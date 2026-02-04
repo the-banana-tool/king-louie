@@ -1,0 +1,20 @@
+{
+  "name": "king-louie",
+  "version": "1.0.0",
+  "description": "Cross-platform Electron desktop chat application",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "electron",
+    "chat",
+    "desktop"
+  ],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "electron": "^40.1.0"
+  }
+}

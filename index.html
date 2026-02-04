@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'">
+  <title>King Louie Chat</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container">
+    <!-- Left Sidebar: Chat History (1/4 width) -->
+    <div class="sidebar">
+      <div class="sidebar-header">
+        <h2>Chat History</h2>
+        <button id="new-chat-btn" class="new-chat-btn">+ New Chat</button>
+      </div>
+      <div class="chat-list" id="chat-list">
+        <div class="chat-item active">
+          <div class="chat-item-title">Welcome Chat</div>
+          <div class="chat-item-preview">Get started with your first message...</div>
+        </div>
+        <div class="chat-item">
+          <div class="chat-item-title">Previous Conversation</div>
+          <div class="chat-item-preview">This is a sample conversation...</div>
+        </div>
+        <div class="chat-item">
+          <div class="chat-item-title">Another Chat</div>
+          <div class="chat-item-preview">Example chat history item...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right Main Area: Chat Box (3/4 width) -->
+    <div class="main-content">
+      <div class="chat-header">
+        <h1>King Louie Chat</h1>
+      </div>
+      
+      <div class="chat-messages" id="chat-messages">
+        <div class="message assistant">
+          <div class="message-content">
+            <strong>Assistant:</strong>
+            <p>Welcome to King Louie Chat! This is a cross-platform Electron desktop chat application. Start typing your message below to begin chatting.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="input-container">
+        <textarea 
+          id="user-input" 
+          class="user-input" 
+          placeholder="Type your message here..."
+          rows="3"
+        ></textarea>
+        <button id="send-btn" class="send-btn">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
