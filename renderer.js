@@ -69,22 +69,23 @@ userInput.addEventListener('input', function() {
 // New chat button
 newChatBtn.addEventListener('click', () => {
   // Clear current chat
-  chatMessages.innerHTML = `
-    <div class="message assistant">
-      <div class="message-content">
-        <strong>Assistant:</strong>
-        <p>New chat started! How can I help you today?</p>
-      </div>
-    </div>
-  `;
+  chatMessages.innerHTML = '';
+  addMessage('assistant', 'New chat started! How can I help you today?');
   
   // Add new chat item to list (in a real app, this would save to database)
   const chatItem = document.createElement('div');
   chatItem.className = 'chat-item active';
-  chatItem.innerHTML = `
-    <div class="chat-item-title">New Chat</div>
-    <div class="chat-item-preview">Just started...</div>
-  `;
+  
+  const titleDiv = document.createElement('div');
+  titleDiv.className = 'chat-item-title';
+  titleDiv.textContent = 'New Chat';
+  
+  const previewDiv = document.createElement('div');
+  previewDiv.className = 'chat-item-preview';
+  previewDiv.textContent = 'Just started...';
+  
+  chatItem.appendChild(titleDiv);
+  chatItem.appendChild(previewDiv);
   
   // Remove active class from all items
   document.querySelectorAll('.chat-item').forEach(item => {
@@ -108,13 +109,7 @@ chatList.addEventListener('click', (e) => {
     chatItem.classList.add('active');
     
     // In a real app, this would load the chat history from storage
-    chatMessages.innerHTML = `
-      <div class="message assistant">
-        <div class="message-content">
-          <strong>Assistant:</strong>
-          <p>Loading chat history... In a real application, this would load the selected conversation.</p>
-        </div>
-      </div>
-    `;
+    chatMessages.innerHTML = '';
+    addMessage('assistant', 'Loading chat history... In a real application, this would load the selected conversation.');
   }
 });
