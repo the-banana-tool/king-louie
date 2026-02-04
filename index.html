@@ -16,34 +16,31 @@
         <button id="new-chat-btn" class="new-chat-btn">+ New Chat</button>
       </div>
       <div class="chat-list" id="chat-list">
-        <div class="chat-item active">
-          <div class="chat-item-title">Welcome Chat</div>
-          <div class="chat-item-preview">Get started with your first message...</div>
-        </div>
-        <div class="chat-item">
-          <div class="chat-item-title">Previous Conversation</div>
-          <div class="chat-item-preview">This is a sample conversation...</div>
-        </div>
-        <div class="chat-item">
-          <div class="chat-item-title">Another Chat</div>
-          <div class="chat-item-preview">Example chat history item...</div>
-        </div>
+        <!-- Chat items rendered by renderer.js -->
+      </div>
+      <div class="context-menu" id="chat-context-menu" hidden>
+        <button class="context-menu-item danger" type="button" data-action="delete">Delete chat</button>
       </div>
     </div>
 
     <!-- Right Main Area: Chat Box (3/4 width) -->
     <div class="main-content">
       <div class="chat-header">
-        <h1>King Louie Chat</h1>
+        <div>
+          <div class="chat-header-title" id="chat-header-title">King Louie Chat</div>
+          <div class="chat-header-meta" id="chat-header-meta">Select a chat to begin</div>
+        </div>
+        <div class="chat-header-actions">
+          <button id="open-settings-btn" class="icon-button" title="Open Settings" type="button">™ Settings</button>
+        </div>
+      </div>
+
+      <div class="empty-state" id="empty-state">
+        <h1>Start a conversation</h1>
+        <p>Type your first message below to create a new chat.</p>
       </div>
       
       <div class="chat-messages" id="chat-messages">
-        <div class="message assistant">
-          <div class="message-content">
-            <strong>Assistant:</strong>
-            <p>Welcome to King Louie Chat! This is a cross-platform Electron desktop chat application. Start typing your message below to begin chatting.</p>
-          </div>
-        </div>
       </div>
 
       <div class="input-container">
@@ -54,6 +51,24 @@
           rows="3"
         ></textarea>
         <button id="send-btn" class="send-btn">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="settings-drawer" id="settings-drawer" hidden>
+    <div class="settings-panel">
+      <div class="settings-header">
+        <div>
+          <h2>API Configuration</h2>
+          <p>Manage API keys for supported providers.</p>
+        </div>
+        <button class="icon-button" id="close-settings-btn" type="button"></button>
+      </div>
+      <div class="settings-body">
+        <div class="settings-alert" id="settings-encryption-alert" hidden>
+          Secure storage is not available on this system. Tokens cannot be saved.
+        </div>
+        <div class="provider-list" id="provider-list"></div>
       </div>
     </div>
   </div>
