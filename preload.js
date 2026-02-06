@@ -102,6 +102,25 @@ contextBridge.exposeInMainWorld(
       respondToApproval: (approvalId, approved, options = {}) =>
         ipcRenderer.send('tool:approvalResponse', { approvalId, approved, ...options })
     },
+    task: {
+      create: (config) => ipcRenderer.invoke('task:create', config),
+      list: () => ipcRenderer.invoke('task:list'),
+      update: (payload) => ipcRenderer.invoke('task:update', payload),
+      onCreated: (callback) => ipcRenderer.on('task:created', (_event, data) => callback(data)),
+      onUpdated: (callback) => ipcRenderer.on('task:updated', (_event, data) => callback(data)),
+      onUnblocked: (callback) => ipcRenderer.on('task:unblocked', (_event, data) => callback(data))
+    },
+    agent: {
+      list: () => ipcRenderer.invoke('agent:list'),
+      execute: (payload) => ipcRenderer.invoke('agent:execute', payload),
+      executeParallel: (payload) => ipcRenderer.invoke('agent:executeParallel', payload),
+      executeSerial: (payload) => ipcRenderer.invoke('agent:executeSerial', payload)
+    },
+    orchestration: {
+      gatewayStatus: () => ipcRenderer.invoke('gateway:status'),
+      listSessions: (filter) => ipcRenderer.invoke('sessions:list', filter),
+      getSessionHistory: (payload) => ipcRenderer.invoke('sessions:history', payload)
+    },
     settings: {
       load: () => ipcRenderer.invoke('settings:load'),
       saveProvider: (payload) => ipcRenderer.invoke('settings:saveProvider', payload),

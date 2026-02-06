@@ -6,9 +6,26 @@ const { initializeTools, toolRegistry } = require('./src/tools');
 const ToolExecutor = require('./src/execution/tool-executor');
 const AgentLoop = require('./src/execution/agent-loop');
 const { getRuntimeEnvironment } = require('./src/execution/runtime-environment');
+const { TaskManager } = require('./src/tasks/task-manager');
+const AgentExecutor = require('./src/agents/agent-executor');
+const AgentOrchestrator = require('./src/agents/orchestrator');
+const { getAgent, listAgents } = require('./src/agents');
+const GatewayServer = require('./src/gateway/gateway-server');
+const SessionManager = require('./src/gateway/session-manager');
+const RemoteControl = require('./src/gateway/remote-control');
+const MessageTool = require('./src/tools/builtin/message-tool');
+const {
+  SessionsListTool,
+  SessionsHistoryTool,
+  SessionsSpawnTool
+} = require('./src/tools/builtin/sessions-tools');
 
 let mainWindow;
 const pendingApprovalResolvers = new Map();
+let taskManager;
+let gatewayServer;
+let sessionManager;
+let remoteControl;
 
 const store = new Store({
   name: 'chat-data',
@@ -502,6 +519,124 @@ const runLlmCommand = async (command = '') => {
   };
 };
 
+const createToolExecutorWithApprovals = async (event, runtimeEnvironment = null) => {
+  const resolvedRuntimeEnvironment = runtimeEnvironment || await getRuntimeEnvironment({
+    workingDirectory: process.cwd()
+  });
+
+  const executor = new ToolExecutor({
+    workingDirectory: process.cwd(),
+    requireApproval: true,
+    runtimeEnvironment: resolvedRuntimeEnvironment,
+    shouldAutoApprove: async (toolName) => isToolAlwaysApproved(toolName)
+  });
+
+  if (event?.sender) {
+    executor.on('approvalRequired', ({ toolName, parameters, resolve }) => {
+      const approvalId = createId();
+      pendingApprovalResolvers.set(approvalId, { resolve, toolName });
+      event.sender.send('tool:approvalRequired', {
+        approvalId,
+        toolName,
+        parameters
+      });
+    });
+  }
+
+  return executor;
+};
+
+const createAgentRuntime = async (providerType, event = null) => {
+  if (!['openai', 'anthropic'].includes(providerType)) {
+    throw new Error('Active provider does not support agent orchestration yet.');
+  }
+
+  const token = getDecryptedProviderToken(providerType);
+  const provider = ProviderFactory.createProvider(providerType, token);
+  const runtimeEnvironment = await getRuntimeEnvironment({
+    workingDirectory: process.cwd()
+  });
+  const toolExecutor = await createToolExecutorWithApprovals(event, runtimeEnvironment);
+
+  return {
+    provider,
+    runtimeEnvironment,
+    toolExecutor,
+    toolDefinitions: toolRegistry.getFunctionDefinitions()
+  };
+};
+
+const initializeAgentInfrastructure = async () => {
+  taskManager = new TaskManager();
+  sessionManager = new SessionManager();
+
+  gatewayServer = new GatewayServer({
+    host: '127.0.0.1',
+    port: 18789
+  });
+
+  toolRegistry.register(new MessageTool(gatewayServer, sessionManager));
+  toolRegistry.register(new SessionsListTool(sessionManager));
+  toolRegistry.register(new SessionsHistoryTool(sessionManager));
+  toolRegistry.register(new SessionsSpawnTool(sessionManager));
+
+  const agentExecutorAdapter = {
+    execute: async (agent, message, options = {}) => {
+      const settings = getSettings();
+      const providerType = settings.activeProvider || 'openai';
+      const runtime = await createAgentRuntime(providerType);
+      const executor = new AgentExecutor(runtime.provider, runtime.toolExecutor);
+
+      return executor.execute(agent, message, {
+        ...options,
+        tools: runtime.toolDefinitions,
+        systemPrompt: buildRuntimeSystemPrompt(runtime.runtimeEnvironment)
+      });
+    }
+  };
+
+  remoteControl = new RemoteControl(
+    gatewayServer,
+    sessionManager,
+    agentExecutorAdapter,
+    { getAgent }
+  );
+
+  gatewayServer.on('agent:message', async ({ agentId, sessionKey, message }) => {
+    try {
+      const agent = getAgent(agentId);
+      if (!agent) {
+        throw new Error(`Agent not found: ${agentId}`);
+      }
+
+      const result = await agentExecutorAdapter.execute(agent, message.message, {
+        sessionKey,
+        runId: message.runId
+      });
+
+      sessionManager.addMessage(sessionKey, {
+        role: 'assistant',
+        content: result.content || '',
+        from: agentId
+      });
+
+      gatewayServer.emit('agent:response', {
+        sessionKey,
+        runId: message.runId,
+        content: result.content || ''
+      });
+    } catch (error) {
+      gatewayServer.emit('agent:response', {
+        sessionKey,
+        runId: message.runId,
+        error: error.message
+      });
+    }
+  });
+
+  await gatewayServer.start();
+};
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
@@ -891,8 +1026,141 @@ ipcMain.handle('settings:runLlmCommand', async (_event, { command }) => {
   }
 });
 
-app.whenReady().then(() => {
+ipcMain.handle('task:create', async (_event, config) => {
+  if (!taskManager) {
+    throw new Error('Task manager is not initialized');
+  }
+
+  return taskManager.create(config || {});
+});
+
+ipcMain.handle('task:list', async () => {
+  if (!taskManager) {
+    throw new Error('Task manager is not initialized');
+  }
+
+  return taskManager.list();
+});
+
+ipcMain.handle('task:update', async (_event, { taskId, updates }) => {
+  if (!taskManager) {
+    throw new Error('Task manager is not initialized');
+  }
+
+  return taskManager.update(taskId, updates || {});
+});
+
+ipcMain.handle('agent:list', async () => {
+  return listAgents().map((agent) => ({
+    id: agent.id,
+    name: agent.name,
+    description: agent.description,
+    model: agent.model,
+    allowedTools: agent.allowedTools
+  }));
+});
+
+ipcMain.handle('agent:execute', async (event, { agentId, message }) => {
+  const settings = getSettings();
+  const providerType = settings.activeProvider || 'openai';
+  const runtime = await createAgentRuntime(providerType, event);
+  const agent = getAgent(agentId);
+
+  if (!agent) {
+    throw new Error(`Agent not found: ${agentId}`);
+  }
+
+  const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor);
+  return agentExecutor.execute(agent, message, {
+    tools: runtime.toolDefinitions,
+    systemPrompt: buildRuntimeSystemPrompt(runtime.runtimeEnvironment)
+  });
+});
+
+ipcMain.handle('agent:executeParallel', async (event, { agentIds = [], message }) => {
+  const settings = getSettings();
+  const providerType = settings.activeProvider || 'openai';
+  const runtime = await createAgentRuntime(providerType, event);
+
+  const agents = agentIds
+    .map((agentId) => getAgent(agentId))
+    .filter(Boolean);
+
+  const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor);
+  const orchestrator = new AgentOrchestrator(agentExecutor);
+
+  return orchestrator.executeParallel(agents, message, {
+    tools: runtime.toolDefinitions,
+    systemPrompt: buildRuntimeSystemPrompt(runtime.runtimeEnvironment)
+  });
+});
+
+ipcMain.handle('agent:executeSerial', async (event, { agentIds = [], message }) => {
+  const settings = getSettings();
+  const providerType = settings.activeProvider || 'openai';
+  const runtime = await createAgentRuntime(providerType, event);
+
+  const agents = agentIds
+    .map((agentId) => getAgent(agentId))
+    .filter(Boolean);
+
+  const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor);
+  const orchestrator = new AgentOrchestrator(agentExecutor);
+
+  return orchestrator.executeSerial(agents, message, {
+    tools: runtime.toolDefinitions,
+    systemPrompt: buildRuntimeSystemPrompt(runtime.runtimeEnvironment)
+  });
+});
+
+ipcMain.handle('gateway:status', async () => {
+  if (!remoteControl) {
+    return {
+      status: 'uninitialized'
+    };
+  }
+
+  return remoteControl.getStatus();
+});
+
+ipcMain.handle('sessions:list', async (_event, filter = {}) => {
+  if (!sessionManager) {
+    throw new Error('Session manager is not initialized');
+  }
+
+  return sessionManager.listSessions(filter);
+});
+
+ipcMain.handle('sessions:history', async (_event, { sessionKey, limit = 50 }) => {
+  if (!sessionManager) {
+    throw new Error('Session manager is not initialized');
+  }
+
+  return sessionManager.getHistory(sessionKey, limit);
+});
+
+app.whenReady().then(async () => {
   initializeTools();
+  await initializeAgentInfrastructure();
+
+  taskManager.on('taskCreated', (task) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('task:created', task);
+    }
+  });
+
+  taskManager.on('taskUpdated', (task) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('task:updated', task);
+    }
+  });
+
+  taskManager.on('taskUnblocked', (task) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('task:unblocked', task);
+    }
+  });
+
   createWindow();
 
   app.on('activate', function () {
@@ -901,5 +1169,10 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', function () {
-  if (process.platform !== 'darwin') app.quit();
+  if (process.platform !== 'darwin') {
+    if (gatewayServer) {
+      gatewayServer.stop().catch(() => {});
+    }
+    app.quit();
+  }
 });

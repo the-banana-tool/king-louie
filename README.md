@@ -50,3 +50,16 @@ The application includes:
 - Add file upload capabilities
 - Support for markdown rendering
 - Search functionality in chat history
+
+## Agent Orchestration (Phase 3)
+
+The app now includes core orchestration infrastructure in the main process:
+
+- Task manager with status/dependency lifecycle (`task:create`, `task:list`, `task:update` IPC)
+- Built-in agents (`main`, `code-explorer`, `code-writer`) with tool allow-lists
+- Parallel and serial multi-agent execution (`agent:executeParallel`, `agent:executeSerial` IPC)
+- Gateway + session orchestration foundation (`gateway:status`, `sessions:list`, `sessions:history` IPC)
+- Messaging tools for agent-to-agent/session workflows (`message`, `sessions_list`, `sessions_history`, `sessions_spawn`)
+
+The renderer API exposure for these capabilities is available in `preload.js` under:
+`window.electron.task`, `window.electron.agent`, and `window.electron.orchestration`.
