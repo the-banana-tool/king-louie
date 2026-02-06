@@ -93,7 +93,8 @@ contextBridge.exposeInMainWorld(
       onMessageComplete: (callback) => ipcRenderer.on('chat:messageComplete', (_event, data) => callback(data)),
       onMessageError: (callback) => ipcRenderer.on('chat:messageError', (_event, data) => callback(data)),
       onToolUse: (callback) => ipcRenderer.on('chat:toolUse', (_event, data) => callback(data)),
-      onToolResult: (callback) => ipcRenderer.on('chat:toolResult', (_event, data) => callback(data))
+      onToolResult: (callback) => ipcRenderer.on('chat:toolResult', (_event, data) => callback(data)),
+      onChatUpdated: (callback) => ipcRenderer.on('chat:updated', (_event, data) => callback(data))
     },
     tool: {
       list: () => ipcRenderer.invoke('tool:list'),

@@ -13,6 +13,7 @@ const { getAgent, listAgents } = require('./src/agents');
 const GatewayServer = require('./src/gateway/gateway-server');
 const SessionManager = require('./src/gateway/session-manager');
 const RemoteControl = require('./src/gateway/remote-control');
+const TelegramBridge = require('./src/channels/telegram-bridge');
 const MessageTool = require('./src/tools/builtin/message-tool');
 const {
   SessionsListTool,
@@ -26,6 +27,8 @@ let taskManager;
 let gatewayServer;
 let sessionManager;
 let remoteControl;
+let telegramBridge;
+const TELEGRAM_TOKEN_STORE_KEY = '__telegram_bot_token';
 
 const store = new Store({
   name: 'chat-data',
@@ -289,6 +292,122 @@ const clearProviderToken = (provider) => {
   return false;
 };
 
+const hasStoredTelegramToken = () => {
+  const tokens = getApiTokens();
+  return Boolean(tokens[TELEGRAM_TOKEN_STORE_KEY]);
+};
+
+const saveTelegramToken = (token) => {
+  const tokens = getApiTokens();
+  tokens[TELEGRAM_TOKEN_STORE_KEY] = encryptToken(token.trim());
+  setApiTokens(tokens);
+};
+
+const clearTelegramToken = () => {
+  const tokens = getApiTokens();
+  delete tokens[TELEGRAM_TOKEN_STORE_KEY];
+  setApiTokens(tokens);
+};
+
+const getDecryptedTelegramToken = () => {
+  const tokens = getApiTokens();
+  const encryptedToken = tokens[TELEGRAM_TOKEN_STORE_KEY];
+  if (!encryptedToken) return null;
+  return decryptToken(encryptedToken);
+};
+
+const validateTelegramToken = (token = '') => {
+  const trimmed = String(token || '').trim();
+  if (!trimmed) {
+    return 'Telegram bot token is required.';
+  }
+
+  if (!/^\d+:[A-Za-z0-9_-]{20,}$/.test(trimmed)) {
+    return 'Telegram token format looks invalid. Expected like <digits>:<secret>.';
+  }
+
+  return null;
+};
+
+const stopTelegramBridge = async () => {
+  if (!telegramBridge) return;
+
+  await telegramBridge.stop();
+  telegramBridge = null;
+};
+
+const startTelegramBridge = async (token) => {
+  if (!token || !gatewayServer || !sessionManager) return;
+
+  await stopTelegramBridge();
+
+  telegramBridge = new TelegramBridge({
+    token,
+    gatewayServer,
+    sessionManager,
+    getAgent,
+    listAgents,
+    // Callbacks for local chat management
+    createLocalChat: (title) => {
+      const now = new Date().toISOString();
+      const newChat = {
+        id: createId(),
+        title,
+        createdAt: now,
+        updatedAt: now,
+        messages: []
+      };
+      const chats = [newChat, ...getChats()];
+      setChats(chats);
+
+      // Notify renderer if window exists
+      if (mainWindow) {
+        mainWindow.webContents.send('chat:updated', { chats });
+      }
+
+      return newChat.id;
+    },
+    addMessageToLocalChat: (chatId, sender, text) => {
+      const chats = getChats();
+      const chat = chats.find((c) => c.id === chatId);
+      if (!chat) return;
+
+      const now = new Date().toISOString();
+      chat.messages.push({
+        id: createId(),
+        sender,
+        text,
+        timestamp: now
+      });
+      chat.updatedAt = now;
+
+      setChats(chats);
+
+      // Notify renderer if window exists
+      if (mainWindow) {
+        mainWindow.webContents.send('chat:updated', { chats });
+      }
+    }
+  });
+
+  await telegramBridge.start();
+};
+
+const testTelegramConnection = async (token) => {
+  const response = await fetch(`https://api.telegram.org/bot${token}/getMe`);
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Telegram API request failed: ${response.status} ${response.statusText} ${text}`);
+  }
+
+  const payload = await response.json();
+  if (!payload.ok) {
+    throw new Error(payload.description || 'Telegram API returned an unknown error.');
+  }
+
+  return payload.result;
+};
+
 const getProviderSnapshot = () => {
   const tokens = getApiTokens();
   const status = getApiStatus();
@@ -403,9 +522,102 @@ const runLlmCommand = async (command = '') => {
         '- `/llm test <provider>` — test provider connection',
         '- `/llm use <provider>` — set active provider',
         '- `/llm model <provider> <model>` — set model for provider',
+        '- `/llm telegram add <token>` — save Telegram bot token and start bridge',
+        '- `/llm telegram test` — test saved Telegram token',
+        '- `/llm telegram remove` — clear Telegram token and stop bridge',
+        '- `/llm telegram status` — show Telegram bridge status',
         '',
         'Providers: `openai`, `anthropic`, `copilot`'
       ].join('\n')
+    };
+  }
+
+  if (action === 'telegram') {
+    const subAction = (rest[0] || 'status').toLowerCase();
+    const token = rest.slice(1).join(' ').trim();
+
+    if (subAction === 'status') {
+      const status = getApiStatus()?.telegram || null;
+      return {
+        ok: true,
+        output: [
+          '### Telegram Bridge',
+          `- Token: ${hasStoredTelegramToken() ? 'saved' : 'missing'}`,
+          `- Bridge: ${telegramBridge ? 'running' : 'stopped'}`,
+          `- Status: ${status?.message || 'not tested'}`
+        ].join('\n')
+      };
+    }
+
+    if (subAction === 'add' || subAction === 'save') {
+      const validationError = validateTelegramToken(token);
+      if (validationError) {
+        return { ok: false, error: validationError };
+      }
+
+      try {
+        const bot = await testTelegramConnection(token);
+        saveTelegramToken(token);
+        await startTelegramBridge(token);
+        updateStatus('telegram', {
+          ok: true,
+          message: `Connected as @${bot?.username || 'telegram-bot'}`
+        });
+
+        return {
+          ok: true,
+          output: `Telegram bridge connected as @${bot?.username || 'telegram-bot'}.`
+        };
+      } catch (error) {
+        updateStatus('telegram', {
+          ok: false,
+          message: error.message
+        });
+        return { ok: false, error: error.message };
+      }
+    }
+
+    if (subAction === 'test') {
+      const candidateToken = String(getDecryptedTelegramToken() || '').trim();
+      if (!candidateToken) {
+        return { ok: false, error: 'No Telegram token saved. Use `/llm telegram add <token>`.' };
+      }
+
+      try {
+        const bot = await testTelegramConnection(candidateToken);
+        updateStatus('telegram', {
+          ok: true,
+          message: `Connected as @${bot?.username || 'telegram-bot'}`
+        });
+        return {
+          ok: true,
+          output: `Telegram connection successful (@${bot?.username || 'telegram-bot'}).`
+        };
+      } catch (error) {
+        updateStatus('telegram', {
+          ok: false,
+          message: error.message
+        });
+        return { ok: false, error: error.message };
+      }
+    }
+
+    if (subAction === 'remove' || subAction === 'clear') {
+      await stopTelegramBridge();
+      clearTelegramToken();
+      updateStatus('telegram', {
+        ok: true,
+        message: 'Telegram token removed and bridge stopped.'
+      });
+      return {
+        ok: true,
+        output: 'Telegram token removed and bridge stopped.'
+      };
+    }
+
+    return {
+      ok: false,
+      error: 'Unknown telegram action. Use add, test, remove, or status.'
     };
   }
 
@@ -519,7 +731,11 @@ const runLlmCommand = async (command = '') => {
   };
 };
 
-const createToolExecutorWithApprovals = async (event, runtimeEnvironment = null) => {
+const createToolExecutorWithApprovals = async (
+  event,
+  runtimeEnvironment = null,
+  approvalRequester = null
+) => {
   const resolvedRuntimeEnvironment = runtimeEnvironment || await getRuntimeEnvironment({
     workingDirectory: process.cwd()
   });
@@ -528,6 +744,7 @@ const createToolExecutorWithApprovals = async (event, runtimeEnvironment = null)
     workingDirectory: process.cwd(),
     requireApproval: true,
     runtimeEnvironment: resolvedRuntimeEnvironment,
+    approvalRequester,
     shouldAutoApprove: async (toolName) => isToolAlwaysApproved(toolName)
   });
 
@@ -546,7 +763,7 @@ const createToolExecutorWithApprovals = async (event, runtimeEnvironment = null)
   return executor;
 };
 
-const createAgentRuntime = async (providerType, event = null) => {
+const createAgentRuntime = async (providerType, event = null, approvalRequester = null) => {
   if (!['openai', 'anthropic'].includes(providerType)) {
     throw new Error('Active provider does not support agent orchestration yet.');
   }
@@ -556,7 +773,11 @@ const createAgentRuntime = async (providerType, event = null) => {
   const runtimeEnvironment = await getRuntimeEnvironment({
     workingDirectory: process.cwd()
   });
-  const toolExecutor = await createToolExecutorWithApprovals(event, runtimeEnvironment);
+  const toolExecutor = await createToolExecutorWithApprovals(
+    event,
+    runtimeEnvironment,
+    approvalRequester
+  );
 
   return {
     provider,
@@ -584,11 +805,19 @@ const initializeAgentInfrastructure = async () => {
     execute: async (agent, message, options = {}) => {
       const settings = getSettings();
       const providerType = settings.activeProvider || 'openai';
-      const runtime = await createAgentRuntime(providerType);
+      const runtime = await createAgentRuntime(
+        providerType,
+        null,
+        options.approvalRequester || null
+      );
       const executor = new AgentExecutor(runtime.provider, runtime.toolExecutor);
+
+      // Get the model from settings for the active provider
+      const modelFromSettings = settings.providerModels?.[providerType];
 
       return executor.execute(agent, message, {
         ...options,
+        model: modelFromSettings || options.model || agent.model, // Use settings model first
         tools: runtime.toolDefinitions,
         systemPrompt: buildRuntimeSystemPrompt(runtime.runtimeEnvironment)
       });
@@ -611,7 +840,11 @@ const initializeAgentInfrastructure = async () => {
 
       const result = await agentExecutorAdapter.execute(agent, message.message, {
         sessionKey,
-        runId: message.runId
+        runId: message.runId,
+        approvalRequester:
+          typeof message.approvalHandler === 'function'
+            ? async (toolName, parameters) => message.approvalHandler({ toolName, parameters })
+            : null
       });
 
       sessionManager.addMessage(sessionKey, {
@@ -635,6 +868,11 @@ const initializeAgentInfrastructure = async () => {
   });
 
   await gatewayServer.start();
+
+  const telegramToken = String(getDecryptedTelegramToken() || '').trim();
+  if (telegramToken) {
+    await startTelegramBridge(telegramToken);
+  }
 };
 
 function createWindow() {
@@ -890,7 +1128,12 @@ ipcMain.handle('settings:load', () => {
   return {
     encryptionAvailable: safeStorage.isEncryptionAvailable(),
     providers,
-    activeProvider: settings.activeProvider || 'openai'
+    activeProvider: settings.activeProvider || 'openai',
+    telegram: {
+      hasToken: hasStoredTelegramToken(),
+      bridgeActive: Boolean(telegramBridge),
+      status: status.telegram || null
+    }
   };
 });
 
@@ -1071,7 +1314,10 @@ ipcMain.handle('agent:execute', async (event, { agentId, message }) => {
   }
 
   const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor);
+  const modelFromSettings = settings.providerModels?.[providerType];
+
   return agentExecutor.execute(agent, message, {
+    model: modelFromSettings || agent.model, // Use settings model first
     tools: runtime.toolDefinitions,
     systemPrompt: buildRuntimeSystemPrompt(runtime.runtimeEnvironment)
   });
@@ -1088,8 +1334,10 @@ ipcMain.handle('agent:executeParallel', async (event, { agentIds = [], message }
 
   const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor);
   const orchestrator = new AgentOrchestrator(agentExecutor);
+  const modelFromSettings = settings.providerModels?.[providerType];
 
   return orchestrator.executeParallel(agents, message, {
+    model: modelFromSettings, // Use settings model
     tools: runtime.toolDefinitions,
     systemPrompt: buildRuntimeSystemPrompt(runtime.runtimeEnvironment)
   });
@@ -1106,8 +1354,10 @@ ipcMain.handle('agent:executeSerial', async (event, { agentIds = [], message }) 
 
   const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor);
   const orchestrator = new AgentOrchestrator(agentExecutor);
+  const modelFromSettings = settings.providerModels?.[providerType];
 
   return orchestrator.executeSerial(agents, message, {
+    model: modelFromSettings, // Use settings model
     tools: runtime.toolDefinitions,
     systemPrompt: buildRuntimeSystemPrompt(runtime.runtimeEnvironment)
   });
@@ -1170,6 +1420,9 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', function () {
   if (process.platform !== 'darwin') {
+    if (telegramBridge) {
+      telegramBridge.stop().catch(() => {});
+    }
     if (gatewayServer) {
       gatewayServer.stop().catch(() => {});
     }

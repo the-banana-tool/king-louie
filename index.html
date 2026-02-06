@@ -79,9 +79,19 @@
             <li><code>/llm add &lt;provider&gt; &lt;token&gt;</code></li>
             <li><code>/llm test &lt;provider&gt;</code></li>
             <li><code>/llm remove &lt;provider&gt;</code></li>
+            <li><code>/llm telegram add &lt;token&gt;</code></li>
+            <li><code>/llm telegram test</code></li>
+            <li><code>/llm telegram remove</code></li>
+            <li><code>/llm telegram status</code></li>
             <li><code>/agent on|off|toggle|status</code></li>
           </ul>
         </div>
+
+        <div class="settings-alert" id="settings-encryption-alert" hidden>
+          Secure storage is unavailable. API and Telegram tokens cannot be safely saved on this system.
+        </div>
+
+        <div class="provider-list" id="provider-list"></div>
       </div>
     </div>
   </div>

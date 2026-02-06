@@ -56,6 +56,19 @@ class SessionManager {
     return session.messages.slice(-Math.max(1, limit));
   }
 
+  clearSession(sessionKey) {
+    const session = this.sessions.get(sessionKey);
+    if (!session) return false;
+
+    session.messages = [];
+    session.updatedAt = Date.now();
+    return true;
+  }
+
+  removeSession(sessionKey) {
+    return this.sessions.delete(sessionKey);
+  }
+
   listSessions(filter = {}) {
     const sessions = Array.from(this.sessions.values());
 

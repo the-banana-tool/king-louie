@@ -7,6 +7,10 @@ class ToolExecutor extends EventEmitter {
     super();
     this.workingDirectory = options.workingDirectory || process.cwd();
     this.requireApproval = options.requireApproval !== false;
+    this.approvalRequester =
+      typeof options.approvalRequester === 'function'
+        ? options.approvalRequester
+        : null;
     this.shouldAutoApprove =
       typeof options.shouldAutoApprove === 'function'
         ? options.shouldAutoApprove
@@ -68,6 +72,14 @@ class ToolExecutor extends EventEmitter {
   }
 
   async requestApproval(toolName, parameters) {
+    if (this.approvalRequester) {
+      return this.approvalRequester(toolName, parameters);
+    }
+
+    if (this.listenerCount('approvalRequired') === 0) {
+      return false;
+    }
+
     return new Promise((resolve) => {
       this.emit('approvalRequired', { toolName, parameters, resolve });
     });

@@ -63,3 +63,40 @@ The app now includes core orchestration infrastructure in the main process:
 
 The renderer API exposure for these capabilities is available in `preload.js` under:
 `window.electron.task`, `window.electron.agent`, and `window.electron.orchestration`.
+
+## Telegram Bot Bridge
+
+King Louie now supports an optional Telegram bridge that routes Telegram chats into the existing gateway/session/agent pipeline.
+
+### Setup
+
+1. Create a Telegram bot with [@BotFather](https://t.me/BotFather)
+2. Copy your bot token
+3. In chat, configure the token using local commands:
+
+```bash
+/llm telegram add <token>
+/llm telegram test
+/llm telegram status
+```
+
+The token is saved securely (same storage path used for provider tokens) and the bridge starts automatically when configured.
+
+To remove it later:
+
+```bash
+/llm telegram remove
+```
+
+### Supported Commands
+
+- `/help` — bridge help and available agents
+- `/status` — gateway/session status snapshot
+- `/clear` — clear current Telegram chat session history
+- `/agent <name>` — switch agent for current Telegram chat
+
+### Behavior
+
+- One Telegram chat maps to one King Louie session (`agent:<id>:telegram:<chatId>`)
+- Messages are sent through the existing gateway (`agent:message` / `agent:response` events)
+- Tool approvals can be handled in Telegram via inline approve/deny buttons

@@ -67,6 +67,10 @@ function getLocalHelpText() {
     '- `/llm test <provider>` — test provider connection',
     '- `/llm use <provider>` — set active provider',
     '- `/llm model <provider> <model>` — set model for provider',
+    '- `/llm telegram add <token>` — save Telegram bot token and start bridge',
+    '- `/llm telegram test` — test saved Telegram bot token',
+    '- `/llm telegram remove` — clear saved Telegram token and stop bridge',
+    '- `/llm telegram status` — show Telegram bridge status',
     '- `/agent on|off|toggle|status` — control agent mode',
     '- `exit` or `quit` — close the window'
   ].join('\n');
@@ -1210,6 +1214,11 @@ window.electron.chat.onToolResult(({ chatId, toolName, result }) => {
 
 window.electron.tool.onApprovalRequired(({ approvalId, toolName, parameters }) => {
   showToolApprovalDialog(approvalId, toolName, parameters);
+});
+
+// Listen for chat updates from Telegram bridge or other sources
+window.electron.chat.onChatUpdated(async () => {
+  await loadChats();
 });
 
 loadChats();

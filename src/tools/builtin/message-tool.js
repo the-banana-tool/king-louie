@@ -38,14 +38,16 @@ class MessageTool extends Tool {
         },
         required: ['action', 'message']
       },
-      requiresApproval: false
+      requiresApproval: false,
+      execute: async () => ({ status: 'ok' })
     });
 
     this.gateway = gatewayServer;
     this.sessionManager = sessionManager;
+    this.execute = this.run.bind(this);
   }
 
-  async execute(params = {}, context = {}) {
+  async run(params = {}, context = {}) {
     const { action, target, message, timeoutSeconds = 30, media, metadata } = params;
 
     switch (action) {
