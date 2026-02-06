@@ -14,13 +14,15 @@ const settingsDrawer = document.getElementById('settings-drawer');
 const openSettingsBtn = document.getElementById('open-settings-btn');
 const closeSettingsBtn = document.getElementById('close-settings-btn');
 const floatingSettingsBtn = document.getElementById('floating-settings-btn');
+const composerSettingsBtn = document.getElementById('composer-settings-btn');
 const providerList = document.getElementById('provider-list');
 const settingsEncryptionAlert = document.getElementById('settings-encryption-alert');
 
 let chats = [];
 let activeChatId = null;
 let contextChatId = null;
-let settingsState = { encryptionAvailable: true, providers: {} };
+let settingsState = { encryptionAvailable: true, providers: {}, activeProvider: 'openai' };
+const streamBufferById = new Map();
 
 // Send message function
 function formatTimestamp(iso) {
@@ -135,6 +137,11 @@ function setSettingsDrawer(open) {
   document.body.style.overflow = open ? 'hidden' : '';
 }
 
+function openSettingsDrawer() {
+  setSettingsDrawer(true);
+  loadSettings();
+}
+
 function renderProviderCard(providerKey, provider) {
   const card = document.createElement('div');
   card.className = 'provider-card';
@@ -146,6 +153,17 @@ function renderProviderCard(providerKey, provider) {
   const title = document.createElement('div');
   title.className = 'provider-title';
   title.textContent = provider.label;
+
+  const titleWrap = document.createElement('div');
+  titleWrap.className = 'provider-title-wrap';
+  titleWrap.appendChild(title);
+
+  if (settingsState.activeProvider === providerKey) {
+    const activeBadge = document.createElement('span');
+    activeBadge.className = 'active-provider-badge';
+    activeBadge.textContent = 'Active';
+    titleWrap.appendChild(activeBadge);
+  }
 
   const status = document.createElement('span');
   status.className = 'provider-status';
@@ -159,7 +177,7 @@ function renderProviderCard(providerKey, provider) {
     status.textContent = 'Not tested';
   }
 
-  header.appendChild(title);
+  header.appendChild(titleWrap);
   header.appendChild(status);
 
   const controls = document.createElement('div');
@@ -178,6 +196,19 @@ function renderProviderCard(providerKey, provider) {
 
   controls.appendChild(label);
   controls.appendChild(input);
+
+  const modelLabel = document.createElement('label');
+  modelLabel.textContent = 'Model';
+
+  const modelInput = document.createElement('input');
+  modelInput.className = 'provider-input';
+  modelInput.type = 'text';
+  modelInput.placeholder = 'Model name';
+  modelInput.value = provider.model || '';
+  modelInput.dataset.modelProvider = providerKey;
+
+  controls.appendChild(modelLabel);
+  controls.appendChild(modelInput);
 
   const actions = document.createElement('div');
   actions.className = 'provider-actions';
@@ -202,7 +233,22 @@ function renderProviderCard(providerKey, provider) {
   clearBtn.dataset.action = 'clear';
   clearBtn.dataset.provider = providerKey;
 
+  const modelBtn = document.createElement('button');
+  modelBtn.type = 'button';
+  modelBtn.textContent = 'Save Model';
+  modelBtn.dataset.action = 'save-model';
+  modelBtn.dataset.provider = providerKey;
+
+  const activeBtn = document.createElement('button');
+  activeBtn.type = 'button';
+  activeBtn.textContent = settingsState.activeProvider === providerKey ? 'Active Provider' : 'Set Active';
+  activeBtn.disabled = settingsState.activeProvider === providerKey;
+  activeBtn.dataset.action = 'set-active';
+  activeBtn.dataset.provider = providerKey;
+
   actions.appendChild(saveBtn);
+  actions.appendChild(modelBtn);
+  actions.appendChild(activeBtn);
   actions.appendChild(testBtn);
   actions.appendChild(clearBtn);
 
@@ -233,8 +279,24 @@ function renderSettings() {
 }
 
 async function loadSettings() {
-  settingsState = await window.electron.settings.load();
-  renderSettings();
+  try {
+    settingsState = await window.electron.settings.load();
+    if (!settingsState.providers || Object.keys(settingsState.providers).length === 0) {
+      setProviderListFallback('No providers returned from settings. Please restart the app.');
+      return;
+    }
+    renderSettings();
+  } catch (error) {
+    setProviderListFallback(`Unable to load provider settings: ${error.message || 'Unknown error'}`);
+  }
+}
+
+function setProviderListFallback(message) {
+  providerList.innerHTML = '';
+  const fallback = document.createElement('div');
+  fallback.className = 'provider-message error';
+  fallback.textContent = message;
+  providerList.appendChild(fallback);
 }
 
 function getTokenInput(providerKey) {
@@ -311,31 +373,41 @@ async function sendMessage() {
     activeChatId = newChat.id;
   }
 
-  const updatedChat = await window.electron.chat.addMessage({
-    chatId: activeChatId,
-    sender: 'user',
-    text: message
+  const now = new Date().toISOString();
+  chats = chats.map((chat) => {
+    if (chat.id !== activeChatId) return chat;
+    return {
+      ...chat,
+      updatedAt: now,
+      messages: [
+        ...chat.messages,
+        {
+          id: `temp-${Date.now()}`,
+          sender: 'user',
+          text: message,
+          timestamp: now
+        }
+      ]
+    };
   });
-
-  if (updatedChat) {
-    chats = chats.map((chat) => (chat.id === updatedChat.id ? updatedChat : chat));
-    refreshUI();
-  }
+  refreshUI();
 
   userInput.value = '';
   userInput.style.height = 'auto';
 
-  setTimeout(async () => {
-    const assistantChat = await window.electron.chat.addMessage({
+  try {
+    const updatedChat = await window.electron.chat.sendMessage({
       chatId: activeChatId,
-      sender: 'assistant',
-      text: 'This is a simulated response. In a real application, this would be connected to your chat backend or AI service.'
+      message
     });
-    if (assistantChat) {
-      chats = chats.map((chat) => (chat.id === assistantChat.id ? assistantChat : chat));
+
+    if (updatedChat) {
+      chats = chats.map((chat) => (chat.id === updatedChat.id ? updatedChat : chat));
       refreshUI();
     }
-  }, 400);
+  } catch (error) {
+    addMessage('assistant', `Error: ${error.message || 'Unable to send message.'}`);
+  }
 }
 
 // Add message to chat display
@@ -345,15 +417,15 @@ function addMessage(sender, text) {
   
   const messageContent = document.createElement('div');
   messageContent.className = 'message-content';
-  
-  const senderLabel = document.createElement('strong');
-  senderLabel.textContent = sender === 'user' ? 'You:' : 'Assistant:';
-  
-  const messagePara = document.createElement('p');
-  messagePara.textContent = text;
-  
-  messageContent.appendChild(senderLabel);
-  messageContent.appendChild(messagePara);
+
+  if (sender === 'assistant') {
+    messageContent.innerHTML = window.electron.markdown.parse(text || '');
+  } else {
+    const messagePara = document.createElement('p');
+    messagePara.textContent = text;
+    messageContent.appendChild(messagePara);
+  }
+
   messageDiv.appendChild(messageContent);
   
   chatMessages.appendChild(messageDiv);
@@ -473,6 +545,35 @@ async function handleTestProvider(providerKey) {
   setProviderMessage(providerKey, result.status?.message || 'Connection successful.');
 }
 
+async function handleSaveProviderModel(providerKey) {
+  const input = providerList.querySelector(`input[data-model-provider="${providerKey}"]`);
+  const model = input?.value?.trim() || '';
+  const result = await window.electron.settings.setProviderModel({
+    provider: providerKey,
+    model
+  });
+
+  if (!result.ok) {
+    setProviderMessage(providerKey, result.error || 'Unable to save model.', true);
+    return;
+  }
+
+  settingsState.providers[providerKey].model = result.model;
+  setProviderMessage(providerKey, `Model saved: ${result.model || '(default)'}`);
+  renderSettings();
+}
+
+async function handleSetActiveProvider(providerKey) {
+  const result = await window.electron.settings.setActiveProvider({ provider: providerKey });
+  if (!result.ok) {
+    setProviderMessage(providerKey, result.error || 'Unable to set active provider.', true);
+    return;
+  }
+
+  settingsState.activeProvider = result.activeProvider;
+  renderSettings();
+}
+
 // Event Listeners
 sendBtn.addEventListener('click', sendMessage);
 
@@ -543,17 +644,15 @@ document.addEventListener('click', (e) => {
 });
 
 if (openSettingsBtn) {
-  openSettingsBtn.addEventListener('click', () => {
-    setSettingsDrawer(true);
-    loadSettings();
-  });
+  openSettingsBtn.addEventListener('click', openSettingsDrawer);
 }
 
 if (floatingSettingsBtn) {
-  floatingSettingsBtn.addEventListener('click', () => {
-    setSettingsDrawer(true);
-    loadSettings();
-  });
+  floatingSettingsBtn.addEventListener('click', openSettingsDrawer);
+}
+
+if (composerSettingsBtn) {
+  composerSettingsBtn.addEventListener('click', openSettingsDrawer);
 }
 
 if (closeSettingsBtn) {
@@ -589,12 +688,67 @@ providerList.addEventListener('click', (e) => {
   if (action === 'test') {
     handleTestProvider(provider);
   }
+  if (action === 'save-model') {
+    handleSaveProviderModel(provider);
+  }
+  if (action === 'set-active') {
+    handleSetActiveProvider(provider);
+  }
 });
 
 window.addEventListener('blur', () => {
   if (!chatContextMenu.hidden) {
     closeContextMenu();
   }
+});
+
+window.electron.chat.onMessageStart(({ chatId, responseId }) => {
+  if (chatId !== activeChatId) return;
+
+  const messageDiv = document.createElement('div');
+  messageDiv.className = 'message assistant streaming';
+  messageDiv.dataset.responseId = responseId;
+
+  const messageContent = document.createElement('div');
+  messageContent.className = 'message-content';
+  messageContent.innerHTML = '<p>...</p>';
+
+  messageDiv.appendChild(messageContent);
+  chatMessages.appendChild(messageDiv);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+  streamBufferById.set(responseId, '');
+});
+
+window.electron.chat.onMessageChunk(({ chatId, responseId, chunk }) => {
+  if (chatId !== activeChatId) return;
+
+  const existing = streamBufferById.get(responseId) || '';
+  const next = existing + (chunk || '');
+  streamBufferById.set(responseId, next);
+
+  const streamElement = chatMessages.querySelector(`[data-response-id="${responseId}"] .message-content`);
+  if (!streamElement) return;
+
+  streamElement.innerHTML = window.electron.markdown.parse(next);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+});
+
+window.electron.chat.onMessageComplete(({ chatId, responseId }) => {
+  if (chatId !== activeChatId) return;
+  const messageDiv = chatMessages.querySelector(`[data-response-id="${responseId}"]`);
+  if (messageDiv) {
+    messageDiv.classList.remove('streaming');
+  }
+  streamBufferById.delete(responseId);
+});
+
+window.electron.chat.onMessageError(({ chatId, responseId, error }) => {
+  if (chatId !== activeChatId) return;
+  const messageDiv = chatMessages.querySelector(`[data-response-id="${responseId}"] .message-content`);
+  if (messageDiv) {
+    messageDiv.innerHTML = `<p>Error: ${error}</p>`;
+  }
+  streamBufferById.delete(responseId);
 });
 
 loadChats();

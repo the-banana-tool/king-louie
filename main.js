@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, safeStorage } = require('electron');
 const path = require('path');
 const { default: Store } = require('electron-store');
+const ProviderFactory = require('./src/providers/provider-factory');
 
 let mainWindow;
 
@@ -10,7 +11,15 @@ const store = new Store({
     chats: [],
     activeChatId: null,
     apiTokens: {},
-    apiStatus: {}
+    apiStatus: {},
+    settings: {
+      activeProvider: 'openai',
+      providerModels: {
+        openai: 'gpt-4o-mini',
+        anthropic: 'claude-3-5-sonnet-latest',
+        copilot: ''
+      }
+    }
   }
 });
 
@@ -24,11 +33,31 @@ const getApiTokens = () => store.get('apiTokens', {});
 const setApiTokens = (tokens) => store.set('apiTokens', tokens);
 const getApiStatus = () => store.get('apiStatus', {});
 const setApiStatus = (status) => store.set('apiStatus', status);
+const getSettings = () => store.get('settings', {
+  activeProvider: 'openai',
+  providerModels: {
+    openai: 'gpt-4o-mini',
+    anthropic: 'claude-3-5-sonnet-latest',
+    copilot: ''
+  }
+});
+const setSettings = (settings) => store.set('settings', settings);
 
 const providerLabels = {
   openai: 'OpenAI',
   anthropic: 'Anthropic Claude',
   copilot: 'GitHub Copilot'
+};
+
+const providerDefaults = {
+  openai: 'gpt-4o-mini',
+  anthropic: 'claude-3-5-sonnet-latest',
+  copilot: ''
+};
+
+const getProviderModel = (provider) => {
+  const settings = getSettings();
+  return settings.providerModels?.[provider] || providerDefaults[provider] || '';
 };
 
 const encryptToken = (token) => {
@@ -59,6 +88,42 @@ const updateStatus = (provider, status) => {
   };
   setApiStatus(updated);
   return updated[provider];
+};
+
+const appendMessageToChat = (chatId, sender, text) => {
+  const now = new Date().toISOString();
+  const chats = getChats();
+  const updated = chats.map((chat) => {
+    if (chat.id !== chatId) {
+      return chat;
+    }
+
+    return {
+      ...chat,
+      updatedAt: now,
+      messages: [
+        ...chat.messages,
+        {
+          id: createId(),
+          sender,
+          text,
+          timestamp: now
+        }
+      ]
+    };
+  });
+
+  setChats(updated);
+  return updated.find((chat) => chat.id === chatId) || null;
+};
+
+const getDecryptedProviderToken = (provider) => {
+  const tokens = getApiTokens();
+  const encryptedToken = tokens[provider];
+  if (!encryptedToken) {
+    throw new Error(`No token saved for ${providerLabels[provider] || provider}.`);
+  }
+  return decryptToken(encryptedToken);
 };
 
 function createWindow() {
@@ -139,48 +204,113 @@ ipcMain.handle('chat:delete', (_event, chatId) => {
 });
 
 ipcMain.handle('chat:addMessage', (_event, { chatId, sender, text }) => {
-  const now = new Date().toISOString();
-  const chats = getChats();
-  const updated = chats.map((chat) => {
-    if (chat.id !== chatId) {
-      return chat;
-    }
+  return appendMessageToChat(chatId, sender, text);
+});
 
-    return {
-      ...chat,
-      updatedAt: now,
-      messages: [
-        ...chat.messages,
-        {
-          id: createId(),
-          sender,
-          text,
-          timestamp: now
-        }
-      ]
-    };
-  });
-  setChats(updated);
-  return updated.find((chat) => chat.id === chatId);
+ipcMain.handle('chat:sendMessage', async (event, { chatId, message }) => {
+  const userMessage = appendMessageToChat(chatId, 'user', message);
+  if (!userMessage) {
+    throw new Error('Chat not found');
+  }
+
+  const settings = getSettings();
+  const providerType = settings.activeProvider || 'openai';
+  if (!['openai', 'anthropic'].includes(providerType)) {
+    throw new Error('Active provider does not support chat completions yet.');
+  }
+
+  const token = getDecryptedProviderToken(providerType);
+  const provider = ProviderFactory.createProvider(providerType, token);
+  const chat = getChats().find((item) => item.id === chatId);
+  if (!chat) {
+    throw new Error('Chat not found');
+  }
+
+  const responseId = createId();
+  const options = {
+    model: getProviderModel(providerType)
+  };
+
+  let fullResponse = '';
+  event.sender.send('chat:messageStart', { chatId, responseId });
+
+  try {
+    await provider.streamMessage(chat.messages, options, (chunk) => {
+      fullResponse += chunk;
+      event.sender.send('chat:messageChunk', { chatId, responseId, chunk });
+    });
+
+    const updatedChat = appendMessageToChat(chatId, 'assistant', fullResponse || '(No response)');
+    event.sender.send('chat:messageComplete', {
+      chatId,
+      responseId,
+      message: fullResponse || '(No response)'
+    });
+
+    return updatedChat;
+  } catch (error) {
+    event.sender.send('chat:messageError', {
+      chatId,
+      responseId,
+      error: error.message
+    });
+    throw error;
+  }
 });
 
 ipcMain.handle('settings:load', () => {
   const tokens = getApiTokens();
   const status = getApiStatus();
+  const settings = getSettings();
 
   const providers = Object.keys(providerLabels).reduce((acc, key) => {
     acc[key] = {
       label: providerLabels[key],
       hasToken: Boolean(tokens[key]),
-      status: status[key] || null
+      status: status[key] || null,
+      model: settings.providerModels?.[key] || providerDefaults[key] || ''
     };
     return acc;
   }, {});
 
   return {
     encryptionAvailable: safeStorage.isEncryptionAvailable(),
-    providers
+    providers,
+    activeProvider: settings.activeProvider || 'openai'
   };
+});
+
+ipcMain.handle('settings:setActiveProvider', (_event, { provider }) => {
+  if (!providerLabels[provider]) {
+    return { ok: false, error: 'Unknown provider.' };
+  }
+
+  const settings = getSettings();
+  const updated = {
+    ...settings,
+    activeProvider: provider
+  };
+  setSettings(updated);
+
+  return { ok: true, activeProvider: provider };
+});
+
+ipcMain.handle('settings:setProviderModel', (_event, { provider, model }) => {
+  if (!providerLabels[provider]) {
+    return { ok: false, error: 'Unknown provider.' };
+  }
+
+  const settings = getSettings();
+  const updated = {
+    ...settings,
+    providerModels: {
+      ...(settings.providerModels || {}),
+      [provider]: (model || '').trim()
+    }
+  };
+  setSettings(updated);
+
+  return { ok: true, model: updated.providerModels[provider] };
 });
 
 ipcMain.handle('settings:saveProvider', (_event, { provider, token, clear }) => {

@@ -118,15 +118,22 @@ body {
   font-weight: 600;
   font-size: 14px;
   margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .chat-item-details {
   flex: 1;
+  min-width: 0;
 }
 
 .chat-item-meta {
   font-size: 11px;
   color: #9a9a9a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .chat-item-actions {
@@ -281,14 +288,14 @@ body {
   align-items: stretch;
 }
 
+.main-content.start-state .input-actions {
+  align-self: flex-end;
+}
+
 .main-content.start-state .user-input {
   min-height: 140px;
   font-size: 18px;
   padding: 18px 20px;
-}
-
-.main-content.start-state .send-btn {
-  align-self: flex-end;
 }
 
 .message {
@@ -346,6 +353,17 @@ body {
   display: flex;
   gap: 15px;
   align-items: flex-end;
+}
+
+.input-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.composer-settings-btn {
+  min-width: 42px;
+  padding: 10px 12px;
 }
 
 .empty-state {
@@ -485,6 +503,21 @@ body {
   font-size: 16px;
   font-weight: 600;
   color: #2c2c2c;
+}
+
+.provider-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.active-provider-badge {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #e6f1ff;
+  color: #1d5fbf;
+  border: 1px solid #bdd7ff;
 }
 
 .provider-status {

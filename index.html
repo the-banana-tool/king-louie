@@ -31,7 +31,7 @@
           <div class="chat-header-meta" id="chat-header-meta">Select a chat to begin</div>
         </div>
         <div class="chat-header-actions">
-          <button id="open-settings-btn" class="icon-button" title="Open Settings" type="button">� Settings</button>
+          <button id="open-settings-btn" class="icon-button" title="Open Settings" aria-label="Open Settings" type="button">⚙</button>
         </div>
       </div>
 
@@ -50,7 +50,10 @@
           placeholder="Type your message here..."
           rows="3"
         ></textarea>
-        <button id="send-btn" class="send-btn">Send</button>
+        <div class="input-actions">
+          <button id="composer-settings-btn" class="icon-button composer-settings-btn" title="Open Settings" aria-label="Open Settings" type="button">⚙</button>
+          <button id="send-btn" class="send-btn">Send</button>
+        </div>
       </div>
     </div>
   </div>
