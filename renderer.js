@@ -3,6 +3,7 @@ const userInput = document.getElementById('user-input');
 const sendBtn = document.getElementById('send-btn');
 const chatMessages = document.getElementById('chat-messages');
 const newChatBtn = document.getElementById('new-chat-btn');
+const newChatBtnCompact = document.getElementById('new-chat-btn-compact');
 const chatList = document.getElementById('chat-list');
 const chatHeaderTitle = document.getElementById('chat-header-title');
 const chatHeaderMeta = document.getElementById('chat-header-meta');
@@ -69,6 +70,27 @@ function getLocalHelpText() {
     '- `/agent on|off|toggle|status` — control agent mode',
     '- `exit` or `quit` — close the window'
   ].join('\n');
+}
+
+function appendLocalMessage(sender, text) {
+  const now = new Date().toISOString();
+  chats = chats.map((chat) => {
+    if (chat.id !== activeChatId) return chat;
+    return {
+      ...chat,
+      updatedAt: now,
+      messages: [
+        ...chat.messages,
+        {
+          id: `local-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+          sender,
+          text,
+          timestamp: now
+        }
+      ]
+    };
+  });
+  refreshUI();
 }
 
 function parseSlashCommand(message = '') {
@@ -252,6 +274,17 @@ function renderChatList() {
     chatItem.className = `chat-item ${chat.id === activeChatId ? 'active' : ''}`;
     chatItem.dataset.chatId = chat.id;
 
+    const viewBtn = document.createElement('button');
+    viewBtn.className = 'chat-view-btn';
+    viewBtn.type = 'button';
+    viewBtn.title = `View ${chat.title}`;
+    viewBtn.setAttribute('aria-label', `View ${chat.title}`);
+    viewBtn.dataset.chatId = chat.id;
+
+    const viewBtnDot = document.createElement('span');
+    viewBtnDot.className = 'chat-view-btn-dot';
+    viewBtn.appendChild(viewBtnDot);
+
     const details = document.createElement('div');
     details.className = 'chat-item-details';
 
@@ -290,6 +323,7 @@ function renderChatList() {
     actions.appendChild(renameBtn);
     actions.appendChild(deleteBtn);
 
+    chatItem.appendChild(viewBtn);
     chatItem.appendChild(details);
     chatItem.appendChild(actions);
 
@@ -674,18 +708,12 @@ async function sendMessage() {
     userInput.value = '';
     userInput.style.height = 'auto';
 
-    try {
-      await window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message });
-      await window.electron.chat.addMessage({
-        chatId: activeChatId,
-        sender: 'assistant',
-        text: getLocalHelpText()
-      });
-      await loadChats();
-    } catch (error) {
-      addMessage('assistant', `Error: ${error.message || 'Unable to run local command.'}`);
-      await loadChats();
-    }
+    const helpText = getLocalHelpText();
+    appendLocalMessage('user', message);
+    appendLocalMessage('assistant', helpText);
+
+    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch(() => {});
+    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: helpText }).catch(() => {});
 
     return;
   }
@@ -703,9 +731,10 @@ async function sendMessage() {
       isAgentModeEnabled = !isAgentModeEnabled;
     } else if (modeArg !== 'status') {
       const helpText = 'Usage: `/agent on`, `/agent off`, `/agent toggle`, or `/agent status`.';
-      await window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message });
-      await window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: helpText });
-      await loadChats();
+      appendLocalMessage('user', message);
+      appendLocalMessage('assistant', helpText);
+      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch(() => {});
+      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: helpText }).catch(() => {});
       return;
     }
 
@@ -714,14 +743,10 @@ async function sendMessage() {
       ? `Agent mode is currently **${isAgentModeEnabled ? 'ON' : 'OFF'}**.`
       : `Agent mode is now **${isAgentModeEnabled ? 'ON' : 'OFF'}**.`;
 
-    try {
-      await window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message });
-      await window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: statusText });
-      await loadChats();
-    } catch (error) {
-      addMessage('assistant', `Error: ${error.message || 'Unable to run local command.'}`);
-      await loadChats();
-    }
+    appendLocalMessage('user', message);
+    appendLocalMessage('assistant', statusText);
+    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch(() => {});
+    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: statusText }).catch(() => {});
 
     return;
   }
@@ -730,24 +755,21 @@ async function sendMessage() {
     userInput.value = '';
     userInput.style.height = 'auto';
 
-    try {
-      await window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message });
+    appendLocalMessage('user', message);
+    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch(() => {});
 
+    try {
       const result = await window.electron.settings.runLlmCommand({ command: message });
       const responseText = result?.ok
         ? (result.output || 'Command completed.')
         : `Error: ${result?.error || 'Unable to run local LLM command.'}`;
 
-      await window.electron.chat.addMessage({
-        chatId: activeChatId,
-        sender: 'assistant',
-        text: responseText
-      });
-
-      await loadChats();
+      appendLocalMessage('assistant', responseText);
+      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch(() => {});
     } catch (error) {
-      addMessage('assistant', `Error: ${error.message || 'Unable to run local LLM command.'}`);
-      await loadChats();
+      const errorText = `Error: ${error.message || 'Unable to run local LLM command.'}`;
+      appendLocalMessage('assistant', errorText);
+      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: errorText }).catch(() => {});
     }
 
     return;
@@ -814,14 +836,14 @@ function addMessage(sender, text, metadata = {}) {
     metricsDiv.className = 'message-metrics';
 
     const callSpan = document.createElement('span');
-    callSpan.textContent = `Call: in ${formatTokenCount(callTotals.inputTokens)} • out ${formatTokenCount(callTotals.outputTokens)} • total ${formatTokenCount(callTotals.totalTokens)} • ${formatUsd(callTotals.costUsd)}`;
-    metricsDiv.appendChild(callSpan);
+    callSpan.className = 'message-metrics-call';
+    callSpan.textContent = `Call: in ${formatTokenCount(callTotals.inputTokens)} - out ${formatTokenCount(callTotals.outputTokens)} - total ${formatTokenCount(callTotals.totalTokens)} • ${formatUsd(callTotals.costUsd)}`;
 
     if (runningTotals) {
-      const runningSpan = document.createElement('span');
-      runningSpan.textContent = `Running: ${formatTokenCount(runningTotals.totalTokens)} tokens • ${formatUsd(runningTotals.costUsd)}`;
-      metricsDiv.appendChild(runningSpan);
+      callSpan.textContent += ` Running: ${formatTokenCount(runningTotals.totalTokens)} tokens - ${formatUsd(runningTotals.costUsd)}`;
     }
+  
+    metricsDiv.appendChild(callSpan);
 
     messageContent.appendChild(metricsDiv);
   }
@@ -992,6 +1014,9 @@ userInput.addEventListener('input', function() {
 
 // New chat button
 newChatBtn.addEventListener('click', handleCreateChat);
+if (newChatBtnCompact) {
+  newChatBtnCompact.addEventListener('click', handleCreateChat);
+}
 
 // Chat history item click handler
 chatList.addEventListener('click', (e) => {

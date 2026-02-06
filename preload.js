@@ -16,17 +16,63 @@ const escapeHtml = (value = '') =>
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
 
-const safeMarkdownParse = (text) => {
-  const input = text || '';
-  if (markdownParser?.parse) {
-    try {
-      return markdownParser.parse(input);
-    } catch {
-      // Fall through to plain-text HTML
+const formatInlineMarkdown = (text = '') =>
+  String(text)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+
+const simpleMarkdownFallback = (text = '') => {
+  const lines = String(text || '').split(/\r?\n/);
+  const chunks = [];
+  let listBuffer = [];
+
+  const flushList = () => {
+    if (!listBuffer.length) return;
+    chunks.push(`<ul>${listBuffer.map((item) => `<li>${item}</li>`).join('')}</ul>`);
+    listBuffer = [];
+  };
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) {
+      flushList();
+      continue;
     }
+
+    if (line.startsWith('- ')) {
+      listBuffer.push(formatInlineMarkdown(escapeHtml(line.slice(2))));
+      continue;
+    }
+
+    flushList();
+
+    if (line.startsWith('### ')) {
+      chunks.push(`<h3>${formatInlineMarkdown(escapeHtml(line.slice(4)))}</h3>`);
+      continue;
+    }
+
+    chunks.push(`<p>${formatInlineMarkdown(escapeHtml(line))}</p>`);
   }
 
-  return `<p>${escapeHtml(input).replace(/\n/g, '<br>')}</p>`;
+  flushList();
+  return chunks.join('');
+};
+
+const safeMarkdownParse = (text) => {
+  const input = text || '';
+  try {
+    if (markdownParser?.parse && typeof markdownParser.parse === 'function') {
+      return markdownParser.parse(input);
+    }
+
+    if (typeof markdownParser === 'function') {
+      return markdownParser(input);
+    }
+  } catch {
+    // Fall through to plain-text HTML
+  }
+
+  return simpleMarkdownFallback(input);
 };
 
 // Expose protected methods that allow the renderer process to use

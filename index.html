@@ -11,6 +11,10 @@
   <div class="container">
     <!-- Left Sidebar: Chat History (1/4 width) -->
     <div class="sidebar">
+      <div class="sidebar-toggle-row">
+        <button id="toggle-history-btn" class="icon-button history-toggle-btn" title="Collapse chat history" aria-label="Collapse chat history" type="button" aria-pressed="false">☰</button>
+        <button id="new-chat-btn-compact" class="icon-button compact-add-btn" title="New chat" aria-label="New chat" type="button">+</button>
+      </div>
       <div class="sidebar-header">
         <h2>Chat History</h2>
         <button id="new-chat-btn" class="new-chat-btn">+ New Chat</button>
@@ -27,7 +31,6 @@
     <div class="main-content">
       <div class="chat-header">
         <div class="chat-header-main">
-          <button id="toggle-history-btn" class="icon-button history-toggle-btn" title="Collapse chat history" aria-label="Collapse chat history" type="button" aria-pressed="false">☰</button>
           <div>
           <div class="chat-header-title" id="chat-header-title">King Louie Chat</div>
           <div class="chat-header-meta" id="chat-header-meta">Select a chat to begin</div>
