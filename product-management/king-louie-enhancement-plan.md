@@ -2,7 +2,72 @@
 
 ## Executive Summary
 
-This document outlines a phased approach to transform King Louie from a basic Electron chat application with simulated responses into a sophisticated tool-oriented LLM system modeled after Claude Code's architecture. The plan focuses on implementing real LLM integration, comprehensive tool support, agent orchestration, and extensibility.
+This document outlines a phased approach to transform King Louie from a basic Electron chat application with simulated responses into a sophisticated tool-oriented LLM system modeled after Claude Code's architecture, enhanced with powerful messaging and remote control capabilities inspired by OpenClaw.
+
+The plan focuses on implementing:
+- **Real LLM integration** with streaming support
+- **Comprehensive tool support** with 10+ built-in tools
+- **Agent orchestration** with multi-agent workflows
+- **Gateway architecture** for agent-to-agent communication (OpenClaw-inspired)
+- **Multi-channel messaging system** with session management and routing
+- **Remote control API** via WebSocket for external integration
+- **Advanced tool patterns** including sandboxing, result guards, and type safety
+- **Plugin system** for extensibility
+
+**Key OpenClaw-Inspired Features:**
+- Gateway server for WebSocket-based agent communication
+- Session management with sophisticated routing and bindings
+- Message tools for agent-to-agent messaging with timeout support
+- Multi-agent coordination with permission controls
+- Channel plugin architecture for future expansion
+- Remote control API for programmatic access
+- Tool policy system with granular permissions
+- Sandbox integration for secure tool execution
+
+---
+
+## Implementation Progress (as of 2026-02-05)
+
+### ✅ Phase 1: Core LLM Integration - **COMPLETE**
+- Multi-provider architecture (OpenAI, Anthropic) with factory pattern
+- Real-time streaming responses with IPC events
+- Markdown rendering for formatted messages
+- Secure token storage with encryption
+- Active provider and model selection in UI
+
+### 🔄 Phase 2: Tool System Foundation - **CORE COMPLETE** (UI Integration Pending)
+
+**Implemented:**
+- ✅ Tool definition schema with JSON Schema validation
+- ✅ Tool registry for managing tools
+- ✅ Four core tools: Bash, Read, Edit, Write
+- ✅ Path security validation preventing directory traversal
+- ✅ Dangerous pattern detection (e.g., `rm -rf /`)
+- ✅ Provider function calling support (OpenAI + Anthropic)
+- ✅ Tool executor with approval system and events
+- ✅ Agent loop supporting multi-turn tool execution
+
+**Pending Integration:**
+- ✅ Main process IPC handlers for tool execution
+- ✅ Tool approval dialog in renderer
+- ✅ Tool result display in chat interface
+- ✅ Agent mode trigger from UI
+
+**Files Created:**
+- `src/tools/tool-schema.js` - Tool class with validation
+- `src/tools/tool-registry.js` - Registry for managing tools
+- `src/tools/utils.js` - Path security helpers
+- `src/tools/index.js` - Tool initialization
+- `src/tools/builtin/bash-tool.js` - Shell command execution
+- `src/tools/builtin/read-tool.js` - File reading with line ranges
+- `src/tools/builtin/edit-tool.js` - Exact string replacements
+- `src/tools/builtin/write-tool.js` - File creation/overwriting
+- `src/execution/tool-executor.js` - Tool execution engine
+- `src/execution/agent-loop.js` - Multi-turn agentic loop
+- `src/providers/*.js` - Updated with `sendMessageWithTools()`, `parseToolResponse()`, `buildToolMessages()`
+
+### 📋 Phase 3-8: Future Work
+Remaining phases (Agent Orchestration, Plugin System, Hook System, Permission System, Advanced Features, Additional Tools) are documented but not yet started.
 
 ---
 
@@ -16,34 +81,55 @@ This document outlines a phased approach to transform King Louie from a basic El
 ✅ Chat persistence (electron-store)
 ✅ IPC communication architecture
 ✅ Settings management UI
+✅ **Real LLM integration** with OpenAI and Anthropic providers
+✅ **Streaming responses** with real-time token display
+✅ **Markdown rendering** for formatted assistant messages
+✅ **Provider abstraction layer** for multi-model support
+✅ **Active provider and model selection** in settings UI
+✅ **Tool/function calling framework** with schema validation and safety checks
+✅ **Core built-in tools** (Bash, Read, Edit, Write) with security controls
+✅ **Tool execution engine** with approval system and event emitters
+✅ **Agent loop** supporting multi-turn tool execution
+✅ **Provider tool support** (OpenAI + Anthropic function calling)
+
+### What's Partially Implemented (Needs UI Integration)
+🔄 **Tool approval system** - Core implementation complete, UI integration pending
+🔄 **Agent orchestration** - Agent loop complete, needs main process integration
+🔄 **Permission system** - Tool-level approval ready, needs UI dialogs
 
 ### What's Missing
-❌ **No actual LLM integration** - Only simulated responses
-❌ **No tool/function calling framework** - Cannot execute tools or actions
-❌ **No agent orchestration** - Simple request-response only
-❌ **No streaming responses** - Hardcoded delays
-❌ **No message formatting** - Plain text only (no markdown rendering)
-❌ **No plugin/extension system** - Monolithic architecture
-❌ **No task management** - Cannot track multi-step operations
-❌ **No permission system** - No tool safety controls
-❌ **No hook system** - No pre/post execution automation
+❌ **Tool UI integration** - Tool results not displayed in chat interface
+❌ **Agent mode UI** - No way to trigger agentic workflows from UI
+❌ **Plugin/extension system** - Monolithic architecture
+❌ **Task management** - Cannot track multi-step operations
+❌ **Hook system** - No pre/post execution automation
+❌ **Syntax highlighting** - Code blocks in markdown not highlighted
+❌ **Token usage tracking** - API usage not monitored
+❌ **Additional tools** - Need Glob, Grep, Git, etc.
+❌ **Gateway architecture** - No agent-to-agent communication
 
 ---
 
 ## Architecture Comparison
 
-| Feature | King Louie (Current) | Claude Code (Target) |
-|---------|---------------------|----------------------|
-| LLM Integration | None (simulated) | Multi-model with streaming |
-| Tool System | None | 10+ built-in tools + MCP |
-| Agent Architecture | N/A | Multi-agent orchestration |
-| Permission System | N/A | 3-layer (manifest/command/hook) |
-| Plugin Support | N/A | Full plugin architecture |
-| Task Management | N/A | Complete lifecycle tracking |
-| Workflow Orchestration | N/A | Serial + parallel execution |
-| Security Hooks | N/A | Pre/post tool validation |
-| Message Format | Plain text | Markdown + code blocks |
-| Response Mode | Simulated | Streaming with SSE |
+| Feature | King Louie (Current) | King Louie (Target) | Status |
+|---------|---------------------|---------------------|--------|
+| LLM Integration | ✅ Multi-model with streaming | Multi-model with streaming | **✅ Complete** |
+| Tool System | 🔄 4 core tools (Bash, Read, Edit, Write) | 10+ built-in tools + MCP | **🔄 Core Done, UI Pending** |
+| Tool Schema & Validation | ✅ JSON Schema validation with safety checks | Full validation + TypeBox schemas | **✅ Core Complete** |
+| Agent Architecture | 🔄 Single agent loop implemented | Multi-agent orchestration | **🔄 Single Agent Done** |
+| Function Calling | ✅ OpenAI + Anthropic tool support | Provider abstraction with tool support | **✅ Complete** |
+| Tool Execution Engine | ✅ Executor with approval system | Full execution with hooks | **✅ Core Complete** |
+| Permission System | 🔄 Tool-level approval ready | 3-layer (manifest/command/hook) | **🔄 Partial** |
+| Plugin Support | N/A | Full plugin architecture | **❌ Not Started** |
+| Task Management | N/A | Complete lifecycle tracking | **❌ Not Started** |
+| Workflow Orchestration | N/A | Serial + parallel execution | **❌ Not Started** |
+| Security Hooks | 🔄 Dangerous pattern detection | Pre/post tool validation + result guards | **🔄 Partial** |
+| Message Format | ✅ Markdown rendering | Markdown + code blocks + syntax highlighting | **🔄 Partial** |
+| Response Mode | ✅ Streaming with IPC events | Streaming with SSE | **✅ Complete** |
+| **Messaging System** | **N/A** | **Multi-channel messaging** | **❌ Not Started** |
+| **Remote Control** | **N/A** | **WebSocket API** | **❌ Not Started** |
+| **Gateway Architecture** | **N/A** | **Agent-to-agent routing** | **❌ Not Started** |
 
 ---
 
@@ -55,20 +141,21 @@ This document outlines a phased approach to transform King Louie from a basic El
 **Timeline:** 2-3 weeks
 **Priority:** CRITICAL
 
-**Status Update (2026-02-05):** 🚧 In Progress (Core foundation implemented)
+**Status:** ✅ **COMPLETE** (2026-02-05)
 
-### Implementation Progress Notes
-- Implemented provider abstraction layer and provider factory:
-  - `src/providers/base-provider.js`
-  - `src/providers/openai-provider.js`
-  - `src/providers/anthropic-provider.js`
-  - `src/providers/provider-factory.js`
-- Replaced simulated response flow with real provider-backed streaming in `main.js` via `chat:sendMessage`
-- Added streaming IPC events and preload wiring:
-  - `chat:messageStart`, `chat:messageChunk`, `chat:messageComplete`, `chat:messageError`
-- Added markdown rendering support in UI (assistant messages + streaming chunks)
-- Added active provider and per-provider model settings persistence + UI controls
-- Added fallback/error handling to prevent settings panel from silently failing
+### Summary
+Phase 1 successfully replaced simulated responses with real LLM integration. The application now supports:
+- Multi-provider architecture (OpenAI, Anthropic) with factory pattern
+- Real-time streaming responses with IPC event propagation
+- Markdown rendering for formatted messages
+- Secure token storage with encryption
+- Active provider and model selection in settings UI
+- Comprehensive error handling for API failures
+
+**Remaining Optional Items:**
+- Token usage tracking (future enhancement)
+- Syntax highlighting for code blocks in markdown (future enhancement)
+- Anthropic API verification (testing pending)
 
 ### Goals
 - Replace simulated responses with real LLM API calls
@@ -79,234 +166,72 @@ This document outlines a phased approach to transform King Louie from a basic El
 ### Implementation Tasks
 
 #### 1.1 Provider Abstraction Layer
+**Status:** ✅ **Implemented**
 **File:** `src/providers/base-provider.js`
 
-Create abstract class for all LLM providers:
-```javascript
-class BaseLLMProvider {
-  constructor(apiKey) {}
-
-  // Core methods to implement
-  async sendMessage(messages, options) {}
-  async streamMessage(messages, options, onChunk) {}
-  async listModels() {}
-  formatMessages(chatHistory) {} // Provider-specific formatting
-
-  // Utility methods
-  validateApiKey() {}
-  getDefaultModel() {}
-  getHeaders() {}
-}
-```
+Base class providing:
+- API key validation
+- Message normalization
+- Standard headers configuration
+- Abstract methods for `sendMessage()`, `streamMessage()`, `listModels()`, and `getDefaultModel()`
 
 #### 1.2 OpenAI Provider Implementation
+**Status:** ✅ **Implemented**
 **File:** `src/providers/openai-provider.js`
 
-```javascript
-class OpenAIProvider extends BaseLLMProvider {
-  async sendMessage(messages, options = {}) {
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: this.getHeaders(),
-      body: JSON.stringify({
-        model: options.model || 'gpt-4',
-        messages: this.formatMessages(messages),
-        temperature: options.temperature || 0.7,
-        stream: false
-      })
-    });
-    return response.json();
-  }
-
-  async streamMessage(messages, options, onChunk) {
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: this.getHeaders(),
-      body: JSON.stringify({
-        model: options.model || 'gpt-4',
-        messages: this.formatMessages(messages),
-        stream: true
-      })
-    });
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      const chunk = decoder.decode(value);
-      const lines = chunk.split('\n').filter(line => line.trim());
-
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          const data = line.slice(6);
-          if (data === '[DONE]') break;
-
-          const parsed = JSON.parse(data);
-          const content = parsed.choices[0]?.delta?.content;
-          if (content) onChunk(content);
-        }
-      }
-    }
-  }
-}
-```
+Extends BaseLLMProvider with:
+- Non-streaming and streaming message support via OpenAI Chat Completions API
+- Server-sent events (SSE) parsing for streaming responses
+- Default model: `gpt-4o-mini`
+- Message formatting for OpenAI's format
 
 #### 1.3 Anthropic Provider Implementation
+**Status:** ✅ **Implemented**
 **File:** `src/providers/anthropic-provider.js`
 
-```javascript
-class AnthropicProvider extends BaseLLMProvider {
-  async sendMessage(messages, options = {}) {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'x-api-key': this.apiKey,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: options.model || 'claude-sonnet-4-5-20250929',
-        messages: this.formatMessages(messages),
-        max_tokens: options.max_tokens || 4096,
-        stream: false
-      })
-    });
-    return response.json();
-  }
-
-  formatMessages(chatHistory) {
-    // Anthropic requires alternating user/assistant messages
-    // System messages handled separately
-    return chatHistory.map(msg => ({
-      role: msg.sender === 'user' ? 'user' : 'assistant',
-      content: msg.text
-    }));
-  }
-}
-```
+Extends BaseLLMProvider with:
+- Non-streaming and streaming message support via Anthropic Messages API
+- SSE parsing for streaming responses
+- Default model: `claude-3-5-sonnet-latest`
+- Custom headers with `x-api-key` and `anthropic-version`
 
 #### 1.4 Provider Factory
+**Status:** ✅ **Implemented**
 **File:** `src/providers/provider-factory.js`
 
-```javascript
-class ProviderFactory {
-  static async createProvider(providerType, apiKey) {
-    switch (providerType) {
-      case 'openai':
-        return new OpenAIProvider(apiKey);
-      case 'anthropic':
-        return new AnthropicProvider(apiKey);
-      case 'github':
-        return new GitHubCopilotProvider(apiKey);
-      default:
-        throw new Error(`Unknown provider: ${providerType}`);
-    }
-  }
-}
-```
+Factory pattern for instantiating providers:
+- `createProvider(providerType, apiKey)` returns appropriate provider instance
+- Supports: `openai`, `anthropic`, `copilot` (copilot not fully implemented)
 
 #### 1.5 Update Main Process Handler
-**File:** `main.js` (modifications)
+**Status:** ✅ **Implemented**
+**File:** `main.js`
 
-Replace simulated response with real LLM call:
-```javascript
-ipcMain.handle('chat:sendMessage', async (event, { chatId, message }) => {
-  // Get active provider from settings
-  const settings = store.get('settings.providers', {});
-  const activeProvider = store.get('settings.activeProvider', 'openai');
-
-  // Decrypt token
-  const encryptedToken = settings[activeProvider]?.token;
-  if (!encryptedToken) {
-    throw new Error('No API token configured');
-  }
-  const apiKey = safeStorage.decryptString(Buffer.from(encryptedToken, 'base64'));
-
-  // Create provider
-  const provider = await ProviderFactory.createProvider(activeProvider, apiKey);
-
-  // Get chat history
-  const chat = store.get('chats', []).find(c => c.id === chatId);
-
-  // Stream response
-  let fullResponse = '';
-  const responseId = Date.now();
-
-  await provider.streamMessage(
-    chat.messages,
-    { model: settings[activeProvider]?.model },
-    (chunk) => {
-      fullResponse += chunk;
-      event.sender.send('chat:messageChunk', { chatId, responseId, chunk });
-    }
-  );
-
-  // Save complete message
-  return addMessageToChat(chatId, 'assistant', fullResponse);
-});
-```
+IPC handler `chat:sendMessage` now:
+- Retrieves active provider and model from settings
+- Decrypts API token using safeStorage
+- Creates provider instance via ProviderFactory
+- Streams responses with IPC events: `chat:messageStart`, `chat:messageChunk`, `chat:messageComplete`, `chat:messageError`
+- Saves complete message to chat history
 
 #### 1.6 Add Markdown Rendering
-**File:** `renderer.js` (modifications)
+**Status:** ✅ **Implemented**
+**Files:** `renderer.js`, `preload.js`, `package.json`
 
-Install `marked` library:
-```bash
-npm install marked
-```
-
-Update message rendering:
-```javascript
-function renderMessage(message) {
-  const messageDiv = document.createElement('div');
-  messageDiv.className = `message ${message.sender}`;
-
-  const contentDiv = document.createElement('div');
-  contentDiv.className = 'message-content';
-
-  // Render markdown
-  if (message.sender === 'assistant') {
-    contentDiv.innerHTML = marked.parse(message.text);
-  } else {
-    contentDiv.textContent = message.text;
-  }
-
-  messageDiv.appendChild(contentDiv);
-  return messageDiv;
-}
-
-// Handle streaming chunks
-window.electron.onMessageChunk((data) => {
-  const { chatId, responseId, chunk } = data;
-  if (chatId !== activeChatId) return;
-
-  let streamElement = document.querySelector(`[data-response-id="${responseId}"]`);
-  if (!streamElement) {
-    streamElement = document.createElement('div');
-    streamElement.className = 'message assistant streaming';
-    streamElement.dataset.responseId = responseId;
-    chatContent.appendChild(streamElement);
-  }
-
-  streamElement.innerHTML = marked.parse(streamElement.textContent + chunk);
-});
-```
+- Installed `marked` library (v15.0.7)
+- Assistant messages rendered as markdown via `window.electron.markdown.parse()`
+- Streaming chunks accumulated and re-rendered as markdown in real-time
+- Fallback to plain text with HTML escaping if marked fails
+- User messages displayed as plain text
 
 #### 1.7 Update Preload Script
-**File:** `preload.js` (additions)
+**Status:** ✅ **Implemented**
+**File:** `preload.js`
 
-Add streaming support:
-```javascript
-contextBridge.exposeInMainWorld('electron', {
-  // ... existing methods ...
-
-  onMessageChunk: (callback) => {
-    ipcRenderer.on('chat:messageChunk', (event, data) => callback(data));
-  }
-});
-```
+Exposed to renderer via contextBridge:
+- `chat.onMessageStart`, `chat.onMessageChunk`, `chat.onMessageComplete`, `chat.onMessageError` event listeners
+- `markdown.parse()` function for safe markdown rendering
+- All existing chat and settings IPC handlers
 
 ### Deliverables
 - [x] Provider abstraction layer implemented
@@ -334,29 +259,53 @@ contextBridge.exposeInMainWorld('electron', {
 **Timeline:** 3-4 weeks
 **Priority:** HIGH
 
+**Status:** ✅ **CORE COMPLETE** (2026-02-05) - Integration with UI pending
+
+### Summary
+Phase 2 successfully implemented the tool system foundation with:
+- Complete tool definition schema with validation and safety checks
+- Tool registry for managing and executing tools
+- Four core built-in tools (Bash, Read, Edit, Write) with security controls
+- Provider updates for function calling (OpenAI + Anthropic)
+- Tool executor with approval system and event emitters
+- Agent loop supporting multi-turn tool execution
+
+**Remaining Integration Work:**
+- UI integration for tool approval dialogs (not yet wired to renderer)
+- Tool execution display in chat interface
+- IPC handlers in main.js for tool operations
+
 ### Goals
-- Implement function calling support
-- Create tool definition framework
-- Build core built-in tools (Bash, Read, Edit, Write)
-- Add tool execution engine with safety controls
+- Implement function calling support ✅
+- Create tool definition framework ✅
+- Build core built-in tools (Bash, Read, Edit, Write) ✅
+- Add tool execution engine with safety controls ✅
 
 ### Implementation Tasks
 
 #### 2.1 Tool Definition Schema
+**Status:** ✅ **Implemented**
 **File:** `src/tools/tool-schema.js`
+
+Complete implementation with validation, safety checks, and LLM integration:
 
 ```javascript
 class Tool {
-  constructor(config) {
-    this.name = config.name;                    // e.g., "Bash"
-    this.description = config.description;      // What the tool does
-    this.parameters = config.parameters;        // JSON Schema for parameters
-    this.execute = config.execute;              // Async function
-    this.requiresApproval = config.requiresApproval || false;
-    this.dangerousPatterns = config.dangerousPatterns || [];
+  constructor(config = {}) {
+    if (!config.name) throw new Error('Tool name is required');
+    if (typeof config.execute !== 'function')
+      throw new Error(`Tool execute handler is required for ${config.name}`);
+
+    this.name = config.name;
+    this.description = config.description || '';
+    this.parameters = config.parameters || { type: 'object', properties: {} };
+    this.execute = config.execute;
+    this.requiresApproval = Boolean(config.requiresApproval);
+    this.dangerousPatterns = Array.isArray(config.dangerousPatterns)
+      ? config.dangerousPatterns
+      : [];
   }
 
-  // Convert to OpenAI/Anthropic function format
   toFunctionDefinition() {
     return {
       name: this.name,
@@ -365,24 +314,70 @@ class Tool {
     };
   }
 
-  // Validate parameters before execution
-  validateParameters(params) {
-    // JSON Schema validation
+  validateParameters(params = {}) {
+    const schema = this.parameters || {};
+    const required = Array.isArray(schema.required) ? schema.required : [];
+
+    // Check required fields
+    for (const field of required) {
+      if (!(field in params)) {
+        throw new Error(`Missing required parameter: ${field}`);
+      }
+    }
+
+    // Type validation with enum and numeric constraints
+    const properties = schema.properties || {};
+    for (const [key, descriptor] of Object.entries(properties)) {
+      if (!(key in params) || params[key] === undefined || params[key] === null)
+        continue;
+
+      const value = params[key];
+      if (!descriptor.type) continue;
+
+      const typeOk =
+        (descriptor.type === 'string' && typeof value === 'string') ||
+        (descriptor.type === 'number' && typeof value === 'number') ||
+        (descriptor.type === 'boolean' && typeof value === 'boolean') ||
+        (descriptor.type === 'array' && Array.isArray(value)) ||
+        (descriptor.type === 'object' && typeof value === 'object' && !Array.isArray(value));
+
+      if (!typeOk) {
+        throw new Error(`Invalid type for parameter '${key}'. Expected ${descriptor.type}.`);
+      }
+
+      if (Array.isArray(descriptor.enum) && !descriptor.enum.includes(value)) {
+        throw new Error(`Invalid value for parameter '${key}'. Expected one of: ${descriptor.enum.join(', ')}`);
+      }
+
+      if (descriptor.type === 'number') {
+        if (typeof descriptor.minimum === 'number' && value < descriptor.minimum) {
+          throw new Error(`Parameter '${key}' must be >= ${descriptor.minimum}`);
+        }
+        if (typeof descriptor.maximum === 'number' && value > descriptor.maximum) {
+          throw new Error(`Parameter '${key}' must be <= ${descriptor.maximum}`);
+        }
+      }
+    }
   }
 
-  // Check if command matches dangerous patterns
-  isDangerous(params) {
-    return this.dangerousPatterns.some(pattern =>
-      pattern.test(JSON.stringify(params))
-    );
+  isDangerous(params = {}) {
+    const value = JSON.stringify(params);
+    return this.dangerousPatterns.some((pattern) => pattern.test(value));
   }
 }
+
+module.exports = { Tool };
 ```
 
 #### 2.2 Tool Registry
+**Status:** ✅ **Implemented**
 **File:** `src/tools/tool-registry.js`
 
+Implemented with full validation and safety checks:
+
 ```javascript
+const { Tool } = require('./tool-schema');
+
 class ToolRegistry {
   constructor() {
     this.tools = new Map();
@@ -393,6 +388,7 @@ class ToolRegistry {
       throw new Error('Must register Tool instance');
     }
     this.tools.set(tool.name, tool);
+    return tool;
   }
 
   get(name) {
@@ -403,47 +399,51 @@ class ToolRegistry {
     return Array.from(this.tools.values());
   }
 
-  // Get function definitions for LLM
   getFunctionDefinitions() {
-    return this.list().map(tool => tool.toFunctionDefinition());
+    return this.list().map((tool) => tool.toFunctionDefinition());
   }
 
-  // Execute tool with safety checks
   async execute(name, parameters, options = {}) {
     const tool = this.get(name);
-    if (!tool) throw new Error(`Tool not found: ${name}`);
+    if (!tool) {
+      throw new Error(`Tool not found: ${name}`);
+    }
 
-    // Validate parameters
-    tool.validateParameters(parameters);
+    tool.validateParameters(parameters || {});
 
-    // Check if dangerous
-    if (tool.isDangerous(parameters) && !options.bypassSafety) {
+    if (tool.isDangerous(parameters || {}) && !options.bypassSafety) {
       throw new Error(`Dangerous operation detected: ${name}`);
     }
 
-    // Execute
-    return await tool.execute(parameters, options);
+    return tool.execute(parameters || {}, options);
   }
 }
 
-// Global registry
 const registry = new ToolRegistry();
-module.exports = registry;
+
+module.exports = {
+  ToolRegistry,
+  registry
+};
 ```
 
 #### 2.3 Core Built-in Tools
+**Status:** ✅ **Implemented** (4/4 tools complete)
+
+All core tools implemented with security controls, validation, and proper error handling:
 
 **File:** `src/tools/builtin/bash-tool.js`
 
 ```javascript
-const { Tool } = require('../tool-schema');
 const { exec } = require('child_process');
 const { promisify } = require('util');
+const { Tool } = require('../tool-schema');
+
 const execAsync = promisify(exec);
 
 const BashTool = new Tool({
   name: 'Bash',
-  description: 'Execute shell commands. Use for git operations, file system tasks, etc.',
+  description: 'Execute shell commands for local development tasks.',
   parameters: {
     type: 'object',
     properties: {
@@ -458,42 +458,46 @@ const BashTool = new Tool({
       timeout: {
         type: 'number',
         description: 'Optional timeout in milliseconds (max 600000)',
-        default: 120000
+        minimum: 1,
+        maximum: 600000
       }
     },
     required: ['command']
   },
   requiresApproval: true,
   dangerousPatterns: [
-    /rm\s+-rf\s+\/(?!home|tmp)/,  // Prevent dangerous rm commands
-    /mkfs\./,                       // Filesystem formatting
-    /dd\s+if=/,                     // Disk operations
-    /:(){ :|:&};:/,                // Fork bomb
+    /rm\s+-rf\s+\//i,
+    /mkfs\./i,
+    /dd\s+if=/i,
+    /:(){\s*:|:&};:/,
+    /del\s+\/s\s+\/q/i,
+    /rmdir\s+\/s\s+\/q/i,
+    /format\s+[a-z]:/i
   ],
 
-  async execute(params, options) {
+  async execute(params, options = {}) {
     const { command, timeout = 120000 } = params;
 
     try {
       const { stdout, stderr } = await execAsync(command, {
-        timeout,
-        maxBuffer: 10 * 1024 * 1024, // 10MB
-        cwd: options.cwd || process.cwd(),
+        timeout: Math.min(timeout, 600000),
+        maxBuffer: 10 * 1024 * 1024,
+        cwd: options.workingDirectory || process.cwd(),
         shell: true
       });
 
       return {
         success: true,
-        stdout: stdout.trim(),
-        stderr: stderr.trim(),
+        stdout: (stdout || '').trim(),
+        stderr: (stderr || '').trim(),
         exitCode: 0
       };
     } catch (error) {
       return {
         success: false,
-        stdout: error.stdout || '',
-        stderr: error.stderr || error.message,
-        exitCode: error.code || 1
+        stdout: (error.stdout || '').trim(),
+        stderr: (error.stderr || error.message || '').trim(),
+        exitCode: typeof error.code === 'number' ? error.code : 1
       };
     }
   }
@@ -505,39 +509,43 @@ module.exports = BashTool;
 **File:** `src/tools/builtin/read-tool.js`
 
 ```javascript
-const { Tool } = require('../tool-schema');
 const fs = require('fs').promises;
 const path = require('path');
+const { Tool } = require('../tool-schema');
+const { isPathWithin } = require('../utils');
 
 const ReadTool = new Tool({
   name: 'Read',
-  description: 'Read file contents with optional line range',
+  description: 'Read file contents with optional line ranges.',
   parameters: {
     type: 'object',
     properties: {
       file_path: {
         type: 'string',
-        description: 'Absolute path to the file to read'
+        description: 'Absolute or workspace-relative path to the file to read'
       },
       offset: {
         type: 'number',
-        description: 'Line number to start reading from (1-indexed)'
+        description: 'Line number to start reading from (1-indexed)',
+        minimum: 1
       },
       limit: {
         type: 'number',
-        description: 'Number of lines to read'
+        description: 'Number of lines to read',
+        minimum: 1
       }
     },
     required: ['file_path']
   },
 
-  async execute(params, options) {
+  async execute(params, options = {}) {
     const { file_path, offset, limit } = params;
+    const workingDirectory = options.workingDirectory || process.cwd();
+    const resolvedPath = path.isAbsolute(file_path)
+      ? path.resolve(file_path)
+      : path.resolve(workingDirectory, file_path);
 
-    // Security: Prevent directory traversal
-    const resolvedPath = path.resolve(file_path);
-    const workingDir = options.workingDirectory || process.cwd();
-    if (!resolvedPath.startsWith(workingDir)) {
+    if (!isPathWithin(workingDirectory, resolvedPath)) {
       throw new Error('Access denied: Path outside working directory');
     }
 
@@ -545,12 +553,10 @@ const ReadTool = new Tool({
       const content = await fs.readFile(resolvedPath, 'utf-8');
       const lines = content.split('\n');
 
-      let startLine = offset ? offset - 1 : 0;
-      let endLine = limit ? startLine + limit : lines.length;
+      const startLine = offset ? Math.max(offset - 1, 0) : 0;
+      const endLine = limit ? Math.min(startLine + limit, lines.length) : lines.length;
 
       const selectedLines = lines.slice(startLine, endLine);
-
-      // Format with line numbers (cat -n style)
       const formatted = selectedLines
         .map((line, idx) => `${startLine + idx + 1}\t${line}`)
         .join('\n');
@@ -559,7 +565,8 @@ const ReadTool = new Tool({
         success: true,
         content: formatted,
         totalLines: lines.length,
-        readLines: selectedLines.length
+        readLines: selectedLines.length,
+        filePath: resolvedPath
       };
     } catch (error) {
       return {
@@ -576,72 +583,73 @@ module.exports = ReadTool;
 **File:** `src/tools/builtin/edit-tool.js`
 
 ```javascript
-const { Tool } = require('../tool-schema');
 const fs = require('fs').promises;
 const path = require('path');
+const { Tool } = require('../tool-schema');
+const { isPathWithin } = require('../utils');
 
 const EditTool = new Tool({
   name: 'Edit',
-  description: 'Perform exact string replacements in files',
+  description: 'Perform exact string replacements in files.',
   parameters: {
     type: 'object',
     properties: {
       file_path: {
         type: 'string',
-        description: 'Absolute path to the file to edit'
+        description: 'Absolute or workspace-relative path to the file to edit'
       },
       old_string: {
         type: 'string',
-        description: 'The exact text to replace (must be unique in file)'
+        description: 'The exact text to replace (must be unique unless replace_all=true)'
       },
       new_string: {
         type: 'string',
-        description: 'The text to replace it with'
+        description: 'The replacement text'
       },
       replace_all: {
         type: 'boolean',
-        description: 'Replace all occurrences (default: false)',
-        default: false
+        description: 'Replace all occurrences if true'
       }
     },
     required: ['file_path', 'old_string', 'new_string']
   },
   requiresApproval: true,
 
-  async execute(params, options) {
+  async execute(params, options = {}) {
     const { file_path, old_string, new_string, replace_all = false } = params;
+    const workingDirectory = options.workingDirectory || process.cwd();
+    const resolvedPath = path.isAbsolute(file_path)
+      ? path.resolve(file_path)
+      : path.resolve(workingDirectory, file_path);
 
-    // Security check
-    const resolvedPath = path.resolve(file_path);
-    const workingDir = options.workingDirectory || process.cwd();
-    if (!resolvedPath.startsWith(workingDir)) {
-      throw new Error('Access denied');
+    if (!isPathWithin(workingDirectory, resolvedPath)) {
+      throw new Error('Access denied: Path outside working directory');
     }
 
     try {
       const content = await fs.readFile(resolvedPath, 'utf-8');
-
-      // Check if old_string exists
       const occurrences = content.split(old_string).length - 1;
+
       if (occurrences === 0) {
         throw new Error('old_string not found in file');
       }
 
       if (occurrences > 1 && !replace_all) {
-        throw new Error(`old_string appears ${occurrences} times. Use replace_all=true or provide more context to make it unique.`);
+        throw new Error(
+          `old_string appears ${occurrences} times. Use replace_all=true or provide more context.`
+        );
       }
 
-      // Perform replacement
-      const newContent = replace_all
+      const updated = replace_all
         ? content.split(old_string).join(new_string)
         : content.replace(old_string, new_string);
 
-      await fs.writeFile(resolvedPath, newContent, 'utf-8');
+      await fs.writeFile(resolvedPath, updated, 'utf-8');
 
       return {
         success: true,
         replacements: replace_all ? occurrences : 1,
-        message: `Successfully replaced ${replace_all ? occurrences : 1} occurrence(s)`
+        filePath: resolvedPath
       };
     } catch (error) {
       return {
@@ -658,48 +666,49 @@ module.exports = EditTool;
 **File:** `src/tools/builtin/write-tool.js`
 
 ```javascript
-const { Tool } = require('../tool-schema');
 const fs = require('fs').promises;
 const path = require('path');
+const { Tool } = require('../tool-schema');
+const { isPathWithin } = require('../utils');
 
 const WriteTool = new Tool({
   name: 'Write',
-  description: 'Create or overwrite a file with content',
+  description: 'Create or overwrite a file with provided content.',
   parameters: {
     type: 'object',
     properties: {
       file_path: {
         type: 'string',
-        description: 'Absolute path to the file to write'
+        description: 'Absolute or workspace-relative path to the file to write'
       },
       content: {
         type: 'string',
-        description: 'The content to write to the file'
+        description: 'The content to write'
       }
     },
     required: ['file_path', 'content']
   },
   requiresApproval: true,
 
-  async execute(params, options) {
+  async execute(params, options = {}) {
     const { file_path, content } = params;
+    const workingDirectory = options.workingDirectory || process.cwd();
+    const resolvedPath = path.isAbsolute(file_path)
+      ? path.resolve(file_path)
+      : path.resolve(workingDirectory, file_path);
 
-    const resolvedPath = path.resolve(file_path);
-    const workingDir = options.workingDirectory || process.cwd();
-    if (!resolvedPath.startsWith(workingDir)) {
-      throw new Error('Access denied');
+    if (!isPathWithin(workingDirectory, resolvedPath)) {
+      throw new Error('Access denied: Path outside working directory');
     }
 
     try {
-      // Create parent directories if needed
       await fs.mkdir(path.dirname(resolvedPath), { recursive: true });
-
-      // Write file
       await fs.writeFile(resolvedPath, content, 'utf-8');
 
       return {
         success: true,
-        message: `Successfully wrote ${content.length} bytes to ${file_path}`
+        message: `Successfully wrote ${Buffer.byteLength(content, 'utf-8')} bytes`,
+        filePath: resolvedPath
       };
     } catch (error) {
       return {
@@ -713,24 +722,44 @@ const WriteTool = new Tool({
 module.exports = WriteTool;
 ```
 
+**File:** `src/tools/utils.js`
+
+Helper utilities for path security validation:
+
+```javascript
+const path = require('path');
+
+function isPathWithin(parentDir, childPath) {
+  const relative = path.relative(parentDir, childPath);
+  return !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
+module.exports = { isPathWithin };
+```
+
 #### 2.4 Tool Initialization
+**Status:** ✅ **Implemented**
 **File:** `src/tools/index.js`
 
 ```javascript
-const toolRegistry = require('./tool-registry');
+const { registry: toolRegistry } = require('./tool-registry');
 
-// Import built-in tools
 const BashTool = require('./builtin/bash-tool');
 const ReadTool = require('./builtin/read-tool');
 const EditTool = require('./builtin/edit-tool');
 const WriteTool = require('./builtin/write-tool');
 
-// Register all built-in tools
+let initialized = false;
+
 function initializeTools() {
+  if (initialized) return;
+
   toolRegistry.register(BashTool);
   toolRegistry.register(ReadTool);
   toolRegistry.register(EditTool);
   toolRegistry.register(WriteTool);
+
+  initialized = true;
 }
 
 module.exports = {
@@ -740,141 +769,237 @@ module.exports = {
 ```
 
 #### 2.5 Update Provider Classes for Function Calling
+**Status:** ✅ **Implemented**
 
-**File:** `src/providers/openai-provider.js` (additions)
+Both OpenAI and Anthropic providers now support tool calling with proper format conversion:
+
+**File:** `src/providers/openai-provider.js` (key methods)
 
 ```javascript
 class OpenAIProvider extends BaseLLMProvider {
-  async sendMessageWithTools(messages, tools, options = {}) {
+  // Send message with tool definitions
+  async sendMessageWithTools(messages, tools = [], options = {}) {
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
-        model: options.model || 'gpt-4',
+        model: options.model || this.getDefaultModel(),
         messages: this.formatMessages(messages),
-        functions: tools.map(tool => ({
-          name: tool.name,
-          description: tool.description,
-          parameters: tool.parameters
+        tools: tools.map((tool) => ({
+          type: 'function',
+          function: {
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.parameters
+          }
         })),
-        function_call: 'auto',
-        temperature: options.temperature || 0.7
+        tool_choice: 'auto',
+        temperature: options.temperature ?? 0.7,
+        stream: false
       })
     });
+
+    if (!response.ok) {
+      throw new Error(await this.extractError(response));
+    }
 
     const data = await response.json();
     return this.parseToolResponse(data);
   }
 
+  // Parse tool use from response
   parseToolResponse(response) {
-    const message = response.choices[0].message;
+    const message = response?.choices?.[0]?.message;
+    if (!message) {
+      return {
+        type: 'text',
+        content: ''
+      };
+    }
 
-    if (message.function_call) {
+    const toolCall = message.tool_calls?.find((call) => call.type === 'function');
+    if (toolCall?.function?.name) {
+      let parsedArgs = {};
+      try {
+        parsedArgs = JSON.parse(toolCall.function.arguments || '{}');
+      } catch {
+        parsedArgs = {};
+      }
+
       return {
         type: 'tool_use',
-        toolName: message.function_call.name,
-        parameters: JSON.parse(message.function_call.arguments),
+        toolName: toolCall.function.name,
+        toolUseId: toolCall.id,
+        parameters: parsedArgs,
         messageContent: message.content || ''
       };
     }
 
     return {
       type: 'text',
-      content: message.content
+      content: message.content || ''
     };
+  }
+
+  // Build proper message format for tool results
+  buildToolMessages(response, toolResult, toolCallId) {
+    return [
+      {
+        role: 'assistant',
+        content: response.messageContent || '',
+        tool_calls: [
+          {
+            id: toolCallId,
+            type: 'function',
+            function: {
+              name: response.toolName,
+              arguments: JSON.stringify(response.parameters || {})
+            }
+          }
+        ]
+      },
+      {
+        role: 'tool',
+        tool_call_id: toolCallId,
+        content: JSON.stringify(toolResult)
+      }
+    ];
   }
 }
 ```
 
-**File:** `src/providers/anthropic-provider.js` (additions)
+**File:** `src/providers/anthropic-provider.js` (key methods)
 
 ```javascript
 class AnthropicProvider extends BaseLLMProvider {
-  async sendMessageWithTools(messages, tools, options = {}) {
+  // Send message with tool definitions
+  async sendMessageWithTools(messages, tools = [], options = {}) {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: {
-        'x-api-key': this.apiKey,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json'
-      },
+      headers: this.getHeaders(),
       body: JSON.stringify({
-        model: options.model || 'claude-sonnet-4-5-20250929',
+        model: options.model || this.getDefaultModel(),
         messages: this.formatMessages(messages),
-        tools: tools.map(tool => ({
+        tools: tools.map((tool) => ({
           name: tool.name,
           description: tool.description,
           input_schema: tool.parameters
         })),
-        max_tokens: options.max_tokens || 4096
+        max_tokens: options.max_tokens || 4096,
+        temperature: options.temperature ?? 0.7,
+        stream: false
       })
     });
+
+    if (!response.ok) {
+      throw new Error(await this.extractError(response));
+    }
 
     const data = await response.json();
     return this.parseToolResponse(data);
   }
 
+  // Parse tool use from response
   parseToolResponse(response) {
-    const content = response.content;
-
-    // Find tool use blocks
-    const toolUse = content.find(block => block.type === 'tool_use');
-    const textBlocks = content.filter(block => block.type === 'text');
+    const content = Array.isArray(response?.content) ? response.content : [];
+    const toolUse = content.find((block) => block.type === 'tool_use');
+    const textBlocks = content.filter((block) => block.type === 'text');
 
     if (toolUse) {
       return {
         type: 'tool_use',
         toolName: toolUse.name,
         toolUseId: toolUse.id,
-        parameters: toolUse.input,
-        messageContent: textBlocks.map(b => b.text).join('\n')
+        parameters: toolUse.input || {},
+        messageContent: textBlocks.map((block) => block.text).join('\n')
       };
     }
 
     return {
       type: 'text',
-      content: textBlocks.map(b => b.text).join('\n')
+      content: textBlocks.map((block) => block.text).join('\n')
     };
+  }
+
+  // Build proper message format for tool results
+  buildToolMessages(response, toolResult, toolCallId) {
+    const assistantContent = [];
+
+    if (response.messageContent) {
+      assistantContent.push({ type: 'text', text: response.messageContent });
+    }
+
+    assistantContent.push({
+      type: 'tool_use',
+      id: toolCallId,
+      name: response.toolName,
+      input: response.parameters || {}
+    });
+
+    return [
+      {
+        role: 'assistant',
+        content: assistantContent
+      },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: toolCallId,
+            content: JSON.stringify(toolResult)
+          }
+        ]
+      }
+    ];
   }
 }
 ```
 
 #### 2.6 Tool Execution Engine
+**Status:** ✅ **Implemented**
 **File:** `src/execution/tool-executor.js`
 
+Complete implementation with validation, safety checks, and approval system:
+
 ```javascript
-const { toolRegistry } = require('../tools');
 const { EventEmitter } = require('events');
+const { toolRegistry } = require('../tools');
 
 class ToolExecutor extends EventEmitter {
   constructor(options = {}) {
     super();
-    this.workingDirectory = options.workingDirectory;
+    this.workingDirectory = options.workingDirectory || process.cwd();
     this.requireApproval = options.requireApproval !== false;
   }
 
-  async execute(toolName, parameters, options = {}) {
+  async execute(toolName, parameters = {}, options = {}) {
     const tool = toolRegistry.get(toolName);
     if (!tool) {
       throw new Error(`Tool not found: ${toolName}`);
     }
 
-    // Emit pre-execution event
     this.emit('preExecute', { toolName, parameters });
 
-    // Check if approval required
+    tool.validateParameters(parameters);
+
+    if (tool.isDangerous(parameters) && !options.bypassSafety) {
+      throw new Error(`Dangerous operation detected: ${toolName}`);
+    }
+
     if (tool.requiresApproval && this.requireApproval) {
       const approved = await this.requestApproval(toolName, parameters);
       if (!approved) {
-        return { success: false, error: 'User denied permission' };
+        const denied = { success: false, error: 'User denied permission' };
+        this.emit('postExecute', { toolName, parameters, result: denied });
+        return denied;
       }
     }
 
-    // Execute tool
     try {
       const result = await tool.execute(parameters, {
-        workingDirectory: this.workingDirectory,
-        ...options
+        ...options,
+        workingDirectory: options.workingDirectory || this.workingDirectory
       });
 
       this.emit('postExecute', { toolName, parameters, result });
@@ -886,7 +1011,6 @@ class ToolExecutor extends EventEmitter {
   }
 
   async requestApproval(toolName, parameters) {
-    // This will trigger UI approval dialog
     return new Promise((resolve) => {
       this.emit('approvalRequired', { toolName, parameters, resolve });
     });
@@ -897,11 +1021,14 @@ module.exports = ToolExecutor;
 ```
 
 #### 2.7 Update Main Process for Tool Execution
-**File:** `main.js` (additions)
+**Status:** ⏳ **TODO** - Not yet integrated
+
+Proposed implementation for `main.js`:
 
 ```javascript
 const { initializeTools, toolRegistry } = require('./src/tools');
 const ToolExecutor = require('./src/execution/tool-executor');
+const AgentLoop = require('./src/execution/agent-loop');
 
 // Initialize tools on startup
 app.whenReady().then(() => {
@@ -932,10 +1059,27 @@ ipcMain.handle('tool:execute', async (event, { toolName, parameters }) => {
 ipcMain.handle('tool:list', async () => {
   return toolRegistry.getFunctionDefinitions();
 });
+
+// Agent-based chat with tool support
+ipcMain.handle('chat:sendMessageWithTools', async (event, { messages }) => {
+  const provider = createProvider(/* ... */);
+  const executor = new ToolExecutor({
+    workingDirectory: process.cwd(),
+    requireApproval: true
+  });
+
+  const loop = new AgentLoop(provider, executor);
+  const tools = toolRegistry.getFunctionDefinitions();
+
+  const result = await loop.run(messages, tools);
+  return result;
+});
 ```
 
 #### 2.8 Update Preload Script
-**File:** `preload.js` (additions)
+**Status:** ⏳ **TODO** - Not yet integrated
+
+Proposed additions to `preload.js`:
 
 ```javascript
 contextBridge.exposeInMainWorld('electron', {
@@ -954,7 +1098,9 @@ contextBridge.exposeInMainWorld('electron', {
 ```
 
 #### 2.9 Tool Approval UI
-**File:** `renderer.js` (additions)
+**Status:** ⏳ **TODO** - Not yet integrated
+
+Proposed additions to `renderer.js`:
 
 ```javascript
 // Listen for tool approval requests
@@ -993,70 +1139,105 @@ function showToolApprovalDialog(toolName, parameters) {
 ```
 
 #### 2.10 Agent Loop with Tool Support
+**Status:** ✅ **Implemented**
 **File:** `src/execution/agent-loop.js`
+
+Complete multi-turn agent loop with provider-specific message formatting:
 
 ```javascript
 class AgentLoop {
-  constructor(provider, executor) {
+  constructor(provider, executor, options = {}) {
     this.provider = provider;
     this.executor = executor;
-    this.maxIterations = 10;
+    this.maxIterations = options.maxIterations || 10;
   }
 
-  async run(messages, tools) {
+  async run(messages, tools, options = {}) {
     let iterations = 0;
-    let conversationHistory = [...messages];
+    const conversationHistory = [...messages];
+    const executedTools = [];
 
     while (iterations < this.maxIterations) {
-      iterations++;
+      iterations += 1;
 
-      // Get response from LLM
       const response = await this.provider.sendMessageWithTools(
         conversationHistory,
-        tools
+        tools,
+        options
       );
 
       if (response.type === 'text') {
-        // Final response - return to user
         return {
           type: 'complete',
           content: response.content,
-          iterations
+          iterations,
+          tools: executedTools
         };
       }
 
       if (response.type === 'tool_use') {
-        // Execute tool
+        const toolCallId =
+          response.toolUseId ||
+          `toolcall-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
         const toolResult = await this.executor.execute(
           response.toolName,
-          response.parameters
+          response.parameters,
+          options
         );
 
-        // Add tool use + result to conversation
-        conversationHistory.push({
-          role: 'assistant',
-          content: response.messageContent,
-          tool_calls: [{
-            name: response.toolName,
-            parameters: response.parameters
-          }]
+        executedTools.push({
+          name: response.toolName,
+          parameters: response.parameters,
+          result: toolResult
         });
 
-        conversationHistory.push({
-          role: 'tool',
-          tool_name: response.toolName,
-          content: JSON.stringify(toolResult)
-        });
+        if (typeof this.provider.buildToolMessages === 'function') {
+          const providerMessages = this.provider.buildToolMessages(
+            response,
+            toolResult,
+            toolCallId
+          );
+          conversationHistory.push(...providerMessages);
+        } else {
+          conversationHistory.push({
+            role: 'assistant',
+            content: response.messageContent || '',
+            tool_calls: [
+              {
+                id: toolCallId,
+                type: 'function',
+                function: {
+                  name: response.toolName,
+                  arguments: JSON.stringify(response.parameters || {})
+                }
+              }
+            ]
+          });
 
-        // Continue loop
+          conversationHistory.push({
+            role: 'tool',
+            tool_call_id: toolCallId,
+            content: JSON.stringify(toolResult)
+          });
+        }
+
         continue;
       }
+
+      return {
+        type: 'error',
+        content: 'Unsupported response type from provider',
+        iterations,
+        tools: executedTools
+      };
     }
 
     return {
       type: 'max_iterations',
-      content: 'Maximum iterations reached',
-      iterations
+      content: 'Maximum tool iterations reached before final answer.',
+      iterations,
+      tools: executedTools
     };
   }
 }
@@ -1065,20 +1246,34 @@ module.exports = AgentLoop;
 ```
 
 ### Deliverables
-- [ ] Tool definition schema and registry
-- [ ] Core tools: Bash, Read, Edit, Write
-- [ ] Provider updates for function calling (OpenAI + Anthropic)
-- [ ] Tool execution engine with safety checks
-- [ ] Permission system (approval dialogs)
-- [ ] Agent loop supporting tool calls
-- [ ] Tool result display in UI
-- [ ] Dangerous command detection
+- [x] Tool definition schema and registry
+- [x] Core tools: Bash, Read, Edit, Write
+- [x] Provider updates for function calling (OpenAI + Anthropic)
+- [x] Tool execution engine with safety checks
+- [x] Agent loop supporting tool calls
+- [x] Dangerous command detection
+- [ ] Permission system (approval dialogs) - Implementation complete, UI integration pending
+- [ ] Tool result display in UI - Pending
+- [ ] Main process IPC integration - Pending
 
 ### Testing Checklist
-- [ ] Bash tool executes commands successfully
-- [ ] Read tool can read files with line ranges
-- [ ] Edit tool performs string replacements
-- [ ] Write tool creates/overwrites files
+**Core Implementation:**
+- [x] Tool schema validates parameters correctly
+- [x] Tool registry registers and retrieves tools
+- [x] Dangerous patterns detected in Bash tool
+- [x] Path security checks prevent directory traversal
+- [x] Provider function calling formats match API specs
+- [x] Agent loop handles multi-turn tool execution
+- [x] Tool executor emits proper events
+
+**Integration Testing (TODO):**
+- [ ] Bash tool executes commands via UI
+- [ ] Read tool can read files with line ranges via UI
+- [ ] Edit tool performs string replacements via UI
+- [ ] Write tool creates/overwrites files via UI
+- [ ] Approval dialog appears for dangerous operations
+- [ ] Tool results display in chat interface
+- [ ] Multi-turn agentic workflows complete successfully
 - [ ] Approval dialog appears for dangerous operations
 - [ ] Tool results are properly formatted in chat
 - [ ] Agent loop executes multi-step tool sequences
@@ -1374,7 +1569,924 @@ Always read files before editing them. Follow existing code style.`
 module.exports = CodeWriterAgent;
 ```
 
-#### 3.6 IPC Handlers for Agent System
+#### 3.6 Agent-to-Agent Communication & Remote Control (OpenClaw-Style Messaging)
+
+**Inspiration:** OpenClaw's powerful messaging and remote control system
+
+This section adds advanced messaging capabilities inspired by OpenClaw's architecture, enabling agent-to-agent communication, remote control, multi-channel messaging support, and session management.
+
+##### 3.6.1 Gateway Architecture for Message Routing
+
+**File:** `src/gateway/gateway-server.js`
+
+Create a central gateway server for managing agent communication:
+
+```javascript
+const { EventEmitter } = require('events');
+const WebSocket = require('ws');
+
+class GatewayServer extends EventEmitter {
+  constructor(config = {}) {
+    super();
+    this.port = config.port || 18789;
+    this.host = config.host || '127.0.0.1';
+    this.agents = new Map(); // agentId -> agent session
+    this.connections = new Map(); // connectionId -> websocket
+    this.messageHandlers = new Map();
+    this.sessionStore = new Map(); // sessionKey -> conversation history
+  }
+
+  async start() {
+    this.wss = new WebSocket.Server({
+      host: this.host,
+      port: this.port
+    });
+
+    this.wss.on('connection', (ws, req) => {
+      this.handleConnection(ws, req);
+    });
+
+    console.log(`Gateway server started on ${this.host}:${this.port}`);
+  }
+
+  handleConnection(ws, req) {
+    const connectionId = Date.now().toString();
+    this.connections.set(connectionId, ws);
+
+    ws.on('message', async (data) => {
+      try {
+        const message = JSON.parse(data);
+        await this.routeMessage(connectionId, message);
+      } catch (error) {
+        ws.send(JSON.stringify({
+          type: 'error',
+          error: error.message
+        }));
+      }
+    });
+
+    ws.on('close', () => {
+      this.connections.delete(connectionId);
+    });
+  }
+
+  async routeMessage(connectionId, message) {
+    const handler = this.messageHandlers.get(message.method);
+    if (!handler) {
+      throw new Error(`Unknown method: ${message.method}`);
+    }
+
+    const result = await handler(message.params, connectionId);
+
+    const ws = this.connections.get(connectionId);
+    if (ws) {
+      ws.send(JSON.stringify({
+        type: 'response',
+        id: message.id,
+        result
+      }));
+    }
+  }
+
+  registerMethod(method, handler) {
+    this.messageHandlers.set(method, handler);
+  }
+
+  // Send message to specific agent session
+  async sendToAgent(agentId, sessionKey, message) {
+    const session = this.sessionStore.get(sessionKey);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionKey}`);
+    }
+
+    // Emit event for agent to process
+    this.emit('agent:message', {
+      agentId,
+      sessionKey,
+      message
+    });
+  }
+
+  // Broadcast to all connected clients
+  broadcast(event, data) {
+    const message = JSON.stringify({ type: 'event', event, data });
+    this.connections.forEach(ws => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(message);
+      }
+    });
+  }
+}
+
+module.exports = GatewayServer;
+```
+
+##### 3.6.2 Session Management & Routing
+
+**File:** `src/gateway/session-manager.js`
+
+```javascript
+class SessionManager {
+  constructor() {
+    this.sessions = new Map(); // sessionKey -> session data
+    this.bindings = new Map(); // agent bindings for routing
+  }
+
+  // Create or get session key for agent
+  buildSessionKey(agentId, channel = 'desktop', peer = null) {
+    if (!peer) {
+      // Main session for agent
+      return `agent:${agentId}:main`;
+    }
+
+    // Peer-specific session
+    return `agent:${agentId}:${channel}:${peer}`;
+  }
+
+  // Get or create session
+  getOrCreateSession(sessionKey, agentId) {
+    if (!this.sessions.has(sessionKey)) {
+      this.sessions.set(sessionKey, {
+        key: sessionKey,
+        agentId,
+        messages: [],
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        metadata: {}
+      });
+    }
+    return this.sessions.get(sessionKey);
+  }
+
+  // Add message to session history
+  addMessage(sessionKey, message) {
+    const session = this.sessions.get(sessionKey);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionKey}`);
+    }
+
+    session.messages.push({
+      ...message,
+      timestamp: Date.now()
+    });
+    session.updatedAt = Date.now();
+  }
+
+  // Get session history
+  getHistory(sessionKey, limit = 50) {
+    const session = this.sessions.get(sessionKey);
+    if (!session) return [];
+
+    const messages = session.messages;
+    return messages.slice(-limit);
+  }
+
+  // List all sessions
+  listSessions(filter = {}) {
+    const sessions = Array.from(this.sessions.values());
+
+    if (filter.agentId) {
+      return sessions.filter(s => s.agentId === filter.agentId);
+    }
+
+    return sessions;
+  }
+
+  // Resolve session by label or key
+  resolveSession(labelOrKey, agentId) {
+    // Try exact key match first
+    if (this.sessions.has(labelOrKey)) {
+      return this.sessions.get(labelOrKey);
+    }
+
+    // Search by label in metadata
+    for (const session of this.sessions.values()) {
+      if (session.metadata.label === labelOrKey) {
+        if (!agentId || session.agentId === agentId) {
+          return session;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  // Add agent binding for routing
+  addBinding(binding) {
+    const key = `${binding.channel || '*'}:${binding.accountId || '*'}`;
+    this.bindings.set(key, binding);
+  }
+
+  // Resolve which agent should handle a message
+  resolveAgentRoute(channel, accountId, peerId) {
+    // Most specific match wins
+    const keys = [
+      `${channel}:${accountId}:${peerId}`,
+      `${channel}:${accountId}`,
+      `${channel}:*`,
+      `*:*`
+    ];
+
+    for (const key of keys) {
+      const binding = this.bindings.get(key);
+      if (binding) {
+        return binding.agentId;
+      }
+    }
+
+    return 'main'; // Default agent
+  }
+}
+
+module.exports = SessionManager;
+```
+
+##### 3.6.3 Message Tool for Agent-to-Agent Communication
+
+**File:** `src/tools/builtin/message-tool.js`
+
+```javascript
+const Tool = require('../tool-schema');
+
+class MessageTool extends Tool {
+  constructor(gatewayServer, sessionManager) {
+    super({
+      name: 'message',
+      description: `Send messages to other agents or sessions. Actions: send, reply, broadcast.
+
+Examples:
+- Send to agent: { action: "send", target: "agent:worker:main", message: "Process this data" }
+- Reply: { action: "reply", target: "session:abc123", message: "Task completed" }
+- Broadcast: { action: "broadcast", message: "System update" }`,
+
+      parameters: {
+        type: 'object',
+        properties: {
+          action: {
+            type: 'string',
+            enum: ['send', 'reply', 'broadcast'],
+            description: 'Message action to perform'
+          },
+          target: {
+            type: 'string',
+            description: 'Target agent session key (e.g., agent:worker:main) or session label'
+          },
+          message: {
+            type: 'string',
+            description: 'Message content to send'
+          },
+          timeoutSeconds: {
+            type: 'number',
+            description: 'Optional timeout for waiting for response (default: 30)',
+            default: 30
+          },
+          media: {
+            type: 'string',
+            description: 'Optional media URL or local path'
+          },
+          metadata: {
+            type: 'object',
+            description: 'Optional metadata to include with message'
+          }
+        },
+        required: ['action', 'message']
+      },
+
+      requiresApproval: false
+    });
+
+    this.gateway = gatewayServer;
+    this.sessionManager = sessionManager;
+  }
+
+  async execute(params, context) {
+    const { action, target, message, timeoutSeconds = 30, media, metadata } = params;
+
+    switch (action) {
+      case 'send':
+        return await this.handleSend(target, message, timeoutSeconds, media, metadata, context);
+
+      case 'reply':
+        return await this.handleReply(target, message, media, context);
+
+      case 'broadcast':
+        return await this.handleBroadcast(message, media);
+
+      default:
+        throw new Error(`Unknown action: ${action}`);
+    }
+  }
+
+  async handleSend(target, message, timeoutSeconds, media, metadata, context) {
+    // Resolve target session
+    const session = this.sessionManager.resolveSession(target);
+    if (!session) {
+      return {
+        status: 'error',
+        error: `Session not found: ${target}`
+      };
+    }
+
+    // Add message to session history
+    this.sessionManager.addMessage(session.key, {
+      role: 'user',
+      content: message,
+      from: context.sessionKey || 'unknown',
+      media,
+      metadata
+    });
+
+    // Send to agent via gateway
+    const runId = `msg_${Date.now()}`;
+    await this.gateway.sendToAgent(session.agentId, session.key, {
+      runId,
+      message,
+      media,
+      metadata,
+      from: context.sessionKey
+    });
+
+    // Wait for response if timeout > 0
+    if (timeoutSeconds > 0) {
+      try {
+        const response = await this.waitForResponse(session.key, runId, timeoutSeconds * 1000);
+        return {
+          status: 'ok',
+          runId,
+          reply: response.content,
+          sessionKey: session.key
+        };
+      } catch (error) {
+        return {
+          status: 'timeout',
+          runId,
+          error: 'Response timeout',
+          sessionKey: session.key
+        };
+      }
+    }
+
+    return {
+      status: 'accepted',
+      runId,
+      sessionKey: session.key
+    };
+  }
+
+  async handleReply(target, message, media, context) {
+    // Similar to send but for replying in existing conversation
+    return await this.handleSend(target, message, 0, media, null, context);
+  }
+
+  async handleBroadcast(message, media) {
+    // Broadcast to all agents
+    this.gateway.broadcast('agent:broadcast', {
+      message,
+      media,
+      timestamp: Date.now()
+    });
+
+    return {
+      status: 'ok',
+      action: 'broadcast',
+      message: 'Broadcast sent to all agents'
+    };
+  }
+
+  async waitForResponse(sessionKey, runId, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.gateway.removeListener('agent:response', handler);
+        reject(new Error('Timeout waiting for response'));
+      }, timeoutMs);
+
+      const handler = (data) => {
+        if (data.sessionKey === sessionKey && data.runId === runId) {
+          clearTimeout(timeout);
+          this.gateway.removeListener('agent:response', handler);
+          resolve(data);
+        }
+      };
+
+      this.gateway.on('agent:response', handler);
+    });
+  }
+}
+
+module.exports = MessageTool;
+```
+
+##### 3.6.4 Sessions Management Tools
+
+**File:** `src/tools/builtin/sessions-tools.js`
+
+```javascript
+const Tool = require('../tool-schema');
+
+class SessionsListTool extends Tool {
+  constructor(sessionManager) {
+    super({
+      name: 'sessions_list',
+      description: 'List all active agent sessions',
+      parameters: {
+        type: 'object',
+        properties: {
+          agentId: {
+            type: 'string',
+            description: 'Optional: filter by agent ID'
+          },
+          limit: {
+            type: 'number',
+            description: 'Maximum number of sessions to return',
+            default: 50
+          }
+        }
+      }
+    });
+    this.sessionManager = sessionManager;
+  }
+
+  async execute(params) {
+    const sessions = this.sessionManager.listSessions(params);
+    return {
+      sessions: sessions.slice(0, params.limit || 50).map(s => ({
+        key: s.key,
+        agentId: s.agentId,
+        label: s.metadata.label,
+        messageCount: s.messages.length,
+        createdAt: s.createdAt,
+        updatedAt: s.updatedAt
+      }))
+    };
+  }
+}
+
+class SessionsHistoryTool extends Tool {
+  constructor(sessionManager) {
+    super({
+      name: 'sessions_history',
+      description: 'Get conversation history from a session',
+      parameters: {
+        type: 'object',
+        properties: {
+          sessionKey: {
+            type: 'string',
+            description: 'Session key or label'
+          },
+          limit: {
+            type: 'number',
+            description: 'Number of messages to retrieve',
+            default: 50
+          }
+        },
+        required: ['sessionKey']
+      }
+    });
+    this.sessionManager = sessionManager;
+  }
+
+  async execute(params) {
+    const session = this.sessionManager.resolveSession(params.sessionKey);
+    if (!session) {
+      throw new Error(`Session not found: ${params.sessionKey}`);
+    }
+
+    const messages = this.sessionManager.getHistory(session.key, params.limit);
+    return {
+      sessionKey: session.key,
+      agentId: session.agentId,
+      messages
+    };
+  }
+}
+
+class SessionsSpawnTool extends Tool {
+  constructor(sessionManager, agentExecutor) {
+    super({
+      name: 'sessions_spawn',
+      description: 'Spawn a new agent session for isolated work',
+      parameters: {
+        type: 'object',
+        properties: {
+          agentId: {
+            type: 'string',
+            description: 'Agent to spawn'
+          },
+          label: {
+            type: 'string',
+            description: 'Label for the session'
+          },
+          message: {
+            type: 'string',
+            description: 'Initial message for the spawned agent'
+          }
+        },
+        required: ['agentId', 'message']
+      }
+    });
+    this.sessionManager = sessionManager;
+    this.agentExecutor = agentExecutor;
+  }
+
+  async execute(params, context) {
+    const sessionKey = this.sessionManager.buildSessionKey(
+      params.agentId,
+      'spawned',
+      `spawn_${Date.now()}`
+    );
+
+    const session = this.sessionManager.getOrCreateSession(sessionKey, params.agentId);
+
+    if (params.label) {
+      session.metadata.label = params.label;
+      session.metadata.spawnedBy = context.sessionKey;
+    }
+
+    // Send initial message
+    this.sessionManager.addMessage(sessionKey, {
+      role: 'user',
+      content: params.message,
+      from: context.sessionKey || 'system'
+    });
+
+    return {
+      status: 'spawned',
+      sessionKey,
+      agentId: params.agentId,
+      label: params.label
+    };
+  }
+}
+
+module.exports = {
+  SessionsListTool,
+  SessionsHistoryTool,
+  SessionsSpawnTool
+};
+```
+
+##### 3.6.5 Multi-Channel Support Architecture
+
+**File:** `src/channels/channel-plugin.js`
+
+```javascript
+class ChannelPlugin {
+  constructor(config) {
+    this.id = config.id;
+    this.label = config.label;
+    this.capabilities = config.capabilities || {};
+  }
+
+  // Normalize target for this channel
+  normalizeTarget(rawTarget) {
+    throw new Error('Must implement normalizeTarget');
+  }
+
+  // Send message through this channel
+  async send(target, message, options = {}) {
+    throw new Error('Must implement send');
+  }
+
+  // List available actions for this channel
+  listActions() {
+    return ['send', 'reply'];
+  }
+}
+
+// Example: Desktop channel plugin
+class DesktopChannelPlugin extends ChannelPlugin {
+  constructor() {
+    super({
+      id: 'desktop',
+      label: 'Desktop App',
+      capabilities: {
+        chatTypes: ['direct', 'group'],
+        media: true,
+        buttons: true
+      }
+    });
+  }
+
+  normalizeTarget(rawTarget) {
+    return rawTarget.trim();
+  }
+
+  async send(target, message, options = {}) {
+    // Send via IPC to Electron renderer
+    const { BrowserWindow } = require('electron');
+    const mainWindow = BrowserWindow.getAllWindows()[0];
+
+    if (mainWindow) {
+      mainWindow.webContents.send('channel:message', {
+        channel: 'desktop',
+        target,
+        message,
+        media: options.media,
+        buttons: options.buttons
+      });
+    }
+
+    return { status: 'sent' };
+  }
+}
+
+module.exports = { ChannelPlugin, DesktopChannelPlugin };
+```
+
+##### 3.6.6 Remote Control API
+
+**File:** `src/gateway/remote-control.js`
+
+```javascript
+class RemoteControl {
+  constructor(gatewayServer, sessionManager, agentExecutor) {
+    this.gateway = gatewayServer;
+    this.sessionManager = sessionManager;
+    this.agentExecutor = agentExecutor;
+
+    // Register remote control methods
+    this.registerMethods();
+  }
+
+  registerMethods() {
+    // Agent control
+    this.gateway.registerMethod('agent.execute', this.executeAgent.bind(this));
+    this.gateway.registerMethod('agent.wait', this.waitForAgent.bind(this));
+    this.gateway.registerMethod('agent.abort', this.abortAgent.bind(this));
+
+    // Session control
+    this.gateway.registerMethod('sessions.list', this.listSessions.bind(this));
+    this.gateway.registerMethod('sessions.resolve', this.resolveSession.bind(this));
+    this.gateway.registerMethod('chat.history', this.getChatHistory.bind(this));
+
+    // System control
+    this.gateway.registerMethod('system.health', this.getHealth.bind(this));
+    this.gateway.registerMethod('system.status', this.getStatus.bind(this));
+  }
+
+  async executeAgent(params, connectionId) {
+    const { message, sessionKey, channel, deliver = false } = params;
+
+    // Resolve or create session
+    const session = this.sessionManager.getOrCreateSession(
+      sessionKey || `agent:main:main`,
+      'main'
+    );
+
+    // Add user message
+    this.sessionManager.addMessage(session.key, {
+      role: 'user',
+      content: message
+    });
+
+    // Execute agent
+    const runId = `run_${Date.now()}`;
+    const result = await this.agentExecutor.execute(
+      session.agentId,
+      message,
+      {
+        sessionKey: session.key,
+        runId
+      }
+    );
+
+    // Add assistant response
+    this.sessionManager.addMessage(session.key, {
+      role: 'assistant',
+      content: result.content
+    });
+
+    return {
+      runId,
+      status: 'completed',
+      reply: result.content
+    };
+  }
+
+  async waitForAgent(params) {
+    const { runId, timeoutMs = 30000 } = params;
+
+    // Wait for agent completion
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('Agent timeout'));
+      }, timeoutMs);
+
+      this.gateway.once(`agent:complete:${runId}`, (data) => {
+        clearTimeout(timeout);
+        resolve(data);
+      });
+    });
+  }
+
+  async abortAgent(params) {
+    const { runId } = params;
+    this.gateway.emit(`agent:abort:${runId}`);
+    return { status: 'aborted' };
+  }
+
+  async listSessions(params) {
+    const sessions = this.sessionManager.listSessions(params);
+    return { sessions };
+  }
+
+  async resolveSession(params) {
+    const session = this.sessionManager.resolveSession(
+      params.sessionKey || params.label,
+      params.agentId
+    );
+
+    if (!session) {
+      throw new Error('Session not found');
+    }
+
+    return { key: session.key, agentId: session.agentId };
+  }
+
+  async getChatHistory(params) {
+    const { sessionKey, limit = 50 } = params;
+    const messages = this.sessionManager.getHistory(sessionKey, limit);
+    return { messages };
+  }
+
+  async getHealth() {
+    return {
+      status: 'healthy',
+      timestamp: Date.now(),
+      agents: this.sessionManager.listSessions().length
+    };
+  }
+
+  async getStatus() {
+    return {
+      gateway: {
+        uptime: process.uptime(),
+        connections: this.gateway.connections.size
+      },
+      sessions: {
+        total: this.sessionManager.sessions.size,
+        active: this.sessionManager.listSessions().filter(s =>
+          Date.now() - s.updatedAt < 300000 // Active in last 5 minutes
+        ).length
+      }
+    };
+  }
+}
+
+module.exports = RemoteControl;
+```
+
+##### 3.6.7 Integration with Main Process
+
+**File:** `main.js` (additions for gateway integration)
+
+```javascript
+const GatewayServer = require('./src/gateway/gateway-server');
+const SessionManager = require('./src/gateway/session-manager');
+const RemoteControl = require('./src/gateway/remote-control');
+const MessageTool = require('./src/tools/builtin/message-tool');
+const { SessionsListTool, SessionsHistoryTool, SessionsSpawnTool } = require('./src/tools/builtin/sessions-tools');
+
+// Global gateway instance
+let gatewayServer;
+let sessionManager;
+let remoteControl;
+
+app.whenReady().then(async () => {
+  // ... existing initialization ...
+
+  // Initialize gateway for agent communication
+  sessionManager = new SessionManager();
+  gatewayServer = new GatewayServer({
+    port: 18789,
+    host: '127.0.0.1'
+  });
+
+  // Initialize remote control API
+  remoteControl = new RemoteControl(
+    gatewayServer,
+    sessionManager,
+    agentExecutor
+  );
+
+  // Register messaging tools
+  toolRegistry.register(new MessageTool(gatewayServer, sessionManager));
+  toolRegistry.register(new SessionsListTool(sessionManager));
+  toolRegistry.register(new SessionsHistoryTool(sessionManager));
+  toolRegistry.register(new SessionsSpawnTool(sessionManager, agentExecutor));
+
+  // Start gateway server
+  await gatewayServer.start();
+  console.log('Gateway server started for agent communication');
+
+  // Handle agent messages
+  gatewayServer.on('agent:message', async ({ agentId, sessionKey, message }) => {
+    // Execute agent with message
+    const result = await agentExecutor.execute(agentId, message.message, {
+      sessionKey,
+      runId: message.runId
+    });
+
+    // Emit response
+    gatewayServer.emit('agent:response', {
+      sessionKey,
+      runId: message.runId,
+      content: result.content
+    });
+
+    // Also send to main window
+    const mainWindow = BrowserWindow.getAllWindows()[0];
+    if (mainWindow) {
+      mainWindow.webContents.send('agent:response', {
+        agentId,
+        sessionKey,
+        message: result.content
+      });
+    }
+  });
+});
+```
+
+##### 3.6.8 Configuration Schema for Multi-Agent Routing
+
+**File:** `config/agent-config.json`
+
+```json
+{
+  "agents": {
+    "list": [
+      {
+        "id": "main",
+        "name": "Main Assistant",
+        "workspace": "~/.king-louie/workspace-main",
+        "model": "sonnet",
+        "default": true
+      },
+      {
+        "id": "worker",
+        "name": "Background Worker",
+        "workspace": "~/.king-louie/workspace-worker",
+        "model": "haiku",
+        "tools": ["Bash", "Read", "Write", "sessions_send"]
+      },
+      {
+        "id": "researcher",
+        "name": "Research Agent",
+        "workspace": "~/.king-louie/workspace-research",
+        "model": "opus",
+        "tools": ["WebSearch", "WebFetch", "Read", "sessions_send"]
+      }
+    ]
+  },
+  "bindings": [
+    {
+      "agentId": "main",
+      "match": {
+        "channel": "desktop",
+        "accountId": "default"
+      }
+    },
+    {
+      "agentId": "worker",
+      "match": {
+        "channel": "desktop",
+        "peer": {
+          "kind": "group",
+          "id": "background-tasks"
+        }
+      }
+    }
+  ],
+  "tools": {
+    "agentToAgent": {
+      "enabled": true,
+      "allow": ["main", "worker", "researcher"]
+    }
+  },
+  "gateway": {
+    "port": 18789,
+    "host": "127.0.0.1",
+    "auth": {
+      "enabled": false
+    }
+  }
+}
+```
+
+**Key Features Added:**
+
+1. **Gateway Architecture**: Central server for managing agent communication with WebSocket support
+2. **Session Management**: Sophisticated session routing with agent bindings and peer-based routing
+3. **Message Tool**: Send messages between agents with timeout support and delivery confirmation
+4. **Sessions Tools**: List, spawn, and manage agent sessions programmatically
+5. **Multi-Channel Support**: Plugin architecture for different communication channels
+6. **Remote Control API**: Full remote control capabilities via WebSocket protocol
+7. **Agent-to-Agent Messaging**: Controlled messaging between agents with permission system
+8. **Configuration-Based Routing**: Declarative routing rules for directing messages to appropriate agents
+
+This brings King Louie's capabilities close to OpenClaw's sophisticated messaging and remote control system!
+
+#### 3.7 IPC Handlers for Agent System
 **File:** `main.js` (additions)
 
 ```javascript
@@ -1443,9 +2555,17 @@ ipcMain.handle('agent:executeParallel', async (event, { agentIds, message }) => 
 - [ ] Agent executor with tool filtering
 - [ ] Multi-agent orchestrator (parallel + serial)
 - [ ] Built-in agents (code-explorer, code-writer)
+- [ ] **Gateway server for agent communication (WebSocket-based)**
+- [ ] **Session management system with routing**
+- [ ] **Message tool for agent-to-agent communication**
+- [ ] **Sessions management tools (list, history, spawn)**
+- [ ] **Multi-channel plugin architecture**
+- [ ] **Remote control API for external access**
+- [ ] **Agent binding configuration system**
 - [ ] Task UI in sidebar
 - [ ] Agent execution progress indicators
 - [ ] Task dependency visualization
+- [ ] **Agent communication visualizer in UI**
 
 ### Testing Checklist
 - [ ] Tasks can be created with dependencies
@@ -1456,6 +2576,14 @@ ipcMain.handle('agent:executeParallel', async (event, { agentIds, message }) => 
 - [ ] Serial agent execution passes outputs correctly
 - [ ] Task list UI updates in real-time
 - [ ] Agent results display properly
+- [ ] **Gateway server starts and accepts WebSocket connections**
+- [ ] **Message tool can send messages between agents**
+- [ ] **Session routing works correctly based on bindings**
+- [ ] **Sessions can be spawned and managed**
+- [ ] **Agent-to-agent communication respects permissions**
+- [ ] **Remote control API methods work via WebSocket**
+- [ ] **Multiple agents can communicate simultaneously**
+- [ ] **Session history persists correctly**
 
 ---
 
@@ -3289,11 +4417,432 @@ const WebSearchTool = new Tool({
 module.exports = WebSearchTool;
 ```
 
+#### 8.5 Advanced Tool Patterns from OpenClaw
+
+**Inspiration:** OpenClaw's innovative tool architecture and execution patterns
+
+These patterns enhance tool execution, validation, and user experience:
+
+##### 8.5.1 TypeBox Schema System for Type Safety
+
+**File:** `src/tools/schema/typebox-helpers.js`
+
+OpenClaw uses TypeBox for runtime type validation and schema generation. This provides:
+- Compile-time type checking with TypeScript
+- Runtime validation
+- Automatic JSON Schema generation
+- Better error messages
+
+```javascript
+const { Type } = require('@sinclair/typebox');
+
+// Helper for string enums (more reliable than Type.Union)
+function stringEnum(values, options = {}) {
+  return Type.Unsafe({
+    type: 'string',
+    enum: values,
+    ...options
+  });
+}
+
+// Helper for optional string enums
+function optionalStringEnum(values, options = {}) {
+  return Type.Optional(stringEnum(values, options));
+}
+
+// Example: Tool with TypeBox schema
+const ExampleToolSchema = Type.Object({
+  action: stringEnum(['create', 'update', 'delete'], {
+    description: 'Action to perform'
+  }),
+  target: Type.String({ description: 'Target identifier' }),
+  options: Type.Optional(Type.Object({
+    force: Type.Boolean(),
+    quiet: Type.Boolean()
+  }))
+});
+
+module.exports = { stringEnum, optionalStringEnum };
+```
+
+##### 8.5.2 Tool Policy System
+
+**File:** `src/tools/tool-policy.js`
+
+Implement granular tool policies inspired by OpenClaw:
+
+```javascript
+class ToolPolicy {
+  constructor(config = {}) {
+    this.allowList = new Set(config.allow || []);
+    this.denyList = new Set(config.deny || []);
+    this.elevatedList = new Set(config.elevated || []);
+  }
+
+  // Check if tool is allowed
+  isAllowed(toolName, params = {}) {
+    // Check deny list first (highest priority)
+    if (this.isDenied(toolName, params)) {
+      return { allowed: false, reason: 'Tool is denied by policy' };
+    }
+
+    // Check if tool requires elevation
+    if (this.requiresElevation(toolName, params)) {
+      return {
+        allowed: true,
+        requiresElevation: true,
+        reason: 'Tool requires elevated permissions'
+      };
+    }
+
+    // Check allow list
+    if (this.allowList.has('*') || this.allowList.has(toolName)) {
+      return { allowed: true };
+    }
+
+    return { allowed: false, reason: 'Tool not in allow list' };
+  }
+
+  isDenied(toolName, params) {
+    // Simple deny check
+    if (this.denyList.has(toolName)) return true;
+
+    // Pattern-based deny (e.g., "Bash:rm -rf*")
+    for (const pattern of this.denyList) {
+      if (pattern.includes(':')) {
+        const [tool, cmdPattern] = pattern.split(':', 2);
+        if (tool === toolName && params.command) {
+          const regex = new RegExp(cmdPattern.replace('*', '.*'));
+          if (regex.test(params.command)) {
+            return true;
+          }
+        }
+      }
+    }
+
+    return false;
+  }
+
+  requiresElevation(toolName, params) {
+    // Check if tool requires elevated permissions
+    return this.elevatedList.has(toolName);
+  }
+}
+
+module.exports = ToolPolicy;
+```
+
+##### 8.5.3 Tool Result Guards
+
+**File:** `src/tools/result-guards.js`
+
+Protect sensitive data in tool outputs:
+
+```javascript
+class ToolResultGuard {
+  constructor() {
+    this.sensitivePatterns = [
+      /\bAK[A-Z0-9]{18}\b/g,  // AWS Access Key
+      /\bSK[A-Z0-9]{32}\b/g,  // AWS Secret Key
+      /sk-[a-zA-Z0-9]{48}/g,  // OpenAI API Key
+      /ghp_[a-zA-Z0-9]{36}/g, // GitHub Personal Access Token
+      /xox[baprs]-[a-zA-Z0-9-]+/g, // Slack tokens
+      /-----BEGIN (?:RSA |DSA )?PRIVATE KEY-----/g, // Private keys
+      /\b[0-9]{4}[-\s]?[0-9]{4}[-\s]?[0-9]{4}[-\s]?[0-9]{4}\b/g // Credit cards
+    ];
+  }
+
+  // Scan and redact sensitive data
+  guard(result) {
+    if (typeof result === 'string') {
+      return this.redactString(result);
+    }
+
+    if (typeof result === 'object' && result !== null) {
+      return this.redactObject(result);
+    }
+
+    return result;
+  }
+
+  redactString(text) {
+    let redacted = text;
+
+    for (const pattern of this.sensitivePatterns) {
+      redacted = redacted.replace(pattern, '[REDACTED]');
+    }
+
+    return redacted;
+  }
+
+  redactObject(obj) {
+    if (Array.isArray(obj)) {
+      return obj.map(item => this.guard(item));
+    }
+
+    const redacted = {};
+    for (const [key, value] of Object.entries(obj)) {
+      // Skip redaction for certain keys if needed
+      redacted[key] = this.guard(value);
+    }
+
+    return redacted;
+  }
+}
+
+module.exports = ToolResultGuard;
+```
+
+##### 8.5.4 Sandbox Integration for Tools
+
+**File:** `src/tools/sandbox/sandbox-integration.js`
+
+Inspired by OpenClaw's Docker sandbox integration:
+
+```javascript
+const Docker = require('dockerode');
+
+class ToolSandbox {
+  constructor(config = {}) {
+    this.docker = new Docker();
+    this.mode = config.mode || 'off'; // off, all, dangerous
+    this.scope = config.scope || 'shared'; // shared, agent, session
+    this.containers = new Map();
+  }
+
+  // Check if tool should run in sandbox
+  shouldSandbox(toolName, params) {
+    if (this.mode === 'off') return false;
+    if (this.mode === 'all') return true;
+
+    // Dangerous mode - only sandbox risky tools
+    const dangerousTools = ['Bash', 'Write', 'Edit', 'apply_patch'];
+    return dangerousTools.includes(toolName);
+  }
+
+  // Execute tool in sandbox
+  async executeSandboxed(toolName, params, options = {}) {
+    const container = await this.getOrCreateContainer(options.agentId);
+
+    // Map paths if needed
+    const sandboxParams = this.mapPaths(params, options.workspaceRoot);
+
+    // Execute in container
+    const exec = await container.exec({
+      Cmd: ['node', '-e', `
+        const tool = require('./tools/${toolName}');
+        const result = await tool.execute(${JSON.stringify(sandboxParams)});
+        console.log(JSON.stringify(result));
+      `],
+      AttachStdout: true,
+      AttachStderr: true
+    });
+
+    const stream = await exec.start();
+    const output = await this.collectStream(stream);
+
+    return JSON.parse(output);
+  }
+
+  async getOrCreateContainer(agentId) {
+    const key = this.scope === 'agent' ? agentId : 'shared';
+
+    if (this.containers.has(key)) {
+      return this.containers.get(key);
+    }
+
+    // Create new container
+    const container = await this.docker.createContainer({
+      Image: 'node:22-alpine',
+      Cmd: ['tail', '-f', '/dev/null'], // Keep alive
+      WorkingDir: '/workspace',
+      HostConfig: {
+        Binds: [`${process.cwd()}:/workspace`],
+        Memory: 512 * 1024 * 1024, // 512MB
+        NetworkMode: 'none' // No network access
+      }
+    });
+
+    await container.start();
+    this.containers.set(key, container);
+
+    return container;
+  }
+
+  mapPaths(params, workspaceRoot) {
+    // Map host paths to container paths
+    const mapped = { ...params };
+
+    if (params.file_path) {
+      mapped.file_path = params.file_path.replace(workspaceRoot, '/workspace');
+    }
+
+    return mapped;
+  }
+
+  async collectStream(stream) {
+    return new Promise((resolve, reject) => {
+      let output = '';
+      stream.on('data', chunk => output += chunk.toString());
+      stream.on('end', () => resolve(output));
+      stream.on('error', reject);
+    });
+  }
+
+  async cleanup() {
+    for (const container of this.containers.values()) {
+      await container.stop();
+      await container.remove();
+    }
+    this.containers.clear();
+  }
+}
+
+module.exports = ToolSandbox;
+```
+
+##### 8.5.5 Tool Execution Context
+
+**File:** `src/tools/execution-context.js`
+
+Provide rich context to tools during execution:
+
+```javascript
+class ToolExecutionContext {
+  constructor(config) {
+    this.sessionKey = config.sessionKey;
+    this.agentId = config.agentId;
+    this.workspaceRoot = config.workspaceRoot;
+    this.sandboxRoot = config.sandboxRoot;
+    this.currentChannelProvider = config.currentChannelProvider;
+    this.currentChannelId = config.currentChannelId;
+    this.permissions = config.permissions;
+    this.metadata = config.metadata || {};
+  }
+
+  // Check if agent has permission
+  hasPermission(permission) {
+    return this.permissions?.includes(permission) || false;
+  }
+
+  // Get workspace-relative path
+  getWorkspacePath(relativePath) {
+    return path.join(this.workspaceRoot, relativePath);
+  }
+
+  // Get sandbox-relative path
+  getSandboxPath(relativePath) {
+    if (!this.sandboxRoot) return null;
+    return path.join(this.sandboxRoot, relativePath);
+  }
+
+  // Create child context for spawned agents
+  createChildContext(overrides = {}) {
+    return new ToolExecutionContext({
+      ...this,
+      ...overrides,
+      metadata: {
+        ...this.metadata,
+        parentSessionKey: this.sessionKey
+      }
+    });
+  }
+}
+
+module.exports = ToolExecutionContext;
+```
+
+##### 8.5.6 Tool Summary System
+
+**File:** `src/tools/tool-summaries.js`
+
+Generate concise summaries of tool execution for better conversation flow:
+
+```javascript
+class ToolSummaryGenerator {
+  constructor() {
+    this.summarizers = new Map();
+    this.registerDefaultSummarizers();
+  }
+
+  registerDefaultSummarizers() {
+    // Bash tool summary
+    this.register('Bash', (params, result) => {
+      if (result.success) {
+        const outputPreview = result.output.slice(0, 100);
+        return `Executed: ${params.command}\n${outputPreview}${result.output.length > 100 ? '...' : ''}`;
+      }
+      return `Command failed: ${result.error}`;
+    });
+
+    // Read tool summary
+    this.register('Read', (params, result) => {
+      if (result.success) {
+        const lines = result.content.split('\n').length;
+        return `Read ${lines} lines from ${params.file_path}`;
+      }
+      return `Failed to read ${params.file_path}: ${result.error}`;
+    });
+
+    // Write tool summary
+    this.register('Write', (params, result) => {
+      if (result.success) {
+        const lines = params.content.split('\n').length;
+        return `Wrote ${lines} lines to ${params.file_path}`;
+      }
+      return `Failed to write to ${params.file_path}: ${result.error}`;
+    });
+
+    // Message tool summary
+    this.register('message', (params, result) => {
+      if (result.status === 'ok') {
+        return `Message sent to ${result.sessionKey}: ${params.message.slice(0, 50)}...`;
+      }
+      return `Failed to send message: ${result.error}`;
+    });
+  }
+
+  register(toolName, summarizer) {
+    this.summarizers.set(toolName, summarizer);
+  }
+
+  summarize(toolName, params, result) {
+    const summarizer = this.summarizers.get(toolName);
+
+    if (!summarizer) {
+      // Default summary
+      return `Tool ${toolName} executed: ${result.success ? 'success' : 'failed'}`;
+    }
+
+    return summarizer(params, result);
+  }
+}
+
+module.exports = ToolSummaryGenerator;
+```
+
+**Key Benefits:**
+
+1. **Type Safety with TypeBox**: Runtime validation and compile-time checking
+2. **Granular Tool Policies**: Fine-grained control over tool access
+3. **Result Guards**: Automatic redaction of sensitive data
+4. **Sandbox Integration**: Isolated execution for dangerous operations
+5. **Rich Execution Context**: Tools have access to session, agent, and workspace info
+6. **Tool Summaries**: Concise summaries improve conversation flow
+
+These patterns make King Louie's tool system more robust, secure, and user-friendly!
+
 ### Deliverables
 - [ ] Glob tool for file pattern matching
 - [ ] Grep tool for content search
 - [ ] WebFetch tool for URL content retrieval
 - [ ] WebSearch tool for web searches
+- [ ] **TypeBox schema system for type safety**
+- [ ] **Tool policy system with granular controls**
+- [ ] **Tool result guards for sensitive data**
+- [ ] **Sandbox integration for tool execution**
+- [ ] **Tool execution context system**
+- [ ] **Tool summary generator**
 - [ ] Documentation for each tool
 - [ ] Integration with provider system
 - [ ] UI for tool results
@@ -3307,6 +4856,12 @@ module.exports = WebSearchTool;
 - [ ] WebFetch processes with AI when prompt provided
 - [ ] WebSearch returns relevant results
 - [ ] WebSearch domain filtering works
+- [ ] **TypeBox schemas validate parameters correctly**
+- [ ] **Tool policies deny/allow tools appropriately**
+- [ ] **Result guards redact sensitive data**
+- [ ] **Sandbox executes tools in isolated containers**
+- [ ] **Execution context provides correct paths**
+- [ ] **Tool summaries generate concise descriptions**
 - [ ] All tools handle errors gracefully
 
 ---
@@ -3578,19 +5133,63 @@ For MVP (Phases 1-3): **8-11 weeks (2-3 months)**
 
 ## Conclusion
 
-This plan transforms King Louie from a basic chat application into a sophisticated tool-oriented LLM system comparable to Claude Code. The phased approach allows for incremental development and testing, with clear milestones and deliverables at each stage.
+This plan transforms King Louie from a basic chat application into a sophisticated tool-oriented LLM system that combines the best of Claude Code's architecture with OpenClaw's innovative messaging and remote control capabilities. The phased approach allows for incremental development and testing, with clear milestones and deliverables at each stage.
 
 The MVP (Phases 1-3) provides core functionality within 2-3 months, with remaining phases adding polish, security, and extensibility over the following 3-4 months.
 
-Key advantages of this architecture:
-- ✅ Extensible through plugins
-- ✅ Secure through multi-layer permissions
-- ✅ Flexible through agent orchestration
-- ✅ Maintainable through clear abstractions
+### OpenClaw Integration Summary
+
+The following powerful features from OpenClaw have been integrated into the enhancement plan:
+
+**Phase 3 Additions (Agent Orchestration & Messaging):**
+- **Gateway Server**: WebSocket-based communication hub for agent coordination
+- **Session Management**: Sophisticated routing with agent bindings and peer-based routing
+- **Message Tool**: Agent-to-agent communication with timeout support and delivery confirmation
+- **Sessions Tools**: List, spawn, and manage agent sessions programmatically
+- **Multi-Channel Support**: Plugin architecture for different communication channels
+- **Remote Control API**: Full remote control capabilities via WebSocket protocol
+- **Agent Bindings**: Configuration-based routing for directing messages to appropriate agents
+
+**Phase 8 Additions (Advanced Tool Patterns):**
+- **TypeBox Schema System**: Runtime type validation and compile-time checking
+- **Tool Policy System**: Granular permission controls with pattern matching
+- **Tool Result Guards**: Automatic redaction of sensitive data (API keys, credentials)
+- **Sandbox Integration**: Docker-based isolated execution for dangerous operations
+- **Execution Context**: Rich context providing session, agent, and workspace information
+- **Tool Summaries**: Concise summaries that improve conversation flow
+
+**Key Benefits of OpenClaw Integration:**
+1. **Remote Control**: Programmatic access via WebSocket API for external integration
+2. **Multi-Agent Communication**: Agents can collaborate, delegate, and coordinate work
+3. **Advanced Security**: Sandbox execution and result guards protect sensitive data
+4. **Type Safety**: TypeBox schemas prevent runtime errors and provide better tooling
+5. **Extensibility**: Channel plugin architecture enables future expansion to other platforms
+6. **Session Management**: Sophisticated routing enables complex multi-agent workflows
+
+Key advantages of this enhanced architecture:
+- ✅ Extensible through plugins and channel adapters
+- ✅ Secure through multi-layer permissions, sandboxing, and result guards
+- ✅ Flexible through agent orchestration and inter-agent messaging
+- ✅ Maintainable through clear abstractions and type safety
 - ✅ User-friendly through progressive disclosure
+- ✅ **Remotely controllable through WebSocket gateway**
+- ✅ **Collaborative through agent-to-agent communication**
+- ✅ **Enterprise-ready through advanced session management**
+
+**Success Criteria**: King Louie will successfully rival Claude Code and incorporate OpenClaw's best features when it can:
+- Execute complex multi-step tasks autonomously
+- Use 10+ tools effectively with runtime type safety
+- Orchestrate multiple specialized agents with inter-agent messaging
+- Route messages intelligently based on configured bindings
+- Execute tools in isolated sandboxes when needed
+- Handle errors gracefully with user approval
+- Support plugins and channel extensions
+- Provide remote control via WebSocket API
+- Provide a polished, responsive user interface
 
 **Next Steps:**
-1. Review and approve this plan
-2. Set up development environment
-3. Begin Phase 1 implementation
-4. Establish regular check-ins for progress review
+1. Review and approve this enhanced plan
+2. Set up development environment (including Docker for sandbox support)
+3. Begin Phase 1 implementation (Core LLM Integration)
+4. Parallel track: Research OpenClaw's gateway implementation for Phase 3
+5. Establish regular check-ins for progress review

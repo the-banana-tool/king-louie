@@ -9,20 +9,151 @@ const chatHeaderMeta = document.getElementById('chat-header-meta');
 const emptyState = document.getElementById('empty-state');
 const mainContent = document.querySelector('.main-content');
 const container = document.querySelector('.container');
+const sidebar = document.querySelector('.sidebar');
 const chatContextMenu = document.getElementById('chat-context-menu');
 const settingsDrawer = document.getElementById('settings-drawer');
+const toggleHistoryBtn = document.getElementById('toggle-history-btn');
 const openSettingsBtn = document.getElementById('open-settings-btn');
 const closeSettingsBtn = document.getElementById('close-settings-btn');
 const floatingSettingsBtn = document.getElementById('floating-settings-btn');
 const composerSettingsBtn = document.getElementById('composer-settings-btn');
 const providerList = document.getElementById('provider-list');
 const settingsEncryptionAlert = document.getElementById('settings-encryption-alert');
+const agentModeBtn = document.getElementById('agent-mode-btn');
 
 let chats = [];
 let activeChatId = null;
 let contextChatId = null;
 let settingsState = { encryptionAvailable: true, providers: {}, activeProvider: 'openai' };
 const streamBufferById = new Map();
+let isAgentModeEnabled = false;
+let isHistoryCollapsed = false;
+
+function renderHistoryToggleButton() {
+  if (!toggleHistoryBtn) return;
+
+  const title = isHistoryCollapsed ? 'Expand chat history' : 'Collapse chat history';
+  toggleHistoryBtn.textContent = isHistoryCollapsed ? '▶' : '◀';
+  toggleHistoryBtn.title = title;
+  toggleHistoryBtn.setAttribute('aria-label', title);
+  toggleHistoryBtn.setAttribute('aria-pressed', isHistoryCollapsed ? 'true' : 'false');
+}
+
+function setHistoryCollapsed(collapsed) {
+  isHistoryCollapsed = Boolean(collapsed);
+  if (container && sidebar) {
+    container.classList.toggle('history-collapsed', isHistoryCollapsed);
+  }
+  renderHistoryToggleButton();
+}
+
+function renderAgentModeButton() {
+  if (!agentModeBtn) return;
+  agentModeBtn.textContent = `Agent Mode: ${isAgentModeEnabled ? 'On' : 'Off'}`;
+  agentModeBtn.classList.toggle('active', isAgentModeEnabled);
+  agentModeBtn.setAttribute('aria-pressed', isAgentModeEnabled ? 'true' : 'false');
+}
+
+function addToolEventMessage(title, payload, variant = '') {
+  const messageDiv = document.createElement('div');
+  messageDiv.className = `message assistant tool-event ${variant}`.trim();
+
+  const messageContent = document.createElement('div');
+  messageContent.className = 'message-content';
+
+  const heading = document.createElement('p');
+  heading.className = 'tool-event-title';
+  heading.textContent = title;
+
+  messageContent.appendChild(heading);
+
+  if (payload !== undefined) {
+    const markdownCandidate = (() => {
+      if (typeof payload === 'string') {
+        return payload;
+      }
+
+      if (payload && typeof payload === 'object') {
+        const keysToCheck = ['content', 'stdout', 'output', 'message'];
+        for (const key of keysToCheck) {
+          const value = payload[key];
+          if (typeof value === 'string' && value.trim() !== '') {
+            return value;
+          }
+        }
+      }
+
+      return null;
+    })();
+
+    if (typeof markdownCandidate === 'string') {
+      const payloadDiv = document.createElement('div');
+      payloadDiv.className = 'tool-event-payload';
+      payloadDiv.innerHTML = window.electron.markdown.parse(markdownCandidate);
+      messageContent.appendChild(payloadDiv);
+    } else {
+      const pre = document.createElement('pre');
+      pre.className = 'tool-event-payload';
+      pre.textContent = typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2);
+      messageContent.appendChild(pre);
+    }
+  }
+
+  messageDiv.appendChild(messageContent);
+  chatMessages.appendChild(messageDiv);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function showToolApprovalDialog(approvalId, toolName, parameters) {
+  const modal = document.createElement('div');
+  modal.className = 'tool-approval-modal';
+
+  const card = document.createElement('div');
+  card.className = 'tool-approval-card';
+
+  const title = document.createElement('h3');
+  title.textContent = 'Tool Execution Approval Required';
+
+  const toolLabel = document.createElement('p');
+  toolLabel.innerHTML = `<strong>Tool:</strong> ${toolName}`;
+
+  const pre = document.createElement('pre');
+  pre.textContent = JSON.stringify(parameters || {}, null, 2);
+
+  const actions = document.createElement('div');
+  actions.className = 'tool-approval-actions';
+
+  const denyBtn = document.createElement('button');
+  denyBtn.type = 'button';
+  denyBtn.className = 'danger';
+  denyBtn.textContent = 'Deny';
+
+  const approveBtn = document.createElement('button');
+  approveBtn.type = 'button';
+  approveBtn.className = 'primary';
+  approveBtn.textContent = 'Approve';
+
+  denyBtn.addEventListener('click', () => {
+    window.electron.tool.respondToApproval(approvalId, false);
+    modal.remove();
+  });
+
+  approveBtn.addEventListener('click', () => {
+    window.electron.tool.respondToApproval(approvalId, true);
+    modal.remove();
+  });
+
+  actions.appendChild(denyBtn);
+  actions.appendChild(approveBtn);
+
+  card.appendChild(title);
+  card.appendChild(toolLabel);
+  card.appendChild(pre);
+  card.appendChild(actions);
+
+  modal.appendChild(card);
+  document.body.appendChild(modal);
+}
 
 // Send message function
 function formatTimestamp(iso) {
@@ -43,6 +174,28 @@ function getActiveChat() {
 function getChatPreview(chat) {
   const lastMessage = chat.messages?.[chat.messages.length - 1];
   return lastMessage ? lastMessage.text : 'No messages yet...';
+}
+
+function sumChatLlmTotals(chat) {
+  const totals = chat?.messages?.reduce(
+    (acc, msg) => ({
+      inputTokens: acc.inputTokens + (Number(msg?.llm?.totals?.inputTokens) || 0),
+      outputTokens: acc.outputTokens + (Number(msg?.llm?.totals?.outputTokens) || 0),
+      totalTokens: acc.totalTokens + (Number(msg?.llm?.totals?.totalTokens) || 0),
+      costUsd: Number((acc.costUsd + (Number(msg?.llm?.totals?.costUsd) || 0)).toFixed(8))
+    }),
+    { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
+  ) || { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 };
+
+  return totals;
+}
+
+function formatUsd(value = 0) {
+  return `$${Number(value || 0).toFixed(4)}`;
+}
+
+function formatTokenCount(value = 0) {
+  return Number(value || 0).toLocaleString();
 }
 
 function renderChatList() {
@@ -66,7 +219,8 @@ function renderChatList() {
 
     const metaDiv = document.createElement('div');
     metaDiv.className = 'chat-item-meta';
-    metaDiv.textContent = `Updated ${formatTimestamp(chat.updatedAt)}`;
+    const totals = chat.llmTotals || sumChatLlmTotals(chat);
+    metaDiv.textContent = `Updated ${formatTimestamp(chat.updatedAt)} • ${formatTokenCount(totals.totalTokens)} tokens • ${formatUsd(totals.costUsd)}`;
 
     details.appendChild(titleDiv);
     details.appendChild(previewDiv);
@@ -119,10 +273,31 @@ function renderChatMessages() {
   }
 
   chatHeaderTitle.textContent = activeChat.title;
-  chatHeaderMeta.textContent = `Updated ${formatTimestamp(activeChat.updatedAt)}`;
+  const chatTotals = activeChat.llmTotals || sumChatLlmTotals(activeChat);
+  chatHeaderMeta.textContent = `Updated ${formatTimestamp(activeChat.updatedAt)} • Total ${formatTokenCount(chatTotals.totalTokens)} tokens • ${formatUsd(chatTotals.costUsd)}`;
+
+  let runningTotals = {
+    inputTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+    costUsd: 0
+  };
 
   activeChat.messages.forEach((message) => {
-    addMessage(message.sender, message.text);
+    const callTotals = message?.llm?.totals || null;
+    if (callTotals) {
+      runningTotals = {
+        inputTokens: runningTotals.inputTokens + (Number(callTotals.inputTokens) || 0),
+        outputTokens: runningTotals.outputTokens + (Number(callTotals.outputTokens) || 0),
+        totalTokens: runningTotals.totalTokens + (Number(callTotals.totalTokens) || 0),
+        costUsd: Number((runningTotals.costUsd + (Number(callTotals.costUsd) || 0)).toFixed(8))
+      };
+    }
+
+    addMessage(message.sender, message.text, {
+      llm: message?.llm,
+      runningLlmTotals: callTotals ? { ...runningTotals } : null
+    });
   });
 }
 
@@ -357,10 +532,86 @@ function openContextMenu({ chatId, x, y }) {
   chatContextMenu.style.top = `${Math.min(y, maxY)}px`;
 }
 
+function showRenameDialog(currentTitle) {
+  return new Promise((resolve) => {
+    const modal = document.createElement('div');
+    modal.className = 'rename-chat-modal';
+
+    const card = document.createElement('div');
+    card.className = 'rename-chat-card';
+
+    const heading = document.createElement('h3');
+    heading.textContent = 'Rename chat';
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'rename-chat-input';
+    input.value = currentTitle || '';
+    input.placeholder = 'Enter chat name';
+
+    const actions = document.createElement('div');
+    actions.className = 'rename-chat-actions';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.textContent = 'Cancel';
+
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'primary';
+    saveBtn.textContent = 'Save';
+
+    const close = (value = null) => {
+      modal.remove();
+      resolve(value);
+    };
+
+    cancelBtn.addEventListener('click', () => close(null));
+    saveBtn.addEventListener('click', () => close(input.value));
+
+    modal.addEventListener('click', (event) => {
+      if (event.target === modal) {
+        close(null);
+      }
+    });
+
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        close(input.value);
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        close(null);
+      }
+    });
+
+    actions.appendChild(cancelBtn);
+    actions.appendChild(saveBtn);
+
+    card.appendChild(heading);
+    card.appendChild(input);
+    card.appendChild(actions);
+
+    modal.appendChild(card);
+    document.body.appendChild(modal);
+    input.focus();
+    input.select();
+  });
+}
+
 async function sendMessage() {
   const message = userInput.value.trim();
 
   if (message === '') {
+    return;
+  }
+
+  const command = message.toLowerCase();
+  if (command === 'exit' || command === 'quit') {
+    userInput.value = '';
+    userInput.style.height = 'auto';
+    await window.electron.app.quitWindow();
     return;
   }
 
@@ -398,7 +649,8 @@ async function sendMessage() {
   try {
     const updatedChat = await window.electron.chat.sendMessage({
       chatId: activeChatId,
-      message
+      message,
+      agentMode: isAgentModeEnabled
     });
 
     if (updatedChat) {
@@ -411,7 +663,7 @@ async function sendMessage() {
 }
 
 // Add message to chat display
-function addMessage(sender, text) {
+function addMessage(sender, text, metadata = {}) {
   const messageDiv = document.createElement('div');
   messageDiv.className = `message ${sender}`;
   
@@ -424,6 +676,25 @@ function addMessage(sender, text) {
     const messagePara = document.createElement('p');
     messagePara.textContent = text;
     messageContent.appendChild(messagePara);
+  }
+
+  if (sender === 'assistant' && metadata?.llm?.totals) {
+    const callTotals = metadata.llm.totals;
+    const runningTotals = metadata.runningLlmTotals;
+    const metricsDiv = document.createElement('div');
+    metricsDiv.className = 'message-metrics';
+
+    const callSpan = document.createElement('span');
+    callSpan.textContent = `Call: in ${formatTokenCount(callTotals.inputTokens)} • out ${formatTokenCount(callTotals.outputTokens)} • total ${formatTokenCount(callTotals.totalTokens)} • ${formatUsd(callTotals.costUsd)}`;
+    metricsDiv.appendChild(callSpan);
+
+    if (runningTotals) {
+      const runningSpan = document.createElement('span');
+      runningSpan.textContent = `Running: ${formatTokenCount(runningTotals.totalTokens)} tokens • ${formatUsd(runningTotals.costUsd)}`;
+      metricsDiv.appendChild(runningSpan);
+    }
+
+    messageContent.appendChild(metricsDiv);
   }
 
   messageDiv.appendChild(messageContent);
@@ -461,7 +732,7 @@ async function handleRenameChat(chatId) {
   if (!chat) {
     return;
   }
-  const title = prompt('Rename chat', chat.title);
+  const title = await showRenameDialog(chat.title);
   if (!title || title.trim() === '' || title.trim() === chat.title) {
     return;
   }
@@ -655,6 +926,26 @@ if (composerSettingsBtn) {
   composerSettingsBtn.addEventListener('click', openSettingsDrawer);
 }
 
+if (agentModeBtn) {
+  agentModeBtn.addEventListener('click', () => {
+    isAgentModeEnabled = !isAgentModeEnabled;
+    renderAgentModeButton();
+    addToolEventMessage(
+      `Agent mode ${isAgentModeEnabled ? 'enabled' : 'disabled'}`,
+      {
+        mode: isAgentModeEnabled ? 'agent' : 'standard'
+      },
+      isAgentModeEnabled ? 'success' : ''
+    );
+  });
+}
+
+if (toggleHistoryBtn) {
+  toggleHistoryBtn.addEventListener('click', () => {
+    setHistoryCollapsed(!isHistoryCollapsed);
+  });
+}
+
 if (closeSettingsBtn) {
   closeSettingsBtn.addEventListener('click', () => {
     setSettingsDrawer(false);
@@ -751,4 +1042,20 @@ window.electron.chat.onMessageError(({ chatId, responseId, error }) => {
   streamBufferById.delete(responseId);
 });
 
+window.electron.chat.onToolUse(({ chatId, toolName, parameters }) => {
+  if (chatId !== activeChatId) return;
+  addToolEventMessage(`Using tool: ${toolName}`, parameters);
+});
+
+window.electron.chat.onToolResult(({ chatId, toolName, result }) => {
+  if (chatId !== activeChatId) return;
+  addToolEventMessage(`Tool result: ${toolName}`, result, result?.success === false ? 'error' : 'success');
+});
+
+window.electron.tool.onApprovalRequired(({ approvalId, toolName, parameters }) => {
+  showToolApprovalDialog(approvalId, toolName, parameters);
+});
+
 loadChats();
+renderAgentModeButton();
+renderHistoryToggleButton();

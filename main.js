@@ -2,8 +2,12 @@ const { app, BrowserWindow, ipcMain, safeStorage } = require('electron');
 const path = require('path');
 const { default: Store } = require('electron-store');
 const ProviderFactory = require('./src/providers/provider-factory');
+const { initializeTools, toolRegistry } = require('./src/tools');
+const ToolExecutor = require('./src/execution/tool-executor');
+const AgentLoop = require('./src/execution/agent-loop');
 
 let mainWindow;
+const pendingApprovalResolvers = new Map();
 
 const store = new Store({
   name: 'chat-data',
@@ -90,7 +94,33 @@ const updateStatus = (provider, status) => {
   return updated[provider];
 };
 
-const appendMessageToChat = (chatId, sender, text) => {
+const sumLlmCalls = (calls = []) =>
+  (calls || []).reduce(
+    (acc, call) => ({
+      inputTokens: acc.inputTokens + (Number(call?.inputTokens) || 0),
+      outputTokens: acc.outputTokens + (Number(call?.outputTokens) || 0),
+      totalTokens: acc.totalTokens + (Number(call?.totalTokens) || 0),
+      costUsd: Number((acc.costUsd + (Number(call?.costUsd) || 0)).toFixed(8))
+    }),
+    { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
+  );
+
+const getChatLlmTotals = (chat) => {
+  const messages = chat?.messages || [];
+  const totals = messages.reduce(
+    (acc, message) => ({
+      inputTokens: acc.inputTokens + (Number(message?.llm?.totals?.inputTokens) || 0),
+      outputTokens: acc.outputTokens + (Number(message?.llm?.totals?.outputTokens) || 0),
+      totalTokens: acc.totalTokens + (Number(message?.llm?.totals?.totalTokens) || 0),
+      costUsd: Number((acc.costUsd + (Number(message?.llm?.totals?.costUsd) || 0)).toFixed(8))
+    }),
+    { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
+  );
+
+  return totals;
+};
+
+const appendMessageToChat = (chatId, sender, text, metadata = {}) => {
   const now = new Date().toISOString();
   const chats = getChats();
   const updated = chats.map((chat) => {
@@ -107,9 +137,21 @@ const appendMessageToChat = (chatId, sender, text) => {
           id: createId(),
           sender,
           text,
-          timestamp: now
+          timestamp: now,
+          ...(metadata || {})
         }
-      ]
+      ],
+      llmTotals: getChatLlmTotals({
+        ...chat,
+        messages: [
+          ...chat.messages,
+          {
+            sender,
+            text,
+            ...(metadata || {})
+          }
+        ]
+      })
     };
   });
 
@@ -137,6 +179,8 @@ function createWindow() {
     }
   });
 
+  mainWindow.removeMenu();
+
   mainWindow.loadFile('index.html');
 
   // Open DevTools in development mode
@@ -146,6 +190,13 @@ function createWindow() {
     mainWindow = null;
   });
 }
+
+ipcMain.handle('app:quitWindow', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.close();
+  }
+  return { ok: true };
+});
 
 ipcMain.handle('chat:load', () => {
   return {
@@ -207,7 +258,7 @@ ipcMain.handle('chat:addMessage', (_event, { chatId, sender, text }) => {
   return appendMessageToChat(chatId, sender, text);
 });
 
-ipcMain.handle('chat:sendMessage', async (event, { chatId, message }) => {
+ipcMain.handle('chat:sendMessage', async (event, { chatId, message, agentMode = false }) => {
   const userMessage = appendMessageToChat(chatId, 'user', message);
   if (!userMessage) {
     throw new Error('Chat not found');
@@ -227,24 +278,72 @@ ipcMain.handle('chat:sendMessage', async (event, { chatId, message }) => {
   }
 
   const responseId = createId();
+  const runId = createId();
   const options = {
-    model: getProviderModel(providerType)
+    model: getProviderModel(providerType),
+    runId
   };
 
-  let fullResponse = '';
   event.sender.send('chat:messageStart', { chatId, responseId });
 
   try {
-    await provider.streamMessage(chat.messages, options, (chunk) => {
-      fullResponse += chunk;
-      event.sender.send('chat:messageChunk', { chatId, responseId, chunk });
+    const executor = new ToolExecutor({
+      workingDirectory: process.cwd(),
+      requireApproval: true
     });
 
-    const updatedChat = appendMessageToChat(chatId, 'assistant', fullResponse || '(No response)');
+    executor.on('preExecute', ({ toolName, parameters }) => {
+      event.sender.send('chat:toolUse', { chatId, runId, toolName, parameters });
+    });
+
+    executor.on('postExecute', ({ toolName, result }) => {
+      event.sender.send('chat:toolResult', { chatId, runId, toolName, result });
+    });
+
+    executor.on('approvalRequired', ({ toolName, parameters, resolve }) => {
+      const approvalId = createId();
+      pendingApprovalResolvers.set(approvalId, resolve);
+      event.sender.send('tool:approvalRequired', { approvalId, toolName, parameters });
+    });
+
+    let fullResponse = '';
+    let llmSummary = {
+      calls: [],
+      totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
+    };
+    const toolDefinitions = toolRegistry.getFunctionDefinitions();
+    const canUseAgentMode = agentMode && toolDefinitions.length > 0 && typeof provider.sendMessageWithTools === 'function';
+    if (canUseAgentMode) {
+      const loop = new AgentLoop(provider, executor, { maxIterations: 10 });
+      const result = await loop.run(chat.messages, toolDefinitions, options);
+      fullResponse = result.content || '(No response)';
+      llmSummary = {
+        calls: result?.llm?.calls || [],
+        totals: result?.llm?.totals || llmSummary.totals
+      };
+      event.sender.send('chat:messageChunk', { chatId, responseId, chunk: fullResponse });
+    } else {
+      const streamResult = await provider.streamMessage(chat.messages, options, (chunk) => {
+        fullResponse += chunk;
+        event.sender.send('chat:messageChunk', { chatId, responseId, chunk });
+      });
+
+      const singleCall = streamResult?.llmMetrics || null;
+      const calls = singleCall ? [singleCall] : [];
+      llmSummary = {
+        calls,
+        totals: sumLlmCalls(calls)
+      };
+    }
+
+    const updatedChat = appendMessageToChat(chatId, 'assistant', fullResponse || '(No response)', {
+      llm: llmSummary
+    });
     event.sender.send('chat:messageComplete', {
       chatId,
       responseId,
-      message: fullResponse || '(No response)'
+      message: fullResponse || '(No response)',
+      llm: llmSummary
     });
 
     return updatedChat;
@@ -256,6 +355,37 @@ ipcMain.handle('chat:sendMessage', async (event, { chatId, message }) => {
     });
     throw error;
   }
+});
+
+ipcMain.handle('tool:execute', async (event, { toolName, parameters }) => {
+  const executor = new ToolExecutor({
+    workingDirectory: process.cwd(),
+    requireApproval: true
+  });
+
+  executor.on('approvalRequired', ({ toolName: requestedToolName, parameters: requestedParameters, resolve }) => {
+    const approvalId = createId();
+    pendingApprovalResolvers.set(approvalId, resolve);
+    event.sender.send('tool:approvalRequired', {
+      approvalId,
+      toolName: requestedToolName,
+      parameters: requestedParameters
+    });
+  });
+
+  return executor.execute(toolName, parameters);
+});
+
+ipcMain.handle('tool:list', async () => {
+  return toolRegistry.getFunctionDefinitions();
+});
+
+ipcMain.on('tool:approvalResponse', (_event, { approvalId, approved }) => {
+  const resolve = pendingApprovalResolvers.get(approvalId);
+  if (!resolve) return;
+
+  pendingApprovalResolvers.delete(approvalId);
+  resolve(Boolean(approved));
 });
 
 ipcMain.handle('settings:load', () => {
@@ -405,6 +535,7 @@ ipcMain.handle('settings:testProvider', async (_event, { provider }) => {
 });
 
 app.whenReady().then(() => {
+  initializeTools();
   createWindow();
 
   app.on('activate', function () {

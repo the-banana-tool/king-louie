@@ -58,6 +58,19 @@ body {
   display: flex;
   flex-direction: column;
   border-right: 1px solid #1a1a1a;
+  transition: width 0.2s ease, opacity 0.2s ease;
+}
+
+.container.history-collapsed .sidebar {
+  width: 52px;
+  opacity: 1;
+  overflow: hidden;
+}
+
+.container.history-collapsed .sidebar-header,
+.container.history-collapsed .chat-list,
+.container.history-collapsed .context-menu {
+  display: none;
 }
 
 .sidebar-header {
@@ -213,6 +226,11 @@ body {
   display: flex;
   flex-direction: column;
   background-color: #ffffff;
+  transition: width 0.2s ease;
+}
+
+.container.history-collapsed .main-content {
+  width: 100%;
 }
 
 .main-content.start-state {
@@ -230,6 +248,24 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+.chat-header-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.history-toggle-btn {
+  min-width: 36px;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
 }
 
 .chat-header-title {
@@ -364,6 +400,28 @@ body {
 .composer-settings-btn {
   min-width: 42px;
   padding: 10px 12px;
+}
+
+.agent-mode-btn {
+  border: 1px solid #d5d5d5;
+  background: #ffffff;
+  color: #2c2c2c;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color 0.2s, border-color 0.2s, color 0.2s;
+}
+
+.agent-mode-btn:hover {
+  background: #f1f1f1;
+  border-color: #bdbdbd;
+}
+
+.agent-mode-btn.active {
+  background: #e6f1ff;
+  border-color: #6ea8ff;
+  color: #1d5fbf;
 }
 
 .empty-state {
@@ -589,6 +647,151 @@ body {
 
 .provider-message.error {
   color: #b03a3a;
+}
+
+.tool-event .message-content {
+  background: #f5f9ff;
+  border-color: #cfdcf1;
+}
+
+.tool-event.error .message-content {
+  background: #fff2f2;
+  border-color: #edcaca;
+}
+
+.tool-event.success .message-content {
+  background: #effcf4;
+  border-color: #bfe7cd;
+}
+
+.tool-event-title {
+  margin: 0 0 8px 0;
+  font-weight: 600;
+}
+
+.tool-event-payload {
+  margin: 0;
+  padding: 10px;
+  background: rgba(0, 0, 0, 0.04);
+  border-radius: 8px;
+  overflow-x: auto;
+  font-size: 12px;
+}
+
+.tool-approval-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 2500;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.tool-approval-card {
+  width: min(620px, 95vw);
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 15px 35px rgba(0, 0, 0, 0.25);
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.tool-approval-card pre {
+  margin: 0;
+  max-height: 260px;
+  overflow: auto;
+  background: #f6f6f6;
+  padding: 10px;
+  border-radius: 8px;
+}
+
+.tool-approval-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.tool-approval-actions button {
+  border-radius: 8px;
+  border: 1px solid #d5d5d5;
+  background: #fff;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.tool-approval-actions button.primary {
+  background: #0084ff;
+  border-color: #0084ff;
+  color: #fff;
+}
+
+.tool-approval-actions button.danger {
+  border-color: #e3b3b3;
+  color: #b03a3a;
+}
+
+.rename-chat-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 2400;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.rename-chat-card {
+  width: min(420px, 92vw);
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 15px 35px rgba(0, 0, 0, 0.25);
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.rename-chat-card h3 {
+  font-size: 18px;
+  color: #2c2c2c;
+}
+
+.rename-chat-input {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid #d0d0d0;
+  font-size: 14px;
+}
+
+.rename-chat-input:focus {
+  outline: none;
+  border-color: #0084ff;
+}
+
+.rename-chat-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.rename-chat-actions button {
+  border-radius: 8px;
+  border: 1px solid #d5d5d5;
+  background: #fff;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.rename-chat-actions button.primary {
+  background: #0084ff;
+  border-color: #0084ff;
+  color: #fff;
 }
 
 /* Scrollbar Styling */

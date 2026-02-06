@@ -26,9 +26,12 @@
     <!-- Right Main Area: Chat Box (3/4 width) -->
     <div class="main-content">
       <div class="chat-header">
-        <div>
+        <div class="chat-header-main">
+          <button id="toggle-history-btn" class="icon-button history-toggle-btn" title="Collapse chat history" aria-label="Collapse chat history" type="button" aria-pressed="false">☰</button>
+          <div>
           <div class="chat-header-title" id="chat-header-title">King Louie Chat</div>
           <div class="chat-header-meta" id="chat-header-meta">Select a chat to begin</div>
+          </div>
         </div>
         <div class="chat-header-actions">
           <button id="open-settings-btn" class="icon-button" title="Open Settings" aria-label="Open Settings" type="button">⚙</button>
@@ -51,6 +54,7 @@
           rows="3"
         ></textarea>
         <div class="input-actions">
+          <button id="agent-mode-btn" class="agent-mode-btn" title="Toggle Agent Mode" aria-label="Toggle Agent Mode" type="button" aria-pressed="false">Agent Mode: Off</button>
           <button id="composer-settings-btn" class="icon-button composer-settings-btn" title="Open Settings" aria-label="Open Settings" type="button">⚙</button>
           <button id="send-btn" class="send-btn">Send</button>
         </div>

@@ -45,7 +45,15 @@ contextBridge.exposeInMainWorld(
       onMessageStart: (callback) => ipcRenderer.on('chat:messageStart', (_event, data) => callback(data)),
       onMessageChunk: (callback) => ipcRenderer.on('chat:messageChunk', (_event, data) => callback(data)),
       onMessageComplete: (callback) => ipcRenderer.on('chat:messageComplete', (_event, data) => callback(data)),
-      onMessageError: (callback) => ipcRenderer.on('chat:messageError', (_event, data) => callback(data))
+      onMessageError: (callback) => ipcRenderer.on('chat:messageError', (_event, data) => callback(data)),
+      onToolUse: (callback) => ipcRenderer.on('chat:toolUse', (_event, data) => callback(data)),
+      onToolResult: (callback) => ipcRenderer.on('chat:toolResult', (_event, data) => callback(data))
+    },
+    tool: {
+      list: () => ipcRenderer.invoke('tool:list'),
+      execute: (toolName, parameters) => ipcRenderer.invoke('tool:execute', { toolName, parameters }),
+      onApprovalRequired: (callback) => ipcRenderer.on('tool:approvalRequired', (_event, data) => callback(data)),
+      respondToApproval: (approvalId, approved) => ipcRenderer.send('tool:approvalResponse', { approvalId, approved })
     },
     settings: {
       load: () => ipcRenderer.invoke('settings:load'),
@@ -53,6 +61,9 @@ contextBridge.exposeInMainWorld(
       testProvider: (payload) => ipcRenderer.invoke('settings:testProvider', payload),
       setActiveProvider: (payload) => ipcRenderer.invoke('settings:setActiveProvider', payload),
       setProviderModel: (payload) => ipcRenderer.invoke('settings:setProviderModel', payload)
+    },
+    app: {
+      quitWindow: () => ipcRenderer.invoke('app:quitWindow')
     },
     markdown: {
       parse: (text) => safeMarkdownParse(text)
