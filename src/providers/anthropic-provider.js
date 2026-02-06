@@ -50,12 +50,14 @@ class AnthropicProvider extends BaseLLMProvider {
   }
 
   async sendMessage(messages, options = {}) {
+    const systemPrompt = typeof options.systemPrompt === 'string' ? options.systemPrompt : '';
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
         model: options.model || this.getDefaultModel(),
         messages: this.formatMessages(messages),
+        ...(systemPrompt ? { system: systemPrompt } : {}),
         max_tokens: options.max_tokens || 4096,
         temperature: options.temperature ?? 0.7,
         stream: false
@@ -75,12 +77,14 @@ class AnthropicProvider extends BaseLLMProvider {
 
   async sendMessageWithTools(messages, tools = [], options = {}) {
     const requestedModel = options.model || this.getDefaultModel();
+    const systemPrompt = typeof options.systemPrompt === 'string' ? options.systemPrompt : '';
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
         model: requestedModel,
         messages: this.formatMessages(messages),
+        ...(systemPrompt ? { system: systemPrompt } : {}),
         tools: tools.map((tool) => ({
           name: tool.name,
           description: tool.description,
@@ -161,12 +165,14 @@ class AnthropicProvider extends BaseLLMProvider {
 
   async streamMessage(messages, options = {}, onChunk) {
     const requestedModel = options.model || this.getDefaultModel();
+    const systemPrompt = typeof options.systemPrompt === 'string' ? options.systemPrompt : '';
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
         model: requestedModel,
         messages: this.formatMessages(messages),
+        ...(systemPrompt ? { system: systemPrompt } : {}),
         max_tokens: options.max_tokens || 4096,
         temperature: options.temperature ?? 0.7,
         stream: true

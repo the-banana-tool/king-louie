@@ -1,6 +1,14 @@
 const BaseLLMProvider = require('./base-provider');
 
 class OpenAIProvider extends BaseLLMProvider {
+  prependSystemPrompt(messages = [], systemPrompt = '') {
+    if (!systemPrompt || typeof systemPrompt !== 'string') {
+      return messages;
+    }
+
+    return [{ role: 'system', content: systemPrompt }, ...(messages || [])];
+  }
+
   getProviderName() {
     return 'openai';
   }
@@ -62,12 +70,13 @@ class OpenAIProvider extends BaseLLMProvider {
   }
 
   async sendMessage(messages, options = {}) {
+    const preparedMessages = this.prependSystemPrompt(messages, options.systemPrompt);
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
         model: options.model || this.getDefaultModel(),
-        messages: this.formatMessages(messages),
+        messages: this.formatMessages(preparedMessages),
         temperature: options.temperature ?? 0.7,
         stream: false
       })
@@ -83,12 +92,13 @@ class OpenAIProvider extends BaseLLMProvider {
 
   async sendMessageWithTools(messages, tools = [], options = {}) {
     const requestedModel = options.model || this.getDefaultModel();
+    const preparedMessages = this.prependSystemPrompt(messages, options.systemPrompt);
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
         model: requestedModel,
-        messages: this.formatMessages(messages),
+        messages: this.formatMessages(preparedMessages),
         tools: tools.map((tool) => ({
           type: 'function',
           function: {
@@ -178,12 +188,13 @@ class OpenAIProvider extends BaseLLMProvider {
 
   async streamMessage(messages, options = {}, onChunk) {
     const requestedModel = options.model || this.getDefaultModel();
+    const preparedMessages = this.prependSystemPrompt(messages, options.systemPrompt);
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
         model: requestedModel,
-        messages: this.formatMessages(messages),
+        messages: this.formatMessages(preparedMessages),
         temperature: options.temperature ?? 0.7,
         stream: true,
         stream_options: {

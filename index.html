@@ -33,9 +33,6 @@
           <div class="chat-header-meta" id="chat-header-meta">Select a chat to begin</div>
           </div>
         </div>
-        <div class="chat-header-actions">
-          <button id="open-settings-btn" class="icon-button" title="Open Settings" aria-label="Open Settings" type="button">⚙</button>
-        </div>
       </div>
 
       <div class="empty-state" id="empty-state">
@@ -54,8 +51,6 @@
           rows="3"
         ></textarea>
         <div class="input-actions">
-          <button id="agent-mode-btn" class="agent-mode-btn" title="Toggle Agent Mode" aria-label="Toggle Agent Mode" type="button" aria-pressed="false">Agent Mode: Off</button>
-          <button id="composer-settings-btn" class="icon-button composer-settings-btn" title="Open Settings" aria-label="Open Settings" type="button">⚙</button>
           <button id="send-btn" class="send-btn">Send</button>
         </div>
       </div>
@@ -66,16 +61,24 @@
     <div class="settings-panel">
       <div class="settings-header">
         <div>
-          <h2>API Configuration</h2>
-          <p>Manage API keys for supported providers.</p>
+          <h2>Local LLM Tool</h2>
+          <p>Use chat commands to manage API keys and provider connections.</p>
         </div>
         <button class="icon-button" id="close-settings-btn" type="button"></button>
       </div>
       <div class="settings-body">
-        <div class="settings-alert" id="settings-encryption-alert" hidden>
-          Secure storage is not available on this system. Tokens cannot be saved.
+        <div class="settings-alert">
+          Run these commands directly in chat:
+          <ul class="settings-help-list">
+            <li><code>/help</code></li>
+            <li><code>/llm help</code></li>
+            <li><code>/llm list</code></li>
+            <li><code>/llm add &lt;provider&gt; &lt;token&gt;</code></li>
+            <li><code>/llm test &lt;provider&gt;</code></li>
+            <li><code>/llm remove &lt;provider&gt;</code></li>
+            <li><code>/agent on|off|toggle|status</code></li>
+          </ul>
         </div>
-        <div class="provider-list" id="provider-list"></div>
       </div>
     </div>
   </div>

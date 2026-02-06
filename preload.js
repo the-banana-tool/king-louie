@@ -53,14 +53,16 @@ contextBridge.exposeInMainWorld(
       list: () => ipcRenderer.invoke('tool:list'),
       execute: (toolName, parameters) => ipcRenderer.invoke('tool:execute', { toolName, parameters }),
       onApprovalRequired: (callback) => ipcRenderer.on('tool:approvalRequired', (_event, data) => callback(data)),
-      respondToApproval: (approvalId, approved) => ipcRenderer.send('tool:approvalResponse', { approvalId, approved })
+      respondToApproval: (approvalId, approved, options = {}) =>
+        ipcRenderer.send('tool:approvalResponse', { approvalId, approved, ...options })
     },
     settings: {
       load: () => ipcRenderer.invoke('settings:load'),
       saveProvider: (payload) => ipcRenderer.invoke('settings:saveProvider', payload),
       testProvider: (payload) => ipcRenderer.invoke('settings:testProvider', payload),
       setActiveProvider: (payload) => ipcRenderer.invoke('settings:setActiveProvider', payload),
-      setProviderModel: (payload) => ipcRenderer.invoke('settings:setProviderModel', payload)
+      setProviderModel: (payload) => ipcRenderer.invoke('settings:setProviderModel', payload),
+      runLlmCommand: (payload) => ipcRenderer.invoke('settings:runLlmCommand', payload)
     },
     app: {
       quitWindow: () => ipcRenderer.invoke('app:quitWindow')

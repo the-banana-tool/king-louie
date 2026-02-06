@@ -54,6 +54,36 @@ function renderAgentModeButton() {
   agentModeBtn.setAttribute('aria-pressed', isAgentModeEnabled ? 'true' : 'false');
 }
 
+function getLocalHelpText() {
+  return [
+    '### Local Commands',
+    '',
+    '- `/help` — show local command help',
+    '- `/llm help` — show LLM connection command help',
+    '- `/llm list` — list configured providers and connection status',
+    '- `/llm add <provider> <token>` — add/update provider API token',
+    '- `/llm remove <provider>` — remove saved provider token',
+    '- `/llm test <provider>` — test provider connection',
+    '- `/llm use <provider>` — set active provider',
+    '- `/llm model <provider> <model>` — set model for provider',
+    '- `/agent on|off|toggle|status` — control agent mode',
+    '- `exit` or `quit` — close the window'
+  ].join('\n');
+}
+
+function parseSlashCommand(message = '') {
+  const trimmed = String(message || '').trim();
+  if (!trimmed.startsWith('/')) {
+    return null;
+  }
+
+  const [name, ...rest] = trimmed.split(/\s+/);
+  return {
+    name: name.toLowerCase(),
+    args: rest
+  };
+}
+
 function addToolEventMessage(title, payload, variant = '') {
   const messageDiv = document.createElement('div');
   messageDiv.className = `message assistant tool-event ${variant}`.trim();
@@ -123,6 +153,19 @@ function showToolApprovalDialog(approvalId, toolName, parameters) {
   const actions = document.createElement('div');
   actions.className = 'tool-approval-actions';
 
+  const alwaysApproveLabel = document.createElement('label');
+  alwaysApproveLabel.className = 'tool-approval-always';
+
+  const alwaysApproveInput = document.createElement('input');
+  alwaysApproveInput.type = 'checkbox';
+  alwaysApproveInput.className = 'tool-approval-always-checkbox';
+
+  const alwaysApproveText = document.createElement('span');
+  alwaysApproveText.textContent = `Always approve ${toolName}`;
+
+  alwaysApproveLabel.appendChild(alwaysApproveInput);
+  alwaysApproveLabel.appendChild(alwaysApproveText);
+
   const denyBtn = document.createElement('button');
   denyBtn.type = 'button';
   denyBtn.className = 'danger';
@@ -134,15 +177,18 @@ function showToolApprovalDialog(approvalId, toolName, parameters) {
   approveBtn.textContent = 'Approve';
 
   denyBtn.addEventListener('click', () => {
-    window.electron.tool.respondToApproval(approvalId, false);
+    window.electron.tool.respondToApproval(approvalId, false, { alwaysApprove: false });
     modal.remove();
   });
 
   approveBtn.addEventListener('click', () => {
-    window.electron.tool.respondToApproval(approvalId, true);
+    window.electron.tool.respondToApproval(approvalId, true, {
+      alwaysApprove: Boolean(alwaysApproveInput.checked)
+    });
     modal.remove();
   });
 
+  actions.appendChild(alwaysApproveLabel);
   actions.appendChild(denyBtn);
   actions.appendChild(approveBtn);
 
@@ -314,7 +360,6 @@ function setSettingsDrawer(open) {
 
 function openSettingsDrawer() {
   setSettingsDrawer(true);
-  loadSettings();
 }
 
 function renderProviderCard(providerKey, provider) {
@@ -622,6 +667,90 @@ async function sendMessage() {
     }
     chats = [newChat, ...chats.filter((chat) => chat.id !== newChat.id)];
     activeChatId = newChat.id;
+  }
+
+  const slashCommand = parseSlashCommand(message);
+  if (slashCommand?.name === '/help') {
+    userInput.value = '';
+    userInput.style.height = 'auto';
+
+    try {
+      await window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message });
+      await window.electron.chat.addMessage({
+        chatId: activeChatId,
+        sender: 'assistant',
+        text: getLocalHelpText()
+      });
+      await loadChats();
+    } catch (error) {
+      addMessage('assistant', `Error: ${error.message || 'Unable to run local command.'}`);
+      await loadChats();
+    }
+
+    return;
+  }
+
+  if (slashCommand?.name === '/agent') {
+    userInput.value = '';
+    userInput.style.height = 'auto';
+
+    const modeArg = (slashCommand.args[0] || 'toggle').toLowerCase();
+    if (modeArg === 'on') {
+      isAgentModeEnabled = true;
+    } else if (modeArg === 'off') {
+      isAgentModeEnabled = false;
+    } else if (modeArg === 'toggle') {
+      isAgentModeEnabled = !isAgentModeEnabled;
+    } else if (modeArg !== 'status') {
+      const helpText = 'Usage: `/agent on`, `/agent off`, `/agent toggle`, or `/agent status`.';
+      await window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message });
+      await window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: helpText });
+      await loadChats();
+      return;
+    }
+
+    renderAgentModeButton();
+    const statusText = modeArg === 'status'
+      ? `Agent mode is currently **${isAgentModeEnabled ? 'ON' : 'OFF'}**.`
+      : `Agent mode is now **${isAgentModeEnabled ? 'ON' : 'OFF'}**.`;
+
+    try {
+      await window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message });
+      await window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: statusText });
+      await loadChats();
+    } catch (error) {
+      addMessage('assistant', `Error: ${error.message || 'Unable to run local command.'}`);
+      await loadChats();
+    }
+
+    return;
+  }
+
+  if (slashCommand?.name === '/llm') {
+    userInput.value = '';
+    userInput.style.height = 'auto';
+
+    try {
+      await window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message });
+
+      const result = await window.electron.settings.runLlmCommand({ command: message });
+      const responseText = result?.ok
+        ? (result.output || 'Command completed.')
+        : `Error: ${result?.error || 'Unable to run local LLM command.'}`;
+
+      await window.electron.chat.addMessage({
+        chatId: activeChatId,
+        sender: 'assistant',
+        text: responseText
+      });
+
+      await loadChats();
+    } catch (error) {
+      addMessage('assistant', `Error: ${error.message || 'Unable to run local LLM command.'}`);
+      await loadChats();
+    }
+
+    return;
   }
 
   const now = new Date().toISOString();
@@ -964,28 +1093,30 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-providerList.addEventListener('click', (e) => {
-  const button = e.target.closest('button[data-action]');
-  if (!button) return;
-  const { action, provider } = button.dataset;
-  if (!provider) return;
+if (providerList) {
+  providerList.addEventListener('click', (e) => {
+    const button = e.target.closest('button[data-action]');
+    if (!button) return;
+    const { action, provider } = button.dataset;
+    if (!provider) return;
 
-  if (action === 'save') {
-    handleSaveProvider(provider);
-  }
-  if (action === 'clear') {
-    handleClearProvider(provider);
-  }
-  if (action === 'test') {
-    handleTestProvider(provider);
-  }
-  if (action === 'save-model') {
-    handleSaveProviderModel(provider);
-  }
-  if (action === 'set-active') {
-    handleSetActiveProvider(provider);
-  }
-});
+    if (action === 'save') {
+      handleSaveProvider(provider);
+    }
+    if (action === 'clear') {
+      handleClearProvider(provider);
+    }
+    if (action === 'test') {
+      handleTestProvider(provider);
+    }
+    if (action === 'save-model') {
+      handleSaveProviderModel(provider);
+    }
+    if (action === 'set-active') {
+      handleSetActiveProvider(provider);
+    }
+  });
+}
 
 window.addEventListener('blur', () => {
   if (!chatContextMenu.hidden) {

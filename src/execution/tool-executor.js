@@ -1,11 +1,24 @@
 const { EventEmitter } = require('events');
 const { toolRegistry } = require('../tools');
+const { getRuntimeEnvironment } = require('./runtime-environment');
 
 class ToolExecutor extends EventEmitter {
   constructor(options = {}) {
     super();
     this.workingDirectory = options.workingDirectory || process.cwd();
     this.requireApproval = options.requireApproval !== false;
+    this.shouldAutoApprove =
+      typeof options.shouldAutoApprove === 'function'
+        ? options.shouldAutoApprove
+        : async () => false;
+    this.runtimeEnvironmentPromise =
+      options.runtimeEnvironment
+        ? Promise.resolve(options.runtimeEnvironment)
+        : getRuntimeEnvironment({ workingDirectory: this.workingDirectory });
+  }
+
+  async getRuntimeEnvironment() {
+    return this.runtimeEnvironmentPromise;
   }
 
   async execute(toolName, parameters = {}, options = {}) {
@@ -23,18 +36,27 @@ class ToolExecutor extends EventEmitter {
     }
 
     if (tool.requiresApproval && this.requireApproval) {
-      const approved = await this.requestApproval(toolName, parameters);
-      if (!approved) {
-        const denied = { success: false, error: 'User denied permission' };
-        this.emit('postExecute', { toolName, parameters, result: denied });
-        return denied;
+      const autoApproved = await this.shouldAutoApprove(toolName, parameters);
+      if (autoApproved) {
+        this.emit('approvalAutoGranted', { toolName, parameters });
+      }
+
+      if (!autoApproved) {
+        const approved = await this.requestApproval(toolName, parameters);
+        if (!approved) {
+          const denied = { success: false, error: 'User denied permission' };
+          this.emit('postExecute', { toolName, parameters, result: denied });
+          return denied;
+        }
       }
     }
 
     try {
+      const runtimeEnvironment = await this.getRuntimeEnvironment();
       const result = await tool.execute(parameters, {
         ...options,
-        workingDirectory: options.workingDirectory || this.workingDirectory
+        workingDirectory: options.workingDirectory || this.workingDirectory,
+        runtimeEnvironment
       });
 
       this.emit('postExecute', { toolName, parameters, result });

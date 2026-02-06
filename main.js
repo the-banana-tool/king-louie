@@ -5,6 +5,7 @@ const ProviderFactory = require('./src/providers/provider-factory');
 const { initializeTools, toolRegistry } = require('./src/tools');
 const ToolExecutor = require('./src/execution/tool-executor');
 const AgentLoop = require('./src/execution/agent-loop');
+const { getRuntimeEnvironment } = require('./src/execution/runtime-environment');
 
 let mainWindow;
 const pendingApprovalResolvers = new Map();
@@ -23,6 +24,9 @@ const store = new Store({
         anthropic: 'claude-3-5-sonnet-latest',
         copilot: ''
       }
+    },
+    toolApprovals: {
+      alwaysApproveTools: {}
     }
   }
 });
@@ -46,6 +50,26 @@ const getSettings = () => store.get('settings', {
   }
 });
 const setSettings = (settings) => store.set('settings', settings);
+const getToolApprovals = () => store.get('toolApprovals', { alwaysApproveTools: {} });
+const setToolApprovals = (toolApprovals) => store.set('toolApprovals', toolApprovals);
+
+const isToolAlwaysApproved = (toolName) => {
+  const approvals = getToolApprovals();
+  return Boolean(approvals?.alwaysApproveTools?.[toolName]);
+};
+
+const setToolAlwaysApprove = (toolName, approved = true) => {
+  const approvals = getToolApprovals();
+  const updated = {
+    ...approvals,
+    alwaysApproveTools: {
+      ...(approvals?.alwaysApproveTools || {}),
+      [toolName]: Boolean(approved)
+    }
+  };
+
+  setToolApprovals(updated);
+};
 
 const providerLabels = {
   openai: 'OpenAI',
@@ -59,9 +83,55 @@ const providerDefaults = {
   copilot: ''
 };
 
+const providerTokenHints = {
+  openai: 'sk-',
+  anthropic: 'sk-ant-',
+  copilot: 'ghp_'
+};
+
+const normalizeProvider = (value = '') => String(value || '').trim().toLowerCase();
+
+const isSupportedProvider = (provider) => Boolean(providerLabels[provider]);
+
+const validateProviderToken = (provider, token) => {
+  if (!token || token.trim().length < 8) {
+    return 'Token is required and must be at least 8 characters.';
+  }
+
+  const expectedPrefix = providerTokenHints[provider];
+  if (expectedPrefix && !token.startsWith(expectedPrefix)) {
+    return `${providerLabels[provider]} tokens typically start with "${expectedPrefix}".`;
+  }
+
+  return null;
+};
+
 const getProviderModel = (provider) => {
   const settings = getSettings();
   return settings.providerModels?.[provider] || providerDefaults[provider] || '';
+};
+
+const setProviderModel = (provider, model) => {
+  const settings = getSettings();
+  const updated = {
+    ...settings,
+    providerModels: {
+      ...(settings.providerModels || {}),
+      [provider]: (model || '').trim()
+    }
+  };
+  setSettings(updated);
+  return updated.providerModels[provider];
+};
+
+const setActiveProvider = (provider) => {
+  const settings = getSettings();
+  const updated = {
+    ...settings,
+    activeProvider: provider
+  };
+  setSettings(updated);
+  return updated.activeProvider;
 };
 
 const encryptToken = (token) => {
@@ -104,6 +174,26 @@ const sumLlmCalls = (calls = []) =>
     }),
     { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
   );
+
+const buildRuntimeSystemPrompt = (runtimeEnvironment = {}) => {
+  const platform = runtimeEnvironment.platform || process.platform;
+  const shell = runtimeEnvironment.shell || 'unknown';
+  const available = Array.isArray(runtimeEnvironment.available)
+    ? runtimeEnvironment.available
+    : [];
+  const unavailable = Array.isArray(runtimeEnvironment.unavailable)
+    ? runtimeEnvironment.unavailable
+    : [];
+
+  return [
+    'Environment context (auto-detected):',
+    `- Platform: ${platform}`,
+    `- Shell: ${shell}`,
+    `- Available CLI tools: ${available.length ? available.join(', ') : 'unknown'}`,
+    `- Known missing CLI tools: ${unavailable.length ? unavailable.join(', ') : 'none detected'}`,
+    'Use this context when proposing commands and selecting tools. Avoid commands for unavailable tools.'
+  ].join('\n');
+};
 
 const getChatLlmTotals = (chat) => {
   const messages = chat?.messages || [];
@@ -166,6 +256,250 @@ const getDecryptedProviderToken = (provider) => {
     throw new Error(`No token saved for ${providerLabels[provider] || provider}.`);
   }
   return decryptToken(encryptedToken);
+};
+
+const saveProviderToken = (provider, token) => {
+  const tokens = getApiTokens();
+  tokens[provider] = encryptToken(token.trim());
+  setApiTokens(tokens);
+  return true;
+};
+
+const clearProviderToken = (provider) => {
+  const tokens = getApiTokens();
+  delete tokens[provider];
+  setApiTokens(tokens);
+  return false;
+};
+
+const getProviderSnapshot = () => {
+  const tokens = getApiTokens();
+  const status = getApiStatus();
+  const settings = getSettings();
+
+  const providers = Object.keys(providerLabels).reduce((acc, key) => {
+    acc[key] = {
+      label: providerLabels[key],
+      hasToken: Boolean(tokens[key]),
+      status: status[key] || null,
+      model: settings.providerModels?.[key] || providerDefaults[key] || ''
+    };
+    return acc;
+  }, {});
+
+  return {
+    encryptionAvailable: safeStorage.isEncryptionAvailable(),
+    providers,
+    activeProvider: settings.activeProvider || 'openai'
+  };
+};
+
+const testProviderConnection = async (provider) => {
+  const tokens = getApiTokens();
+  if (!tokens[provider]) {
+    return { ok: false, error: 'No token saved for this provider.' };
+  }
+
+  const token = decryptToken(tokens[provider]);
+
+  let response;
+  if (provider === 'openai') {
+    response = await fetch('https://api.openai.com/v1/models', {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+  } else if (provider === 'anthropic') {
+    response = await fetch('https://api.anthropic.com/v1/models', {
+      headers: {
+        'x-api-key': token,
+        'anthropic-version': '2023-06-01'
+      }
+    });
+  } else if (provider === 'copilot') {
+    response = await fetch('https://api.github.com/user', {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'User-Agent': 'king-louie-app'
+      }
+    });
+  }
+
+  if (!response) {
+    return { ok: false, error: 'Unable to reach provider.' };
+  }
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    const status = updateStatus(provider, {
+      ok: false,
+      message: `${response.status} ${response.statusText}`
+    });
+    return {
+      ok: false,
+      error: `${response.status} ${response.statusText}`,
+      details: errorText,
+      status
+    };
+  }
+
+  const status = updateStatus(provider, {
+    ok: true,
+    message: 'Connection successful'
+  });
+  return { ok: true, status };
+};
+
+const tokenizeCommand = (input = '') => {
+  const regex = /"([^"\\]*(\\.[^"\\]*)*)"|'([^'\\]*(\\.[^'\\]*)*)'|`([^`\\]*(\\.[^`\\]*)*)`|(\S+)/g;
+  const tokens = [];
+  let match;
+
+  while ((match = regex.exec(input)) !== null) {
+    const token = match[1] ?? match[3] ?? match[5] ?? match[7] ?? '';
+    tokens.push(token.replace(/\\(["'`\\])/g, '$1'));
+  }
+
+  return tokens;
+};
+
+const runLlmCommand = async (command = '') => {
+  const trimmed = String(command || '').trim();
+  const parts = tokenizeCommand(trimmed);
+  const [namespace, actionRaw, ...rest] = parts;
+  const action = (actionRaw || '').toLowerCase();
+
+  if (namespace !== '/llm') {
+    return {
+      ok: false,
+      error: 'Unknown local command. Use `/llm help` for usage.'
+    };
+  }
+
+  if (!action || action === 'help') {
+    return {
+      ok: true,
+      output: [
+        '### Local LLM Connection Tool',
+        '',
+        '- `/llm list` — list configured providers and connection status',
+        '- `/llm add <provider> <token>` — add/update provider API token',
+        '- `/llm remove <provider>` — remove saved provider token',
+        '- `/llm test <provider>` — test provider connection',
+        '- `/llm use <provider>` — set active provider',
+        '- `/llm model <provider> <model>` — set model for provider',
+        '',
+        'Providers: `openai`, `anthropic`, `copilot`'
+      ].join('\n')
+    };
+  }
+
+  if (action === 'list') {
+    const snapshot = getProviderSnapshot();
+    const rows = Object.entries(snapshot.providers).map(([key, provider]) => {
+      const activeMarker = snapshot.activeProvider === key ? ' (active)' : '';
+      const status = provider.status?.ok
+        ? `connected (${provider.status.message || 'ok'})`
+        : provider.status
+          ? `error (${provider.status.message || 'failed'})`
+          : 'not tested';
+      return `- **${provider.label}** \`${key}\`${activeMarker}: token=${provider.hasToken ? 'saved' : 'missing'}, model=\`${provider.model || '(default)'}\`, status=${status}`;
+    });
+
+    return {
+      ok: true,
+      output: ['### LLM Providers & Connections', '', ...rows].join('\n')
+    };
+  }
+
+  if (['add', 'save'].includes(action)) {
+    const provider = normalizeProvider(rest[0]);
+    const token = rest[1] || '';
+
+    if (!isSupportedProvider(provider)) {
+      return { ok: false, error: 'Unknown provider. Use openai, anthropic, or copilot.' };
+    }
+
+    const validationError = validateProviderToken(provider, token);
+    if (validationError) {
+      return { ok: false, error: validationError };
+    }
+
+    if (!safeStorage.isEncryptionAvailable()) {
+      return { ok: false, error: 'Secure storage is not available on this system. Tokens cannot be saved.' };
+    }
+
+    saveProviderToken(provider, token);
+    return {
+      ok: true,
+      output: `${providerLabels[provider]} token saved securely.`
+    };
+  }
+
+  if (['remove', 'clear'].includes(action)) {
+    const provider = normalizeProvider(rest[0]);
+    if (!isSupportedProvider(provider)) {
+      return { ok: false, error: 'Unknown provider. Use openai, anthropic, or copilot.' };
+    }
+
+    clearProviderToken(provider);
+    return {
+      ok: true,
+      output: `${providerLabels[provider]} token removed.`
+    };
+  }
+
+  if (action === 'test') {
+    const provider = normalizeProvider(rest[0]);
+    if (!isSupportedProvider(provider)) {
+      return { ok: false, error: 'Unknown provider. Use openai, anthropic, or copilot.' };
+    }
+
+    const result = await testProviderConnection(provider);
+    if (!result.ok) {
+      return {
+        ok: false,
+        error: `Connection failed for ${providerLabels[provider]}: ${result.error}`,
+        details: result.details,
+        status: result.status
+      };
+    }
+
+    return {
+      ok: true,
+      output: `${providerLabels[provider]} connection successful.`
+    };
+  }
+
+  if (['use', 'active'].includes(action)) {
+    const provider = normalizeProvider(rest[0]);
+    if (!isSupportedProvider(provider)) {
+      return { ok: false, error: 'Unknown provider. Use openai, anthropic, or copilot.' };
+    }
+
+    setActiveProvider(provider);
+    return {
+      ok: true,
+      output: `Active provider set to ${providerLabels[provider]}.`
+    };
+  }
+
+  if (action === 'model') {
+    const provider = normalizeProvider(rest[0]);
+    const model = rest.slice(1).join(' ').trim();
+    if (!isSupportedProvider(provider)) {
+      return { ok: false, error: 'Unknown provider. Use openai, anthropic, or copilot.' };
+    }
+
+    setProviderModel(provider, model);
+    return {
+      ok: true,
+      output: `${providerLabels[provider]} model set to ${model || '(default)'}.`
+    };
+  }
+
+  return {
+    ok: false,
+    error: `Unknown action \`${action}\`. Use \`/llm help\` for usage.`
+  };
 };
 
 function createWindow() {
@@ -287,9 +621,18 @@ ipcMain.handle('chat:sendMessage', async (event, { chatId, message, agentMode = 
   event.sender.send('chat:messageStart', { chatId, responseId });
 
   try {
+    const runtimeEnvironment = await getRuntimeEnvironment({
+      workingDirectory: process.cwd()
+    });
+
+    options.runtimeEnvironment = runtimeEnvironment;
+    options.systemPrompt = buildRuntimeSystemPrompt(runtimeEnvironment);
+
     const executor = new ToolExecutor({
       workingDirectory: process.cwd(),
-      requireApproval: true
+      requireApproval: true,
+      runtimeEnvironment,
+      shouldAutoApprove: async (toolName) => isToolAlwaysApproved(toolName)
     });
 
     executor.on('preExecute', ({ toolName, parameters }) => {
@@ -302,7 +645,7 @@ ipcMain.handle('chat:sendMessage', async (event, { chatId, message, agentMode = 
 
     executor.on('approvalRequired', ({ toolName, parameters, resolve }) => {
       const approvalId = createId();
-      pendingApprovalResolvers.set(approvalId, resolve);
+      pendingApprovalResolvers.set(approvalId, { resolve, toolName });
       event.sender.send('tool:approvalRequired', { approvalId, toolName, parameters });
     });
 
@@ -360,12 +703,13 @@ ipcMain.handle('chat:sendMessage', async (event, { chatId, message, agentMode = 
 ipcMain.handle('tool:execute', async (event, { toolName, parameters }) => {
   const executor = new ToolExecutor({
     workingDirectory: process.cwd(),
-    requireApproval: true
+    requireApproval: true,
+    shouldAutoApprove: async (requestedToolName) => isToolAlwaysApproved(requestedToolName)
   });
 
   executor.on('approvalRequired', ({ toolName: requestedToolName, parameters: requestedParameters, resolve }) => {
     const approvalId = createId();
-    pendingApprovalResolvers.set(approvalId, resolve);
+    pendingApprovalResolvers.set(approvalId, { resolve, toolName: requestedToolName });
     event.sender.send('tool:approvalRequired', {
       approvalId,
       toolName: requestedToolName,
@@ -380,12 +724,17 @@ ipcMain.handle('tool:list', async () => {
   return toolRegistry.getFunctionDefinitions();
 });
 
-ipcMain.on('tool:approvalResponse', (_event, { approvalId, approved }) => {
-  const resolve = pendingApprovalResolvers.get(approvalId);
-  if (!resolve) return;
+ipcMain.on('tool:approvalResponse', (_event, { approvalId, approved, alwaysApprove }) => {
+  const pendingApproval = pendingApprovalResolvers.get(approvalId);
+  if (!pendingApproval) return;
 
   pendingApprovalResolvers.delete(approvalId);
-  resolve(Boolean(approved));
+
+  if (Boolean(approved) && Boolean(alwaysApprove) && pendingApproval.toolName) {
+    setToolAlwaysApprove(pendingApproval.toolName, true);
+  }
+
+  pendingApproval.resolve(Boolean(approved));
 });
 
 ipcMain.handle('settings:load', () => {
@@ -531,6 +880,14 @@ ipcMain.handle('settings:testProvider', async (_event, { provider }) => {
       message: error.message
     });
     return { ok: false, error: error.message, status };
+  }
+});
+
+ipcMain.handle('settings:runLlmCommand', async (_event, { command }) => {
+  try {
+    return await runLlmCommand(command);
+  } catch (error) {
+    return { ok: false, error: error.message || 'Unable to run local LLM command.' };
   }
 });
 

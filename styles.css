@@ -534,6 +534,19 @@ body {
   font-size: 13px;
 }
 
+.settings-help-list {
+  margin: 10px 0 0 18px;
+  display: grid;
+  gap: 6px;
+}
+
+.settings-help-list code {
+  background: #ffffff;
+  border: 1px solid #ffd7b3;
+  border-radius: 5px;
+  padding: 2px 6px;
+}
+
 .provider-list {
   display: flex;
   flex-direction: column;
@@ -711,8 +724,24 @@ body {
 
 .tool-approval-actions {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
   gap: 10px;
+}
+
+.tool-approval-always {
+  margin-right: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #3d3d3d;
+  user-select: none;
+}
+
+.tool-approval-always-checkbox {
+  width: 15px;
+  height: 15px;
 }
 
 .tool-approval-actions button {
