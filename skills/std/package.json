@@ -1,0 +1,23 @@
+{
+  "name": "king-louie-std-skill",
+  "version": "1.0.0",
+  "description": "STD (Task) management skill for King Louie",
+  "main": "index.js",
+  "author": "Seth Blackman",
+  "license": "ISC",
+  "scripts": {
+    "install:prod": "node install.js",
+    "install:dev": "node install.js --dev",
+    "uninstall": "node uninstall.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.7.0"
+  },
+  "keywords": [
+    "king-louie",
+    "skill",
+    "task-management",
+    "todo",
+    "std"
+  ]
+}

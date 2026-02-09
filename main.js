@@ -20,8 +20,10 @@ const {
   SessionsHistoryTool,
   SessionsSpawnTool
 } = require('./src/tools/builtin/sessions-tools');
+const { SkillLoader, skillRegistry } = require('./src/skills');
 
 let mainWindow;
+let skillLoader;
 const pendingApprovalResolvers = new Map();
 let taskManager;
 let gatewayServer;
@@ -869,6 +871,27 @@ const initializeAgentInfrastructure = async () => {
 
   await gatewayServer.start();
 
+  // Initialize and load skills
+  skillLoader = new SkillLoader({
+    skillsDirectory: path.join(__dirname, 'skills'),
+    context: {
+      workingDirectory: process.cwd(),
+      userDataPath: app.getPath('userData'),
+      toolRegistry,
+      sessionManager,
+      sendMessage: (chatId, message) => {
+        if (telegramBridge) {
+          return telegramBridge.sendMessage(chatId, message);
+        }
+        // Could also send to UI here if needed
+        return Promise.resolve();
+      }
+    }
+  });
+
+  const skillsLoaded = await skillLoader.loadAll();
+  console.log(`[main] Loaded ${skillsLoaded} skill(s)`);
+
   const telegramToken = String(getDecryptedTelegramToken() || '').trim();
   if (telegramToken) {
     await startTelegramBridge(telegramToken);
@@ -1387,6 +1410,45 @@ ipcMain.handle('sessions:history', async (_event, { sessionKey, limit = 50 }) =>
   }
 
   return sessionManager.getHistory(sessionKey, limit);
+});
+
+ipcMain.handle('skill:list', async () => {
+  return skillRegistry.listSkills();
+});
+
+ipcMain.handle('skill:execute', async (_event, { command, args = [], chatId }) => {
+  const skill = skillRegistry.getSkillForCommand(command);
+  if (!skill) {
+    return {
+      ok: false,
+      error: `Unknown skill command: /${command}`
+    };
+  }
+
+  try {
+    // Create a session for this chat if needed
+    const sessionKey = sessionManager.buildSessionKey('main', 'ui', chatId);
+    const session = sessionManager.getOrCreateSession(sessionKey, 'main', {
+      channel: 'ui',
+      peer: chatId,
+      label: `ui:${chatId}`
+    });
+
+    const result = await skill.handleCommand(command, args, {
+      chatId,
+      channel: 'ui',
+      userId: chatId,
+      session
+    });
+
+    return result;
+  } catch (error) {
+    console.error('[main] Skill execution error:', error);
+    return {
+      ok: false,
+      error: error.message || 'Unknown error executing skill command'
+    };
+  }
 });
 
 app.whenReady().then(async () => {

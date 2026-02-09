@@ -21,7 +21,7 @@ function splitMessage(text = '', maxLength = 3800) {
   return chunks;
 }
 
-function formatHelp({ agents = [], currentAgent = 'main' } = {}) {
+function formatHelp({ agents = [], currentAgent = 'main', skills = [] } = {}) {
   const agentRows = agents.length
     ? agents
         .map((agent) => {
@@ -31,7 +31,16 @@ function formatHelp({ agents = [], currentAgent = 'main' } = {}) {
         .join('\n')
     : '- main';
 
-  return [
+  const skillRows = skills.length
+    ? skills
+        .map((skill) => {
+          const commands = skill.commands.map((cmd) => `/${cmd}`).join(', ');
+          return `- ${commands} — ${skill.description}`;
+        })
+        .join('\n')
+    : '';
+
+  const parts = [
     '🤖 *King Louie Telegram Bridge*',
     '',
     'Commands:',
@@ -42,7 +51,13 @@ function formatHelp({ agents = [], currentAgent = 'main' } = {}) {
     '',
     'Available agents:',
     agentRows
-  ].join('\n');
+  ];
+
+  if (skillRows) {
+    parts.push('', 'Skills:', skillRows);
+  }
+
+  return parts.join('\n');
 }
 
 function formatStatus(status = {}) {

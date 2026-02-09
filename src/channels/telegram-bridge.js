@@ -4,6 +4,7 @@ const {
   formatStatus,
   formatApprovalRequest
 } = require('./telegram-adapter');
+const { skillRegistry } = require('../skills');
 
 class TelegramBridge {
   constructor(options = {}) {
@@ -179,12 +180,43 @@ class TelegramBridge {
     const arg = rest.join(' ').trim();
     const state = this.getOrCreateChatState(chatId);
 
+    // Check if this is a skill command
+    const commandName = command.startsWith('/') ? command.slice(1) : command;
+    const skill = skillRegistry.getSkillForCommand(commandName);
+    if (skill) {
+      try {
+        const session = this.sessionManager.getOrCreateSession(state.sessionKey, state.agentId, {
+          channel: 'telegram',
+          peer: chatId,
+          label: `telegram:${chatId}`
+        });
+
+        const result = await skill.handleCommand(commandName, rest, {
+          chatId,
+          channel: 'telegram',
+          userId: chatId, // In Telegram, chatId serves as userId for now
+          session
+        });
+
+        if (result.ok) {
+          await this.sendMessage(chatId, result.message || 'Command executed successfully.');
+        } else {
+          await this.sendMessage(chatId, `❌ Error: ${result.error || 'Unknown error'}`);
+        }
+      } catch (error) {
+        console.error(`[telegram-bridge] Skill command error:`, error);
+        await this.sendMessage(chatId, `❌ Error executing command: ${error.message}`);
+      }
+      return;
+    }
+
     if (command === '/help' || command === '/start') {
       await this.sendMessage(
         chatId,
         formatHelp({
           agents: this.listAgents(),
-          currentAgent: state.agentId
+          currentAgent: state.agentId,
+          skills: skillRegistry.listSkills()
         })
       );
       return;
