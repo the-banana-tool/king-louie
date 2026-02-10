@@ -885,6 +885,21 @@ const initializeAgentInfrastructure = async () => {
         }
         // Could also send to UI here if needed
         return Promise.resolve();
+      },
+      // Provide LLM provider for skills that need AI capabilities
+      get llmProvider() {
+        try {
+          const settings = getSettings();
+          const providerType = settings.activeProvider || 'openai';
+          if (!['openai', 'anthropic'].includes(providerType)) {
+            return null;
+          }
+          const token = getDecryptedProviderToken(providerType);
+          return ProviderFactory.createProvider(providerType, token);
+        } catch (error) {
+          console.warn('[skills] LLM provider not available:', error.message);
+          return null;
+        }
       }
     }
   });

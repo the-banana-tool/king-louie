@@ -1,29 +1,51 @@
-const Database = require('better-sqlite3');
 const fs = require('fs');
 const path = require('path');
+const initSqlJs = require('sql.js');
 
 /**
- * SQLite database wrapper for STD tasks
+ * SQLite database wrapper for STD tasks using sql.js
  */
 class StdDatabase {
   constructor(dbPath) {
     this.dbPath = dbPath;
     this.db = null;
+    this.SQL = null;
   }
 
   /**
    * Initialize database and create tables
    */
   async initialize() {
-    this.db = new Database(this.dbPath);
-    this.db.pragma('journal_mode = WAL');
+    this.SQL = await initSqlJs();
+
+    // Load existing database or create new one
+    if (fs.existsSync(this.dbPath)) {
+      const buffer = fs.readFileSync(this.dbPath);
+      this.db = new this.SQL.Database(buffer);
+    } else {
+      this.db = new this.SQL.Database();
+    }
 
     // Load and execute schema
     const schemaPath = path.join(__dirname, 'schema.sql');
     const schema = fs.readFileSync(schemaPath, 'utf-8');
     this.db.exec(schema);
 
+    // Save to disk
+    this._save();
+
     console.log('[std-db] Database initialized:', this.dbPath);
+  }
+
+  /**
+   * Save database to disk
+   */
+  _save() {
+    if (this.db) {
+      const data = this.db.export();
+      const buffer = Buffer.from(data);
+      fs.writeFileSync(this.dbPath, buffer);
+    }
   }
 
   /**
@@ -35,26 +57,30 @@ class StdDatabase {
         title, details, dueDate, priority, status, tags,
         isRecurring, recurringPattern, reminderTime, attachments, customFields
       ) VALUES (
-        @title, @details, @dueDate, @priority, @status, @tags,
-        @isRecurring, @recurringPattern, @reminderTime, @attachments, @customFields
+        ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?
       )
     `);
 
-    const result = stmt.run({
-      title: data.title,
-      details: data.details || null,
-      dueDate: data.dueDate || null,
-      priority: data.priority || 'medium',
-      status: data.status || 'pending',
-      tags: data.tags ? JSON.stringify(data.tags) : null,
-      isRecurring: data.isRecurring ? 1 : 0,
-      recurringPattern: data.recurringPattern || null,
-      reminderTime: data.reminderTime || null,
-      attachments: data.attachments ? JSON.stringify(data.attachments) : null,
-      customFields: data.customFields ? JSON.stringify(data.customFields) : null
-    });
+    stmt.run([
+      data.title,
+      data.details || null,
+      data.dueDate || null,
+      data.priority || 'medium',
+      data.status || 'pending',
+      data.tags ? JSON.stringify(data.tags) : null,
+      data.isRecurring ? 1 : 0,
+      data.recurringPattern || null,
+      data.reminderTime || null,
+      data.attachments ? JSON.stringify(data.attachments) : null,
+      data.customFields ? JSON.stringify(data.customFields) : null
+    ]);
 
-    return this.findById(result.lastInsertRowid);
+    stmt.free();
+    this._save();
+
+    const lastId = this.db.exec('SELECT last_insert_rowid() as id')[0].values[0][0];
+    return this.findById(lastId);
   }
 
   /**
@@ -62,7 +88,11 @@ class StdDatabase {
    */
   findById(id) {
     const stmt = this.db.prepare('SELECT * FROM stds WHERE id = ?');
-    const row = stmt.get(id);
+    stmt.bind([id]);
+
+    const row = stmt.step() ? stmt.getAsObject() : null;
+    stmt.free();
+
     return row ? this._deserialize(row) : null;
   }
 
@@ -71,36 +101,36 @@ class StdDatabase {
    */
   findAll(filters = {}) {
     let query = 'SELECT * FROM stds WHERE 1=1';
-    const params = {};
+    const params = [];
 
     if (filters.status) {
-      query += ' AND status = @status';
-      params.status = filters.status;
+      query += ' AND status = ?';
+      params.push(filters.status);
     }
 
     if (filters.priority) {
-      query += ' AND priority = @priority';
-      params.priority = filters.priority;
+      query += ' AND priority = ?';
+      params.push(filters.priority);
     }
 
     if (filters.dueDate) {
-      query += ' AND date(dueDate) = date(@dueDate)';
-      params.dueDate = filters.dueDate;
+      query += ' AND date(dueDate) = date(?)';
+      params.push(filters.dueDate);
     }
 
     if (filters.dueBefore) {
-      query += ' AND dueDate < @dueBefore';
-      params.dueBefore = filters.dueBefore;
+      query += ' AND dueDate < ?';
+      params.push(filters.dueBefore);
     }
 
     if (filters.dueAfter) {
-      query += ' AND dueDate > @dueAfter';
-      params.dueAfter = filters.dueAfter;
+      query += ' AND dueDate > ?';
+      params.push(filters.dueAfter);
     }
 
     if (filters.isRecurring !== undefined) {
-      query += ' AND isRecurring = @isRecurring';
-      params.isRecurring = filters.isRecurring ? 1 : 0;
+      query += ' AND isRecurring = ?';
+      params.push(filters.isRecurring ? 1 : 0);
     }
 
     // Sorting
@@ -110,13 +140,20 @@ class StdDatabase {
 
     // Limit
     if (filters.limit) {
-      query += ' LIMIT @limit';
-      params.limit = filters.limit;
+      query += ' LIMIT ?';
+      params.push(filters.limit);
     }
 
     const stmt = this.db.prepare(query);
-    const rows = stmt.all(params);
-    return rows.map((row) => this._deserialize(row));
+    stmt.bind(params);
+
+    const results = [];
+    while (stmt.step()) {
+      results.push(this._deserialize(stmt.getAsObject()));
+    }
+    stmt.free();
+
+    return results;
   }
 
   /**
@@ -125,22 +162,36 @@ class StdDatabase {
   search(query) {
     const stmt = this.db.prepare(`
       SELECT * FROM stds
-      WHERE title LIKE @query OR details LIKE @query
+      WHERE title LIKE ? OR details LIKE ?
       ORDER BY updatedAt DESC
     `);
 
     const searchPattern = `%${query}%`;
-    const rows = stmt.all({ query: searchPattern });
-    return rows.map((row) => this._deserialize(row));
+    stmt.bind([searchPattern, searchPattern]);
+
+    const results = [];
+    while (stmt.step()) {
+      results.push(this._deserialize(stmt.getAsObject()));
+    }
+    stmt.free();
+
+    return results;
   }
 
   /**
    * Filter tasks by tags
    */
   filterByTag(tag) {
-    const stmt = this.db.prepare('SELECT * FROM stds WHERE tags LIKE @tag');
-    const rows = stmt.all({ tag: `%"${tag}"%` });
-    return rows.map((row) => this._deserialize(row));
+    const stmt = this.db.prepare('SELECT * FROM stds WHERE tags LIKE ?');
+    stmt.bind([`%"${tag}"%`]);
+
+    const results = [];
+    while (stmt.step()) {
+      results.push(this._deserialize(stmt.getAsObject()));
+    }
+    stmt.free();
+
+    return results;
   }
 
   /**
@@ -148,71 +199,78 @@ class StdDatabase {
    */
   update(id, data) {
     const fields = [];
-    const params = { id };
+    const params = [];
 
     if (data.title !== undefined) {
-      fields.push('title = @title');
-      params.title = data.title;
+      fields.push('title = ?');
+      params.push(data.title);
     }
 
     if (data.details !== undefined) {
-      fields.push('details = @details');
-      params.details = data.details;
+      fields.push('details = ?');
+      params.push(data.details);
     }
 
     if (data.dueDate !== undefined) {
-      fields.push('dueDate = @dueDate');
-      params.dueDate = data.dueDate;
+      fields.push('dueDate = ?');
+      params.push(data.dueDate);
     }
 
     if (data.priority !== undefined) {
-      fields.push('priority = @priority');
-      params.priority = data.priority;
+      fields.push('priority = ?');
+      params.push(data.priority);
     }
 
     if (data.status !== undefined) {
-      fields.push('status = @status');
-      params.status = data.status;
+      fields.push('status = ?');
+      params.push(data.status);
     }
 
     if (data.tags !== undefined) {
-      fields.push('tags = @tags');
-      params.tags = JSON.stringify(data.tags);
+      fields.push('tags = ?');
+      params.push(JSON.stringify(data.tags));
     }
 
     if (data.isRecurring !== undefined) {
-      fields.push('isRecurring = @isRecurring');
-      params.isRecurring = data.isRecurring ? 1 : 0;
+      fields.push('isRecurring = ?');
+      params.push(data.isRecurring ? 1 : 0);
     }
 
     if (data.recurringPattern !== undefined) {
-      fields.push('recurringPattern = @recurringPattern');
-      params.recurringPattern = data.recurringPattern;
+      fields.push('recurringPattern = ?');
+      params.push(data.recurringPattern);
     }
 
     if (data.reminderTime !== undefined) {
-      fields.push('reminderTime = @reminderTime');
-      params.reminderTime = data.reminderTime;
+      fields.push('reminderTime = ?');
+      params.push(data.reminderTime);
     }
 
     if (data.attachments !== undefined) {
-      fields.push('attachments = @attachments');
-      params.attachments = JSON.stringify(data.attachments);
+      fields.push('attachments = ?');
+      params.push(JSON.stringify(data.attachments));
     }
 
     if (data.customFields !== undefined) {
-      fields.push('customFields = @customFields');
-      params.customFields = JSON.stringify(data.customFields);
+      fields.push('customFields = ?');
+      params.push(JSON.stringify(data.customFields));
     }
 
     if (fields.length === 0) {
       return this.findById(id);
     }
 
-    const query = `UPDATE stds SET ${fields.join(', ')} WHERE id = @id`;
+    // Add updated timestamp
+    fields.push('updatedAt = datetime("now")');
+
+    const query = `UPDATE stds SET ${fields.join(', ')} WHERE id = ?`;
+    params.push(id);
+
     const stmt = this.db.prepare(query);
     stmt.run(params);
+    stmt.free();
 
+    this._save();
     return this.findById(id);
   }
 
@@ -221,8 +279,12 @@ class StdDatabase {
    */
   delete(id) {
     const stmt = this.db.prepare('DELETE FROM stds WHERE id = ?');
-    const result = stmt.run(id);
-    return result.changes > 0;
+    stmt.run([id]);
+    const changes = this.db.getRowsModified();
+    stmt.free();
+
+    this._save();
+    return changes > 0;
   }
 
   /**
@@ -231,8 +293,12 @@ class StdDatabase {
   bulkDelete(ids) {
     const placeholders = ids.map(() => '?').join(',');
     const stmt = this.db.prepare(`DELETE FROM stds WHERE id IN (${placeholders})`);
-    const result = stmt.run(...ids);
-    return result.changes;
+    stmt.run(ids);
+    const changes = this.db.getRowsModified();
+    stmt.free();
+
+    this._save();
+    return changes;
   }
 
   /**
@@ -253,7 +319,7 @@ class StdDatabase {
    * Get statistics
    */
   getStats() {
-    const stmt = this.db.prepare(`
+    const result = this.db.exec(`
       SELECT
         COUNT(*) as total,
         SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
@@ -265,7 +331,19 @@ class StdDatabase {
       FROM stds
     `);
 
-    return stmt.get();
+    if (result.length === 0 || result[0].values.length === 0) {
+      return { total: 0, pending: 0, inProgress: 0, completed: 0, archived: 0, highPriority: 0, overdue: 0 };
+    }
+
+    const values = result[0].values[0];
+    const columns = result[0].columns;
+
+    const stats = {};
+    columns.forEach((col, idx) => {
+      stats[col] = values[idx];
+    });
+
+    return stats;
   }
 
   /**
@@ -273,8 +351,14 @@ class StdDatabase {
    */
   exportAll() {
     const stmt = this.db.prepare('SELECT * FROM stds ORDER BY createdAt DESC');
-    const rows = stmt.all();
-    return rows.map((row) => this._deserialize(row));
+
+    const results = [];
+    while (stmt.step()) {
+      results.push(this._deserialize(stmt.getAsObject()));
+    }
+    stmt.free();
+
+    return results;
   }
 
   /**
@@ -297,6 +381,7 @@ class StdDatabase {
    */
   async close() {
     if (this.db) {
+      this._save();
       this.db.close();
       console.log('[std-db] Database closed');
     }

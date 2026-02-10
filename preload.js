@@ -130,6 +130,10 @@ contextBridge.exposeInMainWorld(
       setProviderModel: (payload) => ipcRenderer.invoke('settings:setProviderModel', payload),
       runLlmCommand: (payload) => ipcRenderer.invoke('settings:runLlmCommand', payload)
     },
+    skill: {
+      list: () => ipcRenderer.invoke('skill:list'),
+      execute: (payload) => ipcRenderer.invoke('skill:execute', payload)
+    },
     app: {
       quitWindow: () => ipcRenderer.invoke('app:quitWindow')
     },

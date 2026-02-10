@@ -11,6 +11,9 @@ A powerful task management skill for King Louie that helps you manage your STDs 
 - **Recurring Tasks**: Create tasks that repeat on a schedule
 - **Bulk Operations**: Update or delete multiple tasks at once
 - **Export**: Export tasks to JSON format
+- **🧠 AI-Powered NLP**: Parse natural language to create tasks
+- **📚 RAG Context**: Store information about people and projects for intelligent task parsing
+- **Smart Task Extraction**: Automatically extract multiple tasks from natural language
 - **Sync Ready**: Prepared for Phase 2 API sync with sethserver.com
 
 ## Installation
@@ -120,6 +123,43 @@ npm run uninstall
 ```
 /std export
 ```
+
+### 🧠 AI-Powered Natural Language (NEW!)
+
+#### Add Context (People & Projects)
+
+First, teach the system about people and projects:
+
+```
+/std context add person "Scott" --role "Client" --notes "Website owner, prefers email"
+/std context add person "Chris" --role "Teammate" --aliases "Christopher" --notes "Backend developer"
+/std context add project "Scott's Site" --description "E-commerce website" --owner "Scott"
+/std context list people
+/std context list projects
+```
+
+#### Smart Task Creation
+
+Now use natural language to create tasks:
+
+```
+/std smart add new login for scott's site and update chris
+/std smart email bob about the project and call sarah tomorrow
+/std smart fix the bug chris reported and deploy to production
+```
+
+Or just type naturally (no "smart" needed):
+
+```
+/std add new login for scott's site and update chris
+/std schedule meeting with team and prepare presentation
+```
+
+The AI will:
+- Extract multiple tasks from one sentence
+- Use RAG context to expand abbreviated references
+- Suggest appropriate priorities and tags
+- Add relevant details based on context
 
 ## Task Fields
 

@@ -55,8 +55,8 @@ function renderAgentModeButton() {
   agentModeBtn.setAttribute('aria-pressed', isAgentModeEnabled ? 'true' : 'false');
 }
 
-function getLocalHelpText() {
-  return [
+async function getLocalHelpText() {
+  const helpLines = [
     '### Local Commands',
     '',
     '- `/help` — show local command help',
@@ -73,7 +73,23 @@ function getLocalHelpText() {
     '- `/llm telegram status` — show Telegram bridge status',
     '- `/agent on|off|toggle|status` — control agent mode',
     '- `exit` or `quit` — close the window'
-  ].join('\n');
+  ];
+
+  // Add skills if available
+  try {
+    const skills = await window.electron.skill.list();
+    if (skills && skills.length > 0) {
+      helpLines.push('', '### Skills', '');
+      for (const skill of skills) {
+        const commands = skill.commands.map(cmd => `/${cmd}`).join(', ');
+        helpLines.push(`- ${commands} — ${skill.description}`);
+      }
+    }
+  } catch (error) {
+    // Skills not available, ignore
+  }
+
+  return helpLines.join('\n');
 }
 
 function appendLocalMessage(sender, text) {
@@ -712,7 +728,7 @@ async function sendMessage() {
     userInput.value = '';
     userInput.style.height = 'auto';
 
-    const helpText = getLocalHelpText();
+    const helpText = await getLocalHelpText();
     appendLocalMessage('user', message);
     appendLocalMessage('assistant', helpText);
 
@@ -777,6 +793,37 @@ async function sendMessage() {
     }
 
     return;
+  }
+
+  // Check if this is a skill command (e.g., /std)
+  if (slashCommand) {
+    const commandName = slashCommand.name.slice(1); // Remove leading /
+
+    try {
+      // Check if this command is handled by a skill
+      const skillResult = await window.electron.skill.execute({
+        command: commandName,
+        args: slashCommand.args,
+        chatId: activeChatId
+      });
+
+      if (skillResult && skillResult.ok !== false) {
+        userInput.value = '';
+        userInput.style.height = 'auto';
+
+        appendLocalMessage('user', message);
+        window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch(() => {});
+
+        const responseText = skillResult.message || 'Skill command executed.';
+        appendLocalMessage('assistant', responseText);
+        window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch(() => {});
+
+        return;
+      }
+    } catch (error) {
+      // Skill command failed or doesn't exist - continue to LLM
+      console.log('[renderer] Skill command not found, sending to LLM:', commandName);
+    }
   }
 
   const now = new Date().toISOString();

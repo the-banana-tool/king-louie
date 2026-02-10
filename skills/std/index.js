@@ -6,12 +6,16 @@
 
 const path = require('path');
 const StdDatabase = require('./database/std-db');
+const ContextDatabase = require('./database/context-db');
+const NLPParser = require('./nlp/parser');
 const CommandRouter = require('./commands/router');
 
 class StdSkill {
   constructor() {
     this.context = null;
     this.database = null;
+    this.contextDb = null;
+    this.nlpParser = null;
     this.commandRouter = null;
   }
 
@@ -30,16 +34,35 @@ class StdSkill {
     this.context = context;
     console.log('[std-skill] Initializing...');
 
-    // Initialize database
+    // Initialize task database
     const dbPath = path.join(context.userDataPath, 'std-tasks.db');
     this.database = new StdDatabase(dbPath);
     await this.database.initialize();
 
-    // Initialize command router
-    this.commandRouter = new CommandRouter(this.database, context);
+    // Initialize context database for RAG
+    const contextDbPath = path.join(context.userDataPath, 'std-context.db');
+    this.contextDb = new ContextDatabase(contextDbPath);
+    await this.contextDb.initialize();
+
+    // Initialize NLP parser (requires LLM provider from context)
+    if (context.llmProvider) {
+      this.nlpParser = new NLPParser(context.llmProvider, this.contextDb);
+      console.log('[std-skill] NLP parser initialized');
+    } else {
+      console.warn('[std-skill] LLM provider not available - NLP features disabled');
+    }
+
+    // Initialize command router with extended context
+    const extendedContext = {
+      ...context,
+      contextDb: this.contextDb,
+      nlpParser: this.nlpParser
+    };
+    this.commandRouter = new CommandRouter(this.database, extendedContext);
 
     console.log('[std-skill] Initialized successfully!');
-    console.log('[std-skill] Database:', dbPath);
+    console.log('[std-skill] Task database:', dbPath);
+    console.log('[std-skill] Context database:', contextDbPath);
   }
 
   async handleCommand(command, args, context) {
@@ -85,6 +108,9 @@ class StdSkill {
     console.log('[std-skill] Cleaning up...');
     if (this.database) {
       await this.database.close();
+    }
+    if (this.contextDb) {
+      await this.contextDb.close();
     }
   }
 }
