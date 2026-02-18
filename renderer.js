@@ -801,7 +801,11 @@ async function sendMessage() {
     appendLocalMessage('user', message);
     window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch(() => {});
     const result = await window.electron.skill.unpin({ chatId: activeChatId });
-    const responseText = result.ok ? '📌 Unpinned. Normal behavior restored.' : `❌ ${result.error}`;
+    const responseText = !result.ok
+      ? `❌ ${result.error}`
+      : result.previousSkillId
+        ? '📌 Unpinned. Normal behavior restored.'
+        : 'No skill is currently pinned.';
     appendLocalMessage('assistant', responseText);
     window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch(() => {});
     return;
