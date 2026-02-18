@@ -17,7 +17,7 @@ async function searchCommand(args, database) {
   }
 
   try {
-    const tasks = database.search(query);
+    const tasks = await database.search(query);
     return {
       ok: true,
       message: formatTaskList(tasks, { detailed: false, showCount: true })

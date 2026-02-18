@@ -27,7 +27,7 @@ async function addCommand(args, database) {
   };
 
   try {
-    const task = database.create(taskData);
+    const task = await database.create(taskData);
     return {
       ok: true,
       message: formatSuccess(`Task created!\n\n${formatTask(task, true)}`)

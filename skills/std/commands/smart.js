@@ -36,7 +36,7 @@ async function smartCommand(args, database, context) {
     // Create tasks in database
     const createdTasks = [];
     for (const taskData of tasks) {
-      const task = database.create(taskData);
+      const task = await database.create(taskData);
       createdTasks.push(task);
     }
 

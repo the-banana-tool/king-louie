@@ -34,7 +34,7 @@ async function remindCommand(args, database) {
   }
 
   try {
-    const updated = database.update(id, { reminderTime });
+    const updated = await database.update(id, { reminderTime });
     if (updated) {
       return {
         ok: true,

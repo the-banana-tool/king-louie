@@ -10,12 +10,23 @@ class StdDatabase {
     this.dbPath = dbPath;
     this.db = null;
     this.SQL = null;
+
+    this.apiBaseUrl = process.env.STD_API_BASE_URL || 'https://sethserver.com/api/v1';
+    this.apiUsername = process.env.STD_API_USERNAME || '';
+    this.apiPassword = process.env.STD_API_PASSWORD || '';
+    this.apiTimeoutMs = Number(process.env.STD_API_TIMEOUT_MS || 15000);
+    this.remoteMode = Boolean(this.apiUsername && this.apiPassword);
   }
 
   /**
    * Initialize database and create tables
    */
   async initialize() {
+    if (this.remoteMode) {
+      console.log('[std-db] Remote API mode enabled:', this.apiBaseUrl);
+      return;
+    }
+
     this.SQL = await initSqlJs();
 
     // Load existing database or create new one
@@ -37,6 +48,112 @@ class StdDatabase {
     console.log('[std-db] Database initialized:', this.dbPath);
   }
 
+  async _apiRequest(endpoint, { method = 'GET', body = null, query = null } = {}) {
+    const url = new URL(`${this.apiBaseUrl}${endpoint}`);
+
+    if (query && typeof query === 'object') {
+      Object.entries(query).forEach(([key, value]) => {
+        if (value !== undefined && value !== null) {
+          url.searchParams.set(key, String(value));
+        }
+      });
+    }
+
+    const headers = {
+      Authorization: `Basic ${Buffer.from(`${this.apiUsername}:${this.apiPassword}`).toString('base64')}`
+    };
+
+    if (body !== null) {
+      headers['Content-Type'] = 'application/json';
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.apiTimeoutMs);
+
+    try {
+      const response = await fetch(url, {
+        method,
+        headers,
+        body: body !== null ? JSON.stringify(body) : undefined,
+        signal: controller.signal
+      });
+
+      const text = await response.text();
+      const data = text ? JSON.parse(text) : null;
+
+      if (!response.ok) {
+        const err = data?.error || data?.message || `${response.status} ${response.statusText}`;
+        throw new Error(`STD API error: ${err}`);
+      }
+
+      return data;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  _fromApi(std) {
+    const isArchived = Boolean(std.archived);
+    const isCompleted = Boolean(std.completed_at) && !isArchived;
+
+    return {
+      id: std.id,
+      title: std.task_description || '',
+      details: std.details || null,
+      dueDate: std.due_by || null,
+      priority: 'medium',
+      status: isArchived ? 'archived' : isCompleted ? 'completed' : 'pending',
+      tags: [],
+      isRecurring: false,
+      recurringPattern: null,
+      reminderTime: null,
+      attachments: [],
+      customFields: std.project
+        ? { project: std.project, order: std.order ?? 0 }
+        : { order: std.order ?? 0 },
+      createdAt: std.created_at || null,
+      updatedAt: std.created_at || null
+    };
+  }
+
+  _toApiCreate(data) {
+    return {
+      task_description: data.title,
+      details: data.details || null,
+      due_by: data.dueDate || null,
+      project: data.customFields?.project || data.project || null,
+      order: data.customFields?.order ?? data.order ?? 0
+    };
+  }
+
+  _toApiUpdate(data) {
+    const payload = {};
+
+    if (data.title !== undefined) payload.task_description = data.title;
+    if (data.details !== undefined) payload.details = data.details;
+    if (data.dueDate !== undefined) payload.due_by = data.dueDate;
+
+    if (data.status !== undefined) {
+      payload.archived = data.status === 'archived';
+      payload.completed = data.status === 'completed';
+    }
+
+    if (data.project !== undefined) payload.project = data.project;
+    if (data.order !== undefined) payload.order = data.order;
+
+    if (data.customFields?.project !== undefined) payload.project = data.customFields.project;
+    if (data.customFields?.order !== undefined) payload.order = data.customFields.order;
+
+    return payload;
+  }
+
+  async _getRemoteTasks({ archived = false } = {}) {
+    const result = await this._apiRequest('/stds', {
+      query: { archived: archived ? 'true' : 'false' }
+    });
+    return Array.isArray(result) ? result.map((item) => this._fromApi(item)) : [];
+  }
+
   /**
    * Save database to disk
    */
@@ -51,7 +168,16 @@ class StdDatabase {
   /**
    * Create a new STD task
    */
-  create(data) {
+  async create(data) {
+    if (this.remoteMode) {
+      const payload = this._toApiCreate(data);
+      const created = await this._apiRequest('/stds', {
+        method: 'POST',
+        body: payload
+      });
+      return this.findById(created.id);
+    }
+
     const stmt = this.db.prepare(`
       INSERT INTO stds (
         title, details, dueDate, priority, status, tags,
@@ -86,7 +212,15 @@ class StdDatabase {
   /**
    * Find task by ID
    */
-  findById(id) {
+  async findById(id) {
+    if (this.remoteMode) {
+      const all = [
+        ...(await this._getRemoteTasks({ archived: false })),
+        ...(await this._getRemoteTasks({ archived: true }))
+      ];
+      return all.find((task) => task.id === Number(id)) || null;
+    }
+
     const stmt = this.db.prepare('SELECT * FROM stds WHERE id = ?');
     stmt.bind([id]);
 
@@ -99,7 +233,56 @@ class StdDatabase {
   /**
    * Find all tasks with optional filters
    */
-  findAll(filters = {}) {
+  async findAll(filters = {}) {
+    if (this.remoteMode) {
+      let tasks;
+
+      if (filters.status === 'archived') {
+        tasks = await this._getRemoteTasks({ archived: true });
+      } else {
+        tasks = await this._getRemoteTasks({ archived: false });
+      }
+
+      if (filters.status && filters.status !== 'archived') {
+        tasks = tasks.filter((t) => t.status === filters.status);
+      }
+
+      if (filters.priority) {
+        tasks = tasks.filter((t) => t.priority === filters.priority);
+      }
+
+      if (filters.dueDate) {
+        const due = new Date(filters.dueDate).toDateString();
+        tasks = tasks.filter((t) => t.dueDate && new Date(t.dueDate).toDateString() === due);
+      }
+
+      if (filters.dueBefore) {
+        const before = new Date(filters.dueBefore).getTime();
+        tasks = tasks.filter((t) => t.dueDate && new Date(t.dueDate).getTime() < before);
+      }
+
+      if (filters.dueAfter) {
+        const after = new Date(filters.dueAfter).getTime();
+        tasks = tasks.filter((t) => t.dueDate && new Date(t.dueDate).getTime() > after);
+      }
+
+      const sortBy = filters.sortBy || 'createdAt';
+      const sortOrder = filters.sortOrder === 'ASC' ? 'ASC' : 'DESC';
+      tasks.sort((a, b) => {
+        const av = a[sortBy] ?? '';
+        const bv = b[sortBy] ?? '';
+        if (av < bv) return sortOrder === 'ASC' ? -1 : 1;
+        if (av > bv) return sortOrder === 'ASC' ? 1 : -1;
+        return 0;
+      });
+
+      if (filters.limit) {
+        tasks = tasks.slice(0, Number(filters.limit));
+      }
+
+      return tasks;
+    }
+
     let query = 'SELECT * FROM stds WHERE 1=1';
     const params = [];
 
@@ -159,7 +342,17 @@ class StdDatabase {
   /**
    * Search tasks by text query
    */
-  search(query) {
+  async search(query) {
+    if (this.remoteMode) {
+      const q = String(query || '').toLowerCase();
+      const tasks = await this.findAll({});
+      return tasks.filter(
+        (t) =>
+          (t.title && t.title.toLowerCase().includes(q)) ||
+          (t.details && t.details.toLowerCase().includes(q))
+      );
+    }
+
     const stmt = this.db.prepare(`
       SELECT * FROM stds
       WHERE title LIKE ? OR details LIKE ?
@@ -181,7 +374,12 @@ class StdDatabase {
   /**
    * Filter tasks by tags
    */
-  filterByTag(tag) {
+  async filterByTag(tag) {
+    if (this.remoteMode) {
+      const tasks = await this.findAll({});
+      return tasks.filter((t) => Array.isArray(t.tags) && t.tags.includes(tag));
+    }
+
     const stmt = this.db.prepare('SELECT * FROM stds WHERE tags LIKE ?');
     stmt.bind([`%"${tag}"%`]);
 
@@ -197,7 +395,20 @@ class StdDatabase {
   /**
    * Update a task
    */
-  update(id, data) {
+  async update(id, data) {
+    if (this.remoteMode) {
+      const payload = this._toApiUpdate(data);
+      if (Object.keys(payload).length === 0) {
+        return this.findById(id);
+      }
+
+      await this._apiRequest(`/stds/${id}`, {
+        method: 'PUT',
+        body: payload
+      });
+      return this.findById(id);
+    }
+
     const fields = [];
     const params = [];
 
@@ -277,7 +488,12 @@ class StdDatabase {
   /**
    * Delete a task
    */
-  delete(id) {
+  async delete(id) {
+    if (this.remoteMode) {
+      await this._apiRequest(`/stds/${id}`, { method: 'DELETE' });
+      return true;
+    }
+
     const stmt = this.db.prepare('DELETE FROM stds WHERE id = ?');
     stmt.run([id]);
     const changes = this.db.getRowsModified();
@@ -290,7 +506,16 @@ class StdDatabase {
   /**
    * Bulk delete tasks
    */
-  bulkDelete(ids) {
+  async bulkDelete(ids) {
+    if (this.remoteMode) {
+      let deleted = 0;
+      for (const id of ids) {
+        await this.delete(id);
+        deleted += 1;
+      }
+      return deleted;
+    }
+
     const placeholders = ids.map(() => '?').join(',');
     const stmt = this.db.prepare(`DELETE FROM stds WHERE id IN (${placeholders})`);
     stmt.run(ids);
@@ -304,21 +529,42 @@ class StdDatabase {
   /**
    * Mark task as complete
    */
-  complete(id) {
+  async complete(id) {
     return this.update(id, { status: 'completed' });
   }
 
   /**
    * Archive a task
    */
-  archive(id) {
+  async archive(id) {
     return this.update(id, { status: 'archived' });
   }
 
   /**
    * Get statistics
    */
-  getStats() {
+  async getStats() {
+    if (this.remoteMode) {
+      const tasks = [
+        ...(await this._getRemoteTasks({ archived: false })),
+        ...(await this._getRemoteTasks({ archived: true }))
+      ];
+
+      const stats = {
+        total: tasks.length,
+        pending: tasks.filter((t) => t.status === 'pending').length,
+        inProgress: tasks.filter((t) => t.status === 'in-progress').length,
+        completed: tasks.filter((t) => t.status === 'completed').length,
+        archived: tasks.filter((t) => t.status === 'archived').length,
+        highPriority: tasks.filter((t) => t.priority === 'high' || t.priority === 'critical').length,
+        overdue: tasks.filter(
+          (t) => t.dueDate && new Date(t.dueDate) < new Date() && t.status !== 'completed' && t.status !== 'archived'
+        ).length
+      };
+
+      return stats;
+    }
+
     const result = this.db.exec(`
       SELECT
         COUNT(*) as total,
@@ -349,7 +595,22 @@ class StdDatabase {
   /**
    * Export all tasks
    */
-  exportAll() {
+  async exportAll() {
+    if (this.remoteMode) {
+      const tasks = [
+        ...(await this._getRemoteTasks({ archived: false })),
+        ...(await this._getRemoteTasks({ archived: true }))
+      ];
+
+      tasks.sort((a, b) => {
+        const av = new Date(a.createdAt || 0).getTime();
+        const bv = new Date(b.createdAt || 0).getTime();
+        return bv - av;
+      });
+
+      return tasks;
+    }
+
     const stmt = this.db.prepare('SELECT * FROM stds ORDER BY createdAt DESC');
 
     const results = [];
@@ -380,6 +641,10 @@ class StdDatabase {
    * Close database connection
    */
   async close() {
+    if (this.remoteMode) {
+      return;
+    }
+
     if (this.db) {
       this._save();
       this.db.close();

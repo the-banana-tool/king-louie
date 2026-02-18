@@ -24,7 +24,7 @@ async function deleteCommand(args, database) {
   }
 
   // Check if task exists
-  const existing = database.findById(id);
+  const existing = await database.findById(id);
   if (!existing) {
     return {
       ok: false,
@@ -33,7 +33,7 @@ async function deleteCommand(args, database) {
   }
 
   try {
-    const deleted = database.delete(id);
+    const deleted = await database.delete(id);
     if (deleted) {
       return {
         ok: true,

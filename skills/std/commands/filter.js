@@ -37,7 +37,7 @@ async function filterCommand(args, database) {
     let tasks;
 
     if (filters.tag) {
-      tasks = database.filterByTag(filters.tag);
+      tasks = await database.filterByTag(filters.tag);
       // Apply additional filters
       if (dbFilters.status) {
         tasks = tasks.filter((t) => t.status === dbFilters.status);
@@ -46,7 +46,7 @@ async function filterCommand(args, database) {
         tasks = tasks.filter((t) => t.priority === dbFilters.priority);
       }
     } else {
-      tasks = database.findAll(dbFilters);
+      tasks = await database.findAll(dbFilters);
     }
 
     return {

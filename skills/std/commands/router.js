@@ -77,16 +77,36 @@ class CommandRouter {
 
     // If no handler found, check if NLP is available and use smart command
     if (!handler) {
+      const naturalInput = args.join(' ');
+      const intent = this.detectNaturalLanguageIntent(naturalInput);
+
+      // Handle query-style natural language without creating tasks
+      if (intent === 'list') {
+        console.log('[std-router] Unknown subcommand, detected list/query intent');
+        return await listCommand([], this.database, this.context, commandContext);
+      }
+
+      if (intent === 'stats') {
+        console.log('[std-router] Unknown subcommand, detected stats intent');
+        return await statsCommand([], this.database, this.context, commandContext);
+      }
+
+      if (intent === 'search') {
+        console.log('[std-router] Unknown subcommand, detected search intent');
+        const query = this.extractSearchQuery(naturalInput);
+        return await searchCommand(query ? [query] : [], this.database, this.context, commandContext);
+      }
+
       if (this.context.nlpParser) {
         console.log('[std-router] Unknown subcommand, trying NLP parser...');
-        // Treat entire input as natural language
+        // Treat entire input as natural language task-creation input
         return await smartCommand(args, this.database, this.context, commandContext);
-      } else {
-        return {
-          ok: false,
-          error: `Unknown subcommand: ${subcommand}. Try: /std help\n\nNote: NLP parsing not available (LLM provider required)`
-        };
       }
+
+      return {
+        ok: false,
+        error: `Unknown subcommand: ${subcommand}. Try: /std help\n\nNote: NLP parsing not available (LLM provider required)`
+      };
     }
 
     // Execute command
@@ -176,6 +196,46 @@ class CommandRouter {
       ok: true,
       message: helpLines.join('\n')
     };
+  }
+
+  detectNaturalLanguageIntent(input) {
+    const text = String(input || '').trim().toLowerCase();
+    if (!text) return null;
+
+    // Query/list intent (e.g., "what are my current tasks?")
+    if (
+      (/(^|\b)(what|which|show|list|display)\b/.test(text) && /\b(task|tasks|todo|todos)\b/.test(text)) ||
+      /\b(current tasks?)\b/.test(text) ||
+      /\b(my tasks?)\b/.test(text)
+    ) {
+      return 'list';
+    }
+
+    // Stats/count intent
+    if (
+      /\b(how many|count|statistics|stats|summary)\b/.test(text) &&
+      /\b(task|tasks|todo|todos)\b/.test(text)
+    ) {
+      return 'stats';
+    }
+
+    // Search/find intent
+    if (/\b(search|find|look for)\b/.test(text) && /\b(task|tasks|todo|todos)\b/.test(text)) {
+      return 'search';
+    }
+
+    return null;
+  }
+
+  extractSearchQuery(input) {
+    const text = String(input || '').trim();
+    if (!text) return '';
+
+    return text
+      .replace(/\b(search|find|look for)\b/gi, '')
+      .replace(/\b(task|tasks|todo|todos)\b/gi, '')
+      .replace(/[?.!]+$/g, '')
+      .trim();
   }
 }
 

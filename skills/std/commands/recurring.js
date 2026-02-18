@@ -26,7 +26,7 @@ async function recurringCommand(args, database) {
   const pattern = parsed.positional.slice(1).join(' ');
 
   try {
-    const updated = database.update(id, {
+    const updated = await database.update(id, {
       isRecurring: true,
       recurringPattern: pattern
     });

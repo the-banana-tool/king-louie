@@ -2,7 +2,14 @@
   "permissions": {
     "allow": [
       "Bash(xargs:*)",
-      "Bash(npm run install:dev:*)"
+      "Bash(npm run install:dev:*)",
+      "Bash(ls -la \"E:\\\\Programming\\\\king-louie\\\\skills\"\" 2>/dev/null || dir \"E:Programmingking-louieskills\"\")",
+      "Bash(dir:*)",
+      "Bash(git -C \"E:/Programming/king-louie\" status --short)",
+      "Bash(git -C \"E:/Programming/king-louie\" ls-files skills/std/)",
+      "Bash(git -C \"E:/Programming/king-louie\" ls-files --cached)",
+      "Bash(git -C \"E:/Programming/king-louie\" ls-files)",
+      "Bash(findstr:*)"
     ]
   }
 }

@@ -6,7 +6,7 @@ const { formatSuccess } = require('../utils/formatter');
  */
 async function exportCommand(args, database) {
   try {
-    const tasks = database.exportAll();
+    const tasks = await database.exportAll();
     const json = JSON.stringify(tasks, null, 2);
 
     // For now, return the JSON as text

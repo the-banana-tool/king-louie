@@ -11,7 +11,7 @@ async function archiveCommand(args, database) {
   if (parsed.flags.list || parsed.positional.length === 0) {
     // List archived tasks
     try {
-      const tasks = database.findAll({ status: 'archived' });
+      const tasks = await database.findAll({ status: 'archived' });
       return {
         ok: true,
         message: formatTaskList(tasks, { detailed: false, showCount: true })
@@ -34,7 +34,7 @@ async function archiveCommand(args, database) {
   }
 
   try {
-    const task = database.archive(id);
+    const task = await database.archive(id);
     if (task) {
       return {
         ok: true,

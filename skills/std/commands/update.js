@@ -24,7 +24,7 @@ async function updateCommand(args, database) {
   }
 
   // Check if task exists
-  const existing = database.findById(id);
+  const existing = await database.findById(id);
   if (!existing) {
     return {
       ok: false,
@@ -90,7 +90,7 @@ async function updateCommand(args, database) {
   }
 
   try {
-    const updated = database.update(id, updates);
+    const updated = await database.update(id, updates);
     return {
       ok: true,
       message: formatSuccess(`Task updated!\n\n${formatTask(updated, true)}`)

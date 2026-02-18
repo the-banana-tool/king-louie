@@ -37,7 +37,7 @@ async function listCommand(args, database) {
   }
 
   try {
-    const tasks = database.findAll(filters);
+    const tasks = await database.findAll(filters);
     const detailed = parsed.flags.detailed === true || parsed.flags.detailed === 'true';
 
     return {

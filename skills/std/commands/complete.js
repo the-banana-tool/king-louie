@@ -24,7 +24,7 @@ async function completeCommand(args, database) {
   }
 
   // Check if task exists
-  const existing = database.findById(id);
+  const existing = await database.findById(id);
   if (!existing) {
     return {
       ok: false,
@@ -33,7 +33,7 @@ async function completeCommand(args, database) {
   }
 
   try {
-    const completed = database.complete(id);
+    const completed = await database.complete(id);
     return {
       ok: true,
       message: formatSuccess(`Task completed! 🎉\n\n${formatTask(completed)}`)

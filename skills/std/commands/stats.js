@@ -6,7 +6,7 @@ const { formatStats } = require('../utils/formatter');
  */
 async function statsCommand(args, database) {
   try {
-    const stats = database.getStats();
+    const stats = await database.getStats();
     return {
       ok: true,
       message: formatStats(stats)

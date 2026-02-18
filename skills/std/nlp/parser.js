@@ -88,7 +88,16 @@ Rules:
         max_tokens: 1000
       });
 
-      return response.content || '';
+      // Provider responses can be plain strings or objects with `content`
+      if (typeof response === 'string') {
+        return response;
+      }
+
+      if (response && typeof response.content === 'string') {
+        return response.content;
+      }
+
+      return String(response || '');
     } catch (error) {
       console.error('[nlp-parser] LLM call failed:', error);
       throw new Error(`Failed to parse natural language: ${error.message}`);
@@ -108,8 +117,17 @@ Rules:
         cleaned = cleaned.replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/, '');
       }
 
-      // Parse JSON
-      const parsed = JSON.parse(cleaned);
+      // Parse JSON (with fallback extraction if model wraps JSON in extra text)
+      let parsed;
+      try {
+        parsed = JSON.parse(cleaned);
+      } catch {
+        const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) {
+          throw new Error('No JSON object found in LLM response');
+        }
+        parsed = JSON.parse(jsonMatch[0]);
+      }
 
       if (!parsed.tasks || !Array.isArray(parsed.tasks)) {
         throw new Error('Invalid response format - missing tasks array');
