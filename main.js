@@ -20,10 +20,11 @@ const {
   SessionsHistoryTool,
   SessionsSpawnTool
 } = require('./src/tools/builtin/sessions-tools');
-const { SkillLoader, skillRegistry } = require('./src/skills');
+const { SkillLoader, skillRegistry, PinManager } = require('./src/skills');
 
 let mainWindow;
 let skillLoader;
+let pinManager;
 const pendingApprovalResolvers = new Map();
 let taskManager;
 let gatewayServer;
@@ -349,6 +350,7 @@ const startTelegramBridge = async (token) => {
     sessionManager,
     getAgent,
     listAgents,
+    pinManager,
     // Callbacks for local chat management
     createLocalChat: (title) => {
       const now = new Date().toISOString();
@@ -870,6 +872,11 @@ const initializeAgentInfrastructure = async () => {
   });
 
   await gatewayServer.start();
+
+  pinManager = new PinManager({
+    storageFile: path.join(app.getPath('userData'), 'skill-pins.json')
+  });
+  await pinManager.load();
 
   // Initialize and load skills
   skillLoader = new SkillLoader({
@@ -1463,6 +1470,61 @@ ipcMain.handle('skill:execute', async (_event, { command, args = [], chatId }) =
       ok: false,
       error: error.message || 'Unknown error executing skill command'
     };
+  }
+});
+
+// skill:pin — pin a skill to the UI chat's session
+ipcMain.handle('skill:pin', async (_event, { chatId, skillId }) => {
+  const skill = skillRegistry.getSkill(skillId);
+  if (!skill) return { ok: false, error: `Unknown skill: ${skillId}` };
+  if (!skill.getMetadata().pinnable) return { ok: false, error: `Skill '${skillId}' does not support pinning.` };
+  const sessionKey = sessionManager.buildSessionKey('main', 'ui', chatId);
+  await pinManager.pin(sessionKey, skillId);
+  return { ok: true, skillId, name: skill.getMetadata().name };
+});
+
+// skill:unpin — remove pin for a UI chat
+ipcMain.handle('skill:unpin', async (_event, { chatId }) => {
+  const sessionKey = sessionManager.buildSessionKey('main', 'ui', chatId);
+  const previousId = pinManager.getPinned(sessionKey);
+  await pinManager.unpin(sessionKey);
+  return { ok: true, previousSkillId: previousId || null };
+});
+
+// skill:getPinned — get the currently pinned skill for a UI chat
+ipcMain.handle('skill:getPinned', async (_event, { chatId }) => {
+  const sessionKey = sessionManager.buildSessionKey('main', 'ui', chatId);
+  const skillId = pinManager.getPinned(sessionKey);
+  if (!skillId) return { ok: true, pinned: null };
+  const skill = skillRegistry.getSkill(skillId);
+  return { ok: true, pinned: skill ? { skillId, ...skill.getMetadata() } : { skillId } };
+});
+
+// skill:listPinnable — list all skills that support pinning
+ipcMain.handle('skill:listPinnable', async () => {
+  return skillRegistry.getPinnableSkills();
+});
+
+// skill:handleMessage — route a free-form message to the pinned skill (UI channel)
+ipcMain.handle('skill:handleMessage', async (_event, { chatId, message }) => {
+  const sessionKey = sessionManager.buildSessionKey('main', 'ui', chatId);
+  const skillId = pinManager.getPinned(sessionKey);
+  if (!skillId) return { ok: false, error: 'No skill pinned', continueWithAgent: true };
+
+  const skill = skillRegistry.getSkill(skillId);
+  if (!skill || typeof skill.handleMessage !== 'function') {
+    return { ok: false, error: 'Pinned skill cannot handle messages', continueWithAgent: true };
+  }
+
+  const session = sessionManager.getOrCreateSession(sessionKey, 'main', {
+    channel: 'ui', peer: chatId, label: `ui:${chatId}`
+  });
+
+  try {
+    const result = await skill.handleMessage(message, { chatId, channel: 'ui', userId: chatId, session });
+    return result || { ok: false, continueWithAgent: true };
+  } catch (error) {
+    return { ok: false, error: error.message, continueWithAgent: true };
   }
 });
 

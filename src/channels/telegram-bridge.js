@@ -13,6 +13,7 @@ class TelegramBridge {
     this.sessionManager = options.sessionManager;
     this.getAgent = options.getAgent || (() => null);
     this.listAgents = options.listAgents || (() => []);
+    this.pinManager = options.pinManager || null;
     this.pollTimeoutSeconds = Number(options.pollTimeoutSeconds || 30);
 
     // Callbacks for local chat management
@@ -171,6 +172,39 @@ class TelegramBridge {
     // Add user message to local chat
     this.addToLocalChat(chatId, 'user', text);
 
+    // Check if chat has a pinned skill
+    const state = this.getOrCreateChatState(chatId);
+    const pinnedSkillId = this.pinManager?.getPinned(state.sessionKey);
+    if (pinnedSkillId) {
+      const skill = skillRegistry.getSkill(pinnedSkillId);
+      if (skill && typeof skill.handleMessage === 'function') {
+        const session = this.sessionManager.getOrCreateSession(state.sessionKey, state.agentId, {
+          channel: 'telegram',
+          peer: chatId,
+          label: `telegram:${chatId}`
+        });
+
+        try {
+          const result = await skill.handleMessage(text, { chatId, channel: 'telegram', userId: chatId, session });
+          if (result !== null) {
+            if (result.ok) {
+              await this.sendMessage(chatId, result.message || 'Done.');
+              this.addToLocalChat(chatId, 'assistant', result.message || 'Done.');
+            } else {
+              const errorMsg = `❌ ${result.error || 'Error'}`;
+              await this.sendMessage(chatId, errorMsg);
+              this.addToLocalChat(chatId, 'assistant', errorMsg);
+            }
+            if (!result.continueWithAgent) return; // Skip AI
+          }
+        } catch (error) {
+          console.error('[telegram-bridge] Pinned skill error:', error);
+          await this.sendMessage(chatId, `❌ Pinned skill error: ${error.message}`);
+          return;
+        }
+      }
+    }
+
     await this.routeAgentMessage(chatId, text);
   }
 
@@ -179,6 +213,54 @@ class TelegramBridge {
     const command = String(rawCommand || '').toLowerCase();
     const arg = rest.join(' ').trim();
     const state = this.getOrCreateChatState(chatId);
+
+    if (command === '/pin') {
+      const skillId = arg;
+      if (!this.pinManager) {
+        await this.sendMessage(chatId, '❌ Pinning feature not available.');
+        return;
+      }
+      const skill = skillRegistry.getSkill(skillId);
+      if (!skill) {
+        await this.sendMessage(chatId, `Unknown skill: ${skillId}`);
+        return;
+      }
+      if (!skill.getMetadata().pinnable) {
+        await this.sendMessage(chatId, `Skill '${skillId}' does not support pinning.`);
+        return;
+      }
+      await this.pinManager.pin(state.sessionKey, skillId);
+      await this.sendMessage(chatId, `📌 Pinned ${skill.getMetadata().name} to this chat. All messages will be handled by ${skill.getMetadata().name}. Use /unpin to restore normal behavior.`);
+      return;
+    }
+
+    if (command === '/unpin') {
+      if (!this.pinManager) {
+        await this.sendMessage(chatId, '❌ Pinning feature not available.');
+        return;
+      }
+      const pinnedId = this.pinManager.getPinned(state.sessionKey);
+      await this.pinManager.unpin(state.sessionKey);
+      const label = pinnedId ? skillRegistry.getSkill(pinnedId)?.getMetadata().name || pinnedId : null;
+      await this.sendMessage(chatId, label ? `📌 Unpinned ${label}. Normal behavior restored.` : 'No skill is currently pinned.');
+      return;
+    }
+
+    if (command === '/pinned') {
+      if (!this.pinManager) {
+        await this.sendMessage(chatId, '❌ Pinning feature not available.');
+        return;
+      }
+      const pinnedId = this.pinManager.getPinned(state.sessionKey);
+      if (!pinnedId) {
+        await this.sendMessage(chatId, 'No skill is currently pinned to this chat.');
+        return;
+      }
+      const skill = skillRegistry.getSkill(pinnedId);
+      const name = skill?.getMetadata().name || pinnedId;
+      await this.sendMessage(chatId, `📌 Pinned skill: ${name} (${pinnedId})`);
+      return;
+    }
 
     // Check if this is a skill command
     const commandName = command.startsWith('/') ? command.slice(1) : command;

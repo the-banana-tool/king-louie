@@ -26,7 +26,8 @@ class StdSkill {
       version: '1.0.0',
       description: 'Manage your tasks (STDs) with full CRUD, reminders, and sync',
       author: 'Seth Blackman',
-      commands: ['std']
+      commands: ['std'],
+      pinnable: true
     };
   }
 
@@ -74,6 +75,19 @@ class StdSkill {
     }
 
     return this.commandRouter.route(args, context);
+  }
+
+  async handleMessage(text, context) {
+    if (!this.commandRouter) {
+      return { ok: false, error: 'STD skill not initialized', continueWithAgent: false };
+    }
+
+    // Split raw text into args and route through the existing command router.
+    // The router already handles natural language via NLP parser when no subcommand matches.
+    const args = String(text || '').trim().split(/\s+/).filter(Boolean);
+    const result = await this.commandRouter.route(args, context);
+
+    return { ...result, continueWithAgent: false };
   }
 
   async getHelp() {

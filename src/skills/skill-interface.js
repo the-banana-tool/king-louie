@@ -18,6 +18,16 @@
  * @property {string} description - Brief description of what the skill does
  * @property {string} author - Skill author
  * @property {string[]} commands - List of commands this skill handles (e.g., ['std'])
+ * @property {boolean} [pinnable] - If true, skill can be pinned to a chat. Pinned skill must implement handleMessage().
+ */
+
+/**
+ * @typedef {Object} MessageResult
+ * @property {boolean} ok
+ * @property {string} [message]
+ * @property {string} [error]
+ * @property {any} [data]
+ * @property {boolean} [continueWithAgent] - If true, also run the AI agent after this response. Defaults to false (skill handles it completely).
  */
 
 /**
@@ -75,6 +85,18 @@ class Skill {
    */
   async handleCommand(command, args, context) {
     throw new Error('Skill must implement handleCommand()');
+  }
+
+  /**
+   * Handle a free-form message when this skill is pinned to a chat.
+   * Only called when the skill is pinned AND the user sends non-command text.
+   *
+   * @param {string} text - Raw user message
+   * @param {CommandContext} context
+   * @returns {Promise<MessageResult|null>} - null means "not handled, fall through to agent"
+   */
+  async handleMessage(text, context) {
+    return null; // Default: not handled
   }
 
   /**
