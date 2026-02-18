@@ -72,6 +72,9 @@ async function getLocalHelpText() {
     '- `/llm telegram remove` — clear saved Telegram token and stop bridge',
     '- `/llm telegram status` — show Telegram bridge status',
     '- `/agent on|off|toggle|status` — control agent mode',
+    '- `/pin <skill-id>` — pin a skill to this chat (all messages handled by the skill)',
+    '- `/unpin` — unpin current skill, restore normal behavior',
+    '- `/pinned` — show which skill (if any) is pinned to this chat',
     '- `exit` or `quit` — close the window'
   ];
 
@@ -771,6 +774,53 @@ async function sendMessage() {
     return;
   }
 
+  if (slashCommand?.name === '/pin') {
+    userInput.value = '';
+    userInput.style.height = 'auto';
+    const skillId = slashCommand.args[0];
+    appendLocalMessage('user', message);
+    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch(() => {});
+    if (!skillId) {
+      const errorText = 'Usage: `/pin <skill-id>`. Use `/pin std` to pin the STD skill.';
+      appendLocalMessage('assistant', errorText);
+      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: errorText }).catch(() => {});
+      return;
+    }
+    const result = await window.electron.skill.pin({ chatId: activeChatId, skillId });
+    const responseText = result.ok
+      ? `📌 Pinned **${result.name || skillId}** to this chat. All messages will be handled by this skill. Use \`/unpin\` to restore normal behavior.`
+      : `❌ ${result.error}`;
+    appendLocalMessage('assistant', responseText);
+    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch(() => {});
+    return;
+  }
+
+  if (slashCommand?.name === '/unpin') {
+    userInput.value = '';
+    userInput.style.height = 'auto';
+    appendLocalMessage('user', message);
+    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch(() => {});
+    const result = await window.electron.skill.unpin({ chatId: activeChatId });
+    const responseText = result.ok ? '📌 Unpinned. Normal behavior restored.' : `❌ ${result.error}`;
+    appendLocalMessage('assistant', responseText);
+    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch(() => {});
+    return;
+  }
+
+  if (slashCommand?.name === '/pinned') {
+    userInput.value = '';
+    userInput.style.height = 'auto';
+    appendLocalMessage('user', message);
+    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch(() => {});
+    const result = await window.electron.skill.getPinned({ chatId: activeChatId });
+    const responseText = result.pinned
+      ? `📌 Pinned skill: **${result.pinned.name || result.pinned.skillId}** (\`${result.pinned.skillId}\`)`
+      : 'No skill is currently pinned to this chat.';
+    appendLocalMessage('assistant', responseText);
+    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch(() => {});
+    return;
+  }
+
   if (slashCommand?.name === '/llm') {
     userInput.value = '';
     userInput.style.height = 'auto';
@@ -847,6 +897,21 @@ async function sendMessage() {
 
   userInput.value = '';
   userInput.style.height = 'auto';
+
+  // If a skill is pinned, route the message to it before (or instead of) the AI
+  const pinnedInfo = await window.electron.skill.getPinned({ chatId: activeChatId });
+  if (pinnedInfo?.pinned) {
+    const skillResult = await window.electron.skill.handleMessage({ chatId: activeChatId, message });
+    if (skillResult && !skillResult.continueWithAgent) {
+      const responseText = skillResult.ok
+        ? (skillResult.message || 'Done.')
+        : `❌ ${skillResult.error || 'Error'}`;
+      appendLocalMessage('assistant', responseText);
+      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch(() => {});
+      return;
+    }
+    // continueWithAgent: true — fall through to AI below
+  }
 
   try {
     const updatedChat = await window.electron.chat.sendMessage({

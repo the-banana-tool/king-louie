@@ -132,7 +132,12 @@ contextBridge.exposeInMainWorld(
     },
     skill: {
       list: () => ipcRenderer.invoke('skill:list'),
-      execute: (payload) => ipcRenderer.invoke('skill:execute', payload)
+      execute: (payload) => ipcRenderer.invoke('skill:execute', payload),
+      pin: (payload) => ipcRenderer.invoke('skill:pin', payload),
+      unpin: (payload) => ipcRenderer.invoke('skill:unpin', payload),
+      getPinned: (payload) => ipcRenderer.invoke('skill:getPinned', payload),
+      listPinnable: () => ipcRenderer.invoke('skill:listPinnable'),
+      handleMessage: (payload) => ipcRenderer.invoke('skill:handleMessage', payload)
     },
     app: {
       quitWindow: () => ipcRenderer.invoke('app:quitWindow')
