@@ -82,7 +82,7 @@ class SkillRegistry {
 
   /**
    * List all skills that support pinning (pinnable: true in metadata)
-   * @returns {Array<{id, name, description, commands, version}>}
+   * @returns {Array<{id: string, name: string, description: string, commands: string[], version: string, pinnable: boolean}>}
    */
   getPinnableSkills() {
     return Array.from(this.skills.values())
@@ -94,7 +94,8 @@ class SkillRegistry {
           name: meta.name,
           description: meta.description,
           commands: meta.commands,
-          version: meta.version
+          version: meta.version,
+          pinnable: meta.pinnable
         };
       });
   }

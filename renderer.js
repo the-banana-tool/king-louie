@@ -801,11 +801,7 @@ async function sendMessage() {
     appendLocalMessage('user', message);
     window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch(() => {});
     const result = await window.electron.skill.unpin({ chatId: activeChatId });
-    const responseText = !result.ok
-      ? `❌ ${result.error}`
-      : result.previousSkillId
-        ? '📌 Unpinned. Normal behavior restored.'
-        : 'No skill is currently pinned.';
+    const responseText = result.ok ? '📌 Unpinned. Normal behavior restored.' : `❌ ${result.error}`;
     appendLocalMessage('assistant', responseText);
     window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch(() => {});
     return;
@@ -906,17 +902,13 @@ async function sendMessage() {
   const pinnedInfo = await window.electron.skill.getPinned({ chatId: activeChatId });
   if (pinnedInfo?.pinned) {
     const skillResult = await window.electron.skill.handleMessage({ chatId: activeChatId, message });
-    if (skillResult) {
+    if (skillResult && !skillResult.continueWithAgent) {
       const responseText = skillResult.ok
         ? (skillResult.message || 'Done.')
         : `❌ ${skillResult.error || 'Error'}`;
       appendLocalMessage('assistant', responseText);
-      window.electron.chat
-        .addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText })
-        .catch(() => {});
-      if (!skillResult.continueWithAgent) {
-        return;
-      }
+      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch(() => {});
+      return;
     }
     // continueWithAgent: true — fall through to AI below
   }

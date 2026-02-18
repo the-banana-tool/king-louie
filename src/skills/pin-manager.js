@@ -12,6 +12,7 @@ class PinManager {
     }
     this.storageFile = options.storageFile;
     this.pins = new Map(); // sessionKey -> skillId
+    this._savePromise = Promise.resolve();
   }
 
   /**
@@ -31,11 +32,20 @@ class PinManager {
   }
 
   /**
-   * Save pins to disk
+   * Save pins to disk (atomic and serialized)
    */
   async save() {
-    const json = Object.fromEntries(this.pins);
-    await fs.writeFile(this.storageFile, JSON.stringify(json, null, 2), 'utf8');
+    // Queue save operations to prevent race conditions
+    this._savePromise = this._savePromise.then(async () => {
+      const json = Object.fromEntries(this.pins);
+      const tempFile = `${this.storageFile}.tmp`;
+      await fs.writeFile(tempFile, JSON.stringify(json, null, 2), 'utf8');
+      await fs.rename(tempFile, this.storageFile);
+    }).catch((error) => {
+      console.error('[pin-manager] Failed to save pins:', error.message);
+    });
+
+    return this._savePromise;
   }
 
   /**
