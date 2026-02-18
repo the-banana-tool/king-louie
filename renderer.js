@@ -906,13 +906,17 @@ async function sendMessage() {
   const pinnedInfo = await window.electron.skill.getPinned({ chatId: activeChatId });
   if (pinnedInfo?.pinned) {
     const skillResult = await window.electron.skill.handleMessage({ chatId: activeChatId, message });
-    if (skillResult && !skillResult.continueWithAgent) {
+    if (skillResult) {
       const responseText = skillResult.ok
         ? (skillResult.message || 'Done.')
         : `❌ ${skillResult.error || 'Error'}`;
       appendLocalMessage('assistant', responseText);
-      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch(() => {});
-      return;
+      window.electron.chat
+        .addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText })
+        .catch(() => {});
+      if (!skillResult.continueWithAgent) {
+        return;
+      }
     }
     // continueWithAgent: true — fall through to AI below
   }
