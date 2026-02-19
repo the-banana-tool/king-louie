@@ -43,6 +43,7 @@
  * @property {boolean} ok - Whether command executed successfully
  * @property {string} [message] - Message to display to user
  * @property {string} [error] - Error message if ok=false
+ * @property {'json'|'html'|'markdown'|'xml'|'text'} [format] - Content format for message/error payload
  * @property {any} [data] - Optional data payload
  */
 
@@ -51,6 +52,7 @@
  * @property {boolean} ok
  * @property {string} [message]
  * @property {string} [error]
+ * @property {'json'|'html'|'markdown'|'xml'|'text'} [format] - Content format for message/error payload
  * @property {any} [data]
  * @property {boolean} [continueWithAgent] - If true, also run the AI agent after this response.
  *                                            Defaults to false (skill handles it completely).

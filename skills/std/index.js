@@ -19,6 +19,44 @@ class StdSkill {
     this.commandRouter = null;
   }
 
+  toHtml(content) {
+    const escaped = String(content ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+
+    return escaped.replace(/\r?\n/g, '<br/>');
+  }
+
+  normalizeResultFormat(result) {
+    if (!result || typeof result !== 'object') {
+      return result;
+    }
+
+    const next = { ...result };
+    if (!next.format) {
+      next.format = 'html';
+    }
+
+    if (next.format === 'html' && typeof next.message === 'string') {
+      const hasHtmlTag = /<\/?[a-z][^>]*>/i.test(next.message);
+      if (!hasHtmlTag) {
+        next.message = this.toHtml(next.message);
+      }
+    }
+
+    if (next.format === 'html' && typeof next.error === 'string') {
+      const hasHtmlTag = /<\/?[a-z][^>]*>/i.test(next.error);
+      if (!hasHtmlTag) {
+        next.error = this.toHtml(next.error);
+      }
+    }
+
+    return next;
+  }
+
   getMetadata() {
     return {
       id: 'std',
@@ -70,16 +108,23 @@ class StdSkill {
     if (!this.commandRouter) {
       return {
         ok: false,
-        error: 'STD skill not initialized'
+        error: 'STD skill not initialized',
+        format: 'html'
       };
     }
 
-    return this.commandRouter.route(args, context);
+    const result = await this.commandRouter.route(args, context);
+    return this.normalizeResultFormat(result);
   }
 
   async handleMessage(text, context) {
     if (!this.commandRouter) {
-      return { ok: false, error: 'STD skill not initialized', continueWithAgent: false };
+      return {
+        ok: false,
+        error: 'STD skill not initialized',
+        continueWithAgent: false,
+        format: 'html'
+      };
     }
 
     const args = String(text || '').trim().split(/\s+/).filter(Boolean);
@@ -91,12 +136,13 @@ class StdSkill {
       return {
         ok: true,
         message: 'STD command not provided. Try: /std help',
+        format: 'html',
         continueWithAgent: false
       };
     }
 
     const result = await this.commandRouter.route(args, context);
-    return { ...result, continueWithAgent: false };
+    return this.normalizeResultFormat({ ...result, continueWithAgent: false });
   }
 
   async getHelp() {

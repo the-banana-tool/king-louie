@@ -98,7 +98,7 @@ async function getLocalHelpText() {
   return helpLines.join('\n');
 }
 
-function appendLocalMessage(sender, text) {
+function appendLocalMessage(sender, text, metadata = {}) {
   const now = new Date().toISOString();
   chats = chats.map((chat) => {
     if (chat.id !== activeChatId) return chat;
@@ -111,7 +111,8 @@ function appendLocalMessage(sender, text) {
           id: `local-${Date.now()}-${Math.random().toString(16).slice(2)}`,
           sender,
           text,
-          timestamp: now
+          timestamp: now,
+          ...(metadata || {})
         }
       ]
     };
@@ -402,7 +403,8 @@ function renderChatMessages() {
 
     addMessage(message.sender, message.text, {
       llm: message?.llm,
-      runningLlmTotals: callTotals ? { ...runningTotals } : null
+      runningLlmTotals: callTotals ? { ...runningTotals } : null,
+      format: message?.format
     });
   });
 }
@@ -947,8 +949,9 @@ async function sendMessage() {
         const responseText = skillResult.ok === false
           ? `❌ ${skillResult.error || 'Skill command failed.'}`
           : (skillResult.message || 'Skill command executed.');
-        appendLocalMessage('assistant', responseText);
-        window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch(() => {});
+        const responseFormat = skillResult.format || 'markdown';
+        appendLocalMessage('assistant', responseText, { format: responseFormat });
+        window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText, format: responseFormat }).catch(() => {});
 
         return;
       }
@@ -988,8 +991,9 @@ async function sendMessage() {
       const responseText = skillResult.ok
         ? (skillResult.message || 'Done.')
         : `❌ ${skillResult.error || 'Error'}`;
-      appendLocalMessage('assistant', responseText);
-      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch(() => {});
+      const responseFormat = skillResult.format || 'markdown';
+      appendLocalMessage('assistant', responseText, { format: responseFormat });
+      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText, format: responseFormat }).catch(() => {});
       return;
     }
     // continueWithAgent: true — fall through to AI below
@@ -1007,9 +1011,10 @@ async function sendMessage() {
         const responseText = skillResult.ok
           ? (skillResult.message || 'Done.')
           : `❌ ${skillResult.error || 'Error'}`;
+        const responseFormat = skillResult.format || 'markdown';
         window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch(() => {});
-        appendLocalMessage('assistant', responseText);
-        window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch(() => {});
+        appendLocalMessage('assistant', responseText, { format: responseFormat });
+        window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText, format: responseFormat }).catch(() => {});
         return;
       }
     }
@@ -1030,6 +1035,24 @@ async function sendMessage() {
 }
 
 // Add message to chat display
+function renderAssistantMessageContent(messageContent, text, format = 'markdown') {
+  const safeFormat = String(format || 'markdown').toLowerCase();
+
+  if (safeFormat === 'html') {
+    messageContent.innerHTML = String(text || '');
+    return;
+  }
+
+  if (safeFormat === 'json' || safeFormat === 'xml' || safeFormat === 'text') {
+    const pre = document.createElement('pre');
+    pre.textContent = String(text || '');
+    messageContent.appendChild(pre);
+    return;
+  }
+
+  messageContent.innerHTML = window.electron.markdown.parse(text || '');
+}
+
 function addMessage(sender, text, metadata = {}) {
   const messageDiv = document.createElement('div');
   messageDiv.className = `message ${sender}`;
@@ -1038,7 +1061,7 @@ function addMessage(sender, text, metadata = {}) {
   messageContent.className = 'message-content';
 
   if (sender === 'assistant') {
-    messageContent.innerHTML = window.electron.markdown.parse(text || '');
+    renderAssistantMessageContent(messageContent, text, metadata?.format || 'markdown');
   } else {
     const messagePara = document.createElement('p');
     messagePara.textContent = text;

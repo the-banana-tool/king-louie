@@ -1005,8 +1005,9 @@ ipcMain.handle('chat:delete', (_event, chatId) => {
   return { chats, activeChatId: getActiveChatId() };
 });
 
-ipcMain.handle('chat:addMessage', (_event, { chatId, sender, text }) => {
-  return appendMessageToChat(chatId, sender, text);
+ipcMain.handle('chat:addMessage', (_event, payload = {}) => {
+  const { chatId, sender, text, ...metadata } = payload;
+  return appendMessageToChat(chatId, sender, text, metadata);
 });
 
 ipcMain.handle('chat:sendMessage', async (event, { chatId, message, agentMode = false }) => {
