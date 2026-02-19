@@ -983,22 +983,6 @@ async function sendMessage() {
   userInput.value = '';
   userInput.style.height = 'auto';
 
-  // If a skill is pinned, route the message to it before (or instead of) the AI
-  const pinnedInfo = await window.electron.skill.getPinned({ chatId: activeChatId });
-  if (pinnedInfo?.pinned) {
-    const skillResult = await window.electron.skill.handleMessage({ chatId: activeChatId, message });
-    if (skillResult && !skillResult.continueWithAgent) {
-      const responseText = skillResult.ok
-        ? (skillResult.message || 'Done.')
-        : `❌ ${skillResult.error || 'Error'}`;
-      const responseFormat = skillResult.format || 'markdown';
-      appendLocalMessage('assistant', responseText, { format: responseFormat });
-      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText, format: responseFormat }).catch(() => {});
-      return;
-    }
-    // continueWithAgent: true — fall through to AI below
-  }
-
   try {
     const pinnedInfo = await window.electron.skill.getPinned({ chatId: activeChatId });
     if (pinnedInfo?.pinned) {
@@ -1031,6 +1015,49 @@ async function sendMessage() {
     }
   } catch (error) {
     addMessage('assistant', `Error: ${error.message || 'Unable to send message.'}`);
+  }
+}
+
+async function handleStdCardAction(action, taskId, buttonEl = null) {
+  if (action !== 'complete' || !taskId || !activeChatId) {
+    return;
+  }
+
+  if (buttonEl) {
+    buttonEl.disabled = true;
+    buttonEl.textContent = 'Completing...';
+  }
+
+  const commandText = `/std complete ${taskId}`;
+
+  try {
+    appendLocalMessage('user', commandText);
+    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: commandText }).catch(() => {});
+
+    const skillResult = await window.electron.skill.execute({
+      command: 'std',
+      args: ['complete', String(taskId)],
+      chatId: activeChatId
+    });
+
+    const responseText = skillResult?.ok === false
+      ? `❌ ${skillResult.error || 'Skill command failed.'}`
+      : (skillResult?.message || 'Task completed.');
+    const responseFormat = skillResult?.format || 'markdown';
+
+    appendLocalMessage('assistant', responseText, { format: responseFormat });
+    window.electron.chat
+      .addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText, format: responseFormat })
+      .catch(() => {});
+  } catch (error) {
+    const errorText = `❌ ${error.message || 'Unable to complete task.'}`;
+    appendLocalMessage('assistant', errorText);
+    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: errorText }).catch(() => {});
+  } finally {
+    if (buttonEl) {
+      buttonEl.disabled = false;
+      buttonEl.textContent = 'Complete';
+    }
   }
 }
 
@@ -1279,6 +1306,19 @@ chatList.addEventListener('click', (e) => {
   if (chatItem) {
     handleSelectChat(chatItem.dataset.chatId);
   }
+});
+
+chatMessages.addEventListener('click', (e) => {
+  const actionButton = e.target.closest('[data-std-action]');
+  if (!actionButton) return;
+
+  const action = String(actionButton.dataset.stdAction || '').trim().toLowerCase();
+  const taskId = String(actionButton.dataset.stdTaskId || '').trim();
+
+  if (!action || !taskId) return;
+
+  e.preventDefault();
+  handleStdCardAction(action, taskId, actionButton);
 });
 
 chatList.addEventListener('contextmenu', (e) => {

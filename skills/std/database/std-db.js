@@ -120,6 +120,11 @@ class StdDatabase {
     const schema = fs.readFileSync(schemaPath, 'utf-8');
     this.db.exec(schema);
 
+    // Migrate existing databases to add new columns
+    try {
+      this.db.exec('ALTER TABLE stds ADD COLUMN client TEXT');
+    } catch (_) { /* column already exists */ }
+
     // Save to disk
     this._save();
   }
@@ -358,6 +363,7 @@ class StdDatabase {
       priority: 'medium',
       status: isArchived ? 'archived' : isCompleted ? 'completed' : 'pending',
       tags: [],
+      client: std.client || null,
       isRecurring: false,
       recurringPattern: null,
       reminderTime: null,
@@ -375,6 +381,7 @@ class StdDatabase {
       task_description: data.title,
       details: data.details || null,
       due_by: data.dueDate || null,
+      client: data.client || null,
       project: data.customFields?.project || data.project || null,
       order: data.customFields?.order ?? data.order ?? 0
     };
@@ -392,6 +399,7 @@ class StdDatabase {
       payload.completed = data.status === 'completed';
     }
 
+    if (data.client !== undefined) payload.client = data.client;
     if (data.project !== undefined) payload.project = data.project;
     if (data.order !== undefined) payload.order = data.order;
 
@@ -435,10 +443,10 @@ class StdDatabase {
     const stmt = this.db.prepare(`
       INSERT INTO stds (
         title, details, dueDate, priority, status, tags,
-        isRecurring, recurringPattern, reminderTime, attachments, customFields
+        client, isRecurring, recurringPattern, reminderTime, attachments, customFields
       ) VALUES (
         ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?
+        ?, ?, ?, ?, ?, ?
       )
     `);
 
@@ -449,6 +457,7 @@ class StdDatabase {
       data.priority || 'medium',
       data.status || 'pending',
       data.tags ? JSON.stringify(data.tags) : null,
+      data.client || null,
       data.isRecurring ? 1 : 0,
       data.recurringPattern || null,
       data.reminderTime || null,
@@ -694,6 +703,11 @@ class StdDatabase {
     if (data.tags !== undefined) {
       fields.push('tags = ?');
       params.push(JSON.stringify(data.tags));
+    }
+
+    if (data.client !== undefined) {
+      fields.push('client = ?');
+      params.push(data.client);
     }
 
     if (data.isRecurring !== undefined) {

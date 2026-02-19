@@ -41,10 +41,9 @@ async function smartCommand(args, database, context) {
     }
 
     // Format response
+    const taskWord = createdTasks.length === 1 ? 'task' : 'tasks';
     const message = [
-      formatSuccess(`Created ${createdTasks.length} task(s) from natural language!`),
-      '',
-      'Input: "' + naturalLanguage + '"',
+      formatSuccess(`Created ${createdTasks.length} ${taskWord}`),
       '',
       formatTaskList(createdTasks, { detailed: true, showCount: false })
     ].join('\n');

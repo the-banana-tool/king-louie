@@ -11,7 +11,7 @@ async function addCommand(args, database) {
   if (parsed.positional.length === 0) {
     return {
       ok: false,
-      error: 'Task title is required. Usage: /std add "Task title" [--details ...] [--priority ...] [--due ...]'
+      error: 'Task title is required. Usage: /std add "Task title" [--client ...] [--details ...] [--priority ...] [--due ...]'
     };
   }
 
@@ -20,6 +20,7 @@ async function addCommand(args, database) {
   const taskData = {
     title,
     details: parsed.flags.details || null,
+    client: parsed.flags.client || null,
     priority: parsePriority(parsed.flags.priority) || 'medium',
     dueDate: parseDate(parsed.flags.due) || null,
     tags: parseTags(parsed.flags.tags) || [],

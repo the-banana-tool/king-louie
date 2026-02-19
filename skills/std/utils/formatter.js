@@ -31,7 +31,7 @@ function wrapLine(label, value) {
 function formatTask(task, detailed = false) {
   if (!task) return '<div style="font-family:sans-serif;color:#888;">Task not found</div>';
 
-  const project = task["customFields"]?.project || "Unknown Project";
+  const project = task.client || task.customFields?.project || null;
   const title = task.title || "Untitled Task";
 
   const styles = {
@@ -109,16 +109,32 @@ function formatTask(task, detailed = false) {
       font-weight:600;
       border-radius:4px;
       padding:1px 6px;
+    `,
+    actionWrap: `
+      margin-top:10px;
+    `,
+    actionButton: `
+      border:1px solid #16a34a;
+      background:#16a34a;
+      color:#fff;
+      border-radius:6px;
+      font-size:12px;
+      font-weight:600;
+      padding:6px 10px;
+      cursor:pointer;
     `
   };
 
   const row = (label, value) =>
     `<div style="${styles.row}"><span style="${styles.label}">${label}</span><span>${value}</span></div>`;
 
-  const parts = [
-    `<div style="${styles.project}">${escapeHtml(project)}</div>`,
-    `<div style="${styles.title}">${escapeHtml(title)}</div>`,
-  ];
+  const parts = [];
+
+  if (project) {
+    parts.push(`<div style="${styles.project}">${escapeHtml(project)}</div>`);
+  }
+
+  parts.push(`<div style="${styles.title}">${escapeHtml(title)}</div>`);
 
   parts.push(`<hr style="${styles.divider}">`);
 
@@ -144,6 +160,11 @@ function formatTask(task, detailed = false) {
     parts.push(row('Priority:',
       `<span style="background:${p.bg};color:${p.color};font-size:11px;font-weight:600;border-radius:4px;padding:1px 6px;">${escapeHtml(task.priority)}</span>`
     ));
+  }
+
+  if (task.client) {
+    needsNextHr = true;
+    parts.push(row('Client:', escapeHtml(task.client)));
   }
 
   if (task.details) {
@@ -175,6 +196,20 @@ function formatTask(task, detailed = false) {
   if (needsNextHr) {
     parts.push(`<hr style="${styles.divider}">`);
   }
+
+  const canComplete = task.id !== undefined
+    && task.id !== null
+    && task.status !== 'completed'
+    && task.status !== 'archived';
+
+  if (canComplete) {
+    parts.push(
+      `<div style="${styles.actionWrap}">` +
+      `<button type="button" style="${styles.actionButton}" data-std-action="complete" data-std-task-id="${escapeHtml(task.id)}">Complete</button>` +
+      `</div>`
+    );
+  }
+
   parts.push(`<div style="${styles.meta}">Created ${escapeHtml(formatDate(task.createdAt))}</div>`);
 
   return `<div style="${styles.card}">${parts.join('')}</div>`;

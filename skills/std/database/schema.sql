@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS stds (
   priority TEXT DEFAULT 'medium' CHECK(priority IN ('low', 'medium', 'high', 'critical')),
   status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'in-progress', 'completed', 'archived')),
   tags TEXT,  -- JSON array
+  client TEXT,  -- Client or company this task is for
   isRecurring INTEGER DEFAULT 0,  -- Boolean (0 or 1)
   recurringPattern TEXT,  -- e.g., 'daily', 'weekly', 'monthly'
   reminderTime TEXT,  -- ISO 8601 format

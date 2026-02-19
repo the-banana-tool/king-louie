@@ -85,8 +85,14 @@ class StdSkill {
 
     // Initialize NLP parser (requires LLM provider from context)
     if (context.llmProvider) {
-      this.nlpParser = new NLPParser(context.llmProvider, this.contextDb);
-      console.log('[std-skill] NLP parser initialized');
+      const nlpModelMap = {
+        anthropic: 'claude-haiku-4-5-20251001',
+        openai: 'gpt-4o-mini'
+      };
+      const providerName = context.llmProvider.getProviderName?.() || '';
+      const nlpModel = nlpModelMap[providerName] || null;
+      this.nlpParser = new NLPParser(context.llmProvider, this.contextDb, nlpModel);
+      console.log(`[std-skill] NLP parser initialized (model: ${nlpModel || 'provider default'})`);
     } else {
       console.warn('[std-skill] LLM provider not available - NLP features disabled');
     }
@@ -104,7 +110,7 @@ class StdSkill {
     console.log('[std-skill] Context database:', contextDbPath);
   }
 
-  async handleCommand(command, args, context) {
+  async handleCommand(_command, args, context) {
     if (!this.commandRouter) {
       return {
         ok: false,

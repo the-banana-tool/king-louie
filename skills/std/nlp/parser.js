@@ -3,10 +3,13 @@
  * Uses LLM to parse natural language and extract structured tasks
  */
 
+const { parseDate } = require('../utils/parser');
+
 class NLPParser {
-  constructor(llmProvider, contextDb) {
+  constructor(llmProvider, contextDb, nlpModel = null) {
     this.llmProvider = llmProvider;
     this.contextDb = contextDb;
+    this.nlpModel = nlpModel;
   }
 
   /**
@@ -32,18 +35,23 @@ class NLPParser {
    * Build prompt for LLM
    */
   _buildPrompt(naturalLanguage, context) {
+    const today = new Date().toISOString().split('T')[0];
+
     return `You are a task extraction assistant. Given natural language input and context information, extract discrete tasks.
+
+Today's date is: ${today}
 
 ${context.summary}
 
 User input: "${naturalLanguage}"
 
-Extract tasks from this input. For each task:
-1. Create a clear, actionable title
-2. Add relevant details based on context
-3. Identify any person or project references
-4. Suggest appropriate priority (low, medium, high, critical)
-5. Suggest tags
+Extract tasks from this input. For each task provide:
+1. title - clear, actionable task title
+2. details - description or additional context (null if none)
+3. client - the client, company, or person this task is for (null if not mentioned)
+4. dueDate - due date as ISO 8601 string (YYYY-MM-DD), resolving relative dates using today's date (null if not mentioned)
+5. priority - low, medium, high, or critical
+6. tags - relevant tags
 
 Output ONLY valid JSON (no markdown, no code blocks) in this exact format:
 {
@@ -51,6 +59,8 @@ Output ONLY valid JSON (no markdown, no code blocks) in this exact format:
     {
       "title": "task title",
       "details": "detailed description with context",
+      "client": "Acme Corp",
+      "dueDate": "2026-03-15",
       "priority": "medium",
       "tags": ["tag1", "tag2"]
     }
@@ -60,7 +70,10 @@ Output ONLY valid JSON (no markdown, no code blocks) in this exact format:
 Rules:
 - Split compound statements into separate tasks
 - Expand abbreviated references (e.g., "scott's site" -> "Update login for Scott's website")
-- Use context to add relevant details
+- Use context to identify clients — people with role "Client" are likely the client for their tasks
+- Resolve relative dates (e.g., "next Friday", "end of month", "in 2 weeks") to absolute ISO dates using today's date
+- Set client to null if no client is mentioned
+- Set dueDate to null if no due date is mentioned
 - Be specific and actionable
 - Output ONLY the JSON, nothing else`;
   }
@@ -85,7 +98,8 @@ Rules:
       // Call LLM (using King Louie's provider interface)
       const response = await this.llmProvider.sendMessage(messages, {
         temperature: 0.3, // Lower temperature for more consistent output
-        max_tokens: 1000
+        max_tokens: 1000,
+        ...(this.nlpModel ? { model: this.nlpModel } : {})
       });
 
       // Provider responses can be plain strings or objects with `content`
@@ -137,6 +151,8 @@ Rules:
       return parsed.tasks.map((task) => ({
         title: task.title || 'Untitled task',
         details: task.details || null,
+        client: task.client || null,
+        dueDate: parseDate(task.dueDate) || null,
         priority: this._normalizePriority(task.priority),
         tags: Array.isArray(task.tags) ? task.tags : [],
         status: 'pending'

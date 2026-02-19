@@ -98,6 +98,10 @@ class CommandRouter {
       // Handle query-style natural language without creating tasks
       if (intent === 'list') {
         console.log('[std-router] Unknown subcommand, detected list/query intent');
+        const filterArgs = this.extractQueryFilters(naturalInput);
+        if (filterArgs.length > 0) {
+          return await filterCommand(filterArgs, this.database, this.context, commandContext);
+        }
         return await listCommand([], this.database, this.context, commandContext);
       }
 
@@ -229,11 +233,13 @@ class CommandRouter {
       return 'complete';
     }
 
-    // Query/list intent (e.g., "what are my current tasks?")
+    // Query/list intent (e.g., "what are my current tasks?", "do I have any high priority tasks?")
     if (
       (/(^|\b)(what|which|show|list|display)\b/.test(text) && /\b(task|tasks|todo|todos)\b/.test(text)) ||
       /\b(current tasks?)\b/.test(text) ||
-      /\b(my tasks?)\b/.test(text)
+      /\b(my tasks?)\b/.test(text) ||
+      (/\b(do\s+i\s+have|are\s+there|have\s+i\s+got|any)\b/.test(text) && /\b(task|tasks|todo|todos)\b/.test(text)) ||
+      (/\?$/.test(text.trim()) && /\b(task|tasks|todo|todos)\b/.test(text))
     ) {
       return 'list';
     }
@@ -252,6 +258,22 @@ class CommandRouter {
     }
 
     return null;
+  }
+
+  extractQueryFilters(input) {
+    const text = String(input || '').toLowerCase();
+    const args = [];
+
+    if (/\bcritical\b/.test(text)) args.push('priority:critical');
+    else if (/\bhigh[\s-]priority\b|\bpriority[\s:]high\b|\bhigh\s+priority\b/.test(text)) args.push('priority:high');
+    else if (/\blow[\s-]priority\b|\bpriority[\s:]low\b/.test(text)) args.push('priority:low');
+    else if (/\bmedium[\s-]priority\b|\bpriority[\s:]medium\b/.test(text)) args.push('priority:medium');
+
+    if (/\boverdue\b/.test(text) || /\bpast\s+due\b/.test(text)) args.push('status:pending');
+    else if (/\bin[\s-]progress\b/.test(text)) args.push('status:in-progress');
+    else if (/\bpending\b/.test(text)) args.push('status:pending');
+
+    return args;
   }
 
   extractSearchQuery(input) {
