@@ -124,6 +124,27 @@ npm run uninstall
 /std export
 ```
 
+### Configure API Mode (No env vars required)
+
+You can now configure API sync directly from chat/UI commands:
+
+```
+/std login
+/std login <username>
+/std login <password>
+
+/std api status
+/std api set --username <user> --password <pass> --url https://sethserver.com/api/v1
+/std api test
+/std api clear
+```
+
+Notes:
+- `login` is a guided flow: start with `/std login`, then provide username, then password
+- `set` stores config in your King Louie user data folder (`std-api-config.json`)
+- `test` validates auth/connectivity before normal usage
+- `clear` removes credentials and switches back to local SQLite mode
+
 ### 🧠 AI-Powered Natural Language (NEW!)
 
 #### Add Context (People & Projects)
@@ -218,7 +239,14 @@ king-louie-std-skill/
 
 ## Phase 2: API Sync
 
-The STD skill is designed to sync with your sethserver.com API. API sync will be implemented in Phase 2 with:
+The STD skill supports a remote API mode for sethserver.com-compatible endpoints.
+
+Current implementation includes:
+- Command-based API configuration (`/std api ...`)
+- Authenticated CRUD against remote `/stds` endpoints
+- Easy fallback back to local DB mode
+
+Future improvements can still include:
 
 - Automatic background sync
 - Conflict resolution

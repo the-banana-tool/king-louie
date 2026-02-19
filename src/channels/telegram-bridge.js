@@ -13,6 +13,7 @@ class TelegramBridge {
     this.sessionManager = options.sessionManager;
     this.getAgent = options.getAgent || (() => null);
     this.listAgents = options.listAgents || (() => []);
+    this.pinManager = options.pinManager || null;
     this.pollTimeoutSeconds = Number(options.pollTimeoutSeconds || 30);
 
     // Callbacks for local chat management
@@ -171,6 +172,39 @@ class TelegramBridge {
     // Add user message to local chat
     this.addToLocalChat(chatId, 'user', text);
 
+    const state = this.getOrCreateChatState(chatId);
+    const pinnedSkillId = this.pinManager?.getPinned(state.sessionKey);
+    if (pinnedSkillId) {
+      const skill = skillRegistry.getSkill(pinnedSkillId);
+      if (skill && typeof skill.handleMessage === 'function') {
+        const session = this.sessionManager.getOrCreateSession(state.sessionKey, state.agentId, {
+          channel: 'telegram',
+          peer: chatId,
+          label: `telegram:${chatId}`
+        });
+
+        const result = await skill.handleMessage(text, {
+          chatId,
+          channel: 'telegram',
+          userId: chatId,
+          session
+        });
+
+        if (result !== null) {
+          const responseText = result.ok
+            ? (result.message || 'Done.')
+            : `❌ ${result.error || 'Error'}`;
+
+          await this.sendMessage(chatId, responseText);
+          this.addToLocalChat(chatId, 'assistant', responseText);
+
+          if (!result.continueWithAgent) {
+            return;
+          }
+        }
+      }
+    }
+
     await this.routeAgentMessage(chatId, text);
   }
 
@@ -179,6 +213,74 @@ class TelegramBridge {
     const command = String(rawCommand || '').toLowerCase();
     const arg = rest.join(' ').trim();
     const state = this.getOrCreateChatState(chatId);
+
+    if (command === '/pin') {
+      const skillId = arg;
+      if (!skillId) {
+        await this.sendMessage(chatId, 'Usage: /pin <skill-id>');
+        return;
+      }
+
+      const skill = skillRegistry.getSkill(skillId);
+      if (!skill) {
+        await this.sendMessage(chatId, `Unknown skill: ${skillId}`);
+        return;
+      }
+
+      if (!skill.getMetadata().pinnable) {
+        await this.sendMessage(chatId, `Skill '${skillId}' does not support pinning.`);
+        return;
+      }
+
+      if (!this.pinManager) {
+        await this.sendMessage(chatId, 'Pin manager is not available.');
+        return;
+      }
+
+      await this.pinManager.pin(state.sessionKey, skillId);
+      const meta = skill.getMetadata();
+      await this.sendMessage(
+        chatId,
+        `📌 Pinned ${meta.name} to this chat. All messages will be handled by ${meta.name}. Use /unpin to restore normal behavior.`
+      );
+      return;
+    }
+
+    if (command === '/unpin') {
+      if (!this.pinManager) {
+        await this.sendMessage(chatId, 'Pin manager is not available.');
+        return;
+      }
+
+      const pinnedId = this.pinManager.getPinned(state.sessionKey);
+      if (!pinnedId) {
+        await this.sendMessage(chatId, 'No skill is currently pinned.');
+        return;
+      }
+
+      await this.pinManager.unpin(state.sessionKey);
+      const label = skillRegistry.getSkill(pinnedId)?.getMetadata()?.name || pinnedId;
+      await this.sendMessage(chatId, `📌 Unpinned ${label}. Normal behavior restored.`);
+      return;
+    }
+
+    if (command === '/pinned') {
+      if (!this.pinManager) {
+        await this.sendMessage(chatId, 'Pin manager is not available.');
+        return;
+      }
+
+      const pinnedId = this.pinManager.getPinned(state.sessionKey);
+      if (!pinnedId) {
+        await this.sendMessage(chatId, 'No skill is currently pinned to this chat.');
+        return;
+      }
+
+      const skill = skillRegistry.getSkill(pinnedId);
+      const name = skill?.getMetadata()?.name || pinnedId;
+      await this.sendMessage(chatId, `📌 Pinned skill: ${name} (${pinnedId})`);
+      return;
+    }
 
     // Check if this is a skill command
     const commandName = command.startsWith('/') ? command.slice(1) : command;

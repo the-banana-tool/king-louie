@@ -23,8 +23,9 @@ function formatTask(task, detailed = false) {
   };
 
   const parts = [
-    `${statusEmoji[task.status] || '📋'} #${task.id}: ${task.title}`,
-    `   ${priorityEmoji[task.priority] || ''} Priority: ${task.priority}`
+    `${statusEmoji[task.status] || '📋'}  Task #${task.id}`,
+    `   📝 ${task.title}`,
+    `   ${priorityEmoji[task.priority] || '⚪'} Priority: ${(task.priority || 'unknown').toUpperCase()}`
   ];
 
   if (task.dueDate) {
@@ -32,7 +33,7 @@ function formatTask(task, detailed = false) {
     const now = new Date();
     const isOverdue = dueDate < now && task.status !== 'completed';
     const dueDateStr = dueDate.toLocaleDateString();
-    parts.push(`   📅 Due: ${dueDateStr}${isOverdue ? ' ⚠️ OVERDUE' : ''}`);
+    parts.push(`   📅 Due: ${dueDateStr}${isOverdue ? '  ⚠️ OVERDUE' : ''}`);
   }
 
   if (task.tags && task.tags.length > 0) {
@@ -41,7 +42,7 @@ function formatTask(task, detailed = false) {
 
   if (detailed) {
     if (task.details) {
-      parts.push(`   📝 Details: ${task.details}`);
+      parts.push(`   📄 Details: ${task.details}`);
     }
 
     if (task.isRecurring) {
@@ -58,7 +59,7 @@ function formatTask(task, detailed = false) {
     }
 
     parts.push(`   🕒 Created: ${new Date(task.createdAt).toLocaleString()}`);
-    parts.push(`   🕒 Updated: ${new Date(task.updatedAt).toLocaleString()}`);
+    parts.push(`   🛠️  Updated: ${new Date(task.updatedAt).toLocaleString()}`);
   }
 
   return parts.join('\n');
@@ -77,13 +78,20 @@ function formatTaskList(tasks, options = {}) {
   const parts = [];
 
   if (showCount) {
-    parts.push(`📋 Found ${tasks.length} task(s):\n`);
+    parts.push(`📋 Found ${tasks.length} task(s)`);
+    parts.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   }
 
-  for (const task of tasks) {
+  tasks.forEach((task, index) => {
+    if (index === 0) {
+      parts.push('');
+    }
+
+    parts.push(`${String(index + 1).padStart(2, '0')} of ${tasks.length}`);
     parts.push(formatTask(task, detailed));
-    parts.push(''); // Empty line between tasks
-  }
+    parts.push('────────────────────────────────────────');
+    parts.push('');
+  });
 
   return parts.join('\n');
 }

@@ -11,11 +11,16 @@ class StdDatabase {
     this.db = null;
     this.SQL = null;
 
-    this.apiBaseUrl = process.env.STD_API_BASE_URL || 'https://sethserver.com/api/v1';
-    this.apiUsername = process.env.STD_API_USERNAME || '';
-    this.apiPassword = process.env.STD_API_PASSWORD || '';
-    this.apiTimeoutMs = Number(process.env.STD_API_TIMEOUT_MS || 15000);
-    this.remoteMode = Boolean(this.apiUsername && this.apiPassword);
+    this.defaultApiBaseUrl = 'https://www.sethserver.com/api/v1';
+    this.apiConfigPath = path.join(path.dirname(dbPath), 'std-api-config.json');
+
+    this.apiBaseUrl = this.defaultApiBaseUrl;
+    this.apiUsername = '';
+    this.apiPassword = '';
+    this.apiTimeoutMs = 15000;
+    this.remoteMode = false;
+
+    this._loadApiConfig();
   }
 
   /**
@@ -27,7 +32,80 @@ class StdDatabase {
       return;
     }
 
-    this.SQL = await initSqlJs();
+    await this._initializeLocalDb();
+
+    console.log('[std-db] Database initialized:', this.dbPath);
+  }
+
+  _loadApiConfig() {
+    const fileConfig = this._readApiConfigFile();
+    const envConfig = {
+      baseUrl: process.env.STD_API_BASE_URL,
+      username: process.env.STD_API_USERNAME,
+      password: process.env.STD_API_PASSWORD,
+      timeoutMs: process.env.STD_API_TIMEOUT_MS
+    };
+
+    const merged = {
+      baseUrl: envConfig.baseUrl || fileConfig.baseUrl || this.defaultApiBaseUrl,
+      username: envConfig.username || fileConfig.username || '',
+      password: envConfig.password || fileConfig.password || '',
+      timeoutMs: Number(envConfig.timeoutMs || fileConfig.timeoutMs || 15000)
+    };
+
+    this._applyApiConfig(merged, { persist: false });
+  }
+
+  _readApiConfigFile() {
+    if (!fs.existsSync(this.apiConfigPath)) {
+      return {};
+    }
+
+    try {
+      const raw = fs.readFileSync(this.apiConfigPath, 'utf-8');
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (error) {
+      console.warn('[std-db] Failed to read API config file:', error.message);
+      return {};
+    }
+  }
+
+  _writeApiConfigFile() {
+    const payload = {
+      baseUrl: this.apiBaseUrl,
+      username: this.apiUsername,
+      password: this.apiPassword,
+      timeoutMs: this.apiTimeoutMs,
+      updatedAt: new Date().toISOString()
+    };
+
+    fs.writeFileSync(this.apiConfigPath, JSON.stringify(payload, null, 2), 'utf-8');
+  }
+
+  _applyApiConfig(config = {}, { persist = true } = {}) {
+    this.apiBaseUrl = String(config.baseUrl || this.defaultApiBaseUrl).replace(/\/$/, '');
+    this.apiUsername = String(config.username || '');
+    this.apiPassword = String(config.password || '');
+
+    const timeout = Number(config.timeoutMs || 15000);
+    this.apiTimeoutMs = Number.isFinite(timeout) && timeout > 0 ? timeout : 15000;
+
+    this.remoteMode = Boolean(this.apiUsername && this.apiPassword);
+
+    if (persist) {
+      this._writeApiConfigFile();
+    }
+  }
+
+  async _initializeLocalDb() {
+    if (this.db) {
+      return;
+    }
+
+    if (!this.SQL) {
+      this.SQL = await initSqlJs();
+    }
 
     // Load existing database or create new one
     if (fs.existsSync(this.dbPath)) {
@@ -44,8 +122,85 @@ class StdDatabase {
 
     // Save to disk
     this._save();
+  }
 
-    console.log('[std-db] Database initialized:', this.dbPath);
+  _closeLocalDb() {
+    if (!this.db) {
+      return;
+    }
+
+    this._save();
+    this.db.close();
+    this.db = null;
+  }
+
+  async configureApi(config = {}) {
+    const wasRemoteMode = this.remoteMode;
+    this._applyApiConfig(config, { persist: true });
+
+    if (this.remoteMode) {
+      // Free local DB resources while operating in API mode.
+      this._closeLocalDb();
+    } else if (wasRemoteMode && !this.remoteMode) {
+      // Switched from API mode back to local mode at runtime.
+      await this._initializeLocalDb();
+    }
+
+    return this.getApiStatus();
+  }
+
+  async clearApiConfig() {
+    const wasRemoteMode = this.remoteMode;
+
+    this._applyApiConfig(
+      {
+        baseUrl: this.defaultApiBaseUrl,
+        username: '',
+        password: '',
+        timeoutMs: 15000
+      },
+      { persist: false }
+    );
+
+    if (fs.existsSync(this.apiConfigPath)) {
+      fs.unlinkSync(this.apiConfigPath);
+    }
+
+    if (wasRemoteMode) {
+      await this._initializeLocalDb();
+    }
+
+    return this.getApiStatus();
+  }
+
+  getApiStatus() {
+    return {
+      remoteMode: this.remoteMode,
+      baseUrl: this.apiBaseUrl,
+      timeoutMs: this.apiTimeoutMs,
+      hasCredentials: Boolean(this.apiUsername && this.apiPassword),
+      username: this.apiUsername || null,
+      configPath: this.apiConfigPath
+    };
+  }
+
+  async testApiConnection() {
+    if (!this.remoteMode) {
+      return {
+        ok: false,
+        message: 'Remote API mode is disabled. Configure credentials with /std api set first.'
+      };
+    }
+
+    await this._apiRequest('/stds', {
+      method: 'GET',
+      query: { archived: 'false' }
+    });
+
+    return {
+      ok: true,
+      message: 'Connected to STD API successfully.'
+    };
   }
 
   async _apiRequest(endpoint, { method = 'GET', body = null, query = null } = {}) {
@@ -79,17 +234,116 @@ class StdDatabase {
       });
 
       const text = await response.text();
-      const data = text ? JSON.parse(text) : null;
+      let data = null;
+      if (text) {
+        try {
+          data = JSON.parse(text);
+        } catch {
+          data = text;
+        }
+      }
 
       if (!response.ok) {
-        const err = data?.error || data?.message || `${response.status} ${response.statusText}`;
-        throw new Error(`STD API error: ${err}`);
+        const serverMessage =
+          (data && typeof data === 'object' && (data.error || data.message || data.detail)) ||
+          (typeof data === 'string' ? data : '');
+
+        throw this._createHttpApiError({
+          method,
+          url,
+          status: response.status,
+          statusText: response.statusText,
+          serverMessage
+        });
       }
 
       return data;
+    } catch (error) {
+      if (error && error.isStdApiError) {
+        throw error;
+      }
+
+      throw this._createTransportApiError({ method, url, error });
     } finally {
       clearTimeout(timeout);
     }
+  }
+
+  _createHttpApiError({ method, url, status, statusText, serverMessage = '' }) {
+    const normalizedMessage = String(serverMessage || '').trim();
+    const responseSummary = `${status} ${statusText || ''}`.trim();
+
+    let classification = 'http_error';
+    let guidance = 'Request to STD API failed.';
+
+    if (status === 401) {
+      classification = 'auth_invalid';
+      guidance =
+        'Authentication failed (401). The API rejected your username/password. If credentials look correct, verify this base URL and auth scheme are correct for your API.';
+    } else if (status === 403) {
+      classification = 'auth_forbidden';
+      guidance =
+        'Authentication succeeded but access is forbidden (403). Your account may not have permission for this endpoint.';
+    } else if (status === 404) {
+      classification = 'endpoint_not_found';
+      guidance =
+        'Endpoint not found (404). This often means the base URL is wrong (for example missing /api/v1) or the route is unavailable on the server.';
+    } else if (status >= 500) {
+      classification = 'server_error';
+      guidance = 'STD API server returned an internal error.';
+    }
+
+    const parts = [
+      `STD API request failed: ${responseSummary}`,
+      `Method: ${method}`,
+      `URL: ${url.toString()}`
+    ];
+
+    if (normalizedMessage) {
+      parts.push(`Server message: ${normalizedMessage}`);
+    }
+
+    parts.push(`Diagnosis: ${guidance}`);
+
+    const apiError = new Error(parts.join('\n'));
+    apiError.name = 'StdApiError';
+    apiError.isStdApiError = true;
+    apiError.type = 'http';
+    apiError.classification = classification;
+    apiError.status = status;
+    apiError.statusText = statusText;
+    apiError.method = method;
+    apiError.url = url.toString();
+    apiError.serverMessage = normalizedMessage || null;
+    return apiError;
+  }
+
+  _createTransportApiError({ method, url, error }) {
+    const isTimeout = error?.name === 'AbortError';
+    const classification = isTimeout ? 'network_timeout' : 'network_error';
+
+    const guidance = isTimeout
+      ? 'The request timed out before the API responded. Check connectivity/server health or increase timeout with /std api set --timeout <ms>.'
+      : 'Could not reach the STD API. Check base URL, DNS/network access, and whether the API server is running.';
+
+    const parts = [
+      `STD API request failed: ${isTimeout ? 'timeout' : 'network error'}`,
+      `Method: ${method}`,
+      `URL: ${url.toString()}`,
+      `Cause: ${error?.message || 'unknown error'}`,
+      `Diagnosis: ${guidance}`
+    ];
+
+    const apiError = new Error(parts.join('\n'));
+    apiError.name = 'StdApiError';
+    apiError.isStdApiError = true;
+    apiError.type = 'transport';
+    apiError.classification = classification;
+    apiError.status = null;
+    apiError.method = method;
+    apiError.url = url.toString();
+    apiError.cause = error;
+    return apiError;
   }
 
   _fromApi(std) {
@@ -641,15 +895,10 @@ class StdDatabase {
    * Close database connection
    */
   async close() {
-    if (this.remoteMode) {
-      return;
-    }
+    if (!this.db) return;
 
-    if (this.db) {
-      this._save();
-      this.db.close();
-      console.log('[std-db] Database closed');
-    }
+    this._closeLocalDb();
+    console.log('[std-db] Database closed');
   }
 }
 

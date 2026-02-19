@@ -20,7 +20,7 @@ const {
   SessionsHistoryTool,
   SessionsSpawnTool
 } = require('./src/tools/builtin/sessions-tools');
-const { SkillLoader, skillRegistry } = require('./src/skills');
+const { SkillLoader, skillRegistry, PinManager } = require('./src/skills');
 
 let mainWindow;
 let skillLoader;
@@ -30,6 +30,7 @@ let gatewayServer;
 let sessionManager;
 let remoteControl;
 let telegramBridge;
+let pinManager;
 const TELEGRAM_TOKEN_STORE_KEY = '__telegram_bot_token';
 
 const store = new Store({
@@ -347,6 +348,7 @@ const startTelegramBridge = async (token) => {
     token,
     gatewayServer,
     sessionManager,
+    pinManager,
     getAgent,
     listAgents,
     // Callbacks for local chat management
@@ -792,6 +794,10 @@ const createAgentRuntime = async (providerType, event = null, approvalRequester 
 const initializeAgentInfrastructure = async () => {
   taskManager = new TaskManager();
   sessionManager = new SessionManager();
+  pinManager = new PinManager({
+    storageFile: path.join(app.getPath('userData'), 'skill-pins.json')
+  });
+  await pinManager.load();
 
   gatewayServer = new GatewayServer({
     host: '127.0.0.1',
@@ -1463,6 +1469,101 @@ ipcMain.handle('skill:execute', async (_event, { command, args = [], chatId }) =
       ok: false,
       error: error.message || 'Unknown error executing skill command'
     };
+  }
+});
+
+ipcMain.handle('skill:pin', async (_event, { chatId, skillId }) => {
+  if (!pinManager) {
+    return { ok: false, error: 'Pin manager is not initialized.' };
+  }
+
+  const skill = skillRegistry.getSkill(skillId);
+  if (!skill) {
+    return { ok: false, error: `Unknown skill: ${skillId}` };
+  }
+
+  if (!skill.getMetadata().pinnable) {
+    return { ok: false, error: `Skill '${skillId}' does not support pinning.` };
+  }
+
+  const sessionKey = sessionManager.buildSessionKey('main', 'ui', chatId);
+  await pinManager.pin(sessionKey, skillId);
+  return { ok: true, skillId, name: skill.getMetadata().name };
+});
+
+ipcMain.handle('skill:unpin', async (_event, { chatId }) => {
+  if (!pinManager) {
+    return { ok: false, error: 'Pin manager is not initialized.' };
+  }
+
+  const sessionKey = sessionManager.buildSessionKey('main', 'ui', chatId);
+  const previousId = pinManager.getPinned(sessionKey);
+  await pinManager.unpin(sessionKey);
+  return { ok: true, previousSkillId: previousId || null };
+});
+
+ipcMain.handle('skill:getPinned', async (_event, { chatId }) => {
+  if (!pinManager) {
+    return { ok: false, error: 'Pin manager is not initialized.' };
+  }
+
+  const sessionKey = sessionManager.buildSessionKey('main', 'ui', chatId);
+  const skillId = pinManager.getPinned(sessionKey);
+  if (!skillId) {
+    return { ok: true, pinned: null };
+  }
+
+  const skill = skillRegistry.getSkill(skillId);
+  if (!skill) {
+    return { ok: true, pinned: { skillId } };
+  }
+
+  return {
+    ok: true,
+    pinned: {
+      skillId,
+      ...skill.getMetadata()
+    }
+  };
+});
+
+ipcMain.handle('skill:listPinnable', async () => {
+  return skillRegistry.getPinnableSkills();
+});
+
+ipcMain.handle('skill:handleMessage', async (_event, { chatId, message }) => {
+  if (!pinManager) {
+    return { ok: false, error: 'Pin manager is not initialized.', continueWithAgent: true };
+  }
+
+  const sessionKey = sessionManager.buildSessionKey('main', 'ui', chatId);
+  const skillId = pinManager.getPinned(sessionKey);
+  if (!skillId) {
+    return { ok: false, error: 'No skill pinned', continueWithAgent: true };
+  }
+
+  const skill = skillRegistry.getSkill(skillId);
+  if (!skill || typeof skill.handleMessage !== 'function') {
+    return { ok: false, error: 'Pinned skill cannot handle messages', continueWithAgent: true };
+  }
+
+  const session = sessionManager.getOrCreateSession(sessionKey, 'main', {
+    channel: 'ui',
+    peer: chatId,
+    label: `ui:${chatId}`
+  });
+
+  try {
+    const result = await skill.handleMessage(message, {
+      chatId,
+      channel: 'ui',
+      userId: chatId,
+      session
+    });
+
+    return result || { ok: false, continueWithAgent: true };
+  } catch (error) {
+    return { ok: false, error: error.message, continueWithAgent: true };
   }
 });
 

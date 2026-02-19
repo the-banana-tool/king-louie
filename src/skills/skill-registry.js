@@ -80,6 +80,26 @@ class SkillRegistry {
   }
 
   /**
+   * List all skills that support pinning
+   *
+   * @returns {Array<{id: string, name: string, description: string, commands: string[], version: string}>}
+   */
+  getPinnableSkills() {
+    return Array.from(this.skills.values())
+      .filter((skill) => skill.getMetadata().pinnable === true)
+      .map((skill) => {
+        const meta = skill.getMetadata();
+        return {
+          id: meta.id,
+          name: meta.name,
+          description: meta.description,
+          commands: meta.commands,
+          version: meta.version
+        };
+      });
+  }
+
+  /**
    * Check if a command is handled by a skill
    *
    * @param {string} command - Command name (without /)

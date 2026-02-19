@@ -71,6 +71,9 @@ async function getLocalHelpText() {
     '- `/llm telegram test` — test saved Telegram bot token',
     '- `/llm telegram remove` — clear saved Telegram token and stop bridge',
     '- `/llm telegram status` — show Telegram bridge status',
+    '- `/pin <skill-id>` — pin a skill to this chat (all messages handled by the skill)',
+    '- `/unpin` — unpin current skill, restore normal behavior',
+    '- `/pinned` — show which skill (if any) is pinned to this chat',
     '- `/agent on|off|toggle|status` — control agent mode',
     '- `exit` or `quit` — close the window'
   ];
@@ -795,6 +798,83 @@ async function sendMessage() {
     return;
   }
 
+  if (slashCommand?.name === '/pin') {
+    userInput.value = '';
+    userInput.style.height = 'auto';
+
+    appendLocalMessage('user', message);
+    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch(() => {});
+
+    const skillId = slashCommand.args[0];
+    if (!skillId) {
+      const errorText = 'Usage: `/pin <skill-id>`. Example: `/pin std`';
+      appendLocalMessage('assistant', errorText);
+      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: errorText }).catch(() => {});
+      return;
+    }
+
+    try {
+      const result = await window.electron.skill.pin({ chatId: activeChatId, skillId });
+      const responseText = result.ok
+        ? `📌 Pinned **${result.name || skillId}** to this chat. All messages will be handled by this skill. Use \`/unpin\` to restore normal behavior.`
+        : `❌ ${result.error || 'Unable to pin skill.'}`;
+      appendLocalMessage('assistant', responseText);
+      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch(() => {});
+    } catch (error) {
+      const errorText = `❌ ${error.message || 'Unable to pin skill.'}`;
+      appendLocalMessage('assistant', errorText);
+      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: errorText }).catch(() => {});
+    }
+
+    return;
+  }
+
+  if (slashCommand?.name === '/unpin') {
+    userInput.value = '';
+    userInput.style.height = 'auto';
+
+    appendLocalMessage('user', message);
+    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch(() => {});
+
+    try {
+      const result = await window.electron.skill.unpin({ chatId: activeChatId });
+      const responseText = result.ok
+        ? '📌 Unpinned. Normal behavior restored.'
+        : `❌ ${result.error || 'Unable to unpin skill.'}`;
+      appendLocalMessage('assistant', responseText);
+      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch(() => {});
+    } catch (error) {
+      const errorText = `❌ ${error.message || 'Unable to unpin skill.'}`;
+      appendLocalMessage('assistant', errorText);
+      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: errorText }).catch(() => {});
+    }
+
+    return;
+  }
+
+  if (slashCommand?.name === '/pinned') {
+    userInput.value = '';
+    userInput.style.height = 'auto';
+
+    appendLocalMessage('user', message);
+    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch(() => {});
+
+    try {
+      const result = await window.electron.skill.getPinned({ chatId: activeChatId });
+      const responseText = result?.pinned
+        ? `📌 Pinned skill: **${result.pinned.name || result.pinned.skillId}** (\`${result.pinned.skillId}\`)`
+        : 'No skill is currently pinned to this chat.';
+      appendLocalMessage('assistant', responseText);
+      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch(() => {});
+    } catch (error) {
+      const errorText = `❌ ${error.message || 'Unable to get pinned skill.'}`;
+      appendLocalMessage('assistant', errorText);
+      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: errorText }).catch(() => {});
+    }
+
+    return;
+  }
+
   // Check if this is a skill command (e.g., /std)
   if (slashCommand) {
     const commandName = slashCommand.name.slice(1); // Remove leading /
@@ -807,14 +887,16 @@ async function sendMessage() {
         chatId: activeChatId
       });
 
-      if (skillResult && skillResult.ok !== false) {
+      if (skillResult && !skillResult.error?.startsWith('Unknown skill command:')) {
         userInput.value = '';
         userInput.style.height = 'auto';
 
         appendLocalMessage('user', message);
         window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch(() => {});
 
-        const responseText = skillResult.message || 'Skill command executed.';
+        const responseText = skillResult.ok === false
+          ? `❌ ${skillResult.error || 'Skill command failed.'}`
+          : (skillResult.message || 'Skill command executed.');
         appendLocalMessage('assistant', responseText);
         window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch(() => {});
 
@@ -849,6 +931,24 @@ async function sendMessage() {
   userInput.style.height = 'auto';
 
   try {
+    const pinnedInfo = await window.electron.skill.getPinned({ chatId: activeChatId });
+    if (pinnedInfo?.pinned) {
+      const skillResult = await window.electron.skill.handleMessage({
+        chatId: activeChatId,
+        message
+      });
+
+      if (skillResult && !skillResult.continueWithAgent) {
+        const responseText = skillResult.ok
+          ? (skillResult.message || 'Done.')
+          : `❌ ${skillResult.error || 'Error'}`;
+        window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch(() => {});
+        appendLocalMessage('assistant', responseText);
+        window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch(() => {});
+        return;
+      }
+    }
+
     const updatedChat = await window.electron.chat.sendMessage({
       chatId: activeChatId,
       message,

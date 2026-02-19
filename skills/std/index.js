@@ -26,7 +26,8 @@ class StdSkill {
       version: '1.0.0',
       description: 'Manage your tasks (STDs) with full CRUD, reminders, and sync',
       author: 'Seth Blackman',
-      commands: ['std']
+      commands: ['std'],
+      pinnable: true
     };
   }
 
@@ -76,6 +77,35 @@ class StdSkill {
     return this.commandRouter.route(args, context);
   }
 
+  async handleMessage(text, context) {
+    if (!this.commandRouter) {
+      return {
+        ok: false,
+        error: 'STD skill not initialized',
+        continueWithAgent: false
+      };
+    }
+
+    const args = String(text || '').trim().split(/\s+/).filter(Boolean);
+    if (args[0] && args[0].toLowerCase() === '/std') {
+      args.shift();
+    }
+
+    if (args.length === 0) {
+      return {
+        ok: true,
+        message: 'STD command not provided. Try: /std help',
+        continueWithAgent: false
+      };
+    }
+
+    const result = await this.commandRouter.route(args, context);
+    return {
+      ...result,
+      continueWithAgent: false
+    };
+  }
+
   async getHelp() {
     return [
       '📋 STD Task Manager',
@@ -95,12 +125,18 @@ class StdSkill {
       '  /std remind <id> <datetime> - Set reminder',
       '  /std recurring <id> <pattern> - Set as recurring',
       '  /std export - Export tasks to JSON',
+      '  /std login - Interactive API login (username then password)',
+      '  /std api <status|set|test|clear> - Configure and test remote API mode',
       '',
       'Examples:',
       '  /std add "Buy groceries" --priority high --due tomorrow',
       '  /std list --status pending',
       '  /std complete 5',
-      '  /std filter priority:high status:pending'
+      '  /std filter priority:high status:pending',
+      '  /std login',
+      '  /std login <username>',
+      '  /std login <password>',
+      '  /std api set --username <user> --password <pass> --url https://www.sethserver.com/api/v1',
     ].join('\n');
   }
 

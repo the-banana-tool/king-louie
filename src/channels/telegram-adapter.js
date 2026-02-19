@@ -48,6 +48,9 @@ function formatHelp({ agents = [], currentAgent = 'main', skills = [] } = {}) {
     '- /status — show gateway + session stats',
     '- /clear — clear current chat session history',
     '- /agent <name> — switch active agent for this chat',
+    '- /pin <skill-id> — pin a skill to this chat',
+    '- /unpin — remove pinned skill from this chat',
+    '- /pinned — show currently pinned skill',
     '',
     'Available agents:',
     agentRows

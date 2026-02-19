@@ -94,6 +94,9 @@ To remove it later:
 - `/status` — gateway/session status snapshot
 - `/clear` — clear current Telegram chat session history
 - `/agent <name>` — switch agent for current Telegram chat
+- `/pin <skill-id>` — pin a pinnable skill to the current chat (e.g., `/pin std`)
+- `/unpin` — remove the currently pinned skill
+- `/pinned` — show which skill is currently pinned
 
 ### Behavior
 
