@@ -18,8 +18,7 @@
  * @property {string} description - Brief description of what the skill does
  * @property {string} author - Skill author
  * @property {string[]} commands - List of commands this skill handles (e.g., ['std'])
- * @property {boolean} [pinnable] - If true, skill can be pinned to a chat.
- *   Pinned skill must implement handleMessage().
+ * @property {boolean} [pinnable] - If true, skill can be pinned to a chat. Pinned skill must implement handleMessage().
  */
 
 /**
@@ -98,7 +97,7 @@ class Skill {
    * @returns {Promise<MessageResult|null>} - null means "not handled, fall through to agent"
    */
   async handleMessage(text, context) {
-    return null;
+    return null; // Default: not handled
   }
 
   /**

@@ -24,13 +24,13 @@ const { SkillLoader, skillRegistry, PinManager } = require('./src/skills');
 
 let mainWindow;
 let skillLoader;
+let pinManager;
 const pendingApprovalResolvers = new Map();
 let taskManager;
 let gatewayServer;
 let sessionManager;
 let remoteControl;
 let telegramBridge;
-let pinManager;
 const TELEGRAM_TOKEN_STORE_KEY = '__telegram_bot_token';
 
 const store = new Store({
@@ -348,9 +348,9 @@ const startTelegramBridge = async (token) => {
     token,
     gatewayServer,
     sessionManager,
-    pinManager,
     getAgent,
     listAgents,
+    pinManager,
     // Callbacks for local chat management
     createLocalChat: (title) => {
       const now = new Date().toISOString();
@@ -1485,7 +1485,6 @@ ipcMain.handle('skill:pin', async (_event, { chatId, skillId }) => {
   if (!skill.getMetadata().pinnable) {
     return { ok: false, error: `Skill '${skillId}' does not support pinning.` };
   }
-
   const sessionKey = sessionManager.buildSessionKey('main', 'ui', chatId);
   await pinManager.pin(sessionKey, skillId);
   return { ok: true, skillId, name: skill.getMetadata().name };
@@ -1495,7 +1494,6 @@ ipcMain.handle('skill:unpin', async (_event, { chatId }) => {
   if (!pinManager) {
     return { ok: false, error: 'Pin manager is not initialized.' };
   }
-
   const sessionKey = sessionManager.buildSessionKey('main', 'ui', chatId);
   const previousId = pinManager.getPinned(sessionKey);
   await pinManager.unpin(sessionKey);
@@ -1526,7 +1524,6 @@ ipcMain.handle('skill:getPinned', async (_event, { chatId }) => {
     }
   };
 });
-
 ipcMain.handle('skill:listPinnable', async () => {
   return skillRegistry.getPinnableSkills();
 });
@@ -1560,7 +1557,6 @@ ipcMain.handle('skill:handleMessage', async (_event, { chatId, message }) => {
       userId: chatId,
       session
     });
-
     return result || { ok: false, continueWithAgent: true };
   } catch (error) {
     return { ok: false, error: error.message, continueWithAgent: true };

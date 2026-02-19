@@ -79,11 +79,7 @@ class StdSkill {
 
   async handleMessage(text, context) {
     if (!this.commandRouter) {
-      return {
-        ok: false,
-        error: 'STD skill not initialized',
-        continueWithAgent: false
-      };
+      return { ok: false, error: 'STD skill not initialized', continueWithAgent: false };
     }
 
     const args = String(text || '').trim().split(/\s+/).filter(Boolean);
@@ -100,10 +96,7 @@ class StdSkill {
     }
 
     const result = await this.commandRouter.route(args, context);
-    return {
-      ...result,
-      continueWithAgent: false
-    };
+    return { ...result, continueWithAgent: false };
   }
 
   async getHelp() {

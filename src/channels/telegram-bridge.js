@@ -172,6 +172,7 @@ class TelegramBridge {
     // Add user message to local chat
     this.addToLocalChat(chatId, 'user', text);
 
+    // Check if chat has a pinned skill
     const state = this.getOrCreateChatState(chatId);
     const pinnedSkillId = this.pinManager?.getPinned(state.sessionKey);
     if (pinnedSkillId) {
@@ -183,24 +184,23 @@ class TelegramBridge {
           label: `telegram:${chatId}`
         });
 
-        const result = await skill.handleMessage(text, {
-          chatId,
-          channel: 'telegram',
-          userId: chatId,
-          session
-        });
-
-        if (result !== null) {
-          const responseText = result.ok
-            ? (result.message || 'Done.')
-            : `❌ ${result.error || 'Error'}`;
-
-          await this.sendMessage(chatId, responseText);
-          this.addToLocalChat(chatId, 'assistant', responseText);
-
-          if (!result.continueWithAgent) {
-            return;
+        try {
+          const result = await skill.handleMessage(text, { chatId, channel: 'telegram', userId: chatId, session });
+          if (result !== null) {
+            if (result.ok) {
+              await this.sendMessage(chatId, result.message || 'Done.');
+              this.addToLocalChat(chatId, 'assistant', result.message || 'Done.');
+            } else {
+              const errorMsg = `❌ ${result.error || 'Error'}`;
+              await this.sendMessage(chatId, errorMsg);
+              this.addToLocalChat(chatId, 'assistant', errorMsg);
+            }
+            if (!result.continueWithAgent) return; // Skip AI
           }
+        } catch (error) {
+          console.error('[telegram-bridge] Pinned skill error:', error);
+          await this.sendMessage(chatId, `❌ Pinned skill error: ${error.message}`);
+          return;
         }
       }
     }
@@ -220,64 +220,48 @@ class TelegramBridge {
         await this.sendMessage(chatId, 'Usage: /pin <skill-id>');
         return;
       }
-
+      if (!this.pinManager) {
+        await this.sendMessage(chatId, '❌ Pinning feature not available.');
+        return;
+      }
       const skill = skillRegistry.getSkill(skillId);
       if (!skill) {
         await this.sendMessage(chatId, `Unknown skill: ${skillId}`);
         return;
       }
-
       if (!skill.getMetadata().pinnable) {
         await this.sendMessage(chatId, `Skill '${skillId}' does not support pinning.`);
         return;
       }
-
-      if (!this.pinManager) {
-        await this.sendMessage(chatId, 'Pin manager is not available.');
-        return;
-      }
-
       await this.pinManager.pin(state.sessionKey, skillId);
-      const meta = skill.getMetadata();
-      await this.sendMessage(
-        chatId,
-        `📌 Pinned ${meta.name} to this chat. All messages will be handled by ${meta.name}. Use /unpin to restore normal behavior.`
-      );
+      await this.sendMessage(chatId, `📌 Pinned ${skill.getMetadata().name} to this chat. All messages will be handled by ${skill.getMetadata().name}. Use /unpin to restore normal behavior.`);
       return;
     }
 
     if (command === '/unpin') {
       if (!this.pinManager) {
-        await this.sendMessage(chatId, 'Pin manager is not available.');
+        await this.sendMessage(chatId, '❌ Pinning feature not available.');
         return;
       }
-
       const pinnedId = this.pinManager.getPinned(state.sessionKey);
-      if (!pinnedId) {
-        await this.sendMessage(chatId, 'No skill is currently pinned.');
-        return;
-      }
-
       await this.pinManager.unpin(state.sessionKey);
-      const label = skillRegistry.getSkill(pinnedId)?.getMetadata()?.name || pinnedId;
-      await this.sendMessage(chatId, `📌 Unpinned ${label}. Normal behavior restored.`);
+      const label = pinnedId ? skillRegistry.getSkill(pinnedId)?.getMetadata().name || pinnedId : null;
+      await this.sendMessage(chatId, label ? `📌 Unpinned ${label}. Normal behavior restored.` : 'No skill is currently pinned.');
       return;
     }
 
     if (command === '/pinned') {
       if (!this.pinManager) {
-        await this.sendMessage(chatId, 'Pin manager is not available.');
+        await this.sendMessage(chatId, '❌ Pinning feature not available.');
         return;
       }
-
       const pinnedId = this.pinManager.getPinned(state.sessionKey);
       if (!pinnedId) {
         await this.sendMessage(chatId, 'No skill is currently pinned to this chat.');
         return;
       }
-
       const skill = skillRegistry.getSkill(pinnedId);
-      const name = skill?.getMetadata()?.name || pinnedId;
+      const name = skill?.getMetadata().name || pinnedId;
       await this.sendMessage(chatId, `📌 Pinned skill: ${name} (${pinnedId})`);
       return;
     }

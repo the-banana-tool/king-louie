@@ -7,6 +7,6 @@ module.exports = {
   Skill,
   SkillRegistry,
   SkillLoader,
-  PinManager,
-  skillRegistry: registry
+  skillRegistry: registry,
+  PinManager
 };
