@@ -169,6 +169,37 @@ Skills are automatically loaded from the `skills/` directory when King Louie sta
 
 See `skills/hello-world/` for a complete working example.
 
+## Skill Customizations (Upgrade-Safe Overrides)
+
+King Louie supports user-level skill customizations without editing files under `skills/`.
+
+- Customizations are stored in your user data folder under:
+  - `skill-customizations/<skill-id>/customization.json`
+- Create/open a customization file from chat with:
+  - `/skill customize <skill-id>`
+
+### Customization File Shape
+
+```json
+{
+  "metadata": {
+    "description": "My custom description",
+    "commands": ["std"],
+    "resolvers": ["code", "skill"]
+  },
+  "settings": {
+    "exampleFlag": true
+  }
+}
+```
+
+### Merge Behavior
+
+- Customizations are loaded after the base skill module.
+- Objects are deep-merged (`metadata`, `settings`, nested objects).
+- Arrays are **replaced** (not concatenated).
+- If a skill implements `applyCustomization(settings)`, it will receive merged settings on load.
+
 ## Tips
 
 - Use `userDataPath` to store skill-specific data

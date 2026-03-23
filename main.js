@@ -1,4 +1,5 @@
-const { app, BrowserWindow, ipcMain, safeStorage } = require('electron');
+const { app, BrowserWindow, ipcMain, safeStorage, shell } = require('electron');
+const fs = require('fs');
 const path = require('path');
 const { default: Store } = require('electron-store');
 const ProviderFactory = require('./src/providers/provider-factory');
@@ -477,6 +478,52 @@ const clearProviderToken = (provider) => {
   delete tokens[provider];
   setApiTokens(tokens);
   return false;
+};
+
+const normalizeSkillIdForCustomization = (rawSkillId = '') => {
+  return String(rawSkillId || '').trim().toLowerCase();
+};
+
+const ensureSkillCustomizationFile = (skillId) => {
+  const normalizedSkillId = normalizeSkillIdForCustomization(skillId);
+  if (!normalizedSkillId) {
+    throw new Error('Skill ID is required. Usage: /skill customize <skill-id>');
+  }
+
+  if (!/^[a-z0-9][a-z0-9-_]*$/i.test(normalizedSkillId)) {
+    throw new Error('Skill ID contains invalid characters.');
+  }
+
+  const skill = skillRegistry.getSkill(normalizedSkillId);
+  if (!skill) {
+    throw new Error(`Unknown skill: ${normalizedSkillId}`);
+  }
+
+  const customizationDir = path.join(app.getPath('userData'), 'skill-customizations', normalizedSkillId);
+  fs.mkdirSync(customizationDir, { recursive: true });
+
+  const customizationFilePath = path.join(customizationDir, 'customization.json');
+  const existed = fs.existsSync(customizationFilePath);
+
+  if (!existed) {
+    const metadata = skill.getMetadata();
+    const template = {
+      metadata: {
+        description: metadata?.description || '',
+        commands: Array.isArray(metadata?.commands) ? metadata.commands : [],
+        resolvers: Array.isArray(metadata?.resolvers) ? metadata.resolvers : ['skill']
+      },
+      settings: {}
+    };
+
+    fs.writeFileSync(customizationFilePath, `${JSON.stringify(template, null, 2)}\n`, 'utf-8');
+  }
+
+  return {
+    skillId: normalizedSkillId,
+    path: customizationFilePath,
+    created: !existed
+  };
 };
 
 const hasStoredTelegramToken = () => {
@@ -1692,6 +1739,30 @@ ipcMain.handle('sessions:history', async (_event, { sessionKey, limit = 50 }) =>
 
 ipcMain.handle('skill:list', async () => {
   return skillRegistry.listSkills();
+});
+
+ipcMain.handle('skill:customize', async (_event, { skillId } = {}) => {
+  try {
+    const customization = ensureSkillCustomizationFile(skillId);
+    const openError = await shell.openPath(customization.path);
+    if (openError) {
+      return {
+        ok: false,
+        error: openError,
+        ...customization
+      };
+    }
+
+    return {
+      ok: true,
+      ...customization
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message
+    };
+  }
 });
 
 ipcMain.handle('skill:execute', async (_event, { command, args = [], chatId }) => {

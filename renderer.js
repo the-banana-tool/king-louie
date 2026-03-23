@@ -112,6 +112,7 @@ async function getLocalHelpText() {
     '- `/pin <skill-id>` — pin a skill to this chat (all messages handled by the skill)',
     '- `/unpin` — unpin current skill, restore normal behavior',
     '- `/pinned` — show which skill (if any) is pinned to this chat',
+    '- `/skill customize <skill-id>` — open/create a user customization file for a skill',
     '- `/agent on|off|toggle|status` — control agent mode',
     '- `/pin <skill-id>` — pin a skill to this chat (all messages handled by the skill)',
     '- `/unpin` — unpin current skill, restore normal behavior',
@@ -1150,6 +1151,39 @@ async function sendMessage() {
       : 'No skill is currently pinned to this chat.';
     appendLocalMessage('assistant', responseText);
     window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch(() => {});
+    return;
+  }
+
+  if (slashCommand?.name === '/skill') {
+    userInput.value = '';
+    userInput.style.height = 'auto';
+
+    appendLocalMessage('user', message);
+    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch(() => {});
+
+    const action = (slashCommand.args[0] || '').toLowerCase();
+    const skillId = (slashCommand.args[1] || '').trim();
+
+    if (action !== 'customize' || !skillId) {
+      const usage = 'Usage: `/skill customize <skill-id>`. Example: `/skill customize std`';
+      appendLocalMessage('assistant', usage);
+      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: usage }).catch(() => {});
+      return;
+    }
+
+    try {
+      const result = await window.electron.skill.customize({ skillId });
+      const responseText = result?.ok
+        ? `Opened customization file for **${result.skillId}** at:\n\`${result.path}\`${result.created ? '\n\nCreated a new file with starter defaults.' : ''}`
+        : `❌ ${result?.error || 'Unable to open customization file.'}`;
+      appendLocalMessage('assistant', responseText);
+      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch(() => {});
+    } catch (error) {
+      const errorText = `❌ ${error.message || 'Unable to open customization file.'}`;
+      appendLocalMessage('assistant', errorText);
+      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: errorText }).catch(() => {});
+    }
+
     return;
   }
 

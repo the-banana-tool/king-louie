@@ -2,6 +2,29 @@ const fs = require('fs');
 const path = require('path');
 const { registry } = require('./skill-registry');
 
+const isPlainObject = (value) => {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+};
+
+const deepMergeWithArrayReplace = (baseValue, overrideValue) => {
+  if (Array.isArray(overrideValue)) {
+    return [...overrideValue];
+  }
+
+  if (!isPlainObject(overrideValue)) {
+    return overrideValue;
+  }
+
+  const baseObject = isPlainObject(baseValue) ? baseValue : {};
+  const result = { ...baseObject };
+
+  for (const [key, value] of Object.entries(overrideValue)) {
+    result[key] = deepMergeWithArrayReplace(baseObject[key], value);
+  }
+
+  return result;
+};
+
 /**
  * Loads skills from the skills directory
  */
@@ -9,6 +32,105 @@ class SkillLoader {
   constructor(options = {}) {
     this.skillsDirectory = options.skillsDirectory || path.join(__dirname, '..', '..', 'skills');
     this.context = options.context || {};
+    const userDataPath = this.context?.userDataPath || options.userDataPath || process.cwd();
+    this.customizationsDirectory =
+      options.customizationsDirectory || path.join(userDataPath, 'skill-customizations');
+  }
+
+  ensureCustomizationDirectory() {
+    if (!this.customizationsDirectory) {
+      return null;
+    }
+
+    try {
+      fs.mkdirSync(this.customizationsDirectory, { recursive: true });
+      return this.customizationsDirectory;
+    } catch (error) {
+      console.warn('[skill-loader] Unable to create skill customizations directory:', error.message);
+      return null;
+    }
+  }
+
+  readSkillCustomization(skillPath, skillInstance) {
+    if (!this.customizationsDirectory) {
+      return null;
+    }
+
+    const skillDirectoryName = path.basename(skillPath);
+    const metadata = typeof skillInstance?.getMetadata === 'function' ? skillInstance.getMetadata() : {};
+    const identifiers = [
+      metadata?.id,
+      skillDirectoryName
+    ].filter(Boolean);
+
+    for (const identifier of identifiers) {
+      const customizationFilePath = path.join(
+        this.customizationsDirectory,
+        identifier,
+        'customization.json'
+      );
+
+      if (!fs.existsSync(customizationFilePath)) {
+        continue;
+      }
+
+      try {
+        const raw = fs.readFileSync(customizationFilePath, 'utf-8');
+        const parsed = JSON.parse(raw);
+        if (!isPlainObject(parsed)) {
+          console.warn(`[skill-loader] Ignoring invalid customization in ${customizationFilePath}`);
+          continue;
+        }
+
+        return {
+          identifier,
+          path: customizationFilePath,
+          data: parsed
+        };
+      } catch (error) {
+        console.warn(`[skill-loader] Failed to parse customization at ${customizationFilePath}:`, error.message);
+      }
+    }
+
+    return null;
+  }
+
+  applySkillCustomization(skillInstance, customizationRecord) {
+    if (!customizationRecord?.data || !skillInstance || typeof skillInstance.getMetadata !== 'function') {
+      return;
+    }
+
+    const originalGetMetadata = skillInstance.getMetadata.bind(skillInstance);
+    const customization = customizationRecord.data;
+    const metadataOverrides = isPlainObject(customization.metadata)
+      ? customization.metadata
+      : Object.fromEntries(
+          Object.entries(customization).filter(([key]) => key !== 'settings')
+        );
+
+    skillInstance.getMetadata = () => {
+      const baseMetadata = originalGetMetadata();
+      return deepMergeWithArrayReplace(baseMetadata, metadataOverrides);
+    };
+
+    if (isPlainObject(customization.settings)) {
+      const baseSettings = isPlainObject(skillInstance.customSettings)
+        ? skillInstance.customSettings
+        : {};
+      const mergedSettings = deepMergeWithArrayReplace(baseSettings, customization.settings);
+      skillInstance.customSettings = mergedSettings;
+
+      if (typeof skillInstance.applyCustomization === 'function') {
+        skillInstance.applyCustomization(mergedSettings);
+      }
+    }
+
+    skillInstance.customization = {
+      id: customizationRecord.identifier,
+      path: customizationRecord.path
+    };
+
+    console.log(`[skill-loader] Applied customization for skill '${customizationRecord.identifier}'`);
   }
 
   /**
@@ -83,6 +205,11 @@ class SkillLoader {
         return null;
       }
 
+      const customizationRecord = this.readSkillCustomization(skillPath, skillInstance);
+      if (customizationRecord) {
+        this.applySkillCustomization(skillInstance, customizationRecord);
+      }
+
       // Initialize the skill
       if (typeof skillInstance.initialize === 'function') {
         await skillInstance.initialize(this.context);
@@ -101,6 +228,7 @@ class SkillLoader {
    * @returns {Promise<number>} - Number of skills loaded successfully
    */
   async loadAll() {
+    this.ensureCustomizationDirectory();
     const skillDirs = this.discoverSkills();
     let loadedCount = 0;
 

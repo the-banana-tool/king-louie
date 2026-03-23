@@ -185,11 +185,20 @@ Allow users to override skill configs without modifying base skill files. Upgrad
 
 ### Tasks
 
-- [ ] **8.1** Create `skill-customizations/` directory in app user data path
-- [ ] **8.2** Modify `skill-loader.js` to check for user overrides in `skill-customizations/{skill-name}/` after loading base skill
-- [ ] **8.3** Implement deep merge strategy - User config overrides base config, arrays are replaced not merged
-- [ ] **8.4** Add `/skill customize <name>` command that opens/creates the customization file for a skill
-- [ ] **8.5** Document customization pattern in `skills/README.md`
+- [x] **8.1** Create `skill-customizations/` directory in app user data path
+- [x] **8.2** Modify `skill-loader.js` to check for user overrides in `skill-customizations/{skill-name}/` after loading base skill
+- [x] **8.3** Implement deep merge strategy - User config overrides base config, arrays are replaced not merged
+- [x] **8.4** Add `/skill customize <name>` command that opens/creates the customization file for a skill
+- [x] **8.5** Document customization pattern in `skills/README.md`
+
+### Progress Notes
+
+- ✅ Completed 2026-03-23: skill customization merging + command + docs (8.1–8.5)
+- Added upgrade-safe customization loading in `src/skills/skill-loader.js` with user-data directory support (`skill-customizations/<skill-id>/customization.json`)
+- Implemented deep merge behavior for customization data with array replacement semantics (arrays replace, objects merge recursively)
+- Added `/skill customize <skill-id>` command flow in desktop chat (`renderer.js` + `preload.js` + new `skill:customize` IPC in `main.js`) to create/open customization files quickly
+- Added customization docs to `skills/README.md`, including file shape and merge rules
+- Verified with syntax checks (`node --check` on touched JS files) and a node-based smoke test validating metadata override + array replacement behavior
 
 ---
 

@@ -135,6 +135,7 @@ contextBridge.exposeInMainWorld(
     },
     skill: {
       list: () => ipcRenderer.invoke('skill:list'),
+      customize: (payload) => ipcRenderer.invoke('skill:customize', payload),
       execute: (payload) => ipcRenderer.invoke('skill:execute', payload),
       pin: (payload) => ipcRenderer.invoke('skill:pin', payload),
       unpin: (payload) => ipcRenderer.invoke('skill:unpin', payload),
