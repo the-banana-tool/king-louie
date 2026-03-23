@@ -5,6 +5,12 @@ class MemoryStore {
   constructor(options = {}) {
     this.storageFile = options.storageFile || path.join(process.cwd(), 'memory-store.json');
     this.cache = null;
+    this._writeQueue = Promise.resolve();
+  }
+
+  _enqueue(fn) {
+    this._writeQueue = this._writeQueue.then(fn).catch(fn);
+    return this._writeQueue;
   }
 
   ensureDirectory() {
@@ -56,7 +62,10 @@ class MemoryStore {
   save(document = this.cache || this.getDefaultDocument()) {
     this.ensureDirectory();
     this.cache = this.normalizeDocument(document);
-    fs.writeFileSync(this.storageFile, `${JSON.stringify(this.cache, null, 2)}\n`, 'utf-8');
+    const data = `${JSON.stringify(this.cache, null, 2)}\n`;
+    const tempFile = `${this.storageFile}.tmp`;
+    fs.writeFileSync(tempFile, data, 'utf-8');
+    fs.renameSync(tempFile, this.storageFile);
     return this.cache;
   }
 
@@ -72,6 +81,8 @@ class MemoryStore {
   }
 
   insert(entry) {
+    // Invalidate cache and reload to prevent lost updates from concurrent callers
+    this.cache = null;
     const document = this.load();
     document.entries = [entry, ...document.entries.filter((item) => item.id !== entry.id)];
     this.save(document);
@@ -84,6 +95,7 @@ class MemoryStore {
       return null;
     }
 
+    this.cache = null;
     const document = this.load();
     let updated = null;
     document.entries = document.entries.map((entry) => {
@@ -112,6 +124,7 @@ class MemoryStore {
       return false;
     }
 
+    this.cache = null;
     const document = this.load();
     const before = document.entries.length;
     document.entries = document.entries.filter((entry) => entry.id !== key);
@@ -120,6 +133,7 @@ class MemoryStore {
   }
 
   clear() {
+    this.cache = null;
     const document = this.getDefaultDocument();
     this.save(document);
     return true;
