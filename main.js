@@ -7,7 +7,10 @@ const InferenceRouter = require('./src/providers/inference-router');
 const { initializeTools, toolRegistry } = require('./src/tools');
 const ToolExecutor = require('./src/execution/tool-executor');
 const AgentLoop = require('./src/execution/agent-loop');
-const { getRuntimeEnvironment } = require('./src/execution/runtime-environment');
+const {
+  getRuntimeEnvironment,
+  resetRuntimeEnvironmentCache
+} = require('./src/execution/runtime-environment');
 const { TaskManager } = require('./src/tasks/task-manager');
 const AgentExecutor = require('./src/agents/agent-executor');
 const AgentOrchestrator = require('./src/agents/orchestrator');
@@ -34,6 +37,7 @@ const {
   normalizeNotificationSettings
 } = require('./src/notifications/notification-router');
 const { TTSEngine, DEFAULT_VOICE_SETTINGS } = require('./src/voice/tts-engine');
+const { applyActiveProviderUpdate } = require('./src/ipc/settings-provider');
 
 let mainWindow;
 let skillLoader;
@@ -377,6 +381,7 @@ const setActiveProvider = (provider) => {
     activeProvider: provider
   };
   setSettings(updated);
+  resetRuntimeEnvironmentCache();
   return updated.activeProvider;
 };
 
@@ -2126,18 +2131,13 @@ ipcMain.handle('settings:testVoice', async (_event, { settings } = {}) => {
 });
 
 ipcMain.handle('settings:setActiveProvider', (_event, { provider }) => {
-  if (!providerLabels[provider]) {
-    return { ok: false, error: 'Unknown provider.' };
-  }
-
-  const settings = getSettings();
-  const updated = {
-    ...settings,
-    activeProvider: provider
-  };
-  setSettings(updated);
-
-  return { ok: true, activeProvider: provider };
+  return applyActiveProviderUpdate({
+    provider,
+    providerLabels,
+    getSettings,
+    setSettings,
+    resetRuntimeEnvironmentCache
+  });
 });
 
 ipcMain.handle('settings:setProviderModel', (_event, { provider, model }) => {

@@ -51,7 +51,17 @@ Remaining issues from the 2026-03-23 comprehensive code review. The 12 quick/sec
 - **Item 3:** Apply `wrapHandler` to all 51 handlers for fully standardized IPC result shape.
 - **Item 5:** Global renderer state consolidation into `appState` / `dom` objects.
 - **Item 6 (remaining):** Additional validation coverage/access controls beyond current sensitive paths.
-- **Item 7.1 (optional):** Runtime cache reset wiring on provider/workdir changes.
+
+### ✅ Completed in this commit
+
+- **Item 7.1 (optional): Runtime cache reset wiring on provider changes**
+  - Added `src/ipc/settings-provider.js` with `applyActiveProviderUpdate(...)` to centralize provider-switch behavior.
+  - `settings:setActiveProvider` now calls this helper and invokes `resetRuntimeEnvironmentCache()` after updating settings.
+  - Added test coverage in `tests/settings-provider.test.js` for:
+    - unknown provider rejection
+    - successful provider update + cache reset invocation
+    - successful update when reset callback is absent
+  - Included the new test file in `npm test`.
 
 ---
 
@@ -468,7 +478,7 @@ The `getRuntimeEnvironment()` cache was fixed in commit `3070275` with a 5-minut
 
 ### Optional Follow-Up
 
-- [ ] **7.1** Wire `resetRuntimeEnvironmentCache()` into `settings:setActiveProvider` handler so environment is re-detected when the user changes providers or working directory.
+- [x] **7.1** Wire `resetRuntimeEnvironmentCache()` into `settings:setActiveProvider` handler so environment is re-detected when the user changes providers or working directory.
 
 ---
 
