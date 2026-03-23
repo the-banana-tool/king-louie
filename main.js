@@ -33,6 +33,7 @@ const {
   DEFAULT_NOTIFICATION_SETTINGS,
   normalizeNotificationSettings
 } = require('./src/notifications/notification-router');
+const { TTSEngine, DEFAULT_VOICE_SETTINGS } = require('./src/voice/tts-engine');
 
 let mainWindow;
 let skillLoader;
@@ -49,7 +50,9 @@ let hookRegistry;
 let hookExecutor;
 let memoryStore;
 let memoryManager;
+let ttsEngine;
 const TELEGRAM_TOKEN_STORE_KEY = '__telegram_bot_token';
+const ELEVENLABS_TOKEN_STORE_KEY = '__elevenlabs_api_key';
 
 const DEFAULT_SETTINGS = {
   activeProvider: 'openai',
@@ -89,6 +92,9 @@ const DEFAULT_SETTINGS = {
   notifications: {
     ...DEFAULT_NOTIFICATION_SETTINGS
   },
+  voice: {
+    ...DEFAULT_VOICE_SETTINGS
+  },
   hooks: {
     enabled: true,
     hookStates: {}
@@ -124,6 +130,10 @@ const mergeSettings = (settings = {}) => {
       ...(DEFAULT_SETTINGS.notifications || {}),
       ...(source.notifications || {})
     }),
+    voice: {
+      ...(DEFAULT_SETTINGS.voice || {}),
+      ...(source.voice || {})
+    },
     hooks: {
       ...(DEFAULT_SETTINGS.hooks || {}),
       ...(source.hooks || {}),
@@ -401,6 +411,53 @@ const setNotificationSettings = (notifications = {}) => {
 
   setSettings(updated);
   return updated.notifications;
+};
+
+const normalizeVoiceSettings = (voice = {}) => {
+  const source = voice && typeof voice === 'object' ? voice : {};
+  const toNumberOr = (value, fallback) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  };
+
+  const sanitized = {
+    ...DEFAULT_VOICE_SETTINGS,
+    ...source,
+    enabled: source.enabled === true,
+    engine: String(source.engine || DEFAULT_VOICE_SETTINGS.engine).trim().toLowerCase() === 'elevenlabs'
+      ? 'elevenlabs'
+      : 'system',
+    voiceId: String(source.voiceId || '').trim(),
+    speed: Math.max(0.5, Math.min(2, toNumberOr(source.speed, DEFAULT_VOICE_SETTINGS.speed))),
+    stability: Math.max(0, Math.min(1, toNumberOr(source.stability, DEFAULT_VOICE_SETTINGS.stability))),
+    style: Math.max(0, Math.min(1, toNumberOr(source.style, DEFAULT_VOICE_SETTINGS.style))),
+    speakAgentSummary: source.speakAgentSummary !== false,
+    speakChatResponses: source.speakChatResponses === true,
+    telegramVoiceForLongResponses: source.telegramVoiceForLongResponses === true,
+    telegramMinChars: Math.max(80, Math.round(toNumberOr(source.telegramMinChars, DEFAULT_VOICE_SETTINGS.telegramMinChars))),
+    summaryMaxChars: Math.max(80, Math.round(toNumberOr(source.summaryMaxChars, DEFAULT_VOICE_SETTINGS.summaryMaxChars)))
+  };
+
+  return sanitized;
+};
+
+const getVoiceSettings = () => {
+  const settings = getSettings();
+  return normalizeVoiceSettings(settings.voice || {});
+};
+
+const setVoiceSettings = (voice = {}) => {
+  const settings = getSettings();
+  const updated = {
+    ...settings,
+    voice: normalizeVoiceSettings({
+      ...(settings.voice || {}),
+      ...(voice || {})
+    })
+  };
+
+  setSettings(updated);
+  return updated.voice;
 };
 
 const getHookSettings = () => {
@@ -710,6 +767,90 @@ const getDecryptedTelegramToken = () => {
   return decryptToken(encryptedToken);
 };
 
+const hasStoredElevenLabsToken = () => {
+  const tokens = getApiTokens();
+  return Boolean(tokens[ELEVENLABS_TOKEN_STORE_KEY]);
+};
+
+const saveElevenLabsToken = (token) => {
+  const tokens = getApiTokens();
+  tokens[ELEVENLABS_TOKEN_STORE_KEY] = encryptToken(token.trim());
+  setApiTokens(tokens);
+};
+
+const clearElevenLabsToken = () => {
+  const tokens = getApiTokens();
+  delete tokens[ELEVENLABS_TOKEN_STORE_KEY];
+  setApiTokens(tokens);
+};
+
+const getDecryptedElevenLabsToken = () => {
+  const tokens = getApiTokens();
+  const encryptedToken = tokens[ELEVENLABS_TOKEN_STORE_KEY];
+  if (!encryptedToken) return null;
+  return decryptToken(encryptedToken);
+};
+
+const buildAgentVoiceOptions = (agent = null) => {
+  const globalVoice = getVoiceSettings();
+  const agentVoice = agent?.voice || {};
+
+  return {
+    ...globalVoice,
+    ...agentVoice,
+    enabled:
+      (agentVoice && Object.prototype.hasOwnProperty.call(agentVoice, 'enabled'))
+        ? agentVoice.enabled === true
+        : globalVoice.enabled === true,
+    engine: agentVoice.engine || globalVoice.engine,
+    voiceId: agentVoice.voiceId || globalVoice.voiceId,
+    speed:
+      typeof agentVoice.speed === 'number' && Number.isFinite(agentVoice.speed)
+        ? agentVoice.speed
+        : globalVoice.speed,
+    stability:
+      typeof agentVoice.stability === 'number' && Number.isFinite(agentVoice.stability)
+        ? agentVoice.stability
+        : globalVoice.stability,
+    style:
+      typeof agentVoice.style === 'number' && Number.isFinite(agentVoice.style)
+        ? agentVoice.style
+        : globalVoice.style,
+    summaryMaxChars:
+      typeof agentVoice.summaryMaxChars === 'number' && Number.isFinite(agentVoice.summaryMaxChars)
+        ? agentVoice.summaryMaxChars
+        : globalVoice.summaryMaxChars
+  };
+};
+
+const speakSummaryText = async (text, voiceOptions = {}) => {
+  if (!ttsEngine) {
+    return { ok: false, skipped: true, reason: 'TTS engine not initialized.' };
+  }
+
+  try {
+    return await ttsEngine.speakSummary(text, voiceOptions);
+  } catch (error) {
+    return { ok: false, skipped: true, reason: error.message };
+  }
+};
+
+const buildAgentCompletionSummary = (agent, content = '') => {
+  const safeContent = String(content || '').trim();
+  const snippet = safeContent.length > 320 ? `${safeContent.slice(0, 317)}...` : safeContent;
+  return `${agent?.name || 'Agent'} completed. ${snippet || 'No response content.'}`;
+};
+
+const getLastAssistantMessage = (chatId) => {
+  const chat = getChats().find((item) => item.id === chatId);
+  if (!chat) {
+    return null;
+  }
+
+  const messages = Array.isArray(chat.messages) ? [...chat.messages] : [];
+  return messages.reverse().find((message) => message?.sender === 'assistant') || null;
+};
+
 const validateTelegramToken = (token = '') => {
   const trimmed = String(token || '').trim();
   if (!trimmed) {
@@ -743,6 +884,8 @@ const startTelegramBridge = async (token) => {
     listAgents,
     pinManager,
     getNotificationSettings: () => getSettings().notifications,
+    getVoiceSettings,
+    getTtsEngine: () => ttsEngine,
     // Callbacks for local chat management
     createLocalChat: (title) => {
       const now = new Date().toISOString();
@@ -923,6 +1066,10 @@ const runLlmCommand = async (command = '') => {
         '- `/llm telegram test` — test saved Telegram token',
         '- `/llm telegram remove` — clear Telegram token and stop bridge',
         '- `/llm telegram status` — show Telegram bridge status',
+        '- `/llm voice add <elevenlabs_api_key>` — save ElevenLabs API key',
+        '- `/llm voice test` — test ElevenLabs API key',
+        '- `/llm voice remove` — clear saved ElevenLabs API key',
+        '- `/llm voice status` — show voice/TTS status',
         '',
         'Providers: `openai`, `anthropic`, `copilot`'
       ].join('\n')
@@ -1015,6 +1162,73 @@ const runLlmCommand = async (command = '') => {
     return {
       ok: false,
       error: 'Unknown telegram action. Use add, test, remove, or status.'
+    };
+  }
+
+  if (action === 'voice') {
+    const subAction = (rest[0] || 'status').toLowerCase();
+    const token = rest.slice(1).join(' ').trim();
+
+    if (subAction === 'status') {
+      const voice = getVoiceSettings();
+      return {
+        ok: true,
+        output: [
+          '### Voice / TTS',
+          `- Enabled: ${voice.enabled ? 'yes' : 'no'}`,
+          `- Engine: ${voice.engine}`,
+          `- ElevenLabs key: ${hasStoredElevenLabsToken() ? 'saved' : 'missing'}`,
+          `- Voice ID: ${voice.voiceId || '(not set)'}`
+        ].join('\n')
+      };
+    }
+
+    if (subAction === 'add' || subAction === 'save') {
+      if (!token) {
+        return { ok: false, error: 'Usage: /llm voice add <elevenlabs_api_key>' };
+      }
+
+      if (!safeStorage.isEncryptionAvailable()) {
+        return { ok: false, error: 'Secure storage is not available on this system.' };
+      }
+
+      saveElevenLabsToken(token);
+      return {
+        ok: true,
+        output: 'ElevenLabs API key saved securely.'
+      };
+    }
+
+    if (subAction === 'remove' || subAction === 'clear') {
+      clearElevenLabsToken();
+      return {
+        ok: true,
+        output: 'ElevenLabs API key removed.'
+      };
+    }
+
+    if (subAction === 'test') {
+      try {
+        if (!ttsEngine) {
+          throw new Error('TTS engine is not initialized.');
+        }
+
+        await ttsEngine.testConnection({ engine: 'elevenlabs' });
+        return {
+          ok: true,
+          output: 'ElevenLabs connection successful.'
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          error: error.message || 'ElevenLabs connection failed.'
+        };
+      }
+    }
+
+    return {
+      ok: false,
+      error: 'Unknown voice action. Use add, test, remove, or status.'
     };
   }
 
@@ -1252,6 +1466,11 @@ const initializeAgentInfrastructure = async () => {
   memoryManager = new MemoryManager({
     store: memoryStore,
     currentSessionId: `main-${Date.now()}`
+  });
+  ttsEngine = new TTSEngine({
+    getSettings: getVoiceSettings,
+    getElevenLabsApiKey: getDecryptedElevenLabsToken,
+    audioOutputDirectory: path.join(app.getPath('userData'), 'voice', 'out')
   });
   process.env.KING_LOUIE_MEMORY_STORE = memoryStorageFile;
 
@@ -1513,6 +1732,36 @@ ipcMain.handle('chat:addMessage', (_event, payload = {}) => {
   return appendMessageToChat(chatId, sender, text, metadata);
 });
 
+ipcMain.handle('chat:speakLast', async (_event, { chatId, summary = false } = {}) => {
+  const chat = getChats().find((item) => item.id === chatId);
+  if (!chat) {
+    return { ok: false, error: 'Chat not found.' };
+  }
+
+  const lastAssistant = getLastAssistantMessage(chatId);
+  if (!lastAssistant?.text) {
+    return { ok: false, error: 'No assistant message found to speak.' };
+  }
+
+  if (!ttsEngine) {
+    return { ok: false, error: 'TTS engine is not initialized.' };
+  }
+
+  const voiceSettings = getVoiceSettings();
+  if (!voiceSettings.enabled) {
+    return { ok: false, error: 'Voice output is disabled. Enable it in settings first.' };
+  }
+
+  try {
+    const result = summary
+      ? await ttsEngine.speakSummary(lastAssistant.text, voiceSettings)
+      : await ttsEngine.speak(lastAssistant.text, voiceSettings);
+    return { ok: true, result };
+  } catch (error) {
+    return { ok: false, error: error.message || 'Unable to speak message.' };
+  }
+});
+
 ipcMain.handle('chat:sendMessage', async (event, { chatId, message, agentMode = false }) => {
   await runHookEvent('UserPromptSubmit', {
     source: 'ui',
@@ -1622,6 +1871,13 @@ ipcMain.handle('chat:sendMessage', async (event, { chatId, message, agentMode = 
       message: fullResponse || '(No response)',
       llm: llmSummary
     });
+
+    const voiceSettings = getVoiceSettings();
+    if (voiceSettings.enabled && voiceSettings.speakChatResponses) {
+      speakSummaryText(fullResponse || '(No response)', voiceSettings).catch((error) => {
+        console.warn('[voice] Failed to speak chat response:', error.message);
+      });
+    }
 
     return updatedChat;
   } catch (error) {
@@ -1787,6 +2043,10 @@ ipcMain.handle('settings:load', () => {
     },
     templateVariables: normalizeTemplateVariables(settings.templateVariables || {}),
     userProfile: getUserProfile(),
+    voice: {
+      ...getVoiceSettings(),
+      hasElevenLabsKey: hasStoredElevenLabsToken()
+    },
     telegram: {
       hasToken: hasStoredTelegramToken(),
       bridgeActive: Boolean(telegramBridge),
@@ -1806,6 +2066,62 @@ ipcMain.handle('settings:saveUserProfile', (_event, { profile } = {}) => {
     return { ok: true, userProfile: saved };
   } catch (error) {
     return { ok: false, error: error.message };
+  }
+});
+
+ipcMain.handle('settings:saveVoice', (_event, { voice } = {}) => {
+  try {
+    const saved = setVoiceSettings(voice || {});
+    return {
+      ok: true,
+      voice: {
+        ...saved,
+        hasElevenLabsKey: hasStoredElevenLabsToken()
+      }
+    };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+});
+
+ipcMain.handle('settings:saveElevenLabsKey', (_event, { apiKey, clear } = {}) => {
+  try {
+    if (clear) {
+      clearElevenLabsToken();
+      return { ok: true, hasElevenLabsKey: false };
+    }
+
+    const key = String(apiKey || '').trim();
+    if (!key) {
+      return { ok: false, error: 'ElevenLabs API key is required.' };
+    }
+
+    if (!safeStorage.isEncryptionAvailable()) {
+      return { ok: false, error: 'Secure storage is not available on this system.' };
+    }
+
+    saveElevenLabsToken(key);
+    return { ok: true, hasElevenLabsKey: true };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+});
+
+ipcMain.handle('settings:testVoice', async (_event, { settings } = {}) => {
+  try {
+    if (!ttsEngine) {
+      throw new Error('TTS engine is not initialized.');
+    }
+
+    const voiceSettings = normalizeVoiceSettings({
+      ...getVoiceSettings(),
+      ...(settings || {})
+    });
+
+    await ttsEngine.testConnection(voiceSettings);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error.message || 'Voice test failed.' };
   }
 });
 
@@ -1991,7 +2307,7 @@ ipcMain.handle('agent:execute', async (event, { agentId, message, tier }) => {
 
   const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor);
   return withNotificationTiming(`Agent ${agent.id}`, async () => {
-    return agentExecutor.execute(agent, message, {
+    const result = await agentExecutor.execute(agent, message, {
       tier: runtime.tier,
       model: runtime.model || agent.model,
       timeoutMs: runtime.timeoutMs,
@@ -2005,6 +2321,20 @@ ipcMain.handle('agent:execute', async (event, { agentId, message, tier }) => {
         formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
       ].join('\n\n')
     });
+
+    const voiceOptions = buildAgentVoiceOptions(agent);
+    let voiceResult = null;
+    if (voiceOptions.enabled && voiceOptions.speakAgentSummary !== false) {
+      voiceResult = await speakSummaryText(
+        buildAgentCompletionSummary(agent, result?.content || ''),
+        voiceOptions
+      );
+    }
+
+    return {
+      ...result,
+      voice: voiceResult
+    };
   });
 });
 
@@ -2019,7 +2349,7 @@ ipcMain.handle('agent:executeParallel', async (event, { agentIds = [], message }
   const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor);
   const orchestrator = new AgentOrchestrator(agentExecutor);
   return withNotificationTiming('Parallel agent run', async () => {
-    return orchestrator.executeParallel(agents, message, {
+    const results = await orchestrator.executeParallel(agents, message, {
       tier: runtime.tier,
       model: runtime.model,
       timeoutMs: runtime.timeoutMs,
@@ -2033,6 +2363,21 @@ ipcMain.handle('agent:executeParallel', async (event, { agentIds = [], message }
         formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
       ].join('\n\n')
     });
+
+    await Promise.all(
+      (results || []).map(async (result, index) => {
+        const agent = agents[index];
+        if (!agent) return;
+        const voiceOptions = buildAgentVoiceOptions(agent);
+        if (!voiceOptions.enabled || voiceOptions.speakAgentSummary === false) {
+          return;
+        }
+
+        await speakSummaryText(buildAgentCompletionSummary(agent, result?.content || ''), voiceOptions);
+      })
+    );
+
+    return results;
   });
 });
 
@@ -2047,7 +2392,7 @@ ipcMain.handle('agent:executeSerial', async (event, { agentIds = [], message }) 
   const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor);
   const orchestrator = new AgentOrchestrator(agentExecutor);
   return withNotificationTiming('Serial agent run', async () => {
-    return orchestrator.executeSerial(agents, message, {
+    const results = await orchestrator.executeSerial(agents, message, {
       tier: runtime.tier,
       model: runtime.model,
       timeoutMs: runtime.timeoutMs,
@@ -2061,6 +2406,19 @@ ipcMain.handle('agent:executeSerial', async (event, { agentIds = [], message }) 
         formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
       ].join('\n\n')
     });
+
+    for (let index = 0; index < (results || []).length; index += 1) {
+      const agent = agents[index];
+      if (!agent) continue;
+      const voiceOptions = buildAgentVoiceOptions(agent);
+      if (!voiceOptions.enabled || voiceOptions.speakAgentSummary === false) {
+        continue;
+      }
+
+      await speakSummaryText(buildAgentCompletionSummary(agent, results[index]?.content || ''), voiceOptions);
+    }
+
+    return results;
   });
 });
 

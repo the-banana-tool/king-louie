@@ -14,6 +14,32 @@ class Agent {
     this.allowedTools = Array.isArray(config.allowedTools) ? config.allowedTools : [];
     this.temperature = typeof config.temperature === 'number' ? config.temperature : 0.7;
     this.maxIterations = Number.isInteger(config.maxIterations) ? config.maxIterations : 10;
+    this.voice = Agent.normalizeVoiceConfig(config.voice);
+  }
+
+  static normalizeVoiceConfig(voiceConfig = {}) {
+    const source = voiceConfig && typeof voiceConfig === 'object' ? voiceConfig : {};
+    const engine = String(source.engine || '').trim().toLowerCase();
+    const mode = String(source.mode || '').trim().toLowerCase();
+
+    return {
+      enabled: source.enabled === true,
+      engine: ['system', 'elevenlabs'].includes(engine) ? engine : null,
+      voiceId: String(source.voiceId || source.voice || '').trim() || null,
+      mode: ['summary', 'full'].includes(mode) ? mode : 'summary',
+      speed:
+        typeof source.speed === 'number' && Number.isFinite(source.speed)
+          ? source.speed
+          : null,
+      stability:
+        typeof source.stability === 'number' && Number.isFinite(source.stability)
+          ? source.stability
+          : null,
+      style:
+        typeof source.style === 'number' && Number.isFinite(source.style)
+          ? source.style
+          : null
+    };
   }
 
   canUseTool(toolName) {

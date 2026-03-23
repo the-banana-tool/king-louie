@@ -43,6 +43,23 @@ const notificationsExternalThresholdInput = document.getElementById('notificatio
 const notificationsNtfyTopicInput = document.getElementById('notifications-ntfy-topic-input');
 const saveNotificationsBtn = document.getElementById('save-notifications-btn');
 const notificationsStatus = document.getElementById('notifications-status');
+const voiceEnabledInput = document.getElementById('voice-enabled-input');
+const voiceSpeakChatInput = document.getElementById('voice-speak-chat-input');
+const voiceSpeakAgentSummaryInput = document.getElementById('voice-speak-agent-summary-input');
+const voiceTelegramLongInput = document.getElementById('voice-telegram-long-input');
+const voiceEngineInput = document.getElementById('voice-engine-input');
+const voiceIdInput = document.getElementById('voice-id-input');
+const voiceSpeedInput = document.getElementById('voice-speed-input');
+const voiceStabilityInput = document.getElementById('voice-stability-input');
+const voiceStyleInput = document.getElementById('voice-style-input');
+const voiceSummaryMaxInput = document.getElementById('voice-summary-max-input');
+const voiceTelegramMinInput = document.getElementById('voice-telegram-min-input');
+const voiceElevenLabsKeyInput = document.getElementById('voice-elevenlabs-key-input');
+const saveVoiceSettingsBtn = document.getElementById('save-voice-settings-btn');
+const saveVoiceKeyBtn = document.getElementById('save-voice-key-btn');
+const clearVoiceKeyBtn = document.getElementById('clear-voice-key-btn');
+const testVoiceBtn = document.getElementById('test-voice-btn');
+const voiceStatus = document.getElementById('voice-status');
 const hooksGlobalEnabledInput = document.getElementById('hooks-global-enabled-input');
 const reloadHooksBtn = document.getElementById('reload-hooks-btn');
 const hooksStatus = document.getElementById('hooks-status');
@@ -97,6 +114,20 @@ let settingsState = {
       longTaskNotice: true
     }
   },
+  voice: {
+    enabled: false,
+    engine: 'system',
+    voiceId: '',
+    speed: 1,
+    stability: 0.5,
+    style: 0.25,
+    speakAgentSummary: true,
+    speakChatResponses: false,
+    telegramVoiceForLongResponses: false,
+    telegramMinChars: 500,
+    summaryMaxChars: 260,
+    hasElevenLabsKey: false
+  },
   hooks: {
     enabled: true,
     loaded: []
@@ -148,6 +179,8 @@ async function getLocalHelpText() {
     '- `/llm telegram test` — test saved Telegram bot token',
     '- `/llm telegram remove` — clear saved Telegram token and stop bridge',
     '- `/llm telegram status` — show Telegram bridge status',
+    '- `/llm voice status` — show current voice configuration status',
+    '- `/speak` — read the last assistant response aloud',
     '- `/profile` — show your current profile values',
     '- `/profile set <field> <value>` — update profile field (`name`, `role`, `projectContext`, `goals`, `preferences`)',
     '- `/fast` — switch inference tier to fast',
@@ -158,9 +191,6 @@ async function getLocalHelpText() {
     '- `/pinned` — show which skill (if any) is pinned to this chat',
     '- `/skill customize <skill-id>` — open/create a user customization file for a skill',
     '- `/agent on|off|toggle|status` — control agent mode',
-    '- `/pin <skill-id>` — pin a skill to this chat (all messages handled by the skill)',
-    '- `/unpin` — unpin current skill, restore normal behavior',
-    '- `/pinned` — show which skill (if any) is pinned to this chat',
     '- `exit` or `quit` — close the window'
   ];
 
@@ -739,6 +769,26 @@ function renderSettings() {
     notificationsStatus.classList.remove('error');
   }
 
+  const voice = settingsState.voice || {};
+  if (voiceEnabledInput) voiceEnabledInput.checked = voice.enabled === true;
+  if (voiceSpeakChatInput) voiceSpeakChatInput.checked = voice.speakChatResponses === true;
+  if (voiceSpeakAgentSummaryInput) voiceSpeakAgentSummaryInput.checked = voice.speakAgentSummary !== false;
+  if (voiceTelegramLongInput) voiceTelegramLongInput.checked = voice.telegramVoiceForLongResponses === true;
+  if (voiceEngineInput) voiceEngineInput.value = String(voice.engine || 'system');
+  if (voiceIdInput) voiceIdInput.value = String(voice.voiceId || '');
+  if (voiceSpeedInput) voiceSpeedInput.value = String(Number(voice.speed || 1));
+  if (voiceStabilityInput) voiceStabilityInput.value = String(Number(voice.stability || 0.5));
+  if (voiceStyleInput) voiceStyleInput.value = String(Number(voice.style || 0.25));
+  if (voiceSummaryMaxInput) voiceSummaryMaxInput.value = String(Number(voice.summaryMaxChars || 260));
+  if (voiceTelegramMinInput) voiceTelegramMinInput.value = String(Number(voice.telegramMinChars || 500));
+
+  if (voiceStatus) {
+    voiceStatus.textContent = voice.hasElevenLabsKey
+      ? 'Voice settings loaded. ElevenLabs key is saved.'
+      : 'Voice settings loaded. ElevenLabs key is not saved.';
+    voiceStatus.classList.remove('error');
+  }
+
   const hooks = settingsState.hooks || {};
   const loadedHooks = Array.isArray(hooks.loaded) ? hooks.loaded : [];
 
@@ -1272,6 +1322,165 @@ async function handleSaveNotifications() {
   }
 }
 
+function collectVoiceFromForm() {
+  const toNumber = (value, fallback) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  };
+
+  return {
+    enabled: Boolean(voiceEnabledInput?.checked),
+    speakChatResponses: Boolean(voiceSpeakChatInput?.checked),
+    speakAgentSummary: Boolean(voiceSpeakAgentSummaryInput?.checked),
+    telegramVoiceForLongResponses: Boolean(voiceTelegramLongInput?.checked),
+    engine: String(voiceEngineInput?.value || 'system').toLowerCase() === 'elevenlabs' ? 'elevenlabs' : 'system',
+    voiceId: String(voiceIdInput?.value || '').trim(),
+    speed: toNumber(voiceSpeedInput?.value, 1),
+    stability: toNumber(voiceStabilityInput?.value, 0.5),
+    style: toNumber(voiceStyleInput?.value, 0.25),
+    summaryMaxChars: Math.max(80, Math.round(toNumber(voiceSummaryMaxInput?.value, 260))),
+    telegramMinChars: Math.max(80, Math.round(toNumber(voiceTelegramMinInput?.value, 500)))
+  };
+}
+
+async function handleSaveVoiceSettings() {
+  if (!saveVoiceSettingsBtn) return;
+
+  saveVoiceSettingsBtn.disabled = true;
+  if (voiceStatus) {
+    voiceStatus.textContent = 'Saving voice settings...';
+    voiceStatus.classList.remove('error');
+  }
+
+  try {
+    const voice = collectVoiceFromForm();
+    const result = await window.electron.settings.saveVoice({ voice });
+    if (!result?.ok) {
+      throw new Error(result?.error || 'Unable to save voice settings.');
+    }
+
+    settingsState.voice = {
+      ...(settingsState.voice || {}),
+      ...(result.voice || voice)
+    };
+
+    if (voiceStatus) {
+      voiceStatus.textContent = 'Voice settings saved.';
+      voiceStatus.classList.remove('error');
+    }
+  } catch (error) {
+    if (voiceStatus) {
+      voiceStatus.textContent = `Error: ${error.message || 'Unable to save voice settings.'}`;
+      voiceStatus.classList.add('error');
+    }
+  } finally {
+    saveVoiceSettingsBtn.disabled = false;
+  }
+}
+
+async function handleSaveElevenLabsKey() {
+  if (!saveVoiceKeyBtn) return;
+
+  const apiKey = String(voiceElevenLabsKeyInput?.value || '').trim();
+  if (!apiKey) {
+    if (voiceStatus) {
+      voiceStatus.textContent = 'Enter an ElevenLabs API key first.';
+      voiceStatus.classList.add('error');
+    }
+    return;
+  }
+
+  saveVoiceKeyBtn.disabled = true;
+  try {
+    const result = await window.electron.settings.saveElevenLabsKey({ apiKey });
+    if (!result?.ok) {
+      throw new Error(result?.error || 'Unable to save ElevenLabs key.');
+    }
+
+    settingsState.voice = {
+      ...(settingsState.voice || {}),
+      hasElevenLabsKey: Boolean(result.hasElevenLabsKey)
+    };
+
+    if (voiceElevenLabsKeyInput) {
+      voiceElevenLabsKeyInput.value = '';
+    }
+
+    if (voiceStatus) {
+      voiceStatus.textContent = 'ElevenLabs API key saved securely.';
+      voiceStatus.classList.remove('error');
+    }
+  } catch (error) {
+    if (voiceStatus) {
+      voiceStatus.textContent = `Error: ${error.message || 'Unable to save ElevenLabs key.'}`;
+      voiceStatus.classList.add('error');
+    }
+  } finally {
+    saveVoiceKeyBtn.disabled = false;
+  }
+}
+
+async function handleClearElevenLabsKey() {
+  if (!clearVoiceKeyBtn) return;
+  const confirmed = confirm('Clear the saved ElevenLabs API key?');
+  if (!confirmed) return;
+
+  clearVoiceKeyBtn.disabled = true;
+  try {
+    const result = await window.electron.settings.saveElevenLabsKey({ clear: true });
+    if (!result?.ok) {
+      throw new Error(result?.error || 'Unable to clear ElevenLabs key.');
+    }
+
+    settingsState.voice = {
+      ...(settingsState.voice || {}),
+      hasElevenLabsKey: Boolean(result.hasElevenLabsKey)
+    };
+
+    if (voiceStatus) {
+      voiceStatus.textContent = 'ElevenLabs API key removed.';
+      voiceStatus.classList.remove('error');
+    }
+  } catch (error) {
+    if (voiceStatus) {
+      voiceStatus.textContent = `Error: ${error.message || 'Unable to clear ElevenLabs key.'}`;
+      voiceStatus.classList.add('error');
+    }
+  } finally {
+    clearVoiceKeyBtn.disabled = false;
+  }
+}
+
+async function handleTestVoice() {
+  if (!testVoiceBtn) return;
+
+  testVoiceBtn.disabled = true;
+  if (voiceStatus) {
+    voiceStatus.textContent = 'Testing voice connection...';
+    voiceStatus.classList.remove('error');
+  }
+
+  try {
+    const settings = collectVoiceFromForm();
+    const result = await window.electron.settings.testVoice({ settings });
+    if (!result?.ok) {
+      throw new Error(result?.error || 'Voice connection failed.');
+    }
+
+    if (voiceStatus) {
+      voiceStatus.textContent = 'Voice connection test successful.';
+      voiceStatus.classList.remove('error');
+    }
+  } catch (error) {
+    if (voiceStatus) {
+      voiceStatus.textContent = `Error: ${error.message || 'Voice connection failed.'}`;
+      voiceStatus.classList.add('error');
+    }
+  } finally {
+    testVoiceBtn.disabled = false;
+  }
+}
+
 async function loadSettings() {
   try {
     settingsState = await window.electron.settings.load();
@@ -1695,38 +1904,7 @@ async function sendMessage() {
     return;
   }
 
-  if (slashCommand?.name === '/pin') {
-    userInput.value = '';
-    userInput.style.height = 'auto';
-
-    appendLocalMessage('user', message);
-    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch(() => {});
-
-    const skillId = slashCommand.args[0];
-    if (!skillId) {
-      const errorText = 'Usage: `/pin <skill-id>`. Example: `/pin std`';
-      appendLocalMessage('assistant', errorText);
-      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: errorText }).catch(() => {});
-      return;
-    }
-
-    try {
-      const result = await window.electron.skill.pin({ chatId: activeChatId, skillId });
-      const responseText = result.ok
-        ? `📌 Pinned **${result.name || skillId}** to this chat. All messages will be handled by this skill. Use \`/unpin\` to restore normal behavior.`
-        : `❌ ${result.error || 'Unable to pin skill.'}`;
-      appendLocalMessage('assistant', responseText);
-      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch(() => {});
-    } catch (error) {
-      const errorText = `❌ ${error.message || 'Unable to pin skill.'}`;
-      appendLocalMessage('assistant', errorText);
-      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: errorText }).catch(() => {});
-    }
-
-    return;
-  }
-
-  if (slashCommand?.name === '/unpin') {
+  if (slashCommand?.name === '/speak') {
     userInput.value = '';
     userInput.style.height = 'auto';
 
@@ -1734,37 +1912,21 @@ async function sendMessage() {
     window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch(() => {});
 
     try {
-      const result = await window.electron.skill.unpin({ chatId: activeChatId });
-      const responseText = result.ok
-        ? '📌 Unpinned. Normal behavior restored.'
-        : `❌ ${result.error || 'Unable to unpin skill.'}`;
+      const summaryMode = ['summary', '--summary', '-s'].some((token) =>
+        slashCommand.args.map((arg) => String(arg || '').toLowerCase()).includes(token)
+      );
+      const result = await window.electron.chat.speakLast({
+        chatId: activeChatId,
+        summary: summaryMode
+      });
+
+      const responseText = result?.ok
+        ? `🔊 Speaking the last assistant response${summaryMode ? ' (summary)' : ''}.`
+        : `❌ ${result?.error || 'Unable to speak the last response.'}`;
       appendLocalMessage('assistant', responseText);
       window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch(() => {});
     } catch (error) {
-      const errorText = `❌ ${error.message || 'Unable to unpin skill.'}`;
-      appendLocalMessage('assistant', errorText);
-      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: errorText }).catch(() => {});
-    }
-
-    return;
-  }
-
-  if (slashCommand?.name === '/pinned') {
-    userInput.value = '';
-    userInput.style.height = 'auto';
-
-    appendLocalMessage('user', message);
-    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch(() => {});
-
-    try {
-      const result = await window.electron.skill.getPinned({ chatId: activeChatId });
-      const responseText = result?.pinned
-        ? `📌 Pinned skill: **${result.pinned.name || result.pinned.skillId}** (\`${result.pinned.skillId}\`)`
-        : 'No skill is currently pinned to this chat.';
-      appendLocalMessage('assistant', responseText);
-      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch(() => {});
-    } catch (error) {
-      const errorText = `❌ ${error.message || 'Unable to get pinned skill.'}`;
+      const errorText = `❌ ${error.message || 'Unable to speak the last response.'}`;
       appendLocalMessage('assistant', errorText);
       window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: errorText }).catch(() => {});
     }
@@ -2282,6 +2444,30 @@ if (saveUserProfileBtn) {
 if (saveNotificationsBtn) {
   saveNotificationsBtn.addEventListener('click', () => {
     handleSaveNotifications();
+  });
+}
+
+if (saveVoiceSettingsBtn) {
+  saveVoiceSettingsBtn.addEventListener('click', () => {
+    handleSaveVoiceSettings();
+  });
+}
+
+if (saveVoiceKeyBtn) {
+  saveVoiceKeyBtn.addEventListener('click', () => {
+    handleSaveElevenLabsKey();
+  });
+}
+
+if (clearVoiceKeyBtn) {
+  clearVoiceKeyBtn.addEventListener('click', () => {
+    handleClearElevenLabsKey();
+  });
+}
+
+if (testVoiceBtn) {
+  testVoiceBtn.addEventListener('click', () => {
+    handleTestVoice();
   });
 }
 

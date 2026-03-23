@@ -6,6 +6,12 @@ const MainAssistantAgent = new Agent({
   description: 'General purpose orchestration assistant',
   model: 'claude-3-5-sonnet-latest',
   inferenceTier: 'standard',
+  voice: {
+    enabled: false,
+    engine: 'system',
+    mode: 'summary',
+    speed: 1
+  },
   systemPromptTemplate: 'templates/main-assistant.md.template',
   allowedTools: ['*'],
   systemPrompt: `You are King Louie's primary orchestration assistant.

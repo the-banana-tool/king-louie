@@ -266,14 +266,25 @@ Add optional voice output for agent responses and task completion announcements.
 
 ### Tasks
 
-- [ ] **10.1** Create `src/voice/tts-engine.js` - Abstract TTS interface with `speak(text, options)` method
-- [ ] **10.2** Create `src/voice/engines/elevenlabs.js` - ElevenLabs API integration with voice selection and prosody settings (stability, speed, style)
-- [ ] **10.3** Create `src/voice/engines/system-tts.js` - Fallback using OS native TTS (Windows SAPI, macOS say, Linux espeak)
-- [ ] **10.4** Add voice settings to UI - Enable/disable, engine selection, API key (for ElevenLabs), voice selection, speed/stability sliders
-- [ ] **10.5** Add per-agent voice config to agent schema - Each agent can have distinct voice settings
-- [ ] **10.6** Wire into agent completion - Optionally speak a summary of what the agent did
-- [ ] **10.7** Wire into Telegram bridge - Send voice messages instead of/in addition to text for long responses
-- [ ] **10.8** Add `/speak` slash command to read the last response aloud
+- [x] **10.1** Create `src/voice/tts-engine.js` - Abstract TTS interface with `speak(text, options)` method
+- [x] **10.2** Create `src/voice/engines/elevenlabs.js` - ElevenLabs API integration with voice selection and prosody settings (stability, speed, style)
+- [x] **10.3** Create `src/voice/engines/system-tts.js` - Fallback using OS native TTS (Windows SAPI, macOS say, Linux espeak)
+- [x] **10.4** Add voice settings to UI - Enable/disable, engine selection, API key (for ElevenLabs), voice selection, speed/stability sliders
+- [x] **10.5** Add per-agent voice config to agent schema - Each agent can have distinct voice settings
+- [x] **10.6** Wire into agent completion - Optionally speak a summary of what the agent did
+- [x] **10.7** Wire into Telegram bridge - Send voice messages instead of/in addition to text for long responses
+- [x] **10.8** Add `/speak` slash command to read the last response aloud
+
+### Progress Notes
+
+- ✅ Completed 2026-03-23: Voice/TTS Integration implementation (10.1–10.8)
+- Added voice subsystem with shared orchestration in `src/voice/tts-engine.js`, ElevenLabs integration in `src/voice/engines/elevenlabs.js`, and OS-native fallback in `src/voice/engines/system-tts.js`
+- Added voice settings persistence and secure ElevenLabs key handling in `main.js` (`settings:saveVoice`, `settings:saveElevenLabsKey`, `settings:testVoice`) and exposed through `preload.js`
+- Added settings UI controls in `index.html` and `renderer.js` for voice enablement, engine selection, prosody, summary limits, Telegram thresholds, and API key management
+- Added per-agent voice configuration support through `src/agents/agent-schema.js` and built-in agent defaults (`main-assistant`, `code-explorer`, `code-writer`)
+- Wired speech output into chat and agent flows in `main.js`, including `/speak` support via `chat:speakLast` and automatic agent completion summaries
+- Extended Telegram bridge in `src/channels/telegram-bridge.js` to optionally send voice summaries for long responses via Telegram `sendVoice`
+- Added automated coverage in `tests/voice-tts.test.js` (summary behavior, ElevenLabs voice settings clamping, system command generation) and wired into `npm test`
 
 ---
 

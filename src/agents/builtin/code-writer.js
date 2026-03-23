@@ -6,6 +6,12 @@ const CodeWriterAgent = new Agent({
   description: 'Writes and modifies code based on requirements',
   model: 'claude-3-5-sonnet-latest',
   inferenceTier: 'smart',
+  voice: {
+    enabled: false,
+    engine: 'system',
+    mode: 'summary',
+    speed: 0.95
+  },
   systemPromptTemplate: 'templates/code-writer.md.template',
   allowedTools: ['Bash', 'Read', 'Edit', 'Write'],
   systemPrompt: `You are a code implementation specialist. Your job is to:

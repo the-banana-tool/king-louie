@@ -18,6 +18,19 @@ class TelegramBridge {
       typeof options.getNotificationSettings === 'function'
         ? options.getNotificationSettings
         : () => ({ enabled: false, thresholdsMs: { external: 120000 }, telegram: { longTaskNotice: false } });
+    this.getVoiceSettings =
+      typeof options.getVoiceSettings === 'function'
+        ? options.getVoiceSettings
+        : () => ({
+          enabled: false,
+          telegramVoiceForLongResponses: false,
+          telegramMinChars: 500,
+          summaryMaxChars: 260
+        });
+    this.getTtsEngine =
+      typeof options.getTtsEngine === 'function'
+        ? options.getTtsEngine
+        : () => null;
     this.pollTimeoutSeconds = Number(options.pollTimeoutSeconds || 30);
 
     // Callbacks for local chat management
@@ -507,6 +520,36 @@ class TelegramBridge {
       await this.sendMessage(run.chatId, chunk);
     }
 
+    const voiceSettings = this.getVoiceSettings() || {};
+    if (
+      voiceSettings.enabled === true
+      && voiceSettings.telegramVoiceForLongResponses === true
+      && content.length >= Number(voiceSettings.telegramMinChars || 500)
+    ) {
+      try {
+        const ttsEngine = this.getTtsEngine();
+        if (ttsEngine && typeof ttsEngine.speakSummary === 'function') {
+          const voiceResult = await ttsEngine.speakSummary(content, {
+            ...voiceSettings,
+            summaryMaxChars: Number(voiceSettings.summaryMaxChars || 260)
+          });
+
+          const audioBuffer = voiceResult?.audio?.buffer;
+          if (audioBuffer && Buffer.isBuffer(audioBuffer)) {
+            await this.sendVoice(
+              run.chatId,
+              audioBuffer,
+              `response-${Date.now()}.mp3`,
+              'audio/mpeg',
+              '🔊 Voice summary'
+            );
+          }
+        }
+      } catch (error) {
+        console.warn('[telegram-bridge] Unable to send voice response:', error.message);
+      }
+    }
+
     const notifications = this.getNotificationSettings() || {};
     const thresholds = notifications.thresholdsMs || {};
     const externalThreshold = Number(thresholds.external || 120000);
@@ -529,6 +572,34 @@ class TelegramBridge {
       text: String(text || ''),
       ...extra
     });
+  }
+
+  async sendVoice(chatId, audioBuffer, fileName = 'voice.mp3', mimeType = 'audio/mpeg', caption = '') {
+    const formData = new FormData();
+    formData.append('chat_id', String(Number(chatId)));
+    if (caption) {
+      formData.append('caption', String(caption));
+    }
+
+    const blob = new Blob([audioBuffer], { type: mimeType });
+    formData.append('voice', blob, fileName);
+
+    const response = await fetch(`${this.apiBase}/sendVoice`, {
+      method: 'POST',
+      body: formData
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Telegram sendVoice failed: ${response.status} ${response.statusText} ${text}`);
+    }
+
+    const json = await response.json();
+    if (!json.ok) {
+      throw new Error(`Telegram sendVoice error: ${json.description || 'Unknown error'}`);
+    }
+
+    return json.result;
   }
 
   async callTelegram(method, payload = {}, options = {}) {

@@ -85,6 +85,11 @@
             <li><code>/llm telegram test</code></li>
             <li><code>/llm telegram remove</code></li>
             <li><code>/llm telegram status</code></li>
+            <li><code>/llm voice status</code></li>
+            <li><code>/llm voice add &lt;elevenlabs_key&gt;</code></li>
+            <li><code>/llm voice test</code></li>
+            <li><code>/llm voice remove</code></li>
+            <li><code>/speak</code></li>
             <li><code>/agent on|off|toggle|status</code></li>
           </ul>
         </div>
@@ -176,6 +181,66 @@
           <div class="template-variables-actions">
             <button id="save-notifications-btn" type="button" class="primary">Save Notification Settings</button>
             <span id="notifications-status" class="provider-message">Not saved yet.</span>
+          </div>
+        </section>
+
+        <section class="template-variables-card">
+          <h3>Voice / TTS</h3>
+          <p>Configure optional speech output for chat responses, agents, and Telegram long responses.</p>
+          <div class="template-variables-grid">
+            <label class="inline-toggle" for="voice-enabled-input">
+              <input id="voice-enabled-input" type="checkbox">
+              <span>Enable voice output</span>
+            </label>
+
+            <label class="inline-toggle" for="voice-speak-chat-input">
+              <input id="voice-speak-chat-input" type="checkbox">
+              <span>Speak desktop chat responses automatically</span>
+            </label>
+
+            <label class="inline-toggle" for="voice-speak-agent-summary-input">
+              <input id="voice-speak-agent-summary-input" type="checkbox">
+              <span>Speak agent completion summaries</span>
+            </label>
+
+            <label class="inline-toggle" for="voice-telegram-long-input">
+              <input id="voice-telegram-long-input" type="checkbox">
+              <span>Send Telegram voice for long responses</span>
+            </label>
+
+            <label for="voice-engine-input">Engine</label>
+            <select id="voice-engine-input" class="provider-input">
+              <option value="system">System TTS</option>
+              <option value="elevenlabs">ElevenLabs</option>
+            </select>
+
+            <label for="voice-id-input">Voice ID / Voice Name</label>
+            <input id="voice-id-input" class="provider-input" type="text" placeholder="ElevenLabs voice ID or system voice name">
+
+            <label for="voice-speed-input">Speed</label>
+            <input id="voice-speed-input" class="provider-input" type="number" min="0.5" max="2" step="0.05" placeholder="1.0">
+
+            <label for="voice-stability-input">Stability (ElevenLabs)</label>
+            <input id="voice-stability-input" class="provider-input" type="number" min="0" max="1" step="0.05" placeholder="0.5">
+
+            <label for="voice-style-input">Style (ElevenLabs)</label>
+            <input id="voice-style-input" class="provider-input" type="number" min="0" max="1" step="0.05" placeholder="0.25">
+
+            <label for="voice-summary-max-input">Summary max chars</label>
+            <input id="voice-summary-max-input" class="provider-input" type="number" min="80" step="10" placeholder="260">
+
+            <label for="voice-telegram-min-input">Telegram min chars</label>
+            <input id="voice-telegram-min-input" class="provider-input" type="number" min="80" step="10" placeholder="500">
+
+            <label for="voice-elevenlabs-key-input">ElevenLabs API key</label>
+            <input id="voice-elevenlabs-key-input" class="provider-input" type="password" placeholder="Paste ElevenLabs API key to save securely">
+          </div>
+          <div class="template-variables-actions">
+            <button id="save-voice-settings-btn" type="button" class="primary">Save Voice Settings</button>
+            <button id="save-voice-key-btn" type="button">Save ElevenLabs Key</button>
+            <button id="clear-voice-key-btn" type="button" class="danger">Clear ElevenLabs Key</button>
+            <button id="test-voice-btn" type="button">Test Voice Connection</button>
+            <span id="voice-status" class="provider-message">Voice settings not saved yet.</span>
           </div>
         </section>
 
