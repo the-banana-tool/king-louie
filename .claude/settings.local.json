@@ -9,7 +9,14 @@
       "Bash(git -C \"E:/Programming/king-louie\" ls-files skills/std/)",
       "Bash(git -C \"E:/Programming/king-louie\" ls-files --cached)",
       "Bash(git -C \"E:/Programming/king-louie\" ls-files)",
-      "Bash(findstr:*)"
+      "Bash(findstr:*)",
+      "Bash(python3 -m venv venv)",
+      "Bash(./venv/Scripts/pip install:*)",
+      "Bash(where python:*)",
+      "Bash(find E:Programmingking-louie/src -type f -name *.js -o -name *.json)",
+      "Bash(claude --version)",
+      "Bash(node:*)",
+      "Bash(claude:*)"
     ]
   }
 }
