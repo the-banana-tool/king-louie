@@ -4,6 +4,57 @@ Remaining issues from the 2026-03-23 comprehensive code review. The 12 quick/sec
 
 ---
 
+## Progress Update (2026-03-23)
+
+### ✅ Completed in commit `96e5a82`
+
+- **XSS / sanitization hardening (subset of item 1):**
+  - Installed `dompurify` and wired sanitization into `preload.js` markdown parsing.
+  - Sanitized renderer `html` format path (`renderAssistantMessageContent`).
+  - Removed dynamic `innerHTML` tool label interpolation.
+  - Replaced dynamic error `innerHTML` interpolation with safe DOM node creation.
+  - Replaced streaming placeholder HTML injection (`'<p>...</p>'`) with safe DOM node creation.
+
+- **IPC reliability groundwork (subset of item 3):**
+  - Added `src/ipc/wrap-handler.js` utility.
+  - Added test coverage in `tests/ipc-wrap-handler.test.js`.
+  - Updated key renderer IPC call sites to handle `{ ok, error }` shape via `unwrapIpcResult` for:
+    - `loadChats()`
+    - `handleCreateChat()`
+    - `loadSettings()`
+    - chat activate/rename/delete flow
+
+- **Memory/leak hardening (subset of item 4):**
+  - Tool approval modal listeners now use `{ once: true }`.
+  - Stream buffer cleanup now happens defensively (including chat switch and beforeunload).
+  - Listener lifecycle cleanup added on `beforeunload`.
+
+- **Preload hardening (item 6 core pieces):**
+  - Input validation added for sensitive operations:
+    - `settings.saveProvider`
+    - `settings.runLlmCommand`
+    - `skill.execute`
+    - `tool.execute`
+  - Listener registration now supports unsubscribe and deduplication.
+  - Basic rate limiting added for:
+    - `settings.testProvider`
+    - `settings.testVoice`
+    - `tool.execute`
+
+- **Testing:**
+  - `npm test` updated to include IPC wrap-handler tests.
+  - Test suite passes.
+
+### 🚧 Still Outstanding
+
+- **Item 2:** Full IPC extraction from `main.js` into `src/ipc/*` modules + central register/constants.
+- **Item 3:** Apply `wrapHandler` to all 51 handlers for fully standardized IPC result shape.
+- **Item 5:** Global renderer state consolidation into `appState` / `dom` objects.
+- **Item 6 (remaining):** Additional validation coverage/access controls beyond current sensitive paths.
+- **Item 7.1 (optional):** Runtime cache reset wiring on provider/workdir changes.
+
+---
+
 ## 1. XSS via innerHTML in renderer.js
 
 **Priority:** High | **Complexity:** Medium
