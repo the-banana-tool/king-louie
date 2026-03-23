@@ -45,7 +45,19 @@ function loadProjectContext(options = {}) {
   }
 
   try {
-    const content = fs.readFileSync(contextFile, 'utf-8').trim();
+    // Resolve symlinks to prevent reading arbitrary files via symlinked context.md
+    const realContextPath = fs.realpathSync(contextFile);
+    const startDir = path.resolve(resolveStartDirectory(options.workingDirectory));
+    const normalizedReal = path.resolve(realContextPath);
+    if (!normalizedReal.startsWith(startDir + path.sep) && !normalizedReal.startsWith(startDir)) {
+      return {
+        content: '',
+        path: contextFile,
+        error: 'Context file resolves outside the project directory (possible symlink attack).'
+      };
+    }
+
+    const content = fs.readFileSync(realContextPath, 'utf-8').trim();
     return {
       content,
       path: contextFile
