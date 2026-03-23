@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const {
   splitMessage,
   formatHelp,
@@ -399,7 +400,7 @@ class TelegramBridge {
       from: `telegram:${chatId}`
     });
 
-    const runId = `tg_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const runId = `tg_${Date.now()}_${crypto.randomBytes(8).toString('hex')}`;
     this.pendingRuns.set(runId, {
       chatId,
       sessionKey: session.key,
@@ -418,7 +419,7 @@ class TelegramBridge {
 
   createApprovalHandler(chatId) {
     return async ({ toolName, parameters }) => {
-      const approvalId = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+      const approvalId = crypto.randomBytes(16).toString('hex');
       const callbackApprove = `kl_a_${approvalId}_y`;
       const callbackDeny = `kl_a_${approvalId}_n`;
 
