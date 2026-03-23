@@ -26,7 +26,7 @@ class NtfyChannel {
       };
     }
 
-    const title = String(payload.title || 'King Louie');
+    const title = String(payload.title || 'King Louie').replace(/[\r\n\0]/g, ' ');
     const message = String(payload.body || 'Task completed.');
 
     const response = await fetch(`${this.baseUrl}/${encodeURIComponent(topic)}`, {
