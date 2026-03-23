@@ -81,9 +81,9 @@ Replace static agent system prompts with a template system that resolves variabl
 - [x] **4.1** Create `src/templates/template-engine.js` - Simple `{{variable}}` substitution engine that resolves from a context object
 - [x] **4.2** Create `templates/` directory with default agent prompt templates (`main-assistant.md.template`, `code-explorer.md.template`, `code-writer.md.template`)
 - [x] **4.3** Modify `AgentExecutor` to resolve templates at execution time instead of using static `systemPrompt` strings
-- [ ] **4.4** Add user-editable variables in settings - Name, role, preferences, project context
+- [x] **4.4** Add user-editable variables in settings - Name, role, preferences, project context
 - [x] **4.5** Support template includes - `{{> partial_name}}` syntax for shared prompt fragments
-- [ ] **4.6** Add a rebuild trigger - Re-resolve templates when settings change (no restart needed)
+- [x] **4.6** Add a rebuild trigger - Re-resolve templates when settings change (no restart needed)
 
 ### Progress Notes
 
@@ -92,6 +92,12 @@ Replace static agent system prompts with a template system that resolves variabl
 - Added `templates/` prompt templates for built-in agents plus shared partials under `templates/partials/`
 - Updated agent schema + built-in agent configs to support `systemPromptTemplate`, and wired `AgentExecutor` to render templates at runtime with fallback to static prompts
 - Verified via node-based checks for template rendering and executor integration
+- ✅ Completed 2026-03-23: settings-driven prompt variables + live re-resolution (4.4, 4.6)
+- Added template variable storage in settings (`name`, `role`, `preferences`, `projectContext`) with new IPC endpoint `settings:saveTemplateVariables`
+- Added settings UI form to edit and persist prompt variables, exposed through preload bridge and renderer handlers
+- Injected settings-derived `templateContext` into agent execution paths (single, parallel, serial, and remote adapter), so updated values apply on next run without restart
+- Extended shared prompt partial (`templates/partials/operating-principles.md.template`) to include user/project context fields
+- Verified syntax with `node --check` for `main.js`, `renderer.js`, and `preload.js`
 
 ---
 
@@ -103,12 +109,18 @@ A lightweight user profile that agents reference to personalize responses. Not t
 
 ### Tasks
 
-- [ ] **5.1** Create `src/telos/user-profile.js` - Manages a user profile with fields: `name`, `role`, `goals[]`, `preferences{}`, `projectContext`
+- [x] **5.1** Create `src/telos/user-profile.js` - Manages a user profile with fields: `name`, `role`, `goals[]`, `preferences{}`, `projectContext`
 - [ ] **5.2** Store profile in electron-store under `userProfile` key
 - [ ] **5.3** Create profile setup UI - First-run wizard or settings tab with text fields for each profile property
 - [ ] **5.4** Inject user profile into agent system prompts - Append a "User Context" section with relevant profile info
 - [ ] **5.5** Add `/profile` slash command to view/edit profile inline in chat
 - [ ] **5.6** Add project-level TELOS - Per-directory `.king-louie/context.md` file that agents auto-load when working in that directory
+
+### Progress Notes
+
+- ✅ Completed 2026-03-23: initial TELOS user profile manager (5.1)
+- Added `src/telos/user-profile.js` with normalized profile schema support (`name`, `role`, `goals[]`, `preferences{}`, `projectContext`)
+- Added profile read/update helpers plus template-context projection for prompt injection (`toTemplateContext`)
 
 ---
 
