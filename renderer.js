@@ -137,6 +137,21 @@ const streamBufferById = new Map();
 let isAgentModeEnabled = false;
 let isHistoryCollapsed = false;
 let memoryEntries = [];
+const unsubscribeHandlers = [];
+
+function unwrapIpcResult(result, fallbackError = 'Request failed') {
+  if (result && typeof result === 'object' && Object.prototype.hasOwnProperty.call(result, 'ok')) {
+    if (!result.ok) {
+      throw new Error(result.error || fallbackError);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(result, 'data')) {
+      return result.data;
+    }
+  }
+
+  return result;
+}
 
 function renderHistoryToggleButton() {
   if (!toggleHistoryBtn) return;
@@ -348,7 +363,11 @@ function showToolApprovalDialog(approvalId, toolName, parameters) {
   title.textContent = 'Tool Execution Approval Required';
 
   const toolLabel = document.createElement('p');
-  toolLabel.innerHTML = `<strong>Tool:</strong> ${toolName}`;
+  const strong = document.createElement('strong');
+  strong.textContent = 'Tool:';
+  toolLabel.textContent = '';
+  toolLabel.appendChild(strong);
+  toolLabel.appendChild(document.createTextNode(` ${toolName}`));
 
   const pre = document.createElement('pre');
   pre.textContent = JSON.stringify(parameters || {}, null, 2);
@@ -382,14 +401,14 @@ function showToolApprovalDialog(approvalId, toolName, parameters) {
   denyBtn.addEventListener('click', () => {
     window.electron.tool.respondToApproval(approvalId, false, { alwaysApprove: false });
     modal.remove();
-  });
+  }, { once: true });
 
   approveBtn.addEventListener('click', () => {
     window.electron.tool.respondToApproval(approvalId, true, {
       alwaysApprove: Boolean(alwaysApproveInput.checked)
     });
     modal.remove();
-  });
+  }, { once: true });
 
   actions.appendChild(alwaysApproveLabel);
   actions.appendChild(denyBtn);
@@ -1483,7 +1502,7 @@ async function handleTestVoice() {
 
 async function loadSettings() {
   try {
-    settingsState = await window.electron.settings.load();
+    settingsState = unwrapIpcResult(await window.electron.settings.load(), 'Unable to load settings.');
     if (!settingsState.providers || Object.keys(settingsState.providers).length === 0) {
       setProviderListFallback('No providers returned from settings. Please restart the app.');
       return;
@@ -2073,7 +2092,7 @@ function renderAssistantMessageContent(messageContent, text, format = 'markdown'
   const safeFormat = String(format || 'markdown').toLowerCase();
 
   if (safeFormat === 'html') {
-    messageContent.innerHTML = String(text || '');
+    messageContent.innerHTML = window.electron.markdown.sanitize(String(text || ''));
     return;
   }
 
@@ -2130,14 +2149,14 @@ function addMessage(sender, text, metadata = {}) {
 }
 
 async function loadChats() {
-  const data = await window.electron.chat.load();
+  const data = unwrapIpcResult(await window.electron.chat.load(), 'Unable to load chats.');
   chats = data.chats || [];
   activeChatId = data.activeChatId || chats[0]?.id || null;
   refreshUI();
 }
 
 async function handleCreateChat() {
-  const newChat = await window.electron.chat.create('New Chat');
+  const newChat = unwrapIpcResult(await window.electron.chat.create('New Chat'), 'Unable to create chat.');
   if (newChat) {
     chats = [newChat, ...chats.filter((chat) => chat.id !== newChat.id)];
     activeChatId = newChat.id;
@@ -2146,8 +2165,9 @@ async function handleCreateChat() {
 }
 
 async function handleSelectChat(chatId) {
+  streamBufferById.clear();
   activeChatId = chatId;
-  await window.electron.chat.setActive(chatId);
+  unwrapIpcResult(await window.electron.chat.setActive(chatId), 'Unable to switch active chat.');
   refreshUI();
 }
 
@@ -2161,8 +2181,9 @@ async function handleRenameChat(chatId) {
     return;
   }
   const updated = await window.electron.chat.rename({ id: chatId, title: title.trim() });
-  if (updated) {
-    chats = chats.map((item) => (item.id === updated.id ? updated : item));
+  const safeUpdated = unwrapIpcResult(updated, 'Unable to rename chat.');
+  if (safeUpdated) {
+    chats = chats.map((item) => (item.id === safeUpdated.id ? safeUpdated : item));
     refreshUI();
   }
 }
@@ -2176,7 +2197,7 @@ async function handleDeleteChat(chatId) {
   if (!confirmed) {
     return;
   }
-  const result = await window.electron.chat.remove(chatId);
+  const result = unwrapIpcResult(await window.electron.chat.remove(chatId), 'Unable to delete chat.');
   chats = result.chats || [];
   activeChatId = result.activeChatId || chats[0]?.id || null;
   refreshUI();
@@ -2540,7 +2561,7 @@ window.addEventListener('blur', () => {
   }
 });
 
-window.electron.chat.onMessageStart(({ chatId, responseId }) => {
+unsubscribeHandlers.push(window.electron.chat.onMessageStart(({ chatId, responseId }) => {
   if (chatId !== activeChatId) return;
 
   const messageDiv = document.createElement('div');
@@ -2549,15 +2570,18 @@ window.electron.chat.onMessageStart(({ chatId, responseId }) => {
 
   const messageContent = document.createElement('div');
   messageContent.className = 'message-content';
-  messageContent.innerHTML = '<p>...</p>';
+  const pending = document.createElement('p');
+  pending.textContent = '...';
+  messageContent.textContent = '';
+  messageContent.appendChild(pending);
 
   messageDiv.appendChild(messageContent);
   chatMessages.appendChild(messageDiv);
   chatMessages.scrollTop = chatMessages.scrollHeight;
   streamBufferById.set(responseId, '');
-});
+}));
 
-window.electron.chat.onMessageChunk(({ chatId, responseId, chunk }) => {
+unsubscribeHandlers.push(window.electron.chat.onMessageChunk(({ chatId, responseId, chunk }) => {
   if (chatId !== activeChatId) return;
 
   const existing = streamBufferById.get(responseId) || '';
@@ -2569,43 +2593,56 @@ window.electron.chat.onMessageChunk(({ chatId, responseId, chunk }) => {
 
   streamElement.innerHTML = window.electron.markdown.parse(next);
   chatMessages.scrollTop = chatMessages.scrollHeight;
-});
+}));
 
-window.electron.chat.onMessageComplete(({ chatId, responseId }) => {
+unsubscribeHandlers.push(window.electron.chat.onMessageComplete(({ chatId, responseId }) => {
+  streamBufferById.delete(responseId);
   if (chatId !== activeChatId) return;
   const messageDiv = chatMessages.querySelector(`[data-response-id="${responseId}"]`);
   if (messageDiv) {
     messageDiv.classList.remove('streaming');
   }
-  streamBufferById.delete(responseId);
-});
+}));
 
-window.electron.chat.onMessageError(({ chatId, responseId, error }) => {
+unsubscribeHandlers.push(window.electron.chat.onMessageError(({ chatId, responseId, error }) => {
+  streamBufferById.delete(responseId);
   if (chatId !== activeChatId) return;
   const messageDiv = chatMessages.querySelector(`[data-response-id="${responseId}"] .message-content`);
   if (messageDiv) {
-    messageDiv.innerHTML = `<p>Error: ${error}</p>`;
+    const p = document.createElement('p');
+    p.textContent = `Error: ${error}`;
+    messageDiv.textContent = '';
+    messageDiv.appendChild(p);
   }
-  streamBufferById.delete(responseId);
-});
+}));
 
-window.electron.chat.onToolUse(({ chatId, toolName, parameters }) => {
+unsubscribeHandlers.push(window.electron.chat.onToolUse(({ chatId, toolName, parameters }) => {
   if (chatId !== activeChatId) return;
   addToolEventMessage(`Using tool: ${toolName}`, parameters);
-});
+}));
 
-window.electron.chat.onToolResult(({ chatId, toolName, result }) => {
+unsubscribeHandlers.push(window.electron.chat.onToolResult(({ chatId, toolName, result }) => {
   if (chatId !== activeChatId) return;
   addToolEventMessage(`Tool result: ${toolName}`, result, result?.success === false ? 'error' : 'success');
-});
+}));
 
-window.electron.tool.onApprovalRequired(({ approvalId, toolName, parameters }) => {
+unsubscribeHandlers.push(window.electron.tool.onApprovalRequired(({ approvalId, toolName, parameters }) => {
   showToolApprovalDialog(approvalId, toolName, parameters);
-});
+}));
 
 // Listen for chat updates from Telegram bridge or other sources
-window.electron.chat.onChatUpdated(async () => {
+unsubscribeHandlers.push(window.electron.chat.onChatUpdated(async () => {
   await loadChats();
+}));
+
+window.addEventListener('beforeunload', () => {
+  streamBufferById.clear();
+  while (unsubscribeHandlers.length > 0) {
+    const unsubscribe = unsubscribeHandlers.pop();
+    if (typeof unsubscribe === 'function') {
+      unsubscribe();
+    }
+  }
 });
 
 loadChats();
