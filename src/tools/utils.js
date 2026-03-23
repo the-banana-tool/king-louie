@@ -1,3 +1,4 @@
+const fs = require('fs');
 const path = require('path');
 
 const DEFAULT_DANGEROUS_COMMAND_PATTERNS = [
@@ -51,9 +52,23 @@ function normalizeForComparison(value) {
   return path.resolve(value).replace(/\\/g, '/').toLowerCase();
 }
 
+function resolveRealPath(filePath) {
+  try {
+    return fs.realpathSync(filePath);
+  } catch {
+    // If the file doesn't exist yet, resolve the parent directory and append the basename
+    const dir = path.dirname(filePath);
+    try {
+      return path.join(fs.realpathSync(dir), path.basename(filePath));
+    } catch {
+      return path.resolve(filePath);
+    }
+  }
+}
+
 function isPathWithin(basePath, targetPath) {
-  const base = normalizeForComparison(basePath);
-  const target = normalizeForComparison(targetPath);
+  const base = normalizeForComparison(resolveRealPath(basePath));
+  const target = normalizeForComparison(resolveRealPath(targetPath));
   return target === base || target.startsWith(`${base}/`);
 }
 
