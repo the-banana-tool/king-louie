@@ -145,9 +145,11 @@ class ClaudeCodeSkill extends Skill {
         stderr += data.toString();
       });
 
+      const processStartedAt = Date.now();
+
       proc.on('close', (code) => {
         this.runningProcesses.delete(chatId);
-        const elapsed = ((Date.now() - (proc._startedAt || Date.now())) / 1000).toFixed(1);
+        const elapsed = ((Date.now() - processStartedAt) / 1000).toFixed(1);
 
         if (code === null) {
           resolve({ ok: true, message: '_Claude Code process stopped._', format: 'markdown' });
