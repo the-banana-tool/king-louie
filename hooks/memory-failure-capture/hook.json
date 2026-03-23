@@ -1,0 +1,8 @@
+{
+  "name": "memory-failure-capture",
+  "event": "PostToolUse",
+  "matcher": "*",
+  "enabled": true,
+  "description": "Capture failed tool executions as tiered memory entries.",
+  "handler": "index.js"
+}

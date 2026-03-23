@@ -140,6 +140,13 @@ contextBridge.exposeInMainWorld(
       setEnabled: (payload) => ipcRenderer.invoke('hooks:setEnabled', payload),
       setGlobalEnabled: (payload) => ipcRenderer.invoke('hooks:setGlobalEnabled', payload)
     },
+    memory: {
+      capture: (payload) => ipcRenderer.invoke('memory:capture', payload),
+      recall: (payload) => ipcRenderer.invoke('memory:recall', payload),
+      list: (payload) => ipcRenderer.invoke('memory:list', payload),
+      delete: (payload) => ipcRenderer.invoke('memory:delete', payload),
+      clear: () => ipcRenderer.invoke('memory:clear')
+    },
     skill: {
       list: () => ipcRenderer.invoke('skill:list'),
       customize: (payload) => ipcRenderer.invoke('skill:customize', payload),

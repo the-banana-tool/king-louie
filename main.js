@@ -27,6 +27,7 @@ const UserProfile = require('./src/telos/user-profile');
 const { loadProjectContext } = require('./src/telos/project-context');
 const HookRegistry = require('./src/hooks/hook-registry');
 const HookExecutor = require('./src/hooks/hook-executor');
+const { MemoryStore, MemoryManager } = require('./src/memory');
 const {
   NotificationRouter,
   DEFAULT_NOTIFICATION_SETTINGS,
@@ -46,6 +47,8 @@ let userProfile;
 let notificationRouter;
 let hookRegistry;
 let hookExecutor;
+let memoryStore;
+let memoryManager;
 const TELEGRAM_TOKEN_STORE_KEY = '__telegram_bot_token';
 
 const DEFAULT_SETTINGS = {
@@ -246,6 +249,21 @@ const formatProjectContextSection = (workingDirectory = process.cwd()) => {
     '',
     projectContext.content
   ].join('\n');
+};
+
+const buildMemoryContextSection = (query = '', options = {}) => {
+  if (!memoryManager) {
+    return '';
+  }
+
+  try {
+    return memoryManager.buildPromptContext(query, {
+      limit: options.limit || 6
+    });
+  } catch (error) {
+    console.warn('[memory] Failed building memory context:', error.message);
+    return '';
+  }
 };
 
 const buildTemplateContextFromSettings = () => {
@@ -1229,6 +1247,14 @@ const initializeAgentInfrastructure = async () => {
     registry: hookRegistry,
     workingDirectory: process.cwd()
   });
+  const memoryStorageFile = path.join(app.getPath('userData'), 'memory', 'memory-store.json');
+  memoryStore = new MemoryStore({ storageFile: memoryStorageFile });
+  memoryManager = new MemoryManager({
+    store: memoryStore,
+    currentSessionId: `main-${Date.now()}`
+  });
+  process.env.KING_LOUIE_MEMORY_STORE = memoryStorageFile;
+
   reloadHooksFromSettings();
 
   gatewayServer = new GatewayServer({
@@ -1265,6 +1291,7 @@ const initializeAgentInfrastructure = async () => {
         },
         systemPrompt: [
           buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
+          buildMemoryContextSection(message),
           formatUserContextSection(),
           formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
         ].join('\n\n')
@@ -1388,6 +1415,10 @@ const initializeAgentInfrastructure = async () => {
     startedAt: new Date().toISOString(),
     workingDirectory: process.cwd()
   });
+
+  if (memoryManager) {
+    memoryManager.runAging();
+  }
 };
 
 function createWindow() {
@@ -1523,7 +1554,10 @@ ipcMain.handle('chat:sendMessage', async (event, { chatId, message, agentMode = 
     });
 
     options.runtimeEnvironment = runtimeEnvironment;
-    options.systemPrompt = buildRuntimeSystemPrompt(runtimeEnvironment);
+    options.systemPrompt = [
+      buildRuntimeSystemPrompt(runtimeEnvironment),
+      buildMemoryContextSection(message, { limit: 4 })
+    ].filter(Boolean).join('\n\n');
 
     const executor = new ToolExecutor({
       workingDirectory: process.cwd(),
@@ -1642,6 +1676,71 @@ ipcMain.handle('hooks:setGlobalEnabled', async (_event, { enabled }) => {
     enabled: normalized,
     hooks: listHookDefinitions()
   };
+});
+
+ipcMain.handle('memory:capture', async (_event, { type, content, source, metadata } = {}) => {
+  if (!memoryManager) {
+    return { ok: false, error: 'Memory manager is not initialized.' };
+  }
+
+  try {
+    const entry = memoryManager.capture(type, content, { source, metadata });
+    return { ok: true, entry };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+});
+
+ipcMain.handle('memory:recall', async (_event, { query = '', options = {} } = {}) => {
+  if (!memoryManager) {
+    return { ok: false, error: 'Memory manager is not initialized.', entries: [] };
+  }
+
+  try {
+    const entries = memoryManager.recall(query, options || {});
+    return { ok: true, entries };
+  } catch (error) {
+    return { ok: false, error: error.message, entries: [] };
+  }
+});
+
+ipcMain.handle('memory:list', async (_event, options = {}) => {
+  if (!memoryManager) {
+    return { ok: false, error: 'Memory manager is not initialized.', entries: [] };
+  }
+
+  try {
+    const entries = memoryManager.list(options || {});
+    return { ok: true, entries };
+  } catch (error) {
+    return { ok: false, error: error.message, entries: [] };
+  }
+});
+
+ipcMain.handle('memory:delete', async (_event, { id } = {}) => {
+  if (!memoryManager) {
+    return { ok: false, error: 'Memory manager is not initialized.' };
+  }
+
+  try {
+    const deleted = memoryManager.delete(id);
+    return { ok: true, deleted };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+});
+
+ipcMain.handle('memory:clear', async () => {
+  if (!memoryManager) {
+    return { ok: false, error: 'Memory manager is not initialized.' };
+  }
+
+  try {
+    memoryManager.clear();
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
 });
 
 ipcMain.handle('tool:list', async () => {
@@ -1901,6 +2000,7 @@ ipcMain.handle('agent:execute', async (event, { agentId, message, tier }) => {
       templateContext: buildTemplateContextFromSettings(),
       systemPrompt: [
         buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
+        buildMemoryContextSection(message),
         formatUserContextSection(),
         formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
       ].join('\n\n')
@@ -1928,6 +2028,7 @@ ipcMain.handle('agent:executeParallel', async (event, { agentIds = [], message }
       templateContext: buildTemplateContextFromSettings(),
       systemPrompt: [
         buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
+        buildMemoryContextSection(message),
         formatUserContextSection(),
         formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
       ].join('\n\n')
@@ -1955,6 +2056,7 @@ ipcMain.handle('agent:executeSerial', async (event, { agentIds = [], message }) 
       templateContext: buildTemplateContextFromSettings(),
       systemPrompt: [
         buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
+        buildMemoryContextSection(message),
         formatUserContextSection(),
         formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
       ].join('\n\n')

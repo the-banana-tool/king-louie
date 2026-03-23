@@ -41,16 +41,28 @@ Agents currently forget everything between sessions. Add persistent learning tha
 
 ### Tasks
 
-- [ ] **2.1** Design memory schema - Define structure for memory entries: `{ id, type (success|failure|preference|context), content, source (session_id), created, lastAccessed, tier (hot|warm|cold) }`
-- [ ] **2.2** Create `src/memory/memory-store.js` - CRUD operations for memory entries, backed by a JSON file in the app's user data directory
-- [ ] **2.3** Create `src/memory/memory-manager.js` - Higher-level API: `capture(type, content)`, `recall(query, options)`, `promote(id)`, `demote(id)`
-- [ ] **2.4** Implement tier aging - Hot (current session + 7 days), Warm (7-90 days), Cold (90+ days). Run aging on SessionStart
-- [ ] **2.5** Implement phase-based capture - Add `captureSuccess(what, why)`, `captureFailure(what, why, fix)`, `capturePreference(key, value)` convenience methods
-- [ ] **2.6** Create `src/memory/memory-retrieval.js` - Retrieve relevant memories for a given prompt/context using keyword matching and recency scoring
-- [ ] **2.7** Inject recalled memories into agent system prompts - When building messages for the LLM, prepend relevant memories as context
-- [ ] **2.8** Add IPC handlers in `main.js` for memory operations (memory:capture, memory:recall, memory:list, memory:clear)
-- [ ] **2.9** Add memory panel to UI - Sidebar tab or drawer showing recent memories with search, tier filter, and delete
-- [ ] **2.10** Create a PostToolUse hook that auto-captures tool failures as memory entries
+- [x] **2.1** Design memory schema - Define structure for memory entries: `{ id, type (success|failure|preference|context), content, source (session_id), created, lastAccessed, tier (hot|warm|cold) }`
+- [x] **2.2** Create `src/memory/memory-store.js` - CRUD operations for memory entries, backed by a JSON file in the app's user data directory
+- [x] **2.3** Create `src/memory/memory-manager.js` - Higher-level API: `capture(type, content)`, `recall(query, options)`, `promote(id)`, `demote(id)`
+- [x] **2.4** Implement tier aging - Hot (current session + 7 days), Warm (7-90 days), Cold (90+ days). Run aging on SessionStart
+- [x] **2.5** Implement phase-based capture - Add `captureSuccess(what, why)`, `captureFailure(what, why, fix)`, `capturePreference(key, value)` convenience methods
+- [x] **2.6** Create `src/memory/memory-retrieval.js` - Retrieve relevant memories for a given prompt/context using keyword matching and recency scoring
+- [x] **2.7** Inject recalled memories into agent system prompts - When building messages for the LLM, prepend relevant memories as context
+- [x] **2.8** Add IPC handlers in `main.js` for memory operations (memory:capture, memory:recall, memory:list, memory:clear)
+- [x] **2.9** Add memory panel to UI - Sidebar tab or drawer showing recent memories with search, tier filter, and delete
+- [x] **2.10** Create a PostToolUse hook that auto-captures tool failures as memory entries
+
+### Progress Notes
+
+- ✅ Completed 2026-03-23: Tiered Memory System implementation (2.1–2.10)
+- Added memory subsystem under `src/memory/`:
+  - `memory-store.js` for persistent JSON-backed CRUD
+  - `memory-manager.js` for capture/recall/promote/demote, tier aging, convenience capture helpers, and prompt-context generation
+  - `memory-retrieval.js` for keyword + recency scoring across memory entries
+- Wired memory lifecycle into `main.js` with startup aging on `SessionStart`, prompt-time memory context injection for chat/agent/orchestrated execution, and IPC handlers (`memory:capture`, `memory:recall`, `memory:list`, `memory:delete`, `memory:clear`)
+- Added memory UI controls in settings drawer (`index.html`, `renderer.js`, `preload.js`) with capture, search, tier filtering, delete, and clear-all actions
+- Added `hooks/memory-failure-capture/` PostToolUse hook to persist failed tool executions as failure memories
+- Added targeted automated tests in `tests/memory-system.test.js` and set `npm test` to execute memory system coverage
 
 ---
 

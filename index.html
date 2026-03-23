@@ -195,6 +195,41 @@
           <div class="provider-list" id="hooks-list"></div>
         </section>
 
+        <section class="template-variables-card">
+          <h3>Memory (Hot / Warm / Cold)</h3>
+          <p>Persistent tiered memory used to inform future agent responses.</p>
+          <div class="template-variables-grid">
+            <label for="memory-query-input">Search</label>
+            <input id="memory-query-input" class="provider-input" type="text" placeholder="keyword or phrase">
+
+            <label for="memory-tier-filter-input">Tier Filter</label>
+            <select id="memory-tier-filter-input" class="provider-input">
+              <option value="">All tiers</option>
+              <option value="hot">Hot</option>
+              <option value="warm">Warm</option>
+              <option value="cold">Cold</option>
+            </select>
+
+            <label for="memory-capture-type-input">Capture Type</label>
+            <select id="memory-capture-type-input" class="provider-input">
+              <option value="context">context</option>
+              <option value="success">success</option>
+              <option value="failure">failure</option>
+              <option value="preference">preference</option>
+            </select>
+
+            <label for="memory-capture-content-input">Capture Content</label>
+            <textarea id="memory-capture-content-input" class="provider-input" rows="3" placeholder="Add memory entry content..."></textarea>
+          </div>
+          <div class="template-variables-actions">
+            <button id="memory-refresh-btn" type="button">Refresh</button>
+            <button id="memory-capture-btn" type="button" class="primary">Capture</button>
+            <button id="memory-clear-btn" type="button" class="danger">Clear All</button>
+            <span id="memory-status" class="provider-message">Memory not loaded yet.</span>
+          </div>
+          <div class="provider-list" id="memory-list"></div>
+        </section>
+
         <div class="provider-list" id="provider-list"></div>
       </div>
     </div>

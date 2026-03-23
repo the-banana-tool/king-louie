@@ -47,6 +47,15 @@ const hooksGlobalEnabledInput = document.getElementById('hooks-global-enabled-in
 const reloadHooksBtn = document.getElementById('reload-hooks-btn');
 const hooksStatus = document.getElementById('hooks-status');
 const hooksList = document.getElementById('hooks-list');
+const memoryQueryInput = document.getElementById('memory-query-input');
+const memoryTierFilterInput = document.getElementById('memory-tier-filter-input');
+const memoryCaptureTypeInput = document.getElementById('memory-capture-type-input');
+const memoryCaptureContentInput = document.getElementById('memory-capture-content-input');
+const memoryRefreshBtn = document.getElementById('memory-refresh-btn');
+const memoryCaptureBtn = document.getElementById('memory-capture-btn');
+const memoryClearBtn = document.getElementById('memory-clear-btn');
+const memoryStatus = document.getElementById('memory-status');
+const memoryList = document.getElementById('memory-list');
 
 let chats = [];
 let activeChatId = null;
@@ -96,6 +105,7 @@ let settingsState = {
 const streamBufferById = new Map();
 let isAgentModeEnabled = false;
 let isHistoryCollapsed = false;
+let memoryEntries = [];
 
 function renderHistoryToggleButton() {
   if (!toggleHistoryBtn) return;
@@ -814,10 +824,203 @@ function renderSettings() {
     }
   }
 
+  if (memoryStatus) {
+    memoryStatus.textContent = 'Memory settings ready.';
+    memoryStatus.classList.remove('error');
+  }
+
+  if (memoryCaptureTypeInput && !memoryCaptureTypeInput.value) {
+    memoryCaptureTypeInput.value = 'context';
+  }
+
   providerList.innerHTML = '';
   Object.entries(settingsState.providers).forEach(([key, provider]) => {
     providerList.appendChild(renderProviderCard(key, provider));
   });
+}
+
+function formatMemoryEntry(entry = {}) {
+  const content = String(entry.content || '').trim();
+  return content.length > 240
+    ? `${content.slice(0, 240)}...`
+    : content;
+}
+
+function renderMemoryList(entries = []) {
+  if (!memoryList) return;
+
+  memoryList.innerHTML = '';
+  if (!entries.length) {
+    const empty = document.createElement('div');
+    empty.className = 'provider-message';
+    empty.textContent = 'No memories found for the current filters.';
+    memoryList.appendChild(empty);
+    return;
+  }
+
+  entries.forEach((entry) => {
+    const card = document.createElement('div');
+    card.className = 'provider-card';
+    card.dataset.memoryId = entry.id;
+
+    const header = document.createElement('div');
+    header.className = 'provider-header';
+
+    const title = document.createElement('div');
+    title.className = 'provider-title';
+    title.textContent = `${String(entry.tier || 'hot').toUpperCase()} • ${String(entry.type || 'context')}`;
+
+    const status = document.createElement('span');
+    status.className = 'provider-status ok';
+    status.textContent = String(entry.source || 'unknown-session');
+
+    header.appendChild(title);
+    header.appendChild(status);
+
+    const body = document.createElement('div');
+    body.className = 'provider-message';
+    body.textContent = formatMemoryEntry(entry);
+
+    const meta = document.createElement('div');
+    meta.className = 'provider-message';
+    meta.textContent = `Created: ${formatTimestamp(entry.created)} • Last Accessed: ${formatTimestamp(entry.lastAccessed)}`;
+
+    const actions = document.createElement('div');
+    actions.className = 'provider-actions';
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.type = 'button';
+    deleteBtn.className = 'danger';
+    deleteBtn.dataset.action = 'delete-memory';
+    deleteBtn.dataset.memoryId = entry.id;
+    deleteBtn.textContent = 'Delete';
+
+    actions.appendChild(deleteBtn);
+
+    card.appendChild(header);
+    card.appendChild(body);
+    card.appendChild(meta);
+    card.appendChild(actions);
+    memoryList.appendChild(card);
+  });
+}
+
+function collectMemoryFilters() {
+  return {
+    query: String(memoryQueryInput?.value || '').trim(),
+    tier: String(memoryTierFilterInput?.value || '').trim(),
+    limit: 200
+  };
+}
+
+async function loadMemoryEntries() {
+  if (!window.electron?.memory || !memoryList) {
+    return;
+  }
+
+  const { query, tier, limit } = collectMemoryFilters();
+  try {
+    if (memoryStatus) {
+      memoryStatus.textContent = 'Loading memories...';
+      memoryStatus.classList.remove('error');
+    }
+
+    const result = await window.electron.memory.list({
+      query,
+      tier,
+      limit
+    });
+
+    if (!result?.ok) {
+      throw new Error(result?.error || 'Unable to load memory entries.');
+    }
+
+    memoryEntries = Array.isArray(result.entries) ? result.entries : [];
+    renderMemoryList(memoryEntries);
+    if (memoryStatus) {
+      memoryStatus.textContent = `Loaded ${memoryEntries.length} memory entr${memoryEntries.length === 1 ? 'y' : 'ies'}.`;
+      memoryStatus.classList.remove('error');
+    }
+  } catch (error) {
+    if (memoryStatus) {
+      memoryStatus.textContent = `Error: ${error.message || 'Unable to load memory entries.'}`;
+      memoryStatus.classList.add('error');
+    }
+  }
+}
+
+async function handleCaptureMemory() {
+  if (!window.electron?.memory) return;
+
+  const type = String(memoryCaptureTypeInput?.value || 'context').trim() || 'context';
+  const content = String(memoryCaptureContentInput?.value || '').trim();
+  if (!content) {
+    if (memoryStatus) {
+      memoryStatus.textContent = 'Capture content is required.';
+      memoryStatus.classList.add('error');
+    }
+    return;
+  }
+
+  if (memoryCaptureBtn) memoryCaptureBtn.disabled = true;
+  try {
+    const result = await window.electron.memory.capture({ type, content });
+    if (!result?.ok) {
+      throw new Error(result?.error || 'Unable to capture memory.');
+    }
+
+    if (memoryCaptureContentInput) {
+      memoryCaptureContentInput.value = '';
+    }
+    if (memoryStatus) {
+      memoryStatus.textContent = 'Memory captured.';
+      memoryStatus.classList.remove('error');
+    }
+    await loadMemoryEntries();
+  } catch (error) {
+    if (memoryStatus) {
+      memoryStatus.textContent = `Error: ${error.message || 'Unable to capture memory.'}`;
+      memoryStatus.classList.add('error');
+    }
+  } finally {
+    if (memoryCaptureBtn) memoryCaptureBtn.disabled = false;
+  }
+}
+
+async function handleDeleteMemory(memoryId) {
+  if (!window.electron?.memory || !memoryId) return;
+
+  try {
+    const result = await window.electron.memory.delete({ id: memoryId });
+    if (!result?.ok) {
+      throw new Error(result?.error || 'Unable to delete memory.');
+    }
+    await loadMemoryEntries();
+  } catch (error) {
+    if (memoryStatus) {
+      memoryStatus.textContent = `Error: ${error.message || 'Unable to delete memory.'}`;
+      memoryStatus.classList.add('error');
+    }
+  }
+}
+
+async function handleClearMemory() {
+  if (!window.electron?.memory) return;
+  const confirmed = confirm('Clear all memory entries? This cannot be undone.');
+  if (!confirmed) return;
+
+  try {
+    const result = await window.electron.memory.clear();
+    if (!result?.ok) {
+      throw new Error(result?.error || 'Unable to clear memory entries.');
+    }
+    await loadMemoryEntries();
+  } catch (error) {
+    if (memoryStatus) {
+      memoryStatus.textContent = `Error: ${error.message || 'Unable to clear memory.'}`;
+      memoryStatus.classList.add('error');
+    }
+  }
 }
 
 async function handleToggleHook(hookName, enabled) {
@@ -1077,6 +1280,7 @@ async function loadSettings() {
       return;
     }
     renderSettings();
+    await loadMemoryEntries();
   } catch (error) {
     setProviderListFallback(`Unable to load provider settings: ${error.message || 'Unknown error'}`);
   }
@@ -2101,6 +2305,46 @@ if (hooksList) {
     const hookName = String(button.dataset.hookName || '').trim();
     const enabled = String(button.dataset.nextEnabled || '').toLowerCase() === 'true';
     handleToggleHook(hookName, enabled);
+  });
+}
+
+if (memoryRefreshBtn) {
+  memoryRefreshBtn.addEventListener('click', () => {
+    loadMemoryEntries();
+  });
+}
+
+if (memoryCaptureBtn) {
+  memoryCaptureBtn.addEventListener('click', () => {
+    handleCaptureMemory();
+  });
+}
+
+if (memoryClearBtn) {
+  memoryClearBtn.addEventListener('click', () => {
+    handleClearMemory();
+  });
+}
+
+if (memoryList) {
+  memoryList.addEventListener('click', (event) => {
+    const button = event.target.closest('button[data-action="delete-memory"]');
+    if (!button) return;
+    const memoryId = String(button.dataset.memoryId || '').trim();
+    if (!memoryId) return;
+    handleDeleteMemory(memoryId);
+  });
+}
+
+if (memoryQueryInput) {
+  memoryQueryInput.addEventListener('input', () => {
+    loadMemoryEntries();
+  });
+}
+
+if (memoryTierFilterInput) {
+  memoryTierFilterInput.addEventListener('change', () => {
+    loadMemoryEntries();
   });
 }
 
