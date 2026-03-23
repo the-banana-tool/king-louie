@@ -110,10 +110,10 @@ A lightweight user profile that agents reference to personalize responses. Not t
 ### Tasks
 
 - [x] **5.1** Create `src/telos/user-profile.js` - Manages a user profile with fields: `name`, `role`, `goals[]`, `preferences{}`, `projectContext`
-- [ ] **5.2** Store profile in electron-store under `userProfile` key
-- [ ] **5.3** Create profile setup UI - First-run wizard or settings tab with text fields for each profile property
-- [ ] **5.4** Inject user profile into agent system prompts - Append a "User Context" section with relevant profile info
-- [ ] **5.5** Add `/profile` slash command to view/edit profile inline in chat
+- [x] **5.2** Store profile in electron-store under `userProfile` key
+- [x] **5.3** Create profile setup UI - First-run wizard or settings tab with text fields for each profile property
+- [x] **5.4** Inject user profile into agent system prompts - Append a "User Context" section with relevant profile info
+- [x] **5.5** Add `/profile` slash command to view/edit profile inline in chat
 - [ ] **5.6** Add project-level TELOS - Per-directory `.king-louie/context.md` file that agents auto-load when working in that directory
 
 ### Progress Notes
@@ -121,6 +121,11 @@ A lightweight user profile that agents reference to personalize responses. Not t
 - ✅ Completed 2026-03-23: initial TELOS user profile manager (5.1)
 - Added `src/telos/user-profile.js` with normalized profile schema support (`name`, `role`, `goals[]`, `preferences{}`, `projectContext`)
 - Added profile read/update helpers plus template-context projection for prompt injection (`toTemplateContext`)
+- ✅ Completed 2026-03-23: profile persistence + UI + prompt injection + slash command (5.2–5.5)
+- Stored user profile in `electron-store` under `userProfile`, with new IPC save endpoint (`settings:saveUserProfile`) and preload bridge wiring
+- Added TELOS profile section in settings UI (name, role, goals, preferences JSON, project context) with save/status handling
+- Injected `User Context` into agent execution system prompts (single, parallel, serial, and remote adapter paths)
+- Added `/profile` and `/profile set <field> <value>` commands in renderer for inline view/edit (`name`, `role`, `projectContext`, `goals`, `preferences`)
 
 ---
 

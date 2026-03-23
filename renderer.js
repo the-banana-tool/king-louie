@@ -27,6 +27,13 @@ const templatePreferencesInput = document.getElementById('template-preferences-i
 const templateProjectContextInput = document.getElementById('template-project-context-input');
 const saveTemplateVariablesBtn = document.getElementById('save-template-variables-btn');
 const templateVariablesStatus = document.getElementById('template-variables-status');
+const profileNameInput = document.getElementById('profile-name-input');
+const profileRoleInput = document.getElementById('profile-role-input');
+const profileGoalsInput = document.getElementById('profile-goals-input');
+const profilePreferencesInput = document.getElementById('profile-preferences-input');
+const profileProjectContextInput = document.getElementById('profile-project-context-input');
+const saveUserProfileBtn = document.getElementById('save-user-profile-btn');
+const userProfileStatus = document.getElementById('user-profile-status');
 
 let chats = [];
 let activeChatId = null;
@@ -42,6 +49,13 @@ let settingsState = {
     name: '',
     role: '',
     preferences: '',
+    projectContext: ''
+  },
+  userProfile: {
+    name: '',
+    role: '',
+    goals: [],
+    preferences: {},
     projectContext: ''
   }
 };
@@ -90,6 +104,8 @@ async function getLocalHelpText() {
     '- `/llm telegram test` — test saved Telegram bot token',
     '- `/llm telegram remove` — clear saved Telegram token and stop bridge',
     '- `/llm telegram status` — show Telegram bridge status',
+    '- `/profile` — show your current profile values',
+    '- `/profile set <field> <value>` — update profile field (`name`, `role`, `projectContext`, `goals`, `preferences`)',
     '- `/fast` — switch inference tier to fast',
     '- `/standard` — switch inference tier to standard',
     '- `/smart` — switch inference tier to smart',
@@ -140,6 +156,47 @@ function appendLocalMessage(sender, text, metadata = {}) {
     };
   });
   refreshUI();
+}
+
+function formatProfileSummary(profile = {}) {
+  const goals = Array.isArray(profile?.goals) ? profile.goals.filter(Boolean) : [];
+  const preferences =
+    profile?.preferences && typeof profile.preferences === 'object'
+      ? profile.preferences
+      : {};
+
+  return [
+    '### User Profile',
+    '',
+    `- Name: ${profile?.name || '(not set)'}`,
+    `- Role: ${profile?.role || '(not set)'}`,
+    `- Goals: ${goals.length ? goals.join('; ') : '(none set)'}`,
+    `- Preferences: ${Object.keys(preferences).length ? JSON.stringify(preferences) : '(none set)'}`,
+    `- Project Context: ${profile?.projectContext || '(not set)'}`,
+    '',
+    'Use `/profile set <field> <value>` to update inline. Example: `/profile set role Staff Engineer`'
+  ].join('\n');
+}
+
+async function saveUserProfileWithFeedback(profile, userCommand = null) {
+  const result = await window.electron.settings.saveUserProfile({ profile });
+  if (!result?.ok) {
+    throw new Error(result?.error || 'Unable to save profile.');
+  }
+
+  settingsState.userProfile = {
+    ...(result.userProfile || profile)
+  };
+  renderSettings();
+
+  if (userCommand) {
+    appendLocalMessage('user', userCommand);
+    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: userCommand }).catch(() => {});
+  }
+
+  const summary = formatProfileSummary(settingsState.userProfile);
+  appendLocalMessage('assistant', summary);
+  window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: summary }).catch(() => {});
 }
 
 function parseSlashCommand(message = '') {
@@ -600,6 +657,28 @@ function renderSettings() {
     templateVariablesStatus.classList.remove('error');
   }
 
+  const userProfile = settingsState.userProfile || {};
+  if (profileNameInput) profileNameInput.value = userProfile.name || '';
+  if (profileRoleInput) profileRoleInput.value = userProfile.role || '';
+  if (profileGoalsInput) {
+    const goals = Array.isArray(userProfile.goals) ? userProfile.goals : [];
+    profileGoalsInput.value = goals.join('\n');
+  }
+  if (profilePreferencesInput) {
+    profilePreferencesInput.value =
+      userProfile.preferences && typeof userProfile.preferences === 'object'
+        ? JSON.stringify(userProfile.preferences, null, 2)
+        : '';
+  }
+  if (profileProjectContextInput) {
+    profileProjectContextInput.value = userProfile.projectContext || '';
+  }
+
+  if (userProfileStatus) {
+    userProfileStatus.textContent = 'User profile loaded.';
+    userProfileStatus.classList.remove('error');
+  }
+
   providerList.innerHTML = '';
   Object.entries(settingsState.providers).forEach(([key, provider]) => {
     providerList.appendChild(renderProviderCard(key, provider));
@@ -647,6 +726,65 @@ async function handleSaveTemplateVariables() {
     }
   } finally {
     saveTemplateVariablesBtn.disabled = false;
+  }
+}
+
+function collectUserProfileFromForm() {
+  const goals = String(profileGoalsInput?.value || '')
+    .split(/\r?\n/)
+    .map((goal) => goal.trim())
+    .filter(Boolean);
+
+  const rawPreferences = String(profilePreferencesInput?.value || '').trim();
+  let preferences = {};
+  if (rawPreferences) {
+    const parsed = JSON.parse(rawPreferences);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('Preferences must be valid JSON object syntax.');
+    }
+    preferences = parsed;
+  }
+
+  return {
+    name: String(profileNameInput?.value || '').trim(),
+    role: String(profileRoleInput?.value || '').trim(),
+    goals,
+    preferences,
+    projectContext: String(profileProjectContextInput?.value || '').trim()
+  };
+}
+
+async function handleSaveUserProfile() {
+  if (!saveUserProfileBtn) return;
+
+  saveUserProfileBtn.disabled = true;
+  if (userProfileStatus) {
+    userProfileStatus.textContent = 'Saving...';
+    userProfileStatus.classList.remove('error');
+  }
+
+  try {
+    const profile = collectUserProfileFromForm();
+    const result = await window.electron.settings.saveUserProfile({ profile });
+    if (!result?.ok) {
+      throw new Error(result?.error || 'Unable to save user profile.');
+    }
+
+    settingsState.userProfile = {
+      ...(result.userProfile || profile)
+    };
+
+    if (userProfileStatus) {
+      userProfileStatus.textContent = 'User profile saved. New agent runs include it in context.';
+      userProfileStatus.classList.remove('error');
+    }
+  } catch (error) {
+    if (userProfileStatus) {
+      userProfileStatus.textContent = `Error: ${error.message || 'Unable to save user profile.'}`;
+      userProfileStatus.classList.add('error');
+    }
+  } finally {
+    saveUserProfileBtn.disabled = false;
   }
 }
 
@@ -865,6 +1003,75 @@ async function sendMessage() {
     appendLocalMessage('assistant', statusText);
     window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch(() => {});
     window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: statusText }).catch(() => {});
+
+    return;
+  }
+
+  if (slashCommand?.name === '/profile') {
+    userInput.value = '';
+    userInput.style.height = 'auto';
+
+    const action = (slashCommand.args[0] || '').toLowerCase();
+    if (!action) {
+      appendLocalMessage('user', message);
+      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch(() => {});
+
+      const summary = formatProfileSummary(settingsState.userProfile || {});
+      appendLocalMessage('assistant', summary);
+      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: summary }).catch(() => {});
+      return;
+    }
+
+    if (action !== 'set') {
+      const usage = 'Usage: `/profile` or `/profile set <field> <value>`. Fields: name, role, projectContext, goals, preferences';
+      appendLocalMessage('user', message);
+      appendLocalMessage('assistant', usage);
+      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch(() => {});
+      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: usage }).catch(() => {});
+      return;
+    }
+
+    const fieldRaw = slashCommand.args[1] || '';
+    const field = fieldRaw.toLowerCase();
+    const rawValue = slashCommand.args.slice(2).join(' ').trim();
+    const profile = {
+      ...(settingsState.userProfile || {})
+    };
+
+    try {
+      if (!field || rawValue.length === 0) {
+        throw new Error('Usage: `/profile set <field> <value>`.');
+      }
+
+      if (field === 'name') {
+        profile.name = rawValue;
+      } else if (field === 'role') {
+        profile.role = rawValue;
+      } else if (field === 'projectcontext' || field === 'project_context') {
+        profile.projectContext = rawValue;
+      } else if (field === 'goals') {
+        profile.goals = rawValue
+          .split(';')
+          .map((goal) => goal.trim())
+          .filter(Boolean);
+      } else if (field === 'preferences') {
+        const parsed = JSON.parse(rawValue);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error('`preferences` must be a valid JSON object.');
+        }
+        profile.preferences = parsed;
+      } else {
+        throw new Error('Unknown field. Use name, role, projectContext, goals, or preferences.');
+      }
+
+      await saveUserProfileWithFeedback(profile, message);
+    } catch (error) {
+      appendLocalMessage('user', message);
+      const errorText = `❌ ${error.message || 'Unable to update profile.'}`;
+      appendLocalMessage('assistant', errorText);
+      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch(() => {});
+      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: errorText }).catch(() => {});
+    }
 
     return;
   }
@@ -1545,6 +1752,12 @@ if (providerList) {
 if (saveTemplateVariablesBtn) {
   saveTemplateVariablesBtn.addEventListener('click', () => {
     handleSaveTemplateVariables();
+  });
+}
+
+if (saveUserProfileBtn) {
+  saveUserProfileBtn.addEventListener('click', () => {
+    handleSaveUserProfile();
   });
 }
 

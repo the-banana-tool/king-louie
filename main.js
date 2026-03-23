@@ -22,6 +22,7 @@ const {
   SessionsSpawnTool
 } = require('./src/tools/builtin/sessions-tools');
 const { SkillLoader, skillRegistry, PinManager } = require('./src/skills');
+const UserProfile = require('./src/telos/user-profile');
 
 let mainWindow;
 let skillLoader;
@@ -32,6 +33,7 @@ let gatewayServer;
 let sessionManager;
 let remoteControl;
 let telegramBridge;
+let userProfile;
 const TELEGRAM_TOKEN_STORE_KEY = '__telegram_bot_token';
 
 const DEFAULT_SETTINGS = {
@@ -149,15 +151,67 @@ const setTemplateVariables = (templateVariables = {}) => {
   return updated.templateVariables;
 };
 
+const normalizeUserProfileInput = (profile = {}) => ({
+  ...(profile || {}),
+  goals: Array.isArray(profile?.goals)
+    ? profile.goals
+    : String(profile?.goals || '')
+        .split(/\r?\n|;/)
+        .map((goal) => String(goal || '').trim())
+        .filter(Boolean)
+});
+
+const getUserProfile = () => {
+  if (!userProfile) {
+    return UserProfile.getDefaultProfile();
+  }
+
+  return userProfile.getProfile();
+};
+
+const updateUserProfile = (profile = {}) => {
+  if (!userProfile) {
+    throw new Error('User profile manager is not initialized.');
+  }
+
+  return userProfile.updateProfile(normalizeUserProfileInput(profile));
+};
+
+const formatUserContextSection = (profile = getUserProfile()) => {
+  const normalized = (profile && typeof profile === 'object') ? profile : {};
+  const goals = Array.isArray(normalized.goals) ? normalized.goals.filter(Boolean) : [];
+  const preferences =
+    normalized.preferences && typeof normalized.preferences === 'object'
+      ? normalized.preferences
+      : {};
+
+  const preferenceEntries = Object.entries(preferences)
+    .map(([key, value]) => `${key}: ${String(value)}`)
+    .filter(Boolean);
+
+  return [
+    'User Context:',
+    `- Name: ${normalized.name || '(not set)'}`,
+    `- Role: ${normalized.role || '(not set)'}`,
+    `- Goals: ${goals.length ? goals.join('; ') : '(none set)'}`,
+    `- Preferences: ${preferenceEntries.length ? preferenceEntries.join('; ') : '(none set)'}`,
+    `- Project Context: ${normalized.projectContext || '(not set)'}`
+  ].join('\n');
+};
+
 const buildTemplateContextFromSettings = () => {
   const templateVariables = getTemplateVariables();
+  const profileContext = userProfile ? userProfile.toTemplateContext(getUserProfile()) : {};
   return {
+    ...profileContext,
     user: {
+      ...(profileContext.user || {}),
       name: templateVariables.name,
       role: templateVariables.role,
       preferences: templateVariables.preferences
     },
     project: {
+      ...(profileContext.project || {}),
       context: templateVariables.projectContext
     }
   };
@@ -920,6 +974,10 @@ const initializeAgentInfrastructure = async () => {
     storageFile: path.join(app.getPath('userData'), 'skill-pins.json')
   });
   await pinManager.load();
+  userProfile = new UserProfile({
+    getStoredProfile: () => store.get('userProfile', UserProfile.getDefaultProfile()),
+    setStoredProfile: (profile) => store.set('userProfile', profile)
+  });
 
   gatewayServer = new GatewayServer({
     host: '127.0.0.1',
@@ -948,11 +1006,15 @@ const initializeAgentInfrastructure = async () => {
         model: options.model || runtime.model || agent.model,
         timeoutMs: options.timeoutMs || runtime.timeoutMs,
         tools: runtime.toolDefinitions,
+        userProfile: getUserProfile(),
         templateContext: {
           ...buildTemplateContextFromSettings(),
           ...(options.templateContext || {})
         },
-        systemPrompt: buildRuntimeSystemPrompt(runtime.runtimeEnvironment)
+        systemPrompt: [
+          buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
+          formatUserContextSection()
+        ].join('\n\n')
       });
     }
   };
@@ -1301,6 +1363,7 @@ ipcMain.handle('settings:load', () => {
     activeProvider: settings.activeProvider || 'openai',
     inference: settings.inference,
     templateVariables: normalizeTemplateVariables(settings.templateVariables || {}),
+    userProfile: getUserProfile(),
     telegram: {
       hasToken: hasStoredTelegramToken(),
       bridgeActive: Boolean(telegramBridge),
@@ -1312,6 +1375,15 @@ ipcMain.handle('settings:load', () => {
 ipcMain.handle('settings:saveTemplateVariables', (_event, { templateVariables } = {}) => {
   const saved = setTemplateVariables(templateVariables || {});
   return { ok: true, templateVariables: saved };
+});
+
+ipcMain.handle('settings:saveUserProfile', (_event, { profile } = {}) => {
+  try {
+    const saved = updateUserProfile(profile || {});
+    return { ok: true, userProfile: saved };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
 });
 
 ipcMain.handle('settings:setActiveProvider', (_event, { provider }) => {
@@ -1500,8 +1572,12 @@ ipcMain.handle('agent:execute', async (event, { agentId, message, tier }) => {
     model: runtime.model || agent.model,
     timeoutMs: runtime.timeoutMs,
     tools: runtime.toolDefinitions,
+    userProfile: getUserProfile(),
     templateContext: buildTemplateContextFromSettings(),
-    systemPrompt: buildRuntimeSystemPrompt(runtime.runtimeEnvironment)
+    systemPrompt: [
+      buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
+      formatUserContextSection()
+    ].join('\n\n')
   });
 });
 
@@ -1520,8 +1596,12 @@ ipcMain.handle('agent:executeParallel', async (event, { agentIds = [], message }
     model: runtime.model,
     timeoutMs: runtime.timeoutMs,
     tools: runtime.toolDefinitions,
+    userProfile: getUserProfile(),
     templateContext: buildTemplateContextFromSettings(),
-    systemPrompt: buildRuntimeSystemPrompt(runtime.runtimeEnvironment)
+    systemPrompt: [
+      buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
+      formatUserContextSection()
+    ].join('\n\n')
   });
 });
 
@@ -1540,8 +1620,12 @@ ipcMain.handle('agent:executeSerial', async (event, { agentIds = [], message }) 
     model: runtime.model,
     timeoutMs: runtime.timeoutMs,
     tools: runtime.toolDefinitions,
+    userProfile: getUserProfile(),
     templateContext: buildTemplateContextFromSettings(),
-    systemPrompt: buildRuntimeSystemPrompt(runtime.runtimeEnvironment)
+    systemPrompt: [
+      buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
+      formatUserContextSection()
+    ].join('\n\n')
   });
 });
 

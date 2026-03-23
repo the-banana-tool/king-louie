@@ -75,6 +75,7 @@
           Run these commands directly in chat:
           <ul class="settings-help-list">
             <li><code>/help</code></li>
+            <li><code>/profile</code></li>
             <li><code>/llm help</code></li>
             <li><code>/llm list</code></li>
             <li><code>/llm add &lt;provider&gt; &lt;token&gt;</code></li>
@@ -111,6 +112,31 @@
           <div class="template-variables-actions">
             <button id="save-template-variables-btn" type="button" class="primary">Save Variables</button>
             <span id="template-variables-status" class="provider-message">Not saved yet.</span>
+          </div>
+        </section>
+
+        <section class="template-variables-card">
+          <h3>User Profile (TELOS)</h3>
+          <p>Used as persistent user context for agents and profile command responses.</p>
+          <div class="template-variables-grid">
+            <label for="profile-name-input">Name</label>
+            <input id="profile-name-input" class="provider-input" type="text" placeholder="Your name">
+
+            <label for="profile-role-input">Role</label>
+            <input id="profile-role-input" class="provider-input" type="text" placeholder="Your role">
+
+            <label for="profile-goals-input">Goals (one per line)</label>
+            <textarea id="profile-goals-input" class="provider-input" rows="4" placeholder="Primary goals"></textarea>
+
+            <label for="profile-preferences-input">Preferences (JSON)</label>
+            <textarea id="profile-preferences-input" class="provider-input" rows="4" placeholder='{"tone":"concise","style":"pragmatic"}'></textarea>
+
+            <label for="profile-project-context-input">Project Context</label>
+            <textarea id="profile-project-context-input" class="provider-input" rows="4" placeholder="Current project context"></textarea>
+          </div>
+          <div class="template-variables-actions">
+            <button id="save-user-profile-btn" type="button" class="primary">Save Profile</button>
+            <span id="user-profile-status" class="provider-message">Not saved yet.</span>
           </div>
         </section>
 

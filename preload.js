@@ -125,6 +125,7 @@ contextBridge.exposeInMainWorld(
     settings: {
       load: () => ipcRenderer.invoke('settings:load'),
       saveTemplateVariables: (payload) => ipcRenderer.invoke('settings:saveTemplateVariables', payload),
+      saveUserProfile: (payload) => ipcRenderer.invoke('settings:saveUserProfile', payload),
       saveProvider: (payload) => ipcRenderer.invoke('settings:saveProvider', payload),
       testProvider: (payload) => ipcRenderer.invoke('settings:testProvider', payload),
       setActiveProvider: (payload) => ipcRenderer.invoke('settings:setActiveProvider', payload),
