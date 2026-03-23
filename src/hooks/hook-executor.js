@@ -132,8 +132,23 @@ class HookExecutor {
       throw new Error(`Hook handler not found: ${handlerPath || hook.handler}`);
     }
 
-    // eslint-disable-next-line global-require, import/no-dynamic-require
-    const handlerModule = require(handlerPath);
+    // Validate handler path stays within the hook's own directory
+    if (hook.directory) {
+      const realHandler = fs.realpathSync(handlerPath);
+      const realHookDir = fs.realpathSync(hook.directory);
+      if (!realHandler.startsWith(realHookDir + path.sep) && realHandler !== realHookDir) {
+        throw new Error(`Hook handler path escapes hook directory: ${hook.handler}`);
+      }
+    }
+
+    let handlerModule;
+    try {
+      // eslint-disable-next-line global-require, import/no-dynamic-require
+      handlerModule = require(handlerPath);
+    } catch (error) {
+      throw new Error(`Failed to load hook handler '${hook.handler}': ${error.message}`);
+    }
+
     const handlerFn = typeof handlerModule === 'function'
       ? handlerModule
       : typeof handlerModule?.run === 'function'
