@@ -2656,13 +2656,13 @@ app.on('window-all-closed', function () {
       source: 'main',
       endedAt: new Date().toISOString(),
       workingDirectory: process.cwd()
-    }).catch(() => {});
+    }).catch((err) => console.warn('[main] SessionEnd hook failed:', err.message));
 
     if (telegramBridge) {
-      telegramBridge.stop().catch(() => {});
+      telegramBridge.stop().catch((err) => console.warn('[main] Telegram bridge stop failed:', err.message));
     }
     if (gatewayServer) {
-      gatewayServer.stop().catch(() => {});
+      gatewayServer.stop().catch((err) => console.warn('[main] Gateway server stop failed:', err.message));
     }
     app.quit();
   }
