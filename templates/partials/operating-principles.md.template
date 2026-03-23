@@ -9,3 +9,7 @@ User context (from settings):
 - Role: {{user.role}}
 - Preferences: {{user.preferences}}
 - Project context: {{project.context}}
+
+Project TELOS context:
+- Context file: {{project.telosContextPath}}
+- Notes: {{project.telosContext}}

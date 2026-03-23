@@ -1,4 +1,5 @@
 const { Skill } = require('./skill-interface');
+const ResolutionChain = require('./resolution-chain');
 
 /**
  * Registry for managing loaded skills
@@ -7,6 +8,8 @@ class SkillRegistry {
   constructor() {
     this.skills = new Map(); // id -> skill instance
     this.commandMap = new Map(); // command -> skill id
+    this.lastResolutionBySkill = new Map();
+    this.resolutionChain = new ResolutionChain();
   }
 
   /**
@@ -75,9 +78,55 @@ class SkillRegistry {
         description: meta.description,
         commands: meta.commands,
         version: meta.version,
-        pinnable: meta.pinnable
+        pinnable: meta.pinnable,
+        resolvers: Array.isArray(meta.resolvers) && meta.resolvers.length ? meta.resolvers : ['skill'],
+        lastResolutionMethod: this.lastResolutionBySkill.get(meta.id) || null
       };
     });
+  }
+
+  /**
+   * Execute a command via a skill's configured resolver chain.
+   *
+   * @param {string} command
+   * @param {string[]} args
+   * @param {Object} context
+   * @param {{ forcePrompt?: boolean }} options
+   * @returns {Promise<Object>}
+   */
+  async executeCommand(command, args = [], context = {}, options = {}) {
+    const skill = this.getSkillForCommand(command);
+    if (!skill) {
+      return {
+        ok: false,
+        error: `Unknown skill command: /${command}`
+      };
+    }
+
+    const metadata = skill.getMetadata();
+    const defaultResolvers =
+      Array.isArray(metadata?.resolvers) && metadata.resolvers.length
+        ? metadata.resolvers
+        : ['skill'];
+
+    const requestedResolvers = options.forcePrompt
+      ? ['prompt', 'skill']
+      : defaultResolvers;
+
+    const result = await this.resolutionChain.execute({
+      skill,
+      command,
+      args,
+      context,
+      resolvers: requestedResolvers
+    });
+
+    const resolutionMethod = result?.resolution?.method || null;
+    if (metadata?.id && resolutionMethod) {
+      this.lastResolutionBySkill.set(metadata.id, resolutionMethod);
+    }
+
+    return result;
   }
 
   /**
@@ -134,6 +183,7 @@ class SkillRegistry {
     }
 
     this.skills.delete(skillId);
+    this.lastResolutionBySkill.delete(skillId);
     console.log(`[skill-registry] Unregistered skill: ${skillId}`);
     return true;
   }
@@ -151,6 +201,7 @@ class SkillRegistry {
     await Promise.all(cleanupPromises);
     this.skills.clear();
     this.commandMap.clear();
+    this.lastResolutionBySkill.clear();
   }
 }
 

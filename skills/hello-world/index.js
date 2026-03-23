@@ -18,7 +18,8 @@ class HelloWorldSkill extends Skill {
       version: '1.0.0',
       description: 'Example skill that greets users',
       author: 'King Louie Team',
-      commands: ['hello', 'greet']
+      commands: ['hello', 'greet'],
+      resolvers: ['code', 'skill']
     };
   }
 
@@ -28,7 +29,11 @@ class HelloWorldSkill extends Skill {
     console.log('[hello-world] User data path:', context.userDataPath);
   }
 
-  async handleCommand(command, args, context) {
+  async resolveCode({ command, args = [], context }) {
+    if (!['hello', 'greet'].includes(command)) {
+      return null;
+    }
+
     this.greetCount++;
 
     if (command === 'hello') {
@@ -39,25 +44,25 @@ class HelloWorldSkill extends Skill {
       };
     }
 
-    if (command === 'greet') {
-      const greetings = [
-        'Howdy!',
-        'Hi there!',
-        'Greetings!',
-        'Salutations!',
-        'Hey!',
-        'What\'s up?'
-      ];
-      const randomGreeting = greetings[Math.floor(Math.random() * greetings.length)];
-      return {
-        ok: true,
-        message: `${randomGreeting} 🎉`
-      };
-    }
+    const greetings = [
+      'Howdy!',
+      'Hi there!',
+      'Greetings!',
+      'Salutations!',
+      'Hey!',
+      'What\'s up?'
+    ];
+    const randomGreeting = greetings[Math.floor(Math.random() * greetings.length)];
+    return {
+      ok: true,
+      message: `${randomGreeting} 🎉`
+    };
+  }
 
+  async handleCommand(command, args, context) {
     return {
       ok: false,
-      error: 'Unknown command'
+      error: `No fallback handler for command: ${command}`
     };
   }
 

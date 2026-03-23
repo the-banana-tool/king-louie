@@ -114,7 +114,7 @@ A lightweight user profile that agents reference to personalize responses. Not t
 - [x] **5.3** Create profile setup UI - First-run wizard or settings tab with text fields for each profile property
 - [x] **5.4** Inject user profile into agent system prompts - Append a "User Context" section with relevant profile info
 - [x] **5.5** Add `/profile` slash command to view/edit profile inline in chat
-- [ ] **5.6** Add project-level TELOS - Per-directory `.king-louie/context.md` file that agents auto-load when working in that directory
+- [x] **5.6** Add project-level TELOS - Per-directory `.king-louie/context.md` file that agents auto-load when working in that directory
 
 ### Progress Notes
 
@@ -126,6 +126,10 @@ A lightweight user profile that agents reference to personalize responses. Not t
 - Added TELOS profile section in settings UI (name, role, goals, preferences JSON, project context) with save/status handling
 - Injected `User Context` into agent execution system prompts (single, parallel, serial, and remote adapter paths)
 - Added `/profile` and `/profile set <field> <value>` commands in renderer for inline view/edit (`name`, `role`, `projectContext`, `goals`, `preferences`)
+- ✅ Completed 2026-03-23: project-level TELOS context auto-loading (5.6)
+- Added `src/telos/project-context.js` to discover and load nearest `.king-louie/context.md` while traversing parent directories
+- Injected loaded project context into runtime system prompts (`agent:execute`, parallel/serial orchestration, and remote adapter execution path)
+- Extended template context payload with `project.telosContext` and `project.telosContextPath`, and surfaced both in shared operating-principles partial
 
 ---
 
@@ -137,12 +141,22 @@ Skills should try deterministic approaches before falling back to LLM. This make
 
 ### Tasks
 
-- [ ] **6.1** Extend `skill-interface.js` with a `resolvers[]` array - Ordered list of resolution strategies: `code`, `cli`, `prompt`, `skill`
-- [ ] **6.2** Create `src/skills/resolution-chain.js` - Executes resolvers in order, returns first successful result
-- [ ] **6.3** Modify `skill-registry.js` to use resolution chain when handling commands
-- [ ] **6.4** Update hello-world skill as example with a `code` resolver that handles greetings without LLM
-- [ ] **6.5** Add resolver metadata to skill `getMetadata()` output so UI can show which resolution method was used
-- [ ] **6.6** Add a `--force-prompt` flag that skips code/CLI resolvers and goes straight to LLM (for debugging or when deterministic result is wrong)
+- [x] **6.1** Extend `skill-interface.js` with a `resolvers[]` array - Ordered list of resolution strategies: `code`, `cli`, `prompt`, `skill`
+- [x] **6.2** Create `src/skills/resolution-chain.js` - Executes resolvers in order, returns first successful result
+- [x] **6.3** Modify `skill-registry.js` to use resolution chain when handling commands
+- [x] **6.4** Update hello-world skill as example with a `code` resolver that handles greetings without LLM
+- [x] **6.5** Add resolver metadata to skill `getMetadata()` output so UI can show which resolution method was used
+- [x] **6.6** Add a `--force-prompt` flag that skips code/CLI resolvers and goes straight to LLM (for debugging or when deterministic result is wrong)
+
+### Progress Notes
+
+- ✅ Completed 2026-03-23: skill priority hierarchy + resolution chain (6.1–6.6)
+- Extended skill metadata docs to include optional ordered `resolvers` and added optional resolver methods (`resolveCode`, `resolveCli`, `resolvePrompt`) to the base skill interface
+- Added `src/skills/resolution-chain.js` to execute `code -> cli -> prompt -> skill` style resolver stacks and annotate each result with resolution metadata
+- Updated `src/skills/skill-registry.js` to run commands through resolver chains, persist last-used resolution method per skill, and expose resolver metadata in `listSkills()`
+- Updated `skills/hello-world` to declare `resolvers: ['code', 'skill']` and implement deterministic `resolveCode` handling for `/hello` and `/greet`
+- Added `--force-prompt` support in both desktop and Telegram skill execution paths, routing via registry options to skip deterministic resolvers
+- Verified behavior with node checks and a scripted resolver-chain smoke test showing normal `code` resolution and forced prompt fallback path
 
 ---
 

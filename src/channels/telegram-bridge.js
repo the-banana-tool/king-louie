@@ -277,12 +277,20 @@ class TelegramBridge {
           label: `telegram:${chatId}`
         });
 
-        const result = await skill.handleCommand(commandName, rest, {
-          chatId,
-          channel: 'telegram',
-          userId: chatId, // In Telegram, chatId serves as userId for now
-          session
-        });
+        const forcePrompt = rest.includes('--force-prompt');
+        const sanitizedArgs = rest.filter((arg) => arg !== '--force-prompt');
+
+        const result = await skillRegistry.executeCommand(
+          commandName,
+          sanitizedArgs,
+          {
+            chatId,
+            channel: 'telegram',
+            userId: chatId, // In Telegram, chatId serves as userId for now
+            session
+          },
+          { forcePrompt }
+        );
 
         if (result.ok) {
           await this.sendMessage(chatId, result.message || 'Command executed successfully.');

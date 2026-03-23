@@ -18,6 +18,7 @@
  * @property {string} description - Brief description of what the skill does
  * @property {string} author - Skill author
  * @property {string[]} commands - List of commands this skill handles (e.g., ['std'])
+ * @property {Array<'code'|'cli'|'prompt'|'skill'>} [resolvers] - Ordered resolver chain. Default: ['skill']
  * @property {boolean} [pinnable] - If true, skill can be pinned to a chat. Pinned skill must implement handleMessage().
  */
 
@@ -76,6 +77,36 @@ class Skill {
    */
   async initialize(context) {
     throw new Error('Skill must implement initialize()');
+  }
+
+  /**
+   * Optional deterministic code resolver (first in priority chain when enabled)
+   *
+   * @param {{ command: string, args: string[], context: CommandContext }} payload
+   * @returns {Promise<CommandResult|null>}
+   */
+  async resolveCode(payload) {
+    return null;
+  }
+
+  /**
+   * Optional CLI resolver
+   *
+   * @param {{ command: string, args: string[], context: CommandContext }} payload
+   * @returns {Promise<CommandResult|null>}
+   */
+  async resolveCli(payload) {
+    return null;
+  }
+
+  /**
+   * Optional prompt/LLM resolver
+   *
+   * @param {{ command: string, args: string[], context: CommandContext }} payload
+   * @returns {Promise<CommandResult|null>}
+   */
+  async resolvePrompt(payload) {
+    return null;
   }
 
   /**

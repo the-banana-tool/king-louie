@@ -23,6 +23,7 @@ const {
 } = require('./src/tools/builtin/sessions-tools');
 const { SkillLoader, skillRegistry, PinManager } = require('./src/skills');
 const UserProfile = require('./src/telos/user-profile');
+const { loadProjectContext } = require('./src/telos/project-context');
 
 let mainWindow;
 let skillLoader;
@@ -199,9 +200,28 @@ const formatUserContextSection = (profile = getUserProfile()) => {
   ].join('\n');
 };
 
+const getProjectContextPayload = (workingDirectory = process.cwd()) => {
+  return loadProjectContext({ workingDirectory });
+};
+
+const formatProjectContextSection = (workingDirectory = process.cwd()) => {
+  const projectContext = getProjectContextPayload(workingDirectory);
+  if (!projectContext?.content) {
+    return '';
+  }
+
+  return [
+    'Project TELOS Context:',
+    `- Source: ${projectContext.path}`,
+    '',
+    projectContext.content
+  ].join('\n');
+};
+
 const buildTemplateContextFromSettings = () => {
   const templateVariables = getTemplateVariables();
   const profileContext = userProfile ? userProfile.toTemplateContext(getUserProfile()) : {};
+  const projectContext = getProjectContextPayload(process.cwd());
   return {
     ...profileContext,
     user: {
@@ -212,7 +232,9 @@ const buildTemplateContextFromSettings = () => {
     },
     project: {
       ...(profileContext.project || {}),
-      context: templateVariables.projectContext
+      context: templateVariables.projectContext,
+      telosContext: projectContext.content || '',
+      telosContextPath: projectContext.path || ''
     }
   };
 };
@@ -1013,7 +1035,8 @@ const initializeAgentInfrastructure = async () => {
         },
         systemPrompt: [
           buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
-          formatUserContextSection()
+          formatUserContextSection(),
+          formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
         ].join('\n\n')
       });
     }
@@ -1576,7 +1599,8 @@ ipcMain.handle('agent:execute', async (event, { agentId, message, tier }) => {
     templateContext: buildTemplateContextFromSettings(),
     systemPrompt: [
       buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
-      formatUserContextSection()
+      formatUserContextSection(),
+      formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
     ].join('\n\n')
   });
 });
@@ -1600,7 +1624,8 @@ ipcMain.handle('agent:executeParallel', async (event, { agentIds = [], message }
     templateContext: buildTemplateContextFromSettings(),
     systemPrompt: [
       buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
-      formatUserContextSection()
+      formatUserContextSection(),
+      formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
     ].join('\n\n')
   });
 });
@@ -1624,7 +1649,8 @@ ipcMain.handle('agent:executeSerial', async (event, { agentIds = [], message }) 
     templateContext: buildTemplateContextFromSettings(),
     systemPrompt: [
       buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
-      formatUserContextSection()
+      formatUserContextSection(),
+      formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
     ].join('\n\n')
   });
 });
@@ -1669,15 +1695,11 @@ ipcMain.handle('skill:list', async () => {
 });
 
 ipcMain.handle('skill:execute', async (_event, { command, args = [], chatId }) => {
-  const skill = skillRegistry.getSkillForCommand(command);
-  if (!skill) {
-    return {
-      ok: false,
-      error: `Unknown skill command: /${command}`
-    };
-  }
-
   try {
+    const parsedArgs = Array.isArray(args) ? [...args] : [];
+    const forcePrompt = parsedArgs.includes('--force-prompt');
+    const sanitizedArgs = parsedArgs.filter((arg) => arg !== '--force-prompt');
+
     // Create a session for this chat if needed
     const sessionKey = sessionManager.buildSessionKey('main', 'ui', chatId);
     const session = sessionManager.getOrCreateSession(sessionKey, 'main', {
@@ -1686,12 +1708,17 @@ ipcMain.handle('skill:execute', async (_event, { command, args = [], chatId }) =
       label: `ui:${chatId}`
     });
 
-    const result = await skill.handleCommand(command, args, {
-      chatId,
-      channel: 'ui',
-      userId: chatId,
-      session
-    });
+    const result = await skillRegistry.executeCommand(
+      command,
+      sanitizedArgs,
+      {
+        chatId,
+        channel: 'ui',
+        userId: chatId,
+        session
+      },
+      { forcePrompt }
+    );
 
     return result;
   } catch (error) {
