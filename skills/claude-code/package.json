@@ -1,0 +1,7 @@
+{
+  "name": "king-louie-claude-code-skill",
+  "version": "1.0.0",
+  "main": "index.js",
+  "description": "Manage Claude Code CLI sessions from King Louie",
+  "author": "King Louie Team"
+}
