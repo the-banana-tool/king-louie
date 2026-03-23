@@ -19,6 +19,7 @@ class ToolExecutor extends EventEmitter {
       options.runtimeEnvironment
         ? Promise.resolve(options.runtimeEnvironment)
         : getRuntimeEnvironment({ workingDirectory: this.workingDirectory });
+    this.hookExecutor = options.hookExecutor || null;
   }
 
   async getRuntimeEnvironment() {
@@ -31,25 +32,68 @@ class ToolExecutor extends EventEmitter {
       throw new Error(`Tool not found: ${toolName}`);
     }
 
-    this.emit('preExecute', { toolName, parameters });
+    let effectiveParameters = parameters;
+    let preHookResult = null;
 
-    tool.validateParameters(parameters);
+    if (this.hookExecutor && typeof this.hookExecutor.run === 'function') {
+      preHookResult = await this.hookExecutor.run('PreToolUse', {
+        toolName,
+        parameters,
+        options,
+        workingDirectory: options.workingDirectory || this.workingDirectory
+      });
 
-    if (tool.isDangerous(parameters) && !options.bypassSafety) {
+      const action = String(preHookResult?.action || 'allow').toLowerCase();
+      if (action === 'deny') {
+        const denied = {
+          success: false,
+          error: preHookResult?.message || `Tool execution blocked by policy: ${toolName}`,
+          blockedByHook: true,
+          hookResults: preHookResult?.results || []
+        };
+        this.emit('postExecute', { toolName, parameters, result: denied });
+        return denied;
+      }
+
+      if (action === 'confirm') {
+        const approved = await this.requestApproval(toolName, parameters, {
+          reason: preHookResult?.message || 'Hook policy requires explicit confirmation.'
+        });
+
+        if (!approved) {
+          const denied = {
+            success: false,
+            error: 'User denied permission',
+            blockedByHook: true,
+            hookResults: preHookResult?.results || []
+          };
+          this.emit('postExecute', { toolName, parameters, result: denied });
+          return denied;
+        }
+      }
+
+      effectiveParameters = preHookResult?.context?.parameters || effectiveParameters;
+    }
+
+    this.emit('preExecute', { toolName, parameters: effectiveParameters });
+
+    tool.validateParameters(effectiveParameters);
+
+    if (tool.isDangerous(effectiveParameters) && !options.bypassSafety) {
       throw new Error(`Dangerous operation detected: ${toolName}`);
     }
 
     if (tool.requiresApproval && this.requireApproval) {
-      const autoApproved = await this.shouldAutoApprove(toolName, parameters);
+      const autoApproved = await this.shouldAutoApprove(toolName, effectiveParameters);
       if (autoApproved) {
-        this.emit('approvalAutoGranted', { toolName, parameters });
+        this.emit('approvalAutoGranted', { toolName, parameters: effectiveParameters });
       }
 
       if (!autoApproved) {
-        const approved = await this.requestApproval(toolName, parameters);
+        const approved = await this.requestApproval(toolName, effectiveParameters);
         if (!approved) {
           const denied = { success: false, error: 'User denied permission' };
-          this.emit('postExecute', { toolName, parameters, result: denied });
+          this.emit('postExecute', { toolName, parameters: effectiveParameters, result: denied });
           return denied;
         }
       }
@@ -57,23 +101,43 @@ class ToolExecutor extends EventEmitter {
 
     try {
       const runtimeEnvironment = await this.getRuntimeEnvironment();
-      const result = await tool.execute(parameters, {
+      const result = await tool.execute(effectiveParameters, {
         ...options,
         workingDirectory: options.workingDirectory || this.workingDirectory,
         runtimeEnvironment
       });
 
-      this.emit('postExecute', { toolName, parameters, result });
+      if (this.hookExecutor && typeof this.hookExecutor.run === 'function') {
+        const postHookResult = await this.hookExecutor.run('PostToolUse', {
+          toolName,
+          parameters: effectiveParameters,
+          result,
+          options,
+          workingDirectory: options.workingDirectory || this.workingDirectory,
+          preHookResult
+        });
+
+        if (postHookResult?.context?.result) {
+          this.emit('postExecute', {
+            toolName,
+            parameters: effectiveParameters,
+            result: postHookResult.context.result
+          });
+          return postHookResult.context.result;
+        }
+      }
+
+      this.emit('postExecute', { toolName, parameters: effectiveParameters, result });
       return result;
     } catch (error) {
-      this.emit('error', { toolName, parameters, error });
+      this.emit('error', { toolName, parameters: effectiveParameters, error });
       return { success: false, error: error.message };
     }
   }
 
-  async requestApproval(toolName, parameters) {
+  async requestApproval(toolName, parameters, metadata = {}) {
     if (this.approvalRequester) {
-      return this.approvalRequester(toolName, parameters);
+      return this.approvalRequester(toolName, parameters, metadata);
     }
 
     if (this.listenerCount('approvalRequired') === 0) {
@@ -81,7 +145,7 @@ class ToolExecutor extends EventEmitter {
     }
 
     return new Promise((resolve) => {
-      this.emit('approvalRequired', { toolName, parameters, resolve });
+      this.emit('approvalRequired', { toolName, parameters, metadata, resolve });
     });
   }
 }

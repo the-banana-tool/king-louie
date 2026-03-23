@@ -134,6 +134,12 @@ contextBridge.exposeInMainWorld(
       setInferenceTier: (payload) => ipcRenderer.invoke('settings:setInferenceTier', payload),
       runLlmCommand: (payload) => ipcRenderer.invoke('settings:runLlmCommand', payload)
     },
+    hooks: {
+      list: () => ipcRenderer.invoke('hooks:list'),
+      reload: () => ipcRenderer.invoke('hooks:reload'),
+      setEnabled: (payload) => ipcRenderer.invoke('hooks:setEnabled', payload),
+      setGlobalEnabled: (payload) => ipcRenderer.invoke('hooks:setGlobalEnabled', payload)
+    },
     skill: {
       list: () => ipcRenderer.invoke('skill:list'),
       customize: (payload) => ipcRenderer.invoke('skill:customize', payload),

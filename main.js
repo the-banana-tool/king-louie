@@ -25,6 +25,8 @@ const {
 const { SkillLoader, skillRegistry, PinManager } = require('./src/skills');
 const UserProfile = require('./src/telos/user-profile');
 const { loadProjectContext } = require('./src/telos/project-context');
+const HookRegistry = require('./src/hooks/hook-registry');
+const HookExecutor = require('./src/hooks/hook-executor');
 const {
   NotificationRouter,
   DEFAULT_NOTIFICATION_SETTINGS,
@@ -42,6 +44,8 @@ let remoteControl;
 let telegramBridge;
 let userProfile;
 let notificationRouter;
+let hookRegistry;
+let hookExecutor;
 const TELEGRAM_TOKEN_STORE_KEY = '__telegram_bot_token';
 
 const DEFAULT_SETTINGS = {
@@ -81,6 +85,10 @@ const DEFAULT_SETTINGS = {
   },
   notifications: {
     ...DEFAULT_NOTIFICATION_SETTINGS
+  },
+  hooks: {
+    enabled: true,
+    hookStates: {}
   }
 };
 
@@ -112,7 +120,15 @@ const mergeSettings = (settings = {}) => {
     notifications: normalizeNotificationSettings({
       ...(DEFAULT_SETTINGS.notifications || {}),
       ...(source.notifications || {})
-    })
+    }),
+    hooks: {
+      ...(DEFAULT_SETTINGS.hooks || {}),
+      ...(source.hooks || {}),
+      hookStates: {
+        ...(DEFAULT_SETTINGS.hooks?.hookStates || {}),
+        ...(source.hooks?.hookStates || {})
+      }
+    }
   };
 };
 
@@ -367,6 +383,105 @@ const setNotificationSettings = (notifications = {}) => {
 
   setSettings(updated);
   return updated.notifications;
+};
+
+const getHookSettings = () => {
+  const settings = getSettings();
+  return {
+    enabled: settings?.hooks?.enabled !== false,
+    hookStates: {
+      ...(settings?.hooks?.hookStates || {})
+    }
+  };
+};
+
+const setHookSettings = (hooks = {}) => {
+  const settings = getSettings();
+  const updated = {
+    ...settings,
+    hooks: {
+      ...(settings.hooks || {}),
+      ...(hooks || {}),
+      hookStates: {
+        ...(settings?.hooks?.hookStates || {}),
+        ...(hooks?.hookStates || {})
+      }
+    }
+  };
+
+  setSettings(updated);
+  return updated.hooks;
+};
+
+const listHookDefinitions = () => {
+  if (!hookRegistry) {
+    return [];
+  }
+
+  return hookRegistry.list().map((hook) => ({
+    name: hook.name,
+    event: hook.event,
+    matcher: hook.matcher,
+    enabled: hook.enabled !== false,
+    description: hook.description || '',
+    handler: hook.handler,
+    directory: hook.directory || ''
+  }));
+};
+
+const reloadHooksFromSettings = () => {
+  if (!hookRegistry) {
+    return [];
+  }
+
+  const hookSettings = getHookSettings();
+  hookRegistry.setEnabledOverrides(hookSettings.hookStates || {});
+  hookRegistry.loadAll();
+  return listHookDefinitions();
+};
+
+const setHookEnabled = (name, enabled) => {
+  if (!hookRegistry) {
+    throw new Error('Hook registry is not initialized.');
+  }
+
+  const hookName = String(name || '').trim();
+  if (!hookName) {
+    throw new Error('Hook name is required.');
+  }
+
+  const hook = hookRegistry.setEnabled(hookName, enabled);
+  if (!hook) {
+    throw new Error(`Hook not found: ${hookName}`);
+  }
+
+  const settings = getHookSettings();
+  setHookSettings({
+    hookStates: {
+      ...(settings.hookStates || {}),
+      [hookName]: Boolean(enabled)
+    }
+  });
+
+  return {
+    name: hook.name,
+    event: hook.event,
+    enabled: hook.enabled !== false
+  };
+};
+
+const runHookEvent = async (eventName, context = {}) => {
+  const hookSettings = getHookSettings();
+  if (!hookExecutor || hookSettings.enabled === false) {
+    return null;
+  }
+
+  try {
+    return await hookExecutor.run(eventName, context);
+  } catch (error) {
+    console.warn(`[hooks] ${eventName} hook execution failed:`, error.message);
+    return null;
+  }
 };
 
 const encryptToken = (token) => {
@@ -1009,7 +1124,8 @@ const createToolExecutorWithApprovals = async (
     requireApproval: true,
     runtimeEnvironment: resolvedRuntimeEnvironment,
     approvalRequester,
-    shouldAutoApprove: async (toolName) => isToolAlwaysApproved(toolName)
+    shouldAutoApprove: async (toolName) => isToolAlwaysApproved(toolName),
+    hookExecutor: getHookSettings().enabled ? hookExecutor : null
   });
 
   if (event?.sender) {
@@ -1106,6 +1222,14 @@ const initializeAgentInfrastructure = async () => {
   notificationRouter = new NotificationRouter({
     getSettings: () => getSettings().notifications
   });
+  hookRegistry = new HookRegistry({
+    hooksDirectory: path.join(process.cwd(), 'hooks')
+  });
+  hookExecutor = new HookExecutor({
+    registry: hookRegistry,
+    workingDirectory: process.cwd()
+  });
+  reloadHooksFromSettings();
 
   gatewayServer = new GatewayServer({
     host: '127.0.0.1',
@@ -1258,6 +1382,12 @@ const initializeAgentInfrastructure = async () => {
   if (telegramToken) {
     await startTelegramBridge(telegramToken);
   }
+
+  await runHookEvent('SessionStart', {
+    source: 'main',
+    startedAt: new Date().toISOString(),
+    workingDirectory: process.cwd()
+  });
 };
 
 function createWindow() {
@@ -1353,6 +1483,14 @@ ipcMain.handle('chat:addMessage', (_event, payload = {}) => {
 });
 
 ipcMain.handle('chat:sendMessage', async (event, { chatId, message, agentMode = false }) => {
+  await runHookEvent('UserPromptSubmit', {
+    source: 'ui',
+    chatId,
+    prompt: String(message || ''),
+    timestamp: new Date().toISOString(),
+    workingDirectory: process.cwd()
+  });
+
   const userMessage = appendMessageToChat(chatId, 'user', message);
   if (!userMessage) {
     throw new Error('Chat not found');
@@ -1391,7 +1529,8 @@ ipcMain.handle('chat:sendMessage', async (event, { chatId, message, agentMode = 
       workingDirectory: process.cwd(),
       requireApproval: true,
       runtimeEnvironment,
-      shouldAutoApprove: async (toolName) => isToolAlwaysApproved(toolName)
+      shouldAutoApprove: async (toolName) => isToolAlwaysApproved(toolName),
+      hookExecutor: getHookSettings().enabled ? hookExecutor : null
     });
 
     executor.on('preExecute', ({ toolName, parameters }) => {
@@ -1462,23 +1601,47 @@ ipcMain.handle('chat:sendMessage', async (event, { chatId, message, agentMode = 
 });
 
 ipcMain.handle('tool:execute', async (event, { toolName, parameters }) => {
-  const executor = new ToolExecutor({
-    workingDirectory: process.cwd(),
-    requireApproval: true,
-    shouldAutoApprove: async (requestedToolName) => isToolAlwaysApproved(requestedToolName)
-  });
-
-  executor.on('approvalRequired', ({ toolName: requestedToolName, parameters: requestedParameters, resolve }) => {
-    const approvalId = createId();
-    pendingApprovalResolvers.set(approvalId, { resolve, toolName: requestedToolName });
-    event.sender.send('tool:approvalRequired', {
-      approvalId,
-      toolName: requestedToolName,
-      parameters: requestedParameters
-    });
-  });
+  const executor = await createToolExecutorWithApprovals(event);
 
   return executor.execute(toolName, parameters);
+});
+
+ipcMain.handle('hooks:list', async () => {
+  return {
+    enabled: getHookSettings().enabled,
+    hooks: listHookDefinitions()
+  };
+});
+
+ipcMain.handle('hooks:reload', async () => {
+  return {
+    enabled: getHookSettings().enabled,
+    hooks: reloadHooksFromSettings()
+  };
+});
+
+ipcMain.handle('hooks:setEnabled', async (_event, { name, enabled }) => {
+  const hook = setHookEnabled(name, enabled);
+  return {
+    ok: true,
+    hook,
+    hooks: listHookDefinitions()
+  };
+});
+
+ipcMain.handle('hooks:setGlobalEnabled', async (_event, { enabled }) => {
+  const settings = getHookSettings();
+  const normalized = Boolean(enabled);
+  setHookSettings({
+    ...settings,
+    enabled: normalized
+  });
+
+  return {
+    ok: true,
+    enabled: normalized,
+    hooks: listHookDefinitions()
+  };
 });
 
 ipcMain.handle('tool:list', async () => {
@@ -1519,6 +1682,10 @@ ipcMain.handle('settings:load', () => {
     activeProvider: settings.activeProvider || 'openai',
     inference: settings.inference,
     notifications: settings.notifications,
+    hooks: {
+      enabled: settings?.hooks?.enabled !== false,
+      loaded: listHookDefinitions()
+    },
     templateVariables: normalizeTemplateVariables(settings.templateVariables || {}),
     userProfile: getUserProfile(),
     telegram: {
@@ -2025,6 +2192,12 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', function () {
   if (process.platform !== 'darwin') {
+    runHookEvent('SessionEnd', {
+      source: 'main',
+      endedAt: new Date().toISOString(),
+      workingDirectory: process.cwd()
+    }).catch(() => {});
+
     if (telegramBridge) {
       telegramBridge.stop().catch(() => {});
     }

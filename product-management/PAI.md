@@ -12,15 +12,24 @@ King Louie's `ToolExecutor` already emits events. This task adds a user-configur
 
 ### Tasks
 
-- [ ] **1.1** Create `src/hooks/hook-schema.js` - Hook definition class with fields: `name`, `event` (PreToolUse, PostToolUse, SessionStart, SessionEnd, UserPromptSubmit), `matcher` (tool name or glob pattern), `handler` (path to JS/TS file or inline shell command)
-- [ ] **1.2** Create `src/hooks/hook-registry.js` - Registry that loads hook definitions from a `hooks/` directory (same discovery pattern as skills)
-- [ ] **1.3** Create `src/hooks/hook-executor.js` - Runs matching hooks for a given event, passes context (tool name, params, result), respects hook return values (allow/deny/modify for PreToolUse)
-- [ ] **1.4** Wire hook executor into `ToolExecutor` - Call PreToolUse hooks before execution (can block), PostToolUse hooks after execution (informational)
-- [ ] **1.5** Wire SessionStart/SessionEnd hooks into `main.js` app lifecycle
-- [ ] **1.6** Wire UserPromptSubmit hook into the renderer's send flow via IPC
-- [ ] **1.7** Create `hooks/` directory with a `README.md` explaining hook authoring
-- [ ] **1.8** Create example hook: `hooks/log-tool-usage/` - Logs every tool execution to a file with timestamp, tool name, params, and result status
-- [ ] **1.9** Add hook management to settings UI - List loaded hooks, enable/disable toggle
+- [x] **1.1** Create `src/hooks/hook-schema.js` - Hook definition class with fields: `name`, `event` (PreToolUse, PostToolUse, SessionStart, SessionEnd, UserPromptSubmit), `matcher` (tool name or glob pattern), `handler` (path to JS/TS file or inline shell command)
+- [x] **1.2** Create `src/hooks/hook-registry.js` - Registry that loads hook definitions from a `hooks/` directory (same discovery pattern as skills)
+- [x] **1.3** Create `src/hooks/hook-executor.js` - Runs matching hooks for a given event, passes context (tool name, params, result), respects hook return values (allow/deny/modify for PreToolUse)
+- [x] **1.4** Wire hook executor into `ToolExecutor` - Call PreToolUse hooks before execution (can block), PostToolUse hooks after execution (informational)
+- [x] **1.5** Wire SessionStart/SessionEnd hooks into `main.js` app lifecycle
+- [x] **1.6** Wire UserPromptSubmit hook into the renderer's send flow via IPC
+- [x] **1.7** Create `hooks/` directory with a `README.md` explaining hook authoring
+- [x] **1.8** Create example hook: `hooks/log-tool-usage/` - Logs every tool execution to a file with timestamp, tool name, params, and result status
+- [x] **1.9** Add hook management to settings UI - List loaded hooks, enable/disable toggle
+
+### Progress Notes
+
+- ✅ Completed 2026-03-23: Hook System implementation (1.1–1.9)
+- Added hook primitives under `src/hooks/` (`hook-schema.js`, `hook-registry.js`, `hook-executor.js`) with event validation, filesystem discovery from `hooks/`, matcher support, and pre-hook action handling (`allow|deny|confirm|modify`)
+- Integrated hooks into tool execution lifecycle in `src/execution/tool-executor.js` (PreToolUse policy enforcement, PostToolUse execution, and metadata-aware confirmation path)
+- Wired hook lifecycle events in `main.js`: `SessionStart`, `SessionEnd`, and `UserPromptSubmit`, plus hook-aware tool executors for chat and direct tool execution paths
+- Added hook management IPC + settings integration (`hooks:list`, `hooks:reload`, `hooks:setEnabled`, `hooks:setGlobalEnabled`) and renderer/preload UI controls for global enable, reload, and per-hook toggles
+- Added `hooks/README.md` and example `hooks/log-tool-usage/` hook with JSONL audit logging
 
 ---
 
@@ -220,11 +229,20 @@ PAI has a SecurityValidator hook that validates tool calls against a deny list b
 
 ### Tasks
 
-- [ ] **9.1** Create `hooks/security-validator/` - PreToolUse hook that checks Bash commands against a configurable deny list
-- [ ] **9.2** Define default deny list - `rm -rf /`, `mkfs`, `dd if=`, `:(){ :|:& };:`, `chmod -R 777 /`, `> /dev/sda`, etc. (extend existing dangerous patterns in `src/tools/utils.js`)
-- [ ] **9.3** Add path-based restrictions - Configurable list of protected paths that tools cannot write to
-- [ ] **9.4** Add confirmation escalation - Instead of hard deny, some patterns trigger a "are you sure?" confirmation with explanation of risk
-- [ ] **9.5** Log all security blocks to a `security.log` file for audit
+- [x] **9.1** Create `hooks/security-validator/` - PreToolUse hook that checks Bash commands against a configurable deny list
+- [x] **9.2** Define default deny list - `rm -rf /`, `mkfs`, `dd if=`, `:(){ :|:& };:`, `chmod -R 777 /`, `> /dev/sda`, etc. (extend existing dangerous patterns in `src/tools/utils.js`)
+- [x] **9.3** Add path-based restrictions - Configurable list of protected paths that tools cannot write to
+- [x] **9.4** Add confirmation escalation - Instead of hard deny, some patterns trigger a "are you sure?" confirmation with explanation of risk
+- [x] **9.5** Log all security blocks to a `security.log` file for audit
+
+### Progress Notes
+
+- ✅ Completed 2026-03-23: Security Validation Hook (9.1–9.5)
+- Added `hooks/security-validator/` PreToolUse hook that evaluates Bash commands and blocks/escalates based on policy
+- Extended `src/tools/utils.js` with reusable dangerous command rules (`DEFAULT_DANGEROUS_COMMAND_PATTERNS`), protected path defaults (`DEFAULT_PROTECTED_PATHS`), and `evaluateDangerousCommand()`
+- Implemented protected path write detection with env-configurable override support (`KING_LOUIE_PROTECTED_PATHS`)
+- Added escalation behavior for medium-risk commands (`action: confirm`) while denying high-risk commands (`action: deny`)
+- Added append-only audit logging to `hooks/security.log` for policy matches and blocked path attempts
 
 ---
 

@@ -1,0 +1,8 @@
+{
+  "name": "log-tool-usage",
+  "event": "PostToolUse",
+  "matcher": "*",
+  "enabled": true,
+  "description": "Log all tool executions with status and basic payload metadata.",
+  "handler": "index.js"
+}

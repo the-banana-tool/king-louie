@@ -179,6 +179,22 @@
           </div>
         </section>
 
+        <section class="template-variables-card">
+          <h3>Hook Management</h3>
+          <p>Manage loaded lifecycle hooks and enable/disable individual hook definitions.</p>
+          <div class="template-variables-grid">
+            <label class="inline-toggle" for="hooks-global-enabled-input">
+              <input id="hooks-global-enabled-input" type="checkbox">
+              <span>Enable hooks globally</span>
+            </label>
+          </div>
+          <div class="template-variables-actions">
+            <button id="reload-hooks-btn" type="button">Reload Hooks</button>
+            <span id="hooks-status" class="provider-message">Hooks not loaded yet.</span>
+          </div>
+          <div class="provider-list" id="hooks-list"></div>
+        </section>
+
         <div class="provider-list" id="provider-list"></div>
       </div>
     </div>

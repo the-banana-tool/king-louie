@@ -43,6 +43,10 @@ const notificationsExternalThresholdInput = document.getElementById('notificatio
 const notificationsNtfyTopicInput = document.getElementById('notifications-ntfy-topic-input');
 const saveNotificationsBtn = document.getElementById('save-notifications-btn');
 const notificationsStatus = document.getElementById('notifications-status');
+const hooksGlobalEnabledInput = document.getElementById('hooks-global-enabled-input');
+const reloadHooksBtn = document.getElementById('reload-hooks-btn');
+const hooksStatus = document.getElementById('hooks-status');
+const hooksList = document.getElementById('hooks-list');
 
 let chats = [];
 let activeChatId = null;
@@ -83,6 +87,10 @@ let settingsState = {
     telegram: {
       longTaskNotice: true
     }
+  },
+  hooks: {
+    enabled: true,
+    loaded: []
   }
 };
 const streamBufferById = new Map();
@@ -721,10 +729,184 @@ function renderSettings() {
     notificationsStatus.classList.remove('error');
   }
 
+  const hooks = settingsState.hooks || {};
+  const loadedHooks = Array.isArray(hooks.loaded) ? hooks.loaded : [];
+
+  if (hooksGlobalEnabledInput) {
+    hooksGlobalEnabledInput.checked = hooks.enabled !== false;
+  }
+
+  if (hooksStatus) {
+    hooksStatus.textContent = `Loaded ${loadedHooks.length} hook(s).`;
+    hooksStatus.classList.remove('error');
+  }
+
+  if (hooksList) {
+    hooksList.innerHTML = '';
+
+    if (!loadedHooks.length) {
+      const empty = document.createElement('div');
+      empty.className = 'provider-message';
+      empty.textContent = 'No hooks discovered in hooks/ directory.';
+      hooksList.appendChild(empty);
+    } else {
+      loadedHooks.forEach((hook) => {
+        const card = document.createElement('div');
+        card.className = 'provider-card';
+        card.dataset.hookName = hook.name;
+
+        const header = document.createElement('div');
+        header.className = 'provider-header';
+
+        const titleWrap = document.createElement('div');
+        titleWrap.className = 'provider-title-wrap';
+
+        const title = document.createElement('div');
+        title.className = 'provider-title';
+        title.textContent = hook.name;
+
+        const eventMeta = document.createElement('div');
+        eventMeta.className = 'provider-message';
+        eventMeta.textContent = `${hook.event} • matcher: ${hook.matcher || '*'}`;
+
+        titleWrap.appendChild(title);
+        titleWrap.appendChild(eventMeta);
+
+        const status = document.createElement('span');
+        status.className = 'provider-status';
+        if (hook.enabled !== false) {
+          status.classList.add('ok');
+          status.textContent = 'Enabled';
+        } else {
+          status.classList.add('error');
+          status.textContent = 'Disabled';
+        }
+
+        header.appendChild(titleWrap);
+        header.appendChild(status);
+
+        const description = document.createElement('div');
+        description.className = 'provider-message';
+        description.textContent = hook.description || hook.handler || 'No description provided.';
+
+        const actions = document.createElement('div');
+        actions.className = 'provider-actions';
+
+        const toggleBtn = document.createElement('button');
+        toggleBtn.type = 'button';
+        toggleBtn.dataset.action = 'toggle-hook';
+        toggleBtn.dataset.hookName = hook.name;
+        toggleBtn.dataset.nextEnabled = hook.enabled !== false ? 'false' : 'true';
+        toggleBtn.textContent = hook.enabled !== false ? 'Disable Hook' : 'Enable Hook';
+        if (hook.enabled !== false) {
+          toggleBtn.className = 'danger';
+        } else {
+          toggleBtn.className = 'primary';
+        }
+
+        actions.appendChild(toggleBtn);
+
+        card.appendChild(header);
+        card.appendChild(description);
+        card.appendChild(actions);
+        hooksList.appendChild(card);
+      });
+    }
+  }
+
   providerList.innerHTML = '';
   Object.entries(settingsState.providers).forEach(([key, provider]) => {
     providerList.appendChild(renderProviderCard(key, provider));
   });
+}
+
+async function handleToggleHook(hookName, enabled) {
+  if (!hookName) return;
+
+  try {
+    const result = await window.electron.hooks.setEnabled({
+      name: hookName,
+      enabled: Boolean(enabled)
+    });
+
+    if (!result?.ok) {
+      throw new Error(result?.error || 'Unable to update hook state.');
+    }
+
+    settingsState.hooks = {
+      ...(settingsState.hooks || {}),
+      loaded: Array.isArray(result.hooks) ? result.hooks : (settingsState.hooks?.loaded || [])
+    };
+
+    if (hooksStatus) {
+      hooksStatus.textContent = `Hook '${hookName}' ${enabled ? 'enabled' : 'disabled'}.`;
+      hooksStatus.classList.remove('error');
+    }
+
+    renderSettings();
+  } catch (error) {
+    if (hooksStatus) {
+      hooksStatus.textContent = `Error: ${error.message || 'Unable to update hook.'}`;
+      hooksStatus.classList.add('error');
+    }
+  }
+}
+
+async function handleToggleHooksGlobal(enabled) {
+  try {
+    const result = await window.electron.hooks.setGlobalEnabled({ enabled: Boolean(enabled) });
+    if (!result?.ok) {
+      throw new Error(result?.error || 'Unable to update global hook setting.');
+    }
+
+    settingsState.hooks = {
+      ...(settingsState.hooks || {}),
+      enabled: Boolean(result.enabled),
+      loaded: Array.isArray(result.hooks) ? result.hooks : (settingsState.hooks?.loaded || [])
+    };
+
+    if (hooksStatus) {
+      hooksStatus.textContent = `Hooks are now ${result.enabled ? 'enabled' : 'disabled'} globally.`;
+      hooksStatus.classList.remove('error');
+    }
+
+    renderSettings();
+  } catch (error) {
+    if (hooksGlobalEnabledInput) {
+      hooksGlobalEnabledInput.checked = !Boolean(enabled);
+    }
+
+    if (hooksStatus) {
+      hooksStatus.textContent = `Error: ${error.message || 'Unable to update hook setting.'}`;
+      hooksStatus.classList.add('error');
+    }
+  }
+}
+
+async function handleReloadHooks() {
+  if (reloadHooksBtn) reloadHooksBtn.disabled = true;
+
+  if (hooksStatus) {
+    hooksStatus.textContent = 'Reloading hooks...';
+    hooksStatus.classList.remove('error');
+  }
+
+  try {
+    const result = await window.electron.hooks.reload();
+    settingsState.hooks = {
+      ...(settingsState.hooks || {}),
+      enabled: result?.enabled !== false,
+      loaded: Array.isArray(result?.hooks) ? result.hooks : []
+    };
+    renderSettings();
+  } catch (error) {
+    if (hooksStatus) {
+      hooksStatus.textContent = `Error: ${error.message || 'Unable to reload hooks.'}`;
+      hooksStatus.classList.add('error');
+    }
+  } finally {
+    if (reloadHooksBtn) reloadHooksBtn.disabled = false;
+  }
 }
 
 function collectTemplateVariablesFromForm() {
@@ -1896,6 +2078,29 @@ if (saveUserProfileBtn) {
 if (saveNotificationsBtn) {
   saveNotificationsBtn.addEventListener('click', () => {
     handleSaveNotifications();
+  });
+}
+
+if (reloadHooksBtn) {
+  reloadHooksBtn.addEventListener('click', () => {
+    handleReloadHooks();
+  });
+}
+
+if (hooksGlobalEnabledInput) {
+  hooksGlobalEnabledInput.addEventListener('change', (event) => {
+    handleToggleHooksGlobal(Boolean(event?.target?.checked));
+  });
+}
+
+if (hooksList) {
+  hooksList.addEventListener('click', (event) => {
+    const button = event.target.closest('button[data-action="toggle-hook"]');
+    if (!button) return;
+
+    const hookName = String(button.dataset.hookName || '').trim();
+    const enabled = String(button.dataset.nextEnabled || '').toLowerCase() === 'true';
+    handleToggleHook(hookName, enabled);
   });
 }
 

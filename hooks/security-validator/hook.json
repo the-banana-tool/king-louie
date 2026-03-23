@@ -1,0 +1,8 @@
+{
+  "name": "security-validator",
+  "event": "PreToolUse",
+  "matcher": "Bash",
+  "enabled": true,
+  "description": "Block or escalate risky shell commands before execution.",
+  "handler": "index.js"
+}
