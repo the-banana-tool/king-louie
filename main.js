@@ -36,6 +36,12 @@ const TELEGRAM_TOKEN_STORE_KEY = '__telegram_bot_token';
 
 const DEFAULT_SETTINGS = {
   activeProvider: 'openai',
+  templateVariables: {
+    name: '',
+    role: '',
+    preferences: '',
+    projectContext: ''
+  },
   providerModels: {
     openai: 'gpt-4o-mini',
     anthropic: 'claude-3-5-sonnet-latest',
@@ -70,6 +76,10 @@ const mergeSettings = (settings = {}) => {
   return {
     ...DEFAULT_SETTINGS,
     ...source,
+    templateVariables: {
+      ...(DEFAULT_SETTINGS.templateVariables || {}),
+      ...(source.templateVariables || {})
+    },
     providerModels: {
       ...(DEFAULT_SETTINGS.providerModels || {}),
       ...(source.providerModels || {})
@@ -117,6 +127,41 @@ const getApiStatus = () => store.get('apiStatus', {});
 const setApiStatus = (status) => store.set('apiStatus', status);
 const getSettings = () => mergeSettings(store.get('settings', DEFAULT_SETTINGS));
 const setSettings = (settings) => store.set('settings', mergeSettings(settings));
+const normalizeTemplateVariables = (templateVariables = {}) => ({
+  name: String(templateVariables?.name || '').trim(),
+  role: String(templateVariables?.role || '').trim(),
+  preferences: String(templateVariables?.preferences || '').trim(),
+  projectContext: String(templateVariables?.projectContext || '').trim()
+});
+
+const getTemplateVariables = () => {
+  const settings = getSettings();
+  return normalizeTemplateVariables(settings.templateVariables || {});
+};
+
+const setTemplateVariables = (templateVariables = {}) => {
+  const settings = getSettings();
+  const updated = {
+    ...settings,
+    templateVariables: normalizeTemplateVariables(templateVariables)
+  };
+  setSettings(updated);
+  return updated.templateVariables;
+};
+
+const buildTemplateContextFromSettings = () => {
+  const templateVariables = getTemplateVariables();
+  return {
+    user: {
+      name: templateVariables.name,
+      role: templateVariables.role,
+      preferences: templateVariables.preferences
+    },
+    project: {
+      context: templateVariables.projectContext
+    }
+  };
+};
 const getToolApprovals = () => store.get('toolApprovals', { alwaysApproveTools: {} });
 const setToolApprovals = (toolApprovals) => store.set('toolApprovals', toolApprovals);
 
@@ -903,6 +948,10 @@ const initializeAgentInfrastructure = async () => {
         model: options.model || runtime.model || agent.model,
         timeoutMs: options.timeoutMs || runtime.timeoutMs,
         tools: runtime.toolDefinitions,
+        templateContext: {
+          ...buildTemplateContextFromSettings(),
+          ...(options.templateContext || {})
+        },
         systemPrompt: buildRuntimeSystemPrompt(runtime.runtimeEnvironment)
       });
     }
@@ -999,6 +1048,7 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
+    icon: path.join(__dirname, 'icons', 'icon.ico'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -1250,12 +1300,18 @@ ipcMain.handle('settings:load', () => {
     providers,
     activeProvider: settings.activeProvider || 'openai',
     inference: settings.inference,
+    templateVariables: normalizeTemplateVariables(settings.templateVariables || {}),
     telegram: {
       hasToken: hasStoredTelegramToken(),
       bridgeActive: Boolean(telegramBridge),
       status: status.telegram || null
     }
   };
+});
+
+ipcMain.handle('settings:saveTemplateVariables', (_event, { templateVariables } = {}) => {
+  const saved = setTemplateVariables(templateVariables || {});
+  return { ok: true, templateVariables: saved };
 });
 
 ipcMain.handle('settings:setActiveProvider', (_event, { provider }) => {
@@ -1444,6 +1500,7 @@ ipcMain.handle('agent:execute', async (event, { agentId, message, tier }) => {
     model: runtime.model || agent.model,
     timeoutMs: runtime.timeoutMs,
     tools: runtime.toolDefinitions,
+    templateContext: buildTemplateContextFromSettings(),
     systemPrompt: buildRuntimeSystemPrompt(runtime.runtimeEnvironment)
   });
 });
@@ -1463,6 +1520,7 @@ ipcMain.handle('agent:executeParallel', async (event, { agentIds = [], message }
     model: runtime.model,
     timeoutMs: runtime.timeoutMs,
     tools: runtime.toolDefinitions,
+    templateContext: buildTemplateContextFromSettings(),
     systemPrompt: buildRuntimeSystemPrompt(runtime.runtimeEnvironment)
   });
 });
@@ -1482,6 +1540,7 @@ ipcMain.handle('agent:executeSerial', async (event, { agentIds = [], message }) 
     model: runtime.model,
     timeoutMs: runtime.timeoutMs,
     tools: runtime.toolDefinitions,
+    templateContext: buildTemplateContextFromSettings(),
     systemPrompt: buildRuntimeSystemPrompt(runtime.runtimeEnvironment)
   });
 });

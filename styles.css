@@ -695,6 +695,57 @@ body {
   padding: 2px 6px;
 }
 
+.template-variables-card {
+  border: 1px solid #e0e0e0;
+  border-radius: 12px;
+  padding: 16px;
+  background: #fafafa;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.template-variables-card h3 {
+  font-size: 16px;
+  color: #2c2c2c;
+}
+
+.template-variables-card p {
+  font-size: 13px;
+  color: #6f6f6f;
+}
+
+.template-variables-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.template-variables-grid label {
+  font-size: 13px;
+  color: #4a4a4a;
+}
+
+.template-variables-grid textarea.provider-input {
+  resize: vertical;
+  min-height: 70px;
+}
+
+.template-variables-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.template-variables-actions .primary {
+  border-radius: 8px;
+  border: 1px solid #0084ff;
+  background: #0084ff;
+  color: #fff;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
 .provider-list {
   display: flex;
   flex-direction: column;

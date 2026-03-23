@@ -21,6 +21,12 @@ const composerSettingsBtn = document.getElementById('composer-settings-btn');
 const providerList = document.getElementById('provider-list');
 const settingsEncryptionAlert = document.getElementById('settings-encryption-alert');
 const agentModeBtn = document.getElementById('agent-mode-btn');
+const templateNameInput = document.getElementById('template-name-input');
+const templateRoleInput = document.getElementById('template-role-input');
+const templatePreferencesInput = document.getElementById('template-preferences-input');
+const templateProjectContextInput = document.getElementById('template-project-context-input');
+const saveTemplateVariablesBtn = document.getElementById('save-template-variables-btn');
+const templateVariablesStatus = document.getElementById('template-variables-status');
 
 let chats = [];
 let activeChatId = null;
@@ -31,6 +37,12 @@ let settingsState = {
   activeProvider: 'openai',
   inference: {
     activeTier: 'standard'
+  },
+  templateVariables: {
+    name: '',
+    role: '',
+    preferences: '',
+    projectContext: ''
   }
 };
 const streamBufferById = new Map();
@@ -576,10 +588,66 @@ function renderProviderCard(providerKey, provider) {
 
 function renderSettings() {
   settingsEncryptionAlert.hidden = settingsState.encryptionAvailable;
+
+  const templateVariables = settingsState.templateVariables || {};
+  if (templateNameInput) templateNameInput.value = templateVariables.name || '';
+  if (templateRoleInput) templateRoleInput.value = templateVariables.role || '';
+  if (templatePreferencesInput) templatePreferencesInput.value = templateVariables.preferences || '';
+  if (templateProjectContextInput) templateProjectContextInput.value = templateVariables.projectContext || '';
+
+  if (templateVariablesStatus) {
+    templateVariablesStatus.textContent = 'Template variables loaded.';
+    templateVariablesStatus.classList.remove('error');
+  }
+
   providerList.innerHTML = '';
   Object.entries(settingsState.providers).forEach(([key, provider]) => {
     providerList.appendChild(renderProviderCard(key, provider));
   });
+}
+
+function collectTemplateVariablesFromForm() {
+  return {
+    name: String(templateNameInput?.value || '').trim(),
+    role: String(templateRoleInput?.value || '').trim(),
+    preferences: String(templatePreferencesInput?.value || '').trim(),
+    projectContext: String(templateProjectContextInput?.value || '').trim()
+  };
+}
+
+async function handleSaveTemplateVariables() {
+  if (!saveTemplateVariablesBtn) return;
+
+  saveTemplateVariablesBtn.disabled = true;
+  if (templateVariablesStatus) {
+    templateVariablesStatus.textContent = 'Saving...';
+    templateVariablesStatus.classList.remove('error');
+  }
+
+  try {
+    const templateVariables = collectTemplateVariablesFromForm();
+    const result = await window.electron.settings.saveTemplateVariables({ templateVariables });
+
+    if (!result?.ok) {
+      throw new Error(result?.error || 'Unable to save template variables.');
+    }
+
+    settingsState.templateVariables = {
+      ...(result.templateVariables || templateVariables)
+    };
+
+    if (templateVariablesStatus) {
+      templateVariablesStatus.textContent = 'Template variables saved. New runs use updated values.';
+      templateVariablesStatus.classList.remove('error');
+    }
+  } catch (error) {
+    if (templateVariablesStatus) {
+      templateVariablesStatus.textContent = `Error: ${error.message || 'Unable to save template variables.'}`;
+      templateVariablesStatus.classList.add('error');
+    }
+  } finally {
+    saveTemplateVariablesBtn.disabled = false;
+  }
 }
 
 async function loadSettings() {
@@ -1471,6 +1539,12 @@ if (providerList) {
     if (action === 'set-active') {
       handleSetActiveProvider(provider);
     }
+  });
+}
+
+if (saveTemplateVariablesBtn) {
+  saveTemplateVariablesBtn.addEventListener('click', () => {
+    handleSaveTemplateVariables();
   });
 }
 

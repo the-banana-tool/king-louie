@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'">
   <title>King Louie Chat</title>
+  <link rel="icon" type="image/png" href="favicon.png">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -90,6 +91,28 @@
         <div class="settings-alert" id="settings-encryption-alert" hidden>
           Secure storage is unavailable. API and Telegram tokens cannot be safely saved on this system.
         </div>
+
+        <section class="template-variables-card">
+          <h3>Prompt Template Variables</h3>
+          <p>These values are injected into agent prompt templates at runtime.</p>
+          <div class="template-variables-grid">
+            <label for="template-name-input">Name</label>
+            <input id="template-name-input" class="provider-input" type="text" placeholder="Your name">
+
+            <label for="template-role-input">Role</label>
+            <input id="template-role-input" class="provider-input" type="text" placeholder="Your role">
+
+            <label for="template-preferences-input">Preferences</label>
+            <textarea id="template-preferences-input" class="provider-input" rows="3" placeholder="Response and workflow preferences"></textarea>
+
+            <label for="template-project-context-input">Project Context</label>
+            <textarea id="template-project-context-input" class="provider-input" rows="4" placeholder="Current project context"></textarea>
+          </div>
+          <div class="template-variables-actions">
+            <button id="save-template-variables-btn" type="button" class="primary">Save Variables</button>
+            <span id="template-variables-status" class="provider-message">Not saved yet.</span>
+          </div>
+        </section>
 
         <div class="provider-list" id="provider-list"></div>
       </div>
