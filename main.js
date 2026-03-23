@@ -25,6 +25,11 @@ const {
 const { SkillLoader, skillRegistry, PinManager } = require('./src/skills');
 const UserProfile = require('./src/telos/user-profile');
 const { loadProjectContext } = require('./src/telos/project-context');
+const {
+  NotificationRouter,
+  DEFAULT_NOTIFICATION_SETTINGS,
+  normalizeNotificationSettings
+} = require('./src/notifications/notification-router');
 
 let mainWindow;
 let skillLoader;
@@ -36,6 +41,7 @@ let sessionManager;
 let remoteControl;
 let telegramBridge;
 let userProfile;
+let notificationRouter;
 const TELEGRAM_TOKEN_STORE_KEY = '__telegram_bot_token';
 
 const DEFAULT_SETTINGS = {
@@ -72,6 +78,9 @@ const DEFAULT_SETTINGS = {
       standard: 30000,
       smart: 90000
     }
+  },
+  notifications: {
+    ...DEFAULT_NOTIFICATION_SETTINGS
   }
 };
 
@@ -99,7 +108,11 @@ const mergeSettings = (settings = {}) => {
         ...(DEFAULT_SETTINGS.inference?.timeoutsMs || {}),
         ...(source.inference?.timeoutsMs || {})
       }
-    }
+    },
+    notifications: normalizeNotificationSettings({
+      ...(DEFAULT_SETTINGS.notifications || {}),
+      ...(source.notifications || {})
+    })
   };
 };
 
@@ -342,6 +355,20 @@ const setActiveInferenceTier = (tier) => {
   return updated.inference;
 };
 
+const setNotificationSettings = (notifications = {}) => {
+  const settings = getSettings();
+  const updated = {
+    ...settings,
+    notifications: normalizeNotificationSettings({
+      ...(settings.notifications || {}),
+      ...(notifications || {})
+    })
+  };
+
+  setSettings(updated);
+  return updated.notifications;
+};
+
 const encryptToken = (token) => {
   if (!token) return null;
   if (!safeStorage.isEncryptionAvailable()) {
@@ -582,6 +609,7 @@ const startTelegramBridge = async (token) => {
     getAgent,
     listAgents,
     pinManager,
+    getNotificationSettings: () => getSettings().notifications,
     // Callbacks for local chat management
     createLocalChat: (title) => {
       const now = new Date().toISOString();
@@ -1036,6 +1064,34 @@ const createAgentRuntime = async (providerType, event = null, approvalRequester 
   };
 };
 
+const withNotificationTiming = async (label, fn) => {
+  const startedAt = Date.now();
+  try {
+    const result = await fn();
+    if (notificationRouter) {
+      await notificationRouter.route({
+        title: 'King Louie task completed',
+        body: `${label} completed in ${Math.round((Date.now() - startedAt) / 1000)}s.`,
+        durationMs: Date.now() - startedAt,
+        label,
+        status: 'success'
+      });
+    }
+    return result;
+  } catch (error) {
+    if (notificationRouter) {
+      await notificationRouter.route({
+        title: 'King Louie task failed',
+        body: `${label} failed after ${Math.round((Date.now() - startedAt) / 1000)}s: ${error.message}`,
+        durationMs: Date.now() - startedAt,
+        label,
+        status: 'error'
+      });
+    }
+    throw error;
+  }
+};
+
 const initializeAgentInfrastructure = async () => {
   taskManager = new TaskManager();
   sessionManager = new SessionManager();
@@ -1046,6 +1102,9 @@ const initializeAgentInfrastructure = async () => {
   userProfile = new UserProfile({
     getStoredProfile: () => store.get('userProfile', UserProfile.getDefaultProfile()),
     setStoredProfile: (profile) => store.set('userProfile', profile)
+  });
+  notificationRouter = new NotificationRouter({
+    getSettings: () => getSettings().notifications
   });
 
   gatewayServer = new GatewayServer({
@@ -1097,6 +1156,7 @@ const initializeAgentInfrastructure = async () => {
   );
 
   gatewayServer.on('agent:message', async ({ agentId, sessionKey, message }) => {
+    const startedAt = Number(message?.startedAt) || Date.now();
     try {
       const agent = getAgent(agentId);
       if (!agent) {
@@ -1118,16 +1178,40 @@ const initializeAgentInfrastructure = async () => {
         from: agentId
       });
 
+      const durationMs = Math.max(0, Date.now() - startedAt);
+      if (notificationRouter) {
+        await notificationRouter.route({
+          title: 'King Louie task completed',
+          body: `Gateway agent ${agentId} completed in ${Math.round(durationMs / 1000)}s.`,
+          durationMs,
+          label: `Gateway agent ${agentId}`,
+          status: 'success'
+        });
+      }
+
       gatewayServer.emit('agent:response', {
         sessionKey,
         runId: message.runId,
-        content: result.content || ''
+        content: result.content || '',
+        durationMs
       });
     } catch (error) {
+      const durationMs = Math.max(0, Date.now() - startedAt);
+      if (notificationRouter) {
+        await notificationRouter.route({
+          title: 'King Louie task failed',
+          body: `Gateway agent ${agentId} failed after ${Math.round(durationMs / 1000)}s: ${error.message}`,
+          durationMs,
+          label: `Gateway agent ${agentId}`,
+          status: 'error'
+        });
+      }
+
       gatewayServer.emit('agent:response', {
         sessionKey,
         runId: message.runId,
-        error: error.message
+        error: error.message,
+        durationMs
       });
     }
   });
@@ -1330,29 +1414,31 @@ ipcMain.handle('chat:sendMessage', async (event, { chatId, message, agentMode = 
       totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
     };
     const toolDefinitions = toolRegistry.getFunctionDefinitions();
-    const canUseAgentMode = agentMode && toolDefinitions.length > 0 && typeof provider.sendMessageWithTools === 'function';
-    if (canUseAgentMode) {
-      const loop = new AgentLoop(provider, executor, { maxIterations: 10 });
-      const result = await loop.run(chat.messages, toolDefinitions, options);
-      fullResponse = result.content || '(No response)';
-      llmSummary = {
-        calls: result?.llm?.calls || [],
-        totals: result?.llm?.totals || llmSummary.totals
-      };
-      event.sender.send('chat:messageChunk', { chatId, responseId, chunk: fullResponse });
-    } else {
-      const streamResult = await provider.streamMessage(chat.messages, options, (chunk) => {
-        fullResponse += chunk;
-        event.sender.send('chat:messageChunk', { chatId, responseId, chunk });
-      });
+    await withNotificationTiming('Chat response', async () => {
+      const canUseAgentMode = agentMode && toolDefinitions.length > 0 && typeof provider.sendMessageWithTools === 'function';
+      if (canUseAgentMode) {
+        const loop = new AgentLoop(provider, executor, { maxIterations: 10 });
+        const result = await loop.run(chat.messages, toolDefinitions, options);
+        fullResponse = result.content || '(No response)';
+        llmSummary = {
+          calls: result?.llm?.calls || [],
+          totals: result?.llm?.totals || llmSummary.totals
+        };
+        event.sender.send('chat:messageChunk', { chatId, responseId, chunk: fullResponse });
+      } else {
+        const streamResult = await provider.streamMessage(chat.messages, options, (chunk) => {
+          fullResponse += chunk;
+          event.sender.send('chat:messageChunk', { chatId, responseId, chunk });
+        });
 
-      const singleCall = streamResult?.llmMetrics || null;
-      const calls = singleCall ? [singleCall] : [];
-      llmSummary = {
-        calls,
-        totals: sumLlmCalls(calls)
-      };
-    }
+        const singleCall = streamResult?.llmMetrics || null;
+        const calls = singleCall ? [singleCall] : [];
+        llmSummary = {
+          calls,
+          totals: sumLlmCalls(calls)
+        };
+      }
+    });
 
     const updatedChat = appendMessageToChat(chatId, 'assistant', fullResponse || '(No response)', {
       llm: llmSummary
@@ -1432,6 +1518,7 @@ ipcMain.handle('settings:load', () => {
     providers,
     activeProvider: settings.activeProvider || 'openai',
     inference: settings.inference,
+    notifications: settings.notifications,
     templateVariables: normalizeTemplateVariables(settings.templateVariables || {}),
     userProfile: getUserProfile(),
     telegram: {
@@ -1637,18 +1724,20 @@ ipcMain.handle('agent:execute', async (event, { agentId, message, tier }) => {
   );
 
   const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor);
-  return agentExecutor.execute(agent, message, {
-    tier: runtime.tier,
-    model: runtime.model || agent.model,
-    timeoutMs: runtime.timeoutMs,
-    tools: runtime.toolDefinitions,
-    userProfile: getUserProfile(),
-    templateContext: buildTemplateContextFromSettings(),
-    systemPrompt: [
-      buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
-      formatUserContextSection(),
-      formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
-    ].join('\n\n')
+  return withNotificationTiming(`Agent ${agent.id}`, async () => {
+    return agentExecutor.execute(agent, message, {
+      tier: runtime.tier,
+      model: runtime.model || agent.model,
+      timeoutMs: runtime.timeoutMs,
+      tools: runtime.toolDefinitions,
+      userProfile: getUserProfile(),
+      templateContext: buildTemplateContextFromSettings(),
+      systemPrompt: [
+        buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
+        formatUserContextSection(),
+        formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
+      ].join('\n\n')
+    });
   });
 });
 
@@ -1662,18 +1751,20 @@ ipcMain.handle('agent:executeParallel', async (event, { agentIds = [], message }
 
   const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor);
   const orchestrator = new AgentOrchestrator(agentExecutor);
-  return orchestrator.executeParallel(agents, message, {
-    tier: runtime.tier,
-    model: runtime.model,
-    timeoutMs: runtime.timeoutMs,
-    tools: runtime.toolDefinitions,
-    userProfile: getUserProfile(),
-    templateContext: buildTemplateContextFromSettings(),
-    systemPrompt: [
-      buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
-      formatUserContextSection(),
-      formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
-    ].join('\n\n')
+  return withNotificationTiming('Parallel agent run', async () => {
+    return orchestrator.executeParallel(agents, message, {
+      tier: runtime.tier,
+      model: runtime.model,
+      timeoutMs: runtime.timeoutMs,
+      tools: runtime.toolDefinitions,
+      userProfile: getUserProfile(),
+      templateContext: buildTemplateContextFromSettings(),
+      systemPrompt: [
+        buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
+        formatUserContextSection(),
+        formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
+      ].join('\n\n')
+    });
   });
 });
 
@@ -1687,18 +1778,20 @@ ipcMain.handle('agent:executeSerial', async (event, { agentIds = [], message }) 
 
   const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor);
   const orchestrator = new AgentOrchestrator(agentExecutor);
-  return orchestrator.executeSerial(agents, message, {
-    tier: runtime.tier,
-    model: runtime.model,
-    timeoutMs: runtime.timeoutMs,
-    tools: runtime.toolDefinitions,
-    userProfile: getUserProfile(),
-    templateContext: buildTemplateContextFromSettings(),
-    systemPrompt: [
-      buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
-      formatUserContextSection(),
-      formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
-    ].join('\n\n')
+  return withNotificationTiming('Serial agent run', async () => {
+    return orchestrator.executeSerial(agents, message, {
+      tier: runtime.tier,
+      model: runtime.model,
+      timeoutMs: runtime.timeoutMs,
+      tools: runtime.toolDefinitions,
+      userProfile: getUserProfile(),
+      templateContext: buildTemplateContextFromSettings(),
+      systemPrompt: [
+        buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
+        formatUserContextSection(),
+        formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
+      ].join('\n\n')
+    });
   });
 });
 
@@ -1706,6 +1799,15 @@ ipcMain.handle('settings:setInferenceTier', (_event, { tier }) => {
   try {
     const inference = setActiveInferenceTier(tier);
     return { ok: true, inference };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+});
+
+ipcMain.handle('settings:saveNotifications', (_event, { notifications } = {}) => {
+  try {
+    const saved = setNotificationSettings(notifications || {});
+    return { ok: true, notifications: saved };
   } catch (error) {
     return { ok: false, error: error.message };
   }

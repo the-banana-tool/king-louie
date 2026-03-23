@@ -34,6 +34,15 @@ const profilePreferencesInput = document.getElementById('profile-preferences-inp
 const profileProjectContextInput = document.getElementById('profile-project-context-input');
 const saveUserProfileBtn = document.getElementById('save-user-profile-btn');
 const userProfileStatus = document.getElementById('user-profile-status');
+const notificationsEnabledInput = document.getElementById('notifications-enabled-input');
+const notificationsUiToastEnabledInput = document.getElementById('notifications-ui-toast-enabled-input');
+const notificationsNtfyEnabledInput = document.getElementById('notifications-ntfy-enabled-input');
+const notificationsTelegramLongTaskInput = document.getElementById('notifications-telegram-long-task-input');
+const notificationsToastThresholdInput = document.getElementById('notifications-toast-threshold-input');
+const notificationsExternalThresholdInput = document.getElementById('notifications-external-threshold-input');
+const notificationsNtfyTopicInput = document.getElementById('notifications-ntfy-topic-input');
+const saveNotificationsBtn = document.getElementById('save-notifications-btn');
+const notificationsStatus = document.getElementById('notifications-status');
 
 let chats = [];
 let activeChatId = null;
@@ -57,6 +66,23 @@ let settingsState = {
     goals: [],
     preferences: {},
     projectContext: ''
+  },
+  notifications: {
+    enabled: true,
+    thresholdsMs: {
+      toast: 30000,
+      external: 120000
+    },
+    uiToast: {
+      enabled: true
+    },
+    ntfy: {
+      enabled: false,
+      topic: ''
+    },
+    telegram: {
+      longTaskNotice: true
+    }
   }
 };
 const streamBufferById = new Map();
@@ -680,6 +706,21 @@ function renderSettings() {
     userProfileStatus.classList.remove('error');
   }
 
+  const notifications = settingsState.notifications || {};
+  const thresholds = notifications.thresholdsMs || {};
+  if (notificationsEnabledInput) notificationsEnabledInput.checked = notifications.enabled !== false;
+  if (notificationsUiToastEnabledInput) notificationsUiToastEnabledInput.checked = notifications.uiToast?.enabled !== false;
+  if (notificationsNtfyEnabledInput) notificationsNtfyEnabledInput.checked = notifications.ntfy?.enabled === true;
+  if (notificationsTelegramLongTaskInput) notificationsTelegramLongTaskInput.checked = notifications.telegram?.longTaskNotice !== false;
+  if (notificationsToastThresholdInput) notificationsToastThresholdInput.value = Math.round((Number(thresholds.toast || 30000)) / 1000);
+  if (notificationsExternalThresholdInput) notificationsExternalThresholdInput.value = Math.round((Number(thresholds.external || 120000)) / 1000);
+  if (notificationsNtfyTopicInput) notificationsNtfyTopicInput.value = String(notifications.ntfy?.topic || '');
+
+  if (notificationsStatus) {
+    notificationsStatus.textContent = 'Notification settings loaded.';
+    notificationsStatus.classList.remove('error');
+  }
+
   providerList.innerHTML = '';
   Object.entries(settingsState.providers).forEach(([key, provider]) => {
     providerList.appendChild(renderProviderCard(key, provider));
@@ -786,6 +827,63 @@ async function handleSaveUserProfile() {
     }
   } finally {
     saveUserProfileBtn.disabled = false;
+  }
+}
+
+function collectNotificationsFromForm() {
+  const toastSeconds = Math.max(0, Number(notificationsToastThresholdInput?.value || 30));
+  const externalSeconds = Math.max(toastSeconds, Number(notificationsExternalThresholdInput?.value || 120));
+
+  return {
+    enabled: Boolean(notificationsEnabledInput?.checked),
+    thresholdsMs: {
+      toast: Math.round(toastSeconds * 1000),
+      external: Math.round(externalSeconds * 1000)
+    },
+    uiToast: {
+      enabled: Boolean(notificationsUiToastEnabledInput?.checked)
+    },
+    ntfy: {
+      enabled: Boolean(notificationsNtfyEnabledInput?.checked),
+      topic: String(notificationsNtfyTopicInput?.value || '').trim()
+    },
+    telegram: {
+      longTaskNotice: Boolean(notificationsTelegramLongTaskInput?.checked)
+    }
+  };
+}
+
+async function handleSaveNotifications() {
+  if (!saveNotificationsBtn) return;
+
+  saveNotificationsBtn.disabled = true;
+  if (notificationsStatus) {
+    notificationsStatus.textContent = 'Saving...';
+    notificationsStatus.classList.remove('error');
+  }
+
+  try {
+    const notifications = collectNotificationsFromForm();
+    const result = await window.electron.settings.saveNotifications({ notifications });
+    if (!result?.ok) {
+      throw new Error(result?.error || 'Unable to save notification settings.');
+    }
+
+    settingsState.notifications = {
+      ...(result.notifications || notifications)
+    };
+
+    if (notificationsStatus) {
+      notificationsStatus.textContent = 'Notification settings saved.';
+      notificationsStatus.classList.remove('error');
+    }
+  } catch (error) {
+    if (notificationsStatus) {
+      notificationsStatus.textContent = `Error: ${error.message || 'Unable to save notification settings.'}`;
+      notificationsStatus.classList.add('error');
+    }
+  } finally {
+    saveNotificationsBtn.disabled = false;
   }
 }
 
@@ -1792,6 +1890,12 @@ if (saveTemplateVariablesBtn) {
 if (saveUserProfileBtn) {
   saveUserProfileBtn.addEventListener('click', () => {
     handleSaveUserProfile();
+  });
+}
+
+if (saveNotificationsBtn) {
+  saveNotificationsBtn.addEventListener('click', () => {
+    handleSaveNotifications();
   });
 }
 

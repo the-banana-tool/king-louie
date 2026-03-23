@@ -725,6 +725,19 @@ body {
   color: #4a4a4a;
 }
 
+.template-variables-grid .inline-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #2f2f2f;
+}
+
+.template-variables-grid .inline-toggle input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+}
+
 .template-variables-grid textarea.provider-input {
   resize: vertical;
   min-height: 70px;

@@ -168,12 +168,22 @@ Escalate notifications based on task duration. Short tasks = no notification. Lo
 
 ### Tasks
 
-- [ ] **7.1** Create `src/notifications/notification-router.js` - Routes notifications based on duration thresholds: <30s (none), 30s-2min (UI toast), 2min+ (external push)
-- [ ] **7.2** Create `src/notifications/channels/ui-toast.js` - Electron notification API for desktop toasts
-- [ ] **7.3** Create `src/notifications/channels/ntfy-channel.js` - Push via ntfy.sh (simple HTTP POST, no auth required for public topics)
-- [ ] **7.4** Add notification settings to UI - Enable/disable, ntfy topic, duration thresholds
-- [ ] **7.5** Wire into agent execution - Start timer on agent.execute, route notification on completion
-- [ ] **7.6** Wire into Telegram bridge - Send completion message to Telegram chat for long-running tasks
+- [x] **7.1** Create `src/notifications/notification-router.js` - Routes notifications based on duration thresholds: <30s (none), 30s-2min (UI toast), 2min+ (external push)
+- [x] **7.2** Create `src/notifications/channels/ui-toast.js` - Electron notification API for desktop toasts
+- [x] **7.3** Create `src/notifications/channels/ntfy-channel.js` - Push via ntfy.sh (simple HTTP POST, no auth required for public topics)
+- [x] **7.4** Add notification settings to UI - Enable/disable, ntfy topic, duration thresholds
+- [x] **7.5** Wire into agent execution - Start timer on agent.execute, route notification on completion
+- [x] **7.6** Wire into Telegram bridge - Send completion message to Telegram chat for long-running tasks
+
+### Progress Notes
+
+- ✅ Completed 2026-03-23: Notification Routing implementation (7.1–7.6)
+- Added `src/notifications/notification-router.js` with duration-aware routing, settings normalization, and default thresholds (`toast=30s`, `external=120s`)
+- Added notification channels for desktop toast (`src/notifications/channels/ui-toast.js`) and ntfy push (`src/notifications/channels/ntfy-channel.js`)
+- Added notification settings UI + persistence wiring (`index.html`, `renderer.js`, `preload.js`, `main.js`) for enable toggles, thresholds, and ntfy topic
+- Wired completion timing notifications across chat and agent execution paths in `main.js` (single, parallel, serial, and gateway response emission)
+- Wired Telegram long-task completion notice behavior in `src/channels/telegram-bridge.js` using duration + notification settings thresholds
+- Verified syntax with `node --check` on touched JS files (`main.js`, `preload.js`, `renderer.js`, `src/channels/telegram-bridge.js`, `src/notifications/**`)
 
 ---
 

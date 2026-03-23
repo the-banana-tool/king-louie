@@ -140,6 +140,45 @@
           </div>
         </section>
 
+        <section class="template-variables-card">
+          <h3>Notification Routing</h3>
+          <p>Control duration-aware completion notifications for desktop, ntfy, and Telegram.</p>
+          <div class="template-variables-grid">
+            <label class="inline-toggle" for="notifications-enabled-input">
+              <input id="notifications-enabled-input" type="checkbox">
+              <span>Enable notifications</span>
+            </label>
+
+            <label class="inline-toggle" for="notifications-ui-toast-enabled-input">
+              <input id="notifications-ui-toast-enabled-input" type="checkbox">
+              <span>Enable desktop toast notifications</span>
+            </label>
+
+            <label class="inline-toggle" for="notifications-ntfy-enabled-input">
+              <input id="notifications-ntfy-enabled-input" type="checkbox">
+              <span>Enable ntfy external notifications</span>
+            </label>
+
+            <label class="inline-toggle" for="notifications-telegram-long-task-input">
+              <input id="notifications-telegram-long-task-input" type="checkbox">
+              <span>Enable long-task notices in Telegram</span>
+            </label>
+
+            <label for="notifications-toast-threshold-input">UI toast threshold (seconds)</label>
+            <input id="notifications-toast-threshold-input" class="provider-input" type="number" min="0" step="1" placeholder="30">
+
+            <label for="notifications-external-threshold-input">External threshold (seconds)</label>
+            <input id="notifications-external-threshold-input" class="provider-input" type="number" min="0" step="1" placeholder="120">
+
+            <label for="notifications-ntfy-topic-input">ntfy topic</label>
+            <input id="notifications-ntfy-topic-input" class="provider-input" type="text" placeholder="your-topic-name">
+          </div>
+          <div class="template-variables-actions">
+            <button id="save-notifications-btn" type="button" class="primary">Save Notification Settings</button>
+            <span id="notifications-status" class="provider-message">Not saved yet.</span>
+          </div>
+        </section>
+
         <div class="provider-list" id="provider-list"></div>
       </div>
     </div>

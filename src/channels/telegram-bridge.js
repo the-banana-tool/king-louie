@@ -14,6 +14,10 @@ class TelegramBridge {
     this.getAgent = options.getAgent || (() => null);
     this.listAgents = options.listAgents || (() => []);
     this.pinManager = options.pinManager || null;
+    this.getNotificationSettings =
+      typeof options.getNotificationSettings === 'function'
+        ? options.getNotificationSettings
+        : () => ({ enabled: false, thresholdsMs: { external: 120000 }, telegram: { longTaskNotice: false } });
     this.pollTimeoutSeconds = Number(options.pollTimeoutSeconds || 30);
 
     // Callbacks for local chat management
@@ -394,6 +398,7 @@ class TelegramBridge {
       message: text,
       from: `telegram:${chatId}`,
       channel: 'telegram',
+      startedAt: Date.now(),
       approvalHandler: this.createApprovalHandler(chatId)
     });
   }
@@ -481,6 +486,7 @@ class TelegramBridge {
 
     const run = this.pendingRuns.get(runId);
     this.pendingRuns.delete(runId);
+    const durationMs = Number(response.durationMs || Date.now() - Number(run.startedAt || Date.now()));
 
     if (response.error) {
       const errorMsg = `❌ Agent error: ${response.error}`;
@@ -499,6 +505,21 @@ class TelegramBridge {
     const chunks = splitMessage(content);
     for (const chunk of chunks) {
       await this.sendMessage(run.chatId, chunk);
+    }
+
+    const notifications = this.getNotificationSettings() || {};
+    const thresholds = notifications.thresholdsMs || {};
+    const externalThreshold = Number(thresholds.external || 120000);
+    const longTaskNoticeEnabled = notifications.telegram?.longTaskNotice !== false;
+    if (
+      notifications.enabled !== false
+      && longTaskNoticeEnabled
+      && durationMs >= externalThreshold
+    ) {
+      await this.sendMessage(
+        run.chatId,
+        `⏱️ Long task complete in ${Math.round(durationMs / 1000)}s.`
+      );
     }
   }
 
