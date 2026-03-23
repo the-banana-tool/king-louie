@@ -226,6 +226,7 @@ class MemoryManager {
   runAging(now = Date.now()) {
     const entries = this.store.list();
     let changed = 0;
+    const snapshot = { hot: 0, warm: 0, cold: 0 };
 
     for (const entry of entries) {
       const nextTier = this.inferTier(entry, now);
@@ -234,16 +235,13 @@ class MemoryManager {
         this.store.update(entry.id, { tier: nextTier });
         changed += 1;
       }
+      snapshot[nextTier] = (snapshot[nextTier] || 0) + 1;
     }
 
     return {
       total: entries.length,
       changed,
-      snapshot: {
-        hot: entries.filter((entry) => this.inferTier(entry, now) === 'hot').length,
-        warm: entries.filter((entry) => this.inferTier(entry, now) === 'warm').length,
-        cold: entries.filter((entry) => this.inferTier(entry, now) === 'cold').length
-      }
+      snapshot
     };
   }
 
