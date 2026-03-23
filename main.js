@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, safeStorage } = require('electron');
 const path = require('path');
 const { default: Store } = require('electron-store');
 const ProviderFactory = require('./src/providers/provider-factory');
+const InferenceRouter = require('./src/providers/inference-router');
 const { initializeTools, toolRegistry } = require('./src/tools');
 const ToolExecutor = require('./src/execution/tool-executor');
 const AgentLoop = require('./src/execution/agent-loop');
@@ -33,6 +34,61 @@ let remoteControl;
 let telegramBridge;
 const TELEGRAM_TOKEN_STORE_KEY = '__telegram_bot_token';
 
+const DEFAULT_SETTINGS = {
+  activeProvider: 'openai',
+  providerModels: {
+    openai: 'gpt-4o-mini',
+    anthropic: 'claude-3-5-sonnet-latest',
+    copilot: ''
+  },
+  inference: {
+    activeTier: 'standard',
+    tierMap: {
+      fast: {
+        provider: 'openai',
+        model: 'gpt-4o-mini'
+      },
+      standard: {
+        provider: 'anthropic',
+        model: 'claude-3-5-sonnet-latest'
+      },
+      smart: {
+        provider: 'anthropic',
+        model: 'claude-3-5-sonnet-latest'
+      }
+    },
+    timeoutsMs: {
+      fast: 15000,
+      standard: 30000,
+      smart: 90000
+    }
+  }
+};
+
+const mergeSettings = (settings = {}) => {
+  const source = settings || {};
+  return {
+    ...DEFAULT_SETTINGS,
+    ...source,
+    providerModels: {
+      ...(DEFAULT_SETTINGS.providerModels || {}),
+      ...(source.providerModels || {})
+    },
+    inference: {
+      ...(DEFAULT_SETTINGS.inference || {}),
+      ...(source.inference || {}),
+      tierMap: {
+        ...(DEFAULT_SETTINGS.inference?.tierMap || {}),
+        ...(source.inference?.tierMap || {})
+      },
+      timeoutsMs: {
+        ...(DEFAULT_SETTINGS.inference?.timeoutsMs || {}),
+        ...(source.inference?.timeoutsMs || {})
+      }
+    }
+  };
+};
+
 const store = new Store({
   name: 'chat-data',
   defaults: {
@@ -41,12 +97,7 @@ const store = new Store({
     apiTokens: {},
     apiStatus: {},
     settings: {
-      activeProvider: 'openai',
-      providerModels: {
-        openai: 'gpt-4o-mini',
-        anthropic: 'claude-3-5-sonnet-latest',
-        copilot: ''
-      }
+      ...DEFAULT_SETTINGS
     },
     toolApprovals: {
       alwaysApproveTools: {}
@@ -64,15 +115,8 @@ const getApiTokens = () => store.get('apiTokens', {});
 const setApiTokens = (tokens) => store.set('apiTokens', tokens);
 const getApiStatus = () => store.get('apiStatus', {});
 const setApiStatus = (status) => store.set('apiStatus', status);
-const getSettings = () => store.get('settings', {
-  activeProvider: 'openai',
-  providerModels: {
-    openai: 'gpt-4o-mini',
-    anthropic: 'claude-3-5-sonnet-latest',
-    copilot: ''
-  }
-});
-const setSettings = (settings) => store.set('settings', settings);
+const getSettings = () => mergeSettings(store.get('settings', DEFAULT_SETTINGS));
+const setSettings = (settings) => store.set('settings', mergeSettings(settings));
 const getToolApprovals = () => store.get('toolApprovals', { alwaysApproveTools: {} });
 const setToolApprovals = (toolApprovals) => store.set('toolApprovals', toolApprovals);
 
@@ -155,6 +199,25 @@ const setActiveProvider = (provider) => {
   };
   setSettings(updated);
   return updated.activeProvider;
+};
+
+const setActiveInferenceTier = (tier) => {
+  const normalizedTier = String(tier || '').toLowerCase();
+  if (!['fast', 'standard', 'smart'].includes(normalizedTier)) {
+    throw new Error('Inference tier must be one of: fast, standard, smart.');
+  }
+
+  const settings = getSettings();
+  const updated = {
+    ...settings,
+    inference: {
+      ...(settings.inference || {}),
+      activeTier: normalizedTier
+    }
+  };
+
+  setSettings(updated);
+  return updated.inference;
 };
 
 const encryptToken = (token) => {
@@ -430,7 +493,8 @@ const getProviderSnapshot = () => {
   return {
     encryptionAvailable: safeStorage.isEncryptionAvailable(),
     providers,
-    activeProvider: settings.activeProvider || 'openai'
+    activeProvider: settings.activeProvider || 'openai',
+    inference: settings.inference
   };
 };
 
@@ -767,13 +831,26 @@ const createToolExecutorWithApprovals = async (
   return executor;
 };
 
-const createAgentRuntime = async (providerType, event = null, approvalRequester = null) => {
-  if (!['openai', 'anthropic'].includes(providerType)) {
-    throw new Error('Active provider does not support agent orchestration yet.');
+const inferenceRouter = new InferenceRouter({
+  getSettings,
+  getProviderModel,
+  getProviderToken: getDecryptedProviderToken,
+  createProvider: (providerType, token) => ProviderFactory.createProvider(providerType, token)
+});
+
+const resolveInference = (selection = {}) => {
+  if (typeof selection === 'string') {
+    return inferenceRouter.resolve({ provider: selection });
   }
 
-  const token = getDecryptedProviderToken(providerType);
-  const provider = ProviderFactory.createProvider(providerType, token);
+  return inferenceRouter.resolve(selection || {});
+};
+
+const createAgentRuntime = async (providerType, event = null, approvalRequester = null) => {
+  const resolution = resolveInference(providerType);
+  if (!['openai', 'anthropic'].includes(resolution.providerType)) {
+    throw new Error('Active provider does not support agent orchestration yet.');
+  }
   const runtimeEnvironment = await getRuntimeEnvironment({
     workingDirectory: process.cwd()
   });
@@ -784,7 +861,7 @@ const createAgentRuntime = async (providerType, event = null, approvalRequester 
   );
 
   return {
-    provider,
+    ...resolution,
     runtimeEnvironment,
     toolExecutor,
     toolDefinitions: toolRegistry.getFunctionDefinitions()
@@ -812,20 +889,19 @@ const initializeAgentInfrastructure = async () => {
   const agentExecutorAdapter = {
     execute: async (agent, message, options = {}) => {
       const settings = getSettings();
-      const providerType = settings.activeProvider || 'openai';
+      const requestedTier = options.tier || agent?.inferenceTier || settings?.inference?.activeTier;
       const runtime = await createAgentRuntime(
-        providerType,
+        { tier: requestedTier },
         null,
         options.approvalRequester || null
       );
       const executor = new AgentExecutor(runtime.provider, runtime.toolExecutor);
 
-      // Get the model from settings for the active provider
-      const modelFromSettings = settings.providerModels?.[providerType];
-
       return executor.execute(agent, message, {
         ...options,
-        model: modelFromSettings || options.model || agent.model, // Use settings model first
+        tier: runtime.tier,
+        model: options.model || runtime.model || agent.model,
+        timeoutMs: options.timeoutMs || runtime.timeoutMs,
         tools: runtime.toolDefinitions,
         systemPrompt: buildRuntimeSystemPrompt(runtime.runtimeEnvironment)
       });
@@ -1016,14 +1092,11 @@ ipcMain.handle('chat:sendMessage', async (event, { chatId, message, agentMode = 
     throw new Error('Chat not found');
   }
 
-  const settings = getSettings();
-  const providerType = settings.activeProvider || 'openai';
-  if (!['openai', 'anthropic'].includes(providerType)) {
+  const inference = resolveInference();
+  if (!['openai', 'anthropic'].includes(inference.providerType)) {
     throw new Error('Active provider does not support chat completions yet.');
   }
-
-  const token = getDecryptedProviderToken(providerType);
-  const provider = ProviderFactory.createProvider(providerType, token);
+  const provider = inference.provider;
   const chat = getChats().find((item) => item.id === chatId);
   if (!chat) {
     throw new Error('Chat not found');
@@ -1032,7 +1105,9 @@ ipcMain.handle('chat:sendMessage', async (event, { chatId, message, agentMode = 
   const responseId = createId();
   const runId = createId();
   const options = {
-    model: getProviderModel(providerType),
+    model: inference.model,
+    timeoutMs: inference.timeoutMs,
+    tier: inference.tier,
     runId
   };
 
@@ -1174,6 +1249,7 @@ ipcMain.handle('settings:load', () => {
     encryptionAvailable: safeStorage.isEncryptionAvailable(),
     providers,
     activeProvider: settings.activeProvider || 'openai',
+    inference: settings.inference,
     telegram: {
       hasToken: hasStoredTelegramToken(),
       bridgeActive: Boolean(telegramBridge),
@@ -1344,25 +1420,29 @@ ipcMain.handle('agent:list', async () => {
     name: agent.name,
     description: agent.description,
     model: agent.model,
+    inferenceTier: agent.inferenceTier,
     allowedTools: agent.allowedTools
   }));
 });
 
-ipcMain.handle('agent:execute', async (event, { agentId, message }) => {
+ipcMain.handle('agent:execute', async (event, { agentId, message, tier }) => {
   const settings = getSettings();
-  const providerType = settings.activeProvider || 'openai';
-  const runtime = await createAgentRuntime(providerType, event);
   const agent = getAgent(agentId);
 
   if (!agent) {
     throw new Error(`Agent not found: ${agentId}`);
   }
 
-  const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor);
-  const modelFromSettings = settings.providerModels?.[providerType];
+  const runtime = await createAgentRuntime(
+    { tier: tier || agent.inferenceTier || settings?.inference?.activeTier },
+    event
+  );
 
+  const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor);
   return agentExecutor.execute(agent, message, {
-    model: modelFromSettings || agent.model, // Use settings model first
+    tier: runtime.tier,
+    model: runtime.model || agent.model,
+    timeoutMs: runtime.timeoutMs,
     tools: runtime.toolDefinitions,
     systemPrompt: buildRuntimeSystemPrompt(runtime.runtimeEnvironment)
   });
@@ -1370,8 +1450,7 @@ ipcMain.handle('agent:execute', async (event, { agentId, message }) => {
 
 ipcMain.handle('agent:executeParallel', async (event, { agentIds = [], message }) => {
   const settings = getSettings();
-  const providerType = settings.activeProvider || 'openai';
-  const runtime = await createAgentRuntime(providerType, event);
+  const runtime = await createAgentRuntime({ tier: settings?.inference?.activeTier }, event);
 
   const agents = agentIds
     .map((agentId) => getAgent(agentId))
@@ -1379,10 +1458,10 @@ ipcMain.handle('agent:executeParallel', async (event, { agentIds = [], message }
 
   const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor);
   const orchestrator = new AgentOrchestrator(agentExecutor);
-  const modelFromSettings = settings.providerModels?.[providerType];
-
   return orchestrator.executeParallel(agents, message, {
-    model: modelFromSettings, // Use settings model
+    tier: runtime.tier,
+    model: runtime.model,
+    timeoutMs: runtime.timeoutMs,
     tools: runtime.toolDefinitions,
     systemPrompt: buildRuntimeSystemPrompt(runtime.runtimeEnvironment)
   });
@@ -1390,8 +1469,7 @@ ipcMain.handle('agent:executeParallel', async (event, { agentIds = [], message }
 
 ipcMain.handle('agent:executeSerial', async (event, { agentIds = [], message }) => {
   const settings = getSettings();
-  const providerType = settings.activeProvider || 'openai';
-  const runtime = await createAgentRuntime(providerType, event);
+  const runtime = await createAgentRuntime({ tier: settings?.inference?.activeTier }, event);
 
   const agents = agentIds
     .map((agentId) => getAgent(agentId))
@@ -1399,13 +1477,22 @@ ipcMain.handle('agent:executeSerial', async (event, { agentIds = [], message }) 
 
   const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor);
   const orchestrator = new AgentOrchestrator(agentExecutor);
-  const modelFromSettings = settings.providerModels?.[providerType];
-
   return orchestrator.executeSerial(agents, message, {
-    model: modelFromSettings, // Use settings model
+    tier: runtime.tier,
+    model: runtime.model,
+    timeoutMs: runtime.timeoutMs,
     tools: runtime.toolDefinitions,
     systemPrompt: buildRuntimeSystemPrompt(runtime.runtimeEnvironment)
   });
+});
+
+ipcMain.handle('settings:setInferenceTier', (_event, { tier }) => {
+  try {
+    const inference = setActiveInferenceTier(tier);
+    return { ok: true, inference };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
 });
 
 ipcMain.handle('gateway:status', async () => {

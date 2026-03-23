@@ -5,6 +5,7 @@ const MainAssistantAgent = new Agent({
   name: 'Main Assistant',
   description: 'General purpose orchestration assistant',
   model: 'claude-3-5-sonnet-latest',
+  inferenceTier: 'standard',
   allowedTools: ['*'],
   systemPrompt: `You are King Louie's primary orchestration assistant.
 Coordinate tasks, delegate when needed, and provide clear final responses.

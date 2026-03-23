@@ -25,7 +25,14 @@ const agentModeBtn = document.getElementById('agent-mode-btn');
 let chats = [];
 let activeChatId = null;
 let contextChatId = null;
-let settingsState = { encryptionAvailable: true, providers: {}, activeProvider: 'openai' };
+let settingsState = {
+  encryptionAvailable: true,
+  providers: {},
+  activeProvider: 'openai',
+  inference: {
+    activeTier: 'standard'
+  }
+};
 const streamBufferById = new Map();
 let isAgentModeEnabled = false;
 let isHistoryCollapsed = false;
@@ -71,6 +78,9 @@ async function getLocalHelpText() {
     '- `/llm telegram test` — test saved Telegram bot token',
     '- `/llm telegram remove` — clear saved Telegram token and stop bridge',
     '- `/llm telegram status` — show Telegram bridge status',
+    '- `/fast` — switch inference tier to fast',
+    '- `/standard` — switch inference tier to standard',
+    '- `/smart` — switch inference tier to smart',
     '- `/pin <skill-id>` — pin a skill to this chat (all messages handled by the skill)',
     '- `/unpin` — unpin current skill, restore normal behavior',
     '- `/pinned` — show which skill (if any) is pinned to this chat',
@@ -293,6 +303,17 @@ function formatTokenCount(value = 0) {
   return Number(value || 0).toLocaleString();
 }
 
+function getActiveInferenceTier() {
+  return String(settingsState?.inference?.activeTier || 'standard').toLowerCase();
+}
+
+function formatInferenceTierLabel(tier) {
+  const normalized = String(tier || 'standard').toLowerCase();
+  if (normalized === 'fast') return 'Fast';
+  if (normalized === 'smart') return 'Smart';
+  return 'Standard';
+}
+
 function renderChatList() {
   chatList.innerHTML = '';
 
@@ -375,13 +396,13 @@ function renderChatMessages() {
 
   if (!activeChat) {
     chatHeaderTitle.textContent = 'King Louie Chat';
-    chatHeaderMeta.textContent = 'Start a new conversation';
+    chatHeaderMeta.textContent = `Start a new conversation • Tier: ${formatInferenceTierLabel(getActiveInferenceTier())}`;
     return;
   }
 
   chatHeaderTitle.textContent = activeChat.title;
   const chatTotals = activeChat.llmTotals || sumChatLlmTotals(activeChat);
-  chatHeaderMeta.textContent = `Updated ${formatTimestamp(activeChat.updatedAt)} • Total ${formatTokenCount(chatTotals.totalTokens)} tokens • ${formatUsd(chatTotals.costUsd)}`;
+  chatHeaderMeta.textContent = `Updated ${formatTimestamp(activeChat.updatedAt)} • Total ${formatTokenCount(chatTotals.totalTokens)} tokens • ${formatUsd(chatTotals.costUsd)} • Tier: ${formatInferenceTierLabel(getActiveInferenceTier())}`;
 
   let runningTotals = {
     inputTokens: 0,
@@ -422,6 +443,7 @@ function setSettingsDrawer(open) {
 
 function openSettingsDrawer() {
   setSettingsDrawer(true);
+  loadSettings();
 }
 
 function renderProviderCard(providerKey, provider) {
@@ -775,6 +797,36 @@ async function sendMessage() {
     appendLocalMessage('assistant', statusText);
     window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch(() => {});
     window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: statusText }).catch(() => {});
+
+    return;
+  }
+
+  if (['/fast', '/standard', '/smart'].includes(slashCommand?.name)) {
+    userInput.value = '';
+    userInput.style.height = 'auto';
+
+    appendLocalMessage('user', message);
+    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch(() => {});
+
+    const tier = slashCommand.name.slice(1);
+    try {
+      const result = await window.electron.settings.setInferenceTier({ tier });
+      const responseText = result?.ok
+        ? `Inference tier is now **${formatInferenceTierLabel(tier)}**.`
+        : `❌ ${result?.error || 'Unable to update inference tier.'}`;
+
+      if (result?.ok && result?.inference) {
+        settingsState.inference = result.inference;
+        refreshUI();
+      }
+
+      appendLocalMessage('assistant', responseText);
+      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch(() => {});
+    } catch (error) {
+      const errorText = `❌ ${error.message || 'Unable to update inference tier.'}`;
+      appendLocalMessage('assistant', errorText);
+      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: errorText }).catch(() => {});
+    }
 
     return;
   }
@@ -1497,5 +1549,6 @@ window.electron.chat.onChatUpdated(async () => {
 });
 
 loadChats();
+loadSettings();
 renderAgentModeButton();
 renderHistoryToggleButton();

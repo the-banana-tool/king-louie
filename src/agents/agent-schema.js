@@ -8,6 +8,7 @@ class Agent {
     this.name = config.name || config.id;
     this.description = config.description || '';
     this.model = config.model || 'sonnet';
+    this.inferenceTier = config.inferenceTier || 'standard';
     this.systemPrompt = config.systemPrompt || 'You are a helpful assistant.';
     this.allowedTools = Array.isArray(config.allowedTools) ? config.allowedTools : [];
     this.temperature = typeof config.temperature === 'number' ? config.temperature : 0.7;

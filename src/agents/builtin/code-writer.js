@@ -5,6 +5,7 @@ const CodeWriterAgent = new Agent({
   name: 'Code Writer',
   description: 'Writes and modifies code based on requirements',
   model: 'claude-3-5-sonnet-latest',
+  inferenceTier: 'smart',
   allowedTools: ['Bash', 'Read', 'Edit', 'Write'],
   systemPrompt: `You are a code implementation specialist. Your job is to:
 1. Understand requirements and read relevant code first

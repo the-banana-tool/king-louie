@@ -128,6 +128,7 @@ contextBridge.exposeInMainWorld(
       testProvider: (payload) => ipcRenderer.invoke('settings:testProvider', payload),
       setActiveProvider: (payload) => ipcRenderer.invoke('settings:setActiveProvider', payload),
       setProviderModel: (payload) => ipcRenderer.invoke('settings:setProviderModel', payload),
+      setInferenceTier: (payload) => ipcRenderer.invoke('settings:setInferenceTier', payload),
       runLlmCommand: (payload) => ipcRenderer.invoke('settings:runLlmCommand', payload)
     },
     skill: {
