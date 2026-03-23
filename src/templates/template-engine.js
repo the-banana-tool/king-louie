@@ -1,6 +1,8 @@
 const fs = require('fs');
 const path = require('path');
 
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
 class TemplateEngine {
   constructor(options = {}) {
     this.templatesDirectory = options.templatesDirectory || path.join(process.cwd(), 'templates');
@@ -13,16 +15,18 @@ class TemplateEngine {
 
     const withIncludes = source.replace(/\{\{>\s*([\w./-]+)\s*\}\}/g, (_match, partialName) => {
       const partialPath = this.resolvePartialPath(partialName, includeDirectory);
-      const normalizedPath = path.normalize(partialPath);
+      const realPath = fs.realpathSync(partialPath);
 
-      if (includeStack.includes(normalizedPath)) {
-        throw new Error(`Template include cycle detected: ${[...includeStack, normalizedPath].join(' -> ')}`);
+      this.assertWithinTemplatesDirectory(realPath);
+
+      if (includeStack.includes(realPath)) {
+        throw new Error(`Template include cycle detected: ${[...includeStack, realPath].join(' -> ')}`);
       }
 
-      const partialContent = fs.readFileSync(normalizedPath, 'utf8');
+      const partialContent = fs.readFileSync(realPath, 'utf8');
       return this.render(partialContent, context, {
         includeDirectory,
-        includeStack: [...includeStack, normalizedPath]
+        includeStack: [...includeStack, realPath]
       });
     });
 
@@ -62,12 +66,23 @@ class TemplateEngine {
     return found;
   }
 
+  assertWithinTemplatesDirectory(resolvedPath) {
+    const realTemplatesDir = fs.realpathSync(this.templatesDirectory);
+    const normalized = path.resolve(resolvedPath);
+    if (!normalized.startsWith(realTemplatesDir + path.sep) && normalized !== realTemplatesDir) {
+      throw new Error(`Template path escapes templates directory: ${resolvedPath}`);
+    }
+  }
+
   getValue(context, variablePath) {
     const keys = String(variablePath || '').split('.').filter(Boolean);
     let current = context;
 
     for (const key of keys) {
       if (current == null || typeof current !== 'object') {
+        return undefined;
+      }
+      if (UNSAFE_KEYS.has(key)) {
         return undefined;
       }
       current = current[key];
