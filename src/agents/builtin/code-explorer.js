@@ -6,6 +6,7 @@ const CodeExplorerAgent = new Agent({
   description: 'Explores codebase to understand structure and patterns',
   model: 'claude-3-5-sonnet-latest',
   inferenceTier: 'fast',
+  systemPromptTemplate: 'templates/code-explorer.md.template',
   allowedTools: ['Bash', 'Read'],
   systemPrompt: `You are a code exploration specialist. Your job is to:
 1. Read existing source files and identify structure

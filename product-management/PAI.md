@@ -78,12 +78,20 @@ Replace static agent system prompts with a template system that resolves variabl
 
 ### Tasks
 
-- [ ] **4.1** Create `src/templates/template-engine.js` - Simple `{{variable}}` substitution engine that resolves from a context object
-- [ ] **4.2** Create `templates/` directory with default agent prompt templates (`main-assistant.md.template`, `code-explorer.md.template`, `code-writer.md.template`)
-- [ ] **4.3** Modify `AgentExecutor` to resolve templates at execution time instead of using static `systemPrompt` strings
+- [x] **4.1** Create `src/templates/template-engine.js` - Simple `{{variable}}` substitution engine that resolves from a context object
+- [x] **4.2** Create `templates/` directory with default agent prompt templates (`main-assistant.md.template`, `code-explorer.md.template`, `code-writer.md.template`)
+- [x] **4.3** Modify `AgentExecutor` to resolve templates at execution time instead of using static `systemPrompt` strings
 - [ ] **4.4** Add user-editable variables in settings - Name, role, preferences, project context
-- [ ] **4.5** Support template includes - `{{> partial_name}}` syntax for shared prompt fragments
+- [x] **4.5** Support template includes - `{{> partial_name}}` syntax for shared prompt fragments
 - [ ] **4.6** Add a rebuild trigger - Re-resolve templates when settings change (no restart needed)
+
+### Progress Notes
+
+- ✅ Completed 2026-03-23: Dynamic System Prompt foundations (4.1, 4.2, 4.3, 4.5)
+- Added `src/templates/template-engine.js` with variable interpolation, nested path resolution, and partial include support (`{{> partial_name}}`) including include-cycle protection
+- Added `templates/` prompt templates for built-in agents plus shared partials under `templates/partials/`
+- Updated agent schema + built-in agent configs to support `systemPromptTemplate`, and wired `AgentExecutor` to render templates at runtime with fallback to static prompts
+- Verified via node-based checks for template rendering and executor integration
 
 ---
 
