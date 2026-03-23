@@ -71,13 +71,18 @@ function summarizeAvailability(availableCommands = {}) {
   return { available, unavailable };
 }
 
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
 let runtimeEnvironmentPromise = null;
+let runtimeEnvironmentCachedAt = 0;
 
 async function getRuntimeEnvironment(options = {}) {
-  if (runtimeEnvironmentPromise) {
+  const now = Date.now();
+  if (runtimeEnvironmentPromise && (now - runtimeEnvironmentCachedAt) < CACHE_TTL_MS) {
     return runtimeEnvironmentPromise;
   }
 
+  runtimeEnvironmentCachedAt = now;
   runtimeEnvironmentPromise = (async () => {
     const availableCommands = await detectCommands(options.commands || DEFAULT_COMMANDS);
     const shell = process.platform === 'win32'
@@ -98,9 +103,16 @@ async function getRuntimeEnvironment(options = {}) {
   return runtimeEnvironmentPromise;
 }
 
+function resetRuntimeEnvironmentCache() {
+  runtimeEnvironmentPromise = null;
+  runtimeEnvironmentCachedAt = 0;
+  cache.clear();
+}
+
 module.exports = {
   DEFAULT_COMMANDS,
   getRuntimeEnvironment,
+  resetRuntimeEnvironmentCache,
   isCommandAvailable,
   sanitizeCommandName
 };
