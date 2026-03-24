@@ -2656,6 +2656,58 @@ unsubscribeHandlers.push(window.electron.tool.onApprovalRequired(({ approvalId, 
   showToolApprovalDialog(approvalId, toolName, parameters);
 }));
 
+unsubscribeHandlers.push(window.electron.agent.onAskUser(({ requestId, question }) => {
+  const modal = document.createElement('div');
+  modal.className = 'tool-approval-modal'; // reusing styles
+
+  const card = document.createElement('div');
+  card.className = 'tool-approval-card';
+
+  const title = document.createElement('h3');
+  title.textContent = 'Agent requires your input';
+
+  const qLabel = document.createElement('p');
+  qLabel.textContent = question;
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'rename-chat-input'; // reusing styles
+  input.placeholder = 'Enter your response...';
+
+  const actions = document.createElement('div');
+  actions.className = 'tool-approval-actions';
+
+  const submitBtn = document.createElement('button');
+  submitBtn.type = 'button';
+  submitBtn.className = 'primary';
+  submitBtn.textContent = 'Submit';
+
+  const close = (responseStr) => {
+    window.electron.agent.sendUserResponse({ requestId, response: responseStr });
+    modal.remove();
+  };
+
+  submitBtn.addEventListener('click', () => close(input.value), { once: true });
+
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      close(input.value);
+    }
+  });
+
+  actions.appendChild(submitBtn);
+
+  card.appendChild(title);
+  card.appendChild(qLabel);
+  card.appendChild(input);
+  card.appendChild(actions);
+
+  modal.appendChild(card);
+  document.body.appendChild(modal);
+  input.focus();
+}));
+
 // Listen for chat updates from Telegram bridge or other sources
 unsubscribeHandlers.push(window.electron.chat.onChatUpdated(async () => {
   await loadChats();

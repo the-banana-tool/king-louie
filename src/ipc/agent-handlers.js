@@ -121,6 +121,15 @@ function registerAgentHandlers(ipcMain, context = {}) {
     });
   }));
 
+  ipcMain.on(IPC.AGENT_USER_RESPONSE, (event, { requestId, response }) => {
+    const { pendingAskUserResolvers } = context;
+    if (pendingAskUserResolvers && pendingAskUserResolvers.has(requestId)) {
+      const { resolve } = pendingAskUserResolvers.get(requestId);
+      resolve(response);
+      pendingAskUserResolvers.delete(requestId);
+    }
+  });
+
   ipcMain.handle(IPC.AGENT_EXECUTE_SERIAL, wrapHandler(IPC.AGENT_EXECUTE_SERIAL, async (event, { agentIds = [], message }) => {
     const settings = getSettings();
     const runtime = await createAgentRuntime({ tier: settings?.inference?.activeTier }, event);
