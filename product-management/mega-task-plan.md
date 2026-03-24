@@ -8,6 +8,142 @@
 
 ---
 
+## Task 1: Consolidate Global Renderer State
+
+**Source:** architecture-updates.md item 5
+**Dependencies:** None
+**Files to modify:** `renderer.js`
+**Estimated scope:** ~200 mechanical find-and-replace operations in one file
+
+### Context
+
+`renderer.js` has 82+ global variables (75 DOM refs + 7 mutable state vars + `settingsState` object) declared at the top level. Mutations are scattered throughout 2600+ lines making state changes hard to trace. This task consolidates them into two objects: `appState` (mutable state) and `dom` (DOM references).
+
+### Instructions
+
+**Step 1:** Read `renderer.js` lines 1-140 to identify all current global variable declarations. **(Done)**
+
+**Step 2:** Create an `appState` object immediately after all `const` DOM references. Move these mutable variables into it: **(Done)**
+
+```javascript
+const appState = {
+  chats: [],
+  activeChatId: null,
+  contextChatId: null,
+  isAgentModeEnabled: false,
+  isHistoryCollapsed: false,
+  memoryEntries: [],
+  streamBuffers: new Map(),   // was streamBufferById
+  settings: { ... }           // was settingsState — keep same nested shape
+};
+```
+
+**Step 3:** Create a `dom` object for all DOM element references. Currently these are ~75 `const` declarations using `document.getElementById(...)`. Group them: **(Done)**
+
+```javascript
+const dom = {
+  userInput: document.getElementById('user-input'),
+  sendBtn: document.getElementById('send-btn'),
+  chatMessages: document.getElementById('chat-messages'),
+  // ... all 75 element references
+};
+```
+
+**Step 4:** Find-and-replace all bare references throughout `renderer.js`:
+- `chats` → `appState.chats` (but NOT inside object keys or string literals)
+- `activeChatId` → `appState.activeChatId`
+- `contextChatId` → `appState.contextChatId`
+- `settingsState` → `appState.settings`
+- `streamBufferById` → `appState.streamBuffers`
+- `isAgentModeEnabled` → `appState.isAgentModeEnabled`
+- `isHistoryCollapsed` → `appState.isHistoryCollapsed`
+- `memoryEntries` → `appState.memoryEntries`
+- Each DOM ref (e.g., `userInput` → `dom.userInput`, `sendBtn` → `dom.sendBtn`, etc.)
+
+**Be careful with:**
+- Function parameters named the same as globals (e.g., a function that takes `chats` as a parameter should NOT be renamed)
+- Object property access on other objects (e.g., `someObj.chats` should NOT become `someObj.appState.chats`)
+- String literals containing variable names
+- Destructured assignments
+
+**Step 5:** Add a `resetAppState()` function:
+
+```javascript
+function resetAppState() {
+  appState.chats = [];
+  appState.activeChatId = null;
+  appState.contextChatId = null;
+  appState.isAgentModeEnabled = false;
+  appState.isHistoryCollapsed = false;
+  appState.memoryEntries = [];
+  appState.streamBuffers.clear();
+  // Reset settings to defaults
+}
+```
+
+**Step 6:** Remove the old bare variable declarations (the `let chats = []`, `let activeChatId = null`, etc.).
+
+### Test Cases
+
+**T1.1 — Syntax check:**
+```bash
+node --check renderer.js
+```
+Expected: No syntax errors.
+
+**T1.2 — No bare global state variables remain:**
+```bash
+# From repo root, grep for the old variable declarations
+grep -n "^let chats " renderer.js
+grep -n "^let activeChatId " renderer.js
+grep -n "^let contextChatId " renderer.js
+grep -n "^let settingsState " renderer.js
+grep -n "^let streamBufferById " renderer.js
+grep -n "^let isAgentModeEnabled " renderer.js
+grep -n "^let isHistoryCollapsed " renderer.js
+grep -n "^let memoryEntries " renderer.js
+```
+Expected: All return zero results.
+
+**T1.3 — `appState` and `dom` objects exist:**
+```bash
+grep -n "const appState" renderer.js
+grep -n "const dom" renderer.js
+```
+Expected: Exactly one match each.
+
+**T1.4 — All references use new prefix:**
+```bash
+# Spot check: activeChatId should only appear as appState.activeChatId (or in comments/strings)
+grep -n "activeChatId" renderer.js | grep -v "appState\." | grep -v "//" | grep -v "'"
+```
+Expected: Zero results (or only inside the appState object definition itself).
+
+**T1.5 — `npm test` passes:**
+```bash
+npm test
+```
+Expected: All existing tests pass. No regressions.
+
+**T1.6 — Manual smoke test:**
+- Launch the app (`npm start`)
+- Create a new chat
+- Send a message and receive a response
+- Switch between chats
+- Open settings and change a provider
+- Toggle agent mode
+- Collapse/expand history sidebar
+
+All should work identically to before.
+
+### Acceptance Criteria
+- All mutable state accessed through `appState` object
+- All DOM refs accessed through `dom` object
+- No bare global `let` variables for state remain
+- `resetAppState()` function exists
+- No functional regressions
+
+---
 
 ## Task 2: Additional Preload Validation Coverage
 
@@ -232,12 +368,12 @@ describe('ProviderFactory', () => {
 
   it('registers and creates a provider', () => {
     class MockProvider {
-      constructor(config) { this.config = config; }
+      constructor(apiKey) { this.apiKey = apiKey; }
     }
     ProviderFactory.registerProvider('mock', MockProvider);
-    const instance = ProviderFactory.create('mock', { apiKey: 'test' });
+    const instance = ProviderFactory.create('mock', 'test-key');
     assert.ok(instance instanceof MockProvider);
-    assert.strictEqual(instance.config.apiKey, 'test');
+    assert.strictEqual(instance.apiKey, 'test-key');
   });
 
   it('lists registered providers', () => {
@@ -252,7 +388,7 @@ describe('ProviderFactory', () => {
 
   it('throws on unknown provider with helpful message', () => {
     assert.throws(
-      () => ProviderFactory.create('nonexistent', {}),
+      () => ProviderFactory.create('nonexistent', 'test-key'),
       /Unknown provider.*nonexistent/
     );
   });
@@ -260,7 +396,7 @@ describe('ProviderFactory', () => {
   it('is case-insensitive for provider type', () => {
     class MockProvider {}
     ProviderFactory.registerProvider('MyProvider', MockProvider);
-    const instance = ProviderFactory.create('myprovider', {});
+    const instance = ProviderFactory.create('myprovider', 'test-key');
     assert.ok(instance instanceof MockProvider);
   });
 
@@ -289,7 +425,7 @@ describe('ProviderFactory', () => {
   });
 
   it('create() produces working OpenAI provider', () => {
-    const provider = ProviderFactory.create('openai', { apiKey: 'sk-test' });
+    const provider = ProviderFactory.create('openai', 'sk-test12345');
     assert.ok(provider);
     assert.ok(typeof provider.getModels === 'function');
   });
@@ -305,7 +441,7 @@ describe('BaseLLMProvider.discoverModels', () => {
     class TestProvider extends BaseLLMProvider {
       getModels() { return ['model-a', 'model-b']; }
     }
-    const provider = new TestProvider({});
+    const provider = new TestProvider('test-key123');
     const models = await provider.discoverModels();
     assert.strictEqual(models.length, 2);
     assert.strictEqual(models[0].id, 'model-a');
@@ -1161,7 +1297,7 @@ describe('WebFetch Cache', () => {
 
 ```javascript
 class SearchProvider {
-  constructor(config) { this.config = config; }
+  constructor(apiKey) { this.apiKey = apiKey; }
   getName() { throw new Error('Not implemented'); }
   isConfigured() { return false; }
   async search(query, maxResults) { throw new Error('Not implemented'); }
@@ -3417,11 +3553,11 @@ describe('Doctor', () => {
 
 ```
 Phase 1 — Architecture Cleanup (no dependencies):
-    Global state consolidation (renderer.js)
-  Task 2:  Additional preload validation
+  Task 1:  Global state consolidation (renderer.js)
+  Task 2:  Additional preload validation (Completed)
 
 Phase 2 — Provider Expansion:
-  Task 3:  Provider abstraction refactor (prerequisite for 4-8)
+  Task 3:  Provider abstraction refactor (prerequisite for 4-8) - COMPLETE
   Task 4:  Groq provider
   Task 5:  Ollama provider
   Task 6:  Mistral provider

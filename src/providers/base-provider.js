@@ -113,6 +113,24 @@ class BaseLLMProvider {
     throw new Error('streamMessage must be implemented by provider');
   }
 
+  getModels() {
+    return [];
+  }
+
+  /**
+   * Discover available models from the provider's API.
+   * Override in subclasses that support model discovery.
+   * @returns {Promise<Array<{id: string, name: string, capabilities: string[]}>>}
+   */
+  async discoverModels() {
+    // Default: return static model list from getModels()
+    return this.getModels().map(m => ({
+      id: typeof m === 'string' ? m : m.id,
+      name: typeof m === 'string' ? m : (m.name || m.id),
+      capabilities: ['chat', 'streaming']
+    }));
+  }
+
   async listModels() {
     throw new Error('listModels must be implemented by provider');
   }

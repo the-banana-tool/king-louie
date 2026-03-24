@@ -13,6 +13,18 @@ class OpenAIProvider extends BaseLLMProvider {
     return 'openai';
   }
 
+  getModels() {
+    return [
+      'gpt-4o',
+      'gpt-4o-mini',
+      'o1',
+      'o1-mini',
+      'o3-mini',
+      'gpt-4-turbo',
+      'gpt-4'
+    ];
+  }
+
   getModelPricingTable() {
     return {
       'gpt-4o-mini': { inputPerMillion: 0.15, outputPerMillion: 0.6 },
