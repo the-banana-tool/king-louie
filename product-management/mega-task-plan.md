@@ -476,21 +476,27 @@ npm test
 
 ---
 
-## Task 4: Groq Provider ✅ COMPLETED
+## Task 4: Groq Provider ✅ COMPLETED (with known bug)
 
-> **Summary:** Implemented `GroqProvider` in `src/providers/groq-provider.js` extending `BaseLLMProvider`. Registered it in `ProviderFactory` and integrated it into the settings system (`main.js` and `settings-handlers.js`). Updated `DEFAULT_SETTINGS` to use Groq with `llama-3.3-70b-versatile` as the default fast-tier provider. Added full test coverage in `tests/groq-provider.test.js` and configured `npm test` to run it.
+> **Completed:** `GroqProvider` in `src/providers/groq-provider.js`, settings integrated in `main.js` (providerLabels, providerDefaults, providerTokenHints, providerModels, tierMap.fast), test endpoint in `settings-handlers.js`, tests in `tests/groq-provider.test.js` added to `package.json`.
+>
+> **BUG — factory registration missing:** `provider-factory.js` line 3 imports `GroqProvider` but lines 37-38 only register `openai` and `anthropic`. Missing: `ProviderFactory.registerProvider('groq', GroqProvider);` after line 38. The test `'is registered in ProviderFactory'` (`groq-provider.test.js:95`) will fail until this is fixed.
+>
+> **Architecture note for Tasks 5-8:** GroqProvider is a near-identical copy of OpenAIProvider (~280 lines each). The only differences are `this.baseUrl`, `getName()`/`getLabel()`/`getProviderName()`, `getModels()`, and `getDefaultModel()`. All of `formatMessages`, `sendMessage`, `sendMessageWithTools`, `parseToolResponse`, `buildToolMessages`, `streamMessage`, `listModels`, `extractError`, and `prependSystemPrompt` are duplicated verbatim. For Tasks 5-8:
+> - **Option (a):** Copy the same pattern (fast, more duplication) — recommended for now
+> - **Option (b):** Extract a shared `OpenAICompatibleProvider` base class and have all OpenAI-compatible providers extend it (cleaner, but scope creep)
+>
+> **Actual patterns to follow (verified against code):**
+> - **Constructor:** Takes `apiKey` string directly (not config object). `BaseLLMProvider` validates min 8 chars.
+> - **Settings in `main.js`:** Add to `providerLabels` (~line 325), `providerDefaults` (~line 332), `providerTokenHints` (~line 339), `DEFAULT_SETTINGS.providerModels` (~line 70).
+> - **Test endpoint in `settings-handlers.js`:** Add `else if (provider === '...')` branch (~line 223) hitting the provider's models endpoint.
+> - **Factory registration in `provider-factory.js`:** Import at top, add `ProviderFactory.registerProvider('name', Class);` after existing registrations (~line 38).
+> - **Test script in `package.json`:** Append `&& node --test tests/<name>.test.js` to the `"test"` script (line 8).
 
 **Source:** openclaw.md §2.2
 **Dependencies:** Task 3 (provider abstraction)
-**Files to create:** `src/providers/groq-provider.js`
-**Files to modify:** `src/providers/provider-factory.js` (register), `main.js` (settings), `src/ipc/settings-handlers.js` (test endpoint)
-
-> **Clarifications:**
-> - **Settings location:** Provider config maps live in `main.js` (~lines 324-340): add `groq: 'Groq'` to `providerLabels`, `groq: 'llama-3.3-70b-versatile'` to `providerDefaults`, `groq: 'gsk_'` to `providerTokenHints`.
-> - **DEFAULT_SETTINGS:** Add `groq: 'llama-3.3-70b-versatile'` to `DEFAULT_SETTINGS.providerModels` (~line 70). Update `DEFAULT_SETTINGS.inference.tierMap.fast` to `{ provider: 'groq', model: 'llama-3.3-70b-versatile' }`.
-> - **Test endpoint:** In `settings:testProvider` handler (`src/ipc/settings-handlers.js` ~line 192), add an `else if (provider === 'groq')` branch hitting `https://api.groq.com/openai/v1/models` with `Authorization: Bearer {token}` header.
-> - **Factory signature:** `ProviderFactory.create(providerType, apiKey)` passes `apiKey` directly (not a config object). Match the constructor to accept either pattern or match the existing OpenAI/Anthropic constructors.
-> - **Test script:** Add `&& node tests/groq-provider.test.js` to the `"test"` script in `package.json` (tests are chained sequentially with `&&`).
+**Files created:** `src/providers/groq-provider.js`, `tests/groq-provider.test.js`
+**Files modified:** `src/providers/provider-factory.js`, `main.js`, `src/ipc/settings-handlers.js`, `package.json`
 
 ### Instructions
 
@@ -625,10 +631,11 @@ describe('GroqProvider', () => {
 **Files to modify:** `src/providers/provider-factory.js`, `main.js` (settings), `src/ipc/settings-handlers.js`
 
 > **Clarifications:**
-> - **No API key:** Ollama has no API key, so do NOT add to `providerTokenHints`. Still add to `providerLabels` (`ollama: 'Ollama (Local)'`) and `providerDefaults` (`ollama: ''`).
-> - **Settings integration:** Add `ollama: ''` to `DEFAULT_SETTINGS.providerModels`. Add a `settings:testProvider` branch that hits `http://localhost:11434/api/tags` with no auth — success means Ollama is running.
-> - **Factory constructor:** The constructor receives `apiKey` from `ProviderFactory.create()`. For Ollama, ignore it and use `baseUrl` from a separate config path or default to `http://localhost:11434`.
-> - **Test script:** Add `&& node tests/ollama-provider.test.js` to `package.json` test script.
+> - **Copy `groq-provider.js` as template** (~280 lines), then change: `this.baseUrl` → `http://localhost:11434/v1`, `getName()` → `'ollama'`, `getLabel()` → `'Ollama (Local)'`, `getModels()` → empty (models come from `discoverModels()`), `getDefaultModel()` → `''`.
+> - **No API key:** Ollama has no key. `BaseLLMProvider.validateApiKey()` throws if key < 8 chars, so **override `validateApiKey()` to be a no-op** in OllamaProvider. Do NOT add to `providerTokenHints`. Still add to `providerLabels` and `providerDefaults` in `main.js`.
+> - **Settings integration:** Add `ollama: ''` to `DEFAULT_SETTINGS.providerModels`. Test endpoint branch: hit `http://localhost:11434/api/tags` with no auth.
+> - **Override `getHeaders()`** to omit `Authorization` header (just `Content-Type: application/json`).
+> - **Test script:** Add `&& node --test tests/ollama-provider.test.js` to `package.json`.
 
 ### Instructions
 
@@ -739,10 +746,12 @@ describe('OllamaProvider', () => {
 **Files to modify:** `src/providers/provider-factory.js`, `main.js` (settings), `src/ipc/settings-handlers.js`
 
 > **Clarifications:**
-> - **Same pattern as Groq (Task 4):** Add to `providerLabels` (`mistral: 'Mistral AI'`), `providerDefaults` (`mistral: 'mistral-large-latest'`), `providerTokenHints` (`mistral: ''` — Mistral keys have no standard prefix).
-> - **DEFAULT_SETTINGS:** Add `mistral: 'mistral-large-latest'` to `providerModels`.
-> - **Test endpoint:** Hit `https://api.mistral.ai/v1/models` with `Authorization: Bearer {token}`.
-> - **Test script:** Add `&& node tests/mistral-provider.test.js` to `package.json`.
+> - **Copy `groq-provider.js` as template** (~280 lines), then change: `this.baseUrl` → `https://api.mistral.ai/v1`, `getName()` → `'mistral'`, `getLabel()` → `'Mistral AI'`, `getProviderName()` → `'mistral'`, `getModels()` → Mistral model list, `getDefaultModel()` → `'mistral-large-latest'`.
+> - **Settings in `main.js`:** Add `mistral: 'Mistral AI'` to `providerLabels`, `mistral: 'mistral-large-latest'` to `providerDefaults`, `mistral: ''` to `providerTokenHints` (no standard prefix). Add `mistral: 'mistral-large-latest'` to `DEFAULT_SETTINGS.providerModels`.
+> - **Test endpoint in `settings-handlers.js`:** Hit `https://api.mistral.ai/v1/models` with `Authorization: Bearer {token}`.
+> - **Factory registration:** Import + `ProviderFactory.registerProvider('mistral', MistralProvider);` in `provider-factory.js`.
+> - **Test script:** Add `&& node --test tests/mistral-provider.test.js` to `package.json`.
+> - **Also fix Task 4 bug** while you're in `provider-factory.js`: add missing `ProviderFactory.registerProvider('groq', GroqProvider);`.
 
 ### Instructions
 
@@ -804,11 +813,14 @@ describe('MistralProvider', () => {
 **Files to modify:** `src/providers/provider-factory.js`, `main.js` (settings), `src/ipc/settings-handlers.js`
 
 > **Clarifications:**
-> - **Different auth pattern:** Gemini uses `?key={apiKey}` query param, NOT Authorization header. The `settings:testProvider` branch should hit `https://generativelanguage.googleapis.com/v1beta/models?key={token}`.
-> - **Settings:** Add to `providerLabels` (`gemini: 'Google Gemini'`), `providerDefaults` (`gemini: 'gemini-2.0-flash'`), `providerTokenHints` (`gemini: 'AI'` — Gemini keys often start with `AI`).
-> - **DEFAULT_SETTINGS:** Add `gemini: 'gemini-2.0-flash'` to `providerModels`.
-> - **Format adapters:** This is the only non-OpenAI-compatible provider. Must implement `formatMessages()` (role mapping: assistant→model, parts array) and `formatTools()` (functionDeclarations) and `parseToolCalls()` (functionCall→tool_calls conversion).
-> - **Test script:** Add `&& node tests/gemini-provider.test.js` to `package.json`.
+> - **DO NOT copy `groq-provider.js` verbatim.** Gemini is NOT OpenAI-compatible. Start from `base-provider.js` and implement from scratch. You WILL need custom `formatMessages()`, `sendMessage()`, `sendMessageWithTools()`, `streamMessage()`, and tool-related methods.
+> - **Auth:** Gemini uses `?key={apiKey}` query param, NOT `Authorization` header. Override `getHeaders()` to omit the Bearer token. Append key to URL instead.
+> - **Constructor:** Still takes `apiKey` string via `BaseLLMProvider(apiKey)`. The `validateApiKey()` base method (min 8 chars) should work fine for Gemini keys.
+> - **Settings in `main.js`:** Add `gemini: 'Google Gemini'` to `providerLabels`, `gemini: 'gemini-2.0-flash'` to `providerDefaults`, `gemini: 'AI'` to `providerTokenHints`. Add `gemini: 'gemini-2.0-flash'` to `DEFAULT_SETTINGS.providerModels`.
+> - **Test endpoint in `settings-handlers.js`:** Hit `https://generativelanguage.googleapis.com/v1beta/models?key={token}` (no auth header).
+> - **Format adapters:** Must implement: `formatMessages()` (role mapping: `assistant`→`model`, content→`parts: [{text}]`), `formatTools()` (→`functionDeclarations`), `parseToolCalls()` (`functionCall`→tool_calls conversion). The response shape is completely different from OpenAI.
+> - **Return shape must match other providers:** `sendMessageWithTools()` must return `{ type: 'tool_use'|'text', toolName, toolUseId, parameters, messageContent, llmMetrics }` — same shape as `GroqProvider.parseToolResponse()`.
+> - **Factory + test script:** Same pattern as other providers.
 
 ### Instructions
 
@@ -947,10 +959,11 @@ describe('GeminiProvider', () => {
 **Files to modify:** `src/providers/provider-factory.js`, `main.js` (settings), `src/ipc/settings-handlers.js`
 
 > **Clarifications:**
-> - **Same pattern as Groq:** Add to `providerLabels` (`openrouter: 'OpenRouter'`), `providerDefaults` (`openrouter: 'openai/gpt-4o-mini'`), `providerTokenHints` (`openrouter: 'sk-or-'`).
-> - **DEFAULT_SETTINGS:** Add `openrouter: 'openai/gpt-4o-mini'` to `providerModels`.
-> - **Test endpoint:** Hit `https://openrouter.ai/api/v1/models` with `Authorization: Bearer {token}` plus `HTTP-Referer` and `X-Title` headers.
-> - **Test script:** Add `&& node tests/openrouter-provider.test.js` to `package.json`.
+> - **Copy `groq-provider.js` as template**, then change: `this.baseUrl` → `https://openrouter.ai/api/v1`, `getName()` → `'openrouter'`, `getLabel()` → `'OpenRouter'`, `getProviderName()` → `'openrouter'`, `getDefaultModel()` → `'openai/gpt-4o-mini'`.
+> - **Override `getHeaders()`** to add extra headers: `'HTTP-Referer': 'king-louie'` and `'X-Title': 'King Louie'` alongside the Bearer token.
+> - **Settings in `main.js`:** Add `openrouter: 'OpenRouter'` to `providerLabels`, `openrouter: 'openai/gpt-4o-mini'` to `providerDefaults`, `openrouter: 'sk-or-'` to `providerTokenHints`. Add `openrouter: 'openai/gpt-4o-mini'` to `DEFAULT_SETTINGS.providerModels`.
+> - **Test endpoint in `settings-handlers.js`:** Hit `https://openrouter.ai/api/v1/models` with Bearer auth + the extra headers.
+> - **Factory + test script:** Same pattern as other providers.
 
 ### Instructions
 
