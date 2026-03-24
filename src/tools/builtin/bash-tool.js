@@ -2,8 +2,10 @@ const { exec } = require('child_process');
 const { promisify } = require('util');
 const { Tool } = require('../tool-schema');
 const { sanitizeCommandName } = require('../../execution/runtime-environment');
+const SandboxExecutor = require('../../execution/sandbox-executor');
 
 const execAsync = promisify(exec);
+const sandboxExecutor = new SandboxExecutor();
 
 const WINDOWS_BUILTINS = new Set([
   'cd',
@@ -108,50 +110,32 @@ const BashTool = new Tool({
     const { command, timeout = 120000 } = params;
     const runtimeEnvironment = options.runtimeEnvironment || {};
 
-    const validation = validateCommandAvailability(command, runtimeEnvironment);
+    const useSandbox = options.useSandbox !== false;
+    const isDockerAvailable = await sandboxExecutor.isDockerAvailable();
+    const willUseSandbox = useSandbox && isDockerAvailable;
+
+    // Always validate command availability first, even if using sandbox.
+    // If sandbox is used, assume POSIX builtins (linux environment)
+    const validationEnvironment = willUseSandbox ? { platform: 'linux', shell: 'sh' } : runtimeEnvironment;
+    const validation = validateCommandAvailability(command, validationEnvironment);
     if (!validation.ok) {
       return {
         success: false,
         stdout: '',
         stderr: validation.error,
         exitCode: 127,
-        environment: {
-          platform: runtimeEnvironment.platform || process.platform,
-          shell: runtimeEnvironment.shell || null
-        }
+        environment: validationEnvironment
       };
     }
 
-    try {
-      const { stdout, stderr } = await execAsync(command, {
-        timeout: Math.min(timeout, 600000),
-        maxBuffer: 10 * 1024 * 1024,
-        cwd: options.workingDirectory || process.cwd(),
-        shell: true
-      });
+    const execOptions = {
+      timeout,
+      workingDirectory: options.workingDirectory,
+      sessionId: options.sessionId,
+      useSandbox
+    };
 
-      return {
-        success: true,
-        stdout: (stdout || '').trim(),
-        stderr: (stderr || '').trim(),
-        exitCode: 0,
-        environment: {
-          platform: runtimeEnvironment.platform || process.platform,
-          shell: runtimeEnvironment.shell || null
-        }
-      };
-    } catch (error) {
-      return {
-        success: false,
-        stdout: (error.stdout || '').trim(),
-        stderr: (error.stderr || error.message || '').trim(),
-        exitCode: typeof error.code === 'number' ? error.code : 1,
-        environment: {
-          platform: runtimeEnvironment.platform || process.platform,
-          shell: runtimeEnvironment.shell || null
-        }
-      };
-    }
+    return await sandboxExecutor.execute(command, execOptions);
   }
 });
 
