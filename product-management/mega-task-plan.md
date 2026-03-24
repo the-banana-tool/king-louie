@@ -21,9 +21,9 @@
 
 ### Instructions
 
-**Step 1:** Read `renderer.js` lines 1-140 to identify all current global variable declarations.
+**Step 1:** Read `renderer.js` lines 1-140 to identify all current global variable declarations. **(Done)**
 
-**Step 2:** Create an `appState` object immediately after all `const` DOM references. Move these mutable variables into it:
+**Step 2:** Create an `appState` object immediately after all `const` DOM references. Move these mutable variables into it: **(Done)**
 
 ```javascript
 const appState = {
@@ -38,7 +38,7 @@ const appState = {
 };
 ```
 
-**Step 3:** Create a `dom` object for all DOM element references. Currently these are ~75 `const` declarations using `document.getElementById(...)`. Group them:
+**Step 3:** Create a `dom` object for all DOM element references. Currently these are ~75 `const` declarations using `document.getElementById(...)`. Group them: **(Done)**
 
 ```javascript
 const dom = {

@@ -1,4 +1,82 @@
 // DOM Elements
+const dom = {
+  userInput: document.getElementById('user-input'),
+  sendBtn: document.getElementById('send-btn'),
+  chatMessages: document.getElementById('chat-messages'),
+  newChatBtn: document.getElementById('new-chat-btn'),
+  newChatBtnCompact: document.getElementById('new-chat-btn-compact'),
+  chatList: document.getElementById('chat-list'),
+  chatHeaderTitle: document.getElementById('chat-header-title'),
+  chatHeaderMeta: document.getElementById('chat-header-meta'),
+  emptyState: document.getElementById('empty-state'),
+  mainContent: document.querySelector('.main-content'),
+  container: document.querySelector('.container'),
+  sidebar: document.querySelector('.sidebar'),
+  chatContextMenu: document.getElementById('chat-context-menu'),
+  settingsDrawer: document.getElementById('settings-drawer'),
+  toggleHistoryBtn: document.getElementById('toggle-history-btn'),
+  openSettingsBtn: document.getElementById('open-settings-btn'),
+  closeSettingsBtn: document.getElementById('close-settings-btn'),
+  floatingSettingsBtn: document.getElementById('floating-settings-btn'),
+  composerSettingsBtn: document.getElementById('composer-settings-btn'),
+  providerList: document.getElementById('provider-list'),
+  settingsEncryptionAlert: document.getElementById('settings-encryption-alert'),
+  agentModeBtn: document.getElementById('agent-mode-btn'),
+  templateNameInput: document.getElementById('template-name-input'),
+  templateRoleInput: document.getElementById('template-role-input'),
+  templatePreferencesInput: document.getElementById('template-preferences-input'),
+  templateProjectContextInput: document.getElementById('template-project-context-input'),
+  saveTemplateVariablesBtn: document.getElementById('save-template-variables-btn'),
+  templateVariablesStatus: document.getElementById('template-variables-status'),
+  profileNameInput: document.getElementById('profile-name-input'),
+  profileRoleInput: document.getElementById('profile-role-input'),
+  profileGoalsInput: document.getElementById('profile-goals-input'),
+  profilePreferencesInput: document.getElementById('profile-preferences-input'),
+  profileProjectContextInput: document.getElementById('profile-project-context-input'),
+  saveUserProfileBtn: document.getElementById('save-user-profile-btn'),
+  userProfileStatus: document.getElementById('user-profile-status'),
+  notificationsEnabledInput: document.getElementById('notifications-enabled-input'),
+  notificationsUiToastEnabledInput: document.getElementById('notifications-ui-toast-enabled-input'),
+  notificationsNtfyEnabledInput: document.getElementById('notifications-ntfy-enabled-input'),
+  notificationsTelegramLongTaskInput: document.getElementById('notifications-telegram-long-task-input'),
+  notificationsToastThresholdInput: document.getElementById('notifications-toast-threshold-input'),
+  notificationsExternalThresholdInput: document.getElementById('notifications-external-threshold-input'),
+  notificationsNtfyTopicInput: document.getElementById('notifications-ntfy-topic-input'),
+  saveNotificationsBtn: document.getElementById('save-notifications-btn'),
+  notificationsStatus: document.getElementById('notifications-status'),
+  voiceEnabledInput: document.getElementById('voice-enabled-input'),
+  voiceSpeakChatInput: document.getElementById('voice-speak-chat-input'),
+  voiceSpeakAgentSummaryInput: document.getElementById('voice-speak-agent-summary-input'),
+  voiceTelegramLongInput: document.getElementById('voice-telegram-long-input'),
+  voiceEngineInput: document.getElementById('voice-engine-input'),
+  voiceIdInput: document.getElementById('voice-id-input'),
+  voiceSpeedInput: document.getElementById('voice-speed-input'),
+  voiceStabilityInput: document.getElementById('voice-stability-input'),
+  voiceStyleInput: document.getElementById('voice-style-input'),
+  voiceSummaryMaxInput: document.getElementById('voice-summary-max-input'),
+  voiceTelegramMinInput: document.getElementById('voice-telegram-min-input'),
+  voiceElevenLabsKeyInput: document.getElementById('voice-elevenlabs-key-input'),
+  saveVoiceSettingsBtn: document.getElementById('save-voice-settings-btn'),
+  saveVoiceKeyBtn: document.getElementById('save-voice-key-btn'),
+  clearVoiceKeyBtn: document.getElementById('clear-voice-key-btn'),
+  testVoiceBtn: document.getElementById('test-voice-btn'),
+  voiceStatus: document.getElementById('voice-status'),
+  hooksGlobalEnabledInput: document.getElementById('hooks-global-enabled-input'),
+  reloadHooksBtn: document.getElementById('reload-hooks-btn'),
+  hooksStatus: document.getElementById('hooks-status'),
+  hooksList: document.getElementById('hooks-list'),
+  memoryQueryInput: document.getElementById('memory-query-input'),
+  memoryTierFilterInput: document.getElementById('memory-tier-filter-input'),
+  memoryCaptureTypeInput: document.getElementById('memory-capture-type-input'),
+  memoryCaptureContentInput: document.getElementById('memory-capture-content-input'),
+  memoryRefreshBtn: document.getElementById('memory-refresh-btn'),
+  memoryCaptureBtn: document.getElementById('memory-capture-btn'),
+  memoryClearBtn: document.getElementById('memory-clear-btn'),
+  memoryStatus: document.getElementById('memory-status'),
+  memoryList: document.getElementById('memory-list')
+};
+
+// Also keep the individual variables intact since we are only implementing steps 1-3.
 const userInput = document.getElementById('user-input');
 const sendBtn = document.getElementById('send-btn');
 const chatMessages = document.getElementById('chat-messages');
@@ -73,6 +151,72 @@ const memoryCaptureBtn = document.getElementById('memory-capture-btn');
 const memoryClearBtn = document.getElementById('memory-clear-btn');
 const memoryStatus = document.getElementById('memory-status');
 const memoryList = document.getElementById('memory-list');
+
+const appState = {
+  chats: [],
+  activeChatId: null,
+  contextChatId: null,
+  isAgentModeEnabled: false,
+  isHistoryCollapsed: false,
+  memoryEntries: [],
+  streamBuffers: new Map(),
+  settings: {
+    encryptionAvailable: true,
+    providers: {},
+    activeProvider: 'openai',
+    inference: {
+      activeTier: 'standard'
+    },
+    templateVariables: {
+      name: '',
+      role: '',
+      preferences: '',
+      projectContext: ''
+    },
+    userProfile: {
+      name: '',
+      role: '',
+      goals: [],
+      preferences: {},
+      projectContext: ''
+    },
+    notifications: {
+      enabled: true,
+      thresholdsMs: {
+        toast: 30000,
+        external: 120000
+      },
+      uiToast: {
+        enabled: true
+      },
+      ntfy: {
+        enabled: false,
+        topic: ''
+      },
+      telegram: {
+        longTaskNotice: true
+      }
+    },
+    voice: {
+      enabled: false,
+      engine: 'system',
+      voiceId: '',
+      speed: 1,
+      stability: 0.5,
+      style: 0.25,
+      speakAgentSummary: true,
+      speakChatResponses: false,
+      telegramVoiceForLongResponses: false,
+      telegramMinChars: 500,
+      summaryMaxChars: 260,
+      hasElevenLabsKey: false
+    },
+    hooks: {
+      enabled: true,
+      loaded: []
+    }
+  }
+};
 
 let chats = [];
 let activeChatId = null;
