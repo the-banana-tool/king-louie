@@ -1494,7 +1494,9 @@ describe('WebSearch Tool', () => {
 
 ---
 
-## Task 12: Glob Tool
+## Task 12: Glob Tool ✅ COMPLETED
+
+> **Completed:** `GlobTool` created in `src/tools/builtin/glob-tool.js` using `fast-glob`. It supports sorting files by modification time, excludes `node_modules` and `.git` by default, and respects the `maxResults` constraint. It is registered in `src/tools/index.js` and tested via `tests/glob-tool.test.js`.
 
 **Source:** king-louie-enhancement-plan.md Phase 7
 **Dependencies:** None
