@@ -139,6 +139,15 @@ const dom = {
   memoryClearBtn: document.getElementById('memory-clear-btn'),
   memoryStatus: document.getElementById('memory-status'),
   memoryList: document.getElementById('memory-list'),
+  cronRefreshBtn: document.getElementById('cron-refresh-btn'),
+  cronStatus: document.getElementById('cron-status'),
+  cronList: document.getElementById('cron-list'),
+  cronAddBtn: document.getElementById('cron-add-btn'),
+  cronAddStatus: document.getElementById('cron-add-status'),
+  cronAddMessageInput: document.getElementById('cron-add-message-input'),
+  cronAddTargetInput: document.getElementById('cron-add-target-input'),
+  cronAddKindInput: document.getElementById('cron-add-kind-input'),
+  cronAddValueInput: document.getElementById('cron-add-value-input'),
 };
 
 const unsubscribeHandlers = [];
@@ -160,7 +169,8 @@ function resetAppState() {
     userProfile: { name: '', role: '', goals: [], preferences: {}, projectContext: '' },
     notifications: { enabled: true, thresholdsMs: { toast: 30000, external: 120000 }, uiToast: { enabled: true }, ntfy: { enabled: false, topic: '' }, telegram: { longTaskNotice: true } },
     voice: { enabled: false, engine: 'system', voiceId: '', speed: 1, stability: 0.5, style: 0.25, speakAgentSummary: true, speakChatResponses: false, telegramVoiceForLongResponses: false, telegramMinChars: 500, summaryMaxChars: 260, hasElevenLabsKey: false },
-    hooks: { enabled: true, loaded: [] }
+    hooks: { enabled: true, loaded: [] },
+    cronJobs: []
   };
 }
 
@@ -1543,6 +1553,233 @@ async function handleTestVoice() {
   }
 }
 
+async function loadCronJobs() {
+  if (!window.electron?.cron || !dom.cronList) return;
+
+  try {
+    if (dom.cronStatus) dom.cronStatus.textContent = 'Loading scheduler status...';
+
+    const [listResult, statusResult] = await Promise.all([
+      window.electron.cron.list(),
+      window.electron.cron.status()
+    ]);
+
+    if (!listResult?.ok) throw new Error(listResult?.error || 'Failed to list jobs');
+    if (!statusResult?.ok) throw new Error(statusResult?.error || 'Failed to get status');
+
+    appState.settings.cronJobs = Array.isArray(listResult.jobs) ? listResult.jobs : [];
+
+    if (dom.cronStatus) {
+      const stats = statusResult.status || {};
+      dom.cronStatus.textContent = `Scheduler: ${stats.running ? 'Running' : 'Stopped'} • ${stats.activeJobs} active / ${stats.totalJobs} total jobs.`;
+      dom.cronStatus.classList.remove('error');
+    }
+
+    renderCronJobs(appState.settings.cronJobs);
+  } catch (err) {
+    if (dom.cronStatus) {
+      dom.cronStatus.textContent = `Error: ${err.message}`;
+      dom.cronStatus.classList.add('error');
+    }
+  }
+}
+
+function renderCronJobs(jobs = []) {
+  if (!dom.cronList) return;
+  dom.cronList.innerHTML = '';
+
+  if (jobs.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'provider-message';
+    empty.textContent = 'No cron jobs configured.';
+    dom.cronList.appendChild(empty);
+    return;
+  }
+
+  jobs.forEach(job => {
+    const card = document.createElement('div');
+    card.className = 'provider-card';
+    card.dataset.jobId = job.id;
+
+    const header = document.createElement('div');
+    header.className = 'provider-header';
+
+    const titleWrap = document.createElement('div');
+    titleWrap.className = 'provider-title-wrap';
+
+    const title = document.createElement('div');
+    title.className = 'provider-title';
+    title.textContent = `Job: ${job.id}`;
+
+    const meta = document.createElement('div');
+    meta.className = 'provider-message';
+    const scheduleDesc = job.schedule?.kind === 'at' ? `At ${job.schedule.at}` :
+                         job.schedule?.kind === 'every' ? `Every ${job.schedule.everyMs}ms` :
+                         job.schedule?.kind === 'cron' ? `Cron ${job.schedule.expr}` : 'Unknown schedule';
+    meta.textContent = `Target: ${job.payload?.sessionTarget || 'local'} • ${scheduleDesc}`;
+
+    titleWrap.appendChild(title);
+    titleWrap.appendChild(meta);
+
+    const status = document.createElement('span');
+    status.className = 'provider-status';
+    if (job.enabled !== false) {
+      status.classList.add('ok');
+      status.textContent = 'Enabled';
+    } else {
+      status.classList.add('error');
+      status.textContent = 'Disabled';
+    }
+
+    header.appendChild(titleWrap);
+    header.appendChild(status);
+
+    const body = document.createElement('div');
+    body.className = 'provider-message';
+    body.textContent = job.payload?.message || '(no message)';
+
+    const stats = document.createElement('div');
+    stats.className = 'provider-message';
+    stats.textContent = `Errors: ${job.state?.consecutiveErrors || 0} • Next Run: ${job.nextRunAt ? formatTimestamp(job.nextRunAt) : 'None'}`;
+
+    const actions = document.createElement('div');
+    actions.className = 'provider-actions';
+
+    const toggleBtn = document.createElement('button');
+    toggleBtn.type = 'button';
+    toggleBtn.textContent = job.enabled !== false ? 'Disable' : 'Enable';
+    toggleBtn.className = job.enabled !== false ? 'danger' : 'primary';
+    toggleBtn.dataset.action = 'toggle-cron';
+    toggleBtn.dataset.jobId = job.id;
+    toggleBtn.dataset.nextEnabled = job.enabled !== false ? 'false' : 'true';
+
+    const runBtn = document.createElement('button');
+    runBtn.type = 'button';
+    runBtn.textContent = 'Run Now';
+    runBtn.dataset.action = 'run-cron';
+    runBtn.dataset.jobId = job.id;
+
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'danger';
+    delBtn.textContent = 'Delete';
+    delBtn.dataset.action = 'delete-cron';
+    delBtn.dataset.jobId = job.id;
+
+    actions.appendChild(toggleBtn);
+    actions.appendChild(runBtn);
+    actions.appendChild(delBtn);
+
+    card.appendChild(header);
+    card.appendChild(body);
+    card.appendChild(stats);
+    card.appendChild(actions);
+
+    dom.cronList.appendChild(card);
+  });
+}
+
+async function handleToggleCronJob(jobId, enabled) {
+  try {
+    const result = await window.electron.cron.update({ id: jobId, patch: { enabled } });
+    if (!result?.ok) throw new Error(result?.error || 'Failed to update job');
+    await loadCronJobs();
+  } catch (err) {
+    if (dom.cronStatus) {
+      dom.cronStatus.textContent = `Error: ${err.message}`;
+      dom.cronStatus.classList.add('error');
+    }
+  }
+}
+
+async function handleRunCronJob(jobId) {
+  try {
+    if (dom.cronStatus) dom.cronStatus.textContent = `Running job ${jobId}...`;
+    const result = await window.electron.cron.run({ id: jobId });
+    if (!result?.ok) throw new Error(result?.result?.error || result?.error || 'Job failed');
+    await loadCronJobs();
+    if (dom.cronStatus) {
+      dom.cronStatus.textContent = `Job ${jobId} ran successfully.`;
+      dom.cronStatus.classList.remove('error');
+    }
+  } catch (err) {
+    if (dom.cronStatus) {
+      dom.cronStatus.textContent = `Run Error: ${err.message}`;
+      dom.cronStatus.classList.add('error');
+    }
+  }
+}
+
+async function handleDeleteCronJob(jobId) {
+  if (!confirm(`Delete cron job ${jobId}?`)) return;
+  try {
+    const result = await window.electron.cron.remove({ id: jobId });
+    if (!result?.ok) throw new Error(result?.error || 'Failed to delete job');
+    await loadCronJobs();
+  } catch (err) {
+    if (dom.cronStatus) {
+      dom.cronStatus.textContent = `Delete Error: ${err.message}`;
+      dom.cronStatus.classList.add('error');
+    }
+  }
+}
+
+async function handleAddCronJob() {
+  if (!dom.cronAddBtn) return;
+  dom.cronAddBtn.disabled = true;
+
+  try {
+    const message = dom.cronAddMessageInput?.value?.trim();
+    const sessionTarget = dom.cronAddTargetInput?.value?.trim();
+    const kind = dom.cronAddKindInput?.value;
+    const value = dom.cronAddValueInput?.value?.trim();
+
+    if (!message || !value) {
+      throw new Error('Message and schedule value are required.');
+    }
+
+    const schedule = { kind };
+    if (kind === 'every') {
+      const ms = parseInt(value, 10);
+      if (isNaN(ms) || ms < 1000) throw new Error('Interval must be a number >= 1000 (ms).');
+      schedule.everyMs = ms;
+    } else if (kind === 'cron') {
+      schedule.expr = value;
+    } else if (kind === 'at') {
+      schedule.at = value;
+    }
+
+    const payload = {
+      schedule,
+      payload: {
+        sessionTarget: sessionTarget || undefined,
+        message
+      }
+    };
+
+    const result = await window.electron.cron.add(payload);
+    if (!result?.ok) throw new Error(result?.error || 'Failed to add job.');
+
+    if (dom.cronAddMessageInput) dom.cronAddMessageInput.value = '';
+    if (dom.cronAddTargetInput) dom.cronAddTargetInput.value = '';
+    if (dom.cronAddValueInput) dom.cronAddValueInput.value = '';
+
+    if (dom.cronAddStatus) {
+      dom.cronAddStatus.textContent = 'Job added successfully.';
+      dom.cronAddStatus.classList.remove('error');
+    }
+
+    await loadCronJobs();
+  } catch (err) {
+    if (dom.cronAddStatus) {
+      dom.cronAddStatus.textContent = `Error: ${err.message}`;
+      dom.cronAddStatus.classList.add('error');
+    }
+  } finally {
+    dom.cronAddBtn.disabled = false;
+  }
+}
+
 async function loadSettings() {
   try {
     appState.settings = unwrapIpcResult(await window.electron.settings.load(), 'Unable to load settings.');
@@ -1552,6 +1789,7 @@ async function loadSettings() {
     }
     renderSettings();
     await loadMemoryEntries();
+    await loadCronJobs();
   } catch (error) {
     setProviderListFallback(`Unable to load provider settings: ${error.message || 'Unknown error'}`);
   }
@@ -2595,6 +2833,32 @@ if (dom.memoryQueryInput) {
 if (dom.memoryTierFilterInput) {
   dom.memoryTierFilterInput.addEventListener('change', () => {
     loadMemoryEntries();
+  });
+}
+
+if (dom.cronRefreshBtn) {
+  dom.cronRefreshBtn.addEventListener('click', () => loadCronJobs());
+}
+
+if (dom.cronAddBtn) {
+  dom.cronAddBtn.addEventListener('click', () => handleAddCronJob());
+}
+
+if (dom.cronList) {
+  dom.cronList.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-action]');
+    if (!btn) return;
+
+    const action = btn.dataset.action;
+    const jobId = btn.dataset.jobId;
+
+    if (action === 'toggle-cron') {
+      handleToggleCronJob(jobId, btn.dataset.nextEnabled === 'true');
+    } else if (action === 'run-cron') {
+      handleRunCronJob(jobId);
+    } else if (action === 'delete-cron') {
+      handleDeleteCronJob(jobId);
+    }
   });
 }
 

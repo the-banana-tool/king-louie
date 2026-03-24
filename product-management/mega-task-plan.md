@@ -2386,7 +2386,9 @@ describe('ChannelRegistry', () => {
 
 ---
 
-## Task 18: Cron / Scheduling System
+## Task 18: Cron / Scheduling System ✅ COMPLETED
+
+> **Completed:** Created `CronStore` for JSON file persistence (`{userData}/cron/jobs.json`) and `CronScheduler` supporting `at`, `every`, and `cron` intervals using `cron-parser`. Built `CronExecutor` to run agents in isolated sessions and optionally output to channels. Created `CronTool` and registered it for agent access. Handlers exposed via IPC and settings UI added in `renderer.js`. Test coverage included and passing in `tests/cron-store.test.js` and `tests/cron-scheduler.test.js`.
 
 **Source:** openclaw.md §4.1, §4.2, §4.3
 **Dependencies:** Task 17 (channel registry for delivery)

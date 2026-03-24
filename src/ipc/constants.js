@@ -57,6 +57,13 @@ module.exports = {
   SESSIONS_LIST: 'sessions:list',
   SESSIONS_HISTORY: 'sessions:history',
 
+  CRON_LIST: 'cron:list',
+  CRON_ADD: 'cron:add',
+  CRON_UPDATE: 'cron:update',
+  CRON_REMOVE: 'cron:remove',
+  CRON_RUN: 'cron:run',
+  CRON_STATUS: 'cron:status',
+
   SKILL_LIST: 'skill:list',
   SKILL_CUSTOMIZE: 'skill:customize',
   SKILL_EXECUTE: 'skill:execute',

@@ -5,7 +5,7 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node --test",
+    "test": "node --test tests/*.test.js",
     "test:watch": "node --test --watch"
   },
   "keywords": [
@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@mozilla/readability": "^0.6.0",
+    "cron-parser": "^5.5.0",
     "dompurify": "^3.3.3",
     "electron-store": "^11.0.2",
     "fast-glob": "^3.3.3",
