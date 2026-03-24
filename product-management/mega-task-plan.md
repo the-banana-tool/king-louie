@@ -2388,6 +2388,7 @@ describe('ChannelRegistry', () => {
 
 ## Task 18: Cron / Scheduling System
 
+
 **Source:** openclaw.md §4.1, §4.2, §4.3
 **Dependencies:** Task 17 (channel registry for delivery)
 **Files to create:** `src/cron/cron-scheduler.js`, `src/cron/cron-store.js`, `src/cron/cron-executor.js`, `src/tools/builtin/cron-tool.js`
@@ -2396,13 +2397,13 @@ describe('ChannelRegistry', () => {
 
 ### Instructions
 
-**Step 1:** Create `src/cron/cron-store.js` — file-based persistence for cron jobs:
+**Step 1:** ✅ COMPLETED Create `src/cron/cron-store.js` — file-based persistence for cron jobs:
 - Storage file: `{userData}/cron/jobs.json`
 - Atomic writes (write to temp file, rename)
 - CRUD methods: `list()`, `get(id)`, `add(job)`, `update(id, patch)`, `remove(id)`
 - Load on startup
 
-**Step 2:** Create `src/cron/cron-executor.js`:
+**Step 2:** ✅ COMPLETED Create `src/cron/cron-executor.js`:
 - Accepts `agentExecutor`, `sessionManager`, `gateway` as dependencies
 - `execute(job)` method:
   1. Creates or reuses a session based on `job.payload.sessionTarget`
@@ -2411,7 +2412,7 @@ describe('ChannelRegistry', () => {
   4. Delivers to configured channel if `job.delivery` specified
   5. Updates `job.state` with last run info
 
-**Step 3:** Create `src/cron/cron-scheduler.js`:
+**Step 3:** ✅ COMPLETED Create `src/cron/cron-scheduler.js`:
 - Runs a tick loop every 30 seconds (configurable)
 - On each tick: check all enabled jobs, execute any that are due
 - Calculate next run time from schedule (`at`, `every`, `cron` kinds)
