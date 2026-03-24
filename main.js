@@ -107,6 +107,10 @@ const DEFAULT_SETTINGS = {
   hooks: {
     enabled: true,
     hookStates: {}
+  },
+  webSearch: {
+    brave: { apiKey: '' },
+    tavily: { apiKey: '' }
   }
 };
 
@@ -149,6 +153,18 @@ const mergeSettings = (settings = {}) => {
       hookStates: {
         ...(DEFAULT_SETTINGS.hooks?.hookStates || {}),
         ...(source.hooks?.hookStates || {})
+      }
+    },
+    webSearch: {
+      ...(DEFAULT_SETTINGS.webSearch || {}),
+      ...(source.webSearch || {}),
+      brave: {
+        ...(DEFAULT_SETTINGS.webSearch?.brave || {}),
+        ...(source.webSearch?.brave || {})
+      },
+      tavily: {
+        ...(DEFAULT_SETTINGS.webSearch?.tavily || {}),
+        ...(source.webSearch?.tavily || {})
       }
     }
   };
