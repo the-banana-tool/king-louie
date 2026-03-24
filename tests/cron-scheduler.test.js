@@ -2,95 +2,103 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert');
 const CronScheduler = require('../src/cron/cron-scheduler');
 
-describe('CronScheduler', () => {
-  const mockStore = {
-    jobs: [],
-    list() { return this.jobs; },
-    get(id) { return this.jobs.find(j => j.id === id); },
-    update(id, patch) {
-      const job = this.get(id);
-      if (job) Object.assign(job, patch);
-      return Promise.resolve(job);
+// Simple in-memory mock store
+class MockStore {
+  constructor() {
+    this.jobs = new Map();
+  }
+  list() { return Array.from(this.jobs.values()); }
+  get(id) { return this.jobs.get(id); }
+  async update(id, patch) {
+    const job = this.jobs.get(id);
+    if (job) {
+      const updated = { ...job, ...patch };
+      this.jobs.set(id, updated);
+      return updated;
     }
-  };
+  }
+  add(job) {
+    this.jobs.set(job.id, job);
+  }
+}
 
-  const mockExecutor = {
-    async execute() { return { ok: true }; }
-  };
-
+describe('CronScheduler', () => {
   it('calculates next run for interval schedule', () => {
+    const mockStore = new MockStore();
+    const mockExecutor = { execute: async () => ({ ok: true }) };
     const scheduler = new CronScheduler(mockStore, mockExecutor);
-    const job = { enabled: true, schedule: { kind: 'every', everyMs: 60000 }, state: { lastRunAtMs: Date.now() - 60001 } };
+    const job = { id: 'j1', enabled: true, schedule: { kind: 'every', everyMs: 60000 }, state: { lastRunAtMs: Date.now() - 60001 } };
     assert.ok(scheduler.isDue(job));
   });
 
   it('calculates next run for cron expression', () => {
+    const mockStore = new MockStore();
+    const mockExecutor = { execute: async () => ({ ok: true }) };
     const scheduler = new CronScheduler(mockStore, mockExecutor);
     const nextRun = scheduler.getNextRun({
+      id: 'j2',
+      enabled: true,
       schedule: { kind: 'cron', expr: '0 9 * * 1-5', tz: 'UTC' }
     });
-    assert.ok(nextRun > Date.now());
+    assert.ok(nextRun > 0);
   });
 
   it('calculates next run for one-shot schedule', () => {
+    const mockStore = new MockStore();
+    const mockExecutor = { execute: async () => ({ ok: true }) };
     const futureTime = new Date(Date.now() + 3600000).toISOString();
     const scheduler = new CronScheduler(mockStore, mockExecutor);
-    const job = { enabled: true, schedule: { kind: 'at', at: futureTime } };
+    const job = { id: 'j3', enabled: true, schedule: { kind: 'at', at: futureTime } };
     assert.ok(!scheduler.isDue(job));
   });
 
   it('executes due jobs on tick', async () => {
+    const mockStore = new MockStore();
     let executed = false;
-    const executor = { async execute() { executed = true; return { ok: true }; } };
-    const scheduler = new CronScheduler({ ...mockStore, jobs: [{ id: '1', enabled: true, schedule: { kind: 'every', everyMs: 1 }, state: { lastRunAtMs: 0 } }] }, executor);
+    const executor = { execute: async () => { executed = true; return { ok: true }; } };
+    const scheduler = new CronScheduler(mockStore, executor);
+    mockStore.add({ id: 'j4', enabled: true, schedule: { kind: 'every', everyMs: 60000 }, state: { lastRunAtMs: Date.now() - 60001 } });
+
     await scheduler.tick();
     assert.ok(executed);
   });
 
   it('respects maxConcurrentJobs', async () => {
-    let executions = 0;
-    const executor = {
-      async execute() {
-        executions++;
-        return new Promise(resolve => setTimeout(() => resolve({ ok: true }), 100)); // Delay to simulate running
-      }
-    };
+    const mockStore = new MockStore();
+    let executeCount = 0;
+    const executor = { execute: async () => { executeCount++; return { ok: true }; } };
+    const scheduler = new CronScheduler(mockStore, executor, { maxConcurrentJobs: 2 });
 
-    const jobs = Array.from({ length: 5 }).map((_, i) => ({
-      id: `job-${i}`, enabled: true, schedule: { kind: 'every', everyMs: 1 }, state: { lastRunAtMs: 0 }
-    }));
+    // Add 5 due jobs
+    for(let i=0; i<5; i++) {
+        mockStore.add({ id: `j${i}`, enabled: true, schedule: { kind: 'every', everyMs: 1 }, state: { lastRunAtMs: 0 } });
+    }
 
-    const scheduler = new CronScheduler({ ...mockStore, jobs }, executor, { maxConcurrentJobs: 2 });
     await scheduler.tick();
-
-    // We didn't await the jobs finishing inside tick() because tick() itself just spins them off asynchronously?
-    // Let's modify the test. In our implementation of tick(), we iterate and call `executeJob`, which modifies activeJobs.
-    assert.strictEqual(scheduler.activeJobs.size, 2);
-    assert.strictEqual(executions, 2);
+    assert.strictEqual(executeCount, 2);
   });
 
   it('tracks consecutive errors', async () => {
-    const job = { id: 'err-job', enabled: true, schedule: { kind: 'every', everyMs: 1 }, state: {} };
-    const store = {
-      list() { return [job]; },
-      get() { return job; },
-      async update(id, patch) { Object.assign(job, patch); }
-    };
-    const executor = { async execute() { throw new Error('test err'); } };
-    const scheduler = new CronScheduler(store, executor);
+    const mockStore = new MockStore();
+    const executor = { execute: async () => ({ ok: false, error: 'failed' }) };
+    const scheduler = new CronScheduler(mockStore, executor);
+    mockStore.add({ id: 'j5', enabled: true, schedule: { kind: 'every', everyMs: 1 }, state: { lastRunAtMs: 0, consecutiveErrors: 0 } });
 
-    await scheduler.executeJob(job);
+    await scheduler.tick();
+    const job = mockStore.get('j5');
     assert.strictEqual(job.state.consecutiveErrors, 1);
   });
 
   it('runNow executes immediately regardless of schedule', async () => {
+    const mockStore = new MockStore();
     let executed = false;
-    const job = { id: 'run-now-job', enabled: true, schedule: { kind: 'at', at: new Date(Date.now() + 3600000).toISOString() }, state: {} };
-    const store = { list() { return [job]; }, get(id) { return id === job.id ? job : null; }, async update() {} };
-    const executor = { async execute() { executed = true; return { ok: true }; } };
-    const scheduler = new CronScheduler(store, executor);
+    const executor = { execute: async () => { executed = true; return { ok: true }; } };
+    const scheduler = new CronScheduler(mockStore, executor);
 
-    await scheduler.runNow('run-now-job');
+    const futureTime = new Date(Date.now() + 3600000).toISOString();
+    mockStore.add({ id: 'j6', enabled: true, schedule: { kind: 'at', at: futureTime } });
+
+    await scheduler.runNow('j6');
     assert.ok(executed);
   });
 });

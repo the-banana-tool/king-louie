@@ -6,15 +6,15 @@ class CronScheduler {
     this.executor = executor;
     this.tickIntervalMs = options.tickIntervalMs || 30000;
     this.maxConcurrentJobs = options.maxConcurrentJobs || 5;
-    this.jobTimeoutMs = options.jobTimeoutMs || 300000;
 
     this.timer = null;
-    this.activeJobs = new Set();
+    this.runningJobs = new Set();
   }
 
   start() {
     if (this.timer) return;
     this.timer = setInterval(() => this.tick(), this.tickIntervalMs);
+    setTimeout(() => this.tick(), 100);
   }
 
   stop() {
@@ -25,43 +25,31 @@ class CronScheduler {
   }
 
   getNextRun(job) {
-    if (!job.schedule) return null;
+    if (!job.schedule || !job.enabled) return null;
+    const { kind, at, everyMs, expr, tz } = job.schedule;
 
-    const { kind } = job.schedule;
-    const lastRun = job.state?.lastRunAtMs || 0;
-    const now = Date.now();
+    if (kind === 'at') {
+      const runAt = new Date(at).getTime();
+      return runAt > Date.now() ? runAt : null;
+    }
 
     if (kind === 'every') {
-      const everyMs = job.schedule.everyMs;
-      if (!everyMs) return null;
-      if (lastRun === 0) return now; // Run immediately if never run
-      return lastRun + everyMs;
+      const lastRun = job.state?.lastRunAtMs || 0;
+      return lastRun + (everyMs || 60000);
     }
 
     if (kind === 'cron') {
-      const expr = job.schedule.expr;
-      if (!expr) return null;
       try {
-        const options = {};
-        if (job.schedule.tz) options.tz = job.schedule.tz;
-
-        // Ensure we calculate from max(lastRun, now) to avoid immediate re-runs
-        const fromDate = lastRun ? new Date(lastRun) : new Date(job.createdAt || now);
-        options.currentDate = fromDate;
-
-        const interval = (cronParser.parseExpression || cronParser.parse || (cronParser.default && cronParser.default.parse))(expr, options);
+        const lastRun = job.state?.lastRunAtMs || 0;
+        const options = { tz: tz || 'UTC' };
+        if (lastRun > 0) {
+          options.currentDate = new Date(lastRun);
+        }
+        const interval = cronParser.CronExpressionParser.parse(expr, options);
         return interval.next().getTime();
       } catch (err) {
-        console.error(`Invalid cron expression for job ${job.id}: ${expr}`, err);
         return null;
       }
-    }
-
-    if (kind === 'at') {
-      if (lastRun > 0) return null; // Already ran
-      const atTime = new Date(job.schedule.at).getTime();
-      if (isNaN(atTime)) return null;
-      return atTime;
     }
 
     return null;
@@ -69,77 +57,93 @@ class CronScheduler {
 
   isDue(job) {
     if (!job.enabled) return false;
-    if (this.activeJobs.has(job.id)) return false; // Already running
+
+    if (job.schedule?.kind === 'at') {
+        const runAt = new Date(job.schedule.at).getTime();
+        return runAt <= Date.now() && (!job.state?.lastRunAtMs || job.state.lastRunAtMs < runAt);
+    }
 
     const nextRun = this.getNextRun(job);
-    if (nextRun === null) return false;
-
-    return Date.now() >= nextRun;
+    return nextRun !== null && nextRun <= Date.now();
   }
 
   async tick() {
-    const allJobs = this.store.list();
-    const dueJobs = allJobs.filter(job => this.isDue(job));
+    const jobs = this.store.list();
+    const dueJobs = jobs.filter(job => this.isDue(job) && !this.runningJobs.has(job.id));
 
-    // Sort by next run time (optional, but good practice)
-    dueJobs.sort((a, b) => {
-        const nextA = this.getNextRun(a) || 0;
-        const nextB = this.getNextRun(b) || 0;
-        return nextA - nextB;
-    });
+    if (dueJobs.length === 0) return;
 
-    const jobsToRun = dueJobs.slice(0, Math.max(0, this.maxConcurrentJobs - this.activeJobs.size));
+    const jobsToRun = dueJobs.slice(0, Math.max(0, this.maxConcurrentJobs - this.runningJobs.size));
 
     for (const job of jobsToRun) {
-      this.executeJob(job);
+      this.runNow(job.id).catch(err => console.error(`[cron-scheduler] tick run failed for ${job.id}:`, err));
     }
-  }
-
-  async executeJob(job) {
-    if (this.activeJobs.has(job.id)) return;
-    this.activeJobs.add(job.id);
-
-    try {
-      const executePromise = this.executor.execute(job);
-      const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error('Job execution timed out')), this.jobTimeoutMs);
-      });
-
-      await Promise.race([executePromise, timeoutPromise]);
-    } catch (err) {
-      job.state = job.state || {};
-      job.state.consecutiveErrors = (job.state.consecutiveErrors || 0) + 1;
-      console.error(`Error executing cron job ${job.id}:`, err);
-    } finally {
-      this.activeJobs.delete(job.id);
-      try {
-        await this.store.update(job.id, { state: job.state });
-      } catch (updateErr) {
-        console.error(`Failed to update job state for ${job.id}:`, updateErr);
-      }
-    }
-  }
-
-  async addJob(jobData) {
-    return await this.store.add(jobData);
-  }
-
-  async updateJob(id, patch) {
-    return await this.store.update(id, patch);
-  }
-
-  async removeJob(id) {
-    return await this.store.remove(id);
   }
 
   async runNow(id) {
     const job = this.store.get(id);
-    if (!job) throw new Error(`Job ${id} not found`);
-    return await this.executeJob(job);
+    if (!job) {
+      return { ok: false, error: `Job not found: ${id}` };
+    }
+
+    if (this.runningJobs.has(id)) {
+      return { ok: false, error: `Job ${id} is already running` };
+    }
+
+    this.runningJobs.add(id);
+    let result = { ok: false, error: 'Unknown error' };
+
+    try {
+      if (this.executor && typeof this.executor.execute === 'function') {
+         result = await this.executor.execute(job);
+      } else {
+         result = { ok: false, error: 'Executor not configured' };
+      }
+    } catch (err) {
+      result = { ok: false, error: err.message };
+    } finally {
+      this.runningJobs.delete(id);
+    }
+
+    const currentState = job.state || {};
+    const newState = {
+        lastRunAtMs: Date.now(),
+        lastResult: result,
+        consecutiveErrors: result.ok ? 0 : (currentState.consecutiveErrors || 0) + 1
+    };
+
+    const patch = { state: newState };
+    if (job.schedule?.kind === 'at') {
+        patch.enabled = false;
+    } else if (newState.consecutiveErrors >= 5) {
+        patch.enabled = false;
+        console.warn(`[cron-scheduler] disabled job ${id} after 5 consecutive errors.`);
+    }
+
+    await this.store.update(id, patch);
+    return result;
+  }
+
+  async addJob(job) {
+    return this.store.add(job);
+  }
+
+  async updateJob(id, patch) {
+    return this.store.update(id, patch);
+  }
+
+  async removeJob(id) {
+    return this.store.remove(id);
   }
 
   listJobs() {
-    return this.store.list();
+    return this.store.list().map(job => {
+      const nextRun = this.getNextRun(job);
+      return {
+         ...job,
+         nextRunAt: nextRun ? new Date(nextRun).toISOString() : null
+      };
+    });
   }
 }
 

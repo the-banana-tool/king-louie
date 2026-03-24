@@ -104,7 +104,7 @@ run('supports tier aging hot/warm/cold', () => {
   }
 });
 
-run('recalls relevant memories and updates lastAccessed', () => {
+run('recalls relevant memories and updates lastAccessed', async () => {
   const temp = createTempStorageFile();
 
   try {
@@ -118,7 +118,7 @@ run('recalls relevant memories and updates lastAccessed', () => {
     manager.capture('context', 'Unrelated content about UI colors and spacing.');
 
     const before = store.getById(target.id);
-    const recalled = manager.recall('memory behavior test', { limit: 3 });
+    const recalled = await manager.recall('memory behavior test', { limit: 3 });
     assert.ok(recalled.length >= 1);
     assert.strictEqual(recalled[0].id, target.id);
 

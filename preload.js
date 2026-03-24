@@ -154,7 +154,10 @@ const throttleInvoke = (key, fn, delayMs = 1000) => {
     return Promise.resolve({ ok: false, error: 'Too many requests' });
   }
   lastCallByKey.set(key, now);
-  return fn();
+  if (typeof fn === 'function') {
+    return fn();
+  }
+  return Promise.resolve({ ok: false, error: 'fn is not a function' });
 };
 
 const registeredListeners = new Map();
@@ -333,6 +336,30 @@ contextBridge.exposeInMainWorld(
     usage: {
       getSession: () => ipcRenderer.invoke('usage:getSession'),
       getDaily: (payload) => ipcRenderer.invoke('usage:getDaily', payload)
+    },
+    cron: {
+      list: () => ipcRenderer.invoke('cron:list'),
+      add: (payload) => {
+        validateObject(payload, 'payload');
+        return ipcRenderer.invoke('cron:add', payload);
+      },
+      update: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.id, 'id');
+        validateObject(payload.patch, 'patch');
+        return ipcRenderer.invoke('cron:update', payload);
+      },
+      remove: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.id, 'id');
+        return ipcRenderer.invoke('cron:remove', payload);
+      },
+      run: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.id, 'id');
+        return ipcRenderer.invoke('cron:run', payload);
+      },
+      status: () => ipcRenderer.invoke('cron:status')
     },
     skill: {
       list: () => ipcRenderer.invoke('skill:list'),

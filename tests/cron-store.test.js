@@ -13,7 +13,9 @@ describe('CronStore', () => {
     store = new CronStore(tempFile);
   });
 
-  afterEach(() => { try { fs.unlinkSync(tempFile); } catch {} });
+  afterEach(() => {
+    try { fs.unlinkSync(tempFile); } catch {}
+  });
 
   it('loads from empty/missing file', async () => {
     await store.load();

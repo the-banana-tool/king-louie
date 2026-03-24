@@ -295,6 +295,43 @@
           <div class="provider-list" id="memory-list"></div>
         </section>
 
+        <section class="template-variables-card">
+          <h3>Cron Scheduler</h3>
+          <p>Manage scheduled agent tasks (Cron, Interval, or Once-off).</p>
+
+          <div class="template-variables-actions" style="margin-top: 10px;">
+            <button id="cron-refresh-btn" type="button">Refresh Jobs</button>
+            <span id="cron-status" class="provider-message">Scheduler status unknown.</span>
+          </div>
+
+          <div class="provider-list" id="cron-list"></div>
+
+          <div class="cron-add-panel">
+            <h4>Add New Job</h4>
+            <div class="template-variables-grid">
+              <label for="cron-add-message-input">Agent Message (Prompt)</label>
+              <textarea id="cron-add-message-input" class="provider-input" rows="2" placeholder="e.g., Check weather..."></textarea>
+
+              <label for="cron-add-target-input">Session Target</label>
+              <input id="cron-add-target-input" class="provider-input" type="text" placeholder="e.g., main">
+
+              <label for="cron-add-kind-input">Schedule Kind</label>
+              <select id="cron-add-kind-input" class="provider-input">
+                <option value="every">Interval (Every X ms)</option>
+                <option value="cron">Cron Expression</option>
+                <option value="at">Specific Time (At)</option>
+              </select>
+
+              <label for="cron-add-value-input">Schedule Value</label>
+              <input id="cron-add-value-input" class="provider-input" type="text" placeholder="e.g., 60000 or * * * * *">
+            </div>
+            <div class="template-variables-actions" style="margin-top: 10px;">
+              <button id="cron-add-btn" type="button" class="primary">Add Job</button>
+              <span id="cron-add-status" class="provider-message"></span>
+            </div>
+          </div>
+        </section>
+
         <div class="provider-list" id="provider-list"></div>
       </div>
     </div>
