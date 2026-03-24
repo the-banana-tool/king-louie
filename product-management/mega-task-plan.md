@@ -3568,21 +3568,21 @@ describe('Onboarding', () => {
 
 ---
 
-## Task 29: Diagnostics (Doctor Command)
+## Task 29: Diagnostics (Fixit Command)
 
 **Source:** openclaw.md §15
 **Dependencies:** All previous features (checks their health)
-**Files to create:** `src/diagnostics/doctor.js`
+**Files to create:** `src/diagnostics/fixit.js`
 **Files to modify:** `main.js` (IPC handler), `renderer.js` (command + settings button)
 
 ### Instructions
 
 This should be the **last task** as it checks all other subsystems.
 
-**Step 1:** Create `src/diagnostics/doctor.js`:
+**Step 1:** Create `src/diagnostics/fixit.js`:
 
 ```javascript
-class Doctor {
+class Fixit {
   constructor(context) {
     // context: { providerFactory, channelRegistry, memoryManager, hookRegistry,
     //            skillRegistry, gateway, cronScheduler, browserService, sandboxExecutor, store }
@@ -3622,7 +3622,7 @@ class Doctor {
     for (const r of results) {
       const icon = { PASS: '[PASS]', WARN: '[WARN]', FAIL: '[FAIL]', SKIP: '[SKIP]', INFO: '[INFO]' }[r.status] || '[????]';
       lines.push(`${icon} ${r.name} — ${r.message}`);
-      if (r.fix) lines.push(`      Fix: ${r.fix}`);
+      if (r.fix) lines.push(`      Fixit: ${r.fix}`);
     }
     return lines.join('\n');
   }
@@ -3631,7 +3631,7 @@ class Doctor {
 
 **Step 2:** Implement each check function. Each returns `{ status: 'PASS'|'WARN'|'FAIL'|'SKIP', message: string, fix?: string }`.
 
-**Step 3:** Add `/doctor` command handling in renderer.js.
+**Step 3:** Add `/fixit` command handling in renderer.js.
 
 **Step 4:** Add IPC handler: `diagnostics:run`.
 
@@ -3639,13 +3639,13 @@ class Doctor {
 
 ### Test Cases
 
-**T29.1 — Create `tests/doctor.test.js`:**
+**T29.1 — Create `tests/fixit.test.js`:**
 
 ```javascript
-describe('Doctor', () => {
+describe('Fixit', () => {
   it('runs all checks and returns results', async () => {
-    const doctor = new Doctor(mockContext);
-    const results = await doctor.runAll();
+    const fixit = new Fixit(mockContext);
+    const results = await fixit.runAll();
     assert.ok(Array.isArray(results));
     assert.ok(results.length > 0);
     results.forEach(r => {
@@ -3656,27 +3656,27 @@ describe('Doctor', () => {
   });
 
   it('handles check failures gracefully', async () => {
-    const doctor = new Doctor({});  // Empty context, checks should handle missing deps
-    const results = await doctor.runAll();
+    const fixit = new Fixit({});  // Empty context, checks should handle missing deps
+    const results = await fixit.runAll();
     // Should not throw, should return FAIL/SKIP status for each
     assert.ok(results.every(r => r.status));
   });
 
   it('formats results as readable text', () => {
-    const doctor = new Doctor({});
-    const text = doctor.formatResults([
+    const fixit = new Fixit({});
+    const text = fixit.formatResults([
       { name: 'Test', status: 'PASS', message: 'OK' },
       { name: 'Broken', status: 'FAIL', message: 'Error', fix: 'Do this' }
     ]);
     assert.ok(text.includes('[PASS]'));
     assert.ok(text.includes('[FAIL]'));
-    assert.ok(text.includes('Fix:'));
+    assert.ok(text.includes('Fixit:'));
   });
 
   it('completes in under 10 seconds', async () => {
-    const doctor = new Doctor(mockContext);
+    const fixit = new Fixit(mockContext);
     const start = Date.now();
-    await doctor.runAll();
+    await fixit.runAll();
     assert.ok(Date.now() - start < 10000);
   });
 });
@@ -3684,13 +3684,13 @@ describe('Doctor', () => {
 
 **T29.2 — `npm test` passes.**
 
-**T29.3 — Manual test:** Run `/doctor` in the app, verify output shows status of all subsystems.
+**T29.3 — Manual test:** Run `/fixit` in the app, verify output shows status of all subsystems.
 
 ### Acceptance Criteria
 - All subsystems checked
 - Clear PASS/WARN/FAIL/SKIP indicators
 - Actionable fix suggestions for failures
-- Available via `/doctor` command and settings UI
+- Available via `/fixit` command and settings UI
 - Runs in under 10 seconds
 
 ---
@@ -3739,7 +3739,7 @@ Phase 6 — Advanced Features:
 
 Phase 7 — Polish:
   Task 28: Onboarding wizard
-  Task 29: Diagnostics (doctor command) — LAST
+  Task 29: Diagnostics (fixit command) — LAST
 ```
 
 Tasks within the same phase that share no dependencies can be executed in parallel. Tasks in later phases depend on earlier phases being complete.
