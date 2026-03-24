@@ -20,7 +20,9 @@ function registerChatHandlers(ipcMain, context = {}) {
     withNotificationTiming,
     buildRuntimeSystemPrompt,
     buildMemoryContextSection,
-    speakSummaryText
+    speakSummaryText,
+    getUsageTracker,
+    createUsageRecordFromMetrics
   } = context;
 
   const getMainWindow = () => (
@@ -191,7 +193,10 @@ function registerChatHandlers(ipcMain, context = {}) {
       await withNotificationTiming('Chat response', async () => {
         const canUseAgentMode = agentMode && toolDefinitions.length > 0 && typeof provider.sendMessageWithTools === 'function';
         if (canUseAgentMode) {
-          const loop = new AgentLoop(provider, executor, { maxIterations: 10 });
+          const loop = new AgentLoop(provider, executor, {
+            maxIterations: 10,
+            usageTracker: typeof getUsageTracker === 'function' ? getUsageTracker() : null
+          });
           const result = await loop.run(chat.messages, toolDefinitions, options);
           fullResponse = result.content || '(No response)';
           llmSummary = {
@@ -219,6 +224,22 @@ function registerChatHandlers(ipcMain, context = {}) {
               { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
             )
           };
+
+          const usageTracker = typeof getUsageTracker === 'function' ? getUsageTracker() : null;
+          if (usageTracker && singleCall && typeof usageTracker.record === 'function') {
+            usageTracker.record(
+              typeof createUsageRecordFromMetrics === 'function'
+                ? createUsageRecordFromMetrics(singleCall, 0)
+                : {
+                    provider: singleCall.provider,
+                    model: singleCall.model,
+                    inputTokens: singleCall.inputTokens,
+                    outputTokens: singleCall.outputTokens,
+                    totalTokens: singleCall.totalTokens,
+                    costUsd: singleCall.costUsd
+                  }
+            );
+          }
         }
       });
 

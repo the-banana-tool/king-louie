@@ -6,9 +6,9 @@
 >
 > **What's already done:** LLM integration (OpenAI, Anthropic), 6 built-in tools (Bash, Read, Edit, Write, Message, Sessions), 3-agent orchestration, gateway/WebSocket, session management, task management, hook system, skill system with pinning, IPC extraction into `src/ipc/` modules with `wrapHandler`, XSS hardening, memory leak fixes, preload input validation + rate limiting, runtime cache.
 >
-> **Progress as of 2026-03-23:** 8 of 29 tasks completed (Tasks 1–8). Task 4 bug (missing factory registration) fixed. Task 17 partially done. 21 tasks not started. See status markers on each task heading below.
+> **Progress as of 2026-03-23:** 9 of 29 tasks completed (Tasks 1–9 and 16). Task 4 bug (missing factory registration) fixed. Task 17 partially done. 20 tasks not started. See status markers on each task heading below.
 >
-> **Next up (all unblocked):** Task 9 (inference router updates), Tasks 10–15 (new tools, independent of each other), Task 16 (usage tracking), Task 17 completion (channel registry).
+> **Next up (all unblocked):** Tasks 10–15 (new tools, independent of each other), Task 17 completion (channel registry).
 
 ---
 
@@ -2026,7 +2026,9 @@ describe('AskUser Tool', () => {
 
 ---
 
-## Task 16: Usage Tracking & Cost Display
+## Task 16: Usage Tracking & Cost Display ✅ COMPLETED
+
+> **Completed:** Added `src/tracking/pricing-tables.js` and `src/tracking/usage-tracker.js` with session + daily usage aggregation, provider breakdowns, and pricing-based cost estimation (with explicit `costUsd` fallback). Integrated usage capture into both tool-loop (`src/execution/agent-loop.js`) and streaming chat path (`src/ipc/chat-handlers.js`), wired tracker lifecycle in `main.js`, added usage IPC surface (`src/ipc/usage-handlers.js`, `src/ipc/constants.js`, `src/ipc/register.js`, `preload.js`), updated assistant message token/cost display in `renderer.js`, and added comprehensive coverage in `tests/usage-tracker.test.js`. Also wired test script inclusion in `package.json` and verified Task 16 tests pass via `node --test tests/usage-tracker.test.js`.
 
 **Source:** openclaw.md §13
 **Dependencies:** None

@@ -3,6 +3,10 @@ class AgentLoop {
     this.provider = provider;
     this.executor = executor;
     this.maxIterations = options.maxIterations || 10;
+    this.usageTracker = options.usageTracker || null;
+    this.onUsageRecorded = typeof options.onUsageRecorded === 'function'
+      ? options.onUsageRecorded
+      : null;
   }
 
   async run(messages, tools, options = {}) {
@@ -22,6 +26,25 @@ class AgentLoop {
 
       if (response?.llmMetrics) {
         llmCalls.push(response.llmMetrics);
+
+        if (this.usageTracker && typeof this.usageTracker.record === 'function') {
+          const usageEvent = this.usageTracker.record({
+            provider: response.llmMetrics.provider,
+            model: response.llmMetrics.model,
+            inputTokens: response.llmMetrics.inputTokens,
+            outputTokens: response.llmMetrics.outputTokens,
+            totalTokens: response.llmMetrics.totalTokens,
+            costUsd: response.llmMetrics.costUsd
+          });
+
+          if (this.onUsageRecorded) {
+            try {
+              this.onUsageRecorded(usageEvent);
+            } catch {
+              // Non-fatal callback failure should never break the agent loop.
+            }
+          }
+        }
       }
 
       if (response.type === 'text') {
