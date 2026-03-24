@@ -18,7 +18,8 @@ function registerAgentHandlers(ipcMain, context = {}) {
     buildRuntimeSystemPrompt,
     buildMemoryContextSection,
     formatUserContextSection,
-    formatProjectContextSection
+    formatProjectContextSection,
+    getUsageTracker
   } = context;
 
   ipcMain.handle(IPC.AGENT_LIST, wrapHandler(IPC.AGENT_LIST, async () => {
@@ -45,7 +46,9 @@ function registerAgentHandlers(ipcMain, context = {}) {
       event
     );
 
-    const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor);
+    const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor, {
+      usageTracker: typeof getUsageTracker === 'function' ? getUsageTracker() : null
+    });
     return withNotificationTiming(`Agent ${agent.id}`, async () => {
       const result = await agentExecutor.execute(agent, message, {
         tier: runtime.tier,
@@ -86,7 +89,9 @@ function registerAgentHandlers(ipcMain, context = {}) {
       .map((agentId) => getAgent(agentId))
       .filter(Boolean);
 
-    const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor);
+    const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor, {
+      usageTracker: typeof getUsageTracker === 'function' ? getUsageTracker() : null
+    });
     const orchestrator = new AgentOrchestrator(agentExecutor);
     return withNotificationTiming('Parallel agent run', async () => {
       const results = await orchestrator.executeParallel(agents, message, {
@@ -129,7 +134,9 @@ function registerAgentHandlers(ipcMain, context = {}) {
       .map((agentId) => getAgent(agentId))
       .filter(Boolean);
 
-    const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor);
+    const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor, {
+      usageTracker: typeof getUsageTracker === 'function' ? getUsageTracker() : null
+    });
     const orchestrator = new AgentOrchestrator(agentExecutor);
     return withNotificationTiming('Serial agent run', async () => {
       const results = await orchestrator.executeSerial(agents, message, {

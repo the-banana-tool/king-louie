@@ -25,6 +25,9 @@ module.exports = {
   MEMORY_DELETE: 'memory:delete',
   MEMORY_CLEAR: 'memory:clear',
 
+  USAGE_GET_SESSION: 'usage:getSession',
+  USAGE_GET_DAILY: 'usage:getDaily',
+
   SETTINGS_LOAD: 'settings:load',
   SETTINGS_SAVE_TEMPLATE_VARIABLES: 'settings:saveTemplateVariables',
   SETTINGS_SAVE_USER_PROFILE: 'settings:saveUserProfile',

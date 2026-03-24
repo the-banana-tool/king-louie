@@ -7,6 +7,7 @@ const { registerTaskHandlers } = require('./task-handlers');
 const { registerAgentHandlers } = require('./agent-handlers');
 const { registerGatewayHandlers } = require('./gateway-handlers');
 const { registerSkillHandlers } = require('./skill-handlers');
+const { registerUsageHandlers } = require('./usage-handlers');
 
 function registerHandlers(ipcMain, context = {}) {
   registerChatHandlers(ipcMain, context);
@@ -18,6 +19,7 @@ function registerHandlers(ipcMain, context = {}) {
   registerAgentHandlers(ipcMain, context);
   registerGatewayHandlers(ipcMain, context);
   registerSkillHandlers(ipcMain, context);
+  registerUsageHandlers(ipcMain, context);
 }
 
 module.exports = {

@@ -3,9 +3,13 @@ const path = require('path');
 const TemplateEngine = require('../templates/template-engine');
 
 class AgentExecutor {
-  constructor(provider, toolExecutor) {
+  constructor(provider, toolExecutor, options = {}) {
     this.provider = provider;
     this.toolExecutor = toolExecutor;
+    this.usageTracker = options.usageTracker || null;
+    this.onUsageRecorded = typeof options.onUsageRecorded === 'function'
+      ? options.onUsageRecorded
+      : null;
     this.templateEngine = new TemplateEngine({
       templatesDirectory: path.join(process.cwd(), 'templates')
     });
@@ -64,7 +68,9 @@ class AgentExecutor {
     const availableTools = candidateTools.filter((tool) => agent.canUseTool(tool.name));
 
     const loop = new AgentLoop(this.provider, this.toolExecutor, {
-      maxIterations: options.maxIterations || agent.maxIterations
+      maxIterations: options.maxIterations || agent.maxIterations,
+      usageTracker: this.usageTracker,
+      onUsageRecorded: this.onUsageRecorded
     });
 
     const combinedSystemPrompt = [this.resolveAgentSystemPrompt(agent, options, userMessage), options.systemPrompt]

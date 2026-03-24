@@ -323,6 +323,10 @@ contextBridge.exposeInMainWorld(
       },
       clear: () => ipcRenderer.invoke('memory:clear')
     },
+    usage: {
+      getSession: () => ipcRenderer.invoke('usage:getSession'),
+      getDaily: (payload) => ipcRenderer.invoke('usage:getDaily', payload)
+    },
     skill: {
       list: () => ipcRenderer.invoke('skill:list'),
       customize: (payload) => ipcRenderer.invoke('skill:customize', payload),

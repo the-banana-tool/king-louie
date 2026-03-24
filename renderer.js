@@ -488,6 +488,23 @@ function formatUsd(value = 0) {
   return `$${Number(value || 0).toFixed(4)}`;
 }
 
+function formatCompactUsd(value = 0) {
+  const normalized = Number(value || 0);
+  if (!Number.isFinite(normalized)) {
+    return '$0.0000';
+  }
+
+  if (normalized >= 0.01) {
+    return `$${normalized.toFixed(2)}`;
+  }
+
+  if (normalized >= 0.001) {
+    return `$${normalized.toFixed(3)}`;
+  }
+
+  return `$${normalized.toFixed(4)}`;
+}
+
 function formatTokenCount(value = 0) {
   return Number(value || 0).toLocaleString();
 }
@@ -2155,10 +2172,10 @@ function addMessage(sender, text, metadata = {}) {
 
     const callSpan = document.createElement('span');
     callSpan.className = 'message-metrics-call';
-    callSpan.textContent = `Call: in ${formatTokenCount(callTotals.inputTokens)} - out ${formatTokenCount(callTotals.outputTokens)} - total ${formatTokenCount(callTotals.totalTokens)} • ${formatUsd(callTotals.costUsd)}`;
+    callSpan.textContent = `${formatTokenCount(callTotals.totalTokens)} tokens · ${formatCompactUsd(callTotals.costUsd)}`;
 
     if (runningTotals) {
-      callSpan.textContent += ` Running: ${formatTokenCount(runningTotals.totalTokens)} tokens - ${formatUsd(runningTotals.costUsd)}`;
+      callSpan.textContent += ` · session ${formatTokenCount(runningTotals.totalTokens)} tokens · ${formatCompactUsd(runningTotals.costUsd)}`;
     }
   
     metricsDiv.appendChild(callSpan);

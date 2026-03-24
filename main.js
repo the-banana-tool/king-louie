@@ -31,6 +31,7 @@ const { loadProjectContext } = require('./src/telos/project-context');
 const HookRegistry = require('./src/hooks/hook-registry');
 const HookExecutor = require('./src/hooks/hook-executor');
 const { MemoryStore, MemoryManager } = require('./src/memory');
+const UsageTracker = require('./src/tracking/usage-tracker');
 const {
   NotificationRouter,
   DEFAULT_NOTIFICATION_SETTINGS,
@@ -55,6 +56,7 @@ let hookExecutor;
 let memoryStore;
 let memoryManager;
 let ttsEngine;
+let usageTracker;
 const TELEGRAM_TOKEN_STORE_KEY = '__telegram_bot_token';
 const ELEVENLABS_TOKEN_STORE_KEY = '__elevenlabs_api_key';
 
@@ -639,6 +641,16 @@ const sumLlmCalls = (calls = []) =>
     }),
     { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
   );
+
+const createUsageRecordFromMetrics = (metrics = {}, durationMs = 0) => ({
+  provider: metrics.provider,
+  model: metrics.model,
+  inputTokens: Number(metrics.inputTokens) || 0,
+  outputTokens: Number(metrics.outputTokens) || 0,
+  totalTokens: Number(metrics.totalTokens) || 0,
+  costUsd: Number.isFinite(Number(metrics.costUsd)) ? Number(metrics.costUsd) : null,
+  durationMs: Number(durationMs) || 0
+});
 
 const buildRuntimeSystemPrompt = (runtimeEnvironment = {}) => {
   const platform = runtimeEnvironment.platform || process.platform;
@@ -1507,6 +1519,7 @@ const initializeAgentInfrastructure = async () => {
     store: memoryStore,
     currentSessionId: `main-${Date.now()}`
   });
+  usageTracker = new UsageTracker(store);
   ttsEngine = new TTSEngine({
     getSettings: getVoiceSettings,
     getElevenLabsApiKey: getDecryptedElevenLabsToken,
@@ -1535,7 +1548,9 @@ const initializeAgentInfrastructure = async () => {
         null,
         options.approvalRequester || null
       );
-      const executor = new AgentExecutor(runtime.provider, runtime.toolExecutor);
+      const executor = new AgentExecutor(runtime.provider, runtime.toolExecutor, {
+        usageTracker
+      });
 
       return executor.execute(agent, message, {
         ...options,
@@ -1553,7 +1568,8 @@ const initializeAgentInfrastructure = async () => {
           buildMemoryContextSection(message),
           formatUserContextSection(),
           formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
-        ].join('\n\n')
+        ].join('\n\n'),
+        onUsageRecorded: options.onUsageRecorded
       });
     }
   };
@@ -1726,6 +1742,8 @@ registerHandlers(ipcMain, {
   speakSummaryText,
   getMainWindow: () => mainWindow,
   getTtsEngine: () => ttsEngine,
+  getUsageTracker: () => usageTracker,
+  createUsageRecordFromMetrics,
 
   // Tool
   pendingApprovalResolvers,
@@ -1838,6 +1856,11 @@ app.on('window-all-closed', function () {
     if (gatewayServer) {
       gatewayServer.stop().catch((err) => console.warn('[main] Gateway server stop failed:', err.message));
     }
+
+    if (usageTracker) {
+      usageTracker.reset();
+    }
+
     app.quit();
   }
 });
