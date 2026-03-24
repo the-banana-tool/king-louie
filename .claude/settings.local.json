@@ -17,7 +17,9 @@
       "Bash(claude --version)",
       "Bash(node:*)",
       "Bash(claude:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(npm install:*)",
+      "Bash(npm test:*)"
     ]
   }
 }

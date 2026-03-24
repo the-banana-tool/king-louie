@@ -5,15 +5,28 @@ const {
   formatStatus,
   formatApprovalRequest
 } = require('./telegram-adapter');
+const { ChannelPlugin } = require('./channel-plugin');
+const { shouldRespond } = require('./mention-gating');
 const { skillRegistry } = require('../skills');
 
-class TelegramBridge {
+class TelegramBridge extends ChannelPlugin {
   constructor(options = {}) {
+    super({
+      id: 'telegram',
+      label: 'Telegram',
+      capabilities: ['send', 'receive']
+    });
+
     this.token = options.token;
     this.gateway = options.gatewayServer;
     this.sessionManager = options.sessionManager;
+    this.allowlistManager = options.allowlistManager || null;
     this.getAgent = options.getAgent || (() => null);
     this.listAgents = options.listAgents || (() => []);
+    this.getChannelSettings =
+      typeof options.getChannelSettings === 'function'
+        ? options.getChannelSettings
+        : () => ({ requireMention: false });
     this.pinManager = options.pinManager || null;
     this.getNotificationSettings =
       typeof options.getNotificationSettings === 'function'
@@ -41,7 +54,11 @@ class TelegramBridge {
     this.apiBase = `https://api.telegram.org/bot${this.token}`;
     this.offset = 0;
     this.running = false;
+    this.connected = false;
+    this.botUsername = null;
+    this.botId = null;
     this.pollAbortController = null;
+    this.messageHandlers = new Set();
 
     this.chatState = new Map();
     this.pendingRuns = new Map();
@@ -51,10 +68,27 @@ class TelegramBridge {
     this.boundAgentResponse = this.handleAgentResponse.bind(this);
   }
 
-  async start() {
+  async initialize(gateway) {
+    if (gateway) {
+      this.gateway = gateway;
+    }
+
     if (this.running) return;
     if (!this.token) {
       throw new Error('Telegram bridge requires a bot token');
+    }
+    if (!this.gateway) {
+      throw new Error('Telegram bridge requires a gateway server');
+    }
+
+    try {
+      const me = await this.callTelegram('getMe', {});
+      this.botUsername = String(me?.username || '').trim() || null;
+      this.botId = me?.id != null ? String(me.id) : null;
+      this.connected = true;
+    } catch (error) {
+      this.connected = false;
+      throw error;
     }
 
     this.running = true;
@@ -64,10 +98,11 @@ class TelegramBridge {
     });
   }
 
-  async stop() {
+  async shutdown() {
     if (!this.running) return;
 
     this.running = false;
+    this.connected = false;
     this.gateway.off('agent:response', this.boundAgentResponse);
 
     if (this.pollAbortController) {
@@ -80,6 +115,69 @@ class TelegramBridge {
       clearTimeout(approval.timer);
     }
     this.pendingApprovals.clear();
+  }
+
+  async start() {
+    return this.initialize(this.gateway);
+  }
+
+  async stop() {
+    return this.shutdown();
+  }
+
+  normalizeTarget(rawTarget = '') {
+    if (rawTarget && typeof rawTarget === 'object') {
+      return String(rawTarget.chatId || rawTarget.id || '').trim();
+    }
+    return String(rawTarget || '').trim();
+  }
+
+  async send(target, message, options = {}) {
+    const chatId = this.normalizeTarget(target);
+    if (!chatId) {
+      throw new Error('Invalid Telegram target: expected chat id');
+    }
+    return this.sendMessage(chatId, message, options);
+  }
+
+  async onMessage(handler) {
+    if (typeof handler === 'function') {
+      this.messageHandlers.add(handler);
+    }
+  }
+
+  getStatus() {
+    return {
+      connected: this.connected,
+      running: this.running,
+      pendingRuns: this.pendingRuns.size,
+      pendingApprovals: this.pendingApprovals.size
+    };
+  }
+
+  supportsGroups() {
+    return true;
+  }
+
+  async listTargets() {
+    return Array.from(this.chatState.values()).map((state) => ({
+      id: state.chatId,
+      label: state.group ? `group:${state.group.name || state.chatId}` : `user:${state.chatId}`,
+      isGroup: Boolean(state.group)
+    }));
+  }
+
+  async listGroups() {
+    return Array.from(this.chatState.values())
+      .filter((state) => Boolean(state.group))
+      .map((state) => ({ ...state.group }));
+  }
+
+  getMentionPattern() {
+    if (!this.botUsername) {
+      return null;
+    }
+    return new RegExp(`@${this.botUsername}(\\b|$)`, 'i');
   }
 
   async pollLoop() {
@@ -126,18 +224,103 @@ class TelegramBridge {
     }
   }
 
-  getOrCreateChatState(chatId) {
+  getOrCreateChatState(chatId, group = null) {
     const key = String(chatId);
     if (!this.chatState.has(key)) {
       const agentId = 'main';
       this.chatState.set(key, {
         chatId: key,
         agentId,
+        group: group && group.id ? group : null,
         sessionKey: this.sessionManager.buildSessionKey(agentId, 'telegram', key)
       });
+    } else if (group && group.id) {
+      const state = this.chatState.get(key);
+      state.group = group;
     }
 
     return this.chatState.get(key);
+  }
+
+  normalizeInboundMessage(message = {}) {
+    const chat = message?.chat || {};
+    const from = message?.from || {};
+    const chatType = String(chat.type || '').toLowerCase();
+    const isGroup = chatType === 'group' || chatType === 'supergroup';
+
+    const mentions = [];
+    const entities = Array.isArray(message.entities) ? message.entities : [];
+    const text = String(message.text || '').trim();
+    for (const entity of entities) {
+      if (entity?.type === 'mention') {
+        const offset = Number(entity.offset) || 0;
+        const length = Number(entity.length) || 0;
+        const mentionText = text.slice(offset, offset + length);
+        if (mentionText) mentions.push(mentionText);
+      }
+      if (entity?.type === 'text_mention' && entity.user) {
+        mentions.push(String(entity.user.username || entity.user.id || '').trim());
+      }
+    }
+
+    const attachments = [];
+    if (Array.isArray(message.photo) && message.photo.length) attachments.push({ type: 'photo' });
+    if (message.document) attachments.push({ type: 'document', name: message.document.file_name || '' });
+    if (message.audio) attachments.push({ type: 'audio', name: message.audio.file_name || '' });
+    if (message.video) attachments.push({ type: 'video', name: message.video.file_name || '' });
+
+    return {
+      channel: 'telegram',
+      sender: {
+        id: String(from.id || chat.id || ''),
+        name: from.username || [from.first_name, from.last_name].filter(Boolean).join(' ').trim() || 'User',
+        isGroup
+      },
+      group: isGroup
+        ? {
+            id: String(chat.id || ''),
+            name: chat.title || ''
+          }
+        : null,
+      text,
+      mentions,
+      attachments,
+      threadId: message.message_thread_id != null
+        ? String(message.message_thread_id)
+        : null,
+      raw: message
+    };
+  }
+
+  isMentioned(message = {}, inbound = {}) {
+    const mentionPattern = this.getMentionPattern();
+    if (mentionPattern && mentionPattern.test(inbound.text || '')) {
+      return true;
+    }
+
+    const entities = Array.isArray(message.entities) ? message.entities : [];
+    for (const entity of entities) {
+      if (entity?.type === 'text_mention' && entity.user) {
+        const entityId = String(entity.user.id || '');
+        if (this.botId && entityId && entityId === this.botId) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  async emitInbound(inboundMessage) {
+    if (!this.messageHandlers.size) return;
+
+    for (const handler of this.messageHandlers) {
+      try {
+        await handler(inboundMessage);
+      } catch (error) {
+        console.warn('[telegram-bridge] inbound handler failed:', error.message);
+      }
+    }
   }
 
   getOrCreateLocalChat(telegramChatId, userName = 'Unknown') {
@@ -167,12 +350,36 @@ class TelegramBridge {
   }
 
   async handleMessage(message = {}) {
+    const inbound = this.normalizeInboundMessage(message);
     const chatId = String(message?.chat?.id || '');
-    const text = String(message.text || '').trim();
+    const text = inbound.text;
     if (!chatId) return;
 
+    const channelSettings = this.getChannelSettings() || {};
+    const isGroup = Boolean(inbound.group);
+    const isCommand = text.startsWith('/');
+    const isReply = Boolean(message.reply_to_message);
+    const wasMentioned = this.isMentioned(message, inbound);
+
+    if (this.allowlistManager && !this.allowlistManager.isAllowed('telegram', inbound.sender.id, inbound.group?.id || null)) {
+      return;
+    }
+
+    if (!shouldRespond({
+      isGroup,
+      requireMention: channelSettings.requireMention === true,
+      wasMentioned,
+      isCommand,
+      isReply
+    })) {
+      return;
+    }
+
+    this.getOrCreateChatState(chatId, inbound.group);
+    await this.emitInbound(inbound);
+
     // Get user info for chat title
-    const userName = message?.from?.username || message?.from?.first_name || 'User';
+    const userName = inbound.sender.name;
 
     // Create or get local chat for audit logging
     this.getOrCreateLocalChat(chatId, userName);
@@ -191,7 +398,7 @@ class TelegramBridge {
     this.addToLocalChat(chatId, 'user', text);
 
     // Check if chat has a pinned skill
-    const state = this.getOrCreateChatState(chatId);
+    const state = this.getOrCreateChatState(chatId, inbound.group);
     const pinnedSkillId = this.pinManager?.getPinned(state.sessionKey);
     if (pinnedSkillId) {
       const skill = skillRegistry.getSkill(pinnedSkillId);

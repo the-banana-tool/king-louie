@@ -18,6 +18,8 @@ const { getAgent, listAgents } = require('./src/agents');
 const GatewayServer = require('./src/gateway/gateway-server');
 const SessionManager = require('./src/gateway/session-manager');
 const RemoteControl = require('./src/gateway/remote-control');
+const { ChannelRegistry } = require('./src/channels/channel-plugin');
+const AllowlistManager = require('./src/channels/allowlist-manager');
 const TelegramBridge = require('./src/channels/telegram-bridge');
 const MessageTool = require('./src/tools/builtin/message-tool');
 const {
@@ -49,7 +51,9 @@ let taskManager;
 let gatewayServer;
 let sessionManager;
 let remoteControl;
+let channelRegistry;
 let telegramBridge;
+let allowlistManager;
 let userProfile;
 let notificationRouter;
 let hookRegistry;
@@ -114,6 +118,11 @@ const DEFAULT_SETTINGS = {
   webSearch: {
     brave: { apiKey: '' },
     tavily: { apiKey: '' }
+  },
+  channels: {
+    telegram: {
+      requireMention: false
+    }
   }
 };
 
@@ -168,6 +177,14 @@ const mergeSettings = (settings = {}) => {
       tavily: {
         ...(DEFAULT_SETTINGS.webSearch?.tavily || {}),
         ...(source.webSearch?.tavily || {})
+      }
+    },
+    channels: {
+      ...(DEFAULT_SETTINGS.channels || {}),
+      ...(source.channels || {}),
+      telegram: {
+        ...(DEFAULT_SETTINGS.channels?.telegram || {}),
+        ...(source.channels?.telegram || {})
       }
     }
   };
@@ -921,6 +938,9 @@ const stopTelegramBridge = async () => {
   if (!telegramBridge) return;
 
   await telegramBridge.stop();
+  if (channelRegistry) {
+    channelRegistry.unregister('telegram');
+  }
   telegramBridge = null;
 };
 
@@ -933,6 +953,8 @@ const startTelegramBridge = async (token) => {
     token,
     gatewayServer,
     sessionManager,
+    allowlistManager,
+    getChannelSettings: () => getSettings().channels?.telegram || {},
     getAgent,
     listAgents,
     pinManager,
@@ -982,7 +1004,12 @@ const startTelegramBridge = async (token) => {
     }
   });
 
-  await telegramBridge.start();
+  if (channelRegistry) {
+    channelRegistry.register(telegramBridge);
+    await channelRegistry.initializeAll(gatewayServer);
+  } else {
+    await telegramBridge.start();
+  }
 };
 
 const testTelegramConnection = async (token) => {
@@ -1496,6 +1523,8 @@ const withNotificationTiming = async (label, fn) => {
 const initializeAgentInfrastructure = async () => {
   taskManager = new TaskManager();
   sessionManager = new SessionManager();
+  channelRegistry = new ChannelRegistry();
+  allowlistManager = new AllowlistManager(store);
   pinManager = new PinManager({
     storageFile: path.join(app.getPath('userData'), 'skill-pins.json')
   });
@@ -1852,7 +1881,9 @@ app.on('window-all-closed', function () {
       workingDirectory: process.cwd()
     }).catch((err) => console.warn('[main] SessionEnd hook failed:', err.message));
 
-    if (telegramBridge) {
+    if (channelRegistry) {
+      channelRegistry.shutdownAll().catch((err) => console.warn('[main] Channel shutdown failed:', err.message));
+    } else if (telegramBridge) {
       telegramBridge.stop().catch((err) => console.warn('[main] Telegram bridge stop failed:', err.message));
     }
     if (gatewayServer) {

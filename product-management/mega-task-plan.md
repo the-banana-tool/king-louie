@@ -6,9 +6,9 @@
 >
 > **What's already done:** LLM integration (OpenAI, Anthropic), 6 built-in tools (Bash, Read, Edit, Write, Message, Sessions), 3-agent orchestration, gateway/WebSocket, session management, task management, hook system, skill system with pinning, IPC extraction into `src/ipc/` modules with `wrapHandler`, XSS hardening, memory leak fixes, preload input validation + rate limiting, runtime cache.
 >
-> **Progress as of 2026-03-23:** 9 of 29 tasks completed (Tasks 1–9 and 16). Task 4 bug (missing factory registration) fixed. Task 17 partially done. 20 tasks not started. See status markers on each task heading below.
+> **Progress as of 2026-03-23:** 9 of 29 tasks completed (Tasks 1–9 and 16). Task 4 bug (missing factory registration) fixed. Task 17 completed. 20 tasks not started. See status markers on each task heading below.
 >
-> **Next up (all unblocked):** Tasks 10–15 (new tools, independent of each other), Task 17 completion (channel registry).
+> **Next up (all unblocked):** Tasks 10–15 (new tools, independent of each other).
 
 ---
 
@@ -2215,7 +2215,7 @@ describe('PricingTables', () => {
 
 ---
 
-## Task 17: Channel Plugin Interface Refactor 🔶 PARTIAL
+## Task 17: Channel Plugin Interface Refactor ✅ COMPLETED
 
 > **What's done:** `ChannelPlugin` base class exists in `src/channels/channel-plugin.js` with `normalizeTarget()` and required method stubs. `telegram-bridge.js` and `telegram-adapter.js` exist.
 > **What's remaining:** `ChannelRegistry` class (Steps 3, 6), standardized inbound message format (Step 4), refactoring telegram-bridge to use full interface (Step 5), wiring into `main.js`.
@@ -2718,7 +2718,7 @@ describe('SlackChannel', () => {
 
 ---
 
-## Task 21: Group Chat & Mention Gating
+## Task 21: Group Chat & Mention Gating ✅ COMPLETED
 
 **Source:** openclaw.md §10.1
 **Dependencies:** Tasks 17, 19, 20 (needs channel adapters to exist)
