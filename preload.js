@@ -296,6 +296,15 @@ contextBridge.exposeInMainWorld(
       },
       executeParallel: (payload) => ipcRenderer.invoke('agent:executeParallel', payload),
       executeSerial: (payload) => ipcRenderer.invoke('agent:executeSerial', payload),
+      executeWithDeps: (payload) => {
+        validateObject(payload, 'payload');
+        const hasTasks = Array.isArray(payload.tasks) && payload.tasks.length > 0;
+        const hasPlanFile = typeof payload.planFile === 'string' && payload.planFile.trim().length > 0;
+        if (!hasTasks && !hasPlanFile) {
+          throw new Error('Invalid payload: expected tasks array or planFile path');
+        }
+        return ipcRenderer.invoke('agent:executeWithDeps', payload);
+      },
       onAskUser: (callback) => registerOnce('agent:askUser', callback),
       sendUserResponse: (payload) => {
         validateObject(payload, 'payload');

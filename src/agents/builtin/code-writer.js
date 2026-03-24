@@ -4,7 +4,7 @@ const CodeWriterAgent = new Agent({
   id: 'code-writer',
   name: 'Code Writer',
   description: 'Writes and modifies code based on requirements',
-  model: 'claude-3-5-sonnet-latest',
+  model: 'claude-sonnet-4-20250514',
   inferenceTier: 'smart',
   voice: {
     enabled: false,

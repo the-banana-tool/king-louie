@@ -4,7 +4,7 @@ const CodeExplorerAgent = new Agent({
   id: 'code-explorer',
   name: 'Code Explorer',
   description: 'Explores codebase to understand structure and patterns',
-  model: 'claude-3-5-sonnet-latest',
+  model: 'claude-sonnet-4-20250514',
   inferenceTier: 'fast',
   voice: {
     enabled: false,

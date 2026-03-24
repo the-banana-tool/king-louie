@@ -20,7 +20,8 @@
       "Bash(git push:*)",
       "Bash(npm install:*)",
       "Bash(npm test:*)",
-      "Bash(find tests:*)"
+      "Bash(find tests:*)",
+      "Bash(where claude:*)"
     ]
   }
 }

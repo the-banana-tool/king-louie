@@ -59,7 +59,8 @@ class InferenceRouter {
       tierConfig.provider || settings.activeProvider || 'openai'
     ).toLowerCase();
 
-    const model = tierConfig.model || (typeof this.getProviderModel === 'function' ? this.getProviderModel(provider) : '');
+    const providerModel = typeof this.getProviderModel === 'function' ? this.getProviderModel(provider) : '';
+    const model = providerModel || tierConfig.model || '';
 
     return { provider, model, tier: resolvedTier };
   }
@@ -126,10 +127,9 @@ class InferenceRouter {
     const providerType = String(
       request.provider || tierConfig.provider || settings.activeProvider || 'openai'
     ).toLowerCase();
-    const model =
-      request.model ||
-      tierConfig.model ||
-      (typeof this.getProviderModel === 'function' ? this.getProviderModel(providerType) : '');
+    const tierModel = tierConfig.model || '';
+    const providerModel = typeof this.getProviderModel === 'function' ? this.getProviderModel(providerType) : '';
+    const model = request.model || providerModel || tierModel;
 
     const configuredTimeout = request.timeoutMs ?? timeoutsMs[tier];
     const timeoutMs = Number(configuredTimeout);

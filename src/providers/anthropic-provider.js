@@ -8,7 +8,7 @@ class AnthropicProvider extends BaseLLMProvider {
 
   getModels() {
     return [
-      'claude-3-7-sonnet-latest',
+      'claude-sonnet-4-20250514',
       'claude-3-5-sonnet-latest',
       'claude-3-5-haiku-latest',
       'claude-3-opus-latest'
@@ -24,7 +24,7 @@ class AnthropicProvider extends BaseLLMProvider {
   }
 
   getDefaultModel() {
-    return 'claude-3-5-sonnet-latest';
+    return 'claude-sonnet-4-20250514';
   }
 
   getHeaders() {

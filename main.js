@@ -88,7 +88,7 @@ const DEFAULT_SETTINGS = {
   },
   providerModels: {
     openai: 'gpt-4o-mini',
-    anthropic: 'claude-3-5-sonnet-latest',
+    anthropic: 'claude-sonnet-4-20250514',
     copilot: '',
     groq: 'llama-3.3-70b-versatile',
     mistral: 'mistral-large-latest',
@@ -105,11 +105,11 @@ const DEFAULT_SETTINGS = {
       },
       standard: {
         provider: 'anthropic',
-        model: 'claude-3-5-sonnet-latest'
+        model: 'claude-sonnet-4-20250514'
       },
       smart: {
         provider: 'anthropic',
-        model: 'claude-3-5-sonnet-latest'
+        model: 'claude-sonnet-4-20250514'
       }
     },
     timeoutsMs: {
@@ -406,7 +406,7 @@ const providerLabels = {
 
 const providerDefaults = {
   openai: 'gpt-4o-mini',
-  anthropic: 'claude-3-5-sonnet-latest',
+  anthropic: 'claude-sonnet-4-20250514',
   copilot: '',
   groq: 'llama-3.3-70b-versatile',
   mistral: 'mistral-large-latest',
@@ -888,6 +888,10 @@ const clearDiscordToken = () => {
 const getDecryptedDiscordToken = () => {
   const tokens = getApiTokens();
   const encryptedToken = tokens[DISCORD_TOKEN_STORE_KEY];
+  if (!encryptedToken) return null;
+  return decryptToken(encryptedToken);
+};
+
 const hasStoredSlackAppToken = () => {
   const tokens = getApiTokens();
   return Boolean(tokens[SLACK_APP_TOKEN_STORE_KEY]);
@@ -1702,18 +1706,25 @@ const runLlmCommand = async (command = '') => {
   if (action === 'list') {
     const snapshot = getProviderSnapshot();
     const rows = Object.entries(snapshot.providers).map(([key, provider]) => {
-      const activeMarker = snapshot.activeProvider === key ? ' (active)' : '';
+      const active = snapshot.activeProvider === key;
       const status = provider.status?.ok
-        ? `connected (${provider.status.message || 'ok'})`
+        ? 'connected'
         : provider.status
-          ? `error (${provider.status.message || 'failed'})`
+          ? 'error'
           : 'not tested';
-      return `- **${provider.label}** \`${key}\`${activeMarker}: token=${provider.hasToken ? 'saved' : 'missing'}, model=\`${provider.model || '(default)'}\`, status=${status}`;
+      const parts = [
+        `**${provider.label}**` + (active ? ' (active)' : ''),
+        `key: \`${key}\``,
+        `token: ${provider.hasToken ? 'saved' : 'missing'}`,
+        `model: \`${provider.model || '(default)'}\``,
+        `status: ${status}`
+      ];
+      return `- ${parts.join(' | ')}`;
     });
 
     return {
       ok: true,
-      output: ['### LLM Providers & Connections', '', ...rows].join('\n')
+      output: ['### LLM Providers', '', ...rows].join('\n')
     };
   }
 
@@ -2136,7 +2147,7 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
-    icon: path.join(__dirname, 'icons', 'icon.ico'),
+    icon: path.join(__dirname, 'banana.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,

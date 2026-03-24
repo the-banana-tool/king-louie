@@ -446,6 +446,29 @@ body {
   line-height: 1.6;
 }
 
+.message-content table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 8px 0;
+  font-size: 13px;
+}
+
+.message-content th,
+.message-content td {
+  border: 1px solid #444;
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.message-content th {
+  background: rgba(0, 0, 0, 0.15);
+  font-weight: 600;
+}
+
+.message-content tr:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
 .message.user .message-content {
   background-color: #0084ff;
   color: #ffffff;
@@ -538,6 +561,45 @@ body {
   flex-direction: column;
   gap: 15px;
   align-items: stretch;
+  position: relative;
+}
+
+.slash-autocomplete {
+  position: absolute;
+  bottom: 100%;
+  left: 30px;
+  right: 30px;
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 8px;
+  max-height: 260px;
+  overflow-y: auto;
+  z-index: 100;
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.3);
+}
+
+.slash-autocomplete-item {
+  padding: 8px 14px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.slash-autocomplete-item:hover,
+.slash-autocomplete-item.active {
+  background: #3a3a3a;
+}
+
+.slash-autocomplete-item .slash-cmd {
+  color: #7ab3ff;
+  font-family: monospace;
+  font-size: 14px;
+}
+
+.slash-autocomplete-item .slash-desc {
+  color: #999;
+  font-size: 12px;
 }
 
 .image-preview-list {

@@ -18,7 +18,7 @@ describe('InferenceRouter', () => {
 
     return {
       getSettings: () => ({ ...defaultSettings, ...overrides.settings }),
-      getProviderModel: (p) => overrides.models?.[p] || 'default-model',
+      getProviderModel: (p) => overrides.models?.[p] || '',
       getProviderToken: (p) => 'fake-token',
       createProvider: (p, t) => overrides.providers?.[p] || {
         getDefaultModel: () => 'default-model',

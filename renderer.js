@@ -88,6 +88,7 @@ const dom = {
   providerList: document.getElementById('provider-list'),
   settingsEncryptionAlert: document.getElementById('settings-encryption-alert'),
   agentModeBtn: document.getElementById('agent-mode-btn'),
+  slashAutocomplete: document.getElementById('slash-autocomplete'),
   templateNameInput: document.getElementById('template-name-input'),
   templateRoleInput: document.getElementById('template-role-input'),
   templatePreferencesInput: document.getElementById('template-preferences-input'),
@@ -2133,6 +2134,52 @@ async function sendMessage() {
     return;
   }
 
+  if (slashCommand?.name === '/delegate') {
+    dom.userInput.value = '';
+    dom.userInput.style.height = 'auto';
+
+    appendLocalMessage('user', message);
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+
+    const taskArg = slashCommand.args[0] || '';
+    if (!taskArg) {
+      const usage = 'Usage: `/delegate <task-plan-path>` — reads task configs from a JSON file and executes them with dependency ordering.\n\nExample JSON:\n```json\n{ "agentId": "code-writer", "tasks": [\n  { "id": "t26", "subject": "Task 26", "description": "..." },\n  { "id": "t29", "subject": "Task 29", "description": "...", "blockedBy": ["t26"] }\n]}\n```';
+      appendLocalMessage('assistant', usage);
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: usage }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      return;
+    }
+
+    try {
+      appendLocalMessage('assistant', `Loading task plan from \`${taskArg}\`...`);
+
+      // Listen for task progress events during delegation
+      const taskUpdatedHandler = (task) => {
+        if (task?.status === 'in_progress') {
+          appendLocalMessage('assistant', `Started: **${task.subject || task.id}**`);
+        } else if (task?.status === 'completed') {
+          appendLocalMessage('assistant', `Completed: **${task.subject || task.id}**`);
+        }
+      };
+      const taskUnblockedHandler = (task) => {
+        appendLocalMessage('assistant', `Unblocked: **${task.subject || task.id}**`);
+      };
+      window.electron.task.onUpdated(taskUpdatedHandler);
+      window.electron.task.onUnblocked(taskUnblockedHandler);
+
+      const result = await window.electron.agent.executeWithDeps({ planFile: taskArg });
+
+      const completionMsg = `Delegation complete. ${(result?.tasks || []).filter((t) => t.status === 'completed').length}/${(result?.tasks || []).length} tasks finished.`;
+      appendLocalMessage('assistant', completionMsg);
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: completionMsg }).catch((err2) => console.warn('[chat] addMessage persistence failed:', err2.message));
+    } catch (err) {
+      const errMsg = `Delegation failed: ${err.message}`;
+      appendLocalMessage('assistant', errMsg);
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: errMsg }).catch((err2) => console.warn('[chat] addMessage persistence failed:', err2.message));
+    }
+
+    return;
+  }
+
   if (slashCommand?.name === '/profile') {
     dom.userInput.value = '';
     dom.userInput.style.height = 'auto';
@@ -2726,8 +2773,114 @@ if (dom.attachImageBtn && dom.imageFileInput) {
   });
 }
 
+// Slash command autocomplete
+const SLASH_COMMANDS = [
+  { cmd: '/help', desc: 'Show local command help' },
+  { cmd: '/agent', desc: 'Toggle agent mode (on/off/status)' },
+  { cmd: '/delegate', desc: 'Run tasks from a JSON plan file' },
+  { cmd: '/profile', desc: 'View or set user profile fields' },
+  { cmd: '/pin', desc: 'Pin a skill to current chat' },
+  { cmd: '/unpin', desc: 'Unpin a skill from current chat' },
+  { cmd: '/pinned', desc: 'List pinned skills' },
+  { cmd: '/skill', desc: 'Execute a skill by name' },
+  { cmd: '/llm', desc: 'Manage providers, tokens, and models' },
+  { cmd: '/speak', desc: 'Speak last assistant message via TTS' }
+];
+
+let slashActiveIndex = -1;
+
+function updateSlashAutocomplete() {
+  const el = dom.slashAutocomplete;
+  if (!el) return;
+
+  const text = dom.userInput.value;
+  if (!text.startsWith('/') || text.includes(' ') || text.includes('\n')) {
+    el.hidden = true;
+    slashActiveIndex = -1;
+    return;
+  }
+
+  const query = text.toLowerCase();
+  const matches = SLASH_COMMANDS.filter((c) => c.cmd.startsWith(query));
+
+  if (!matches.length || (matches.length === 1 && matches[0].cmd === query)) {
+    el.hidden = true;
+    slashActiveIndex = -1;
+    return;
+  }
+
+  slashActiveIndex = 0;
+  el.innerHTML = matches.map((m, i) =>
+    `<div class="slash-autocomplete-item${i === 0 ? ' active' : ''}" data-cmd="${m.cmd}">` +
+    `<span class="slash-cmd">${m.cmd}</span>` +
+    `<span class="slash-desc">${m.desc}</span></div>`
+  ).join('');
+  el.hidden = false;
+
+  el.querySelectorAll('.slash-autocomplete-item').forEach((item) => {
+    item.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      dom.userInput.value = item.dataset.cmd + ' ';
+      el.hidden = true;
+      slashActiveIndex = -1;
+      dom.userInput.focus();
+    });
+  });
+}
+
+function navigateSlashAutocomplete(direction) {
+  const el = dom.slashAutocomplete;
+  if (!el || el.hidden) return false;
+  const items = el.querySelectorAll('.slash-autocomplete-item');
+  if (!items.length) return false;
+
+  items[slashActiveIndex]?.classList.remove('active');
+  slashActiveIndex = (slashActiveIndex + direction + items.length) % items.length;
+  items[slashActiveIndex]?.classList.add('active');
+  items[slashActiveIndex]?.scrollIntoView({ block: 'nearest' });
+  return true;
+}
+
+function acceptSlashAutocomplete() {
+  const el = dom.slashAutocomplete;
+  if (!el || el.hidden) return false;
+  const items = el.querySelectorAll('.slash-autocomplete-item');
+  if (slashActiveIndex >= 0 && items[slashActiveIndex]) {
+    dom.userInput.value = items[slashActiveIndex].dataset.cmd + ' ';
+    el.hidden = true;
+    slashActiveIndex = -1;
+    return true;
+  }
+  return false;
+}
+
+dom.userInput.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowUp' && navigateSlashAutocomplete(-1)) {
+    e.preventDefault();
+    return;
+  }
+  if (e.key === 'ArrowDown' && navigateSlashAutocomplete(1)) {
+    e.preventDefault();
+    return;
+  }
+  if (e.key === 'Tab' && acceptSlashAutocomplete()) {
+    e.preventDefault();
+    return;
+  }
+  if (e.key === 'Escape' && dom.slashAutocomplete && !dom.slashAutocomplete.hidden) {
+    dom.slashAutocomplete.hidden = true;
+    slashActiveIndex = -1;
+    e.preventDefault();
+    return;
+  }
+});
+
 dom.userInput.addEventListener('keypress', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
+    if (acceptSlashAutocomplete()) {
+      e.preventDefault();
+      return;
+    }
     e.preventDefault();
     sendMessage();
   }
@@ -2737,6 +2890,7 @@ dom.userInput.addEventListener('keypress', (e) => {
 dom.userInput.addEventListener('input', function() {
   this.style.height = 'auto';
   this.style.height = Math.min(this.scrollHeight, 200) + 'px';
+  updateSlashAutocomplete();
 });
 
 dom.userInput.addEventListener('paste', async (event) => {

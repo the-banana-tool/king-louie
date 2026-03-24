@@ -50,6 +50,7 @@ module.exports = {
   AGENT_EXECUTE: 'agent:execute',
   AGENT_EXECUTE_PARALLEL: 'agent:executeParallel',
   AGENT_EXECUTE_SERIAL: 'agent:executeSerial',
+  AGENT_EXECUTE_WITH_DEPS: 'agent:executeWithDeps',
   AGENT_ASK_USER: 'agent:askUser',
   AGENT_USER_RESPONSE: 'agent:userResponse',
 

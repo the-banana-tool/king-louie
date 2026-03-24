@@ -135,6 +135,104 @@ function registerAgentHandlers(ipcMain, context = {}) {
     }
   });
 
+  ipcMain.handle(IPC.AGENT_EXECUTE_WITH_DEPS, wrapHandler(IPC.AGENT_EXECUTE_WITH_DEPS, async (event, payload) => {
+    let taskConfigs = payload.tasks || [];
+    let agentId = payload.agentId || 'code-writer';
+
+    // If planFile is provided, read and parse it
+    if (payload.planFile && !taskConfigs.length) {
+      const fs = require('fs');
+      const planPath = require('path').resolve(payload.planFile);
+      const raw = fs.readFileSync(planPath, 'utf-8');
+      const plan = JSON.parse(raw);
+      taskConfigs = plan.tasks || [];
+      agentId = plan.agentId || agentId;
+    }
+
+    if (!taskConfigs.length) throw new Error('No tasks provided');
+
+    const settings = getSettings();
+    const agent = getAgent(agentId);
+    if (!agent) throw new Error(`Agent not found: ${agentId}`);
+
+    const { getTaskManager } = context;
+    const taskManager = typeof getTaskManager === 'function' ? getTaskManager() : context.taskManager;
+    if (!taskManager) throw new Error('Task manager is not initialized');
+
+    const runtime = await createAgentRuntime({ tier: agent.inferenceTier || settings?.inference?.activeTier }, event);
+
+    // Create tasks in TaskManager from the provided configs
+    const createdTasks = [];
+    const idMap = new Map(); // Maps caller-provided id → real task id
+
+    for (const tc of taskConfigs) {
+      const task = taskManager.create({
+        subject: tc.subject || 'Untitled',
+        description: tc.description || '',
+        metadata: { agentId: agent.id, ...(tc.metadata || {}) }
+      });
+      idMap.set(tc.id || task.id, task.id);
+      createdTasks.push({ callerKey: tc.id, task });
+    }
+
+    // Wire up blockedBy using the id map
+    for (const tc of taskConfigs) {
+      if (!Array.isArray(tc.blockedBy) || !tc.blockedBy.length) continue;
+      const realId = idMap.get(tc.id);
+      if (!realId) continue;
+      const resolvedBlockers = tc.blockedBy
+        .map((dep) => idMap.get(dep))
+        .filter(Boolean);
+      if (resolvedBlockers.length) {
+        taskManager.update(realId, { blockedBy: resolvedBlockers });
+      }
+    }
+
+    // Also wire up blocks relationships
+    for (const tc of taskConfigs) {
+      const realId = idMap.get(tc.id);
+      if (!realId) continue;
+      const blocksIds = (tc.blockedBy || [])
+        .map((dep) => idMap.get(dep))
+        .filter(Boolean);
+      // For each blocker, add this task to its blocks array
+      for (const blockerId of blocksIds) {
+        const blockerTask = taskManager.get(blockerId);
+        if (blockerTask && !blockerTask.blocks.includes(realId)) {
+          blockerTask.blocks.push(realId);
+        }
+      }
+    }
+
+    const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor, {
+      usageTracker: typeof getUsageTracker === 'function' ? getUsageTracker() : null
+    });
+    const orchestrator = new AgentOrchestrator(agentExecutor);
+
+    return withNotificationTiming('Dependency-based agent run', async () => {
+      const results = await orchestrator.executeWithDependencies(taskManager, [agent], {
+        tier: runtime.tier,
+        model: runtime.model || agent.model,
+        timeoutMs: runtime.timeoutMs,
+        tools: runtime.toolDefinitions,
+        userProfile: getUserProfile(),
+        templateContext: buildTemplateContextFromSettings(),
+        systemPrompt: [
+          buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
+          formatUserContextSection(),
+          formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
+        ].join('\n\n')
+      });
+
+      // Convert Map to serializable object
+      const serialized = {};
+      for (const [taskId, result] of results) {
+        serialized[taskId] = result;
+      }
+      return { tasks: createdTasks.map((ct) => ({ id: ct.task.id, subject: ct.task.subject, status: ct.task.status })), results: serialized };
+    });
+  }));
+
   ipcMain.handle(IPC.AGENT_EXECUTE_SERIAL, wrapHandler(IPC.AGENT_EXECUTE_SERIAL, async (event, { agentIds = [], message }) => {
     const settings = getSettings();
     const runtime = await createAgentRuntime({ tier: settings?.inference?.activeTier }, event);
