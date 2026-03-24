@@ -4,6 +4,7 @@ const BashTool = require('./builtin/bash-tool');
 const ReadTool = require('./builtin/read-tool');
 const EditTool = require('./builtin/edit-tool');
 const WriteTool = require('./builtin/write-tool');
+const GrepTool = require('./builtin/grep-tool');
 
 let initialized = false;
 
@@ -14,6 +15,7 @@ function initializeTools() {
   toolRegistry.register(ReadTool);
   toolRegistry.register(EditTool);
   toolRegistry.register(WriteTool);
+  toolRegistry.register(GrepTool);
 
   initialized = true;
 }
