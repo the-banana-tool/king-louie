@@ -476,7 +476,9 @@ npm test
 
 ---
 
-## Task 4: Groq Provider
+## Task 4: Groq Provider ✅ COMPLETED
+
+> **Summary:** Implemented `GroqProvider` in `src/providers/groq-provider.js` extending `BaseLLMProvider`. Registered it in `ProviderFactory` and integrated it into the settings system (`main.js` and `settings-handlers.js`). Updated `DEFAULT_SETTINGS` to use Groq with `llama-3.3-70b-versatile` as the default fast-tier provider. Added full test coverage in `tests/groq-provider.test.js` and configured `npm test` to run it.
 
 **Source:** openclaw.md §2.2
 **Dependencies:** Task 3 (provider abstraction)

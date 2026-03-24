@@ -69,14 +69,15 @@ const DEFAULT_SETTINGS = {
   providerModels: {
     openai: 'gpt-4o-mini',
     anthropic: 'claude-3-5-sonnet-latest',
-    copilot: ''
+    copilot: '',
+    groq: 'llama-3.3-70b-versatile'
   },
   inference: {
     activeTier: 'standard',
     tierMap: {
       fast: {
-        provider: 'openai',
-        model: 'gpt-4o-mini'
+        provider: 'groq',
+        model: 'llama-3.3-70b-versatile'
       },
       standard: {
         provider: 'anthropic',
@@ -324,19 +325,22 @@ const setToolAlwaysApprove = (toolName, approved = true) => {
 const providerLabels = {
   openai: 'OpenAI',
   anthropic: 'Anthropic Claude',
-  copilot: 'GitHub Copilot'
+  copilot: 'GitHub Copilot',
+  groq: 'Groq'
 };
 
 const providerDefaults = {
   openai: 'gpt-4o-mini',
   anthropic: 'claude-3-5-sonnet-latest',
-  copilot: ''
+  copilot: '',
+  groq: 'llama-3.3-70b-versatile'
 };
 
 const providerTokenHints = {
   openai: 'sk-',
   anthropic: 'sk-ant-',
-  copilot: 'ghp_'
+  copilot: 'ghp_',
+  groq: 'gsk_'
 };
 
 const normalizeProvider = (value = '') => String(value || '').trim().toLowerCase();

@@ -1,5 +1,6 @@
 const OpenAIProvider = require('./openai-provider');
 const AnthropicProvider = require('./anthropic-provider');
+const GroqProvider = require('./groq-provider');
 
 class ProviderFactory {
   static _registry = new Map();
