@@ -2555,7 +2555,9 @@ describe('CronScheduler', () => {
 
 ---
 
-## Task 19: Discord Channel
+## Task 19: Discord Channel ✅ COMPLETED
+
+> **Completed:** Created `DiscordChannel` extending `ChannelPlugin` inside `src/channels/discord-bridge.js`. Added `splitMessage` logic handling the 2000 character limits, formatters in `src/channels/discord-adapter.js`. The channel accepts DMs and Guild channel messages, correctly generates separate session keys for group channels and DMs, routes messages through the `mention-gating.js` rule set, handles slash commands, implements pinned skills, routes remaining questions to the gateway, and responds to Interaction callback queries for Tool Approvals. Modified `main.js` to start/stop the bridge and integrated Discord configurations in settings. Added robust test cases in `tests/discord-channel.test.js` covering `normalizeTarget`, `buildSessionKey`, mention regex pattern, and Discord limits/split operations. All tests passed perfectly.
 
 **Source:** openclaw.md §3.2
 **Dependencies:** Task 17 completed (needs `ChannelRegistry` from Step 3, normalized message format from Step 4)

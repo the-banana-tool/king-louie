@@ -21,6 +21,7 @@ const RemoteControl = require('./src/gateway/remote-control');
 const { ChannelRegistry } = require('./src/channels/channel-plugin');
 const AllowlistManager = require('./src/channels/allowlist-manager');
 const TelegramBridge = require('./src/channels/telegram-bridge');
+const DiscordChannel = require('./src/channels/discord-bridge');
 const MessageTool = require('./src/tools/builtin/message-tool');
 const {
   SessionsListTool,
@@ -53,6 +54,7 @@ let sessionManager;
 let remoteControl;
 let channelRegistry;
 let telegramBridge;
+let discordBridge;
 let allowlistManager;
 let userProfile;
 let notificationRouter;
@@ -63,6 +65,7 @@ let memoryManager;
 let ttsEngine;
 let usageTracker;
 const TELEGRAM_TOKEN_STORE_KEY = '__telegram_bot_token';
+const DISCORD_TOKEN_STORE_KEY = '__discord_bot_token';
 const ELEVENLABS_TOKEN_STORE_KEY = '__elevenlabs_api_key';
 
 const DEFAULT_SETTINGS = {
@@ -122,6 +125,12 @@ const DEFAULT_SETTINGS = {
   channels: {
     telegram: {
       requireMention: false
+    },
+    discord: {
+      enabled: false,
+      requireMention: false,
+      allowedGuilds: [],
+      allowedChannels: []
     }
   }
 };
@@ -185,6 +194,10 @@ const mergeSettings = (settings = {}) => {
       telegram: {
         ...(DEFAULT_SETTINGS.channels?.telegram || {}),
         ...(source.channels?.telegram || {})
+      },
+      discord: {
+        ...(DEFAULT_SETTINGS.channels?.discord || {}),
+        ...(source.channels?.discord || {})
       }
     }
   };
@@ -837,6 +850,30 @@ const getDecryptedTelegramToken = () => {
   return decryptToken(encryptedToken);
 };
 
+const hasStoredDiscordToken = () => {
+  const tokens = getApiTokens();
+  return Boolean(tokens[DISCORD_TOKEN_STORE_KEY]);
+};
+
+const saveDiscordToken = (token) => {
+  const tokens = getApiTokens();
+  tokens[DISCORD_TOKEN_STORE_KEY] = encryptToken(token.trim());
+  setApiTokens(tokens);
+};
+
+const clearDiscordToken = () => {
+  const tokens = getApiTokens();
+  delete tokens[DISCORD_TOKEN_STORE_KEY];
+  setApiTokens(tokens);
+};
+
+const getDecryptedDiscordToken = () => {
+  const tokens = getApiTokens();
+  const encryptedToken = tokens[DISCORD_TOKEN_STORE_KEY];
+  if (!encryptedToken) return null;
+  return decryptToken(encryptedToken);
+};
+
 const hasStoredElevenLabsToken = () => {
   const tokens = getApiTokens();
   return Boolean(tokens[ELEVENLABS_TOKEN_STORE_KEY]);
@@ -932,6 +969,81 @@ const validateTelegramToken = (token = '') => {
   }
 
   return null;
+};
+
+const stopDiscordBridge = async () => {
+  if (!discordBridge) return;
+
+  await discordBridge.stop();
+  if (channelRegistry) {
+    channelRegistry.unregister('discord');
+  }
+  discordBridge = null;
+};
+
+const startDiscordBridge = async (token) => {
+  if (!token || !gatewayServer || !sessionManager) return;
+
+  await stopDiscordBridge();
+
+  discordBridge = new DiscordChannel({
+    token,
+    gatewayServer,
+    sessionManager,
+    allowlistManager,
+    getChannelSettings: () => getSettings().channels?.discord || {},
+    getAgent,
+    listAgents,
+    pinManager,
+    getNotificationSettings: () => getSettings().notifications,
+    getVoiceSettings,
+    getTtsEngine: () => ttsEngine,
+    createLocalChat: (title) => {
+      const now = new Date().toISOString();
+      const newChat = {
+        id: createId(),
+        title,
+        createdAt: now,
+        updatedAt: now,
+        messages: []
+      };
+      const chats = [newChat, ...getChats()];
+      setChats(chats);
+
+      if (mainWindow) {
+        mainWindow.webContents.send('chat:updated', { chats });
+      }
+
+      return newChat.id;
+    },
+    addMessageToLocalChat: (chatId, sender, text) => {
+      const chats = getChats();
+      const chat = chats.find((c) => c.id === chatId);
+      if (!chat) return;
+
+      const now = new Date().toISOString();
+      chat.messages.push({
+        id: createId(),
+        sender,
+        text,
+        timestamp: now
+      });
+      chat.updatedAt = now;
+
+      setChats(chats);
+
+      if (mainWindow) {
+        mainWindow.webContents.send('chat:updated', { chats });
+      }
+    }
+  });
+
+  if (channelRegistry) {
+    channelRegistry.register(discordBridge);
+    await channelRegistry.initializeAll(gatewayServer);
+  } else {
+    await discordBridge.start();
+  }
 };
 
 const stopTelegramBridge = async () => {
@@ -1153,6 +1265,66 @@ const runLlmCommand = async (command = '') => {
         '',
         'Providers: `openai`, `anthropic`, `copilot`'
       ].join('\n')
+    };
+  }
+
+  if (action === 'discord') {
+    const subAction = (rest[0] || 'status').toLowerCase();
+    const token = rest.slice(1).join(' ').trim();
+
+    if (subAction === 'status') {
+      const status = getApiStatus()?.discord || null;
+      return {
+        ok: true,
+        output: [
+          '### Discord Bridge',
+          `- Token: ${hasStoredDiscordToken() ? 'saved' : 'missing'}`,
+          `- Bridge: ${discordBridge ? 'running' : 'stopped'}`,
+          `- Status: ${status?.message || 'not tested'}`
+        ].join('\n')
+      };
+    }
+
+    if (subAction === 'add' || subAction === 'save') {
+      if (!token) return { ok: false, error: 'Token is required' };
+
+      try {
+        saveDiscordToken(token);
+        await startDiscordBridge(token);
+        updateStatus('discord', {
+          ok: true,
+          message: `Connected successfully`
+        });
+
+        return {
+          ok: true,
+          output: `Discord bridge connected.`
+        };
+      } catch (error) {
+        updateStatus('discord', {
+          ok: false,
+          message: error.message
+        });
+        return { ok: false, error: error.message };
+      }
+    }
+
+    if (subAction === 'remove' || subAction === 'clear') {
+      await stopDiscordBridge();
+      clearDiscordToken();
+      updateStatus('discord', {
+        ok: true,
+        message: 'Discord token removed and bridge stopped.'
+      });
+      return {
+        ok: true,
+        output: 'Discord token removed and bridge stopped.'
+      };
+    }
+
+    return {
+      ok: false,
+      error: 'Unknown discord action. Use add, remove, or status.'
     };
   }
 
@@ -1715,6 +1887,11 @@ const initializeAgentInfrastructure = async () => {
     await startTelegramBridge(telegramToken);
   }
 
+  const discordToken = String(getDecryptedDiscordToken() || '').trim();
+  if (discordToken) {
+    await startDiscordBridge(discordToken);
+  }
+
   await runHookEvent('SessionStart', {
     source: 'main',
     startedAt: new Date().toISOString(),
@@ -1883,8 +2060,9 @@ app.on('window-all-closed', function () {
 
     if (channelRegistry) {
       channelRegistry.shutdownAll().catch((err) => console.warn('[main] Channel shutdown failed:', err.message));
-    } else if (telegramBridge) {
-      telegramBridge.stop().catch((err) => console.warn('[main] Telegram bridge stop failed:', err.message));
+    } else {
+      if (telegramBridge) telegramBridge.stop().catch((err) => console.warn('[main] Telegram bridge stop failed:', err.message));
+      if (discordBridge) discordBridge.stop().catch((err) => console.warn('[main] Discord bridge stop failed:', err.message));
     }
     if (gatewayServer) {
       gatewayServer.stop().catch((err) => console.warn('[main] Gateway server stop failed:', err.message));
