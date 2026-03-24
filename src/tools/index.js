@@ -8,6 +8,8 @@ const GrepTool = require('./builtin/grep-tool');
 const WebSearchTool = require('./builtin/web-search-tool');
 const WebFetchTool = require('./builtin/web-fetch-tool');
 const GlobTool = require('./builtin/glob-tool');
+const GitTool = require('./builtin/git-tool');
+const AskUserTool = require('./builtin/ask-user-tool');
 
 let initialized = false;
 
@@ -22,6 +24,8 @@ function initializeTools() {
   toolRegistry.register(WebSearchTool);
   toolRegistry.register(WebFetchTool);
   toolRegistry.register(GlobTool);
+  toolRegistry.register(GitTool);
+  toolRegistry.register(AskUserTool);
 
   initialized = true;
 }

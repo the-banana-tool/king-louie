@@ -1787,7 +1787,9 @@ describe('Grep Tool', () => {
 
 ---
 
-## Task 14: Git Tool
+## Task 14: Git Tool ✅ COMPLETED
+
+> **Completed:** Created `GitTool` in `src/tools/builtin/git-tool.js` to execute Git commands using `execFileAsync`. Implemented an allowlist for commands and blocked destructive flags (`--force`, `-f`, `--hard`, `--delete`, `-D`). Configured the tool to require approval. Registered in `src/tools/index.js`. Added tests in `tests/git-tool.test.js` and ensured all tests pass correctly.
 
 **Source:** king-louie-enhancement-plan.md Phase 7
 **Dependencies:** None
@@ -1933,7 +1935,9 @@ describe('Git Tool', () => {
 
 ---
 
-## Task 15: AskUser Tool
+## Task 15: AskUser Tool ✅ COMPLETED
+
+> **Completed:** Implemented `AskUserTool` to pause the agent loop and prompt the user for input. Created `src/tools/builtin/ask-user-tool.js` (no execution logic inside, `requiresApproval` set to false). Modified `src/execution/agent-loop.js` to intercept AskUser, set a 5-minute timeout, and route via IPC to the renderer. Added IPC events `agent:askUser` and `agent:userResponse` to `src/ipc/constants.js`, updated `agent-handlers.js` to resolve pending requests, updated `preload.js` to expose these events, and modified `renderer.js` to render the prompt UI modal and return the user's response. Added and passed tests in `tests/ask-user-tool.test.js`.
 
 **Source:** king-louie-enhancement-plan.md Phase 7
 **Dependencies:** None
