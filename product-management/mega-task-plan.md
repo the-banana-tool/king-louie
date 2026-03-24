@@ -1630,7 +1630,9 @@ describe('Glob Tool', () => {
 
 ---
 
-## Task 13: Grep Tool
+## Task 13: Grep Tool ✅ COMPLETED
+
+> **Completed:** Created `src/tools/builtin/grep-tool.js` using `fast-glob` to search file contents with regex. Supports binary file skipping, case-insensitive search, maximum results limits, and context lines. Registered in `src/tools/index.js` and added tests in `tests/grep-tool.test.js` which pass correctly.
 
 **Source:** king-louie-enhancement-plan.md Phase 7
 **Dependencies:** None
