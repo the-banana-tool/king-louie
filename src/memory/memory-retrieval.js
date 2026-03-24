@@ -49,19 +49,56 @@ class MemoryRetrieval {
     };
   }
 
-  findRelevant(entries = [], query = '', options = {}) {
+  async findRelevant(entries = [], query = '', options = {}) {
     const queryTokens = unique(tokenize(query));
     const includeScores = options.includeScores === true;
     const limit = Number(options.limit || 8);
 
-    const scored = (entries || [])
-      .map((entry) => ({
-        entry,
-        score: this.scoreEntry(entry, queryTokens)
-      }))
+    // Initial scoring: Keyword + Recency (plus tierBoost)
+    let scored = (entries || []).map((entry) => ({
+      entry,
+      score: this.scoreEntry(entry, queryTokens)
+    }));
+
+    // Perform Semantic Search if available
+    let hasSemanticScores = false;
+    if (options.embeddingProvider && options.vectorStore) {
+      try {
+        const queryEmbeddings = await options.embeddingProvider.embed([query]);
+        if (queryEmbeddings && queryEmbeddings.length > 0) {
+          const queryVector = queryEmbeddings[0];
+          // Get similarities for all candidates from vectorStore
+          const semanticResults = options.vectorStore.search(queryVector, entries.length);
+          const semanticMap = new Map(semanticResults.map(r => [r.id, r.similarity]));
+
+          scored = scored.map(({ entry, score }) => {
+            const semanticScore = semanticMap.get(entry.id) || 0;
+            const hybridScore = (score.keywordScore * 0.4) + (semanticScore * 0.4) + (score.recencyScore * 0.2);
+            return {
+              entry,
+              score: {
+                ...score,
+                semanticScore,
+                hybridScore,
+                finalScore: hybridScore + score.tierBoost
+              }
+            };
+          });
+
+          hasSemanticScores = true;
+        }
+      } catch (err) {
+        console.warn('[memory-retrieval] Semantic search failed, falling back to keyword search:', err.message);
+      }
+    }
+
+    scored = scored
       .filter(({ score }) => {
-        if (!queryTokens.length) {
+        if (!queryTokens.length && !hasSemanticScores) {
           return true;
+        }
+        if (hasSemanticScores) {
+          return score.keywordScore > 0 || score.semanticScore > 0;
         }
         return score.keywordScore > 0;
       })

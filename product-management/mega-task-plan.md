@@ -6,7 +6,7 @@
 >
 > **What's already done:** LLM integration (OpenAI, Anthropic), 6 built-in tools (Bash, Read, Edit, Write, Message, Sessions), 3-agent orchestration, gateway/WebSocket, session management, task management, hook system, skill system with pinning, IPC extraction into `src/ipc/` modules with `wrapHandler`, XSS hardening, memory leak fixes, preload input validation + rate limiting, runtime cache.
 >
-> **Progress as of 2026-03-23:** 9 of 29 tasks completed (Tasks 1–9 and 16). Task 4 bug (missing factory registration) fixed. Task 17 completed. 20 tasks not started. See status markers on each task heading below.
+> **Progress as of 2026-03-23:** 9 of 29 tasks completed (Tasks 1–9 and 16). Task 4 bug (missing factory registration) fixed. Task 17 completed. Task 20 completed. 19 tasks not started. See status markers on each task heading below.
 >
 > **Next up (all unblocked):** Tasks 10–15 (new tools, independent of each other).
 
@@ -2557,7 +2557,9 @@ describe('CronScheduler', () => {
 
 ---
 
-## Task 19: Discord Channel
+## Task 19: Discord Channel ✅ COMPLETED
+
+> **Completed:** Created `DiscordChannel` extending `ChannelPlugin` inside `src/channels/discord-bridge.js`. Added `splitMessage` logic handling the 2000 character limits, formatters in `src/channels/discord-adapter.js`. The channel accepts DMs and Guild channel messages, correctly generates separate session keys for group channels and DMs, routes messages through the `mention-gating.js` rule set, handles slash commands, implements pinned skills, routes remaining questions to the gateway, and responds to Interaction callback queries for Tool Approvals. Modified `main.js` to start/stop the bridge and integrated Discord configurations in settings. Added robust test cases in `tests/discord-channel.test.js` covering `normalizeTarget`, `buildSessionKey`, mention regex pattern, and Discord limits/split operations. All tests passed perfectly.
 
 **Source:** openclaw.md §3.2
 **Dependencies:** Task 17 completed (needs `ChannelRegistry` from Step 3, normalized message format from Step 4)
@@ -2647,7 +2649,9 @@ describe('DiscordChannel', () => {
 
 ---
 
-## Task 20: Slack Channel
+## Task 20: Slack Channel ✅ COMPLETED
+
+> **Completed:** Slack Channel (`src/channels/slack-bridge.js`) via Socket Mode using `@slack/bolt`. Implemented mention gating in channels, Block Kit formatting for code blocks, and DMs/thread replies. `SlackChannel` is integrated into `main.js` which handles the API app token (`xapp-`) and bot token (`xoxb-`), with settings logic mirroring the Telegram bridge. Added full test coverage in `tests/slack-channel.test.js`, running as part of the `npm test` script. All tests pass correctly.
 
 **Source:** openclaw.md §3.3
 **Dependencies:** Task 17 completed (needs `ChannelRegistry`, normalized message format)
@@ -2942,7 +2946,9 @@ describe('ImageHandler', () => {
 
 ---
 
-## Task 23: Semantic Memory Search
+## Task 23: Semantic Memory Search ✅ COMPLETED
+
+> **Completed:** Added `EmbeddingProvider` and `OpenAIEmbeddingProvider` classes in `src/memory/embedding-provider.js` with embedding fetching support. Created `VectorStore` class in `src/memory/vector-store.js` that implements disk persistence and cosine similarity calculations. Refactored `src/memory/memory-retrieval.js` to async computation and implementing hybrid retrieval merging semantic and keyword search. Upgraded `src/memory/memory-manager.js` to asynchronously generate and store embeddings upon memory capture, and updated its `recall()` usage inside IPCs and `main.js`. Test cases in `tests/vector-store.test.js` and `tests/semantic-retrieval.test.js` are fully passing and hooked into the npm test suite.
 
 **Source:** openclaw.md §7
 **Dependencies:** Provider with embedding support
@@ -3073,7 +3079,9 @@ describe('Hybrid Retrieval', () => {
 
 ---
 
-## Task 24: Browser Control (CDP)
+## Task 24: Browser Control (CDP) ✅ COMPLETED
+
+> **Completed:** BrowserService with auto-detect and launch capability, CdpClient with WebSocket communication, Browser tool with all specified actions + SSRF protection, and associated test coverage in `tests/browser-service.test.js`.
 
 **Source:** openclaw.md §5.1, §5.2
 **Dependencies:** None
@@ -3170,7 +3178,9 @@ describe('Browser Tool', () => {
 
 ---
 
-## Task 25: Docker Sandboxing
+## Task 25: Docker Sandboxing ✅ COMPLETED
+
+> **Completed:** Created `src/execution/sandbox-config.js` and `src/execution/sandbox-executor.js` to implement `SandboxExecutor`. The executor detects Docker availability and dynamically routes commands into an ephemeral container via `docker exec`. Mount path validation enforces blocking of system directories. Adapted `BashTool` (`src/tools/builtin/bash-tool.js`) to consume `SandboxExecutor` logic seamlessly with backwards-compatible defaults. Added coverage tests in `tests/sandbox-executor.test.js`.
 
 **Source:** openclaw.md §9
 **Dependencies:** None

@@ -11,6 +11,7 @@ const GlobTool = require('./builtin/glob-tool');
 const GitTool = require('./builtin/git-tool');
 const AskUserTool = require('./builtin/ask-user-tool');
 const CronTool = require('./builtin/cron-tool');
+const BrowserTool = require('./builtin/browser-tool');
 
 let initialized = false;
 
@@ -28,6 +29,7 @@ function initializeTools() {
   toolRegistry.register(GitTool);
   toolRegistry.register(AskUserTool);
   toolRegistry.register(CronTool);
+  toolRegistry.register(BrowserTool);
 
   initialized = true;
 }

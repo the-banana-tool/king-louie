@@ -21,6 +21,8 @@ const RemoteControl = require('./src/gateway/remote-control');
 const { ChannelRegistry } = require('./src/channels/channel-plugin');
 const AllowlistManager = require('./src/channels/allowlist-manager');
 const TelegramBridge = require('./src/channels/telegram-bridge');
+const DiscordChannel = require('./src/channels/discord-bridge');
+const SlackChannel = require('./src/channels/slack-bridge');
 const MessageTool = require('./src/tools/builtin/message-tool');
 const {
   SessionsListTool,
@@ -56,6 +58,8 @@ let sessionManager;
 let remoteControl;
 let channelRegistry;
 let telegramBridge;
+let discordBridge;
+let slackChannel;
 let allowlistManager;
 let userProfile;
 let notificationRouter;
@@ -69,6 +73,9 @@ let cronStore;
 let cronExecutor;
 let cronScheduler;
 const TELEGRAM_TOKEN_STORE_KEY = '__telegram_bot_token';
+const DISCORD_TOKEN_STORE_KEY = '__discord_bot_token';
+const SLACK_APP_TOKEN_STORE_KEY = '__slack_app_token';
+const SLACK_BOT_TOKEN_STORE_KEY = '__slack_bot_token';
 const ELEVENLABS_TOKEN_STORE_KEY = '__elevenlabs_api_key';
 
 const DEFAULT_SETTINGS = {
@@ -128,6 +135,16 @@ const DEFAULT_SETTINGS = {
   channels: {
     telegram: {
       requireMention: false
+    },
+    discord: {
+      enabled: false,
+      requireMention: false,
+      allowedGuilds: [],
+    },
+    slack: {
+      enabled: false,
+      requireMention: true,
+      allowedChannels: []
     }
   }
 };
@@ -191,6 +208,14 @@ const mergeSettings = (settings = {}) => {
       telegram: {
         ...(DEFAULT_SETTINGS.channels?.telegram || {}),
         ...(source.channels?.telegram || {})
+      },
+      discord: {
+        ...(DEFAULT_SETTINGS.channels?.discord || {}),
+        ...(source.channels?.discord || {})
+      },
+      slack: {
+        ...(DEFAULT_SETTINGS.channels?.slack || {}),
+        ...(source.channels?.slack || {})
       }
     }
   };
@@ -312,13 +337,13 @@ const formatProjectContextSection = (workingDirectory = process.cwd()) => {
   ].join('\n');
 };
 
-const buildMemoryContextSection = (query = '', options = {}) => {
+const buildMemoryContextSection = async (query = '', options = {}) => {
   if (!memoryManager) {
     return '';
   }
 
   try {
-    return memoryManager.buildPromptContext(query, {
+    return await memoryManager.buildPromptContext(query, {
       limit: options.limit || 6
     });
   } catch (error) {
@@ -843,6 +868,74 @@ const getDecryptedTelegramToken = () => {
   return decryptToken(encryptedToken);
 };
 
+const hasStoredDiscordToken = () => {
+  const tokens = getApiTokens();
+  return Boolean(tokens[DISCORD_TOKEN_STORE_KEY]);
+};
+
+const saveDiscordToken = (token) => {
+  const tokens = getApiTokens();
+  tokens[DISCORD_TOKEN_STORE_KEY] = encryptToken(token.trim());
+  setApiTokens(tokens);
+};
+
+const clearDiscordToken = () => {
+  const tokens = getApiTokens();
+  delete tokens[DISCORD_TOKEN_STORE_KEY];
+  setApiTokens(tokens);
+};
+
+const getDecryptedDiscordToken = () => {
+  const tokens = getApiTokens();
+  const encryptedToken = tokens[DISCORD_TOKEN_STORE_KEY];
+const hasStoredSlackAppToken = () => {
+  const tokens = getApiTokens();
+  return Boolean(tokens[SLACK_APP_TOKEN_STORE_KEY]);
+};
+
+const saveSlackAppToken = (token) => {
+  const tokens = getApiTokens();
+  tokens[SLACK_APP_TOKEN_STORE_KEY] = encryptToken(token.trim());
+  setApiTokens(tokens);
+};
+
+const clearSlackAppToken = () => {
+  const tokens = getApiTokens();
+  delete tokens[SLACK_APP_TOKEN_STORE_KEY];
+  setApiTokens(tokens);
+};
+
+const getDecryptedSlackAppToken = () => {
+  const tokens = getApiTokens();
+  const encryptedToken = tokens[SLACK_APP_TOKEN_STORE_KEY];
+  if (!encryptedToken) return null;
+  return decryptToken(encryptedToken);
+};
+
+const hasStoredSlackBotToken = () => {
+  const tokens = getApiTokens();
+  return Boolean(tokens[SLACK_BOT_TOKEN_STORE_KEY]);
+};
+
+const saveSlackBotToken = (token) => {
+  const tokens = getApiTokens();
+  tokens[SLACK_BOT_TOKEN_STORE_KEY] = encryptToken(token.trim());
+  setApiTokens(tokens);
+};
+
+const clearSlackBotToken = () => {
+  const tokens = getApiTokens();
+  delete tokens[SLACK_BOT_TOKEN_STORE_KEY];
+  setApiTokens(tokens);
+};
+
+const getDecryptedSlackBotToken = () => {
+  const tokens = getApiTokens();
+  const encryptedToken = tokens[SLACK_BOT_TOKEN_STORE_KEY];
+  if (!encryptedToken) return null;
+  return decryptToken(encryptedToken);
+};
+
 const hasStoredElevenLabsToken = () => {
   const tokens = getApiTokens();
   return Boolean(tokens[ELEVENLABS_TOKEN_STORE_KEY]);
@@ -940,6 +1033,81 @@ const validateTelegramToken = (token = '') => {
   return null;
 };
 
+const stopDiscordBridge = async () => {
+  if (!discordBridge) return;
+
+  await discordBridge.stop();
+  if (channelRegistry) {
+    channelRegistry.unregister('discord');
+  }
+  discordBridge = null;
+};
+
+const startDiscordBridge = async (token) => {
+  if (!token || !gatewayServer || !sessionManager) return;
+
+  await stopDiscordBridge();
+
+  discordBridge = new DiscordChannel({
+    token,
+    gatewayServer,
+    sessionManager,
+    allowlistManager,
+    getChannelSettings: () => getSettings().channels?.discord || {},
+    getAgent,
+    listAgents,
+    pinManager,
+    getNotificationSettings: () => getSettings().notifications,
+    getVoiceSettings,
+    getTtsEngine: () => ttsEngine,
+    createLocalChat: (title) => {
+      const now = new Date().toISOString();
+      const newChat = {
+        id: createId(),
+        title,
+        createdAt: now,
+        updatedAt: now,
+        messages: []
+      };
+      const chats = [newChat, ...getChats()];
+      setChats(chats);
+
+      if (mainWindow) {
+        mainWindow.webContents.send('chat:updated', { chats });
+      }
+
+      return newChat.id;
+    },
+    addMessageToLocalChat: (chatId, sender, text) => {
+      const chats = getChats();
+      const chat = chats.find((c) => c.id === chatId);
+      if (!chat) return;
+
+      const now = new Date().toISOString();
+      chat.messages.push({
+        id: createId(),
+        sender,
+        text,
+        timestamp: now
+      });
+      chat.updatedAt = now;
+
+      setChats(chats);
+
+      if (mainWindow) {
+        mainWindow.webContents.send('chat:updated', { chats });
+      }
+    }
+  });
+
+  if (channelRegistry) {
+    channelRegistry.register(discordBridge);
+    await channelRegistry.initializeAll(gatewayServer);
+  } else {
+    await discordBridge.start();
+  }
+};
+
 const stopTelegramBridge = async () => {
   if (!telegramBridge) return;
 
@@ -1015,6 +1183,38 @@ const startTelegramBridge = async (token) => {
     await channelRegistry.initializeAll(gatewayServer);
   } else {
     await telegramBridge.start();
+  }
+};
+
+const stopSlackChannel = async () => {
+  if (!slackChannel) return;
+
+  await slackChannel.shutdown();
+  if (channelRegistry) {
+    channelRegistry.unregister('slack');
+  }
+  slackChannel = null;
+};
+
+const startSlackChannel = async (appToken, botToken) => {
+  if (!appToken || !botToken || !gatewayServer || !sessionManager) return;
+
+  await stopSlackChannel();
+
+  slackChannel = new SlackChannel({
+    enabled: true,
+    appToken,
+    botToken,
+    requireMention: getSettings().channels?.slack?.requireMention !== false,
+    allowedChannels: getSettings().channels?.slack?.allowedChannels || []
+  });
+
+  if (channelRegistry) {
+    channelRegistry.register(slackChannel);
+    await channelRegistry.initializeAll(gatewayServer);
+  } else {
+    slackChannel.gateway = gatewayServer;
+    await slackChannel.initialize(gatewayServer);
   }
 };
 
@@ -1152,6 +1352,10 @@ const runLlmCommand = async (command = '') => {
         '- `/llm telegram test` — test saved Telegram token',
         '- `/llm telegram remove` — clear Telegram token and stop bridge',
         '- `/llm telegram status` — show Telegram bridge status',
+        '- `/llm slack add <app_token> <bot_token>` — save Slack tokens and start bridge',
+        '- `/llm slack test` — test saved Slack tokens',
+        '- `/llm slack remove` — clear Slack tokens and stop bridge',
+        '- `/llm slack status` — show Slack bridge status',
         '- `/llm voice add <elevenlabs_api_key>` — save ElevenLabs API key',
         '- `/llm voice test` — test ElevenLabs API key',
         '- `/llm voice remove` — clear saved ElevenLabs API key',
@@ -1159,6 +1363,66 @@ const runLlmCommand = async (command = '') => {
         '',
         'Providers: `openai`, `anthropic`, `copilot`'
       ].join('\n')
+    };
+  }
+
+  if (action === 'discord') {
+    const subAction = (rest[0] || 'status').toLowerCase();
+    const token = rest.slice(1).join(' ').trim();
+
+    if (subAction === 'status') {
+      const status = getApiStatus()?.discord || null;
+      return {
+        ok: true,
+        output: [
+          '### Discord Bridge',
+          `- Token: ${hasStoredDiscordToken() ? 'saved' : 'missing'}`,
+          `- Bridge: ${discordBridge ? 'running' : 'stopped'}`,
+          `- Status: ${status?.message || 'not tested'}`
+        ].join('\n')
+      };
+    }
+
+    if (subAction === 'add' || subAction === 'save') {
+      if (!token) return { ok: false, error: 'Token is required' };
+
+      try {
+        saveDiscordToken(token);
+        await startDiscordBridge(token);
+        updateStatus('discord', {
+          ok: true,
+          message: `Connected successfully`
+        });
+
+        return {
+          ok: true,
+          output: `Discord bridge connected.`
+        };
+      } catch (error) {
+        updateStatus('discord', {
+          ok: false,
+          message: error.message
+        });
+        return { ok: false, error: error.message };
+      }
+    }
+
+    if (subAction === 'remove' || subAction === 'clear') {
+      await stopDiscordBridge();
+      clearDiscordToken();
+      updateStatus('discord', {
+        ok: true,
+        message: 'Discord token removed and bridge stopped.'
+      });
+      return {
+        ok: true,
+        output: 'Discord token removed and bridge stopped.'
+      };
+    }
+
+    return {
+      ok: false,
+      error: 'Unknown discord action. Use add, remove, or status.'
     };
   }
 
@@ -1248,6 +1512,123 @@ const runLlmCommand = async (command = '') => {
     return {
       ok: false,
       error: 'Unknown telegram action. Use add, test, remove, or status.'
+    };
+  }
+
+  if (action === 'slack') {
+    const subAction = (rest[0] || 'status').toLowerCase();
+
+    if (subAction === 'status') {
+      const status = getApiStatus()?.slack || null;
+      return {
+        ok: true,
+        output: [
+          '### Slack Bridge',
+          `- App Token: ${hasStoredSlackAppToken() ? 'saved' : 'missing'}`,
+          `- Bot Token: ${hasStoredSlackBotToken() ? 'saved' : 'missing'}`,
+          `- Bridge: ${slackChannel ? 'running' : 'stopped'}`,
+          `- Status: ${status?.message || 'not tested'}`
+        ].join('\n')
+      };
+    }
+
+    if (subAction === 'add' || subAction === 'save') {
+      const appToken = rest[1] || '';
+      const botToken = rest[2] || '';
+
+      if (!appToken.startsWith('xapp-') || !botToken.startsWith('xoxb-')) {
+        return { ok: false, error: 'Invalid Slack tokens. Usage: /llm slack add xapp-... xoxb-...' };
+      }
+
+      try {
+        saveSlackAppToken(appToken);
+        saveSlackBotToken(botToken);
+
+        // Update settings to enable
+        const settings = getSettings();
+        setSettings({
+          ...settings,
+          channels: {
+            ...settings.channels,
+            slack: { ...settings.channels?.slack, enabled: true }
+          }
+        });
+
+        await startSlackChannel(appToken, botToken);
+
+        // If we get here it started successfully
+        updateStatus('slack', {
+          ok: true,
+          message: 'Connected to Slack Socket Mode'
+        });
+
+        return {
+          ok: true,
+          output: 'Slack bridge connected.'
+        };
+      } catch (error) {
+        updateStatus('slack', {
+          ok: false,
+          message: error.message
+        });
+        return { ok: false, error: error.message };
+      }
+    }
+
+    if (subAction === 'test') {
+      const appToken = getDecryptedSlackAppToken();
+      const botToken = getDecryptedSlackBotToken();
+
+      if (!appToken || !botToken) {
+        return { ok: false, error: 'Missing Slack tokens. Use `/llm slack add <app_token> <bot_token>`.' };
+      }
+
+      try {
+        await startSlackChannel(appToken, botToken);
+        updateStatus('slack', {
+          ok: true,
+          message: 'Connected to Slack Socket Mode'
+        });
+        return {
+          ok: true,
+          output: 'Slack connection successful.'
+        };
+      } catch (error) {
+        updateStatus('slack', {
+          ok: false,
+          message: error.message
+        });
+        return { ok: false, error: error.message };
+      }
+    }
+
+    if (subAction === 'remove' || subAction === 'clear') {
+      await stopSlackChannel();
+      clearSlackAppToken();
+      clearSlackBotToken();
+
+      const settings = getSettings();
+      setSettings({
+        ...settings,
+        channels: {
+          ...settings.channels,
+          slack: { ...settings.channels?.slack, enabled: false }
+        }
+      });
+
+      updateStatus('slack', {
+        ok: true,
+        message: 'Slack tokens removed and bridge stopped.'
+      });
+      return {
+        ok: true,
+        output: 'Slack tokens removed and bridge stopped.'
+      };
+    }
+
+    return {
+      ok: false,
+      error: 'Unknown slack action. Use add, test, remove, or status.'
     };
   }
 
@@ -1605,7 +1986,7 @@ const initializeAgentInfrastructure = async () => {
         },
         systemPrompt: [
           buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
-          buildMemoryContextSection(message),
+          await buildMemoryContextSection(message),
           formatUserContextSection(),
           formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
         ].join('\n\n'),
@@ -1729,6 +2110,17 @@ const initializeAgentInfrastructure = async () => {
     await startTelegramBridge(telegramToken);
   }
 
+  const discordToken = String(getDecryptedDiscordToken() || '').trim();
+  if (discordToken) {
+    await startDiscordBridge(discordToken);
+  }
+  const slackAppToken = getDecryptedSlackAppToken();
+  const slackBotToken = getDecryptedSlackBotToken();
+  const settings = getSettings();
+  if (slackAppToken && slackBotToken && settings.channels?.slack?.enabled) {
+    await startSlackChannel(slackAppToken, slackBotToken);
+  }
+
   await runHookEvent('SessionStart', {
     source: 'main',
     startedAt: new Date().toISOString(),
@@ -1813,7 +2205,10 @@ registerHandlers(ipcMain, {
   providerDefaults,
   hasStoredElevenLabsToken,
   hasStoredTelegramToken,
+  hasStoredSlackAppToken,
+  hasStoredSlackBotToken,
   getTelegramBridge: () => telegramBridge,
+  getSlackChannel: () => slackChannel,
   normalizeTemplateVariables,
   getUserProfile,
   setTemplateVariables,
@@ -1900,8 +2295,9 @@ app.on('window-all-closed', function () {
 
     if (channelRegistry) {
       channelRegistry.shutdownAll().catch((err) => console.warn('[main] Channel shutdown failed:', err.message));
-    } else if (telegramBridge) {
-      telegramBridge.stop().catch((err) => console.warn('[main] Telegram bridge stop failed:', err.message));
+    } else {
+      if (telegramBridge) telegramBridge.stop().catch((err) => console.warn('[main] Telegram bridge stop failed:', err.message));
+      if (discordBridge) discordBridge.stop().catch((err) => console.warn('[main] Discord bridge stop failed:', err.message));
     }
     if (gatewayServer) {
       gatewayServer.stop().catch((err) => console.warn('[main] Gateway server stop failed:', err.message));
