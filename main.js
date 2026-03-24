@@ -70,7 +70,11 @@ const DEFAULT_SETTINGS = {
     openai: 'gpt-4o-mini',
     anthropic: 'claude-3-5-sonnet-latest',
     copilot: '',
-    groq: 'llama-3.3-70b-versatile'
+    groq: 'llama-3.3-70b-versatile',
+    mistral: 'mistral-large-latest',
+    ollama: '',
+    gemini: 'gemini-2.0-flash',
+    openrouter: 'openai/gpt-4o-mini'
   },
   inference: {
     activeTier: 'standard',
@@ -326,21 +330,32 @@ const providerLabels = {
   openai: 'OpenAI',
   anthropic: 'Anthropic Claude',
   copilot: 'GitHub Copilot',
-  groq: 'Groq'
+  groq: 'Groq',
+  mistral: 'Mistral AI',
+  ollama: 'Ollama (Local)',
+  gemini: 'Google Gemini',
+  openrouter: 'OpenRouter'
 };
 
 const providerDefaults = {
   openai: 'gpt-4o-mini',
   anthropic: 'claude-3-5-sonnet-latest',
   copilot: '',
-  groq: 'llama-3.3-70b-versatile'
+  groq: 'llama-3.3-70b-versatile',
+  mistral: 'mistral-large-latest',
+  ollama: '',
+  gemini: 'gemini-2.0-flash',
+  openrouter: 'openai/gpt-4o-mini'
 };
 
 const providerTokenHints = {
   openai: 'sk-',
   anthropic: 'sk-ant-',
   copilot: 'ghp_',
-  groq: 'gsk_'
+  groq: 'gsk_',
+  mistral: '',
+  gemini: '',
+  openrouter: 'sk-or-'
 };
 
 const normalizeProvider = (value = '') => String(value || '').trim().toLowerCase();

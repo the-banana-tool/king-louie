@@ -1,6 +1,10 @@
 const OpenAIProvider = require('./openai-provider');
 const AnthropicProvider = require('./anthropic-provider');
 const GroqProvider = require('./groq-provider');
+const MistralProvider = require('./mistral-provider');
+const OllamaProvider = require('./ollama-provider');
+const GeminiProvider = require('./gemini-provider');
+const OpenRouterProvider = require('./openrouter-provider');
 
 class ProviderFactory {
   static _registry = new Map();
@@ -36,5 +40,10 @@ class ProviderFactory {
 
 ProviderFactory.registerProvider('openai', OpenAIProvider);
 ProviderFactory.registerProvider('anthropic', AnthropicProvider);
+ProviderFactory.registerProvider('groq', GroqProvider);
+ProviderFactory.registerProvider('mistral', MistralProvider);
+ProviderFactory.registerProvider('ollama', OllamaProvider);
+ProviderFactory.registerProvider('gemini', GeminiProvider);
+ProviderFactory.registerProvider('openrouter', OpenRouterProvider);
 
 module.exports = ProviderFactory;

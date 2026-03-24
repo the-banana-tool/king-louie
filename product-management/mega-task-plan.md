@@ -6,9 +6,9 @@
 >
 > **What's already done:** LLM integration (OpenAI, Anthropic), 6 built-in tools (Bash, Read, Edit, Write, Message, Sessions), 3-agent orchestration, gateway/WebSocket, session management, task management, hook system, skill system with pinning, IPC extraction into `src/ipc/` modules with `wrapHandler`, XSS hardening, memory leak fixes, preload input validation + rate limiting, runtime cache.
 >
-> **Progress as of 2026-03-23:** 3 of 29 tasks completed (Tasks 1, 2, 3). Task 17 partially done. 25 tasks not started. See status markers on each task heading below.
+> **Progress as of 2026-03-23:** 8 of 29 tasks completed (Tasks 1–8). Task 4 bug (missing factory registration) fixed. Task 17 partially done. 21 tasks not started. See status markers on each task heading below.
 >
-> **Next up (all unblocked):** Tasks 4–8 (new providers, independent of each other), Tasks 10–15 (new tools, independent of each other), Task 16 (usage tracking), Task 17 completion (channel registry).
+> **Next up (all unblocked):** Task 9 (inference router updates), Tasks 10–15 (new tools, independent of each other), Task 16 (usage tracking), Task 17 completion (channel registry).
 
 ---
 
@@ -476,7 +476,7 @@ npm test
 
 ---
 
-## Task 4: Groq Provider ✅ COMPLETED (with known bug)
+## Task 4: Groq Provider ✅ COMPLETED
 
 > **Completed:** `GroqProvider` in `src/providers/groq-provider.js`, settings integrated in `main.js` (providerLabels, providerDefaults, providerTokenHints, providerModels, tierMap.fast), test endpoint in `settings-handlers.js`, tests in `tests/groq-provider.test.js` added to `package.json`.
 >
@@ -623,7 +623,9 @@ describe('GroqProvider', () => {
 
 ---
 
-## Task 5: Ollama Provider (Local Models)
+## Task 5: Ollama Provider (Local Models) ✅ COMPLETED
+
+> **Completed:** `OllamaProvider` in `src/providers/ollama-provider.js`. Overrides `validateApiKey()` (no-op) and `getHeaders()` (no Authorization). Uses OpenAI-compatible endpoint at `localhost:11434/v1`. `discoverModels()` hits `/api/tags`. Registered in factory, settings integrated in `main.js`, test endpoint in `settings-handlers.js`. 10 tests passing.
 
 **Source:** openclaw.md §2.3
 **Dependencies:** Task 3
@@ -738,7 +740,9 @@ describe('OllamaProvider', () => {
 
 ---
 
-## Task 6: Mistral Provider
+## Task 6: Mistral Provider ✅ COMPLETED
+
+> **Completed:** `MistralProvider` in `src/providers/mistral-provider.js`. OpenAI-compatible pattern (copied from Groq). Models: mistral-large-latest, mistral-small-latest, codestral-latest, open-mistral-nemo. Pricing table included. Registered in factory, settings integrated, test endpoint added. Also fixed Task 4 Groq registration bug. 8 tests passing.
 
 **Source:** openclaw.md §2.4
 **Dependencies:** Task 3
@@ -805,7 +809,9 @@ describe('MistralProvider', () => {
 
 ---
 
-## Task 7: Google Gemini Provider
+## Task 7: Google Gemini Provider ✅ COMPLETED
+
+> **Completed:** `GeminiProvider` in `src/providers/gemini-provider.js`. Custom implementation (NOT OpenAI-compatible): `formatMessages()` converts to Gemini parts format with role mapping (assistant→model), extracts system instructions separately. `formatTools()` converts to functionDeclarations. `parseToolCalls()` converts functionCall responses back to standard tool_use shape. Auth via `?key=` query param. Streaming via SSE with `usageMetadata` parsing. Registered in factory, settings integrated, test endpoint added. 15 tests passing.
 
 **Source:** openclaw.md §2.5
 **Dependencies:** Task 3
@@ -951,7 +957,9 @@ describe('GeminiProvider', () => {
 
 ---
 
-## Task 8: OpenRouter Meta-Provider
+## Task 8: OpenRouter Meta-Provider ✅ COMPLETED
+
+> **Completed:** `OpenRouterProvider` in `src/providers/openrouter-provider.js`. OpenAI-compatible pattern with extra `HTTP-Referer` and `X-Title` headers. Default models span multiple upstream providers. `discoverModels()` fetches from `/models` endpoint. Registered in factory, settings integrated, test endpoint added. 8 tests passing.
 
 **Source:** openclaw.md §2.6
 **Dependencies:** Task 3

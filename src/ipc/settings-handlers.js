@@ -224,6 +224,22 @@ function registerSettingsHandlers(ipcMain, context = {}) {
       response = await fetch('https://api.groq.com/openai/v1/models', {
         headers: { Authorization: `Bearer ${token}` }
       });
+    } else if (provider === 'mistral') {
+      response = await fetch('https://api.mistral.ai/v1/models', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+    } else if (provider === 'ollama') {
+      response = await fetch('http://localhost:11434/api/tags');
+    } else if (provider === 'gemini') {
+      response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${token}`);
+    } else if (provider === 'openrouter') {
+      response = await fetch('https://openrouter.ai/api/v1/models', {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'HTTP-Referer': 'king-louie',
+          'X-Title': 'King Louie'
+        }
+      });
     }
 
     if (!response) {
