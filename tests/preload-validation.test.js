@@ -45,10 +45,22 @@ describe('Preload Validation', () => {
       assert.throws(() => api.chat.sendMessage({}), /Invalid chatId: expected string/);
     });
     it('requires message to be a string', () => {
-      assert.throws(() => api.chat.sendMessage({ chatId: '123' }), /Invalid message: expected string/);
+      assert.throws(
+        () => api.chat.sendMessage({ chatId: '123' }),
+        /Invalid payload: expected non-empty message or at least one image/
+      );
     });
     it('requires message to have length > 0', () => {
-      assert.throws(() => api.chat.sendMessage({ chatId: '123', message: '   ' }), /Invalid message: must be at least 1 character\(s\)/);
+      assert.throws(
+        () => api.chat.sendMessage({ chatId: '123', message: '   ' }),
+        /Invalid payload: expected non-empty message or at least one image/
+      );
+    });
+    it('allows image-only payload', async () => {
+      await assert.doesNotReject(api.chat.sendMessage({
+        chatId: '123',
+        images: [{ base64: 'abc123', mimeType: 'image/png' }]
+      }));
     });
     it('allows valid payload', async () => {
       await assert.doesNotReject(api.chat.sendMessage({ chatId: '123', message: 'hello' }));

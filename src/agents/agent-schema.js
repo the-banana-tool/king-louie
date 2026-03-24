@@ -12,6 +12,7 @@ class Agent {
     this.systemPromptTemplate = config.systemPromptTemplate || null;
     this.systemPrompt = config.systemPrompt || 'You are a helpful assistant.';
     this.allowedTools = Array.isArray(config.allowedTools) ? config.allowedTools : [];
+    this.autoApproveTools = Array.isArray(config.autoApproveTools) ? config.autoApproveTools : [];
     this.temperature = typeof config.temperature === 'number' ? config.temperature : 0.7;
     this.maxIterations = Number.isInteger(config.maxIterations) ? config.maxIterations : 10;
     this.voice = Agent.normalizeVoiceConfig(config.voice);

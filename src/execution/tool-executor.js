@@ -85,11 +85,14 @@ class ToolExecutor extends EventEmitter {
 
     if (tool.requiresApproval && this.requireApproval) {
       const autoApproved = await this.shouldAutoApprove(toolName, effectiveParameters);
-      if (autoApproved) {
+      const agentAutoApproved = Array.isArray(options.autoApproveTools)
+        && options.autoApproveTools.includes(toolName);
+
+      if (autoApproved || agentAutoApproved) {
         this.emit('approvalAutoGranted', { toolName, parameters: effectiveParameters });
       }
 
-      if (!autoApproved) {
+      if (!autoApproved && !agentAutoApproved) {
         const approved = await this.requestApproval(toolName, effectiveParameters);
         if (!approved) {
           const denied = { success: false, error: 'User denied permission' };

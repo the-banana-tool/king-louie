@@ -5,6 +5,7 @@ const appState = {
   isAgentModeEnabled: false,
   isHistoryCollapsed: false,
   memoryEntries: [],
+  pendingImages: [],
   streamBuffers: new Map(),
   settings: {
     encryptionAvailable: true,
@@ -148,6 +149,9 @@ const dom = {
   cronAddTargetInput: document.getElementById('cron-add-target-input'),
   cronAddKindInput: document.getElementById('cron-add-kind-input'),
   cronAddValueInput: document.getElementById('cron-add-value-input'),
+  imagePreviewList: document.getElementById('image-preview-list'),
+  imageFileInput: document.getElementById('image-file-input'),
+  attachImageBtn: document.getElementById('attach-image-btn'),
 };
 
 const unsubscribeHandlers = [];
@@ -159,6 +163,7 @@ function resetAppState() {
   appState.isAgentModeEnabled = false;
   appState.isHistoryCollapsed = false;
   appState.memoryEntries = [];
+  appState.pendingImages = [];
   appState.streamBuffers.clear();
   appState.settings = {
     encryptionAvailable: true,
@@ -336,6 +341,131 @@ function parseSlashCommand(message = '') {
     name: name.toLowerCase(),
     args: rest
   };
+}
+
+const SUPPORTED_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024;
+const MAX_IMAGES_PER_MESSAGE = 5;
+
+function renderPendingImages() {
+  if (!dom.imagePreviewList) return;
+
+  dom.imagePreviewList.innerHTML = '';
+  if (!Array.isArray(appState.pendingImages) || appState.pendingImages.length === 0) {
+    dom.imagePreviewList.hidden = true;
+    return;
+  }
+
+  appState.pendingImages.forEach((image, index) => {
+    const item = document.createElement('div');
+    item.className = 'image-preview-item';
+
+    const img = document.createElement('img');
+    img.className = 'image-preview-thumb';
+    img.src = image.previewUrl || `data:${image.mimeType};base64,${image.base64}`;
+    img.alt = image.name || `Image ${index + 1}`;
+
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.className = 'image-preview-remove';
+    removeBtn.textContent = '×';
+    removeBtn.title = 'Remove image';
+    removeBtn.setAttribute('aria-label', 'Remove image');
+    removeBtn.addEventListener('click', () => {
+      appState.pendingImages.splice(index, 1);
+      renderPendingImages();
+    });
+
+    item.appendChild(img);
+    item.appendChild(removeBtn);
+    dom.imagePreviewList.appendChild(item);
+  });
+
+  dom.imagePreviewList.hidden = false;
+}
+
+function clearPendingImages() {
+  if (Array.isArray(appState.pendingImages)) {
+    appState.pendingImages.forEach((image) => {
+      if (image?.previewUrl) {
+        URL.revokeObjectURL(image.previewUrl);
+      }
+    });
+  }
+  appState.pendingImages = [];
+  if (dom.imageFileInput) {
+    dom.imageFileInput.value = '';
+  }
+  renderPendingImages();
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || '');
+      const parts = result.split(',');
+      resolve(parts[1] || '');
+    };
+    reader.onerror = () => reject(new Error('Unable to read image file'));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function addImageFiles(fileList) {
+  const files = Array.from(fileList || []);
+  if (files.length === 0) return;
+
+  const remainingSlots = MAX_IMAGES_PER_MESSAGE - appState.pendingImages.length;
+  if (remainingSlots <= 0) {
+    alert(`You can attach up to ${MAX_IMAGES_PER_MESSAGE} images per message.`);
+    return;
+  }
+
+  const candidates = files.slice(0, remainingSlots);
+  for (const file of candidates) {
+    if (!SUPPORTED_IMAGE_MIME_TYPES.has(file.type)) {
+      alert(`Unsupported image format: ${file.type}`);
+      continue;
+    }
+
+    if (file.size > MAX_IMAGE_SIZE_BYTES) {
+      alert(`Image too large: ${file.name} exceeds 5MB.`);
+      continue;
+    }
+
+    const base64 = await fileToBase64(file);
+    appState.pendingImages.push({
+      name: file.name,
+      mimeType: file.type,
+      base64,
+      previewUrl: URL.createObjectURL(file)
+    });
+  }
+
+  renderPendingImages();
+}
+
+function renderMessageImages(messageContent, images = []) {
+  if (!Array.isArray(images) || images.length === 0) {
+    return;
+  }
+
+  const gallery = document.createElement('div');
+  gallery.className = 'message-image-gallery';
+
+  images.forEach((image, index) => {
+    if (!image?.base64 || !image?.mimeType) return;
+    const img = document.createElement('img');
+    img.className = 'message-image';
+    img.src = `data:${image.mimeType};base64,${image.base64}`;
+    img.alt = image.name || `Attached image ${index + 1}`;
+    gallery.appendChild(img);
+  });
+
+  if (gallery.childElementCount > 0) {
+    messageContent.appendChild(gallery);
+  }
 }
 
 function addToolEventMessage(title, payload, variant = '') {
@@ -641,7 +771,8 @@ function renderChatMessages() {
     addMessage(message.sender, message.text, {
       llm: message?.llm,
       runningLlmTotals: callTotals ? { ...runningTotals } : null,
-      format: message?.format
+      format: message?.format,
+      images: message?.images
     });
   });
 }
@@ -1931,8 +2062,9 @@ function showRenameDialog(currentTitle) {
 
 async function sendMessage() {
   const message = dom.userInput.value.trim();
+  const pendingImages = Array.isArray(appState.pendingImages) ? [...appState.pendingImages] : [];
 
-  if (message === '') {
+  if (message === '' && pendingImages.length === 0) {
     return;
   }
 
@@ -2280,7 +2412,10 @@ async function sendMessage() {
           id: `temp-${Date.now()}`,
           sender: 'user',
           text: message,
-          timestamp: now
+          timestamp: now,
+          ...(pendingImages.length > 0 ? {
+            images: pendingImages.map(({ previewUrl, ...rest }) => rest)
+          } : {})
         }
       ]
     };
@@ -2289,6 +2424,7 @@ async function sendMessage() {
 
   dom.userInput.value = '';
   dom.userInput.style.height = 'auto';
+  clearPendingImages();
 
   try {
     const pinnedInfo = await window.electron.skill.getPinned({ chatId: appState.activeChatId });
@@ -2299,6 +2435,9 @@ async function sendMessage() {
       });
 
       if (skillResult && !skillResult.continueWithAgent) {
+        if (pendingImages.length > 0) {
+          throw new Error('Pinned skill handling currently supports text-only input. Unpin skill or send without images.');
+        }
         const responseText = skillResult.ok
           ? (skillResult.message || 'Done.')
           : `❌ ${skillResult.error || 'Error'}`;
@@ -2313,6 +2452,7 @@ async function sendMessage() {
     const updatedChat = await window.electron.chat.sendMessage({
       chatId: appState.activeChatId,
       message,
+      images: pendingImages.map(({ previewUrl, ...rest }) => rest),
       agentMode: appState.isAgentModeEnabled
     });
 
@@ -2401,6 +2541,8 @@ function addMessage(sender, text, metadata = {}) {
     messagePara.textContent = text;
     messageContent.appendChild(messagePara);
   }
+
+  renderMessageImages(messageContent, metadata?.images || []);
 
   if (sender === 'assistant' && metadata?.llm?.totals) {
     const callTotals = metadata.llm.totals;
@@ -2574,6 +2716,16 @@ async function handleSetActiveProvider(providerKey) {
 // Event Listeners
 dom.sendBtn.addEventListener('click', sendMessage);
 
+if (dom.attachImageBtn && dom.imageFileInput) {
+  dom.attachImageBtn.addEventListener('click', () => {
+    dom.imageFileInput.click();
+  });
+
+  dom.imageFileInput.addEventListener('change', async (event) => {
+    await addImageFiles(event?.target?.files || []);
+  });
+}
+
 dom.userInput.addEventListener('keypress', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
@@ -2585,6 +2737,28 @@ dom.userInput.addEventListener('keypress', (e) => {
 dom.userInput.addEventListener('input', function() {
   this.style.height = 'auto';
   this.style.height = Math.min(this.scrollHeight, 200) + 'px';
+});
+
+dom.userInput.addEventListener('paste', async (event) => {
+  const items = Array.from(event.clipboardData?.items || []);
+  const imageFiles = items
+    .filter((item) => item.type && item.type.startsWith('image/'))
+    .map((item) => item.getAsFile())
+    .filter(Boolean);
+  if (imageFiles.length > 0) {
+    event.preventDefault();
+    await addImageFiles(imageFiles);
+  }
+});
+
+dom.userInput.addEventListener('dragover', (event) => {
+  event.preventDefault();
+});
+
+dom.userInput.addEventListener('drop', async (event) => {
+  event.preventDefault();
+  const files = Array.from(event.dataTransfer?.files || []).filter((file) => file.type?.startsWith('image/'));
+  await addImageFiles(files);
 });
 
 // New chat button
@@ -2995,6 +3169,7 @@ unsubscribeHandlers.push(window.electron.chat.onChatUpdated(async () => {
 }));
 
 window.addEventListener('beforeunload', () => {
+  clearPendingImages();
   appState.streamBuffers.clear();
   while (unsubscribeHandlers.length > 0) {
     const unsubscribe = unsubscribeHandlers.pop();

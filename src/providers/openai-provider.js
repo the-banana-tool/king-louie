@@ -1,4 +1,5 @@
 const BaseLLMProvider = require('./base-provider');
+const ImageHandler = require('../media/image-handler');
 
 class OpenAIProvider extends BaseLLMProvider {
   prependSystemPrompt(messages = [], systemPrompt = '') {
@@ -45,6 +46,30 @@ class OpenAIProvider extends BaseLLMProvider {
   }
 
   formatMessages(chatHistory) {
+    const buildImageParts = (images = []) => {
+      if (!Array.isArray(images) || images.length === 0) {
+        return [];
+      }
+
+      return ImageHandler.normalizeMessageImages(images).map((image) =>
+        ImageHandler.formatForProvider('openai', image)
+      );
+    };
+
+    const buildMultimodalContent = (text, images = []) => {
+      const imageParts = buildImageParts(images);
+      if (imageParts.length === 0) {
+        return typeof text === 'string' ? text : '';
+      }
+
+      const content = [];
+      if (typeof text === 'string' && text.trim()) {
+        content.push({ type: 'text', text });
+      }
+      content.push(...imageParts);
+      return content;
+    };
+
     return (chatHistory || [])
       .map((msg) => {
         if (!msg) return null;
@@ -65,14 +90,20 @@ class OpenAIProvider extends BaseLLMProvider {
           };
         }
 
-        if (msg.role && typeof msg.content === 'string') {
-          return { role: msg.role, content: msg.content };
+        if (msg.role && (typeof msg.content === 'string' || Array.isArray(msg.content))) {
+          const textContent = typeof msg.content === 'string' ? msg.content : '';
+          return {
+            role: msg.role,
+            content: Array.isArray(msg.content)
+              ? msg.content
+              : buildMultimodalContent(textContent, msg.images)
+          };
         }
 
         if (msg.sender && typeof msg.text === 'string') {
           return {
             role: msg.sender === 'assistant' ? 'assistant' : 'user',
-            content: msg.text
+            content: buildMultimodalContent(msg.text, msg.images)
           };
         }
 

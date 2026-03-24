@@ -117,6 +117,7 @@ const validateObject = (value, fieldName) => {
 };
 
 const VALID_SENDERS = new Set(['user', 'assistant', 'system', 'tool']);
+const SUPPORTED_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 
 const knownProviders = new Set(['openai', 'anthropic', 'copilot']);
 
@@ -144,6 +145,25 @@ const validateSkillExecutePayload = (payload = {}) => {
 const validateToolExecutePayload = (toolName, parameters) => {
   validateString(toolName, 'toolName', { minLength: 1 });
   validateObject(parameters || {}, 'parameters');
+};
+
+const validateImagesPayload = (images) => {
+  if (images == null) return;
+  if (!Array.isArray(images)) {
+    throw new Error('Invalid images: expected array');
+  }
+  if (images.length > 5) {
+    throw new Error('Invalid images: maximum 5 images per message');
+  }
+
+  for (const image of images) {
+    validateObject(image, 'image');
+    validateString(image.base64, 'image.base64', { minLength: 1 });
+    validateString(image.mimeType, 'image.mimeType', { minLength: 1 });
+    if (!SUPPORTED_IMAGE_MIME_TYPES.has(String(image.mimeType).toLowerCase())) {
+      throw new Error(`Invalid image.mimeType: unsupported type ${image.mimeType}`);
+    }
+  }
 };
 
 const lastCallByKey = new Map();
@@ -229,7 +249,15 @@ contextBridge.exposeInMainWorld(
       sendMessage: (payload) => {
         validateObject(payload, 'payload');
         validateString(payload.chatId, 'chatId');
-        validateString(payload.message, 'message', { minLength: 1 });
+        if (payload.message != null && typeof payload.message !== 'string') {
+          throw new Error('Invalid message: expected string');
+        }
+        validateImagesPayload(payload.images);
+        const hasText = typeof payload.message === 'string' && payload.message.trim().length > 0;
+        const hasImages = Array.isArray(payload.images) && payload.images.length > 0;
+        if (!hasText && !hasImages) {
+          throw new Error('Invalid payload: expected non-empty message or at least one image');
+        }
         return ipcRenderer.invoke('chat:sendMessage', payload);
       },
       onMessageStart: (callback) => registerOnce('chat:messageStart', callback),

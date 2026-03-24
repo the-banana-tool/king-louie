@@ -35,6 +35,29 @@ describe('GeminiProvider', () => {
     assert.deepStrictEqual(contents[1].parts, [{ text: 'Hi there' }]);
   });
 
+  it('formats user images into inlineData parts', () => {
+    const provider = new GeminiProvider('test-key-minimum-length');
+    const imageBase64 = Buffer.from('tiny-image').toString('base64');
+
+    const { contents } = provider.formatMessages([
+      {
+        role: 'user',
+        content: 'Describe this image',
+        images: [{ base64: imageBase64, mimeType: 'image/png', name: 'tiny.png' }]
+      }
+    ]);
+
+    assert.strictEqual(contents.length, 1);
+    assert.strictEqual(contents[0].role, 'user');
+    assert.deepStrictEqual(contents[0].parts[0], { text: 'Describe this image' });
+    assert.deepStrictEqual(contents[0].parts[1], {
+      inlineData: {
+        mimeType: 'image/png',
+        data: imageBase64
+      }
+    });
+  });
+
   it('extracts system instruction from messages', () => {
     const provider = new GeminiProvider('test-key-minimum-length');
     const { contents, systemInstruction } = provider.formatMessages([

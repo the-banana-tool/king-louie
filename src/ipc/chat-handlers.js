@@ -1,5 +1,6 @@
 const { wrapHandler } = require('./wrap-handler');
 const IPC = require('./constants');
+const ImageHandler = require('../media/image-handler');
 
 function registerChatHandlers(ipcMain, context = {}) {
   const {
@@ -128,22 +129,31 @@ function registerChatHandlers(ipcMain, context = {}) {
     return { ok: true, result };
   }));
 
-  ipcMain.handle(IPC.CHAT_SEND_MESSAGE, wrapHandler(IPC.CHAT_SEND_MESSAGE, async (event, { chatId, message, agentMode = false }) => {
+  ipcMain.handle(IPC.CHAT_SEND_MESSAGE, wrapHandler(IPC.CHAT_SEND_MESSAGE, async (event, { chatId, message, images = [], agentMode = false }) => {
+    const safeMessage = String(message || '');
+    const normalizedImages = ImageHandler.normalizeMessageImages(images);
+
+    if (!safeMessage.trim() && normalizedImages.length === 0) {
+      throw new Error('Message text or at least one image is required.');
+    }
+
     await runHookEvent('UserPromptSubmit', {
       source: 'ui',
       chatId,
-      prompt: String(message || ''),
+      prompt: safeMessage,
       timestamp: new Date().toISOString(),
       workingDirectory: process.cwd()
     });
 
-    const userMessage = appendMessageToChat(chatId, 'user', message);
+    const userMessage = appendMessageToChat(chatId, 'user', safeMessage, {
+      ...(normalizedImages.length > 0 ? { images: normalizedImages } : {})
+    });
     if (!userMessage) {
       throw new Error('Chat not found');
     }
 
     const inference = resolveInference();
-    if (!['openai', 'anthropic'].includes(inference.providerType)) {
+    if (!['openai', 'anthropic', 'gemini'].includes(inference.providerType)) {
       throw new Error('Active provider does not support chat completions yet.');
     }
     const provider = inference.provider;
@@ -171,7 +181,7 @@ function registerChatHandlers(ipcMain, context = {}) {
       options.runtimeEnvironment = runtimeEnvironment;
       options.systemPrompt = [
         buildRuntimeSystemPrompt(runtimeEnvironment),
-        await buildMemoryContextSection(message, { limit: 4 })
+        await buildMemoryContextSection(safeMessage, { limit: 4 })
       ].filter(Boolean).join('\n\n');
 
       const executor = await createToolExecutorWithApprovals(event, runtimeEnvironment);

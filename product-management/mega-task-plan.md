@@ -6,9 +6,9 @@
 >
 > **What's already done:** LLM integration (OpenAI, Anthropic), 6 built-in tools (Bash, Read, Edit, Write, Message, Sessions), 3-agent orchestration, gateway/WebSocket, session management, task management, hook system, skill system with pinning, IPC extraction into `src/ipc/` modules with `wrapHandler`, XSS hardening, memory leak fixes, preload input validation + rate limiting, runtime cache.
 >
-> **Progress as of 2026-03-24:** 24 of 29 tasks completed (Tasks 1–21, 23–25). Task 22 (Image Input) has a merged PR (#20) but the commit was empty — no code was delivered; task remains incomplete. 5 tasks remain: 22, 26, 27, 28, 29. See status markers on each task heading below.
+> **Progress as of 2026-03-24:** 25 of 29 tasks completed (Tasks 1–25, excluding 26–29). Task 22 (Image Input) has now been reimplemented and validated after the prior ghost commit issue. 4 tasks remain: 26, 27, 28, 29. See status markers on each task heading below.
 >
-> **Next up (all unblocked):** Task 22 (Image Input — redo), Task 26 (Webhook Ingress), Task 27 (Syntax Highlighting), Task 28 (Onboarding Wizard), Task 29 (Diagnostics — do last).
+> **Next up (all unblocked):** Task 26 (Webhook Ingress), Task 27 (Syntax Highlighting), Task 28 (Onboarding Wizard), Task 29 (Diagnostics — do last).
 
 ---
 
@@ -2838,9 +2838,9 @@ describe('AllowlistManager', () => {
 
 ---
 
-## Task 22: Media Handling — Image Input ⚠️ NOT COMPLETED (ghost commit)
+## Task 22: Media Handling — Image Input ✅ COMPLETED
 
-> **Warning:** PR #20 merged commit `c833696` which claims this task is done, but the commit contains zero file changes (identical tree to parent). `src/media/` does not exist. This task must be implemented from scratch.
+> **Completed:** Reimplemented from scratch after ghost commit issue. Added `src/media/image-handler.js` with validation, normalization, provider adapters, and processing helpers. Updated provider formatting for multimodal payloads in `src/providers/openai-provider.js`, `src/providers/anthropic-provider.js`, and `src/providers/gemini-provider.js`. Added renderer image attach/paste/drop flow with preview/remove UI and in-message image rendering updates in `renderer.js`, plus required styles in `styles.css`. Added tests in `tests/image-handler.test.js`, extended `tests/gemini-provider.test.js`, and added `tests/multimodal-provider-formatting.test.js`. Task 22 tests pass.
 
 **Source:** openclaw.md §6.1
 **Dependencies:** Providers that support vision (OpenAI gpt-4o, Anthropic Claude, Gemini)

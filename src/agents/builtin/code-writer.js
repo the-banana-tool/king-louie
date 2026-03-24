@@ -13,7 +13,9 @@ const CodeWriterAgent = new Agent({
     speed: 0.95
   },
   systemPromptTemplate: 'templates/code-writer.md.template',
-  allowedTools: ['Bash', 'Read', 'Edit', 'Write'],
+  allowedTools: ['Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep', 'Git'],
+  autoApproveTools: ['Bash', 'Edit', 'Write', 'Git'],
+  maxIterations: 40,
   systemPrompt: `You are a code implementation specialist. Your job is to:
 1. Understand requirements and read relevant code first
 2. Make minimal, targeted edits aligned with existing style

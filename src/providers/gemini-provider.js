@@ -1,4 +1,5 @@
 const BaseLLMProvider = require('./base-provider');
+const ImageHandler = require('../media/image-handler');
 
 class GeminiProvider extends BaseLLMProvider {
   constructor(apiKey) {
@@ -51,6 +52,26 @@ class GeminiProvider extends BaseLLMProvider {
     const messages = [];
     let systemInstruction = null;
 
+    const buildParts = (text, images = []) => {
+      const parts = [];
+      if (typeof text === 'string' && text.trim()) {
+        parts.push({ text });
+      }
+
+      if (Array.isArray(images) && images.length > 0) {
+        const imageParts = ImageHandler.normalizeMessageImages(images).map((image) =>
+          ImageHandler.formatForProvider('gemini', image)
+        );
+        parts.push(...imageParts);
+      }
+
+      if (parts.length === 0) {
+        parts.push({ text: '' });
+      }
+
+      return parts;
+    };
+
     for (const msg of (chatHistory || [])) {
       if (!msg) continue;
 
@@ -100,7 +121,7 @@ class GeminiProvider extends BaseLLMProvider {
 
       messages.push({
         role: role === 'assistant' ? 'model' : 'user',
-        parts: [{ text }]
+        parts: Array.isArray(msg.content) ? msg.content : buildParts(text, msg.images)
       });
     }
 

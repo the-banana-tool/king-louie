@@ -1,4 +1,5 @@
 const BaseLLMProvider = require('./base-provider');
+const ImageHandler = require('../media/image-handler');
 
 class AnthropicProvider extends BaseLLMProvider {
   getProviderName() {
@@ -35,21 +36,47 @@ class AnthropicProvider extends BaseLLMProvider {
   }
 
   formatMessages(chatHistory) {
+    const buildContent = (text, images = []) => {
+      const imageParts = Array.isArray(images) && images.length > 0
+        ? ImageHandler.normalizeMessageImages(images).map((image) =>
+            ImageHandler.formatForProvider('anthropic', image)
+          )
+        : [];
+
+      if (imageParts.length === 0) {
+        return text;
+      }
+
+      const content = [];
+      if (typeof text === 'string' && text.trim()) {
+        content.push({ type: 'text', text });
+      }
+      content.push(...imageParts);
+      return content;
+    };
+
     return (chatHistory || [])
       .map((msg) => {
         if (!msg) return null;
 
         if (msg.role === 'assistant' || msg.role === 'user') {
+          if (Array.isArray(msg.content)) {
+            return {
+              role: msg.role,
+              content: msg.content
+            };
+          }
+
           return {
             role: msg.role,
-            content: msg.content
+            content: buildContent(msg.content, msg.images)
           };
         }
 
         if (msg.sender && typeof msg.text === 'string') {
           return {
             role: msg.sender === 'assistant' ? 'assistant' : 'user',
-            content: msg.text
+            content: buildContent(msg.text, msg.images)
           };
         }
 
