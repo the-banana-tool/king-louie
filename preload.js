@@ -264,7 +264,14 @@ contextBridge.exposeInMainWorld(
         return ipcRenderer.invoke('agent:execute', payload);
       },
       executeParallel: (payload) => ipcRenderer.invoke('agent:executeParallel', payload),
-      executeSerial: (payload) => ipcRenderer.invoke('agent:executeSerial', payload)
+      executeSerial: (payload) => ipcRenderer.invoke('agent:executeSerial', payload),
+      onAskUser: (callback) => registerOnce('agent:askUser', callback),
+      sendUserResponse: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.requestId, 'requestId');
+        validateString(payload.response, 'response');
+        ipcRenderer.send('agent:userResponse', payload);
+      }
     },
     orchestration: {
       gatewayStatus: () => ipcRenderer.invoke('gateway:status'),

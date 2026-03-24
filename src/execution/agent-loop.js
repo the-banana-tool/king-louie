@@ -75,11 +75,61 @@ class AgentLoop {
           response.toolUseId ||
           `toolcall-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-        const toolResult = await this.executor.execute(
-          response.toolName,
-          response.parameters,
-          options
-        );
+        let toolResult;
+
+        if (response.toolName === 'AskUser') {
+          // Special handling for AskUser tool
+          const question = response.parameters?.question;
+
+          toolResult = await new Promise((resolve, reject) => {
+            const requestId = `ask-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+            const timeoutMs = 5 * 60 * 1000; // 5 minutes
+
+            const timeoutId = setTimeout(() => {
+              // Only cleanup if we actually emitted the event
+              // Cleanup is handled by the main process IPC handler when it resolves
+              resolve({ ok: false, error: 'User did not respond within 5 minutes.' });
+            }, timeoutMs);
+
+            // Send IPC message to the renderer to show the prompt
+            // Check if we are running in the main process
+            try {
+              const { BrowserWindow } = require('electron');
+              const windows = BrowserWindow.getAllWindows();
+
+              if (windows.length > 0) {
+                const win = windows[0];
+                const { pendingAskUserResolvers } = require('../../main');
+
+                if (pendingAskUserResolvers) {
+                  pendingAskUserResolvers.set(requestId, {
+                    resolve: (userResponse) => {
+                      clearTimeout(timeoutId);
+                      resolve({ ok: true, response: userResponse });
+                    }
+                  });
+                  win.webContents.send('agent:askUser', { requestId, question });
+                } else {
+                   clearTimeout(timeoutId);
+                   resolve({ ok: false, error: 'pendingAskUserResolvers not available' });
+                }
+              } else {
+                clearTimeout(timeoutId);
+                resolve({ ok: false, error: 'No UI available to ask user.' });
+              }
+            } catch (e) {
+              // Not in electron main process context (e.g. tests)
+              clearTimeout(timeoutId);
+              resolve({ ok: false, error: 'Cannot ask user outside of Electron main process.' });
+            }
+          });
+        } else {
+          toolResult = await this.executor.execute(
+            response.toolName,
+            response.parameters,
+            options
+          );
+        }
 
         executedTools.push({
           name: response.toolName,
