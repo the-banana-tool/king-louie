@@ -1360,7 +1360,9 @@ describe('WebFetch Cache', () => {
 
 ---
 
-## Task 11: Web Search Tool
+## Task 11: Web Search Tool ✅ COMPLETED
+
+> **Completed:** Created `SearchProvider` base class and implementations for `DuckDuckGoSearch`, `BraveSearch`, and `TavilySearch`. Created `WebSearchTool` which auto-detects the configured provider from the app settings, falling back to DuckDuckGo. Integrated settings handling in `main.js` and `src/ipc/settings-handlers.js` with `safeStorage` encryption for Brave and Tavily API keys. Added test coverage in `tests/web-search-tool.test.js`.
 
 **Source:** openclaw.md §1.2
 **Dependencies:** None (independent of Task 10)

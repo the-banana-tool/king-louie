@@ -81,8 +81,35 @@ function registerSettingsHandlers(ipcMain, context = {}) {
         hasToken: hasStoredTelegramToken(),
         bridgeActive: Boolean(getTelegramBridge()),
         status: status.telegram || null
-      }
+      },
+      webSearch: settings.webSearch
     };
+  }));
+
+  ipcMain.handle('settings:saveWebSearchKey', wrapHandler('settings:saveWebSearchKey', async (_event, { provider, apiKey, clear } = {}) => {
+    if (!['brave', 'tavily'].includes(provider)) {
+      return { ok: false, error: 'Unknown web search provider.' };
+    }
+
+    const settings = getSettings();
+    if (clear) {
+      settings.webSearch[provider].apiKey = '';
+      setSettings(settings);
+      return { ok: true, hasKey: false };
+    }
+
+    const key = String(apiKey || '').trim();
+    if (!key) {
+      return { ok: false, error: `${provider} API key is required.` };
+    }
+
+    if (!safeStorage.isEncryptionAvailable()) {
+      return { ok: false, error: 'Secure storage is not available on this system.' };
+    }
+
+    settings.webSearch[provider].apiKey = encryptToken(key);
+    setSettings(settings);
+    return { ok: true, hasKey: true };
   }));
 
   ipcMain.handle('settings:saveTemplateVariables', wrapHandler('settings:saveTemplateVariables', async (_event, { templateVariables } = {}) => {
