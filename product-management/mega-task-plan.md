@@ -1,14 +1,20 @@
 # King Louie — Consolidated Implementation Plan
 
-> **Purpose:** Single-file handoff for LLMs working in series. Each task is self-contained, in dependency order, with explicit instructions and test cases. Tasks already completed have been excluded.
+> **Purpose:** Single-file handoff for LLMs working in series. Each task is self-contained, in dependency order, with explicit instructions and test cases.
 >
 > **Codebase context:** Electron app (main process + renderer + preload). Node.js/CommonJS. No TypeScript. Uses `electron-store`, `marked`, `dompurify`. Tests run via `npm test` (Node `--test` runner). IPC handlers live in `src/ipc/` modules using `wrapHandler()`. Tools registered in `src/tools/builtin/`. Providers in `src/providers/`. Skills in `src/skills/` + `skills/` directory.
 >
 > **What's already done:** LLM integration (OpenAI, Anthropic), 6 built-in tools (Bash, Read, Edit, Write, Message, Sessions), 3-agent orchestration, gateway/WebSocket, session management, task management, hook system, skill system with pinning, IPC extraction into `src/ipc/` modules with `wrapHandler`, XSS hardening, memory leak fixes, preload input validation + rate limiting, runtime cache.
+>
+> **Progress as of 2026-03-23:** 3 of 29 tasks completed (Tasks 1, 2, 3). Task 17 partially done. 25 tasks not started. See status markers on each task heading below.
+>
+> **Next up (all unblocked):** Tasks 4–8 (new providers, independent of each other), Tasks 10–15 (new tools, independent of each other), Task 16 (usage tracking), Task 17 completion (channel registry).
 
 ---
 
-## Task 1: Consolidate Global Renderer State
+## Task 1: Consolidate Global Renderer State ✅ COMPLETED
+
+> **Completed:** `appState` object (lines 1-65) and `dom` object (lines 67-142) exist in `renderer.js`. All mutable state consolidated. 70+ DOM refs cached.
 
 **Source:** architecture-updates.md item 5
 **Dependencies:** None
@@ -145,7 +151,9 @@ All should work identically to before.
 
 ---
 
-## Task 2: Additional Preload Validation Coverage
+## Task 2: Additional Preload Validation Coverage ✅ COMPLETED
+
+> **Completed:** All chat/memory/agent/hooks/skills/settings/tool handlers validated in `preload.js` (347 lines). `throttleInvoke` rate limiting in place. Test file `tests/preload-validation.test.js` exists with full coverage.
 
 **Source:** architecture-updates.md item 6 (remaining)
 **Dependencies:** None (can run in parallel with Task 1)
@@ -267,7 +275,9 @@ describe('Preload input validation', () => {
 
 ---
 
-## Task 3: Provider Abstraction Refactor
+## Task 3: Provider Abstraction Refactor ✅ COMPLETED
+
+> **Completed:** `ProviderFactory` has static `_registry` Map, `registerProvider()`, `listRegistered()`, `create()`. `BaseLLMProvider.discoverModels()` implemented. OpenAI + Anthropic registered at load time. Test file `tests/provider-factory.test.js` exists.
 
 **Source:** openclaw.md §2.1
 **Dependencies:** None
@@ -2091,7 +2101,10 @@ describe('PricingTables', () => {
 
 ---
 
-## Task 17: Channel Plugin Interface Refactor
+## Task 17: Channel Plugin Interface Refactor 🔶 PARTIAL
+
+> **What's done:** `ChannelPlugin` base class exists in `src/channels/channel-plugin.js` with `normalizeTarget()` and required method stubs. `telegram-bridge.js` and `telegram-adapter.js` exist.
+> **What's remaining:** `ChannelRegistry` class (Steps 3, 6), standardized inbound message format (Step 4), refactoring telegram-bridge to use full interface (Step 5), wiring into `main.js`.
 
 **Source:** openclaw.md §3.1
 **Dependencies:** None
