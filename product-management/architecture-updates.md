@@ -63,6 +63,13 @@ Remaining issues from the 2026-03-23 comprehensive code review. The 12 quick/sec
     - successful update when reset callback is absent
   - Included the new test file in `npm test`.
 
+- **Item 2.1 / 2.3 / 3.2 (incremental): Task IPC handler extraction + wrapHandler standardization**
+  - Added `src/ipc/task-handlers.js` and moved task handlers (`task:create`, `task:list`, `task:update`) out of `main.js`.
+  - Task handlers now register via `registerTaskHandlers(ipcMain, { getTaskManager })` and consume dependencies through context.
+  - Applied `wrapHandler(...)` to all extracted task handlers so they now consistently return `{ ok: true, data }` or `{ ok: false, error }`.
+  - Added automated coverage in `tests/task-handlers.test.js` (registration, success wrapping, error wrapping, and update path behavior).
+  - Included the new task handler test in `npm test`.
+
 ---
 
 ## 1. XSS via innerHTML in renderer.js

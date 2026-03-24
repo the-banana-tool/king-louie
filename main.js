@@ -38,6 +38,7 @@ const {
 } = require('./src/notifications/notification-router');
 const { TTSEngine, DEFAULT_VOICE_SETTINGS } = require('./src/voice/tts-engine');
 const { applyActiveProviderUpdate } = require('./src/ipc/settings-provider');
+const { registerTaskHandlers } = require('./src/ipc/task-handlers');
 
 let mainWindow;
 let skillLoader;
@@ -2257,28 +2258,8 @@ ipcMain.handle('settings:runLlmCommand', async (_event, { command }) => {
   }
 });
 
-ipcMain.handle('task:create', async (_event, config) => {
-  if (!taskManager) {
-    throw new Error('Task manager is not initialized');
-  }
-
-  return taskManager.create(config || {});
-});
-
-ipcMain.handle('task:list', async () => {
-  if (!taskManager) {
-    throw new Error('Task manager is not initialized');
-  }
-
-  return taskManager.list();
-});
-
-ipcMain.handle('task:update', async (_event, { taskId, updates }) => {
-  if (!taskManager) {
-    throw new Error('Task manager is not initialized');
-  }
-
-  return taskManager.update(taskId, updates || {});
+registerTaskHandlers(ipcMain, {
+  getTaskManager: () => taskManager
 });
 
 ipcMain.handle('agent:list', async () => {
