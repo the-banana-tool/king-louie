@@ -1127,7 +1127,9 @@ describe('InferenceRouter', () => {
 
 ---
 
-## Task 10: Web Fetch Tool
+## Task 10: Web Fetch Tool ✅ COMPLETED
+
+> **Completed:** Web Fetch Tool (`src/tools/builtin/web-fetch-tool.js` and `src/tools/builtin/web-fetch-utils.js`) implemented with SSRF protection, content extraction (markdown/text), size limits, truncation, and 15-minute caching. Registered in `src/tools/index.js` and tested thoroughly in `tests/web-fetch-tool.test.js`.
 
 **Source:** openclaw.md §1.1
 **Dependencies:** None
