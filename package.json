@@ -5,7 +5,7 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node --test",
+    "test": "node --test && node --test tests/browser-service.test.js",
     "test:watch": "node --test --watch"
   },
   "keywords": [
@@ -28,6 +28,6 @@
     "linkedom": "^0.18.12",
     "marked": "^15.0.7",
     "turndown": "^7.2.2",
-    "ws": "^8.18.3"
+    "ws": "^8.20.0"
   }
 }
