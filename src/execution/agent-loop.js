@@ -7,6 +7,7 @@ class AgentLoop {
     this.onUsageRecorded = typeof options.onUsageRecorded === 'function'
       ? options.onUsageRecorded
       : null;
+    this.abortSignal = options.abortSignal || null;
   }
 
   async run(messages, tools, options = {}) {
@@ -16,6 +17,27 @@ class AgentLoop {
     const llmCalls = [];
 
     while (iterations < this.maxIterations) {
+      if (this.abortSignal?.aborted) {
+        return {
+          type: 'stopped',
+          content: '(Session stopped by user)',
+          iterations,
+          tools: executedTools,
+          llm: {
+            calls: llmCalls,
+            totals: llmCalls.reduce(
+              (acc, call) => ({
+                inputTokens: acc.inputTokens + (call.inputTokens || 0),
+                outputTokens: acc.outputTokens + (call.outputTokens || 0),
+                totalTokens: acc.totalTokens + (call.totalTokens || 0),
+                costUsd: Number((acc.costUsd + (call.costUsd || 0)).toFixed(8))
+              }),
+              { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
+            )
+          }
+        };
+      }
+
       iterations += 1;
 
       const response = await this.provider.sendMessageWithTools(

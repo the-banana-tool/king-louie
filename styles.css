@@ -740,6 +740,26 @@ body {
   background-color: #0062cc;
 }
 
+.stop-btn {
+  padding: 12px 30px;
+  background-color: #e53e3e;
+  color: #ffffff;
+  border: none;
+  border-radius: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.stop-btn:hover {
+  background-color: #c53030;
+}
+
+.stop-btn:active {
+  background-color: #9b2c2c;
+}
+
 .settings-drawer {
   position: fixed;
   inset: 0;

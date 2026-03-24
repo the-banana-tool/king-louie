@@ -9,6 +9,7 @@ module.exports = {
   CHAT_ADD_MESSAGE: 'chat:addMessage',
   CHAT_SPEAK_LAST: 'chat:speakLast',
   CHAT_SEND_MESSAGE: 'chat:sendMessage',
+  CHAT_STOP_RESPONSE: 'chat:stopResponse',
 
   TOOL_EXECUTE: 'tool:execute',
   TOOL_LIST: 'tool:list',
@@ -72,5 +73,12 @@ module.exports = {
   SKILL_UNPIN: 'skill:unpin',
   SKILL_GET_PINNED: 'skill:getPinned',
   SKILL_LIST_PINNABLE: 'skill:listPinnable',
-  SKILL_HANDLE_MESSAGE: 'skill:handleMessage'
+  SKILL_HANDLE_MESSAGE: 'skill:handleMessage',
+
+  WEBHOOK_LIST: 'webhook:list',
+  WEBHOOK_CREATE: 'webhook:create',
+  WEBHOOK_UPDATE: 'webhook:update',
+  WEBHOOK_DELETE: 'webhook:delete',
+  WEBHOOK_GET: 'webhook:get',
+  WEBHOOK_REGENERATE_SECRET: 'webhook:regenerateSecret'
 };

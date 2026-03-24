@@ -6,6 +6,7 @@ const appState = {
   isHistoryCollapsed: false,
   memoryEntries: [],
   pendingImages: [],
+  isResponseActive: false,
   streamBuffers: new Map(),
   settings: {
     encryptionAvailable: true,
@@ -68,6 +69,7 @@ const appState = {
 const dom = {
   userInput: document.getElementById('user-input'),
   sendBtn: document.getElementById('send-btn'),
+  stopBtn: document.getElementById('stop-btn'),
   chatMessages: document.getElementById('chat-messages'),
   newChatBtn: document.getElementById('new-chat-btn'),
   newChatBtnCompact: document.getElementById('new-chat-btn-compact'),
@@ -211,6 +213,12 @@ function setHistoryCollapsed(collapsed) {
     dom.container.classList.toggle('history-collapsed', appState.isHistoryCollapsed);
   }
   renderHistoryToggleButton();
+}
+
+function setResponseActive(active) {
+  appState.isResponseActive = active;
+  if (dom.sendBtn) dom.sendBtn.hidden = active;
+  if (dom.stopBtn) dom.stopBtn.hidden = !active;
 }
 
 function renderAgentModeButton() {
@@ -2763,6 +2771,13 @@ async function handleSetActiveProvider(providerKey) {
 // Event Listeners
 dom.sendBtn.addEventListener('click', sendMessage);
 
+if (dom.stopBtn) {
+  dom.stopBtn.addEventListener('click', async () => {
+    if (!appState.activeChatId) return;
+    await window.electron.chat.stopResponse(appState.activeChatId);
+  });
+}
+
 if (dom.attachImageBtn && dom.imageFileInput) {
   dom.attachImageBtn.addEventListener('click', () => {
     dom.imageFileInput.click();
@@ -3199,6 +3214,8 @@ window.addEventListener('blur', () => {
 unsubscribeHandlers.push(window.electron.chat.onMessageStart(({ chatId, responseId }) => {
   if (chatId !== appState.activeChatId) return;
 
+  setResponseActive(true);
+
   const messageDiv = document.createElement('div');
   messageDiv.className = 'message assistant streaming';
   messageDiv.dataset.responseId = responseId;
@@ -3233,6 +3250,7 @@ unsubscribeHandlers.push(window.electron.chat.onMessageChunk(({ chatId, response
 unsubscribeHandlers.push(window.electron.chat.onMessageComplete(({ chatId, responseId }) => {
   appState.streamBuffers.delete(responseId);
   if (chatId !== appState.activeChatId) return;
+  setResponseActive(false);
   const messageDiv = dom.chatMessages.querySelector(`[data-response-id="${responseId}"]`);
   if (messageDiv) {
     messageDiv.classList.remove('streaming');
@@ -3242,6 +3260,7 @@ unsubscribeHandlers.push(window.electron.chat.onMessageComplete(({ chatId, respo
 unsubscribeHandlers.push(window.electron.chat.onMessageError(({ chatId, responseId, error }) => {
   appState.streamBuffers.delete(responseId);
   if (chatId !== appState.activeChatId) return;
+  setResponseActive(false);
   const messageDiv = dom.chatMessages.querySelector(`[data-response-id="${responseId}"] .message-content`);
   if (messageDiv) {
     const p = document.createElement('p');

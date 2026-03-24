@@ -260,6 +260,10 @@ contextBridge.exposeInMainWorld(
         }
         return ipcRenderer.invoke('chat:sendMessage', payload);
       },
+      stopResponse: (chatId) => {
+        validateString(chatId, 'chatId');
+        return ipcRenderer.invoke('chat:stopResponse', { chatId });
+      },
       onMessageStart: (callback) => registerOnce('chat:messageStart', callback),
       onMessageChunk: (callback) => registerOnce('chat:messageChunk', callback),
       onMessageComplete: (callback) => registerOnce('chat:messageComplete', callback),
