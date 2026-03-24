@@ -481,7 +481,14 @@ npm test
 **Source:** openclaw.md §2.2
 **Dependencies:** Task 3 (provider abstraction)
 **Files to create:** `src/providers/groq-provider.js`
-**Files to modify:** `src/providers/provider-factory.js` (register), settings store
+**Files to modify:** `src/providers/provider-factory.js` (register), `main.js` (settings), `src/ipc/settings-handlers.js` (test endpoint)
+
+> **Clarifications:**
+> - **Settings location:** Provider config maps live in `main.js` (~lines 324-340): add `groq: 'Groq'` to `providerLabels`, `groq: 'llama-3.3-70b-versatile'` to `providerDefaults`, `groq: 'gsk_'` to `providerTokenHints`.
+> - **DEFAULT_SETTINGS:** Add `groq: 'llama-3.3-70b-versatile'` to `DEFAULT_SETTINGS.providerModels` (~line 70). Update `DEFAULT_SETTINGS.inference.tierMap.fast` to `{ provider: 'groq', model: 'llama-3.3-70b-versatile' }`.
+> - **Test endpoint:** In `settings:testProvider` handler (`src/ipc/settings-handlers.js` ~line 192), add an `else if (provider === 'groq')` branch hitting `https://api.groq.com/openai/v1/models` with `Authorization: Bearer {token}` header.
+> - **Factory signature:** `ProviderFactory.create(providerType, apiKey)` passes `apiKey` directly (not a config object). Match the constructor to accept either pattern or match the existing OpenAI/Anthropic constructors.
+> - **Test script:** Add `&& node tests/groq-provider.test.js` to the `"test"` script in `package.json` (tests are chained sequentially with `&&`).
 
 ### Instructions
 
@@ -613,7 +620,13 @@ describe('GroqProvider', () => {
 **Source:** openclaw.md §2.3
 **Dependencies:** Task 3
 **Files to create:** `src/providers/ollama-provider.js`
-**Files to modify:** `src/providers/provider-factory.js`
+**Files to modify:** `src/providers/provider-factory.js`, `main.js` (settings), `src/ipc/settings-handlers.js`
+
+> **Clarifications:**
+> - **No API key:** Ollama has no API key, so do NOT add to `providerTokenHints`. Still add to `providerLabels` (`ollama: 'Ollama (Local)'`) and `providerDefaults` (`ollama: ''`).
+> - **Settings integration:** Add `ollama: ''` to `DEFAULT_SETTINGS.providerModels`. Add a `settings:testProvider` branch that hits `http://localhost:11434/api/tags` with no auth — success means Ollama is running.
+> - **Factory constructor:** The constructor receives `apiKey` from `ProviderFactory.create()`. For Ollama, ignore it and use `baseUrl` from a separate config path or default to `http://localhost:11434`.
+> - **Test script:** Add `&& node tests/ollama-provider.test.js` to `package.json` test script.
 
 ### Instructions
 
@@ -721,7 +734,13 @@ describe('OllamaProvider', () => {
 **Source:** openclaw.md §2.4
 **Dependencies:** Task 3
 **Files to create:** `src/providers/mistral-provider.js`
-**Files to modify:** `src/providers/provider-factory.js`
+**Files to modify:** `src/providers/provider-factory.js`, `main.js` (settings), `src/ipc/settings-handlers.js`
+
+> **Clarifications:**
+> - **Same pattern as Groq (Task 4):** Add to `providerLabels` (`mistral: 'Mistral AI'`), `providerDefaults` (`mistral: 'mistral-large-latest'`), `providerTokenHints` (`mistral: ''` — Mistral keys have no standard prefix).
+> - **DEFAULT_SETTINGS:** Add `mistral: 'mistral-large-latest'` to `providerModels`.
+> - **Test endpoint:** Hit `https://api.mistral.ai/v1/models` with `Authorization: Bearer {token}`.
+> - **Test script:** Add `&& node tests/mistral-provider.test.js` to `package.json`.
 
 ### Instructions
 
@@ -780,7 +799,14 @@ describe('MistralProvider', () => {
 **Source:** openclaw.md §2.5
 **Dependencies:** Task 3
 **Files to create:** `src/providers/gemini-provider.js`
-**Files to modify:** `src/providers/provider-factory.js`
+**Files to modify:** `src/providers/provider-factory.js`, `main.js` (settings), `src/ipc/settings-handlers.js`
+
+> **Clarifications:**
+> - **Different auth pattern:** Gemini uses `?key={apiKey}` query param, NOT Authorization header. The `settings:testProvider` branch should hit `https://generativelanguage.googleapis.com/v1beta/models?key={token}`.
+> - **Settings:** Add to `providerLabels` (`gemini: 'Google Gemini'`), `providerDefaults` (`gemini: 'gemini-2.0-flash'`), `providerTokenHints` (`gemini: 'AI'` — Gemini keys often start with `AI`).
+> - **DEFAULT_SETTINGS:** Add `gemini: 'gemini-2.0-flash'` to `providerModels`.
+> - **Format adapters:** This is the only non-OpenAI-compatible provider. Must implement `formatMessages()` (role mapping: assistant→model, parts array) and `formatTools()` (functionDeclarations) and `parseToolCalls()` (functionCall→tool_calls conversion).
+> - **Test script:** Add `&& node tests/gemini-provider.test.js` to `package.json`.
 
 ### Instructions
 
@@ -916,7 +942,13 @@ describe('GeminiProvider', () => {
 **Source:** openclaw.md §2.6
 **Dependencies:** Task 3
 **Files to create:** `src/providers/openrouter-provider.js`
-**Files to modify:** `src/providers/provider-factory.js`
+**Files to modify:** `src/providers/provider-factory.js`, `main.js` (settings), `src/ipc/settings-handlers.js`
+
+> **Clarifications:**
+> - **Same pattern as Groq:** Add to `providerLabels` (`openrouter: 'OpenRouter'`), `providerDefaults` (`openrouter: 'openai/gpt-4o-mini'`), `providerTokenHints` (`openrouter: 'sk-or-'`).
+> - **DEFAULT_SETTINGS:** Add `openrouter: 'openai/gpt-4o-mini'` to `providerModels`.
+> - **Test endpoint:** Hit `https://openrouter.ai/api/v1/models` with `Authorization: Bearer {token}` plus `HTTP-Referer` and `X-Title` headers.
+> - **Test script:** Add `&& node tests/openrouter-provider.test.js` to `package.json`.
 
 ### Instructions
 
@@ -976,7 +1008,12 @@ describe('OpenRouterProvider', () => {
 
 **Source:** openclaw.md §2.7
 **Dependencies:** Tasks 4-8 (new providers)
-**Files to modify:** `src/providers/inference-router.js`
+**Files to modify:** `src/providers/inference-router.js`, `main.js` (DEFAULT_SETTINGS)
+
+> **Clarifications:**
+> - **Tier map lives in `main.js`:** `DEFAULT_SETTINGS.inference.tierMap` defines the fast/standard/smart mappings. `InferenceRouter.resolve()` reads from `settings.inference.tierMap`. If Task 4 already updated the fast tier to Groq, this task just needs to add fallback chains and capability detection to `inference-router.js` itself.
+> - **Timeouts:** `DEFAULT_SETTINGS.inference.timeoutsMs` has per-tier timeouts (fast: 15000, standard: 30000, smart: 90000). No changes needed unless a provider needs a different timeout.
+> - **Test script:** Add `&& node tests/inference-router.test.js` to `package.json`.
 
 ### Instructions
 
@@ -1074,6 +1111,12 @@ describe('InferenceRouter', () => {
 **Files to create:** `src/tools/builtin/web-fetch-tool.js`, `src/tools/builtin/web-fetch-utils.js`
 **Files to modify:** `src/tools/index.js` (register tool)
 **npm install:** `@mozilla/readability`, `linkedom`, `turndown`
+
+> **Clarifications:**
+> - **Tool registration pattern:** In `src/tools/index.js`, import the tool and call `toolRegistry.register(WebFetchTool)` inside `initializeTools()`. Follow the exact pattern of BashTool/ReadTool/EditTool/WriteTool already there.
+> - **Test script:** Add `&& node tests/web-fetch-tool.test.js` to `package.json`.
+> - **Tool schema:** Tool class is in `src/tools/tool-schema.js`. Tools have `name`, `description`, `parameters` (JSON Schema), `requiresApproval`, and `execute(params, context)`.
+> - **Approval system:** `src/execution/tool-executor.js` handles approval. Set `requiresApproval: false` for WebFetch since it only reads public URLs.
 
 ### Instructions
 
@@ -1301,6 +1344,11 @@ describe('WebFetch Cache', () => {
 **Files to create:** `src/tools/builtin/web-search-tool.js`, `src/web-search/search-provider.js`, `src/web-search/providers/brave-search.js`, `src/web-search/providers/duckduckgo.js`, `src/web-search/providers/tavily.js`
 **Files to modify:** `src/tools/index.js`
 
+> **Clarifications:**
+> - **Tool registration:** Same pattern as Task 10 — `toolRegistry.register(WebSearchTool)` in `src/tools/index.js`.
+> - **Settings for API keys:** Search provider API keys (Brave, Tavily) need storage. Add a `webSearch` section to `DEFAULT_SETTINGS` in `main.js` and encrypt keys via `safeStorage` same as LLM provider keys.
+> - **Test script:** Add `&& node tests/web-search-tool.test.js` to `package.json`.
+
 ### Instructions
 
 **Step 1:** Create `src/web-search/search-provider.js` (base class):
@@ -1431,6 +1479,10 @@ describe('WebSearch Tool', () => {
 **Files to modify:** `src/tools/index.js`
 **npm install:** `fast-glob`
 
+> **Clarifications:**
+> - **Tool registration:** `toolRegistry.register(GlobTool)` in `src/tools/index.js`.
+> - **Test script:** Add `&& node tests/glob-tool.test.js` to `package.json`.
+
 ### Instructions
 
 Create a Glob tool for fast file pattern matching:
@@ -1555,6 +1607,11 @@ describe('Glob Tool', () => {
 **Dependencies:** None
 **Files to create:** `src/tools/builtin/grep-tool.js`
 **Files to modify:** `src/tools/index.js`
+
+> **Clarifications:**
+> - **Depends on fast-glob:** Task 12 installs `fast-glob`. If doing Task 13 before Task 12, install it yourself.
+> - **Tool registration:** `toolRegistry.register(GrepTool)` in `src/tools/index.js`.
+> - **Test script:** Add `&& node tests/grep-tool.test.js` to `package.json`.
 
 ### Instructions
 
@@ -1704,6 +1761,11 @@ describe('Grep Tool', () => {
 **Files to create:** `src/tools/builtin/git-tool.js`
 **Files to modify:** `src/tools/index.js`
 
+> **Clarifications:**
+> - **Tool registration:** `toolRegistry.register(GitTool)` in `src/tools/index.js`.
+> - **Approval:** `requiresApproval: true` — git write operations (add, commit, push) are destructive. The approval system in `src/execution/tool-executor.js` handles this.
+> - **Test script:** Add `&& node tests/git-tool.test.js` to `package.json`.
+
 ### Instructions
 
 Create a Git tool that wraps common git operations:
@@ -1845,6 +1907,13 @@ describe('Git Tool', () => {
 **Files to create:** `src/tools/builtin/ask-user-tool.js`
 **Files to modify:** `src/tools/index.js`, `preload.js`, `renderer.js`
 
+> **Clarifications:**
+> - **Special tool:** Unlike other tools, AskUser pauses the agent loop and waits for user input. The execution flow is: tool-executor emits event → main process sends IPC to renderer → renderer shows prompt → user responds → IPC back to main → tool resolves.
+> - **IPC channels:** Add `agent:askUser` and `agent:userResponse` to `src/ipc/constants.js`. Add corresponding handlers in `src/ipc/agent-handlers.js`.
+> - **Preload validation:** Add validation for `agent:userResponse` in `preload.js` — validate `requestId` is string, `response` is string.
+> - **Tool registration:** `toolRegistry.register(AskUserTool)` in `src/tools/index.js`.
+> - **Test script:** Add `&& node tests/ask-user-tool.test.js` to `package.json`.
+
 ### Instructions
 
 Create an AskUser tool that allows the agent to ask the user a question and wait for their response:
@@ -1926,6 +1995,12 @@ describe('AskUser Tool', () => {
 **Dependencies:** None
 **Files to create:** `src/tracking/usage-tracker.js`, `src/tracking/pricing-tables.js`
 **Files to modify:** `src/execution/agent-loop.js`, `renderer.js`
+
+> **Clarifications:**
+> - **Agent loop integration:** `src/execution/agent-loop.js` is where LLM responses come back. After each response, call `usageTracker.record()` with the provider, model, and token counts from the response.
+> - **IPC for UI:** Add `usage:getSession` and `usage:getDaily` handlers to a new `src/ipc/usage-handlers.js` (follow `wrapHandler` pattern from existing IPC modules). Register in `src/ipc/register.js`.
+> - **Renderer display:** Add a small token/cost badge below each assistant message in `renderer.js`. Keep it subtle — e.g., `"142 tokens · $0.002"`.
+> - **Test script:** Add `&& node tests/usage-tracker.test.js` to `package.json`.
 
 ### Instructions
 
@@ -2275,7 +2350,7 @@ describe('ChannelRegistry', () => {
 ## Task 18: Cron / Scheduling System
 
 **Source:** openclaw.md §4.1, §4.2, §4.3
-**Dependencies:** None
+**Dependencies:** Task 17 (channel registry for delivery)
 **Files to create:** `src/cron/cron-scheduler.js`, `src/cron/cron-store.js`, `src/cron/cron-executor.js`, `src/tools/builtin/cron-tool.js`
 **Files to modify:** `main.js`, `preload.js`, `renderer.js`, `index.html`, `styles.css`
 **npm install:** `cron-parser`
@@ -2444,7 +2519,7 @@ describe('CronScheduler', () => {
 ## Task 19: Discord Channel
 
 **Source:** openclaw.md §3.2
-**Dependencies:** Task 17 (channel plugin refactor)
+**Dependencies:** Task 17 completed (needs `ChannelRegistry` from Step 3, normalized message format from Step 4)
 **Files to create:** `src/channels/discord-adapter.js`, `src/channels/discord-bridge.js`
 **npm install:** `discord.js`
 
@@ -2534,7 +2609,7 @@ describe('DiscordChannel', () => {
 ## Task 20: Slack Channel
 
 **Source:** openclaw.md §3.3
-**Dependencies:** Task 17
+**Dependencies:** Task 17 completed (needs `ChannelRegistry`, normalized message format)
 **Files to create:** `src/channels/slack-adapter.js`, `src/channels/slack-bridge.js`
 **npm install:** `@slack/bolt`
 
@@ -2607,7 +2682,7 @@ describe('SlackChannel', () => {
 ## Task 21: Group Chat & Mention Gating
 
 **Source:** openclaw.md §10.1
-**Dependencies:** Task 17
+**Dependencies:** Tasks 17, 19, 20 (needs channel adapters to exist)
 **Files to create:** `src/channels/mention-gating.js`, `src/channels/allowlist-manager.js`
 **Files to modify:** Channel adapters
 
@@ -3248,6 +3323,10 @@ describe('WebhookHandler', () => {
 **Dependencies:** None
 **Files to modify:** `preload.js`, `renderer.js`, `styles.css`
 **npm install:** `highlight.js`
+
+> **Clarifications:**
+> - **Renderer is monolithic:** `renderer.js` is 2,677 lines. The markdown rendering likely uses `marked` and `DOMPurify`. Find the existing `marked` configuration and add `highlight.js` integration there.
+> - **CSP:** highlight.js uses inline styles by default. If Content-Security-Policy blocks inline styles, load the highlight.js CSS theme as a stylesheet in `index.html` instead.
 
 ### Instructions
 
