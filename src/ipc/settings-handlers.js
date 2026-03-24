@@ -220,6 +220,10 @@ function registerSettingsHandlers(ipcMain, context = {}) {
           'User-Agent': 'king-louie-app'
         }
       });
+    } else if (provider === 'groq') {
+      response = await fetch('https://api.groq.com/openai/v1/models', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
     }
 
     if (!response) {
