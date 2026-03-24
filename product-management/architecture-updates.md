@@ -70,6 +70,15 @@ Remaining issues from the 2026-03-23 comprehensive code review. The 12 quick/sec
   - Added automated coverage in `tests/task-handlers.test.js` (registration, success wrapping, error wrapping, and update path behavior).
   - Included the new task handler test in `npm test`.
 
+- **Item 2.1 / 2.3 / 3.2 (incremental): Settings IPC handler extraction + wrapHandler standardization**
+  - Added `src/ipc/settings-handlers.js` and moved all settings handlers out of `main.js`:
+    - `settings:load`, `settings:saveTemplateVariables`, `settings:saveUserProfile`, `settings:saveVoice`, `settings:saveElevenLabsKey`, `settings:testVoice`, `settings:setActiveProvider`, `settings:setProviderModel`, `settings:saveProvider`, `settings:testProvider`, `settings:runLlmCommand`, `settings:setInferenceTier`, `settings:saveNotifications`.
+  - Settings handlers now register via `registerSettingsHandlers(ipcMain, context)` and consume dependencies through injected context/getters.
+  - Applied `wrapHandler(...)` to all extracted settings handlers for consistent IPC result shape and centralized error wrapping.
+  - Added automated coverage in `tests/settings-handlers.test.js` (registration, wrapped `settings:load` payload, provider error path, and thrown tier error wrapping).
+  - Updated `npm test` script to include the new settings handler test file.
+  - Verified test suite passes.
+
 ---
 
 ## 1. XSS via innerHTML in renderer.js
