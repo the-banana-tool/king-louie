@@ -6,7 +6,7 @@
 >
 > **What's already done:** LLM integration (OpenAI, Anthropic), 6 built-in tools (Bash, Read, Edit, Write, Message, Sessions), 3-agent orchestration, gateway/WebSocket, session management, task management, hook system, skill system with pinning, IPC extraction into `src/ipc/` modules with `wrapHandler`, XSS hardening, memory leak fixes, preload input validation + rate limiting, runtime cache.
 >
-> **Progress as of 2026-03-23:** 9 of 29 tasks completed (Tasks 1–9 and 16). Task 4 bug (missing factory registration) fixed. Task 17 completed. 20 tasks not started. See status markers on each task heading below.
+> **Progress as of 2026-03-23:** 9 of 29 tasks completed (Tasks 1–9 and 16). Task 4 bug (missing factory registration) fixed. Task 17 completed. Task 20 completed. 19 tasks not started. See status markers on each task heading below.
 >
 > **Next up (all unblocked):** Tasks 10–15 (new tools, independent of each other).
 
@@ -2647,7 +2647,9 @@ describe('DiscordChannel', () => {
 
 ---
 
-## Task 20: Slack Channel
+## Task 20: Slack Channel ✅ COMPLETED
+
+> **Completed:** Slack Channel (`src/channels/slack-bridge.js`) via Socket Mode using `@slack/bolt`. Implemented mention gating in channels, Block Kit formatting for code blocks, and DMs/thread replies. `SlackChannel` is integrated into `main.js` which handles the API app token (`xapp-`) and bot token (`xoxb-`), with settings logic mirroring the Telegram bridge. Added full test coverage in `tests/slack-channel.test.js`, running as part of the `npm test` script. All tests pass correctly.
 
 **Source:** openclaw.md §3.3
 **Dependencies:** Task 17 completed (needs `ChannelRegistry`, normalized message format)
@@ -3073,7 +3075,9 @@ describe('Hybrid Retrieval', () => {
 
 ---
 
-## Task 24: Browser Control (CDP)
+## Task 24: Browser Control (CDP) ✅ COMPLETED
+
+> **Completed:** BrowserService with auto-detect and launch capability, CdpClient with WebSocket communication, Browser tool with all specified actions + SSRF protection, and associated test coverage in `tests/browser-service.test.js`.
 
 **Source:** openclaw.md §5.1, §5.2
 **Dependencies:** None
