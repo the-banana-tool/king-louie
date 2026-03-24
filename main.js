@@ -306,13 +306,13 @@ const formatProjectContextSection = (workingDirectory = process.cwd()) => {
   ].join('\n');
 };
 
-const buildMemoryContextSection = (query = '', options = {}) => {
+const buildMemoryContextSection = async (query = '', options = {}) => {
   if (!memoryManager) {
     return '';
   }
 
   try {
-    return memoryManager.buildPromptContext(query, {
+    return await memoryManager.buildPromptContext(query, {
       limit: options.limit || 6
     });
   } catch (error) {
@@ -1595,7 +1595,7 @@ const initializeAgentInfrastructure = async () => {
         },
         systemPrompt: [
           buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
-          buildMemoryContextSection(message),
+          await buildMemoryContextSection(message),
           formatUserContextSection(),
           formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
         ].join('\n\n'),

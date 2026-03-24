@@ -23,7 +23,7 @@ function registerMemoryHandlers(ipcMain, context = {}) {
       return { ok: false, error: 'Memory manager is not initialized.', entries: [] };
     }
 
-    const entries = memoryManager.recall(query, options || {});
+    const entries = await memoryManager.recall(query, options || {});
     return { ok: true, entries };
   }));
 

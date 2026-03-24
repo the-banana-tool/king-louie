@@ -2940,7 +2940,9 @@ describe('ImageHandler', () => {
 
 ---
 
-## Task 23: Semantic Memory Search
+## Task 23: Semantic Memory Search ✅ COMPLETED
+
+> **Completed:** Added `EmbeddingProvider` and `OpenAIEmbeddingProvider` classes in `src/memory/embedding-provider.js` with embedding fetching support. Created `VectorStore` class in `src/memory/vector-store.js` that implements disk persistence and cosine similarity calculations. Refactored `src/memory/memory-retrieval.js` to async computation and implementing hybrid retrieval merging semantic and keyword search. Upgraded `src/memory/memory-manager.js` to asynchronously generate and store embeddings upon memory capture, and updated its `recall()` usage inside IPCs and `main.js`. Test cases in `tests/vector-store.test.js` and `tests/semantic-retrieval.test.js` are fully passing and hooked into the npm test suite.
 
 **Source:** openclaw.md §7
 **Dependencies:** Provider with embedding support

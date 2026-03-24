@@ -38,6 +38,8 @@ class MemoryManager {
     this.store = options.store;
     this.retrieval = options.retrieval || new MemoryRetrieval();
     this.currentSessionId = String(options.currentSessionId || '').trim();
+    this.embeddingProvider = options.embeddingProvider || null;
+    this.vectorStore = options.vectorStore || null;
   }
 
   setCurrentSession(sessionId = '') {
@@ -95,7 +97,19 @@ class MemoryManager {
       tier: options.tier
     });
 
-    return this.store.insert(entry);
+    const inserted = this.store.insert(entry);
+
+    if (this.embeddingProvider && this.vectorStore) {
+      this.embeddingProvider.embed([normalizedContent])
+        .then(embs => {
+          if (embs && embs[0]) {
+            this.vectorStore.add(entry.id, embs[0]);
+          }
+        })
+        .catch(err => console.warn('[memory-manager] Failed to generate embedding for entry:', err.message));
+    }
+
+    return inserted;
   }
 
   captureSuccess(what, why, options = {}) {
@@ -164,16 +178,18 @@ class MemoryManager {
     return entries.slice(0, Math.max(1, limit));
   }
 
-  recall(query = '', options = {}) {
+  async recall(query = '', options = {}) {
     const candidates = this.list({
       limit: options.candidateLimit || 250,
       type: options.type,
       tier: options.tier
     });
 
-    const recalled = this.retrieval.findRelevant(candidates, query, {
+    const recalled = await this.retrieval.findRelevant(candidates, query, {
       limit: options.limit || 8,
-      includeScores: options.includeScores === true
+      includeScores: options.includeScores === true,
+      embeddingProvider: this.embeddingProvider,
+      vectorStore: this.vectorStore
     });
 
     const nowIso = new Date().toISOString();
@@ -216,11 +232,20 @@ class MemoryManager {
   }
 
   delete(id) {
-    return this.store.delete(id);
+    const deleted = this.store.delete(id);
+    if (deleted && this.vectorStore) {
+      this.vectorStore.remove(id);
+    }
+    return deleted;
   }
 
   clear() {
-    return this.store.clear();
+    const cleared = this.store.clear();
+    if (cleared && this.vectorStore) {
+      this.vectorStore.vectors = {};
+      this.vectorStore.save();
+    }
+    return cleared;
   }
 
   runAging(now = Date.now()) {
@@ -245,8 +270,8 @@ class MemoryManager {
     };
   }
 
-  buildPromptContext(query = '', options = {}) {
-    const recalled = this.recall(query, {
+  async buildPromptContext(query = '', options = {}) {
+    const recalled = await this.recall(query, {
       ...options,
       limit: options.limit || 6
     });
