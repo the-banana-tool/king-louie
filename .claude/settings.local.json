@@ -16,7 +16,8 @@
       "Bash(find E:Programmingking-louie/src -type f -name *.js -o -name *.json)",
       "Bash(claude --version)",
       "Bash(node:*)",
-      "Bash(claude:*)"
+      "Bash(claude:*)",
+      "Bash(git push:*)"
     ]
   }
 }

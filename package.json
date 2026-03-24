@@ -5,7 +5,8 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node tests/memory-system.test.js && node tests/voice-tts.test.js && node tests/ipc-wrap-handler.test.js && node tests/settings-provider.test.js && node tests/task-handlers.test.js && node tests/settings-handlers.test.js && node --test tests/groq-provider.test.js && node --test tests/mistral-provider.test.js && node --test tests/ollama-provider.test.js && node --test tests/gemini-provider.test.js && node --test tests/openrouter-provider.test.js && node --test tests/glob-tool.test.js --test tests/web-fetch-tool.test.js && node --test tests/usage-tracker.test.js"
+    "test": "node --test",
+    "test:watch": "node --test --watch"
   },
   "keywords": [
     "electron",
