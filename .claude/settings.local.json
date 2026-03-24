@@ -19,7 +19,8 @@
       "Bash(claude:*)",
       "Bash(git push:*)",
       "Bash(npm install:*)",
-      "Bash(npm test:*)"
+      "Bash(npm test:*)",
+      "Bash(find tests:*)"
     ]
   }
 }
