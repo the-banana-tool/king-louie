@@ -3174,7 +3174,9 @@ describe('Browser Tool', () => {
 
 ---
 
-## Task 25: Docker Sandboxing
+## Task 25: Docker Sandboxing ✅ COMPLETED
+
+> **Completed:** Created `src/execution/sandbox-config.js` and `src/execution/sandbox-executor.js` to implement `SandboxExecutor`. The executor detects Docker availability and dynamically routes commands into an ephemeral container via `docker exec`. Mount path validation enforces blocking of system directories. Adapted `BashTool` (`src/tools/builtin/bash-tool.js`) to consume `SandboxExecutor` logic seamlessly with backwards-compatible defaults. Added coverage tests in `tests/sandbox-executor.test.js`.
 
 **Source:** openclaw.md §9
 **Dependencies:** None
