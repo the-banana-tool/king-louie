@@ -5,7 +5,7 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node --test && node --test tests/vector-store.test.js && node --test tests/semantic-retrieval.test.js",
+    "test": "node --test tests/*.test.js",
     "test:watch": "node --test --watch"
   },
   "keywords": [
@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@mozilla/readability": "^0.6.0",
+    "cron-parser": "^5.5.0",
     "discord.js": "^14.25.1",
     "@slack/bolt": "^4.6.0",
     "dompurify": "^3.3.3",

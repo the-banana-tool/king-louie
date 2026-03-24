@@ -34,6 +34,9 @@ const UserProfile = require('./src/telos/user-profile');
 const { loadProjectContext } = require('./src/telos/project-context');
 const HookRegistry = require('./src/hooks/hook-registry');
 const HookExecutor = require('./src/hooks/hook-executor');
+const CronStore = require('./src/cron/cron-store');
+const CronExecutor = require('./src/cron/cron-executor');
+const CronScheduler = require('./src/cron/cron-scheduler');
 const { MemoryStore, MemoryManager } = require('./src/memory');
 const UsageTracker = require('./src/tracking/usage-tracker');
 const {
@@ -66,6 +69,9 @@ let memoryStore;
 let memoryManager;
 let ttsEngine;
 let usageTracker;
+let cronStore;
+let cronExecutor;
+let cronScheduler;
 const TELEGRAM_TOKEN_STORE_KEY = '__telegram_bot_token';
 const DISCORD_TOKEN_STORE_KEY = '__discord_bot_token';
 const SLACK_APP_TOKEN_STORE_KEY = '__slack_app_token';
@@ -1938,6 +1944,10 @@ const initializeAgentInfrastructure = async () => {
   });
   process.env.KING_LOUIE_MEMORY_STORE = memoryStorageFile;
 
+  const cronJobsFile = path.join(app.getPath('userData'), 'cron', 'jobs.json');
+  cronStore = new CronStore(cronJobsFile);
+  await cronStore.load();
+
   reloadHooksFromSettings();
 
   gatewayServer = new GatewayServer({
@@ -1991,6 +2001,10 @@ const initializeAgentInfrastructure = async () => {
     agentExecutorAdapter,
     { getAgent }
   );
+
+  cronExecutor = new CronExecutor(agentExecutorAdapter, sessionManager, gatewayServer);
+  cronScheduler = new CronScheduler(cronStore, cronExecutor);
+  cronScheduler.start();
 
   gatewayServer.on('agent:message', async ({ agentId, sessionKey, message }) => {
     const startedAt = Number(message?.startedAt) || Date.now();
@@ -2232,6 +2246,9 @@ registerHandlers(ipcMain, {
   getRemoteControl: () => remoteControl,
   getSessionManager: () => sessionManager,
 
+  // Cron
+  getCronScheduler: () => cronScheduler,
+
   // Skill
   skillRegistry,
   ensureSkillCustomizationFile,
@@ -2288,6 +2305,10 @@ app.on('window-all-closed', function () {
 
     if (usageTracker) {
       usageTracker.reset();
+    }
+
+    if (cronScheduler) {
+      cronScheduler.stop();
     }
 
     app.quit();

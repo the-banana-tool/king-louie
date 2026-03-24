@@ -1066,3 +1066,18 @@ body {
 .chat-messages::-webkit-scrollbar-thumb:hover {
   background: #b0b0b0;
 }
+
+/* Cron */
+.cron-add-panel {
+  margin-top: 1rem;
+  padding: 1rem;
+  background-color: var(--sidebar-hover);
+  border-radius: 4px;
+}
+
+.cron-add-panel h4 {
+  margin-top: 0;
+  margin-bottom: 0.5rem;
+  color: var(--text-primary);
+  font-size: 14px;
+}
