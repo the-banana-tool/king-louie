@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@mozilla/readability": "^0.6.0",
+    "@slack/bolt": "^4.6.0",
     "dompurify": "^3.3.3",
     "electron-store": "^11.0.2",
     "fast-glob": "^3.3.3",
