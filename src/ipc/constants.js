@@ -1,0 +1,63 @@
+module.exports = {
+  APP_QUIT_WINDOW: 'app:quitWindow',
+
+  CHAT_LOAD: 'chat:load',
+  CHAT_CREATE: 'chat:create',
+  CHAT_SET_ACTIVE: 'chat:setActive',
+  CHAT_RENAME: 'chat:rename',
+  CHAT_DELETE: 'chat:delete',
+  CHAT_ADD_MESSAGE: 'chat:addMessage',
+  CHAT_SPEAK_LAST: 'chat:speakLast',
+  CHAT_SEND_MESSAGE: 'chat:sendMessage',
+
+  TOOL_EXECUTE: 'tool:execute',
+  TOOL_LIST: 'tool:list',
+  TOOL_APPROVAL_RESPONSE: 'tool:approvalResponse',
+
+  HOOKS_LIST: 'hooks:list',
+  HOOKS_RELOAD: 'hooks:reload',
+  HOOKS_SET_ENABLED: 'hooks:setEnabled',
+  HOOKS_SET_GLOBAL_ENABLED: 'hooks:setGlobalEnabled',
+
+  MEMORY_CAPTURE: 'memory:capture',
+  MEMORY_RECALL: 'memory:recall',
+  MEMORY_LIST: 'memory:list',
+  MEMORY_DELETE: 'memory:delete',
+  MEMORY_CLEAR: 'memory:clear',
+
+  SETTINGS_LOAD: 'settings:load',
+  SETTINGS_SAVE_TEMPLATE_VARIABLES: 'settings:saveTemplateVariables',
+  SETTINGS_SAVE_USER_PROFILE: 'settings:saveUserProfile',
+  SETTINGS_SAVE_VOICE: 'settings:saveVoice',
+  SETTINGS_SAVE_ELEVENLABS_KEY: 'settings:saveElevenLabsKey',
+  SETTINGS_TEST_VOICE: 'settings:testVoice',
+  SETTINGS_SET_ACTIVE_PROVIDER: 'settings:setActiveProvider',
+  SETTINGS_SET_PROVIDER_MODEL: 'settings:setProviderModel',
+  SETTINGS_SAVE_PROVIDER: 'settings:saveProvider',
+  SETTINGS_TEST_PROVIDER: 'settings:testProvider',
+  SETTINGS_RUN_LLM_COMMAND: 'settings:runLlmCommand',
+  SETTINGS_SET_INFERENCE_TIER: 'settings:setInferenceTier',
+  SETTINGS_SAVE_NOTIFICATIONS: 'settings:saveNotifications',
+
+  TASK_CREATE: 'task:create',
+  TASK_LIST: 'task:list',
+  TASK_UPDATE: 'task:update',
+
+  AGENT_LIST: 'agent:list',
+  AGENT_EXECUTE: 'agent:execute',
+  AGENT_EXECUTE_PARALLEL: 'agent:executeParallel',
+  AGENT_EXECUTE_SERIAL: 'agent:executeSerial',
+
+  GATEWAY_STATUS: 'gateway:status',
+  SESSIONS_LIST: 'sessions:list',
+  SESSIONS_HISTORY: 'sessions:history',
+
+  SKILL_LIST: 'skill:list',
+  SKILL_CUSTOMIZE: 'skill:customize',
+  SKILL_EXECUTE: 'skill:execute',
+  SKILL_PIN: 'skill:pin',
+  SKILL_UNPIN: 'skill:unpin',
+  SKILL_GET_PINNED: 'skill:getPinned',
+  SKILL_LIST_PINNABLE: 'skill:listPinnable',
+  SKILL_HANDLE_MESSAGE: 'skill:handleMessage'
+};

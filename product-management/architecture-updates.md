@@ -47,12 +47,19 @@ Remaining issues from the 2026-03-23 comprehensive code review. The 12 quick/sec
 
 ### 🚧 Still Outstanding
 
-- **Item 2:** Full IPC extraction from `main.js` into `src/ipc/*` modules + central register/constants.
-- **Item 3:** Apply `wrapHandler` to all 51 handlers for fully standardized IPC result shape.
 - **Item 5:** Global renderer state consolidation into `appState` / `dom` objects.
 - **Item 6 (remaining):** Additional validation coverage/access controls beyond current sensitive paths.
 
 ### ✅ Completed in this commit
+
+- **Item 2 + 3 (complete): Full IPC extraction + wrapHandler standardization**
+  - Extracted all remaining handlers (chat 9, tool 3, hooks 4, memory 5, agent 4, gateway 3, skill 8) into `src/ipc/` modules.
+  - Created `src/ipc/register.js` central registration function and `src/ipc/constants.js` with all 51 channel name constants.
+  - All 51 handlers now use `wrapHandler(...)` for consistent `{ ok, data/error }` return shape.
+  - Replaced ~620 lines of inline `ipcMain.handle` calls in `main.js` with a single `registerHandlers(ipcMain, context)` call.
+  - `main.js` reduced from ~2430 to ~1808 lines.
+  - Handler modules consume dependencies via injected context object with late-bound getters for mutable singletons.
+  - `node --check main.js` and `npm test` pass.
 
 - **Item 7.1 (optional): Runtime cache reset wiring on provider changes**
   - Added `src/ipc/settings-provider.js` with `applyActiveProviderUpdate(...)` to centralize provider-switch behavior.

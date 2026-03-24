@@ -37,8 +37,7 @@ const {
   normalizeNotificationSettings
 } = require('./src/notifications/notification-router');
 const { TTSEngine, DEFAULT_VOICE_SETTINGS } = require('./src/voice/tts-engine');
-const { registerTaskHandlers } = require('./src/ipc/task-handlers');
-const { registerSettingsHandlers } = require('./src/ipc/settings-handlers');
+const { registerHandlers } = require('./src/ipc/register');
 
 let mainWindow;
 let skillLoader;
@@ -1670,359 +1669,44 @@ function createWindow() {
   });
 }
 
-ipcMain.handle('app:quitWindow', () => {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.close();
-  }
-  return { ok: true };
-});
+registerHandlers(ipcMain, {
+  // Chat
+  createId,
+  getChats,
+  setChats,
+  getActiveChatId,
+  setActiveChatId,
+  appendMessageToChat,
+  getLastAssistantMessage,
+  getVoiceSettings,
+  runHookEvent,
+  resolveInference,
+  getRuntimeEnvironment,
+  createToolExecutorWithApprovals,
+  AgentLoop,
+  toolRegistry,
+  withNotificationTiming,
+  buildRuntimeSystemPrompt,
+  buildMemoryContextSection,
+  speakSummaryText,
+  getMainWindow: () => mainWindow,
+  getTtsEngine: () => ttsEngine,
 
-ipcMain.handle('chat:load', () => {
-  return {
-    chats: getChats(),
-    activeChatId: getActiveChatId()
-  };
-});
+  // Tool
+  pendingApprovalResolvers,
+  setToolAlwaysApprove,
 
-ipcMain.handle('chat:create', (_event, title = 'New Chat') => {
-  const now = new Date().toISOString();
-  const newChat = {
-    id: createId(),
-    title,
-    createdAt: now,
-    updatedAt: now,
-    messages: [
-      {
-        id: createId(),
-        sender: 'assistant',
-        text: 'New chat started! How can I help you today?',
-        timestamp: now
-      }
-    ]
-  };
-  const chats = [newChat, ...getChats()];
-  setChats(chats);
-  setActiveChatId(newChat.id);
-  return newChat;
-});
+  // Hooks
+  getHookSettings,
+  listHookDefinitions,
+  reloadHooksFromSettings,
+  setHookEnabled,
+  setHookSettings,
 
-ipcMain.handle('chat:setActive', (_event, chatId) => {
-  setActiveChatId(chatId);
-  return { activeChatId: chatId };
-});
+  // Memory
+  getMemoryManager: () => memoryManager,
 
-ipcMain.handle('chat:rename', (_event, { id, title }) => {
-  const chats = getChats();
-  const updated = chats.map((chat) =>
-    chat.id === id
-      ? { ...chat, title, updatedAt: new Date().toISOString() }
-      : chat
-  );
-  setChats(updated);
-  return updated.find((chat) => chat.id === id);
-});
-
-ipcMain.handle('chat:delete', (_event, chatId) => {
-  const chats = getChats().filter((chat) => chat.id !== chatId);
-  setChats(chats);
-  const activeChatId = getActiveChatId();
-  if (activeChatId === chatId) {
-    const nextChatId = chats[0]?.id || null;
-    setActiveChatId(nextChatId);
-  }
-  return { chats, activeChatId: getActiveChatId() };
-});
-
-ipcMain.handle('chat:addMessage', (_event, payload = {}) => {
-  const { chatId, sender, text, ...metadata } = payload;
-  return appendMessageToChat(chatId, sender, text, metadata);
-});
-
-ipcMain.handle('chat:speakLast', async (_event, { chatId, summary = false } = {}) => {
-  const chat = getChats().find((item) => item.id === chatId);
-  if (!chat) {
-    return { ok: false, error: 'Chat not found.' };
-  }
-
-  const lastAssistant = getLastAssistantMessage(chatId);
-  if (!lastAssistant?.text) {
-    return { ok: false, error: 'No assistant message found to speak.' };
-  }
-
-  if (!ttsEngine) {
-    return { ok: false, error: 'TTS engine is not initialized.' };
-  }
-
-  const voiceSettings = getVoiceSettings();
-  if (!voiceSettings.enabled) {
-    return { ok: false, error: 'Voice output is disabled. Enable it in settings first.' };
-  }
-
-  try {
-    const result = summary
-      ? await ttsEngine.speakSummary(lastAssistant.text, voiceSettings)
-      : await ttsEngine.speak(lastAssistant.text, voiceSettings);
-    return { ok: true, result };
-  } catch (error) {
-    return { ok: false, error: error.message || 'Unable to speak message.' };
-  }
-});
-
-ipcMain.handle('chat:sendMessage', async (event, { chatId, message, agentMode = false }) => {
-  await runHookEvent('UserPromptSubmit', {
-    source: 'ui',
-    chatId,
-    prompt: String(message || ''),
-    timestamp: new Date().toISOString(),
-    workingDirectory: process.cwd()
-  });
-
-  const userMessage = appendMessageToChat(chatId, 'user', message);
-  if (!userMessage) {
-    throw new Error('Chat not found');
-  }
-
-  const inference = resolveInference();
-  if (!['openai', 'anthropic'].includes(inference.providerType)) {
-    throw new Error('Active provider does not support chat completions yet.');
-  }
-  const provider = inference.provider;
-  const chat = getChats().find((item) => item.id === chatId);
-  if (!chat) {
-    throw new Error('Chat not found');
-  }
-
-  const responseId = createId();
-  const runId = createId();
-  const options = {
-    model: inference.model,
-    timeoutMs: inference.timeoutMs,
-    tier: inference.tier,
-    runId
-  };
-
-  event.sender.send('chat:messageStart', { chatId, responseId });
-
-  try {
-    const runtimeEnvironment = await getRuntimeEnvironment({
-      workingDirectory: process.cwd()
-    });
-
-    options.runtimeEnvironment = runtimeEnvironment;
-    options.systemPrompt = [
-      buildRuntimeSystemPrompt(runtimeEnvironment),
-      buildMemoryContextSection(message, { limit: 4 })
-    ].filter(Boolean).join('\n\n');
-
-    const executor = new ToolExecutor({
-      workingDirectory: process.cwd(),
-      requireApproval: true,
-      runtimeEnvironment,
-      shouldAutoApprove: async (toolName) => isToolAlwaysApproved(toolName),
-      hookExecutor: getHookSettings().enabled ? hookExecutor : null
-    });
-
-    executor.on('preExecute', ({ toolName, parameters }) => {
-      event.sender.send('chat:toolUse', { chatId, runId, toolName, parameters });
-    });
-
-    executor.on('postExecute', ({ toolName, result }) => {
-      event.sender.send('chat:toolResult', { chatId, runId, toolName, result });
-    });
-
-    executor.on('approvalRequired', ({ toolName, parameters, resolve }) => {
-      const approvalId = createId();
-      pendingApprovalResolvers.set(approvalId, { resolve, toolName });
-      event.sender.send('tool:approvalRequired', { approvalId, toolName, parameters });
-    });
-
-    let fullResponse = '';
-    let llmSummary = {
-      calls: [],
-      totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
-    };
-    const toolDefinitions = toolRegistry.getFunctionDefinitions();
-    await withNotificationTiming('Chat response', async () => {
-      const canUseAgentMode = agentMode && toolDefinitions.length > 0 && typeof provider.sendMessageWithTools === 'function';
-      if (canUseAgentMode) {
-        const loop = new AgentLoop(provider, executor, { maxIterations: 10 });
-        const result = await loop.run(chat.messages, toolDefinitions, options);
-        fullResponse = result.content || '(No response)';
-        llmSummary = {
-          calls: result?.llm?.calls || [],
-          totals: result?.llm?.totals || llmSummary.totals
-        };
-        event.sender.send('chat:messageChunk', { chatId, responseId, chunk: fullResponse });
-      } else {
-        const streamResult = await provider.streamMessage(chat.messages, options, (chunk) => {
-          fullResponse += chunk;
-          event.sender.send('chat:messageChunk', { chatId, responseId, chunk });
-        });
-
-        const singleCall = streamResult?.llmMetrics || null;
-        const calls = singleCall ? [singleCall] : [];
-        llmSummary = {
-          calls,
-          totals: sumLlmCalls(calls)
-        };
-      }
-    });
-
-    const updatedChat = appendMessageToChat(chatId, 'assistant', fullResponse || '(No response)', {
-      llm: llmSummary
-    });
-    event.sender.send('chat:messageComplete', {
-      chatId,
-      responseId,
-      message: fullResponse || '(No response)',
-      llm: llmSummary
-    });
-
-    const voiceSettings = getVoiceSettings();
-    if (voiceSettings.enabled && voiceSettings.speakChatResponses) {
-      speakSummaryText(fullResponse || '(No response)', voiceSettings).catch((error) => {
-        console.warn('[voice] Failed to speak chat response:', error.message);
-      });
-    }
-
-    return updatedChat;
-  } catch (error) {
-    event.sender.send('chat:messageError', {
-      chatId,
-      responseId,
-      error: error.message
-    });
-    throw error;
-  }
-});
-
-ipcMain.handle('tool:execute', async (event, { toolName, parameters }) => {
-  const executor = await createToolExecutorWithApprovals(event);
-
-  return executor.execute(toolName, parameters);
-});
-
-ipcMain.handle('hooks:list', async () => {
-  return {
-    enabled: getHookSettings().enabled,
-    hooks: listHookDefinitions()
-  };
-});
-
-ipcMain.handle('hooks:reload', async () => {
-  return {
-    enabled: getHookSettings().enabled,
-    hooks: reloadHooksFromSettings()
-  };
-});
-
-ipcMain.handle('hooks:setEnabled', async (_event, { name, enabled }) => {
-  const hook = setHookEnabled(name, enabled);
-  return {
-    ok: true,
-    hook,
-    hooks: listHookDefinitions()
-  };
-});
-
-ipcMain.handle('hooks:setGlobalEnabled', async (_event, { enabled }) => {
-  const settings = getHookSettings();
-  const normalized = Boolean(enabled);
-  setHookSettings({
-    ...settings,
-    enabled: normalized
-  });
-
-  return {
-    ok: true,
-    enabled: normalized,
-    hooks: listHookDefinitions()
-  };
-});
-
-ipcMain.handle('memory:capture', async (_event, { type, content, source, metadata } = {}) => {
-  if (!memoryManager) {
-    return { ok: false, error: 'Memory manager is not initialized.' };
-  }
-
-  try {
-    const entry = memoryManager.capture(type, content, { source, metadata });
-    return { ok: true, entry };
-  } catch (error) {
-    return { ok: false, error: error.message };
-  }
-});
-
-ipcMain.handle('memory:recall', async (_event, { query = '', options = {} } = {}) => {
-  if (!memoryManager) {
-    return { ok: false, error: 'Memory manager is not initialized.', entries: [] };
-  }
-
-  try {
-    const entries = memoryManager.recall(query, options || {});
-    return { ok: true, entries };
-  } catch (error) {
-    return { ok: false, error: error.message, entries: [] };
-  }
-});
-
-ipcMain.handle('memory:list', async (_event, options = {}) => {
-  if (!memoryManager) {
-    return { ok: false, error: 'Memory manager is not initialized.', entries: [] };
-  }
-
-  try {
-    const entries = memoryManager.list(options || {});
-    return { ok: true, entries };
-  } catch (error) {
-    return { ok: false, error: error.message, entries: [] };
-  }
-});
-
-ipcMain.handle('memory:delete', async (_event, { id } = {}) => {
-  if (!memoryManager) {
-    return { ok: false, error: 'Memory manager is not initialized.' };
-  }
-
-  try {
-    const deleted = memoryManager.delete(id);
-    return { ok: true, deleted };
-  } catch (error) {
-    return { ok: false, error: error.message };
-  }
-});
-
-ipcMain.handle('memory:clear', async () => {
-  if (!memoryManager) {
-    return { ok: false, error: 'Memory manager is not initialized.' };
-  }
-
-  try {
-    memoryManager.clear();
-    return { ok: true };
-  } catch (error) {
-    return { ok: false, error: error.message };
-  }
-});
-
-ipcMain.handle('tool:list', async () => {
-  return toolRegistry.getFunctionDefinitions();
-});
-
-ipcMain.on('tool:approvalResponse', (_event, { approvalId, approved, alwaysApprove }) => {
-  const pendingApproval = pendingApprovalResolvers.get(approvalId);
-  if (!pendingApproval) return;
-
-  pendingApprovalResolvers.delete(approvalId);
-
-  if (Boolean(approved) && Boolean(alwaysApprove) && pendingApproval.toolName) {
-    setToolAlwaysApprove(pendingApproval.toolName, true);
-  }
-
-  pendingApproval.resolve(Boolean(approved));
-});
-
-registerSettingsHandlers(ipcMain, {
+  // Settings
   safeStorage,
   getApiTokens,
   getApiStatus,
@@ -2031,21 +1715,14 @@ registerSettingsHandlers(ipcMain, {
   providerDefaults,
   hasStoredElevenLabsToken,
   hasStoredTelegramToken,
-  get telegramBridge() {
-    return telegramBridge;
-  },
-  listHookDefinitions,
+  getTelegramBridge: () => telegramBridge,
   normalizeTemplateVariables,
   getUserProfile,
-  getVoiceSettings,
   setTemplateVariables,
   updateUserProfile,
   setVoiceSettings,
   clearElevenLabsToken,
   saveElevenLabsToken,
-  get ttsEngine() {
-    return ttsEngine;
-  },
   normalizeVoiceSettings,
   setSettings,
   resetRuntimeEnvironmentCache,
@@ -2055,333 +1732,32 @@ registerSettingsHandlers(ipcMain, {
   updateStatus,
   runLlmCommand,
   setActiveInferenceTier,
-  setNotificationSettings
-});
+  setNotificationSettings,
 
-registerTaskHandlers(ipcMain, {
-  getTaskManager: () => taskManager
-});
+  // Task
+  getTaskManager: () => taskManager,
 
-ipcMain.handle('agent:list', async () => {
-  return listAgents().map((agent) => ({
-    id: agent.id,
-    name: agent.name,
-    description: agent.description,
-    model: agent.model,
-    inferenceTier: agent.inferenceTier,
-    allowedTools: agent.allowedTools
-  }));
-});
+  // Agent
+  getAgent,
+  listAgents,
+  createAgentRuntime,
+  AgentExecutor,
+  AgentOrchestrator,
+  buildAgentVoiceOptions,
+  buildAgentCompletionSummary,
+  buildTemplateContextFromSettings,
+  formatUserContextSection,
+  formatProjectContextSection,
 
-ipcMain.handle('agent:execute', async (event, { agentId, message, tier }) => {
-  const settings = getSettings();
-  const agent = getAgent(agentId);
+  // Gateway
+  getRemoteControl: () => remoteControl,
+  getSessionManager: () => sessionManager,
 
-  if (!agent) {
-    throw new Error(`Agent not found: ${agentId}`);
-  }
-
-  const runtime = await createAgentRuntime(
-    { tier: tier || agent.inferenceTier || settings?.inference?.activeTier },
-    event
-  );
-
-  const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor);
-  return withNotificationTiming(`Agent ${agent.id}`, async () => {
-    const result = await agentExecutor.execute(agent, message, {
-      tier: runtime.tier,
-      model: runtime.model || agent.model,
-      timeoutMs: runtime.timeoutMs,
-      tools: runtime.toolDefinitions,
-      userProfile: getUserProfile(),
-      templateContext: buildTemplateContextFromSettings(),
-      systemPrompt: [
-        buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
-        buildMemoryContextSection(message),
-        formatUserContextSection(),
-        formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
-      ].join('\n\n')
-    });
-
-    const voiceOptions = buildAgentVoiceOptions(agent);
-    let voiceResult = null;
-    if (voiceOptions.enabled && voiceOptions.speakAgentSummary !== false) {
-      voiceResult = await speakSummaryText(
-        buildAgentCompletionSummary(agent, result?.content || ''),
-        voiceOptions
-      );
-    }
-
-    return {
-      ...result,
-      voice: voiceResult
-    };
-  });
-});
-
-ipcMain.handle('agent:executeParallel', async (event, { agentIds = [], message }) => {
-  const settings = getSettings();
-  const runtime = await createAgentRuntime({ tier: settings?.inference?.activeTier }, event);
-
-  const agents = agentIds
-    .map((agentId) => getAgent(agentId))
-    .filter(Boolean);
-
-  const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor);
-  const orchestrator = new AgentOrchestrator(agentExecutor);
-  return withNotificationTiming('Parallel agent run', async () => {
-    const results = await orchestrator.executeParallel(agents, message, {
-      tier: runtime.tier,
-      model: runtime.model,
-      timeoutMs: runtime.timeoutMs,
-      tools: runtime.toolDefinitions,
-      userProfile: getUserProfile(),
-      templateContext: buildTemplateContextFromSettings(),
-      systemPrompt: [
-        buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
-        buildMemoryContextSection(message),
-        formatUserContextSection(),
-        formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
-      ].join('\n\n')
-    });
-
-    await Promise.all(
-      (results || []).map(async (result, index) => {
-        const agent = agents[index];
-        if (!agent) return;
-        const voiceOptions = buildAgentVoiceOptions(agent);
-        if (!voiceOptions.enabled || voiceOptions.speakAgentSummary === false) {
-          return;
-        }
-
-        await speakSummaryText(buildAgentCompletionSummary(agent, result?.content || ''), voiceOptions);
-      })
-    );
-
-    return results;
-  });
-});
-
-ipcMain.handle('agent:executeSerial', async (event, { agentIds = [], message }) => {
-  const settings = getSettings();
-  const runtime = await createAgentRuntime({ tier: settings?.inference?.activeTier }, event);
-
-  const agents = agentIds
-    .map((agentId) => getAgent(agentId))
-    .filter(Boolean);
-
-  const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor);
-  const orchestrator = new AgentOrchestrator(agentExecutor);
-  return withNotificationTiming('Serial agent run', async () => {
-    const results = await orchestrator.executeSerial(agents, message, {
-      tier: runtime.tier,
-      model: runtime.model,
-      timeoutMs: runtime.timeoutMs,
-      tools: runtime.toolDefinitions,
-      userProfile: getUserProfile(),
-      templateContext: buildTemplateContextFromSettings(),
-      systemPrompt: [
-        buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
-        buildMemoryContextSection(message),
-        formatUserContextSection(),
-        formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
-      ].join('\n\n')
-    });
-
-    for (let index = 0; index < (results || []).length; index += 1) {
-      const agent = agents[index];
-      if (!agent) continue;
-      const voiceOptions = buildAgentVoiceOptions(agent);
-      if (!voiceOptions.enabled || voiceOptions.speakAgentSummary === false) {
-        continue;
-      }
-
-      await speakSummaryText(buildAgentCompletionSummary(agent, results[index]?.content || ''), voiceOptions);
-    }
-
-    return results;
-  });
-});
-
-ipcMain.handle('gateway:status', async () => {
-  if (!remoteControl) {
-    return {
-      status: 'uninitialized'
-    };
-  }
-
-  return remoteControl.getStatus();
-});
-
-ipcMain.handle('sessions:list', async (_event, filter = {}) => {
-  if (!sessionManager) {
-    throw new Error('Session manager is not initialized');
-  }
-
-  return sessionManager.listSessions(filter);
-});
-
-ipcMain.handle('sessions:history', async (_event, { sessionKey, limit = 50 }) => {
-  if (!sessionManager) {
-    throw new Error('Session manager is not initialized');
-  }
-
-  return sessionManager.getHistory(sessionKey, limit);
-});
-
-ipcMain.handle('skill:list', async () => {
-  return skillRegistry.listSkills();
-});
-
-ipcMain.handle('skill:customize', async (_event, { skillId } = {}) => {
-  try {
-    const customization = ensureSkillCustomizationFile(skillId);
-    const openError = await shell.openPath(customization.path);
-    if (openError) {
-      return {
-        ok: false,
-        error: openError,
-        ...customization
-      };
-    }
-
-    return {
-      ok: true,
-      ...customization
-    };
-  } catch (error) {
-    return {
-      ok: false,
-      error: error.message
-    };
-  }
-});
-
-ipcMain.handle('skill:execute', async (_event, { command, args = [], chatId }) => {
-  try {
-    const parsedArgs = Array.isArray(args) ? [...args] : [];
-    const forcePrompt = parsedArgs.includes('--force-prompt');
-    const sanitizedArgs = parsedArgs.filter((arg) => arg !== '--force-prompt');
-
-    // Create a session for this chat if needed
-    const sessionKey = sessionManager.buildSessionKey('main', 'ui', chatId);
-    const session = sessionManager.getOrCreateSession(sessionKey, 'main', {
-      channel: 'ui',
-      peer: chatId,
-      label: `ui:${chatId}`
-    });
-
-    const result = await skillRegistry.executeCommand(
-      command,
-      sanitizedArgs,
-      {
-        chatId,
-        channel: 'ui',
-        userId: chatId,
-        session
-      },
-      { forcePrompt }
-    );
-
-    return result;
-  } catch (error) {
-    console.error('[main] Skill execution error:', error);
-    return {
-      ok: false,
-      error: error.message || 'Unknown error executing skill command'
-    };
-  }
-});
-
-ipcMain.handle('skill:pin', async (_event, { chatId, skillId }) => {
-  if (!pinManager) {
-    return { ok: false, error: 'Pin manager is not initialized.' };
-  }
-
-  const skill = skillRegistry.getSkill(skillId);
-  if (!skill) {
-    return { ok: false, error: `Unknown skill: ${skillId}` };
-  }
-
-  if (!skill.getMetadata().pinnable) {
-    return { ok: false, error: `Skill '${skillId}' does not support pinning.` };
-  }
-  const sessionKey = sessionManager.buildSessionKey('main', 'ui', chatId);
-  await pinManager.pin(sessionKey, skillId);
-  return { ok: true, skillId, name: skill.getMetadata().name };
-});
-
-ipcMain.handle('skill:unpin', async (_event, { chatId }) => {
-  if (!pinManager) {
-    return { ok: false, error: 'Pin manager is not initialized.' };
-  }
-  const sessionKey = sessionManager.buildSessionKey('main', 'ui', chatId);
-  const previousId = pinManager.getPinned(sessionKey);
-  await pinManager.unpin(sessionKey);
-  return { ok: true, previousSkillId: previousId || null };
-});
-
-ipcMain.handle('skill:getPinned', async (_event, { chatId }) => {
-  if (!pinManager) {
-    return { ok: false, error: 'Pin manager is not initialized.' };
-  }
-
-  const sessionKey = sessionManager.buildSessionKey('main', 'ui', chatId);
-  const skillId = pinManager.getPinned(sessionKey);
-  if (!skillId) {
-    return { ok: true, pinned: null };
-  }
-
-  const skill = skillRegistry.getSkill(skillId);
-  if (!skill) {
-    return { ok: true, pinned: { skillId } };
-  }
-
-  return {
-    ok: true,
-    pinned: {
-      skillId,
-      ...skill.getMetadata()
-    }
-  };
-});
-ipcMain.handle('skill:listPinnable', async () => {
-  return skillRegistry.getPinnableSkills();
-});
-
-ipcMain.handle('skill:handleMessage', async (_event, { chatId, message }) => {
-  if (!pinManager) {
-    return { ok: false, error: 'Pin manager is not initialized.', continueWithAgent: true };
-  }
-
-  const sessionKey = sessionManager.buildSessionKey('main', 'ui', chatId);
-  const skillId = pinManager.getPinned(sessionKey);
-  if (!skillId) {
-    return { ok: false, error: 'No skill pinned', continueWithAgent: true };
-  }
-
-  const skill = skillRegistry.getSkill(skillId);
-  if (!skill || typeof skill.handleMessage !== 'function') {
-    return { ok: false, error: 'Pinned skill cannot handle messages', continueWithAgent: true };
-  }
-
-  const session = sessionManager.getOrCreateSession(sessionKey, 'main', {
-    channel: 'ui',
-    peer: chatId,
-    label: `ui:${chatId}`
-  });
-
-  try {
-    const result = await skill.handleMessage(message, {
-      chatId,
-      channel: 'ui',
-      userId: chatId,
-      session
-    });
-    return result || { ok: false, continueWithAgent: true };
-  } catch (error) {
-    return { ok: false, error: error.message, continueWithAgent: true };
-  }
+  // Skill
+  skillRegistry,
+  ensureSkillCustomizationFile,
+  getPinManager: () => pinManager,
+  getShell: () => shell
 });
 
 app.whenReady().then(async () => {
