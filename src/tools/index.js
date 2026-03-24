@@ -4,6 +4,7 @@ const BashTool = require('./builtin/bash-tool');
 const ReadTool = require('./builtin/read-tool');
 const EditTool = require('./builtin/edit-tool');
 const WriteTool = require('./builtin/write-tool');
+const WebSearchTool = require('./builtin/web-search-tool');
 const WebFetchTool = require('./builtin/web-fetch-tool');
 const GlobTool = require('./builtin/glob-tool');
 
@@ -16,6 +17,7 @@ function initializeTools() {
   toolRegistry.register(ReadTool);
   toolRegistry.register(EditTool);
   toolRegistry.register(WriteTool);
+  toolRegistry.register(WebSearchTool);
   toolRegistry.register(WebFetchTool);
   toolRegistry.register(GlobTool);
 
