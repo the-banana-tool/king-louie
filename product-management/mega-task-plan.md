@@ -1127,7 +1127,9 @@ describe('InferenceRouter', () => {
 
 ---
 
-## Task 10: Web Fetch Tool
+## Task 10: Web Fetch Tool ✅ COMPLETED
+
+> **Completed:** Web Fetch Tool (`src/tools/builtin/web-fetch-tool.js` and `src/tools/builtin/web-fetch-utils.js`) implemented with SSRF protection, content extraction (markdown/text), size limits, truncation, and 15-minute caching. Registered in `src/tools/index.js` and tested thoroughly in `tests/web-fetch-tool.test.js`.
 
 **Source:** openclaw.md §1.1
 **Dependencies:** None
@@ -1496,7 +1498,9 @@ describe('WebSearch Tool', () => {
 
 ---
 
-## Task 12: Glob Tool
+## Task 12: Glob Tool ✅ COMPLETED
+
+> **Completed:** `GlobTool` created in `src/tools/builtin/glob-tool.js` using `fast-glob`. It supports sorting files by modification time, excludes `node_modules` and `.git` by default, and respects the `maxResults` constraint. It is registered in `src/tools/index.js` and tested via `tests/glob-tool.test.js`.
 
 **Source:** king-louie-enhancement-plan.md Phase 7
 **Dependencies:** None
