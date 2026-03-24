@@ -116,6 +116,8 @@ const validateObject = (value, fieldName) => {
   }
 };
 
+const VALID_SENDERS = new Set(['user', 'assistant', 'system', 'tool']);
+
 const knownProviders = new Set(['openai', 'anthropic', 'copilot']);
 
 const validateSettingsSaveProviderPayload = (payload = {}) => {
@@ -198,11 +200,35 @@ contextBridge.exposeInMainWorld(
       load: () => ipcRenderer.invoke('chat:load'),
       create: (title) => ipcRenderer.invoke('chat:create', title),
       setActive: (chatId) => ipcRenderer.invoke('chat:setActive', chatId),
-      rename: (payload) => ipcRenderer.invoke('chat:rename', payload),
-      remove: (chatId) => ipcRenderer.invoke('chat:delete', chatId),
-      addMessage: (payload) => ipcRenderer.invoke('chat:addMessage', payload),
+      rename: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.chatId, 'chatId');
+        validateString(payload.name, 'name', { minLength: 1 });
+        if (payload.name.length > 200) {
+          throw new Error('Invalid name: must be 200 characters or fewer');
+        }
+        return ipcRenderer.invoke('chat:rename', payload);
+      },
+      remove: (chatId) => {
+        validateString(chatId, 'chatId');
+        return ipcRenderer.invoke('chat:delete', chatId);
+      },
+      addMessage: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.chatId, 'chatId');
+        validateString(payload.text, 'text');
+        if (!VALID_SENDERS.has(payload.sender)) {
+          throw new Error('Invalid sender: must be one of user, assistant, system, tool');
+        }
+        return ipcRenderer.invoke('chat:addMessage', payload);
+      },
       speakLast: (payload) => ipcRenderer.invoke('chat:speakLast', payload),
-      sendMessage: (payload) => ipcRenderer.invoke('chat:sendMessage', payload),
+      sendMessage: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.chatId, 'chatId');
+        validateString(payload.message, 'message', { minLength: 1 });
+        return ipcRenderer.invoke('chat:sendMessage', payload);
+      },
       onMessageStart: (callback) => registerOnce('chat:messageStart', callback),
       onMessageChunk: (callback) => registerOnce('chat:messageChunk', callback),
       onMessageComplete: (callback) => registerOnce('chat:messageComplete', callback),
@@ -231,7 +257,12 @@ contextBridge.exposeInMainWorld(
     },
     agent: {
       list: () => ipcRenderer.invoke('agent:list'),
-      execute: (payload) => ipcRenderer.invoke('agent:execute', payload),
+      execute: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.agentId, 'agentId');
+        validateString(payload.message, 'message');
+        return ipcRenderer.invoke('agent:execute', payload);
+      },
       executeParallel: (payload) => ipcRenderer.invoke('agent:executeParallel', payload),
       executeSerial: (payload) => ipcRenderer.invoke('agent:executeSerial', payload)
     },
@@ -266,14 +297,30 @@ contextBridge.exposeInMainWorld(
     hooks: {
       list: () => ipcRenderer.invoke('hooks:list'),
       reload: () => ipcRenderer.invoke('hooks:reload'),
-      setEnabled: (payload) => ipcRenderer.invoke('hooks:setEnabled', payload),
+      setEnabled: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.hookId, 'hookId');
+        if (typeof payload.enabled !== 'boolean') {
+          throw new Error('Invalid enabled: expected boolean');
+        }
+        return ipcRenderer.invoke('hooks:setEnabled', payload);
+      },
       setGlobalEnabled: (payload) => ipcRenderer.invoke('hooks:setGlobalEnabled', payload)
     },
     memory: {
-      capture: (payload) => ipcRenderer.invoke('memory:capture', payload),
+      capture: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.type, 'type');
+        validateString(payload.content, 'content', { minLength: 1 });
+        return ipcRenderer.invoke('memory:capture', payload);
+      },
       recall: (payload) => ipcRenderer.invoke('memory:recall', payload),
       list: (payload) => ipcRenderer.invoke('memory:list', payload),
-      delete: (payload) => ipcRenderer.invoke('memory:delete', payload),
+      delete: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.id, 'id');
+        return ipcRenderer.invoke('memory:delete', payload);
+      },
       clear: () => ipcRenderer.invoke('memory:clear')
     },
     skill: {

@@ -1,143 +1,169 @@
-// DOM Elements
-const userInput = document.getElementById('user-input');
-const sendBtn = document.getElementById('send-btn');
-const chatMessages = document.getElementById('chat-messages');
-const newChatBtn = document.getElementById('new-chat-btn');
-const newChatBtnCompact = document.getElementById('new-chat-btn-compact');
-const chatList = document.getElementById('chat-list');
-const chatHeaderTitle = document.getElementById('chat-header-title');
-const chatHeaderMeta = document.getElementById('chat-header-meta');
-const emptyState = document.getElementById('empty-state');
-const mainContent = document.querySelector('.main-content');
-const container = document.querySelector('.container');
-const sidebar = document.querySelector('.sidebar');
-const chatContextMenu = document.getElementById('chat-context-menu');
-const settingsDrawer = document.getElementById('settings-drawer');
-const toggleHistoryBtn = document.getElementById('toggle-history-btn');
-const openSettingsBtn = document.getElementById('open-settings-btn');
-const closeSettingsBtn = document.getElementById('close-settings-btn');
-const floatingSettingsBtn = document.getElementById('floating-settings-btn');
-const composerSettingsBtn = document.getElementById('composer-settings-btn');
-const providerList = document.getElementById('provider-list');
-const settingsEncryptionAlert = document.getElementById('settings-encryption-alert');
-const agentModeBtn = document.getElementById('agent-mode-btn');
-const templateNameInput = document.getElementById('template-name-input');
-const templateRoleInput = document.getElementById('template-role-input');
-const templatePreferencesInput = document.getElementById('template-preferences-input');
-const templateProjectContextInput = document.getElementById('template-project-context-input');
-const saveTemplateVariablesBtn = document.getElementById('save-template-variables-btn');
-const templateVariablesStatus = document.getElementById('template-variables-status');
-const profileNameInput = document.getElementById('profile-name-input');
-const profileRoleInput = document.getElementById('profile-role-input');
-const profileGoalsInput = document.getElementById('profile-goals-input');
-const profilePreferencesInput = document.getElementById('profile-preferences-input');
-const profileProjectContextInput = document.getElementById('profile-project-context-input');
-const saveUserProfileBtn = document.getElementById('save-user-profile-btn');
-const userProfileStatus = document.getElementById('user-profile-status');
-const notificationsEnabledInput = document.getElementById('notifications-enabled-input');
-const notificationsUiToastEnabledInput = document.getElementById('notifications-ui-toast-enabled-input');
-const notificationsNtfyEnabledInput = document.getElementById('notifications-ntfy-enabled-input');
-const notificationsTelegramLongTaskInput = document.getElementById('notifications-telegram-long-task-input');
-const notificationsToastThresholdInput = document.getElementById('notifications-toast-threshold-input');
-const notificationsExternalThresholdInput = document.getElementById('notifications-external-threshold-input');
-const notificationsNtfyTopicInput = document.getElementById('notifications-ntfy-topic-input');
-const saveNotificationsBtn = document.getElementById('save-notifications-btn');
-const notificationsStatus = document.getElementById('notifications-status');
-const voiceEnabledInput = document.getElementById('voice-enabled-input');
-const voiceSpeakChatInput = document.getElementById('voice-speak-chat-input');
-const voiceSpeakAgentSummaryInput = document.getElementById('voice-speak-agent-summary-input');
-const voiceTelegramLongInput = document.getElementById('voice-telegram-long-input');
-const voiceEngineInput = document.getElementById('voice-engine-input');
-const voiceIdInput = document.getElementById('voice-id-input');
-const voiceSpeedInput = document.getElementById('voice-speed-input');
-const voiceStabilityInput = document.getElementById('voice-stability-input');
-const voiceStyleInput = document.getElementById('voice-style-input');
-const voiceSummaryMaxInput = document.getElementById('voice-summary-max-input');
-const voiceTelegramMinInput = document.getElementById('voice-telegram-min-input');
-const voiceElevenLabsKeyInput = document.getElementById('voice-elevenlabs-key-input');
-const saveVoiceSettingsBtn = document.getElementById('save-voice-settings-btn');
-const saveVoiceKeyBtn = document.getElementById('save-voice-key-btn');
-const clearVoiceKeyBtn = document.getElementById('clear-voice-key-btn');
-const testVoiceBtn = document.getElementById('test-voice-btn');
-const voiceStatus = document.getElementById('voice-status');
-const hooksGlobalEnabledInput = document.getElementById('hooks-global-enabled-input');
-const reloadHooksBtn = document.getElementById('reload-hooks-btn');
-const hooksStatus = document.getElementById('hooks-status');
-const hooksList = document.getElementById('hooks-list');
-const memoryQueryInput = document.getElementById('memory-query-input');
-const memoryTierFilterInput = document.getElementById('memory-tier-filter-input');
-const memoryCaptureTypeInput = document.getElementById('memory-capture-type-input');
-const memoryCaptureContentInput = document.getElementById('memory-capture-content-input');
-const memoryRefreshBtn = document.getElementById('memory-refresh-btn');
-const memoryCaptureBtn = document.getElementById('memory-capture-btn');
-const memoryClearBtn = document.getElementById('memory-clear-btn');
-const memoryStatus = document.getElementById('memory-status');
-const memoryList = document.getElementById('memory-list');
-
-let chats = [];
-let activeChatId = null;
-let contextChatId = null;
-let settingsState = {
-  encryptionAvailable: true,
-  providers: {},
-  activeProvider: 'openai',
-  inference: {
-    activeTier: 'standard'
-  },
-  templateVariables: {
-    name: '',
-    role: '',
-    preferences: '',
-    projectContext: ''
-  },
-  userProfile: {
-    name: '',
-    role: '',
-    goals: [],
-    preferences: {},
-    projectContext: ''
-  },
-  notifications: {
-    enabled: true,
-    thresholdsMs: {
-      toast: 30000,
-      external: 120000
+const appState = {
+  chats: [],
+  activeChatId: null,
+  contextChatId: null,
+  isAgentModeEnabled: false,
+  isHistoryCollapsed: false,
+  memoryEntries: [],
+  streamBuffers: new Map(),
+  settings: {
+    encryptionAvailable: true,
+    providers: {},
+    activeProvider: 'openai',
+    inference: {
+      activeTier: 'standard'
     },
-    uiToast: {
-      enabled: true
+    templateVariables: {
+      name: '',
+      role: '',
+      preferences: '',
+      projectContext: ''
     },
-    ntfy: {
+    userProfile: {
+      name: '',
+      role: '',
+      goals: [],
+      preferences: {},
+      projectContext: ''
+    },
+    notifications: {
+      enabled: true,
+      thresholdsMs: {
+        toast: 30000,
+        external: 120000
+      },
+      uiToast: {
+        enabled: true
+      },
+      ntfy: {
+        enabled: false,
+        topic: ''
+      },
+      telegram: {
+        longTaskNotice: true
+      }
+    },
+    voice: {
       enabled: false,
-      topic: ''
+      engine: 'system',
+      voiceId: '',
+      speed: 1,
+      stability: 0.5,
+      style: 0.25,
+      speakAgentSummary: true,
+      speakChatResponses: false,
+      telegramVoiceForLongResponses: false,
+      telegramMinChars: 500,
+      summaryMaxChars: 260,
+      hasElevenLabsKey: false
     },
-    telegram: {
-      longTaskNotice: true
+    hooks: {
+      enabled: true,
+      loaded: []
     }
-  },
-  voice: {
-    enabled: false,
-    engine: 'system',
-    voiceId: '',
-    speed: 1,
-    stability: 0.5,
-    style: 0.25,
-    speakAgentSummary: true,
-    speakChatResponses: false,
-    telegramVoiceForLongResponses: false,
-    telegramMinChars: 500,
-    summaryMaxChars: 260,
-    hasElevenLabsKey: false
-  },
-  hooks: {
-    enabled: true,
-    loaded: []
   }
 };
-const streamBufferById = new Map();
-let isAgentModeEnabled = false;
-let isHistoryCollapsed = false;
-let memoryEntries = [];
+
+const dom = {
+  userInput: document.getElementById('user-input'),
+  sendBtn: document.getElementById('send-btn'),
+  chatMessages: document.getElementById('chat-messages'),
+  newChatBtn: document.getElementById('new-chat-btn'),
+  newChatBtnCompact: document.getElementById('new-chat-btn-compact'),
+  chatList: document.getElementById('chat-list'),
+  chatHeaderTitle: document.getElementById('chat-header-title'),
+  chatHeaderMeta: document.getElementById('chat-header-meta'),
+  emptyState: document.getElementById('empty-state'),
+  mainContent: document.querySelector('.main-content'),
+  container: document.querySelector('.container'),
+  sidebar: document.querySelector('.sidebar'),
+  chatContextMenu: document.getElementById('chat-context-menu'),
+  settingsDrawer: document.getElementById('settings-drawer'),
+  toggleHistoryBtn: document.getElementById('toggle-history-btn'),
+  openSettingsBtn: document.getElementById('open-settings-btn'),
+  closeSettingsBtn: document.getElementById('close-settings-btn'),
+  floatingSettingsBtn: document.getElementById('floating-settings-btn'),
+  composerSettingsBtn: document.getElementById('composer-settings-btn'),
+  providerList: document.getElementById('provider-list'),
+  settingsEncryptionAlert: document.getElementById('settings-encryption-alert'),
+  agentModeBtn: document.getElementById('agent-mode-btn'),
+  templateNameInput: document.getElementById('template-name-input'),
+  templateRoleInput: document.getElementById('template-role-input'),
+  templatePreferencesInput: document.getElementById('template-preferences-input'),
+  templateProjectContextInput: document.getElementById('template-project-context-input'),
+  saveTemplateVariablesBtn: document.getElementById('save-template-variables-btn'),
+  templateVariablesStatus: document.getElementById('template-variables-status'),
+  profileNameInput: document.getElementById('profile-name-input'),
+  profileRoleInput: document.getElementById('profile-role-input'),
+  profileGoalsInput: document.getElementById('profile-goals-input'),
+  profilePreferencesInput: document.getElementById('profile-preferences-input'),
+  profileProjectContextInput: document.getElementById('profile-project-context-input'),
+  saveUserProfileBtn: document.getElementById('save-user-profile-btn'),
+  userProfileStatus: document.getElementById('user-profile-status'),
+  notificationsEnabledInput: document.getElementById('notifications-enabled-input'),
+  notificationsUiToastEnabledInput: document.getElementById('notifications-ui-toast-enabled-input'),
+  notificationsNtfyEnabledInput: document.getElementById('notifications-ntfy-enabled-input'),
+  notificationsTelegramLongTaskInput: document.getElementById('notifications-telegram-long-task-input'),
+  notificationsToastThresholdInput: document.getElementById('notifications-toast-threshold-input'),
+  notificationsExternalThresholdInput: document.getElementById('notifications-external-threshold-input'),
+  notificationsNtfyTopicInput: document.getElementById('notifications-ntfy-topic-input'),
+  saveNotificationsBtn: document.getElementById('save-notifications-btn'),
+  notificationsStatus: document.getElementById('notifications-status'),
+  voiceEnabledInput: document.getElementById('voice-enabled-input'),
+  voiceSpeakChatInput: document.getElementById('voice-speak-chat-input'),
+  voiceSpeakAgentSummaryInput: document.getElementById('voice-speak-agent-summary-input'),
+  voiceTelegramLongInput: document.getElementById('voice-telegram-long-input'),
+  voiceEngineInput: document.getElementById('voice-engine-input'),
+  voiceIdInput: document.getElementById('voice-id-input'),
+  voiceSpeedInput: document.getElementById('voice-speed-input'),
+  voiceStabilityInput: document.getElementById('voice-stability-input'),
+  voiceStyleInput: document.getElementById('voice-style-input'),
+  voiceSummaryMaxInput: document.getElementById('voice-summary-max-input'),
+  voiceTelegramMinInput: document.getElementById('voice-telegram-min-input'),
+  voiceElevenLabsKeyInput: document.getElementById('voice-elevenlabs-key-input'),
+  saveVoiceSettingsBtn: document.getElementById('save-voice-settings-btn'),
+  saveVoiceKeyBtn: document.getElementById('save-voice-key-btn'),
+  clearVoiceKeyBtn: document.getElementById('clear-voice-key-btn'),
+  testVoiceBtn: document.getElementById('test-voice-btn'),
+  voiceStatus: document.getElementById('voice-status'),
+  hooksGlobalEnabledInput: document.getElementById('hooks-global-enabled-input'),
+  reloadHooksBtn: document.getElementById('reload-hooks-btn'),
+  hooksStatus: document.getElementById('hooks-status'),
+  hooksList: document.getElementById('hooks-list'),
+  memoryQueryInput: document.getElementById('memory-query-input'),
+  memoryTierFilterInput: document.getElementById('memory-tier-filter-input'),
+  memoryCaptureTypeInput: document.getElementById('memory-capture-type-input'),
+  memoryCaptureContentInput: document.getElementById('memory-capture-content-input'),
+  memoryRefreshBtn: document.getElementById('memory-refresh-btn'),
+  memoryCaptureBtn: document.getElementById('memory-capture-btn'),
+  memoryClearBtn: document.getElementById('memory-clear-btn'),
+  memoryStatus: document.getElementById('memory-status'),
+  memoryList: document.getElementById('memory-list'),
+};
+
 const unsubscribeHandlers = [];
+
+function resetAppState() {
+  appState.chats = [];
+  appState.activeChatId = null;
+  appState.contextChatId = null;
+  appState.isAgentModeEnabled = false;
+  appState.isHistoryCollapsed = false;
+  appState.memoryEntries = [];
+  appState.streamBuffers.clear();
+  appState.settings = {
+    encryptionAvailable: true,
+    providers: {},
+    activeProvider: 'openai',
+    inference: { activeTier: 'standard' },
+    templateVariables: { name: '', role: '', preferences: '', projectContext: '' },
+    userProfile: { name: '', role: '', goals: [], preferences: {}, projectContext: '' },
+    notifications: { enabled: true, thresholdsMs: { toast: 30000, external: 120000 }, uiToast: { enabled: true }, ntfy: { enabled: false, topic: '' }, telegram: { longTaskNotice: true } },
+    voice: { enabled: false, engine: 'system', voiceId: '', speed: 1, stability: 0.5, style: 0.25, speakAgentSummary: true, speakChatResponses: false, telegramVoiceForLongResponses: false, telegramMinChars: 500, summaryMaxChars: 260, hasElevenLabsKey: false },
+    hooks: { enabled: true, loaded: [] }
+  };
+}
+
 
 function unwrapIpcResult(result, fallbackError = 'Request failed') {
   if (result && typeof result === 'object' && Object.prototype.hasOwnProperty.call(result, 'ok')) {
@@ -154,28 +180,28 @@ function unwrapIpcResult(result, fallbackError = 'Request failed') {
 }
 
 function renderHistoryToggleButton() {
-  if (!toggleHistoryBtn) return;
+  if (!dom.toggleHistoryBtn) return;
 
-  const title = isHistoryCollapsed ? 'Expand chat history' : 'Collapse chat history';
-  toggleHistoryBtn.textContent = isHistoryCollapsed ? '▶' : '◀';
-  toggleHistoryBtn.title = title;
-  toggleHistoryBtn.setAttribute('aria-label', title);
-  toggleHistoryBtn.setAttribute('aria-pressed', isHistoryCollapsed ? 'true' : 'false');
+  const title = appState.isHistoryCollapsed ? 'Expand chat history' : 'Collapse chat history';
+  dom.toggleHistoryBtn.textContent = appState.isHistoryCollapsed ? '▶' : '◀';
+  dom.toggleHistoryBtn.title = title;
+  dom.toggleHistoryBtn.setAttribute('aria-label', title);
+  dom.toggleHistoryBtn.setAttribute('aria-pressed', appState.isHistoryCollapsed ? 'true' : 'false');
 }
 
 function setHistoryCollapsed(collapsed) {
-  isHistoryCollapsed = Boolean(collapsed);
-  if (container && sidebar) {
-    container.classList.toggle('history-collapsed', isHistoryCollapsed);
+  appState.isHistoryCollapsed = Boolean(collapsed);
+  if (dom.container && dom.sidebar) {
+    dom.container.classList.toggle('history-collapsed', appState.isHistoryCollapsed);
   }
   renderHistoryToggleButton();
 }
 
 function renderAgentModeButton() {
-  if (!agentModeBtn) return;
-  agentModeBtn.textContent = `Agent Mode: ${isAgentModeEnabled ? 'On' : 'Off'}`;
-  agentModeBtn.classList.toggle('active', isAgentModeEnabled);
-  agentModeBtn.setAttribute('aria-pressed', isAgentModeEnabled ? 'true' : 'false');
+  if (!dom.agentModeBtn) return;
+  dom.agentModeBtn.textContent = `Agent Mode: ${appState.isAgentModeEnabled ? 'On' : 'Off'}`;
+  dom.agentModeBtn.classList.toggle('active', appState.isAgentModeEnabled);
+  dom.agentModeBtn.setAttribute('aria-pressed', appState.isAgentModeEnabled ? 'true' : 'false');
 }
 
 async function getLocalHelpText() {
@@ -228,8 +254,8 @@ async function getLocalHelpText() {
 
 function appendLocalMessage(sender, text, metadata = {}) {
   const now = new Date().toISOString();
-  chats = chats.map((chat) => {
-    if (chat.id !== activeChatId) return chat;
+  appState.chats = appState.chats.map((chat) => {
+    if (chat.id !== appState.activeChatId) return chat;
     return {
       ...chat,
       updatedAt: now,
@@ -274,19 +300,19 @@ async function saveUserProfileWithFeedback(profile, userCommand = null) {
     throw new Error(result?.error || 'Unable to save profile.');
   }
 
-  settingsState.userProfile = {
+  appState.settings.userProfile = {
     ...(result.userProfile || profile)
   };
   renderSettings();
 
   if (userCommand) {
     appendLocalMessage('user', userCommand);
-    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: userCommand }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: userCommand }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
   }
 
-  const summary = formatProfileSummary(settingsState.userProfile);
+  const summary = formatProfileSummary(appState.settings.userProfile);
   appendLocalMessage('assistant', summary);
-  window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: summary }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+  window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: summary }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
 }
 
 function parseSlashCommand(message = '') {
@@ -348,8 +374,8 @@ function addToolEventMessage(title, payload, variant = '') {
   }
 
   messageDiv.appendChild(messageContent);
-  chatMessages.appendChild(messageDiv);
-  chatMessages.scrollTop = chatMessages.scrollHeight;
+  dom.chatMessages.appendChild(messageDiv);
+  dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
 }
 
 function showToolApprovalDialog(approvalId, toolName, parameters) {
@@ -436,7 +462,7 @@ function formatTimestamp(iso) {
 }
 
 function getActiveChat() {
-  return chats.find((chat) => chat.id === activeChatId);
+  return appState.chats.find((chat) => chat.id === appState.activeChatId);
 }
 
 function getChatPreview(chat) {
@@ -467,7 +493,7 @@ function formatTokenCount(value = 0) {
 }
 
 function getActiveInferenceTier() {
-  return String(settingsState?.inference?.activeTier || 'standard').toLowerCase();
+  return String(appState.settings?.inference?.activeTier || 'standard').toLowerCase();
 }
 
 function formatInferenceTierLabel(tier) {
@@ -478,11 +504,11 @@ function formatInferenceTierLabel(tier) {
 }
 
 function renderChatList() {
-  chatList.innerHTML = '';
+  dom.chatList.innerHTML = '';
 
-  chats.forEach((chat) => {
+  appState.chats.forEach((chat) => {
     const chatItem = document.createElement('div');
-    chatItem.className = `chat-item ${chat.id === activeChatId ? 'active' : ''}`;
+    chatItem.className = `chat-item ${chat.id === appState.activeChatId ? 'active' : ''}`;
     chatItem.dataset.chatId = chat.id;
 
     const viewBtn = document.createElement('button');
@@ -538,34 +564,34 @@ function renderChatList() {
     chatItem.appendChild(details);
     chatItem.appendChild(actions);
 
-    chatList.appendChild(chatItem);
+    dom.chatList.appendChild(chatItem);
   });
 }
 
 function updateEmptyState() {
-  const hasChats = chats.length > 0;
-  const hasActiveChat = !!activeChatId;
+  const hasChats = appState.chats.length > 0;
+  const hasActiveChat = !!appState.activeChatId;
   const showEmpty = !hasChats || !hasActiveChat;
 
-  emptyState.hidden = !showEmpty;
-  chatMessages.hidden = showEmpty;
-  mainContent.classList.toggle('start-state', showEmpty);
-  container.classList.toggle('start-state', showEmpty);
+  dom.emptyState.hidden = !showEmpty;
+  dom.chatMessages.hidden = showEmpty;
+  dom.mainContent.classList.toggle('start-state', showEmpty);
+  dom.container.classList.toggle('start-state', showEmpty);
 }
 
 function renderChatMessages() {
   const activeChat = getActiveChat();
-  chatMessages.innerHTML = '';
+  dom.chatMessages.innerHTML = '';
 
   if (!activeChat) {
-    chatHeaderTitle.textContent = 'King Louie Chat';
-    chatHeaderMeta.textContent = `Start a new conversation • Tier: ${formatInferenceTierLabel(getActiveInferenceTier())}`;
+    dom.chatHeaderTitle.textContent = 'King Louie Chat';
+    dom.chatHeaderMeta.textContent = `Start a new conversation • Tier: ${formatInferenceTierLabel(getActiveInferenceTier())}`;
     return;
   }
 
-  chatHeaderTitle.textContent = activeChat.title;
+  dom.chatHeaderTitle.textContent = activeChat.title;
   const chatTotals = activeChat.llmTotals || sumChatLlmTotals(activeChat);
-  chatHeaderMeta.textContent = `Updated ${formatTimestamp(activeChat.updatedAt)} • Total ${formatTokenCount(chatTotals.totalTokens)} tokens • ${formatUsd(chatTotals.costUsd)} • Tier: ${formatInferenceTierLabel(getActiveInferenceTier())}`;
+  dom.chatHeaderMeta.textContent = `Updated ${formatTimestamp(activeChat.updatedAt)} • Total ${formatTokenCount(chatTotals.totalTokens)} tokens • ${formatUsd(chatTotals.costUsd)} • Tier: ${formatInferenceTierLabel(getActiveInferenceTier())}`;
 
   let runningTotals = {
     inputTokens: 0,
@@ -600,7 +626,7 @@ function refreshUI() {
 }
 
 function setSettingsDrawer(open) {
-  settingsDrawer.hidden = !open;
+  dom.settingsDrawer.hidden = !open;
   document.body.style.overflow = open ? 'hidden' : '';
 }
 
@@ -625,7 +651,7 @@ function renderProviderCard(providerKey, provider) {
   titleWrap.className = 'provider-title-wrap';
   titleWrap.appendChild(title);
 
-  if (settingsState.activeProvider === providerKey) {
+  if (appState.settings.activeProvider === providerKey) {
     const activeBadge = document.createElement('span');
     activeBadge.className = 'active-provider-badge';
     activeBadge.textContent = 'Active';
@@ -708,8 +734,8 @@ function renderProviderCard(providerKey, provider) {
 
   const activeBtn = document.createElement('button');
   activeBtn.type = 'button';
-  activeBtn.textContent = settingsState.activeProvider === providerKey ? 'Active Provider' : 'Set Active';
-  activeBtn.disabled = settingsState.activeProvider === providerKey;
+  activeBtn.textContent = appState.settings.activeProvider === providerKey ? 'Active Provider' : 'Set Active';
+  activeBtn.disabled = appState.settings.activeProvider === providerKey;
   activeBtn.dataset.action = 'set-active';
   activeBtn.dataset.provider = providerKey;
 
@@ -738,96 +764,96 @@ function renderProviderCard(providerKey, provider) {
 }
 
 function renderSettings() {
-  settingsEncryptionAlert.hidden = settingsState.encryptionAvailable;
+  dom.settingsEncryptionAlert.hidden = appState.settings.encryptionAvailable;
 
-  const templateVariables = settingsState.templateVariables || {};
-  if (templateNameInput) templateNameInput.value = templateVariables.name || '';
-  if (templateRoleInput) templateRoleInput.value = templateVariables.role || '';
-  if (templatePreferencesInput) templatePreferencesInput.value = templateVariables.preferences || '';
-  if (templateProjectContextInput) templateProjectContextInput.value = templateVariables.projectContext || '';
+  const templateVariables = appState.settings.templateVariables || {};
+  if (dom.templateNameInput) dom.templateNameInput.value = templateVariables.name || '';
+  if (dom.templateRoleInput) dom.templateRoleInput.value = templateVariables.role || '';
+  if (dom.templatePreferencesInput) dom.templatePreferencesInput.value = templateVariables.preferences || '';
+  if (dom.templateProjectContextInput) dom.templateProjectContextInput.value = templateVariables.projectContext || '';
 
-  if (templateVariablesStatus) {
-    templateVariablesStatus.textContent = 'Template variables loaded.';
-    templateVariablesStatus.classList.remove('error');
+  if (dom.templateVariablesStatus) {
+    dom.templateVariablesStatus.textContent = 'Template variables loaded.';
+    dom.templateVariablesStatus.classList.remove('error');
   }
 
-  const userProfile = settingsState.userProfile || {};
-  if (profileNameInput) profileNameInput.value = userProfile.name || '';
-  if (profileRoleInput) profileRoleInput.value = userProfile.role || '';
-  if (profileGoalsInput) {
+  const userProfile = appState.settings.userProfile || {};
+  if (dom.profileNameInput) dom.profileNameInput.value = userProfile.name || '';
+  if (dom.profileRoleInput) dom.profileRoleInput.value = userProfile.role || '';
+  if (dom.profileGoalsInput) {
     const goals = Array.isArray(userProfile.goals) ? userProfile.goals : [];
-    profileGoalsInput.value = goals.join('\n');
+    dom.profileGoalsInput.value = goals.join('\n');
   }
-  if (profilePreferencesInput) {
-    profilePreferencesInput.value =
+  if (dom.profilePreferencesInput) {
+    dom.profilePreferencesInput.value =
       userProfile.preferences && typeof userProfile.preferences === 'object'
         ? JSON.stringify(userProfile.preferences, null, 2)
         : '';
   }
-  if (profileProjectContextInput) {
-    profileProjectContextInput.value = userProfile.projectContext || '';
+  if (dom.profileProjectContextInput) {
+    dom.profileProjectContextInput.value = userProfile.projectContext || '';
   }
 
-  if (userProfileStatus) {
-    userProfileStatus.textContent = 'User profile loaded.';
-    userProfileStatus.classList.remove('error');
+  if (dom.userProfileStatus) {
+    dom.userProfileStatus.textContent = 'User profile loaded.';
+    dom.userProfileStatus.classList.remove('error');
   }
 
-  const notifications = settingsState.notifications || {};
+  const notifications = appState.settings.notifications || {};
   const thresholds = notifications.thresholdsMs || {};
-  if (notificationsEnabledInput) notificationsEnabledInput.checked = notifications.enabled !== false;
-  if (notificationsUiToastEnabledInput) notificationsUiToastEnabledInput.checked = notifications.uiToast?.enabled !== false;
-  if (notificationsNtfyEnabledInput) notificationsNtfyEnabledInput.checked = notifications.ntfy?.enabled === true;
-  if (notificationsTelegramLongTaskInput) notificationsTelegramLongTaskInput.checked = notifications.telegram?.longTaskNotice !== false;
-  if (notificationsToastThresholdInput) notificationsToastThresholdInput.value = Math.round((Number(thresholds.toast || 30000)) / 1000);
-  if (notificationsExternalThresholdInput) notificationsExternalThresholdInput.value = Math.round((Number(thresholds.external || 120000)) / 1000);
-  if (notificationsNtfyTopicInput) notificationsNtfyTopicInput.value = String(notifications.ntfy?.topic || '');
+  if (dom.notificationsEnabledInput) dom.notificationsEnabledInput.checked = notifications.enabled !== false;
+  if (dom.notificationsUiToastEnabledInput) dom.notificationsUiToastEnabledInput.checked = notifications.uiToast?.enabled !== false;
+  if (dom.notificationsNtfyEnabledInput) dom.notificationsNtfyEnabledInput.checked = notifications.ntfy?.enabled === true;
+  if (dom.notificationsTelegramLongTaskInput) dom.notificationsTelegramLongTaskInput.checked = notifications.telegram?.longTaskNotice !== false;
+  if (dom.notificationsToastThresholdInput) dom.notificationsToastThresholdInput.value = Math.round((Number(thresholds.toast || 30000)) / 1000);
+  if (dom.notificationsExternalThresholdInput) dom.notificationsExternalThresholdInput.value = Math.round((Number(thresholds.external || 120000)) / 1000);
+  if (dom.notificationsNtfyTopicInput) dom.notificationsNtfyTopicInput.value = String(notifications.ntfy?.topic || '');
 
-  if (notificationsStatus) {
-    notificationsStatus.textContent = 'Notification settings loaded.';
-    notificationsStatus.classList.remove('error');
+  if (dom.notificationsStatus) {
+    dom.notificationsStatus.textContent = 'Notification settings loaded.';
+    dom.notificationsStatus.classList.remove('error');
   }
 
-  const voice = settingsState.voice || {};
-  if (voiceEnabledInput) voiceEnabledInput.checked = voice.enabled === true;
-  if (voiceSpeakChatInput) voiceSpeakChatInput.checked = voice.speakChatResponses === true;
-  if (voiceSpeakAgentSummaryInput) voiceSpeakAgentSummaryInput.checked = voice.speakAgentSummary !== false;
-  if (voiceTelegramLongInput) voiceTelegramLongInput.checked = voice.telegramVoiceForLongResponses === true;
-  if (voiceEngineInput) voiceEngineInput.value = String(voice.engine || 'system');
-  if (voiceIdInput) voiceIdInput.value = String(voice.voiceId || '');
-  if (voiceSpeedInput) voiceSpeedInput.value = String(Number(voice.speed || 1));
-  if (voiceStabilityInput) voiceStabilityInput.value = String(Number(voice.stability || 0.5));
-  if (voiceStyleInput) voiceStyleInput.value = String(Number(voice.style || 0.25));
-  if (voiceSummaryMaxInput) voiceSummaryMaxInput.value = String(Number(voice.summaryMaxChars || 260));
-  if (voiceTelegramMinInput) voiceTelegramMinInput.value = String(Number(voice.telegramMinChars || 500));
+  const voice = appState.settings.voice || {};
+  if (dom.voiceEnabledInput) dom.voiceEnabledInput.checked = voice.enabled === true;
+  if (dom.voiceSpeakChatInput) dom.voiceSpeakChatInput.checked = voice.speakChatResponses === true;
+  if (dom.voiceSpeakAgentSummaryInput) dom.voiceSpeakAgentSummaryInput.checked = voice.speakAgentSummary !== false;
+  if (dom.voiceTelegramLongInput) dom.voiceTelegramLongInput.checked = voice.telegramVoiceForLongResponses === true;
+  if (dom.voiceEngineInput) dom.voiceEngineInput.value = String(voice.engine || 'system');
+  if (dom.voiceIdInput) dom.voiceIdInput.value = String(voice.voiceId || '');
+  if (dom.voiceSpeedInput) dom.voiceSpeedInput.value = String(Number(voice.speed || 1));
+  if (dom.voiceStabilityInput) dom.voiceStabilityInput.value = String(Number(voice.stability || 0.5));
+  if (dom.voiceStyleInput) dom.voiceStyleInput.value = String(Number(voice.style || 0.25));
+  if (dom.voiceSummaryMaxInput) dom.voiceSummaryMaxInput.value = String(Number(voice.summaryMaxChars || 260));
+  if (dom.voiceTelegramMinInput) dom.voiceTelegramMinInput.value = String(Number(voice.telegramMinChars || 500));
 
-  if (voiceStatus) {
-    voiceStatus.textContent = voice.hasElevenLabsKey
+  if (dom.voiceStatus) {
+    dom.voiceStatus.textContent = voice.hasElevenLabsKey
       ? 'Voice settings loaded. ElevenLabs key is saved.'
       : 'Voice settings loaded. ElevenLabs key is not saved.';
-    voiceStatus.classList.remove('error');
+    dom.voiceStatus.classList.remove('error');
   }
 
-  const hooks = settingsState.hooks || {};
+  const hooks = appState.settings.hooks || {};
   const loadedHooks = Array.isArray(hooks.loaded) ? hooks.loaded : [];
 
-  if (hooksGlobalEnabledInput) {
-    hooksGlobalEnabledInput.checked = hooks.enabled !== false;
+  if (dom.hooksGlobalEnabledInput) {
+    dom.hooksGlobalEnabledInput.checked = hooks.enabled !== false;
   }
 
-  if (hooksStatus) {
-    hooksStatus.textContent = `Loaded ${loadedHooks.length} hook(s).`;
-    hooksStatus.classList.remove('error');
+  if (dom.hooksStatus) {
+    dom.hooksStatus.textContent = `Loaded ${loadedHooks.length} hook(s).`;
+    dom.hooksStatus.classList.remove('error');
   }
 
-  if (hooksList) {
-    hooksList.innerHTML = '';
+  if (dom.hooksList) {
+    dom.hooksList.innerHTML = '';
 
     if (!loadedHooks.length) {
       const empty = document.createElement('div');
       empty.className = 'provider-message';
       empty.textContent = 'No hooks discovered in hooks/ directory.';
-      hooksList.appendChild(empty);
+      dom.hooksList.appendChild(empty);
     } else {
       loadedHooks.forEach((hook) => {
         const card = document.createElement('div');
@@ -888,23 +914,23 @@ function renderSettings() {
         card.appendChild(header);
         card.appendChild(description);
         card.appendChild(actions);
-        hooksList.appendChild(card);
+        dom.hooksList.appendChild(card);
       });
     }
   }
 
-  if (memoryStatus) {
-    memoryStatus.textContent = 'Memory settings ready.';
-    memoryStatus.classList.remove('error');
+  if (dom.memoryStatus) {
+    dom.memoryStatus.textContent = 'Memory settings ready.';
+    dom.memoryStatus.classList.remove('error');
   }
 
-  if (memoryCaptureTypeInput && !memoryCaptureTypeInput.value) {
-    memoryCaptureTypeInput.value = 'context';
+  if (dom.memoryCaptureTypeInput && !dom.memoryCaptureTypeInput.value) {
+    dom.memoryCaptureTypeInput.value = 'context';
   }
 
-  providerList.innerHTML = '';
-  Object.entries(settingsState.providers).forEach(([key, provider]) => {
-    providerList.appendChild(renderProviderCard(key, provider));
+  dom.providerList.innerHTML = '';
+  Object.entries(appState.settings.providers).forEach(([key, provider]) => {
+    dom.providerList.appendChild(renderProviderCard(key, provider));
   });
 }
 
@@ -916,14 +942,14 @@ function formatMemoryEntry(entry = {}) {
 }
 
 function renderMemoryList(entries = []) {
-  if (!memoryList) return;
+  if (!dom.memoryList) return;
 
-  memoryList.innerHTML = '';
+  dom.memoryList.innerHTML = '';
   if (!entries.length) {
     const empty = document.createElement('div');
     empty.className = 'provider-message';
     empty.textContent = 'No memories found for the current filters.';
-    memoryList.appendChild(empty);
+    dom.memoryList.appendChild(empty);
     return;
   }
 
@@ -970,28 +996,28 @@ function renderMemoryList(entries = []) {
     card.appendChild(body);
     card.appendChild(meta);
     card.appendChild(actions);
-    memoryList.appendChild(card);
+    dom.memoryList.appendChild(card);
   });
 }
 
 function collectMemoryFilters() {
   return {
-    query: String(memoryQueryInput?.value || '').trim(),
-    tier: String(memoryTierFilterInput?.value || '').trim(),
+    query: String(dom.memoryQueryInput?.value || '').trim(),
+    tier: String(dom.memoryTierFilterInput?.value || '').trim(),
     limit: 200
   };
 }
 
 async function loadMemoryEntries() {
-  if (!window.electron?.memory || !memoryList) {
+  if (!window.electron?.memory || !dom.memoryList) {
     return;
   }
 
   const { query, tier, limit } = collectMemoryFilters();
   try {
-    if (memoryStatus) {
-      memoryStatus.textContent = 'Loading memories...';
-      memoryStatus.classList.remove('error');
+    if (dom.memoryStatus) {
+      dom.memoryStatus.textContent = 'Loading memories...';
+      dom.memoryStatus.classList.remove('error');
     }
 
     const result = await window.electron.memory.list({
@@ -1004,16 +1030,16 @@ async function loadMemoryEntries() {
       throw new Error(result?.error || 'Unable to load memory entries.');
     }
 
-    memoryEntries = Array.isArray(result.entries) ? result.entries : [];
-    renderMemoryList(memoryEntries);
-    if (memoryStatus) {
-      memoryStatus.textContent = `Loaded ${memoryEntries.length} memory entr${memoryEntries.length === 1 ? 'y' : 'ies'}.`;
-      memoryStatus.classList.remove('error');
+    appState.memoryEntries = Array.isArray(result.entries) ? result.entries : [];
+    renderMemoryList(appState.memoryEntries);
+    if (dom.memoryStatus) {
+      dom.memoryStatus.textContent = `Loaded ${appState.memoryEntries.length} memory entr${appState.memoryEntries.length === 1 ? 'y' : 'ies'}.`;
+      dom.memoryStatus.classList.remove('error');
     }
   } catch (error) {
-    if (memoryStatus) {
-      memoryStatus.textContent = `Error: ${error.message || 'Unable to load memory entries.'}`;
-      memoryStatus.classList.add('error');
+    if (dom.memoryStatus) {
+      dom.memoryStatus.textContent = `Error: ${error.message || 'Unable to load memory entries.'}`;
+      dom.memoryStatus.classList.add('error');
     }
   }
 }
@@ -1021,38 +1047,38 @@ async function loadMemoryEntries() {
 async function handleCaptureMemory() {
   if (!window.electron?.memory) return;
 
-  const type = String(memoryCaptureTypeInput?.value || 'context').trim() || 'context';
-  const content = String(memoryCaptureContentInput?.value || '').trim();
+  const type = String(dom.memoryCaptureTypeInput?.value || 'context').trim() || 'context';
+  const content = String(dom.memoryCaptureContentInput?.value || '').trim();
   if (!content) {
-    if (memoryStatus) {
-      memoryStatus.textContent = 'Capture content is required.';
-      memoryStatus.classList.add('error');
+    if (dom.memoryStatus) {
+      dom.memoryStatus.textContent = 'Capture content is required.';
+      dom.memoryStatus.classList.add('error');
     }
     return;
   }
 
-  if (memoryCaptureBtn) memoryCaptureBtn.disabled = true;
+  if (dom.memoryCaptureBtn) dom.memoryCaptureBtn.disabled = true;
   try {
     const result = await window.electron.memory.capture({ type, content });
     if (!result?.ok) {
       throw new Error(result?.error || 'Unable to capture memory.');
     }
 
-    if (memoryCaptureContentInput) {
-      memoryCaptureContentInput.value = '';
+    if (dom.memoryCaptureContentInput) {
+      dom.memoryCaptureContentInput.value = '';
     }
-    if (memoryStatus) {
-      memoryStatus.textContent = 'Memory captured.';
-      memoryStatus.classList.remove('error');
+    if (dom.memoryStatus) {
+      dom.memoryStatus.textContent = 'Memory captured.';
+      dom.memoryStatus.classList.remove('error');
     }
     await loadMemoryEntries();
   } catch (error) {
-    if (memoryStatus) {
-      memoryStatus.textContent = `Error: ${error.message || 'Unable to capture memory.'}`;
-      memoryStatus.classList.add('error');
+    if (dom.memoryStatus) {
+      dom.memoryStatus.textContent = `Error: ${error.message || 'Unable to capture memory.'}`;
+      dom.memoryStatus.classList.add('error');
     }
   } finally {
-    if (memoryCaptureBtn) memoryCaptureBtn.disabled = false;
+    if (dom.memoryCaptureBtn) dom.memoryCaptureBtn.disabled = false;
   }
 }
 
@@ -1066,9 +1092,9 @@ async function handleDeleteMemory(memoryId) {
     }
     await loadMemoryEntries();
   } catch (error) {
-    if (memoryStatus) {
-      memoryStatus.textContent = `Error: ${error.message || 'Unable to delete memory.'}`;
-      memoryStatus.classList.add('error');
+    if (dom.memoryStatus) {
+      dom.memoryStatus.textContent = `Error: ${error.message || 'Unable to delete memory.'}`;
+      dom.memoryStatus.classList.add('error');
     }
   }
 }
@@ -1085,9 +1111,9 @@ async function handleClearMemory() {
     }
     await loadMemoryEntries();
   } catch (error) {
-    if (memoryStatus) {
-      memoryStatus.textContent = `Error: ${error.message || 'Unable to clear memory.'}`;
-      memoryStatus.classList.add('error');
+    if (dom.memoryStatus) {
+      dom.memoryStatus.textContent = `Error: ${error.message || 'Unable to clear memory.'}`;
+      dom.memoryStatus.classList.add('error');
     }
   }
 }
@@ -1105,21 +1131,21 @@ async function handleToggleHook(hookName, enabled) {
       throw new Error(result?.error || 'Unable to update hook state.');
     }
 
-    settingsState.hooks = {
-      ...(settingsState.hooks || {}),
-      loaded: Array.isArray(result.hooks) ? result.hooks : (settingsState.hooks?.loaded || [])
+    appState.settings.hooks = {
+      ...(appState.settings.hooks || {}),
+      loaded: Array.isArray(result.hooks) ? result.hooks : (appState.settings.hooks?.loaded || [])
     };
 
-    if (hooksStatus) {
-      hooksStatus.textContent = `Hook '${hookName}' ${enabled ? 'enabled' : 'disabled'}.`;
-      hooksStatus.classList.remove('error');
+    if (dom.hooksStatus) {
+      dom.hooksStatus.textContent = `Hook '${hookName}' ${enabled ? 'enabled' : 'disabled'}.`;
+      dom.hooksStatus.classList.remove('error');
     }
 
     renderSettings();
   } catch (error) {
-    if (hooksStatus) {
-      hooksStatus.textContent = `Error: ${error.message || 'Unable to update hook.'}`;
-      hooksStatus.classList.add('error');
+    if (dom.hooksStatus) {
+      dom.hooksStatus.textContent = `Error: ${error.message || 'Unable to update hook.'}`;
+      dom.hooksStatus.classList.add('error');
     }
   }
 }
@@ -1131,72 +1157,72 @@ async function handleToggleHooksGlobal(enabled) {
       throw new Error(result?.error || 'Unable to update global hook setting.');
     }
 
-    settingsState.hooks = {
-      ...(settingsState.hooks || {}),
+    appState.settings.hooks = {
+      ...(appState.settings.hooks || {}),
       enabled: Boolean(result.enabled),
-      loaded: Array.isArray(result.hooks) ? result.hooks : (settingsState.hooks?.loaded || [])
+      loaded: Array.isArray(result.hooks) ? result.hooks : (appState.settings.hooks?.loaded || [])
     };
 
-    if (hooksStatus) {
-      hooksStatus.textContent = `Hooks are now ${result.enabled ? 'enabled' : 'disabled'} globally.`;
-      hooksStatus.classList.remove('error');
+    if (dom.hooksStatus) {
+      dom.hooksStatus.textContent = `Hooks are now ${result.enabled ? 'enabled' : 'disabled'} globally.`;
+      dom.hooksStatus.classList.remove('error');
     }
 
     renderSettings();
   } catch (error) {
-    if (hooksGlobalEnabledInput) {
-      hooksGlobalEnabledInput.checked = !Boolean(enabled);
+    if (dom.hooksGlobalEnabledInput) {
+      dom.hooksGlobalEnabledInput.checked = !Boolean(enabled);
     }
 
-    if (hooksStatus) {
-      hooksStatus.textContent = `Error: ${error.message || 'Unable to update hook setting.'}`;
-      hooksStatus.classList.add('error');
+    if (dom.hooksStatus) {
+      dom.hooksStatus.textContent = `Error: ${error.message || 'Unable to update hook setting.'}`;
+      dom.hooksStatus.classList.add('error');
     }
   }
 }
 
 async function handleReloadHooks() {
-  if (reloadHooksBtn) reloadHooksBtn.disabled = true;
+  if (dom.reloadHooksBtn) dom.reloadHooksBtn.disabled = true;
 
-  if (hooksStatus) {
-    hooksStatus.textContent = 'Reloading hooks...';
-    hooksStatus.classList.remove('error');
+  if (dom.hooksStatus) {
+    dom.hooksStatus.textContent = 'Reloading hooks...';
+    dom.hooksStatus.classList.remove('error');
   }
 
   try {
     const result = await window.electron.hooks.reload();
-    settingsState.hooks = {
-      ...(settingsState.hooks || {}),
+    appState.settings.hooks = {
+      ...(appState.settings.hooks || {}),
       enabled: result?.enabled !== false,
       loaded: Array.isArray(result?.hooks) ? result.hooks : []
     };
     renderSettings();
   } catch (error) {
-    if (hooksStatus) {
-      hooksStatus.textContent = `Error: ${error.message || 'Unable to reload hooks.'}`;
-      hooksStatus.classList.add('error');
+    if (dom.hooksStatus) {
+      dom.hooksStatus.textContent = `Error: ${error.message || 'Unable to reload hooks.'}`;
+      dom.hooksStatus.classList.add('error');
     }
   } finally {
-    if (reloadHooksBtn) reloadHooksBtn.disabled = false;
+    if (dom.reloadHooksBtn) dom.reloadHooksBtn.disabled = false;
   }
 }
 
 function collectTemplateVariablesFromForm() {
   return {
-    name: String(templateNameInput?.value || '').trim(),
-    role: String(templateRoleInput?.value || '').trim(),
-    preferences: String(templatePreferencesInput?.value || '').trim(),
-    projectContext: String(templateProjectContextInput?.value || '').trim()
+    name: String(dom.templateNameInput?.value || '').trim(),
+    role: String(dom.templateRoleInput?.value || '').trim(),
+    preferences: String(dom.templatePreferencesInput?.value || '').trim(),
+    projectContext: String(dom.templateProjectContextInput?.value || '').trim()
   };
 }
 
 async function handleSaveTemplateVariables() {
-  if (!saveTemplateVariablesBtn) return;
+  if (!dom.saveTemplateVariablesBtn) return;
 
-  saveTemplateVariablesBtn.disabled = true;
-  if (templateVariablesStatus) {
-    templateVariablesStatus.textContent = 'Saving...';
-    templateVariablesStatus.classList.remove('error');
+  dom.saveTemplateVariablesBtn.disabled = true;
+  if (dom.templateVariablesStatus) {
+    dom.templateVariablesStatus.textContent = 'Saving...';
+    dom.templateVariablesStatus.classList.remove('error');
   }
 
   try {
@@ -1207,31 +1233,31 @@ async function handleSaveTemplateVariables() {
       throw new Error(result?.error || 'Unable to save template variables.');
     }
 
-    settingsState.templateVariables = {
+    appState.settings.templateVariables = {
       ...(result.templateVariables || templateVariables)
     };
 
-    if (templateVariablesStatus) {
-      templateVariablesStatus.textContent = 'Template variables saved. New runs use updated values.';
-      templateVariablesStatus.classList.remove('error');
+    if (dom.templateVariablesStatus) {
+      dom.templateVariablesStatus.textContent = 'Template variables saved. New runs use updated values.';
+      dom.templateVariablesStatus.classList.remove('error');
     }
   } catch (error) {
-    if (templateVariablesStatus) {
-      templateVariablesStatus.textContent = `Error: ${error.message || 'Unable to save template variables.'}`;
-      templateVariablesStatus.classList.add('error');
+    if (dom.templateVariablesStatus) {
+      dom.templateVariablesStatus.textContent = `Error: ${error.message || 'Unable to save template variables.'}`;
+      dom.templateVariablesStatus.classList.add('error');
     }
   } finally {
-    saveTemplateVariablesBtn.disabled = false;
+    dom.saveTemplateVariablesBtn.disabled = false;
   }
 }
 
 function collectUserProfileFromForm() {
-  const goals = String(profileGoalsInput?.value || '')
+  const goals = String(dom.profileGoalsInput?.value || '')
     .split(/\r?\n/)
     .map((goal) => goal.trim())
     .filter(Boolean);
 
-  const rawPreferences = String(profilePreferencesInput?.value || '').trim();
+  const rawPreferences = String(dom.profilePreferencesInput?.value || '').trim();
   let preferences = {};
   if (rawPreferences) {
     const parsed = JSON.parse(rawPreferences);
@@ -1242,21 +1268,21 @@ function collectUserProfileFromForm() {
   }
 
   return {
-    name: String(profileNameInput?.value || '').trim(),
-    role: String(profileRoleInput?.value || '').trim(),
+    name: String(dom.profileNameInput?.value || '').trim(),
+    role: String(dom.profileRoleInput?.value || '').trim(),
     goals,
     preferences,
-    projectContext: String(profileProjectContextInput?.value || '').trim()
+    projectContext: String(dom.profileProjectContextInput?.value || '').trim()
   };
 }
 
 async function handleSaveUserProfile() {
-  if (!saveUserProfileBtn) return;
+  if (!dom.saveUserProfileBtn) return;
 
-  saveUserProfileBtn.disabled = true;
-  if (userProfileStatus) {
-    userProfileStatus.textContent = 'Saving...';
-    userProfileStatus.classList.remove('error');
+  dom.saveUserProfileBtn.disabled = true;
+  if (dom.userProfileStatus) {
+    dom.userProfileStatus.textContent = 'Saving...';
+    dom.userProfileStatus.classList.remove('error');
   }
 
   try {
@@ -1266,54 +1292,54 @@ async function handleSaveUserProfile() {
       throw new Error(result?.error || 'Unable to save user profile.');
     }
 
-    settingsState.userProfile = {
+    appState.settings.userProfile = {
       ...(result.userProfile || profile)
     };
 
-    if (userProfileStatus) {
-      userProfileStatus.textContent = 'User profile saved. New agent runs include it in context.';
-      userProfileStatus.classList.remove('error');
+    if (dom.userProfileStatus) {
+      dom.userProfileStatus.textContent = 'User profile saved. New agent runs include it in context.';
+      dom.userProfileStatus.classList.remove('error');
     }
   } catch (error) {
-    if (userProfileStatus) {
-      userProfileStatus.textContent = `Error: ${error.message || 'Unable to save user profile.'}`;
-      userProfileStatus.classList.add('error');
+    if (dom.userProfileStatus) {
+      dom.userProfileStatus.textContent = `Error: ${error.message || 'Unable to save user profile.'}`;
+      dom.userProfileStatus.classList.add('error');
     }
   } finally {
-    saveUserProfileBtn.disabled = false;
+    dom.saveUserProfileBtn.disabled = false;
   }
 }
 
 function collectNotificationsFromForm() {
-  const toastSeconds = Math.max(0, Number(notificationsToastThresholdInput?.value || 30));
-  const externalSeconds = Math.max(toastSeconds, Number(notificationsExternalThresholdInput?.value || 120));
+  const toastSeconds = Math.max(0, Number(dom.notificationsToastThresholdInput?.value || 30));
+  const externalSeconds = Math.max(toastSeconds, Number(dom.notificationsExternalThresholdInput?.value || 120));
 
   return {
-    enabled: Boolean(notificationsEnabledInput?.checked),
+    enabled: Boolean(dom.notificationsEnabledInput?.checked),
     thresholdsMs: {
       toast: Math.round(toastSeconds * 1000),
       external: Math.round(externalSeconds * 1000)
     },
     uiToast: {
-      enabled: Boolean(notificationsUiToastEnabledInput?.checked)
+      enabled: Boolean(dom.notificationsUiToastEnabledInput?.checked)
     },
     ntfy: {
-      enabled: Boolean(notificationsNtfyEnabledInput?.checked),
-      topic: String(notificationsNtfyTopicInput?.value || '').trim()
+      enabled: Boolean(dom.notificationsNtfyEnabledInput?.checked),
+      topic: String(dom.notificationsNtfyTopicInput?.value || '').trim()
     },
     telegram: {
-      longTaskNotice: Boolean(notificationsTelegramLongTaskInput?.checked)
+      longTaskNotice: Boolean(dom.notificationsTelegramLongTaskInput?.checked)
     }
   };
 }
 
 async function handleSaveNotifications() {
-  if (!saveNotificationsBtn) return;
+  if (!dom.saveNotificationsBtn) return;
 
-  saveNotificationsBtn.disabled = true;
-  if (notificationsStatus) {
-    notificationsStatus.textContent = 'Saving...';
-    notificationsStatus.classList.remove('error');
+  dom.saveNotificationsBtn.disabled = true;
+  if (dom.notificationsStatus) {
+    dom.notificationsStatus.textContent = 'Saving...';
+    dom.notificationsStatus.classList.remove('error');
   }
 
   try {
@@ -1323,21 +1349,21 @@ async function handleSaveNotifications() {
       throw new Error(result?.error || 'Unable to save notification settings.');
     }
 
-    settingsState.notifications = {
+    appState.settings.notifications = {
       ...(result.notifications || notifications)
     };
 
-    if (notificationsStatus) {
-      notificationsStatus.textContent = 'Notification settings saved.';
-      notificationsStatus.classList.remove('error');
+    if (dom.notificationsStatus) {
+      dom.notificationsStatus.textContent = 'Notification settings saved.';
+      dom.notificationsStatus.classList.remove('error');
     }
   } catch (error) {
-    if (notificationsStatus) {
-      notificationsStatus.textContent = `Error: ${error.message || 'Unable to save notification settings.'}`;
-      notificationsStatus.classList.add('error');
+    if (dom.notificationsStatus) {
+      dom.notificationsStatus.textContent = `Error: ${error.message || 'Unable to save notification settings.'}`;
+      dom.notificationsStatus.classList.add('error');
     }
   } finally {
-    saveNotificationsBtn.disabled = false;
+    dom.saveNotificationsBtn.disabled = false;
   }
 }
 
@@ -1348,27 +1374,27 @@ function collectVoiceFromForm() {
   };
 
   return {
-    enabled: Boolean(voiceEnabledInput?.checked),
-    speakChatResponses: Boolean(voiceSpeakChatInput?.checked),
-    speakAgentSummary: Boolean(voiceSpeakAgentSummaryInput?.checked),
-    telegramVoiceForLongResponses: Boolean(voiceTelegramLongInput?.checked),
-    engine: String(voiceEngineInput?.value || 'system').toLowerCase() === 'elevenlabs' ? 'elevenlabs' : 'system',
-    voiceId: String(voiceIdInput?.value || '').trim(),
-    speed: toNumber(voiceSpeedInput?.value, 1),
-    stability: toNumber(voiceStabilityInput?.value, 0.5),
-    style: toNumber(voiceStyleInput?.value, 0.25),
-    summaryMaxChars: Math.max(80, Math.round(toNumber(voiceSummaryMaxInput?.value, 260))),
-    telegramMinChars: Math.max(80, Math.round(toNumber(voiceTelegramMinInput?.value, 500)))
+    enabled: Boolean(dom.voiceEnabledInput?.checked),
+    speakChatResponses: Boolean(dom.voiceSpeakChatInput?.checked),
+    speakAgentSummary: Boolean(dom.voiceSpeakAgentSummaryInput?.checked),
+    telegramVoiceForLongResponses: Boolean(dom.voiceTelegramLongInput?.checked),
+    engine: String(dom.voiceEngineInput?.value || 'system').toLowerCase() === 'elevenlabs' ? 'elevenlabs' : 'system',
+    voiceId: String(dom.voiceIdInput?.value || '').trim(),
+    speed: toNumber(dom.voiceSpeedInput?.value, 1),
+    stability: toNumber(dom.voiceStabilityInput?.value, 0.5),
+    style: toNumber(dom.voiceStyleInput?.value, 0.25),
+    summaryMaxChars: Math.max(80, Math.round(toNumber(dom.voiceSummaryMaxInput?.value, 260))),
+    telegramMinChars: Math.max(80, Math.round(toNumber(dom.voiceTelegramMinInput?.value, 500)))
   };
 }
 
 async function handleSaveVoiceSettings() {
-  if (!saveVoiceSettingsBtn) return;
+  if (!dom.saveVoiceSettingsBtn) return;
 
-  saveVoiceSettingsBtn.disabled = true;
-  if (voiceStatus) {
-    voiceStatus.textContent = 'Saving voice settings...';
-    voiceStatus.classList.remove('error');
+  dom.saveVoiceSettingsBtn.disabled = true;
+  if (dom.voiceStatus) {
+    dom.voiceStatus.textContent = 'Saving voice settings...';
+    dom.voiceStatus.classList.remove('error');
   }
 
   try {
@@ -1378,105 +1404,105 @@ async function handleSaveVoiceSettings() {
       throw new Error(result?.error || 'Unable to save voice settings.');
     }
 
-    settingsState.voice = {
-      ...(settingsState.voice || {}),
+    appState.settings.voice = {
+      ...(appState.settings.voice || {}),
       ...(result.voice || voice)
     };
 
-    if (voiceStatus) {
-      voiceStatus.textContent = 'Voice settings saved.';
-      voiceStatus.classList.remove('error');
+    if (dom.voiceStatus) {
+      dom.voiceStatus.textContent = 'Voice settings saved.';
+      dom.voiceStatus.classList.remove('error');
     }
   } catch (error) {
-    if (voiceStatus) {
-      voiceStatus.textContent = `Error: ${error.message || 'Unable to save voice settings.'}`;
-      voiceStatus.classList.add('error');
+    if (dom.voiceStatus) {
+      dom.voiceStatus.textContent = `Error: ${error.message || 'Unable to save voice settings.'}`;
+      dom.voiceStatus.classList.add('error');
     }
   } finally {
-    saveVoiceSettingsBtn.disabled = false;
+    dom.saveVoiceSettingsBtn.disabled = false;
   }
 }
 
 async function handleSaveElevenLabsKey() {
-  if (!saveVoiceKeyBtn) return;
+  if (!dom.saveVoiceKeyBtn) return;
 
-  const apiKey = String(voiceElevenLabsKeyInput?.value || '').trim();
+  const apiKey = String(dom.voiceElevenLabsKeyInput?.value || '').trim();
   if (!apiKey) {
-    if (voiceStatus) {
-      voiceStatus.textContent = 'Enter an ElevenLabs API key first.';
-      voiceStatus.classList.add('error');
+    if (dom.voiceStatus) {
+      dom.voiceStatus.textContent = 'Enter an ElevenLabs API key first.';
+      dom.voiceStatus.classList.add('error');
     }
     return;
   }
 
-  saveVoiceKeyBtn.disabled = true;
+  dom.saveVoiceKeyBtn.disabled = true;
   try {
     const result = await window.electron.settings.saveElevenLabsKey({ apiKey });
     if (!result?.ok) {
       throw new Error(result?.error || 'Unable to save ElevenLabs key.');
     }
 
-    settingsState.voice = {
-      ...(settingsState.voice || {}),
+    appState.settings.voice = {
+      ...(appState.settings.voice || {}),
       hasElevenLabsKey: Boolean(result.hasElevenLabsKey)
     };
 
-    if (voiceElevenLabsKeyInput) {
-      voiceElevenLabsKeyInput.value = '';
+    if (dom.voiceElevenLabsKeyInput) {
+      dom.voiceElevenLabsKeyInput.value = '';
     }
 
-    if (voiceStatus) {
-      voiceStatus.textContent = 'ElevenLabs API key saved securely.';
-      voiceStatus.classList.remove('error');
+    if (dom.voiceStatus) {
+      dom.voiceStatus.textContent = 'ElevenLabs API key saved securely.';
+      dom.voiceStatus.classList.remove('error');
     }
   } catch (error) {
-    if (voiceStatus) {
-      voiceStatus.textContent = `Error: ${error.message || 'Unable to save ElevenLabs key.'}`;
-      voiceStatus.classList.add('error');
+    if (dom.voiceStatus) {
+      dom.voiceStatus.textContent = `Error: ${error.message || 'Unable to save ElevenLabs key.'}`;
+      dom.voiceStatus.classList.add('error');
     }
   } finally {
-    saveVoiceKeyBtn.disabled = false;
+    dom.saveVoiceKeyBtn.disabled = false;
   }
 }
 
 async function handleClearElevenLabsKey() {
-  if (!clearVoiceKeyBtn) return;
+  if (!dom.clearVoiceKeyBtn) return;
   const confirmed = confirm('Clear the saved ElevenLabs API key?');
   if (!confirmed) return;
 
-  clearVoiceKeyBtn.disabled = true;
+  dom.clearVoiceKeyBtn.disabled = true;
   try {
     const result = await window.electron.settings.saveElevenLabsKey({ clear: true });
     if (!result?.ok) {
       throw new Error(result?.error || 'Unable to clear ElevenLabs key.');
     }
 
-    settingsState.voice = {
-      ...(settingsState.voice || {}),
+    appState.settings.voice = {
+      ...(appState.settings.voice || {}),
       hasElevenLabsKey: Boolean(result.hasElevenLabsKey)
     };
 
-    if (voiceStatus) {
-      voiceStatus.textContent = 'ElevenLabs API key removed.';
-      voiceStatus.classList.remove('error');
+    if (dom.voiceStatus) {
+      dom.voiceStatus.textContent = 'ElevenLabs API key removed.';
+      dom.voiceStatus.classList.remove('error');
     }
   } catch (error) {
-    if (voiceStatus) {
-      voiceStatus.textContent = `Error: ${error.message || 'Unable to clear ElevenLabs key.'}`;
-      voiceStatus.classList.add('error');
+    if (dom.voiceStatus) {
+      dom.voiceStatus.textContent = `Error: ${error.message || 'Unable to clear ElevenLabs key.'}`;
+      dom.voiceStatus.classList.add('error');
     }
   } finally {
-    clearVoiceKeyBtn.disabled = false;
+    dom.clearVoiceKeyBtn.disabled = false;
   }
 }
 
 async function handleTestVoice() {
-  if (!testVoiceBtn) return;
+  if (!dom.testVoiceBtn) return;
 
-  testVoiceBtn.disabled = true;
-  if (voiceStatus) {
-    voiceStatus.textContent = 'Testing voice connection...';
-    voiceStatus.classList.remove('error');
+  dom.testVoiceBtn.disabled = true;
+  if (dom.voiceStatus) {
+    dom.voiceStatus.textContent = 'Testing voice connection...';
+    dom.voiceStatus.classList.remove('error');
   }
 
   try {
@@ -1486,24 +1512,24 @@ async function handleTestVoice() {
       throw new Error(result?.error || 'Voice connection failed.');
     }
 
-    if (voiceStatus) {
-      voiceStatus.textContent = 'Voice connection test successful.';
-      voiceStatus.classList.remove('error');
+    if (dom.voiceStatus) {
+      dom.voiceStatus.textContent = 'Voice connection test successful.';
+      dom.voiceStatus.classList.remove('error');
     }
   } catch (error) {
-    if (voiceStatus) {
-      voiceStatus.textContent = `Error: ${error.message || 'Voice connection failed.'}`;
-      voiceStatus.classList.add('error');
+    if (dom.voiceStatus) {
+      dom.voiceStatus.textContent = `Error: ${error.message || 'Voice connection failed.'}`;
+      dom.voiceStatus.classList.add('error');
     }
   } finally {
-    testVoiceBtn.disabled = false;
+    dom.testVoiceBtn.disabled = false;
   }
 }
 
 async function loadSettings() {
   try {
-    settingsState = unwrapIpcResult(await window.electron.settings.load(), 'Unable to load settings.');
-    if (!settingsState.providers || Object.keys(settingsState.providers).length === 0) {
+    appState.settings = unwrapIpcResult(await window.electron.settings.load(), 'Unable to load settings.');
+    if (!appState.settings.providers || Object.keys(appState.settings.providers).length === 0) {
       setProviderListFallback('No providers returned from settings. Please restart the app.');
       return;
     }
@@ -1515,15 +1541,15 @@ async function loadSettings() {
 }
 
 function setProviderListFallback(message) {
-  providerList.innerHTML = '';
+  dom.providerList.innerHTML = '';
   const fallback = document.createElement('div');
   fallback.className = 'provider-message error';
   fallback.textContent = message;
-  providerList.appendChild(fallback);
+  dom.providerList.appendChild(fallback);
 }
 
 function getTokenInput(providerKey) {
-  return providerList.querySelector(`input[data-provider="${providerKey}"]`);
+  return dom.providerList.querySelector(`input[data-provider="${providerKey}"]`);
 }
 
 function validateToken(providerKey, token) {
@@ -1547,7 +1573,7 @@ function validateToken(providerKey, token) {
 }
 
 function setProviderMessage(providerKey, message, isError = false) {
-  const card = providerList.querySelector(`.provider-card[data-provider="${providerKey}"]`);
+  const card = dom.providerList.querySelector(`.provider-card[data-provider="${providerKey}"]`);
   if (!card) return;
   const messageEl = card.querySelector('.provider-message');
   if (!messageEl) return;
@@ -1556,28 +1582,28 @@ function setProviderMessage(providerKey, message, isError = false) {
 }
 
 function updateProviderStatus(providerKey, status) {
-  settingsState.providers[providerKey] = {
-    ...settingsState.providers[providerKey],
+  appState.settings.providers[providerKey] = {
+    ...appState.settings.providers[providerKey],
     status
   };
   renderSettings();
 }
 
 function closeContextMenu() {
-  chatContextMenu.hidden = true;
-  contextChatId = null;
+  dom.chatContextMenu.hidden = true;
+  appState.contextChatId = null;
 }
 
 function openContextMenu({ chatId, x, y }) {
-  contextChatId = chatId;
-  chatContextMenu.hidden = false;
+  appState.contextChatId = chatId;
+  dom.chatContextMenu.hidden = false;
 
-  const menuRect = chatContextMenu.getBoundingClientRect();
+  const menuRect = dom.chatContextMenu.getBoundingClientRect();
   const maxX = window.innerWidth - menuRect.width - 8;
   const maxY = window.innerHeight - menuRect.height - 8;
 
-  chatContextMenu.style.left = `${Math.min(x, maxX)}px`;
-  chatContextMenu.style.top = `${Math.min(y, maxY)}px`;
+  dom.chatContextMenu.style.left = `${Math.min(x, maxX)}px`;
+  dom.chatContextMenu.style.top = `${Math.min(y, maxY)}px`;
 }
 
 function showRenameDialog(currentTitle) {
@@ -1649,7 +1675,7 @@ function showRenameDialog(currentTitle) {
 }
 
 async function sendMessage() {
-  const message = userInput.value.trim();
+  const message = dom.userInput.value.trim();
 
   if (message === '') {
     return;
@@ -1657,81 +1683,81 @@ async function sendMessage() {
 
   const command = message.toLowerCase();
   if (command === 'exit' || command === 'quit') {
-    userInput.value = '';
-    userInput.style.height = 'auto';
+    dom.userInput.value = '';
+    dom.userInput.style.height = 'auto';
     await window.electron.app.quitWindow();
     return;
   }
 
-  if (!activeChatId) {
+  if (!appState.activeChatId) {
     const newChat = await window.electron.chat.create('New Chat');
     if (!newChat) {
       return;
     }
-    chats = [newChat, ...chats.filter((chat) => chat.id !== newChat.id)];
-    activeChatId = newChat.id;
+    appState.chats = [newChat, ...appState.chats.filter((chat) => chat.id !== newChat.id)];
+    appState.activeChatId = newChat.id;
   }
 
   const slashCommand = parseSlashCommand(message);
   if (slashCommand?.name === '/help') {
-    userInput.value = '';
-    userInput.style.height = 'auto';
+    dom.userInput.value = '';
+    dom.userInput.style.height = 'auto';
 
     const helpText = await getLocalHelpText();
     appendLocalMessage('user', message);
     appendLocalMessage('assistant', helpText);
 
-    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
-    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: helpText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: helpText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
 
     return;
   }
 
   if (slashCommand?.name === '/agent') {
-    userInput.value = '';
-    userInput.style.height = 'auto';
+    dom.userInput.value = '';
+    dom.userInput.style.height = 'auto';
 
     const modeArg = (slashCommand.args[0] || 'toggle').toLowerCase();
     if (modeArg === 'on') {
-      isAgentModeEnabled = true;
+      appState.isAgentModeEnabled = true;
     } else if (modeArg === 'off') {
-      isAgentModeEnabled = false;
+      appState.isAgentModeEnabled = false;
     } else if (modeArg === 'toggle') {
-      isAgentModeEnabled = !isAgentModeEnabled;
+      appState.isAgentModeEnabled = !appState.isAgentModeEnabled;
     } else if (modeArg !== 'status') {
       const helpText = 'Usage: `/agent on`, `/agent off`, `/agent toggle`, or `/agent status`.';
       appendLocalMessage('user', message);
       appendLocalMessage('assistant', helpText);
-      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
-      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: helpText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: helpText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
       return;
     }
 
     renderAgentModeButton();
     const statusText = modeArg === 'status'
-      ? `Agent mode is currently **${isAgentModeEnabled ? 'ON' : 'OFF'}**.`
-      : `Agent mode is now **${isAgentModeEnabled ? 'ON' : 'OFF'}**.`;
+      ? `Agent mode is currently **${appState.isAgentModeEnabled ? 'ON' : 'OFF'}**.`
+      : `Agent mode is now **${appState.isAgentModeEnabled ? 'ON' : 'OFF'}**.`;
 
     appendLocalMessage('user', message);
     appendLocalMessage('assistant', statusText);
-    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
-    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: statusText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: statusText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
 
     return;
   }
 
   if (slashCommand?.name === '/profile') {
-    userInput.value = '';
-    userInput.style.height = 'auto';
+    dom.userInput.value = '';
+    dom.userInput.style.height = 'auto';
 
     const action = (slashCommand.args[0] || '').toLowerCase();
     if (!action) {
       appendLocalMessage('user', message);
-      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
 
-      const summary = formatProfileSummary(settingsState.userProfile || {});
+      const summary = formatProfileSummary(appState.settings.userProfile || {});
       appendLocalMessage('assistant', summary);
-      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: summary }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: summary }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
       return;
     }
 
@@ -1739,8 +1765,8 @@ async function sendMessage() {
       const usage = 'Usage: `/profile` or `/profile set <field> <value>`. Fields: name, role, projectContext, goals, preferences';
       appendLocalMessage('user', message);
       appendLocalMessage('assistant', usage);
-      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
-      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: usage }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: usage }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
       return;
     }
 
@@ -1748,7 +1774,7 @@ async function sendMessage() {
     const field = fieldRaw.toLowerCase();
     const rawValue = slashCommand.args.slice(2).join(' ').trim();
     const profile = {
-      ...(settingsState.userProfile || {})
+      ...(appState.settings.userProfile || {})
     };
 
     try {
@@ -1782,19 +1808,19 @@ async function sendMessage() {
       appendLocalMessage('user', message);
       const errorText = `❌ ${error.message || 'Unable to update profile.'}`;
       appendLocalMessage('assistant', errorText);
-      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
-      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: errorText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: errorText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
     }
 
     return;
   }
 
   if (['/fast', '/standard', '/smart'].includes(slashCommand?.name)) {
-    userInput.value = '';
-    userInput.style.height = 'auto';
+    dom.userInput.value = '';
+    dom.userInput.style.height = 'auto';
 
     appendLocalMessage('user', message);
-    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
 
     const tier = slashCommand.name.slice(1);
     try {
@@ -1804,74 +1830,74 @@ async function sendMessage() {
         : `❌ ${result?.error || 'Unable to update inference tier.'}`;
 
       if (result?.ok && result?.inference) {
-        settingsState.inference = result.inference;
+        appState.settings.inference = result.inference;
         refreshUI();
       }
 
       appendLocalMessage('assistant', responseText);
-      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
     } catch (error) {
       const errorText = `❌ ${error.message || 'Unable to update inference tier.'}`;
       appendLocalMessage('assistant', errorText);
-      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: errorText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: errorText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
     }
 
     return;
   }
 
   if (slashCommand?.name === '/pin') {
-    userInput.value = '';
-    userInput.style.height = 'auto';
+    dom.userInput.value = '';
+    dom.userInput.style.height = 'auto';
     const skillId = slashCommand.args[0];
     appendLocalMessage('user', message);
-    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
     if (!skillId) {
       const errorText = 'Usage: `/pin <skill-id>`. Use `/pin std` to pin the STD skill.';
       appendLocalMessage('assistant', errorText);
-      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: errorText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: errorText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
       return;
     }
-    const result = await window.electron.skill.pin({ chatId: activeChatId, skillId });
+    const result = await window.electron.skill.pin({ chatId: appState.activeChatId, skillId });
     const responseText = result.ok
       ? `📌 Pinned **${result.name || skillId}** to this chat. All messages will be handled by this skill. Use \`/unpin\` to restore normal behavior.`
       : `❌ ${result.error}`;
     appendLocalMessage('assistant', responseText);
-    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
     return;
   }
 
   if (slashCommand?.name === '/unpin') {
-    userInput.value = '';
-    userInput.style.height = 'auto';
+    dom.userInput.value = '';
+    dom.userInput.style.height = 'auto';
     appendLocalMessage('user', message);
-    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
-    const result = await window.electron.skill.unpin({ chatId: activeChatId });
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    const result = await window.electron.skill.unpin({ chatId: appState.activeChatId });
     const responseText = result.ok ? '📌 Unpinned. Normal behavior restored.' : `❌ ${result.error}`;
     appendLocalMessage('assistant', responseText);
-    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
     return;
   }
 
   if (slashCommand?.name === '/pinned') {
-    userInput.value = '';
-    userInput.style.height = 'auto';
+    dom.userInput.value = '';
+    dom.userInput.style.height = 'auto';
     appendLocalMessage('user', message);
-    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
-    const result = await window.electron.skill.getPinned({ chatId: activeChatId });
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    const result = await window.electron.skill.getPinned({ chatId: appState.activeChatId });
     const responseText = result.pinned
       ? `📌 Pinned skill: **${result.pinned.name || result.pinned.skillId}** (\`${result.pinned.skillId}\`)`
       : 'No skill is currently pinned to this chat.';
     appendLocalMessage('assistant', responseText);
-    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
     return;
   }
 
   if (slashCommand?.name === '/skill') {
-    userInput.value = '';
-    userInput.style.height = 'auto';
+    dom.userInput.value = '';
+    dom.userInput.style.height = 'auto';
 
     appendLocalMessage('user', message);
-    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
 
     const action = (slashCommand.args[0] || '').toLowerCase();
     const skillId = (slashCommand.args[1] || '').trim();
@@ -1879,7 +1905,7 @@ async function sendMessage() {
     if (action !== 'customize' || !skillId) {
       const usage = 'Usage: `/skill customize <skill-id>`. Example: `/skill customize std`';
       appendLocalMessage('assistant', usage);
-      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: usage }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: usage }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
       return;
     }
 
@@ -1889,22 +1915,22 @@ async function sendMessage() {
         ? `Opened customization file for **${result.skillId}** at:\n\`${result.path}\`${result.created ? '\n\nCreated a new file with starter defaults.' : ''}`
         : `❌ ${result?.error || 'Unable to open customization file.'}`;
       appendLocalMessage('assistant', responseText);
-      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
     } catch (error) {
       const errorText = `❌ ${error.message || 'Unable to open customization file.'}`;
       appendLocalMessage('assistant', errorText);
-      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: errorText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: errorText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
     }
 
     return;
   }
 
   if (slashCommand?.name === '/llm') {
-    userInput.value = '';
-    userInput.style.height = 'auto';
+    dom.userInput.value = '';
+    dom.userInput.style.height = 'auto';
 
     appendLocalMessage('user', message);
-    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
 
     try {
       const result = await window.electron.settings.runLlmCommand({ command: message });
@@ -1913,29 +1939,29 @@ async function sendMessage() {
         : `Error: ${result?.error || 'Unable to run local LLM command.'}`;
 
       appendLocalMessage('assistant', responseText);
-      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
     } catch (error) {
       const errorText = `Error: ${error.message || 'Unable to run local LLM command.'}`;
       appendLocalMessage('assistant', errorText);
-      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: errorText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: errorText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
     }
 
     return;
   }
 
   if (slashCommand?.name === '/speak') {
-    userInput.value = '';
-    userInput.style.height = 'auto';
+    dom.userInput.value = '';
+    dom.userInput.style.height = 'auto';
 
     appendLocalMessage('user', message);
-    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
 
     try {
       const summaryMode = ['summary', '--summary', '-s'].some((token) =>
         slashCommand.args.map((arg) => String(arg || '').toLowerCase()).includes(token)
       );
       const result = await window.electron.chat.speakLast({
-        chatId: activeChatId,
+        chatId: appState.activeChatId,
         summary: summaryMode
       });
 
@@ -1943,11 +1969,11 @@ async function sendMessage() {
         ? `🔊 Speaking the last assistant response${summaryMode ? ' (summary)' : ''}.`
         : `❌ ${result?.error || 'Unable to speak the last response.'}`;
       appendLocalMessage('assistant', responseText);
-      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
     } catch (error) {
       const errorText = `❌ ${error.message || 'Unable to speak the last response.'}`;
       appendLocalMessage('assistant', errorText);
-      window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: errorText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: errorText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
     }
 
     return;
@@ -1962,22 +1988,22 @@ async function sendMessage() {
       const skillResult = await window.electron.skill.execute({
         command: commandName,
         args: slashCommand.args,
-        chatId: activeChatId
+        chatId: appState.activeChatId
       });
 
       if (skillResult && !skillResult.error?.startsWith('Unknown skill command:')) {
-        userInput.value = '';
-        userInput.style.height = 'auto';
+        dom.userInput.value = '';
+        dom.userInput.style.height = 'auto';
 
         appendLocalMessage('user', message);
-        window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+        window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
 
         const responseText = skillResult.ok === false
           ? `❌ ${skillResult.error || 'Skill command failed.'}`
           : (skillResult.message || 'Skill command executed.');
         const responseFormat = skillResult.format || 'markdown';
         appendLocalMessage('assistant', responseText, { format: responseFormat });
-        window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText, format: responseFormat }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+        window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText, format: responseFormat }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
 
         return;
       }
@@ -1988,8 +2014,8 @@ async function sendMessage() {
   }
 
   const now = new Date().toISOString();
-  chats = chats.map((chat) => {
-    if (chat.id !== activeChatId) return chat;
+  appState.chats = appState.chats.map((chat) => {
+    if (chat.id !== appState.activeChatId) return chat;
     return {
       ...chat,
       updatedAt: now,
@@ -2006,14 +2032,14 @@ async function sendMessage() {
   });
   refreshUI();
 
-  userInput.value = '';
-  userInput.style.height = 'auto';
+  dom.userInput.value = '';
+  dom.userInput.style.height = 'auto';
 
   try {
-    const pinnedInfo = await window.electron.skill.getPinned({ chatId: activeChatId });
+    const pinnedInfo = await window.electron.skill.getPinned({ chatId: appState.activeChatId });
     if (pinnedInfo?.pinned) {
       const skillResult = await window.electron.skill.handleMessage({
-        chatId: activeChatId,
+        chatId: appState.activeChatId,
         message
       });
 
@@ -2022,21 +2048,21 @@ async function sendMessage() {
           ? (skillResult.message || 'Done.')
           : `❌ ${skillResult.error || 'Error'}`;
         const responseFormat = skillResult.format || 'markdown';
-        window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+        window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
         appendLocalMessage('assistant', responseText, { format: responseFormat });
-        window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText, format: responseFormat }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+        window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText, format: responseFormat }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
         return;
       }
     }
 
     const updatedChat = await window.electron.chat.sendMessage({
-      chatId: activeChatId,
+      chatId: appState.activeChatId,
       message,
-      agentMode: isAgentModeEnabled
+      agentMode: appState.isAgentModeEnabled
     });
 
     if (updatedChat) {
-      chats = chats.map((chat) => (chat.id === updatedChat.id ? updatedChat : chat));
+      appState.chats = appState.chats.map((chat) => (chat.id === updatedChat.id ? updatedChat : chat));
       refreshUI();
     }
   } catch (error) {
@@ -2045,7 +2071,7 @@ async function sendMessage() {
 }
 
 async function handleStdCardAction(action, taskId, buttonEl = null) {
-  if (action !== 'complete' || !taskId || !activeChatId) {
+  if (action !== 'complete' || !taskId || !appState.activeChatId) {
     return;
   }
 
@@ -2058,12 +2084,12 @@ async function handleStdCardAction(action, taskId, buttonEl = null) {
 
   try {
     appendLocalMessage('user', commandText);
-    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'user', text: commandText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: commandText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
 
     const skillResult = await window.electron.skill.execute({
       command: 'std',
       args: ['complete', String(taskId)],
-      chatId: activeChatId
+      chatId: appState.activeChatId
     });
 
     const responseText = skillResult?.ok === false
@@ -2073,12 +2099,12 @@ async function handleStdCardAction(action, taskId, buttonEl = null) {
 
     appendLocalMessage('assistant', responseText, { format: responseFormat });
     window.electron.chat
-      .addMessage({ chatId: activeChatId, sender: 'assistant', text: responseText, format: responseFormat })
+      .addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText, format: responseFormat })
       .catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
   } catch (error) {
     const errorText = `❌ ${error.message || 'Unable to complete task.'}`;
     appendLocalMessage('assistant', errorText);
-    window.electron.chat.addMessage({ chatId: activeChatId, sender: 'assistant', text: errorText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: errorText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
   } finally {
     if (buttonEl) {
       buttonEl.disabled = false;
@@ -2142,37 +2168,37 @@ function addMessage(sender, text, metadata = {}) {
 
   messageDiv.appendChild(messageContent);
   
-  chatMessages.appendChild(messageDiv);
+  dom.chatMessages.appendChild(messageDiv);
   
   // Scroll to bottom
-  chatMessages.scrollTop = chatMessages.scrollHeight;
+  dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
 }
 
 async function loadChats() {
   const data = unwrapIpcResult(await window.electron.chat.load(), 'Unable to load chats.');
-  chats = data.chats || [];
-  activeChatId = data.activeChatId || chats[0]?.id || null;
+  appState.chats = data.chats || [];
+  appState.activeChatId = data.activeChatId || appState.chats[0]?.id || null;
   refreshUI();
 }
 
 async function handleCreateChat() {
   const newChat = unwrapIpcResult(await window.electron.chat.create('New Chat'), 'Unable to create chat.');
   if (newChat) {
-    chats = [newChat, ...chats.filter((chat) => chat.id !== newChat.id)];
-    activeChatId = newChat.id;
+    appState.chats = [newChat, ...appState.chats.filter((chat) => chat.id !== newChat.id)];
+    appState.activeChatId = newChat.id;
     refreshUI();
   }
 }
 
 async function handleSelectChat(chatId) {
-  streamBufferById.clear();
-  activeChatId = chatId;
+  appState.streamBuffers.clear();
+  appState.activeChatId = chatId;
   unwrapIpcResult(await window.electron.chat.setActive(chatId), 'Unable to switch active chat.');
   refreshUI();
 }
 
 async function handleRenameChat(chatId) {
-  const chat = chats.find((item) => item.id === chatId);
+  const chat = appState.chats.find((item) => item.id === chatId);
   if (!chat) {
     return;
   }
@@ -2183,13 +2209,13 @@ async function handleRenameChat(chatId) {
   const updated = await window.electron.chat.rename({ id: chatId, title: title.trim() });
   const safeUpdated = unwrapIpcResult(updated, 'Unable to rename chat.');
   if (safeUpdated) {
-    chats = chats.map((item) => (item.id === safeUpdated.id ? safeUpdated : item));
+    appState.chats = appState.chats.map((item) => (item.id === safeUpdated.id ? safeUpdated : item));
     refreshUI();
   }
 }
 
 async function handleDeleteChat(chatId) {
-  const chat = chats.find((item) => item.id === chatId);
+  const chat = appState.chats.find((item) => item.id === chatId);
   if (!chat) {
     return;
   }
@@ -2198,8 +2224,8 @@ async function handleDeleteChat(chatId) {
     return;
   }
   const result = unwrapIpcResult(await window.electron.chat.remove(chatId), 'Unable to delete chat.');
-  chats = result.chats || [];
-  activeChatId = result.activeChatId || chats[0]?.id || null;
+  appState.chats = result.chats || [];
+  appState.activeChatId = result.activeChatId || appState.chats[0]?.id || null;
   refreshUI();
 }
 
@@ -2224,7 +2250,7 @@ async function handleSaveProvider(providerKey) {
 
   setProviderMessage(providerKey, 'Token saved securely.');
   if (input) input.value = '';
-  settingsState.providers[providerKey].hasToken = result.hasToken;
+  appState.settings.providers[providerKey].hasToken = result.hasToken;
   renderSettings();
 }
 
@@ -2242,7 +2268,7 @@ async function handleClearProvider(providerKey) {
     return;
   }
 
-  settingsState.providers[providerKey].hasToken = false;
+  appState.settings.providers[providerKey].hasToken = false;
   setProviderMessage(providerKey, 'Token removed.');
   renderSettings();
 }
@@ -2262,7 +2288,7 @@ async function handleTestProvider(providerKey) {
 }
 
 async function handleSaveProviderModel(providerKey) {
-  const input = providerList.querySelector(`input[data-model-provider="${providerKey}"]`);
+  const input = dom.providerList.querySelector(`input[data-model-provider="${providerKey}"]`);
   const model = input?.value?.trim() || '';
   const result = await window.electron.settings.setProviderModel({
     provider: providerKey,
@@ -2274,7 +2300,7 @@ async function handleSaveProviderModel(providerKey) {
     return;
   }
 
-  settingsState.providers[providerKey].model = result.model;
+  appState.settings.providers[providerKey].model = result.model;
   setProviderMessage(providerKey, `Model saved: ${result.model || '(default)'}`);
   renderSettings();
 }
@@ -2286,14 +2312,14 @@ async function handleSetActiveProvider(providerKey) {
     return;
   }
 
-  settingsState.activeProvider = result.activeProvider;
+  appState.settings.activeProvider = result.activeProvider;
   renderSettings();
 }
 
 // Event Listeners
-sendBtn.addEventListener('click', sendMessage);
+dom.sendBtn.addEventListener('click', sendMessage);
 
-userInput.addEventListener('keypress', (e) => {
+dom.userInput.addEventListener('keypress', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     sendMessage();
@@ -2301,20 +2327,20 @@ userInput.addEventListener('keypress', (e) => {
 });
 
 // Auto-resize textarea as user types
-userInput.addEventListener('input', function() {
+dom.userInput.addEventListener('input', function() {
   this.style.height = 'auto';
   this.style.height = Math.min(this.scrollHeight, 200) + 'px';
 });
 
 // New chat button
-newChatBtn.addEventListener('click', handleCreateChat);
-if (newChatBtnCompact) {
-  newChatBtnCompact.addEventListener('click', handleCreateChat);
+dom.newChatBtn.addEventListener('click', handleCreateChat);
+if (dom.newChatBtnCompact) {
+  dom.newChatBtnCompact.addEventListener('click', handleCreateChat);
 }
 
 // Chat history item click handler
-chatList.addEventListener('click', (e) => {
-  if (!chatContextMenu.hidden && !e.target.closest('#chat-context-menu')) {
+dom.chatList.addEventListener('click', (e) => {
+  if (!dom.chatContextMenu.hidden && !e.target.closest('#chat-context-menu')) {
     closeContextMenu();
   }
 
@@ -2336,7 +2362,7 @@ chatList.addEventListener('click', (e) => {
   }
 });
 
-chatMessages.addEventListener('click', (e) => {
+dom.chatMessages.addEventListener('click', (e) => {
   const actionButton = e.target.closest('[data-std-action]');
   if (!actionButton) return;
 
@@ -2349,7 +2375,7 @@ chatMessages.addEventListener('click', (e) => {
   handleStdCardAction(action, taskId, actionButton);
 });
 
-chatList.addEventListener('contextmenu', (e) => {
+dom.chatList.addEventListener('contextmenu', (e) => {
   const chatItem = e.target.closest('.chat-item');
   if (!chatItem) {
     return;
@@ -2358,75 +2384,75 @@ chatList.addEventListener('contextmenu', (e) => {
   openContextMenu({ chatId: chatItem.dataset.chatId, x: e.clientX, y: e.clientY });
 });
 
-chatContextMenu.addEventListener('click', (e) => {
+dom.chatContextMenu.addEventListener('click', (e) => {
   const actionButton = e.target.closest('.context-menu-item');
   if (!actionButton) {
     return;
   }
-  if (actionButton.dataset.action === 'delete' && contextChatId) {
-    handleDeleteChat(contextChatId);
+  if (actionButton.dataset.action === 'delete' && appState.contextChatId) {
+    handleDeleteChat(appState.contextChatId);
   }
   closeContextMenu();
 });
 
 document.addEventListener('click', (e) => {
-  if (!chatContextMenu.hidden && !e.target.closest('#chat-context-menu')) {
+  if (!dom.chatContextMenu.hidden && !e.target.closest('#chat-context-menu')) {
     closeContextMenu();
   }
 });
 
-if (openSettingsBtn) {
-  openSettingsBtn.addEventListener('click', openSettingsDrawer);
+if (dom.openSettingsBtn) {
+  dom.openSettingsBtn.addEventListener('click', openSettingsDrawer);
 }
 
-if (floatingSettingsBtn) {
-  floatingSettingsBtn.addEventListener('click', openSettingsDrawer);
+if (dom.floatingSettingsBtn) {
+  dom.floatingSettingsBtn.addEventListener('click', openSettingsDrawer);
 }
 
-if (composerSettingsBtn) {
-  composerSettingsBtn.addEventListener('click', openSettingsDrawer);
+if (dom.composerSettingsBtn) {
+  dom.composerSettingsBtn.addEventListener('click', openSettingsDrawer);
 }
 
-if (agentModeBtn) {
-  agentModeBtn.addEventListener('click', () => {
-    isAgentModeEnabled = !isAgentModeEnabled;
+if (dom.agentModeBtn) {
+  dom.agentModeBtn.addEventListener('click', () => {
+    appState.isAgentModeEnabled = !appState.isAgentModeEnabled;
     renderAgentModeButton();
     addToolEventMessage(
-      `Agent mode ${isAgentModeEnabled ? 'enabled' : 'disabled'}`,
+      `Agent mode ${appState.isAgentModeEnabled ? 'enabled' : 'disabled'}`,
       {
-        mode: isAgentModeEnabled ? 'agent' : 'standard'
+        mode: appState.isAgentModeEnabled ? 'agent' : 'standard'
       },
-      isAgentModeEnabled ? 'success' : ''
+      appState.isAgentModeEnabled ? 'success' : ''
     );
   });
 }
 
-if (toggleHistoryBtn) {
-  toggleHistoryBtn.addEventListener('click', () => {
-    setHistoryCollapsed(!isHistoryCollapsed);
+if (dom.toggleHistoryBtn) {
+  dom.toggleHistoryBtn.addEventListener('click', () => {
+    setHistoryCollapsed(!appState.isHistoryCollapsed);
   });
 }
 
-if (closeSettingsBtn) {
-  closeSettingsBtn.addEventListener('click', () => {
+if (dom.closeSettingsBtn) {
+  dom.closeSettingsBtn.addEventListener('click', () => {
     setSettingsDrawer(false);
   });
 }
 
-settingsDrawer.addEventListener('click', (e) => {
-  if (e.target === settingsDrawer) {
+dom.settingsDrawer.addEventListener('click', (e) => {
+  if (e.target === dom.settingsDrawer) {
     setSettingsDrawer(false);
   }
 });
 
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !settingsDrawer.hidden) {
+  if (e.key === 'Escape' && !dom.settingsDrawer.hidden) {
     setSettingsDrawer(false);
   }
 });
 
-if (providerList) {
-  providerList.addEventListener('click', (e) => {
+if (dom.providerList) {
+  dom.providerList.addEventListener('click', (e) => {
     const button = e.target.closest('button[data-action]');
     if (!button) return;
     const { action, provider } = button.dataset;
@@ -2450,62 +2476,62 @@ if (providerList) {
   });
 }
 
-if (saveTemplateVariablesBtn) {
-  saveTemplateVariablesBtn.addEventListener('click', () => {
+if (dom.saveTemplateVariablesBtn) {
+  dom.saveTemplateVariablesBtn.addEventListener('click', () => {
     handleSaveTemplateVariables();
   });
 }
 
-if (saveUserProfileBtn) {
-  saveUserProfileBtn.addEventListener('click', () => {
+if (dom.saveUserProfileBtn) {
+  dom.saveUserProfileBtn.addEventListener('click', () => {
     handleSaveUserProfile();
   });
 }
 
-if (saveNotificationsBtn) {
-  saveNotificationsBtn.addEventListener('click', () => {
+if (dom.saveNotificationsBtn) {
+  dom.saveNotificationsBtn.addEventListener('click', () => {
     handleSaveNotifications();
   });
 }
 
-if (saveVoiceSettingsBtn) {
-  saveVoiceSettingsBtn.addEventListener('click', () => {
+if (dom.saveVoiceSettingsBtn) {
+  dom.saveVoiceSettingsBtn.addEventListener('click', () => {
     handleSaveVoiceSettings();
   });
 }
 
-if (saveVoiceKeyBtn) {
-  saveVoiceKeyBtn.addEventListener('click', () => {
+if (dom.saveVoiceKeyBtn) {
+  dom.saveVoiceKeyBtn.addEventListener('click', () => {
     handleSaveElevenLabsKey();
   });
 }
 
-if (clearVoiceKeyBtn) {
-  clearVoiceKeyBtn.addEventListener('click', () => {
+if (dom.clearVoiceKeyBtn) {
+  dom.clearVoiceKeyBtn.addEventListener('click', () => {
     handleClearElevenLabsKey();
   });
 }
 
-if (testVoiceBtn) {
-  testVoiceBtn.addEventListener('click', () => {
+if (dom.testVoiceBtn) {
+  dom.testVoiceBtn.addEventListener('click', () => {
     handleTestVoice();
   });
 }
 
-if (reloadHooksBtn) {
-  reloadHooksBtn.addEventListener('click', () => {
+if (dom.reloadHooksBtn) {
+  dom.reloadHooksBtn.addEventListener('click', () => {
     handleReloadHooks();
   });
 }
 
-if (hooksGlobalEnabledInput) {
-  hooksGlobalEnabledInput.addEventListener('change', (event) => {
+if (dom.hooksGlobalEnabledInput) {
+  dom.hooksGlobalEnabledInput.addEventListener('change', (event) => {
     handleToggleHooksGlobal(Boolean(event?.target?.checked));
   });
 }
 
-if (hooksList) {
-  hooksList.addEventListener('click', (event) => {
+if (dom.hooksList) {
+  dom.hooksList.addEventListener('click', (event) => {
     const button = event.target.closest('button[data-action="toggle-hook"]');
     if (!button) return;
 
@@ -2515,26 +2541,26 @@ if (hooksList) {
   });
 }
 
-if (memoryRefreshBtn) {
-  memoryRefreshBtn.addEventListener('click', () => {
+if (dom.memoryRefreshBtn) {
+  dom.memoryRefreshBtn.addEventListener('click', () => {
     loadMemoryEntries();
   });
 }
 
-if (memoryCaptureBtn) {
-  memoryCaptureBtn.addEventListener('click', () => {
+if (dom.memoryCaptureBtn) {
+  dom.memoryCaptureBtn.addEventListener('click', () => {
     handleCaptureMemory();
   });
 }
 
-if (memoryClearBtn) {
-  memoryClearBtn.addEventListener('click', () => {
+if (dom.memoryClearBtn) {
+  dom.memoryClearBtn.addEventListener('click', () => {
     handleClearMemory();
   });
 }
 
-if (memoryList) {
-  memoryList.addEventListener('click', (event) => {
+if (dom.memoryList) {
+  dom.memoryList.addEventListener('click', (event) => {
     const button = event.target.closest('button[data-action="delete-memory"]');
     if (!button) return;
     const memoryId = String(button.dataset.memoryId || '').trim();
@@ -2543,26 +2569,26 @@ if (memoryList) {
   });
 }
 
-if (memoryQueryInput) {
-  memoryQueryInput.addEventListener('input', () => {
+if (dom.memoryQueryInput) {
+  dom.memoryQueryInput.addEventListener('input', () => {
     loadMemoryEntries();
   });
 }
 
-if (memoryTierFilterInput) {
-  memoryTierFilterInput.addEventListener('change', () => {
+if (dom.memoryTierFilterInput) {
+  dom.memoryTierFilterInput.addEventListener('change', () => {
     loadMemoryEntries();
   });
 }
 
 window.addEventListener('blur', () => {
-  if (!chatContextMenu.hidden) {
+  if (!dom.chatContextMenu.hidden) {
     closeContextMenu();
   }
 });
 
 unsubscribeHandlers.push(window.electron.chat.onMessageStart(({ chatId, responseId }) => {
-  if (chatId !== activeChatId) return;
+  if (chatId !== appState.activeChatId) return;
 
   const messageDiv = document.createElement('div');
   messageDiv.className = 'message assistant streaming';
@@ -2576,38 +2602,38 @@ unsubscribeHandlers.push(window.electron.chat.onMessageStart(({ chatId, response
   messageContent.appendChild(pending);
 
   messageDiv.appendChild(messageContent);
-  chatMessages.appendChild(messageDiv);
-  chatMessages.scrollTop = chatMessages.scrollHeight;
-  streamBufferById.set(responseId, '');
+  dom.chatMessages.appendChild(messageDiv);
+  dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
+  appState.streamBuffers.set(responseId, '');
 }));
 
 unsubscribeHandlers.push(window.electron.chat.onMessageChunk(({ chatId, responseId, chunk }) => {
-  if (chatId !== activeChatId) return;
+  if (chatId !== appState.activeChatId) return;
 
-  const existing = streamBufferById.get(responseId) || '';
+  const existing = appState.streamBuffers.get(responseId) || '';
   const next = existing + (chunk || '');
-  streamBufferById.set(responseId, next);
+  appState.streamBuffers.set(responseId, next);
 
-  const streamElement = chatMessages.querySelector(`[data-response-id="${responseId}"] .message-content`);
+  const streamElement = dom.chatMessages.querySelector(`[data-response-id="${responseId}"] .message-content`);
   if (!streamElement) return;
 
   streamElement.innerHTML = window.electron.markdown.parse(next);
-  chatMessages.scrollTop = chatMessages.scrollHeight;
+  dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
 }));
 
 unsubscribeHandlers.push(window.electron.chat.onMessageComplete(({ chatId, responseId }) => {
-  streamBufferById.delete(responseId);
-  if (chatId !== activeChatId) return;
-  const messageDiv = chatMessages.querySelector(`[data-response-id="${responseId}"]`);
+  appState.streamBuffers.delete(responseId);
+  if (chatId !== appState.activeChatId) return;
+  const messageDiv = dom.chatMessages.querySelector(`[data-response-id="${responseId}"]`);
   if (messageDiv) {
     messageDiv.classList.remove('streaming');
   }
 }));
 
 unsubscribeHandlers.push(window.electron.chat.onMessageError(({ chatId, responseId, error }) => {
-  streamBufferById.delete(responseId);
-  if (chatId !== activeChatId) return;
-  const messageDiv = chatMessages.querySelector(`[data-response-id="${responseId}"] .message-content`);
+  appState.streamBuffers.delete(responseId);
+  if (chatId !== appState.activeChatId) return;
+  const messageDiv = dom.chatMessages.querySelector(`[data-response-id="${responseId}"] .message-content`);
   if (messageDiv) {
     const p = document.createElement('p');
     p.textContent = `Error: ${error}`;
@@ -2617,12 +2643,12 @@ unsubscribeHandlers.push(window.electron.chat.onMessageError(({ chatId, response
 }));
 
 unsubscribeHandlers.push(window.electron.chat.onToolUse(({ chatId, toolName, parameters }) => {
-  if (chatId !== activeChatId) return;
+  if (chatId !== appState.activeChatId) return;
   addToolEventMessage(`Using tool: ${toolName}`, parameters);
 }));
 
 unsubscribeHandlers.push(window.electron.chat.onToolResult(({ chatId, toolName, result }) => {
-  if (chatId !== activeChatId) return;
+  if (chatId !== appState.activeChatId) return;
   addToolEventMessage(`Tool result: ${toolName}`, result, result?.success === false ? 'error' : 'success');
 }));
 
@@ -2636,7 +2662,7 @@ unsubscribeHandlers.push(window.electron.chat.onChatUpdated(async () => {
 }));
 
 window.addEventListener('beforeunload', () => {
-  streamBufferById.clear();
+  appState.streamBuffers.clear();
   while (unsubscribeHandlers.length > 0) {
     const unsubscribe = unsubscribeHandlers.pop();
     if (typeof unsubscribe === 'function') {
