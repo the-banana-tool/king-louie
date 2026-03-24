@@ -171,7 +171,7 @@ function registerChatHandlers(ipcMain, context = {}) {
       options.runtimeEnvironment = runtimeEnvironment;
       options.systemPrompt = [
         buildRuntimeSystemPrompt(runtimeEnvironment),
-        buildMemoryContextSection(message, { limit: 4 })
+        await buildMemoryContextSection(message, { limit: 4 })
       ].filter(Boolean).join('\n\n');
 
       const executor = await createToolExecutorWithApprovals(event, runtimeEnvironment);

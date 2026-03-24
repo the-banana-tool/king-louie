@@ -59,7 +59,7 @@ function registerAgentHandlers(ipcMain, context = {}) {
         templateContext: buildTemplateContextFromSettings(),
         systemPrompt: [
           buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
-          buildMemoryContextSection(message),
+          await buildMemoryContextSection(message),
           formatUserContextSection(),
           formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
         ].join('\n\n')
@@ -103,7 +103,7 @@ function registerAgentHandlers(ipcMain, context = {}) {
         templateContext: buildTemplateContextFromSettings(),
         systemPrompt: [
           buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
-          buildMemoryContextSection(message),
+          await buildMemoryContextSection(message),
           formatUserContextSection(),
           formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
         ].join('\n\n')
@@ -157,7 +157,7 @@ function registerAgentHandlers(ipcMain, context = {}) {
         templateContext: buildTemplateContextFromSettings(),
         systemPrompt: [
           buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
-          buildMemoryContextSection(message),
+          await buildMemoryContextSection(message),
           formatUserContextSection(),
           formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
         ].join('\n\n')
