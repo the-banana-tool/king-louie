@@ -1027,7 +1027,9 @@ describe('OpenRouterProvider', () => {
 
 ---
 
-## Task 9: Inference Router Updates
+## Task 9: Inference Router Updates ✅ COMPLETED
+
+> **Completed:** Updated `InferenceRouter` with `getCapabilities()`, `getTierConfig()`, `execute()`, and `routeWithFallback()` to support fallbacks. Added `tests/inference-router.test.js` and wired it into `package.json`. All 5 tests passing.
 
 **Source:** openclaw.md §2.7
 **Dependencies:** Tasks 4-8 (new providers)
