@@ -3071,7 +3071,9 @@ describe('Hybrid Retrieval', () => {
 
 ---
 
-## Task 24: Browser Control (CDP)
+## Task 24: Browser Control (CDP) ✅ COMPLETED
+
+> **Completed:** BrowserService with auto-detect and launch capability, CdpClient with WebSocket communication, Browser tool with all specified actions + SSRF protection, and associated test coverage in `tests/browser-service.test.js`.
 
 **Source:** openclaw.md §5.1, §5.2
 **Dependencies:** None
