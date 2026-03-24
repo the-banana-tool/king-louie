@@ -368,12 +368,12 @@ describe('ProviderFactory', () => {
 
   it('registers and creates a provider', () => {
     class MockProvider {
-      constructor(config) { this.config = config; }
+      constructor(apiKey) { this.apiKey = apiKey; }
     }
     ProviderFactory.registerProvider('mock', MockProvider);
-    const instance = ProviderFactory.create('mock', { apiKey: 'test' });
+    const instance = ProviderFactory.create('mock', 'test-key');
     assert.ok(instance instanceof MockProvider);
-    assert.strictEqual(instance.config.apiKey, 'test');
+    assert.strictEqual(instance.apiKey, 'test-key');
   });
 
   it('lists registered providers', () => {
@@ -388,7 +388,7 @@ describe('ProviderFactory', () => {
 
   it('throws on unknown provider with helpful message', () => {
     assert.throws(
-      () => ProviderFactory.create('nonexistent', {}),
+      () => ProviderFactory.create('nonexistent', 'test-key'),
       /Unknown provider.*nonexistent/
     );
   });
@@ -396,7 +396,7 @@ describe('ProviderFactory', () => {
   it('is case-insensitive for provider type', () => {
     class MockProvider {}
     ProviderFactory.registerProvider('MyProvider', MockProvider);
-    const instance = ProviderFactory.create('myprovider', {});
+    const instance = ProviderFactory.create('myprovider', 'test-key');
     assert.ok(instance instanceof MockProvider);
   });
 
@@ -425,7 +425,7 @@ describe('ProviderFactory', () => {
   });
 
   it('create() produces working OpenAI provider', () => {
-    const provider = ProviderFactory.create('openai', { apiKey: 'sk-test' });
+    const provider = ProviderFactory.create('openai', 'sk-test12345');
     assert.ok(provider);
     assert.ok(typeof provider.getModels === 'function');
   });
@@ -441,7 +441,7 @@ describe('BaseLLMProvider.discoverModels', () => {
     class TestProvider extends BaseLLMProvider {
       getModels() { return ['model-a', 'model-b']; }
     }
-    const provider = new TestProvider({});
+    const provider = new TestProvider('test-key123');
     const models = await provider.discoverModels();
     assert.strictEqual(models.length, 2);
     assert.strictEqual(models[0].id, 'model-a');
@@ -1297,7 +1297,7 @@ describe('WebFetch Cache', () => {
 
 ```javascript
 class SearchProvider {
-  constructor(config) { this.config = config; }
+  constructor(apiKey) { this.apiKey = apiKey; }
   getName() { throw new Error('Not implemented'); }
   isConfigured() { return false; }
   async search(query, maxResults) { throw new Error('Not implemented'); }
@@ -3557,7 +3557,7 @@ Phase 1 — Architecture Cleanup (no dependencies):
   Task 2:  Additional preload validation
 
 Phase 2 — Provider Expansion:
-  Task 3:  Provider abstraction refactor (prerequisite for 4-8)
+  Task 3:  Provider abstraction refactor (prerequisite for 4-8) - COMPLETE
   Task 4:  Groq provider
   Task 5:  Ollama provider
   Task 6:  Mistral provider
