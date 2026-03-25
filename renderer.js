@@ -485,54 +485,280 @@ function renderMessageImages(messageContent, images = []) {
   }
 }
 
-function addToolEventMessage(title, payload, variant = '') {
+/* ── Tool event helpers ─────────────────────────────────────── */
+
+const LOW_STAKES_TOOLS = new Set([
+  'Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch',
+  'sessions_list', 'sessions_history', 'message'
+]);
+
+const TOOL_ICONS = {
+  Read:             'fas fa-file-lines',
+  Write:            'fas fa-file-pen',
+  Edit:             'fas fa-pen-to-square',
+  Bash:             'fas fa-terminal',
+  Git:              'fas fa-code-branch',
+  Glob:             'fas fa-folder-open',
+  Grep:             'fas fa-magnifying-glass',
+  WebFetch:         'fas fa-globe',
+  WebSearch:        'fas fa-magnifying-glass',
+  Browser:          'fas fa-window-maximize',
+  AskUser:          'fas fa-comment-dots',
+  Cron:             'fas fa-clock',
+  sessions_list:    'fas fa-list',
+  sessions_history: 'fas fa-clock-rotate-left',
+  sessions_spawn:   'fas fa-play',
+  message:          'fas fa-envelope',
+};
+
+const TOOL_ICON_DEFAULT = 'fas fa-wrench';
+
+function getToolIcon(toolName) {
+  return TOOL_ICONS[toolName] || TOOL_ICON_DEFAULT;
+}
+
+function extractPayloadText(payload) {
+  if (payload === undefined || payload === null) return '';
+  if (typeof payload === 'string') return payload;
+  if (typeof payload === 'object') {
+    for (const key of ['content', 'stdout', 'output', 'message']) {
+      const v = payload[key];
+      if (typeof v === 'string' && v.trim()) return v;
+    }
+  }
+  return JSON.stringify(payload, null, 2);
+}
+
+function getToolSummary(toolName, params) {
+  if (!params || typeof params !== 'object') return toolName;
+  const p = params;
+
+  switch (toolName) {
+    case 'Read':      return `Read ${p.file_path || p.path || ''}`.trim();
+    case 'Write':     return `Write ${p.file_path || p.path || ''}`.trim();
+    case 'Edit':      return `Edit ${p.file_path || p.path || ''}`.trim();
+    case 'Bash':      return `Bash: ${(p.command || '').slice(0, 80)}${(p.command || '').length > 80 ? '…' : ''}`;
+    case 'Git':       return `Git: ${(p.command || p.subcommand || '').slice(0, 60)}`;
+    case 'Glob':      return `Glob ${p.pattern || ''}`.trim();
+    case 'Grep':      return `Grep "${(p.pattern || '').slice(0, 40)}"`;
+    case 'WebFetch':  return `Fetch ${(p.url || '').slice(0, 50)}`;
+    case 'WebSearch':  return `Search "${(p.query || '').slice(0, 50)}"`;
+    case 'Browser':   return `Browser: ${p.action || 'navigate'}`;
+    default:          return toolName;
+  }
+}
+
+function getToolResultSummary(toolName, result) {
+  if (!result || typeof result !== 'object') return '';
+  if (result.success === false) {
+    const errMsg = result.error || result.message || 'failed';
+    return typeof errMsg === 'string' ? errMsg.slice(0, 60) : 'failed';
+  }
+  if (toolName === 'Bash') {
+    const exit = result.exitCode !== undefined ? result.exitCode : (result.code !== undefined ? result.code : null);
+    if (exit !== null) return `exit ${exit}`;
+  }
+  return '';
+}
+
+/**
+ * Pending low-stakes tool accumulator.
+ * Consecutive low-stakes tool use/result pairs are collected and rendered as a group.
+ */
+const toolGroupBuffer = {
+  items: [],         // { toolName, params, result, variant }
+  element: null,     // current group DOM element
+  timeout: null
+};
+
+function flushToolGroup() {
+  if (toolGroupBuffer.timeout) {
+    clearTimeout(toolGroupBuffer.timeout);
+    toolGroupBuffer.timeout = null;
+  }
+  if (toolGroupBuffer.items.length === 0) return;
+
+  const items = [...toolGroupBuffer.items];
+  toolGroupBuffer.items = [];
+  toolGroupBuffer.element = null;
+
+  renderToolGroup(items);
+}
+
+function renderToolGroup(items) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'tool-group';
+
+  // Summary text
+  const counts = {};
+  items.forEach(item => {
+    const name = item.toolName;
+    counts[name] = (counts[name] || 0) + 1;
+  });
+  const parts = Object.entries(counts).map(([name, count]) =>
+    count > 1 ? `${name} ×${count}` : name
+  );
+  const summaryText = parts.join(', ');
+
+  const row = document.createElement('div');
+  row.className = 'tool-group-row';
+
+  const icon = document.createElement('i');
+  icon.className = 'fas fa-layer-group tool-group-icon';
+  row.appendChild(icon);
+
+  const summary = document.createElement('span');
+  summary.className = 'tool-group-summary';
+  summary.textContent = summaryText;
+  row.appendChild(summary);
+
+  const chevron = document.createElement('i');
+  chevron.className = 'fas fa-chevron-right tool-chevron';
+  row.appendChild(chevron);
+
+  wrapper.appendChild(row);
+
+  // Expandable item list
+  const itemsDiv = document.createElement('div');
+  itemsDiv.className = 'tool-group-items';
+  itemsDiv.hidden = true;
+
+  items.forEach(item => {
+    const itemRow = document.createElement('div');
+    itemRow.className = 'tool-group-item';
+
+    const itemIcon = document.createElement('i');
+    itemIcon.className = getToolIcon(item.toolName) + ' tool-icon';
+    itemRow.appendChild(itemIcon);
+
+    const label = document.createElement('span');
+    label.textContent = getToolSummary(item.toolName, item.params);
+    itemRow.appendChild(label);
+
+    itemsDiv.appendChild(itemRow);
+  });
+
+  wrapper.appendChild(itemsDiv);
+
+  // Toggle
+  row.addEventListener('click', () => {
+    const expanded = !itemsDiv.hidden;
+    itemsDiv.hidden = expanded;
+    row.classList.toggle('expanded', !expanded);
+  });
+
+  dom.chatMessages.appendChild(wrapper);
+  dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
+}
+
+function addToolEventCompact(toolName, payload, variant = '', isResult = false) {
+  const isLowStakes = LOW_STAKES_TOOLS.has(toolName);
+
+  // Low-stakes tools: buffer into groups
+  if (isLowStakes) {
+    if (isResult) {
+      // Try to update the last buffered item for this tool
+      const existing = [...toolGroupBuffer.items].reverse().find(i => i.toolName === toolName && !i.result);
+      if (existing) {
+        existing.result = payload;
+        existing.variant = variant;
+      }
+    } else {
+      toolGroupBuffer.items.push({ toolName, params: payload, result: null, variant: '' });
+    }
+
+    // Reset flush timer — flush after a short idle gap
+    if (toolGroupBuffer.timeout) clearTimeout(toolGroupBuffer.timeout);
+    toolGroupBuffer.timeout = setTimeout(flushToolGroup, 150);
+    return;
+  }
+
+  // High-stakes tools: flush any pending group first, then render individually
+  flushToolGroup();
+
   const messageDiv = document.createElement('div');
-  messageDiv.className = `message assistant tool-event ${variant}`.trim();
+  messageDiv.className = `message assistant tool-event high-stakes ${variant}`.trim();
 
   const messageContent = document.createElement('div');
   messageContent.className = 'message-content';
 
-  const heading = document.createElement('p');
-  heading.className = 'tool-event-title';
-  heading.textContent = title;
+  const row = document.createElement('div');
+  row.className = 'tool-event-row';
 
-  messageContent.appendChild(heading);
+  // Icon
+  const iconEl = document.createElement('i');
+  const iconClass = getToolIcon(toolName);
+  const variantClass = variant === 'error' ? 'error' : variant === 'success' ? 'success' : 'info';
+  iconEl.className = `${iconClass} tool-icon ${variantClass}`;
+  row.appendChild(iconEl);
 
-  if (payload !== undefined) {
-    const markdownCandidate = (() => {
-      if (typeof payload === 'string') {
-        return payload;
-      }
+  // Label
+  const label = document.createElement('span');
+  label.className = 'tool-label';
+  if (isResult) {
+    const resultSummary = getToolResultSummary(toolName, payload);
+    label.textContent = resultSummary
+      ? `${toolName} → ${resultSummary}`
+      : `${toolName} ✓`;
+  } else {
+    label.textContent = getToolSummary(toolName, payload);
+  }
+  row.appendChild(label);
 
-      if (payload && typeof payload === 'object') {
-        const keysToCheck = ['content', 'stdout', 'output', 'message'];
-        for (const key of keysToCheck) {
-          const value = payload[key];
-          if (typeof value === 'string' && value.trim() !== '') {
-            return value;
-          }
-        }
-      }
+  // Status badge
+  if (variant === 'success' || variant === 'error') {
+    const badge = document.createElement('span');
+    badge.className = `tool-status-badge ${variant}`;
+    badge.textContent = variant === 'success' ? 'ok' : 'err';
+    row.appendChild(badge);
+  }
 
-      return null;
-    })();
+  // Chevron
+  const chevron = document.createElement('i');
+  chevron.className = 'fas fa-chevron-right tool-chevron';
+  row.appendChild(chevron);
 
-    if (typeof markdownCandidate === 'string') {
-      const payloadDiv = document.createElement('div');
-      payloadDiv.className = 'tool-event-payload';
-      payloadDiv.innerHTML = window.electron.markdown.parse(markdownCandidate);
-      messageContent.appendChild(payloadDiv);
+  messageContent.appendChild(row);
+
+  // Expandable payload
+  const payloadText = extractPayloadText(payload);
+  if (payloadText) {
+    const payloadDiv = document.createElement('div');
+    payloadDiv.className = 'tool-event-payload';
+    payloadDiv.hidden = true;
+
+    // Try rendering as markdown, fall back to pre
+    if (typeof payload === 'string' || (payload && (payload.content || payload.stdout || payload.output || payload.message))) {
+      const markdownSource = typeof payload === 'string' ? payload : (payload.content || payload.stdout || payload.output || payload.message);
+      payloadDiv.innerHTML = window.electron.markdown.parse(markdownSource);
     } else {
       const pre = document.createElement('pre');
-      pre.className = 'tool-event-payload';
-      pre.textContent = typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2);
-      messageContent.appendChild(pre);
+      pre.textContent = payloadText;
+      payloadDiv.appendChild(pre);
     }
+
+    messageContent.appendChild(payloadDiv);
+
+    // Toggle expand/collapse
+    row.addEventListener('click', () => {
+      const expanded = !payloadDiv.hidden;
+      payloadDiv.hidden = expanded;
+      row.classList.toggle('expanded', !expanded);
+    });
   }
 
   messageDiv.appendChild(messageContent);
   dom.chatMessages.appendChild(messageDiv);
   dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
+}
+
+/** Legacy compat wrapper — still callable by old code paths if needed */
+function addToolEventMessage(title, payload, variant = '') {
+  // Extract tool name from title like "Using tool: Bash" or "Tool result: Read"
+  const match = title.match(/(?:Using tool|Tool result):\s*(.+)/);
+  const toolName = match ? match[1].trim() : 'unknown';
+  const isResult = title.startsWith('Tool result');
+  addToolEventCompact(toolName, payload, variant, isResult);
 }
 
 function showToolApprovalDialog(approvalId, toolName, parameters) {
@@ -760,6 +986,14 @@ function updateEmptyState() {
 function renderChatMessages() {
   const activeChat = getActiveChat();
   dom.chatMessages.innerHTML = '';
+
+  // Clear any pending tool group buffer
+  toolGroupBuffer.items = [];
+  toolGroupBuffer.element = null;
+  if (toolGroupBuffer.timeout) {
+    clearTimeout(toolGroupBuffer.timeout);
+    toolGroupBuffer.timeout = null;
+  }
 
   if (!activeChat) {
     dom.chatHeaderTitle.textContent = 'King Louie Chat';
@@ -3237,6 +3471,9 @@ window.addEventListener('blur', () => {
 unsubscribeHandlers.push(window.electron.chat.onMessageStart(({ chatId, responseId }) => {
   if (chatId !== appState.activeChatId) return;
 
+  // Flush any pending tool group before the assistant message
+  flushToolGroup();
+
   setResponseActive(true);
 
   const messageDiv = document.createElement('div');
@@ -3245,10 +3482,6 @@ unsubscribeHandlers.push(window.electron.chat.onMessageStart(({ chatId, response
 
   const messageContent = document.createElement('div');
   messageContent.className = 'message-content';
-  const pending = document.createElement('p');
-  pending.textContent = '...';
-  messageContent.textContent = '';
-  messageContent.appendChild(pending);
 
   messageDiv.appendChild(messageContent);
   dom.chatMessages.appendChild(messageDiv);
@@ -3295,12 +3528,12 @@ unsubscribeHandlers.push(window.electron.chat.onMessageError(({ chatId, response
 
 unsubscribeHandlers.push(window.electron.chat.onToolUse(({ chatId, toolName, parameters }) => {
   if (chatId !== appState.activeChatId) return;
-  addToolEventMessage(`Using tool: ${toolName}`, parameters);
+  addToolEventCompact(toolName, parameters, '', false);
 }));
 
 unsubscribeHandlers.push(window.electron.chat.onToolResult(({ chatId, toolName, result }) => {
   if (chatId !== appState.activeChatId) return;
-  addToolEventMessage(`Tool result: ${toolName}`, result, result?.success === false ? 'error' : 'success');
+  addToolEventCompact(toolName, result, result?.success === false ? 'error' : 'success', true);
 }));
 
 unsubscribeHandlers.push(window.electron.tool.onApprovalRequired(({ approvalId, toolName, parameters }) => {
