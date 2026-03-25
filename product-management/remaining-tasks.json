@@ -1,0 +1,26 @@
+{
+  "agentId": "code-writer",
+  "tasks": [
+    {
+      "id": "t26",
+      "subject": "Task 26: Webhook Ingress",
+      "description": "Work on product-management/mega-task-plan.md and implement Task 26 fully (WebhookRegistry, WebhookHandler with HMAC + rate limiting + templating, HTTP routes on gateway, IPC handlers + UI, tests/webhook-handler.test.js, pass all T26 tests). Once done, commit to main with work reflected in mega-task-plan.md."
+    },
+    {
+      "id": "t27",
+      "subject": "Task 27: Syntax Highlighting",
+      "description": "Work on product-management/mega-task-plan.md and implement Task 27 fully (highlight.js integration in preload, custom marked renderer, dark theme CSS, DOMPurify allowlist update, tests/syntax-highlighting.test.js, pass all T27 tests). Once done, commit to main with work reflected in mega-task-plan.md."
+    },
+    {
+      "id": "t28",
+      "subject": "Task 28: Onboarding Wizard",
+      "description": "Work on product-management/mega-task-plan.md and implement Task 28 fully (5-step onboarding wizard, first-run detection, wizard UI in renderer, IPC handler, re-run from settings, tests/onboarding.test.js, pass all T28 tests). Once done, commit to main with work reflected in mega-task-plan.md."
+    },
+    {
+      "id": "t29",
+      "subject": "Task 29: Diagnostics (Fixit Command)",
+      "description": "Work on product-management/mega-task-plan.md and implement Task 29 fully (Fixit class with all 10 subsystem checks, formatted output, /fixit command, IPC handler, settings button, tests/fixit.test.js, pass all T29 tests). Once done, commit to main with work reflected in mega-task-plan.md.",
+      "blockedBy": ["t26", "t27", "t28"]
+    }
+  ]
+}

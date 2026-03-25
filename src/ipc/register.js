@@ -9,6 +9,8 @@ const { registerGatewayHandlers } = require('./gateway-handlers');
 const { registerSkillHandlers } = require('./skill-handlers');
 const { registerUsageHandlers } = require('./usage-handlers');
 const { registerCronHandlers } = require('./cron-handlers');
+const { registerWebhookHandlers } = require('./webhook-handlers');
+const { wrapHandler } = require('./wrap-handler');
 
 function registerHandlers(ipcMain, context = {}) {
   registerChatHandlers(ipcMain, context);
@@ -22,8 +24,10 @@ function registerHandlers(ipcMain, context = {}) {
   registerSkillHandlers(ipcMain, context);
   registerUsageHandlers(ipcMain, context);
   registerCronHandlers(ipcMain, context);
+  registerWebhookHandlers(ipcMain, context);
 }
 
 module.exports = {
-  registerHandlers
+  registerHandlers,
+  wrapHandler
 };
