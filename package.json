@@ -17,7 +17,10 @@
     "chat",
     "desktop"
   ],
-  "author": "",
+  "author": {
+    "name": "Fiscus Technology, LLC",
+    "email": "info@fiscus.technology"
+  },
   "license": "ISC",
   "build": {
     "appId": "com.kinglouie.app",
@@ -31,11 +34,7 @@
     "win": {
       "target": [
         "nsis"
-      ],
-      "signtoolOptions": {
-        "signingHashAlgorithms": ["sha256"],
-        "certificateSha1": "${env.WIN_CSC_THUMBPRINT}"
-      }
+      ]
     },
     "mac": {
       "target": [

@@ -41,9 +41,14 @@ jobs:
 
       - name: Build signed Windows installer
         env:
-          WIN_CSC_THUMBPRINT: ${{ secrets.WIN_CSC_THUMBPRINT }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npx electron-builder --win --publish never
+        shell: bash
+        run: |
+          SIGN_ARGS=""
+          if [ -n "${{ secrets.WIN_CSC_THUMBPRINT }}" ]; then
+            SIGN_ARGS="-c.win.signtoolOptions.certificateSha1=${{ secrets.WIN_CSC_THUMBPRINT }} -c.win.signtoolOptions.signingHashAlgorithms=[sha256]"
+          fi
+          npx electron-builder --win --publish never $SIGN_ARGS
 
       - uses: actions/upload-artifact@v4
         with:
