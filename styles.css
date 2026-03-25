@@ -1249,136 +1249,29 @@ body {
 }
 
 /* --- Settings tabs ----------------------------------------- */
-.settings-tabs-wrapper {
-  display: flex;
-  align-items: stretch;
+.settings-nav {
+  padding: 10px 14px;
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-elevated);
   flex-shrink: 0;
-  position: relative;
 }
 
-.settings-tabs {
-  display: flex;
-  gap: 0;
-  padding: 0 0 0 12px;
-  overflow: hidden;
-  flex: 1;
-  min-width: 0;
-}
-
-.settings-tab {
-  background: none;
-  border: none;
-  border-bottom: 2px solid transparent;
-  padding: 10px 14px;
-  font-size: 12px;
-  color: var(--text-muted);
-  cursor: pointer;
-  white-space: nowrap;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  transition: color var(--transition), border-color var(--transition);
-  flex-shrink: 0;
-}
-
-.settings-tab.overflowed {
-  display: none;
-}
-
-.settings-tab:hover {
-  color: var(--text-secondary);
-}
-
-.settings-tab.active {
-  color: var(--accent);
-  border-bottom-color: var(--accent);
-}
-
-.settings-tab i {
-  font-size: 12px;
-}
-
-/* Overflow "more" button */
-.settings-tabs-more {
-  background: none;
-  border: none;
-  border-bottom: 2px solid transparent;
-  border-left: 1px solid var(--border-subtle);
-  padding: 10px 14px;
-  font-size: 13px;
-  color: var(--text-muted);
-  cursor: pointer;
-  white-space: nowrap;
-  display: none;
-  align-items: center;
-  gap: 5px;
-  flex-shrink: 0;
-  transition: color var(--transition), background var(--transition);
-}
-
-.settings-tabs-more:hover {
-  color: var(--text-secondary);
-  background: var(--bg-overlay);
-}
-
-.settings-tabs-more.visible {
-  display: flex;
-}
-
-.settings-tabs-more.has-active {
-  color: var(--accent);
-  border-bottom-color: var(--accent);
-}
-
-/* Overflow dropdown */
-.settings-tabs-dropdown {
-  position: absolute;
-  top: 100%;
-  right: 0;
-  z-index: 100;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-  padding: 4px 0;
-  min-width: 160px;
-  display: none;
-}
-
-.settings-tabs-dropdown.open {
-  display: block;
-}
-
-.settings-tabs-dropdown-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.settings-nav-select {
   width: 100%;
-  padding: 8px 14px;
-  font-size: 12px;
-  color: var(--text-secondary);
-  background: none;
-  border: none;
-  cursor: pointer;
-  text-align: left;
-  transition: background var(--transition), color var(--transition);
-}
-
-.settings-tabs-dropdown-item:hover {
-  background: var(--bg-overlay);
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-default);
+  font-size: 13px;
+  background: var(--bg-input);
   color: var(--text-primary);
+  font-family: inherit;
+  cursor: pointer;
+  appearance: auto;
 }
 
-.settings-tabs-dropdown-item.active {
-  color: var(--accent);
-}
-
-.settings-tabs-dropdown-item i {
-  font-size: 12px;
-  width: 14px;
-  text-align: center;
+.settings-nav-select:focus {
+  outline: none;
+  border-color: var(--accent);
 }
 
 /* --- Settings tab content ---------------------------------- */
@@ -1814,6 +1707,56 @@ body {
   margin-bottom: 8px;
   color: var(--text-primary);
   font-size: 13px;
+}
+
+/* --- Skill settings fields --------------------------------- */
+
+.skill-settings-form {
+  display: grid;
+  gap: 10px;
+}
+
+.skill-settings-field {
+  display: grid;
+  gap: 4px;
+}
+
+.skill-settings-field label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.skill-settings-input,
+.skill-settings-select {
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-default);
+  font-size: 13px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-family: inherit;
+}
+
+.skill-settings-input::placeholder {
+  color: var(--text-faint);
+}
+
+.skill-settings-input:focus,
+.skill-settings-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.skill-settings-toggle {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
+.skill-settings-description {
+  font-size: 11px;
+  color: var(--text-muted);
 }
 
 /* --- Selection / accent color ------------------------------ */

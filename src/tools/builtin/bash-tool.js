@@ -139,4 +139,6 @@ const BashTool = new Tool({
   }
 });
 
+BashTool.sandboxExecutor = sandboxExecutor;
+
 module.exports = BashTool;

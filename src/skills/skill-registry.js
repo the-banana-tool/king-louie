@@ -103,6 +103,13 @@ class SkillRegistry {
       };
     }
 
+    if (skill._enabled === false) {
+      return {
+        ok: false,
+        error: `Skill '${command}' is currently disabled. Enable it in Settings > Skills.`
+      };
+    }
+
     const metadata = skill.getMetadata();
     const defaultResolvers =
       Array.isArray(metadata?.resolvers) && metadata.resolvers.length

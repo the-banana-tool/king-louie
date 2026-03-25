@@ -1,5 +1,5 @@
 const SANDBOX_CONFIG = {
-  defaultImage: 'sandbox:latest',
+  defaultImage: 'debian:bookworm-slim',
   memoryLimit: '512m',
   timeoutMs: 120000,
   networkMode: 'bridge',

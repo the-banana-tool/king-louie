@@ -40,6 +40,79 @@ function registerSkillHandlers(ipcMain, context = {}) {
     };
   }));
 
+  ipcMain.handle(IPC.SKILL_LIST_WITH_SETTINGS, wrapHandler(IPC.SKILL_LIST_WITH_SETTINGS, async () => {
+    const skills = skillRegistry.listSkills();
+    return skills.map((meta) => {
+      const skill = skillRegistry.getSkill(meta.id);
+      const schema = (skill && typeof skill.getSettingsSchema === 'function')
+        ? skill.getSettingsSchema()
+        : [];
+      const settings = (skill && typeof skill.getSettings === 'function')
+        ? skill.getSettings()
+        : {};
+      const enabled = skill ? (skill._enabled !== false) : true;
+      return { ...meta, settingsSchema: schema, settings, enabled };
+    });
+  }));
+
+  ipcMain.handle(IPC.SKILL_SET_ENABLED, wrapHandler(IPC.SKILL_SET_ENABLED, async (_event, { skillId, enabled } = {}) => {
+    const skill = skillRegistry.getSkill(skillId);
+    if (!skill) {
+      return { ok: false, error: `Unknown skill: ${skillId}` };
+    }
+
+    skill._enabled = Boolean(enabled);
+
+    // Persist via customization file
+    const customization = ensureSkillCustomizationFile(skillId);
+    const fs = require('fs');
+    let existing = {};
+    try {
+      existing = JSON.parse(fs.readFileSync(customization.path, 'utf-8'));
+    } catch { /* start fresh */ }
+
+    existing.enabled = Boolean(enabled);
+    fs.writeFileSync(customization.path, JSON.stringify(existing, null, 2) + '\n', 'utf-8');
+
+    return { ok: true, skillId, enabled: Boolean(enabled) };
+  }));
+
+  ipcMain.handle(IPC.SKILL_GET_SETTINGS, wrapHandler(IPC.SKILL_GET_SETTINGS, async (_event, { skillId } = {}) => {
+    const skill = skillRegistry.getSkill(skillId);
+    if (!skill) {
+      return { ok: false, error: `Unknown skill: ${skillId}` };
+    }
+    const schema = typeof skill.getSettingsSchema === 'function' ? skill.getSettingsSchema() : [];
+    const settings = typeof skill.getSettings === 'function' ? skill.getSettings() : {};
+    return { ok: true, skillId, schema, settings };
+  }));
+
+  ipcMain.handle(IPC.SKILL_SAVE_SETTINGS, wrapHandler(IPC.SKILL_SAVE_SETTINGS, async (_event, { skillId, settings } = {}) => {
+    const skill = skillRegistry.getSkill(skillId);
+    if (!skill) {
+      return { ok: false, error: `Unknown skill: ${skillId}` };
+    }
+
+    // Persist via customization file
+    const customization = ensureSkillCustomizationFile(skillId);
+    const fs = require('fs');
+    let existing = {};
+    try {
+      existing = JSON.parse(fs.readFileSync(customization.path, 'utf-8'));
+    } catch { /* start fresh */ }
+
+    existing.settings = { ...(existing.settings || {}), ...settings };
+    fs.writeFileSync(customization.path, JSON.stringify(existing, null, 2) + '\n', 'utf-8');
+
+    // Apply to live skill instance
+    skill.customSettings = { ...(skill.customSettings || {}), ...settings };
+    if (typeof skill.applyCustomization === 'function') {
+      skill.applyCustomization(skill.customSettings);
+    }
+
+    return { ok: true, skillId, settings: skill.getSettings() };
+  }));
+
   ipcMain.handle(IPC.SKILL_EXECUTE, wrapHandler(IPC.SKILL_EXECUTE, async (_event, { command, args = [], chatId }) => {
     const sessionManager = getSessionManager();
 

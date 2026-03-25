@@ -87,21 +87,20 @@
         <button class="icon-button" id="close-settings-btn" type="button" title="Close settings"><i class="fas fa-xmark"></i></button>
       </div>
 
-      <div class="settings-tabs-wrapper">
-        <nav class="settings-tabs" id="settings-tabs">
-          <button class="settings-tab active" data-tab="providers" type="button"><i class="fas fa-plug"></i> Providers</button>
-          <button class="settings-tab" data-tab="inference" type="button"><i class="fas fa-bolt"></i> Inference</button>
-          <button class="settings-tab" data-tab="channels" type="button"><i class="fas fa-tower-broadcast"></i> Channels</button>
-          <button class="settings-tab" data-tab="profile" type="button"><i class="fas fa-user"></i> Profile</button>
-          <button class="settings-tab" data-tab="voice" type="button"><i class="fas fa-volume-high"></i> Voice</button>
-          <button class="settings-tab" data-tab="notifications" type="button"><i class="fas fa-bell"></i> Notifications</button>
-          <button class="settings-tab" data-tab="hooks" type="button"><i class="fas fa-plug-circle-bolt"></i> Hooks</button>
-          <button class="settings-tab" data-tab="memory" type="button"><i class="fas fa-brain"></i> Memory</button>
-          <button class="settings-tab" data-tab="scheduler" type="button"><i class="fas fa-clock"></i> Scheduler</button>
-          <button class="settings-tab" data-tab="commands" type="button"><i class="fas fa-terminal"></i> Commands</button>
-        </nav>
-        <button class="settings-tabs-more" id="settings-tabs-more" type="button"><i class="fas fa-ellipsis"></i> More</button>
-        <div class="settings-tabs-dropdown" id="settings-tabs-dropdown"></div>
+      <div class="settings-nav">
+        <select class="settings-nav-select" id="settings-nav-select">
+          <option value="providers">Providers</option>
+          <option value="inference">Inference</option>
+          <option value="channels">Channels</option>
+          <option value="profile">Profile</option>
+          <option value="voice">Voice</option>
+          <option value="notifications">Notifications</option>
+          <option value="hooks">Hooks</option>
+          <option value="memory">Memory</option>
+          <option value="scheduler">Scheduler</option>
+          <option value="skills">Skills</option>
+          <option value="commands">Commands</option>
+        </select>
       </div>
 
       <div class="settings-body">
@@ -469,6 +468,19 @@
             </div>
           </section>
         </div>
+
+        <!-- Tab: Skills -->
+        <div class="settings-tab-content" data-tab="skills">
+          <section class="template-variables-card">
+            <h3>Loaded Skills</h3>
+            <p>Skills extend King Louie with new commands and capabilities. Disable a skill to prevent it from handling commands.</p>
+            <div id="skills-list"></div>
+            <div class="provider-message" id="skills-status">Loading skills...</div>
+          </section>
+        </div>
+
+        <!-- Skill settings tabs (dynamically injected) -->
+        <div id="skill-settings-container"></div>
 
         <!-- Tab: Commands -->
         <div class="settings-tab-content" data-tab="commands">

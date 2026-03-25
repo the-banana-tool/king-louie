@@ -105,8 +105,12 @@ class SkillLoader {
     const metadataOverrides = isPlainObject(customization.metadata)
       ? customization.metadata
       : Object.fromEntries(
-          Object.entries(customization).filter(([key]) => key !== 'settings')
+          Object.entries(customization).filter(([key]) => key !== 'settings' && key !== 'enabled')
         );
+
+    if (customization.enabled === false) {
+      skillInstance._enabled = false;
+    }
 
     skillInstance.getMetadata = () => {
       const baseMetadata = originalGetMetadata();

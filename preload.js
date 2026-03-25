@@ -443,7 +443,11 @@ contextBridge.exposeInMainWorld(
       unpin: (payload) => ipcRenderer.invoke('skill:unpin', payload),
       getPinned: (payload) => ipcRenderer.invoke('skill:getPinned', payload),
       listPinnable: () => ipcRenderer.invoke('skill:listPinnable'),
-      handleMessage: (payload) => ipcRenderer.invoke('skill:handleMessage', payload)
+      handleMessage: (payload) => ipcRenderer.invoke('skill:handleMessage', payload),
+      listWithSettings: () => ipcRenderer.invoke('skill:listWithSettings'),
+      getSettings: (payload) => ipcRenderer.invoke('skill:getSettings', payload),
+      saveSettings: (payload) => ipcRenderer.invoke('skill:saveSettings', payload),
+      setEnabled: (payload) => ipcRenderer.invoke('skill:setEnabled', payload)
     },
     app: {
       quitWindow: () => ipcRenderer.invoke('app:quitWindow')

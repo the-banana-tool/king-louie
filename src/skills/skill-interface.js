@@ -11,6 +11,17 @@
  */
 
 /**
+ * @typedef {Object} SkillSettingsField
+ * @property {string} key - Setting key (dot-notation for nested, e.g. 'docker.image')
+ * @property {string} label - Human-readable label
+ * @property {'text'|'number'|'toggle'|'select'|'password'} type - Field type
+ * @property {any} default - Default value
+ * @property {string} [description] - Help text shown below the field
+ * @property {Array<{label: string, value: string}>} [options] - For 'select' type
+ * @property {string} [placeholder] - Placeholder text for text/number/password inputs
+ */
+
+/**
  * @typedef {Object} SkillMetadata
  * @property {string} id - Unique skill identifier (e.g., 'std', 'calendar')
  * @property {string} name - Human-readable skill name
@@ -131,6 +142,41 @@ class Skill {
    */
   async handleMessage(text, context) {
     return null; // Default: not handled
+  }
+
+  /**
+   * Get settings schema for this skill.
+   * Override to expose configurable settings in the settings overlay.
+   *
+   * @returns {SkillSettingsField[]} - Array of field definitions (empty = no settings)
+   */
+  getSettingsSchema() {
+    return [];
+  }
+
+  /**
+   * Get current settings values for this skill.
+   * Returns the merged result of defaults + stored customizations.
+   *
+   * @returns {Object} - Key-value pairs of current settings
+   */
+  getSettings() {
+    const schema = this.getSettingsSchema();
+    const defaults = {};
+    for (const field of schema) {
+      defaults[field.key] = field.default;
+    }
+    return { ...defaults, ...(this.customSettings || {}) };
+  }
+
+  /**
+   * Called when settings are updated from the UI.
+   * Override to react to setting changes (e.g. reconfigure internal state).
+   *
+   * @param {Object} settings - The full settings object after the update
+   */
+  applyCustomization(settings) {
+    // Optional: override in subclass to react to settings changes
   }
 
   /**

@@ -13,6 +13,10 @@ class SandboxExecutor {
     this.dockerAvailable = null;
   }
 
+  updateConfig(overrides = {}) {
+    this.config = { ...this.config, ...overrides };
+  }
+
   async isDockerAvailable() {
     if (this.dockerAvailable !== null) {
       return this.dockerAvailable;

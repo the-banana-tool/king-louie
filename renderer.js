@@ -159,9 +159,10 @@ const dom = {
   chatInfoPopover: document.getElementById('chat-info-popover'),
   chatInfoCloseBtn: document.getElementById('chat-info-close-btn'),
   chatInfoPopoverBody: document.getElementById('chat-info-popover-body'),
-  settingsTabs: document.getElementById('settings-tabs'),
-  settingsTabsMore: document.getElementById('settings-tabs-more'),
-  settingsTabsDropdown: document.getElementById('settings-tabs-dropdown'),
+  skillSettingsContainer: document.getElementById('skill-settings-container'),
+  skillsList: document.getElementById('skills-list'),
+  skillsStatus: document.getElementById('skills-status'),
+  settingsNavSelect: document.getElementById('settings-nav-select'),
   inferenceTierSelect: document.getElementById('inference-tier-select'),
   saveInferenceTierBtn: document.getElementById('save-inference-tier-btn'),
   inferenceTierStatus: document.getElementById('inference-tier-status'),
@@ -1179,60 +1180,11 @@ function setSettingsDrawer(open) {
 }
 
 function switchSettingsTab(tabName) {
-  if (!dom.settingsTabs) return;
-  dom.settingsTabs.querySelectorAll('.settings-tab').forEach((btn) => {
-    btn.classList.toggle('active', btn.dataset.tab === tabName);
-  });
+  if (!dom.settingsNavSelect) return;
+  dom.settingsNavSelect.value = tabName;
   dom.settingsDrawer.querySelectorAll('.settings-tab-content').forEach((pane) => {
     pane.classList.toggle('active', pane.dataset.tab === tabName);
   });
-  closeSettingsTabsDropdown();
-  updateSettingsTabsOverflow();
-}
-
-function updateSettingsTabsOverflow() {
-  if (!dom.settingsTabs || !dom.settingsTabsMore || !dom.settingsTabsDropdown) return;
-
-  const tabs = Array.from(dom.settingsTabs.querySelectorAll('.settings-tab'));
-  // Reset all to visible first
-  tabs.forEach((t) => t.classList.remove('overflowed'));
-
-  const containerWidth = dom.settingsTabs.offsetWidth;
-  let usedWidth = 0;
-  const overflowed = [];
-
-  for (const tab of tabs) {
-    usedWidth += tab.offsetWidth;
-    if (usedWidth > containerWidth) {
-      overflowed.push(tab);
-    }
-  }
-
-  overflowed.forEach((t) => t.classList.add('overflowed'));
-
-  const hasOverflow = overflowed.length > 0;
-  dom.settingsTabsMore.classList.toggle('visible', hasOverflow);
-
-  // Check if the active tab is in the overflow set
-  const activeInOverflow = overflowed.some((t) => t.classList.contains('active'));
-  dom.settingsTabsMore.classList.toggle('has-active', activeInOverflow);
-
-  // Build dropdown items
-  dom.settingsTabsDropdown.innerHTML = '';
-  overflowed.forEach((tab) => {
-    const item = document.createElement('button');
-    item.type = 'button';
-    item.className = 'settings-tabs-dropdown-item' + (tab.classList.contains('active') ? ' active' : '');
-    item.dataset.tab = tab.dataset.tab;
-    item.innerHTML = tab.innerHTML;
-    dom.settingsTabsDropdown.appendChild(item);
-  });
-}
-
-function closeSettingsTabsDropdown() {
-  if (dom.settingsTabsDropdown) {
-    dom.settingsTabsDropdown.classList.remove('open');
-  }
 }
 
 function renderInferenceTierDetails() {
@@ -1270,7 +1222,6 @@ function renderInferenceTierDetails() {
 function openSettingsDrawer() {
   setSettingsDrawer(true);
   loadSettings();
-  requestAnimationFrame(() => updateSettingsTabsOverflow());
 }
 
 function renderProviderCard(providerKey, provider) {
@@ -1606,6 +1557,320 @@ function renderSettings() {
       ? `Configured: ${parts.join(', ')}`
       : 'No web search keys configured.';
     dom.websearchStatus.classList.remove('error');
+  }
+}
+
+// ── Skills List ────────────────────────────────────────────
+
+function renderSkillCard(skill) {
+  const card = document.createElement('div');
+  card.className = 'provider-card';
+  card.dataset.skillId = skill.id;
+
+  const header = document.createElement('div');
+  header.className = 'provider-header';
+
+  const titleWrap = document.createElement('div');
+  titleWrap.className = 'provider-title-wrap';
+
+  const title = document.createElement('div');
+  title.className = 'provider-title';
+  title.textContent = skill.name;
+
+  const versionBadge = document.createElement('span');
+  versionBadge.className = 'active-provider-badge';
+  versionBadge.textContent = `v${skill.version || '?'}`;
+
+  titleWrap.appendChild(title);
+  titleWrap.appendChild(versionBadge);
+
+  const status = document.createElement('span');
+  status.className = 'provider-status';
+  if (skill.enabled !== false) {
+    status.classList.add('ok');
+    status.textContent = 'Enabled';
+  } else {
+    status.classList.add('error');
+    status.textContent = 'Disabled';
+  }
+
+  header.appendChild(titleWrap);
+  header.appendChild(status);
+
+  const desc = document.createElement('div');
+  desc.className = 'provider-message';
+  const commands = (skill.commands || []).map((c) => `/${c}`).join(', ');
+  desc.textContent = `${skill.description || ''}${commands ? ` — Commands: ${commands}` : ''}`;
+
+  const actions = document.createElement('div');
+  actions.className = 'provider-actions';
+
+  const toggleBtn = document.createElement('button');
+  toggleBtn.type = 'button';
+  toggleBtn.dataset.action = 'toggle-skill';
+  toggleBtn.dataset.skillId = skill.id;
+  if (skill.enabled !== false) {
+    toggleBtn.className = 'btn btn-danger';
+    toggleBtn.dataset.nextEnabled = 'false';
+    toggleBtn.appendChild(faIcon('fas fa-toggle-on'));
+    toggleBtn.appendChild(document.createTextNode(' Disable'));
+  } else {
+    toggleBtn.className = 'btn btn-primary';
+    toggleBtn.dataset.nextEnabled = 'true';
+    toggleBtn.appendChild(faIcon('fas fa-toggle-off'));
+    toggleBtn.appendChild(document.createTextNode(' Enable'));
+  }
+  actions.appendChild(toggleBtn);
+
+  if (Array.isArray(skill.settingsSchema) && skill.settingsSchema.length > 0) {
+    const settingsBtn = document.createElement('button');
+    settingsBtn.type = 'button';
+    settingsBtn.className = 'btn';
+    settingsBtn.dataset.action = 'open-skill-settings';
+    settingsBtn.dataset.skillId = skill.id;
+    settingsBtn.appendChild(faIcon('fas fa-gear'));
+    settingsBtn.appendChild(document.createTextNode(' Settings'));
+    actions.appendChild(settingsBtn);
+  }
+
+  card.appendChild(header);
+  card.appendChild(desc);
+  card.appendChild(actions);
+  return card;
+}
+
+function renderSkillsList(skills) {
+  if (!dom.skillsList) return;
+  dom.skillsList.innerHTML = '';
+
+  if (!skills || skills.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'provider-message';
+    empty.textContent = 'No skills loaded.';
+    dom.skillsList.appendChild(empty);
+    return;
+  }
+
+  for (const skill of skills) {
+    dom.skillsList.appendChild(renderSkillCard(skill));
+  }
+
+  if (dom.skillsStatus) {
+    dom.skillsStatus.textContent = `${skills.length} skill(s) loaded.`;
+    dom.skillsStatus.classList.remove('error');
+  }
+}
+
+async function toggleSkillEnabled(skillId, enabled) {
+  try {
+    const result = await window.electron.skill.setEnabled({ skillId, enabled });
+    if (result?.error) throw new Error(result.error);
+    // Reload the skills list to reflect the change
+    await loadSkillSettingsTabs();
+  } catch (err) {
+    if (dom.skillsStatus) {
+      dom.skillsStatus.textContent = `Error: ${err.message}`;
+      dom.skillsStatus.classList.add('error');
+    }
+  }
+}
+
+// ── Skill Settings ─────────────────────────────────────────
+
+function renderSkillSettingsField(field, value) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'skill-settings-field';
+
+  const label = document.createElement('label');
+  label.textContent = field.label;
+  wrapper.appendChild(label);
+
+  let input;
+
+  switch (field.type) {
+    case 'toggle': {
+      input = document.createElement('input');
+      input.type = 'checkbox';
+      input.checked = Boolean(value);
+      input.dataset.skillKey = field.key;
+      input.className = 'skill-settings-toggle';
+      break;
+    }
+    case 'select': {
+      input = document.createElement('select');
+      input.dataset.skillKey = field.key;
+      input.className = 'skill-settings-select';
+      for (const opt of (field.options || [])) {
+        const option = document.createElement('option');
+        option.value = opt.value;
+        option.textContent = opt.label;
+        if (String(opt.value) === String(value)) option.selected = true;
+        input.appendChild(option);
+      }
+      break;
+    }
+    case 'number': {
+      input = document.createElement('input');
+      input.type = 'number';
+      input.value = value != null ? String(value) : '';
+      input.dataset.skillKey = field.key;
+      input.className = 'skill-settings-input';
+      if (field.placeholder) input.placeholder = field.placeholder;
+      break;
+    }
+    case 'password': {
+      input = document.createElement('input');
+      input.type = 'password';
+      input.value = value != null ? String(value) : '';
+      input.dataset.skillKey = field.key;
+      input.className = 'skill-settings-input';
+      if (field.placeholder) input.placeholder = field.placeholder;
+      break;
+    }
+    default: {
+      input = document.createElement('input');
+      input.type = 'text';
+      input.value = value != null ? String(value) : '';
+      input.dataset.skillKey = field.key;
+      input.className = 'skill-settings-input';
+      if (field.placeholder) input.placeholder = field.placeholder;
+      break;
+    }
+  }
+
+  wrapper.appendChild(input);
+
+  if (field.description) {
+    const desc = document.createElement('div');
+    desc.className = 'skill-settings-description';
+    desc.textContent = field.description;
+    wrapper.appendChild(desc);
+  }
+
+  return wrapper;
+}
+
+function renderSkillSettingsTab(skillData) {
+  const pane = document.createElement('div');
+  pane.className = 'settings-tab-content';
+  pane.dataset.tab = `skill-${skillData.id}`;
+
+  const card = document.createElement('section');
+  card.className = 'template-variables-card';
+
+  const heading = document.createElement('h3');
+  heading.textContent = `${skillData.name} Settings`;
+  card.appendChild(heading);
+
+  if (skillData.description) {
+    const desc = document.createElement('p');
+    desc.textContent = skillData.description;
+    card.appendChild(desc);
+  }
+
+  const form = document.createElement('div');
+  form.className = 'skill-settings-form';
+  form.dataset.skillId = skillData.id;
+
+  for (const field of skillData.settingsSchema) {
+    const value = skillData.settings?.[field.key] ?? field.default;
+    form.appendChild(renderSkillSettingsField(field, value));
+  }
+
+  card.appendChild(form);
+
+  const actions = document.createElement('div');
+  actions.className = 'provider-actions';
+
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'button';
+  saveBtn.className = 'btn btn-primary';
+  saveBtn.appendChild(faIcon('fas fa-floppy-disk'));
+  saveBtn.appendChild(document.createTextNode(' Save'));
+  saveBtn.dataset.action = 'save-skill-settings';
+  saveBtn.dataset.skillId = skillData.id;
+  actions.appendChild(saveBtn);
+
+  card.appendChild(actions);
+
+  const status = document.createElement('div');
+  status.className = 'provider-message';
+  status.id = `skill-settings-status-${skillData.id}`;
+  status.textContent = 'Settings loaded.';
+  card.appendChild(status);
+
+  pane.appendChild(card);
+  return pane;
+}
+
+function collectSkillSettingsValues(skillId) {
+  const form = document.querySelector(`.skill-settings-form[data-skill-id="${skillId}"]`);
+  if (!form) return {};
+  const values = {};
+  form.querySelectorAll('[data-skill-key]').forEach((el) => {
+    const key = el.dataset.skillKey;
+    if (el.type === 'checkbox') {
+      values[key] = el.checked;
+    } else if (el.type === 'number') {
+      values[key] = el.value !== '' ? Number(el.value) : null;
+    } else {
+      values[key] = el.value;
+    }
+  });
+  return values;
+}
+
+async function saveSkillSettings(skillId) {
+  const statusEl = document.getElementById(`skill-settings-status-${skillId}`);
+  try {
+    const settings = collectSkillSettingsValues(skillId);
+    const result = await window.electron.skill.saveSettings({ skillId, settings });
+    if (result?.error) throw new Error(result.error);
+    if (statusEl) {
+      statusEl.textContent = 'Settings saved.';
+      statusEl.classList.remove('error');
+    }
+  } catch (err) {
+    if (statusEl) {
+      statusEl.textContent = `Error: ${err.message}`;
+      statusEl.classList.add('error');
+    }
+  }
+}
+
+async function loadSkillSettingsTabs() {
+  if (!dom.settingsNavSelect) return;
+
+  try {
+    const skills = await window.electron.skill.listWithSettings();
+
+    // Render the skills management list
+    renderSkillsList(skills || []);
+
+    // Render per-skill settings tabs
+    const skillsWithSettings = (skills || []).filter(
+      (s) => Array.isArray(s.settingsSchema) && s.settingsSchema.length > 0
+    );
+
+    // Remove previously injected skill options and panes
+    dom.settingsNavSelect.querySelectorAll('option[data-skill]').forEach((el) => el.remove());
+    if (dom.skillSettingsContainer) dom.skillSettingsContainer.innerHTML = '';
+
+    for (const skill of skillsWithSettings) {
+      // Add dropdown option
+      const option = document.createElement('option');
+      option.value = `skill-${skill.id}`;
+      option.textContent = skill.name;
+      option.dataset.skill = skill.id;
+      dom.settingsNavSelect.appendChild(option);
+
+      // Add tab content pane
+      if (dom.skillSettingsContainer) {
+        dom.skillSettingsContainer.appendChild(renderSkillSettingsTab(skill));
+      }
+    }
+  } catch (err) {
+    console.error('[skill-settings] Failed to load skill settings tabs:', err);
   }
 }
 
@@ -2441,6 +2706,7 @@ async function loadSettings() {
       return;
     }
     renderSettings();
+    await loadSkillSettingsTabs();
     await loadMemoryEntries();
     await loadCronJobs();
   } catch (error) {
@@ -3599,40 +3865,35 @@ document.addEventListener('keydown', (e) => {
 });
 
 /* --- Settings tab switching -------------------------------- */
-if (dom.settingsTabs) {
-  dom.settingsTabs.addEventListener('click', (e) => {
-    const tab = e.target.closest('.settings-tab');
-    if (!tab || !tab.dataset.tab) return;
-    switchSettingsTab(tab.dataset.tab);
+if (dom.settingsNavSelect) {
+  dom.settingsNavSelect.addEventListener('change', () => {
+    switchSettingsTab(dom.settingsNavSelect.value);
   });
 }
 
-if (dom.settingsTabsMore) {
-  dom.settingsTabsMore.addEventListener('click', (e) => {
-    e.stopPropagation();
-    dom.settingsTabsDropdown.classList.toggle('open');
+/* --- Skills list actions ----------------------------------- */
+if (dom.skillsList) {
+  dom.skillsList.addEventListener('click', (e) => {
+    const button = e.target.closest('button[data-action]');
+    if (!button) return;
+    const { action, skillId, nextEnabled } = button.dataset;
+    if (action === 'toggle-skill' && skillId) {
+      toggleSkillEnabled(skillId, nextEnabled === 'true');
+    } else if (action === 'open-skill-settings' && skillId) {
+      switchSettingsTab(`skill-${skillId}`);
+    }
   });
 }
 
-if (dom.settingsTabsDropdown) {
-  dom.settingsTabsDropdown.addEventListener('click', (e) => {
-    const item = e.target.closest('.settings-tabs-dropdown-item');
-    if (!item || !item.dataset.tab) return;
-    switchSettingsTab(item.dataset.tab);
+/* --- Skill settings save ---------------------------------- */
+if (dom.skillSettingsContainer) {
+  dom.skillSettingsContainer.addEventListener('click', (e) => {
+    const button = e.target.closest('button[data-action="save-skill-settings"]');
+    if (!button) return;
+    const { skillId } = button.dataset;
+    if (skillId) saveSkillSettings(skillId);
   });
 }
-
-document.addEventListener('click', (e) => {
-  if (dom.settingsTabsDropdown && !e.target.closest('.settings-tabs-more') && !e.target.closest('.settings-tabs-dropdown')) {
-    closeSettingsTabsDropdown();
-  }
-});
-
-window.addEventListener('resize', () => {
-  if (dom.settingsDrawer && !dom.settingsDrawer.hidden) {
-    updateSettingsTabsOverflow();
-  }
-});
 
 /* --- Inference tier ---------------------------------------- */
 if (dom.saveInferenceTierBtn) {
