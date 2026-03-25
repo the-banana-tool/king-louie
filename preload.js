@@ -343,6 +343,10 @@ contextBridge.exposeInMainWorld(
       runLlmCommand: (payload) => {
         validateSettingsRunLlmPayload(payload);
         return ipcRenderer.invoke('settings:runLlmCommand', payload);
+      },
+      saveWebSearchKey: (payload) => {
+        validateObject(payload, 'payload');
+        return ipcRenderer.invoke('settings:saveWebSearchKey', payload);
       }
     },
     hooks: {

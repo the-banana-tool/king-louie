@@ -155,6 +155,38 @@ const dom = {
   imagePreviewList: document.getElementById('image-preview-list'),
   imageFileInput: document.getElementById('image-file-input'),
   attachImageBtn: document.getElementById('attach-image-btn'),
+  settingsTabs: document.getElementById('settings-tabs'),
+  settingsTabsMore: document.getElementById('settings-tabs-more'),
+  settingsTabsDropdown: document.getElementById('settings-tabs-dropdown'),
+  inferenceTierSelect: document.getElementById('inference-tier-select'),
+  saveInferenceTierBtn: document.getElementById('save-inference-tier-btn'),
+  inferenceTierStatus: document.getElementById('inference-tier-status'),
+  inferenceTierDetails: document.getElementById('inference-tier-details'),
+  channelTelegramTokenInput: document.getElementById('channel-telegram-token-input'),
+  saveTelegramTokenBtn: document.getElementById('save-telegram-token-btn'),
+  testTelegramBtn: document.getElementById('test-telegram-btn'),
+  clearTelegramTokenBtn: document.getElementById('clear-telegram-token-btn'),
+  telegramChannelStatus: document.getElementById('telegram-channel-status'),
+  channelDiscordTokenInput: document.getElementById('channel-discord-token-input'),
+  channelDiscordEnabledInput: document.getElementById('channel-discord-enabled-input'),
+  channelDiscordMentionInput: document.getElementById('channel-discord-mention-input'),
+  saveDiscordTokenBtn: document.getElementById('save-discord-token-btn'),
+  clearDiscordTokenBtn: document.getElementById('clear-discord-token-btn'),
+  discordChannelStatus: document.getElementById('discord-channel-status'),
+  channelSlackAppTokenInput: document.getElementById('channel-slack-app-token-input'),
+  channelSlackBotTokenInput: document.getElementById('channel-slack-bot-token-input'),
+  channelSlackEnabledInput: document.getElementById('channel-slack-enabled-input'),
+  channelSlackMentionInput: document.getElementById('channel-slack-mention-input'),
+  saveSlackTokensBtn: document.getElementById('save-slack-tokens-btn'),
+  clearSlackTokensBtn: document.getElementById('clear-slack-tokens-btn'),
+  slackChannelStatus: document.getElementById('slack-channel-status'),
+  websearchBraveKeyInput: document.getElementById('websearch-brave-key-input'),
+  websearchTavilyKeyInput: document.getElementById('websearch-tavily-key-input'),
+  saveWebsearchBraveBtn: document.getElementById('save-websearch-brave-btn'),
+  clearWebsearchBraveBtn: document.getElementById('clear-websearch-brave-btn'),
+  saveWebsearchTavilyBtn: document.getElementById('save-websearch-tavily-btn'),
+  clearWebsearchTavilyBtn: document.getElementById('clear-websearch-tavily-btn'),
+  websearchStatus: document.getElementById('websearch-status'),
 };
 
 function faIcon(iconClass) {
@@ -799,13 +831,13 @@ function showToolApprovalDialog(approvalId, toolName, parameters) {
 
   const denyBtn = document.createElement('button');
   denyBtn.type = 'button';
-  denyBtn.className = 'danger';
+  denyBtn.className = 'btn btn-danger';
   denyBtn.appendChild(faIcon('fas fa-ban'));
   denyBtn.appendChild(document.createTextNode(' Deny'));
 
   const approveBtn = document.createElement('button');
   approveBtn.type = 'button';
-  approveBtn.className = 'primary';
+  approveBtn.className = 'btn btn-primary';
   approveBtn.appendChild(faIcon('fas fa-check'));
   approveBtn.appendChild(document.createTextNode(' Approve'));
 
@@ -948,14 +980,14 @@ function renderChatList() {
     actions.className = 'chat-item-actions';
 
     const renameBtn = document.createElement('button');
-    renameBtn.className = 'chat-action-btn';
+    renameBtn.className = 'btn btn-sm chat-action-btn';
     renameBtn.appendChild(faIcon('fas fa-pen'));
     renameBtn.appendChild(document.createTextNode(' Rename'));
     renameBtn.dataset.action = 'rename';
     renameBtn.dataset.chatId = chat.id;
 
     const deleteBtn = document.createElement('button');
-    deleteBtn.className = 'chat-action-btn danger';
+    deleteBtn.className = 'btn btn-sm btn-danger chat-action-btn';
     deleteBtn.appendChild(faIcon('fas fa-trash'));
     deleteBtn.appendChild(document.createTextNode(' Delete'));
     deleteBtn.dataset.action = 'delete';
@@ -1043,9 +1075,99 @@ function setSettingsDrawer(open) {
   document.body.style.overflow = open ? 'hidden' : '';
 }
 
+function switchSettingsTab(tabName) {
+  if (!dom.settingsTabs) return;
+  dom.settingsTabs.querySelectorAll('.settings-tab').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.tab === tabName);
+  });
+  dom.settingsDrawer.querySelectorAll('.settings-tab-content').forEach((pane) => {
+    pane.classList.toggle('active', pane.dataset.tab === tabName);
+  });
+  closeSettingsTabsDropdown();
+  updateSettingsTabsOverflow();
+}
+
+function updateSettingsTabsOverflow() {
+  if (!dom.settingsTabs || !dom.settingsTabsMore || !dom.settingsTabsDropdown) return;
+
+  const tabs = Array.from(dom.settingsTabs.querySelectorAll('.settings-tab'));
+  // Reset all to visible first
+  tabs.forEach((t) => t.classList.remove('overflowed'));
+
+  const containerWidth = dom.settingsTabs.offsetWidth;
+  let usedWidth = 0;
+  const overflowed = [];
+
+  for (const tab of tabs) {
+    usedWidth += tab.offsetWidth;
+    if (usedWidth > containerWidth) {
+      overflowed.push(tab);
+    }
+  }
+
+  overflowed.forEach((t) => t.classList.add('overflowed'));
+
+  const hasOverflow = overflowed.length > 0;
+  dom.settingsTabsMore.classList.toggle('visible', hasOverflow);
+
+  // Check if the active tab is in the overflow set
+  const activeInOverflow = overflowed.some((t) => t.classList.contains('active'));
+  dom.settingsTabsMore.classList.toggle('has-active', activeInOverflow);
+
+  // Build dropdown items
+  dom.settingsTabsDropdown.innerHTML = '';
+  overflowed.forEach((tab) => {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'settings-tabs-dropdown-item' + (tab.classList.contains('active') ? ' active' : '');
+    item.dataset.tab = tab.dataset.tab;
+    item.innerHTML = tab.innerHTML;
+    dom.settingsTabsDropdown.appendChild(item);
+  });
+}
+
+function closeSettingsTabsDropdown() {
+  if (dom.settingsTabsDropdown) {
+    dom.settingsTabsDropdown.classList.remove('open');
+  }
+}
+
+function renderInferenceTierDetails() {
+  if (!dom.inferenceTierDetails) return;
+  const inference = appState.settings.inference || {};
+  const tierMap = inference.tierMap || {};
+  const timeouts = inference.timeoutsMs || {};
+  const activeTier = String(inference.activeTier || 'standard').toLowerCase();
+
+  dom.inferenceTierDetails.innerHTML = '';
+  ['fast', 'standard', 'smart'].forEach((tier) => {
+    const info = tierMap[tier] || {};
+    const row = document.createElement('div');
+    row.className = 'inference-tier-row' + (tier === activeTier ? ' active-tier' : '');
+
+    const label = document.createElement('span');
+    label.className = 'inference-tier-label';
+    label.textContent = tier;
+
+    const meta = document.createElement('span');
+    meta.className = 'inference-tier-meta';
+    const timeoutSec = Math.round((timeouts[tier] || 30000) / 1000);
+    meta.textContent = `${info.provider || '?'} / ${info.model || '?'} • ${timeoutSec}s timeout`;
+
+    row.appendChild(label);
+    row.appendChild(meta);
+    dom.inferenceTierDetails.appendChild(row);
+  });
+
+  if (dom.inferenceTierSelect) {
+    dom.inferenceTierSelect.value = activeTier;
+  }
+}
+
 function openSettingsDrawer() {
   setSettingsDrawer(true);
   loadSettings();
+  requestAnimationFrame(() => updateSettingsTabsOverflow());
 }
 
 function renderProviderCard(providerKey, provider) {
@@ -1120,7 +1242,7 @@ function renderProviderCard(providerKey, provider) {
   actions.className = 'provider-actions';
 
   const saveBtn = document.createElement('button');
-  saveBtn.className = 'primary';
+  saveBtn.className = 'btn btn-primary';
   saveBtn.type = 'button';
   saveBtn.appendChild(faIcon('fas fa-floppy-disk'));
   saveBtn.appendChild(document.createTextNode(' Save Token'));
@@ -1129,6 +1251,7 @@ function renderProviderCard(providerKey, provider) {
 
   const testBtn = document.createElement('button');
   testBtn.type = 'button';
+  testBtn.className = 'btn';
   testBtn.appendChild(faIcon('fas fa-plug'));
   testBtn.appendChild(document.createTextNode(' Test Connection'));
   testBtn.dataset.action = 'test';
@@ -1136,7 +1259,7 @@ function renderProviderCard(providerKey, provider) {
 
   const clearBtn = document.createElement('button');
   clearBtn.type = 'button';
-  clearBtn.className = 'danger';
+  clearBtn.className = 'btn btn-danger';
   clearBtn.appendChild(faIcon('fas fa-eraser'));
   clearBtn.appendChild(document.createTextNode(' Clear Token'));
   clearBtn.dataset.action = 'clear';
@@ -1144,6 +1267,7 @@ function renderProviderCard(providerKey, provider) {
 
   const modelBtn = document.createElement('button');
   modelBtn.type = 'button';
+  modelBtn.className = 'btn';
   modelBtn.appendChild(faIcon('fas fa-floppy-disk'));
   modelBtn.appendChild(document.createTextNode(' Save Model'));
   modelBtn.dataset.action = 'save-model';
@@ -1151,6 +1275,7 @@ function renderProviderCard(providerKey, provider) {
 
   const activeBtn = document.createElement('button');
   activeBtn.type = 'button';
+  activeBtn.className = 'btn';
   activeBtn.textContent = appState.settings.activeProvider === providerKey ? 'Active Provider' : 'Set Active';
   activeBtn.disabled = appState.settings.activeProvider === providerKey;
   activeBtn.dataset.action = 'set-active';
@@ -1322,9 +1447,9 @@ function renderSettings() {
         toggleBtn.appendChild(faIcon(hook.enabled !== false ? 'fas fa-toggle-on' : 'fas fa-toggle-off'));
         toggleBtn.appendChild(document.createTextNode(hook.enabled !== false ? ' Disable Hook' : ' Enable Hook'));
         if (hook.enabled !== false) {
-          toggleBtn.className = 'danger';
+          toggleBtn.className = 'btn btn-danger';
         } else {
-          toggleBtn.className = 'primary';
+          toggleBtn.className = 'btn btn-primary';
         }
 
         actions.appendChild(toggleBtn);
@@ -1350,6 +1475,35 @@ function renderSettings() {
   Object.entries(appState.settings.providers).forEach(([key, provider]) => {
     dom.providerList.appendChild(renderProviderCard(key, provider));
   });
+
+  renderInferenceTierDetails();
+
+  const telegram = appState.settings.telegram || {};
+  if (dom.telegramChannelStatus) {
+    if (telegram.bridgeActive) {
+      dom.telegramChannelStatus.textContent = 'Bridge active.';
+      dom.telegramChannelStatus.classList.remove('error');
+    } else if (telegram.hasToken) {
+      dom.telegramChannelStatus.textContent = 'Token saved. Bridge not active.';
+      dom.telegramChannelStatus.classList.remove('error');
+    } else {
+      dom.telegramChannelStatus.textContent = 'Not configured.';
+      dom.telegramChannelStatus.classList.remove('error');
+    }
+  }
+
+  const webSearch = appState.settings.webSearch || {};
+  if (dom.websearchStatus) {
+    const hasBrave = Boolean(webSearch.brave?.apiKey);
+    const hasTavily = Boolean(webSearch.tavily?.apiKey);
+    const parts = [];
+    if (hasBrave) parts.push('Brave');
+    if (hasTavily) parts.push('Tavily');
+    dom.websearchStatus.textContent = parts.length
+      ? `Configured: ${parts.join(', ')}`
+      : 'No web search keys configured.';
+    dom.websearchStatus.classList.remove('error');
+  }
 }
 
 function formatMemoryEntry(entry = {}) {
@@ -1403,7 +1557,7 @@ function renderMemoryList(entries = []) {
 
     const deleteBtn = document.createElement('button');
     deleteBtn.type = 'button';
-    deleteBtn.className = 'danger';
+    deleteBtn.className = 'btn btn-danger';
     deleteBtn.dataset.action = 'delete-memory';
     deleteBtn.dataset.memoryId = entry.id;
     deleteBtn.appendChild(faIcon('fas fa-trash'));
@@ -2041,13 +2195,14 @@ function renderCronJobs(jobs = []) {
     toggleBtn.type = 'button';
     toggleBtn.appendChild(faIcon(job.enabled !== false ? 'fas fa-toggle-on' : 'fas fa-toggle-off'));
     toggleBtn.appendChild(document.createTextNode(job.enabled !== false ? ' Disable' : ' Enable'));
-    toggleBtn.className = job.enabled !== false ? 'danger' : 'primary';
+    toggleBtn.className = job.enabled !== false ? 'btn btn-danger' : 'btn btn-primary';
     toggleBtn.dataset.action = 'toggle-cron';
     toggleBtn.dataset.jobId = job.id;
     toggleBtn.dataset.nextEnabled = job.enabled !== false ? 'false' : 'true';
 
     const runBtn = document.createElement('button');
     runBtn.type = 'button';
+    runBtn.className = 'btn';
     runBtn.appendChild(faIcon('fas fa-play'));
     runBtn.appendChild(document.createTextNode(' Run Now'));
     runBtn.dataset.action = 'run-cron';
@@ -2055,7 +2210,7 @@ function renderCronJobs(jobs = []) {
 
     const delBtn = document.createElement('button');
     delBtn.type = 'button';
-    delBtn.className = 'danger';
+    delBtn.className = 'btn btn-danger';
     delBtn.appendChild(faIcon('fas fa-trash'));
     delBtn.appendChild(document.createTextNode(' Delete'));
     delBtn.dataset.action = 'delete-cron';
@@ -2278,12 +2433,13 @@ function showRenameDialog(currentTitle) {
 
     const cancelBtn = document.createElement('button');
     cancelBtn.type = 'button';
+    cancelBtn.className = 'btn';
     cancelBtn.appendChild(faIcon('fas fa-xmark'));
     cancelBtn.appendChild(document.createTextNode(' Cancel'));
 
     const saveBtn = document.createElement('button');
     saveBtn.type = 'button';
-    saveBtn.className = 'primary';
+    saveBtn.className = 'btn btn-primary';
     saveBtn.appendChild(faIcon('fas fa-check'));
     saveBtn.appendChild(document.createTextNode(' Save'));
 
@@ -3306,6 +3462,218 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+/* --- Settings tab switching -------------------------------- */
+if (dom.settingsTabs) {
+  dom.settingsTabs.addEventListener('click', (e) => {
+    const tab = e.target.closest('.settings-tab');
+    if (!tab || !tab.dataset.tab) return;
+    switchSettingsTab(tab.dataset.tab);
+  });
+}
+
+if (dom.settingsTabsMore) {
+  dom.settingsTabsMore.addEventListener('click', (e) => {
+    e.stopPropagation();
+    dom.settingsTabsDropdown.classList.toggle('open');
+  });
+}
+
+if (dom.settingsTabsDropdown) {
+  dom.settingsTabsDropdown.addEventListener('click', (e) => {
+    const item = e.target.closest('.settings-tabs-dropdown-item');
+    if (!item || !item.dataset.tab) return;
+    switchSettingsTab(item.dataset.tab);
+  });
+}
+
+document.addEventListener('click', (e) => {
+  if (dom.settingsTabsDropdown && !e.target.closest('.settings-tabs-more') && !e.target.closest('.settings-tabs-dropdown')) {
+    closeSettingsTabsDropdown();
+  }
+});
+
+window.addEventListener('resize', () => {
+  if (dom.settingsDrawer && !dom.settingsDrawer.hidden) {
+    updateSettingsTabsOverflow();
+  }
+});
+
+/* --- Inference tier ---------------------------------------- */
+if (dom.saveInferenceTierBtn) {
+  dom.saveInferenceTierBtn.addEventListener('click', async () => {
+    const tier = dom.inferenceTierSelect?.value;
+    if (!tier) return;
+    try {
+      const result = unwrapIpcResult(
+        await window.electron.settings.setInferenceTier({ tier }),
+        'Failed to set inference tier.'
+      );
+      appState.settings.inference = result.inference || appState.settings.inference;
+      renderInferenceTierDetails();
+      if (dom.inferenceTierStatus) {
+        dom.inferenceTierStatus.textContent = `Switched to "${tier}" tier.`;
+        dom.inferenceTierStatus.classList.remove('error');
+      }
+    } catch (err) {
+      if (dom.inferenceTierStatus) {
+        dom.inferenceTierStatus.textContent = err.message || 'Error setting tier.';
+        dom.inferenceTierStatus.classList.add('error');
+      }
+    }
+  });
+}
+
+/* --- Channel management: Telegram -------------------------- */
+if (dom.saveTelegramTokenBtn) {
+  dom.saveTelegramTokenBtn.addEventListener('click', async () => {
+    const token = dom.channelTelegramTokenInput?.value?.trim();
+    if (!token) return;
+    try {
+      unwrapIpcResult(
+        await window.electron.settings.runLlmCommand({ command: `telegram add ${token}` }),
+        'Failed to save Telegram token.'
+      );
+      dom.channelTelegramTokenInput.value = '';
+      if (dom.telegramChannelStatus) {
+        dom.telegramChannelStatus.textContent = 'Token saved successfully.';
+        dom.telegramChannelStatus.classList.remove('error');
+      }
+    } catch (err) {
+      if (dom.telegramChannelStatus) {
+        dom.telegramChannelStatus.textContent = err.message || 'Error saving token.';
+        dom.telegramChannelStatus.classList.add('error');
+      }
+    }
+  });
+}
+
+if (dom.testTelegramBtn) {
+  dom.testTelegramBtn.addEventListener('click', async () => {
+    try {
+      const result = unwrapIpcResult(
+        await window.electron.settings.runLlmCommand({ command: 'telegram test' }),
+        'Failed to test Telegram.'
+      );
+      if (dom.telegramChannelStatus) {
+        dom.telegramChannelStatus.textContent = result.message || 'Test successful.';
+        dom.telegramChannelStatus.classList.remove('error');
+      }
+    } catch (err) {
+      if (dom.telegramChannelStatus) {
+        dom.telegramChannelStatus.textContent = err.message || 'Test failed.';
+        dom.telegramChannelStatus.classList.add('error');
+      }
+    }
+  });
+}
+
+if (dom.clearTelegramTokenBtn) {
+  dom.clearTelegramTokenBtn.addEventListener('click', async () => {
+    try {
+      unwrapIpcResult(
+        await window.electron.settings.runLlmCommand({ command: 'telegram remove' }),
+        'Failed to clear Telegram token.'
+      );
+      if (dom.telegramChannelStatus) {
+        dom.telegramChannelStatus.textContent = 'Token cleared.';
+        dom.telegramChannelStatus.classList.remove('error');
+      }
+    } catch (err) {
+      if (dom.telegramChannelStatus) {
+        dom.telegramChannelStatus.textContent = err.message || 'Error clearing token.';
+        dom.telegramChannelStatus.classList.add('error');
+      }
+    }
+  });
+}
+
+/* --- Channel management: Web Search keys ------------------- */
+if (dom.saveWebsearchBraveBtn) {
+  dom.saveWebsearchBraveBtn.addEventListener('click', async () => {
+    const apiKey = dom.websearchBraveKeyInput?.value?.trim();
+    if (!apiKey) return;
+    try {
+      unwrapIpcResult(
+        await window.electron.settings.saveWebSearchKey({ provider: 'brave', apiKey }),
+        'Failed to save Brave key.'
+      );
+      dom.websearchBraveKeyInput.value = '';
+      if (dom.websearchStatus) {
+        dom.websearchStatus.textContent = 'Brave key saved.';
+        dom.websearchStatus.classList.remove('error');
+      }
+    } catch (err) {
+      if (dom.websearchStatus) {
+        dom.websearchStatus.textContent = err.message || 'Error saving Brave key.';
+        dom.websearchStatus.classList.add('error');
+      }
+    }
+  });
+}
+
+if (dom.clearWebsearchBraveBtn) {
+  dom.clearWebsearchBraveBtn.addEventListener('click', async () => {
+    try {
+      unwrapIpcResult(
+        await window.electron.settings.saveWebSearchKey({ provider: 'brave', clear: true }),
+        'Failed to clear Brave key.'
+      );
+      if (dom.websearchStatus) {
+        dom.websearchStatus.textContent = 'Brave key cleared.';
+        dom.websearchStatus.classList.remove('error');
+      }
+    } catch (err) {
+      if (dom.websearchStatus) {
+        dom.websearchStatus.textContent = err.message || 'Error.';
+        dom.websearchStatus.classList.add('error');
+      }
+    }
+  });
+}
+
+if (dom.saveWebsearchTavilyBtn) {
+  dom.saveWebsearchTavilyBtn.addEventListener('click', async () => {
+    const apiKey = dom.websearchTavilyKeyInput?.value?.trim();
+    if (!apiKey) return;
+    try {
+      unwrapIpcResult(
+        await window.electron.settings.saveWebSearchKey({ provider: 'tavily', apiKey }),
+        'Failed to save Tavily key.'
+      );
+      dom.websearchTavilyKeyInput.value = '';
+      if (dom.websearchStatus) {
+        dom.websearchStatus.textContent = 'Tavily key saved.';
+        dom.websearchStatus.classList.remove('error');
+      }
+    } catch (err) {
+      if (dom.websearchStatus) {
+        dom.websearchStatus.textContent = err.message || 'Error saving Tavily key.';
+        dom.websearchStatus.classList.add('error');
+      }
+    }
+  });
+}
+
+if (dom.clearWebsearchTavilyBtn) {
+  dom.clearWebsearchTavilyBtn.addEventListener('click', async () => {
+    try {
+      unwrapIpcResult(
+        await window.electron.settings.saveWebSearchKey({ provider: 'tavily', clear: true }),
+        'Failed to clear Tavily key.'
+      );
+      if (dom.websearchStatus) {
+        dom.websearchStatus.textContent = 'Tavily key cleared.';
+        dom.websearchStatus.classList.remove('error');
+      }
+    } catch (err) {
+      if (dom.websearchStatus) {
+        dom.websearchStatus.textContent = err.message || 'Error.';
+        dom.websearchStatus.classList.add('error');
+      }
+    }
+  });
+}
+
 if (dom.providerList) {
   dom.providerList.addEventListener('click', (e) => {
     const button = e.target.closest('button[data-action]');
@@ -3563,7 +3931,7 @@ unsubscribeHandlers.push(window.electron.agent.onAskUser(({ requestId, question 
 
   const submitBtn = document.createElement('button');
   submitBtn.type = 'button';
-  submitBtn.className = 'primary';
+  submitBtn.className = 'btn btn-primary';
   submitBtn.appendChild(faIcon('fas fa-paper-plane'));
   submitBtn.appendChild(document.createTextNode(' Submit'));
 

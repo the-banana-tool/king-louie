@@ -64,6 +64,77 @@ body {
   color: var(--text-primary);
 }
 
+/* --- Shared button system ---------------------------------- */
+.btn {
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-default);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  padding: 7px 12px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.3;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: background var(--transition), border-color var(--transition), color var(--transition), opacity var(--transition);
+}
+
+.btn:hover {
+  background: var(--bg-overlay);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.btn:active {
+  opacity: 0.85;
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+  pointer-events: none;
+}
+
+.btn-primary,
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #11111b;
+  font-weight: 600;
+}
+
+.btn-primary:hover,
+.btn.primary:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  opacity: 0.9;
+}
+
+.btn-danger,
+.btn.danger {
+  background: transparent;
+  border-color: rgba(243,139,168,0.3);
+  color: var(--error);
+}
+
+.btn-danger:hover,
+.btn.danger:hover {
+  background: var(--error-bg);
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.btn-lg {
+  padding: 10px 24px;
+}
+
+.btn-sm {
+  padding: 3px 6px;
+  font-size: 11px;
+}
+
 /* --- Layout ------------------------------------------------ */
 .container {
   display: flex;
@@ -109,19 +180,7 @@ body {
 
 .new-chat-btn {
   width: 100%;
-  padding: 8px;
-  background-color: var(--bg-elevated);
-  color: var(--text-primary);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  font-size: 13px;
-  transition: background-color var(--transition), border-color var(--transition);
-}
-
-.new-chat-btn:hover {
-  background-color: var(--bg-overlay);
-  border-color: var(--border-strong);
+  justify-content: center;
 }
 
 /* Chat list */
@@ -196,29 +255,9 @@ body {
   opacity: 1;
 }
 
+/* Chat action buttons use .btn-sm sizing but transparent bg */
 .chat-action-btn {
   background: transparent;
-  color: var(--text-secondary);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-sm);
-  font-size: 11px;
-  padding: 3px 6px;
-  cursor: pointer;
-  transition: border-color var(--transition), color var(--transition);
-}
-
-.chat-action-btn:hover {
-  border-color: var(--border-strong);
-  color: var(--text-primary);
-}
-
-.chat-action-btn.danger {
-  border-color: rgba(243,139,168,0.3);
-  color: var(--error);
-}
-
-.chat-action-btn.danger:hover {
-  border-color: var(--error);
 }
 
 /* Chat view button (dot indicator) */
@@ -876,44 +915,13 @@ body {
   gap: 8px;
 }
 
-.send-btn {
-  padding: 10px 24px;
-  background-color: var(--accent);
-  color: #11111b;
-  border: none;
-  border-radius: var(--radius-sm);
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background-color var(--transition), opacity var(--transition);
-}
-
-.send-btn:hover {
-  opacity: 0.9;
-}
-
-.send-btn:active {
-  opacity: 0.8;
-}
+/* .send-btn inherits from .btn-primary .btn-lg */
 
 .stop-btn {
-  padding: 10px 24px;
-  background-color: var(--error);
+  border-color: var(--error);
+  background: var(--error);
   color: #11111b;
-  border: none;
-  border-radius: var(--radius-sm);
-  font-size: 13px;
   font-weight: 600;
-  cursor: pointer;
-  transition: background-color var(--transition), opacity var(--transition);
-}
-
-.stop-btn:hover {
-  opacity: 0.9;
-}
-
-.stop-btn:active {
-  opacity: 0.8;
 }
 
 /* --- Slash autocomplete ------------------------------------ */
@@ -1065,22 +1073,6 @@ body {
 }
 
 /* --- Agent mode btn ---------------------------------------- */
-.agent-mode-btn {
-  border: 1px solid var(--border-default);
-  background: var(--bg-elevated);
-  color: var(--text-secondary);
-  border-radius: var(--radius-sm);
-  padding: 8px 12px;
-  font-size: 13px;
-  cursor: pointer;
-  transition: background-color var(--transition), border-color var(--transition), color var(--transition);
-}
-
-.agent-mode-btn:hover {
-  background: var(--bg-overlay);
-  border-color: var(--border-strong);
-}
-
 .agent-mode-btn.active {
   background: var(--accent-surface);
   border-color: var(--accent);
@@ -1092,47 +1084,212 @@ body {
   padding: 8px 10px;
 }
 
-/* --- Settings drawer --------------------------------------- */
-.settings-drawer {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.55);
-  display: flex;
-  justify-content: flex-end;
-  z-index: 2000;
+/* --- Settings gear button in sidebar ----------------------- */
+.settings-gear-btn {
+  min-width: 32px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
+  order: -1;
 }
 
-.settings-drawer[hidden] {
+.container.history-collapsed .settings-gear-btn {
+  order: 0;
+}
+
+/* --- Settings overlay (modal) ------------------------------ */
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+  padding: 24px;
+}
+
+.settings-overlay[hidden] {
   display: none;
 }
 
-.settings-panel {
-  width: min(520px, 92vw);
+.settings-modal {
+  width: min(820px, 95vw);
+  max-height: min(90vh, 800px);
   background: var(--bg-surface);
-  height: 100%;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
   display: flex;
   flex-direction: column;
-  box-shadow: -12px 0 30px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
 }
 
 .settings-header {
-  padding: 20px 20px 14px;
+  padding: 16px 20px;
   border-bottom: 1px solid var(--border-subtle);
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
+  align-items: center;
   gap: 12px;
+  flex-shrink: 0;
 }
 
 .settings-header h2 {
-  font-size: 18px;
-  margin-bottom: 4px;
+  font-size: 17px;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-header h2 i {
+  color: var(--text-muted);
+  font-size: 15px;
+}
+
+/* --- Settings tabs ----------------------------------------- */
+.settings-tabs-wrapper {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  flex-shrink: 0;
+  position: relative;
+}
+
+.settings-tabs {
+  display: flex;
+  gap: 0;
+  padding: 0 0 0 12px;
+  overflow: hidden;
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 10px 14px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: color var(--transition), border-color var(--transition);
+  flex-shrink: 0;
+}
+
+.settings-tab.overflowed {
+  display: none;
+}
+
+.settings-tab:hover {
+  color: var(--text-secondary);
+}
+
+.settings-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.settings-tab i {
+  font-size: 12px;
+}
+
+/* Overflow "more" button */
+.settings-tabs-more {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-left: 1px solid var(--border-subtle);
+  padding: 10px 14px;
+  font-size: 13px;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  display: none;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  transition: color var(--transition), background var(--transition);
+}
+
+.settings-tabs-more:hover {
+  color: var(--text-secondary);
+  background: var(--bg-overlay);
+}
+
+.settings-tabs-more.visible {
+  display: flex;
+}
+
+.settings-tabs-more.has-active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* Overflow dropdown */
+.settings-tabs-dropdown {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 100;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  padding: 4px 0;
+  min-width: 160px;
+  display: none;
+}
+
+.settings-tabs-dropdown.open {
+  display: block;
+}
+
+.settings-tabs-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 14px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--transition), color var(--transition);
+}
+
+.settings-tabs-dropdown-item:hover {
+  background: var(--bg-overlay);
   color: var(--text-primary);
 }
 
-.settings-header p {
-  color: var(--text-muted);
+.settings-tabs-dropdown-item.active {
+  color: var(--accent);
+}
+
+.settings-tabs-dropdown-item i {
   font-size: 12px;
+  width: 14px;
+  text-align: center;
+}
+
+/* --- Settings tab content ---------------------------------- */
+.settings-tab-content {
+  display: none;
+}
+
+.settings-tab-content.active {
+  display: block;
 }
 
 .settings-body {
@@ -1141,6 +1298,8 @@ body {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  flex: 1;
+  min-height: 0;
 }
 
 .settings-alert {
@@ -1221,32 +1380,8 @@ body {
 .template-variables-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
-}
-
-.template-variables-actions .primary {
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--accent);
-  background: var(--accent);
-  color: #11111b;
-  padding: 7px 12px;
-  cursor: pointer;
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.template-variables-actions .primary:hover {
-  opacity: 0.9;
-}
-
-.template-variables-actions .danger {
-  border-radius: var(--radius-sm);
-  border: 1px solid rgba(243,139,168,0.3);
-  background: transparent;
-  color: var(--error);
-  padding: 7px 12px;
-  cursor: pointer;
-  font-size: 13px;
 }
 
 /* Provider cards */
@@ -1349,38 +1484,6 @@ body {
   gap: 8px;
 }
 
-.provider-actions button {
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border-default);
-  background: var(--bg-elevated);
-  color: var(--text-secondary);
-  padding: 7px 12px;
-  cursor: pointer;
-  font-size: 13px;
-  transition: background var(--transition), border-color var(--transition);
-}
-
-.provider-actions button:hover {
-  background: var(--bg-overlay);
-  border-color: var(--border-strong);
-}
-
-.provider-actions button.primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #11111b;
-  font-weight: 600;
-}
-
-.provider-actions button.primary:hover {
-  opacity: 0.9;
-}
-
-.provider-actions button.danger {
-  border-color: rgba(243,139,168,0.3);
-  color: var(--error);
-}
-
 .provider-message {
   font-size: 11px;
   color: var(--text-muted);
@@ -1455,32 +1558,7 @@ body {
   accent-color: var(--accent);
 }
 
-.tool-approval-actions button {
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border-default);
-  background: var(--bg-elevated);
-  color: var(--text-secondary);
-  padding: 8px 14px;
-  cursor: pointer;
-  font-size: 13px;
-  transition: background var(--transition), border-color var(--transition);
-}
-
-.tool-approval-actions button:hover {
-  background: var(--bg-overlay);
-}
-
-.tool-approval-actions button.primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #11111b;
-  font-weight: 600;
-}
-
-.tool-approval-actions button.danger {
-  border-color: rgba(243,139,168,0.3);
-  color: var(--error);
-}
+/* tool-approval buttons inherit from .btn system */
 
 /* --- Rename modal ------------------------------------------ */
 .rename-chat-modal {
@@ -1536,24 +1614,9 @@ body {
   gap: 8px;
 }
 
-.rename-chat-actions button {
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border-default);
-  background: var(--bg-elevated);
-  color: var(--text-secondary);
-  padding: 8px 14px;
-  cursor: pointer;
-  font-size: 13px;
-}
+/* rename-chat buttons inherit from .btn system */
 
-.rename-chat-actions button.primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #11111b;
-  font-weight: 600;
-}
-
-/* --- Floating settings ------------------------------------- */
+/* --- Floating settings (legacy, kept for start-state) ------ */
 .floating-settings-btn {
   position: fixed;
   top: 14px;
@@ -1568,7 +1631,7 @@ body {
   box-shadow: 0 8px 20px rgba(0, 0, 0, 0.3);
   cursor: pointer;
   transition: background-color var(--transition), border-color var(--transition);
-  display: inline-flex;
+  display: none;
   align-items: center;
   gap: 6px;
 }
@@ -1580,6 +1643,42 @@ body {
 
 .container.start-state .floating-settings-btn {
   display: inline-flex;
+}
+
+/* --- Inference tier details -------------------------------- */
+.inference-tier-details {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 8px 0 0;
+}
+
+.inference-tier-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  background: var(--bg-base);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+}
+
+.inference-tier-row.active-tier {
+  border-color: var(--accent);
+  background: var(--accent-surface);
+}
+
+.inference-tier-label {
+  font-weight: 600;
+  min-width: 70px;
+  text-transform: capitalize;
+  color: var(--text-primary);
+}
+
+.inference-tier-meta {
+  color: var(--text-muted);
 }
 
 /* --- Scrollbars -------------------------------------------- */
