@@ -3724,7 +3724,7 @@ async function handleRenameChat(chatId) {
   if (!title || title.trim() === '' || title.trim() === chat.title) {
     return;
   }
-  const updated = await window.electron.chat.rename({ id: chatId, title: title.trim() });
+  const updated = await window.electron.chat.rename({ chatId, name: title.trim() });
   const safeUpdated = unwrapIpcResult(updated, 'Unable to rename chat.');
   if (safeUpdated) {
     appState.chats = appState.chats.map((item) => (item.id === safeUpdated.id ? safeUpdated : item));

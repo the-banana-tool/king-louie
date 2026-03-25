@@ -120,15 +120,15 @@ function registerChatHandlers(ipcMain, context = {}) {
     return { activeChatId: chatId };
   }));
 
-  ipcMain.handle(IPC.CHAT_RENAME, wrapHandler(IPC.CHAT_RENAME, async (_event, { id, title }) => {
+  ipcMain.handle(IPC.CHAT_RENAME, wrapHandler(IPC.CHAT_RENAME, async (_event, { chatId, name }) => {
     const chats = getChats();
     const updated = chats.map((chat) =>
-      chat.id === id
-        ? { ...chat, title, updatedAt: new Date().toISOString() }
+      chat.id === chatId
+        ? { ...chat, title: name, updatedAt: new Date().toISOString() }
         : chat
     );
     setChats(updated);
-    return updated.find((chat) => chat.id === id);
+    return updated.find((chat) => chat.id === chatId);
   }));
 
   ipcMain.handle(IPC.CHAT_DELETE, wrapHandler(IPC.CHAT_DELETE, async (_event, chatId) => {
