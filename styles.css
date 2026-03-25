@@ -395,6 +395,12 @@ body {
   color: var(--error);
 }
 
+.context-menu-item i {
+  margin-right: 6px;
+  width: 14px;
+  text-align: center;
+}
+
 /* --- Main content ------------------------------------------ */
 .main-content {
   flex: 1;

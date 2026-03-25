@@ -1,13 +1,18 @@
 const PRICING = {
   openai: {
-    'gpt-4o': { input: 2.5, output: 10.0, cacheRead: 1.25 },
+    'gpt-4.1-mini': { input: 0.4, output: 1.6 },
+    'gpt-4.1': { input: 2.0, output: 8.0 },
     'gpt-4o-mini': { input: 0.15, output: 0.6, cacheRead: 0.075 },
-    'gpt-4.1': { input: 2.0, output: 8.0 }
+    'gpt-4o': { input: 2.5, output: 10.0, cacheRead: 1.25 }
   },
   anthropic: {
-    'claude-sonnet-4-20250514': { input: 3.0, output: 15.0, cacheRead: 0.3 },
-    'claude-3-5-sonnet-latest': { input: 3.0, output: 15.0, cacheRead: 0.3 },
-    'claude-3-5-haiku-20241022': { input: 0.8, output: 4.0, cacheRead: 0.08 }
+    'claude-sonnet-4': { input: 3.0, output: 15.0, cacheRead: 0.3 },
+    'claude-opus-4': { input: 15.0, output: 75.0, cacheRead: 1.5 },
+    'claude-haiku-4': { input: 0.8, output: 4.0, cacheRead: 0.08 },
+    'claude-3-7-sonnet': { input: 3.0, output: 15.0, cacheRead: 0.3 },
+    'claude-3-5-sonnet': { input: 3.0, output: 15.0, cacheRead: 0.3 },
+    'claude-3-5-haiku': { input: 0.8, output: 4.0, cacheRead: 0.08 },
+    'claude-3-opus': { input: 15.0, output: 75.0, cacheRead: 1.5 }
   },
   groq: {
     'llama-3.3-70b-versatile': { input: 0.59, output: 0.79 },

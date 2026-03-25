@@ -195,6 +195,8 @@ const dom = {
   saveWebsearchTavilyBtn: document.getElementById('save-websearch-tavily-btn'),
   clearWebsearchTavilyBtn: document.getElementById('clear-websearch-tavily-btn'),
   websearchStatus: document.getElementById('websearch-status'),
+  exportChatBtn: document.getElementById('export-chat-btn'),
+  messageContextMenu: document.getElementById('message-context-menu'),
 };
 
 function faIcon(iconClass) {
@@ -3870,6 +3872,69 @@ document.addEventListener('click', (e) => {
   if (!dom.chatContextMenu.hidden && !e.target.closest('#chat-context-menu')) {
     closeContextMenu();
   }
+  if (!dom.messageContextMenu.hidden && !e.target.closest('#message-context-menu')) {
+    dom.messageContextMenu.hidden = true;
+  }
+});
+
+// --- Export chat as JSON ---
+dom.exportChatBtn.addEventListener('click', () => {
+  const chat = appState.chats.find(c => c.id === appState.activeChatId);
+  if (!chat) return;
+  const json = JSON.stringify(chat, null, 2);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${(chat.title || 'chat').replace(/[^a-z0-9_-]/gi, '_')}_${chat.id}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+});
+
+// --- Message right-click context menu ---
+let messageContextTarget = null;
+let messageContextCodeBlock = null;
+
+dom.chatMessages.addEventListener('contextmenu', (e) => {
+  const messageEl = e.target.closest('.message');
+  if (!messageEl) return;
+  e.preventDefault();
+  messageContextTarget = messageEl;
+  messageContextCodeBlock = e.target.closest('pre');
+
+  // Show/hide "Copy code block" option based on whether click was on/inside a code block
+  const copyCodeBtn = dom.messageContextMenu.querySelector('[data-action="copy-code"]');
+  copyCodeBtn.style.display = messageContextCodeBlock ? '' : 'none';
+
+  dom.messageContextMenu.hidden = false;
+  const menuRect = dom.messageContextMenu.getBoundingClientRect();
+  const maxX = window.innerWidth - menuRect.width - 8;
+  const maxY = window.innerHeight - menuRect.height - 8;
+  dom.messageContextMenu.style.left = `${Math.min(e.clientX, maxX)}px`;
+  dom.messageContextMenu.style.top = `${Math.min(e.clientY, maxY)}px`;
+});
+
+dom.messageContextMenu.addEventListener('click', (e) => {
+  const actionBtn = e.target.closest('.context-menu-item');
+  if (!actionBtn || !messageContextTarget) return;
+  const action = actionBtn.dataset.action;
+
+  if (action === 'copy') {
+    // Copy the selected text if any, otherwise the full message text
+    const selection = window.getSelection();
+    const selectedText = selection && selection.toString().trim();
+    const text = selectedText || messageContextTarget.querySelector('.message-content')?.innerText || '';
+    navigator.clipboard.writeText(text);
+  } else if (action === 'copy-code' && messageContextCodeBlock) {
+    const codeEl = messageContextCodeBlock.querySelector('code') || messageContextCodeBlock;
+    navigator.clipboard.writeText(codeEl.innerText);
+  }
+
+  dom.messageContextMenu.hidden = true;
+  messageContextTarget = null;
+  messageContextCodeBlock = null;
 });
 
 if (dom.openSettingsBtn) {

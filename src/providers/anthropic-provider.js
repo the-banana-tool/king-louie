@@ -17,6 +17,10 @@ class AnthropicProvider extends BaseLLMProvider {
 
   getModelPricingTable() {
     return {
+      'claude-sonnet-4': { inputPerMillion: 3, outputPerMillion: 15 },
+      'claude-opus-4': { inputPerMillion: 15, outputPerMillion: 75 },
+      'claude-haiku-4': { inputPerMillion: 0.8, outputPerMillion: 4 },
+      'claude-3-7-sonnet': { inputPerMillion: 3, outputPerMillion: 15 },
       'claude-3-5-sonnet': { inputPerMillion: 3, outputPerMillion: 15 },
       'claude-3-5-haiku': { inputPerMillion: 0.8, outputPerMillion: 4 },
       'claude-3-opus': { inputPerMillion: 15, outputPerMillion: 75 }

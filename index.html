@@ -30,6 +30,10 @@
       <div class="context-menu" id="chat-context-menu" hidden>
         <button class="context-menu-item danger" type="button" data-action="delete">Delete chat</button>
       </div>
+      <div class="context-menu" id="message-context-menu" hidden>
+        <button class="context-menu-item" type="button" data-action="copy"><i class="fas fa-copy"></i> Copy</button>
+        <button class="context-menu-item" type="button" data-action="copy-code"><i class="fas fa-code"></i> Copy code block</button>
+      </div>
     </div>
 
     <!-- Right Main Area: Chat Box (3/4 width) -->
@@ -42,6 +46,7 @@
           </div>
         </div>
         <div class="chat-header-actions">
+          <button id="export-chat-btn" class="icon-button" type="button" title="Export chat as JSON" aria-label="Export chat as JSON"><i class="fas fa-file-export"></i></button>
           <button id="chat-info-btn" class="icon-button" type="button" title="Chat info" aria-label="Chat info"><i class="fas fa-chart-bar"></i></button>
         </div>
         <div class="chat-info-popover" id="chat-info-popover" hidden>
