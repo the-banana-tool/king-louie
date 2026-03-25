@@ -213,10 +213,15 @@ function registerChatHandlers(ipcMain, context = {}) {
       throw new Error('Active provider does not support chat completions yet.');
     }
     const provider = inference.provider;
-    const chat = getChats().find((item) => item.id === chatId);
-    if (!chat) {
+    const chatRaw = getChats().find((item) => item.id === chatId);
+    if (!chatRaw) {
       throw new Error('Chat not found');
     }
+    // Filter out persisted tool events — only user/assistant messages go to the LLM
+    const chat = {
+      ...chatRaw,
+      messages: chatRaw.messages.filter((m) => m.sender === 'user' || m.sender === 'assistant')
+    };
 
     const responseId = createId();
     const runId = createId();
@@ -246,10 +251,12 @@ function registerChatHandlers(ipcMain, context = {}) {
       const executor = await createToolExecutorWithApprovals(event, runtimeEnvironment);
 
       executor.on('preExecute', ({ toolName, parameters }) => {
+        appendMessageToChat(chatId, 'toolUse', '', { toolName, parameters, runId });
         event.sender.send('chat:toolUse', { chatId, runId, toolName, parameters });
       });
 
       executor.on('postExecute', ({ toolName, result }) => {
+        appendMessageToChat(chatId, 'toolResult', '', { toolName, result, runId });
         event.sender.send('chat:toolResult', { chatId, runId, toolName, result });
       });
 

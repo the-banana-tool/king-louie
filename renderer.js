@@ -960,8 +960,9 @@ function getActiveChat() {
 }
 
 function getChatPreview(chat) {
-  const lastMessage = chat.messages?.[chat.messages.length - 1];
-  return lastMessage ? lastMessage.text : 'No messages yet...';
+  const messages = chat.messages || [];
+  const lastVisible = messages.findLast((m) => m.sender === 'user' || m.sender === 'assistant');
+  return lastVisible ? lastVisible.text : 'No messages yet...';
 }
 
 function sumChatLlmTotals(chat) {
@@ -1303,6 +1304,16 @@ function renderChatMessages() {
   };
 
   activeChat.messages.forEach((message) => {
+    if (message.sender === 'toolUse') {
+      addToolEventCompact(message.toolName, message.parameters, '', false);
+      return;
+    }
+    if (message.sender === 'toolResult') {
+      const isError = message.result?.success === false || message.result?.ok === false;
+      addToolEventCompact(message.toolName, message.result, isError ? 'error' : 'success', true);
+      return;
+    }
+
     const callTotals = message?.llm?.totals || null;
     if (callTotals) {
       runningTotals = {
@@ -1320,6 +1331,9 @@ function renderChatMessages() {
       images: message?.images
     });
   });
+
+  // Flush any remaining buffered tool group from the rendering pass
+  flushToolGroup();
 }
 
 function refreshUI() {
