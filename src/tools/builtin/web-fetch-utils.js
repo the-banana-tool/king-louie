@@ -65,11 +65,22 @@ function htmlToText(html) {
   return html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+function stripNonContent(html) {
+  // Remove script, style, noscript, svg, and JSON-LD blocks before parsing.
+  // This dramatically reduces memory for heavy pages (CNN, Reddit, etc.)
+  return html
+    .replace(/<script[\s>][\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s>][\s\S]*?<\/style>/gi, '')
+    .replace(/<noscript[\s>][\s\S]*?<\/noscript>/gi, '')
+    .replace(/<svg[\s>][\s\S]*?<\/svg>/gi, '');
+}
+
 function extractReadableContent(html, url) {
-  const { document } = parseHTML(html);
+  const cleaned = stripNonContent(html);
+  const { document } = parseHTML(cleaned);
   const reader = new Readability(document);
   const article = reader.parse();
   return article ? { title: article.title, content: article.content } : null;
 }
 
-module.exports = { validateUrl, isPrivateIp, htmlToMarkdown, htmlToText, extractReadableContent };
+module.exports = { validateUrl, isPrivateIp, htmlToMarkdown, htmlToText, stripNonContent, extractReadableContent };

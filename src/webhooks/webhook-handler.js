@@ -26,8 +26,9 @@ class WebhookHandler {
     }
 
     // Verify HMAC signature if configured
+    const sigHeader = webhook.signatureHeader || 'x-hub-signature-256';
     if (webhook.secret && request.headers) {
-      const signature = request.headers[webhook.signatureHeader] || request.headers[webhook.signatureHeader.toLowerCase()];
+      const signature = request.headers[sigHeader] || request.headers[sigHeader.toLowerCase()];
       if (!this.verifySignature(request.body, signature, webhook.secret, webhook.signatureFormat)) {
         throw new Error('Invalid signature');
       }

@@ -268,7 +268,8 @@ describe('WebhookHandler', () => {
     mockRegistry.register({
       id: 'test',
       name: 'Test',
-      enabled: true
+      enabled: true,
+      secret: null
     });
 
     const request = { body: 'invalid json{', headers: {} };
@@ -284,6 +285,7 @@ describe('WebhookHandler', () => {
       id: 'dedicated',
       name: 'Dedicated Webhook',
       enabled: true,
+      secret: null,
       route: { sessionTarget: 'dedicated' }
     });
 
@@ -300,6 +302,7 @@ describe('WebhookHandler', () => {
       id: 'no-exec',
       name: 'No Execute',
       enabled: true,
+      secret: null,
       route: { sessionTarget: 'main', autoExecute: false }
     });
 

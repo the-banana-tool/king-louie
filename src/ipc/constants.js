@@ -86,5 +86,11 @@ module.exports = {
   WEBHOOK_UPDATE: 'webhook:update',
   WEBHOOK_DELETE: 'webhook:delete',
   WEBHOOK_GET: 'webhook:get',
-  WEBHOOK_REGENERATE_SECRET: 'webhook:regenerateSecret'
+  WEBHOOK_REGENERATE_SECRET: 'webhook:regenerateSecret',
+
+  WIZARD_GET_STATUS: 'wizard:getStatus',
+  WIZARD_COMPLETE: 'wizard:complete',
+  WIZARD_GET_STEPS: 'wizard:getSteps',
+
+  DIAGNOSTICS_RUN: 'diagnostics:run'
 };

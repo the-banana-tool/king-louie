@@ -85,6 +85,24 @@
     </div>
   </div>
 
+  <div class="settings-overlay" id="wizard-overlay" hidden>
+    <div class="settings-modal" style="max-width: 520px;">
+      <div class="settings-header">
+        <h2><i class="fas fa-wand-magic-sparkles"></i> Welcome to King Louie</h2>
+        <button class="icon-button" id="wizard-skip-btn" type="button" title="Skip setup"><i class="fas fa-xmark"></i></button>
+      </div>
+      <div class="settings-body" id="wizard-body">
+        <div class="wizard-progress" id="wizard-progress"></div>
+        <div id="wizard-step-content"></div>
+      </div>
+      <div class="settings-nav" style="display: flex; gap: 8px; justify-content: flex-end; padding: 12px 16px; border-top: 1px solid var(--border);">
+        <button type="button" class="btn" id="wizard-back-btn" hidden>Back</button>
+        <button type="button" class="btn" id="wizard-skip-step-btn" hidden>Skip</button>
+        <button type="button" class="btn btn-primary" id="wizard-next-btn">Next</button>
+      </div>
+    </div>
+  </div>
+
   <div class="settings-overlay" id="settings-drawer" hidden>
     <div class="settings-modal">
       <div class="settings-header">
@@ -103,7 +121,9 @@
           <option value="hooks">Hooks</option>
           <option value="memory">Memory</option>
           <option value="scheduler">Scheduler</option>
+          <option value="webhooks">Webhooks</option>
           <option value="skills">Skills</option>
+          <option value="diagnostics">Diagnostics</option>
           <option value="commands">Commands</option>
         </select>
       </div>
@@ -496,6 +516,45 @@
         <!-- Skill settings tabs (dynamically injected) -->
         <div id="skill-settings-container"></div>
 
+        <!-- Tab: Webhooks -->
+        <div class="settings-tab-content" data-tab="webhooks">
+          <section class="template-variables-card">
+            <h3>Webhook Ingress</h3>
+            <p>Receive external HTTP webhooks and route them to agent sessions. Compatible with GitHub, Slack, and Stripe signature formats.</p>
+            <div class="template-variables-grid">
+              <label for="webhook-name-input">Name</label>
+              <input type="text" class="provider-input" id="webhook-name-input" placeholder="e.g. GitHub Push">
+              <label for="webhook-template-input">Message Template</label>
+              <input type="text" class="provider-input" id="webhook-template-input" placeholder="{{repository.name}}: {{action}}">
+            </div>
+            <div class="template-variables-actions">
+              <button type="button" class="btn btn-primary" id="webhook-create-btn"><i class="fas fa-plus"></i> Create Webhook</button>
+              <span class="provider-message" id="webhook-status"></span>
+            </div>
+          </section>
+          <section class="template-variables-card">
+            <h3>Registered Webhooks</h3>
+            <div id="webhook-list"></div>
+            <div class="provider-message" id="webhook-list-status">Loading webhooks...</div>
+          </section>
+        </div>
+
+        <!-- Tab: Diagnostics -->
+        <div class="settings-tab-content" data-tab="diagnostics">
+          <section class="template-variables-card">
+            <h3>System Diagnostics</h3>
+            <p>Run health checks on all subsystems. You can also run <code>/fixit</code> in any chat.</p>
+            <div class="template-variables-actions">
+              <button type="button" class="btn btn-primary" id="diagnostics-run-btn"><i class="fas fa-stethoscope"></i> Run Diagnostics</button>
+              <span class="provider-message" id="diagnostics-status"></span>
+            </div>
+          </section>
+          <section class="template-variables-card">
+            <h3>Results</h3>
+            <pre id="diagnostics-results" style="white-space: pre-wrap; font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-secondary);"></pre>
+          </section>
+        </div>
+
         <!-- Tab: Commands -->
         <div class="settings-tab-content" data-tab="commands">
           <section class="template-variables-card">
@@ -522,6 +581,7 @@
                 <li><code>/fast</code> — switch to fast tier</li>
                 <li><code>/standard</code> — switch to standard tier</li>
                 <li><code>/smart</code> — switch to smart tier</li>
+                <li><code>/fixit</code> — run system diagnostics</li>
               </ul>
             </div>
           </section>

@@ -46,6 +46,9 @@ const {
 } = require('./src/notifications/notification-router');
 const { TTSEngine, DEFAULT_VOICE_SETTINGS } = require('./src/voice/tts-engine');
 const { registerHandlers } = require('./src/ipc/register');
+const WebhookRegistry = require('./src/webhooks/webhook-registry');
+const WebhookHandler = require('./src/webhooks/webhook-handler');
+const WebhookServer = require('./src/webhooks/webhook-server');
 
 let mainWindow;
 let skillLoader;
@@ -72,6 +75,9 @@ let usageTracker;
 let cronStore;
 let cronExecutor;
 let cronScheduler;
+let webhookRegistry;
+let webhookHandler;
+let webhookServer;
 const TELEGRAM_TOKEN_STORE_KEY = '__telegram_bot_token';
 const DISCORD_TOKEN_STORE_KEY = '__discord_bot_token';
 const SLACK_APP_TOKEN_STORE_KEY = '__slack_app_token';
@@ -2017,6 +2023,11 @@ const initializeAgentInfrastructure = async () => {
   cronScheduler = new CronScheduler(cronStore, cronExecutor);
   cronScheduler.start();
 
+  webhookRegistry = new WebhookRegistry(store);
+  webhookHandler = new WebhookHandler(webhookRegistry, sessionManager, agentExecutorAdapter);
+  webhookServer = new WebhookServer(gatewayServer, webhookHandler);
+  webhookServer.start().catch(err => console.warn('[main] Webhook server start failed:', err.message));
+
   gatewayServer.on('agent:message', async ({ agentId, sessionKey, message }) => {
     const startedAt = Number(message?.startedAt) || Date.now();
     try {
@@ -2260,6 +2271,23 @@ registerHandlers(ipcMain, {
   // Cron
   getCronScheduler: () => cronScheduler,
 
+  // Webhook
+  webhookRegistry,
+  webhookServer,
+  getWebhookRegistry: () => webhookRegistry,
+  getWebhookServer: () => webhookServer,
+
+  // Wizard / Diagnostics
+  getStore: () => store,
+  getProviderFactory: () => {
+    try { return ProviderFactory; } catch { return null; }
+  },
+  getChannelRegistry: () => channelRegistry,
+  getHookRegistry: () => hookRegistry,
+  getGatewayServer: () => gatewayServer,
+  getBrowserService: () => null,
+  getSandboxExecutor: () => null,
+
   // Skill
   skillRegistry,
   ensureSkillCustomizationFile,
@@ -2310,6 +2338,9 @@ app.on('window-all-closed', function () {
     } else {
       if (telegramBridge) telegramBridge.stop().catch((err) => console.warn('[main] Telegram bridge stop failed:', err.message));
       if (discordBridge) discordBridge.stop().catch((err) => console.warn('[main] Discord bridge stop failed:', err.message));
+    }
+    if (webhookServer) {
+      webhookServer.stop().catch((err) => console.warn('[main] Webhook server stop failed:', err.message));
     }
     if (gatewayServer) {
       gatewayServer.stop().catch((err) => console.warn('[main] Gateway server stop failed:', err.message));

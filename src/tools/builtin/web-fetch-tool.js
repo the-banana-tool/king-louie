@@ -1,5 +1,5 @@
 const { Tool } = require('../tool-schema');
-const { validateUrl, extractReadableContent, htmlToMarkdown, htmlToText } = require('./web-fetch-utils');
+const { validateUrl, extractReadableContent, stripNonContent, htmlToMarkdown, htmlToText } = require('./web-fetch-utils');
 
 // 15 minute cache TTL
 const CACHE_TTL_MS = 15 * 60 * 1000;
@@ -49,29 +49,40 @@ const webFetchTool = new Tool({
       const contentType = res.headers.get('content-type') || '';
       const contentLength = res.headers.get('content-length');
 
-      // Check header first
-      if (contentLength && parseInt(contentLength, 10) > 2097152) {
-        throw new Error('Response exceeds 2MB limit');
-      }
+      // Fetch up to 10MB of raw HTML — script/style stripping and Readability
+      // extraction happen downstream, so the useful content is much smaller.
+      const MAX_BYTES = 10 * 1024 * 1024; // 10MB
+      let truncated = false;
 
       let raw = '';
       if (res.body) {
-        // Stream response to enforce 2MB limit without loading entire payload in memory
+        // Stream response, capping at 2MB
         const decoder = new TextDecoder('utf-8');
         const reader = res.body.getReader();
         let bytesRead = 0;
 
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
 
-          if (value) {
-            bytesRead += value.length;
-            if (bytesRead > 2097152) {
-              throw new Error('Response exceeds 2MB limit');
+            if (value) {
+              bytesRead += value.length;
+              if (bytesRead > MAX_BYTES) {
+                // Decode the partial chunk up to the limit
+                const excess = bytesRead - MAX_BYTES;
+                const usable = value.length - excess;
+                if (usable > 0) {
+                  raw += decoder.decode(value.slice(0, usable), { stream: true });
+                }
+                truncated = true;
+                break;
+              }
+              raw += decoder.decode(value, { stream: true });
             }
-            raw += decoder.decode(value, { stream: true });
           }
+        } finally {
+          try { reader.cancel(); } catch { /* ok */ }
         }
         raw += decoder.decode();
       }
@@ -79,7 +90,8 @@ const webFetchTool = new Tool({
       let output;
       if (contentType.includes('text/html')) {
         const article = extractReadableContent(raw, urlString);
-        const content = article ? article.content : raw;
+        // If Readability extracted an article, use it; otherwise strip JS/CSS and convert
+        const content = article ? article.content : stripNonContent(raw);
         output = extractMode === 'markdown' ? htmlToMarkdown(content) : htmlToText(content);
         if (article?.title) output = `# ${article.title}\n\n${output}`;
       } else {
@@ -92,9 +104,10 @@ const webFetchTool = new Tool({
       // Truncate to maxChars
       if (output.length > maxChars) {
         output = output.slice(0, maxChars) + '\n\n[Content truncated]';
+        truncated = true;
       }
 
-      return { ok: true, content: output };
+      return { ok: true, content: output, truncated };
     } finally {
       clearTimeout(timeout);
     }

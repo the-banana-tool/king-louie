@@ -451,6 +451,43 @@ contextBridge.exposeInMainWorld(
       install: (payload) => ipcRenderer.invoke('skill:install', payload),
       remove: (payload) => ipcRenderer.invoke('skill:remove', payload)
     },
+    webhook: {
+      list: () => ipcRenderer.invoke('webhook:list'),
+      create: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.name, 'name', { minLength: 1 });
+        return ipcRenderer.invoke('webhook:create', payload);
+      },
+      update: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.id, 'id');
+        return ipcRenderer.invoke('webhook:update', payload);
+      },
+      delete: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.id, 'id');
+        return ipcRenderer.invoke('webhook:delete', payload);
+      },
+      get: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.id, 'id');
+        return ipcRenderer.invoke('webhook:get', payload);
+      },
+      regenerateSecret: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.id, 'id');
+        return ipcRenderer.invoke('webhook:regenerateSecret', payload);
+      }
+    },
+    wizard: {
+      getStatus: () => ipcRenderer.invoke('wizard:getStatus'),
+      complete: () => ipcRenderer.invoke('wizard:complete'),
+      getSteps: () => ipcRenderer.invoke('wizard:getSteps'),
+      onStart: (callback) => registerOnce('wizard:start', callback)
+    },
+    diagnostics: {
+      run: () => ipcRenderer.invoke('diagnostics:run')
+    },
     app: {
       quitWindow: () => ipcRenderer.invoke('app:quitWindow')
     },

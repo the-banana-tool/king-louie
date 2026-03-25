@@ -197,6 +197,23 @@ const dom = {
   websearchStatus: document.getElementById('websearch-status'),
   exportChatBtn: document.getElementById('export-chat-btn'),
   messageContextMenu: document.getElementById('message-context-menu'),
+  webhookNameInput: document.getElementById('webhook-name-input'),
+  webhookTemplateInput: document.getElementById('webhook-template-input'),
+  webhookCreateBtn: document.getElementById('webhook-create-btn'),
+  webhookStatus: document.getElementById('webhook-status'),
+  webhookList: document.getElementById('webhook-list'),
+  webhookListStatus: document.getElementById('webhook-list-status'),
+  diagnosticsRunBtn: document.getElementById('diagnostics-run-btn'),
+  diagnosticsStatus: document.getElementById('diagnostics-status'),
+  diagnosticsResults: document.getElementById('diagnostics-results'),
+  wizardOverlay: document.getElementById('wizard-overlay'),
+  wizardBody: document.getElementById('wizard-body'),
+  wizardStepContent: document.getElementById('wizard-step-content'),
+  wizardProgress: document.getElementById('wizard-progress'),
+  wizardBackBtn: document.getElementById('wizard-back-btn'),
+  wizardNextBtn: document.getElementById('wizard-next-btn'),
+  wizardSkipBtn: document.getElementById('wizard-skip-btn'),
+  wizardSkipStepBtn: document.getElementById('wizard-skip-step-btn'),
 };
 
 function faIcon(iconClass) {
@@ -2883,6 +2900,7 @@ async function loadSettings() {
     await loadSkillSettingsTabs();
     await loadMemoryEntries();
     await loadCronJobs();
+    loadWebhookList().catch(() => {});
   } catch (error) {
     setProviderListFallback(`Unable to load provider settings: ${error.message || 'Unknown error'}`);
   }
@@ -3347,6 +3365,32 @@ async function sendMessage() {
     return;
   }
 
+  if (slashCommand?.name === '/fixit') {
+    dom.userInput.value = '';
+    dom.userInput.style.height = 'auto';
+
+    appendLocalMessage('user', message);
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+
+    appendLocalMessage('assistant', 'Running diagnostics...');
+
+    try {
+      const result = await window.electron.diagnostics.run();
+      const responseText = result?.ok
+        ? '```\n' + (result.formatted || 'No results.') + '\n```'
+        : `Error: ${result?.error || 'Diagnostics failed.'}`;
+
+      appendLocalMessage('assistant', responseText);
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    } catch (error) {
+      const errorText = `Error: ${error.message || 'Diagnostics failed.'}`;
+      appendLocalMessage('assistant', errorText);
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: errorText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    }
+
+    return;
+  }
+
   if (slashCommand?.name === '/speak') {
     dom.userInput.value = '';
     dom.userInput.style.height = 'auto';
@@ -3766,7 +3810,8 @@ const SLASH_COMMANDS = [
   { cmd: '/pinned', desc: 'List pinned skills' },
   { cmd: '/skill', desc: 'Execute a skill by name' },
   { cmd: '/llm', desc: 'Manage providers, tokens, and models' },
-  { cmd: '/speak', desc: 'Speak last assistant message via TTS' }
+  { cmd: '/speak', desc: 'Speak last assistant message via TTS' },
+  { cmd: '/fixit', desc: 'Run system diagnostics' }
 ];
 
 let slashActiveIndex = -1;
@@ -4642,7 +4687,242 @@ window.addEventListener('beforeunload', () => {
   }
 });
 
+/* --- Webhook management ----------------------------------- */
+async function loadWebhookList() {
+  if (!dom.webhookList) return;
+  try {
+    const result = await window.electron.webhook.list();
+    const webhooks = Array.isArray(result) ? result : (result?.webhooks || []);
+    if (!webhooks.length) {
+      dom.webhookList.innerHTML = '';
+      if (dom.webhookListStatus) dom.webhookListStatus.textContent = 'No webhooks registered.';
+      return;
+    }
+    if (dom.webhookListStatus) dom.webhookListStatus.textContent = '';
+    dom.webhookList.innerHTML = '';
+    webhooks.forEach(wh => {
+      const row = document.createElement('div');
+      row.className = 'provider-card';
+      row.style.marginBottom = '8px';
+      row.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;">
+        <div><strong>${wh.name}</strong><br><code style="font-size:0.8rem;color:var(--text-secondary);">${wh.url || wh.id}</code></div>
+        <div style="display:flex;gap:4px;">
+          <button class="icon-button" data-action="delete-webhook" data-id="${wh.id}" title="Delete"><i class="fas fa-trash"></i></button>
+        </div>
+      </div>`;
+      dom.webhookList.appendChild(row);
+    });
+  } catch (err) {
+    if (dom.webhookListStatus) dom.webhookListStatus.textContent = `Error: ${err.message}`;
+  }
+}
+
+if (dom.webhookCreateBtn) {
+  dom.webhookCreateBtn.addEventListener('click', async () => {
+    const name = dom.webhookNameInput?.value?.trim();
+    if (!name) {
+      if (dom.webhookStatus) dom.webhookStatus.textContent = 'Name is required.';
+      return;
+    }
+    try {
+      const payload = { name, messageTemplate: dom.webhookTemplateInput?.value || undefined };
+      const result = await window.electron.webhook.create(payload);
+      if (dom.webhookStatus) dom.webhookStatus.textContent = `Created! URL: ${result?.url || result?.id}`;
+      if (dom.webhookNameInput) dom.webhookNameInput.value = '';
+      if (dom.webhookTemplateInput) dom.webhookTemplateInput.value = '';
+      loadWebhookList();
+    } catch (err) {
+      if (dom.webhookStatus) dom.webhookStatus.textContent = `Error: ${err.message}`;
+    }
+  });
+}
+
+if (dom.webhookList) {
+  dom.webhookList.addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-action="delete-webhook"]');
+    if (!btn) return;
+    const id = btn.dataset.id;
+    try {
+      await window.electron.webhook.delete({ id });
+      loadWebhookList();
+    } catch (err) {
+      if (dom.webhookListStatus) dom.webhookListStatus.textContent = `Error: ${err.message}`;
+    }
+  });
+}
+
+/* --- Diagnostics ------------------------------------------- */
+if (dom.diagnosticsRunBtn) {
+  dom.diagnosticsRunBtn.addEventListener('click', async () => {
+    if (dom.diagnosticsStatus) dom.diagnosticsStatus.textContent = 'Running...';
+    if (dom.diagnosticsResults) dom.diagnosticsResults.textContent = '';
+    try {
+      const result = await window.electron.diagnostics.run();
+      if (dom.diagnosticsStatus) dom.diagnosticsStatus.textContent = result?.ok ? 'Complete.' : 'Failed.';
+      if (dom.diagnosticsResults) dom.diagnosticsResults.textContent = result?.formatted || 'No results.';
+    } catch (err) {
+      if (dom.diagnosticsStatus) dom.diagnosticsStatus.textContent = `Error: ${err.message}`;
+    }
+  });
+}
+
+/* --- Onboarding Wizard ------------------------------------- */
+const wizardState = { currentStep: 0, steps: [], data: {} };
+
+async function checkFirstRun() {
+  try {
+    const result = await window.electron.wizard.getStatus();
+    if (result?.isFirstRun) {
+      startWizard();
+    }
+  } catch {
+    // Wizard unavailable, skip
+  }
+}
+
+async function startWizard() {
+  try {
+    const result = await window.electron.wizard.getSteps();
+    wizardState.steps = result?.steps || [];
+    wizardState.currentStep = 0;
+    wizardState.data = {};
+    if (wizardState.steps.length > 0 && dom.wizardOverlay) {
+      dom.wizardOverlay.hidden = false;
+      renderWizardStep();
+    }
+  } catch {
+    // Wizard unavailable
+  }
+}
+
+function renderWizardStep() {
+  const step = wizardState.steps[wizardState.currentStep];
+  if (!step || !dom.wizardStepContent) return;
+
+  // Progress bar
+  if (dom.wizardProgress) {
+    dom.wizardProgress.innerHTML = wizardState.steps.map((s, i) =>
+      `<span style="display:inline-block;width:${100/wizardState.steps.length}%;height:4px;background:${i <= wizardState.currentStep ? 'var(--accent)' : 'var(--border)'};"></span>`
+    ).join('');
+  }
+
+  // Step content
+  let html = `<h3>${step.title}</h3><p style="color:var(--text-secondary);margin-bottom:12px;">${step.description}</p>`;
+
+  if (step.id === 'provider') {
+    html += `<div class="template-variables-grid">
+      <label>Provider</label>
+      <select id="wizard-provider" class="provider-input">
+        <option value="openai">OpenAI</option>
+        <option value="anthropic">Anthropic</option>
+        <option value="groq">Groq</option>
+        <option value="ollama">Ollama</option>
+        <option value="mistral">Mistral</option>
+        <option value="gemini">Gemini</option>
+        <option value="openrouter">OpenRouter</option>
+      </select>
+      <label>API Key</label>
+      <input type="password" id="wizard-apikey" class="provider-input" placeholder="sk-...">
+    </div>`;
+  } else if (step.id === 'profile') {
+    html += `<div class="template-variables-grid">
+      <label>Your Name</label>
+      <input type="text" id="wizard-name" class="provider-input" placeholder="Your name" value="${wizardState.data.name || ''}">
+      <label>Role</label>
+      <input type="text" id="wizard-role" class="provider-input" placeholder="e.g. Developer, Designer" value="${wizardState.data.role || ''}">
+    </div>`;
+  } else if (step.id === 'channels') {
+    html += `<div class="template-variables-grid">
+      <label>Telegram Bot Token (optional)</label>
+      <input type="password" id="wizard-telegram" class="provider-input" placeholder="123456:ABC-...">
+    </div>`;
+  }
+
+  dom.wizardStepContent.innerHTML = html;
+
+  // Button visibility
+  if (dom.wizardBackBtn) dom.wizardBackBtn.hidden = wizardState.currentStep === 0;
+  if (dom.wizardSkipStepBtn) dom.wizardSkipStepBtn.hidden = !step.optional;
+  if (dom.wizardNextBtn) dom.wizardNextBtn.textContent = wizardState.currentStep === wizardState.steps.length - 1 ? 'Finish' : 'Next';
+}
+
+function collectWizardStepData() {
+  const step = wizardState.steps[wizardState.currentStep];
+  if (!step) return;
+
+  if (step.id === 'provider') {
+    wizardState.data.provider = document.getElementById('wizard-provider')?.value || '';
+    wizardState.data.apiKey = document.getElementById('wizard-apikey')?.value || '';
+  } else if (step.id === 'profile') {
+    wizardState.data.name = document.getElementById('wizard-name')?.value || '';
+    wizardState.data.role = document.getElementById('wizard-role')?.value || '';
+  } else if (step.id === 'channels') {
+    wizardState.data.telegramToken = document.getElementById('wizard-telegram')?.value || '';
+  }
+}
+
+async function closeWizard() {
+  try { await window.electron.wizard.complete(); } catch { /* ok */ }
+  if (dom.wizardOverlay) dom.wizardOverlay.hidden = true;
+}
+
+if (dom.wizardNextBtn) {
+  dom.wizardNextBtn.addEventListener('click', () => {
+    collectWizardStepData();
+    if (wizardState.currentStep >= wizardState.steps.length - 1) {
+      closeWizard();
+      // Apply collected settings
+      if (wizardState.data.provider && wizardState.data.apiKey) {
+        window.electron.settings.saveProvider({
+          provider: wizardState.data.provider,
+          token: wizardState.data.apiKey
+        }).catch(() => {});
+      }
+      if (wizardState.data.name) {
+        window.electron.settings.saveUserProfile({
+          name: wizardState.data.name,
+          role: wizardState.data.role || ''
+        }).catch(() => {});
+      }
+    } else {
+      wizardState.currentStep++;
+      renderWizardStep();
+    }
+  });
+}
+
+if (dom.wizardBackBtn) {
+  dom.wizardBackBtn.addEventListener('click', () => {
+    collectWizardStepData();
+    if (wizardState.currentStep > 0) {
+      wizardState.currentStep--;
+      renderWizardStep();
+    }
+  });
+}
+
+if (dom.wizardSkipStepBtn) {
+  dom.wizardSkipStepBtn.addEventListener('click', () => {
+    if (wizardState.currentStep < wizardState.steps.length - 1) {
+      wizardState.currentStep++;
+      renderWizardStep();
+    } else {
+      closeWizard();
+    }
+  });
+}
+
+if (dom.wizardSkipBtn) {
+  dom.wizardSkipBtn.addEventListener('click', () => closeWizard());
+}
+
+// Listen for wizard start from main process (first run detection)
+if (window.electron.wizard?.onStart) {
+  unsubscribeHandlers.push(window.electron.wizard.onStart(() => startWizard()));
+}
+
 loadChats();
 loadSettings();
 renderAgentModeButton();
 renderHistoryToggleButton();
+checkFirstRun();
