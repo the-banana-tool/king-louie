@@ -1289,7 +1289,9 @@ body {
 }
 
 .settings-tab-content.active {
-  display: block;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 
 .settings-body {
