@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs:*)",
+      "Bash(npm run install:dev:*)",
+      "Bash(ls -la \"E:\\\\Programming\\\\king-louie\\\\skills\"\" 2>/dev/null || dir \"E:Programmingking-louieskills\"\")",
+      "Bash(dir:*)",
+      "Bash(git -C \"E:/Programming/king-louie\" status --short)",
+      "Bash(git -C \"E:/Programming/king-louie\" ls-files skills/std/)",
+      "Bash(git -C \"E:/Programming/king-louie\" ls-files --cached)",
+      "Bash(git -C \"E:/Programming/king-louie\" ls-files)",
+      "Bash(findstr:*)",
+      "Bash(python3 -m venv venv)",
+      "Bash(./venv/Scripts/pip install:*)",
+      "Bash(where python:*)",
+      "Bash(find E:Programmingking-louie/src -type f -name *.js -o -name *.json)",
+      "Bash(claude --version)",
+      "Bash(node:*)",
+      "Bash(claude:*)",
+      "Bash(git push:*)",
+      "Bash(npm install:*)",
+      "Bash(npm test:*)",
+      "Bash(find tests:*)",
+      "Bash(where claude:*)",
+      "Bash(find /e/Programming/claude-code/plugins -type f -name *.ts -o -name *.tsx -o -name *.js)",
+      "Bash(find /e/Programming/claude-code -type f \\\\\\(-name *.js -o -name *.jsx -o -name *.ts -o -name *.tsx \\\\\\))"
+    ]
+  }
+}

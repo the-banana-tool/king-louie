@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self'">
+  <title>King Louie Chat</title>
+  <link rel="icon" type="image/x-icon" href="favicon.ico">
+  <link rel="icon" type="image/png" sizes="48x48" href="favicon.png">
+  <link rel="stylesheet" href="node_modules/@fortawesome/fontawesome-free/css/all.min.css">
+  <link rel="stylesheet" href="node_modules/highlight.js/styles/atom-one-dark.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container">
+    <!-- Left Sidebar: Chat History (1/4 width) -->
+    <div class="sidebar">
+      <div class="sidebar-toggle-row">
+        <button id="toggle-history-btn" class="icon-button history-toggle-btn" title="Collapse chat history" aria-label="Collapse chat history" type="button" aria-pressed="false"><i class="fas fa-bars"></i></button>
+        <button id="new-chat-btn-compact" class="icon-button compact-add-btn" title="New chat" aria-label="New chat" type="button"><i class="fas fa-plus"></i></button>
+        <button id="open-settings-btn" class="icon-button settings-gear-btn" title="Settings" aria-label="Settings" type="button"><i class="fas fa-gear"></i></button>
+      </div>
+      <div class="sidebar-header">
+        <h2>Chat History</h2>
+        <button id="new-chat-btn" class="btn new-chat-btn"><i class="fas fa-plus"></i> New Chat</button>
+      </div>
+      <div class="chat-list" id="chat-list">
+        <!-- Chat items rendered by renderer.js -->
+      </div>
+      <div class="context-menu" id="chat-context-menu" hidden>
+        <button class="context-menu-item danger" type="button" data-action="delete">Delete chat</button>
+      </div>
+      <div class="context-menu" id="message-context-menu" hidden>
+        <button class="context-menu-item" type="button" data-action="copy"><i class="fas fa-copy"></i> Copy</button>
+        <button class="context-menu-item" type="button" data-action="copy-code"><i class="fas fa-code"></i> Copy code block</button>
+      </div>
+    </div>
+
+    <!-- Right Main Area: Chat Box (3/4 width) -->
+    <div class="main-content">
+      <div class="chat-header">
+        <div class="chat-header-main">
+          <div>
+          <div class="chat-header-title" id="chat-header-title">King Louie Chat</div>
+          <div class="chat-header-meta" id="chat-header-meta">Select a chat to begin</div>
+          </div>
+        </div>
+        <div class="chat-header-actions">
+          <button id="export-chat-btn" class="icon-button" type="button" title="Export chat as JSON" aria-label="Export chat as JSON"><i class="fas fa-file-export"></i></button>
+          <button id="chat-info-btn" class="icon-button" type="button" title="Chat info" aria-label="Chat info"><i class="fas fa-chart-bar"></i></button>
+        </div>
+        <div class="chat-info-popover" id="chat-info-popover" hidden>
+          <div class="chat-info-popover-header">
+            <span>Chat Stats</span>
+            <button id="chat-info-close-btn" class="icon-button" type="button" title="Close"><i class="fas fa-xmark"></i></button>
+          </div>
+          <div class="chat-info-popover-body" id="chat-info-popover-body"></div>
+        </div>
+      </div>
+
+      <div class="empty-state" id="empty-state">
+        <h1>Start a conversation</h1>
+        <p>Type your first message below to create a new chat.</p>
+      </div>
+      
+      <div class="chat-messages" id="chat-messages">
+      </div>
+
+      <div class="input-container">
+        <div id="image-preview-list" class="image-preview-list" hidden></div>
+        <div id="slash-autocomplete" class="slash-autocomplete" hidden></div>
+        <textarea
+          id="user-input"
+          class="user-input"
+          placeholder="Type your message here..."
+          rows="3"
+        ></textarea>
+        <div class="input-actions">
+          <input id="image-file-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
+          <button id="attach-image-btn" class="icon-button" type="button" title="Attach images" aria-label="Attach images"><i class="fas fa-paperclip"></i></button>
+          <button id="send-btn" class="btn btn-primary btn-lg send-btn"><i class="fas fa-paper-plane"></i> Send</button>
+          <button id="stop-btn" class="btn btn-lg stop-btn" hidden><i class="fas fa-stop"></i> Stop</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="settings-overlay" id="wizard-overlay" hidden>
+    <div class="settings-modal" style="max-width: 520px;">
+      <div class="settings-header">
+        <h2><i class="fas fa-wand-magic-sparkles"></i> Welcome to King Louie</h2>
+        <button class="icon-button" id="wizard-skip-btn" type="button" title="Skip setup"><i class="fas fa-xmark"></i></button>
+      </div>
+      <div class="settings-body" id="wizard-body">
+        <div class="wizard-progress" id="wizard-progress"></div>
+        <div id="wizard-step-content"></div>
+      </div>
+      <div class="settings-nav" style="display: flex; gap: 8px; justify-content: flex-end; padding: 12px 16px; border-top: 1px solid var(--border);">
+        <button type="button" class="btn" id="wizard-back-btn" hidden>Back</button>
+        <button type="button" class="btn" id="wizard-skip-step-btn" hidden>Skip</button>
+        <button type="button" class="btn btn-primary" id="wizard-next-btn">Next</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="settings-overlay" id="settings-drawer" hidden>
+    <div class="settings-modal">
+      <div class="settings-header">
+        <h2><i class="fas fa-gear"></i> Settings</h2>
+        <button class="icon-button" id="close-settings-btn" type="button" title="Close settings"><i class="fas fa-xmark"></i></button>
+      </div>
+
+      <div class="settings-nav">
+        <select class="settings-nav-select" id="settings-nav-select">
+          <option value="providers">Providers</option>
+          <option value="inference">Inference</option>
+          <option value="channels">Channels</option>
+          <option value="profile">Profile</option>
+          <option value="voice">Voice</option>
+          <option value="notifications">Notifications</option>
+          <option value="hooks">Hooks</option>
+          <option value="memory">Memory</option>
+          <option value="scheduler">Scheduler</option>
+          <option value="webhooks">Webhooks</option>
+          <option value="skills">Skills</option>
+          <option value="diagnostics">Diagnostics</option>
+          <option value="commands">Commands</option>
+        </select>
+      </div>
+
+      <div class="settings-body">
+        <div class="settings-alert" id="settings-encryption-alert" hidden>
+          <i class="fas fa-triangle-exclamation"></i> Secure storage is unavailable. API and Telegram tokens cannot be safely saved on this system.
+        </div>
+
+        <!-- Tab: Providers -->
+        <div class="settings-tab-content active" data-tab="providers">
+          <div class="provider-list" id="provider-list"></div>
+        </div>
+
+        <!-- Tab: Inference -->
+        <div class="settings-tab-content" data-tab="inference">
+          <section class="template-variables-card">
+            <h3>Inference Tier</h3>
+            <p>Select the active inference tier. Each tier maps to a provider/model pair with different speed/quality tradeoffs.</p>
+            <div class="template-variables-grid">
+              <label for="inference-tier-select">Active Tier</label>
+              <select id="inference-tier-select" class="provider-input">
+                <option value="fast">Fast</option>
+                <option value="standard">Standard</option>
+                <option value="smart">Smart</option>
+              </select>
+            </div>
+            <div class="template-variables-actions">
+              <button id="save-inference-tier-btn" type="button" class="btn btn-primary">Apply Tier</button>
+              <span id="inference-tier-status" class="provider-message">Select a tier and click Apply.</span>
+            </div>
+            <div class="inference-tier-details" id="inference-tier-details"></div>
+          </section>
+        </div>
+
+        <!-- Tab: Channels -->
+        <div class="settings-tab-content" data-tab="channels">
+          <section class="template-variables-card">
+            <h3>Telegram</h3>
+            <p>Connect a Telegram bot for remote chat and notifications.</p>
+            <div class="template-variables-grid">
+              <label for="channel-telegram-token-input">Bot Token</label>
+              <input id="channel-telegram-token-input" class="provider-input" type="password" placeholder="Paste Telegram bot token">
+            </div>
+            <div class="template-variables-actions">
+              <button id="save-telegram-token-btn" type="button" class="btn btn-primary">Save Token</button>
+              <button id="test-telegram-btn" type="button" class="btn">Test Connection</button>
+              <button id="clear-telegram-token-btn" type="button" class="btn btn-danger">Clear Token</button>
+              <span id="telegram-channel-status" class="provider-message">Not configured.</span>
+            </div>
+          </section>
+
+          <section class="template-variables-card">
+            <h3>Discord</h3>
+            <p>Connect a Discord bot for server-based interaction.</p>
+            <div class="template-variables-grid">
+              <label for="channel-discord-token-input">Bot Token</label>
+              <input id="channel-discord-token-input" class="provider-input" type="password" placeholder="Paste Discord bot token">
+              <label class="inline-toggle" for="channel-discord-enabled-input">
+                <input id="channel-discord-enabled-input" type="checkbox">
+                <span>Enable Discord channel</span>
+              </label>
+              <label class="inline-toggle" for="channel-discord-mention-input">
+                <input id="channel-discord-mention-input" type="checkbox">
+                <span>Require @mention</span>
+              </label>
+            </div>
+            <div class="template-variables-actions">
+              <button id="save-discord-token-btn" type="button" class="btn btn-primary">Save Token</button>
+              <button id="clear-discord-token-btn" type="button" class="btn btn-danger">Clear Token</button>
+              <span id="discord-channel-status" class="provider-message">Not configured.</span>
+            </div>
+          </section>
+
+          <section class="template-variables-card">
+            <h3>Slack</h3>
+            <p>Connect Slack for workspace-based interaction.</p>
+            <div class="template-variables-grid">
+              <label for="channel-slack-app-token-input">App Token</label>
+              <input id="channel-slack-app-token-input" class="provider-input" type="password" placeholder="xapp-...">
+              <label for="channel-slack-bot-token-input">Bot Token</label>
+              <input id="channel-slack-bot-token-input" class="provider-input" type="password" placeholder="xoxb-...">
+              <label class="inline-toggle" for="channel-slack-enabled-input">
+                <input id="channel-slack-enabled-input" type="checkbox">
+                <span>Enable Slack channel</span>
+              </label>
+              <label class="inline-toggle" for="channel-slack-mention-input">
+                <input id="channel-slack-mention-input" type="checkbox">
+                <span>Require @mention</span>
+              </label>
+            </div>
+            <div class="template-variables-actions">
+              <button id="save-slack-tokens-btn" type="button" class="btn btn-primary">Save Tokens</button>
+              <button id="clear-slack-tokens-btn" type="button" class="btn btn-danger">Clear Tokens</button>
+              <span id="slack-channel-status" class="provider-message">Not configured.</span>
+            </div>
+          </section>
+
+          <section class="template-variables-card">
+            <h3>Web Search</h3>
+            <p>API keys for web search tool providers (Brave Search, Tavily).</p>
+            <div class="template-variables-grid">
+              <label for="websearch-brave-key-input">Brave Search API Key</label>
+              <input id="websearch-brave-key-input" class="provider-input" type="password" placeholder="Brave Search API key">
+
+              <label for="websearch-tavily-key-input">Tavily API Key</label>
+              <input id="websearch-tavily-key-input" class="provider-input" type="password" placeholder="Tavily API key">
+            </div>
+            <div class="template-variables-actions">
+              <button id="save-websearch-brave-btn" type="button" class="btn btn-primary">Save Brave Key</button>
+              <button id="clear-websearch-brave-btn" type="button" class="btn btn-danger">Clear</button>
+              <button id="save-websearch-tavily-btn" type="button" class="btn btn-primary">Save Tavily Key</button>
+              <button id="clear-websearch-tavily-btn" type="button" class="btn btn-danger">Clear</button>
+              <span id="websearch-status" class="provider-message">Not configured.</span>
+            </div>
+          </section>
+        </div>
+
+        <!-- Tab: Profile -->
+        <div class="settings-tab-content" data-tab="profile">
+          <section class="template-variables-card">
+            <h3>Prompt Template Variables</h3>
+            <p>These values are injected into agent prompt templates at runtime.</p>
+            <div class="template-variables-grid">
+              <label for="template-name-input">Name</label>
+              <input id="template-name-input" class="provider-input" type="text" placeholder="Your name">
+
+              <label for="template-role-input">Role</label>
+              <input id="template-role-input" class="provider-input" type="text" placeholder="Your role">
+
+              <label for="template-preferences-input">Preferences</label>
+              <textarea id="template-preferences-input" class="provider-input" rows="3" placeholder="Response and workflow preferences"></textarea>
+
+              <label for="template-project-context-input">Project Context</label>
+              <textarea id="template-project-context-input" class="provider-input" rows="4" placeholder="Current project context"></textarea>
+            </div>
+            <div class="template-variables-actions">
+              <button id="save-template-variables-btn" type="button" class="btn btn-primary">Save Variables</button>
+              <span id="template-variables-status" class="provider-message">Not saved yet.</span>
+            </div>
+          </section>
+
+          <section class="template-variables-card">
+            <h3>User Profile (TELOS)</h3>
+            <p>Used as persistent user context for agents and profile command responses.</p>
+            <div class="template-variables-grid">
+              <label for="profile-name-input">Name</label>
+              <input id="profile-name-input" class="provider-input" type="text" placeholder="Your name">
+
+              <label for="profile-role-input">Role</label>
+              <input id="profile-role-input" class="provider-input" type="text" placeholder="Your role">
+
+              <label for="profile-goals-input">Goals (one per line)</label>
+              <textarea id="profile-goals-input" class="provider-input" rows="4" placeholder="Primary goals"></textarea>
+
+              <label for="profile-preferences-input">Preferences (JSON)</label>
+              <textarea id="profile-preferences-input" class="provider-input" rows="4" placeholder='{"tone":"concise","style":"pragmatic"}'></textarea>
+
+              <label for="profile-project-context-input">Project Context</label>
+              <textarea id="profile-project-context-input" class="provider-input" rows="4" placeholder="Current project context"></textarea>
+            </div>
+            <div class="template-variables-actions">
+              <button id="save-user-profile-btn" type="button" class="btn btn-primary">Save Profile</button>
+              <span id="user-profile-status" class="provider-message">Not saved yet.</span>
+            </div>
+          </section>
+        </div>
+
+        <!-- Tab: Voice -->
+        <div class="settings-tab-content" data-tab="voice">
+          <section class="template-variables-card">
+            <h3>Voice / TTS</h3>
+            <p>Configure optional speech output for chat responses, agents, and Telegram long responses.</p>
+            <div class="template-variables-grid">
+              <label class="inline-toggle" for="voice-enabled-input">
+                <input id="voice-enabled-input" type="checkbox">
+                <span>Enable voice output</span>
+              </label>
+
+              <label class="inline-toggle" for="voice-speak-chat-input">
+                <input id="voice-speak-chat-input" type="checkbox">
+                <span>Speak desktop chat responses automatically</span>
+              </label>
+
+              <label class="inline-toggle" for="voice-speak-agent-summary-input">
+                <input id="voice-speak-agent-summary-input" type="checkbox">
+                <span>Speak agent completion summaries</span>
+              </label>
+
+              <label class="inline-toggle" for="voice-telegram-long-input">
+                <input id="voice-telegram-long-input" type="checkbox">
+                <span>Send Telegram voice for long responses</span>
+              </label>
+
+              <label for="voice-engine-input">Engine</label>
+              <select id="voice-engine-input" class="provider-input">
+                <option value="system">System TTS</option>
+                <option value="elevenlabs">ElevenLabs</option>
+              </select>
+
+              <label for="voice-id-input">Voice ID / Voice Name</label>
+              <input id="voice-id-input" class="provider-input" type="text" placeholder="ElevenLabs voice ID or system voice name">
+
+              <label for="voice-speed-input">Speed</label>
+              <input id="voice-speed-input" class="provider-input" type="number" min="0.5" max="2" step="0.05" placeholder="1.0">
+
+              <label for="voice-stability-input">Stability (ElevenLabs)</label>
+              <input id="voice-stability-input" class="provider-input" type="number" min="0" max="1" step="0.05" placeholder="0.5">
+
+              <label for="voice-style-input">Style (ElevenLabs)</label>
+              <input id="voice-style-input" class="provider-input" type="number" min="0" max="1" step="0.05" placeholder="0.25">
+
+              <label for="voice-summary-max-input">Summary max chars</label>
+              <input id="voice-summary-max-input" class="provider-input" type="number" min="80" step="10" placeholder="260">
+
+              <label for="voice-telegram-min-input">Telegram min chars</label>
+              <input id="voice-telegram-min-input" class="provider-input" type="number" min="80" step="10" placeholder="500">
+
+              <label for="voice-elevenlabs-key-input">ElevenLabs API key</label>
+              <input id="voice-elevenlabs-key-input" class="provider-input" type="password" placeholder="Paste ElevenLabs API key to save securely">
+            </div>
+            <div class="template-variables-actions">
+              <button id="save-voice-settings-btn" type="button" class="btn btn-primary">Save Voice Settings</button>
+              <button id="save-voice-key-btn" type="button" class="btn">Save ElevenLabs Key</button>
+              <button id="clear-voice-key-btn" type="button" class="btn btn-danger">Clear ElevenLabs Key</button>
+              <button id="test-voice-btn" type="button" class="btn">Test Voice Connection</button>
+              <span id="voice-status" class="provider-message">Voice settings not saved yet.</span>
+            </div>
+          </section>
+        </div>
+
+        <!-- Tab: Notifications -->
+        <div class="settings-tab-content" data-tab="notifications">
+          <section class="template-variables-card">
+            <h3>Notification Routing</h3>
+            <p>Control duration-aware completion notifications for desktop, ntfy, and Telegram.</p>
+            <div class="template-variables-grid">
+              <label class="inline-toggle" for="notifications-enabled-input">
+                <input id="notifications-enabled-input" type="checkbox">
+                <span>Enable notifications</span>
+              </label>
+
+              <label class="inline-toggle" for="notifications-ui-toast-enabled-input">
+                <input id="notifications-ui-toast-enabled-input" type="checkbox">
+                <span>Enable desktop toast notifications</span>
+              </label>
+
+              <label class="inline-toggle" for="notifications-ntfy-enabled-input">
+                <input id="notifications-ntfy-enabled-input" type="checkbox">
+                <span>Enable ntfy external notifications</span>
+              </label>
+
+              <label class="inline-toggle" for="notifications-telegram-long-task-input">
+                <input id="notifications-telegram-long-task-input" type="checkbox">
+                <span>Enable long-task notices in Telegram</span>
+              </label>
+
+              <label for="notifications-toast-threshold-input">UI toast threshold (seconds)</label>
+              <input id="notifications-toast-threshold-input" class="provider-input" type="number" min="0" step="1" placeholder="30">
+
+              <label for="notifications-external-threshold-input">External threshold (seconds)</label>
+              <input id="notifications-external-threshold-input" class="provider-input" type="number" min="0" step="1" placeholder="120">
+
+              <label for="notifications-ntfy-topic-input">ntfy topic</label>
+              <input id="notifications-ntfy-topic-input" class="provider-input" type="text" placeholder="your-topic-name">
+            </div>
+            <div class="template-variables-actions">
+              <button id="save-notifications-btn" type="button" class="btn btn-primary">Save Notification Settings</button>
+              <span id="notifications-status" class="provider-message">Not saved yet.</span>
+            </div>
+          </section>
+        </div>
+
+        <!-- Tab: Hooks -->
+        <div class="settings-tab-content" data-tab="hooks">
+          <section class="template-variables-card">
+            <h3>Hook Management</h3>
+            <p>Manage loaded lifecycle hooks and enable/disable individual hook definitions.</p>
+            <div class="template-variables-grid">
+              <label class="inline-toggle" for="hooks-global-enabled-input">
+                <input id="hooks-global-enabled-input" type="checkbox">
+                <span>Enable hooks globally</span>
+              </label>
+            </div>
+            <div class="template-variables-actions">
+              <button id="reload-hooks-btn" type="button" class="btn">Reload Hooks</button>
+              <span id="hooks-status" class="provider-message">Hooks not loaded yet.</span>
+            </div>
+            <div class="provider-list" id="hooks-list"></div>
+          </section>
+        </div>
+
+        <!-- Tab: Memory -->
+        <div class="settings-tab-content" data-tab="memory">
+          <section class="template-variables-card">
+            <h3>Memory (Hot / Warm / Cold)</h3>
+            <p>Persistent tiered memory used to inform future agent responses.</p>
+            <div class="template-variables-grid">
+              <label for="memory-query-input">Search</label>
+              <input id="memory-query-input" class="provider-input" type="text" placeholder="keyword or phrase">
+
+              <label for="memory-tier-filter-input">Tier Filter</label>
+              <select id="memory-tier-filter-input" class="provider-input">
+                <option value="">All tiers</option>
+                <option value="hot">Hot</option>
+                <option value="warm">Warm</option>
+                <option value="cold">Cold</option>
+              </select>
+
+              <label for="memory-capture-type-input">Capture Type</label>
+              <select id="memory-capture-type-input" class="provider-input">
+                <option value="context">context</option>
+                <option value="success">success</option>
+                <option value="failure">failure</option>
+                <option value="preference">preference</option>
+              </select>
+
+              <label for="memory-capture-content-input">Capture Content</label>
+              <textarea id="memory-capture-content-input" class="provider-input" rows="3" placeholder="Add memory entry content..."></textarea>
+            </div>
+            <div class="template-variables-actions">
+              <button id="memory-refresh-btn" type="button" class="btn">Refresh</button>
+              <button id="memory-capture-btn" type="button" class="btn btn-primary">Capture</button>
+              <button id="memory-clear-btn" type="button" class="btn btn-danger">Clear All</button>
+              <span id="memory-status" class="provider-message">Memory not loaded yet.</span>
+            </div>
+            <div class="provider-list" id="memory-list"></div>
+          </section>
+        </div>
+
+        <!-- Tab: Scheduler -->
+        <div class="settings-tab-content" data-tab="scheduler">
+          <section class="template-variables-card">
+            <h3>Cron Scheduler</h3>
+            <p>Manage scheduled agent tasks (Cron, Interval, or Once-off).</p>
+
+            <div class="template-variables-actions" style="margin-top: 10px;">
+              <button id="cron-refresh-btn" type="button" class="btn">Refresh Jobs</button>
+              <span id="cron-status" class="provider-message">Scheduler status unknown.</span>
+            </div>
+
+            <div class="provider-list" id="cron-list"></div>
+
+            <div class="cron-add-panel">
+              <h4>Add New Job</h4>
+              <div class="template-variables-grid">
+                <label for="cron-add-message-input">Agent Message (Prompt)</label>
+                <textarea id="cron-add-message-input" class="provider-input" rows="2" placeholder="e.g., Check weather..."></textarea>
+
+                <label for="cron-add-target-input">Session Target</label>
+                <input id="cron-add-target-input" class="provider-input" type="text" placeholder="e.g., main">
+
+                <label for="cron-add-kind-input">Schedule Kind</label>
+                <select id="cron-add-kind-input" class="provider-input">
+                  <option value="every">Interval (Every X ms)</option>
+                  <option value="cron">Cron Expression</option>
+                  <option value="at">Specific Time (At)</option>
+                </select>
+
+                <label for="cron-add-value-input">Schedule Value</label>
+                <input id="cron-add-value-input" class="provider-input" type="text" placeholder="e.g., 60000 or * * * * *">
+              </div>
+              <div class="template-variables-actions" style="margin-top: 10px;">
+                <button id="cron-add-btn" type="button" class="btn btn-primary">Add Job</button>
+                <span id="cron-add-status" class="provider-message"></span>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <!-- Tab: Skills -->
+        <div class="settings-tab-content" data-tab="skills">
+          <section class="template-variables-card">
+            <h3>Install Skill</h3>
+            <p>Install a skill from a GitHub URL or a local directory path.</p>
+            <div class="skill-install-form">
+              <input type="text" class="skill-settings-input" id="skill-install-url" placeholder="https://github.com/user/repo or E:\path\to\skill">
+              <button type="button" class="btn btn-primary" id="skill-install-btn"><i class="fas fa-download"></i> Install</button>
+            </div>
+            <div class="provider-message" id="skill-install-status"></div>
+          </section>
+          <section class="template-variables-card">
+            <h3>Loaded Skills</h3>
+            <p>Disable a skill to prevent it from handling commands. Remove to uninstall completely.</p>
+            <div id="skills-list"></div>
+            <div class="provider-message" id="skills-status">Loading skills...</div>
+          </section>
+        </div>
+
+        <!-- Skill settings tabs (dynamically injected) -->
+        <div id="skill-settings-container"></div>
+
+        <!-- Tab: Webhooks -->
+        <div class="settings-tab-content" data-tab="webhooks">
+          <section class="template-variables-card">
+            <h3>Webhook Ingress</h3>
+            <p>Receive external HTTP webhooks and route them to agent sessions. Compatible with GitHub, Slack, and Stripe signature formats.</p>
+            <div class="template-variables-grid">
+              <label for="webhook-name-input">Name</label>
+              <input type="text" class="provider-input" id="webhook-name-input" placeholder="e.g. GitHub Push">
+              <label for="webhook-template-input">Message Template</label>
+              <input type="text" class="provider-input" id="webhook-template-input" placeholder="{{repository.name}}: {{action}}">
+            </div>
+            <div class="template-variables-actions">
+              <button type="button" class="btn btn-primary" id="webhook-create-btn"><i class="fas fa-plus"></i> Create Webhook</button>
+              <span class="provider-message" id="webhook-status"></span>
+            </div>
+          </section>
+          <section class="template-variables-card">
+            <h3>Registered Webhooks</h3>
+            <div id="webhook-list"></div>
+            <div class="provider-message" id="webhook-list-status">Loading webhooks...</div>
+          </section>
+        </div>
+
+        <!-- Tab: Diagnostics -->
+        <div class="settings-tab-content" data-tab="diagnostics">
+          <section class="template-variables-card">
+            <h3>System Diagnostics</h3>
+            <p>Run health checks on all subsystems. You can also run <code>/fixit</code> in any chat.</p>
+            <div class="template-variables-actions">
+              <button type="button" class="btn btn-primary" id="diagnostics-run-btn"><i class="fas fa-stethoscope"></i> Run Diagnostics</button>
+              <span class="provider-message" id="diagnostics-status"></span>
+            </div>
+          </section>
+          <section class="template-variables-card">
+            <h3>Results</h3>
+            <pre id="diagnostics-results" style="white-space: pre-wrap; font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-secondary);"></pre>
+          </section>
+        </div>
+
+        <!-- Tab: Commands -->
+        <div class="settings-tab-content" data-tab="commands">
+          <section class="template-variables-card">
+            <h3>Chat Commands Reference</h3>
+            <p>Power users can also run these commands directly in chat.</p>
+            <div class="settings-alert">
+              <ul class="settings-help-list">
+                <li><code>/help</code> — show help</li>
+                <li><code>/profile</code> — view current profile</li>
+                <li><code>/llm list</code> — list providers &amp; status</li>
+                <li><code>/llm add &lt;provider&gt; &lt;token&gt;</code> — add provider token</li>
+                <li><code>/llm test &lt;provider&gt;</code> — test provider connection</li>
+                <li><code>/llm remove &lt;provider&gt;</code> — remove provider token</li>
+                <li><code>/llm telegram add &lt;token&gt;</code> — save Telegram token</li>
+                <li><code>/llm telegram test</code> — test Telegram</li>
+                <li><code>/llm telegram remove</code> — clear Telegram token</li>
+                <li><code>/llm telegram status</code> — Telegram bridge status</li>
+                <li><code>/llm voice status</code> — voice status</li>
+                <li><code>/llm voice add &lt;key&gt;</code> — save ElevenLabs key</li>
+                <li><code>/llm voice test</code> — test voice</li>
+                <li><code>/llm voice remove</code> — clear voice key</li>
+                <li><code>/speak</code> — speak last response</li>
+                <li><code>/agent on|off|toggle|status</code> — agent mode</li>
+                <li><code>/fast</code> — switch to fast tier</li>
+                <li><code>/standard</code> — switch to standard tier</li>
+                <li><code>/smart</code> — switch to smart tier</li>
+                <li><code>/fixit</code> — run system diagnostics</li>
+              </ul>
+            </div>
+          </section>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

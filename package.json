@@ -1,0 +1,77 @@
+{
+  "name": "king-louie",
+  "version": "26.3.25",
+  "description": "Cross-platform Electron desktop chat application",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test tests/*.test.js",
+    "test:watch": "node --test --watch",
+    "build": "electron-builder",
+    "build:win": "electron-builder --win",
+    "build:mac": "electron-builder --mac",
+    "build:linux": "electron-builder --linux"
+  },
+  "keywords": [
+    "electron",
+    "chat",
+    "desktop"
+  ],
+  "author": {
+    "name": "Fiscus Technology, LLC",
+    "email": "info@fiscus.technology"
+  },
+  "license": "ISC",
+  "build": {
+    "appId": "com.kinglouie.app",
+    "productName": "King Louie",
+    "files": [
+      "**/*",
+      "!tests/**",
+      "!product-management/**",
+      "!.github/**"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "hardenedRuntime": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "notarize": true
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Utility"
+    }
+  },
+  "devDependencies": {
+    "electron": "^40.1.0",
+    "electron-builder": "^26.8.1",
+    "playwright": "^1.58.2"
+  },
+  "dependencies": {
+    "@fortawesome/fontawesome-free": "^7.2.0",
+    "@mozilla/readability": "^0.6.0",
+    "@slack/bolt": "^4.6.0",
+    "cron-parser": "^5.5.0",
+    "discord.js": "^14.25.1",
+    "dompurify": "^3.3.3",
+    "electron-store": "^11.0.2",
+    "fast-glob": "^3.3.3",
+    "highlight.js": "^11.11.1",
+    "linkedom": "^0.18.12",
+    "marked": "^15.0.7",
+    "turndown": "^7.2.2",
+    "ws": "^8.20.0"
+  }
+}
