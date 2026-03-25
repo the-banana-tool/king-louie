@@ -6,7 +6,7 @@ const appState = {
   isHistoryCollapsed: false,
   memoryEntries: [],
   pendingImages: [],
-  isResponseActive: false,
+  activeResponses: new Set(),
   streamBuffers: new Map(),
   settings: {
     encryptionAvailable: true,
@@ -232,6 +232,7 @@ function resetAppState() {
   appState.isHistoryCollapsed = false;
   appState.memoryEntries = [];
   appState.pendingImages = [];
+  appState.activeResponses.clear();
   appState.streamBuffers.clear();
   appState.settings = {
     encryptionAvailable: true,
@@ -281,10 +282,25 @@ function setHistoryCollapsed(collapsed) {
   renderHistoryToggleButton();
 }
 
-function setResponseActive(active) {
-  appState.isResponseActive = active;
-  if (dom.sendBtn) dom.sendBtn.hidden = active;
-  if (dom.stopBtn) dom.stopBtn.hidden = !active;
+function setResponseActive(active, chatId) {
+  const id = chatId || appState.activeChatId;
+  if (active) {
+    appState.activeResponses.add(id);
+  } else {
+    appState.activeResponses.delete(id);
+  }
+  const isActiveChatStreaming = appState.activeResponses.has(appState.activeChatId);
+  if (dom.sendBtn) dom.sendBtn.hidden = isActiveChatStreaming;
+  if (dom.stopBtn) dom.stopBtn.hidden = !isActiveChatStreaming;
+  updateChatStreamingIndicators();
+}
+
+function updateChatStreamingIndicators() {
+  if (!dom.chatList) return;
+  dom.chatList.querySelectorAll('.chat-item').forEach((item) => {
+    const id = item.dataset.chatId;
+    item.classList.toggle('streaming', appState.activeResponses.has(id));
+  });
 }
 
 function renderAgentModeButton() {
@@ -989,7 +1005,10 @@ function renderChatList() {
 
   appState.chats.forEach((chat) => {
     const chatItem = document.createElement('div');
-    chatItem.className = `chat-item ${chat.id === appState.activeChatId ? 'active' : ''}`;
+    const classes = ['chat-item'];
+    if (chat.id === appState.activeChatId) classes.push('active');
+    if (appState.activeResponses.has(chat.id)) classes.push('streaming');
+    chatItem.className = classes.join(' ');
     chatItem.dataset.chatId = chat.id;
 
     const viewBtn = document.createElement('button');
@@ -3527,7 +3546,7 @@ async function sendMessage() {
   } catch (error) {
     addMessage('assistant', `Error: ${error.message || 'Unable to send message.'}`);
   } finally {
-    setResponseActive(false);
+    setResponseActive(false, appState.activeChatId);
     flushToolGroup();
   }
 }
@@ -3667,7 +3686,9 @@ async function handleCreateChat() {
 async function handleSelectChat(chatId) {
   appState.streamBuffers.clear();
   appState.activeChatId = chatId;
-  setResponseActive(false);
+  const isStreaming = appState.activeResponses.has(chatId);
+  if (dom.sendBtn) dom.sendBtn.hidden = isStreaming;
+  if (dom.stopBtn) dom.stopBtn.hidden = !isStreaming;
   const chat = appState.chats.find((c) => c.id === chatId);
   appState.isAgentModeEnabled = !!(chat && chat.agentMode);
   unwrapIpcResult(await window.electron.chat.setActive(chatId), 'Unable to switch active chat.');
@@ -4553,12 +4574,11 @@ window.addEventListener('blur', () => {
 });
 
 unsubscribeHandlers.push(window.electron.chat.onMessageStart(({ chatId, responseId }) => {
+  setResponseActive(true, chatId);
   if (chatId !== appState.activeChatId) return;
 
   // Flush any pending tool group before the assistant message
   flushToolGroup();
-
-  setResponseActive(true);
 
   const messageDiv = document.createElement('div');
   messageDiv.className = 'message assistant streaming';
@@ -4589,8 +4609,8 @@ unsubscribeHandlers.push(window.electron.chat.onMessageChunk(({ chatId, response
 
 unsubscribeHandlers.push(window.electron.chat.onMessageComplete(({ chatId, responseId }) => {
   appState.streamBuffers.delete(responseId);
+  setResponseActive(false, chatId);
   if (chatId !== appState.activeChatId) return;
-  setResponseActive(false);
   const messageDiv = dom.chatMessages.querySelector(`[data-response-id="${responseId}"]`);
   if (messageDiv) {
     messageDiv.classList.remove('streaming');
@@ -4599,8 +4619,8 @@ unsubscribeHandlers.push(window.electron.chat.onMessageComplete(({ chatId, respo
 
 unsubscribeHandlers.push(window.electron.chat.onMessageError(({ chatId, responseId, error }) => {
   appState.streamBuffers.delete(responseId);
+  setResponseActive(false, chatId);
   if (chatId !== appState.activeChatId) return;
-  setResponseActive(false);
   const messageDiv = dom.chatMessages.querySelector(`[data-response-id="${responseId}"] .message-content`);
   if (messageDiv) {
     const p = document.createElement('p');
