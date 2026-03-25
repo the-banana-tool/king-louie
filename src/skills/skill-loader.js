@@ -48,6 +48,7 @@ const deepMergeWithArrayReplace = (baseValue, overrideValue) => {
 class SkillLoader {
   constructor(options = {}) {
     this.skillsDirectory = options.skillsDirectory || path.join(__dirname, '..', '..', 'skills');
+    this.builtinSkillsDirectory = options.builtinSkillsDirectory || null;
     this.context = options.context || {};
     const userDataPath = this.context?.userDataPath || options.userDataPath || process.cwd();
     this.customizationsDirectory =
@@ -160,15 +161,24 @@ class SkillLoader {
    * @returns {string[]} - Array of skill directory paths
    */
   discoverSkills() {
-    if (!fs.existsSync(this.skillsDirectory)) {
-      console.log(`[skill-loader] Skills directory not found: ${this.skillsDirectory}`);
-      return [];
-    }
+    const skillDirs = [];
+    const seen = new Set();
 
-    const entries = fs.readdirSync(this.skillsDirectory, { withFileTypes: true });
-    const skillDirs = entries
-      .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
-      .map((entry) => path.join(this.skillsDirectory, entry.name));
+    // Scan both builtin and user skills directories
+    const directories = [this.builtinSkillsDirectory, this.skillsDirectory].filter(Boolean);
+    for (const dir of directories) {
+      if (!fs.existsSync(dir)) {
+        console.log(`[skill-loader] Skills directory not found: ${dir}`);
+        continue;
+      }
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        if ((entry.isDirectory() || entry.isSymbolicLink()) && !seen.has(entry.name)) {
+          seen.add(entry.name);
+          skillDirs.push(path.join(dir, entry.name));
+        }
+      }
+    }
 
     console.log(`[skill-loader] Discovered ${skillDirs.length} potential skill(s)`);
     return skillDirs;

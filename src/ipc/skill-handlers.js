@@ -190,6 +190,12 @@ function registerSkillHandlers(ipcMain, context = {}) {
       return { ok: false, error: `Cannot determine install path for skill '${skillId}'.` };
     }
 
+    // Prevent removing builtin skills (those inside the app directory)
+    const loader = getSkillLoader();
+    if (loader?.builtinSkillsDirectory && skillPath.startsWith(loader.builtinSkillsDirectory)) {
+      return { ok: false, error: `Cannot remove built-in skill '${skillId}'.` };
+    }
+
     // Unregister first
     await skillRegistry.unregister(skillId);
 

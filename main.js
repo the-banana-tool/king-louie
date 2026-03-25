@@ -2099,8 +2099,14 @@ const initializeAgentInfrastructure = async () => {
   });
 
   // Initialize skills while gateway server starts in parallel
+  const userSkillsDir = path.join(app.getPath('userData'), 'skills');
+  if (!fs.existsSync(userSkillsDir)) {
+    fs.mkdirSync(userSkillsDir, { recursive: true });
+  }
+
   skillLoader = new SkillLoader({
-    skillsDirectory: path.join(__dirname, 'skills'),
+    skillsDirectory: userSkillsDir,
+    builtinSkillsDirectory: path.join(__dirname, 'skills'),
     context: {
       workingDirectory: process.cwd(),
       userDataPath: app.getPath('userData'),
