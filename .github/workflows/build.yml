@@ -46,7 +46,7 @@ jobs:
         run: |
           SIGN_ARGS=""
           if [ -n "${{ secrets.WIN_CSC_THUMBPRINT }}" ]; then
-            SIGN_ARGS="-c.win.signtoolOptions.certificateSha1=${{ secrets.WIN_CSC_THUMBPRINT }} -c.win.signtoolOptions.signingHashAlgorithms=[sha256]"
+            SIGN_ARGS="-c.win.signtoolOptions.certificateSha1=${{ secrets.WIN_CSC_THUMBPRINT }}"
           fi
           npx electron-builder --win --publish never $SIGN_ARGS
 
