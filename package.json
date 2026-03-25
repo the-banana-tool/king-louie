@@ -20,10 +20,11 @@
     "playwright": "^1.58.2"
   },
   "dependencies": {
+    "@fortawesome/fontawesome-free": "^7.2.0",
     "@mozilla/readability": "^0.6.0",
+    "@slack/bolt": "^4.6.0",
     "cron-parser": "^5.5.0",
     "discord.js": "^14.25.1",
-    "@slack/bolt": "^4.6.0",
     "dompurify": "^3.3.3",
     "electron-store": "^11.0.2",
     "fast-glob": "^3.3.3",

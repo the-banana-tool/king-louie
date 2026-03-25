@@ -157,6 +157,12 @@ const dom = {
   attachImageBtn: document.getElementById('attach-image-btn'),
 };
 
+function faIcon(iconClass) {
+  const i = document.createElement('i');
+  i.className = iconClass;
+  return i;
+}
+
 const unsubscribeHandlers = [];
 
 function resetAppState() {
@@ -201,7 +207,8 @@ function renderHistoryToggleButton() {
   if (!dom.toggleHistoryBtn) return;
 
   const title = appState.isHistoryCollapsed ? 'Expand chat history' : 'Collapse chat history';
-  dom.toggleHistoryBtn.textContent = appState.isHistoryCollapsed ? '▶' : '◀';
+  dom.toggleHistoryBtn.innerHTML = '';
+  dom.toggleHistoryBtn.appendChild(faIcon(appState.isHistoryCollapsed ? 'fas fa-chevron-right' : 'fas fa-chevron-left'));
   dom.toggleHistoryBtn.title = title;
   dom.toggleHistoryBtn.setAttribute('aria-label', title);
   dom.toggleHistoryBtn.setAttribute('aria-pressed', appState.isHistoryCollapsed ? 'true' : 'false');
@@ -377,7 +384,8 @@ function renderPendingImages() {
     const removeBtn = document.createElement('button');
     removeBtn.type = 'button';
     removeBtn.className = 'image-preview-remove';
-    removeBtn.textContent = '×';
+    removeBtn.innerHTML = '';
+    removeBtn.appendChild(faIcon('fas fa-xmark'));
     removeBtn.title = 'Remove image';
     removeBtn.setAttribute('aria-label', 'Remove image');
     removeBtn.addEventListener('click', () => {
@@ -566,12 +574,14 @@ function showToolApprovalDialog(approvalId, toolName, parameters) {
   const denyBtn = document.createElement('button');
   denyBtn.type = 'button';
   denyBtn.className = 'danger';
-  denyBtn.textContent = 'Deny';
+  denyBtn.appendChild(faIcon('fas fa-ban'));
+  denyBtn.appendChild(document.createTextNode(' Deny'));
 
   const approveBtn = document.createElement('button');
   approveBtn.type = 'button';
   approveBtn.className = 'primary';
-  approveBtn.textContent = 'Approve';
+  approveBtn.appendChild(faIcon('fas fa-check'));
+  approveBtn.appendChild(document.createTextNode(' Approve'));
 
   denyBtn.addEventListener('click', () => {
     window.electron.tool.respondToApproval(approvalId, false, { alwaysApprove: false });
@@ -713,13 +723,15 @@ function renderChatList() {
 
     const renameBtn = document.createElement('button');
     renameBtn.className = 'chat-action-btn';
-    renameBtn.textContent = 'Rename';
+    renameBtn.appendChild(faIcon('fas fa-pen'));
+    renameBtn.appendChild(document.createTextNode(' Rename'));
     renameBtn.dataset.action = 'rename';
     renameBtn.dataset.chatId = chat.id;
 
     const deleteBtn = document.createElement('button');
     deleteBtn.className = 'chat-action-btn danger';
-    deleteBtn.textContent = 'Delete';
+    deleteBtn.appendChild(faIcon('fas fa-trash'));
+    deleteBtn.appendChild(document.createTextNode(' Delete'));
     deleteBtn.dataset.action = 'delete';
     deleteBtn.dataset.chatId = chat.id;
 
@@ -876,26 +888,30 @@ function renderProviderCard(providerKey, provider) {
   const saveBtn = document.createElement('button');
   saveBtn.className = 'primary';
   saveBtn.type = 'button';
-  saveBtn.textContent = 'Save Token';
+  saveBtn.appendChild(faIcon('fas fa-floppy-disk'));
+  saveBtn.appendChild(document.createTextNode(' Save Token'));
   saveBtn.dataset.action = 'save';
   saveBtn.dataset.provider = providerKey;
 
   const testBtn = document.createElement('button');
   testBtn.type = 'button';
-  testBtn.textContent = 'Test Connection';
+  testBtn.appendChild(faIcon('fas fa-plug'));
+  testBtn.appendChild(document.createTextNode(' Test Connection'));
   testBtn.dataset.action = 'test';
   testBtn.dataset.provider = providerKey;
 
   const clearBtn = document.createElement('button');
   clearBtn.type = 'button';
   clearBtn.className = 'danger';
-  clearBtn.textContent = 'Clear Token';
+  clearBtn.appendChild(faIcon('fas fa-eraser'));
+  clearBtn.appendChild(document.createTextNode(' Clear Token'));
   clearBtn.dataset.action = 'clear';
   clearBtn.dataset.provider = providerKey;
 
   const modelBtn = document.createElement('button');
   modelBtn.type = 'button';
-  modelBtn.textContent = 'Save Model';
+  modelBtn.appendChild(faIcon('fas fa-floppy-disk'));
+  modelBtn.appendChild(document.createTextNode(' Save Model'));
   modelBtn.dataset.action = 'save-model';
   modelBtn.dataset.provider = providerKey;
 
@@ -1069,7 +1085,8 @@ function renderSettings() {
         toggleBtn.dataset.action = 'toggle-hook';
         toggleBtn.dataset.hookName = hook.name;
         toggleBtn.dataset.nextEnabled = hook.enabled !== false ? 'false' : 'true';
-        toggleBtn.textContent = hook.enabled !== false ? 'Disable Hook' : 'Enable Hook';
+        toggleBtn.appendChild(faIcon(hook.enabled !== false ? 'fas fa-toggle-on' : 'fas fa-toggle-off'));
+        toggleBtn.appendChild(document.createTextNode(hook.enabled !== false ? ' Disable Hook' : ' Enable Hook'));
         if (hook.enabled !== false) {
           toggleBtn.className = 'danger';
         } else {
@@ -1155,7 +1172,8 @@ function renderMemoryList(entries = []) {
     deleteBtn.className = 'danger';
     deleteBtn.dataset.action = 'delete-memory';
     deleteBtn.dataset.memoryId = entry.id;
-    deleteBtn.textContent = 'Delete';
+    deleteBtn.appendChild(faIcon('fas fa-trash'));
+    deleteBtn.appendChild(document.createTextNode(' Delete'));
 
     actions.appendChild(deleteBtn);
 
@@ -1787,7 +1805,8 @@ function renderCronJobs(jobs = []) {
 
     const toggleBtn = document.createElement('button');
     toggleBtn.type = 'button';
-    toggleBtn.textContent = job.enabled !== false ? 'Disable' : 'Enable';
+    toggleBtn.appendChild(faIcon(job.enabled !== false ? 'fas fa-toggle-on' : 'fas fa-toggle-off'));
+    toggleBtn.appendChild(document.createTextNode(job.enabled !== false ? ' Disable' : ' Enable'));
     toggleBtn.className = job.enabled !== false ? 'danger' : 'primary';
     toggleBtn.dataset.action = 'toggle-cron';
     toggleBtn.dataset.jobId = job.id;
@@ -1795,14 +1814,16 @@ function renderCronJobs(jobs = []) {
 
     const runBtn = document.createElement('button');
     runBtn.type = 'button';
-    runBtn.textContent = 'Run Now';
+    runBtn.appendChild(faIcon('fas fa-play'));
+    runBtn.appendChild(document.createTextNode(' Run Now'));
     runBtn.dataset.action = 'run-cron';
     runBtn.dataset.jobId = job.id;
 
     const delBtn = document.createElement('button');
     delBtn.type = 'button';
     delBtn.className = 'danger';
-    delBtn.textContent = 'Delete';
+    delBtn.appendChild(faIcon('fas fa-trash'));
+    delBtn.appendChild(document.createTextNode(' Delete'));
     delBtn.dataset.action = 'delete-cron';
     delBtn.dataset.jobId = job.id;
 
@@ -2023,12 +2044,14 @@ function showRenameDialog(currentTitle) {
 
     const cancelBtn = document.createElement('button');
     cancelBtn.type = 'button';
-    cancelBtn.textContent = 'Cancel';
+    cancelBtn.appendChild(faIcon('fas fa-xmark'));
+    cancelBtn.appendChild(document.createTextNode(' Cancel'));
 
     const saveBtn = document.createElement('button');
     saveBtn.type = 'button';
     saveBtn.className = 'primary';
-    saveBtn.textContent = 'Save';
+    saveBtn.appendChild(faIcon('fas fa-check'));
+    saveBtn.appendChild(document.createTextNode(' Save'));
 
     const close = (value = null) => {
       modal.remove();
@@ -3308,7 +3331,8 @@ unsubscribeHandlers.push(window.electron.agent.onAskUser(({ requestId, question 
   const submitBtn = document.createElement('button');
   submitBtn.type = 'button';
   submitBtn.className = 'primary';
-  submitBtn.textContent = 'Submit';
+  submitBtn.appendChild(faIcon('fas fa-paper-plane'));
+  submitBtn.appendChild(document.createTextNode(' Submit'));
 
   const close = (responseStr) => {
     window.electron.agent.sendUserResponse({ requestId, response: responseStr });
