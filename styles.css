@@ -286,8 +286,8 @@ body {
 }
 
 .chat-view-btn-dot {
-  width: 7px;
-  height: 7px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   background: var(--text-faint);
 }
@@ -353,6 +353,8 @@ body {
   padding: 0;
   font-size: 16px;
   line-height: 1;
+  align-items: center;
+  justify-content: center;
 }
 
 .container.history-collapsed .compact-add-btn {
@@ -493,7 +495,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-height: 320px;
+  max-height: 420px;
   overflow-y: auto;
 }
 
@@ -536,6 +538,70 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.5px;
   margin-top: 4px;
+}
+
+/* Chat info popover – inline select */
+.chat-info-select {
+  background: var(--bg-overlay);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 2px 6px;
+  cursor: pointer;
+  outline: none;
+}
+
+.chat-info-select:focus {
+  border-color: var(--accent);
+}
+
+/* Chat info popover – toggle switch */
+.chat-info-toggle {
+  position: relative;
+  display: inline-block;
+  width: 32px;
+  height: 18px;
+  cursor: pointer;
+}
+
+.chat-info-toggle input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+  position: absolute;
+}
+
+.chat-info-toggle-slider {
+  position: absolute;
+  inset: 0;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border-default);
+  border-radius: 9px;
+  transition: background var(--transition), border-color var(--transition);
+}
+
+.chat-info-toggle-slider::before {
+  content: '';
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  left: 2px;
+  top: 2px;
+  background: var(--text-muted);
+  border-radius: 50%;
+  transition: transform var(--transition), background var(--transition);
+}
+
+.chat-info-toggle input:checked + .chat-info-toggle-slider {
+  background: var(--accent-surface);
+  border-color: var(--accent);
+}
+
+.chat-info-toggle input:checked + .chat-info-toggle-slider::before {
+  transform: translateX(14px);
+  background: var(--accent);
 }
 
 /* --- Icon buttons (shared) --------------------------------- */
@@ -1196,11 +1262,9 @@ body {
   padding: 0;
   font-size: 15px;
   line-height: 1;
-  order: -1;
-}
-
-.container.history-collapsed .settings-gear-btn {
-  order: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 /* --- Settings overlay (modal) ------------------------------ */

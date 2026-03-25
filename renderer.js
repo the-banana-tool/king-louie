@@ -1064,16 +1064,11 @@ function renderChatInfoPopover() {
     { icon: 'fas fa-sigma', label: 'Total tokens', value: formatTokenCount(totals.totalTokens) },
     { icon: 'fas fa-dollar-sign', label: 'Estimated cost', value: formatUsd(totals.costUsd) },
     { divider: true },
-    { section: 'Inference' },
-    { icon: 'fas fa-bolt', label: 'Active tier', value: tier },
-    { icon: 'fas fa-plug', label: 'Provider', value: tierInfo.provider || '—' },
-    { icon: 'fas fa-microchip', label: 'Model', value: tierInfo.model || '—' },
-    { divider: true },
     { section: 'Memory' },
     { icon: 'fas fa-brain', label: 'Memory entries', value: String(memoryCount) },
   ];
 
-  rows.forEach((row) => {
+  const appendRow = (row) => {
     if (row.divider) {
       const hr = document.createElement('hr');
       hr.className = 'chat-info-divider';
@@ -1104,7 +1099,104 @@ function renderChatInfoPopover() {
     el.appendChild(labelEl);
     el.appendChild(valueEl);
     dom.chatInfoPopoverBody.appendChild(el);
+  };
+
+  rows.forEach(appendRow);
+
+  /* --- Inference controls section --- */
+  appendRow({ divider: true });
+  appendRow({ section: 'Inference' });
+
+  // Tier selector row
+  const tierRow = document.createElement('div');
+  tierRow.className = 'chat-info-row';
+  const tierLabel = document.createElement('span');
+  tierLabel.className = 'chat-info-label';
+  tierLabel.appendChild(faIcon('fas fa-bolt'));
+  tierLabel.appendChild(document.createTextNode('Tier'));
+  const tierSelect = document.createElement('select');
+  tierSelect.className = 'chat-info-select';
+  ['fast', 'standard', 'smart'].forEach((t) => {
+    const opt = document.createElement('option');
+    opt.value = t;
+    opt.textContent = formatInferenceTierLabel(t);
+    if (t === activeTierKey) opt.selected = true;
+    tierSelect.appendChild(opt);
   });
+  tierSelect.addEventListener('change', async () => {
+    try {
+      const result = unwrapIpcResult(
+        await window.electron.settings.setInferenceTier({ tier: tierSelect.value }),
+        'Failed to set inference tier.'
+      );
+      appState.settings.inference = result.inference || appState.settings.inference;
+      // Update the provider/model display
+      const newInfo = (appState.settings.inference.tierMap || {})[tierSelect.value] || {};
+      if (providerVal) providerVal.textContent = newInfo.provider || '—';
+      if (modelVal) modelVal.textContent = newInfo.model || '—';
+      if (typeof renderInferenceTierDetails === 'function') renderInferenceTierDetails();
+    } catch (err) { /* silently fail */ }
+  });
+  tierRow.appendChild(tierLabel);
+  tierRow.appendChild(tierSelect);
+  dom.chatInfoPopoverBody.appendChild(tierRow);
+
+  // Provider row (read-only)
+  const providerRow = document.createElement('div');
+  providerRow.className = 'chat-info-row';
+  const providerLabel = document.createElement('span');
+  providerLabel.className = 'chat-info-label';
+  providerLabel.appendChild(faIcon('fas fa-plug'));
+  providerLabel.appendChild(document.createTextNode('Provider'));
+  const providerVal = document.createElement('span');
+  providerVal.className = 'chat-info-value';
+  providerVal.textContent = tierInfo.provider || '—';
+  providerRow.appendChild(providerLabel);
+  providerRow.appendChild(providerVal);
+  dom.chatInfoPopoverBody.appendChild(providerRow);
+
+  // Model row (read-only)
+  const modelRow = document.createElement('div');
+  modelRow.className = 'chat-info-row';
+  const modelLabel = document.createElement('span');
+  modelLabel.className = 'chat-info-label';
+  modelLabel.appendChild(faIcon('fas fa-microchip'));
+  modelLabel.appendChild(document.createTextNode('Model'));
+  const modelVal = document.createElement('span');
+  modelVal.className = 'chat-info-value';
+  modelVal.textContent = tierInfo.model || '—';
+  modelRow.appendChild(modelLabel);
+  modelRow.appendChild(modelVal);
+  dom.chatInfoPopoverBody.appendChild(modelRow);
+
+  // Agent mode toggle row
+  const agentRow = document.createElement('div');
+  agentRow.className = 'chat-info-row';
+  const agentLabel = document.createElement('span');
+  agentLabel.className = 'chat-info-label';
+  agentLabel.appendChild(faIcon('fas fa-wand-magic-sparkles'));
+  agentLabel.appendChild(document.createTextNode('Agent mode'));
+  const agentToggle = document.createElement('label');
+  agentToggle.className = 'chat-info-toggle';
+  const agentCheckbox = document.createElement('input');
+  agentCheckbox.type = 'checkbox';
+  agentCheckbox.checked = appState.isAgentModeEnabled;
+  agentCheckbox.addEventListener('change', () => {
+    appState.isAgentModeEnabled = agentCheckbox.checked;
+    renderAgentModeButton();
+    addToolEventMessage(
+      `Agent mode ${appState.isAgentModeEnabled ? 'enabled' : 'disabled'}`,
+      { mode: appState.isAgentModeEnabled ? 'agent' : 'standard' },
+      appState.isAgentModeEnabled ? 'success' : ''
+    );
+  });
+  const agentSlider = document.createElement('span');
+  agentSlider.className = 'chat-info-toggle-slider';
+  agentToggle.appendChild(agentCheckbox);
+  agentToggle.appendChild(agentSlider);
+  agentRow.appendChild(agentLabel);
+  agentRow.appendChild(agentToggle);
+  dom.chatInfoPopoverBody.appendChild(agentRow);
 }
 
 function toggleChatInfoPopover() {
