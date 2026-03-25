@@ -3,7 +3,7 @@ name: Build & Release
 on:
   push:
     tags:
-      - 'v*'
+      - 'v*'       # e.g. v26.3.25
   workflow_dispatch:
 
 permissions:

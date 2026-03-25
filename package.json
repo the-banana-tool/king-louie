@@ -1,6 +1,6 @@
 {
   "name": "king-louie",
-  "version": "1.0.0",
+  "version": "26.3.25",
   "description": "Cross-platform Electron desktop chat application",
   "main": "main.js",
   "scripts": {
