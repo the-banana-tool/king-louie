@@ -32,10 +32,10 @@
       "target": [
         "nsis"
       ],
-      "signingHashAlgorithms": [
-        "sha256"
-      ],
-      "sign": "./build/sign.js"
+      "signtoolOptions": {
+        "signingHashAlgorithms": ["sha256"],
+        "certificateSha1": "${env.WIN_CSC_THUMBPRINT}"
+      }
     },
     "mac": {
       "target": [
