@@ -80,7 +80,9 @@ class SkillRegistry {
         version: meta.version,
         pinnable: meta.pinnable,
         resolvers: Array.isArray(meta.resolvers) && meta.resolvers.length ? meta.resolvers : ['skill'],
-        lastResolutionMethod: this.lastResolutionBySkill.get(meta.id) || null
+        lastResolutionMethod: this.lastResolutionBySkill.get(meta.id) || null,
+        skillPath: skill._skillPath || null,
+        isSymlink: skill._isSymlink || false
       };
     });
   }

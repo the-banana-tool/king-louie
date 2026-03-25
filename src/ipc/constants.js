@@ -73,6 +73,8 @@ module.exports = {
   SKILL_SAVE_SETTINGS: 'skill:saveSettings',
   SKILL_LIST_WITH_SETTINGS: 'skill:listWithSettings',
   SKILL_SET_ENABLED: 'skill:setEnabled',
+  SKILL_INSTALL: 'skill:install',
+  SKILL_REMOVE: 'skill:remove',
   SKILL_PIN: 'skill:pin',
   SKILL_UNPIN: 'skill:unpin',
   SKILL_GET_PINNED: 'skill:getPinned',

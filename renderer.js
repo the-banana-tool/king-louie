@@ -162,6 +162,9 @@ const dom = {
   skillSettingsContainer: document.getElementById('skill-settings-container'),
   skillsList: document.getElementById('skills-list'),
   skillsStatus: document.getElementById('skills-status'),
+  skillInstallUrl: document.getElementById('skill-install-url'),
+  skillInstallBtn: document.getElementById('skill-install-btn'),
+  skillInstallStatus: document.getElementById('skill-install-status'),
   settingsNavSelect: document.getElementById('settings-nav-select'),
   inferenceTierSelect: document.getElementById('inference-tier-select'),
   saveInferenceTierBtn: document.getElementById('save-inference-tier-btn'),
@@ -1633,6 +1636,18 @@ function renderSkillCard(skill) {
     actions.appendChild(settingsBtn);
   }
 
+  if (skill.skillPath) {
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.className = 'btn btn-danger';
+    removeBtn.dataset.action = 'remove-skill';
+    removeBtn.dataset.skillId = skill.id;
+    removeBtn.dataset.skillName = skill.name;
+    removeBtn.appendChild(faIcon('fas fa-trash'));
+    removeBtn.appendChild(document.createTextNode(' Remove'));
+    actions.appendChild(removeBtn);
+  }
+
   card.appendChild(header);
   card.appendChild(desc);
   card.appendChild(actions);
@@ -1665,11 +1680,66 @@ async function toggleSkillEnabled(skillId, enabled) {
   try {
     const result = await window.electron.skill.setEnabled({ skillId, enabled });
     if (result?.error) throw new Error(result.error);
-    // Reload the skills list to reflect the change
     await loadSkillSettingsTabs();
   } catch (err) {
     if (dom.skillsStatus) {
       dom.skillsStatus.textContent = `Error: ${err.message}`;
+      dom.skillsStatus.classList.add('error');
+    }
+  }
+}
+
+async function installSkill() {
+  const url = (dom.skillInstallUrl?.value || '').trim();
+  if (!url) {
+    if (dom.skillInstallStatus) {
+      dom.skillInstallStatus.textContent = 'Please enter a GitHub repository URL.';
+      dom.skillInstallStatus.classList.add('error');
+    }
+    return;
+  }
+
+  if (dom.skillInstallStatus) {
+    dom.skillInstallStatus.textContent = 'Installing...';
+    dom.skillInstallStatus.classList.remove('error');
+  }
+  if (dom.skillInstallBtn) dom.skillInstallBtn.disabled = true;
+
+  try {
+    const result = await window.electron.skill.install({ url });
+    if (result?.error) throw new Error(result.error);
+    if (dom.skillInstallStatus) {
+      dom.skillInstallStatus.textContent = `Installed "${result.name || result.skillId}" successfully.`;
+      dom.skillInstallStatus.classList.remove('error');
+    }
+    if (dom.skillInstallUrl) dom.skillInstallUrl.value = '';
+    await loadSkillSettingsTabs();
+  } catch (err) {
+    if (dom.skillInstallStatus) {
+      dom.skillInstallStatus.textContent = `Install failed: ${err.message}`;
+      dom.skillInstallStatus.classList.add('error');
+    }
+  } finally {
+    if (dom.skillInstallBtn) dom.skillInstallBtn.disabled = false;
+  }
+}
+
+async function removeSkill(skillId, skillName) {
+  if (!confirm(`Remove skill "${skillName || skillId}"? This will delete its files.`)) {
+    return;
+  }
+
+  try {
+    const result = await window.electron.skill.remove({ skillId });
+    if (result?.error) throw new Error(result.error);
+    if (dom.skillsStatus) {
+      dom.skillsStatus.textContent = `Removed "${skillName || skillId}".`;
+      dom.skillsStatus.classList.remove('error');
+    }
+    await loadSkillSettingsTabs();
+  } catch (err) {
+    if (dom.skillsStatus) {
+      dom.skillsStatus.textContent = `Remove failed: ${err.message}`;
       dom.skillsStatus.classList.add('error');
     }
   }
@@ -1842,10 +1912,11 @@ async function loadSkillSettingsTabs() {
   if (!dom.settingsNavSelect) return;
 
   try {
-    const skills = await window.electron.skill.listWithSettings();
+    const result = await window.electron.skill.listWithSettings();
+    const skills = Array.isArray(result) ? result : (result?.data || []);
 
     // Render the skills management list
-    renderSkillsList(skills || []);
+    renderSkillsList(skills);
 
     // Render per-skill settings tabs
     const skillsWithSettings = (skills || []).filter(
@@ -3876,12 +3947,24 @@ if (dom.skillsList) {
   dom.skillsList.addEventListener('click', (e) => {
     const button = e.target.closest('button[data-action]');
     if (!button) return;
-    const { action, skillId, nextEnabled } = button.dataset;
+    const { action, skillId, nextEnabled, skillName } = button.dataset;
     if (action === 'toggle-skill' && skillId) {
       toggleSkillEnabled(skillId, nextEnabled === 'true');
     } else if (action === 'open-skill-settings' && skillId) {
       switchSettingsTab(`skill-${skillId}`);
+    } else if (action === 'remove-skill' && skillId) {
+      removeSkill(skillId, skillName);
     }
+  });
+}
+
+if (dom.skillInstallBtn) {
+  dom.skillInstallBtn.addEventListener('click', () => installSkill());
+}
+
+if (dom.skillInstallUrl) {
+  dom.skillInstallUrl.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') installSkill();
   });
 }
 

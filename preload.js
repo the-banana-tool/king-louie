@@ -447,7 +447,9 @@ contextBridge.exposeInMainWorld(
       listWithSettings: () => ipcRenderer.invoke('skill:listWithSettings'),
       getSettings: (payload) => ipcRenderer.invoke('skill:getSettings', payload),
       saveSettings: (payload) => ipcRenderer.invoke('skill:saveSettings', payload),
-      setEnabled: (payload) => ipcRenderer.invoke('skill:setEnabled', payload)
+      setEnabled: (payload) => ipcRenderer.invoke('skill:setEnabled', payload),
+      install: (payload) => ipcRenderer.invoke('skill:install', payload),
+      remove: (payload) => ipcRenderer.invoke('skill:remove', payload)
     },
     app: {
       quitWindow: () => ipcRenderer.invoke('app:quitWindow')

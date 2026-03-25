@@ -1759,6 +1759,16 @@ body {
   color: var(--text-muted);
 }
 
+.skill-install-form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.skill-install-form .skill-settings-input {
+  flex: 1;
+}
+
 /* --- Selection / accent color ------------------------------ */
 ::selection {
   background: rgba(137,180,250,0.3);

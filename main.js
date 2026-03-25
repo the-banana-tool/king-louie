@@ -2263,6 +2263,7 @@ registerHandlers(ipcMain, {
   // Skill
   skillRegistry,
   ensureSkillCustomizationFile,
+  getSkillLoader: () => skillLoader,
   getPinManager: () => pinManager,
   getShell: () => shell
 });

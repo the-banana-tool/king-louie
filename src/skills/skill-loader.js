@@ -209,6 +209,10 @@ class SkillLoader {
         return null;
       }
 
+      // Track where this skill lives on disk
+      skillInstance._skillPath = skillPath;
+      skillInstance._isSymlink = fs.lstatSync(skillPath).isSymbolicLink();
+
       const customizationRecord = this.readSkillCustomization(skillPath, skillInstance);
       if (customizationRecord) {
         this.applySkillCustomization(skillInstance, customizationRecord);

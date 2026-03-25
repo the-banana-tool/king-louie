@@ -1,11 +1,18 @@
 const { wrapHandler } = require('./wrap-handler');
 const IPC = require('./constants');
+const { execSync } = require('child_process');
+const path = require('path');
+const fs = require('fs');
 
 function registerSkillHandlers(ipcMain, context = {}) {
   const {
     skillRegistry,
     ensureSkillCustomizationFile
   } = context;
+
+  const getSkillLoader = () => (
+    typeof context.getSkillLoader === 'function' ? context.getSkillLoader() : context.skillLoader
+  );
 
   const getSessionManager = () => (
     typeof context.getSessionManager === 'function' ? context.getSessionManager() : context.sessionManager
@@ -65,7 +72,6 @@ function registerSkillHandlers(ipcMain, context = {}) {
 
     // Persist via customization file
     const customization = ensureSkillCustomizationFile(skillId);
-    const fs = require('fs');
     let existing = {};
     try {
       existing = JSON.parse(fs.readFileSync(customization.path, 'utf-8'));
@@ -75,6 +81,110 @@ function registerSkillHandlers(ipcMain, context = {}) {
     fs.writeFileSync(customization.path, JSON.stringify(existing, null, 2) + '\n', 'utf-8');
 
     return { ok: true, skillId, enabled: Boolean(enabled) };
+  }));
+
+  ipcMain.handle(IPC.SKILL_INSTALL, wrapHandler(IPC.SKILL_INSTALL, async (_event, { url } = {}) => {
+    if (!url || typeof url !== 'string') {
+      return { ok: false, error: 'A GitHub repository URL is required.' };
+    }
+
+    const cleaned = url.trim().replace(/\/+$/, '').replace(/\.git$/, '');
+
+    // Extract repo name for the directory
+    const repoName = path.basename(cleaned);
+    if (!repoName || !/^[a-zA-Z0-9._-]+$/.test(repoName)) {
+      return { ok: false, error: `Invalid repository name: ${repoName}` };
+    }
+
+    const loader = getSkillLoader();
+    if (!loader) {
+      return { ok: false, error: 'Skill loader is not initialized.' };
+    }
+
+    const targetDir = path.join(loader.skillsDirectory, repoName);
+
+    if (fs.existsSync(targetDir)) {
+      return { ok: false, error: `Directory already exists: ${repoName}. Remove the existing skill first.` };
+    }
+
+    // Clone the repo
+    try {
+      execSync(`git clone "${cleaned}.git" "${targetDir}"`, {
+        timeout: 60000,
+        stdio: 'pipe'
+      });
+    } catch (err) {
+      // Clean up partial clone
+      try { fs.rmSync(targetDir, { recursive: true, force: true }); } catch { /* ignore */ }
+      return { ok: false, error: `Git clone failed: ${err.stderr?.toString().trim() || err.message}` };
+    }
+
+    // Run npm install if package.json has dependencies
+    try {
+      const pkgPath = path.join(targetDir, 'package.json');
+      if (fs.existsSync(pkgPath)) {
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+        if (pkg.dependencies && Object.keys(pkg.dependencies).length > 0) {
+          execSync('npm install --production', {
+            cwd: targetDir,
+            timeout: 120000,
+            stdio: 'pipe'
+          });
+        }
+      }
+    } catch (err) {
+      console.warn(`[skill-install] npm install warning for ${repoName}:`, err.message);
+      // Don't fail — some skills may not need npm install
+    }
+
+    // Load and register the skill
+    try {
+      const skill = await loader.loadSkill(targetDir);
+      if (!skill) {
+        return { ok: false, error: `Cloned successfully but failed to load skill from ${repoName}. Check that it has a valid package.json and entry point.` };
+      }
+      skillRegistry.register(skill);
+      const meta = skill.getMetadata();
+      return { ok: true, skillId: meta.id, name: meta.name };
+    } catch (err) {
+      return { ok: false, error: `Cloned but registration failed: ${err.message}` };
+    }
+  }));
+
+  ipcMain.handle(IPC.SKILL_REMOVE, wrapHandler(IPC.SKILL_REMOVE, async (_event, { skillId } = {}) => {
+    const skill = skillRegistry.getSkill(skillId);
+    if (!skill) {
+      return { ok: false, error: `Unknown skill: ${skillId}` };
+    }
+
+    const skillPath = skill._skillPath;
+    if (!skillPath) {
+      return { ok: false, error: `Cannot determine install path for skill '${skillId}'.` };
+    }
+
+    // Unregister first
+    await skillRegistry.unregister(skillId);
+
+    // Clear the require cache for this skill's files
+    Object.keys(require.cache).forEach((key) => {
+      if (key.startsWith(skillPath)) {
+        delete require.cache[key];
+      }
+    });
+
+    // Delete the directory (or unlink if symlink)
+    try {
+      const stat = fs.lstatSync(skillPath);
+      if (stat.isSymbolicLink()) {
+        fs.unlinkSync(skillPath);
+      } else {
+        fs.rmSync(skillPath, { recursive: true, force: true });
+      }
+    } catch (err) {
+      return { ok: false, error: `Unregistered skill but failed to remove directory: ${err.message}` };
+    }
+
+    return { ok: true, skillId, removed: true };
   }));
 
   ipcMain.handle(IPC.SKILL_GET_SETTINGS, wrapHandler(IPC.SKILL_GET_SETTINGS, async (_event, { skillId } = {}) => {
@@ -95,7 +205,6 @@ function registerSkillHandlers(ipcMain, context = {}) {
 
     // Persist via customization file
     const customization = ensureSkillCustomizationFile(skillId);
-    const fs = require('fs');
     let existing = {};
     try {
       existing = JSON.parse(fs.readFileSync(customization.path, 'utf-8'));

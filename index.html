@@ -472,8 +472,17 @@
         <!-- Tab: Skills -->
         <div class="settings-tab-content" data-tab="skills">
           <section class="template-variables-card">
+            <h3>Install Skill</h3>
+            <p>Install a skill from a GitHub repository URL.</p>
+            <div class="skill-install-form">
+              <input type="text" class="skill-settings-input" id="skill-install-url" placeholder="https://github.com/user/repo">
+              <button type="button" class="btn btn-primary" id="skill-install-btn"><i class="fas fa-download"></i> Install</button>
+            </div>
+            <div class="provider-message" id="skill-install-status"></div>
+          </section>
+          <section class="template-variables-card">
             <h3>Loaded Skills</h3>
-            <p>Skills extend King Louie with new commands and capabilities. Disable a skill to prevent it from handling commands.</p>
+            <p>Disable a skill to prevent it from handling commands. Remove to uninstall completely.</p>
             <div id="skills-list"></div>
             <div class="provider-message" id="skills-status">Loading skills...</div>
           </section>
