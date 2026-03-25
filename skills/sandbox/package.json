@@ -1,6 +1,0 @@
-{
-  "name": "king-louie-sandbox-skill",
-  "version": "1.0.0",
-  "description": "Configure Docker sandbox settings for code execution",
-  "main": "index.js"
-}

@@ -1,8 +1,12 @@
-const { Skill } = require('../../src/skills/skill-interface');
+const { Skill } = require('king-louie/skill-interface');
 
 /**
  * Example Hello World Skill
- * Demonstrates the basic skill interface
+ *
+ * Demonstrates the basic skill interface including:
+ * - Command handling via the resolver chain
+ * - Configurable settings exposed in the settings overlay
+ * - Reading settings at runtime
  */
 class HelloWorldSkill extends Skill {
   constructor() {
@@ -15,7 +19,7 @@ class HelloWorldSkill extends Skill {
     return {
       id: 'hello-world',
       name: 'Hello World',
-      version: '1.0.0',
+      version: '26.3.24',
       description: 'Example skill that greets users',
       author: 'King Louie Team',
       commands: ['hello', 'greet'],
@@ -23,10 +27,24 @@ class HelloWorldSkill extends Skill {
     };
   }
 
+  getSettingsSchema() {
+    return [
+      {
+        key: 'name',
+        label: 'Your Name',
+        type: 'text',
+        default: '',
+        description: 'If set, greetings will address you by name.',
+        placeholder: 'e.g. Alice'
+      }
+    ];
+  }
+
   async initialize(context) {
     this.context = context;
-    console.log('[hello-world] Skill initialized!');
-    console.log('[hello-world] User data path:', context.userDataPath);
+    const settings = this.getSettings();
+    const who = settings.name || 'the world';
+    console.log(`[hello-world] Skill initialized! Ready to greet ${who}.`);
   }
 
   async resolveCode({ command, args = [], context }) {
@@ -35,54 +53,53 @@ class HelloWorldSkill extends Skill {
     }
 
     this.greetCount++;
+    const settings = this.getSettings();
 
     if (command === 'hello') {
-      const name = args.length > 0 ? args.join(' ') : 'friend';
+      // Use the arg if provided, fall back to the configured name, then "friend"
+      const name = args.length > 0
+        ? args.join(' ')
+        : (settings.name || 'friend');
       return {
         ok: true,
-        message: `👋 Hello, ${name}! (Greeting #${this.greetCount})\n\nChannel: ${context.channel}\nChat ID: ${context.chatId}`
+        message: `Hello, ${name}! (Greeting #${this.greetCount})`
       };
     }
 
     const greetings = [
-      'Howdy!',
-      'Hi there!',
-      'Greetings!',
-      'Salutations!',
-      'Hey!',
-      'What\'s up?'
+      'Howdy',
+      'Hi there',
+      'Greetings',
+      'Salutations',
+      'Hey',
+      'What\'s up'
     ];
-    const randomGreeting = greetings[Math.floor(Math.random() * greetings.length)];
+    const random = greetings[Math.floor(Math.random() * greetings.length)];
+    const suffix = settings.name ? `, ${settings.name}!` : '!';
     return {
       ok: true,
-      message: `${randomGreeting} 🎉`
+      message: `${random}${suffix}`
     };
   }
 
   async handleCommand(command, args, context) {
-    return {
-      ok: false,
-      error: `No fallback handler for command: ${command}`
-    };
+    return this.resolveCode({ command, args, context });
   }
 
   async getHelp() {
     return [
-      '👋 Hello World Skill',
+      'Hello World Skill',
       '',
       'Commands:',
-      '  /hello [name] - Say hello to someone (default: "friend")',
-      '  /greet - Get a random greeting',
+      '  /hello [name] - Say hello (uses your configured name if no arg given)',
+      '  /greet        - Get a random greeting',
       '',
-      'Examples:',
-      '  /hello',
-      '  /hello Alice',
-      '  /greet'
+      'Set your name in Settings > Hello World so greetings are personalized.'
     ].join('\n');
   }
 
   async cleanup() {
-    console.log(`[hello-world] Shutting down... Said hello ${this.greetCount} times!`);
+    console.log(`[hello-world] Shutting down. Said hello ${this.greetCount} times.`);
   }
 }
 

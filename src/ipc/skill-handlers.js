@@ -85,69 +85,97 @@ function registerSkillHandlers(ipcMain, context = {}) {
 
   ipcMain.handle(IPC.SKILL_INSTALL, wrapHandler(IPC.SKILL_INSTALL, async (_event, { url } = {}) => {
     if (!url || typeof url !== 'string') {
-      return { ok: false, error: 'A GitHub repository URL is required.' };
+      return { ok: false, error: 'A GitHub URL or local directory path is required.' };
     }
 
-    const cleaned = url.trim().replace(/\/+$/, '').replace(/\.git$/, '');
-
-    // Extract repo name for the directory
-    const repoName = path.basename(cleaned);
-    if (!repoName || !/^[a-zA-Z0-9._-]+$/.test(repoName)) {
-      return { ok: false, error: `Invalid repository name: ${repoName}` };
-    }
-
+    const cleaned = url.trim().replace(/\/+$/, '');
     const loader = getSkillLoader();
     if (!loader) {
       return { ok: false, error: 'Skill loader is not initialized.' };
     }
 
-    const targetDir = path.join(loader.skillsDirectory, repoName);
+    // Detect local directory vs git URL
+    const isLocalPath = /^[a-zA-Z]:[\\/]|^\/|^~\/|^\.\.?[\\/]/.test(cleaned);
+    let targetDir;
+    let skillDir; // The actual directory containing the skill files
 
-    if (fs.existsSync(targetDir)) {
-      return { ok: false, error: `Directory already exists: ${repoName}. Remove the existing skill first.` };
-    }
+    if (isLocalPath) {
+      // Local directory — resolve and symlink into skills/
+      const resolved = path.resolve(cleaned);
+      if (!fs.existsSync(resolved)) {
+        return { ok: false, error: `Directory not found: ${resolved}` };
+      }
+      const stat = fs.statSync(resolved);
+      if (!stat.isDirectory()) {
+        return { ok: false, error: `Not a directory: ${resolved}` };
+      }
+      const dirName = path.basename(resolved);
+      targetDir = path.join(loader.skillsDirectory, dirName);
 
-    // Clone the repo
-    try {
-      execSync(`git clone "${cleaned}.git" "${targetDir}"`, {
-        timeout: 60000,
-        stdio: 'pipe'
-      });
-    } catch (err) {
-      // Clean up partial clone
-      try { fs.rmSync(targetDir, { recursive: true, force: true }); } catch { /* ignore */ }
-      return { ok: false, error: `Git clone failed: ${err.stderr?.toString().trim() || err.message}` };
+      if (fs.existsSync(targetDir)) {
+        return { ok: false, error: `Skill "${dirName}" already exists. Remove it first.` };
+      }
+
+      try {
+        fs.symlinkSync(resolved, targetDir, 'junction');
+      } catch (err) {
+        return { ok: false, error: `Failed to create symlink: ${err.message}` };
+      }
+      skillDir = resolved;
+    } else {
+      // Git URL — clone into skills/
+      const strippedGit = cleaned.replace(/\.git$/, '');
+      const repoName = path.basename(strippedGit);
+      if (!repoName || !/^[a-zA-Z0-9._-]+$/.test(repoName)) {
+        return { ok: false, error: `Invalid repository name: ${repoName}` };
+      }
+
+      targetDir = path.join(loader.skillsDirectory, repoName);
+      if (fs.existsSync(targetDir)) {
+        return { ok: false, error: `Directory already exists: ${repoName}. Remove the existing skill first.` };
+      }
+
+      try {
+        const cloneUrl = cleaned.endsWith('.git') ? cleaned : `${strippedGit}.git`;
+        execSync(`git clone "${cloneUrl}" "${targetDir}"`, {
+          timeout: 60000,
+          stdio: 'pipe'
+        });
+      } catch (err) {
+        try { fs.rmSync(targetDir, { recursive: true, force: true }); } catch { /* ignore */ }
+        return { ok: false, error: `Git clone failed: ${err.stderr?.toString().trim() || err.message}` };
+      }
+      skillDir = targetDir;
     }
 
     // Run npm install if package.json has dependencies
     try {
-      const pkgPath = path.join(targetDir, 'package.json');
+      const pkgPath = path.join(skillDir, 'package.json');
       if (fs.existsSync(pkgPath)) {
         const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
         if (pkg.dependencies && Object.keys(pkg.dependencies).length > 0) {
           execSync('npm install --production', {
-            cwd: targetDir,
+            cwd: skillDir,
             timeout: 120000,
             stdio: 'pipe'
           });
         }
       }
     } catch (err) {
-      console.warn(`[skill-install] npm install warning for ${repoName}:`, err.message);
-      // Don't fail — some skills may not need npm install
+      console.warn(`[skill-install] npm install warning:`, err.message);
     }
 
     // Load and register the skill
     try {
       const skill = await loader.loadSkill(targetDir);
       if (!skill) {
-        return { ok: false, error: `Cloned successfully but failed to load skill from ${repoName}. Check that it has a valid package.json and entry point.` };
+        return { ok: false, error: `Install succeeded but failed to load skill. Check that it has a valid package.json and entry point.` };
       }
       skillRegistry.register(skill);
       const meta = skill.getMetadata();
       return { ok: true, skillId: meta.id, name: meta.name };
     } catch (err) {
-      return { ok: false, error: `Cloned but registration failed: ${err.message}` };
+      return { ok: false, error: `Installed but registration failed: ${err.message}` };
     }
   }));
 

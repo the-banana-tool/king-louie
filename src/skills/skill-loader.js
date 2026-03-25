@@ -1,6 +1,23 @@
 const fs = require('fs');
 const path = require('path');
+const Module = require('module');
 const { registry } = require('./skill-registry');
+
+// Hook into Node's module resolution so that require('king-louie/...')
+// resolves to actual files in this project, regardless of where the
+// requiring skill lives on disk (symlinked, cloned, etc.).
+const kingLouieModules = {
+  'king-louie/skill-interface': path.join(__dirname, 'skill-interface.js'),
+  'king-louie/bash-tool': path.join(__dirname, '..', 'tools', 'builtin', 'bash-tool.js')
+};
+
+const originalResolveFilename = Module._resolveFilename;
+Module._resolveFilename = function (request, parent, isMain, options) {
+  if (kingLouieModules[request]) {
+    return kingLouieModules[request];
+  }
+  return originalResolveFilename.call(this, request, parent, isMain, options);
+};
 
 const isPlainObject = (value) => {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);

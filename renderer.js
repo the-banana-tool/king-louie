@@ -1661,8 +1661,11 @@ function renderSkillsList(skills) {
   if (!skills || skills.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'provider-message';
-    empty.textContent = 'No skills loaded.';
+    empty.textContent = 'No skills loaded. Install one from a GitHub URL or local path above.';
     dom.skillsList.appendChild(empty);
+    if (dom.skillsStatus) {
+      dom.skillsStatus.textContent = '';
+    }
     return;
   }
 
@@ -1693,7 +1696,7 @@ async function installSkill() {
   const url = (dom.skillInstallUrl?.value || '').trim();
   if (!url) {
     if (dom.skillInstallStatus) {
-      dom.skillInstallStatus.textContent = 'Please enter a GitHub repository URL.';
+      dom.skillInstallStatus.textContent = 'Please enter a GitHub URL or local directory path.';
       dom.skillInstallStatus.classList.add('error');
     }
     return;

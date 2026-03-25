@@ -1,121 +1,152 @@
 # King Louie Skills
 
-This directory contains custom skills/plugins for King Louie.
+This directory is where installed skills are loaded from. Skills extend King Louie with custom commands, tools, and behaviors.
 
-## What is a Skill?
+Skills are managed through **Settings > Skills** in the UI, or by placing them in this directory manually.
 
-A skill is a self-contained module that extends King Louie's functionality with custom commands, tools, and behaviors. Skills can:
+## Installing Skills
 
-- Handle custom commands (e.g., `/std add "Task name"`)
-- Register custom tools that the agent can use
-- Maintain their own state/database
-- Work seamlessly with both Telegram and UI interfaces
+### From the UI
+
+Open **Settings > Skills** and enter a source in the install field:
+
+- **GitHub URL** — `https://github.com/user/king-louie-my-skill`
+- **Local directory** — `E:\Programming\my-skill` or `/home/user/my-skill`
+
+GitHub installs clone the repo into this directory. Local installs create a symlink, so the original directory stays in place and changes are reflected immediately.
+
+If the skill has a `package.json` with dependencies, `npm install --production` runs automatically.
+
+### Manual install
+
+Clone or symlink a skill into this directory:
+
+```bash
+# Clone from GitHub
+git clone https://github.com/user/king-louie-my-skill skills/my-skill
+
+# Or symlink a local directory
+ln -s /path/to/my-skill skills/my-skill       # Linux/macOS
+mklink /J skills\my-skill E:\path\to\my-skill  # Windows
+```
+
+Restart King Louie (or reload skills) to pick it up.
+
+## Removing Skills
+
+Click **Remove** on any skill card in **Settings > Skills**. This deletes the directory (or removes the symlink for linked skills). The original directory is not touched for symlinked skills.
+
+## Enabling / Disabling Skills
+
+Each skill has an **Enable/Disable** toggle in **Settings > Skills**. Disabled skills stay installed but their commands return an error. The state persists across restarts.
 
 ## Creating a Skill
 
-### 1. Project Structure
-
-Create a new directory in `skills/` with the following structure:
+### Project structure
 
 ```
-skills/
-└── my-skill/
-    ├── package.json
-    ├── index.js
-    ├── README.md
-    └── ... (other files)
+my-skill/
+├── package.json
+├── index.js
+└── ... (other files)
 ```
 
-### 2. Package.json
+### package.json
 
 ```json
 {
   "name": "king-louie-my-skill",
-  "version": "1.0.0",
+  "version": "YY.M.D",
   "main": "index.js",
-  "description": "My custom King Louie skill",
-  "dependencies": {}
+  "description": "My custom King Louie skill"
 }
 ```
 
-### 3. Skill Implementation
+### Skill implementation
 
-Your `index.js` should export a class or object implementing the skill interface:
+Export a class extending the `Skill` base class. Use `king-louie/skill-interface` to import it — this works regardless of where the skill lives on disk:
 
 ```javascript
-const { Skill } = require('../../src/skills/skill-interface');
+const { Skill } = require('king-louie/skill-interface');
 
 class MySkill extends Skill {
-  constructor() {
-    super();
-    this.context = null;
-  }
-
   getMetadata() {
     return {
       id: 'my-skill',
       name: 'My Skill',
-      version: '1.0.0',
+      version: '25.3.4',
       description: 'Does something awesome',
       author: 'Your Name',
-      commands: ['mycommand'] // Commands this skill handles (without /)
+      commands: ['mycommand'],       // Commands this skill handles (without /)
+      resolvers: ['code', 'skill'],  // Resolution chain (optional, default: ['skill'])
+      pinnable: false                // Whether this skill can be pinned to a chat
     };
   }
 
   async initialize(context) {
+    // context: { workingDirectory, userDataPath, toolRegistry, sessionManager, sendMessage, llmProvider }
     this.context = context;
-    console.log('[my-skill] Initialized with context:', context);
-
-    // context contains:
-    // - workingDirectory: King Louie working directory
-    // - userDataPath: Path for storing skill data
-    // - toolRegistry: For registering custom tools
-    // - sessionManager: For managing sessions
-    // - sendMessage: Function to send messages
   }
 
   async handleCommand(command, args, context) {
-    // command: 'mycommand' (without /)
-    // args: Array of command arguments
-    // context: {chatId, channel, userId, session}
-
-    if (args.length === 0) {
-      return {
-        ok: false,
-        error: 'Please provide an argument'
-      };
-    }
-
-    // Do something...
-    const result = `You said: ${args.join(' ')}`;
-
-    return {
-      ok: true,
-      message: result
-    };
+    // context: { chatId, channel, userId, session }
+    return { ok: true, message: `You said: ${args.join(' ')}` };
   }
 
   async getHelp() {
-    return [
-      'My Skill Help',
-      '',
-      'Usage:',
-      '  /mycommand <arg1> <arg2> ... - Does something awesome'
-    ].join('\n');
+    return '/mycommand <args> — does something awesome';
   }
 
   async cleanup() {
-    // Clean up resources when skill is unloaded
-    console.log('[my-skill] Cleaning up...');
+    // Called when the skill is unloaded
   }
 }
 
 module.exports = MySkill;
 ```
 
-## Command Context
+### Skill settings
 
-When your skill's `handleCommand` is called, it receives a context object:
+Skills can expose configurable settings that appear as a dedicated tab in the settings overlay. Override `getSettingsSchema()` to declare fields:
+
+```javascript
+getSettingsSchema() {
+  return [
+    { key: 'apiUrl', label: 'API URL', type: 'text', default: 'https://example.com', description: 'Backend endpoint' },
+    { key: 'timeout', label: 'Timeout (ms)', type: 'number', default: 30000 },
+    { key: 'verbose', label: 'Verbose logging', type: 'toggle', default: false },
+    { key: 'mode', label: 'Mode', type: 'select', default: 'fast', options: [
+      { label: 'Fast', value: 'fast' },
+      { label: 'Accurate', value: 'accurate' }
+    ]}
+  ];
+}
+```
+
+Supported field types: `text`, `number`, `toggle`, `select`, `password`.
+
+Read current values with `this.getSettings()`. React to changes by overriding `applyCustomization(settings)`.
+
+Settings are persisted in `skill-customizations/<skill-id>/customization.json` under the user data directory, so they survive skill updates.
+
+### Resolver chain
+
+Skills can use multiple resolution strategies, tried in order:
+
+| Resolver | Method | Use case |
+|----------|--------|----------|
+| `code` | `resolveCode()` | Deterministic logic, no AI needed |
+| `cli` | `resolveCli()` | Shell command execution |
+| `prompt` | `resolvePrompt()` | LLM-powered responses |
+| `skill` | `handleCommand()` | Default fallback handler |
+
+Set `resolvers` in metadata to control the chain, e.g. `['code', 'prompt', 'skill']`.
+
+### Pinned mode
+
+Skills with `pinnable: true` can be pinned to a chat with `/pin <skill-id>`. When pinned, all non-command messages go to the skill's `handleMessage(text, context)` method instead of the AI agent.
+
+## Command context
 
 ```javascript
 {
@@ -126,84 +157,34 @@ When your skill's `handleCommand` is called, it receives a context object:
 }
 ```
 
-## Return Value
-
-Your `handleCommand` should return a Promise resolving to:
+## Return value
 
 ```javascript
 {
-  ok: boolean,         // Success status
-  message?: string,    // Message to display (if ok=true)
-  error?: string,      // Error message (if ok=false)
-  data?: any          // Optional data payload
+  ok: boolean,                    // Success status
+  message?: string,               // Message to display
+  error?: string,                 // Error message (if ok=false)
+  format?: 'markdown'|'text',     // Content format (default: text)
+  data?: any,                     // Optional data payload
+  continueWithAgent?: boolean     // Also run AI agent after this response (pinned mode)
 }
 ```
 
-## Skill Context
+## Skill customizations
 
-During initialization, your skill receives a context object:
-
-```javascript
-{
-  workingDirectory: string,    // King Louie working directory
-  userDataPath: string,        // User data directory for storage
-  toolRegistry: object,        // King Louie's tool registry
-  sessionManager: object,      // Session manager
-  sendMessage: function        // (chatId, message) => Promise
-}
-```
-
-## Loading Skills
-
-Skills are automatically loaded from the `skills/` directory when King Louie starts. Each subdirectory is scanned for a `package.json` with a `main` entry point.
-
-## Testing Your Skill
-
-1. Create your skill directory in `skills/`
-2. Implement the skill interface
-3. Restart King Louie
-4. Use `/help` in Telegram or UI to see your skill listed
-5. Test your commands!
-
-## Example: Hello World Skill
-
-See `skills/hello-world/` for a complete working example.
-
-## Skill Customizations (Upgrade-Safe Overrides)
-
-King Louie supports user-level skill customizations without editing files under `skills/`.
-
-- Customizations are stored in your user data folder under:
-  - `skill-customizations/<skill-id>/customization.json`
-- Create/open a customization file from chat with:
-  - `/skill customize <skill-id>`
-
-### Customization File Shape
+User-level overrides are stored in `skill-customizations/<skill-id>/customization.json` under the user data directory. This file can override metadata and settings without modifying skill source files:
 
 ```json
 {
   "metadata": {
     "description": "My custom description",
-    "commands": ["std"],
-    "resolvers": ["code", "skill"]
+    "resolvers": ["code", "prompt", "skill"]
   },
   "settings": {
-    "exampleFlag": true
-  }
+    "apiUrl": "https://my-instance.com"
+  },
+  "enabled": true
 }
 ```
 
-### Merge Behavior
-
-- Customizations are loaded after the base skill module.
-- Objects are deep-merged (`metadata`, `settings`, nested objects).
-- Arrays are **replaced** (not concatenated).
-- If a skill implements `applyCustomization(settings)`, it will receive merged settings on load.
-
-## Tips
-
-- Use `userDataPath` to store skill-specific data
-- Skills can use SQLite, JSON files, or any Node.js module
-- Handle errors gracefully and return meaningful error messages
-- Log important events with `console.log('[my-skill] ...')`
-- Test commands in both Telegram and UI interfaces
+Objects are deep-merged. Arrays are replaced (not concatenated). Create/open a customization file from chat with `/skill customize <skill-id>`.
