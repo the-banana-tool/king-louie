@@ -2,20 +2,25 @@ const { wrapHandler } = require('./wrap-handler');
 const IPC = require('./constants');
 
 function registerWebhookHandlers(ipcMain, context = {}) {
-  const { webhookRegistry, webhookServer } = context;
+  const getRegistry = () => context.getWebhookRegistry ? context.getWebhookRegistry() : context.webhookRegistry;
+  const getServer = () => context.getWebhookServer ? context.getWebhookServer() : context.webhookServer;
 
-  if (!webhookRegistry) {
-    console.warn('[webhook-handlers] webhookRegistry not available in context');
-    return;
-  }
+  const requireRegistry = () => {
+    const registry = getRegistry();
+    if (!registry) throw new Error('Webhook system is still initializing, please try again');
+    return registry;
+  };
 
   ipcMain.handle(IPC.WEBHOOK_LIST, wrapHandler(IPC.WEBHOOK_LIST, async () => {
-    return webhookRegistry.list();
+    const registry = getRegistry();
+    if (!registry) return [];
+    return registry.list();
   }));
 
   ipcMain.handle(IPC.WEBHOOK_CREATE, wrapHandler(IPC.WEBHOOK_CREATE, async (_event, payload) => {
+    const webhookRegistry = requireRegistry();
     const { name, messageTemplate, rateLimit, route, signatureFormat } = payload;
-    
+
     if (!name || typeof name !== 'string' || !name.trim()) {
       throw new Error('Webhook name is required');
     }
@@ -29,7 +34,8 @@ function registerWebhookHandlers(ipcMain, context = {}) {
     };
 
     const webhook = webhookRegistry.register(config);
-    
+    const webhookServer = getServer();
+
     return {
       ...webhook,
       url: webhookServer ? webhookServer.getWebhookUrl(webhook.id) : null
@@ -37,8 +43,9 @@ function registerWebhookHandlers(ipcMain, context = {}) {
   }));
 
   ipcMain.handle(IPC.WEBHOOK_UPDATE, wrapHandler(IPC.WEBHOOK_UPDATE, async (_event, payload) => {
+    const webhookRegistry = requireRegistry();
     const { id, ...updates } = payload;
-    
+
     if (!id || typeof id !== 'string') {
       throw new Error('Webhook ID is required');
     }
@@ -48,6 +55,7 @@ function registerWebhookHandlers(ipcMain, context = {}) {
       throw new Error(`Webhook not found: ${id}`);
     }
 
+    const webhookServer = getServer();
     return {
       ...webhook,
       url: webhookServer ? webhookServer.getWebhookUrl(webhook.id) : null
@@ -55,8 +63,9 @@ function registerWebhookHandlers(ipcMain, context = {}) {
   }));
 
   ipcMain.handle(IPC.WEBHOOK_DELETE, wrapHandler(IPC.WEBHOOK_DELETE, async (_event, payload) => {
+    const webhookRegistry = requireRegistry();
     const { id } = payload;
-    
+
     if (!id || typeof id !== 'string') {
       throw new Error('Webhook ID is required');
     }
@@ -70,8 +79,9 @@ function registerWebhookHandlers(ipcMain, context = {}) {
   }));
 
   ipcMain.handle(IPC.WEBHOOK_GET, wrapHandler(IPC.WEBHOOK_GET, async (_event, payload) => {
+    const webhookRegistry = requireRegistry();
     const { id } = payload;
-    
+
     if (!id || typeof id !== 'string') {
       throw new Error('Webhook ID is required');
     }
@@ -81,6 +91,7 @@ function registerWebhookHandlers(ipcMain, context = {}) {
       throw new Error(`Webhook not found: ${id}`);
     }
 
+    const webhookServer = getServer();
     return {
       ...webhook,
       url: webhookServer ? webhookServer.getWebhookUrl(webhook.id) : null
@@ -88,8 +99,9 @@ function registerWebhookHandlers(ipcMain, context = {}) {
   }));
 
   ipcMain.handle(IPC.WEBHOOK_REGENERATE_SECRET, wrapHandler(IPC.WEBHOOK_REGENERATE_SECRET, async (_event, payload) => {
+    const webhookRegistry = requireRegistry();
     const { id } = payload;
-    
+
     if (!id || typeof id !== 'string') {
       throw new Error('Webhook ID is required');
     }
@@ -102,6 +114,7 @@ function registerWebhookHandlers(ipcMain, context = {}) {
     const newSecret = webhookRegistry.generateSecret();
     const updatedWebhook = webhookRegistry.update(id, { secret: newSecret });
 
+    const webhookServer = getServer();
     return {
       ...updatedWebhook,
       url: webhookServer ? webhookServer.getWebhookUrl(updatedWebhook.id) : null

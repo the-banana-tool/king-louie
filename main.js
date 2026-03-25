@@ -1932,7 +1932,6 @@ const initializeAgentInfrastructure = async () => {
   pinManager = new PinManager({
     storageFile: path.join(app.getPath('userData'), 'skill-pins.json')
   });
-  await pinManager.load();
   userProfile = new UserProfile({
     getStoredProfile: () => store.get('userProfile', UserProfile.getDefaultProfile()),
     setStoredProfile: (profile) => store.set('userProfile', profile)
@@ -1963,7 +1962,12 @@ const initializeAgentInfrastructure = async () => {
 
   const cronJobsFile = path.join(app.getPath('userData'), 'cron', 'jobs.json');
   cronStore = new CronStore(cronJobsFile);
-  await cronStore.load();
+
+  // Load persistent stores and hooks in parallel
+  await Promise.all([
+    pinManager.load(),
+    cronStore.load(),
+  ]);
 
   reloadHooksFromSettings();
 
@@ -2089,9 +2093,7 @@ const initializeAgentInfrastructure = async () => {
     }
   });
 
-  await gatewayServer.start();
-
-  // Initialize and load skills
+  // Initialize skills while gateway server starts in parallel
   skillLoader = new SkillLoader({
     skillsDirectory: path.join(__dirname, 'skills'),
     context: {
@@ -2124,30 +2126,44 @@ const initializeAgentInfrastructure = async () => {
     }
   });
 
-  const skillsLoaded = await skillLoader.loadAll();
+  const [, skillsLoaded] = await Promise.all([
+    gatewayServer.start(),
+    skillLoader.loadAll(),
+  ]);
   console.log(`[main] Loaded ${skillsLoaded} skill(s)`);
 
-  const telegramToken = String(getDecryptedTelegramToken() || '').trim();
-  if (telegramToken) {
-    await startTelegramBridge(telegramToken);
-  }
+  // Defer channel connections — don't block startup for network calls
+  const deferChannels = async () => {
+    try {
+      const telegramToken = String(getDecryptedTelegramToken() || '').trim();
+      if (telegramToken) {
+        await startTelegramBridge(telegramToken);
+      }
 
-  const discordToken = String(getDecryptedDiscordToken() || '').trim();
-  if (discordToken) {
-    await startDiscordBridge(discordToken);
-  }
-  const slackAppToken = getDecryptedSlackAppToken();
-  const slackBotToken = getDecryptedSlackBotToken();
-  const settings = getSettings();
-  if (slackAppToken && slackBotToken && settings.channels?.slack?.enabled) {
-    await startSlackChannel(slackAppToken, slackBotToken);
-  }
+      const discordToken = String(getDecryptedDiscordToken() || '').trim();
+      if (discordToken) {
+        await startDiscordBridge(discordToken);
+      }
 
-  await runHookEvent('SessionStart', {
+      const slackAppToken = getDecryptedSlackAppToken();
+      const slackBotToken = getDecryptedSlackBotToken();
+      const settings = getSettings();
+      if (slackAppToken && slackBotToken && settings.channels?.slack?.enabled) {
+        await startSlackChannel(slackAppToken, slackBotToken);
+      }
+    } catch (err) {
+      console.warn('[main] Deferred channel startup error:', err.message);
+    }
+  };
+
+  // Fire-and-forget: channels, hooks, and memory aging
+  deferChannels();
+
+  runHookEvent('SessionStart', {
     source: 'main',
     startedAt: new Date().toISOString(),
     workingDirectory: process.cwd()
-  });
+  }).catch(err => console.warn('[main] SessionStart hook failed:', err.message));
 
   if (memoryManager) {
     memoryManager.runAging();
@@ -2298,6 +2314,10 @@ registerHandlers(ipcMain, {
 
 app.whenReady().then(async () => {
   initializeTools();
+
+  // Show the window immediately — don't block on infrastructure
+  createWindow();
+
   await initializeAgentInfrastructure();
 
   taskManager.on('taskCreated', (task) => {
@@ -2317,8 +2337,6 @@ app.whenReady().then(async () => {
       mainWindow.webContents.send('task:unblocked', task);
     }
   });
-
-  createWindow();
 
   app.on('activate', function () {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
