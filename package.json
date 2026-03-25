@@ -6,7 +6,11 @@
   "scripts": {
     "start": "electron .",
     "test": "node --test tests/*.test.js",
-    "test:watch": "node --test --watch"
+    "test:watch": "node --test --watch",
+    "build": "electron-builder",
+    "build:win": "electron-builder --win",
+    "build:mac": "electron-builder --mac",
+    "build:linux": "electron-builder --linux"
   },
   "keywords": [
     "electron",
@@ -15,8 +19,45 @@
   ],
   "author": "",
   "license": "ISC",
+  "build": {
+    "appId": "com.kinglouie.app",
+    "productName": "King Louie",
+    "files": [
+      "**/*",
+      "!tests/**",
+      "!product-management/**",
+      "!.github/**"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "signingHashAlgorithms": [
+        "sha256"
+      ],
+      "sign": "./build/sign.js"
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "hardenedRuntime": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "notarize": true
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Utility"
+    }
+  },
   "devDependencies": {
     "electron": "^40.1.0",
+    "electron-builder": "^26.8.1",
     "playwright": "^1.58.2"
   },
   "dependencies": {
