@@ -133,8 +133,10 @@ class ToolExecutor extends EventEmitter {
       this.emit('postExecute', { toolName, parameters: effectiveParameters, result });
       return result;
     } catch (error) {
+      const errorResult = { success: false, error: error.message };
       this.emit('error', { toolName, parameters: effectiveParameters, error });
-      return { success: false, error: error.message };
+      this.emit('postExecute', { toolName, parameters: effectiveParameters, result: errorResult });
+      return errorResult;
     }
   }
 

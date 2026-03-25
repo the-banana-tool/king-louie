@@ -770,7 +770,13 @@ function addToolEventCompact(toolName, payload, variant = '', isResult = false) 
     // Try rendering as markdown, fall back to pre
     if (typeof payload === 'string' || (payload && (payload.content || payload.stdout || payload.output || payload.message))) {
       const markdownSource = typeof payload === 'string' ? payload : (payload.content || payload.stdout || payload.output || payload.message);
-      payloadDiv.innerHTML = window.electron.markdown.parse(markdownSource);
+      try {
+        payloadDiv.innerHTML = window.electron.markdown.parse(typeof markdownSource === 'string' ? markdownSource : String(markdownSource));
+      } catch {
+        const pre = document.createElement('pre');
+        pre.textContent = payloadText;
+        payloadDiv.appendChild(pre);
+      }
     } else {
       const pre = document.createElement('pre');
       pre.textContent = payloadText;
@@ -3369,10 +3375,20 @@ async function sendMessage() {
 
     if (updatedChat) {
       appState.chats = appState.chats.map((chat) => (chat.id === updatedChat.id ? updatedChat : chat));
-      refreshUI();
+    } else {
+      // Backend may have saved the response (e.g. aborted run) but returned
+      // undefined — reload chats from storage so we don't lose the message.
+      try {
+        const data = unwrapIpcResult(await window.electron.chat.load(), 'reload');
+        appState.chats = data.chats || [];
+      } catch { /* best-effort reload */ }
     }
+    refreshUI();
   } catch (error) {
     addMessage('assistant', `Error: ${error.message || 'Unable to send message.'}`);
+  } finally {
+    setResponseActive(false);
+    flushToolGroup();
   }
 }
 
@@ -4379,12 +4395,21 @@ unsubscribeHandlers.push(window.electron.chat.onMessageError(({ chatId, response
 
 unsubscribeHandlers.push(window.electron.chat.onToolUse(({ chatId, toolName, parameters }) => {
   if (chatId !== appState.activeChatId) return;
-  addToolEventCompact(toolName, parameters, '', false);
+  try {
+    addToolEventCompact(toolName, parameters, '', false);
+  } catch (err) {
+    console.error('[renderer] Failed to render tool use for', toolName, err);
+  }
 }));
 
 unsubscribeHandlers.push(window.electron.chat.onToolResult(({ chatId, toolName, result }) => {
   if (chatId !== appState.activeChatId) return;
-  addToolEventCompact(toolName, result, result?.success === false ? 'error' : 'success', true);
+  const isError = result?.success === false || result?.ok === false;
+  try {
+    addToolEventCompact(toolName, result, isError ? 'error' : 'success', true);
+  } catch (err) {
+    console.error('[renderer] Failed to render tool result for', toolName, err);
+  }
 }));
 
 unsubscribeHandlers.push(window.electron.tool.onApprovalRequired(({ approvalId, toolName, parameters }) => {
