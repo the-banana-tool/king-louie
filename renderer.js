@@ -155,6 +155,10 @@ const dom = {
   imagePreviewList: document.getElementById('image-preview-list'),
   imageFileInput: document.getElementById('image-file-input'),
   attachImageBtn: document.getElementById('attach-image-btn'),
+  chatInfoBtn: document.getElementById('chat-info-btn'),
+  chatInfoPopover: document.getElementById('chat-info-popover'),
+  chatInfoCloseBtn: document.getElementById('chat-info-close-btn'),
+  chatInfoPopoverBody: document.getElementById('chat-info-popover-body'),
   settingsTabs: document.getElementById('settings-tabs'),
   settingsTabsMore: document.getElementById('settings-tabs-more'),
   settingsTabsDropdown: document.getElementById('settings-tabs-dropdown'),
@@ -841,17 +845,30 @@ function showToolApprovalDialog(approvalId, toolName, parameters) {
   approveBtn.appendChild(faIcon('fas fa-check'));
   approveBtn.appendChild(document.createTextNode(' Approve'));
 
-  denyBtn.addEventListener('click', () => {
-    window.electron.tool.respondToApproval(approvalId, false, { alwaysApprove: false });
+  function dismiss(approved) {
+    if (modal._dismissed) return;
+    modal._dismissed = true;
+    if (approved) {
+      window.electron.tool.respondToApproval(approvalId, true, {
+        alwaysApprove: Boolean(alwaysApproveInput.checked)
+      });
+    } else {
+      window.electron.tool.respondToApproval(approvalId, false, { alwaysApprove: false });
+    }
     modal.remove();
-  }, { once: true });
+    dom.userInput.focus();
+  }
 
-  approveBtn.addEventListener('click', () => {
-    window.electron.tool.respondToApproval(approvalId, true, {
-      alwaysApprove: Boolean(alwaysApproveInput.checked)
-    });
-    modal.remove();
-  }, { once: true });
+  denyBtn.addEventListener('click', () => dismiss(false), { once: true });
+  approveBtn.addEventListener('click', () => dismiss(true), { once: true });
+
+  // Allow dismissing via backdrop click or Escape key
+  modal.addEventListener('click', (event) => {
+    if (event.target === modal) dismiss(false);
+  });
+  modal.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') dismiss(false);
+  });
 
   actions.appendChild(alwaysApproveLabel);
   actions.appendChild(denyBtn);
@@ -864,6 +881,7 @@ function showToolApprovalDialog(approvalId, toolName, parameters) {
 
   modal.appendChild(card);
   document.body.appendChild(modal);
+  approveBtn.focus();
 }
 
 // Send message function
@@ -982,14 +1000,12 @@ function renderChatList() {
     const renameBtn = document.createElement('button');
     renameBtn.className = 'btn btn-sm chat-action-btn';
     renameBtn.appendChild(faIcon('fas fa-pen'));
-    renameBtn.appendChild(document.createTextNode(' Rename'));
     renameBtn.dataset.action = 'rename';
     renameBtn.dataset.chatId = chat.id;
 
     const deleteBtn = document.createElement('button');
     deleteBtn.className = 'btn btn-sm btn-danger chat-action-btn';
     deleteBtn.appendChild(faIcon('fas fa-trash'));
-    deleteBtn.appendChild(document.createTextNode(' Delete'));
     deleteBtn.dataset.action = 'delete';
     deleteBtn.dataset.chatId = chat.id;
 
@@ -1002,6 +1018,92 @@ function renderChatList() {
 
     dom.chatList.appendChild(chatItem);
   });
+}
+
+function renderChatInfoPopover() {
+  if (!dom.chatInfoPopoverBody) return;
+  const chat = getActiveChat();
+  dom.chatInfoPopoverBody.innerHTML = '';
+
+  if (!chat) {
+    dom.chatInfoPopoverBody.textContent = 'No active chat.';
+    return;
+  }
+
+  const totals = chat.llmTotals || sumChatLlmTotals(chat);
+  const messageCount = chat.messages?.length || 0;
+  const userMessages = chat.messages?.filter((m) => m.sender === 'user').length || 0;
+  const assistantMessages = chat.messages?.filter((m) => m.sender === 'assistant').length || 0;
+  const tier = formatInferenceTierLabel(getActiveInferenceTier());
+  const tierMap = appState.settings?.inference?.tierMap || {};
+  const activeTierKey = getActiveInferenceTier();
+  const tierInfo = tierMap[activeTierKey] || {};
+  const memoryCount = appState.memoryEntries?.length || 0;
+
+  const rows = [
+    { section: 'Messages' },
+    { icon: 'fas fa-comments', label: 'Total messages', value: String(messageCount) },
+    { icon: 'fas fa-user', label: 'User', value: String(userMessages) },
+    { icon: 'fas fa-robot', label: 'Assistant', value: String(assistantMessages) },
+    { divider: true },
+    { section: 'Token Usage' },
+    { icon: 'fas fa-arrow-up', label: 'Input tokens', value: formatTokenCount(totals.inputTokens) },
+    { icon: 'fas fa-arrow-down', label: 'Output tokens', value: formatTokenCount(totals.outputTokens) },
+    { icon: 'fas fa-sigma', label: 'Total tokens', value: formatTokenCount(totals.totalTokens) },
+    { icon: 'fas fa-dollar-sign', label: 'Estimated cost', value: formatUsd(totals.costUsd) },
+    { divider: true },
+    { section: 'Inference' },
+    { icon: 'fas fa-bolt', label: 'Active tier', value: tier },
+    { icon: 'fas fa-plug', label: 'Provider', value: tierInfo.provider || '—' },
+    { icon: 'fas fa-microchip', label: 'Model', value: tierInfo.model || '—' },
+    { divider: true },
+    { section: 'Memory' },
+    { icon: 'fas fa-brain', label: 'Memory entries', value: String(memoryCount) },
+  ];
+
+  rows.forEach((row) => {
+    if (row.divider) {
+      const hr = document.createElement('hr');
+      hr.className = 'chat-info-divider';
+      dom.chatInfoPopoverBody.appendChild(hr);
+      return;
+    }
+    if (row.section) {
+      const title = document.createElement('div');
+      title.className = 'chat-info-section-title';
+      title.textContent = row.section;
+      dom.chatInfoPopoverBody.appendChild(title);
+      return;
+    }
+    const el = document.createElement('div');
+    el.className = 'chat-info-row';
+
+    const labelEl = document.createElement('span');
+    labelEl.className = 'chat-info-label';
+    if (row.icon) {
+      labelEl.appendChild(faIcon(row.icon));
+    }
+    labelEl.appendChild(document.createTextNode(row.label));
+
+    const valueEl = document.createElement('span');
+    valueEl.className = 'chat-info-value';
+    valueEl.textContent = row.value;
+
+    el.appendChild(labelEl);
+    el.appendChild(valueEl);
+    dom.chatInfoPopoverBody.appendChild(el);
+  });
+}
+
+function toggleChatInfoPopover() {
+  if (!dom.chatInfoPopover) return;
+  const isOpen = !dom.chatInfoPopover.hidden;
+  if (isOpen) {
+    dom.chatInfoPopover.hidden = true;
+  } else {
+    renderChatInfoPopover();
+    dom.chatInfoPopover.hidden = false;
+  }
 }
 
 function updateEmptyState() {
@@ -1018,6 +1120,7 @@ function updateEmptyState() {
 function renderChatMessages() {
   const activeChat = getActiveChat();
   dom.chatMessages.innerHTML = '';
+  if (dom.chatInfoPopover) dom.chatInfoPopover.hidden = true;
 
   // Clear any pending tool group buffer
   toolGroupBuffer.items = [];
@@ -3058,6 +3161,7 @@ async function handleCreateChat() {
 async function handleSelectChat(chatId) {
   appState.streamBuffers.clear();
   appState.activeChatId = chatId;
+  setResponseActive(false);
   unwrapIpcResult(await window.electron.chat.setActive(chatId), 'Unable to switch active chat.');
   refreshUI();
 }
@@ -3444,6 +3548,27 @@ if (dom.toggleHistoryBtn) {
   });
 }
 
+/* --- Chat info popover ------------------------------------- */
+if (dom.chatInfoBtn) {
+  dom.chatInfoBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleChatInfoPopover();
+  });
+}
+
+if (dom.chatInfoCloseBtn) {
+  dom.chatInfoCloseBtn.addEventListener('click', () => {
+    dom.chatInfoPopover.hidden = true;
+  });
+}
+
+document.addEventListener('click', (e) => {
+  if (dom.chatInfoPopover && !dom.chatInfoPopover.hidden &&
+      !e.target.closest('.chat-info-popover') && !e.target.closest('#chat-info-btn')) {
+    dom.chatInfoPopover.hidden = true;
+  }
+});
+
 if (dom.closeSettingsBtn) {
   dom.closeSettingsBtn.addEventListener('click', () => {
     setSettingsDrawer(false);
@@ -3457,8 +3582,19 @@ dom.settingsDrawer.addEventListener('click', (e) => {
 });
 
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !dom.settingsDrawer.hidden) {
-    setSettingsDrawer(false);
+  if (e.key === 'Escape') {
+    if (!dom.settingsDrawer.hidden) {
+      setSettingsDrawer(false);
+      dom.userInput.focus();
+      return;
+    }
+    // Dismiss any lingering tool approval modals
+    const approvalModal = document.querySelector('.tool-approval-modal');
+    if (approvalModal && !approvalModal._dismissed) {
+      approvalModal._dismissed = true;
+      approvalModal.remove();
+      dom.userInput.focus();
+    }
   }
 });
 
