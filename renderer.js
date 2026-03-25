@@ -3525,12 +3525,13 @@ async function sendMessage() {
       }
     }
 
-    const updatedChat = await window.electron.chat.sendMessage({
+    const rawResult = await window.electron.chat.sendMessage({
       chatId: appState.activeChatId,
       message,
       images: pendingImages.map(({ previewUrl, ...rest }) => rest),
       agentMode: appState.isAgentModeEnabled
     });
+    const updatedChat = unwrapIpcResult(rawResult, 'Unable to send message.');
 
     if (updatedChat) {
       appState.chats = appState.chats.map((chat) => (chat.id === updatedChat.id ? updatedChat : chat));
@@ -3544,7 +3545,12 @@ async function sendMessage() {
     }
     refreshUI();
   } catch (error) {
-    addMessage('assistant', `Error: ${error.message || 'Unable to send message.'}`);
+    // onMessageError may have already displayed this error via IPC event.
+    // Only add a fallback message if no error element was rendered yet.
+    const alreadyShown = dom.chatMessages.querySelector('.message.assistant:last-child .message-content p');
+    if (!alreadyShown || !alreadyShown.textContent.startsWith('Error:')) {
+      addMessage('assistant', `Error: ${error.message || 'Unable to send message.'}`);
+    }
   } finally {
     setResponseActive(false, appState.activeChatId);
     flushToolGroup();
@@ -4621,13 +4627,26 @@ unsubscribeHandlers.push(window.electron.chat.onMessageError(({ chatId, response
   appState.streamBuffers.delete(responseId);
   setResponseActive(false, chatId);
   if (chatId !== appState.activeChatId) return;
-  const messageDiv = dom.chatMessages.querySelector(`[data-response-id="${responseId}"] .message-content`);
-  if (messageDiv) {
-    const p = document.createElement('p');
-    p.textContent = `Error: ${error}`;
-    messageDiv.textContent = '';
-    messageDiv.appendChild(p);
+
+  let messageDiv = dom.chatMessages.querySelector(`[data-response-id="${responseId}"] .message-content`);
+
+  // If onMessageStart never fired, there's no element yet — create one so the
+  // error is visible instead of silently lost.
+  if (!messageDiv) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'message assistant';
+    wrapper.dataset.responseId = responseId || 'error';
+    messageDiv = document.createElement('div');
+    messageDiv.className = 'message-content';
+    wrapper.appendChild(messageDiv);
+    dom.chatMessages.appendChild(wrapper);
   }
+
+  const p = document.createElement('p');
+  p.textContent = `Error: ${error}`;
+  messageDiv.textContent = '';
+  messageDiv.appendChild(p);
+  dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
 }));
 
 unsubscribeHandlers.push(window.electron.chat.onToolUse(({ chatId, toolName, parameters }) => {
