@@ -29,7 +29,8 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     updateStatus,
     runLlmCommand,
     setActiveInferenceTier,
-    setNotificationSettings
+    setNotificationSettings,
+    getMainWindow
   } = context;
 
   const getTelegramBridge = () => (
@@ -82,7 +83,8 @@ function registerSettingsHandlers(ipcMain, context = {}) {
         bridgeActive: Boolean(getTelegramBridge()),
         status: status.telegram || null
       },
-      webSearch: settings.webSearch
+      webSearch: settings.webSearch,
+      allowedDirectories: settings.allowedDirectories || []
     };
   }));
 
@@ -306,6 +308,36 @@ function registerSettingsHandlers(ipcMain, context = {}) {
   ipcMain.handle('settings:saveNotifications', wrapHandler('settings:saveNotifications', async (_event, { notifications } = {}) => {
     const saved = setNotificationSettings(notifications || {});
     return { ok: true, notifications: saved };
+  }));
+
+  ipcMain.handle('settings:addAllowedDirectory', wrapHandler('settings:addAllowedDirectory', async () => {
+    const { dialog } = require('electron');
+    const getMainWindow = context.getMainWindow;
+    const win = typeof getMainWindow === 'function' ? getMainWindow() : null;
+    const result = await dialog.showOpenDialog(win, {
+      properties: ['openDirectory'],
+      title: 'Add Allowed Directory'
+    });
+    if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+      return { ok: false, canceled: true };
+    }
+    const dir = result.filePaths[0];
+    const settings = getSettings();
+    const dirs = Array.isArray(settings.allowedDirectories) ? [...settings.allowedDirectories] : [];
+    if (!dirs.includes(dir)) {
+      dirs.push(dir);
+    }
+    settings.allowedDirectories = dirs;
+    setSettings(settings);
+    return { ok: true, allowedDirectories: dirs };
+  }));
+
+  ipcMain.handle('settings:removeAllowedDirectory', wrapHandler('settings:removeAllowedDirectory', async (_event, { directory } = {}) => {
+    const settings = getSettings();
+    const dirs = Array.isArray(settings.allowedDirectories) ? settings.allowedDirectories.filter((d) => d !== directory) : [];
+    settings.allowedDirectories = dirs;
+    setSettings(settings);
+    return { ok: true, allowedDirectories: dirs };
   }));
 }
 

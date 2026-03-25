@@ -266,6 +266,15 @@ contextBridge.exposeInMainWorld(
         validateString(chatId, 'chatId');
         return ipcRenderer.invoke('chat:delete', chatId);
       },
+      setWorkingDirectory: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.chatId, 'chatId');
+        return ipcRenderer.invoke('chat:setWorkingDirectory', payload);
+      },
+      pickWorkingDirectory: (chatId) => {
+        validateString(chatId, 'chatId');
+        return ipcRenderer.invoke('chat:pickWorkingDirectory', { chatId });
+      },
       addMessage: (payload) => {
         validateObject(payload, 'payload');
         validateString(payload.chatId, 'chatId');
@@ -361,6 +370,11 @@ contextBridge.exposeInMainWorld(
       testVoice: (payload) =>
         throttleInvoke('settings:testVoice', () => ipcRenderer.invoke('settings:testVoice', payload)),
       saveNotifications: (payload) => ipcRenderer.invoke('settings:saveNotifications', payload),
+      addAllowedDirectory: () => ipcRenderer.invoke('settings:addAllowedDirectory'),
+      removeAllowedDirectory: (directory) => {
+        validateString(directory, 'directory');
+        return ipcRenderer.invoke('settings:removeAllowedDirectory', { directory });
+      },
       saveProvider: (payload) => {
         validateSettingsSaveProviderPayload(payload);
         return ipcRenderer.invoke('settings:saveProvider', payload);

@@ -11,6 +11,8 @@ module.exports = {
   CHAT_SEND_MESSAGE: 'chat:sendMessage',
   CHAT_STOP_RESPONSE: 'chat:stopResponse',
   CHAT_SET_AGENT_MODE: 'chat:setAgentMode',
+  CHAT_SET_WORKING_DIR: 'chat:setWorkingDirectory',
+  CHAT_PICK_WORKING_DIR: 'chat:pickWorkingDirectory',
 
   TOOL_EXECUTE: 'tool:execute',
   TOOL_LIST: 'tool:list',

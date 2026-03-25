@@ -1,7 +1,7 @@
 const fs = require('fs').promises;
 const path = require('path');
 const { Tool } = require('../tool-schema');
-const { isPathWithin } = require('../utils');
+const { isPathAllowed } = require('../utils');
 
 const ReadTool = new Tool({
   name: 'Read',
@@ -30,12 +30,13 @@ const ReadTool = new Tool({
   async execute(params, options = {}) {
     const { file_path, offset, limit } = params;
     const workingDirectory = options.workingDirectory || process.cwd();
+    const allowedDirectories = options.allowedDirectories || [];
     const resolvedPath = path.isAbsolute(file_path)
       ? path.resolve(file_path)
       : path.resolve(workingDirectory, file_path);
 
-    if (!isPathWithin(workingDirectory, resolvedPath)) {
-      throw new Error('Access denied: Path outside working directory');
+    if (!isPathAllowed(resolvedPath, workingDirectory, allowedDirectories)) {
+      throw new Error('Access denied: Path outside working directory and allowed directories');
     }
 
     try {

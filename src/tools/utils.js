@@ -72,6 +72,22 @@ function isPathWithin(basePath, targetPath) {
   return target === base || target.startsWith(`${base}/`);
 }
 
+/**
+ * Check if a target path is allowed — either within the working directory
+ * or within any of the global allowed directories.
+ */
+function isPathAllowed(targetPath, workingDirectory, allowedDirectories = []) {
+  if (workingDirectory && isPathWithin(workingDirectory, targetPath)) {
+    return true;
+  }
+  for (const dir of allowedDirectories) {
+    if (dir && isPathWithin(dir, targetPath)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function evaluateDangerousCommand(command = '', patterns = DEFAULT_DANGEROUS_COMMAND_PATTERNS) {
   const text = String(command || '');
   for (const rule of patterns) {
@@ -96,6 +112,7 @@ function evaluateDangerousCommand(command = '', patterns = DEFAULT_DANGEROUS_COM
 
 module.exports = {
   isPathWithin,
+  isPathAllowed,
   evaluateDangerousCommand,
   DEFAULT_DANGEROUS_COMMAND_PATTERNS,
   DEFAULT_PROTECTED_PATHS

@@ -1,6 +1,7 @@
 const Tool = require('../tool-schema').Tool;
 const fg = require('fast-glob');
 const path = require('path');
+const { isPathAllowed } = require('../utils');
 
 const globTool = new Tool({
   name: 'Glob',
@@ -17,10 +18,15 @@ const globTool = new Tool({
   requiresApproval: false,
   execute: async (params, context) => {
     const { pattern, cwd, maxResults = 100 } = params;
-    const baseDir = cwd || context?.workingDirectory || process.cwd();
+    const workingDirectory = context?.workingDirectory || process.cwd();
+    const allowedDirectories = context?.allowedDirectories || [];
+    const baseDir = cwd || workingDirectory;
 
-    // Security: validate the resolved cwd is within allowed paths
     const resolvedBase = path.resolve(baseDir);
+
+    if (!isPathAllowed(resolvedBase, workingDirectory, allowedDirectories)) {
+      return { ok: false, error: 'Access denied: Path outside working directory and allowed directories' };
+    }
 
     try {
       const files = await fg(pattern, {

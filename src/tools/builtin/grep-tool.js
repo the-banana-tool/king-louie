@@ -2,6 +2,7 @@ const { Tool } = require('../tool-schema');
 const fs = require('fs');
 const path = require('path');
 const fg = require('fast-glob');
+const { isPathAllowed } = require('../utils');
 
 function isBinary(filePath) {
   try {
@@ -47,7 +48,14 @@ const grepTool = new Tool({
       contextLines = 0
     } = params;
 
-    const baseDir = searchPath || context?.workingDirectory || process.cwd();
+    const workingDirectory = context?.workingDirectory || process.cwd();
+    const allowedDirectories = context?.allowedDirectories || [];
+    const baseDir = searchPath || workingDirectory;
+
+    if (!isPathAllowed(path.resolve(baseDir), workingDirectory, allowedDirectories)) {
+      return { ok: false, error: 'Access denied: Path outside working directory and allowed directories' };
+    }
+
     let regex;
     try {
       regex = new RegExp(pattern, caseSensitive ? 'g' : 'gi');

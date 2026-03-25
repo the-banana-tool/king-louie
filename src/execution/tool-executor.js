@@ -6,6 +6,7 @@ class ToolExecutor extends EventEmitter {
   constructor(options = {}) {
     super();
     this.workingDirectory = options.workingDirectory || process.cwd();
+    this.allowedDirectories = options.allowedDirectories || [];
     this.requireApproval = options.requireApproval !== false;
     this.approvalRequester =
       typeof options.approvalRequester === 'function'
@@ -107,6 +108,7 @@ class ToolExecutor extends EventEmitter {
       const result = await tool.execute(effectiveParameters, {
         ...options,
         workingDirectory: options.workingDirectory || this.workingDirectory,
+        allowedDirectories: options.allowedDirectories || this.allowedDirectories,
         runtimeEnvironment
       });
 

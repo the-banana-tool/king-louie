@@ -153,6 +153,39 @@ function registerChatHandlers(ipcMain, context = {}) {
     return updated.find((chat) => chat.id === chatId);
   }));
 
+  ipcMain.handle(IPC.CHAT_SET_WORKING_DIR, wrapHandler(IPC.CHAT_SET_WORKING_DIR, async (_event, { chatId, workingDirectory }) => {
+    const chats = getChats();
+    const updated = chats.map((chat) =>
+      chat.id === chatId
+        ? { ...chat, workingDirectory: workingDirectory || null, updatedAt: new Date().toISOString() }
+        : chat
+    );
+    setChats(updated);
+    return updated.find((chat) => chat.id === chatId);
+  }));
+
+  ipcMain.handle(IPC.CHAT_PICK_WORKING_DIR, wrapHandler(IPC.CHAT_PICK_WORKING_DIR, async (_event, { chatId }) => {
+    const { dialog } = require('electron');
+    const getMainWindow = context.getMainWindow;
+    const win = typeof getMainWindow === 'function' ? getMainWindow() : null;
+    const result = await dialog.showOpenDialog(win, {
+      properties: ['openDirectory'],
+      title: 'Select Working Directory'
+    });
+    if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+      return { canceled: true };
+    }
+    const dir = result.filePaths[0];
+    const chats = getChats();
+    const updated = chats.map((chat) =>
+      chat.id === chatId
+        ? { ...chat, workingDirectory: dir, updatedAt: new Date().toISOString() }
+        : chat
+    );
+    setChats(updated);
+    return { canceled: false, chat: updated.find((chat) => chat.id === chatId) };
+  }));
+
   ipcMain.handle(IPC.CHAT_ADD_MESSAGE, wrapHandler(IPC.CHAT_ADD_MESSAGE, async (_event, payload = {}) => {
     const { chatId, sender, text, ...metadata } = payload;
     return appendMessageToChat(chatId, sender, text, metadata);
@@ -185,6 +218,8 @@ function registerChatHandlers(ipcMain, context = {}) {
     return { ok: true, result };
   }));
 
+  const getSettings = context.getSettings;
+
   ipcMain.handle(IPC.CHAT_SEND_MESSAGE, wrapHandler(IPC.CHAT_SEND_MESSAGE, async (event, { chatId, message, images = [], agentMode = false }) => {
     const safeMessage = String(message || '');
     const normalizedImages = ImageHandler.normalizeMessageImages(images);
@@ -193,12 +228,18 @@ function registerChatHandlers(ipcMain, context = {}) {
       throw new Error('Message text or at least one image is required.');
     }
 
+    // Resolve working directory: per-chat > process.cwd()
+    const chatForDir = getChats().find((item) => item.id === chatId);
+    const chatWorkingDirectory = chatForDir?.workingDirectory || process.cwd();
+    const settings = typeof getSettings === 'function' ? getSettings() : {};
+    const allowedDirectories = Array.isArray(settings.allowedDirectories) ? settings.allowedDirectories : [];
+
     await runHookEvent('UserPromptSubmit', {
       source: 'ui',
       chatId,
       prompt: safeMessage,
       timestamp: new Date().toISOString(),
-      workingDirectory: process.cwd()
+      workingDirectory: chatWorkingDirectory
     });
 
     const userMessage = appendMessageToChat(chatId, 'user', safeMessage, {
@@ -239,7 +280,7 @@ function registerChatHandlers(ipcMain, context = {}) {
 
     try {
       const runtimeEnvironment = await getRuntimeEnvironment({
-        workingDirectory: process.cwd()
+        workingDirectory: chatWorkingDirectory
       });
 
       options.runtimeEnvironment = runtimeEnvironment;
@@ -248,7 +289,10 @@ function registerChatHandlers(ipcMain, context = {}) {
         await buildMemoryContextSection(safeMessage, { limit: 4 })
       ].filter(Boolean).join('\n\n');
 
-      const executor = await createToolExecutorWithApprovals(event, runtimeEnvironment);
+      const executor = await createToolExecutorWithApprovals(event, runtimeEnvironment, null, {
+        workingDirectory: chatWorkingDirectory,
+        allowedDirectories
+      });
 
       executor.on('preExecute', ({ toolName, parameters }) => {
         appendMessageToChat(chatId, 'toolUse', '', { toolName, parameters, runId });

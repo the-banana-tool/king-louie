@@ -134,6 +134,7 @@ const DEFAULT_SETTINGS = {
     enabled: true,
     hookStates: {}
   },
+  allowedDirectories: [],
   webSearch: {
     brave: { apiKey: '' },
     tavily: { apiKey: '' }
@@ -196,6 +197,7 @@ const mergeSettings = (settings = {}) => {
         ...(source.hooks?.hookStates || {})
       }
     },
+    allowedDirectories: Array.isArray(source.allowedDirectories) ? source.allowedDirectories : (DEFAULT_SETTINGS.allowedDirectories || []),
     webSearch: {
       ...(DEFAULT_SETTINGS.webSearch || {}),
       ...(source.webSearch || {}),
@@ -1829,14 +1831,17 @@ const runLlmCommand = async (command = '') => {
 const createToolExecutorWithApprovals = async (
   event,
   runtimeEnvironment = null,
-  approvalRequester = null
+  approvalRequester = null,
+  executorOptions = {}
 ) => {
+  const workingDirectory = executorOptions.workingDirectory || process.cwd();
   const resolvedRuntimeEnvironment = runtimeEnvironment || await getRuntimeEnvironment({
-    workingDirectory: process.cwd()
+    workingDirectory
   });
 
   const executor = new ToolExecutor({
-    workingDirectory: process.cwd(),
+    workingDirectory,
+    allowedDirectories: executorOptions.allowedDirectories || [],
     requireApproval: true,
     runtimeEnvironment: resolvedRuntimeEnvironment,
     approvalRequester,
@@ -2218,6 +2223,7 @@ registerHandlers(ipcMain, {
   getTtsEngine: () => ttsEngine,
   getUsageTracker: () => usageTracker,
   createUsageRecordFromMetrics,
+  getSettings,
 
   // Tool
   pendingApprovalResolvers,

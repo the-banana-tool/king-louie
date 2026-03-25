@@ -195,6 +195,7 @@ const dom = {
   saveWebsearchTavilyBtn: document.getElementById('save-websearch-tavily-btn'),
   clearWebsearchTavilyBtn: document.getElementById('clear-websearch-tavily-btn'),
   websearchStatus: document.getElementById('websearch-status'),
+  workingDirBtn: document.getElementById('working-dir-btn'),
   exportChatBtn: document.getElementById('export-chat-btn'),
   messageContextMenu: document.getElementById('message-context-menu'),
   webhookNameInput: document.getElementById('webhook-name-input'),
@@ -315,6 +316,7 @@ async function getLocalHelpText() {
     '### Local Commands',
     '',
     '- `/help` — show local command help',
+    '- `/cd [path]` — set working directory for this chat (opens folder picker if no path given)',
     '- `/llm help` — show LLM connection command help',
     '- `/llm list` — list configured providers and connection status',
     '- `/llm add <provider> <token>` — add/update provider API token',
@@ -1294,7 +1296,11 @@ function renderChatMessages() {
 
   dom.chatHeaderTitle.textContent = activeChat.title;
   const chatTotals = activeChat.llmTotals || sumChatLlmTotals(activeChat);
-  dom.chatHeaderMeta.textContent = `Updated ${formatTimestamp(activeChat.updatedAt)} • Total ${formatTokenCount(chatTotals.totalTokens)} tokens • ${formatUsd(chatTotals.costUsd)} • Tier: ${formatInferenceTierLabel(getActiveInferenceTier())}`;
+  const dirLabel = activeChat.workingDirectory ? ` • ${activeChat.workingDirectory}` : '';
+  dom.chatHeaderMeta.textContent = `Updated ${formatTimestamp(activeChat.updatedAt)} • Total ${formatTokenCount(chatTotals.totalTokens)} tokens • ${formatUsd(chatTotals.costUsd)} • Tier: ${formatInferenceTierLabel(getActiveInferenceTier())}${dirLabel}`;
+  if (dom.workingDirBtn) {
+    dom.workingDirBtn.title = activeChat.workingDirectory ? `Working directory: ${activeChat.workingDirectory}` : 'Set working directory';
+  }
 
   let runningTotals = {
     inputTokens: 0,
@@ -3131,6 +3137,42 @@ async function sendMessage() {
     return;
   }
 
+  if (slashCommand?.name === '/cd') {
+    dom.userInput.value = '';
+    dom.userInput.style.height = 'auto';
+
+    appendLocalMessage('user', message);
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+
+    const dirArg = slashCommand.args.join(' ').trim();
+    let responseText;
+    if (dirArg) {
+      const result = await window.electron.chat.setWorkingDirectory({ chatId: appState.activeChatId, workingDirectory: dirArg });
+      const updated = result?.data || result;
+      if (updated?.workingDirectory) {
+        appState.chats = appState.chats.map((c) => c.id === updated.id ? updated : c);
+        responseText = `Working directory set to \`${updated.workingDirectory}\``;
+      } else {
+        responseText = `Working directory set to \`${dirArg}\``;
+        appState.chats = appState.chats.map((c) => c.id === appState.activeChatId ? { ...c, workingDirectory: dirArg } : c);
+      }
+    } else {
+      const result = await window.electron.chat.pickWorkingDirectory(appState.activeChatId);
+      if (result && !result.canceled && result.chat) {
+        appState.chats = appState.chats.map((c) => c.id === result.chat.id ? result.chat : c);
+        responseText = `Working directory set to \`${result.chat.workingDirectory}\``;
+      } else {
+        responseText = 'No directory selected.';
+      }
+    }
+
+    appendLocalMessage('assistant', responseText);
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    refreshUI();
+
+    return;
+  }
+
   if (slashCommand?.name === '/agent') {
     dom.userInput.value = '';
     dom.userInput.style.height = 'auto';
@@ -3871,6 +3913,7 @@ if (dom.attachImageBtn && dom.imageFileInput) {
 // Slash command autocomplete
 const SLASH_COMMANDS = [
   { cmd: '/help', desc: 'Show local command help' },
+  { cmd: '/cd', desc: 'Set working directory for this chat' },
   { cmd: '/agent', desc: 'Toggle agent mode (on/off/status)' },
   { cmd: '/delegate', desc: 'Run tasks from a JSON plan file' },
   { cmd: '/profile', desc: 'View or set user profile fields' },
@@ -4082,6 +4125,18 @@ document.addEventListener('click', (e) => {
     dom.messageContextMenu.hidden = true;
   }
 });
+
+// --- Working directory picker ---
+if (dom.workingDirBtn) {
+  dom.workingDirBtn.addEventListener('click', async () => {
+    if (!appState.activeChatId) return;
+    const result = await window.electron.chat.pickWorkingDirectory(appState.activeChatId);
+    if (result && !result.canceled && result.chat) {
+      appState.chats = appState.chats.map((c) => c.id === result.chat.id ? result.chat : c);
+      refreshUI();
+    }
+  });
+}
 
 // --- Export chat as JSON ---
 dom.exportChatBtn.addEventListener('click', () => {
