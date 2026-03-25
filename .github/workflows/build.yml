@@ -39,16 +39,20 @@ jobs:
           Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation "Cert:\CurrentUser\My" -Password $securePassword
           Remove-Item $pfxPath
 
-      - name: Build signed Windows installer
+      - name: Build Windows installer
         env:
+          WIN_CSC_THUMBPRINT: ${{ secrets.WIN_CSC_THUMBPRINT }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
+        shell: powershell
         run: |
-          SIGN_ARGS=""
-          if [ -n "${{ secrets.WIN_CSC_THUMBPRINT }}" ]; then
-            SIGN_ARGS="-c.win.signtoolOptions.certificateSha1=${{ secrets.WIN_CSC_THUMBPRINT }}"
-          fi
-          npx electron-builder --win --publish never $SIGN_ARGS
+          $cert = Get-ChildItem -Path "Cert:\CurrentUser\My" | Where-Object { $_.Thumbprint -eq $env:WIN_CSC_THUMBPRINT }
+          if ($cert) {
+            Write-Host "Signing certificate found, building with code signing"
+            npx electron-builder --win --publish never "-c.win.signtoolOptions.certificateSha1=$env:WIN_CSC_THUMBPRINT"
+          } else {
+            Write-Host "No signing certificate in store, building unsigned"
+            npx electron-builder --win --publish never
+          }
 
       - uses: actions/upload-artifact@v4
         with:
