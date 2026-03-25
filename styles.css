@@ -97,6 +97,10 @@ body {
   pointer-events: none;
 }
 
+.btn[hidden] {
+  display: none;
+}
+
 .btn-primary,
 .btn.primary {
   background: var(--accent);
