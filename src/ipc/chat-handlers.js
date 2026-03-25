@@ -28,6 +28,49 @@ function registerChatHandlers(ipcMain, context = {}) {
 
   const activeRuns = new Map(); // chatId -> AbortController
 
+  /**
+   * Generate a contextual title for a chat using the LLM,
+   * then persist it and notify the renderer.
+   */
+  async function autoNameChat(chatId, userMessage, assistantResponse, sender) {
+    try {
+      const inference = resolveInference();
+      const provider = inference.provider;
+      if (typeof provider.sendMessage !== 'function') return;
+
+      const titlePrompt = [
+        {
+          sender: 'user',
+          text: `Generate a short, descriptive title (max 6 words) for a chat that starts with this exchange. Reply with ONLY the title text, no quotes or punctuation at the end.\n\nUser: ${userMessage.slice(0, 300)}\nAssistant: ${assistantResponse.slice(0, 300)}`
+        }
+      ];
+
+      const title = await provider.sendMessage(titlePrompt, {
+        model: inference.model,
+        temperature: 0.3,
+        max_tokens: 30
+      });
+
+      const cleaned = title.replace(/^["']|["'.!]$/g, '').trim();
+      if (!cleaned) return;
+
+      const chats = getChats();
+      const updated = chats.map((chat) =>
+        chat.id === chatId
+          ? { ...chat, title: cleaned, updatedAt: new Date().toISOString() }
+          : chat
+      );
+      setChats(updated);
+
+      // Notify the renderer so the sidebar updates
+      if (sender && !sender.isDestroyed()) {
+        sender.send('chat:updated', { chats: updated });
+      }
+    } catch (err) {
+      console.warn('[auto-name] Failed to generate chat title:', err.message);
+    }
+  }
+
   const getMainWindow = () => (
     typeof context.getMainWindow === 'function' ? context.getMainWindow() : context.mainWindow
   );
@@ -280,6 +323,11 @@ function registerChatHandlers(ipcMain, context = {}) {
         speakSummaryText(fullResponse || '(No response)', voiceSettings).catch((error) => {
           console.warn('[voice] Failed to speak chat response:', error.message);
         });
+      }
+
+      // Auto-name chats that still have the default title
+      if (chat.title === 'New Chat' && fullResponse) {
+        autoNameChat(chatId, safeMessage, fullResponse, event.sender).catch(() => {});
       }
 
       return updatedChat;
