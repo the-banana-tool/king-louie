@@ -23,17 +23,20 @@ jobs:
       - run: npm ci
 
       - name: Import code signing certificate
-        if: ${{ secrets.WIN_CSC_LINK != '' }}
         env:
           WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
           WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
         shell: powershell
         run: |
+          if (-not $env:WIN_CSC_LINK) {
+            Write-Host "No signing certificate configured, skipping import"
+            exit 0
+          }
           $pfxBytes = [Convert]::FromBase64String($env:WIN_CSC_LINK)
           $pfxPath = Join-Path $env:RUNNER_TEMP "signing.pfx"
           [IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
           $securePassword = ConvertTo-SecureString $env:WIN_CSC_KEY_PASSWORD -AsPlainText -Force
-          Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $securePassword
+          Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation "Cert:\CurrentUser\My" -Password $securePassword
           Remove-Item $pfxPath
 
       - name: Build signed Windows installer
