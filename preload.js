@@ -10,10 +10,31 @@ try {
   domPurify = null;
 }
 
+let hljs = null;
+try {
+  hljs = require('highlight.js');
+} catch {
+  hljs = null;
+}
+
 let markdownParser = null;
 try {
   const markedModule = require('marked');
   markdownParser = markedModule.marked || markedModule;
+
+  if (markdownParser && hljs) {
+    const renderer = {
+      code({ text, lang }) {
+        const validLang = lang && hljs.getLanguage(lang) ? lang : null;
+        const highlighted = validLang
+          ? hljs.highlight(text, { language: validLang }).value
+          : hljs.highlightAuto(text).value;
+        const langClass = validLang ? ` language-${validLang}` : '';
+        return `<pre><code class="hljs${langClass}">${highlighted}</code></pre>`;
+      }
+    };
+    markdownParser.use({ renderer });
+  }
 } catch {
   markdownParser = null;
 }
@@ -68,6 +89,11 @@ const simpleMarkdownFallback = (text = '') => {
   return chunks.join('');
 };
 
+const DOMPURIFY_CONFIG = {
+  ADD_ATTR: ['class'],
+  ADD_TAGS: ['span'],
+};
+
 const safeMarkdownParse = (text) => {
   const input = text || '';
   const sanitize = (html) => {
@@ -75,7 +101,7 @@ const safeMarkdownParse = (text) => {
       return String(html || '');
     }
 
-    return domPurify.sanitize(String(html || ''));
+    return domPurify.sanitize(String(html || ''), DOMPURIFY_CONFIG);
   };
 
   try {

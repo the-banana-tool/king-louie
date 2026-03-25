@@ -8,6 +8,7 @@
   <link rel="icon" type="image/x-icon" href="favicon.ico">
   <link rel="icon" type="image/png" sizes="48x48" href="favicon.png">
   <link rel="stylesheet" href="node_modules/@fortawesome/fontawesome-free/css/all.min.css">
+  <link rel="stylesheet" href="node_modules/highlight.js/styles/atom-one-dark.css">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -39,6 +40,16 @@
           <div class="chat-header-title" id="chat-header-title">King Louie Chat</div>
           <div class="chat-header-meta" id="chat-header-meta">Select a chat to begin</div>
           </div>
+        </div>
+        <div class="chat-header-actions">
+          <button id="chat-info-btn" class="icon-button" type="button" title="Chat info" aria-label="Chat info"><i class="fas fa-chart-bar"></i></button>
+        </div>
+        <div class="chat-info-popover" id="chat-info-popover" hidden>
+          <div class="chat-info-popover-header">
+            <span>Chat Stats</span>
+            <button id="chat-info-close-btn" class="icon-button" type="button" title="Close"><i class="fas fa-xmark"></i></button>
+          </div>
+          <div class="chat-info-popover-body" id="chat-info-popover-body"></div>
         </div>
       </div>
 

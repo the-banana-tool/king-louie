@@ -410,6 +410,7 @@ body {
 
 /* Chat header */
 .chat-header {
+  position: relative;
   padding: 14px 24px;
   background-color: var(--bg-surface);
   border-bottom: 1px solid var(--border-subtle);
@@ -441,6 +442,94 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+/* --- Chat info popover ------------------------------------- */
+.chat-info-popover {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 16px;
+  z-index: 500;
+  width: min(360px, 90vw);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.chat-info-popover[hidden] {
+  display: none;
+}
+
+.chat-info-popover-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.chat-info-popover-header .icon-button {
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  font-size: 11px;
+  padding: 0;
+}
+
+.chat-info-popover-body {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.chat-info-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+}
+
+.chat-info-label {
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chat-info-label i {
+  width: 14px;
+  text-align: center;
+  font-size: 11px;
+}
+
+.chat-info-value {
+  color: var(--text-primary);
+  font-weight: 500;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.chat-info-divider {
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  margin: 2px 0;
+}
+
+.chat-info-section-title {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-top: 4px;
 }
 
 /* --- Icon buttons (shared) --------------------------------- */
@@ -587,9 +676,8 @@ body {
   color: var(--accent);
 }
 
-/* Code — block (rendered by marked) */
+/* Code — block (rendered by marked + highlight.js) */
 .message-content pre {
-  background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   padding: 12px 14px;
@@ -598,7 +686,13 @@ body {
   font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.5;
-  color: var(--text-primary);
+}
+
+.message-content pre code.hljs {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-size: inherit;
 }
 
 .message-content pre code {
@@ -1121,7 +1215,7 @@ body {
 
 .settings-modal {
   width: min(820px, 95vw);
-  max-height: min(90vh, 800px);
+  height: min(90vh, 800px);
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-lg);
