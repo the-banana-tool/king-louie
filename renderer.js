@@ -1200,6 +1200,7 @@ function renderChatInfoPopover() {
   agentCheckbox.checked = appState.isAgentModeEnabled;
   agentCheckbox.addEventListener('change', () => {
     appState.isAgentModeEnabled = agentCheckbox.checked;
+    persistAgentMode();
     renderAgentModeButton();
     addToolEventMessage(
       `Agent mode ${appState.isAgentModeEnabled ? 'enabled' : 'disabled'}`,
@@ -3103,6 +3104,7 @@ async function sendMessage() {
       return;
     }
 
+    if (modeArg !== 'status') persistAgentMode();
     renderAgentModeButton();
     const statusText = modeArg === 'status'
       ? `Agent mode is currently **${appState.isAgentModeEnabled ? 'ON' : 'OFF'}**.`
@@ -3640,7 +3642,17 @@ async function loadChats() {
   const data = unwrapIpcResult(await window.electron.chat.load(), 'Unable to load chats.');
   appState.chats = data.chats || [];
   appState.activeChatId = data.activeChatId || appState.chats[0]?.id || null;
+  const activeChat = appState.chats.find((c) => c.id === appState.activeChatId);
+  appState.isAgentModeEnabled = !!(activeChat && activeChat.agentMode);
   refreshUI();
+}
+
+function persistAgentMode() {
+  const chatId = appState.activeChatId;
+  if (!chatId) return;
+  const chat = appState.chats.find((c) => c.id === chatId);
+  if (chat) chat.agentMode = appState.isAgentModeEnabled;
+  window.electron.chat.setAgentMode(chatId, appState.isAgentModeEnabled).catch((err) => console.warn('[chat] setAgentMode persistence failed:', err.message));
 }
 
 async function handleCreateChat() {
@@ -3656,6 +3668,8 @@ async function handleSelectChat(chatId) {
   appState.streamBuffers.clear();
   appState.activeChatId = chatId;
   setResponseActive(false);
+  const chat = appState.chats.find((c) => c.id === chatId);
+  appState.isAgentModeEnabled = !!(chat && chat.agentMode);
   unwrapIpcResult(await window.electron.chat.setActive(chatId), 'Unable to switch active chat.');
   refreshUI();
 }
@@ -4089,6 +4103,7 @@ if (dom.composerSettingsBtn) {
 if (dom.agentModeBtn) {
   dom.agentModeBtn.addEventListener('click', () => {
     appState.isAgentModeEnabled = !appState.isAgentModeEnabled;
+    persistAgentMode();
     renderAgentModeButton();
     addToolEventMessage(
       `Agent mode ${appState.isAgentModeEnabled ? 'enabled' : 'disabled'}`,

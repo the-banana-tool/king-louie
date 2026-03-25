@@ -10,6 +10,7 @@ module.exports = {
   CHAT_SPEAK_LAST: 'chat:speakLast',
   CHAT_SEND_MESSAGE: 'chat:sendMessage',
   CHAT_STOP_RESPONSE: 'chat:stopResponse',
+  CHAT_SET_AGENT_MODE: 'chat:setAgentMode',
 
   TOOL_EXECUTE: 'tool:execute',
   TOOL_LIST: 'tool:list',

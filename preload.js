@@ -249,6 +249,10 @@ contextBridge.exposeInMainWorld(
       load: () => ipcRenderer.invoke('chat:load'),
       create: (title) => ipcRenderer.invoke('chat:create', title),
       setActive: (chatId) => ipcRenderer.invoke('chat:setActive', chatId),
+      setAgentMode: (chatId, agentMode) => {
+        validateString(chatId, 'chatId');
+        return ipcRenderer.invoke('chat:setAgentMode', { chatId, agentMode: !!agentMode });
+      },
       rename: (payload) => {
         validateObject(payload, 'payload');
         validateString(payload.chatId, 'chatId');

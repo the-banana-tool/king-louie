@@ -142,6 +142,17 @@ function registerChatHandlers(ipcMain, context = {}) {
     return { chats, activeChatId: getActiveChatId() };
   }));
 
+  ipcMain.handle(IPC.CHAT_SET_AGENT_MODE, wrapHandler(IPC.CHAT_SET_AGENT_MODE, async (_event, { chatId, agentMode }) => {
+    const chats = getChats();
+    const updated = chats.map((chat) =>
+      chat.id === chatId
+        ? { ...chat, agentMode: !!agentMode, updatedAt: new Date().toISOString() }
+        : chat
+    );
+    setChats(updated);
+    return updated.find((chat) => chat.id === chatId);
+  }));
+
   ipcMain.handle(IPC.CHAT_ADD_MESSAGE, wrapHandler(IPC.CHAT_ADD_MESSAGE, async (_event, payload = {}) => {
     const { chatId, sender, text, ...metadata } = payload;
     return appendMessageToChat(chatId, sender, text, metadata);
