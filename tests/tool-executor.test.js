@@ -43,6 +43,36 @@ toolRegistry.register(new Tool({
   }
 }));
 
+toolRegistry.register(new Tool({
+  name: 'RequiredParamTool',
+  description: 'A tool with required parameters',
+  requiresApproval: false,
+  parameters: {
+    type: 'object',
+    properties: {
+      content: { type: 'string' },
+      path: { type: 'string' }
+    },
+    required: ['content', 'path']
+  },
+  execute: async (params) => ({ ok: true, output: `wrote: ${params.content} to ${params.path}` })
+}));
+
+toolRegistry.register(new Tool({
+  name: 'TypeCheckTool',
+  description: 'A tool with typed parameters',
+  requiresApproval: false,
+  parameters: {
+    type: 'object',
+    properties: {
+      count: { type: 'number' },
+      label: { type: 'string' }
+    },
+    required: ['count']
+  },
+  execute: async (params) => ({ ok: true, count: params.count })
+}));
+
 const ToolExecutor = require('../src/execution/tool-executor');
 
 describe('ToolExecutor', () => {
@@ -208,6 +238,74 @@ describe('ToolExecutor', () => {
       const result = await executor.execute('DangerousTool', { force: true }, { bypassSafety: true });
 
       assert.strictEqual(result.ok, true);
+    });
+  });
+
+  describe('parameter validation (graceful failure)', () => {
+    it('returns error result instead of throwing when required param is missing', async () => {
+      const executor = new ToolExecutor({ requireApproval: false });
+      const result = await executor.execute('RequiredParamTool', { content: 'hello' }); // missing 'path'
+
+      assert.strictEqual(result.success, false);
+      assert.ok(result.error.includes('Missing required parameter: path'));
+    });
+
+    it('returns error result when all required params are missing', async () => {
+      const executor = new ToolExecutor({ requireApproval: false });
+      const result = await executor.execute('RequiredParamTool', {});
+
+      assert.strictEqual(result.success, false);
+      assert.ok(result.error.includes('Missing required parameter'));
+    });
+
+    it('returns error result when parameter has wrong type', async () => {
+      const executor = new ToolExecutor({ requireApproval: false });
+      const result = await executor.execute('TypeCheckTool', { count: 'not-a-number' });
+
+      assert.strictEqual(result.success, false);
+      assert.ok(result.error.includes('Invalid type'));
+    });
+
+    it('emits postExecute with error result on validation failure', async () => {
+      const executor = new ToolExecutor({ requireApproval: false });
+      const events = [];
+      executor.on('postExecute', (evt) => events.push(evt));
+
+      await executor.execute('RequiredParamTool', { content: 'hello' }); // missing 'path'
+
+      assert.strictEqual(events.length, 1);
+      assert.strictEqual(events[0].toolName, 'RequiredParamTool');
+      assert.strictEqual(events[0].result.success, false);
+      assert.ok(events[0].result.error.includes('Missing required parameter'));
+    });
+
+    it('emits preExecute before validation failure', async () => {
+      const executor = new ToolExecutor({ requireApproval: false });
+      const timeline = [];
+      executor.on('preExecute', ({ toolName }) => timeline.push(`pre:${toolName}`));
+      executor.on('postExecute', ({ toolName }) => timeline.push(`post:${toolName}`));
+
+      await executor.execute('RequiredParamTool', {}); // will fail validation
+
+      assert.deepStrictEqual(timeline, ['pre:RequiredParamTool', 'post:RequiredParamTool']);
+    });
+
+    it('does not call tool.execute when validation fails', async () => {
+      const executor = new ToolExecutor({ requireApproval: false });
+      // If execute were called with missing params it would still work since
+      // our test tool doesn't care, but we can verify via the result shape
+      const result = await executor.execute('RequiredParamTool', { path: '/tmp/x' }); // missing 'content'
+
+      assert.strictEqual(result.success, false);
+      assert.ok(!result.ok, 'should not have ok:true from the tool execute');
+    });
+
+    it('succeeds when all required params are provided', async () => {
+      const executor = new ToolExecutor({ requireApproval: false });
+      const result = await executor.execute('RequiredParamTool', { content: 'hello', path: '/tmp/x' });
+
+      assert.strictEqual(result.ok, true);
+      assert.strictEqual(result.output, 'wrote: hello to /tmp/x');
     });
   });
 

@@ -388,6 +388,164 @@ describe('AgentLoop', () => {
     });
   });
 
+  describe('tool validation error mid-loop does not kill the session', () => {
+    it('continues the loop when executor returns a validation error result', async () => {
+      // Simulates the real scenario: LLM calls a tool with missing required param,
+      // executor returns { success: false, error: 'Missing required parameter: content' },
+      // LLM gets the error and retries or responds with text.
+      const provider = sequenceProvider([
+        { type: 'tool_use', toolName: 'Write', parameters: { path: '/tmp/x' } }, // missing 'content'
+        { type: 'text', content: 'Sorry, let me try again with the correct parameters.' }
+      ]);
+      const executor = recordingExecutor([
+        { success: false, error: 'Missing required parameter: content' }
+      ]);
+      const loop = new AgentLoop(provider, executor, { maxIterations: 5 });
+      const result = await loop.run([], []);
+
+      assert.strictEqual(result.type, 'complete');
+      assert.strictEqual(result.content, 'Sorry, let me try again with the correct parameters.');
+      assert.strictEqual(result.tools.length, 1);
+      assert.strictEqual(result.tools[0].result.success, false);
+      assert.ok(result.tools[0].result.error.includes('Missing required parameter'));
+      assert.strictEqual(result.iterations, 2);
+    });
+
+    it('preserves all tool history when validation error occurs mid-chain', async () => {
+      // Tool 1 succeeds, tool 2 has validation error, LLM recovers with text
+      const provider = sequenceProvider([
+        { type: 'tool_use', toolName: 'Read', parameters: { file: 'a.txt' } },
+        { type: 'tool_use', toolName: 'Write', parameters: {} }, // missing required params
+        { type: 'text', content: 'I encountered an error writing. Here is what I read.' }
+      ]);
+      const executor = recordingExecutor([
+        { ok: true, content: 'file contents' },
+        { success: false, error: 'Missing required parameter: content' }
+      ]);
+      const loop = new AgentLoop(provider, executor, { maxIterations: 10 });
+      const result = await loop.run([], []);
+
+      assert.strictEqual(result.type, 'complete');
+      assert.strictEqual(result.tools.length, 2);
+      assert.strictEqual(result.tools[0].result.ok, true);
+      assert.strictEqual(result.tools[1].result.success, false);
+      assert.strictEqual(result.iterations, 3);
+    });
+
+    it('LLM can retry the tool call after validation error', async () => {
+      const provider = sequenceProvider([
+        { type: 'tool_use', toolName: 'Write', parameters: { path: '/tmp/x' } }, // missing content
+        { type: 'tool_use', toolName: 'Write', parameters: { path: '/tmp/x', content: 'hello' } }, // retry with content
+        { type: 'text', content: 'File written successfully.' }
+      ]);
+      const executor = recordingExecutor([
+        { success: false, error: 'Missing required parameter: content' },
+        { ok: true, output: 'written' }
+      ]);
+      const loop = new AgentLoop(provider, executor, { maxIterations: 10 });
+      const result = await loop.run([], []);
+
+      assert.strictEqual(result.type, 'complete');
+      assert.strictEqual(result.content, 'File written successfully.');
+      assert.strictEqual(result.tools.length, 2);
+      assert.strictEqual(result.tools[0].result.success, false);
+      assert.strictEqual(result.tools[1].result.ok, true);
+    });
+  });
+
+  describe('tool errors preserve accumulated state', () => {
+    it('LLM metrics are preserved even when a tool call returns an error', async () => {
+      const provider = sequenceProvider([
+        {
+          type: 'tool_use',
+          toolName: 'Write',
+          parameters: {},
+          llmMetrics: { inputTokens: 100, outputTokens: 50, totalTokens: 150, costUsd: 0.001, provider: 'openai', model: 'gpt-4' }
+        },
+        {
+          type: 'text',
+          content: 'Recovered from error.',
+          llmMetrics: { inputTokens: 200, outputTokens: 80, totalTokens: 280, costUsd: 0.002, provider: 'openai', model: 'gpt-4' }
+        }
+      ]);
+      const executor = recordingExecutor([
+        { success: false, error: 'Missing required parameter: content' }
+      ]);
+      const loop = new AgentLoop(provider, executor, { maxIterations: 5 });
+      const result = await loop.run([], []);
+
+      assert.strictEqual(result.type, 'complete');
+      assert.strictEqual(result.llm.calls.length, 2);
+      assert.strictEqual(result.llm.totals.inputTokens, 300);
+      assert.strictEqual(result.llm.totals.costUsd, 0.003);
+    });
+
+    it('tools executed before a max_iterations cutoff are all preserved', async () => {
+      let callCount = 0;
+      const provider = {
+        sendMessageWithTools: async () => ({
+          type: 'tool_use',
+          toolName: 'Read',
+          parameters: { file: `file${++callCount}.txt` }
+        }),
+        buildToolMessages: (response, toolResult, toolCallId) => [
+          { role: 'assistant', content: '', tool_calls: [{ id: toolCallId, type: 'function', function: { name: response.toolName, arguments: '{}' } }] },
+          { role: 'tool', tool_call_id: toolCallId, content: JSON.stringify(toolResult) }
+        ]
+      };
+      const executor = recordingExecutor([
+        { ok: true, content: 'a' },
+        { ok: true, content: 'b' },
+        { success: false, error: 'file not found' },
+        { ok: true, content: 'd' },
+        { ok: true, content: 'e' }
+      ]);
+      const loop = new AgentLoop(provider, executor, { maxIterations: 5 });
+      const result = await loop.run([], []);
+
+      assert.strictEqual(result.type, 'max_iterations');
+      assert.strictEqual(result.tools.length, 5);
+      // The third tool had an error - verify it's preserved
+      assert.strictEqual(result.tools[2].result.success, false);
+      assert.strictEqual(result.tools[2].result.error, 'file not found');
+      // Others succeeded
+      assert.strictEqual(result.tools[0].result.ok, true);
+      assert.strictEqual(result.tools[4].result.ok, true);
+    });
+
+    it('abort preserves tool history accumulated before abort', async () => {
+      const controller = new AbortController();
+      let callCount = 0;
+
+      const provider = {
+        sendMessageWithTools: async () => {
+          callCount++;
+          if (callCount === 2) controller.abort();
+          return { type: 'tool_use', toolName: 'Bash', parameters: { command: `cmd${callCount}` } };
+        },
+        buildToolMessages: (response, toolResult, toolCallId) => [
+          { role: 'assistant', content: '', tool_calls: [{ id: toolCallId, type: 'function', function: { name: response.toolName, arguments: '{}' } }] },
+          { role: 'tool', tool_call_id: toolCallId, content: JSON.stringify(toolResult) }
+        ]
+      };
+
+      const executor = recordingExecutor([
+        { ok: true, output: 'first' },
+        { ok: true, output: 'second' }
+      ]);
+
+      const loop = new AgentLoop(provider, executor, {
+        maxIterations: 10,
+        abortSignal: controller.signal
+      });
+      const result = await loop.run([], []);
+
+      assert.strictEqual(result.type, 'stopped');
+      // Should have the tools from iterations that completed before abort was checked
+      assert.ok(result.tools.length >= 1, `expected at least 1 tool, got ${result.tools.length}`);
+    });
+  });
+
   describe('provider throws during sendMessageWithTools', () => {
     it('propagates the provider error', async () => {
       const provider = {

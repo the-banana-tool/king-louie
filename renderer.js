@@ -3615,12 +3615,19 @@ async function sendMessage() {
     }
     refreshUI();
   } catch (error) {
+    // Reload chat state from storage so persisted tool events aren't lost
+    try {
+      const data = unwrapIpcResult(await window.electron.chat.load(), 'reload');
+      appState.chats = data.chats || [];
+    } catch { /* best-effort reload */ }
+
     // onMessageError may have already displayed this error via IPC event.
     // Only add a fallback message if no error element was rendered yet.
     const alreadyShown = dom.chatMessages.querySelector('.message.assistant:last-child .message-content p');
     if (!alreadyShown || !alreadyShown.textContent.startsWith('Error:')) {
       addMessage('assistant', `Error: ${error.message || 'Unable to send message.'}`);
     }
+    refreshUI();
   } finally {
     setResponseActive(false, appState.activeChatId);
     flushToolGroup();

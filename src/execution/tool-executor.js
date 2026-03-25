@@ -78,7 +78,13 @@ class ToolExecutor extends EventEmitter {
 
     this.emit('preExecute', { toolName, parameters: effectiveParameters });
 
-    tool.validateParameters(effectiveParameters);
+    try {
+      tool.validateParameters(effectiveParameters);
+    } catch (validationError) {
+      const errorResult = { success: false, error: validationError.message };
+      this.emit('postExecute', { toolName, parameters: effectiveParameters, result: errorResult });
+      return errorResult;
+    }
 
     if (tool.isDangerous(effectiveParameters) && !options.bypassSafety) {
       throw new Error(`Dangerous operation detected: ${toolName}`);
