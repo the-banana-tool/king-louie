@@ -723,6 +723,13 @@ function renderToolGroup(items) {
   });
 
   dom.chatMessages.appendChild(wrapper);
+
+  // Keep the streaming indicator below tool groups
+  const streaming = dom.chatMessages.querySelector('.message.streaming');
+  if (streaming && streaming.nextElementSibling) {
+    dom.chatMessages.appendChild(streaming);
+  }
+
   dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
 }
 
@@ -830,6 +837,13 @@ function addToolEventCompact(toolName, payload, variant = '', isResult = false) 
 
   messageDiv.appendChild(messageContent);
   dom.chatMessages.appendChild(messageDiv);
+
+  // Keep the streaming indicator below high-stakes tool events
+  const streaming = dom.chatMessages.querySelector('.message.streaming');
+  if (streaming && streaming.nextElementSibling) {
+    dom.chatMessages.appendChild(streaming);
+  }
+
   dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
 }
 
@@ -4649,10 +4663,19 @@ unsubscribeHandlers.push(window.electron.chat.onMessageError(({ chatId, response
   dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
 }));
 
+/** Move the streaming indicator element to the bottom so it renders below tool events. */
+function keepStreamingIndicatorAtBottom() {
+  const streaming = dom.chatMessages.querySelector('.message.streaming');
+  if (streaming && streaming.nextElementSibling) {
+    dom.chatMessages.appendChild(streaming);
+  }
+}
+
 unsubscribeHandlers.push(window.electron.chat.onToolUse(({ chatId, toolName, parameters }) => {
   if (chatId !== appState.activeChatId) return;
   try {
     addToolEventCompact(toolName, parameters, '', false);
+    keepStreamingIndicatorAtBottom();
   } catch (err) {
     console.error('[renderer] Failed to render tool use for', toolName, err);
   }
@@ -4663,6 +4686,7 @@ unsubscribeHandlers.push(window.electron.chat.onToolResult(({ chatId, toolName, 
   const isError = result?.success === false || result?.ok === false;
   try {
     addToolEventCompact(toolName, result, isError ? 'error' : 'success', true);
+    keepStreamingIndicatorAtBottom();
   } catch (err) {
     console.error('[renderer] Failed to render tool result for', toolName, err);
   }
