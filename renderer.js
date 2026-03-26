@@ -621,6 +621,26 @@ function extractXmlToolBlocks(text) {
 }
 
 /**
+ * Convert an XML tool block's raw content into structured parameters
+ * that getToolSummary() can display meaningfully.
+ */
+function xmlToolBlockToParams(toolName, content) {
+  switch (toolName) {
+    case 'Glob':      return { pattern: content };
+    case 'Grep':      return { pattern: content };
+    case 'Read':      return { file_path: content };
+    case 'Write':     return { file_path: content };
+    case 'Edit':      return { file_path: content };
+    case 'Bash':      return { command: content };
+    case 'Git':       return { command: content };
+    case 'WebFetch':  return { url: content };
+    case 'WebSearch':  return { query: content };
+    case 'Browser':   return { action: content };
+    default:          return { content };
+  }
+}
+
+/**
  * Strip any trailing unclosed tool tag from display text so we don't render
  * partial XML while the LLM is still streaming inside a tool block.
  */
@@ -1618,7 +1638,7 @@ function renderChatMessages() {
     if (message.sender === 'assistant' && displayText) {
       const { cleanText, toolBlocks } = extractXmlToolBlocks(displayText);
       for (const block of toolBlocks) {
-        addToolEventCompact(block.toolName, { content: block.content }, 'success', false);
+        addToolEventCompact(block.toolName, xmlToolBlockToParams(block.toolName, block.content), 'success', false);
       }
       displayText = cleanText;
       if (!displayText) return; // message was entirely tool blocks
@@ -5232,7 +5252,7 @@ unsubscribeHandlers.push(window.electron.chat.onMessageChunk(({ chatId, response
     if (!rendered.has(key)) {
       rendered.set(key, true);
       freezeStreamingText(cleanText);
-      addToolEventCompact(block.toolName, { content: block.content }, 'success', false);
+      addToolEventCompact(block.toolName, xmlToolBlockToParams(block.toolName, block.content), 'success', false);
       keepStreamingIndicatorAtBottom();
     }
   }

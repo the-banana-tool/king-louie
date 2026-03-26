@@ -2398,3 +2398,6 @@ app.on('window-all-closed', function () {
     app.quit();
   }
 });
+
+// Export Maps needed by agent-loop.js for IPC prompts (AskUser, directory access)
+module.exports = { pendingAskUserResolvers, pendingDirectoryAccessResolvers };
