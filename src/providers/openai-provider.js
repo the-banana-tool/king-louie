@@ -663,33 +663,34 @@ class OpenAIProvider extends BaseLLMProvider {
 
       for (const line of lines) {
         const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith('event:') && !trimmed.startsWith('data:')) continue;
-
-        if (trimmed.startsWith('event:')) continue; // skip event lines, process data lines
+        if (!trimmed.startsWith('data:')) continue;
 
         const data = trimmed.slice(5).trim();
-        if (data === '[DONE]') return buildResult();
+        if (!data) continue;
 
         try {
           const parsed = JSON.parse(data);
+          const eventType = parsed?.type;
 
-          // Responses API: response.completed carries usage
-          if (parsed?.usage) {
-            usage = parsed.usage;
-          }
-
-          if (parsed?.model) {
-            model = parsed.model;
-          }
-
-          // Responses API streaming: output_text.delta contains the text chunk
-          if (parsed?.delta) {
+          // Text content delta
+          if (eventType === 'response.output_text.delta' && parsed.delta) {
             onChunk(parsed.delta);
           }
 
-          // Also handle the type=response.output_text.delta format
-          if (parsed?.type === 'response.output_text.delta' && parsed?.delta) {
-            // Already handled above
+          // Usage from the completed event
+          if (eventType === 'response.completed' && parsed.response) {
+            if (parsed.response.usage) {
+              usage = parsed.response.usage;
+            }
+            if (parsed.response.model) {
+              model = parsed.response.model;
+            }
+            return buildResult();
+          }
+
+          // Capture model from early events
+          if (eventType === 'response.created' && parsed.response?.model) {
+            model = parsed.response.model;
           }
         } catch {
           // Ignore malformed partial chunks
