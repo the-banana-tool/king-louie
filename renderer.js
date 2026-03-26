@@ -82,6 +82,7 @@ const dom = {
   mainContent: document.querySelector('.main-content'),
   container: document.querySelector('.container'),
   sidebar: document.querySelector('.sidebar'),
+  sidebarResizeHandle: document.getElementById('sidebar-resize-handle'),
   chatContextMenu: document.getElementById('chat-context-menu'),
   settingsDrawer: document.getElementById('settings-drawer'),
   toggleHistoryBtn: document.getElementById('toggle-history-btn'),
@@ -4644,6 +4645,42 @@ if (dom.agentModeBtn) {
 if (dom.toggleHistoryBtn) {
   dom.toggleHistoryBtn.addEventListener('click', () => {
     setHistoryCollapsed(!appState.isHistoryCollapsed);
+  });
+}
+
+// --- Sidebar horizontal resize handle ---
+{
+  let resizing = false;
+  let startX = 0;
+  let startWidth = 0;
+  const MIN_WIDTH = 220;
+  const MAX_WIDTH = 520;
+
+  if (dom.sidebarResizeHandle) {
+    dom.sidebarResizeHandle.addEventListener('mousedown', (e) => {
+      if (appState.isHistoryCollapsed) return;
+      e.preventDefault();
+      resizing = true;
+      startX = e.clientX;
+      startWidth = dom.sidebar.offsetWidth;
+      document.body.style.cursor = 'ew-resize';
+      document.body.style.userSelect = 'none';
+    });
+  }
+
+  document.addEventListener('mousemove', (e) => {
+    if (!resizing || !dom.sidebar) return;
+    const delta = e.clientX - startX;
+    const newWidth = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, startWidth + delta));
+    dom.sidebar.style.width = `${newWidth}px`;
+    dom.sidebar.style.minWidth = `${newWidth}px`;
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!resizing) return;
+    resizing = false;
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
   });
 }
 

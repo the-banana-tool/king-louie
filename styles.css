@@ -158,6 +158,31 @@ body {
   transition: width var(--transition), min-width var(--transition), opacity var(--transition);
 }
 
+.sidebar-resize-handle {
+  width: 6px;
+  cursor: ew-resize;
+  background: transparent;
+  position: relative;
+  flex-shrink: 0;
+}
+
+.sidebar-resize-handle::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 2px;
+  height: 44px;
+  border-radius: 2px;
+  background: var(--border-default);
+  transition: background var(--transition);
+}
+
+.sidebar-resize-handle:hover::after {
+  background: var(--accent);
+}
+
 .sidebar-toggle-row {
   display: flex;
   justify-content: flex-end;
@@ -316,6 +341,11 @@ body {
   width: 48px;
   min-width: 48px;
   overflow: hidden;
+}
+
+.container.history-collapsed .sidebar-resize-handle,
+.container.start-state .sidebar-resize-handle {
+  display: none;
 }
 
 .container.history-collapsed .sidebar-toggle-row {
