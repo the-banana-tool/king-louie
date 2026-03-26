@@ -4311,7 +4311,27 @@ dom.sendBtn.addEventListener('click', sendMessage);
 if (dom.stopBtn) {
   dom.stopBtn.addEventListener('click', async () => {
     if (!appState.activeChatId) return;
-    await window.electron.chat.stopResponse(appState.activeChatId);
+
+    // Force-clean streaming UI immediately — don't wait for backend
+    const streamingDivs = dom.chatMessages.querySelectorAll('.message.streaming');
+    streamingDivs.forEach((div) => {
+      div.classList.remove('streaming');
+      const content = div.querySelector('.message-content');
+      if (content && !content.textContent.trim()) {
+        div.remove();
+      }
+    });
+    appState.streamBuffers.clear();
+    streamTextOffsets.clear();
+    if (appState.streamRenderedTools) appState.streamRenderedTools.clear();
+    setResponseActive(false, appState.activeChatId);
+
+    // Then tell the backend to abort
+    try {
+      await window.electron.chat.stopResponse(appState.activeChatId);
+    } catch (err) {
+      console.warn('[chat] stopResponse failed:', err.message);
+    }
   });
 }
 
@@ -5216,6 +5236,10 @@ window.addEventListener('blur', () => {
 
 unsubscribeHandlers.push(window.electron.chat.onMessageStart(({ chatId, responseId }) => {
   setResponseActive(true, chatId);
+  appState._streamStartTime = Date.now();
+  appState._streamResponseId = responseId;
+  appState._streamChatId = chatId;
+  appState._streamChunkCount = 0;
   if (chatId !== appState.activeChatId) return;
 
   // Flush any pending tool group before the assistant message
@@ -5228,6 +5252,27 @@ unsubscribeHandlers.push(window.electron.chat.onMessageStart(({ chatId, response
   const messageContent = document.createElement('div');
   messageContent.className = 'message-content';
 
+  // Double-click streaming indicator to show debug info
+  messageDiv.addEventListener('dblclick', () => {
+    const elapsed = ((Date.now() - (appState._streamStartTime || Date.now())) / 1000).toFixed(1);
+    const bufferSize = (appState.streamBuffers.get(responseId) || '').length;
+    const chunks = appState._streamChunkCount || 0;
+    const info = [
+      `Response ID: ${responseId}`,
+      `Chat ID: ${chatId}`,
+      `Elapsed: ${elapsed}s`,
+      `Chunks received: ${chunks}`,
+      `Buffer size: ${bufferSize} chars`,
+      `Active responses: ${[...appState.activeResponses].join(', ') || 'none'}`,
+      `Stream buffers: ${appState.streamBuffers.size}`
+    ].join('\n');
+    const debugDiv = messageContent.querySelector('.stream-debug') || document.createElement('pre');
+    debugDiv.className = 'stream-debug';
+    debugDiv.textContent = info;
+    debugDiv.style.cssText = 'font-size:11px;opacity:0.7;margin-top:8px;white-space:pre-wrap;';
+    if (!messageContent.contains(debugDiv)) messageContent.appendChild(debugDiv);
+  });
+
   messageDiv.appendChild(messageContent);
   dom.chatMessages.appendChild(messageDiv);
   dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
@@ -5235,6 +5280,7 @@ unsubscribeHandlers.push(window.electron.chat.onMessageStart(({ chatId, response
 }));
 
 unsubscribeHandlers.push(window.electron.chat.onMessageChunk(({ chatId, responseId, chunk }) => {
+  appState._streamChunkCount = (appState._streamChunkCount || 0) + 1;
   if (chatId !== appState.activeChatId) return;
 
   const existing = appState.streamBuffers.get(responseId) || '';
@@ -5285,21 +5331,26 @@ unsubscribeHandlers.push(window.electron.chat.onMessageComplete(({ chatId, respo
 unsubscribeHandlers.push(window.electron.chat.onMessageError(({ chatId, responseId, error }) => {
   appState.streamBuffers.delete(responseId);
   streamTextOffsets.delete(responseId);
+  if (appState.streamRenderedTools) appState.streamRenderedTools.clear();
   setResponseActive(false, chatId);
   if (chatId !== appState.activeChatId) return;
 
-  let messageDiv = dom.chatMessages.querySelector(`[data-response-id="${responseId}"] .message-content`);
+  // Remove streaming class from the wrapper div
+  const wrapper = dom.chatMessages.querySelector(`[data-response-id="${responseId}"]`);
+  if (wrapper) wrapper.classList.remove('streaming');
+
+  let messageDiv = wrapper?.querySelector('.message-content');
 
   // If onMessageStart never fired, there's no element yet — create one so the
   // error is visible instead of silently lost.
   if (!messageDiv) {
-    const wrapper = document.createElement('div');
-    wrapper.className = 'message assistant';
-    wrapper.dataset.responseId = responseId || 'error';
+    const newWrapper = document.createElement('div');
+    newWrapper.className = 'message assistant';
+    newWrapper.dataset.responseId = responseId || 'error';
     messageDiv = document.createElement('div');
     messageDiv.className = 'message-content';
-    wrapper.appendChild(messageDiv);
-    dom.chatMessages.appendChild(wrapper);
+    newWrapper.appendChild(messageDiv);
+    dom.chatMessages.appendChild(newWrapper);
   }
 
   const p = document.createElement('p');
