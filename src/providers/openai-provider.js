@@ -4,9 +4,21 @@ const ImageHandler = require('../media/image-handler');
 // Models that use the /v1/completions endpoint instead of /v1/chat/completions
 const COMPLETIONS_MODELS = ['codex', 'davinci', 'babbage', 'curie', 'ada'];
 
+// Models that don't support temperature (only default of 1)
+const NO_TEMPERATURE_MODELS = ['codex', 'o1', 'o3'];
+
 function isCompletionsModel(model) {
   const lower = String(model || '').toLowerCase();
   return COMPLETIONS_MODELS.some((m) => lower.includes(m));
+}
+
+function supportsTemperature(model) {
+  const lower = String(model || '').toLowerCase();
+  return !NO_TEMPERATURE_MODELS.some((m) => lower.includes(m));
+}
+
+function temperatureParam(model, options = {}) {
+  return supportsTemperature(model) ? { temperature: options.temperature ?? 0.7 } : {};
 }
 
 /**
@@ -166,7 +178,7 @@ class OpenAIProvider extends BaseLLMProvider {
       body: JSON.stringify({
         model,
         messages: this.formatMessages(preparedMessages),
-        temperature: options.temperature ?? 0.7,
+        ...temperatureParam(model, options),
         stream: false
       })
     });
@@ -187,7 +199,7 @@ class OpenAIProvider extends BaseLLMProvider {
         model,
         prompt,
         max_tokens: options.max_tokens || 4096,
-        temperature: options.temperature ?? 0.7,
+        ...temperatureParam(model, options),
         stream: false
       })
     });
@@ -223,7 +235,7 @@ class OpenAIProvider extends BaseLLMProvider {
           }
         })),
         tool_choice: 'auto',
-        temperature: options.temperature ?? 0.7,
+        ...temperatureParam(requestedModel, options),
         stream: false
       })
     });
@@ -250,7 +262,7 @@ class OpenAIProvider extends BaseLLMProvider {
         model,
         prompt,
         max_tokens: options.max_tokens || 4096,
-        temperature: options.temperature ?? 0.7,
+        ...temperatureParam(model, options),
         stream: false
       })
     });
@@ -358,14 +370,14 @@ class OpenAIProvider extends BaseLLMProvider {
           model: requestedModel,
           prompt: messagesToPrompt(this.formatMessages(preparedMessages)),
           max_tokens: options.max_tokens || 4096,
-          temperature: options.temperature ?? 0.7,
+          ...temperatureParam(requestedModel, options),
           stream: true,
           stream_options: { include_usage: true }
         }
       : {
           model: requestedModel,
           messages: this.formatMessages(preparedMessages),
-          temperature: options.temperature ?? 0.7,
+          ...temperatureParam(requestedModel, options),
           stream: true,
           stream_options: { include_usage: true }
         };
