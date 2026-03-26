@@ -674,6 +674,7 @@ const TOOL_ICONS = {
   sessions_spawn:   'fas fa-play',
   message:          'fas fa-envelope',
   Status:           'fas fa-info-circle',
+  'Tier changed':   'fas fa-layer-group',
   'Provider changed': 'fas fa-exchange-alt',
   'Model changed':  'fas fa-exchange-alt',
   'Sandbox mode':   'fas fa-shield-halved',
@@ -724,6 +725,7 @@ function getToolSummary(toolName, params) {
       if (mode === 'off' || mode === 'disabled') return 'Sandbox mode: off';
       return 'Sandbox mode';
     }
+    case 'Tier changed':     return `Tier: ${p.from || '?'} → ${p.to || '?'}`;
     case 'Provider changed': return `Provider: ${p.from || '?'} → ${p.to || '?'}`;
     case 'Model changed':    return `Model (${p.provider || '?'}): ${p.from || '(default)'} → ${p.to || '(default)'}`;
     case 'Status':           return p.message || 'Status update';
@@ -1359,6 +1361,7 @@ function renderChatInfoPopover() {
     tierSelect.appendChild(opt);
   });
   tierSelect.addEventListener('change', async () => {
+    const prevTier = appState.settings.inference?.activeTier || 'standard';
     try {
       const result = unwrapIpcResult(
         await window.electron.settings.setInferenceTier({ tier: tierSelect.value }),
@@ -1370,6 +1373,10 @@ function renderChatInfoPopover() {
       if (providerSelect) providerSelect.value = newInfo.provider || 'openai';
       if (populateModels) populateModels(newInfo.provider || 'openai', newInfo.model || '');
       if (typeof renderInferenceTierDetails === 'function') renderInferenceTierDetails();
+      addToolEventCompact('Tier changed', { from: prevTier, to: tierSelect.value }, 'info', false);
+      if (appState.activeChatId) {
+        window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'status', text: `Tier changed: ${prevTier} → ${tierSelect.value}` }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      }
     } catch (err) { /* silently fail */ }
   });
   tierRow.appendChild(tierLabel);
@@ -1473,6 +1480,7 @@ function renderChatInfoPopover() {
 
   // Provider change → fetch models + persist
   providerSelect.addEventListener('change', async () => {
+    const prevProvider = tierInfo.provider || 'openai';
     const newProvider = providerSelect.value;
     const activeTier = tierSelect.value;
     await populateModels(newProvider, '');
@@ -1486,12 +1494,17 @@ function renderChatInfoPopover() {
       );
       appState.settings.inference = result.inference || appState.settings.inference;
       if (typeof renderInferenceTierDetails === 'function') renderInferenceTierDetails();
+      addToolEventCompact('Provider changed', { from: prevProvider, to: newProvider }, 'info', false);
+      if (appState.activeChatId) {
+        window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'status', text: `Provider changed: ${prevProvider} → ${newProvider}` }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      }
     } catch { /* silently fail */ }
   });
 
   // Model change → persist
   modelSelect.addEventListener('change', async () => {
     const activeTier = tierSelect.value;
+    const prevModel = tierInfo.model || '';
     try {
       const result = unwrapIpcResult(
         await window.electron.settings.setTierProviderModel({
@@ -1501,6 +1514,10 @@ function renderChatInfoPopover() {
       );
       appState.settings.inference = result.inference || appState.settings.inference;
       if (typeof renderInferenceTierDetails === 'function') renderInferenceTierDetails();
+      addToolEventCompact('Model changed', { provider: providerSelect.value, from: prevModel, to: modelSelect.value }, 'info', false);
+      if (appState.activeChatId) {
+        window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'status', text: `Model changed (${providerSelect.value}): ${prevModel || '(default)'} → ${modelSelect.value || '(default)'}` }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      }
     } catch { /* silently fail */ }
   });
 
@@ -1529,6 +1546,9 @@ function renderChatInfoPopover() {
       appState.isAgentModeEnabled ? 'success' : '',
       false
     );
+    if (appState.activeChatId) {
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'status', text: `Agent mode: ${appState.isAgentModeEnabled ? 'on' : 'off'}` }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    }
   });
   const agentSlider = document.createElement('span');
   agentSlider.className = 'chat-info-toggle-slider';

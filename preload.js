@@ -217,7 +217,7 @@ const validateObject = (value, fieldName) => {
   }
 };
 
-const VALID_SENDERS = new Set(['user', 'assistant', 'system', 'tool']);
+const VALID_SENDERS = new Set(['user', 'assistant', 'system', 'tool', 'status']);
 const SUPPORTED_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 
 const knownProviders = new Set(['openai', 'anthropic', 'copilot']);
