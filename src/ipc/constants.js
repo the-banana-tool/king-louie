@@ -88,6 +88,8 @@ module.exports = {
   SKILL_LIST_PINNABLE: 'skill:listPinnable',
   SKILL_HANDLE_MESSAGE: 'skill:handleMessage',
   SKILL_CHECK_DEPS: 'skill:checkDeps',
+  SKILL_CHECK_UPDATES: 'skill:checkUpdates',
+  SKILL_UPDATE: 'skill:update',
 
   WEBHOOK_LIST: 'webhook:list',
   WEBHOOK_CREATE: 'webhook:create',

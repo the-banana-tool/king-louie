@@ -1,6 +1,6 @@
 const { wrapHandler } = require('./wrap-handler');
 const IPC = require('./constants');
-const { execSync } = require('child_process');
+const childProcess = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const { isCommandAvailable, resetRuntimeEnvironmentCache } = require('../execution/runtime-environment');
@@ -144,7 +144,7 @@ function registerSkillHandlers(ipcMain, context = {}) {
 
       try {
         const cloneUrl = cleaned.endsWith('.git') ? cleaned : `${strippedGit}.git`;
-        execSync(`git clone "${cloneUrl}" "${targetDir}"`, {
+        childProcess.execSync(`git clone "${cloneUrl}" "${targetDir}"`, {
           timeout: 60000,
           stdio: 'pipe'
         });
@@ -161,7 +161,7 @@ function registerSkillHandlers(ipcMain, context = {}) {
       if (fs.existsSync(pkgPath)) {
         const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
         if (pkg.dependencies && Object.keys(pkg.dependencies).length > 0) {
-          execSync('npm install --production', {
+          childProcess.execSync('npm install --production', {
             cwd: skillDir,
             timeout: 120000,
             stdio: 'pipe'
@@ -430,6 +430,118 @@ function registerSkillHandlers(ipcMain, context = {}) {
     }
 
     return { ok: true, results };
+  }));
+  // --- skill update checking ---
+
+  ipcMain.handle(IPC.SKILL_CHECK_UPDATES, wrapHandler(IPC.SKILL_CHECK_UPDATES, async () => {
+    const skills = Array.from(skillRegistry.skills?.values() || []);
+    const results = {};
+
+    for (const skill of skills) {
+      const skillPath = skill._skillPath;
+      if (!skillPath || skill._isSymlink) continue;
+
+      const gitDir = path.join(skillPath, '.git');
+      if (!fs.existsSync(gitDir)) continue;
+
+      const meta = typeof skill.getMetadata === 'function' ? skill.getMetadata() : {};
+      const skillId = meta.id || path.basename(skillPath);
+
+      try {
+        childProcess.execSync('git fetch', { cwd: skillPath, timeout: 30000, stdio: 'pipe' });
+
+        const local = childProcess.execSync('git rev-parse HEAD', { cwd: skillPath, timeout: 5000, stdio: 'pipe' }).toString().trim();
+        const remote = childProcess.execSync('git rev-parse @{u}', { cwd: skillPath, timeout: 5000, stdio: 'pipe' }).toString().trim();
+
+        if (local !== remote) {
+          // Get the remote version from package.json on the remote branch
+          let remoteVersion = null;
+          try {
+            const remotePkg = childProcess.execSync('git show @{u}:package.json', { cwd: skillPath, timeout: 5000, stdio: 'pipe' }).toString();
+            const parsed = JSON.parse(remotePkg);
+            remoteVersion = parsed.version || null;
+          } catch { /* no package.json on remote or parse error */ }
+
+          const behind = childProcess.execSync('git rev-list HEAD..@{u} --count', { cwd: skillPath, timeout: 5000, stdio: 'pipe' }).toString().trim();
+
+          results[skillId] = {
+            updateAvailable: true,
+            currentVersion: meta.version || null,
+            remoteVersion,
+            behind: parseInt(behind, 10) || 0
+          };
+        } else {
+          results[skillId] = { updateAvailable: false };
+        }
+      } catch (err) {
+        results[skillId] = { updateAvailable: false, error: err.message };
+      }
+    }
+
+    return { ok: true, results };
+  }));
+
+  ipcMain.handle(IPC.SKILL_UPDATE, wrapHandler(IPC.SKILL_UPDATE, async (_event, { skillId } = {}) => {
+    const skill = skillRegistry.getSkill(skillId);
+    if (!skill) {
+      return { ok: false, error: `Unknown skill: ${skillId}` };
+    }
+
+    const skillPath = skill._skillPath;
+    if (!skillPath) {
+      return { ok: false, error: `Cannot determine install path for skill '${skillId}'.` };
+    }
+
+    if (skill._isSymlink) {
+      return { ok: false, error: `Skill '${skillId}' is symlinked — update it manually.` };
+    }
+
+    const gitDir = path.join(skillPath, '.git');
+    if (!fs.existsSync(gitDir)) {
+      return { ok: false, error: `Skill '${skillId}' is not a git repository.` };
+    }
+
+    try {
+      childProcess.execSync('git pull --ff-only', { cwd: skillPath, timeout: 60000, stdio: 'pipe' });
+    } catch (err) {
+      return { ok: false, error: `Git pull failed: ${err.stderr?.toString().trim() || err.message}` };
+    }
+
+    // Re-run npm install if needed
+    try {
+      const pkgPath = path.join(skillPath, 'package.json');
+      if (fs.existsSync(pkgPath)) {
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+        if (pkg.dependencies && Object.keys(pkg.dependencies).length > 0) {
+          childProcess.execSync('npm install --production', { cwd: skillPath, timeout: 120000, stdio: 'pipe' });
+        }
+      }
+    } catch (err) {
+      console.warn(`[skill-update] npm install warning:`, err.message);
+    }
+
+    // Clear require cache for the skill so it reloads fresh
+    Object.keys(require.cache).forEach((key) => {
+      if (key.startsWith(skillPath)) {
+        delete require.cache[key];
+      }
+    });
+
+    // Unregister old instance, reload, and re-register
+    await skillRegistry.unregister(skillId);
+
+    const loader = getSkillLoader();
+    try {
+      const reloaded = await loader.loadSkill(skillPath);
+      if (!reloaded) {
+        return { ok: false, error: `Update pulled but failed to reload skill.` };
+      }
+      skillRegistry.register(reloaded);
+      const meta = reloaded.getMetadata();
+      return { ok: true, skillId: meta.id, name: meta.name, version: meta.version };
+    } catch (err) {
+      return { ok: false, error: `Update pulled but reload failed: ${err.message}` };
+    }
   }));
 }
 

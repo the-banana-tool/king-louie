@@ -2144,6 +2144,17 @@ function renderSkillCard(skill) {
   titleWrap.appendChild(title);
   titleWrap.appendChild(versionBadge);
 
+  if (skill._updateInfo?.updateAvailable) {
+    const updateBadge = document.createElement('span');
+    updateBadge.className = 'active-provider-badge skill-update-badge';
+    const remoteVer = skill._updateInfo.remoteVersion;
+    updateBadge.textContent = remoteVer ? `v${remoteVer} available` : 'Update available';
+    updateBadge.title = skill._updateInfo.behind
+      ? `${skill._updateInfo.behind} commit(s) behind`
+      : 'New version available';
+    titleWrap.appendChild(updateBadge);
+  }
+
   const status = document.createElement('span');
   status.className = 'provider-status';
   if (skill.enabled !== false) {
@@ -2191,6 +2202,18 @@ function renderSkillCard(skill) {
     settingsBtn.appendChild(faIcon('fas fa-gear'));
     settingsBtn.appendChild(document.createTextNode(' Settings'));
     actions.appendChild(settingsBtn);
+  }
+
+  if (skill._updateInfo?.updateAvailable) {
+    const updateBtn = document.createElement('button');
+    updateBtn.type = 'button';
+    updateBtn.className = 'btn btn-primary';
+    updateBtn.dataset.action = 'update-skill';
+    updateBtn.dataset.skillId = skill.id;
+    updateBtn.dataset.skillName = skill.name;
+    updateBtn.appendChild(faIcon('fas fa-download'));
+    updateBtn.appendChild(document.createTextNode(' Update'));
+    actions.appendChild(updateBtn);
   }
 
   if (skill.skillPath) {
@@ -2468,12 +2491,48 @@ async function saveSkillSettings(skillId) {
   }
 }
 
+async function updateSkill(skillId, skillName) {
+  if (dom.skillsStatus) {
+    dom.skillsStatus.textContent = `Updating "${skillName || skillId}"...`;
+    dom.skillsStatus.classList.remove('error');
+  }
+
+  try {
+    const result = await window.electron.skill.update({ skillId });
+    if (result?.error) throw new Error(result.error);
+    if (dom.skillsStatus) {
+      dom.skillsStatus.textContent = `Updated "${result.name || skillId}" to v${result.version || '?'}.`;
+      dom.skillsStatus.classList.remove('error');
+    }
+    await loadSkillSettingsTabs();
+  } catch (err) {
+    if (dom.skillsStatus) {
+      dom.skillsStatus.textContent = `Update failed: ${err.message}`;
+      dom.skillsStatus.classList.add('error');
+    }
+  }
+}
+
 async function loadSkillSettingsTabs() {
   if (!dom.settingsNavSelect) return;
 
   try {
     const result = await window.electron.skill.listWithSettings();
     const skills = Array.isArray(result) ? result : (result?.data || []);
+
+    // Check for updates in the background
+    window.electron.skill.checkUpdates().then((updateResult) => {
+      if (!updateResult?.ok || !updateResult.results) return;
+      const updates = updateResult.results;
+      let hasAnyUpdate = false;
+      for (const skill of skills) {
+        if (updates[skill.id]) {
+          skill._updateInfo = updates[skill.id];
+          if (updates[skill.id].updateAvailable) hasAnyUpdate = true;
+        }
+      }
+      if (hasAnyUpdate) renderSkillsList(skills);
+    }).catch(() => {});
 
     // Render the skills management list
     renderSkillsList(skills);
@@ -4873,6 +4932,8 @@ if (dom.skillsList) {
       toggleSkillEnabled(skillId, nextEnabled === 'true');
     } else if (action === 'open-skill-settings' && skillId) {
       switchSettingsTab(`skill-${skillId}`);
+    } else if (action === 'update-skill' && skillId) {
+      updateSkill(skillId, skillName);
     } else if (action === 'remove-skill' && skillId) {
       removeSkill(skillId, skillName);
     }
