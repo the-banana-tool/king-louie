@@ -562,6 +562,63 @@ function renderMessageImages(messageContent, images = []) {
   }
 }
 
+/* ── XML tool-call extraction (non-agent-mode) ─────────────── */
+
+/**
+ * Known tool names the LLM might emit as XML tags in non-agent text responses.
+ * Case-insensitive lookup map: lowercase tag → canonical tool name.
+ */
+const XML_TOOL_NAMES = {
+  bash: 'Bash', powershell: 'Bash', shell: 'Bash', terminal: 'Bash', cmd: 'Bash',
+  read: 'Read', write: 'Write', edit: 'Edit',
+  grep: 'Grep', glob: 'Glob', git: 'Git',
+  webfetch: 'WebFetch', fetch: 'WebFetch',
+  websearch: 'WebSearch', search: 'WebSearch',
+  browser: 'Browser', askuser: 'AskUser', cron: 'Cron', skill: 'Skill'
+};
+
+/**
+ * Regex that matches complete XML tool blocks: <toolName>...content...</toolName>
+ * Captures: (1) tag name, (2) inner content.
+ * Uses a dynamic alternation built from the known names.
+ */
+const XML_TOOL_TAG_NAMES = Object.keys(XML_TOOL_NAMES).join('|');
+const XML_TOOL_BLOCK_RE = new RegExp(
+  `<(${XML_TOOL_TAG_NAMES})>([\\s\\S]*?)<\\/\\1>`,
+  'gi'
+);
+
+/**
+ * Detect whether text still has an unclosed XML tool tag at the end
+ * (i.e. the LLM is still streaming content inside a tool block).
+ */
+const XML_TOOL_OPEN_RE = new RegExp(
+  `<(${XML_TOOL_TAG_NAMES})>([\\s\\S]*)$`,
+  'i'
+);
+
+/**
+ * Parse completed XML tool blocks from text.
+ * Returns { cleanText, toolBlocks: [{ toolName, content }] }.
+ */
+function extractXmlToolBlocks(text) {
+  const toolBlocks = [];
+  const cleanText = text.replace(XML_TOOL_BLOCK_RE, (match, tagName, content) => {
+    const canonical = XML_TOOL_NAMES[tagName.toLowerCase()] || tagName;
+    toolBlocks.push({ toolName: canonical, content: content.trim() });
+    return '';
+  });
+  return { cleanText: cleanText.trim(), toolBlocks };
+}
+
+/**
+ * Strip any trailing unclosed tool tag from display text so we don't render
+ * partial XML while the LLM is still streaming inside a tool block.
+ */
+function stripTrailingOpenToolTag(text) {
+  return text.replace(XML_TOOL_OPEN_RE, '').trim();
+}
+
 /* ── Tool event helpers ─────────────────────────────────────── */
 
 const LOW_STAKES_TOOLS = new Set([
@@ -1330,7 +1387,18 @@ function renderChatMessages() {
       };
     }
 
-    addMessage(message.sender, message.text, {
+    // For assistant messages, extract any XML tool blocks and render as pills
+    let displayText = message.text;
+    if (message.sender === 'assistant' && displayText) {
+      const { cleanText, toolBlocks } = extractXmlToolBlocks(displayText);
+      for (const block of toolBlocks) {
+        addToolEventCompact(block.toolName, { content: block.content }, 'success', false);
+      }
+      displayText = cleanText;
+      if (!displayText) return; // message was entirely tool blocks
+    }
+
+    addMessage(message.sender, displayText, {
       llm: message?.llm,
       runningLlmTotals: callTotals ? { ...runningTotals } : null,
       format: message?.format,
@@ -4699,17 +4767,38 @@ unsubscribeHandlers.push(window.electron.chat.onMessageChunk(({ chatId, response
   const streamElement = dom.chatMessages.querySelector(`[data-response-id="${responseId}"] .message-content`);
   if (!streamElement) return;
 
-  streamElement.innerHTML = window.electron.markdown.parse(next);
+  // Extract completed XML tool blocks and render them as pills
+  const { cleanText, toolBlocks } = extractXmlToolBlocks(next);
+  for (const block of toolBlocks) {
+    // Only render each tool block once — track which we've already shown
+    const rendered = appState.streamRenderedTools = appState.streamRenderedTools || new Map();
+    const key = `${responseId}:${block.toolName}:${block.content.slice(0, 80)}`;
+    if (!rendered.has(key)) {
+      rendered.set(key, true);
+      addToolEventCompact(block.toolName, { content: block.content }, 'success', false);
+      keepStreamingIndicatorAtBottom();
+    }
+  }
+
+  // Strip trailing unclosed tags so partial XML isn't shown while streaming
+  const displayText = stripTrailingOpenToolTag(cleanText);
+  streamElement.innerHTML = displayText ? window.electron.markdown.parse(displayText) : '';
   dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
 }));
 
 unsubscribeHandlers.push(window.electron.chat.onMessageComplete(({ chatId, responseId }) => {
   appState.streamBuffers.delete(responseId);
+  if (appState.streamRenderedTools) appState.streamRenderedTools.clear();
   setResponseActive(false, chatId);
   if (chatId !== appState.activeChatId) return;
   const messageDiv = dom.chatMessages.querySelector(`[data-response-id="${responseId}"]`);
   if (messageDiv) {
     messageDiv.classList.remove('streaming');
+    // If the message is now empty after tool extraction, remove it entirely
+    const content = messageDiv.querySelector('.message-content');
+    if (content && !content.textContent.trim()) {
+      messageDiv.remove();
+    }
   }
 }));
 
