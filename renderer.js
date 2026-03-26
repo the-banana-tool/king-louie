@@ -634,6 +634,7 @@ const TOOL_ICONS = {
   Read:             'fas fa-file-lines',
   Write:            'fas fa-file-pen',
   Edit:             'fas fa-pen-to-square',
+  'Agent mode':     'fas fa-wand-magic-sparkles',
   Bash:             'fas fa-terminal',
   Git:              'fas fa-code-branch',
   Glob:             'fas fa-folder-open',
@@ -682,6 +683,12 @@ function getToolSummary(toolName, params) {
     case 'WebFetch':  return `Fetch ${(p.url || '').slice(0, 50)}`;
     case 'WebSearch':  return `Search "${(p.query || '').slice(0, 50)}"`;
     case 'Browser':   return `Browser: ${p.action || 'navigate'}`;
+    case 'Agent mode': {
+      const mode = String(p.mode || p.state || '').trim().toLowerCase();
+      if (mode === 'on' || mode === 'enabled' || mode === 'agent') return 'Agent mode: on';
+      if (mode === 'off' || mode === 'disabled' || mode === 'standard') return 'Agent mode: off';
+      return 'Agent mode';
+    }
     default:          return toolName;
   }
 }
@@ -1409,10 +1416,11 @@ function renderChatInfoPopover() {
     appState.isAgentModeEnabled = agentCheckbox.checked;
     persistAgentMode();
     renderAgentModeButton();
-    addToolEventMessage(
-      `Agent mode ${appState.isAgentModeEnabled ? 'enabled' : 'disabled'}`,
-      { mode: appState.isAgentModeEnabled ? 'agent' : 'standard' },
-      appState.isAgentModeEnabled ? 'success' : ''
+    addToolEventCompact(
+      'Agent mode',
+      { mode: appState.isAgentModeEnabled ? 'on' : 'off' },
+      appState.isAgentModeEnabled ? 'success' : '',
+      false
     );
   });
   const agentSlider = document.createElement('span');
@@ -4553,12 +4561,13 @@ if (dom.agentModeBtn) {
     appState.isAgentModeEnabled = !appState.isAgentModeEnabled;
     persistAgentMode();
     renderAgentModeButton();
-    addToolEventMessage(
-      `Agent mode ${appState.isAgentModeEnabled ? 'enabled' : 'disabled'}`,
+    addToolEventCompact(
+      'Agent mode',
       {
-        mode: appState.isAgentModeEnabled ? 'agent' : 'standard'
+        mode: appState.isAgentModeEnabled ? 'on' : 'off'
       },
-      appState.isAgentModeEnabled ? 'success' : ''
+      appState.isAgentModeEnabled ? 'success' : '',
+      false
     );
   });
 }
