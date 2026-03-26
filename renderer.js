@@ -973,6 +973,29 @@ function addToolEventMessage(title, payload, variant = '') {
   addToolEventCompact(toolName, payload, variant, isResult);
 }
 
+/**
+ * Add a status message to the chat: renders the UI event, persists to backend,
+ * and updates local appState so re-renders don't lose it.
+ */
+function addStatusMessage(text) {
+  addToolEventCompact('Status', { message: text }, 'info', false);
+  const chatId = appState.activeChatId;
+  if (!chatId) return;
+  const msg = {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    sender: 'status',
+    text,
+    timestamp: new Date().toISOString()
+  };
+  // Update local state so re-renders preserve it
+  const chat = appState.chats.find((c) => c.id === chatId);
+  if (chat) {
+    chat.messages = chat.messages || [];
+    chat.messages.push(msg);
+  }
+  window.electron.chat.addMessage({ chatId, sender: 'status', text }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+}
+
 function showToolApprovalDialog(approvalId, toolName, parameters) {
   const messageDiv = document.createElement('div');
   messageDiv.className = 'message assistant prompt-message';
@@ -1343,10 +1366,7 @@ function renderChatInfoPopover() {
       if (providerSelect) providerSelect.value = newInfo.provider || 'openai';
       if (populateModels) populateModels(newInfo.provider || 'openai', newInfo.model || '');
       if (typeof renderInferenceTierDetails === 'function') renderInferenceTierDetails();
-      addToolEventCompact('Tier changed', { from: prevTier, to: tierSelect.value }, 'info', false);
-      if (appState.activeChatId) {
-        window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'status', text: `Tier changed: ${prevTier} → ${tierSelect.value}` }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
-      }
+      addStatusMessage(`Tier changed: ${prevTier} → ${tierSelect.value}`);
     } catch (err) { /* silently fail */ }
   });
   tierRow.appendChild(tierLabel);
@@ -1464,10 +1484,7 @@ function renderChatInfoPopover() {
       );
       appState.settings.inference = result.inference || appState.settings.inference;
       if (typeof renderInferenceTierDetails === 'function') renderInferenceTierDetails();
-      addToolEventCompact('Provider changed', { from: prevProvider, to: newProvider }, 'info', false);
-      if (appState.activeChatId) {
-        window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'status', text: `Provider changed: ${prevProvider} → ${newProvider}` }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
-      }
+      addStatusMessage(`Provider changed: ${prevProvider} → ${newProvider}`);
     } catch { /* silently fail */ }
   });
 
@@ -1484,10 +1501,7 @@ function renderChatInfoPopover() {
       );
       appState.settings.inference = result.inference || appState.settings.inference;
       if (typeof renderInferenceTierDetails === 'function') renderInferenceTierDetails();
-      addToolEventCompact('Model changed', { provider: providerSelect.value, from: prevModel, to: modelSelect.value }, 'info', false);
-      if (appState.activeChatId) {
-        window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'status', text: `Model changed (${providerSelect.value}): ${prevModel || '(default)'} → ${modelSelect.value || '(default)'}` }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
-      }
+      addStatusMessage(`Model changed (${providerSelect.value}): ${prevModel || '(default)'} → ${modelSelect.value || '(default)'}`);
     } catch { /* silently fail */ }
   });
 
@@ -1510,15 +1524,7 @@ function renderChatInfoPopover() {
     appState.isAgentModeEnabled = agentCheckbox.checked;
     persistAgentMode();
     renderAgentModeButton();
-    addToolEventCompact(
-      'Agent mode',
-      { mode: appState.isAgentModeEnabled ? 'on' : 'off' },
-      appState.isAgentModeEnabled ? 'success' : '',
-      false
-    );
-    if (appState.activeChatId) {
-      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'status', text: `Agent mode: ${appState.isAgentModeEnabled ? 'on' : 'off'}` }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
-    }
+    addStatusMessage(`Agent mode: ${appState.isAgentModeEnabled ? 'on' : 'off'}`);
   });
   const agentSlider = document.createElement('span');
   agentSlider.className = 'chat-info-toggle-slider';
@@ -1543,15 +1549,7 @@ function renderChatInfoPopover() {
   sandboxCheckbox.addEventListener('change', () => {
     appState.isSandboxModeEnabled = sandboxCheckbox.checked;
     persistSandboxMode();
-    addToolEventCompact(
-      'Sandbox mode',
-      { mode: appState.isSandboxModeEnabled ? 'on' : 'off' },
-      appState.isSandboxModeEnabled ? 'success' : '',
-      false
-    );
-    if (appState.activeChatId) {
-      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'status', text: `Sandbox mode: ${appState.isSandboxModeEnabled ? 'on' : 'off'}` }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
-    }
+    addStatusMessage(`Sandbox mode: ${appState.isSandboxModeEnabled ? 'on' : 'off'}`);
   });
   const sandboxSlider = document.createElement('span');
   sandboxSlider.className = 'chat-info-toggle-slider';
@@ -1852,10 +1850,7 @@ function renderProviderCard(providerKey, provider) {
     }
     appState.settings.providers[providerKey].model = result.model;
     setProviderMessage(providerKey, `Model saved: ${result.model || '(default)'}`);
-    addToolEventCompact('Model changed', { provider: providerKey, from: prevModel, to: result.model }, 'info', false);
-    if (appState.activeChatId) {
-      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'status', text: `Model changed (${providerKey}): ${prevModel || '(default)'} → ${result.model || '(default)'}` }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
-    }
+    addStatusMessage(`Model changed (${providerKey}): ${prevModel || '(default)'} → ${result.model || '(default)'}`);
   });
 
   controls.appendChild(modelLabel);
@@ -4294,10 +4289,7 @@ async function handleSaveProviderModel(providerKey) {
   appState.settings.providers[providerKey].model = result.model;
   setProviderMessage(providerKey, `Model saved: ${result.model || '(default)'}`);
   renderSettings();
-  addToolEventCompact('Model changed', { provider: providerKey, from: prevModel, to: result.model }, 'info', false);
-  if (appState.activeChatId) {
-    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'status', text: `Model changed (${providerKey}): ${prevModel || '(default)'} → ${result.model || '(default)'}` }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
-  }
+  addStatusMessage(`Model changed (${providerKey}): ${prevModel || '(default)'} → ${result.model || '(default)'}`);
 }
 
 async function handleSetActiveProvider(providerKey) {
@@ -4310,10 +4302,7 @@ async function handleSetActiveProvider(providerKey) {
   const prev = appState.settings.activeProvider;
   appState.settings.activeProvider = result.activeProvider;
   renderSettings();
-  addToolEventCompact('Provider changed', { from: prev, to: result.activeProvider }, 'info', false);
-  if (appState.activeChatId) {
-    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'status', text: `Provider changed: ${prev} → ${result.activeProvider}` }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
-  }
+  addStatusMessage(`Provider changed: ${prev} → ${result.activeProvider}`);
 }
 
 // Event Listeners
@@ -4730,17 +4719,7 @@ if (dom.agentModeBtn) {
     appState.isAgentModeEnabled = !appState.isAgentModeEnabled;
     persistAgentMode();
     renderAgentModeButton();
-    addToolEventCompact(
-      'Agent mode',
-      {
-        mode: appState.isAgentModeEnabled ? 'on' : 'off'
-      },
-      appState.isAgentModeEnabled ? 'success' : '',
-      false
-    );
-    if (appState.activeChatId) {
-      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'status', text: `Agent mode: ${appState.isAgentModeEnabled ? 'on' : 'off'}` }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
-    }
+    addStatusMessage(`Agent mode: ${appState.isAgentModeEnabled ? 'on' : 'off'}`);
   });
 }
 

@@ -1704,6 +1704,7 @@ body {
 /* --- Inline chat prompts (approval, directory access, ask user) --- */
 .message.prompt-message {
   border-left: 3px solid var(--accent);
+  padding-left: 16px;
 }
 
 .message.prompt-message .message-content pre {
