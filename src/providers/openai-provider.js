@@ -1,6 +1,45 @@
 const BaseLLMProvider = require('./base-provider');
 const ImageHandler = require('../media/image-handler');
 
+// Models that use the /v1/completions endpoint instead of /v1/chat/completions
+const COMPLETIONS_MODELS = ['codex', 'davinci', 'babbage', 'curie', 'ada'];
+
+function isCompletionsModel(model) {
+  const lower = String(model || '').toLowerCase();
+  return COMPLETIONS_MODELS.some((m) => lower.includes(m));
+}
+
+/**
+ * Convert chat messages array into a single prompt string for the completions endpoint.
+ */
+function messagesToPrompt(messages) {
+  return (messages || []).map((msg) => {
+    const role = msg.role || msg.sender || 'user';
+    const text = msg.content || msg.text || '';
+    const content = typeof text === 'string' ? text : JSON.stringify(text);
+    return `${role}: ${content}`;
+  }).join('\n\n') + '\n\nassistant:';
+}
+
+/**
+ * Build a completions prompt that includes tool definitions so the model
+ * can respond with structured tool calls using a simple JSON format.
+ */
+function messagesToPromptWithTools(messages, tools) {
+  const toolDefs = (tools || []).map((t) =>
+    `- ${t.name}: ${t.description}\n  Parameters: ${JSON.stringify(t.parameters || {})}`
+  ).join('\n');
+
+  const toolSection = tools?.length
+    ? `\nYou have these tools available. To use a tool, respond with ONLY a JSON block like {"tool": "ToolName", "parameters": {...}}. Otherwise respond with plain text.\n\nTools:\n${toolDefs}\n`
+    : '';
+
+  return messagesToPrompt([
+    { role: 'system', content: toolSection },
+    ...messages
+  ]);
+}
+
 class OpenAIProvider extends BaseLLMProvider {
   prependSystemPrompt(messages = [], systemPrompt = '') {
     if (!systemPrompt || typeof systemPrompt !== 'string') {
@@ -18,6 +57,7 @@ class OpenAIProvider extends BaseLLMProvider {
     return [
       'gpt-4o',
       'gpt-4o-mini',
+      'gpt-5.2-codex',
       'o1',
       'o1-mini',
       'o3-mini',
@@ -113,12 +153,18 @@ class OpenAIProvider extends BaseLLMProvider {
   }
 
   async sendMessage(messages, options = {}) {
+    const model = options.model || this.getDefaultModel();
     const preparedMessages = this.prependSystemPrompt(messages, options.systemPrompt);
+
+    if (isCompletionsModel(model)) {
+      return this._sendCompletions(model, messagesToPrompt(this.formatMessages(preparedMessages)), options);
+    }
+
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
-        model: options.model || this.getDefaultModel(),
+        model,
         messages: this.formatMessages(preparedMessages),
         temperature: options.temperature ?? 0.7,
         stream: false
@@ -133,9 +179,35 @@ class OpenAIProvider extends BaseLLMProvider {
     return data.choices?.[0]?.message?.content || '';
   }
 
+  async _sendCompletions(model, prompt, options = {}) {
+    const response = await fetch('https://api.openai.com/v1/completions', {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify({
+        model,
+        prompt,
+        max_tokens: options.max_tokens || 4096,
+        temperature: options.temperature ?? 0.7,
+        stream: false
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(await this.extractError(response));
+    }
+
+    const data = await response.json();
+    return data.choices?.[0]?.text || '';
+  }
+
   async sendMessageWithTools(messages, tools = [], options = {}) {
     const requestedModel = options.model || this.getDefaultModel();
     const preparedMessages = this.prependSystemPrompt(messages, options.systemPrompt);
+
+    if (isCompletionsModel(requestedModel)) {
+      return this._sendCompletionsWithTools(requestedModel, preparedMessages, tools, options);
+    }
+
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: this.getHeaders(),
@@ -167,6 +239,49 @@ class OpenAIProvider extends BaseLLMProvider {
     });
 
     return this.parseToolResponse(data, llmMetrics);
+  }
+
+  async _sendCompletionsWithTools(model, messages, tools, options = {}) {
+    const prompt = messagesToPromptWithTools(this.formatMessages(messages), tools);
+    const response = await fetch('https://api.openai.com/v1/completions', {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify({
+        model,
+        prompt,
+        max_tokens: options.max_tokens || 4096,
+        temperature: options.temperature ?? 0.7,
+        stream: false
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(await this.extractError(response));
+    }
+
+    const data = await response.json();
+    const text = (data.choices?.[0]?.text || '').trim();
+    const llmMetrics = this.buildLlmCallMetrics({
+      model: data.model || model,
+      usage: data.usage
+    });
+
+    // Try to parse a tool call from the response
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed?.tool && typeof parsed.tool === 'string') {
+        return {
+          type: 'tool_use',
+          toolName: parsed.tool,
+          toolUseId: `call_${Date.now()}`,
+          parameters: parsed.parameters || {},
+          messageContent: '',
+          llmMetrics
+        };
+      }
+    } catch { /* not a tool call — plain text response */ }
+
+    return { type: 'text', content: text, llmMetrics };
   }
 
   parseToolResponse(response, llmMetrics) {
@@ -232,18 +347,33 @@ class OpenAIProvider extends BaseLLMProvider {
   async streamMessage(messages, options = {}, onChunk) {
     const requestedModel = options.model || this.getDefaultModel();
     const preparedMessages = this.prependSystemPrompt(messages, options.systemPrompt);
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+
+    const isCompletions = isCompletionsModel(requestedModel);
+    const url = isCompletions
+      ? 'https://api.openai.com/v1/completions'
+      : 'https://api.openai.com/v1/chat/completions';
+
+    const body = isCompletions
+      ? {
+          model: requestedModel,
+          prompt: messagesToPrompt(this.formatMessages(preparedMessages)),
+          max_tokens: options.max_tokens || 4096,
+          temperature: options.temperature ?? 0.7,
+          stream: true,
+          stream_options: { include_usage: true }
+        }
+      : {
+          model: requestedModel,
+          messages: this.formatMessages(preparedMessages),
+          temperature: options.temperature ?? 0.7,
+          stream: true,
+          stream_options: { include_usage: true }
+        };
+
+    const response = await fetch(url, {
       method: 'POST',
       headers: this.getHeaders(),
-      body: JSON.stringify({
-        model: requestedModel,
-        messages: this.formatMessages(preparedMessages),
-        temperature: options.temperature ?? 0.7,
-        stream: true,
-        stream_options: {
-          include_usage: true
-        }
-      })
+      body: JSON.stringify(body)
     });
 
     if (!response.ok) {
@@ -285,7 +415,8 @@ class OpenAIProvider extends BaseLLMProvider {
             model = parsed.model;
           }
 
-          const content = parsed.choices?.[0]?.delta?.content;
+          // Chat completions use delta.content; completions use text
+          const content = parsed.choices?.[0]?.delta?.content || parsed.choices?.[0]?.text;
           if (content) onChunk(content);
         } catch {
           // Ignore malformed partial chunks
