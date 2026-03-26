@@ -1158,7 +1158,24 @@ body {
 .input-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 8px;
+}
+
+/* Match attach button height to send/stop buttons */
+.input-actions .icon-button {
+  height: 38px;
+  min-height: 38px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.input-actions .send-btn,
+.input-actions .stop-btn {
+  height: 38px;
+  min-height: 38px;
 }
 
 /* .send-btn inherits from .btn-primary .btn-lg */
