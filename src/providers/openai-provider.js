@@ -70,12 +70,18 @@ class OpenAIProvider extends BaseLLMProvider {
 
   getModels() {
     return [
+      'gpt-5',
+      'gpt-5-mini',
+      'gpt-5.4-mini',
+      'gpt-5.2-codex',
+      'gpt-4.1',
+      'gpt-4.1-mini',
       'gpt-4o',
       'gpt-4o-mini',
-      'gpt-5.2-codex',
+      'o4-mini',
+      'o3-mini',
       'o1',
       'o1-mini',
-      'o3-mini',
       'gpt-4-turbo',
       'gpt-4'
     ];
@@ -83,10 +89,17 @@ class OpenAIProvider extends BaseLLMProvider {
 
   getModelPricingTable() {
     return {
-      'gpt-4o-mini': { inputPerMillion: 0.15, outputPerMillion: 0.6 },
-      'gpt-4o': { inputPerMillion: 2.5, outputPerMillion: 10 },
+      'gpt-5': { inputPerMillion: 3, outputPerMillion: 15 },
+      'gpt-5-mini': { inputPerMillion: 0.5, outputPerMillion: 2 },
+      'gpt-5.2-codex': { inputPerMillion: 3, outputPerMillion: 15 },
+      'gpt-4.1': { inputPerMillion: 2, outputPerMillion: 8 },
       'gpt-4.1-mini': { inputPerMillion: 0.4, outputPerMillion: 1.6 },
-      'gpt-4.1': { inputPerMillion: 2, outputPerMillion: 8 }
+      'gpt-4o': { inputPerMillion: 2.5, outputPerMillion: 10 },
+      'gpt-4o-mini': { inputPerMillion: 0.15, outputPerMillion: 0.6 },
+      'o4-mini': { inputPerMillion: 1.1, outputPerMillion: 4.4 },
+      'o3-mini': { inputPerMillion: 1.1, outputPerMillion: 4.4 },
+      'o1': { inputPerMillion: 15, outputPerMillion: 60 },
+      'o1-mini': { inputPerMillion: 1.1, outputPerMillion: 4.4 }
     };
   }
 
