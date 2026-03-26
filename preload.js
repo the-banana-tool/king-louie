@@ -384,6 +384,8 @@ contextBridge.exposeInMainWorld(
       setActiveProvider: (payload) => ipcRenderer.invoke('settings:setActiveProvider', payload),
       setProviderModel: (payload) => ipcRenderer.invoke('settings:setProviderModel', payload),
       setInferenceTier: (payload) => ipcRenderer.invoke('settings:setInferenceTier', payload),
+      listModels: (payload) => ipcRenderer.invoke('settings:listModels', payload),
+      setTierProviderModel: (payload) => ipcRenderer.invoke('settings:setTierProviderModel', payload),
       runLlmCommand: (payload) => {
         validateSettingsRunLlmPayload(payload);
         return ipcRenderer.invoke('settings:runLlmCommand', payload);

@@ -305,6 +305,68 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     return { ok: true, inference };
   }));
 
+  ipcMain.handle('settings:listModels', wrapHandler('settings:listModels', async (_event, { provider } = {}) => {
+    if (!provider) {
+      return { ok: false, error: 'Provider is required.' };
+    }
+
+    const ProviderFactory = require('../providers/provider-factory');
+    const registeredProviders = ProviderFactory.listRegistered();
+    if (!registeredProviders.includes(provider)) {
+      return { ok: false, error: 'Unknown provider.' };
+    }
+
+    const tokens = getApiTokens();
+    const encryptedToken = tokens[provider];
+    const token = encryptedToken ? decryptToken(encryptedToken) : null;
+
+    // Try API-based listing first (ollama needs no token)
+    if (token || provider === 'ollama') {
+      try {
+        const instance = ProviderFactory.create(provider, token || 'ollama-local');
+        const models = await instance.listModels();
+        return { ok: true, models, source: 'api' };
+      } catch { /* fall through to static */ }
+    }
+
+    // Fall back to static model list
+    try {
+      const instance = ProviderFactory.create(provider, 'static-fallback');
+      const models = instance.getModels();
+      return { ok: true, models, source: 'static' };
+    } catch {
+      return { ok: false, error: 'Unable to list models for this provider.' };
+    }
+  }));
+
+  ipcMain.handle('settings:setTierProviderModel', wrapHandler('settings:setTierProviderModel', async (_event, { tier, provider, model } = {}) => {
+    const normalizedTier = String(tier || '').toLowerCase();
+    if (!['fast', 'standard', 'smart'].includes(normalizedTier)) {
+      return { ok: false, error: 'Invalid tier.' };
+    }
+
+    const settings = getSettings();
+    const tierMap = { ...(settings.inference?.tierMap || {}) };
+    const current = tierMap[normalizedTier] || {};
+
+    tierMap[normalizedTier] = {
+      ...current,
+      ...(provider !== undefined ? { provider } : {}),
+      ...(model !== undefined ? { model } : {})
+    };
+
+    const updated = {
+      ...settings,
+      inference: {
+        ...(settings.inference || {}),
+        tierMap
+      }
+    };
+
+    setSettings(updated);
+    return { ok: true, inference: updated.inference };
+  }));
+
   ipcMain.handle('settings:saveNotifications', wrapHandler('settings:saveNotifications', async (_event, { notifications } = {}) => {
     const saved = setNotificationSettings(notifications || {});
     return { ok: true, notifications: saved };

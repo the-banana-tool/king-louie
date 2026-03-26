@@ -1240,10 +1240,10 @@ function renderChatInfoPopover() {
         'Failed to set inference tier.'
       );
       appState.settings.inference = result.inference || appState.settings.inference;
-      // Update the provider/model display
+      // Update the provider/model dropdowns for the new tier
       const newInfo = (appState.settings.inference.tierMap || {})[tierSelect.value] || {};
-      if (providerVal) providerVal.textContent = newInfo.provider || '—';
-      if (modelVal) modelVal.textContent = newInfo.model || '—';
+      if (providerSelect) providerSelect.value = newInfo.provider || 'openai';
+      if (populateModels) populateModels(newInfo.provider || 'openai', newInfo.model || '');
       if (typeof renderInferenceTierDetails === 'function') renderInferenceTierDetails();
     } catch (err) { /* silently fail */ }
   });
@@ -1251,33 +1251,136 @@ function renderChatInfoPopover() {
   tierRow.appendChild(tierSelect);
   dom.chatInfoPopoverBody.appendChild(tierRow);
 
-  // Provider row (read-only)
+  // Provider row (dropdown)
   const providerRow = document.createElement('div');
   providerRow.className = 'chat-info-row';
   const providerLabel = document.createElement('span');
   providerLabel.className = 'chat-info-label';
   providerLabel.appendChild(faIcon('fas fa-plug'));
   providerLabel.appendChild(document.createTextNode('Provider'));
-  const providerVal = document.createElement('span');
-  providerVal.className = 'chat-info-value';
-  providerVal.textContent = tierInfo.provider || '—';
+  const providerSelect = document.createElement('select');
+  providerSelect.className = 'chat-info-select';
+  const providerDisplayNames = {
+    openai: 'OpenAI', anthropic: 'Anthropic', groq: 'Groq',
+    mistral: 'Mistral', ollama: 'Ollama', gemini: 'Gemini', openrouter: 'OpenRouter'
+  };
+  Object.keys(providerDisplayNames).forEach((p) => {
+    const opt = document.createElement('option');
+    opt.value = p;
+    opt.textContent = providerDisplayNames[p];
+    if (p === (tierInfo.provider || '')) opt.selected = true;
+    providerSelect.appendChild(opt);
+  });
   providerRow.appendChild(providerLabel);
-  providerRow.appendChild(providerVal);
+  providerRow.appendChild(providerSelect);
   dom.chatInfoPopoverBody.appendChild(providerRow);
 
-  // Model row (read-only)
+  // Model row (dropdown)
   const modelRow = document.createElement('div');
   modelRow.className = 'chat-info-row';
   const modelLabel = document.createElement('span');
   modelLabel.className = 'chat-info-label';
   modelLabel.appendChild(faIcon('fas fa-microchip'));
   modelLabel.appendChild(document.createTextNode('Model'));
-  const modelVal = document.createElement('span');
-  modelVal.className = 'chat-info-value';
-  modelVal.textContent = tierInfo.model || '—';
+  const modelSelect = document.createElement('select');
+  modelSelect.className = 'chat-info-select';
+  // Seed with current model so there's no flash of empty
+  if (tierInfo.model) {
+    const opt = document.createElement('option');
+    opt.value = tierInfo.model;
+    opt.textContent = tierInfo.model;
+    opt.selected = true;
+    modelSelect.appendChild(opt);
+  }
   modelRow.appendChild(modelLabel);
-  modelRow.appendChild(modelVal);
+  modelRow.appendChild(modelSelect);
   dom.chatInfoPopoverBody.appendChild(modelRow);
+
+  // Helper to populate model dropdown from API (with static fallback)
+  let modelFetchId = 0;
+  const populateModels = async (provider, selectedModel) => {
+    const fetchId = ++modelFetchId;
+    modelSelect.disabled = true;
+    modelSelect.innerHTML = '';
+    const loadingOpt = document.createElement('option');
+    loadingOpt.textContent = 'Loading…';
+    loadingOpt.disabled = true;
+    loadingOpt.selected = true;
+    modelSelect.appendChild(loadingOpt);
+
+    try {
+      const result = unwrapIpcResult(
+        await window.electron.settings.listModels({ provider }),
+        'Failed to list models.'
+      );
+      if (fetchId !== modelFetchId) return; // stale response
+      modelSelect.innerHTML = '';
+      const models = result.models || [];
+      let hasSelected = false;
+      models.forEach((m) => {
+        const opt = document.createElement('option');
+        opt.value = m;
+        opt.textContent = m;
+        if (m === selectedModel) { opt.selected = true; hasSelected = true; }
+        modelSelect.appendChild(opt);
+      });
+      // If current model not in list, keep it at the top
+      if (selectedModel && !hasSelected) {
+        const opt = document.createElement('option');
+        opt.value = selectedModel;
+        opt.textContent = selectedModel + ' (current)';
+        opt.selected = true;
+        modelSelect.insertBefore(opt, modelSelect.firstChild);
+      }
+    } catch {
+      if (fetchId !== modelFetchId) return;
+      modelSelect.innerHTML = '';
+      if (selectedModel) {
+        const opt = document.createElement('option');
+        opt.value = selectedModel;
+        opt.textContent = selectedModel;
+        modelSelect.appendChild(opt);
+      }
+    } finally {
+      if (fetchId === modelFetchId) modelSelect.disabled = false;
+    }
+  };
+
+  // Provider change → fetch models + persist
+  providerSelect.addEventListener('change', async () => {
+    const newProvider = providerSelect.value;
+    const activeTier = tierSelect.value;
+    await populateModels(newProvider, '');
+    const newModel = modelSelect.value || '';
+    try {
+      const result = unwrapIpcResult(
+        await window.electron.settings.setTierProviderModel({
+          tier: activeTier, provider: newProvider, model: newModel
+        }),
+        'Failed to update provider.'
+      );
+      appState.settings.inference = result.inference || appState.settings.inference;
+      if (typeof renderInferenceTierDetails === 'function') renderInferenceTierDetails();
+    } catch { /* silently fail */ }
+  });
+
+  // Model change → persist
+  modelSelect.addEventListener('change', async () => {
+    const activeTier = tierSelect.value;
+    try {
+      const result = unwrapIpcResult(
+        await window.electron.settings.setTierProviderModel({
+          tier: activeTier, model: modelSelect.value
+        }),
+        'Failed to update model.'
+      );
+      appState.settings.inference = result.inference || appState.settings.inference;
+      if (typeof renderInferenceTierDetails === 'function') renderInferenceTierDetails();
+    } catch { /* silently fail */ }
+  });
+
+  // Load models for current provider
+  populateModels(tierInfo.provider || 'openai', tierInfo.model || '');
 
   // Agent mode toggle row
   const agentRow = document.createElement('div');
@@ -1524,15 +1627,62 @@ function renderProviderCard(providerKey, provider) {
   const modelLabel = document.createElement('label');
   modelLabel.textContent = 'Model';
 
-  const modelInput = document.createElement('input');
-  modelInput.className = 'provider-input';
-  modelInput.type = 'text';
-  modelInput.placeholder = 'Model name';
-  modelInput.value = provider.model || '';
-  modelInput.dataset.modelProvider = providerKey;
+  const modelSelect = document.createElement('select');
+  modelSelect.className = 'provider-input';
+  modelSelect.dataset.modelProvider = providerKey;
+  // Seed with current model
+  if (provider.model) {
+    const opt = document.createElement('option');
+    opt.value = provider.model;
+    opt.textContent = provider.model;
+    opt.selected = true;
+    modelSelect.appendChild(opt);
+  }
+
+  // Fetch models from API asynchronously
+  (async () => {
+    try {
+      const result = unwrapIpcResult(
+        await window.electron.settings.listModels({ provider: providerKey }),
+        'Failed to list models.'
+      );
+      const models = result.models || [];
+      const currentModel = provider.model || '';
+      modelSelect.innerHTML = '';
+      let hasSelected = false;
+      models.forEach((m) => {
+        const opt = document.createElement('option');
+        opt.value = m;
+        opt.textContent = m;
+        if (m === currentModel) { opt.selected = true; hasSelected = true; }
+        modelSelect.appendChild(opt);
+      });
+      if (currentModel && !hasSelected) {
+        const opt = document.createElement('option');
+        opt.value = currentModel;
+        opt.textContent = currentModel + ' (current)';
+        opt.selected = true;
+        modelSelect.insertBefore(opt, modelSelect.firstChild);
+      }
+    } catch { /* keep the seeded option */ }
+  })();
+
+  // Auto-save on change
+  modelSelect.addEventListener('change', async () => {
+    const model = modelSelect.value;
+    const result = await window.electron.settings.setProviderModel({
+      provider: providerKey, model
+    });
+    if (!result.ok) {
+      setProviderMessage(providerKey, result.error || 'Unable to save model.', true);
+      return;
+    }
+    appState.settings.providers[providerKey].model = result.model;
+    setProviderMessage(providerKey, `Model saved: ${result.model || '(default)'}`);
+  });
 
   controls.appendChild(modelLabel);
-  controls.appendChild(modelInput);
+  controls.appendChild(modelSelect);
 
   const actions = document.createElement('div');
   actions.className = 'provider-actions';
@@ -1561,14 +1711,6 @@ function renderProviderCard(providerKey, provider) {
   clearBtn.dataset.action = 'clear';
   clearBtn.dataset.provider = providerKey;
 
-  const modelBtn = document.createElement('button');
-  modelBtn.type = 'button';
-  modelBtn.className = 'btn';
-  modelBtn.appendChild(faIcon('fas fa-floppy-disk'));
-  modelBtn.appendChild(document.createTextNode(' Save Model'));
-  modelBtn.dataset.action = 'save-model';
-  modelBtn.dataset.provider = providerKey;
-
   const activeBtn = document.createElement('button');
   activeBtn.type = 'button';
   activeBtn.className = 'btn';
@@ -1578,7 +1720,6 @@ function renderProviderCard(providerKey, provider) {
   activeBtn.dataset.provider = providerKey;
 
   actions.appendChild(saveBtn);
-  actions.appendChild(modelBtn);
   actions.appendChild(activeBtn);
   actions.appendChild(testBtn);
   actions.appendChild(clearBtn);
@@ -3937,8 +4078,8 @@ async function handleTestProvider(providerKey) {
 }
 
 async function handleSaveProviderModel(providerKey) {
-  const input = dom.providerList.querySelector(`input[data-model-provider="${providerKey}"]`);
-  const model = input?.value?.trim() || '';
+  const el = dom.providerList.querySelector(`[data-model-provider="${providerKey}"]`);
+  const model = (el?.value || '').trim();
   const result = await window.electron.settings.setProviderModel({
     provider: providerKey,
     model
@@ -4590,9 +4731,6 @@ if (dom.providerList) {
     }
     if (action === 'test') {
       handleTestProvider(provider);
-    }
-    if (action === 'save-model') {
-      handleSaveProviderModel(provider);
     }
     if (action === 'set-active') {
       handleSetActiveProvider(provider);
