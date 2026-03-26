@@ -68,6 +68,8 @@ const appState = {
 
 const dom = {
   userInput: document.getElementById('user-input'),
+  inputContainer: document.getElementById('input-container'),
+  inputResizeHandle: document.getElementById('input-resize-handle'),
   sendBtn: document.getElementById('send-btn'),
   stopBtn: document.getElementById('stop-btn'),
   chatMessages: document.getElementById('chat-messages'),
@@ -198,6 +200,7 @@ const dom = {
   workingDirBtn: document.getElementById('working-dir-btn'),
   exportChatBtn: document.getElementById('export-chat-btn'),
   messageContextMenu: document.getElementById('message-context-menu'),
+  inputContextMenu: document.getElementById('input-context-menu'),
   webhookNameInput: document.getElementById('webhook-name-input'),
   webhookTemplateInput: document.getElementById('webhook-template-input'),
   webhookCreateBtn: document.getElementById('webhook-create-btn'),
@@ -235,6 +238,7 @@ function resetAppState() {
   appState.pendingImages = [];
   appState.activeResponses.clear();
   appState.streamBuffers.clear();
+  streamTextOffsets.clear();
   appState.settings = {
     encryptionAvailable: true,
     providers: {},
@@ -704,6 +708,13 @@ const toolGroupBuffer = {
   element: null,     // current group DOM element
   timeout: null
 };
+
+/**
+ * Tracks how much of each response's clean text has already been "frozen" into
+ * a completed message div.  When a tool event fires mid-stream we snapshot the
+ * text accumulated so far, and subsequent chunks only display the remainder.
+ */
+const streamTextOffsets = new Map();
 
 function flushToolGroup() {
   if (toolGroupBuffer.timeout) {
@@ -3977,6 +3988,7 @@ async function handleCreateChat() {
 
 async function handleSelectChat(chatId) {
   appState.streamBuffers.clear();
+  streamTextOffsets.clear();
   appState.activeChatId = chatId;
   const isStreaming = appState.activeResponses.has(chatId);
   if (dom.sendBtn) dom.sendBtn.hidden = isStreaming;
@@ -4340,6 +4352,9 @@ document.addEventListener('click', (e) => {
   if (!dom.messageContextMenu.hidden && !e.target.closest('#message-context-menu')) {
     dom.messageContextMenu.hidden = true;
   }
+  if (!dom.inputContextMenu.hidden && !e.target.closest('#input-context-menu')) {
+    dom.inputContextMenu.hidden = true;
+  }
 });
 
 // --- Working directory picker ---
@@ -4412,6 +4427,82 @@ dom.messageContextMenu.addEventListener('click', (e) => {
   dom.messageContextMenu.hidden = true;
   messageContextTarget = null;
   messageContextCodeBlock = null;
+});
+
+// --- Input panel resize handle ---
+{
+  let resizing = false;
+  let startY = 0;
+  let startHeight = 0;
+  const MIN_HEIGHT = 100;
+  const MAX_HEIGHT = 500;
+
+  dom.inputResizeHandle.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    resizing = true;
+    startY = e.clientY;
+    startHeight = dom.inputContainer.offsetHeight;
+    document.body.style.cursor = 'ns-resize';
+    document.body.style.userSelect = 'none';
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!resizing) return;
+    const delta = startY - e.clientY;
+    const newHeight = Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, startHeight + delta));
+    dom.inputContainer.style.height = `${newHeight}px`;
+    dom.userInput.style.flex = '1';
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!resizing) return;
+    resizing = false;
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  });
+}
+
+// --- Input textarea right-click context menu ---
+dom.userInput.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  const hasSelection = dom.userInput.selectionStart !== dom.userInput.selectionEnd;
+  dom.inputContextMenu.querySelector('[data-action="cut"]').classList.toggle('disabled', !hasSelection);
+  dom.inputContextMenu.querySelector('[data-action="copy"]').classList.toggle('disabled', !hasSelection);
+
+  dom.inputContextMenu.hidden = false;
+  const menuRect = dom.inputContextMenu.getBoundingClientRect();
+  const maxX = window.innerWidth - menuRect.width - 8;
+  const maxY = window.innerHeight - menuRect.height - 8;
+  dom.inputContextMenu.style.left = `${Math.min(e.clientX, maxX)}px`;
+  dom.inputContextMenu.style.top = `${Math.min(e.clientY, maxY)}px`;
+});
+
+dom.inputContextMenu.addEventListener('click', async (e) => {
+  const actionBtn = e.target.closest('.context-menu-item');
+  if (!actionBtn) return;
+  const action = actionBtn.dataset.action;
+  const { selectionStart, selectionEnd } = dom.userInput;
+
+  if (action === 'cut') {
+    const selected = dom.userInput.value.substring(selectionStart, selectionEnd);
+    if (selected) {
+      await navigator.clipboard.writeText(selected);
+      dom.userInput.setRangeText('', selectionStart, selectionEnd, 'end');
+      dom.userInput.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  } else if (action === 'copy') {
+    const selected = dom.userInput.value.substring(selectionStart, selectionEnd);
+    if (selected) await navigator.clipboard.writeText(selected);
+  } else if (action === 'paste') {
+    const text = await navigator.clipboard.readText();
+    dom.userInput.setRangeText(text, selectionStart, selectionEnd, 'end');
+    dom.userInput.dispatchEvent(new Event('input', { bubbles: true }));
+  } else if (action === 'select-all') {
+    dom.userInput.select();
+  }
+
+  dom.inputContextMenu.hidden = true;
+  dom.userInput.focus();
 });
 
 if (dom.openSettingsBtn) {
@@ -4913,19 +5004,22 @@ unsubscribeHandlers.push(window.electron.chat.onMessageChunk(({ chatId, response
     const key = `${responseId}:${block.toolName}:${block.content.slice(0, 80)}`;
     if (!rendered.has(key)) {
       rendered.set(key, true);
+      freezeStreamingText(cleanText);
       addToolEventCompact(block.toolName, { content: block.content }, 'success', false);
       keepStreamingIndicatorAtBottom();
     }
   }
 
   // Strip trailing unclosed tags so partial XML isn't shown while streaming
-  const displayText = stripTrailingOpenToolTag(cleanText);
+  const offset = streamTextOffsets.get(responseId) || 0;
+  const displayText = stripTrailingOpenToolTag(cleanText.substring(offset));
   streamElement.innerHTML = displayText ? window.electron.markdown.parse(displayText) : '';
   dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
 }));
 
 unsubscribeHandlers.push(window.electron.chat.onMessageComplete(({ chatId, responseId }) => {
   appState.streamBuffers.delete(responseId);
+  streamTextOffsets.delete(responseId);
   if (appState.streamRenderedTools) appState.streamRenderedTools.clear();
   setResponseActive(false, chatId);
   if (chatId !== appState.activeChatId) return;
@@ -4942,6 +5036,7 @@ unsubscribeHandlers.push(window.electron.chat.onMessageComplete(({ chatId, respo
 
 unsubscribeHandlers.push(window.electron.chat.onMessageError(({ chatId, responseId, error }) => {
   appState.streamBuffers.delete(responseId);
+  streamTextOffsets.delete(responseId);
   setResponseActive(false, chatId);
   if (chatId !== appState.activeChatId) return;
 
@@ -4966,6 +5061,45 @@ unsubscribeHandlers.push(window.electron.chat.onMessageError(({ chatId, response
   dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
 }));
 
+/**
+ * Freeze the text accumulated in the streaming div so far into a completed
+ * message div.  Call this before inserting a tool-event element so that
+ * text and tool calls appear in chronological order.
+ *
+ * @param {string} [cleanText] – pre-computed clean text (avoids re-extracting)
+ */
+function freezeStreamingText(cleanText) {
+  const streamingDiv = dom.chatMessages.querySelector('.message.streaming');
+  if (!streamingDiv) return;
+  const responseId = streamingDiv.dataset.responseId;
+
+  // Compute cleanText from buffer if not supplied
+  if (cleanText === undefined) {
+    const buffer = appState.streamBuffers.get(responseId);
+    if (!buffer) return;
+    cleanText = extractXmlToolBlocks(buffer).cleanText;
+  }
+
+  const offset = streamTextOffsets.get(responseId) || 0;
+  const frozenText = stripTrailingOpenToolTag(cleanText.substring(offset));
+
+  if (frozenText.trim()) {
+    const frozenDiv = document.createElement('div');
+    frozenDiv.className = 'message assistant';
+    const frozenContent = document.createElement('div');
+    frozenContent.className = 'message-content';
+    frozenContent.innerHTML = window.electron.markdown.parse(frozenText);
+    frozenDiv.appendChild(frozenContent);
+    dom.chatMessages.insertBefore(frozenDiv, streamingDiv);
+
+    // Clear live streaming content — it will be repopulated from the offset
+    const streamContent = streamingDiv.querySelector('.message-content');
+    if (streamContent) streamContent.innerHTML = '';
+  }
+
+  streamTextOffsets.set(responseId, cleanText.length);
+}
+
 /** Move the streaming indicator element to the bottom so it renders below tool events. */
 function keepStreamingIndicatorAtBottom() {
   const streaming = dom.chatMessages.querySelector('.message.streaming');
@@ -4977,6 +5111,7 @@ function keepStreamingIndicatorAtBottom() {
 unsubscribeHandlers.push(window.electron.chat.onToolUse(({ chatId, toolName, parameters }) => {
   if (chatId !== appState.activeChatId) return;
   try {
+    freezeStreamingText();
     addToolEventCompact(toolName, parameters, '', false);
     keepStreamingIndicatorAtBottom();
   } catch (err) {
@@ -5060,6 +5195,7 @@ unsubscribeHandlers.push(window.electron.chat.onChatUpdated(async () => {
 window.addEventListener('beforeunload', () => {
   clearPendingImages();
   appState.streamBuffers.clear();
+  streamTextOffsets.clear();
   while (unsubscribeHandlers.length > 0) {
     const unsubscribe = unsubscribeHandlers.pop();
     if (typeof unsubscribe === 'function') {

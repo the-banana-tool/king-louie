@@ -407,6 +407,11 @@ body {
   color: var(--error);
 }
 
+.context-menu-item.disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
 .context-menu-item i {
   margin-right: 6px;
   width: 14px;
@@ -1056,6 +1061,32 @@ body {
   display: none;
 }
 
+/* --- Input resize handle ----------------------------------- */
+.input-resize-handle {
+  height: 6px;
+  cursor: ns-resize;
+  background: transparent;
+  position: relative;
+  flex-shrink: 0;
+}
+
+.input-resize-handle::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 40px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--border-default);
+  transition: background var(--transition);
+}
+
+.input-resize-handle:hover::after {
+  background: var(--accent);
+}
+
 /* --- Input area -------------------------------------------- */
 .input-container {
   padding: 16px 24px;
@@ -1066,6 +1097,7 @@ body {
   gap: 10px;
   align-items: stretch;
   position: relative;
+  overflow: hidden;
 }
 
 .user-input {
@@ -1856,4 +1888,9 @@ body {
 ::selection {
   background: rgba(137,180,250,0.3);
   color: var(--text-primary);
+}
+
+.message.user .message-content ::selection {
+  background: rgba(0,0,0,0.25);
+  color: #11111b;
 }
