@@ -4,12 +4,11 @@ const ImageHandler = require('../media/image-handler');
 // Models that use the /v1/completions endpoint instead of /v1/chat/completions
 const COMPLETIONS_MODELS = ['davinci', 'babbage', 'curie', 'ada'];
 
-// Models that use the /v1/responses endpoint instead of /v1/chat/completions
-// "chatgpt-*" models are not chat-completion models; codex models also use responses API
-const RESPONSES_MODELS = ['chatgpt-', '-codex'];
-
 // Models that don't support temperature (only default of 1)
 const NO_TEMPERATURE_MODELS = ['codex', 'o1', 'o3', 'o4', 'gpt-5', 'chatgpt-'];
+
+// Runtime cache: models that need /v1/responses instead of /v1/chat/completions
+const _responsesModels = new Set();
 
 function isCompletionsModel(model) {
   const lower = String(model || '').toLowerCase();
@@ -17,8 +16,11 @@ function isCompletionsModel(model) {
 }
 
 function isResponsesModel(model) {
-  const lower = String(model || '').toLowerCase();
-  return RESPONSES_MODELS.some((m) => lower.includes(m));
+  return _responsesModels.has(String(model || '').toLowerCase());
+}
+
+function markAsResponsesModel(model) {
+  _responsesModels.add(String(model || '').toLowerCase());
 }
 
 function supportsTemperature(model) {
@@ -79,7 +81,7 @@ class OpenAIProvider extends BaseLLMProvider {
 
   getModels() {
     return [
-      'chatgpt-5.4-pro',
+      'gpt-5.4-pro',
       'gpt-5',
       'gpt-5-mini',
       'gpt-5.4-mini',
@@ -99,7 +101,7 @@ class OpenAIProvider extends BaseLLMProvider {
 
   getModelPricingTable() {
     return {
-      'chatgpt-5.4-pro': { inputPerMillion: 3, outputPerMillion: 15 },
+      'gpt-5.4-pro': { inputPerMillion: 3, outputPerMillion: 15 },
       'gpt-5': { inputPerMillion: 3, outputPerMillion: 15 },
       'gpt-5-mini': { inputPerMillion: 0.5, outputPerMillion: 2 },
       'gpt-5.2-codex': { inputPerMillion: 3, outputPerMillion: 15 },
@@ -215,7 +217,12 @@ class OpenAIProvider extends BaseLLMProvider {
     });
 
     if (!response.ok) {
-      throw new Error(await this.extractError(response));
+      const err = await this.extractError(response);
+      if (err.includes('not a chat model')) {
+        markAsResponsesModel(model);
+        return this._sendResponses(model, preparedMessages, options);
+      }
+      throw new Error(err);
     }
 
     const data = await response.json();
@@ -276,7 +283,12 @@ class OpenAIProvider extends BaseLLMProvider {
     });
 
     if (!response.ok) {
-      throw new Error(await this.extractError(response));
+      const err = await this.extractError(response);
+      if (err.includes('not a chat model')) {
+        markAsResponsesModel(requestedModel);
+        return this._sendResponsesWithTools(requestedModel, preparedMessages, tools, options);
+      }
+      throw new Error(err);
     }
 
     const data = await response.json();
@@ -527,7 +539,12 @@ class OpenAIProvider extends BaseLLMProvider {
     });
 
     if (!response.ok) {
-      throw new Error(await this.extractError(response));
+      const err = await this.extractError(response);
+      if (err.includes('not a chat model')) {
+        markAsResponsesModel(requestedModel);
+        return this._streamResponses(requestedModel, preparedMessages, options, onChunk);
+      }
+      throw new Error(err);
     }
 
     const reader = response.body.getReader();
