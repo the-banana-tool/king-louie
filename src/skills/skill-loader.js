@@ -214,7 +214,7 @@ class SkillLoader {
     const directories = [this.builtinSkillsDirectory, this.skillsDirectory].filter(Boolean);
     for (const dir of directories) {
       if (!fs.existsSync(dir)) {
-        console.log(`[skill-loader] Skills directory not found: ${dir}`);
+        console.debug(`[skill-loader] Skills directory not found: ${dir}`);
         continue;
       }
       const entries = fs.readdirSync(dir, { withFileTypes: true });
