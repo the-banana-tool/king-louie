@@ -728,14 +728,32 @@ const buildRuntimeSystemPrompt = (runtimeEnvironment = {}) => {
     ? runtimeEnvironment.unavailable
     : [];
 
-  return [
+  const sections = [
     'Environment context (auto-detected):',
     `- Platform: ${platform}`,
     `- Shell: ${shell}`,
     `- Available CLI tools: ${available.length ? available.join(', ') : 'unknown'}`,
     `- Known missing CLI tools: ${unavailable.length ? unavailable.join(', ') : 'none detected'}`,
     'Use this context when proposing commands and selecting tools. Avoid commands for unavailable tools.'
-  ].join('\n');
+  ];
+
+  // Include installed skills so the LLM knows they exist
+  try {
+    const skills = typeof skillRegistry.listSkills === 'function'
+      ? skillRegistry.listSkills()
+      : [];
+    if (skills.length > 0) {
+      sections.push('');
+      sections.push('Installed skills (use the Skill tool to invoke these):');
+      for (const s of skills) {
+        const cmds = Array.isArray(s.commands) && s.commands.length ? ` (commands: ${s.commands.join(', ')})` : '';
+        sections.push(`- ${s.id}: ${s.description || s.name || s.id}${cmds}`);
+      }
+      sections.push('When the user explicitly asks you to use a specific skill, prefer the Skill tool over built-in tools like Git or Bash.');
+    }
+  } catch { /* skills unavailable */ }
+
+  return sections.join('\n');
 };
 
 const getChatLlmTotals = (chat) => {
