@@ -372,6 +372,21 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     return { ok: true, notifications: saved };
   }));
 
+  ipcMain.handle('settings:saveDefaults', wrapHandler('settings:saveDefaults', async (_event, { defaults } = {}) => {
+    const settings = getSettings();
+    const merged = {
+      ...(settings.defaults || {}),
+      ...(defaults || {})
+    };
+    // Only allow known keys
+    const sanitized = {
+      agentMode: !!merged.agentMode,
+      sandboxMode: merged.sandboxMode !== false
+    };
+    setSettings({ ...settings, defaults: sanitized });
+    return { ok: true, defaults: sanitized };
+  }));
+
   ipcMain.handle('settings:addAllowedDirectory', wrapHandler('settings:addAllowedDirectory', async () => {
     const { dialog } = require('electron');
     const getMainWindow = context.getMainWindow;

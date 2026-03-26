@@ -253,6 +253,10 @@ contextBridge.exposeInMainWorld(
         validateString(chatId, 'chatId');
         return ipcRenderer.invoke('chat:setAgentMode', { chatId, agentMode: !!agentMode });
       },
+      setSandboxMode: (chatId, sandboxMode) => {
+        validateString(chatId, 'chatId');
+        return ipcRenderer.invoke('chat:setSandboxMode', { chatId, sandboxMode: !!sandboxMode });
+      },
       rename: (payload) => {
         validateObject(payload, 'payload');
         validateString(payload.chatId, 'chatId');
@@ -373,6 +377,7 @@ contextBridge.exposeInMainWorld(
       testVoice: (payload) =>
         throttleInvoke('settings:testVoice', () => ipcRenderer.invoke('settings:testVoice', payload)),
       saveNotifications: (payload) => ipcRenderer.invoke('settings:saveNotifications', payload),
+      saveDefaults: (payload) => ipcRenderer.invoke('settings:saveDefaults', payload),
       addAllowedDirectory: () => ipcRenderer.invoke('settings:addAllowedDirectory'),
       removeAllowedDirectory: (directory) => {
         validateString(directory, 'directory');

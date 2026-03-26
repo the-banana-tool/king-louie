@@ -197,6 +197,10 @@ class SandboxExecutor {
         shell: true
       });
 
+      const hostShell = process.platform === 'win32'
+        ? (process.env.ComSpec || 'cmd.exe')
+        : (process.env.SHELL || '/bin/sh');
+
       return {
         success: true,
         stdout: (stdout || '').trim(),
@@ -204,11 +208,15 @@ class SandboxExecutor {
         exitCode: 0,
         environment: {
           platform: process.platform,
-          shell: null,
+          shell: hostShell,
           sandbox: false
         }
       };
     } catch (error) {
+      const hostShell = process.platform === 'win32'
+        ? (process.env.ComSpec || 'cmd.exe')
+        : (process.env.SHELL || '/bin/sh');
+
       return {
         success: false,
         stdout: (error.stdout || '').trim(),
@@ -216,7 +224,7 @@ class SandboxExecutor {
         exitCode: typeof error.code === 'number' ? error.code : 1,
         environment: {
           platform: process.platform,
-          shell: null,
+          shell: hostShell,
           sandbox: false
         }
       };

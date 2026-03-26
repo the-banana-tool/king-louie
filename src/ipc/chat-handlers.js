@@ -95,11 +95,15 @@ function registerChatHandlers(ipcMain, context = {}) {
 
   ipcMain.handle(IPC.CHAT_CREATE, wrapHandler(IPC.CHAT_CREATE, async (_event, title = 'New Chat') => {
     const now = new Date().toISOString();
+    const settings = typeof context.getSettings === 'function' ? context.getSettings() : {};
+    const defaults = settings.defaults || {};
     const newChat = {
       id: createId(),
       title,
       createdAt: now,
       updatedAt: now,
+      agentMode: !!defaults.agentMode,
+      sandboxMode: defaults.sandboxMode !== false,
       messages: [
         {
           id: createId(),
@@ -147,6 +151,17 @@ function registerChatHandlers(ipcMain, context = {}) {
     const updated = chats.map((chat) =>
       chat.id === chatId
         ? { ...chat, agentMode: !!agentMode, updatedAt: new Date().toISOString() }
+        : chat
+    );
+    setChats(updated);
+    return updated.find((chat) => chat.id === chatId);
+  }));
+
+  ipcMain.handle(IPC.CHAT_SET_SANDBOX_MODE, wrapHandler(IPC.CHAT_SET_SANDBOX_MODE, async (_event, { chatId, sandboxMode }) => {
+    const chats = getChats();
+    const updated = chats.map((chat) =>
+      chat.id === chatId
+        ? { ...chat, sandboxMode: !!sandboxMode, updatedAt: new Date().toISOString() }
         : chat
     );
     setChats(updated);
@@ -220,7 +235,7 @@ function registerChatHandlers(ipcMain, context = {}) {
 
   const getSettings = context.getSettings;
 
-  ipcMain.handle(IPC.CHAT_SEND_MESSAGE, wrapHandler(IPC.CHAT_SEND_MESSAGE, async (event, { chatId, message, images = [], agentMode = false }) => {
+  ipcMain.handle(IPC.CHAT_SEND_MESSAGE, wrapHandler(IPC.CHAT_SEND_MESSAGE, async (event, { chatId, message, images = [], agentMode = false, sandboxMode = true }) => {
     const safeMessage = String(message || '');
     const normalizedImages = ImageHandler.normalizeMessageImages(images);
 
@@ -291,7 +306,8 @@ function registerChatHandlers(ipcMain, context = {}) {
 
       const executor = await createToolExecutorWithApprovals(event, runtimeEnvironment, null, {
         workingDirectory: chatWorkingDirectory,
-        allowedDirectories
+        allowedDirectories,
+        useSandbox: sandboxMode
       });
 
       executor.on('preExecute', ({ toolName, parameters }) => {

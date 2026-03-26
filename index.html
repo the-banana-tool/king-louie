@@ -59,7 +59,7 @@
         </div>
         <div class="chat-info-popover" id="chat-info-popover" hidden>
           <div class="chat-info-popover-header">
-            <span>Chat Stats</span>
+            <span>Chat Info</span>
             <button id="chat-info-close-btn" class="icon-button" type="button" title="Close"><i class="fas fa-xmark"></i></button>
           </div>
           <div class="chat-info-popover-body" id="chat-info-popover-body"></div>
@@ -121,6 +121,7 @@
 
       <div class="settings-nav">
         <select class="settings-nav-select" id="settings-nav-select">
+          <option value="general">General</option>
           <option value="providers">Providers</option>
           <option value="inference">Inference</option>
           <option value="channels">Channels</option>
@@ -140,6 +141,25 @@
       <div class="settings-body">
         <div class="settings-alert" id="settings-encryption-alert" hidden>
           <i class="fas fa-triangle-exclamation"></i> Secure storage is unavailable. API and Telegram tokens cannot be safely saved on this system.
+        </div>
+
+        <!-- Tab: General -->
+        <div class="settings-tab-content" data-tab="general">
+          <section class="template-variables-card">
+            <h3>New Chat Defaults</h3>
+            <p>These settings are applied when creating a new chat.</p>
+            <div class="template-variables-grid">
+              <label class="inline-toggle" for="default-agent-mode">
+                <input id="default-agent-mode" type="checkbox">
+                <span>Agent mode on by default</span>
+              </label>
+              <label class="inline-toggle" for="default-sandbox-mode">
+                <input id="default-sandbox-mode" type="checkbox" checked>
+                <span>Sandbox mode on by default</span>
+              </label>
+            </div>
+            <span class="provider-message" id="general-defaults-status"></span>
+          </section>
         </div>
 
         <!-- Tab: Providers -->

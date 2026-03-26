@@ -21,6 +21,7 @@ class ToolExecutor extends EventEmitter {
         ? Promise.resolve(options.runtimeEnvironment)
         : getRuntimeEnvironment({ workingDirectory: this.workingDirectory });
     this.hookExecutor = options.hookExecutor || null;
+    this.useSandbox = options.useSandbox !== false;
   }
 
   async getRuntimeEnvironment() {
@@ -115,7 +116,8 @@ class ToolExecutor extends EventEmitter {
         ...options,
         workingDirectory: options.workingDirectory || this.workingDirectory,
         allowedDirectories: options.allowedDirectories || this.allowedDirectories,
-        runtimeEnvironment
+        runtimeEnvironment,
+        useSandbox: this.useSandbox
       });
 
       if (this.hookExecutor && typeof this.hookExecutor.run === 'function') {

@@ -3,6 +3,7 @@ const appState = {
   activeChatId: null,
   contextChatId: null,
   isAgentModeEnabled: false,
+  isSandboxModeEnabled: true,
   isHistoryCollapsed: false,
   memoryEntries: [],
   pendingImages: [],
@@ -169,6 +170,9 @@ const dom = {
   skillInstallBtn: document.getElementById('skill-install-btn'),
   skillInstallStatus: document.getElementById('skill-install-status'),
   settingsNavSelect: document.getElementById('settings-nav-select'),
+  defaultAgentMode: document.getElementById('default-agent-mode'),
+  defaultSandboxMode: document.getElementById('default-sandbox-mode'),
+  generalDefaultsStatus: document.getElementById('general-defaults-status'),
   inferenceTierSelect: document.getElementById('inference-tier-select'),
   saveInferenceTierBtn: document.getElementById('save-inference-tier-btn'),
   inferenceTierStatus: document.getElementById('inference-tier-status'),
@@ -1500,6 +1504,36 @@ function renderChatInfoPopover() {
   agentRow.appendChild(agentLabel);
   agentRow.appendChild(agentToggle);
   dom.chatInfoPopoverBody.appendChild(agentRow);
+
+  // Sandbox mode toggle row
+  const sandboxRow = document.createElement('div');
+  sandboxRow.className = 'chat-info-row';
+  const sandboxLabel = document.createElement('span');
+  sandboxLabel.className = 'chat-info-label';
+  sandboxLabel.appendChild(faIcon('fas fa-shield-halved'));
+  sandboxLabel.appendChild(document.createTextNode('Sandbox mode'));
+  const sandboxToggle = document.createElement('label');
+  sandboxToggle.className = 'chat-info-toggle';
+  const sandboxCheckbox = document.createElement('input');
+  sandboxCheckbox.type = 'checkbox';
+  sandboxCheckbox.checked = appState.isSandboxModeEnabled;
+  sandboxCheckbox.addEventListener('change', () => {
+    appState.isSandboxModeEnabled = sandboxCheckbox.checked;
+    persistSandboxMode();
+    addToolEventCompact(
+      'Sandbox mode',
+      { mode: appState.isSandboxModeEnabled ? 'on' : 'off' },
+      appState.isSandboxModeEnabled ? 'success' : '',
+      false
+    );
+  });
+  const sandboxSlider = document.createElement('span');
+  sandboxSlider.className = 'chat-info-toggle-slider';
+  sandboxToggle.appendChild(sandboxCheckbox);
+  sandboxToggle.appendChild(sandboxSlider);
+  sandboxRow.appendChild(sandboxLabel);
+  sandboxRow.appendChild(sandboxToggle);
+  dom.chatInfoPopoverBody.appendChild(sandboxRow);
 }
 
 function toggleChatInfoPopover() {
@@ -1852,6 +1886,11 @@ function renderProviderCard(providerKey, provider) {
 
 function renderSettings() {
   dom.settingsEncryptionAlert.hidden = appState.settings.encryptionAvailable;
+
+  // General defaults
+  const defaults = appState.settings.defaults || {};
+  if (dom.defaultAgentMode) dom.defaultAgentMode.checked = !!defaults.agentMode;
+  if (dom.defaultSandboxMode) dom.defaultSandboxMode.checked = defaults.sandboxMode !== false;
 
   const templateVariables = appState.settings.templateVariables || {};
   if (dom.templateNameInput) dom.templateNameInput.value = templateVariables.name || '';
@@ -3439,6 +3478,8 @@ async function sendMessage() {
     }
     appState.chats = [newChat, ...appState.chats.filter((chat) => chat.id !== newChat.id)];
     appState.activeChatId = newChat.id;
+    appState.isAgentModeEnabled = !!newChat.agentMode;
+    appState.isSandboxModeEnabled = newChat.sandboxMode !== false;
   }
 
   const slashCommand = parseSlashCommand(message);
@@ -3918,7 +3959,8 @@ async function sendMessage() {
       chatId: appState.activeChatId,
       message,
       images: pendingImages.map(({ previewUrl, ...rest }) => rest),
-      agentMode: appState.isAgentModeEnabled
+      agentMode: appState.isAgentModeEnabled,
+      sandboxMode: appState.isSandboxModeEnabled
     });
     const updatedChat = unwrapIpcResult(rawResult, 'Unable to send message.');
 
@@ -4065,6 +4107,7 @@ async function loadChats() {
   appState.activeChatId = data.activeChatId || appState.chats[0]?.id || null;
   const activeChat = appState.chats.find((c) => c.id === appState.activeChatId);
   appState.isAgentModeEnabled = !!(activeChat && activeChat.agentMode);
+  appState.isSandboxModeEnabled = activeChat ? activeChat.sandboxMode !== false : true;
   refreshUI();
 }
 
@@ -4076,11 +4119,21 @@ function persistAgentMode() {
   window.electron.chat.setAgentMode(chatId, appState.isAgentModeEnabled).catch((err) => console.warn('[chat] setAgentMode persistence failed:', err.message));
 }
 
+function persistSandboxMode() {
+  const chatId = appState.activeChatId;
+  if (!chatId) return;
+  const chat = appState.chats.find((c) => c.id === chatId);
+  if (chat) chat.sandboxMode = appState.isSandboxModeEnabled;
+  window.electron.chat.setSandboxMode(chatId, appState.isSandboxModeEnabled).catch((err) => console.warn('[chat] setSandboxMode persistence failed:', err.message));
+}
+
 async function handleCreateChat() {
   const newChat = unwrapIpcResult(await window.electron.chat.create('New Chat'), 'Unable to create chat.');
   if (newChat) {
     appState.chats = [newChat, ...appState.chats.filter((chat) => chat.id !== newChat.id)];
     appState.activeChatId = newChat.id;
+    appState.isAgentModeEnabled = !!newChat.agentMode;
+    appState.isSandboxModeEnabled = newChat.sandboxMode !== false;
     refreshUI();
   }
 }
@@ -4094,6 +4147,7 @@ async function handleSelectChat(chatId) {
   if (dom.stopBtn) dom.stopBtn.hidden = !isStreaming;
   const chat = appState.chats.find((c) => c.id === chatId);
   appState.isAgentModeEnabled = !!(chat && chat.agentMode);
+  appState.isSandboxModeEnabled = chat ? chat.sandboxMode !== false : true;
   unwrapIpcResult(await window.electron.chat.setActive(chatId), 'Unable to switch active chat.');
   refreshUI();
 }
@@ -4741,6 +4795,32 @@ if (dom.settingsNavSelect) {
     switchSettingsTab(dom.settingsNavSelect.value);
   });
 }
+
+/* --- General defaults -------------------------------------- */
+async function saveGeneralDefaults() {
+  try {
+    const defaults = {
+      agentMode: dom.defaultAgentMode?.checked || false,
+      sandboxMode: dom.defaultSandboxMode?.checked !== false
+    };
+    const result = unwrapIpcResult(
+      await window.electron.settings.saveDefaults({ defaults }),
+      'Failed to save defaults.'
+    );
+    appState.settings.defaults = result.defaults || defaults;
+    if (dom.generalDefaultsStatus) {
+      dom.generalDefaultsStatus.textContent = 'Defaults saved.';
+      dom.generalDefaultsStatus.classList.remove('error');
+    }
+  } catch (err) {
+    if (dom.generalDefaultsStatus) {
+      dom.generalDefaultsStatus.textContent = err.message || 'Failed to save defaults.';
+      dom.generalDefaultsStatus.classList.add('error');
+    }
+  }
+}
+if (dom.defaultAgentMode) dom.defaultAgentMode.addEventListener('change', saveGeneralDefaults);
+if (dom.defaultSandboxMode) dom.defaultSandboxMode.addEventListener('change', saveGeneralDefaults);
 
 /* --- Skills list actions ----------------------------------- */
 if (dom.skillsList) {

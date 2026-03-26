@@ -86,6 +86,10 @@ const SLACK_BOT_TOKEN_STORE_KEY = '__slack_bot_token';
 const ELEVENLABS_TOKEN_STORE_KEY = '__elevenlabs_api_key';
 
 const DEFAULT_SETTINGS = {
+  defaults: {
+    agentMode: false,
+    sandboxMode: true
+  },
   activeProvider: 'openai',
   templateVariables: {
     name: '',
@@ -162,6 +166,10 @@ const mergeSettings = (settings = {}) => {
   return {
     ...DEFAULT_SETTINGS,
     ...source,
+    defaults: {
+      ...(DEFAULT_SETTINGS.defaults || {}),
+      ...(source.defaults || {})
+    },
     templateVariables: {
       ...(DEFAULT_SETTINGS.templateVariables || {}),
       ...(source.templateVariables || {})
@@ -1847,7 +1855,8 @@ const createToolExecutorWithApprovals = async (
     runtimeEnvironment: resolvedRuntimeEnvironment,
     approvalRequester,
     shouldAutoApprove: async (toolName) => isToolAlwaysApproved(toolName),
-    hookExecutor: getHookSettings().enabled ? hookExecutor : null
+    hookExecutor: getHookSettings().enabled ? hookExecutor : null,
+    useSandbox: executorOptions.useSandbox !== false
   });
 
   if (event?.sender) {
