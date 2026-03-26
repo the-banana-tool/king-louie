@@ -55,6 +55,7 @@ class AgentLoop {
           if (pendingDirectoryAccessResolvers) {
             const requestId = `diraccess-${Date.now()}-${Math.random().toString(36).slice(2)}`;
             pendingDirectoryAccessResolvers.set(requestId, {
+              directory: dirToAllow,
               resolve: (approved) => {
                 clearTimeout(timeoutId);
                 resolve(approved);

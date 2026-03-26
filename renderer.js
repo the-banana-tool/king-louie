@@ -1078,7 +1078,7 @@ function showDirectoryAccessDialog(requestId, directory, toolName) {
 
   const hint = document.createElement('p');
   hint.className = 'prompt-hint';
-  hint.textContent = 'Allowing will grant access for this session only.';
+  hint.textContent = 'Allow grants access for this session. Always Allow adds the directory to your global allow list.';
 
   const actions = document.createElement('div');
   actions.className = 'prompt-actions';
@@ -1095,23 +1095,31 @@ function showDirectoryAccessDialog(requestId, directory, toolName) {
   allowBtn.appendChild(faIcon('fas fa-folder-open'));
   allowBtn.appendChild(document.createTextNode(' Allow'));
 
+  const alwaysAllowBtn = document.createElement('button');
+  alwaysAllowBtn.type = 'button';
+  alwaysAllowBtn.className = 'btn btn-primary btn-sm';
+  alwaysAllowBtn.appendChild(faIcon('fas fa-shield-halved'));
+  alwaysAllowBtn.appendChild(document.createTextNode(' Always Allow'));
+
   let dismissed = false;
-  function dismiss(approved) {
+  function dismiss(approved, alwaysAllow = false) {
     if (dismissed) return;
     dismissed = true;
-    window.electron.tool.respondToDirectoryAccess(requestId, approved);
+    window.electron.tool.respondToDirectoryAccess(requestId, approved, { alwaysAllow });
     actions.innerHTML = '';
     const result = document.createElement('p');
     result.className = approved ? 'prompt-result-approved' : 'prompt-result-denied';
-    result.textContent = approved ? 'Access granted' : 'Access denied';
+    result.textContent = alwaysAllow ? 'Access granted (added to allow list)' : approved ? 'Access granted' : 'Access denied';
     actions.appendChild(result);
   }
 
   denyBtn.addEventListener('click', () => dismiss(false), { once: true });
   allowBtn.addEventListener('click', () => dismiss(true), { once: true });
+  alwaysAllowBtn.addEventListener('click', () => dismiss(true, true), { once: true });
 
   actions.appendChild(denyBtn);
   actions.appendChild(allowBtn);
+  actions.appendChild(alwaysAllowBtn);
 
   messageContent.appendChild(desc);
   messageContent.appendChild(pathEl);

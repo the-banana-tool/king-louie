@@ -32,12 +32,30 @@ function registerToolHandlers(ipcMain, context = {}) {
     pendingApproval.resolve(Boolean(approved));
   });
 
-  ipcMain.on(IPC.TOOL_DIRECTORY_ACCESS_RESPONSE, (_event, { requestId, approved }) => {
+  ipcMain.on(IPC.TOOL_DIRECTORY_ACCESS_RESPONSE, (_event, { requestId, approved, alwaysAllow }) => {
     if (!pendingDirectoryAccessResolvers) return;
     const pending = pendingDirectoryAccessResolvers.get(requestId);
     if (!pending) return;
 
     pendingDirectoryAccessResolvers.delete(requestId);
+
+    if (Boolean(approved) && Boolean(alwaysAllow) && pending.directory) {
+      try {
+        const { getSettings, setSettings } = context;
+        if (getSettings && setSettings) {
+          const settings = getSettings();
+          const dirs = Array.isArray(settings.allowedDirectories) ? [...settings.allowedDirectories] : [];
+          if (!dirs.includes(pending.directory)) {
+            dirs.push(pending.directory);
+            settings.allowedDirectories = dirs;
+            setSettings(settings);
+          }
+        }
+      } catch (err) {
+        console.warn('[tool-handlers] Failed to persist always-allow directory:', err.message);
+      }
+    }
+
     pending.resolve(Boolean(approved));
   });
 }
