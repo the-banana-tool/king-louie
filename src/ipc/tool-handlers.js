@@ -6,6 +6,7 @@ function registerToolHandlers(ipcMain, context = {}) {
     toolRegistry,
     createToolExecutorWithApprovals,
     pendingApprovalResolvers,
+    pendingDirectoryAccessResolvers,
     setToolAlwaysApprove
   } = context;
 
@@ -29,6 +30,15 @@ function registerToolHandlers(ipcMain, context = {}) {
     }
 
     pendingApproval.resolve(Boolean(approved));
+  });
+
+  ipcMain.on(IPC.TOOL_DIRECTORY_ACCESS_RESPONSE, (_event, { requestId, approved }) => {
+    if (!pendingDirectoryAccessResolvers) return;
+    const pending = pendingDirectoryAccessResolvers.get(requestId);
+    if (!pending) return;
+
+    pendingDirectoryAccessResolvers.delete(requestId);
+    pending.resolve(Boolean(approved));
   });
 }
 

@@ -17,6 +17,8 @@ module.exports = {
   TOOL_EXECUTE: 'tool:execute',
   TOOL_LIST: 'tool:list',
   TOOL_APPROVAL_RESPONSE: 'tool:approvalResponse',
+  TOOL_DIRECTORY_ACCESS_REQUIRED: 'tool:directoryAccessRequired',
+  TOOL_DIRECTORY_ACCESS_RESPONSE: 'tool:directoryAccessResponse',
 
   HOOKS_LIST: 'hooks:list',
   HOOKS_RELOAD: 'hooks:reload',

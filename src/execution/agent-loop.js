@@ -1,3 +1,5 @@
+const path = require('path');
+
 class AgentLoop {
   constructor(provider, executor, options = {}) {
     this.provider = provider;
@@ -8,6 +10,89 @@ class AgentLoop {
       ? options.onUsageRecorded
       : null;
     this.abortSignal = options.abortSignal || null;
+  }
+
+  /**
+   * Check if a tool result is an "access denied" error and, if so, prompt
+   * the user to grant directory access for this session.  Returns the
+   * retried tool result when access is granted, or the original result
+   * (with a directive for the LLM) when denied / unavailable.
+   */
+  async _handleAccessDenied(toolResult, toolName, parameters, options) {
+    const errMsg = toolResult?.error || '';
+    if (typeof errMsg !== 'string' || !errMsg.toLowerCase().includes('access denied')) {
+      return toolResult; // not an access-denied error
+    }
+
+    // Extract the path the tool tried to access from its parameters
+    const targetPath = parameters?.file_path || parameters?.cwd || parameters?.path
+      || parameters?.searchPath || null;
+
+    if (!targetPath) {
+      return {
+        ...toolResult,
+        _directive: 'The tool was denied access. Tell the user the path is outside the allowed directories.'
+      };
+    }
+
+    const resolvedDir = path.resolve(
+      path.isAbsolute(targetPath) ? targetPath : path.resolve(this.executor.workingDirectory || '.', targetPath)
+    );
+    // Use the parent directory for file paths (heuristic: if it looks like a file)
+    const dirToAllow = path.extname(resolvedDir) ? path.dirname(resolvedDir) : resolvedDir;
+
+    // Ask the user for permission via IPC (mirrors the AskUser pattern)
+    const granted = await new Promise((resolve) => {
+      const timeoutMs = 2 * 60 * 1000; // 2 minutes
+      const timeoutId = setTimeout(() => resolve(false), timeoutMs);
+
+      try {
+        const { BrowserWindow } = require('electron');
+        const windows = BrowserWindow.getAllWindows();
+        if (windows.length > 0) {
+          const win = windows[0];
+          const { pendingDirectoryAccessResolvers } = require('../../main');
+          if (pendingDirectoryAccessResolvers) {
+            const requestId = `diraccess-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+            pendingDirectoryAccessResolvers.set(requestId, {
+              resolve: (approved) => {
+                clearTimeout(timeoutId);
+                resolve(approved);
+              }
+            });
+            win.webContents.send('tool:directoryAccessRequired', {
+              requestId,
+              directory: dirToAllow,
+              toolName
+            });
+          } else {
+            clearTimeout(timeoutId);
+            resolve(false);
+          }
+        } else {
+          clearTimeout(timeoutId);
+          resolve(false);
+        }
+      } catch {
+        clearTimeout(timeoutId);
+        resolve(false);
+      }
+    });
+
+    if (granted) {
+      // Add the directory to the executor's allowed list for this session
+      if (!this.executor.allowedDirectories.includes(dirToAllow)) {
+        this.executor.allowedDirectories.push(dirToAllow);
+      }
+      // Retry the tool call now that the directory is allowed
+      return this.executor.execute(toolName, parameters, options);
+    }
+
+    // User denied — tell the LLM not to retry
+    return {
+      ...toolResult,
+      _directive: 'The user denied access to this directory. Do NOT retry or attempt workarounds. Inform the user that you cannot access this path without permission.'
+    };
   }
 
   async run(messages, tools, options = {}) {
@@ -150,6 +235,11 @@ class AgentLoop {
             response.toolName,
             response.parameters,
             options
+          );
+
+          // If access was denied, prompt user and optionally retry
+          toolResult = await this._handleAccessDenied(
+            toolResult, response.toolName, response.parameters, options
           );
         }
 

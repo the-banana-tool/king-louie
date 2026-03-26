@@ -55,6 +55,7 @@ let skillLoader;
 let pinManager;
 const pendingApprovalResolvers = new Map();
 const pendingAskUserResolvers = new Map();
+const pendingDirectoryAccessResolvers = new Map();
 let taskManager;
 let gatewayServer;
 let sessionManager;
@@ -2235,6 +2236,7 @@ registerHandlers(ipcMain, {
   pendingApprovalResolvers,
   setToolAlwaysApprove,
   pendingAskUserResolvers,
+  pendingDirectoryAccessResolvers,
 
   // Hooks
   getHookSettings,

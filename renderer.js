@@ -1020,6 +1020,75 @@ function showToolApprovalDialog(approvalId, toolName, parameters) {
   approveBtn.focus();
 }
 
+function showDirectoryAccessDialog(requestId, directory, toolName) {
+  const modal = document.createElement('div');
+  modal.className = 'tool-approval-modal';
+
+  const card = document.createElement('div');
+  card.className = 'tool-approval-card';
+
+  const title = document.createElement('h3');
+  title.textContent = 'Directory Access Required';
+
+  const desc = document.createElement('p');
+  desc.textContent = `The tool "${toolName}" needs access to a directory outside the current working directory:`;
+
+  const pathEl = document.createElement('pre');
+  pathEl.textContent = directory;
+  pathEl.style.userSelect = 'all';
+
+  const hint = document.createElement('p');
+  hint.style.fontSize = '12px';
+  hint.style.opacity = '0.7';
+  hint.textContent = 'Allowing will grant access for this session only.';
+
+  const actions = document.createElement('div');
+  actions.className = 'tool-approval-actions';
+
+  const denyBtn = document.createElement('button');
+  denyBtn.type = 'button';
+  denyBtn.className = 'btn btn-danger';
+  denyBtn.appendChild(faIcon('fas fa-ban'));
+  denyBtn.appendChild(document.createTextNode(' Deny'));
+
+  const allowBtn = document.createElement('button');
+  allowBtn.type = 'button';
+  allowBtn.className = 'btn btn-primary';
+  allowBtn.appendChild(faIcon('fas fa-folder-open'));
+  allowBtn.appendChild(document.createTextNode(' Allow'));
+
+  function dismiss(approved) {
+    if (modal._dismissed) return;
+    modal._dismissed = true;
+    window.electron.tool.respondToDirectoryAccess(requestId, approved);
+    modal.remove();
+    dom.userInput.focus();
+  }
+
+  denyBtn.addEventListener('click', () => dismiss(false), { once: true });
+  allowBtn.addEventListener('click', () => dismiss(true), { once: true });
+
+  modal.addEventListener('click', (event) => {
+    if (event.target === modal) dismiss(false);
+  });
+  modal.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') dismiss(false);
+  });
+
+  actions.appendChild(denyBtn);
+  actions.appendChild(allowBtn);
+
+  card.appendChild(title);
+  card.appendChild(desc);
+  card.appendChild(pathEl);
+  card.appendChild(hint);
+  card.appendChild(actions);
+
+  modal.appendChild(card);
+  document.body.appendChild(modal);
+  allowBtn.focus();
+}
+
 // Send message function
 function formatTimestamp(iso) {
   if (!iso) return '';
@@ -5173,6 +5242,10 @@ unsubscribeHandlers.push(window.electron.chat.onToolResult(({ chatId, toolName, 
 
 unsubscribeHandlers.push(window.electron.tool.onApprovalRequired(({ approvalId, toolName, parameters }) => {
   showToolApprovalDialog(approvalId, toolName, parameters);
+}));
+
+unsubscribeHandlers.push(window.electron.tool.onDirectoryAccessRequired(({ requestId, directory, toolName }) => {
+  showDirectoryAccessDialog(requestId, directory, toolName);
 }));
 
 unsubscribeHandlers.push(window.electron.agent.onAskUser(({ requestId, question }) => {

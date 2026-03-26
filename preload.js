@@ -319,7 +319,10 @@ contextBridge.exposeInMainWorld(
       },
       onApprovalRequired: (callback) => registerOnce('tool:approvalRequired', callback),
       respondToApproval: (approvalId, approved, options = {}) =>
-        ipcRenderer.send('tool:approvalResponse', { approvalId, approved, ...options })
+        ipcRenderer.send('tool:approvalResponse', { approvalId, approved, ...options }),
+      onDirectoryAccessRequired: (callback) => registerOnce('tool:directoryAccessRequired', callback),
+      respondToDirectoryAccess: (requestId, approved) =>
+        ipcRenderer.send('tool:directoryAccessResponse', { requestId, approved })
     },
     task: {
       create: (config) => ipcRenderer.invoke('task:create', config),
