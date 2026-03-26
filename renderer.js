@@ -673,6 +673,10 @@ const TOOL_ICONS = {
   sessions_history: 'fas fa-clock-rotate-left',
   sessions_spawn:   'fas fa-play',
   message:          'fas fa-envelope',
+  Status:           'fas fa-info-circle',
+  'Provider changed': 'fas fa-exchange-alt',
+  'Model changed':  'fas fa-exchange-alt',
+  'Sandbox mode':   'fas fa-shield-halved',
 };
 
 const TOOL_ICON_DEFAULT = 'fas fa-wrench';
@@ -714,6 +718,15 @@ function getToolSummary(toolName, params) {
       if (mode === 'off' || mode === 'disabled' || mode === 'standard') return 'Agent mode: off';
       return 'Agent mode';
     }
+    case 'Sandbox mode': {
+      const mode = String(p.mode || p.state || '').trim().toLowerCase();
+      if (mode === 'on' || mode === 'enabled') return 'Sandbox mode: on';
+      if (mode === 'off' || mode === 'disabled') return 'Sandbox mode: off';
+      return 'Sandbox mode';
+    }
+    case 'Provider changed': return `Provider: ${p.from || '?'} → ${p.to || '?'}`;
+    case 'Model changed':    return `Model (${p.provider || '?'}): ${p.from || '(default)'} → ${p.to || '(default)'}`;
+    case 'Status':           return p.message || 'Status update';
     default:          return toolName;
   }
 }
@@ -1546,6 +1559,9 @@ function renderChatInfoPopover() {
       appState.isSandboxModeEnabled ? 'success' : '',
       false
     );
+    if (appState.activeChatId) {
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'status', text: `Sandbox mode: ${appState.isSandboxModeEnabled ? 'on' : 'off'}` }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    }
   });
   const sandboxSlider = document.createElement('span');
   sandboxSlider.className = 'chat-info-toggle-slider';
@@ -1613,6 +1629,10 @@ function renderChatMessages() {
   };
 
   activeChat.messages.forEach((message) => {
+    if (message.sender === 'status') {
+      addToolEventCompact('Status', { message: message.text }, 'info', false);
+      return;
+    }
     if (message.sender === 'toolUse') {
       addToolEventCompact(message.toolName, message.parameters, '', false);
       return;
@@ -1831,6 +1851,7 @@ function renderProviderCard(providerKey, provider) {
 
   // Auto-save on change
   modelSelect.addEventListener('change', async () => {
+    const prevModel = appState.settings.providers[providerKey]?.model || '';
     const model = modelSelect.value;
     const result = await window.electron.settings.setProviderModel({
       provider: providerKey, model
@@ -1841,6 +1862,10 @@ function renderProviderCard(providerKey, provider) {
     }
     appState.settings.providers[providerKey].model = result.model;
     setProviderMessage(providerKey, `Model saved: ${result.model || '(default)'}`);
+    addToolEventCompact('Model changed', { provider: providerKey, from: prevModel, to: result.model }, 'info', false);
+    if (appState.activeChatId) {
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'status', text: `Model changed (${providerKey}): ${prevModel || '(default)'} → ${result.model || '(default)'}` }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    }
   });
 
   controls.appendChild(modelLabel);
@@ -4275,9 +4300,14 @@ async function handleSaveProviderModel(providerKey) {
     return;
   }
 
+  const prevModel = appState.settings.providers[providerKey]?.model || '';
   appState.settings.providers[providerKey].model = result.model;
   setProviderMessage(providerKey, `Model saved: ${result.model || '(default)'}`);
   renderSettings();
+  addToolEventCompact('Model changed', { provider: providerKey, from: prevModel, to: result.model }, 'info', false);
+  if (appState.activeChatId) {
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'status', text: `Model changed (${providerKey}): ${prevModel || '(default)'} → ${result.model || '(default)'}` }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+  }
 }
 
 async function handleSetActiveProvider(providerKey) {
@@ -4287,8 +4317,13 @@ async function handleSetActiveProvider(providerKey) {
     return;
   }
 
+  const prev = appState.settings.activeProvider;
   appState.settings.activeProvider = result.activeProvider;
   renderSettings();
+  addToolEventCompact('Provider changed', { from: prev, to: result.activeProvider }, 'info', false);
+  if (appState.activeChatId) {
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'status', text: `Provider changed: ${prev} → ${result.activeProvider}` }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+  }
 }
 
 // Event Listeners
@@ -4713,6 +4748,9 @@ if (dom.agentModeBtn) {
       appState.isAgentModeEnabled ? 'success' : '',
       false
     );
+    if (appState.activeChatId) {
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'status', text: `Agent mode: ${appState.isAgentModeEnabled ? 'on' : 'off'}` }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    }
   });
 }
 

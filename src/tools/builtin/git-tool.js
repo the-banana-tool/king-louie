@@ -6,7 +6,7 @@ const execFileAsync = promisify(execFile);
 const ALLOWED_COMMANDS = [
   'status', 'log', 'diff', 'branch', 'show', 'blame', 'stash',
   'add', 'commit', 'checkout', 'merge', 'pull', 'push', 'fetch',
-  'tag', 'remote', 'rev-parse', 'ls-files'
+  'tag', 'remote', 'rev-parse', 'ls-files', 'init', 'clone'
 ];
 
 // Block destructive commands that could cause data loss
