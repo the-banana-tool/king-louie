@@ -3,6 +3,7 @@ const IPC = require('./constants');
 const { execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const { isCommandAvailable, resetRuntimeEnvironmentCache } = require('../execution/runtime-environment');
 
 function registerSkillHandlers(ipcMain, context = {}) {
   const {
@@ -58,7 +59,13 @@ function registerSkillHandlers(ipcMain, context = {}) {
         ? skill.getSettings()
         : {};
       const enabled = skill ? (skill._enabled !== false) : true;
-      return { ...meta, settingsSchema: schema, settings, enabled };
+      const dependencyStatus = (skill && typeof skill.getDependencyStatus === 'function')
+        ? skill.getDependencyStatus()
+        : [];
+      const hasMissingDeps = (skill && typeof skill.getMissingDependencies === 'function')
+        ? skill.getMissingDependencies().length > 0
+        : false;
+      return { ...meta, settingsSchema: schema, settings, enabled, dependencyStatus, hasMissingDeps };
     });
   }));
 
@@ -384,6 +391,45 @@ function registerSkillHandlers(ipcMain, context = {}) {
       session
     });
     return result || { ok: false, continueWithAgent: true };
+  }));
+
+  ipcMain.handle(IPC.SKILL_CHECK_DEPS, wrapHandler(IPC.SKILL_CHECK_DEPS, async (_event, { skillId } = {}) => {
+    // Clear the runtime environment cache so we get fresh results
+    resetRuntimeEnvironmentCache();
+
+    const skill = skillId ? skillRegistry.getSkill(skillId) : null;
+    const skills = skillId ? (skill ? [skill] : []) : Array.from(skillRegistry.skills?.values() || []);
+
+    if (skillId && !skill) {
+      return { ok: false, error: `Unknown skill: ${skillId}` };
+    }
+
+    const results = {};
+
+    for (const s of skills) {
+      const metadata = typeof s.getMetadata === 'function' ? s.getMetadata() : {};
+      const deps = metadata.systemDependencies;
+      if (!Array.isArray(deps) || deps.length === 0) {
+        results[metadata.id] = [];
+        continue;
+      }
+
+      const statuses = await Promise.all(
+        deps.map(async (dep) => ({
+          command: dep.command,
+          name: dep.name || dep.command,
+          available: await isCommandAvailable(dep.command),
+          required: dep.required !== false,
+          installUrl: dep.installUrl || null,
+          install: dep.install || null
+        }))
+      );
+
+      s._dependencyStatus = statuses;
+      results[metadata.id] = statuses;
+    }
+
+    return { ok: true, results };
   }));
 }
 

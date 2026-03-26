@@ -82,7 +82,13 @@ class SkillRegistry {
         resolvers: Array.isArray(meta.resolvers) && meta.resolvers.length ? meta.resolvers : ['skill'],
         lastResolutionMethod: this.lastResolutionBySkill.get(meta.id) || null,
         skillPath: skill._skillPath || null,
-        isSymlink: skill._isSymlink || false
+        isSymlink: skill._isSymlink || false,
+        dependencyStatus: typeof skill.getDependencyStatus === 'function'
+          ? skill.getDependencyStatus()
+          : [],
+        hasMissingDeps: typeof skill.getMissingDependencies === 'function'
+          ? skill.getMissingDependencies().length > 0
+          : false
       };
     });
   }
@@ -110,6 +116,22 @@ class SkillRegistry {
         ok: false,
         error: `Skill '${command}' is currently disabled. Enable it in Settings > Skills.`
       };
+    }
+
+    // Check for missing required system dependencies
+    if (typeof skill.getMissingDependencies === 'function') {
+      const missing = skill.getMissingDependencies();
+      if (missing.length > 0) {
+        const errorMsg = typeof skill.formatMissingDepsError === 'function'
+          ? skill.formatMissingDepsError()
+          : `Skill '${command}' is missing required system dependencies: ${missing.map((d) => d.name).join(', ')}`;
+        return {
+          ok: false,
+          error: errorMsg,
+          format: 'markdown',
+          missingDependencies: missing
+        };
+      }
     }
 
     const metadata = skill.getMetadata();

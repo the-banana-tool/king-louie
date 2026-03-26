@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const Module = require('module');
 const { registry } = require('./skill-registry');
+const { isCommandAvailable } = require('../execution/runtime-environment');
 
 // Hook into Node's module resolution so that require('king-louie/...')
 // resolves to actual files in this project, regardless of where the
@@ -156,6 +157,51 @@ class SkillLoader {
   }
 
   /**
+   * Check system dependencies declared in a skill's metadata.
+   * Sets skill._dependencyStatus with the results.
+   * The skill still loads even if deps are missing — commands are gated at execution time.
+   *
+   * @param {Object} skillInstance
+   * @returns {Promise<void>}
+   */
+  async checkDependencies(skillInstance) {
+    const metadata = typeof skillInstance.getMetadata === 'function'
+      ? skillInstance.getMetadata()
+      : {};
+
+    const deps = metadata.systemDependencies;
+    if (!Array.isArray(deps) || deps.length === 0) {
+      skillInstance._dependencyStatus = [];
+      return;
+    }
+
+    const results = await Promise.all(
+      deps.map(async (dep) => {
+        const available = await isCommandAvailable(dep.command);
+        const status = {
+          command: dep.command,
+          name: dep.name || dep.command,
+          available,
+          required: dep.required !== false, // default true
+          installUrl: dep.installUrl || null,
+          install: dep.install || null
+        };
+
+        if (!available) {
+          const level = status.required ? 'WARN' : 'INFO';
+          console.log(
+            `[skill-loader] [${level}] Skill '${metadata.id}' dependency '${dep.command}' (${status.name}) not found on system`
+          );
+        }
+
+        return status;
+      })
+    );
+
+    skillInstance._dependencyStatus = results;
+  }
+
+  /**
    * Discover all skill directories
    *
    * @returns {string[]} - Array of skill directory paths
@@ -244,6 +290,9 @@ class SkillLoader {
       if (customizationRecord) {
         this.applySkillCustomization(skillInstance, customizationRecord);
       }
+
+      // Check system dependencies before initialization
+      await this.checkDependencies(skillInstance);
 
       // Initialize the skill
       if (typeof skillInstance.initialize === 'function') {

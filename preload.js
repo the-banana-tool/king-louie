@@ -469,7 +469,8 @@ contextBridge.exposeInMainWorld(
       saveSettings: (payload) => ipcRenderer.invoke('skill:saveSettings', payload),
       setEnabled: (payload) => ipcRenderer.invoke('skill:setEnabled', payload),
       install: (payload) => ipcRenderer.invoke('skill:install', payload),
-      remove: (payload) => ipcRenderer.invoke('skill:remove', payload)
+      remove: (payload) => ipcRenderer.invoke('skill:remove', payload),
+      checkDeps: (payload) => ipcRenderer.invoke('skill:checkDeps', payload)
     },
     webhook: {
       list: () => ipcRenderer.invoke('webhook:list'),

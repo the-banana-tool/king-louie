@@ -22,6 +22,28 @@
  */
 
 /**
+ * @typedef {Object} SystemDependency
+ * @property {string} command - CLI command name to check (e.g., 'gh', 'docker', 'git')
+ * @property {string} name - Human-readable name (e.g., 'GitHub CLI')
+ * @property {boolean} [required=true] - If true, skill commands are blocked when missing
+ * @property {string} [installUrl] - URL to installation instructions
+ * @property {Object} [install] - Platform-specific install commands
+ * @property {string} [install.win] - Windows install command (e.g., 'winget install --id GitHub.cli')
+ * @property {string} [install.mac] - macOS install command (e.g., 'brew install gh')
+ * @property {string} [install.linux] - Linux install command (e.g., 'apt-get install -y gh')
+ */
+
+/**
+ * @typedef {Object} DependencyStatus
+ * @property {string} command - The command that was checked
+ * @property {string} name - Human-readable name
+ * @property {boolean} available - Whether the command was found on the system
+ * @property {boolean} required - Whether this dependency is required
+ * @property {string} [installUrl] - URL to installation instructions
+ * @property {Object} [install] - Platform-specific install commands
+ */
+
+/**
  * @typedef {Object} SkillMetadata
  * @property {string} id - Unique skill identifier (e.g., 'std', 'calendar')
  * @property {string} name - Human-readable skill name
@@ -31,6 +53,7 @@
  * @property {string[]} commands - List of commands this skill handles (e.g., ['std'])
  * @property {Array<'code'|'cli'|'prompt'|'skill'>} [resolvers] - Ordered resolver chain. Default: ['skill']
  * @property {boolean} [pinnable] - If true, skill can be pinned to a chat. Pinned skill must implement handleMessage().
+ * @property {SystemDependency[]} [systemDependencies] - External CLI tools this skill requires
  */
 
 /**
@@ -177,6 +200,52 @@ class Skill {
    */
   applyCustomization(settings) {
     // Optional: override in subclass to react to settings changes
+  }
+
+  /**
+   * Get the dependency status array set by the loader after checking system dependencies.
+   * Each entry indicates whether a declared systemDependency was found on the system.
+   *
+   * @returns {DependencyStatus[]}
+   */
+  getDependencyStatus() {
+    return this._dependencyStatus || [];
+  }
+
+  /**
+   * Get only the missing *required* dependencies.
+   *
+   * @returns {DependencyStatus[]}
+   */
+  getMissingDependencies() {
+    return (this._dependencyStatus || []).filter((d) => d.required && !d.available);
+  }
+
+  /**
+   * Build a user-friendly error message for missing dependencies.
+   *
+   * @returns {string|null} - Markdown error string, or null if all deps are satisfied.
+   */
+  formatMissingDepsError() {
+    const missing = this.getMissingDependencies();
+    if (!missing.length) return null;
+
+    const platform =
+      process.platform === 'win32' ? 'win' : process.platform === 'darwin' ? 'mac' : 'linux';
+
+    const lines = missing.map((dep) => {
+      const parts = [`**${dep.name}** (\`${dep.command}\`)`];
+      const installCmd = dep.install?.[platform];
+      if (installCmd) {
+        parts.push(`  Install: \`${installCmd}\``);
+      }
+      if (dep.installUrl) {
+        parts.push(`  More info: ${dep.installUrl}`);
+      }
+      return parts.join('\n');
+    });
+
+    return `This skill requires the following tools that are not installed:\n\n${lines.join('\n\n')}`;
   }
 
   /**

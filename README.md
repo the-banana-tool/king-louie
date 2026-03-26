@@ -85,6 +85,85 @@ Each skill can:
 - Maintain persistent state
 - Be pinned to a chat session to handle free-form messages
 - Expose configurable settings
+- Declare system dependencies with platform-specific install instructions
+
+### System Dependencies
+
+Skills can declare external CLI tools they require (e.g., `gh`, `docker`, `git`) in their metadata via `systemDependencies`. When a skill is loaded:
+
+1. The loader checks each declared dependency against the host system
+2. The skill still loads even if dependencies are missing (so it appears in the UI)
+3. Commands are blocked at execution time with a user-friendly error that includes install instructions for the current platform
+4. The UI can re-check dependencies on demand after the user installs a tool (`skill:checkDeps`)
+
+Example dependency declaration:
+
+```js
+getMetadata() {
+  return {
+    id: 'my-skill',
+    // ...
+    systemDependencies: [
+      {
+        command: 'docker',
+        name: 'Docker',
+        required: true,
+        installUrl: 'https://docs.docker.com/get-docker/',
+        install: {
+          win: 'winget install --id Docker.DockerDesktop',
+          mac: 'brew install --cask docker',
+          linux: 'sudo apt install docker.io'
+        }
+      }
+    ]
+  };
+}
+```
+
+Dependencies can be `required: true` (blocks commands when missing) or `required: false` (warns but allows execution).
+
+### Building a Skill
+
+A skill is a Node.js module that extends the `Skill` base class from `king-louie/skill-interface`:
+
+```js
+const { Skill } = require('king-louie/skill-interface');
+
+class MySkill extends Skill {
+  getMetadata() {
+    return {
+      id: 'my-skill',
+      name: 'My Skill',
+      version: '1.0.0',
+      description: 'What it does',
+      author: 'you',
+      commands: ['my'],
+      systemDependencies: []  // external CLI tools needed
+    };
+  }
+
+  async initialize(context) { /* setup */ }
+  async handleCommand(command, args, context) { /* handle /my <args> */ }
+}
+
+module.exports = MySkill;
+```
+
+**Required methods:** `getMetadata()`, `initialize()`, `handleCommand()`
+
+**Optional methods:** `resolveCode()`, `resolveCli()`, `resolvePrompt()`, `handleMessage()`, `getSettingsSchema()`, `getHelp()`, `cleanup()`
+
+### Installing Skills
+
+```bash
+# From a GitHub repo
+# Settings > Skills > Install, then paste the URL
+
+# From a local directory (symlinked)
+# Settings > Skills > Install, then paste the path
+```
+
+Skills are auto-discovered from the `skills/` directory on startup. User-installed skills go to `%APPDATA%/King Louie/skills/` (Windows) or `~/.config/King Louie/skills/` (Linux/macOS).
 
 ## Channel Integrations
 
