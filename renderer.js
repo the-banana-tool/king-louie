@@ -4394,7 +4394,17 @@ if (dom.workingDirBtn) {
 dom.exportChatBtn.addEventListener('click', () => {
   const chat = appState.chats.find(c => c.id === appState.activeChatId);
   if (!chat) return;
-  const json = JSON.stringify(chat, null, 2);
+
+  // Enrich messages: extract XML tool blocks from assistant text into structured toolCalls
+  const enrichedMessages = chat.messages.map((msg) => {
+    if (msg.sender !== 'assistant' || !msg.text) return msg;
+    const { cleanText, toolBlocks } = extractXmlToolBlocks(msg.text);
+    if (toolBlocks.length === 0) return msg;
+    return { ...msg, text: cleanText, toolCalls: toolBlocks };
+  });
+
+  const exportData = { ...chat, messages: enrichedMessages };
+  const json = JSON.stringify(exportData, null, 2);
   const blob = new Blob([json], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
