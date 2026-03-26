@@ -2,10 +2,10 @@ const BaseLLMProvider = require('./base-provider');
 const ImageHandler = require('../media/image-handler');
 
 // Models that use the /v1/completions endpoint instead of /v1/chat/completions
-const COMPLETIONS_MODELS = ['codex', 'davinci', 'babbage', 'curie', 'ada'];
+const COMPLETIONS_MODELS = ['davinci', 'babbage', 'curie', 'ada'];
 
 // Models that don't support temperature (only default of 1)
-const NO_TEMPERATURE_MODELS = ['codex', 'o1', 'o3'];
+const NO_TEMPERATURE_MODELS = ['codex', 'o1', 'o3', 'o4', 'gpt-5'];
 
 function isCompletionsModel(model) {
   const lower = String(model || '').toLowerCase();
@@ -20,6 +20,9 @@ function supportsTemperature(model) {
 function temperatureParam(model, options = {}) {
   return supportsTemperature(model) ? { temperature: options.temperature ?? 0.7 } : {};
 }
+
+// Track models that rejected temperature at runtime so we don't retry every call
+const _noTempModels = new Set();
 
 /**
  * Convert chat messages array into a single prompt string for the completions endpoint.
