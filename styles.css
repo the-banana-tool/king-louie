@@ -1701,6 +1701,94 @@ body {
 
 /* tool-approval buttons inherit from .btn system */
 
+/* --- Inline chat prompts (approval, directory access, ask user) --- */
+.message.prompt-message {
+  border-left: 3px solid var(--accent);
+}
+
+.message.prompt-message .message-content pre {
+  margin: 6px 0;
+  max-height: 200px;
+  overflow: auto;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  padding: 8px;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.prompt-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.prompt-checkbox-label {
+  margin-right: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  user-select: none;
+}
+
+.prompt-checkbox-label input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent);
+}
+
+.prompt-hint {
+  font-size: 12px;
+  opacity: 0.7;
+  margin: 2px 0;
+}
+
+.prompt-input-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  align-items: center;
+}
+
+.prompt-input {
+  flex: 1;
+  padding: 6px 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.prompt-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.prompt-result-approved {
+  color: var(--success, #4caf50);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.prompt-result-denied {
+  color: var(--error, #f44336);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.btn-sm {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
 /* --- Rename modal ------------------------------------------ */
 .rename-chat-modal {
   position: fixed;

@@ -974,159 +974,129 @@ function addToolEventMessage(title, payload, variant = '') {
 }
 
 function showToolApprovalDialog(approvalId, toolName, parameters) {
-  const modal = document.createElement('div');
-  modal.className = 'tool-approval-modal';
+  const messageDiv = document.createElement('div');
+  messageDiv.className = 'message assistant prompt-message';
 
-  const card = document.createElement('div');
-  card.className = 'tool-approval-card';
+  const messageContent = document.createElement('div');
+  messageContent.className = 'message-content';
 
-  const title = document.createElement('h3');
-  title.textContent = 'Tool Execution Approval Required';
-
-  const toolLabel = document.createElement('p');
-  const strong = document.createElement('strong');
-  strong.textContent = 'Tool:';
-  toolLabel.textContent = '';
-  toolLabel.appendChild(strong);
-  toolLabel.appendChild(document.createTextNode(` ${toolName}`));
+  const title = document.createElement('p');
+  title.innerHTML = `<strong>Tool approval required:</strong> <code>${toolName}</code>`;
 
   const pre = document.createElement('pre');
   pre.textContent = JSON.stringify(parameters || {}, null, 2);
 
   const actions = document.createElement('div');
-  actions.className = 'tool-approval-actions';
+  actions.className = 'prompt-actions';
 
   const alwaysApproveLabel = document.createElement('label');
-  alwaysApproveLabel.className = 'tool-approval-always';
-
+  alwaysApproveLabel.className = 'prompt-checkbox-label';
   const alwaysApproveInput = document.createElement('input');
   alwaysApproveInput.type = 'checkbox';
-  alwaysApproveInput.className = 'tool-approval-always-checkbox';
-
   const alwaysApproveText = document.createElement('span');
-  alwaysApproveText.textContent = `Always approve ${toolName}`;
-
+  alwaysApproveText.textContent = ` Always approve ${toolName}`;
   alwaysApproveLabel.appendChild(alwaysApproveInput);
   alwaysApproveLabel.appendChild(alwaysApproveText);
 
   const denyBtn = document.createElement('button');
   denyBtn.type = 'button';
-  denyBtn.className = 'btn btn-danger';
+  denyBtn.className = 'btn btn-danger btn-sm';
   denyBtn.appendChild(faIcon('fas fa-ban'));
   denyBtn.appendChild(document.createTextNode(' Deny'));
 
   const approveBtn = document.createElement('button');
   approveBtn.type = 'button';
-  approveBtn.className = 'btn btn-primary';
+  approveBtn.className = 'btn btn-primary btn-sm';
   approveBtn.appendChild(faIcon('fas fa-check'));
   approveBtn.appendChild(document.createTextNode(' Approve'));
 
+  let dismissed = false;
   function dismiss(approved) {
-    if (modal._dismissed) return;
-    modal._dismissed = true;
-    if (approved) {
-      window.electron.tool.respondToApproval(approvalId, true, {
-        alwaysApprove: Boolean(alwaysApproveInput.checked)
-      });
-    } else {
-      window.electron.tool.respondToApproval(approvalId, false, { alwaysApprove: false });
-    }
-    modal.remove();
-    dom.userInput.focus();
+    if (dismissed) return;
+    dismissed = true;
+    window.electron.tool.respondToApproval(approvalId, approved, {
+      alwaysApprove: approved ? Boolean(alwaysApproveInput.checked) : false
+    });
+    // Replace actions with result text
+    actions.innerHTML = '';
+    const result = document.createElement('p');
+    result.className = approved ? 'prompt-result-approved' : 'prompt-result-denied';
+    result.textContent = approved ? (alwaysApproveInput.checked ? `Approved (always for ${toolName})` : 'Approved') : 'Denied';
+    actions.appendChild(result);
   }
 
   denyBtn.addEventListener('click', () => dismiss(false), { once: true });
   approveBtn.addEventListener('click', () => dismiss(true), { once: true });
 
-  // Allow dismissing via backdrop click or Escape key
-  modal.addEventListener('click', (event) => {
-    if (event.target === modal) dismiss(false);
-  });
-  modal.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') dismiss(false);
-  });
-
   actions.appendChild(alwaysApproveLabel);
   actions.appendChild(denyBtn);
   actions.appendChild(approveBtn);
 
-  card.appendChild(title);
-  card.appendChild(toolLabel);
-  card.appendChild(pre);
-  card.appendChild(actions);
-
-  modal.appendChild(card);
-  document.body.appendChild(modal);
-  approveBtn.focus();
+  messageContent.appendChild(title);
+  messageContent.appendChild(pre);
+  messageContent.appendChild(actions);
+  messageDiv.appendChild(messageContent);
+  dom.chatMessages.appendChild(messageDiv);
+  dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
 }
 
 function showDirectoryAccessDialog(requestId, directory, toolName) {
-  const modal = document.createElement('div');
-  modal.className = 'tool-approval-modal';
+  const messageDiv = document.createElement('div');
+  messageDiv.className = 'message assistant prompt-message';
 
-  const card = document.createElement('div');
-  card.className = 'tool-approval-card';
-
-  const title = document.createElement('h3');
-  title.textContent = 'Directory Access Required';
+  const messageContent = document.createElement('div');
+  messageContent.className = 'message-content';
 
   const desc = document.createElement('p');
-  desc.textContent = `The tool "${toolName}" needs access to a directory outside the current working directory:`;
+  desc.innerHTML = `<strong>Directory access required:</strong> <code>${toolName}</code> needs access to:`;
 
   const pathEl = document.createElement('pre');
   pathEl.textContent = directory;
-  pathEl.style.userSelect = 'all';
 
   const hint = document.createElement('p');
-  hint.style.fontSize = '12px';
-  hint.style.opacity = '0.7';
+  hint.className = 'prompt-hint';
   hint.textContent = 'Allowing will grant access for this session only.';
 
   const actions = document.createElement('div');
-  actions.className = 'tool-approval-actions';
+  actions.className = 'prompt-actions';
 
   const denyBtn = document.createElement('button');
   denyBtn.type = 'button';
-  denyBtn.className = 'btn btn-danger';
+  denyBtn.className = 'btn btn-danger btn-sm';
   denyBtn.appendChild(faIcon('fas fa-ban'));
   denyBtn.appendChild(document.createTextNode(' Deny'));
 
   const allowBtn = document.createElement('button');
   allowBtn.type = 'button';
-  allowBtn.className = 'btn btn-primary';
+  allowBtn.className = 'btn btn-primary btn-sm';
   allowBtn.appendChild(faIcon('fas fa-folder-open'));
   allowBtn.appendChild(document.createTextNode(' Allow'));
 
+  let dismissed = false;
   function dismiss(approved) {
-    if (modal._dismissed) return;
-    modal._dismissed = true;
+    if (dismissed) return;
+    dismissed = true;
     window.electron.tool.respondToDirectoryAccess(requestId, approved);
-    modal.remove();
-    dom.userInput.focus();
+    actions.innerHTML = '';
+    const result = document.createElement('p');
+    result.className = approved ? 'prompt-result-approved' : 'prompt-result-denied';
+    result.textContent = approved ? 'Access granted' : 'Access denied';
+    actions.appendChild(result);
   }
 
   denyBtn.addEventListener('click', () => dismiss(false), { once: true });
   allowBtn.addEventListener('click', () => dismiss(true), { once: true });
 
-  modal.addEventListener('click', (event) => {
-    if (event.target === modal) dismiss(false);
-  });
-  modal.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') dismiss(false);
-  });
-
   actions.appendChild(denyBtn);
   actions.appendChild(allowBtn);
 
-  card.appendChild(title);
-  card.appendChild(desc);
-  card.appendChild(pathEl);
-  card.appendChild(hint);
-  card.appendChild(actions);
-
-  modal.appendChild(card);
-  document.body.appendChild(modal);
-  allowBtn.focus();
+  messageContent.appendChild(desc);
+  messageContent.appendChild(pathEl);
+  messageContent.appendChild(hint);
+  messageContent.appendChild(actions);
+  messageDiv.appendChild(messageContent);
+  dom.chatMessages.appendChild(messageDiv);
+  dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
 }
 
 // Send message function
@@ -4856,13 +4826,7 @@ document.addEventListener('keydown', (e) => {
       dom.userInput.focus();
       return;
     }
-    // Dismiss any lingering tool approval modals
-    const approvalModal = document.querySelector('.tool-approval-modal');
-    if (approvalModal && !approvalModal._dismissed) {
-      approvalModal._dismissed = true;
-      approvalModal.remove();
-      dom.userInput.focus();
-    }
+    // No more modal dialogs to dismiss — prompts are inline in chat
   }
 });
 
@@ -5444,55 +5408,57 @@ unsubscribeHandlers.push(window.electron.tool.onDirectoryAccessRequired(({ reque
 }));
 
 unsubscribeHandlers.push(window.electron.agent.onAskUser(({ requestId, question }) => {
-  const modal = document.createElement('div');
-  modal.className = 'tool-approval-modal'; // reusing styles
+  const messageDiv = document.createElement('div');
+  messageDiv.className = 'message assistant prompt-message';
 
-  const card = document.createElement('div');
-  card.className = 'tool-approval-card';
-
-  const title = document.createElement('h3');
-  title.textContent = 'Agent requires your input';
+  const messageContent = document.createElement('div');
+  messageContent.className = 'message-content';
 
   const qLabel = document.createElement('p');
-  qLabel.textContent = question;
+  qLabel.innerHTML = `<strong>Agent needs your input:</strong> ${question}`;
+
+  const inputRow = document.createElement('div');
+  inputRow.className = 'prompt-input-row';
 
   const input = document.createElement('input');
   input.type = 'text';
-  input.className = 'rename-chat-input'; // reusing styles
-  input.placeholder = 'Enter your response...';
-
-  const actions = document.createElement('div');
-  actions.className = 'tool-approval-actions';
+  input.className = 'prompt-input';
+  input.placeholder = 'Type your response...';
 
   const submitBtn = document.createElement('button');
   submitBtn.type = 'button';
-  submitBtn.className = 'btn btn-primary';
+  submitBtn.className = 'btn btn-primary btn-sm';
   submitBtn.appendChild(faIcon('fas fa-paper-plane'));
-  submitBtn.appendChild(document.createTextNode(' Submit'));
+  submitBtn.appendChild(document.createTextNode(' Send'));
 
-  const close = (responseStr) => {
-    window.electron.agent.sendUserResponse({ requestId, response: responseStr });
-    modal.remove();
+  let submitted = false;
+  const submit = () => {
+    if (submitted || !input.value.trim()) return;
+    submitted = true;
+    window.electron.agent.sendUserResponse({ requestId, response: input.value });
+    inputRow.innerHTML = '';
+    const result = document.createElement('p');
+    result.className = 'prompt-result-approved';
+    result.textContent = `You responded: ${input.value}`;
+    inputRow.appendChild(result);
   };
 
-  submitBtn.addEventListener('click', () => close(input.value), { once: true });
-
+  submitBtn.addEventListener('click', submit, { once: true });
   input.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
       event.preventDefault();
-      close(input.value);
+      submit();
     }
   });
 
-  actions.appendChild(submitBtn);
+  inputRow.appendChild(input);
+  inputRow.appendChild(submitBtn);
 
-  card.appendChild(title);
-  card.appendChild(qLabel);
-  card.appendChild(input);
-  card.appendChild(actions);
-
-  modal.appendChild(card);
-  document.body.appendChild(modal);
+  messageContent.appendChild(qLabel);
+  messageContent.appendChild(inputRow);
+  messageDiv.appendChild(messageContent);
+  dom.chatMessages.appendChild(messageDiv);
+  dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
   input.focus();
 }));
 
