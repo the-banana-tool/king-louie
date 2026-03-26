@@ -27,6 +27,17 @@ function listAvailableSkills() {
   });
 }
 
+function getSkillToolDescription() {
+  try {
+    const skills = listAvailableSkills();
+    if (skills.length > 0) {
+      const skillList = skills.map((s) => `"${s.id}"`).join(', ');
+      return `Invoke an installed skill by ID. When the user mentions a skill by name, use this tool. Installed skills: ${skillList}. Use list=true to see full details.`;
+    }
+  } catch { /* fall through */ }
+  return 'Invoke an installed skill by ID, or list available skills for discovery.';
+}
+
 const SkillTool = new Tool({
   name: 'Skill',
   description: 'Invoke an installed skill by ID, or list available skills for discovery.',
@@ -35,7 +46,7 @@ const SkillTool = new Tool({
     properties: {
       skill_id: {
         type: 'string',
-        description: 'The target skill identifier (e.g. "claude-code")'
+        description: 'The target skill identifier (e.g. "gh", "claude-code")'
       },
       message: {
         type: 'string',
@@ -103,5 +114,13 @@ const SkillTool = new Tool({
     return result;
   }
 });
+
+// Override to include dynamic skill list in the description sent to the LLM
+const originalToFunctionDefinition = SkillTool.toFunctionDefinition.bind(SkillTool);
+SkillTool.toFunctionDefinition = function () {
+  const def = originalToFunctionDefinition();
+  def.description = getSkillToolDescription();
+  return def;
+};
 
 module.exports = SkillTool;

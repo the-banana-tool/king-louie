@@ -60,7 +60,7 @@ class InferenceRouter {
     ).toLowerCase();
 
     const providerModel = typeof this.getProviderModel === 'function' ? this.getProviderModel(provider) : '';
-    const model = providerModel || tierConfig.model || '';
+    const model = tierConfig.model || providerModel || '';
 
     return { provider, model, tier: resolvedTier };
   }
@@ -129,7 +129,7 @@ class InferenceRouter {
     ).toLowerCase();
     const tierModel = tierConfig.model || '';
     const providerModel = typeof this.getProviderModel === 'function' ? this.getProviderModel(providerType) : '';
-    const model = request.model || providerModel || tierModel;
+    const model = request.model || tierModel || providerModel;
 
     const configuredTimeout = request.timeoutMs ?? timeoutsMs[tier];
     const timeoutMs = Number(configuredTimeout);
