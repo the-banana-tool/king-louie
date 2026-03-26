@@ -1543,6 +1543,25 @@ function switchSettingsTab(tabName) {
   });
 }
 
+function sortSettingsNavOptions() {
+  if (!dom.settingsNavSelect) return;
+
+  const currentValue = dom.settingsNavSelect.value;
+  const options = Array.from(dom.settingsNavSelect.options);
+  options.sort((a, b) =>
+    String(a.textContent || '').localeCompare(String(b.textContent || ''), undefined, {
+      sensitivity: 'base'
+    })
+  );
+
+  dom.settingsNavSelect.innerHTML = '';
+  options.forEach((option) => dom.settingsNavSelect.appendChild(option));
+
+  if (currentValue) {
+    dom.settingsNavSelect.value = currentValue;
+  }
+}
+
 function renderInferenceTierDetails() {
   if (!dom.inferenceTierDetails) return;
   const inference = appState.settings.inference || {};
@@ -2334,6 +2353,8 @@ async function loadSkillSettingsTabs() {
         dom.skillSettingsContainer.appendChild(renderSkillSettingsTab(skill));
       }
     }
+
+    sortSettingsNavOptions();
   } catch (err) {
     console.error('[skill-settings] Failed to load skill settings tabs:', err);
   }
@@ -4590,6 +4611,7 @@ document.addEventListener('keydown', (e) => {
 
 /* --- Settings tab switching -------------------------------- */
 if (dom.settingsNavSelect) {
+  sortSettingsNavOptions();
   dom.settingsNavSelect.addEventListener('change', () => {
     switchSettingsTab(dom.settingsNavSelect.value);
   });
