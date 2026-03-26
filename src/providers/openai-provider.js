@@ -345,15 +345,46 @@ class OpenAIProvider extends BaseLLMProvider {
 
   /**
    * Convert chat messages to the Responses API input format.
+   * Maps system→developer, and converts chat-format tool_calls/tool messages
+   * into the Responses API function_call / function_call_output items.
    */
   _formatResponsesInput(messages) {
     const formatted = this.formatMessages(messages);
-    return formatted.map((msg) => {
-      // The Responses API accepts {role, content} items similar to chat,
-      // but uses "developer" instead of "system"
+    const input = [];
+
+    for (const msg of formatted) {
+      // Assistant message with tool_calls → function_call items
+      if (msg.role === 'assistant' && Array.isArray(msg.tool_calls)) {
+        if (msg.content) {
+          input.push({ role: 'assistant', content: msg.content });
+        }
+        for (const tc of msg.tool_calls) {
+          input.push({
+            type: 'function_call',
+            name: tc.function?.name,
+            call_id: tc.id,
+            arguments: tc.function?.arguments || '{}'
+          });
+        }
+        continue;
+      }
+
+      // Tool result → function_call_output
+      if (msg.role === 'tool') {
+        input.push({
+          type: 'function_call_output',
+          call_id: msg.tool_call_id,
+          output: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)
+        });
+        continue;
+      }
+
+      // Regular message: system→developer, everything else passes through
       const role = msg.role === 'system' ? 'developer' : msg.role;
-      return { role, content: msg.content };
-    }).filter((msg) => msg.role !== 'tool'); // tool results handled separately
+      input.push({ role, content: msg.content });
+    }
+
+    return input;
   }
 
   async _sendResponses(model, messages, options = {}) {
