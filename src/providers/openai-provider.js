@@ -4,12 +4,21 @@ const ImageHandler = require('../media/image-handler');
 // Models that use the /v1/completions endpoint instead of /v1/chat/completions
 const COMPLETIONS_MODELS = ['davinci', 'babbage', 'curie', 'ada'];
 
+// Models that use the /v1/responses endpoint instead of /v1/chat/completions
+// "chatgpt-*" models are not chat-completion models; codex models also use responses API
+const RESPONSES_MODELS = ['chatgpt-', '-codex'];
+
 // Models that don't support temperature (only default of 1)
-const NO_TEMPERATURE_MODELS = ['codex', 'o1', 'o3', 'o4', 'gpt-5'];
+const NO_TEMPERATURE_MODELS = ['codex', 'o1', 'o3', 'o4', 'gpt-5', 'chatgpt-'];
 
 function isCompletionsModel(model) {
   const lower = String(model || '').toLowerCase();
   return COMPLETIONS_MODELS.some((m) => lower.includes(m));
+}
+
+function isResponsesModel(model) {
+  const lower = String(model || '').toLowerCase();
+  return RESPONSES_MODELS.some((m) => lower.includes(m));
 }
 
 function supportsTemperature(model) {
@@ -70,6 +79,7 @@ class OpenAIProvider extends BaseLLMProvider {
 
   getModels() {
     return [
+      'chatgpt-5.4-pro',
       'gpt-5',
       'gpt-5-mini',
       'gpt-5.4-mini',
@@ -89,6 +99,7 @@ class OpenAIProvider extends BaseLLMProvider {
 
   getModelPricingTable() {
     return {
+      'chatgpt-5.4-pro': { inputPerMillion: 3, outputPerMillion: 15 },
       'gpt-5': { inputPerMillion: 3, outputPerMillion: 15 },
       'gpt-5-mini': { inputPerMillion: 0.5, outputPerMillion: 2 },
       'gpt-5.2-codex': { inputPerMillion: 3, outputPerMillion: 15 },
@@ -188,6 +199,10 @@ class OpenAIProvider extends BaseLLMProvider {
       return this._sendCompletions(model, messagesToPrompt(this.formatMessages(preparedMessages)), options);
     }
 
+    if (isResponsesModel(model)) {
+      return this._sendResponses(model, preparedMessages, options);
+    }
+
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: this.getHeaders(),
@@ -234,6 +249,10 @@ class OpenAIProvider extends BaseLLMProvider {
 
     if (isCompletionsModel(requestedModel)) {
       return this._sendCompletionsWithTools(requestedModel, preparedMessages, tools, options);
+    }
+
+    if (isResponsesModel(requestedModel)) {
+      return this._sendResponsesWithTools(requestedModel, preparedMessages, tools, options);
     }
 
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -312,6 +331,105 @@ class OpenAIProvider extends BaseLLMProvider {
     return { type: 'text', content: text, llmMetrics };
   }
 
+  /**
+   * Convert chat messages to the Responses API input format.
+   */
+  _formatResponsesInput(messages) {
+    const formatted = this.formatMessages(messages);
+    return formatted.map((msg) => {
+      // The Responses API accepts {role, content} items similar to chat,
+      // but uses "developer" instead of "system"
+      const role = msg.role === 'system' ? 'developer' : msg.role;
+      return { role, content: msg.content };
+    }).filter((msg) => msg.role !== 'tool'); // tool results handled separately
+  }
+
+  async _sendResponses(model, messages, options = {}) {
+    const input = this._formatResponsesInput(messages);
+
+    const response = await fetch('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify({
+        model,
+        input,
+        ...temperatureParam(model, options)
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(await this.extractError(response));
+    }
+
+    const data = await response.json();
+    // Extract text from output items
+    const textItem = data.output?.find((item) => item.type === 'message');
+    const text = textItem?.content
+      ?.filter((c) => c.type === 'output_text')
+      .map((c) => c.text)
+      .join('') || '';
+    return text;
+  }
+
+  async _sendResponsesWithTools(model, messages, tools, options = {}) {
+    const input = this._formatResponsesInput(messages);
+
+    const responsesTools = (tools || []).map((tool) => ({
+      type: 'function',
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters
+    }));
+
+    const response = await fetch('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify({
+        model,
+        input,
+        tools: responsesTools,
+        ...temperatureParam(model, options)
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(await this.extractError(response));
+    }
+
+    const data = await response.json();
+    const llmMetrics = this.buildLlmCallMetrics({
+      model: data.model || model,
+      usage: data.usage
+    });
+
+    // Check for function_call output items
+    const fnCall = data.output?.find((item) => item.type === 'function_call');
+    if (fnCall) {
+      let parsedArgs = {};
+      try {
+        parsedArgs = JSON.parse(fnCall.arguments || '{}');
+      } catch {
+        parsedArgs = {};
+      }
+      return {
+        type: 'tool_use',
+        toolName: fnCall.name,
+        toolUseId: fnCall.call_id || `call_${Date.now()}`,
+        parameters: parsedArgs,
+        messageContent: '',
+        llmMetrics
+      };
+    }
+
+    // Fall back to text
+    const textItem = data.output?.find((item) => item.type === 'message');
+    const text = textItem?.content
+      ?.filter((c) => c.type === 'output_text')
+      .map((c) => c.text)
+      .join('') || '';
+    return { type: 'text', content: text, llmMetrics };
+  }
+
   parseToolResponse(response, llmMetrics) {
     const message = response?.choices?.[0]?.message;
     if (!message) {
@@ -375,6 +493,10 @@ class OpenAIProvider extends BaseLLMProvider {
   async streamMessage(messages, options = {}, onChunk) {
     const requestedModel = options.model || this.getDefaultModel();
     const preparedMessages = this.prependSystemPrompt(messages, options.systemPrompt);
+
+    if (isResponsesModel(requestedModel)) {
+      return this._streamResponses(requestedModel, preparedMessages, options, onChunk);
+    }
 
     const isCompletions = isCompletionsModel(requestedModel);
     const url = isCompletions
@@ -446,6 +568,81 @@ class OpenAIProvider extends BaseLLMProvider {
           // Chat completions use delta.content; completions use text
           const content = parsed.choices?.[0]?.delta?.content || parsed.choices?.[0]?.text;
           if (content) onChunk(content);
+        } catch {
+          // Ignore malformed partial chunks
+        }
+      }
+    }
+
+    return buildResult();
+  }
+
+  async _streamResponses(requestedModel, messages, options, onChunk) {
+    const input = this._formatResponsesInput(messages);
+
+    const response = await fetch('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify({
+        model: requestedModel,
+        input,
+        ...temperatureParam(requestedModel, options),
+        stream: true
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(await this.extractError(response));
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let usage = null;
+    let model = requestedModel;
+
+    const buildResult = () => ({
+      llmMetrics: this.buildLlmCallMetrics({ model, usage })
+    });
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('event:') && !trimmed.startsWith('data:')) continue;
+
+        if (trimmed.startsWith('event:')) continue; // skip event lines, process data lines
+
+        const data = trimmed.slice(5).trim();
+        if (data === '[DONE]') return buildResult();
+
+        try {
+          const parsed = JSON.parse(data);
+
+          // Responses API: response.completed carries usage
+          if (parsed?.usage) {
+            usage = parsed.usage;
+          }
+
+          if (parsed?.model) {
+            model = parsed.model;
+          }
+
+          // Responses API streaming: output_text.delta contains the text chunk
+          if (parsed?.delta) {
+            onChunk(parsed.delta);
+          }
+
+          // Also handle the type=response.output_text.delta format
+          if (parsed?.type === 'response.output_text.delta' && parsed?.delta) {
+            // Already handled above
+          }
         } catch {
           // Ignore malformed partial chunks
         }

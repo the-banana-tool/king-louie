@@ -7,6 +7,7 @@ const PRICING = {
     'gpt-5': { input: 3.0, output: 15.0, cacheRead: 1.5 },
     'gpt-5-mini': { input: 0.5, output: 2.0, cacheRead: 0.25 },
     'gpt-5.4-mini': { input: 0.5, output: 2.0, cacheRead: 0.25 },
+    'chatgpt-5.4-pro': { input: 3.0, output: 15.0 },
     'gpt-5.2-codex': { input: 3.0, output: 15.0 },
     'o1': { input: 15.0, output: 60.0, cacheRead: 7.5 },
     'o1-mini': { input: 1.1, output: 4.4, cacheRead: 0.55 },
