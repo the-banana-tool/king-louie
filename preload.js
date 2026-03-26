@@ -35,7 +35,8 @@ try {
     };
     markdownParser.use({ renderer });
   }
-} catch {
+} catch (err) {
+  console.warn('[markdown] Failed to load marked:', err?.message || err);
   markdownParser = null;
 }
 
@@ -56,29 +57,98 @@ const simpleMarkdownFallback = (text = '') => {
   const lines = String(text || '').split(/\r?\n/);
   const chunks = [];
   let listBuffer = [];
+  let listType = null; // 'ul' or 'ol'
+  let inCodeBlock = false;
+  let codeLines = [];
+  let codeLang = '';
 
   const flushList = () => {
     if (!listBuffer.length) return;
-    chunks.push(`<ul>${listBuffer.map((item) => `<li>${item}</li>`).join('')}</ul>`);
+    const tag = listType || 'ul';
+    chunks.push(`<${tag}>${listBuffer.map((item) => `<li>${item}</li>`).join('')}</${tag}>`);
     listBuffer = [];
+    listType = null;
+  };
+
+  const flushCode = () => {
+    if (!codeLines.length) return;
+    const langClass = codeLang ? ` class="language-${escapeHtml(codeLang)}"` : '';
+    chunks.push(`<pre><code${langClass}>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+    codeLines = [];
+    codeLang = '';
   };
 
   for (const rawLine of lines) {
+    // Code fence toggle
+    if (rawLine.trimStart().startsWith('```')) {
+      if (inCodeBlock) {
+        flushCode();
+        inCodeBlock = false;
+      } else {
+        flushList();
+        inCodeBlock = true;
+        codeLang = rawLine.trimStart().slice(3).trim();
+      }
+      continue;
+    }
+
+    if (inCodeBlock) {
+      codeLines.push(rawLine);
+      continue;
+    }
+
     const line = rawLine.trim();
     if (!line) {
       flushList();
       continue;
     }
 
-    if (line.startsWith('- ')) {
+    // Unordered list
+    if (line.startsWith('- ') || line.startsWith('* ')) {
+      if (listType === 'ol') flushList();
+      listType = 'ul';
       listBuffer.push(formatInlineMarkdown(escapeHtml(line.slice(2))));
+      continue;
+    }
+
+    // Ordered list
+    const olMatch = line.match(/^(\d+)\.\s+(.*)$/);
+    if (olMatch) {
+      if (listType === 'ul') flushList();
+      listType = 'ol';
+      listBuffer.push(formatInlineMarkdown(escapeHtml(olMatch[2])));
       continue;
     }
 
     flushList();
 
+    // Headings
+    if (line.startsWith('#### ')) {
+      chunks.push(`<h4>${formatInlineMarkdown(escapeHtml(line.slice(5)))}</h4>`);
+      continue;
+    }
     if (line.startsWith('### ')) {
       chunks.push(`<h3>${formatInlineMarkdown(escapeHtml(line.slice(4)))}</h3>`);
+      continue;
+    }
+    if (line.startsWith('## ')) {
+      chunks.push(`<h2>${formatInlineMarkdown(escapeHtml(line.slice(3)))}</h2>`);
+      continue;
+    }
+    if (line.startsWith('# ')) {
+      chunks.push(`<h1>${formatInlineMarkdown(escapeHtml(line.slice(2)))}</h1>`);
+      continue;
+    }
+
+    // Blockquote
+    if (line.startsWith('> ')) {
+      chunks.push(`<blockquote><p>${formatInlineMarkdown(escapeHtml(line.slice(2)))}</p></blockquote>`);
+      continue;
+    }
+
+    // Horizontal rule
+    if (/^[-*_]{3,}$/.test(line)) {
+      chunks.push('<hr>');
       continue;
     }
 
@@ -86,6 +156,7 @@ const simpleMarkdownFallback = (text = '') => {
   }
 
   flushList();
+  if (inCodeBlock) flushCode();
   return chunks.join('');
 };
 
@@ -112,8 +183,12 @@ const safeMarkdownParse = (text) => {
     if (typeof markdownParser === 'function') {
       return sanitize(markdownParser(input));
     }
-  } catch {
-    // Fall through to plain-text HTML
+  } catch (err) {
+    console.warn('[markdown] marked.parse() threw, using fallback:', err?.message || err);
+  }
+
+  if (!markdownParser) {
+    console.warn('[markdown] marked not loaded, using fallback renderer');
   }
 
   return sanitize(simpleMarkdownFallback(input));
