@@ -13,6 +13,7 @@ const SkillTool = require('./builtin/skill-tool');
 const AskUserTool = require('./builtin/ask-user-tool');
 const CronTool = require('./builtin/cron-tool');
 const BrowserTool = require('./builtin/browser-tool');
+const RemoteDispatchTool = require('./builtin/remote-dispatch-tool');
 
 let initialized = false;
 
@@ -32,6 +33,7 @@ function initializeTools() {
   toolRegistry.register(AskUserTool);
   toolRegistry.register(CronTool);
   toolRegistry.register(BrowserTool);
+  toolRegistry.register(RemoteDispatchTool);
 
   initialized = true;
 }

@@ -49,8 +49,10 @@ const { registerHandlers } = require('./src/ipc/register');
 const WebhookRegistry = require('./src/webhooks/webhook-registry');
 const WebhookHandler = require('./src/webhooks/webhook-handler');
 const WebhookServer = require('./src/webhooks/webhook-server');
+const { initializeMesh } = require('./src/mesh');
 
 let mainWindow;
+let meshContext;
 let skillLoader;
 let pinManager;
 const pendingApprovalResolvers = new Map();
@@ -2065,6 +2067,21 @@ const initializeAgentInfrastructure = async () => {
   webhookServer = new WebhookServer(gatewayServer, webhookHandler);
   webhookServer.start().catch(err => console.warn('[main] Webhook server start failed:', err.message));
 
+  // Initialize mesh networking (peer-to-peer communication between king-louie instances)
+  try {
+    meshContext = await initializeMesh({
+      store,
+      sessionManager,
+      agentExecutor: agentExecutorAdapter,
+      taskManager,
+      channelRegistry,
+      getAgent,
+      settings: getSettings()
+    });
+  } catch (err) {
+    console.warn('[main] Mesh initialization failed:', err.message);
+  }
+
   gatewayServer.on('agent:message', async ({ agentId, sessionKey, message }) => {
     const startedAt = Number(message?.startedAt) || Date.now();
     try {
@@ -2342,6 +2359,8 @@ registerHandlers(ipcMain, {
   getChannelRegistry: () => channelRegistry,
   getHookRegistry: () => hookRegistry,
   getGatewayServer: () => gatewayServer,
+  getMeshContext: () => meshContext,
+  meshContext: null, // will be set after initialization
   getBrowserService: () => null,
   getSandboxExecutor: () => null,
 
@@ -2379,6 +2398,40 @@ app.whenReady().then(async () => {
     }
   });
 
+  // Forward mesh events to renderer
+  if (meshContext) {
+    meshContext.transport.on('peerConnected', (peer) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('mesh:peerConnected', {
+          peerId: peer.peerId,
+          displayName: peer.displayName,
+          capabilities: peer.capabilities
+        });
+      }
+    });
+
+    meshContext.transport.on('peerDisconnected', (info) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('mesh:peerDisconnected', {
+          peerId: info.peerId,
+          reason: info.reason
+        });
+      }
+    });
+
+    meshContext.remoteControl.on('taskCompleted', (info) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('mesh:taskCompleted', info);
+      }
+    });
+
+    meshContext.remoteControl.on('taskFailed', (info) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('mesh:taskFailed', info);
+      }
+    });
+  }
+
   app.on('activate', function () {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -2400,6 +2453,9 @@ app.on('window-all-closed', function () {
     }
     if (webhookServer) {
       webhookServer.stop().catch((err) => console.warn('[main] Webhook server stop failed:', err.message));
+    }
+    if (meshContext) {
+      meshContext.shutdown().catch((err) => console.warn('[main] Mesh shutdown failed:', err.message));
     }
     if (gatewayServer) {
       gatewayServer.stop().catch((err) => console.warn('[main] Gateway server stop failed:', err.message));

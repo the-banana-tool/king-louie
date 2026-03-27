@@ -1,6 +1,7 @@
 class AgentOrchestrator {
-  constructor(agentExecutor) {
+  constructor(agentExecutor, options = {}) {
     this.agentExecutor = agentExecutor;
+    this.meshRemoteControl = options.meshRemoteControl || null;
   }
 
   async executeParallel(agents, message, options = {}) {
@@ -51,7 +52,20 @@ class AgentOrchestrator {
           taskManager.markInProgress(task.id);
 
           try {
-            const result = await this.agentExecutor.execute(agent, task.description, options);
+            let result;
+
+            // If task is assigned to a remote peer, dispatch via mesh
+            const targetPeer = task.metadata?.targetPeer;
+            if (targetPeer && targetPeer !== 'local' && this.meshRemoteControl) {
+              const remoteResult = await this.meshRemoteControl.dispatchTask(targetPeer, {
+                message: task.description || task.metadata?.message || '',
+                agentId: task.metadata?.agentId || agent.id
+              });
+              result = { content: remoteResult.result?.content || '', remote: true, peer: targetPeer };
+            } else {
+              result = await this.agentExecutor.execute(agent, task.description, options);
+            }
+
             results.set(task.id, result);
             taskManager.markCompleted(task.id);
           } catch (error) {

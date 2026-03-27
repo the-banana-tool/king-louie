@@ -212,6 +212,29 @@ const dom = {
   webhookStatus: document.getElementById('webhook-status'),
   webhookList: document.getElementById('webhook-list'),
   webhookListStatus: document.getElementById('webhook-list-status'),
+  meshIndicatorBtn: document.getElementById('mesh-indicator-btn'),
+  meshPeerCount: document.getElementById('mesh-peer-count'),
+  meshPeerId: document.getElementById('mesh-peer-id'),
+  meshDisplayNameInput: document.getElementById('mesh-display-name-input'),
+  meshCapabilitiesInput: document.getElementById('mesh-capabilities-input'),
+  meshSaveIdentityBtn: document.getElementById('mesh-save-identity-btn'),
+  meshIdentityStatus: document.getElementById('mesh-identity-status'),
+  meshPairingCode: document.getElementById('mesh-pairing-code'),
+  meshPairGenerateBtn: document.getElementById('mesh-pair-generate-btn'),
+  meshPairAcceptBtn: document.getElementById('mesh-pair-accept-btn'),
+  meshPairingStatus: document.getElementById('mesh-pairing-status'),
+  meshPeerAddressInput: document.getElementById('mesh-peer-address-input'),
+  meshPeerPortInput: document.getElementById('mesh-peer-port-input'),
+  meshPeerConnectBtn: document.getElementById('mesh-peer-connect-btn'),
+  meshConnectStatus: document.getElementById('mesh-connect-status'),
+  meshPeersList: document.getElementById('mesh-peers-list'),
+  meshPeersStatus: document.getElementById('mesh-peers-status'),
+  meshPortInput: document.getElementById('mesh-port-input'),
+  meshDiscoveryToggle: document.getElementById('mesh-discovery-toggle'),
+  meshSaveTransportBtn: document.getElementById('mesh-save-transport-btn'),
+  meshTransportStatus: document.getElementById('mesh-transport-status'),
+  meshTasksList: document.getElementById('mesh-tasks-list'),
+  meshTasksStatus: document.getElementById('mesh-tasks-status'),
   diagnosticsRunBtn: document.getElementById('diagnostics-run-btn'),
   diagnosticsStatus: document.getElementById('diagnostics-status'),
   diagnosticsResults: document.getElementById('diagnostics-results'),
@@ -3410,6 +3433,7 @@ async function loadSettings() {
     await loadMemoryEntries();
     await loadCronJobs();
     loadWebhookList().catch(() => {});
+    loadMeshStatus().catch(() => {});
   } catch (error) {
     setProviderListFallback(`Unable to load provider settings: ${error.message || 'Unknown error'}`);
   }
@@ -5656,6 +5680,330 @@ if (dom.diagnosticsRunBtn) {
     }
   });
 }
+
+/* --- Mesh Network ------------------------------------------ */
+
+async function loadMeshStatus() {
+  try {
+    const status = await window.electron.mesh.status();
+
+    if (!status || !status.enabled) {
+      if (dom.meshPeerId) dom.meshPeerId.textContent = 'Mesh not enabled';
+      updateMeshIndicator(0);
+      return;
+    }
+
+    if (dom.meshPeerId) dom.meshPeerId.textContent = status.peerId;
+    if (dom.meshDisplayNameInput && !dom.meshDisplayNameInput.value) {
+      dom.meshDisplayNameInput.value = status.displayName || '';
+    }
+    if (dom.meshCapabilitiesInput && !dom.meshCapabilitiesInput.value) {
+      dom.meshCapabilitiesInput.value = (status.capabilities || []).join(', ');
+    }
+
+    renderMeshPeers(status.peers || [], status.discoveredPeers || []);
+    renderMeshTasks(status.tasks || {});
+    updateMeshIndicator((status.peers || []).length);
+  } catch (err) {
+    if (dom.meshPeersStatus) {
+      dom.meshPeersStatus.textContent = `Error loading mesh status: ${err.message}`;
+      dom.meshPeersStatus.classList.add('error');
+    }
+  }
+}
+
+function updateMeshIndicator(peerCount) {
+  if (!dom.meshIndicatorBtn) return;
+
+  if (peerCount > 0) {
+    dom.meshIndicatorBtn.hidden = false;
+    dom.meshIndicatorBtn.classList.add('online');
+    if (dom.meshPeerCount) dom.meshPeerCount.textContent = String(peerCount);
+    dom.meshIndicatorBtn.title = `${peerCount} mesh peer${peerCount !== 1 ? 's' : ''} online`;
+  } else {
+    dom.meshIndicatorBtn.hidden = true;
+    dom.meshIndicatorBtn.classList.remove('online');
+  }
+}
+
+function renderMeshPeers(connected, discovered) {
+  if (!dom.meshPeersList) return;
+  dom.meshPeersList.innerHTML = '';
+
+  const allPeers = [
+    ...connected.map((p) => ({ ...p, status: 'online' })),
+    ...discovered
+      .filter((d) => !connected.some((c) => c.peerId === d.peerId))
+      .map((p) => ({ ...p, status: 'discovered' }))
+  ];
+
+  if (allPeers.length === 0) {
+    if (dom.meshPeersStatus) dom.meshPeersStatus.textContent = 'No peers connected';
+    return;
+  }
+
+  if (dom.meshPeersStatus) dom.meshPeersStatus.textContent = '';
+
+  for (const peer of allPeers) {
+    const card = document.createElement('div');
+    card.className = 'mesh-peer-card';
+
+    const info = document.createElement('div');
+    info.className = 'mesh-peer-info';
+
+    const name = document.createElement('div');
+    name.className = 'mesh-peer-name';
+    name.textContent = peer.displayName || peer.peerId;
+    info.appendChild(name);
+
+    const meta = document.createElement('div');
+    meta.className = 'mesh-peer-meta';
+    meta.innerHTML = `<span class="mesh-peer-id">${peer.peerId}</span>`;
+    if (peer.capabilities && peer.capabilities.length > 0) {
+      const caps = peer.capabilities.map((c) =>
+        `<span class="mesh-capability-tag">${c}</span>`
+      ).join('');
+      meta.innerHTML += ` ${caps}`;
+    }
+    info.appendChild(meta);
+
+    const actions = document.createElement('div');
+    actions.className = 'mesh-peer-actions';
+
+    const statusBadge = document.createElement('span');
+    statusBadge.className = `mesh-peer-status ${peer.status}`;
+    statusBadge.textContent = peer.status === 'online' ? 'Online' :
+                              peer.status === 'discovered' ? 'Discovered' : 'Offline';
+    actions.appendChild(statusBadge);
+
+    if (peer.status === 'online') {
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.className = 'btn btn-danger';
+      removeBtn.style.padding = '3px 8px';
+      removeBtn.style.fontSize = '11px';
+      removeBtn.appendChild(faIcon('fas fa-xmark'));
+      removeBtn.addEventListener('click', async () => {
+        try {
+          await window.electron.mesh.removePeer({ peerId: peer.peerId });
+          loadMeshStatus();
+        } catch (err) {
+          if (dom.meshPeersStatus) {
+            dom.meshPeersStatus.textContent = `Error: ${err.message}`;
+            dom.meshPeersStatus.classList.add('error');
+          }
+        }
+      });
+      actions.appendChild(removeBtn);
+    }
+
+    card.appendChild(info);
+    card.appendChild(actions);
+    dom.meshPeersList.appendChild(card);
+  }
+}
+
+function renderMeshTasks(tasksInfo) {
+  if (!dom.meshTasksList) return;
+  dom.meshTasksList.innerHTML = '';
+
+  const allTasks = [
+    ...(tasksInfo.tasks?.pending || []).map((t) => ({ ...t, type: 'outbound' })),
+    ...(tasksInfo.tasks?.active || []).map((t) => ({ ...t, type: 'inbound' }))
+  ];
+
+  if (allTasks.length === 0) {
+    if (dom.meshTasksStatus) dom.meshTasksStatus.textContent = 'No remote tasks';
+    return;
+  }
+
+  if (dom.meshTasksStatus) dom.meshTasksStatus.textContent = '';
+
+  for (const task of allTasks) {
+    const card = document.createElement('div');
+    card.className = 'mesh-task-card';
+
+    const header = document.createElement('div');
+    header.className = 'mesh-task-header';
+
+    const subject = document.createElement('span');
+    subject.className = 'mesh-task-subject';
+    subject.textContent = task.taskId;
+    header.appendChild(subject);
+
+    const badge = document.createElement('span');
+    badge.className = 'mesh-remote-badge';
+    badge.innerHTML = task.type === 'outbound'
+      ? `<i class="fas fa-arrow-up"></i> Sent to ${task.peerId || task.fromPeerId || '?'}`
+      : `<i class="fas fa-arrow-down"></i> From ${task.fromPeerId || '?'}`;
+    header.appendChild(badge);
+
+    const meta = document.createElement('div');
+    meta.className = 'mesh-task-meta';
+    meta.textContent = `Status: ${task.status} | ${new Date(task.dispatchedAt || task.startedAt).toLocaleTimeString()}`;
+
+    card.appendChild(header);
+    card.appendChild(meta);
+    dom.meshTasksList.appendChild(card);
+  }
+}
+
+function initMeshHandlers() {
+  if (dom.meshSaveIdentityBtn) {
+    dom.meshSaveIdentityBtn.addEventListener('click', async () => {
+      const displayName = dom.meshDisplayNameInput?.value?.trim() || '';
+      const capabilities = (dom.meshCapabilitiesInput?.value || '')
+        .split(',').map((s) => s.trim()).filter(Boolean);
+
+      try {
+        await window.electron.mesh.saveSettings({ displayName, capabilities });
+        if (dom.meshIdentityStatus) {
+          dom.meshIdentityStatus.textContent = 'Identity saved.';
+          dom.meshIdentityStatus.classList.remove('error');
+        }
+      } catch (err) {
+        if (dom.meshIdentityStatus) {
+          dom.meshIdentityStatus.textContent = `Error: ${err.message}`;
+          dom.meshIdentityStatus.classList.add('error');
+        }
+      }
+    });
+  }
+
+  if (dom.meshPairGenerateBtn) {
+    dom.meshPairGenerateBtn.addEventListener('click', async () => {
+      try {
+        const result = await window.electron.mesh.startPairing();
+        if (dom.meshPairingCode) {
+          dom.meshPairingCode.textContent = result.code;
+          dom.meshPairingCode.className = 'provider-input mesh-pairing-code';
+        }
+        if (dom.meshPairingStatus) {
+          dom.meshPairingStatus.textContent = 'Share this code with the other machine. Expires in 2 minutes.';
+          dom.meshPairingStatus.classList.remove('error');
+        }
+      } catch (err) {
+        if (dom.meshPairingStatus) {
+          dom.meshPairingStatus.textContent = `Error: ${err.message}`;
+          dom.meshPairingStatus.classList.add('error');
+        }
+      }
+    });
+  }
+
+  if (dom.meshPairAcceptBtn) {
+    dom.meshPairAcceptBtn.addEventListener('click', async () => {
+      const code = prompt('Enter the 6-word pairing code:');
+      if (!code) return;
+      const address = prompt('Enter the peer address (IP or hostname):');
+      if (!address) return;
+      const port = prompt('Enter the peer mesh port:', '18791');
+      if (!port) return;
+
+      try {
+        if (dom.meshPairingStatus) {
+          dom.meshPairingStatus.textContent = 'Pairing...';
+          dom.meshPairingStatus.classList.remove('error');
+        }
+        const result = await window.electron.mesh.acceptPairing({ code, address, port: Number(port) });
+        if (dom.meshPairingStatus) {
+          dom.meshPairingStatus.textContent = `Paired with ${result.displayName || result.peerId}!`;
+        }
+        loadMeshStatus();
+      } catch (err) {
+        if (dom.meshPairingStatus) {
+          dom.meshPairingStatus.textContent = `Pairing failed: ${err.message}`;
+          dom.meshPairingStatus.classList.add('error');
+        }
+      }
+    });
+  }
+
+  if (dom.meshPeerConnectBtn) {
+    dom.meshPeerConnectBtn.addEventListener('click', async () => {
+      const address = dom.meshPeerAddressInput?.value?.trim();
+      const port = dom.meshPeerPortInput?.value;
+
+      if (!address) {
+        if (dom.meshConnectStatus) {
+          dom.meshConnectStatus.textContent = 'Address is required.';
+          dom.meshConnectStatus.classList.add('error');
+        }
+        return;
+      }
+
+      try {
+        if (dom.meshConnectStatus) {
+          dom.meshConnectStatus.textContent = 'Connecting...';
+          dom.meshConnectStatus.classList.remove('error');
+        }
+        const result = await window.electron.mesh.addPeer({ address, port: Number(port || 18791) });
+        if (dom.meshConnectStatus) {
+          dom.meshConnectStatus.textContent = `Connected to ${result.displayName || result.peerId}`;
+        }
+        if (dom.meshPeerAddressInput) dom.meshPeerAddressInput.value = '';
+        loadMeshStatus();
+      } catch (err) {
+        if (dom.meshConnectStatus) {
+          dom.meshConnectStatus.textContent = `Failed: ${err.message}`;
+          dom.meshConnectStatus.classList.add('error');
+        }
+      }
+    });
+  }
+
+  if (dom.meshSaveTransportBtn) {
+    dom.meshSaveTransportBtn.addEventListener('click', async () => {
+      const port = Number(dom.meshPortInput?.value || 18791);
+      const discoveryEnabled = dom.meshDiscoveryToggle?.checked !== false;
+
+      try {
+        await window.electron.mesh.saveSettings({ port, discoveryEnabled });
+        if (dom.meshTransportStatus) {
+          dom.meshTransportStatus.textContent = 'Transport settings saved. Restart to apply port changes.';
+          dom.meshTransportStatus.classList.remove('error');
+        }
+      } catch (err) {
+        if (dom.meshTransportStatus) {
+          dom.meshTransportStatus.textContent = `Error: ${err.message}`;
+          dom.meshTransportStatus.classList.add('error');
+        }
+      }
+    });
+  }
+
+  // Mesh indicator opens settings to mesh tab
+  if (dom.meshIndicatorBtn) {
+    dom.meshIndicatorBtn.addEventListener('click', () => {
+      if (dom.settingsDrawer) dom.settingsDrawer.hidden = false;
+      switchSettingsTab('mesh');
+    });
+  }
+
+  // Listen for real-time mesh events
+  if (window.electron.mesh?.onPeerConnected) {
+    unsubscribeHandlers.push(
+      window.electron.mesh.onPeerConnected(() => loadMeshStatus())
+    );
+  }
+  if (window.electron.mesh?.onPeerDisconnected) {
+    unsubscribeHandlers.push(
+      window.electron.mesh.onPeerDisconnected(() => loadMeshStatus())
+    );
+  }
+  if (window.electron.mesh?.onTaskCompleted) {
+    unsubscribeHandlers.push(
+      window.electron.mesh.onTaskCompleted(() => loadMeshStatus())
+    );
+  }
+  if (window.electron.mesh?.onTaskFailed) {
+    unsubscribeHandlers.push(
+      window.electron.mesh.onTaskFailed(() => loadMeshStatus())
+    );
+  }
+}
+
+initMeshHandlers();
 
 /* --- Onboarding Wizard ------------------------------------- */
 const wizardState = { currentStep: 0, steps: [], data: {} };

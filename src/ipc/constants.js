@@ -102,5 +102,15 @@ module.exports = {
   WIZARD_COMPLETE: 'wizard:complete',
   WIZARD_GET_STEPS: 'wizard:getSteps',
 
-  DIAGNOSTICS_RUN: 'diagnostics:run'
+  DIAGNOSTICS_RUN: 'diagnostics:run',
+
+  MESH_STATUS: 'mesh:status',
+  MESH_PEERS_LIST: 'mesh:peers',
+  MESH_PEER_ADD: 'mesh:addPeer',
+  MESH_PEER_REMOVE: 'mesh:removePeer',
+  MESH_PAIR_START: 'mesh:pairStart',
+  MESH_PAIR_ACCEPT: 'mesh:pairAccept',
+  MESH_DISPATCH_TASK: 'mesh:dispatchTask',
+  MESH_TASK_STATUS: 'mesh:taskStatus',
+  MESH_SETTINGS_SAVE: 'mesh:settingsSave'
 };

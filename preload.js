@@ -594,6 +594,42 @@ contextBridge.exposeInMainWorld(
     diagnostics: {
       run: () => ipcRenderer.invoke('diagnostics:run')
     },
+    mesh: {
+      status: () => ipcRenderer.invoke('mesh:status'),
+      listPeers: () => ipcRenderer.invoke('mesh:peers'),
+      addPeer: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.address, 'address');
+        return ipcRenderer.invoke('mesh:addPeer', payload);
+      },
+      removePeer: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.peerId, 'peerId');
+        return ipcRenderer.invoke('mesh:removePeer', payload);
+      },
+      startPairing: () => ipcRenderer.invoke('mesh:pairStart'),
+      acceptPairing: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.code, 'code');
+        validateString(payload.address, 'address');
+        return ipcRenderer.invoke('mesh:pairAccept', payload);
+      },
+      dispatchTask: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.peerId, 'peerId');
+        validateString(payload.message, 'message');
+        return ipcRenderer.invoke('mesh:dispatchTask', payload);
+      },
+      taskStatus: (payload) => ipcRenderer.invoke('mesh:taskStatus', payload),
+      saveSettings: (payload) => {
+        validateObject(payload, 'payload');
+        return ipcRenderer.invoke('mesh:settingsSave', payload);
+      },
+      onPeerConnected: (callback) => registerOnce('mesh:peerConnected', callback),
+      onPeerDisconnected: (callback) => registerOnce('mesh:peerDisconnected', callback),
+      onTaskCompleted: (callback) => registerOnce('mesh:taskCompleted', callback),
+      onTaskFailed: (callback) => registerOnce('mesh:taskFailed', callback)
+    },
     app: {
       quitWindow: () => ipcRenderer.invoke('app:quitWindow')
     },

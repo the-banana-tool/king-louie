@@ -2045,3 +2045,159 @@ body {
   background: rgba(0,0,0,0.25);
   color: #11111b;
 }
+
+/* ── Mesh Network ─────────────────────────────────── */
+
+.mesh-indicator {
+  gap: 5px;
+  font-size: 12px;
+}
+
+.mesh-indicator .fa-network-wired {
+  font-size: 13px;
+}
+
+.mesh-indicator.online {
+  color: var(--success);
+  border-color: rgba(166,227,161,0.3);
+}
+
+.mesh-indicator.online:hover {
+  background: var(--success-bg);
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.mesh-peer-card {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: 12px 14px;
+  background: var(--bg-elevated);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.mesh-peer-card:last-child {
+  margin-bottom: 0;
+}
+
+.mesh-peer-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.mesh-peer-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mesh-peer-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.mesh-peer-meta .mesh-peer-id {
+  font-family: var(--font-mono);
+}
+
+.mesh-peer-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.mesh-peer-status {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-weight: 600;
+}
+
+.mesh-peer-status.online {
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.mesh-peer-status.offline {
+  background: var(--bg-overlay);
+  color: var(--text-muted);
+}
+
+.mesh-peer-status.discovered {
+  background: var(--info-bg);
+  color: var(--info);
+}
+
+.mesh-capability-tag {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent-surface);
+  color: var(--accent);
+  border: 1px solid rgba(137,180,250,0.15);
+  margin-right: 4px;
+}
+
+.mesh-pairing-code {
+  font-family: var(--font-mono);
+  font-size: 16px;
+  letter-spacing: 1px;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.mesh-task-card {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: 10px 14px;
+  background: var(--bg-elevated);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.mesh-task-card:last-child {
+  margin-bottom: 0;
+}
+
+.mesh-task-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.mesh-task-subject {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.mesh-task-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.mesh-remote-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--accent-surface);
+  color: var(--accent);
+  border: 1px solid rgba(137,180,250,0.15);
+  font-weight: 500;
+}

@@ -53,6 +53,7 @@
           </div>
         </div>
         <div class="chat-header-actions">
+          <button id="mesh-indicator-btn" class="icon-button mesh-indicator" type="button" title="Mesh network" aria-label="Mesh network" hidden><i class="fas fa-network-wired"></i> <span id="mesh-peer-count">0</span></button>
           <button id="working-dir-btn" class="icon-button" type="button" title="Set working directory" aria-label="Set working directory"><i class="fas fa-folder-open"></i></button>
           <button id="export-chat-btn" class="icon-button" type="button" title="Export chat as JSON" aria-label="Export chat as JSON"><i class="fas fa-file-export"></i></button>
           <button id="chat-info-btn" class="icon-button" type="button" title="Chat info" aria-label="Chat info"><i class="fas fa-chart-bar"></i></button>
@@ -133,6 +134,7 @@
           <option value="scheduler">Scheduler</option>
           <option value="webhooks">Webhooks</option>
           <option value="skills">Skills</option>
+          <option value="mesh">Mesh Network</option>
           <option value="diagnostics">Diagnostics</option>
           <option value="commands">Commands</option>
         </select>
@@ -565,6 +567,82 @@
             <h3>Registered Webhooks</h3>
             <div id="webhook-list"></div>
             <div class="provider-message" id="webhook-list-status">Loading webhooks...</div>
+          </section>
+        </div>
+
+        <!-- Tab: Mesh Network -->
+        <div class="settings-tab-content" data-tab="mesh">
+          <section class="template-variables-card">
+            <h3><i class="fas fa-network-wired"></i> Identity</h3>
+            <p>Your mesh identity is how other King Louie instances recognize this machine.</p>
+            <div class="template-variables-grid">
+              <label>Peer ID</label>
+              <div class="provider-input" id="mesh-peer-id" style="background: var(--bg-overlay); cursor: default;">Not initialized</div>
+              <label for="mesh-display-name-input">Display Name</label>
+              <input type="text" class="provider-input" id="mesh-display-name-input" placeholder="e.g. Desktop GPU Rig">
+              <label for="mesh-capabilities-input">Capabilities (comma-separated)</label>
+              <input type="text" class="provider-input" id="mesh-capabilities-input" placeholder="e.g. gpu, build-server, 16gb-ram">
+            </div>
+            <div class="template-variables-actions">
+              <button type="button" class="btn btn-primary" id="mesh-save-identity-btn"><i class="fas fa-floppy-disk"></i> Save Identity</button>
+              <span class="provider-message" id="mesh-identity-status"></span>
+            </div>
+          </section>
+
+          <section class="template-variables-card">
+            <h3><i class="fas fa-link"></i> Pairing</h3>
+            <p>Pair with another King Louie instance using a shared code.</p>
+            <div class="template-variables-grid">
+              <label>Pairing Code</label>
+              <div class="provider-input" id="mesh-pairing-code" style="background: var(--bg-overlay); cursor: default; font-family: var(--font-mono);">Click "Generate" to create a code</div>
+            </div>
+            <div class="template-variables-actions">
+              <button type="button" class="btn btn-primary" id="mesh-pair-generate-btn"><i class="fas fa-key"></i> Generate Code</button>
+              <button type="button" class="btn" id="mesh-pair-accept-btn"><i class="fas fa-handshake"></i> Enter Code</button>
+              <span class="provider-message" id="mesh-pairing-status"></span>
+            </div>
+          </section>
+
+          <section class="template-variables-card">
+            <h3><i class="fas fa-plus-circle"></i> Add Peer Manually</h3>
+            <div class="template-variables-grid">
+              <label for="mesh-peer-address-input">Address</label>
+              <input type="text" class="provider-input" id="mesh-peer-address-input" placeholder="e.g. 192.168.1.100">
+              <label for="mesh-peer-port-input">Port</label>
+              <input type="number" class="provider-input" id="mesh-peer-port-input" placeholder="18791" value="18791">
+            </div>
+            <div class="template-variables-actions">
+              <button type="button" class="btn btn-primary" id="mesh-peer-connect-btn"><i class="fas fa-plug"></i> Connect</button>
+              <span class="provider-message" id="mesh-connect-status"></span>
+            </div>
+          </section>
+
+          <section class="template-variables-card">
+            <h3><i class="fas fa-tower-broadcast"></i> Connected Peers</h3>
+            <div id="mesh-peers-list"></div>
+            <div class="provider-message" id="mesh-peers-status">No peers connected</div>
+          </section>
+
+          <section class="template-variables-card">
+            <h3><i class="fas fa-gear"></i> Transport</h3>
+            <div class="template-variables-grid">
+              <label for="mesh-port-input">Mesh Port</label>
+              <input type="number" class="provider-input" id="mesh-port-input" placeholder="18791" value="18791">
+              <label class="inline-toggle" for="mesh-discovery-toggle">
+                <input id="mesh-discovery-toggle" type="checkbox" checked>
+                <span>Enable LAN discovery (mDNS)</span>
+              </label>
+            </div>
+            <div class="template-variables-actions">
+              <button type="button" class="btn btn-primary" id="mesh-save-transport-btn"><i class="fas fa-floppy-disk"></i> Save Transport Settings</button>
+              <span class="provider-message" id="mesh-transport-status"></span>
+            </div>
+          </section>
+
+          <section class="template-variables-card">
+            <h3><i class="fas fa-tasks"></i> Remote Tasks</h3>
+            <div id="mesh-tasks-list"></div>
+            <div class="provider-message" id="mesh-tasks-status">No remote tasks</div>
           </section>
         </div>
 
