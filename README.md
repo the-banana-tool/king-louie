@@ -12,6 +12,7 @@ An open-source, cross-platform AI chat desktop application built with Electron. 
 - **Agentic Tool Use** — Agents can execute shell commands, read/write/edit files, search the web, automate browsers, and more
 - **Multi-Agent Orchestration** — Run agents in parallel, serial, or dependency-based workflows
 - **Extensible Skill System** — Install, remove, enable, and pin custom skill plugins
+- **Mesh Networking** — Secure peer-to-peer communication between King Louie instances across machines
 - **Channel Integrations** — Bridge conversations to Telegram, Discord, and Slack bots
 - **Cron Scheduling** — Schedule recurring or one-time agent tasks with cron expressions
 - **Semantic Memory** — Embedding-based memory with hot/warm/cold tiering and recall
@@ -63,6 +64,7 @@ Agents have access to a suite of tools that can be individually approved or auto
 | `web_fetch` | Fetch and parse web pages |
 | `browser` | Headless browser automation via CDP |
 | `cron` | Manage scheduled tasks |
+| `remote_dispatch` | Dispatch tasks to remote King Louie peers on the mesh network |
 | `ask_user` | Request user input during execution |
 
 ## Agent System
@@ -195,6 +197,118 @@ Skills are auto-discovered from the `skills/` directory on startup. User-install
 
 Tool approvals are handled inline with approve/deny buttons.
 
+## Mesh Networking
+
+King Louie instances can securely communicate with each other over an encrypted peer-to-peer mesh network. This lets you dispatch tasks from one machine to another — for example, sending a GPU-heavy build from your laptop to your desktop, or coordinating a swarm of instances across a cluster.
+
+### How It Works
+
+Each King Louie instance generates a unique cryptographic identity (Ed25519 keypair + self-signed TLS certificate) on first launch. Instances establish trust through a pairing code exchange, then communicate over TLS-encrypted WebSocket connections with mutual authentication.
+
+### Setting Up Two Machines
+
+**Step 1: Open Settings > Mesh Network on both machines**
+
+Give each machine a descriptive name and capability tags:
+
+- Desktop: Display Name = `Desktop GPU Rig`, Capabilities = `gpu, build-server`
+- Laptop: Display Name = `Work Laptop`, Capabilities = `portable`
+
+Click **Save Identity** on each.
+
+**Step 2: Pair the machines**
+
+On your **desktop**, click **Generate Code**. You'll get a 6-word code like:
+
+```
+bamboo crystal dolphin garden silver thunder
+```
+
+On your **laptop**, click **Enter Code** and type in the code, the desktop's IP address (e.g., `192.168.1.50`), and port (`18791`).
+
+The machines exchange public keys and TLS certificate fingerprints. Once paired, they'll auto-connect whenever both are online.
+
+**Step 3: Dispatch tasks**
+
+In any chat on your laptop, ask the agent to run something remotely:
+
+> "Build the release binary on my desktop"
+
+The agent uses the `RemoteDispatch` tool to send the task to the desktop's King Louie, which executes it and returns the result.
+
+### LAN Auto-Discovery
+
+If `bonjour-service` is installed (`npm install bonjour-service`), King Louie automatically discovers other instances on the same local network via mDNS. Discovered peers appear in the Mesh Network settings panel. You still need to pair before they can communicate — discovery just makes finding each other easier.
+
+### Manual Peer Connection
+
+For machines on different networks (VPN, Tailscale, WireGuard), add peers manually:
+
+1. Go to **Settings > Mesh Network > Add Peer Manually**
+2. Enter the remote machine's IP address and mesh port (default: `18791`)
+3. Click **Connect**
+
+The machines must already be paired (via pairing code) for the connection to succeed.
+
+### Swarm Mode
+
+For distributed workloads like model training, King Louie supports swarm coordination:
+
+1. A coordinator instance decomposes work into sub-tasks with dependencies
+2. Sub-tasks are proposed to capable peers based on their capability tags
+3. Peers accept or reject based on current load
+4. The coordinator dispatches tasks as dependencies resolve, collecting results
+
+The orchestrator's existing dependency graph (`executeWithDependencies`) handles task ordering — tasks with `metadata.targetPeer` are dispatched remotely instead of locally.
+
+### Agent Usage Examples
+
+The `RemoteDispatch` tool is available to agents in any chat:
+
+```
+User: "List my connected peers"
+Agent: [calls RemoteDispatch with action: "peers"]
+→ 1 peer connected: Desktop GPU Rig (kl-a1b2c3d4e5f6) — capabilities: gpu, build-server
+
+User: "Run cargo build --release on the desktop"
+Agent: [calls RemoteDispatch with action: "dispatch", peer: "Desktop GPU Rig", message: "Run cargo build --release in /projects/myapp"]
+→ Task dispatched to Desktop GPU Rig, completed in 45s
+
+User: "Train the model across all GPU machines"
+Agent: [decomposes into sub-tasks, dispatches to capable peers via swarm]
+→ Swarm completed: 3 sub-tasks across 2 peers
+```
+
+### Security
+
+All mesh communication is secured with multiple layers:
+
+| Layer | Protection |
+|-------|-----------|
+| TLS 1.3 | Encrypts all traffic — prevents eavesdropping |
+| Certificate pinning | Each peer's TLS cert fingerprint is pinned at pairing time — prevents MITM |
+| Ed25519 mutual auth | Challenge-response on every connection — proves identity |
+| Signed envelopes | Every message is cryptographically signed — prevents tampering |
+| Nonce + expiry | Messages expire after 5 minutes, nonces tracked — prevents replay |
+| Trusted peers only | Connections from unknown peers rejected at TLS handshake |
+
+Private keys are encrypted at rest via Electron's `safeStorage` API.
+
+### Configuration
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Mesh Port | `18791` | WebSocket server port (binds to `0.0.0.0`) |
+| LAN Discovery | Enabled | mDNS broadcast/browse for local peers |
+| TLS | Enabled | Self-signed cert encryption (disable only for debugging) |
+| Task Timeout | 5 minutes | Max time to wait for a remote task result |
+
+### Network Requirements
+
+- **Same LAN**: Works out of the box. mDNS handles discovery, direct connection over local IP.
+- **VPN / Tailscale / WireGuard**: Add peers manually by VPN IP address. mDNS may not cross subnets.
+- **Different NATs**: Requires port forwarding or a VPN. A relay server is planned for future releases.
+
 ## Cron Scheduling
 
 Schedule agent tasks to run automatically:
@@ -270,6 +384,7 @@ src/
   ipc/                   # IPC handler registration
   media/                 # Image handling and multimodal support
   memory/                # Semantic memory and vector store
+  mesh/                  # Peer-to-peer mesh networking
   notifications/         # Notification routing
   providers/             # LLM provider implementations
   skills/                # Skill loader, registry, and pinning
@@ -310,6 +425,7 @@ npm run build:linux
 - Tool execution requires approval (configurable auto-approve lists)
 - Pre-execution security hooks block dangerous commands
 - Webhook signature verification
+- Mesh networking: TLS 1.3 encryption, Ed25519 signed messages, certificate pinning, replay protection
 
 ## License
 
