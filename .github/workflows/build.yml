@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write   # Required for Azure OIDC federated credentials
 
 jobs:
   build-windows:
@@ -22,37 +23,34 @@ jobs:
 
       - run: npm ci
 
-      - name: Import code signing certificate
+      - name: Build Windows installer (unsigned)
         env:
-          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
-          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
-        shell: powershell
-        run: |
-          if (-not $env:WIN_CSC_LINK) {
-            Write-Host "No signing certificate configured, skipping import"
-            exit 0
-          }
-          $pfxBytes = [Convert]::FromBase64String($env:WIN_CSC_LINK)
-          $pfxPath = Join-Path $env:RUNNER_TEMP "signing.pfx"
-          [IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
-          $securePassword = ConvertTo-SecureString $env:WIN_CSC_KEY_PASSWORD -AsPlainText -Force
-          Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation "Cert:\CurrentUser\My" -Password $securePassword
-          Remove-Item $pfxPath
-
-      - name: Build Windows installer
-        env:
-          WIN_CSC_THUMBPRINT: ${{ secrets.WIN_CSC_THUMBPRINT }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: powershell
-        run: |
-          $cert = Get-ChildItem -Path "Cert:\CurrentUser\My" | Where-Object { $_.Thumbprint -eq $env:WIN_CSC_THUMBPRINT }
-          if ($cert) {
-            Write-Host "Signing certificate found, building with code signing"
-            npx electron-builder --win --publish never "-c.win.signtoolOptions.certificateSha1=$env:WIN_CSC_THUMBPRINT"
-          } else {
-            Write-Host "No signing certificate in store, building unsigned"
-            npx electron-builder --win --publish never
-          }
+        run: npx electron-builder --win --publish never
+
+      - name: Azure Login (OIDC)
+        if: vars.AZURE_SIGNING_ENDPOINT != ''
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign with Azure Trusted Signing
+        if: vars.AZURE_SIGNING_ENDPOINT != ''
+        uses: azure/trusted-signing-action@v0.5.0
+        with:
+          azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          azure-client-id: ${{ vars.AZURE_CLIENT_ID }}
+          azure-client-secret: ''
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_CERTIFICATE_PROFILE }}
+          files-folder: dist
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
 
       - uses: actions/upload-artifact@v4
         with:
