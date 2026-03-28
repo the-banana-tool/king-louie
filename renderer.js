@@ -3593,7 +3593,7 @@ async function sendMessage() {
   }
 
   if (!appState.activeChatId) {
-    const newChat = await window.electron.chat.create('New Chat');
+    const newChat = unwrapIpcResult(await window.electron.chat.create('New Chat'), 'Unable to create chat.');
     if (!newChat) {
       return;
     }
@@ -6119,8 +6119,10 @@ if (dom.wizardNextBtn) {
       }
       if (wizardState.data.name) {
         window.electron.settings.saveUserProfile({
-          name: wizardState.data.name,
-          role: wizardState.data.role || ''
+          profile: {
+            name: wizardState.data.name,
+            role: wizardState.data.role || ''
+          }
         }).catch(() => {});
       }
     } else {
