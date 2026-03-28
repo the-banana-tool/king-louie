@@ -62,6 +62,10 @@ class BrowserService {
       `--window-size=${this.options.viewport.width},${this.options.viewport.height}`
     ];
 
+    if (this.options.profileDirectory) {
+      args.push(`--profile-directory=${this.options.profileDirectory}`);
+    }
+
     if (this.options.headless) {
       args.push('--headless=new'); // or just --headless depending on browser version, but =new is standard now
     }

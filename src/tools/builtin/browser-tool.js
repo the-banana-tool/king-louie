@@ -23,7 +23,10 @@ const browserTool = new Tool({
       text: { type: 'string', description: 'Text to type (required for type action)' },
       expression: { type: 'string', description: 'JavaScript expression to evaluate (required for evaluate action)' },
       timeout: { type: 'number', description: 'Timeout in ms for wait_for action (default 30000)' },
-      targetId: { type: 'string', description: 'Target ID of the tab to close (required for close_tab action)' }
+      targetId: { type: 'string', description: 'Target ID of the tab to close (required for close_tab action)' },
+      userDataPath: { type: 'string', description: 'Path to Chrome user data directory (for start action). Use this to reuse an existing Chrome profile with saved logins/cookies.' },
+      profileDirectory: { type: 'string', description: 'Chrome profile directory name e.g. "Default", "Profile 1" (for start action). Used with userDataPath to select a specific profile.' },
+      headless: { type: 'boolean', description: 'Whether to run headless (default true). Set to false to see the browser window.' }
     },
     required: ['action']
   },
@@ -41,7 +44,11 @@ const browserTool = new Tool({
         if (browserService && browserService.process) {
           return { ok: true, message: 'Browser already running' };
         }
-        browserService = new BrowserService();
+        const browserOptions = {};
+        if (params.userDataPath) browserOptions.userDataPath = params.userDataPath;
+        if (params.profileDirectory) browserOptions.profileDirectory = params.profileDirectory;
+        if (params.headless !== undefined) browserOptions.headless = params.headless;
+        browserService = new BrowserService(browserOptions);
         const wsUrl = await browserService.start();
         cdpClient = new CdpClient(wsUrl);
         await cdpClient.connect();

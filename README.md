@@ -67,6 +67,44 @@ Agents have access to a suite of tools that can be individually approved or auto
 | `remote_dispatch` | Dispatch tasks to remote King Louie peers on the mesh network |
 | `ask_user` | Request user input during execution |
 
+### Browser Tool — Using Your Chrome Profile
+
+By default, the browser tool launches with an isolated temporary profile (no saved logins or cookies). To browse authenticated sites like Reddit, GitHub, or Gmail, you can start the browser with your existing Chrome profile:
+
+```
+User: "Check my Reddit for new comments on my posts"
+Agent: [starts browser with your Chrome profile, navigates to reddit.com — already logged in]
+```
+
+The `start` action accepts three optional parameters:
+
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `userDataPath` | Path to your Chrome User Data directory | `C:\Users\you\AppData\Local\Google\Chrome\User Data` |
+| `profileDirectory` | Which profile folder to use | `Default`, `Profile 1`, `Profile 2` |
+| `headless` | Show the browser window (default: `true`) | `false` to see the browser |
+
+**Finding your profile path:**
+
+1. Open Chrome with the profile you want to use
+2. Navigate to `chrome://version`
+3. Look at the **Profile Path** — it will be something like:
+   ```
+   C:\Users\you\AppData\Local\Google\Chrome\User Data\Profile 1
+   ```
+   - The **User Data** directory is the `userDataPath`
+   - The last segment (`Profile 1`) is the `profileDirectory`
+
+**Important:** Chrome locks its profile directory while running. You must **close Chrome completely** before King Louie can launch with that profile. If Chrome is open, the browser will fail to start or start without your session data.
+
+**Typical paths by platform:**
+
+| Platform | User Data Path |
+|----------|---------------|
+| Windows | `C:\Users\<you>\AppData\Local\Google\Chrome\User Data` |
+| macOS | `~/Library/Application Support/Google/Chrome` |
+| Linux | `~/.config/google-chrome` |
+
 ## Agent System
 
 King Louie ships with three built-in agents, each with their own system prompt template and tool allowlist:
