@@ -202,7 +202,7 @@ class MeshIdentity {
     const sig = crypto.sign('sha256', tbs, privateKey);
     const sigBits = Buffer.concat([Buffer.from([0x00]), sig]); // 0 unused bits
 
-    const cert = _derSeq([tbs, sigAlg, _derTag(0x03, Buffer.concat([_derLen(sigBits.length), sigBits]))]);
+    const cert = _derSeq([tbs, sigAlg, _derTag(0x03, sigBits)]);
 
     const b64 = cert.toString('base64');
     const lines = [];

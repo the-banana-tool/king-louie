@@ -12,7 +12,7 @@ function registerMeshHandlers(ipcMain, context = {}) {
     context.store ||
     null;
 
-  ipcMain.handle(C.MESH_STATUS, wrapHandler(async () => {
+  ipcMain.handle(C.MESH_STATUS, wrapHandler(C.MESH_STATUS, async () => {
     const mc = getMeshContext();
     if (!mc) {
       return { enabled: false };
@@ -32,7 +32,7 @@ function registerMeshHandlers(ipcMain, context = {}) {
     };
   }));
 
-  ipcMain.handle(C.MESH_PEERS_LIST, wrapHandler(async () => {
+  ipcMain.handle(C.MESH_PEERS_LIST, wrapHandler(C.MESH_PEERS_LIST, async () => {
     const mc = getMeshContext();
     if (!mc) return { peers: [] };
 
@@ -43,7 +43,7 @@ function registerMeshHandlers(ipcMain, context = {}) {
     };
   }));
 
-  ipcMain.handle(C.MESH_PEER_ADD, wrapHandler(async (_event, params = {}) => {
+  ipcMain.handle(C.MESH_PEER_ADD, wrapHandler(C.MESH_PEER_ADD, async (_event, params = {}) => {
     const mc = getMeshContext();
     if (!mc) throw new Error('Mesh not enabled');
 
@@ -54,7 +54,7 @@ function registerMeshHandlers(ipcMain, context = {}) {
     return { peerId: peer.peerId, displayName: peer.displayName };
   }));
 
-  ipcMain.handle(C.MESH_PEER_REMOVE, wrapHandler(async (_event, params = {}) => {
+  ipcMain.handle(C.MESH_PEER_REMOVE, wrapHandler(C.MESH_PEER_REMOVE, async (_event, params = {}) => {
     const mc = getMeshContext();
     if (!mc) throw new Error('Mesh not enabled');
 
@@ -65,7 +65,7 @@ function registerMeshHandlers(ipcMain, context = {}) {
     return { removed: true };
   }));
 
-  ipcMain.handle(C.MESH_PAIR_START, wrapHandler(async () => {
+  ipcMain.handle(C.MESH_PAIR_START, wrapHandler(C.MESH_PAIR_START, async () => {
     const mc = getMeshContext();
     if (!mc) throw new Error('Mesh not enabled');
 
@@ -73,7 +73,7 @@ function registerMeshHandlers(ipcMain, context = {}) {
     return { pairingId, code };
   }));
 
-  ipcMain.handle(C.MESH_PAIR_ACCEPT, wrapHandler(async (_event, params = {}) => {
+  ipcMain.handle(C.MESH_PAIR_ACCEPT, wrapHandler(C.MESH_PAIR_ACCEPT, async (_event, params = {}) => {
     const mc = getMeshContext();
     if (!mc) throw new Error('Mesh not enabled');
 
@@ -86,7 +86,7 @@ function registerMeshHandlers(ipcMain, context = {}) {
     return { peerId: peer.peerId, displayName: peer.displayName };
   }));
 
-  ipcMain.handle(C.MESH_DISPATCH_TASK, wrapHandler(async (_event, params = {}) => {
+  ipcMain.handle(C.MESH_DISPATCH_TASK, wrapHandler(C.MESH_DISPATCH_TASK, async (_event, params = {}) => {
     const mc = getMeshContext();
     if (!mc) throw new Error('Mesh not enabled');
 
@@ -100,7 +100,7 @@ function registerMeshHandlers(ipcMain, context = {}) {
     return result;
   }));
 
-  ipcMain.handle(C.MESH_TASK_STATUS, wrapHandler(async (_event, params = {}) => {
+  ipcMain.handle(C.MESH_TASK_STATUS, wrapHandler(C.MESH_TASK_STATUS, async (_event, params = {}) => {
     const mc = getMeshContext();
     if (!mc) throw new Error('Mesh not enabled');
 
@@ -111,7 +111,7 @@ function registerMeshHandlers(ipcMain, context = {}) {
     return mc.remoteControl.getStatus();
   }));
 
-  ipcMain.handle(C.MESH_SETTINGS_SAVE, wrapHandler(async (_event, params = {}) => {
+  ipcMain.handle(C.MESH_SETTINGS_SAVE, wrapHandler(C.MESH_SETTINGS_SAVE, async (_event, params = {}) => {
     const store = getStore();
     if (!store) throw new Error('Store not available');
 
