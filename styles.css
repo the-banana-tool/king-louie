@@ -348,18 +348,22 @@ body {
   display: none;
 }
 
-.container.history-collapsed .sidebar-toggle-row {
+.container.history-collapsed .sidebar-toggle-row,
+.container.start-state .sidebar-toggle-row {
   flex-direction: column;
   align-items: center;
   justify-content: flex-start;
 }
 
 .container.history-collapsed .sidebar-header,
-.container.history-collapsed .context-menu {
+.container.history-collapsed .context-menu,
+.container.start-state .sidebar-header,
+.container.start-state .context-menu {
   display: none;
 }
 
-.container.history-collapsed .chat-list {
+.container.history-collapsed .chat-list,
+.container.start-state .chat-list {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -367,7 +371,8 @@ body {
   padding: 6px 0;
 }
 
-.container.history-collapsed .chat-item {
+.container.history-collapsed .chat-item,
+.container.start-state .chat-item {
   background: transparent;
   border-left: none;
   padding: 4px;
@@ -376,11 +381,14 @@ body {
 }
 
 .container.history-collapsed .chat-item-details,
-.container.history-collapsed .chat-item-actions {
+.container.history-collapsed .chat-item-actions,
+.container.start-state .chat-item-details,
+.container.start-state .chat-item-actions {
   display: none;
 }
 
-.container.history-collapsed .chat-item.active {
+.container.history-collapsed .chat-item.active,
+.container.start-state .chat-item.active {
   background: transparent;
   border-left: none;
 }
@@ -397,12 +405,15 @@ body {
   justify-content: center;
 }
 
-.container.history-collapsed .compact-add-btn {
+.container.history-collapsed .compact-add-btn,
+.container.start-state .compact-add-btn {
   display: inline-flex;
 }
 
 .container.start-state .sidebar {
-  display: none;
+  width: 48px;
+  min-width: 48px;
+  overflow: hidden;
 }
 
 /* Context menu */
@@ -1909,7 +1920,7 @@ body {
 }
 
 .container.start-state .floating-settings-btn {
-  display: inline-flex;
+  display: none;
 }
 
 /* --- Inference tier details -------------------------------- */
