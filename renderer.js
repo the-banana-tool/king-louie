@@ -1611,6 +1611,10 @@ function updateEmptyState() {
   dom.chatMessages.hidden = showEmpty;
   dom.mainContent.classList.toggle('start-state', showEmpty);
   dom.container.classList.toggle('start-state', showEmpty);
+
+  if (showEmpty) {
+    dom.userInput.focus();
+  }
 }
 
 function renderChatMessages() {

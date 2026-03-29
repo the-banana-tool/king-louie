@@ -417,6 +417,10 @@ body {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
 }
 
+.context-menu[hidden] {
+  display: none;
+}
+
 .context-menu-item {
   width: 100%;
   background: transparent;
@@ -1231,6 +1235,10 @@ body {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.image-preview-list[hidden] {
+  display: none;
 }
 
 .image-preview-item {

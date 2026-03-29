@@ -27,21 +27,23 @@
       <div class="chat-list" id="chat-list">
         <!-- Chat items rendered by renderer.js -->
       </div>
-      <div class="context-menu" id="chat-context-menu" hidden>
-        <button class="context-menu-item danger" type="button" data-action="delete">Delete chat</button>
-      </div>
-      <div class="context-menu" id="message-context-menu" hidden>
-        <button class="context-menu-item" type="button" data-action="copy"><i class="fas fa-copy"></i> Copy</button>
-        <button class="context-menu-item" type="button" data-action="copy-code"><i class="fas fa-code"></i> Copy code block</button>
-      </div>
-      <div class="context-menu" id="input-context-menu" hidden>
-        <button class="context-menu-item" type="button" data-action="cut"><i class="fas fa-cut"></i> Cut</button>
-        <button class="context-menu-item" type="button" data-action="copy"><i class="fas fa-copy"></i> Copy</button>
-        <button class="context-menu-item" type="button" data-action="paste"><i class="fas fa-paste"></i> Paste</button>
-        <button class="context-menu-item" type="button" data-action="select-all"><i class="fas fa-align-justify"></i> Select all</button>
-      </div>
     </div>
     <div class="sidebar-resize-handle" id="sidebar-resize-handle" aria-hidden="true"></div>
+
+    <!-- Context menus (fixed-position, kept outside sidebar so they remain accessible in start-state) -->
+    <div class="context-menu" id="chat-context-menu" hidden>
+      <button class="context-menu-item danger" type="button" data-action="delete">Delete chat</button>
+    </div>
+    <div class="context-menu" id="message-context-menu" hidden>
+      <button class="context-menu-item" type="button" data-action="copy"><i class="fas fa-copy"></i> Copy</button>
+      <button class="context-menu-item" type="button" data-action="copy-code"><i class="fas fa-code"></i> Copy code block</button>
+    </div>
+    <div class="context-menu" id="input-context-menu" hidden>
+      <button class="context-menu-item" type="button" data-action="cut"><i class="fas fa-cut"></i> Cut</button>
+      <button class="context-menu-item" type="button" data-action="copy"><i class="fas fa-copy"></i> Copy</button>
+      <button class="context-menu-item" type="button" data-action="paste"><i class="fas fa-paste"></i> Paste</button>
+      <button class="context-menu-item" type="button" data-action="select-all"><i class="fas fa-align-justify"></i> Select all</button>
+    </div>
 
     <!-- Right Main Area: Chat Box (3/4 width) -->
     <div class="main-content">
