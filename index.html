@@ -127,6 +127,7 @@
           <option value="general">General</option>
           <option value="providers">Providers</option>
           <option value="inference">Inference</option>
+          <option value="routing">Smart Routing</option>
           <option value="channels">Channels</option>
           <option value="profile">Profile</option>
           <option value="voice">Voice</option>
@@ -189,6 +190,23 @@
               <span id="inference-tier-status" class="provider-message">Select a tier and click Apply.</span>
             </div>
             <div class="inference-tier-details" id="inference-tier-details"></div>
+          </section>
+        </div>
+
+        <!-- Tab: Smart Routing -->
+        <div class="settings-tab-content" data-tab="routing">
+          <section class="template-variables-card">
+            <h3>Smart LLM Routing</h3>
+            <p>Define rules to automatically route messages to different LLM providers based on content, patterns, or slash-command prefixes. Rules are evaluated in priority order — the first match wins. When disabled or no rule matches, the standard inference tier is used.</p>
+            <label class="inline-toggle" for="smart-routing-enabled">
+              <input id="smart-routing-enabled" type="checkbox">
+              <span>Enable smart routing</span>
+            </label>
+            <div id="smart-routing-rules-list"></div>
+            <div class="template-variables-actions">
+              <button id="add-routing-rule-btn" type="button" class="btn btn-primary"><i class="fas fa-plus"></i> Add Rule</button>
+              <span id="smart-routing-status" class="provider-message"></span>
+            </div>
           </section>
         </div>
 

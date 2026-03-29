@@ -177,6 +177,10 @@ const dom = {
   saveInferenceTierBtn: document.getElementById('save-inference-tier-btn'),
   inferenceTierStatus: document.getElementById('inference-tier-status'),
   inferenceTierDetails: document.getElementById('inference-tier-details'),
+  smartRoutingEnabled: document.getElementById('smart-routing-enabled'),
+  smartRoutingRulesList: document.getElementById('smart-routing-rules-list'),
+  addRoutingRuleBtn: document.getElementById('add-routing-rule-btn'),
+  smartRoutingStatus: document.getElementById('smart-routing-status'),
   channelTelegramTokenInput: document.getElementById('channel-telegram-token-input'),
   saveTelegramTokenBtn: document.getElementById('save-telegram-token-btn'),
   testTelegramBtn: document.getElementById('test-telegram-btn'),
@@ -1769,6 +1773,290 @@ function renderInferenceTierDetails() {
   }
 }
 
+function generateRuleId() {
+  return `rule-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function getProviderKeys() {
+  const providers = appState.settings.providers || {};
+  return Object.keys(providers);
+}
+
+function renderSmartRoutingRules() {
+  const smartRouting = appState.settings.inference?.smartRouting || {};
+  if (dom.smartRoutingEnabled) {
+    dom.smartRoutingEnabled.checked = !!smartRouting.enabled;
+  }
+  if (!dom.smartRoutingRulesList) return;
+
+  dom.smartRoutingRulesList.innerHTML = '';
+  const rules = Array.isArray(smartRouting.rules) ? smartRouting.rules : [];
+  const providerKeys = getProviderKeys();
+
+  rules.forEach((rule, index) => {
+    const card = document.createElement('div');
+    card.className = 'routing-rule-card' + (rule.enabled === false ? ' disabled' : '');
+    card.dataset.ruleIndex = index;
+
+    // Header row: priority arrows, name, enabled toggle, delete
+    const header = document.createElement('div');
+    header.className = 'routing-rule-header';
+
+    const priorityControls = document.createElement('div');
+    priorityControls.className = 'routing-rule-priority';
+
+    const upBtn = document.createElement('button');
+    upBtn.className = 'btn btn-sm';
+    upBtn.innerHTML = '<i class="fas fa-arrow-up"></i>';
+    upBtn.title = 'Move up (higher priority)';
+    upBtn.disabled = index === 0;
+    upBtn.addEventListener('click', () => {
+      if (index > 0) {
+        const arr = getSmartRoutingRulesFromState();
+        [arr[index - 1], arr[index]] = [arr[index], arr[index - 1]];
+        recomputePriorities(arr);
+        appState.settings.inference.smartRouting.rules = arr;
+        renderSmartRoutingRules();
+        saveSmartRoutingRulesToBackend();
+      }
+    });
+
+    const downBtn = document.createElement('button');
+    downBtn.className = 'btn btn-sm';
+    downBtn.innerHTML = '<i class="fas fa-arrow-down"></i>';
+    downBtn.title = 'Move down (lower priority)';
+    downBtn.disabled = index === rules.length - 1;
+    downBtn.addEventListener('click', () => {
+      if (index < rules.length - 1) {
+        const arr = getSmartRoutingRulesFromState();
+        [arr[index], arr[index + 1]] = [arr[index + 1], arr[index]];
+        recomputePriorities(arr);
+        appState.settings.inference.smartRouting.rules = arr;
+        renderSmartRoutingRules();
+        saveSmartRoutingRulesToBackend();
+      }
+    });
+
+    priorityControls.appendChild(upBtn);
+    priorityControls.appendChild(downBtn);
+
+    const nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.className = 'provider-input routing-rule-name';
+    nameInput.value = rule.name || '';
+    nameInput.placeholder = 'Rule name';
+
+    const enabledToggle = document.createElement('label');
+    enabledToggle.className = 'inline-toggle routing-rule-toggle';
+    const enabledCheck = document.createElement('input');
+    enabledCheck.type = 'checkbox';
+    enabledCheck.checked = rule.enabled !== false;
+    const enabledLabel = document.createElement('span');
+    enabledLabel.textContent = 'Enabled';
+    enabledToggle.appendChild(enabledCheck);
+    enabledToggle.appendChild(enabledLabel);
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'btn btn-danger btn-sm';
+    deleteBtn.innerHTML = '<i class="fas fa-trash"></i>';
+    deleteBtn.title = 'Delete rule';
+    deleteBtn.addEventListener('click', () => {
+      const arr = getSmartRoutingRulesFromState();
+      arr.splice(index, 1);
+      recomputePriorities(arr);
+      appState.settings.inference.smartRouting.rules = arr;
+      renderSmartRoutingRules();
+      saveSmartRoutingRulesToBackend();
+    });
+
+    header.appendChild(priorityControls);
+    header.appendChild(nameInput);
+    header.appendChild(enabledToggle);
+    header.appendChild(deleteBtn);
+
+    // Body: condition + target
+    const body = document.createElement('div');
+    body.className = 'routing-rule-body';
+
+    // Condition type
+    const condTypeLabel = document.createElement('label');
+    condTypeLabel.textContent = 'Condition';
+    const condTypeSelect = document.createElement('select');
+    condTypeSelect.className = 'provider-input';
+    ['keyword', 'regex', 'prefix'].forEach((t) => {
+      const opt = document.createElement('option');
+      opt.value = t;
+      opt.textContent = t.charAt(0).toUpperCase() + t.slice(1);
+      condTypeSelect.appendChild(opt);
+    });
+    condTypeSelect.value = rule.condition?.type || 'keyword';
+
+    // Condition value
+    const condValueLabel = document.createElement('label');
+    condValueLabel.className = 'routing-cond-value-label';
+    const condValueInput = document.createElement('input');
+    condValueInput.type = 'text';
+    condValueInput.className = 'provider-input';
+
+    function updateCondValueUI() {
+      const type = condTypeSelect.value;
+      if (type === 'keyword') {
+        condValueLabel.textContent = 'Keywords (comma-separated)';
+        condValueInput.placeholder = 'design, architect, plan feature';
+        condValueInput.value = Array.isArray(rule.condition?.keywords) ? rule.condition.keywords.join(', ') : '';
+      } else if (type === 'regex') {
+        condValueLabel.textContent = 'Regex pattern';
+        condValueInput.placeholder = '\\b(refactor|redesign)\\b';
+        condValueInput.value = rule.condition?.pattern || '';
+      } else if (type === 'prefix') {
+        condValueLabel.textContent = 'Prefix command';
+        condValueInput.placeholder = '/code';
+        condValueInput.value = rule.condition?.prefix || '';
+      }
+    }
+    updateCondValueUI();
+    condTypeSelect.addEventListener('change', updateCondValueUI);
+
+    // Agent mode only
+    const agentToggle = document.createElement('label');
+    agentToggle.className = 'inline-toggle';
+    const agentCheck = document.createElement('input');
+    agentCheck.type = 'checkbox';
+    agentCheck.checked = !!rule.condition?.agentModeOnly;
+    const agentLabel = document.createElement('span');
+    agentLabel.textContent = 'Agent mode only';
+    agentToggle.appendChild(agentCheck);
+    agentToggle.appendChild(agentLabel);
+
+    // Target provider
+    const targetProviderLabel = document.createElement('label');
+    targetProviderLabel.textContent = 'Target Provider';
+    const targetProviderSelect = document.createElement('select');
+    targetProviderSelect.className = 'provider-input';
+    providerKeys.forEach((pk) => {
+      const opt = document.createElement('option');
+      opt.value = pk;
+      opt.textContent = pk;
+      targetProviderSelect.appendChild(opt);
+    });
+    targetProviderSelect.value = rule.target?.provider || providerKeys[0] || '';
+
+    // Target model
+    const targetModelLabel = document.createElement('label');
+    targetModelLabel.textContent = 'Target Model';
+    const targetModelInput = document.createElement('input');
+    targetModelInput.type = 'text';
+    targetModelInput.className = 'provider-input';
+    targetModelInput.placeholder = 'e.g. gpt-4o-mini';
+    targetModelInput.value = rule.target?.model || '';
+
+    // Build condition section
+    const condGrid = document.createElement('div');
+    condGrid.className = 'routing-rule-grid';
+    condGrid.appendChild(condTypeLabel);
+    condGrid.appendChild(condTypeSelect);
+    condGrid.appendChild(condValueLabel);
+    condGrid.appendChild(condValueInput);
+    condGrid.appendChild(agentToggle);
+
+    // Build target section
+    const targetGrid = document.createElement('div');
+    targetGrid.className = 'routing-rule-grid';
+    targetGrid.appendChild(targetProviderLabel);
+    targetGrid.appendChild(targetProviderSelect);
+    targetGrid.appendChild(targetModelLabel);
+    targetGrid.appendChild(targetModelInput);
+
+    body.appendChild(condGrid);
+    body.appendChild(targetGrid);
+
+    card.appendChild(header);
+    card.appendChild(body);
+
+    // Store references for collection
+    card._refs = {
+      nameInput, enabledCheck, condTypeSelect, condValueInput,
+      agentCheck, targetProviderSelect, targetModelInput
+    };
+
+    dom.smartRoutingRulesList.appendChild(card);
+  });
+}
+
+function getSmartRoutingRulesFromState() {
+  const smartRouting = appState.settings.inference?.smartRouting || {};
+  return Array.isArray(smartRouting.rules) ? [...smartRouting.rules] : [];
+}
+
+function recomputePriorities(rules) {
+  rules.forEach((r, i) => { r.priority = (i + 1) * 10; });
+}
+
+function collectSmartRoutingRules() {
+  if (!dom.smartRoutingRulesList) return [];
+  const cards = dom.smartRoutingRulesList.querySelectorAll('.routing-rule-card');
+  const rules = [];
+  cards.forEach((card, index) => {
+    const refs = card._refs;
+    if (!refs) return;
+
+    const condType = refs.condTypeSelect.value;
+    const condValue = refs.condValueInput.value.trim();
+    const condition = { type: condType, agentModeOnly: refs.agentCheck.checked };
+
+    if (condType === 'keyword') {
+      condition.keywords = condValue.split(',').map((s) => s.trim()).filter(Boolean);
+    } else if (condType === 'regex') {
+      condition.pattern = condValue;
+      condition.flags = 'i';
+    } else if (condType === 'prefix') {
+      condition.prefix = condValue;
+    }
+
+    rules.push({
+      id: appState.settings.inference?.smartRouting?.rules?.[index]?.id || generateRuleId(),
+      name: refs.nameInput.value.trim() || `Rule ${index + 1}`,
+      enabled: refs.enabledCheck.checked,
+      priority: (index + 1) * 10,
+      condition,
+      target: {
+        provider: refs.targetProviderSelect.value,
+        model: refs.targetModelInput.value.trim()
+      }
+    });
+  });
+  return rules;
+}
+
+async function saveSmartRoutingRulesToBackend() {
+  const rules = collectSmartRoutingRules();
+  try {
+    const result = await window.electron.settings.saveSmartRoutingRules({ rules });
+    if (result?.error) {
+      if (dom.smartRoutingStatus) {
+        dom.smartRoutingStatus.textContent = result.error;
+        dom.smartRoutingStatus.classList.add('error');
+      }
+      return;
+    }
+    if (result?.smartRouting) {
+      appState.settings.inference = {
+        ...(appState.settings.inference || {}),
+        smartRouting: result.smartRouting
+      };
+    }
+    if (dom.smartRoutingStatus) {
+      dom.smartRoutingStatus.textContent = 'Rules saved.';
+      dom.smartRoutingStatus.classList.remove('error');
+    }
+  } catch (err) {
+    if (dom.smartRoutingStatus) {
+      dom.smartRoutingStatus.textContent = err.message || 'Failed to save rules.';
+      dom.smartRoutingStatus.classList.add('error');
+    }
+  }
+}
+
 function openSettingsDrawer() {
   setSettingsDrawer(true);
   loadSettings();
@@ -2126,6 +2414,7 @@ function renderSettings() {
   });
 
   renderInferenceTierDetails();
+  renderSmartRoutingRules();
 
   const telegram = appState.settings.telegram || {};
   if (dom.telegramChannelStatus) {
@@ -5017,6 +5306,59 @@ if (dom.saveInferenceTierBtn) {
         dom.inferenceTierStatus.textContent = err.message || 'Error setting tier.';
         dom.inferenceTierStatus.classList.add('error');
       }
+    }
+  });
+}
+
+/* --- Smart Routing ---------------------------------------- */
+if (dom.smartRoutingEnabled) {
+  dom.smartRoutingEnabled.addEventListener('change', async () => {
+    const enabled = dom.smartRoutingEnabled.checked;
+    try {
+      const result = await window.electron.settings.saveSmartRouting({ enabled });
+      if (result?.smartRouting) {
+        appState.settings.inference = {
+          ...(appState.settings.inference || {}),
+          smartRouting: result.smartRouting
+        };
+      }
+      if (dom.smartRoutingStatus) {
+        dom.smartRoutingStatus.textContent = enabled ? 'Smart routing enabled.' : 'Smart routing disabled.';
+        dom.smartRoutingStatus.classList.remove('error');
+      }
+    } catch (err) {
+      if (dom.smartRoutingStatus) {
+        dom.smartRoutingStatus.textContent = err.message || 'Error toggling smart routing.';
+        dom.smartRoutingStatus.classList.add('error');
+      }
+    }
+  });
+}
+
+if (dom.addRoutingRuleBtn) {
+  dom.addRoutingRuleBtn.addEventListener('click', () => {
+    const rules = getSmartRoutingRulesFromState();
+    rules.push({
+      id: generateRuleId(),
+      name: '',
+      enabled: true,
+      priority: (rules.length + 1) * 10,
+      condition: { type: 'keyword', keywords: [] },
+      target: { provider: getProviderKeys()[0] || 'openai', model: '' }
+    });
+    if (!appState.settings.inference) appState.settings.inference = {};
+    if (!appState.settings.inference.smartRouting) appState.settings.inference.smartRouting = { enabled: false, rules: [] };
+    appState.settings.inference.smartRouting.rules = rules;
+    renderSmartRoutingRules();
+  });
+}
+
+if (dom.smartRoutingRulesList) {
+  // Save on blur/change of any input within the rules list
+  dom.smartRoutingRulesList.addEventListener('change', () => saveSmartRoutingRulesToBackend());
+  dom.smartRoutingRulesList.addEventListener('focusout', (e) => {
+    if (e.target.tagName === 'INPUT' && e.target.type === 'text') {
+      saveSmartRoutingRulesToBackend();
     }
   });
 }

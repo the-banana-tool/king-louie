@@ -9,6 +9,7 @@ An open-source, cross-platform AI chat desktop application built with Electron. 
 ## Features
 
 - **Multi-Provider LLM Support** — OpenAI, Anthropic, Google Gemini, Groq, Mistral, Ollama (local), and OpenRouter
+- **Smart LLM Routing** — Rule-based dynamic model selection routes messages to different providers based on keywords, regex patterns, or slash-command prefixes
 - **Agentic Tool Use** — Agents can execute shell commands, read/write/edit files, search the web, automate browsers, and more
 - **Multi-Agent Orchestration** — Run agents in parallel, serial, or dependency-based workflows
 - **Extensible Skill System** — Install, remove, enable, and pin custom skill plugins
@@ -46,6 +47,43 @@ On first launch, the onboarding wizard walks you through selecting a provider an
 | OpenRouter | Multi-provider router | No |
 
 Configure providers and API keys in **Settings**.
+
+## Smart LLM Routing
+
+King Louie can automatically route messages to different LLM providers based on configurable rules. Instead of manually switching providers, define rules once and let the router pick the best model for each task.
+
+### How It Works
+
+1. Go to **Settings > Smart Routing**
+2. Toggle **Enable smart routing** on
+3. Add rules — each rule has a **condition** (what to match) and a **target** (which provider/model to use)
+4. Rules are evaluated in priority order; the first match wins
+5. If no rule matches, the standard inference tier is used as a fallback
+
+### Condition Types
+
+| Type | Description | Example |
+|------|-------------|---------|
+| **Keyword** | Case-insensitive substring match (comma-separated, OR logic) | `documentation, write docs` |
+| **Regex** | Regular expression test against the message | `\b(refactor\|redesign)\b` |
+| **Prefix** | Slash-command at the start of the message (prefix is stripped before sending to the LLM) | `/code` |
+
+### Example Rules
+
+| Rule Name | Condition | Target |
+|-----------|-----------|--------|
+| Design with Claude | Keywords: `design, architect, plan feature` | Anthropic / claude-sonnet-4 |
+| Docs with GPT | Keywords: `documentation, write docs, readme` | OpenAI / gpt-4o-mini |
+| Code prefix | Prefix: `/code` | OpenAI / gpt-4o |
+| Agent-only coding | Keywords: `implement, build` (agent mode only) | Anthropic / claude-sonnet-4 |
+
+With these rules, typing "design a new auth system" automatically routes to Claude, while "write docs for the API" goes to GPT-4o-mini. Typing `/code implement a parser` routes to GPT-4o with the `/code` prefix stripped from the prompt.
+
+### Rule Options
+
+- **Priority** — Reorder rules with up/down arrows; lower position = higher priority
+- **Enabled** — Toggle individual rules on/off without deleting them
+- **Agent mode only** — Rule only applies when agent mode is active
 
 ## Built-in Tools
 

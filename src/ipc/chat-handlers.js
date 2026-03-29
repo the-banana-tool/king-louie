@@ -236,7 +236,7 @@ function registerChatHandlers(ipcMain, context = {}) {
   const getSettings = context.getSettings;
 
   ipcMain.handle(IPC.CHAT_SEND_MESSAGE, wrapHandler(IPC.CHAT_SEND_MESSAGE, async (event, { chatId, message, images = [], agentMode = false, sandboxMode = true }) => {
-    const safeMessage = String(message || '');
+    let safeMessage = String(message || '');
     const normalizedImages = ImageHandler.normalizeMessageImages(images);
 
     if (!safeMessage.trim() && normalizedImages.length === 0) {
@@ -264,10 +264,17 @@ function registerChatHandlers(ipcMain, context = {}) {
       throw new Error('Chat not found');
     }
 
-    const inference = resolveInference();
+    const inference = resolveInference({ message: safeMessage, agentMode });
     if (!['openai', 'anthropic', 'gemini'].includes(inference.providerType)) {
       throw new Error('Active provider does not support chat completions yet.');
     }
+
+    // If a prefix-type smart routing rule matched, strip the prefix from the message
+    if (inference.matchedPrefix) {
+      const { stripPrefix } = require('../providers/smart-routing');
+      safeMessage = stripPrefix(safeMessage, inference.matchedPrefix);
+    }
+
     const provider = inference.provider;
     const chatRaw = getChats().find((item) => item.id === chatId);
     if (!chatRaw) {

@@ -129,6 +129,10 @@ const DEFAULT_SETTINGS = {
       fast: 15000,
       standard: 30000,
       smart: 90000
+    },
+    smartRouting: {
+      enabled: false,
+      rules: []
     }
   },
   notifications: {
@@ -190,6 +194,13 @@ const mergeSettings = (settings = {}) => {
       timeoutsMs: {
         ...(DEFAULT_SETTINGS.inference?.timeoutsMs || {}),
         ...(source.inference?.timeoutsMs || {})
+      },
+      smartRouting: {
+        ...(DEFAULT_SETTINGS.inference?.smartRouting || {}),
+        ...(source.inference?.smartRouting || {}),
+        rules: Array.isArray(source.inference?.smartRouting?.rules)
+          ? source.inference.smartRouting.rules
+          : (DEFAULT_SETTINGS.inference?.smartRouting?.rules || [])
       }
     },
     notifications: normalizeNotificationSettings({
@@ -1904,6 +1915,15 @@ const inferenceRouter = new InferenceRouter({
 const resolveInference = (selection = {}) => {
   if (typeof selection === 'string') {
     return inferenceRouter.resolve({ provider: selection });
+  }
+
+  // When a message is provided, attempt smart routing first
+  if (selection && selection.message) {
+    return inferenceRouter.resolveWithSmartRouting(
+      selection,
+      selection.message,
+      { agentMode: !!selection.agentMode }
+    );
   }
 
   return inferenceRouter.resolve(selection || {});

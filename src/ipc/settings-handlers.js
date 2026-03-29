@@ -367,6 +367,44 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     return { ok: true, inference: updated.inference };
   }));
 
+  ipcMain.handle('settings:saveSmartRouting', wrapHandler('settings:saveSmartRouting', async (_event, { enabled } = {}) => {
+    const settings = getSettings();
+    const smartRouting = {
+      ...(settings.inference?.smartRouting || {}),
+      enabled: !!enabled
+    };
+    const updated = {
+      ...settings,
+      inference: { ...(settings.inference || {}), smartRouting }
+    };
+    setSettings(updated);
+    return { ok: true, smartRouting };
+  }));
+
+  ipcMain.handle('settings:saveSmartRoutingRules', wrapHandler('settings:saveSmartRoutingRules', async (_event, { rules } = {}) => {
+    const { validateRule } = require('../providers/smart-routing');
+    if (!Array.isArray(rules)) {
+      return { ok: false, error: 'Rules must be an array.' };
+    }
+    for (const rule of rules) {
+      const check = validateRule(rule);
+      if (!check.valid) {
+        return { ok: false, error: `Rule "${rule.name || '?'}": ${check.errors.join(', ')}` };
+      }
+    }
+    const settings = getSettings();
+    const smartRouting = {
+      ...(settings.inference?.smartRouting || {}),
+      rules
+    };
+    const updated = {
+      ...settings,
+      inference: { ...(settings.inference || {}), smartRouting }
+    };
+    setSettings(updated);
+    return { ok: true, smartRouting };
+  }));
+
   ipcMain.handle('settings:saveNotifications', wrapHandler('settings:saveNotifications', async (_event, { notifications } = {}) => {
     const saved = setNotificationSettings(notifications || {});
     return { ok: true, notifications: saved };

@@ -1,3 +1,5 @@
+const { evaluateRules } = require('./smart-routing');
+
 class InferenceRouter {
   constructor(options = {}) {
     this.getSettings = options.getSettings;
@@ -153,6 +155,68 @@ class InferenceRouter {
       timeoutMs: normalizedTimeoutMs,
       provider
     };
+  }
+  resolveWithSmartRouting(request = {}, message = '', context = {}) {
+    if (typeof this.getSettings !== 'function') {
+      throw new Error('InferenceRouter requires getSettings()');
+    }
+
+    const settings = this.getSettings() || {};
+    const smartRouting = settings.inference?.smartRouting;
+
+    if (!smartRouting || !smartRouting.enabled) {
+      return { ...this.resolve(request), routedBy: 'tier' };
+    }
+
+    const rules = Array.isArray(smartRouting.rules) ? smartRouting.rules : [];
+    const match = evaluateRules(message, rules, context);
+
+    if (!match) {
+      return { ...this.resolve(request), routedBy: 'tier' };
+    }
+
+    const { target, matchedRule } = match;
+    const providerType = String(target.provider || '').toLowerCase();
+    const model = target.model || '';
+
+    // Verify the target provider has a token available
+    if (typeof this.getProviderToken === 'function') {
+      try {
+        const token = this.getProviderToken(providerType);
+        if (!token) {
+          console.warn(`[inference-router] Smart routing rule "${matchedRule.name}" targets ${providerType} but no token is available, falling back to tier.`);
+          return { ...this.resolve(request), routedBy: 'tier' };
+        }
+      } catch {
+        return { ...this.resolve(request), routedBy: 'tier' };
+      }
+    }
+
+    if (typeof this.createProvider !== 'function') {
+      throw new Error('InferenceRouter requires createProvider()');
+    }
+
+    const token = this.getProviderToken(providerType);
+    const provider = this.createProvider(providerType, token);
+
+    const result = {
+      tier: 'smart-routing',
+      providerType,
+      model,
+      provider,
+      routedBy: 'smart-routing',
+      matchedRule: {
+        id: matchedRule.id,
+        name: matchedRule.name
+      }
+    };
+
+    // Include matched prefix for prefix-type rules so the caller can strip it
+    if (matchedRule.condition?.type === 'prefix' && matchedRule.condition?.prefix) {
+      result.matchedPrefix = matchedRule.condition.prefix;
+    }
+
+    return result;
   }
 }
 
