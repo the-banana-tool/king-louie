@@ -1303,18 +1303,8 @@ body {
 .empty-state {
   text-align: center;
   padding: 60px 20px 20px;
-  color: var(--text-primary);
-}
-
-.empty-state h1 {
-  font-size: 24px;
-  margin-bottom: 8px;
-  color: var(--text-primary);
-}
-
-.empty-state p {
-  font-size: 14px;
   color: var(--text-muted);
+  font-size: 14px;
 }
 
 /* Start state */
@@ -1334,24 +1324,7 @@ body {
 }
 
 .main-content.start-state .input-container {
-  border-top: none;
-  background: transparent;
-  padding: 0;
-  width: min(680px, 90%);
-  flex-direction: column;
-  align-items: stretch;
-}
-
-.main-content.start-state .input-actions {
-  align-self: flex-end;
-}
-
-.main-content.start-state .user-input {
-  min-height: 120px;
-  font-size: 16px;
-  padding: 16px 18px;
-  background: var(--bg-surface);
-  border-color: var(--border-default);
+  display: none;
 }
 
 /* --- Agent mode btn ---------------------------------------- */
