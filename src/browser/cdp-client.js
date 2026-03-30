@@ -9,6 +9,7 @@ class CdpClient {
     this.pendingResolvers = new Map();
     this.eventListeners = new Map();
     this.consoleMessages = [];
+    this.sessionId = null; // Flattened session for page-level commands
   }
 
   static parseWsUrl(stderr) {
@@ -32,8 +33,11 @@ class CdpClient {
       this.ws.on('open', async () => {
         clearTimeout(timeout);
 
-        // Setup console listening automatically when connected
         try {
+          // Attach to a page target so page-level domains (Runtime, Page, etc.) work
+          await this._attachToPageTarget();
+
+          // Setup console listening automatically when connected
           await this.send('Runtime.enable');
           this.on('Runtime.consoleAPICalled', (params) => {
             const type = params.type;
@@ -41,7 +45,7 @@ class CdpClient {
             this.consoleMessages.push({ type, text: args, timestamp: params.timestamp });
           });
         } catch (e) {
-          console.error('[CdpClient] Failed to enable Runtime for console logs', e);
+          console.error('[CdpClient] Failed to attach to page target or enable Runtime', e);
         }
 
         resolve();
@@ -80,14 +84,56 @@ class CdpClient {
     });
   }
 
+  async attachToTarget(targetId) {
+    // Detach old session if any, then attach to the new target
+    const { sessionId } = await this._sendBrowser('Target.attachToTarget', {
+      targetId,
+      flatten: true
+    });
+    this.sessionId = sessionId;
+    this.consoleMessages = [];
+
+    // Re-enable Runtime for the new target
+    try {
+      await this.send('Runtime.enable');
+      this.on('Runtime.consoleAPICalled', (params) => {
+        const type = params.type;
+        const args = params.args.map(a => a.value !== undefined ? a.value : a.description).join(' ');
+        this.consoleMessages.push({ type, text: args, timestamp: params.timestamp });
+      });
+    } catch (e) {
+      // Non-fatal
+    }
+  }
+
   disconnect() {
     if (this.ws) {
       this.ws.close();
       this.ws = null;
     }
+    this.sessionId = null;
   }
 
-  async send(method, params = {}) {
+  async _attachToPageTarget() {
+    // Use browser-level commands (no sessionId) to find and attach to a page
+    const { targetInfos } = await this._sendBrowser('Target.getTargets');
+    let page = targetInfos.find(t => t.type === 'page');
+
+    if (!page) {
+      // No page open yet — create one
+      const { targetId } = await this._sendBrowser('Target.createTarget', { url: 'about:blank' });
+      page = { targetId };
+    }
+
+    const { sessionId } = await this._sendBrowser('Target.attachToTarget', {
+      targetId: page.targetId,
+      flatten: true
+    });
+    this.sessionId = sessionId;
+  }
+
+  // Send a browser-level command (no sessionId)
+  async _sendBrowser(method, params = {}) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new Error('WebSocket is not connected');
     }
@@ -96,6 +142,31 @@ class CdpClient {
     return new Promise((resolve, reject) => {
       this.pendingResolvers.set(id, { resolve, reject });
       this.ws.send(JSON.stringify({ id, method, params }), (err) => {
+        if (err) {
+          this.pendingResolvers.delete(id);
+          reject(err);
+        }
+      });
+    });
+  }
+
+  async send(method, params = {}) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new Error('WebSocket is not connected');
+    }
+
+    // Browser-level Target.* commands don't need a sessionId
+    const isBrowserCommand = method.startsWith('Target.');
+
+    const id = this.messageId++;
+    const msg = { id, method, params };
+    if (!isBrowserCommand && this.sessionId) {
+      msg.sessionId = this.sessionId;
+    }
+
+    return new Promise((resolve, reject) => {
+      this.pendingResolvers.set(id, { resolve, reject });
+      this.ws.send(JSON.stringify(msg), (err) => {
         if (err) {
           this.pendingResolvers.delete(id);
           reject(err);

@@ -131,7 +131,9 @@ const browserTool = new Tool({
           if (!url) return { ok: false, error: 'url parameter is required' };
           await validateUrl(url);
           const { targetId } = await cdpClient.send('Target.createTarget', { url });
-          return { ok: true, targetId };
+          // Attach to the new tab so subsequent commands target it
+          await cdpClient.attachToTarget(targetId);
+          return { ok: true, targetId, message: `Opened and switched to new tab` };
         }
 
         case 'close_tab': {
