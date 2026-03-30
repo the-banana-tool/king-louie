@@ -25,6 +25,7 @@
   "build": {
     "appId": "com.kinglouie.app",
     "productName": "King Louie",
+    "icon": "icons/icon",
     "files": [
       "**/*",
       "!tests/**",
