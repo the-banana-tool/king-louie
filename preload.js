@@ -478,6 +478,10 @@ contextBridge.exposeInMainWorld(
       saveWebSearchKey: (payload) => {
         validateObject(payload, 'payload');
         return ipcRenderer.invoke('settings:saveWebSearchKey', payload);
+      },
+      testWebSearchKey: (payload) => {
+        validateObject(payload, 'payload');
+        return ipcRenderer.invoke('settings:testWebSearchKey', payload);
       }
     },
     hooks: {

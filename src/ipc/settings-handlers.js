@@ -114,6 +114,52 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     return { ok: true, hasKey: true };
   }));
 
+  ipcMain.handle('settings:testWebSearchKey', wrapHandler('settings:testWebSearchKey', async (_event, { provider } = {}) => {
+    if (!['brave', 'tavily'].includes(provider)) {
+      return { ok: false, error: 'Unknown web search provider.' };
+    }
+
+    const settings = getSettings();
+    const encrypted = settings.webSearch?.[provider]?.apiKey;
+    if (!encrypted) {
+      return { ok: false, error: `No ${provider} API key configured.` };
+    }
+
+    const apiKey = decryptToken(encrypted);
+    if (!apiKey) {
+      return { ok: false, error: `Failed to decrypt ${provider} API key.` };
+    }
+
+    try {
+      if (provider === 'brave') {
+        const res = await fetch(`https://api.search.brave.com/res/v1/web/search?q=test&count=1`, {
+          headers: {
+            'Accept': 'application/json',
+            'X-Subscription-Token': apiKey
+          }
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`Brave API error (${res.status}): ${text}`);
+        }
+        return { ok: true, message: 'Brave Search connection successful.' };
+      } else {
+        const res = await fetch('https://api.tavily.com/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ api_key: apiKey, query: 'test', max_results: 1, search_depth: 'basic' })
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`Tavily API error (${res.status}): ${text}`);
+        }
+        return { ok: true, message: 'Tavily connection successful.' };
+      }
+    } catch (err) {
+      return { ok: false, error: err.message || `${provider} test failed.` };
+    }
+  }));
+
   ipcMain.handle('settings:saveTemplateVariables', wrapHandler('settings:saveTemplateVariables', async (_event, { templateVariables } = {}) => {
     const saved = setTemplateVariables(templateVariables || {});
     return { ok: true, templateVariables: saved };

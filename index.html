@@ -170,6 +170,36 @@
         <!-- Tab: Providers -->
         <div class="settings-tab-content active" data-tab="providers">
           <div class="provider-list" id="provider-list"></div>
+
+          <section class="template-variables-card">
+            <h3>Brave Search</h3>
+            <p>API key for the Brave Search web search provider.</p>
+            <div class="template-variables-grid">
+              <label for="websearch-brave-key-input">Brave Search API Key</label>
+              <input id="websearch-brave-key-input" class="provider-input" type="password" placeholder="Brave Search API key">
+            </div>
+            <div class="template-variables-actions">
+              <button id="save-websearch-brave-btn" type="button" class="btn btn-primary">Save Key</button>
+              <button id="test-websearch-brave-btn" type="button" class="btn">Test Connection</button>
+              <button id="clear-websearch-brave-btn" type="button" class="btn btn-danger">Clear Key</button>
+              <span id="websearch-brave-status" class="provider-message">Not configured.</span>
+            </div>
+          </section>
+
+          <section class="template-variables-card">
+            <h3>Tavily</h3>
+            <p>API key for the Tavily web search provider.</p>
+            <div class="template-variables-grid">
+              <label for="websearch-tavily-key-input">Tavily API Key</label>
+              <input id="websearch-tavily-key-input" class="provider-input" type="password" placeholder="Tavily API key">
+            </div>
+            <div class="template-variables-actions">
+              <button id="save-websearch-tavily-btn" type="button" class="btn btn-primary">Save Key</button>
+              <button id="test-websearch-tavily-btn" type="button" class="btn">Test Connection</button>
+              <button id="clear-websearch-tavily-btn" type="button" class="btn btn-danger">Clear Key</button>
+              <span id="websearch-tavily-status" class="provider-message">Not configured.</span>
+            </div>
+          </section>
         </div>
 
         <!-- Tab: Inference -->
@@ -273,24 +303,6 @@
             </div>
           </section>
 
-          <section class="template-variables-card">
-            <h3>Web Search</h3>
-            <p>API keys for web search tool providers (Brave Search, Tavily).</p>
-            <div class="template-variables-grid">
-              <label for="websearch-brave-key-input">Brave Search API Key</label>
-              <input id="websearch-brave-key-input" class="provider-input" type="password" placeholder="Brave Search API key">
-
-              <label for="websearch-tavily-key-input">Tavily API Key</label>
-              <input id="websearch-tavily-key-input" class="provider-input" type="password" placeholder="Tavily API key">
-            </div>
-            <div class="template-variables-actions">
-              <button id="save-websearch-brave-btn" type="button" class="btn btn-primary">Save Brave Key</button>
-              <button id="clear-websearch-brave-btn" type="button" class="btn btn-danger">Clear</button>
-              <button id="save-websearch-tavily-btn" type="button" class="btn btn-primary">Save Tavily Key</button>
-              <button id="clear-websearch-tavily-btn" type="button" class="btn btn-danger">Clear</button>
-              <span id="websearch-status" class="provider-message">Not configured.</span>
-            </div>
-          </section>
         </div>
 
         <!-- Tab: Profile -->

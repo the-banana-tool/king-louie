@@ -202,10 +202,13 @@ const dom = {
   websearchBraveKeyInput: document.getElementById('websearch-brave-key-input'),
   websearchTavilyKeyInput: document.getElementById('websearch-tavily-key-input'),
   saveWebsearchBraveBtn: document.getElementById('save-websearch-brave-btn'),
+  testWebsearchBraveBtn: document.getElementById('test-websearch-brave-btn'),
   clearWebsearchBraveBtn: document.getElementById('clear-websearch-brave-btn'),
   saveWebsearchTavilyBtn: document.getElementById('save-websearch-tavily-btn'),
+  testWebsearchTavilyBtn: document.getElementById('test-websearch-tavily-btn'),
   clearWebsearchTavilyBtn: document.getElementById('clear-websearch-tavily-btn'),
-  websearchStatus: document.getElementById('websearch-status'),
+  websearchBraveStatus: document.getElementById('websearch-brave-status'),
+  websearchTavilyStatus: document.getElementById('websearch-tavily-status'),
   workingDirBtn: document.getElementById('working-dir-btn'),
   exportChatBtn: document.getElementById('export-chat-btn'),
   messageContextMenu: document.getElementById('message-context-menu'),
@@ -2431,16 +2434,15 @@ function renderSettings() {
   }
 
   const webSearch = appState.settings.webSearch || {};
-  if (dom.websearchStatus) {
-    const hasBrave = Boolean(webSearch.brave?.apiKey);
-    const hasTavily = Boolean(webSearch.tavily?.apiKey);
-    const parts = [];
-    if (hasBrave) parts.push('Brave');
-    if (hasTavily) parts.push('Tavily');
-    dom.websearchStatus.textContent = parts.length
-      ? `Configured: ${parts.join(', ')}`
-      : 'No web search keys configured.';
-    dom.websearchStatus.classList.remove('error');
+  if (dom.websearchBraveStatus) {
+    dom.websearchBraveStatus.textContent = webSearch.brave?.apiKey
+      ? 'Key configured.'
+      : 'Not configured.';
+  }
+  if (dom.websearchTavilyStatus) {
+    dom.websearchTavilyStatus.textContent = webSearch.tavily?.apiKey
+      ? 'Key configured.'
+      : 'Not configured.';
   }
 }
 
@@ -5427,7 +5429,7 @@ if (dom.clearTelegramTokenBtn) {
   });
 }
 
-/* --- Channel management: Web Search keys ------------------- */
+/* --- Provider management: Web Search keys ------------------- */
 if (dom.saveWebsearchBraveBtn) {
   dom.saveWebsearchBraveBtn.addEventListener('click', async () => {
     const apiKey = dom.websearchBraveKeyInput?.value?.trim();
@@ -5438,15 +5440,42 @@ if (dom.saveWebsearchBraveBtn) {
         'Failed to save Brave key.'
       );
       dom.websearchBraveKeyInput.value = '';
-      if (dom.websearchStatus) {
-        dom.websearchStatus.textContent = 'Brave key saved.';
-        dom.websearchStatus.classList.remove('error');
+      if (dom.websearchBraveStatus) {
+        dom.websearchBraveStatus.textContent = 'Key saved.';
+        dom.websearchBraveStatus.classList.remove('error');
       }
     } catch (err) {
-      if (dom.websearchStatus) {
-        dom.websearchStatus.textContent = err.message || 'Error saving Brave key.';
-        dom.websearchStatus.classList.add('error');
+      if (dom.websearchBraveStatus) {
+        dom.websearchBraveStatus.textContent = err.message || 'Error saving key.';
+        dom.websearchBraveStatus.classList.add('error');
       }
+    }
+  });
+}
+
+if (dom.testWebsearchBraveBtn) {
+  dom.testWebsearchBraveBtn.addEventListener('click', async () => {
+    dom.testWebsearchBraveBtn.disabled = true;
+    if (dom.websearchBraveStatus) {
+      dom.websearchBraveStatus.textContent = 'Testing Brave Search...';
+      dom.websearchBraveStatus.classList.remove('error');
+    }
+    try {
+      const result = unwrapIpcResult(
+        await window.electron.settings.testWebSearchKey({ provider: 'brave' }),
+        'Failed to test Brave Search.'
+      );
+      if (dom.websearchBraveStatus) {
+        dom.websearchBraveStatus.textContent = result.message || 'Connection successful.';
+        dom.websearchBraveStatus.classList.remove('error');
+      }
+    } catch (err) {
+      if (dom.websearchBraveStatus) {
+        dom.websearchBraveStatus.textContent = err.message || 'Test failed.';
+        dom.websearchBraveStatus.classList.add('error');
+      }
+    } finally {
+      dom.testWebsearchBraveBtn.disabled = false;
     }
   });
 }
@@ -5458,14 +5487,14 @@ if (dom.clearWebsearchBraveBtn) {
         await window.electron.settings.saveWebSearchKey({ provider: 'brave', clear: true }),
         'Failed to clear Brave key.'
       );
-      if (dom.websearchStatus) {
-        dom.websearchStatus.textContent = 'Brave key cleared.';
-        dom.websearchStatus.classList.remove('error');
+      if (dom.websearchBraveStatus) {
+        dom.websearchBraveStatus.textContent = 'Key cleared.';
+        dom.websearchBraveStatus.classList.remove('error');
       }
     } catch (err) {
-      if (dom.websearchStatus) {
-        dom.websearchStatus.textContent = err.message || 'Error.';
-        dom.websearchStatus.classList.add('error');
+      if (dom.websearchBraveStatus) {
+        dom.websearchBraveStatus.textContent = err.message || 'Error.';
+        dom.websearchBraveStatus.classList.add('error');
       }
     }
   });
@@ -5481,15 +5510,42 @@ if (dom.saveWebsearchTavilyBtn) {
         'Failed to save Tavily key.'
       );
       dom.websearchTavilyKeyInput.value = '';
-      if (dom.websearchStatus) {
-        dom.websearchStatus.textContent = 'Tavily key saved.';
-        dom.websearchStatus.classList.remove('error');
+      if (dom.websearchTavilyStatus) {
+        dom.websearchTavilyStatus.textContent = 'Key saved.';
+        dom.websearchTavilyStatus.classList.remove('error');
       }
     } catch (err) {
-      if (dom.websearchStatus) {
-        dom.websearchStatus.textContent = err.message || 'Error saving Tavily key.';
-        dom.websearchStatus.classList.add('error');
+      if (dom.websearchTavilyStatus) {
+        dom.websearchTavilyStatus.textContent = err.message || 'Error saving key.';
+        dom.websearchTavilyStatus.classList.add('error');
       }
+    }
+  });
+}
+
+if (dom.testWebsearchTavilyBtn) {
+  dom.testWebsearchTavilyBtn.addEventListener('click', async () => {
+    dom.testWebsearchTavilyBtn.disabled = true;
+    if (dom.websearchTavilyStatus) {
+      dom.websearchTavilyStatus.textContent = 'Testing Tavily...';
+      dom.websearchTavilyStatus.classList.remove('error');
+    }
+    try {
+      const result = unwrapIpcResult(
+        await window.electron.settings.testWebSearchKey({ provider: 'tavily' }),
+        'Failed to test Tavily.'
+      );
+      if (dom.websearchTavilyStatus) {
+        dom.websearchTavilyStatus.textContent = result.message || 'Connection successful.';
+        dom.websearchTavilyStatus.classList.remove('error');
+      }
+    } catch (err) {
+      if (dom.websearchTavilyStatus) {
+        dom.websearchTavilyStatus.textContent = err.message || 'Test failed.';
+        dom.websearchTavilyStatus.classList.add('error');
+      }
+    } finally {
+      dom.testWebsearchTavilyBtn.disabled = false;
     }
   });
 }
@@ -5501,14 +5557,14 @@ if (dom.clearWebsearchTavilyBtn) {
         await window.electron.settings.saveWebSearchKey({ provider: 'tavily', clear: true }),
         'Failed to clear Tavily key.'
       );
-      if (dom.websearchStatus) {
-        dom.websearchStatus.textContent = 'Tavily key cleared.';
-        dom.websearchStatus.classList.remove('error');
+      if (dom.websearchTavilyStatus) {
+        dom.websearchTavilyStatus.textContent = 'Key cleared.';
+        dom.websearchTavilyStatus.classList.remove('error');
       }
     } catch (err) {
-      if (dom.websearchStatus) {
-        dom.websearchStatus.textContent = err.message || 'Error.';
-        dom.websearchStatus.classList.add('error');
+      if (dom.websearchTavilyStatus) {
+        dom.websearchTavilyStatus.textContent = err.message || 'Error.';
+        dom.websearchTavilyStatus.classList.add('error');
       }
     }
   });
