@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const WebSocket = require('ws');
 
 // BIP39-inspired wordlist (256 words = 8 bits per word, 6 words = 48 bits of entropy)
 const WORDLIST = [

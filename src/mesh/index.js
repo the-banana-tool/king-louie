@@ -80,8 +80,9 @@ async function initializeMesh(config = {}) {
     });
   }
 
-  // Create pairing
+  // Create pairing and wire it into the transport
   const pairing = new MeshPairing(identity, transport);
+  transport.onPairingRequest = (ws, msg) => pairing.handlePairingRequest(ws, msg);
 
   // Create channel
   const meshChannel = new MeshChannel({

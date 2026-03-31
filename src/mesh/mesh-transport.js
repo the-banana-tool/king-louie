@@ -27,6 +27,7 @@ class MeshTransport extends EventEmitter {
     this.heartbeatInterval = null;
     this.seenNonces = new Set();
     this.running = false;
+    this.onPairingRequest = null; // set by MeshPairing to handle pair:request messages
   }
 
   async start() {
@@ -240,7 +241,10 @@ class MeshTransport extends EventEmitter {
     const onMessage = (data) => {
       try {
         const msg = JSON.parse(data);
-        if (msg.type === 'auth:challenge') {
+        if (msg.type === 'pair:request' && this.onPairingRequest) {
+          clearTimeout(authTimeout);
+          this.onPairingRequest(ws, msg);
+        } else if (msg.type === 'auth:challenge') {
           clearTimeout(authTimeout);
           this._respondToChallenge(ws, msg);
         }
