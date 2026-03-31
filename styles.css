@@ -1811,6 +1811,30 @@ body {
   font-size: 12px;
 }
 
+/* --- Notice banner ----------------------------------------- */
+.kl-notice {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2500;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  padding: 10px 20px;
+  font-size: 13px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+  max-width: 90vw;
+  animation: kl-notice-in 0.2s ease-out;
+}
+
+@keyframes kl-notice-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(-8px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
 /* --- Rename modal ------------------------------------------ */
 .rename-chat-modal {
   position: fixed;

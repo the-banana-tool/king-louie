@@ -629,8 +629,18 @@
             </div>
             <div class="template-variables-actions">
               <button type="button" class="btn btn-primary" id="mesh-pair-generate-btn"><i class="fas fa-key"></i> Generate Code</button>
-              <button type="button" class="btn" id="mesh-pair-accept-btn"><i class="fas fa-handshake"></i> Enter Code</button>
               <span class="provider-message" id="mesh-pairing-status"></span>
+            </div>
+            <div class="template-variables-grid" style="margin-top: 0.75rem;">
+              <label for="mesh-pair-code-input">Peer Code</label>
+              <input type="text" class="provider-input" id="mesh-pair-code-input" placeholder="Enter the 6-word pairing code">
+              <label for="mesh-pair-address-input">Peer Address</label>
+              <input type="text" class="provider-input" id="mesh-pair-address-input" placeholder="e.g. 192.168.1.100">
+              <label for="mesh-pair-port-input">Peer Port</label>
+              <input type="number" class="provider-input" id="mesh-pair-port-input" placeholder="18791" value="18791">
+            </div>
+            <div class="template-variables-actions">
+              <button type="button" class="btn btn-primary" id="mesh-pair-accept-btn"><i class="fas fa-handshake"></i> Pair</button>
             </div>
           </section>
 

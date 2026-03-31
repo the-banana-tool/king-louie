@@ -229,6 +229,9 @@ const dom = {
   meshPairingCode: document.getElementById('mesh-pairing-code'),
   meshPairGenerateBtn: document.getElementById('mesh-pair-generate-btn'),
   meshPairAcceptBtn: document.getElementById('mesh-pair-accept-btn'),
+  meshPairCodeInput: document.getElementById('mesh-pair-code-input'),
+  meshPairAddressInput: document.getElementById('mesh-pair-address-input'),
+  meshPairPortInput: document.getElementById('mesh-pair-port-input'),
   meshPairingStatus: document.getElementById('mesh-pairing-status'),
   meshPeerAddressInput: document.getElementById('mesh-peer-address-input'),
   meshPeerPortInput: document.getElementById('mesh-peer-port-input'),
@@ -551,19 +554,19 @@ async function addImageFiles(fileList) {
 
   const remainingSlots = MAX_IMAGES_PER_MESSAGE - appState.pendingImages.length;
   if (remainingSlots <= 0) {
-    alert(`You can attach up to ${MAX_IMAGES_PER_MESSAGE} images per message.`);
+    showNotice(`You can attach up to ${MAX_IMAGES_PER_MESSAGE} images per message.`);
     return;
   }
 
   const candidates = files.slice(0, remainingSlots);
   for (const file of candidates) {
     if (!SUPPORTED_IMAGE_MIME_TYPES.has(file.type)) {
-      alert(`Unsupported image format: ${file.type}`);
+      showNotice(`Unsupported image format: ${file.type}`);
       continue;
     }
 
     if (file.size > MAX_IMAGE_SIZE_BYTES) {
-      alert(`Image too large: ${file.name} exceeds 5MB.`);
+      showNotice(`Image too large: ${file.name} exceeds 5MB.`);
       continue;
     }
 
@@ -1001,6 +1004,73 @@ function addToolEventMessage(title, payload, variant = '') {
   const toolName = match ? match[1].trim() : 'unknown';
   const isResult = title.startsWith('Tool result');
   addToolEventCompact(toolName, payload, variant, isResult);
+}
+
+/**
+ * Show a non-blocking notice banner (replaces alert()).
+ * Auto-dismisses after a few seconds; click to dismiss early.
+ */
+function showNotice(text) {
+  const el = document.createElement('div');
+  el.className = 'kl-notice';
+  el.textContent = text;
+  el.addEventListener('click', () => el.remove());
+  document.body.appendChild(el);
+  setTimeout(() => { if (el.parentNode) el.remove(); }, 5000);
+}
+
+/**
+ * Show a confirm dialog using in-app modal (replaces confirm()).
+ * Returns a promise that resolves to true (confirm) or false (cancel).
+ */
+function showConfirmDialog(message) {
+  return new Promise((resolve) => {
+    const modal = document.createElement('div');
+    modal.className = 'rename-chat-modal';
+
+    const card = document.createElement('div');
+    card.className = 'rename-chat-card';
+
+    const heading = document.createElement('h3');
+    heading.textContent = 'Confirm';
+
+    const body = document.createElement('p');
+    body.textContent = message;
+    body.style.color = 'var(--text-secondary)';
+    body.style.margin = '0';
+
+    const actions = document.createElement('div');
+    actions.className = 'rename-chat-actions';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'btn';
+    cancelBtn.textContent = 'Cancel';
+
+    const confirmBtn = document.createElement('button');
+    confirmBtn.type = 'button';
+    confirmBtn.className = 'btn btn-primary';
+    confirmBtn.textContent = 'Confirm';
+
+    const close = (value) => { modal.remove(); resolve(value); };
+
+    cancelBtn.addEventListener('click', () => close(false));
+    confirmBtn.addEventListener('click', () => close(true));
+    modal.addEventListener('click', (e) => { if (e.target === modal) close(false); });
+    modal.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') close(false);
+      if (e.key === 'Enter') close(true);
+    });
+
+    actions.appendChild(cancelBtn);
+    actions.appendChild(confirmBtn);
+    card.appendChild(heading);
+    card.appendChild(body);
+    card.appendChild(actions);
+    modal.appendChild(card);
+    document.body.appendChild(modal);
+    confirmBtn.focus();
+  });
 }
 
 /**
@@ -2632,7 +2702,7 @@ async function installSkill() {
 }
 
 async function removeSkill(skillId, skillName) {
-  if (!confirm(`Remove skill "${skillName || skillId}"? This will delete its files.`)) {
+  if (!await showConfirmDialog(`Remove skill "${skillName || skillId}"? This will delete its files.`)) {
     return;
   }
 
@@ -3058,7 +3128,7 @@ async function handleDeleteMemory(memoryId) {
 
 async function handleClearMemory() {
   if (!window.electron?.memory) return;
-  const confirmed = confirm('Clear all memory entries? This cannot be undone.');
+  const confirmed = await showConfirmDialog('Clear all memory entries? This cannot be undone.');
   if (!confirmed) return;
 
   try {
@@ -3424,7 +3494,7 @@ async function handleSaveElevenLabsKey() {
 
 async function handleClearElevenLabsKey() {
   if (!dom.clearVoiceKeyBtn) return;
-  const confirmed = confirm('Clear the saved ElevenLabs API key?');
+  const confirmed = await showConfirmDialog('Clear the saved ElevenLabs API key?');
   if (!confirmed) return;
 
   dom.clearVoiceKeyBtn.disabled = true;
@@ -3645,7 +3715,7 @@ async function handleRunCronJob(jobId) {
 }
 
 async function handleDeleteCronJob(jobId) {
-  if (!confirm(`Delete cron job ${jobId}?`)) return;
+  if (!await showConfirmDialog(`Delete cron job ${jobId}?`)) return;
   try {
     const result = await window.electron.cron.remove({ id: jobId });
     if (!result?.ok) throw new Error(result?.error || 'Failed to delete job');
@@ -4588,7 +4658,7 @@ async function handleDeleteChat(chatId) {
   if (!chat) {
     return;
   }
-  const confirmed = confirm(`Delete "${chat.title}"? This cannot be undone.`);
+  const confirmed = await showConfirmDialog(`Delete "${chat.title}"? This cannot be undone.`);
   if (!confirmed) {
     return;
   }
@@ -4624,7 +4694,7 @@ async function handleSaveProvider(providerKey) {
 }
 
 async function handleClearProvider(providerKey) {
-  const confirmed = confirm('Clear the saved token for this provider?');
+  const confirmed = await showConfirmDialog('Clear the saved token for this provider?');
   if (!confirmed) return;
 
   const result = await window.electron.settings.saveProvider({
@@ -6295,12 +6365,17 @@ function initMeshHandlers() {
 
   if (dom.meshPairAcceptBtn) {
     dom.meshPairAcceptBtn.addEventListener('click', async () => {
-      const code = prompt('Enter the 6-word pairing code:');
-      if (!code) return;
-      const address = prompt('Enter the peer address (IP or hostname):');
-      if (!address) return;
-      const port = prompt('Enter the peer mesh port:', '18791');
-      if (!port) return;
+      const code = dom.meshPairCodeInput?.value?.trim();
+      const address = dom.meshPairAddressInput?.value?.trim();
+      const port = dom.meshPairPortInput?.value || '18791';
+
+      if (!code || !address) {
+        if (dom.meshPairingStatus) {
+          dom.meshPairingStatus.textContent = 'Pairing code and peer address are required.';
+          dom.meshPairingStatus.classList.add('error');
+        }
+        return;
+      }
 
       try {
         if (dom.meshPairingStatus) {
@@ -6311,7 +6386,10 @@ function initMeshHandlers() {
         const result = raw?.data || raw;
         if (dom.meshPairingStatus) {
           dom.meshPairingStatus.textContent = `Paired with ${result.displayName || result.peerId}!`;
+          dom.meshPairingStatus.classList.remove('error');
         }
+        if (dom.meshPairCodeInput) dom.meshPairCodeInput.value = '';
+        if (dom.meshPairAddressInput) dom.meshPairAddressInput.value = '';
         loadMeshStatus();
       } catch (err) {
         if (dom.meshPairingStatus) {
