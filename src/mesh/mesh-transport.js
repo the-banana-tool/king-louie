@@ -51,6 +51,7 @@ class MeshTransport extends EventEmitter {
         this.httpsServer.once('error', reject);
       });
 
+      if (this.httpsServer.address()) this.port = this.httpsServer.address().port;
       console.log(`[mesh] transport listening on wss://${this.host}:${this.port} (TLS)`);
     } else {
       // Fallback: plain WS (for tests or when TLS certs not available)
@@ -68,6 +69,7 @@ class MeshTransport extends EventEmitter {
         this.server.once('error', reject);
       });
 
+      if (this.server.address()) this.port = this.server.address().port;
       console.log(`[mesh] transport listening on ws://${this.host}:${this.port} (no TLS)`);
     }
 

@@ -1,6 +1,8 @@
 const { app, BrowserWindow, ipcMain, safeStorage, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
+
+// E2E test bridge — loaded in app.whenReady() when KL_TEST_BRIDGE_PORT is set
 const { default: Store } = require('electron-store');
 const ProviderFactory = require('./src/providers/provider-factory');
 const InferenceRouter = require('./src/providers/inference-router');
@@ -2052,7 +2054,7 @@ const initializeAgentInfrastructure = async () => {
 
   gatewayServer = new GatewayServer({
     host: '127.0.0.1',
-    port: 18789
+    port: process.env.KL_TEST_MODE ? 0 : 18789
   });
 
   toolRegistry.register(new MessageTool(gatewayServer, sessionManager));
@@ -2424,6 +2426,11 @@ registerHandlers(ipcMain, {
 
 app.whenReady().then(async () => {
   initializeTools();
+
+  // E2E test bridge — starts an HTTP server for test automation
+  if (process.env.KL_TEST_BRIDGE_PORT) {
+    require(process.env.KL_TEST_BRIDGE_SCRIPT || path.join(__dirname, 'tests', 'e2e', '_bridge.js'));
+  }
 
   // Show the window immediately — don't block on infrastructure
   createWindow();

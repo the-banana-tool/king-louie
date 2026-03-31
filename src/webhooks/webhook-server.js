@@ -6,22 +6,34 @@ class WebhookServer {
     this.gatewayServer = gatewayServer;
     this.webhookHandler = webhookHandler;
     this.httpServer = null;
-    this.port = gatewayServer.port + 1; // Use next port for HTTP
+    this._configuredPort = null;
+  }
+
+  get port() {
+    // Derive from gateway's actual port (which may change after start when using port 0)
+    if (this._configuredPort != null) return this._configuredPort;
+    return this.gatewayServer.port + 1;
   }
 
   async start() {
     if (this.httpServer) return;
+    // When gateway uses port 0, use port 0 for webhook too
+    const listenPort = this.gatewayServer.port === 0 ? 0 : this.port;
 
     this.httpServer = http.createServer((req, res) => {
       this.handleHttpRequest(req, res);
     });
 
     await new Promise((resolve, reject) => {
-      this.httpServer.listen(this.port, '127.0.0.1', (err) => {
+      this.httpServer.listen(listenPort, '127.0.0.1', (err) => {
         if (err) reject(err);
         else resolve();
       });
     });
+
+    // Update port to the actual bound port (important when using port 0)
+    const addr = this.httpServer.address();
+    if (addr) this._configuredPort = addr.port;
 
     console.log(`[webhook-server] HTTP server listening on http://127.0.0.1:${this.port}`);
   }

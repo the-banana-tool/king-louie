@@ -4,7 +4,7 @@ const WebSocket = require('ws');
 class GatewayServer extends EventEmitter {
   constructor(config = {}) {
     super();
-    this.port = config.port || 18789;
+    this.port = config.port || (process.env.KL_TEST_MODE ? 0 : 18789);
     this.host = config.host || '127.0.0.1';
     this.connections = new Map();
     this.messageHandlers = new Map();
@@ -28,6 +28,11 @@ class GatewayServer extends EventEmitter {
       this.wss.once('listening', resolve);
       this.wss.once('error', reject);
     });
+
+    // Update port to the actual bound port (important when using port 0)
+    if (this.wss.address()) {
+      this.port = this.wss.address().port;
+    }
   }
 
   async stop() {

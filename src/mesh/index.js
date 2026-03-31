@@ -58,7 +58,7 @@ async function initializeMesh(config = {}) {
     // Not in Electron context or safeStorage unavailable
   }
 
-  const port = meshSettings.port || DEFAULT_PORT;
+  const port = meshSettings.port || (process.env.KL_TEST_MODE ? 0 : DEFAULT_PORT);
 
   // Create transport (TLS enabled by default)
   const transport = new MeshTransport({
