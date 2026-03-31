@@ -107,7 +107,13 @@ const DEFAULT_SETTINGS = {
     mistral: 'mistral-large-latest',
     ollama: '',
     gemini: 'gemini-2.0-flash',
-    openrouter: 'openai/gpt-4o-mini'
+    openrouter: 'openai/gpt-4o-mini',
+    xai: 'grok-3-mini',
+    deepseek: 'deepseek-chat',
+    qwen: 'qwen-plus',
+    together: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
+    fireworks: 'accounts/fireworks/models/llama-v3p3-70b-instruct',
+    cohere: 'command-r-plus'
   },
   inference: {
     activeTier: 'standard',
@@ -431,7 +437,13 @@ const providerLabels = {
   mistral: 'Mistral AI',
   ollama: 'Ollama (Local)',
   gemini: 'Google Gemini',
-  openrouter: 'OpenRouter'
+  openrouter: 'OpenRouter',
+  xai: 'xAI (Grok)',
+  deepseek: 'DeepSeek',
+  qwen: 'Qwen (Alibaba)',
+  together: 'Together AI',
+  fireworks: 'Fireworks AI',
+  cohere: 'Cohere'
 };
 
 const providerDefaults = {
@@ -442,7 +454,13 @@ const providerDefaults = {
   mistral: 'mistral-large-latest',
   ollama: '',
   gemini: 'gemini-2.0-flash',
-  openrouter: 'openai/gpt-4o-mini'
+  openrouter: 'openai/gpt-4o-mini',
+  xai: 'grok-3-mini',
+  deepseek: 'deepseek-chat',
+  qwen: 'qwen-plus',
+  together: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
+  fireworks: 'accounts/fireworks/models/llama-v3p3-70b-instruct',
+  cohere: 'command-r-plus'
 };
 
 const providerTokenHints = {
@@ -452,7 +470,13 @@ const providerTokenHints = {
   groq: 'gsk_',
   mistral: '',
   gemini: '',
-  openrouter: 'sk-or-'
+  openrouter: 'sk-or-',
+  xai: 'xai-',
+  deepseek: 'sk-',
+  qwen: 'sk-',
+  together: '',
+  fireworks: '',
+  cohere: ''
 };
 
 const normalizeProvider = (value = '') => String(value || '').trim().toLowerCase();

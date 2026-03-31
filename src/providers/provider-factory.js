@@ -5,6 +5,12 @@ const MistralProvider = require('./mistral-provider');
 const OllamaProvider = require('./ollama-provider');
 const GeminiProvider = require('./gemini-provider');
 const OpenRouterProvider = require('./openrouter-provider');
+const XAIProvider = require('./xai-provider');
+const DeepSeekProvider = require('./deepseek-provider');
+const QwenProvider = require('./qwen-provider');
+const TogetherProvider = require('./together-provider');
+const FireworksProvider = require('./fireworks-provider');
+const CohereProvider = require('./cohere-provider');
 
 class ProviderFactory {
   static _registry = new Map();
@@ -45,5 +51,11 @@ ProviderFactory.registerProvider('mistral', MistralProvider);
 ProviderFactory.registerProvider('ollama', OllamaProvider);
 ProviderFactory.registerProvider('gemini', GeminiProvider);
 ProviderFactory.registerProvider('openrouter', OpenRouterProvider);
+ProviderFactory.registerProvider('xai', XAIProvider);
+ProviderFactory.registerProvider('deepseek', DeepSeekProvider);
+ProviderFactory.registerProvider('qwen', QwenProvider);
+ProviderFactory.registerProvider('together', TogetherProvider);
+ProviderFactory.registerProvider('fireworks', FireworksProvider);
+ProviderFactory.registerProvider('cohere', CohereProvider);
 
 module.exports = ProviderFactory;

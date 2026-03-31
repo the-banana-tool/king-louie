@@ -1422,7 +1422,9 @@ function renderChatInfoPopover() {
   providerSelect.className = 'chat-info-select';
   const providerDisplayNames = {
     openai: 'OpenAI', anthropic: 'Anthropic', groq: 'Groq',
-    mistral: 'Mistral', ollama: 'Ollama', gemini: 'Gemini', openrouter: 'OpenRouter'
+    mistral: 'Mistral', ollama: 'Ollama', gemini: 'Gemini', openrouter: 'OpenRouter',
+    xai: 'xAI', deepseek: 'DeepSeek', qwen: 'Qwen', together: 'Together',
+    fireworks: 'Fireworks', cohere: 'Cohere'
   };
   Object.keys(providerDisplayNames).forEach((p) => {
     const opt = document.createElement('option');
