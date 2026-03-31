@@ -29,18 +29,18 @@ class ProviderFactory {
     return Array.from(ProviderFactory._registry.keys());
   }
 
-  static create(providerType, apiKey) {
+  static create(providerType, apiKey, options = {}) {
     const key = (providerType || '').toLowerCase();
     const ProviderClass = ProviderFactory._registry.get(key);
     if (!ProviderClass) {
       const available = ProviderFactory.listRegistered().join(', ');
       throw new Error(`Unknown provider: "${providerType}". Available: ${available}`);
     }
-    return new ProviderClass(apiKey);
+    return new ProviderClass(apiKey, options);
   }
 
-  static createProvider(providerType, apiKey) {
-    return ProviderFactory.create(providerType, apiKey);
+  static createProvider(providerType, apiKey, options = {}) {
+    return ProviderFactory.create(providerType, apiKey, options);
   }
 }
 

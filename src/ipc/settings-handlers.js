@@ -28,6 +28,7 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     decryptToken,
     updateStatus,
     runLlmCommand,
+    anthropicOAuth,
     setActiveInferenceTier,
     setNotificationSettings,
     getMainWindow
@@ -84,7 +85,8 @@ function registerSettingsHandlers(ipcMain, context = {}) {
         status: status.telegram || null
       },
       webSearch: settings.webSearch,
-      allowedDirectories: settings.allowedDirectories || []
+      allowedDirectories: settings.allowedDirectories || [],
+      anthropicOAuth: anthropicOAuth ? anthropicOAuth.getStatus() : { connected: false }
     };
   }));
 
@@ -269,17 +271,28 @@ function registerSettingsHandlers(ipcMain, context = {}) {
       return { ok: false, error: 'Unknown provider.' };
     }
 
+    // For Anthropic, allow testing via OAuth even without a stored API key
+    const isAnthropicOAuth = provider === 'anthropic' && anthropicOAuth && anthropicOAuth.isConnected();
+
     const tokens = getApiTokens();
-    if (!tokens[provider]) {
+    if (!tokens[provider] && !isAnthropicOAuth) {
       return { ok: false, error: 'No token saved for this provider.' };
     }
 
-    const token = decryptToken(tokens[provider]);
+    const token = isAnthropicOAuth ? null : decryptToken(tokens[provider]);
 
     let response;
     if (provider === 'openai') {
       response = await fetch('https://api.openai.com/v1/models', {
         headers: { Authorization: `Bearer ${token}` }
+      });
+    } else if (provider === 'anthropic' && isAnthropicOAuth) {
+      const oauthToken = await anthropicOAuth.getValidAccessToken();
+      response = await fetch('https://api.anthropic.com/v1/models', {
+        headers: {
+          'Authorization': `Bearer ${oauthToken}`,
+          'anthropic-version': '2023-06-01'
+        }
       });
     } else if (provider === 'anthropic') {
       response = await fetch('https://api.anthropic.com/v1/models', {
@@ -364,12 +377,21 @@ function registerSettingsHandlers(ipcMain, context = {}) {
 
     const tokens = getApiTokens();
     const encryptedToken = tokens[provider];
-    const token = encryptedToken ? decryptToken(encryptedToken) : null;
+    let token = encryptedToken ? decryptToken(encryptedToken) : null;
+    let authMode = 'api-key';
+
+    // For Anthropic, use OAuth token if connected and no API key
+    if (provider === 'anthropic' && !token && anthropicOAuth && anthropicOAuth.isConnected()) {
+      try {
+        token = await anthropicOAuth.getValidAccessToken();
+        authMode = 'oauth';
+      } catch { /* fall through to static list */ }
+    }
 
     // Try API-based listing first (ollama needs no token)
     if (token || provider === 'ollama') {
       try {
-        const instance = ProviderFactory.create(provider, token || 'ollama-local');
+        const instance = ProviderFactory.create(provider, token || 'ollama-local', { authMode });
         const models = await instance.listModels();
         return { ok: true, models, source: 'api' };
       } catch (err) { console.debug('[settings] listModels API failed, falling back to static:', err.message); }
@@ -499,6 +521,64 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     settings.allowedDirectories = dirs;
     setSettings(settings);
     return { ok: true, allowedDirectories: dirs };
+  }));
+
+  // --- Anthropic OAuth handlers ---
+
+  ipcMain.handle('settings:anthropicOAuthStatus', wrapHandler('settings:anthropicOAuthStatus', async () => {
+    if (!anthropicOAuth) {
+      return { connected: false };
+    }
+    return anthropicOAuth.getStatus();
+  }));
+
+  ipcMain.handle('settings:anthropicOAuthStart', wrapHandler('settings:anthropicOAuthStart', async () => {
+    if (!anthropicOAuth) {
+      return { ok: false, error: 'OAuth handler not available.' };
+    }
+
+    if (!anthropicOAuth.clientId) {
+      return { ok: false, error: 'Anthropic OAuth Client ID is not configured. Please set it first.' };
+    }
+
+    try {
+      const result = await anthropicOAuth.startAuthFlow();
+      const status = updateStatus('anthropic', {
+        ok: true,
+        message: 'Connected via OAuth (Max subscription)'
+      });
+      return { ok: true, status, expiresAt: result.expiresAt };
+    } catch (err) {
+      return { ok: false, error: err.message || 'OAuth flow failed.' };
+    }
+  }));
+
+  ipcMain.handle('settings:anthropicOAuthDisconnect', wrapHandler('settings:anthropicOAuthDisconnect', async () => {
+    if (!anthropicOAuth) {
+      return { ok: false, error: 'OAuth handler not available.' };
+    }
+
+    anthropicOAuth.clearStoredTokens();
+    return { ok: true };
+  }));
+
+  ipcMain.handle('settings:anthropicOAuthSaveClientId', wrapHandler('settings:anthropicOAuthSaveClientId', async (_event, { clientId } = {}) => {
+    const id = String(clientId || '').trim();
+    if (!id) {
+      return { ok: false, error: 'Client ID is required.' };
+    }
+
+    const { store } = anthropicOAuth;
+    store.set('anthropicOAuthClientId', id);
+    anthropicOAuth.clientId = id;
+    return { ok: true };
+  }));
+
+  ipcMain.handle('settings:anthropicOAuthGetClientId', wrapHandler('settings:anthropicOAuthGetClientId', async () => {
+    if (!anthropicOAuth) {
+      return { ok: true, clientId: '' };
+    }
+    return { ok: true, clientId: anthropicOAuth.clientId || '' };
   }));
 }
 

@@ -1,7 +1,10 @@
 class BaseLLMProvider {
-  constructor(apiKey) {
+  constructor(apiKey, options = {}) {
     this.apiKey = apiKey;
-    this.validateApiKey();
+    this.authMode = options.authMode || 'api-key';
+    if (this.authMode === 'api-key') {
+      this.validateApiKey();
+    }
   }
 
   validateApiKey() {

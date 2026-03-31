@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, safeStorage, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
+const AnthropicOAuth = require('./src/auth/anthropic-oauth');
 
 // E2E test bridge — loaded in app.whenReady() when KL_TEST_BRIDGE_PORT is set
 const { default: Store } = require('electron-store');
@@ -723,6 +724,13 @@ const decryptToken = (encrypted) => {
   return safeStorage.decryptString(buffer);
 };
 
+const anthropicOAuth = new AnthropicOAuth({
+  clientId: store.get('anthropicOAuthClientId', ''),
+  encryptToken,
+  decryptToken,
+  store
+});
+
 const updateStatus = (provider, status) => {
   const current = getApiStatus();
   const updated = {
@@ -849,13 +857,40 @@ const appendMessageToChat = (chatId, sender, text, metadata = {}) => {
   return updated.find((chat) => chat.id === chatId) || null;
 };
 
+let _cachedOAuthAccessToken = null;
+let _cachedOAuthExpiresAt = 0;
+
 const getDecryptedProviderToken = (provider) => {
+  // For Anthropic, check if OAuth is connected first
+  if (provider === 'anthropic' && anthropicOAuth.isConnected()) {
+    // Return cached token if still valid (with 60s buffer)
+    if (_cachedOAuthAccessToken && Date.now() < _cachedOAuthExpiresAt - 60_000) {
+      return _cachedOAuthAccessToken;
+    }
+    // Signal that OAuth is active but token needs refresh
+    return '__anthropic_oauth__';
+  }
+
   const tokens = getApiTokens();
   const encryptedToken = tokens[provider];
   if (!encryptedToken) {
     throw new Error(`No token saved for ${providerLabels[provider] || provider}.`);
   }
   return decryptToken(encryptedToken);
+};
+
+const refreshAnthropicOAuthToken = async () => {
+  try {
+    const result = await anthropicOAuth.getValidAccessToken();
+    _cachedOAuthAccessToken = result;
+    const status = anthropicOAuth.getStatus();
+    _cachedOAuthExpiresAt = status.expiresAt || (Date.now() + 3600_000);
+    return result;
+  } catch (err) {
+    _cachedOAuthAccessToken = null;
+    _cachedOAuthExpiresAt = 0;
+    throw err;
+  }
 };
 
 const saveProviderToken = (provider, token) => {
@@ -1935,28 +1970,46 @@ const inferenceRouter = new InferenceRouter({
   getSettings,
   getProviderModel,
   getProviderToken: getDecryptedProviderToken,
-  createProvider: (providerType, token) => ProviderFactory.createProvider(providerType, token)
+  createProvider: (providerType, token) => {
+    if (providerType === 'anthropic' && token === '__anthropic_oauth__') {
+      // OAuth mode — token will be refreshed async before first API call
+      return ProviderFactory.createProvider(providerType, 'oauth-placeholder', { authMode: 'oauth' });
+    }
+    return ProviderFactory.createProvider(providerType, token);
+  }
 });
 
-const resolveInference = (selection = {}) => {
-  if (typeof selection === 'string') {
-    return inferenceRouter.resolve({ provider: selection });
-  }
+// Wrap resolveInference to handle async OAuth token refresh
+const _originalResolve = inferenceRouter.resolve.bind(inferenceRouter);
+const _originalResolveWithSmart = inferenceRouter.resolveWithSmartRouting.bind(inferenceRouter);
 
-  // When a message is provided, attempt smart routing first
-  if (selection && selection.message) {
-    return inferenceRouter.resolveWithSmartRouting(
+const ensureOAuthToken = async (result) => {
+  if (result.providerType === 'anthropic' && result.provider?.authMode === 'oauth') {
+    const accessToken = await refreshAnthropicOAuthToken();
+    result.provider.apiKey = accessToken;
+  }
+  return result;
+};
+
+const resolveInference = async (selection = {}) => {
+  let result;
+  if (typeof selection === 'string') {
+    result = inferenceRouter.resolve({ provider: selection });
+  } else if (selection && selection.message) {
+    result = inferenceRouter.resolveWithSmartRouting(
       selection,
       selection.message,
       { agentMode: !!selection.agentMode }
     );
+  } else {
+    result = inferenceRouter.resolve(selection || {});
   }
 
-  return inferenceRouter.resolve(selection || {});
+  return ensureOAuthToken(result);
 };
 
 const createAgentRuntime = async (providerType, event = null, approvalRequester = null) => {
-  const resolution = resolveInference(providerType);
+  const resolution = await resolveInference(providerType);
   if (!['openai', 'anthropic'].includes(resolution.providerType)) {
     throw new Error('Active provider does not support agent orchestration yet.');
   }
@@ -2372,6 +2425,7 @@ registerHandlers(ipcMain, {
   decryptToken,
   updateStatus,
   runLlmCommand,
+  anthropicOAuth,
   setActiveInferenceTier,
   setNotificationSettings,
 

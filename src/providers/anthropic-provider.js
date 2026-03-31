@@ -32,11 +32,18 @@ class AnthropicProvider extends BaseLLMProvider {
   }
 
   getHeaders() {
-    return {
+    const headers = {
       'Content-Type': 'application/json',
-      'x-api-key': this.apiKey,
       'anthropic-version': '2023-06-01'
     };
+
+    if (this.authMode === 'oauth') {
+      headers['Authorization'] = `Bearer ${this.apiKey}`;
+    } else {
+      headers['x-api-key'] = this.apiKey;
+    }
+
+    return headers;
   }
 
   formatMessages(chatHistory) {

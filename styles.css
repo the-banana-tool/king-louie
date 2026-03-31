@@ -1655,6 +1655,88 @@ body {
   color: var(--error);
 }
 
+/* --- Anthropic OAuth --------------------------------------- */
+.provider-oauth-section {
+  margin-top: 8px;
+  padding-top: 4px;
+}
+
+.provider-oauth-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.provider-oauth-divider::before,
+.provider-oauth-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.provider-oauth-connected {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(76, 175, 80, 0.08);
+  border: 1px solid rgba(76, 175, 80, 0.25);
+}
+
+.oauth-status-icon.connected {
+  font-size: 12px;
+  color: #66bb6a;
+  flex: 1;
+}
+
+.provider-oauth-client-id {
+  margin-bottom: 6px;
+}
+
+.oauth-label-sm {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+  display: block;
+}
+
+.provider-input-sm {
+  font-size: 12px;
+  padding: 5px 8px;
+}
+
+.btn-oauth {
+  background: linear-gradient(135deg, #d4a574 0%, #c2956a 100%);
+  color: #1a1a2e;
+  font-weight: 600;
+  border: none;
+  padding: 7px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: opacity 0.15s;
+  margin-top: 4px;
+}
+
+.btn-oauth:hover {
+  opacity: 0.9;
+}
+
+.btn-oauth:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-sm {
+  padding: 4px 10px;
+  font-size: 11px;
+}
+
 /* --- Tool approval modal ----------------------------------- */
 .tool-approval-modal {
   position: fixed;

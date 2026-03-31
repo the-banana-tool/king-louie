@@ -34,7 +34,7 @@ function registerChatHandlers(ipcMain, context = {}) {
    */
   async function autoNameChat(chatId, userMessage, assistantResponse, sender) {
     try {
-      const inference = resolveInference();
+      const inference = await resolveInference();
       const provider = inference.provider;
       if (typeof provider.sendMessage !== 'function') return;
 
@@ -264,7 +264,7 @@ function registerChatHandlers(ipcMain, context = {}) {
       throw new Error('Chat not found');
     }
 
-    const inference = resolveInference({ message: safeMessage, agentMode });
+    const inference = await resolveInference({ message: safeMessage, agentMode });
     if (!['openai', 'anthropic', 'gemini'].includes(inference.providerType)) {
       throw new Error('Active provider does not support chat completions yet.');
     }

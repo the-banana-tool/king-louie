@@ -482,7 +482,16 @@ contextBridge.exposeInMainWorld(
       testWebSearchKey: (payload) => {
         validateObject(payload, 'payload');
         return ipcRenderer.invoke('settings:testWebSearchKey', payload);
-      }
+      },
+      // Anthropic OAuth
+      anthropicOAuthStatus: () => ipcRenderer.invoke('settings:anthropicOAuthStatus'),
+      anthropicOAuthStart: () => ipcRenderer.invoke('settings:anthropicOAuthStart'),
+      anthropicOAuthDisconnect: () => ipcRenderer.invoke('settings:anthropicOAuthDisconnect'),
+      anthropicOAuthSaveClientId: (payload) => {
+        validateObject(payload, 'payload');
+        return ipcRenderer.invoke('settings:anthropicOAuthSaveClientId', payload);
+      },
+      anthropicOAuthGetClientId: () => ipcRenderer.invoke('settings:anthropicOAuthGetClientId')
     },
     hooks: {
       list: () => ipcRenderer.invoke('hooks:list'),
