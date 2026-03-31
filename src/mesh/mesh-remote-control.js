@@ -46,7 +46,7 @@ class MeshRemoteControl extends EventEmitter {
         console.error(`[mesh-rc] handler error for ${method}:`, err.message);
         try {
           this.transport.sendRpcResponse(from, id, null, err);
-        } catch { /* peer might be disconnected */ }
+        } catch (sendErr) { console.debug('[mesh-rc] failed to send error response (peer may be disconnected):', sendErr.message); }
       });
     }
   }

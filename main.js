@@ -764,7 +764,7 @@ const buildRuntimeSystemPrompt = (runtimeEnvironment = {}) => {
       }
       sections.push('When the user explicitly asks you to use a specific skill, prefer the Skill tool over built-in tools like Git or Bash.');
     }
-  } catch { /* skills unavailable */ }
+  } catch (err) { console.debug('[system-prompt] skills unavailable:', err.message); }
 
   return sections.join('\n');
 };
@@ -2100,6 +2100,12 @@ const initializeAgentInfrastructure = async () => {
     });
   } catch (err) {
     console.warn('[main] Mesh initialization failed:', err.message);
+    console.warn('[main] Mesh initialization stack:', err.stack);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.executeJavaScript(
+        `console.error('[main→renderer] Mesh initialization failed:', ${JSON.stringify(err.message)}, ${JSON.stringify(err.stack)})`
+      ).catch(() => {});
+    }
   }
 
   gatewayServer.on('agent:message', async ({ agentId, sessionKey, message }) => {
@@ -2417,6 +2423,16 @@ app.whenReady().then(async () => {
       mainWindow.webContents.send('task:unblocked', task);
     }
   });
+
+  // Notify renderer that mesh is ready so it can refresh status
+  if (meshContext && mainWindow && !mainWindow.isDestroyed()) {
+    const sendReady = () => mainWindow.webContents.send('mesh:ready');
+    if (mainWindow.webContents.isLoading()) {
+      mainWindow.webContents.once('did-finish-load', sendReady);
+    } else {
+      sendReady();
+    }
+  }
 
   // Forward mesh events to renderer
   if (meshContext) {

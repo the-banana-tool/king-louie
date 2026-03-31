@@ -15,6 +15,7 @@ function registerMeshHandlers(ipcMain, context = {}) {
   ipcMain.handle(C.MESH_STATUS, wrapHandler(C.MESH_STATUS, async () => {
     const mc = getMeshContext();
     if (!mc) {
+      console.warn('[mesh-handlers] status requested but meshContext is null');
       return { enabled: false };
     }
 

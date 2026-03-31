@@ -306,7 +306,7 @@ class MeshTransport extends EventEmitter {
         } else if (resp.type && this.peers.has(remoteIdentity.peerId)) {
           this._handlePeerMessage(remoteIdentity.peerId, resp);
         }
-      } catch { /* ignore parse errors */ }
+      } catch (err) { console.debug('[mesh-transport] inbound message parse error:', err.message); }
     });
   }
 
@@ -437,7 +437,7 @@ class MeshTransport extends EventEmitter {
       try {
         const msg = JSON.parse(data);
         this._handlePeerMessage(remoteIdentity.peerId, msg);
-      } catch { /* ignore */ }
+      } catch (err) { console.debug('[mesh-transport] peer message parse error:', err.message); }
     });
 
     ws.on('close', () => {

@@ -631,6 +631,7 @@ contextBridge.exposeInMainWorld(
         validateObject(payload, 'payload');
         return ipcRenderer.invoke('mesh:settingsSave', payload);
       },
+      onReady: (callback) => registerOnce('mesh:ready', callback),
       onPeerConnected: (callback) => registerOnce('mesh:peerConnected', callback),
       onPeerDisconnected: (callback) => registerOnce('mesh:peerDisconnected', callback),
       onTaskCompleted: (callback) => registerOnce('mesh:taskCompleted', callback),

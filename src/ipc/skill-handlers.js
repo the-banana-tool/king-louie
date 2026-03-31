@@ -82,7 +82,7 @@ function registerSkillHandlers(ipcMain, context = {}) {
     let existing = {};
     try {
       existing = JSON.parse(fs.readFileSync(customization.path, 'utf-8'));
-    } catch { /* start fresh */ }
+    } catch (err) { console.debug('[skill] customization read failed, starting fresh:', err.message); }
 
     existing.enabled = Boolean(enabled);
     fs.writeFileSync(customization.path, JSON.stringify(existing, null, 2) + '\n', 'utf-8');
@@ -149,7 +149,7 @@ function registerSkillHandlers(ipcMain, context = {}) {
           stdio: 'pipe'
         });
       } catch (err) {
-        try { fs.rmSync(targetDir, { recursive: true, force: true }); } catch { /* ignore */ }
+        try { fs.rmSync(targetDir, { recursive: true, force: true }); } catch (cleanupErr) { console.warn('[skill] cleanup after clone failure failed:', cleanupErr.message); }
         return { ok: false, error: `Git clone failed: ${err.stderr?.toString().trim() || err.message}` };
       }
       skillDir = targetDir;
@@ -249,7 +249,7 @@ function registerSkillHandlers(ipcMain, context = {}) {
     let existing = {};
     try {
       existing = JSON.parse(fs.readFileSync(customization.path, 'utf-8'));
-    } catch { /* start fresh */ }
+    } catch (err) { console.debug('[skill] customization read failed, starting fresh:', err.message); }
 
     existing.settings = { ...(existing.settings || {}), ...settings };
     fs.writeFileSync(customization.path, JSON.stringify(existing, null, 2) + '\n', 'utf-8');
@@ -460,7 +460,7 @@ function registerSkillHandlers(ipcMain, context = {}) {
             const remotePkg = childProcess.execSync('git show @{u}:package.json', { cwd: skillPath, timeout: 5000, stdio: 'pipe' }).toString();
             const parsed = JSON.parse(remotePkg);
             remoteVersion = parsed.version || null;
-          } catch { /* no package.json on remote or parse error */ }
+          } catch (err) { console.debug('[skill] remote package.json check failed:', err.message); }
 
           const behind = childProcess.execSync('git rev-list HEAD..@{u} --count', { cwd: skillPath, timeout: 5000, stdio: 'pipe' }).toString().trim();
 

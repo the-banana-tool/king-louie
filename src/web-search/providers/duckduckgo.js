@@ -47,7 +47,7 @@ class DuckDuckGoSearch extends SearchProvider {
               const urlParams = new URL('https:' + url).searchParams;
               const uddg = urlParams.get('uddg');
               if (uddg) finalUrl = decodeURIComponent(uddg);
-            } catch(e) {}
+            } catch(e) { console.debug('[duckduckgo] URL decode failed:', e.message); }
         }
 
         const snippet = snippetEl.textContent?.trim();

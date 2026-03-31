@@ -1405,7 +1405,7 @@ function renderChatInfoPopover() {
       if (populateModels) populateModels(newInfo.provider || 'openai', newInfo.model || '');
       if (typeof renderInferenceTierDetails === 'function') renderInferenceTierDetails();
       addStatusMessage(`Tier changed: ${prevTier} → ${tierSelect.value}`);
-    } catch (err) { /* silently fail */ }
+    } catch (err) { console.warn('[tier-change] failed:', err); }
   });
   tierRow.appendChild(tierLabel);
   tierRow.appendChild(tierSelect);
@@ -1523,7 +1523,7 @@ function renderChatInfoPopover() {
       appState.settings.inference = result.inference || appState.settings.inference;
       if (typeof renderInferenceTierDetails === 'function') renderInferenceTierDetails();
       addStatusMessage(`Provider changed: ${prevProvider} → ${newProvider}`);
-    } catch { /* silently fail */ }
+    } catch (err) { console.warn('[provider-change] failed:', err); }
   });
 
   // Model change → persist
@@ -1540,7 +1540,7 @@ function renderChatInfoPopover() {
       appState.settings.inference = result.inference || appState.settings.inference;
       if (typeof renderInferenceTierDetails === 'function') renderInferenceTierDetails();
       addStatusMessage(`Model changed (${providerSelect.value}): ${prevModel || '(default)'} → ${modelSelect.value || '(default)'}`);
-    } catch { /* silently fail */ }
+    } catch (err) { console.warn('[model-change] failed:', err); }
   });
 
   // Load models for current provider
@@ -2156,7 +2156,7 @@ function renderProviderCard(providerKey, provider) {
         opt.selected = true;
         modelSelect.insertBefore(opt, modelSelect.firstChild);
       }
-    } catch { /* keep the seeded option */ }
+    } catch (err) { console.debug('[model-populate] seed failed:', err); }
   })();
 
   // Auto-save on change
@@ -4384,7 +4384,7 @@ async function sendMessage() {
       try {
         const data = unwrapIpcResult(await window.electron.chat.load(), 'reload');
         appState.chats = data.chats || [];
-      } catch { /* best-effort reload */ }
+      } catch (err) { console.warn('[chat] best-effort reload failed:', err); }
     }
     refreshUI();
   } catch (error) {
@@ -6083,7 +6083,8 @@ if (dom.diagnosticsRunBtn) {
 
 async function loadMeshStatus() {
   try {
-    const status = await window.electron.mesh.status();
+    const result = await window.electron.mesh.status();
+    const status = result?.data || result;
 
     if (!status || !status.enabled) {
       if (dom.meshPeerId) dom.meshPeerId.textContent = 'Mesh not enabled';
@@ -6271,7 +6272,8 @@ function initMeshHandlers() {
   if (dom.meshPairGenerateBtn) {
     dom.meshPairGenerateBtn.addEventListener('click', async () => {
       try {
-        const result = await window.electron.mesh.startPairing();
+        const raw = await window.electron.mesh.startPairing();
+        const result = raw?.data || raw;
         if (dom.meshPairingCode) {
           dom.meshPairingCode.textContent = result.code;
           dom.meshPairingCode.className = 'provider-input mesh-pairing-code';
@@ -6303,7 +6305,8 @@ function initMeshHandlers() {
           dom.meshPairingStatus.textContent = 'Pairing...';
           dom.meshPairingStatus.classList.remove('error');
         }
-        const result = await window.electron.mesh.acceptPairing({ code, address, port: Number(port) });
+        const raw = await window.electron.mesh.acceptPairing({ code, address, port: Number(port) });
+        const result = raw?.data || raw;
         if (dom.meshPairingStatus) {
           dom.meshPairingStatus.textContent = `Paired with ${result.displayName || result.peerId}!`;
         }
@@ -6335,7 +6338,8 @@ function initMeshHandlers() {
           dom.meshConnectStatus.textContent = 'Connecting...';
           dom.meshConnectStatus.classList.remove('error');
         }
-        const result = await window.electron.mesh.addPeer({ address, port: Number(port || 18791) });
+        const raw = await window.electron.mesh.addPeer({ address, port: Number(port || 18791) });
+        const result = raw?.data || raw;
         if (dom.meshConnectStatus) {
           dom.meshConnectStatus.textContent = `Connected to ${result.displayName || result.peerId}`;
         }
@@ -6376,6 +6380,13 @@ function initMeshHandlers() {
       if (dom.settingsDrawer) dom.settingsDrawer.hidden = false;
       switchSettingsTab('mesh');
     });
+  }
+
+  // Listen for mesh ready (fires after main process finishes initialization)
+  if (window.electron.mesh?.onReady) {
+    unsubscribeHandlers.push(
+      window.electron.mesh.onReady(() => loadMeshStatus())
+    );
   }
 
   // Listen for real-time mesh events
@@ -6499,7 +6510,7 @@ function collectWizardStepData() {
 }
 
 async function closeWizard() {
-  try { await window.electron.wizard.complete(); } catch { /* ok */ }
+  try { await window.electron.wizard.complete(); } catch (err) { console.warn('[wizard] complete failed:', err); }
   if (dom.wizardOverlay) dom.wizardOverlay.hidden = true;
 }
 

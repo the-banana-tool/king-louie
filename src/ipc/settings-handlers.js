@@ -372,7 +372,7 @@ function registerSettingsHandlers(ipcMain, context = {}) {
         const instance = ProviderFactory.create(provider, token || 'ollama-local');
         const models = await instance.listModels();
         return { ok: true, models, source: 'api' };
-      } catch { /* fall through to static */ }
+      } catch (err) { console.debug('[settings] listModels API failed, falling back to static:', err.message); }
     }
 
     // Fall back to static model list

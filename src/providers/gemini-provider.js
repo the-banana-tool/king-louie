@@ -106,7 +106,7 @@ class GeminiProvider extends BaseLLMProvider {
               args = typeof call.function.arguments === 'string'
                 ? JSON.parse(call.function.arguments)
                 : call.function.arguments || {};
-            } catch { args = {}; }
+            } catch (err) { console.debug('[gemini] function args parse failed:', err.message); args = {}; }
             parts.push({
               functionCall: {
                 name: call.function.name,

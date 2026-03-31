@@ -34,7 +34,7 @@ function getSkillToolDescription() {
       const skillList = skills.map((s) => `"${s.id}"`).join(', ');
       return `Invoke an installed skill by ID. When the user mentions a skill by name, use this tool. Installed skills: ${skillList}. Use list=true to see full details.`;
     }
-  } catch { /* fall through */ }
+  } catch (err) { console.debug('[skill-tool] failed to list skills:', err.message); }
   return 'Invoke an installed skill by ID, or list available skills for discovery.';
 }
 

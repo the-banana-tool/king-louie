@@ -338,7 +338,7 @@ class OpenAIProvider extends BaseLLMProvider {
           llmMetrics
         };
       }
-    } catch { /* not a tool call — plain text response */ }
+    } catch (err) { console.debug('[openai] tool call parse failed:', err.message); }
 
     return { type: 'text', content: text, llmMetrics };
   }
