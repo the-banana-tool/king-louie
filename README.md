@@ -24,15 +24,22 @@ An open-source, cross-platform AI chat desktop application built with Electron. 
 
 ## Quick Start
 
-```bash
-# Install dependencies
-npm install
+Download the latest release for your platform from [Releases](https://github.com/the-banana-tool/king-louie/releases):
 
-# Run the app
-npm start
-```
+| Platform | Download |
+|----------|----------|
+| Windows | `King-Louie-Setup-x.x.x.exe` |
+| macOS | `King-Louie-x.x.x-arm64.dmg` |
+| Linux | `King-Louie-x.x.x.AppImage` or `.deb` |
 
 On first launch, the onboarding wizard walks you through selecting a provider and entering your API key.
+
+### Building from Source
+
+```bash
+npm install
+npm start
+```
 
 ## Supported Providers
 
