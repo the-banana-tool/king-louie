@@ -6345,6 +6345,7 @@ function initMeshHandlers() {
     dom.meshPairGenerateBtn.addEventListener('click', async () => {
       try {
         const raw = await window.electron.mesh.startPairing();
+        if (raw?.ok === false) throw new Error(raw.error || 'Failed to generate pairing code');
         const result = raw?.data || raw;
         if (dom.meshPairingCode) {
           dom.meshPairingCode.textContent = result.code;
@@ -6383,6 +6384,7 @@ function initMeshHandlers() {
           dom.meshPairingStatus.classList.remove('error');
         }
         const raw = await window.electron.mesh.acceptPairing({ code, address, port: Number(port) });
+        if (raw?.ok === false) throw new Error(raw.error || 'Pairing failed');
         const result = raw?.data || raw;
         if (dom.meshPairingStatus) {
           dom.meshPairingStatus.textContent = `Paired with ${result.displayName || result.peerId}!`;
@@ -6419,6 +6421,7 @@ function initMeshHandlers() {
           dom.meshConnectStatus.classList.remove('error');
         }
         const raw = await window.electron.mesh.addPeer({ address, port: Number(port || 18791) });
+        if (raw?.ok === false) throw new Error(raw.error || 'Failed to connect');
         const result = raw?.data || raw;
         if (dom.meshConnectStatus) {
           dom.meshConnectStatus.textContent = `Connected to ${result.displayName || result.peerId}`;

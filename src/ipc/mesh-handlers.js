@@ -84,7 +84,15 @@ function registerMeshHandlers(ipcMain, context = {}) {
     }
 
     const peer = await mc.pairing.acceptCode(code, address, Number(port));
-    return { peerId: peer.peerId, displayName: peer.displayName };
+
+    // Auto-connect to the newly paired peer
+    try {
+      await mc.transport.connectToPeer(address, Number(port));
+    } catch (err) {
+      console.debug('[mesh] auto-connect after pairing failed:', err.message);
+    }
+
+    return { peerId: peer.peerId, displayName: peer.displayName || '' };
   }));
 
   ipcMain.handle(C.MESH_DISPATCH_TASK, wrapHandler(C.MESH_DISPATCH_TASK, async (_event, params = {}) => {

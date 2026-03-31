@@ -1,9 +1,12 @@
 const { describe, it, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert');
+const crypto = require('crypto');
 
 const { MeshIdentity } = require('../src/mesh/mesh-identity');
 const { MeshTransport } = require('../src/mesh/mesh-transport');
 const { MeshPairing, WORDLIST } = require('../src/mesh/mesh-pairing');
+const { wrapHandler } = require('../src/ipc/wrap-handler');
+const { registerMeshHandlers } = require('../src/ipc/mesh-handlers');
 
 describe('MeshPairing', () => {
   let identityA, identityB;
@@ -483,6 +486,318 @@ describe('MeshPairing', () => {
       assert.ok(true, 'transport should not crash on unhandled pair:request');
 
       ws.close();
+    });
+  });
+
+  describe('IPC handler integration', () => {
+    // Simulates the full IPC path: handler → wrapHandler → renderer unwrap
+
+    function createIpcMainMock() {
+      const handlers = new Map();
+      return {
+        handlers,
+        handle(channel, handler) { handlers.set(channel, handler); }
+      };
+    }
+
+    it('MESH_PAIR_START returns code wrapped correctly for renderer', async () => {
+      const portA = nextPort();
+      transportA = new MeshTransport({ identity: identityA, port: portA, useTls: false });
+      pairingA = new MeshPairing(identityA, transportA);
+
+      const ipcMain = createIpcMainMock();
+      registerMeshHandlers(ipcMain, {
+        getMeshContext: () => ({
+          identity: identityA,
+          transport: transportA,
+          pairing: pairingA,
+          discovery: { isAvailable: () => false, getDiscoveredPeers: () => [] },
+          remoteControl: { getStatus: () => ({}) },
+          swarm: { listSwarms: () => [] }
+        }),
+        getStore: () => ({ get: () => null, set: () => {} })
+      });
+
+      const handler = ipcMain.handlers.get('mesh:pairStart');
+      assert.ok(handler, 'mesh:pairStart handler should be registered');
+
+      const result = await handler({});
+      // wrapHandler wraps as { ok: true, data: { pairingId, code } }
+      assert.strictEqual(result.ok, true);
+      assert.ok(result.data.pairingId, 'should have pairingId');
+      assert.ok(result.data.code, 'should have code');
+      assert.strictEqual(result.data.code.split(' ').length, 6);
+
+      // Renderer unwraps as: const result = raw?.data || raw
+      const rendererResult = result.data;
+      assert.ok(rendererResult.code, 'renderer should be able to read code from .data');
+    });
+
+    it('MESH_PAIR_ACCEPT returns peerId and displayName wrapped for renderer', async () => {
+      const portA = nextPort();
+      const portB = nextPort();
+
+      transportA = new MeshTransport({ identity: identityA, port: portA, useTls: false });
+      transportB = new MeshTransport({ identity: identityB, port: portB, useTls: false });
+      pairingA = new MeshPairing(identityA, transportA);
+      pairingB = new MeshPairing(identityB, transportB);
+
+      transportA.onPairingRequest = (ws, msg) => pairingA.handlePairingRequest(ws, msg);
+
+      await transportA.start();
+      await transportB.start();
+
+      const { code } = pairingA.generateCode();
+
+      const ipcMain = createIpcMainMock();
+      registerMeshHandlers(ipcMain, {
+        getMeshContext: () => ({
+          identity: identityB,
+          transport: transportB,
+          pairing: pairingB,
+          discovery: { isAvailable: () => false, getDiscoveredPeers: () => [] },
+          remoteControl: { getStatus: () => ({}) },
+          swarm: { listSwarms: () => [] }
+        }),
+        getStore: () => ({ get: () => null, set: () => {} })
+      });
+
+      const handler = ipcMain.handlers.get('mesh:pairAccept');
+      const result = await handler({}, { code, address: '127.0.0.1', port: portA });
+
+      // wrapHandler wraps as { ok: true, data: { peerId, displayName } }
+      assert.strictEqual(result.ok, true);
+
+      // Renderer does: const result = raw?.data || raw
+      const rendererResult = result.data;
+      assert.strictEqual(rendererResult.peerId, identityA.peerId, 'renderer should see peerId');
+      assert.strictEqual(rendererResult.displayName, 'Node A', 'renderer should see displayName');
+
+      // Verify the exact template string the renderer uses
+      const displayText = `Paired with ${rendererResult.displayName || rendererResult.peerId}!`;
+      assert.ok(!displayText.includes('undefined'), `display text should not contain undefined, got: "${displayText}"`);
+    });
+
+    it('MESH_STATUS returns enabled:true wrapped for renderer', async () => {
+      const portA = nextPort();
+      transportA = new MeshTransport({ identity: identityA, port: portA, useTls: false });
+      pairingA = new MeshPairing(identityA, transportA);
+
+      const ipcMain = createIpcMainMock();
+      registerMeshHandlers(ipcMain, {
+        getMeshContext: () => ({
+          identity: identityA,
+          transport: transportA,
+          pairing: pairingA,
+          discovery: { isAvailable: () => false, getDiscoveredPeers: () => [] },
+          remoteControl: { getStatus: () => ({}) },
+          swarm: { listSwarms: () => [] }
+        }),
+        getStore: () => ({ get: () => null, set: () => {} })
+      });
+
+      const handler = ipcMain.handlers.get('mesh:status');
+      const result = await handler({});
+
+      assert.strictEqual(result.ok, true);
+
+      // Renderer does: const status = result?.data || result
+      const status = result.data;
+      assert.strictEqual(status.enabled, true, 'renderer should see enabled: true via .data');
+      assert.strictEqual(status.peerId, identityA.peerId);
+    });
+
+    it('MESH_STATUS returns enabled:false when meshContext is null', async () => {
+      const ipcMain = createIpcMainMock();
+      registerMeshHandlers(ipcMain, {
+        getMeshContext: () => null,
+        getStore: () => ({ get: () => null, set: () => {} })
+      });
+
+      const handler = ipcMain.handlers.get('mesh:status');
+      const result = await handler({});
+
+      // wrapHandler wraps { enabled: false } as { ok: true, data: { enabled: false } }
+      assert.strictEqual(result.ok, true);
+
+      // Renderer does: const status = result?.data || result
+      const status = result.data;
+      assert.strictEqual(status.enabled, false);
+    });
+
+    it('MESH_PAIR_ACCEPT error is wrapped as ok:false with error message', async () => {
+      const ipcMain = createIpcMainMock();
+      registerMeshHandlers(ipcMain, {
+        getMeshContext: () => null,
+        getStore: () => ({ get: () => null, set: () => {} })
+      });
+
+      const handler = ipcMain.handlers.get('mesh:pairAccept');
+      const result = await handler({}, { code: 'test', address: '1.2.3.4', port: 18791 });
+
+      // When mesh is not enabled, handler throws and wrapHandler catches it
+      assert.strictEqual(result.ok, false);
+      assert.ok(result.error, 'should have error message');
+      assert.ok(result.error.includes('not enabled'), `error should mention not enabled, got: "${result.error}"`);
+
+      // Renderer does: const result = raw?.data || raw
+      // When ok:false, data is undefined, so it falls back to raw
+      const rendererResult = result.data || result;
+      // rendererResult.peerId would be undefined → "Paired with undefined"
+      // This is the bug path — renderer should check result.ok first
+      assert.strictEqual(rendererResult.peerId, undefined, 'peerId should be undefined on error');
+    });
+  });
+
+  describe('acceptCode result shape', () => {
+    it('returns all expected fields for renderer consumption', async () => {
+      const portA = nextPort();
+      const portB = nextPort();
+
+      transportA = new MeshTransport({ identity: identityA, port: portA, useTls: false });
+      transportB = new MeshTransport({ identity: identityB, port: portB, useTls: false });
+      pairingA = new MeshPairing(identityA, transportA);
+      pairingB = new MeshPairing(identityB, transportB);
+
+      transportA.onPairingRequest = (ws, msg) => pairingA.handlePairingRequest(ws, msg);
+
+      await transportA.start();
+      await transportB.start();
+
+      const { code } = pairingA.generateCode();
+      const peerInfo = await pairingB.acceptCode(code, '127.0.0.1', portA);
+
+      // These are the fields the IPC handler passes through
+      assert.ok(peerInfo.peerId, 'must have peerId');
+      assert.strictEqual(typeof peerInfo.peerId, 'string');
+      assert.ok(peerInfo.peerId.startsWith('kl-'), 'peerId should start with kl-');
+      assert.strictEqual(typeof peerInfo.displayName, 'string');
+      assert.ok(peerInfo.publicKey, 'must have publicKey');
+      assert.ok(peerInfo.address, 'must have address');
+      assert.ok(peerInfo.port, 'must have port');
+    });
+
+    it('both sides store TLS fingerprint after TLS pairing', async () => {
+      const portA = nextPort();
+      const portB = nextPort();
+
+      transportA = new MeshTransport({ identity: identityA, port: portA, useTls: true });
+      transportB = new MeshTransport({ identity: identityB, port: portB, useTls: true });
+      pairingA = new MeshPairing(identityA, transportA);
+      pairingB = new MeshPairing(identityB, transportB);
+
+      transportA.onPairingRequest = (ws, msg) => pairingA.handlePairingRequest(ws, msg);
+
+      await transportA.start();
+      await transportB.start();
+
+      const { code } = pairingA.generateCode();
+      await pairingB.acceptCode(code, '127.0.0.1', portA);
+
+      // Responder (B) should have A's fingerprint
+      const trustedOnB = transportB.trustedPeers.get(identityA.peerId);
+      assert.ok(trustedOnB.tlsFingerprint, 'B should store A\'s TLS fingerprint');
+      assert.strictEqual(trustedOnB.tlsFingerprint, identityA.tlsFingerprint);
+
+      // Initiator (A) should have B's fingerprint
+      const trustedOnA = transportA.trustedPeers.get(identityB.peerId);
+      assert.ok(trustedOnA.tlsFingerprint, 'A should store B\'s TLS fingerprint');
+      assert.strictEqual(trustedOnA.tlsFingerprint, identityB.tlsFingerprint);
+    });
+  });
+
+  describe('auto-connect after pairing', () => {
+    it('paired peers can auto-connect and appear as connected', async () => {
+      const portA = nextPort();
+      const portB = nextPort();
+
+      transportA = new MeshTransport({ identity: identityA, port: portA, useTls: false });
+      transportB = new MeshTransport({ identity: identityB, port: portB, useTls: false });
+      pairingA = new MeshPairing(identityA, transportA);
+      pairingB = new MeshPairing(identityB, transportB);
+
+      transportA.onPairingRequest = (ws, msg) => pairingA.handlePairingRequest(ws, msg);
+
+      await transportA.start();
+      await transportB.start();
+
+      const { code } = pairingA.generateCode();
+      await pairingB.acceptCode(code, '127.0.0.1', portA);
+
+      // After pairing, peers are trusted but NOT connected
+      assert.strictEqual(transportA.getConnectedPeers().length, 0, 'no connected peers yet');
+      assert.strictEqual(transportB.getConnectedPeers().length, 0, 'no connected peers yet');
+      assert.ok(transportA.trustedPeers.has(identityB.peerId), 'but B is trusted');
+      assert.ok(transportB.trustedPeers.has(identityA.peerId), 'but A is trusted');
+
+      // Simulate what the IPC handler should do: auto-connect after pairing
+      const peerConnectedOnA = new Promise((resolve) => {
+        transportA.once('peerConnected', resolve);
+      });
+
+      await transportB.connectToPeer('127.0.0.1', portA);
+      await peerConnectedOnA;
+
+      assert.strictEqual(transportA.getConnectedPeers().length, 1, 'A should have 1 connected peer');
+      assert.strictEqual(transportB.getConnectedPeers().length, 1, 'B should have 1 connected peer');
+      assert.strictEqual(transportA.getConnectedPeers()[0].peerId, identityB.peerId);
+      assert.strictEqual(transportB.getConnectedPeers()[0].peerId, identityA.peerId);
+    });
+
+    it('getConnectedPeers returns displayName after pairing + connect', async () => {
+      const portA = nextPort();
+      const portB = nextPort();
+
+      transportA = new MeshTransport({ identity: identityA, port: portA, useTls: false });
+      transportB = new MeshTransport({ identity: identityB, port: portB, useTls: false });
+      pairingA = new MeshPairing(identityA, transportA);
+      pairingB = new MeshPairing(identityB, transportB);
+
+      transportA.onPairingRequest = (ws, msg) => pairingA.handlePairingRequest(ws, msg);
+
+      await transportA.start();
+      await transportB.start();
+
+      const { code } = pairingA.generateCode();
+      await pairingB.acceptCode(code, '127.0.0.1', portA);
+
+      const peerConnected = new Promise((r) => transportA.once('peerConnected', r));
+      await transportB.connectToPeer('127.0.0.1', portA);
+      await peerConnected;
+
+      // The status handler uses getConnectedPeers() — verify it has the data
+      const peersOnA = transportA.getConnectedPeers();
+      assert.strictEqual(peersOnA[0].peerId, identityB.peerId);
+      assert.strictEqual(peersOnA[0].displayName, 'Node B');
+    });
+  });
+
+  describe('secret derivation consistency', () => {
+    it('generateCode and acceptCode derive the same HMAC secret', () => {
+      transportA = new MeshTransport({ identity: identityA, port: nextPort(), useTls: false });
+      pairingA = new MeshPairing(identityA, transportA);
+
+      const { code } = pairingA.generateCode();
+      const pending = Array.from(pairingA.pendingPairings.values())[0];
+
+      // acceptCode lowercases the code before hashing
+      const acceptSecret = crypto.createHash('sha256').update(code.trim().toLowerCase()).digest();
+
+      // The wordlist is all lowercase, so these should match
+      assert.ok(pending.secret.equals(acceptSecret),
+        'initiator and responder should derive the same secret from the same code');
+    });
+
+    it('different codes produce different secrets', () => {
+      transportA = new MeshTransport({ identity: identityA, port: nextPort(), useTls: false });
+      pairingA = new MeshPairing(identityA, transportA);
+
+      pairingA.generateCode();
+      pairingA.generateCode();
+
+      const pairings = Array.from(pairingA.pendingPairings.values());
+      assert.ok(!pairings[0].secret.equals(pairings[1].secret),
+        'different codes should produce different secrets');
     });
   });
 });
