@@ -108,7 +108,7 @@ function registerChatHandlers(ipcMain, context = {}) {
         {
           id: createId(),
           sender: 'assistant',
-          text: 'New chat started! How can I help you today?',
+          text: 'How can I help you?',
           timestamp: now
         }
       ]

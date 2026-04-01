@@ -84,7 +84,7 @@ describe('Chat creation – defaults applied to new chat', () => {
       messages: [{
         id: `msg-${Date.now()}`,
         sender: 'assistant',
-        text: 'New chat started! How can I help you today?',
+        text: 'How can I help you?',
         timestamp: now
       }]
     };
