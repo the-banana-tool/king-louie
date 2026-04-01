@@ -4605,6 +4605,117 @@ async function sendMessage() {
   }
 }
 
+async function resendUserMessage(messageEl) {
+  const chatId = appState.activeChatId;
+  if (!chatId) return;
+  const chat = appState.chats.find((c) => c.id === chatId);
+  if (!chat || !chat.messages.length) return;
+
+  // Find which user message was right-clicked by matching DOM position
+  const allMessageEls = Array.from(dom.chatMessages.querySelectorAll('.message'));
+  const clickedIndex = allMessageEls.indexOf(messageEl);
+  if (clickedIndex === -1) return;
+
+  // Map DOM index back to the corresponding message in appState.
+  // The DOM may contain extra elements (tool groups, streaming) so match by
+  // walking user+assistant messages in order.
+  let domUserIndex = 0;
+  for (let i = 0; i < allMessageEls.length; i++) {
+    if (allMessageEls[i].classList.contains('user')) {
+      if (i === clickedIndex) break;
+      domUserIndex++;
+    }
+  }
+
+  // Find the nth user message in the chat data
+  let userCount = 0;
+  let msgIndex = -1;
+  for (let i = 0; i < chat.messages.length; i++) {
+    if (chat.messages[i].sender === 'user') {
+      if (userCount === domUserIndex) { msgIndex = i; break; }
+      userCount++;
+    }
+  }
+  if (msgIndex === -1) return;
+
+  const userMsg = chat.messages[msgIndex];
+  const message = userMsg.text || '';
+  const images = userMsg.images || [];
+  const documents = userMsg.documents || [];
+
+  if (!message && images.length === 0 && documents.length === 0) return;
+
+  // Truncate from this message onward (removes the user message + its response)
+  try {
+    const updatedChat = await window.electron.chat.truncateFrom({ chatId, fromIndex: msgIndex });
+    if (updatedChat) {
+      appState.chats = appState.chats.map((c) => (c.id === updatedChat.id ? updatedChat : c));
+      refreshUI();
+    }
+  } catch (err) {
+    addMessage('assistant', `Error: ${err.message || 'Unable to resend.'}`);
+    return;
+  }
+
+  // Re-send the message through the normal flow
+  // Add user message to local state optimistically
+  const now = new Date().toISOString();
+  appState.chats = appState.chats.map((c) => {
+    if (c.id !== chatId) return c;
+    return {
+      ...c,
+      updatedAt: now,
+      messages: [
+        ...c.messages,
+        {
+          id: `temp-${Date.now()}`,
+          sender: 'user',
+          text: message,
+          timestamp: now,
+          ...(images.length > 0 ? { images } : {}),
+          ...(documents.length > 0 ? { documents } : {})
+        }
+      ]
+    };
+  });
+  refreshUI();
+
+  try {
+    setResponseActive(true, chatId);
+    const rawResult = await window.electron.chat.sendMessage({
+      chatId,
+      message,
+      images,
+      documents,
+      agentMode: appState.isAgentModeEnabled,
+      sandboxMode: appState.isSandboxModeEnabled
+    });
+    const updatedChat = unwrapIpcResult(rawResult, 'Unable to send message.');
+    if (updatedChat) {
+      appState.chats = appState.chats.map((c) => (c.id === updatedChat.id ? updatedChat : c));
+    } else {
+      try {
+        const data = unwrapIpcResult(await window.electron.chat.load(), 'reload');
+        appState.chats = data.chats || [];
+      } catch (err) { console.warn('[chat] best-effort reload failed:', err); }
+    }
+    refreshUI();
+  } catch (error) {
+    try {
+      const data = unwrapIpcResult(await window.electron.chat.load(), 'reload');
+      appState.chats = data.chats || [];
+    } catch { /* best-effort reload */ }
+    const alreadyShown = dom.chatMessages.querySelector('.message.assistant:last-child .message-content p');
+    if (!alreadyShown || !alreadyShown.textContent.startsWith('Error:')) {
+      addMessage('assistant', `Error: ${error.message || 'Unable to send message.'}`);
+    }
+    refreshUI();
+  } finally {
+    setResponseActive(false, chatId);
+    flushToolGroup();
+  }
+}
+
 async function handleStdCardAction(action, taskId, buttonEl = null) {
   if (action !== 'complete' || !taskId || !appState.activeChatId) {
     return;
@@ -5202,6 +5313,10 @@ dom.chatMessages.addEventListener('contextmenu', (e) => {
   const copyCodeBtn = dom.messageContextMenu.querySelector('[data-action="copy-code"]');
   copyCodeBtn.style.display = messageContextCodeBlock ? '' : 'none';
 
+  // Show "Resend" only for user messages
+  const resendBtn = dom.messageContextMenu.querySelector('[data-action="resend"]');
+  resendBtn.style.display = messageEl.classList.contains('user') ? '' : 'none';
+
   dom.messageContextMenu.hidden = false;
   const menuRect = dom.messageContextMenu.getBoundingClientRect();
   const maxX = window.innerWidth - menuRect.width - 8;
@@ -5224,6 +5339,8 @@ dom.messageContextMenu.addEventListener('click', (e) => {
   } else if (action === 'copy-code' && messageContextCodeBlock) {
     const codeEl = messageContextCodeBlock.querySelector('code') || messageContextCodeBlock;
     navigator.clipboard.writeText(codeEl.innerText);
+  } else if (action === 'resend' && messageContextTarget.classList.contains('user')) {
+    resendUserMessage(messageContextTarget);
   }
 
   dom.messageContextMenu.hidden = true;

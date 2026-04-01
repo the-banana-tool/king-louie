@@ -14,6 +14,7 @@ module.exports = {
   CHAT_SET_SANDBOX_MODE: 'chat:setSandboxMode',
   CHAT_SET_WORKING_DIR: 'chat:setWorkingDirectory',
   CHAT_PICK_WORKING_DIR: 'chat:pickWorkingDirectory',
+  CHAT_TRUNCATE_FROM: 'chat:truncateFrom',
 
   TOOL_EXECUTE: 'tool:execute',
   TOOL_LIST: 'tool:list',

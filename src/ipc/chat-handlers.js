@@ -441,6 +441,22 @@ function registerChatHandlers(ipcMain, context = {}) {
     }
   }));
 
+  ipcMain.handle(IPC.CHAT_TRUNCATE_FROM, wrapHandler(IPC.CHAT_TRUNCATE_FROM, async (_event, { chatId, fromIndex }) => {
+    const chats = getChats();
+    const chat = chats.find((c) => c.id === chatId);
+    if (!chat) throw new Error('Chat not found');
+    if (typeof fromIndex !== 'number' || fromIndex < 0 || fromIndex >= chat.messages.length) {
+      throw new Error('Invalid fromIndex');
+    }
+    const updated = chats.map((c) => {
+      if (c.id !== chatId) return c;
+      const trimmed = c.messages.slice(0, fromIndex);
+      return { ...c, messages: trimmed, updatedAt: new Date().toISOString() };
+    });
+    setChats(updated);
+    return updated.find((c) => c.id === chatId);
+  }));
+
   ipcMain.handle(IPC.CHAT_STOP_RESPONSE, wrapHandler(IPC.CHAT_STOP_RESPONSE, async (_event, { chatId }) => {
     const controller = activeRuns.get(chatId);
     if (controller) {
