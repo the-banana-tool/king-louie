@@ -684,6 +684,42 @@ function renderMessageImages(messageContent, images = []) {
   }
 }
 
+function renderMessageDocuments(messageContent, documents = []) {
+  if (!Array.isArray(documents) || documents.length === 0) {
+    return;
+  }
+
+  const gallery = document.createElement('div');
+  gallery.className = 'message-image-gallery';
+
+  documents.forEach((doc) => {
+    if (!doc?.mimeType) return;
+    const item = document.createElement('div');
+    item.className = 'image-preview-item doc-preview-item';
+
+    const iconEl = document.createElement('div');
+    iconEl.className = 'doc-preview-icon';
+    const iconClass = doc.mimeType === 'application/pdf' ? 'fas fa-file-pdf'
+      : doc.mimeType.includes('spreadsheet') || doc.mimeType.includes('excel') ? 'fas fa-file-excel'
+      : doc.mimeType === 'text/csv' ? 'fas fa-file-csv'
+      : 'fas fa-file-lines';
+    iconEl.appendChild(faIcon(iconClass));
+
+    const nameEl = document.createElement('span');
+    nameEl.className = 'doc-preview-name';
+    nameEl.textContent = doc.name || 'Document';
+    nameEl.title = doc.name || 'Document';
+
+    item.appendChild(iconEl);
+    item.appendChild(nameEl);
+    gallery.appendChild(item);
+  });
+
+  if (gallery.childElementCount > 0) {
+    messageContent.appendChild(gallery);
+  }
+}
+
 /* ── XML tool-call extraction (non-agent-mode) ─────────────── */
 
 /**
@@ -1846,7 +1882,8 @@ function renderChatMessages() {
       llm: message?.llm,
       runningLlmTotals: callTotals ? { ...runningTotals } : null,
       format: message?.format,
-      images: message?.images
+      images: message?.images,
+      documents: message?.documents
     });
   });
 
@@ -4642,6 +4679,7 @@ function addMessage(sender, text, metadata = {}) {
   }
 
   renderMessageImages(messageContent, metadata?.images || []);
+  renderMessageDocuments(messageContent, metadata?.documents || []);
 
   if (sender === 'assistant' && metadata?.llm?.totals) {
     const callTotals = metadata.llm.totals;
