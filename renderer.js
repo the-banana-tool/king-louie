@@ -1666,10 +1666,12 @@ function renderChatInfoPopover() {
       const models = result.models || [];
       let hasSelected = false;
       models.forEach((m) => {
+        const modelId = typeof m === 'string' ? m : m.id;
+        const modelName = typeof m === 'string' ? m : (m.name || m.id);
         const opt = document.createElement('option');
-        opt.value = m;
-        opt.textContent = m;
-        if (m === selectedModel) { opt.selected = true; hasSelected = true; }
+        opt.value = modelId;
+        opt.textContent = modelName;
+        if (modelId === selectedModel) { opt.selected = true; hasSelected = true; }
         modelSelect.appendChild(opt);
       });
       // If current model not in list, keep it at the top
@@ -2332,10 +2334,12 @@ function renderProviderCard(providerKey, provider) {
       modelSelect.innerHTML = '';
       let hasSelected = false;
       models.forEach((m) => {
+        const modelId = typeof m === 'string' ? m : m.id;
+        const modelName = typeof m === 'string' ? m : (m.name || m.id);
         const opt = document.createElement('option');
-        opt.value = m;
-        opt.textContent = m;
-        if (m === currentModel) { opt.selected = true; hasSelected = true; }
+        opt.value = modelId;
+        opt.textContent = modelName;
+        if (modelId === currentModel) { opt.selected = true; hasSelected = true; }
         modelSelect.appendChild(opt);
       });
       if (currentModel && !hasSelected) {
