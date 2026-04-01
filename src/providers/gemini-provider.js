@@ -52,10 +52,23 @@ class GeminiProvider extends BaseLLMProvider {
     const messages = [];
     let systemInstruction = null;
 
-    const buildParts = (text, images = []) => {
+    const buildParts = (text, images = [], documents = []) => {
       const parts = [];
       if (typeof text === 'string' && text.trim()) {
         parts.push({ text });
+      }
+
+      if (Array.isArray(documents) && documents.length > 0) {
+        const docParts = ImageHandler.normalizeMessageDocuments(documents).map((doc) =>
+          ImageHandler.formatDocumentForProvider('gemini', doc)
+        );
+        docParts.forEach((part) => {
+          if (part.type === 'text') {
+            parts.push({ text: part.text });
+          } else if (part.inlineData) {
+            parts.push(part);
+          }
+        });
       }
 
       if (Array.isArray(images) && images.length > 0) {
@@ -121,7 +134,7 @@ class GeminiProvider extends BaseLLMProvider {
 
       messages.push({
         role: role === 'assistant' ? 'model' : 'user',
-        parts: Array.isArray(msg.content) ? msg.content : buildParts(text, msg.images)
+        parts: Array.isArray(msg.content) ? msg.content : buildParts(text, msg.images, msg.documents)
       });
     }
 

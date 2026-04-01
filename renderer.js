@@ -7,6 +7,7 @@ const appState = {
   isHistoryCollapsed: false,
   memoryEntries: [],
   pendingImages: [],
+  pendingDocuments: [],
   activeResponses: new Set(),
   streamBuffers: new Map(),
   settings: {
@@ -274,6 +275,7 @@ function resetAppState() {
   appState.isHistoryCollapsed = false;
   appState.memoryEntries = [];
   appState.pendingImages = [];
+  appState.pendingDocuments = [];
   appState.activeResponses.clear();
   appState.streamBuffers.clear();
   streamTextOffsets.clear();
@@ -479,14 +481,25 @@ function parseSlashCommand(message = '') {
 }
 
 const SUPPORTED_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+const SUPPORTED_DOCUMENT_MIME_TYPES = new Set([
+  'text/plain', 'text/markdown', 'text/csv',
+  'application/pdf',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-excel'
+]);
+const DOCUMENT_EXTENSIONS = { '.txt': 'text/plain', '.md': 'text/markdown', '.csv': 'text/csv', '.pdf': 'application/pdf', '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', '.xls': 'application/vnd.ms-excel' };
 const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024;
+const MAX_DOCUMENT_SIZE_BYTES = 10 * 1024 * 1024;
 const MAX_IMAGES_PER_MESSAGE = 5;
+const MAX_DOCUMENTS_PER_MESSAGE = 5;
 
 function renderPendingImages() {
   if (!dom.imagePreviewList) return;
 
   dom.imagePreviewList.innerHTML = '';
-  if (!Array.isArray(appState.pendingImages) || appState.pendingImages.length === 0) {
+  const hasImages = Array.isArray(appState.pendingImages) && appState.pendingImages.length > 0;
+  const hasDocs = Array.isArray(appState.pendingDocuments) && appState.pendingDocuments.length > 0;
+  if (!hasImages && !hasDocs) {
     dom.imagePreviewList.hidden = true;
     return;
   }
@@ -517,6 +530,41 @@ function renderPendingImages() {
     dom.imagePreviewList.appendChild(item);
   });
 
+  appState.pendingDocuments.forEach((doc, index) => {
+    const item = document.createElement('div');
+    item.className = 'image-preview-item doc-preview-item';
+
+    const iconEl = document.createElement('div');
+    iconEl.className = 'doc-preview-icon';
+    const iconClass = doc.mimeType === 'application/pdf' ? 'fas fa-file-pdf'
+      : doc.mimeType.includes('spreadsheet') || doc.mimeType.includes('excel') ? 'fas fa-file-excel'
+      : doc.mimeType === 'text/csv' ? 'fas fa-file-csv'
+      : 'fas fa-file-lines';
+    iconEl.appendChild(faIcon(iconClass));
+
+    const nameEl = document.createElement('span');
+    nameEl.className = 'doc-preview-name';
+    nameEl.textContent = doc.name || 'Document';
+    nameEl.title = doc.name || 'Document';
+
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.className = 'image-preview-remove';
+    removeBtn.innerHTML = '';
+    removeBtn.appendChild(faIcon('fas fa-xmark'));
+    removeBtn.title = 'Remove document';
+    removeBtn.setAttribute('aria-label', 'Remove document');
+    removeBtn.addEventListener('click', () => {
+      appState.pendingDocuments.splice(index, 1);
+      renderPendingImages();
+    });
+
+    item.appendChild(iconEl);
+    item.appendChild(nameEl);
+    item.appendChild(removeBtn);
+    dom.imagePreviewList.appendChild(item);
+  });
+
   dom.imagePreviewList.hidden = false;
 }
 
@@ -529,6 +577,7 @@ function clearPendingImages() {
     });
   }
   appState.pendingImages = [];
+  appState.pendingDocuments = [];
   if (dom.imageFileInput) {
     dom.imageFileInput.value = '';
   }
@@ -548,35 +597,66 @@ function fileToBase64(file) {
   });
 }
 
+function resolveDocumentMimeType(file) {
+  if (file.type && SUPPORTED_DOCUMENT_MIME_TYPES.has(file.type)) return file.type;
+  const ext = (file.name || '').toLowerCase().match(/\.[^.]+$/)?.[0];
+  return ext ? (DOCUMENT_EXTENSIONS[ext] || null) : null;
+}
+
+function fileToText(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result || '');
+    reader.onerror = () => reject(new Error('Unable to read file'));
+    reader.readAsText(file);
+  });
+}
+
 async function addImageFiles(fileList) {
   const files = Array.from(fileList || []);
   if (files.length === 0) return;
 
-  const remainingSlots = MAX_IMAGES_PER_MESSAGE - appState.pendingImages.length;
-  if (remainingSlots <= 0) {
-    showNotice(`You can attach up to ${MAX_IMAGES_PER_MESSAGE} images per message.`);
-    return;
-  }
+  for (const file of files) {
+    const isImage = SUPPORTED_IMAGE_MIME_TYPES.has(file.type);
+    const docMime = !isImage ? resolveDocumentMimeType(file) : null;
 
-  const candidates = files.slice(0, remainingSlots);
-  for (const file of candidates) {
-    if (!SUPPORTED_IMAGE_MIME_TYPES.has(file.type)) {
-      showNotice(`Unsupported image format: ${file.type}`);
-      continue;
+    if (isImage) {
+      if (appState.pendingImages.length >= MAX_IMAGES_PER_MESSAGE) {
+        showNotice(`You can attach up to ${MAX_IMAGES_PER_MESSAGE} images per message.`);
+        continue;
+      }
+      if (file.size > MAX_IMAGE_SIZE_BYTES) {
+        showNotice(`Image too large: ${file.name} exceeds 5MB.`);
+        continue;
+      }
+      const base64 = await fileToBase64(file);
+      appState.pendingImages.push({
+        name: file.name,
+        mimeType: file.type,
+        base64,
+        previewUrl: URL.createObjectURL(file)
+      });
+    } else if (docMime) {
+      if (appState.pendingDocuments.length >= MAX_DOCUMENTS_PER_MESSAGE) {
+        showNotice(`You can attach up to ${MAX_DOCUMENTS_PER_MESSAGE} documents per message.`);
+        continue;
+      }
+      if (file.size > MAX_DOCUMENT_SIZE_BYTES) {
+        showNotice(`Document too large: ${file.name} exceeds 10MB.`);
+        continue;
+      }
+      const isTextBased = docMime.startsWith('text/');
+      const base64 = await fileToBase64(file);
+      const textContent = isTextBased ? await fileToText(file) : null;
+      appState.pendingDocuments.push({
+        name: file.name,
+        mimeType: docMime,
+        base64,
+        textContent
+      });
+    } else {
+      showNotice(`Unsupported file type: ${file.name}`);
     }
-
-    if (file.size > MAX_IMAGE_SIZE_BYTES) {
-      showNotice(`Image too large: ${file.name} exceeds 5MB.`);
-      continue;
-    }
-
-    const base64 = await fileToBase64(file);
-    appState.pendingImages.push({
-      name: file.name,
-      mimeType: file.type,
-      base64,
-      previewUrl: URL.createObjectURL(file)
-    });
   }
 
   renderPendingImages();
@@ -3942,8 +4022,9 @@ function showRenameDialog(currentTitle) {
 async function sendMessage() {
   const message = dom.userInput.value.trim();
   const pendingImages = Array.isArray(appState.pendingImages) ? [...appState.pendingImages] : [];
+  const pendingDocuments = Array.isArray(appState.pendingDocuments) ? [...appState.pendingDocuments] : [];
 
-  if (message === '' && pendingImages.length === 0) {
+  if (message === '' && pendingImages.length === 0 && pendingDocuments.length === 0) {
     return;
   }
 
@@ -4405,6 +4486,9 @@ async function sendMessage() {
           timestamp: now,
           ...(pendingImages.length > 0 ? {
             images: pendingImages.map(({ previewUrl, ...rest }) => rest)
+          } : {}),
+          ...(pendingDocuments.length > 0 ? {
+            documents: pendingDocuments.map(({ textContent, ...rest }) => rest)
           } : {})
         }
       ]
@@ -4425,8 +4509,8 @@ async function sendMessage() {
       });
 
       if (skillResult && !skillResult.continueWithAgent) {
-        if (pendingImages.length > 0) {
-          throw new Error('Pinned skill handling currently supports text-only input. Unpin skill or send without images.');
+        if (pendingImages.length > 0 || pendingDocuments.length > 0) {
+          throw new Error('Pinned skill handling currently supports text-only input. Unpin skill or send without attachments.');
         }
         const responseText = skillResult.ok
           ? (skillResult.message || 'Done.')
@@ -4443,6 +4527,7 @@ async function sendMessage() {
       chatId: appState.activeChatId,
       message,
       images: pendingImages.map(({ previewUrl, ...rest }) => rest),
+      documents: pendingDocuments,
       agentMode: appState.isAgentModeEnabled,
       sandboxMode: appState.isSandboxModeEnabled
     });
@@ -4939,7 +5024,11 @@ dom.userInput.addEventListener('dragover', (event) => {
 
 dom.userInput.addEventListener('drop', async (event) => {
   event.preventDefault();
-  const files = Array.from(event.dataTransfer?.files || []).filter((file) => file.type?.startsWith('image/'));
+  const files = Array.from(event.dataTransfer?.files || []).filter((file) => {
+    if (file.type?.startsWith('image/')) return true;
+    if (resolveDocumentMimeType(file)) return true;
+    return false;
+  });
   await addImageFiles(files);
 });
 

@@ -47,13 +47,13 @@ describe('Preload Validation', () => {
     it('requires message to be a string', () => {
       assert.throws(
         () => api.chat.sendMessage({ chatId: '123' }),
-        /Invalid payload: expected non-empty message or at least one image/
+        /Invalid payload: expected non-empty message or at least one attachment/
       );
     });
     it('requires message to have length > 0', () => {
       assert.throws(
         () => api.chat.sendMessage({ chatId: '123', message: '   ' }),
-        /Invalid payload: expected non-empty message or at least one image/
+        /Invalid payload: expected non-empty message or at least one attachment/
       );
     });
     it('allows image-only payload', async () => {

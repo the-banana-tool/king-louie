@@ -47,14 +47,20 @@ class AnthropicProvider extends BaseLLMProvider {
   }
 
   formatMessages(chatHistory) {
-    const buildContent = (text, images = []) => {
+    const buildContent = (text, images = [], documents = []) => {
       const imageParts = Array.isArray(images) && images.length > 0
         ? ImageHandler.normalizeMessageImages(images).map((image) =>
             ImageHandler.formatForProvider('anthropic', image)
           )
         : [];
 
-      if (imageParts.length === 0) {
+      const docParts = Array.isArray(documents) && documents.length > 0
+        ? ImageHandler.normalizeMessageDocuments(documents).map((doc) =>
+            ImageHandler.formatDocumentForProvider('anthropic', doc)
+          )
+        : [];
+
+      if (imageParts.length === 0 && docParts.length === 0) {
         return text;
       }
 
@@ -62,6 +68,7 @@ class AnthropicProvider extends BaseLLMProvider {
       if (typeof text === 'string' && text.trim()) {
         content.push({ type: 'text', text });
       }
+      content.push(...docParts);
       content.push(...imageParts);
       return content;
     };
@@ -80,14 +87,14 @@ class AnthropicProvider extends BaseLLMProvider {
 
           return {
             role: msg.role,
-            content: buildContent(msg.content, msg.images)
+            content: buildContent(msg.content, msg.images, msg.documents)
           };
         }
 
         if (msg.sender && typeof msg.text === 'string') {
           return {
             role: msg.sender === 'assistant' ? 'assistant' : 'user',
-            content: buildContent(msg.text, msg.images)
+            content: buildContent(msg.text, msg.images, msg.documents)
           };
         }
 

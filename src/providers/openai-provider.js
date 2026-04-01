@@ -137,9 +137,17 @@ class OpenAIProvider extends BaseLLMProvider {
       );
     };
 
-    const buildMultimodalContent = (text, images = []) => {
+    const buildDocParts = (documents = []) => {
+      if (!Array.isArray(documents) || documents.length === 0) return [];
+      return ImageHandler.normalizeMessageDocuments(documents).map((doc) =>
+        ImageHandler.formatDocumentForProvider('openai', doc)
+      );
+    };
+
+    const buildMultimodalContent = (text, images = [], documents = []) => {
       const imageParts = buildImageParts(images);
-      if (imageParts.length === 0) {
+      const docParts = buildDocParts(documents);
+      if (imageParts.length === 0 && docParts.length === 0) {
         return typeof text === 'string' ? text : '';
       }
 
@@ -147,6 +155,7 @@ class OpenAIProvider extends BaseLLMProvider {
       if (typeof text === 'string' && text.trim()) {
         content.push({ type: 'text', text });
       }
+      content.push(...docParts);
       content.push(...imageParts);
       return content;
     };
@@ -177,14 +186,14 @@ class OpenAIProvider extends BaseLLMProvider {
             role: msg.role,
             content: Array.isArray(msg.content)
               ? msg.content
-              : buildMultimodalContent(textContent, msg.images)
+              : buildMultimodalContent(textContent, msg.images, msg.documents)
           };
         }
 
         if (msg.sender && typeof msg.text === 'string') {
           return {
             role: msg.sender === 'assistant' ? 'assistant' : 'user',
-            content: buildMultimodalContent(msg.text, msg.images)
+            content: buildMultimodalContent(msg.text, msg.images, msg.documents)
           };
         }
 

@@ -235,12 +235,13 @@ function registerChatHandlers(ipcMain, context = {}) {
 
   const getSettings = context.getSettings;
 
-  ipcMain.handle(IPC.CHAT_SEND_MESSAGE, wrapHandler(IPC.CHAT_SEND_MESSAGE, async (event, { chatId, message, images = [], agentMode = false, sandboxMode = true }) => {
+  ipcMain.handle(IPC.CHAT_SEND_MESSAGE, wrapHandler(IPC.CHAT_SEND_MESSAGE, async (event, { chatId, message, images = [], documents = [], agentMode = false, sandboxMode = true }) => {
     let safeMessage = String(message || '');
     const normalizedImages = ImageHandler.normalizeMessageImages(images);
+    const normalizedDocuments = ImageHandler.normalizeMessageDocuments(documents);
 
-    if (!safeMessage.trim() && normalizedImages.length === 0) {
-      throw new Error('Message text or at least one image is required.');
+    if (!safeMessage.trim() && normalizedImages.length === 0 && normalizedDocuments.length === 0) {
+      throw new Error('Message text or at least one attachment is required.');
     }
 
     // Resolve working directory: per-chat > process.cwd()
@@ -258,7 +259,8 @@ function registerChatHandlers(ipcMain, context = {}) {
     });
 
     const userMessage = appendMessageToChat(chatId, 'user', safeMessage, {
-      ...(normalizedImages.length > 0 ? { images: normalizedImages } : {})
+      ...(normalizedImages.length > 0 ? { images: normalizedImages } : {}),
+      ...(normalizedDocuments.length > 0 ? { documents: normalizedDocuments } : {})
     });
     if (!userMessage) {
       throw new Error('Chat not found');

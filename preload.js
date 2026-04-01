@@ -371,10 +371,14 @@ contextBridge.exposeInMainWorld(
           throw new Error('Invalid message: expected string');
         }
         validateImagesPayload(payload.images);
+        if (payload.documents != null && !Array.isArray(payload.documents)) {
+          throw new Error('Invalid documents: expected array');
+        }
         const hasText = typeof payload.message === 'string' && payload.message.trim().length > 0;
         const hasImages = Array.isArray(payload.images) && payload.images.length > 0;
-        if (!hasText && !hasImages) {
-          throw new Error('Invalid payload: expected non-empty message or at least one image');
+        const hasDocs = Array.isArray(payload.documents) && payload.documents.length > 0;
+        if (!hasText && !hasImages && !hasDocs) {
+          throw new Error('Invalid payload: expected non-empty message or at least one attachment');
         }
         return ipcRenderer.invoke('chat:sendMessage', payload);
       },
