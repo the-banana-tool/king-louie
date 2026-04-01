@@ -220,7 +220,11 @@ const validateObject = (value, fieldName) => {
 const VALID_SENDERS = new Set(['user', 'assistant', 'system', 'tool', 'status']);
 const SUPPORTED_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 
-const knownProviders = new Set(['openai', 'anthropic', 'copilot']);
+const knownProviders = new Set([
+  'openai', 'anthropic', 'copilot', 'groq', 'mistral', 'ollama',
+  'gemini', 'openrouter', 'xai', 'deepseek', 'qwen', 'together',
+  'fireworks', 'cohere'
+]);
 
 const validateSettingsSaveProviderPayload = (payload = {}) => {
   validateObject(payload, 'payload');
@@ -385,6 +389,10 @@ contextBridge.exposeInMainWorld(
       stopResponse: (chatId) => {
         validateString(chatId, 'chatId');
         return ipcRenderer.invoke('chat:stopResponse', { chatId });
+      },
+      truncateFrom: ({ chatId, fromIndex }) => {
+        validateString(chatId, 'chatId');
+        return ipcRenderer.invoke('chat:truncateFrom', { chatId, fromIndex });
       },
       onMessageStart: (callback) => registerOnce('chat:messageStart', callback),
       onMessageChunk: (callback) => registerOnce('chat:messageChunk', callback),
