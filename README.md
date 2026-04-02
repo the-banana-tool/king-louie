@@ -1,10 +1,41 @@
-# King Louie
+<p align="center">
+  <img src="banana.png" alt="King Louie" width="200" />
+</p>
 
-An open-source, cross-platform AI chat desktop application built with Electron. Bring your own API keys and chat with multiple LLM providers through a modern dark-themed interface — or connect King Louie to Telegram, Discord, and Slack as a bot.
+<h1 align="center">King Louie</h1>
 
-![Electron](https://img.shields.io/badge/Electron-40-47848F?logo=electron&logoColor=white)
-![License](https://img.shields.io/badge/License-MIT-green)
-![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-blue)
+<p align="center">
+  An open-source, cross-platform AI chat desktop app.<br>
+  Bring your own API keys. Chat with any LLM. Run agents. Connect bots to Telegram, Discord, and Slack.
+</p>
+
+<p align="center">
+  <a href="https://github.com/the-banana-tool/king-louie/releases/latest"><img src="https://img.shields.io/github/v/release/the-banana-tool/king-louie?label=Latest%20Release&style=for-the-badge" alt="Latest Release" /></a>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Electron-40-47848F?logo=electron&logoColor=white" alt="Electron" />
+  <img src="https://img.shields.io/badge/License-MIT-green" alt="License" />
+  <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-blue" alt="Platform" />
+</p>
+
+---
+
+## Download
+
+> **Just pick your platform and run the installer. That's it.**
+
+| Platform | Link | What to do |
+|----------|------|------------|
+| **Windows** | [**Download .exe installer**](https://github.com/the-banana-tool/king-louie/releases/latest/download/King-Louie-Setup.exe) | Run the `.exe` → click "Install" → done |
+| **macOS** | [**Download .dmg**](https://github.com/the-banana-tool/king-louie/releases/latest/download/King-Louie-arm64.dmg) | Open the `.dmg` → drag to Applications → done |
+| **Linux** | [**Download .AppImage**](https://github.com/the-banana-tool/king-louie/releases/latest/download/King-Louie.AppImage) | `chmod +x` the file → double-click → done |
+
+> **Don't see your platform?** Check the [all downloads page](https://github.com/the-banana-tool/king-louie/releases/latest) for `.deb`, other architectures, and older versions.
+
+On first launch, the onboarding wizard walks you through selecting a provider and entering your API key.
+
+---
 
 ## Features
 
@@ -22,19 +53,7 @@ An open-source, cross-platform AI chat desktop application built with Electron. 
 - **Dark Theme UI** — Two-pane chat interface with syntax highlighting, markdown rendering, and image attachments
 - **Cross-Platform Builds** — Windows (NSIS), macOS (DMG), and Linux (AppImage/DEB) via GitHub Actions
 
-## Quick Start
-
-Download the latest release for your platform from [Releases](https://github.com/the-banana-tool/king-louie/releases):
-
-| Platform | Download |
-|----------|----------|
-| Windows | `King-Louie-Setup-x.x.x.exe` |
-| macOS | `King-Louie-x.x.x-arm64.dmg` |
-| Linux | `King-Louie-x.x.x.AppImage` or `.deb` |
-
-On first launch, the onboarding wizard walks you through selecting a provider and entering your API key.
-
-### Building from Source
+## Building from Source
 
 ```bash
 npm install
