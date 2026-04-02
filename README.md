@@ -53,6 +53,10 @@ On first launch, the onboarding wizard walks you through selecting a provider an
 - **Dark Theme UI** — Two-pane chat interface with syntax highlighting, markdown rendering, and image attachments
 - **Cross-Platform Builds** — Windows (NSIS), macOS (DMG), and Linux (AppImage/DEB) via GitHub Actions
 
+## Demo
+
+[![Watch the demo](https://img.youtube.com/vi/Da4a_OJWFeM/maxresdefault.jpg)](https://youtu.be/Da4a_OJWFeM)
+
 ## Building from Source
 
 ```bash
