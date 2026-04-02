@@ -2073,6 +2073,7 @@ const initializeAgentInfrastructure = async () => {
   notificationRouter = new NotificationRouter({
     getSettings: () => getSettings().notifications
   });
+
   hookRegistry = new HookRegistry({
     hooksDirectory: path.join(process.cwd(), 'hooks')
   });
