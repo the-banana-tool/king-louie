@@ -227,7 +227,7 @@ class OpenAIProvider extends BaseLLMProvider {
 
     if (!response.ok) {
       const err = await this.extractError(response);
-      if (err.includes('not a chat model')) {
+      if (err.includes('not a chat model') || err.includes('only supported in v1/responses')) {
         markAsResponsesModel(model);
         return this._sendResponses(model, preparedMessages, options);
       }
@@ -293,7 +293,7 @@ class OpenAIProvider extends BaseLLMProvider {
 
     if (!response.ok) {
       const err = await this.extractError(response);
-      if (err.includes('not a chat model')) {
+      if (err.includes('not a chat model') || err.includes('only supported in v1/responses')) {
         markAsResponsesModel(requestedModel);
         return this._sendResponsesWithTools(requestedModel, preparedMessages, tools, options);
       }
@@ -580,7 +580,7 @@ class OpenAIProvider extends BaseLLMProvider {
 
     if (!response.ok) {
       const err = await this.extractError(response);
-      if (err.includes('not a chat model')) {
+      if (err.includes('not a chat model') || err.includes('only supported in v1/responses')) {
         markAsResponsesModel(requestedModel);
         return this._streamResponses(requestedModel, preparedMessages, options, onChunk);
       }

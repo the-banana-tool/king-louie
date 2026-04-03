@@ -6169,6 +6169,11 @@ unsubscribeHandlers.push(window.electron.chat.onMessageError(({ chatId, response
   messageDiv.textContent = '';
   messageDiv.appendChild(p);
   dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
+
+  // Persist the error so refreshUI / renderChatMessages doesn't wipe it
+  const errorText = `Error: ${error}`;
+  window.electron.chat.addMessage({ chatId, sender: 'assistant', text: errorText })
+    .catch((err) => console.warn('[chat] error message persistence failed:', err.message));
 }));
 
 /**

@@ -775,12 +775,20 @@ const buildRuntimeSystemPrompt = (runtimeEnvironment = {}) => {
     ? runtimeEnvironment.unavailable
     : [];
 
+  const workingDirectory = runtimeEnvironment.workingDirectory || process.cwd();
+
   const sections = [
     'Environment context (auto-detected):',
     `- Platform: ${platform}`,
     `- Shell: ${shell}`,
+    `- Working directory: ${workingDirectory}`,
     `- Available CLI tools: ${available.length ? available.join(', ') : 'unknown'}`,
     `- Known missing CLI tools: ${unavailable.length ? unavailable.join(', ') : 'none detected'}`,
+    '',
+    'Important:',
+    '- Each Bash command runs in a fresh shell — environment variables, virtual environment activation, and cd do not persist between calls. Use absolute paths or explicit venv paths (e.g. venv/Scripts/python on Windows, venv/bin/python on Unix) instead of relying on activate.',
+    '- You have a Browser tool that can launch a real browser, navigate to URLs, take screenshots, and interact with pages. Use it when the user asks to open or view something in a browser.',
+    '',
     'Use this context when proposing commands and selecting tools. Avoid commands for unavailable tools.'
   ];
 

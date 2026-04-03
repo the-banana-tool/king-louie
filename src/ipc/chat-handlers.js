@@ -71,6 +71,13 @@ function registerChatHandlers(ipcMain, context = {}) {
     }
   }
 
+  /** Safely send an IPC event — no-op if the sender (renderer) has been destroyed. */
+  function safeSend(sender, channel, data) {
+    if (sender && !sender.isDestroyed()) {
+      sender.send(channel, data);
+    }
+  }
+
   const getMainWindow = () => (
     typeof context.getMainWindow === 'function' ? context.getMainWindow() : context.mainWindow
   );
@@ -278,6 +285,7 @@ function registerChatHandlers(ipcMain, context = {}) {
     }
 
     const provider = inference.provider;
+
     const chatRaw = getChats().find((item) => item.id === chatId);
     if (!chatRaw) {
       throw new Error('Chat not found');
@@ -300,7 +308,7 @@ function registerChatHandlers(ipcMain, context = {}) {
     const abortController = new AbortController();
     activeRuns.set(chatId, abortController);
 
-    event.sender.send('chat:messageStart', { chatId, responseId });
+    safeSend(event.sender, 'chat:messageStart', { chatId, responseId });
 
     try {
       const runtimeEnvironment = await getRuntimeEnvironment({
@@ -321,12 +329,12 @@ function registerChatHandlers(ipcMain, context = {}) {
 
       executor.on('preExecute', ({ toolName, parameters }) => {
         appendMessageToChat(chatId, 'toolUse', '', { toolName, parameters, runId });
-        event.sender.send('chat:toolUse', { chatId, runId, toolName, parameters });
+        safeSend(event.sender, 'chat:toolUse', { chatId, runId, toolName, parameters });
       });
 
       executor.on('postExecute', ({ toolName, result }) => {
         appendMessageToChat(chatId, 'toolResult', '', { toolName, result, runId });
-        event.sender.send('chat:toolResult', { chatId, runId, toolName, result });
+        safeSend(event.sender, 'chat:toolResult', { chatId, runId, toolName, result });
       });
 
       let fullResponse = '';
@@ -352,12 +360,12 @@ function registerChatHandlers(ipcMain, context = {}) {
             calls: result?.llm?.calls || [],
             totals: result?.llm?.totals || llmSummary.totals
           };
-          event.sender.send('chat:messageChunk', { chatId, responseId, chunk: fullResponse });
+          safeSend(event.sender, 'chat:messageChunk', { chatId, responseId, chunk: fullResponse });
         } else {
           const streamResult = await provider.streamMessage(chat.messages, { ...options, abortSignal: abortController.signal }, (chunk) => {
             if (abortController.signal.aborted) return;
             fullResponse += chunk;
-            event.sender.send('chat:messageChunk', { chatId, responseId, chunk });
+            safeSend(event.sender, 'chat:messageChunk', { chatId, responseId, chunk });
           });
 
           const singleCall = streamResult?.llmMetrics || null;
@@ -398,7 +406,7 @@ function registerChatHandlers(ipcMain, context = {}) {
       const updatedChat = appendMessageToChat(chatId, 'assistant', fullResponse || '(No response)', {
         llm: llmSummary
       });
-      event.sender.send('chat:messageComplete', {
+      safeSend(event.sender, 'chat:messageComplete', {
         chatId,
         responseId,
         message: fullResponse || '(No response)',
@@ -421,7 +429,7 @@ function registerChatHandlers(ipcMain, context = {}) {
     } catch (error) {
       activeRuns.delete(chatId);
       if (abortController.signal.aborted) {
-        event.sender.send('chat:messageComplete', {
+        safeSend(event.sender, 'chat:messageComplete', {
           chatId,
           responseId,
           message: fullResponse || '(Stopped by user)',
@@ -432,7 +440,7 @@ function registerChatHandlers(ipcMain, context = {}) {
         }
         return;
       }
-      event.sender.send('chat:messageError', {
+      safeSend(event.sender, 'chat:messageError', {
         chatId,
         responseId,
         error: error.message
