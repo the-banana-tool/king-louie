@@ -39,8 +39,13 @@ On first launch, the onboarding wizard walks you through selecting a provider an
 
 ## Features
 
-- **Multi-Provider LLM Support** — OpenAI, Anthropic, Google Gemini, Groq, Mistral, Ollama (local), and OpenRouter
+- **Multi-Provider LLM Support** — OpenAI, Anthropic, Google Gemini, Groq, Mistral, Ollama (local), OpenRouter, x.AI, DeepSeek, Qwen, Together, Fireworks, and Cohere
 - **Smart LLM Routing** — Rule-based dynamic model selection routes messages to different providers based on keywords, regex patterns, or slash-command prefixes
+- **LLM-Powered Model Router** — AI-driven model selection that automatically picks the best provider/model per task based on message content, cost, speed, and quality preferences
+- **Workflow Engine** — Durable, multi-step workflow execution with pause/resume, parallel task execution, dependency ordering, and persistent state across sessions
+- **Planner Agent** — Decomposes high-level goals ("build a REST API with auth and tests") into structured task graphs that the workflow engine executes automatically
+- **Dynamic Sub-Agents** — Agents can spawn specialized sub-agents mid-execution to handle subtasks with different models, tools, or system prompts
+- **System App Discovery** — Auto-detects installed desktop applications (Excel, Photoshop, VS Code, etc.) so agents use local software instead of generating content via LLM
 - **Agentic Tool Use** — Agents can execute shell commands, read/write/edit files, search the web, automate browsers, and more
 - **Multi-Agent Orchestration** — Run agents in parallel, serial, or dependency-based workflows
 - **Extensible Skill System** — Install, remove, enable, and pin custom skill plugins
@@ -68,13 +73,19 @@ npm start
 
 | Provider | Models | Local |
 |----------|--------|-------|
-| OpenAI | GPT-4o, GPT-4, etc. | No |
-| Anthropic | Claude Sonnet, Opus, etc. | No |
-| Google Gemini | Gemini Pro, Flash, etc. | No |
-| Groq | Llama, Mixtral, etc. | No |
-| Mistral | Mistral models | No |
+| OpenAI | GPT-4o, GPT-5, o1, o3-mini, etc. | No |
+| Anthropic | Claude Sonnet 4, Opus, Haiku, etc. | No |
+| Google Gemini | Gemini 2.0 Flash, 2.5 Pro, etc. | No |
+| Groq | Llama, Mixtral (ultra-fast inference) | No |
+| Mistral | Mistral Large, etc. | No |
 | Ollama | Any Ollama-hosted model | Yes |
 | OpenRouter | Multi-provider router | No |
+| x.AI | Grok 3, Grok 3 Mini | No |
+| DeepSeek | DeepSeek Chat | No |
+| Qwen | Qwen Plus | No |
+| Together AI | Llama, open-source models | No |
+| Fireworks AI | Llama, fast inference | No |
+| Cohere | Command R+ | No |
 
 Configure providers and API keys in **Settings**.
 
@@ -115,6 +126,141 @@ With these rules, typing "design a new auth system" automatically routes to Clau
 - **Enabled** — Toggle individual rules on/off without deleting them
 - **Agent mode only** — Rule only applies when agent mode is active
 
+## LLM-Powered Model Router
+
+Beyond rule-based routing, King Louie can use AI to automatically select the best model for each task.
+
+### How It Works
+
+1. Go to **Settings > Workflows**
+2. Enable **LLM-Powered Routing**
+3. Configure your preferences:
+   - **Cost Sensitivity** — Low (prefer quality), Medium, or High (prefer cheap)
+   - **Speed Priority** — Low, Medium, or High (prefer fast)
+   - **Quality Priority** — Low, Medium, or High
+4. A fast, cheap classifier model analyzes each message and picks the best provider/model from your configured providers
+
+The router maintains a cache of recent classifications to avoid redundant API calls. It falls back to rule-based routing or tier defaults if classification fails.
+
+### When to Use Each
+
+| Approach | Best For |
+|----------|----------|
+| **Tier-based** | Simple setups — one model for everything |
+| **Rule-based** (Smart Routing) | Predictable patterns — always route `/code` to GPT-4o |
+| **LLM-powered** | Dynamic workloads — let AI decide based on task content |
+
+All three can coexist: LLM routing is tried first, then rule-based, then tier defaults.
+
+## Workflow Engine
+
+King Louie includes a durable workflow engine for executing complex, multi-step goals. Instead of manually breaking work into prompts, describe the outcome you want and let the system figure out the steps.
+
+### How It Works
+
+1. Go to **Settings > Workflows**
+2. Enter a goal (e.g., "Build a REST API for user authentication with tests and documentation")
+3. Click **Plan & Execute**
+
+The system:
+1. Runs the **Planner Agent** to decompose the goal into a structured task graph
+2. Creates a **durable workflow** with dependency ordering and parallel groups
+3. Executes tasks through the appropriate agents (code-writer, code-explorer, main)
+4. Streams progress events to the UI in real-time
+
+### Workflow Lifecycle
+
+| Status | Meaning |
+|--------|---------|
+| `pending` | Created but not started |
+| `running` | Tasks are being executed |
+| `paused` | Execution suspended — can be resumed |
+| `completed` | All tasks finished successfully |
+| `failed` | A critical task failed |
+| `cancelled` | Manually cancelled by user |
+
+Workflows persist to disk and survive app restarts. A workflow that was `running` when the app closed will resume as `paused` on next launch.
+
+### Task Graph
+
+The planner outputs a JSON task graph with:
+- **Tasks** — Each with a title, description, assigned agent, and priority
+- **Dependencies** — Tasks only run after their dependencies complete
+- **Parallel groups** — Independent tasks execute concurrently
+- **Model preferences** — Tasks can suggest specific models (e.g., Gemini for research, Opus for deep reasoning)
+
+### Workflow Controls
+
+From the Workflows panel, you can:
+- **Resume** a paused workflow
+- **Pause** a running workflow
+- **Cancel** a workflow entirely
+- **Delete** a workflow and its saved state
+- **Plan Only** — Generate the task graph without executing it
+
+## Dynamic Sub-Agents
+
+Agents can spawn specialized sub-agents mid-execution using the `SpawnAgent` tool. This enables recursive problem-solving — when an agent hits a subtask that needs different capabilities, it creates a new agent for it.
+
+### Example
+
+```
+User: "Refactor the auth module and update the docs"
+
+Main Agent:
+  → SpawnAgent(agentId: "code-writer", task: "Refactor auth module to use JWT")
+  → SpawnAgent(agentId: "code-writer", task: "Update API documentation to reflect auth changes")
+```
+
+### SpawnAgent Parameters
+
+| Parameter | Description |
+|-----------|-------------|
+| `task` | The instruction for the sub-agent (required) |
+| `agentId` | Which agent to use: `main`, `code-explorer`, `code-writer`, `planner` |
+| `model` | Override the model (e.g., `gpt-4o`, `claude-sonnet-4-20250514`) |
+| `provider` | Override the provider (e.g., `openai`, `anthropic`, `gemini`) |
+| `maxIterations` | Max tool iterations (default: 10) |
+| `systemPromptAppend` | Additional instructions for the sub-agent |
+| `tools` | Restrict to specific tools (e.g., `["Read", "Grep"]`) |
+
+Sub-agents run in their own conversation context and return results inline to the parent agent.
+
+## System App Discovery
+
+King Louie auto-detects installed desktop applications on your system and makes them available to agents. When a task can be done with local software (creating a spreadsheet, editing an image), agents will use the installed app instead of trying to generate content through the LLM.
+
+### Auto-Detected Apps
+
+The discovery engine checks platform-specific locations:
+
+| Platform | Detection Method |
+|----------|-----------------|
+| **Windows** | PATH, Registry (COM), Start Menu, Program Files |
+| **macOS** | `/Applications`, Spotlight (`mdfind`), PATH |
+| **Linux** | `.desktop` files, PATH |
+
+Categories include office (Excel, Word, LibreOffice), development (VS Code, Cursor), browsers, graphics (Photoshop, GIMP, Figma), media (OBS, VLC, FFmpeg), communication (Slack, Discord, Teams, Zoom), and more.
+
+### Managing Apps
+
+Go to **Settings > System Apps** to:
+- **View** all discovered apps grouped by category with their launch commands
+- **Re-scan** to refresh after installing new software
+- **Add custom apps** for software in non-standard locations
+- **Remove** custom app entries
+
+Custom apps persist across restarts and are merged with auto-detected apps in the agent system prompt.
+
+### How Agents Use It
+
+The discovered app list is injected into every agent's system prompt. When you ask "create a spreadsheet of Q1 sales data", the agent will:
+
+1. Generate the `.xlsx` file content using a library
+2. Launch Excel (or whatever spreadsheet app is installed) to open it
+
+Instead of trying to render a table in chat or generating a CSV via the LLM.
+
 ## Built-in Tools
 
 Agents have access to a suite of tools that can be individually approved or auto-approved:
@@ -133,6 +279,7 @@ Agents have access to a suite of tools that can be individually approved or auto
 | `browser` | Headless browser automation via CDP |
 | `cron` | Manage scheduled tasks |
 | `remote_dispatch` | Dispatch tasks to remote King Louie peers on the mesh network |
+| `spawn_agent` | Dynamically spawn sub-agents with different models, tools, or specializations |
 | `ask_user` | Request user input during execution |
 
 ### Browser Tool — Using Your Chrome Profile
@@ -175,13 +322,14 @@ The `start` action accepts three optional parameters:
 
 ## Agent System
 
-King Louie ships with three built-in agents, each with their own system prompt template and tool allowlist:
+King Louie ships with four built-in agents, each with their own system prompt template and tool allowlist:
 
 - **main-assistant** — General-purpose chat and task execution
 - **code-explorer** — Code analysis, search, and explanation
 - **code-writer** — Code generation and implementation
+- **planner** — Decomposes high-level goals into structured task graphs for the workflow engine
 
-Agents run in an agentic loop with configurable max iterations and token tracking. The orchestrator supports parallel, serial, and dependency-based multi-agent execution.
+Agents run in an agentic loop with configurable max iterations and token tracking. The orchestrator supports parallel, serial, and dependency-based multi-agent execution. Agents can also spawn sub-agents dynamically using the `SpawnAgent` tool.
 
 ## Skills
 
@@ -484,7 +632,7 @@ src/
   browser/               # Headless browser automation
   channels/              # Telegram, Discord, Slack bridges
   cron/                  # Scheduled task system
-  execution/             # Agent loop, tool executor, sandbox
+  execution/             # Agent loop, tool executor, sandbox, app discovery
   gateway/               # WebSocket gateway and session manager
   hooks/                 # Pre/post tool execution hooks
   ipc/                   # IPC handler registration
@@ -500,6 +648,7 @@ src/
   voice/                 # TTS engines
   web-search/            # Search provider integrations
   webhooks/              # Webhook server and handlers
+  workflows/             # Durable workflow engine and planner executor
   wizard/                # Onboarding wizard
 skills/                  # Installable skill plugins
 hooks/                   # Custom hook plugins
