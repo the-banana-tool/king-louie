@@ -58,6 +58,9 @@ class BrowserService {
       '--remote-debugging-port=0',
       '--no-first-run',
       '--no-default-browser-check',
+      '--disable-session-crashed-bubble',
+      '--disable-infobars',
+      '--hide-crash-restore-bubble',
       `--user-data-dir=${this.options.userDataPath}`,
       `--window-size=${this.options.viewport.width},${this.options.viewport.height}`
     ];
