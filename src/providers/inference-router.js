@@ -156,6 +156,46 @@ class InferenceRouter {
       provider
     };
   }
+  /**
+   * Set an LLM-powered router for intelligent model selection.
+   * When enabled, this is tried before rule-based routing.
+   */
+  setLLMRouter(llmRouter) {
+    this.llmRouter = llmRouter || null;
+  }
+
+  /**
+   * Attempt LLM-powered routing. Returns null if disabled or fails.
+   */
+  async resolveLLMRouting(message) {
+    if (!this.llmRouter) return null;
+
+    const settings = this.getSettings() || {};
+    const llmRouting = settings.inference?.llmRouting;
+    if (!llmRouting || !llmRouting.enabled) return null;
+
+    try {
+      const classification = await this.llmRouter.classify(message);
+      if (!classification) return null;
+
+      const token = this.getProviderToken(classification.provider);
+      if (!token) return null;
+
+      const provider = this.createProvider(classification.provider, token);
+
+      return {
+        tier: 'llm-routing',
+        providerType: classification.provider,
+        model: classification.model,
+        provider,
+        routedBy: 'llm-routing',
+        routingReason: classification.reason
+      };
+    } catch {
+      return null;
+    }
+  }
+
   resolveWithSmartRouting(request = {}, message = '', context = {}) {
     if (typeof this.getSettings !== 'function') {
       throw new Error('InferenceRouter requires getSettings()');

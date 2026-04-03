@@ -14,6 +14,7 @@ const AskUserTool = require('./builtin/ask-user-tool');
 const CronTool = require('./builtin/cron-tool');
 const BrowserTool = require('./builtin/browser-tool');
 const RemoteDispatchTool = require('./builtin/remote-dispatch-tool');
+const SpawnAgentTool = require('./builtin/spawn-agent-tool');
 
 let initialized = false;
 
@@ -34,6 +35,7 @@ function initializeTools() {
   toolRegistry.register(CronTool);
   toolRegistry.register(BrowserTool);
   toolRegistry.register(RemoteDispatchTool);
+  toolRegistry.register(SpawnAgentTool);
 
   initialized = true;
 }

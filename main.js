@@ -53,6 +53,9 @@ const WebhookRegistry = require('./src/webhooks/webhook-registry');
 const WebhookHandler = require('./src/webhooks/webhook-handler');
 const WebhookServer = require('./src/webhooks/webhook-server');
 const { initializeMesh } = require('./src/mesh');
+const LLMRouter = require('./src/providers/llm-router');
+const { WorkflowEngine } = require('./src/workflows/workflow-engine');
+const PlannerExecutor = require('./src/workflows/planner-executor');
 
 let mainWindow;
 let meshContext;
@@ -84,6 +87,10 @@ let cronScheduler;
 let webhookRegistry;
 let webhookHandler;
 let webhookServer;
+let workflowEngine;
+let plannerExecutor;
+let llmRouter;
+let agentExecutorAdapter;
 const TELEGRAM_TOKEN_STORE_KEY = '__telegram_bot_token';
 const DISCORD_TOKEN_STORE_KEY = '__discord_bot_token';
 const SLACK_APP_TOKEN_STORE_KEY = '__slack_app_token';
@@ -142,6 +149,12 @@ const DEFAULT_SETTINGS = {
     smartRouting: {
       enabled: false,
       rules: []
+    },
+    llmRouting: {
+      enabled: false,
+      costSensitivity: 'medium',
+      speedPriority: 'medium',
+      qualityPriority: 'high'
     }
   },
   notifications: {
@@ -1956,7 +1969,14 @@ const createToolExecutorWithApprovals = async (
     approvalRequester,
     shouldAutoApprove: async (toolName) => isToolAlwaysApproved(toolName),
     hookExecutor: getHookSettings().enabled ? hookExecutor : null,
-    useSandbox: executorOptions.useSandbox !== false
+    useSandbox: executorOptions.useSandbox !== false,
+    extraToolOptions: {
+      get agentExecutorAdapter() { return agentExecutorAdapter; },
+      getAgent,
+      listAgents,
+      toolRegistry,
+      inferenceRouter
+    }
   });
 
   if (event?.sender) {
@@ -2018,8 +2038,9 @@ const resolveInference = async (selection = {}) => {
 
 const createAgentRuntime = async (providerType, event = null, approvalRequester = null) => {
   const resolution = await resolveInference(providerType);
-  if (!['openai', 'anthropic'].includes(resolution.providerType)) {
-    throw new Error('Active provider does not support agent orchestration yet.');
+  const capabilities = inferenceRouter.getCapabilities(resolution.providerType, resolution.model);
+  if (!capabilities.toolCalling) {
+    throw new Error(`Provider ${resolution.providerType} (${resolution.model}) does not support tool calling required for agent mode.`);
   }
   const runtimeEnvironment = await getRuntimeEnvironment({
     workingDirectory: process.cwd()
@@ -2124,7 +2145,7 @@ const initializeAgentInfrastructure = async () => {
   toolRegistry.register(new SessionsHistoryTool(sessionManager));
   toolRegistry.register(new SessionsSpawnTool(sessionManager));
 
-  const agentExecutorAdapter = {
+  agentExecutorAdapter = {
     execute: async (agent, message, options = {}) => {
       const settings = getSettings();
       const requestedTier = options.tier || agent?.inferenceTier || settings?.inference?.activeTier;
@@ -2158,6 +2179,40 @@ const initializeAgentInfrastructure = async () => {
       });
     }
   };
+
+  // Initialize LLM-powered router and attach to inference router
+  llmRouter = new LLMRouter({
+    getSettings,
+    getProviderToken: getDecryptedProviderToken,
+    createProvider: (providerType, token) => ProviderFactory.createProvider(providerType, token)
+  });
+  inferenceRouter.setLLMRouter(llmRouter);
+
+  // Initialize workflow engine for durable multi-session workflows
+  workflowEngine = new WorkflowEngine({
+    storageDir: path.join(app.getPath('userData'), 'workflows'),
+    agentExecutorAdapter,
+    getAgent,
+    maxConcurrentTasks: 3
+  });
+  await workflowEngine.initialize();
+
+  // Forward workflow events to the renderer
+  for (const event of ['workflow:created', 'workflow:started', 'workflow:completed', 'workflow:failed',
+    'workflow:paused', 'workflow:cancelled', 'workflow:task:started', 'workflow:task:completed', 'workflow:task:failed']) {
+    workflowEngine.on(event, (data) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(event, data);
+      }
+    });
+  }
+
+  // Initialize planner executor (ties planner agent → workflow engine)
+  plannerExecutor = new PlannerExecutor({
+    agentExecutorAdapter,
+    workflowEngine,
+    getAgent
+  });
 
   remoteControl = new RemoteControl(
     gatewayServer,
@@ -2459,6 +2514,11 @@ registerHandlers(ipcMain, {
 
   // Cron
   getCronScheduler: () => cronScheduler,
+
+  // Workflow / Planner
+  getWorkflowEngine: () => workflowEngine,
+  getPlannerExecutor: () => plannerExecutor,
+  getLLMRouter: () => llmRouter,
 
   // Webhook
   webhookRegistry,

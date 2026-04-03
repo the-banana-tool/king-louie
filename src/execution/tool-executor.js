@@ -22,6 +22,8 @@ class ToolExecutor extends EventEmitter {
         : getRuntimeEnvironment({ workingDirectory: this.workingDirectory });
     this.hookExecutor = options.hookExecutor || null;
     this.useSandbox = options.useSandbox !== false;
+    // Extra options passed to every tool execution (e.g., agentExecutorAdapter for SpawnAgent)
+    this.extraToolOptions = options.extraToolOptions || {};
   }
 
   async getRuntimeEnvironment() {
@@ -113,6 +115,7 @@ class ToolExecutor extends EventEmitter {
     try {
       const runtimeEnvironment = await this.getRuntimeEnvironment();
       const result = await tool.execute(effectiveParameters, {
+        ...this.extraToolOptions,
         ...options,
         workingDirectory: options.workingDirectory || this.workingDirectory,
         allowedDirectories: options.allowedDirectories || this.allowedDirectories,

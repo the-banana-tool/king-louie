@@ -658,6 +658,26 @@ contextBridge.exposeInMainWorld(
       onTaskCompleted: (callback) => registerOnce('mesh:taskCompleted', callback),
       onTaskFailed: (callback) => registerOnce('mesh:taskFailed', callback)
     },
+    workflow: {
+      plan: (goal, options) => ipcRenderer.invoke('workflow:plan', { goal, options }),
+      planAndExecute: (goal, options, background) => ipcRenderer.invoke('workflow:planAndExecute', { goal, options, background }),
+      run: (id) => ipcRenderer.invoke('workflow:run', { id }),
+      pause: (id) => ipcRenderer.invoke('workflow:pause', { id }),
+      cancel: (id) => ipcRenderer.invoke('workflow:cancel', { id }),
+      list: (filter) => ipcRenderer.invoke('workflow:list', filter),
+      get: (id) => ipcRenderer.invoke('workflow:get', { id }),
+      progress: (id) => ipcRenderer.invoke('workflow:progress', { id }),
+      delete: (id) => ipcRenderer.invoke('workflow:delete', { id }),
+      onCreated: (callback) => registerOnce('workflow:created', callback),
+      onStarted: (callback) => registerOnce('workflow:started', callback),
+      onCompleted: (callback) => registerOnce('workflow:completed', callback),
+      onFailed: (callback) => registerOnce('workflow:failed', callback),
+      onPaused: (callback) => registerOnce('workflow:paused', callback),
+      onCancelled: (callback) => registerOnce('workflow:cancelled', callback),
+      onTaskStarted: (callback) => registerOnce('workflow:task:started', callback),
+      onTaskCompleted: (callback) => registerOnce('workflow:task:completed', callback),
+      onTaskFailed: (callback) => registerOnce('workflow:task:failed', callback)
+    },
     app: {
       quitWindow: () => ipcRenderer.invoke('app:quitWindow')
     },

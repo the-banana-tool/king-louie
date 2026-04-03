@@ -13,6 +13,7 @@ const { registerWebhookHandlers } = require('./webhook-handlers');
 const { registerWizardHandlers } = require('./wizard-handlers');
 const { registerDiagnosticsHandlers } = require('./diagnostics-handlers');
 const { registerMeshHandlers } = require('./mesh-handlers');
+const { registerWorkflowHandlers } = require('./workflow-handlers');
 const { wrapHandler } = require('./wrap-handler');
 
 function registerHandlers(ipcMain, context = {}) {
@@ -31,6 +32,7 @@ function registerHandlers(ipcMain, context = {}) {
   registerWizardHandlers(ipcMain, context);
   registerDiagnosticsHandlers(ipcMain, context);
   registerMeshHandlers(ipcMain, context);
+  registerWorkflowHandlers(ipcMain, context);
 }
 
 module.exports = {

@@ -135,6 +135,7 @@
           <option value="hooks">Hooks</option>
           <option value="memory">Memory</option>
           <option value="scheduler">Scheduler</option>
+          <option value="workflows">Workflows</option>
           <option value="webhooks">Webhooks</option>
           <option value="skills">Skills</option>
           <option value="mesh">Mesh Network</option>
@@ -578,6 +579,68 @@
 
         <!-- Skill settings tabs (dynamically injected) -->
         <div id="skill-settings-container"></div>
+
+        <!-- Tab: Workflows -->
+        <div class="settings-tab-content" data-tab="workflows">
+          <section class="template-variables-card">
+            <h3>Workflow Engine</h3>
+            <p>Plan and execute complex, multi-step workflows. Describe a goal and the planner agent decomposes it into a task graph with parallel execution and dependency ordering.</p>
+
+            <div class="template-variables-actions" style="margin-top: 10px;">
+              <button id="workflow-refresh-btn" type="button" class="btn">Refresh</button>
+              <span id="workflow-status" class="provider-message">No workflows yet.</span>
+            </div>
+
+            <!-- New workflow form -->
+            <div style="margin-top: 16px;">
+              <label for="workflow-goal-input">Goal</label>
+              <textarea id="workflow-goal-input" rows="3" placeholder="Describe the outcome you want (e.g., 'Build a REST API for user authentication with tests and documentation')" style="width: 100%; resize: vertical; font-family: inherit; padding: 8px; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 6px;"></textarea>
+              <div style="margin-top: 8px; display: flex; gap: 8px;">
+                <button id="workflow-plan-btn" type="button" class="btn">Plan Only</button>
+                <button id="workflow-run-btn" type="button" class="btn btn-primary">Plan & Execute</button>
+              </div>
+              <span id="workflow-add-status" class="provider-message"></span>
+            </div>
+
+            <!-- Workflow list -->
+            <div class="provider-list" id="workflow-list" style="margin-top: 16px;"></div>
+          </section>
+
+          <!-- LLM Routing Settings -->
+          <section class="template-variables-card" style="margin-top: 16px;">
+            <h3>LLM-Powered Routing</h3>
+            <p>Automatically select the best model for each task using AI classification instead of keyword rules.</p>
+            <div class="template-variables-grid">
+              <label for="llm-routing-enabled">Enable LLM Routing</label>
+              <input type="checkbox" id="llm-routing-enabled" />
+
+              <label for="llm-routing-cost">Cost Sensitivity</label>
+              <select id="llm-routing-cost">
+                <option value="low">Low (prefer quality)</option>
+                <option value="medium">Medium (balanced)</option>
+                <option value="high">High (prefer cheap)</option>
+              </select>
+
+              <label for="llm-routing-speed">Speed Priority</label>
+              <select id="llm-routing-speed">
+                <option value="low">Low (prefer quality)</option>
+                <option value="medium">Medium (balanced)</option>
+                <option value="high">High (prefer fast)</option>
+              </select>
+
+              <label for="llm-routing-quality">Quality Priority</label>
+              <select id="llm-routing-quality">
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+              </select>
+            </div>
+            <div class="template-variables-actions" style="margin-top: 10px;">
+              <button id="llm-routing-save-btn" type="button" class="btn">Save</button>
+              <span id="llm-routing-status" class="provider-message"></span>
+            </div>
+          </section>
+        </div>
 
         <!-- Tab: Webhooks -->
         <div class="settings-tab-content" data-tab="webhooks">

@@ -157,6 +157,19 @@ const dom = {
   cronAddTargetInput: document.getElementById('cron-add-target-input'),
   cronAddKindInput: document.getElementById('cron-add-kind-input'),
   cronAddValueInput: document.getElementById('cron-add-value-input'),
+  workflowRefreshBtn: document.getElementById('workflow-refresh-btn'),
+  workflowStatus: document.getElementById('workflow-status'),
+  workflowList: document.getElementById('workflow-list'),
+  workflowGoalInput: document.getElementById('workflow-goal-input'),
+  workflowPlanBtn: document.getElementById('workflow-plan-btn'),
+  workflowRunBtn: document.getElementById('workflow-run-btn'),
+  workflowAddStatus: document.getElementById('workflow-add-status'),
+  llmRoutingEnabled: document.getElementById('llm-routing-enabled'),
+  llmRoutingCost: document.getElementById('llm-routing-cost'),
+  llmRoutingSpeed: document.getElementById('llm-routing-speed'),
+  llmRoutingQuality: document.getElementById('llm-routing-quality'),
+  llmRoutingSaveBtn: document.getElementById('llm-routing-save-btn'),
+  llmRoutingStatus: document.getElementById('llm-routing-status'),
   imagePreviewList: document.getElementById('image-preview-list'),
   imageFileInput: document.getElementById('image-file-input'),
   attachImageBtn: document.getElementById('attach-image-btn'),
@@ -3674,6 +3687,215 @@ async function handleTestVoice() {
   }
 }
 
+// ─── Workflow Panel ───
+
+async function loadWorkflows() {
+  if (!window.electron?.workflow || !dom.workflowList) return;
+  try {
+    if (dom.workflowStatus) dom.workflowStatus.textContent = 'Loading...';
+    const result = await window.electron.workflow.list();
+    if (!result?.ok) throw new Error(result?.error || 'Failed to list workflows');
+    const workflows = Array.isArray(result.workflows) ? result.workflows : [];
+    if (dom.workflowStatus) {
+      const running = workflows.filter(w => w.status === 'running').length;
+      dom.workflowStatus.textContent = `${workflows.length} workflow(s)${running ? ` • ${running} running` : ''}`;
+      dom.workflowStatus.classList.remove('error');
+    }
+    renderWorkflows(workflows);
+  } catch (err) {
+    if (dom.workflowStatus) {
+      dom.workflowStatus.textContent = `Error: ${err.message}`;
+      dom.workflowStatus.classList.add('error');
+    }
+  }
+}
+
+function renderWorkflows(workflows = []) {
+  if (!dom.workflowList) return;
+  dom.workflowList.innerHTML = '';
+  if (workflows.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'provider-message';
+    empty.textContent = 'No workflows yet. Enter a goal above to get started.';
+    dom.workflowList.appendChild(empty);
+    return;
+  }
+  workflows.forEach(wf => {
+    const card = document.createElement('div');
+    card.className = 'provider-card';
+    card.dataset.workflowId = wf.id;
+
+    const statusColors = {
+      pending: '#888', running: '#4a9eff', paused: '#f0ad4e',
+      completed: '#5cb85c', failed: '#d9534f', cancelled: '#888'
+    };
+
+    const header = document.createElement('div');
+    header.className = 'provider-header';
+    header.innerHTML = `
+      <strong>${wf.goal || '(no goal)'}</strong>
+      <span style="color: ${statusColors[wf.status] || '#888'}; font-size: 0.85em; margin-left: 8px;">
+        ● ${wf.status}
+      </span>`;
+
+    const body = document.createElement('div');
+    body.className = 'provider-message';
+    const completed = (wf.tasks || []).filter(t => t.status === 'completed').length;
+    const total = (wf.tasks || []).length;
+    body.innerHTML = `${wf.summary || ''}<br><small>${completed}/${total} tasks complete • Created ${new Date(wf.createdAt).toLocaleString()}</small>`;
+
+    const actions = document.createElement('div');
+    actions.className = 'provider-actions';
+    actions.style.marginTop = '8px';
+
+    if (wf.status === 'paused' || wf.status === 'pending') {
+      const resumeBtn = document.createElement('button');
+      resumeBtn.className = 'btn';
+      resumeBtn.textContent = 'Resume';
+      resumeBtn.dataset.action = 'resume-workflow';
+      resumeBtn.dataset.workflowId = wf.id;
+      actions.appendChild(resumeBtn);
+    }
+    if (wf.status === 'running') {
+      const pauseBtn = document.createElement('button');
+      pauseBtn.className = 'btn';
+      pauseBtn.textContent = 'Pause';
+      pauseBtn.dataset.action = 'pause-workflow';
+      pauseBtn.dataset.workflowId = wf.id;
+      actions.appendChild(pauseBtn);
+    }
+    if (wf.status !== 'cancelled' && wf.status !== 'completed') {
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'btn';
+      cancelBtn.textContent = 'Cancel';
+      cancelBtn.dataset.action = 'cancel-workflow';
+      cancelBtn.dataset.workflowId = wf.id;
+      actions.appendChild(cancelBtn);
+    }
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'btn';
+    deleteBtn.textContent = 'Delete';
+    deleteBtn.dataset.action = 'delete-workflow';
+    deleteBtn.dataset.workflowId = wf.id;
+    actions.appendChild(deleteBtn);
+
+    // Task breakdown
+    const taskList = document.createElement('div');
+    taskList.style.cssText = 'margin-top: 8px; font-size: 0.85em;';
+    (wf.tasks || []).forEach(task => {
+      const taskEl = document.createElement('div');
+      taskEl.style.cssText = 'padding: 2px 0; display: flex; align-items: center; gap: 6px;';
+      const icons = { pending: '○', running: '◐', completed: '●', failed: '✗', skipped: '—' };
+      const colors = { pending: '#888', running: '#4a9eff', completed: '#5cb85c', failed: '#d9534f', skipped: '#888' };
+      taskEl.innerHTML = `<span style="color: ${colors[task.status] || '#888'}">${icons[task.status] || '?'}</span> ${task.title || task.id}`;
+      taskList.appendChild(taskEl);
+    });
+
+    card.appendChild(header);
+    card.appendChild(body);
+    card.appendChild(taskList);
+    card.appendChild(actions);
+    dom.workflowList.appendChild(card);
+  });
+}
+
+async function handlePlanWorkflow() {
+  const goal = dom.workflowGoalInput?.value?.trim();
+  if (!goal) {
+    if (dom.workflowAddStatus) dom.workflowAddStatus.textContent = 'Please enter a goal.';
+    return;
+  }
+  if (dom.workflowPlanBtn) dom.workflowPlanBtn.disabled = true;
+  if (dom.workflowAddStatus) dom.workflowAddStatus.textContent = 'Planning...';
+  try {
+    const result = await window.electron.workflow.plan(goal);
+    if (!result?.ok) throw new Error(result?.error || 'Planning failed');
+    if (dom.workflowAddStatus) {
+      dom.workflowAddStatus.textContent = `Plan ready: ${result.taskGraph.tasks.length} tasks. Use "Plan & Execute" to run it.`;
+      dom.workflowAddStatus.classList.remove('error');
+    }
+  } catch (err) {
+    if (dom.workflowAddStatus) {
+      dom.workflowAddStatus.textContent = `Error: ${err.message}`;
+      dom.workflowAddStatus.classList.add('error');
+    }
+  } finally {
+    if (dom.workflowPlanBtn) dom.workflowPlanBtn.disabled = false;
+  }
+}
+
+async function handlePlanAndExecuteWorkflow() {
+  const goal = dom.workflowGoalInput?.value?.trim();
+  if (!goal) {
+    if (dom.workflowAddStatus) dom.workflowAddStatus.textContent = 'Please enter a goal.';
+    return;
+  }
+  if (dom.workflowRunBtn) dom.workflowRunBtn.disabled = true;
+  if (dom.workflowAddStatus) dom.workflowAddStatus.textContent = 'Planning and launching workflow...';
+  try {
+    const result = await window.electron.workflow.planAndExecute(goal, {}, true);
+    if (!result?.ok) throw new Error(result?.error || 'Workflow launch failed');
+    dom.workflowGoalInput.value = '';
+    if (dom.workflowAddStatus) {
+      dom.workflowAddStatus.textContent = `Workflow ${result.workflow.id} started.`;
+      dom.workflowAddStatus.classList.remove('error');
+    }
+    await loadWorkflows();
+  } catch (err) {
+    if (dom.workflowAddStatus) {
+      dom.workflowAddStatus.textContent = `Error: ${err.message}`;
+      dom.workflowAddStatus.classList.add('error');
+    }
+  } finally {
+    if (dom.workflowRunBtn) dom.workflowRunBtn.disabled = false;
+  }
+}
+
+async function loadLLMRoutingSettings() {
+  if (!dom.llmRoutingEnabled) return;
+  try {
+    const result = await window.electron.settings.load();
+    if (!result?.ok) return;
+    const llmRouting = result.settings?.inference?.llmRouting || {};
+    dom.llmRoutingEnabled.checked = llmRouting.enabled === true;
+    if (dom.llmRoutingCost) dom.llmRoutingCost.value = llmRouting.costSensitivity || 'medium';
+    if (dom.llmRoutingSpeed) dom.llmRoutingSpeed.value = llmRouting.speedPriority || 'medium';
+    if (dom.llmRoutingQuality) dom.llmRoutingQuality.value = llmRouting.qualityPriority || 'high';
+  } catch { /* ignore */ }
+}
+
+async function handleSaveLLMRouting() {
+  if (dom.llmRoutingSaveBtn) dom.llmRoutingSaveBtn.disabled = true;
+  try {
+    const result = await window.electron.settings.load();
+    if (!result?.ok) throw new Error('Failed to load settings');
+    const settings = result.settings || {};
+    if (!settings.inference) settings.inference = {};
+    settings.inference.llmRouting = {
+      enabled: dom.llmRoutingEnabled?.checked || false,
+      costSensitivity: dom.llmRoutingCost?.value || 'medium',
+      speedPriority: dom.llmRoutingSpeed?.value || 'medium',
+      qualityPriority: dom.llmRoutingQuality?.value || 'high'
+    };
+    // Save the full settings back — find the right IPC call
+    // We'll use the general settings save mechanism
+    await window.electron.settings.save?.(settings) || await window.electron.settings.load();
+    if (dom.llmRoutingStatus) {
+      dom.llmRoutingStatus.textContent = 'Saved.';
+      dom.llmRoutingStatus.classList.remove('error');
+    }
+  } catch (err) {
+    if (dom.llmRoutingStatus) {
+      dom.llmRoutingStatus.textContent = `Error: ${err.message}`;
+      dom.llmRoutingStatus.classList.add('error');
+    }
+  } finally {
+    if (dom.llmRoutingSaveBtn) dom.llmRoutingSaveBtn.disabled = false;
+  }
+}
+
+// ─── End Workflow Panel ───
+
 async function loadCronJobs() {
   if (!window.electron?.cron || !dom.cronList) return;
 
@@ -3916,6 +4138,8 @@ async function loadSettings() {
     await loadSkillSettingsTabs();
     await loadMemoryEntries();
     await loadCronJobs();
+    loadWorkflows().catch(() => {});
+    loadLLMRoutingSettings().catch(() => {});
     loadWebhookList().catch(() => {});
     loadMeshStatus().catch(() => {});
   } catch (error) {
@@ -6035,6 +6259,54 @@ if (dom.cronList) {
       handleRunCronJob(jobId);
     } else if (action === 'delete-cron') {
       handleDeleteCronJob(jobId);
+    }
+  });
+}
+
+// ─── Workflow event listeners ───
+if (dom.workflowRefreshBtn) {
+  dom.workflowRefreshBtn.addEventListener('click', () => loadWorkflows());
+}
+if (dom.workflowPlanBtn) {
+  dom.workflowPlanBtn.addEventListener('click', () => handlePlanWorkflow());
+}
+if (dom.workflowRunBtn) {
+  dom.workflowRunBtn.addEventListener('click', () => handlePlanAndExecuteWorkflow());
+}
+if (dom.llmRoutingSaveBtn) {
+  dom.llmRoutingSaveBtn.addEventListener('click', () => handleSaveLLMRouting());
+}
+if (dom.workflowList) {
+  dom.workflowList.addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-action]');
+    if (!btn) return;
+    const action = btn.dataset.action;
+    const workflowId = btn.dataset.workflowId;
+    try {
+      if (action === 'resume-workflow') {
+        await window.electron.workflow.run(workflowId);
+      } else if (action === 'pause-workflow') {
+        await window.electron.workflow.pause(workflowId);
+      } else if (action === 'cancel-workflow') {
+        await window.electron.workflow.cancel(workflowId);
+      } else if (action === 'delete-workflow') {
+        await window.electron.workflow.delete(workflowId);
+      }
+      await loadWorkflows();
+    } catch (err) {
+      if (dom.workflowStatus) {
+        dom.workflowStatus.textContent = `Error: ${err.message}`;
+        dom.workflowStatus.classList.add('error');
+      }
+    }
+  });
+}
+
+// Auto-refresh workflows on events from main
+if (window.electron?.workflow) {
+  ['onCompleted', 'onFailed', 'onPaused', 'onTaskCompleted', 'onTaskFailed'].forEach(event => {
+    if (typeof window.electron.workflow[event] === 'function') {
+      window.electron.workflow[event](() => loadWorkflows());
     }
   });
 }

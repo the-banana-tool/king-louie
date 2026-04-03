@@ -113,5 +113,15 @@ module.exports = {
   MESH_PAIR_ACCEPT: 'mesh:pairAccept',
   MESH_DISPATCH_TASK: 'mesh:dispatchTask',
   MESH_TASK_STATUS: 'mesh:taskStatus',
-  MESH_SETTINGS_SAVE: 'mesh:settingsSave'
+  MESH_SETTINGS_SAVE: 'mesh:settingsSave',
+
+  WORKFLOW_PLAN: 'workflow:plan',
+  WORKFLOW_PLAN_AND_EXECUTE: 'workflow:planAndExecute',
+  WORKFLOW_RUN: 'workflow:run',
+  WORKFLOW_PAUSE: 'workflow:pause',
+  WORKFLOW_CANCEL: 'workflow:cancel',
+  WORKFLOW_LIST: 'workflow:list',
+  WORKFLOW_GET: 'workflow:get',
+  WORKFLOW_PROGRESS: 'workflow:progress',
+  WORKFLOW_DELETE: 'workflow:delete'
 };
