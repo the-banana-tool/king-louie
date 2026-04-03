@@ -165,7 +165,35 @@ const browserTool = new Tool({
           // Brief settle for any pending renders
           await new Promise((r) => setTimeout(r, 500));
           const data = await cdpClient.screenshot();
-          return { ok: true, message: 'Screenshot captured', format: 'base64_png', data };
+
+          // Save to file instead of returning raw base64 (which bloats LLM context)
+          const fs = require('fs');
+          const os = require('os');
+          const path = require('path');
+          const screenshotDir = path.join(os.tmpdir(), 'king-louie-screenshots');
+          if (!fs.existsSync(screenshotDir)) fs.mkdirSync(screenshotDir, { recursive: true });
+          const screenshotPath = path.join(screenshotDir, `screenshot-${Date.now()}.png`);
+          fs.writeFileSync(screenshotPath, Buffer.from(data, 'base64'));
+
+          // Extract visible page content so the agent can "see" what's on screen
+          const pageInfo = await cdpClient.evaluate(`
+            (() => {
+              const url = window.location.href;
+              const title = document.title;
+              const bodyText = document.body ? document.body.innerText.substring(0, 3000) : '(empty)';
+              const links = Array.from(document.querySelectorAll('a[href]')).slice(0, 20).map(a => ({ text: a.textContent.trim().substring(0, 80), href: a.href })).filter(l => l.text);
+              const buttons = Array.from(document.querySelectorAll('button, input[type="submit"], a.btn, a[role="button"]')).slice(0, 20).map(b => (b.textContent || b.value || '').trim().substring(0, 80)).filter(Boolean);
+              const inputs = Array.from(document.querySelectorAll('input, textarea, select')).slice(0, 20).map(i => ({ type: i.type || i.tagName.toLowerCase(), name: i.name || i.id || '', placeholder: i.placeholder || '' }));
+              return { url, title, bodyText, links, buttons, inputs };
+            })()
+          `);
+
+          return {
+            ok: true,
+            message: `Screenshot saved to ${screenshotPath}`,
+            savedTo: screenshotPath,
+            page: pageInfo
+          };
         }
 
         case 'pdf': {
