@@ -1098,8 +1098,31 @@ function addToolEventCompact(toolName, payload, variant = '', isResult = false) 
     payloadDiv.className = 'tool-event-payload';
     payloadDiv.hidden = true;
 
-    // Try rendering as markdown, fall back to pre
-    if (typeof payload === 'string' || (payload && (payload.content || payload.stdout || payload.output || payload.message))) {
+    // Check for Browser screenshot with savedTo path — show inline image
+    if (isResult && toolName === 'Browser' && payload && payload.savedTo) {
+      const imgContainer = document.createElement('div');
+      imgContainer.style.cssText = 'margin: 8px 0; max-width: 100%; overflow: hidden;';
+      const img = document.createElement('img');
+      img.src = 'file://' + payload.savedTo.replace(/\\/g, '/');
+      img.style.cssText = 'max-width: 100%; height: auto; border-radius: 6px; border: 1px solid var(--border-color); cursor: pointer;';
+      img.title = 'Click to open full size';
+      img.addEventListener('click', () => {
+        window.open(img.src, '_blank');
+      });
+      imgContainer.appendChild(img);
+      payloadDiv.appendChild(imgContainer);
+
+      // Also show the page info text below the image
+      if (payload.page) {
+        const infoDiv = document.createElement('div');
+        infoDiv.style.cssText = 'margin-top: 8px; font-size: 0.9em; color: var(--text-secondary);';
+        const pageUrl = payload.page.url || '';
+        const pageTitle = payload.page.title || '';
+        infoDiv.textContent = `${pageTitle} — ${pageUrl}`;
+        payloadDiv.appendChild(infoDiv);
+      }
+    } else if (typeof payload === 'string' || (payload && (payload.content || payload.stdout || payload.output || payload.message))) {
+      // Try rendering as markdown, fall back to pre
       const markdownSource = typeof payload === 'string' ? payload : (payload.content || payload.stdout || payload.output || payload.message);
       try {
         payloadDiv.innerHTML = window.electron.markdown.parse(typeof markdownSource === 'string' ? markdownSource : String(markdownSource));
@@ -1115,6 +1138,13 @@ function addToolEventCompact(toolName, payload, variant = '', isResult = false) 
     }
 
     messageContent.appendChild(payloadDiv);
+
+    // Auto-expand screenshots so the image is visible immediately
+    const isScreenshot = isResult && toolName === 'Browser' && payload && payload.savedTo;
+    if (isScreenshot) {
+      payloadDiv.hidden = false;
+      row.classList.add('expanded');
+    }
 
     // Toggle expand/collapse
     row.addEventListener('click', () => {
