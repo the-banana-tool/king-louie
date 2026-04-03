@@ -40,6 +40,7 @@ in its own conversation context. Results are returned inline to the calling agen
       },
       tools: {
         type: 'array',
+        items: { type: 'string' },
         description: 'Restrict the sub-agent to only these tools (e.g., ["Read", "Grep", "Bash"]). Defaults to agent allowedTools.'
       }
     },
