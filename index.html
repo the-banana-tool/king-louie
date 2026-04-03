@@ -138,6 +138,7 @@
           <option value="workflows">Workflows</option>
           <option value="webhooks">Webhooks</option>
           <option value="skills">Skills</option>
+          <option value="system-apps">System Apps</option>
           <option value="mesh">Mesh Network</option>
           <option value="diagnostics">Diagnostics</option>
           <option value="commands">Commands</option>
@@ -662,6 +663,58 @@
             <h3>Registered Webhooks</h3>
             <div id="webhook-list"></div>
             <div class="provider-message" id="webhook-list-status">Loading webhooks...</div>
+          </section>
+        </div>
+
+        <!-- Tab: System Apps -->
+        <div class="settings-tab-content" data-tab="system-apps">
+          <section class="template-variables-card">
+            <h3>System Apps</h3>
+            <p>Local applications discovered on your system. Agents will prefer these over generating content via LLM. Click <strong>Re-scan</strong> to refresh, or manually add apps in non-standard locations.</p>
+
+            <div class="template-variables-actions" style="margin-top: 10px;">
+              <button id="apps-rescan-btn" type="button" class="btn">Re-scan System</button>
+              <span id="apps-status" class="provider-message">Not scanned yet.</span>
+            </div>
+
+            <!-- Discovered apps list -->
+            <div class="provider-list" id="apps-list" style="margin-top: 16px;"></div>
+          </section>
+
+          <!-- Add custom app form -->
+          <section class="template-variables-card" style="margin-top: 16px;">
+            <h3>Add Custom App</h3>
+            <p>Manually register an application that wasn't auto-detected.</p>
+            <div class="template-variables-grid">
+              <label for="app-add-id">App ID</label>
+              <input type="text" id="app-add-id" placeholder="e.g., my-tool" />
+
+              <label for="app-add-description">Description</label>
+              <input type="text" id="app-add-description" placeholder="e.g., My Custom Tool — does something useful" />
+
+              <label for="app-add-launch">Launch Command</label>
+              <input type="text" id="app-add-launch" placeholder="e.g., C:\Program Files\MyTool\mytool.exe" />
+
+              <label for="app-add-category">Category</label>
+              <select id="app-add-category">
+                <option value="custom">Custom</option>
+                <option value="office">Office</option>
+                <option value="development">Development</option>
+                <option value="graphics">Graphics</option>
+                <option value="media">Media</option>
+                <option value="communication">Communication</option>
+                <option value="data">Data</option>
+                <option value="browser">Browser</option>
+                <option value="utility">Utility</option>
+              </select>
+
+              <label for="app-add-capabilities">Capabilities</label>
+              <input type="text" id="app-add-capabilities" placeholder="e.g., spreadsheet, csv, data-analysis (comma-separated)" />
+            </div>
+            <div class="template-variables-actions" style="margin-top: 10px;">
+              <button id="app-add-btn" type="button" class="btn btn-primary">Add App</button>
+              <span id="app-add-status" class="provider-message"></span>
+            </div>
           </section>
         </div>
 

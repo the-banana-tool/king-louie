@@ -308,11 +308,88 @@ function resetDiscoveryCache() {
   discoveryCachedAt = 0;
 }
 
+// ── Custom / user-managed apps ──────────────────────────────────────────────
+
+let customAppsStore = null;
+
+/**
+ * Set the store reference for persisting custom apps.
+ * Expected to be an electron-store instance or similar with get/set.
+ */
+function setCustomAppsStore(store) {
+  customAppsStore = store;
+}
+
+/**
+ * Get user-added custom apps from the store.
+ */
+function getCustomApps() {
+  if (!customAppsStore) return [];
+  return customAppsStore.get('customApps', []);
+}
+
+/**
+ * Add a custom app entry.
+ */
+function addCustomApp(app) {
+  if (!app.id || !app.launchCmd) {
+    throw new Error('Custom app requires id and launchCmd');
+  }
+  const customs = getCustomApps();
+  // Replace if same id exists
+  const filtered = customs.filter((a) => a.id !== app.id);
+  const entry = {
+    id: app.id,
+    description: app.description || app.id,
+    capabilities: Array.isArray(app.capabilities) ? app.capabilities : [],
+    category: app.category || 'custom',
+    launchCmd: app.launchCmd,
+    custom: true
+  };
+  filtered.push(entry);
+  if (customAppsStore) customAppsStore.set('customApps', filtered);
+  resetDiscoveryCache();
+  return entry;
+}
+
+/**
+ * Remove a custom app by id.
+ */
+function removeCustomApp(id) {
+  const customs = getCustomApps();
+  const filtered = customs.filter((a) => a.id !== id);
+  if (customAppsStore) customAppsStore.set('customApps', filtered);
+  resetDiscoveryCache();
+  return filtered;
+}
+
+/**
+ * Run full discovery including custom apps.
+ * Merges auto-detected apps with user-added custom apps.
+ */
+async function discoverAllApps(options = {}) {
+  const autoApps = await discoverApps({ ...options, force: options.force });
+  const customs = getCustomApps();
+
+  // Merge: custom apps override auto-detected ones with same id
+  const autoById = new Map(autoApps.map((a) => [a.id, a]));
+  for (const custom of customs) {
+    autoById.set(custom.id, { ...custom, custom: true });
+  }
+
+  return Array.from(autoById.values());
+}
+
 module.exports = {
   APP_CATALOG,
   discoverApps,
+  discoverAllApps,
   findByCapability,
   findById,
   buildAppContextSection,
-  resetDiscoveryCache
+  resetDiscoveryCache,
+  setCustomAppsStore,
+  getCustomApps,
+  addCustomApp,
+  removeCustomApp
 };

@@ -170,6 +170,16 @@ const dom = {
   llmRoutingQuality: document.getElementById('llm-routing-quality'),
   llmRoutingSaveBtn: document.getElementById('llm-routing-save-btn'),
   llmRoutingStatus: document.getElementById('llm-routing-status'),
+  appsRescanBtn: document.getElementById('apps-rescan-btn'),
+  appsStatus: document.getElementById('apps-status'),
+  appsList: document.getElementById('apps-list'),
+  appAddBtn: document.getElementById('app-add-btn'),
+  appAddId: document.getElementById('app-add-id'),
+  appAddDescription: document.getElementById('app-add-description'),
+  appAddLaunch: document.getElementById('app-add-launch'),
+  appAddCategory: document.getElementById('app-add-category'),
+  appAddCapabilities: document.getElementById('app-add-capabilities'),
+  appAddStatus: document.getElementById('app-add-status'),
   imagePreviewList: document.getElementById('image-preview-list'),
   imageFileInput: document.getElementById('image-file-input'),
   attachImageBtn: document.getElementById('attach-image-btn'),
@@ -3894,6 +3904,173 @@ async function handleSaveLLMRouting() {
   }
 }
 
+// ─── System Apps Panel ───
+
+async function loadSystemApps() {
+  if (!window.electron?.apps || !dom.appsList) return;
+  try {
+    if (dom.appsStatus) dom.appsStatus.textContent = 'Loading...';
+    const result = await window.electron.apps.list();
+    if (!result?.ok) throw new Error(result?.error || 'Failed to list apps');
+    const apps = Array.isArray(result.apps) ? result.apps : [];
+    if (dom.appsStatus) {
+      const custom = apps.filter(a => a.custom).length;
+      dom.appsStatus.textContent = `${apps.length} app(s) detected${custom ? ` (${custom} custom)` : ''}.`;
+      dom.appsStatus.classList.remove('error');
+    }
+    renderSystemApps(apps);
+  } catch (err) {
+    if (dom.appsStatus) {
+      dom.appsStatus.textContent = `Error: ${err.message}`;
+      dom.appsStatus.classList.add('error');
+    }
+  }
+}
+
+function renderSystemApps(apps = []) {
+  if (!dom.appsList) return;
+  dom.appsList.innerHTML = '';
+
+  if (apps.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'provider-message';
+    empty.textContent = 'No apps detected. Click "Re-scan System" to discover installed applications.';
+    dom.appsList.appendChild(empty);
+    return;
+  }
+
+  // Group by category
+  const byCategory = {};
+  apps.forEach(app => {
+    const cat = app.category || 'other';
+    if (!byCategory[cat]) byCategory[cat] = [];
+    byCategory[cat].push(app);
+  });
+
+  for (const [category, catApps] of Object.entries(byCategory)) {
+    const header = document.createElement('div');
+    header.style.cssText = 'font-weight: bold; margin-top: 12px; margin-bottom: 4px; text-transform: capitalize; color: var(--text-secondary);';
+    header.textContent = category;
+    dom.appsList.appendChild(header);
+
+    catApps.forEach(app => {
+      const card = document.createElement('div');
+      card.className = 'provider-card';
+      card.dataset.appId = app.id;
+
+      const headerEl = document.createElement('div');
+      headerEl.className = 'provider-header';
+      headerEl.innerHTML = `<strong>${app.id}</strong>${app.custom ? ' <span style="color: #4a9eff; font-size: 0.8em;">custom</span>' : ''}`;
+
+      const body = document.createElement('div');
+      body.className = 'provider-message';
+      body.innerHTML = `${app.description || ''}<br><small style="color: var(--text-secondary);">Launch: <code>${app.launchCmd}</code></small>`;
+
+      if (app.capabilities && app.capabilities.length) {
+        const caps = document.createElement('div');
+        caps.style.cssText = 'margin-top: 4px; font-size: 0.8em; color: var(--text-secondary);';
+        caps.textContent = `Capabilities: ${app.capabilities.join(', ')}`;
+        body.appendChild(caps);
+      }
+
+      card.appendChild(headerEl);
+      card.appendChild(body);
+
+      if (app.custom) {
+        const actions = document.createElement('div');
+        actions.className = 'provider-actions';
+        actions.style.marginTop = '6px';
+        const removeBtn = document.createElement('button');
+        removeBtn.className = 'btn btn-danger';
+        removeBtn.textContent = 'Remove';
+        removeBtn.dataset.action = 'remove-app';
+        removeBtn.dataset.appId = app.id;
+        actions.appendChild(removeBtn);
+        card.appendChild(actions);
+      }
+
+      dom.appsList.appendChild(card);
+    });
+  }
+}
+
+async function handleRescanApps() {
+  if (dom.appsRescanBtn) dom.appsRescanBtn.disabled = true;
+  if (dom.appsStatus) dom.appsStatus.textContent = 'Scanning system for installed apps...';
+  try {
+    const result = await window.electron.apps.rescan();
+    if (!result?.ok) throw new Error(result?.error || 'Rescan failed');
+    const apps = Array.isArray(result.apps) ? result.apps : [];
+    if (dom.appsStatus) {
+      const custom = apps.filter(a => a.custom).length;
+      dom.appsStatus.textContent = `Re-scan complete: ${apps.length} app(s) found${custom ? ` (${custom} custom)` : ''}.`;
+      dom.appsStatus.classList.remove('error');
+    }
+    renderSystemApps(apps);
+  } catch (err) {
+    if (dom.appsStatus) {
+      dom.appsStatus.textContent = `Error: ${err.message}`;
+      dom.appsStatus.classList.add('error');
+    }
+  } finally {
+    if (dom.appsRescanBtn) dom.appsRescanBtn.disabled = false;
+  }
+}
+
+async function handleAddCustomApp() {
+  const id = dom.appAddId?.value?.trim();
+  const description = dom.appAddDescription?.value?.trim();
+  const launchCmd = dom.appAddLaunch?.value?.trim();
+  const category = dom.appAddCategory?.value || 'custom';
+  const capabilitiesRaw = dom.appAddCapabilities?.value?.trim() || '';
+
+  if (!id) {
+    if (dom.appAddStatus) { dom.appAddStatus.textContent = 'App ID is required.'; dom.appAddStatus.classList.add('error'); }
+    return;
+  }
+  if (!launchCmd) {
+    if (dom.appAddStatus) { dom.appAddStatus.textContent = 'Launch command is required.'; dom.appAddStatus.classList.add('error'); }
+    return;
+  }
+
+  const capabilities = capabilitiesRaw
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  if (dom.appAddBtn) dom.appAddBtn.disabled = true;
+  try {
+    const result = await window.electron.apps.add({
+      id,
+      description: description || id,
+      launchCmd,
+      category,
+      capabilities
+    });
+    if (!result?.ok) throw new Error(result?.error || 'Failed to add app');
+
+    // Clear form
+    if (dom.appAddId) dom.appAddId.value = '';
+    if (dom.appAddDescription) dom.appAddDescription.value = '';
+    if (dom.appAddLaunch) dom.appAddLaunch.value = '';
+    if (dom.appAddCapabilities) dom.appAddCapabilities.value = '';
+    if (dom.appAddStatus) {
+      dom.appAddStatus.textContent = `Added "${id}" successfully.`;
+      dom.appAddStatus.classList.remove('error');
+    }
+    await loadSystemApps();
+  } catch (err) {
+    if (dom.appAddStatus) {
+      dom.appAddStatus.textContent = `Error: ${err.message}`;
+      dom.appAddStatus.classList.add('error');
+    }
+  } finally {
+    if (dom.appAddBtn) dom.appAddBtn.disabled = false;
+  }
+}
+
+// ─── End System Apps Panel ───
+
 // ─── End Workflow Panel ───
 
 async function loadCronJobs() {
@@ -4140,6 +4317,7 @@ async function loadSettings() {
     await loadCronJobs();
     loadWorkflows().catch(() => {});
     loadLLMRoutingSettings().catch(() => {});
+    loadSystemApps().catch(() => {});
     loadWebhookList().catch(() => {});
     loadMeshStatus().catch(() => {});
   } catch (error) {
@@ -6309,6 +6487,31 @@ if (window.electron?.workflow) {
   ['onCompleted', 'onFailed', 'onPaused', 'onTaskCompleted', 'onTaskFailed'].forEach(event => {
     if (typeof window.electron.workflow[event] === 'function') {
       window.electron.workflow[event](() => loadWorkflows());
+    }
+  });
+}
+
+// ─── System Apps event listeners ───
+if (dom.appsRescanBtn) {
+  dom.appsRescanBtn.addEventListener('click', () => handleRescanApps());
+}
+if (dom.appAddBtn) {
+  dom.appAddBtn.addEventListener('click', () => handleAddCustomApp());
+}
+if (dom.appsList) {
+  dom.appsList.addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-action]');
+    if (!btn) return;
+    if (btn.dataset.action === 'remove-app') {
+      try {
+        await window.electron.apps.remove(btn.dataset.appId);
+        await loadSystemApps();
+      } catch (err) {
+        if (dom.appsStatus) {
+          dom.appsStatus.textContent = `Error: ${err.message}`;
+          dom.appsStatus.classList.add('error');
+        }
+      }
     }
   });
 }

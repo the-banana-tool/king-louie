@@ -678,6 +678,12 @@ contextBridge.exposeInMainWorld(
       onTaskCompleted: (callback) => registerOnce('workflow:task:completed', callback),
       onTaskFailed: (callback) => registerOnce('workflow:task:failed', callback)
     },
+    apps: {
+      list: () => ipcRenderer.invoke('apps:list'),
+      rescan: () => ipcRenderer.invoke('apps:rescan'),
+      add: (payload) => ipcRenderer.invoke('apps:add', payload),
+      remove: (id) => ipcRenderer.invoke('apps:remove', { id })
+    },
     app: {
       quitWindow: () => ipcRenderer.invoke('app:quitWindow')
     },

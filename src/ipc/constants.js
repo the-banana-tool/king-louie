@@ -123,5 +123,10 @@ module.exports = {
   WORKFLOW_LIST: 'workflow:list',
   WORKFLOW_GET: 'workflow:get',
   WORKFLOW_PROGRESS: 'workflow:progress',
-  WORKFLOW_DELETE: 'workflow:delete'
+  WORKFLOW_DELETE: 'workflow:delete',
+
+  APPS_LIST: 'apps:list',
+  APPS_RESCAN: 'apps:rescan',
+  APPS_ADD: 'apps:add',
+  APPS_REMOVE: 'apps:remove'
 };

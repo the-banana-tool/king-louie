@@ -14,7 +14,15 @@ const {
   getRuntimeEnvironment,
   resetRuntimeEnvironmentCache
 } = require('./src/execution/runtime-environment');
-const { discoverApps, buildAppContextSection } = require('./src/execution/app-discovery');
+const {
+  discoverAllApps,
+  buildAppContextSection,
+  setCustomAppsStore,
+  getCustomApps,
+  addCustomApp,
+  removeCustomApp,
+  resetDiscoveryCache
+} = require('./src/execution/app-discovery');
 const { TaskManager } = require('./src/tasks/task-manager');
 const AgentExecutor = require('./src/agents/agent-executor');
 const AgentOrchestrator = require('./src/agents/orchestrator');
@@ -2146,8 +2154,9 @@ const initializeAgentInfrastructure = async () => {
 
   reloadHooksFromSettings();
 
-  // Discover installed local applications in the background
-  discoverApps().then((apps) => {
+  // Set up custom apps store and discover installed local applications
+  setCustomAppsStore(store);
+  discoverAllApps().then((apps) => {
     discoveredApps = apps;
     console.log(`[main] Discovered ${apps.length} local app(s): ${apps.map(a => a.id).join(', ')}`);
   }).catch((err) => {
@@ -2533,6 +2542,16 @@ registerHandlers(ipcMain, {
 
   // Cron
   getCronScheduler: () => cronScheduler,
+
+  // System Apps
+  getDiscoveredApps: () => discoveredApps,
+  rescanApps: async () => {
+    resetDiscoveryCache();
+    discoveredApps = await discoverAllApps({ force: true });
+    return discoveredApps;
+  },
+  addCustomApp,
+  removeCustomApp,
 
   // Workflow / Planner
   getWorkflowEngine: () => workflowEngine,
