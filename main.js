@@ -14,6 +14,7 @@ const {
   getRuntimeEnvironment,
   resetRuntimeEnvironmentCache
 } = require('./src/execution/runtime-environment');
+const { discoverApps, buildAppContextSection } = require('./src/execution/app-discovery');
 const { TaskManager } = require('./src/tasks/task-manager');
 const AgentExecutor = require('./src/agents/agent-executor');
 const AgentOrchestrator = require('./src/agents/orchestrator');
@@ -91,6 +92,7 @@ let workflowEngine;
 let plannerExecutor;
 let llmRouter;
 let agentExecutorAdapter;
+let discoveredApps = [];
 const TELEGRAM_TOKEN_STORE_KEY = '__telegram_bot_token';
 const DISCORD_TOKEN_STORE_KEY = '__discord_bot_token';
 const SLACK_APP_TOKEN_STORE_KEY = '__slack_app_token';
@@ -804,6 +806,15 @@ const buildRuntimeSystemPrompt = (runtimeEnvironment = {}) => {
     '',
     'Use this context when proposing commands and selecting tools. Avoid commands for unavailable tools.'
   ];
+
+  // Include discovered local applications
+  if (discoveredApps.length > 0) {
+    const appSection = buildAppContextSection(discoveredApps);
+    if (appSection) {
+      sections.push('');
+      sections.push(appSection);
+    }
+  }
 
   // Include installed skills so the LLM knows they exist
   try {
@@ -2134,6 +2145,14 @@ const initializeAgentInfrastructure = async () => {
   ]);
 
   reloadHooksFromSettings();
+
+  // Discover installed local applications in the background
+  discoverApps().then((apps) => {
+    discoveredApps = apps;
+    console.log(`[main] Discovered ${apps.length} local app(s): ${apps.map(a => a.id).join(', ')}`);
+  }).catch((err) => {
+    console.warn('[main] App discovery failed:', err.message);
+  });
 
   gatewayServer = new GatewayServer({
     host: '127.0.0.1',
