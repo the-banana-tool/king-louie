@@ -3960,15 +3960,15 @@ function renderSystemApps(apps = []) {
 
       const headerEl = document.createElement('div');
       headerEl.className = 'provider-header';
-      headerEl.innerHTML = `<strong>${app.id}</strong>${app.custom ? ' <span style="color: #4a9eff; font-size: 0.8em;">custom</span>' : ''}`;
+      headerEl.innerHTML = `<strong>${app.id}</strong>${app.custom ? ' <span style="color: #4a9eff; margin-left: 8px;">custom</span>' : ''}`;
 
       const body = document.createElement('div');
       body.className = 'provider-message';
-      body.innerHTML = `${app.description || ''}<br><small style="color: var(--text-secondary);">Launch: <code>${app.launchCmd}</code></small>`;
+      body.innerHTML = `${app.description || ''}<br><span style="color: var(--text-secondary);">Launch: <code>${app.launchCmd}</code></span>`;
 
       if (app.capabilities && app.capabilities.length) {
         const caps = document.createElement('div');
-        caps.style.cssText = 'margin-top: 4px; font-size: 0.8em; color: var(--text-secondary);';
+        caps.style.cssText = 'margin-top: 4px; color: var(--text-secondary);';
         caps.textContent = `Capabilities: ${app.capabilities.join(', ')}`;
         body.appendChild(caps);
       }
