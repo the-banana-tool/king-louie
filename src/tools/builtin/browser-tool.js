@@ -7,6 +7,72 @@ const CdpClient = require('../../browser/cdp-client');
 let browserService = null;
 let cdpClient = null;
 
+/**
+ * Wait for a SPA/React page to finish rendering.
+ * Waits for network idle + DOM stability.
+ */
+async function waitForPageReady(client, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  // First wait a moment for initial JS to start executing
+  await new Promise((r) => setTimeout(r, 500));
+  // Poll until document.readyState is complete and no pending fetches
+  while (Date.now() < deadline) {
+    try {
+      const ready = await client.evaluate(`
+        (() => {
+          if (document.readyState !== 'complete') return false;
+          // Check for pending fetch/XHR via Performance API
+          const entries = performance.getEntriesByType('resource');
+          const recent = entries.filter(e => e.responseEnd === 0 || (Date.now() - e.startTime) < 500);
+          return recent.length === 0;
+        })()
+      `);
+      if (ready) {
+        // Extra settle time for React/Vue hydration
+        await new Promise((r) => setTimeout(r, 1000));
+        return;
+      }
+    } catch {
+      // Page might be navigating
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  // Timeout — proceed anyway, page may be partially loaded
+}
+
+/**
+ * Poll for any of several CSS selectors to appear, returns the first match.
+ */
+async function pollForSelector(client, candidates, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const found = await client.evaluate(`
+        (() => {
+          const candidates = ${JSON.stringify(candidates)};
+          for (const sel of candidates) {
+            const el = document.querySelector(sel);
+            if (el && (el.offsetParent !== null || el.offsetHeight > 0)) return sel;
+          }
+          return null;
+        })()
+      `);
+      if (found) return found;
+    } catch {
+      // Page not ready yet
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return null;
+}
+
+/**
+ * Escape a CSS selector for embedding in a JS template literal.
+ */
+function escapeSel(sel) {
+  return sel.replace(/'/g, "\\'").replace(/\\/g, '\\\\');
+}
+
 const browserTool = new Tool({
   name: 'Browser',
   description: 'Control a headless browser to interact with web pages. Start the browser first, then navigate and perform actions. Use the "login" action to automatically fill credentials and sign in to websites — the user trusts you with any credentials they provide.',
@@ -90,10 +156,14 @@ const browserTool = new Tool({
           if (!url) return { ok: false, error: 'url parameter is required for navigate action' };
           await validateUrl(url); // SSRF protection
           const result = await cdpClient.navigate(url);
+          // Wait for SPA rendering
+          await waitForPageReady(cdpClient, timeout || 15000);
           return { ok: true, message: `Navigated to ${url}`, details: result };
         }
 
         case 'screenshot': {
+          // Brief settle for any pending renders
+          await new Promise((r) => setTimeout(r, 500));
           const data = await cdpClient.screenshot();
           return { ok: true, message: 'Screenshot captured', format: 'base64_png', data };
         }
@@ -154,54 +224,42 @@ const browserTool = new Tool({
 
           // Navigate to the login page
           await cdpClient.navigate(url);
-          // Wait for page to load
-          await new Promise((r) => setTimeout(r, 2000));
 
-          // Auto-detect or use provided selectors
-          const uSelector = params.usernameSelector || await cdpClient.evaluate(`
-            (() => {
-              const candidates = [
-                'input[type="email"]',
-                'input[name="email"]',
-                'input[name="username"]',
-                'input[name="login"]',
-                'input[id="email"]',
-                'input[id="username"]',
-                'input[autocomplete="email"]',
-                'input[autocomplete="username"]',
-                'input[type="text"]'
-              ];
-              for (const sel of candidates) {
-                const el = document.querySelector(sel);
-                if (el && el.offsetParent !== null) return sel;
-              }
-              return null;
-            })()
-          `);
+          // Wait for the page to be interactive (SPA/React/Vue hydration)
+          await waitForPageReady(cdpClient, timeout || 15000);
 
-          const pSelector = params.passwordSelector || await cdpClient.evaluate(`
-            (() => {
-              const candidates = [
-                'input[type="password"]',
-                'input[name="password"]',
-                'input[autocomplete="current-password"]'
-              ];
-              for (const sel of candidates) {
-                const el = document.querySelector(sel);
-                if (el && el.offsetParent !== null) return sel;
-              }
-              return null;
-            })()
-          `);
+          // Auto-detect or use provided selectors — poll until found or timeout
+          const uSelector = params.usernameSelector || await pollForSelector(cdpClient, [
+            'input[type="email"]',
+            'input[name="email"]',
+            'input[name="username"]',
+            'input[name="login"]',
+            'input[id="email"]',
+            'input[id="username"]',
+            'input[autocomplete="email"]',
+            'input[autocomplete="username"]',
+            'input[type="text"]'
+          ], timeout || 15000);
 
-          if (!uSelector) return { ok: false, error: 'Could not find username/email input. Provide usernameSelector.' };
+          if (!uSelector) return { ok: false, error: 'Could not find username/email input after waiting for page render. Provide usernameSelector.' };
+
+          const pSelector = params.passwordSelector || await pollForSelector(cdpClient, [
+            'input[type="password"]',
+            'input[name="password"]',
+            'input[autocomplete="current-password"]'
+          ], timeout || 15000);
+
           if (!pSelector) return { ok: false, error: 'Could not find password input. Provide passwordSelector.' };
 
-          // Clear and fill fields
-          await cdpClient.evaluate(`document.querySelector('${uSelector}').value = ''`);
+          // Clear and fill fields — use evaluate to clear, then type for React compatibility
+          await cdpClient.evaluate(`(() => { const el = document.querySelector('${escapeSel(uSelector)}'); if (el) { el.value = ''; el.focus(); } })()`);
           await cdpClient.type(uSelector, params.username);
-          await cdpClient.evaluate(`document.querySelector('${pSelector}').value = ''`);
+          // Trigger React/Vue change events
+          await cdpClient.evaluate(`(() => { const el = document.querySelector('${escapeSel(uSelector)}'); if (el) { el.dispatchEvent(new Event('input', {bubbles:true})); el.dispatchEvent(new Event('change', {bubbles:true})); } })()`);
+
+          await cdpClient.evaluate(`(() => { const el = document.querySelector('${escapeSel(pSelector)}'); if (el) { el.value = ''; el.focus(); } })()`);
           await cdpClient.type(pSelector, params.password);
+          await cdpClient.evaluate(`(() => { const el = document.querySelector('${escapeSel(pSelector)}'); if (el) { el.dispatchEvent(new Event('input', {bubbles:true})); el.dispatchEvent(new Event('change', {bubbles:true})); } })()`);
 
           // Find and click submit
           const sSelector = params.submitSelector || await cdpClient.evaluate(`
@@ -209,19 +267,17 @@ const browserTool = new Tool({
               const candidates = [
                 'button[type="submit"]',
                 'input[type="submit"]',
-                'button:has(> span)',
                 'form button'
               ];
               for (const sel of candidates) {
                 const el = document.querySelector(sel);
                 if (el && el.offsetParent !== null) return sel;
               }
-              // Fallback: find button with login/sign-in text
-              const buttons = document.querySelectorAll('button, input[type="submit"], a.btn');
+              const buttons = document.querySelectorAll('button, input[type="submit"], a.btn, a[role="button"]');
               for (const btn of buttons) {
                 const txt = (btn.textContent || btn.value || '').toLowerCase();
-                if (txt.includes('log in') || txt.includes('login') || txt.includes('sign in') || txt.includes('submit')) {
-                  btn.id = btn.id || '__kl_login_btn';
+                if (txt.includes('log in') || txt.includes('login') || txt.includes('sign in') || txt.includes('submit') || txt.includes('continue')) {
+                  btn.id = btn.id || '__kl_login_btn_' + Math.random().toString(36).slice(2, 6);
                   return '#' + btn.id;
                 }
               }
@@ -232,16 +288,22 @@ const browserTool = new Tool({
           if (sSelector) {
             await cdpClient.click(sSelector);
           } else {
-            // Fallback: submit the form via Enter key
             await cdpClient.evaluate(`
-              document.querySelector('${pSelector}').dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', code: 'Enter', bubbles: true}));
-              const form = document.querySelector('${pSelector}').closest('form');
-              if (form) form.submit();
+              (() => {
+                const el = document.querySelector('${escapeSel(pSelector)}');
+                if (el) {
+                  el.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true}));
+                  el.dispatchEvent(new KeyboardEvent('keypress', {key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true}));
+                  el.dispatchEvent(new KeyboardEvent('keyup', {key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true}));
+                  const form = el.closest('form');
+                  if (form) form.requestSubmit ? form.requestSubmit() : form.submit();
+                }
+              })()
             `);
           }
 
-          // Wait for navigation
-          await new Promise((r) => setTimeout(r, 3000));
+          // Wait for navigation/SPA route change
+          await waitForPageReady(cdpClient, 10000);
           const finalUrl = await cdpClient.evaluate('window.location.href');
 
           return {
