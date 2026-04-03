@@ -5149,10 +5149,11 @@ async function handleSaveProvider(providerKey) {
     return;
   }
 
-  setProviderMessage(providerKey, 'Token saved securely.');
   if (input) input.value = '';
   appState.settings.providers[providerKey].hasToken = result.hasToken;
+  delete appState.settings.providers[providerKey].status;
   renderSettings();
+  setProviderMessage(providerKey, 'Token saved securely.');
 }
 
 async function handleClearProvider(providerKey) {
@@ -5170,8 +5171,9 @@ async function handleClearProvider(providerKey) {
   }
 
   appState.settings.providers[providerKey].hasToken = false;
-  setProviderMessage(providerKey, 'Token removed.');
+  delete appState.settings.providers[providerKey].status;
   renderSettings();
+  setProviderMessage(providerKey, 'Token removed.');
 }
 
 async function handleTestProvider(providerKey) {
