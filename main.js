@@ -51,6 +51,8 @@ const CronStore = require('./src/cron/cron-store');
 const CronExecutor = require('./src/cron/cron-executor');
 const CronScheduler = require('./src/cron/cron-scheduler');
 const { MemoryStore, MemoryManager } = require('./src/memory');
+const ContextAssembler = require('./src/context/context-assembler');
+const { buildSystemSections } = require('./src/context/system-sections');
 const UsageTracker = require('./src/tracking/usage-tracker');
 const {
   NotificationRouter,
@@ -89,6 +91,7 @@ let hookRegistry;
 let hookExecutor;
 let memoryStore;
 let memoryManager;
+let contextAssembler;
 let ttsEngine;
 let usageTracker;
 let cronStore;
@@ -2136,6 +2139,15 @@ const initializeAgentInfrastructure = async () => {
     store: memoryStore,
     currentSessionId: `main-${Date.now()}`
   });
+
+  // Initialize ContextAssembler for dynamic per-turn context retrieval
+  const contextVectorStorePath = path.join(app.getPath('userData'), 'memory', 'context-vectors.json');
+  const openaiApiKey = getDecryptedProviderToken('openai');
+  contextAssembler = new ContextAssembler({
+    vectorStorePath: contextVectorStorePath,
+    openaiApiKey: openaiApiKey || ''
+  });
+
   usageTracker = new UsageTracker(store);
   ttsEngine = new TTSEngine({
     getSettings: getVoiceSettings,
@@ -2167,6 +2179,26 @@ const initializeAgentInfrastructure = async () => {
   }).catch((err) => {
     console.warn('[main] App discovery failed:', err.message);
   });
+
+  // Index tools and system prompt sections in the ContextAssembler (background, non-blocking)
+  if (contextAssembler) {
+    (async () => {
+      try {
+        const toolDefs = toolRegistry.getFunctionDefinitions();
+        const runtimeEnv = await getRuntimeEnvironment({ workingDirectory: process.cwd() });
+        const skills = typeof skillRegistry?.listSkills === 'function' ? skillRegistry.listSkills() : [];
+        const sections = buildSystemSections(runtimeEnv, {
+          discoveredApps,
+          buildAppContextSection,
+          skills
+        });
+        await contextAssembler.index(toolDefs, sections);
+        console.log(`[context-assembler] Indexed ${toolDefs.length} tools and ${sections.length} system sections`);
+      } catch (err) {
+        console.warn('[context-assembler] Indexing failed (will use full context fallback):', err.message);
+      }
+    })();
+  }
 
   gatewayServer = new GatewayServer({
     host: '127.0.0.1',
@@ -2471,6 +2503,7 @@ registerHandlers(ipcMain, {
   withNotificationTiming,
   buildRuntimeSystemPrompt,
   buildMemoryContextSection,
+  getContextAssembler: () => contextAssembler,
   speakSummaryText,
   getMainWindow: () => mainWindow,
   getTtsEngine: () => ttsEngine,

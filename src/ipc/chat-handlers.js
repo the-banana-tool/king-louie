@@ -23,7 +23,8 @@ function registerChatHandlers(ipcMain, context = {}) {
     buildMemoryContextSection,
     speakSummaryText,
     getUsageTracker,
-    createUsageRecordFromMetrics
+    createUsageRecordFromMetrics,
+    getContextAssembler
   } = context;
 
   const activeRuns = new Map(); // chatId -> AbortController
@@ -316,10 +317,39 @@ function registerChatHandlers(ipcMain, context = {}) {
       });
 
       options.runtimeEnvironment = runtimeEnvironment;
-      options.systemPrompt = [
-        buildRuntimeSystemPrompt(runtimeEnvironment),
-        await buildMemoryContextSection(safeMessage, { limit: 4 })
-      ].filter(Boolean).join('\n\n');
+
+      // Dynamic context assembly: use ContextAssembler if available,
+      // otherwise fall back to the original monolithic approach.
+      const contextAssembler = typeof getContextAssembler === 'function' ? getContextAssembler() : null;
+      const memoryContext = await buildMemoryContextSection(safeMessage, { limit: 4 });
+
+      let assembledTools = null;
+      if (contextAssembler) {
+        try {
+          const assembled = await contextAssembler.assemble(safeMessage, {
+            maxTools: 10,
+            maxSections: 4,
+            memoryContext
+          });
+          options.systemPrompt = assembled.systemPrompt;
+          assembledTools = assembled.tools;
+
+          // Tell the LLM which tools are available on-demand via RequestTools
+          if (assembled.availableToolNames.length > 0) {
+            options.systemPrompt += `\n\nAdditional tools available on request via the RequestTools tool: ${assembled.availableToolNames.join(', ')}`;
+          }
+        } catch (err) {
+          console.warn('[chat] Context assembly failed, falling back to full context:', err.message);
+        }
+      }
+
+      // Fallback: full system prompt + all tools
+      if (!options.systemPrompt) {
+        options.systemPrompt = [
+          buildRuntimeSystemPrompt(runtimeEnvironment),
+          memoryContext
+        ].filter(Boolean).join('\n\n');
+      }
 
       const executor = await createToolExecutorWithApprovals(event, runtimeEnvironment, null, {
         workingDirectory: chatWorkingDirectory,
@@ -342,7 +372,7 @@ function registerChatHandlers(ipcMain, context = {}) {
         calls: [],
         totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
       };
-      const toolDefinitions = toolRegistry.getFunctionDefinitions();
+      const toolDefinitions = assembledTools || toolRegistry.getFunctionDefinitions();
       await withNotificationTiming('Chat response', async () => {
         const canUseAgentMode = agentMode && toolDefinitions.length > 0 && typeof provider.sendMessageWithTools === 'function';
         if (canUseAgentMode) {
@@ -353,6 +383,7 @@ function registerChatHandlers(ipcMain, context = {}) {
           });
           const result = await loop.run(chat.messages, toolDefinitions, {
             ...options,
+            contextAssembler,
             autoApproveTools: ['Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep', 'Git']
           });
           fullResponse = result.content || '(No response)';

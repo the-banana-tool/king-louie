@@ -101,6 +101,8 @@ class AgentLoop {
     const conversationHistory = [...messages];
     const executedTools = [];
     const llmCalls = [];
+    // Mutable copy so RequestTools can inject additional tools mid-run
+    let activeTools = [...tools];
 
     while (iterations < this.maxIterations) {
       if (this.abortSignal?.aborted) {
@@ -128,7 +130,7 @@ class AgentLoop {
 
       const response = await this.provider.sendMessageWithTools(
         conversationHistory,
-        tools,
+        activeTools,
         options
       );
 
@@ -242,6 +244,17 @@ class AgentLoop {
           toolResult = await this._handleAccessDenied(
             toolResult, response.toolName, response.parameters, options
           );
+        }
+
+        // If RequestTools returned injected tools, merge them into activeTools
+        if (Array.isArray(toolResult?._injectedTools) && toolResult._injectedTools.length > 0) {
+          const existingNames = new Set(activeTools.map(t => t.name));
+          for (const injected of toolResult._injectedTools) {
+            if (!existingNames.has(injected.name)) {
+              activeTools.push(injected);
+              existingNames.add(injected.name);
+            }
+          }
         }
 
         executedTools.push({
