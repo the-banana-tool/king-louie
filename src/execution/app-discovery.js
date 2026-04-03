@@ -311,6 +311,7 @@ function resetDiscoveryCache() {
 // ── Custom / user-managed apps ──────────────────────────────────────────────
 
 let customAppsStore = null;
+const DISCOVERED_APPS_KEY = 'discoveredApps';
 
 /**
  * Set the store reference for persisting custom apps.
@@ -318,6 +319,22 @@ let customAppsStore = null;
  */
 function setCustomAppsStore(store) {
   customAppsStore = store;
+}
+
+/**
+ * Get the last cached discovery results from disk (instant on restart).
+ */
+function getCachedDiscoveredApps() {
+  if (!customAppsStore) return [];
+  return customAppsStore.get(DISCOVERED_APPS_KEY, []);
+}
+
+/**
+ * Save discovery results to disk for instant load on next restart.
+ */
+function saveCachedDiscoveredApps(apps) {
+  if (!customAppsStore) return;
+  customAppsStore.set(DISCOVERED_APPS_KEY, apps);
 }
 
 /**
@@ -377,7 +394,9 @@ async function discoverAllApps(options = {}) {
     autoById.set(custom.id, { ...custom, custom: true });
   }
 
-  return Array.from(autoById.values());
+  const merged = Array.from(autoById.values());
+  saveCachedDiscoveredApps(merged);
+  return merged;
 }
 
 module.exports = {
@@ -390,6 +409,7 @@ module.exports = {
   resetDiscoveryCache,
   setCustomAppsStore,
   getCustomApps,
+  getCachedDiscoveredApps,
   addCustomApp,
   removeCustomApp
 };

@@ -18,6 +18,7 @@ const {
   discoverAllApps,
   buildAppContextSection,
   setCustomAppsStore,
+  getCachedDiscoveredApps,
   getCustomApps,
   addCustomApp,
   removeCustomApp,
@@ -2154,11 +2155,15 @@ const initializeAgentInfrastructure = async () => {
 
   reloadHooksFromSettings();
 
-  // Set up custom apps store and discover installed local applications
+  // Set up custom apps store — load cached results immediately, then refresh in background
   setCustomAppsStore(store);
-  discoverAllApps().then((apps) => {
+  discoveredApps = getCachedDiscoveredApps();
+  if (discoveredApps.length > 0) {
+    console.log(`[main] Loaded ${discoveredApps.length} cached app(s)`);
+  }
+  discoverAllApps({ force: true }).then((apps) => {
     discoveredApps = apps;
-    console.log(`[main] Discovered ${apps.length} local app(s): ${apps.map(a => a.id).join(', ')}`);
+    console.log(`[main] Refreshed app discovery: ${apps.length} app(s)`);
   }).catch((err) => {
     console.warn('[main] App discovery failed:', err.message);
   });
