@@ -154,26 +154,29 @@ class ConversationCompactor {
    * Retrieve relevant chunks for a query.
    *
    * Strategy:
-   *  - Always include the last `alwaysKeepRecent` messages verbatim (recency)
-   *  - For all older messages, search at the chunk level
-   *  - Deduplicate near-identical chunks
-   *  - Return synthetic messages built from the top-K relevant chunks,
-   *    plus the recent messages, in chronological order
+   *  - Recent SHORT messages (< recentTokenBudget) are kept verbatim
+   *  - ALL large messages — including recent ones — are chunked and
+   *    searched at the paragraph level
+   *  - Near-duplicate chunks are removed
+   *  - Return synthetic messages from top-K relevant chunks + verbatim
+   *    short recent messages, in chronological order
    *
    * @param {string} query - the current user message
    * @param {Array} messages - full chat messages array
    * @param {object} [options]
-   * @param {number} [options.maxChunks=20]          - max older chunks to retrieve
-   * @param {number} [options.alwaysKeepRecent=4]    - recent messages kept verbatim
-   * @param {number} [options.minSimilarity=0.25]    - minimum relevance score
-   * @param {number} [options.dedupeThreshold=0.92]  - cosine threshold for dedup
-   * @param {number} [options.maxTokens=4000]        - rough token budget for older chunks
+   * @param {number} [options.maxChunks=20]           - max chunks to retrieve
+   * @param {number} [options.alwaysKeepRecent=4]     - recent short messages kept verbatim
+   * @param {number} [options.recentTokenBudget=800]  - max tokens for a message to be "short"
+   * @param {number} [options.minSimilarity=0.25]     - minimum relevance score
+   * @param {number} [options.dedupeThreshold=0.92]   - cosine threshold for dedup
+   * @param {number} [options.maxTokens=4000]         - rough token budget for retrieved chunks
    * @returns {Array} messages (some synthetic from chunks), chronologically ordered
    */
   async retrieve(query, messages, options = {}) {
     const {
       maxChunks = 20,
       alwaysKeepRecent = 4,
+      recentTokenBudget = 800,
       minSimilarity = 0.25,
       dedupeThreshold = 0.92,
       maxTokens = 4000
@@ -192,7 +195,6 @@ class ConversationCompactor {
     // Index all messages (chunking + embedding)
     const indexed = await this._ensureIndexed(contentMessages);
     if (!indexed) {
-      // Fallback: return recent messages only
       return contentMessages.slice(-alwaysKeepRecent);
     }
 
@@ -208,17 +210,30 @@ class ConversationCompactor {
       return contentMessages.slice(-alwaysKeepRecent);
     }
 
-    // Always keep recent messages verbatim
-    const recentMessages = contentMessages.slice(-alwaysKeepRecent);
-    const recentIds = new Set(recentMessages.map(m => m.id));
+    // Separate recent messages into "short" (keep verbatim) and "large" (chunk-search).
+    // A 14K-token article pasted as a single message must be chunked even if it's recent.
+    const tail = contentMessages.slice(-alwaysKeepRecent);
+    const recentVerbatim = [];   // short messages kept as-is
+    const recentLargeIds = new Set(); // large recent messages → search their chunks
+    for (const msg of tail) {
+      const estTokens = Math.ceil((msg.text?.length || 0) / CHARS_PER_TOKEN);
+      if (estTokens <= recentTokenBudget) {
+        recentVerbatim.push(msg);
+      } else {
+        recentLargeIds.add(msg.id);
+      }
+    }
 
-    // Score ALL chunks from older messages
-    const olderChunkIds = Object.keys(this._chunks).filter(cid => {
+    // Messages excluded from chunk search: only the short recent ones
+    const verbatimIds = new Set(recentVerbatim.map(m => m.id));
+
+    // Score ALL chunks (from any message not in verbatimIds)
+    const searchableChunkIds = Object.keys(this._chunks).filter(cid => {
       const chunk = this._chunks[cid];
-      return !recentIds.has(chunk.messageId) && this._vectors[cid];
+      return !verbatimIds.has(chunk.messageId) && this._vectors[cid];
     });
 
-    const scored = olderChunkIds
+    const scored = searchableChunkIds
       .map(cid => ({
         chunk: this._chunks[cid],
         chunkId: cid,
@@ -251,10 +266,8 @@ class ConversationCompactor {
       chunksByMessage.get(mid).push(item);
     }
 
-    // Build synthetic messages: each is the relevant excerpts from one original message
     const syntheticMessages = [];
     for (const [messageId, items] of chunksByMessage) {
-      // Sort chunks by their position within the original message
       items.sort((a, b) => {
         const idxA = parseInt(a.chunkId.split(':')[1], 10);
         const idxB = parseInt(b.chunkId.split(':')[1], 10);
@@ -273,8 +286,8 @@ class ConversationCompactor {
       });
     }
 
-    // Combine: synthetic older messages + verbatim recent messages
-    const combined = [...syntheticMessages, ...recentMessages];
+    // Combine: synthetic chunks + verbatim short recent messages
+    const combined = [...syntheticMessages, ...recentVerbatim];
     combined.sort((a, b) => {
       const timeA = new Date(a.timestamp || 0).getTime();
       const timeB = new Date(b.timestamp || 0).getTime();

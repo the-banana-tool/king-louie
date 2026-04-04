@@ -337,7 +337,9 @@ function registerChatHandlers(ipcMain, context = {}) {
           minSimilarity: 0.25,
           maxTokens: 4000
         });
-        console.log(`[chat] Compacted ${allContentMessages.length} messages → ${chatMessages.length} (chunk-level retrieval)`);
+        const origTokens = Math.ceil(allContentMessages.reduce((s, m) => s + (m.text?.length || 0), 0) / 4);
+        const compTokens = Math.ceil(chatMessages.reduce((s, m) => s + (m.text?.length || 0), 0) / 4);
+        console.log(`[chat] Compacted ${allContentMessages.length} messages → ${chatMessages.length} messages (~${origTokens} → ~${compTokens} tokens, ${Math.round((1 - compTokens / origTokens) * 100)}% reduction)`);
       } catch (err) {
         console.warn('[chat] Conversation compaction failed, using full history:', err.message);
       }
