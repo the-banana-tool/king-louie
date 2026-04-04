@@ -210,126 +210,140 @@ class AgentLoop {
       }
 
       if (response.type === 'tool_use') {
-        const toolCallId =
-          response.toolUseId ||
-          `toolcall-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        // Normalize to an array of tool calls (supports both single and multi)
+        const calls = response.toolCalls || [{
+          toolName: response.toolName,
+          toolUseId: response.toolUseId,
+          parameters: response.parameters
+        }];
 
-        let toolResult;
+        // Execute a single tool call (AskUser or normal tool)
+        const executeSingleCall = async (call) => {
+          const toolCallId = call.toolUseId ||
+            `toolcall-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-        if (response.toolName === 'AskUser') {
-          // Special handling for AskUser tool
-          const question = response.parameters?.question;
+          let toolResult;
 
-          toolResult = await new Promise((resolve, reject) => {
-            const requestId = `ask-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-            const timeoutMs = 5 * 60 * 1000; // 5 minutes
+          if (call.toolName === 'AskUser') {
+            const question = call.parameters?.question;
+            toolResult = await new Promise((resolve) => {
+              const requestId = `ask-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+              const timeoutMs = 5 * 60 * 1000;
+              const timeoutId = setTimeout(() => {
+                resolve({ ok: false, error: 'User did not respond within 5 minutes.' });
+              }, timeoutMs);
 
-            const timeoutId = setTimeout(() => {
-              // Only cleanup if we actually emitted the event
-              // Cleanup is handled by the main process IPC handler when it resolves
-              resolve({ ok: false, error: 'User did not respond within 5 minutes.' });
-            }, timeoutMs);
-
-            // Send IPC message to the renderer to show the prompt
-            // Check if we are running in the main process
-            try {
-              const { BrowserWindow } = require('electron');
-              const windows = BrowserWindow.getAllWindows();
-
-              if (windows.length > 0) {
-                const win = windows[0];
-                const { pendingAskUserResolvers } = require('../../main');
-
-                if (pendingAskUserResolvers) {
-                  pendingAskUserResolvers.set(requestId, {
-                    resolve: (userResponse) => {
-                      clearTimeout(timeoutId);
-                      resolve({ ok: true, response: userResponse });
-                    }
-                  });
-                  win.webContents.send('agent:askUser', { requestId, question });
+              try {
+                const { BrowserWindow } = require('electron');
+                const windows = BrowserWindow.getAllWindows();
+                if (windows.length > 0) {
+                  const win = windows[0];
+                  const { pendingAskUserResolvers } = require('../../main');
+                  if (pendingAskUserResolvers) {
+                    pendingAskUserResolvers.set(requestId, {
+                      resolve: (userResponse) => {
+                        clearTimeout(timeoutId);
+                        resolve({ ok: true, response: userResponse });
+                      }
+                    });
+                    win.webContents.send('agent:askUser', { requestId, question });
+                  } else {
+                    clearTimeout(timeoutId);
+                    resolve({ ok: false, error: 'pendingAskUserResolvers not available' });
+                  }
                 } else {
-                   clearTimeout(timeoutId);
-                   resolve({ ok: false, error: 'pendingAskUserResolvers not available' });
+                  clearTimeout(timeoutId);
+                  resolve({ ok: false, error: 'No UI available to ask user.' });
                 }
-              } else {
+              } catch (e) {
                 clearTimeout(timeoutId);
-                resolve({ ok: false, error: 'No UI available to ask user.' });
+                resolve({ ok: false, error: 'Cannot ask user outside of Electron main process.' });
               }
-            } catch (e) {
-              // Not in electron main process context (e.g. tests)
-              clearTimeout(timeoutId);
-              resolve({ ok: false, error: 'Cannot ask user outside of Electron main process.' });
-            }
-          });
-        } else {
-          toolResult = await this.executor.execute(
-            response.toolName,
-            response.parameters,
-            options
-          );
+            });
+          } else {
+            toolResult = await this.executor.execute(
+              call.toolName,
+              call.parameters,
+              options
+            );
+            toolResult = await this._handleAccessDenied(
+              toolResult, call.toolName, call.parameters, options
+            );
+          }
 
-          // If access was denied, prompt user and optionally retry
-          toolResult = await this._handleAccessDenied(
-            toolResult, response.toolName, response.parameters, options
-          );
+          return { ...call, toolCallId, result: toolResult };
+        };
+
+        // Execute all tool calls in parallel
+        const results = await Promise.all(calls.map(executeSingleCall));
+
+        // Process results: merge injected tools and track executed tools
+        for (const entry of results) {
+          if (Array.isArray(entry.result?._injectedTools) && entry.result._injectedTools.length > 0) {
+            const existingNames = new Set(activeTools.map(t => t.name));
+            for (const injected of entry.result._injectedTools) {
+              if (!existingNames.has(injected.name)) {
+                activeTools.push(injected);
+                existingNames.add(injected.name);
+              }
+            }
+          }
+
+          executedTools.push({
+            name: entry.toolName,
+            parameters: entry.parameters,
+            result: entry.result
+          });
         }
 
-        // If RequestTools returned injected tools, merge them into activeTools
-        if (Array.isArray(toolResult?._injectedTools) && toolResult._injectedTools.length > 0) {
-          const existingNames = new Set(activeTools.map(t => t.name));
-          for (const injected of toolResult._injectedTools) {
-            if (!existingNames.has(injected.name)) {
-              activeTools.push(injected);
-              existingNames.add(injected.name);
-            }
+        // Build conversation history messages
+        if (results.length > 1 && typeof this.provider.buildMultiToolMessages === 'function') {
+          const providerMessages = this.provider.buildMultiToolMessages(response, results);
+          conversationHistory.push(...providerMessages);
+        } else if (results.length === 1 && typeof this.provider.buildToolMessages === 'function') {
+          const entry = results[0];
+          const providerMessages = this.provider.buildToolMessages(
+            { toolName: entry.toolName, parameters: entry.parameters, messageContent: response.messageContent },
+            entry.result,
+            entry.toolCallId
+          );
+          conversationHistory.push(...providerMessages);
+        } else if (typeof this.provider.buildMultiToolMessages === 'function') {
+          const providerMessages = this.provider.buildMultiToolMessages(response, results);
+          conversationHistory.push(...providerMessages);
+        } else {
+          // Generic fallback for providers without buildToolMessages
+          for (const entry of results) {
+            conversationHistory.push({
+              role: 'assistant',
+              content: response.messageContent || '',
+              tool_calls: [{
+                id: entry.toolCallId,
+                type: 'function',
+                function: {
+                  name: entry.toolName,
+                  arguments: JSON.stringify(entry.parameters || {})
+                }
+              }]
+            });
+            conversationHistory.push({
+              role: 'tool',
+              tool_call_id: entry.toolCallId,
+              content: JSON.stringify(entry.result)
+            });
           }
         }
 
-        executedTools.push({
-          name: response.toolName,
-          parameters: response.parameters,
-          result: toolResult
-        });
-
-        if (typeof this.provider.buildToolMessages === 'function') {
-          const providerMessages = this.provider.buildToolMessages(
-            response,
-            toolResult,
-            toolCallId
-          );
-          conversationHistory.push(...providerMessages);
-        } else {
-          conversationHistory.push({
-            role: 'assistant',
-            content: response.messageContent || '',
-            tool_calls: [
-              {
-                id: toolCallId,
-                type: 'function',
-                function: {
-                  name: response.toolName,
-                  arguments: JSON.stringify(response.parameters || {})
-                }
-              }
-            ]
-          });
-
-          conversationHistory.push({
-            role: 'tool',
-            tool_call_id: toolCallId,
-            content: JSON.stringify(toolResult)
+        // Track tool results for semantic compaction
+        for (const entry of results) {
+          const resultSnippet = entry.result != null ? JSON.stringify(entry.result).substring(0, 400) : '';
+          this._toolResultEntries.push({
+            historyIndex: conversationHistory.length - 1,
+            toolName: entry.toolName,
+            text: `${entry.toolName}: ${resultSnippet}`,
+            compacted: false
           });
         }
-
-        // Track tool result for semantic compaction (last message is the result)
-        const resultSnippet = toolResult != null ? JSON.stringify(toolResult).substring(0, 400) : '';
-        this._toolResultEntries.push({
-          historyIndex: conversationHistory.length - 1,
-          toolName: response.toolName,
-          text: `${response.toolName}: ${resultSnippet}`,
-          compacted: false
-        });
 
         continue;
       }

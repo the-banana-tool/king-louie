@@ -164,15 +164,22 @@ class AnthropicProvider extends BaseLLMProvider {
 
   parseToolResponse(response, llmMetrics) {
     const content = Array.isArray(response?.content) ? response.content : [];
-    const toolUse = content.find((block) => block.type === 'tool_use');
+    const toolUseBlocks = content.filter((block) => block.type === 'tool_use');
     const textBlocks = content.filter((block) => block.type === 'text');
 
-    if (toolUse) {
+    if (toolUseBlocks.length > 0) {
+      const toolCalls = toolUseBlocks.map((block) => ({
+        toolName: block.name,
+        toolUseId: block.id,
+        parameters: block.input || {}
+      }));
+
       return {
         type: 'tool_use',
-        toolName: toolUse.name,
-        toolUseId: toolUse.id,
-        parameters: toolUse.input || {},
+        toolName: toolCalls[0].toolName,
+        toolUseId: toolCalls[0].toolUseId,
+        parameters: toolCalls[0].parameters,
+        toolCalls,
         messageContent: textBlocks.map((block) => block.text).join('\n'),
         llmMetrics
       };
@@ -214,6 +221,34 @@ class AnthropicProvider extends BaseLLMProvider {
           }
         ]
       }
+    ];
+  }
+
+  buildMultiToolMessages(response, toolCallEntries) {
+    const assistantContent = [];
+
+    if (response.messageContent) {
+      assistantContent.push({ type: 'text', text: response.messageContent });
+    }
+
+    for (const entry of toolCallEntries) {
+      assistantContent.push({
+        type: 'tool_use',
+        id: entry.toolCallId,
+        name: entry.toolName,
+        input: entry.parameters || {}
+      });
+    }
+
+    const toolResults = toolCallEntries.map((entry) => ({
+      type: 'tool_result',
+      tool_use_id: entry.toolCallId,
+      content: JSON.stringify(entry.result)
+    }));
+
+    return [
+      { role: 'assistant', content: assistantContent },
+      { role: 'user', content: toolResults }
     ];
   }
 
