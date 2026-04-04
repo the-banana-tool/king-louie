@@ -55,7 +55,10 @@ function buildSystemSections(runtimeEnvironment = {}, options = {}) {
     content: [
       'Browser tool guidance:',
       '- You have a Browser tool that can launch a real browser, navigate to URLs, take screenshots, and interact with pages.',
-      '- Use it when the user asks to open or view something in a browser.'
+      '- Use it when the user asks to open or view something in a browser.',
+      '- When testing or interacting with a page: first take a screenshot or get content to discover the real element selectors. NEVER guess IDs or selectors — inspect the DOM first.',
+      '- If a Browser evaluate/click/fill returns empty, sparse, or unexpected results, DO NOT give up. Take a screenshot, re-inspect the DOM, find the correct selectors, and retry. Iterate until the task succeeds.',
+      '- Report what you actually tested and what the results were. Never substitute a how-to guide or test plan for actually doing the work.'
     ].join('\n')
   });
 

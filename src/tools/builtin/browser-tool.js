@@ -2,6 +2,15 @@ const { Tool } = require('../tool-schema');
 const { validateUrl } = require('./web-fetch-utils');
 const PlaywrightBrowser = require('../../browser/playwright-browser');
 
+// Maximum timeout the LLM can request for any browser action (15 seconds).
+// This prevents wasting iterations on long waits for invisible/missing elements.
+const MAX_ACTION_TIMEOUT = 15000;
+
+function clampTimeout(requested, fallback) {
+  const t = requested || fallback;
+  return Math.min(t, MAX_ACTION_TIMEOUT);
+}
+
 // Singleton browser instance reused across tool calls
 let pw = null;
 
@@ -169,11 +178,10 @@ const actions = {
   async click(params) {
     const b = requireRunning();
     const loc = resolveLocator(b.page, params.selector);
-    const opts = {};
+    const opts = { timeout: clampTimeout(params.timeout, 10000) };
     if (params.button) opts.button = params.button; // 'left', 'right', 'middle'
     if (params.click_count) opts.clickCount = params.click_count;
     if (params.modifiers) opts.modifiers = params.modifiers; // ['Shift', 'Control', etc.]
-    if (params.timeout) opts.timeout = params.timeout;
     await loc.click(opts);
     return { ok: true, message: `Clicked ${params.selector}` };
   },
@@ -181,7 +189,7 @@ const actions = {
   async dblclick(params) {
     const b = requireRunning();
     const loc = resolveLocator(b.page, params.selector);
-    await loc.dblclick({ timeout: params.timeout || 5000 });
+    await loc.dblclick({ timeout: clampTimeout(params.timeout, 5000) });
     return { ok: true, message: `Double-clicked ${params.selector}` };
   },
 
@@ -189,7 +197,7 @@ const actions = {
     const b = requireRunning();
     if (params.text === undefined) return { ok: false, error: 'text parameter is required' };
     const loc = resolveLocator(b.page, params.selector);
-    await loc.fill(params.text, { timeout: params.timeout || 5000 });
+    await loc.fill(params.text, { timeout: clampTimeout(params.timeout, 5000) });
     return { ok: true, message: `Filled ${params.selector}` };
   },
 
@@ -199,7 +207,7 @@ const actions = {
     const loc = resolveLocator(b.page, params.selector);
     await loc.pressSequentially(params.text, {
       delay: params.delay || 50,
-      timeout: params.timeout || 10000,
+      timeout: clampTimeout(params.timeout, 10000),
     });
     return { ok: true, message: `Typed into ${params.selector}` };
   },
@@ -209,7 +217,7 @@ const actions = {
     if (!params.key) return { ok: false, error: 'key parameter is required (e.g. "Enter", "Tab", "Control+a")' };
     if (params.selector) {
       const loc = resolveLocator(b.page, params.selector);
-      await loc.press(params.key, { timeout: params.timeout || 5000 });
+      await loc.press(params.key, { timeout: clampTimeout(params.timeout, 5000) });
     } else {
       await b.page.keyboard.press(params.key);
     }
@@ -219,7 +227,7 @@ const actions = {
   async clear(params) {
     const b = requireRunning();
     const loc = resolveLocator(b.page, params.selector);
-    await loc.clear({ timeout: params.timeout || 5000 });
+    await loc.clear({ timeout: clampTimeout(params.timeout, 5000) });
     return { ok: true, message: `Cleared ${params.selector}` };
   },
 
@@ -232,35 +240,35 @@ const actions = {
     const selectArg = params.label ? { label: params.label }
       : params.index !== undefined ? { index: params.index }
         : params.value;
-    const selected = await loc.selectOption(selectArg, { timeout: params.timeout || 5000 });
+    const selected = await loc.selectOption(selectArg, { timeout: clampTimeout(params.timeout, 5000) });
     return { ok: true, selected };
   },
 
   async check(params) {
     const b = requireRunning();
     const loc = resolveLocator(b.page, params.selector);
-    await loc.check({ timeout: params.timeout || 5000 });
+    await loc.check({ timeout: clampTimeout(params.timeout, 5000) });
     return { ok: true, message: `Checked ${params.selector}` };
   },
 
   async uncheck(params) {
     const b = requireRunning();
     const loc = resolveLocator(b.page, params.selector);
-    await loc.uncheck({ timeout: params.timeout || 5000 });
+    await loc.uncheck({ timeout: clampTimeout(params.timeout, 5000) });
     return { ok: true, message: `Unchecked ${params.selector}` };
   },
 
   async hover(params) {
     const b = requireRunning();
     const loc = resolveLocator(b.page, params.selector);
-    await loc.hover({ timeout: params.timeout || 5000 });
+    await loc.hover({ timeout: clampTimeout(params.timeout, 5000) });
     return { ok: true, message: `Hovered over ${params.selector}` };
   },
 
   async focus(params) {
     const b = requireRunning();
     const loc = resolveLocator(b.page, params.selector);
-    await loc.focus({ timeout: params.timeout || 5000 });
+    await loc.focus({ timeout: clampTimeout(params.timeout, 5000) });
     return { ok: true, message: `Focused ${params.selector}` };
   },
 
@@ -269,7 +277,7 @@ const actions = {
     if (!params.target_selector) return { ok: false, error: 'target_selector parameter is required' };
     const source = resolveLocator(b.page, params.selector);
     const target = resolveLocator(b.page, params.target_selector);
-    await source.dragTo(target, { timeout: params.timeout || 10000 });
+    await source.dragTo(target, { timeout: clampTimeout(params.timeout, 10000) });
     return { ok: true, message: `Dragged ${params.selector} to ${params.target_selector}` };
   },
 
@@ -277,7 +285,7 @@ const actions = {
     const b = requireRunning();
     if (!params.files) return { ok: false, error: 'files parameter is required (path string or array of paths)' };
     const loc = resolveLocator(b.page, params.selector);
-    await loc.setInputFiles(params.files, { timeout: params.timeout || 5000 });
+    await loc.setInputFiles(params.files, { timeout: clampTimeout(params.timeout, 5000) });
     return { ok: true, message: `Set files on ${params.selector}` };
   },
 
@@ -285,7 +293,7 @@ const actions = {
     const b = requireRunning();
     if (params.selector) {
       const loc = resolveLocator(b.page, params.selector);
-      await loc.scrollIntoViewIfNeeded({ timeout: params.timeout || 5000 });
+      await loc.scrollIntoViewIfNeeded({ timeout: clampTimeout(params.timeout, 5000) });
       return { ok: true, message: `Scrolled ${params.selector} into view` };
     }
     // Scroll page by delta
@@ -363,7 +371,7 @@ const actions = {
   async get_text(params) {
     const b = requireRunning();
     const loc = resolveLocator(b.page, params.selector);
-    const text = await loc.innerText({ timeout: params.timeout || 5000 });
+    const text = await loc.innerText({ timeout: clampTimeout(params.timeout, 5000) });
     return { ok: true, text };
   },
 
@@ -371,14 +379,14 @@ const actions = {
     const b = requireRunning();
     if (!params.attribute) return { ok: false, error: 'attribute parameter is required' };
     const loc = resolveLocator(b.page, params.selector);
-    const value = await loc.getAttribute(params.attribute, { timeout: params.timeout || 5000 });
+    const value = await loc.getAttribute(params.attribute, { timeout: clampTimeout(params.timeout, 5000) });
     return { ok: true, value };
   },
 
   async get_value(params) {
     const b = requireRunning();
     const loc = resolveLocator(b.page, params.selector);
-    const value = await loc.inputValue({ timeout: params.timeout || 5000 });
+    const value = await loc.inputValue({ timeout: clampTimeout(params.timeout, 5000) });
     return { ok: true, value };
   },
 
@@ -399,7 +407,7 @@ const actions = {
   async bounding_box(params) {
     const b = requireRunning();
     const loc = resolveLocator(b.page, params.selector);
-    const box = await loc.boundingBox({ timeout: params.timeout || 5000 });
+    const box = await loc.boundingBox({ timeout: clampTimeout(params.timeout, 5000) });
     return { ok: true, box };
   },
 
