@@ -58,8 +58,7 @@
   },
   "devDependencies": {
     "electron": "^41.0.4",
-    "electron-builder": "^26.8.1",
-    "playwright": "^1.58.2"
+    "electron-builder": "^26.8.1"
   },
   "dependencies": {
     "@fortawesome/fontawesome-free": "^7.2.0",
@@ -75,6 +74,7 @@
     "marked": "^17.0.5",
     "turndown": "^7.2.2",
     "ws": "^8.20.0",
-    "xlsx": "^0.18.5"
+    "xlsx": "^0.18.5",
+    "playwright": "^1.58.2"
   }
 }
