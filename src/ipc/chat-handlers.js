@@ -323,18 +323,21 @@ function registerChatHandlers(ipcMain, context = {}) {
     // Filter out persisted tool events — only user/assistant messages go to the LLM
     const allContentMessages = chatRaw.messages.filter((m) => m.sender === 'user' || m.sender === 'assistant');
 
-    // Semantic conversation compaction: for long conversations, retrieve only
-    // the messages relevant to the current query instead of sending everything.
-    // One cheap embedding call (~$0.001), then pure local cosine similarity.
+    // Semantic conversation compaction: for large conversations, chunk every
+    // message into paragraphs, embed them, then retrieve only the chunks
+    // relevant to the current query.  One cheap embedding call (~$0.002),
+    // then pure local cosine similarity — no LLM call for the retrieval.
     const compactor = typeof getConversationCompactor === 'function' ? getConversationCompactor() : null;
     let chatMessages = allContentMessages;
     if (compactor && compactor.shouldCompact(allContentMessages)) {
       try {
         chatMessages = await compactor.retrieve(safeMessage, allContentMessages, {
-          maxMessages: 15,
+          maxChunks: 20,
           alwaysKeepRecent: 4,
-          minSimilarity: 0.2
+          minSimilarity: 0.25,
+          maxTokens: 4000
         });
+        console.log(`[chat] Compacted ${allContentMessages.length} messages → ${chatMessages.length} (chunk-level retrieval)`);
       } catch (err) {
         console.warn('[chat] Conversation compaction failed, using full history:', err.message);
       }
