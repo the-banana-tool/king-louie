@@ -103,6 +103,7 @@ class OpenAIProvider extends BaseLLMProvider {
     return {
       'gpt-5.4-pro': { inputPerMillion: 3, outputPerMillion: 15 },
       'gpt-5': { inputPerMillion: 3, outputPerMillion: 15 },
+      'gpt-5.1': { inputPerMillion: 3, outputPerMillion: 15 },
       'gpt-5-mini': { inputPerMillion: 0.5, outputPerMillion: 2 },
       'gpt-5.2-codex': { inputPerMillion: 3, outputPerMillion: 15 },
       'gpt-4.1': { inputPerMillion: 2, outputPerMillion: 8 },

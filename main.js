@@ -52,6 +52,7 @@ const CronExecutor = require('./src/cron/cron-executor');
 const CronScheduler = require('./src/cron/cron-scheduler');
 const { MemoryStore, MemoryManager } = require('./src/memory');
 const ContextAssembler = require('./src/context/context-assembler');
+const ConversationCompactor = require('./src/context/conversation-compactor');
 const { buildSystemSections } = require('./src/context/system-sections');
 const UsageTracker = require('./src/tracking/usage-tracker');
 const {
@@ -92,6 +93,7 @@ let hookExecutor;
 let memoryStore;
 let memoryManager;
 let contextAssembler;
+let conversationCompactor;
 let ttsEngine;
 let usageTracker;
 let cronStore;
@@ -2148,6 +2150,12 @@ const initializeAgentInfrastructure = async () => {
     openaiApiKey: openaiApiKey || ''
   });
 
+  // ConversationCompactor: semantic retrieval over conversation history.
+  // Reuses the same embedding provider as the context assembler.
+  conversationCompactor = new ConversationCompactor({
+    embeddingProvider: contextAssembler.embeddingProvider
+  });
+
   usageTracker = new UsageTracker(store);
   ttsEngine = new TTSEngine({
     getSettings: getVoiceSettings,
@@ -2504,6 +2512,7 @@ registerHandlers(ipcMain, {
   buildRuntimeSystemPrompt,
   buildMemoryContextSection,
   getContextAssembler: () => contextAssembler,
+  getConversationCompactor: () => conversationCompactor,
   speakSummaryText,
   getMainWindow: () => mainWindow,
   getTtsEngine: () => ttsEngine,
