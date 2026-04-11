@@ -10,6 +10,12 @@ class PlannerExecutor {
     this.agentExecutorAdapter = options.agentExecutorAdapter;
     this.workflowEngine = options.workflowEngine;
     this.getAgent = options.getAgent;
+    // Optional: semantic conversation compactor. When provided and the chat
+    // history exceeds its threshold, the planner receives a semantically
+    // retrieved subset instead of the full transcript.
+    this.getConversationCompactor = typeof options.getConversationCompactor === 'function'
+      ? options.getConversationCompactor
+      : () => null;
   }
 
   /**
@@ -20,8 +26,12 @@ class PlannerExecutor {
     // Phase 1: Plan
     const taskGraph = await this.plan(goal, options);
 
-    // Phase 2: Create workflow
-    const workflow = await this.workflowEngine.create(taskGraph);
+    // Phase 2: Create workflow (carry chatId + workingDirectory so events and task
+    // execution are rooted in the chat that launched the workflow)
+    const workflow = await this.workflowEngine.create(taskGraph, {
+      chatId: options.chatId || null,
+      workingDirectory: options.workingDirectory || null
+    });
 
     // Phase 3: Execute (async — returns immediately if background)
     if (options.background) {
@@ -38,6 +48,15 @@ class PlannerExecutor {
 
   /**
    * Run only the planning phase — returns the task graph without executing it.
+   *
+   * Supported options:
+   *   - workingDirectory: project root; rooted for the planner's Read/Glob/Grep tools
+   *     AND injected into the system prompt so the planner cites real paths.
+   *   - chatMessages: array of {sender, text} chat history; converted to
+   *     {role, content} and passed as `messages` so the planner sees the full
+   *     conversation context (the goal alone is often not enough).
+   *   - maxIterations: override default 15.
+   *   - chatId: carried through for event association (not used during planning).
    */
   async plan(goal, options = {}) {
     const plannerAgent = this.getAgent('planner');
@@ -45,9 +64,55 @@ class PlannerExecutor {
       throw new Error('Planner agent not found. Ensure it is registered.');
     }
 
-    const result = await this.agentExecutorAdapter.execute(plannerAgent, goal, {
+    const execOptions = {
       maxIterations: options.maxIterations || 15
-    });
+    };
+
+    if (options.workingDirectory) {
+      execOptions.workingDirectory = options.workingDirectory;
+      execOptions.systemPrompt = [
+        `Working directory (project root for this plan): ${options.workingDirectory}`,
+        'All file paths in your task descriptions MUST be absolute and rooted under this directory unless the goal explicitly requires otherwise.',
+        'Your Read/Glob/Grep tool calls are already rooted in this directory — use them.'
+      ].join('\n');
+    }
+
+    let history = Array.isArray(options.chatMessages) ? options.chatMessages : [];
+    history = history.filter((m) => m && (m.sender === 'user' || m.sender === 'assistant'));
+
+    // Semantic compaction: if history is large, retrieve only the chunks
+    // relevant to the goal instead of replaying the whole transcript.
+    const compactor = this.getConversationCompactor();
+    if (compactor && history.length > 0 && typeof compactor.shouldCompact === 'function' && compactor.shouldCompact(history)) {
+      try {
+        history = await compactor.retrieve(goal, history, {
+          maxChunks: 20,
+          alwaysKeepRecent: 4,
+          minSimilarity: 0.25,
+          maxTokens: 4000
+        });
+      } catch (err) {
+        console.warn('[planner-executor] Conversation compaction failed, using full history:', err.message);
+      }
+    }
+
+    const convertedHistory = history
+      .map((m) => ({
+        role: m.sender === 'assistant' ? 'assistant' : 'user',
+        content: typeof m.text === 'string' ? m.text : String(m.text || '')
+      }))
+      .filter((m) => m.content.trim().length > 0);
+
+    if (convertedHistory.length > 0) {
+      // Append the explicit goal as the final user turn so the planner knows
+      // what to produce a plan for.
+      execOptions.messages = [
+        ...convertedHistory,
+        { role: 'user', content: `Produce a task graph for this goal:\n\n${goal}` }
+      ];
+    }
+
+    const result = await this.agentExecutorAdapter.execute(plannerAgent, goal, execOptions);
 
     if (result.type === 'error' || result.type === 'stopped') {
       throw new Error(`Planning failed: ${result.content}`);

@@ -117,6 +117,7 @@ module.exports = {
 
   WORKFLOW_PLAN: 'workflow:plan',
   WORKFLOW_PLAN_AND_EXECUTE: 'workflow:planAndExecute',
+  WORKFLOW_CREATE: 'workflow:create',
   WORKFLOW_RUN: 'workflow:run',
   WORKFLOW_PAUSE: 'workflow:pause',
   WORKFLOW_CANCEL: 'workflow:cancel',

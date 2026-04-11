@@ -37,6 +37,16 @@ class WorkflowEngine extends EventEmitter {
     this.agentExecutorAdapter = options.agentExecutorAdapter || null;
     this.getAgent = options.getAgent || null;
     this.maxConcurrentTasks = options.maxConcurrentTasks || 3;
+    // Optional: parent-chat context injection for each task. When both are
+    // provided, _executeTask pulls the parent chat's history, semantically
+    // compacts it using the task description as the query, and prepends it to
+    // the task's messages so the executor has the user's surrounding context.
+    this.getConversationCompactor = typeof options.getConversationCompactor === 'function'
+      ? options.getConversationCompactor
+      : () => null;
+    this.getParentChatMessages = typeof options.getParentChatMessages === 'function'
+      ? options.getParentChatMessages
+      : () => [];
     this.workflows = new Map();
     this.activeExecutions = new Map(); // workflowId → AbortController
   }
@@ -49,7 +59,7 @@ class WorkflowEngine extends EventEmitter {
   /**
    * Create a workflow from a planner task graph.
    */
-  async create(taskGraph) {
+  async create(taskGraph, opts = {}) {
     if (!taskGraph || !Array.isArray(taskGraph.tasks)) {
       throw new Error('Invalid task graph: must have a tasks array');
     }
@@ -88,13 +98,15 @@ class WorkflowEngine extends EventEmitter {
       metadata: {
         estimatedTotalSteps: taskGraph.estimatedTotalSteps || taskGraph.tasks.length,
         requiresUserInput: taskGraph.requiresUserInput || false,
-        userInputNeeded: taskGraph.userInputNeeded || null
+        userInputNeeded: taskGraph.userInputNeeded || null,
+        chatId: opts.chatId || null,
+        workingDirectory: opts.workingDirectory || null
       }
     };
 
     this.workflows.set(id, workflow);
     await this._save(workflow);
-    this.emit('workflow:created', { workflowId: id, goal: workflow.goal });
+    this.emit('workflow:created', { workflowId: id, goal: workflow.goal, chatId: workflow.metadata.chatId });
 
     return workflow;
   }
@@ -121,17 +133,18 @@ class WorkflowEngine extends EventEmitter {
     workflow.startedAt = workflow.startedAt || new Date().toISOString();
     workflow.updatedAt = new Date().toISOString();
     this._save(workflow);
-    this.emit('workflow:started', { workflowId });
+    const chatId = workflow.metadata?.chatId || null;
+    this.emit('workflow:started', { workflowId, chatId });
 
     try {
       await this._executeLoop(workflow, abortController.signal);
     } catch (error) {
       if (error.name === 'AbortError' || abortController.signal.aborted) {
         workflow.status = WORKFLOW_STATUS.PAUSED;
-        this.emit('workflow:paused', { workflowId });
+        this.emit('workflow:paused', { workflowId, chatId });
       } else {
         workflow.status = WORKFLOW_STATUS.FAILED;
-        this.emit('workflow:failed', { workflowId, error: error.message });
+        this.emit('workflow:failed', { workflowId, chatId, error: error.message });
       }
     } finally {
       this.activeExecutions.delete(workflowId);
@@ -155,7 +168,7 @@ class WorkflowEngine extends EventEmitter {
       workflow.status = WORKFLOW_STATUS.PAUSED;
       workflow.updatedAt = new Date().toISOString();
       this._save(workflow);
-      this.emit('workflow:paused', { workflowId });
+      this.emit('workflow:paused', { workflowId, chatId: workflow.metadata?.chatId || null });
     }
     return workflow;
   }
@@ -174,7 +187,7 @@ class WorkflowEngine extends EventEmitter {
       workflow.updatedAt = new Date().toISOString();
       workflow.completedAt = new Date().toISOString();
       this._save(workflow);
-      this.emit('workflow:cancelled', { workflowId });
+      this.emit('workflow:cancelled', { workflowId, chatId: workflow.metadata?.chatId || null });
     }
     return workflow;
   }
@@ -266,7 +279,7 @@ class WorkflowEngine extends EventEmitter {
         if (allDone) {
           workflow.status = WORKFLOW_STATUS.COMPLETED;
           workflow.completedAt = new Date().toISOString();
-          this.emit('workflow:completed', { workflowId: workflow.id });
+          this.emit('workflow:completed', { workflowId: workflow.id, chatId: workflow.metadata?.chatId || null });
         }
         break;
       }
@@ -299,14 +312,14 @@ class WorkflowEngine extends EventEmitter {
       task.status = TASK_STATUS.FAILED;
       task.error = `Agent "${task.agentId}" not found`;
       task.completedAt = new Date().toISOString();
-      this.emit('workflow:task:failed', { workflowId: workflow.id, taskId: task.id, error: task.error });
+      this.emit('workflow:task:failed', { workflowId: workflow.id, chatId: workflow.metadata?.chatId || null, taskId: task.id, title: task.title, error: task.error });
       return;
     }
 
     task.status = TASK_STATUS.RUNNING;
     task.startedAt = new Date().toISOString();
     workflow.updatedAt = new Date().toISOString();
-    this.emit('workflow:task:started', { workflowId: workflow.id, taskId: task.id, title: task.title });
+    this.emit('workflow:task:started', { workflowId: workflow.id, chatId: workflow.metadata?.chatId || null, taskId: task.id, title: task.title });
 
     // Build context from completed dependency results
     const depContext = task.dependsOn
@@ -325,6 +338,9 @@ class WorkflowEngine extends EventEmitter {
       : task.description;
 
     const executeOptions = {};
+    if (workflow.metadata?.workingDirectory) {
+      executeOptions.workingDirectory = workflow.metadata.workingDirectory;
+    }
     if (task.preferredModel) {
       // Parse "provider:model" format
       const parts = task.preferredModel.split(':');
@@ -333,6 +349,48 @@ class WorkflowEngine extends EventEmitter {
         executeOptions.model = parts[1];
       } else {
         executeOptions.model = task.preferredModel;
+      }
+    }
+
+    // Parent-chat context: pull the chat that launched this workflow and
+    // semantically retrieve the slice relevant to this task. This gives each
+    // task agent visibility into the user's surrounding conversation (e.g. a
+    // pasted audit document) without replaying the whole transcript.
+    const parentChatId = workflow.metadata?.chatId;
+    if (parentChatId) {
+      try {
+        let parentMessages = this.getParentChatMessages(parentChatId) || [];
+        parentMessages = parentMessages.filter((m) => m && (m.sender === 'user' || m.sender === 'assistant'));
+
+        const compactor = this.getConversationCompactor();
+        if (compactor && parentMessages.length > 0 && typeof compactor.shouldCompact === 'function' && compactor.shouldCompact(parentMessages)) {
+          try {
+            parentMessages = await compactor.retrieve(task.description || task.title || '', parentMessages, {
+              maxChunks: 12,
+              alwaysKeepRecent: 2,
+              minSimilarity: 0.25,
+              maxTokens: 2000
+            });
+          } catch (err) {
+            console.warn(`[workflow-engine] Parent context compaction failed for task ${task.id}:`, err.message);
+          }
+        }
+
+        const convertedParent = parentMessages
+          .map((m) => ({
+            role: m.sender === 'assistant' ? 'assistant' : 'user',
+            content: typeof m.text === 'string' ? m.text : String(m.text || '')
+          }))
+          .filter((m) => m.content.trim().length > 0);
+
+        if (convertedParent.length > 0) {
+          executeOptions.messages = [
+            ...convertedParent,
+            { role: 'user', content: fullMessage }
+          ];
+        }
+      } catch (err) {
+        console.warn(`[workflow-engine] Failed to load parent chat context for task ${task.id}:`, err.message);
       }
     }
 
@@ -347,6 +405,7 @@ class WorkflowEngine extends EventEmitter {
 
       this.emit('workflow:task:completed', {
         workflowId: workflow.id,
+        chatId: workflow.metadata?.chatId || null,
         taskId: task.id,
         title: task.title
       });
@@ -357,6 +416,7 @@ class WorkflowEngine extends EventEmitter {
 
       this.emit('workflow:task:failed', {
         workflowId: workflow.id,
+        chatId: workflow.metadata?.chatId || null,
         taskId: task.id,
         title: task.title,
         error: error.message

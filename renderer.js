@@ -157,6 +157,7 @@ const dom = {
   cronAddTargetInput: document.getElementById('cron-add-target-input'),
   cronAddKindInput: document.getElementById('cron-add-kind-input'),
   cronAddValueInput: document.getElementById('cron-add-value-input'),
+  chatPlanBtn: document.getElementById('chat-plan-btn'),
   workflowRefreshBtn: document.getElementById('workflow-refresh-btn'),
   workflowStatus: document.getElementById('workflow-status'),
   workflowList: document.getElementById('workflow-list'),
@@ -3891,6 +3892,380 @@ async function handlePlanAndExecuteWorkflow() {
   }
 }
 
+/**
+ * Append a status message to a specific chat (not necessarily the active one).
+ * Updates the chat's message array, persists, and renders inline if that chat
+ * is currently active.
+ */
+function appendStatusToChat(chatId, text) {
+  if (!chatId) return;
+  const chat = appState.chats.find((c) => c.id === chatId);
+  if (chat) {
+    chat.messages = chat.messages || [];
+    chat.messages.push({
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+      sender: 'status',
+      text,
+      timestamp: new Date().toISOString()
+    });
+  }
+  if (chatId === appState.activeChatId) {
+    addToolEventCompact('Workflow', { message: text }, 'info', false);
+  }
+  window.electron.chat.addMessage({ chatId, sender: 'status', text })
+    .catch((err) => console.warn('[workflow] status persist failed:', err.message));
+}
+
+/**
+ * Render an in-chat, EDITABLE approval card for a proposed task graph.
+ * Each task row has inputs for title, agentId, description, and dependsOn.
+ * Users can delete tasks and add new ones. On approve, the task graph is
+ * rebuilt from the current DOM state and passed to onApprove(editedGraph).
+ */
+const AGENT_CHOICES = ['main', 'code-explorer', 'code-writer', 'planner'];
+
+function buildTaskRow(task, taskListEl) {
+  const row = document.createElement('div');
+  row.className = 'workflow-task-row';
+  row.dataset.taskId = task.id || `task-${Math.random().toString(36).slice(2, 8)}`;
+  row.style.border = '1px solid rgba(255,255,255,0.12)';
+  row.style.borderRadius = '6px';
+  row.style.padding = '0.6em 0.75em';
+  row.style.marginBottom = '0.5em';
+  row.style.background = 'rgba(255,255,255,0.02)';
+
+  const topRow = document.createElement('div');
+  topRow.style.display = 'flex';
+  topRow.style.gap = '0.5em';
+  topRow.style.alignItems = 'center';
+  topRow.style.marginBottom = '0.35em';
+
+  const idBadge = document.createElement('code');
+  idBadge.textContent = row.dataset.taskId;
+  idBadge.style.opacity = '0.6';
+  idBadge.style.fontSize = '0.8em';
+  idBadge.style.flexShrink = '0';
+
+  const titleInput = document.createElement('input');
+  titleInput.type = 'text';
+  titleInput.className = 'workflow-task-title';
+  titleInput.value = task.title || '';
+  titleInput.placeholder = 'Task title';
+  titleInput.style.flex = '1';
+  titleInput.style.background = 'rgba(0,0,0,0.2)';
+  titleInput.style.border = '1px solid rgba(255,255,255,0.15)';
+  titleInput.style.borderRadius = '4px';
+  titleInput.style.padding = '0.25em 0.5em';
+  titleInput.style.color = 'inherit';
+  titleInput.style.fontWeight = '600';
+
+  const agentSelect = document.createElement('select');
+  agentSelect.className = 'workflow-task-agent';
+  agentSelect.style.background = 'rgba(0,0,0,0.2)';
+  agentSelect.style.border = '1px solid rgba(255,255,255,0.15)';
+  agentSelect.style.borderRadius = '4px';
+  agentSelect.style.padding = '0.25em 0.4em';
+  agentSelect.style.color = 'inherit';
+  for (const choice of AGENT_CHOICES) {
+    const opt = document.createElement('option');
+    opt.value = choice;
+    opt.textContent = choice;
+    if (choice === (task.agentId || 'main')) opt.selected = true;
+    agentSelect.appendChild(opt);
+  }
+
+  const deleteBtn = document.createElement('button');
+  deleteBtn.type = 'button';
+  deleteBtn.className = 'btn btn-sm';
+  deleteBtn.title = 'Delete task';
+  deleteBtn.appendChild(faIcon('fas fa-trash'));
+  deleteBtn.style.background = 'transparent';
+  deleteBtn.style.border = '1px solid rgba(255,255,255,0.15)';
+  deleteBtn.addEventListener('click', () => {
+    row.remove();
+  });
+
+  topRow.appendChild(idBadge);
+  topRow.appendChild(titleInput);
+  topRow.appendChild(agentSelect);
+  topRow.appendChild(deleteBtn);
+  row.appendChild(topRow);
+
+  const descInput = document.createElement('textarea');
+  descInput.className = 'workflow-task-desc';
+  descInput.value = task.description || '';
+  descInput.placeholder = 'Task description (what the executing agent should do)';
+  descInput.rows = Math.max(2, Math.min(8, (task.description || '').split('\n').length + 1));
+  descInput.style.width = '100%';
+  descInput.style.background = 'rgba(0,0,0,0.2)';
+  descInput.style.border = '1px solid rgba(255,255,255,0.15)';
+  descInput.style.borderRadius = '4px';
+  descInput.style.padding = '0.3em 0.5em';
+  descInput.style.color = 'inherit';
+  descInput.style.fontFamily = 'inherit';
+  descInput.style.fontSize = '0.9em';
+  descInput.style.marginBottom = '0.35em';
+  descInput.style.resize = 'vertical';
+  row.appendChild(descInput);
+
+  const depsWrap = document.createElement('div');
+  depsWrap.style.display = 'flex';
+  depsWrap.style.alignItems = 'center';
+  depsWrap.style.gap = '0.5em';
+  depsWrap.style.fontSize = '0.85em';
+
+  const depsLabel = document.createElement('span');
+  depsLabel.textContent = 'Depends on:';
+  depsLabel.style.opacity = '0.7';
+  depsLabel.style.flexShrink = '0';
+
+  const depsInput = document.createElement('input');
+  depsInput.type = 'text';
+  depsInput.className = 'workflow-task-deps';
+  depsInput.value = Array.isArray(task.dependsOn) ? task.dependsOn.join(', ') : '';
+  depsInput.placeholder = 'task-1, task-2 (comma-separated task IDs)';
+  depsInput.style.flex = '1';
+  depsInput.style.background = 'rgba(0,0,0,0.2)';
+  depsInput.style.border = '1px solid rgba(255,255,255,0.15)';
+  depsInput.style.borderRadius = '4px';
+  depsInput.style.padding = '0.2em 0.4em';
+  depsInput.style.color = 'inherit';
+  depsInput.style.fontFamily = 'monospace';
+
+  depsWrap.appendChild(depsLabel);
+  depsWrap.appendChild(depsInput);
+  row.appendChild(depsWrap);
+
+  // Stash the original task so fields we don't edit (priority, tools,
+  // preferredModel, estimatedComplexity) survive the round trip.
+  row._original = task;
+
+  return row;
+}
+
+function rebuildTaskGraphFromDOM(originalGraph, taskListEl) {
+  const rows = taskListEl.querySelectorAll('.workflow-task-row');
+  const tasks = [];
+  for (const row of rows) {
+    const id = row.dataset.taskId;
+    const title = row.querySelector('.workflow-task-title').value.trim();
+    const agentId = row.querySelector('.workflow-task-agent').value;
+    const description = row.querySelector('.workflow-task-desc').value.trim();
+    const depsRaw = row.querySelector('.workflow-task-deps').value.trim();
+    const dependsOn = depsRaw
+      ? depsRaw.split(',').map((s) => s.trim()).filter(Boolean)
+      : [];
+
+    const original = row._original || {};
+    tasks.push({
+      ...original,
+      id,
+      title: title || id,
+      description: description || title || id,
+      agentId: agentId || 'main',
+      dependsOn
+    });
+  }
+  return {
+    ...originalGraph,
+    tasks,
+    estimatedTotalSteps: tasks.length
+  };
+}
+
+function showWorkflowApprovalCard(taskGraph, { onApprove, onCancel }) {
+  const messageDiv = document.createElement('div');
+  messageDiv.className = 'message assistant prompt-message';
+
+  const messageContent = document.createElement('div');
+  messageContent.className = 'message-content';
+  messageContent.style.maxWidth = '100%';
+
+  const title = document.createElement('p');
+  title.innerHTML = `<strong>Proposed workflow — review &amp; edit before running</strong>`;
+  messageContent.appendChild(title);
+
+  if (taskGraph.summary) {
+    const summary = document.createElement('p');
+    summary.textContent = taskGraph.summary;
+    summary.style.opacity = '0.85';
+    summary.style.fontSize = '0.9em';
+    messageContent.appendChild(summary);
+  }
+
+  const taskList = document.createElement('div');
+  taskList.className = 'workflow-task-list';
+  taskList.style.margin = '0.5em 0 0.5em 0';
+
+  for (const t of taskGraph.tasks) {
+    taskList.appendChild(buildTaskRow(t, taskList));
+  }
+  messageContent.appendChild(taskList);
+
+  const addBtn = document.createElement('button');
+  addBtn.type = 'button';
+  addBtn.className = 'btn btn-sm';
+  addBtn.appendChild(faIcon('fas fa-plus'));
+  addBtn.appendChild(document.createTextNode(' Add task'));
+  addBtn.style.background = 'transparent';
+  addBtn.style.border = '1px dashed rgba(255,255,255,0.25)';
+  addBtn.style.width = '100%';
+  addBtn.style.padding = '0.5em';
+  addBtn.style.marginBottom = '0.5em';
+  addBtn.addEventListener('click', () => {
+    const newId = `task-${Math.random().toString(36).slice(2, 8)}`;
+    taskList.appendChild(buildTaskRow({
+      id: newId,
+      title: '',
+      description: '',
+      agentId: 'main',
+      dependsOn: [],
+      priority: 999,
+      estimatedComplexity: 'medium'
+    }, taskList));
+  });
+  messageContent.appendChild(addBtn);
+
+  const actions = document.createElement('div');
+  actions.className = 'prompt-actions';
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.className = 'btn btn-danger btn-sm';
+  cancelBtn.appendChild(faIcon('fas fa-ban'));
+  cancelBtn.appendChild(document.createTextNode(' Cancel'));
+
+  const approveBtn = document.createElement('button');
+  approveBtn.type = 'button';
+  approveBtn.className = 'btn btn-primary btn-sm';
+  approveBtn.appendChild(faIcon('fas fa-play'));
+  approveBtn.appendChild(document.createTextNode(' Approve & Run'));
+
+  let decided = false;
+  const finish = (approved) => {
+    if (decided) return;
+    const editedGraph = approved ? rebuildTaskGraphFromDOM(taskGraph, taskList) : null;
+    if (approved && editedGraph.tasks.length === 0) {
+      // Refuse — keep the card open
+      alert('Cannot approve an empty task graph. Add at least one task or cancel.');
+      return;
+    }
+    decided = true;
+    // Freeze the editable fields so they look like a snapshot
+    taskList.querySelectorAll('input, textarea, select, button').forEach((el) => {
+      el.disabled = true;
+    });
+    addBtn.disabled = true;
+    actions.innerHTML = '';
+    const result = document.createElement('p');
+    result.className = approved ? 'prompt-result-approved' : 'prompt-result-denied';
+    result.textContent = approved
+      ? `Approved — launching ${editedGraph.tasks.length} task(s)…`
+      : 'Cancelled';
+    actions.appendChild(result);
+    if (approved) onApprove?.(editedGraph); else onCancel?.();
+  };
+
+  cancelBtn.addEventListener('click', () => finish(false));
+  approveBtn.addEventListener('click', () => finish(true));
+
+  actions.appendChild(cancelBtn);
+  actions.appendChild(approveBtn);
+  messageContent.appendChild(actions);
+  messageDiv.appendChild(messageContent);
+  dom.chatMessages.appendChild(messageDiv);
+  dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
+}
+
+/**
+ * Called from the in-chat "Plan & Execute" button. Flow:
+ *   1. Collect goal (textarea, else last user message)
+ *   2. Gather chat history + workingDirectory from the active chat
+ *   3. Call workflow.plan() — the planner explores the project dir and
+ *      returns a task graph
+ *   4. Render an approval card inline; on approve, create + run the workflow
+ */
+async function handleChatPlanAndExecute() {
+  const chatId = appState.activeChatId;
+  if (!chatId) {
+    addStatusMessage('Open a chat first before launching a workflow.');
+    return;
+  }
+  const chat = appState.chats.find((c) => c.id === chatId);
+  if (!chat) {
+    addStatusMessage('Active chat not found.');
+    return;
+  }
+
+  // Goal: textarea first, else last user message in the chat
+  let goal = (dom.userInput?.value || '').trim();
+  if (!goal) {
+    const lastUserMsg = [...(chat.messages || [])]
+      .reverse()
+      .find((m) => m.sender === 'user' && typeof m.text === 'string' && m.text.trim());
+    if (lastUserMsg) goal = lastUserMsg.text.trim();
+  }
+  if (!goal) {
+    addStatusMessage('Type a goal in the message box, or send a message first, then click Plan & Execute.');
+    return;
+  }
+
+  const workingDirectory = chat.workingDirectory || null;
+  if (!workingDirectory) {
+    appendStatusToChat(chatId, 'Warning: this chat has no working directory set — the planner will explore the app root instead of a project. Set a working directory first for best results.');
+  }
+
+  const chatMessages = (chat.messages || [])
+    .filter((m) => m.sender === 'user' || m.sender === 'assistant')
+    .map((m) => ({ sender: m.sender, text: m.text || '' }))
+    .filter((m) => m.text.trim().length > 0);
+
+  if (dom.chatPlanBtn) dom.chatPlanBtn.disabled = true;
+  appendStatusToChat(chatId, `Planning workflow for goal: ${goal.slice(0, 120)}${goal.length > 120 ? '…' : ''}`);
+  if (workingDirectory) {
+    appendStatusToChat(chatId, `Planner is exploring ${workingDirectory}…`);
+  }
+
+  try {
+    const result = await window.electron.workflow.plan(goal, {
+      chatId,
+      workingDirectory,
+      chatMessages
+    });
+    if (!result?.ok) throw new Error(result?.error || 'Planning failed');
+    const taskGraph = result.taskGraph;
+    if (!taskGraph || !Array.isArray(taskGraph.tasks) || taskGraph.tasks.length === 0) {
+      throw new Error('Planner returned an empty task graph');
+    }
+
+    // Clear textarea now that we've captured the goal
+    if (dom.userInput && dom.userInput.value.trim() === goal) dom.userInput.value = '';
+
+    showWorkflowApprovalCard(taskGraph, {
+      onApprove: async (editedGraph) => {
+        try {
+          const createRes = await window.electron.workflow.create(editedGraph, { chatId, workingDirectory });
+          if (!createRes?.ok) throw new Error(createRes?.error || 'Workflow creation failed');
+          const wf = createRes.workflow;
+          appendStatusToChat(chatId, `Workflow ${wf.id} created — ${wf.tasks.length} task(s). Starting…`);
+          const runRes = await window.electron.workflow.run(wf.id);
+          if (!runRes?.ok) throw new Error(runRes?.error || 'Workflow run failed to start');
+          await loadWorkflows();
+        } catch (err) {
+          appendStatusToChat(chatId, `Workflow launch error: ${err.message}`);
+        }
+      },
+      onCancel: () => {
+        appendStatusToChat(chatId, 'Workflow plan cancelled.');
+      }
+    });
+  } catch (err) {
+    appendStatusToChat(chatId, `Planning error: ${err.message}`);
+  } finally {
+    if (dom.chatPlanBtn) dom.chatPlanBtn.disabled = false;
+  }
+}
+
 async function loadLLMRoutingSettings() {
   if (!dom.llmRoutingEnabled) return;
   try {
@@ -6512,13 +6887,34 @@ if (dom.workflowList) {
   });
 }
 
-// Auto-refresh workflows on events from main
+if (dom.chatPlanBtn) {
+  dom.chatPlanBtn.addEventListener('click', () => handleChatPlanAndExecute());
+}
+
+// Workflow event stream → chat (loose-coupled via data.chatId) + settings panel refresh.
+// registerOnce() in preload replaces prior listeners per-channel, so we attach a single
+// rich callback per event rather than chaining multiple simple ones.
 if (window.electron?.workflow) {
-  ['onCompleted', 'onFailed', 'onPaused', 'onTaskCompleted', 'onTaskFailed'].forEach(event => {
-    if (typeof window.electron.workflow[event] === 'function') {
-      window.electron.workflow[event](() => loadWorkflows());
-    }
-  });
+  const onEvent = (eventName, formatter) => {
+    const fn = window.electron.workflow[eventName];
+    if (typeof fn !== 'function') return;
+    fn((data) => {
+      if (data?.chatId) {
+        const text = formatter(data);
+        if (text) appendStatusToChat(data.chatId, text);
+      }
+      loadWorkflows().catch(() => {});
+    });
+  };
+
+  onEvent('onStarted', (d) => `Workflow ${d.workflowId} started.`);
+  onEvent('onTaskStarted', (d) => `→ ${d.title || d.taskId}`);
+  onEvent('onTaskCompleted', (d) => `✓ ${d.title || d.taskId}`);
+  onEvent('onTaskFailed', (d) => `✗ ${d.title || d.taskId}${d.error ? `: ${d.error}` : ''}`);
+  onEvent('onCompleted', (d) => `Workflow ${d.workflowId} completed.`);
+  onEvent('onFailed', (d) => `Workflow ${d.workflowId} failed${d.error ? `: ${d.error}` : ''}.`);
+  onEvent('onPaused', (d) => `Workflow ${d.workflowId} paused.`);
+  onEvent('onCancelled', (d) => `Workflow ${d.workflowId} cancelled.`);
 }
 
 // ─── System Apps event listeners ───

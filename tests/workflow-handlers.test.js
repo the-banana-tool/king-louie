@@ -58,6 +58,7 @@ describe('Workflow handler module', () => {
 
     assert.ok(registered.includes('workflow:plan'));
     assert.ok(registered.includes('workflow:planAndExecute'));
+    assert.ok(registered.includes('workflow:create'));
     assert.ok(registered.includes('workflow:run'));
     assert.ok(registered.includes('workflow:pause'));
     assert.ok(registered.includes('workflow:cancel'));
@@ -65,6 +66,6 @@ describe('Workflow handler module', () => {
     assert.ok(registered.includes('workflow:get'));
     assert.ok(registered.includes('workflow:progress'));
     assert.ok(registered.includes('workflow:delete'));
-    assert.strictEqual(registered.length, 9);
+    assert.strictEqual(registered.length, 10);
   });
 });

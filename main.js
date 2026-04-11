@@ -2266,7 +2266,13 @@ const initializeAgentInfrastructure = async () => {
     storageDir: path.join(app.getPath('userData'), 'workflows'),
     agentExecutorAdapter,
     getAgent,
-    maxConcurrentTasks: 3
+    maxConcurrentTasks: 3,
+    getConversationCompactor: () => conversationCompactor,
+    getParentChatMessages: (chatId) => {
+      const chat = getChats().find((c) => c.id === chatId);
+      if (!chat || !Array.isArray(chat.messages)) return [];
+      return chat.messages.filter((m) => m.sender === 'user' || m.sender === 'assistant');
+    }
   });
   await workflowEngine.initialize();
 
@@ -2284,7 +2290,8 @@ const initializeAgentInfrastructure = async () => {
   plannerExecutor = new PlannerExecutor({
     agentExecutorAdapter,
     workflowEngine,
-    getAgent
+    getAgent,
+    getConversationCompactor: () => conversationCompactor
   });
 
   remoteControl = new RemoteControl(

@@ -2,12 +2,20 @@ const { wrapHandler } = require('./wrap-handler');
 const constants = require('./constants');
 
 function registerWorkflowHandlers(ipcMain, context) {
+  const mergePlanOptions = (payload) => {
+    const options = { ...(payload.options || {}) };
+    if (payload.chatId) options.chatId = payload.chatId;
+    if (payload.workingDirectory) options.workingDirectory = payload.workingDirectory;
+    if (Array.isArray(payload.chatMessages)) options.chatMessages = payload.chatMessages;
+    return options;
+  };
+
   ipcMain.handle(
     constants.WORKFLOW_PLAN,
     wrapHandler('workflow:plan', async (event, payload) => {
       const planner = context.getPlannerExecutor();
       if (!planner) throw new Error('Planner not available');
-      const taskGraph = await planner.plan(payload.goal, payload.options || {});
+      const taskGraph = await planner.plan(payload.goal, mergePlanOptions(payload));
       return { ok: true, taskGraph };
     })
   );
@@ -17,9 +25,24 @@ function registerWorkflowHandlers(ipcMain, context) {
     wrapHandler('workflow:planAndExecute', async (event, payload) => {
       const planner = context.getPlannerExecutor();
       if (!planner) throw new Error('Planner not available');
-      const workflow = await planner.planAndExecute(payload.goal, {
-        ...(payload.options || {}),
+      const options = {
+        ...mergePlanOptions(payload),
         background: payload.background !== false
+      };
+      const workflow = await planner.planAndExecute(payload.goal, options);
+      return { ok: true, workflow };
+    })
+  );
+
+  ipcMain.handle(
+    constants.WORKFLOW_CREATE,
+    wrapHandler('workflow:create', async (event, payload) => {
+      const engine = context.getWorkflowEngine();
+      if (!engine) throw new Error('Workflow engine not available');
+      if (!payload?.taskGraph) throw new Error('taskGraph is required');
+      const workflow = await engine.create(payload.taskGraph, {
+        chatId: payload.chatId || null,
+        workingDirectory: payload.workingDirectory || null
       });
       return { ok: true, workflow };
     })

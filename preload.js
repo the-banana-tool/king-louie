@@ -659,8 +659,26 @@ contextBridge.exposeInMainWorld(
       onTaskFailed: (callback) => registerOnce('mesh:taskFailed', callback)
     },
     workflow: {
-      plan: (goal, options) => ipcRenderer.invoke('workflow:plan', { goal, options }),
-      planAndExecute: (goal, options, background) => ipcRenderer.invoke('workflow:planAndExecute', { goal, options, background }),
+      plan: (goal, planOpts = {}) => ipcRenderer.invoke('workflow:plan', {
+        goal,
+        options: planOpts.options || {},
+        chatId: planOpts.chatId,
+        workingDirectory: planOpts.workingDirectory,
+        chatMessages: planOpts.chatMessages
+      }),
+      planAndExecute: (goal, planOpts = {}) => ipcRenderer.invoke('workflow:planAndExecute', {
+        goal,
+        options: planOpts.options || {},
+        background: planOpts.background !== false,
+        chatId: planOpts.chatId,
+        workingDirectory: planOpts.workingDirectory,
+        chatMessages: planOpts.chatMessages
+      }),
+      create: (taskGraph, createOpts = {}) => ipcRenderer.invoke('workflow:create', {
+        taskGraph,
+        chatId: createOpts.chatId,
+        workingDirectory: createOpts.workingDirectory
+      }),
       run: (id) => ipcRenderer.invoke('workflow:run', { id }),
       pause: (id) => ipcRenderer.invoke('workflow:pause', { id }),
       cancel: (id) => ipcRenderer.invoke('workflow:cancel', { id }),
