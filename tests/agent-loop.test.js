@@ -1,6 +1,11 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert');
 const AgentLoop = require('../src/execution/agent-loop');
+// Initialize the global tool registry so AgentLoop's concurrency-safety
+// partitioning can look up tools like `Read` and see they are marked
+// `concurrencySafe: true`. Without this, all tools fall through to the
+// default (unsafe) and parallel-execution tests would serialize.
+require('../src/tools').initializeTools();
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 

@@ -132,7 +132,11 @@ const BashTool = new Tool({
       timeout,
       workingDirectory: options.workingDirectory,
       sessionId: options.sessionId,
-      useSandbox
+      useSandbox,
+      // Forward turn-level cancellation. SandboxExecutor passes signal into
+      // child_process so a cancelled turn actually kills the subprocess
+      // instead of letting it run on in the background.
+      signal: options.signal || null
     };
 
     return await sandboxExecutor.execute(command, execOptions);

@@ -25,7 +25,8 @@ function registerChatHandlers(ipcMain, context = {}) {
     getUsageTracker,
     createUsageRecordFromMetrics,
     getContextAssembler,
-    getConversationCompactor
+    getConversationCompactor,
+    getToolResultsDir
   } = context;
 
   const activeRuns = new Map(); // chatId -> AbortController
@@ -428,12 +429,14 @@ function registerChatHandlers(ipcMain, context = {}) {
         if (canUseAgentMode) {
           const loopModel = resolveAgentLoopModel(inference.providerType, options.model);
           const embeddingProvider = contextAssembler?.embeddingProvider || null;
+          const toolResultsDir = typeof getToolResultsDir === 'function' ? getToolResultsDir() : null;
           const loop = new AgentLoop(provider, executor, {
             maxIterations: 40,
             loopModel,
             embeddingProvider,
             usageTracker: typeof getUsageTracker === 'function' ? getUsageTracker() : null,
-            abortSignal: abortController.signal
+            abortSignal: abortController.signal,
+            toolResultsDir
           });
           const result = await loop.run(chat.messages, toolDefinitions, {
             ...options,

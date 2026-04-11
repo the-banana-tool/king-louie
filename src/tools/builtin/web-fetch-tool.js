@@ -18,8 +18,10 @@ const webFetchTool = new Tool({
     required: ['url']
   },
   requiresApproval: false,
-  execute: async (params) => {
+  concurrencySafe: true,
+  execute: async (params, context = {}) => {
     const { url: urlString, extractMode = 'markdown', maxChars = 50000 } = params;
+    const { signal } = context;
 
     // Check cache
     const cacheKey = `${urlString}::${extractMode}`;
@@ -39,6 +41,12 @@ const webFetchTool = new Tool({
     // Fetch with timeout and size limit
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30000);
+    // Forward turn-level cancellation: when the agent loop's signal aborts,
+    // tear down this fetch too instead of letting it complete in the dark.
+    if (signal) {
+      if (signal.aborted) controller.abort();
+      else signal.addEventListener('abort', () => controller.abort(), { once: true });
+    }
     try {
       const res = await fetch(urlString, {
         signal: controller.signal,

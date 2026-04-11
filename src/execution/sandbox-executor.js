@@ -158,7 +158,11 @@ class SandboxExecutor {
       const timeout = options.timeout || this.config.timeoutMs;
       const { stdout, stderr } = await execFileAsync('docker', args, {
         timeout: Math.min(timeout, 600000),
-        maxBuffer: 10 * 1024 * 1024
+        maxBuffer: 10 * 1024 * 1024,
+        // signal: when the agent loop's abort fires, child_process kills
+        // the docker exec subprocess. Without this, a cancelled turn would
+        // leave a 60-second command running in the container.
+        signal: options.signal || undefined
       });
 
       return {
@@ -194,7 +198,8 @@ class SandboxExecutor {
         timeout: Math.min(timeout, 600000),
         maxBuffer: 10 * 1024 * 1024,
         cwd: options.workingDirectory || process.cwd(),
-        shell: true
+        shell: true,
+        signal: options.signal || undefined
       });
 
       const hostShell = process.platform === 'win32'

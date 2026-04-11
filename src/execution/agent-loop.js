@@ -1,5 +1,6 @@
 const path = require('path');
 const VectorStore = require('../memory/vector-store');
+const ResultPersistence = require('./result-persistence');
 
 class AgentLoop {
   constructor(provider, executor, options = {}) {
@@ -35,6 +36,15 @@ class AgentLoop {
     // await the same promise instead of spamming the user with N prompts.
     // Key: normalized absolute directory path. Value: Promise<boolean>.
     this._pendingDirectoryAccess = new Map();
+
+    // Persist oversized tool results to disk so the conversation history
+    // stays compact without losing data. The model still sees a preview
+    // and a [persisted: <path>] marker; it can Read the file if needed.
+    this.resultPersistence = options.resultPersistence
+      || new ResultPersistence({
+        baseDir: options.toolResultsDir || null,
+        thresholdChars: options.resultPersistenceThreshold || 50000
+      });
   }
 
   /**
@@ -276,6 +286,11 @@ class AgentLoop {
           parameters: response.parameters
         }];
 
+        // Per-turn options propagated to every tool call. The abort signal
+        // is forwarded so cancelling the loop tears down in-flight tools
+        // (Bash subprocess, WebFetch, etc.) instead of letting them run on.
+        const callOptions = { ...options, signal: this.abortSignal || options.signal || null };
+
         // Execute a single tool call (AskUser or normal tool)
         const executeSingleCall = async (call) => {
           const toolCallId = call.toolUseId ||
@@ -323,18 +338,84 @@ class AgentLoop {
             toolResult = await this.executor.execute(
               call.toolName,
               call.parameters,
-              options
+              callOptions
             );
             toolResult = await this._handleAccessDenied(
-              toolResult, call.toolName, call.parameters, options
+              toolResult, call.toolName, call.parameters, callOptions
             );
           }
 
           return { ...call, toolCallId, result: toolResult };
         };
 
-        // Execute all tool calls in parallel
-        const results = await Promise.all(calls.map(executeSingleCall));
+        // Concurrency-safety partitioning. Read-only / idempotent tools
+        // (Read, Glob, Grep, WebFetch, WebSearch) run in parallel; tools
+        // with side effects (Edit, Write, Bash, Git, Browser, ...) run
+        // serially after the safe batch so two parallel Edit calls on the
+        // same file can't corrupt it. AskUser is always serial — only one
+        // user prompt at a time.
+        const isSafe = (call) => {
+          if (call.toolName === 'AskUser') return false;
+          const tool = this.executor && this.executor.toolRegistry
+            ? this.executor.toolRegistry.get(call.toolName)
+            : null;
+          // Fall back to the global registry if executor doesn't expose one.
+          const resolved = tool || require('../tools').toolRegistry.get(call.toolName);
+          return Boolean(resolved && resolved.concurrencySafe);
+        };
+
+        const safeCalls = calls.filter(isSafe);
+        const unsafeCalls = calls.filter((c) => !isSafe(c));
+
+        const safeResults = await Promise.all(safeCalls.map(executeSingleCall));
+        const unsafeResults = [];
+        for (const call of unsafeCalls) {
+          // Bail out of the unsafe queue on abort — no point starting a new
+          // subprocess after the user has cancelled the turn.
+          if (callOptions.signal?.aborted) {
+            unsafeResults.push({
+              ...call,
+              toolCallId: call.toolUseId || `toolcall-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+              result: { success: false, error: 'Cancelled before execution', cancelled: true }
+            });
+            continue;
+          }
+          unsafeResults.push(await executeSingleCall(call));
+        }
+
+        // Re-order results to match the model's original call order so the
+        // tool_result blocks the provider sees line up with the tool_use
+        // blocks the model emitted. Otherwise downstream message-builders
+        // pair them up wrong.
+        const byId = new Map();
+        for (const r of [...safeResults, ...unsafeResults]) {
+          byId.set(r.toolUseId || r.toolCallId, r);
+        }
+        const results = calls.map((call) => {
+          const id = call.toolUseId;
+          if (id && byId.has(id)) return byId.get(id);
+          // Fall back to first match by toolName for providers that don't
+          // emit toolUseId (rare).
+          for (const r of byId.values()) {
+            if (r.toolName === call.toolName) {
+              byId.delete(r.toolUseId || r.toolCallId);
+              return r;
+            }
+          }
+          return null;
+        }).filter(Boolean);
+
+        // Persist oversized results to disk and replace inline payloads
+        // with a [persisted: <path>] preview. The model still sees the
+        // shape and a head excerpt and can Read the file if needed —
+        // unlike the lossy regex-based compaction which dropped fields.
+        const persistCtx = { sessionId: options.sessionId || options.chatId || null };
+        for (const entry of results) {
+          entry.result = this.resultPersistence.persistResultObject(entry.result, {
+            ...persistCtx,
+            toolName: entry.toolName
+          });
+        }
 
         // Process results: merge injected tools and track executed tools
         for (const entry of results) {

@@ -2538,6 +2538,7 @@ registerHandlers(ipcMain, {
   buildMemoryContextSection,
   getContextAssembler: () => contextAssembler,
   getConversationCompactor: () => conversationCompactor,
+  getToolResultsDir: () => path.join(app.getPath('userData'), 'tool-results'),
   speakSummaryText,
   getMainWindow: () => mainWindow,
   getTtsEngine: () => ttsEngine,

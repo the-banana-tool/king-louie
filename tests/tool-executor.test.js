@@ -364,4 +364,116 @@ describe('ToolExecutor', () => {
       assert.strictEqual(result.output, 'hook-overridden');
     });
   });
+
+  describe('pattern-based permission rules', () => {
+    // Register a tool whose key field is `command` so the rules engine
+    // can pattern-match against it.
+    toolRegistry.register(new Tool({
+      name: 'Bash',
+      description: 'shell',
+      requiresApproval: true,
+      parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] },
+      execute: async (params) => ({ ok: true, ran: params.command })
+    }));
+
+    it('allow rule short-circuits the approval prompt', async () => {
+      let approvalCalled = false;
+      const executor = new ToolExecutor({
+        requireApproval: true,
+        approvalRequester: async () => { approvalCalled = true; return false; },
+        permissionRules: [{ tool: 'Bash', pattern: 'git *', action: 'allow', source: 'session' }]
+      });
+      const result = await executor.execute('Bash', { command: 'git status' });
+      assert.strictEqual(result.ok, true);
+      assert.strictEqual(approvalCalled, false);
+    });
+
+    it('deny rule blocks execution and never asks the user', async () => {
+      let executed = false;
+      toolRegistry.register(new Tool({
+        name: 'BashDeny',
+        description: 'shell',
+        requiresApproval: true,
+        parameters: { type: 'object', properties: { command: { type: 'string' } } },
+        execute: async () => { executed = true; return { ok: true }; }
+      }));
+      const executor = new ToolExecutor({
+        requireApproval: true,
+        approvalRequester: async () => true,
+        permissionRules: [{ tool: 'BashDeny', pattern: 'rm *', action: 'deny', source: 'safety' }]
+      });
+      const result = await executor.execute('BashDeny', { command: 'rm -rf /' });
+      assert.strictEqual(result.success, false);
+      assert.strictEqual(result.deniedBy, 'rule');
+      assert.match(result.error, /Blocked by rule/);
+      assert.strictEqual(executed, false);
+    });
+
+    it('non-matching rule falls through to per-tool flag', async () => {
+      let askedFor;
+      const executor = new ToolExecutor({
+        requireApproval: true,
+        approvalRequester: async (toolName) => { askedFor = toolName; return true; },
+        permissionRules: [{ tool: 'Bash', pattern: 'git *', action: 'allow' }]
+      });
+      const result = await executor.execute('Bash', { command: 'npm install' });
+      assert.strictEqual(result.ok, true);
+      assert.strictEqual(askedFor, 'Bash', 'should fall through to approval');
+    });
+
+    it('first matching rule wins (deny before allow)', async () => {
+      const executor = new ToolExecutor({
+        requireApproval: true,
+        approvalRequester: async () => true,
+        permissionRules: [
+          { tool: 'Bash', pattern: 'rm *', action: 'deny' },
+          { tool: 'Bash', pattern: '*', action: 'allow' }
+        ]
+      });
+      const denied = await executor.execute('Bash', { command: 'rm secrets.txt' });
+      assert.strictEqual(denied.deniedBy, 'rule');
+      const allowed = await executor.execute('Bash', { command: 'ls' });
+      assert.strictEqual(allowed.ok, true);
+    });
+
+    it('addPermissionRule appends a runtime rule', async () => {
+      const executor = new ToolExecutor({
+        requireApproval: true,
+        approvalRequester: async () => false
+      });
+      executor.addPermissionRule({ tool: 'Bash', pattern: 'echo *', action: 'allow' });
+      const result = await executor.execute('Bash', { command: 'echo hi' });
+      assert.strictEqual(result.ok, true);
+    });
+  });
+
+  describe('AbortSignal propagation', () => {
+    it('refuses to run when signal is already aborted', async () => {
+      const executor = new ToolExecutor({ requireApproval: false });
+      const controller = new AbortController();
+      controller.abort();
+      const result = await executor.execute('TestTool', { input: 'x' }, { signal: controller.signal });
+      assert.strictEqual(result.success, false);
+      assert.strictEqual(result.cancelled, true);
+    });
+
+    it('forwards the signal into the tool execution context', async () => {
+      let receivedSignal;
+      toolRegistry.register(new Tool({
+        name: 'SignalEcho',
+        description: 'records context.signal',
+        requiresApproval: false,
+        parameters: { type: 'object', properties: {} },
+        execute: async (_params, context) => {
+          receivedSignal = context.signal;
+          return { ok: true };
+        }
+      }));
+      const executor = new ToolExecutor({ requireApproval: false });
+      const controller = new AbortController();
+      await executor.execute('SignalEcho', {}, { signal: controller.signal });
+      assert.ok(receivedSignal, 'tool should have received an AbortSignal in context');
+      assert.strictEqual(receivedSignal.aborted, false);
+    });
+  });
 });

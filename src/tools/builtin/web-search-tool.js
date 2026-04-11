@@ -36,6 +36,7 @@ const WebSearchTool = new Tool({
     required: ['query']
   },
   requiresApproval: false,
+  concurrencySafe: true,
   execute: async (params, context) => {
     const { query, maxResults = 10 } = params;
 

@@ -38,6 +38,7 @@ const grepTool = new Tool({
     required: ['pattern']
   },
   requiresApproval: false,
+  concurrencySafe: true,
   execute: async (params, context) => {
     const {
       pattern,
