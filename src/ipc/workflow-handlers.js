@@ -15,8 +15,18 @@ function registerWorkflowHandlers(ipcMain, context) {
     wrapHandler('workflow:plan', async (event, payload) => {
       const planner = context.getPlannerExecutor();
       if (!planner) throw new Error('Planner not available');
-      const taskGraph = await planner.plan(payload.goal, mergePlanOptions(payload));
-      return { ok: true, taskGraph };
+      try {
+        const taskGraph = await planner.plan(payload.goal, mergePlanOptions(payload));
+        return { ok: true, taskGraph };
+      } catch (err) {
+        // Preserve planner raw output so the UI can show the user what the
+        // planner actually said (clarifying question, refusal, malformed JSON).
+        return {
+          ok: false,
+          error: err.message || String(err),
+          plannerOutput: typeof err.plannerOutput === 'string' ? err.plannerOutput : null
+        };
+      }
     })
   );
 

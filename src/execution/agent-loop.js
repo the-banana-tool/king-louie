@@ -29,6 +29,12 @@ class AgentLoop {
     this.embeddingProvider = options.embeddingProvider || null;
     this._toolResultEntries = []; // { historyIndex, toolName, text, compacted }
     this._relevanceThreshold = options.relevanceThreshold ?? 0.3;
+
+    // Deduplicate in-flight directory access prompts. When multiple parallel
+    // tool calls hit the same denied directory in the same turn, they all
+    // await the same promise instead of spamming the user with N prompts.
+    // Key: normalized absolute directory path. Value: Promise<boolean>.
+    this._pendingDirectoryAccess = new Map();
   }
 
   /**
@@ -59,45 +65,67 @@ class AgentLoop {
     );
     // Use the parent directory for file paths (heuristic: if it looks like a file)
     const dirToAllow = path.extname(resolvedDir) ? path.dirname(resolvedDir) : resolvedDir;
+    const dirKey = path.normalize(dirToAllow);
 
-    // Ask the user for permission via IPC (mirrors the AskUser pattern)
-    const granted = await new Promise((resolve) => {
-      const timeoutMs = 2 * 60 * 1000; // 2 minutes
-      const timeoutId = setTimeout(() => resolve(false), timeoutMs);
+    // Fast-path: a concurrent sibling call may have already been granted
+    // access to this directory before we got here. If so, retry immediately.
+    if (this.executor.allowedDirectories.includes(dirToAllow)) {
+      return this.executor.execute(toolName, parameters, options);
+    }
 
-      try {
-        const { BrowserWindow } = require('electron');
-        const windows = BrowserWindow.getAllWindows();
-        if (windows.length > 0) {
-          const win = windows[0];
-          const { pendingDirectoryAccessResolvers } = require('../../main');
-          if (pendingDirectoryAccessResolvers) {
-            const requestId = `diraccess-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-            pendingDirectoryAccessResolvers.set(requestId, {
-              directory: dirToAllow,
-              resolve: (approved) => {
-                clearTimeout(timeoutId);
-                resolve(approved);
-              }
-            });
-            win.webContents.send('tool:directoryAccessRequired', {
-              requestId,
-              directory: dirToAllow,
-              toolName
-            });
+    // Dedup: if another parallel tool call is already awaiting the user's
+    // decision for this same directory, piggyback on its promise instead of
+    // opening a second prompt.
+    let grantedPromise = this._pendingDirectoryAccess.get(dirKey);
+    if (!grantedPromise) {
+      grantedPromise = new Promise((resolve) => {
+        const timeoutMs = 2 * 60 * 1000; // 2 minutes
+        const timeoutId = setTimeout(() => resolve(false), timeoutMs);
+
+        try {
+          const { BrowserWindow } = require('electron');
+          const windows = BrowserWindow.getAllWindows();
+          if (windows.length > 0) {
+            const win = windows[0];
+            const { pendingDirectoryAccessResolvers } = require('../../main');
+            if (pendingDirectoryAccessResolvers) {
+              const requestId = `diraccess-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+              pendingDirectoryAccessResolvers.set(requestId, {
+                directory: dirToAllow,
+                resolve: (approved) => {
+                  clearTimeout(timeoutId);
+                  resolve(approved);
+                }
+              });
+              win.webContents.send('tool:directoryAccessRequired', {
+                requestId,
+                directory: dirToAllow,
+                toolName
+              });
+            } else {
+              clearTimeout(timeoutId);
+              resolve(false);
+            }
           } else {
             clearTimeout(timeoutId);
             resolve(false);
           }
-        } else {
+        } catch {
           clearTimeout(timeoutId);
           resolve(false);
         }
-      } catch {
-        clearTimeout(timeoutId);
-        resolve(false);
-      }
-    });
+      });
+      this._pendingDirectoryAccess.set(dirKey, grantedPromise);
+      // Clean up the entry once resolved so a later denial of a different
+      // directory doesn't get stuck on an old promise.
+      grantedPromise.finally(() => {
+        if (this._pendingDirectoryAccess.get(dirKey) === grantedPromise) {
+          this._pendingDirectoryAccess.delete(dirKey);
+        }
+      });
+    }
+
+    const granted = await grantedPromise;
 
     if (granted) {
       // Add the directory to the executor's allowed list for this session
@@ -157,11 +185,42 @@ class AgentLoop {
         await this._compactToolResults(conversationHistory);
       }
 
-      const response = await this.provider.sendMessageWithTools(
-        conversationHistory,
-        activeTools,
-        effectiveOptions
-      );
+      // Retry transient upstream failures (Anthropic 529 "overloaded",
+       // generic 5xx, rate limit 429, connection resets) with exponential
+       // backoff so a mid-loop hiccup doesn't discard the exploration so far.
+      // Up to 3 retries; total worst-case wait ~14s before giving up.
+      const isTransient = (err) => {
+        const msg = String(err?.message || err || '').toLowerCase();
+        if (!msg) return false;
+        if (msg.includes('overloaded')) return true;
+        if (msg.includes('rate limit') || msg.includes('429')) return true;
+        if (msg.includes('503') || msg.includes('504') || msg.includes('502')) return true;
+        if (msg.includes('econnreset') || msg.includes('etimedout') || msg.includes('fetch failed')) return true;
+        if (msg.includes('timeout')) return true;
+        return false;
+      };
+      const maxAttempts = 4;
+      let response;
+      let lastErr;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        if (this.abortSignal?.aborted) break;
+        try {
+          response = await this.provider.sendMessageWithTools(
+            conversationHistory,
+            activeTools,
+            effectiveOptions
+          );
+          lastErr = null;
+          break;
+        } catch (err) {
+          lastErr = err;
+          if (!isTransient(err) || attempt === maxAttempts) throw err;
+          const waitMs = 1000 * Math.pow(2, attempt - 1); // 1s, 2s, 4s, 8s
+          console.warn(`[agent-loop] Transient provider error (attempt ${attempt}/${maxAttempts}): ${err.message}. Retrying in ${waitMs}ms…`);
+          await new Promise((resolve) => setTimeout(resolve, waitMs));
+        }
+      }
+      if (lastErr) throw lastErr;
 
       if (response?.llmMetrics) {
         llmCalls.push(response.llmMetrics);

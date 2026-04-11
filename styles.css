@@ -687,6 +687,48 @@ body {
   color: var(--text-primary);
 }
 
+/* Working directory pill in the chat header: inherits icon-button look
+   but shows a path label inline so the active working directory is
+   always visible without digging into tooltips. */
+.working-dir-btn {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 280px;
+  transition: background-color var(--transition), border-color var(--transition), color var(--transition);
+}
+
+.working-dir-btn:hover {
+  background: var(--bg-overlay);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.working-dir-btn.is-set {
+  color: var(--text-primary);
+  border-color: var(--accent, var(--border-strong));
+}
+
+.working-dir-btn .working-dir-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+}
+
+.working-dir-btn:not(.is-set) .working-dir-label {
+  font-style: italic;
+  opacity: 0.75;
+}
+
 .history-toggle-btn {
   min-width: 32px;
   width: 32px;

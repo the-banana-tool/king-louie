@@ -2061,19 +2061,33 @@ const resolveInference = async (selection = {}) => {
   return ensureOAuthToken(result);
 };
 
-const createAgentRuntime = async (providerType, event = null, approvalRequester = null) => {
+const createAgentRuntime = async (
+  providerType,
+  event = null,
+  approvalRequester = null,
+  runtimeOptions = {}
+) => {
   const resolution = await resolveInference(providerType);
   const capabilities = inferenceRouter.getCapabilities(resolution.providerType, resolution.model);
   if (!capabilities.toolCalling) {
     throw new Error(`Provider ${resolution.providerType} (${resolution.model}) does not support tool calling required for agent mode.`);
   }
+  const workingDirectory = runtimeOptions.workingDirectory || process.cwd();
   const runtimeEnvironment = await getRuntimeEnvironment({
-    workingDirectory: process.cwd()
+    workingDirectory
   });
+  // Pull the persisted allowlist so "Always Allow" decisions made in earlier
+  // workflow/chat runs carry forward. Without this, each Plan & Execute
+  // starts from an empty allowlist and re-prompts for the same directories.
+  const settings = getSettings();
+  const allowedDirectories = Array.isArray(settings.allowedDirectories)
+    ? settings.allowedDirectories
+    : [];
   const toolExecutor = await createToolExecutorWithApprovals(
     event,
     runtimeEnvironment,
-    approvalRequester
+    approvalRequester,
+    { workingDirectory, allowedDirectories }
   );
 
   return {
@@ -2225,7 +2239,8 @@ const initializeAgentInfrastructure = async () => {
       const runtime = await createAgentRuntime(
         { tier: requestedTier },
         null,
-        options.approvalRequester || null
+        options.approvalRequester || null,
+        { workingDirectory: options.workingDirectory }
       );
       const executor = new AgentExecutor(runtime.provider, runtime.toolExecutor, {
         usageTracker

@@ -102,11 +102,12 @@ describe('PlannerExecutor', () => {
       await assert.rejects(() => executor.plan('test'), /Planning failed/);
     });
 
-    it('creates a single-task fallback when planner output is not JSON', async () => {
+    it('throws with plannerOutput when planner output is not JSON', async () => {
+      const plannerText = 'I think we should build a REST API with authentication and tests.';
       const adapter = {
         execute: async () => ({
           type: 'complete',
-          content: 'I think we should build a REST API with authentication and tests.',
+          content: plannerText,
           iterations: 1
         })
       };
@@ -116,10 +117,14 @@ describe('PlannerExecutor', () => {
         getAgent: makeGetAgent()
       });
 
-      const result = await executor.plan('Build a REST API');
-      assert.strictEqual(result.tasks.length, 1);
-      assert.strictEqual(result.tasks[0].agentId, 'main');
-      assert.ok(result.tasks[0].description.includes('Build a REST API'));
+      let thrown;
+      try {
+        await executor.plan('Build a REST API');
+      } catch (e) { thrown = e; }
+      assert.ok(thrown, 'expected plan() to throw');
+      assert.match(thrown.message, /JSON/);
+      assert.strictEqual(thrown.plannerOutput, plannerText);
+      assert.strictEqual(thrown.goal, 'Build a REST API');
     });
   });
 
@@ -169,16 +174,24 @@ describe('PlannerExecutor', () => {
       assert.throws(() => executor._parseTaskGraph(JSON.stringify(graph), 'goal'), /circular/);
     });
 
-    it('returns fallback for empty tasks array', () => {
+    it('throws with plannerOutput for empty tasks array', () => {
       const graph = { tasks: [] };
-      const result = executor._parseTaskGraph(JSON.stringify(graph), 'my goal');
-      assert.strictEqual(result.tasks.length, 1);
-      assert.ok(result.tasks[0].description.includes('my goal'));
+      const raw = JSON.stringify(graph);
+      let thrown;
+      try { executor._parseTaskGraph(raw, 'my goal'); } catch (e) { thrown = e; }
+      assert.ok(thrown, 'expected _parseTaskGraph to throw');
+      assert.match(thrown.message, /empty task graph/);
+      assert.strictEqual(thrown.plannerOutput, raw);
+      assert.strictEqual(thrown.goal, 'my goal');
     });
 
-    it('returns fallback for invalid JSON', () => {
-      const result = executor._parseTaskGraph('not json at all {{{', 'my goal');
-      assert.strictEqual(result.tasks.length, 1);
+    it('throws with plannerOutput for invalid JSON', () => {
+      const raw = 'not json at all {{{';
+      let thrown;
+      try { executor._parseTaskGraph(raw, 'my goal'); } catch (e) { thrown = e; }
+      assert.ok(thrown, 'expected _parseTaskGraph to throw');
+      assert.match(thrown.message, /JSON/);
+      assert.strictEqual(thrown.plannerOutput, raw);
     });
   });
 

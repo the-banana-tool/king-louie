@@ -65,7 +65,7 @@ class PlannerExecutor {
     }
 
     const execOptions = {
-      maxIterations: options.maxIterations || 15
+      maxIterations: options.maxIterations || plannerAgent.maxIterations || 40
     };
 
     if (options.workingDirectory) {
@@ -115,7 +115,22 @@ class PlannerExecutor {
     const result = await this.agentExecutorAdapter.execute(plannerAgent, goal, execOptions);
 
     if (result.type === 'error' || result.type === 'stopped') {
-      throw new Error(`Planning failed: ${result.content}`);
+      const err = new Error(`Planning failed: ${result.content}`);
+      err.plannerOutput = result.content || '';
+      err.goal = goal;
+      throw err;
+    }
+
+    if (result.type === 'max_iterations') {
+      const toolSummary = Array.isArray(result.tools) && result.tools.length
+        ? `\n\nTools used (${result.tools.length}):\n${result.tools.map((t) => `- ${t.toolName || t.name || 'unknown'}`).join('\n')}`
+        : '';
+      const err = new Error(
+        `Planner hit the iteration cap (${execOptions.maxIterations}) before producing a task graph. Try a narrower goal, or increase the cap.`
+      );
+      err.plannerOutput = (result.content || '') + toolSummary;
+      err.goal = goal;
+      throw err;
     }
 
     return this._parseTaskGraph(result.content, goal);
@@ -123,85 +138,74 @@ class PlannerExecutor {
 
   /**
    * Parse the planner agent's output into a structured task graph.
+   *
+   * If the planner did not produce valid JSON with at least one task, this
+   * throws a PlannerOutputError carrying the planner's raw text so the UI
+   * can show the user what the planner actually said (a clarifying question,
+   * a refusal, an explanation of why the goal is ambiguous, etc.) instead
+   * of silently fabricating a single "Execute goal directly" pseudo-task.
    */
   _parseTaskGraph(content, originalGoal) {
-    // Extract JSON from the response
-    const jsonMatch = content.match(/```json\s*([\s\S]*?)```/) || content.match(/(\{[\s\S]*\})/);
+    const rawContent = typeof content === 'string' ? content : String(content || '');
+
+    const jsonMatch = rawContent.match(/```json\s*([\s\S]*?)```/) || rawContent.match(/(\{[\s\S]*\})/);
     if (!jsonMatch) {
-      // If planner didn't output JSON, create a single-task fallback
-      return {
-        goal: originalGoal,
-        summary: 'Direct execution (planner did not produce a structured plan)',
-        tasks: [{
-          id: 'task-1',
-          title: 'Execute goal directly',
-          description: `${originalGoal}\n\nPlanner context:\n${content}`,
-          agentId: 'main',
-          dependsOn: [],
-          priority: 1,
-          estimatedComplexity: 'medium'
-        }],
-        parallelGroups: [],
-        estimatedTotalSteps: 1
-      };
+      const err = new Error(
+        'Planner did not emit a JSON task graph. It likely asked a clarifying question or decided the goal was ambiguous.'
+      );
+      err.plannerOutput = rawContent;
+      err.goal = originalGoal;
+      throw err;
     }
 
+    let parsed;
     try {
-      const parsed = JSON.parse(jsonMatch[1] || jsonMatch[0]);
-
-      // Validate minimum structure
-      if (!Array.isArray(parsed.tasks) || parsed.tasks.length === 0) {
-        throw new Error('Task graph has no tasks');
-      }
-
-      // Ensure all tasks have required fields
-      for (const task of parsed.tasks) {
-        if (!task.id) task.id = `task-${Math.random().toString(36).slice(2, 8)}`;
-        if (!task.description) task.description = task.title || 'No description';
-        if (!task.agentId) task.agentId = 'main';
-        if (!Array.isArray(task.dependsOn)) task.dependsOn = [];
-      }
-
-      // Validate dependency references
-      const taskIds = new Set(parsed.tasks.map((t) => t.id));
-      for (const task of parsed.tasks) {
-        task.dependsOn = task.dependsOn.filter((depId) => taskIds.has(depId));
-      }
-
-      // Detect circular dependencies
-      if (this._hasCycle(parsed.tasks)) {
-        throw new Error('Task graph has circular dependencies');
-      }
-
-      return {
-        goal: parsed.goal || originalGoal,
-        summary: parsed.summary || '',
-        tasks: parsed.tasks,
-        parallelGroups: parsed.parallelGroups || [],
-        estimatedTotalSteps: parsed.estimatedTotalSteps || parsed.tasks.length,
-        requiresUserInput: parsed.requiresUserInput || false,
-        userInputNeeded: parsed.userInputNeeded || null
-      };
-    } catch (error) {
-      if (error.message.includes('circular')) throw error;
-
-      // JSON parse failed — fallback to single task
-      return {
-        goal: originalGoal,
-        summary: 'Direct execution (could not parse planner output)',
-        tasks: [{
-          id: 'task-1',
-          title: 'Execute goal directly',
-          description: `${originalGoal}\n\nPlanner context:\n${content}`,
-          agentId: 'main',
-          dependsOn: [],
-          priority: 1,
-          estimatedComplexity: 'medium'
-        }],
-        parallelGroups: [],
-        estimatedTotalSteps: 1
-      };
+      parsed = JSON.parse(jsonMatch[1] || jsonMatch[0]);
+    } catch (parseErr) {
+      const err = new Error(`Planner produced malformed JSON: ${parseErr.message}`);
+      err.plannerOutput = rawContent;
+      err.goal = originalGoal;
+      throw err;
     }
+
+    if (!Array.isArray(parsed.tasks) || parsed.tasks.length === 0) {
+      const err = new Error('Planner produced an empty task graph (no tasks).');
+      err.plannerOutput = rawContent;
+      err.goal = originalGoal;
+      throw err;
+    }
+
+    // Ensure all tasks have required fields
+    for (const task of parsed.tasks) {
+      if (!task.id) task.id = `task-${Math.random().toString(36).slice(2, 8)}`;
+      if (!task.description) task.description = task.title || 'No description';
+      if (!task.agentId) task.agentId = 'main';
+      if (!Array.isArray(task.dependsOn)) task.dependsOn = [];
+    }
+
+    // Validate dependency references
+    const taskIds = new Set(parsed.tasks.map((t) => t.id));
+    for (const task of parsed.tasks) {
+      task.dependsOn = task.dependsOn.filter((depId) => taskIds.has(depId));
+    }
+
+    // Detect circular dependencies
+    if (this._hasCycle(parsed.tasks)) {
+      const err = new Error('Task graph has circular dependencies');
+      err.plannerOutput = rawContent;
+      err.goal = originalGoal;
+      throw err;
+    }
+
+    return {
+      goal: parsed.goal || originalGoal,
+      summary: parsed.summary || '',
+      tasks: parsed.tasks,
+      parallelGroups: parsed.parallelGroups || [],
+      estimatedTotalSteps: parsed.estimatedTotalSteps || parsed.tasks.length,
+      requiresUserInput: parsed.requiresUserInput || false,
+      userInputNeeded: parsed.userInputNeeded || null
+    };
   }
 
   /**

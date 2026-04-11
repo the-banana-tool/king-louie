@@ -465,6 +465,7 @@ contextBridge.exposeInMainWorld(
         throttleInvoke('settings:testVoice', () => ipcRenderer.invoke('settings:testVoice', payload)),
       saveSmartRouting: (payload) => ipcRenderer.invoke('settings:saveSmartRouting', payload),
       saveSmartRoutingRules: (payload) => ipcRenderer.invoke('settings:saveSmartRoutingRules', payload),
+      saveLlmRouting: (payload) => ipcRenderer.invoke('settings:saveLlmRouting', payload),
       saveNotifications: (payload) => ipcRenderer.invoke('settings:saveNotifications', payload),
       saveDefaults: (payload) => ipcRenderer.invoke('settings:saveDefaults', payload),
       addAllowedDirectory: () => ipcRenderer.invoke('settings:addAllowedDirectory'),

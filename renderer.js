@@ -235,6 +235,7 @@ const dom = {
   websearchBraveStatus: document.getElementById('websearch-brave-status'),
   websearchTavilyStatus: document.getElementById('websearch-tavily-status'),
   workingDirBtn: document.getElementById('working-dir-btn'),
+  workingDirLabel: document.getElementById('working-dir-label'),
   exportChatBtn: document.getElementById('export-chat-btn'),
   messageContextMenu: document.getElementById('message-context-menu'),
   inputContextMenu: document.getElementById('input-context-menu'),
@@ -1880,15 +1881,30 @@ function renderChatMessages() {
   if (!activeChat) {
     dom.chatHeaderTitle.textContent = 'King Louie Chat';
     dom.chatHeaderMeta.textContent = `Start a new conversation • Tier: ${formatInferenceTierLabel(getActiveInferenceTier())}`;
+    if (dom.workingDirLabel) dom.workingDirLabel.textContent = 'No working directory';
+    if (dom.workingDirBtn) dom.workingDirBtn.classList.remove('is-set');
     return;
   }
 
   dom.chatHeaderTitle.textContent = activeChat.title;
   const chatTotals = activeChat.llmTotals || sumChatLlmTotals(activeChat);
-  const dirLabel = activeChat.workingDirectory ? ` • ${activeChat.workingDirectory}` : '';
-  dom.chatHeaderMeta.textContent = `Updated ${formatTimestamp(activeChat.updatedAt)} • Total ${formatTokenCount(chatTotals.totalTokens)} tokens • ${formatUsd(chatTotals.costUsd)} • Tier: ${formatInferenceTierLabel(getActiveInferenceTier())}${dirLabel}`;
+  dom.chatHeaderMeta.textContent = `Updated ${formatTimestamp(activeChat.updatedAt)} • Total ${formatTokenCount(chatTotals.totalTokens)} tokens • ${formatUsd(chatTotals.costUsd)} • Tier: ${formatInferenceTierLabel(getActiveInferenceTier())}`;
   if (dom.workingDirBtn) {
-    dom.workingDirBtn.title = activeChat.workingDirectory ? `Working directory: ${activeChat.workingDirectory}` : 'Set working directory';
+    dom.workingDirBtn.title = activeChat.workingDirectory ? `Working directory: ${activeChat.workingDirectory}\nClick to change` : 'Click to set working directory';
+    dom.workingDirBtn.classList.toggle('is-set', Boolean(activeChat.workingDirectory));
+  }
+  if (dom.workingDirLabel) {
+    if (activeChat.workingDirectory) {
+      // Show just the last 1-2 path segments inline; full path lives in the
+      // tooltip. This keeps the header readable even for deep nested projects.
+      const parts = activeChat.workingDirectory.split(/[\\/]/).filter(Boolean);
+      const shortLabel = parts.length > 2
+        ? `…${parts.slice(-2).join('/')}`
+        : parts.join('/');
+      dom.workingDirLabel.textContent = shortLabel;
+    } else {
+      dom.workingDirLabel.textContent = 'No working directory';
+    }
   }
 
   let runningTotals = {
@@ -3893,6 +3909,60 @@ async function handlePlanAndExecuteWorkflow() {
 }
 
 /**
+ * Format a task graph as a readable markdown block and persist it to the
+ * chat as an assistant message tagged with workflowScaffolding so it shows
+ * up in chat exports but is filtered out of the next planner run.
+ *
+ * kind: 'proposed' | 'edited'
+ */
+async function persistProposedPlan(chatId, goal, taskGraph, kind = 'proposed') {
+  if (!taskGraph || !Array.isArray(taskGraph.tasks)) return;
+  const heading = kind === 'edited'
+    ? '**Edited workflow plan (approved by user):**'
+    : '**Proposed workflow plan:**';
+  const lines = [heading, ''];
+  lines.push(`Goal: ${goal}`);
+  if (taskGraph.summary) lines.push(`Summary: ${taskGraph.summary}`);
+  lines.push(`Tasks: ${taskGraph.tasks.length}`);
+  lines.push('');
+  taskGraph.tasks.forEach((t, i) => {
+    const deps = Array.isArray(t.dependsOn) && t.dependsOn.length ? ` ← [${t.dependsOn.join(', ')}]` : '';
+    lines.push(`${i + 1}. **${t.title || t.id}** \`${t.id}\` [${t.agentId || 'main'}]${deps}`);
+    if (t.description) {
+      lines.push(`   ${String(t.description).replace(/\n/g, '\n   ')}`);
+    }
+    lines.push('');
+  });
+  const text = lines.join('\n');
+
+  try {
+    await window.electron.chat.addMessage({
+      chatId,
+      sender: 'assistant',
+      text,
+      workflowScaffolding: true
+    });
+  } catch (err) {
+    console.warn('[workflow] persist proposed plan failed:', err.message);
+  }
+
+  const chatObj = appState.chats.find((c) => c.id === chatId);
+  if (chatObj) {
+    chatObj.messages = chatObj.messages || [];
+    chatObj.messages.push({
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+      sender: 'assistant',
+      text,
+      workflowScaffolding: true,
+      timestamp: new Date().toISOString()
+    });
+    if (chatId === appState.activeChatId) {
+      addMessage('assistant', text);
+    }
+  }
+}
+
+/**
  * Append a status message to a specific chat (not necessarily the active one).
  * Updates the chat's message array, persists, and renders inline if that chat
  * is currently active.
@@ -4197,34 +4267,108 @@ async function handleChatPlanAndExecute() {
     return;
   }
 
-  // Goal: textarea first, else last user message in the chat
+  // Goal source: textarea ONLY. If empty, prompt explicitly. We deliberately
+  // do NOT fall back to the last user message — when users paste large context
+  // documents, "last user message" becomes the entire document, which is
+  // never a goal. The chat context is still passed to the planner as history
+  // regardless, so the goal can be short and focused.
   let goal = (dom.userInput?.value || '').trim();
   if (!goal) {
-    const lastUserMsg = [...(chat.messages || [])]
-      .reverse()
-      .find((m) => m.sender === 'user' && typeof m.text === 'string' && m.text.trim());
-    if (lastUserMsg) goal = lastUserMsg.text.trim();
+    const entered = window.prompt(
+      'What should the planner do? (short, focused goal — e.g. "take Funnel-OS from 6/9 to 9/9")\n\nThe whole chat will be passed as context automatically.'
+    );
+    goal = (entered || '').trim();
   }
   if (!goal) {
-    addStatusMessage('Type a goal in the message box, or send a message first, then click Plan & Execute.');
+    addStatusMessage('Plan & Execute cancelled — no goal provided.');
     return;
   }
 
-  const workingDirectory = chat.workingDirectory || null;
-  if (!workingDirectory) {
-    appendStatusToChat(chatId, 'Warning: this chat has no working directory set — the planner will explore the app root instead of a project. Set a working directory first for best results.');
+  // Post the goal as a real user message in the chat BEFORE doing anything
+  // else — including the working-directory check. This guarantees the user's
+  // typed goal is never lost to a validation branch, and makes clicking the
+  // button always feel like "send this as a workflow goal".
+  try {
+    await window.electron.chat.addMessage({ chatId, sender: 'user', text: goal });
+  } catch (err) {
+    console.warn('[workflow] goal persist failed:', err.message);
+  }
+  const goalMsgId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const goalMsg = {
+    id: goalMsgId,
+    sender: 'user',
+    text: goal,
+    timestamp: new Date().toISOString()
+  };
+  chat.messages = chat.messages || [];
+  chat.messages.push(goalMsg);
+  if (chatId === appState.activeChatId) {
+    addMessage('user', goal);
   }
 
+  // Clear the textarea now that the goal has been captured and displayed.
+  if (dom.userInput) dom.userInput.value = '';
+
+  // Working directory is required for a meaningful workflow. If the chat
+  // doesn't have one set, abort cleanly with an in-chat notification — do
+  // NOT open a popup. The user's goal is already persisted above, so they
+  // can click the folder-icon button in the chat header to set a working
+  // directory and then click Plan & Execute again.
+  const workingDirectory = chat.workingDirectory || null;
+  if (!workingDirectory) {
+    appendStatusToChat(
+      chatId,
+      'Plan & Execute needs a working directory for this chat. Click the folder icon in the chat header to set one, then click Plan & Execute again — your goal is saved above.'
+    );
+    return;
+  }
+
+  // Build chat history for the planner — exclude noise that pollutes
+  // successive runs in the same chat:
+  //   1. status/toolUse/toolResult events (via sender filter)
+  //   2. messages tagged with workflowScaffolding (my own diagnostic injects)
+  //   3. prior untagged planner diagnostic output (content heuristic — matches
+  //      earlier scaffolding injected before the tag existed)
+  //   4. the goal message we just posted (don't double-include it)
+  const isPriorPlannerDiagnostic = (text) =>
+    typeof text === 'string' &&
+    text.trim().startsWith('**Planner response (no task graph produced):**');
   const chatMessages = (chat.messages || [])
     .filter((m) => m.sender === 'user' || m.sender === 'assistant')
+    .filter((m) => !m.workflowScaffolding)
+    .filter((m) => !isPriorPlannerDiagnostic(m.text))
+    .filter((m) => m.id !== goalMsgId)
     .map((m) => ({ sender: m.sender, text: m.text || '' }))
     .filter((m) => m.text.trim().length > 0);
 
   if (dom.chatPlanBtn) dom.chatPlanBtn.disabled = true;
-  appendStatusToChat(chatId, `Planning workflow for goal: ${goal.slice(0, 120)}${goal.length > 120 ? '…' : ''}`);
+  const contextChars = chatMessages.reduce((n, m) => n + (m.text?.length || 0), 0);
+  appendStatusToChat(
+    chatId,
+    `Planning workflow (${chatMessages.length} context msgs, ~${Math.round(contextChars / 4)} tokens) for goal: ${goal.slice(0, 120)}${goal.length > 120 ? '…' : ''}`
+  );
   if (workingDirectory) {
     appendStatusToChat(chatId, `Planner is exploring ${workingDirectory}…`);
   }
+
+  // Insert a streaming placeholder so the user sees the same blinking
+  // indicator the normal chat path shows — this reuses the existing
+  // .message.streaming CSS (blinking ▊ cursor via ::after).
+  const plannerIndicator = document.createElement('div');
+  plannerIndicator.className = 'message assistant streaming';
+  plannerIndicator.dataset.plannerIndicator = 'true';
+  const plannerContent = document.createElement('div');
+  plannerContent.className = 'message-content';
+  plannerContent.textContent = 'Planner is exploring and drafting a task graph…';
+  plannerIndicator.appendChild(plannerContent);
+  if (chatId === appState.activeChatId) {
+    dom.chatMessages.appendChild(plannerIndicator);
+    dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
+  }
+  const removePlannerIndicator = () => {
+    if (plannerIndicator.parentNode) plannerIndicator.parentNode.removeChild(plannerIndicator);
+  };
+  setResponseActive(true, chatId);
 
   try {
     const result = await window.electron.workflow.plan(goal, {
@@ -4232,18 +4376,59 @@ async function handleChatPlanAndExecute() {
       workingDirectory,
       chatMessages
     });
-    if (!result?.ok) throw new Error(result?.error || 'Planning failed');
+    if (!result?.ok) {
+      removePlannerIndicator();
+      // If the planner returned raw content (a clarifying question, refusal,
+      // or malformed JSON), show it as an assistant message so the user can
+      // see what the planner actually said instead of a cryptic error.
+      // Tag it with workflowScaffolding so the next Plan & Execute run in
+      // the same chat does NOT re-feed this output back to the planner.
+      if (typeof result?.plannerOutput === 'string' && result.plannerOutput.trim()) {
+        appendStatusToChat(chatId, `Planner did not produce a task graph: ${result.error}`);
+        const diagnosticText = `**Planner response (no task graph produced):**\n\n${result.plannerOutput}`;
+        await window.electron.chat.addMessage({
+          chatId,
+          sender: 'assistant',
+          text: diagnosticText,
+          workflowScaffolding: true
+        });
+        const chatObj = appState.chats.find((c) => c.id === chatId);
+        if (chatObj) {
+          chatObj.messages = chatObj.messages || [];
+          chatObj.messages.push({
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+            sender: 'assistant',
+            text: diagnosticText,
+            workflowScaffolding: true,
+            timestamp: new Date().toISOString()
+          });
+          if (chatId === appState.activeChatId) renderChatMessages();
+        }
+        return;
+      }
+      throw new Error(result?.error || 'Planning failed');
+    }
     const taskGraph = result.taskGraph;
     if (!taskGraph || !Array.isArray(taskGraph.tasks) || taskGraph.tasks.length === 0) {
       throw new Error('Planner returned an empty task graph');
     }
 
-    // Clear textarea now that we've captured the goal
-    if (dom.userInput && dom.userInput.value.trim() === goal) dom.userInput.value = '';
+    removePlannerIndicator();
+
+    // Persist the proposed task graph to the chat so it shows up in exports
+    // even if the user later cancels or edits it. Tagged with
+    // workflowScaffolding so the next Plan & Execute run in this chat does
+    // NOT re-feed it to the planner (prevents pollution from stale proposals).
+    await persistProposedPlan(chatId, goal, taskGraph, 'proposed');
 
     showWorkflowApprovalCard(taskGraph, {
       onApprove: async (editedGraph) => {
         try {
+          // If the user edited anything, log the edited version too so the
+          // export shows both what the planner proposed AND what actually ran.
+          if (JSON.stringify(editedGraph?.tasks) !== JSON.stringify(taskGraph.tasks)) {
+            await persistProposedPlan(chatId, goal, editedGraph, 'edited');
+          }
           const createRes = await window.electron.workflow.create(editedGraph, { chatId, workingDirectory });
           if (!createRes?.ok) throw new Error(createRes?.error || 'Workflow creation failed');
           const wf = createRes.workflow;
@@ -4256,12 +4441,22 @@ async function handleChatPlanAndExecute() {
         }
       },
       onCancel: () => {
-        appendStatusToChat(chatId, 'Workflow plan cancelled.');
+        appendStatusToChat(chatId, 'Workflow plan cancelled (proposed plan is preserved in the chat above).');
       }
     });
   } catch (err) {
-    appendStatusToChat(chatId, `Planning error: ${err.message}`);
+    removePlannerIndicator();
+    const msg = String(err?.message || err || '').toLowerCase();
+    if (msg.includes('overloaded')) {
+      appendStatusToChat(chatId, `Planning error: the model provider is overloaded right now. The agent loop already retried a few times with backoff. Wait a minute and click Plan & Execute again — your goal is saved above.`);
+    } else if (msg.includes('rate limit') || msg.includes('429')) {
+      appendStatusToChat(chatId, `Planning error: rate-limited by the model provider. Wait a moment and click Plan & Execute again.`);
+    } else {
+      appendStatusToChat(chatId, `Planning error: ${err.message}`);
+    }
   } finally {
+    removePlannerIndicator();
+    setResponseActive(false, chatId);
     if (dom.chatPlanBtn) dom.chatPlanBtn.disabled = false;
   }
 }
@@ -4269,34 +4464,34 @@ async function handleChatPlanAndExecute() {
 async function loadLLMRoutingSettings() {
   if (!dom.llmRoutingEnabled) return;
   try {
-    const result = await window.electron.settings.load();
-    if (!result?.ok) return;
-    const llmRouting = result.settings?.inference?.llmRouting || {};
+    // The settings:load handler returns {inference, providers, ...} at the
+    // top level, which wrapHandler wraps as {ok:true, data:{...}}. Use the
+    // existing unwrap helper — the old code read result.settings (which is
+    // always undefined) and force-unchecked the box on every load.
+    const data = unwrapIpcResult(await window.electron.settings.load(), 'Unable to load settings.');
+    const llmRouting = data?.inference?.llmRouting || {};
     dom.llmRoutingEnabled.checked = llmRouting.enabled === true;
     if (dom.llmRoutingCost) dom.llmRoutingCost.value = llmRouting.costSensitivity || 'medium';
     if (dom.llmRoutingSpeed) dom.llmRoutingSpeed.value = llmRouting.speedPriority || 'medium';
     if (dom.llmRoutingQuality) dom.llmRoutingQuality.value = llmRouting.qualityPriority || 'high';
-  } catch { /* ignore */ }
+  } catch (err) {
+    console.warn('[settings] loadLLMRoutingSettings failed:', err.message);
+  }
 }
 
 async function handleSaveLLMRouting() {
   if (dom.llmRoutingSaveBtn) dom.llmRoutingSaveBtn.disabled = true;
   try {
-    const result = await window.electron.settings.load();
-    if (!result?.ok) throw new Error('Failed to load settings');
-    const settings = result.settings || {};
-    if (!settings.inference) settings.inference = {};
-    settings.inference.llmRouting = {
-      enabled: dom.llmRoutingEnabled?.checked || false,
+    const payload = {
+      enabled: Boolean(dom.llmRoutingEnabled?.checked),
       costSensitivity: dom.llmRoutingCost?.value || 'medium',
       speedPriority: dom.llmRoutingSpeed?.value || 'medium',
       qualityPriority: dom.llmRoutingQuality?.value || 'high'
     };
-    // Save the full settings back — find the right IPC call
-    // We'll use the general settings save mechanism
-    await window.electron.settings.save?.(settings) || await window.electron.settings.load();
+    const result = await window.electron.settings.saveLlmRouting(payload);
+    if (!result?.ok) throw new Error(result?.error || 'Save failed');
     if (dom.llmRoutingStatus) {
-      dom.llmRoutingStatus.textContent = 'Saved.';
+      dom.llmRoutingStatus.textContent = payload.enabled ? 'Saved — LLM routing enabled.' : 'Saved — LLM routing disabled.';
       dom.llmRoutingStatus.classList.remove('error');
     }
   } catch (err) {
@@ -4930,10 +5125,13 @@ async function sendMessage() {
         appState.chats = appState.chats.map((c) => c.id === appState.activeChatId ? { ...c, workingDirectory: dirArg } : c);
       }
     } else {
-      const result = await window.electron.chat.pickWorkingDirectory(appState.activeChatId);
-      if (result && !result.canceled && result.chat) {
-        appState.chats = appState.chats.map((c) => c.id === result.chat.id ? result.chat : c);
-        responseText = `Working directory set to \`${result.chat.workingDirectory}\``;
+      const data = unwrapIpcResult(
+        await window.electron.chat.pickWorkingDirectory(appState.activeChatId),
+        'Unable to set working directory.'
+      );
+      if (data && !data.canceled && data.chat) {
+        appState.chats = appState.chats.map((c) => (c.id === data.chat.id ? data.chat : c));
+        responseText = `Working directory set to \`${data.chat.workingDirectory}\``;
       } else {
         responseText = 'No directory selected.';
       }
@@ -6073,10 +6271,19 @@ document.addEventListener('click', (e) => {
 if (dom.workingDirBtn) {
   dom.workingDirBtn.addEventListener('click', async () => {
     if (!appState.activeChatId) return;
-    const result = await window.electron.chat.pickWorkingDirectory(appState.activeChatId);
-    if (result && !result.canceled && result.chat) {
-      appState.chats = appState.chats.map((c) => c.id === result.chat.id ? result.chat : c);
+    try {
+      // The IPC handler returns {canceled, chat} at the top level, which
+      // wrapHandler wraps as {ok:true, data:{canceled, chat}}. Unwrap it
+      // with the shared helper instead of reading result.chat directly.
+      const data = unwrapIpcResult(
+        await window.electron.chat.pickWorkingDirectory(appState.activeChatId),
+        'Unable to set working directory.'
+      );
+      if (!data || data.canceled || !data.chat) return;
+      appState.chats = appState.chats.map((c) => (c.id === data.chat.id ? data.chat : c));
       refreshUI();
+    } catch (err) {
+      console.warn('[chat] pickWorkingDirectory failed:', err.message);
     }
   });
 }
