@@ -3935,12 +3935,18 @@ async function persistProposedPlan(chatId, goal, taskGraph, kind = 'proposed') {
   });
   const text = lines.join('\n');
 
+  // Embed the structured task graph in the message metadata so the plan can
+  // be recovered from chat history if workflows/{id}.json is lost. The
+  // existing `!m.workflowScaffolding` filters elsewhere still match because
+  // an object is truthy.
+  const scaffolding = { kind, taskGraph };
+
   try {
     await window.electron.chat.addMessage({
       chatId,
       sender: 'assistant',
       text,
-      workflowScaffolding: true
+      workflowScaffolding: scaffolding
     });
   } catch (err) {
     console.warn('[workflow] persist proposed plan failed:', err.message);
@@ -3953,7 +3959,7 @@ async function persistProposedPlan(chatId, goal, taskGraph, kind = 'proposed') {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
       sender: 'assistant',
       text,
-      workflowScaffolding: true,
+      workflowScaffolding: scaffolding,
       timestamp: new Date().toISOString()
     });
     if (chatId === appState.activeChatId) {

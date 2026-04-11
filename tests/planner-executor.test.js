@@ -154,14 +154,18 @@ describe('PlannerExecutor', () => {
       assert.strictEqual(result.tasks[0].agentId, 'main');
     });
 
-    it('filters out invalid dependency references', () => {
+    it('rejects invalid dependency references with ORPHAN_DEPENDENCY', () => {
       const graph = {
         tasks: [
           { id: 'a', title: 'A', description: 'A', dependsOn: ['nonexistent'] }
         ]
       };
-      const result = executor._parseTaskGraph(JSON.stringify(graph), 'goal');
-      assert.deepStrictEqual(result.tasks[0].dependsOn, []);
+      let thrown;
+      try { executor._parseTaskGraph(JSON.stringify(graph), 'goal'); } catch (e) { thrown = e; }
+      assert.ok(thrown, 'expected throw');
+      assert.strictEqual(thrown.validationCode, 'ORPHAN_DEPENDENCY');
+      assert.strictEqual(thrown.validationDetails.taskId, 'a');
+      assert.strictEqual(thrown.validationDetails.missingDep, 'nonexistent');
     });
 
     it('throws on circular dependencies', () => {
@@ -171,7 +175,11 @@ describe('PlannerExecutor', () => {
           { id: 'b', title: 'B', description: 'B', dependsOn: ['a'] }
         ]
       };
-      assert.throws(() => executor._parseTaskGraph(JSON.stringify(graph), 'goal'), /circular/);
+      let thrown;
+      try { executor._parseTaskGraph(JSON.stringify(graph), 'goal'); } catch (e) { thrown = e; }
+      assert.ok(thrown, 'expected throw');
+      assert.match(thrown.message, /circular/i);
+      assert.strictEqual(thrown.validationCode, 'CYCLE');
     });
 
     it('throws with plannerOutput for empty tasks array', () => {
@@ -195,41 +203,65 @@ describe('PlannerExecutor', () => {
     });
   });
 
-  describe('_hasCycle()', () => {
-    const executor = new PlannerExecutor({
-      agentExecutorAdapter: makeMockAdapter(),
-      workflowEngine: makeMockWorkflowEngine(),
-      getAgent: makeGetAgent()
-    });
+  describe('validateTaskGraph()', () => {
+    const { validateTaskGraph } = require('../src/workflows/task-graph-validator');
+    const wrap = (tasks) => ({ tasks: tasks.map((t) => ({ description: t.id, ...t })) });
 
-    it('returns false for acyclic graph', () => {
-      const tasks = [
+    it('accepts an acyclic graph', () => {
+      assert.strictEqual(validateTaskGraph(wrap([
         { id: 'a', dependsOn: [] },
         { id: 'b', dependsOn: ['a'] },
         { id: 'c', dependsOn: ['a', 'b'] }
-      ];
-      assert.strictEqual(executor._hasCycle(tasks), false);
+      ])), true);
     });
 
-    it('returns true for direct cycle', () => {
-      const tasks = [
-        { id: 'a', dependsOn: ['b'] },
-        { id: 'b', dependsOn: ['a'] }
-      ];
-      assert.strictEqual(executor._hasCycle(tasks), true);
+    it('rejects a direct cycle', () => {
+      assert.throws(
+        () => validateTaskGraph(wrap([
+          { id: 'a', dependsOn: ['b'] },
+          { id: 'b', dependsOn: ['a'] }
+        ])),
+        (err) => err.code === 'CYCLE'
+      );
     });
 
-    it('returns true for indirect cycle', () => {
-      const tasks = [
-        { id: 'a', dependsOn: ['c'] },
-        { id: 'b', dependsOn: ['a'] },
-        { id: 'c', dependsOn: ['b'] }
-      ];
-      assert.strictEqual(executor._hasCycle(tasks), true);
+    it('rejects an indirect cycle', () => {
+      assert.throws(
+        () => validateTaskGraph(wrap([
+          { id: 'a', dependsOn: ['c'] },
+          { id: 'b', dependsOn: ['a'] },
+          { id: 'c', dependsOn: ['b'] }
+        ])),
+        (err) => err.code === 'CYCLE'
+      );
     });
 
-    it('returns false for empty task list', () => {
-      assert.strictEqual(executor._hasCycle([]), false);
+    it('rejects a self-loop', () => {
+      assert.throws(
+        () => validateTaskGraph(wrap([{ id: 'a', dependsOn: ['a'] }])),
+        (err) => err.code === 'SELF_LOOP'
+      );
+    });
+
+    it('rejects orphan dependencies', () => {
+      assert.throws(
+        () => validateTaskGraph(wrap([{ id: 'a', dependsOn: ['ghost'] }])),
+        (err) => err.code === 'ORPHAN_DEPENDENCY'
+      );
+    });
+
+    it('rejects duplicate task ids', () => {
+      assert.throws(
+        () => validateTaskGraph(wrap([
+          { id: 'a', dependsOn: [] },
+          { id: 'a', dependsOn: [] }
+        ])),
+        (err) => err.code === 'DUPLICATE_ID'
+      );
+    });
+
+    it('rejects an empty task list', () => {
+      assert.throws(() => validateTaskGraph({ tasks: [] }), (err) => err.code === 'EMPTY');
     });
   });
 

@@ -300,4 +300,64 @@ describe('ConversationCompactor (chunk-level)', () => {
       assert.strictEqual(result.length, 2);
     });
   });
+
+  describe('disk-backed embedding cache', () => {
+    let cacheDir;
+    let cachePath;
+
+    beforeEach(() => {
+      const os = require('os');
+      cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-emb-cache-'));
+      cachePath = path.join(cacheDir, 'embeddings.jsonl');
+    });
+
+    function countingProvider(stats = { calls: 0, embedded: 0 }) {
+      const base = createMockEmbeddingProvider();
+      return {
+        stats,
+        async embed(texts) {
+          stats.calls++;
+          stats.embedded += texts.length;
+          return base.embed(texts);
+        }
+      };
+    }
+
+    it('persists embeddings to disk and reuses them on a new instance', async () => {
+      const stats = { calls: 0, embedded: 0 };
+      const c1 = new ConversationCompactor({
+        embeddingProvider: countingProvider(stats),
+        cacheFilePath: cachePath
+      });
+      await c1.retrieve('linen wrapping', conversation);
+      const firstCallEmbedded = stats.embedded;
+      assert.ok(firstCallEmbedded > 0, 'first run must embed at least one chunk');
+      assert.ok(fs.existsSync(cachePath), 'cache file should be written');
+
+      // Brand-new compactor — same cache file. All hashes hit; no new embeds.
+      const stats2 = { calls: 0, embedded: 0 };
+      const c2 = new ConversationCompactor({
+        embeddingProvider: countingProvider(stats2),
+        cacheFilePath: cachePath
+      });
+      await c2.retrieve('linen wrapping', conversation);
+      assert.strictEqual(stats2.embedded, 1, 'only the query itself should be embedded fresh');
+      const cstats = c2.getCacheStats();
+      assert.ok(cstats.hits > 0, `expected cache hits, got ${cstats.hits}`);
+    });
+
+    it('survives a corrupt trailing line in the cache file', async () => {
+      fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+      fs.writeFileSync(cachePath, '{"h":"abc","v":[0.1,0.2]}\nnot-json-at-all\n', 'utf8');
+      const c = new ConversationCompactor({
+        embeddingProvider: createMockEmbeddingProvider(),
+        cacheFilePath: cachePath
+      });
+      // Should not throw on load.
+      await c.retrieve('linen', conversation);
+      const stats = c.getCacheStats();
+      // The good entry was loaded; the corrupt one was skipped.
+      assert.ok(stats.cacheSize >= 1);
+    });
+  });
 });

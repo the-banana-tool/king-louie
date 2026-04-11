@@ -15,6 +15,7 @@ describe('Workflow IPC constants', () => {
     assert.strictEqual(constants.WORKFLOW_GET, 'workflow:get');
     assert.strictEqual(constants.WORKFLOW_PROGRESS, 'workflow:progress');
     assert.strictEqual(constants.WORKFLOW_DELETE, 'workflow:delete');
+    assert.strictEqual(constants.WORKFLOW_RECOVER_PLAN, 'workflow:recoverPlan');
   });
 
   it('workflow constants have unique values', () => {
@@ -66,6 +67,7 @@ describe('Workflow handler module', () => {
     assert.ok(registered.includes('workflow:get'));
     assert.ok(registered.includes('workflow:progress'));
     assert.ok(registered.includes('workflow:delete'));
-    assert.strictEqual(registered.length, 10);
+    assert.ok(registered.includes('workflow:recoverPlan'));
+    assert.strictEqual(registered.length, 11);
   });
 });

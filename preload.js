@@ -687,6 +687,7 @@ contextBridge.exposeInMainWorld(
       get: (id) => ipcRenderer.invoke('workflow:get', { id }),
       progress: (id) => ipcRenderer.invoke('workflow:progress', { id }),
       delete: (id) => ipcRenderer.invoke('workflow:delete', { id }),
+      recoverPlan: (chatId) => ipcRenderer.invoke('workflow:recoverPlan', { chatId }),
       onCreated: (callback) => registerOnce('workflow:created', callback),
       onStarted: (callback) => registerOnce('workflow:started', callback),
       onCompleted: (callback) => registerOnce('workflow:completed', callback),

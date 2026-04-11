@@ -2165,9 +2165,12 @@ const initializeAgentInfrastructure = async () => {
   });
 
   // ConversationCompactor: semantic retrieval over conversation history.
-  // Reuses the same embedding provider as the context assembler.
+  // Reuses the same embedding provider as the context assembler. The cache
+  // file persists embeddings keyed by chunk-content hash, so the same text
+  // is never embedded twice — survives restarts and is shared across chats.
   conversationCompactor = new ConversationCompactor({
-    embeddingProvider: contextAssembler.embeddingProvider
+    embeddingProvider: contextAssembler.embeddingProvider,
+    cacheFilePath: path.join(app.getPath('userData'), 'memory', 'embedding-cache.jsonl')
   });
 
   usageTracker = new UsageTracker(store);

@@ -5,6 +5,8 @@
  * then feeds that graph into the WorkflowEngine for durable execution.
  */
 
+const { validateTaskGraph, TaskGraphValidationError } = require('./task-graph-validator');
+
 class PlannerExecutor {
   constructor(options = {}) {
     this.agentExecutorAdapter = options.agentExecutorAdapter;
@@ -175,7 +177,7 @@ class PlannerExecutor {
       throw err;
     }
 
-    // Ensure all tasks have required fields
+    // Ensure all tasks have required fields before validation
     for (const task of parsed.tasks) {
       if (!task.id) task.id = `task-${Math.random().toString(36).slice(2, 8)}`;
       if (!task.description) task.description = task.title || 'No description';
@@ -183,59 +185,34 @@ class PlannerExecutor {
       if (!Array.isArray(task.dependsOn)) task.dependsOn = [];
     }
 
-    // Validate dependency references
-    const taskIds = new Set(parsed.tasks.map((t) => t.id));
-    for (const task of parsed.tasks) {
-      task.dependsOn = task.dependsOn.filter((depId) => taskIds.has(depId));
-    }
-
-    // Detect circular dependencies
-    if (this._hasCycle(parsed.tasks)) {
-      const err = new Error('Task graph has circular dependencies');
-      err.plannerOutput = rawContent;
-      err.goal = originalGoal;
-      throw err;
-    }
-
-    return {
+    const graph = {
       goal: parsed.goal || originalGoal,
       summary: parsed.summary || '',
       tasks: parsed.tasks,
       parallelGroups: parsed.parallelGroups || [],
       estimatedTotalSteps: parsed.estimatedTotalSteps || parsed.tasks.length,
       requiresUserInput: parsed.requiresUserInput || false,
-      userInputNeeded: parsed.userInputNeeded || null
+      userInputNeeded: parsed.userInputNeeded || null,
+      // Optional: action categories the planner believes the user will need
+      // to pre-approve (e.g. "run-tests"). Surfaces in the approval UI.
+      allowedActions: Array.isArray(parsed.allowedActions) ? parsed.allowedActions : []
     };
-  }
 
-  /**
-   * Detect cycles in the task dependency graph using DFS.
-   */
-  _hasCycle(tasks) {
-    const visited = new Set();
-    const inStack = new Set();
-    const adjacency = new Map();
-
-    for (const task of tasks) {
-      adjacency.set(task.id, task.dependsOn || []);
-    }
-
-    const dfs = (nodeId) => {
-      if (inStack.has(nodeId)) return true;
-      if (visited.has(nodeId)) return false;
-      visited.add(nodeId);
-      inStack.add(nodeId);
-      for (const dep of adjacency.get(nodeId) || []) {
-        if (dfs(dep)) return true;
+    try {
+      validateTaskGraph(graph);
+    } catch (validationErr) {
+      if (validationErr instanceof TaskGraphValidationError) {
+        const err = new Error(`Planner produced an invalid task graph: ${validationErr.message}`);
+        err.plannerOutput = rawContent;
+        err.goal = originalGoal;
+        err.validationCode = validationErr.code;
+        err.validationDetails = validationErr.details;
+        throw err;
       }
-      inStack.delete(nodeId);
-      return false;
-    };
-
-    for (const task of tasks) {
-      if (dfs(task.id)) return true;
+      throw validationErr;
     }
-    return false;
+
+    return graph;
   }
 }
 

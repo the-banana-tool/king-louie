@@ -1,4 +1,7 @@
 const VectorStore = require('../memory/vector-store');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
 
 /**
  * ConversationCompactor — chunk-level semantic retrieval over conversation history.
@@ -28,15 +31,27 @@ const CHARS_PER_TOKEN = 4;
 // Target size for each chunk in characters (~300–500 tokens).
 const CHUNK_TARGET_CHARS = 1500;
 
+// Hash a chunk's text for cache lookup. Stable across processes — same
+// text always produces the same key, so two different chats discussing the
+// same pasted document share embeddings instead of paying twice.
+function hashText(text) {
+  return crypto.createHash('sha256').update(text).digest('hex');
+}
+
 class ConversationCompactor {
   /**
    * @param {object} options
    * @param {object} options.embeddingProvider - OpenAIEmbeddingProvider instance
+   * @param {string} [options.cacheFilePath] - JSONL cache for embeddings
+   *        keyed by chunk content hash. When supplied, embeddings persist
+   *        across process restarts and across chats — same text never
+   *        gets embedded twice. Append-only so a crash mid-write loses at
+   *        most one entry.
    */
   constructor(options = {}) {
     this.embeddingProvider = options.embeddingProvider || null;
 
-    // chunkId → embedding vector
+    // chunkId → embedding vector (volatile, per-process)
     this._vectors = {};
 
     // chunkId → { messageId, sender, text, timestamp }
@@ -44,6 +59,60 @@ class ConversationCompactor {
 
     // messageId → true (tracks which messages have been chunked)
     this._chunkedMessages = {};
+
+    // Disk-backed embedding cache (hash → vector). Loaded lazily on first
+    // _ensureIndexed call so the constructor stays sync.
+    this._cacheFilePath = options.cacheFilePath || null;
+    this._diskCache = null;
+    this._cacheStats = { hits: 0, misses: 0 };
+  }
+
+  // ─── Disk cache ──────────────────────────────────────────────────────────
+
+  _loadDiskCache() {
+    if (this._diskCache !== null) return;
+    this._diskCache = new Map();
+    if (!this._cacheFilePath) return;
+    try {
+      if (!fs.existsSync(this._cacheFilePath)) return;
+      const raw = fs.readFileSync(this._cacheFilePath, 'utf8');
+      for (const line of raw.split('\n')) {
+        if (!line.trim()) continue;
+        try {
+          const entry = JSON.parse(line);
+          if (entry && entry.h && Array.isArray(entry.v)) {
+            this._diskCache.set(entry.h, entry.v);
+          }
+        } catch {
+          // Skip corrupt lines — tail of a partial write.
+        }
+      }
+    } catch (err) {
+      console.warn('[conversation-compactor] Failed to load embedding cache:', err.message);
+    }
+  }
+
+  _appendToDiskCache(hash, vector) {
+    if (!this._cacheFilePath || !this._diskCache) return;
+    this._diskCache.set(hash, vector);
+    try {
+      fs.mkdirSync(path.dirname(this._cacheFilePath), { recursive: true });
+      fs.appendFileSync(
+        this._cacheFilePath,
+        JSON.stringify({ h: hash, v: vector }) + '\n',
+        'utf8'
+      );
+    } catch (err) {
+      console.warn('[conversation-compactor] Failed to persist embedding:', err.message);
+    }
+  }
+
+  getCacheStats() {
+    return {
+      ...this._cacheStats,
+      cacheSize: this._diskCache ? this._diskCache.size : 0,
+      cachePath: this._cacheFilePath
+    };
   }
 
   // ─── Chunking ────────────────────────────────────────────────────────────
@@ -112,6 +181,7 @@ class ConversationCompactor {
    */
   async _ensureIndexed(messages) {
     if (!this.embeddingProvider) return false;
+    this._loadDiskCache();
 
     // Chunk any new messages
     const newChunks = [];
@@ -129,17 +199,36 @@ class ConversationCompactor {
 
     if (newChunks.length === 0) return true;
 
-    // Batch embed all new chunks
-    const texts = newChunks.map(c =>
-      `${c.sender || 'user'}: ${c.text.substring(0, 500)}`
-    );
+    // Build the embedding text for each chunk and check the disk cache
+    // first. Hash is over the exact text we'd send to the embedder so a
+    // formatting tweak invalidates correctly.
+    const toEmbed = []; // chunks that need fresh embeddings
+    const toEmbedTexts = [];
+    for (const chunk of newChunks) {
+      const embedText = `${chunk.sender || 'user'}: ${chunk.text.substring(0, 500)}`;
+      const hash = hashText(embedText);
+      const cached = this._diskCache.get(hash);
+      if (cached) {
+        this._vectors[chunk.chunkId] = cached;
+        this._cacheStats.hits++;
+      } else {
+        chunk._embedText = embedText;
+        chunk._embedHash = hash;
+        toEmbed.push(chunk);
+        toEmbedTexts.push(embedText);
+      }
+    }
+
+    if (toEmbed.length === 0) return true;
+    this._cacheStats.misses += toEmbed.length;
 
     try {
-      const embeddings = await this.embeddingProvider.embed(texts);
-      for (let i = 0; i < newChunks.length; i++) {
-        if (embeddings[i]) {
-          this._vectors[newChunks[i].chunkId] = embeddings[i];
-        }
+      const embeddings = await this.embeddingProvider.embed(toEmbedTexts);
+      for (let i = 0; i < toEmbed.length; i++) {
+        const vec = embeddings[i];
+        if (!vec) continue;
+        this._vectors[toEmbed[i].chunkId] = vec;
+        this._appendToDiskCache(toEmbed[i]._embedHash, vec);
       }
       return true;
     } catch (err) {

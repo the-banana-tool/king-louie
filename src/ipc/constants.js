@@ -125,6 +125,7 @@ module.exports = {
   WORKFLOW_GET: 'workflow:get',
   WORKFLOW_PROGRESS: 'workflow:progress',
   WORKFLOW_DELETE: 'workflow:delete',
+  WORKFLOW_RECOVER_PLAN: 'workflow:recoverPlan',
 
   APPS_LIST: 'apps:list',
   APPS_RESCAN: 'apps:rescan',

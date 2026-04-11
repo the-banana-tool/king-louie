@@ -8,6 +8,7 @@ const PlannerAgent = new Agent({
   inferenceTier: 'smart',
   systemPromptTemplate: 'templates/planner.md.template',
   allowedTools: ['WebSearch', 'WebFetch', 'Read', 'Glob', 'Grep', 'AskUser'],
+  readOnly: true,
   autoApproveTools: ['WebSearch', 'WebFetch', 'Read', 'Glob', 'Grep'],
   temperature: 0.4,
   maxIterations: 40,

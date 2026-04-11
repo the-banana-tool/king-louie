@@ -13,6 +13,11 @@ class Agent {
     this.systemPrompt = config.systemPrompt || 'You are a helpful assistant.';
     this.allowedTools = Array.isArray(config.allowedTools) ? config.allowedTools : [];
     this.autoApproveTools = Array.isArray(config.autoApproveTools) ? config.autoApproveTools : [];
+    // readOnly agents (e.g. the planner) must never be handed mutating tools.
+    // AgentExecutor enforces this defensively even if a caller passes a tool
+    // list that bypasses allowedTools — the planner is exploration-only and
+    // any Write/Edit/Bash/Git slip-through is a bug.
+    this.readOnly = config.readOnly === true;
     this.temperature = typeof config.temperature === 'number' ? config.temperature : 0.7;
     this.maxIterations = Number.isInteger(config.maxIterations) ? config.maxIterations : 10;
     this.voice = Agent.normalizeVoiceConfig(config.voice);
