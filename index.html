@@ -134,6 +134,7 @@
           <option value="voice">Voice</option>
           <option value="notifications">Notifications</option>
           <option value="hooks">Hooks</option>
+          <option value="permissions">Permissions</option>
           <option value="memory">Memory</option>
           <option value="scheduler">Scheduler</option>
           <option value="workflows">Workflows</option>
@@ -479,6 +480,18 @@
               <span id="hooks-status" class="provider-message">Hooks not loaded yet.</span>
             </div>
             <div class="provider-list" id="hooks-list"></div>
+          </section>
+        </div>
+
+        <!-- Tab: Permissions -->
+        <div class="settings-tab-content" data-tab="permissions">
+          <section class="template-variables-card">
+            <h3>Tool Permission Rules</h3>
+            <p>Pattern-based rules that auto-approve or block tool calls. Rules are evaluated first-match-wins: a matching rule short-circuits the per-tool approval prompt. Created via the approval dialog ("Always allow pattern") or manually below.</p>
+            <div id="permission-rules-list" class="provider-list"></div>
+            <div class="template-variables-actions" style="margin-top: 12px;">
+              <span id="permission-rules-status" class="provider-message"></span>
+            </div>
           </section>
         </div>
 

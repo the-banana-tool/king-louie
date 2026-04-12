@@ -5000,6 +5000,7 @@ async function loadSettings() {
     await loadSkillSettingsTabs();
     await loadMemoryEntries();
     await loadCronJobs();
+    loadPermissionRules().catch(() => {});
     loadWorkflows().catch(() => {});
     loadLLMRoutingSettings().catch(() => {});
     loadSystemApps().catch(() => {});
@@ -7521,6 +7522,59 @@ window.addEventListener('beforeunload', () => {
 });
 
 /* --- Webhook management ----------------------------------- */
+// ── Permissions tab ────────────────────────────────────────────
+async function loadPermissionRules() {
+  const container = document.getElementById('permission-rules-list');
+  const status = document.getElementById('permission-rules-status');
+  if (!container) return;
+
+  try {
+    const result = await window.electron.tool.listPermissionRules();
+    if (!result?.ok) {
+      if (status) status.textContent = result?.error || 'Unable to load rules.';
+      return;
+    }
+    const rules = result.rules || [];
+    container.innerHTML = '';
+    if (rules.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'provider-message';
+      empty.textContent = 'No permission rules configured yet. Approve a tool call with a pattern to create one.';
+      container.appendChild(empty);
+      return;
+    }
+    for (const rule of rules) {
+      const row = document.createElement('div');
+      row.className = 'provider-item permission-rule-row';
+      const label = document.createElement('span');
+      label.className = 'permission-rule-label';
+      const actionClass = rule.action === 'deny' ? 'badge-danger' : (rule.action === 'allow' ? 'badge-success' : 'badge-warn');
+      label.innerHTML = `<code>${rule.tool || '?'}</code> <code>${rule.pattern || '*'}</code> <span class="badge ${actionClass}">${rule.action || '?'}</span>`;
+      if (rule.source) {
+        const src = document.createElement('span');
+        src.className = 'permission-rule-source';
+        src.textContent = rule.source;
+        label.appendChild(document.createTextNode(' '));
+        label.appendChild(src);
+      }
+      const deleteBtn = document.createElement('button');
+      deleteBtn.type = 'button';
+      deleteBtn.className = 'btn btn-danger btn-xs';
+      deleteBtn.textContent = 'Remove';
+      deleteBtn.addEventListener('click', async () => {
+        await window.electron.tool.removePermissionRule(rule.tool, rule.pattern, rule.action);
+        loadPermissionRules();
+      });
+      row.appendChild(label);
+      row.appendChild(deleteBtn);
+      container.appendChild(row);
+    }
+    if (status) status.textContent = `${rules.length} rule${rules.length === 1 ? '' : 's'}`;
+  } catch (err) {
+    if (status) status.textContent = `Error: ${err.message}`;
+  }
+}
+
 async function loadWebhookList() {
   if (!dom.webhookList) return;
   try {

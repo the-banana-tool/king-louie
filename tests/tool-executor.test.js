@@ -329,13 +329,13 @@ describe('ToolExecutor', () => {
       assert.strictEqual(result.blockedByHook, true);
     });
 
-    it('modifies parameters when pre-hook provides new parameters', async () => {
+    it('modifies parameters when pre-hook returns action=modify', async () => {
       const executor = new ToolExecutor({
         requireApproval: false,
         hookExecutor: {
           run: async (event) => {
             if (event === 'PreToolUse') {
-              return { action: 'allow', context: { parameters: { input: 'modified' } } };
+              return { action: 'modify', context: { parameters: { input: 'modified' } } };
             }
             return { action: 'allow' };
           }
@@ -345,6 +345,22 @@ describe('ToolExecutor', () => {
 
       assert.strictEqual(result.ok, true);
       assert.strictEqual(result.output, 'processed: modified');
+    });
+
+    it('does NOT pass hook-decorated params to tool when action is allow (backfill pattern)', async () => {
+      const executor = new ToolExecutor({
+        requireApproval: false,
+        hookExecutor: {
+          run: async (event) => {
+            if (event === 'PreToolUse') {
+              return { action: 'allow', context: { parameters: { input: 'decorated' } } };
+            }
+            return { action: 'allow' };
+          }
+        }
+      });
+      const result = await executor.execute('TestTool', { input: 'original' });
+      assert.strictEqual(result.output, 'processed: original');
     });
 
     it('allows post-hook to override the result', async () => {

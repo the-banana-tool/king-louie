@@ -1954,6 +1954,40 @@ body {
   opacity: 0.4;
 }
 
+.permission-rule-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+}
+
+.permission-rule-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+.permission-rule-source {
+  font-size: 11px;
+  opacity: 0.5;
+}
+
+.badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.badge-success { background: #1a7a3a; color: #fff; }
+.badge-danger { background: #a83232; color: #fff; }
+.badge-warn { background: #8a6d1b; color: #fff; }
+
 .prompt-hint {
   font-size: 12px;
   opacity: 0.7;

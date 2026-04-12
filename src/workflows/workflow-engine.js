@@ -420,6 +420,18 @@ class WorkflowEngine extends EventEmitter {
     if (workflow.metadata?.workingDirectory) {
       executeOptions.workingDirectory = workflow.metadata.workingDirectory;
     }
+    // Apply the mode snapshot captured at approval time. This ensures a
+    // user toggling sandboxMode or allowedDirectories mid-flight doesn't
+    // silently change the workflow's permission posture.
+    const snapshot = workflow.metadata?.modeSnapshot;
+    if (snapshot) {
+      if (typeof snapshot.sandboxMode === 'boolean') {
+        executeOptions.useSandbox = snapshot.sandboxMode;
+      }
+      if (Array.isArray(snapshot.allowedDirectories) && snapshot.allowedDirectories.length > 0) {
+        executeOptions.allowedDirectories = snapshot.allowedDirectories;
+      }
+    }
     if (task.preferredModel) {
       // Parse "provider:model" format
       const parts = task.preferredModel.split(':');
