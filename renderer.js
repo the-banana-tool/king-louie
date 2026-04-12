@@ -1051,6 +1051,9 @@ function addToolEventCompact(toolName, payload, variant = '', isResult = false) 
 
   const messageDiv = document.createElement('div');
   messageDiv.className = `message assistant tool-event high-stakes ${variant}`.trim();
+  if (!isResult) {
+    messageDiv.dataset.toolProgressTarget = toolName;
+  }
 
   const messageContent = document.createElement('div');
   messageContent.className = 'message-content';
@@ -1077,6 +1080,13 @@ function addToolEventCompact(toolName, payload, variant = '', isResult = false) 
     label.textContent = getToolSummary(toolName, payload);
   }
   row.appendChild(label);
+
+  // Progress text (updated by chat:toolProgress events)
+  if (!isResult) {
+    const progressSpan = document.createElement('span');
+    progressSpan.className = 'tool-progress-text';
+    row.appendChild(progressSpan);
+  }
 
   // Status badge
   if (variant === 'success' || variant === 'error') {
@@ -7434,10 +7444,33 @@ unsubscribeHandlers.push(window.electron.chat.onToolResult(({ chatId, toolName, 
   if (chatId !== appState.activeChatId) return;
   const isError = result?.success === false || result?.ok === false;
   try {
+    // Seal the progress pill: remove the target so no further progress
+    // events update it, and clear the progress text.
+    const pill = dom.chatMessages.querySelector(`[data-tool-progress-target="${toolName}"]`);
+    if (pill) {
+      delete pill.dataset.toolProgressTarget;
+      const progressText = pill.querySelector('.tool-progress-text');
+      if (progressText) progressText.remove();
+    }
     addToolEventCompact(toolName, result, isError ? 'error' : 'success', true);
     keepStreamingIndicatorAtBottom();
   } catch (err) {
     console.error('[renderer] Failed to render tool result for', toolName, err);
+  }
+}));
+
+unsubscribeHandlers.push(window.electron.chat.onToolProgress(({ chatId, toolName, progress }) => {
+  if (chatId !== appState.activeChatId) return;
+  try {
+    const pill = dom.chatMessages.querySelector(`[data-tool-progress-target="${toolName}"]`);
+    if (!pill) return;
+    const progressText = pill.querySelector('.tool-progress-text');
+    if (!progressText) return;
+    progressText.textContent = typeof progress?.message === 'string'
+      ? progress.message
+      : (typeof progress === 'string' ? progress : '');
+  } catch {
+    // Non-critical — swallow rendering errors in progress updates.
   }
 }));
 

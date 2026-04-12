@@ -418,6 +418,10 @@ function registerChatHandlers(ipcMain, context = {}) {
         safeSend(event.sender, 'chat:toolResult', { chatId, runId, toolName, result });
       });
 
+      executor.on('toolProgress', ({ toolName, progress }) => {
+        safeSend(event.sender, 'chat:toolProgress', { chatId, runId, toolName, progress });
+      });
+
       let fullResponse = '';
       let llmSummary = {
         calls: [],

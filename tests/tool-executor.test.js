@@ -551,6 +551,32 @@ describe('ToolExecutor', () => {
     });
   });
 
+  describe('onProgress callback', () => {
+    it('emits toolProgress events during tool execution', async () => {
+      const progressEvents = [];
+      toolRegistry.register(new Tool({
+        name: 'ProgressTool',
+        description: 'tool that emits progress',
+        requiresApproval: false,
+        parameters: { type: 'object', properties: {} },
+        execute: async (_params, ctx) => {
+          if (typeof ctx.onProgress === 'function') {
+            ctx.onProgress({ type: 'step', message: 'step 1' });
+            ctx.onProgress({ type: 'step', message: 'step 2' });
+          }
+          return { ok: true };
+        }
+      }));
+      const executor = new ToolExecutor({ requireApproval: false });
+      executor.on('toolProgress', (event) => progressEvents.push(event));
+      await executor.execute('ProgressTool', {});
+      assert.strictEqual(progressEvents.length, 2);
+      assert.strictEqual(progressEvents[0].progress.message, 'step 1');
+      assert.strictEqual(progressEvents[1].progress.message, 'step 2');
+      assert.strictEqual(progressEvents[0].toolName, 'ProgressTool');
+    });
+  });
+
   describe('AbortSignal propagation', () => {
     it('refuses to run when signal is already aborted', async () => {
       const executor = new ToolExecutor({ requireApproval: false });

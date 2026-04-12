@@ -262,6 +262,18 @@ class ToolExecutor extends EventEmitter {
 
     try {
       const runtimeEnvironment = await this.getRuntimeEnvironment();
+      // Build the onProgress callback that tools can call to emit
+      // intermediate updates (bytes downloaded, stdout lines, match
+      // counts, etc.). Emitted as 'toolProgress' events so listeners
+      // (chat-handlers → IPC → renderer) can display inline progress.
+      const onProgress = (progressEvent) => {
+        this.emit('toolProgress', {
+          toolName,
+          parameters: hookDecoratedParameters,
+          progress: progressEvent
+        });
+      };
+
       const result = await tool.execute(effectiveParameters, {
         ...this.extraToolOptions,
         ...options,
@@ -269,9 +281,8 @@ class ToolExecutor extends EventEmitter {
         allowedDirectories: options.allowedDirectories || this.allowedDirectories,
         runtimeEnvironment,
         useSandbox: typeof options.useSandbox === 'boolean' ? options.useSandbox : this.useSandbox,
-        // Forward turn-level cancellation. Tools that respect this (Bash,
-        // WebFetch) tear down their work on abort instead of running on.
-        signal: options.signal || null
+        signal: options.signal || null,
+        onProgress
       });
 
       if (this.hookExecutor && typeof this.hookExecutor.run === 'function') {

@@ -1988,6 +1988,17 @@ body {
 .badge-danger { background: #a83232; color: #fff; }
 .badge-warn { background: #8a6d1b; color: #fff; }
 
+.tool-progress-text {
+  font-size: 11px;
+  color: var(--text-secondary);
+  opacity: 0.75;
+  margin-left: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+
 .prompt-hint {
   font-size: 12px;
   opacity: 0.7;

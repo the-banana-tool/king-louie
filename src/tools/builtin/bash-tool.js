@@ -133,10 +133,11 @@ const BashTool = new Tool({
       workingDirectory: options.workingDirectory,
       sessionId: options.sessionId,
       useSandbox,
-      // Forward turn-level cancellation. SandboxExecutor passes signal into
-      // child_process so a cancelled turn actually kills the subprocess
-      // instead of letting it run on in the background.
-      signal: options.signal || null
+      signal: options.signal || null,
+      // Streaming progress: when an onProgress callback is available,
+      // SandboxExecutor uses spawn instead of exec so stdout lines are
+      // emitted as they arrive instead of buffered until completion.
+      onProgress: typeof options.onProgress === 'function' ? options.onProgress : null
     };
 
     return await sandboxExecutor.execute(command, execOptions);

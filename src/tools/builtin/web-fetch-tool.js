@@ -63,11 +63,13 @@ const webFetchTool = new Tool({
       let truncated = false;
 
       let raw = '';
+      const { onProgress } = context || {};
+      const expectedBytes = contentLength ? parseInt(contentLength, 10) : null;
       if (res.body) {
-        // Stream response, capping at 2MB
         const decoder = new TextDecoder('utf-8');
         const reader = res.body.getReader();
         let bytesRead = 0;
+        let lastProgressAt = 0;
 
         try {
           while (true) {
@@ -77,7 +79,6 @@ const webFetchTool = new Tool({
             if (value) {
               bytesRead += value.length;
               if (bytesRead > MAX_BYTES) {
-                // Decode the partial chunk up to the limit
                 const excess = bytesRead - MAX_BYTES;
                 const usable = value.length - excess;
                 if (usable > 0) {
@@ -87,6 +88,15 @@ const webFetchTool = new Tool({
                 break;
               }
               raw += decoder.decode(value, { stream: true });
+
+              // Emit download progress every ~100KB so the UI can show
+              // how far along a large fetch is.
+              if (typeof onProgress === 'function' && bytesRead - lastProgressAt > 100_000) {
+                lastProgressAt = bytesRead;
+                const kb = Math.round(bytesRead / 1024);
+                const pct = expectedBytes ? ` (${Math.round(bytesRead / expectedBytes * 100)}%)` : '';
+                onProgress({ type: 'download', message: `${kb} KB downloaded${pct}`, bytesRead, expectedBytes });
+              }
             }
           }
         } finally {

@@ -400,6 +400,7 @@ contextBridge.exposeInMainWorld(
       onMessageError: (callback) => registerOnce('chat:messageError', callback),
       onToolUse: (callback) => registerOnce('chat:toolUse', callback),
       onToolResult: (callback) => registerOnce('chat:toolResult', callback),
+      onToolProgress: (callback) => registerOnce('chat:toolProgress', callback),
       onChatUpdated: (callback) => registerOnce('chat:updated', callback)
     },
     tool: {
