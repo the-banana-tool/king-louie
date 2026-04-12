@@ -2,24 +2,32 @@ const VectorStore = require('../memory/vector-store');
 const { OpenAIEmbeddingProvider } = require('../memory/embedding-provider');
 
 /**
- * ContextAssembler — dynamic, per-turn context assembly using semantic search.
+ * ContextAssembler — dynamic context assembly with two modes:
  *
- * Instead of sending the full system prompt + all tool definitions on every
- * message, we embed each tool description and each system prompt section once
- * at startup, then on each user turn we make a *single* embedding call for
- * the user message and search both indexes to retrieve only the relevant
- * tools and prompt sections.
+ * 1. **Deferred mode** (default, recommended for Anthropic):
+ *    Core tools are always included with full schemas. All other tools are
+ *    "deferred" — the LLM sees their names listed in the system prompt but
+ *    not their schemas. It calls ToolSearch to load schemas on demand.
+ *    This stabilizes the prompt for caching and eliminates per-turn embedding cost.
  *
- * This cuts token overhead by 30-60 % while keeping a core set of tools
- * always available and an escape-hatch tool that lets the LLM request
- * additional tools mid-conversation.
+ * 2. **Semantic mode** (legacy, for non-Anthropic providers):
+ *    Embeds each tool description once at startup, then on each user turn
+ *    makes a single embedding call to retrieve only relevant tools.
+ *
+ * Both modes keep a core set of tools always available and support the full
+ * system prompt section assembly.
  */
 
-// Tools that are always included regardless of relevance score.
+// Tools that are always included with full schemas regardless of mode.
 const CORE_TOOLS = new Set([
   'Bash',
   'Read',
+  'Edit',
+  'Write',
+  'Glob',
+  'Grep',
   'AskUser',
+  'ToolSearch',
 ]);
 
 // System prompt sections that are always included.
@@ -27,7 +35,7 @@ const CORE_SECTIONS = new Set([
   'environment',  // platform, shell, cwd — always needed
 ]);
 
-// Minimum similarity score to include a non-core item.
+// Minimum similarity score to include a non-core item (semantic mode only).
 const MIN_TOOL_SIMILARITY = 0.25;
 const MIN_SECTION_SIMILARITY = 0.20;
 
@@ -37,6 +45,7 @@ class ContextAssembler {
    * @param {string} options.vectorStorePath  - path for the context vector store file
    * @param {string} options.openaiApiKey     - OpenAI API key for embeddings
    * @param {string} [options.embeddingModel] - model name (default: text-embedding-3-small)
+   * @param {string} [options.mode]           - 'deferred' (default) or 'semantic'
    */
   constructor(options = {}) {
     this.vectorStore = new VectorStore(options.vectorStorePath);
@@ -46,6 +55,10 @@ class ContextAssembler {
           model: options.embeddingModel || 'text-embedding-3-small'
         })
       : null;
+
+    // 'deferred' = core tools inline + ToolSearch for rest (cache-friendly)
+    // 'semantic' = per-turn embedding-based tool selection (legacy)
+    this.mode = options.mode || 'deferred';
 
     // In-memory registries: name → { definition, text }
     this._tools = new Map();
@@ -134,17 +147,76 @@ class ContextAssembler {
   // ──────────────────────────────────────────────
 
   /**
-   * Assemble only the relevant tools and system prompt sections for this turn.
-   * Makes ONE embedding call for the user message, then searches both indexes.
+   * Assemble tools and system prompt sections for this turn.
+   *
+   * In 'deferred' mode (default): includes core tools with full schemas,
+   * lists deferred tool names in the system prompt. No embedding call needed.
+   * The LLM calls ToolSearch to load schemas on demand.
+   *
+   * In 'semantic' mode: makes one embedding call per turn to select
+   * relevant tools via cosine similarity.
    *
    * @param {string} userMessage - the current user message
    * @param {object} [options]
-   * @param {number} [options.maxTools=10]       - max tools to return (including core)
-   * @param {number} [options.maxSections=4]     - max sections to return (including core)
+   * @param {number} [options.maxTools=10]       - max tools to return (semantic mode)
+   * @param {number} [options.maxSections=4]     - max sections to return
    * @param {string} [options.memoryContext='']   - pre-built memory context string
    * @returns {{ systemPrompt: string, tools: Array, allToolNames: string[] }}
    */
   async assemble(userMessage, options = {}) {
+    if (this.mode === 'deferred') {
+      return this._assembleDeferred(options);
+    }
+    return this._assembleSemantic(userMessage, options);
+  }
+
+  /**
+   * Deferred mode: core tools with schemas + deferred tool names in prompt.
+   * Zero embedding calls. Stable prompt enables prompt caching.
+   */
+  _assembleDeferred(options = {}) {
+    const memoryContext = options.memoryContext || '';
+
+    // Core tools get full schemas
+    const selectedTools = [];
+    const selectedToolNames = new Set();
+
+    for (const name of CORE_TOOLS) {
+      if (this._tools.has(name)) {
+        selectedTools.push(this._tools.get(name).definition);
+        selectedToolNames.add(name);
+      }
+    }
+
+    // Deferred tools: everything not in core
+    const deferredNames = Array.from(this._tools.keys()).filter(n => !selectedToolNames.has(n));
+
+    // All sections included (stable for caching)
+    const allSections = Array.from(this._sections.values()).map(s => s.content);
+
+    // Build deferred tools announcement for system prompt
+    const deferredSection = deferredNames.length > 0
+      ? `The following deferred tools are available via ToolSearch. Their schemas are NOT loaded — calling them directly will fail. Use ToolSearch with query "select:<name>[,<name>...]" to load tool schemas before calling them:\n${deferredNames.join(', ')}`
+      : '';
+
+    const systemPrompt = [
+      ...allSections,
+      deferredSection,
+      memoryContext
+    ].filter(Boolean).join('\n\n');
+
+    return {
+      systemPrompt,
+      tools: selectedTools,
+      selectedToolNames: Array.from(selectedToolNames),
+      availableToolNames: deferredNames,
+    };
+  }
+
+  /**
+   * Semantic mode (legacy): per-turn embedding-based tool selection.
+   */
+  async _assembleSemantic(userMessage, options = {}) {
     const maxTools = options.maxTools || 10;
     const maxSections = options.maxSections || 4;
     const memoryContext = options.memoryContext || '';
@@ -186,18 +258,11 @@ class ContextAssembler {
     const selectedTools = [];
     const selectedToolNames = new Set();
 
-    // Core tools first
     for (const name of CORE_TOOLS) {
       if (this._tools.has(name)) {
         selectedTools.push(this._tools.get(name).definition);
         selectedToolNames.add(name);
       }
-    }
-
-    // Always include RequestTools escape hatch if registered
-    if (this._tools.has('RequestTools')) {
-      selectedTools.push(this._tools.get('RequestTools').definition);
-      selectedToolNames.add('RequestTools');
     }
 
     // Ranked non-core tools
@@ -256,7 +321,7 @@ class ContextAssembler {
   }
 
   /**
-   * Retrieve specific tools by name (used by the RequestTools escape hatch).
+   * Retrieve specific tools by name (used by ToolSearch and RequestTools).
    * @param {string[]} toolNames
    * @returns {Array} tool definitions
    */
@@ -264,6 +329,17 @@ class ContextAssembler {
     return toolNames
       .map(name => this._tools.get(name)?.definition)
       .filter(Boolean);
+  }
+
+  /**
+   * Get all deferred (non-core) tool definitions.
+   * Used by ToolSearch for keyword matching.
+   * @returns {Array} tool definitions
+   */
+  getAllDeferredTools() {
+    return Array.from(this._tools.entries())
+      .filter(([name]) => !CORE_TOOLS.has(name))
+      .map(([, entry]) => entry.definition);
   }
 
   /**

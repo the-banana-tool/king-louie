@@ -1,6 +1,7 @@
 const path = require('path');
 const VectorStore = require('../memory/vector-store');
 const ResultPersistence = require('./result-persistence');
+const APICompaction = require('../context/api-compaction');
 
 class AgentLoop {
   constructor(provider, executor, options = {}) {
@@ -12,6 +13,11 @@ class AgentLoop {
       ? options.onUsageRecorded
       : null;
     this.abortSignal = options.abortSignal || null;
+
+    // Streaming callback: fires with text deltas during LLM inference.
+    // Enables real-time UI updates during agent loop iterations instead
+    // of waiting for the full response to complete.
+    this.onChunk = typeof options.onChunk === 'function' ? options.onChunk : null;
 
     // Model tiering: use a cheaper model for tool iterations after the first.
     // The first iteration uses the primary model (for planning/reasoning),
@@ -30,6 +36,18 @@ class AgentLoop {
     this.embeddingProvider = options.embeddingProvider || null;
     this._toolResultEntries = []; // { historyIndex, toolName, text, compacted }
     this._relevanceThreshold = options.relevanceThreshold ?? 0.3;
+
+    // API-native compaction: clears old tool_result content blocks when
+    // input tokens approach the limit. No embedding calls needed. Used
+    // for Anthropic provider; falls back to semantic compaction for others.
+    this.apiCompaction = options.apiCompaction || new APICompaction({
+      triggerTokens: options.compactionTriggerTokens || 150000,
+      targetTokens: options.compactionTargetTokens || 40000,
+      keepRecent: options.keepRecentResults ?? 6
+    });
+    // Enable API compaction for Anthropic provider by default
+    this.useAPICompaction = options.useAPICompaction
+      ?? (provider?.getProviderName?.() === 'anthropic');
 
     // Deduplicate in-flight directory access prompts. When multiple parallel
     // tool calls hit the same denied directory in the same turn, they all
@@ -190,8 +208,21 @@ class AgentLoop {
         ? { ...options, model: this.loopModel }
         : options;
 
-      // Compact old tool results periodically to prevent context bloat
-      if (iterations > 1 && this.compactEvery > 0 && (iterations - 1) % this.compactEvery === 0) {
+      // Compact old tool results to prevent context bloat.
+      // API compaction (Anthropic): triggered by token count threshold.
+      // Semantic compaction (fallback): triggered every N iterations.
+      if (this.useAPICompaction && this.apiCompaction && this.apiCompaction.shouldCompact()) {
+        const stats = this.apiCompaction.compact(conversationHistory);
+        if (stats.cleared === 0) {
+          // Try OpenAI format as fallback
+          const openaiStats = this.apiCompaction.compactOpenAIFormat(conversationHistory);
+          if (openaiStats.cleared > 0) {
+            console.log(`[agent-loop] API compaction: cleared ${openaiStats.cleared} tool results (~${openaiStats.freedEstimate} tokens freed)`);
+          }
+        } else {
+          console.log(`[agent-loop] API compaction: cleared ${stats.cleared} tool results (~${stats.freedEstimate} tokens freed)`);
+        }
+      } else if (iterations > 1 && this.compactEvery > 0 && (iterations - 1) % this.compactEvery === 0) {
         await this._compactToolResults(conversationHistory);
       }
 
@@ -215,11 +246,25 @@ class AgentLoop {
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         if (this.abortSignal?.aborted) break;
         try {
-          response = await this.provider.sendMessageWithTools(
-            conversationHistory,
-            activeTools,
-            effectiveOptions
-          );
+          // Use streaming when an onChunk callback is provided and the
+          // provider supports it. This gives real-time text feedback in
+          // the UI during agent loop iterations.
+          const canStream = this.onChunk
+            && typeof this.provider.streamMessageWithTools === 'function';
+          if (canStream) {
+            response = await this.provider.streamMessageWithTools(
+              conversationHistory,
+              activeTools,
+              effectiveOptions,
+              this.onChunk
+            );
+          } else {
+            response = await this.provider.sendMessageWithTools(
+              conversationHistory,
+              activeTools,
+              effectiveOptions
+            );
+          }
           lastErr = null;
           break;
         } catch (err) {
@@ -234,6 +279,11 @@ class AgentLoop {
 
       if (response?.llmMetrics) {
         llmCalls.push(response.llmMetrics);
+
+        // Feed token count to API compaction tracker
+        if (this.useAPICompaction && this.apiCompaction) {
+          this.apiCompaction.updateTokenCount(response.llmMetrics);
+        }
 
         if (this.usageTracker && typeof this.usageTracker.record === 'function') {
           const usageEvent = this.usageTracker.record({

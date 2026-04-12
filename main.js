@@ -70,6 +70,8 @@ const { initializeMesh } = require('./src/mesh');
 const LLMRouter = require('./src/providers/llm-router');
 const { WorkflowEngine } = require('./src/workflows/workflow-engine');
 const PlannerExecutor = require('./src/workflows/planner-executor');
+const { MCPManager } = require('./src/mcp');
+const { BackgroundTaskManager } = require('./src/tasks/background-task-manager');
 
 let mainWindow;
 let meshContext;
@@ -100,6 +102,8 @@ let usageTracker;
 let cronStore;
 let cronExecutor;
 let cronScheduler;
+let mcpManager;
+let backgroundTaskManager;
 let webhookRegistry;
 let webhookHandler;
 let webhookServer;
@@ -2047,6 +2051,7 @@ const createToolExecutorWithApprovals = async (
     useSandbox: executorOptions.useSandbox !== false,
     extraToolOptions: {
       get agentExecutorAdapter() { return agentExecutorAdapter; },
+      get backgroundTaskManager() { return backgroundTaskManager; },
       getAgent,
       listAgents,
       toolRegistry,
@@ -2223,6 +2228,22 @@ const initializeAgentInfrastructure = async () => {
     cacheFilePath: path.join(app.getPath('userData'), 'memory', 'embedding-cache.jsonl')
   });
 
+  // Background task manager for async agent tasks
+  backgroundTaskManager = new BackgroundTaskManager({
+    outputDir: path.join(app.getPath('userData'), 'background-tasks')
+  });
+
+  backgroundTaskManager.on('taskCompleted', (task) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('backgroundTask:completed', {
+        id: task.id,
+        state: task.state,
+        description: task.description,
+        error: task.error
+      });
+    }
+  });
+
   usageTracker = new UsageTracker(store);
   ttsEngine = new TTSEngine({
     getSettings: getVoiceSettings,
@@ -2273,6 +2294,32 @@ const initializeAgentInfrastructure = async () => {
         console.warn('[context-assembler] Indexing failed (will use full context fallback):', err.message);
       }
     })();
+  }
+
+  // Initialize MCP servers from settings (background, non-blocking).
+  // MCP tools are registered into the toolRegistry and become available
+  // to agents via ToolSearch (deferred loading).
+  mcpManager = new MCPManager({ toolRegistry });
+  const mcpServers = getSettings().mcpServers || {};
+  if (Object.keys(mcpServers).length > 0) {
+    mcpManager.connectAll(mcpServers).then((results) => {
+      const connected = results.filter(r => r.status === 'connected');
+      const failed = results.filter(r => r.status === 'failed');
+      if (connected.length > 0) {
+        console.log(`[mcp] Connected to ${connected.length} server(s): ${connected.map(r => `${r.name} (${r.tools} tools)`).join(', ')}`);
+      }
+      if (failed.length > 0) {
+        console.warn(`[mcp] Failed to connect: ${failed.map(r => `${r.name}: ${r.error}`).join(', ')}`);
+      }
+
+      // Re-index context assembler after MCP tools are registered
+      if (contextAssembler) {
+        const toolDefs = toolRegistry.getFunctionDefinitions();
+        contextAssembler.index(toolDefs).catch(() => {});
+      }
+    }).catch((err) => {
+      console.warn('[mcp] MCP initialization failed:', err.message);
+    });
   }
 
   gatewayServer = new GatewayServer({
@@ -2799,6 +2846,9 @@ app.on('window-all-closed', function () {
       workingDirectory: process.cwd()
     }).catch((err) => console.warn('[main] SessionEnd hook failed:', err.message));
 
+    if (mcpManager) {
+      mcpManager.disconnectAll().catch((err) => console.warn('[main] MCP shutdown failed:', err.message));
+    }
     if (channelRegistry) {
       channelRegistry.shutdownAll().catch((err) => console.warn('[main] Channel shutdown failed:', err.message));
     } else {

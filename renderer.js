@@ -1133,6 +1133,16 @@ function addToolEventCompact(toolName, payload, variant = '', isResult = false) 
         infoDiv.textContent = `${pageTitle} — ${pageUrl}`;
         payloadDiv.appendChild(infoDiv);
       }
+    } else if (isResult && payload?.diff && (toolName === 'Edit' || toolName === 'MultiEdit' || toolName === 'Write')) {
+      // Render structured diff for file edit/write results
+      const diffEl = renderDiffBlock(payload.diff);
+      payloadDiv.appendChild(diffEl);
+      if (payload.linesAdded || payload.linesRemoved) {
+        const statsEl = document.createElement('div');
+        statsEl.className = 'diff-stats';
+        statsEl.innerHTML = `<span class="diff-stat-added">+${payload.linesAdded || 0}</span> <span class="diff-stat-removed">-${payload.linesRemoved || 0}</span>`;
+        payloadDiv.appendChild(statsEl);
+      }
     } else if (typeof payload === 'string' || (payload && (payload.content || payload.stdout || payload.output || payload.message))) {
       // Try rendering as markdown, fall back to pre
       const markdownSource = typeof payload === 'string' ? payload : (payload.content || payload.stdout || payload.output || payload.message);
@@ -5860,6 +5870,77 @@ async function handleStdCardAction(action, taskId, buttonEl = null) {
   }
 }
 
+/**
+ * Post-process rendered HTML to add copy buttons to code blocks
+ * and render diff blocks with syntax highlighting.
+ */
+function enhanceRenderedContent(container) {
+  // Add copy button to all <pre> elements
+  container.querySelectorAll('pre').forEach((pre) => {
+    if (pre.querySelector('.code-copy-btn')) return; // already enhanced
+    const wrapper = document.createElement('div');
+    wrapper.className = 'code-block-wrapper';
+    pre.parentNode.insertBefore(wrapper, pre);
+    wrapper.appendChild(pre);
+
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'code-copy-btn';
+    copyBtn.type = 'button';
+    copyBtn.title = 'Copy code';
+    copyBtn.setAttribute('aria-label', 'Copy code');
+    copyBtn.innerHTML = '<i class="fas fa-copy"></i>';
+    copyBtn.addEventListener('click', () => {
+      const code = pre.querySelector('code') || pre;
+      navigator.clipboard.writeText(code.textContent).then(() => {
+        copyBtn.innerHTML = '<i class="fas fa-check"></i>';
+        copyBtn.classList.add('copied');
+        setTimeout(() => {
+          copyBtn.innerHTML = '<i class="fas fa-copy"></i>';
+          copyBtn.classList.remove('copied');
+        }, 2000);
+      });
+    });
+    wrapper.appendChild(copyBtn);
+
+    // Detect language badge from hljs class
+    const code = pre.querySelector('code');
+    if (code) {
+      const langClass = Array.from(code.classList).find(c => c.startsWith('language-'));
+      if (langClass) {
+        const langBadge = document.createElement('span');
+        langBadge.className = 'code-lang-badge';
+        langBadge.textContent = langClass.replace('language-', '');
+        wrapper.appendChild(langBadge);
+      }
+    }
+  });
+}
+
+/**
+ * Render a unified diff string as a colored diff block.
+ */
+function renderDiffBlock(diffString) {
+  const container = document.createElement('div');
+  container.className = 'diff-block';
+  const lines = diffString.split('\n');
+  for (const line of lines) {
+    const lineEl = document.createElement('div');
+    lineEl.className = 'diff-line';
+    if (line.startsWith('+') && !line.startsWith('+++')) {
+      lineEl.classList.add('diff-added');
+    } else if (line.startsWith('-') && !line.startsWith('---')) {
+      lineEl.classList.add('diff-removed');
+    } else if (line.startsWith('@@')) {
+      lineEl.classList.add('diff-hunk');
+    } else if (line.startsWith('---') || line.startsWith('+++')) {
+      lineEl.classList.add('diff-header');
+    }
+    lineEl.textContent = line;
+    container.appendChild(lineEl);
+  }
+  return container;
+}
+
 // Add message to chat display
 function renderAssistantMessageContent(messageContent, text, format = 'markdown') {
   const safeFormat = String(format || 'markdown').toLowerCase();
@@ -5877,6 +5958,7 @@ function renderAssistantMessageContent(messageContent, text, format = 'markdown'
   }
 
   messageContent.innerHTML = window.electron.markdown.parse(text || '');
+  enhanceRenderedContent(messageContent);
 }
 
 function addMessage(sender, text, metadata = {}) {
@@ -7290,6 +7372,12 @@ unsubscribeHandlers.push(window.electron.chat.onMessageStart(({ chatId, response
     if (!messageContent.contains(debugDiv)) messageContent.appendChild(debugDiv);
   });
 
+  // Add thinking indicator — replaced when first chunk arrives
+  const thinkingEl = document.createElement('div');
+  thinkingEl.className = 'thinking-indicator';
+  thinkingEl.innerHTML = '<span class="thinking-dots"><span>.</span><span>.</span><span>.</span></span> Thinking';
+  messageContent.appendChild(thinkingEl);
+
   messageDiv.appendChild(messageContent);
   dom.chatMessages.appendChild(messageDiv);
   dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
@@ -7306,6 +7394,10 @@ unsubscribeHandlers.push(window.electron.chat.onMessageChunk(({ chatId, response
 
   const streamElement = dom.chatMessages.querySelector(`[data-response-id="${responseId}"] .message-content`);
   if (!streamElement) return;
+
+  // Remove thinking indicator on first real content
+  const thinking = streamElement.querySelector('.thinking-indicator');
+  if (thinking) thinking.remove();
 
   // Extract completed XML tool blocks and render them as pills
   const { cleanText, toolBlocks } = extractXmlToolBlocks(next);
@@ -7337,8 +7429,13 @@ unsubscribeHandlers.push(window.electron.chat.onMessageComplete(({ chatId, respo
   const messageDiv = dom.chatMessages.querySelector(`[data-response-id="${responseId}"]`);
   if (messageDiv) {
     messageDiv.classList.remove('streaming');
-    // If the message is now empty after tool extraction, remove it entirely
+    // Remove any leftover thinking indicator
+    const thinking = messageDiv.querySelector('.thinking-indicator');
+    if (thinking) thinking.remove();
+    // Enhance code blocks with copy buttons
     const content = messageDiv.querySelector('.message-content');
+    if (content) enhanceRenderedContent(content);
+    // If the message is now empty after tool extraction, remove it entirely
     if (content && !content.textContent.trim()) {
       messageDiv.remove();
     }
@@ -8188,6 +8285,279 @@ if (dom.wizardSkipBtn) {
 if (window.electron.wizard?.onStart) {
   unsubscribeHandlers.push(window.electron.wizard.onStart(() => startWizard()));
 }
+
+// ============================================================
+// UX Enhancements — Wave 3
+// ============================================================
+
+// --- Chat search & pin ------------------------------------------
+(function initChatSearch() {
+  const sidebar = document.querySelector('.sidebar');
+  const chatList = document.getElementById('chat-list');
+  if (!sidebar || !chatList) return;
+
+  // Insert search box after sidebar-header
+  const header = sidebar.querySelector('.sidebar-header');
+  if (!header) return;
+
+  const searchDiv = document.createElement('div');
+  searchDiv.className = 'sidebar-search';
+  searchDiv.innerHTML = '<i class="fas fa-search sidebar-search-icon"></i><input type="text" id="chat-search-input" placeholder="Search chats..." aria-label="Search chats">';
+  header.after(searchDiv);
+
+  const searchInput = searchDiv.querySelector('input');
+  searchInput.addEventListener('input', () => {
+    const query = searchInput.value.toLowerCase().trim();
+    const items = chatList.querySelectorAll('.chat-item');
+    items.forEach((item) => {
+      const title = item.querySelector('.chat-item-title')?.textContent?.toLowerCase() || '';
+      const preview = item.querySelector('.chat-item-preview')?.textContent?.toLowerCase() || '';
+      item.style.display = (title.includes(query) || preview.includes(query)) ? '' : 'none';
+    });
+  });
+})();
+
+// --- Retry button on errors ------------------------------------
+(function initRetryOnError() {
+  // Watch for error messages and add retry buttons
+  const observer = new MutationObserver((mutations) => {
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        if (node.nodeType !== 1) continue;
+        // Look for error status messages or failed assistant messages
+        if (node.classList?.contains('message') && node.classList?.contains('assistant')) {
+          const content = node.querySelector('.message-content');
+          const text = content?.textContent || '';
+          if (text.toLowerCase().includes('error') && !content?.querySelector('.retry-btn')) {
+            const retryBtn = document.createElement('button');
+            retryBtn.className = 'retry-btn';
+            retryBtn.type = 'button';
+            retryBtn.innerHTML = '<i class="fas fa-rotate-right"></i> Retry';
+            retryBtn.addEventListener('click', () => {
+              retryBtn.remove();
+              sendMessage();
+            });
+            content.appendChild(retryBtn);
+          }
+        }
+      }
+    }
+  });
+  const chatMessages = document.getElementById('chat-messages');
+  if (chatMessages) observer.observe(chatMessages, { childList: true });
+})();
+
+// --- Command palette (Ctrl+K) ----------------------------------
+const commandPaletteActions = [
+  { name: 'New Chat', icon: 'fas fa-plus', shortcut: 'Ctrl+N', action: () => handleCreateChat() },
+  { name: 'Export as JSON', icon: 'fas fa-file-export', shortcut: 'Ctrl+Shift+E', action: () => document.getElementById('export-chat-btn')?.click() },
+  { name: 'Export as Markdown', icon: 'fas fa-file-lines', action: () => exportAsMarkdown() },
+  { name: 'Settings', icon: 'fas fa-gear', shortcut: 'Ctrl+,', action: () => document.getElementById('open-settings-btn')?.click() },
+  { name: 'Toggle Agent Mode', icon: 'fas fa-robot', action: () => document.getElementById('agent-mode-btn')?.click() },
+  { name: 'Clear Input', icon: 'fas fa-eraser', shortcut: 'Ctrl+L', action: () => { dom.userInput.value = ''; dom.userInput.style.height = 'auto'; } },
+  { name: 'Plan & Execute', icon: 'fas fa-diagram-project', action: () => document.getElementById('chat-plan-btn')?.click() },
+  { name: '/help — Show commands', icon: 'fas fa-circle-question', action: () => { dom.userInput.value = '/help'; sendMessage(); } },
+  { name: '/cd — Change directory', icon: 'fas fa-folder-open', action: () => { dom.userInput.value = '/cd '; dom.userInput.focus(); } },
+];
+
+function showCommandPalette() {
+  if (document.querySelector('.command-palette-overlay')) return;
+
+  const overlay = document.createElement('div');
+  overlay.className = 'command-palette-overlay';
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+
+  const palette = document.createElement('div');
+  palette.className = 'command-palette';
+
+  const input = document.createElement('input');
+  input.className = 'command-palette-input';
+  input.type = 'text';
+  input.placeholder = 'Type a command...';
+  palette.appendChild(input);
+
+  const results = document.createElement('div');
+  results.className = 'command-palette-results';
+  palette.appendChild(results);
+
+  let selectedIndex = 0;
+
+  function renderResults(query) {
+    const q = query.toLowerCase().trim();
+    const filtered = q
+      ? commandPaletteActions.filter(a => a.name.toLowerCase().includes(q))
+      : commandPaletteActions;
+    results.innerHTML = '';
+    selectedIndex = 0;
+    filtered.forEach((action, i) => {
+      const item = document.createElement('button');
+      item.className = 'command-palette-item' + (i === 0 ? ' selected' : '');
+      item.type = 'button';
+      item.innerHTML = `<i class="${action.icon}"></i> ${action.name}`;
+      if (action.shortcut) {
+        item.innerHTML += `<span class="shortcut">${action.shortcut}</span>`;
+      }
+      item.addEventListener('click', () => { overlay.remove(); action.action(); });
+      item.addEventListener('mouseenter', () => {
+        results.querySelectorAll('.command-palette-item').forEach(el => el.classList.remove('selected'));
+        item.classList.add('selected');
+        selectedIndex = i;
+      });
+      results.appendChild(item);
+    });
+  }
+
+  input.addEventListener('input', () => renderResults(input.value));
+  input.addEventListener('keydown', (e) => {
+    const items = results.querySelectorAll('.command-palette-item');
+    if (e.key === 'ArrowDown') { e.preventDefault(); selectedIndex = Math.min(selectedIndex + 1, items.length - 1); }
+    if (e.key === 'ArrowUp') { e.preventDefault(); selectedIndex = Math.max(selectedIndex - 1, 0); }
+    items.forEach((el, i) => el.classList.toggle('selected', i === selectedIndex));
+    if (e.key === 'Enter' && items[selectedIndex]) { overlay.remove(); commandPaletteActions.filter(a => !input.value.trim() || a.name.toLowerCase().includes(input.value.toLowerCase()))[selectedIndex]?.action(); }
+    if (e.key === 'Escape') overlay.remove();
+  });
+
+  renderResults('');
+  overlay.appendChild(palette);
+  document.body.appendChild(overlay);
+  input.focus();
+}
+
+// --- Global keyboard shortcuts ---------------------------------
+document.addEventListener('keydown', (e) => {
+  const isMod = e.ctrlKey || e.metaKey;
+
+  // Ctrl+K — command palette
+  if (isMod && e.key === 'k') { e.preventDefault(); showCommandPalette(); return; }
+  // Ctrl+N — new chat
+  if (isMod && e.key === 'n' && !e.shiftKey) { e.preventDefault(); handleCreateChat(); return; }
+  // Ctrl+L — clear input
+  if (isMod && e.key === 'l' && !e.shiftKey) { e.preventDefault(); dom.userInput.value = ''; dom.userInput.style.height = 'auto'; dom.userInput.focus(); return; }
+  // Ctrl+, — settings
+  if (isMod && e.key === ',') { e.preventDefault(); document.getElementById('open-settings-btn')?.click(); return; }
+  // Ctrl+Shift+E — export
+  if (isMod && e.shiftKey && e.key === 'E') { e.preventDefault(); document.getElementById('export-chat-btn')?.click(); return; }
+});
+
+// --- Markdown export -------------------------------------------
+async function exportAsMarkdown() {
+  const chat = getActiveChat();
+  if (!chat) return;
+
+  const lines = [`# ${chat.title}\n`];
+  lines.push(`_Exported ${new Date().toISOString()}_\n`);
+
+  for (const msg of chat.messages) {
+    if (msg.sender === 'user') {
+      lines.push(`## User\n\n${msg.text}\n`);
+    } else if (msg.sender === 'assistant') {
+      lines.push(`## Assistant\n\n${msg.text}\n`);
+    } else if (msg.sender === 'toolUse') {
+      lines.push(`<details><summary>Tool: ${msg.toolName}</summary>\n\n\`\`\`json\n${JSON.stringify(msg.parameters, null, 2)}\n\`\`\`\n</details>\n`);
+    } else if (msg.sender === 'toolResult') {
+      const status = (msg.result?.success === false || msg.result?.ok === false) ? 'Error' : 'Result';
+      const diff = msg.result?.diff;
+      if (diff) {
+        lines.push(`<details><summary>${msg.toolName} ${status}</summary>\n\n\`\`\`diff\n${diff}\n\`\`\`\n</details>\n`);
+      } else {
+        lines.push(`<details><summary>${msg.toolName} ${status}</summary>\n\n\`\`\`json\n${JSON.stringify(msg.result, null, 2).substring(0, 2000)}\n\`\`\`\n</details>\n`);
+      }
+    }
+  }
+
+  const content = lines.join('\n');
+  const blob = new Blob([content], { type: 'text/markdown' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${chat.title.replace(/[^a-zA-Z0-9]/g, '_')}.md`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// --- Agent progress status line --------------------------------
+(function initAgentProgress() {
+  const inputContainer = document.getElementById('input-container');
+  if (!inputContainer) return;
+
+  const progressBar = document.createElement('div');
+  progressBar.className = 'agent-progress-bar';
+  progressBar.id = 'agent-progress-bar';
+  progressBar.hidden = true;
+  progressBar.innerHTML = '<span class="progress-dot"></span><span id="agent-progress-text">Agent running...</span>';
+  inputContainer.parentNode.insertBefore(progressBar, inputContainer);
+
+  let toolCount = 0;
+  let startTime = 0;
+  let progressInterval = null;
+
+  function updateProgress() {
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+    const text = document.getElementById('agent-progress-text');
+    if (text) text.textContent = `Agent running · ${toolCount} tool${toolCount !== 1 ? 's' : ''} · ${elapsed}s`;
+  }
+
+  // Hook into existing response events
+  if (window.electron?.chat?.onMessageStart) {
+    window.electron.chat.onMessageStart(({ chatId }) => {
+      if (chatId !== appState.activeChatId) return;
+      toolCount = 0;
+      startTime = Date.now();
+      progressBar.hidden = false;
+      updateProgress();
+      progressInterval = setInterval(updateProgress, 1000);
+    });
+  }
+
+  if (window.electron?.chat?.onToolUse) {
+    window.electron.chat.onToolUse(({ chatId, toolName }) => {
+      if (chatId !== appState.activeChatId) return;
+      toolCount++;
+      const text = document.getElementById('agent-progress-text');
+      if (text) text.textContent = `Agent running · ${toolName} · ${toolCount} tool${toolCount !== 1 ? 's' : ''}`;
+    });
+  }
+
+  if (window.electron?.chat?.onMessageComplete) {
+    window.electron.chat.onMessageComplete(({ chatId }) => {
+      if (chatId !== appState.activeChatId) return;
+      progressBar.hidden = true;
+      if (progressInterval) { clearInterval(progressInterval); progressInterval = null; }
+    });
+  }
+})();
+
+// --- Welcome card (first-run) ----------------------------------
+(function initWelcomeCard() {
+  const emptyState = document.getElementById('empty-state');
+  if (!emptyState) return;
+
+  // Check if this is a first-run (no chats exist and haven't dismissed)
+  const dismissed = localStorage.getItem('kl-welcome-dismissed');
+  if (dismissed) return;
+
+  const card = document.createElement('div');
+  card.className = 'welcome-card';
+  card.innerHTML = `
+    <h2>Welcome to King Louie</h2>
+    <p>Your AI-powered desktop assistant for coding, automation, and more.</p>
+    <ul class="welcome-tips">
+      <li><i class="fas fa-key"></i> Set your API key in <strong>Settings</strong> (gear icon or <kbd>Ctrl+,</kbd>)</li>
+      <li><i class="fas fa-robot"></i> Enable <strong>Agent Mode</strong> for tool-using AI (file editing, terminal, web search)</li>
+      <li><i class="fas fa-keyboard"></i> Press <kbd>Ctrl+K</kbd> to open the <strong>Command Palette</strong></li>
+      <li><i class="fas fa-slash"></i> Type <kbd>/help</kbd> to see all available commands</li>
+      <li><i class="fas fa-diagram-project"></i> Use <strong>Plan & Execute</strong> for complex multi-step tasks</li>
+    </ul>
+    <button class="welcome-dismiss" type="button">Got it, don't show again</button>
+  `;
+  card.querySelector('.welcome-dismiss').addEventListener('click', () => {
+    localStorage.setItem('kl-welcome-dismissed', '1');
+    card.remove();
+  });
+  emptyState.appendChild(card);
+})();
 
 loadChats();
 loadSettings();

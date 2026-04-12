@@ -1,6 +1,7 @@
 const { wrapHandler } = require('./wrap-handler');
 const IPC = require('./constants');
 const ImageHandler = require('../media/image-handler');
+const Advisor = require('../execution/advisor');
 
 function registerChatHandlers(ipcMain, context = {}) {
   const {
@@ -440,19 +441,65 @@ function registerChatHandlers(ipcMain, context = {}) {
             embeddingProvider,
             usageTracker: typeof getUsageTracker === 'function' ? getUsageTracker() : null,
             abortSignal: abortController.signal,
-            toolResultsDir
+            toolResultsDir,
+            // Stream text deltas to the UI during agent loop iterations
+            onChunk: (chunk) => {
+              if (abortController.signal.aborted) return;
+              fullResponse += chunk;
+              safeSend(event.sender, 'chat:messageChunk', { chatId, responseId, chunk });
+            }
           });
           const result = await loop.run(chat.messages, toolDefinitions, {
             ...options,
             contextAssembler,
             autoApproveTools: ['Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep', 'Git']
           });
-          fullResponse = result.content || '(No response)';
+          // If streaming didn't fire (non-streaming provider), send full response
+          if (!fullResponse) {
+            fullResponse = result.content || '(No response)';
+            safeSend(event.sender, 'chat:messageChunk', { chatId, responseId, chunk: fullResponse });
+          } else {
+            // Streaming fired — use result.content as the canonical final answer
+            // (fullResponse accumulated deltas but result.content is the clean final text)
+            fullResponse = result.content || fullResponse;
+          }
           llmSummary = {
             calls: result?.llm?.calls || [],
             totals: result?.llm?.totals || llmSummary.totals
           };
-          safeSend(event.sender, 'chat:messageChunk', { chatId, responseId, chunk: fullResponse });
+
+          // Run advisor review if enabled in settings
+          const advisorSettings = typeof getSettings === 'function' ? getSettings() : {};
+          const advisorConfig = advisorSettings.advisor;
+          if (advisorConfig?.enabled && advisorConfig?.model && !abortController.signal.aborted) {
+            try {
+              safeSend(event.sender, 'chat:advisorStarted', { chatId });
+              const advisorProvider = provider; // Use same provider by default
+              const advisor = new Advisor({
+                provider: advisorProvider,
+                model: advisorConfig.model,
+                usageTracker: typeof getUsageTracker === 'function' ? getUsageTracker() : null
+              });
+
+              const reviewResult = await advisor.review(result, {
+                userMessage: safeMessage
+              });
+
+              if (reviewResult.review) {
+                // Append advisor review as a system note
+                const reviewNote = `\n\n---\n**Advisor Review** (${advisorConfig.model}):\n${reviewResult.review}`;
+                fullResponse += reviewNote;
+                safeSend(event.sender, 'chat:messageChunk', { chatId, responseId, chunk: reviewNote });
+                safeSend(event.sender, 'chat:advisorCompleted', {
+                  chatId,
+                  verdict: reviewResult.verdict,
+                  model: advisorConfig.model
+                });
+              }
+            } catch (err) {
+              console.warn('[advisor] Review failed:', err.message);
+            }
+          }
         } else {
           const streamResult = await provider.streamMessage(chat.messages, { ...options, abortSignal: abortController.signal }, (chunk) => {
             if (abortController.signal.aborted) return;

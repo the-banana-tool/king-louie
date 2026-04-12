@@ -2,6 +2,7 @@ const fs = require('fs').promises;
 const path = require('path');
 const { Tool } = require('../tool-schema');
 const { isPathAllowed } = require('../utils');
+const { generateUnifiedDiff, countDiffStats } = require('./diff-utils');
 
 const EditTool = new Tool({
   name: 'Edit',
@@ -62,10 +63,18 @@ const EditTool = new Tool({
 
       await fs.writeFile(resolvedPath, updated, 'utf-8');
 
+      // Generate structured diff for UI display
+      const relativePath = path.relative(workingDirectory, resolvedPath);
+      const diff = generateUnifiedDiff(content, updated, relativePath);
+      const stats = countDiffStats(diff);
+
       return {
         success: true,
         replacements: replace_all ? occurrences : 1,
-        filePath: resolvedPath
+        filePath: resolvedPath,
+        diff,
+        linesAdded: stats.added,
+        linesRemoved: stats.removed
       };
     } catch (error) {
       return {
