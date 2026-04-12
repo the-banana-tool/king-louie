@@ -1267,6 +1267,35 @@ function addStatusMessage(text) {
   window.electron.chat.addMessage({ chatId, sender: 'status', text }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
 }
 
+// Suggest a reasonable "allow pattern" seed from a tool call. For Bash,
+// we want `git *` when the user runs `git status`, not the literal command.
+// For URL / path tools, we suggest the directory / origin prefix.
+function suggestAllowPattern(toolName, parameters = {}) {
+  if (!parameters || typeof parameters !== 'object') return null;
+  if (toolName === 'Bash' && typeof parameters.command === 'string') {
+    const first = parameters.command.trim().split(/\s+/)[0];
+    if (first) return `${first} *`;
+    return null;
+  }
+  if (toolName === 'WebFetch' && typeof parameters.url === 'string') {
+    try {
+      const u = new URL(parameters.url);
+      return `${u.origin}/*`;
+    } catch { return null; }
+  }
+  if ((toolName === 'Read' || toolName === 'Edit' || toolName === 'Write')
+      && typeof parameters.file_path === 'string') {
+    const p = parameters.file_path;
+    const lastSlash = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+    if (lastSlash > 0) return p.slice(0, lastSlash + 1) + '*';
+    return null;
+  }
+  if (toolName === 'WebSearch' && typeof parameters.query === 'string') {
+    return '*';
+  }
+  return null;
+}
+
 function showToolApprovalDialog(approvalId, toolName, parameters) {
   const messageDiv = document.createElement('div');
   messageDiv.className = 'message assistant prompt-message';
@@ -1283,12 +1312,42 @@ function showToolApprovalDialog(approvalId, toolName, parameters) {
   const actions = document.createElement('div');
   actions.className = 'prompt-actions';
 
+  // "Always allow matching pattern" — the preferred grant path. When
+  // checked, the approval response carries a pattern that tool-handlers
+  // persists as a permission rule. The user can still tweak the pattern
+  // in the text input before approving.
+  const patternSeed = suggestAllowPattern(toolName, parameters);
+  const patternRow = document.createElement('div');
+  patternRow.className = 'prompt-pattern-row';
+  const patternLabel = document.createElement('label');
+  patternLabel.className = 'prompt-checkbox-label';
+  const patternCheckbox = document.createElement('input');
+  patternCheckbox.type = 'checkbox';
+  const patternText = document.createElement('span');
+  patternText.textContent = ' Always allow pattern:';
+  patternLabel.appendChild(patternCheckbox);
+  patternLabel.appendChild(patternText);
+  const patternInput = document.createElement('input');
+  patternInput.type = 'text';
+  patternInput.className = 'prompt-pattern-input';
+  patternInput.placeholder = patternSeed || '*';
+  patternInput.value = patternSeed || '';
+  patternInput.disabled = !patternSeed;
+  if (!patternSeed) {
+    patternCheckbox.disabled = true;
+    patternLabel.title = 'This tool has no matchable field for pattern rules.';
+  }
+  patternRow.appendChild(patternLabel);
+  patternRow.appendChild(patternInput);
+
+  // Legacy "Always approve entire tool" — kept for users who want the
+  // coarse grant, but visually de-emphasized.
   const alwaysApproveLabel = document.createElement('label');
-  alwaysApproveLabel.className = 'prompt-checkbox-label';
+  alwaysApproveLabel.className = 'prompt-checkbox-label prompt-checkbox-muted';
   const alwaysApproveInput = document.createElement('input');
   alwaysApproveInput.type = 'checkbox';
   const alwaysApproveText = document.createElement('span');
-  alwaysApproveText.textContent = ` Always approve ${toolName}`;
+  alwaysApproveText.textContent = ` Always approve all ${toolName} calls`;
   alwaysApproveLabel.appendChild(alwaysApproveInput);
   alwaysApproveLabel.appendChild(alwaysApproveText);
 
@@ -1304,24 +1363,44 @@ function showToolApprovalDialog(approvalId, toolName, parameters) {
   approveBtn.appendChild(faIcon('fas fa-check'));
   approveBtn.appendChild(document.createTextNode(' Approve'));
 
+  // Enable / disable the pattern input based on the checkbox.
+  patternCheckbox.addEventListener('change', () => {
+    patternInput.disabled = !patternCheckbox.checked;
+    if (patternCheckbox.checked && !patternInput.value && patternSeed) {
+      patternInput.value = patternSeed;
+    }
+  });
+
   let dismissed = false;
   function dismiss(approved) {
     if (dismissed) return;
     dismissed = true;
+    const usePattern = approved && patternCheckbox.checked && patternInput.value.trim();
     window.electron.tool.respondToApproval(approvalId, approved, {
-      alwaysApprove: approved ? Boolean(alwaysApproveInput.checked) : false
+      alwaysApprove: approved ? Boolean(alwaysApproveInput.checked) : false,
+      alwaysAllowPattern: usePattern ? patternInput.value.trim() : null
     });
-    // Replace actions with result text
     actions.innerHTML = '';
     const result = document.createElement('p');
     result.className = approved ? 'prompt-result-approved' : 'prompt-result-denied';
-    result.textContent = approved ? (alwaysApproveInput.checked ? `Approved (always for ${toolName})` : 'Approved') : 'Denied';
+    if (approved) {
+      if (usePattern) {
+        result.textContent = `Approved and saved rule: ${toolName} '${patternInput.value.trim()}' → allow`;
+      } else if (alwaysApproveInput.checked) {
+        result.textContent = `Approved (always for ${toolName})`;
+      } else {
+        result.textContent = 'Approved';
+      }
+    } else {
+      result.textContent = 'Denied';
+    }
     actions.appendChild(result);
   }
 
   denyBtn.addEventListener('click', () => dismiss(false), { once: true });
   approveBtn.addEventListener('click', () => dismiss(true), { once: true });
 
+  actions.appendChild(patternRow);
   actions.appendChild(alwaysApproveLabel);
   actions.appendChild(denyBtn);
   actions.appendChild(approveBtn);

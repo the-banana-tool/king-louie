@@ -447,6 +447,94 @@ describe('ToolExecutor', () => {
     });
   });
 
+  describe('getPermissionRules callback', () => {
+    it('picks up rules added mid-session via a callback', async () => {
+      const rules = [];
+      let approvalAsked = false;
+      const executor = new ToolExecutor({
+        requireApproval: true,
+        approvalRequester: async () => { approvalAsked = true; return false; },
+        getPermissionRules: () => rules
+      });
+
+      // First call — no rule, approval gets asked (and we deny).
+      let result = await executor.execute('Bash', { command: 'git status' });
+      assert.strictEqual(approvalAsked, true);
+      assert.strictEqual(result.success, false);
+
+      // Add a rule and re-run — rule should match, no approval prompt.
+      rules.push({ tool: 'Bash', pattern: 'git *', action: 'allow', source: 'test' });
+      approvalAsked = false;
+      result = await executor.execute('Bash', { command: 'git status' });
+      assert.strictEqual(approvalAsked, false);
+      assert.strictEqual(result.ok, true);
+    });
+  });
+
+  describe('denial tracker integration', () => {
+    const DenialTracker = require('../src/tools/denial-tracker');
+
+    it('auto-denies after the threshold without prompting', async () => {
+      let prompts = 0;
+      const tracker = new DenialTracker({ threshold: 2 });
+      const executor = new ToolExecutor({
+        requireApproval: true,
+        approvalRequester: async () => { prompts++; return false; },
+        denialTracker: tracker
+      });
+
+      // Two denials, both prompt the user.
+      await executor.execute('Bash', { command: 'rm file' });
+      await executor.execute('Bash', { command: 'rm file' });
+      assert.strictEqual(prompts, 2);
+
+      // Third call: threshold tripped, no prompt, auto-deny.
+      const third = await executor.execute('Bash', { command: 'rm file' });
+      assert.strictEqual(prompts, 2, 'no new prompt on auto-deny');
+      assert.strictEqual(third.success, false);
+      assert.strictEqual(third.deniedBy, 'denial-tracker');
+      assert.strictEqual(third.denialCount, 2);
+    });
+
+    it('grant clears the counter for that key', async () => {
+      let promptResult = false;
+      const tracker = new DenialTracker({ threshold: 2 });
+      const executor = new ToolExecutor({
+        requireApproval: true,
+        approvalRequester: async () => promptResult,
+        denialTracker: tracker
+      });
+
+      // One denial.
+      await executor.execute('Bash', { command: 'ls' });
+      // Grant on the second try.
+      promptResult = true;
+      await executor.execute('Bash', { command: 'ls' });
+      // Third call: counter was cleared on the grant, so the tracker
+      // does not auto-deny on a fresh denial.
+      promptResult = false;
+      const third = await executor.execute('Bash', { command: 'ls' });
+      assert.strictEqual(third.deniedBy, 'user');
+    });
+
+    it('tracker is per-key — denying "rm" does not block "ls"', async () => {
+      const tracker = new DenialTracker({ threshold: 2 });
+      const executor = new ToolExecutor({
+        requireApproval: true,
+        approvalRequester: async (_name, params) => params.command === 'ls',
+        denialTracker: tracker
+      });
+      await executor.execute('Bash', { command: 'rm file' });
+      await executor.execute('Bash', { command: 'rm file' });
+      // rm is at threshold. ls should still be askable (and we approve).
+      const ls = await executor.execute('Bash', { command: 'ls' });
+      assert.strictEqual(ls.ok, true);
+      // rm is still auto-denied.
+      const rm = await executor.execute('Bash', { command: 'rm file' });
+      assert.strictEqual(rm.deniedBy, 'denial-tracker');
+    });
+  });
+
   describe('AbortSignal propagation', () => {
     it('refuses to run when signal is already aborted', async () => {
       const executor = new ToolExecutor({ requireApproval: false });

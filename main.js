@@ -9,6 +9,7 @@ const ProviderFactory = require('./src/providers/provider-factory');
 const InferenceRouter = require('./src/providers/inference-router');
 const { initializeTools, toolRegistry } = require('./src/tools');
 const ToolExecutor = require('./src/execution/tool-executor');
+const DenialTracker = require('./src/tools/denial-tracker');
 const AgentLoop = require('./src/execution/agent-loop');
 const {
   getRuntimeEnvironment,
@@ -459,6 +460,49 @@ const setToolAlwaysApprove = (toolName, approved = true) => {
   };
 
   setToolApprovals(updated);
+};
+
+// Persisted pattern-based permission rules. Shape:
+//   [{ tool, pattern, action: 'allow'|'ask'|'deny', source, createdAt }]
+// ToolExecutor reads these at approval time via getPermissionRules() and
+// short-circuits the per-tool flag when a rule matches.
+const getPermissionRules = () => {
+  const approvals = getToolApprovals();
+  return Array.isArray(approvals?.permissionRules) ? approvals.permissionRules : [];
+};
+
+const setPermissionRules = (rules) => {
+  const approvals = getToolApprovals();
+  setToolApprovals({
+    ...approvals,
+    permissionRules: Array.isArray(rules) ? rules : []
+  });
+};
+
+const addPermissionRule = (rule) => {
+  if (!rule || !rule.tool || !rule.action) return;
+  const existing = getPermissionRules();
+  // De-duplicate: same tool + pattern + action replaces the old entry
+  // (useful when user upgrades "ask" to "allow").
+  const filtered = existing.filter((r) =>
+    !(r.tool === rule.tool && (r.pattern || '*') === (rule.pattern || '*') && r.action === rule.action)
+  );
+  filtered.push({
+    tool: rule.tool,
+    pattern: rule.pattern || '*',
+    action: rule.action,
+    source: rule.source || 'user',
+    createdAt: new Date().toISOString()
+  });
+  setPermissionRules(filtered);
+};
+
+const removePermissionRule = (tool, pattern, action) => {
+  const existing = getPermissionRules();
+  const filtered = existing.filter((r) =>
+    !(r.tool === tool && (r.pattern || '*') === (pattern || '*') && r.action === action)
+  );
+  setPermissionRules(filtered);
 };
 
 const providerLabels = {
@@ -1993,6 +2037,12 @@ const createToolExecutorWithApprovals = async (
     runtimeEnvironment: resolvedRuntimeEnvironment,
     approvalRequester,
     shouldAutoApprove: async (toolName) => isToolAlwaysApproved(toolName),
+    // Live callback — picks up rules added mid-session when the user
+    // clicks "Always allow 'git *'" in an approval dialog.
+    getPermissionRules,
+    // Session-scoped denial counter so "rm *" denied three times stops
+    // re-prompting and returns an auto-deny to the model.
+    denialTracker: new DenialTracker(),
     hookExecutor: getHookSettings().enabled ? hookExecutor : null,
     useSandbox: executorOptions.useSandbox !== false,
     extraToolOptions: {
@@ -2549,6 +2599,9 @@ registerHandlers(ipcMain, {
   // Tool
   pendingApprovalResolvers,
   setToolAlwaysApprove,
+  getPermissionRules,
+  addPermissionRule,
+  removePermissionRule,
   pendingAskUserResolvers,
   pendingDirectoryAccessResolvers,
 

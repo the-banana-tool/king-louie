@@ -28,18 +28,45 @@ class ToolExecutor extends EventEmitter {
     // Pattern-based permission rules. First-match-wins; falls back to the
     // tool's `requiresApproval` flag when nothing matches. See
     // src/tools/permission-rules.js.
-    this.permissionRules = Array.isArray(options.permissionRules)
-      ? options.permissionRules
-      : [];
+    //
+    // Can be supplied as a static array OR a callback. The callback form
+    // lets the executor pick up rules that were persisted mid-session
+    // (e.g. the user clicks "Always allow 'git *'" in an approval dialog
+    // and the rule lands in electron-store) without reconstructing the
+    // executor.
+    if (typeof options.getPermissionRules === 'function') {
+      this._getPermissionRules = options.getPermissionRules;
+    } else if (Array.isArray(options.permissionRules)) {
+      this._staticPermissionRules = options.permissionRules;
+      this._getPermissionRules = () => this._staticPermissionRules;
+    } else {
+      this._staticPermissionRules = [];
+      this._getPermissionRules = () => this._staticPermissionRules;
+    }
+
+    // Optional denial tracker. Counts consecutive user denials for a
+    // (tool, pattern) key; after a threshold the executor stops asking
+    // and auto-denies. See src/tools/denial-tracker.js.
+    this.denialTracker = options.denialTracker || null;
+  }
+
+  get permissionRules() {
+    return this._getPermissionRules() || [];
   }
 
   setPermissionRules(rules) {
-    this.permissionRules = Array.isArray(rules) ? rules : [];
+    this._staticPermissionRules = Array.isArray(rules) ? rules : [];
+    this._getPermissionRules = () => this._staticPermissionRules;
   }
 
   addPermissionRule(rule) {
     if (!rule || !rule.tool) return;
-    this.permissionRules.push(rule);
+    if (!this._staticPermissionRules) {
+      // Wrapping a callback-backed rule list: we can't mutate the caller's
+      // store. Ignore (the caller should use their own add path).
+      return;
+    }
+    this._staticPermissionRules.push(rule);
   }
 
   async getRuntimeEnvironment() {
@@ -157,14 +184,33 @@ class ToolExecutor extends EventEmitter {
       }
 
       if (!autoApproved && !agentAutoApproved) {
+        // If the user has already denied this same (tool, key) repeatedly,
+        // stop asking and auto-deny. The model can pivot instead of
+        // hammering the user with the same prompt.
+        if (this.denialTracker) {
+          const check = this.denialTracker.check(toolName, effectiveParameters);
+          if (check.tripped) {
+            const denied = {
+              success: false,
+              error: `Auto-denied after ${check.count} consecutive user denials. Pick a different approach.`,
+              deniedBy: 'denial-tracker',
+              denialCount: check.count
+            };
+            this.emit('postExecute', { toolName, parameters: effectiveParameters, result: denied });
+            return denied;
+          }
+        }
+
         const approved = await this.requestApproval(toolName, effectiveParameters, {
           ruleHint: ruleSaysAsk ? describeRule(ruleMatch.rule) : null
         });
         if (!approved) {
+          if (this.denialTracker) this.denialTracker.recordDenial(toolName, effectiveParameters);
           const denied = { success: false, error: 'User denied permission', deniedBy: 'user' };
           this.emit('postExecute', { toolName, parameters: effectiveParameters, result: denied });
           return denied;
         }
+        if (this.denialTracker) this.denialTracker.recordGrant(toolName, effectiveParameters);
         approvalSource = { type: 'user' };
       }
     }

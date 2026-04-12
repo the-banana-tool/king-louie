@@ -413,7 +413,10 @@ contextBridge.exposeInMainWorld(
         ipcRenderer.send('tool:approvalResponse', { approvalId, approved, ...options }),
       onDirectoryAccessRequired: (callback) => registerOnce('tool:directoryAccessRequired', callback),
       respondToDirectoryAccess: (requestId, approved, options = {}) =>
-        ipcRenderer.send('tool:directoryAccessResponse', { requestId, approved, ...options })
+        ipcRenderer.send('tool:directoryAccessResponse', { requestId, approved, ...options }),
+      listPermissionRules: () => ipcRenderer.invoke('tool:listPermissionRules'),
+      removePermissionRule: (tool, pattern, action) =>
+        ipcRenderer.invoke('tool:removePermissionRule', { tool, pattern, action })
     },
     task: {
       create: (config) => ipcRenderer.invoke('task:create', config),
