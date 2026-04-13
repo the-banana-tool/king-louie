@@ -132,7 +132,12 @@ const BashTool = new Tool({
       timeout,
       workingDirectory: options.workingDirectory,
       sessionId: options.sessionId,
-      useSandbox
+      useSandbox,
+      signal: options.signal || null,
+      // Streaming progress: when an onProgress callback is available,
+      // SandboxExecutor uses spawn instead of exec so stdout lines are
+      // emitted as they arrive instead of buffered until completion.
+      onProgress: typeof options.onProgress === 'function' ? options.onProgress : null
     };
 
     return await sandboxExecutor.execute(command, execOptions);

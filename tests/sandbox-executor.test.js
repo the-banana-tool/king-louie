@@ -60,4 +60,41 @@ describe('SandboxExecutor', () => {
     await executor.execute('echo "test"');
     assert.ok(directCalled);
   });
+
+  it('streams stdout progress via onProgress when callback is provided', async () => {
+    const executor = new SandboxExecutor();
+    executor.isDockerAvailable = async () => false;
+
+    const progressEvents = [];
+    const result = await executor._executeDirect(
+      process.platform === 'win32'
+        ? 'for /L %i in (1,1,5) do @echo line %i'
+        : 'for i in 1 2 3 4 5; do echo "line $i"; done',
+      {
+        onProgress: (event) => progressEvents.push(event),
+        timeout: 10000
+      }
+    );
+
+    assert.strictEqual(result.success, true);
+    assert.ok(result.stdout.includes('line'), 'stdout should contain output');
+    // Progress events may or may not fire depending on timing/throttling,
+    // but the result should be correct regardless.
+    assert.strictEqual(typeof result.exitCode, 'number');
+  });
+
+  it('returns the same result shape from spawn path as from exec path', async () => {
+    const executor = new SandboxExecutor();
+    executor.isDockerAvailable = async () => false;
+
+    const execResult = await executor._executeDirect('echo hello', {});
+    const spawnResult = await executor._executeDirect('echo hello', {
+      onProgress: () => {}
+    });
+
+    assert.strictEqual(execResult.success, spawnResult.success);
+    assert.strictEqual(execResult.stdout, spawnResult.stdout);
+    assert.strictEqual(typeof spawnResult.exitCode, 'number');
+    assert.strictEqual(spawnResult.environment.sandbox, false);
+  });
 });

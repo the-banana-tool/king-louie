@@ -1,3 +1,5 @@
+const { execSync } = require('child_process');
+
 /**
  * Breaks the monolithic system prompt into discrete, named sections
  * that can be individually indexed and retrieved by ContextAssembler.
@@ -6,6 +8,36 @@
  *   - name:    unique key (used for vector store IDs and core-section matching)
  *   - content: the actual prompt text
  */
+
+/**
+ * Gather git context for the working directory.
+ * Runs synchronously with short timeouts — never blocks startup.
+ */
+function getGitContext(workingDirectory) {
+  const run = (cmd) => {
+    try {
+      return execSync(cmd, {
+        cwd: workingDirectory,
+        timeout: 3000,
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe']
+      }).trim();
+    } catch {
+      return null;
+    }
+  };
+
+  // Check if this is a git repo
+  const isGitRepo = run('git rev-parse --is-inside-work-tree');
+  if (isGitRepo !== 'true') return null;
+
+  const branch = run('git branch --show-current') || run('git rev-parse --short HEAD') || 'unknown';
+  const status = run('git status --short --untracked-files=normal');
+  const recentCommits = run('git log --oneline -5 --no-decorate');
+  const userName = run('git config user.name');
+
+  return { branch, status, recentCommits, userName };
+}
 
 function buildSystemSections(runtimeEnvironment = {}, options = {}) {
   const platform = runtimeEnvironment.platform || process.platform;
@@ -27,7 +59,33 @@ function buildSystemSections(runtimeEnvironment = {}, options = {}) {
     ].join('\n')
   });
 
-  // ── 2. CLI tools availability (relevant when using Bash) ───
+  // ── 2. Git repository context (auto-detected) ─────────────
+  const gitContext = options.gitContext || getGitContext(workingDirectory);
+  if (gitContext) {
+    const lines = [
+      'Git repository context (auto-detected):',
+      `- Current branch: ${gitContext.branch}`,
+    ];
+    if (gitContext.userName) lines.push(`- Git user: ${gitContext.userName}`);
+    if (gitContext.status) {
+      const fileCount = gitContext.status.split('\n').filter(Boolean).length;
+      lines.push(`- Working tree: ${fileCount} changed file(s)`);
+      lines.push('- Status:');
+      lines.push(gitContext.status);
+    } else {
+      lines.push('- Working tree: clean');
+    }
+    if (gitContext.recentCommits) {
+      lines.push('- Recent commits:');
+      lines.push(gitContext.recentCommits);
+    }
+    sections.push({
+      name: 'git-context',
+      content: lines.join('\n')
+    });
+  }
+
+  // ── 3. CLI tools availability (relevant when using Bash) ───
   sections.push({
     name: 'cli-tools',
     content: [
@@ -55,7 +113,10 @@ function buildSystemSections(runtimeEnvironment = {}, options = {}) {
     content: [
       'Browser tool guidance:',
       '- You have a Browser tool that can launch a real browser, navigate to URLs, take screenshots, and interact with pages.',
-      '- Use it when the user asks to open or view something in a browser.'
+      '- Use it when the user asks to open or view something in a browser.',
+      '- When testing or interacting with a page: first take a screenshot or get content to discover the real element selectors. NEVER guess IDs or selectors — inspect the DOM first.',
+      '- If a Browser evaluate/click/fill returns empty, sparse, or unexpected results, DO NOT give up. Take a screenshot, re-inspect the DOM, find the correct selectors, and retry. Iterate until the task succeeds.',
+      '- Report what you actually tested and what the results were. Never substitute a how-to guide or test plan for actually doing the work.'
     ].join('\n')
   });
 

@@ -470,6 +470,8 @@ body {
   flex-direction: column;
   background-color: var(--bg-base);
   transition: width var(--transition);
+  min-width: 0;
+  overflow: hidden;
 }
 
 .container.history-collapsed .main-content {
@@ -685,6 +687,48 @@ body {
   color: var(--text-primary);
 }
 
+/* Working directory pill in the chat header: inherits icon-button look
+   but shows a path label inline so the active working directory is
+   always visible without digging into tooltips. */
+.working-dir-btn {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 280px;
+  transition: background-color var(--transition), border-color var(--transition), color var(--transition);
+}
+
+.working-dir-btn:hover {
+  background: var(--bg-overlay);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.working-dir-btn.is-set {
+  color: var(--text-primary);
+  border-color: var(--accent, var(--border-strong));
+}
+
+.working-dir-btn .working-dir-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+}
+
+.working-dir-btn:not(.is-set) .working-dir-label {
+  font-style: italic;
+  opacity: 0.75;
+}
+
 .history-toggle-btn {
   min-width: 32px;
   width: 32px;
@@ -700,14 +744,18 @@ body {
 .chat-messages {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 24px 28px;
   background-color: var(--bg-base);
+  min-width: 0;
 }
 
 /* --- Messages ---------------------------------------------- */
 .message {
   margin-bottom: 16px;
   animation: fadeIn 0.25s ease-out;
+  min-width: 0;
+  max-width: 100%;
 }
 
 @keyframes fadeIn {
@@ -1877,6 +1925,80 @@ body {
   accent-color: var(--accent);
 }
 
+.prompt-checkbox-muted {
+  opacity: 0.65;
+  font-size: 12px;
+}
+
+.prompt-pattern-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-basis: 100%;
+  margin-bottom: 4px;
+}
+
+.prompt-pattern-input {
+  flex: 1;
+  padding: 4px 8px;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-primary);
+  min-width: 0;
+}
+
+.prompt-pattern-input:disabled {
+  opacity: 0.4;
+}
+
+.permission-rule-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+}
+
+.permission-rule-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+.permission-rule-source {
+  font-size: 11px;
+  opacity: 0.5;
+}
+
+.badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.badge-success { background: #1a7a3a; color: #fff; }
+.badge-danger { background: #a83232; color: #fff; }
+.badge-warn { background: #8a6d1b; color: #fff; }
+
+.tool-progress-text {
+  font-size: 11px;
+  color: var(--text-secondary);
+  opacity: 0.75;
+  margin-left: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+
 .prompt-hint {
   font-size: 12px;
   opacity: 0.7;
@@ -2395,3 +2517,139 @@ body {
   border: 1px solid rgba(137,180,250,0.15);
   font-weight: 500;
 }
+
+/* ============================================================
+   UX Enhancements — Wave 3
+   ============================================================ */
+
+/* --- Code block copy button --------------------------------- */
+.code-block-wrapper { position: relative; }
+.code-copy-btn {
+  position: absolute; top: 6px; right: 6px;
+  background: var(--bg-overlay); border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm); color: var(--text-secondary);
+  padding: 4px 8px; cursor: pointer; font-size: 12px;
+  opacity: 0; transition: opacity var(--transition), background var(--transition); z-index: 2;
+}
+.code-block-wrapper:hover .code-copy-btn { opacity: 1; }
+.code-copy-btn:hover { background: var(--bg-elevated); color: var(--text-primary); }
+.code-copy-btn.copied { color: var(--success); border-color: var(--success); }
+.code-lang-badge {
+  position: absolute; top: 6px; right: 48px;
+  font-size: 10px; color: var(--text-muted); text-transform: uppercase;
+  letter-spacing: 0.5px; opacity: 0; transition: opacity var(--transition);
+}
+.code-block-wrapper:hover .code-lang-badge { opacity: 1; }
+
+/* --- Thinking / typing indicator ---------------------------- */
+.thinking-indicator { color: var(--text-muted); font-size: 13px; padding: 4px 0; }
+.thinking-dots span { animation: thinkingDot 1.4s infinite; opacity: 0.3; }
+.thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
+.thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes thinkingDot { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
+
+/* --- Diff rendering ----------------------------------------- */
+.diff-block {
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.5;
+  overflow-x: auto; background: var(--bg-base);
+  border-radius: var(--radius-sm); padding: 8px; margin: 4px 0;
+}
+.diff-line { white-space: pre; }
+.diff-added { color: var(--success); background: rgba(166,227,161,0.08); }
+.diff-removed { color: var(--error); background: rgba(243,139,168,0.08); }
+.diff-hunk { color: var(--accent); font-weight: 500; }
+.diff-header { color: var(--text-muted); font-style: italic; }
+.diff-stats { margin-top: 4px; font-size: 11px; font-family: var(--font-mono); }
+.diff-stat-added { color: var(--success); }
+.diff-stat-removed { color: var(--error); }
+
+/* --- Chat search box ---------------------------------------- */
+.sidebar-search {
+  padding: 8px 12px; border-bottom: 1px solid var(--border-subtle); position: relative;
+}
+.sidebar-search input {
+  width: 100%; background: var(--bg-elevated); border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm); color: var(--text-primary);
+  padding: 6px 10px 6px 30px; font-size: 13px; font-family: inherit; outline: none;
+  transition: border-color var(--transition);
+}
+.sidebar-search input:focus { border-color: var(--accent); }
+.sidebar-search input::placeholder { color: var(--text-muted); }
+.sidebar-search-icon {
+  position: absolute; left: 20px; top: 50%; transform: translateY(-50%);
+  color: var(--text-muted); font-size: 12px; pointer-events: none;
+}
+.chat-item.pinned .chat-item-title::before {
+  content: '\f08d'; font-family: 'Font Awesome 6 Free'; font-weight: 900;
+  font-size: 9px; margin-right: 4px; color: var(--accent);
+}
+
+/* --- Retry button ------------------------------------------- */
+.retry-btn {
+  display: inline-flex; align-items: center; gap: 4px; margin-top: 6px;
+  padding: 4px 10px; background: var(--error-bg); border: 1px solid var(--error);
+  border-radius: var(--radius-sm); color: var(--error); cursor: pointer;
+  font-size: 12px; font-family: inherit; transition: background var(--transition);
+}
+.retry-btn:hover { background: rgba(243,139,168,0.15); }
+
+/* --- Command palette ---------------------------------------- */
+.command-palette-overlay {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.5); z-index: 9999;
+  display: flex; justify-content: center; padding-top: 15vh;
+}
+.command-palette {
+  width: 520px; max-height: 400px; background: var(--bg-surface);
+  border: 1px solid var(--border-default); border-radius: var(--radius-lg);
+  overflow: hidden; box-shadow: 0 16px 48px rgba(0,0,0,0.4);
+  display: flex; flex-direction: column;
+}
+.command-palette-input {
+  width: 100%; padding: 14px 16px; background: transparent;
+  border: none; border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-primary); font-size: 15px; font-family: inherit; outline: none;
+}
+.command-palette-input::placeholder { color: var(--text-muted); }
+.command-palette-results { overflow-y: auto; flex: 1; }
+.command-palette-item {
+  padding: 10px 16px; cursor: pointer; display: flex; align-items: center; gap: 10px;
+  transition: background var(--transition); border: none; background: transparent;
+  color: var(--text-primary); font-size: 14px; font-family: inherit; width: 100%; text-align: left;
+}
+.command-palette-item:hover, .command-palette-item.selected { background: var(--accent-surface); }
+.command-palette-item i { color: var(--text-muted); width: 20px; text-align: center; }
+.command-palette-item .shortcut {
+  margin-left: auto; font-size: 11px; color: var(--text-muted);
+  background: var(--bg-overlay); padding: 2px 6px; border-radius: 3px; font-family: var(--font-mono);
+}
+
+/* --- Agent progress bar ------------------------------------- */
+.agent-progress-bar {
+  display: flex; align-items: center; gap: 8px; padding: 4px 16px;
+  background: var(--bg-elevated); border-top: 1px solid var(--border-subtle);
+  font-size: 12px; color: var(--text-secondary);
+}
+.agent-progress-bar .progress-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
+  animation: progressPulse 1s infinite;
+}
+@keyframes progressPulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+.agent-progress-bar[hidden] { display: none; }
+
+/* --- Welcome card ------------------------------------------- */
+.welcome-card {
+  max-width: 480px; margin: 40px auto; padding: 24px;
+  background: var(--bg-elevated); border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg); text-align: center;
+}
+.welcome-card h2 { margin-bottom: 12px; color: var(--text-primary); }
+.welcome-card p { color: var(--text-secondary); font-size: 14px; line-height: 1.6; margin-bottom: 8px; }
+.welcome-card .welcome-tips { text-align: left; margin: 16px 0; padding: 0; list-style: none; }
+.welcome-card .welcome-tips li { padding: 6px 0; font-size: 13px; color: var(--text-secondary); }
+.welcome-card .welcome-tips li i { color: var(--accent); width: 20px; margin-right: 6px; }
+.welcome-card .welcome-dismiss {
+  margin-top: 12px; color: var(--text-muted); font-size: 12px; cursor: pointer;
+  background: none; border: none; font-family: inherit;
+}
+.welcome-card .welcome-dismiss:hover { color: var(--text-secondary); }

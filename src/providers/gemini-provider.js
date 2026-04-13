@@ -242,14 +242,20 @@ class GeminiProvider extends BaseLLMProvider {
       usage
     });
 
-    const toolCalls = this.parseToolCalls(candidate);
-    if (toolCalls.length > 0) {
-      const call = toolCalls[0];
-      return {
-        type: 'tool_use',
+    const parsedToolCalls = this.parseToolCalls(candidate);
+    if (parsedToolCalls.length > 0) {
+      const toolCalls = parsedToolCalls.map((call) => ({
         toolName: call.name,
         toolUseId: call.id,
-        parameters: call.arguments,
+        parameters: call.arguments
+      }));
+
+      return {
+        type: 'tool_use',
+        toolName: toolCalls[0].toolName,
+        toolUseId: toolCalls[0].toolUseId,
+        parameters: toolCalls[0].parameters,
+        toolCalls,
         messageContent: candidate?.content?.parts?.filter(p => p.text).map(p => p.text).join('') || '',
         llmMetrics
       };
@@ -285,6 +291,34 @@ class GeminiProvider extends BaseLLMProvider {
         content: JSON.stringify(toolResult)
       }
     ];
+  }
+
+  buildMultiToolMessages(response, toolCallEntries) {
+    const messages = [
+      {
+        role: 'assistant',
+        content: response.messageContent || '',
+        tool_calls: toolCallEntries.map((entry) => ({
+          id: entry.toolCallId,
+          type: 'function',
+          function: {
+            name: entry.toolName,
+            arguments: JSON.stringify(entry.parameters || {})
+          }
+        }))
+      }
+    ];
+
+    for (const entry of toolCallEntries) {
+      messages.push({
+        role: 'tool',
+        tool_call_id: entry.toolCallId,
+        tool_name: entry.toolName,
+        content: JSON.stringify(entry.result)
+      });
+    }
+
+    return messages;
   }
 
   async streamMessage(messages, options = {}, onChunk) {

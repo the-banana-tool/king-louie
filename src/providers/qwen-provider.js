@@ -96,11 +96,14 @@ class QwenProvider extends BaseLLMProvider {
   parseToolResponse(response, llmMetrics) {
     const message = response?.choices?.[0]?.message;
     if (!message) return { type: 'text', content: '', llmMetrics };
-    const toolCall = message.tool_calls?.find((call) => call.type === 'function');
-    if (toolCall?.function?.name) {
-      let parsedArgs = {};
-      try { parsedArgs = JSON.parse(toolCall.function.arguments || '{}'); } catch { parsedArgs = {}; }
-      return { type: 'tool_use', toolName: toolCall.function.name, toolUseId: toolCall.id, parameters: parsedArgs, messageContent: message.content || '', llmMetrics };
+    const functionCalls = (message.tool_calls || []).filter((call) => call.type === 'function' && call.function?.name);
+    if (functionCalls.length > 0) {
+      const toolCalls = functionCalls.map((call) => {
+        let parsedArgs = {};
+        try { parsedArgs = JSON.parse(call.function.arguments || '{}'); } catch { parsedArgs = {}; }
+        return { toolName: call.function.name, toolUseId: call.id, parameters: parsedArgs };
+      });
+      return { type: 'tool_use', toolName: toolCalls[0].toolName, toolUseId: toolCalls[0].toolUseId, parameters: toolCalls[0].parameters, toolCalls, messageContent: message.content || '', llmMetrics };
     }
     return { type: 'text', content: message.content || '', llmMetrics };
   }
@@ -110,6 +113,12 @@ class QwenProvider extends BaseLLMProvider {
       { role: 'assistant', content: response.messageContent || '', tool_calls: [{ id: toolCallId, type: 'function', function: { name: response.toolName, arguments: JSON.stringify(response.parameters || {}) } }] },
       { role: 'tool', tool_call_id: toolCallId, content: JSON.stringify(toolResult) }
     ];
+  }
+
+  buildMultiToolMessages(response, toolCallEntries) {
+    const messages = [{ role: 'assistant', content: response.messageContent || '', tool_calls: toolCallEntries.map((e) => ({ id: e.toolCallId, type: 'function', function: { name: e.toolName, arguments: JSON.stringify(e.parameters || {}) } })) }];
+    for (const e of toolCallEntries) messages.push({ role: 'tool', tool_call_id: e.toolCallId, content: JSON.stringify(e.result) });
+    return messages;
   }
 
   async streamMessage(messages, options = {}, onChunk) {

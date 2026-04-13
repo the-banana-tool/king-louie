@@ -167,6 +167,7 @@ const dom = {
   cronAddTargetInput: document.getElementById('cron-add-target-input'),
   cronAddKindInput: document.getElementById('cron-add-kind-input'),
   cronAddValueInput: document.getElementById('cron-add-value-input'),
+  chatPlanBtn: document.getElementById('chat-plan-btn'),
   workflowRefreshBtn: document.getElementById('workflow-refresh-btn'),
   workflowStatus: document.getElementById('workflow-status'),
   workflowList: document.getElementById('workflow-list'),
@@ -244,6 +245,7 @@ const dom = {
   websearchBraveStatus: document.getElementById('websearch-brave-status'),
   websearchTavilyStatus: document.getElementById('websearch-tavily-status'),
   workingDirBtn: document.getElementById('working-dir-btn'),
+  workingDirLabel: document.getElementById('working-dir-label'),
   exportChatBtn: document.getElementById('export-chat-btn'),
   messageContextMenu: document.getElementById('message-context-menu'),
   inputContextMenu: document.getElementById('input-context-menu'),
@@ -1059,6 +1061,9 @@ function addToolEventCompact(toolName, payload, variant = '', isResult = false) 
 
   const messageDiv = document.createElement('div');
   messageDiv.className = `message assistant tool-event high-stakes ${variant}`.trim();
+  if (!isResult) {
+    messageDiv.dataset.toolProgressTarget = toolName;
+  }
 
   const messageContent = document.createElement('div');
   messageContent.className = 'message-content';
@@ -1085,6 +1090,13 @@ function addToolEventCompact(toolName, payload, variant = '', isResult = false) 
     label.textContent = getToolSummary(toolName, payload);
   }
   row.appendChild(label);
+
+  // Progress text (updated by chat:toolProgress events)
+  if (!isResult) {
+    const progressSpan = document.createElement('span');
+    progressSpan.className = 'tool-progress-text';
+    row.appendChild(progressSpan);
+  }
 
   // Status badge
   if (variant === 'success' || variant === 'error') {
@@ -1130,6 +1142,16 @@ function addToolEventCompact(toolName, payload, variant = '', isResult = false) 
         const pageTitle = payload.page.title || '';
         infoDiv.textContent = `${pageTitle} — ${pageUrl}`;
         payloadDiv.appendChild(infoDiv);
+      }
+    } else if (isResult && payload?.diff && (toolName === 'Edit' || toolName === 'MultiEdit' || toolName === 'Write')) {
+      // Render structured diff for file edit/write results
+      const diffEl = renderDiffBlock(payload.diff);
+      payloadDiv.appendChild(diffEl);
+      if (payload.linesAdded || payload.linesRemoved) {
+        const statsEl = document.createElement('div');
+        statsEl.className = 'diff-stats';
+        statsEl.innerHTML = `<span class="diff-stat-added">+${payload.linesAdded || 0}</span> <span class="diff-stat-removed">-${payload.linesRemoved || 0}</span>`;
+        payloadDiv.appendChild(statsEl);
       }
     } else if (typeof payload === 'string' || (payload && (payload.content || payload.stdout || payload.output || payload.message))) {
       // Try rendering as markdown, fall back to pre
@@ -1275,6 +1297,35 @@ function addStatusMessage(text) {
   window.electron.chat.addMessage({ chatId, sender: 'status', text }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
 }
 
+// Suggest a reasonable "allow pattern" seed from a tool call. For Bash,
+// we want `git *` when the user runs `git status`, not the literal command.
+// For URL / path tools, we suggest the directory / origin prefix.
+function suggestAllowPattern(toolName, parameters = {}) {
+  if (!parameters || typeof parameters !== 'object') return null;
+  if (toolName === 'Bash' && typeof parameters.command === 'string') {
+    const first = parameters.command.trim().split(/\s+/)[0];
+    if (first) return `${first} *`;
+    return null;
+  }
+  if (toolName === 'WebFetch' && typeof parameters.url === 'string') {
+    try {
+      const u = new URL(parameters.url);
+      return `${u.origin}/*`;
+    } catch { return null; }
+  }
+  if ((toolName === 'Read' || toolName === 'Edit' || toolName === 'Write')
+      && typeof parameters.file_path === 'string') {
+    const p = parameters.file_path;
+    const lastSlash = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+    if (lastSlash > 0) return p.slice(0, lastSlash + 1) + '*';
+    return null;
+  }
+  if (toolName === 'WebSearch' && typeof parameters.query === 'string') {
+    return '*';
+  }
+  return null;
+}
+
 function showToolApprovalDialog(approvalId, toolName, parameters) {
   const messageDiv = document.createElement('div');
   messageDiv.className = 'message assistant prompt-message';
@@ -1291,12 +1342,42 @@ function showToolApprovalDialog(approvalId, toolName, parameters) {
   const actions = document.createElement('div');
   actions.className = 'prompt-actions';
 
+  // "Always allow matching pattern" — the preferred grant path. When
+  // checked, the approval response carries a pattern that tool-handlers
+  // persists as a permission rule. The user can still tweak the pattern
+  // in the text input before approving.
+  const patternSeed = suggestAllowPattern(toolName, parameters);
+  const patternRow = document.createElement('div');
+  patternRow.className = 'prompt-pattern-row';
+  const patternLabel = document.createElement('label');
+  patternLabel.className = 'prompt-checkbox-label';
+  const patternCheckbox = document.createElement('input');
+  patternCheckbox.type = 'checkbox';
+  const patternText = document.createElement('span');
+  patternText.textContent = ' Always allow pattern:';
+  patternLabel.appendChild(patternCheckbox);
+  patternLabel.appendChild(patternText);
+  const patternInput = document.createElement('input');
+  patternInput.type = 'text';
+  patternInput.className = 'prompt-pattern-input';
+  patternInput.placeholder = patternSeed || '*';
+  patternInput.value = patternSeed || '';
+  patternInput.disabled = !patternSeed;
+  if (!patternSeed) {
+    patternCheckbox.disabled = true;
+    patternLabel.title = 'This tool has no matchable field for pattern rules.';
+  }
+  patternRow.appendChild(patternLabel);
+  patternRow.appendChild(patternInput);
+
+  // Legacy "Always approve entire tool" — kept for users who want the
+  // coarse grant, but visually de-emphasized.
   const alwaysApproveLabel = document.createElement('label');
-  alwaysApproveLabel.className = 'prompt-checkbox-label';
+  alwaysApproveLabel.className = 'prompt-checkbox-label prompt-checkbox-muted';
   const alwaysApproveInput = document.createElement('input');
   alwaysApproveInput.type = 'checkbox';
   const alwaysApproveText = document.createElement('span');
-  alwaysApproveText.textContent = ` Always approve ${toolName}`;
+  alwaysApproveText.textContent = ` Always approve all ${toolName} calls`;
   alwaysApproveLabel.appendChild(alwaysApproveInput);
   alwaysApproveLabel.appendChild(alwaysApproveText);
 
@@ -1312,24 +1393,44 @@ function showToolApprovalDialog(approvalId, toolName, parameters) {
   approveBtn.appendChild(faIcon('fas fa-check'));
   approveBtn.appendChild(document.createTextNode(' Approve'));
 
+  // Enable / disable the pattern input based on the checkbox.
+  patternCheckbox.addEventListener('change', () => {
+    patternInput.disabled = !patternCheckbox.checked;
+    if (patternCheckbox.checked && !patternInput.value && patternSeed) {
+      patternInput.value = patternSeed;
+    }
+  });
+
   let dismissed = false;
   function dismiss(approved) {
     if (dismissed) return;
     dismissed = true;
+    const usePattern = approved && patternCheckbox.checked && patternInput.value.trim();
     window.electron.tool.respondToApproval(approvalId, approved, {
-      alwaysApprove: approved ? Boolean(alwaysApproveInput.checked) : false
+      alwaysApprove: approved ? Boolean(alwaysApproveInput.checked) : false,
+      alwaysAllowPattern: usePattern ? patternInput.value.trim() : null
     });
-    // Replace actions with result text
     actions.innerHTML = '';
     const result = document.createElement('p');
     result.className = approved ? 'prompt-result-approved' : 'prompt-result-denied';
-    result.textContent = approved ? (alwaysApproveInput.checked ? `Approved (always for ${toolName})` : 'Approved') : 'Denied';
+    if (approved) {
+      if (usePattern) {
+        result.textContent = `Approved and saved rule: ${toolName} '${patternInput.value.trim()}' → allow`;
+      } else if (alwaysApproveInput.checked) {
+        result.textContent = `Approved (always for ${toolName})`;
+      } else {
+        result.textContent = 'Approved';
+      }
+    } else {
+      result.textContent = 'Denied';
+    }
     actions.appendChild(result);
   }
 
   denyBtn.addEventListener('click', () => dismiss(false), { once: true });
   approveBtn.addEventListener('click', () => dismiss(true), { once: true });
 
+  actions.appendChild(patternRow);
   actions.appendChild(alwaysApproveLabel);
   actions.appendChild(denyBtn);
   actions.appendChild(approveBtn);
@@ -1889,15 +1990,30 @@ function renderChatMessages() {
   if (!activeChat) {
     dom.chatHeaderTitle.textContent = 'King Louie Chat';
     dom.chatHeaderMeta.textContent = `Start a new conversation • Tier: ${formatInferenceTierLabel(getActiveInferenceTier())}`;
+    if (dom.workingDirLabel) dom.workingDirLabel.textContent = 'No working directory';
+    if (dom.workingDirBtn) dom.workingDirBtn.classList.remove('is-set');
     return;
   }
 
   dom.chatHeaderTitle.textContent = activeChat.title;
   const chatTotals = activeChat.llmTotals || sumChatLlmTotals(activeChat);
-  const dirLabel = activeChat.workingDirectory ? ` • ${activeChat.workingDirectory}` : '';
-  dom.chatHeaderMeta.textContent = `Updated ${formatTimestamp(activeChat.updatedAt)} • Total ${formatTokenCount(chatTotals.totalTokens)} tokens • ${formatUsd(chatTotals.costUsd)} • Tier: ${formatInferenceTierLabel(getActiveInferenceTier())}${dirLabel}`;
+  dom.chatHeaderMeta.textContent = `Updated ${formatTimestamp(activeChat.updatedAt)} • Total ${formatTokenCount(chatTotals.totalTokens)} tokens • ${formatUsd(chatTotals.costUsd)} • Tier: ${formatInferenceTierLabel(getActiveInferenceTier())}`;
   if (dom.workingDirBtn) {
-    dom.workingDirBtn.title = activeChat.workingDirectory ? `Working directory: ${activeChat.workingDirectory}` : 'Set working directory';
+    dom.workingDirBtn.title = activeChat.workingDirectory ? `Working directory: ${activeChat.workingDirectory}\nClick to change` : 'Click to set working directory';
+    dom.workingDirBtn.classList.toggle('is-set', Boolean(activeChat.workingDirectory));
+  }
+  if (dom.workingDirLabel) {
+    if (activeChat.workingDirectory) {
+      // Show just the last 1-2 path segments inline; full path lives in the
+      // tooltip. This keeps the header readable even for deep nested projects.
+      const parts = activeChat.workingDirectory.split(/[\\/]/).filter(Boolean);
+      const shortLabel = parts.length > 2
+        ? `…${parts.slice(-2).join('/')}`
+        : parts.join('/');
+      dom.workingDirLabel.textContent = shortLabel;
+    } else {
+      dom.workingDirLabel.textContent = 'No working directory';
+    }
   }
 
   let runningTotals = {
@@ -4067,37 +4183,596 @@ async function handlePlanAndExecuteWorkflow() {
   }
 }
 
+/**
+ * Format a task graph as a readable markdown block and persist it to the
+ * chat as an assistant message tagged with workflowScaffolding so it shows
+ * up in chat exports but is filtered out of the next planner run.
+ *
+ * kind: 'proposed' | 'edited'
+ */
+async function persistProposedPlan(chatId, goal, taskGraph, kind = 'proposed') {
+  if (!taskGraph || !Array.isArray(taskGraph.tasks)) return;
+  const heading = kind === 'edited'
+    ? '**Edited workflow plan (approved by user):**'
+    : '**Proposed workflow plan:**';
+  const lines = [heading, ''];
+  lines.push(`Goal: ${goal}`);
+  if (taskGraph.summary) lines.push(`Summary: ${taskGraph.summary}`);
+  lines.push(`Tasks: ${taskGraph.tasks.length}`);
+  lines.push('');
+  taskGraph.tasks.forEach((t, i) => {
+    const deps = Array.isArray(t.dependsOn) && t.dependsOn.length ? ` ← [${t.dependsOn.join(', ')}]` : '';
+    lines.push(`${i + 1}. **${t.title || t.id}** \`${t.id}\` [${t.agentId || 'main'}]${deps}`);
+    if (t.description) {
+      lines.push(`   ${String(t.description).replace(/\n/g, '\n   ')}`);
+    }
+    lines.push('');
+  });
+  const text = lines.join('\n');
+
+  // Embed the structured task graph in the message metadata so the plan can
+  // be recovered from chat history if workflows/{id}.json is lost. The
+  // existing `!m.workflowScaffolding` filters elsewhere still match because
+  // an object is truthy.
+  const scaffolding = { kind, taskGraph };
+
+  try {
+    await window.electron.chat.addMessage({
+      chatId,
+      sender: 'assistant',
+      text,
+      workflowScaffolding: scaffolding
+    });
+  } catch (err) {
+    console.warn('[workflow] persist proposed plan failed:', err.message);
+  }
+
+  const chatObj = appState.chats.find((c) => c.id === chatId);
+  if (chatObj) {
+    chatObj.messages = chatObj.messages || [];
+    chatObj.messages.push({
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+      sender: 'assistant',
+      text,
+      workflowScaffolding: scaffolding,
+      timestamp: new Date().toISOString()
+    });
+    if (chatId === appState.activeChatId) {
+      addMessage('assistant', text);
+    }
+  }
+}
+
+/**
+ * Append a status message to a specific chat (not necessarily the active one).
+ * Updates the chat's message array, persists, and renders inline if that chat
+ * is currently active.
+ */
+function appendStatusToChat(chatId, text) {
+  if (!chatId) return;
+  const chat = appState.chats.find((c) => c.id === chatId);
+  if (chat) {
+    chat.messages = chat.messages || [];
+    chat.messages.push({
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+      sender: 'status',
+      text,
+      timestamp: new Date().toISOString()
+    });
+  }
+  if (chatId === appState.activeChatId) {
+    addToolEventCompact('Workflow', { message: text }, 'info', false);
+  }
+  window.electron.chat.addMessage({ chatId, sender: 'status', text })
+    .catch((err) => console.warn('[workflow] status persist failed:', err.message));
+}
+
+/**
+ * Render an in-chat, EDITABLE approval card for a proposed task graph.
+ * Each task row has inputs for title, agentId, description, and dependsOn.
+ * Users can delete tasks and add new ones. On approve, the task graph is
+ * rebuilt from the current DOM state and passed to onApprove(editedGraph).
+ */
+const AGENT_CHOICES = ['main', 'code-explorer', 'code-writer', 'planner'];
+
+function buildTaskRow(task, taskListEl) {
+  const row = document.createElement('div');
+  row.className = 'workflow-task-row';
+  row.dataset.taskId = task.id || `task-${Math.random().toString(36).slice(2, 8)}`;
+  row.style.border = '1px solid rgba(255,255,255,0.12)';
+  row.style.borderRadius = '6px';
+  row.style.padding = '0.6em 0.75em';
+  row.style.marginBottom = '0.5em';
+  row.style.background = 'rgba(255,255,255,0.02)';
+
+  const topRow = document.createElement('div');
+  topRow.style.display = 'flex';
+  topRow.style.gap = '0.5em';
+  topRow.style.alignItems = 'center';
+  topRow.style.marginBottom = '0.35em';
+
+  const idBadge = document.createElement('code');
+  idBadge.textContent = row.dataset.taskId;
+  idBadge.style.opacity = '0.6';
+  idBadge.style.fontSize = '0.8em';
+  idBadge.style.flexShrink = '0';
+
+  const titleInput = document.createElement('input');
+  titleInput.type = 'text';
+  titleInput.className = 'workflow-task-title';
+  titleInput.value = task.title || '';
+  titleInput.placeholder = 'Task title';
+  titleInput.style.flex = '1';
+  titleInput.style.background = 'rgba(0,0,0,0.2)';
+  titleInput.style.border = '1px solid rgba(255,255,255,0.15)';
+  titleInput.style.borderRadius = '4px';
+  titleInput.style.padding = '0.25em 0.5em';
+  titleInput.style.color = 'inherit';
+  titleInput.style.fontWeight = '600';
+
+  const agentSelect = document.createElement('select');
+  agentSelect.className = 'workflow-task-agent';
+  agentSelect.style.background = 'rgba(0,0,0,0.2)';
+  agentSelect.style.border = '1px solid rgba(255,255,255,0.15)';
+  agentSelect.style.borderRadius = '4px';
+  agentSelect.style.padding = '0.25em 0.4em';
+  agentSelect.style.color = 'inherit';
+  for (const choice of AGENT_CHOICES) {
+    const opt = document.createElement('option');
+    opt.value = choice;
+    opt.textContent = choice;
+    if (choice === (task.agentId || 'main')) opt.selected = true;
+    agentSelect.appendChild(opt);
+  }
+
+  const deleteBtn = document.createElement('button');
+  deleteBtn.type = 'button';
+  deleteBtn.className = 'btn btn-sm';
+  deleteBtn.title = 'Delete task';
+  deleteBtn.appendChild(faIcon('fas fa-trash'));
+  deleteBtn.style.background = 'transparent';
+  deleteBtn.style.border = '1px solid rgba(255,255,255,0.15)';
+  deleteBtn.addEventListener('click', () => {
+    row.remove();
+  });
+
+  topRow.appendChild(idBadge);
+  topRow.appendChild(titleInput);
+  topRow.appendChild(agentSelect);
+  topRow.appendChild(deleteBtn);
+  row.appendChild(topRow);
+
+  const descInput = document.createElement('textarea');
+  descInput.className = 'workflow-task-desc';
+  descInput.value = task.description || '';
+  descInput.placeholder = 'Task description (what the executing agent should do)';
+  descInput.rows = Math.max(2, Math.min(8, (task.description || '').split('\n').length + 1));
+  descInput.style.width = '100%';
+  descInput.style.background = 'rgba(0,0,0,0.2)';
+  descInput.style.border = '1px solid rgba(255,255,255,0.15)';
+  descInput.style.borderRadius = '4px';
+  descInput.style.padding = '0.3em 0.5em';
+  descInput.style.color = 'inherit';
+  descInput.style.fontFamily = 'inherit';
+  descInput.style.fontSize = '0.9em';
+  descInput.style.marginBottom = '0.35em';
+  descInput.style.resize = 'vertical';
+  row.appendChild(descInput);
+
+  const depsWrap = document.createElement('div');
+  depsWrap.style.display = 'flex';
+  depsWrap.style.alignItems = 'center';
+  depsWrap.style.gap = '0.5em';
+  depsWrap.style.fontSize = '0.85em';
+
+  const depsLabel = document.createElement('span');
+  depsLabel.textContent = 'Depends on:';
+  depsLabel.style.opacity = '0.7';
+  depsLabel.style.flexShrink = '0';
+
+  const depsInput = document.createElement('input');
+  depsInput.type = 'text';
+  depsInput.className = 'workflow-task-deps';
+  depsInput.value = Array.isArray(task.dependsOn) ? task.dependsOn.join(', ') : '';
+  depsInput.placeholder = 'task-1, task-2 (comma-separated task IDs)';
+  depsInput.style.flex = '1';
+  depsInput.style.background = 'rgba(0,0,0,0.2)';
+  depsInput.style.border = '1px solid rgba(255,255,255,0.15)';
+  depsInput.style.borderRadius = '4px';
+  depsInput.style.padding = '0.2em 0.4em';
+  depsInput.style.color = 'inherit';
+  depsInput.style.fontFamily = 'monospace';
+
+  depsWrap.appendChild(depsLabel);
+  depsWrap.appendChild(depsInput);
+  row.appendChild(depsWrap);
+
+  // Stash the original task so fields we don't edit (priority, tools,
+  // preferredModel, estimatedComplexity) survive the round trip.
+  row._original = task;
+
+  return row;
+}
+
+function rebuildTaskGraphFromDOM(originalGraph, taskListEl) {
+  const rows = taskListEl.querySelectorAll('.workflow-task-row');
+  const tasks = [];
+  for (const row of rows) {
+    const id = row.dataset.taskId;
+    const title = row.querySelector('.workflow-task-title').value.trim();
+    const agentId = row.querySelector('.workflow-task-agent').value;
+    const description = row.querySelector('.workflow-task-desc').value.trim();
+    const depsRaw = row.querySelector('.workflow-task-deps').value.trim();
+    const dependsOn = depsRaw
+      ? depsRaw.split(',').map((s) => s.trim()).filter(Boolean)
+      : [];
+
+    const original = row._original || {};
+    tasks.push({
+      ...original,
+      id,
+      title: title || id,
+      description: description || title || id,
+      agentId: agentId || 'main',
+      dependsOn
+    });
+  }
+  return {
+    ...originalGraph,
+    tasks,
+    estimatedTotalSteps: tasks.length
+  };
+}
+
+function showWorkflowApprovalCard(taskGraph, { onApprove, onCancel }) {
+  const messageDiv = document.createElement('div');
+  messageDiv.className = 'message assistant prompt-message';
+
+  const messageContent = document.createElement('div');
+  messageContent.className = 'message-content';
+  messageContent.style.maxWidth = '100%';
+
+  const title = document.createElement('p');
+  title.innerHTML = `<strong>Proposed workflow — review &amp; edit before running</strong>`;
+  messageContent.appendChild(title);
+
+  if (taskGraph.summary) {
+    const summary = document.createElement('p');
+    summary.textContent = taskGraph.summary;
+    summary.style.opacity = '0.85';
+    summary.style.fontSize = '0.9em';
+    messageContent.appendChild(summary);
+  }
+
+  const taskList = document.createElement('div');
+  taskList.className = 'workflow-task-list';
+  taskList.style.margin = '0.5em 0 0.5em 0';
+
+  for (const t of taskGraph.tasks) {
+    taskList.appendChild(buildTaskRow(t, taskList));
+  }
+  messageContent.appendChild(taskList);
+
+  const addBtn = document.createElement('button');
+  addBtn.type = 'button';
+  addBtn.className = 'btn btn-sm';
+  addBtn.appendChild(faIcon('fas fa-plus'));
+  addBtn.appendChild(document.createTextNode(' Add task'));
+  addBtn.style.background = 'transparent';
+  addBtn.style.border = '1px dashed rgba(255,255,255,0.25)';
+  addBtn.style.width = '100%';
+  addBtn.style.padding = '0.5em';
+  addBtn.style.marginBottom = '0.5em';
+  addBtn.addEventListener('click', () => {
+    const newId = `task-${Math.random().toString(36).slice(2, 8)}`;
+    taskList.appendChild(buildTaskRow({
+      id: newId,
+      title: '',
+      description: '',
+      agentId: 'main',
+      dependsOn: [],
+      priority: 999,
+      estimatedComplexity: 'medium'
+    }, taskList));
+  });
+  messageContent.appendChild(addBtn);
+
+  const actions = document.createElement('div');
+  actions.className = 'prompt-actions';
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.className = 'btn btn-danger btn-sm';
+  cancelBtn.appendChild(faIcon('fas fa-ban'));
+  cancelBtn.appendChild(document.createTextNode(' Cancel'));
+
+  const approveBtn = document.createElement('button');
+  approveBtn.type = 'button';
+  approveBtn.className = 'btn btn-primary btn-sm';
+  approveBtn.appendChild(faIcon('fas fa-play'));
+  approveBtn.appendChild(document.createTextNode(' Approve & Run'));
+
+  let decided = false;
+  const finish = (approved) => {
+    if (decided) return;
+    const editedGraph = approved ? rebuildTaskGraphFromDOM(taskGraph, taskList) : null;
+    if (approved && editedGraph.tasks.length === 0) {
+      // Refuse — keep the card open
+      alert('Cannot approve an empty task graph. Add at least one task or cancel.');
+      return;
+    }
+    decided = true;
+    // Freeze the editable fields so they look like a snapshot
+    taskList.querySelectorAll('input, textarea, select, button').forEach((el) => {
+      el.disabled = true;
+    });
+    addBtn.disabled = true;
+    actions.innerHTML = '';
+    const result = document.createElement('p');
+    result.className = approved ? 'prompt-result-approved' : 'prompt-result-denied';
+    result.textContent = approved
+      ? `Approved — launching ${editedGraph.tasks.length} task(s)…`
+      : 'Cancelled';
+    actions.appendChild(result);
+    if (approved) onApprove?.(editedGraph); else onCancel?.();
+  };
+
+  cancelBtn.addEventListener('click', () => finish(false));
+  approveBtn.addEventListener('click', () => finish(true));
+
+  actions.appendChild(cancelBtn);
+  actions.appendChild(approveBtn);
+  messageContent.appendChild(actions);
+  messageDiv.appendChild(messageContent);
+  dom.chatMessages.appendChild(messageDiv);
+  dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
+}
+
+/**
+ * Called from the in-chat "Plan & Execute" button. Flow:
+ *   1. Collect goal (textarea, else last user message)
+ *   2. Gather chat history + workingDirectory from the active chat
+ *   3. Call workflow.plan() — the planner explores the project dir and
+ *      returns a task graph
+ *   4. Render an approval card inline; on approve, create + run the workflow
+ */
+async function handleChatPlanAndExecute() {
+  const chatId = appState.activeChatId;
+  if (!chatId) {
+    addStatusMessage('Open a chat first before launching a workflow.');
+    return;
+  }
+  const chat = appState.chats.find((c) => c.id === chatId);
+  if (!chat) {
+    addStatusMessage('Active chat not found.');
+    return;
+  }
+
+  // Goal source: textarea ONLY. If empty, prompt explicitly. We deliberately
+  // do NOT fall back to the last user message — when users paste large context
+  // documents, "last user message" becomes the entire document, which is
+  // never a goal. The chat context is still passed to the planner as history
+  // regardless, so the goal can be short and focused.
+  let goal = (dom.userInput?.value || '').trim();
+  if (!goal) {
+    const entered = window.prompt(
+      'What should the planner do? (short, focused goal — e.g. "take Funnel-OS from 6/9 to 9/9")\n\nThe whole chat will be passed as context automatically.'
+    );
+    goal = (entered || '').trim();
+  }
+  if (!goal) {
+    addStatusMessage('Plan & Execute cancelled — no goal provided.');
+    return;
+  }
+
+  // Post the goal as a real user message in the chat BEFORE doing anything
+  // else — including the working-directory check. This guarantees the user's
+  // typed goal is never lost to a validation branch, and makes clicking the
+  // button always feel like "send this as a workflow goal".
+  try {
+    await window.electron.chat.addMessage({ chatId, sender: 'user', text: goal });
+  } catch (err) {
+    console.warn('[workflow] goal persist failed:', err.message);
+  }
+  const goalMsgId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const goalMsg = {
+    id: goalMsgId,
+    sender: 'user',
+    text: goal,
+    timestamp: new Date().toISOString()
+  };
+  chat.messages = chat.messages || [];
+  chat.messages.push(goalMsg);
+  if (chatId === appState.activeChatId) {
+    addMessage('user', goal);
+  }
+
+  // Clear the textarea now that the goal has been captured and displayed.
+  if (dom.userInput) dom.userInput.value = '';
+
+  // Working directory is required for a meaningful workflow. If the chat
+  // doesn't have one set, abort cleanly with an in-chat notification — do
+  // NOT open a popup. The user's goal is already persisted above, so they
+  // can click the folder-icon button in the chat header to set a working
+  // directory and then click Plan & Execute again.
+  const workingDirectory = chat.workingDirectory || null;
+  if (!workingDirectory) {
+    appendStatusToChat(
+      chatId,
+      'Plan & Execute needs a working directory for this chat. Click the folder icon in the chat header to set one, then click Plan & Execute again — your goal is saved above.'
+    );
+    return;
+  }
+
+  // Build chat history for the planner — exclude noise that pollutes
+  // successive runs in the same chat:
+  //   1. status/toolUse/toolResult events (via sender filter)
+  //   2. messages tagged with workflowScaffolding (my own diagnostic injects)
+  //   3. prior untagged planner diagnostic output (content heuristic — matches
+  //      earlier scaffolding injected before the tag existed)
+  //   4. the goal message we just posted (don't double-include it)
+  const isPriorPlannerDiagnostic = (text) =>
+    typeof text === 'string' &&
+    text.trim().startsWith('**Planner response (no task graph produced):**');
+  const chatMessages = (chat.messages || [])
+    .filter((m) => m.sender === 'user' || m.sender === 'assistant')
+    .filter((m) => !m.workflowScaffolding)
+    .filter((m) => !isPriorPlannerDiagnostic(m.text))
+    .filter((m) => m.id !== goalMsgId)
+    .map((m) => ({ sender: m.sender, text: m.text || '' }))
+    .filter((m) => m.text.trim().length > 0);
+
+  if (dom.chatPlanBtn) dom.chatPlanBtn.disabled = true;
+  const contextChars = chatMessages.reduce((n, m) => n + (m.text?.length || 0), 0);
+  appendStatusToChat(
+    chatId,
+    `Planning workflow (${chatMessages.length} context msgs, ~${Math.round(contextChars / 4)} tokens) for goal: ${goal.slice(0, 120)}${goal.length > 120 ? '…' : ''}`
+  );
+  if (workingDirectory) {
+    appendStatusToChat(chatId, `Planner is exploring ${workingDirectory}…`);
+  }
+
+  // Insert a streaming placeholder so the user sees the same blinking
+  // indicator the normal chat path shows — this reuses the existing
+  // .message.streaming CSS (blinking ▊ cursor via ::after).
+  const plannerIndicator = document.createElement('div');
+  plannerIndicator.className = 'message assistant streaming';
+  plannerIndicator.dataset.plannerIndicator = 'true';
+  const plannerContent = document.createElement('div');
+  plannerContent.className = 'message-content';
+  plannerContent.textContent = 'Planner is exploring and drafting a task graph…';
+  plannerIndicator.appendChild(plannerContent);
+  if (chatId === appState.activeChatId) {
+    dom.chatMessages.appendChild(plannerIndicator);
+    dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
+  }
+  const removePlannerIndicator = () => {
+    if (plannerIndicator.parentNode) plannerIndicator.parentNode.removeChild(plannerIndicator);
+  };
+  setResponseActive(true, chatId);
+
+  try {
+    const result = await window.electron.workflow.plan(goal, {
+      chatId,
+      workingDirectory,
+      chatMessages
+    });
+    if (!result?.ok) {
+      removePlannerIndicator();
+      // If the planner returned raw content (a clarifying question, refusal,
+      // or malformed JSON), show it as an assistant message so the user can
+      // see what the planner actually said instead of a cryptic error.
+      // Tag it with workflowScaffolding so the next Plan & Execute run in
+      // the same chat does NOT re-feed this output back to the planner.
+      if (typeof result?.plannerOutput === 'string' && result.plannerOutput.trim()) {
+        appendStatusToChat(chatId, `Planner did not produce a task graph: ${result.error}`);
+        const diagnosticText = `**Planner response (no task graph produced):**\n\n${result.plannerOutput}`;
+        await window.electron.chat.addMessage({
+          chatId,
+          sender: 'assistant',
+          text: diagnosticText,
+          workflowScaffolding: true
+        });
+        const chatObj = appState.chats.find((c) => c.id === chatId);
+        if (chatObj) {
+          chatObj.messages = chatObj.messages || [];
+          chatObj.messages.push({
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+            sender: 'assistant',
+            text: diagnosticText,
+            workflowScaffolding: true,
+            timestamp: new Date().toISOString()
+          });
+          if (chatId === appState.activeChatId) renderChatMessages();
+        }
+        return;
+      }
+      throw new Error(result?.error || 'Planning failed');
+    }
+    const taskGraph = result.taskGraph;
+    if (!taskGraph || !Array.isArray(taskGraph.tasks) || taskGraph.tasks.length === 0) {
+      throw new Error('Planner returned an empty task graph');
+    }
+
+    removePlannerIndicator();
+
+    // Persist the proposed task graph to the chat so it shows up in exports
+    // even if the user later cancels or edits it. Tagged with
+    // workflowScaffolding so the next Plan & Execute run in this chat does
+    // NOT re-feed it to the planner (prevents pollution from stale proposals).
+    await persistProposedPlan(chatId, goal, taskGraph, 'proposed');
+
+    showWorkflowApprovalCard(taskGraph, {
+      onApprove: async (editedGraph) => {
+        try {
+          // If the user edited anything, log the edited version too so the
+          // export shows both what the planner proposed AND what actually ran.
+          if (JSON.stringify(editedGraph?.tasks) !== JSON.stringify(taskGraph.tasks)) {
+            await persistProposedPlan(chatId, goal, editedGraph, 'edited');
+          }
+          const createRes = await window.electron.workflow.create(editedGraph, { chatId, workingDirectory });
+          if (!createRes?.ok) throw new Error(createRes?.error || 'Workflow creation failed');
+          const wf = createRes.workflow;
+          appendStatusToChat(chatId, `Workflow ${wf.id} created — ${wf.tasks.length} task(s). Starting…`);
+          const runRes = await window.electron.workflow.run(wf.id);
+          if (!runRes?.ok) throw new Error(runRes?.error || 'Workflow run failed to start');
+          await loadWorkflows();
+        } catch (err) {
+          appendStatusToChat(chatId, `Workflow launch error: ${err.message}`);
+        }
+      },
+      onCancel: () => {
+        appendStatusToChat(chatId, 'Workflow plan cancelled (proposed plan is preserved in the chat above).');
+      }
+    });
+  } catch (err) {
+    removePlannerIndicator();
+    const msg = String(err?.message || err || '').toLowerCase();
+    if (msg.includes('overloaded')) {
+      appendStatusToChat(chatId, `Planning error: the model provider is overloaded right now. The agent loop already retried a few times with backoff. Wait a minute and click Plan & Execute again — your goal is saved above.`);
+    } else if (msg.includes('rate limit') || msg.includes('429')) {
+      appendStatusToChat(chatId, `Planning error: rate-limited by the model provider. Wait a moment and click Plan & Execute again.`);
+    } else {
+      appendStatusToChat(chatId, `Planning error: ${err.message}`);
+    }
+  } finally {
+    removePlannerIndicator();
+    setResponseActive(false, chatId);
+    if (dom.chatPlanBtn) dom.chatPlanBtn.disabled = false;
+  }
+}
+
 async function loadLLMRoutingSettings() {
   if (!dom.llmRoutingEnabled) return;
   try {
-    const result = await window.electron.settings.load();
-    if (!result?.ok) return;
-    const llmRouting = result.settings?.inference?.llmRouting || {};
+    // The settings:load handler returns {inference, providers, ...} at the
+    // top level, which wrapHandler wraps as {ok:true, data:{...}}. Use the
+    // existing unwrap helper — the old code read result.settings (which is
+    // always undefined) and force-unchecked the box on every load.
+    const data = unwrapIpcResult(await window.electron.settings.load(), 'Unable to load settings.');
+    const llmRouting = data?.inference?.llmRouting || {};
     dom.llmRoutingEnabled.checked = llmRouting.enabled === true;
     if (dom.llmRoutingCost) dom.llmRoutingCost.value = llmRouting.costSensitivity || 'medium';
     if (dom.llmRoutingSpeed) dom.llmRoutingSpeed.value = llmRouting.speedPriority || 'medium';
     if (dom.llmRoutingQuality) dom.llmRoutingQuality.value = llmRouting.qualityPriority || 'high';
-  } catch { /* ignore */ }
+  } catch (err) {
+    console.warn('[settings] loadLLMRoutingSettings failed:', err.message);
+  }
 }
 
 async function handleSaveLLMRouting() {
   if (dom.llmRoutingSaveBtn) dom.llmRoutingSaveBtn.disabled = true;
   try {
-    const result = await window.electron.settings.load();
-    if (!result?.ok) throw new Error('Failed to load settings');
-    const settings = result.settings || {};
-    if (!settings.inference) settings.inference = {};
-    settings.inference.llmRouting = {
-      enabled: dom.llmRoutingEnabled?.checked || false,
+    const payload = {
+      enabled: Boolean(dom.llmRoutingEnabled?.checked),
       costSensitivity: dom.llmRoutingCost?.value || 'medium',
       speedPriority: dom.llmRoutingSpeed?.value || 'medium',
       qualityPriority: dom.llmRoutingQuality?.value || 'high'
     };
-    // Save the full settings back — find the right IPC call
-    // We'll use the general settings save mechanism
-    await window.electron.settings.save?.(settings) || await window.electron.settings.load();
+    const result = await window.electron.settings.saveLlmRouting(payload);
+    if (!result?.ok) throw new Error(result?.error || 'Save failed');
     if (dom.llmRoutingStatus) {
-      dom.llmRoutingStatus.textContent = 'Saved.';
+      dom.llmRoutingStatus.textContent = payload.enabled ? 'Saved — LLM routing enabled.' : 'Saved — LLM routing disabled.';
       dom.llmRoutingStatus.classList.remove('error');
     }
   } catch (err) {
@@ -4521,6 +5196,7 @@ async function loadSettings() {
     await loadSkillSettingsTabs();
     await loadMemoryEntries();
     await loadCronJobs();
+    loadPermissionRules().catch(() => {});
     loadWorkflows().catch(() => {});
     loadLLMRoutingSettings().catch(() => {});
     loadSystemApps().catch(() => {});
@@ -4731,10 +5407,13 @@ async function sendMessage() {
         appState.chats = appState.chats.map((c) => c.id === appState.activeChatId ? { ...c, workingDirectory: dirArg } : c);
       }
     } else {
-      const result = await window.electron.chat.pickWorkingDirectory(appState.activeChatId);
-      if (result && !result.canceled && result.chat) {
-        appState.chats = appState.chats.map((c) => c.id === result.chat.id ? result.chat : c);
-        responseText = `Working directory set to \`${result.chat.workingDirectory}\``;
+      const data = unwrapIpcResult(
+        await window.electron.chat.pickWorkingDirectory(appState.activeChatId),
+        'Unable to set working directory.'
+      );
+      if (data && !data.canceled && data.chat) {
+        appState.chats = appState.chats.map((c) => (c.id === data.chat.id ? data.chat : c));
+        responseText = `Working directory set to \`${data.chat.workingDirectory}\``;
       } else {
         responseText = 'No directory selected.';
       }
@@ -5367,6 +6046,77 @@ async function handleStdCardAction(action, taskId, buttonEl = null) {
   }
 }
 
+/**
+ * Post-process rendered HTML to add copy buttons to code blocks
+ * and render diff blocks with syntax highlighting.
+ */
+function enhanceRenderedContent(container) {
+  // Add copy button to all <pre> elements
+  container.querySelectorAll('pre').forEach((pre) => {
+    if (pre.querySelector('.code-copy-btn')) return; // already enhanced
+    const wrapper = document.createElement('div');
+    wrapper.className = 'code-block-wrapper';
+    pre.parentNode.insertBefore(wrapper, pre);
+    wrapper.appendChild(pre);
+
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'code-copy-btn';
+    copyBtn.type = 'button';
+    copyBtn.title = 'Copy code';
+    copyBtn.setAttribute('aria-label', 'Copy code');
+    copyBtn.innerHTML = '<i class="fas fa-copy"></i>';
+    copyBtn.addEventListener('click', () => {
+      const code = pre.querySelector('code') || pre;
+      navigator.clipboard.writeText(code.textContent).then(() => {
+        copyBtn.innerHTML = '<i class="fas fa-check"></i>';
+        copyBtn.classList.add('copied');
+        setTimeout(() => {
+          copyBtn.innerHTML = '<i class="fas fa-copy"></i>';
+          copyBtn.classList.remove('copied');
+        }, 2000);
+      });
+    });
+    wrapper.appendChild(copyBtn);
+
+    // Detect language badge from hljs class
+    const code = pre.querySelector('code');
+    if (code) {
+      const langClass = Array.from(code.classList).find(c => c.startsWith('language-'));
+      if (langClass) {
+        const langBadge = document.createElement('span');
+        langBadge.className = 'code-lang-badge';
+        langBadge.textContent = langClass.replace('language-', '');
+        wrapper.appendChild(langBadge);
+      }
+    }
+  });
+}
+
+/**
+ * Render a unified diff string as a colored diff block.
+ */
+function renderDiffBlock(diffString) {
+  const container = document.createElement('div');
+  container.className = 'diff-block';
+  const lines = diffString.split('\n');
+  for (const line of lines) {
+    const lineEl = document.createElement('div');
+    lineEl.className = 'diff-line';
+    if (line.startsWith('+') && !line.startsWith('+++')) {
+      lineEl.classList.add('diff-added');
+    } else if (line.startsWith('-') && !line.startsWith('---')) {
+      lineEl.classList.add('diff-removed');
+    } else if (line.startsWith('@@')) {
+      lineEl.classList.add('diff-hunk');
+    } else if (line.startsWith('---') || line.startsWith('+++')) {
+      lineEl.classList.add('diff-header');
+    }
+    lineEl.textContent = line;
+    container.appendChild(lineEl);
+  }
+  return container;
+}
+
 // Add message to chat display
 function renderAssistantMessageContent(messageContent, text, format = 'markdown') {
   const safeFormat = String(format || 'markdown').toLowerCase();
@@ -5384,6 +6134,7 @@ function renderAssistantMessageContent(messageContent, text, format = 'markdown'
   }
 
   messageContent.innerHTML = window.electron.markdown.parse(text || '');
+  enhanceRenderedContent(messageContent);
 }
 
 function addMessage(sender, text, metadata = {}) {
@@ -5874,10 +6625,19 @@ document.addEventListener('click', (e) => {
 if (dom.workingDirBtn) {
   dom.workingDirBtn.addEventListener('click', async () => {
     if (!appState.activeChatId) return;
-    const result = await window.electron.chat.pickWorkingDirectory(appState.activeChatId);
-    if (result && !result.canceled && result.chat) {
-      appState.chats = appState.chats.map((c) => c.id === result.chat.id ? result.chat : c);
+    try {
+      // The IPC handler returns {canceled, chat} at the top level, which
+      // wrapHandler wraps as {ok:true, data:{canceled, chat}}. Unwrap it
+      // with the shared helper instead of reading result.chat directly.
+      const data = unwrapIpcResult(
+        await window.electron.chat.pickWorkingDirectory(appState.activeChatId),
+        'Unable to set working directory.'
+      );
+      if (!data || data.canceled || !data.chat) return;
+      appState.chats = appState.chats.map((c) => (c.id === data.chat.id ? data.chat : c));
       refreshUI();
+    } catch (err) {
+      console.warn('[chat] pickWorkingDirectory failed:', err.message);
     }
   });
 }
@@ -6724,13 +7484,34 @@ if (dom.workflowList) {
   });
 }
 
-// Auto-refresh workflows on events from main
+if (dom.chatPlanBtn) {
+  dom.chatPlanBtn.addEventListener('click', () => handleChatPlanAndExecute());
+}
+
+// Workflow event stream → chat (loose-coupled via data.chatId) + settings panel refresh.
+// registerOnce() in preload replaces prior listeners per-channel, so we attach a single
+// rich callback per event rather than chaining multiple simple ones.
 if (window.electron?.workflow) {
-  ['onCompleted', 'onFailed', 'onPaused', 'onTaskCompleted', 'onTaskFailed'].forEach(event => {
-    if (typeof window.electron.workflow[event] === 'function') {
-      window.electron.workflow[event](() => loadWorkflows());
-    }
-  });
+  const onEvent = (eventName, formatter) => {
+    const fn = window.electron.workflow[eventName];
+    if (typeof fn !== 'function') return;
+    fn((data) => {
+      if (data?.chatId) {
+        const text = formatter(data);
+        if (text) appendStatusToChat(data.chatId, text);
+      }
+      loadWorkflows().catch(() => {});
+    });
+  };
+
+  onEvent('onStarted', (d) => `Workflow ${d.workflowId} started.`);
+  onEvent('onTaskStarted', (d) => `→ ${d.title || d.taskId}`);
+  onEvent('onTaskCompleted', (d) => `✓ ${d.title || d.taskId}`);
+  onEvent('onTaskFailed', (d) => `✗ ${d.title || d.taskId}${d.error ? `: ${d.error}` : ''}`);
+  onEvent('onCompleted', (d) => `Workflow ${d.workflowId} completed.`);
+  onEvent('onFailed', (d) => `Workflow ${d.workflowId} failed${d.error ? `: ${d.error}` : ''}.`);
+  onEvent('onPaused', (d) => `Workflow ${d.workflowId} paused.`);
+  onEvent('onCancelled', (d) => `Workflow ${d.workflowId} cancelled.`);
 }
 
 // ─── System Apps event listeners ───
@@ -6803,6 +7584,12 @@ unsubscribeHandlers.push(window.electron.chat.onMessageStart(({ chatId, response
     if (!messageContent.contains(debugDiv)) messageContent.appendChild(debugDiv);
   });
 
+  // Add thinking indicator — replaced when first chunk arrives
+  const thinkingEl = document.createElement('div');
+  thinkingEl.className = 'thinking-indicator';
+  thinkingEl.innerHTML = '<span class="thinking-dots"><span>.</span><span>.</span><span>.</span></span> Thinking';
+  messageContent.appendChild(thinkingEl);
+
   messageDiv.appendChild(messageContent);
   dom.chatMessages.appendChild(messageDiv);
   dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
@@ -6819,6 +7606,10 @@ unsubscribeHandlers.push(window.electron.chat.onMessageChunk(({ chatId, response
 
   const streamElement = dom.chatMessages.querySelector(`[data-response-id="${responseId}"] .message-content`);
   if (!streamElement) return;
+
+  // Remove thinking indicator on first real content
+  const thinking = streamElement.querySelector('.thinking-indicator');
+  if (thinking) thinking.remove();
 
   // Extract completed XML tool blocks and render them as pills
   const { cleanText, toolBlocks } = extractXmlToolBlocks(next);
@@ -6850,8 +7641,13 @@ unsubscribeHandlers.push(window.electron.chat.onMessageComplete(({ chatId, respo
   const messageDiv = dom.chatMessages.querySelector(`[data-response-id="${responseId}"]`);
   if (messageDiv) {
     messageDiv.classList.remove('streaming');
-    // If the message is now empty after tool extraction, remove it entirely
+    // Remove any leftover thinking indicator
+    const thinking = messageDiv.querySelector('.thinking-indicator');
+    if (thinking) thinking.remove();
+    // Enhance code blocks with copy buttons
     const content = messageDiv.querySelector('.message-content');
+    if (content) enhanceRenderedContent(content);
+    // If the message is now empty after tool extraction, remove it entirely
     if (content && !content.textContent.trim()) {
       messageDiv.remove();
     }
@@ -6957,10 +7753,33 @@ unsubscribeHandlers.push(window.electron.chat.onToolResult(({ chatId, toolName, 
   if (chatId !== appState.activeChatId) return;
   const isError = result?.success === false || result?.ok === false;
   try {
+    // Seal the progress pill: remove the target so no further progress
+    // events update it, and clear the progress text.
+    const pill = dom.chatMessages.querySelector(`[data-tool-progress-target="${toolName}"]`);
+    if (pill) {
+      delete pill.dataset.toolProgressTarget;
+      const progressText = pill.querySelector('.tool-progress-text');
+      if (progressText) progressText.remove();
+    }
     addToolEventCompact(toolName, result, isError ? 'error' : 'success', true);
     keepStreamingIndicatorAtBottom();
   } catch (err) {
     console.error('[renderer] Failed to render tool result for', toolName, err);
+  }
+}));
+
+unsubscribeHandlers.push(window.electron.chat.onToolProgress(({ chatId, toolName, progress }) => {
+  if (chatId !== appState.activeChatId) return;
+  try {
+    const pill = dom.chatMessages.querySelector(`[data-tool-progress-target="${toolName}"]`);
+    if (!pill) return;
+    const progressText = pill.querySelector('.tool-progress-text');
+    if (!progressText) return;
+    progressText.textContent = typeof progress?.message === 'string'
+      ? progress.message
+      : (typeof progress === 'string' ? progress : '');
+  } catch {
+    // Non-critical — swallow rendering errors in progress updates.
   }
 }));
 
@@ -7045,6 +7864,59 @@ window.addEventListener('beforeunload', () => {
 });
 
 /* --- Webhook management ----------------------------------- */
+// ── Permissions tab ────────────────────────────────────────────
+async function loadPermissionRules() {
+  const container = document.getElementById('permission-rules-list');
+  const status = document.getElementById('permission-rules-status');
+  if (!container) return;
+
+  try {
+    const result = await window.electron.tool.listPermissionRules();
+    if (!result?.ok) {
+      if (status) status.textContent = result?.error || 'Unable to load rules.';
+      return;
+    }
+    const rules = result.rules || [];
+    container.innerHTML = '';
+    if (rules.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'provider-message';
+      empty.textContent = 'No permission rules configured yet. Approve a tool call with a pattern to create one.';
+      container.appendChild(empty);
+      return;
+    }
+    for (const rule of rules) {
+      const row = document.createElement('div');
+      row.className = 'provider-item permission-rule-row';
+      const label = document.createElement('span');
+      label.className = 'permission-rule-label';
+      const actionClass = rule.action === 'deny' ? 'badge-danger' : (rule.action === 'allow' ? 'badge-success' : 'badge-warn');
+      label.innerHTML = `<code>${rule.tool || '?'}</code> <code>${rule.pattern || '*'}</code> <span class="badge ${actionClass}">${rule.action || '?'}</span>`;
+      if (rule.source) {
+        const src = document.createElement('span');
+        src.className = 'permission-rule-source';
+        src.textContent = rule.source;
+        label.appendChild(document.createTextNode(' '));
+        label.appendChild(src);
+      }
+      const deleteBtn = document.createElement('button');
+      deleteBtn.type = 'button';
+      deleteBtn.className = 'btn btn-danger btn-xs';
+      deleteBtn.textContent = 'Remove';
+      deleteBtn.addEventListener('click', async () => {
+        await window.electron.tool.removePermissionRule(rule.tool, rule.pattern, rule.action);
+        loadPermissionRules();
+      });
+      row.appendChild(label);
+      row.appendChild(deleteBtn);
+      container.appendChild(row);
+    }
+    if (status) status.textContent = `${rules.length} rule${rules.length === 1 ? '' : 's'}`;
+  } catch (err) {
+    if (status) status.textContent = `Error: ${err.message}`;
+  }
+}
+
 async function loadWebhookList() {
   if (!dom.webhookList) return;
   try {
@@ -7625,6 +8497,279 @@ if (dom.wizardSkipBtn) {
 if (window.electron.wizard?.onStart) {
   unsubscribeHandlers.push(window.electron.wizard.onStart(() => startWizard()));
 }
+
+// ============================================================
+// UX Enhancements — Wave 3
+// ============================================================
+
+// --- Chat search & pin ------------------------------------------
+(function initChatSearch() {
+  const sidebar = document.querySelector('.sidebar');
+  const chatList = document.getElementById('chat-list');
+  if (!sidebar || !chatList) return;
+
+  // Insert search box after sidebar-header
+  const header = sidebar.querySelector('.sidebar-header');
+  if (!header) return;
+
+  const searchDiv = document.createElement('div');
+  searchDiv.className = 'sidebar-search';
+  searchDiv.innerHTML = '<i class="fas fa-search sidebar-search-icon"></i><input type="text" id="chat-search-input" placeholder="Search chats..." aria-label="Search chats">';
+  header.after(searchDiv);
+
+  const searchInput = searchDiv.querySelector('input');
+  searchInput.addEventListener('input', () => {
+    const query = searchInput.value.toLowerCase().trim();
+    const items = chatList.querySelectorAll('.chat-item');
+    items.forEach((item) => {
+      const title = item.querySelector('.chat-item-title')?.textContent?.toLowerCase() || '';
+      const preview = item.querySelector('.chat-item-preview')?.textContent?.toLowerCase() || '';
+      item.style.display = (title.includes(query) || preview.includes(query)) ? '' : 'none';
+    });
+  });
+})();
+
+// --- Retry button on errors ------------------------------------
+(function initRetryOnError() {
+  // Watch for error messages and add retry buttons
+  const observer = new MutationObserver((mutations) => {
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        if (node.nodeType !== 1) continue;
+        // Look for error status messages or failed assistant messages
+        if (node.classList?.contains('message') && node.classList?.contains('assistant')) {
+          const content = node.querySelector('.message-content');
+          const text = content?.textContent || '';
+          if (text.toLowerCase().includes('error') && !content?.querySelector('.retry-btn')) {
+            const retryBtn = document.createElement('button');
+            retryBtn.className = 'retry-btn';
+            retryBtn.type = 'button';
+            retryBtn.innerHTML = '<i class="fas fa-rotate-right"></i> Retry';
+            retryBtn.addEventListener('click', () => {
+              retryBtn.remove();
+              sendMessage();
+            });
+            content.appendChild(retryBtn);
+          }
+        }
+      }
+    }
+  });
+  const chatMessages = document.getElementById('chat-messages');
+  if (chatMessages) observer.observe(chatMessages, { childList: true });
+})();
+
+// --- Command palette (Ctrl+K) ----------------------------------
+const commandPaletteActions = [
+  { name: 'New Chat', icon: 'fas fa-plus', shortcut: 'Ctrl+N', action: () => handleCreateChat() },
+  { name: 'Export as JSON', icon: 'fas fa-file-export', shortcut: 'Ctrl+Shift+E', action: () => document.getElementById('export-chat-btn')?.click() },
+  { name: 'Export as Markdown', icon: 'fas fa-file-lines', action: () => exportAsMarkdown() },
+  { name: 'Settings', icon: 'fas fa-gear', shortcut: 'Ctrl+,', action: () => document.getElementById('open-settings-btn')?.click() },
+  { name: 'Toggle Agent Mode', icon: 'fas fa-robot', action: () => document.getElementById('agent-mode-btn')?.click() },
+  { name: 'Clear Input', icon: 'fas fa-eraser', shortcut: 'Ctrl+L', action: () => { dom.userInput.value = ''; dom.userInput.style.height = 'auto'; } },
+  { name: 'Plan & Execute', icon: 'fas fa-diagram-project', action: () => document.getElementById('chat-plan-btn')?.click() },
+  { name: '/help — Show commands', icon: 'fas fa-circle-question', action: () => { dom.userInput.value = '/help'; sendMessage(); } },
+  { name: '/cd — Change directory', icon: 'fas fa-folder-open', action: () => { dom.userInput.value = '/cd '; dom.userInput.focus(); } },
+];
+
+function showCommandPalette() {
+  if (document.querySelector('.command-palette-overlay')) return;
+
+  const overlay = document.createElement('div');
+  overlay.className = 'command-palette-overlay';
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+
+  const palette = document.createElement('div');
+  palette.className = 'command-palette';
+
+  const input = document.createElement('input');
+  input.className = 'command-palette-input';
+  input.type = 'text';
+  input.placeholder = 'Type a command...';
+  palette.appendChild(input);
+
+  const results = document.createElement('div');
+  results.className = 'command-palette-results';
+  palette.appendChild(results);
+
+  let selectedIndex = 0;
+
+  function renderResults(query) {
+    const q = query.toLowerCase().trim();
+    const filtered = q
+      ? commandPaletteActions.filter(a => a.name.toLowerCase().includes(q))
+      : commandPaletteActions;
+    results.innerHTML = '';
+    selectedIndex = 0;
+    filtered.forEach((action, i) => {
+      const item = document.createElement('button');
+      item.className = 'command-palette-item' + (i === 0 ? ' selected' : '');
+      item.type = 'button';
+      item.innerHTML = `<i class="${action.icon}"></i> ${action.name}`;
+      if (action.shortcut) {
+        item.innerHTML += `<span class="shortcut">${action.shortcut}</span>`;
+      }
+      item.addEventListener('click', () => { overlay.remove(); action.action(); });
+      item.addEventListener('mouseenter', () => {
+        results.querySelectorAll('.command-palette-item').forEach(el => el.classList.remove('selected'));
+        item.classList.add('selected');
+        selectedIndex = i;
+      });
+      results.appendChild(item);
+    });
+  }
+
+  input.addEventListener('input', () => renderResults(input.value));
+  input.addEventListener('keydown', (e) => {
+    const items = results.querySelectorAll('.command-palette-item');
+    if (e.key === 'ArrowDown') { e.preventDefault(); selectedIndex = Math.min(selectedIndex + 1, items.length - 1); }
+    if (e.key === 'ArrowUp') { e.preventDefault(); selectedIndex = Math.max(selectedIndex - 1, 0); }
+    items.forEach((el, i) => el.classList.toggle('selected', i === selectedIndex));
+    if (e.key === 'Enter' && items[selectedIndex]) { overlay.remove(); commandPaletteActions.filter(a => !input.value.trim() || a.name.toLowerCase().includes(input.value.toLowerCase()))[selectedIndex]?.action(); }
+    if (e.key === 'Escape') overlay.remove();
+  });
+
+  renderResults('');
+  overlay.appendChild(palette);
+  document.body.appendChild(overlay);
+  input.focus();
+}
+
+// --- Global keyboard shortcuts ---------------------------------
+document.addEventListener('keydown', (e) => {
+  const isMod = e.ctrlKey || e.metaKey;
+
+  // Ctrl+K — command palette
+  if (isMod && e.key === 'k') { e.preventDefault(); showCommandPalette(); return; }
+  // Ctrl+N — new chat
+  if (isMod && e.key === 'n' && !e.shiftKey) { e.preventDefault(); handleCreateChat(); return; }
+  // Ctrl+L — clear input
+  if (isMod && e.key === 'l' && !e.shiftKey) { e.preventDefault(); dom.userInput.value = ''; dom.userInput.style.height = 'auto'; dom.userInput.focus(); return; }
+  // Ctrl+, — settings
+  if (isMod && e.key === ',') { e.preventDefault(); document.getElementById('open-settings-btn')?.click(); return; }
+  // Ctrl+Shift+E — export
+  if (isMod && e.shiftKey && e.key === 'E') { e.preventDefault(); document.getElementById('export-chat-btn')?.click(); return; }
+});
+
+// --- Markdown export -------------------------------------------
+async function exportAsMarkdown() {
+  const chat = getActiveChat();
+  if (!chat) return;
+
+  const lines = [`# ${chat.title}\n`];
+  lines.push(`_Exported ${new Date().toISOString()}_\n`);
+
+  for (const msg of chat.messages) {
+    if (msg.sender === 'user') {
+      lines.push(`## User\n\n${msg.text}\n`);
+    } else if (msg.sender === 'assistant') {
+      lines.push(`## Assistant\n\n${msg.text}\n`);
+    } else if (msg.sender === 'toolUse') {
+      lines.push(`<details><summary>Tool: ${msg.toolName}</summary>\n\n\`\`\`json\n${JSON.stringify(msg.parameters, null, 2)}\n\`\`\`\n</details>\n`);
+    } else if (msg.sender === 'toolResult') {
+      const status = (msg.result?.success === false || msg.result?.ok === false) ? 'Error' : 'Result';
+      const diff = msg.result?.diff;
+      if (diff) {
+        lines.push(`<details><summary>${msg.toolName} ${status}</summary>\n\n\`\`\`diff\n${diff}\n\`\`\`\n</details>\n`);
+      } else {
+        lines.push(`<details><summary>${msg.toolName} ${status}</summary>\n\n\`\`\`json\n${JSON.stringify(msg.result, null, 2).substring(0, 2000)}\n\`\`\`\n</details>\n`);
+      }
+    }
+  }
+
+  const content = lines.join('\n');
+  const blob = new Blob([content], { type: 'text/markdown' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${chat.title.replace(/[^a-zA-Z0-9]/g, '_')}.md`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// --- Agent progress status line --------------------------------
+(function initAgentProgress() {
+  const inputContainer = document.getElementById('input-container');
+  if (!inputContainer) return;
+
+  const progressBar = document.createElement('div');
+  progressBar.className = 'agent-progress-bar';
+  progressBar.id = 'agent-progress-bar';
+  progressBar.hidden = true;
+  progressBar.innerHTML = '<span class="progress-dot"></span><span id="agent-progress-text">Agent running...</span>';
+  inputContainer.parentNode.insertBefore(progressBar, inputContainer);
+
+  let toolCount = 0;
+  let startTime = 0;
+  let progressInterval = null;
+
+  function updateProgress() {
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+    const text = document.getElementById('agent-progress-text');
+    if (text) text.textContent = `Agent running · ${toolCount} tool${toolCount !== 1 ? 's' : ''} · ${elapsed}s`;
+  }
+
+  // Hook into existing response events
+  if (window.electron?.chat?.onMessageStart) {
+    window.electron.chat.onMessageStart(({ chatId }) => {
+      if (chatId !== appState.activeChatId) return;
+      toolCount = 0;
+      startTime = Date.now();
+      progressBar.hidden = false;
+      updateProgress();
+      progressInterval = setInterval(updateProgress, 1000);
+    });
+  }
+
+  if (window.electron?.chat?.onToolUse) {
+    window.electron.chat.onToolUse(({ chatId, toolName }) => {
+      if (chatId !== appState.activeChatId) return;
+      toolCount++;
+      const text = document.getElementById('agent-progress-text');
+      if (text) text.textContent = `Agent running · ${toolName} · ${toolCount} tool${toolCount !== 1 ? 's' : ''}`;
+    });
+  }
+
+  if (window.electron?.chat?.onMessageComplete) {
+    window.electron.chat.onMessageComplete(({ chatId }) => {
+      if (chatId !== appState.activeChatId) return;
+      progressBar.hidden = true;
+      if (progressInterval) { clearInterval(progressInterval); progressInterval = null; }
+    });
+  }
+})();
+
+// --- Welcome card (first-run) ----------------------------------
+(function initWelcomeCard() {
+  const emptyState = document.getElementById('empty-state');
+  if (!emptyState) return;
+
+  // Check if this is a first-run (no chats exist and haven't dismissed)
+  const dismissed = localStorage.getItem('kl-welcome-dismissed');
+  if (dismissed) return;
+
+  const card = document.createElement('div');
+  card.className = 'welcome-card';
+  card.innerHTML = `
+    <h2>Welcome to King Louie</h2>
+    <p>Your AI-powered desktop assistant for coding, automation, and more.</p>
+    <ul class="welcome-tips">
+      <li><i class="fas fa-key"></i> Set your API key in <strong>Settings</strong> (gear icon or <kbd>Ctrl+,</kbd>)</li>
+      <li><i class="fas fa-robot"></i> Enable <strong>Agent Mode</strong> for tool-using AI (file editing, terminal, web search)</li>
+      <li><i class="fas fa-keyboard"></i> Press <kbd>Ctrl+K</kbd> to open the <strong>Command Palette</strong></li>
+      <li><i class="fas fa-slash"></i> Type <kbd>/help</kbd> to see all available commands</li>
+      <li><i class="fas fa-diagram-project"></i> Use <strong>Plan & Execute</strong> for complex multi-step tasks</li>
+    </ul>
+    <button class="welcome-dismiss" type="button">Got it, don't show again</button>
+  `;
+  card.querySelector('.welcome-dismiss').addEventListener('click', () => {
+    localStorage.setItem('kl-welcome-dismissed', '1');
+    card.remove();
+  });
+  emptyState.appendChild(card);
+})();
 
 loadChats();
 loadSettings();

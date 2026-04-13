@@ -57,7 +57,7 @@
         </div>
         <div class="chat-header-actions">
           <button id="mesh-indicator-btn" class="icon-button mesh-indicator" type="button" title="Mesh network" aria-label="Mesh network" hidden><i class="fas fa-network-wired"></i> <span id="mesh-peer-count">0</span></button>
-          <button id="working-dir-btn" class="icon-button" type="button" title="Set working directory" aria-label="Set working directory"><i class="fas fa-folder-open"></i></button>
+          <button id="working-dir-btn" class="working-dir-btn" type="button" title="Set working directory" aria-label="Set working directory"><i class="fas fa-folder-open"></i> <span id="working-dir-label" class="working-dir-label">No working directory</span></button>
           <button id="export-chat-btn" class="icon-button" type="button" title="Export chat as JSON" aria-label="Export chat as JSON"><i class="fas fa-file-export"></i></button>
           <button id="chat-info-btn" class="icon-button" type="button" title="Chat info" aria-label="Chat info"><i class="fas fa-chart-bar"></i></button>
         </div>
@@ -90,6 +90,7 @@
         <div class="input-actions">
           <input id="image-file-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp,text/plain,.txt,.md,text/csv,.csv,application/pdf,.pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx,application/vnd.ms-excel,.xls" multiple hidden>
           <button id="attach-image-btn" class="icon-button" type="button" title="Attach files" aria-label="Attach files"><i class="fas fa-paperclip"></i></button>
+          <button id="chat-plan-btn" class="btn btn-lg" type="button" title="Plan & Execute this goal as a multi-step workflow in this chat"><i class="fas fa-diagram-project"></i> Plan &amp; Execute</button>
           <button id="send-btn" class="btn btn-primary btn-lg send-btn"><i class="fas fa-paper-plane"></i> Send</button>
           <button id="stop-btn" class="btn btn-lg stop-btn" hidden><i class="fas fa-stop"></i> Stop</button>
         </div>
@@ -134,6 +135,7 @@
           <option value="voice">Voice</option>
           <option value="notifications">Notifications</option>
           <option value="hooks">Hooks</option>
+          <option value="permissions">Permissions</option>
           <option value="memory">Memory</option>
           <option value="scheduler">Scheduler</option>
           <option value="workflows">Workflows</option>
@@ -514,6 +516,18 @@
           </section>
         </div>
 
+        <!-- Tab: Permissions -->
+        <div class="settings-tab-content" data-tab="permissions">
+          <section class="template-variables-card">
+            <h3>Tool Permission Rules</h3>
+            <p>Pattern-based rules that auto-approve or block tool calls. Rules are evaluated first-match-wins: a matching rule short-circuits the per-tool approval prompt. Created via the approval dialog ("Always allow pattern") or manually below.</p>
+            <div id="permission-rules-list" class="provider-list"></div>
+            <div class="template-variables-actions" style="margin-top: 12px;">
+              <span id="permission-rules-status" class="provider-message"></span>
+            </div>
+          </section>
+        </div>
+
         <!-- Tab: Memory -->
         <div class="settings-tab-content" data-tab="memory">
           <section class="template-variables-card">
@@ -644,33 +658,34 @@
           <section class="template-variables-card" style="margin-top: 16px;">
             <h3>LLM-Powered Routing</h3>
             <p>Automatically select the best model for each task using AI classification instead of keyword rules.</p>
+            <label class="inline-toggle" for="llm-routing-enabled">
+              <input id="llm-routing-enabled" type="checkbox">
+              <span>Enable LLM Routing</span>
+            </label>
             <div class="template-variables-grid">
-              <label for="llm-routing-enabled">Enable LLM Routing</label>
-              <input type="checkbox" id="llm-routing-enabled" />
-
               <label for="llm-routing-cost">Cost Sensitivity</label>
-              <select id="llm-routing-cost">
+              <select id="llm-routing-cost" class="provider-input">
                 <option value="low">Low (prefer quality)</option>
                 <option value="medium">Medium (balanced)</option>
                 <option value="high">High (prefer cheap)</option>
               </select>
 
               <label for="llm-routing-speed">Speed Priority</label>
-              <select id="llm-routing-speed">
+              <select id="llm-routing-speed" class="provider-input">
                 <option value="low">Low (prefer quality)</option>
                 <option value="medium">Medium (balanced)</option>
                 <option value="high">High (prefer fast)</option>
               </select>
 
               <label for="llm-routing-quality">Quality Priority</label>
-              <select id="llm-routing-quality">
+              <select id="llm-routing-quality" class="provider-input">
                 <option value="low">Low</option>
                 <option value="medium">Medium</option>
                 <option value="high">High</option>
               </select>
             </div>
-            <div class="template-variables-actions" style="margin-top: 10px;">
-              <button id="llm-routing-save-btn" type="button" class="btn">Save</button>
+            <div class="template-variables-actions">
+              <button id="llm-routing-save-btn" type="button" class="btn btn-primary">Save</button>
               <span id="llm-routing-status" class="provider-message"></span>
             </div>
           </section>

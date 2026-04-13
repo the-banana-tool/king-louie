@@ -103,6 +103,7 @@ class OpenAIProvider extends BaseLLMProvider {
     return {
       'gpt-5.4-pro': { inputPerMillion: 3, outputPerMillion: 15 },
       'gpt-5': { inputPerMillion: 3, outputPerMillion: 15 },
+      'gpt-5.1': { inputPerMillion: 3, outputPerMillion: 15 },
       'gpt-5-mini': { inputPerMillion: 0.5, outputPerMillion: 2 },
       'gpt-5.2-codex': { inputPerMillion: 3, outputPerMillion: 15 },
       'gpt-4.1': { inputPerMillion: 2, outputPerMillion: 8 },
@@ -455,19 +456,24 @@ class OpenAIProvider extends BaseLLMProvider {
     });
 
     // Check for function_call output items
-    const fnCall = data.output?.find((item) => item.type === 'function_call');
-    if (fnCall) {
-      let parsedArgs = {};
-      try {
-        parsedArgs = JSON.parse(fnCall.arguments || '{}');
-      } catch {
-        parsedArgs = {};
-      }
+    const fnCalls = (data.output || []).filter((item) => item.type === 'function_call');
+    if (fnCalls.length > 0) {
+      const toolCalls = fnCalls.map((fnCall) => {
+        let parsedArgs = {};
+        try { parsedArgs = JSON.parse(fnCall.arguments || '{}'); } catch { parsedArgs = {}; }
+        return {
+          toolName: fnCall.name,
+          toolUseId: fnCall.call_id || `call_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+          parameters: parsedArgs
+        };
+      });
+
       return {
         type: 'tool_use',
-        toolName: fnCall.name,
-        toolUseId: fnCall.call_id || `call_${Date.now()}`,
-        parameters: parsedArgs,
+        toolName: toolCalls[0].toolName,
+        toolUseId: toolCalls[0].toolUseId,
+        parameters: toolCalls[0].parameters,
+        toolCalls,
         messageContent: '',
         llmMetrics
       };
@@ -492,20 +498,24 @@ class OpenAIProvider extends BaseLLMProvider {
       };
     }
 
-    const toolCall = message.tool_calls?.find((call) => call.type === 'function');
-    if (toolCall?.function?.name) {
-      let parsedArgs = {};
-      try {
-        parsedArgs = JSON.parse(toolCall.function.arguments || '{}');
-      } catch {
-        parsedArgs = {};
-      }
+    const functionCalls = (message.tool_calls || []).filter((call) => call.type === 'function' && call.function?.name);
+    if (functionCalls.length > 0) {
+      const toolCalls = functionCalls.map((call) => {
+        let parsedArgs = {};
+        try { parsedArgs = JSON.parse(call.function.arguments || '{}'); } catch { parsedArgs = {}; }
+        return {
+          toolName: call.function.name,
+          toolUseId: call.id,
+          parameters: parsedArgs
+        };
+      });
 
       return {
         type: 'tool_use',
-        toolName: toolCall.function.name,
-        toolUseId: toolCall.id,
-        parameters: parsedArgs,
+        toolName: toolCalls[0].toolName,
+        toolUseId: toolCalls[0].toolUseId,
+        parameters: toolCalls[0].parameters,
+        toolCalls,
         messageContent: message.content || '',
         llmMetrics
       };
@@ -540,6 +550,33 @@ class OpenAIProvider extends BaseLLMProvider {
         content: JSON.stringify(toolResult)
       }
     ];
+  }
+
+  buildMultiToolMessages(response, toolCallEntries) {
+    const messages = [
+      {
+        role: 'assistant',
+        content: response.messageContent || '',
+        tool_calls: toolCallEntries.map((entry) => ({
+          id: entry.toolCallId,
+          type: 'function',
+          function: {
+            name: entry.toolName,
+            arguments: JSON.stringify(entry.parameters || {})
+          }
+        }))
+      }
+    ];
+
+    for (const entry of toolCallEntries) {
+      messages.push({
+        role: 'tool',
+        tool_call_id: entry.toolCallId,
+        content: JSON.stringify(entry.result)
+      });
+    }
+
+    return messages;
   }
 
   async streamMessage(messages, options = {}, onChunk) {

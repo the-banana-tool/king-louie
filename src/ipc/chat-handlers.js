@@ -1,6 +1,7 @@
 const { wrapHandler } = require('./wrap-handler');
 const IPC = require('./constants');
 const ImageHandler = require('../media/image-handler');
+const Advisor = require('../execution/advisor');
 
 function registerChatHandlers(ipcMain, context = {}) {
   const {
@@ -24,7 +25,9 @@ function registerChatHandlers(ipcMain, context = {}) {
     speakSummaryText,
     getUsageTracker,
     createUsageRecordFromMetrics,
-    getContextAssembler
+    getContextAssembler,
+    getConversationCompactor,
+    getToolResultsDir
   } = context;
 
   const activeRuns = new Map(); // chatId -> AbortController
@@ -243,6 +246,34 @@ function registerChatHandlers(ipcMain, context = {}) {
 
   const getSettings = context.getSettings;
 
+  /**
+   * Pick a cheap model for agent-loop tool iterations (after the first).
+   * Uses settings.inference.agentLoopModel if configured, otherwise
+   * auto-selects the cheapest capable model for the same provider.
+   * Returns null if the primary model is already cheap.
+   */
+  function resolveAgentLoopModel(providerType, primaryModel) {
+    const settings = typeof getSettings === 'function' ? getSettings() : {};
+    const configured = settings?.inference?.agentLoopModel;
+    if (configured) return configured;
+
+    // Don't downgrade if already on a cheap model
+    const lower = String(primaryModel || '').toLowerCase();
+    const cheapPatterns = ['mini', 'haiku', 'flash', '8b-instant', 'small'];
+    if (cheapPatterns.some(p => lower.includes(p))) return null;
+
+    const cheapModels = {
+      openai: 'gpt-4o-mini',
+      anthropic: 'claude-3-5-haiku-latest',
+      gemini: 'gemini-2.0-flash',
+      groq: 'llama-3.1-8b-instant',
+      mistral: 'mistral-small-latest',
+      deepseek: 'deepseek-chat'
+    };
+
+    return cheapModels[providerType] || null;
+  }
+
   ipcMain.handle(IPC.CHAT_SEND_MESSAGE, wrapHandler(IPC.CHAT_SEND_MESSAGE, async (event, { chatId, message, images = [], documents = [], agentMode = false, sandboxMode = true }) => {
     let safeMessage = String(message || '');
     const normalizedImages = ImageHandler.normalizeMessageImages(images);
@@ -292,10 +323,31 @@ function registerChatHandlers(ipcMain, context = {}) {
       throw new Error('Chat not found');
     }
     // Filter out persisted tool events — only user/assistant messages go to the LLM
-    const chat = {
-      ...chatRaw,
-      messages: chatRaw.messages.filter((m) => m.sender === 'user' || m.sender === 'assistant')
-    };
+    const allContentMessages = chatRaw.messages.filter((m) => m.sender === 'user' || m.sender === 'assistant');
+
+    // Semantic conversation compaction: for large conversations, chunk every
+    // message into paragraphs, embed them, then retrieve only the chunks
+    // relevant to the current query.  One cheap embedding call (~$0.002),
+    // then pure local cosine similarity — no LLM call for the retrieval.
+    const compactor = typeof getConversationCompactor === 'function' ? getConversationCompactor() : null;
+    let chatMessages = allContentMessages;
+    if (compactor && compactor.shouldCompact(allContentMessages)) {
+      try {
+        chatMessages = await compactor.retrieve(safeMessage, allContentMessages, {
+          maxChunks: 20,
+          alwaysKeepRecent: 4,
+          minSimilarity: 0.25,
+          maxTokens: 4000
+        });
+        const origTokens = Math.ceil(allContentMessages.reduce((s, m) => s + (m.text?.length || 0), 0) / 4);
+        const compTokens = Math.ceil(chatMessages.reduce((s, m) => s + (m.text?.length || 0), 0) / 4);
+        console.log(`[chat] Compacted ${allContentMessages.length} messages → ${chatMessages.length} messages (~${origTokens} → ~${compTokens} tokens, ${Math.round((1 - compTokens / origTokens) * 100)}% reduction)`);
+      } catch (err) {
+        console.warn('[chat] Conversation compaction failed, using full history:', err.message);
+      }
+    }
+
+    const chat = { ...chatRaw, messages: chatMessages };
 
     const responseId = createId();
     const runId = createId();
@@ -367,6 +419,10 @@ function registerChatHandlers(ipcMain, context = {}) {
         safeSend(event.sender, 'chat:toolResult', { chatId, runId, toolName, result });
       });
 
+      executor.on('toolProgress', ({ toolName, progress }) => {
+        safeSend(event.sender, 'chat:toolProgress', { chatId, runId, toolName, progress });
+      });
+
       let fullResponse = '';
       let llmSummary = {
         calls: [],
@@ -376,22 +432,74 @@ function registerChatHandlers(ipcMain, context = {}) {
       await withNotificationTiming('Chat response', async () => {
         const canUseAgentMode = agentMode && toolDefinitions.length > 0 && typeof provider.sendMessageWithTools === 'function';
         if (canUseAgentMode) {
+          const loopModel = resolveAgentLoopModel(inference.providerType, options.model);
+          const embeddingProvider = contextAssembler?.embeddingProvider || null;
+          const toolResultsDir = typeof getToolResultsDir === 'function' ? getToolResultsDir() : null;
           const loop = new AgentLoop(provider, executor, {
             maxIterations: 40,
+            loopModel,
+            embeddingProvider,
             usageTracker: typeof getUsageTracker === 'function' ? getUsageTracker() : null,
-            abortSignal: abortController.signal
+            abortSignal: abortController.signal,
+            toolResultsDir,
+            // Stream text deltas to the UI during agent loop iterations
+            onChunk: (chunk) => {
+              if (abortController.signal.aborted) return;
+              fullResponse += chunk;
+              safeSend(event.sender, 'chat:messageChunk', { chatId, responseId, chunk });
+            }
           });
           const result = await loop.run(chat.messages, toolDefinitions, {
             ...options,
             contextAssembler,
             autoApproveTools: ['Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep', 'Git']
           });
-          fullResponse = result.content || '(No response)';
+          // If streaming didn't fire (non-streaming provider), send full response
+          if (!fullResponse) {
+            fullResponse = result.content || '(No response)';
+            safeSend(event.sender, 'chat:messageChunk', { chatId, responseId, chunk: fullResponse });
+          } else {
+            // Streaming fired — use result.content as the canonical final answer
+            // (fullResponse accumulated deltas but result.content is the clean final text)
+            fullResponse = result.content || fullResponse;
+          }
           llmSummary = {
             calls: result?.llm?.calls || [],
             totals: result?.llm?.totals || llmSummary.totals
           };
-          safeSend(event.sender, 'chat:messageChunk', { chatId, responseId, chunk: fullResponse });
+
+          // Run advisor review if enabled in settings
+          const advisorSettings = typeof getSettings === 'function' ? getSettings() : {};
+          const advisorConfig = advisorSettings.advisor;
+          if (advisorConfig?.enabled && advisorConfig?.model && !abortController.signal.aborted) {
+            try {
+              safeSend(event.sender, 'chat:advisorStarted', { chatId });
+              const advisorProvider = provider; // Use same provider by default
+              const advisor = new Advisor({
+                provider: advisorProvider,
+                model: advisorConfig.model,
+                usageTracker: typeof getUsageTracker === 'function' ? getUsageTracker() : null
+              });
+
+              const reviewResult = await advisor.review(result, {
+                userMessage: safeMessage
+              });
+
+              if (reviewResult.review) {
+                // Append advisor review as a system note
+                const reviewNote = `\n\n---\n**Advisor Review** (${advisorConfig.model}):\n${reviewResult.review}`;
+                fullResponse += reviewNote;
+                safeSend(event.sender, 'chat:messageChunk', { chatId, responseId, chunk: reviewNote });
+                safeSend(event.sender, 'chat:advisorCompleted', {
+                  chatId,
+                  verdict: reviewResult.verdict,
+                  model: advisorConfig.model
+                });
+              }
+            } catch (err) {
+              console.warn('[advisor] Review failed:', err.message);
+            }
+          }
         } else {
           const streamResult = await provider.streamMessage(chat.messages, { ...options, abortSignal: abortController.signal }, (chunk) => {
             if (abortController.signal.aborted) return;

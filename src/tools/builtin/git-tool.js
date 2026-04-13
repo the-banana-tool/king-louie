@@ -9,8 +9,23 @@ const ALLOWED_COMMANDS = [
   'tag', 'remote', 'rev-parse', 'ls-files', 'init', 'clone'
 ];
 
-// Block destructive commands that could cause data loss
+// Block destructive flags that could cause data loss
 const BLOCKED_ARGS = ['--force', '-f', '--hard', '--delete', '-D'];
+
+// Block hook bypass flags — hooks exist for a reason
+const BLOCKED_HOOK_BYPASS = ['--no-verify', '--no-gpg-sign', '-n'];
+
+// Block interactive flags — not supported in non-interactive execution
+const BLOCKED_INTERACTIVE = ['-i', '--interactive', '-p', '--patch'];
+
+// Files that should never be committed (secrets, credentials)
+const SENSITIVE_FILE_PATTERNS = [
+  /\.env$/i, /\.env\.\w+$/i,
+  /credentials\.json$/i, /secrets\.json$/i, /secret\.json$/i,
+  /\.pem$/, /\.key$/, /id_rsa/, /id_ed25519/,
+  /token\.json$/i, /auth\.json$/i,
+  /\.netrc$/i, /\.npmrc$/i
+];
 
 const gitTool = new Tool({
   name: 'Git',
@@ -35,7 +50,61 @@ const gitTool = new Tool({
     // Check for blocked destructive args
     for (const arg of args) {
       if (BLOCKED_ARGS.includes(arg)) {
-        return { ok: false, error: `Argument "${arg}" is blocked for safety. Use the Bash tool for destructive operations.` };
+        return { ok: false, error: `Argument "${arg}" is blocked for safety. Destructive git operations require explicit user approval via the Bash tool.` };
+      }
+    }
+
+    // Block hook bypass flags
+    for (const arg of args) {
+      if (BLOCKED_HOOK_BYPASS.includes(arg)) {
+        return { ok: false, error: `Argument "${arg}" is blocked. Git hooks must not be bypassed — if a hook fails, investigate and fix the underlying issue.` };
+      }
+    }
+
+    // Block interactive flags (not supported in non-interactive execution)
+    for (const arg of args) {
+      if (BLOCKED_INTERACTIVE.includes(arg)) {
+        return { ok: false, error: `Argument "${arg}" is blocked. Interactive git operations are not supported. Use non-interactive alternatives.` };
+      }
+    }
+
+    // Prevent --amend — always create new commits to avoid destroying history
+    if (command === 'commit' && args.some(a => a === '--amend')) {
+      return {
+        ok: false,
+        error: 'git commit --amend is blocked. Always create new commits instead of amending. Amending can overwrite previous changes and lose work.'
+      };
+    }
+
+    // Prevent force push to main/master
+    if (command === 'push' && args.some(a => a === '--force' || a === '--force-with-lease' || a === '-f')) {
+      return {
+        ok: false,
+        error: 'Force push is blocked for safety. If you need to force push, use the Bash tool with explicit user approval.'
+      };
+    }
+
+    // Check for sensitive files in add/commit commands
+    if (command === 'add') {
+      // Block "git add -A" or "git add ." — prefer explicit file names
+      if (args.includes('-A') || args.includes('--all') || args.includes('.')) {
+        return {
+          ok: false,
+          error: 'git add -A/--all/. is blocked. Stage specific files by name to avoid accidentally including sensitive files (.env, credentials, keys).'
+        };
+      }
+
+      // Check for sensitive file patterns in explicit adds
+      for (const arg of args) {
+        if (arg.startsWith('-')) continue;
+        for (const pattern of SENSITIVE_FILE_PATTERNS) {
+          if (pattern.test(arg)) {
+            return {
+              ok: false,
+              error: `Refusing to stage "${arg}" — it matches a sensitive file pattern. This file likely contains secrets and should not be committed.`
+            };
+          }
+        }
       }
     }
 

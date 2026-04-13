@@ -9,6 +9,12 @@ class Tool {
     this.execute = config.execute;
     this.requiresApproval = Boolean(config.requiresApproval);
     this.dangerousPatterns = Array.isArray(config.dangerousPatterns) ? config.dangerousPatterns : [];
+    // Concurrency-safe tools (read-only, idempotent, no shared mutable
+    // state) can run in parallel within a single LLM turn. Unsafe tools
+    // (writes, subprocesses, stateful side effects) are serialized so two
+    // parallel Edit calls on the same file can't corrupt it. Default false
+    // — opt in explicitly. AgentLoop partitions accordingly.
+    this.concurrencySafe = config.concurrencySafe === true;
   }
 
   toFunctionDefinition() {

@@ -6,6 +6,7 @@ const { isPathAllowed } = require('../utils');
 const ReadTool = new Tool({
   name: 'Read',
   description: 'Read file contents with optional line ranges.',
+  concurrencySafe: true,
   parameters: {
     type: 'object',
     properties: {

@@ -1,4 +1,4 @@
-const { exec, execFile } = require('child_process');
+const { exec, execFile, spawn } = require('child_process');
 const { promisify } = require('util');
 const path = require('path');
 const SANDBOX_CONFIG = require('./sandbox-config');
@@ -158,7 +158,11 @@ class SandboxExecutor {
       const timeout = options.timeout || this.config.timeoutMs;
       const { stdout, stderr } = await execFileAsync('docker', args, {
         timeout: Math.min(timeout, 600000),
-        maxBuffer: 10 * 1024 * 1024
+        maxBuffer: 10 * 1024 * 1024,
+        // signal: when the agent loop's abort fires, child_process kills
+        // the docker exec subprocess. Without this, a cancelled turn would
+        // leave a 60-second command running in the container.
+        signal: options.signal || undefined
       });
 
       return {
@@ -188,13 +192,23 @@ class SandboxExecutor {
   }
 
   async _executeDirect(command, options) {
+    const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
+
+    // When an onProgress callback is provided, use spawn so we can stream
+    // stdout lines to the UI as they arrive. Without it, use the simpler
+    // exec path (buffers everything, no streaming overhead).
+    if (onProgress) {
+      return this._executeDirectWithProgress(command, options, onProgress);
+    }
+
     const timeout = options.timeout || this.config.timeoutMs;
     try {
       const { stdout, stderr } = await execAsync(command, {
         timeout: Math.min(timeout, 600000),
         maxBuffer: 10 * 1024 * 1024,
         cwd: options.workingDirectory || process.cwd(),
-        shell: true
+        shell: true,
+        signal: options.signal || undefined
       });
 
       const hostShell = process.platform === 'win32'
@@ -229,6 +243,71 @@ class SandboxExecutor {
         }
       };
     }
+  }
+
+  _executeDirectWithProgress(command, options, onProgress) {
+    const timeout = options.timeout || this.config.timeoutMs;
+    const cwd = options.workingDirectory || process.cwd();
+    const hostShell = process.platform === 'win32'
+      ? (process.env.ComSpec || 'cmd.exe')
+      : (process.env.SHELL || '/bin/sh');
+    const shellArgs = process.platform === 'win32' ? ['/c', command] : ['-c', command];
+
+    return new Promise((resolve) => {
+      const child = spawn(hostShell, shellArgs, {
+        cwd,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        signal: options.signal || undefined,
+        timeout: Math.min(timeout, 600000)
+      });
+
+      let stdout = '';
+      let stderr = '';
+      let lineCount = 0;
+      let lastProgressAt = 0;
+
+      child.stdout.on('data', (chunk) => {
+        const text = chunk.toString();
+        stdout += text;
+        lineCount += (text.match(/\n/g) || []).length;
+        const now = Date.now();
+        // Throttle progress updates to every 200ms so we don't flood
+        // the IPC channel on a firehose command like `find /`.
+        if (now - lastProgressAt > 200) {
+          lastProgressAt = now;
+          const lastLine = text.trimEnd().split('\n').pop() || '';
+          onProgress({
+            type: 'stdout',
+            message: `${lineCount} lines${lastLine ? ': ' + lastLine.slice(0, 80) : ''}`,
+            lineCount
+          });
+        }
+      });
+
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk.toString();
+      });
+
+      child.on('close', (code) => {
+        resolve({
+          success: code === 0,
+          stdout: stdout.trim(),
+          stderr: stderr.trim(),
+          exitCode: typeof code === 'number' ? code : 1,
+          environment: { platform: process.platform, shell: hostShell, sandbox: false }
+        });
+      });
+
+      child.on('error', (err) => {
+        resolve({
+          success: false,
+          stdout: stdout.trim(),
+          stderr: (err.message || '').trim(),
+          exitCode: 1,
+          environment: { platform: process.platform, shell: hostShell, sandbox: false }
+        });
+      });
+    });
   }
 
   _cleanupHotCache() {

@@ -321,6 +321,92 @@ describe('WorkflowEngine', () => {
     });
   });
 
+  describe('mintTaskId() — high-water-mark', () => {
+    it('starts at the next id after creation', async () => {
+      const wf = await engine.create(makeTaskGraph()); // 2 tasks → counter=2
+      assert.strictEqual(engine.mintTaskId(wf.id), 'task-3');
+      assert.strictEqual(engine.mintTaskId(wf.id), 'task-4');
+    });
+
+    it('does not reuse ids after deletion', async () => {
+      const wf = await engine.create(makeTaskGraph());
+      const id1 = engine.mintTaskId(wf.id);
+      // Simulate a task being deleted in the UI
+      wf.tasks.pop();
+      const id2 = engine.mintTaskId(wf.id);
+      assert.notStrictEqual(id1, id2);
+      assert.strictEqual(id2, 'task-4');
+    });
+  });
+
+  describe('structured dependency-result handoff', () => {
+    it('passes summarized upstream results into downstream task message', async () => {
+      const messages = [];
+      engine.agentExecutorAdapter = {
+        execute: async (agent, message) => {
+          messages.push(message);
+          // First call returns a long result; second call should see the
+          // labeled, truncated upstream block.
+          if (messages.length === 1) {
+            return { type: 'complete', content: 'X'.repeat(5000), iterations: 1, tools: [], llm: { totals: {} } };
+          }
+          return { type: 'complete', content: 'ok', iterations: 1, tools: [], llm: { totals: {} } };
+        }
+      };
+
+      const wf = await engine.create(makeTaskGraph());
+      await engine.run(wf.id);
+
+      assert.strictEqual(messages.length, 2);
+      const downstream = messages[1];
+      assert.match(downstream, /Result from upstream task/);
+      assert.match(downstream, /\[t1\]/);
+      assert.match(downstream, /truncated/);
+      // Must NOT contain the full 5000-char blob.
+      assert.ok(downstream.length < 5000, `expected truncation, got ${downstream.length}`);
+      // The upstream task should now carry the cached summary.
+      assert.ok(wf.tasks[0].resultSummary);
+      assert.strictEqual(wf.tasks[0].resultTruncated, true);
+    });
+
+    it('does not truncate small results', async () => {
+      engine.agentExecutorAdapter = makeAdapter({ content: 'short result' });
+      const wf = await engine.create(makeTaskGraph());
+      await engine.run(wf.id);
+      assert.strictEqual(wf.tasks[0].resultTruncated, false);
+      assert.strictEqual(wf.tasks[0].resultSummary, 'short result');
+    });
+  });
+
+  describe('mode snapshot and allowedActions', () => {
+    it('persists modeSnapshot from create options', async () => {
+      const snapshot = { agentMode: true, sandboxMode: false, allowedDirectories: ['/tmp'], capturedAt: 'now' };
+      const wf = await engine.create(makeTaskGraph(), { modeSnapshot: snapshot });
+      assert.deepStrictEqual(wf.metadata.modeSnapshot, snapshot);
+    });
+
+    it('persists allowedActions from the task graph', async () => {
+      const graph = makeTaskGraph({ allowedActions: ['run-tests', 'install-deps'] });
+      const wf = await engine.create(graph);
+      assert.deepStrictEqual(wf.metadata.allowedActions, ['run-tests', 'install-deps']);
+    });
+
+    it('injects allowedActions into the task message', async () => {
+      const messages = [];
+      engine.agentExecutorAdapter = {
+        execute: async (agent, message) => {
+          messages.push(message);
+          return { type: 'complete', content: 'ok', iterations: 1, tools: [], llm: { totals: {} } };
+        }
+      };
+      const graph = makeTaskGraph({ allowedActions: ['run-tests'] });
+      const wf = await engine.create(graph);
+      await engine.run(wf.id);
+      assert.match(messages[0], /Pre-approved actions/);
+      assert.match(messages[0], /run-tests/);
+    });
+  });
+
   describe('persistence and recovery', () => {
     it('loads workflows from disk on initialize', async () => {
       const wf = await engine.create(makeTaskGraph());

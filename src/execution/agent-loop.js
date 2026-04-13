@@ -1,4 +1,7 @@
 const path = require('path');
+const VectorStore = require('../memory/vector-store');
+const ResultPersistence = require('./result-persistence');
+const APICompaction = require('../context/api-compaction');
 
 class AgentLoop {
   constructor(provider, executor, options = {}) {
@@ -10,6 +13,56 @@ class AgentLoop {
       ? options.onUsageRecorded
       : null;
     this.abortSignal = options.abortSignal || null;
+
+    // Streaming callback: fires with text deltas during LLM inference.
+    // Enables real-time UI updates during agent loop iterations instead
+    // of waiting for the full response to complete.
+    this.onChunk = typeof options.onChunk === 'function' ? options.onChunk : null;
+
+    // Model tiering: use a cheaper model for tool iterations after the first.
+    // The first iteration uses the primary model (for planning/reasoning),
+    // subsequent iterations switch to loopModel (for mechanical tool use).
+    this.loopModel = options.loopModel || null;
+
+    // Context compaction: truncate old tool results every N iterations
+    // to prevent linear context growth. keepRecentResults controls how
+    // many recent tool result messages are kept intact.
+    this.compactEvery = options.compactEvery ?? 6;
+    this.keepRecentResults = options.keepRecentResults ?? 4;
+
+    // Semantic compaction: when an embeddingProvider is available, use
+    // semantic search to preserve relevant old results and only compact
+    // irrelevant ones. One cheap batch embedding call per compaction cycle.
+    this.embeddingProvider = options.embeddingProvider || null;
+    this._toolResultEntries = []; // { historyIndex, toolName, text, compacted }
+    this._relevanceThreshold = options.relevanceThreshold ?? 0.3;
+
+    // API-native compaction: clears old tool_result content blocks when
+    // input tokens approach the limit. No embedding calls needed. Used
+    // for Anthropic provider; falls back to semantic compaction for others.
+    this.apiCompaction = options.apiCompaction || new APICompaction({
+      triggerTokens: options.compactionTriggerTokens || 150000,
+      targetTokens: options.compactionTargetTokens || 40000,
+      keepRecent: options.keepRecentResults ?? 6
+    });
+    // Enable API compaction for Anthropic provider by default
+    this.useAPICompaction = options.useAPICompaction
+      ?? (provider?.getProviderName?.() === 'anthropic');
+
+    // Deduplicate in-flight directory access prompts. When multiple parallel
+    // tool calls hit the same denied directory in the same turn, they all
+    // await the same promise instead of spamming the user with N prompts.
+    // Key: normalized absolute directory path. Value: Promise<boolean>.
+    this._pendingDirectoryAccess = new Map();
+
+    // Persist oversized tool results to disk so the conversation history
+    // stays compact without losing data. The model still sees a preview
+    // and a [persisted: <path>] marker; it can Read the file if needed.
+    this.resultPersistence = options.resultPersistence
+      || new ResultPersistence({
+        baseDir: options.toolResultsDir || null,
+        thresholdChars: options.resultPersistenceThreshold || 50000
+      });
   }
 
   /**
@@ -40,45 +93,67 @@ class AgentLoop {
     );
     // Use the parent directory for file paths (heuristic: if it looks like a file)
     const dirToAllow = path.extname(resolvedDir) ? path.dirname(resolvedDir) : resolvedDir;
+    const dirKey = path.normalize(dirToAllow);
 
-    // Ask the user for permission via IPC (mirrors the AskUser pattern)
-    const granted = await new Promise((resolve) => {
-      const timeoutMs = 2 * 60 * 1000; // 2 minutes
-      const timeoutId = setTimeout(() => resolve(false), timeoutMs);
+    // Fast-path: a concurrent sibling call may have already been granted
+    // access to this directory before we got here. If so, retry immediately.
+    if (this.executor.allowedDirectories.includes(dirToAllow)) {
+      return this.executor.execute(toolName, parameters, options);
+    }
 
-      try {
-        const { BrowserWindow } = require('electron');
-        const windows = BrowserWindow.getAllWindows();
-        if (windows.length > 0) {
-          const win = windows[0];
-          const { pendingDirectoryAccessResolvers } = require('../../main');
-          if (pendingDirectoryAccessResolvers) {
-            const requestId = `diraccess-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-            pendingDirectoryAccessResolvers.set(requestId, {
-              directory: dirToAllow,
-              resolve: (approved) => {
-                clearTimeout(timeoutId);
-                resolve(approved);
-              }
-            });
-            win.webContents.send('tool:directoryAccessRequired', {
-              requestId,
-              directory: dirToAllow,
-              toolName
-            });
+    // Dedup: if another parallel tool call is already awaiting the user's
+    // decision for this same directory, piggyback on its promise instead of
+    // opening a second prompt.
+    let grantedPromise = this._pendingDirectoryAccess.get(dirKey);
+    if (!grantedPromise) {
+      grantedPromise = new Promise((resolve) => {
+        const timeoutMs = 2 * 60 * 1000; // 2 minutes
+        const timeoutId = setTimeout(() => resolve(false), timeoutMs);
+
+        try {
+          const { BrowserWindow } = require('electron');
+          const windows = BrowserWindow.getAllWindows();
+          if (windows.length > 0) {
+            const win = windows[0];
+            const { pendingDirectoryAccessResolvers } = require('../../main');
+            if (pendingDirectoryAccessResolvers) {
+              const requestId = `diraccess-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+              pendingDirectoryAccessResolvers.set(requestId, {
+                directory: dirToAllow,
+                resolve: (approved) => {
+                  clearTimeout(timeoutId);
+                  resolve(approved);
+                }
+              });
+              win.webContents.send('tool:directoryAccessRequired', {
+                requestId,
+                directory: dirToAllow,
+                toolName
+              });
+            } else {
+              clearTimeout(timeoutId);
+              resolve(false);
+            }
           } else {
             clearTimeout(timeoutId);
             resolve(false);
           }
-        } else {
+        } catch {
           clearTimeout(timeoutId);
           resolve(false);
         }
-      } catch {
-        clearTimeout(timeoutId);
-        resolve(false);
-      }
-    });
+      });
+      this._pendingDirectoryAccess.set(dirKey, grantedPromise);
+      // Clean up the entry once resolved so a later denial of a different
+      // directory doesn't get stuck on an old promise.
+      grantedPromise.finally(() => {
+        if (this._pendingDirectoryAccess.get(dirKey) === grantedPromise) {
+          this._pendingDirectoryAccess.delete(dirKey);
+        }
+      });
+    }
+
+    const granted = await grantedPromise;
 
     if (granted) {
       // Add the directory to the executor's allowed list for this session
@@ -128,14 +203,87 @@ class AgentLoop {
 
       iterations += 1;
 
-      const response = await this.provider.sendMessageWithTools(
-        conversationHistory,
-        activeTools,
-        options
-      );
+      // After the first iteration, switch to the cheaper loop model
+      const effectiveOptions = (iterations > 1 && this.loopModel)
+        ? { ...options, model: this.loopModel }
+        : options;
+
+      // Compact old tool results to prevent context bloat.
+      // API compaction (Anthropic): triggered by token count threshold.
+      // Semantic compaction (fallback): triggered every N iterations.
+      if (this.useAPICompaction && this.apiCompaction && this.apiCompaction.shouldCompact()) {
+        const stats = this.apiCompaction.compact(conversationHistory);
+        if (stats.cleared === 0) {
+          // Try OpenAI format as fallback
+          const openaiStats = this.apiCompaction.compactOpenAIFormat(conversationHistory);
+          if (openaiStats.cleared > 0) {
+            console.log(`[agent-loop] API compaction: cleared ${openaiStats.cleared} tool results (~${openaiStats.freedEstimate} tokens freed)`);
+          }
+        } else {
+          console.log(`[agent-loop] API compaction: cleared ${stats.cleared} tool results (~${stats.freedEstimate} tokens freed)`);
+        }
+      } else if (iterations > 1 && this.compactEvery > 0 && (iterations - 1) % this.compactEvery === 0) {
+        await this._compactToolResults(conversationHistory);
+      }
+
+      // Retry transient upstream failures (Anthropic 529 "overloaded",
+       // generic 5xx, rate limit 429, connection resets) with exponential
+       // backoff so a mid-loop hiccup doesn't discard the exploration so far.
+      // Up to 3 retries; total worst-case wait ~14s before giving up.
+      const isTransient = (err) => {
+        const msg = String(err?.message || err || '').toLowerCase();
+        if (!msg) return false;
+        if (msg.includes('overloaded')) return true;
+        if (msg.includes('rate limit') || msg.includes('429')) return true;
+        if (msg.includes('503') || msg.includes('504') || msg.includes('502')) return true;
+        if (msg.includes('econnreset') || msg.includes('etimedout') || msg.includes('fetch failed')) return true;
+        if (msg.includes('timeout')) return true;
+        return false;
+      };
+      const maxAttempts = 4;
+      let response;
+      let lastErr;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        if (this.abortSignal?.aborted) break;
+        try {
+          // Use streaming when an onChunk callback is provided and the
+          // provider supports it. This gives real-time text feedback in
+          // the UI during agent loop iterations.
+          const canStream = this.onChunk
+            && typeof this.provider.streamMessageWithTools === 'function';
+          if (canStream) {
+            response = await this.provider.streamMessageWithTools(
+              conversationHistory,
+              activeTools,
+              effectiveOptions,
+              this.onChunk
+            );
+          } else {
+            response = await this.provider.sendMessageWithTools(
+              conversationHistory,
+              activeTools,
+              effectiveOptions
+            );
+          }
+          lastErr = null;
+          break;
+        } catch (err) {
+          lastErr = err;
+          if (!isTransient(err) || attempt === maxAttempts) throw err;
+          const waitMs = 1000 * Math.pow(2, attempt - 1); // 1s, 2s, 4s, 8s
+          console.warn(`[agent-loop] Transient provider error (attempt ${attempt}/${maxAttempts}): ${err.message}. Retrying in ${waitMs}ms…`);
+          await new Promise((resolve) => setTimeout(resolve, waitMs));
+        }
+      }
+      if (lastErr) throw lastErr;
 
       if (response?.llmMetrics) {
         llmCalls.push(response.llmMetrics);
+
+        // Feed token count to API compaction tracker
+        if (this.useAPICompaction && this.apiCompaction) {
+          this.apiCompaction.updateTokenCount(response.llmMetrics);
+        }
 
         if (this.usageTracker && typeof this.usageTracker.record === 'function') {
           const usageEvent = this.usageTracker.record({
@@ -181,115 +329,209 @@ class AgentLoop {
       }
 
       if (response.type === 'tool_use') {
-        const toolCallId =
-          response.toolUseId ||
-          `toolcall-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        // Normalize to an array of tool calls (supports both single and multi)
+        const calls = response.toolCalls || [{
+          toolName: response.toolName,
+          toolUseId: response.toolUseId,
+          parameters: response.parameters
+        }];
 
-        let toolResult;
+        // Per-turn options propagated to every tool call. The abort signal
+        // is forwarded so cancelling the loop tears down in-flight tools
+        // (Bash subprocess, WebFetch, etc.) instead of letting them run on.
+        const callOptions = { ...options, signal: this.abortSignal || options.signal || null };
 
-        if (response.toolName === 'AskUser') {
-          // Special handling for AskUser tool
-          const question = response.parameters?.question;
+        // Execute a single tool call (AskUser or normal tool)
+        const executeSingleCall = async (call) => {
+          const toolCallId = call.toolUseId ||
+            `toolcall-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-          toolResult = await new Promise((resolve, reject) => {
-            const requestId = `ask-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-            const timeoutMs = 5 * 60 * 1000; // 5 minutes
+          let toolResult;
 
-            const timeoutId = setTimeout(() => {
-              // Only cleanup if we actually emitted the event
-              // Cleanup is handled by the main process IPC handler when it resolves
-              resolve({ ok: false, error: 'User did not respond within 5 minutes.' });
-            }, timeoutMs);
+          if (call.toolName === 'AskUser') {
+            const question = call.parameters?.question;
+            toolResult = await new Promise((resolve) => {
+              const requestId = `ask-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+              const timeoutMs = 5 * 60 * 1000;
+              const timeoutId = setTimeout(() => {
+                resolve({ ok: false, error: 'User did not respond within 5 minutes.' });
+              }, timeoutMs);
 
-            // Send IPC message to the renderer to show the prompt
-            // Check if we are running in the main process
-            try {
-              const { BrowserWindow } = require('electron');
-              const windows = BrowserWindow.getAllWindows();
-
-              if (windows.length > 0) {
-                const win = windows[0];
-                const { pendingAskUserResolvers } = require('../../main');
-
-                if (pendingAskUserResolvers) {
-                  pendingAskUserResolvers.set(requestId, {
-                    resolve: (userResponse) => {
-                      clearTimeout(timeoutId);
-                      resolve({ ok: true, response: userResponse });
-                    }
-                  });
-                  win.webContents.send('agent:askUser', { requestId, question });
+              try {
+                const { BrowserWindow } = require('electron');
+                const windows = BrowserWindow.getAllWindows();
+                if (windows.length > 0) {
+                  const win = windows[0];
+                  const { pendingAskUserResolvers } = require('../../main');
+                  if (pendingAskUserResolvers) {
+                    pendingAskUserResolvers.set(requestId, {
+                      resolve: (userResponse) => {
+                        clearTimeout(timeoutId);
+                        resolve({ ok: true, response: userResponse });
+                      }
+                    });
+                    win.webContents.send('agent:askUser', { requestId, question });
+                  } else {
+                    clearTimeout(timeoutId);
+                    resolve({ ok: false, error: 'pendingAskUserResolvers not available' });
+                  }
                 } else {
-                   clearTimeout(timeoutId);
-                   resolve({ ok: false, error: 'pendingAskUserResolvers not available' });
+                  clearTimeout(timeoutId);
+                  resolve({ ok: false, error: 'No UI available to ask user.' });
                 }
-              } else {
+              } catch (e) {
                 clearTimeout(timeoutId);
-                resolve({ ok: false, error: 'No UI available to ask user.' });
+                resolve({ ok: false, error: 'Cannot ask user outside of Electron main process.' });
               }
-            } catch (e) {
-              // Not in electron main process context (e.g. tests)
-              clearTimeout(timeoutId);
-              resolve({ ok: false, error: 'Cannot ask user outside of Electron main process.' });
-            }
-          });
-        } else {
-          toolResult = await this.executor.execute(
-            response.toolName,
-            response.parameters,
-            options
-          );
+            });
+          } else {
+            toolResult = await this.executor.execute(
+              call.toolName,
+              call.parameters,
+              callOptions
+            );
+            toolResult = await this._handleAccessDenied(
+              toolResult, call.toolName, call.parameters, callOptions
+            );
+          }
 
-          // If access was denied, prompt user and optionally retry
-          toolResult = await this._handleAccessDenied(
-            toolResult, response.toolName, response.parameters, options
-          );
+          return { ...call, toolCallId, result: toolResult };
+        };
+
+        // Concurrency-safety partitioning. Read-only / idempotent tools
+        // (Read, Glob, Grep, WebFetch, WebSearch) run in parallel; tools
+        // with side effects (Edit, Write, Bash, Git, Browser, ...) run
+        // serially after the safe batch so two parallel Edit calls on the
+        // same file can't corrupt it. AskUser is always serial — only one
+        // user prompt at a time.
+        const isSafe = (call) => {
+          if (call.toolName === 'AskUser') return false;
+          const tool = this.executor && this.executor.toolRegistry
+            ? this.executor.toolRegistry.get(call.toolName)
+            : null;
+          // Fall back to the global registry if executor doesn't expose one.
+          const resolved = tool || require('../tools').toolRegistry.get(call.toolName);
+          return Boolean(resolved && resolved.concurrencySafe);
+        };
+
+        const safeCalls = calls.filter(isSafe);
+        const unsafeCalls = calls.filter((c) => !isSafe(c));
+
+        const safeResults = await Promise.all(safeCalls.map(executeSingleCall));
+        const unsafeResults = [];
+        for (const call of unsafeCalls) {
+          // Bail out of the unsafe queue on abort — no point starting a new
+          // subprocess after the user has cancelled the turn.
+          if (callOptions.signal?.aborted) {
+            unsafeResults.push({
+              ...call,
+              toolCallId: call.toolUseId || `toolcall-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+              result: { success: false, error: 'Cancelled before execution', cancelled: true }
+            });
+            continue;
+          }
+          unsafeResults.push(await executeSingleCall(call));
         }
 
-        // If RequestTools returned injected tools, merge them into activeTools
-        if (Array.isArray(toolResult?._injectedTools) && toolResult._injectedTools.length > 0) {
-          const existingNames = new Set(activeTools.map(t => t.name));
-          for (const injected of toolResult._injectedTools) {
-            if (!existingNames.has(injected.name)) {
-              activeTools.push(injected);
-              existingNames.add(injected.name);
+        // Re-order results to match the model's original call order so the
+        // tool_result blocks the provider sees line up with the tool_use
+        // blocks the model emitted. Otherwise downstream message-builders
+        // pair them up wrong.
+        const byId = new Map();
+        for (const r of [...safeResults, ...unsafeResults]) {
+          byId.set(r.toolUseId || r.toolCallId, r);
+        }
+        const results = calls.map((call) => {
+          const id = call.toolUseId;
+          if (id && byId.has(id)) return byId.get(id);
+          // Fall back to first match by toolName for providers that don't
+          // emit toolUseId (rare).
+          for (const r of byId.values()) {
+            if (r.toolName === call.toolName) {
+              byId.delete(r.toolUseId || r.toolCallId);
+              return r;
             }
+          }
+          return null;
+        }).filter(Boolean);
+
+        // Persist oversized results to disk and replace inline payloads
+        // with a [persisted: <path>] preview. The model still sees the
+        // shape and a head excerpt and can Read the file if needed —
+        // unlike the lossy regex-based compaction which dropped fields.
+        const persistCtx = { sessionId: options.sessionId || options.chatId || null };
+        for (const entry of results) {
+          entry.result = this.resultPersistence.persistResultObject(entry.result, {
+            ...persistCtx,
+            toolName: entry.toolName
+          });
+        }
+
+        // Process results: merge injected tools and track executed tools
+        for (const entry of results) {
+          if (Array.isArray(entry.result?._injectedTools) && entry.result._injectedTools.length > 0) {
+            const existingNames = new Set(activeTools.map(t => t.name));
+            for (const injected of entry.result._injectedTools) {
+              if (!existingNames.has(injected.name)) {
+                activeTools.push(injected);
+                existingNames.add(injected.name);
+              }
+            }
+          }
+
+          executedTools.push({
+            name: entry.toolName,
+            parameters: entry.parameters,
+            result: entry.result
+          });
+        }
+
+        // Build conversation history messages
+        if (results.length > 1 && typeof this.provider.buildMultiToolMessages === 'function') {
+          const providerMessages = this.provider.buildMultiToolMessages(response, results);
+          conversationHistory.push(...providerMessages);
+        } else if (results.length === 1 && typeof this.provider.buildToolMessages === 'function') {
+          const entry = results[0];
+          const providerMessages = this.provider.buildToolMessages(
+            { toolName: entry.toolName, parameters: entry.parameters, messageContent: response.messageContent },
+            entry.result,
+            entry.toolCallId
+          );
+          conversationHistory.push(...providerMessages);
+        } else if (typeof this.provider.buildMultiToolMessages === 'function') {
+          const providerMessages = this.provider.buildMultiToolMessages(response, results);
+          conversationHistory.push(...providerMessages);
+        } else {
+          // Generic fallback for providers without buildToolMessages
+          for (const entry of results) {
+            conversationHistory.push({
+              role: 'assistant',
+              content: response.messageContent || '',
+              tool_calls: [{
+                id: entry.toolCallId,
+                type: 'function',
+                function: {
+                  name: entry.toolName,
+                  arguments: JSON.stringify(entry.parameters || {})
+                }
+              }]
+            });
+            conversationHistory.push({
+              role: 'tool',
+              tool_call_id: entry.toolCallId,
+              content: JSON.stringify(entry.result)
+            });
           }
         }
 
-        executedTools.push({
-          name: response.toolName,
-          parameters: response.parameters,
-          result: toolResult
-        });
-
-        if (typeof this.provider.buildToolMessages === 'function') {
-          const providerMessages = this.provider.buildToolMessages(
-            response,
-            toolResult,
-            toolCallId
-          );
-          conversationHistory.push(...providerMessages);
-        } else {
-          conversationHistory.push({
-            role: 'assistant',
-            content: response.messageContent || '',
-            tool_calls: [
-              {
-                id: toolCallId,
-                type: 'function',
-                function: {
-                  name: response.toolName,
-                  arguments: JSON.stringify(response.parameters || {})
-                }
-              }
-            ]
-          });
-
-          conversationHistory.push({
-            role: 'tool',
-            tool_call_id: toolCallId,
-            content: JSON.stringify(toolResult)
+        // Track tool results for semantic compaction
+        for (const entry of results) {
+          const resultSnippet = entry.result != null ? JSON.stringify(entry.result).substring(0, 400) : '';
+          this._toolResultEntries.push({
+            historyIndex: conversationHistory.length - 1,
+            toolName: entry.toolName,
+            text: `${entry.toolName}: ${resultSnippet}`,
+            compacted: false
           });
         }
 
@@ -334,6 +576,146 @@ class AgentLoop {
         )
       }
     };
+  }
+
+  /**
+   * Compact old tool results to reduce context size.
+   *
+   * When an embeddingProvider is available, uses semantic search to
+   * preserve relevant old results (one cheap batch embedding call)
+   * and only compacts irrelevant ones. Falls back to recency-only
+   * compaction when embeddings are unavailable.
+   *
+   * Works with both OpenAI format (role='tool') and Anthropic format
+   * (role='user' with tool_result content blocks).
+   */
+  async _compactToolResults(history) {
+    if (this._toolResultEntries.length <= this.keepRecentResults) return;
+
+    const recentCutoff = this._toolResultEntries.length - this.keepRecentResults;
+    const oldEntries = this._toolResultEntries.slice(0, recentCutoff).filter(e => !e.compacted);
+
+    if (oldEntries.length === 0) return;
+
+    // Try semantic compaction first
+    if (this.embeddingProvider) {
+      const userQuery = this._extractUserQuery(history);
+      if (userQuery) {
+        try {
+          await this._semanticCompact(history, oldEntries, userQuery);
+          return;
+        } catch (err) {
+          console.warn('[agent-loop] Semantic compaction failed, using recency:', err.message);
+        }
+      }
+    }
+
+    // Fallback: compact all old entries by recency only
+    for (const entry of oldEntries) {
+      this._truncateAtIndex(history, entry.historyIndex);
+      entry.compacted = true;
+    }
+  }
+
+  /**
+   * Semantic compaction: batch-embed old tool results + user query in a
+   * single API call, then use cosine similarity to decide what to keep.
+   * Results above the relevance threshold are preserved intact; the rest
+   * are truncated to status-only summaries.
+   */
+  async _semanticCompact(history, oldEntries, userQuery) {
+    // Single batch embedding: [userQuery, ...toolResultTexts]
+    const texts = [userQuery, ...oldEntries.map(e => e.text)];
+    const embeddings = await this.embeddingProvider.embed(texts);
+
+    if (!embeddings || embeddings.length < 2) return;
+
+    const queryVector = embeddings[0];
+
+    for (let i = 0; i < oldEntries.length; i++) {
+      const resultVector = embeddings[i + 1];
+      if (!resultVector) continue;
+
+      const similarity = VectorStore.cosineSimilarity(queryVector, resultVector);
+      if (similarity < this._relevanceThreshold) {
+        this._truncateAtIndex(history, oldEntries[i].historyIndex);
+        oldEntries[i].compacted = true;
+      }
+    }
+  }
+
+  /**
+   * Extract the original user query from conversation history.
+   * Skips tool_result user messages (Anthropic format).
+   */
+  _extractUserQuery(history) {
+    for (const msg of history) {
+      if (msg.sender === 'user' && typeof msg.text === 'string') return msg.text;
+      if (msg.role === 'user') {
+        if (typeof msg.content === 'string') return msg.content;
+        // Skip Anthropic tool_result messages
+        if (Array.isArray(msg.content) && msg.content.some(b => b.type === 'tool_result')) continue;
+        if (Array.isArray(msg.content)) {
+          const textBlock = msg.content.find(b => b.type === 'text');
+          if (textBlock?.text) return textBlock.text;
+        }
+      }
+    }
+    return '';
+  }
+
+  /**
+   * Truncate a tool result message at a specific history index.
+   * Handles both OpenAI and Anthropic message formats.
+   */
+  _truncateAtIndex(history, idx) {
+    const msg = history[idx];
+    if (!msg) return;
+
+    // OpenAI format
+    if (msg.role === 'tool' && typeof msg.content === 'string') {
+      history[idx] = { ...msg, content: this._truncateToolContent(msg.content) };
+      return;
+    }
+
+    // Anthropic format
+    if (msg.role === 'user' && Array.isArray(msg.content)) {
+      history[idx] = {
+        ...msg,
+        content: msg.content.map(block => {
+          if (block.type === 'tool_result' && typeof block.content === 'string') {
+            return { ...block, content: this._truncateToolContent(block.content) };
+          }
+          return block;
+        })
+      };
+    }
+  }
+
+  /**
+   * Reduce a JSON-stringified tool result to its essential fields.
+   * Drops large payloads like page HTML, DOM snapshots, and complex
+   * result objects while preserving status and error info.
+   */
+  _truncateToolContent(jsonStr) {
+    try {
+      const parsed = JSON.parse(jsonStr);
+      const compact = { ok: parsed.ok };
+      if (parsed.message) compact.message = String(parsed.message).substring(0, 150);
+      if (parsed.error) compact.error = String(parsed.error).substring(0, 150);
+      if (parsed.result !== undefined) {
+        const r = parsed.result;
+        if (r === null || typeof r === 'string' || typeof r === 'number' || typeof r === 'boolean') {
+          compact.result = typeof r === 'string' ? r.substring(0, 200) : r;
+        } else {
+          compact.result = '(compacted)';
+        }
+      }
+      // Verbose properties (page, html, savedTo, etc.) are intentionally dropped
+      return JSON.stringify(compact);
+    } catch {
+      return jsonStr.substring(0, 200) + (jsonStr.length > 200 ? '...' : '');
+    }
   }
 }
 

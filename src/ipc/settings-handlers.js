@@ -473,6 +473,24 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     return { ok: true, smartRouting };
   }));
 
+  ipcMain.handle('settings:saveLlmRouting', wrapHandler('settings:saveLlmRouting', async (_event, payload = {}) => {
+    const allowedSensitivity = new Set(['low', 'medium', 'high']);
+    const settings = getSettings();
+    const current = settings.inference?.llmRouting || {};
+    const llmRouting = {
+      enabled: Boolean(payload.enabled),
+      costSensitivity: allowedSensitivity.has(payload.costSensitivity) ? payload.costSensitivity : (current.costSensitivity || 'medium'),
+      speedPriority: allowedSensitivity.has(payload.speedPriority) ? payload.speedPriority : (current.speedPriority || 'medium'),
+      qualityPriority: allowedSensitivity.has(payload.qualityPriority) ? payload.qualityPriority : (current.qualityPriority || 'high')
+    };
+    const updated = {
+      ...settings,
+      inference: { ...(settings.inference || {}), llmRouting }
+    };
+    setSettings(updated);
+    return { ok: true, llmRouting };
+  }));
+
   ipcMain.handle('settings:saveNotifications', wrapHandler('settings:saveNotifications', async (_event, { notifications } = {}) => {
     const saved = setNotificationSettings(notifications || {});
     return { ok: true, notifications: saved };

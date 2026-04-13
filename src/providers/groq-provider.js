@@ -138,20 +138,20 @@ class GroqProvider extends BaseLLMProvider {
       };
     }
 
-    const toolCall = message.tool_calls?.find((call) => call.type === 'function');
-    if (toolCall?.function?.name) {
-      let parsedArgs = {};
-      try {
-        parsedArgs = JSON.parse(toolCall.function.arguments || '{}');
-      } catch {
-        parsedArgs = {};
-      }
+    const functionCalls = (message.tool_calls || []).filter((call) => call.type === 'function' && call.function?.name);
+    if (functionCalls.length > 0) {
+      const toolCalls = functionCalls.map((call) => {
+        let parsedArgs = {};
+        try { parsedArgs = JSON.parse(call.function.arguments || '{}'); } catch { parsedArgs = {}; }
+        return { toolName: call.function.name, toolUseId: call.id, parameters: parsedArgs };
+      });
 
       return {
         type: 'tool_use',
-        toolName: toolCall.function.name,
-        toolUseId: toolCall.id,
-        parameters: parsedArgs,
+        toolName: toolCalls[0].toolName,
+        toolUseId: toolCalls[0].toolUseId,
+        parameters: toolCalls[0].parameters,
+        toolCalls,
         messageContent: message.content || '',
         llmMetrics
       };
@@ -186,6 +186,27 @@ class GroqProvider extends BaseLLMProvider {
         content: JSON.stringify(toolResult)
       }
     ];
+  }
+
+  buildMultiToolMessages(response, toolCallEntries) {
+    const messages = [
+      {
+        role: 'assistant',
+        content: response.messageContent || '',
+        tool_calls: toolCallEntries.map((entry) => ({
+          id: entry.toolCallId,
+          type: 'function',
+          function: {
+            name: entry.toolName,
+            arguments: JSON.stringify(entry.parameters || {})
+          }
+        }))
+      }
+    ];
+    for (const entry of toolCallEntries) {
+      messages.push({ role: 'tool', tool_call_id: entry.toolCallId, content: JSON.stringify(entry.result) });
+    }
+    return messages;
   }
 
   async streamMessage(messages, options = {}, onChunk) {

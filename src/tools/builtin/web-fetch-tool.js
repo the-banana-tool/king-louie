@@ -18,8 +18,10 @@ const webFetchTool = new Tool({
     required: ['url']
   },
   requiresApproval: false,
-  execute: async (params) => {
+  concurrencySafe: true,
+  execute: async (params, context = {}) => {
     const { url: urlString, extractMode = 'markdown', maxChars = 50000 } = params;
+    const { signal } = context;
 
     // Check cache
     const cacheKey = `${urlString}::${extractMode}`;
@@ -39,6 +41,12 @@ const webFetchTool = new Tool({
     // Fetch with timeout and size limit
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30000);
+    // Forward turn-level cancellation: when the agent loop's signal aborts,
+    // tear down this fetch too instead of letting it complete in the dark.
+    if (signal) {
+      if (signal.aborted) controller.abort();
+      else signal.addEventListener('abort', () => controller.abort(), { once: true });
+    }
     try {
       const res = await fetch(urlString, {
         signal: controller.signal,
@@ -55,11 +63,13 @@ const webFetchTool = new Tool({
       let truncated = false;
 
       let raw = '';
+      const { onProgress } = context || {};
+      const expectedBytes = contentLength ? parseInt(contentLength, 10) : null;
       if (res.body) {
-        // Stream response, capping at 2MB
         const decoder = new TextDecoder('utf-8');
         const reader = res.body.getReader();
         let bytesRead = 0;
+        let lastProgressAt = 0;
 
         try {
           while (true) {
@@ -69,7 +79,6 @@ const webFetchTool = new Tool({
             if (value) {
               bytesRead += value.length;
               if (bytesRead > MAX_BYTES) {
-                // Decode the partial chunk up to the limit
                 const excess = bytesRead - MAX_BYTES;
                 const usable = value.length - excess;
                 if (usable > 0) {
@@ -79,6 +88,15 @@ const webFetchTool = new Tool({
                 break;
               }
               raw += decoder.decode(value, { stream: true });
+
+              // Emit download progress every ~100KB so the UI can show
+              // how far along a large fetch is.
+              if (typeof onProgress === 'function' && bytesRead - lastProgressAt > 100_000) {
+                lastProgressAt = bytesRead;
+                const kb = Math.round(bytesRead / 1024);
+                const pct = expectedBytes ? ` (${Math.round(bytesRead / expectedBytes * 100)}%)` : '';
+                onProgress({ type: 'download', message: `${kb} KB downloaded${pct}`, bytesRead, expectedBytes });
+              }
             }
           }
         } finally {

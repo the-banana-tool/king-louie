@@ -17,6 +17,9 @@ const RemoteDispatchTool = require('./builtin/remote-dispatch-tool');
 const SpawnAgentTool = require('./builtin/spawn-agent-tool');
 const RequestToolsTool = require('./builtin/request-tools-tool');
 const VaultTool = require('./builtin/vault-tool');
+const ToolSearchTool = require('./builtin/tool-search-tool');
+const { BackgroundTaskTool, TaskStatusTool } = require('./builtin/background-task-tool');
+const MultiEditTool = require('./builtin/multi-edit-tool');
 
 let initialized = false;
 
@@ -26,6 +29,7 @@ function initializeTools() {
   toolRegistry.register(BashTool);
   toolRegistry.register(ReadTool);
   toolRegistry.register(EditTool);
+  toolRegistry.register(MultiEditTool);
   toolRegistry.register(WriteTool);
   toolRegistry.register(GrepTool);
   toolRegistry.register(WebSearchTool);
@@ -40,6 +44,9 @@ function initializeTools() {
   toolRegistry.register(SpawnAgentTool);
   toolRegistry.register(RequestToolsTool);
   toolRegistry.register(VaultTool);
+  toolRegistry.register(ToolSearchTool);
+  toolRegistry.register(BackgroundTaskTool);
+  toolRegistry.register(TaskStatusTool);
 
   initialized = true;
 }

@@ -17,6 +17,7 @@ const globTool = new Tool({
     required: ['pattern']
   },
   requiresApproval: false,
+  concurrencySafe: true,
   execute: async (params, context) => {
     const { pattern, cwd, maxResults = 100, type: matchType = 'all' } = params;
     const workingDirectory = context?.workingDirectory || process.cwd();

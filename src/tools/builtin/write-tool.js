@@ -2,6 +2,7 @@ const fs = require('fs').promises;
 const path = require('path');
 const { Tool } = require('../tool-schema');
 const { isPathAllowed } = require('../utils');
+const { generateUnifiedDiff, countDiffStats } = require('./diff-utils');
 
 const WriteTool = new Tool({
   name: 'Write',
@@ -35,13 +36,33 @@ const WriteTool = new Tool({
     }
 
     try {
+      // Read existing content for diff generation (if file exists)
+      let oldContent = '';
+      let isNew = true;
+      try {
+        oldContent = await fs.readFile(resolvedPath, 'utf-8');
+        isNew = false;
+      } catch {
+        // File doesn't exist yet — this is a new file
+      }
+
       await fs.mkdir(path.dirname(resolvedPath), { recursive: true });
       await fs.writeFile(resolvedPath, content, 'utf-8');
 
+      const relativePath = path.relative(workingDirectory, resolvedPath);
+      const diff = !isNew ? generateUnifiedDiff(oldContent, content, relativePath) : null;
+      const stats = diff ? countDiffStats(diff) : null;
+
       return {
         success: true,
-        message: `Successfully wrote ${Buffer.byteLength(content, 'utf-8')} bytes`,
-        filePath: resolvedPath
+        message: isNew
+          ? `Created new file (${Buffer.byteLength(content, 'utf-8')} bytes)`
+          : `Overwrote file (${Buffer.byteLength(content, 'utf-8')} bytes)`,
+        filePath: resolvedPath,
+        isNew,
+        diff: diff || undefined,
+        linesAdded: stats?.added,
+        linesRemoved: stats?.removed
       };
     } catch (error) {
       return {

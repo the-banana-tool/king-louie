@@ -39,15 +39,40 @@ On first launch, the onboarding wizard walks you through selecting a provider an
 
 ## Features
 
+### LLM & Providers
 - **Multi-Provider LLM Support** — OpenAI, Anthropic, Google Gemini, Groq, Mistral, Ollama (local), OpenRouter, x.AI, DeepSeek, Qwen, Together, Fireworks, and Cohere
 - **Smart LLM Routing** — Rule-based dynamic model selection routes messages to different providers based on keywords, regex patterns, or slash-command prefixes
 - **LLM-Powered Model Router** — AI-driven model selection that automatically picks the best provider/model per task based on message content, cost, speed, and quality preferences
+- **Prompt Caching** — Anthropic `cache_control` blocks on system prompts reduce input token costs by 50–90% on multi-turn conversations, with cache-aware cost tracking
+- **Extended Thinking** — Claude 3.7+ models can use extended thinking with configurable budget tokens for deeper reasoning on complex tasks
+
+### Agents & Tools
+- **Agentic Tool Use** — Agents can execute shell commands, read/write/edit files, search the web, automate browsers, and more
+- **Agent Streaming** — Real-time token-by-token streaming during agent loop iterations instead of waiting for the full response
 - **Workflow Engine** — Durable, multi-step workflow execution with pause/resume, parallel task execution, dependency ordering, and persistent state across sessions
 - **Planner Agent** — Decomposes high-level goals ("build a REST API with auth and tests") into structured task graphs that the workflow engine executes automatically
 - **Dynamic Sub-Agents** — Agents can spawn specialized sub-agents mid-execution to handle subtasks with different models, tools, or system prompts
-- **System App Discovery** — Auto-detects installed desktop applications (Excel, Photoshop, VS Code, etc.) so agents use local software instead of generating content via LLM
-- **Agentic Tool Use** — Agents can execute shell commands, read/write/edit files, search the web, automate browsers, and more
+- **Background Tasks** — Spawn agent tasks that run asynchronously in the background while the main conversation continues, with output logging and status checking
+- **Worktree Isolation** — Background tasks can run in isolated git worktrees to prevent file conflicts with the main workspace
+- **Advisor Mode** — Optional second-model code review that automatically reviews agent-generated code changes for bugs, security issues, and performance problems
 - **Multi-Agent Orchestration** — Run agents in parallel, serial, or dependency-based workflows
+
+### Tools
+- **20+ Built-in Tools** — Bash, Read, Write, Edit, MultiEdit, Glob, Grep, Git, WebSearch, WebFetch, Browser, ToolSearch, BackgroundTask, TaskStatus, SpawnAgent, and more
+- **MultiEdit** — Batch edit multiple files in a single tool call with cascading failure isolation and per-file content caching
+- **Deferred Tool Loading** — Core tools load inline; others are deferred behind a ToolSearch meta-tool that supports keyword search and exact selection — stabilizes prompts for caching
+- **MCP Support** — Model Context Protocol client with stdio transport connects to any MCP server, automatically registering its tools into the tool registry
+- **Git Safety Guards** — Blocks `--amend`, `--force`, `--no-verify`, interactive flags, `git add .`, and sensitive file patterns (.env, credentials, keys)
+- **Structured Diffs** — Edit and Write tools generate unified diffs with line stats, displayed as colored diff blocks in the UI
+- **Git Context Injection** — Current branch, working tree status, and recent commits are automatically injected into the system prompt
+
+### Context & Performance
+- **API-Native Context Compaction** — Clears old tool result content when approaching token limits (Anthropic provider), with embedding-based fallback for other providers
+- **Semantic Context Assembly** — Dynamic per-turn tool and prompt section selection via embeddings, cutting token overhead by 30–60%
+- **Result Persistence** — Oversized tool results are persisted to disk with a preview marker; the model can Read the full file if needed
+
+### Integrations & Infrastructure
+- **System App Discovery** — Auto-detects installed desktop applications (Excel, Photoshop, VS Code, etc.) so agents use local software instead of generating content via LLM
 - **Extensible Skill System** — Install, remove, enable, and pin custom skill plugins
 - **Mesh Networking** — Secure peer-to-peer communication between King Louie instances across machines
 - **Channel Integrations** — Bridge conversations to Telegram, Discord, and Slack bots
@@ -55,6 +80,18 @@ On first launch, the onboarding wizard walks you through selecting a provider an
 - **Semantic Memory** — Embedding-based memory with hot/warm/cold tiering and recall
 - **Voice / TTS** — System TTS or ElevenLabs for voice responses
 - **Webhooks** — HTTP endpoints for external automation triggers
+
+### User Experience
+- **Command Palette** — `Ctrl+K` opens a searchable command palette for quick access to all actions, commands, and settings
+- **Keyboard Shortcuts** — `Ctrl+N` (new chat), `Ctrl+L` (clear input), `Ctrl+,` (settings), `Ctrl+Shift+E` (export)
+- **Chat Search** — Real-time search box in the sidebar filters chats by title and preview text
+- **Thinking Indicator** — Animated "Thinking..." appears while waiting for the LLM to respond, replaced when streaming begins
+- **Agent Progress Bar** — Shows iteration count, current tool, and elapsed time during agent execution
+- **Copy Code Button** — One-click copy button on code blocks with language badge and "Copied!" feedback
+- **Diff Display** — Edit/Write tool results render as syntax-highlighted colored diffs instead of raw JSON
+- **Retry on Error** — Failed messages show a "Retry" button to resend without retyping
+- **Markdown Export** — Export conversations as readable Markdown with collapsible tool results
+- **Welcome Card** — First-run quick-start tips for new users (API key setup, agent mode, commands)
 - **Dark Theme UI** — Two-pane chat interface with syntax highlighting, markdown rendering, and image attachments
 - **Cross-Platform Builds** — Windows (NSIS), macOS (DMG), and Linux (AppImage/DEB) via GitHub Actions
 
@@ -267,20 +304,26 @@ Agents have access to a suite of tools that can be individually approved or auto
 
 | Tool | Description |
 |------|-------------|
-| `bash` | Execute shell commands (platform-aware) |
-| `read` | Read file contents |
-| `write` | Write files |
-| `edit` | Edit file ranges |
-| `grep` | Regex content search |
-| `glob` | File pattern matching |
-| `git` | Git operations |
-| `web_search` | Search the web (Brave, Tavily) |
-| `web_fetch` | Fetch and parse web pages |
-| `browser` | Headless browser automation via CDP |
-| `cron` | Manage scheduled tasks |
-| `remote_dispatch` | Dispatch tasks to remote King Louie peers on the mesh network |
-| `spawn_agent` | Dynamically spawn sub-agents with different models, tools, or specializations |
-| `ask_user` | Request user input during execution |
+| `Bash` | Execute shell commands (platform-aware) |
+| `Read` | Read file contents |
+| `Write` | Create or overwrite files (generates diff for overwrites) |
+| `Edit` | Exact string replacement in files (generates unified diff) |
+| `MultiEdit` | Batch edit multiple files in a single call with cascading failure isolation |
+| `Grep` | Regex content search across files |
+| `Glob` | File pattern matching |
+| `Git` | Git operations with safety guards (blocks --amend, --force, --no-verify, sensitive files) |
+| `WebSearch` | Search the web (Brave, Tavily) |
+| `WebFetch` | Fetch and parse web pages |
+| `Browser` | Headless browser automation via CDP |
+| `ToolSearch` | Search and load deferred tool schemas on demand (keyword, exact, or prefix match) |
+| `SpawnAgent` | Dynamically spawn sub-agents with different models, tools, or specializations |
+| `BackgroundTask` | Spawn agent tasks that run asynchronously with optional worktree isolation |
+| `TaskStatus` | Check status, read output, list, or stop background tasks |
+| `Cron` | Manage scheduled tasks |
+| `RemoteDispatch` | Dispatch tasks to remote King Louie peers on the mesh network |
+| `AskUser` | Request user input during execution |
+| `Skill` | Invoke installed skill plugins |
+| `RequestTools` | Legacy escape hatch for requesting additional tools mid-conversation |
 
 ### Browser Tool — Using Your Chrome Profile
 
@@ -612,6 +655,83 @@ Hooks run custom logic before or after tool execution:
 
 Add custom hooks in the `hooks/` directory with a `hook.json` manifest and `index.js` handler.
 
+## MCP (Model Context Protocol)
+
+King Louie includes an MCP client that connects to any MCP-compatible server over stdio, giving agents access to databases, APIs, and specialized tools without custom code.
+
+### Configuration
+
+Add MCP servers in your settings:
+
+```json
+{
+  "mcpServers": {
+    "sqlite": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-sqlite", "mydb.db"]
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_TOKEN": "ghp_..." }
+    }
+  }
+}
+```
+
+### How It Works
+
+1. On startup, King Louie spawns each configured MCP server as a child process
+2. Connects via the MCP JSON-RPC 2.0 protocol (Content-Length framing over stdin/stdout)
+3. Lists the server's tools and registers them in the tool registry as `mcp__<server>__<tool>`
+4. Tools become available to agents via ToolSearch (deferred loading)
+5. When an agent calls an MCP tool, King Louie proxies the request to the server and returns the result
+
+### Supported Transports
+
+Currently stdio only. SSE and WebSocket transports are planned.
+
+## Advisor Mode
+
+An optional second-model review pass that catches bugs before they land.
+
+### Setup
+
+In Settings, configure the advisor:
+
+```json
+{
+  "advisor": {
+    "enabled": true,
+    "model": "claude-sonnet-4-20250514"
+  }
+}
+```
+
+### How It Works
+
+1. After the agent loop completes, the advisor reviews all code changes (Edit, Write, MultiEdit diffs)
+2. A focused review prompt checks for bugs, security issues, and performance problems
+3. Returns a verdict: **LGTM** or **ISSUES FOUND** with specific feedback
+4. The review is appended to the chat so you can see it inline
+
+The advisor uses the same provider as the main agent but can target a different model. Its cost is tracked separately.
+
+## Keyboard Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl+K` | Open command palette |
+| `Ctrl+N` | New chat |
+| `Ctrl+L` | Clear input |
+| `Ctrl+,` | Open settings |
+| `Ctrl+Shift+E` | Export chat |
+| `Enter` | Send message |
+| `Shift+Enter` | New line in input |
+| `Escape` | Close palette/settings/modals |
+
+The command palette (`Ctrl+K`) provides fuzzy search across all commands and actions.
+
 ## Notifications
 
 Configurable notification routing based on response duration:
@@ -624,26 +744,38 @@ Configurable notification routing based on response duration:
 ```
 main.js                  # Electron main process
 preload.js               # Secure IPC bridge (context isolation)
-renderer.js              # Frontend UI logic
+renderer.js              # Frontend UI logic (command palette, search, streaming, diffs)
 index.html               # App layout
-styles.css               # Dark theme styles
+styles.css               # Dark theme styles + UX enhancement CSS
 src/
   agents/                # Agent definitions and orchestrator
   browser/               # Headless browser automation
   channels/              # Telegram, Discord, Slack bridges
+  context/               # Context assembly, compaction, and system prompt sections
+    context-assembler.js # Deferred/semantic tool loading and prompt assembly
+    api-compaction.js    # API-native context compaction (clears old tool results)
+    system-sections.js   # System prompt sections (environment, git context, CLI tools)
   cron/                  # Scheduled task system
   execution/             # Agent loop, tool executor, sandbox, app discovery
+    agent-loop.js        # Core agent-tool loop with streaming and compaction
+    advisor.js           # Optional second-model code review
+    worktree.js          # Git worktree isolation for concurrent agents
   gateway/               # WebSocket gateway and session manager
   hooks/                 # Pre/post tool execution hooks
   ipc/                   # IPC handler registration
+  mcp/                   # Model Context Protocol client
+    mcp-client.js        # JSON-RPC 2.0 over stdio with Content-Length framing
+    mcp-manager.js       # Multi-server lifecycle and tool registration
   media/                 # Image handling and multimodal support
   memory/                # Semantic memory and vector store
   mesh/                  # Peer-to-peer mesh networking
   notifications/         # Notification routing
-  providers/             # LLM provider implementations
+  providers/             # LLM provider implementations (prompt caching, extended thinking)
   skills/                # Skill loader, registry, and pinning
-  tasks/                 # Task manager
-  tools/                 # Tool registry and built-in tools
+  tasks/                 # Task manager and background task system
+  tools/                 # Tool registry and 20+ built-in tools
+    builtin/             # Bash, Read, Edit, MultiEdit, Write, Git, ToolSearch, etc.
+    builtin/diff-utils.js# Unified diff generation for Edit/Write results
   tracking/              # Token usage and cost tracking
   voice/                 # TTS engines
   web-search/            # Search provider integrations
@@ -653,7 +785,7 @@ src/
 skills/                  # Installable skill plugins
 hooks/                   # Custom hook plugins
 templates/               # Agent system prompt templates
-tests/                   # Test suite
+tests/                   # Test suite (90+ test files)
 build/                   # Build configuration and signing
 ```
 
@@ -679,6 +811,9 @@ npm run build:linux
 - HTML sanitized with DOMPurify
 - Tool execution requires approval (configurable auto-approve lists)
 - Pre-execution security hooks block dangerous commands
+- **Git safety guards** — Blocks `--amend` (always creates new commits), `--force`, `--no-verify`, interactive flags, `git add ./-A` (must stage specific files), and sensitive file patterns (.env, .pem, credentials.json, etc.)
+- **Worktree isolation** — Background agents can run in isolated git worktrees to prevent file conflicts
+- **Pattern-based permission rules** — First-match-wins rules with allow/ask/deny actions and denial tracking
 - Webhook signature verification
 - Mesh networking: TLS 1.3 encryption, Ed25519 signed messages, certificate pinning, replay protection
 

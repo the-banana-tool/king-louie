@@ -9,6 +9,7 @@ const ProviderFactory = require('./src/providers/provider-factory');
 const InferenceRouter = require('./src/providers/inference-router');
 const { initializeTools, toolRegistry } = require('./src/tools');
 const ToolExecutor = require('./src/execution/tool-executor');
+const DenialTracker = require('./src/tools/denial-tracker');
 const AgentLoop = require('./src/execution/agent-loop');
 const {
   getRuntimeEnvironment,
@@ -52,6 +53,7 @@ const CronExecutor = require('./src/cron/cron-executor');
 const CronScheduler = require('./src/cron/cron-scheduler');
 const { MemoryStore, MemoryManager } = require('./src/memory');
 const ContextAssembler = require('./src/context/context-assembler');
+const ConversationCompactor = require('./src/context/conversation-compactor');
 const { buildSystemSections } = require('./src/context/system-sections');
 const UsageTracker = require('./src/tracking/usage-tracker');
 const {
@@ -68,6 +70,8 @@ const { initializeMesh } = require('./src/mesh');
 const LLMRouter = require('./src/providers/llm-router');
 const { WorkflowEngine } = require('./src/workflows/workflow-engine');
 const PlannerExecutor = require('./src/workflows/planner-executor');
+const { MCPManager } = require('./src/mcp');
+const { BackgroundTaskManager } = require('./src/tasks/background-task-manager');
 
 let mainWindow;
 let meshContext;
@@ -92,11 +96,14 @@ let hookExecutor;
 let memoryStore;
 let memoryManager;
 let contextAssembler;
+let conversationCompactor;
 let ttsEngine;
 let usageTracker;
 let cronStore;
 let cronExecutor;
 let cronScheduler;
+let mcpManager;
+let backgroundTaskManager;
 let webhookRegistry;
 let webhookHandler;
 let webhookServer;
@@ -457,6 +464,49 @@ const setToolAlwaysApprove = (toolName, approved = true) => {
   };
 
   setToolApprovals(updated);
+};
+
+// Persisted pattern-based permission rules. Shape:
+//   [{ tool, pattern, action: 'allow'|'ask'|'deny', source, createdAt }]
+// ToolExecutor reads these at approval time via getPermissionRules() and
+// short-circuits the per-tool flag when a rule matches.
+const getPermissionRules = () => {
+  const approvals = getToolApprovals();
+  return Array.isArray(approvals?.permissionRules) ? approvals.permissionRules : [];
+};
+
+const setPermissionRules = (rules) => {
+  const approvals = getToolApprovals();
+  setToolApprovals({
+    ...approvals,
+    permissionRules: Array.isArray(rules) ? rules : []
+  });
+};
+
+const addPermissionRule = (rule) => {
+  if (!rule || !rule.tool || !rule.action) return;
+  const existing = getPermissionRules();
+  // De-duplicate: same tool + pattern + action replaces the old entry
+  // (useful when user upgrades "ask" to "allow").
+  const filtered = existing.filter((r) =>
+    !(r.tool === rule.tool && (r.pattern || '*') === (rule.pattern || '*') && r.action === rule.action)
+  );
+  filtered.push({
+    tool: rule.tool,
+    pattern: rule.pattern || '*',
+    action: rule.action,
+    source: rule.source || 'user',
+    createdAt: new Date().toISOString()
+  });
+  setPermissionRules(filtered);
+};
+
+const removePermissionRule = (tool, pattern, action) => {
+  const existing = getPermissionRules();
+  const filtered = existing.filter((r) =>
+    !(r.tool === tool && (r.pattern || '*') === (pattern || '*') && r.action === action)
+  );
+  setPermissionRules(filtered);
 };
 
 const providerLabels = {
@@ -1991,10 +2041,17 @@ const createToolExecutorWithApprovals = async (
     runtimeEnvironment: resolvedRuntimeEnvironment,
     approvalRequester,
     shouldAutoApprove: async (toolName) => isToolAlwaysApproved(toolName),
+    // Live callback — picks up rules added mid-session when the user
+    // clicks "Always allow 'git *'" in an approval dialog.
+    getPermissionRules,
+    // Session-scoped denial counter so "rm *" denied three times stops
+    // re-prompting and returns an auto-deny to the model.
+    denialTracker: new DenialTracker(),
     hookExecutor: getHookSettings().enabled ? hookExecutor : null,
     useSandbox: executorOptions.useSandbox !== false,
     extraToolOptions: {
       get agentExecutorAdapter() { return agentExecutorAdapter; },
+      get backgroundTaskManager() { return backgroundTaskManager; },
       getAgent,
       listAgents,
       toolRegistry,
@@ -2061,19 +2118,33 @@ const resolveInference = async (selection = {}) => {
   return ensureOAuthToken(result);
 };
 
-const createAgentRuntime = async (providerType, event = null, approvalRequester = null) => {
+const createAgentRuntime = async (
+  providerType,
+  event = null,
+  approvalRequester = null,
+  runtimeOptions = {}
+) => {
   const resolution = await resolveInference(providerType);
   const capabilities = inferenceRouter.getCapabilities(resolution.providerType, resolution.model);
   if (!capabilities.toolCalling) {
     throw new Error(`Provider ${resolution.providerType} (${resolution.model}) does not support tool calling required for agent mode.`);
   }
+  const workingDirectory = runtimeOptions.workingDirectory || process.cwd();
   const runtimeEnvironment = await getRuntimeEnvironment({
-    workingDirectory: process.cwd()
+    workingDirectory
   });
+  // Pull the persisted allowlist so "Always Allow" decisions made in earlier
+  // workflow/chat runs carry forward. Without this, each Plan & Execute
+  // starts from an empty allowlist and re-prompts for the same directories.
+  const settings = getSettings();
+  const allowedDirectories = Array.isArray(settings.allowedDirectories)
+    ? settings.allowedDirectories
+    : [];
   const toolExecutor = await createToolExecutorWithApprovals(
     event,
     runtimeEnvironment,
-    approvalRequester
+    approvalRequester,
+    { workingDirectory, allowedDirectories }
   );
 
   return {
@@ -2150,6 +2221,31 @@ const initializeAgentInfrastructure = async () => {
     openaiApiKey: openaiApiKey || ''
   });
 
+  // ConversationCompactor: semantic retrieval over conversation history.
+  // Reuses the same embedding provider as the context assembler. The cache
+  // file persists embeddings keyed by chunk-content hash, so the same text
+  // is never embedded twice — survives restarts and is shared across chats.
+  conversationCompactor = new ConversationCompactor({
+    embeddingProvider: contextAssembler.embeddingProvider,
+    cacheFilePath: path.join(app.getPath('userData'), 'memory', 'embedding-cache.jsonl')
+  });
+
+  // Background task manager for async agent tasks
+  backgroundTaskManager = new BackgroundTaskManager({
+    outputDir: path.join(app.getPath('userData'), 'background-tasks')
+  });
+
+  backgroundTaskManager.on('taskCompleted', (task) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('backgroundTask:completed', {
+        id: task.id,
+        state: task.state,
+        description: task.description,
+        error: task.error
+      });
+    }
+  });
+
   usageTracker = new UsageTracker(store);
   ttsEngine = new TTSEngine({
     getSettings: getVoiceSettings,
@@ -2202,6 +2298,32 @@ const initializeAgentInfrastructure = async () => {
     })();
   }
 
+  // Initialize MCP servers from settings (background, non-blocking).
+  // MCP tools are registered into the toolRegistry and become available
+  // to agents via ToolSearch (deferred loading).
+  mcpManager = new MCPManager({ toolRegistry });
+  const mcpServers = getSettings().mcpServers || {};
+  if (Object.keys(mcpServers).length > 0) {
+    mcpManager.connectAll(mcpServers).then((results) => {
+      const connected = results.filter(r => r.status === 'connected');
+      const failed = results.filter(r => r.status === 'failed');
+      if (connected.length > 0) {
+        console.log(`[mcp] Connected to ${connected.length} server(s): ${connected.map(r => `${r.name} (${r.tools} tools)`).join(', ')}`);
+      }
+      if (failed.length > 0) {
+        console.warn(`[mcp] Failed to connect: ${failed.map(r => `${r.name}: ${r.error}`).join(', ')}`);
+      }
+
+      // Re-index context assembler after MCP tools are registered
+      if (contextAssembler) {
+        const toolDefs = toolRegistry.getFunctionDefinitions();
+        contextAssembler.index(toolDefs).catch(() => {});
+      }
+    }).catch((err) => {
+      console.warn('[mcp] MCP initialization failed:', err.message);
+    });
+  }
+
   gatewayServer = new GatewayServer({
     host: '127.0.0.1',
     port: process.env.KL_TEST_MODE ? 0 : 18789
@@ -2219,7 +2341,8 @@ const initializeAgentInfrastructure = async () => {
       const runtime = await createAgentRuntime(
         { tier: requestedTier },
         null,
-        options.approvalRequester || null
+        options.approvalRequester || null,
+        { workingDirectory: options.workingDirectory }
       );
       const executor = new AgentExecutor(runtime.provider, runtime.toolExecutor, {
         usageTracker
@@ -2260,7 +2383,13 @@ const initializeAgentInfrastructure = async () => {
     storageDir: path.join(app.getPath('userData'), 'workflows'),
     agentExecutorAdapter,
     getAgent,
-    maxConcurrentTasks: 3
+    maxConcurrentTasks: 3,
+    getConversationCompactor: () => conversationCompactor,
+    getParentChatMessages: (chatId) => {
+      const chat = getChats().find((c) => c.id === chatId);
+      if (!chat || !Array.isArray(chat.messages)) return [];
+      return chat.messages.filter((m) => m.sender === 'user' || m.sender === 'assistant');
+    }
   });
   await workflowEngine.initialize();
 
@@ -2278,7 +2407,8 @@ const initializeAgentInfrastructure = async () => {
   plannerExecutor = new PlannerExecutor({
     agentExecutorAdapter,
     workflowEngine,
-    getAgent
+    getAgent,
+    getConversationCompactor: () => conversationCompactor
   });
 
   remoteControl = new RemoteControl(
@@ -2506,6 +2636,8 @@ registerHandlers(ipcMain, {
   buildRuntimeSystemPrompt,
   buildMemoryContextSection,
   getContextAssembler: () => contextAssembler,
+  getConversationCompactor: () => conversationCompactor,
+  getToolResultsDir: () => path.join(app.getPath('userData'), 'tool-results'),
   speakSummaryText,
   getMainWindow: () => mainWindow,
   getTtsEngine: () => ttsEngine,
@@ -2516,6 +2648,9 @@ registerHandlers(ipcMain, {
   // Tool
   pendingApprovalResolvers,
   setToolAlwaysApprove,
+  getPermissionRules,
+  addPermissionRule,
+  removePermissionRule,
   pendingAskUserResolvers,
   pendingDirectoryAccessResolvers,
 
@@ -2713,6 +2848,9 @@ app.on('window-all-closed', function () {
       workingDirectory: process.cwd()
     }).catch((err) => console.warn('[main] SessionEnd hook failed:', err.message));
 
+    if (mcpManager) {
+      mcpManager.disconnectAll().catch((err) => console.warn('[main] MCP shutdown failed:', err.message));
+    }
     if (channelRegistry) {
       channelRegistry.shutdownAll().catch((err) => console.warn('[main] Channel shutdown failed:', err.message));
     } else {

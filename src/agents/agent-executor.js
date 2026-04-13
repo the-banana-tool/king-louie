@@ -2,6 +2,20 @@ const AgentLoop = require('../execution/agent-loop');
 const path = require('path');
 const TemplateEngine = require('../templates/template-engine');
 
+// Tools that mutate the environment. readOnly agents (e.g. the planner) must
+// never be handed any of these, even if a caller's options.tools list slips
+// one through. canUseTool already filters by allowedTools, but this is the
+// belt to that suspenders — a future regression in agent config can't allow
+// the planner to start writing files.
+const MUTATING_TOOL_NAMES = new Set([
+  'Write',
+  'Edit',
+  'MultiEdit',
+  'NotebookEdit',
+  'Bash',
+  'Git'
+]);
+
 class AgentExecutor {
   constructor(provider, toolExecutor, options = {}) {
     this.provider = provider;
@@ -65,7 +79,16 @@ class AgentExecutor {
       : [{ role: 'user', content: userMessage }];
 
     const candidateTools = Array.isArray(options.tools) ? options.tools : [];
-    const availableTools = candidateTools.filter((tool) => agent.canUseTool(tool.name));
+    let availableTools = candidateTools.filter((tool) => agent.canUseTool(tool.name));
+    if (agent.readOnly) {
+      const blocked = availableTools.filter((tool) => MUTATING_TOOL_NAMES.has(tool.name));
+      if (blocked.length > 0) {
+        console.warn(
+          `[agent-executor] Stripping mutating tools from readOnly agent '${agent.id}': ${blocked.map((t) => t.name).join(', ')}`
+        );
+      }
+      availableTools = availableTools.filter((tool) => !MUTATING_TOOL_NAMES.has(tool.name));
+    }
 
     const loop = new AgentLoop(this.provider, this.toolExecutor, {
       maxIterations: options.maxIterations || agent.maxIterations,

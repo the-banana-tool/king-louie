@@ -400,6 +400,7 @@ contextBridge.exposeInMainWorld(
       onMessageError: (callback) => registerOnce('chat:messageError', callback),
       onToolUse: (callback) => registerOnce('chat:toolUse', callback),
       onToolResult: (callback) => registerOnce('chat:toolResult', callback),
+      onToolProgress: (callback) => registerOnce('chat:toolProgress', callback),
       onChatUpdated: (callback) => registerOnce('chat:updated', callback)
     },
     tool: {
@@ -413,7 +414,10 @@ contextBridge.exposeInMainWorld(
         ipcRenderer.send('tool:approvalResponse', { approvalId, approved, ...options }),
       onDirectoryAccessRequired: (callback) => registerOnce('tool:directoryAccessRequired', callback),
       respondToDirectoryAccess: (requestId, approved, options = {}) =>
-        ipcRenderer.send('tool:directoryAccessResponse', { requestId, approved, ...options })
+        ipcRenderer.send('tool:directoryAccessResponse', { requestId, approved, ...options }),
+      listPermissionRules: () => ipcRenderer.invoke('tool:listPermissionRules'),
+      removePermissionRule: (tool, pattern, action) =>
+        ipcRenderer.invoke('tool:removePermissionRule', { tool, pattern, action })
     },
     task: {
       create: (config) => ipcRenderer.invoke('task:create', config),
@@ -465,6 +469,7 @@ contextBridge.exposeInMainWorld(
         throttleInvoke('settings:testVoice', () => ipcRenderer.invoke('settings:testVoice', payload)),
       saveSmartRouting: (payload) => ipcRenderer.invoke('settings:saveSmartRouting', payload),
       saveSmartRoutingRules: (payload) => ipcRenderer.invoke('settings:saveSmartRoutingRules', payload),
+      saveLlmRouting: (payload) => ipcRenderer.invoke('settings:saveLlmRouting', payload),
       saveNotifications: (payload) => ipcRenderer.invoke('settings:saveNotifications', payload),
       saveDefaults: (payload) => ipcRenderer.invoke('settings:saveDefaults', payload),
       addAllowedDirectory: () => ipcRenderer.invoke('settings:addAllowedDirectory'),
@@ -673,8 +678,26 @@ contextBridge.exposeInMainWorld(
       onTaskFailed: (callback) => registerOnce('mesh:taskFailed', callback)
     },
     workflow: {
-      plan: (goal, options) => ipcRenderer.invoke('workflow:plan', { goal, options }),
-      planAndExecute: (goal, options, background) => ipcRenderer.invoke('workflow:planAndExecute', { goal, options, background }),
+      plan: (goal, planOpts = {}) => ipcRenderer.invoke('workflow:plan', {
+        goal,
+        options: planOpts.options || {},
+        chatId: planOpts.chatId,
+        workingDirectory: planOpts.workingDirectory,
+        chatMessages: planOpts.chatMessages
+      }),
+      planAndExecute: (goal, planOpts = {}) => ipcRenderer.invoke('workflow:planAndExecute', {
+        goal,
+        options: planOpts.options || {},
+        background: planOpts.background !== false,
+        chatId: planOpts.chatId,
+        workingDirectory: planOpts.workingDirectory,
+        chatMessages: planOpts.chatMessages
+      }),
+      create: (taskGraph, createOpts = {}) => ipcRenderer.invoke('workflow:create', {
+        taskGraph,
+        chatId: createOpts.chatId,
+        workingDirectory: createOpts.workingDirectory
+      }),
       run: (id) => ipcRenderer.invoke('workflow:run', { id }),
       pause: (id) => ipcRenderer.invoke('workflow:pause', { id }),
       cancel: (id) => ipcRenderer.invoke('workflow:cancel', { id }),
@@ -682,6 +705,7 @@ contextBridge.exposeInMainWorld(
       get: (id) => ipcRenderer.invoke('workflow:get', { id }),
       progress: (id) => ipcRenderer.invoke('workflow:progress', { id }),
       delete: (id) => ipcRenderer.invoke('workflow:delete', { id }),
+      recoverPlan: (chatId) => ipcRenderer.invoke('workflow:recoverPlan', { chatId }),
       onCreated: (callback) => registerOnce('workflow:created', callback),
       onStarted: (callback) => registerOnce('workflow:started', callback),
       onCompleted: (callback) => registerOnce('workflow:completed', callback),
