@@ -16,6 +16,7 @@ const BrowserTool = require('./builtin/browser-tool');
 const RemoteDispatchTool = require('./builtin/remote-dispatch-tool');
 const SpawnAgentTool = require('./builtin/spawn-agent-tool');
 const RequestToolsTool = require('./builtin/request-tools-tool');
+const VaultTool = require('./builtin/vault-tool');
 
 let initialized = false;
 
@@ -38,6 +39,7 @@ function initializeTools() {
   toolRegistry.register(RemoteDispatchTool);
   toolRegistry.register(SpawnAgentTool);
   toolRegistry.register(RequestToolsTool);
+  toolRegistry.register(VaultTool);
 
   initialized = true;
 }

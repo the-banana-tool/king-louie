@@ -1998,7 +1998,9 @@ const createToolExecutorWithApprovals = async (
       getAgent,
       listAgents,
       toolRegistry,
-      inferenceRouter
+      inferenceRouter,
+      encryptToken,
+      decryptToken
     }
   });
 

@@ -580,6 +580,58 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     }
     return { ok: true, clientId: anthropicOAuth.clientId || '' };
   }));
+
+  // ── Vault ────────────────────────────────────────────────
+  const VAULT_PREFIX = '__vault_';
+  const Store = require('electron-store');
+  const vaultStore = new Store();
+
+  ipcMain.handle('settings:vaultList', wrapHandler('settings:vaultList', async () => {
+    const allKeys = Object.keys(vaultStore.store || {});
+    const vaultKeys = allKeys
+      .filter((k) => k.startsWith(VAULT_PREFIX))
+      .map((k) => k.slice(VAULT_PREFIX.length));
+    return { ok: true, keys: vaultKeys, count: vaultKeys.length };
+  }));
+
+  ipcMain.handle('settings:vaultStore', wrapHandler('settings:vaultStore', async (_event, { key, value } = {}) => {
+    if (!key || typeof key !== 'string') return { ok: false, error: 'Key is required.' };
+    if (!value || typeof value !== 'string') return { ok: false, error: 'Value is required.' };
+    if (!encryptToken) return { ok: false, error: 'Encryption unavailable.' };
+    const encrypted = encryptToken(value);
+    vaultStore.set(`${VAULT_PREFIX}${key.trim()}`, encrypted);
+    return { ok: true, message: `Secret "${key.trim()}" saved.` };
+  }));
+
+  ipcMain.handle('settings:vaultDelete', wrapHandler('settings:vaultDelete', async (_event, { key } = {}) => {
+    if (!key || typeof key !== 'string') return { ok: false, error: 'Key is required.' };
+    const storeKey = `${VAULT_PREFIX}${key}`;
+    if (!vaultStore.has(storeKey)) return { ok: false, error: `No secret found for "${key}".` };
+    vaultStore.delete(storeKey);
+    return { ok: true, message: `Secret "${key}" deleted.` };
+  }));
+
+  ipcMain.handle('settings:vaultUpdate', wrapHandler('settings:vaultUpdate', async (_event, { oldKey, newKey, value } = {}) => {
+    if (!oldKey || typeof oldKey !== 'string') return { ok: false, error: 'Old key is required.' };
+    if (!newKey || typeof newKey !== 'string') return { ok: false, error: 'New key is required.' };
+    const oldStoreKey = `${VAULT_PREFIX}${oldKey}`;
+    const newStoreKey = `${VAULT_PREFIX}${newKey.trim()}`;
+
+    if (value && typeof value === 'string') {
+      // Update both key name and value
+      if (!encryptToken) return { ok: false, error: 'Encryption unavailable.' };
+      if (oldStoreKey !== newStoreKey) vaultStore.delete(oldStoreKey);
+      vaultStore.set(newStoreKey, encryptToken(value));
+    } else if (oldStoreKey !== newStoreKey) {
+      // Rename key only — move the encrypted blob
+      const existing = vaultStore.get(oldStoreKey);
+      if (!existing) return { ok: false, error: `No secret found for "${oldKey}".` };
+      vaultStore.set(newStoreKey, existing);
+      vaultStore.delete(oldStoreKey);
+    }
+
+    return { ok: true, message: `Secret updated.` };
+  }));
 }
 
 module.exports = {

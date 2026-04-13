@@ -503,7 +503,21 @@ contextBridge.exposeInMainWorld(
         validateObject(payload, 'payload');
         return ipcRenderer.invoke('settings:anthropicOAuthSaveClientId', payload);
       },
-      anthropicOAuthGetClientId: () => ipcRenderer.invoke('settings:anthropicOAuthGetClientId')
+      anthropicOAuthGetClientId: () => ipcRenderer.invoke('settings:anthropicOAuthGetClientId'),
+      // Vault
+      vaultList: () => ipcRenderer.invoke('settings:vaultList'),
+      vaultStore: (payload) => {
+        validateObject(payload, 'payload');
+        return ipcRenderer.invoke('settings:vaultStore', payload);
+      },
+      vaultDelete: (payload) => {
+        validateObject(payload, 'payload');
+        return ipcRenderer.invoke('settings:vaultDelete', payload);
+      },
+      vaultUpdate: (payload) => {
+        validateObject(payload, 'payload');
+        return ipcRenderer.invoke('settings:vaultUpdate', payload);
+      }
     },
     hooks: {
       list: () => ipcRenderer.invoke('hooks:list'),

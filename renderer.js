@@ -148,6 +148,16 @@ const dom = {
   memoryClearBtn: document.getElementById('memory-clear-btn'),
   memoryStatus: document.getElementById('memory-status'),
   memoryList: document.getElementById('memory-list'),
+  vaultList: document.getElementById('vault-list'),
+  vaultAddBtn: document.getElementById('vault-add-btn'),
+  vaultRefreshBtn: document.getElementById('vault-refresh-btn'),
+  vaultStatus: document.getElementById('vault-status'),
+  vaultAddPanel: document.getElementById('vault-add-panel'),
+  vaultAddKeyInput: document.getElementById('vault-add-key-input'),
+  vaultAddValueInput: document.getElementById('vault-add-value-input'),
+  vaultSaveEntryBtn: document.getElementById('vault-save-entry-btn'),
+  vaultCancelEntryBtn: document.getElementById('vault-cancel-entry-btn'),
+  vaultAddStatus: document.getElementById('vault-add-status'),
   cronRefreshBtn: document.getElementById('cron-refresh-btn'),
   cronStatus: document.getElementById('cron-status'),
   cronList: document.getElementById('cron-list'),
@@ -2660,6 +2670,7 @@ function renderSettings() {
 
   renderInferenceTierDetails();
   renderSmartRoutingRules();
+  loadVaultEntries();
 
   const telegram = appState.settings.telegram || {};
   if (dom.telegramChannelStatus) {
@@ -2685,6 +2696,171 @@ function renderSettings() {
     dom.websearchTavilyStatus.textContent = webSearch.tavily?.apiKey
       ? 'Key configured.'
       : 'Not configured.';
+  }
+}
+
+// ── Vault ──────────────────────────────────────────────────
+
+async function loadVaultEntries() {
+  if (!window.electron?.settings?.vaultList || !dom.vaultList) return;
+  try {
+    if (dom.vaultStatus) {
+      dom.vaultStatus.textContent = 'Loading vault...';
+      dom.vaultStatus.classList.remove('error');
+    }
+    const result = await window.electron.settings.vaultList();
+    if (!result?.ok) throw new Error(result?.error || 'Failed to list vault entries');
+    appState.settings.vaultKeys = Array.isArray(result.keys) ? result.keys : [];
+    renderVaultEntries(appState.settings.vaultKeys);
+    if (dom.vaultStatus) {
+      dom.vaultStatus.textContent = `${result.count} secret(s) stored.`;
+    }
+  } catch (err) {
+    if (dom.vaultStatus) {
+      dom.vaultStatus.textContent = `Error: ${err.message}`;
+      dom.vaultStatus.classList.add('error');
+    }
+  }
+}
+
+function renderVaultEntries(keys = []) {
+  if (!dom.vaultList) return;
+  dom.vaultList.innerHTML = '';
+
+  if (keys.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'provider-message';
+    empty.textContent = 'No secrets stored in the vault.';
+    dom.vaultList.appendChild(empty);
+    return;
+  }
+
+  keys.forEach((key) => {
+    const card = document.createElement('div');
+    card.className = 'provider-card';
+    card.dataset.vaultKey = key;
+
+    const header = document.createElement('div');
+    header.className = 'provider-header';
+
+    const titleWrap = document.createElement('div');
+    titleWrap.className = 'provider-title-wrap';
+
+    const title = document.createElement('div');
+    title.className = 'provider-title';
+    title.textContent = key;
+
+    const meta = document.createElement('div');
+    meta.className = 'provider-message';
+    meta.textContent = 'Encrypted • Click "Update" to change the value';
+
+    titleWrap.appendChild(title);
+    titleWrap.appendChild(meta);
+
+    const status = document.createElement('span');
+    status.className = 'provider-status ok';
+    status.textContent = 'Stored';
+
+    header.appendChild(titleWrap);
+    header.appendChild(status);
+
+    const actions = document.createElement('div');
+    actions.className = 'provider-actions';
+
+    const updateBtn = document.createElement('button');
+    updateBtn.type = 'button';
+    updateBtn.className = 'btn';
+    updateBtn.appendChild(faIcon('fas fa-pen'));
+    updateBtn.appendChild(document.createTextNode(' Update'));
+    updateBtn.dataset.action = 'update-vault';
+    updateBtn.dataset.vaultKey = key;
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.type = 'button';
+    deleteBtn.className = 'btn btn-danger';
+    deleteBtn.appendChild(faIcon('fas fa-trash'));
+    deleteBtn.appendChild(document.createTextNode(' Delete'));
+    deleteBtn.dataset.action = 'delete-vault';
+    deleteBtn.dataset.vaultKey = key;
+
+    actions.appendChild(updateBtn);
+    actions.appendChild(deleteBtn);
+
+    card.appendChild(header);
+    card.appendChild(actions);
+    dom.vaultList.appendChild(card);
+  });
+}
+
+async function handleVaultDelete(key) {
+  if (!confirm(`Delete secret "${key}" from the vault?`)) return;
+  try {
+    const result = await window.electron.settings.vaultDelete({ key });
+    if (!result?.ok) throw new Error(result?.error || 'Delete failed');
+    await loadVaultEntries();
+  } catch (err) {
+    if (dom.vaultStatus) {
+      dom.vaultStatus.textContent = `Error: ${err.message}`;
+      dom.vaultStatus.classList.add('error');
+    }
+  }
+}
+
+async function handleVaultUpdate(key) {
+  const newValue = prompt(`Enter new value for "${key}" (leave blank to keep current):`);
+  if (newValue === null) return; // cancelled
+  const newKey = prompt(`Rename key? (leave as-is or type new name):`, key);
+  if (newKey === null) return;
+
+  try {
+    const payload = { oldKey: key, newKey: newKey || key };
+    if (newValue) payload.value = newValue;
+    const result = await window.electron.settings.vaultUpdate(payload);
+    if (!result?.ok) throw new Error(result?.error || 'Update failed');
+    await loadVaultEntries();
+  } catch (err) {
+    if (dom.vaultStatus) {
+      dom.vaultStatus.textContent = `Error: ${err.message}`;
+      dom.vaultStatus.classList.add('error');
+    }
+  }
+}
+
+async function handleVaultSave() {
+  const key = dom.vaultAddKeyInput?.value?.trim();
+  const value = dom.vaultAddValueInput?.value;
+
+  if (!key) {
+    if (dom.vaultAddStatus) {
+      dom.vaultAddStatus.textContent = 'Key name is required.';
+      dom.vaultAddStatus.classList.add('error');
+    }
+    return;
+  }
+  if (!value) {
+    if (dom.vaultAddStatus) {
+      dom.vaultAddStatus.textContent = 'Value is required.';
+      dom.vaultAddStatus.classList.add('error');
+    }
+    return;
+  }
+
+  try {
+    const result = await window.electron.settings.vaultStore({ key, value });
+    if (!result?.ok) throw new Error(result?.error || 'Save failed');
+    if (dom.vaultAddKeyInput) dom.vaultAddKeyInput.value = '';
+    if (dom.vaultAddValueInput) dom.vaultAddValueInput.value = '';
+    if (dom.vaultAddPanel) dom.vaultAddPanel.hidden = true;
+    if (dom.vaultAddStatus) {
+      dom.vaultAddStatus.textContent = '';
+      dom.vaultAddStatus.classList.remove('error');
+    }
+    await loadVaultEntries();
+  } catch (err) {
+    if (dom.vaultAddStatus) {
+      dom.vaultAddStatus.textContent = `Error: ${err.message}`;
+      dom.vaultAddStatus.classList.add('error');
+    }
   }
 }
 
@@ -6449,6 +6625,42 @@ if (dom.memoryTierFilterInput) {
 
 if (dom.cronRefreshBtn) {
   dom.cronRefreshBtn.addEventListener('click', () => loadCronJobs());
+}
+
+// ── Vault event listeners ──────────────────────────────────
+if (dom.vaultAddBtn) {
+  dom.vaultAddBtn.addEventListener('click', () => {
+    if (dom.vaultAddPanel) dom.vaultAddPanel.hidden = false;
+    if (dom.vaultAddKeyInput) dom.vaultAddKeyInput.focus();
+  });
+}
+
+if (dom.vaultCancelEntryBtn) {
+  dom.vaultCancelEntryBtn.addEventListener('click', () => {
+    if (dom.vaultAddPanel) dom.vaultAddPanel.hidden = true;
+    if (dom.vaultAddKeyInput) dom.vaultAddKeyInput.value = '';
+    if (dom.vaultAddValueInput) dom.vaultAddValueInput.value = '';
+    if (dom.vaultAddStatus) { dom.vaultAddStatus.textContent = ''; dom.vaultAddStatus.classList.remove('error'); }
+  });
+}
+
+if (dom.vaultSaveEntryBtn) {
+  dom.vaultSaveEntryBtn.addEventListener('click', () => handleVaultSave());
+}
+
+if (dom.vaultRefreshBtn) {
+  dom.vaultRefreshBtn.addEventListener('click', () => loadVaultEntries());
+}
+
+if (dom.vaultList) {
+  dom.vaultList.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-action]');
+    if (!btn) return;
+    const action = btn.dataset.action;
+    const key = btn.dataset.vaultKey;
+    if (action === 'delete-vault' && key) handleVaultDelete(key);
+    if (action === 'update-vault' && key) handleVaultUpdate(key);
+  });
 }
 
 if (dom.cronAddBtn) {

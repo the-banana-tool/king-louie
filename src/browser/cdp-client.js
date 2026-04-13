@@ -279,6 +279,89 @@ class CdpClient {
     return this.evaluate(expression);
   }
 
+  /**
+   * Get all frames in the page (for interacting with iframes, e.g. Stripe payment forms).
+   * Returns an array of { frameId, url, name, securityOrigin }.
+   */
+  async getFrames() {
+    await this.send('Page.enable');
+    const { frameTree } = await this.send('Page.getFrameTree');
+    const frames = [];
+    const walk = (node) => {
+      frames.push({
+        frameId: node.frame.id,
+        url: node.frame.url,
+        name: node.frame.name || '',
+        securityOrigin: node.frame.securityOrigin || ''
+      });
+      if (node.childFrames) {
+        for (const child of node.childFrames) walk(child);
+      }
+    };
+    walk(frameTree);
+    return frames;
+  }
+
+  /**
+   * Evaluate an expression inside a specific iframe identified by frameId.
+   * Use getFrames() to discover available frames first.
+   */
+  async evaluateInFrame(frameId, expression) {
+    // Create an isolated world in the target frame so we can execute JS there
+    const { executionContextId } = await this.send('Page.createIsolatedWorld', {
+      frameId,
+      worldName: 'king-louie-vault',
+      grantUniveralAccess: true
+    });
+
+    await this.send('Runtime.enable');
+    const result = await this.send('Runtime.evaluate', {
+      expression,
+      contextId: executionContextId,
+      returnByValue: true,
+      awaitPromise: true
+    });
+
+    if (result.exceptionDetails) {
+      throw new Error(`Frame evaluation failed: ${result.exceptionDetails.exception.description || result.exceptionDetails.text}`);
+    }
+    return result.result.value;
+  }
+
+  /**
+   * Type text into an input inside an iframe (e.g. Stripe Elements).
+   * Dispatches input/change events for React/Vue compatibility.
+   */
+  async typeInFrame(frameId, selector, text) {
+    return this.evaluateInFrame(frameId, `
+      (() => {
+        const el = document.querySelector('${selector.replace(/'/g, "\\'")}');
+        if (!el) throw new Error('Element not found in frame: ${selector.replace(/'/g, "\\'")}');
+        el.focus();
+        if ('value' in el) {
+          el.value = ${JSON.stringify(text)};
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        return true;
+      })()
+    `);
+  }
+
+  /**
+   * Click an element inside an iframe.
+   */
+  async clickInFrame(frameId, selector) {
+    return this.evaluateInFrame(frameId, `
+      (() => {
+        const el = document.querySelector('${selector.replace(/'/g, "\\'")}');
+        if (!el) throw new Error('Element not found in frame: ${selector.replace(/'/g, "\\'")}');
+        el.click();
+        return true;
+      })()
+    `);
+  }
+
   async waitForSelector(selector, timeout = 30000) {
     const expression = `
       new Promise((resolve, reject) => {

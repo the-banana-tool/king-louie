@@ -128,6 +128,7 @@
           <option value="providers">Providers</option>
           <option value="inference">Inference</option>
           <option value="routing">Smart Routing</option>
+          <option value="vault">Vault</option>
           <option value="channels">Channels</option>
           <option value="profile">Profile</option>
           <option value="voice">Voice</option>
@@ -238,6 +239,38 @@
             <div class="template-variables-actions">
               <button id="add-routing-rule-btn" type="button" class="btn btn-primary"><i class="fas fa-plus"></i> Add Rule</button>
               <span id="smart-routing-status" class="provider-message"></span>
+            </div>
+          </section>
+        </div>
+
+        <!-- Tab: Vault -->
+        <div class="settings-tab-content" data-tab="vault">
+          <section class="template-variables-card">
+            <h3>Secure Vault</h3>
+            <p>Store sensitive credentials (passwords, API keys, credit card numbers, etc.) encrypted at rest. The agent retrieves these via the Vault tool when needed — values never sit in the conversation.</p>
+
+            <div class="template-variables-actions" style="margin-top: 10px;">
+              <button id="vault-add-btn" type="button" class="btn btn-primary"><i class="fas fa-plus"></i> Add Secret</button>
+              <button id="vault-refresh-btn" type="button" class="btn"><i class="fas fa-sync-alt"></i> Refresh</button>
+              <span id="vault-status" class="provider-message"></span>
+            </div>
+
+            <div class="provider-list" id="vault-list"></div>
+
+            <div class="vault-add-panel" id="vault-add-panel" hidden>
+              <h4>Add New Secret</h4>
+              <div class="template-variables-grid">
+                <label for="vault-add-key-input">Key Name</label>
+                <input id="vault-add-key-input" class="provider-input" type="text" placeholder='e.g., test_cc_number, signup_password'>
+
+                <label for="vault-add-value-input">Secret Value</label>
+                <input id="vault-add-value-input" class="provider-input" type="password" placeholder="Will be encrypted before saving">
+              </div>
+              <div class="template-variables-actions" style="margin-top: 10px;">
+                <button id="vault-save-entry-btn" type="button" class="btn btn-primary"><i class="fas fa-lock"></i> Save Encrypted</button>
+                <button id="vault-cancel-entry-btn" type="button" class="btn">Cancel</button>
+                <span id="vault-add-status" class="provider-message"></span>
+              </div>
             </div>
           </section>
         </div>
