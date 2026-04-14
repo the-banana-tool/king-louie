@@ -1,6 +1,35 @@
 const { chromium } = require('playwright');
 const path = require('path');
 const os = require('os');
+const { spawn } = require('child_process');
+
+let installPromise = null;
+
+function installChromium(onProgress) {
+  if (installPromise) return installPromise;
+  installPromise = new Promise((resolve, reject) => {
+    const cliPath = path.join(path.dirname(require.resolve('playwright/package.json')), 'cli.js');
+    const child = spawn(process.execPath, [cliPath, 'install', 'chromium'], {
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const onData = (buf) => { if (onProgress) onProgress(buf.toString()); };
+    child.stdout.on('data', onData);
+    child.stderr.on('data', onData);
+    child.on('error', reject);
+    child.on('exit', (code) => {
+      installPromise = null;
+      if (code === 0) resolve();
+      else reject(new Error(`playwright install exited with code ${code}`));
+    });
+  });
+  return installPromise;
+}
+
+function isMissingBrowserError(err) {
+  const msg = err && err.message ? err.message : '';
+  return msg.includes("Executable doesn't exist") || msg.includes('playwright install');
+}
 
 /**
  * Playwright-based browser manager.
@@ -35,21 +64,37 @@ class PlaywrightBrowser {
       '--no-default-browser-check',
     ];
 
-    if (options.userDataPath) {
-      // Persistent context: preserves cookies, localStorage, login sessions
-      this._persistent = true;
-      this.context = await chromium.launchPersistentContext(options.userDataPath, {
-        headless,
-        viewport,
-        args: launchArgs,
-      });
-      this.browser = null;
-      this.page = this.context.pages()[0] || await this.context.newPage();
-    } else {
-      this._persistent = false;
-      this.browser = await chromium.launch({ headless, args: launchArgs });
-      this.context = await this.browser.newContext({ viewport });
-      this.page = await this.context.newPage();
+    const launch = async (channel) => {
+      const base = { headless, args: launchArgs };
+      if (channel) base.channel = channel;
+      if (options.userDataPath) {
+        this._persistent = true;
+        this.context = await chromium.launchPersistentContext(options.userDataPath, {
+          ...base,
+          viewport,
+        });
+        this.browser = null;
+        this.page = this.context.pages()[0] || await this.context.newPage();
+      } else {
+        this._persistent = false;
+        this.browser = await chromium.launch(base);
+        this.context = await this.browser.newContext({ viewport });
+        this.page = await this.context.newPage();
+      }
+    };
+
+    try {
+      // Prefer the user's installed Chrome — avoids the ~280MB playwright download.
+      await launch('chrome');
+    } catch (chromeErr) {
+      try {
+        await launch(null);
+      } catch (bundledErr) {
+        if (!isMissingBrowserError(bundledErr)) throw bundledErr;
+        if (options.onInstallProgress) options.onInstallProgress('Downloading Chromium for browser automation…');
+        await installChromium(options.onInstallProgress);
+        await launch(null);
+      }
     }
 
     this._attachPageListeners(this.page);
