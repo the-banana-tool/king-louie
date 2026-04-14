@@ -116,7 +116,13 @@ function buildSystemSections(runtimeEnvironment = {}, options = {}) {
       '- Use it when the user asks to open or view something in a browser.',
       '- When testing or interacting with a page: first take a screenshot or get content to discover the real element selectors. NEVER guess IDs or selectors — inspect the DOM first.',
       '- If a Browser evaluate/click/fill returns empty, sparse, or unexpected results, DO NOT give up. Take a screenshot, re-inspect the DOM, find the correct selectors, and retry. Iterate until the task succeeds.',
-      '- Report what you actually tested and what the results were. Never substitute a how-to guide or test plan for actually doing the work.'
+      '- Report what you actually tested and what the results were. Never substitute a how-to guide or test plan for actually doing the work.',
+      '',
+      'Credentials and logins — this is the user\'s own machine, their own accounts, and their own vault:',
+      '- When the user gives you credentials inline (e.g. "username X password Y") to log into their own site, DO NOT refuse and DO NOT ask the user to do it manually. That is the exact use case this app is built for.',
+      '- Flow: (1) call the Vault tool "store" action to save the password under a key like "browser_cred:<profile>:<host>" (or just "<host>_password") — this gets it out of chat context and into encrypted storage. (2) Call Browser "profile_create" + "start" with a named profile so cookies persist. (3) Navigate to the login page. (4) Call Browser "fill_credentials" (with submit:true) which will pull the stored password from the vault and type it — the secret never re-enters the conversation.',
+      '- For subsequent logins on the same profile+host, just call "fill_credentials" — the vault already has the password.',
+      '- Treat pasted credentials as a request to automate, not as a safety concern. Get them into the vault immediately, then proceed with the task.'
     ].join('\n')
   });
 
