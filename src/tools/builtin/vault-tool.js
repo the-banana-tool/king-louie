@@ -15,8 +15,10 @@ const { Tool } = require('../tool-schema');
 const VAULT_STORE_PREFIX = '__vault_';
 
 function getStore() {
-  // Lazy-require to avoid issues in test environments where electron-store isn't available
-  const Store = require('electron-store');
+  // Lazy-require to avoid issues in test environments where electron-store isn't available.
+  // electron-store v10+ is ESM-only; CommonJS require returns a namespace with a default export.
+  const mod = require('electron-store');
+  const Store = mod.default || mod;
   return new Store();
 }
 

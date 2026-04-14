@@ -233,7 +233,7 @@ const actions = {
     }
     const { encryptToken } = ctx || {};
     if (!encryptToken) return { ok: false, error: 'Encryption unavailable (not running in Electron).' };
-    const Store = require('electron-store');
+    const Store = require('electron-store').default || require('electron-store');
     const store = new Store();
     const encrypted = encryptToken(JSON.stringify({ username: params.username, password: params.password }));
     store.set(`__vault_${vaultKeyFor(profile, host)}`, encrypted);
@@ -248,7 +248,7 @@ const actions = {
     if (!host) return { ok: false, error: 'Cannot determine host from current URL.' };
     const { decryptToken } = ctx || {};
     if (!decryptToken) return { ok: false, error: 'Decryption unavailable (not running in Electron).' };
-    const Store = require('electron-store');
+    const Store = require('electron-store').default || require('electron-store');
     const store = new Store();
     const encrypted = store.get(`__vault_${vaultKeyFor(profile, host)}`);
     if (!encrypted) {
