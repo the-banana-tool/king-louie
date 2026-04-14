@@ -1,7 +1,35 @@
 const { chromium } = require('playwright');
 const path = require('path');
 const os = require('os');
+const fs = require('fs');
 const { spawn } = require('child_process');
+
+/**
+ * Write (or merge) a Chromium Preferences file into the profile dir that
+ * disables the built-in password manager. King-Louie's vault is the single
+ * source of truth for web credentials, so Chromium's own save-password
+ * prompts just get in the way.
+ *
+ * Safe to call repeatedly; leaves unrelated prefs untouched.
+ */
+function disableChromiumPasswordManager(userDataPath) {
+  try {
+    const defaultDir = path.join(userDataPath, 'Default');
+    fs.mkdirSync(defaultDir, { recursive: true });
+    const prefsPath = path.join(defaultDir, 'Preferences');
+    let prefs = {};
+    if (fs.existsSync(prefsPath)) {
+      try { prefs = JSON.parse(fs.readFileSync(prefsPath, 'utf8')); } catch { prefs = {}; }
+    }
+    prefs.credentials_enable_service = false;
+    prefs.profile = prefs.profile || {};
+    prefs.profile.password_manager_enabled = false;
+    fs.writeFileSync(prefsPath, JSON.stringify(prefs));
+  } catch (err) {
+    // Non-fatal: if we can't write prefs, the launch args below are still in effect.
+    console.warn('[playwright-browser] could not disable Chromium password manager:', err.message);
+  }
+}
 
 let installPromise = null;
 
@@ -62,12 +90,16 @@ class PlaywrightBrowser {
       '--hide-crash-restore-bubble',
       '--no-first-run',
       '--no-default-browser-check',
+      // Suppress Chromium's built-in password manager / autofill prompts —
+      // king-louie's vault is the source of truth.
+      '--disable-features=PasswordManagerOnboarding,AutofillServerCommunication,PasswordManager',
     ];
 
     const launch = async (channel) => {
       const base = { headless, args: launchArgs };
       if (channel) base.channel = channel;
       if (options.userDataPath) {
+        disableChromiumPasswordManager(options.userDataPath);
         this._persistent = true;
         this.context = await chromium.launchPersistentContext(options.userDataPath, {
           ...base,

@@ -1,6 +1,8 @@
 const { Tool } = require('../tool-schema');
 const { validateUrl } = require('./web-fetch-utils');
 const PlaywrightBrowser = require('../../browser/playwright-browser');
+const fs = require('fs');
+const path = require('path');
 
 // Maximum timeout the LLM can request for any browser action (15 seconds).
 // This prevents wasting iterations on long waits for invisible/missing elements.
@@ -13,10 +15,40 @@ function clampTimeout(requested, fallback) {
 
 // Singleton browser instance reused across tool calls
 let pw = null;
+// Name of the profile backing the currently-running browser, if any.
+let activeProfile = null;
 
 function getPw() {
   if (!pw) pw = new PlaywrightBrowser();
   return pw;
+}
+
+const VAULT_CRED_PREFIX = 'browser_cred:';
+
+function profilesRoot(context) {
+  if (!context || !context.userDataPath) {
+    throw new Error('Profile actions require userDataPath in tool context (are you running inside Electron?).');
+  }
+  return path.join(context.userDataPath, 'browser-profiles');
+}
+
+function validProfileName(name) {
+  return typeof name === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(name);
+}
+
+function resolveProfileDir(context, name) {
+  if (!validProfileName(name)) {
+    throw new Error(`Invalid profile name "${name}". Use 1–64 chars of [A-Za-z0-9_-].`);
+  }
+  return path.join(profilesRoot(context), name);
+}
+
+function vaultKeyFor(profile, host) {
+  return `${VAULT_CRED_PREFIX}${profile}:${host}`;
+}
+
+function hostFromUrl(u) {
+  try { return new URL(u).hostname.toLowerCase(); } catch { return null; }
 }
 
 function requireRunning() {
@@ -117,20 +149,139 @@ async function getPageInfo(page) {
 const actions = {
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
-  async start(params) {
+  async start(params, ctx) {
     const b = getPw();
-    if (b.isRunning) return { ok: true, message: 'Browser already running' };
+    if (b.isRunning) {
+      return { ok: true, message: 'Browser already running', profile: activeProfile };
+    }
     const opts = {};
-    if (params.userDataPath) opts.userDataPath = params.userDataPath;
-    if (params.headless !== undefined) opts.headless = params.headless;
+    if (params.profile) {
+      const dir = resolveProfileDir(ctx, params.profile);
+      fs.mkdirSync(dir, { recursive: true });
+      opts.userDataPath = dir;
+      activeProfile = params.profile;
+    } else if (params.userDataPath) {
+      opts.userDataPath = params.userDataPath;
+      activeProfile = null;
+    } else {
+      activeProfile = null;
+    }
+    // v1 default: headed, so the user can watch the automation.
+    opts.headless = params.headless === true;
     await b.start(opts);
-    return { ok: true, message: 'Browser started (Playwright)' };
+    return {
+      ok: true,
+      message: `Browser started (Playwright, ${opts.headless ? 'headless' : 'headed'})`,
+      profile: activeProfile,
+    };
   },
 
   async stop() {
     const b = getPw();
     await b.stop();
+    activeProfile = null;
     return { ok: true, message: 'Browser stopped' };
+  },
+
+  // ── Profile management ─────────────────────────────────────────────────────
+
+  async profile_list(_params, ctx) {
+    const root = profilesRoot(ctx);
+    if (!fs.existsSync(root)) return { ok: true, profiles: [] };
+    const names = fs.readdirSync(root, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+    return { ok: true, profiles: names, active: activeProfile };
+  },
+
+  async profile_create(params, ctx) {
+    if (!params.profile) return { ok: false, error: '"profile" parameter is required.' };
+    const dir = resolveProfileDir(ctx, params.profile);
+    if (fs.existsSync(dir)) {
+      return { ok: true, message: `Profile "${params.profile}" already exists.`, path: dir };
+    }
+    fs.mkdirSync(dir, { recursive: true });
+    return { ok: true, message: `Profile "${params.profile}" created.`, path: dir };
+  },
+
+  async profile_delete(params, ctx) {
+    if (!params.profile) return { ok: false, error: '"profile" parameter is required.' };
+    if (activeProfile === params.profile && getPw().isRunning) {
+      return { ok: false, error: `Profile "${params.profile}" is in use. Call stop first.` };
+    }
+    const dir = resolveProfileDir(ctx, params.profile);
+    if (!fs.existsSync(dir)) {
+      return { ok: false, error: `Profile "${params.profile}" does not exist.` };
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+    return { ok: true, message: `Profile "${params.profile}" deleted.` };
+  },
+
+  async profile_current() {
+    return { ok: true, active: activeProfile, running: getPw().isRunning };
+  },
+
+  // ── Vault-backed credentials ───────────────────────────────────────────────
+
+  async save_credentials(params, ctx) {
+    const profile = params.profile || activeProfile;
+    if (!profile) return { ok: false, error: 'No active profile. Pass "profile" or start the browser with one.' };
+    const host = params.host || (getPw().page && hostFromUrl(getPw().page.url()));
+    if (!host) return { ok: false, error: '"host" parameter is required when no page is loaded.' };
+    if (!params.username || !params.password) {
+      return { ok: false, error: '"username" and "password" parameters are required.' };
+    }
+    const { encryptToken } = ctx || {};
+    if (!encryptToken) return { ok: false, error: 'Encryption unavailable (not running in Electron).' };
+    const Store = require('electron-store');
+    const store = new Store();
+    const encrypted = encryptToken(JSON.stringify({ username: params.username, password: params.password }));
+    store.set(`__vault_${vaultKeyFor(profile, host)}`, encrypted);
+    return { ok: true, message: `Credentials saved for ${profile}@${host}.` };
+  },
+
+  async fill_credentials(params, ctx) {
+    const b = requireRunning();
+    const profile = params.profile || activeProfile;
+    if (!profile) return { ok: false, error: 'No active profile. Start the browser with a profile first.' };
+    const host = params.host || hostFromUrl(b.page.url());
+    if (!host) return { ok: false, error: 'Cannot determine host from current URL.' };
+    const { decryptToken } = ctx || {};
+    if (!decryptToken) return { ok: false, error: 'Decryption unavailable (not running in Electron).' };
+    const Store = require('electron-store');
+    const store = new Store();
+    const encrypted = store.get(`__vault_${vaultKeyFor(profile, host)}`);
+    if (!encrypted) {
+      return { ok: false, error: `No credentials in vault for ${profile}@${host}. Use save_credentials first.` };
+    }
+    let creds;
+    try { creds = JSON.parse(decryptToken(encrypted)); }
+    catch (err) { return { ok: false, error: `Could not decode credentials: ${err.message}` }; }
+
+    const userSel = params.usernameSelector || await autoDetectField(b.page, [
+      'input[type="email"]', 'input[name="email"]', 'input[name="username"]',
+      'input[name="login"]', 'input[id="email"]', 'input[id="username"]',
+      'input[autocomplete="email"]', 'input[autocomplete="username"]',
+      'input[type="text"]',
+    ]);
+    const passSel = params.passwordSelector || await autoDetectField(b.page, [
+      'input[type="password"]', 'input[name="password"]',
+      'input[autocomplete="current-password"]',
+    ]);
+    if (!userSel || !passSel) {
+      return { ok: false, error: 'Could not locate username/password fields. Pass usernameSelector/passwordSelector.' };
+    }
+    await resolveLocator(b.page, userSel).fill(creds.username, { timeout: clampTimeout(params.timeout, 5000) });
+    await resolveLocator(b.page, passSel).fill(creds.password, { timeout: clampTimeout(params.timeout, 5000) });
+    if (params.submit) {
+      const submitSel = params.submitSelector || await autoDetectSubmit(b.page);
+      if (submitSel) {
+        await resolveLocator(b.page, submitSel).click({ timeout: clampTimeout(params.timeout, 5000) });
+      } else {
+        await resolveLocator(b.page, passSel).press('Enter');
+      }
+    }
+    return { ok: true, message: `Filled credentials for ${profile}@${host}.`, host, profile };
   },
 
   async status() {
@@ -1025,7 +1176,23 @@ const actionNames = Object.keys(actions);
 
 const browserTool = new Tool({
   name: 'Browser',
-  description: `Control a Playwright-powered headless browser. Start the browser first, then perform actions.
+  description: `Control a Playwright-powered browser (visible by default). Start the browser first, then perform actions.
+
+PROFILES — persistent logins and cookies across runs:
+  - "profile_list" — list saved profiles.
+  - "profile_create" / "profile_delete" — manage named profiles (params.profile). Stored under the app's userData dir.
+  - "start" with params.profile="<name>" — launches Chromium with that profile attached. Cookies, localStorage, and service workers persist between sessions.
+  - "profile_current" — report the active profile.
+
+VAULT CREDENTIALS — King-Louie's vault is the source of truth for web logins. Chromium's own password manager is disabled.
+  - "save_credentials" (params.profile?, params.host?, params.username, params.password) — encrypts and stores creds for a profile+host pair.
+  - "fill_credentials" (params.profile?, params.host?, params.submit?) — retrieves and types creds into auto-detected (or explicit) username/password fields on the current page. Set submit:true to also click the submit button.
+
+PREFER high-level actions over manual "fill" + "click" sequences:
+  - "login" — signs in with username + password. Auto-detects the username field (including type="text" with name="username", not just type="email"), password field, and submit button. Use this for ALL credentialed sign-ins instead of hand-rolling selectors like input[type='email'].
+  - "signup" — registration forms (name + email + password + confirm).
+  - "fill_payment" — credit card forms, including Stripe/Braintree iframes.
+These handle selector variation across sites. Only fall back to manual fill/click when the high-level action fails or the flow is non-standard.
 
 Selector strategies (pass as the "selector" parameter):
   - CSS:          "div.class" or "#id" (default)
@@ -1039,8 +1206,6 @@ Selector strategies (pass as the "selector" parameter):
   - Title:        "title=Close dialog"
 
 All element actions auto-wait for the element to be actionable.
-Use "login" to automatically fill credentials and sign in to websites.
-Use "signup" for registration forms, "fill_payment" for credit card/payment forms (supports Stripe/Braintree iframes).
 Use "frames" to list all iframes, "fill_in_frame"/"type_in_frame"/"click_in_frame"/"evaluate_in_frame" for direct iframe interaction.`,
   parameters: {
     type: 'object',
@@ -1149,19 +1314,24 @@ Use "frames" to list all iframes, "fill_in_frame"/"type_in_frame"/"click_in_fram
       frame_index: { type: 'number', description: 'Frame index for *_in_frame actions.' },
 
       // Start options
-      userDataPath: { type: 'string', description: 'Chrome user data directory (start action). Reuses saved logins/cookies.' },
-      headless: { type: 'boolean', description: 'Run headless (default true). Set false to see the browser window.' },
+      userDataPath: { type: 'string', description: 'Raw Chrome user data directory (start action, advanced). Prefer "profile" — it resolves to a managed directory under the app\'s userData.' },
+      profile: { type: 'string', description: 'Named persistent profile (used by start, profile_create, profile_delete, save_credentials, fill_credentials). Cookies/localStorage persist between runs. Allowed chars: [A-Za-z0-9_-], max 64.' },
+      headless: { type: 'boolean', description: 'Run headless (default false — v1 defaults to visible so you can watch). Set true to hide the window.' },
+
+      // Vault-backed credentials
+      host: { type: 'string', description: 'Host to scope credentials to (save_credentials, fill_credentials). Defaults to the current page origin.' },
+      submit: { type: 'boolean', description: 'After fill_credentials, click the submit button (or press Enter) to log in.' },
     },
     required: ['action'],
   },
   requiresApproval: true,
-  execute: async (params) => {
+  execute: async (params, context) => {
     const handler = actions[params.action];
     if (!handler) {
       return { ok: false, error: `Unknown action: ${params.action}. Valid actions: ${actionNames.join(', ')}` };
     }
     try {
-      return await handler(params);
+      return await handler(params, context);
     } catch (err) {
       return { ok: false, error: err.message || String(err) };
     }

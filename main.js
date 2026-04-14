@@ -2059,7 +2059,8 @@ const createToolExecutorWithApprovals = async (
       toolRegistry,
       inferenceRouter,
       encryptToken,
-      decryptToken
+      decryptToken,
+      userDataPath: app.getPath('userData')
     }
   });
 
