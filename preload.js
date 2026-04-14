@@ -336,6 +336,11 @@ contextBridge.exposeInMainWorld(
         validateString(chatId, 'chatId');
         return ipcRenderer.invoke('chat:setSandboxMode', { chatId, sandboxMode: !!sandboxMode });
       },
+      setDisabledMcpServers: (chatId, disabledMcpServers) => {
+        validateString(chatId, 'chatId');
+        const list = Array.isArray(disabledMcpServers) ? disabledMcpServers : [];
+        return ipcRenderer.invoke('chat:setDisabledMcpServers', { chatId, disabledMcpServers: list });
+      },
       rename: (payload) => {
         validateObject(payload, 'payload');
         validateString(payload.chatId, 'chatId');
@@ -522,7 +527,18 @@ contextBridge.exposeInMainWorld(
       vaultUpdate: (payload) => {
         validateObject(payload, 'payload');
         return ipcRenderer.invoke('settings:vaultUpdate', payload);
-      }
+      },
+      // MCP Servers
+      mcpList: () => ipcRenderer.invoke('settings:mcpList'),
+      mcpSave: (payload) => {
+        validateObject(payload, 'payload');
+        return ipcRenderer.invoke('settings:mcpSave', payload);
+      },
+      mcpDelete: (payload) => {
+        validateObject(payload, 'payload');
+        return ipcRenderer.invoke('settings:mcpDelete', payload);
+      },
+      mcpReload: (payload) => ipcRenderer.invoke('settings:mcpReload', payload || {})
     },
     hooks: {
       list: () => ipcRenderer.invoke('hooks:list'),

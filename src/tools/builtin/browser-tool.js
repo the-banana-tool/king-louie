@@ -523,7 +523,271 @@ const actions = {
     return { ok: true, logs };
   },
 
+  // ── Frames / iframes ───────────────────────────────────────────────────────
+
+  async frames() {
+    const b = requireRunning();
+    const frames = b.page.frames().map((f, i) => ({
+      index: i,
+      name: f.name() || '',
+      url: f.url(),
+    }));
+    return { ok: true, frames };
+  },
+
+  async fill_in_frame(params) {
+    const f = resolveFrame(requireRunning().page, params);
+    if (!params.selector) return { ok: false, error: 'selector parameter is required' };
+    if (params.text === undefined) return { ok: false, error: 'text parameter is required' };
+    await f.locator(params.selector).fill(params.text, { timeout: clampTimeout(params.timeout, 5000) });
+    return { ok: true, message: `Filled ${params.selector} in frame ${params.frame_name || params.frame_url || '(index)'}` };
+  },
+
+  async click_in_frame(params) {
+    const f = resolveFrame(requireRunning().page, params);
+    if (!params.selector) return { ok: false, error: 'selector parameter is required' };
+    await f.locator(params.selector).click({ timeout: clampTimeout(params.timeout, 10000) });
+    return { ok: true, message: `Clicked ${params.selector} in frame ${params.frame_name || params.frame_url || '(index)'}` };
+  },
+
+  async type_in_frame(params) {
+    const f = resolveFrame(requireRunning().page, params);
+    if (!params.selector) return { ok: false, error: 'selector parameter is required' };
+    if (params.text === undefined) return { ok: false, error: 'text parameter is required' };
+    await f.locator(params.selector).pressSequentially(params.text, {
+      delay: params.delay || 50,
+      timeout: clampTimeout(params.timeout, 10000),
+    });
+    return { ok: true, message: `Typed into ${params.selector} in frame ${params.frame_name || params.frame_url || '(index)'}` };
+  },
+
+  async evaluate_in_frame(params) {
+    const f = resolveFrame(requireRunning().page, params);
+    if (!params.expression) return { ok: false, error: 'expression parameter is required' };
+    const result = await f.evaluate(params.expression);
+    return { ok: true, result };
+  },
+
   // ── Auth & state ───────────────────────────────────────────────────────────
+
+  async signup(params) {
+    const b = requireRunning();
+    if (!params.url) return { ok: false, error: 'url parameter is required' };
+    await validateUrl(params.url);
+
+    await b.page.goto(params.url, { waitUntil: 'domcontentloaded', timeout: params.timeout || 30000 });
+    await b.page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+
+    const results = {};
+
+    // Name field (optional — not all signup forms have it)
+    if (params.name) {
+      const nSel = params.nameSelector || await autoDetectField(b.page, [
+        'input[name="name"]', 'input[name="full_name"]', 'input[name="fullName"]',
+        'input[id="name"]', 'input[id="full-name"]', 'input[autocomplete="name"]',
+        'input[name="first_name"]', 'input[placeholder*="name" i]',
+      ]);
+      if (nSel) { await b.page.locator(nSel).fill(params.name); results.nameSelector = nSel; }
+    }
+
+    // Email field
+    if (params.email || params.username) {
+      const eSel = params.emailSelector || await autoDetectField(b.page, [
+        'input[type="email"]', 'input[name="email"]', 'input[id="email"]',
+        'input[autocomplete="email"]', 'input[name="username"]', 'input[id="username"]',
+        'input[autocomplete="username"]', 'input[type="text"]',
+      ]);
+      if (!eSel) return { ok: false, error: 'Could not find email/username input. Provide emailSelector.' };
+      await b.page.locator(eSel).fill(params.email || params.username);
+      results.emailSelector = eSel;
+    }
+
+    // Password field
+    if (params.password) {
+      const pSel = params.passwordSelector || await autoDetectField(b.page, [
+        'input[type="password"]', 'input[name="password"]',
+        'input[autocomplete="new-password"]',
+      ]);
+      if (!pSel) return { ok: false, error: 'Could not find password input. Provide passwordSelector.' };
+      await b.page.locator(pSel).fill(params.password);
+      results.passwordSelector = pSel;
+
+      // Confirm password (optional — only if a second password field exists)
+      const cpSel = params.confirmPasswordSelector || await autoDetectField(b.page, [
+        'input[name="password_confirmation"]', 'input[name="confirmPassword"]',
+        'input[name="confirm_password"]', 'input[name="password2"]',
+      ]);
+      if (cpSel) {
+        await b.page.locator(cpSel).fill(params.confirmPassword || params.password);
+        results.confirmPasswordSelector = cpSel;
+      } else {
+        // Check if there are multiple password fields (second one = confirm)
+        const pwCount = await b.page.locator('input[type="password"]').count();
+        if (pwCount >= 2) {
+          await b.page.locator('input[type="password"]').nth(1).fill(params.confirmPassword || params.password);
+          results.confirmPasswordSelector = 'input[type="password"]:nth(1)';
+        }
+      }
+    }
+
+    // Find and click submit
+    const sSel = params.submitSelector || await autoDetectSignupSubmit(b.page);
+    if (sSel) {
+      await b.page.locator(sSel).click();
+      results.submitSelector = sSel;
+    } else {
+      // Fallback: press Enter
+      await b.page.keyboard.press('Enter');
+      results.submitSelector = '(Enter key fallback)';
+    }
+
+    await b.page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+    const finalUrl = b.page.url();
+
+    return { ok: true, message: `Signup attempted at ${params.url}`, currentUrl: finalUrl, ...results };
+  },
+
+  async fill_payment(params) {
+    const b = requireRunning();
+    const results = {};
+
+    // Apply coupon first if provided
+    if (params.couponCode) {
+      const couponSel = params.couponSelector || await autoDetectField(b.page, [
+        'input[name="coupon"]', 'input[name="coupon_code"]', 'input[name="couponCode"]',
+        'input[name="promo"]', 'input[name="promo_code"]', 'input[name="promoCode"]',
+        'input[name="discount"]', 'input[name="discount_code"]',
+        'input[id="coupon"]', 'input[id="promo"]', 'input[id="coupon-code"]',
+        'input[id="promo-code"]', 'input[id="discount-code"]',
+        'input[placeholder*="coupon" i]', 'input[placeholder*="promo" i]',
+        'input[placeholder*="discount" i]', 'input[name="code"]',
+      ]);
+
+      if (couponSel) {
+        await b.page.locator(couponSel).fill(params.couponCode);
+        results.couponSelector = couponSel;
+
+        // Click apply button
+        const applySel = params.couponSubmitSelector || await autoDetectApplyCoupon(b.page);
+        if (applySel) {
+          await b.page.locator(applySel).click();
+          await b.page.waitForTimeout(2000); // wait for coupon validation
+          results.couponSubmitSelector = applySel;
+        }
+      }
+    }
+
+    // Detect if payment fields are in an iframe (Stripe, Braintree, etc.)
+    const paymentFrames = b.page.frames().filter((f) => {
+      const url = f.url();
+      return url.includes('stripe.com') || url.includes('braintree') ||
+        url.includes('recurly') || url.includes('chargebee') ||
+        url.includes('paddle') || url.includes('checkout.stripe.com');
+    });
+
+    if (paymentFrames.length > 0) {
+      results.paymentFrameDetected = true;
+      const fieldAttempts = [];
+
+      for (const frame of paymentFrames) {
+        const frameName = (frame.name() || '').toLowerCase();
+        const frameUrl = frame.url().toLowerCase();
+
+        try {
+          if ((frameName.includes('number') || frameUrl.includes('number') || paymentFrames.length === 1) && params.cardNumber) {
+            const input = frame.locator('input[name="cardnumber"], input[name="card-number"], input[autocomplete="cc-number"], input[name="number"], input').first();
+            if (await input.isVisible().catch(() => false)) {
+              await input.fill(params.cardNumber);
+              fieldAttempts.push({ field: 'cardNumber', frameName: frame.name(), status: 'filled' });
+            }
+          }
+
+          if ((frameName.includes('expir') || frameUrl.includes('expir')) && params.cardExpiry) {
+            await frame.locator('input').first().fill(params.cardExpiry);
+            fieldAttempts.push({ field: 'cardExpiry', frameName: frame.name(), status: 'filled' });
+          }
+
+          if ((frameName.includes('cvc') || frameName.includes('cvv') || frameUrl.includes('cvc') || frameUrl.includes('cvv')) && params.cardCvc) {
+            await frame.locator('input').first().fill(params.cardCvc);
+            fieldAttempts.push({ field: 'cardCvc', frameName: frame.name(), status: 'filled' });
+          }
+
+          if ((frameName.includes('postal') || frameName.includes('zip') || frameUrl.includes('postal') || frameUrl.includes('zip')) && params.cardZip) {
+            await frame.locator('input').first().fill(params.cardZip);
+            fieldAttempts.push({ field: 'cardZip', frameName: frame.name(), status: 'filled' });
+          }
+        } catch (frameErr) {
+          fieldAttempts.push({ field: 'unknown', frameName: frame.name(), status: 'error', error: frameErr.message });
+        }
+      }
+
+      // Cardholder name is typically in the main frame
+      if (params.cardName) {
+        const nameSel = params.cardNameSelector || await autoDetectField(b.page, [
+          'input[name="name"]', 'input[name="cardholder"]', 'input[name="cardholder-name"]',
+          'input[name="card-name"]', 'input[autocomplete="cc-name"]',
+          'input[id="cardholder-name"]', 'input[placeholder*="name on card" i]',
+          'input[placeholder*="cardholder" i]',
+        ]);
+        if (nameSel) {
+          await b.page.locator(nameSel).fill(params.cardName);
+          fieldAttempts.push({ field: 'cardName', location: 'main_frame', status: 'filled' });
+        }
+      }
+
+      results.iframeFields = fieldAttempts;
+      results.paymentFrames = paymentFrames.map((f) => ({ name: f.name(), url: f.url() }));
+    } else {
+      // Payment fields in the main frame
+      results.paymentFrameDetected = false;
+
+      if (params.cardNumber) {
+        const sel = params.cardNumberSelector || await autoDetectField(b.page, [
+          'input[name="cardnumber"]', 'input[name="card_number"]', 'input[name="cc-number"]',
+          'input[autocomplete="cc-number"]', 'input[data-stripe="number"]',
+          'input[id="card-number"]', 'input[placeholder*="card number" i]',
+        ]);
+        if (sel) { await b.page.locator(sel).fill(params.cardNumber); results.cardNumberSelector = sel; }
+      }
+
+      if (params.cardExpiry) {
+        const sel = params.cardExpirySelector || await autoDetectField(b.page, [
+          'input[name="exp-date"]', 'input[name="expiry"]', 'input[name="cc-exp"]',
+          'input[autocomplete="cc-exp"]', 'input[data-stripe="exp"]',
+          'input[placeholder*="MM" i]', 'input[name="expiration"]',
+        ]);
+        if (sel) { await b.page.locator(sel).fill(params.cardExpiry); results.cardExpirySelector = sel; }
+      }
+
+      if (params.cardCvc) {
+        const sel = params.cardCvcSelector || await autoDetectField(b.page, [
+          'input[name="cvc"]', 'input[name="cvv"]', 'input[name="cc-csc"]',
+          'input[autocomplete="cc-csc"]', 'input[data-stripe="cvc"]',
+          'input[placeholder*="CVC" i]', 'input[placeholder*="CVV" i]',
+        ]);
+        if (sel) { await b.page.locator(sel).fill(params.cardCvc); results.cardCvcSelector = sel; }
+      }
+
+      if (params.cardName) {
+        const sel = params.cardNameSelector || await autoDetectField(b.page, [
+          'input[name="ccname"]', 'input[name="cc-name"]', 'input[autocomplete="cc-name"]',
+          'input[name="cardholder"]', 'input[placeholder*="name on card" i]',
+        ]);
+        if (sel) { await b.page.locator(sel).fill(params.cardName); results.cardNameSelector = sel; }
+      }
+
+      if (params.cardZip) {
+        const sel = params.cardZipSelector || await autoDetectField(b.page, [
+          'input[name="postal"]', 'input[name="zip"]', 'input[name="billing_zip"]',
+          'input[autocomplete="postal-code"]', 'input[placeholder*="zip" i]',
+          'input[placeholder*="postal" i]',
+        ]);
+        if (sel) { await b.page.locator(sel).fill(params.cardZip); results.cardZipSelector = sel; }
+      }
+    }
+
+    return { ok: true, message: 'Payment form filled', ...results };
+  },
 
   async login(params) {
     const b = requireRunning();
@@ -679,6 +943,29 @@ const actions = {
   },
 };
 
+// ─── Frame resolution helper ────────────────────────────────────────────────
+
+function resolveFrame(page, params) {
+  if (params.frame_name) {
+    const f = page.frame({ name: params.frame_name });
+    if (!f) throw new Error(`No frame found with name "${params.frame_name}". Use the "frames" action to list available frames.`);
+    return f;
+  }
+  if (params.frame_url) {
+    const f = page.frame({ url: new RegExp(params.frame_url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) });
+    if (!f) throw new Error(`No frame found matching URL "${params.frame_url}". Use the "frames" action to list available frames.`);
+    return f;
+  }
+  if (params.frame_index !== undefined) {
+    const frames = page.frames();
+    if (params.frame_index < 0 || params.frame_index >= frames.length) {
+      throw new Error(`Invalid frame_index ${params.frame_index}. Available frames: ${frames.length}. Use the "frames" action to list them.`);
+    }
+    return frames[params.frame_index];
+  }
+  throw new Error('One of frame_name, frame_url, or frame_index is required for frame actions. Use "frames" to list available frames.');
+}
+
 // ─── Auto-detection helpers for login ────────────────────────────────────────
 
 async function autoDetectField(page, candidates) {
@@ -697,6 +984,33 @@ async function autoDetectSubmit(page) {
   }
   // Try text-based detection
   const textPatterns = ['log in', 'login', 'sign in', 'submit', 'continue'];
+  for (const text of textPatterns) {
+    const loc = page.getByRole('button', { name: new RegExp(text, 'i') }).first();
+    if (await loc.isVisible().catch(() => false)) {
+      return `role=button[name='${text}']`;
+    }
+  }
+  return null;
+}
+
+async function autoDetectSignupSubmit(page) {
+  const candidates = ['button[type="submit"]', 'input[type="submit"]', 'form button'];
+  for (const sel of candidates) {
+    const loc = page.locator(sel).first();
+    if (await loc.isVisible().catch(() => false)) return sel;
+  }
+  const textPatterns = ['sign up', 'signup', 'register', 'create account', 'get started', 'submit', 'continue'];
+  for (const text of textPatterns) {
+    const loc = page.getByRole('button', { name: new RegExp(text, 'i') }).first();
+    if (await loc.isVisible().catch(() => false)) {
+      return `role=button[name='${text}']`;
+    }
+  }
+  return null;
+}
+
+async function autoDetectApplyCoupon(page) {
+  const textPatterns = ['apply', 'redeem'];
   for (const text of textPatterns) {
     const loc = page.getByRole('button', { name: new RegExp(text, 'i') }).first();
     if (await loc.isVisible().catch(() => false)) {
@@ -725,7 +1039,9 @@ Selector strategies (pass as the "selector" parameter):
   - Title:        "title=Close dialog"
 
 All element actions auto-wait for the element to be actionable.
-Use "login" to automatically fill credentials and sign in to websites.`,
+Use "login" to automatically fill credentials and sign in to websites.
+Use "signup" for registration forms, "fill_payment" for credit card/payment forms (supports Stripe/Braintree iframes).
+Use "frames" to list all iframes, "fill_in_frame"/"type_in_frame"/"click_in_frame"/"evaluate_in_frame" for direct iframe interaction.`,
   parameters: {
     type: 'object',
     properties: {
@@ -803,6 +1119,34 @@ Use "login" to automatically fill credentials and sign in to websites.`,
       // Viewport
       width: { type: 'number', description: 'Viewport width for set_viewport' },
       height: { type: 'number', description: 'Viewport height for set_viewport' },
+
+      // Signup params
+      name: { type: 'string', description: 'Full name for signup action' },
+      email: { type: 'string', description: 'Email for signup action' },
+      confirmPassword: { type: 'string', description: 'Confirm password value (defaults to password if not provided)' },
+      nameSelector: { type: 'string', description: 'CSS selector for name input (signup). Auto-detected if omitted.' },
+      emailSelector: { type: 'string', description: 'CSS selector for email input (signup). Auto-detected if omitted.' },
+      confirmPasswordSelector: { type: 'string', description: 'CSS selector for confirm password input (signup). Auto-detected if omitted.' },
+
+      // Payment params
+      cardNumber: { type: 'string', description: 'Credit card number for fill_payment' },
+      cardExpiry: { type: 'string', description: 'Card expiry (MM/YY) for fill_payment' },
+      cardCvc: { type: 'string', description: 'Card CVC/CVV for fill_payment' },
+      cardName: { type: 'string', description: 'Name on card for fill_payment' },
+      cardZip: { type: 'string', description: 'Billing zip/postal code for fill_payment' },
+      couponCode: { type: 'string', description: 'Coupon/promo code to apply before payment' },
+      cardNumberSelector: { type: 'string', description: 'CSS selector for card number input. Auto-detected if omitted.' },
+      cardExpirySelector: { type: 'string', description: 'CSS selector for card expiry input. Auto-detected if omitted.' },
+      cardCvcSelector: { type: 'string', description: 'CSS selector for card CVC input. Auto-detected if omitted.' },
+      cardNameSelector: { type: 'string', description: 'CSS selector for cardholder name input. Auto-detected if omitted.' },
+      cardZipSelector: { type: 'string', description: 'CSS selector for billing zip input. Auto-detected if omitted.' },
+      couponSelector: { type: 'string', description: 'CSS selector for coupon input. Auto-detected if omitted.' },
+      couponSubmitSelector: { type: 'string', description: 'CSS selector for apply coupon button. Auto-detected if omitted.' },
+
+      // Frame params
+      frame_name: { type: 'string', description: 'Frame name for *_in_frame actions. Use "frames" action to discover names.' },
+      frame_url: { type: 'string', description: 'Frame URL substring for *_in_frame actions.' },
+      frame_index: { type: 'number', description: 'Frame index for *_in_frame actions.' },
 
       // Start options
       userDataPath: { type: 'string', description: 'Chrome user data directory (start action). Reuses saved logins/cookies.' },

@@ -59,7 +59,18 @@
           <button id="mesh-indicator-btn" class="icon-button mesh-indicator" type="button" title="Mesh network" aria-label="Mesh network" hidden><i class="fas fa-network-wired"></i> <span id="mesh-peer-count">0</span></button>
           <button id="working-dir-btn" class="working-dir-btn" type="button" title="Set working directory" aria-label="Set working directory"><i class="fas fa-folder-open"></i> <span id="working-dir-label" class="working-dir-label">No working directory</span></button>
           <button id="export-chat-btn" class="icon-button" type="button" title="Export chat as JSON" aria-label="Export chat as JSON"><i class="fas fa-file-export"></i></button>
+          <button id="chat-mcp-btn" class="icon-button" type="button" title="MCP servers for this chat" aria-label="MCP servers"><i class="fas fa-plug"></i></button>
           <button id="chat-info-btn" class="icon-button" type="button" title="Chat info" aria-label="Chat info"><i class="fas fa-chart-bar"></i></button>
+        </div>
+        <div class="chat-info-popover" id="chat-mcp-popover" hidden>
+          <div class="chat-info-popover-header">
+            <span>MCP Servers (this chat)</span>
+            <button id="chat-mcp-close-btn" class="icon-button" type="button" title="Close"><i class="fas fa-xmark"></i></button>
+          </div>
+          <div class="chat-info-popover-body" id="chat-mcp-popover-body">
+            <p class="provider-message" style="margin: 0 0 8px 0;">Toggle which MCP servers this chat can use. Disabled tools are hidden from the agent until re-enabled.</p>
+            <div id="chat-mcp-toggles"></div>
+          </div>
         </div>
         <div class="chat-info-popover" id="chat-info-popover" hidden>
           <div class="chat-info-popover-header">
@@ -130,6 +141,7 @@
           <option value="inference">Inference</option>
           <option value="routing">Smart Routing</option>
           <option value="vault">Vault</option>
+          <option value="mcp">MCP Servers</option>
           <option value="channels">Channels</option>
           <option value="profile">Profile</option>
           <option value="voice">Voice</option>
@@ -272,6 +284,51 @@
                 <button id="vault-save-entry-btn" type="button" class="btn btn-primary"><i class="fas fa-lock"></i> Save Encrypted</button>
                 <button id="vault-cancel-entry-btn" type="button" class="btn">Cancel</button>
                 <span id="vault-add-status" class="provider-message"></span>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <!-- Tab: MCP Servers -->
+        <div class="settings-tab-content" data-tab="mcp">
+          <section class="template-variables-card">
+            <h3>MCP Servers</h3>
+            <p>Connect to Model Context Protocol servers to give agents extra tools (databases, APIs, file systems, etc.). Tokens in env values can reference vault keys as <code>${vault:my_key}</code> — those are expanded at connection time.</p>
+
+            <div class="template-variables-actions" style="margin-top: 10px;">
+              <button id="mcp-add-btn" type="button" class="btn btn-primary"><i class="fas fa-plus"></i> Add Server</button>
+              <button id="mcp-refresh-btn" type="button" class="btn"><i class="fas fa-sync-alt"></i> Refresh</button>
+              <button id="mcp-reload-all-btn" type="button" class="btn"><i class="fas fa-rotate"></i> Reconnect All</button>
+              <span id="mcp-status" class="provider-message"></span>
+            </div>
+
+            <div class="provider-list" id="mcp-list"></div>
+
+            <div class="vault-add-panel" id="mcp-edit-panel" hidden>
+              <h4 id="mcp-edit-title">Add MCP Server</h4>
+              <div class="template-variables-grid">
+                <label for="mcp-name-input">Server Name</label>
+                <input id="mcp-name-input" class="provider-input" type="text" placeholder="e.g., github, sqlite">
+
+                <label for="mcp-command-input">Command</label>
+                <input id="mcp-command-input" class="provider-input" type="text" placeholder="e.g., npx">
+
+                <label for="mcp-args-input">Arguments (comma-separated)</label>
+                <input id="mcp-args-input" class="provider-input" type="text" placeholder="e.g., -y, @modelcontextprotocol/server-github">
+
+                <label for="mcp-cwd-input">Working Directory (optional)</label>
+                <input id="mcp-cwd-input" class="provider-input" type="text" placeholder="Defaults to app cwd">
+
+                <label>Environment Variables</label>
+                <div id="mcp-env-list"></div>
+              </div>
+              <div class="template-variables-actions" style="margin-top: 10px;">
+                <button id="mcp-env-add-btn" type="button" class="btn"><i class="fas fa-plus"></i> Add Env Var</button>
+              </div>
+              <div class="template-variables-actions" style="margin-top: 10px;">
+                <button id="mcp-save-btn" type="button" class="btn btn-primary"><i class="fas fa-save"></i> Save &amp; Connect</button>
+                <button id="mcp-cancel-btn" type="button" class="btn">Cancel</button>
+                <span id="mcp-edit-status" class="provider-message"></span>
               </div>
             </div>
           </section>

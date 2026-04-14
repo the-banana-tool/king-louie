@@ -28,6 +28,7 @@ class MCPManager extends EventEmitter {
     this._clients = new Map(); // serverName → MCPClient
     this._toolRegistry = options.toolRegistry || null;
     this._registeredTools = new Map(); // toolName → serverName
+    this._envResolver = typeof options.envResolver === 'function' ? options.envResolver : (c) => c;
   }
 
   get clients() {
@@ -78,13 +79,16 @@ class MCPManager extends EventEmitter {
       await this.disconnectServer(name);
     }
 
+    // Resolve ${vault:key} references in env values before spawning
+    const resolved = this._envResolver(config);
+
     const client = new MCPClient({
       name,
-      command: config.command,
-      args: config.args || [],
-      env: config.env || {},
-      cwd: config.cwd,
-      timeoutMs: config.timeoutMs || 30000
+      command: resolved.command,
+      args: resolved.args || [],
+      env: resolved.env || {},
+      cwd: resolved.cwd,
+      timeoutMs: resolved.timeoutMs || 30000
     });
 
     client.on('error', (evt) => {

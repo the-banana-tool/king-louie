@@ -12,6 +12,7 @@ module.exports = {
   CHAT_STOP_RESPONSE: 'chat:stopResponse',
   CHAT_SET_AGENT_MODE: 'chat:setAgentMode',
   CHAT_SET_SANDBOX_MODE: 'chat:setSandboxMode',
+  CHAT_SET_DISABLED_MCP: 'chat:setDisabledMcpServers',
   CHAT_SET_WORKING_DIR: 'chat:setWorkingDirectory',
   CHAT_PICK_WORKING_DIR: 'chat:pickWorkingDirectory',
   CHAT_TRUNCATE_FROM: 'chat:truncateFrom',

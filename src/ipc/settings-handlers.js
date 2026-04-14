@@ -601,11 +601,16 @@ function registerSettingsHandlers(ipcMain, context = {}) {
 
   // ── Vault ────────────────────────────────────────────────
   const VAULT_PREFIX = '__vault_';
-  const Store = require('electron-store');
-  const vaultStore = new Store();
+  let _vaultStore = context.vaultStore || null;
+  const getVaultStore = () => {
+    if (_vaultStore) return _vaultStore;
+    const { default: Store } = require('electron-store');
+    _vaultStore = new Store();
+    return _vaultStore;
+  };
 
   ipcMain.handle('settings:vaultList', wrapHandler('settings:vaultList', async () => {
-    const allKeys = Object.keys(vaultStore.store || {});
+    const allKeys = Object.keys(getVaultStore().store || {});
     const vaultKeys = allKeys
       .filter((k) => k.startsWith(VAULT_PREFIX))
       .map((k) => k.slice(VAULT_PREFIX.length));
@@ -617,15 +622,15 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     if (!value || typeof value !== 'string') return { ok: false, error: 'Value is required.' };
     if (!encryptToken) return { ok: false, error: 'Encryption unavailable.' };
     const encrypted = encryptToken(value);
-    vaultStore.set(`${VAULT_PREFIX}${key.trim()}`, encrypted);
+    getVaultStore().set(`${VAULT_PREFIX}${key.trim()}`, encrypted);
     return { ok: true, message: `Secret "${key.trim()}" saved.` };
   }));
 
   ipcMain.handle('settings:vaultDelete', wrapHandler('settings:vaultDelete', async (_event, { key } = {}) => {
     if (!key || typeof key !== 'string') return { ok: false, error: 'Key is required.' };
     const storeKey = `${VAULT_PREFIX}${key}`;
-    if (!vaultStore.has(storeKey)) return { ok: false, error: `No secret found for "${key}".` };
-    vaultStore.delete(storeKey);
+    if (!getVaultStore().has(storeKey)) return { ok: false, error: `No secret found for "${key}".` };
+    getVaultStore().delete(storeKey);
     return { ok: true, message: `Secret "${key}" deleted.` };
   }));
 
@@ -638,17 +643,127 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     if (value && typeof value === 'string') {
       // Update both key name and value
       if (!encryptToken) return { ok: false, error: 'Encryption unavailable.' };
-      if (oldStoreKey !== newStoreKey) vaultStore.delete(oldStoreKey);
-      vaultStore.set(newStoreKey, encryptToken(value));
+      if (oldStoreKey !== newStoreKey) getVaultStore().delete(oldStoreKey);
+      getVaultStore().set(newStoreKey, encryptToken(value));
     } else if (oldStoreKey !== newStoreKey) {
       // Rename key only — move the encrypted blob
-      const existing = vaultStore.get(oldStoreKey);
+      const existing = getVaultStore().get(oldStoreKey);
       if (!existing) return { ok: false, error: `No secret found for "${oldKey}".` };
-      vaultStore.set(newStoreKey, existing);
-      vaultStore.delete(oldStoreKey);
+      getVaultStore().set(newStoreKey, existing);
+      getVaultStore().delete(oldStoreKey);
     }
 
     return { ok: true, message: `Secret updated.` };
+  }));
+
+  // ── MCP Servers ──────────────────────────────────────────
+  // Storage: settings.mcpServers = { [name]: { command, args, env, cwd } }
+  // Env values may contain ${vault:key} references (expanded at connect time).
+
+  const getMcpManager = typeof context.getMcpManager === 'function' ? context.getMcpManager : () => null;
+
+  const sanitizeServer = (raw = {}) => ({
+    command: String(raw.command || '').trim(),
+    args: Array.isArray(raw.args) ? raw.args.map(String) : [],
+    env: (raw.env && typeof raw.env === 'object') ? Object.fromEntries(
+      Object.entries(raw.env).map(([k, v]) => [String(k), String(v)])
+    ) : {},
+    cwd: raw.cwd ? String(raw.cwd) : undefined
+  });
+
+  ipcMain.handle('settings:mcpList', wrapHandler('settings:mcpList', async () => {
+    const settings = getSettings();
+    const servers = settings.mcpServers || {};
+    const mgr = getMcpManager();
+    const status = mgr ? mgr.getStatus() : {};
+
+    const list = Object.entries(servers).map(([name, cfg]) => ({
+      name,
+      command: cfg.command || '',
+      args: cfg.args || [],
+      env: cfg.env || {},
+      cwd: cfg.cwd || '',
+      connected: Boolean(status[name]?.connected),
+      tools: status[name]?.tools || []
+    }));
+
+    return { ok: true, servers: list };
+  }));
+
+  ipcMain.handle('settings:mcpSave', wrapHandler('settings:mcpSave', async (_event, { name, server, oldName } = {}) => {
+    if (!name || typeof name !== 'string') return { ok: false, error: 'Server name is required.' };
+    const trimmedName = name.trim();
+    if (!trimmedName) return { ok: false, error: 'Server name cannot be empty.' };
+
+    const clean = sanitizeServer(server);
+    if (!clean.command) return { ok: false, error: 'Command is required.' };
+
+    const settings = getSettings();
+    const servers = { ...(settings.mcpServers || {}) };
+
+    // Rename: remove old entry if it differs
+    if (oldName && oldName !== trimmedName) {
+      delete servers[oldName];
+    }
+    servers[trimmedName] = clean;
+    setSettings({ ...settings, mcpServers: servers });
+
+    // Hot-reconnect the server
+    const mgr = getMcpManager();
+    if (mgr) {
+      try {
+        if (oldName && oldName !== trimmedName) {
+          await mgr.disconnectServer(oldName);
+        }
+        await mgr.connectServer(trimmedName, clean);
+      } catch (err) {
+        return { ok: true, message: `Saved "${trimmedName}" but connection failed: ${err.message}`, connectError: err.message };
+      }
+    }
+
+    return { ok: true, message: `MCP server "${trimmedName}" saved.` };
+  }));
+
+  ipcMain.handle('settings:mcpDelete', wrapHandler('settings:mcpDelete', async (_event, { name } = {}) => {
+    if (!name || typeof name !== 'string') return { ok: false, error: 'Server name is required.' };
+
+    const settings = getSettings();
+    const servers = { ...(settings.mcpServers || {}) };
+    if (!servers[name]) return { ok: false, error: `No MCP server named "${name}".` };
+    delete servers[name];
+    setSettings({ ...settings, mcpServers: servers });
+
+    const mgr = getMcpManager();
+    if (mgr) {
+      await mgr.disconnectServer(name).catch(() => {});
+    }
+
+    return { ok: true, message: `MCP server "${name}" deleted.` };
+  }));
+
+  ipcMain.handle('settings:mcpReload', wrapHandler('settings:mcpReload', async (_event, { name } = {}) => {
+    const mgr = getMcpManager();
+    if (!mgr) return { ok: false, error: 'MCP manager is not initialized.' };
+
+    const settings = getSettings();
+    const servers = settings.mcpServers || {};
+
+    if (name) {
+      const cfg = servers[name];
+      if (!cfg) return { ok: false, error: `No MCP server named "${name}".` };
+      try {
+        await mgr.connectServer(name, cfg);
+        const status = mgr.getStatus()[name];
+        return { ok: true, message: `Reconnected "${name}".`, tools: status?.tools || [] };
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    }
+
+    // Reload all
+    await mgr.disconnectAll();
+    const results = await mgr.connectAll(servers);
+    return { ok: true, results };
   }));
 }
 

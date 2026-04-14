@@ -52,12 +52,20 @@ const ToolSearchTool = new Tool({
       };
     }
 
+    // Per-chat filter: exclude MCP tools from servers disabled for this chat.
+    const disabledMcpServers = Array.isArray(options.disabledMcpServers) ? options.disabledMcpServers : [];
+    const isDisabled = (toolName) => {
+      if (!toolName || !toolName.startsWith('mcp__')) return false;
+      const server = toolName.slice('mcp__'.length).split('__')[0];
+      return disabledMcpServers.includes(server);
+    };
+
     let matchedTools = [];
 
     if (query.startsWith('select:')) {
       // Exact selection mode: "select:Read,Edit,Grep"
       const names = query.slice(7).split(',').map(n => n.trim()).filter(Boolean);
-      matchedTools = contextAssembler.getToolsByName(names);
+      matchedTools = contextAssembler.getToolsByName(names).filter((t) => !isDisabled(t.name));
     } else {
       // Keyword search mode
       let requiredPrefix = null;
@@ -70,7 +78,8 @@ const ToolSearchTool = new Tool({
         keywords = parts.slice(1).join(' ').toLowerCase();
       }
 
-      const allTools = contextAssembler.getAllDeferredTools ? contextAssembler.getAllDeferredTools() : [];
+      const allTools = (contextAssembler.getAllDeferredTools ? contextAssembler.getAllDeferredTools() : [])
+        .filter((t) => !isDisabled(t.name));
       const scored = [];
 
       for (const tool of allTools) {
@@ -104,7 +113,8 @@ const ToolSearchTool = new Tool({
 
     if (matchedTools.length === 0) {
       // List available deferred tools to help the LLM
-      const deferred = contextAssembler.getAllDeferredTools ? contextAssembler.getAllDeferredTools() : [];
+      const deferred = (contextAssembler.getAllDeferredTools ? contextAssembler.getAllDeferredTools() : [])
+        .filter((t) => !isDisabled(t.name));
       const names = deferred.map(t => t.name);
       return {
         ok: false,

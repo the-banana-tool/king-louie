@@ -70,7 +70,7 @@ const { initializeMesh } = require('./src/mesh');
 const LLMRouter = require('./src/providers/llm-router');
 const { WorkflowEngine } = require('./src/workflows/workflow-engine');
 const PlannerExecutor = require('./src/workflows/planner-executor');
-const { MCPManager } = require('./src/mcp');
+const { MCPManager, createVaultEnvResolver } = require('./src/mcp');
 const { BackgroundTaskManager } = require('./src/tasks/background-task-manager');
 
 let mainWindow;
@@ -293,6 +293,8 @@ const mergeSettings = (settings = {}) => {
     }
   };
 };
+
+const vaultStore = new Store();
 
 const store = new Store({
   name: 'chat-data',
@@ -2301,7 +2303,12 @@ const initializeAgentInfrastructure = async () => {
   // Initialize MCP servers from settings (background, non-blocking).
   // MCP tools are registered into the toolRegistry and become available
   // to agents via ToolSearch (deferred loading).
-  mcpManager = new MCPManager({ toolRegistry });
+  const vaultEnvResolver = createVaultEnvResolver({
+    vaultStore,
+    decryptToken,
+    onMissing: (key) => console.warn(`[mcp] Vault key not found: "${key}" — env value left unresolved`)
+  });
+  mcpManager = new MCPManager({ toolRegistry, envResolver: vaultEnvResolver });
   const mcpServers = getSettings().mcpServers || {};
   if (Object.keys(mcpServers).length > 0) {
     mcpManager.connectAll(mcpServers).then((results) => {
@@ -2695,6 +2702,10 @@ registerHandlers(ipcMain, {
   anthropicOAuth,
   setActiveInferenceTier,
   setNotificationSettings,
+
+  // MCP
+  getMcpManager: () => mcpManager,
+  vaultStore,
 
   // Task
   getTaskManager: () => taskManager,

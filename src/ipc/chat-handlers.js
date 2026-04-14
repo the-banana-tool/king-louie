@@ -179,6 +179,20 @@ function registerChatHandlers(ipcMain, context = {}) {
     return updated.find((chat) => chat.id === chatId);
   }));
 
+  ipcMain.handle(IPC.CHAT_SET_DISABLED_MCP, wrapHandler(IPC.CHAT_SET_DISABLED_MCP, async (_event, { chatId, disabledMcpServers } = {}) => {
+    const list = Array.isArray(disabledMcpServers)
+      ? disabledMcpServers.filter((s) => typeof s === 'string').map((s) => s.trim()).filter(Boolean)
+      : [];
+    const chats = getChats();
+    const updated = chats.map((chat) =>
+      chat.id === chatId
+        ? { ...chat, disabledMcpServers: list, updatedAt: new Date().toISOString() }
+        : chat
+    );
+    setChats(updated);
+    return updated.find((chat) => chat.id === chatId);
+  }));
+
   ipcMain.handle(IPC.CHAT_SET_WORKING_DIR, wrapHandler(IPC.CHAT_SET_WORKING_DIR, async (_event, { chatId, workingDirectory }) => {
     const chats = getChats();
     const updated = chats.map((chat) =>
@@ -375,6 +389,17 @@ function registerChatHandlers(ipcMain, context = {}) {
       const contextAssembler = typeof getContextAssembler === 'function' ? getContextAssembler() : null;
       const memoryContext = await buildMemoryContextSection(safeMessage, { limit: 4 });
 
+      // Per-chat MCP server filter: drop tools from disabled servers.
+      const disabledMcpServers = Array.isArray(chatForDir?.disabledMcpServers)
+        ? chatForDir.disabledMcpServers
+        : [];
+      const isMcpToolDisabled = (toolName) => {
+        if (!toolName || !toolName.startsWith('mcp__')) return false;
+        const server = toolName.slice('mcp__'.length).split('__')[0];
+        return disabledMcpServers.includes(server);
+      };
+      const filterMcpTools = (list) => list.filter((t) => !isMcpToolDisabled(t.name || t));
+
       let assembledTools = null;
       if (contextAssembler) {
         try {
@@ -384,11 +409,12 @@ function registerChatHandlers(ipcMain, context = {}) {
             memoryContext
           });
           options.systemPrompt = assembled.systemPrompt;
-          assembledTools = assembled.tools;
+          assembledTools = filterMcpTools(assembled.tools);
 
           // Tell the LLM which tools are available on-demand via RequestTools
-          if (assembled.availableToolNames.length > 0) {
-            options.systemPrompt += `\n\nAdditional tools available on request via the RequestTools tool: ${assembled.availableToolNames.join(', ')}`;
+          const availableNames = (assembled.availableToolNames || []).filter((n) => !isMcpToolDisabled(n));
+          if (availableNames.length > 0) {
+            options.systemPrompt += `\n\nAdditional tools available on request via the RequestTools tool: ${availableNames.join(', ')}`;
           }
         } catch (err) {
           console.warn('[chat] Context assembly failed, falling back to full context:', err.message);
@@ -428,7 +454,7 @@ function registerChatHandlers(ipcMain, context = {}) {
         calls: [],
         totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
       };
-      const toolDefinitions = assembledTools || toolRegistry.getFunctionDefinitions();
+      const toolDefinitions = filterMcpTools(assembledTools || toolRegistry.getFunctionDefinitions());
       await withNotificationTiming('Chat response', async () => {
         const canUseAgentMode = agentMode && toolDefinitions.length > 0 && typeof provider.sendMessageWithTools === 'function';
         if (canUseAgentMode) {
@@ -452,6 +478,7 @@ function registerChatHandlers(ipcMain, context = {}) {
           const result = await loop.run(chat.messages, toolDefinitions, {
             ...options,
             contextAssembler,
+            disabledMcpServers,
             autoApproveTools: ['Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep', 'Git']
           });
           // If streaming didn't fire (non-streaming provider), send full response

@@ -158,6 +158,22 @@ const dom = {
   vaultSaveEntryBtn: document.getElementById('vault-save-entry-btn'),
   vaultCancelEntryBtn: document.getElementById('vault-cancel-entry-btn'),
   vaultAddStatus: document.getElementById('vault-add-status'),
+  mcpList: document.getElementById('mcp-list'),
+  mcpStatus: document.getElementById('mcp-status'),
+  mcpAddBtn: document.getElementById('mcp-add-btn'),
+  mcpRefreshBtn: document.getElementById('mcp-refresh-btn'),
+  mcpReloadAllBtn: document.getElementById('mcp-reload-all-btn'),
+  mcpEditPanel: document.getElementById('mcp-edit-panel'),
+  mcpEditTitle: document.getElementById('mcp-edit-title'),
+  mcpNameInput: document.getElementById('mcp-name-input'),
+  mcpCommandInput: document.getElementById('mcp-command-input'),
+  mcpArgsInput: document.getElementById('mcp-args-input'),
+  mcpCwdInput: document.getElementById('mcp-cwd-input'),
+  mcpEnvList: document.getElementById('mcp-env-list'),
+  mcpEnvAddBtn: document.getElementById('mcp-env-add-btn'),
+  mcpSaveBtn: document.getElementById('mcp-save-btn'),
+  mcpCancelBtn: document.getElementById('mcp-cancel-btn'),
+  mcpEditStatus: document.getElementById('mcp-edit-status'),
   cronRefreshBtn: document.getElementById('cron-refresh-btn'),
   cronStatus: document.getElementById('cron-status'),
   cronList: document.getElementById('cron-list'),
@@ -196,6 +212,10 @@ const dom = {
   attachImageBtn: document.getElementById('attach-image-btn'),
   chatInfoBtn: document.getElementById('chat-info-btn'),
   chatInfoPopover: document.getElementById('chat-info-popover'),
+  chatMcpBtn: document.getElementById('chat-mcp-btn'),
+  chatMcpPopover: document.getElementById('chat-mcp-popover'),
+  chatMcpCloseBtn: document.getElementById('chat-mcp-close-btn'),
+  chatMcpToggles: document.getElementById('chat-mcp-toggles'),
   chatInfoCloseBtn: document.getElementById('chat-info-close-btn'),
   chatInfoPopoverBody: document.getElementById('chat-info-popover-body'),
   skillSettingsContainer: document.getElementById('skill-settings-container'),
@@ -2787,6 +2807,7 @@ function renderSettings() {
   renderInferenceTierDetails();
   renderSmartRoutingRules();
   loadVaultEntries();
+  loadMcpServers();
 
   const telegram = appState.settings.telegram || {};
   if (dom.telegramChannelStatus) {
@@ -2977,6 +2998,299 @@ async function handleVaultSave() {
       dom.vaultAddStatus.textContent = `Error: ${err.message}`;
       dom.vaultAddStatus.classList.add('error');
     }
+  }
+}
+
+// ── MCP Servers ────────────────────────────────────────────
+
+let mcpEditingName = null; // null = adding new; string = editing existing
+
+async function loadMcpServers() {
+  if (!window.electron?.settings?.mcpList || !dom.mcpList) return;
+  try {
+    setMcpStatus('Loading MCP servers...');
+    const result = await window.electron.settings.mcpList();
+    if (!result?.ok) throw new Error(result?.error || 'Failed to list MCP servers');
+    renderMcpServers(result.servers || []);
+    setMcpStatus(`${result.servers.length} server(s) configured.`);
+  } catch (err) {
+    setMcpStatus(`Error: ${err.message}`, true);
+  }
+}
+
+function setMcpStatus(text, isError = false) {
+  if (!dom.mcpStatus) return;
+  dom.mcpStatus.textContent = text;
+  dom.mcpStatus.classList.toggle('error', Boolean(isError));
+}
+
+function renderMcpServers(servers = []) {
+  if (!dom.mcpList) return;
+  dom.mcpList.innerHTML = '';
+
+  if (servers.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'provider-message';
+    empty.textContent = 'No MCP servers configured. Click "Add Server" to connect one.';
+    dom.mcpList.appendChild(empty);
+    return;
+  }
+
+  servers.forEach((s) => {
+    const card = document.createElement('div');
+    card.className = 'provider-card';
+    card.dataset.mcpName = s.name;
+
+    const header = document.createElement('div');
+    header.className = 'provider-header';
+
+    const titleWrap = document.createElement('div');
+    titleWrap.className = 'provider-title-wrap';
+
+    const title = document.createElement('div');
+    title.className = 'provider-title';
+    title.textContent = s.name;
+
+    const meta = document.createElement('div');
+    meta.className = 'provider-message';
+    const cmdLine = `${s.command} ${(s.args || []).join(' ')}`.trim();
+    const toolsText = s.connected
+      ? `Connected • ${(s.tools || []).length} tool(s)`
+      : 'Disconnected';
+    meta.textContent = `${cmdLine} • ${toolsText}`;
+
+    titleWrap.appendChild(title);
+    titleWrap.appendChild(meta);
+
+    const status = document.createElement('span');
+    status.className = `provider-status ${s.connected ? 'ok' : 'error'}`;
+    status.textContent = s.connected ? 'Connected' : 'Offline';
+
+    header.appendChild(titleWrap);
+    header.appendChild(status);
+
+    const actions = document.createElement('div');
+    actions.className = 'provider-actions';
+
+    const reloadBtn = document.createElement('button');
+    reloadBtn.type = 'button';
+    reloadBtn.className = 'btn';
+    reloadBtn.appendChild(faIcon('fas fa-rotate'));
+    reloadBtn.appendChild(document.createTextNode(' Reconnect'));
+    reloadBtn.dataset.action = 'reload-mcp';
+    reloadBtn.dataset.mcpName = s.name;
+
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'btn';
+    editBtn.appendChild(faIcon('fas fa-pen'));
+    editBtn.appendChild(document.createTextNode(' Edit'));
+    editBtn.dataset.action = 'edit-mcp';
+    editBtn.dataset.mcpName = s.name;
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.type = 'button';
+    deleteBtn.className = 'btn btn-danger';
+    deleteBtn.appendChild(faIcon('fas fa-trash'));
+    deleteBtn.appendChild(document.createTextNode(' Delete'));
+    deleteBtn.dataset.action = 'delete-mcp';
+    deleteBtn.dataset.mcpName = s.name;
+
+    actions.appendChild(reloadBtn);
+    actions.appendChild(editBtn);
+    actions.appendChild(deleteBtn);
+
+    card.appendChild(header);
+    card.appendChild(actions);
+    dom.mcpList.appendChild(card);
+  });
+}
+
+async function getVaultKeysForAutocomplete() {
+  try {
+    const result = await window.electron.settings.vaultList();
+    return result?.ok ? (result.keys || []) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function addMcpEnvRow(key = '', value = '') {
+  if (!dom.mcpEnvList) return;
+
+  const vaultKeys = await getVaultKeysForAutocomplete();
+  const datalistId = 'mcp-vault-keys-datalist';
+  if (!document.getElementById(datalistId)) {
+    const dl = document.createElement('datalist');
+    dl.id = datalistId;
+    vaultKeys.forEach((k) => {
+      const opt = document.createElement('option');
+      opt.value = `\${vault:${k}}`;
+      dl.appendChild(opt);
+    });
+    document.body.appendChild(dl);
+  }
+
+  const row = document.createElement('div');
+  row.className = 'mcp-env-row';
+  row.style.display = 'flex';
+  row.style.gap = '8px';
+  row.style.marginTop = '6px';
+
+  const keyInput = document.createElement('input');
+  keyInput.type = 'text';
+  keyInput.className = 'provider-input';
+  keyInput.placeholder = 'ENV_VAR_NAME';
+  keyInput.value = key;
+  keyInput.style.flex = '1';
+  keyInput.dataset.mcpEnv = 'key';
+
+  const valueInput = document.createElement('input');
+  valueInput.type = 'text';
+  valueInput.className = 'provider-input';
+  valueInput.placeholder = 'value or ${vault:key}';
+  valueInput.value = value;
+  valueInput.style.flex = '2';
+  valueInput.dataset.mcpEnv = 'value';
+  valueInput.setAttribute('list', datalistId);
+
+  const removeBtn = document.createElement('button');
+  removeBtn.type = 'button';
+  removeBtn.className = 'btn btn-danger';
+  removeBtn.textContent = 'Remove';
+  removeBtn.addEventListener('click', () => row.remove());
+
+  row.appendChild(keyInput);
+  row.appendChild(valueInput);
+  row.appendChild(removeBtn);
+  dom.mcpEnvList.appendChild(row);
+}
+
+function collectMcpEnvFromForm() {
+  const env = {};
+  if (!dom.mcpEnvList) return env;
+  const rows = dom.mcpEnvList.querySelectorAll('.mcp-env-row');
+  rows.forEach((row) => {
+    const k = row.querySelector('[data-mcp-env="key"]')?.value?.trim();
+    const v = row.querySelector('[data-mcp-env="value"]')?.value ?? '';
+    if (k) env[k] = v;
+  });
+  return env;
+}
+
+function openMcpEditPanel(server = null) {
+  mcpEditingName = server?.name || null;
+  if (dom.mcpEditTitle) {
+    dom.mcpEditTitle.textContent = server ? `Edit "${server.name}"` : 'Add MCP Server';
+  }
+  if (dom.mcpNameInput) dom.mcpNameInput.value = server?.name || '';
+  if (dom.mcpCommandInput) dom.mcpCommandInput.value = server?.command || '';
+  if (dom.mcpArgsInput) dom.mcpArgsInput.value = (server?.args || []).join(', ');
+  if (dom.mcpCwdInput) dom.mcpCwdInput.value = server?.cwd || '';
+  if (dom.mcpEnvList) dom.mcpEnvList.innerHTML = '';
+
+  const envEntries = Object.entries(server?.env || {});
+  if (envEntries.length === 0) {
+    addMcpEnvRow();
+  } else {
+    envEntries.forEach(([k, v]) => addMcpEnvRow(k, v));
+  }
+
+  if (dom.mcpEditStatus) { dom.mcpEditStatus.textContent = ''; dom.mcpEditStatus.classList.remove('error'); }
+  if (dom.mcpEditPanel) dom.mcpEditPanel.hidden = false;
+}
+
+function closeMcpEditPanel() {
+  mcpEditingName = null;
+  if (dom.mcpEditPanel) dom.mcpEditPanel.hidden = true;
+  if (dom.mcpEnvList) dom.mcpEnvList.innerHTML = '';
+}
+
+async function handleMcpSave() {
+  const name = dom.mcpNameInput?.value?.trim();
+  const command = dom.mcpCommandInput?.value?.trim();
+
+  if (!name) return setMcpEditStatus('Name is required.', true);
+  if (!command) return setMcpEditStatus('Command is required.', true);
+
+  const argsRaw = dom.mcpArgsInput?.value || '';
+  const args = argsRaw.split(',').map((s) => s.trim()).filter(Boolean);
+  const cwd = dom.mcpCwdInput?.value?.trim() || undefined;
+  const env = collectMcpEnvFromForm();
+
+  const payload = {
+    name,
+    oldName: mcpEditingName,
+    server: { command, args, env, cwd }
+  };
+
+  try {
+    setMcpEditStatus('Saving and connecting...');
+    const result = await window.electron.settings.mcpSave(payload);
+    if (!result?.ok) throw new Error(result?.error || 'Save failed');
+    if (result.connectError) {
+      setMcpEditStatus(`Saved, but connection failed: ${result.connectError}`, true);
+    } else {
+      setMcpEditStatus(result.message || 'Saved.');
+      closeMcpEditPanel();
+    }
+    await loadMcpServers();
+  } catch (err) {
+    setMcpEditStatus(`Error: ${err.message}`, true);
+  }
+}
+
+function setMcpEditStatus(text, isError = false) {
+  if (!dom.mcpEditStatus) return;
+  dom.mcpEditStatus.textContent = text;
+  dom.mcpEditStatus.classList.toggle('error', Boolean(isError));
+}
+
+async function handleMcpEdit(name) {
+  try {
+    const result = await window.electron.settings.mcpList();
+    if (!result?.ok) throw new Error(result?.error || 'Failed to load');
+    const server = (result.servers || []).find((s) => s.name === name);
+    if (!server) throw new Error(`Server "${name}" not found.`);
+    openMcpEditPanel(server);
+  } catch (err) {
+    setMcpStatus(`Error: ${err.message}`, true);
+  }
+}
+
+async function handleMcpDelete(name) {
+  if (!confirm(`Delete MCP server "${name}"? This will disconnect it immediately.`)) return;
+  try {
+    const result = await window.electron.settings.mcpDelete({ name });
+    if (!result?.ok) throw new Error(result?.error || 'Delete failed');
+    await loadMcpServers();
+  } catch (err) {
+    setMcpStatus(`Error: ${err.message}`, true);
+  }
+}
+
+async function handleMcpReload(name) {
+  try {
+    setMcpStatus(`Reconnecting "${name}"...`);
+    const result = await window.electron.settings.mcpReload({ name });
+    if (!result?.ok) throw new Error(result?.error || 'Reload failed');
+    await loadMcpServers();
+    setMcpStatus(result.message || `Reconnected "${name}".`);
+  } catch (err) {
+    setMcpStatus(`Error: ${err.message}`, true);
+  }
+}
+
+async function handleMcpReloadAll() {
+  try {
+    setMcpStatus('Reconnecting all servers...');
+    const result = await window.electron.settings.mcpReload();
+    if (!result?.ok) throw new Error(result?.error || 'Reload failed');
+    await loadMcpServers();
+    const ok = (result.results || []).filter((r) => r.status === 'connected').length;
+    setMcpStatus(`Reconnected ${ok}/${(result.results || []).length} server(s).`);
+  } catch (err) {
+    setMcpStatus(`Error: ${err.message}`, true);
   }
 }
 
@@ -6876,7 +7190,101 @@ document.addEventListener('click', (e) => {
       !e.target.closest('.chat-info-popover') && !e.target.closest('#chat-info-btn')) {
     dom.chatInfoPopover.hidden = true;
   }
+  if (dom.chatMcpPopover && !dom.chatMcpPopover.hidden &&
+      !e.target.closest('#chat-mcp-popover') && !e.target.closest('#chat-mcp-btn')) {
+    dom.chatMcpPopover.hidden = true;
+  }
 });
+
+/* --- Chat MCP popover -------------------------------------- */
+if (dom.chatMcpBtn) {
+  dom.chatMcpBtn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (!dom.chatMcpPopover) return;
+    const willOpen = dom.chatMcpPopover.hidden;
+    if (willOpen) await renderChatMcpToggles();
+    dom.chatMcpPopover.hidden = !willOpen;
+  });
+}
+if (dom.chatMcpCloseBtn) {
+  dom.chatMcpCloseBtn.addEventListener('click', () => {
+    if (dom.chatMcpPopover) dom.chatMcpPopover.hidden = true;
+  });
+}
+
+async function renderChatMcpToggles() {
+  if (!dom.chatMcpToggles) return;
+  const chat = getActiveChat();
+  dom.chatMcpToggles.innerHTML = '';
+
+  if (!chat) {
+    dom.chatMcpToggles.textContent = 'No active chat.';
+    return;
+  }
+
+  let servers = [];
+  try {
+    const result = await window.electron.settings.mcpList();
+    if (result?.ok) servers = result.servers || [];
+  } catch (err) {
+    dom.chatMcpToggles.textContent = `Error loading servers: ${err.message}`;
+    return;
+  }
+
+  if (servers.length === 0) {
+    const hint = document.createElement('div');
+    hint.className = 'provider-message';
+    hint.textContent = 'No MCP servers configured. Add them in Settings → MCP Servers.';
+    dom.chatMcpToggles.appendChild(hint);
+    return;
+  }
+
+  const disabled = new Set(Array.isArray(chat.disabledMcpServers) ? chat.disabledMcpServers : []);
+
+  servers.forEach((s) => {
+    const row = document.createElement('label');
+    row.className = 'inline-toggle';
+    row.style.display = 'flex';
+    row.style.alignItems = 'center';
+    row.style.gap = '8px';
+    row.style.padding = '6px 0';
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = !disabled.has(s.name);
+    checkbox.dataset.mcpServer = s.name;
+
+    const label = document.createElement('span');
+    label.textContent = s.name;
+
+    const meta = document.createElement('span');
+    meta.className = 'provider-message';
+    meta.style.marginLeft = 'auto';
+    meta.textContent = s.connected ? `${(s.tools || []).length} tools` : 'offline';
+
+    checkbox.addEventListener('change', async () => {
+      const checked = checkbox.checked;
+      if (checked) disabled.delete(s.name); else disabled.add(s.name);
+      try {
+        const updated = await window.electron.chat.setDisabledMcpServers(chat.id, Array.from(disabled));
+        if (updated) {
+          const idx = appState.chats.findIndex((c) => c.id === chat.id);
+          if (idx >= 0) appState.chats[idx] = updated;
+        }
+      } catch (err) {
+        console.warn('[chat-mcp] Failed to update disabled servers:', err);
+        // Revert on failure
+        checkbox.checked = !checked;
+        if (checked) disabled.add(s.name); else disabled.delete(s.name);
+      }
+    });
+
+    row.appendChild(checkbox);
+    row.appendChild(label);
+    row.appendChild(meta);
+    dom.chatMcpToggles.appendChild(row);
+  });
+}
 
 if (dom.closeSettingsBtn) {
   dom.closeSettingsBtn.addEventListener('click', () => {
@@ -7420,6 +7828,38 @@ if (dom.vaultList) {
     const key = btn.dataset.vaultKey;
     if (action === 'delete-vault' && key) handleVaultDelete(key);
     if (action === 'update-vault' && key) handleVaultUpdate(key);
+  });
+}
+
+// ── MCP event listeners ────────────────────────────────────
+if (dom.mcpAddBtn) {
+  dom.mcpAddBtn.addEventListener('click', () => openMcpEditPanel(null));
+}
+if (dom.mcpRefreshBtn) {
+  dom.mcpRefreshBtn.addEventListener('click', () => loadMcpServers());
+}
+if (dom.mcpReloadAllBtn) {
+  dom.mcpReloadAllBtn.addEventListener('click', () => handleMcpReloadAll());
+}
+if (dom.mcpSaveBtn) {
+  dom.mcpSaveBtn.addEventListener('click', () => handleMcpSave());
+}
+if (dom.mcpCancelBtn) {
+  dom.mcpCancelBtn.addEventListener('click', () => closeMcpEditPanel());
+}
+if (dom.mcpEnvAddBtn) {
+  dom.mcpEnvAddBtn.addEventListener('click', () => addMcpEnvRow());
+}
+if (dom.mcpList) {
+  dom.mcpList.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-action]');
+    if (!btn) return;
+    const action = btn.dataset.action;
+    const name = btn.dataset.mcpName;
+    if (!name) return;
+    if (action === 'delete-mcp') handleMcpDelete(name);
+    else if (action === 'edit-mcp') handleMcpEdit(name);
+    else if (action === 'reload-mcp') handleMcpReload(name);
   });
 }
 
