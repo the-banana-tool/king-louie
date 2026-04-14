@@ -240,6 +240,36 @@ const actions = {
     return { ok: true, message: `Credentials saved for ${profile}@${host}.` };
   },
 
+  async set_http_auth(params, ctx) {
+    const b = requireRunning();
+    let username = params.username;
+    let password = params.password;
+    // If username/password aren't passed directly, pull from the vault using the
+    // profile+host convention save_credentials uses.
+    if (!username || !password) {
+      const profile = params.profile || activeProfile;
+      const host = params.host;
+      if (!profile || !host) {
+        return { ok: false, error: 'Provide either (username+password) or (profile+host) to look up vault creds.' };
+      }
+      const { decryptToken } = ctx || {};
+      if (!decryptToken) return { ok: false, error: 'Decryption unavailable (not running in Electron).' };
+      const Store = require('electron-store').default || require('electron-store');
+      const store = new Store();
+      const encrypted = store.get(`__vault_${vaultKeyFor(profile, host)}`);
+      if (!encrypted) return { ok: false, error: `No credentials in vault for ${profile}@${host}.` };
+      try {
+        const creds = JSON.parse(decryptToken(encrypted));
+        username = creds.username;
+        password = creds.password;
+      } catch (err) {
+        return { ok: false, error: `Could not decode vault credentials: ${err.message}` };
+      }
+    }
+    await b.context.setHTTPCredentials({ username, password });
+    return { ok: true, message: 'HTTP Basic auth credentials set on browser context. Navigate (or reload) to apply.' };
+  },
+
   async fill_credentials(params, ctx) {
     const b = requireRunning();
     const profile = params.profile || activeProfile;
@@ -1186,7 +1216,8 @@ PROFILES — persistent logins and cookies across runs:
 
 VAULT CREDENTIALS — King-Louie's vault is the source of truth for web logins. Chromium's own password manager is disabled.
   - "save_credentials" (params.profile?, params.host?, params.username, params.password) — encrypts and stores creds for a profile+host pair.
-  - "fill_credentials" (params.profile?, params.host?, params.submit?) — retrieves and types creds into auto-detected (or explicit) username/password fields on the current page. Set submit:true to also click the submit button.
+  - "fill_credentials" (params.profile?, params.host?, params.submit?) — retrieves and types creds into auto-detected (or explicit) username/password fields on the current page. Set submit:true to also click the submit button. Use this for FORM-BASED logins only.
+  - "set_http_auth" (params.username+password OR params.profile+host to look up from vault) — for HTTP Basic auth (the native browser auth dialog, not a form). Call this BEFORE navigating. If the browser already popped the auth dialog and is showing a chrome-error page, call set_http_auth then reload or re-navigate. Signs: an OS-style popup appears instead of an HTML login form, or navigation lands on "chrome-error://chromewebdata/" with a 401.
 
 PREFER high-level actions over manual "fill" + "click" sequences:
   - "login" — signs in with username + password. Auto-detects the username field (including type="text" with name="username", not just type="email"), password field, and submit button. Use this for ALL credentialed sign-ins instead of hand-rolling selectors like input[type='email'].

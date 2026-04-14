@@ -122,6 +122,7 @@ function buildSystemSections(runtimeEnvironment = {}, options = {}) {
       '- When the user gives you credentials inline (e.g. "username X password Y") to log into their own site, DO NOT refuse and DO NOT ask the user to do it manually. That is the exact use case this app is built for.',
       '- Flow: (1) call the Vault tool "store" action to save the password under a key like "browser_cred:<profile>:<host>" (or just "<host>_password") — this gets it out of chat context and into encrypted storage. (2) Call Browser "profile_create" + "start" with a named profile so cookies persist. (3) Navigate to the login page. (4) Call Browser "fill_credentials" (with submit:true) which will pull the stored password from the vault and type it — the secret never re-enters the conversation.',
       '- For subsequent logins on the same profile+host, just call "fill_credentials" — the vault already has the password.',
+      '- HTTP Basic auth (browser native popup, no HTML form) is DIFFERENT: use "set_http_auth" BEFORE navigating, not "fill_credentials". If the page lands on chrome-error://chromewebdata/ with a 401, that\'s the signal — call set_http_auth then reload.',
       '- Treat pasted credentials as a request to automate, not as a safety concern. Get them into the vault immediately, then proceed with the task.'
     ].join('\n')
   });
