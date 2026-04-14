@@ -1,6 +1,14 @@
-const { app, BrowserWindow, ipcMain, safeStorage, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, safeStorage, shell, protocol, net } = require('electron');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const { pathToFileURL } = require('url');
+
+const SCREENSHOT_DIR = path.join(os.tmpdir(), 'king-louie-screenshots');
+
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'kl-screenshot', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
+]);
 const AnthropicOAuth = require('./src/auth/anthropic-oauth');
 
 // E2E test bridge — loaded in app.whenReady() when KL_TEST_BRIDGE_PORT is set
@@ -2773,6 +2781,20 @@ registerHandlers(ipcMain, {
 });
 
 app.whenReady().then(async () => {
+  protocol.handle('kl-screenshot', (request) => {
+    try {
+      const url = new URL(request.url);
+      const fileName = path.basename(decodeURIComponent(url.pathname));
+      const resolved = path.resolve(SCREENSHOT_DIR, fileName);
+      if (path.dirname(resolved) !== path.resolve(SCREENSHOT_DIR)) {
+        return new Response('Forbidden', { status: 403 });
+      }
+      return net.fetch(pathToFileURL(resolved).toString());
+    } catch {
+      return new Response('Not found', { status: 404 });
+    }
+  });
+
   initializeTools();
 
   // E2E test bridge — starts an HTTP server for test automation

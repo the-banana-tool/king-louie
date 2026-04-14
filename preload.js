@@ -163,10 +163,24 @@ const simpleMarkdownFallback = (text = '') => {
 const DOMPURIFY_CONFIG = {
   ADD_ATTR: ['class'],
   ADD_TAGS: ['span'],
+  ALLOWED_URI_REGEXP: /^(?:(?:https?|ftp|mailto|tel|kl-screenshot):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
+};
+
+const SCREENSHOT_PATH_RE = /([A-Za-z]:[\\/](?:[^\s()]+[\\/])*?king-louie-screenshots[\\/]screenshot-\d+\.png|\/(?:[^\s()]+\/)*?king-louie-screenshots\/screenshot-\d+\.png)/g;
+const SCREENSHOT_LINK_RE = /(!?)\[([^\]]*)\]\((kl-screenshot:\/\/[^\s)]+)\)/g;
+
+const rewriteScreenshotPaths = (text = '') => {
+  let out = String(text).replace(SCREENSHOT_PATH_RE, (match) => {
+    const fileName = match.split(/[\\/]/).pop();
+    return `kl-screenshot://local/${encodeURIComponent(fileName)}`;
+  });
+  // Upgrade screenshot links to image embeds so they render inline regardless of syntax the model used.
+  out = out.replace(SCREENSHOT_LINK_RE, (_m, bang, alt, url) => `![${alt}](${url})`);
+  return out;
 };
 
 const safeMarkdownParse = (text) => {
-  const input = text || '';
+  const input = rewriteScreenshotPaths(text || '');
   const sanitize = (html) => {
     if (!domPurify || typeof domPurify.sanitize !== 'function') {
       return String(html || '');
