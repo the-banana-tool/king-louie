@@ -13,12 +13,25 @@ const { createWorktree } = require('../../execution/worktree');
  *  - "Search the codebase for all TODO comments in the background"
  *  - "Build the project in the background"
  */
+// Tools whose presence in a task instruction signals the task needs the
+// approval bridge. If the parent context can't supply one, we reject upfront
+// instead of letting the bg agent silently auto-deny every gated call.
+const GATED_TOOL_HINTS = [
+  'browser', 'vault', 'bash', 'edit ', 'edit_file', 'write ', 'write_file',
+  'git ', 'multiedit', 'multi_edit', 'skill ', 'cron', 'remote'
+];
+
 const BackgroundTaskTool = new Tool({
   name: 'BackgroundTask',
   description:
     'Spawn a task that runs in the background while you continue the conversation. ' +
     'The task runs an agent independently and stores its output for later review. ' +
-    'Use TaskStatus to check progress, read output, or stop background tasks.',
+    'Use TaskStatus to check progress, read output, or stop background tasks. ' +
+    'NOTE: the bg agent gets its own tool runtime — it CAN call gated tools ' +
+    '(Browser, Vault, Bash, Edit, Write, Git) and approval prompts will surface ' +
+    'in this same chat, but it does NOT share the foreground browser instance. ' +
+    'For long-running browser sessions, prefer to drive them inline rather than ' +
+    'handing them to a bg task.',
   parameters: {
     type: 'object',
     properties: {
@@ -46,7 +59,8 @@ const BackgroundTaskTool = new Tool({
     const {
       backgroundTaskManager,
       agentExecutorAdapter,
-      getAgent
+      getAgent,
+      approvalRequester
     } = options;
 
     if (!backgroundTaskManager) {
@@ -57,6 +71,22 @@ const BackgroundTaskTool = new Tool({
     }
     if (typeof getAgent !== 'function') {
       return { ok: false, error: 'Agent resolver not available.' };
+    }
+
+    // Upfront reject: if the task references gated tools but we have no way to
+    // surface approvals back to a user, every such call would silently auto-deny.
+    if (typeof approvalRequester !== 'function') {
+      const lower = String(params.task || '').toLowerCase();
+      const matched = GATED_TOOL_HINTS.find((t) => lower.includes(t));
+      if (matched) {
+        return {
+          ok: false,
+          error:
+            `Refusing to spawn: this task mentions "${matched.trim()}" which requires user approval, ` +
+            `but no approval channel is wired into the parent context (no chat UI to prompt). ` +
+            `Either run the work in the foreground, or pre-approve the relevant tool globally.`
+        };
+      }
     }
 
     const agentId = params.agentId || 'main';
@@ -101,7 +131,11 @@ const BackgroundTaskTool = new Tool({
               {
                 maxIterations: 20,
                 abortSignal: bgTask.signal,
-                workingDirectory: taskWorkDir
+                workingDirectory: taskWorkDir,
+                // Bridge approvals back to whoever spawned us (typically the
+                // foreground chat UI). Without this, the bg agent's gated tool
+                // calls would silently auto-deny.
+                approvalRequester
               }
             );
 

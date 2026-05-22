@@ -109,6 +109,12 @@ in its own conversation context. Results are returned inline to the calling agen
       executeOptions.provider = params.provider;
     }
 
+    // Bridge approvals back to the parent context (the chat UI that spawned us)
+    // so gated tools called by the sub-agent don't silently auto-deny.
+    if (typeof options.approvalRequester === 'function') {
+      executeOptions.approvalRequester = options.approvalRequester;
+    }
+
     try {
       const result = await agentExecutorAdapter.execute(
         agent,

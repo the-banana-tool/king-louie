@@ -64,6 +64,39 @@ class AnthropicProvider extends BaseLLMProvider {
    * This gives a 5-minute TTL cache that avoids re-processing the system
    * prompt on every turn — saving 50-90% of input token costs.
    */
+  /**
+   * Mark the tools block as cacheable. Anthropic caches everything up to and
+   * including the cache_control breakpoint, so attaching it to the last tool
+   * caches the whole tools array (often the bulk of input tokens — the
+   * Browser tool alone is ~5k tokens). Cache hits cost 10% of normal input
+   * and process faster, which materially speeds up agent loops.
+   *
+   * Two breakpoints when ToolSearch is present: one right after ToolSearch
+   * (preserves the core-tools cache when later tools are appended via
+   * deferred loading) and one on the final tool (caches the full current
+   * set). Anthropic allows up to 4 breakpoints; using 2 here is safe.
+   */
+  buildCachedTools(tools) {
+    const formatted = (tools || []).map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      input_schema: tool.parameters
+    }));
+    if (formatted.length === 0) return formatted;
+
+    const breakpoints = new Set();
+    const toolSearchIdx = formatted.findIndex((t) => t.name === 'ToolSearch');
+    if (toolSearchIdx >= 0 && toolSearchIdx < formatted.length - 1) {
+      breakpoints.add(toolSearchIdx);
+    }
+    breakpoints.add(formatted.length - 1);
+
+    for (const idx of breakpoints) {
+      formatted[idx] = { ...formatted[idx], cache_control: { type: 'ephemeral' } };
+    }
+    return formatted;
+  }
+
   buildCachedSystemPrompt(systemPrompt) {
     if (!systemPrompt) return undefined;
 
@@ -146,14 +179,21 @@ class AnthropicProvider extends BaseLLMProvider {
     const pricing = this.resolveModelPricing(model);
     if (!pricing) return 0;
 
-    const cacheCreation = cacheMetrics.cacheCreationInputTokens || 0;
-    const cacheRead = cacheMetrics.cacheReadInputTokens || 0;
-    // Non-cached input = total input minus cache tokens
-    const uncachedInput = Math.max(0, inputTokens - cacheCreation - cacheRead);
+    // Anthropic reports cache tokens as separate counts (NOT included in
+    // input_tokens). Base normalizeUsage maps cache_read_input_tokens →
+    // cachedInputTokens and cache_creation_input_tokens → cacheCreationInputTokens.
+    const cacheCreation = Number(cacheMetrics.cacheCreationInputTokens || 0);
+    const cacheRead = Number(
+      cacheMetrics.cachedInputTokens
+      ?? cacheMetrics.cacheReadInputTokens
+      ?? 0
+    );
+    // Anthropic's input_tokens does NOT include cache tokens, so no subtraction.
+    const uncachedInput = Math.max(0, inputTokens);
 
     const uncachedCost = (uncachedInput / 1_000_000) * (pricing.inputPerMillion || 0);
-    const cacheWriteCost = (cacheCreation / 1_000_000) * (pricing.cacheWritePerMillion || pricing.inputPerMillion || 0);
-    const cacheReadCost = (cacheRead / 1_000_000) * (pricing.cacheReadPerMillion || pricing.inputPerMillion || 0);
+    const cacheWriteCost = (cacheCreation / 1_000_000) * (pricing.cacheWritePerMillion || (pricing.inputPerMillion || 0) * 1.25);
+    const cacheReadCost = (cacheRead / 1_000_000) * (pricing.cacheReadPerMillion || (pricing.inputPerMillion || 0) * 0.1);
     const outputCost = (outputTokens / 1_000_000) * (pricing.outputPerMillion || 0);
 
     return Number((uncachedCost + cacheWriteCost + cacheReadCost + outputCost).toFixed(8));
@@ -248,11 +288,7 @@ class AnthropicProvider extends BaseLLMProvider {
       model: requestedModel,
       messages: this.formatMessages(messages),
       ...(cachedSystem ? { system: cachedSystem } : {}),
-      tools: tools.map((tool) => ({
-        name: tool.name,
-        description: tool.description,
-        input_schema: tool.parameters
-      })),
+      tools: this.buildCachedTools(tools),
       max_tokens: options.max_tokens || 4096,
       stream: false
     };
@@ -298,11 +334,7 @@ class AnthropicProvider extends BaseLLMProvider {
       model: requestedModel,
       messages: this.formatMessages(messages),
       ...(cachedSystem ? { system: cachedSystem } : {}),
-      tools: tools.map((tool) => ({
-        name: tool.name,
-        description: tool.description,
-        input_schema: tool.parameters
-      })),
+      tools: this.buildCachedTools(tools),
       max_tokens: options.max_tokens || 4096,
       stream: true
     };

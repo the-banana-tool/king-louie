@@ -67,6 +67,13 @@ class ToolExecutor extends EventEmitter {
     // (tool, pattern) key; after a threshold the executor stops asking
     // and auto-denies. See src/tools/denial-tracker.js.
     this.denialTracker = options.denialTracker || null;
+
+    // Approval prompts that sit unanswered forever block the agent loop
+    // (we observed a single Vault.store call hang for 7m21s when the user
+    // wasn't watching). Default to 5 min; override via constructor or
+    // per-call. 0 disables the timeout entirely.
+    this.approvalTimeoutMs =
+      typeof options.approvalTimeoutMs === 'number' ? options.approvalTimeoutMs : 5 * 60 * 1000;
   }
 
   get permissionRules() {
@@ -241,6 +248,18 @@ class ToolExecutor extends EventEmitter {
         const approved = await this.requestApproval(toolName, hookDecoratedParameters, {
           ruleHint: ruleSaysAsk ? describeRule(ruleMatch.rule) : null
         });
+        if (approved === 'timeout') {
+          // Inattention, not denial — don't penalize via denialTracker, and
+          // surface a distinct error so the agent can recover or explain
+          // instead of treating it as a hard "no".
+          const timedOut = {
+            success: false,
+            error: `Approval timed out after ${Math.round(this.approvalTimeoutMs / 1000)}s — no user response. Try again when someone is watching, or ask the user to pre-approve this tool.`,
+            deniedBy: 'timeout'
+          };
+          this.emit('postExecute', { toolName, parameters: hookDecoratedParameters, result: timedOut });
+          return timedOut;
+        }
         if (!approved) {
           if (this.denialTracker) this.denialTracker.recordDenial(toolName, hookDecoratedParameters);
           const denied = { success: false, error: 'User denied permission', deniedBy: 'user' };
@@ -282,7 +301,12 @@ class ToolExecutor extends EventEmitter {
         runtimeEnvironment,
         useSandbox: typeof options.useSandbox === 'boolean' ? options.useSandbox : this.useSandbox,
         signal: options.signal || null,
-        onProgress
+        onProgress,
+        // Expose this executor's approval channel so meta-tools (BackgroundTask,
+        // SpawnAgent, workflow runners) can route their child agents' approval
+        // prompts back to the originating chat UI instead of silently auto-denying.
+        approvalRequester: (toolName, parameters, metadata) =>
+          this.requestApproval(toolName, parameters, metadata)
       });
 
       if (this.hookExecutor && typeof this.hookExecutor.run === 'function') {
@@ -319,17 +343,28 @@ class ToolExecutor extends EventEmitter {
   }
 
   async requestApproval(toolName, parameters, metadata = {}) {
-    if (this.approvalRequester) {
-      return this.approvalRequester(toolName, parameters, metadata);
+    const inner = this.approvalRequester
+      ? this.approvalRequester(toolName, parameters, metadata)
+      : (this.listenerCount('approvalRequired') === 0
+          ? Promise.resolve(false)
+          : new Promise((resolve) => {
+              this.emit('approvalRequired', { toolName, parameters, metadata, resolve });
+            }));
+
+    if (!this.approvalTimeoutMs || this.approvalTimeoutMs <= 0) {
+      return inner;
     }
 
-    if (this.listenerCount('approvalRequired') === 0) {
-      return false;
-    }
-
-    return new Promise((resolve) => {
-      this.emit('approvalRequired', { toolName, parameters, metadata, resolve });
+    let timer;
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(() => {
+        this.emit('approvalTimedOut', { toolName, parameters, metadata, timeoutMs: this.approvalTimeoutMs });
+        resolve('timeout');
+      }, this.approvalTimeoutMs);
+      timer.unref?.();
     });
+
+    return Promise.race([inner, timeout]).finally(() => clearTimeout(timer));
   }
 }
 

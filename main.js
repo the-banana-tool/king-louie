@@ -874,7 +874,10 @@ const buildRuntimeSystemPrompt = (runtimeEnvironment = {}) => {
     '',
     'Important:',
     '- Each Bash command runs in a fresh shell — environment variables, virtual environment activation, and cd do not persist between calls. Use absolute paths or explicit venv paths (e.g. venv/Scripts/python on Windows, venv/bin/python on Unix) instead of relying on activate.',
-    '- You have a Browser tool that can launch a real browser, navigate to URLs, take screenshots, and interact with pages. Use it when the user asks to open or view something in a browser.',
+    '- You have browser tools (BrowserSession + BrowserPage + BrowserExtract) that drive a real Playwright-controlled browser. Load only what you need: BrowserSession for start/stop/profiles/credentials/login/tabs, BrowserPage for navigate/click/type/wait/screenshot, BrowserExtract for reading content/iframes/network interception. The legacy "Browser" tool still works but has a much larger schema — prefer the split tools. Use them when the user asks to open or view something in a browser.',
+    '- The browser is a singleton — only one instance runs at a time across all three tools. Before calling BrowserSession.start or profile_create, call BrowserSession.status (or profile_current) to see if a session already exists. Reuse it instead of creating a duplicate profile or hitting "Browser already running".',
+    '- BackgroundTask spawns an agent in a separate tool runtime — it cannot share the foreground browser instance. Before spawning a new bg task, call TaskStatus action="list" to see what is already running; resume via TaskStatus instead of re-spawning. Avoid handing long-running browser sessions to BackgroundTask; drive them inline.',
+    '- For mechanical multi-step work (paced web automation, scraping, repeated form fills), drive it inline in the foreground — each LLM round-trip costs real wall time, so plan a batch of actions and execute them with minimal back-and-forth.',
     '',
     'Use this context when proposing commands and selecting tools. Avoid commands for unavailable tools.'
   ];

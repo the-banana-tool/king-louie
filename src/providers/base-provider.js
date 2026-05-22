@@ -60,10 +60,27 @@ class BaseLLMProvider {
     const outputTokens = Number(usage.output_tokens ?? usage.completion_tokens ?? 0) || 0;
     const totalTokens = Number(usage.total_tokens ?? inputTokens + outputTokens) || 0;
 
+    // Provider-specific cache reporting:
+    //   OpenAI:    usage.prompt_tokens_details.cached_tokens (subset of prompt_tokens)
+    //   Anthropic: usage.cache_read_input_tokens / cache_creation_input_tokens
+    //              (these are NOT included in input_tokens — they're separate counts)
+    //   Gemini:    usage.cached_content_token_count (subset of prompt input)
+    const cachedInputTokens =
+      Number(
+        usage?.prompt_tokens_details?.cached_tokens
+        ?? usage?.cache_read_input_tokens
+        ?? usage?.cached_content_token_count
+        ?? 0
+      ) || 0;
+    const cacheCreationInputTokens =
+      Number(usage?.cache_creation_input_tokens ?? 0) || 0;
+
     return {
       inputTokens,
       outputTokens,
-      totalTokens
+      totalTokens,
+      cachedInputTokens,
+      cacheCreationInputTokens
     };
   }
 
@@ -83,13 +100,23 @@ class BaseLLMProvider {
     return prefixMatch ? prefixMatch[1] : null;
   }
 
-  calculateCostUsd(model, inputTokens, outputTokens) {
+  calculateCostUsd(model, inputTokens, outputTokens, cacheMetrics = {}) {
     const pricing = this.resolveModelPricing(model);
     if (!pricing) return 0;
 
-    const inputCost = (inputTokens / 1_000_000) * (pricing.inputPerMillion || 0);
+    // OpenAI/Gemini convention: cached tokens are a subset of inputTokens
+    // and are billed at a discount (typically 50%, configurable via pricing
+    // table as cachedInputPerMillion). Anthropic overrides this method
+    // entirely because its cached tokens are reported as a separate count.
+    const cachedInput = Number(cacheMetrics.cachedInputTokens || 0);
+    const uncachedInput = Math.max(0, inputTokens - cachedInput);
+    const cachedRate = pricing.cachedInputPerMillion
+      ?? (pricing.inputPerMillion ? pricing.inputPerMillion * 0.5 : 0);
+
+    const inputCost = (uncachedInput / 1_000_000) * (pricing.inputPerMillion || 0);
+    const cachedCost = (cachedInput / 1_000_000) * cachedRate;
     const outputCost = (outputTokens / 1_000_000) * (pricing.outputPerMillion || 0);
-    return Number((inputCost + outputCost).toFixed(8));
+    return Number((inputCost + cachedCost + outputCost).toFixed(8));
   }
 
   buildLlmCallMetrics({ model, usage } = {}) {
@@ -103,7 +130,11 @@ class BaseLLMProvider {
       costUsd: this.calculateCostUsd(
         normalizedModel,
         normalizedUsage.inputTokens,
-        normalizedUsage.outputTokens
+        normalizedUsage.outputTokens,
+        {
+          cachedInputTokens: normalizedUsage.cachedInputTokens,
+          cacheCreationInputTokens: normalizedUsage.cacheCreationInputTokens
+        }
       )
     };
   }

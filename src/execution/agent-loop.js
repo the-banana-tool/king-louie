@@ -269,7 +269,14 @@ class AgentLoop {
           break;
         } catch (err) {
           lastErr = err;
-          if (!isTransient(err) || attempt === maxAttempts) throw err;
+          if (!isTransient(err) || attempt === maxAttempts) {
+            const usedModel = effectiveOptions.model || options.model || '(default)';
+            const wrapped = new Error(
+              `Provider call failed (iteration ${iterations}, model "${usedModel}"): ${err.message || err}`
+            );
+            wrapped.cause = err;
+            throw wrapped;
+          }
           const waitMs = 1000 * Math.pow(2, attempt - 1); // 1s, 2s, 4s, 8s
           console.warn(`[agent-loop] Transient provider error (attempt ${attempt}/${maxAttempts}): ${err.message}. Retrying in ${waitMs}ms…`);
           await new Promise((resolve) => setTimeout(resolve, waitMs));

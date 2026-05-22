@@ -23,7 +23,12 @@
       "Bash(find tests:*)",
       "Bash(where claude:*)",
       "Bash(find /e/Programming/claude-code/plugins -type f -name *.ts -o -name *.tsx -o -name *.js)",
-      "Bash(find /e/Programming/claude-code -type f \\\\\\(-name *.js -o -name *.jsx -o -name *.ts -o -name *.tsx \\\\\\))"
+      "Bash(find /e/Programming/claude-code -type f \\\\\\(-name *.js -o -name *.jsx -o -name *.ts -o -name *.tsx \\\\\\))",
+      "Read(//c/Users/sblac/Programming/playwright/packages/playwright-core/src/client//**)",
+      "Read(//c/Users/sblac/Programming/playwright/packages/playwright-core/src/client/**)",
+      "Read(//c/Users/sblac/Programming/king-louie/**)",
+      "Bash(rm 'C:/Users/sblac/Programming/king-louie/$null')",
+      "Bash(grep -E \"\\\\.\\(ts|tsx\\)$\")"
     ]
   }
 }

@@ -1206,7 +1206,7 @@ const actionNames = Object.keys(actions);
 
 const browserTool = new Tool({
   name: 'Browser',
-  description: `Control a Playwright-powered browser (visible by default). Start the browser first, then perform actions.
+  description: `(LEGACY — prefer the split tools BrowserSession + BrowserPage + BrowserExtract for new work; they share the same singleton with smaller per-iteration schemas.) Control a Playwright-powered browser (visible by default). Start the browser first, then perform actions.
 
 PROFILES — persistent logins and cookies across runs:
   - "profile_list" — list saved profiles.
@@ -1377,4 +1377,10 @@ browserTool._cleanup = async () => {
   }
 };
 
+// Exported so the split tools (BrowserSession/BrowserPage/BrowserExtract)
+// can dispatch into the same action handlers + singleton without duplicating
+// 1k lines of Playwright glue. The split tools narrow the schema (and thus
+// per-iteration token cost) but route execution here.
 module.exports = browserTool;
+module.exports.actions = actions;
+module.exports.actionNames = actionNames;

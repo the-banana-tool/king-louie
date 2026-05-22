@@ -34,7 +34,11 @@ const TOOL_KEY_FIELDS = {
   Edit: 'file_path',
   Write: 'file_path',
   Glob: 'pattern',
-  Grep: 'pattern'
+  Grep: 'pattern',
+  // Vault key namespace: lets users pre-allow per-prefix patterns like
+  // `browser_cred:*` so common credential storage doesn't re-prompt for every
+  // new profile name.
+  Vault: 'key'
 };
 
 function compilePattern(pattern) {

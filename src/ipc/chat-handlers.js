@@ -262,30 +262,14 @@ function registerChatHandlers(ipcMain, context = {}) {
 
   /**
    * Pick a cheap model for agent-loop tool iterations (after the first).
-   * Uses settings.inference.agentLoopModel if configured, otherwise
-   * auto-selects the cheapest capable model for the same provider.
-   * Returns null if the primary model is already cheap.
+   * Returns settings.inference.agentLoopModel if explicitly configured,
+   * otherwise null — no auto-downgrade. The previous auto-downgrade to
+   * haiku/mini/flash silently broke runs whose tool schemas (e.g. Browser,
+   * MCP servers with large param shapes) the cheap model couldn't accept.
    */
-  function resolveAgentLoopModel(providerType, primaryModel) {
+  function resolveAgentLoopModel() {
     const settings = typeof getSettings === 'function' ? getSettings() : {};
-    const configured = settings?.inference?.agentLoopModel;
-    if (configured) return configured;
-
-    // Don't downgrade if already on a cheap model
-    const lower = String(primaryModel || '').toLowerCase();
-    const cheapPatterns = ['mini', 'haiku', 'flash', '8b-instant', 'small'];
-    if (cheapPatterns.some(p => lower.includes(p))) return null;
-
-    const cheapModels = {
-      openai: 'gpt-4o-mini',
-      anthropic: 'claude-3-5-haiku-latest',
-      gemini: 'gemini-2.0-flash',
-      groq: 'llama-3.1-8b-instant',
-      mistral: 'mistral-small-latest',
-      deepseek: 'deepseek-chat'
-    };
-
-    return cheapModels[providerType] || null;
+    return settings?.inference?.agentLoopModel || null;
   }
 
   ipcMain.handle(IPC.CHAT_SEND_MESSAGE, wrapHandler(IPC.CHAT_SEND_MESSAGE, async (event, { chatId, message, images = [], documents = [], agentMode = false, sandboxMode = true }) => {
@@ -458,7 +442,7 @@ function registerChatHandlers(ipcMain, context = {}) {
       await withNotificationTiming('Chat response', async () => {
         const canUseAgentMode = agentMode && toolDefinitions.length > 0 && typeof provider.sendMessageWithTools === 'function';
         if (canUseAgentMode) {
-          const loopModel = resolveAgentLoopModel(inference.providerType, options.model);
+          const loopModel = resolveAgentLoopModel();
           const embeddingProvider = contextAssembler?.embeddingProvider || null;
           const toolResultsDir = typeof getToolResultsDir === 'function' ? getToolResultsDir() : null;
           const loop = new AgentLoop(provider, executor, {
