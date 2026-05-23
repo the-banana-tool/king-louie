@@ -3,6 +3,7 @@ const path = require('path');
 const { EventEmitter } = require('events');
 const AsyncMutex = require('./async-mutex');
 const { createLogger } = require('../logging');
+const { EVENT_TYPES } = require('../events/event-ledger');
 const log = createLogger('workflow-engine');
 
 // Cap a single dependency-result block at this many characters when handing
@@ -75,6 +76,7 @@ class WorkflowEngine extends EventEmitter {
     this.getParentChatMessages = typeof options.getParentChatMessages === 'function'
       ? options.getParentChatMessages
       : () => [];
+    this.eventLedger = options.eventLedger || null;
     this.workflows = new Map();
     this.activeExecutions = new Map(); // workflowId → AbortController
     // Per-workflow mutex serializes _save (writeFile + rename) and prevents
@@ -155,6 +157,12 @@ class WorkflowEngine extends EventEmitter {
     this.workflows.set(id, workflow);
     await this._save(workflow);
     this.emit('workflow:created', { workflowId: id, goal: workflow.goal, chatId: workflow.metadata.chatId });
+    await this._recordEvent(EVENT_TYPES.WORKFLOW_CREATED, id, {
+      goal: workflow.goal,
+      summary: workflow.summary,
+      taskCount: workflow.tasks.length,
+      chatId: workflow.metadata.chatId,
+    });
 
     return workflow;
   }
@@ -183,6 +191,7 @@ class WorkflowEngine extends EventEmitter {
     this._save(workflow);
     const chatId = workflow.metadata?.chatId || null;
     this.emit('workflow:started', { workflowId, chatId });
+    this._recordEvent(EVENT_TYPES.WORKFLOW_STARTED, workflowId, { chatId });
 
     try {
       await this._executeLoop(workflow, abortController.signal);
@@ -190,9 +199,11 @@ class WorkflowEngine extends EventEmitter {
       if (error.name === 'AbortError' || abortController.signal.aborted) {
         workflow.status = WORKFLOW_STATUS.PAUSED;
         this.emit('workflow:paused', { workflowId, chatId });
+        this._recordEvent(EVENT_TYPES.WORKFLOW_PAUSED, workflowId, { chatId });
       } else {
         workflow.status = WORKFLOW_STATUS.FAILED;
         this.emit('workflow:failed', { workflowId, chatId, error: error.message });
+        this._recordEvent(EVENT_TYPES.WORKFLOW_FAILED, workflowId, { chatId, error: error.message });
       }
     } finally {
       this.activeExecutions.delete(workflowId);
@@ -217,6 +228,7 @@ class WorkflowEngine extends EventEmitter {
       workflow.updatedAt = new Date().toISOString();
       this._save(workflow);
       this.emit('workflow:paused', { workflowId, chatId: workflow.metadata?.chatId || null });
+      this._recordEvent(EVENT_TYPES.WORKFLOW_PAUSED, workflowId, { chatId: workflow.metadata?.chatId || null });
     }
     return workflow;
   }
@@ -236,6 +248,7 @@ class WorkflowEngine extends EventEmitter {
       workflow.completedAt = new Date().toISOString();
       this._save(workflow);
       this.emit('workflow:cancelled', { workflowId, chatId: workflow.metadata?.chatId || null });
+      this._recordEvent(EVENT_TYPES.WORKFLOW_CANCELLED, workflowId, { chatId: workflow.metadata?.chatId || null });
     }
     return workflow;
   }
@@ -313,6 +326,9 @@ class WorkflowEngine extends EventEmitter {
     }
     // Remove from memory first so any pending _save() becomes a no-op
     this.workflows.delete(workflowId);
+    if (this.eventLedger) {
+      try { await this.eventLedger.removeWorkflow(workflowId); } catch { /* best-effort */ }
+    }
     const filePath = path.join(this.storageDir, `${workflowId}.json`);
     try {
       await fs.promises.unlink(filePath);
@@ -325,6 +341,27 @@ class WorkflowEngine extends EventEmitter {
     } catch {
       // Ignore
     }
+  }
+
+  // --- Event ledger ---
+
+  async _recordEvent(type, workflowId, payload = {}) {
+    if (!this.eventLedger) return;
+    try {
+      await this.eventLedger.append({
+        workflowId,
+        taskId: payload.taskId || undefined,
+        type,
+        payload,
+      });
+    } catch (err) {
+      log.warn(`Event ledger write failed (${type}): ${err.message}`);
+    }
+  }
+
+  async getEventLog(workflowId) {
+    if (!this.eventLedger) return { complete: false, workflowId, events: [] };
+    return this.eventLedger.replay(workflowId);
   }
 
   // --- Internal execution ---
@@ -345,6 +382,7 @@ class WorkflowEngine extends EventEmitter {
           workflow.status = WORKFLOW_STATUS.COMPLETED;
           workflow.completedAt = new Date().toISOString();
           this.emit('workflow:completed', { workflowId: workflow.id, chatId: workflow.metadata?.chatId || null });
+          this._recordEvent(EVENT_TYPES.WORKFLOW_COMPLETED, workflow.id, { chatId: workflow.metadata?.chatId || null });
         }
         break;
       }
@@ -378,6 +416,7 @@ class WorkflowEngine extends EventEmitter {
       task.error = `Agent "${task.agentId}" not found`;
       task.completedAt = new Date().toISOString();
       this.emit('workflow:task:failed', { workflowId: workflow.id, chatId: workflow.metadata?.chatId || null, taskId: task.id, title: task.title, error: task.error });
+      this._recordEvent(EVENT_TYPES.TASK_FAILED, workflow.id, { taskId: task.id, title: task.title, error: task.error });
       return;
     }
 
@@ -385,6 +424,7 @@ class WorkflowEngine extends EventEmitter {
     task.startedAt = new Date().toISOString();
     workflow.updatedAt = new Date().toISOString();
     this.emit('workflow:task:started', { workflowId: workflow.id, chatId: workflow.metadata?.chatId || null, taskId: task.id, title: task.title });
+    this._recordEvent(EVENT_TYPES.TASK_STARTED, workflow.id, { taskId: task.id, title: task.title });
 
     // Structured dependency context: each upstream result is wrapped in a
     // labeled block with a head/tail-clipped summary so a 100KB result from
@@ -524,6 +564,12 @@ class WorkflowEngine extends EventEmitter {
         taskId: task.id,
         title: task.title
       });
+      this._recordEvent(EVENT_TYPES.TASK_COMPLETED, workflow.id, {
+        taskId: task.id,
+        title: task.title,
+        iterations: task.iterations,
+        llm: task.llm,
+      });
     } catch (error) {
       task.status = TASK_STATUS.FAILED;
       task.error = error.message;
@@ -539,6 +585,12 @@ class WorkflowEngine extends EventEmitter {
         title: task.title,
         error: error.message,
         timedOut: error.code === 'TASK_TIMEOUT'
+      });
+      this._recordEvent(EVENT_TYPES.TASK_FAILED, workflow.id, {
+        taskId: task.id,
+        title: task.title,
+        error: error.message,
+        timedOut: error.code === 'TASK_TIMEOUT',
       });
     } finally {
       if (timeoutHandle) clearTimeout(timeoutHandle);

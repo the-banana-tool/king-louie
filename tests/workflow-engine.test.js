@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { WorkflowEngine, WORKFLOW_STATUS, TASK_STATUS } = require('../src/workflows/workflow-engine');
+const { createInMemoryEventLedger, EVENT_TYPES } = require('../src/events/event-ledger');
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -404,6 +405,129 @@ describe('WorkflowEngine', () => {
       await engine.run(wf.id);
       assert.match(messages[0], /Pre-approved actions/);
       assert.match(messages[0], /run-tests/);
+    });
+  });
+
+  describe('event ledger integration', () => {
+    let ledgerEngine;
+    let ledger;
+
+    beforeEach(async () => {
+      ledger = createInMemoryEventLedger();
+      ledgerEngine = new WorkflowEngine({
+        storageDir: tmpDir,
+        agentExecutorAdapter: makeAdapter(),
+        getAgent: (id) => id === 'main' ? fakeAgent : null,
+        maxConcurrentTasks: 2,
+        eventLedger: ledger,
+      });
+      await ledgerEngine.initialize();
+    });
+
+    it('records workflow lifecycle events', async () => {
+      const wf = await ledgerEngine.create(makeTaskGraph());
+      await ledgerEngine.run(wf.id);
+
+      const replay = await ledger.replay(wf.id);
+      assert.strictEqual(replay.complete, true);
+      const types = replay.events.map((e) => e.type);
+      assert.ok(types.includes(EVENT_TYPES.WORKFLOW_CREATED));
+      assert.ok(types.includes(EVENT_TYPES.WORKFLOW_STARTED));
+      assert.ok(types.includes(EVENT_TYPES.WORKFLOW_COMPLETED));
+    });
+
+    it('records task lifecycle events', async () => {
+      const wf = await ledgerEngine.create(makeTaskGraph());
+      await ledgerEngine.run(wf.id);
+
+      const replay = await ledger.replay(wf.id);
+      const taskEvents = replay.events.filter((e) => e.taskId);
+      assert.ok(taskEvents.length >= 4); // 2 started + 2 completed
+      assert.ok(taskEvents.some((e) => e.type === EVENT_TYPES.TASK_STARTED && e.taskId === 't1'));
+      assert.ok(taskEvents.some((e) => e.type === EVENT_TYPES.TASK_COMPLETED && e.taskId === 't2'));
+    });
+
+    it('records task failure events', async () => {
+      ledgerEngine.agentExecutorAdapter = {
+        execute: async () => { throw new Error('boom'); },
+      };
+      const graph = makeTaskGraph({
+        tasks: [{ id: 't1', title: 'Failing', description: 'Will fail', agentId: 'main', dependsOn: [] }],
+      });
+      const wf = await ledgerEngine.create(graph);
+      await ledgerEngine.run(wf.id);
+
+      const replay = await ledger.replay(wf.id);
+      const failEvent = replay.events.find((e) => e.type === EVENT_TYPES.TASK_FAILED);
+      assert.ok(failEvent);
+      assert.strictEqual(failEvent.payload.error, 'boom');
+    });
+
+    it('records cancel event', async () => {
+      const wf = await ledgerEngine.create(makeTaskGraph());
+      ledgerEngine.cancel(wf.id);
+
+      const replay = await ledger.replay(wf.id);
+      assert.ok(replay.events.some((e) => e.type === EVENT_TYPES.WORKFLOW_CANCELLED));
+    });
+
+    it('cleans up ledger on workflow delete', async () => {
+      const wf = await ledgerEngine.create(makeTaskGraph());
+      await ledgerEngine.delete(wf.id);
+
+      const replay = await ledger.replay(wf.id);
+      assert.strictEqual(replay.events.length, 0);
+    });
+
+    it('getEventLog returns full replay', async () => {
+      const wf = await ledgerEngine.create(makeTaskGraph());
+      await ledgerEngine.run(wf.id);
+
+      const log = await ledgerEngine.getEventLog(wf.id);
+      assert.strictEqual(log.complete, true);
+      assert.ok(log.events.length > 0);
+    });
+
+    it('getEventLog returns empty when no ledger configured', async () => {
+      const plainEngine = new WorkflowEngine({
+        storageDir: tmpDir,
+        agentExecutorAdapter: makeAdapter(),
+        getAgent: (id) => id === 'main' ? fakeAgent : null,
+      });
+      await plainEngine.initialize();
+      const wf = await plainEngine.create(makeTaskGraph());
+      const log = await plainEngine.getEventLog(wf.id);
+      assert.strictEqual(log.complete, false);
+      assert.strictEqual(log.events.length, 0);
+    });
+
+    it('workflow still completes if ledger append fails', async () => {
+      const brokenLedger = {
+        append: async () => { throw new Error('disk full'); },
+        replay: async () => ({ complete: false, events: [] }),
+        removeWorkflow: async () => {},
+      };
+      const brokenEngine = new WorkflowEngine({
+        storageDir: tmpDir,
+        agentExecutorAdapter: makeAdapter(),
+        getAgent: (id) => id === 'main' ? fakeAgent : null,
+        eventLedger: brokenLedger,
+      });
+      await brokenEngine.initialize();
+      const wf = await brokenEngine.create(makeTaskGraph());
+      await brokenEngine.run(wf.id);
+      assert.strictEqual(wf.status, WORKFLOW_STATUS.COMPLETED);
+    });
+
+    it('events have correct chronological order', async () => {
+      const wf = await ledgerEngine.create(makeTaskGraph());
+      await ledgerEngine.run(wf.id);
+
+      const replay = await ledger.replay(wf.id);
+      for (let i = 1; i < replay.events.length; i++) {
+        assert.ok(replay.events[i].seq > replay.events[i - 1].seq);
+        assert.ok(replay.events[i].at >= replay.events[i - 1].at);
+      }
     });
   });
 
