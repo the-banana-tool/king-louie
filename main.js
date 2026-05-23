@@ -211,6 +211,10 @@ const DEFAULT_SETTINGS = {
     brave: { apiKey: '' },
     tavily: { apiKey: '' }
   },
+  imageGeneration: {
+    defaultProvider: 'openai',
+    fal: { apiKey: '' }
+  },
   channels: {
     telegram: {
       requireMention: false
@@ -291,6 +295,14 @@ const mergeSettings = (settings = {}) => {
       tavily: {
         ...(DEFAULT_SETTINGS.webSearch?.tavily || {}),
         ...(source.webSearch?.tavily || {})
+      }
+    },
+    imageGeneration: {
+      ...(DEFAULT_SETTINGS.imageGeneration || {}),
+      ...(source.imageGeneration || {}),
+      fal: {
+        ...(DEFAULT_SETTINGS.imageGeneration?.fal || {}),
+        ...(source.imageGeneration?.fal || {})
       }
     },
     channels: {

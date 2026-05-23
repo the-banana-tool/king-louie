@@ -522,6 +522,19 @@ contextBridge.exposeInMainWorld(
         validateObject(payload, 'payload');
         return ipcRenderer.invoke('settings:testWebSearchKey', payload);
       },
+      // Image Generation
+      saveImageGenKey: (payload) => {
+        validateObject(payload, 'payload');
+        return ipcRenderer.invoke('settings:saveImageGenKey', payload);
+      },
+      testImageGenKey: (payload) => {
+        validateObject(payload, 'payload');
+        return ipcRenderer.invoke('settings:testImageGenKey', payload);
+      },
+      setImageGenDefault: (payload) => {
+        validateObject(payload, 'payload');
+        return ipcRenderer.invoke('settings:setImageGenDefault', payload);
+      },
       // Anthropic OAuth
       anthropicOAuthStatus: () => ipcRenderer.invoke('settings:anthropicOAuthStatus'),
       anthropicOAuthStart: () => ipcRenderer.invoke('settings:anthropicOAuthStart'),

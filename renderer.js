@@ -289,6 +289,13 @@ const dom = {
   clearWebsearchTavilyBtn: document.getElementById('clear-websearch-tavily-btn'),
   websearchBraveStatus: document.getElementById('websearch-brave-status'),
   websearchTavilyStatus: document.getElementById('websearch-tavily-status'),
+  imagegenDefaultSelect: document.getElementById('imagegen-default-select'),
+  imagegenDefaultStatus: document.getElementById('imagegen-default-status'),
+  imagegenFalKeyInput: document.getElementById('imagegen-fal-key-input'),
+  saveImagegenFalBtn: document.getElementById('save-imagegen-fal-btn'),
+  testImagegenFalBtn: document.getElementById('test-imagegen-fal-btn'),
+  clearImagegenFalBtn: document.getElementById('clear-imagegen-fal-btn'),
+  imagegenFalStatus: document.getElementById('imagegen-fal-status'),
   workingDirBtn: document.getElementById('working-dir-btn'),
   workingDirLabel: document.getElementById('working-dir-label'),
   exportChatBtn: document.getElementById('export-chat-btn'),
@@ -913,6 +920,7 @@ const TOOL_ICONS = {
   'Provider changed': 'fas fa-exchange-alt',
   'Model changed':  'fas fa-exchange-alt',
   'Sandbox mode':   'fas fa-shield-halved',
+  ImageGenerate:    'fas fa-image',
 };
 
 const TOOL_ICON_DEFAULT = 'fas fa-wrench';
@@ -964,6 +972,7 @@ function getToolSummary(toolName, params) {
     case 'Provider changed': return `Provider: ${p.from || '?'} → ${p.to || '?'}`;
     case 'Model changed':    return `Model (${p.provider || '?'}): ${p.from || '(default)'} → ${p.to || '(default)'}`;
     case 'Status':           return p.message || 'Status update';
+    case 'ImageGenerate':    return `Generate: "${(p.prompt || '').slice(0, 50)}${(p.prompt || '').length > 50 ? '…' : ''}"`;
     default:          return toolName;
   }
 }
@@ -1194,6 +1203,26 @@ function addToolEventCompact(toolName, payload, variant = '', isResult = false) 
         infoDiv.textContent = `${pageTitle} — ${pageUrl}`;
         payloadDiv.appendChild(infoDiv);
       }
+    } else if (isResult && toolName === 'ImageGenerate' && payload && payload.ok && Array.isArray(payload.images)) {
+      const grid = document.createElement('div');
+      grid.style.cssText = 'display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0;';
+      for (const imgInfo of payload.images) {
+        const imgContainer = document.createElement('div');
+        imgContainer.style.cssText = 'max-width: 100%; overflow: hidden;';
+        const img = document.createElement('img');
+        img.src = 'file://' + imgInfo.path.replace(/\\/g, '/');
+        img.style.cssText = 'max-width: 100%; max-height: 512px; height: auto; border-radius: 6px; border: 1px solid var(--border-color); cursor: pointer;';
+        img.title = imgInfo.revisedPrompt || imgInfo.fileName || 'Generated image — click to open';
+        img.addEventListener('click', () => { window.open(img.src, '_blank'); });
+        imgContainer.appendChild(img);
+        grid.appendChild(imgContainer);
+      }
+      payloadDiv.appendChild(grid);
+
+      const infoDiv = document.createElement('div');
+      infoDiv.style.cssText = 'margin-top: 8px; font-size: 0.9em; color: var(--text-secondary);';
+      infoDiv.textContent = payload.message || `${payload.count} image(s) generated`;
+      payloadDiv.appendChild(infoDiv);
     } else if (isResult && payload?.diff && (toolName === 'Edit' || toolName === 'MultiEdit' || toolName === 'Write')) {
       // Render structured diff for file edit/write results
       const diffEl = renderDiffBlock(payload.diff);
@@ -1222,9 +1251,10 @@ function addToolEventCompact(toolName, payload, variant = '', isResult = false) 
 
     messageContent.appendChild(payloadDiv);
 
-    // Auto-expand screenshots so the image is visible immediately
+    // Auto-expand screenshots and generated images so they are visible immediately
     const isScreenshot = isResult && toolName === 'Browser' && payload && payload.savedTo;
-    if (isScreenshot) {
+    const isGeneratedImage = isResult && toolName === 'ImageGenerate' && payload && payload.ok && Array.isArray(payload.images);
+    if (isScreenshot || isGeneratedImage) {
       payloadDiv.hidden = false;
       row.classList.add('expanded');
     }
@@ -2862,6 +2892,16 @@ function renderSettings() {
   }
   if (dom.websearchTavilyStatus) {
     dom.websearchTavilyStatus.textContent = webSearch.tavily?.apiKey
+      ? 'Key configured.'
+      : 'Not configured.';
+  }
+
+  const imageGen = appState.settings.imageGeneration || {};
+  if (dom.imagegenDefaultSelect) {
+    dom.imagegenDefaultSelect.value = imageGen.defaultProvider || 'openai';
+  }
+  if (dom.imagegenFalStatus) {
+    dom.imagegenFalStatus.textContent = imageGen.fal?.apiKey
       ? 'Key configured.'
       : 'Not configured.';
   }
@@ -7804,6 +7844,98 @@ if (dom.clearWebsearchTavilyBtn) {
       if (dom.websearchTavilyStatus) {
         dom.websearchTavilyStatus.textContent = err.message || 'Error.';
         dom.websearchTavilyStatus.classList.add('error');
+      }
+    }
+  });
+}
+
+// ── Image Generation settings ──
+
+if (dom.imagegenDefaultSelect) {
+  dom.imagegenDefaultSelect.addEventListener('change', async () => {
+    try {
+      unwrapIpcResult(
+        await window.electron.settings.setImageGenDefault({ provider: dom.imagegenDefaultSelect.value }),
+        'Failed to set default provider.'
+      );
+      if (dom.imagegenDefaultStatus) {
+        dom.imagegenDefaultStatus.textContent = `Default set to ${dom.imagegenDefaultSelect.value}.`;
+        dom.imagegenDefaultStatus.classList.remove('error');
+      }
+    } catch (err) {
+      if (dom.imagegenDefaultStatus) {
+        dom.imagegenDefaultStatus.textContent = err.message || 'Error.';
+        dom.imagegenDefaultStatus.classList.add('error');
+      }
+    }
+  });
+}
+
+if (dom.saveImagegenFalBtn) {
+  dom.saveImagegenFalBtn.addEventListener('click', async () => {
+    const apiKey = dom.imagegenFalKeyInput?.value?.trim();
+    if (!apiKey) return;
+    try {
+      unwrapIpcResult(
+        await window.electron.settings.saveImageGenKey({ provider: 'fal', apiKey }),
+        'Failed to save Fal key.'
+      );
+      dom.imagegenFalKeyInput.value = '';
+      if (dom.imagegenFalStatus) {
+        dom.imagegenFalStatus.textContent = 'Key saved.';
+        dom.imagegenFalStatus.classList.remove('error');
+      }
+    } catch (err) {
+      if (dom.imagegenFalStatus) {
+        dom.imagegenFalStatus.textContent = err.message || 'Error saving key.';
+        dom.imagegenFalStatus.classList.add('error');
+      }
+    }
+  });
+}
+
+if (dom.testImagegenFalBtn) {
+  dom.testImagegenFalBtn.addEventListener('click', async () => {
+    dom.testImagegenFalBtn.disabled = true;
+    if (dom.imagegenFalStatus) {
+      dom.imagegenFalStatus.textContent = 'Testing Fal...';
+      dom.imagegenFalStatus.classList.remove('error');
+    }
+    try {
+      const result = unwrapIpcResult(
+        await window.electron.settings.testImageGenKey({ provider: 'fal' }),
+        'Failed to test Fal.'
+      );
+      if (dom.imagegenFalStatus) {
+        dom.imagegenFalStatus.textContent = result.message || 'Connection successful.';
+        dom.imagegenFalStatus.classList.remove('error');
+      }
+    } catch (err) {
+      if (dom.imagegenFalStatus) {
+        dom.imagegenFalStatus.textContent = err.message || 'Test failed.';
+        dom.imagegenFalStatus.classList.add('error');
+      }
+    } finally {
+      dom.testImagegenFalBtn.disabled = false;
+    }
+  });
+}
+
+if (dom.clearImagegenFalBtn) {
+  dom.clearImagegenFalBtn.addEventListener('click', async () => {
+    try {
+      unwrapIpcResult(
+        await window.electron.settings.saveImageGenKey({ provider: 'fal', clear: true }),
+        'Failed to clear Fal key.'
+      );
+      if (dom.imagegenFalStatus) {
+        dom.imagegenFalStatus.textContent = 'Key cleared.';
+        dom.imagegenFalStatus.classList.remove('error');
+      }
+    } catch (err) {
+      if (dom.imagegenFalStatus) {
+        dom.imagegenFalStatus.textContent = err.message || 'Error.';
+        dom.imagegenFalStatus.classList.add('error');
       }
     }
   });

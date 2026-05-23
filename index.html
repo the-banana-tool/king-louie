@@ -228,6 +228,34 @@
               <span id="websearch-tavily-status" class="provider-message">Not configured.</span>
             </div>
           </section>
+
+          <section class="template-variables-card">
+            <h3>Image Generation</h3>
+            <p>Configure image generation providers. OpenAI (DALL-E) uses your existing OpenAI API key. Fal (Flux) requires a separate key.</p>
+            <div class="template-variables-grid">
+              <label for="imagegen-default-select">Default Provider</label>
+              <select id="imagegen-default-select" class="provider-input">
+                <option value="openai">OpenAI (DALL-E)</option>
+                <option value="fal">Fal (Flux)</option>
+              </select>
+            </div>
+            <span id="imagegen-default-status" class="provider-message"></span>
+          </section>
+
+          <section class="template-variables-card">
+            <h3>Fal (Flux)</h3>
+            <p>API key for the Fal image generation provider (Flux models).</p>
+            <div class="template-variables-grid">
+              <label for="imagegen-fal-key-input">Fal API Key</label>
+              <input id="imagegen-fal-key-input" class="provider-input" type="password" placeholder="Fal API key">
+            </div>
+            <div class="template-variables-actions">
+              <button id="save-imagegen-fal-btn" type="button" class="btn btn-primary">Save Key</button>
+              <button id="test-imagegen-fal-btn" type="button" class="btn">Test Connection</button>
+              <button id="clear-imagegen-fal-btn" type="button" class="btn btn-danger">Clear Key</button>
+              <span id="imagegen-fal-status" class="provider-message">Not configured.</span>
+            </div>
+          </section>
         </div>
 
         <!-- Tab: Inference -->

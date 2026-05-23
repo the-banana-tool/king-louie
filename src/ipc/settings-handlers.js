@@ -88,6 +88,7 @@ function registerSettingsHandlers(ipcMain, context = {}) {
         status: status.telegram || null
       },
       webSearch: settings.webSearch,
+      imageGeneration: settings.imageGeneration,
       allowedDirectories: settings.allowedDirectories || [],
       anthropicOAuth: anthropicOAuth ? anthropicOAuth.getStatus() : { connected: false }
     };
@@ -163,6 +164,83 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     } catch (err) {
       return { ok: false, error: err.message || `${provider} test failed.` };
     }
+  }));
+
+  ipcMain.handle('settings:saveImageGenKey', wrapHandler('settings:saveImageGenKey', async (_event, { provider, apiKey, clear } = {}) => {
+    if (!['fal'].includes(provider)) {
+      return { ok: false, error: 'Unknown image generation provider.' };
+    }
+
+    const settings = getSettings();
+    if (!settings.imageGeneration) settings.imageGeneration = {};
+    if (!settings.imageGeneration[provider]) settings.imageGeneration[provider] = {};
+
+    if (clear) {
+      settings.imageGeneration[provider].apiKey = '';
+      setSettings(settings);
+      return { ok: true, hasKey: false };
+    }
+
+    const key = String(apiKey || '').trim();
+    if (!key) {
+      return { ok: false, error: `${provider} API key is required.` };
+    }
+
+    if (!safeStorage.isEncryptionAvailable()) {
+      return { ok: false, error: 'Secure storage is not available on this system.' };
+    }
+
+    settings.imageGeneration[provider].apiKey = encryptToken(key);
+    setSettings(settings);
+    return { ok: true, hasKey: true };
+  }));
+
+  ipcMain.handle('settings:testImageGenKey', wrapHandler('settings:testImageGenKey', async (_event, { provider } = {}) => {
+    if (!['fal'].includes(provider)) {
+      return { ok: false, error: 'Unknown image generation provider.' };
+    }
+
+    const settings = getSettings();
+    const encrypted = settings.imageGeneration?.[provider]?.apiKey;
+    if (!encrypted) {
+      return { ok: false, error: `No ${provider} API key configured.` };
+    }
+
+    const apiKey = decryptToken(encrypted);
+    if (!apiKey) {
+      return { ok: false, error: `Failed to decrypt ${provider} API key.` };
+    }
+
+    try {
+      if (provider === 'fal') {
+        const res = await fetch('https://fal.run/fal-ai/flux/dev', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Key ${apiKey}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ prompt: 'test', num_images: 1, image_size: { width: 64, height: 64 } })
+        });
+        if (res.status === 401 || res.status === 403) {
+          throw new Error(`Fal API authentication failed (${res.status})`);
+        }
+        return { ok: true, message: 'Fal API key is valid.' };
+      }
+      return { ok: false, error: 'Unknown provider.' };
+    } catch (err) {
+      return { ok: false, error: err.message || `${provider} test failed.` };
+    }
+  }));
+
+  ipcMain.handle('settings:setImageGenDefault', wrapHandler('settings:setImageGenDefault', async (_event, { provider } = {}) => {
+    if (!['openai', 'fal'].includes(provider)) {
+      return { ok: false, error: 'Unknown image generation provider.' };
+    }
+    const settings = getSettings();
+    if (!settings.imageGeneration) settings.imageGeneration = {};
+    settings.imageGeneration.defaultProvider = provider;
+    setSettings(settings);
+    return { ok: true, defaultProvider: provider };
   }));
 
   ipcMain.handle('settings:saveTemplateVariables', wrapHandler('settings:saveTemplateVariables', async (_event, { templateVariables } = {}) => {
