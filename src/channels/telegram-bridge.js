@@ -8,6 +8,8 @@ const {
 const { ChannelPlugin } = require('./channel-plugin');
 const { shouldRespond } = require('./mention-gating');
 const { skillRegistry } = require('../skills');
+const { createLogger } = require('../logging');
+const log = createLogger('telegram-bridge');
 
 class TelegramBridge extends ChannelPlugin {
   constructor(options = {}) {
@@ -94,7 +96,7 @@ class TelegramBridge extends ChannelPlugin {
     this.running = true;
     this.gateway.on('agent:response', this.boundAgentResponse);
     this.pollLoop().catch((error) => {
-      console.error('[telegram-bridge] polling failed:', error.message);
+      log.error(`polling failed: ${error.message}`);
     });
   }
 
@@ -196,7 +198,7 @@ class TelegramBridge extends ChannelPlugin {
 
         const aborted = error?.name === 'AbortError';
         if (!aborted) {
-          console.error('[telegram-bridge] update handling error:', error.message);
+          log.error(`update handling error: ${error.message}`);
           await new Promise((resolve) => setTimeout(resolve, 1200));
         }
       }
@@ -318,7 +320,7 @@ class TelegramBridge extends ChannelPlugin {
       try {
         await handler(inboundMessage);
       } catch (error) {
-        console.warn('[telegram-bridge] inbound handler failed:', error.message);
+        log.warn(`inbound handler failed: ${error.message}`);
       }
     }
   }
@@ -423,7 +425,7 @@ class TelegramBridge extends ChannelPlugin {
             if (!result.continueWithAgent) return; // Skip AI
           }
         } catch (error) {
-          console.error('[telegram-bridge] Pinned skill error:', error);
+          log.error(`Pinned skill error: ${error.message}`);
           await this.sendMessage(chatId, `❌ Pinned skill error: ${error.message}`);
           return;
         }
@@ -523,7 +525,7 @@ class TelegramBridge extends ChannelPlugin {
           await this.sendMessage(chatId, `❌ Error: ${result.error || 'Unknown error'}`);
         }
       } catch (error) {
-        console.error(`[telegram-bridge] Skill command error:`, error);
+        log.error(`Skill command error: ${error.message}`);
         await this.sendMessage(chatId, `❌ Error executing command: ${error.message}`);
       }
       return;
@@ -754,7 +756,7 @@ class TelegramBridge extends ChannelPlugin {
           }
         }
       } catch (error) {
-        console.warn('[telegram-bridge] Unable to send voice response:', error.message);
+        log.warn(`Unable to send voice response: ${error.message}`);
       }
     }
 

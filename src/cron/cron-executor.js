@@ -1,3 +1,7 @@
+const { createLogger } = require('../logging');
+
+const log = createLogger('cron-executor');
+
 class CronExecutor {
   constructor(agentExecutor, sessionManager, gateway) {
     this.agentExecutor = agentExecutor;
@@ -46,10 +50,10 @@ class CronExecutor {
           if (channel) {
             await channel.send(job.delivery.target, result.content);
           } else {
-             console.warn(`[cron-executor] delivery channel not found: ${job.delivery.channel}`);
+             log.warn(`delivery channel not found: ${job.delivery.channel}`);
           }
         } else {
-             console.warn(`[cron-executor] gateway channelRegistry not available`);
+             log.warn('gateway channelRegistry not available');
         }
       }
 
@@ -58,7 +62,7 @@ class CronExecutor {
         content: result.content
       };
     } catch (err) {
-      console.error(`[cron-executor] execution failed for job ${job.id}:`, err);
+      log.error(`execution failed for job ${job.id}: ${err.message}`);
       return {
         ok: false,
         error: err.message

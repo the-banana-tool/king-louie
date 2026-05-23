@@ -1,5 +1,7 @@
 const { Skill } = require('./skill-interface');
 const ResolutionChain = require('./resolution-chain');
+const { createLogger } = require('../logging');
+const log = createLogger('skill-registry');
 
 /**
  * Registry for managing loaded skills
@@ -40,7 +42,7 @@ class SkillRegistry {
     }
 
     this.skills.set(metadata.id, skill);
-    console.log(`[skill-registry] Registered skill: ${metadata.id} (${metadata.name})`);
+    log.info(`Registered skill: ${metadata.id} (${metadata.name})`);
   }
 
   /**
@@ -215,7 +217,7 @@ class SkillRegistry {
 
     this.skills.delete(skillId);
     this.lastResolutionBySkill.delete(skillId);
-    console.log(`[skill-registry] Unregistered skill: ${skillId}`);
+    log.info(`Unregistered skill: ${skillId}`);
     return true;
   }
 

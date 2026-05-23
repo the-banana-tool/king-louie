@@ -1,5 +1,7 @@
 const http = require('http');
 const { URL } = require('url');
+const { createLogger } = require('../logging');
+const log = createLogger('webhook-server');
 
 class WebhookServer {
   constructor(gatewayServer, webhookHandler) {
@@ -35,7 +37,7 @@ class WebhookServer {
     const addr = this.httpServer.address();
     if (addr) this._configuredPort = addr.port;
 
-    console.log(`[webhook-server] HTTP server listening on http://127.0.0.1:${this.port}`);
+    log.info(`HTTP server listening on http://127.0.0.1:${this.port}`);
   }
 
   async stop() {
@@ -83,7 +85,7 @@ class WebhookServer {
       res.end(JSON.stringify({ error: 'Not found' }));
 
     } catch (error) {
-      console.error('[webhook-server] Request handling error:', error);
+      log.error(`Request handling error: ${error.message}`);
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Internal server error' }));
     }
@@ -111,7 +113,7 @@ class WebhookServer {
       res.end(JSON.stringify(result));
 
     } catch (error) {
-      console.error(`[webhook-server] Webhook ${webhookId} processing error:`, error.message);
+      log.error(`Webhook ${webhookId} processing error: ${error.message}`);
       
       // Determine appropriate error code
       let statusCode = 500;

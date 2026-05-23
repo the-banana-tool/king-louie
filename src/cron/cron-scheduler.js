@@ -1,4 +1,7 @@
 const cronParser = require('cron-parser');
+const { createLogger } = require('../logging');
+
+const log = createLogger('cron-scheduler');
 
 class CronScheduler {
   constructor(store, executor, options = {}) {
@@ -76,7 +79,7 @@ class CronScheduler {
     const jobsToRun = dueJobs.slice(0, Math.max(0, this.maxConcurrentJobs - this.runningJobs.size));
 
     for (const job of jobsToRun) {
-      this.runNow(job.id).catch(err => console.error(`[cron-scheduler] tick run failed for ${job.id}:`, err));
+      this.runNow(job.id).catch(err => log.error(`tick run failed for ${job.id}: ${err.message}`));
     }
   }
 
@@ -117,7 +120,7 @@ class CronScheduler {
         patch.enabled = false;
     } else if (newState.consecutiveErrors >= 5) {
         patch.enabled = false;
-        console.warn(`[cron-scheduler] disabled job ${id} after 5 consecutive errors.`);
+        log.warn(`disabled job ${id} after 5 consecutive errors`);
     }
 
     await this.store.update(id, patch);

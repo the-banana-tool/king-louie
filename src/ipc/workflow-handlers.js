@@ -2,6 +2,9 @@ const { wrapHandler } = require('./wrap-handler');
 const constants = require('./constants');
 const { validateTaskGraph, TaskGraphValidationError } = require('../workflows/task-graph-validator');
 const { recoverPlanFromMessages } = require('../workflows/plan-recovery');
+const { createLogger } = require('../logging');
+
+const log = createLogger('workflow-handlers');
 
 function registerWorkflowHandlers(ipcMain, context) {
   const mergePlanOptions = (payload) => {
@@ -107,7 +110,7 @@ function registerWorkflowHandlers(ipcMain, context) {
       if (!engine) throw new Error('Workflow engine not available');
       // Run in background by default
       engine.run(payload.id).catch((err) => {
-        console.error(`[workflow-handlers] Workflow ${payload.id} failed:`, err.message);
+        log.error(`Workflow ${payload.id} failed: ${err.message}`);
       });
       return { ok: true, id: payload.id };
     })

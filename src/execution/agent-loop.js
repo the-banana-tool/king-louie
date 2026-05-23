@@ -2,6 +2,8 @@ const path = require('path');
 const VectorStore = require('../memory/vector-store');
 const ResultPersistence = require('./result-persistence');
 const APICompaction = require('../context/api-compaction');
+const { createLogger } = require('../logging');
+const log = createLogger('agent-loop');
 
 class AgentLoop {
   constructor(provider, executor, options = {}) {
@@ -217,10 +219,10 @@ class AgentLoop {
           // Try OpenAI format as fallback
           const openaiStats = this.apiCompaction.compactOpenAIFormat(conversationHistory);
           if (openaiStats.cleared > 0) {
-            console.log(`[agent-loop] API compaction: cleared ${openaiStats.cleared} tool results (~${openaiStats.freedEstimate} tokens freed)`);
+            log.info(`API compaction: cleared ${openaiStats.cleared} tool results (~${openaiStats.freedEstimate} tokens freed)`);
           }
         } else {
-          console.log(`[agent-loop] API compaction: cleared ${stats.cleared} tool results (~${stats.freedEstimate} tokens freed)`);
+          log.info(`API compaction: cleared ${stats.cleared} tool results (~${stats.freedEstimate} tokens freed)`);
         }
       } else if (iterations > 1 && this.compactEvery > 0 && (iterations - 1) % this.compactEvery === 0) {
         await this._compactToolResults(conversationHistory);
@@ -278,7 +280,7 @@ class AgentLoop {
             throw wrapped;
           }
           const waitMs = 1000 * Math.pow(2, attempt - 1); // 1s, 2s, 4s, 8s
-          console.warn(`[agent-loop] Transient provider error (attempt ${attempt}/${maxAttempts}): ${err.message}. Retrying in ${waitMs}ms…`);
+          log.warn(`Transient provider error (attempt ${attempt}/${maxAttempts}): ${err.message}. Retrying in ${waitMs}ms…`);
           await new Promise((resolve) => setTimeout(resolve, waitMs));
         }
       }
@@ -612,7 +614,7 @@ class AgentLoop {
           await this._semanticCompact(history, oldEntries, userQuery);
           return;
         } catch (err) {
-          console.warn('[agent-loop] Semantic compaction failed, using recency:', err.message);
+          log.warn(`Semantic compaction failed, using recency: ${err.message}`);
         }
       }
     }

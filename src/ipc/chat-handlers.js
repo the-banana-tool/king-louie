@@ -2,6 +2,11 @@ const { wrapHandler } = require('./wrap-handler');
 const IPC = require('./constants');
 const ImageHandler = require('../media/image-handler');
 const Advisor = require('../execution/advisor');
+const { createLogger } = require('../logging');
+
+const log = createLogger('chat');
+const advisorLog = createLogger('advisor');
+const voiceLog = createLogger('voice');
 
 function registerChatHandlers(ipcMain, context = {}) {
   const {
@@ -71,7 +76,7 @@ function registerChatHandlers(ipcMain, context = {}) {
         sender.send('chat:updated', { chats: updated });
       }
     } catch (err) {
-      console.warn('[auto-name] Failed to generate chat title:', err.message);
+      log.warn(`Failed to generate chat title: ${err.message}`);
     }
   }
 
@@ -339,9 +344,9 @@ function registerChatHandlers(ipcMain, context = {}) {
         });
         const origTokens = Math.ceil(allContentMessages.reduce((s, m) => s + (m.text?.length || 0), 0) / 4);
         const compTokens = Math.ceil(chatMessages.reduce((s, m) => s + (m.text?.length || 0), 0) / 4);
-        console.log(`[chat] Compacted ${allContentMessages.length} messages → ${chatMessages.length} messages (~${origTokens} → ~${compTokens} tokens, ${Math.round((1 - compTokens / origTokens) * 100)}% reduction)`);
+        log.info(`Compacted ${allContentMessages.length} messages → ${chatMessages.length} messages (~${origTokens} → ~${compTokens} tokens, ${Math.round((1 - compTokens / origTokens) * 100)}% reduction)`);
       } catch (err) {
-        console.warn('[chat] Conversation compaction failed, using full history:', err.message);
+        log.warn(`Conversation compaction failed, using full history: ${err.message}`);
       }
     }
 
@@ -401,7 +406,7 @@ function registerChatHandlers(ipcMain, context = {}) {
             options.systemPrompt += `\n\nAdditional tools available on request via the RequestTools tool: ${availableNames.join(', ')}`;
           }
         } catch (err) {
-          console.warn('[chat] Context assembly failed, falling back to full context:', err.message);
+          log.warn(`Context assembly failed, falling back to full context: ${err.message}`);
         }
       }
 
@@ -509,7 +514,7 @@ function registerChatHandlers(ipcMain, context = {}) {
                 });
               }
             } catch (err) {
-              console.warn('[advisor] Review failed:', err.message);
+              advisorLog.warn(`Review failed: ${err.message}`);
             }
           }
         } else {
@@ -567,7 +572,7 @@ function registerChatHandlers(ipcMain, context = {}) {
       const voiceSettings = getVoiceSettings();
       if (voiceSettings.enabled && voiceSettings.speakChatResponses) {
         speakSummaryText(fullResponse || '(No response)', voiceSettings).catch((error) => {
-          console.warn('[voice] Failed to speak chat response:', error.message);
+          voiceLog.warn(`Failed to speak chat response: ${error.message}`);
         });
       }
 

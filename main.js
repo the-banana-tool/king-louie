@@ -80,6 +80,15 @@ const { WorkflowEngine } = require('./src/workflows/workflow-engine');
 const PlannerExecutor = require('./src/workflows/planner-executor');
 const { MCPManager, createVaultEnvResolver } = require('./src/mcp');
 const { BackgroundTaskManager } = require('./src/tasks/background-task-manager');
+const { createLogger } = require('./src/logging');
+
+const log = createLogger('main');
+const memoryLog = createLogger('memory');
+const hooksLog = createLogger('hooks');
+const systemPromptLog = createLogger('system-prompt');
+const contextAssemblerLog = createLogger('context-assembler');
+const mcpLog = createLogger('mcp');
+const skillsLog = createLogger('skills');
 
 let mainWindow;
 let meshContext;
@@ -431,7 +440,7 @@ const buildMemoryContextSection = async (query = '', options = {}) => {
       limit: options.limit || 6
     });
   } catch (error) {
-    console.warn('[memory] Failed building memory context:', error.message);
+    memoryLog.warn(`Failed building memory context: ${error.message}`);
     return '';
   }
 };
@@ -790,7 +799,7 @@ const runHookEvent = async (eventName, context = {}) => {
   try {
     return await hookExecutor.run(eventName, context);
   } catch (error) {
-    console.warn(`[hooks] ${eventName} hook execution failed:`, error.message);
+    hooksLog.warn(`${eventName} hook execution failed: ${error.message}`);
     return null;
   }
 };
@@ -906,7 +915,7 @@ const buildRuntimeSystemPrompt = (runtimeEnvironment = {}) => {
       }
       sections.push('When the user explicitly asks you to use a specific skill, prefer the Skill tool over built-in tools like Git or Bash.');
     }
-  } catch (err) { console.debug('[system-prompt] skills unavailable:', err.message); }
+  } catch (err) { systemPromptLog.debug(`skills unavailable: ${err.message}`); }
 
   return sections.join('\n');
 };
@@ -2328,13 +2337,13 @@ const initializeAgentInfrastructure = async () => {
   setCustomAppsStore(store);
   discoveredApps = getCachedDiscoveredApps();
   if (discoveredApps.length > 0) {
-    console.log(`[main] Loaded ${discoveredApps.length} cached app(s)`);
+    log.info(`Loaded ${discoveredApps.length} cached app(s)`);
   }
   discoverAllApps({ force: true }).then((apps) => {
     discoveredApps = apps;
-    console.log(`[main] Refreshed app discovery: ${apps.length} app(s)`);
+    log.info(`Refreshed app discovery: ${apps.length} app(s)`);
   }).catch((err) => {
-    console.warn('[main] App discovery failed:', err.message);
+    log.warn(`App discovery failed: ${err.message}`);
   });
 
   // Index tools and system prompt sections in the ContextAssembler (background, non-blocking)
@@ -2350,9 +2359,9 @@ const initializeAgentInfrastructure = async () => {
           skills
         });
         await contextAssembler.index(toolDefs, sections);
-        console.log(`[context-assembler] Indexed ${toolDefs.length} tools and ${sections.length} system sections`);
+        contextAssemblerLog.info(`Indexed ${toolDefs.length} tools and ${sections.length} system sections`);
       } catch (err) {
-        console.warn('[context-assembler] Indexing failed (will use full context fallback):', err.message);
+        contextAssemblerLog.warn(`Indexing failed (will use full context fallback): ${err.message}`);
       }
     })();
   }
@@ -2363,7 +2372,7 @@ const initializeAgentInfrastructure = async () => {
   const vaultEnvResolver = createVaultEnvResolver({
     vaultStore,
     decryptToken,
-    onMissing: (key) => console.warn(`[mcp] Vault key not found: "${key}" — env value left unresolved`)
+    onMissing: (key) => mcpLog.warn(`Vault key not found: "${key}" — env value left unresolved`)
   });
   mcpManager = new MCPManager({ toolRegistry, envResolver: vaultEnvResolver });
   const mcpServers = getSettings().mcpServers || {};
@@ -2372,10 +2381,10 @@ const initializeAgentInfrastructure = async () => {
       const connected = results.filter(r => r.status === 'connected');
       const failed = results.filter(r => r.status === 'failed');
       if (connected.length > 0) {
-        console.log(`[mcp] Connected to ${connected.length} server(s): ${connected.map(r => `${r.name} (${r.tools} tools)`).join(', ')}`);
+        mcpLog.info(`Connected to ${connected.length} server(s): ${connected.map(r => `${r.name} (${r.tools} tools)`).join(', ')}`);
       }
       if (failed.length > 0) {
-        console.warn(`[mcp] Failed to connect: ${failed.map(r => `${r.name}: ${r.error}`).join(', ')}`);
+        mcpLog.warn(`Failed to connect: ${failed.map(r => `${r.name}: ${r.error}`).join(', ')}`);
       }
 
       // Re-index context assembler after MCP tools are registered
@@ -2384,7 +2393,7 @@ const initializeAgentInfrastructure = async () => {
         contextAssembler.index(toolDefs).catch(() => {});
       }
     }).catch((err) => {
-      console.warn('[mcp] MCP initialization failed:', err.message);
+      mcpLog.warn(`MCP initialization failed: ${err.message}`);
     });
   }
 
@@ -2489,7 +2498,7 @@ const initializeAgentInfrastructure = async () => {
   webhookRegistry = new WebhookRegistry(store);
   webhookHandler = new WebhookHandler(webhookRegistry, sessionManager, agentExecutorAdapter);
   webhookServer = new WebhookServer(gatewayServer, webhookHandler);
-  webhookServer.start().catch(err => console.warn('[main] Webhook server start failed:', err.message));
+  webhookServer.start().catch(err => log.warn(`Webhook server start failed: ${err.message}`));
 
   // Initialize mesh networking (peer-to-peer communication between king-louie instances)
   try {
@@ -2503,8 +2512,8 @@ const initializeAgentInfrastructure = async () => {
       settings: getSettings()
     });
   } catch (err) {
-    console.warn('[main] Mesh initialization failed:', err.message);
-    console.warn('[main] Mesh initialization stack:', err.stack);
+    log.warn(`Mesh initialization failed: ${err.message}`);
+    log.warn(`Mesh initialization stack: ${err.stack}`);
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.executeJavaScript(
         `console.error('[main→renderer] Mesh initialization failed:', ${JSON.stringify(err.message)}, ${JSON.stringify(err.stack)})`
@@ -2605,7 +2614,7 @@ const initializeAgentInfrastructure = async () => {
           const token = getDecryptedProviderToken(providerType);
           return ProviderFactory.createProvider(providerType, token);
         } catch (error) {
-          console.warn('[skills] LLM provider not available:', error.message);
+          skillsLog.warn(`LLM provider not available: ${error.message}`);
           return null;
         }
       }
@@ -2616,7 +2625,7 @@ const initializeAgentInfrastructure = async () => {
     gatewayServer.start(),
     skillLoader.loadAll(),
   ]);
-  console.log(`[main] Loaded ${skillsLoaded} skill(s)`);
+  log.info(`Loaded ${skillsLoaded} skill(s)`);
 
   // Defer channel connections — don't block startup for network calls
   const deferChannels = async () => {
@@ -2638,7 +2647,7 @@ const initializeAgentInfrastructure = async () => {
         await startSlackChannel(slackAppToken, slackBotToken);
       }
     } catch (err) {
-      console.warn('[main] Deferred channel startup error:', err.message);
+      log.warn(`Deferred channel startup error: ${err.message}`);
     }
   };
 
@@ -2649,7 +2658,7 @@ const initializeAgentInfrastructure = async () => {
     source: 'main',
     startedAt: new Date().toISOString(),
     workingDirectory: process.cwd()
-  }).catch(err => console.warn('[main] SessionStart hook failed:', err.message));
+  }).catch(err => log.warn(`SessionStart hook failed: ${err.message}`));
 
   if (memoryManager) {
     memoryManager.runAging();
@@ -2940,25 +2949,25 @@ app.on('window-all-closed', function () {
       source: 'main',
       endedAt: new Date().toISOString(),
       workingDirectory: process.cwd()
-    }).catch((err) => console.warn('[main] SessionEnd hook failed:', err.message));
+    }).catch((err) => log.warn(`SessionEnd hook failed: ${err.message}`));
 
     if (mcpManager) {
-      mcpManager.disconnectAll().catch((err) => console.warn('[main] MCP shutdown failed:', err.message));
+      mcpManager.disconnectAll().catch((err) => log.warn(`MCP shutdown failed: ${err.message}`));
     }
     if (channelRegistry) {
-      channelRegistry.shutdownAll().catch((err) => console.warn('[main] Channel shutdown failed:', err.message));
+      channelRegistry.shutdownAll().catch((err) => log.warn(`Channel shutdown failed: ${err.message}`));
     } else {
-      if (telegramBridge) telegramBridge.stop().catch((err) => console.warn('[main] Telegram bridge stop failed:', err.message));
-      if (discordBridge) discordBridge.stop().catch((err) => console.warn('[main] Discord bridge stop failed:', err.message));
+      if (telegramBridge) telegramBridge.stop().catch((err) => log.warn(`Telegram bridge stop failed: ${err.message}`));
+      if (discordBridge) discordBridge.stop().catch((err) => log.warn(`Discord bridge stop failed: ${err.message}`));
     }
     if (webhookServer) {
-      webhookServer.stop().catch((err) => console.warn('[main] Webhook server stop failed:', err.message));
+      webhookServer.stop().catch((err) => log.warn(`Webhook server stop failed: ${err.message}`));
     }
     if (meshContext) {
-      meshContext.shutdown().catch((err) => console.warn('[main] Mesh shutdown failed:', err.message));
+      meshContext.shutdown().catch((err) => log.warn(`Mesh shutdown failed: ${err.message}`));
     }
     if (gatewayServer) {
-      gatewayServer.stop().catch((err) => console.warn('[main] Gateway server stop failed:', err.message));
+      gatewayServer.stop().catch((err) => log.warn(`Gateway server stop failed: ${err.message}`));
     }
 
     if (usageTracker) {

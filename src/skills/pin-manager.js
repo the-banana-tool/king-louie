@@ -1,5 +1,7 @@
 const fs = require('fs').promises;
 const path = require('path');
+const { createLogger } = require('../logging');
+const log = createLogger('pin-manager');
 
 class PinManager {
   /**
@@ -22,7 +24,7 @@ class PinManager {
       this.pins = new Map(Object.entries(json));
     } catch (error) {
       if (error.code !== 'ENOENT') {
-        console.error('[pin-manager] Failed to load pins:', error.message);
+        log.error(`Failed to load pins: ${error.message}`);
       }
       this.pins = new Map();
     }
@@ -41,7 +43,7 @@ class PinManager {
       await fs.writeFile(tempFile, JSON.stringify(json, null, 2), 'utf8');
       await fs.rename(tempFile, this.storageFile);
     }).catch((error) => {
-      console.error('[pin-manager] Failed to save pins:', error.message);
+      log.error(`Failed to save pins: ${error.message}`);
     });
 
     return this._savePromise;

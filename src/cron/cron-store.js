@@ -1,6 +1,8 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { createLogger } = require('../logging');
+const log = createLogger('cron-store');
 
 class CronStore {
   constructor(storageFile) {
@@ -16,7 +18,7 @@ class CronStore {
         this.jobs = new Map(Object.entries(parsed));
       }
     } catch (err) {
-      console.warn(`[cron-store] failed to load jobs from ${this.storageFile}:`, err.message);
+      log.warn(`failed to load jobs from ${this.storageFile}: ${err.message}`);
       this.jobs = new Map();
     }
   }

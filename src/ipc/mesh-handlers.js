@@ -1,5 +1,8 @@
 const { wrapHandler } = require('./wrap-handler');
 const C = require('./constants');
+const { createLogger } = require('../logging');
+
+const log = createLogger('mesh');
 
 function registerMeshHandlers(ipcMain, context = {}) {
   const getMeshContext = () =>
@@ -15,7 +18,7 @@ function registerMeshHandlers(ipcMain, context = {}) {
   ipcMain.handle(C.MESH_STATUS, wrapHandler(C.MESH_STATUS, async () => {
     const mc = getMeshContext();
     if (!mc) {
-      console.warn('[mesh-handlers] status requested but meshContext is null');
+      log.warn('status requested but meshContext is null');
       return { enabled: false };
     }
 
@@ -89,7 +92,7 @@ function registerMeshHandlers(ipcMain, context = {}) {
     try {
       await mc.transport.connectToPeer(address, Number(port));
     } catch (err) {
-      console.debug('[mesh] auto-connect after pairing failed:', err.message);
+      log.debug(`auto-connect after pairing failed: ${err.message}`);
     }
 
     return { peerId: peer.peerId, displayName: peer.displayName || '' };

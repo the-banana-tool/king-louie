@@ -1,4 +1,6 @@
 const { ChannelPlugin } = require('../channels/channel-plugin');
+const { createLogger } = require('../logging');
+const log = createLogger('mesh-channel');
 
 class MeshChannel extends ChannelPlugin {
   constructor(config = {}) {
@@ -114,7 +116,7 @@ class MeshChannel extends ChannelPlugin {
 
     if (this.messageHandler) {
       this.messageHandler(normalized).catch((err) => {
-        console.error(`[mesh-channel] message handler error:`, err.message);
+        log.error(`message handler error: ${err.message}`);
       });
     }
 

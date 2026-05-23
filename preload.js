@@ -1,4 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
+const { createLogger } = require('./src/logging');
+
+const markdownLog = createLogger('markdown');
 
 let domPurify = null;
 try {
@@ -36,7 +39,7 @@ try {
     markdownParser.use({ renderer });
   }
 } catch (err) {
-  console.warn('[markdown] Failed to load marked:', err?.message || err);
+  markdownLog.warn(`Failed to load marked: ${err?.message || err}`);
   markdownParser = null;
 }
 
@@ -198,11 +201,11 @@ const safeMarkdownParse = (text) => {
       return sanitize(markdownParser(input));
     }
   } catch (err) {
-    console.warn('[markdown] marked.parse() threw, using fallback:', err?.message || err);
+    markdownLog.warn(`marked.parse() threw, using fallback: ${err?.message || err}`);
   }
 
   if (!markdownParser) {
-    console.warn('[markdown] marked not loaded, using fallback renderer');
+    markdownLog.warn('marked not loaded, using fallback renderer');
   }
 
   return sanitize(simpleMarkdownFallback(input));

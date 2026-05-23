@@ -1,3 +1,6 @@
+const { createLogger } = require('../logging');
+const log = createLogger('channel');
+
 class ChannelPlugin {
   constructor(config = {}) {
     this.id = config.id;
@@ -75,7 +78,7 @@ class ChannelRegistry {
       try {
         await channel.initialize(gateway);
       } catch (err) {
-        console.error(`[channel:${channel.id}] init failed:`, err.message);
+        log.child(channel.id).error(`init failed: ${err.message}`);
       }
     }
   }
@@ -85,7 +88,7 @@ class ChannelRegistry {
       try {
         await channel.shutdown();
       } catch (err) {
-        console.error(`[channel:${channel.id}] shutdown failed:`, err.message);
+        log.child(channel.id).error(`shutdown failed: ${err.message}`);
       }
     }
   }

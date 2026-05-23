@@ -2,6 +2,8 @@ const { EventEmitter } = require('events');
 const https = require('https');
 const WebSocket = require('ws');
 const { MeshIdentity } = require('./mesh-identity');
+const { createLogger } = require('../logging');
+const log = createLogger('mesh');
 
 const DEFAULT_PORT = 18791;
 const HEARTBEAT_INTERVAL_MS = 30000;
@@ -52,7 +54,7 @@ class MeshTransport extends EventEmitter {
       });
 
       if (this.httpsServer.address()) this.port = this.httpsServer.address().port;
-      console.log(`[mesh] transport listening on wss://${this.host}:${this.port} (TLS)`);
+      log.info(`transport listening on wss://${this.host}:${this.port} (TLS)`);
     } else {
       // Fallback: plain WS (for tests or when TLS certs not available)
       this.server = new WebSocket.Server({
@@ -70,7 +72,7 @@ class MeshTransport extends EventEmitter {
       });
 
       if (this.server.address()) this.port = this.server.address().port;
-      console.log(`[mesh] transport listening on ws://${this.host}:${this.port} (no TLS)`);
+      log.info(`transport listening on ws://${this.host}:${this.port} (no TLS)`);
     }
 
     this.running = true;
@@ -111,7 +113,7 @@ class MeshTransport extends EventEmitter {
       this.httpsServer = null;
     }
 
-    console.log('[mesh] transport stopped');
+    log.info('transport stopped');
   }
 
   // --- Peer Management ---
@@ -158,7 +160,7 @@ class MeshTransport extends EventEmitter {
   async connectToPeer(address, port) {
     const protocol = this.useTls ? 'wss' : 'ws';
     const url = `${protocol}://${address}:${port}`;
-    console.log(`[mesh] connecting to ${url}`);
+    log.info(`connecting to ${url}`);
 
     return new Promise((resolve, reject) => {
       const wsOptions = {};
@@ -228,7 +230,7 @@ class MeshTransport extends EventEmitter {
           this._handleAuthComplete(authId, msg);
         }
       } catch (err) {
-        console.error('[mesh] auth message parse error:', err.message);
+        log.error(`auth message parse error: ${err.message}`);
       }
     });
   }
@@ -251,7 +253,7 @@ class MeshTransport extends EventEmitter {
           this._respondToChallenge(ws, msg);
         }
       } catch (err) {
-        console.error('[mesh] inbound auth parse error:', err.message);
+        log.error(`inbound auth parse error: ${err.message}`);
         ws.close();
       }
     };
@@ -272,7 +274,7 @@ class MeshTransport extends EventEmitter {
     // Verify TLS fingerprint if we have one pinned
     if (this.useTls && trusted.tlsFingerprint && remoteIdentity.tlsFingerprint) {
       if (trusted.tlsFingerprint !== remoteIdentity.tlsFingerprint) {
-        console.warn(`[mesh] TLS fingerprint mismatch for ${remoteIdentity.peerId} - possible impersonation`);
+        log.warn(`TLS fingerprint mismatch for ${remoteIdentity.peerId} - possible impersonation`);
         ws.send(JSON.stringify({ type: 'auth:reject', reason: 'tls_fingerprint_mismatch' }));
         ws.close();
         return;
@@ -312,7 +314,7 @@ class MeshTransport extends EventEmitter {
         } else if (resp.type && this.peers.has(remoteIdentity.peerId)) {
           this._handlePeerMessage(remoteIdentity.peerId, resp);
         }
-      } catch (err) { console.debug('[mesh-transport] inbound message parse error:', err.message); }
+      } catch (err) { log.debug(`inbound message parse error: ${err.message}`); }
     });
   }
 
@@ -443,7 +445,7 @@ class MeshTransport extends EventEmitter {
       try {
         const msg = JSON.parse(data);
         this._handlePeerMessage(remoteIdentity.peerId, msg);
-      } catch (err) { console.debug('[mesh-transport] peer message parse error:', err.message); }
+      } catch (err) { log.debug(`peer message parse error: ${err.message}`); }
     });
 
     ws.on('close', () => {
@@ -455,7 +457,7 @@ class MeshTransport extends EventEmitter {
     });
 
     const tlsLabel = tlsVerified ? ', TLS verified' : (this.useTls ? ', TLS' : '');
-    console.log(`[mesh] peer authenticated: ${remoteIdentity.peerId} (${remoteIdentity.displayName || 'unnamed'}${tlsLabel})`);
+    log.info(`peer authenticated: ${remoteIdentity.peerId} (${remoteIdentity.displayName || 'unnamed'}${tlsLabel})`);
     this.emit('peerConnected', peerInfo);
 
     if (pending.resolve) {
@@ -510,7 +512,7 @@ class MeshTransport extends EventEmitter {
 
       const verification = MeshIdentity.verifyEnvelope(envelope, trusted.publicKey);
       if (!verification.valid) {
-        console.warn(`[mesh] invalid envelope from ${peerId}: ${verification.reason}`);
+        log.warn(`invalid envelope from ${peerId}: ${verification.reason}`);
         return;
       }
 
@@ -543,7 +545,7 @@ class MeshTransport extends EventEmitter {
 
       for (const [peerId, peer] of this.peers) {
         if (now - peer.lastSeen > HEARTBEAT_TIMEOUT_MS) {
-          console.log(`[mesh] peer timed out: ${peerId}`);
+          log.info(`peer timed out: ${peerId}`);
           try { peer.ws.close(); } catch { /* ignore */ }
           this.peers.delete(peerId);
           this.emit('peerDisconnected', { peerId, reason: 'timeout' });
@@ -562,7 +564,7 @@ class MeshTransport extends EventEmitter {
 
   _handlePeerDisconnect(peerId, peerInfo) {
     this.peers.delete(peerId);
-    console.log(`[mesh] peer disconnected: ${peerId}`);
+    log.info(`peer disconnected: ${peerId}`);
     this.emit('peerDisconnected', { peerId, reason: 'closed' });
 
     if (peerInfo.address && peerInfo.port) {
@@ -579,7 +581,7 @@ class MeshTransport extends EventEmitter {
     if (this.peers.has(peerId)) return;
 
     const delay = RECONNECT_DELAYS[Math.min(attempt, RECONNECT_DELAYS.length - 1)];
-    console.log(`[mesh] reconnecting to ${peerId} in ${delay / 1000}s (attempt ${attempt + 1})`);
+    log.info(`reconnecting to ${peerId} in ${delay / 1000}s (attempt ${attempt + 1})`);
 
     const timer = setTimeout(async () => {
       this.reconnectTimers.delete(peerId);

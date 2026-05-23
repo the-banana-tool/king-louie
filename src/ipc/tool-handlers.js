@@ -1,5 +1,8 @@
 const { wrapHandler } = require('./wrap-handler');
 const IPC = require('./constants');
+const { createLogger } = require('../logging');
+
+const log = createLogger('tool-handlers');
 
 function registerToolHandlers(ipcMain, context = {}) {
   const {
@@ -91,7 +94,7 @@ function registerToolHandlers(ipcMain, context = {}) {
           }
         }
       } catch (err) {
-        console.warn('[tool-handlers] Failed to persist always-allow directory:', err.message);
+        log.warn(`Failed to persist always-allow directory: ${err.message}`);
       }
     }
 

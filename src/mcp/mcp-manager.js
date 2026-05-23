@@ -1,6 +1,8 @@
 const { EventEmitter } = require('events');
 const MCPClient = require('./mcp-client');
 const { Tool } = require('../tools/tool-schema');
+const { createLogger } = require('../logging');
+const log = createLogger('mcp-manager');
 
 /**
  * MCPManager — manages multiple MCP server connections and registers their
@@ -62,7 +64,7 @@ class MCPManager extends EventEmitter {
         await this.connectServer(name, config);
         results.push({ name, status: 'connected', tools: this._clients.get(name)?.tools?.length || 0 });
       } catch (err) {
-        console.error(`[mcp-manager] Failed to connect to "${name}":`, err.message);
+        log.error(`Failed to connect to "${name}": ${err.message}`);
         results.push({ name, status: 'failed', error: err.message });
       }
     }
@@ -91,13 +93,15 @@ class MCPManager extends EventEmitter {
       timeoutMs: resolved.timeoutMs || 30000
     });
 
+    const serverLog = log.child(name);
+
     client.on('error', (evt) => {
-      console.error(`[mcp:${name}] Error:`, evt.error?.message);
+      serverLog.error(`Error: ${evt.error?.message}`);
       this.emit('serverError', { name, error: evt.error });
     });
 
     client.on('exit', (evt) => {
-      console.warn(`[mcp:${name}] Exited with code ${evt.code}`);
+      serverLog.warn(`Exited with code ${evt.code}`);
       this._unregisterTools(name);
       this.emit('serverExit', { name, code: evt.code });
     });

@@ -1,6 +1,8 @@
 const AgentLoop = require('../execution/agent-loop');
 const path = require('path');
 const TemplateEngine = require('../templates/template-engine');
+const { createLogger } = require('../logging');
+const log = createLogger('agent-executor');
 
 // Tools that mutate the environment. readOnly agents (e.g. the planner) must
 // never be handed any of these, even if a caller's options.tools list slips
@@ -62,7 +64,7 @@ class AgentExecutor {
       try {
         return this.templateEngine.renderFile(agent.systemPromptTemplate, this.resolveTemplateContext(agent, options, userMessage));
       } catch (error) {
-        console.warn(`[agent-executor] Failed to render template for agent '${agent.id}':`, error.message);
+        log.warn(`Failed to render template for agent '${agent.id}': ${error.message}`);
       }
     }
 
@@ -83,8 +85,8 @@ class AgentExecutor {
     if (agent.readOnly) {
       const blocked = availableTools.filter((tool) => MUTATING_TOOL_NAMES.has(tool.name));
       if (blocked.length > 0) {
-        console.warn(
-          `[agent-executor] Stripping mutating tools from readOnly agent '${agent.id}': ${blocked.map((t) => t.name).join(', ')}`
+        log.warn(
+          `Stripping mutating tools from readOnly agent '${agent.id}': ${blocked.map((t) => t.name).join(', ')}`
         );
       }
       availableTools = availableTools.filter((tool) => !MUTATING_TOOL_NAMES.has(tool.name));

@@ -2,6 +2,8 @@ const fs = require('fs');
 const path = require('path');
 const { EventEmitter } = require('events');
 const AsyncMutex = require('./async-mutex');
+const { createLogger } = require('../logging');
+const log = createLogger('workflow-engine');
 
 // Cap a single dependency-result block at this many characters when handing
 // it down to a downstream task. Oversized results get head/tail clipped with
@@ -463,7 +465,7 @@ class WorkflowEngine extends EventEmitter {
               maxTokens: 2000
             });
           } catch (err) {
-            console.warn(`[workflow-engine] Parent context compaction failed for task ${task.id}:`, err.message);
+            log.warn(`Parent context compaction failed for task ${task.id}: ${err.message}`);
           }
         }
 
@@ -481,7 +483,7 @@ class WorkflowEngine extends EventEmitter {
           ];
         }
       } catch (err) {
-        console.warn(`[workflow-engine] Failed to load parent chat context for task ${task.id}:`, err.message);
+        log.warn(`Failed to load parent chat context for task ${task.id}: ${err.message}`);
       }
     }
 
@@ -560,7 +562,7 @@ class WorkflowEngine extends EventEmitter {
         await fs.promises.writeFile(tmpPath, payload, 'utf8');
         await fs.promises.rename(tmpPath, filePath);
       } catch (error) {
-        console.error(`[workflow-engine] Failed to save workflow ${workflow.id}:`, error.message);
+        log.error(`Failed to save workflow ${workflow.id}: ${error.message}`);
       }
     });
   }

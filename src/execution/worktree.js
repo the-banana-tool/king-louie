@@ -2,6 +2,8 @@ const { execFile } = require('child_process');
 const { promisify } = require('util');
 const fs = require('fs');
 const path = require('path');
+const { createLogger } = require('../logging');
+const log = createLogger('worktree');
 
 const execFileAsync = promisify(execFile);
 
@@ -81,7 +83,7 @@ async function createWorktree(repoDir, taskId, options = {}) {
         const type = process.platform === 'win32' ? 'junction' : 'dir';
         fs.symlinkSync(mainNodeModules, worktreeNodeModules, type);
       } catch (err) {
-        console.warn(`[worktree] Failed to symlink node_modules: ${err.message}`);
+        log.warn(`Failed to symlink node_modules: ${err.message}`);
       }
     }
   }
@@ -116,7 +118,7 @@ async function createWorktree(repoDir, taskId, options = {}) {
 
       return { cleaned: true, hasChanges, branch: hasChanges ? branch : null };
     } catch (err) {
-      console.warn(`[worktree] Cleanup failed for ${slug}: ${err.message}`);
+      log.warn(`Cleanup failed for ${slug}: ${err.message}`);
       // Force remove the directory as fallback
       try {
         fs.rmSync(worktreeDir, { recursive: true, force: true });

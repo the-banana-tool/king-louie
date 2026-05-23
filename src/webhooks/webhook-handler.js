@@ -1,4 +1,6 @@
 const crypto = require('crypto');
+const { createLogger } = require('../logging');
+const log = createLogger('webhook-handler');
 
 class WebhookHandler {
   constructor(registry, sessionManager, agentExecutor) {
@@ -81,7 +83,7 @@ class WebhookHandler {
         Buffer.from(expectedSig, 'utf8')
       );
     } catch (err) {
-      console.error('[webhook-handler] Signature verification error:', err.message);
+      log.error(`Signature verification error: ${err.message}`);
       return false;
     }
   }
@@ -173,7 +175,7 @@ class WebhookHandler {
           source: 'webhook'
         });
       } catch (err) {
-        console.error(`[webhook-handler] Agent execution failed for webhook ${webhook.id}:`, err.message);
+        log.error(`Agent execution failed for webhook ${webhook.id}: ${err.message}`);
         // Don't throw - webhook was received successfully even if agent failed
       }
     }

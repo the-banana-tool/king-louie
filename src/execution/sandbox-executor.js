@@ -2,6 +2,8 @@ const { exec, execFile, spawn } = require('child_process');
 const { promisify } = require('util');
 const path = require('path');
 const SANDBOX_CONFIG = require('./sandbox-config');
+const { createLogger } = require('../logging');
+const log = createLogger('sandbox-executor');
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -149,7 +151,7 @@ class SandboxExecutor {
         };
       }
       // Fallback if container creation fails (e.g. image not found)
-      console.warn(`[sandbox-executor] Container creation failed: ${error.message}. Falling back to direct execution.`);
+      log.warn(`Container creation failed: ${error.message}. Falling back to direct execution.`);
       return this._executeDirect(command, options);
     }
 

@@ -25,6 +25,9 @@ describe('Preload Validation', () => {
           }
         };
       }
+      if (module.startsWith('./') || module.startsWith('../')) {
+        return require(path.join(__dirname, '..', module));
+      }
       return require(module);
     },
     console,

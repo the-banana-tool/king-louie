@@ -1,6 +1,8 @@
 const { EventEmitter } = require('events');
 const fs = require('fs');
 const path = require('path');
+const { createLogger } = require('../logging');
+const log = createLogger('background-task');
 
 /**
  * BackgroundTaskManager — manages agent tasks that run independently
@@ -97,7 +99,7 @@ class BackgroundTaskManager extends EventEmitter {
 
     // Run asynchronously — don't await
     this._runTask(task, executor).catch((err) => {
-      console.error(`[background-task] Task ${task.id} crashed:`, err.message);
+      log.error(`Task ${task.id} crashed: ${err.message}`);
     });
 
     return task;

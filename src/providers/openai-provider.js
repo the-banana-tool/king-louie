@@ -1,5 +1,7 @@
 const BaseLLMProvider = require('./base-provider');
 const ImageHandler = require('../media/image-handler');
+const { createLogger } = require('../logging');
+const log = createLogger('openai');
 
 // Models that use the /v1/completions endpoint instead of /v1/chat/completions
 const COMPLETIONS_MODELS = ['davinci', 'babbage', 'curie', 'ada'];
@@ -348,7 +350,7 @@ class OpenAIProvider extends BaseLLMProvider {
           llmMetrics
         };
       }
-    } catch (err) { console.debug('[openai] tool call parse failed:', err.message); }
+    } catch (err) { log.debug(`tool call parse failed: ${err.message}`); }
 
     return { type: 'text', content: text, llmMetrics };
   }

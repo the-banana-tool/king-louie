@@ -1,6 +1,8 @@
 const { ChannelPlugin } = require('./channel-plugin');
 const { App } = require('@slack/bolt');
 const { shouldRespond } = require('./mention-gating');
+const { createLogger } = require('../logging');
+const log = createLogger('slack');
 
 class SlackChannel extends ChannelPlugin {
   constructor(config = {}) {
@@ -30,7 +32,7 @@ class SlackChannel extends ChannelPlugin {
 
   async initialize(gateway) {
     if (!this.enabled || !this.appToken || !this.botToken) {
-      console.log('[slack] missing config or disabled, skipping initialization');
+      log.info('missing config or disabled, skipping initialization');
       return;
     }
 
@@ -44,8 +46,8 @@ class SlackChannel extends ChannelPlugin {
       logger: {
         debug: () => {},
         info: () => {},
-        warn: console.warn,
-        error: console.error,
+        warn: (...args) => log.warn(args.join(' ')),
+        error: (...args) => log.error(args.join(' ')),
         setLevel: () => {},
         getLevel: () => 'warn',
         setName: () => {}
@@ -56,7 +58,7 @@ class SlackChannel extends ChannelPlugin {
     try {
       const authInfo = await this.app.client.auth.test();
       this.botUserId = authInfo.user_id;
-      console.log(`[slack] connected as @${authInfo.user} (${this.botUserId})`);
+      log.info(`connected as @${authInfo.user} (${this.botUserId})`);
     } catch (err) {
       throw new Error(`Slack auth failed: ${err.message}`);
     }
@@ -76,14 +78,14 @@ class SlackChannel extends ChannelPlugin {
     });
 
     await this.app.start();
-    console.log('[slack] socket mode client started');
+    log.info('socket mode client started');
   }
 
   async shutdown() {
     if (this.app) {
       await this.app.stop();
       this.app = null;
-      console.log('[slack] socket mode client stopped');
+      log.info('socket mode client stopped');
     }
   }
 
@@ -270,7 +272,7 @@ class SlackChannel extends ChannelPlugin {
       try {
         await this.gateway.routeInbound(message);
       } catch (err) {
-        console.error('[slack] error routing message:', err);
+        log.error(`error routing message: ${err.message}`);
         // Fallback error response
         await say({
           text: `Error processing message: ${err.message}`,

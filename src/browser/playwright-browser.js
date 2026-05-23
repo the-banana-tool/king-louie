@@ -3,6 +3,8 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const { spawn } = require('child_process');
+const { createLogger } = require('../logging');
+const log = createLogger('playwright-browser');
 
 /**
  * Write (or merge) a Chromium Preferences file into the profile dir that
@@ -27,7 +29,7 @@ function disableChromiumPasswordManager(userDataPath) {
     fs.writeFileSync(prefsPath, JSON.stringify(prefs));
   } catch (err) {
     // Non-fatal: if we can't write prefs, the launch args below are still in effect.
-    console.warn('[playwright-browser] could not disable Chromium password manager:', err.message);
+    log.warn(`could not disable Chromium password manager: ${err.message}`);
   }
 }
 

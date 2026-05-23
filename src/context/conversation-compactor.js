@@ -2,6 +2,8 @@ const VectorStore = require('../memory/vector-store');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { createLogger } = require('../logging');
+const log = createLogger('conversation-compactor');
 
 /**
  * ConversationCompactor — chunk-level semantic retrieval over conversation history.
@@ -88,7 +90,7 @@ class ConversationCompactor {
         }
       }
     } catch (err) {
-      console.warn('[conversation-compactor] Failed to load embedding cache:', err.message);
+      log.warn(`Failed to load embedding cache: ${err.message}`);
     }
   }
 
@@ -103,7 +105,7 @@ class ConversationCompactor {
         'utf8'
       );
     } catch (err) {
-      console.warn('[conversation-compactor] Failed to persist embedding:', err.message);
+      log.warn(`Failed to persist embedding: ${err.message}`);
     }
   }
 
@@ -232,7 +234,7 @@ class ConversationCompactor {
       }
       return true;
     } catch (err) {
-      console.warn('[conversation-compactor] Embedding failed:', err.message);
+      log.warn(`Embedding failed: ${err.message}`);
       return false;
     }
   }

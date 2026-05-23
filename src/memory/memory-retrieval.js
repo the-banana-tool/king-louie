@@ -1,3 +1,6 @@
+const { createLogger } = require('../logging');
+const log = createLogger('memory-retrieval');
+
 function tokenize(value = '') {
   return String(value || '')
     .toLowerCase()
@@ -88,7 +91,7 @@ class MemoryRetrieval {
           hasSemanticScores = true;
         }
       } catch (err) {
-        console.warn('[memory-retrieval] Semantic search failed, falling back to keyword search:', err.message);
+        log.warn(`Semantic search failed, falling back to keyword search: ${err.message}`);
       }
     }
 

@@ -1,5 +1,7 @@
 const crypto = require('crypto');
 const MemoryRetrieval = require('./memory-retrieval');
+const { createLogger } = require('../logging');
+const log = createLogger('memory-manager');
 
 const VALID_TYPES = new Set(['success', 'failure', 'preference', 'context']);
 const VALID_TIERS = new Set(['hot', 'warm', 'cold']);
@@ -106,7 +108,7 @@ class MemoryManager {
             this.vectorStore.add(entry.id, embs[0]);
           }
         })
-        .catch(err => console.warn('[memory-manager] Failed to generate embedding for entry:', err.message));
+        .catch(err => log.warn(`Failed to generate embedding for entry: ${err.message}`));
     }
 
     return inserted;

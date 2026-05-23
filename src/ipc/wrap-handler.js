@@ -1,3 +1,7 @@
+const { createLogger } = require('../logging');
+
+const log = createLogger('ipc');
+
 function wrapHandler(name, fn) {
   return async (event, ...args) => {
     try {
@@ -12,7 +16,7 @@ function wrapHandler(name, fn) {
       };
     } catch (error) {
       const message = error?.message || String(error || 'Unknown IPC error');
-      console.error(`[ipc] ${name} failed:`, message);
+      log.error(`${name} failed: ${message}`);
       return { ok: false, error: message };
     }
   };

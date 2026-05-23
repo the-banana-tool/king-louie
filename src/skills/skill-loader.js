@@ -3,6 +3,8 @@ const path = require('path');
 const Module = require('module');
 const { registry } = require('./skill-registry');
 const { isCommandAvailable } = require('../execution/runtime-environment');
+const { createLogger } = require('../logging');
+const log = createLogger('skill-loader');
 
 // Hook into Node's module resolution so that require('king-louie/...')
 // resolves to actual files in this project, regardless of where the
@@ -65,7 +67,7 @@ class SkillLoader {
       fs.mkdirSync(this.customizationsDirectory, { recursive: true });
       return this.customizationsDirectory;
     } catch (error) {
-      console.warn('[skill-loader] Unable to create skill customizations directory:', error.message);
+      log.warn(`Unable to create skill customizations directory: ${error.message}`);
       return null;
     }
   }
@@ -97,7 +99,7 @@ class SkillLoader {
         const raw = fs.readFileSync(customizationFilePath, 'utf-8');
         const parsed = JSON.parse(raw);
         if (!isPlainObject(parsed)) {
-          console.warn(`[skill-loader] Ignoring invalid customization in ${customizationFilePath}`);
+          log.warn(`Ignoring invalid customization in ${customizationFilePath}`);
           continue;
         }
 
@@ -107,7 +109,7 @@ class SkillLoader {
           data: parsed
         };
       } catch (error) {
-        console.warn(`[skill-loader] Failed to parse customization at ${customizationFilePath}:`, error.message);
+        log.warn(`Failed to parse customization at ${customizationFilePath}: ${error.message}`);
       }
     }
 
@@ -153,7 +155,7 @@ class SkillLoader {
       path: customizationRecord.path
     };
 
-    console.log(`[skill-loader] Applied customization for skill '${customizationRecord.identifier}'`);
+    log.info(`Applied customization for skill '${customizationRecord.identifier}'`);
   }
 
   /**
@@ -189,8 +191,8 @@ class SkillLoader {
 
         if (!available) {
           const level = status.required ? 'WARN' : 'INFO';
-          console.log(
-            `[skill-loader] [${level}] Skill '${metadata.id}' dependency '${dep.command}' (${status.name}) not found on system`
+          log.info(
+            `[${level}] Skill '${metadata.id}' dependency '${dep.command}' (${status.name}) not found on system`
           );
         }
 
@@ -214,7 +216,7 @@ class SkillLoader {
     const directories = [this.builtinSkillsDirectory, this.skillsDirectory].filter(Boolean);
     for (const dir of directories) {
       if (!fs.existsSync(dir)) {
-        console.debug(`[skill-loader] Skills directory not found: ${dir}`);
+        log.debug(`Skills directory not found: ${dir}`);
         continue;
       }
       const entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -226,7 +228,7 @@ class SkillLoader {
       }
     }
 
-    console.log(`[skill-loader] Discovered ${skillDirs.length} potential skill(s)`);
+    log.info(`Discovered ${skillDirs.length} potential skill(s)`);
     return skillDirs;
   }
 
@@ -241,7 +243,7 @@ class SkillLoader {
       // Check for package.json
       const packageJsonPath = path.join(skillPath, 'package.json');
       if (!fs.existsSync(packageJsonPath)) {
-        console.warn(`[skill-loader] No package.json found in ${skillPath}`);
+        log.warn(`No package.json found in ${skillPath}`);
         return null;
       }
 
@@ -250,12 +252,12 @@ class SkillLoader {
       const skillModulePath = path.join(skillPath, entryPoint);
 
       if (!fs.existsSync(skillModulePath)) {
-        console.warn(`[skill-loader] Entry point not found: ${skillModulePath}`);
+        log.warn(`Entry point not found: ${skillModulePath}`);
         return null;
       }
 
       // Load the skill module
-      console.log(`[skill-loader] Loading skill from ${skillModulePath}`);
+      log.info(`Loading skill from ${skillModulePath}`);
       const skillModule = require(skillModulePath);
 
       // Skills can export either a class or an instance
@@ -273,12 +275,12 @@ class SkillLoader {
 
       // Verify it implements required methods
       if (typeof skillInstance.getMetadata !== 'function') {
-        console.warn(`[skill-loader] Skill in ${skillPath} missing getMetadata() method`);
+        log.warn(`Skill in ${skillPath} missing getMetadata() method`);
         return null;
       }
 
       if (typeof skillInstance.handleCommand !== 'function') {
-        console.warn(`[skill-loader] Skill in ${skillPath} missing handleCommand() method`);
+        log.warn(`Skill in ${skillPath} missing handleCommand() method`);
         return null;
       }
 
@@ -301,7 +303,7 @@ class SkillLoader {
 
       return skillInstance;
     } catch (error) {
-      console.error(`[skill-loader] Error loading skill from ${skillPath}:`, error.message);
+      log.error(`Error loading skill from ${skillPath}: ${error.message}`);
       return null;
     }
   }
@@ -323,12 +325,12 @@ class SkillLoader {
           registry.register(skill);
           loadedCount++;
         } catch (error) {
-          console.error(`[skill-loader] Failed to register skill from ${skillDir}:`, error.message);
+          log.error(`Failed to register skill from ${skillDir}: ${error.message}`);
         }
       }
     }
 
-    console.log(`[skill-loader] Successfully loaded ${loadedCount}/${skillDirs.length} skill(s)`);
+    log.info(`Successfully loaded ${loadedCount}/${skillDirs.length} skill(s)`);
     return loadedCount;
   }
 

@@ -9,6 +9,8 @@ const {
 } = require('./discord-adapter');
 const { shouldRespond } = require('./mention-gating');
 const { skillRegistry } = require('../skills');
+const { createLogger } = require('../logging');
+const log = createLogger('discord-bridge');
 
 class DiscordChannel extends ChannelPlugin {
   constructor(options = {}) {
@@ -92,7 +94,7 @@ class DiscordChannel extends ChannelPlugin {
     this.client.on('interactionCreate', this.handleInteractionCreate.bind(this));
 
     this.client.on('error', (err) => {
-      console.error('[discord-bridge] client error:', err.message);
+      log.error(`client error: ${err.message}`);
     });
 
     try {
@@ -263,7 +265,7 @@ class DiscordChannel extends ChannelPlugin {
             if (!result.continueWithAgent) return;
           }
         } catch (error) {
-          console.error('[discord-bridge] Pinned skill error:', error);
+          log.error(`Pinned skill error: ${error.message}`);
           await this.sendMessage(message.channelId, `❌ Pinned skill error: ${error.message}`);
           return;
         }
@@ -385,7 +387,7 @@ class DiscordChannel extends ChannelPlugin {
       try {
         await handler(inboundMessage);
       } catch (error) {
-        console.warn('[discord-bridge] inbound handler failed:', error.message);
+        log.warn(`inbound handler failed: ${error.message}`);
       }
     }
   }
@@ -483,7 +485,7 @@ class DiscordChannel extends ChannelPlugin {
           await this.sendMessage(chatId, `❌ Error: ${result.error || 'Unknown error'}`);
         }
       } catch (error) {
-        console.error(`[discord-bridge] Skill command error:`, error);
+        log.error(`Skill command error: ${error.message}`);
         await this.sendMessage(chatId, `❌ Error executing command: ${error.message}`);
       }
       return;

@@ -1,3 +1,27 @@
+/* ── Structured logging (renderer-side, mirrors src/logging.js API) ── */
+function createLogger(subsystem) {
+  const tag = `[${subsystem}]`;
+  return {
+    info:  (message, meta) => { const s = meta ? ` {${Object.entries(meta).map(([k,v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`).join(', ')}}` : ''; console.log(tag, message + s); },
+    warn:  (message, meta) => { const s = meta ? ` {${Object.entries(meta).map(([k,v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`).join(', ')}}` : ''; console.warn(tag, message + s); },
+    error: (message, meta) => { const s = meta ? ` {${Object.entries(meta).map(([k,v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`).join(', ')}}` : ''; console.error(tag, message + s); },
+    debug: (message, meta) => { const s = meta ? ` {${Object.entries(meta).map(([k,v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`).join(', ')}}` : ''; console.debug(tag, message + s); },
+    subsystem
+  };
+}
+
+const chatLog = createLogger('chat');
+const tierLog = createLogger('tier-change');
+const providerLog = createLogger('provider-change');
+const modelLog = createLogger('model-change');
+const modelPopulateLog = createLogger('model-populate');
+const skillSettingsLog = createLogger('skill-settings');
+const workflowLog = createLogger('workflow');
+const settingsLog = createLogger('settings');
+const rendererLog = createLogger('renderer');
+const wizardLog = createLogger('wizard');
+const chatMcpLog = createLogger('chat-mcp');
+
 const appState = {
   chats: [],
   activeChatId: null,
@@ -521,12 +545,12 @@ async function saveUserProfileWithFeedback(profile, userCommand = null) {
 
   if (userCommand) {
     appendLocalMessage('user', userCommand);
-    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: userCommand }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: userCommand }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
   }
 
   const summary = formatProfileSummary(appState.settings.userProfile);
   appendLocalMessage('assistant', summary);
-  window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: summary }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+  window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: summary }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
 }
 
 function parseSlashCommand(message = '') {
@@ -1321,7 +1345,7 @@ function addStatusMessage(text) {
     chat.messages = chat.messages || [];
     chat.messages.push(msg);
   }
-  window.electron.chat.addMessage({ chatId, sender: 'status', text }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+  window.electron.chat.addMessage({ chatId, sender: 'status', text }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
 }
 
 // Suggest a reasonable "allow pattern" seed from a tool call. For Bash,
@@ -1782,7 +1806,7 @@ function renderChatInfoPopover() {
       if (populateModels) populateModels(newInfo.provider || 'openai', newInfo.model || '');
       if (typeof renderInferenceTierDetails === 'function') renderInferenceTierDetails();
       addStatusMessage(`Tier changed: ${prevTier} → ${tierSelect.value}`);
-    } catch (err) { console.warn('[tier-change] failed:', err); }
+    } catch (err) { tierLog.warn(`failed: ${err.message}`); }
   });
   tierRow.appendChild(tierLabel);
   tierRow.appendChild(tierSelect);
@@ -1904,7 +1928,7 @@ function renderChatInfoPopover() {
       appState.settings.inference = result.inference || appState.settings.inference;
       if (typeof renderInferenceTierDetails === 'function') renderInferenceTierDetails();
       addStatusMessage(`Provider changed: ${prevProvider} → ${newProvider}`);
-    } catch (err) { console.warn('[provider-change] failed:', err); }
+    } catch (err) { providerLog.warn(`failed: ${err.message}`); }
   });
 
   // Model change → persist
@@ -1921,7 +1945,7 @@ function renderChatInfoPopover() {
       appState.settings.inference = result.inference || appState.settings.inference;
       if (typeof renderInferenceTierDetails === 'function') renderInferenceTierDetails();
       addStatusMessage(`Model changed (${providerSelect.value}): ${prevModel || '(default)'} → ${modelSelect.value || '(default)'}`);
-    } catch (err) { console.warn('[model-change] failed:', err); }
+    } catch (err) { modelLog.warn(`failed: ${err.message}`); }
   });
 
   // Load models for current provider
@@ -2555,7 +2579,7 @@ function renderProviderCard(providerKey, provider) {
         opt.selected = true;
         modelSelect.insertBefore(opt, modelSelect.firstChild);
       }
-    } catch (err) { console.debug('[model-populate] seed failed:', err); }
+    } catch (err) { modelPopulateLog.debug(`seed failed: ${err.message}`); }
   })();
 
   // Auto-save on change
@@ -3743,7 +3767,7 @@ async function loadSkillSettingsTabs() {
 
     sortSettingsNavOptions();
   } catch (err) {
-    console.error('[skill-settings] Failed to load skill settings tabs:', err);
+    skillSettingsLog.error(`Failed to load skill settings tabs: ${err.message}`);
   }
 }
 
@@ -4545,7 +4569,7 @@ async function persistProposedPlan(chatId, goal, taskGraph, kind = 'proposed') {
       workflowScaffolding: scaffolding
     });
   } catch (err) {
-    console.warn('[workflow] persist proposed plan failed:', err.message);
+    workflowLog.warn(`persist proposed plan failed: ${err.message}`);
   }
 
   const chatObj = appState.chats.find((c) => c.id === chatId);
@@ -4585,7 +4609,7 @@ function appendStatusToChat(chatId, text) {
     addToolEventCompact('Workflow', { message: text }, 'info', false);
   }
   window.electron.chat.addMessage({ chatId, sender: 'status', text })
-    .catch((err) => console.warn('[workflow] status persist failed:', err.message));
+    .catch((err) => workflowLog.warn(`status persist failed: ${err.message}`));
 }
 
 /**
@@ -4893,7 +4917,7 @@ async function handleChatPlanAndExecute() {
   try {
     await window.electron.chat.addMessage({ chatId, sender: 'user', text: goal });
   } catch (err) {
-    console.warn('[workflow] goal persist failed:', err.message);
+    workflowLog.warn(`goal persist failed: ${err.message}`);
   }
   const goalMsgId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   const goalMsg = {
@@ -5077,7 +5101,7 @@ async function loadLLMRoutingSettings() {
     if (dom.llmRoutingSpeed) dom.llmRoutingSpeed.value = llmRouting.speedPriority || 'medium';
     if (dom.llmRoutingQuality) dom.llmRoutingQuality.value = llmRouting.qualityPriority || 'high';
   } catch (err) {
-    console.warn('[settings] loadLLMRoutingSettings failed:', err.message);
+    settingsLog.warn(`loadLLMRoutingSettings failed: ${err.message}`);
   }
 }
 
@@ -5702,8 +5726,8 @@ async function sendMessage() {
     appendLocalMessage('user', message);
     appendLocalMessage('assistant', helpText);
 
-    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
-    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: helpText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: helpText }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
 
     return;
   }
@@ -5713,7 +5737,7 @@ async function sendMessage() {
     dom.userInput.style.height = 'auto';
 
     appendLocalMessage('user', message);
-    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
 
     const dirArg = slashCommand.args.join(' ').trim();
     let responseText;
@@ -5741,7 +5765,7 @@ async function sendMessage() {
     }
 
     appendLocalMessage('assistant', responseText);
-    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
     refreshUI();
 
     return;
@@ -5762,8 +5786,8 @@ async function sendMessage() {
       const helpText = 'Usage: `/agent on`, `/agent off`, `/agent toggle`, or `/agent status`.';
       appendLocalMessage('user', message);
       appendLocalMessage('assistant', helpText);
-      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
-      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: helpText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: helpText }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
       return;
     }
 
@@ -5775,8 +5799,8 @@ async function sendMessage() {
 
     appendLocalMessage('user', message);
     appendLocalMessage('assistant', statusText);
-    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
-    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: statusText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: statusText }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
 
     return;
   }
@@ -5786,13 +5810,13 @@ async function sendMessage() {
     dom.userInput.style.height = 'auto';
 
     appendLocalMessage('user', message);
-    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
 
     const taskArg = slashCommand.args[0] || '';
     if (!taskArg) {
       const usage = 'Usage: `/delegate <task-plan-path>` — reads task configs from a JSON file and executes them with dependency ordering.\n\nExample JSON:\n```json\n{ "agentId": "code-writer", "tasks": [\n  { "id": "t26", "subject": "Task 26", "description": "..." },\n  { "id": "t29", "subject": "Task 29", "description": "...", "blockedBy": ["t26"] }\n]}\n```';
       appendLocalMessage('assistant', usage);
-      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: usage }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: usage }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
       return;
     }
 
@@ -5817,11 +5841,11 @@ async function sendMessage() {
 
       const completionMsg = `Delegation complete. ${(result?.tasks || []).filter((t) => t.status === 'completed').length}/${(result?.tasks || []).length} tasks finished.`;
       appendLocalMessage('assistant', completionMsg);
-      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: completionMsg }).catch((err2) => console.warn('[chat] addMessage persistence failed:', err2.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: completionMsg }).catch((err2) => chatLog.warn(`addMessage persistence failed: ${err2.message}`));
     } catch (err) {
       const errMsg = `Delegation failed: ${err.message}`;
       appendLocalMessage('assistant', errMsg);
-      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: errMsg }).catch((err2) => console.warn('[chat] addMessage persistence failed:', err2.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: errMsg }).catch((err2) => chatLog.warn(`addMessage persistence failed: ${err2.message}`));
     }
 
     return;
@@ -5834,11 +5858,11 @@ async function sendMessage() {
     const action = (slashCommand.args[0] || '').toLowerCase();
     if (!action) {
       appendLocalMessage('user', message);
-      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
 
       const summary = formatProfileSummary(appState.settings.userProfile || {});
       appendLocalMessage('assistant', summary);
-      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: summary }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: summary }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
       return;
     }
 
@@ -5846,8 +5870,8 @@ async function sendMessage() {
       const usage = 'Usage: `/profile` or `/profile set <field> <value>`. Fields: name, role, projectContext, goals, preferences';
       appendLocalMessage('user', message);
       appendLocalMessage('assistant', usage);
-      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
-      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: usage }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: usage }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
       return;
     }
 
@@ -5889,8 +5913,8 @@ async function sendMessage() {
       appendLocalMessage('user', message);
       const errorText = `❌ ${error.message || 'Unable to update profile.'}`;
       appendLocalMessage('assistant', errorText);
-      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
-      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: errorText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: errorText }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
     }
 
     return;
@@ -5901,7 +5925,7 @@ async function sendMessage() {
     dom.userInput.style.height = 'auto';
 
     appendLocalMessage('user', message);
-    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
 
     const tier = slashCommand.name.slice(1);
     try {
@@ -5916,11 +5940,11 @@ async function sendMessage() {
       }
 
       appendLocalMessage('assistant', responseText);
-      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
     } catch (error) {
       const errorText = `❌ ${error.message || 'Unable to update inference tier.'}`;
       appendLocalMessage('assistant', errorText);
-      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: errorText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: errorText }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
     }
 
     return;
@@ -5931,11 +5955,11 @@ async function sendMessage() {
     dom.userInput.style.height = 'auto';
     const skillId = slashCommand.args[0];
     appendLocalMessage('user', message);
-    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
     if (!skillId) {
       const errorText = 'Usage: `/pin <skill-id>`. Use `/pin std` to pin the STD skill.';
       appendLocalMessage('assistant', errorText);
-      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: errorText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: errorText }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
       return;
     }
     const result = await window.electron.skill.pin({ chatId: appState.activeChatId, skillId });
@@ -5943,7 +5967,7 @@ async function sendMessage() {
       ? `📌 Pinned **${result.name || skillId}** to this chat. All messages will be handled by this skill. Use \`/unpin\` to restore normal behavior.`
       : `❌ ${result.error}`;
     appendLocalMessage('assistant', responseText);
-    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
     return;
   }
 
@@ -5951,11 +5975,11 @@ async function sendMessage() {
     dom.userInput.value = '';
     dom.userInput.style.height = 'auto';
     appendLocalMessage('user', message);
-    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
     const result = await window.electron.skill.unpin({ chatId: appState.activeChatId });
     const responseText = result.ok ? '📌 Unpinned. Normal behavior restored.' : `❌ ${result.error}`;
     appendLocalMessage('assistant', responseText);
-    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
     return;
   }
 
@@ -5963,13 +5987,13 @@ async function sendMessage() {
     dom.userInput.value = '';
     dom.userInput.style.height = 'auto';
     appendLocalMessage('user', message);
-    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
     const result = await window.electron.skill.getPinned({ chatId: appState.activeChatId });
     const responseText = result.pinned
       ? `📌 Pinned skill: **${result.pinned.name || result.pinned.skillId}** (\`${result.pinned.skillId}\`)`
       : 'No skill is currently pinned to this chat.';
     appendLocalMessage('assistant', responseText);
-    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
     return;
   }
 
@@ -5978,7 +6002,7 @@ async function sendMessage() {
     dom.userInput.style.height = 'auto';
 
     appendLocalMessage('user', message);
-    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
 
     const action = (slashCommand.args[0] || '').toLowerCase();
     const skillId = (slashCommand.args[1] || '').trim();
@@ -5986,7 +6010,7 @@ async function sendMessage() {
     if (action !== 'customize' || !skillId) {
       const usage = 'Usage: `/skill customize <skill-id>`. Example: `/skill customize std`';
       appendLocalMessage('assistant', usage);
-      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: usage }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: usage }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
       return;
     }
 
@@ -5996,11 +6020,11 @@ async function sendMessage() {
         ? `Opened customization file for **${result.skillId}** at:\n\`${result.path}\`${result.created ? '\n\nCreated a new file with starter defaults.' : ''}`
         : `❌ ${result?.error || 'Unable to open customization file.'}`;
       appendLocalMessage('assistant', responseText);
-      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
     } catch (error) {
       const errorText = `❌ ${error.message || 'Unable to open customization file.'}`;
       appendLocalMessage('assistant', errorText);
-      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: errorText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: errorText }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
     }
 
     return;
@@ -6011,7 +6035,7 @@ async function sendMessage() {
     dom.userInput.style.height = 'auto';
 
     appendLocalMessage('user', message);
-    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
 
     try {
       const result = await window.electron.settings.runLlmCommand({ command: message });
@@ -6020,11 +6044,11 @@ async function sendMessage() {
         : `Error: ${result?.error || 'Unable to run local LLM command.'}`;
 
       appendLocalMessage('assistant', responseText);
-      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
     } catch (error) {
       const errorText = `Error: ${error.message || 'Unable to run local LLM command.'}`;
       appendLocalMessage('assistant', errorText);
-      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: errorText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: errorText }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
     }
 
     return;
@@ -6035,7 +6059,7 @@ async function sendMessage() {
     dom.userInput.style.height = 'auto';
 
     appendLocalMessage('user', message);
-    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
 
     appendLocalMessage('assistant', 'Running diagnostics...');
 
@@ -6046,11 +6070,11 @@ async function sendMessage() {
         : `Error: ${result?.error || 'Diagnostics failed.'}`;
 
       appendLocalMessage('assistant', responseText);
-      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
     } catch (error) {
       const errorText = `Error: ${error.message || 'Diagnostics failed.'}`;
       appendLocalMessage('assistant', errorText);
-      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: errorText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: errorText }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
     }
 
     return;
@@ -6061,7 +6085,7 @@ async function sendMessage() {
     dom.userInput.style.height = 'auto';
 
     appendLocalMessage('user', message);
-    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
 
     try {
       const summaryMode = ['summary', '--summary', '-s'].some((token) =>
@@ -6076,11 +6100,11 @@ async function sendMessage() {
         ? `🔊 Speaking the last assistant response${summaryMode ? ' (summary)' : ''}.`
         : `❌ ${result?.error || 'Unable to speak the last response.'}`;
       appendLocalMessage('assistant', responseText);
-      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
     } catch (error) {
       const errorText = `❌ ${error.message || 'Unable to speak the last response.'}`;
       appendLocalMessage('assistant', errorText);
-      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: errorText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: errorText }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
     }
 
     return;
@@ -6103,20 +6127,20 @@ async function sendMessage() {
         dom.userInput.style.height = 'auto';
 
         appendLocalMessage('user', message);
-        window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+        window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
 
         const responseText = skillResult.ok === false
           ? `❌ ${skillResult.error || 'Skill command failed.'}`
           : (skillResult.message || 'Skill command executed.');
         const responseFormat = skillResult.format || 'markdown';
         appendLocalMessage('assistant', responseText, { format: responseFormat });
-        window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText, format: responseFormat }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+        window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText, format: responseFormat }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
 
         return;
       }
     } catch (error) {
       // Skill command failed or doesn't exist - continue to LLM
-      console.log('[renderer] Skill command not found, sending to LLM:', commandName);
+      rendererLog.info(`Skill command not found, sending to LLM: ${commandName}`);
     }
   }
 
@@ -6165,9 +6189,9 @@ async function sendMessage() {
           ? (skillResult.message || 'Done.')
           : `❌ ${skillResult.error || 'Error'}`;
         const responseFormat = skillResult.format || 'markdown';
-        window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+        window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
         appendLocalMessage('assistant', responseText, { format: responseFormat });
-        window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText, format: responseFormat }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+        window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText, format: responseFormat }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
         return;
       }
     }
@@ -6190,7 +6214,7 @@ async function sendMessage() {
       try {
         const data = unwrapIpcResult(await window.electron.chat.load(), 'reload');
         appState.chats = data.chats || [];
-      } catch (err) { console.warn('[chat] best-effort reload failed:', err); }
+      } catch (err) { chatLog.warn(`best-effort reload failed: ${err.message}`); }
     }
     refreshUI();
   } catch (error) {
@@ -6305,7 +6329,7 @@ async function resendUserMessage(messageEl) {
       try {
         const data = unwrapIpcResult(await window.electron.chat.load(), 'reload');
         appState.chats = data.chats || [];
-      } catch (err) { console.warn('[chat] best-effort reload failed:', err); }
+      } catch (err) { chatLog.warn(`best-effort reload failed: ${err.message}`); }
     }
     refreshUI();
   } catch (error) {
@@ -6338,7 +6362,7 @@ async function handleStdCardAction(action, taskId, buttonEl = null) {
 
   try {
     appendLocalMessage('user', commandText);
-    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: commandText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: commandText }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
 
     const skillResult = await window.electron.skill.execute({
       command: 'std',
@@ -6354,11 +6378,11 @@ async function handleStdCardAction(action, taskId, buttonEl = null) {
     appendLocalMessage('assistant', responseText, { format: responseFormat });
     window.electron.chat
       .addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText, format: responseFormat })
-      .catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+      .catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
   } catch (error) {
     const errorText = `❌ ${error.message || 'Unable to complete task.'}`;
     appendLocalMessage('assistant', errorText);
-    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: errorText }).catch((err) => console.warn('[chat] addMessage persistence failed:', err.message));
+    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: errorText }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
   } finally {
     if (buttonEl) {
       buttonEl.disabled = false;
@@ -6518,7 +6542,7 @@ function persistAgentMode() {
   if (!chatId) return;
   const chat = appState.chats.find((c) => c.id === chatId);
   if (chat) chat.agentMode = appState.isAgentModeEnabled;
-  window.electron.chat.setAgentMode(chatId, appState.isAgentModeEnabled).catch((err) => console.warn('[chat] setAgentMode persistence failed:', err.message));
+  window.electron.chat.setAgentMode(chatId, appState.isAgentModeEnabled).catch((err) => chatLog.warn(`setAgentMode persistence failed: ${err.message}`));
 }
 
 function persistSandboxMode() {
@@ -6526,7 +6550,7 @@ function persistSandboxMode() {
   if (!chatId) return;
   const chat = appState.chats.find((c) => c.id === chatId);
   if (chat) chat.sandboxMode = appState.isSandboxModeEnabled;
-  window.electron.chat.setSandboxMode(chatId, appState.isSandboxModeEnabled).catch((err) => console.warn('[chat] setSandboxMode persistence failed:', err.message));
+  window.electron.chat.setSandboxMode(chatId, appState.isSandboxModeEnabled).catch((err) => chatLog.warn(`setSandboxMode persistence failed: ${err.message}`));
 }
 
 async function handleCreateChat() {
@@ -6710,7 +6734,7 @@ if (dom.stopBtn) {
     try {
       await window.electron.chat.stopResponse(appState.activeChatId);
     } catch (err) {
-      console.warn('[chat] stopResponse failed:', err.message);
+      chatLog.warn(`stopResponse failed: ${err.message}`);
     }
   });
 }
@@ -6964,7 +6988,7 @@ if (dom.workingDirBtn) {
       appState.chats = appState.chats.map((c) => (c.id === data.chat.id ? data.chat : c));
       refreshUI();
     } catch (err) {
-      console.warn('[chat] pickWorkingDirectory failed:', err.message);
+      chatLog.warn(`pickWorkingDirectory failed: ${err.message}`);
     }
   });
 }
@@ -7393,7 +7417,7 @@ async function renderChatMcpToggles() {
           if (idx >= 0) appState.chats[idx] = updated;
         }
       } catch (err) {
-        console.warn('[chat-mcp] Failed to update disabled servers:', err);
+        chatMcpLog.warn(`Failed to update disabled servers: ${err.message}`);
         // Revert on failure
         checkbox.checked = !checked;
         if (checked) disabled.add(s.name); else disabled.delete(s.name);
@@ -8249,7 +8273,7 @@ unsubscribeHandlers.push(window.electron.chat.onMessageError(({ chatId, response
   // Persist the error so refreshUI / renderChatMessages doesn't wipe it
   const errorText = `Error: ${error}`;
   window.electron.chat.addMessage({ chatId, sender: 'assistant', text: errorText })
-    .catch((err) => console.warn('[chat] error message persistence failed:', err.message));
+    .catch((err) => chatLog.warn(`error message persistence failed: ${err.message}`));
 }));
 
 /**
@@ -8306,7 +8330,7 @@ unsubscribeHandlers.push(window.electron.chat.onToolUse(({ chatId, toolName, par
     addToolEventCompact(toolName, parameters, '', false);
     keepStreamingIndicatorAtBottom();
   } catch (err) {
-    console.error('[renderer] Failed to render tool use for', toolName, err);
+    rendererLog.error(`Failed to render tool use for ${toolName}: ${err.message}`);
   }
 }));
 
@@ -8325,7 +8349,7 @@ unsubscribeHandlers.push(window.electron.chat.onToolResult(({ chatId, toolName, 
     addToolEventCompact(toolName, result, isError ? 'error' : 'success', true);
     keepStreamingIndicatorAtBottom();
   } catch (err) {
-    console.error('[renderer] Failed to render tool result for', toolName, err);
+    rendererLog.error(`Failed to render tool result for ${toolName}: ${err.message}`);
   }
 }));
 
@@ -9014,7 +9038,7 @@ function collectWizardStepData() {
 }
 
 async function closeWizard() {
-  try { await window.electron.wizard.complete(); } catch (err) { console.warn('[wizard] complete failed:', err); }
+  try { await window.electron.wizard.complete(); } catch (err) { wizardLog.warn(`complete failed: ${err.message}`); }
   if (dom.wizardOverlay) dom.wizardOverlay.hidden = true;
 }
 

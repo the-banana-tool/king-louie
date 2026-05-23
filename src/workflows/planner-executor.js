@@ -6,6 +6,8 @@
  */
 
 const { validateTaskGraph, TaskGraphValidationError } = require('./task-graph-validator');
+const { createLogger } = require('../logging');
+const log = createLogger('planner-executor');
 
 class PlannerExecutor {
   constructor(options = {}) {
@@ -39,7 +41,7 @@ class PlannerExecutor {
     if (options.background) {
       // Fire and forget — caller can poll getProgress()
       this.workflowEngine.run(workflow.id).catch((err) => {
-        console.error(`[planner-executor] Background workflow ${workflow.id} error:`, err.message);
+        log.error(`Background workflow ${workflow.id} error: ${err.message}`);
       });
       return workflow;
     }
@@ -94,7 +96,7 @@ class PlannerExecutor {
           maxTokens: 4000
         });
       } catch (err) {
-        console.warn('[planner-executor] Conversation compaction failed, using full history:', err.message);
+        log.warn(`Conversation compaction failed, using full history: ${err.message}`);
       }
     }
 

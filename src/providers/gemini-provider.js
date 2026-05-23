@@ -1,5 +1,7 @@
 const BaseLLMProvider = require('./base-provider');
 const ImageHandler = require('../media/image-handler');
+const { createLogger } = require('../logging');
+const log = createLogger('gemini');
 
 class GeminiProvider extends BaseLLMProvider {
   constructor(apiKey) {
@@ -119,7 +121,7 @@ class GeminiProvider extends BaseLLMProvider {
               args = typeof call.function.arguments === 'string'
                 ? JSON.parse(call.function.arguments)
                 : call.function.arguments || {};
-            } catch (err) { console.debug('[gemini] function args parse failed:', err.message); args = {}; }
+            } catch (err) { log.debug(`function args parse failed: ${err.message}`); args = {}; }
             parts.push({
               functionCall: {
                 name: call.function.name,

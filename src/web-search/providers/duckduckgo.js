@@ -1,5 +1,7 @@
 const SearchProvider = require('../search-provider');
 const { parseHTML } = require('linkedom');
+const { createLogger } = require('../../logging');
+const log = createLogger('duckduckgo');
 
 class DuckDuckGoSearch extends SearchProvider {
   constructor(apiKey) {
@@ -47,7 +49,7 @@ class DuckDuckGoSearch extends SearchProvider {
               const urlParams = new URL('https:' + url).searchParams;
               const uddg = urlParams.get('uddg');
               if (uddg) finalUrl = decodeURIComponent(uddg);
-            } catch(e) { console.debug('[duckduckgo] URL decode failed:', e.message); }
+            } catch(e) { log.debug(`URL decode failed: ${e.message}`); }
         }
 
         const snippet = snippetEl.textContent?.trim();

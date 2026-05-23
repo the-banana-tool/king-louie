@@ -1,5 +1,7 @@
 const VectorStore = require('../memory/vector-store');
 const { OpenAIEmbeddingProvider } = require('../memory/embedding-provider');
+const { createLogger } = require('../logging');
+const log = createLogger('context-assembler');
 
 /**
  * ContextAssembler — dynamic context assembly with two modes:
@@ -124,7 +126,7 @@ class ContextAssembler {
           }
         }
       } catch (err) {
-        console.warn('[context-assembler] Failed to embed during indexing:', err.message);
+        log.warn(`Failed to embed during indexing: ${err.message}`);
       }
     }
 
@@ -231,7 +233,7 @@ class ContextAssembler {
       const embeddings = await this.embeddingProvider.embed([userMessage]);
       queryVector = embeddings?.[0];
     } catch (err) {
-      console.warn('[context-assembler] Embedding failed, falling back to full context:', err.message);
+      log.warn(`Embedding failed, falling back to full context: ${err.message}`);
       return this._fallbackAll(memoryContext);
     }
 

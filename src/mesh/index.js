@@ -5,6 +5,8 @@ const { MeshChannel } = require('./mesh-channel');
 const { MeshRemoteControl } = require('./mesh-remote-control');
 const { MeshDiscovery } = require('./mesh-discovery');
 const { MeshSwarm } = require('./mesh-swarm');
+const { createLogger } = require('../logging');
+const log = createLogger('mesh');
 
 async function initializeMesh(config = {}) {
   const {
@@ -19,7 +21,7 @@ async function initializeMesh(config = {}) {
 
   const meshSettings = settings.mesh || {};
   if (meshSettings.enabled === false) {
-    console.log('[mesh] disabled by settings');
+    log.info('disabled by settings');
     return null;
   }
 
@@ -33,7 +35,7 @@ async function initializeMesh(config = {}) {
       identity.displayName = meshSettings.displayName || stored.displayName || '';
       identity.capabilities = meshSettings.capabilities || stored.capabilities || [];
     } catch (err) {
-      console.warn('[mesh] failed to load stored identity, generating new one:', err.message);
+      log.warn(`failed to load stored identity, generating new one: ${err.message}`);
       identity = null;
     }
   }
@@ -44,7 +46,7 @@ async function initializeMesh(config = {}) {
       capabilities: meshSettings.capabilities || []
     });
     store.set('mesh.identity', identity.serialize());
-    console.log(`[mesh] generated new identity: ${identity.peerId}`);
+    log.info(`generated new identity: ${identity.peerId}`);
   }
 
   // Encrypt private key if safeStorage is available
@@ -120,7 +122,7 @@ async function initializeMesh(config = {}) {
       try {
         await transport.connectToPeer(peerInfo.address, peerInfo.port);
       } catch (err) {
-        console.debug(`[mesh] auto-connect to discovered peer ${peerInfo.peerId} failed:`, err.message);
+        log.debug(`auto-connect to discovered peer ${peerInfo.peerId} failed: ${err.message}`);
       }
     }
   });
@@ -148,9 +150,9 @@ async function initializeMesh(config = {}) {
       }
     }
 
-    console.log(`[mesh] initialized - peer ID: ${identity.peerId}, port: ${port}`);
+    log.info(`initialized - peer ID: ${identity.peerId}, port: ${port}`);
   } catch (err) {
-    console.error('[mesh] initialization failed:', err.message);
+    log.error(`initialization failed: ${err.message}`);
   }
 
   return {

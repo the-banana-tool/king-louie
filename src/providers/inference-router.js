@@ -1,4 +1,6 @@
 const { evaluateRules } = require('./smart-routing');
+const { createLogger } = require('../logging');
+const log = createLogger('inference-router');
 
 class InferenceRouter {
   constructor(options = {}) {
@@ -105,7 +107,7 @@ class InferenceRouter {
     } catch (err) {
       const fallback = this.fallbacks[primary.provider];
       if (fallback) {
-        console.warn(`[inference-router] ${primary.provider} failed, falling back to ${fallback.provider}`);
+        log.warn(`${primary.provider} failed, falling back to ${fallback.provider}`);
         return await this.execute(fallback, messages, options);
       }
       throw err;
@@ -224,7 +226,7 @@ class InferenceRouter {
       try {
         const token = this.getProviderToken(providerType);
         if (!token) {
-          console.warn(`[inference-router] Smart routing rule "${matchedRule.name}" targets ${providerType} but no token is available, falling back to tier.`);
+          log.warn(`Smart routing rule "${matchedRule.name}" targets ${providerType} but no token is available, falling back to tier.`);
           return { ...this.resolve(request), routedBy: 'tier' };
         }
       } catch {

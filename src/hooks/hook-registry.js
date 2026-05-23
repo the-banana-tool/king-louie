@@ -1,6 +1,8 @@
 const fs = require('fs');
 const path = require('path');
 const { HookDefinition } = require('./hook-schema');
+const { createLogger } = require('../logging');
+const log = createLogger('hooks');
 
 class HookRegistry {
   constructor(options = {}) {
@@ -47,7 +49,7 @@ class HookRegistry {
           this.hooks.push(hook);
         }
       } catch (error) {
-        console.warn(`[hooks] Failed loading hook from ${hookDirectory}:`, error.message);
+        log.warn(`Failed loading hook from ${hookDirectory}: ${error.message}`);
       }
     }
 

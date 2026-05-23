@@ -1,5 +1,8 @@
 const { wrapHandler } = require('./wrap-handler');
 const { applyActiveProviderUpdate } = require('./settings-provider');
+const { createLogger } = require('../logging');
+
+const log = createLogger('settings');
 
 function registerSettingsHandlers(ipcMain, context = {}) {
   const {
@@ -395,7 +398,7 @@ function registerSettingsHandlers(ipcMain, context = {}) {
         const instance = ProviderFactory.create(provider, token || 'ollama-local', { authMode });
         const models = await instance.listModels();
         return { ok: true, models, source: 'api' };
-      } catch (err) { console.debug('[settings] listModels API failed, falling back to static:', err.message); }
+      } catch (err) { log.debug(`listModels API failed, falling back to static: ${err.message}`); }
     }
 
     // Fall back to static model list

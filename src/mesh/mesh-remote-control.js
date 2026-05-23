@@ -1,4 +1,6 @@
 const { EventEmitter } = require('events');
+const { createLogger } = require('../logging');
+const log = createLogger('mesh-rc');
 
 const DEFAULT_TASK_TIMEOUT_MS = 300000; // 5 minutes
 
@@ -43,10 +45,10 @@ class MeshRemoteControl extends EventEmitter {
     const handler = handlers[method];
     if (handler) {
       handler(params || {}).catch((err) => {
-        console.error(`[mesh-rc] handler error for ${method}:`, err.message);
+        log.error(`handler error for ${method}: ${err.message}`);
         try {
           this.transport.sendRpcResponse(from, id, null, err);
-        } catch (sendErr) { console.debug('[mesh-rc] failed to send error response (peer may be disconnected):', sendErr.message); }
+        } catch (sendErr) { log.debug(`failed to send error response (peer may be disconnected): ${sendErr.message}`); }
       });
     }
   }

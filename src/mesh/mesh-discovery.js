@@ -1,5 +1,7 @@
 const { EventEmitter } = require('events');
+const { createLogger } = require('../logging');
 
+const log = createLogger('mesh-discovery');
 const SERVICE_TYPE = 'kinglouie';
 const SERVICE_PROTOCOL = 'tcp';
 const DISCOVERY_INTERVAL_MS = 30000;
@@ -25,8 +27,8 @@ class MeshDiscovery extends EventEmitter {
       const Bonjour = require('bonjour-service');
       this.bonjour = new Bonjour.default();
     } catch {
-      console.log('[mesh-discovery] bonjour-service not available, mDNS discovery disabled');
-      console.log('[mesh-discovery] install with: npm install bonjour-service');
+      log.info('bonjour-service not available, mDNS discovery disabled');
+      log.info('install with: npm install bonjour-service');
       return;
     }
 
@@ -72,7 +74,7 @@ class MeshDiscovery extends EventEmitter {
       }
     });
 
-    console.log(`[mesh-discovery] advertising as ${this.identity.peerId} on port ${this.port}`);
+    log.info(`advertising as ${this.identity.peerId} on port ${this.port}`);
   }
 
   _browse() {
@@ -105,7 +107,7 @@ class MeshDiscovery extends EventEmitter {
       this.discovered.set(peerId, peerInfo);
 
       if (!existing) {
-        console.log(`[mesh-discovery] found peer: ${peerId} (${peerInfo.displayName || 'unnamed'}) at ${address}:${service.port}`);
+        log.info(`found peer: ${peerId} (${peerInfo.displayName || 'unnamed'}) at ${address}:${service.port}`);
         this.emit('peerDiscovered', peerInfo);
       } else {
         this.emit('peerUpdated', peerInfo);
@@ -121,7 +123,7 @@ class MeshDiscovery extends EventEmitter {
       const peerInfo = this.discovered.get(peerId);
       if (peerInfo) {
         this.discovered.delete(peerId);
-        console.log(`[mesh-discovery] peer lost: ${peerId}`);
+        log.info(`peer lost: ${peerId}`);
         this.emit('peerLost', peerInfo);
       }
     });

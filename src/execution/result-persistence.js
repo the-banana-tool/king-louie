@@ -25,6 +25,8 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { createLogger } = require('../logging');
+const log = createLogger('result-persistence');
 
 const DEFAULT_THRESHOLD_CHARS = 50000;
 const PREVIEW_HEAD_CHARS = 500;
@@ -74,7 +76,7 @@ class ResultPersistence {
         '…'
       ].join('\n');
     } catch (err) {
-      console.warn(`[result-persistence] Failed to persist ${toolName} result: ${err.message}`);
+      log.warn(`Failed to persist ${toolName} result: ${err.message}`);
       return this._headOnlyPreview(content, toolName);
     }
   }
