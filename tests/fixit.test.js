@@ -2,16 +2,24 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert');
 const Fixit = require('../src/diagnostics/fixit');
 
+const makeStore = (data = {}) => ({
+  get: (key, fallback) => data[key] !== undefined ? data[key] : fallback
+});
+
 describe('Fixit', () => {
   const mockContext = {
-    providerFactory: { getProviders: () => ['openai'] },
+    providerFactory: {},
     channelRegistry: { getChannels: () => ['telegram'] },
     memoryManager: {},
     hookRegistry: {},
     skillRegistry: { getSkills: () => ['hello-world'] },
     gateway: {},
     cronScheduler: { getJobs: () => [] },
-    store: {}
+    store: makeStore({
+      apiTokens: { openai: 'enc-token' },
+      apiStatus: { openai: { ok: true, lastChecked: Date.now() } },
+      settings: { activeProvider: 'openai' }
+    })
   };
 
   it('runs all checks and returns results', async () => {
@@ -61,5 +69,62 @@ describe('Fixit', () => {
     const results = await fixit.runAll();
     const skipped = results.filter(r => r.status === 'SKIP');
     assert.ok(skipped.length > 0);
+  });
+
+  it('detects provider with stored token', async () => {
+    const fixit = new Fixit({
+      providerFactory: {},
+      store: makeStore({
+        apiTokens: { openai: 'enc-token' },
+        settings: { activeProvider: 'openai' }
+      })
+    });
+    const results = await fixit.runAll();
+    const provider = results.find(r => r.name === 'Provider Connectivity');
+    assert.strictEqual(provider.status, 'PASS');
+    assert.ok(provider.message.includes('openai'));
+  });
+
+  it('detects Ollama as configured without a stored token', async () => {
+    const fixit = new Fixit({
+      providerFactory: {},
+      store: makeStore({
+        apiTokens: {},
+        settings: { activeProvider: 'ollama' }
+      })
+    });
+    const results = await fixit.runAll();
+    const provider = results.find(r => r.name === 'Provider Connectivity');
+    assert.strictEqual(provider.status, 'PASS');
+    assert.ok(provider.message.includes('ollama'));
+  });
+
+  it('warns when no providers are configured', async () => {
+    const fixit = new Fixit({
+      providerFactory: {},
+      store: makeStore({
+        apiTokens: {},
+        settings: { activeProvider: 'openai' }
+      })
+    });
+    const results = await fixit.runAll();
+    const provider = results.find(r => r.name === 'Provider Connectivity');
+    assert.strictEqual(provider.status, 'WARN');
+    assert.ok(provider.fix);
+  });
+
+  it('warns when active provider last connection failed', async () => {
+    const fixit = new Fixit({
+      providerFactory: {},
+      store: makeStore({
+        apiTokens: { openai: 'enc-token' },
+        apiStatus: { openai: { ok: false, message: '401 Unauthorized' } },
+        settings: { activeProvider: 'openai' }
+      })
+    });
+    const results = await fixit.runAll();
+    const provider = results.find(r => r.name === 'Provider Connectivity');
+    assert.strictEqual(provider.status, 'WARN');
+    assert.ok(provider.message.includes('failed'));
   });
 });

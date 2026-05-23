@@ -105,4 +105,69 @@ describe('InferenceRouter', () => {
       assert.strictEqual(resolved.model, 'test-model');
     }
   });
+
+  it('resolves Ollama as active provider without a real token', () => {
+    const router = new InferenceRouter(mockConfig({
+      settings: {
+        activeProvider: 'ollama',
+        inference: {
+          tierMap: {},
+          activeTier: 'standard'
+        }
+      }
+    }));
+    const resolved = router.resolve({});
+    assert.strictEqual(resolved.providerType, 'ollama');
+  });
+
+  it('resolves Ollama with dummy token from getProviderToken', () => {
+    const router = new InferenceRouter({
+      getSettings: () => ({
+        activeProvider: 'ollama',
+        inference: { tierMap: {}, activeTier: 'standard' }
+      }),
+      getProviderModel: () => 'llama3',
+      getProviderToken: (p) => {
+        if (p === 'ollama') return 'not-required';
+        throw new Error(`No token for ${p}`);
+      },
+      createProvider: (p, t) => ({
+        getDefaultModel: () => 'llama3',
+        sendMessage: async () => `response from ${p}`
+      })
+    });
+    const resolved = router.resolve({});
+    assert.strictEqual(resolved.providerType, 'ollama');
+    assert.strictEqual(resolved.model, 'llama3');
+    assert.ok(resolved.provider);
+  });
+
+  it('executes chat through Ollama provider', async () => {
+    let receivedToken = null;
+    const router = new InferenceRouter({
+      getSettings: () => ({
+        activeProvider: 'ollama',
+        inference: {
+          tierMap: { standard: { provider: 'ollama', model: 'llama3' } },
+          activeTier: 'standard'
+        }
+      }),
+      getProviderModel: () => '',
+      getProviderToken: (p) => {
+        if (p === 'ollama') return 'not-required';
+        throw new Error(`No token for ${p}`);
+      },
+      createProvider: (p, t) => {
+        receivedToken = t;
+        return {
+          getDefaultModel: () => 'llama3',
+          sendMessage: async () => 'ollama says hi'
+        };
+      }
+    });
+
+    const result = await router.routeWithFallback('standard', [{ role: 'user', content: 'hi' }], {});
+    assert.strictEqual(result, 'ollama says hi');
+    assert.strictEqual(receivedToken, 'not-required');
+  });
 });

@@ -8,18 +8,45 @@ const STATUS_ICONS = {
   INFO: '\u2139\uFE0F',
 };
 
+const TOKENLESS_PROVIDERS = new Set(['ollama']);
+
 async function checkProvider(context) {
   if (!context.providerFactory) {
     return { status: 'SKIP', message: 'No provider factory configured' };
   }
-  const providers = typeof context.providerFactory.getProviders === 'function'
-    ? context.providerFactory.getProviders()
-    : null;
-  const hasProviders = Array.isArray(providers) ? providers.length > 0 : !!providers;
-  if (hasProviders) {
-    const name = Array.isArray(providers) ? providers[0] : 'configured';
-    return { status: 'PASS', message: `Connected to ${name}` };
+
+  const store = context.store;
+  if (!store || typeof store.get !== 'function') {
+    return {
+      status: 'WARN',
+      message: 'No providers configured',
+      fix: 'Add at least one provider (e.g. OpenAI) in Settings → Providers',
+    };
   }
+
+  const settings = store.get('settings', {});
+  const activeProvider = settings.activeProvider;
+  const apiTokens = store.get('apiTokens', {});
+  const apiStatus = store.get('apiStatus', {});
+
+  const configured = Object.keys(apiTokens);
+  if (activeProvider && TOKENLESS_PROVIDERS.has(activeProvider) && !configured.includes(activeProvider)) {
+    configured.push(activeProvider);
+  }
+
+  if (configured.length > 0) {
+    const active = configured.includes(activeProvider) ? activeProvider : configured[0];
+    const status = apiStatus[active];
+    if (status && status.ok === false) {
+      return {
+        status: 'WARN',
+        message: `${active} configured but last connection failed`,
+        fix: 'Check provider credentials in Settings → Providers and try Test Connection',
+      };
+    }
+    return { status: 'PASS', message: `Connected to ${active}` };
+  }
+
   return {
     status: 'WARN',
     message: 'No providers configured',

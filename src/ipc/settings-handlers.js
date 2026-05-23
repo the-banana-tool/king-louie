@@ -273,13 +273,14 @@ function registerSettingsHandlers(ipcMain, context = {}) {
 
     // For Anthropic, allow testing via OAuth even without a stored API key
     const isAnthropicOAuth = provider === 'anthropic' && anthropicOAuth && anthropicOAuth.isConnected();
+    const isTokenless = provider === 'ollama';
 
     const tokens = getApiTokens();
-    if (!tokens[provider] && !isAnthropicOAuth) {
+    if (!tokens[provider] && !isAnthropicOAuth && !isTokenless) {
       return { ok: false, error: 'No token saved for this provider.' };
     }
 
-    const token = isAnthropicOAuth ? null : decryptToken(tokens[provider]);
+    const token = (isAnthropicOAuth || isTokenless) ? null : decryptToken(tokens[provider]);
 
     let response;
     if (provider === 'openai') {

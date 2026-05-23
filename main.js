@@ -967,6 +967,8 @@ const appendMessageToChat = (chatId, sender, text, metadata = {}) => {
 let _cachedOAuthAccessToken = null;
 let _cachedOAuthExpiresAt = 0;
 
+const TOKENLESS_PROVIDERS = new Set(['ollama']);
+
 const getDecryptedProviderToken = (provider) => {
   // For Anthropic, check if OAuth is connected first
   if (provider === 'anthropic' && anthropicOAuth.isConnected()) {
@@ -981,6 +983,9 @@ const getDecryptedProviderToken = (provider) => {
   const tokens = getApiTokens();
   const encryptedToken = tokens[provider];
   if (!encryptedToken) {
+    if (TOKENLESS_PROVIDERS.has(provider)) {
+      return 'not-required';
+    }
     throw new Error(`No token saved for ${providerLabels[provider] || provider}.`);
   }
   return decryptToken(encryptedToken);
