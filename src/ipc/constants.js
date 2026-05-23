@@ -131,5 +131,14 @@ module.exports = {
   APPS_LIST: 'apps:list',
   APPS_RESCAN: 'apps:rescan',
   APPS_ADD: 'apps:add',
-  APPS_REMOVE: 'apps:remove'
+  APPS_REMOVE: 'apps:remove',
+
+  CANVAS_RENDER: 'canvas:render',
+  CANVAS_UPDATE: 'canvas:update',
+  CANVAS_EXECUTE_JS: 'canvas:executeJs',
+  CANVAS_EXECUTE_JS_RESULT: 'canvas:executeJsResult',
+  CANVAS_CLOSE: 'canvas:close',
+  CANVAS_GET_STATE: 'canvas:getState',
+  CANVAS_SET_STATE: 'canvas:setState',
+  CANVAS_USER_ACTION: 'canvas:userAction'
 };

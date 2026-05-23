@@ -65,7 +65,8 @@ const appState = {
       enabled: true,
       loaded: []
     }
-  }
+  },
+  canvasVisible: false
 };
 
 const dom = {
@@ -312,6 +313,11 @@ const dom = {
   wizardNextBtn: document.getElementById('wizard-next-btn'),
   wizardSkipBtn: document.getElementById('wizard-skip-btn'),
   wizardSkipStepBtn: document.getElementById('wizard-skip-step-btn'),
+  canvasPanel: document.getElementById('canvas-panel'),
+  canvasFrame: document.getElementById('canvas-frame'),
+  canvasTitle: document.getElementById('canvas-title'),
+  canvasCloseBtn: document.getElementById('canvas-close-btn'),
+  canvasResizeHandle: document.getElementById('canvas-resize-handle'),
 };
 
 function faIcon(iconClass) {
@@ -331,6 +337,7 @@ function resetAppState() {
   appState.memoryEntries = [];
   appState.pendingImages = [];
   appState.pendingDocuments = [];
+  appState.canvasVisible = false;
   appState.activeResponses.clear();
   appState.streamBuffers.clear();
   streamTextOffsets.clear();
@@ -6545,6 +6552,12 @@ async function handleSelectChat(chatId) {
   appState.isSandboxModeEnabled = chat ? chat.sandboxMode !== false : true;
   unwrapIpcResult(await window.electron.chat.setActive(chatId), 'Unable to switch active chat.');
   refreshUI();
+
+  if (chat?.canvasState?.visible && chat.canvasState.content) {
+    showCanvas(chat.canvasState.title, chat.canvasState.content);
+  } else {
+    hideCanvas();
+  }
 }
 
 async function handleRenameChat(chatId) {
@@ -7161,6 +7174,114 @@ if (dom.toggleHistoryBtn) {
     const newWidth = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, startWidth + delta));
     dom.sidebar.style.width = `${newWidth}px`;
     dom.sidebar.style.minWidth = `${newWidth}px`;
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!resizing) return;
+    resizing = false;
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  });
+}
+
+/* --- Canvas panel ------------------------------------------ */
+function wrapCanvasContent(content) {
+  return `<!DOCTYPE html>
+<html><head>
+<meta charset="UTF-8">
+<style>
+  body { margin: 0; padding: 16px; font-family: system-ui, -apple-system, sans-serif; color: #1a1a1a; }
+  * { box-sizing: border-box; }
+</style>
+</head><body>
+${content}
+<script>
+window._klSendAction = function(action, data) {
+  window.parent.postMessage({ type: 'kl-canvas-action', action: action, data: data }, '*');
+};
+window.addEventListener('message', function(e) {
+  if (e.data && e.data.type === 'kl-execute-js') {
+    try {
+      var result = eval(e.data.code);
+      window.parent.postMessage({ type: 'kl-js-result', requestId: e.data.requestId, result: String(result == null ? '' : result) }, '*');
+    } catch(err) {
+      window.parent.postMessage({ type: 'kl-js-result', requestId: e.data.requestId, error: err.message }, '*');
+    }
+  }
+});
+</script>
+</body></html>`;
+}
+
+function showCanvas(title, content) {
+  appState.canvasVisible = true;
+  dom.canvasPanel.hidden = false;
+  dom.canvasResizeHandle.hidden = false;
+  dom.canvasTitle.textContent = title || 'Canvas';
+  dom.canvasFrame.srcdoc = wrapCanvasContent(content);
+}
+
+function hideCanvas() {
+  appState.canvasVisible = false;
+  dom.canvasPanel.hidden = true;
+  dom.canvasResizeHandle.hidden = true;
+  dom.canvasFrame.srcdoc = '';
+}
+
+if (dom.canvasCloseBtn) {
+  dom.canvasCloseBtn.addEventListener('click', () => {
+    hideCanvas();
+    if (appState.activeChatId) {
+      window.electron.canvas.close(appState.activeChatId).catch(() => {});
+    }
+  });
+}
+
+window.addEventListener('message', (event) => {
+  if (!event.data || typeof event.data !== 'object') return;
+  if (event.source !== dom.canvasFrame?.contentWindow) return;
+
+  if (event.data.type === 'kl-canvas-action') {
+    window.electron.canvas.sendUserAction({
+      chatId: appState.activeChatId,
+      action: event.data.action,
+      data: event.data.data
+    });
+  }
+
+  if (event.data.type === 'kl-js-result') {
+    window.electron.canvas.sendJsResult({
+      requestId: event.data.requestId,
+      result: event.data.result,
+      error: event.data.error
+    });
+  }
+});
+
+// Canvas resize handle
+{
+  let resizing = false;
+  let startX = 0;
+  let startWidth = 0;
+  const MIN_WIDTH = 300;
+
+  if (dom.canvasResizeHandle) {
+    dom.canvasResizeHandle.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      resizing = true;
+      startX = e.clientX;
+      startWidth = dom.canvasPanel.offsetWidth;
+      document.body.style.cursor = 'ew-resize';
+      document.body.style.userSelect = 'none';
+    });
+  }
+
+  document.addEventListener('mousemove', (e) => {
+    if (!resizing || !dom.canvasPanel) return;
+    const delta = startX - e.clientX;
+    const maxWidth = Math.floor(window.innerWidth * 0.7);
+    const newWidth = Math.min(maxWidth, Math.max(MIN_WIDTH, startWidth + delta));
+    dom.canvasPanel.style.width = `${newWidth}px`;
   });
 
   document.addEventListener('mouseup', () => {
@@ -8221,6 +8342,22 @@ unsubscribeHandlers.push(window.electron.chat.onToolProgress(({ chatId, toolName
   } catch {
     // Non-critical — swallow rendering errors in progress updates.
   }
+}));
+
+// --- Canvas IPC events ---
+unsubscribeHandlers.push(window.electron.canvas.onRender(({ chatId, title, content }) => {
+  if (chatId !== appState.activeChatId) return;
+  showCanvas(title, content);
+}));
+
+unsubscribeHandlers.push(window.electron.canvas.onClose(({ chatId }) => {
+  if (chatId !== appState.activeChatId) return;
+  hideCanvas();
+}));
+
+unsubscribeHandlers.push(window.electron.canvas.onExecuteJs(({ chatId, requestId, code }) => {
+  if (chatId !== appState.activeChatId || !dom.canvasFrame?.contentWindow) return;
+  dom.canvasFrame.contentWindow.postMessage({ type: 'kl-execute-js', requestId, code }, '*');
 }));
 
 unsubscribeHandlers.push(window.electron.tool.onApprovalRequired(({ approvalId, toolName, parameters }) => {

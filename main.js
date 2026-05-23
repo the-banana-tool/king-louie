@@ -88,6 +88,7 @@ let pinManager;
 const pendingApprovalResolvers = new Map();
 const pendingAskUserResolvers = new Map();
 const pendingDirectoryAccessResolvers = new Map();
+const pendingCanvasJsResolvers = new Map();
 let taskManager;
 let gatewayServer;
 let sessionManager;
@@ -2076,7 +2077,46 @@ const createToolExecutorWithApprovals = async (
       inferenceRouter,
       encryptToken,
       decryptToken,
-      userDataPath: app.getPath('userData')
+      userDataPath: app.getPath('userData'),
+      canvasAction: async ({ action, content, title }) => {
+        const cid = executorOptions.chatId;
+        const sender = event?.sender;
+        if (!cid) throw new Error('No chatId available for canvas action');
+
+        if (action === 'render' || action === 'update') {
+          const chats = getChats();
+          const canvasState = { title: title || 'Canvas', content, visible: true, lastUpdatedAt: new Date().toISOString() };
+          setChats(chats.map(c => c.id !== cid ? c : { ...c, canvasState, updatedAt: new Date().toISOString() }));
+          if (sender && !sender.isDestroyed()) {
+            sender.send('canvas:render', { chatId: cid, title: canvasState.title, content });
+          }
+          return { action };
+        }
+
+        if (action === 'close') {
+          const chats = getChats();
+          setChats(chats.map(c => c.id !== cid ? c : { ...c, canvasState: null, updatedAt: new Date().toISOString() }));
+          if (sender && !sender.isDestroyed()) {
+            sender.send('canvas:close', { chatId: cid });
+          }
+          return { action };
+        }
+
+        if (action === 'execute_js') {
+          if (!sender || sender.isDestroyed()) throw new Error('No renderer available for JS execution');
+          const requestId = createId();
+          return new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
+              pendingCanvasJsResolvers.delete(requestId);
+              reject(new Error('Canvas JS execution timed out (10s)'));
+            }, 10000);
+            pendingCanvasJsResolvers.set(requestId, { resolve, reject, timeout });
+            sender.send('canvas:executeJs', { chatId: cid, requestId, code: content });
+          });
+        }
+
+        throw new Error(`Unknown canvas action: ${action}`);
+      }
     }
   });
 
@@ -2786,6 +2826,18 @@ registerHandlers(ipcMain, {
   getSkillLoader: () => skillLoader,
   getPinManager: () => pinManager,
   getShell: () => shell
+});
+
+ipcMain.on('canvas:executeJsResult', (_event, { requestId, result, error }) => {
+  const pending = pendingCanvasJsResolvers.get(requestId);
+  if (!pending) return;
+  pendingCanvasJsResolvers.delete(requestId);
+  clearTimeout(pending.timeout);
+  if (error) {
+    pending.resolve({ action: 'execute_js', error });
+  } else {
+    pending.resolve({ action: 'execute_js', result });
+  }
 });
 
 app.whenReady().then(async () => {

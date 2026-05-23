@@ -755,6 +755,15 @@ contextBridge.exposeInMainWorld(
     app: {
       quitWindow: () => ipcRenderer.invoke('app:quitWindow')
     },
+    canvas: {
+      onRender: (callback) => registerOnce('canvas:render', callback),
+      onClose: (callback) => registerOnce('canvas:close', callback),
+      onExecuteJs: (callback) => registerOnce('canvas:executeJs', callback),
+      sendJsResult: (payload) => ipcRenderer.send('canvas:executeJsResult', payload),
+      sendUserAction: (payload) => ipcRenderer.send('canvas:userAction', payload),
+      getState: (chatId) => ipcRenderer.invoke('canvas:getState', { chatId }),
+      close: (chatId) => ipcRenderer.invoke('canvas:close', { chatId })
+    },
     markdown: {
       parse: (text) => safeMarkdownParse(text),
       sanitize: (text) => sanitizeHtml(text)

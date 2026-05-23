@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self'; frame-src blob: data:">
   <title>King Louie Chat</title>
   <link rel="icon" type="image/x-icon" href="favicon.ico">
   <link rel="icon" type="image/png" sizes="48x48" href="favicon.png">
@@ -106,6 +106,17 @@
           <button id="stop-btn" class="btn btn-lg stop-btn" hidden><i class="fas fa-stop"></i> Stop</button>
         </div>
       </div>
+    </div>
+
+    <div class="canvas-resize-handle" id="canvas-resize-handle" aria-hidden="true" hidden></div>
+    <div class="canvas-panel" id="canvas-panel" hidden>
+      <div class="canvas-header">
+        <span class="canvas-title" id="canvas-title">Canvas</span>
+        <div class="canvas-header-actions">
+          <button id="canvas-close-btn" class="icon-button" type="button" title="Close canvas"><i class="fas fa-xmark"></i></button>
+        </div>
+      </div>
+      <iframe id="canvas-frame" class="canvas-frame" sandbox="allow-scripts"></iframe>
     </div>
   </div>
 

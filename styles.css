@@ -2653,3 +2653,75 @@ body {
   background: none; border: none; font-family: inherit;
 }
 .welcome-card .welcome-dismiss:hover { color: var(--text-secondary); }
+
+/* --- Canvas panel -------------------------------------------- */
+.canvas-panel {
+  width: 45%;
+  min-width: 300px;
+  max-width: 70%;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--bg-base);
+  border-left: 1px solid var(--border-subtle);
+}
+
+.canvas-panel[hidden] { display: none; }
+
+.canvas-header {
+  padding: 10px 16px;
+  background-color: var(--bg-surface);
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+
+.canvas-title {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas-header-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.canvas-frame {
+  flex: 1;
+  border: none;
+  background: #ffffff;
+  width: 100%;
+}
+
+.canvas-resize-handle {
+  width: 6px;
+  cursor: ew-resize;
+  background: transparent;
+  position: relative;
+  flex-shrink: 0;
+}
+
+.canvas-resize-handle[hidden] { display: none; }
+
+.canvas-resize-handle::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 2px;
+  height: 44px;
+  border-radius: 2px;
+  background: var(--border-default);
+  transition: background var(--transition);
+}
+
+.canvas-resize-handle:hover::after {
+  background: var(--accent);
+}

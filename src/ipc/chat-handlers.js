@@ -416,7 +416,8 @@ function registerChatHandlers(ipcMain, context = {}) {
       const executor = await createToolExecutorWithApprovals(event, runtimeEnvironment, null, {
         workingDirectory: chatWorkingDirectory,
         allowedDirectories,
-        useSandbox: sandboxMode
+        useSandbox: sandboxMode,
+        chatId
       });
 
       executor.on('preExecute', ({ toolName, parameters }) => {

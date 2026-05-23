@@ -15,6 +15,7 @@ const { registerDiagnosticsHandlers } = require('./diagnostics-handlers');
 const { registerMeshHandlers } = require('./mesh-handlers');
 const { registerWorkflowHandlers } = require('./workflow-handlers');
 const { registerAppsHandlers } = require('./apps-handlers');
+const { registerCanvasHandlers } = require('./canvas-handlers');
 const { wrapHandler } = require('./wrap-handler');
 
 function registerHandlers(ipcMain, context = {}) {
@@ -35,6 +36,7 @@ function registerHandlers(ipcMain, context = {}) {
   registerMeshHandlers(ipcMain, context);
   registerWorkflowHandlers(ipcMain, context);
   registerAppsHandlers(ipcMain, context);
+  registerCanvasHandlers(ipcMain, context);
 }
 
 module.exports = {
