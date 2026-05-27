@@ -1,5 +1,28 @@
 const { contextBridge, ipcRenderer } = require('electron');
-const { createLogger } = require('./src/logging');
+
+// The logger lives in a bundled app module. If it ever fails to load (e.g. a
+// sandboxed preload where relative requires are blocked), fall back to console
+// rather than letting the whole preload abort — an aborted preload never calls
+// contextBridge.exposeInMainWorld, leaving the renderer with no `window.electron`
+// and breaking every IPC call ("Cannot read properties of undefined").
+let createLogger;
+try {
+  ({ createLogger } = require('./src/logging'));
+} catch {
+  createLogger = (subsystem) => {
+    const tag = `[${subsystem}]`;
+    return {
+      trace: () => {}, debug: () => {},
+      info: (m) => console.log(tag, m),
+      warn: (m) => console.warn(tag, m),
+      error: (m) => console.error(tag, m),
+      fatal: (m) => console.error(tag, m),
+      child() { return this; },
+      withContext() { return this; },
+      isEnabled: () => true
+    };
+  };
+}
 
 const markdownLog = createLogger('markdown');
 

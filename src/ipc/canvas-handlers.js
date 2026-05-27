@@ -22,6 +22,19 @@ function registerCanvasHandlers(ipcMain, context = {}) {
     setChats(updated);
     return { ok: true };
   }));
+
+  // User dismissed the canvas panel — clear the persisted state so it does not
+  // reappear when the chat is reloaded. Mirrors the agent-driven `close` action.
+  ipcMain.handle(IPC.CANVAS_CLOSE, wrapHandler(IPC.CANVAS_CLOSE, async (_event, { chatId } = {}) => {
+    if (!chatId) return { ok: false, error: 'chatId required' };
+    const chats = getChats();
+    const updated = chats.map(chat => {
+      if (chat.id !== chatId) return chat;
+      return { ...chat, canvasState: null, updatedAt: new Date().toISOString() };
+    });
+    setChats(updated);
+    return { ok: true };
+  }));
 }
 
 module.exports = { registerCanvasHandlers };

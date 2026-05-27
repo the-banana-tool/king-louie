@@ -11,6 +11,7 @@ const QwenProvider = require('./qwen-provider');
 const TogetherProvider = require('./together-provider');
 const FireworksProvider = require('./fireworks-provider');
 const CohereProvider = require('./cohere-provider');
+const CopilotProvider = require('./copilot-provider');
 
 class ProviderFactory {
   static _registry = new Map();
@@ -57,5 +58,6 @@ ProviderFactory.registerProvider('qwen', QwenProvider);
 ProviderFactory.registerProvider('together', TogetherProvider);
 ProviderFactory.registerProvider('fireworks', FireworksProvider);
 ProviderFactory.registerProvider('cohere', CohereProvider);
+ProviderFactory.registerProvider('copilot', CopilotProvider);
 
 module.exports = ProviderFactory;

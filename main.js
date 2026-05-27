@@ -151,7 +151,7 @@ const DEFAULT_SETTINGS = {
   providerModels: {
     openai: 'gpt-4o-mini',
     anthropic: 'claude-sonnet-4-20250514',
-    copilot: '',
+    copilot: 'gpt-4o',
     groq: 'llama-3.3-70b-versatile',
     mistral: 'mistral-large-latest',
     ollama: '',
@@ -2685,7 +2685,13 @@ function createWindow() {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      // The preload requires bundled Node modules (logging, marked, dompurify,
+      // highlight.js). Electron 20+ defaults sandbox to true, which blocks those
+      // requires and aborts the preload before it can expose `window.electron`,
+      // breaking every IPC call. The renderer stays isolated via
+      // contextIsolation + nodeIntegration:false.
+      sandbox: false
     }
   });
 
