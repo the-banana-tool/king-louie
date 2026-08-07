@@ -2,6 +2,7 @@ const path = require('path');
 const VectorStore = require('../memory/vector-store');
 const ResultPersistence = require('./result-persistence');
 const APICompaction = require('../context/api-compaction');
+const { FailoverPolicy } = require('../providers/failover-policy');
 const { createLogger } = require('../logging');
 const log = createLogger('agent-loop');
 
@@ -15,6 +16,10 @@ class AgentLoop {
       ? options.onUsageRecorded
       : null;
     this.abortSignal = options.abortSignal || null;
+
+    // Shared with InferenceRouter so "what is worth retrying" has exactly
+    // one definition in the codebase.
+    this.failoverPolicy = options.failoverPolicy || new FailoverPolicy(options.failover || {});
 
     // Streaming callback: fires with text deltas during LLM inference.
     // Enables real-time UI updates during agent loop iterations instead
@@ -228,21 +233,14 @@ class AgentLoop {
         await this._compactToolResults(conversationHistory);
       }
 
-      // Retry transient upstream failures (Anthropic 529 "overloaded",
-       // generic 5xx, rate limit 429, connection resets) with exponential
-       // backoff so a mid-loop hiccup doesn't discard the exploration so far.
-      // Up to 3 retries; total worst-case wait ~14s before giving up.
-      const isTransient = (err) => {
-        const msg = String(err?.message || err || '').toLowerCase();
-        if (!msg) return false;
-        if (msg.includes('overloaded')) return true;
-        if (msg.includes('rate limit') || msg.includes('429')) return true;
-        if (msg.includes('503') || msg.includes('504') || msg.includes('502')) return true;
-        if (msg.includes('econnreset') || msg.includes('etimedout') || msg.includes('fetch failed')) return true;
-        if (msg.includes('timeout')) return true;
-        return false;
-      };
+      // Retry transient upstream failures so a mid-loop hiccup doesn't
+      // discard the exploration so far. What counts as transient — and how
+      // long to wait — comes from the shared failover policy rather than a
+      // local substring check, so a provider's own `retry-after` is honored
+      // and a permanent failure (bad auth, oversized context) stops
+      // immediately instead of burning four attempts on a certainty.
       const maxAttempts = 4;
+      const attemptsByReason = {};
       let response;
       let lastErr;
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -271,16 +269,32 @@ class AgentLoop {
           break;
         } catch (err) {
           lastErr = err;
-          if (!isTransient(err) || attempt === maxAttempts) {
+
+          const plan = this.failoverPolicy.plan(err, {
+            totalAttempts: attempt,
+            attemptsByReason,
+            provider: this.provider?.getProviderName?.(),
+            model: effectiveOptions.model || options.model,
+            aborted: this.abortSignal?.aborted
+          });
+          attemptsByReason[plan.reason] = (attemptsByReason[plan.reason] || 0) + 1;
+
+          const canRetry = plan.action === 'retry' && attempt < maxAttempts;
+          if (!canRetry) {
             const usedModel = effectiveOptions.model || options.model || '(default)';
             const wrapped = new Error(
               `Provider call failed (iteration ${iterations}, model "${usedModel}"): ${err.message || err}`
             );
             wrapped.cause = err;
+            wrapped.failoverReason = plan.reason;
             throw wrapped;
           }
-          const waitMs = 1000 * Math.pow(2, attempt - 1); // 1s, 2s, 4s, 8s
-          log.warn(`Transient provider error (attempt ${attempt}/${maxAttempts}): ${err.message}. Retrying in ${waitMs}ms…`);
+
+          const waitMs = plan.waitMs || 1000 * Math.pow(2, attempt - 1);
+          log.warn(
+            `Transient provider error [${plan.reason}] (attempt ${attempt}/${maxAttempts}): `
+            + `${err.message}. Retrying in ${waitMs}ms…`
+          );
           await new Promise((resolve) => setTimeout(resolve, waitMs));
         }
       }

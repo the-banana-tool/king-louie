@@ -1,4 +1,6 @@
 const { evaluateRules } = require('./smart-routing');
+const { FailoverPolicy } = require('./failover-policy');
+const { RecoveryAction } = require('./error-classifier');
 const { createLogger } = require('../logging');
 const log = createLogger('inference-router');
 
@@ -13,6 +15,24 @@ class InferenceRouter {
       groq: { provider: 'openai', model: 'gpt-4o-mini' },
       ollama: { provider: 'groq', model: 'llama-3.3-70b-versatile' }
     };
+
+    this.policy = options.policy || new FailoverPolicy(options.failover || {});
+
+    // Injectable so tests exercise the backoff logic without real waiting.
+    this.sleep = typeof options.sleep === 'function'
+      ? options.sleep
+      : (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    // Optional hooks. Absent hooks degrade to the next best action rather
+    // than failing — King Louie currently holds one credential per provider,
+    // so credential rotation has nothing to rotate to, and the honest
+    // response is to fall back to another model instead of pretending.
+    this.rotateCredential = typeof options.rotateCredential === 'function'
+      ? options.rotateCredential
+      : null;
+    this.compressContext = typeof options.compressContext === 'function'
+      ? options.compressContext
+      : null;
   }
 
   getCapabilities(provider, model) {
@@ -100,18 +120,126 @@ class InferenceRouter {
     return providerInstance.sendMessage(messages, mergedOptions);
   }
 
-  async routeWithFallback(tier, messages, options) {
-    const primary = this.getTierConfig(tier);
-    try {
-      return await this.execute(primary, messages, options);
-    } catch (err) {
-      const fallback = this.fallbacks[primary.provider];
-      if (fallback) {
-        log.warn(`${primary.provider} failed, falling back to ${fallback.provider}`);
-        return await this.execute(fallback, messages, options);
+  /**
+   * Resolve the fallback target for a config, skipping targets already tried.
+   * Returns null when there is nowhere left to go.
+   */
+  _nextFallback(config, triedTargets) {
+    const fallback = this.fallbacks[config.provider];
+    if (!fallback) return null;
+
+    const key = `${fallback.provider}:${fallback.model}`;
+    if (triedTargets.has(key)) return null;
+
+    return fallback;
+  }
+
+  /**
+   * Execute a tier request, recovering from failures according to what
+   * actually went wrong.
+   *
+   * Previously this did a single static hop to a fallback provider on any
+   * error, which meant a 429 burned the fallback instead of waiting for the
+   * window to clear, a context-overflow retried the identical oversized
+   * request, and a permanent auth failure looked exactly like a hiccup.
+   * Now the classifier decides and FailoverPolicy budgets it.
+   */
+  async routeWithFallback(tier, messages, options = {}) {
+    let config = this.getTierConfig(tier);
+    let payload = messages;
+
+    const triedTargets = new Set([`${config.provider}:${config.model}`]);
+    const attemptsByReason = {};
+    const state = {
+      totalAttempts: 0,
+      credentialRefreshed: false,
+      contextCompressed: false
+    };
+
+    // Bounded by FailoverPolicy.maxTotalAttempts; the loop guard is a
+    // backstop against a hook that never makes progress.
+    for (let guard = 0; guard <= this.policy.maxTotalAttempts; guard += 1) {
+      try {
+        return await this.execute(config, payload, options);
+      } catch (err) {
+        state.totalAttempts += 1;
+
+        const plan = this.policy.plan(err, {
+          ...state,
+          attemptsByReason,
+          provider: config.provider,
+          model: config.model,
+          aborted: options.abortSignal?.aborted
+        });
+
+        attemptsByReason[plan.reason] = (attemptsByReason[plan.reason] || 0) + 1;
+
+        let action = plan.action;
+
+        // Degrade actions we have no hook for, rather than silently
+        // succeeding at nothing.
+        if (action === RecoveryAction.ROTATE_CREDENTIAL && !this.rotateCredential) {
+          action = RecoveryAction.FALLBACK_MODEL;
+        }
+        if (action === RecoveryAction.COMPRESS_CONTEXT && !this.compressContext) {
+          action = RecoveryAction.FALLBACK_MODEL;
+        }
+
+        if (action === RecoveryAction.ABORT) {
+          log.warn(`${config.provider} failed permanently (${plan.reason}): ${plan.detail}`);
+          throw err;
+        }
+
+        if (action === RecoveryAction.RETRY) {
+          log.warn(
+            `${config.provider} ${plan.reason} — retrying in ${plan.waitMs}ms `
+            + `(attempt ${state.totalAttempts}/${this.policy.maxTotalAttempts})`
+          );
+          if (plan.waitMs > 0) await this.sleep(plan.waitMs);
+          continue;
+        }
+
+        if (action === RecoveryAction.ROTATE_CREDENTIAL) {
+          const rotated = await this.rotateCredential(config.provider, err);
+          if (rotated) {
+            state.credentialRefreshed = true;
+            log.warn(`${config.provider} ${plan.reason} — rotated credential, retrying`);
+            continue;
+          }
+          action = RecoveryAction.FALLBACK_MODEL;
+        }
+
+        if (action === RecoveryAction.COMPRESS_CONTEXT) {
+          const compressed = await this.compressContext(payload, { config, error: err });
+          if (compressed) {
+            payload = compressed;
+            state.contextCompressed = true;
+            log.warn(`${config.provider} context overflow — compressed request, retrying`);
+            continue;
+          }
+          action = RecoveryAction.FALLBACK_MODEL;
+        }
+
+        // FALLBACK_MODEL
+        const fallback = this._nextFallback(config, triedTargets);
+        if (!fallback) {
+          log.warn(`${config.provider} failed (${plan.reason}) with no fallback available`);
+          throw err;
+        }
+
+        log.warn(
+          `${config.provider} failed (${plan.reason}), falling back to ${fallback.provider}`
+        );
+        config = fallback;
+        triedTargets.add(`${fallback.provider}:${fallback.model}`);
+        // A new target gets a clean slate: the previous target's rate limit
+        // says nothing about this one's.
+        state.credentialRefreshed = false;
+        for (const key of Object.keys(attemptsByReason)) delete attemptsByReason[key];
       }
-      throw err;
     }
+
+    throw new Error('Failover loop exceeded its attempt ceiling without resolving.');
   }
 
   resolve(request = {}) {

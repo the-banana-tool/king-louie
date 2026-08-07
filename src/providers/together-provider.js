@@ -63,7 +63,7 @@ class TogetherProvider extends BaseLLMProvider {
         stream: false
       })
     });
-    if (!response.ok) throw new Error(await this.extractError(response));
+    if (!response.ok) throw await this.buildError(response);
     const data = await response.json();
     return data.choices?.[0]?.message?.content || '';
   }
@@ -86,7 +86,7 @@ class TogetherProvider extends BaseLLMProvider {
         stream: false
       })
     });
-    if (!response.ok) throw new Error(await this.extractError(response));
+    if (!response.ok) throw await this.buildError(response);
     const data = await response.json();
     const llmMetrics = this.buildLlmCallMetrics({ model: data.model || requestedModel, usage: data.usage });
     return this.parseToolResponse(data, llmMetrics);
@@ -134,7 +134,7 @@ class TogetherProvider extends BaseLLMProvider {
         stream_options: { include_usage: true }
       })
     });
-    if (!response.ok) throw new Error(await this.extractError(response));
+    if (!response.ok) throw await this.buildError(response);
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -168,7 +168,7 @@ class TogetherProvider extends BaseLLMProvider {
 
   async listModels() {
     const response = await fetch(`${this.baseUrl}/models`, { method: 'GET', headers: this.getHeaders() });
-    if (!response.ok) throw new Error(await this.extractError(response));
+    if (!response.ok) throw await this.buildError(response);
     const data = await response.json();
     return (data.data || []).map((m) => m.id).sort();
   }
