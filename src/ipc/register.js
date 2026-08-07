@@ -2,6 +2,7 @@ const { registerChatHandlers } = require('./chat-handlers');
 const { registerToolHandlers } = require('./tool-handlers');
 const { registerHooksHandlers } = require('./hooks-handlers');
 const { registerMemoryHandlers } = require('./memory-handlers');
+const { registerCheckpointHandlers } = require('./checkpoint-handlers');
 const { registerSettingsHandlers } = require('./settings-handlers');
 const { registerTaskHandlers } = require('./task-handlers');
 const { registerAgentHandlers } = require('./agent-handlers');
@@ -23,6 +24,7 @@ function registerHandlers(ipcMain, context = {}) {
   registerToolHandlers(ipcMain, context);
   registerHooksHandlers(ipcMain, context);
   registerMemoryHandlers(ipcMain, context);
+  registerCheckpointHandlers(ipcMain, context);
   registerSettingsHandlers(ipcMain, context);
   registerTaskHandlers(ipcMain, context);
   registerAgentHandlers(ipcMain, context);

@@ -242,6 +242,12 @@ const dom = {
   chatMcpCloseBtn: document.getElementById('chat-mcp-close-btn'),
   chatMcpToggles: document.getElementById('chat-mcp-toggles'),
   chatInfoCloseBtn: document.getElementById('chat-info-close-btn'),
+  checkpointsBtn: document.getElementById('checkpoints-btn'),
+  checkpointsPopover: document.getElementById('checkpoints-popover'),
+  checkpointsCloseBtn: document.getElementById('checkpoints-close-btn'),
+  checkpointsList: document.getElementById('checkpoints-list'),
+  checkpointsEnabled: document.getElementById('checkpoints-enabled'),
+  checkpointsStatus: document.getElementById('checkpoints-status'),
   chatInfoPopoverBody: document.getElementById('chat-info-popover-body'),
   skillSettingsContainer: document.getElementById('skill-settings-container'),
   skillsList: document.getElementById('skills-list'),
@@ -2696,6 +2702,10 @@ function renderSettings() {
   const defaults = appState.settings.defaults || {};
   if (dom.defaultAgentMode) dom.defaultAgentMode.checked = !!defaults.agentMode;
   if (dom.defaultSandboxMode) dom.defaultSandboxMode.checked = defaults.sandboxMode !== false;
+  // `settings:load` returns a curated payload that doesn't carry the
+  // checkpoint flag, and the live manager is the real authority anyway
+  // (it disables itself if git is missing). Ask it directly.
+  refreshCheckpointToggle();
 
   const templateVariables = appState.settings.templateVariables || {};
   if (dom.templateNameInput) dom.templateNameInput.value = templateVariables.name || '';
@@ -7380,6 +7390,195 @@ document.addEventListener('click', (e) => {
     dom.chatMcpPopover.hidden = true;
   }
 });
+
+/* --- File checkpoints popover ------------------------------- */
+
+async function refreshCheckpointToggle() {
+  if (!dom.checkpointsEnabled) return;
+  try {
+    const status = unwrapIpcResult(
+      await window.electron.checkpoints.getStatus(),
+      'Could not read checkpoint status.'
+    );
+    dom.checkpointsEnabled.checked = status.enabled === true;
+    dom.checkpointsEnabled.disabled = !status.available;
+  } catch {
+    dom.checkpointsEnabled.checked = false;
+  }
+}
+
+function formatCheckpointTime(iso) {
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return '';
+
+  const elapsedMin = Math.floor((Date.now() - at.getTime()) / 60000);
+  if (elapsedMin < 1) return 'just now';
+  if (elapsedMin < 60) return `${elapsedMin}m ago`;
+  if (elapsedMin < 24 * 60) return `${Math.floor(elapsedMin / 60)}h ago`;
+  return at.toLocaleString();
+}
+
+async function renderCheckpointsList() {
+  if (!dom.checkpointsList) return;
+
+  const chat = getActiveChat();
+  const workingDirectory = chat?.workingDirectory || null;
+
+  dom.checkpointsList.innerHTML = '';
+
+  if (!workingDirectory) {
+    dom.checkpointsList.textContent = 'Set a working directory to use checkpoints.';
+    return;
+  }
+
+  let status;
+  try {
+    status = unwrapIpcResult(
+      await window.electron.checkpoints.getStatus(),
+      'Could not read checkpoint status.'
+    );
+  } catch {
+    status = { enabled: false };
+  }
+
+  if (!status.enabled) {
+    const note = document.createElement('p');
+    note.className = 'provider-message';
+    note.textContent = 'Checkpoints are off. Turn them on in Settings → General.';
+    dom.checkpointsList.appendChild(note);
+    return;
+  }
+
+  dom.checkpointsList.textContent = 'Loading…';
+
+  let checkpoints = [];
+  try {
+    const result = unwrapIpcResult(
+      await window.electron.checkpoints.list({ workingDirectory, limit: 25 }),
+      'Could not list checkpoints.'
+    );
+    checkpoints = result.checkpoints || [];
+  } catch (err) {
+    dom.checkpointsList.textContent = err.message || 'Could not list checkpoints.';
+    return;
+  }
+
+  dom.checkpointsList.innerHTML = '';
+
+  if (checkpoints.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'provider-message';
+    empty.textContent = 'No checkpoints yet. One is taken before the first file change of a turn.';
+    dom.checkpointsList.appendChild(empty);
+    return;
+  }
+
+  for (const checkpoint of checkpoints) {
+    const row = document.createElement('div');
+    row.className = 'checkpoint-row';
+
+    const info = document.createElement('div');
+    info.className = 'checkpoint-info';
+
+    const when = document.createElement('div');
+    when.className = 'checkpoint-when';
+    when.textContent = formatCheckpointTime(checkpoint.createdAt);
+
+    const label = document.createElement('div');
+    label.className = 'checkpoint-label';
+    label.textContent = checkpoint.message || 'checkpoint';
+    label.title = checkpoint.id;
+
+    info.appendChild(when);
+    info.appendChild(label);
+
+    const restoreBtn = document.createElement('button');
+    restoreBtn.type = 'button';
+    restoreBtn.className = 'btn btn-sm';
+    restoreBtn.appendChild(faIcon('fas fa-rotate-left'));
+    restoreBtn.appendChild(document.createTextNode(' Restore'));
+
+    restoreBtn.addEventListener('click', async () => {
+      // Restoring rewrites files on disk, so it always goes through an
+      // explicit confirmation naming what will change.
+      const confirmed = window.confirm(
+        `Restore files in\n${workingDirectory}\n\nto the state at "${checkpoint.message}"?\n\n`
+        + 'Changes made after this point will be undone. A safety checkpoint '
+        + 'is taken first, so this can itself be undone.'
+      );
+      if (!confirmed) return;
+
+      restoreBtn.disabled = true;
+      restoreBtn.textContent = 'Restoring…';
+
+      try {
+        unwrapIpcResult(
+          await window.electron.checkpoints.restore({
+            workingDirectory,
+            checkpointId: checkpoint.id
+          }),
+          'Restore failed.'
+        );
+        await renderCheckpointsList();
+      } catch (err) {
+        restoreBtn.disabled = false;
+        restoreBtn.textContent = 'Restore';
+        window.alert(err.message || 'Restore failed.');
+      }
+    });
+
+    row.appendChild(info);
+    row.appendChild(restoreBtn);
+    dom.checkpointsList.appendChild(row);
+  }
+}
+
+if (dom.checkpointsBtn) {
+  dom.checkpointsBtn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (!dom.checkpointsPopover) return;
+    const willOpen = dom.checkpointsPopover.hidden;
+    dom.checkpointsPopover.hidden = !willOpen;
+    if (willOpen) await renderCheckpointsList();
+  });
+}
+
+if (dom.checkpointsCloseBtn) {
+  dom.checkpointsCloseBtn.addEventListener('click', () => {
+    if (dom.checkpointsPopover) dom.checkpointsPopover.hidden = true;
+  });
+}
+
+document.addEventListener('click', (e) => {
+  if (dom.checkpointsPopover && !dom.checkpointsPopover.hidden
+      && !e.target.closest('#checkpoints-popover') && !e.target.closest('#checkpoints-btn')) {
+    dom.checkpointsPopover.hidden = true;
+  }
+});
+
+if (dom.checkpointsEnabled) {
+  dom.checkpointsEnabled.addEventListener('change', async () => {
+    const enabled = Boolean(dom.checkpointsEnabled.checked);
+    try {
+      unwrapIpcResult(
+        await window.electron.checkpoints.setEnabled({ enabled }),
+        'Could not change the checkpoint setting.'
+      );
+      if (dom.checkpointsStatus) {
+        dom.checkpointsStatus.textContent = enabled
+          ? 'File checkpoints enabled.'
+          : 'File checkpoints disabled.';
+        dom.checkpointsStatus.classList.remove('error');
+      }
+    } catch (err) {
+      dom.checkpointsEnabled.checked = !enabled;
+      if (dom.checkpointsStatus) {
+        dom.checkpointsStatus.textContent = err.message || 'Could not change the checkpoint setting.';
+        dom.checkpointsStatus.classList.add('error');
+      }
+    }
+  });
+}
 
 /* --- Chat MCP popover -------------------------------------- */
 if (dom.chatMcpBtn) {

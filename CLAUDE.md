@@ -19,6 +19,34 @@ When iterating on a specific module, run just its test file directly with
 `node --test`. Output uses TAP format; look for `# fail 0` / `# pass N` in the
 summary block.
 
+## Running the app
+
+`npm start` launches Electron normally. If it dies instantly with
+`Cannot read properties of undefined (reading 'registerSchemesAsPrivileged')`
+at `main.js:9`, the environment has `ELECTRON_RUN_AS_NODE=1` set — that makes
+the Electron binary run as plain Node, so `app`, `protocol`, and `BrowserWindow`
+are all undefined.
+
+**This is the normal state of an agent shell.** Electron-based tools (VS Code's
+integrated terminal, Electron-based CLI agents) set it for their own child
+processes and it is inherited. Unset it for the launch:
+
+```bash
+ELECTRON_RUN_AS_NODE= npm start
+```
+
+To drive the UI programmatically, use Playwright's `_electron` — it is already a
+dependency. Launch `node_modules/electron/dist/electron.exe` (or
+`dist/electron` on Linux, `dist/Electron.app/Contents/MacOS/Electron` on macOS)
+and **delete `ELECTRON_RUN_AS_NODE` from the env you pass the child**, or the
+launch fails with "Process failed to launch!". Pass
+`--user-data-dir=<temp path>` to get a clean profile instead of mutating real
+chats, settings, and the vault.
+
+Click through `page.evaluate(() => document.getElementById(id).click())` rather
+than `locator.click()`, and remember the onboarding wizard appears on a fresh
+profile (`#wizard-skip-btn` dismisses it).
+
 ## Logging
 
 Use `createLogger` from `src/logging.js` instead of bare `console.*` calls.

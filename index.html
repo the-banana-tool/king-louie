@@ -60,7 +60,18 @@
           <button id="working-dir-btn" class="working-dir-btn" type="button" title="Set working directory" aria-label="Set working directory"><i class="fas fa-folder-open"></i> <span id="working-dir-label" class="working-dir-label">No working directory</span></button>
           <button id="export-chat-btn" class="icon-button" type="button" title="Export chat as JSON" aria-label="Export chat as JSON"><i class="fas fa-file-export"></i></button>
           <button id="chat-mcp-btn" class="icon-button" type="button" title="MCP servers for this chat" aria-label="MCP servers"><i class="fas fa-plug"></i></button>
+          <button id="checkpoints-btn" class="icon-button" type="button" title="File checkpoints" aria-label="File checkpoints"><i class="fas fa-clock-rotate-left"></i></button>
           <button id="chat-info-btn" class="icon-button" type="button" title="Chat info" aria-label="Chat info"><i class="fas fa-chart-bar"></i></button>
+        </div>
+        <div class="chat-info-popover checkpoints-popover" id="checkpoints-popover" hidden>
+          <div class="chat-info-popover-header">
+            <span>File Checkpoints</span>
+            <button id="checkpoints-close-btn" class="icon-button" type="button" title="Close"><i class="fas fa-xmark"></i></button>
+          </div>
+          <div class="chat-info-popover-body">
+            <p class="provider-message" style="margin: 0 0 8px 0;">Snapshots of this working directory taken before the first file change of each turn. Restoring rewrites files on disk.</p>
+            <div id="checkpoints-list" class="checkpoints-list"></div>
+          </div>
         </div>
         <div class="chat-info-popover" id="chat-mcp-popover" hidden>
           <div class="chat-info-popover-header">
@@ -192,6 +203,18 @@
               </label>
             </div>
             <span class="provider-message" id="general-defaults-status"></span>
+          </section>
+
+          <section class="template-variables-card">
+            <h3>File Checkpoints</h3>
+            <p>Snapshots the working directory before the first file-changing tool of each turn, so a turn's edits can be undone from the <i class="fas fa-clock-rotate-left"></i> menu in the chat header. Requires git. Files excluded by <code>.gitignore</code> are not snapshotted.</p>
+            <div class="template-variables-grid">
+              <label class="inline-toggle" for="checkpoints-enabled">
+                <input id="checkpoints-enabled" type="checkbox">
+                <span>Enable file checkpoints</span>
+              </label>
+            </div>
+            <span class="provider-message" id="checkpoints-status"></span>
           </section>
         </div>
 
