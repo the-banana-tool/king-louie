@@ -3,6 +3,7 @@ const VectorStore = require('../memory/vector-store');
 const ResultPersistence = require('./result-persistence');
 const APICompaction = require('../context/api-compaction');
 const { FailoverPolicy } = require('../providers/failover-policy');
+const { ToolGuardrails } = require('./tool-guardrails');
 const { createLogger } = require('../logging');
 const log = createLogger('agent-loop');
 
@@ -20,6 +21,12 @@ class AgentLoop {
     // Shared with InferenceRouter so "what is worth retrying" has exactly
     // one definition in the codebase.
     this.failoverPolicy = options.failoverPolicy || new FailoverPolicy(options.failover || {});
+
+    // Per-turn loop detection. Warnings on, hard stops off by default —
+    // pass `guardrails: false` to disable entirely.
+    this.guardrails = options.guardrails === false
+      ? null
+      : (options.guardrails || new ToolGuardrails(options.guardrailConfig || {}));
 
     // Streaming callback: fires with text deltas during LLM inference.
     // Enables real-time UI updates during agent loop iterations instead
@@ -185,6 +192,10 @@ class AgentLoop {
     // the whole turn is undone as a unit, not iteration by iteration.
     const turnId = options.turnId
       || `turn-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+    // Guardrail counters bound one turn: a file read twice in the previous
+    // turn says nothing about this one.
+    if (this.guardrails) this.guardrails.resetForTurn();
+    this._loggedGuardrails = new Set();
     const conversationHistory = [...messages];
     const executedTools = [];
     const llmCalls = [];
@@ -380,6 +391,37 @@ class AgentLoop {
 
           let toolResult;
 
+          // Loop guardrails. AskUser is exempt — it is user interaction, and
+          // waiting on a person is never the model spinning.
+          const guarded = this.guardrails && call.toolName !== 'AskUser';
+
+          if (guarded) {
+            const gate = this.guardrails.beforeCall(call.toolName, call.parameters);
+            if (gate.shouldHalt) {
+              // A model that keeps re-issuing a blocked call would otherwise
+              // log the identical line on every iteration. Log each distinct
+              // block once; the model still gets the refusal every time.
+              const logKey = `${gate.code}::${gate.signature}`;
+              if (!this._loggedGuardrails.has(logKey)) {
+                this._loggedGuardrails.add(logKey);
+                log.warn(`Guardrail ${gate.code}: ${gate.message}`);
+              }
+              // Return the refusal as the tool's result rather than throwing:
+              // the model needs to see why it was stopped in order to change
+              // course, and an exception would discard the turn's work.
+              return {
+                ...call,
+                toolCallId,
+                result: {
+                  success: false,
+                  error: gate.message,
+                  blockedByGuardrail: true,
+                  guardrailCode: gate.code
+                }
+              };
+            }
+          }
+
           if (call.toolName === 'AskUser') {
             const question = call.parameters?.question;
             toolResult = await new Promise((resolve) => {
@@ -425,6 +467,19 @@ class AgentLoop {
             toolResult = await this._handleAccessDenied(
               toolResult, call.toolName, call.parameters, callOptions
             );
+          }
+
+          if (guarded) {
+            const observed = this.guardrails.recordResult(
+              call.toolName, call.parameters, toolResult
+            );
+            if (observed.action === 'warn') {
+              log.info(`Guardrail ${observed.code}: ${observed.message}`);
+              // Ride along on the result the model already reads, rather than
+              // synthesising an extra message — no change to the tool-use /
+              // tool-result pairing the providers require.
+              toolResult = { ...toolResult, guardrailNotice: observed.message };
+            }
           }
 
           return { ...call, toolCallId, result: toolResult };
@@ -565,6 +620,36 @@ class AgentLoop {
             text: `${entry.toolName}: ${resultSnippet}`,
             compacted: false
           });
+        }
+
+        // A `halt` verdict ends the turn. `block` deliberately does not — a
+        // blocked call comes back as a tool result so the model can pivot,
+        // and killing the turn for one bad call would throw away the work
+        // that got here. `halt` is the other case: the tool has failed
+        // across many different arguments, so there is nothing left to
+        // pivot to and spinning to maxIterations only wastes tokens.
+        const halt = this.guardrails?.haltDecision;
+        if (halt && halt.action === 'halt') {
+          log.warn(`Ending turn early: ${halt.code}`);
+          return {
+            type: 'guardrail_halt',
+            content: halt.message,
+            guardrail: { code: halt.code, toolName: halt.toolName, count: halt.count },
+            iterations,
+            tools: executedTools,
+            llm: {
+              calls: llmCalls,
+              totals: llmCalls.reduce(
+                (acc, call) => ({
+                  inputTokens: acc.inputTokens + (call.inputTokens || 0),
+                  outputTokens: acc.outputTokens + (call.outputTokens || 0),
+                  totalTokens: acc.totalTokens + (call.totalTokens || 0),
+                  costUsd: Number((acc.costUsd + (call.costUsd || 0)).toFixed(8))
+                }),
+                { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
+              )
+            }
+          };
         }
 
         continue;
