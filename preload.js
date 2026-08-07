@@ -606,6 +606,30 @@ contextBridge.exposeInMainWorld(
       },
       setGlobalEnabled: (payload) => ipcRenderer.invoke('hooks:setGlobalEnabled', payload)
     },
+    checkpoints: {
+      list: (payload) => ipcRenderer.invoke('checkpoint:list', payload),
+      changes: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.checkpointId, 'checkpointId');
+        return ipcRenderer.invoke('checkpoint:changes', payload);
+      },
+      // Overwrites files in the working directory — the renderer must only
+      // reach this from an explicit, confirmed user action.
+      restore: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.checkpointId, 'checkpointId');
+        return ipcRenderer.invoke('checkpoint:restore', payload);
+      },
+      prune: (payload) => ipcRenderer.invoke('checkpoint:prune', payload),
+      getStatus: () => ipcRenderer.invoke('checkpoint:getStatus'),
+      setEnabled: (payload) => {
+        validateObject(payload, 'payload');
+        if (typeof payload.enabled !== 'boolean') {
+          throw new Error('Invalid enabled: expected boolean');
+        }
+        return ipcRenderer.invoke('checkpoint:setEnabled', payload);
+      }
+    },
     memory: {
       capture: (payload) => {
         validateObject(payload, 'payload');

@@ -180,6 +180,11 @@ class AgentLoop {
 
   async run(messages, tools, options = {}) {
     let iterations = 0;
+    // One run() is one turn: a single user message worked to completion,
+    // however many tool iterations that takes. Checkpoints latch on this so
+    // the whole turn is undone as a unit, not iteration by iteration.
+    const turnId = options.turnId
+      || `turn-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
     const conversationHistory = [...messages];
     const executedTools = [];
     const llmCalls = [];
@@ -362,7 +367,11 @@ class AgentLoop {
         // Per-turn options propagated to every tool call. The abort signal
         // is forwarded so cancelling the loop tears down in-flight tools
         // (Bash subprocess, WebFetch, etc.) instead of letting them run on.
-        const callOptions = { ...options, signal: this.abortSignal || options.signal || null };
+        const callOptions = {
+          ...options,
+          turnId,
+          signal: this.abortSignal || options.signal || null
+        };
 
         // Execute a single tool call (AskUser or normal tool)
         const executeSingleCall = async (call) => {

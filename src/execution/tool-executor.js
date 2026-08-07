@@ -68,6 +68,11 @@ class ToolExecutor extends EventEmitter {
     // and auto-denies. See src/tools/denial-tracker.js.
     this.denialTracker = options.denialTracker || null;
 
+    // Optional checkpoint manager. Transparent infrastructure — it takes a
+    // filesystem snapshot before the first mutating tool of each turn so the
+    // user can roll the turn back. The model never sees it.
+    this.checkpointManager = options.checkpointManager || null;
+
     // Approval prompts that sit unanswered forever block the agent loop
     // (we observed a single Vault.store call hang for 7m21s when the user
     // wasn't watching). Default to 5 min; override via constructor or
@@ -277,6 +282,27 @@ class ToolExecutor extends EventEmitter {
       const cancelled = { success: false, error: 'Cancelled before execution', cancelled: true };
       this.emit('postExecute', { toolName, parameters: effectiveParameters, result: cancelled });
       return cancelled;
+    }
+
+    // Checkpoint immediately before the tool runs — after every approval
+    // gate and the abort check, so a denied, auto-denied, or cancelled call
+    // never leaves a snapshot behind. maybeSnapshot is a no-op for
+    // non-mutating tools and for turns already snapshotted, and it swallows
+    // its own failures: a broken checkpoint store must not stop the work.
+    if (this.checkpointManager) {
+      try {
+        await this.checkpointManager.maybeSnapshot({
+          toolName,
+          workdir: options.workingDirectory || this.workingDirectory,
+          turnId: options.turnId,
+          label: `before ${toolName}`
+        });
+      } catch (checkpointError) {
+        // CheckpointManager already contains its own failures; this guard
+        // means a third-party or misconfigured manager can't take the
+        // user's turn down with it either.
+        this.emit('checkpointFailed', { toolName, error: checkpointError });
+      }
     }
 
     try {

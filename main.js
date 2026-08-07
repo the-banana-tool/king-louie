@@ -60,6 +60,7 @@ const CronStore = require('./src/cron/cron-store');
 const CronExecutor = require('./src/cron/cron-executor');
 const CronScheduler = require('./src/cron/cron-scheduler');
 const { MemoryStore, MemoryManager } = require('./src/memory');
+const { CheckpointManager } = require('./src/checkpoints');
 const ContextAssembler = require('./src/context/context-assembler');
 const ConversationCompactor = require('./src/context/conversation-compactor');
 const { buildSystemSections } = require('./src/context/system-sections');
@@ -113,6 +114,7 @@ let hookRegistry;
 let hookExecutor;
 let memoryStore;
 let memoryManager;
+let checkpointManager;
 let contextAssembler;
 let conversationCompactor;
 let ttsEngine;
@@ -140,6 +142,13 @@ const DEFAULT_SETTINGS = {
   defaults: {
     agentMode: false,
     sandboxMode: true
+  },
+  // Transparent per-turn filesystem snapshots so a turn's file edits can be
+  // rolled back. Off by default until the UI affordance ships; the store is
+  // never created while disabled.
+  checkpoints: {
+    enabled: false,
+    maxAgeDays: 14
   },
   activeProvider: 'openai',
   templateVariables: {
@@ -240,6 +249,10 @@ const mergeSettings = (settings = {}) => {
     defaults: {
       ...(DEFAULT_SETTINGS.defaults || {}),
       ...(source.defaults || {})
+    },
+    checkpoints: {
+      ...(DEFAULT_SETTINGS.checkpoints || {}),
+      ...(source.checkpoints || {})
     },
     templateVariables: {
       ...(DEFAULT_SETTINGS.templateVariables || {}),
@@ -2087,6 +2100,9 @@ const createToolExecutorWithApprovals = async (
     // Session-scoped denial counter so "rm *" denied three times stops
     // re-prompting and returns an auto-deny to the model.
     denialTracker: new DenialTracker(),
+    // Snapshots the working directory before the turn's first mutating
+    // tool, so the user can undo a turn's file changes.
+    checkpointManager,
     hookExecutor: getHookSettings().enabled ? hookExecutor : null,
     useSandbox: executorOptions.useSandbox !== false,
     extraToolOptions: {
@@ -2286,6 +2302,15 @@ const initializeAgentInfrastructure = async () => {
     registry: hookRegistry,
     workingDirectory: process.cwd()
   });
+  // Checkpoints: transparent snapshots taken before the first file-mutating
+  // tool of each turn. Not a tool — the model never sees this.
+  const checkpointSettings = getSettings().checkpoints || {};
+  checkpointManager = new CheckpointManager({
+    rootDir: path.join(app.getPath('userData'), 'checkpoints'),
+    enabled: checkpointSettings.enabled === true,
+    maxAgeDays: checkpointSettings.maxAgeDays
+  });
+
   const memoryStorageFile = path.join(app.getPath('userData'), 'memory', 'memory-store.json');
   memoryStore = new MemoryStore({ storageFile: memoryStorageFile });
   memoryManager = new MemoryManager({
@@ -2728,6 +2753,7 @@ registerHandlers(ipcMain, {
   buildMemoryContextSection,
   getContextAssembler: () => contextAssembler,
   getConversationCompactor: () => conversationCompactor,
+  getCheckpointManager: () => checkpointManager,
   getToolResultsDir: () => path.join(app.getPath('userData'), 'tool-results'),
   speakSummaryText,
   getMainWindow: () => mainWindow,

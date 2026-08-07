@@ -28,6 +28,13 @@ module.exports = {
   HOOKS_SET_ENABLED: 'hooks:setEnabled',
   HOOKS_SET_GLOBAL_ENABLED: 'hooks:setGlobalEnabled',
 
+  CHECKPOINT_LIST: 'checkpoint:list',
+  CHECKPOINT_CHANGES: 'checkpoint:changes',
+  CHECKPOINT_RESTORE: 'checkpoint:restore',
+  CHECKPOINT_PRUNE: 'checkpoint:prune',
+  CHECKPOINT_GET_STATUS: 'checkpoint:getStatus',
+  CHECKPOINT_SET_ENABLED: 'checkpoint:setEnabled',
+
   MEMORY_CAPTURE: 'memory:capture',
   MEMORY_RECALL: 'memory:recall',
   MEMORY_LIST: 'memory:list',

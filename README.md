@@ -106,6 +106,27 @@ npm install
 npm start
 ```
 
+### Troubleshooting: `Cannot read properties of undefined (reading 'registerSchemesAsPrivileged')`
+
+If `npm start` fails immediately with this error from `main.js`, something in
+your environment has set `ELECTRON_RUN_AS_NODE=1`. That variable tells the
+Electron binary to behave as plain Node, so there is no `app`, no `protocol`,
+and no browser process — the main process crashes on the first Electron API it
+touches.
+
+It is most often inherited from another Electron-based program that spawned
+your shell (VS Code's integrated terminal and Electron-based CLI agents both
+set it). Unset it for the launch:
+
+```bash
+ELECTRON_RUN_AS_NODE= npm start          # bash / zsh
+$env:ELECTRON_RUN_AS_NODE=$null; npm start   # PowerShell
+```
+
+The same applies when driving the app with Playwright's `_electron.launch` —
+delete the key from the env you pass to the child, or it will fail with
+"Process failed to launch!".
+
 ## Supported Providers
 
 | Provider | Models | Local |
