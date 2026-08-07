@@ -1,3 +1,5 @@
+const { buildProviderError } = require('./provider-error');
+
 class BaseLLMProvider {
   constructor(apiKey, options = {}) {
     this.apiKey = apiKey;
@@ -137,6 +139,72 @@ class BaseLLMProvider {
         }
       )
     };
+  }
+
+  /**
+   * Derive the human-readable message from a parsed error body.
+   *
+   * This is the union of what every provider's own `extractError` did:
+   * OpenAI-shaped providers use `error.message`, Cohere puts it at the top
+   * level as `message`, Copilot accepts either. Overriding is rarely needed.
+   */
+  messageFromErrorBody(body, response) {
+    return (
+      body?.error?.message
+      || body?.message
+      || `${response?.status ?? ''} ${response?.statusText ?? ''}`.trim()
+    );
+  }
+
+  /**
+   * Build a ProviderError from a failed Response.
+   *
+   * Providers previously threw `new Error(await this.extractError(response))`,
+   * discarding the status code and `retry-after` header at the throw site and
+   * forcing every consumer downstream to guess by substring-matching the
+   * message. The message produced here is unchanged; the difference is that
+   * the structured fields survive.
+   *
+   * Reads the body exactly once — a Response body is not re-readable, so this
+   * must not be combined with a separate `extractError` call on the same
+   * response.
+   */
+  async buildError(response, details = {}) {
+    let body = null;
+    let message = '';
+
+    // Read the body through whichever accessor this response actually has.
+    // Real fetch Responses expose both text() and json(), but transports and
+    // test doubles frequently implement only one, and assuming text() would
+    // silently degrade every such error to "401 Unauthorized".
+    try {
+      if (typeof response?.text === 'function') {
+        const text = await response.text();
+        try {
+          body = JSON.parse(text);
+        } catch {
+          // Non-JSON error bodies (HTML error pages from proxies, plain text
+          // from local runtimes) still carry signal worth keeping in the
+          // message, but must not blow up parsing.
+          body = null;
+          if (text && text.length <= 500) message = text.trim();
+        }
+      } else if (typeof response?.json === 'function') {
+        body = await response.json();
+      }
+    } catch {
+      body = null;
+    }
+
+    if (!message || body) {
+      message = this.messageFromErrorBody(body, response);
+    }
+
+    return buildProviderError(response, message, {
+      provider: this.getProviderName(),
+      body,
+      ...details
+    });
   }
 
   async sendMessage() {

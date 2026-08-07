@@ -94,7 +94,7 @@ class MistralProvider extends BaseLLMProvider {
     });
 
     if (!response.ok) {
-      throw new Error(await this.extractError(response));
+      throw await this.buildError(response);
     }
 
     const data = await response.json();
@@ -125,7 +125,7 @@ class MistralProvider extends BaseLLMProvider {
     });
 
     if (!response.ok) {
-      throw new Error(await this.extractError(response));
+      throw await this.buildError(response);
     }
 
     const data = await response.json();
@@ -236,7 +236,7 @@ class MistralProvider extends BaseLLMProvider {
     });
 
     if (!response.ok) {
-      throw new Error(await this.extractError(response));
+      throw await this.buildError(response);
     }
 
     const reader = response.body.getReader();
@@ -292,7 +292,7 @@ class MistralProvider extends BaseLLMProvider {
     });
 
     if (!response.ok) {
-      throw new Error(await this.extractError(response));
+      throw await this.buildError(response);
     }
 
     const data = await response.json();

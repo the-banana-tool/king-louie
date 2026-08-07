@@ -65,7 +65,7 @@ class CohereProvider extends BaseLLMProvider {
         stream: false
       })
     });
-    if (!response.ok) throw new Error(await this.extractError(response));
+    if (!response.ok) throw await this.buildError(response);
     const data = await response.json();
     return data.message?.content?.[0]?.text || '';
   }
@@ -87,7 +87,7 @@ class CohereProvider extends BaseLLMProvider {
         stream: false
       })
     });
-    if (!response.ok) throw new Error(await this.extractError(response));
+    if (!response.ok) throw await this.buildError(response);
     const data = await response.json();
     const llmMetrics = this.buildLlmCallMetrics({ model: data.model || requestedModel, usage: data.usage });
     return this.parseToolResponse(data, llmMetrics);
@@ -141,7 +141,7 @@ class CohereProvider extends BaseLLMProvider {
         stream: true
       })
     });
-    if (!response.ok) throw new Error(await this.extractError(response));
+    if (!response.ok) throw await this.buildError(response);
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -181,7 +181,7 @@ class CohereProvider extends BaseLLMProvider {
 
   async listModels() {
     const response = await fetch('https://api.cohere.com/v1/models', { method: 'GET', headers: this.getHeaders() });
-    if (!response.ok) throw new Error(await this.extractError(response));
+    if (!response.ok) throw await this.buildError(response);
     const data = await response.json();
     return (data.models || []).map((m) => m.name).sort();
   }

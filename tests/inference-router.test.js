@@ -171,3 +171,247 @@ describe('InferenceRouter', () => {
     assert.strictEqual(receivedToken, 'not-required');
   });
 });
+
+describe('InferenceRouter failover policy', () => {
+  const { ProviderError } = require('../src/providers/provider-error');
+
+  // Fails `failures` times with `error`, then succeeds. Records every call.
+  const flakyProvider = (failures, error, response = 'recovered') => {
+    const calls = [];
+    return {
+      calls,
+      provider: {
+        getDefaultModel: () => 'test-model',
+        sendMessage: async () => {
+          calls.push(Date.now());
+          if (calls.length <= failures) throw error;
+          return response;
+        }
+      }
+    };
+  };
+
+  const routerFor = (providers, overrides = {}) => {
+    const waits = [];
+    const router = new InferenceRouter({
+      getSettings: () => ({
+        inference: {
+          tierMap: { fast: { provider: 'groq', model: 'llama-3.3-70b-versatile' } },
+          activeTier: 'fast'
+        },
+        activeProvider: 'groq'
+      }),
+      getProviderModel: () => '',
+      getProviderToken: () => 'fake-token',
+      createProvider: (p) => providers[p] || {
+        getDefaultModel: () => 'default-model',
+        sendMessage: async () => `response from ${p}`
+      },
+      sleep: async (ms) => { waits.push(ms); },
+      ...overrides
+    });
+    return { router, waits };
+  };
+
+  it('retries a rate limit on the same provider instead of burning the fallback', async () => {
+    const groq = flakyProvider(
+      2,
+      new ProviderError('Rate limit exceeded', { status: 429, provider: 'groq' })
+    );
+    let openaiCalled = false;
+
+    const { router, waits } = routerFor({
+      groq: groq.provider,
+      openai: {
+        getDefaultModel: () => 'gpt-4o-mini',
+        sendMessage: async () => { openaiCalled = true; return 'openai response'; }
+      }
+    });
+
+    const result = await router.routeWithFallback('fast', [{ role: 'user', content: 'hi' }], {});
+
+    assert.strictEqual(result, 'recovered');
+    assert.strictEqual(groq.calls.length, 3, 'should retry the primary twice');
+    assert.strictEqual(openaiCalled, false, 'must not fall back for a rate limit');
+    assert.deepStrictEqual(waits, [2000, 4000], 'exponential backoff between retries');
+  });
+
+  it('waits exactly as long as a retry-after header asks', async () => {
+    const err = new ProviderError('Rate limit exceeded', {
+      status: 429, provider: 'groq', retryAfterMs: 7500
+    });
+    const groq = flakyProvider(1, err);
+
+    const { router, waits } = routerFor({ groq: groq.provider });
+    await router.routeWithFallback('fast', [{ role: 'user', content: 'hi' }], {});
+
+    assert.deepStrictEqual(waits, [7500]);
+  });
+
+  it('escalates to the fallback once the retry budget is spent', async () => {
+    const groq = flakyProvider(
+      99,
+      new ProviderError('Rate limit exceeded', { status: 429, provider: 'groq' })
+    );
+    let openaiCalled = false;
+
+    const { router } = routerFor({
+      groq: groq.provider,
+      openai: {
+        getDefaultModel: () => 'gpt-4o-mini',
+        sendMessage: async () => { openaiCalled = true; return 'openai response'; }
+      }
+    });
+
+    const result = await router.routeWithFallback('fast', [{ role: 'user', content: 'hi' }], {});
+
+    assert.strictEqual(result, 'openai response');
+    assert.strictEqual(openaiCalled, true);
+    assert.strictEqual(groq.calls.length, 3, 'two retries then escalate');
+  });
+
+  it('falls back immediately on an upstream-model rate limit', async () => {
+    const openrouter = flakyProvider(
+      99,
+      new ProviderError('Provider returned error: upstream model is rate limited', {
+        status: 429, provider: 'openrouter'
+      })
+    );
+
+    const { router, waits } = routerFor(
+      {
+        openrouter: openrouter.provider,
+        openai: {
+          getDefaultModel: () => 'gpt-4o-mini',
+          sendMessage: async () => 'openai response'
+        }
+      }
+    );
+    router.fallbacks.openrouter = { provider: 'openai', model: 'gpt-4o-mini' };
+    router.getTierConfig = () => ({ provider: 'openrouter', model: 'anthropic/claude-3', tier: 'fast' });
+
+    const result = await router.routeWithFallback('fast', [{ role: 'user', content: 'hi' }], {});
+
+    assert.strictEqual(result, 'openai response');
+    assert.strictEqual(openrouter.calls.length, 1, 'the throttled model must not be retried');
+    assert.deepStrictEqual(waits, [], 'no point waiting on someone else’s quota');
+  });
+
+  it('aborts immediately on a permanent failure without touching the fallback', async () => {
+    const groq = flakyProvider(
+      99,
+      new ProviderError('Invalid value for tool_choice', { status: 400, provider: 'groq' })
+    );
+    let openaiCalled = false;
+
+    const { router } = routerFor({
+      groq: groq.provider,
+      openai: {
+        getDefaultModel: () => 'gpt-4o-mini',
+        sendMessage: async () => { openaiCalled = true; return 'openai response'; }
+      }
+    });
+
+    await assert.rejects(
+      () => router.routeWithFallback('fast', [{ role: 'user', content: 'hi' }], {}),
+      /Invalid value for tool_choice/
+    );
+    assert.strictEqual(groq.calls.length, 1);
+    assert.strictEqual(openaiCalled, false, 'a malformed request fails the same way anywhere');
+  });
+
+  it('compresses and retries a context overflow when a hook is available', async () => {
+    const overflow = new ProviderError('prompt is too long: 210000 tokens > 200000 maximum', {
+      status: 400, provider: 'groq'
+    });
+    const groq = flakyProvider(1, overflow);
+
+    let compressCalls = 0;
+    const { router } = routerFor({ groq: groq.provider }, {
+      compressContext: async (messages) => {
+        compressCalls += 1;
+        return messages.slice(-1);
+      }
+    });
+
+    const result = await router.routeWithFallback(
+      'fast',
+      [{ role: 'user', content: 'old' }, { role: 'user', content: 'new' }],
+      {}
+    );
+
+    assert.strictEqual(result, 'recovered');
+    assert.strictEqual(compressCalls, 1);
+  });
+
+  it('degrades to a model fallback when no compression hook is wired', async () => {
+    const overflow = new ProviderError('prompt is too long', { status: 400, provider: 'groq' });
+    const groq = flakyProvider(99, overflow);
+
+    const { router } = routerFor({
+      groq: groq.provider,
+      openai: {
+        getDefaultModel: () => 'gpt-4o-mini',
+        sendMessage: async () => 'openai response'
+      }
+    });
+
+    const result = await router.routeWithFallback('fast', [{ role: 'user', content: 'hi' }], {});
+    assert.strictEqual(result, 'openai response');
+  });
+
+  it('rotates the credential when a hook is available instead of failing over', async () => {
+    const authError = new ProviderError('Incorrect API key provided', {
+      status: 401, provider: 'groq'
+    });
+    const groq = flakyProvider(1, authError);
+
+    let rotations = 0;
+    const { router } = routerFor({ groq: groq.provider }, {
+      rotateCredential: async () => { rotations += 1; return true; }
+    });
+
+    const result = await router.routeWithFallback('fast', [{ role: 'user', content: 'hi' }], {});
+    assert.strictEqual(result, 'recovered');
+    assert.strictEqual(rotations, 1);
+  });
+
+  it('does not loop between two targets that both keep failing', async () => {
+    const err = new ProviderError('Service unavailable', { status: 503, provider: 'groq' });
+    const groq = flakyProvider(99, err);
+    const openai = flakyProvider(99, new ProviderError('Service unavailable', {
+      status: 503, provider: 'openai'
+    }));
+
+    const { router } = routerFor({ groq: groq.provider, openai: openai.provider });
+
+    await assert.rejects(
+      () => router.routeWithFallback('fast', [{ role: 'user', content: 'hi' }], {}),
+      /Service unavailable/
+    );
+    // Ceiling reached rather than ping-ponging forever.
+    assert.ok(groq.calls.length + openai.calls.length <= router.policy.maxTotalAttempts + 1);
+  });
+
+  it('never retries or fails over on user cancellation', async () => {
+    const abort = new Error('The operation was aborted');
+    abort.name = 'AbortError';
+    const groq = flakyProvider(99, abort);
+    let openaiCalled = false;
+
+    const { router } = routerFor({
+      groq: groq.provider,
+      openai: {
+        getDefaultModel: () => 'gpt-4o-mini',
+        sendMessage: async () => { openaiCalled = true; return 'openai response'; }
+      }
+    });
+
+    await assert.rejects(
+      () => router.routeWithFallback('fast', [{ role: 'user', content: 'hi' }], {}),
+      /aborted/
+    );
+    assert.strictEqual(groq.calls.length, 1);
+    assert.strictEqual(openaiCalled, false);
+  });
+});

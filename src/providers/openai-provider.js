@@ -229,12 +229,13 @@ class OpenAIProvider extends BaseLLMProvider {
     });
 
     if (!response.ok) {
-      const err = await this.extractError(response);
+      const providerError = await this.buildError(response);
+      const err = providerError.message;
       if (err.includes('not a chat model') || err.includes('only supported in v1/responses')) {
         markAsResponsesModel(model);
         return this._sendResponses(model, preparedMessages, options);
       }
-      throw new Error(err);
+      throw providerError;
     }
 
     const data = await response.json();
@@ -255,7 +256,7 @@ class OpenAIProvider extends BaseLLMProvider {
     });
 
     if (!response.ok) {
-      throw new Error(await this.extractError(response));
+      throw await this.buildError(response);
     }
 
     const data = await response.json();
@@ -295,12 +296,13 @@ class OpenAIProvider extends BaseLLMProvider {
     });
 
     if (!response.ok) {
-      const err = await this.extractError(response);
+      const providerError = await this.buildError(response);
+      const err = providerError.message;
       if (err.includes('not a chat model') || err.includes('only supported in v1/responses')) {
         markAsResponsesModel(requestedModel);
         return this._sendResponsesWithTools(requestedModel, preparedMessages, tools, options);
       }
-      throw new Error(err);
+      throw providerError;
     }
 
     const data = await response.json();
@@ -327,7 +329,7 @@ class OpenAIProvider extends BaseLLMProvider {
     });
 
     if (!response.ok) {
-      throw new Error(await this.extractError(response));
+      throw await this.buildError(response);
     }
 
     const data = await response.json();
@@ -413,7 +415,7 @@ class OpenAIProvider extends BaseLLMProvider {
     });
 
     if (!response.ok) {
-      throw new Error(await this.extractError(response));
+      throw await this.buildError(response);
     }
 
     const data = await response.json();
@@ -448,7 +450,7 @@ class OpenAIProvider extends BaseLLMProvider {
     });
 
     if (!response.ok) {
-      throw new Error(await this.extractError(response));
+      throw await this.buildError(response);
     }
 
     const data = await response.json();
@@ -618,12 +620,13 @@ class OpenAIProvider extends BaseLLMProvider {
     });
 
     if (!response.ok) {
-      const err = await this.extractError(response);
+      const providerError = await this.buildError(response);
+      const err = providerError.message;
       if (err.includes('not a chat model') || err.includes('only supported in v1/responses')) {
         markAsResponsesModel(requestedModel);
         return this._streamResponses(requestedModel, preparedMessages, options, onChunk);
       }
-      throw new Error(err);
+      throw providerError;
     }
 
     const reader = response.body.getReader();
@@ -688,7 +691,7 @@ class OpenAIProvider extends BaseLLMProvider {
     });
 
     if (!response.ok) {
-      throw new Error(await this.extractError(response));
+      throw await this.buildError(response);
     }
 
     const reader = response.body.getReader();
@@ -756,7 +759,7 @@ class OpenAIProvider extends BaseLLMProvider {
     });
 
     if (!response.ok) {
-      throw new Error(await this.extractError(response));
+      throw await this.buildError(response);
     }
 
     const data = await response.json();

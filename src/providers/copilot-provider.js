@@ -54,7 +54,7 @@ class CopilotProvider extends BaseLLMProvider {
     });
 
     if (!response.ok) {
-      throw new Error(await this.extractError(response));
+      throw await this.buildError(response);
     }
 
     const data = await response.json();
@@ -129,7 +129,7 @@ class CopilotProvider extends BaseLLMProvider {
     });
 
     if (!response.ok) {
-      throw new Error(await this.extractError(response));
+      throw await this.buildError(response);
     }
 
     const data = await response.json();
@@ -156,7 +156,7 @@ class CopilotProvider extends BaseLLMProvider {
     });
 
     if (!response.ok) {
-      throw new Error(await this.extractError(response));
+      throw await this.buildError(response);
     }
 
     const data = await response.json();
@@ -238,7 +238,7 @@ class CopilotProvider extends BaseLLMProvider {
     });
 
     if (!response.ok) {
-      throw new Error(await this.extractError(response));
+      throw await this.buildError(response);
     }
 
     const reader = response.body.getReader();
@@ -286,7 +286,7 @@ class CopilotProvider extends BaseLLMProvider {
     });
 
     if (!response.ok) {
-      throw new Error(await this.extractError(response));
+      throw await this.buildError(response);
     }
 
     const data = await response.json();

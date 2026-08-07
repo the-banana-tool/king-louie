@@ -268,7 +268,7 @@ class AnthropicProvider extends BaseLLMProvider {
     });
 
     if (!response.ok) {
-      throw new Error(await this.extractError(response));
+      throw await this.buildError(response);
     }
 
     const data = await response.json();
@@ -308,7 +308,7 @@ class AnthropicProvider extends BaseLLMProvider {
     });
 
     if (!response.ok) {
-      throw new Error(await this.extractError(response));
+      throw await this.buildError(response);
     }
 
     const data = await response.json();
@@ -353,7 +353,7 @@ class AnthropicProvider extends BaseLLMProvider {
     });
 
     if (!response.ok) {
-      throw new Error(await this.extractError(response));
+      throw await this.buildError(response);
     }
 
     const reader = response.body.getReader();
@@ -576,7 +576,7 @@ class AnthropicProvider extends BaseLLMProvider {
     });
 
     if (!response.ok) {
-      throw new Error(await this.extractError(response));
+      throw await this.buildError(response);
     }
 
     const reader = response.body.getReader();
@@ -655,7 +655,7 @@ class AnthropicProvider extends BaseLLMProvider {
     });
 
     if (!response.ok) {
-      throw new Error(await this.extractError(response));
+      throw await this.buildError(response);
     }
 
     const data = await response.json();
