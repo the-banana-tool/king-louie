@@ -4,6 +4,11 @@ const ResultPersistence = require('./result-persistence');
 const APICompaction = require('../context/api-compaction');
 const { FailoverPolicy } = require('../providers/failover-policy');
 const { ToolGuardrails } = require('./tool-guardrails');
+const {
+  EvidenceLedger,
+  classifyCommand,
+  evaluateVerifyOnStop
+} = require('../verification');
 const { createLogger } = require('../logging');
 const log = createLogger('agent-loop');
 
@@ -27,6 +32,14 @@ class AgentLoop {
     this.guardrails = options.guardrails === false
       ? null
       : (options.guardrails || new ToolGuardrails(options.guardrailConfig || {}));
+
+    // Verification evidence. The ledger is passive bookkeeping and is
+    // always safe to keep; `verifyOnStop` is the policy that turns it into
+    // a nudge, and is opt-in.
+    this.evidenceLedger = options.evidenceLedger === false
+      ? null
+      : (options.evidenceLedger || new EvidenceLedger(options.evidenceLedgerConfig || {}));
+    this.verifyOnStop = options.verifyOnStop === true;
 
     // Streaming callback: fires with text deltas during LLM inference.
     // Enables real-time UI updates during agent loop iterations instead
@@ -196,6 +209,15 @@ class AgentLoop {
     // turn says nothing about this one.
     if (this.guardrails) this.guardrails.resetForTurn();
     this._loggedGuardrails = new Set();
+
+    // Per-turn verification bookkeeping: which files the turn changed, and
+    // whether we have already nudged about them.
+    const turnState = {
+      changedPaths: new Set(),
+      verifyNudged: false,
+      root: options.workingDirectory || this.executor?.workingDirectory || process.cwd()
+    };
+
     const conversationHistory = [...messages];
     const executedTools = [];
     const llmCalls = [];
@@ -355,6 +377,20 @@ class AgentLoop {
           { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
         );
 
+        // Verify-on-stop: the model is about to declare the work done. If
+        // it changed code and never ran anything against it, ask once.
+        // Nothing is blocked — worst case the model explains why a check
+        // isn't warranted and finishes on the next iteration.
+        const verify = this._evaluateVerifyOnStop(turnState);
+        if (verify.nudge) {
+          log.info(`Verify-on-stop nudge (${verify.reason}): ${verify.paths.length} file(s)`);
+          turnState.verifyNudged = true;
+          conversationHistory.push({ role: 'assistant', content: response.content });
+          conversationHistory.push({ role: 'user', content: verify.message });
+          iterations += 1;
+          continue;
+        }
+
         return {
           type: 'complete',
           content: response.content,
@@ -363,7 +399,10 @@ class AgentLoop {
           llm: {
             calls: llmCalls,
             totals: llmTotals
-          }
+          },
+          verification: turnState.verifyNudged
+            ? { nudged: true, changedPaths: [...turnState.changedPaths] }
+            : undefined
         };
       }
 
@@ -468,6 +507,8 @@ class AgentLoop {
               toolResult, call.toolName, call.parameters, callOptions
             );
           }
+
+          this._observeForVerification(turnState, call, toolResult);
 
           if (guarded) {
             const observed = this.guardrails.recordResult(
@@ -706,6 +747,94 @@ class AgentLoop {
    * Works with both OpenAI format (role='tool') and Anthropic format
    * (role='user' with tool_result content blocks).
    */
+  /**
+   * Feed one tool result into the verification ledger.
+   *
+   * Two things are worth recording: a file mutation that actually landed
+   * (so we know verification is owed), and a command that constitutes
+   * evidence (so we know it was paid). Everything else is ignored.
+   */
+  _observeForVerification(turnState, call, result) {
+    if (!this.evidenceLedger) return;
+    if (!result || typeof result !== 'object') return;
+
+    // A call that never ran tells us nothing either way.
+    if (result.cancelled || result.deniedBy || result.blockedByHook || result.blockedByGuardrail) {
+      return;
+    }
+
+    const FILE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
+
+    if (FILE_TOOLS.has(call.toolName)) {
+      // A failed write changed nothing, so nothing is owed for it.
+      if (result.success === false) return;
+      const paths = [];
+      if (result.filePath) paths.push(result.filePath);
+      if (Array.isArray(result.results)) {
+        // MultiEdit reports per-edit outcomes; only the ones that landed count.
+        for (const entry of result.results) {
+          if (entry?.success && entry.filePath) paths.push(entry.filePath);
+        }
+      }
+
+      if (paths.length > 0) {
+        for (const p of paths) turnState.changedPaths.add(p);
+        try {
+          this.evidenceLedger.markEdited(turnState.root, paths);
+        } catch (err) {
+          log.warn(`Could not record edit in evidence ledger: ${err.message}`);
+        }
+      }
+      return;
+    }
+
+    if (call.toolName === 'Bash') {
+      const command = call.parameters?.command;
+      if (!command) return;
+
+      // Deliberately NOT gated on result.success: a failing test run is the
+      // single most important thing this ledger can know. Skipping it would
+      // make the agent that just watched its suite go red get told it had
+      // not verified anything.
+      try {
+        const exitCode = Number.isFinite(result.exitCode)
+          ? result.exitCode
+          : (result.success === false ? 1 : 0);
+
+        const evidence = classifyCommand(command, {
+          exitCode,
+          cwd: turnState.root,
+          output: `${result.stdout || ''}\n${result.stderr || ''}`
+        });
+        // classifyCommand returns null for anything that proves nothing, and
+        // record() ignores null — so no branch is needed here.
+        this.evidenceLedger.record(turnState.root, evidence);
+      } catch (err) {
+        log.warn(`Could not classify command for evidence ledger: ${err.message}`);
+      }
+    }
+  }
+
+  /** Decide whether to ask the model to verify before it finishes. */
+  _evaluateVerifyOnStop(turnState) {
+    if (!this.evidenceLedger || !this.verifyOnStop) {
+      return { nudge: false, reason: 'disabled' };
+    }
+
+    try {
+      return evaluateVerifyOnStop({
+        changedPaths: [...turnState.changedPaths],
+        status: this.evidenceLedger.status(turnState.root),
+        alreadyNudged: turnState.verifyNudged,
+        enabled: true
+      });
+    } catch (err) {
+      // A broken ledger must never stop the model from finishing its turn.
+      log.warn(`Verify-on-stop check failed: ${err.message}`);
+      return { nudge: false, reason: 'error' };
+    }
+  }
+
   async _compactToolResults(history) {
     if (this._toolResultEntries.length <= this.keepRecentResults) return;
 
