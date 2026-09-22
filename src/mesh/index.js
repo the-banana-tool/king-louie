@@ -16,7 +16,8 @@ async function initializeMesh(config = {}) {
     taskManager,
     channelRegistry,
     getAgent,
-    settings = {}
+    settings = {},
+    cipher
   } = config;
 
   const meshSettings = settings.mesh || {};
@@ -49,15 +50,13 @@ async function initializeMesh(config = {}) {
     log.info(`generated new identity: ${identity.peerId}`);
   }
 
-  // Encrypt private key if safeStorage is available
-  try {
-    const { safeStorage } = require('electron');
-    if (safeStorage.isEncryptionAvailable()) {
-      const encryptedKey = safeStorage.encryptString(identity.privateKey.toString('hex'));
-      store.set('mesh.encryptedPrivateKey', encryptedKey.toString('base64'));
+  // Encrypt private key if a cipher is available
+  if (cipher && cipher.isEncryptionAvailable()) {
+    try {
+      store.set('mesh.encryptedPrivateKey', cipher.encryptString(identity.privateKey.toString('hex')));
+    } catch (err) {
+      log.warn(`could not encrypt mesh private key: ${err.message}`);
     }
-  } catch {
-    // Not in Electron context or safeStorage unavailable
   }
 
   const port = meshSettings.port || (process.env.KL_TEST_MODE ? 0 : DEFAULT_PORT);

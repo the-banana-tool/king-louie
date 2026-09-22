@@ -12,13 +12,8 @@ const PATTERNS = [
   { name: 'main.js', re: /require\(\s*['"](\.\.\/)+main['"]\s*\)/ },
 ];
 
-// Shrinks to [] as Tasks 2–4 land. Format: 'relative/path.js:pattern-name'.
-const KNOWN_VIOLATIONS = [
-  'auth/anthropic-oauth.js:electron',
-  'channels/channel-plugin.js:electron',
-  'mesh/index.js:electron',
-  'notifications/channels/ui-toast.js:electron',
-];
+// Must stay empty. Inject the dependency instead.
+const KNOWN_VIOLATIONS = [];
 
 function walk(dir) {
   return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {

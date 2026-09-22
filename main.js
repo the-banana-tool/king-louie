@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, safeStorage, shell, protocol, net } = require('electron');
+const { app, BrowserWindow, ipcMain, safeStorage, shell, protocol, net, Notification } = require('electron');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -72,6 +72,7 @@ const {
   DEFAULT_NOTIFICATION_SETTINGS,
   normalizeNotificationSettings
 } = require('./src/notifications/notification-router');
+const UiToastChannel = require('./src/notifications/channels/ui-toast');
 const { TTSEngine, DEFAULT_VOICE_SETTINGS } = require('./src/voice/tts-engine');
 const { registerHandlers } = require('./src/ipc/register');
 const WebhookRegistry = require('./src/webhooks/webhook-registry');
@@ -846,7 +847,8 @@ const anthropicOAuth = new AnthropicOAuth({
   clientId: store.get('anthropicOAuthClientId', ''),
   encryptToken,
   decryptToken,
-  store
+  store,
+  openExternal: (url) => shell.openExternal(url)
 });
 
 const updateStatus = (provider, status) => {
@@ -2291,7 +2293,8 @@ const initializeAgentInfrastructure = async () => {
     setStoredProfile: (profile) => store.set('userProfile', profile)
   });
   notificationRouter = new NotificationRouter({
-    getSettings: () => getSettings().notifications
+    getSettings: () => getSettings().notifications,
+    uiToastChannel: new UiToastChannel({ Notification })
   });
 
   hookRegistry = new HookRegistry({
@@ -2546,7 +2549,8 @@ const initializeAgentInfrastructure = async () => {
       taskManager,
       channelRegistry,
       getAgent,
-      settings: getSettings()
+      settings: getSettings(),
+      cipher
     });
   } catch (err) {
     log.warn(`Mesh initialization failed: ${err.message}`);
