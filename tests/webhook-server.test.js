@@ -51,7 +51,8 @@ describe('WebhookServer hardening', () => {
   // A browser `fetch(url, { mode: 'no-cors' })` GET sends no Origin, so the
   // Origin check never sees it, yet the page learns from the resolved promise
   // that something is listening on that port. Every browser that can make the
-  // request also sends fetch metadata, and no ordinary client does.
+  // request also sends Sec-Fetch-Site and Sec-Fetch-Dest, and no non-browser
+  // client does.
   it('rejects a no-cors GET, so /health is not a port-existence oracle', async () => {
     const r = await request(server.port, {
       headers: { 'Sec-Fetch-Mode': 'no-cors', 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Dest': 'empty' }
@@ -59,17 +60,61 @@ describe('WebhookServer hardening', () => {
     assert.strictEqual(r.status, 403);
   });
 
-  it('rejects a webhook POST carrying fetch metadata', async () => {
+  it('rejects a cross-site browser subresource load with no Origin', async () => {
+    const r = await request(server.port, {
+      headers: { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'no-cors', 'sec-fetch-dest': 'image' }
+    });
+    assert.strictEqual(r.status, 403);
+  });
+
+  it('rejects a browser navigation to /health, however it was started', async () => {
+    for (const site of ['cross-site', 'same-site', 'none']) {
+      const r = await request(server.port, {
+        headers: { 'Sec-FETCH-Site': site, 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document', 'Sec-Fetch-User': '?1' }
+      });
+      assert.strictEqual(r.status, 403, `Sec-Fetch-Site: ${site} must be refused`);
+    }
+  });
+
+  it('rejects a cross-site browser POST to a webhook endpoint', async () => {
     const r = await request(server.port, {
       method: 'POST',
       path: '/webhooks/abc123',
-      headers: { 'Sec-Fetch-Mode': 'cors' }
+      headers: { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Dest': 'empty' }
     });
     assert.strictEqual(r.status, 403);
   });
 
   it('still answers an ordinary client that sends no fetch metadata', async () => {
     assert.strictEqual((await request(server.port)).status, 200);
+  });
+
+  // undici — Node's global fetch, and the same engine in Deno and Bun — always
+  // sends `sec-fetch-mode: cors` and never sends Sec-Fetch-Site or
+  // Sec-Fetch-Dest. Keying the refusal on "any Sec-Fetch-* header" therefore
+  // 403'd the most obvious modern client, for /health and for real webhook
+  // deliveries alike.
+  it('answers /health for Node\'s own fetch', async () => {
+    const r = await fetch(`http://127.0.0.1:${server.port}/health`);
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual((await r.json()).status, 'ok');
+  });
+
+  it('accepts a real webhook POST from Node\'s own fetch', async () => {
+    const r = await fetch(`http://127.0.0.1:${server.port}/webhooks/abc123`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hello: 'world' })
+    });
+    assert.strictEqual(r.status, 200);
+    assert.deepStrictEqual(await r.json(), { ok: true });
+  });
+
+  it('refuses Node\'s fetch once it is given a browser Origin', async () => {
+    const r = await fetch(`http://127.0.0.1:${server.port}/health`, {
+      headers: { Origin: 'https://example.invalid' }
+    });
+    assert.strictEqual(r.status, 403);
   });
 });
 

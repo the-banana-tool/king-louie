@@ -75,11 +75,25 @@ class WebhookServer {
     // sends no Origin at all, so a page in any browser could ask for /health
     // and learn from the resolved promise that something is listening on this
     // port — a port-existence oracle for anything that wants to find the
-    // service. Fetch metadata (Sec-Fetch-Site/Mode/Dest) is sent by every
-    // browser that can make such a request, is not forgeable from script, and
-    // is sent by no ordinary client, so its mere presence is the signal.
-    const browserShaped = 'origin' in req.headers
-      || Object.keys(req.headers).some((name) => name.toLowerCase().startsWith('sec-fetch-'));
+    // service. Fetch metadata fills that gap: it is set by the browser, not
+    // forgeable from script, and covers no-cors GETs, subresource loads
+    // (`<img src>`, `<script src>`) and navigations alike.
+    //
+    // But only *some* of it is browser-exclusive. undici — Node's global
+    // `fetch`, and the same engine in Deno and Bun — always sends
+    // `sec-fetch-mode: cors` and nothing else, so keying on "any Sec-Fetch-*
+    // header" refused the most obvious modern client, for /health and for real
+    // webhook deliveries. Sec-Fetch-Site and Sec-Fetch-Dest are the
+    // discriminating pair: a browser sets both on every request it makes to a
+    // potentially-trustworthy origin (loopback is one), and no non-browser
+    // client sends either. Sec-Fetch-User comes with a user-activated
+    // navigation and is browser-only too.
+    //
+    // Site is checked by presence, not value: `none` (a typed URL or bookmark)
+    // and `same-origin` are just as much a browser as `cross-site` is, and
+    // this server serves no page that could legitimately be their referrer.
+    const BROWSER_ONLY_HEADERS = ['origin', 'sec-fetch-site', 'sec-fetch-dest', 'sec-fetch-user'];
+    const browserShaped = BROWSER_ONLY_HEADERS.some((name) => name in req.headers);
     if (browserShaped) {
       res.writeHead(403, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Browser-originated requests are not accepted' }));
