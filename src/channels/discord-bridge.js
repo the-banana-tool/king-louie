@@ -8,7 +8,7 @@ const {
   formatApprovalRequest
 } = require('./discord-adapter');
 const { shouldRespond } = require('./mention-gating');
-const { NoticeLimiter, resolveApprovalTarget, addressesBot } = require('./sender-policy');
+const { NoticeLimiter, resolveApprovalTarget, judgeApprovalPress, addressesBot } = require('./sender-policy');
 const { skillRegistry } = require('../skills');
 const { createLogger } = require('../logging');
 const log = createLogger('discord-bridge');
@@ -334,7 +334,7 @@ class DiscordChannel extends ChannelPlugin {
       from: `discord:${chatId}`,
       channel: 'discord',
       startedAt: Date.now(),
-      approvalHandler: this.createApprovalHandler(chatId)
+      approvalHandler: this.createApprovalHandler(chatId, userId)
     });
   }
 
@@ -388,9 +388,10 @@ class DiscordChannel extends ChannelPlugin {
     });
   }
 
-  createApprovalHandler(originChannelId) {
+  createApprovalHandler(originChannelId, requesterUserId = null) {
     return async ({ toolName, parameters }) => {
       const origin = String(originChannelId);
+      const requester = String(requesterUserId == null ? '' : requesterUserId).trim();
       const { target: approverChannelId, reason } = this.resolveApprover(origin);
       if (!approverChannelId) {
         log.warn(`denied ${toolName} requested from discord:${origin} — ${reason}`);
@@ -426,6 +427,7 @@ class DiscordChannel extends ChannelPlugin {
         this.pendingApprovals.set(approvalId, {
           approverChannelId,
           originChannelId: origin,
+          requesterUserId: requester,
           resolve,
           timer
         });
@@ -725,6 +727,22 @@ class DiscordChannel extends ChannelPlugin {
     if (pending.approverChannelId !== String(interaction.channelId)) {
       log.warn(`rejected approval press for ${approvalId} from discord:${interaction.channelId}`);
       await interaction.reply({ content: 'Only the owner channel can approve this action.', ephemeral: true });
+      return;
+    }
+
+    // Arriving in the owner's channel is not the same as being the owner:
+    // anyone who can read that channel sees the button, and the requester may
+    // well be one of them. The presser must be someone else, and someone the
+    // owner allowlisted by user id.
+    const actorId = String(interaction.user?.id || interaction.member?.user?.id || '');
+    const press = judgeApprovalPress({
+      actorId,
+      requesterId: pending.requesterUserId,
+      actorAllowed: Boolean(this.allowlistManager?.isAllowedUser('discord', actorId))
+    });
+    if (!press.ok) {
+      log.warn(`rejected approval press for ${approvalId} in discord:${interaction.channelId} — ${press.reason}`);
+      await interaction.reply({ content: 'You are not allowed to approve this action.', ephemeral: true });
       return;
     }
 

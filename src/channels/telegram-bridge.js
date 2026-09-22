@@ -7,7 +7,7 @@ const {
 } = require('./telegram-adapter');
 const { ChannelPlugin } = require('./channel-plugin');
 const { shouldRespond } = require('./mention-gating');
-const { NoticeLimiter, resolveApprovalTarget, addressesBot, commandTargetsBot } = require('./sender-policy');
+const { NoticeLimiter, resolveApprovalTarget, judgeApprovalPress, addressesBot, commandTargetsBot } = require('./sender-policy');
 const { skillRegistry } = require('../skills');
 const { createLogger } = require('../logging');
 const log = createLogger('telegram-bridge');
@@ -505,7 +505,7 @@ class TelegramBridge extends ChannelPlugin {
       }
     }
 
-    await this.routeAgentMessage(chatId, text);
+    await this.routeAgentMessage(chatId, text, inbound.sender.id);
   }
 
   async handleCommand(chatId, text) {
@@ -668,7 +668,7 @@ class TelegramBridge extends ChannelPlugin {
     await this.sendMessage(chatId, 'Unknown command. Use /help.');
   }
 
-  async routeAgentMessage(chatId, text) {
+  async routeAgentMessage(chatId, text, requesterUserId = null) {
     const state = this.getOrCreateChatState(chatId);
     const session = this.sessionManager.getOrCreateSession(state.sessionKey, state.agentId, {
       channel: 'telegram',
@@ -695,7 +695,7 @@ class TelegramBridge extends ChannelPlugin {
       from: `telegram:${chatId}`,
       channel: 'telegram',
       startedAt: Date.now(),
-      approvalHandler: this.createApprovalHandler(chatId)
+      approvalHandler: this.createApprovalHandler(chatId, requesterUserId)
     });
   }
 
@@ -710,9 +710,10 @@ class TelegramBridge extends ChannelPlugin {
     });
   }
 
-  createApprovalHandler(originChatId) {
+  createApprovalHandler(originChatId, requesterUserId = null) {
     return async ({ toolName, parameters }) => {
       const origin = String(originChatId);
+      const requester = String(requesterUserId == null ? '' : requesterUserId).trim();
       const { target: approverChatId, reason } = this.resolveApprover(origin);
       if (!approverChatId) {
         log.warn(`denied ${toolName} requested from telegram:${origin} — ${reason}`);
@@ -743,6 +744,7 @@ class TelegramBridge extends ChannelPlugin {
         this.pendingApprovals.set(approvalId, {
           approverChatId,
           originChatId: origin,
+          requesterUserId: requester,
           resolve,
           timer
         });
@@ -773,6 +775,22 @@ class TelegramBridge extends ChannelPlugin {
     if (pending.approverChatId !== chatId) {
       log.warn(`rejected approval press for ${approvalId} from telegram:${chatId}`);
       await this.answerCallbackQuery(callbackId, 'Only the owner chat can approve this action.');
+      return;
+    }
+
+    // Arriving in the owner's chat is not the same as being the owner: the
+    // approval surface usually has more than one member, and the requester can
+    // be one of them. The presser must be someone else, and someone the owner
+    // allowlisted by user id.
+    const actorId = String(query?.from?.id || '');
+    const press = judgeApprovalPress({
+      actorId,
+      requesterId: pending.requesterUserId,
+      actorAllowed: Boolean(this.allowlistManager?.isAllowedUser('telegram', actorId))
+    });
+    if (!press.ok) {
+      log.warn(`rejected approval press for ${approvalId} in telegram:${chatId} — ${press.reason}`);
+      await this.answerCallbackQuery(callbackId, 'You are not allowed to approve this action.');
       return;
     }
 

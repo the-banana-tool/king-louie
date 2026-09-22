@@ -96,9 +96,39 @@ function resolveApprovalTarget({ ownerTarget, originTarget } = {}) {
   return { target: owner, reason: null };
 }
 
+// Decides whether a button press may resolve a pending approval.
+//
+// `resolveApprovalTarget` above answers "where may the prompt go"; it says
+// nothing about *who* pressed. Comparing destinations alone is not an actor
+// check: the owner's approval surface is usually a chat or channel with more
+// than one member — and the requester may well be one of them — so a requester
+// who can see the owner's room could press their own Approve button and
+// self-serve the tool the approval gate exists to stop.
+//
+// Three things must hold, and each fails closed on missing information:
+//   - the press names an actor (Telegram `callback_query.from`, Discord
+//     `interaction.user`); an anonymous press proves nothing;
+//   - the pending approval remembers which principal asked, and the actor is
+//     not that principal;
+//   - the actor is a principal the owner allowlisted *by user id*. Group
+//     membership is not enough: `AllowlistManager.isAllowed` passes anyone in
+//     an allowlisted group, which would make every member of the owner's room
+//     an approver.
+function judgeApprovalPress({ actorId, requesterId, actorAllowed } = {}) {
+  const actor = String(actorId == null ? '' : actorId).trim();
+  const requester = String(requesterId == null ? '' : requesterId).trim();
+
+  if (!actor) return { ok: false, reason: 'the press carried no user id' };
+  if (!requester) return { ok: false, reason: 'the requesting principal was not recorded' };
+  if (actor === requester) return { ok: false, reason: `user ${actor} may not approve their own request` };
+  if (!actorAllowed) return { ok: false, reason: `user ${actor} is not allowlisted on this channel` };
+  return { ok: true, reason: null };
+}
+
 module.exports = {
   NoticeLimiter,
   resolveApprovalTarget,
+  judgeApprovalPress,
   addressesBot,
   commandTargetsBot,
   DEFAULT_NOTICE_CAPACITY

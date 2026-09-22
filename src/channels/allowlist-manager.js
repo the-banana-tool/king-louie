@@ -144,6 +144,21 @@ class AllowlistManager {
     return false;
   }
 
+  // Whether this *user id* is on the allowlist, ignoring group membership and
+  // without journalling a refusal.
+  //
+  // `isAllowed` admits anyone who speaks in an allowlisted group, which is
+  // right for "may this message be routed" and wrong for "may this principal
+  // approve a tool": the owner's approval room is a group, and every member of
+  // it would otherwise be an approver. The refusal journal is "who just
+  // knocked" for inbound messages, so a rejected button press does not belong
+  // in it either.
+  isAllowedUser(channel, userId) {
+    const user = String(userId == null ? '' : userId).trim();
+    if (!user) return false;
+    return this.getPolicy(channel).users.includes(user);
+  }
+
   addUser(channel, userId) {
     const policy = this.getPolicy(channel);
     const user = String(userId || '').trim();

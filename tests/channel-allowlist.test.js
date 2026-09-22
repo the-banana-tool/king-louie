@@ -391,10 +391,29 @@ describe('Channel bridges — a slash command must be aimed at this bot', () => 
   });
 });
 
+// The owner's approval surface is a destination, not a principal: a Telegram
+// group or a Discord channel usually has more than one member, and the
+// requester can be one of them. Copilot review comment C2 (PR #28).
+// A pending approval holds a live two-minute timer. A test that deliberately
+// leaves one unresolved must release it, or the file takes two minutes to exit.
+function drainApprovals(bridge) {
+  for (const approval of bridge.pendingApprovals.values()) {
+    clearTimeout(approval.timer);
+    approval.resolve(false);
+  }
+  bridge.pendingApprovals.clear();
+}
+
+function approverAllowlist(channel, ...userIds) {
+  const manager = new AllowlistManager(makeStore());
+  for (const id of userIds) manager.addUser(channel, String(id));
+  return manager;
+}
+
 describe('Telegram bridge — approval routing', () => {
   it('never sends the approval prompt to the chat that originated the request', async () => {
     const bridge = makeTelegram({ getChannelSettings: () => ({}) });
-    const approved = await settled(bridge.createApprovalHandler('999')({ toolName: 'Bash', parameters: { command: 'id' } }));
+    const approved = await settled(bridge.createApprovalHandler('999', '999')({ toolName: 'Bash', parameters: { command: 'id' } }));
     assert.strictEqual(approved, false, 'with no owner surface the approval must be denied');
     assert.deepStrictEqual(bridge.sent, [], 'nothing may be sent to the requester');
     assert.strictEqual(bridge.pendingApprovals.size, 0);
@@ -402,14 +421,17 @@ describe('Telegram bridge — approval routing', () => {
 
   it('denies rather than self-approving when the owner surface is the requester', async () => {
     const bridge = makeTelegram({ getChannelSettings: () => ({ approvalChatId: '999' }) });
-    const approved = await settled(bridge.createApprovalHandler('999')({ toolName: 'Bash', parameters: {} }));
+    const approved = await settled(bridge.createApprovalHandler('999', '999')({ toolName: 'Bash', parameters: {} }));
     assert.strictEqual(approved, false);
     assert.deepStrictEqual(bridge.sent, []);
   });
 
   it('sends the prompt to the owner chat and accepts only the owner callback', async () => {
-    const bridge = makeTelegram({ getChannelSettings: () => ({ approvalChatId: '42' }) });
-    const pending = bridge.createApprovalHandler('999')({ toolName: 'Bash', parameters: {} });
+    const bridge = makeTelegram({
+      getChannelSettings: () => ({ approvalChatId: '42' }),
+      allowlistManager: approverAllowlist('telegram', 42)
+    });
+    const pending = bridge.createApprovalHandler('999', '999')({ toolName: 'Bash', parameters: {} });
     await new Promise((resolve) => setImmediate(resolve));
 
     assert.strictEqual(bridge.sent.length, 1);
@@ -417,10 +439,99 @@ describe('Telegram bridge — approval routing', () => {
     const callbackData = bridge.sent[0].extra.reply_markup.inline_keyboard[0][0].callback_data;
 
     // The requester tries to press the owner's Approve button.
-    await bridge.handleCallbackQuery({ id: 'cb1', data: callbackData, message: { chat: { id: 999 } } });
+    await bridge.handleCallbackQuery({ id: 'cb1', data: callbackData, from: { id: 999 }, message: { chat: { id: 999 } } });
     assert.strictEqual(bridge.pendingApprovals.size, 1, 'the requester must not resolve the approval');
 
-    await bridge.handleCallbackQuery({ id: 'cb2', data: callbackData, message: { chat: { id: 42 } } });
+    await bridge.handleCallbackQuery({ id: 'cb2', data: callbackData, from: { id: 42 }, message: { chat: { id: 42 } } });
+    assert.strictEqual(await settled(pending), true);
+  });
+});
+
+describe('Channel bridges — who pressed the approval button', () => {
+  // The requester is a member of the owner's approval group. The destination
+  // matches, so before the C2 fix their own press resolved the approval.
+  it('telegram: the requester cannot approve their own request from the owner group', async () => {
+    const bridge = makeTelegram({
+      getChannelSettings: () => ({ approvalChatId: '-1001' }),
+      allowlistManager: approverAllowlist('telegram', 42, 999)
+    });
+    const pending = bridge.createApprovalHandler('999', '999')({ toolName: 'Bash', parameters: {} });
+    await new Promise((resolve) => setImmediate(resolve));
+    const callbackData = bridge.sent[0].extra.reply_markup.inline_keyboard[0][0].callback_data;
+
+    await bridge.handleCallbackQuery({ id: 'cb1', data: callbackData, from: { id: 999 }, message: { chat: { id: -1001 } } });
+    assert.strictEqual(bridge.pendingApprovals.size, 1, 'a self-approval must not resolve the request');
+
+    await bridge.handleCallbackQuery({ id: 'cb2', data: callbackData, from: { id: 42 }, message: { chat: { id: -1001 } } });
+    assert.strictEqual(await settled(pending), true, 'a different allowlisted user still approves');
+  });
+
+  it('telegram: a bystander in the owner group cannot approve', async () => {
+    const bridge = makeTelegram({
+      getChannelSettings: () => ({ approvalChatId: '-1001' }),
+      allowlistManager: approverAllowlist('telegram', 42)
+    });
+    const pending = bridge.createApprovalHandler('999', '999')({ toolName: 'Bash', parameters: {} });
+    await new Promise((resolve) => setImmediate(resolve));
+    const callbackData = bridge.sent[0].extra.reply_markup.inline_keyboard[0][0].callback_data;
+
+    await bridge.handleCallbackQuery({ id: 'cb1', data: callbackData, from: { id: 31337 }, message: { chat: { id: -1001 } } });
+    assert.strictEqual(bridge.pendingApprovals.size, 1);
+    assert.strictEqual(await settled(pending, 60), 'PENDING');
+    drainApprovals(bridge);
+  });
+
+  it('telegram: an anonymous press resolves nothing', async () => {
+    const bridge = makeTelegram({
+      getChannelSettings: () => ({ approvalChatId: '-1001' }),
+      allowlistManager: approverAllowlist('telegram', 42)
+    });
+    bridge.createApprovalHandler('999', '999')({ toolName: 'Bash', parameters: {} });
+    await new Promise((resolve) => setImmediate(resolve));
+    const callbackData = bridge.sent[0].extra.reply_markup.inline_keyboard[0][0].callback_data;
+
+    await bridge.handleCallbackQuery({ id: 'cb1', data: callbackData, message: { chat: { id: -1001 } } });
+    assert.strictEqual(bridge.pendingApprovals.size, 1);
+    drainApprovals(bridge);
+  });
+
+  it('telegram: an approval whose requester was never recorded cannot be pressed', async () => {
+    const bridge = makeTelegram({
+      getChannelSettings: () => ({ approvalChatId: '-1001' }),
+      allowlistManager: approverAllowlist('telegram', 42)
+    });
+    bridge.createApprovalHandler('999')({ toolName: 'Bash', parameters: {} });
+    await new Promise((resolve) => setImmediate(resolve));
+    const callbackData = bridge.sent[0].extra.reply_markup.inline_keyboard[0][0].callback_data;
+
+    await bridge.handleCallbackQuery({ id: 'cb1', data: callbackData, from: { id: 42 }, message: { chat: { id: -1001 } } });
+    assert.strictEqual(bridge.pendingApprovals.size, 1, 'an unattributable request must not be approvable');
+    drainApprovals(bridge);
+  });
+
+  it('discord: the requester cannot approve their own request from the owner channel', async () => {
+    const bridge = makeDiscord({
+      getChannelSettings: () => ({ approvalChatId: 'owner-chan' }),
+      allowlistManager: approverAllowlist('discord', 'owner-1', 'user-9')
+    });
+    const pending = bridge.createApprovalHandler('chan-1', 'user-9')({ toolName: 'Bash', parameters: {} });
+    await new Promise((resolve) => setImmediate(resolve));
+    const approvalId = [...bridge.pendingApprovals.keys()][0];
+    const press = (userId) => ({
+      isButton: () => true,
+      customId: `kl_a_${approvalId}_y`,
+      channelId: 'owner-chan',
+      user: { id: userId },
+      reply: async () => {}
+    });
+
+    await bridge.handleInteractionCreate(press('user-9'));
+    assert.strictEqual(bridge.pendingApprovals.size, 1, 'a self-approval must not resolve the request');
+
+    await bridge.handleInteractionCreate(press('bystander'));
+    assert.strictEqual(bridge.pendingApprovals.size, 1, 'a non-allowlisted member must not approve');
+
+    await bridge.handleInteractionCreate(press('owner-1'));
     assert.strictEqual(await settled(pending), true);
   });
 });
@@ -444,8 +555,11 @@ describe('Discord bridge — unknown senders and approval routing', () => {
   });
 
   it('sends the prompt to the owner channel and rejects an interaction from elsewhere', async () => {
-    const bridge = makeDiscord({ getChannelSettings: () => ({ approvalChatId: 'owner-chan' }) });
-    const pending = bridge.createApprovalHandler('chan-1')({ toolName: 'Bash', parameters: {} });
+    const bridge = makeDiscord({
+      getChannelSettings: () => ({ approvalChatId: 'owner-chan' }),
+      allowlistManager: approverAllowlist('discord', 'owner-1')
+    });
+    const pending = bridge.createApprovalHandler('chan-1', 'user-9')({ toolName: 'Bash', parameters: {} });
     await new Promise((resolve) => setImmediate(resolve));
 
     assert.strictEqual(bridge.sent.length, 1);
@@ -457,6 +571,7 @@ describe('Discord bridge — unknown senders and approval routing', () => {
       isButton: () => true,
       customId: `kl_a_${approvalId}_${suffix}`,
       channelId,
+      user: { id: 'owner-1' },
       reply: async (payload) => { replies.push(payload); }
     });
 
