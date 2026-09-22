@@ -32,7 +32,8 @@ function registerChatHandlers(ipcMain, context = {}) {
     createUsageRecordFromMetrics,
     getContextAssembler,
     getConversationCompactor,
-    getToolResultsDir
+    getToolResultsDir,
+    prompter
   } = context;
 
   const activeRuns = new Map(); // chatId -> AbortController
@@ -458,6 +459,7 @@ function registerChatHandlers(ipcMain, context = {}) {
             usageTracker: typeof getUsageTracker === 'function' ? getUsageTracker() : null,
             abortSignal: abortController.signal,
             toolResultsDir,
+            prompter,
             // Stream text deltas to the UI during agent loop iterations
             onChunk: (chunk) => {
               if (abortController.signal.aborted) return;

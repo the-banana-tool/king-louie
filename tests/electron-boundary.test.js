@@ -16,8 +16,6 @@ const PATTERNS = [
 const KNOWN_VIOLATIONS = [
   'auth/anthropic-oauth.js:electron',
   'channels/channel-plugin.js:electron',
-  'execution/agent-loop.js:electron',
-  'execution/agent-loop.js:main.js',
   'mesh/index.js:electron',
   'notifications/channels/ui-toast.js:electron',
   'tools/builtin/browser-tool.js:electron-store',

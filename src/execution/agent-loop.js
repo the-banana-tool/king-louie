@@ -10,6 +10,7 @@ const {
   evaluateVerifyOnStop
 } = require('../verification');
 const { createLogger } = require('../logging');
+const { createHeadlessPrompter } = require('../platform/prompter');
 const log = createLogger('agent-loop');
 
 class AgentLoop {
@@ -22,6 +23,7 @@ class AgentLoop {
       ? options.onUsageRecorded
       : null;
     this.abortSignal = options.abortSignal || null;
+    this.prompter = options.prompter || createHeadlessPrompter();
 
     // Shared with InferenceRouter so "what is worth retrying" has exactly
     // one definition in the codebase.
@@ -133,43 +135,9 @@ class AgentLoop {
     // opening a second prompt.
     let grantedPromise = this._pendingDirectoryAccess.get(dirKey);
     if (!grantedPromise) {
-      grantedPromise = new Promise((resolve) => {
-        const timeoutMs = 2 * 60 * 1000; // 2 minutes
-        const timeoutId = setTimeout(() => resolve(false), timeoutMs);
-
-        try {
-          const { BrowserWindow } = require('electron');
-          const windows = BrowserWindow.getAllWindows();
-          if (windows.length > 0) {
-            const win = windows[0];
-            const { pendingDirectoryAccessResolvers } = require('../../main');
-            if (pendingDirectoryAccessResolvers) {
-              const requestId = `diraccess-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-              pendingDirectoryAccessResolvers.set(requestId, {
-                directory: dirToAllow,
-                resolve: (approved) => {
-                  clearTimeout(timeoutId);
-                  resolve(approved);
-                }
-              });
-              win.webContents.send('tool:directoryAccessRequired', {
-                requestId,
-                directory: dirToAllow,
-                toolName
-              });
-            } else {
-              clearTimeout(timeoutId);
-              resolve(false);
-            }
-          } else {
-            clearTimeout(timeoutId);
-            resolve(false);
-          }
-        } catch {
-          clearTimeout(timeoutId);
-          resolve(false);
-        }
-      });
+      grantedPromise = this.prompter
+        .requestDirectoryAccess({ directory: dirToAllow, toolName })
+        .catch(() => false);
       this._pendingDirectoryAccess.set(dirKey, grantedPromise);
       // Clean up the entry once resolved so a later denial of a different
       // directory doesn't get stuck on an old promise.
@@ -463,40 +431,9 @@ class AgentLoop {
 
           if (call.toolName === 'AskUser') {
             const question = call.parameters?.question;
-            toolResult = await new Promise((resolve) => {
-              const requestId = `ask-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-              const timeoutMs = 5 * 60 * 1000;
-              const timeoutId = setTimeout(() => {
-                resolve({ ok: false, error: 'User did not respond within 5 minutes.' });
-              }, timeoutMs);
-
-              try {
-                const { BrowserWindow } = require('electron');
-                const windows = BrowserWindow.getAllWindows();
-                if (windows.length > 0) {
-                  const win = windows[0];
-                  const { pendingAskUserResolvers } = require('../../main');
-                  if (pendingAskUserResolvers) {
-                    pendingAskUserResolvers.set(requestId, {
-                      resolve: (userResponse) => {
-                        clearTimeout(timeoutId);
-                        resolve({ ok: true, response: userResponse });
-                      }
-                    });
-                    win.webContents.send('agent:askUser', { requestId, question });
-                  } else {
-                    clearTimeout(timeoutId);
-                    resolve({ ok: false, error: 'pendingAskUserResolvers not available' });
-                  }
-                } else {
-                  clearTimeout(timeoutId);
-                  resolve({ ok: false, error: 'No UI available to ask user.' });
-                }
-              } catch (e) {
-                clearTimeout(timeoutId);
-                resolve({ ok: false, error: 'Cannot ask user outside of Electron main process.' });
-              }
-            });
+            toolResult = await this.prompter
+              .askUser({ question })
+              .catch((err) => ({ ok: false, error: err.message || String(err) }));
           } else {
             toolResult = await this.executor.execute(
               call.toolName,

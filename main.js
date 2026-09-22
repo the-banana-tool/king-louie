@@ -82,6 +82,7 @@ const PlannerExecutor = require('./src/workflows/planner-executor');
 const { MCPManager, createVaultEnvResolver } = require('./src/mcp');
 const { BackgroundTaskManager } = require('./src/tasks/background-task-manager');
 const { createLogger } = require('./src/logging');
+const { createElectronPrompter } = require('./src/platform/electron-prompter');
 
 const log = createLogger('main');
 const memoryLog = createLogger('memory');
@@ -98,6 +99,11 @@ let pinManager;
 const pendingApprovalResolvers = new Map();
 const pendingAskUserResolvers = new Map();
 const pendingDirectoryAccessResolvers = new Map();
+const electronPrompter = createElectronPrompter({
+  getWindow: () => mainWindow,
+  pendingAskUserResolvers,
+  pendingDirectoryAccessResolvers
+});
 const pendingCanvasJsResolvers = new Map();
 let taskManager;
 let gatewayServer;
@@ -2455,7 +2461,8 @@ const initializeAgentInfrastructure = async () => {
         { workingDirectory: options.workingDirectory }
       );
       const executor = new AgentExecutor(runtime.provider, runtime.toolExecutor, {
-        usageTracker
+        usageTracker,
+        prompter: electronPrompter
       });
 
       return executor.execute(agent, message, {
@@ -2770,6 +2777,7 @@ registerHandlers(ipcMain, {
   removePermissionRule,
   pendingAskUserResolvers,
   pendingDirectoryAccessResolvers,
+  prompter: electronPrompter,
 
   // Hooks
   getHookSettings,
@@ -3025,6 +3033,3 @@ app.on('window-all-closed', function () {
     app.quit();
   }
 });
-
-// Export Maps needed by agent-loop.js for IPC prompts (AskUser, directory access)
-module.exports = { pendingAskUserResolvers, pendingDirectoryAccessResolvers };
