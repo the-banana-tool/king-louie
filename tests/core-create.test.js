@@ -197,12 +197,17 @@ describe('createCore workingDirectory', () => {
     const { deps } = makeDeps();
     const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-ws-'));
     tempDirs.push(workspace);
+    const cwdBefore = process.cwd();
     const core = createCore({ ...deps, workingDirectory: workspace });
 
     const executor = await core.context.createToolExecutorWithApprovals(null);
     assert.strictEqual(fs.realpathSync(executor.workingDirectory), fs.realpathSync(workspace));
     assert.notStrictEqual(fs.realpathSync(executor.workingDirectory), fs.realpathSync(process.cwd()));
-    assert.strictEqual(process.cwd(), process.cwd(), 'createCore must not chdir the process');
+    // `process.cwd() === process.cwd()` used to stand here, which cannot fail
+    // whatever createCore does. Capture it before the call instead: moving the
+    // process is the host's decision (src/service/run.js does it deliberately),
+    // never createCore's.
+    assert.strictEqual(process.cwd(), cwdBefore, 'createCore must not chdir the process');
   });
 
   it('lets an explicit per-call workingDirectory still win', async () => {

@@ -279,7 +279,10 @@ directory itself: the data directory holds the master key, the gateway
 token and the encrypted stores, and the agent's read tools (`Read`,
 `Grep`, `Glob`) are not approval-gated, so anything reachable from the
 working directory is reachable from a chat message. The secret files are
-additionally denied outright, whatever the working directory is.
+additionally denied outright, whatever the working directory is. The
+service process chdirs into that workspace at startup, so anything it
+spawns without an explicit working directory — a stdio MCP server, for
+instance — starts there too rather than in the data directory.
 
 ### Operate
 

@@ -1026,17 +1026,28 @@ describe('linux /etc/king-louie layout (I1)', () => {
   });
 });
 
-describe('services run in the data dir (M5)', () => {
-  it('systemd: WorkingDirectory= is the data dir', () => {
-    assert.match(renderSystemdUnit(base), /^WorkingDirectory=\/var\/lib\/king-louie$/m);
+// No unit may name the data dir as the process's working directory: the data
+// dir is the secret store, and anything that inherits the cwd — a stdio MCP
+// server spawned without an explicit cwd is the concrete case — would start
+// inside it. The service chdirs into <dataDir>/workspace itself; the units
+// must not hand it the secret store to begin with.
+describe('no unit makes the secret store the working directory', () => {
+  it('systemd: WorkingDirectory= is the workspace, and tolerates it not existing yet', () => {
+    const unit = renderSystemdUnit(base);
+    assert.doesNotMatch(unit, /^WorkingDirectory=\/var\/lib\/king-louie$/m);
+    // The leading "-" is systemd's "start anyway if it is missing": the
+    // installer deliberately creates nothing inside the data dir (a planted
+    // symlink there would turn `install -d -o <svcuser>` into a chown of the
+    // target), so the workspace does not exist until the first run.
+    assert.match(unit, /^WorkingDirectory=-\/var\/lib\/king-louie\/workspace$/m);
   });
-  it('launchd: WorkingDirectory is the data dir', () => {
-    const plist = renderLaunchdPlist({ ...base, dataDir: '/Library/Application Support/KingLouie/data', logsDir: '/Library/Application Support/KingLouie/data/logs', user: '_kinglouie' });
-    assert.match(plist, /<key>WorkingDirectory<\/key>\s*<string>\/Library\/Application Support\/KingLouie\/data<\/string>/);
+  it('launchd: names no WorkingDirectory at all', () => {
+    const plist = renderLaunchdPlist({ ...base, dataDir: '/Library/Application Support/KingLouie/data', logsDir: '/var/log/king-louie', user: '_kinglouie' });
+    assert.doesNotMatch(plist, /<key>WorkingDirectory<\/key>/);
   });
-  it('task XML: <WorkingDirectory> is the data dir, after <Arguments> (schema order)', () => {
+  it('task XML: names no <WorkingDirectory> at all', () => {
     const xml = renderWindowsTaskXml({ nodePath: 'C:\\node.exe', entryPath: 'C:\\kl\\bin\\king-louie-service.js', dataDir: 'C:\\ProgramData\\KingLouie\\data\\' });
-    assert.match(xml, /<\/Arguments>\s*<WorkingDirectory>C:\\ProgramData\\KingLouie\\data<\/WorkingDirectory>\s*<\/Exec>/);
+    assert.doesNotMatch(xml, /<WorkingDirectory>/);
   });
 });
 

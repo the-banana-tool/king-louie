@@ -85,13 +85,25 @@ function loadProfile(profile) {
 // beside the data dir's other subdirectories; src/tools/utils.js separately
 // denies the secret files outright, whatever the workspace is.
 //
-// The workspace is handed to createCore as its `workingDirectory` rather than
-// installed with process.chdir(). A process-wide chdir is global mutable
-// state: anything else in the process can change it or come to depend on it,
-// and in a long-lived service that is a latent bug rather than a setting.
+// The workspace is handed to createCore as its `workingDirectory`, which is
+// what every tool executor and runtime environment inside the core uses. The
+// process is *also* moved there, once, before the core starts: createCore does
+// not own every consumer of `process.cwd()`, and the ones it does not own are
+// exactly the ones that reach outside the process. A stdio MCP server
+// configured without an explicit `cwd` (src/mcp/mcp-client.js) is spawned with
+// the cwd it inherits, and the template, hook and sandbox directory fallbacks
+// (src/templates/template-engine.js, src/hooks/hook-registry.js,
+// src/execution/runtime-environment.js) resolve against it too. With the
+// units' WorkingDirectory gone, that inherited cwd would otherwise be whatever
+// the service manager happened to pick.
+//
+// This is a deliberate one-time host decision made before anything else runs,
+// not a setting the core may change: createCore never chdirs (pinned by
+// tests/core-create.test.js).
 function ensureWorkspace(dataDir) {
   const workspace = path.join(dataDir, 'workspace');
   ensurePrivateDir(workspace);
+  process.chdir(workspace);
   return workspace;
 }
 

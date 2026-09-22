@@ -483,7 +483,12 @@ function renderSystemdUnit({ nodePath, entryPath, dataDir, user, profile = 'agen
     'Type=simple',
     `User=${user}`,
     `Group=${user}`,
-    `WorkingDirectory=${dataDir}`,
+    // Never the data dir: it is the secret store, and a child that inherits the
+    // cwd (a stdio MCP server configured without one) would start inside it.
+    // The leading "-" makes a missing directory non-fatal — the installer
+    // deliberately creates nothing inside the data dir, so the workspace does
+    // not exist until the service's own first run creates it.
+    `WorkingDirectory=-${path.posix.join(dataDir, 'workspace')}`,
     `ExecStart=${nodePath} ${entryPath} run --data-dir ${dataDir} --profile ${profile}`,
     'Restart=on-failure',
     'RestartSec=5',
@@ -517,8 +522,13 @@ ${args}
   </array>
   <key>UserName</key>
   <string>${xmlEscape(user)}</string>
-  <key>WorkingDirectory</key>
-  <string>${xmlEscape(dataDir)}</string>
+  <!-- No WorkingDirectory: it used to be the data dir, i.e. the secret store,
+       which anything spawned without an explicit cwd would inherit. launchd
+       refuses to start a job whose WorkingDirectory is missing, and nothing
+       may create a directory inside the data dir at install time (a planted
+       symlink there turns install -d -o <user> into a chown of its target),
+       so there is no directory to name here. The service chdirs into
+       <dataDir>/workspace itself, right after creating it. -->
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
@@ -559,7 +569,12 @@ function renderWindowsTaskXml({ nodePath, entryPath, dataDir, profile = 'agent' 
     <Exec>
       <Command>${xmlEscape(nodePath)}</Command>
       <Arguments>${xmlEscape(`"${entryPath}" run --data-dir "${dataDir}" --profile ${profile}`)}</Arguments>
-      <WorkingDirectory>${xmlEscape(dataDir)}</WorkingDirectory>
+      <!-- No WorkingDirectory: it used to be the data dir, i.e. the secret
+           store, which anything spawned without an explicit cwd would inherit.
+           Task Scheduler fails a task whose working directory does not exist,
+           and the workspace is created by the service's own first run, so
+           there is nothing to name here. The service chdirs into
+           <dataDir>\\workspace itself. -->
     </Exec>
   </Actions>
 </Task>

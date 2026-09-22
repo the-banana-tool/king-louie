@@ -41,14 +41,17 @@ for (const profile of ['agent', 'runbook']) {
       // store the agent's own workspace: master.key, gateway-token,
       // chat-data.json and config.json were all inside `process.cwd()`, and
       // the ungated read tools (Read/Grep/Glob) treat the working directory
-      // as in-bounds. The service now runs in an explicit workspace instead,
-      // handed to createCore as its workingDirectory rather than installed
-      // with process.chdir() — so the check is on the reported workspace, not
-      // on the process's cwd, which the service deliberately no longer moves.
+      // as in-bounds. The service now runs in an explicit workspace, handed to
+      // createCore as its workingDirectory — and the *process* cwd moves there
+      // too, because everything createCore does not own (a stdio MCP server
+      // spawned without an explicit cwd, the template and hook directory
+      // fallbacks) still resolves against process.cwd().
       const workspace = path.join(dataDir, 'workspace');
       assert.ok(fs.statSync(workspace).isDirectory(), 'the service must create its own workspace dir');
       assert.strictEqual(fs.realpathSync(info.workspace), fs.realpathSync(workspace), 'the service must work in its workspace, not the data dir');
       assert.notStrictEqual(fs.realpathSync(info.workspace), fs.realpathSync(dataDir));
+      assert.strictEqual(fs.realpathSync(info.cwd), fs.realpathSync(workspace), 'the process cwd must not be the secret store');
+      assert.notStrictEqual(fs.realpathSync(info.cwd), fs.realpathSync(dataDir));
       const serviceLog = fs.readFileSync(path.join(dataDir, 'logs', 'service.log'), 'utf8');
       assert.match(serviceLog, /INFO \[service\] service ready/);
       assert.match(serviceLog, /INFO \[service\] stopped/);
