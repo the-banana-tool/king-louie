@@ -39,57 +39,172 @@ const TASK_NAME = 'KingLouie';
 // Control to LOCAL SERVICE (LS), SYSTEM (SY) and Administrators (BA) only.
 const WINDOWS_DATA_DIR_SDDL = 'O:BAD:P(A;OICI;FA;;;LS)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)';
 
+// TrustedInstaller owns the volume root and C:\Windows on a stock install.
+const TRUSTED_INSTALLER_SID = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464';
+
+// Reads a path's attributes and raw security descriptor (owner + DACL)
+// through ONE handle opened with FILE_FLAG_OPEN_REPARSE_POINT, so a junction
+// or symlink is inspected as itself (never followed), and the reparse check
+// and the ACL read are guaranteed to describe the same object — a path-based
+// Get-Item then Get-Acl pair could be raced by swapping the entry in between.
+// Returns $null when nothing exists at the path (not even a dangling link).
+// CreateFileW always adds SYNCHRONIZE to the requested access, so a path whose
+// DACL doesn't grant the (elevated) installer that right can't be opened at
+// all — verification then fails closed with "cannot open …: Access is denied".
+const WINDOWS_INSPECT_CSHARP = [
+  'using System;',
+  'using System.ComponentModel;',
+  'using System.Runtime.InteropServices;',
+  'using Microsoft.Win32.SafeHandles;',
+  'public static class KlFsInspect {',
+  '  [StructLayout(LayoutKind.Sequential)]',
+  '  struct BY_HANDLE_FILE_INFORMATION {',
+  '    public uint FileAttributes;',
+  '    public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime, LastAccessTime, LastWriteTime;',
+  '    public uint VolumeSerialNumber, FileSizeHigh, FileSizeLow, NumberOfLinks, FileIndexHigh, FileIndexLow;',
+  '  }',
+  '  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]',
+  '  static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr sa, uint disposition, uint flags, IntPtr template);',
+  '  [DllImport("kernel32.dll", SetLastError = true)]',
+  '  static extern bool GetFileInformationByHandle(SafeFileHandle h, out BY_HANDLE_FILE_INFORMATION info);',
+  '  [DllImport("advapi32.dll")]',
+  '  static extern uint GetSecurityInfo(SafeFileHandle h, int objectType, uint securityInfo, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl, out IntPtr sd);',
+  '  [DllImport("advapi32.dll")]',
+  '  static extern uint GetSecurityDescriptorLength(IntPtr sd);',
+  '  [DllImport("kernel32.dll")]',
+  '  static extern IntPtr LocalFree(IntPtr mem);',
+  '  public static object[] Inspect(string path) {',
+  '    // READ_CONTROL | FILE_READ_ATTRIBUTES; share read/write/delete; OPEN_EXISTING;',
+  '    // FILE_FLAG_BACKUP_SEMANTICS (needed to open a directory) | FILE_FLAG_OPEN_REPARSE_POINT.',
+  '    SafeFileHandle h = CreateFileW(path, 0x00020080, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);',
+  '    if (h.IsInvalid) {',
+  '      int err = Marshal.GetLastWin32Error();',
+  '      if (err == 2 || err == 3) return null;',
+  '      throw new Win32Exception(err, "cannot open " + path + ": " + new Win32Exception(err).Message);',
+  '    }',
+  '    using (h) {',
+  '      BY_HANDLE_FILE_INFORMATION info;',
+  '      if (!GetFileInformationByHandle(h, out info)) throw new Win32Exception(Marshal.GetLastWin32Error(), "cannot read the attributes of " + path);',
+  '      IntPtr sd;',
+  '      // SE_FILE_OBJECT; OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION',
+  '      uint rc = GetSecurityInfo(h, 1, 0x1 | 0x4, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, out sd);',
+  '      if (rc != 0) throw new Win32Exception((int)rc, "cannot read the security descriptor of " + path);',
+  '      try {',
+  '        byte[] bytes = new byte[GetSecurityDescriptorLength(sd)];',
+  '        Marshal.Copy(sd, bytes, 0, bytes.Length);',
+  '        return new object[] { info.FileAttributes, bytes };',
+  '      } finally { LocalFree(sd); }',
+  '    }',
+  '  }',
+  '}'
+].join('\n');
+
 // Creates the data dir with a protected DACL present from the instant it
-// exists, or — if it already exists — only ever VERIFIES that ACL; it never
-// modifies an existing dir. This replaces a prior multi-step
-// mkdir-then-icacls*3 approach that was structurally unsafe:
-//   - each separate icacls process after an earlier existence/symlink check
-//     left a TOCTOU window an attacker could swap the dir for a junction in;
-//   - `icacls /reset` on an existing dir briefly re-enables inherited ACEs
-//     (e.g. Users:RX from ProgramData) until the following grant step runs,
-//     and any handle opened in that window survives it.
-// A single elevated, in-process PowerShell call has no such window: either
-// the directory doesn't exist and is created with its final ACL already
-// attached via the SecurityDescriptor overload of Directory.CreateDirectory
-// (no separate "create" then "secure" steps), or it exists already and is
-// only ever read, never rewritten. dataDir is passed through the KL_DATA_DIR
-// environment variable, never interpolated into this script's text.
+// exists, then — whether it was just created or already existed — runs the
+// SAME full verification; it never modifies an existing dir's ACL.
+//
+// Why verification always runs after CreateDirectory: Directory.CreateDirectory
+// on a path that already exists (a plain dir or a junction) returns success
+// silently and applies nothing, so a standard user who creates
+// C:\ProgramData\KingLouie (or a junction there) between the existence check
+// and the create would otherwise win. Now that race ends in the owner check
+// (their dir is owned by them) or the reparse check (a junction).
+//
+// Verification, on the data dir itself (read through one no-follow handle —
+// see WINDOWS_INSPECT_CSHARP):
+//   - not a reparse point, and a directory;
+//   - a DACL is present, and EVERY ACE in the raw DACL (RawSecurityDescriptor,
+//     so every ACE is judged by its real type — Get-Acl's .Access view lists
+//     a conditional/callback ACE as if it were an ordinary allow rule, and
+//     can omit ACE kinds it doesn't model) is a plain ACCESS_ALLOWED ACE for LOCAL SERVICE,
+//     SYSTEM or Administrators — anything else, deny ACEs included, fails;
+//   - the DACL is protected (no inherited ACEs);
+//   - the owner is Administrators, SYSTEM or LOCAL SERVICE;
+// and on every ancestor up to the volume root: not a reparse point, and owned
+// by Administrators, SYSTEM or TrustedInstaller. The ancestors that already
+// exist are also checked BEFORE creating, so nothing is created through an
+// attacker-controlled parent.
+//
+// This replaced a multi-step mkdir-then-icacls*3 sequence (a TOCTOU window
+// between every step, and `icacls /reset` briefly re-enabling inherited ACEs).
+// dataDir is passed through the KL_DATA_DIR environment variable, never
+// interpolated into this script's text.
 const WINDOWS_DATA_DIR_SCRIPT = [
   `$ErrorActionPreference = 'Stop'`,
   `try {`,
   `  $path = $env:KL_DATA_DIR`,
   `  if (-not $path) { throw 'KL_DATA_DIR is not set' }`,
-  `  if (-not (Test-Path -LiteralPath $path)) {`,
+  `  $path = [System.IO.Path]::GetFullPath($path)`,
+  `  Add-Type -TypeDefinition @'`,
+  WINDOWS_INSPECT_CSHARP,
+  `'@`,
+  `  $aceSids = @('S-1-5-19','S-1-5-18','S-1-5-32-544')`,
+  `  $dirOwners = @('S-1-5-32-544','S-1-5-18','S-1-5-19')`,
+  `  $ancestorOwners = @('S-1-5-32-544','S-1-5-18','${TRUSTED_INSTALLER_SID}')`,
+  `  function Read-Entry([string]$p) {`,
+  `    $r = [KlFsInspect]::Inspect($p)`,
+  `    if ($null -eq $r) { return $null }`,
+  `    return [PSCustomObject]@{ Attributes = [uint32]$r[0]; Sd = [System.Security.AccessControl.RawSecurityDescriptor]::new([byte[]]$r[1], 0) }`,
+  `  }`,
+  `  function Assert-SafeAncestors([string]$p, [bool]$mustExist) {`,
+  `    $a = [System.IO.Path]::GetDirectoryName($p)`,
+  `    while ($a) {`,
+  `      $e = Read-Entry $a`,
+  `      if ($null -eq $e) {`,
+  `        if ($mustExist) { throw "ancestor directory ${'$'}{a} is not safe: it does not exist" }`,
+  `      } else {`,
+  `        if ($e.Attributes -band 0x400) { throw "ancestor directory ${'$'}{a} is not safe: it is a symlink or junction" }`,
+  `        $o = if ($e.Sd.Owner) { $e.Sd.Owner.Value } else { '(none)' }`,
+  `        if ($ancestorOwners -notcontains $o) { throw "ancestor directory ${'$'}{a} is not safe: owner $o is not Administrators, SYSTEM or TrustedInstaller" }`,
+  `      }`,
+  `      $a = [System.IO.Path]::GetDirectoryName($a)`,
+  `    }`,
+  `  }`,
+  `  if ($null -eq (Read-Entry $path)) {`,
+  `    Assert-SafeAncestors $path $false`,
   `    $ds = New-Object System.Security.AccessControl.DirectorySecurity`,
   `    $ds.SetSecurityDescriptorSddlForm('${WINDOWS_DATA_DIR_SDDL}')`,
   `    [System.IO.Directory]::CreateDirectory($path, $ds) | Out-Null`,
-  `    exit 0`,
   `  }`,
-  `  $item = Get-Item -LiteralPath $path -Force`,
-  `  if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {`,
-  `    throw "refusing to use ${'$'}{path}: it already exists and is a symlink or junction"`,
-  `  }`,
-  `  $allowed = @('S-1-5-32-544','S-1-5-18','S-1-5-19')`,
-  `  $acl = Get-Acl -LiteralPath $path`,
-  `  $ownerSid = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value`,
-  `  if ($allowed -notcontains $ownerSid) {`,
-  `    throw "the data dir's ACL is not safe and must be fixed or removed manually: owner $ownerSid is not Administrators, SYSTEM or LOCAL SERVICE"`,
-  `  }`,
-  `  if (-not $acl.AreAccessRulesProtected) {`,
-  `    throw "the data dir's ACL is not safe and must be fixed or removed manually: inherited access rules are still enabled"`,
-  `  }`,
-  `  foreach ($rule in $acl.Access) {`,
-  `    $ruleSid = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value`,
-  `    if ($allowed -notcontains $ruleSid) {`,
-  `      throw "the data dir's ACL is not safe and must be fixed or removed manually: unexpected access rule for $ruleSid"`,
+  `  # VERIFY: always runs, for a freshly created dir and a pre-existing one alike`,
+  `  $bad = "the data dir's ACL is not safe and must be fixed or removed manually"`,
+  `  $e = Read-Entry $path`,
+  `  if ($null -eq $e) { throw "${'$'}{path} does not exist after creating it" }`,
+  `  if ($e.Attributes -band 0x400) { throw "refusing to use ${'$'}{path}: it is a symlink or junction" }`,
+  `  if (-not ($e.Attributes -band 0x10)) { throw "refusing to use ${'$'}{path}: it is not a directory" }`,
+  `  $dacl = $e.Sd.DiscretionaryAcl`,
+  `  if ($null -eq $dacl) { throw "${'$'}{bad}: it has no DACL (everyone has full access)" }`,
+  `  foreach ($ace in $dacl) {`,
+  `    if (-not ($ace -is [System.Security.AccessControl.CommonAce]) -or $ace.AceType -ne [System.Security.AccessControl.AceType]::AccessAllowed) {`,
+  `      throw "${'$'}{bad}: unexpected ACE of type $($ace.AceType) (only plain allow ACEs are permitted)"`,
   `    }`,
   `  }`,
+  `  foreach ($ace in $dacl) {`,
+  `    $aceSid = $ace.SecurityIdentifier.Value`,
+  `    if ($aceSids -notcontains $aceSid) { throw "${'$'}{bad}: unexpected ACE for $aceSid" }`,
+  `  }`,
+  `  if (-not ($e.Sd.ControlFlags -band [System.Security.AccessControl.ControlFlags]::DiscretionaryAclProtected)) {`,
+  `    throw "${'$'}{bad}: inherited access rules are still enabled"`,
+  `  }`,
+  `  $ownerSid = if ($e.Sd.Owner) { $e.Sd.Owner.Value } else { '(none)' }`,
+  `  if ($dirOwners -notcontains $ownerSid) { throw "${'$'}{bad}: owner $ownerSid is not Administrators, SYSTEM or LOCAL SERVICE" }`,
+  `  Assert-SafeAncestors $path $true`,
   `  exit 0`,
   `} catch {`,
   `  [Console]::Error.WriteLine($_.Exception.Message)`,
   `  exit 1`,
   `}`
 ].join('\n');
+
+// Absolute paths for every Windows executable the plans run, so an elevated
+// install started from an attacker-writable cwd can't pick up a planted
+// powershell.exe/schtasks.exe (Windows searches the cwd before PATH).
+function windowsSystemRoot() {
+  const root = process.env.SystemRoot;
+  return typeof root === 'string' && path.win32.isAbsolute(root) ? root : 'C:\\Windows';
+}
+const windowsPowerShellExe = () => path.win32.join(windowsSystemRoot(), 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+const windowsSchtasksExe = () => path.win32.join(windowsSystemRoot(), 'System32', 'schtasks.exe');
 
 // Escapes text for use inside XML element content (not attribute values, so
 // quotes are left as-is — they're only special inside an attribute).
@@ -353,19 +468,19 @@ function planInstall({ platform = process.platform, nodePath = process.execPath,
       // never through the script's text.
       {
         description: 'create or verify the data dir with a locked-down ACL',
-        run: ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', WINDOWS_DATA_DIR_SCRIPT],
+        run: [windowsPowerShellExe(), '-NoProfile', '-NonInteractive', '-Command', WINDOWS_DATA_DIR_SCRIPT],
         env: { KL_DATA_DIR: dataDir }
       },
       {
         description: 'write the task definition',
         writeFile: { path: xmlPath, content: `\ufeff${renderWindowsTaskXml({ nodePath, entryPath, dataDir, profile })}`, mode: 0o644, encoding: 'utf16le' }
       },
-      { description: 'register the boot task', run: ['schtasks', '/Create', '/TN', TASK_NAME, '/XML', xmlPath, '/F'] },
+      { description: 'register the boot task', run: [windowsSchtasksExe(), '/Create', '/TN', TASK_NAME, '/XML', xmlPath, '/F'] },
       // Always attempted, even if a step above it failed, so a stray temp
       // file doesn't linger; a failure here (e.g. already gone) must not
       // stop "start it now" from running.
       { description: 'delete the temporary task definition', unlink: xmlPath, always: true, ignoreFailure: true },
-      { description: 'start it now', run: ['schtasks', '/Run', '/TN', TASK_NAME] }
+      { description: 'start it now', run: [windowsSchtasksExe(), '/Run', '/TN', TASK_NAME] }
     ];
   } else {
     throw new Error(`Unsupported platform: ${platform}`);
@@ -399,8 +514,8 @@ function planUninstall({ platform = process.platform }) {
     return [
       // The task may already be stopped (or never started); that isn't a
       // reason to abort the uninstall.
-      { description: 'stop the task', run: ['schtasks', '/End', '/TN', TASK_NAME], ignoreFailure: true },
-      { description: 'delete the task', run: ['schtasks', '/Delete', '/TN', TASK_NAME, '/F'] }
+      { description: 'stop the task', run: [windowsSchtasksExe(), '/End', '/TN', TASK_NAME], ignoreFailure: true },
+      { description: 'delete the task', run: [windowsSchtasksExe(), '/Delete', '/TN', TASK_NAME, '/F'] }
     ];
   }
   throw new Error(`Unsupported platform: ${platform}`);

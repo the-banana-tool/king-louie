@@ -1,4 +1,4 @@
-const { describe, it } = require('node:test');
+const { describe, it, after } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
@@ -14,7 +14,21 @@ function io() {
   const out = [];
   return { out, stdout: { write: (s) => out.push(String(s)) } };
 }
-const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'kl-installers-'));
+// Every temp dir this file creates is removed once all tests have run.
+const createdTempDirs = [];
+const tmp = () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-installers-'));
+  createdTempDirs.push(dir);
+  return dir;
+};
+after(() => {
+  for (const dir of createdTempDirs) fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// The absolute executables the Windows plans must use (see installers.js).
+const SYSTEM_ROOT = process.env.SystemRoot && path.win32.isAbsolute(process.env.SystemRoot) ? process.env.SystemRoot : 'C:\\Windows';
+const POWERSHELL_EXE = path.win32.join(SYSTEM_ROOT, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+const SCHTASKS_EXE = path.win32.join(SYSTEM_ROOT, 'System32', 'schtasks.exe');
 
 describe('systemd unit', () => {
   it('runs as the service user with hardening and the master-key credential', () => {
@@ -85,9 +99,9 @@ describe('install plans', () => {
   });
   it('windows: creates/verifies the data dir ACL via PowerShell and registers the task', () => {
     const steps = planInstall({ platform: 'win32', nodePath: 'C:\\node.exe', entryPath: 'C:\\kl\\bin\\king-louie-service.js', dataDir: 'C:\\ProgramData\\KingLouie' });
-    assert.strictEqual(steps[0].run[0], 'powershell.exe');
+    assert.strictEqual(steps[0].run[0], POWERSHELL_EXE);
     assert.strictEqual(steps[0].env.KL_DATA_DIR, 'C:\\ProgramData\\KingLouie');
-    assert.ok(steps.some((s) => s.run?.[0] === 'schtasks' && s.run.includes('/Create')));
+    assert.ok(steps.some((s) => s.run?.[0] === SCHTASKS_EXE && s.run.includes('/Create')));
   });
   it('darwin: requires --user', () => {
     assert.throws(() => planInstall({ platform: 'darwin', ...base, user: undefined }), /--user is required on macOS/);
@@ -196,7 +210,7 @@ describe('Windows install plan fixes', () => {
     const tmpDir = path.win32.resolve(os.tmpdir());
     assert.ok(write.writeFile.path.toLowerCase().startsWith(tmpDir.toLowerCase()));
     assert.ok(!write.writeFile.path.toLowerCase().startsWith('c:\\programdata\\kinglouie'));
-    const register = steps.find((s) => s.run?.[0] === 'schtasks' && s.run.includes('/Create'));
+    const register = steps.find((s) => s.run?.[0] === SCHTASKS_EXE && s.run.includes('/Create'));
     assert.strictEqual(register.run[register.run.indexOf('/XML') + 1], write.writeFile.path);
     const del = steps.find((s) => s.unlink === write.writeFile.path);
     assert.ok(del, 'expected a step that deletes the temp task XML');
@@ -235,9 +249,9 @@ describe('Windows: single PowerShell step creates/verifies the data dir ACL', ()
     assert.strictEqual(steps.filter((s) => s.run?.[0] === 'icacls').length, 0, 'icacls must not appear anywhere in the plan');
   });
 
-  it('runs powershell.exe -NoProfile -NonInteractive -Command <script>, with no other run steps for the ACL', () => {
+  it('runs <SystemRoot>\\System32\\...\\powershell.exe -NoProfile -NonInteractive -Command <script>, with no other run steps for the ACL', () => {
     const step = aclStep();
-    assert.deepStrictEqual(step.run.slice(0, 4), ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command']);
+    assert.deepStrictEqual(step.run.slice(0, 4), [POWERSHELL_EXE, '-NoProfile', '-NonInteractive', '-Command']);
     assert.strictEqual(step.run.length, 5, 'expected exactly one script argument after -Command');
     assert.strictEqual(typeof step.run[4], 'string');
   });
@@ -258,12 +272,57 @@ describe('Windows: single PowerShell step creates/verifies the data dir ACL', ()
     assert.ok(aclStep().run[4].includes('O:BAD:P(A;OICI;FA;;;LS)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'));
   });
 
-  it('the script checks for a reparse point (symlink/junction) before ever verifying the ACL', () => {
+  it('the script checks the data dir for a reparse point (symlink/junction) before verifying its ACL', () => {
     const script = aclStep().run[4];
-    assert.match(script, /ReparsePoint/);
-    const reparseIdx = script.indexOf('ReparsePoint');
-    const aclIdx = script.indexOf('Get-Acl');
-    assert.ok(reparseIdx < aclIdx, 'the reparse-point check must come before the ACL is ever read');
+    const verifyIdx = script.indexOf('# VERIFY');
+    const reparseIdx = script.indexOf('it is a symlink or junction', verifyIdx);
+    const daclIdx = script.indexOf('.DiscretionaryAcl', verifyIdx);
+    assert.ok(verifyIdx > 0 && reparseIdx > verifyIdx && daclIdx > reparseIdx, 'the reparse-point check must come before the DACL is judged');
+  });
+
+  // --- Fix round 4: TOCTOU on the create branch, raw DACL, ancestors ------
+
+  it('the script has exactly one "exit 0", and it comes after the create call and every verification check', () => {
+    const script = aclStep().run[4];
+    const exits = [...script.matchAll(/exit 0/g)].map((m) => m.index);
+    assert.strictEqual(exits.length, 1, 'no early exit 0 may short-circuit verification');
+    const createIdx = script.indexOf('[System.IO.Directory]::CreateDirectory($path, $ds)');
+    const verifyIdx = script.indexOf('# VERIFY');
+    assert.ok(createIdx > 0 && verifyIdx > createIdx, 'verification must follow the create call');
+    for (const marker of ['it is a symlink or junction', 'foreach ($ace in $dacl)', 'DiscretionaryAclProtected', '$dirOwners -notcontains $ownerSid', 'Assert-SafeAncestors $path $true']) {
+      const idx = script.indexOf(marker, verifyIdx);
+      assert.ok(idx > verifyIdx, `missing verification step after the create: ${marker}`);
+      assert.ok(idx < exits[0], `verification step must run before exit 0: ${marker}`);
+    }
+    // The create branch closes before # VERIFY, so both branches fall through to it.
+    const createBranch = script.slice(createIdx, verifyIdx);
+    assert.ok(!/\bexit\b|\breturn\b/.test(createBranch), 'the create branch must not exit/return before verification');
+  });
+
+  it('the script judges the raw DACL (RawSecurityDescriptor), not Get-Acl\'s .Access view, and only allows plain allow ACEs', () => {
+    const script = aclStep().run[4];
+    assert.match(script, /RawSecurityDescriptor/);
+    assert.ok(!/Get-Acl/.test(script), 'Get-Acl follows junctions and hides ACE types');
+    assert.ok(!/\.Access\b/.test(script));
+    assert.match(script, /\$ace -is \[System\.Security\.AccessControl\.CommonAce\]/);
+    assert.match(script, /\$ace\.AceType -ne \[System\.Security\.AccessControl\.AceType\]::AccessAllowed/);
+    assert.ok(script.includes("$aceSids = @('S-1-5-19','S-1-5-18','S-1-5-32-544')"));
+  });
+
+  it('the script checks ancestors (owner BA/SY/TrustedInstaller, no reparse points) before creating and again when verifying', () => {
+    const script = aclStep().run[4];
+    assert.ok(script.includes("$ancestorOwners = @('S-1-5-32-544','S-1-5-18','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')"));
+    const pre = script.indexOf('Assert-SafeAncestors $path $false');
+    const create = script.indexOf('[System.IO.Directory]::CreateDirectory($path, $ds)');
+    const post = script.indexOf('Assert-SafeAncestors $path $true');
+    assert.ok(pre > 0 && pre < create && create < post);
+  });
+
+  it('the script reads attributes and the security descriptor through one no-follow handle', () => {
+    const script = aclStep().run[4];
+    assert.match(script, /FILE_FLAG_OPEN_REPARSE_POINT/);
+    assert.match(script, /GetSecurityInfo\(h,/);
+    assert.ok(!/Get-Item|Test-Path/.test(script), 'no path-based (link-following) existence/attribute checks');
   });
 
   it('the script never calls Set-Acl / icacls / anything that would modify an existing dir\'s ACL', () => {
@@ -276,7 +335,50 @@ describe('Windows: single PowerShell step creates/verifies the data dir ACL', ()
     const t = io();
     const step = aclStep('C:\\ProgramData\\KingLouie');
     await executeSteps([step], { dryRun: true, io: t });
-    assert.match(t.out.join(''), /KL_DATA_DIR=C:\\ProgramData\\KingLouie powershell\.exe/);
+    assert.ok(t.out.join('').includes(`KL_DATA_DIR=C:\\ProgramData\\KingLouie ${POWERSHELL_EXE} -NoProfile`));
+  });
+});
+
+describe('Windows: every executable in the plans is an absolute System32 path', () => {
+  const win = { nodePath: 'C:\\node.exe', entryPath: 'C:\\kl\\bin\\king-louie-service.js', dataDir: 'C:\\ProgramData\\KingLouie' };
+  const runSteps = () => [...planInstall({ platform: 'win32', ...win }), ...planUninstall({ platform: 'win32' })].filter((s) => s.run);
+
+  it('uses %SystemRoot%\\System32\\...\\powershell.exe and %SystemRoot%\\System32\\schtasks.exe, never a bare name', () => {
+    const argv0 = runSteps().map((s) => s.run[0]);
+    assert.ok(argv0.length >= 5);
+    for (const exe of argv0) {
+      assert.ok(path.win32.isAbsolute(exe), `not absolute: ${exe}`);
+      assert.ok([POWERSHELL_EXE, SCHTASKS_EXE].includes(exe), `unexpected executable: ${exe}`);
+    }
+  });
+
+  for (const [label, value] of [['unset', undefined], ['relative', 'Windows']]) {
+    it(`falls back to C:\\Windows when SystemRoot is ${label}`, () => {
+      const saved = process.env.SystemRoot;
+      try {
+        if (value === undefined) delete process.env.SystemRoot;
+        else process.env.SystemRoot = value;
+        const argv0 = runSteps().map((s) => s.run[0]);
+        assert.ok(argv0.includes('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'));
+        assert.ok(argv0.includes('C:\\Windows\\System32\\schtasks.exe'));
+      } finally {
+        if (saved === undefined) delete process.env.SystemRoot;
+        else process.env.SystemRoot = saved;
+      }
+    });
+  }
+
+  it('follows a non-default absolute SystemRoot', () => {
+    const saved = process.env.SystemRoot;
+    try {
+      process.env.SystemRoot = 'D:\\WinNT';
+      const argv0 = runSteps().map((s) => s.run[0]);
+      assert.ok(argv0.includes('D:\\WinNT\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'));
+      assert.ok(argv0.includes('D:\\WinNT\\System32\\schtasks.exe'));
+    } finally {
+      if (saved === undefined) delete process.env.SystemRoot;
+      else process.env.SystemRoot = saved;
+    }
   });
 });
 
@@ -344,21 +446,25 @@ describe('darwin: the new absolute/char validation', () => {
   });
 });
 
-// --- Fix round 3: real-mode tests for the Windows ACL PowerShell script ----
+// --- Real-mode tests for the Windows ACL PowerShell script -----------------
 //
 // Only meaningful on win32 (the script is powershell.exe-specific), so every
-// test in this block is skipped outright on other platforms. Some of them
-// additionally require an elevated (Administrator) process — creating a
-// directory with an O:BA (owner Administrators) security descriptor fails
-// otherwise ("This security ID may not be assigned as the owner of this
-// object"), confirmed empirically before writing these tests. Those are
-// skipped with a clear reason when the test process isn't elevated; see the
-// round-3 fix report for which ones actually ran in this environment.
+// test in this block is skipped outright on other platforms. The "a fresh
+// create passes" tests additionally require an elevated (Administrator)
+// process — creating a directory with an O:BA owner fails otherwise ("This
+// security ID may not be assigned as the owner of this object") — and are
+// skipped with a clear reason when the test process isn't elevated.
+//
+// Every refusal test works without elevation. They run against dirs under
+// os.tmpdir(), whose ancestors (…\AppData\Local\Temp and up) are owned by the
+// current user, so a fresh create there correctly fails the ancestor check.
+// That is also why the elevated create tests use %SystemRoot%\Temp instead,
+// whose ancestor chain is owned by SYSTEM/Administrators/TrustedInstaller.
 
 function isElevatedWindowsProcess() {
   if (process.platform !== 'win32') return false;
   try {
-    const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    const out = execFileSync(POWERSHELL_EXE, ['-NoProfile', '-NonInteractive', '-Command',
       '([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)'
     ], { encoding: 'utf8' });
     return out.trim().toLowerCase() === 'true';
@@ -391,55 +497,176 @@ function runAclScript(dataDir) {
   }
 }
 
+// Replaces the DACL (only the DACL — owner stays the current user) of a dir
+// this file created. An SDDL of 'D:AI' re-enables inheritance from the temp
+// parent, which is how the tests hand access back before deleting.
+function setTestDirDacl(dir, sddl) {
+  execFileSync(POWERSHELL_EXE, ['-NoProfile', '-NonInteractive', '-Command', [
+    '$ErrorActionPreference = "Stop"',
+    '$ds = New-Object System.Security.AccessControl.DirectorySecurity',
+    '$ds.SetSecurityDescriptorSddlForm($env:KL_TEST_SDDL, [System.Security.AccessControl.AccessControlSections]::Access)',
+    '[System.IO.Directory]::SetAccessControl($env:KL_TEST_DIR, $ds)'
+  ].join('; ')], { env: { ...process.env, KL_TEST_DIR: dir, KL_TEST_SDDL: sddl }, stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
+function removeTempTree(base) {
+  fs.rmSync(base, { recursive: true, force: true });
+  assert.ok(!fs.existsSync(base), `failed to clean up ${base}`);
+}
+
 describe('Windows ACL script (real mode, temp dirs only)', () => {
-  it('a fresh create yields a protected DACL with exactly LS/SY/BA and owner BA', { skip: notElevatedSkip }, () => {
-    const dir = path.join(tmp(), 'fresh-data-dir');
-    const created = runAclScript(dir);
-    assert.strictEqual(created.code, 0, `expected a clean create, got: ${created.stderr}`);
-    assert.ok(fs.existsSync(dir));
-
-    const inspect = [
-      '$acl = Get-Acl -LiteralPath $env:KL_INSPECT_DIR',
-      '$owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value',
-      '$protected = $acl.AreAccessRulesProtected',
-      '$rules = ($acl.Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }) -join ","',
-      '[PSCustomObject]@{ Owner = $owner; Protected = $protected; Rules = $rules } | ConvertTo-Json -Compress'
-    ].join('; ');
-    const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', inspect], {
-      env: { ...process.env, KL_INSPECT_DIR: dir },
-      encoding: 'utf8'
-    });
-    const result = JSON.parse(out);
-    assert.strictEqual(result.Owner, 'S-1-5-32-544');
-    assert.strictEqual(result.Protected, true);
-    assert.deepStrictEqual(result.Rules.split(',').sort(), ['S-1-5-18', 'S-1-5-19', 'S-1-5-32-544'].sort());
-  });
-
-  it('an existing dir created by the test with a default ACL is refused', { skip: notWin32Skip }, () => {
-    const dir = path.join(tmp(), 'plain-existing-dir');
-    fs.mkdirSync(dir); // gets whatever default (inherited, current-user-owned) ACL the temp dir has
-    const result = runAclScript(dir);
-    assert.notStrictEqual(result.code, 0);
-    assert.match(result.stderr, /ACL is not safe/);
+  it('a pre-existing dir with a default ACL is refused (the lost-race outcome: CreateDirectory is a silent no-op, then verification fails)', { skip: notWin32Skip }, () => {
+    const base2 = tmp();
+    try {
+      const dir = path.join(base2, 'plain-existing-dir');
+      fs.mkdirSync(dir); // inherited, current-user-owned ACL — what an attacker's pre-created dir looks like
+      const result = runAclScript(dir);
+      assert.notStrictEqual(result.code, 0);
+      assert.match(result.stderr, /ACL is not safe/);
+      assert.match(result.stderr, /unexpected ACE for S-1-5-|owner S-1-5-/);
+    } finally { removeTempTree(base2); }
   });
 
   it('a junction is refused', { skip: notWin32Skip }, () => {
     const base2 = tmp();
-    const target = path.join(base2, 'junction-target');
-    fs.mkdirSync(target);
-    const link = path.join(base2, 'junction-as-datadir');
-    fs.symlinkSync(target, link, 'junction');
-    const result = runAclScript(link);
-    assert.notStrictEqual(result.code, 0);
-    assert.match(result.stderr, /symlink or junction/);
+    try {
+      const target = path.join(base2, 'junction-target');
+      fs.mkdirSync(target);
+      const link = path.join(base2, 'junction-as-datadir');
+      fs.symlinkSync(target, link, 'junction');
+      const result = runAclScript(link);
+      assert.notStrictEqual(result.code, 0);
+      assert.match(result.stderr, /symlink or junction/);
+    } finally { removeTempTree(base2); }
   });
 
-  it('running it twice succeeds: the second run verifies the first run\'s ACL and is happy with it', { skip: notElevatedSkip }, () => {
-    const dir = path.join(tmp(), 'idempotent-data-dir');
-    const first = runAclScript(dir);
-    assert.strictEqual(first.code, 0, `expected a clean create, got: ${first.stderr}`);
-    const second = runAclScript(dir);
-    assert.strictEqual(second.code, 0, `expected the verify-only run to succeed, got: ${second.stderr}`);
+  it('a dangling junction is refused (inspected as itself, not followed)', { skip: notWin32Skip }, () => {
+    const base2 = tmp();
+    try {
+      const link = path.join(base2, 'dangling-junction');
+      fs.symlinkSync(path.join(base2, 'does-not-exist'), link, 'junction');
+      const result = runAclScript(link);
+      assert.notStrictEqual(result.code, 0);
+      assert.match(result.stderr, /symlink or junction/);
+      assert.ok(!fs.existsSync(path.join(base2, 'does-not-exist')), 'nothing may be created through the link');
+    } finally { removeTempTree(base2); }
+  });
+
+  it('a new data dir under a temp parent owned by the current user fails the ancestor check, before anything is created', { skip: notWin32Skip }, () => {
+    const base2 = tmp();
+    try {
+      const dir = path.join(base2, 'fresh-data-dir');
+      const result = runAclScript(dir);
+      assert.notStrictEqual(result.code, 0);
+      assert.match(result.stderr, /ancestor directory .+ is not safe: owner S-1-5-\S+ is not Administrators, SYSTEM or TrustedInstaller/);
+      assert.ok(!fs.existsSync(dir), 'the ancestor pre-check must run before CreateDirectory');
+    } finally { removeTempTree(base2); }
+  });
+
+  // Raw-DACL unit tests. These run without elevation: the test owns the dir,
+  // so it can set any protected DACL on it. The script's no-follow handle
+  // needs SYNCHRONIZE | FILE_READ_ATTRIBUTES | READ_CONTROL, which a
+  // non-elevated test process only gets from an ACE naming it, so each DACL
+  // under test carries a trailing OWNER RIGHTS allow ACE (0x160080, which also
+  // keeps WRITE_DAC so cleanup can hand access back). ACE *types* are all
+  // checked before any ACE's SID, so the ACE under test is always the one
+  // reported, wherever it ends up in the DACL.
+  describe('raw DACL checks (no elevation needed)', () => {
+    const GOOD = '(A;OICI;FA;;;LS)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)';
+    const OPENABLE = '(A;;0x160080;;;OW)';
+
+    function withDacl(sddl, fn) {
+      const base2 = tmp();
+      const dir = path.join(base2, 'custom-dacl-dir');
+      fs.mkdirSync(dir);
+      try {
+        setTestDirDacl(dir, sddl);
+        fn(runAclScript(dir));
+      } finally {
+        try { setTestDirDacl(dir, 'D:AI'); } catch { /* best effort; rm below still asserts */ }
+        removeTempTree(base2);
+      }
+    }
+
+    it('rejects a conditional (callback) allow ACE for Everyone, which Get-Acl\'s .Access would list as a plain allow rule', { skip: notWin32Skip }, () => {
+      withDacl(`D:P${GOOD}(XA;OICI;FA;;;WD;(Member_of {SID(BA)}))${OPENABLE}`, (result) => {
+        assert.notStrictEqual(result.code, 0);
+        assert.match(result.stderr, /unexpected ACE of type AccessAllowedCallback/);
+      });
+    });
+
+    it('rejects a deny ACE', { skip: notWin32Skip }, () => {
+      withDacl(`D:P(D;OICI;FA;;;BG)${GOOD}${OPENABLE}`, (result) => {
+        assert.notStrictEqual(result.code, 0);
+        assert.match(result.stderr, /unexpected ACE of type AccessDenied/);
+      });
+    });
+
+    it('rejects a plain allow ACE for any SID other than LS/SY/BA', { skip: notWin32Skip }, () => {
+      withDacl(`D:P${GOOD}(A;OICI;FA;;;BU)`, (result) => {
+        assert.notStrictEqual(result.code, 0);
+        assert.match(result.stderr, /unexpected ACE for S-1-5-32-545/);
+      });
+    });
+
+    it('rejects an unprotected DACL (inherited ACEs flow in from the parent)', { skip: notWin32Skip }, () => {
+      withDacl(`D:AI${GOOD}`, (result) => {
+        assert.notStrictEqual(result.code, 0);
+        assert.match(result.stderr, /unexpected ACE for|inherited access rules are still enabled/);
+      });
+    });
+
+    it('fails closed when the DACL does not let the installer open the dir at all', { skip: notWin32Skip }, () => {
+      // Non-elevated, LS/SY/BA-only grants nothing this process can use (BA is
+      // deny-only in a filtered token), so the no-follow open is refused.
+      withDacl(`D:P${GOOD}`, (result) => {
+        assert.notStrictEqual(result.code, 0);
+        assert.match(result.stderr, /cannot open .+: Access is denied/);
+      });
+    });
+  });
+
+  describe('elevated: a fresh create passes verification', () => {
+    // %SystemRoot%\Temp: its ancestors are admin/SYSTEM/TrustedInstaller-owned,
+    // unlike os.tmpdir() (see the block comment above).
+    const sysTmp = () => fs.mkdtempSync(path.join(SYSTEM_ROOT, 'Temp', 'kl-installers-'));
+
+    it('a fresh create yields a protected DACL with exactly LS/SY/BA and owner BA', { skip: notElevatedSkip }, () => {
+      const base2 = sysTmp();
+      try {
+        const dir = path.join(base2, 'fresh-data-dir');
+        const created = runAclScript(dir);
+        assert.strictEqual(created.code, 0, `expected a clean create, got: ${created.stderr}`);
+        assert.ok(fs.existsSync(dir));
+
+        const inspect = [
+          '$acl = Get-Acl -LiteralPath $env:KL_INSPECT_DIR',
+          '$owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value',
+          '$protected = $acl.AreAccessRulesProtected',
+          '$rules = ($acl.Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }) -join ","',
+          '[PSCustomObject]@{ Owner = $owner; Protected = $protected; Rules = $rules } | ConvertTo-Json -Compress'
+        ].join('; ');
+        const out = execFileSync(POWERSHELL_EXE, ['-NoProfile', '-NonInteractive', '-Command', inspect], {
+          env: { ...process.env, KL_INSPECT_DIR: dir },
+          encoding: 'utf8'
+        });
+        const result = JSON.parse(out);
+        assert.strictEqual(result.Owner, 'S-1-5-32-544');
+        assert.strictEqual(result.Protected, true);
+        assert.deepStrictEqual(result.Rules.split(',').sort(), ['S-1-5-18', 'S-1-5-19', 'S-1-5-32-544'].sort());
+      } finally { removeTempTree(base2); }
+    });
+
+    it('running it twice succeeds: the second run verifies the first run\'s ACL and is happy with it', { skip: notElevatedSkip }, () => {
+      const base2 = sysTmp();
+      try {
+        const dir = path.join(base2, 'idempotent-data-dir');
+        const first = runAclScript(dir);
+        assert.strictEqual(first.code, 0, `expected a clean create, got: ${first.stderr}`);
+        const second = runAclScript(dir);
+        assert.strictEqual(second.code, 0, `expected the verify-only run to succeed, got: ${second.stderr}`);
+      } finally { removeTempTree(base2); }
+    });
   });
 });
 
@@ -492,7 +719,7 @@ describe('executeSteps: always steps', () => {
 describe('uninstall: Windows tolerates a task that is not running', () => {
   it('marks "schtasks /End" as ignoreFailure', () => {
     const steps = planUninstall({ platform: 'win32' });
-    const stop = steps.find((s) => s.run?.join(' ') === 'schtasks /End /TN KingLouie');
+    const stop = steps.find((s) => s.run?.join(' ') === `${SCHTASKS_EXE} /End /TN KingLouie`);
     assert.strictEqual(stop.ignoreFailure, true);
   });
 });
