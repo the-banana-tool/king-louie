@@ -203,4 +203,17 @@ const mergeSettings = (settings = {}) => {
   };
 };
 
-module.exports = { DEFAULT_SETTINGS, mergeSettings };
+const CHAT_DATA_DEFAULTS = {
+  chats: [],
+  activeChatId: null,
+  apiTokens: {},
+  apiStatus: {},
+  settings: {
+    ...DEFAULT_SETTINGS
+  },
+  toolApprovals: {
+    alwaysApproveTools: {}
+  }
+};
+
+module.exports = { DEFAULT_SETTINGS, mergeSettings, CHAT_DATA_DEFAULTS };

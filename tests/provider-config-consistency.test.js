@@ -7,14 +7,14 @@ const ProviderFactory = require('../src/providers/provider-factory');
 
 /**
  * The provider picker UI is built from `providerLabels` / `providerDefaults`
- * in main.js. Every provider offered there must be creatable by
+ * in src/core/create-core.js. Every provider offered there must be creatable by
  * ProviderFactory — otherwise "Set Active" + sending a message blows up with
  * `Unknown provider: "x"` deep in the inference path, and the model dropdown
  * silently shows nothing. This guards that the menu and the factory agree.
  */
 function extractObjectKeys(source, varName) {
   const start = source.indexOf(`const ${varName} = {`);
-  assert.ok(start !== -1, `Could not find "const ${varName} = {" in main.js`);
+  assert.ok(start !== -1, `Could not find "const ${varName} = {" in src/core/create-core.js`);
   const open = source.indexOf('{', start);
   let depth = 0;
   let end = -1;
@@ -30,8 +30,8 @@ function extractObjectKeys(source, varName) {
   return [...body.matchAll(/^\s*([A-Za-z0-9_]+)\s*:/gm)].map((m) => m[1]);
 }
 
-describe('Provider config consistency (main.js ↔ ProviderFactory)', () => {
-  const mainSrc = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+describe('Provider config consistency (core ↔ ProviderFactory)', () => {
+  const mainSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'create-core.js'), 'utf8');
   const labelKeys = extractObjectKeys(mainSrc, 'providerLabels');
   const defaultKeys = extractObjectKeys(mainSrc, 'providerDefaults');
   const registered = new Set(ProviderFactory.listRegistered());
