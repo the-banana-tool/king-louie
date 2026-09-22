@@ -51,14 +51,17 @@ class GatewayServer extends EventEmitter {
         // Presence, not truthiness: an empty `Origin:` is still a browser-shaped
         // header and must not slip through the check.
         if ('origin' in req.headers) return done(false, 403, 'Forbidden');
+        const header = String(req.headers.authorization || '');
+        const presented = header.startsWith('Bearer ') ? header.slice(7) : '';
+        const ok = crypto.timingSafeEqual(crypto.createHash('sha256').update(presented).digest(), expected);
+        if (!ok) return done(false, 401, 'Unauthorized');
+        // Capped after the token check, so an unauthenticated peer can neither
+        // learn the cap nor flood the log with refusals.
         if (this.connections.size >= this.maxConnections) {
           log.warn(`refused connection: ${this.connections.size} already open`);
           return done(false, 503, 'Too many connections');
         }
-        const header = String(req.headers.authorization || '');
-        const presented = header.startsWith('Bearer ') ? header.slice(7) : '';
-        const ok = crypto.timingSafeEqual(crypto.createHash('sha256').update(presented).digest(), expected);
-        return ok ? done(true) : done(false, 401, 'Unauthorized');
+        return done(true);
       }
     });
 

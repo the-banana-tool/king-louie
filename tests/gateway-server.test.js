@@ -101,6 +101,9 @@ describe('GatewayServer auth', () => {
     const b = await open(server.port);
     assert.strictEqual(server.connections.size, 2);
     assert.strictEqual(await connect(server.port, { Authorization: 'Bearer t' }), 503);
+    // An unauthenticated peer is turned away by the token check, so it cannot
+    // probe the cap or flood the log with refusals.
+    assert.strictEqual(await connect(server.port, {}), 401);
     a.close();
     b.close();
   });

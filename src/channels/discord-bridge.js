@@ -317,9 +317,15 @@ class DiscordChannel extends ChannelPlugin {
   async notifyUnknownSender(channelId, senderId, groupId = null) {
     const sender = String(senderId || '');
     const group = groupId == null ? '' : String(groupId);
-    log.warn(`ignored message from unauthorized discord sender ${sender || '(unknown)'}${group ? ` in channel ${group}` : ''}`);
+    const where = `${sender || '(unknown)'}${group ? ` in channel ${group}` : ''}`;
 
-    if (!this.unknownSenderNotified.shouldNotify(`${group}|${sender}`)) return;
+    // Log the first message from each unknown sender at warn and the rest at
+    // debug: a stranger must not be able to fill the log file by repeating.
+    if (!this.unknownSenderNotified.shouldNotify(`${group}|${sender}`)) {
+      log.debug(`ignored another message from unauthorized discord sender ${where}`);
+      return;
+    }
+    log.warn(`ignored message from unauthorized discord sender ${where}`);
 
     const lines = [
       'This King Louie instance does not accept messages from you.',

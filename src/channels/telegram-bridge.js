@@ -359,9 +359,15 @@ class TelegramBridge extends ChannelPlugin {
   async notifyUnknownSender(chatId, senderId, groupId = null) {
     const sender = String(senderId || '');
     const group = groupId == null ? '' : String(groupId);
-    log.warn(`ignored message from unauthorized telegram sender ${sender || '(unknown)'}${group ? ` in group ${group}` : ''}`);
+    const where = `${sender || '(unknown)'}${group ? ` in group ${group}` : ''}`;
 
-    if (!this.unknownSenderNotified.shouldNotify(`${group}|${sender}`)) return;
+    // Log the first message from each unknown sender at warn and the rest at
+    // debug: a stranger must not be able to fill the log file by repeating.
+    if (!this.unknownSenderNotified.shouldNotify(`${group}|${sender}`)) {
+      log.debug(`ignored another message from unauthorized telegram sender ${where}`);
+      return;
+    }
+    log.warn(`ignored message from unauthorized telegram sender ${where}`);
 
     const lines = [
       'This King Louie instance does not accept messages from you.',
