@@ -144,11 +144,23 @@ to wire things up, and takes these host-provided ports:
 |---|---|---|---|
 | `paths` | `{ dataDir, logsDir, cacheDir }` | `app.getPath('userData')` | `--data-dir`, else OS default (`%ProgramData%\KingLouie`, `/var/lib/king-louie`, `~/Library/Application Support/KingLouie`) |
 | `store(name)` | `get/set/delete/has/keys`, JSON values | `electron-store` (**unchanged on disk**) | atomic JSON files (write-temp + rename) |
-| `secrets` | `get/set/delete/list`, string values | `safeStorage`-encrypted `vaultStore` (unchanged) | Windows DPAPI (machine scope); macOS Keychain; Linux libsecret, falling back to an age-encrypted file keyed by a systemd credential or a root-only key file |
+| `cipher` | `encryptString(plain)` / `decryptString(token)` / `isEncryptionAvailable()` | `safeStorage`-backed (unchanged) | AES-256-GCM (`src/platform/cipher.js`), keyed by a per-install master key (see deviation below) |
 | `approver` | `requestApproval(action) → { decision, evidence }` | existing renderer dialog | stage 1: **deny all unsafe**; stage 3: phone |
 | `prompter` | `askUser(q)`, `requestDirectoryAccess(path)` | renderer dialogs | stage 1: deny / "no interactive user"; stage 3: phone |
 | `notifier` | `notify(event)` | toast | log only; stage 3: push |
 | `opener` | `openExternal(url)` | `shell` | log the URL; the auth flow prints a device code |
+
+**Deviation — no `secrets` port.** It was never built. Secrets still go
+through the plain `store` port (as `vaultStore`), now encrypted by the new
+`cipher` port before being written — the same shape as the Electron host's
+`vaultStore` + `safeStorage`, just with `cipher` swapped in. `cipher`'s
+master key comes from, in order: a systemd credential (`kl-master-key`,
+delivered via `LoadCredential=`) under systemd on Linux; Windows DPAPI in the
+service account's `CurrentUser` scope; otherwise a `0600` key file in the data
+directory (macOS, and Linux without systemd credentials). There is no macOS
+Keychain and no Linux libsecret backend: both would need either a native npm
+dependency (ruled out — no new npm dependencies) or a logged-in session/D-Bus
+secret service, which a service account run before login doesn't have.
 
 Rules:
 
@@ -167,11 +179,26 @@ Rules:
 - `bin/king-louie-service.js` with the subcommands `run`, `install`,
   `uninstall`, `status`, `pair` (stage 2) and `doctor`.
 - `install` registers the service on each OS:
-  - **Windows:** Windows service running as a dedicated low-privilege local
-    account
+  - **Windows (deviation):** a boot-time Scheduled Task (`schtasks`), not a
+    registered SCM service, running as `LOCAL SERVICE`. It creates the data
+    directory itself with a protected, minimal ACL (`LOCAL SERVICE`/`SYSTEM`/
+    Administrators only, inheritance disabled); if the directory already
+    exists it only verifies that ACL and refuses rather than relocking a
+    directory it didn't create. A real Windows Service (SCM-registered,
+    `services.msc`-visible, with proper stop/pause semantics) is deferred to a
+    later stage.
   - **Linux:** systemd unit with `User=king-louie`, `ProtectSystem=strict`,
-    `NoNewPrivileges=yes` and `LoadCredential=` for the secrets key
+    `NoNewPrivileges=yes` and `LoadCredential=` for the master key
   - **macOS:** a launchd LaunchDaemon that runs as a dedicated user
+- Reinstalling is idempotent on every OS: it skips creating the service
+  account if one already exists and never overwrites an existing master key,
+  so a second `install` reuses the key the first one generated.
+- The CLI's flag parsing is strict: an unknown `--flag`, a flag given with no
+  value, and an empty `--data-dir` all exit 2, rather than silently falling
+  back to a default. Both `--flag value` and `--flag=value` are accepted.
+- `core.shutdown()` is bounded rather than open-ended: cron is stopped first
+  so no job fires while the rest drain, and each remaining subsystem stop is
+  given a timeout (default 5s) so one hung stop can't block the others.
 - **Build profiles**, chosen from config and checked at startup:
   - `agent`: full core (providers, agent loop, tools, runbooks, delegation)
   - `runbook`: runbook engine, identity, mesh and audit only. Providers, the
@@ -184,11 +211,23 @@ Rules:
 ### 4.4 Existing gateway
 
 `src/gateway/gateway-server.js` listens on `127.0.0.1:18789` with **no
-authentication**, so any local process can drive the agent. The same applies to
-the webhook server on port +1. In service mode both are **off by default**.
-When enabled they require a bearer token that is stored in `secrets`, and they
-refuse to bind to anything other than loopback. The Electron host gets the same
-token requirement. This is a pre-existing issue and the fix goes in stage 1.
+authentication**, so any local process can drive the agent. In service mode
+both it and the webhook server (port +1) are **off by default** and refuse to
+bind to anything other than loopback. When the gateway is enabled it requires
+a bearer token, generated on first use and encrypted through the `cipher`
+port into the `store` — not a `secrets` port, which was never built (§4.2).
+For local processes and CLI tooling, the same token is also written in the
+clear to `<dataDir>/gateway-token` (mode `0600`, written atomically).
+**Deviation:** where encryption is unavailable on the host, the token falls
+back to **session-only** — it still authenticates the current run, but a
+fresh one replaces it (locking out every prior client) on the next start,
+rather than persisting unencrypted on disk.
+
+**Deviation — webhook server has no bearer token.** Instead it refuses any
+request carrying an `Origin` header (no CORS is offered at all), and each
+registered webhook is separately authenticated with `X-Hub-Signature-256`.
+The Electron host's gateway gets the same token requirement as the service
+host's. This is a pre-existing issue and the fix goes in stage 1.
 
 ### 4.6 Desktop GUI apps on agent nodes (Q5)
 

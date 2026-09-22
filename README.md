@@ -116,16 +116,117 @@ touches.
 
 It is most often inherited from another Electron-based program that spawned
 your shell (VS Code's integrated terminal and Electron-based CLI agents both
-set it). Unset it for the launch:
+set it). Setting the variable to an empty string is not enough — Electron
+treats a present-but-empty value the same as `1`. It has to be removed from
+the environment entirely:
 
 ```bash
-ELECTRON_RUN_AS_NODE= npm start          # bash / zsh
+unset ELECTRON_RUN_AS_NODE && npm start      # bash / zsh
 $env:ELECTRON_RUN_AS_NODE=$null; npm start   # PowerShell
 ```
 
 The same applies when driving the app with Playwright's `_electron.launch` —
 delete the key from the env you pass to the child, or it will fail with
 "Process failed to launch!".
+
+## Running as a Service
+
+King Louie can also run headless, with no Electron and no UI — driven instead
+by chat channels (Telegram, Discord, Slack), cron, and, from later stages, a
+multi-machine fleet. This is a separate entry point (`bin/king-louie-service.js`)
+from the desktop app; the two can run side by side on one machine without
+sharing data.
+
+### Install
+
+Always try `--dry-run` first — it prints every step the installer would take
+without touching the system.
+
+```bash
+# Linux (systemd), from a root shell
+sudo node bin/king-louie-service.js install --profile agent
+
+# macOS (LaunchDaemon) — create a dedicated standard (non-root) account first,
+# then install under it
+sudo node bin/king-louie-service.js install --user <account>
+
+# Windows, from an elevated (Run as administrator) shell — a boot-time
+# Scheduled Task
+node bin\king-louie-service.js install
+```
+
+`install` (and `uninstall`) require an elevated/root shell on every platform —
+they write a systemd unit, a LaunchDaemon, or a Scheduled Task, none of which a
+standard user can register.
+
+Reinstalling is safe: it skips creating the service account if one already
+exists, and it never overwrites an existing master key — a second `install`
+run reuses the key the first one generated.
+
+**Windows only:** the installer creates the data directory itself with a
+locked-down ACL (Full Control limited to `LOCAL SERVICE`, `SYSTEM` and
+Administrators, with inheritance disabled). If the directory already exists,
+the installer only *verifies* that ACL — a hand-created directory, or one with
+looser permissions, is refused rather than silently relocked. Fix or remove it
+manually before retrying.
+
+On every platform, if `node` or the entry script (`bin/king-louie-service.js`)
+lives under a home directory (`/home`, `/root`, `/Users`, or `C:\Users\`), the
+installer prints a warning: the service account (or anyone with access to it)
+could then rewrite the binary it runs. Move the install to a system path.
+
+### Configure
+
+- `<dataDir>/service.json` sets `profile` (`agent` or `runbook`) and
+  `features`. Every listener (`gateway`, `webhooks`, `mesh`, `appDiscovery`)
+  is **off by default**; `channels` is on.
+- `king-louie-service token set anthropic < keyfile` — stores a provider API
+  key (read from stdin, never a CLI argument, so it doesn't end up in shell
+  history or `ps`).
+- `king-louie-service vault set <key> < valuefile` — stores an arbitrary
+  secret in the vault the same way.
+
+The CLI's flag parsing is strict: an unknown `--flag`, a flag given with no
+value, and an empty `--data-dir` all exit with status 2 rather than silently
+falling back to a default. Both `--flag value` and `--flag=value` are
+accepted.
+
+### Default Data Directory
+
+| Platform | Default `--data-dir` |
+|----------|----------------------|
+| Windows | `%ProgramData%\KingLouie` |
+| macOS | `/Library/Application Support/KingLouie` |
+| Linux | `/var/lib/king-louie` |
+
+### Operate
+
+- `king-louie-service status [--data-dir DIR]` — reports whether the service
+  is running.
+- `king-louie-service doctor [--data-dir DIR]` — checks Node version, data
+  directory permissions, and (on Windows) that the DPAPI-wrapped master key
+  is present.
+- Logs: `journalctl -u king-louie` on Linux, `<dataDir>/logs/` on macOS
+  (the LaunchDaemon's stdout/stderr), and Event Viewer → Task Scheduler
+  Library → History on Windows.
+
+### Security Notes
+
+- **Master key location, per OS:** a systemd credential (`kl-master-key`,
+  Linux with systemd); Windows DPAPI in the service account's `CurrentUser`
+  scope; otherwise a `0600` key file in the data directory (macOS, and Linux
+  without systemd credentials).
+- The gateway (when enabled) requires a bearer token stored encrypted and
+  written to `<dataDir>/gateway-token` (mode `0600`, written atomically).
+  If secure storage is unavailable on that host, the token falls back to
+  **session-only**: it still works for the current run but is regenerated
+  (and every existing client rejected) on the next restart, rather than
+  silently persisting in the clear.
+- The service denies every action that requires interactive approval —
+  stage 1 has no remote approver (phone approvals arrive in a later stage),
+  so anything gated on approval simply fails.
+- On Windows the service runs as `LOCAL SERVICE`, a low-privilege account
+  with no access to any user's profile folders.
 
 ## Supported Providers
 
