@@ -13,6 +13,10 @@
 //       clobbers a live master key)
 //   - runUnless: { check: string[], run: string[] } — runs `run` only if `check`
 //       exits non-zero (e.g. "does this user already exist")
+//   - ensureSafeParent: string                — POSIX only: the data dir whose
+//       ancestors must be root-owned and not service-writable before anything
+//       is created inside them (the POSIX counterpart of the Windows ancestor
+//       check); missing levels are created root-owned 0755
 //   - warn: true                             — printed in both dry-run and real
 //       mode, never executed; used for advisory-only steps
 //   - ignoreFailure: true                    — a failure is logged and swallowed
@@ -20,8 +24,8 @@
 //   - always: true                           — this step still runs even after an
 //       earlier step has failed (e.g. cleanup); once every step has been tried,
 //       the original failure is rethrown
-// Exactly one of run, unlink, writeFile and runUnless is set (env, warn,
-// ignoreFailure and always are modifiers, not step kinds).
+// Exactly one of run, unlink, writeFile, runUnless and ensureSafeParent is set
+// (env, warn, ignoreFailure and always are modifiers, not step kinds).
 const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
@@ -38,6 +42,13 @@ const CRED_DIR = path.posix.dirname(CRED_PATH); // /etc/king-louie/credentials
 const CONFIG_DIR = path.posix.dirname(CRED_DIR); // /etc/king-louie
 const PLIST_PATH = '/Library/LaunchDaemons/com.kinglouie.service.plist';
 const TASK_NAME = 'KingLouie';
+// launchd opens StandardOutPath/StandardErrorPath itself, following symlinks,
+// and historically does so in its own root context. They must therefore NOT
+// live in <dataDir>/logs, which the service account owns and can replace with
+// a symlink to any file it wants root to append to. The service's own
+// <dataDir>/logs/service.log is unaffected: it is opened by the service, as
+// the service, through its own descriptor (src/service/log-file.js).
+const DARWIN_LOG_DIR = '/var/log/king-louie';
 
 // Owner Administrators (BA), DACL protected (no inherited ACEs), Full
 // Control to LOCAL SERVICE (LS), SYSTEM (SY) and Administrators (BA) only.
@@ -334,6 +345,109 @@ function assertDataDirNotAtRoot(resolved, style) {
   }
 }
 
+// The POSIX counterpart of the Windows ancestor walk (see
+// WINDOWS_DATA_DIR_SCRIPT). `install -d -m 0700 -o <svcuser> <dataDir>` hands
+// the data dir to the service account, and BSD/GNU `install -d` stat()s the
+// path and then chown()s/chmod()s it *by name* — no lchown, no
+// AT_SYMLINK_NOFOLLOW. So if the service account can unlink the data dir entry
+// and put a symlink in its place, the next (documented-as-safe) reinstall
+// chowns whatever that symlink points at to the service account: `ln -s /etc
+// <dataDir>` turns `sudo … install` into `chown _kinglouie /etc`, and from
+// there /etc/sudoers.d is root.
+//
+// What makes that impossible is the *parent* not being writable by the service
+// account, so the entry cannot be replaced in the first place:
+//   - the immediate parent must be a real, root-owned directory that is
+//     neither group- nor world-writable (a missing one is created that way);
+//   - every ancestor above it must be a real, root-owned directory — the write
+//     bits are not judged there because macOS ships /Library and /Library/
+//     Application Support group-writable by `admin`, and an admin can sudo
+//     anyway, so refusing them would only break the documented default.
+function assertRootOwnedDir(dir, { requirePrivateWrite }) {
+  let st;
+  try {
+    st = fs.lstatSync(dir);
+  } catch (err) {
+    throw new Error(`cannot inspect ${dir}: ${err.message}`);
+  }
+  if (st.isSymbolicLink()) throw new Error(`refusing to install: ${dir} is a symlink`);
+  if (!st.isDirectory()) throw new Error(`refusing to install: ${dir} is not a directory`);
+  if (st.uid !== 0) throw new Error(`refusing to install: ${dir} is not owned by root (uid ${st.uid})`);
+  if (requirePrivateWrite && (st.mode & 0o022)) {
+    throw new Error(
+      `refusing to install: the data dir's parent ${dir} is group- or world-writable `
+      + `(mode ${(st.mode & 0o7777).toString(8)}), so another account could replace the data dir with a symlink`
+    );
+  }
+}
+
+// Ancestors of `dataDir`, nearest last: ['/', '/var', '/var/lib'].
+function posixAncestors(dataDir) {
+  const out = [];
+  let dir = path.posix.dirname(dataDir);
+  while (true) {
+    out.unshift(dir);
+    const next = path.posix.dirname(dir);
+    if (next === dir) break;
+    dir = next;
+  }
+  return out;
+}
+
+// Pins a directory to `mode` through an O_NOFOLLOW descriptor rather than by
+// name, so the chmod cannot be redirected by swapping the entry afterwards.
+function pinDirMode(dir, mode) {
+  const fd = fs.openSync(dir, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+  try {
+    fs.fchmodSync(fd, mode);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function ensureSafeDataDirParent(dataDir) {
+  const ancestors = posixAncestors(dataDir);
+  const parent = ancestors[ancestors.length - 1];
+  for (const dir of ancestors) {
+    let exists = true;
+    try {
+      // lstat, not existsSync: a dangling symlink reads as missing to
+      // existsSync and would then be "created" straight through.
+      fs.lstatSync(dir);
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+      exists = false;
+    }
+    if (!exists) {
+      // This step runs as root, so a directory created here is root-owned by
+      // construction; 0755 keeps it readable but not service-writable.
+      fs.mkdirSync(dir, { mode: 0o755 });
+      pinDirMode(dir, 0o755);
+      continue;
+    }
+    assertRootOwnedDir(dir, { requirePrivateWrite: dir === parent });
+  }
+
+  // And the data dir entry itself: `install -d` stat()s it, sees a directory
+  // through a symlink, and chowns/chmods the *target*. A root-owned parent
+  // already stops the service account planting one, but an installation that
+  // predates that parent check (or one an admin staged by hand) can still
+  // have a symlink sitting there, and this is the step that must refuse it
+  // rather than hand its target to the service account.
+  let st = null;
+  try {
+    st = fs.lstatSync(dataDir);
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+  }
+  if (st && st.isSymbolicLink()) {
+    throw new Error(`refusing to install: the data dir ${dataDir} is a symlink; remove it and retry`);
+  }
+  if (st && !st.isDirectory()) {
+    throw new Error(`refusing to install: the data dir ${dataDir} exists and is not a directory`);
+  }
+}
+
 function renderSystemdUnit({ nodePath, entryPath, dataDir, user, profile = 'agent' }) {
   assertAbsolutePosixDataDir(dataDir);
   assertSafeUnitValue('nodePath', nodePath);
@@ -447,6 +561,10 @@ function planInstall({ platform = process.platform, nodePath = process.execPath,
         description: 'create the service user',
         runUnless: { check: ['id', '-u', svcUser], run: ['useradd', '--system', '--home-dir', dataDir, '--shell', '/usr/sbin/nologin', svcUser] }
       },
+      // Before anything is created: the data dir's parent must be root-owned
+      // and not service-writable, or a planted symlink turns the next
+      // `install -d -o <svcuser>` into a chown of any directory it names.
+      { description: 'verify the data dir\'s ancestors are root-owned', ensureSafeParent: dataDir },
       { description: 'create the data dir', run: ['install', '-d', '-m', '0700', '-o', svcUser, '-g', svcUser, dataDir] },
       // /etc/king-louie is root-owned and world-readable (stage 2 keeps
       // read-only config there); only credentials/ is root-only. install -d
@@ -474,13 +592,22 @@ function planInstall({ platform = process.platform, nodePath = process.execPath,
     dataDir = path.posix.resolve(dataDir);
     assertAbsolutePosixPath('dataDir', dataDir);
     assertDataDirNotAtRoot(dataDir, 'posix');
-    const logsDir = path.posix.join(dataDir, 'logs');
     steps = [
       // Fails fast, before anything is written, if the account doesn't exist.
       { description: 'verify the service account exists', run: ['id', '-u', user] },
+      // Before anything is created: the data dir's parent must be root-owned
+      // and not service-writable, or a planted symlink turns the next
+      // `install -d -o <user>` into a chown of any directory it names. On the
+      // default macOS layout the parent (…/KingLouie) is created here,
+      // root-owned, so the service account cannot replace `data` inside it.
+      { description: 'verify the data dir\'s ancestors are root-owned', ensureSafeParent: dataDir },
       { description: 'create the data dir', run: ['install', '-d', '-m', '0700', '-o', user, dataDir] },
-      { description: 'create the logs dir', run: ['install', '-d', '-m', '0700', '-o', user, logsDir] },
-      { description: 'write the LaunchDaemon', writeFile: { path: PLIST_PATH, content: renderLaunchdPlist({ nodePath, entryPath, dataDir, user, logsDir, profile }), mode: 0o644 } },
+      // No step creates or chowns anything *inside* the data dir: the service
+      // creates <dataDir>/logs itself, under its own uid (ensureServicePaths).
+      // launchd's stdout/stderr go to a root-owned dir instead — see
+      // DARWIN_LOG_DIR.
+      { description: 'create the root-owned launchd log dir', run: ['install', '-d', '-m', '0755', '-o', 'root', '-g', 'wheel', DARWIN_LOG_DIR] },
+      { description: 'write the LaunchDaemon', writeFile: { path: PLIST_PATH, content: renderLaunchdPlist({ nodePath, entryPath, dataDir, user, logsDir: DARWIN_LOG_DIR, profile }), mode: 0o644 } },
       // bootstrap fails if the label is already loaded (a reinstall), so any
       // previous instance is booted out first; on a fresh install there is
       // nothing to boot out, which is fine.
@@ -563,6 +690,16 @@ async function runOneStep(step, { dryRun, io, execFile }) {
   if (step.warn) {
     // Advisory only: printed in both modes, never executed.
     io.stdout.write(`${step.description}\n`);
+    return;
+  }
+
+  if (step.ensureSafeParent) {
+    if (dryRun) {
+      io.stdout.write(`[dry-run] ${step.description}: check that every ancestor of ${step.ensureSafeParent} is a root-owned directory (and that its immediate parent is not group/world-writable), creating any that are missing as 0755 root-owned\n`);
+      return;
+    }
+    io.stdout.write(`${step.description}…\n`);
+    ensureSafeDataDirParent(step.ensureSafeParent);
     return;
   }
 
@@ -668,5 +805,6 @@ async function runInstallCommand(command, flags, io) {
 
 module.exports = {
   renderSystemdUnit, renderLaunchdPlist, renderWindowsTaskXml,
-  planInstall, planUninstall, executeSteps, runInstallCommand
+  planInstall, planUninstall, executeSteps, runInstallCommand,
+  ensureSafeDataDirParent, DARWIN_LOG_DIR
 };

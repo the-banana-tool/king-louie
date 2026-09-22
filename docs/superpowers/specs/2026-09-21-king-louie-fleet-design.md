@@ -250,8 +250,17 @@ Rules:
   the installer creates a missing `KingLouie` parent Administrators-owned with
   its own protected DACL (`SYSTEM`/Administrators full, `LOCAL SERVICE` read)
   and verifies an existing one; on Linux it creates `/etc/king-louie` `0755`
-  root-owned and only `/etc/king-louie/credentials` `0700`. Each service runs
-  with the data dir as its working directory.
+  root-owned and only `/etc/king-louie/credentials` `0700`. On Linux and macOS
+  the same guarantee is enforced by an ancestor walk before anything is
+  created: every ancestor must be a real, root-owned directory, the immediate
+  parent must not be group- or world-writable, and the data dir itself must not
+  be a symlink — `install -d -o <account>` chowns by name and would otherwise
+  follow one. A missing macOS `…/KingLouie` parent is created root-owned
+  `0755`. No install step creates or chowns anything inside the data dir; the
+  service creates `logs/` and `cache/` under its own account, and launchd's
+  `StandardOutPath`/`StandardErrorPath` point at root-owned
+  `/var/log/king-louie` instead. Each service runs with an explicit
+  `<dataDir>/workspace` as its working directory.
 - **Decision — ports and listener failures (I4).** The service host's
   gateway and webhook listeners default to 18791/18792 (the Electron app keeps
   18789/18790), overridable via `service.json` `ports`, so both hosts can run

@@ -165,6 +165,18 @@ run reuses the key the first one generated. It also picks up the new service
 definition: on Linux the unit is restarted after `enable --now`, and on macOS
 any previously loaded LaunchDaemon is booted out before it is loaded again.
 
+**Linux and macOS:** before anything is created, the installer checks that
+every ancestor of the data directory is a real, root-owned directory, that the
+data directory's immediate parent is neither group- nor world-writable, and
+that the data directory itself is not a symlink. A missing parent (the default
+macOS `…/KingLouie`) is created root-owned `0755`, so the service account
+cannot later replace the data directory with a link. `--data-dir /tmp/…` and
+any other path under a world-writable parent is refused: `install -d -o
+<account>` chowns by name and would follow such a link, handing its target to
+the service account on the next reinstall. No install step creates or chowns
+anything *inside* the data directory — the service creates `logs/` and
+`cache/` itself, under its own account.
+
 **Windows only:** the installer creates the data directory itself with a
 locked-down ACL (Full Control limited to `LOCAL SERVICE`, `SYSTEM` and
 Administrators, with inheritance disabled). If its parent
@@ -242,8 +254,10 @@ The service runs with its data directory as its working directory.
   is present.
 - Logs: on every platform the service appends its log to
   `<dataDir>/logs/service.log` (mode `0600` on Linux and macOS). Also
-  `journalctl -u king-louie` on Linux and `<dataDir>/logs/service.out.log` /
-  `service.err.log` on macOS (the LaunchDaemon's stdout/stderr). On Windows,
+  `journalctl -u king-louie` on Linux and `/var/log/king-louie/service.out.log`
+  / `service.err.log` on macOS (the LaunchDaemon's stdout/stderr, in a
+  root-owned directory: launchd opens those paths itself and follows symlinks,
+  so they must not sit anywhere the service account can write). On Windows,
   `service.log` is the only log: Task Scheduler's History tab records only
   that the task started and stopped, not its output.
 - Stopping on Windows: `schtasks /End /TN KingLouie` (and `uninstall`, which

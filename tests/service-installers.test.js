@@ -1056,3 +1056,122 @@ describe('reinstall idempotency (I8)', () => {
     assert.notStrictEqual(steps[restart].ignoreFailure, true);
   });
 });
+
+// --- Fix wave 3: the POSIX installer must not create or chown anything
+// inside a directory the service account owns, and must refuse a data dir
+// whose parent that account could replace with a symlink.
+
+describe('POSIX installer: nothing is created or chowned inside the data dir', () => {
+  const posix = { nodePath: '/usr/bin/node', entryPath: '/opt/king-louie/bin/king-louie-service.js', user: '_kinglouie' };
+  const DARWIN_DATA = '/Library/Application Support/KingLouie/data';
+
+  it('darwin: has no step that creates <dataDir>/logs (the service creates it under its own uid)', () => {
+    const steps = planInstall({ platform: 'darwin', ...posix, dataDir: DARWIN_DATA });
+    const inside = steps.filter((s) => s.run && s.run.some((a) => typeof a === 'string' && a.startsWith(`${DARWIN_DATA}/`)));
+    assert.deepStrictEqual(inside, [], `no install step may touch a path inside the data dir: ${JSON.stringify(inside)}`);
+  });
+
+  it('darwin: launchd stdout/stderr go to a root-owned dir, not <dataDir>/logs', () => {
+    const steps = planInstall({ platform: 'darwin', ...posix, dataDir: DARWIN_DATA });
+    const plist = steps.find((s) => s.writeFile?.path === '/Library/LaunchDaemons/com.kinglouie.service.plist').writeFile.content;
+    assert.match(plist, /<key>StandardOutPath<\/key>\s*<string>\/var\/log\/king-louie\/service\.out\.log<\/string>/);
+    assert.match(plist, /<key>StandardErrorPath<\/key>\s*<string>\/var\/log\/king-louie\/service\.err\.log<\/string>/);
+    assert.ok(!plist.includes(`${DARWIN_DATA}/logs`), 'the plist must not name a log path inside the data dir');
+    const mk = steps.find((s) => s.run?.join(' ') === 'install -d -m 0755 -o root -g wheel /var/log/king-louie');
+    assert.ok(mk, 'the installer must create the root-owned launchd log dir');
+    assert.ok(steps.indexOf(mk) < steps.indexOf(steps.find((s) => s.writeFile?.path === '/Library/LaunchDaemons/com.kinglouie.service.plist')));
+  });
+
+  for (const [platform, dataDir] of [['linux', '/var/lib/king-louie'], ['darwin', DARWIN_DATA]]) {
+    it(`${platform}: checks the data dir's ancestors before the data dir is created`, () => {
+      const steps = planInstall({ platform, ...posix, dataDir });
+      const check = steps.findIndex((s) => s.ensureSafeParent === dataDir);
+      const create = steps.findIndex((s) => s.run?.[0] === 'install' && s.run[s.run.length - 1] === dataDir);
+      assert.ok(check >= 0, 'expected an ensureSafeParent step');
+      assert.ok(create > check, 'the ancestor check must come before the data dir is created');
+    });
+  }
+
+  it('dry-run prints the ancestor check without touching the filesystem', async () => {
+    const t = io();
+    await executeSteps([{ description: 'verify the data dir\'s ancestors are root-owned', ensureSafeParent: '/var/lib/king-louie' }], { dryRun: true, io: t });
+    assert.match(t.out.join(''), /\[dry-run\].*every ancestor of \/var\/lib\/king-louie is a root-owned directory/);
+  });
+});
+
+// Real-filesystem tests for the ancestor check. They need to run as root:
+// the check's whole point is "owned by uid 0", which a non-root process
+// cannot stage. In CI/dev that means a Linux container; on Windows the POSIX
+// `install -d` path does not exist at all.
+const notRootPosixSkip = process.platform === 'win32'
+  ? 'POSIX-only (the Windows installer has its own ancestor check in PowerShell)'
+  : (typeof process.getuid === 'function' && process.getuid() === 0 ? false : 'requires root (the check asserts uid 0 ownership)');
+
+describe('ensureSafeDataDirParent (real filesystem, root only)', () => {
+  const { ensureSafeDataDirParent } = require('../src/service/installers');
+
+  it('accepts a root-owned, 0755 parent', { skip: notRootPosixSkip }, () => {
+    const base = tmp();
+    fs.chmodSync(base, 0o755);
+    ensureSafeDataDirParent(path.posix.join(base, 'data'));
+  });
+
+  it('refuses a world-writable parent (the /tmp/kl case)', { skip: notRootPosixSkip }, () => {
+    const base = tmp();
+    fs.chmodSync(base, 0o1777);
+    assert.throws(() => ensureSafeDataDirParent(path.posix.join(base, 'data')), /group- or world-writable/);
+  });
+
+  it('refuses a group-writable parent', { skip: notRootPosixSkip }, () => {
+    const base = tmp();
+    fs.chmodSync(base, 0o775);
+    assert.throws(() => ensureSafeDataDirParent(path.posix.join(base, 'data')), /group- or world-writable/);
+  });
+
+  it('refuses a parent owned by the service account', { skip: notRootPosixSkip }, () => {
+    const base = tmp();
+    const parent = path.posix.join(base, 'svc-owned');
+    fs.mkdirSync(parent, { mode: 0o755 });
+    fs.chownSync(parent, 12345, 12345);
+    assert.throws(() => ensureSafeDataDirParent(path.posix.join(parent, 'data')), /not owned by root/);
+  });
+
+  it('refuses a parent that is a symlink, and creates nothing through it', { skip: notRootPosixSkip }, () => {
+    const base = tmp();
+    fs.chmodSync(base, 0o755);
+    const target = path.posix.join(base, 'target');
+    fs.mkdirSync(target, { mode: 0o755 });
+    const link = path.posix.join(base, 'link');
+    fs.symlinkSync(target, link);
+    assert.throws(() => ensureSafeDataDirParent(path.posix.join(link, 'data')), /is a symlink/);
+    assert.ok(!fs.existsSync(path.posix.join(target, 'data')), 'nothing may be created through the link');
+  });
+
+  it('refuses a data dir that is itself a symlink, before `install -d` can chown its target', { skip: notRootPosixSkip }, () => {
+    // Confirmed end to end as root in a node:22-alpine container: without
+    // this refusal, `install -d -m 0700 -o <svcuser> <dataDir>` followed the
+    // link and left /etc owned by the service account, mode 0700.
+    const base = tmp();
+    fs.chmodSync(base, 0o755);
+    const target = path.posix.join(base, 'etc');
+    fs.mkdirSync(target, { mode: 0o755 });
+    const dataDir = path.posix.join(base, 'king-louie');
+    fs.symlinkSync(target, dataDir);
+    assert.throws(() => ensureSafeDataDirParent(dataDir), /the data dir .* is a symlink/);
+    const st = fs.lstatSync(target);
+    assert.strictEqual(st.uid, 0);
+    assert.strictEqual(st.mode & 0o7777, 0o755);
+  });
+
+  it('creates a missing parent root-owned 0755 (the default macOS …/KingLouie layout)', { skip: notRootPosixSkip }, () => {
+    const base = tmp();
+    fs.chmodSync(base, 0o755);
+    const parent = path.posix.join(base, 'KingLouie');
+    ensureSafeDataDirParent(path.posix.join(parent, 'data'));
+    const st = fs.lstatSync(parent);
+    assert.ok(st.isDirectory());
+    assert.strictEqual(st.uid, 0);
+    assert.strictEqual(st.mode & 0o7777, 0o755);
+    assert.ok(!fs.existsSync(path.posix.join(parent, 'data')), 'only the parent is created, never the data dir');
+  });
+});
