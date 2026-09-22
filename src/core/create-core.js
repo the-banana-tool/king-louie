@@ -4,6 +4,7 @@ const AnthropicOAuth = require('../auth/anthropic-oauth');
 const ProviderFactory = require('../providers/provider-factory');
 const InferenceRouter = require('../providers/inference-router');
 const { initializeTools, toolRegistry } = require('../tools');
+const { registerSecretDataDir } = require('../tools/utils');
 const ToolExecutor = require('../execution/tool-executor');
 const DenialTracker = require('../tools/denial-tracker');
 const AgentLoop = require('../execution/agent-loop');
@@ -105,6 +106,10 @@ function createCore(deps = {}) {
   const features = { ...DEFAULT_FEATURES, ...(deps.features || {}) };
   const vault = createVault({ store: vaultStore, cipher });
   const userDataPath = paths.dataDir;
+  // The ungated read tools (Read, Grep, Glob) never ask for approval, so the
+  // only thing between a remote origin and this directory's master key,
+  // gateway token and encrypted stores is a deny-list. Tell it where they are.
+  registerSecretDataDir(paths.dataDir);
   const shutdownTimeoutMs = deps.shutdownTimeoutMs ?? 5000;
   // 'allow' (default, the Electron app's behaviour): an approval requester
   // attached by a remote origin (a chat channel's Approve button, a gateway

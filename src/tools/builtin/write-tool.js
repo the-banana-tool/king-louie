@@ -1,7 +1,7 @@
 const fs = require('fs').promises;
 const path = require('path');
 const { Tool } = require('../tool-schema');
-const { isPathAllowed } = require('../utils');
+const { describePathDenial } = require('../utils');
 const { generateUnifiedDiff, countDiffStats } = require('./diff-utils');
 
 const WriteTool = new Tool({
@@ -31,8 +31,9 @@ const WriteTool = new Tool({
       ? path.resolve(file_path)
       : path.resolve(workingDirectory, file_path);
 
-    if (!isPathAllowed(resolvedPath, workingDirectory, allowedDirectories)) {
-      throw new Error('Access denied: Path outside working directory and allowed directories');
+    const denial = describePathDenial(resolvedPath, workingDirectory, allowedDirectories);
+    if (denial) {
+      throw new Error(denial);
     }
 
     try {
