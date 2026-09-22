@@ -200,9 +200,11 @@ describe('Windows install plan fixes', () => {
     const del = steps.find((s) => s.unlink === write.writeFile.path);
     assert.ok(del, 'expected a step that deletes the temp task XML');
     assert.ok(steps.indexOf(del) > steps.indexOf(register), 'delete must come after register');
+    assert.strictEqual(del.always, true, 'cleanup must still run after an earlier failure');
+    assert.strictEqual(del.ignoreFailure, true, 'a failed cleanup must not itself abort the install');
   });
 
-  it('grants recursively and reclaims ownership for Administrators', () => {
+  it('grants recursively, and reclaims ownership before resetting and re-granting the ACL', () => {
     const steps = planInstall({ platform: 'win32', ...win });
     const grant = steps.find((s) => s.run?.[0] === 'icacls' && s.run.includes('/grant:r'));
     assert.ok(grant.run.includes('/T'), 'grant step must recurse with /T');
@@ -210,13 +212,135 @@ describe('Windows install plan fixes', () => {
     assert.ok(setowner, 'expected an icacls /setowner step');
     assert.ok(setowner.run.includes('*S-1-5-32-544'));
     assert.ok(setowner.run.includes('/T'));
-    assert.ok(steps.indexOf(setowner) > steps.indexOf(grant), 'ownership must be reclaimed after the ACL grant');
+    assert.ok(steps.indexOf(setowner) < steps.indexOf(grant), 'ownership must be reclaimed before the ACL grant, not after');
+  });
+
+  it('runs the ACL fix as exactly setowner, then reset, then inheritance:r/grant:r, in that order', () => {
+    const steps = planInstall({ platform: 'win32', ...win });
+    const mkdirIdx = steps.findIndex((s) => s.mkdir === win.dataDir);
+    const icaclsSteps = steps.filter((s) => s.run?.[0] === 'icacls');
+    assert.strictEqual(icaclsSteps.length, 3, 'expected exactly 3 icacls steps');
+    assert.deepStrictEqual(icaclsSteps[0].run, ['icacls', win.dataDir, '/setowner', '*S-1-5-32-544', '/T']);
+    assert.deepStrictEqual(icaclsSteps[1].run, ['icacls', win.dataDir, '/reset', '/T']);
+    assert.deepStrictEqual(icaclsSteps[2].run, [
+      'icacls', win.dataDir, '/inheritance:r', '/grant:r',
+      '*S-1-5-19:(OI)(CI)F', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '/T'
+    ]);
+    // And all three come after mkdir, in plan order.
+    assert.ok(mkdirIdx < steps.indexOf(icaclsSteps[0]));
+    assert.ok(steps.indexOf(icaclsSteps[0]) < steps.indexOf(icaclsSteps[1]));
+    assert.ok(steps.indexOf(icaclsSteps[1]) < steps.indexOf(icaclsSteps[2]));
   });
 
   it('resolves a trailing backslash and rejects a quote in the plan\'s dataDir too', () => {
     const steps = planInstall({ platform: 'win32', ...win, dataDir: 'C:\\ProgramData\\KingLouie\\' });
     assert.strictEqual(steps[0].mkdir, 'C:\\ProgramData\\KingLouie');
     assert.throws(() => planInstall({ platform: 'win32', ...win, dataDir: 'C:\\ProgramData\\Evil"Dir' }), /double quote/);
+  });
+});
+
+describe('root guard: dataDir must have at least 2 path components below root', () => {
+  const win = { nodePath: 'C:\\node.exe', entryPath: 'C:\\kl\\bin\\king-louie-service.js' };
+  const posix = { nodePath: '/usr/bin/node', entryPath: '/opt/king-louie/bin/king-louie-service.js', user: 'king-louie' };
+
+  it('rejects Windows roots: C:\\ and C:\\Windows', () => {
+    assert.throws(() => planInstall({ platform: 'win32', ...win, dataDir: 'C:\\' }), /too close to the filesystem root/);
+    assert.throws(() => planInstall({ platform: 'win32', ...win, dataDir: 'C:\\Windows' }), /too close to the filesystem root/);
+  });
+  it('rejects a bare UNC share root: \\\\srv\\share\\', () => {
+    assert.throws(() => planInstall({ platform: 'win32', ...win, dataDir: '\\\\srv\\share\\' }), /too close to the filesystem root/);
+  });
+  it('accepts the Windows default: C:\\ProgramData\\KingLouie', () => {
+    const steps = planInstall({ platform: 'win32', ...win, dataDir: 'C:\\ProgramData\\KingLouie' });
+    assert.ok(steps.length > 0);
+  });
+
+  it('rejects POSIX roots: / and /etc', () => {
+    assert.throws(() => planInstall({ platform: 'linux', ...posix, dataDir: '/' }), /too close to the filesystem root/);
+    assert.throws(() => planInstall({ platform: 'linux', ...posix, dataDir: '/etc' }), /too close to the filesystem root/);
+    assert.throws(() => planInstall({ platform: 'darwin', ...posix, dataDir: '/' }), /too close to the filesystem root/);
+  });
+  it('accepts the Linux and macOS defaults', () => {
+    assert.ok(planInstall({ platform: 'linux', ...posix, dataDir: '/var/lib/king-louie' }).length > 0);
+    assert.ok(planInstall({ platform: 'darwin', ...posix, dataDir: '/Library/Application Support/KingLouie' }).length > 0);
+  });
+  it('accepts the built-in per-platform default when --data-dir is omitted', () => {
+    assert.ok(planInstall({ platform: 'linux', ...posix }).length > 0);
+    assert.ok(planInstall({ platform: 'darwin', ...posix }).length > 0);
+    assert.ok(planInstall({ platform: 'win32', ...win }).length > 0);
+  });
+});
+
+describe('Windows mkdir refuses an existing symlink/junction', () => {
+  it('dry-run notes that the check will happen, without doing it', async () => {
+    const t = io();
+    await executeSteps([{ description: 'create the data dir', mkdir: 'C:\\ProgramData\\KingLouie' }], { dryRun: true, io: t });
+    assert.match(t.out.join(''), /symlink\/junction/);
+  });
+
+  it('real mode creates a plain directory normally', async () => {
+    const dir = path.join(tmp(), 'plain-dir');
+    await executeSteps([{ description: 'mk', mkdir: dir }], { dryRun: false, io: io() });
+    assert.ok(fs.statSync(dir).isDirectory());
+  });
+
+  it('real mode refuses when the path already exists and is a symlink/junction', async () => {
+    const base2 = tmp();
+    const target = path.join(base2, 'real-target');
+    fs.mkdirSync(target);
+    const link = path.join(base2, 'link-as-datadir');
+    fs.symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir');
+    const t = io();
+    await assert.rejects(
+      () => executeSteps([{ description: 'create the data dir', mkdir: link }], { dryRun: false, io: t }),
+      /symlink or junction/
+    );
+  });
+});
+
+describe('executeSteps: always steps', () => {
+  it('an always step still runs after an earlier step fails, and the original error is rethrown', async () => {
+    const dir = tmp();
+    const markerFile = path.join(dir, 'cleanup-ran.txt');
+    const skippedFile = path.join(dir, 'should-be-skipped.txt');
+    const steps = [
+      { description: 'this fails', run: [process.execPath, '-e', 'process.exit(1)'] },
+      { description: 'this must be skipped (not always, comes after the failure)', writeFile: { path: skippedFile, content: 'x', mode: 0o644 } },
+      { description: 'cleanup marker (always)', always: true, writeFile: { path: markerFile, content: 'ran', mode: 0o644 } }
+    ];
+    await assert.rejects(() => executeSteps(steps, { dryRun: false, io: io() }));
+    assert.ok(fs.existsSync(markerFile), 'the always step should have run despite the earlier failure');
+    assert.ok(!fs.existsSync(skippedFile), 'a non-always step after the failure should have been skipped');
+  });
+
+  it('a failing temp-XML unlink (always + ignoreFailure) does not block the step after it', async () => {
+    const t = io();
+    const calls = [];
+    const execFile = (cmd, args) => calls.push([cmd, ...args].join(' '));
+    const steps = [
+      { description: 'register the boot task', run: ['schtasks', '/Create'] },
+      // Points at a file that was never created, so the real fs.unlinkSync
+      // call below genuinely fails (ENOENT) — a harmless, temp-only failure.
+      { description: 'delete the temporary task definition', unlink: path.join(tmp(), 'does-not-exist.xml'), always: true, ignoreFailure: true },
+      { description: 'start it now', run: ['schtasks', '/Run'] }
+    ];
+    await executeSteps(steps, { dryRun: false, io: t, execFile });
+    assert.deepStrictEqual(calls, ['schtasks /Create', 'schtasks /Run']);
+    assert.match(t.out.join(''), /ignoring failure/);
+  });
+
+  it('dry-run never triggers the always/pendingError machinery (every step just prints)', async () => {
+    const t = io();
+    const steps = [
+      { description: 'this would fail for real', run: ['definitely-not-a-command'] },
+      { description: 'this is not always', run: ['also-not-a-command'] },
+      { description: 'cleanup marker (always)', always: true, run: ['still-not-a-command'] }
+    ];
+    await executeSteps(steps, { dryRun: true, io: t });
+    const out = t.out.join('');
+    assert.match(out, /this would fail for real/);
+    assert.match(out, /this is not always/);
+    assert.match(out, /cleanup marker \(always\)/);
   });
 });
 
