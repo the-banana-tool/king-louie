@@ -1,5 +1,6 @@
 const { Tool } = require('../tool-schema');
 const { createLogger } = require('../../logging');
+const { decryptSettingKey } = require('../utils');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -12,24 +13,14 @@ function ensureOutputDir() {
   if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 }
 
-function decryptKey(encrypted, context) {
-  if (!encrypted) return null;
-  if (typeof context?.decryptToken === 'function') {
-    try {
-      return context.decryptToken(encrypted);
-    } catch (e) {
-      return encrypted; // Fallback
-    }
-  }
-  return encrypted; // In tests where decryptToken isn't available, or keys are stored plain
-}
-
+// Throws rather than falling back to the ciphertext; resolveProvider's caller
+// turns that into an { ok: false, error } the user can act on.
 async function resolveProvider(settings, providerOverride, context) {
   const imgSettings = settings?.imageGeneration || {};
   const chosen = providerOverride || imgSettings.defaultProvider || 'openai';
 
   if (chosen === 'fal') {
-    const apiKey = decryptKey(imgSettings.fal?.apiKey, context);
+    const apiKey = decryptSettingKey(imgSettings.fal?.apiKey, context, 'Fal');
     if (!apiKey) throw new Error('Fal API key not configured. Add it in Settings > Providers.');
     const FalImageProvider = require('../../media/image-generation/fal-provider');
     return new FalImageProvider(apiKey);
@@ -42,7 +33,7 @@ async function resolveProvider(settings, providerOverride, context) {
   } catch (_) { /* no token saved / not available */ }
 
   if (!apiKey) {
-    apiKey = decryptKey(imgSettings.openai?.apiKey, context);
+    apiKey = decryptSettingKey(imgSettings.openai?.apiKey, context, 'OpenAI');
   }
   if (!apiKey) throw new Error('OpenAI API key not configured. Add it in Settings > Providers.');
 

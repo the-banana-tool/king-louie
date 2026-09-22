@@ -4,17 +4,7 @@ const DuckDuckGoSearch = require('../../web-search/providers/duckduckgo');
 const BraveSearch = require('../../web-search/providers/brave-search');
 const TavilySearch = require('../../web-search/providers/tavily');
 
-function decryptKey(encrypted, context) {
-  if (!encrypted) return null;
-  if (typeof context?.decryptToken === 'function') {
-    try {
-      return context.decryptToken(encrypted);
-    } catch (e) {
-      return encrypted; // Fallback
-    }
-  }
-  return encrypted; // In tests where decryptToken isn't available, or keys are stored plain
-}
+const { decryptSettingKey } = require('../utils');
 
 function getDefaultProvider(settings) {
   if (settings?.webSearch?.brave?.apiKey) return 'brave';
@@ -43,12 +33,18 @@ const WebSearchTool = new Tool({
     const providerName = getDefaultProvider(settings);
     let provider;
 
-    if (providerName === 'brave') {
-      provider = new BraveSearch(decryptKey(settings.webSearch.brave.apiKey, context));
-    } else if (providerName === 'tavily') {
-      provider = new TavilySearch(decryptKey(settings.webSearch.tavily.apiKey, context));
-    } else {
-      provider = new DuckDuckGoSearch();
+    // Fail closed before the request is built: an undecryptable key must not
+    // be shipped to Brave or Tavily as if it were the credential.
+    try {
+      if (providerName === 'brave') {
+        provider = new BraveSearch(decryptSettingKey(settings.webSearch.brave.apiKey, context, 'Brave Search'));
+      } else if (providerName === 'tavily') {
+        provider = new TavilySearch(decryptSettingKey(settings.webSearch.tavily.apiKey, context, 'Tavily'));
+      } else {
+        provider = new DuckDuckGoSearch();
+      }
+    } catch (error) {
+      return { ok: false, error: error.message };
     }
 
     try {

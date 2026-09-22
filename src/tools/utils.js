@@ -265,6 +265,38 @@ function describePathDenial(targetPath, workingDirectory, allowedDirectories = [
 
 seedDefaultSecretDataDirs();
 
+/**
+ * Decrypt an API key a tool holds in settings, failing closed.
+ *
+ * Both web-search and image-generate used to `catch (e) { return encrypted; }`
+ * here, which sent the stored *ciphertext* to Brave, Tavily or Fal as a live
+ * credential the moment decryption broke — and the triggers are ordinary, not
+ * exotic: a Linux desktop with no Secret Service, a rotated or restored
+ * keychain/DPAPI entry, or an AES host reading a value the Electron host wrote
+ * now that there are two ciphertext formats. Secret material must never reach
+ * an unrelated third party, and a broken at-rest encryption must not present
+ * itself as "my search key stopped working".
+ *
+ * `label` names the key in the error so the user knows which one to re-enter.
+ * The ciphertext itself is never put in the message.
+ */
+function decryptSettingKey(encrypted, context, label = 'API') {
+  if (!encrypted) return null;
+  if (typeof context?.decryptToken !== 'function') {
+    // No host cipher available (tests, or keys stored in plain text).
+    return encrypted;
+  }
+  try {
+    return context.decryptToken(encrypted);
+  } catch (err) {
+    throw new Error(
+      `Could not decrypt the stored ${label} key (${err.message}). `
+      + 'Re-enter it in Settings > Providers. '
+      + 'Refusing to send undecryptable material to the provider.'
+    );
+  }
+}
+
 function evaluateDangerousCommand(command = '', patterns = DEFAULT_DANGEROUS_COMMAND_PATTERNS) {
   const text = String(command || '');
   for (const rule of patterns) {
@@ -297,6 +329,7 @@ module.exports = {
   listSecretDataDirs,
   SECRET_FILE_PREFIXES,
   SECRET_PATH_DENIAL_MESSAGE,
+  decryptSettingKey,
   evaluateDangerousCommand,
   DEFAULT_DANGEROUS_COMMAND_PATTERNS,
   DEFAULT_PROTECTED_PATHS
