@@ -113,6 +113,13 @@ module.exports = {
 
   DIAGNOSTICS_RUN: 'diagnostics:run',
 
+  // Chat-channel access control: who may drive the agent through a channel,
+  // and where that channel's tool approvals are sent.
+  CHANNEL_ACCESS_GET: 'channel:accessGet',
+  CHANNEL_ACCESS_ALLOW: 'channel:accessAllow',
+  CHANNEL_ACCESS_REMOVE: 'channel:accessRemove',
+  CHANNEL_SET_APPROVAL_TARGET: 'channel:setApprovalTarget',
+
   MESH_STATUS: 'mesh:status',
   MESH_PEERS_LIST: 'mesh:peers',
   MESH_PEER_ADD: 'mesh:addPeer',

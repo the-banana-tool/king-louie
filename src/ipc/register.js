@@ -14,6 +14,7 @@ const { registerWebhookHandlers } = require('./webhook-handlers');
 const { registerWizardHandlers } = require('./wizard-handlers');
 const { registerDiagnosticsHandlers } = require('./diagnostics-handlers');
 const { registerMeshHandlers } = require('./mesh-handlers');
+const { registerChannelHandlers } = require('./channel-handlers');
 const { registerWorkflowHandlers } = require('./workflow-handlers');
 const { registerAppsHandlers } = require('./apps-handlers');
 const { registerCanvasHandlers } = require('./canvas-handlers');
@@ -36,6 +37,7 @@ function registerHandlers(ipcMain, context = {}) {
   registerWizardHandlers(ipcMain, context);
   registerDiagnosticsHandlers(ipcMain, context);
   registerMeshHandlers(ipcMain, context);
+  registerChannelHandlers(ipcMain, context);
   registerWorkflowHandlers(ipcMain, context);
   registerAppsHandlers(ipcMain, context);
   registerCanvasHandlers(ipcMain, context);

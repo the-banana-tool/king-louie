@@ -2693,6 +2693,9 @@ function createCore(deps = {}) {
       try { return ProviderFactory; } catch { return null; }
     },
     getChannelRegistry: () => channelRegistry,
+    // The same instance the bridges check, so the settings pane sees the
+    // senders they just refused (src/ipc/channel-handlers.js).
+    getAllowlistManager: () => allowlistManager,
     getHookRegistry: () => hookRegistry,
     getGatewayServer: () => gatewayServer,
     getMeshContext: () => meshContext,
