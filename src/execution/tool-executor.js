@@ -245,10 +245,16 @@ class ToolExecutor extends EventEmitter {
       || (!ruleMatch.matched && tool.requiresApproval && this.requireApproval);
 
     if (needsApprovalGate && !ruleSaysAllow) {
-      const autoApproved = this.denyAutoApproval
+      // An `ask` rule is the user saying "always check with me for this one",
+      // so it outranks both auto-approve paths — which is what the comment
+      // above evaluateRules has always claimed and the code did not do. Agent
+      // mode's hard-coded list used to win here, leaving the whole `ask` tier
+      // inert for Bash, Edit, Write and Git.
+      const autoApproved = this.denyAutoApproval || ruleSaysAsk
         ? false
         : await this.shouldAutoApprove(toolName, effectiveParameters);
       const agentAutoApproved = !this.denyAutoApproval
+        && !ruleSaysAsk
         && Array.isArray(options.autoApproveTools)
         && options.autoApproveTools.includes(toolName);
 

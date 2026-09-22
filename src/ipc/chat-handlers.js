@@ -467,11 +467,18 @@ function registerChatHandlers(ipcMain, context = {}) {
               safeSend(event.sender, 'chat:messageChunk', { chatId, responseId, chunk });
             }
           });
+          // No autoApproveTools here on purpose. Agent mode used to hard-code
+          // ['Bash','Read','Edit','Write','Glob','Grep','Git'], which silently
+          // overrode the user's own `ask` rules for the seven most dangerous
+          // tools: evaluateRules said ask, the gate opened, and the approval
+          // dialog the README advertises never appeared. What may run without
+          // asking is now decided only by the user's permission rules and the
+          // persisted "always approve" list — both of which they can see and
+          // change.
           const result = await loop.run(chat.messages, toolDefinitions, {
             ...options,
             contextAssembler,
-            disabledMcpServers,
-            autoApproveTools: ['Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep', 'Git']
+            disabledMcpServers
           });
           // If streaming didn't fire (non-streaming provider), send full response
           if (!fullResponse) {
