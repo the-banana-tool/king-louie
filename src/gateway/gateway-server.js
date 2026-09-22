@@ -1,10 +1,21 @@
 const { EventEmitter } = require('events');
 const crypto = require('crypto');
 const WebSocket = require('ws');
+const { createLogger } = require('../logging');
+
+const log = createLogger('gateway-server');
 
 // Literal loopback addresses only: 'localhost' is resolved by the OS resolver
 // (hosts file, DNS) and so is not guaranteed to be loopback.
 const LOOPBACK = new Set(['127.0.0.1', '::1']);
+
+// The gateway protocol carries chat turns, not bulk data. `ws` defaults to
+// 100 MB, which is a lot of memory to hand a single frame.
+const MAX_PAYLOAD_BYTES = 4 * 1024 * 1024;
+const MAX_CONNECTIONS = 64;
+// Node's default is 60s; a loopback client has no excuse for taking that long
+// to finish its request headers.
+const HEADERS_TIMEOUT_MS = 10000;
 
 class GatewayServer extends EventEmitter {
   constructor(config = {}) {
@@ -14,6 +25,7 @@ class GatewayServer extends EventEmitter {
     this.port = config.port != null ? config.port : (process.env.KL_TEST_MODE ? 0 : 18789);
     this.host = config.host || '127.0.0.1';
     this.authToken = config.authToken || null;
+    this.maxConnections = config.maxConnections != null ? config.maxConnections : MAX_CONNECTIONS;
     this.connections = new Map();
     this.messageHandlers = new Map();
     this.nextConnectionId = 0;
@@ -30,8 +42,15 @@ class GatewayServer extends EventEmitter {
     this.wss = new WebSocket.Server({
       host: this.host,
       port: this.port,
+      maxPayload: MAX_PAYLOAD_BYTES,
       verifyClient: ({ req }, done) => {
-        if (req.headers.origin) return done(false, 403, 'Forbidden');
+        // Presence, not truthiness: an empty `Origin:` is still a browser-shaped
+        // header and must not slip through the check.
+        if ('origin' in req.headers) return done(false, 403, 'Forbidden');
+        if (this.connections.size >= this.maxConnections) {
+          log.warn(`refused connection: ${this.connections.size} already open`);
+          return done(false, 503, 'Too many connections');
+        }
         const header = String(req.headers.authorization || '');
         const presented = header.startsWith('Bearer ') ? header.slice(7) : '';
         const ok = crypto.timingSafeEqual(crypto.createHash('sha256').update(presented).digest(), expected);
@@ -41,6 +60,12 @@ class GatewayServer extends EventEmitter {
 
     this.wss.on('connection', (ws, req) => {
       this.handleConnection(ws, req);
+    });
+
+    // `start()`'s once('error', reject) only covers the bind. A later server
+    // error must not reach the process as an unhandled 'error' event.
+    this.wss.on('error', (err) => {
+      log.error(`gateway server error: ${err.message}`);
     });
 
     try {
@@ -58,6 +83,15 @@ class GatewayServer extends EventEmitter {
     // Update port to the actual bound port (important when using port 0)
     if (this.wss.address()) {
       this.port = this.wss.address().port;
+    }
+
+    const httpServer = this.wss._server;
+    if (httpServer) {
+      httpServer.headersTimeout = HEADERS_TIMEOUT_MS;
+      httpServer.on('clientError', (err, socket) => {
+        log.debug(`gateway client error before upgrade: ${err.message}`);
+        try { socket.destroy(); } catch { /* already gone */ }
+      });
     }
   }
 
@@ -86,18 +120,37 @@ class GatewayServer extends EventEmitter {
         const message = JSON.parse(data);
         await this.routeMessage(connectionId, message);
       } catch (error) {
-        ws.send(
-          JSON.stringify({
-            type: 'error',
-            error: error.message
-          })
-        );
+        this.safeSend(ws, {
+          type: 'error',
+          error: error.message
+        });
       }
+    });
+
+    // A malformed frame makes `ws` emit 'error' on this socket. Without a
+    // listener that is an unhandled 'error' event, which takes the whole
+    // process down — the Electron main process, or the service. Drop the one
+    // connection instead.
+    ws.on('error', (err) => {
+      log.warn(`gateway connection ${connectionId} error: ${err.message}`);
+      this.connections.delete(connectionId);
+      try { ws.terminate(); } catch { /* already gone */ }
     });
 
     ws.on('close', () => {
       this.connections.delete(connectionId);
     });
+  }
+
+  safeSend(ws, payload) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    try {
+      ws.send(JSON.stringify(payload));
+      return true;
+    } catch (error) {
+      log.warn(`gateway send failed: ${error.message}`);
+      return false;
+    }
   }
 
   async routeMessage(connectionId, message) {
@@ -108,16 +161,11 @@ class GatewayServer extends EventEmitter {
 
     const result = await handler(message.params || {}, connectionId);
 
-    const ws = this.connections.get(connectionId);
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(
-        JSON.stringify({
-          type: 'response',
-          id: message.id,
-          result
-        })
-      );
-    }
+    this.safeSend(this.connections.get(connectionId), {
+      type: 'response',
+      id: message.id,
+      result
+    });
   }
 
   registerMethod(method, handler) {
@@ -133,16 +181,8 @@ class GatewayServer extends EventEmitter {
   }
 
   broadcast(event, data) {
-    const message = JSON.stringify({
-      type: 'event',
-      event,
-      data
-    });
-
     for (const ws of this.connections.values()) {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(message);
-      }
+      this.safeSend(ws, { type: 'event', event, data });
     }
   }
 }

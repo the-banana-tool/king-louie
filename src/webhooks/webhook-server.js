@@ -26,7 +26,13 @@ class WebhookServer {
     const listenPort = this.gatewayServer.port === 0 ? 0 : this.port;
 
     this.httpServer = http.createServer((req, res) => {
-      this.handleHttpRequest(req, res);
+      // handleHttpRequest is async: an unhandled rejection here would take the
+      // process down on Node >= 15.
+      this.handleHttpRequest(req, res).catch((err) => {
+        log.error(`Unhandled request error: ${err.message}`);
+        try { req.destroy(); } catch { /* already gone */ }
+        try { res.destroy(); } catch { /* already gone */ }
+      });
     });
 
     // listen() reports a bind failure (EADDRINUSE, EACCES) through the
@@ -62,7 +68,9 @@ class WebhookServer {
   }
 
   async handleHttpRequest(req, res) {
-    if (req.headers.origin) {
+    // Presence, not truthiness: an empty `Origin:` is still a browser-shaped
+    // header and must not slip through the check.
+    if ('origin' in req.headers) {
       res.writeHead(403, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Browser-originated requests are not accepted' }));
       return;
