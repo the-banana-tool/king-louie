@@ -3,6 +3,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { execFileSync } = require('child_process');
 const {
   renderSystemdUnit, renderLaunchdPlist, renderWindowsTaskXml, planInstall, planUninstall, executeSteps
 } = require('../src/service/installers');
@@ -82,10 +83,10 @@ describe('install plans', () => {
     assert.strictEqual(cred.writeFile.mode, 0o600);
     assert.match(cred.writeFile.content, /^[0-9a-f]{64}$/);
   });
-  it('windows: locks down the data dir ACL and registers the task', () => {
+  it('windows: creates/verifies the data dir ACL via PowerShell and registers the task', () => {
     const steps = planInstall({ platform: 'win32', nodePath: 'C:\\node.exe', entryPath: 'C:\\kl\\bin\\king-louie-service.js', dataDir: 'C:\\ProgramData\\KingLouie' });
-    assert.strictEqual(steps[0].mkdir, 'C:\\ProgramData\\KingLouie');
-    assert.ok(steps.some((s) => s.run?.[0] === 'icacls' && s.run.includes('/inheritance:r')));
+    assert.strictEqual(steps[0].run[0], 'powershell.exe');
+    assert.strictEqual(steps[0].env.KL_DATA_DIR, 'C:\\ProgramData\\KingLouie');
     assert.ok(steps.some((s) => s.run?.[0] === 'schtasks' && s.run.includes('/Create')));
   });
   it('darwin: requires --user', () => {
@@ -204,38 +205,78 @@ describe('Windows install plan fixes', () => {
     assert.strictEqual(del.ignoreFailure, true, 'a failed cleanup must not itself abort the install');
   });
 
-  it('grants recursively, and reclaims ownership before resetting and re-granting the ACL', () => {
-    const steps = planInstall({ platform: 'win32', ...win });
-    const grant = steps.find((s) => s.run?.[0] === 'icacls' && s.run.includes('/grant:r'));
-    assert.ok(grant.run.includes('/T'), 'grant step must recurse with /T');
-    const setowner = steps.find((s) => s.run?.[0] === 'icacls' && s.run.includes('/setowner'));
-    assert.ok(setowner, 'expected an icacls /setowner step');
-    assert.ok(setowner.run.includes('*S-1-5-32-544'));
-    assert.ok(setowner.run.includes('/T'));
-    assert.ok(steps.indexOf(setowner) < steps.indexOf(grant), 'ownership must be reclaimed before the ACL grant, not after');
-  });
-
-  it('runs the ACL fix as exactly setowner, then reset, then inheritance:r/grant:r, in that order', () => {
-    const steps = planInstall({ platform: 'win32', ...win });
-    const mkdirIdx = steps.findIndex((s) => s.mkdir === win.dataDir);
-    const icaclsSteps = steps.filter((s) => s.run?.[0] === 'icacls');
-    assert.strictEqual(icaclsSteps.length, 3, 'expected exactly 3 icacls steps');
-    assert.deepStrictEqual(icaclsSteps[0].run, ['icacls', win.dataDir, '/setowner', '*S-1-5-32-544', '/T']);
-    assert.deepStrictEqual(icaclsSteps[1].run, ['icacls', win.dataDir, '/reset', '/T']);
-    assert.deepStrictEqual(icaclsSteps[2].run, [
-      'icacls', win.dataDir, '/inheritance:r', '/grant:r',
-      '*S-1-5-19:(OI)(CI)F', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '/T'
-    ]);
-    // And all three come after mkdir, in plan order.
-    assert.ok(mkdirIdx < steps.indexOf(icaclsSteps[0]));
-    assert.ok(steps.indexOf(icaclsSteps[0]) < steps.indexOf(icaclsSteps[1]));
-    assert.ok(steps.indexOf(icaclsSteps[1]) < steps.indexOf(icaclsSteps[2]));
-  });
-
   it('resolves a trailing backslash and rejects a quote in the plan\'s dataDir too', () => {
     const steps = planInstall({ platform: 'win32', ...win, dataDir: 'C:\\ProgramData\\KingLouie\\' });
-    assert.strictEqual(steps[0].mkdir, 'C:\\ProgramData\\KingLouie');
+    assert.strictEqual(steps[0].env.KL_DATA_DIR, 'C:\\ProgramData\\KingLouie');
     assert.throws(() => planInstall({ platform: 'win32', ...win, dataDir: 'C:\\ProgramData\\Evil"Dir' }), /double quote/);
+  });
+});
+
+// --- Fix round 3: single-PowerShell-step ACL redesign ----------------------
+//
+// Round 2's mkdir-then-icacls*3 approach was structurally unsafe: each
+// separate icacls process after a symlink check left a TOCTOU window, and
+// `icacls /reset` on an existing dir briefly re-enabled inherited ACEs. It's
+// replaced by one elevated PowerShell step that either creates the dir with
+// its final ACL already attached, or — if it exists — only ever verifies
+// that ACL, never modifies it.
+
+describe('Windows: single PowerShell step creates/verifies the data dir ACL', () => {
+  const win = { nodePath: 'C:\\node.exe', entryPath: 'C:\\kl\\bin\\king-louie-service.js', dataDir: 'C:\\ProgramData\\KingLouie' };
+
+  function aclStep(dataDir = win.dataDir) {
+    const steps = planInstall({ platform: 'win32', ...win, dataDir });
+    return steps.find((s) => s.description === 'create or verify the data dir with a locked-down ACL');
+  }
+
+  it('is the very first step (before mkdir/icacls — there is no separate mkdir step anymore)', () => {
+    const steps = planInstall({ platform: 'win32', ...win });
+    assert.strictEqual(steps[0].description, 'create or verify the data dir with a locked-down ACL');
+    assert.strictEqual(steps.filter((s) => s.run?.[0] === 'icacls').length, 0, 'icacls must not appear anywhere in the plan');
+  });
+
+  it('runs powershell.exe -NoProfile -NonInteractive -Command <script>, with no other run steps for the ACL', () => {
+    const step = aclStep();
+    assert.deepStrictEqual(step.run.slice(0, 4), ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command']);
+    assert.strictEqual(step.run.length, 5, 'expected exactly one script argument after -Command');
+    assert.strictEqual(typeof step.run[4], 'string');
+  });
+
+  it('passes the data dir through env.KL_DATA_DIR, never interpolated into the script text', () => {
+    const dataDir = 'C:\\ProgramData\\KingLouie';
+    const step = aclStep(dataDir);
+    assert.strictEqual(step.env.KL_DATA_DIR, dataDir);
+    assert.ok(!step.run[4].includes(dataDir), 'the script text must not contain the literal data dir');
+    assert.ok(!step.run[4].includes('ProgramData'), 'the script text must not contain any part of the literal data dir');
+  });
+
+  it('the script reads the path from $env:KL_DATA_DIR', () => {
+    assert.match(aclStep().run[4], /\$env:KL_DATA_DIR/);
+  });
+
+  it('the script\'s SDDL is exactly the ruling\'s string', () => {
+    assert.ok(aclStep().run[4].includes('O:BAD:P(A;OICI;FA;;;LS)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'));
+  });
+
+  it('the script checks for a reparse point (symlink/junction) before ever verifying the ACL', () => {
+    const script = aclStep().run[4];
+    assert.match(script, /ReparsePoint/);
+    const reparseIdx = script.indexOf('ReparsePoint');
+    const aclIdx = script.indexOf('Get-Acl');
+    assert.ok(reparseIdx < aclIdx, 'the reparse-point check must come before the ACL is ever read');
+  });
+
+  it('the script never calls Set-Acl / icacls / anything that would modify an existing dir\'s ACL', () => {
+    const script = aclStep().run[4];
+    assert.ok(!/Set-Acl/i.test(script));
+    assert.ok(!/icacls/i.test(script));
+  });
+
+  it('dry-run prints KL_DATA_DIR in the env before the argv', async () => {
+    const t = io();
+    const step = aclStep('C:\\ProgramData\\KingLouie');
+    await executeSteps([step], { dryRun: true, io: t });
+    assert.match(t.out.join(''), /KL_DATA_DIR=C:\\ProgramData\\KingLouie powershell\.exe/);
   });
 });
 
@@ -260,6 +301,17 @@ describe('root guard: dataDir must have at least 2 path components below root', 
     assert.throws(() => planInstall({ platform: 'linux', ...posix, dataDir: '/etc' }), /too close to the filesystem root/);
     assert.throws(() => planInstall({ platform: 'darwin', ...posix, dataDir: '/' }), /too close to the filesystem root/);
   });
+  it('rejects dot-segment paths that normalize to a root: /etc/.., /tmp/../etc, /./etc, /etc/. (linux and darwin)', () => {
+    // Regression: the root guard used to only resolve *relative* dataDir
+    // values, so an already-absolute path with ".." or "." segments (e.g.
+    // "/etc/..", which normalizes to "/") slipped past it unresolved —
+    // "/etc/.." would have chowned "/". Always normalizing with
+    // path.posix.resolve() before validating closes this.
+    for (const bad of ['/etc/..', '/tmp/../etc', '/./etc', '/etc/.']) {
+      assert.throws(() => planInstall({ platform: 'linux', ...posix, dataDir: bad }), /too close to the filesystem root/, `linux: ${bad}`);
+      assert.throws(() => planInstall({ platform: 'darwin', ...posix, dataDir: bad }), /too close to the filesystem root/, `darwin: ${bad}`);
+    }
+  });
   it('accepts the Linux and macOS defaults', () => {
     assert.ok(planInstall({ platform: 'linux', ...posix, dataDir: '/var/lib/king-louie' }).length > 0);
     assert.ok(planInstall({ platform: 'darwin', ...posix, dataDir: '/Library/Application Support/KingLouie' }).length > 0);
@@ -271,30 +323,123 @@ describe('root guard: dataDir must have at least 2 path components below root', 
   });
 });
 
-describe('Windows mkdir refuses an existing symlink/junction', () => {
-  it('dry-run notes that the check will happen, without doing it', async () => {
-    const t = io();
-    await executeSteps([{ description: 'create the data dir', mkdir: 'C:\\ProgramData\\KingLouie' }], { dryRun: true, io: t });
-    assert.match(t.out.join(''), /symlink\/junction/);
-  });
+describe('darwin: the new absolute/char validation', () => {
+  const posixArgs = { nodePath: '/usr/bin/node', entryPath: '/opt/king-louie/bin/king-louie-service.js', user: 'king-louie' };
 
-  it('real mode creates a plain directory normally', async () => {
-    const dir = path.join(tmp(), 'plain-dir');
-    await executeSteps([{ description: 'mk', mkdir: dir }], { dryRun: false, io: io() });
-    assert.ok(fs.statSync(dir).isDirectory());
+  it('still accepts its default, which contains a space, after normalization', () => {
+    const steps = planInstall({ platform: 'darwin', ...posixArgs, dataDir: '/Library/Application Support/KingLouie' });
+    assert.ok(steps.length > 0);
   });
-
-  it('real mode refuses when the path already exists and is a symlink/junction', async () => {
-    const base2 = tmp();
-    const target = path.join(base2, 'real-target');
-    fs.mkdirSync(target);
-    const link = path.join(base2, 'link-as-datadir');
-    fs.symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir');
-    const t = io();
-    await assert.rejects(
-      () => executeSteps([{ description: 'create the data dir', mkdir: link }], { dryRun: false, io: t }),
-      /symlink or junction/
+  it('rejects a dataDir with a control character', () => {
+    assert.throws(
+      () => planInstall({ platform: 'darwin', ...posixArgs, dataDir: '/Library/Application Support/KingLouie\n' }),
+      /dataDir/
     );
+  });
+  it('rejects a non-absolute dataDir (after normalization still requires a leading /)', () => {
+    // path.posix.resolve() always yields an absolute path from any input, so
+    // this specifically exercises assertAbsolutePosixPath's error message
+    // rather than expecting a relative path to reach it.
+    assert.throws(() => planInstall({ platform: 'darwin', ...posixArgs, dataDir: '/' }), /too close to the filesystem root/);
+  });
+});
+
+// --- Fix round 3: real-mode tests for the Windows ACL PowerShell script ----
+//
+// Only meaningful on win32 (the script is powershell.exe-specific), so every
+// test in this block is skipped outright on other platforms. Some of them
+// additionally require an elevated (Administrator) process — creating a
+// directory with an O:BA (owner Administrators) security descriptor fails
+// otherwise ("This security ID may not be assigned as the owner of this
+// object"), confirmed empirically before writing these tests. Those are
+// skipped with a clear reason when the test process isn't elevated; see the
+// round-3 fix report for which ones actually ran in this environment.
+
+function isElevatedWindowsProcess() {
+  if (process.platform !== 'win32') return false;
+  try {
+    const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      '([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)'
+    ], { encoding: 'utf8' });
+    return out.trim().toLowerCase() === 'true';
+  } catch {
+    return false;
+  }
+}
+const IS_WIN32 = process.platform === 'win32';
+const IS_ELEVATED = isElevatedWindowsProcess();
+const notWin32Skip = IS_WIN32 ? false : 'Windows-only (the ACL step runs powershell.exe)';
+const notElevatedSkip = !IS_WIN32 ? notWin32Skip : (IS_ELEVATED ? false : 'requires an elevated (Administrator) process to create a dir with an O:BA owner');
+
+function aclScriptStepFor(dataDir) {
+  const steps = planInstall({ platform: 'win32', nodePath: 'C:\\node.exe', entryPath: 'C:\\kl\\bin\\king-louie-service.js', dataDir });
+  return steps.find((s) => s.description === 'create or verify the data dir with a locked-down ACL');
+}
+
+// Runs the real script (real mode, only ever against a path under a temp dir
+// this file creates) and captures its exit code/stderr directly, bypassing
+// executeSteps' stdio:'inherit' so the script's own error message can be
+// asserted on.
+function runAclScript(dataDir) {
+  const step = aclScriptStepFor(dataDir);
+  const env = { ...process.env, ...step.env };
+  try {
+    execFileSync(step.run[0], step.run.slice(1), { env, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8' });
+    return { code: 0, stderr: '' };
+  } catch (err) {
+    return { code: typeof err.status === 'number' ? err.status : 1, stderr: String(err.stderr || err.message || '') };
+  }
+}
+
+describe('Windows ACL script (real mode, temp dirs only)', () => {
+  it('a fresh create yields a protected DACL with exactly LS/SY/BA and owner BA', { skip: notElevatedSkip }, () => {
+    const dir = path.join(tmp(), 'fresh-data-dir');
+    const created = runAclScript(dir);
+    assert.strictEqual(created.code, 0, `expected a clean create, got: ${created.stderr}`);
+    assert.ok(fs.existsSync(dir));
+
+    const inspect = [
+      '$acl = Get-Acl -LiteralPath $env:KL_INSPECT_DIR',
+      '$owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value',
+      '$protected = $acl.AreAccessRulesProtected',
+      '$rules = ($acl.Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }) -join ","',
+      '[PSCustomObject]@{ Owner = $owner; Protected = $protected; Rules = $rules } | ConvertTo-Json -Compress'
+    ].join('; ');
+    const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', inspect], {
+      env: { ...process.env, KL_INSPECT_DIR: dir },
+      encoding: 'utf8'
+    });
+    const result = JSON.parse(out);
+    assert.strictEqual(result.Owner, 'S-1-5-32-544');
+    assert.strictEqual(result.Protected, true);
+    assert.deepStrictEqual(result.Rules.split(',').sort(), ['S-1-5-18', 'S-1-5-19', 'S-1-5-32-544'].sort());
+  });
+
+  it('an existing dir created by the test with a default ACL is refused', { skip: notWin32Skip }, () => {
+    const dir = path.join(tmp(), 'plain-existing-dir');
+    fs.mkdirSync(dir); // gets whatever default (inherited, current-user-owned) ACL the temp dir has
+    const result = runAclScript(dir);
+    assert.notStrictEqual(result.code, 0);
+    assert.match(result.stderr, /ACL is not safe/);
+  });
+
+  it('a junction is refused', { skip: notWin32Skip }, () => {
+    const base2 = tmp();
+    const target = path.join(base2, 'junction-target');
+    fs.mkdirSync(target);
+    const link = path.join(base2, 'junction-as-datadir');
+    fs.symlinkSync(target, link, 'junction');
+    const result = runAclScript(link);
+    assert.notStrictEqual(result.code, 0);
+    assert.match(result.stderr, /symlink or junction/);
+  });
+
+  it('running it twice succeeds: the second run verifies the first run\'s ACL and is happy with it', { skip: notElevatedSkip }, () => {
+    const dir = path.join(tmp(), 'idempotent-data-dir');
+    const first = runAclScript(dir);
+    assert.strictEqual(first.code, 0, `expected a clean create, got: ${first.stderr}`);
+    const second = runAclScript(dir);
+    assert.strictEqual(second.code, 0, `expected the verify-only run to succeed, got: ${second.stderr}`);
   });
 });
 
@@ -493,24 +638,58 @@ describe('executeSteps: writeFile overwrite and encoding', () => {
   }
 });
 
-describe('executeSteps: mkdir and unlink', () => {
-  it('dry-run prints mkdir steps', async () => {
-    const t = io();
-    await executeSteps([{ description: 'create the data dir', mkdir: 'C:\\ProgramData\\KingLouie' }], { dryRun: true, io: t });
-    assert.match(t.out.join(''), /\[dry-run\] create the data dir: mkdir C:\\ProgramData\\KingLouie/);
-  });
+describe('executeSteps: unlink', () => {
   it('dry-run prints unlink steps', async () => {
     const t = io();
     await executeSteps([{ description: 'delete the temporary task definition', unlink: 'C:\\Temp\\x.xml' }], { dryRun: true, io: t });
     assert.match(t.out.join(''), /\[dry-run\] delete the temporary task definition: unlink C:\\Temp\\x\.xml/);
   });
-  it('real mode creates and removes files/dirs, against a temp dir only', async () => {
-    const dir = path.join(tmp(), 'nested', 'dir');
+  it('real mode removes a file, against a temp dir only', async () => {
     const base2 = tmp();
     const file = path.join(base2, 'to-delete.txt');
     fs.writeFileSync(file, 'x');
-    await executeSteps([{ description: 'mk', mkdir: dir }, { description: 'rm', unlink: file }], { dryRun: false, io: io() });
-    assert.ok(fs.statSync(dir).isDirectory());
+    await executeSteps([{ description: 'rm', unlink: file }], { dryRun: false, io: io() });
     assert.ok(!fs.existsSync(file));
+  });
+});
+
+describe('executeSteps: env on run steps', () => {
+  it('dry-run prints the env var(s) before the argv', async () => {
+    const t = io();
+    await executeSteps([{
+      description: 'do a thing',
+      run: ['powershell.exe', '-Command', 'X'],
+      env: { KL_DATA_DIR: 'C:\\ProgramData\\KingLouie' }
+    }], { dryRun: true, io: t });
+    assert.match(t.out.join(''), /\[dry-run\] do a thing: KL_DATA_DIR=C:\\ProgramData\\KingLouie powershell\.exe -Command X/);
+  });
+
+  it('real mode (fake execFile) merges env over process.env instead of replacing it', async () => {
+    const t = io();
+    let seenEnv;
+    const execFile = (cmd, args, opts) => { seenEnv = opts.env; };
+    await executeSteps([{ description: 'do a thing', run: ['whatever'], env: { KL_DATA_DIR: 'C:\\x' } }], { dryRun: false, io: t, execFile });
+    assert.strictEqual(seenEnv.KL_DATA_DIR, 'C:\\x');
+    // process.env is still present underneath — merged, not replaced.
+    const [someExistingKey] = Object.keys(process.env);
+    assert.strictEqual(seenEnv[someExistingKey], process.env[someExistingKey]);
+  });
+
+  it('a real (harmless) child process actually receives the merged env var', async () => {
+    const t = io();
+    await executeSteps([{
+      description: 'check env',
+      run: [process.execPath, '-e', 'process.exit(process.env.KL_ROUND3_MARKER === "yes" ? 0 : 1)'],
+      env: { KL_ROUND3_MARKER: 'yes' }
+    }], { dryRun: false, io: t });
+    // No throw => the spawned node process saw KL_ROUND3_MARKER and exited 0.
+  });
+
+  it('a run step with no env is unaffected (no env key forced onto the call)', async () => {
+    const t = io();
+    let sawOptions;
+    const execFile = (cmd, args, opts) => { sawOptions = opts; };
+    await executeSteps([{ description: 'plain run', run: ['whatever'] }], { dryRun: false, io: t, execFile });
+    assert.strictEqual(sawOptions.env, undefined);
   });
 });

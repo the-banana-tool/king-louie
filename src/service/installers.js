@@ -1,10 +1,11 @@
 // Renders OS service definitions and turns them into explicit, printable
 // install steps. `--dry-run` prints the steps without touching the system.
 //
-// Step shape: { description, run?, mkdir?, unlink?, writeFile?, runUnless?, warn?, ignoreFailure?, always? }
+// Step shape: { description, run?, env?, unlink?, writeFile?, runUnless?, warn?, ignoreFailure?, always? }
 //   - run: string[]                          — argv to execute
-//   - mkdir: string                          — directory to create (recursive); real
-//       mode refuses if the path already exists and is a symlink or junction
+//   - env: { [key]: string }                 — only with `run`; merged over
+//       process.env for that one command (e.g. passing a data dir through an
+//       env var instead of interpolating it into a script's text)
 //   - unlink: string                         — file to remove
 //   - writeFile: { path, content, mode, encoding?, overwrite? } — encoding defaults
 //       to 'utf8'; overwrite defaults to true (false uses an exclusive create and
@@ -19,7 +20,7 @@
 //   - always: true                           — this step still runs even after an
 //       earlier step has failed (e.g. cleanup); once every step has been tried,
 //       the original failure is rethrown
-// Exactly one of run, mkdir, unlink, writeFile and runUnless is set (warn,
+// Exactly one of run, unlink, writeFile and runUnless is set (env, warn,
 // ignoreFailure and always are modifiers, not step kinds).
 const crypto = require('crypto');
 const fs = require('fs');
@@ -33,6 +34,62 @@ const UNIT_PATH = '/etc/systemd/system/king-louie.service';
 const CRED_PATH = '/etc/king-louie/credentials/kl-master-key';
 const PLIST_PATH = '/Library/LaunchDaemons/com.kinglouie.service.plist';
 const TASK_NAME = 'KingLouie';
+
+// Owner Administrators (BA), DACL protected (no inherited ACEs), Full
+// Control to LOCAL SERVICE (LS), SYSTEM (SY) and Administrators (BA) only.
+const WINDOWS_DATA_DIR_SDDL = 'O:BAD:P(A;OICI;FA;;;LS)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)';
+
+// Creates the data dir with a protected DACL present from the instant it
+// exists, or — if it already exists — only ever VERIFIES that ACL; it never
+// modifies an existing dir. This replaces a prior multi-step
+// mkdir-then-icacls*3 approach that was structurally unsafe:
+//   - each separate icacls process after an earlier existence/symlink check
+//     left a TOCTOU window an attacker could swap the dir for a junction in;
+//   - `icacls /reset` on an existing dir briefly re-enables inherited ACEs
+//     (e.g. Users:RX from ProgramData) until the following grant step runs,
+//     and any handle opened in that window survives it.
+// A single elevated, in-process PowerShell call has no such window: either
+// the directory doesn't exist and is created with its final ACL already
+// attached via the SecurityDescriptor overload of Directory.CreateDirectory
+// (no separate "create" then "secure" steps), or it exists already and is
+// only ever read, never rewritten. dataDir is passed through the KL_DATA_DIR
+// environment variable, never interpolated into this script's text.
+const WINDOWS_DATA_DIR_SCRIPT = [
+  `$ErrorActionPreference = 'Stop'`,
+  `try {`,
+  `  $path = $env:KL_DATA_DIR`,
+  `  if (-not $path) { throw 'KL_DATA_DIR is not set' }`,
+  `  if (-not (Test-Path -LiteralPath $path)) {`,
+  `    $ds = New-Object System.Security.AccessControl.DirectorySecurity`,
+  `    $ds.SetSecurityDescriptorSddlForm('${WINDOWS_DATA_DIR_SDDL}')`,
+  `    [System.IO.Directory]::CreateDirectory($path, $ds) | Out-Null`,
+  `    exit 0`,
+  `  }`,
+  `  $item = Get-Item -LiteralPath $path -Force`,
+  `  if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {`,
+  `    throw "refusing to use ${'$'}{path}: it already exists and is a symlink or junction"`,
+  `  }`,
+  `  $allowed = @('S-1-5-32-544','S-1-5-18','S-1-5-19')`,
+  `  $acl = Get-Acl -LiteralPath $path`,
+  `  $ownerSid = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value`,
+  `  if ($allowed -notcontains $ownerSid) {`,
+  `    throw "the data dir's ACL is not safe and must be fixed or removed manually: owner $ownerSid is not Administrators, SYSTEM or LOCAL SERVICE"`,
+  `  }`,
+  `  if (-not $acl.AreAccessRulesProtected) {`,
+  `    throw "the data dir's ACL is not safe and must be fixed or removed manually: inherited access rules are still enabled"`,
+  `  }`,
+  `  foreach ($rule in $acl.Access) {`,
+  `    $ruleSid = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value`,
+  `    if ($allowed -notcontains $ruleSid) {`,
+  `      throw "the data dir's ACL is not safe and must be fixed or removed manually: unexpected access rule for $ruleSid"`,
+  `    }`,
+  `  }`,
+  `  exit 0`,
+  `} catch {`,
+  `  [Console]::Error.WriteLine($_.Exception.Message)`,
+  `  exit 1`,
+  `}`
+].join('\n');
 
 // Escapes text for use inside XML element content (not attribute values, so
 // quotes are left as-is — they're only special inside an attribute).
@@ -57,6 +114,29 @@ function assertAbsolutePosixDataDir(dataDir) {
   assertSafeUnitValue('dataDir', dataDir);
   if (!dataDir.startsWith('/')) {
     throw new Error(`dataDir must be an absolute POSIX path: ${JSON.stringify(dataDir)}`);
+  }
+}
+
+// Control characters (including \n and \r) are never legitimate in a
+// filesystem path and could corrupt a plist/log line; unlike
+// assertAbsolutePosixDataDir (which backs the systemd unit file, where
+// whitespace and % $ \ " are also unsafe because ExecStart= is a
+// space-delimited, %-interpolated line), this is deliberately more lenient:
+// macOS paths legitimately contain spaces (the default data dir is under
+// "/Library/Application Support"), and nothing on the darwin/launchd side
+// interpolates dataDir into shell or unit-file syntax — it only ever goes
+// into an XML-escaped <string>.
+const CONTROL_CHARS_RE = /[\x00-\x1F]/;
+
+function assertAbsolutePosixPath(name, value) {
+  if (typeof value !== 'string' || value === '') {
+    throw new Error(`${name} must be a non-empty string, got ${JSON.stringify(value)}`);
+  }
+  if (CONTROL_CHARS_RE.test(value)) {
+    throw new Error(`${name} contains a control character: ${JSON.stringify(value)}`);
+  }
+  if (!value.startsWith('/')) {
+    throw new Error(`${name} must be an absolute POSIX path: ${JSON.stringify(value)}`);
   }
 }
 
@@ -217,7 +297,10 @@ function planInstall({ platform = process.platform, nodePath = process.execPath,
   if (platform === 'linux') {
     const svcUser = user || 'king-louie';
     assertValidUser(svcUser);
-    if (!path.posix.isAbsolute(dataDir)) dataDir = path.posix.resolve(dataDir);
+    // Always normalize (not just when the input looks relative) so a
+    // dot-segment in an already-absolute path — "/etc/..", "/tmp/../etc",
+    // "/./etc" — can't slip past the root guard below unresolved.
+    dataDir = path.posix.resolve(dataDir);
     assertAbsolutePosixDataDir(dataDir);
     assertDataDirNotAtRoot(dataDir, 'posix');
     assertSafeUnitValue('nodePath', nodePath);
@@ -236,7 +319,13 @@ function planInstall({ platform = process.platform, nodePath = process.execPath,
   } else if (platform === 'darwin') {
     if (!user) throw new Error('--user is required on macOS (create a dedicated account first; see README)');
     assertValidUser(user);
-    if (!path.posix.isAbsolute(dataDir)) dataDir = path.posix.resolve(dataDir);
+    // Same normalize-before-validate as linux (see comment there); darwin
+    // also runs the absolute/char validation, just the more lenient variant
+    // (see assertAbsolutePosixPath) since macOS paths can legitimately
+    // contain spaces and dataDir is never interpolated into shell/unit
+    // syntax here — only into an XML-escaped <string>.
+    dataDir = path.posix.resolve(dataDir);
+    assertAbsolutePosixPath('dataDir', dataDir);
     assertDataDirNotAtRoot(dataDir, 'posix');
     const logsDir = path.posix.join(dataDir, 'logs');
     steps = [
@@ -256,19 +345,16 @@ function planInstall({ platform = process.platform, nodePath = process.execPath,
     // service-writable before its ACL is locked down.
     const xmlPath = path.win32.join(os.tmpdir(), `king-louie-task-${crypto.randomBytes(8).toString('hex')}.xml`);
     steps = [
-      { description: 'create the data dir', mkdir: dataDir },
-      // Order matters: /grant:r on its own only replaces the ACEs for the
-      // SIDs it names, so an attacker who pre-created the data dir and
-      // added their own explicit ACE (or Everyone:F) would keep full
-      // control even after the grant below. Take ownership first (the
-      // previous owner loses WRITE_DAC), then /reset drops every explicit
-      // ACE and falls back to inherited-only, then inheritance:r removes
-      // the inherited ACEs too, leaving exactly the three grants below.
-      { description: 'take ownership of the data dir for Administrators', run: ['icacls', dataDir, '/setowner', '*S-1-5-32-544', '/T'] },
-      { description: 'reset the data dir ACL to inherited-only', run: ['icacls', dataDir, '/reset', '/T'] },
+      // One elevated PowerShell call creates the dir with its final,
+      // protected ACL already attached, or — if it already exists — only
+      // ever verifies that ACL (never resets/re-grants it). See the comment
+      // on WINDOWS_DATA_DIR_SCRIPT for why this replaced a separate
+      // mkdir-then-icacls*3 sequence. dataDir travels through an env var,
+      // never through the script's text.
       {
-        description: 'restrict the data dir to LOCAL SERVICE, SYSTEM and Administrators',
-        run: ['icacls', dataDir, '/inheritance:r', '/grant:r', '*S-1-5-19:(OI)(CI)F', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '/T']
+        description: 'create or verify the data dir with a locked-down ACL',
+        run: ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', WINDOWS_DATA_DIR_SCRIPT],
+        env: { KL_DATA_DIR: dataDir }
       },
       {
         description: 'write the task definition',
@@ -351,9 +437,10 @@ async function runOneStep(step, { dryRun, io, execFile }) {
   }
 
   let what;
-  if (step.run) what = step.run.join(' ');
-  else if (step.mkdir) what = `mkdir ${step.mkdir} (real mode refuses an existing symlink/junction)`;
-  else if (step.unlink) what = `unlink ${step.unlink}`;
+  if (step.run) {
+    const envPrefix = step.env ? `${Object.entries(step.env).map(([k, v]) => `${k}=${v}`).join(' ')} ` : '';
+    what = envPrefix + step.run.join(' ');
+  } else if (step.unlink) what = `unlink ${step.unlink}`;
   else {
     what = `write ${step.writeFile.path}`
       + (step.writeFile.encoding ? ` (${step.writeFile.encoding})` : '')
@@ -368,12 +455,9 @@ async function runOneStep(step, { dryRun, io, execFile }) {
 
   io.stdout.write(`${step.description}…\n`);
   if (step.run) {
-    execFile(step.run[0], step.run.slice(1), { stdio: 'inherit', windowsHide: true });
-  } else if (step.mkdir) {
-    if (fs.existsSync(step.mkdir) && fs.lstatSync(step.mkdir).isSymbolicLink()) {
-      throw new Error(`refusing to use ${step.mkdir}: it already exists and is a symlink or junction`);
-    }
-    fs.mkdirSync(step.mkdir, { recursive: true });
+    const execOptions = { stdio: 'inherit', windowsHide: true };
+    if (step.env) execOptions.env = { ...process.env, ...step.env };
+    execFile(step.run[0], step.run.slice(1), execOptions);
   } else if (step.unlink) {
     fs.unlinkSync(step.unlink);
   } else {
