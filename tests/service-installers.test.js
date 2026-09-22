@@ -521,6 +521,46 @@ function setTestDirOwnerToCurrentUser(dir) {
   ].join('; ')], { env: { ...process.env, KL_TEST_DIR: dir }, stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
+// Reads a directory's owner, DACL protection flag and DACL ACE SIDs back out
+// of the filesystem, to check the installer's work independently of the
+// installer's own inspection code.
+//
+// It deliberately does NOT use Get-Acl: that cmdlet lives in
+// Microsoft.PowerShell.Security, which Windows PowerShell autoloads through
+// the inherited PSModulePath, and on a host where PSModulePath has been
+// repointed (a GitHub Actions Windows runner points it at PowerShell 7's
+// module directories) the autoload fails with "the module could not be
+// loaded". `Get-Acl` is then a CommandNotFoundException, $acl is $null, and
+// every property read off it silently yields $null — a green-looking script
+// that reports no owner at all. The System.Security.AccessControl types used
+// here are part of the framework and need no module. The ACEs are read off a
+// RawSecurityDescriptor for the same reason the installer does (see
+// WINDOWS_INSPECT_CSHARP): .Access hides ACE types it does not model.
+function inspectDirAcl(dir) {
+  const inspect = [
+    "$ErrorActionPreference = 'Stop'",
+    "$sections = [System.Security.AccessControl.AccessControlSections]'Owner,Access'",
+    '$ds = New-Object -TypeName System.Security.AccessControl.DirectorySecurity -ArgumentList $env:KL_INSPECT_DIR, $sections',
+    '$sd = New-Object -TypeName System.Security.AccessControl.RawSecurityDescriptor -ArgumentList $ds.GetSecurityDescriptorSddlForm($sections)',
+    '$owner = if ($sd.Owner) { $sd.Owner.Value } else { $null }',
+    '$protected = [bool]($sd.ControlFlags -band [System.Security.AccessControl.ControlFlags]::DiscretionaryAclProtected)',
+    '$rules = ($sd.DiscretionaryAcl | ForEach-Object { $_.SecurityIdentifier.Value }) -join ","',
+    '[PSCustomObject]@{ Owner = $owner; Protected = $protected; Rules = $rules } | ConvertTo-Json -Compress'
+  ].join('; ');
+  let out;
+  try {
+    out = execFileSync(POWERSHELL_EXE, ['-NoProfile', '-NonInteractive', '-Command', inspect], {
+      env: { ...process.env, KL_INSPECT_DIR: dir },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      encoding: 'utf8'
+    });
+  } catch (err) {
+    // Never let a failed inspection read as "the ACL has no owner".
+    throw new Error(`could not read the ACL of ${dir}: ${String(err.stderr || err.message || '').trim()}`);
+  }
+  return JSON.parse(out);
+}
+
 function removeTempTree(base) {
   fs.rmSync(base, { recursive: true, force: true });
   assert.ok(!fs.existsSync(base), `failed to clean up ${base}`);
@@ -681,18 +721,7 @@ describe('Windows ACL script (real mode, temp dirs only)', () => {
         assert.strictEqual(created.code, 0, `expected a clean create, got: ${created.stderr}`);
         assert.ok(fs.existsSync(dir));
 
-        const inspect = [
-          '$acl = Get-Acl -LiteralPath $env:KL_INSPECT_DIR',
-          '$owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value',
-          '$protected = $acl.AreAccessRulesProtected',
-          '$rules = ($acl.Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }) -join ","',
-          '[PSCustomObject]@{ Owner = $owner; Protected = $protected; Rules = $rules } | ConvertTo-Json -Compress'
-        ].join('; ');
-        const out = execFileSync(POWERSHELL_EXE, ['-NoProfile', '-NonInteractive', '-Command', inspect], {
-          env: { ...process.env, KL_INSPECT_DIR: dir },
-          encoding: 'utf8'
-        });
-        const result = JSON.parse(out);
+        const result = inspectDirAcl(dir);
         assert.strictEqual(result.Owner, 'S-1-5-32-544');
         assert.strictEqual(result.Protected, true);
         assert.deepStrictEqual(result.Rules.split(',').sort(), ['S-1-5-18', 'S-1-5-19', 'S-1-5-32-544'].sort());
@@ -706,16 +735,7 @@ describe('Windows ACL script (real mode, temp dirs only)', () => {
         const dir = path.join(parent, 'data');
         const created = runAclScript(dir);
         assert.strictEqual(created.code, 0, `expected a clean create, got: ${created.stderr}`);
-        const inspect = [
-          '$acl = Get-Acl -LiteralPath $env:KL_INSPECT_DIR',
-          '$owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value',
-          '$rules = ($acl.Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }) -join ","',
-          '[PSCustomObject]@{ Owner = $owner; Protected = $acl.AreAccessRulesProtected; Rules = $rules } | ConvertTo-Json -Compress'
-        ].join('; ');
-        const result = JSON.parse(execFileSync(POWERSHELL_EXE, ['-NoProfile', '-NonInteractive', '-Command', inspect], {
-          env: { ...process.env, KL_INSPECT_DIR: parent },
-          encoding: 'utf8'
-        }));
+        const result = inspectDirAcl(parent);
         assert.strictEqual(result.Owner, 'S-1-5-32-544');
         assert.strictEqual(result.Protected, true);
         assert.deepStrictEqual(result.Rules.split(',').sort(), ['S-1-5-18', 'S-1-5-19', 'S-1-5-32-544'].sort());
