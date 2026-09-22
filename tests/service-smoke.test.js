@@ -7,10 +7,11 @@ const path = require('path');
 
 const BIN = path.join(__dirname, '..', 'bin', 'king-louie-service.js');
 
-function startService(profile) {
+function startService(profile, { dataDirArg, cwd } = {}) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-svc-smoke-'));
-  const child = fork(BIN, ['run', '--data-dir', dataDir, '--profile', profile], {
+  const child = fork(BIN, ['run', '--data-dir', dataDirArg || dataDir, '--profile', profile], {
     silent: true,
+    cwd,
     env: { ...process.env, KL_TEST_MODE: '1', KING_LOUIE_LOG_LEVEL: 'info' }
   });
   const ready = new Promise((resolve, reject) => {
@@ -59,3 +60,41 @@ for (const profile of ['agent', 'runbook']) {
     });
   });
 }
+
+// `ensureWorkspace` chdirs into <dataDir>/workspace before the core starts, so
+// a *relative* --data-dir is re-resolved against the new cwd by everything
+// created afterwards: the master key, key-check, the pidfile and the memory
+// stores land in <dataDir>/workspace/<dataDir> while the log file (written
+// before the chdir) stays in <dataDir>. `status` then reports "not running"
+// while it runs and `doctor` reports the key missing, and a later `vault set`
+// would write against a different key than the live service reads.
+describe('service run with a relative --data-dir', { timeout: 60000 }, () => {
+  it('keeps every artifact in the one data dir the operator named', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-svc-rel-'));
+    const { child, ready } = startService('runbook', { dataDirArg: './d', cwd: base });
+    try {
+      const info = await ready;
+      const dataDir = path.join(base, 'd');
+
+      assert.strictEqual(path.isAbsolute(info.dataDir), true, 'the reported data dir must be absolute');
+      assert.strictEqual(fs.realpathSync(info.dataDir), fs.realpathSync(dataDir));
+
+      assert.ok(fs.existsSync(path.join(dataDir, 'service.pid')), 'the pidfile must be in the data dir');
+      assert.ok(fs.existsSync(path.join(dataDir, 'key-check')), 'key-check must be in the data dir');
+      assert.ok(fs.existsSync(path.join(dataDir, 'logs', 'service.log')), 'the log file must be in the data dir');
+      assert.strictEqual(
+        fs.existsSync(path.join(dataDir, 'workspace', 'd')),
+        false,
+        'nothing may be re-resolved against the post-chdir cwd'
+      );
+
+      const { readPidfile } = require('../src/service/pidfile');
+      assert.strictEqual(readPidfile(dataDir), child.pid, 'status must find the running service');
+    } finally {
+      const exited = new Promise((resolve) => child.once('exit', resolve));
+      child.send({ type: 'shutdown' });
+      await exited;
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+});

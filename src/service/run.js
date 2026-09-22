@@ -107,7 +107,18 @@ function ensureWorkspace(dataDir) {
   return workspace;
 }
 
-async function runService({ dataDir, profile: profileOverride, signal, stdout = process.stdout }) {
+async function runService({ dataDir: requestedDataDir, profile: profileOverride, signal, stdout = process.stdout }) {
+  // Resolved once, here, because this is the only place that moves the
+  // process: ensureWorkspace chdirs below, and a relative --data-dir would
+  // then be re-resolved against the *new* cwd by everything built afterwards
+  // — the master key, key-check, the pidfile and the memory stores would land
+  // in <dataDir>/workspace/<dataDir> while the log file, written before the
+  // chdir, stayed in <dataDir>. `status` reported "not running" while it ran
+  // and `doctor` reported the key missing. Resolving before the chdir (rather
+  // than sprinkling path.resolve over each consumer) makes every later
+  // resolution agree with the operator's own cwd, which is what a separate
+  // `status`, `doctor` or `vault set` process resolves against.
+  const dataDir = path.resolve(requestedDataDir);
   const { logsDir } = ensureServicePaths(dataDir);
   const logFile = attachServiceLogFile(logsDir);
   const workspace = ensureWorkspace(dataDir);
