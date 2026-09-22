@@ -11,7 +11,7 @@ function startService(profile) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-svc-smoke-'));
   const child = fork(BIN, ['run', '--data-dir', dataDir, '--profile', profile], {
     silent: true,
-    env: { ...process.env, KL_TEST_MODE: '1', KING_LOUIE_LOG_LEVEL: 'warn' }
+    env: { ...process.env, KL_TEST_MODE: '1', KING_LOUIE_LOG_LEVEL: 'info' }
   });
   const ready = new Promise((resolve, reject) => {
     let buf = '';
@@ -36,6 +36,11 @@ for (const profile of ['agent', 'runbook']) {
       child.send({ type: 'shutdown' });
       assert.strictEqual(await exited, 0);
       assert.strictEqual(fs.existsSync(path.join(dataDir, 'service.pid')), false);
+      assert.ok(fs.existsSync(path.join(dataDir, 'key-check')), 'key-check is written on first key resolution');
+      const serviceLog = fs.readFileSync(path.join(dataDir, 'logs', 'service.log'), 'utf8');
+      assert.match(serviceLog, /INFO \[service\] service ready/);
+      assert.match(serviceLog, /INFO \[service\] stopped/);
+      fs.rmSync(dataDir, { recursive: true, force: true });
     });
   });
 }
