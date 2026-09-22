@@ -12,16 +12,18 @@ const createdTempDirs = [];
 after(() => { for (const d of createdTempDirs) fs.rmSync(d, { recursive: true, force: true }); });
 const tmp = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-svc-cfg-')); createdTempDirs.push(d); return d; };
 const writeCfg = (dir, cfg) => fs.writeFileSync(path.join(dir, 'service.json'), JSON.stringify(cfg));
-// The admin-owned config file. Tests run as an ordinary user, so the
-// "is it owned by the account reading it" check is steered with an injected
-// geteuid, the same way master-key.js takes an injected getuid.
+// The admin-owned config file. Tests run as an ordinary user and cannot create
+// a root-owned file, so "who is the administrator" is steered with an injected
+// adminUid, and the euid with an injected geteuid — the same way master-key.js
+// takes an injected getuid.
+const selfUid = typeof process.getuid === 'function' ? process.getuid() : 0;
 const writeAdmin = (dir, cfg) => {
   const file = path.join(dir, 'service.json');
   fs.writeFileSync(file, JSON.stringify(cfg), { mode: 0o644 });
   if (process.platform !== 'win32') fs.chmodSync(file, 0o644);
   return file;
 };
-const opts = (dir) => ({ adminConfigDir: dir, geteuid: () => -1 });
+const opts = (dir) => ({ adminConfigDir: dir, geteuid: () => -1, adminUid: selfUid });
 
 describe('loadServiceConfig', () => {
   it('defaults to agent profile with listeners and chat channels off, on the service ports', () => {
@@ -149,20 +151,57 @@ describe('loadServiceConfig: only an admin-owned file may enable a listener', ()
   it('refuses an admin config file owned by the account reading it', { skip: process.platform === 'win32' ? 'POSIX ownership only' : false }, () => {
     const admin = tmp();
     const file = writeAdmin(admin, { features: { gateway: true } });
-    // Root owning its own config is correct and must stay accepted; what is
-    // refused is the *service account* owning it. As root, stage that by
-    // handing the file to an unprivileged uid.
-    if (process.getuid() === 0) fs.chownSync(file, 12345, 12345);
+    if (process.getuid() === 0) {
+      fs.chownSync(admin, 12345, 12345);
+      fs.chownSync(file, 12345, 12345);
+    }
     const uid = fs.statSync(file).uid;
-    assert.notStrictEqual(uid, 0, 'this test needs a non-root owner to be meaningful');
     assert.throws(
-      () => loadServiceConfig(tmp(), {}, { adminConfigDir: admin, geteuid: () => uid }),
+      () => loadServiceConfig(tmp(), {}, { adminConfigDir: admin, geteuid: () => uid, adminUid: uid + 1 }),
       /owned by the account/
     );
-    // ...and root's own file is still fine.
-    const rootish = tmp();
-    writeAdmin(rootish, { features: { gateway: true } });
-    assert.strictEqual(loadServiceConfig(tmp(), {}, { adminConfigDir: rootish, geteuid: () => 0 }).features.gateway, true);
+    // ...and the administrator's own file is still fine.
+    const ok = tmp();
+    writeAdmin(ok, { features: { gateway: true } });
+    assert.strictEqual(loadServiceConfig(tmp(), {}, opts(ok)).features.gateway, true);
+  });
+
+  // Copilot review comment C6 (PR #28): the check only rejected a file owned by
+  // the service's own euid, so one planted by any *third* unprivileged uid was
+  // accepted. With a hand-picked data dir under a shared parent (e.g.
+  // `/tmp/kl/data`, whose admin config is `/tmp/kl/config`) another local user
+  // could switch the gateway and webhook listeners on, or move their ports.
+  it('refuses an admin config file owned by a third unprivileged uid', { skip: process.platform === 'win32' ? 'POSIX ownership only' : false }, () => {
+    const admin = tmp();
+    writeAdmin(admin, { features: { gateway: true, webhooks: true }, ports: { gateway: 1234 } });
+    // The file is owned by selfUid; neither the administrator (selfUid + 1)
+    // nor the account running the service (selfUid + 2).
+    assert.throws(
+      () => loadServiceConfig(tmp(), {}, {
+        adminConfigDir: admin,
+        geteuid: () => selfUid + 2,
+        adminUid: selfUid + 1
+      }),
+      /not by root\/an administrator/
+    );
+  });
+
+  it('refuses an admin config dir a non-administrator owns, even when the file looks right', { skip: process.platform === 'win32' ? 'POSIX ownership only' : false }, () => {
+    const admin = tmp();
+    writeAdmin(admin, { features: { gateway: true } });
+    // Whoever can write the directory can rename their own file over the one
+    // that was checked, so the directory has to be the administrator's too.
+    assert.throws(
+      () => loadServiceConfig(tmp(), {}, { adminConfigDir: admin, geteuid: () => -1, adminUid: selfUid + 1 }),
+      /must be owned by root\/an administrator/
+    );
+  });
+
+  it('refuses a group- or world-writable admin config dir', { skip: process.platform === 'win32' ? 'POSIX mode bits only' : false }, () => {
+    const admin = tmp();
+    writeAdmin(admin, { features: { gateway: true } });
+    fs.chmodSync(admin, 0o777);
+    assert.throws(() => loadServiceConfig(tmp(), {}, opts(admin)), /writable/);
   });
 
   it('defaults every feature off when there is no admin config at all', () => {

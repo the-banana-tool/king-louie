@@ -56,21 +56,42 @@ function readJsonFile(file) {
 // Windows has no mode bits worth checking here — the directory's protected
 // DACL (LOCAL SERVICE: read and execute, no write) is the equivalent, and it
 // is verified by the installer.
-function assertAdminOwned(file, geteuid) {
+// `adminUid` is who counts as the administrator — root on every POSIX layout
+// the installers produce. It is a parameter only so the tests, which cannot
+// create a root-owned file, can point it at their own uid; nothing reads it
+// from configuration, because a config-supplied answer to "who may configure
+// this" is no answer at all.
+function assertAdminOwned(file, geteuid, adminUid = 0) {
   if (process.platform === 'win32') return;
-  const st = fs.statSync(file);
-  if (st.mode & 0o022) {
-    throw new Error(
-      `Refusing to read ${file}: it is group- or world-writable (mode ${(st.mode & 0o7777).toString(8)}). `
-      + 'It decides which network listeners this service opens and must be writable only by root/an administrator.'
-    );
-  }
   const euid = geteuid();
-  if (euid >= 0 && euid !== 0 && st.uid === euid) {
-    throw new Error(
-      `Refusing to read ${file}: it is owned by the account running the service (uid ${euid}), which could then `
-      + 'enable its own listeners. It must be owned by root/an administrator.'
-    );
+  // The containing directory as well as the file: whoever can write the
+  // directory can rename a file of their own over this one, so checking the
+  // file alone proves nothing about who decides its contents.
+  for (const target of [path.dirname(file), file]) {
+    const st = fs.lstatSync(target);
+    if (st.isSymbolicLink()) {
+      throw new Error(`Refusing to read ${file}: ${target} is a symlink, so its real owner is not the one checked here.`);
+    }
+    if (st.mode & 0o022) {
+      throw new Error(
+        `Refusing to read ${target}: it is group- or world-writable (mode ${(st.mode & 0o7777).toString(8)}). `
+        + 'It decides which network listeners this service opens and must be writable only by root/an administrator.'
+      );
+    }
+    // Not "owned by somebody other than me": that accepted a file planted by
+    // any *third* unprivileged uid. With a hand-picked data dir under a shared
+    // parent (say `/tmp/kl/data`, whose admin config is `/tmp/kl/config`),
+    // another local user could drop a service.json there and turn on the
+    // gateway and webhook listeners, or move them to ports of their choosing.
+    if (st.uid !== adminUid) {
+      const why = euid >= 0 && st.uid === euid
+        ? `it is owned by the account running the service (uid ${euid}), which could then enable its own listeners`
+        : `it is owned by uid ${st.uid}, not by root/an administrator (uid ${adminUid})`;
+      throw new Error(
+        `Refusing to read ${target}: ${why}. It decides which network listeners this service opens `
+        + 'and must be owned by root/an administrator.'
+      );
+    }
   }
 }
 
@@ -80,10 +101,12 @@ function assertAdminOwned(file, geteuid) {
  * @param adminConfigDir  the root/admin-owned config dir; defaults to the
  *                        per-platform location beside the data dir
  * @param geteuid         injectable for tests, the way master-key.js takes getuid
+ * @param adminUid        which uid counts as the administrator (0; see assertAdminOwned)
  */
 function loadServiceConfig(dataDir, overrides = {}, {
   adminConfigDir: adminDir = adminConfigDir({ dataDir }),
-  geteuid = () => (typeof process.geteuid === 'function' ? process.geteuid() : -1)
+  geteuid = () => (typeof process.geteuid === 'function' ? process.geteuid() : -1),
+  adminUid = 0
 } = {}) {
   const serviceFile = path.join(dataDir, CONFIG_FILE);
   const adminFile = path.join(adminDir, CONFIG_FILE);
@@ -104,7 +127,7 @@ function loadServiceConfig(dataDir, overrides = {}, {
 
   let adminCfg = {};
   if (fs.existsSync(adminFile)) {
-    assertAdminOwned(adminFile, geteuid);
+    assertAdminOwned(adminFile, geteuid, adminUid);
     adminCfg = readJsonFile(adminFile) || {};
   }
 
