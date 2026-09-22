@@ -2,6 +2,7 @@ const Tool = require('../tool-schema').Tool;
 const fg = require('fast-glob');
 const path = require('path');
 const { describePathDenial, isProtectedSecretPath } = require('../utils');
+const { boundedGlobOptions } = require('../bounded-walk');
 
 const globTool = new Tool({
   name: 'Glob',
@@ -49,7 +50,9 @@ const globTool = new Tool({
         globOptions.onlyFiles = false;
       }
 
-      const matched = await fg(pattern, globOptions);
+      // Bounded: Glob needs no approval, so a directory symlink loop must not
+      // be able to walk the process out of memory (src/tools/bounded-walk.js).
+      const matched = await fg(pattern, boundedGlobOptions(globOptions));
 
       // Even naming the secret files is a gift: it tells the model (and through
       // it a remote origin) exactly what to go after next. A glob rooted at the

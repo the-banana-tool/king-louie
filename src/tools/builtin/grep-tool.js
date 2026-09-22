@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const fg = require('fast-glob');
 const { describePathDenial, isProtectedSecretPath } = require('../utils');
+const { boundedGlobOptions } = require('../bounded-walk');
 
 function isBinary(filePath) {
   try {
@@ -80,12 +81,14 @@ const grepTool = new Tool({
       files = [baseDir];
       // For single files, baseDir isn't an actual base directory for relativity, it's the file itself.
     } else {
-      files = await fg(fileGlob, {
+      // Bounded: Grep needs no approval, so a directory symlink loop must not
+      // be able to walk the process out of memory (src/tools/bounded-walk.js).
+      files = await fg(fileGlob, boundedGlobOptions({
         cwd: baseDir,
         absolute: true,
         dot: false,
         ignore: ['**/node_modules/**', '**/.git/**']
-      });
+      }));
     }
 
     for (const file of files) {
