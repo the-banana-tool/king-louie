@@ -215,7 +215,21 @@ class DiscordChannel extends ChannelPlugin {
 
     // Checked before anything else acts on the message: an unrecognised sender
     // is ignored, and is told their id only if they addressed the bot.
-    if (this.allowlistManager && !this.allowlistManager.isAllowed('discord', inbound.sender.id, inbound.group?.id || null)) {
+    // Deny by default, and that includes a bridge with no policy source at
+    // all: `options.allowlistManager` is optional, so a guard written as
+    // "manager present AND sender refused" would process every sender the
+    // moment the dependency went missing. A bridge that cannot prove a sender
+    // is allowed refuses them, and says so in the log rather than in the chat
+    // — this is the operator's misconfiguration, not the sender's business.
+    if (!this.allowlistManager) {
+      const first = this.unknownSenderSeen.shouldNotify('\u0000no-allowlist-manager');
+      const line = 'refusing every discord message: this bridge was built without an allowlist manager, '
+        + 'so no sender can be authorised';
+      if (first) log.error(line); else log.debug(line);
+      return;
+    }
+
+    if (!this.allowlistManager.isAllowed('discord', inbound.sender.id, inbound.group?.id || null)) {
       const isReplyToBot = Boolean(
         this.botUserId && String(message.mentions?.repliedUser?.id || '') === this.botUserId
       );

@@ -467,3 +467,32 @@ describe('Discord bridge — unknown senders and approval routing', () => {
     assert.strictEqual(await settled(pending), true);
   });
 });
+
+// Copilot review comment C1/C3 (PR #28): the deny-by-default check was written
+// as `if (this.allowlistManager && !isAllowed(...))`, so a bridge built without
+// a manager — which the constructor permits, `options.allowlistManager || null`
+// — skipped the check entirely and processed every sender. createCore always
+// passes one, so this was never reachable in the shipped app, but a
+// deny-by-default control must not be one refactor away from opening.
+describe('Channel bridges — a bridge with no allowlist manager denies everyone', () => {
+  it('telegram: refuses to route any sender', async () => {
+    const bridge = makeTelegram({});
+    assert.strictEqual(bridge.allowlistManager, null);
+    await bridge.handleMessage(telegramMessage(42, 'run whoami'));
+    assert.deepStrictEqual(bridge.gateway.sent, [], 'no sender may reach the agent');
+  });
+
+  it('telegram: says nothing into the chat about it', async () => {
+    const bridge = makeTelegram({});
+    await bridge.handleMessage(telegramMessage(42, 'hello'));
+    assert.deepStrictEqual(bridge.sent, [], 'a misconfigured bridge is not an "unknown sender" notice');
+  });
+
+  it('discord: refuses to route any sender', async () => {
+    const bridge = makeDiscord({});
+    assert.strictEqual(bridge.allowlistManager, null);
+    await bridge.handleMessageCreate(discordMessage(42, 'run whoami'));
+    assert.deepStrictEqual(bridge.gateway.sent, []);
+    assert.deepStrictEqual(bridge.sent, []);
+  });
+});

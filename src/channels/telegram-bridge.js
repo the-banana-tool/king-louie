@@ -408,7 +408,21 @@ class TelegramBridge extends ChannelPlugin {
     const isReply = Boolean(message.reply_to_message);
     const wasMentioned = this.isMentioned(message, inbound);
 
-    if (this.allowlistManager && !this.allowlistManager.isAllowed('telegram', inbound.sender.id, inbound.group?.id || null)) {
+    // Deny by default, and that includes a bridge with no policy source at
+    // all: `options.allowlistManager` is optional, so a guard written as
+    // "manager present AND sender refused" would process every sender the
+    // moment the dependency went missing. A bridge that cannot prove a sender
+    // is allowed refuses them, and says so in the log rather than in the chat
+    // — this is the operator's misconfiguration, not the sender's business.
+    if (!this.allowlistManager) {
+      const first = this.unknownSenderSeen.shouldNotify('\u0000no-allowlist-manager');
+      const line = 'refusing every telegram message: this bridge was built without an allowlist manager, '
+        + 'so no sender can be authorised';
+      if (first) log.error(line); else log.debug(line);
+      return;
+    }
+
+    if (!this.allowlistManager.isAllowed('telegram', inbound.sender.id, inbound.group?.id || null)) {
       const isReplyToBot = Boolean(
         this.botId && message.reply_to_message && String(message.reply_to_message.from?.id || '') === this.botId
       );
