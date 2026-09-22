@@ -71,6 +71,22 @@ describe('parseArgs flag validation', () => {
     assert.throws(() => parseArgs(['--verbose', 'run']), /Unknown flag.*--verbose/);
   });
 
+  it('rejects a --flag=value value that looks like another flag, not just the space form', () => {
+    assert.throws(() => parseArgs(['run', '--data-dir=--profile']), /--data-dir.*value/);
+  });
+
+  it('rejects an empty --profile (--profile= form), for consistency with --data-dir', () => {
+    assert.throws(() => parseArgs(['run', '--profile=']), /--profile.*empty/);
+  });
+
+  it('rejects an empty --user (--user= form), for consistency with --data-dir', () => {
+    assert.throws(() => parseArgs(['install', '--user=']), /--user.*empty/);
+  });
+
+  it('rejects --dry-run given a value, since it is a boolean flag', () => {
+    assert.throws(() => parseArgs(['install', '--dry-run=false']), /--dry-run.*value/);
+  });
+
   it('main() returns 2 and prints usage for a value flag with no value, and never reaches a command handler', async () => {
     const t = io();
     assert.strictEqual(await main(['token', 'set', 'openai', '--data-dir'], t), 2);
@@ -98,5 +114,27 @@ describe('parseArgs flag validation', () => {
     const t = io();
     assert.strictEqual(await main(['--verbose', 'run'], t), 2);
     assert.match(t.err.join(''), /Unknown flag.*--verbose/);
+  });
+
+  it('main() returns 2 for --data-dir=--profile and creates no directory anywhere', async () => {
+    // Regression test for the --flag=value form skipping the "looks like
+    // another flag" check: with the bug, this used to treat "--profile" as
+    // a literal (relative) data dir, then actually run "token set" against
+    // it — creating a "--profile" directory with a master key and an
+    // encrypted token inside. Run from an isolated temp cwd, and check for
+    // that directory by its absolute path, so a regression here can't ever
+    // write into the real repo or the real default data dir.
+    const scratchCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-svc-cli-cwd-'));
+    const originalCwd = process.cwd();
+    process.chdir(scratchCwd);
+    try {
+      const t = io('some-token\n');
+      const code = await main(['token', 'set', 'openai', '--data-dir=--profile'], t);
+      assert.strictEqual(code, 2);
+      assert.match(t.err.join(''), /--data-dir.*value/);
+      assert.strictEqual(fs.existsSync(path.join(scratchCwd, '--profile')), false);
+    } finally {
+      process.chdir(originalCwd);
+    }
   });
 });

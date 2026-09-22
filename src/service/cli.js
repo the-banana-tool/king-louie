@@ -25,6 +25,9 @@ function parseArgs(argv) {
     const eq = a.indexOf('=');
     const rawName = eq === -1 ? a.slice(2) : a.slice(2, eq);
     if (rawName === 'dry-run') {
+      if (eq !== -1) {
+        throw new Error('Flag "--dry-run" does not take a value.');
+      }
       flags.dryRun = true;
       continue;
     }
@@ -42,11 +45,14 @@ function parseArgs(argv) {
         i += 1;
       }
     }
-    if (value === undefined) {
+    // Applies to both "--flag value" and "--flag=value": a missing value or
+    // one that looks like another flag is always an error, whichever form
+    // produced it.
+    if (value === undefined || value.startsWith('--')) {
       throw new Error(`Flag "--${rawName}" requires a value.`);
     }
-    if (rawName === 'data-dir' && value === '') {
-      throw new Error('Flag "--data-dir" must not be empty.');
+    if (value === '') {
+      throw new Error(`Flag "--${rawName}" must not be empty.`);
     }
     flags[camelName] = value;
   }
