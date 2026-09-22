@@ -19,7 +19,10 @@ class MeshTransport extends EventEmitter {
   constructor(config = {}) {
     super();
     this.identity = config.identity;
-    this.port = config.port || DEFAULT_PORT;
+    // port 0 means "bind an ephemeral port" and is a legitimate value, so test
+    // for undefined/null rather than falling back on falsy 0 — that is how
+    // `KL_TEST_MODE` asks initializeMesh for an ephemeral port.
+    this.port = config.port != null ? config.port : DEFAULT_PORT;
     this.host = config.host || '0.0.0.0';
     this.trustedPeers = config.trustedPeers || new Map();
     this.useTls = config.useTls !== false; // TLS on by default
