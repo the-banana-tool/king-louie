@@ -17,6 +17,33 @@ let globalLevel = LOG_LEVELS[
 
 let subsystemFilters = null;
 
+// Extra destinations for log records, alongside the console (e.g. the service
+// host's log file). Each sink receives
+// { time, level, subsystem, message, meta, line } for every record that
+// passes the level and subsystem filters. A sink that throws is ignored.
+const sinks = new Set();
+
+function addSink(fn) {
+  if (typeof fn !== 'function') throw new Error('addSink requires a function');
+  sinks.add(fn);
+  return () => { sinks.delete(fn); };
+}
+
+function emitToSinks(level, subsystem, message, meta) {
+  if (sinks.size === 0) return;
+  const record = {
+    time: new Date().toISOString(),
+    level,
+    subsystem,
+    message,
+    meta: meta || undefined,
+    line: `[${subsystem}] ${message}${formatMeta(meta)}`
+  };
+  for (const sink of sinks) {
+    try { sink(record); } catch { /* a broken sink must never break logging */ }
+  }
+}
+
 function setLogLevel(level) {
   const resolved = LOG_LEVELS[level];
   if (resolved === undefined) throw new Error(`Unknown log level: ${level}`);
@@ -65,6 +92,7 @@ function createLogger(subsystem) {
       } else {
         console[consoleFn](tag, message);
       }
+      emitToSinks(level, subsystem, message, meta);
     };
   }
 
@@ -96,6 +124,7 @@ function createBoundLogger(subsystem, boundMeta) {
       const merged = meta ? { ...boundMeta, ...meta } : boundMeta;
       const tag = `[${subsystem}]`;
       console[consoleFn](tag, message + formatMeta(merged));
+      emitToSinks(level, subsystem, message, merged);
     };
   }
 
@@ -121,5 +150,6 @@ module.exports = {
   setLogLevel,
   getLogLevel,
   setSubsystemFilter,
+  addSink,
   LOG_LEVELS,
 };
