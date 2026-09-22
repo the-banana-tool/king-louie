@@ -41,6 +41,20 @@ function ensurePrivateDir(dir) {
   }
 }
 
+// The root/admin-owned, service-read-only configuration directory that sits
+// beside the data dir. Everything security-relevant (which listeners are on,
+// which ports they use) is read from here rather than from the data dir,
+// which is owned by the service account itself. The installers create it:
+// /etc/king-louie on Linux (root-owned 0755), …/KingLouie/config on macOS
+// (root-owned 0755) and %ProgramData%\KingLouie\config on Windows (inside a
+// parent whose protected DACL grants LOCAL SERVICE read and execute only).
+function adminConfigDir({ platform = process.platform, dataDir } = {}) {
+  if (platform === 'linux') return '/etc/king-louie';
+  const join = platform === 'win32' ? path.win32.join : path.posix.join;
+  const dirname = platform === 'win32' ? path.win32.dirname : path.posix.dirname;
+  return join(dirname(dataDir), 'config');
+}
+
 // `onPath` is told about every directory this ensured, so a root admin CLI can
 // hand exactly those back to the data dir's owner afterwards instead of
 // walking the tree looking for root-owned entries (src/service/ownership.js).
@@ -57,4 +71,4 @@ function ensureServicePaths(dataDir, { onPath = null } = {}) {
   return paths;
 }
 
-module.exports = { defaultServiceDataDir, ensureServicePaths, ensurePrivateDir };
+module.exports = { defaultServiceDataDir, adminConfigDir, ensureServicePaths, ensurePrivateDir };

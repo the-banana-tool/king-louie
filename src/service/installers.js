@@ -31,7 +31,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { defaultServiceDataDir } = require('../platform/paths');
+const { defaultServiceDataDir, adminConfigDir } = require('../platform/paths');
 const { windowsPowerShellExe, windowsSchtasksExe } = require('../platform/windows-paths');
 const { ROOT_CREDENTIAL_PATH } = require('../platform/master-key');
 const { PROFILES } = require('./config');
@@ -607,6 +607,9 @@ function planInstall({ platform = process.platform, nodePath = process.execPath,
       // launchd's stdout/stderr go to a root-owned dir instead — see
       // DARWIN_LOG_DIR.
       { description: 'create the root-owned launchd log dir', run: ['install', '-d', '-m', '0755', '-o', 'root', '-g', 'wheel', DARWIN_LOG_DIR] },
+      // Which listeners are on and on which ports is read from here, never
+      // from the service-writable <dataDir>/service.json.
+      { description: 'create the config dir (root-owned, read-only to the service)', run: ['install', '-d', '-m', '0755', '-o', 'root', '-g', 'wheel', adminConfigDir({ platform: 'darwin', dataDir })] },
       { description: 'write the LaunchDaemon', writeFile: { path: PLIST_PATH, content: renderLaunchdPlist({ nodePath, entryPath, dataDir, user, logsDir: DARWIN_LOG_DIR, profile }), mode: 0o644 } },
       // bootstrap fails if the label is already loaded (a reinstall), so any
       // previous instance is booted out first; on a fresh install there is

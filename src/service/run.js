@@ -7,6 +7,28 @@ const { attachServiceLogFile } = require('./log-file');
 
 const log = createLogger('service');
 
+// A listener the operator explicitly switched on must not be silently absent.
+// `createCore` deliberately treats a failed bind as non-fatal (it only
+// `log.warn`s), which in service mode means an unprivileged local user can
+// squat 127.0.0.1:<port> before boot and leave the service running with
+// `features.gateway: true`, no gateway, and a freshly minted bearer token
+// sitting in <dataDir>/gateway-token for any client that follows the README
+// to hand straight to the squatter. `doctor` and `status` never look at
+// listeners, so nothing else would notice. Refuse to start instead.
+function assertEnabledListenersBound(core, features) {
+  const missing = [];
+  // Both servers null their handle when start() rejects, so "has a handle"
+  // is exactly "bound" (src/gateway/gateway-server.js, src/webhooks/webhook-server.js).
+  if (features.gateway && !core.getGatewayServer()?.wss) missing.push('gateway');
+  if (features.webhooks && !core.getWebhookServer()?.httpServer) missing.push('webhooks');
+  if (missing.length === 0) return;
+  throw new Error(
+    `refusing to run without ${missing.join(' and ')}: ${missing.length > 1 ? 'those listeners are' : 'that listener is'} `
+    + 'enabled in the admin config but could not bind (port already in use?). '
+    + 'Free the port or turn the feature off, then start the service again.'
+  );
+}
+
 // Each profile is required lazily so the runbook profile never loads the agent stack.
 function loadProfile(profile) {
   if (profile === 'agent') {
@@ -26,6 +48,13 @@ function loadProfile(profile) {
           builtinSkillsDir: path.join(__dirname, '..', '..', 'skills')
         });
         await core.start();
+        try {
+          assertEnabledListenersBound(core, features);
+        } catch (err) {
+          // Don't leave a half-started core (and its cron timers) behind.
+          await core.shutdown().catch(() => {});
+          throw err;
+        }
         return { stop: () => core.shutdown(), masterKeySource: servicePorts.masterKeySource };
       }
     };
@@ -85,4 +114,4 @@ async function runService({ dataDir, profile: profileOverride, signal, stdout = 
   }
 }
 
-module.exports = { runService, loadProfile };
+module.exports = { runService, loadProfile, assertEnabledListenersBound };

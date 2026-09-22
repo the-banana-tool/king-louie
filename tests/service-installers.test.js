@@ -1082,6 +1082,19 @@ describe('POSIX installer: nothing is created or chowned inside the data dir', (
     assert.ok(steps.indexOf(mk) < steps.indexOf(steps.find((s) => s.writeFile?.path === '/Library/LaunchDaemons/com.kinglouie.service.plist')));
   });
 
+  it('darwin: creates a root-owned config dir beside the data dir', () => {
+    const steps = planInstall({ platform: 'darwin', ...posix, dataDir: DARWIN_DATA });
+    assert.ok(
+      steps.some((s) => s.run?.join(' ') === 'install -d -m 0755 -o root -g wheel /Library/Application Support/KingLouie/config'),
+      'the feature/port config must live somewhere the service account cannot write'
+    );
+  });
+
+  it('linux: still creates /etc/king-louie root-owned, which is where features and ports are read from', () => {
+    const steps = planInstall({ platform: 'linux', ...posix, dataDir: '/var/lib/king-louie' });
+    assert.ok(steps.some((s) => s.run?.join(' ') === 'install -d -m 0755 -o root -g root /etc/king-louie'));
+  });
+
   for (const [platform, dataDir] of [['linux', '/var/lib/king-louie'], ['darwin', DARWIN_DATA]]) {
     it(`${platform}: checks the data dir's ancestors before the data dir is created`, () => {
       const steps = planInstall({ platform, ...posix, dataDir });

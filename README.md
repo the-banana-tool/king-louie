@@ -198,14 +198,38 @@ could then rewrite the binary it runs. Move the install to a system path.
 
 ### Configure
 
-- `<dataDir>/service.json` sets `profile` (`agent` or `runbook`), `features`
-  and `ports`. Every feature (`gateway`, `webhooks`, `mesh`, `channels`,
-  `appDiscovery`) is **off by default**. `mesh` cannot be enabled in service
-  mode yet: it is forced off (with a warning in the log) whatever
-  `service.json` says. `ports` defaults to `{ "gateway": 18791, "webhook": 18792 }`
-  — different from the desktop app's 18789/18790, so both can run on one
-  machine. A listener that can't bind its port logs a warning and stays off;
-  the rest of the service still starts.
+- **`<configDir>/service.json` sets `features` and `ports`.** The config
+  directory is owned by root/Administrators and is only *readable* by the
+  service account — the data directory is not, so nothing that decides
+  whether a network listener exists is read from there:
+
+  | Platform | `configDir` |
+  |----------|-------------|
+  | Linux | `/etc/king-louie` |
+  | macOS | `/Library/Application Support/KingLouie/config` |
+  | Windows | `%ProgramData%\KingLouie\config` |
+
+  The Linux and macOS installers create it. On Windows, create it from the
+  elevated shell after `install` (`mkdir %ProgramData%\KingLouie\config`);
+  it inherits the parent's protected ACL, which grants `LOCAL SERVICE` read
+  and execute only. If the file is missing, every feature stays off.
+
+  Every feature (`gateway`, `webhooks`, `mesh`, `channels`, `appDiscovery`) is
+  **off by default**, and each one that is on is logged at startup naming the
+  file that enabled it. `mesh` cannot be enabled in service mode yet: it is
+  forced off (with a warning in the log) whatever the config says. On Linux
+  and macOS the service refuses to read a `service.json` that is group- or
+  world-writable, or one owned by the account the service runs as.
+
+  `ports` defaults to `{ "gateway": 18793, "webhook": 18794 }` — clear of
+  the desktop app's 18789/18790 *and* of the mesh port 18791, which the
+  desktop app binds on `0.0.0.0` by default. A listener that is enabled but
+  cannot bind its port is fatal: the service refuses to start rather than run
+  without the listener you asked for.
+
+- `<dataDir>/service.json` still sets `profile` (`agent` or `runbook`). It is
+  writable by the service account, so `features` and `ports` are **ignored**
+  there, with a warning naming the file.
 - `king-louie-service token set anthropic < keyfile` — stores a provider API
   key (read from stdin, never a CLI argument, so it doesn't end up in shell
   history or `ps`). The provider must be one king-louie knows (`openai`,
@@ -781,6 +805,15 @@ Private keys are encrypted at rest via Electron's `safeStorage` API.
 | LAN Discovery | Enabled | mDNS broadcast/browse for local peers |
 | TLS | Enabled | Self-signed cert encryption (disable only for debugging) |
 | Task Timeout | 5 minutes | Max time to wait for a remote task result |
+
+Ports used across the project, so nothing collides on a machine running both
+hosts:
+
+| Port | Used by | Binds |
+|------|---------|-------|
+| `18789` / `18790` | desktop app gateway / webhooks | `127.0.0.1` |
+| `18791` | mesh (desktop app; off in service mode) | `0.0.0.0` |
+| `18793` / `18794` | service-mode gateway / webhooks (default) | `127.0.0.1` |
 
 ### Network Requirements
 

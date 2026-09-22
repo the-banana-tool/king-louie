@@ -154,8 +154,8 @@ app's behaviour.
 | `openExternal` | `(url) → Promise` | `shell.openExternal` | unset: the auth flow logs the URL |
 | `uiToastChannel` | notification channel | `UiToastChannel` (desktop toast) | unset: a toast channel with no `Notification`, so toasts are skipped |
 | `builtinSkillsDir` | path | `<app>/skills` | `<package>/skills` |
-| `features` | `{ gateway, webhooks, mesh, channels, appDiscovery }` booleans | all on | all off by default (`service.json` may turn on all but `mesh`, see §4.3) |
-| `ports` | `{ gateway, webhook }` | default 18789 / gateway + 1 | 18791 / 18792, overridable in `service.json` |
+| `features` | `{ gateway, webhooks, mesh, channels, appDiscovery }` booleans | all on | all off by default (only `<configDir>/service.json`, which the service account cannot write, may turn on all but `mesh`, see §4.3) |
+| `ports` | `{ gateway, webhook }` | default 18789 / gateway + 1 | 18793 / 18794, overridable in `<configDir>/service.json` |
 | `remoteApprovals` | `'allow' \| 'deny'` | default `'allow'` | `'deny'` (stage 1); stage 3: phone approver |
 | `shutdownTimeoutMs` | number | default 5000 | default 5000 |
 
@@ -261,14 +261,31 @@ Rules:
   `StandardOutPath`/`StandardErrorPath` point at root-owned
   `/var/log/king-louie` instead. Each service runs with an explicit
   `<dataDir>/workspace` as its working directory.
-- **Decision — ports and listener failures (I4).** The service host's
-  gateway and webhook listeners default to 18791/18792 (the Electron app keeps
-  18789/18790), overridable via `service.json` `ports`, so both hosts can run
-  on one machine. A listener that fails to bind logs a warning and stays off;
-  it never aborts `core.start()`.
-- In stage 1 `features.mesh` is forced off in service mode, whatever
-  `service.json` says: that file is writable by the service account, and mesh
-  binds a non-loopback listener.
+- **Decision — ports and listener failures (I4, revised).** The service
+  host's gateway and webhook listeners default to **18793/18794**, clear of
+  both the Electron app's 18789/18790 and the documented mesh port 18791,
+  which the desktop app binds on `0.0.0.0` by default — the original
+  18791/18792 collided with mesh, and an unprivileged local user could squat
+  the port. They are overridable via `<configDir>/service.json` `ports`.
+  `core.start()` still only warns on a failed bind (the Electron host wants
+  that), but the service host now checks afterwards and **refuses to start**
+  when a feature the operator explicitly enabled has no listener, rather than
+  reporting `ready` with a bearer token on disk and nothing listening.
+- **Decision — where security-relevant config is read from (revised).**
+  `features` and `ports` are read only from `<configDir>/service.json`, which
+  the installers create root/Administrators-owned and the service account can
+  only read (`/etc/king-louie`, `…/KingLouie/config`,
+  `%ProgramData%\KingLouie\config`). `<dataDir>/service.json` still supplies
+  `profile`, but `features`/`ports` there are ignored with a warning: the data
+  dir is `0700` *owned by the service account*, so one `write_file` from a
+  prompt injection would otherwise re-open the gateway, webhooks, channels and
+  app discovery at the next (automatic) restart. On POSIX the service also
+  refuses a config file that is group/world-writable or owned by its own
+  account. Each enabled feature is logged at startup naming the file that
+  enabled it.
+- In stage 1 `features.mesh` is forced off in service mode whatever any config
+  says: mesh binds a non-loopback listener and stage 1 has no remote
+  approver.
 - Logs: the service appends every log record to `<dataDir>/logs/service.log`
   on all OSes (the only log on Windows). On Windows `schtasks /End` is a hard
   stop — there is no graceful shutdown there in stage 1 — and `status` checks
@@ -292,7 +309,7 @@ Rules:
 
 `src/gateway/gateway-server.js` listens on `127.0.0.1:18789` with **no
 authentication**, so any local process can drive the agent. In service mode
-both it and the webhook server are **off by default** (on 18791/18792 when
+both it and the webhook server are **off by default** (on 18793/18794 when
 enabled, §4.3) and refuse to bind to anything other than a literal loopback
 address (`127.0.0.1` or `::1`; `localhost` is resolver-dependent and refused). When the gateway is enabled it requires
 a bearer token, generated on first use and encrypted through the `cipher`
