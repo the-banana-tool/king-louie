@@ -1,4 +1,4 @@
-const { MeshIdentity } = require('./mesh-identity');
+const { MeshIdentity, saveIdentity, loadIdentity } = require('./mesh-identity');
 const { MeshTransport, DEFAULT_PORT } = require('./mesh-transport');
 const { MeshPairing } = require('./mesh-pairing');
 const { MeshChannel } = require('./mesh-channel');
@@ -26,12 +26,14 @@ async function initializeMesh(config = {}) {
     return null;
   }
 
-  // Load or create identity
-  let identity;
+  // Load or create identity. The private keys are encrypted at rest under the
+  // host cipher; a plaintext identity from an older build is upgraded in place
+  // by loadIdentity, keeping the same peer id.
+  let identity = null;
   const stored = store.get('mesh.identity');
   if (stored) {
     try {
-      identity = MeshIdentity.deserialize(stored);
+      identity = loadIdentity(store, cipher);
       // Apply any updated settings
       identity.displayName = meshSettings.displayName || stored.displayName || '';
       identity.capabilities = meshSettings.capabilities || stored.capabilities || [];
@@ -46,17 +48,8 @@ async function initializeMesh(config = {}) {
       displayName: meshSettings.displayName || '',
       capabilities: meshSettings.capabilities || []
     });
-    store.set('mesh.identity', identity.serialize());
+    saveIdentity(store, identity, cipher);
     log.info(`generated new identity: ${identity.peerId}`);
-  }
-
-  // Encrypt private key if a cipher is available
-  if (cipher && cipher.isEncryptionAvailable()) {
-    try {
-      store.set('mesh.encryptedPrivateKey', cipher.encryptString(identity.privateKey.toString('hex')));
-    } catch (err) {
-      log.warn(`could not encrypt mesh private key: ${err.message}`);
-    }
   }
 
   const port = meshSettings.port || (process.env.KL_TEST_MODE ? 0 : DEFAULT_PORT);
@@ -162,6 +155,12 @@ async function initializeMesh(config = {}) {
     remoteControl,
     discovery,
     swarm,
+
+    // Callers that mutate the identity (display name, capabilities) persist it
+    // through here so the private keys stay encrypted.
+    persistIdentity() {
+      return saveIdentity(store, identity, cipher);
+    },
 
     async shutdown() {
       pairing.cleanup();
