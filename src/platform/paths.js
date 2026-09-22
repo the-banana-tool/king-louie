@@ -10,6 +10,97 @@ function defaultServiceDataDir({ platform = process.platform, env = process.env 
   return '/var/lib/king-louie';
 }
 
+// Every path component of `target`, from the filesystem root down to and
+// including `target` itself.
+function pathComponents(target) {
+  const { root } = path.parse(target);
+  const parts = target.slice(root.length).split(/[\\/]+/).filter(Boolean);
+  const out = [root];
+  let current = root;
+  for (const part of parts) {
+    current = path.join(current, part);
+    out.push(current);
+  }
+  return out;
+}
+
+// A symlink (or Windows reparse point) among the ancestors is only as
+// trustworthy as whoever could have planted it. Root and the account running
+// this process are the two principals already trusted with this path, so a
+// link either of them owns is taken as deliberate — that is what keeps macOS's
+// own `/var -> private/var` and `/tmp -> private/tmp` working. A link anyone
+// else owns is refused.
+//
+// Windows has no cheap equivalent here (the owner SID and the DACL would both
+// have to be read through a handle opened FILE_FLAG_OPEN_REPARSE_POINT, which
+// is what the installer does), so a reparse point in the path is refused
+// outright and the operator is told to name the resolved path instead.
+function assertLinkIsDeliberate(link, st, euid) {
+  if (process.platform === 'win32') {
+    throw new Error(
+      `Refusing to use ${link}: it is a junction or symlink, so the directory created under it would not be `
+      + 'the one named here. Pass the resolved path instead.'
+    );
+  }
+  if (euid >= 0 && st.uid !== 0 && st.uid !== euid) {
+    throw new Error(
+      `Refusing to use ${link}: it is a symlink owned by uid ${st.uid}, which is neither root nor this `
+      + `process (uid ${euid}). Whoever owns it chooses where the data dir really lands.`
+    );
+  }
+}
+
+// Refuses a path whose ancestry anyone else could have aimed elsewhere, and
+// returns the components still to be created.
+//
+// `mkdirSync(..., { recursive: true })` treats a symlink-to-a-directory as
+// "already there" and follows it, so only the *final* component was ever
+// checked: `--data-dir /tmp/kl/data` with a planted `/tmp/kl -> …` had root
+// create the data dir — and the master key, key-check, gateway token and
+// stores that go in it — inside a directory of someone else's choosing, and
+// chmod 0700 through it. Verified in a container: ensurePrivateDir('/tmp/c5/kl/data')
+// with `/tmp/c5/kl` a symlink resolved to /tmp/c5/attacker/data.
+//
+// This is a check, not a capability: Node has no openat(2), so between the
+// lstat here and the mkdir below a component could still be swapped. The
+// creation loop is non-recursive so such a swap surfaces as EEXIST on a name
+// that is then re-validated, and the final mode is still applied through an
+// O_NOFOLLOW descriptor rather than by path.
+function assertUnplantedAncestry(target, euid, depth = 0) {
+  if (depth > 32) throw new Error(`Refusing to use ${target}: too many symlinked ancestors`);
+
+  const components = pathComponents(target);
+  for (let i = 0; i < components.length; i += 1) {
+    const entry = components[i];
+    let st;
+    try {
+      // lstat, never existsSync: a dangling symlink reads as missing and would
+      // then be "created" straight through.
+      st = fs.lstatSync(entry);
+    } catch (err) {
+      // Missing, so nothing below it exists either: the rest is ours to make.
+      if (err.code === 'ENOENT') return;
+      throw err;
+    }
+
+    if (st.isSymbolicLink()) {
+      // The entry itself is handled by the O_NOFOLLOW open in ensurePrivateDir
+      // on POSIX; on Windows there is no such open, so refuse it here.
+      if (i === components.length - 1) {
+        throw new Error(`Refusing to use ${target}: it is a symlink or not a directory`);
+      }
+      assertLinkIsDeliberate(entry, st, euid);
+      const rest = components.slice(i + 1).map((c) => path.basename(c));
+      assertUnplantedAncestry(path.join(fs.realpathSync(entry), ...rest), euid, depth + 1);
+      return;
+    }
+
+    if (!st.isDirectory()) {
+      throw new Error(`Refusing to use ${target}: ${entry} exists and is not a directory`);
+    }
+  }
+}
+
 // Creates `dir` 0700 and pins it to 0700 if it already existed.
 //
 // This runs as root from the admin CLI (`token set` / `vault set`), and
@@ -19,18 +110,43 @@ function defaultServiceDataDir({ platform = process.platform, env = process.env 
 // root would apply 0700 to whatever the service account pointed it at —
 // `chmod 0700 /etc` or `/usr` locks every other account out of the machine.
 // So the mode is applied to a descriptor opened with O_NOFOLLOW, and a
-// symlink is refused outright rather than repaired.
+// symlink is refused outright rather than repaired. The ancestors above it get
+// the same treatment in assertUnplantedAncestry, which is why the mkdir below
+// is per component rather than recursive.
 function ensurePrivateDir(dir) {
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const target = path.resolve(dir);
+  const euid = typeof process.geteuid === 'function' ? process.geteuid() : -1;
+
+  assertUnplantedAncestry(target, euid);
+
+  // Skips index 0, the filesystem root: mkdir on `/` or `C:\` is EEXIST at
+  // best and EPERM at worst, and it is not ours to create.
+  for (const entry of pathComponents(target).slice(1)) {
+    try {
+      fs.mkdirSync(entry, { mode: 0o700 });
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+      // Either it was already there (the common case) or it appeared between
+      // the walk above and now. Either way it has to hold up to the same check.
+      const st = fs.lstatSync(entry);
+      if (st.isSymbolicLink()) {
+        if (entry === target) throw new Error(`Refusing to use ${target}: it is a symlink or not a directory`);
+        assertLinkIsDeliberate(entry, st, euid);
+      } else if (!st.isDirectory()) {
+        throw new Error(`Refusing to use ${target}: ${entry} exists and is not a directory`);
+      }
+    }
+  }
+
   if (process.platform === 'win32') return;
   let fd;
   try {
-    fd = fs.openSync(dir, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+    fd = fs.openSync(target, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
   } catch (err) {
     // O_NOFOLLOW on a symlink is ELOOP everywhere Node runs; ENOTDIR means
     // the name is something other than a directory.
     if (err.code === 'ELOOP' || err.code === 'ENOTDIR') {
-      throw new Error(`Refusing to use ${dir}: it is a symlink or not a directory`);
+      throw new Error(`Refusing to use ${target}: it is a symlink or not a directory`);
     }
     throw err;
   }
