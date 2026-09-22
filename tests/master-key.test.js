@@ -1,4 +1,4 @@
-const { describe, it } = require('node:test');
+const { describe, it, after } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
@@ -6,7 +6,10 @@ const path = require('path');
 const { resolveMasterKey, MASTER_KEY_CREDENTIAL, KEY_CHECK_FILE } = require('../src/platform/master-key');
 const { windowsPowerShellExe } = require('../src/platform/windows-paths');
 
-const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'kl-mk-'));
+// Every temp dir this file creates is removed once all tests have run.
+const createdTempDirs = [];
+after(() => { for (const d of createdTempDirs) fs.rmSync(d, { recursive: true, force: true }); });
+const tmp = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-mk-')); createdTempDirs.push(d); return d; };
 
 describe('resolveMasterKey', () => {
   it('prefers a systemd credential', () => {

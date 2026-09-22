@@ -1,4 +1,4 @@
-const { describe, it } = require('node:test');
+const { describe, it, after } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
@@ -15,7 +15,10 @@ function io(stdinText = '') {
     stderr: { write: (s) => err.push(String(s)) }
   };
 }
-const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'kl-svc-cli-'));
+// Every temp dir this file creates is removed once all tests have run.
+const createdTempDirs = [];
+after(() => { for (const d of createdTempDirs) fs.rmSync(d, { recursive: true, force: true }); });
+const tmp = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-svc-cli-')); createdTempDirs.push(d); return d; };
 
 describe('service CLI', () => {
   it('prints help and returns 0', async () => {

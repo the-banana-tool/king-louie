@@ -1,4 +1,4 @@
-const { describe, it } = require('node:test');
+const { describe, it, after } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
@@ -6,7 +6,10 @@ const path = require('path');
 const { loadServiceConfig } = require('../src/service/config');
 const { addSink } = require('../src/logging');
 
-const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'kl-svc-cfg-'));
+// Every temp dir this file creates is removed once all tests have run.
+const createdTempDirs = [];
+after(() => { for (const d of createdTempDirs) fs.rmSync(d, { recursive: true, force: true }); });
+const tmp = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-svc-cfg-')); createdTempDirs.push(d); return d; };
 const writeCfg = (dir, cfg) => fs.writeFileSync(path.join(dir, 'service.json'), JSON.stringify(cfg));
 
 describe('loadServiceConfig', () => {
