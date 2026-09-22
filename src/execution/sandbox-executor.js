@@ -72,6 +72,18 @@ class SandboxExecutor {
     return true;
   }
 
+  // The one shape a refused mount is reported in: a failed result, never an
+  // exception the caller might paper over with a direct run.
+  _securityViolationResult(error) {
+    return {
+      success: false,
+      stdout: '',
+      stderr: error.message,
+      exitCode: 1,
+      environment: { platform: 'linux', shell: 'sh', sandbox: true }
+    };
+  }
+
   getContainerArgs() {
     const args = [
       'run',
@@ -126,6 +138,23 @@ class SandboxExecutor {
 
   async execute(command, options = {}) {
     const useSandbox = options.useSandbox !== false; // Default to true if configured
+
+    // A refused working directory is refused *before* Docker is probed. The
+    // mount check used to live only on the container path, so whether a
+    // sandboxed call naming a restricted directory was rejected or ran
+    // directly in that same directory depended on whether Docker happened to
+    // be installed on the host — the security violation silently downgraded
+    // to an unsandboxed run on any machine without it. Docker's presence is
+    // a property of the host, never a security decision.
+    if (useSandbox && options.workingDirectory) {
+      try {
+        this.validateMount(options.workingDirectory, this.config.defaultWorkdir);
+      } catch (error) {
+        if (error.code !== 'SANDBOX_SECURITY_VIOLATION') throw error;
+        return this._securityViolationResult(error);
+      }
+    }
+
     const isDocker = await this.isDockerAvailable();
 
     if (!useSandbox || !isDocker) {
@@ -141,14 +170,10 @@ class SandboxExecutor {
       containerId = await this.getOrCreateContainer(sessionId, workDir);
     } catch (error) {
       if (error.code === 'SANDBOX_SECURITY_VIOLATION') {
-        // We MUST NOT fallback on a security violation
-        return {
-          success: false,
-          stdout: '',
-          stderr: error.message,
-          exitCode: 1,
-          environment: { platform: 'linux', shell: 'sh', sandbox: true }
-        };
+        // We MUST NOT fallback on a security violation. (process.cwd() is
+        // only checked here; an explicitly requested working directory was
+        // already checked above, before Docker was probed.)
+        return this._securityViolationResult(error);
       }
       // Fallback if container creation fails (e.g. image not found)
       log.warn(`Container creation failed: ${error.message}. Falling back to direct execution.`);
