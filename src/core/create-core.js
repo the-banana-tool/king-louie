@@ -106,6 +106,13 @@ function createCore(deps = {}) {
   const features = { ...DEFAULT_FEATURES, ...(deps.features || {}) };
   const vault = createVault({ store: vaultStore, cipher });
   const userDataPath = paths.dataDir;
+  // Where the agent works: the root for the tool executor, the hooks
+  // directory, project context and the SessionStart/SessionEnd hook payloads.
+  // The Electron host leaves this unset and gets process.cwd() as before; the
+  // service passes <dataDir>/workspace explicitly, because the alternative —
+  // process.chdir() at startup — is process-wide mutable state that anything
+  // else in the process can change or come to depend on.
+  const hostWorkingDirectory = deps.workingDirectory || process.cwd();
   // The ungated read tools (Read, Grep, Glob) never ask for approval, so the
   // only thing between a remote origin and this directory's master key,
   // gateway token and encrypted stores is a deny-list. Tell it where they are.
@@ -257,11 +264,11 @@ function createCore(deps = {}) {
     ].join('\n');
   };
 
-  const getProjectContextPayload = (workingDirectory = process.cwd()) => {
+  const getProjectContextPayload = (workingDirectory = hostWorkingDirectory) => {
     return loadProjectContext({ workingDirectory });
   };
 
-  const formatProjectContextSection = (workingDirectory = process.cwd()) => {
+  const formatProjectContextSection = (workingDirectory = hostWorkingDirectory) => {
     const projectContext = getProjectContextPayload(workingDirectory);
     if (!projectContext?.content) {
       return '';
@@ -293,7 +300,7 @@ function createCore(deps = {}) {
   const buildTemplateContextFromSettings = () => {
     const templateVariables = getTemplateVariables();
     const profileContext = userProfile ? userProfile.toTemplateContext(getUserProfile()) : {};
-    const projectContext = getProjectContextPayload(process.cwd());
+    const projectContext = getProjectContextPayload(hostWorkingDirectory);
     return {
       ...profileContext,
       user: {
@@ -689,7 +696,7 @@ function createCore(deps = {}) {
       ? runtimeEnvironment.unavailable
       : [];
 
-    const workingDirectory = runtimeEnvironment.workingDirectory || process.cwd();
+    const workingDirectory = runtimeEnvironment.workingDirectory || hostWorkingDirectory;
 
     const sections = [
       'Environment context (auto-detected):',
@@ -1866,7 +1873,7 @@ function createCore(deps = {}) {
     approvalRequester = null,
     executorOptions = {}
   ) => {
-    const workingDirectory = executorOptions.workingDirectory || process.cwd();
+    const workingDirectory = executorOptions.workingDirectory || hostWorkingDirectory;
     const resolvedRuntimeEnvironment = runtimeEnvironment || await getRuntimeEnvironment({
       workingDirectory
     });
@@ -2025,7 +2032,7 @@ function createCore(deps = {}) {
     if (!capabilities.toolCalling) {
       throw new Error(`Provider ${resolution.providerType} (${resolution.model}) does not support tool calling required for agent mode.`);
     }
-    const workingDirectory = runtimeOptions.workingDirectory || process.cwd();
+    const workingDirectory = runtimeOptions.workingDirectory || hostWorkingDirectory;
     const runtimeEnvironment = await getRuntimeEnvironment({
       workingDirectory
     });
@@ -2097,11 +2104,11 @@ function createCore(deps = {}) {
     });
 
     hookRegistry = new HookRegistry({
-      hooksDirectory: path.join(process.cwd(), 'hooks')
+      hooksDirectory: path.join(hostWorkingDirectory, 'hooks')
     });
     hookExecutor = new HookExecutor({
       registry: hookRegistry,
-      workingDirectory: process.cwd()
+      workingDirectory: hostWorkingDirectory
     });
     // Checkpoints: transparent snapshots taken before the first file-mutating
     // tool of each turn. Not a tool — the model never sees this.
@@ -2190,7 +2197,7 @@ function createCore(deps = {}) {
       (async () => {
         try {
           const toolDefs = toolRegistry.getFunctionDefinitions();
-          const runtimeEnv = await getRuntimeEnvironment({ workingDirectory: process.cwd() });
+          const runtimeEnv = await getRuntimeEnvironment({ workingDirectory: hostWorkingDirectory });
           const skills = typeof skillRegistry?.listSkills === 'function' ? skillRegistry.listSkills() : [];
           const sections = buildSystemSections(runtimeEnv, {
             discoveredApps,
@@ -2278,7 +2285,7 @@ function createCore(deps = {}) {
             buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
             await buildMemoryContextSection(message),
             formatUserContextSection(),
-            formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
+            formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || hostWorkingDirectory)
           ].join('\n\n'),
           onUsageRecorded: options.onUsageRecorded
         });
@@ -2435,7 +2442,7 @@ function createCore(deps = {}) {
       skillsDirectory: userSkillsDir,
       builtinSkillsDirectory: deps.builtinSkillsDir,
       context: {
-        workingDirectory: process.cwd(),
+        workingDirectory: hostWorkingDirectory,
         userDataPath: userDataPath,
         toolRegistry,
         sessionManager,
@@ -2504,7 +2511,7 @@ function createCore(deps = {}) {
     runHookEvent('SessionStart', {
       source: 'main',
       startedAt: new Date().toISOString(),
-      workingDirectory: process.cwd()
+      workingDirectory: hostWorkingDirectory
     }).catch(err => log.warn(`SessionStart hook failed: ${err.message}`));
 
     if (memoryManager) {
@@ -2536,7 +2543,7 @@ function createCore(deps = {}) {
     if (cronScheduler) cronScheduler.stop();
     const warnTimeout = (label, ms) => log.warn(`${label} timed out after ${ms}ms; continuing shutdown`);
     await withTimeout(
-      runHookEvent('SessionEnd', { source: 'main', endedAt: new Date().toISOString(), workingDirectory: process.cwd() }),
+      runHookEvent('SessionEnd', { source: 'main', endedAt: new Date().toISOString(), workingDirectory: hostWorkingDirectory }),
       shutdownTimeoutMs, 'SessionEnd hook', warnTimeout
     ).catch((err) => log.warn(`SessionEnd hook failed: ${err.message}`));
     const stops = [

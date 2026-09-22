@@ -180,3 +180,39 @@ describe('withTimeout', () => {
     assert.deepStrictEqual(seen, [['slow step', 20]]);
   });
 });
+
+// A6 — the agent's working directory is a dependency, not process-wide state.
+// The service runs in <dataDir>/workspace so the ungated read tools do not
+// treat the secret store as in-bounds; it used to get there with
+// process.chdir(), which every other part of the process shares and can move.
+describe('createCore workingDirectory', () => {
+  it('defaults to process.cwd() so the Electron host is unchanged', async () => {
+    const { deps } = makeDeps();
+    const core = createCore(deps);
+    const executor = await core.context.createToolExecutorWithApprovals(null);
+    assert.strictEqual(fs.realpathSync(executor.workingDirectory), fs.realpathSync(process.cwd()));
+  });
+
+  it('uses the injected directory for the tool executor', async () => {
+    const { deps } = makeDeps();
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-ws-'));
+    tempDirs.push(workspace);
+    const core = createCore({ ...deps, workingDirectory: workspace });
+
+    const executor = await core.context.createToolExecutorWithApprovals(null);
+    assert.strictEqual(fs.realpathSync(executor.workingDirectory), fs.realpathSync(workspace));
+    assert.notStrictEqual(fs.realpathSync(executor.workingDirectory), fs.realpathSync(process.cwd()));
+    assert.strictEqual(process.cwd(), process.cwd(), 'createCore must not chdir the process');
+  });
+
+  it('lets an explicit per-call workingDirectory still win', async () => {
+    const { deps } = makeDeps();
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-ws-'));
+    const perCall = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-call-'));
+    tempDirs.push(workspace, perCall);
+    const core = createCore({ ...deps, workingDirectory: workspace });
+
+    const executor = await core.context.createToolExecutorWithApprovals(null, null, null, { workingDirectory: perCall });
+    assert.strictEqual(fs.realpathSync(executor.workingDirectory), fs.realpathSync(perCall));
+  });
+});

@@ -33,7 +33,7 @@ function assertEnabledListenersBound(core, features) {
 function loadProfile(profile) {
   if (profile === 'agent') {
     return {
-      async start({ dataDir, features, ports }) {
+      async start({ dataDir, features, ports, workspace }) {
         const { createCore } = require('../core');
         const { CHAT_DATA_DEFAULTS } = require('../core/settings');
         const { buildServicePorts } = require('./ports');
@@ -42,6 +42,7 @@ function loadProfile(profile) {
           ...servicePorts,
           features,
           ports,
+          workingDirectory: workspace,
           // Stage 1: nothing remote (chat channels, gateway clients, cron,
           // webhooks) may approve an unsafe tool; stage 3 adds the phone approver.
           remoteApprovals: 'deny',
@@ -81,10 +82,14 @@ function loadProfile(profile) {
 // master key. The service therefore runs in an explicit, empty workspace
 // beside the data dir's other subdirectories; src/tools/utils.js separately
 // denies the secret files outright, whatever the workspace is.
+//
+// The workspace is handed to createCore as its `workingDirectory` rather than
+// installed with process.chdir(). A process-wide chdir is global mutable
+// state: anything else in the process can change it or come to depend on it,
+// and in a long-lived service that is a latent bug rather than a setting.
 function ensureWorkspace(dataDir) {
   const workspace = path.join(dataDir, 'workspace');
   ensurePrivateDir(workspace);
-  process.chdir(workspace);
   return workspace;
 }
 
@@ -99,7 +104,7 @@ async function runService({ dataDir, profile: profileOverride, signal, stdout = 
       const config = loadServiceConfig(dataDir, { profile: profileOverride });
       profile = config.profile;
       log.info('service starting', { profile, dataDir, workspace, pid: process.pid });
-      running = await loadProfile(profile).start({ dataDir, features: config.features, ports: config.ports });
+      running = await loadProfile(profile).start({ dataDir, features: config.features, ports: config.ports, workspace });
     } catch (err) {
       // On Windows nothing reads the task's stderr, so the log file is the
       // only place a startup failure is visible.
@@ -107,7 +112,7 @@ async function runService({ dataDir, profile: profileOverride, signal, stdout = 
       throw err;
     }
     writePidfile(dataDir);
-    stdout.write(`${JSON.stringify({ event: 'ready', profile, dataDir, cwd: process.cwd(), pid: process.pid, masterKeySource: running.masterKeySource })}\n`);
+    stdout.write(`${JSON.stringify({ event: 'ready', profile, dataDir, workspace, cwd: process.cwd(), pid: process.pid, masterKeySource: running.masterKeySource })}\n`);
     log.info('service ready', { profile, masterKeySource: running.masterKeySource });
 
     await new Promise((resolve) => {
