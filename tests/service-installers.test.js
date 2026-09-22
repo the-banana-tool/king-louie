@@ -1273,17 +1273,17 @@ describe('renderers validate their own inputs, not just planInstall', () => {
   });
 
   it('renderWindowsTaskXml sanitizes entryPath and nodePath, not only dataDir', () => {
-    const win = { nodePath: 'C:\node.exe', entryPath: 'C:\kl\bin\king-louie-service.js', dataDir: 'C:\ProgramData\KingLouie\data' };
+    const win = { nodePath: 'C:\\node.exe', entryPath: 'C:\\kl\\bin\\king-louie-service.js', dataDir: 'C:\\ProgramData\\KingLouie\\data' };
     // `"C:\a\b" & --data-dir "C:\evil"` inside <Arguments> is an argv split.
-    assert.throws(() => renderWindowsTaskXml({ ...win, entryPath: 'C:\a\b" & --data-dir "C:\evil' }), /entryPath must not contain a double quote/);
-    assert.throws(() => renderWindowsTaskXml({ ...win, nodePath: 'C:\a" & evil "' }), /nodePath must not contain a double quote/);
+    assert.throws(() => renderWindowsTaskXml({ ...win, entryPath: 'C:\\a\\b" & --data-dir "C:\\evil' }), /entryPath must not contain a double quote/);
+    assert.throws(() => renderWindowsTaskXml({ ...win, nodePath: 'C:\\a" & evil "' }), /nodePath must not contain a double quote/);
     assert.throws(() => renderWindowsTaskXml({ ...win, profile: 'frontdoor' }), /Unknown profile/);
   });
 });
 
 describe('Windows data dir: LOCAL SERVICE may be granted access but may not own it', () => {
   it('drops S-1-5-19 from the accepted owners while keeping it in the ACE list', () => {
-    const script = planInstall({ platform: 'win32', nodePath: 'C:\node.exe', entryPath: 'C:\kl\bin\king-louie-service.js', dataDir: 'C:\ProgramData\KingLouie\data' })
+    const script = planInstall({ platform: 'win32', nodePath: 'C:\\node.exe', entryPath: 'C:\\kl\\bin\\king-louie-service.js', dataDir: 'C:\\ProgramData\\KingLouie\\data' })
       .find((s) => s.description === 'create or verify the data dir with a locked-down ACL').run[4];
     assert.ok(script.includes("$dirOwners = @('S-1-5-32-544','S-1-5-18')"), 'LOCAL SERVICE must not be an accepted owner');
     assert.ok(script.includes("$aceSids = @('S-1-5-19','S-1-5-18','S-1-5-32-544')"), 'LOCAL SERVICE must still be granted access');
