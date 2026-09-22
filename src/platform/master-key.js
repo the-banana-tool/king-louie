@@ -14,9 +14,12 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 const { createAesGcmCipher } = require('./cipher');
 const { windowsPowerShellExe } = require('./windows-paths');
+const { adminCredentialPath } = require('./paths');
 
 const MASTER_KEY_CREDENTIAL = 'kl-master-key';
-// The root-only file the systemd unit's LoadCredential= reads.
+// The root-only file the systemd unit's LoadCredential= reads, for the default
+// Linux layout. An instance on a non-default data dir gets its own, beside its
+// own admin config dir — see adminCredentialPath.
 const ROOT_CREDENTIAL_PATH = '/etc/king-louie/credentials/kl-master-key';
 const KEY_BYTES = 32;
 const KEY_CHECK_FILE = 'key-check';
@@ -152,7 +155,7 @@ function resolveMasterKey({
   env = process.env,
   dpapi,
   getuid = () => (typeof process.getuid === 'function' ? process.getuid() : -1),
-  credentialPath = ROOT_CREDENTIAL_PATH,
+  credentialPath = adminCredentialPath({ platform, dataDir }),
   // Told about each file this created in the data dir (the key file, the
   // key-check), so a root admin CLI can hand exactly those back to the data
   // dir's owner — see src/service/ownership.js. Files it only read are not

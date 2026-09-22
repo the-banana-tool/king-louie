@@ -31,15 +31,17 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { defaultServiceDataDir, adminConfigDir } = require('../platform/paths');
+const { defaultServiceDataDir, adminConfigDir, adminCredentialPath } = require('../platform/paths');
 const { windowsPowerShellExe, windowsSchtasksExe } = require('../platform/windows-paths');
-const { ROOT_CREDENTIAL_PATH } = require('../platform/master-key');
 const { PROFILES } = require('./config');
 
 const UNIT_PATH = '/etc/systemd/system/king-louie.service';
-const CRED_PATH = ROOT_CREDENTIAL_PATH; // /etc/king-louie/credentials/kl-master-key
-const CRED_DIR = path.posix.dirname(CRED_PATH); // /etc/king-louie/credentials
-const CONFIG_DIR = path.posix.dirname(CRED_DIR); // /etc/king-louie
+// /etc/king-louie/... for the default data dir, <parent-of-dataDir>/config/...
+// for an instance installed elsewhere: two services on one box must not share
+// a config file (and so a port) or a master key.
+const linuxCredPath = (dataDir) => adminCredentialPath({ platform: 'linux', dataDir });
+const linuxCredDir = (dataDir) => path.posix.dirname(linuxCredPath(dataDir));
+const linuxConfigDir = (dataDir) => adminConfigDir({ platform: 'linux', dataDir });
 const PLIST_PATH = '/Library/LaunchDaemons/com.kinglouie.service.plist';
 const TASK_NAME = 'KingLouie';
 // launchd opens StandardOutPath/StandardErrorPath itself, following symlinks,
@@ -492,7 +494,7 @@ function renderSystemdUnit({ nodePath, entryPath, dataDir, user, profile = 'agen
     `ExecStart=${nodePath} ${entryPath} run --data-dir ${dataDir} --profile ${profile}`,
     'Restart=on-failure',
     'RestartSec=5',
-    `LoadCredential=kl-master-key:${CRED_PATH}`,
+    `LoadCredential=kl-master-key:${linuxCredPath(dataDir)}`,
     'NoNewPrivileges=yes',
     'ProtectSystem=strict',
     `ProtectHome=${profile === 'runbook' ? 'yes' : 'read-only'}`,
@@ -611,10 +613,10 @@ function planInstall({ platform = process.platform, nodePath = process.execPath,
       // read-only config there); only credentials/ is root-only. install -d
       // re-applies owner and mode to a dir that already exists, and the chmod
       // re-pins credentials/ to 0700 whatever an earlier install left.
-      { description: 'create the config dir (root-owned, read-only to others)', run: ['install', '-d', '-m', '0755', '-o', 'root', '-g', 'root', CONFIG_DIR] },
-      { description: 'create the credentials dir (root-only)', run: ['install', '-d', '-m', '0700', '-o', 'root', '-g', 'root', CRED_DIR] },
-      { description: 'pin the credentials dir to 0700', run: ['chmod', '0700', CRED_DIR] },
-      { description: 'write the master key credential (root-only)', writeFile: { path: CRED_PATH, content: crypto.randomBytes(32).toString('hex'), mode: 0o600, overwrite: false } },
+      { description: 'create the config dir (root-owned, read-only to others)', run: ['install', '-d', '-m', '0755', '-o', 'root', '-g', 'root', linuxConfigDir(dataDir)] },
+      { description: 'create the credentials dir (root-only)', run: ['install', '-d', '-m', '0700', '-o', 'root', '-g', 'root', linuxCredDir(dataDir)] },
+      { description: 'pin the credentials dir to 0700', run: ['chmod', '0700', linuxCredDir(dataDir)] },
+      { description: 'write the master key credential (root-only)', writeFile: { path: linuxCredPath(dataDir), content: crypto.randomBytes(32).toString('hex'), mode: 0o600, overwrite: false } },
       { description: 'write the systemd unit', writeFile: { path: UNIT_PATH, content: renderSystemdUnit({ nodePath, entryPath, dataDir, user: svcUser, profile }), mode: 0o644 } },
       { description: 'reload systemd', run: ['systemctl', 'daemon-reload'] },
       { description: 'enable and start', run: ['systemctl', 'enable', '--now', 'king-louie.service'] },

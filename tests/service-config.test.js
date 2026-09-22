@@ -4,7 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { loadServiceConfig, DEFAULT_PORTS } = require('../src/service/config');
-const { adminConfigDir } = require('../src/platform/paths');
+const { adminConfigDir, adminCredentialPath } = require('../src/platform/paths');
 const { addSink } = require('../src/logging');
 
 // Every temp dir this file creates is removed once all tests have run.
@@ -157,7 +157,7 @@ describe('loadServiceConfig: only an admin-owned file may enable a listener', ()
 describe('adminConfigDir', () => {
   it('is the root/admin-owned dir beside the data dir, and /etc/king-louie on Linux', () => {
     assert.strictEqual(adminConfigDir({ platform: 'linux', dataDir: '/var/lib/king-louie' }), '/etc/king-louie');
-    assert.strictEqual(adminConfigDir({ platform: 'linux', dataDir: '/srv/kl' }), '/etc/king-louie');
+    assert.strictEqual(adminConfigDir({ platform: 'linux' }), '/etc/king-louie');
     assert.strictEqual(
       adminConfigDir({ platform: 'darwin', dataDir: '/Library/Application Support/KingLouie/data' }),
       '/Library/Application Support/KingLouie/config'
@@ -166,5 +166,42 @@ describe('adminConfigDir', () => {
       adminConfigDir({ platform: 'win32', dataDir: 'C:\\ProgramData\\KingLouie\\data' }),
       'C:\\ProgramData\\KingLouie\\config'
     );
+  });
+
+  // Every Linux instance used to read the literal /etc/king-louie whatever
+  // --data-dir said, so a second service inherited the first one's `ports`,
+  // failed to bind and — since a failed bind of an enabled listener is now
+  // fatal — refused to start, with no per-instance port override anywhere.
+  it('derives a per-instance dir on Linux when the data dir is not the default', () => {
+    assert.strictEqual(adminConfigDir({ platform: 'linux', dataDir: '/srv/kl-b/data' }), '/srv/kl-b/config');
+    assert.notStrictEqual(
+      adminConfigDir({ platform: 'linux', dataDir: '/srv/kl-a/data' }),
+      adminConfigDir({ platform: 'linux', dataDir: '/srv/kl-b/data' })
+    );
+    // Dot segments and trailing slashes must not sneak an instance back onto
+    // the shared location, or past a root-owned parent.
+    assert.strictEqual(adminConfigDir({ platform: 'linux', dataDir: '/srv/kl-b/data/' }), '/srv/kl-b/config');
+    assert.strictEqual(adminConfigDir({ platform: 'linux', dataDir: '/var/lib/../lib/king-louie' }), '/etc/king-louie');
+  });
+
+  it('derives a per-instance credential path the same way', () => {
+    assert.strictEqual(adminCredentialPath({ platform: 'linux' }), '/etc/king-louie/credentials/kl-master-key');
+    assert.strictEqual(
+      adminCredentialPath({ platform: 'linux', dataDir: '/srv/kl-b/data' }),
+      '/srv/kl-b/config/credentials/kl-master-key'
+    );
+  });
+});
+
+// Two services with different data dirs must be able to coexist: each reads
+// its own admin config, so each can carry its own ports.
+describe('two instances on one Linux box', () => {
+  it('read their own admin config, not a shared one', () => {
+    const adminA = tmp();
+    const adminB = tmp();
+    writeAdmin(adminA, { features: { gateway: true }, ports: { gateway: 20001 } });
+    writeAdmin(adminB, { features: { gateway: true }, ports: { gateway: 20002 } });
+    assert.strictEqual(loadServiceConfig(tmp(), {}, opts(adminA)).ports.gateway, 20001);
+    assert.strictEqual(loadServiceConfig(tmp(), {}, opts(adminB)).ports.gateway, 20002);
   });
 });

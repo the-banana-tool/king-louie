@@ -1031,6 +1031,27 @@ describe('linux /etc/king-louie layout (I1)', () => {
 // server spawned without an explicit cwd is the concrete case — would start
 // inside it. The service chdirs into <dataDir>/workspace itself; the units
 // must not hand it the secret store to begin with.
+// A second Linux instance used to read the first one's /etc/king-louie, so it
+// inherited its ports, failed to bind and refused to start. Its config — and
+// its master-key credential — have to be its own.
+describe('linux: a non-default data dir gets its own admin config and credential', () => {
+  const alt = { ...base, dataDir: '/srv/kl-b/data' };
+  it('creates the config and credentials dirs beside that data dir', () => {
+    const s = planInstall({ platform: 'linux', ...alt });
+    const runs = s.map((x) => x.run?.join(' ')).filter(Boolean);
+    assert.ok(runs.includes('install -d -m 0755 -o root -g root /srv/kl-b/config'), runs.join('\n'));
+    assert.ok(runs.includes('install -d -m 0700 -o root -g root /srv/kl-b/config/credentials'));
+    assert.ok(s.some((x) => x.writeFile?.path === '/srv/kl-b/config/credentials/kl-master-key'));
+    assert.ok(!runs.some((r) => r.includes('/etc/king-louie')), 'must not touch the shared location');
+  });
+  it('points the unit at that credential', () => {
+    assert.match(
+      renderSystemdUnit(alt),
+      /^LoadCredential=kl-master-key:\/srv\/kl-b\/config\/credentials\/kl-master-key$/m
+    );
+  });
+});
+
 describe('no unit makes the secret store the working directory', () => {
   it('systemd: WorkingDirectory= is the workspace, and tolerates it not existing yet', () => {
     const unit = renderSystemdUnit(base);

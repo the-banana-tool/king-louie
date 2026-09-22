@@ -45,14 +45,38 @@ function ensurePrivateDir(dir) {
 // beside the data dir. Everything security-relevant (which listeners are on,
 // which ports they use) is read from here rather than from the data dir,
 // which is owned by the service account itself. The installers create it:
-// /etc/king-louie on Linux (root-owned 0755), …/KingLouie/config on macOS
-// (root-owned 0755) and %ProgramData%\KingLouie\config on Windows (inside a
-// parent whose protected DACL grants LOCAL SERVICE read and execute only).
+// /etc/king-louie for the default Linux layout (root-owned 0755),
+// …/KingLouie/config on macOS (root-owned 0755) and
+// %ProgramData%\KingLouie\config on Windows (inside a parent whose protected
+// DACL grants LOCAL SERVICE read and execute only).
+//
+// It is derived *per instance*, because a config dir shared between instances
+// is a config dir that cannot hold per-instance ports: Linux used to return
+// the literal /etc/king-louie whatever --data-dir said, so a second service on
+// the box inherited the first one's ports, failed to bind, and — since a
+// failed bind of an explicitly enabled listener is fatal — refused to start.
+// The security property is unchanged: whatever this resolves to, the installer
+// creates it root-owned and `assertAdminOwned` refuses to read a file the
+// service account owns or could write.
 function adminConfigDir({ platform = process.platform, dataDir } = {}) {
-  if (platform === 'linux') return '/etc/king-louie';
   const join = platform === 'win32' ? path.win32.join : path.posix.join;
   const dirname = platform === 'win32' ? path.win32.dirname : path.posix.dirname;
+  if (platform === 'linux') {
+    // Resolve before comparing, so "/var/lib/../lib/king-louie" is recognised
+    // as the default layout rather than deriving "/var/lib/config" from it.
+    const resolved = dataDir ? path.posix.resolve(dataDir) : null;
+    if (!resolved || resolved === defaultServiceDataDir({ platform: 'linux' })) return '/etc/king-louie';
+    return join(dirname(resolved), 'config');
+  }
   return join(dirname(dataDir), 'config');
+}
+
+// The root-only file the systemd unit's LoadCredential= reads, and that a
+// root-run admin CLI reads directly so both resolve the same master key.
+// Derived from the config dir so two instances do not share one key.
+function adminCredentialPath({ platform = process.platform, dataDir } = {}) {
+  const join = platform === 'win32' ? path.win32.join : path.posix.join;
+  return join(adminConfigDir({ platform, dataDir }), 'credentials', 'kl-master-key');
 }
 
 // `onPath` is told about every directory this ensured, so a root admin CLI can
@@ -71,4 +95,10 @@ function ensureServicePaths(dataDir, { onPath = null } = {}) {
   return paths;
 }
 
-module.exports = { defaultServiceDataDir, adminConfigDir, ensureServicePaths, ensurePrivateDir };
+module.exports = {
+  defaultServiceDataDir,
+  adminConfigDir,
+  adminCredentialPath,
+  ensureServicePaths,
+  ensurePrivateDir
+};

@@ -214,6 +214,15 @@ could then rewrite the binary it runs. Move the install to a system path.
   it inherits the parent's protected ACL, which grants `LOCAL SERVICE` read
   and execute only. If the file is missing, every feature stays off.
 
+  The table shows the *default* data directory's config directory. An
+  instance installed with a `--data-dir` of its own gets a config directory
+  of its own, `config` beside that data directory — including on Linux,
+  where every instance used to read the same `/etc/king-louie` and so
+  inherited the first instance's `ports`. Two services on one machine can
+  therefore carry different ports; the installer creates each one
+  root-owned, and a config file the service account owns or could write is
+  still refused.
+
   Every feature (`gateway`, `webhooks`, `mesh`, `channels`, `appDiscovery`) is
   **off by default**, and each one that is on is logged at startup naming the
   file that enabled it. `mesh` cannot be enabled in service mode yet: it is
@@ -250,7 +259,7 @@ installed service:
   change with its own in-memory copy. `channel list` is read-only and stays
   available.
 - Run them as root (Linux, macOS) or from an elevated shell (Windows). On
-  Linux, root reads the same `/etc/king-louie/credentials/kl-master-key` the
+  Linux, root reads the same `<configDir>/credentials/kl-master-key` the
   unit hands the service; on Windows the key is DPAPI-protected in the
   machine scope — unwrappable by anything on the box, so what keeps it
   private is only the data dir's ACL, which grants `LOCAL SERVICE`,
