@@ -245,8 +245,9 @@ could then rewrite the binary it runs. Move the install to a system path.
 - Run them as root (Linux, macOS) or from an elevated shell (Windows). On
   Linux, root reads the same `/etc/king-louie/credentials/kl-master-key` the
   unit hands the service; on Windows the key is DPAPI-protected in the
-  machine scope, readable by `LOCAL SERVICE` and Administrators only through
-  the data dir's ACL. On Linux and macOS, files the CLI creates in the data
+  machine scope — unwrappable by anything on the box, so what keeps it
+  private is only the data dir's ACL, which grants `LOCAL SERVICE`,
+  `SYSTEM` and Administrators (see the known gap below). On Linux and macOS, files the CLI creates in the data
   dir are handed back to the data dir's owner.
 - Every data dir holds a `key-check` file written on first use. If a command
   resolves a different master key than the one the data dir was encrypted
@@ -299,7 +300,9 @@ additionally denied outright, whatever the working directory is.
 - **Master key location, per OS:** a systemd credential (`kl-master-key`,
   Linux with systemd; root outside the unit reads the same file from
   `/etc/king-louie/credentials`); Windows DPAPI in the `LocalMachine` scope
-  in `master.key.dpapi`, kept private by the data directory's ACL; otherwise
+  in `master.key.dpapi`, kept private *only* by the data directory's ACL
+  (`LocalMachine` scope means any code on the machine can unwrap it — see
+  the known gap below); otherwise
   a `0600` key file in the data directory (macOS, and Linux without systemd
   credentials).
 - The gateway (when enabled) requires a bearer token stored encrypted and
@@ -318,8 +321,38 @@ additionally denied outright, whatever the working directory is.
   chat channels: if you turn `channels` on, a channel is never asked to
   approve (no Approve button is sent) and approval-gated tools are still
   denied.
-- On Windows the service runs as `LOCAL SERVICE`, a low-privilege account
-  with no access to any user's profile folders.
+- On Windows the service runs as `LOCAL SERVICE`. It is low-privilege and has
+  no access to any user's profile folders — but it is a **shared, built-in
+  account**, not a dedicated identity for King Louie. Every other service on
+  the machine that runs as `LOCAL SERVICE` (a third-party updater, an OEM
+  agent, anything an attacker gets code execution inside) has the same SID, so
+  the data directory's ACL grants it the same access: it can read the
+  cleartext `<dataDir>\gateway-token` and drive the gateway, and it can read
+  `master.key.dpapi` and run `ProtectedData.Unprotect` on it — the blob is
+  `LocalMachine`-scoped with null entropy, so nothing beyond that ACL keeps
+  it private — and from there decrypt every provider API key and vault
+  entry. Treat "anything on this machine running as `LOCAL SERVICE`" as
+  inside King Louie's trust boundary on Windows.
+
+#### Known gap — Windows service identity
+
+The shared-account problem above is a known gap, deferred to a dedicated
+Windows-hardening stage rather than patched around. The fix is a dedicated
+identity end to end:
+
+1. The installer creates a low-privilege local account for the service (or
+   uses a virtual service account, `NT SERVICE\KingLouie`, which Windows
+   gives its own per-service SID).
+2. The Scheduled Task's `<UserId>` becomes that SID instead of `S-1-5-19`.
+3. `master.key.dpapi` is protected in the `CurrentUser` scope of that account
+   (or `LocalMachine` with a per-install entropy blob) rather than plain
+   `LocalMachine` + null entropy.
+4. The data directory's SDDL names that SID alone in place of
+   `(A;OICI;FA;;;LS)`, so no other service on the box can read the data dir.
+
+Linux and macOS already have this: the installer creates a dedicated
+`king-louie` / `--user <account>` service account, and nothing else on the
+machine runs as it.
 
 ## Supported Providers
 
