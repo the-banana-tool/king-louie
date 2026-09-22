@@ -48,10 +48,14 @@ describe('AllowlistManager', () => {
     assert.ok(!mgr.isAllowed('telegram', 'any-user', null));
   });
 
-  it('allows all only when the owner explicitly set default: allow', () => {
+  // There is no allow-all any more, by any route: a stored `default: 'allow'`
+  // was indistinguishable from the one the pre-deny-by-default setPolicy wrote
+  // for every policy, and it was invisible in every management surface.
+  it('has no allow-all: even an explicit default: allow stays closed', () => {
     const mgr = new AllowlistManager(createStore());
     mgr.setPolicy('telegram', { default: 'allow', users: [], groups: [] });
-    assert.ok(mgr.isAllowed('telegram', 'any-user', null));
+    assert.ok(!mgr.isAllowed('telegram', 'any-user', null));
+    assert.strictEqual(mgr.getPolicy('telegram').default, 'deny');
   });
 
   it('blocks when default is deny and user not in allowlist', () => {

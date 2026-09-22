@@ -1835,6 +1835,13 @@ body {
   font-style: italic;
 }
 
+/* An empty list over an open channel: the opposite of reassuring. */
+.channel-access-empty.channel-access-warning {
+  color: var(--danger, #d9534f);
+  font-style: normal;
+  font-weight: 600;
+}
+
 .channel-access-refused {
   border: 1px solid var(--accent);
   border-radius: var(--radius-sm, 6px);

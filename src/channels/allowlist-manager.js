@@ -1,3 +1,7 @@
+const { createLogger } = require('../logging');
+
+const log = createLogger('channels/allowlist');
+
 // How many distinct refused senders are remembered for the owner's settings
 // pane. Small on purpose: this is "who just knocked", not an audit log.
 const DEFAULT_REFUSAL_CAPACITY = 20;
@@ -70,16 +74,44 @@ class AllowlistManager {
     }
   }
 
+  // A channel nobody has configured denies: anyone who finds the bot's handle
+  // would otherwise be able to drive the agent.
+  //
+  // A stored `default: 'allow'` is ignored rather than honoured. The build
+  // before deny-by-default persisted 'allow' for *any* policy that did not
+  // literally say 'deny' — including one that merely carried a user list — so
+  // a stored 'allow' carries no evidence that anyone chose it, and every store
+  // that ever went through addUser/addGroup has one. It is also invisible: the
+  // settings pane rendered "None — nobody can reach the agent this way" over
+  // an open channel. It is dropped here and rewritten to 'deny' on disk, so
+  // the dangerous state does not survive as something no surface can clear.
   getPolicy(channel) {
     const policies = this.store?.get?.(this.storeKey, {}) || {};
     const current = policies[channel] || {};
-    return {
-      // A channel nobody has configured denies. Anyone who finds the bot's
-      // handle would otherwise be able to drive the agent.
-      default: current.default === 'allow' ? 'allow' : 'deny',
+    const policy = {
+      default: 'deny',
       users: Array.isArray(current.users) ? current.users.map((id) => String(id)) : [],
       groups: Array.isArray(current.groups) ? current.groups.map((id) => String(id)) : []
     };
+    if (current.default === 'allow') this._retireAllowDefault(channel, policies, current);
+    return policy;
+  }
+
+  // Rewrites a stored allow-all to deny, once, keeping the explicit ids. A
+  // read-only or failing store must not break inbound message handling — the
+  // policy returned is already 'deny' either way — so a failure is logged and
+  // swallowed.
+  _retireAllowDefault(channel, policies, current) {
+    log.warn(
+      `the stored ${channel} allowlist has default: "allow", which opened the channel to everyone. `
+      + 'Ignoring it and rewriting it to "deny"; the explicit user and group ids are kept. '
+      + 'Re-add any sender that should still get through.'
+    );
+    try {
+      this.store?.set?.(this.storeKey, { ...policies, [channel]: { ...current, default: 'deny' } });
+    } catch (err) {
+      log.warn(`could not rewrite the ${channel} allowlist default to "deny": ${err.message}`);
+    }
   }
 
   setPolicy(channel, policy = {}) {
@@ -87,9 +119,9 @@ class AllowlistManager {
     const next = {
       ...currentAll,
       [channel]: {
-        // Only an explicit 'allow' opens the channel up; anything else — including
-        // a policy object that just carries a user list — stays closed.
-        default: policy.default === 'allow' ? 'allow' : 'deny',
+        // There is no supported way to open a channel to everyone. The only
+        // way through is an explicit user or group id.
+        default: 'deny',
         users: Array.isArray(policy.users) ? Array.from(new Set(policy.users.map((id) => String(id)))) : [],
         groups: Array.isArray(policy.groups) ? Array.from(new Set(policy.groups.map((id) => String(id)))) : []
       }
@@ -100,10 +132,6 @@ class AllowlistManager {
 
   isAllowed(channel, senderId, groupId = null) {
     const policy = this.getPolicy(channel);
-    if (policy.default === 'allow') {
-      return true;
-    }
-
     const sender = String(senderId || '');
     const group = groupId == null ? '' : String(groupId);
     if (sender && policy.users.includes(sender)) {

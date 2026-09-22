@@ -122,11 +122,33 @@ describe('AllowlistManager default policy', () => {
     assert.strictEqual(manager.isAllowed('discord', '999', null), false);
   });
 
-  it('still honours an explicit allow-all policy the owner wrote', () => {
-    const manager = new AllowlistManager(makeStore({
-      channelAllowlists: { telegram: { default: 'allow', users: [], groups: [] } }
-    }));
-    assert.strictEqual(manager.isAllowed('telegram', '999', null), true);
+  // The pre-deny-by-default `setPolicy` persisted `default: 'allow'` for any
+  // policy that did not say 'deny' — including one that merely carried a user
+  // list — so anyone who ran an earlier build can have an open channel on
+  // disk that no surface can see or clear, while the settings pane renders
+  // "nobody can reach the agent this way".
+  it('ignores a stored allow-all default and rewrites it to deny', () => {
+    const store = makeStore({
+      channelAllowlists: { telegram: { default: 'allow', users: ['42'], groups: [] } }
+    });
+    const manager = new AllowlistManager(store);
+
+    assert.strictEqual(manager.getPolicy('telegram').default, 'deny');
+    assert.strictEqual(manager.isAllowed('telegram', '999', null), false);
+    assert.strictEqual(manager.isAllowed('telegram', '42', null), true, 'the explicit ids must survive');
+    assert.strictEqual(
+      store.data.channelAllowlists.telegram.default,
+      'deny',
+      'the dangerous state must not be left on disk'
+    );
+  });
+
+  it('offers no way to write an allow-all default back', () => {
+    const store = makeStore();
+    const manager = new AllowlistManager(store);
+    assert.strictEqual(manager.setPolicy('telegram', { default: 'allow' }).default, 'deny');
+    assert.strictEqual(store.data.channelAllowlists.telegram.default, 'deny');
+    assert.strictEqual(manager.isAllowed('telegram', '999', null), false);
   });
 
   it('setPolicy does not silently widen a policy with no explicit default', () => {

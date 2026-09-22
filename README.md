@@ -781,13 +781,20 @@ not treat it as gated; treat it as not finished.
 The allowlist holds **user ids** and **group/channel ids**: a message is
 accepted if its sender is allowed, *or* if it arrives in an allowed group.
 Allowing a group therefore trusts everyone in it. There is no "allow
-everyone" switch in either surface.
+everyone" switch in either surface, and none on disk either: a stored
+`default: "allow"` — which every build before this one wrote for any policy
+that did not say otherwise — is ignored and rewritten to `deny` the first
+time it is read, with a warning naming the channel. The explicit ids are
+kept.
 
-An unrecognised sender gets **one** reply telling them their id, and is
-ignored after that, so the refusal is discoverable without handing a stranger
-a message pump. On a headless install the same ids are in
-`<dataDir>/logs/service.log` (the first message from each unknown sender logs
-at `warn`).
+An unrecognised sender who addressed the bot gets **one** reply telling them
+their id, and is ignored after that, so the refusal is discoverable without
+handing a stranger a message pump. In a group, someone who never addressed
+the bot gets no reply at all — the notice names their id and the group id,
+and that is not published into a room on a bystander's behalf. The owner
+still learns the id: the desktop pane lists whoever was just refused, and on
+a headless install the same ids are in `<dataDir>/logs/service.log` (the
+first message from each unknown sender logs at `warn`).
 
 ### Tool approvals from a channel
 
@@ -1176,7 +1183,10 @@ Changes on this branch that will alter behaviour on an existing install.
 
 A Telegram or Discord channel whose allowlist is empty now **denies every
 sender**, where it used to allow everyone by default. Any stranger who found
-the bot's handle could previously drive the agent.
+the bot's handle could previously drive the agent. That includes a channel
+carrying a stored `default: "allow"` from an earlier build: it is ignored and
+rewritten to `deny`, so a channel that looked closed in the settings pane
+while being open to everyone is now closed in fact.
 
 *If you were using a channel, it stops answering until you allowlist yourself*
 — Settings > Channels > _channel_ Access on the desktop, or

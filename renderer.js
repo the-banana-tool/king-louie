@@ -7958,14 +7958,25 @@ function renderChannelIdRow(label, actionLabel, onAction, actionClass = 'btn') {
   return row;
 }
 
-function renderChannelAccessList(channel, kind, ids) {
+// `defaultPolicy` decides what an *empty* list means. AllowlistManager no
+// longer returns 'allow' for any channel — a stored allow-all is ignored and
+// rewritten to deny — but the pane must never be the thing that claims a
+// channel is closed while it is open, so it reads the policy it was given
+// rather than assuming.
+function renderChannelAccessList(channel, kind, ids, defaultPolicy = 'deny') {
   const container = channelAccessEl(channel, `${kind === 'user' ? 'users' : 'groups'}-list`);
   if (!container) return;
   container.innerHTML = '';
   if (!ids.length) {
     const empty = document.createElement('div');
     empty.className = 'channel-access-empty';
-    empty.textContent = 'None — nobody can reach the agent this way.';
+    if (defaultPolicy === 'allow') {
+      empty.classList.add('channel-access-warning');
+      empty.textContent = 'No ids listed — but this channel is OPEN TO EVERYONE: '
+        + 'its stored policy allows every sender. Add an id to close it.';
+    } else {
+      empty.textContent = 'None — nobody can reach the agent this way.';
+    }
     container.appendChild(empty);
     return;
   }
@@ -8001,21 +8012,36 @@ function renderChannelRefusals(channel, refusals) {
   });
 }
 
-function applyChannelAccess(access) {
+// `note` is prepended to the status line rather than replacing it: the line
+// also carries "approvals are denied until you set a target" and, if the
+// channel is open to everyone, the warning about that. "Added user X." used to
+// clobber both until the pane was reopened.
+function applyChannelAccess(access, note = '') {
   const channel = access.channel;
-  renderChannelAccessList(channel, 'user', access.users || []);
-  renderChannelAccessList(channel, 'group', access.groups || []);
+  const defaultPolicy = access.defaultPolicy === 'allow' ? 'allow' : 'deny';
+  renderChannelAccessList(channel, 'user', access.users || [], defaultPolicy);
+  renderChannelAccessList(channel, 'group', access.groups || [], defaultPolicy);
   renderChannelRefusals(channel, access.recentRefusals || []);
 
   const approvalInput = channelAccessEl(channel, 'approval-input');
   if (approvalInput && document.activeElement !== approvalInput) {
     approvalInput.value = access.approvalChatId || '';
   }
-  if (!access.approvalChatId) {
-    setChannelAccessStatus(channel, 'No approval target set — every approval from this channel is denied.');
-  } else {
-    setChannelAccessStatus(channel, `Approvals go to ${access.approvalChatId}.`);
+  const status = channelAccessStatusText(access, defaultPolicy);
+  setChannelAccessStatus(channel, note ? `${note} ${status}` : status, defaultPolicy === 'allow');
+}
+
+// One line that states both things the owner needs: who can reach the agent,
+// and where approvals go. An open channel is said first and in full, because
+// it is the dangerous state.
+function channelAccessStatusText(access, defaultPolicy) {
+  const approvals = access.approvalChatId
+    ? `Approvals go to ${access.approvalChatId}.`
+    : 'No approval target set — every approval from this channel is denied.';
+  if (defaultPolicy === 'allow') {
+    return `WARNING: this channel is open to every sender, whatever the lists below show. ${approvals}`;
   }
+  return approvals;
 }
 
 async function refreshChannelAccess(channel) {
@@ -8041,8 +8067,7 @@ async function allowChannelId(channel, kind, id) {
       await window.electron.channels.allow({ channel, kind, id: String(id) }),
       'Failed to add the id.'
     );
-    applyChannelAccess(access);
-    setChannelAccessStatus(channel, `Added ${kind} ${id}.`);
+    applyChannelAccess(access, `Added ${kind} ${id}.`);
   } catch (err) {
     setChannelAccessStatus(channel, err.message || 'Failed to add the id.', true);
   }
@@ -8054,8 +8079,7 @@ async function removeChannelId(channel, kind, id) {
       await window.electron.channels.remove({ channel, kind, id: String(id) }),
       'Failed to remove the id.'
     );
-    applyChannelAccess(access);
-    setChannelAccessStatus(channel, `Removed ${kind} ${id}.`);
+    applyChannelAccess(access, `Removed ${kind} ${id}.`);
   } catch (err) {
     setChannelAccessStatus(channel, err.message || 'Failed to remove the id.', true);
   }

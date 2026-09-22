@@ -100,6 +100,31 @@ describe('E2E: Settings — Channels', () => {
     assert.strictEqual(cleared, '');
   });
 
+  // The pane used to ignore `defaultPolicy` entirely, so a store carrying the
+  // pre-deny-by-default `default: 'allow'` rendered "None — nobody can reach
+  // the agent this way" over a channel open to the entire internet. The
+  // manager no longer returns 'allow', but the pane must not be the thing that
+  // gets this wrong if it ever sees one.
+  it('never claims a channel is closed when the policy it was handed is open', async () => {
+    const rendered = await evaluate(ctx, `
+      (() => {
+        applyChannelAccess({ channel: 'telegram', defaultPolicy: 'allow', users: [], groups: [], approvalChatId: '' });
+        return JSON.stringify({
+          list: document.getElementById('channel-telegram-users-list').textContent,
+          status: document.getElementById('channel-telegram-access-status').textContent
+        });
+      })()
+    `);
+    const { list, status } = JSON.parse(rendered);
+    assert.doesNotMatch(list, /nobody can reach the agent/i);
+    assert.match(list, /open to everyone/i);
+    assert.match(status, /open to every sender/i);
+
+    // Put the pane back to the real state.
+    await evaluate(ctx, `refreshChannelAccess('telegram')`);
+    await waitFor(ctx, `document.getElementById('channel-telegram-users-list').textContent.includes('nobody can reach')`);
+  });
+
   it('offers no control that re-opens a channel to everyone', async () => {
     const defaultPolicy = await evaluate(ctx, `
       window.electron.channels.getAccess({ channel: 'telegram' }).then((r) => r.data.defaultPolicy)
