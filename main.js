@@ -40,6 +40,7 @@ const AgentExecutor = require('./src/agents/agent-executor');
 const AgentOrchestrator = require('./src/agents/orchestrator');
 const { getAgent, listAgents } = require('./src/agents');
 const GatewayServer = require('./src/gateway/gateway-server');
+const { ensureGatewayToken } = require('./src/gateway/gateway-token');
 const SessionManager = require('./src/gateway/session-manager');
 const RemoteControl = require('./src/gateway/remote-control');
 const { ChannelRegistry } = require('./src/channels/channel-plugin');
@@ -2438,7 +2439,8 @@ const initializeAgentInfrastructure = async () => {
 
   gatewayServer = new GatewayServer({
     host: '127.0.0.1',
-    port: process.env.KL_TEST_MODE ? 0 : 18789
+    port: process.env.KL_TEST_MODE ? 0 : 18789,
+    authToken: ensureGatewayToken({ store, cipher, dataDir: app.getPath('userData') })
   });
 
   toolRegistry.register(new MessageTool(gatewayServer, sessionManager));

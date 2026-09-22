@@ -1,11 +1,17 @@
 const { EventEmitter } = require('events');
+const crypto = require('crypto');
 const WebSocket = require('ws');
+
+const LOOPBACK = new Set(['127.0.0.1', '::1', 'localhost']);
 
 class GatewayServer extends EventEmitter {
   constructor(config = {}) {
     super();
-    this.port = config.port || (process.env.KL_TEST_MODE ? 0 : 18789);
+    // config.port may legitimately be 0 (bind an ephemeral port), so check
+    // for undefined/null explicitly rather than falling back on falsy 0.
+    this.port = config.port != null ? config.port : (process.env.KL_TEST_MODE ? 0 : 18789);
     this.host = config.host || '127.0.0.1';
+    this.authToken = config.authToken || null;
     this.connections = new Map();
     this.messageHandlers = new Map();
     this.nextConnectionId = 0;
@@ -15,9 +21,20 @@ class GatewayServer extends EventEmitter {
   async start() {
     if (this.wss) return;
 
+    if (!this.authToken) throw new Error('GatewayServer requires an authToken');
+    if (!LOOPBACK.has(this.host)) throw new Error('GatewayServer only binds to loopback');
+    const expected = crypto.createHash('sha256').update(this.authToken).digest();
+
     this.wss = new WebSocket.Server({
       host: this.host,
-      port: this.port
+      port: this.port,
+      verifyClient: ({ req }, done) => {
+        if (req.headers.origin) return done(false, 403, 'Forbidden');
+        const header = String(req.headers.authorization || '');
+        const presented = header.startsWith('Bearer ') ? header.slice(7) : '';
+        const ok = crypto.timingSafeEqual(crypto.createHash('sha256').update(presented).digest(), expected);
+        return ok ? done(true) : done(false, 401, 'Unauthorized');
+      }
     });
 
     this.wss.on('connection', (ws, req) => {

@@ -50,14 +50,13 @@ class WebhookServer {
   }
 
   async handleHttpRequest(req, res) {
-    // Set CORS headers for development
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Hub-Signature, X-Hub-Signature-256');
-
-    // Handle preflight OPTIONS requests
+    if (req.headers.origin) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Browser-originated requests are not accepted' }));
+      return;
+    }
     if (req.method === 'OPTIONS') {
-      res.writeHead(200);
+      res.writeHead(405);
       res.end();
       return;
     }
