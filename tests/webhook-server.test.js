@@ -47,6 +47,30 @@ describe('WebhookServer hardening', () => {
   it('rejects preflight', async () => {
     assert.strictEqual((await request(server.port, { method: 'OPTIONS' })).status, 405);
   });
+
+  // A browser `fetch(url, { mode: 'no-cors' })` GET sends no Origin, so the
+  // Origin check never sees it, yet the page learns from the resolved promise
+  // that something is listening on that port. Every browser that can make the
+  // request also sends fetch metadata, and no ordinary client does.
+  it('rejects a no-cors GET, so /health is not a port-existence oracle', async () => {
+    const r = await request(server.port, {
+      headers: { 'Sec-Fetch-Mode': 'no-cors', 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Dest': 'empty' }
+    });
+    assert.strictEqual(r.status, 403);
+  });
+
+  it('rejects a webhook POST carrying fetch metadata', async () => {
+    const r = await request(server.port, {
+      method: 'POST',
+      path: '/webhooks/abc123',
+      headers: { 'Sec-Fetch-Mode': 'cors' }
+    });
+    assert.strictEqual(r.status, 403);
+  });
+
+  it('still answers an ordinary client that sends no fetch metadata', async () => {
+    assert.strictEqual((await request(server.port)).status, 200);
+  });
 });
 
 describe('WebhookServer port', () => {

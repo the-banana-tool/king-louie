@@ -236,9 +236,11 @@ could then rewrite the binary it runs. Move the install to a system path.
   cannot bind its port is fatal: the service refuses to start rather than run
   without the listener you asked for.
 
-- `<dataDir>/service.json` still sets `profile` (`agent` or `runbook`). It is
-  writable by the service account, so `features` and `ports` are **ignored**
-  there, with a warning naming the file.
+- `profile` (`agent` or `runbook`) comes from `<configDir>/service.json` or
+  the unit's `--profile`, never from `<dataDir>/service.json`: which profile
+  runs decides whether the agent stack loads at all. `features`, `ports` and
+  `profile` in the service-writable `<dataDir>/service.json` are all
+  **ignored**, with a warning naming the file.
 - `king-louie-service token set anthropic < keyfile` — stores a provider API
   key (read from stdin, never a CLI argument, so it doesn't end up in shell
   history or `ps`). The provider must be one king-louie knows (`openai`,
@@ -987,7 +989,10 @@ Register HTTP webhooks for external automation:
 - `POST /webhooks/{webhookId}` — Trigger a webhook
 - `GET /health` — Health check
 - Signature verification via `X-Hub-Signature-256`
-- CORS support
+- **No browser may reach it.** A request carrying an `Origin` header, or any
+  `Sec-Fetch-*` fetch metadata, is refused with `403` — including a `no-cors`
+  `GET /health`, which sends no `Origin` and would otherwise tell any page you
+  visit that something is listening on that port.
 
 The webhook server runs on the gateway port + 1 unless a port is set
 explicitly — in service mode that is `ports.webhook` in the admin-owned

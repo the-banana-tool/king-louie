@@ -31,11 +31,29 @@ describe('loadServiceConfig', () => {
       ports: { gateway: 18793, webhook: 18794 }
     });
   });
-  it('reads the profile from service.json and lets CLI overrides win', () => {
+  it('reads the profile from the admin config and lets CLI overrides win', () => {
+    const admin = tmp();
+    writeAdmin(admin, { profile: 'runbook' });
+    assert.strictEqual(loadServiceConfig(tmp(), {}, opts(admin)).profile, 'runbook');
+    assert.strictEqual(loadServiceConfig(tmp(), { profile: 'agent' }, opts(admin)).profile, 'agent');
+  });
+
+  // Which profile runs decides whether the agent stack loads at all, so it is
+  // security-relevant config and must not come from the service-writable file.
+  // Every unit's ExecStart passes --profile, so this was never reachable on an
+  // installed service; it contradicted the rule all the same.
+  it('ignores the profile in the service-writable <dataDir>/service.json, and says so', () => {
     const dir = tmp();
-    writeCfg(dir, { profile: 'agent' });
-    assert.strictEqual(loadServiceConfig(dir).profile, 'agent');
-    assert.strictEqual(loadServiceConfig(dir, { profile: 'runbook' }).profile, 'runbook');
+    writeCfg(dir, { profile: 'runbook' });
+    const warnings = [];
+    const remove = addSink((r) => { if (r.level === 'warn') warnings.push(r.message); });
+    let cfg;
+    try { cfg = loadServiceConfig(dir, {}, opts(tmp())); } finally { remove(); }
+    assert.strictEqual(cfg.profile, 'agent', 'the default must win over the service-writable file');
+    assert.ok(
+      warnings.some((m) => m.includes('service.json') && /profile/.test(m)),
+      `expected a warning naming the file, got ${JSON.stringify(warnings)}`
+    );
   });
   it('rejects unknown profiles', () => {
     assert.throws(() => loadServiceConfig(tmp(), { profile: 'frontdoor' }), /Unknown profile "frontdoor"/);

@@ -96,7 +96,13 @@ const SECRET_FILE_PREFIXES = [
   'gateway-token',   // the gateway bearer token, in plaintext
   '.gateway-token',  // its atomic-write temp
   'chat-data.json',  // the store: provider tokens, gateway.authToken, mesh key
-  'config.json'      // the vault: every __vault_ entry
+  'config.json',     // the vault: every __vault_ entry
+  // The same master key under the name the OS integration uses: systemd's
+  // LoadCredential= hands it to the service as $CREDENTIALS_DIRECTORY/kl-master-key,
+  // and on macOS (and Linux without systemd) it lives under that name in the
+  // admin config dir. Registering those directories without this prefix would
+  // leave the raw hex key readable by name.
+  'kl-master-key'
 ];
 
 const SECRET_PATH_DENIAL_MESSAGE =

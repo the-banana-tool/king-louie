@@ -70,7 +70,17 @@ class WebhookServer {
   async handleHttpRequest(req, res) {
     // Presence, not truthiness: an empty `Origin:` is still a browser-shaped
     // header and must not slip through the check.
-    if ('origin' in req.headers) {
+    //
+    // Origin alone is not enough. A `fetch(url, { mode: 'no-cors' })` GET
+    // sends no Origin at all, so a page in any browser could ask for /health
+    // and learn from the resolved promise that something is listening on this
+    // port — a port-existence oracle for anything that wants to find the
+    // service. Fetch metadata (Sec-Fetch-Site/Mode/Dest) is sent by every
+    // browser that can make such a request, is not forgeable from script, and
+    // is sent by no ordinary client, so its mere presence is the signal.
+    const browserShaped = 'origin' in req.headers
+      || Object.keys(req.headers).some((name) => name.toLowerCase().startsWith('sec-fetch-'));
+    if (browserShaped) {
       res.writeHead(403, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Browser-originated requests are not accepted' }));
       return;

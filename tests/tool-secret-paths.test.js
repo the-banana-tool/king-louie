@@ -245,3 +245,52 @@ describe('secret-path deny-list (A1)', () => {
     });
   });
 });
+
+// The master key is not always called master.key: systemd hands it to the
+// service as `kl-master-key` in $CREDENTIALS_DIRECTORY, and on macOS (and
+// Linux without systemd) it now lives under that name in the admin config
+// dir, outside the data dir. It is the same key, so it needs the same floor.
+describe('the master-key credential is denied by name too', () => {
+  it('protects kl-master-key in a registered credentials dir', () => {
+    const credDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-cred-'));
+    try {
+      fs.writeFileSync(path.join(credDir, 'kl-master-key'), 'ab'.repeat(32));
+      fs.writeFileSync(path.join(credDir, 'readme.txt'), 'not a secret');
+      registerSecretDataDir(credDir);
+
+      assert.strictEqual(isProtectedSecretPath(path.join(credDir, 'kl-master-key')), true);
+      assert.strictEqual(isPathAllowed(path.join(credDir, 'kl-master-key'), credDir, [credDir]), false);
+      assert.strictEqual(isProtectedSecretPath(path.join(credDir, 'readme.txt')), false);
+    } finally {
+      fs.rmSync(credDir, { recursive: true, force: true });
+    }
+  });
+
+  it('createCore registers the credentials dir it was handed', () => {
+    const { createCore } = require('../src/core');
+    const credDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-cred2-'));
+    const core = createCore({
+      paths: { dataDir },
+      store: makeMemoryStore(),
+      vaultStore: makeMemoryStore(),
+      cipher: { isEncryptionAvailable: () => false, encryptString: (x) => x, decryptString: (x) => x },
+      credentialsDir: credDir
+    });
+    try {
+      assert.strictEqual(isProtectedSecretPath(path.join(credDir, 'kl-master-key')), true);
+    } finally {
+      core.shutdown?.();
+      fs.rmSync(credDir, { recursive: true, force: true });
+    }
+  });
+});
+
+function makeMemoryStore() {
+  const data = {};
+  return {
+    get: (k, fallback) => (k in data ? data[k] : fallback),
+    set: (k, v) => { data[k] = v; },
+    has: (k) => k in data,
+    delete: (k) => { delete data[k]; }
+  };
+}

@@ -17,9 +17,10 @@ const DEFAULT_FEATURES = { gateway: false, webhooks: false, mesh: false, channel
 // keep the service's gateway off the air.
 const DEFAULT_PORTS = { gateway: 18793, webhook: 18794 };
 const CONFIG_FILE = 'service.json';
-// Keys that decide whether a network listener exists and where it binds.
-// These may only come from the admin-owned config dir; see below.
-const ADMIN_ONLY_KEYS = ['features', 'ports'];
+// Keys that decide whether a network listener exists and where it binds, and
+// which profile — and so whether the agent stack loads at all. These may only
+// come from the admin-owned config dir; see below.
+const ADMIN_ONLY_KEYS = ['features', 'ports', 'profile'];
 
 function validatePorts(ports, file) {
   if (ports === undefined) return {};
@@ -107,7 +108,7 @@ function loadServiceConfig(dataDir, overrides = {}, {
     adminCfg = readJsonFile(adminFile) || {};
   }
 
-  const profile = overrides.profile || adminCfg.profile || serviceCfg.profile || 'agent';
+  const profile = overrides.profile || adminCfg.profile || 'agent';
   if (!PROFILES.has(profile)) throw new Error(`Unknown profile "${profile}". Expected one of: ${[...PROFILES].join(', ')}`);
 
   const features = { ...DEFAULT_FEATURES, ...(adminCfg.features || {}), ...(overrides.features || {}) };

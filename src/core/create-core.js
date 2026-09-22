@@ -5,6 +5,7 @@ const ProviderFactory = require('../providers/provider-factory');
 const InferenceRouter = require('../providers/inference-router');
 const { initializeTools, toolRegistry } = require('../tools');
 const { registerSecretDataDir } = require('../tools/utils');
+const { adminCredentialPath } = require('../platform/paths');
 const ToolExecutor = require('../execution/tool-executor');
 const DenialTracker = require('../tools/denial-tracker');
 const AgentLoop = require('../execution/agent-loop');
@@ -109,14 +110,29 @@ function createCore(deps = {}) {
   // Where the agent works: the root for the tool executor, the hooks
   // directory, project context and the SessionStart/SessionEnd hook payloads.
   // The Electron host leaves this unset and gets process.cwd() as before; the
-  // service passes <dataDir>/workspace explicitly, because the alternative —
-  // process.chdir() at startup — is process-wide mutable state that anything
-  // else in the process can change or come to depend on.
+  // service passes <dataDir>/workspace explicitly. createCore never chdirs the
+  // process — whether to do that is the host's decision (src/service/run.js
+  // does, for the consumers of process.cwd() createCore does not own).
   const hostWorkingDirectory = deps.workingDirectory || process.cwd();
   // The ungated read tools (Read, Grep, Glob) never ask for approval, so the
   // only thing between a remote origin and this directory's master key,
   // gateway token and encrypted stores is a deny-list. Tell it where they are.
   registerSecretDataDir(paths.dataDir);
+  // The master key is not always inside the data dir: systemd hands it to the
+  // service in $CREDENTIALS_DIRECTORY, and on macOS (and Linux without
+  // systemd) it lives in the admin config dir. Unreachable while
+  // allowedDirectories is empty and the workspace is under the data dir — but
+  // an operator who widens allowedDirectories must not thereby expose the raw
+  // hex key.
+  const credentialDirs = [deps.credentialsDir, process.env.CREDENTIALS_DIRECTORY];
+  try {
+    credentialDirs.push(path.dirname(adminCredentialPath({ dataDir: paths.dataDir })));
+  } catch {
+    // A data dir we cannot derive an admin location from is simply not added.
+  }
+  for (const dir of credentialDirs) {
+    if (dir) registerSecretDataDir(dir);
+  }
   const shutdownTimeoutMs = deps.shutdownTimeoutMs ?? 5000;
   // 'allow' (default, the Electron app's behaviour): an approval requester
   // attached by a remote origin (a chat channel's Approve button, a gateway
