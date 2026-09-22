@@ -1,5 +1,6 @@
 // A small, dependency-free subset of electron-store's API for the headless
 // service: dot-path get/set, top-level defaults, atomic private writes.
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
@@ -30,11 +31,45 @@ class JsonFileStore {
     return this._data;
   }
 
+  // Atomic (temp + rename) and private (0600), written so that nothing in the
+  // containing directory can steer it. The admin CLI runs this as root inside
+  // a data dir the *service account* owns, so every name in there is
+  // attacker-controlled:
+  //   - the temp name is random, not pid-derived, so it cannot be pre-planted
+  //     by enumerating pids;
+  //   - it is created with 'wx' (O_CREAT|O_EXCL), which refuses to follow a
+  //     symlink and refuses an existing file rather than truncating it;
+  //   - the mode is pinned with fchmod on that descriptor, never a path-based
+  //     chmod that would re-resolve the name after the write.
   _save() {
-    const tmp = `${this.path}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(this._data, null, 2), { mode: 0o600 });
-    fs.renameSync(tmp, this.path);
-    if (process.platform !== 'win32') fs.chmodSync(this.path, 0o600);
+    const body = JSON.stringify(this._data, null, 2);
+    // One retry: 'wx' failing with EEXIST means something is squatting the
+    // name we picked. Remove it and try a fresh name rather than writing
+    // into whatever is there.
+    for (let attempt = 0; ; attempt += 1) {
+      const tmp = `${this.path}.${crypto.randomBytes(8).toString('hex')}.tmp`;
+      let fd;
+      try {
+        fd = fs.openSync(tmp, 'wx', 0o600);
+      } catch (err) {
+        if (err.code === 'EEXIST' && attempt === 0) {
+          fs.rmSync(tmp, { force: true });
+          continue;
+        }
+        throw err;
+      }
+      try {
+        fs.writeFileSync(fd, body);
+        // 0600 leaves no group access at all, so a group inherited from a
+        // setgid data dir is harmless; the owner is this process by
+        // construction, since 'wx' means we created the file.
+        if (process.platform !== 'win32') fs.fchmodSync(fd, 0o600);
+      } finally {
+        fs.closeSync(fd);
+      }
+      fs.renameSync(tmp, this.path);
+      break;
+    }
     if (this._onWrite) this._onWrite(this.path);
   }
 
