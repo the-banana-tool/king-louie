@@ -1,5 +1,5 @@
 // tests/core-create.test.js
-const { describe, it } = require('node:test');
+const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert');
 const crypto = require('crypto');
 const fs = require('fs');
@@ -9,9 +9,16 @@ const { createCore } = require('../src/core');
 const { JsonFileStore } = require('../src/platform/json-file-store');
 const { createAesGcmCipher } = require('../src/platform/cipher');
 const { createHeadlessPrompter } = require('../src/platform/prompter');
+const { withTimeout, TIMED_OUT } = require('../src/core/with-timeout');
+
+const tempDirs = [];
+afterEach(() => {
+  while (tempDirs.length) fs.rmSync(tempDirs.pop(), { recursive: true, force: true });
+});
 
 function makeDeps() {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-core-'));
+  tempDirs.push(dataDir);
   const sent = [];
   return {
     sent,
@@ -48,5 +55,68 @@ describe('createCore', () => {
     assert.ok(core.context.toolRegistry.getFunctionDefinitions().length > 10);
     assert.strictEqual(core.getMeshContext(), null);
     await core.shutdown();
+  });
+
+  it('finishes shutdown() within shutdownTimeoutMs when the SessionEnd hook never resolves', async () => {
+    const { deps } = makeDeps();
+    const handlerPath = path.join(deps.paths.dataDir, 'hang-hook.js');
+    fs.writeFileSync(handlerPath, 'module.exports = () => new Promise(() => {});\n');
+    const core = createCore({ ...deps, shutdownTimeoutMs: 50 });
+    await core.start();
+    // Seam: the started core's hook registry (exposed via context) feeds the
+    // HookExecutor that runHookEvent uses, so a SessionEnd hook whose handler
+    // never settles reproduces a hung user hook without spawning a shell.
+    const registry = core.context.getHookRegistry();
+    const original = registry.getByEvent.bind(registry);
+    registry.getByEvent = (event) => (event === 'SessionEnd'
+      ? [{ name: 'hang', event: 'SessionEnd', matcher: '*', enabled: true, handler: handlerPath }]
+      : original(event));
+    const startedAt = Date.now();
+    await core.shutdown();
+    const elapsed = Date.now() - startedAt;
+    assert.ok(elapsed < 2000, `shutdown took ${elapsed}ms`);
+  });
+});
+
+describe('withTimeout', () => {
+  function trackTimers() {
+    const realSet = global.setTimeout;
+    const realClear = global.clearTimeout;
+    const created = [];
+    const cleared = new Set();
+    global.setTimeout = (...args) => { const t = realSet(...args); created.push(t); return t; };
+    global.clearTimeout = (t) => { cleared.add(t); return realClear(t); };
+    return { created, cleared, restore: () => { global.setTimeout = realSet; global.clearTimeout = realClear; } };
+  }
+
+  it('clears and unrefs its timer when the promise settles first', async () => {
+    const timers = trackTimers();
+    let result;
+    try {
+      result = await withTimeout(Promise.resolve('done'), 60_000, 'fast step');
+    } finally {
+      timers.restore();
+    }
+    assert.strictEqual(result, 'done');
+    assert.strictEqual(timers.created.length, 1);
+    assert.ok(timers.cleared.has(timers.created[0]), 'timer was not cleared');
+    assert.strictEqual(timers.created[0].hasRef(), false);
+  });
+
+  it('clears its timer when the promise rejects first and passes the rejection through', async () => {
+    const timers = trackTimers();
+    try {
+      await assert.rejects(withTimeout(Promise.reject(new Error('boom')), 60_000, 'bad step'), /boom/);
+    } finally {
+      timers.restore();
+    }
+    assert.ok(timers.cleared.has(timers.created[0]), 'timer was not cleared');
+  });
+
+  it('resolves with TIMED_OUT and reports the label after the deadline', async () => {
+    const seen = [];
+    const result = await withTimeout(new Promise(() => {}), 20, 'slow step', (label, ms) => seen.push([label, ms]));
+    assert.strictEqual(result, TIMED_OUT);
+    assert.deepStrictEqual(seen, [['slow step', 20]]);
   });
 });

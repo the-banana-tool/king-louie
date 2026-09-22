@@ -71,6 +71,7 @@ const { DEFAULT_SETTINGS, mergeSettings } = require('./settings');
 const { createVault } = require('../platform/vault');
 const { ensureGatewayToken } = require('../gateway/gateway-token');
 const { createHeadlessPrompter } = require('../platform/prompter');
+const { withTimeout } = require('./with-timeout');
 
 const DEFAULT_FEATURES = { gateway: true, webhooks: true, mesh: true, channels: true, appDiscovery: true };
 
@@ -84,6 +85,7 @@ function createCore(deps = {}) {
   const features = { ...DEFAULT_FEATURES, ...(deps.features || {}) };
   const vault = createVault({ store: vaultStore, cipher });
   const userDataPath = paths.dataDir;
+  const shutdownTimeoutMs = deps.shutdownTimeoutMs ?? 5000;
 
   // ── moved from main.js ──
   const log = createLogger('main');
@@ -2492,8 +2494,13 @@ function createCore(deps = {}) {
   };
 
   const shutdown = async () => {
-    await runHookEvent('SessionEnd', { source: 'main', endedAt: new Date().toISOString(), workingDirectory: process.cwd() })
-      .catch((err) => log.warn(`SessionEnd hook failed: ${err.message}`));
+    // Stop cron first so no job fires while the slower stops below drain.
+    if (cronScheduler) cronScheduler.stop();
+    const warnTimeout = (label, ms) => log.warn(`${label} timed out after ${ms}ms; continuing shutdown`);
+    await withTimeout(
+      runHookEvent('SessionEnd', { source: 'main', endedAt: new Date().toISOString(), workingDirectory: process.cwd() }),
+      shutdownTimeoutMs, 'SessionEnd hook', warnTimeout
+    ).catch((err) => log.warn(`SessionEnd hook failed: ${err.message}`));
     const stops = [
       ['MCP shutdown', mcpManager && (() => mcpManager.disconnectAll())],
       ['Channel shutdown', channelRegistry && (() => channelRegistry.shutdownAll())],
@@ -2503,10 +2510,11 @@ function createCore(deps = {}) {
       ['Mesh shutdown', meshContext && (() => meshContext.shutdown())],
       ['Gateway server stop', gatewayServer && (() => gatewayServer.stop())]
     ].filter(([, fn]) => fn);
-    const results = await Promise.allSettled(stops.map(([, fn]) => fn()));
+    const results = await Promise.allSettled(
+      stops.map(([label, fn]) => withTimeout(fn(), shutdownTimeoutMs, label, warnTimeout))
+    );
     results.forEach((r, i) => { if (r.status === 'rejected') log.warn(`${stops[i][0]} failed: ${r.reason?.message}`); });
     if (usageTracker) usageTracker.reset();
-    if (cronScheduler) cronScheduler.stop();
   };
 
   const context = {
