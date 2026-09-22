@@ -30,3 +30,6 @@ venv/
 tmp/
 temp/
 *.tmp
+
+# Claude Code local settings (machine-specific paths, never shared)
+.claude/settings.local.json
