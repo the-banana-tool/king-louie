@@ -3,6 +3,12 @@
   "version": "26.5.27",
   "description": "Cross-platform Electron desktop chat application",
   "main": "main.js",
+  "bin": {
+    "king-louie-service": "bin/king-louie-service.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "start": "electron .",
     "test": "node --test tests/*.test.js",
