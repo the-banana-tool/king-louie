@@ -59,10 +59,12 @@ function parseArgs(argv) {
   return { positional, flags };
 }
 
+// Buffers are concatenated and decoded once, so a multi-byte UTF-8 character
+// split across two chunks survives intact.
 async function readStdin(stdin) {
-  let text = '';
-  for await (const chunk of stdin) text += chunk;
-  return text.replace(/\r?\n$/, '');
+  const chunks = [];
+  for await (const chunk of stdin) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8'));
+  return Buffer.concat(chunks).toString('utf8').replace(/\r?\n$/, '');
 }
 
 async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr }) {
@@ -117,15 +119,38 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
           io.stderr.write(`Usage: king-louie-service ${command} set <${command === 'token' ? 'provider' : 'key'}>\n`);
           return 2;
         }
+        // A running service holds its own in-memory copy of the stores and
+        // would overwrite this change on its next write.
+        const { readPidfile, isRunning } = require('./pidfile');
+        const pid = readPidfile(dataDir);
+        if (pid && isRunning(pid)) {
+          io.stderr.write(`The service is running (pid ${pid}) on ${dataDir}. Stop it first, run this again, then start it.\n`);
+          return 1;
+        }
+        const { createCore, PROVIDER_LABELS } = require('../core');
+        let name = arg;
+        if (command === 'token') {
+          name = arg.trim().toLowerCase();
+          if (!Object.prototype.hasOwnProperty.call(PROVIDER_LABELS, name)) {
+            io.stderr.write(`Unknown provider "${arg}". Known providers: ${Object.keys(PROVIDER_LABELS).join(', ')}\n`);
+            return 2;
+          }
+        }
         const value = await readStdin(io.stdin);
-        if (!value) { io.stderr.write('No value on stdin.\n'); return 2; }
-        const { createCore } = require('../core');
+        if (!value.trim()) { io.stderr.write('No value on stdin.\n'); return 2; }
         const { CHAT_DATA_DEFAULTS } = require('../core/settings');
         const { buildServicePorts } = require('./ports');
-        const core = createCore(buildServicePorts({ dataDir, chatDataDefaults: CHAT_DATA_DEFAULTS }));
-        if (command === 'token') core.saveProviderToken(arg, value);
-        else core.vault.set(arg, value);
-        io.stdout.write(`${command === 'token' ? 'Token' : 'Secret'} "${arg}" saved (encrypted).\n`);
+        const { restoreDataDirOwnership } = require('./ownership');
+        try {
+          const core = createCore(buildServicePorts({ dataDir, chatDataDefaults: CHAT_DATA_DEFAULTS }));
+          if (command === 'token') core.saveProviderToken(name, value);
+          else core.vault.set(name, value);
+        } finally {
+          // Run as root, everything written above is root-owned; hand it back
+          // to the service account that owns the data dir.
+          restoreDataDirOwnership(dataDir, io.ownership);
+        }
+        io.stdout.write(`${command === 'token' ? 'Token' : 'Secret'} "${name}" saved (encrypted).\n`);
         return 0;
       }
 

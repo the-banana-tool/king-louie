@@ -36,6 +36,79 @@ describe('service CLI', () => {
     assert.match(saved, /^klc1:/);
     assert.ok(!t.out.join('').includes('sk-from-stdin'));
   });
+  it('writes key-check next to the stores on first use', async () => {
+    const dir = tmp();
+    assert.strictEqual(await main(['vault', 'set', 'api-key', '--data-dir', dir], io('v1\n')), 0);
+    assert.match(fs.readFileSync(path.join(dir, 'key-check'), 'utf8'), /^klc1:/);
+  });
+  it('refuses (exit 1) when the data dir was encrypted with a different master key', { skip: process.platform === 'win32' }, async () => {
+    // POSIX key-file source: swapping master.key simulates a CLI resolving a
+    // different key than the service (another identity, a lost credential).
+    const dir = tmp();
+    assert.strictEqual(await main(['vault', 'set', 'k', '--data-dir', dir], io('v1\n')), 0);
+    fs.writeFileSync(path.join(dir, 'master.key'), 'ab'.repeat(32), { mode: 0o600 });
+    const t = io('v2\n');
+    assert.strictEqual(await main(['vault', 'set', 'k', '--data-dir', dir], t), 1);
+    assert.match(t.err.join(''), /different master key.*source key-file/);
+  });
+  it('normalizes the provider name and rejects unknown providers and whitespace-only values', async () => {
+    const dir = tmp();
+    const ok = io('sk-abcdef\n');
+    assert.strictEqual(await main(['token', 'set', ' OpenAI ', '--data-dir', dir], ok), 0);
+    assert.ok(JSON.parse(fs.readFileSync(path.join(dir, 'chat-data.json'), 'utf8')).apiTokens.openai.startsWith('klc1:'));
+
+    const unknown = io('sk-abcdef\n');
+    assert.strictEqual(await main(['token', 'set', 'opneai', '--data-dir', tmp()], unknown), 2);
+    assert.match(unknown.err.join(''), /Unknown provider "opneai".*openai/);
+
+    const blank = io('   \n');
+    assert.strictEqual(await main(['token', 'set', 'openai', '--data-dir', tmp()], blank), 2);
+    assert.match(blank.err.join(''), /No value on stdin/);
+  });
+  it('decodes stdin once, so a multi-byte character split across chunks survives', async () => {
+    const dir = tmp();
+    const bytes = Buffer.from('pässwörd-€', 'utf8');
+    const split = bytes.indexOf(Buffer.from('€', 'utf8')) + 1; // inside the 3-byte euro sign
+    const t = io();
+    t.stdin = Readable.from([bytes.subarray(0, split), bytes.subarray(split)]);
+    assert.strictEqual(await main(['vault', 'set', 'pw', '--data-dir', dir], t), 0);
+    const { buildServicePorts } = require('../src/service/ports');
+    const { createVault } = require('../src/platform/vault');
+    const ports = buildServicePorts({ dataDir: dir });
+    assert.strictEqual(createVault({ store: ports.vaultStore, cipher: ports.cipher }).get('pw'), 'pässwörd-€');
+  });
+  it('refuses token/vault set with exit 1 while the service is running on that data dir', async () => {
+    const dir = tmp();
+    fs.writeFileSync(path.join(dir, 'service.pid'), String(process.pid)); // a live pid
+    for (const argv of [['token', 'set', 'openai'], ['vault', 'set', 'k']]) {
+      const t = io('value-123\n');
+      assert.strictEqual(await main([...argv, '--data-dir', dir], t), 1);
+      assert.match(t.err.join(''), new RegExp(`running \\(pid ${process.pid}\\).*Stop it first`));
+    }
+    assert.ok(!fs.existsSync(path.join(dir, 'chat-data.json')), 'nothing written');
+    assert.ok(!fs.existsSync(path.join(dir, 'config.json')), 'nothing written');
+  });
+  it('hands files it wrote back to the data dir owner when run as root (injected uid/fs)', async () => {
+    const dir = tmp();
+    const chowned = [];
+    const realLstat = fs.lstatSync;
+    const fsImpl = {
+      readdirSync: fs.readdirSync,
+      // The data dir belongs to the service account (uid 990); everything
+      // under it looks root-created, as it would after a root CLI run.
+      lstatSync: (p) => {
+        const st = realLstat(p);
+        return Object.assign(Object.create(Object.getPrototypeOf(st)), st, { uid: path.resolve(p) === path.resolve(dir) ? 990 : 0, gid: path.resolve(p) === path.resolve(dir) ? 991 : 0 });
+      },
+      lchownSync: (p, uid, gid) => chowned.push([path.relative(dir, p), uid, gid])
+    };
+    const t = io('secret-value\n');
+    t.ownership = { getuid: () => 0, fsImpl };
+    assert.strictEqual(await main(['vault', 'set', 'k', '--data-dir', dir], t), 0);
+    const names = chowned.map(([p]) => p.split(path.sep).join('/'));
+    for (const expected of ['config.json', 'key-check', 'logs', 'cache']) assert.ok(names.includes(expected), `expected ${expected} to be chowned; got ${names}`);
+    assert.ok(chowned.every(([, uid, gid]) => uid === 990 && gid === 991));
+  });
   it('reports status for a data dir with no running service', async () => {
     const t = io();
     assert.strictEqual(await main(['status', '--data-dir', tmp()], t), 3);
