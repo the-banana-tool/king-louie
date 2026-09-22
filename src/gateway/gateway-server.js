@@ -1,6 +1,7 @@
 const { EventEmitter } = require('events');
 const crypto = require('crypto');
 const WebSocket = require('ws');
+const { publishGatewayToken, revokeGatewayToken } = require('./gateway-token');
 const { createLogger } = require('../logging');
 
 const log = createLogger('gateway-server');
@@ -26,6 +27,9 @@ class GatewayServer extends EventEmitter {
     this.host = config.host || '127.0.0.1';
     this.authToken = config.authToken || null;
     this.maxConnections = config.maxConnections != null ? config.maxConnections : MAX_CONNECTIONS;
+    // Where the plaintext bearer token is published for local clients — written
+    // only after the listener binds, removed when it stops.
+    this.tokenFileDir = config.tokenFileDir || null;
     this.connections = new Map();
     this.messageHandlers = new Map();
     this.nextConnectionId = 0;
@@ -93,6 +97,10 @@ class GatewayServer extends EventEmitter {
         try { socket.destroy(); } catch { /* already gone */ }
       });
     }
+
+    if (this.tokenFileDir) {
+      publishGatewayToken(this.tokenFileDir, this.authToken);
+    }
   }
 
   async stop() {
@@ -109,6 +117,10 @@ class GatewayServer extends EventEmitter {
 
     await new Promise((resolve) => this.wss.close(resolve));
     this.wss = null;
+
+    if (this.tokenFileDir) {
+      revokeGatewayToken(this.tokenFileDir);
+    }
   }
 
   handleConnection(ws) {

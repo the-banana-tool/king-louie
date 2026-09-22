@@ -135,6 +135,30 @@ describe('GatewayServer resilience', () => {
     assert.strictEqual(await connect(server.port, { Authorization: 'Bearer t' }), 'open');
   });
 
+  it('writes the token file only once the listener is bound, and removes it on stop', async () => {
+    const fs = require('fs');
+    const os = require('os');
+    const path = require('path');
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-gwfile-'));
+    const tokenFile = path.join(dataDir, 'gateway-token');
+
+    // A port that is already taken: start() must leave no bearer token behind.
+    const holder = new GatewayServer({ port: 0, authToken: 't' });
+    await holder.start();
+    const dead = new GatewayServer({ port: holder.port, authToken: 'secret', tokenFileDir: dataDir });
+    await assert.rejects(dead.start(), /EADDRINUSE/);
+    assert.strictEqual(fs.existsSync(tokenFile), false, 'a failed bind must not leave a valid token on disk');
+    await holder.stop();
+
+    server = new GatewayServer({ port: 0, authToken: 'secret', tokenFileDir: dataDir });
+    await server.start();
+    assert.strictEqual(fs.readFileSync(tokenFile, 'utf8'), 'secret');
+
+    await server.stop();
+    server = null;
+    assert.strictEqual(fs.existsSync(tokenFile), false, 'the token should not outlive the listener');
+  });
+
   it('bounds the frame size a single client may claim', async () => {
     server = new GatewayServer({ port: 0, authToken: 't' });
     await server.start();

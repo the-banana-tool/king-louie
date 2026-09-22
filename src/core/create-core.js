@@ -2247,7 +2247,10 @@ function createCore(deps = {}) {
       host: '127.0.0.1',
       port: process.env.KL_TEST_MODE ? 0 : ports.gateway,
       // Only minted when the listener is on; start() is never called otherwise.
-      authToken: features.gateway ? ensureGatewayToken({ store, cipher, dataDir: userDataPath }) : null
+      authToken: features.gateway ? ensureGatewayToken({ store, cipher }) : null,
+      // The plaintext token file is written by start(), after the bind
+      // succeeds, and removed by stop() — never for a port nothing serves.
+      tokenFileDir: features.gateway ? userDataPath : null
     });
 
     toolRegistry.register(new MessageTool(gatewayServer, sessionManager));
