@@ -40,6 +40,21 @@ class NoticeLimiter {
   }
 }
 
+// Whether an inbound message actually addresses the bot, as opposed to merely
+// arriving where the bot can see it.
+//
+// The refusal notice names the sender id and the group id, so it may only go to
+// someone who spoke to the bot: in a shared room every other member's ordinary
+// chatter would otherwise be answered with their own id published into a room
+// the owner does not control. `requireMention` is no help here — it is off by
+// default, so on the first run after a deny-by-default upgrade every member of
+// the group gets named. A one-to-one chat is addressed to the bot by
+// construction.
+function addressesBot({ isGroup, wasMentioned, isCommand, isReplyToBot } = {}) {
+  if (!isGroup) return true;
+  return Boolean(wasMentioned || isCommand || isReplyToBot);
+}
+
 // Decides where an approval prompt may be sent.
 // Returns { target } when there is a legitimate approver, or { reason } when
 // the caller must deny.
@@ -56,4 +71,4 @@ function resolveApprovalTarget({ ownerTarget, originTarget } = {}) {
   return { target: owner, reason: null };
 }
 
-module.exports = { NoticeLimiter, resolveApprovalTarget, DEFAULT_NOTICE_CAPACITY };
+module.exports = { NoticeLimiter, resolveApprovalTarget, addressesBot, DEFAULT_NOTICE_CAPACITY };

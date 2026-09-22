@@ -8,7 +8,7 @@ const {
   formatApprovalRequest
 } = require('./discord-adapter');
 const { shouldRespond } = require('./mention-gating');
-const { NoticeLimiter, resolveApprovalTarget } = require('./sender-policy');
+const { NoticeLimiter, resolveApprovalTarget, addressesBot } = require('./sender-policy');
 const { skillRegistry } = require('../skills');
 const { createLogger } = require('../logging');
 const log = createLogger('discord-bridge');
@@ -61,6 +61,9 @@ class DiscordChannel extends ChannelPlugin {
     this.discordToLocalChatMap = new Map();
     // One "you are not on the allowlist" reply per sender, capped.
     this.unknownSenderNotified = new NoticeLimiter();
+    // One warn-level log line per refused sender, capped, whether or not the
+    // sender was answered.
+    this.unknownSenderSeen = new NoticeLimiter();
 
     this.boundAgentResponse = this.handleAgentResponse.bind(this);
   }
@@ -204,18 +207,23 @@ class DiscordChannel extends ChannelPlugin {
     const inbound = this.normalizeInboundMessage(message);
     const text = inbound.text;
 
-    // Checked before anything else touches the message: an unrecognised sender
-    // gets one notice with their id and is otherwise ignored.
-    if (this.allowlistManager && !this.allowlistManager.isAllowed('discord', inbound.sender.id, inbound.group?.id || null)) {
-      await this.notifyUnknownSender(message.channelId, inbound.sender.id, inbound.group?.id || null);
-      return;
-    }
-
     const channelSettings = this.getChannelSettings() || {};
     const isGroup = Boolean(inbound.group);
     const isCommand = text.startsWith('/');
     const isReply = message.reference ? true : false;
     const wasMentioned = this.hasMention(text) || message.mentions.has(this.client?.user);
+
+    // Checked before anything else acts on the message: an unrecognised sender
+    // is ignored, and is told their id only if they addressed the bot.
+    if (this.allowlistManager && !this.allowlistManager.isAllowed('discord', inbound.sender.id, inbound.group?.id || null)) {
+      const isReplyToBot = Boolean(
+        this.botUserId && String(message.mentions?.repliedUser?.id || '') === this.botUserId
+      );
+      await this.notifyUnknownSender(message.channelId, inbound.sender.id, inbound.group?.id || null, {
+        mayReply: addressesBot({ isGroup, wasMentioned, isCommand, isReplyToBot })
+      });
+      return;
+    }
 
     if (!shouldRespond({
       isGroup,
@@ -314,18 +322,28 @@ class DiscordChannel extends ChannelPlugin {
 
   // Tell an unrecognised sender their id once, so the owner can allowlist them,
   // without handing a stranger a reply for every message they send.
-  async notifyUnknownSender(channelId, senderId, groupId = null) {
+  //
+  // `mayReply` is false when the message did not address the bot: the refusal is
+  // still recorded (the allowlist journal, and this log line) but nothing is
+  // posted, because the notice names the sender and the channel and the room is
+  // not the owner's to publish into.
+  async notifyUnknownSender(channelId, senderId, groupId = null, { mayReply = true } = {}) {
     const sender = String(senderId || '');
     const group = groupId == null ? '' : String(groupId);
     const where = `${sender || '(unknown)'}${group ? ` in channel ${group}` : ''}`;
 
     // Log the first message from each unknown sender at warn and the rest at
     // debug: a stranger must not be able to fill the log file by repeating.
-    if (!this.unknownSenderNotified.shouldNotify(`${group}|${sender}`)) {
+    if (this.unknownSenderSeen.shouldNotify(`${group}|${sender}`)) {
+      log.warn(`ignored message from unauthorized discord sender ${where}`);
+    } else {
       log.debug(`ignored another message from unauthorized discord sender ${where}`);
-      return;
     }
-    log.warn(`ignored message from unauthorized discord sender ${where}`);
+
+    // The reply has its own once-per-sender budget, so a bystander message that
+    // was deliberately left unanswered does not spend it.
+    if (!mayReply) return;
+    if (!this.unknownSenderNotified.shouldNotify(`${group}|${sender}`)) return;
 
     const lines = [
       'This King Louie instance does not accept messages from you.',

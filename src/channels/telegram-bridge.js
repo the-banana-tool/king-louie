@@ -7,7 +7,7 @@ const {
 } = require('./telegram-adapter');
 const { ChannelPlugin } = require('./channel-plugin');
 const { shouldRespond } = require('./mention-gating');
-const { NoticeLimiter, resolveApprovalTarget } = require('./sender-policy');
+const { NoticeLimiter, resolveApprovalTarget, addressesBot } = require('./sender-policy');
 const { skillRegistry } = require('../skills');
 const { createLogger } = require('../logging');
 const log = createLogger('telegram-bridge');
@@ -69,6 +69,9 @@ class TelegramBridge extends ChannelPlugin {
     this.telegramToLocalChatMap = new Map(); // Maps Telegram chat ID to local King Louie chat ID
     // One "you are not on the allowlist" reply per sender, capped.
     this.unknownSenderNotified = new NoticeLimiter();
+    // One warn-level log line per refused sender, capped, whether or not the
+    // sender was answered.
+    this.unknownSenderSeen = new NoticeLimiter();
 
     this.boundAgentResponse = this.handleAgentResponse.bind(this);
   }
@@ -356,18 +359,28 @@ class TelegramBridge extends ChannelPlugin {
 
   // Tell an unrecognised sender their id once, so the owner can allowlist them,
   // without handing a stranger a reply for every message they send.
-  async notifyUnknownSender(chatId, senderId, groupId = null) {
+  //
+  // `mayReply` is false when the message did not address the bot: the refusal is
+  // still recorded (the allowlist journal, and this log line) but nothing is
+  // posted, because the notice names the sender and the group and the room is
+  // not the owner's to publish into.
+  async notifyUnknownSender(chatId, senderId, groupId = null, { mayReply = true } = {}) {
     const sender = String(senderId || '');
     const group = groupId == null ? '' : String(groupId);
     const where = `${sender || '(unknown)'}${group ? ` in group ${group}` : ''}`;
 
     // Log the first message from each unknown sender at warn and the rest at
     // debug: a stranger must not be able to fill the log file by repeating.
-    if (!this.unknownSenderNotified.shouldNotify(`${group}|${sender}`)) {
+    if (this.unknownSenderSeen.shouldNotify(`${group}|${sender}`)) {
+      log.warn(`ignored message from unauthorized telegram sender ${where}`);
+    } else {
       log.debug(`ignored another message from unauthorized telegram sender ${where}`);
-      return;
     }
-    log.warn(`ignored message from unauthorized telegram sender ${where}`);
+
+    // The reply has its own once-per-sender budget, so a bystander message that
+    // was deliberately left unanswered does not spend it.
+    if (!mayReply) return;
+    if (!this.unknownSenderNotified.shouldNotify(`${group}|${sender}`)) return;
 
     const lines = [
       'This King Louie instance does not accept messages from you.',
@@ -396,7 +409,12 @@ class TelegramBridge extends ChannelPlugin {
     const wasMentioned = this.isMentioned(message, inbound);
 
     if (this.allowlistManager && !this.allowlistManager.isAllowed('telegram', inbound.sender.id, inbound.group?.id || null)) {
-      await this.notifyUnknownSender(chatId, inbound.sender.id, inbound.group?.id || null);
+      const isReplyToBot = Boolean(
+        this.botId && message.reply_to_message && String(message.reply_to_message.from?.id || '') === this.botId
+      );
+      await this.notifyUnknownSender(chatId, inbound.sender.id, inbound.group?.id || null, {
+        mayReply: addressesBot({ isGroup, wasMentioned, isCommand, isReplyToBot })
+      });
       return;
     }
 

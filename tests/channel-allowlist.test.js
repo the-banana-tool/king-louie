@@ -67,6 +67,15 @@ function telegramMessage(senderId, text = 'hello', chatId = senderId) {
   };
 }
 
+function telegramGroupMessage(senderId, text = 'just chatting', overrides = {}) {
+  return {
+    chat: { id: -1001234567890, type: 'supergroup', title: 'Room' },
+    from: { id: senderId, username: `user${senderId}` },
+    text,
+    ...overrides
+  };
+}
+
 function makeDiscord(options = {}) {
   const bridge = new DiscordChannel({
     token: 'test-token',
@@ -93,6 +102,15 @@ function discordMessage(userId, text = 'hello', channelId = `dm-${userId}`) {
     mentions: { users: [], has: () => false },
     attachments: { forEach: () => {} },
     thread: null
+  };
+}
+
+function discordGuildMessage(userId, text = 'just chatting', overrides = {}) {
+  return {
+    ...discordMessage(userId, text, 'guild-chan'),
+    guildId: 'guild-1',
+    channel: { name: 'general' },
+    ...overrides
   };
 }
 
@@ -157,6 +175,89 @@ describe('Telegram bridge — unknown senders', () => {
     const bridge = makeTelegram({ allowlistManager });
     await bridge.handleMessage(telegramMessage(42, 'hello'));
     assert.strictEqual(bridge.gateway.sent.length, 1);
+  });
+});
+
+// The refusal names the sender id and the group id. Posting that into a shared
+// room for every bystander who happens to type is both noise and a leak, so the
+// reply is gated on the message actually addressing the bot. The refusal itself
+// — the record in the allowlist journal and the log line — is not gated.
+describe('Channel bridges — the refusal notice is gated on being addressed', () => {
+  it('telegram: says nothing to a group bystander who never addressed the bot', async () => {
+    const allowlistManager = new AllowlistManager(makeStore());
+    const bridge = makeTelegram({ allowlistManager, getChannelSettings: () => ({}) });
+    bridge.botUsername = 'kinglouiebot';
+
+    await bridge.handleMessage(telegramGroupMessage(999, 'morning everyone'));
+
+    assert.deepStrictEqual(bridge.sent, [], 'a bystander must not be answered in the room');
+    assert.deepStrictEqual(bridge.gateway.sent, []);
+    const refusals = allowlistManager.listRecentRefusals('telegram');
+    assert.strictEqual(refusals.length, 1, 'the owner must still be able to learn the id');
+    assert.strictEqual(refusals[0].senderId, '999');
+  });
+
+  it('telegram: stays silent for a bystander even with requireMention off', async () => {
+    const bridge = makeTelegram({
+      allowlistManager: new AllowlistManager(makeStore()),
+      getChannelSettings: () => ({ requireMention: false })
+    });
+    bridge.botUsername = 'kinglouiebot';
+    await bridge.handleMessage(telegramGroupMessage(999, 'morning everyone'));
+    assert.deepStrictEqual(bridge.sent, []);
+  });
+
+  it('telegram: still tells a stranger who does address the bot', async () => {
+    const bridge = makeTelegram({
+      allowlistManager: new AllowlistManager(makeStore()),
+      getChannelSettings: () => ({ requireMention: true })
+    });
+    bridge.botUsername = 'kinglouiebot';
+
+    await bridge.handleMessage(telegramGroupMessage(999, '@kinglouiebot run whoami'));
+
+    assert.strictEqual(bridge.sent.length, 1);
+    assert.match(bridge.sent[0].text, /999/);
+    assert.deepStrictEqual(bridge.gateway.sent, []);
+  });
+
+  it('telegram: a bystander first, then a mention, still gets exactly one reply', async () => {
+    const bridge = makeTelegram({
+      allowlistManager: new AllowlistManager(makeStore()),
+      getChannelSettings: () => ({ requireMention: true })
+    });
+    bridge.botUsername = 'kinglouiebot';
+
+    await bridge.handleMessage(telegramGroupMessage(999, 'morning everyone'));
+    await bridge.handleMessage(telegramGroupMessage(999, '@kinglouiebot hello?'));
+    await bridge.handleMessage(telegramGroupMessage(999, '@kinglouiebot hello??'));
+
+    assert.strictEqual(bridge.sent.length, 1, 'the earlier silence must not consume the one reply');
+  });
+
+  it('discord: says nothing to a guild bystander who never addressed the bot', async () => {
+    const allowlistManager = new AllowlistManager(makeStore());
+    const bridge = makeDiscord({ allowlistManager, getChannelSettings: () => ({}) });
+    bridge.botUserId = 'bot-1';
+
+    await bridge.handleMessageCreate(discordGuildMessage('999', 'morning everyone'));
+
+    assert.deepStrictEqual(bridge.sent, []);
+    assert.deepStrictEqual(bridge.gateway.sent, []);
+    assert.strictEqual(allowlistManager.listRecentRefusals('discord').length, 1);
+  });
+
+  it('discord: still tells a stranger who does address the bot', async () => {
+    const bridge = makeDiscord({
+      allowlistManager: new AllowlistManager(makeStore()),
+      getChannelSettings: () => ({ requireMention: true })
+    });
+    bridge.botUserId = 'bot-1';
+
+    await bridge.handleMessageCreate(discordGuildMessage('999', '<@bot-1> run whoami'));
+
+    assert.strictEqual(bridge.sent.length, 1);
+    assert.match(bridge.sent[0].text, /999/);
   });
 });
 
