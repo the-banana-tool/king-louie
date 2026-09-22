@@ -98,3 +98,38 @@ describe('service run with a relative --data-dir', { timeout: 60000 }, () => {
     }
   });
 });
+
+// Copilot review comment C8 (PR #28). With the default feature set no listener
+// binds, so nothing used to stop a second `run` on the same data dir: it
+// overwrote the first one's pidfile and the two processes then shared the
+// cached JSON stores and the cron schedule.
+describe('two runs against one data dir', { timeout: 60000 }, () => {
+  it('the second one refuses to start and leaves the first one\'s claim alone', async () => {
+    const first = startService('runbook');
+    const info = await first.ready;
+    assert.strictEqual(Number(fs.readFileSync(path.join(first.dataDir, 'service.pid'), 'utf8')), first.child.pid);
+
+    const second = fork(BIN, ['run', '--data-dir', first.dataDir, '--profile', 'runbook'], {
+      silent: true,
+      env: { ...process.env, KL_TEST_MODE: '1', KING_LOUIE_LOG_LEVEL: 'info' }
+    });
+    let stderr = '';
+    second.stderr.on('data', (d) => { stderr += d; });
+    const code = await new Promise((resolve) => second.once('exit', resolve));
+
+    assert.notStrictEqual(code, 0, 'a duplicate run must not report success');
+    assert.match(stderr, /already owns/);
+    assert.strictEqual(
+      Number(fs.readFileSync(path.join(first.dataDir, 'service.pid'), 'utf8')),
+      first.child.pid,
+      'the live instance must keep its pidfile'
+    );
+
+    const exited = new Promise((resolve) => first.child.once('exit', resolve));
+    first.child.send({ type: 'shutdown' });
+    assert.strictEqual(await exited, 0);
+    assert.strictEqual(fs.existsSync(path.join(first.dataDir, 'service.pid')), false);
+    assert.strictEqual(info.profile, 'runbook');
+    fs.rmSync(first.dataDir, { recursive: true, force: true });
+  });
+});

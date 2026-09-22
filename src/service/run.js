@@ -1,6 +1,6 @@
 const path = require('path');
 const { createLogger } = require('../logging');
-const { writePidfile, removePidfile } = require('./pidfile');
+const { acquireInstanceLock } = require('./pidfile');
 const { loadServiceConfig } = require('./config');
 const { ensureServicePaths, ensurePrivateDir } = require('../platform/paths');
 const { attachServiceLogFile } = require('./log-file');
@@ -121,6 +121,18 @@ async function runService({ dataDir: requestedDataDir, profile: profileOverride,
   const dataDir = path.resolve(requestedDataDir);
   const { logsDir } = ensureServicePaths(dataDir);
   const logFile = attachServiceLogFile(logsDir);
+  // Before the core, its cron timers and its store writers exist: two `run`
+  // processes sharing one data dir corrupt each other's stores, and with the
+  // default feature set no listener binds, so a port clash would not have
+  // caught it either.
+  let lock;
+  try {
+    lock = acquireInstanceLock(dataDir);
+  } catch (err) {
+    log.error(err.message);
+    logFile.close();
+    throw err;
+  }
   const workspace = ensureWorkspace(dataDir);
   try {
     let running;
@@ -136,7 +148,6 @@ async function runService({ dataDir: requestedDataDir, profile: profileOverride,
       log.error(`service failed to start: ${err.message}`);
       throw err;
     }
-    writePidfile(dataDir);
     stdout.write(`${JSON.stringify({ event: 'ready', profile, dataDir, workspace, cwd: process.cwd(), pid: process.pid, masterKeySource: running.masterKeySource })}\n`);
     log.info('service ready', { profile, masterKeySource: running.masterKeySource });
 
@@ -149,13 +160,10 @@ async function runService({ dataDir: requestedDataDir, profile: profileOverride,
     });
 
     log.info('shutting down');
-    try {
-      await running.stop();
-    } finally {
-      removePidfile(dataDir);
-    }
+    await running.stop();
     log.info('stopped');
   } finally {
+    lock.release();
     logFile.close();
   }
 }
