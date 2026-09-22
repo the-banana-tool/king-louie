@@ -101,8 +101,20 @@ class GatewayServer extends EventEmitter {
       });
     }
 
-    if (this.tokenFileDir) {
-      publishGatewayToken(this.tokenFileDir, this.authToken);
+    // A bound listener nothing can authenticate to is worse than no listener:
+    // every local client follows the README to <dataDir>/gateway-token, finds
+    // nothing (or a stale token from an earlier run, which for a freshly
+    // minted token is just as useless), and the service still reports itself
+    // ready with `features.gateway` on. The return value used to be dropped,
+    // so a failed write was a log line and nothing else. Roll the listener
+    // back instead: `stop()` closes it, nulls `wss` and revokes any stale file,
+    // which is exactly what assertEnabledListenersBound reads in service mode.
+    if (this.tokenFileDir && !publishGatewayToken(this.tokenFileDir, this.authToken)) {
+      await this.stop();
+      throw new Error(
+        `gateway token could not be published to ${this.tokenFileDir}; refusing to serve a listener no local `
+        + 'client can authenticate to'
+      );
     }
   }
 

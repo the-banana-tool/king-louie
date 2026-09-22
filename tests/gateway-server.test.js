@@ -168,3 +168,38 @@ describe('GatewayServer resilience', () => {
     assert.ok(server.wss.options.maxPayload <= 4 * 1024 * 1024, `maxPayload is ${server.wss.options.maxPayload}`);
   });
 });
+
+// Copilot review comment C9 (PR #28): the return value from
+// publishGatewayToken was dropped, so a listener whose bearer token never
+// reached disk still came up — and in service mode assertEnabledListenersBound
+// saw a bound gateway and let the service report {"event":"ready"} with
+// features.gateway on and no token any local client could use.
+describe('GatewayServer: the token file is part of starting', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+
+  it('refuses to serve when the token cannot be published, and leaves no listener behind', async () => {
+    // A *file* where the token dir should be: writing <it>/gateway-token fails
+    // on every platform, without needing permissions this test cannot set.
+    const notADir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'kl-gw-pub-')), 'tokens');
+    fs.writeFileSync(notADir, 'x');
+
+    // Assigned to the shared `server` so that a regression (start resolving
+    // with the listener up) is torn down by afterEach instead of holding the
+    // test runner open until it times out.
+    server = new GatewayServer({ port: 0, authToken: 't', tokenFileDir: notADir });
+    await assert.rejects(() => server.start(), /token could not be published/);
+    assert.strictEqual(server.wss, null, 'a listener nothing can authenticate to must not stay up');
+  });
+
+  it('starts normally when the token can be published', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-gw-pub-'));
+    server = new GatewayServer({ port: 0, authToken: 't', tokenFileDir: dir });
+    await server.start();
+    assert.strictEqual(fs.readFileSync(path.join(dir, 'gateway-token'), 'utf8'), 't');
+    await server.stop();
+    server = null;
+    assert.strictEqual(fs.existsSync(path.join(dir, 'gateway-token')), false);
+  });
+});
