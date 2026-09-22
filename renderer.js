@@ -8062,7 +8062,7 @@ async function removeChannelId(channel, kind, id) {
 }
 
 CHANNEL_ACCESS_CHANNELS.forEach((channel) => {
-  [['user', 'user'], ['group', 'group']].forEach(([kind]) => {
+  ['user', 'group'].forEach((kind) => {
     const addBtn = channelAccessEl(channel, `${kind}-add-btn`);
     const input = channelAccessEl(channel, `${kind}-input`);
     if (!addBtn || !input) return;
