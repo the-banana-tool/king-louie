@@ -413,6 +413,51 @@
             </div>
           </section>
 
+          <section class="template-variables-card channel-access-card" data-channel="telegram">
+            <h3>Telegram Access</h3>
+            <p class="channel-access-note">
+              Only the ids listed below may message this bot. The list starts empty
+              and an empty list refuses <em>everyone</em>, including you — send the
+              bot a message, then add the id it replies with.
+            </p>
+
+            <div id="channel-telegram-refused-block" class="channel-access-refused" hidden>
+              <h4>Recently refused</h4>
+              <div id="channel-telegram-refused-list" class="channel-access-list"></div>
+            </div>
+
+            <h4>Allowed users</h4>
+            <div id="channel-telegram-users-list" class="channel-access-list"></div>
+            <div class="template-variables-actions">
+              <input id="channel-telegram-user-input" class="provider-input" type="text" placeholder="Telegram user id, e.g. 123456789">
+              <button id="channel-telegram-user-add-btn" type="button" class="btn">Add User</button>
+            </div>
+
+            <h4>Allowed groups</h4>
+            <div id="channel-telegram-groups-list" class="channel-access-list"></div>
+            <div class="template-variables-actions">
+              <input id="channel-telegram-group-input" class="provider-input" type="text" placeholder="Telegram group/chat id, e.g. -1001234567890">
+              <button id="channel-telegram-group-add-btn" type="button" class="btn">Add Group</button>
+            </div>
+
+            <h4>Approvals</h4>
+            <p class="channel-access-note">
+              When a Telegram request needs a tool approval, the Approve/Deny card is
+              sent <strong>here</strong> — never back to the chat that asked, which
+              would let a sender approve their own commands. <strong>Until you set
+              this, every Telegram approval is denied.</strong> Use your own private
+              chat id with the bot; it must not be the chat the request came from.
+            </p>
+            <div class="template-variables-grid">
+              <label for="channel-telegram-approval-input">Approval chat id</label>
+              <input id="channel-telegram-approval-input" class="provider-input" type="text" placeholder="Leave empty to deny all approvals">
+            </div>
+            <div class="template-variables-actions">
+              <button id="channel-telegram-approval-save-btn" type="button" class="btn btn-primary">Save Approval Target</button>
+              <span id="channel-telegram-access-status" class="provider-message"></span>
+            </div>
+          </section>
+
           <section class="template-variables-card">
             <h3>Discord</h3>
             <p>Connect a Discord bot for server-based interaction.</p>
@@ -432,6 +477,51 @@
               <button id="save-discord-token-btn" type="button" class="btn btn-primary">Save Token</button>
               <button id="clear-discord-token-btn" type="button" class="btn btn-danger">Clear Token</button>
               <span id="discord-channel-status" class="provider-message">Not configured.</span>
+            </div>
+          </section>
+
+          <section class="template-variables-card channel-access-card" data-channel="discord">
+            <h3>Discord Access</h3>
+            <p class="channel-access-note">
+              Only the ids listed below may message this bot. The list starts empty
+              and an empty list refuses <em>everyone</em>, including you — send the
+              bot a message, then add the id it replies with.
+            </p>
+
+            <div id="channel-discord-refused-block" class="channel-access-refused" hidden>
+              <h4>Recently refused</h4>
+              <div id="channel-discord-refused-list" class="channel-access-list"></div>
+            </div>
+
+            <h4>Allowed users</h4>
+            <div id="channel-discord-users-list" class="channel-access-list"></div>
+            <div class="template-variables-actions">
+              <input id="channel-discord-user-input" class="provider-input" type="text" placeholder="Discord user id (Developer Mode → Copy User ID)">
+              <button id="channel-discord-user-add-btn" type="button" class="btn">Add User</button>
+            </div>
+
+            <h4>Allowed channels</h4>
+            <div id="channel-discord-groups-list" class="channel-access-list"></div>
+            <div class="template-variables-actions">
+              <input id="channel-discord-group-input" class="provider-input" type="text" placeholder="Discord channel id">
+              <button id="channel-discord-group-add-btn" type="button" class="btn">Add Channel</button>
+            </div>
+
+            <h4>Approvals</h4>
+            <p class="channel-access-note">
+              When a Discord request needs a tool approval, the Approve/Deny card is
+              sent <strong>here</strong> — never back to the channel that asked, which
+              would let a sender approve their own commands. <strong>Until you set
+              this, every Discord approval is denied.</strong> Use a channel only you
+              can post in; it must not be the channel the request came from.
+            </p>
+            <div class="template-variables-grid">
+              <label for="channel-discord-approval-input">Approval channel id</label>
+              <input id="channel-discord-approval-input" class="provider-input" type="text" placeholder="Leave empty to deny all approvals">
+            </div>
+            <div class="template-variables-actions">
+              <button id="channel-discord-approval-save-btn" type="button" class="btn btn-primary">Save Approval Target</button>
+              <span id="channel-discord-access-status" class="provider-message"></span>
             </div>
           </section>
 

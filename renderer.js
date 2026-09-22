@@ -2176,6 +2176,11 @@ function switchSettingsTab(tabName) {
   dom.settingsDrawer.querySelectorAll('.settings-tab-content').forEach((pane) => {
     pane.classList.toggle('active', pane.dataset.tab === tabName);
   });
+  // Refused senders accumulate while the drawer is closed, so re-read them
+  // every time the pane is opened rather than only at settings load.
+  if (tabName === 'channels' && typeof loadChannelAccess === 'function') {
+    loadChannelAccess().catch(() => {});
+  }
 }
 
 function sortSettingsNavOptions() {
@@ -5597,6 +5602,7 @@ async function loadSettings() {
     loadSystemApps().catch(() => {});
     loadWebhookList().catch(() => {});
     loadMeshStatus().catch(() => {});
+    loadChannelAccess().catch(() => {});
   } catch (error) {
     setProviderListFallback(`Unable to load provider settings: ${error.message || 'Unknown error'}`);
   }
@@ -7906,6 +7912,194 @@ if (dom.clearTelegramTokenBtn) {
     }
   });
 }
+
+/* --- Channel access control: allowlist + approval target ----
+ *
+ * Two security rules from the channel hardening pass need a way in:
+ *   1. A channel with an empty allowlist refuses every sender, so the owner
+ *      has to be able to add their own id or the bot answers nobody.
+ *   2. A tool approval goes only to `approvalChatId` and is denied when that
+ *      is unset, so the owner has to be able to name their own chat.
+ * Only individual ids can be added or removed here. There is deliberately no
+ * "allow everyone" control — an open channel lets any stranger who finds the
+ * bot drive the agent.
+ */
+const CHANNEL_ACCESS_CHANNELS = ['telegram', 'discord'];
+
+function channelAccessEl(channel, suffix) {
+  return document.getElementById(`channel-${channel}-${suffix}`);
+}
+
+function setChannelAccessStatus(channel, message, isError = false) {
+  const el = channelAccessEl(channel, 'access-status');
+  if (!el) return;
+  el.textContent = message || '';
+  el.classList.toggle('error', Boolean(isError));
+}
+
+// Ids come from strangers on the internet, so every one of them is written
+// with textContent and never interpolated into HTML.
+function renderChannelIdRow(label, actionLabel, onAction, actionClass = 'btn') {
+  const row = document.createElement('div');
+  row.className = 'channel-access-row';
+
+  const text = document.createElement('span');
+  text.className = 'channel-access-id';
+  text.textContent = label;
+  row.appendChild(text);
+
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = `btn btn-small ${actionClass}`;
+  button.textContent = actionLabel;
+  button.addEventListener('click', onAction);
+  row.appendChild(button);
+
+  return row;
+}
+
+function renderChannelAccessList(channel, kind, ids) {
+  const container = channelAccessEl(channel, `${kind === 'user' ? 'users' : 'groups'}-list`);
+  if (!container) return;
+  container.innerHTML = '';
+  if (!ids.length) {
+    const empty = document.createElement('div');
+    empty.className = 'channel-access-empty';
+    empty.textContent = 'None — nobody can reach the agent this way.';
+    container.appendChild(empty);
+    return;
+  }
+  ids.forEach((id) => {
+    container.appendChild(renderChannelIdRow(id, 'Remove', () => {
+      removeChannelId(channel, kind, id);
+    }, 'btn-danger'));
+  });
+}
+
+function renderChannelRefusals(channel, refusals) {
+  const block = channelAccessEl(channel, 'refused-block');
+  const list = channelAccessEl(channel, 'refused-list');
+  if (!block || !list) return;
+  list.innerHTML = '';
+  if (!refusals.length) {
+    block.hidden = true;
+    return;
+  }
+  block.hidden = false;
+  refusals.forEach((entry) => {
+    if (entry.senderId) {
+      const times = entry.count > 1 ? ` (${entry.count} messages)` : '';
+      list.appendChild(renderChannelIdRow(`user ${entry.senderId}${times}`, 'Allow User', () => {
+        allowChannelId(channel, 'user', entry.senderId);
+      }, 'btn-primary'));
+    }
+    if (entry.groupId) {
+      list.appendChild(renderChannelIdRow(`group ${entry.groupId}`, 'Allow Group', () => {
+        allowChannelId(channel, 'group', entry.groupId);
+      }, 'btn-primary'));
+    }
+  });
+}
+
+function applyChannelAccess(access) {
+  const channel = access.channel;
+  renderChannelAccessList(channel, 'user', access.users || []);
+  renderChannelAccessList(channel, 'group', access.groups || []);
+  renderChannelRefusals(channel, access.recentRefusals || []);
+
+  const approvalInput = channelAccessEl(channel, 'approval-input');
+  if (approvalInput && document.activeElement !== approvalInput) {
+    approvalInput.value = access.approvalChatId || '';
+  }
+  if (!access.approvalChatId) {
+    setChannelAccessStatus(channel, 'No approval target set — every approval from this channel is denied.');
+  } else {
+    setChannelAccessStatus(channel, `Approvals go to ${access.approvalChatId}.`);
+  }
+}
+
+async function refreshChannelAccess(channel) {
+  if (!window.electron?.channels) return;
+  try {
+    const access = unwrapIpcResult(
+      await window.electron.channels.getAccess({ channel }),
+      'Failed to load channel access settings.'
+    );
+    applyChannelAccess(access);
+  } catch (err) {
+    setChannelAccessStatus(channel, err.message || 'Failed to load channel access settings.', true);
+  }
+}
+
+function loadChannelAccess() {
+  return Promise.all(CHANNEL_ACCESS_CHANNELS.map((channel) => refreshChannelAccess(channel)));
+}
+
+async function allowChannelId(channel, kind, id) {
+  try {
+    const access = unwrapIpcResult(
+      await window.electron.channels.allow({ channel, kind, id: String(id) }),
+      'Failed to add the id.'
+    );
+    applyChannelAccess(access);
+    setChannelAccessStatus(channel, `Added ${kind} ${id}.`);
+  } catch (err) {
+    setChannelAccessStatus(channel, err.message || 'Failed to add the id.', true);
+  }
+}
+
+async function removeChannelId(channel, kind, id) {
+  try {
+    const access = unwrapIpcResult(
+      await window.electron.channels.remove({ channel, kind, id: String(id) }),
+      'Failed to remove the id.'
+    );
+    applyChannelAccess(access);
+    setChannelAccessStatus(channel, `Removed ${kind} ${id}.`);
+  } catch (err) {
+    setChannelAccessStatus(channel, err.message || 'Failed to remove the id.', true);
+  }
+}
+
+CHANNEL_ACCESS_CHANNELS.forEach((channel) => {
+  [['user', 'user'], ['group', 'group']].forEach(([kind]) => {
+    const addBtn = channelAccessEl(channel, `${kind}-add-btn`);
+    const input = channelAccessEl(channel, `${kind}-input`);
+    if (!addBtn || !input) return;
+    const submit = async () => {
+      const id = input.value.trim();
+      if (!id) {
+        setChannelAccessStatus(channel, 'Enter an id first.', true);
+        return;
+      }
+      await allowChannelId(channel, kind, id);
+      input.value = '';
+    };
+    addBtn.addEventListener('click', submit);
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') { event.preventDefault(); submit(); }
+    });
+  });
+
+  const approvalSaveBtn = channelAccessEl(channel, 'approval-save-btn');
+  const approvalInput = channelAccessEl(channel, 'approval-input');
+  if (approvalSaveBtn && approvalInput) {
+    approvalSaveBtn.addEventListener('click', async () => {
+      try {
+        unwrapIpcResult(
+          await window.electron.channels.setApprovalTarget({
+            channel,
+            approvalChatId: approvalInput.value.trim()
+          }),
+          'Failed to save the approval target.'
+        );
+        await refreshChannelAccess(channel);
+      } catch (err) {
+        setChannelAccessStatus(channel, err.message || 'Failed to save the approval target.', true);
+      }
+    });
+  }
+});
 
 /* --- Provider management: Web Search keys ------------------- */
 if (dom.saveWebsearchBraveBtn) {
