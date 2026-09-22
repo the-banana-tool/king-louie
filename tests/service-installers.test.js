@@ -393,7 +393,8 @@ describe('root guard: dataDir must have at least 2 path components below root', 
   it('rejects a bare UNC share root: \\\\srv\\share\\', () => {
     assert.throws(() => planInstall({ platform: 'win32', ...win, dataDir: '\\\\srv\\share\\' }), /too close to the filesystem root/);
   });
-  it('accepts the Windows default: C:\\ProgramData\\KingLouie', () => {
+  it('accepts the Windows default (C:\\ProgramData\\KingLouie\\data) and the parent-level C:\\ProgramData\\KingLouie', () => {
+    assert.ok(planInstall({ platform: 'win32', ...win, dataDir: 'C:\\ProgramData\\KingLouie\\data' }).length > 0);
     const steps = planInstall({ platform: 'win32', ...win, dataDir: 'C:\\ProgramData\\KingLouie' });
     assert.ok(steps.length > 0);
   });
@@ -416,7 +417,7 @@ describe('root guard: dataDir must have at least 2 path components below root', 
   });
   it('accepts the Linux and macOS defaults', () => {
     assert.ok(planInstall({ platform: 'linux', ...posix, dataDir: '/var/lib/king-louie' }).length > 0);
-    assert.ok(planInstall({ platform: 'darwin', ...posix, dataDir: '/Library/Application Support/KingLouie' }).length > 0);
+    assert.ok(planInstall({ platform: 'darwin', ...posix, dataDir: '/Library/Application Support/KingLouie/data' }).length > 0);
   });
   it('accepts the built-in per-platform default when --data-dir is omitted', () => {
     assert.ok(planInstall({ platform: 'linux', ...posix }).length > 0);
@@ -429,7 +430,7 @@ describe('darwin: the new absolute/char validation', () => {
   const posixArgs = { nodePath: '/usr/bin/node', entryPath: '/opt/king-louie/bin/king-louie-service.js', user: 'king-louie' };
 
   it('still accepts its default, which contains a space, after normalization', () => {
-    const steps = planInstall({ platform: 'darwin', ...posixArgs, dataDir: '/Library/Application Support/KingLouie' });
+    const steps = planInstall({ platform: 'darwin', ...posixArgs, dataDir: '/Library/Application Support/KingLouie/data' });
     assert.ok(steps.length > 0);
   });
   it('rejects a dataDir with a control character', () => {
