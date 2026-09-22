@@ -155,3 +155,34 @@ describe('root reading the systemd credential file on Linux', () => {
     assert.strictEqual(r.source, 'dpapi');
   });
 });
+
+// The 'wx' creates below are already the right primitive — they refuse to
+// follow a symlink and refuse an existing file. What was still wrong is the
+// *path-based* chmod right after each one: as root, inside a data dir the
+// service account owns, that re-opens the name and can be raced (unlink +
+// symlink between the write and the chmod) into chmodding another file.
+describe('master key files: mode is pinned on the descriptor, never by path', () => {
+  const fakeDpapi = { protect: (b) => Buffer.concat([Buffer.from('P:'), b]), unprotect: (b) => b.subarray(2) };
+
+  it('never calls a path-based chmod when minting the key file and key-check', { skip: process.platform === 'win32' ? 'POSIX-only (Windows has no mode bits to pin)' : false }, (t) => {
+    const dataDir = tmp();
+    t.mock.method(fs, 'chmodSync');
+    t.mock.method(fs, 'fchmodSync');
+    resolveMasterKey({ platform: process.platform, dataDir, env: {} });
+    assert.deepStrictEqual(
+      fs.chmodSync.mock.calls.map((c) => c.arguments[0]),
+      [],
+      'no path-based chmod may run inside a service-account-owned data dir'
+    );
+    assert.ok(fs.fchmodSync.mock.calls.length >= 2, 'master.key and key-check must each be pinned via their descriptor');
+    assert.strictEqual(fs.statSync(path.join(dataDir, 'master.key')).mode & 0o777, 0o600);
+    assert.strictEqual(fs.statSync(path.join(dataDir, KEY_CHECK_FILE)).mode & 0o777, 0o600);
+  });
+
+  it('never calls a path-based chmod when minting key-check on Windows', { skip: process.platform === 'win32' ? false : 'Windows-only' }, (t) => {
+    const dataDir = tmp();
+    t.mock.method(fs, 'chmodSync');
+    resolveMasterKey({ platform: 'win32', dataDir, env: {}, dpapi: fakeDpapi });
+    assert.deepStrictEqual(fs.chmodSync.mock.calls.map((c) => c.arguments[0]), []);
+  });
+});

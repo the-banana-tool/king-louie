@@ -53,6 +53,24 @@ function fromDpapiFile(dataDir, dpapi, onPath) {
   return key;
 }
 
+// Creates `file` exclusively with `content` and pins it to 0600.
+//
+// 'wx' (O_CREAT|O_EXCL) refuses to follow a symlink and refuses an existing
+// file, which is what keeps a root-run admin CLI from being steered by a name
+// the service account planted in its own data dir. The mode is then pinned on
+// that same descriptor: a path-based chmod after the write re-resolves the
+// name, and can be raced (unlink + symlink) into chmodding something else.
+// Throws EEXIST to the caller, which decides what a lost race means.
+function writePrivateFileExclusive(file, content) {
+  const fd = fs.openSync(file, 'wx', 0o600);
+  try {
+    fs.writeFileSync(fd, content);
+    if (process.platform !== 'win32') fs.fchmodSync(fd, 0o600);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 function fromKeyFile(dataDir, onPath) {
   const file = path.join(dataDir, 'master.key');
   if (fs.existsSync(file)) {
@@ -61,8 +79,7 @@ function fromKeyFile(dataDir, onPath) {
     return parseHexKey(fs.readFileSync(file, 'utf8'), file);
   }
   const key = crypto.randomBytes(KEY_BYTES);
-  fs.writeFileSync(file, key.toString('hex'), { mode: 0o600, flag: 'wx' });
-  fs.chmodSync(file, 0o600);
+  writePrivateFileExclusive(file, key.toString('hex'));
   onPath(file);
   return key;
 }
@@ -95,8 +112,7 @@ function verifyKeyCheck({ dataDir, key, source, onPath }) {
   const cipher = createAesGcmCipher(key);
   if (!fs.existsSync(file)) {
     try {
-      fs.writeFileSync(file, cipher.encryptString(KEY_CHECK_PLAINTEXT), { mode: 0o600, flag: 'wx' });
-      if (process.platform !== 'win32') fs.chmodSync(file, 0o600);
+      writePrivateFileExclusive(file, cipher.encryptString(KEY_CHECK_PLAINTEXT));
       onPath(file);
       return;
     } catch (err) {
