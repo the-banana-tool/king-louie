@@ -100,8 +100,26 @@ describe('initializeMesh identity preservation', () => {
   it('still mints a new identity when nothing is stored', async () => {
     process.env.KL_TEST_MODE = '1';
     const store = makeStore();
-    const mesh = await initAndShutdown({ store, cipher: unavailableCipher, settings: { mesh: {} } });
+    const mesh = await initAndShutdown({
+      store,
+      cipher: createAesGcmCipher(crypto.randomBytes(32)),
+      settings: { mesh: {} }
+    });
     assert.ok(mesh.identity.peerId.startsWith('kl-'));
     assert.ok(store.data[IDENTITY_STORE_KEY]);
+  });
+
+  // Copilot review comment C4 (PR #28). The "never overwrite a stored identity"
+  // fix above covers a record that already exists; minting a *new* one with no
+  // cipher used to write both private keys to config.json in the clear.
+  it('refuses to mint a new identity on a host with no cipher, and writes nothing', async () => {
+    process.env.KL_TEST_MODE = '1';
+    const store = makeStore();
+
+    await assert.rejects(
+      () => initAndShutdown({ store, cipher: unavailableCipher, settings: { mesh: {} } }),
+      /secure storage is unavailable/i
+    );
+    assert.strictEqual(store.data[IDENTITY_STORE_KEY], undefined, 'no identity may reach disk');
   });
 });

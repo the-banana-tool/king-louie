@@ -306,9 +306,20 @@ function cipherUsable(cipher) {
 
 function serializeIdentity(identity, cipher) {
   const record = identity.serialize();
+  // No cipher, no write. This used to return the plaintext record with a
+  // warning, which left the Ed25519 signing key and the TLS server key sitting
+  // in config.json in the clear on exactly the hosts that cannot protect them
+  // — a Linux desktop with no Secret Service, a keychain that did not unlock.
+  // Anyone who can read that file can impersonate this peer to every peer it
+  // is paired with and terminate its TLS. Mesh initialization failure is
+  // already handled (src/mesh/index.js, and createCore only log.warns), and a
+  // record that is already on disk is never touched by this path, so failing
+  // closed costs a mesh session, not an identity.
   if (!cipherUsable(cipher)) {
-    log.warn('secure storage unavailable; mesh private keys are being stored unencrypted');
-    return record;
+    throw new Error(
+      'refusing to store the mesh identity: secure storage is unavailable on this host, so the private '
+      + 'keys could only be written in the clear'
+    );
   }
 
   try {

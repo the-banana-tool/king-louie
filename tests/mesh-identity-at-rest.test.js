@@ -84,12 +84,42 @@ describe('mesh identity at rest', () => {
     assert.strictEqual(loadIdentity(store, cipher).peerId, identity.peerId);
   });
 
-  it('keeps working, with a warning, when no cipher is available', () => {
+  // Copilot review comment C4 (PR #28): the no-cipher branch used to warn and
+  // write the record as-is, so the at-rest guarantee was absent on exactly the
+  // hosts that cannot keep a secret — a Linux desktop with no Secret Service,
+  // a keychain that did not unlock. A *new* identity is the case the earlier
+  // "never overwrite a stored identity the cipher cannot read" fix did not
+  // cover.
+  it('refuses to mint a new identity when no cipher is available, rather than writing it in the clear', () => {
     const store = makeStore();
     const identity = new MeshIdentity({ displayName: 'no-cipher' });
-    saveIdentity(store, identity, unavailableCipher);
+
+    assert.throws(() => saveIdentity(store, identity, unavailableCipher), /secure storage is unavailable/i);
+    assert.strictEqual(store.data[IDENTITY_STORE_KEY], undefined, 'nothing may be written');
+  });
+
+  it('writes no key material in the clear even when the cipher goes away mid-session', () => {
+    const store = makeStore();
+    const identity = new MeshIdentity({ displayName: 'no-cipher' });
+    try {
+      saveIdentity(store, identity, unavailableCipher);
+    } catch { /* expected */ }
+    const record = JSON.stringify(store.data);
+    assert.ok(!record.includes(identity.privateKey.toString('hex')));
+    assert.ok(!/PRIVATE KEY/.test(record));
+  });
+
+  // The identity an older build already wrote in the clear must still load, or
+  // failing closed would destroy the peer id and every pinned pairing — the
+  // thing the earlier fix exists to prevent.
+  it('still loads a plaintext identity already on disk when no cipher is available', () => {
+    const identity = new MeshIdentity({ displayName: 'legacy-peer' });
+    const store = makeStore({ [IDENTITY_STORE_KEY]: identity.serialize() });
+
     const restored = loadIdentity(store, unavailableCipher);
+
     assert.strictEqual(restored.peerId, identity.peerId);
+    assert.deepStrictEqual(store.data[IDENTITY_STORE_KEY], identity.serialize(), 'the record on disk is untouched');
   });
 
   it('refuses to load an identity whose key will not decrypt, rather than dropping the key', () => {
