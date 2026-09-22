@@ -187,6 +187,42 @@ describe('MeshRemoteControl', () => {
     assert.strictEqual(response.result.peerId, 'kl-local');
   });
 
+  it('clears the dispatch timeout timer once sendRpc resolves', async () => {
+    transport.addPeer('kl-remote', { displayName: 'Remote', capabilities: [] });
+
+    const originalSetTimeout = global.setTimeout;
+    const originalClearTimeout = global.clearTimeout;
+    const liveTimers = new Set();
+
+    global.setTimeout = (...args) => {
+      const handle = originalSetTimeout(...args);
+      liveTimers.add(handle);
+      return handle;
+    };
+    global.clearTimeout = (handle) => {
+      liveTimers.delete(handle);
+      return originalClearTimeout(handle);
+    };
+
+    try {
+      // A large timeout that would hang the process for its full duration
+      // if the dispatch timer is never cleared after sendRpc wins the race.
+      await remoteControl.dispatchTask('kl-remote', {
+        message: 'Build the project',
+        timeout: 5000
+      });
+    } finally {
+      global.setTimeout = originalSetTimeout;
+      global.clearTimeout = originalClearTimeout;
+    }
+
+    assert.strictEqual(
+      liveTimers.size,
+      0,
+      'dispatch timeout timer should be cleared once sendRpc resolves'
+    );
+  });
+
   it('reports status correctly', () => {
     const status = remoteControl.getStatus();
     assert.strictEqual(status.pendingTasks, 0);
