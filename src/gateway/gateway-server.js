@@ -2,7 +2,9 @@ const { EventEmitter } = require('events');
 const crypto = require('crypto');
 const WebSocket = require('ws');
 
-const LOOPBACK = new Set(['127.0.0.1', '::1', 'localhost']);
+// Literal loopback addresses only: 'localhost' is resolved by the OS resolver
+// (hosts file, DNS) and so is not guaranteed to be loopback.
+const LOOPBACK = new Set(['127.0.0.1', '::1']);
 
 class GatewayServer extends EventEmitter {
   constructor(config = {}) {
@@ -41,10 +43,17 @@ class GatewayServer extends EventEmitter {
       this.handleConnection(ws, req);
     });
 
-    await new Promise((resolve, reject) => {
-      this.wss.once('listening', resolve);
-      this.wss.once('error', reject);
-    });
+    try {
+      await new Promise((resolve, reject) => {
+        this.wss.once('listening', resolve);
+        this.wss.once('error', reject);
+      });
+    } catch (err) {
+      // A failed bind leaves no listener to stop; forget it so stop() and a
+      // later start() don't act on a dead server.
+      this.wss = null;
+      throw err;
+    }
 
     // Update port to the actual bound port (important when using port 0)
     if (this.wss.address()) {

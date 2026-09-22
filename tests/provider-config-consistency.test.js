@@ -6,7 +6,7 @@ const path = require('path');
 const ProviderFactory = require('../src/providers/provider-factory');
 
 /**
- * The provider picker UI is built from `providerLabels` / `providerDefaults`
+ * The provider picker UI is built from `PROVIDER_LABELS` / `providerDefaults`
  * in src/core/create-core.js. Every provider offered there must be creatable by
  * ProviderFactory — otherwise "Set Active" + sending a message blows up with
  * `Unknown provider: "x"` deep in the inference path, and the model dropdown
@@ -32,7 +32,9 @@ function extractObjectKeys(source, varName) {
 
 describe('Provider config consistency (core ↔ ProviderFactory)', () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'create-core.js'), 'utf8');
-  const labelKeys = extractObjectKeys(mainSrc, 'providerLabels');
+  // providerLabels is the module-level PROVIDER_LABELS (also what the service
+  // CLI validates `token set <provider>` against).
+  const labelKeys = Object.keys(require('../src/core/create-core').PROVIDER_LABELS);
   const defaultKeys = extractObjectKeys(mainSrc, 'providerDefaults');
   const registered = new Set(ProviderFactory.listRegistered());
 

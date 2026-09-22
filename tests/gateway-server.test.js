@@ -21,6 +21,22 @@ describe('GatewayServer auth', () => {
     await assert.rejects(new GatewayServer({ port: 0, host: '0.0.0.0', authToken: 't' }).start(), /only binds to loopback/);
   });
 
+  it("accepts only literal loopback addresses, not 'localhost' (resolver-dependent)", async () => {
+    await assert.rejects(new GatewayServer({ port: 0, host: 'localhost', authToken: 't' }).start(), /only binds to loopback/);
+    server = new GatewayServer({ port: 0, host: '127.0.0.1', authToken: 't' });
+    await server.start();
+    assert.ok(server.port > 0);
+  });
+
+  it('rejects start() on a taken port and forgets the dead listener', async () => {
+    server = new GatewayServer({ port: 0, authToken: 't' });
+    await server.start();
+    const second = new GatewayServer({ port: server.port, authToken: 't' });
+    await assert.rejects(second.start(), /EADDRINUSE/);
+    assert.strictEqual(second.wss, null);
+    await second.stop();
+  });
+
   it('accepts the right bearer token and rejects everything else', async () => {
     server = new GatewayServer({ port: 0, authToken: 'secret-token' });
     await server.start();

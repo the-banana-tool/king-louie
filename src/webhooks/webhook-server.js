@@ -4,16 +4,19 @@ const { createLogger } = require('../logging');
 const log = createLogger('webhook-server');
 
 class WebhookServer {
-  constructor(gatewayServer, webhookHandler) {
+  constructor(gatewayServer, webhookHandler, options = {}) {
     this.gatewayServer = gatewayServer;
     this.webhookHandler = webhookHandler;
     this.httpServer = null;
     this._configuredPort = null;
+    // An explicit port; when unset, the gateway's port + 1.
+    this._requestedPort = options.port != null ? options.port : null;
   }
 
   get port() {
     // Derive from gateway's actual port (which may change after start when using port 0)
     if (this._configuredPort != null) return this._configuredPort;
+    if (this._requestedPort != null) return this._requestedPort;
     return this.gatewayServer.port + 1;
   }
 
@@ -26,12 +29,21 @@ class WebhookServer {
       this.handleHttpRequest(req, res);
     });
 
-    await new Promise((resolve, reject) => {
-      this.httpServer.listen(listenPort, '127.0.0.1', (err) => {
-        if (err) reject(err);
-        else resolve();
+    // listen() reports a bind failure (EADDRINUSE, EACCES) through the
+    // 'error' event, not its callback — without this listener it would be an
+    // uncaught exception instead of a rejected start().
+    try {
+      await new Promise((resolve, reject) => {
+        this.httpServer.once('error', reject);
+        this.httpServer.listen(listenPort, '127.0.0.1', () => {
+          this.httpServer.off('error', reject);
+          resolve();
+        });
       });
-    });
+    } catch (err) {
+      this.httpServer = null;
+      throw err;
+    }
 
     // Update port to the actual bound port (important when using port 0)
     const addr = this.httpServer.address();

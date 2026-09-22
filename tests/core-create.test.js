@@ -78,6 +78,66 @@ describe('createCore', () => {
   });
 });
 
+describe('createCore ports and listener failures', () => {
+  it('uses the Electron ports by default (gateway 18789, webhook gateway + 1)', async () => {
+    const { deps } = makeDeps();
+    const saved = process.env.KL_TEST_MODE;
+    delete process.env.KL_TEST_MODE;
+    try {
+      // Listeners are only constructed during start(); inspect them through a
+      // started core with every listener feature off (nothing binds).
+      const core = createCore(deps);
+      await core.start();
+      assert.strictEqual(core.context.getGatewayServer().port, 18789);
+      assert.strictEqual(core.context.getWebhookServer().port, 18790);
+      assert.strictEqual(core.context.getGatewayServer().authToken, null, 'no token is minted with the gateway off');
+      await core.shutdown();
+    } finally {
+      if (saved === undefined) delete process.env.KL_TEST_MODE; else process.env.KL_TEST_MODE = saved;
+    }
+  });
+
+  it('honours ports: { gateway, webhook }', async () => {
+    const { deps } = makeDeps();
+    const saved = process.env.KL_TEST_MODE;
+    delete process.env.KL_TEST_MODE;
+    try {
+      const core = createCore({ ...deps, ports: { gateway: 18791, webhook: 18792 } });
+      await core.start();
+      assert.strictEqual(core.context.getGatewayServer().port, 18791);
+      assert.strictEqual(core.context.getWebhookServer().port, 18792);
+      await core.shutdown();
+    } finally {
+      if (saved === undefined) delete process.env.KL_TEST_MODE; else process.env.KL_TEST_MODE = saved;
+    }
+  });
+
+  it('start() still resolves when the gateway and webhook ports are already taken', async () => {
+    const http = require('http');
+    const holders = [http.createServer(), http.createServer()];
+    for (const h of holders) await new Promise((resolve) => h.listen(0, '127.0.0.1', resolve));
+    const [gatewayPort, webhookPort] = holders.map((h) => h.address().port);
+    const saved = process.env.KL_TEST_MODE;
+    delete process.env.KL_TEST_MODE;
+    try {
+      const { deps } = makeDeps();
+      const core = createCore({
+        ...deps,
+        features: { ...deps.features, gateway: true, webhooks: true },
+        ports: { gateway: gatewayPort, webhook: webhookPort }
+      });
+      await core.start();
+      // Give the fire-and-forget webhook start a tick to fail.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.strictEqual(core.context.getWebhookServer().httpServer, null);
+      await core.shutdown();
+    } finally {
+      if (saved === undefined) delete process.env.KL_TEST_MODE; else process.env.KL_TEST_MODE = saved;
+      for (const h of holders) await new Promise((resolve) => h.close(resolve));
+    }
+  });
+});
+
 describe('withTimeout', () => {
   function trackTimers() {
     const realSet = global.setTimeout;

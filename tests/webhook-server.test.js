@@ -31,3 +31,24 @@ describe('WebhookServer hardening', () => {
     assert.strictEqual((await request(server.port, { method: 'OPTIONS' })).status, 405);
   });
 });
+
+describe('WebhookServer port', () => {
+  it('defaults to the gateway port + 1', () => {
+    assert.strictEqual(new WebhookServer({ port: 18789 }, {}).port, 18790);
+  });
+  it('uses an explicit port when given', () => {
+    assert.strictEqual(new WebhookServer({ port: 18791 }, {}, { port: 18792 }).port, 18792);
+  });
+  it('rejects start() (instead of throwing an uncaught error) when the port is taken', async () => {
+    const holder = http.createServer();
+    await new Promise((resolve) => holder.listen(0, '127.0.0.1', resolve));
+    try {
+      const busy = holder.address().port;
+      const server = new WebhookServer({ port: 18789 }, {}, { port: busy });
+      await assert.rejects(server.start(), /EADDRINUSE/);
+      assert.strictEqual(server.httpServer, null);
+    } finally {
+      await new Promise((resolve) => holder.close(resolve));
+    }
+  });
+});

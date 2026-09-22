@@ -74,6 +74,26 @@ const { createHeadlessPrompter } = require('../platform/prompter');
 const { withTimeout } = require('./with-timeout');
 
 const DEFAULT_FEATURES = { gateway: true, webhooks: true, mesh: true, channels: true, appDiscovery: true };
+// Every provider king-louie can hold a token for (keys) and its display name.
+const PROVIDER_LABELS = {
+  openai: 'OpenAI',
+  anthropic: 'Anthropic Claude',
+  copilot: 'GitHub Copilot',
+  groq: 'Groq',
+  mistral: 'Mistral AI',
+  ollama: 'Ollama (Local)',
+  gemini: 'Google Gemini',
+  openrouter: 'OpenRouter',
+  xai: 'xAI (Grok)',
+  deepseek: 'DeepSeek',
+  qwen: 'Qwen (Alibaba)',
+  together: 'Together AI',
+  fireworks: 'Fireworks AI',
+  cohere: 'Cohere'
+};
+
+// The Electron app's ports. The webhook listener defaults to gateway + 1.
+const DEFAULT_GATEWAY_PORT = 18789;
 
 function createCore(deps = {}) {
   const { paths, store, vaultStore, cipher } = deps;
@@ -86,6 +106,16 @@ function createCore(deps = {}) {
   const vault = createVault({ store: vaultStore, cipher });
   const userDataPath = paths.dataDir;
   const shutdownTimeoutMs = deps.shutdownTimeoutMs ?? 5000;
+  // 'allow' (default, the Electron app's behaviour): an approval requester
+  // attached by a remote origin (a chat channel's Approve button, a gateway
+  // client, a child agent of one) may approve unsafe tools. 'deny': every such
+  // requester is ignored, so approval-requiring tools are denied unless a
+  // local UI listener (Electron IPC) or an auto-approve rule allows them.
+  const ports = { gateway: DEFAULT_GATEWAY_PORT, ...(deps.ports || {}) };
+  const remoteApprovals = deps.remoteApprovals ?? 'allow';
+  if (remoteApprovals !== 'allow' && remoteApprovals !== 'deny') {
+    throw new Error(`createCore: remoteApprovals must be 'allow' or 'deny', got ${JSON.stringify(remoteApprovals)}`);
+  }
 
   // ── moved from main.js ──
   const log = createLogger('main');
@@ -339,22 +369,7 @@ function createCore(deps = {}) {
     setPermissionRules(filtered);
   };
 
-  const providerLabels = {
-    openai: 'OpenAI',
-    anthropic: 'Anthropic Claude',
-    copilot: 'GitHub Copilot',
-    groq: 'Groq',
-    mistral: 'Mistral AI',
-    ollama: 'Ollama (Local)',
-    gemini: 'Google Gemini',
-    openrouter: 'OpenRouter',
-    xai: 'xAI (Grok)',
-    deepseek: 'DeepSeek',
-    qwen: 'Qwen (Alibaba)',
-    together: 'Together AI',
-    fireworks: 'Fireworks AI',
-    cohere: 'Cohere'
-  };
+  const providerLabels = PROVIDER_LABELS;
 
   const providerDefaults = {
     openai: 'gpt-4o-mini',
@@ -1851,12 +1866,20 @@ function createCore(deps = {}) {
       workingDirectory
     });
 
+    // Every approval requester — gateway/channel approvalHandler, cron,
+    // webhook, mesh, and meta-tools re-threading a parent's requester — reaches
+    // a ToolExecutor through here, so this is the single place that enforces
+    // remoteApprovals: 'deny'.
+    const effectiveApprovalRequester = remoteApprovals === 'deny' ? null : approvalRequester;
+    if (approvalRequester && !effectiveApprovalRequester) {
+      log.debug('remoteApprovals is "deny": ignoring a remote approval requester');
+    }
     const executor = new ToolExecutor({
       workingDirectory,
       allowedDirectories: executorOptions.allowedDirectories || [],
       requireApproval: true,
       runtimeEnvironment: resolvedRuntimeEnvironment,
-      approvalRequester,
+      approvalRequester: effectiveApprovalRequester,
       shouldAutoApprove: async (toolName) => isToolAlwaysApproved(toolName),
       // Live callback — picks up rules added mid-session when the user
       // clicks "Always allow 'git *'" in an approval dialog.
@@ -2205,8 +2228,9 @@ function createCore(deps = {}) {
 
     gatewayServer = new GatewayServer({
       host: '127.0.0.1',
-      port: process.env.KL_TEST_MODE ? 0 : 18789,
-      authToken: features.gateway ? ensureGatewayToken({ store, cipher, dataDir: userDataPath }) : 'disabled'
+      port: process.env.KL_TEST_MODE ? 0 : ports.gateway,
+      // Only minted when the listener is on; start() is never called otherwise.
+      authToken: features.gateway ? ensureGatewayToken({ store, cipher, dataDir: userDataPath }) : null
     });
 
     toolRegistry.register(new MessageTool(gatewayServer, sessionManager));
@@ -2303,7 +2327,7 @@ function createCore(deps = {}) {
 
     webhookRegistry = new WebhookRegistry(store);
     webhookHandler = new WebhookHandler(webhookRegistry, sessionManager, agentExecutorAdapter);
-    webhookServer = new WebhookServer(gatewayServer, webhookHandler);
+    webhookServer = new WebhookServer(gatewayServer, webhookHandler, { port: ports.webhook });
     if (features.webhooks) {
       webhookServer.start().catch(err => log.warn(`Webhook server start failed: ${err.message}`));
     }
@@ -2431,7 +2455,11 @@ function createCore(deps = {}) {
     });
 
     const [, skillsLoaded] = await Promise.all([
-      features.gateway ? gatewayServer.start() : Promise.resolve(),
+      // A listener that can't bind (e.g. the port is taken by another host)
+      // disables that listener only; it never aborts start().
+      features.gateway
+        ? gatewayServer.start().catch((err) => log.warn(`Gateway server start failed: ${err.message}`))
+        : Promise.resolve(),
       skillLoader.loadAll(),
     ]);
     log.info(`Loaded ${skillsLoaded} skill(s)`);
@@ -2504,8 +2532,6 @@ function createCore(deps = {}) {
     const stops = [
       ['MCP shutdown', mcpManager && (() => mcpManager.disconnectAll())],
       ['Channel shutdown', channelRegistry && (() => channelRegistry.shutdownAll())],
-      ['Telegram bridge stop', !channelRegistry && telegramBridge && (() => telegramBridge.stop())],
-      ['Discord bridge stop', !channelRegistry && discordBridge && (() => discordBridge.stop())],
       ['Webhook server stop', webhookServer && (() => webhookServer.stop())],
       ['Mesh shutdown', meshContext && (() => meshContext.shutdown())],
       ['Gateway server stop', gatewayServer && (() => gatewayServer.stop())]
@@ -2677,4 +2703,4 @@ function createCore(deps = {}) {
   };
 }
 
-module.exports = { createCore };
+module.exports = { createCore, PROVIDER_LABELS };
