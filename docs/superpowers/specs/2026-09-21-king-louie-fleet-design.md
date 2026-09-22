@@ -170,6 +170,32 @@ unsafe" and trust principle 3 (§3.1) until stage 3's phone approver exists.
 The service host also defaults `channels` off, since a channel can't approve
 anything in stage 1.
 
+**Decision — a chat channel is a locked front door (revised).** A bot's handle
+is not a secret, so an unconfigured channel **denies every sender**; it used to
+allow everyone. An unrecognised sender gets exactly one reply naming their id
+(rate-limited per sender, with a bounded set, so the refusal is not a message
+pump) and is otherwise ignored. On the Electron host, where approvals *are*
+answered, an approval prompt is never routed back to the principal that asked
+for the tool — it goes only to `channels.<channel>.approvalChatId`, is denied
+outright when that is unset or names the requesting chat, and only the
+configured approver's button press is honoured. Both rules cover Telegram and
+Discord; `SlackChannel` has neither, and also has no working inbound route.
+
+**Decision — the configuration surface for both.** A deny that cannot be
+opened is a broken feature, so each rule has two management surfaces, and
+neither can set `default: 'allow'`:
+
+- Desktop: `src/ipc/channel-handlers.js` (`channel:accessGet`,
+  `channel:accessAllow`, `channel:accessRemove`, `channel:setApprovalTarget`)
+  behind a **Settings > Channels > _channel_ Access** pane. `AllowlistManager`
+  keeps a small bounded **in-memory** journal of who it just refused so the
+  pane can offer one-click "Allow"; it is deliberately never persisted, since
+  a stranger messaging in a loop must not be able to grow a file on disk.
+- Service: `king-louie-service channel list|allow|remove|approval <channel>`,
+  with the same strict flag parsing and the same "stop the service first"
+  refusal as `token set`/`vault set`. `list` is read-only and stays available.
+  Headless operators read refused ids out of `<dataDir>/logs/service.log`.
+
 **Deviation — no `notifier` or `opener` port.** They are the optional
 `uiToastChannel` and `openExternal` deps above.
 
@@ -315,7 +341,12 @@ address (`127.0.0.1` or `::1`; `localhost` is resolver-dependent and refused). W
 a bearer token, generated on first use and encrypted through the `cipher`
 port into the `store` — not a `secrets` port, which was never built (§4.2).
 For local processes and CLI tooling, the same token is also written in the
-clear to `<dataDir>/gateway-token` (mode `0600`, written atomically).
+clear to `<dataDir>/gateway-token` (mode `0600`, written atomically) — but
+**only while the listener is bound**. Minting and publishing are separate:
+`GatewayServer.start()` writes the file after the bind succeeds and `stop()`
+removes it, so a failed start leaves no valid credential on disk for a port
+nothing is listening on (and, with the fatal-bind rule above, nothing for a
+port squatter to be handed either).
 **Deviation:** where encryption is unavailable on the host, the token falls
 back to **session-only** — it still authenticates the current run, but a
 fresh one replaces it (locking out every prior client) on the next start,
@@ -422,7 +453,14 @@ door exists.
 - Each node gets an **Ed25519 key pair** when it is first set up. The
   private key is encrypted under the master key (§4.2; there is no `secrets`
   port) and is never stored in a service-writable file in the clear; the exact
-  layout is decided in the stage 2 spec. Its node ID is `kl-<base32(sha256(pubkey))[0..16]>`, and each node
+  layout is decided in the stage 2 spec. Stage 1 already does this for the
+  **mesh** identity, which had been writing both the Ed25519 and the TLS
+  private key in plaintext while claiming otherwise: `saveIdentity` encrypts
+  both through the host `cipher` and stores only the public halves in the
+  clear, and a legacy plaintext record is re-encrypted in place on first load
+  — same peer id, same TLS fingerprint, so existing pairings survive. This is
+  the one sanctioned on-disk migration in stage 1. A key that will not decrypt
+  refuses to load rather than silently becoming a new identity. Its node ID is `kl-<base32(sha256(pubkey))[0..16]>`, and each node
   also has a human-readable name (`gpu-box`, `laptop`, `web-01`).
 - The mesh TLS certificate is self-signed with this key. Peers pin the
   **public key**, not a CA.
@@ -922,7 +960,14 @@ architecture level; the detail inside each stage is still open for changes.
   time-limited leases (§4.6).
 - **Delegation:** multi-turn, using `send_to_job` with an idle timeout (§8.2).
 - **Local approvals:** sessions started in the desktop app keep the on-screen
-  dialog. Only remote-origin work needs the phone (§3.1).
+  dialog. Only remote-origin work needs the phone (§3.1). Stage 1 made that
+  dialog real again: desktop agent mode used to pass a hard-coded
+  `autoApproveTools: ['Bash','Read','Edit','Write','Glob','Grep','Git']` into
+  every turn, so an `ask` rule the user wrote was inert for exactly the seven
+  most dangerous tools and the dialog never appeared. Agent mode sets no
+  auto-approve list at all now, and an explicit `ask`/`deny` rule beats every
+  auto-approve list, including an agent definition's own. This is a visible
+  behaviour change for existing desktop users.
 - **Servers manage themselves.** Each server runs its own runbooks (pull,
   build, restart, reboot). The laptop's SSH keys are only for break-glass
   access and for any host that can't run King Louie. A deploy that needs a

@@ -75,7 +75,7 @@ On first launch, the onboarding wizard walks you through selecting a provider an
 - **System App Discovery** — Auto-detects installed desktop applications (Excel, Photoshop, VS Code, etc.) so agents use local software instead of generating content via LLM
 - **Extensible Skill System** — Install, remove, enable, and pin custom skill plugins
 - **Mesh Networking** — Secure peer-to-peer communication between King Louie instances across machines
-- **Channel Integrations** — Bridge conversations to Telegram, Discord, and Slack bots
+- **Channel Integrations** — Bridge conversations to Telegram and Discord bots, behind a deny-by-default sender allowlist (Slack is connected but its inbound path is not wired to the agent yet)
 - **Cron Scheduling** — Schedule recurring or one-time agent tasks with cron expressions
 - **Semantic Memory** — Embedding-based memory with hot/warm/cold tiering and recall
 - **Voice / TTS** — System TTS or ElevenLabs for voice responses
@@ -236,12 +236,19 @@ could then rewrite the binary it runs. Move the install to a system path.
   `anthropic`, `groq`, …); an unknown name is rejected.
 - `king-louie-service vault set <key> < valuefile` — stores an arbitrary
   secret in the vault the same way.
+- `king-louie-service channel list|allow|remove|approval <channel> …` —
+  manages who may drive the agent through Telegram or Discord, and where that
+  channel's approvals go. A channel with an empty allowlist refuses everyone,
+  so this is required before a channel does anything at all. See
+  [Channel Integrations](#channel-integrations).
 
-`token set` and `vault set` against an installed service:
+`token set`, `vault set` and the mutating `channel` subcommands against an
+installed service:
 
-- **Stop the service first.** Both refuse (exit 1) while the service is
+- **Stop the service first.** They refuse (exit 1) while the service is
   running on that data dir, because the running service would overwrite the
-  change with its own in-memory copy.
+  change with its own in-memory copy. `channel list` is read-only and stays
+  available.
 - Run them as root (Linux, macOS) or from an elevated shell (Windows). On
   Linux, root reads the same `/etc/king-louie/credentials/kl-master-key` the
   unit hands the service; on Windows the key is DPAPI-protected in the
@@ -305,22 +312,28 @@ additionally denied outright, whatever the working directory is.
   the known gap below); otherwise
   a `0600` key file in the data directory (macOS, and Linux without systemd
   credentials).
-- The gateway (when enabled) requires a bearer token stored encrypted and
-  written atomically to `<dataDir>/gateway-token`. That copy is in the clear,
-  so that local clients and CLI tooling can read it: on Linux and macOS it is
-  mode `0600`; on Windows the mode bits are meaningless and its only
+- The gateway (when enabled) requires a bearer token, kept encrypted in the
+  store. A cleartext copy is written atomically to `<dataDir>/gateway-token`
+  so local clients and CLI tooling can read it — but **only while the listener
+  is actually bound**: the file is written after the bind succeeds and removed
+  again when the gateway stops, so a failed start never leaves a valid
+  credential on disk for a port nothing is listening on. On Linux and macOS it
+  is mode `0600`; on Windows the mode bits are meaningless and its only
   protection is the data directory's ACL (`LOCAL SERVICE`, `SYSTEM` and
-  Administrators).
-  If secure storage is unavailable on that host, the token falls back to
-  **session-only**: it still works for the current run but is regenerated
-  (and every existing client rejected) on the next restart, rather than
-  silently persisting in the clear.
+  Administrators). If secure storage is unavailable on that host, the token
+  falls back to **session-only**: it still works for the current run but is
+  regenerated (and every existing client rejected) on the next restart,
+  rather than silently persisting in the clear.
 - The service denies every action that requires interactive approval —
   stage 1 has no remote approver (phone approvals arrive in a later stage),
   so anything gated on approval simply fails. That includes requests from
   chat channels: if you turn `channels` on, a channel is never asked to
   approve (no Approve button is sent) and approval-gated tools are still
-  denied.
+  denied. Setting a channel's approval target does not change that in service
+  mode — it only matters in the desktop app.
+- Chat channels are closed by default: a channel whose allowlist is empty
+  refuses every sender, so turning `channels` on does not by itself let
+  anyone in. `king-louie-service channel allow …` opens it one id at a time.
 - On Windows the service runs as `LOCAL SERVICE`. It is low-privilege and has
   no access to any user's profile folders — but it is a **shared, built-in
   account**, not a dedicated identity for King Louie. Every other service on
@@ -714,22 +727,75 @@ Skills are auto-discovered from the `skills/` directory on startup. User-install
 
 ## Channel Integrations
 
+A chat bot's handle is not a secret. Anyone who finds it can message it, so
+King Louie treats a channel as a **front door that starts locked**: a channel
+nobody has configured refuses every sender, including you. Set up the token
+first, then allowlist yourself.
+
 ### Telegram
 
 1. Create a bot via [@BotFather](https://t.me/BotFather)
 2. Add the token in Settings or via `/llm telegram add <token>`
 3. The bridge starts automatically
+4. Message the bot. It replies once with your user id and ignores you.
+5. Add that id under **Settings > Channels > Telegram Access** — it is waiting
+   there under "Recently refused" with an **Allow User** button.
 
 ### Discord
 
 1. Create a Discord application and bot
 2. Add the bot token in Settings
-3. Configure mention gating and channel allowlists
+3. Allowlist yourself under **Settings > Channels > Discord Access**, the same
+   way (Developer Mode → Copy User ID, or use the id the bot replies with)
+4. Mention gating (**Require @mention**) is a separate, narrower control: it
+   decides when an *already allowed* sender's message is answered in a group.
 
 ### Slack
 
 1. Create a Slack app with Socket Mode enabled
 2. Add the bot and app-level tokens in Settings
+
+Slack has **no allowlist and no approval routing** — its inbound path is not
+wired up to the agent yet, so nothing a Slack user sends reaches a tool. Do
+not treat it as gated; treat it as not finished.
+
+### Who may message the bot
+
+| Where | How |
+|-------|-----|
+| Desktop | **Settings > Channels > _channel_ Access** — allowed users, allowed groups/channels, add and remove, plus a one-click **Allow** for whoever was just refused |
+| Service | `king-louie-service channel list telegram`<br>`king-louie-service channel allow telegram 123456789`<br>`king-louie-service channel allow discord <channel-id> --group`<br>`king-louie-service channel remove telegram 123456789` |
+
+The allowlist holds **user ids** and **group/channel ids**: a message is
+accepted if its sender is allowed, *or* if it arrives in an allowed group.
+Allowing a group therefore trusts everyone in it. There is no "allow
+everyone" switch in either surface.
+
+An unrecognised sender gets **one** reply telling them their id, and is
+ignored after that, so the refusal is discoverable without handing a stranger
+a message pump. On a headless install the same ids are in
+`<dataDir>/logs/service.log` (the first message from each unknown sender logs
+at `warn`).
+
+### Tool approvals from a channel
+
+An approval prompt is **never sent back to the chat that asked for the tool** —
+that would let a sender approve their own `Bash` calls. It goes only to an
+owner chat you name explicitly:
+
+| Where | How |
+|-------|-----|
+| Desktop | **Settings > Channels > _channel_ Access > Approvals** |
+| Service | `king-louie-service channel approval telegram <your-chat-id>`<br>`king-louie-service channel approval telegram --clear` |
+
+**Until you set it, every approval-gated tool call from that channel is
+denied** — no Approve button is sent anywhere. The target must not be the chat
+the request came from; if it is, the approval is denied rather than
+self-served. Only the configured approver's button press counts; a press from
+the requesting chat is refused.
+
+In **service mode this is moot**: stage 1 has no remote approver at all and
+denies everything that needs approval, whatever `approvalChatId` says.
 
 ### Common Commands (all channels)
 
@@ -739,8 +805,6 @@ Skills are auto-discovered from the `skills/` directory on startup. User-install
 - `/agent <name>` — Switch agent
 - `/pin <skill-id>` — Pin a skill to the chat
 - `/unpin` — Remove pinned skill
-
-Tool approvals are handled inline with approve/deny buttons.
 
 ## Mesh Networking
 
@@ -837,7 +901,15 @@ All mesh communication is secured with multiple layers:
 | Nonce + expiry | Messages expire after 5 minutes, nonces tracked — prevents replay |
 | Trusted peers only | Connections from unknown peers rejected at TLS handshake |
 
-Private keys are encrypted at rest via Electron's `safeStorage` API.
+A peer's Ed25519 private key and its TLS private key are **encrypted at rest**
+under the host's cipher — Electron `safeStorage` in the desktop app, the
+service's master key headless — and only the public halves (peer id, public
+key, certificate, fingerprint) are stored in the clear. An identity created by
+an older build, which wrote both private keys in plaintext, is re-encrypted in
+place the first time it is loaded; the peer id and certificate fingerprint do
+not change, so existing pairings survive. On a host with no secure storage at
+all the keys fall back to plaintext with a warning in the log — a cipher that
+is available but fails is an error, never a silent fallback.
 
 ### Configuration
 
@@ -891,7 +963,9 @@ Register HTTP webhooks for external automation:
 - Signature verification via `X-Hub-Signature-256`
 - CORS support
 
-The webhook server runs on the gateway port + 1.
+The webhook server runs on the gateway port + 1 unless a port is set
+explicitly — in service mode that is `ports.webhook` in the admin-owned
+`<configDir>/service.json`, defaulting to `18794`.
 
 ## Voice / TTS
 
@@ -1066,13 +1140,89 @@ npm run build:linux
 - Context isolation enabled — renderer has no direct Node.js access
 - All IPC calls validated through the preload bridge
 - HTML sanitized with DOMPurify
-- Tool execution requires approval (configurable auto-approve lists)
+- Tool execution requires approval. Your own permission rules decide what runs
+  unattended; an explicit `ask` or `deny` rule beats every auto-approve list,
+  including agent mode's and an agent definition's own
+- The host's own secrets (`master.key`, `master.key.dpapi`, `key-check`,
+  `gateway-token`, and the store/vault JSON) are out of bounds for every
+  path-gated tool — `Read`, `Grep` and `Glob` refuse them whatever the
+  working directory and allowed directories say
+- Chat channels deny unknown senders, and a channel's approval prompt goes
+  only to an owner chat you configured — never back to the requester
 - Pre-execution security hooks block dangerous commands
 - **Git safety guards** — Blocks `--amend` (always creates new commits), `--force`, `--no-verify`, interactive flags, `git add ./-A` (must stage specific files), and sensitive file patterns (.env, .pem, credentials.json, etc.)
 - **Worktree isolation** — Background agents can run in isolated git worktrees to prevent file conflicts
 - **Pattern-based permission rules** — First-match-wins rules with allow/ask/deny actions and denial tracking
 - Webhook signature verification
 - Mesh networking: TLS 1.3 encryption, Ed25519 signed messages, certificate pinning, replay protection
+
+## Breaking Changes
+
+Changes on this branch that will alter behaviour on an existing install.
+
+### Chat channels refuse unknown senders
+
+A Telegram or Discord channel whose allowlist is empty now **denies every
+sender**, where it used to allow everyone by default. Any stranger who found
+the bot's handle could previously drive the agent.
+
+*If you were using a channel, it stops answering until you allowlist yourself*
+— Settings > Channels > _channel_ Access on the desktop, or
+`king-louie-service channel allow …` headless. The bot replies once to an
+unrecognised sender with the id to add.
+
+### Channel tool approvals need an owner target
+
+An approval prompt used to be sent to the chat that asked for the tool, which
+meant an attacker approved their own `Bash` calls. It now goes only to
+`channels.<channel>.approvalChatId`, and **every channel approval is denied
+until that is set** (and denied if it names the requesting chat). Set it in
+the same two places as the allowlist.
+
+### Desktop agent mode prompts again
+
+Agent mode hard-coded `Bash, Read, Edit, Write, Glob, Grep, Git` as
+auto-approved, which silently overrode the user's own `ask` rules for exactly
+the seven most dangerous tools. It no longer sets an auto-approve list at all:
+what runs unattended is decided by your permission rules and the persisted
+"always approve" list. **Expect approval prompts in agent mode where there
+were none.** Add `allow` rules for what you want unattended.
+
+### Service `features` and `ports` moved out of `<dataDir>/service.json`
+
+`features` and `ports` are now read **only** from `<configDir>/service.json`,
+which is root/Administrators-owned and read-only to the service account
+(`/etc/king-louie`, `/Library/Application Support/KingLouie/config`,
+`%ProgramData%\KingLouie\config`). The data dir is writable by the service
+account, so one `write_file` from a prompt injection could otherwise re-enable
+a network listener at the next restart.
+
+*`features`/`ports` left in `<dataDir>/service.json` are ignored, with a
+warning naming the file.* `profile` still comes from there. If the admin file
+is missing, every feature stays off.
+
+### Default service ports moved 18791/18792 → 18793/18794
+
+The old service defaults collided with the documented mesh port `18791`, which
+the desktop app binds on `0.0.0.0`. Update anything pointing at the old ports,
+or set `ports` in `<configDir>/service.json`.
+
+Relatedly, a listener the operator explicitly enabled that **cannot bind is
+now fatal** — the service refuses to start rather than running without it.
+
+### `<dataDir>/gateway-token` exists only while the gateway is up
+
+The cleartext bearer-token file is written after the listener binds and
+removed when it stops. Tooling that reads it at an arbitrary time, or that
+assumed it persists across a stopped service, needs to handle its absence.
+
+### Mesh identities are re-encrypted on first load
+
+Ed25519 and TLS private keys were written in plaintext despite the README
+saying otherwise. They are now encrypted at rest and an existing identity is
+upgraded in place on first load. The peer id and TLS fingerprint are
+unchanged, so **pairings survive** — but the on-disk record is no longer
+readable by an older build.
 
 ## License
 
