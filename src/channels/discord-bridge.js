@@ -220,7 +220,11 @@ class DiscordChannel extends ChannelPlugin {
         this.botUserId && String(message.mentions?.repliedUser?.id || '') === this.botUserId
       );
       await this.notifyUnknownSender(message.channelId, inbound.sender.id, inbound.group?.id || null, {
-        mayReply: addressesBot({ isGroup, wasMentioned, isCommand, isReplyToBot })
+        // Discord text commands carry no per-bot suffix, so in a guild channel
+        // there is no way to tell `/weather berlin` aimed at another bot from
+        // one aimed at us. A mention or a DM is the only proof, and without it
+        // the sender's id stays out of the room.
+        mayReply: addressesBot({ isGroup, wasMentioned, isTargetedCommand: false, isReplyToBot })
       });
       return;
     }

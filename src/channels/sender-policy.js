@@ -40,6 +40,23 @@ class NoticeLimiter {
   }
 }
 
+// Whether a slash command names this bot as its target.
+//
+// Telegram disambiguates commands in a shared room with a `/cmd@botusername`
+// suffix, which is the only positive signal a group message carries about
+// which of the bots present a command was meant for. Matched case-insensitively
+// because Telegram usernames are, and only against a username we actually know:
+// before getMe resolves there is nothing to compare, and an unverifiable target
+// is not a target. Discord text commands have no equivalent, so its bridge
+// passes no text here and relies on a mention or a DM instead.
+function commandTargetsBot(text, botUsername) {
+  const me = String(botUsername || '').trim();
+  if (!me) return false;
+  const firstToken = String(text || '').trim().split(/\s+/)[0] || '';
+  const suffix = firstToken.match(/^\/[^\s@]+@([A-Za-z0-9_]+)$/);
+  return Boolean(suffix) && suffix[1].toLowerCase() === me.toLowerCase();
+}
+
 // Whether an inbound message actually addresses the bot, as opposed to merely
 // arriving where the bot can see it.
 //
@@ -50,9 +67,17 @@ class NoticeLimiter {
 // default, so on the first run after a deny-by-default upgrade every member of
 // the group gets named. A one-to-one chat is addressed to the bot by
 // construction.
-function addressesBot({ isGroup, wasMentioned, isCommand, isReplyToBot } = {}) {
+//
+// A *bare* `/command` is not proof either. Group chats routinely carry several
+// bots, and `/weather berlin` aimed at one of the others would otherwise have
+// King Louie answer with that member's id. Only a command that names this bot
+// counts — hence `isTargetedCommand` rather than the old `isCommand`; a caller
+// that has not been updated passes `undefined` and so fails closed, which is
+// the right way round. When in doubt, stay silent: the refusal is still
+// recorded for the owner, only the reply into the room is withheld.
+function addressesBot({ isGroup, wasMentioned, isTargetedCommand, isReplyToBot } = {}) {
   if (!isGroup) return true;
-  return Boolean(wasMentioned || isCommand || isReplyToBot);
+  return Boolean(wasMentioned || isTargetedCommand || isReplyToBot);
 }
 
 // Decides where an approval prompt may be sent.
@@ -71,4 +96,10 @@ function resolveApprovalTarget({ ownerTarget, originTarget } = {}) {
   return { target: owner, reason: null };
 }
 
-module.exports = { NoticeLimiter, resolveApprovalTarget, addressesBot, DEFAULT_NOTICE_CAPACITY };
+module.exports = {
+  NoticeLimiter,
+  resolveApprovalTarget,
+  addressesBot,
+  commandTargetsBot,
+  DEFAULT_NOTICE_CAPACITY
+};

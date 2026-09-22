@@ -283,6 +283,114 @@ describe('Channel bridges — the refusal notice is gated on being addressed', (
   });
 });
 
+// Group chats routinely carry several bots. A bare `/command` says nothing
+// about which of them it was meant for, so treating any slash command as
+// "addressed to us" published a bystander's user id — and the group id — into
+// a room the owner does not control, just for aiming a command at someone
+// else's bot. Telegram's `/cmd@botusername` suffix is the one positive signal
+// there is; Discord text has no equivalent, so there a mention or a DM is the
+// only proof. The refusal record is kept for the owner either way.
+describe('Channel bridges — a slash command must be aimed at this bot', () => {
+  it('telegram: says nothing to a bare /command in a group', async () => {
+    const allowlistManager = new AllowlistManager(makeStore());
+    const bridge = makeTelegram({ allowlistManager, getChannelSettings: () => ({}) });
+    bridge.botUsername = 'kinglouiebot';
+
+    await bridge.handleMessage(telegramGroupMessage(999, '/weather berlin'));
+
+    assert.deepStrictEqual(bridge.sent, [], 'a command that names no bot must not publish the sender id');
+    const refusals = allowlistManager.listRecentRefusals('telegram');
+    assert.strictEqual(refusals.length, 1, 'the owner must still get the refusal record');
+    assert.strictEqual(refusals[0].senderId, '999');
+  });
+
+  it('telegram: says nothing to a /command aimed at a different bot', async () => {
+    const bridge = makeTelegram({
+      allowlistManager: new AllowlistManager(makeStore()),
+      getChannelSettings: () => ({})
+    });
+    bridge.botUsername = 'kinglouiebot';
+
+    await bridge.handleMessage(telegramGroupMessage(999, '/weather@someotherbot berlin'));
+
+    assert.deepStrictEqual(bridge.sent, []);
+  });
+
+  it('telegram: answers a /command carrying this bot\'s username suffix', async () => {
+    const bridge = makeTelegram({
+      allowlistManager: new AllowlistManager(makeStore()),
+      getChannelSettings: () => ({})
+    });
+    bridge.botUsername = 'kinglouiebot';
+
+    await bridge.handleMessage(telegramGroupMessage(999, '/help@KingLouieBot'));
+
+    assert.strictEqual(bridge.sent.length, 1, 'a command addressed to us by name is addressed to us');
+    assert.match(bridge.sent[0].text, /999/);
+  });
+
+  it('telegram: answers a /command in a one-to-one chat', async () => {
+    const bridge = makeTelegram({
+      allowlistManager: new AllowlistManager(makeStore()),
+      getChannelSettings: () => ({})
+    });
+    bridge.botUsername = 'kinglouiebot';
+
+    await bridge.handleMessage(telegramMessage(999, '/help'));
+
+    assert.strictEqual(bridge.sent.length, 1);
+    assert.match(bridge.sent[0].text, /999/);
+  });
+
+  it('telegram: stays silent when it does not yet know its own username', async () => {
+    const bridge = makeTelegram({
+      allowlistManager: new AllowlistManager(makeStore()),
+      getChannelSettings: () => ({})
+    });
+    bridge.botUsername = null;
+
+    await bridge.handleMessage(telegramGroupMessage(999, '/help@kinglouiebot'));
+
+    assert.deepStrictEqual(bridge.sent, [], 'an unverifiable target is not a target');
+  });
+
+  it('discord: says nothing to a bare /command in a guild channel', async () => {
+    const allowlistManager = new AllowlistManager(makeStore());
+    const bridge = makeDiscord({ allowlistManager, getChannelSettings: () => ({}) });
+    bridge.botUserId = 'bot-1';
+
+    await bridge.handleMessageCreate(discordGuildMessage('999', '/weather berlin'));
+
+    assert.deepStrictEqual(bridge.sent, []);
+    assert.strictEqual(allowlistManager.listRecentRefusals('discord').length, 1);
+  });
+
+  it('discord: answers a /command in a DM', async () => {
+    const bridge = makeDiscord({
+      allowlistManager: new AllowlistManager(makeStore()),
+      getChannelSettings: () => ({})
+    });
+    bridge.botUserId = 'bot-1';
+
+    await bridge.handleMessageCreate(discordMessage('999', '/help'));
+
+    assert.strictEqual(bridge.sent.length, 1);
+    assert.match(bridge.sent[0].text, /999/);
+  });
+
+  it('discord: answers a /command that also mentions the bot', async () => {
+    const bridge = makeDiscord({
+      allowlistManager: new AllowlistManager(makeStore()),
+      getChannelSettings: () => ({})
+    });
+    bridge.botUserId = 'bot-1';
+
+    await bridge.handleMessageCreate(discordGuildMessage('999', '<@bot-1> /help'));
+
+    assert.strictEqual(bridge.sent.length, 1);
+  });
+});
+
 describe('Telegram bridge — approval routing', () => {
   it('never sends the approval prompt to the chat that originated the request', async () => {
     const bridge = makeTelegram({ getChannelSettings: () => ({}) });

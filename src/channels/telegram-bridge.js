@@ -7,7 +7,7 @@ const {
 } = require('./telegram-adapter');
 const { ChannelPlugin } = require('./channel-plugin');
 const { shouldRespond } = require('./mention-gating');
-const { NoticeLimiter, resolveApprovalTarget, addressesBot } = require('./sender-policy');
+const { NoticeLimiter, resolveApprovalTarget, addressesBot, commandTargetsBot } = require('./sender-policy');
 const { skillRegistry } = require('../skills');
 const { createLogger } = require('../logging');
 const log = createLogger('telegram-bridge');
@@ -413,7 +413,15 @@ class TelegramBridge extends ChannelPlugin {
         this.botId && message.reply_to_message && String(message.reply_to_message.from?.id || '') === this.botId
       );
       await this.notifyUnknownSender(chatId, inbound.sender.id, inbound.group?.id || null, {
-        mayReply: addressesBot({ isGroup, wasMentioned, isCommand, isReplyToBot })
+        // Only a command that names this bot — Telegram's `/cmd@botusername`
+        // suffix — counts; a bare `/weather berlin` in a room full of bots is
+        // not ours to answer with the sender's id.
+        mayReply: addressesBot({
+          isGroup,
+          wasMentioned,
+          isTargetedCommand: isCommand && commandTargetsBot(text, this.botUsername),
+          isReplyToBot
+        })
       });
       return;
     }
