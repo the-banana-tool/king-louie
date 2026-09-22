@@ -44,6 +44,12 @@ class HookExecutor {
     const results = [];
     let action = 'allow';
     let message = '';
+    // Whether any hook rewrote context.parameters. Deliberately separate from
+    // `action`: a hook's decision (allow/confirm/deny) and its rewrite are
+    // independent, and folding the rewrite into the action loses it the moment
+    // a later hook escalates to `confirm`. The caller needs both, because the
+    // rewritten set is the only set that may be judged *and* executed.
+    let modified = false;
 
     for (const hook of hooks) {
       const hookResult = await this.executeHook(hook, { ...context, event });
@@ -71,6 +77,7 @@ class HookExecutor {
             ...(context.parameters || {}),
             ...hookResult.parameters
           };
+          modified = true;
         }
       }
     }
@@ -79,6 +86,7 @@ class HookExecutor {
       action,
       message,
       context,
+      modified,
       results
     };
   }

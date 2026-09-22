@@ -118,14 +118,24 @@ class ToolExecutor extends EventEmitter {
       throw new Error(`Tool not found: ${toolName}`);
     }
 
-    // The "original" parameters passed to tool.execute(). Hooks may
-    // decorate these (adding derived fields, normalising values), but the
-    // decorated copy is what hooks and the approval dialog see — the tool
-    // itself always receives the originals so that conversation transcripts
-    // aren't corrupted by hook-injected fields (the "backfill" pattern
-    // from claude-code's toolExecution.ts:775).
+    // There is exactly one parameter set, and it is both judged and executed.
+    //
+    // This used to be two: a hook-decorated copy for the permission rules, the
+    // approval dialog, the denial tracker and the pre/post events, and the
+    // originals for tool.execute() and tool.isDangerous(). A PreToolUse hook
+    // returning { action: 'modify', parameters } drove them apart — the
+    // sanitised command was what the `deny Bash 'curl *'` rule was tested
+    // against and what the human saw on the approval card, while the raw
+    // command was what ran. A prompt-injected agent on a host with the
+    // documented sanitising hook installed got its `curl … | sh` executed with
+    // the rule never firing.
+    //
+    // So: a hook's rewrite is taken wholesale or not at all. `modified` says a
+    // hook explicitly asked to rewrite; without it, context.parameters is
+    // ignored entirely rather than half-applied, which keeps the "backfill"
+    // property that a hook cannot sneak fields into the transcript by
+    // decorating the context.
     let effectiveParameters = parameters;
-    let hookDecoratedParameters = parameters;
     let preHookResult = null;
 
     if (this.hookExecutor && typeof this.hookExecutor.run === 'function') {
@@ -137,6 +147,20 @@ class ToolExecutor extends EventEmitter {
       });
 
       const action = String(preHookResult?.action || 'allow').toLowerCase();
+
+      // Adopt the rewrite first, so everything below — the hook's own confirm
+      // prompt included — is about the parameters that will actually run.
+      // A hook with action='modify' explicitly opts in to changing what the
+      // tool receives (fixing a path, normalising a command). HookExecutor
+      // reports that as `modified`, separately from its allow/confirm/deny
+      // decision, so a later hook escalating to `confirm` cannot silently drop
+      // the rewrite. `action === 'modify'` is still honoured for a
+      // caller-supplied hookExecutor that predates `modified`.
+      const rewrote = preHookResult?.modified === true || action === 'modify';
+      if (rewrote && preHookResult?.context?.parameters) {
+        effectiveParameters = preHookResult.context.parameters;
+      }
+
       if (action === 'deny') {
         const denied = {
           success: false,
@@ -144,12 +168,12 @@ class ToolExecutor extends EventEmitter {
           blockedByHook: true,
           hookResults: preHookResult?.results || []
         };
-        this.emit('postExecute', { toolName, parameters, result: denied });
+        this.emit('postExecute', { toolName, parameters: effectiveParameters, result: denied });
         return denied;
       }
 
       if (action === 'confirm') {
-        const approved = await this.requestApproval(toolName, parameters, {
+        const approved = await this.requestApproval(toolName, effectiveParameters, {
           reason: preHookResult?.message || 'Hook policy requires explicit confirmation.'
         });
 
@@ -160,32 +184,19 @@ class ToolExecutor extends EventEmitter {
             blockedByHook: true,
             hookResults: preHookResult?.results || []
           };
-          this.emit('postExecute', { toolName, parameters, result: denied });
+          this.emit('postExecute', { toolName, parameters: effectiveParameters, result: denied });
           return denied;
-        }
-      }
-
-      // A hook with action='modify' explicitly opts in to changing what
-      // the tool actually receives — e.g. a hook that fixes a path or
-      // normalises a command. Otherwise, hook-decorated params are used
-      // for approval prompts and rule evaluation only (the "backfill"
-      // pattern from claude-code). This prevents a hook from sneaking
-      // fields into the conversation transcript by accident.
-      if (preHookResult?.context?.parameters) {
-        hookDecoratedParameters = preHookResult.context.parameters;
-        if (action === 'modify') {
-          effectiveParameters = preHookResult.context.parameters;
         }
       }
     }
 
-    this.emit('preExecute', { toolName, parameters: hookDecoratedParameters });
+    this.emit('preExecute', { toolName, parameters: effectiveParameters });
 
     try {
       tool.validateParameters(effectiveParameters);
     } catch (validationError) {
       const errorResult = { success: false, error: validationError.message };
-      this.emit('postExecute', { toolName, parameters: hookDecoratedParameters, result: errorResult });
+      this.emit('postExecute', { toolName, parameters: effectiveParameters, result: errorResult });
       return errorResult;
     }
 
@@ -200,7 +211,7 @@ class ToolExecutor extends EventEmitter {
     // Rule evaluation uses the hook-decorated parameters so a hook that
     // normalises a command (e.g. resolving aliases) feeds the same key
     // the user saw in the approval dialog.
-    const ruleMatch = evaluateRules(this.permissionRules, toolName, hookDecoratedParameters);
+    const ruleMatch = evaluateRules(this.permissionRules, toolName, effectiveParameters);
     let approvalSource = null;
 
     if (ruleMatch.matched) {
@@ -211,14 +222,14 @@ class ToolExecutor extends EventEmitter {
           deniedBy: 'rule',
           rule: { tool: ruleMatch.rule.tool, pattern: ruleMatch.rule.pattern, source: ruleMatch.rule.source }
         };
-        this.emit('postExecute', { toolName, parameters: hookDecoratedParameters, result: denied });
+        this.emit('postExecute', { toolName, parameters: effectiveParameters, result: denied });
         return denied;
       }
       if (ruleMatch.action === 'allow' && !this.denyAutoApproval) {
         approvalSource = { type: 'rule', rule: describeRule(ruleMatch.rule) };
         this.emit('approvalAutoGranted', {
           toolName,
-          parameters: hookDecoratedParameters,
+          parameters: effectiveParameters,
           source: approvalSource
         });
       }
@@ -236,7 +247,7 @@ class ToolExecutor extends EventEmitter {
     if (needsApprovalGate && !ruleSaysAllow) {
       const autoApproved = this.denyAutoApproval
         ? false
-        : await this.shouldAutoApprove(toolName, hookDecoratedParameters);
+        : await this.shouldAutoApprove(toolName, effectiveParameters);
       const agentAutoApproved = !this.denyAutoApproval
         && Array.isArray(options.autoApproveTools)
         && options.autoApproveTools.includes(toolName);
@@ -245,14 +256,14 @@ class ToolExecutor extends EventEmitter {
         approvalSource = { type: agentAutoApproved ? 'agent-config' : 'global-auto-approve' };
         this.emit('approvalAutoGranted', {
           toolName,
-          parameters: hookDecoratedParameters,
+          parameters: effectiveParameters,
           source: approvalSource
         });
       }
 
       if (!autoApproved && !agentAutoApproved) {
         if (this.denialTracker) {
-          const check = this.denialTracker.check(toolName, hookDecoratedParameters);
+          const check = this.denialTracker.check(toolName, effectiveParameters);
           if (check.tripped) {
             const denied = {
               success: false,
@@ -260,12 +271,12 @@ class ToolExecutor extends EventEmitter {
               deniedBy: 'denial-tracker',
               denialCount: check.count
             };
-            this.emit('postExecute', { toolName, parameters: hookDecoratedParameters, result: denied });
+            this.emit('postExecute', { toolName, parameters: effectiveParameters, result: denied });
             return denied;
           }
         }
 
-        const approved = await this.requestApproval(toolName, hookDecoratedParameters, {
+        const approved = await this.requestApproval(toolName, effectiveParameters, {
           ruleHint: ruleSaysAsk || allowRuleDemoted ? describeRule(ruleMatch.rule) : null
         });
         if (approved === 'timeout') {
@@ -277,16 +288,16 @@ class ToolExecutor extends EventEmitter {
             error: `Approval timed out after ${Math.round(this.approvalTimeoutMs / 1000)}s — no user response. Try again when someone is watching, or ask the user to pre-approve this tool.`,
             deniedBy: 'timeout'
           };
-          this.emit('postExecute', { toolName, parameters: hookDecoratedParameters, result: timedOut });
+          this.emit('postExecute', { toolName, parameters: effectiveParameters, result: timedOut });
           return timedOut;
         }
         if (!approved) {
-          if (this.denialTracker) this.denialTracker.recordDenial(toolName, hookDecoratedParameters);
+          if (this.denialTracker) this.denialTracker.recordDenial(toolName, effectiveParameters);
           const denied = { success: false, error: 'User denied permission', deniedBy: 'user' };
-          this.emit('postExecute', { toolName, parameters: hookDecoratedParameters, result: denied });
+          this.emit('postExecute', { toolName, parameters: effectiveParameters, result: denied });
           return denied;
         }
-        if (this.denialTracker) this.denialTracker.recordGrant(toolName, hookDecoratedParameters);
+        if (this.denialTracker) this.denialTracker.recordGrant(toolName, effectiveParameters);
         approvalSource = { type: 'user' };
       }
     }
@@ -329,7 +340,7 @@ class ToolExecutor extends EventEmitter {
       const onProgress = (progressEvent) => {
         this.emit('toolProgress', {
           toolName,
-          parameters: hookDecoratedParameters,
+          parameters: effectiveParameters,
           progress: progressEvent
         });
       };
@@ -353,7 +364,7 @@ class ToolExecutor extends EventEmitter {
       if (this.hookExecutor && typeof this.hookExecutor.run === 'function') {
         const postHookResult = await this.hookExecutor.run('PostToolUse', {
           toolName,
-          parameters: hookDecoratedParameters,
+          parameters: effectiveParameters,
           result,
           options,
           workingDirectory: options.workingDirectory || this.workingDirectory,
@@ -363,22 +374,22 @@ class ToolExecutor extends EventEmitter {
         if (postHookResult?.context?.result) {
           this.emit('postExecute', {
             toolName,
-            parameters: hookDecoratedParameters,
+            parameters: effectiveParameters,
             result: postHookResult.context.result
           });
           return postHookResult.context.result;
         }
       }
 
-      this.emit('postExecute', { toolName, parameters: hookDecoratedParameters, result });
+      this.emit('postExecute', { toolName, parameters: effectiveParameters, result });
       return result;
     } catch (error) {
       const errorCode = extractErrorCode(error);
       const errorResult = { success: false, error: error.message, errorCode };
       if (this.listenerCount('toolError') > 0) {
-        this.emit('toolError', { toolName, parameters: hookDecoratedParameters, error, errorCode });
+        this.emit('toolError', { toolName, parameters: effectiveParameters, error, errorCode });
       }
-      this.emit('postExecute', { toolName, parameters: hookDecoratedParameters, result: errorResult });
+      this.emit('postExecute', { toolName, parameters: effectiveParameters, result: errorResult });
       return errorResult;
     }
   }
