@@ -225,24 +225,32 @@ class ToolExecutor extends EventEmitter {
         this.emit('postExecute', { toolName, parameters: effectiveParameters, result: denied });
         return denied;
       }
-      if (ruleMatch.action === 'allow' && !this.denyAutoApproval) {
-        approvalSource = { type: 'rule', rule: describeRule(ruleMatch.rule) };
-        this.emit('approvalAutoGranted', {
-          toolName,
-          parameters: effectiveParameters,
-          source: approvalSource
-        });
-      }
       // 'ask' falls through to the regular approval flow below.
     }
 
     const ruleSaysAsk = ruleMatch.matched && ruleMatch.action === 'ask';
+    // What this tool would face with no rule written for it at all.
+    const toolWouldGate = tool.requiresApproval && this.requireApproval;
     // Under denyAutoApproval an `allow` rule is demoted to `ask`: it neither
-    // announces an auto-grant nor skips the gate.
-    const allowRuleDemoted = ruleMatch.matched && ruleMatch.action === 'allow' && this.denyAutoApproval;
-    const ruleSaysAllow = ruleMatch.matched && ruleMatch.action === 'allow' && !this.denyAutoApproval;
+    // announces an auto-grant nor skips the gate, so it cannot be used to
+    // pre-approve an unsafe tool for a remote origin. Only for a tool the gate
+    // would have caught anyway — demoting the rule on a tool whose
+    // requiresApproval is false would deny it, making an `allow` rule *more*
+    // restrictive than no rule, which is not a security property, just a bug.
+    const allowRuleDemoted = ruleMatch.matched && ruleMatch.action === 'allow'
+      && this.denyAutoApproval && toolWouldGate;
+    const ruleSaysAllow = ruleMatch.matched && ruleMatch.action === 'allow' && !allowRuleDemoted;
     const needsApprovalGate = ruleSaysAsk || allowRuleDemoted
-      || (!ruleMatch.matched && tool.requiresApproval && this.requireApproval);
+      || (!ruleMatch.matched && toolWouldGate);
+
+    if (ruleSaysAllow) {
+      approvalSource = { type: 'rule', rule: describeRule(ruleMatch.rule) };
+      this.emit('approvalAutoGranted', {
+        toolName,
+        parameters: effectiveParameters,
+        source: approvalSource
+      });
+    }
 
     if (needsApprovalGate && !ruleSaysAllow) {
       // An `ask` rule is the user saying "always check with me for this one",

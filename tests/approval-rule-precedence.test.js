@@ -10,6 +10,14 @@ const { Tool } = require('../src/tools/tool-schema');
 const ToolExecutor = require('../src/execution/tool-executor');
 
 toolRegistry.register(new Tool({
+  name: 'UngatedPrecedenceTool',
+  description: 'a tool that never requires approval',
+  requiresApproval: false,
+  parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] },
+  execute: async (params) => ({ ok: true, ran: params.command })
+}));
+
+toolRegistry.register(new Tool({
   name: 'PrecedenceTool',
   description: 'an approval-requiring tool with a pattern-matchable command',
   requiresApproval: true,
@@ -104,5 +112,79 @@ describe('permission rules vs auto-approve lists (A3)', () => {
     // explicit, persisted setting, not a hidden constant.
     const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'ipc', 'chat-handlers.js'), 'utf8');
     assert.doesNotMatch(source, /autoApproveTools\s*:/, 'chat-handlers.js must not set autoApproveTools');
+  });
+});
+
+// A5 — narrowing the `allow`-rule demotion that fix e8e1115 introduced.
+// Under denyAutoApproval an `allow` rule is demoted to `ask` so it cannot
+// short-circuit the gate. That is right for a tool the gate would have caught
+// anyway; applied to a tool whose requiresApproval is false it made writing an
+// `allow` rule *more* restrictive than writing no rule at all.
+describe('the `allow`-rule demotion under denyAutoApproval (A5)', () => {
+  const denying = (options = {}) => {
+    const autoGranted = [];
+    const executor = new ToolExecutor({
+      requireApproval: true,
+      denyAutoApproval: true,
+      ...options
+    });
+    executor.on('approvalAutoGranted', (evt) => autoGranted.push(evt.source.type));
+    return { executor, autoGranted };
+  };
+
+  it('still denies an approval-requiring tool that an `allow` rule names', async () => {
+    // The hole e8e1115 closed. Must not regress.
+    const { executor, autoGranted } = denying({
+      permissionRules: [{ tool: 'PrecedenceTool', pattern: 'git *', action: 'allow', source: 'session' }]
+    });
+    const result = await executor.execute('PrecedenceTool', { command: 'git status' });
+
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.deniedBy, 'user');
+    assert.deepStrictEqual(autoGranted, []);
+  });
+
+  it('does not gate a tool whose requiresApproval is false', async () => {
+    const { executor, autoGranted } = denying({
+      permissionRules: [{ tool: 'UngatedPrecedenceTool', pattern: '*', action: 'allow', source: 'session' }]
+    });
+    const result = await executor.execute('UngatedPrecedenceTool', { command: 'ls' });
+
+    assert.strictEqual(result.ok, true, 'an `allow` rule must not be stricter than no rule');
+    assert.deepStrictEqual(autoGranted, ['rule'], 'the auto-grant still travels for audit');
+  });
+
+  it('matches what the same tool does with no rule at all', async () => {
+    const { executor } = denying();
+    const result = await executor.execute('UngatedPrecedenceTool', { command: 'ls' });
+    assert.strictEqual(result.ok, true);
+  });
+
+  it('keeps `deny` winning for an ungated tool', async () => {
+    const { executor } = denying({
+      permissionRules: [{ tool: 'UngatedPrecedenceTool', pattern: 'rm *', action: 'deny', source: 'safety' }]
+    });
+    const result = await executor.execute('UngatedPrecedenceTool', { command: 'rm -rf /' });
+
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.deniedBy, 'rule');
+  });
+
+  it('keeps `ask` gating an ungated tool the user asked to be asked about', async () => {
+    const { executor } = denying({
+      permissionRules: [{ tool: 'UngatedPrecedenceTool', pattern: '*', action: 'ask', source: 'user' }]
+    });
+    const result = await executor.execute('UngatedPrecedenceTool', { command: 'ls' });
+
+    assert.strictEqual(result.success, false, 'an explicit `ask` still gates, and service mode denies');
+  });
+
+  it('does not demote when the executor gates nothing (requireApproval: false)', async () => {
+    const { executor } = denying({
+      requireApproval: false,
+      permissionRules: [{ tool: 'PrecedenceTool', pattern: '*', action: 'allow', source: 'session' }]
+    });
+    const result = await executor.execute('PrecedenceTool', { command: 'git status' });
+    assert.strictEqual(result.ok, true);
   });
 });
