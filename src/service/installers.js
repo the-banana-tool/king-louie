@@ -144,7 +144,8 @@ const WINDOWS_INSPECT_CSHARP = [
 //     can omit ACE kinds it doesn't model) is a plain ACCESS_ALLOWED ACE for LOCAL SERVICE,
 //     SYSTEM or Administrators — anything else, deny ACEs included, fails;
 //   - the DACL is protected (no inherited ACEs);
-//   - the owner is Administrators, SYSTEM or LOCAL SERVICE;
+//   - the owner is Administrators or SYSTEM (never LOCAL SERVICE — see
+//     $dirOwners below);
 // and on every ancestor up to the volume root: not a reparse point, and owned
 // by Administrators, SYSTEM or TrustedInstaller. The ancestors that already
 // exist are also checked BEFORE creating, so nothing is created through an
@@ -164,7 +165,14 @@ const WINDOWS_DATA_DIR_SCRIPT = [
   WINDOWS_INSPECT_CSHARP,
   `'@`,
   `  $aceSids = @('S-1-5-19','S-1-5-18','S-1-5-32-544')`,
-  `  $dirOwners = @('S-1-5-32-544','S-1-5-18','S-1-5-19')`,
+  // LOCAL SERVICE is deliberately NOT an accepted *owner*: S-1-5-19 is shared
+  // by every LocalService-hosted service on the box, it is a member of
+  // BUILTIN\Users (so it can create folders directly under %ProgramData%), and
+  // an owner holds implicit WRITE_DAC/WRITE_OWNER. A hostile LocalService
+  // process could otherwise pre-create a non-default --data-dir with exactly
+  // the expected SDDL and have the installer bless it. It stays in $aceSids:
+  // the service must still be granted access, just not own the directory.
+  `  $dirOwners = @('S-1-5-32-544','S-1-5-18')`,
   `  $ancestorOwners = @('S-1-5-32-544','S-1-5-18','${TRUSTED_INSTALLER_SID}')`,
   `  function Read-Entry([string]$p) {`,
   `    $r = [KlFsInspect]::Inspect($p)`,
@@ -222,7 +230,7 @@ const WINDOWS_DATA_DIR_SCRIPT = [
   `    throw "${'$'}{bad}: inherited access rules are still enabled"`,
   `  }`,
   `  $ownerSid = if ($e.Sd.Owner) { $e.Sd.Owner.Value } else { '(none)' }`,
-  `  if ($dirOwners -notcontains $ownerSid) { throw "${'$'}{bad}: owner $ownerSid is not Administrators, SYSTEM or LOCAL SERVICE" }`,
+  `  if ($dirOwners -notcontains $ownerSid) { throw "${'$'}{bad}: owner $ownerSid is not Administrators or SYSTEM" }`,
   `  Assert-SafeAncestors $path $true`,
   `  exit 0`,
   `} catch {`,
@@ -305,15 +313,23 @@ function assertValidProfile(profile) {
 // and a trailing backslash right before that closing quote would escape it
 // (Windows command-line quoting rules) — path.win32.resolve() strips a
 // trailing separator, and the explicit check rejects the quote outright.
-function sanitizeWindowsDataDir(dataDir) {
-  if (typeof dataDir !== 'string' || dataDir === '') {
-    throw new Error(`dataDir must be a non-empty string, got ${JSON.stringify(dataDir)}`);
+//
+// This runs over every path that reaches <Arguments>, not just dataDir:
+// `"${entryPath}" run --data-dir "${dataDir}"` splits into attacker-chosen
+// argv just as readily from entryPath (`C:\a\b" & --data-dir "C:\evil`) as
+// from dataDir. `"` is not a legal NTFS filename character, so nothing
+// legitimate is refused.
+function sanitizeWindowsPath(name, value) {
+  if (typeof value !== 'string' || value === '') {
+    throw new Error(`${name} must be a non-empty string, got ${JSON.stringify(value)}`);
   }
-  if (dataDir.includes('"')) {
-    throw new Error(`dataDir must not contain a double quote: ${JSON.stringify(dataDir)}`);
+  if (value.includes('"')) {
+    throw new Error(`${name} must not contain a double quote: ${JSON.stringify(value)}`);
   }
-  return path.win32.resolve(dataDir);
+  return path.win32.resolve(value);
 }
+
+const sanitizeWindowsDataDir = (dataDir) => sanitizeWindowsPath('dataDir', dataDir);
 
 // True when a path sits under a user's home directory rather than a system
 // path — installing there means the service account (or anyone with access
@@ -448,7 +464,12 @@ function ensureSafeDataDirParent(dataDir) {
   }
 }
 
+// Validation lives here, not only in planInstall: this is a public export, and
+// `user` is interpolated raw into `User=`/`Group=`, where a newline injects
+// further directives (`x\nExecStartPre=/bin/sh -c …`) into the unit.
 function renderSystemdUnit({ nodePath, entryPath, dataDir, user, profile = 'agent' }) {
+  assertValidUser(user);
+  assertValidProfile(profile);
   assertAbsolutePosixDataDir(dataDir);
   assertSafeUnitValue('nodePath', nodePath);
   assertSafeUnitValue('entryPath', entryPath);
@@ -481,6 +502,8 @@ function renderSystemdUnit({ nodePath, entryPath, dataDir, user, profile = 'agen
 }
 
 function renderLaunchdPlist({ nodePath, entryPath, dataDir, user, logsDir, profile = 'agent' }) {
+  assertValidUser(user);
+  assertValidProfile(profile);
   const args = [nodePath, entryPath, 'run', '--data-dir', dataDir, '--profile', profile].map((a) => `    <string>${xmlEscape(a)}</string>`).join('\n');
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -510,7 +533,10 @@ ${args}
 }
 
 function renderWindowsTaskXml({ nodePath, entryPath, dataDir, profile = 'agent' }) {
-  dataDir = sanitizeWindowsDataDir(dataDir);
+  assertValidProfile(profile);
+  dataDir = sanitizeWindowsPath('dataDir', dataDir);
+  nodePath = sanitizeWindowsPath('nodePath', nodePath);
+  entryPath = sanitizeWindowsPath('entryPath', entryPath);
   return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo><Description>King Louie service</Description></RegistrationInfo>

@@ -303,7 +303,11 @@ additionally denied outright, whatever the working directory is.
   a `0600` key file in the data directory (macOS, and Linux without systemd
   credentials).
 - The gateway (when enabled) requires a bearer token stored encrypted and
-  written to `<dataDir>/gateway-token` (mode `0600`, written atomically).
+  written atomically to `<dataDir>/gateway-token`. That copy is in the clear,
+  so that local clients and CLI tooling can read it: on Linux and macOS it is
+  mode `0600`; on Windows the mode bits are meaningless and its only
+  protection is the data directory's ACL (`LOCAL SERVICE`, `SYSTEM` and
+  Administrators).
   If secure storage is unavailable on that host, the token falls back to
   **session-only**: it still works for the current run but is regenerated
   (and every existing client rejected) on the next restart, rather than
