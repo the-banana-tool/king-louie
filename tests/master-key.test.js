@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 const { resolveMasterKey, MASTER_KEY_CREDENTIAL, KEY_CHECK_FILE } = require('../src/platform/master-key');
 const { windowsPowerShellExe } = require('../src/platform/windows-paths');
+const { addSink } = require('../src/logging');
 
 // Every temp dir this file creates is removed once all tests have run.
 const createdTempDirs = [];
@@ -117,9 +118,10 @@ describe('master key check', () => {
 });
 
 describe('root reading the systemd credential file on Linux', () => {
-  function credFile(hex) {
+  function credFile(hex, mode) {
     const file = path.join(tmp(), MASTER_KEY_CREDENTIAL);
     fs.writeFileSync(file, hex);
+    if (mode !== undefined && process.platform !== 'win32') fs.chmodSync(file, mode);
     return file;
   }
 
@@ -142,17 +144,106 @@ describe('root reading the systemd credential file on Linux', () => {
     assert.strictEqual(r.source, 'credential-file');
   });
 
-  it('is ignored for a non-root user, on other platforms, and when the file is absent', { skip: process.platform === 'win32' }, () => {
-    const credentialPath = credFile('ef'.repeat(32));
-    assert.strictEqual(resolveMasterKey({ platform: 'linux', dataDir: tmp(), env: {}, getuid: () => 1000, credentialPath }).source, 'key-file');
-    assert.strictEqual(resolveMasterKey({ platform: 'darwin', dataDir: tmp(), env: {}, getuid: () => 0, credentialPath }).source, 'key-file');
-    assert.strictEqual(resolveMasterKey({ platform: 'linux', dataDir: tmp(), env: {}, getuid: () => 0, credentialPath: path.join(tmp(), 'absent') }).source, 'key-file');
+  it('falls back to a key file when there is no credential and no place to put one', { skip: process.platform === 'win32' }, () => {
+    assert.strictEqual(
+      resolveMasterKey({
+        platform: 'linux',
+        dataDir: tmp(),
+        env: {},
+        getuid: () => 0,
+        credentialPath: path.join(tmp(), 'no-such-dir', MASTER_KEY_CREDENTIAL)
+      }).source,
+      'key-file'
+    );
+  });
+
+  // The credential is no longer root-and-Linux-only: it is where every POSIX
+  // host without a systemd credential keeps its key, so a non-root service
+  // account reads it too (the installer chowns it to that account inside a
+  // root-owned directory). What is still refused is a key anyone can read.
+  it('is read on darwin and by a non-root account, and refused when it is group- or world-readable', { skip: process.platform === 'win32' }, () => {
+    const credentialPath = credFile('ef'.repeat(32), 0o600);
+    assert.strictEqual(resolveMasterKey({ platform: 'darwin', dataDir: tmp(), env: {}, getuid: () => 501, credentialPath }).source, 'credential-file');
+    assert.strictEqual(resolveMasterKey({ platform: 'linux', dataDir: tmp(), env: {}, getuid: () => 1000, credentialPath }).source, 'credential-file');
+    assert.throws(
+      () => resolveMasterKey({ platform: 'darwin', dataDir: tmp(), env: {}, getuid: () => 501, credentialPath: credFile('ef'.repeat(32), 0o644) }),
+      /permissions 644/
+    );
   });
 
   it('is ignored for a non-root user (platform-independent check)', () => {
     const credentialPath = credFile('ef'.repeat(32));
     const r = resolveMasterKey({ platform: 'win32', dataDir: tmp(), env: {}, getuid: () => 0, credentialPath, dpapi: { protect: (b) => b, unprotect: (b) => b } });
     assert.strictEqual(r.source, 'dpapi');
+  });
+});
+
+// At-rest encryption buys nothing when the key sits inside the directory it
+// protects: a Time Machine backup, a snapshot or a `tar` of the data dir
+// carries both halves. macOS (and Linux without systemd credentials) did
+// exactly that. The key belongs in the admin-owned config dir the installers
+// create, which the service account can read but not replace.
+describe('the master key lives outside the directory it protects', () => {
+  const posixOnly = process.platform === 'win32' ? 'POSIX-only (needs 0600 mode bits)' : false;
+  const credIn = (dir) => {
+    const credDir = path.join(dir, 'config', 'credentials');
+    fs.mkdirSync(credDir, { recursive: true });
+    return path.join(credDir, MASTER_KEY_CREDENTIAL);
+  };
+
+  it('mints the key in the admin credentials dir when one exists', { skip: posixOnly }, () => {
+    const base = tmp();
+    const dataDir = path.join(base, 'data');
+    fs.mkdirSync(dataDir);
+    const credentialPath = credIn(base);
+
+    const r = resolveMasterKey({ platform: 'darwin', dataDir, env: {}, getuid: () => 0, credentialPath });
+
+    assert.strictEqual(r.source, 'credential-file');
+    assert.ok(fs.existsSync(credentialPath), 'the key must be written outside the data dir');
+    assert.strictEqual(fs.statSync(credentialPath).mode & 0o077, 0);
+    assert.ok(!fs.existsSync(path.join(dataDir, 'master.key')), 'nothing may put a key back in the data dir');
+    // ...and the same key comes back next time.
+    const again = resolveMasterKey({ platform: 'darwin', dataDir, env: {}, getuid: () => 0, credentialPath });
+    assert.ok(r.key.equals(again.key));
+  });
+
+  it('falls back to the data dir, loudly, when there is no admin credentials dir', { skip: posixOnly }, () => {
+    const base = tmp();
+    const dataDir = path.join(base, 'data');
+    fs.mkdirSync(dataDir);
+    const credentialPath = path.join(base, 'config', 'credentials', MASTER_KEY_CREDENTIAL);
+
+    const r = resolveMasterKey({ platform: 'darwin', dataDir, env: {}, getuid: () => 0, credentialPath });
+
+    assert.strictEqual(r.source, 'key-file');
+    assert.ok(fs.existsSync(path.join(dataDir, 'master.key')));
+  });
+
+  it('keeps using a key already in the data dir, and says how to move it', { skip: posixOnly }, () => {
+    const base = tmp();
+    const dataDir = path.join(base, 'data');
+    fs.mkdirSync(dataDir);
+    const legacy = path.join(dataDir, 'master.key');
+    fs.writeFileSync(legacy, 'ab'.repeat(32), { mode: 0o600 });
+    fs.chmodSync(legacy, 0o600);
+    const credentialPath = credIn(base);
+
+    const warnings = [];
+    const remove = addSink((rec) => { if (rec.level === 'warn') warnings.push(rec.message); });
+    let r;
+    try {
+      r = resolveMasterKey({ platform: 'darwin', dataDir, env: {}, getuid: () => 0, credentialPath });
+    } finally {
+      remove();
+    }
+
+    assert.strictEqual(r.key.toString('hex'), 'ab'.repeat(32), 'an existing data dir must keep working');
+    assert.ok(!fs.existsSync(credentialPath), 'it must not silently mint a second key');
+    assert.ok(
+      warnings.some((m) => m.includes(credentialPath) && m.includes(legacy)),
+      `expected a warning naming both locations, got ${JSON.stringify(warnings)}`
+    );
   });
 });
 

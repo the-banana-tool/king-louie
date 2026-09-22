@@ -15,6 +15,9 @@ const { execFileSync } = require('child_process');
 const { createAesGcmCipher } = require('./cipher');
 const { windowsPowerShellExe } = require('./windows-paths');
 const { adminCredentialPath } = require('./paths');
+const { createLogger } = require('../logging');
+
+const log = createLogger('master-key');
 
 const MASTER_KEY_CREDENTIAL = 'kl-master-key';
 // The root-only file the systemd unit's LoadCredential= reads, for the default
@@ -74,17 +77,65 @@ function writePrivateFileExclusive(file, content) {
   }
 }
 
-function fromKeyFile(dataDir, onPath) {
-  const file = path.join(dataDir, 'master.key');
-  if (fs.existsSync(file)) {
-    const mode = fs.statSync(file).mode & 0o777;
-    if (mode & 0o077) throw new Error(`${file} has permissions ${mode.toString(8)}; it must be 600`);
-    return parseHexKey(fs.readFileSync(file, 'utf8'), file);
+function readPrivateKeyFile(file) {
+  if (!fs.existsSync(file)) return null;
+  const mode = fs.statSync(file).mode & 0o777;
+  if (mode & 0o077) throw new Error(`${file} has permissions ${mode.toString(8)}; it must be 600`);
+  return parseHexKey(fs.readFileSync(file, 'utf8'), file);
+}
+
+// Where a POSIX host without a systemd credential keeps its key.
+//
+// It used to be <dataDir>/master.key — inside the very directory the key
+// encrypts. A Time Machine backup, a snapshot or a `tar` of the data dir then
+// carried both halves, which is strictly weaker than the Electron host's
+// Keychain on the same machine, and weaker than Linux-with-systemd. The key
+// now goes in the admin-owned config dir the installers create: the service
+// account can read it, but the directory is root-owned, so the account cannot
+// replace the key, and a copy of the data dir alone does not decrypt.
+//
+// Order matters. A key already in the data dir wins, because minting a second
+// one would fail the key check and lock the operator out of their own store;
+// it is used and the log says where to move it. Minting only ever goes to the
+// admin location when that directory already exists — no installer, no
+// directory, and the data dir stays the fallback, loudly.
+function fromPosixKeyFile({ dataDir, credentialPath, onPath }) {
+  const dataDirKey = path.join(dataDir, 'master.key');
+
+  const legacy = readPrivateKeyFile(dataDirKey);
+  if (legacy) {
+    log.warn(
+      `the master key is inside the directory it protects (${dataDirKey}); a backup or snapshot of the `
+      + `data dir carries both halves. Stop the service, move the file to ${credentialPath} (root-owned `
+      + 'directory, 0600), and start it again.'
+    );
+    return { key: legacy, source: 'key-file' };
   }
+
+  const admin = readPrivateKeyFile(credentialPath);
+  if (admin) return { key: admin, source: 'credential-file' };
+
   const key = crypto.randomBytes(KEY_BYTES);
-  writePrivateFileExclusive(file, key.toString('hex'));
-  onPath(file);
-  return key;
+  if (fs.existsSync(path.dirname(credentialPath))) {
+    try {
+      writePrivateFileExclusive(credentialPath, key.toString('hex'));
+      return { key, source: 'credential-file' };
+    } catch (err) {
+      // Lost a race with another process: use whatever it wrote.
+      if (err.code === 'EEXIST') return { key: readPrivateKeyFile(credentialPath), source: 'credential-file' };
+      if (!['EACCES', 'EPERM', 'EROFS'].includes(err.code)) throw err;
+      log.warn(`cannot write the master key to ${credentialPath} (${err.code}); falling back to the data dir`);
+    }
+  }
+
+  log.warn(
+    `no admin-owned key location at ${path.dirname(credentialPath)}, so the master key is being written to `
+    + `${dataDirKey} — inside the directory it protects. A backup or snapshot of the data dir will carry `
+    + 'both halves. Install the service so the config dir exists, or create that directory root-owned.'
+  );
+  writePrivateFileExclusive(dataDirKey, key.toString('hex'));
+  onPath(dataDirKey);
+  return { key, source: 'key-file' };
 }
 
 // LocalMachine scope: any account on this machine could unprotect the blob,
@@ -146,7 +197,7 @@ function resolveMasterKeyUnchecked({ platform, dataDir, env, dpapi, getuid, cred
   if (platform === 'win32') {
     return { key: fromDpapiFile(dataDir, dpapi || createPowerShellDpapi(), onPath), source: 'dpapi' };
   }
-  return { key: fromKeyFile(dataDir, onPath), source: 'key-file' };
+  return fromPosixKeyFile({ dataDir, credentialPath, onPath });
 }
 
 function resolveMasterKey({

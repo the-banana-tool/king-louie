@@ -1031,6 +1031,39 @@ describe('linux /etc/king-louie layout (I1)', () => {
 // server spawned without an explicit cwd is the concrete case — would start
 // inside it. The service chdirs into <dataDir>/workspace itself; the units
 // must not hand it the secret store to begin with.
+// At-rest encryption buys nothing when the key sits inside the directory it
+// protects. macOS has no systemd credential, so the installer mints the key in
+// the root-owned config dir instead and hands the file — only the file — to
+// the service account.
+describe('darwin: the master key is created outside the data dir', () => {
+  const steps = () => planInstall({ platform: 'darwin', ...base, dataDir: '/Library/Application Support/KingLouie/data', user: '_kinglouie' });
+  const KEY = '/Library/Application Support/KingLouie/config/credentials/kl-master-key';
+
+  it('creates a root-owned credentials dir and a 0600 key inside it', () => {
+    const s = steps();
+    const runs = s.map((x) => x.run?.join(' ')).filter(Boolean);
+    assert.ok(runs.some((r) => r === `install -d -m 0755 -o root -g wheel ${path.posix.dirname(KEY)}`), runs.join('\n'));
+    const key = s.find((x) => x.writeFile?.path === KEY);
+    assert.ok(key, 'no master key step');
+    assert.strictEqual(key.writeFile.mode, 0o600);
+    assert.strictEqual(key.writeFile.overwrite, false, 'a reinstall must not clobber a live key');
+    assert.match(key.writeFile.content, /^[0-9a-f]{64}$/);
+    assert.ok(runs.includes(`chown _kinglouie ${KEY}`), 'the service account must be able to read it');
+  });
+
+  it('still creates nothing inside the data dir', () => {
+    for (const step of steps()) {
+      const touched = [step.writeFile?.path, step.unlink, ...(step.run || [])].filter(Boolean);
+      for (const p of touched) {
+        assert.ok(
+          !String(p).startsWith('/Library/Application Support/KingLouie/data/'),
+          `${step.description} touches ${p} inside the data dir`
+        );
+      }
+    }
+  });
+});
+
 // A second Linux instance used to read the first one's /etc/king-louie, so it
 // inherited its ports, failed to bind and refused to start. Its config — and
 // its master-key credential — have to be its own.

@@ -42,6 +42,9 @@ const UNIT_PATH = '/etc/systemd/system/king-louie.service';
 const linuxCredPath = (dataDir) => adminCredentialPath({ platform: 'linux', dataDir });
 const linuxCredDir = (dataDir) => path.posix.dirname(linuxCredPath(dataDir));
 const linuxConfigDir = (dataDir) => adminConfigDir({ platform: 'linux', dataDir });
+// macOS has no systemd credential, so the key is a plain 0600 file — but in
+// the root-owned config dir rather than inside the data dir it encrypts.
+const darwinCredPath = (dataDir) => adminCredentialPath({ platform: 'darwin', dataDir });
 const PLIST_PATH = '/Library/LaunchDaemons/com.kinglouie.service.plist';
 const TASK_NAME = 'KingLouie';
 // launchd opens StandardOutPath/StandardErrorPath itself, following symlinks,
@@ -653,6 +656,15 @@ function planInstall({ platform = process.platform, nodePath = process.execPath,
       // Which listeners are on and on which ports is read from here, never
       // from the service-writable <dataDir>/service.json.
       { description: 'create the config dir (root-owned, read-only to the service)', run: ['install', '-d', '-m', '0755', '-o', 'root', '-g', 'wheel', adminConfigDir({ platform: 'darwin', dataDir })] },
+      // The master key goes here, not in the data dir it encrypts: a Time
+      // Machine backup or a `tar` of the data dir would otherwise carry both
+      // halves. The directory is root-owned and the service account cannot
+      // write it, so it can neither replace nor unlink the key; the file
+      // itself is handed to that account 0600 so it can read it. `overwrite:
+      // false` means a reinstall never clobbers a live key.
+      { description: 'create the credentials dir (root-owned, not writable by the service)', run: ['install', '-d', '-m', '0755', '-o', 'root', '-g', 'wheel', path.posix.dirname(darwinCredPath(dataDir))] },
+      { description: 'write the master key (0600)', writeFile: { path: darwinCredPath(dataDir), content: crypto.randomBytes(32).toString('hex'), mode: 0o600, overwrite: false } },
+      { description: 'let the service account read the master key', run: ['chown', user, darwinCredPath(dataDir)] },
       { description: 'write the LaunchDaemon', writeFile: { path: PLIST_PATH, content: renderLaunchdPlist({ nodePath, entryPath, dataDir, user, logsDir: DARWIN_LOG_DIR, profile }), mode: 0o644 } },
       // bootstrap fails if the label is already loaded (a reinstall), so any
       // previous instance is booted out first; on a fresh install there is

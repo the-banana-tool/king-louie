@@ -321,9 +321,16 @@ instance — starts there too rather than in the data directory.
   `/etc/king-louie/credentials`); Windows DPAPI in the `LocalMachine` scope
   in `master.key.dpapi`, kept private *only* by the data directory's ACL
   (`LocalMachine` scope means any code on the machine can unwrap it — see
-  the known gap below); otherwise
-  a `0600` key file in the data directory (macOS, and Linux without systemd
-  credentials).
+  the known gap below); otherwise a `0600` key file at
+  `<configDir>/credentials/kl-master-key` (macOS, and Linux without systemd
+  credentials). That file is **outside** the data directory on purpose: a
+  backup, a snapshot or a `tar` of the data directory would otherwise carry
+  both the ciphertext and the key that opens it. The directory is root-owned
+  and not writable by the service account, so the key can be read by the
+  service but not replaced by it. A key already at the old location
+  (`<dataDir>/master.key`) keeps working and the service logs where to move
+  it; if there is no config directory at all, the key still lands in the data
+  directory, with a warning saying so.
 - The gateway (when enabled) requires a bearer token, kept encrypted in the
   store. A cleartext copy is written atomically to `<dataDir>/gateway-token`
   so local clients and CLI tooling can read it — but **only while the listener
