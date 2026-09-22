@@ -29,18 +29,30 @@ async function initializeMesh(config = {}) {
   // Load or create identity. The private keys are encrypted at rest under the
   // host cipher; a plaintext identity from an older build is upgraded in place
   // by loadIdentity, keeping the same peer id.
+  //
+  // A stored identity that cannot be read is NOT a reason to mint a new one.
+  // An unavailable cipher (no Secret Service on a Linux desktop, a keychain
+  // reset, a DPAPI profile that did not load) is a transient, recoverable
+  // condition; overwriting the record would destroy the peer id and every
+  // pinned pairing irrecoverably, and with no cipher it would write the fresh
+  // key in the clear. So the error propagates — mesh stays off for this
+  // session and the record on disk is untouched. Minting is correct only when
+  // there is genuinely nothing stored.
   let identity = null;
   const stored = store.get('mesh.identity');
   if (stored) {
     try {
       identity = loadIdentity(store, cipher);
-      // Apply any updated settings
-      identity.displayName = meshSettings.displayName || stored.displayName || '';
-      identity.capabilities = meshSettings.capabilities || stored.capabilities || [];
     } catch (err) {
-      log.warn(`failed to load stored identity, generating new one: ${err.message}`);
-      identity = null;
+      log.error(
+        `refusing to start: the stored mesh identity could not be loaded (${err.message}). ` +
+        'The identity on disk has been left untouched; fix the host cipher and restart.'
+      );
+      throw err;
     }
+    // Apply any updated settings
+    identity.displayName = meshSettings.displayName || stored.displayName || '';
+    identity.capabilities = meshSettings.capabilities || stored.capabilities || [];
   }
 
   if (!identity) {

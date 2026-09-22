@@ -330,6 +330,13 @@ function serializeIdentity(identity, cipher) {
 
 function deserializeIdentity(record, cipher) {
   if (record?.keyEncryption !== KEY_ENCRYPTION_MARKER) {
+    // A record holding one half of the keypair is not a plaintext identity: it
+    // is an encrypted or half-written one that lost its marker. The MeshIdentity
+    // constructor would quietly mint a brand-new keypair from it — a new peer id
+    // and dead pairings — so refuse instead.
+    if (record && Boolean(record.publicKey) !== Boolean(record.privateKey)) {
+      throw new Error('stored mesh identity is incomplete: it has no usable private key');
+    }
     return MeshIdentity.deserialize(record);
   }
 
