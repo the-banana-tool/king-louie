@@ -11,17 +11,44 @@ const HELP = `Usage:
   king-louie-service uninstall [--dry-run]
 `;
 
+const VALUE_FLAGS = new Set(['data-dir', 'profile', 'user']);
+
 function parseArgs(argv) {
   const positional = [];
   const flags = {};
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
-    if (a === '--dry-run') flags.dryRun = true;
-    else if (a.startsWith('--')) {
-      const name = a.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
-      flags[name] = argv[i + 1];
-      i += 1;
-    } else positional.push(a);
+    if (!a.startsWith('--')) {
+      positional.push(a);
+      continue;
+    }
+    const eq = a.indexOf('=');
+    const rawName = eq === -1 ? a.slice(2) : a.slice(2, eq);
+    if (rawName === 'dry-run') {
+      flags.dryRun = true;
+      continue;
+    }
+    if (!VALUE_FLAGS.has(rawName)) {
+      throw new Error(`Unknown flag "--${rawName}".`);
+    }
+    const camelName = rawName.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+    let value;
+    if (eq !== -1) {
+      value = a.slice(eq + 1);
+    } else {
+      const next = argv[i + 1];
+      if (next !== undefined && !next.startsWith('--')) {
+        value = next;
+        i += 1;
+      }
+    }
+    if (value === undefined) {
+      throw new Error(`Flag "--${rawName}" requires a value.`);
+    }
+    if (rawName === 'data-dir' && value === '') {
+      throw new Error('Flag "--data-dir" must not be empty.');
+    }
+    flags[camelName] = value;
   }
   return { positional, flags };
 }
@@ -33,8 +60,18 @@ async function readStdin(stdin) {
 }
 
 async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr }) {
-  const { positional, flags } = parseArgs(argv);
+  let positional;
+  let flags;
+  try {
+    ({ positional, flags } = parseArgs(argv));
+  } catch (err) {
+    io.stderr.write(`${err.message}\n${HELP}`);
+    return 2;
+  }
   const [command, sub, arg] = positional;
+  // flags.dataDir is only ever undefined (flag absent) or a validated
+  // non-empty string here — parseArgs rejects a missing or empty --data-dir
+  // above, so the default is used only when the flag was never given.
   const dataDir = flags.dataDir || defaultServiceDataDir();
 
   try {
