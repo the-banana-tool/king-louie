@@ -8,9 +8,9 @@ const { defaultServiceDataDir, ensureServicePaths } = require('../src/platform/p
 describe('service paths', () => {
   it('uses OS-appropriate system locations', () => {
     assert.strictEqual(defaultServiceDataDir({ platform: 'linux', env: {} }), '/var/lib/king-louie');
-    assert.strictEqual(defaultServiceDataDir({ platform: 'darwin', env: {} }), '/Library/Application Support/KingLouie');
-    assert.strictEqual(defaultServiceDataDir({ platform: 'win32', env: { ProgramData: 'D:\\PD' } }), path.win32.join('D:\\PD', 'KingLouie'));
-    assert.strictEqual(defaultServiceDataDir({ platform: 'win32', env: {} }), path.win32.join('C:\\ProgramData', 'KingLouie'));
+    assert.strictEqual(defaultServiceDataDir({ platform: 'darwin', env: {} }), '/Library/Application Support/KingLouie/data');
+    assert.strictEqual(defaultServiceDataDir({ platform: 'win32', env: { ProgramData: 'D:\\PD' } }), 'D:\\PD\\KingLouie\\data');
+    assert.strictEqual(defaultServiceDataDir({ platform: 'win32', env: {} }), 'C:\\ProgramData\\KingLouie\\data');
   });
 
   it('creates private data, logs and cache dirs', () => {

@@ -28,16 +28,25 @@ const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const { defaultServiceDataDir } = require('../platform/paths');
+const { windowsPowerShellExe, windowsSchtasksExe } = require('../platform/windows-paths');
+const { ROOT_CREDENTIAL_PATH } = require('../platform/master-key');
 const { PROFILES } = require('./config');
 
 const UNIT_PATH = '/etc/systemd/system/king-louie.service';
-const CRED_PATH = '/etc/king-louie/credentials/kl-master-key';
+const CRED_PATH = ROOT_CREDENTIAL_PATH; // /etc/king-louie/credentials/kl-master-key
+const CRED_DIR = path.posix.dirname(CRED_PATH); // /etc/king-louie/credentials
+const CONFIG_DIR = path.posix.dirname(CRED_DIR); // /etc/king-louie
 const PLIST_PATH = '/Library/LaunchDaemons/com.kinglouie.service.plist';
 const TASK_NAME = 'KingLouie';
 
 // Owner Administrators (BA), DACL protected (no inherited ACEs), Full
 // Control to LOCAL SERVICE (LS), SYSTEM (SY) and Administrators (BA) only.
 const WINDOWS_DATA_DIR_SDDL = 'O:BAD:P(A;OICI;FA;;;LS)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)';
+// The data dir's parent (…\KingLouie), when the installer has to create it:
+// owner Administrators, DACL protected, Full Control to SYSTEM and
+// Administrators, read & execute (0x1200a9) to LOCAL SERVICE — so stage 2's
+// config dir beside the data dir is readable, never writable, by the service.
+const WINDOWS_PARENT_DIR_SDDL = 'O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;LS)';
 
 // TrustedInstaller owns the volume root and C:\Windows on a stock install.
 const TRUSTED_INSTALLER_SID = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464';
@@ -101,12 +110,17 @@ const WINDOWS_INSPECT_CSHARP = [
 
 // Creates the data dir with a protected DACL present from the instant it
 // exists, then — whether it was just created or already existed — runs the
-// SAME full verification; it never modifies an existing dir's ACL.
+// SAME full verification; it never modifies an existing dir's ACL. A missing
+// parent (C:\ProgramData\KingLouie for the default data dir
+// C:\ProgramData\KingLouie\data) is created first, admin-owned with its own
+// protected DACL (WINDOWS_PARENT_DIR_SDDL); an existing parent must pass the
+// ancestor checks below (a standard user can create folders in ProgramData,
+// and one they pre-created is owned by them, so it fails).
 //
 // Why verification always runs after CreateDirectory: Directory.CreateDirectory
 // on a path that already exists (a plain dir or a junction) returns success
 // silently and applies nothing, so a standard user who creates
-// C:\ProgramData\KingLouie (or a junction there) between the existence check
+// C:\ProgramData\KingLouie\data (or a junction there) between the existence check
 // and the create would otherwise win. Now that race ends in the owner check
 // (their dir is owned by them) or the reparse check (a junction).
 //
@@ -161,6 +175,16 @@ const WINDOWS_DATA_DIR_SCRIPT = [
   `    }`,
   `  }`,
   `  if ($null -eq (Read-Entry $path)) {`,
+  `    # A missing parent (where stage 2's read-only config dir will sit) is`,
+  `    # created admin-owned with its own protected DACL rather than inheriting`,
+  `    # a user-writable one; an existing parent is only verified.`,
+  `    $parent = [System.IO.Path]::GetDirectoryName($path)`,
+  `    if ($parent -and ($null -eq (Read-Entry $parent))) {`,
+  `      Assert-SafeAncestors $parent $false`,
+  `      $pds = New-Object System.Security.AccessControl.DirectorySecurity`,
+  `      $pds.SetSecurityDescriptorSddlForm('${WINDOWS_PARENT_DIR_SDDL}')`,
+  `      [System.IO.Directory]::CreateDirectory($parent, $pds) | Out-Null`,
+  `    }`,
   `    Assert-SafeAncestors $path $false`,
   `    $ds = New-Object System.Security.AccessControl.DirectorySecurity`,
   `    $ds.SetSecurityDescriptorSddlForm('${WINDOWS_DATA_DIR_SDDL}')`,
@@ -196,15 +220,9 @@ const WINDOWS_DATA_DIR_SCRIPT = [
   `}`
 ].join('\n');
 
-// Absolute paths for every Windows executable the plans run, so an elevated
-// install started from an attacker-writable cwd can't pick up a planted
-// powershell.exe/schtasks.exe (Windows searches the cwd before PATH).
-function windowsSystemRoot() {
-  const root = process.env.SystemRoot;
-  return typeof root === 'string' && path.win32.isAbsolute(root) ? root : 'C:\\Windows';
-}
-const windowsPowerShellExe = () => path.win32.join(windowsSystemRoot(), 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-const windowsSchtasksExe = () => path.win32.join(windowsSystemRoot(), 'System32', 'schtasks.exe');
+// Every Windows executable the plans run is an absolute System32 path (see
+// src/platform/windows-paths.js), so an elevated install started from an
+// attacker-writable cwd can't pick up a planted powershell.exe/schtasks.exe.
 
 // Escapes text for use inside XML element content (not attribute values, so
 // quotes are left as-is — they're only special inside an attribute).
@@ -330,6 +348,7 @@ function renderSystemdUnit({ nodePath, entryPath, dataDir, user, profile = 'agen
     'Type=simple',
     `User=${user}`,
     `Group=${user}`,
+    `WorkingDirectory=${dataDir}`,
     `ExecStart=${nodePath} ${entryPath} run --data-dir ${dataDir} --profile ${profile}`,
     'Restart=on-failure',
     'RestartSec=5',
@@ -361,6 +380,8 @@ ${args}
   </array>
   <key>UserName</key>
   <string>${xmlEscape(user)}</string>
+  <key>WorkingDirectory</key>
+  <string>${xmlEscape(dataDir)}</string>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
@@ -398,6 +419,7 @@ function renderWindowsTaskXml({ nodePath, entryPath, dataDir, profile = 'agent' 
     <Exec>
       <Command>${xmlEscape(nodePath)}</Command>
       <Arguments>${xmlEscape(`"${entryPath}" run --data-dir "${dataDir}" --profile ${profile}`)}</Arguments>
+      <WorkingDirectory>${xmlEscape(dataDir)}</WorkingDirectory>
     </Exec>
   </Actions>
 </Task>
@@ -426,10 +448,20 @@ function planInstall({ platform = process.platform, nodePath = process.execPath,
         runUnless: { check: ['id', '-u', svcUser], run: ['useradd', '--system', '--home-dir', dataDir, '--shell', '/usr/sbin/nologin', svcUser] }
       },
       { description: 'create the data dir', run: ['install', '-d', '-m', '0700', '-o', svcUser, '-g', svcUser, dataDir] },
+      // /etc/king-louie is root-owned and world-readable (stage 2 keeps
+      // read-only config there); only credentials/ is root-only. install -d
+      // re-applies owner and mode to a dir that already exists, and the chmod
+      // re-pins credentials/ to 0700 whatever an earlier install left.
+      { description: 'create the config dir (root-owned, read-only to others)', run: ['install', '-d', '-m', '0755', '-o', 'root', '-g', 'root', CONFIG_DIR] },
+      { description: 'create the credentials dir (root-only)', run: ['install', '-d', '-m', '0700', '-o', 'root', '-g', 'root', CRED_DIR] },
+      { description: 'pin the credentials dir to 0700', run: ['chmod', '0700', CRED_DIR] },
       { description: 'write the master key credential (root-only)', writeFile: { path: CRED_PATH, content: crypto.randomBytes(32).toString('hex'), mode: 0o600, overwrite: false } },
       { description: 'write the systemd unit', writeFile: { path: UNIT_PATH, content: renderSystemdUnit({ nodePath, entryPath, dataDir, user: svcUser, profile }), mode: 0o644 } },
       { description: 'reload systemd', run: ['systemctl', 'daemon-reload'] },
-      { description: 'enable and start', run: ['systemctl', 'enable', '--now', 'king-louie.service'] }
+      { description: 'enable and start', run: ['systemctl', 'enable', '--now', 'king-louie.service'] },
+      // enable --now leaves an already-running service on its old unit and
+      // code; a reinstall must pick up both.
+      { description: 'restart it on the new unit', run: ['systemctl', 'restart', 'king-louie.service'] }
     ];
   } else if (platform === 'darwin') {
     if (!user) throw new Error('--user is required on macOS (create a dedicated account first; see README)');
@@ -449,6 +481,10 @@ function planInstall({ platform = process.platform, nodePath = process.execPath,
       { description: 'create the data dir', run: ['install', '-d', '-m', '0700', '-o', user, dataDir] },
       { description: 'create the logs dir', run: ['install', '-d', '-m', '0700', '-o', user, logsDir] },
       { description: 'write the LaunchDaemon', writeFile: { path: PLIST_PATH, content: renderLaunchdPlist({ nodePath, entryPath, dataDir, user, logsDir, profile }), mode: 0o644 } },
+      // bootstrap fails if the label is already loaded (a reinstall), so any
+      // previous instance is booted out first; on a fresh install there is
+      // nothing to boot out, which is fine.
+      { description: 'unload any previous LaunchDaemon', run: ['launchctl', 'bootout', 'system', PLIST_PATH], ignoreFailure: true },
       { description: 'load the LaunchDaemon', run: ['launchctl', 'bootstrap', 'system', PLIST_PATH] }
     ];
   } else if (platform === 'win32') {

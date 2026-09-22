@@ -509,6 +509,17 @@ function setTestDirDacl(dir, sddl) {
   ].join('; ')], { env: { ...process.env, KL_TEST_DIR: dir, KL_TEST_SDDL: sddl }, stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
+// Sets only the owner of a dir this file created to the current user's own
+// SID (always permitted: it is in the token). A no-op when not elevated.
+function setTestDirOwnerToCurrentUser(dir) {
+  execFileSync(POWERSHELL_EXE, ['-NoProfile', '-NonInteractive', '-Command', [
+    '$ErrorActionPreference = "Stop"',
+    '$ds = New-Object System.Security.AccessControl.DirectorySecurity',
+    '$ds.SetOwner([System.Security.Principal.WindowsIdentity]::GetCurrent().User)',
+    '[System.IO.Directory]::SetAccessControl($env:KL_TEST_DIR, $ds)'
+  ].join('; ')], { env: { ...process.env, KL_TEST_DIR: dir }, stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
 function removeTempTree(base) {
   fs.rmSync(base, { recursive: true, force: true });
   assert.ok(!fs.existsSync(base), `failed to clean up ${base}`);
@@ -555,11 +566,39 @@ describe('Windows ACL script (real mode, temp dirs only)', () => {
   it('a new data dir under a temp parent owned by the current user fails the ancestor check, before anything is created', { skip: notWin32Skip }, () => {
     const base2 = tmp();
     try {
+      // Elevated, mkdtemp's dir would be owned by Administrators; pin it to
+      // the current user so the ancestor check has something to refuse.
+      setTestDirOwnerToCurrentUser(base2);
       const dir = path.join(base2, 'fresh-data-dir');
       const result = runAclScript(dir);
       assert.notStrictEqual(result.code, 0);
       assert.match(result.stderr, /ancestor directory .+ is not safe: owner S-1-5-\S+ is not Administrators, SYSTEM or TrustedInstaller/);
       assert.ok(!fs.existsSync(dir), 'the ancestor pre-check must run before CreateDirectory');
+    } finally { removeTempTree(base2); }
+  });
+
+  it('a missing parent (…\\KingLouie\\data with no KingLouie) under a user-owned temp dir is refused before the parent is created', { skip: notWin32Skip }, () => {
+    const base2 = tmp();
+    try {
+      setTestDirOwnerToCurrentUser(base2);
+      const parent = path.join(base2, 'KingLouie');
+      const result = runAclScript(path.join(parent, 'data'));
+      assert.notStrictEqual(result.code, 0);
+      assert.match(result.stderr, /ancestor directory .+ is not safe: owner S-1-5-\S+ is not Administrators, SYSTEM or TrustedInstaller/);
+      assert.ok(!fs.existsSync(parent), 'the parent must not be created through an unsafe ancestor');
+    } finally { removeTempTree(base2); }
+  });
+
+  it('an existing parent owned by the current user is refused (a pre-created KingLouie dir)', { skip: notWin32Skip }, () => {
+    const base2 = tmp();
+    try {
+      const parent = path.join(base2, 'KingLouie');
+      fs.mkdirSync(parent);
+      setTestDirOwnerToCurrentUser(parent);
+      const result = runAclScript(path.join(parent, 'data'));
+      assert.notStrictEqual(result.code, 0);
+      assert.match(result.stderr, /ancestor directory .+ is not safe: owner S-1-5-/);
+      assert.ok(!fs.existsSync(path.join(parent, 'data')));
     } finally { removeTempTree(base2); }
   });
 
@@ -616,7 +655,9 @@ describe('Windows ACL script (real mode, temp dirs only)', () => {
       });
     });
 
-    it('fails closed when the DACL does not let the installer open the dir at all', { skip: notWin32Skip }, () => {
+    // Elevated, the BA ACE does grant this process access (BA is enabled in a
+    // full token), so the open succeeds and this scenario can't be staged.
+    it('fails closed when the DACL does not let the installer open the dir at all', { skip: IS_ELEVATED ? 'elevated: the BA ACE grants this process access, so the open succeeds' : notWin32Skip }, () => {
       // Non-elevated, LS/SY/BA-only grants nothing this process can use (BA is
       // deny-only in a filtered token), so the no-follow open is refused.
       withDacl(`D:P${GOOD}`, (result) => {
@@ -654,6 +695,30 @@ describe('Windows ACL script (real mode, temp dirs only)', () => {
         assert.strictEqual(result.Owner, 'S-1-5-32-544');
         assert.strictEqual(result.Protected, true);
         assert.deepStrictEqual(result.Rules.split(',').sort(), ['S-1-5-18', 'S-1-5-19', 'S-1-5-32-544'].sort());
+      } finally { removeTempTree(base2); }
+    });
+
+    it('creates a missing parent (the default layout …\\KingLouie\\data) owned by BA with a protected SY/BA/LS(read) DACL', { skip: notElevatedSkip }, () => {
+      const base2 = sysTmp();
+      try {
+        const parent = path.join(base2, 'KingLouie');
+        const dir = path.join(parent, 'data');
+        const created = runAclScript(dir);
+        assert.strictEqual(created.code, 0, `expected a clean create, got: ${created.stderr}`);
+        const inspect = [
+          '$acl = Get-Acl -LiteralPath $env:KL_INSPECT_DIR',
+          '$owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value',
+          '$rules = ($acl.Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }) -join ","',
+          '[PSCustomObject]@{ Owner = $owner; Protected = $acl.AreAccessRulesProtected; Rules = $rules } | ConvertTo-Json -Compress'
+        ].join('; ');
+        const result = JSON.parse(execFileSync(POWERSHELL_EXE, ['-NoProfile', '-NonInteractive', '-Command', inspect], {
+          env: { ...process.env, KL_INSPECT_DIR: parent },
+          encoding: 'utf8'
+        }));
+        assert.strictEqual(result.Owner, 'S-1-5-32-544');
+        assert.strictEqual(result.Protected, true);
+        assert.deepStrictEqual(result.Rules.split(',').sort(), ['S-1-5-18', 'S-1-5-19', 'S-1-5-32-544'].sort());
+        assert.strictEqual(runAclScript(dir).code, 0, 'a second run only verifies');
       } finally { removeTempTree(base2); }
     });
 
@@ -918,5 +983,75 @@ describe('executeSteps: env on run steps', () => {
     const execFile = (cmd, args, opts) => { sawOptions = opts; };
     await executeSteps([{ description: 'plain run', run: ['whatever'] }], { dryRun: false, io: t, execFile });
     assert.strictEqual(sawOptions.env, undefined);
+  });
+});
+
+// --- Final-review fix wave -------------------------------------------------
+
+describe('default data dirs leave room for a read-only config dir (I1)', () => {
+  it('windows: the default is <ProgramData>\\KingLouie\\data', () => {
+    const steps = planInstall({ platform: 'win32', nodePath: 'C:\\node.exe', entryPath: 'C:\\kl\\bin\\king-louie-service.js' });
+    const expected = path.win32.join(process.env.ProgramData || 'C:\\ProgramData', 'KingLouie', 'data');
+    assert.strictEqual(steps.find((s) => s.env?.KL_DATA_DIR).env.KL_DATA_DIR, expected);
+  });
+  it('darwin: the default is /Library/Application Support/KingLouie/data', () => {
+    const steps = planInstall({ platform: 'darwin', nodePath: '/usr/bin/node', entryPath: '/opt/king-louie/bin/king-louie-service.js', user: '_kinglouie' });
+    assert.ok(steps.some((s) => s.run?.join(' ') === 'install -d -m 0700 -o _kinglouie /Library/Application Support/KingLouie/data'));
+  });
+  it('linux: the default stays /var/lib/king-louie', () => {
+    const steps = planInstall({ platform: 'linux', nodePath: '/usr/bin/node', entryPath: '/opt/king-louie/bin/king-louie-service.js' });
+    assert.ok(steps.some((s) => s.run?.join(' ') === 'install -d -m 0700 -o king-louie -g king-louie /var/lib/king-louie'));
+  });
+  it('windows: the script creates a missing parent admin-owned with its own protected DACL, before the data dir, inside the create branch', () => {
+    const steps = planInstall({ platform: 'win32', nodePath: 'C:\\node.exe', entryPath: 'C:\\kl\\bin\\king-louie-service.js' });
+    const script = steps.find((s) => s.env?.KL_DATA_DIR).run[4];
+    const branch = script.indexOf('if ($null -eq (Read-Entry $path)) {');
+    const parentCheck = script.indexOf('Assert-SafeAncestors $parent $false');
+    const parentSddl = script.indexOf("SetSecurityDescriptorSddlForm('O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;LS)')");
+    const parentCreate = script.indexOf('[System.IO.Directory]::CreateDirectory($parent, $pds)');
+    const dataCreate = script.indexOf('[System.IO.Directory]::CreateDirectory($path, $ds)');
+    assert.ok(branch > 0 && branch < parentCheck && parentCheck < parentSddl && parentSddl < parentCreate && parentCreate < dataCreate);
+  });
+});
+
+describe('linux /etc/king-louie layout (I1)', () => {
+  it('creates /etc/king-louie 0755 root-owned and only credentials/ 0700 (re-pinned), before writing the credential', () => {
+    const s = planInstall({ platform: 'linux', ...base });
+    const cfg = s.findIndex((x) => x.run?.join(' ') === 'install -d -m 0755 -o root -g root /etc/king-louie');
+    const cred = s.findIndex((x) => x.run?.join(' ') === 'install -d -m 0700 -o root -g root /etc/king-louie/credentials');
+    const pin = s.findIndex((x) => x.run?.join(' ') === 'chmod 0700 /etc/king-louie/credentials');
+    const write = s.findIndex((x) => x.writeFile?.path === '/etc/king-louie/credentials/kl-master-key');
+    assert.ok(cfg >= 0 && cfg < cred && cred < pin && pin < write, `order: ${[cfg, cred, pin, write]}`);
+  });
+});
+
+describe('services run in the data dir (M5)', () => {
+  it('systemd: WorkingDirectory= is the data dir', () => {
+    assert.match(renderSystemdUnit(base), /^WorkingDirectory=\/var\/lib\/king-louie$/m);
+  });
+  it('launchd: WorkingDirectory is the data dir', () => {
+    const plist = renderLaunchdPlist({ ...base, dataDir: '/Library/Application Support/KingLouie/data', logsDir: '/Library/Application Support/KingLouie/data/logs', user: '_kinglouie' });
+    assert.match(plist, /<key>WorkingDirectory<\/key>\s*<string>\/Library\/Application Support\/KingLouie\/data<\/string>/);
+  });
+  it('task XML: <WorkingDirectory> is the data dir, after <Arguments> (schema order)', () => {
+    const xml = renderWindowsTaskXml({ nodePath: 'C:\\node.exe', entryPath: 'C:\\kl\\bin\\king-louie-service.js', dataDir: 'C:\\ProgramData\\KingLouie\\data\\' });
+    assert.match(xml, /<\/Arguments>\s*<WorkingDirectory>C:\\ProgramData\\KingLouie\\data<\/WorkingDirectory>\s*<\/Exec>/);
+  });
+});
+
+describe('reinstall idempotency (I8)', () => {
+  it('darwin: boots out any previous LaunchDaemon (failure ignored) right before bootstrap', () => {
+    const steps = planInstall({ platform: 'darwin', ...base, user: '_kinglouie' });
+    const bootout = steps.findIndex((s) => s.run?.join(' ') === 'launchctl bootout system /Library/LaunchDaemons/com.kinglouie.service.plist');
+    const bootstrap = steps.findIndex((s) => s.run?.join(' ') === 'launchctl bootstrap system /Library/LaunchDaemons/com.kinglouie.service.plist');
+    assert.ok(bootout >= 0 && bootstrap === bootout + 1);
+    assert.strictEqual(steps[bootout].ignoreFailure, true);
+  });
+  it('linux: restarts the service after enable --now, so a reinstall runs the new unit', () => {
+    const steps = planInstall({ platform: 'linux', ...base });
+    const enable = steps.findIndex((s) => s.run?.join(' ') === 'systemctl enable --now king-louie.service');
+    const restart = steps.findIndex((s) => s.run?.join(' ') === 'systemctl restart king-louie.service');
+    assert.ok(enable >= 0 && restart === enable + 1);
+    assert.notStrictEqual(steps[restart].ignoreFailure, true);
   });
 });
