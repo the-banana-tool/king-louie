@@ -37,6 +37,15 @@ for (const profile of ['agent', 'runbook']) {
       assert.strictEqual(await exited, 0);
       assert.strictEqual(fs.existsSync(path.join(dataDir, 'service.pid')), false);
       assert.ok(fs.existsSync(path.join(dataDir, 'key-check')), 'key-check is written on first key resolution');
+      // The installers set WorkingDirectory=<dataDir>, which made the secret
+      // store the agent's own workspace: master.key, gateway-token,
+      // chat-data.json and config.json were all inside `process.cwd()`, and
+      // the ungated read tools (Read/Grep/Glob) treat the working directory
+      // as in-bounds. The service now runs in an explicit workspace instead.
+      const workspace = path.join(dataDir, 'workspace');
+      assert.ok(fs.statSync(workspace).isDirectory(), 'the service must create its own workspace dir');
+      assert.strictEqual(fs.realpathSync(info.cwd), fs.realpathSync(workspace), 'the service must run in its workspace, not the data dir');
+      assert.notStrictEqual(fs.realpathSync(info.cwd), fs.realpathSync(dataDir));
       const serviceLog = fs.readFileSync(path.join(dataDir, 'logs', 'service.log'), 'utf8');
       assert.match(serviceLog, /INFO \[service\] service ready/);
       assert.match(serviceLog, /INFO \[service\] stopped/);

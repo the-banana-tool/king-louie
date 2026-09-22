@@ -2,7 +2,7 @@ const path = require('path');
 const { createLogger } = require('../logging');
 const { writePidfile, removePidfile } = require('./pidfile');
 const { loadServiceConfig } = require('./config');
-const { ensureServicePaths } = require('../platform/paths');
+const { ensureServicePaths, ensurePrivateDir } = require('../platform/paths');
 const { attachServiceLogFile } = require('./log-file');
 
 const log = createLogger('service');
@@ -73,16 +73,32 @@ function loadProfile(profile) {
   throw new Error(`Unknown profile "${profile}"`);
 }
 
+// The unit files set WorkingDirectory=<dataDir>, which made the secret store
+// the agent's own workspace: master.key, key-check, gateway-token,
+// chat-data.json and config.json all sit in process.cwd(), and the ungated
+// read tools (Read, Grep, Glob — none of which require approval) treat the
+// working directory as in-bounds. A chat message was enough to read the
+// master key. The service therefore runs in an explicit, empty workspace
+// beside the data dir's other subdirectories; src/tools/utils.js separately
+// denies the secret files outright, whatever the workspace is.
+function ensureWorkspace(dataDir) {
+  const workspace = path.join(dataDir, 'workspace');
+  ensurePrivateDir(workspace);
+  process.chdir(workspace);
+  return workspace;
+}
+
 async function runService({ dataDir, profile: profileOverride, signal, stdout = process.stdout }) {
   const { logsDir } = ensureServicePaths(dataDir);
   const logFile = attachServiceLogFile(logsDir);
+  const workspace = ensureWorkspace(dataDir);
   try {
     let running;
     let profile;
     try {
       const config = loadServiceConfig(dataDir, { profile: profileOverride });
       profile = config.profile;
-      log.info('service starting', { profile, dataDir, pid: process.pid });
+      log.info('service starting', { profile, dataDir, workspace, pid: process.pid });
       running = await loadProfile(profile).start({ dataDir, features: config.features, ports: config.ports });
     } catch (err) {
       // On Windows nothing reads the task's stderr, so the log file is the
@@ -91,7 +107,7 @@ async function runService({ dataDir, profile: profileOverride, signal, stdout = 
       throw err;
     }
     writePidfile(dataDir);
-    stdout.write(`${JSON.stringify({ event: 'ready', profile, dataDir, pid: process.pid, masterKeySource: running.masterKeySource })}\n`);
+    stdout.write(`${JSON.stringify({ event: 'ready', profile, dataDir, cwd: process.cwd(), pid: process.pid, masterKeySource: running.masterKeySource })}\n`);
     log.info('service ready', { profile, masterKeySource: running.masterKeySource });
 
     await new Promise((resolve) => {
