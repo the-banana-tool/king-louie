@@ -9,6 +9,22 @@ const { sanitizeCommandName } = require('../src/execution/runtime-environment');
 // We need to import validateCommandAvailability and extractCommandNames
 // Since they're not exported, we test them through the tool's behavior
 
+// Exit code 127 has two possible sources here, and only one of them is what
+// these tests are about:
+//   1. the tool's own availability check refusing a command it believes is
+//      unavailable on the (simulated) platform — the behaviour under test;
+//   2. the *host* shell failing to find a real binary, because the command
+//      is only executed for real after validation lets it through.
+// They must not be conflated: `dir` is a cmd.exe builtin on Windows and a
+// coreutils binary on Linux, but does not exist at all on macOS, where the
+// host shell legitimately answers 127 for a command that passed validation.
+// Only the availability check produces this message, so assert on that.
+const NOT_AVAILABLE_RE = /is not available on this system/;
+
+function assertNotFlaggedUnavailable(result, message) {
+  assert.ok(!NOT_AVAILABLE_RE.test(result.stderr || ''), `${message} (stderr: ${result.stderr})`);
+}
+
 describe('Bash tool – platform-aware command validation', () => {
   describe('Windows builtins', () => {
     const winEnv = { platform: 'win32', shell: 'cmd.exe', availableCommands: {} };
@@ -18,11 +34,9 @@ describe('Bash tool – platform-aware command validation', () => {
         { command: 'dir' },
         { runtimeEnvironment: winEnv, useSandbox: false }
       );
-      // dir should not fail with "not available" – it's a Windows builtin
-      // It might fail for other reasons (not actually on Windows) but NOT with exitCode 127
-      if (!result.success) {
-        assert.notStrictEqual(result.exitCode, 127, 'dir should not be flagged as unavailable on win32');
-      }
+      // dir should not fail with "not available" – it's a Windows builtin.
+      // It may well fail for other reasons (the host isn't Windows).
+      assertNotFlaggedUnavailable(result, 'dir should not be flagged as unavailable on win32');
     });
 
     it('allows echo on Windows', async () => {
@@ -30,9 +44,7 @@ describe('Bash tool – platform-aware command validation', () => {
         { command: 'echo hello' },
         { runtimeEnvironment: winEnv, useSandbox: false }
       );
-      if (!result.success) {
-        assert.notStrictEqual(result.exitCode, 127, 'echo should not be flagged as unavailable on win32');
-      }
+      assertNotFlaggedUnavailable(result, 'echo should not be flagged as unavailable on win32');
     });
 
     it('allows cd on Windows', async () => {
@@ -40,9 +52,7 @@ describe('Bash tool – platform-aware command validation', () => {
         { command: 'cd' },
         { runtimeEnvironment: winEnv, useSandbox: false }
       );
-      if (!result.success) {
-        assert.notStrictEqual(result.exitCode, 127, 'cd should not be flagged as unavailable on win32');
-      }
+      assertNotFlaggedUnavailable(result, 'cd should not be flagged as unavailable on win32');
     });
 
     it('flags unavailable commands on Windows', async () => {
@@ -70,9 +80,7 @@ describe('Bash tool – platform-aware command validation', () => {
         { command: 'echo hello' },
         { runtimeEnvironment: posixEnv, useSandbox: false }
       );
-      if (!result.success) {
-        assert.notStrictEqual(result.exitCode, 127, 'echo should not be flagged as unavailable on linux');
-      }
+      assertNotFlaggedUnavailable(result, 'echo should not be flagged as unavailable on linux');
     });
 
     it('allows pwd on linux', async () => {
@@ -80,9 +88,7 @@ describe('Bash tool – platform-aware command validation', () => {
         { command: 'pwd' },
         { runtimeEnvironment: posixEnv, useSandbox: false }
       );
-      if (!result.success) {
-        assert.notStrictEqual(result.exitCode, 127, 'pwd should not be flagged as unavailable on linux');
-      }
+      assertNotFlaggedUnavailable(result, 'pwd should not be flagged as unavailable on linux');
     });
 
     it('flags unavailable commands on linux', async () => {
@@ -117,10 +123,8 @@ describe('Bash tool – platform-aware command validation', () => {
           { command: 'pwd' },
           { runtimeEnvironment: winEnv, useSandbox: true }
         );
-        // Should not get 127 (command not found) since pwd is a POSIX builtin
-        if (!result.success) {
-          assert.notStrictEqual(result.exitCode, 127, 'pwd should be valid in sandbox (POSIX) mode');
-        }
+        // pwd is a POSIX builtin, so the availability check must let it through
+        assertNotFlaggedUnavailable(result, 'pwd should be valid in sandbox (POSIX) mode');
       } finally {
         BashTool.sandboxExecutor.isDockerAvailable = originalIsDockerAvailable;
       }
@@ -139,9 +143,7 @@ describe('Bash tool – platform-aware command validation', () => {
           { command: 'dir' },
           { runtimeEnvironment: winEnv, useSandbox: false }
         );
-        if (!result.success) {
-          assert.notStrictEqual(result.exitCode, 127, 'dir should be valid on win32 without sandbox');
-        }
+        assertNotFlaggedUnavailable(result, 'dir should be valid on win32 without sandbox');
       } finally {
         BashTool.sandboxExecutor.isDockerAvailable = originalIsDockerAvailable;
       }
@@ -170,9 +172,7 @@ describe('Bash tool – platform-aware command validation', () => {
         { command: 'echo hello && pwd' },
         { runtimeEnvironment: env, useSandbox: false }
       );
-      if (!result.success) {
-        assert.notStrictEqual(result.exitCode, 127, 'Chained builtins should not be flagged');
-      }
+      assertNotFlaggedUnavailable(result, 'Chained builtins should not be flagged');
     });
 
     it('validates commands separated by semicolons', async () => {
