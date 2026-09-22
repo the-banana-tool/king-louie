@@ -6,11 +6,16 @@ const path = require('path');
 const clone = (v) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
 
 class JsonFileStore {
-  constructor({ dir, name = 'config', defaults = {} }) {
+  // `onWrite` is called with this store's path each time it is actually
+  // written, so a root admin CLI knows which files it has to hand back to the
+  // data dir's owner (src/service/ownership.js). Constructing a store writes
+  // nothing, so a store that is only read is never reported.
+  constructor({ dir, name = 'config', defaults = {}, onWrite = null }) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     this.path = path.join(dir, `${name}.json`);
     this._defaults = clone(defaults) || {};
     this._data = null;
+    this._onWrite = typeof onWrite === 'function' ? onWrite : null;
   }
 
   _load() {
@@ -30,6 +35,7 @@ class JsonFileStore {
     fs.writeFileSync(tmp, JSON.stringify(this._data, null, 2), { mode: 0o600 });
     fs.renameSync(tmp, this.path);
     if (process.platform !== 'win32') fs.chmodSync(this.path, 0o600);
+    if (this._onWrite) this._onWrite(this.path);
   }
 
   get(key, defaultValue) {

@@ -44,15 +44,16 @@ function fromRootCredentialFile({ platform, env, getuid, credentialPath }) {
   return parseHexKey(fs.readFileSync(credentialPath, 'utf8'), credentialPath);
 }
 
-function fromDpapiFile(dataDir, dpapi) {
+function fromDpapiFile(dataDir, dpapi, onPath) {
   const file = path.join(dataDir, 'master.key.dpapi');
   if (fs.existsSync(file)) return dpapi.unprotect(fs.readFileSync(file));
   const key = crypto.randomBytes(KEY_BYTES);
   fs.writeFileSync(file, dpapi.protect(key), { flag: 'wx' });
+  onPath(file);
   return key;
 }
 
-function fromKeyFile(dataDir) {
+function fromKeyFile(dataDir, onPath) {
   const file = path.join(dataDir, 'master.key');
   if (fs.existsSync(file)) {
     const mode = fs.statSync(file).mode & 0o777;
@@ -62,6 +63,7 @@ function fromKeyFile(dataDir) {
   const key = crypto.randomBytes(KEY_BYTES);
   fs.writeFileSync(file, key.toString('hex'), { mode: 0o600, flag: 'wx' });
   fs.chmodSync(file, 0o600);
+  onPath(file);
   return key;
 }
 
@@ -88,13 +90,14 @@ function createPowerShellDpapi({ powershellExe = windowsPowerShellExe() } = {}) 
 
 // First resolution in a data dir writes key-check; every later one must be
 // able to decrypt it.
-function verifyKeyCheck({ dataDir, key, source }) {
+function verifyKeyCheck({ dataDir, key, source, onPath }) {
   const file = path.join(dataDir, KEY_CHECK_FILE);
   const cipher = createAesGcmCipher(key);
   if (!fs.existsSync(file)) {
     try {
       fs.writeFileSync(file, cipher.encryptString(KEY_CHECK_PLAINTEXT), { mode: 0o600, flag: 'wx' });
       if (process.platform !== 'win32') fs.chmodSync(file, 0o600);
+      onPath(file);
       return;
     } catch (err) {
       if (err.code !== 'EEXIST') throw err;
@@ -116,15 +119,15 @@ function verifyKeyCheck({ dataDir, key, source }) {
   }
 }
 
-function resolveMasterKeyUnchecked({ platform, dataDir, env, dpapi, getuid, credentialPath }) {
+function resolveMasterKeyUnchecked({ platform, dataDir, env, dpapi, getuid, credentialPath, onPath }) {
   const fromCred = fromSystemdCredential(env);
   if (fromCred) return { key: fromCred, source: 'systemd-credential' };
   const fromRootCred = fromRootCredentialFile({ platform, env, getuid, credentialPath });
   if (fromRootCred) return { key: fromRootCred, source: 'credential-file' };
   if (platform === 'win32') {
-    return { key: fromDpapiFile(dataDir, dpapi || createPowerShellDpapi()), source: 'dpapi' };
+    return { key: fromDpapiFile(dataDir, dpapi || createPowerShellDpapi(), onPath), source: 'dpapi' };
   }
-  return { key: fromKeyFile(dataDir), source: 'key-file' };
+  return { key: fromKeyFile(dataDir, onPath), source: 'key-file' };
 }
 
 function resolveMasterKey({
@@ -133,10 +136,15 @@ function resolveMasterKey({
   env = process.env,
   dpapi,
   getuid = () => (typeof process.getuid === 'function' ? process.getuid() : -1),
-  credentialPath = ROOT_CREDENTIAL_PATH
+  credentialPath = ROOT_CREDENTIAL_PATH,
+  // Told about each file this created in the data dir (the key file, the
+  // key-check), so a root admin CLI can hand exactly those back to the data
+  // dir's owner — see src/service/ownership.js. Files it only read are not
+  // reported: they were not created by this run.
+  onPath = () => {}
 } = {}) {
-  const resolved = resolveMasterKeyUnchecked({ platform, dataDir, env, dpapi, getuid, credentialPath });
-  verifyKeyCheck({ dataDir, key: resolved.key, source: resolved.source });
+  const resolved = resolveMasterKeyUnchecked({ platform, dataDir, env, dpapi, getuid, credentialPath, onPath });
+  verifyKeyCheck({ dataDir, key: resolved.key, source: resolved.source, onPath });
   return resolved;
 }
 

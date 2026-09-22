@@ -10,7 +10,10 @@ function defaultServiceDataDir({ platform = process.platform, env = process.env 
   return '/var/lib/king-louie';
 }
 
-function ensureServicePaths(dataDir) {
+// `onPath` is told about every directory this ensured, so a root admin CLI can
+// hand exactly those back to the data dir's owner afterwards instead of
+// walking the tree looking for root-owned entries (src/service/ownership.js).
+function ensureServicePaths(dataDir, { onPath = null } = {}) {
   const paths = {
     dataDir,
     logsDir: path.join(dataDir, 'logs'),
@@ -19,6 +22,7 @@ function ensureServicePaths(dataDir) {
   for (const dir of Object.values(paths)) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     if (process.platform !== 'win32') fs.chmodSync(dir, 0o700);
+    if (onPath) onPath(dir);
   }
   return paths;
 }

@@ -141,14 +141,22 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
         const { CHAT_DATA_DEFAULTS } = require('../core/settings');
         const { buildServicePorts } = require('./ports');
         const { restoreDataDirOwnership } = require('./ownership');
+        // Every path the ports create or write this run, reported as it
+        // happens so a failure partway through still hands back what it
+        // managed to write. Nothing else in the data dir is touched.
+        const writtenPaths = [];
         try {
-          const core = createCore(buildServicePorts({ dataDir, chatDataDefaults: CHAT_DATA_DEFAULTS }));
+          const core = createCore(buildServicePorts({
+            dataDir,
+            chatDataDefaults: CHAT_DATA_DEFAULTS,
+            onPathWritten: (p) => writtenPaths.push(p)
+          }));
           if (command === 'token') core.saveProviderToken(name, value);
           else core.vault.set(name, value);
         } finally {
           // Run as root, everything written above is root-owned; hand it back
           // to the service account that owns the data dir.
-          restoreDataDirOwnership(dataDir, io.ownership);
+          restoreDataDirOwnership(dataDir, writtenPaths, io.ownership);
         }
         io.stdout.write(`${command === 'token' ? 'Token' : 'Secret'} "${name}" saved (encrypted).\n`);
         return 0;

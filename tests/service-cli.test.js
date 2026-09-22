@@ -93,10 +93,14 @@ describe('service CLI', () => {
   });
   it('hands files it wrote back to the data dir owner when run as root (injected uid/fs)', async () => {
     const dir = tmp();
+    // Planted by the service account before the root CLI runs: root-owned and
+    // inside the data dir, but not written by this invocation, so it must be
+    // left alone (it could be a hard link to a file elsewhere on the volume).
+    const planted = path.join(dir, 'planted-by-the-service-account');
+    fs.writeFileSync(planted, 'not ours');
     const chowned = [];
     const realLstat = fs.lstatSync;
     const fsImpl = {
-      readdirSync: fs.readdirSync,
       // The data dir belongs to the service account (uid 990); everything
       // under it looks root-created, as it would after a root CLI run.
       lstatSync: (p) => {
@@ -111,6 +115,7 @@ describe('service CLI', () => {
     const names = chowned.map(([p]) => p.split(path.sep).join('/'));
     for (const expected of ['config.json', 'key-check', 'logs', 'cache']) assert.ok(names.includes(expected), `expected ${expected} to be chowned; got ${names}`);
     assert.ok(chowned.every(([, uid, gid]) => uid === 990 && gid === 991));
+    assert.ok(!names.includes(path.basename(planted)), `a path this run never wrote must not be chowned; got ${names}`);
   });
   it('reports status for a data dir with no running service', async () => {
     const t = io();
