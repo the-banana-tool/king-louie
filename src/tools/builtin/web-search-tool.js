@@ -1,21 +1,19 @@
 const { Tool } = require('../tool-schema');
-const { safeStorage } = require('electron');
 
 const DuckDuckGoSearch = require('../../web-search/providers/duckduckgo');
 const BraveSearch = require('../../web-search/providers/brave-search');
 const TavilySearch = require('../../web-search/providers/tavily');
 
-function decryptKey(encrypted) {
+function decryptKey(encrypted, context) {
   if (!encrypted) return null;
-  if (safeStorage && safeStorage.isEncryptionAvailable()) {
+  if (typeof context?.decryptToken === 'function') {
     try {
-      const buffer = Buffer.from(encrypted, 'base64');
-      return safeStorage.decryptString(buffer);
+      return context.decryptToken(encrypted);
     } catch (e) {
-      return encrypted; // Fallback or throw
+      return encrypted; // Fallback
     }
   }
-  return encrypted; // In tests where safeStorage isn't available
+  return encrypted; // In tests where decryptToken isn't available, or keys are stored plain
 }
 
 function getDefaultProvider(settings) {
@@ -40,23 +38,15 @@ const WebSearchTool = new Tool({
   execute: async (params, context) => {
     const { query, maxResults = 10 } = params;
 
-    // Read from electron-store
-    let settings = {};
-    try {
-      const { default: Store } = await import('electron-store');
-      const store = new Store({ name: 'chat-data' });
-      settings = store.get('settings') || {};
-    } catch (e) {
-      // In case electron-store is not available (e.g. in some tests), just pass empty settings
-    }
+    const settings = typeof context?.getSettings === 'function' ? (context.getSettings() || {}) : {};
 
     const providerName = getDefaultProvider(settings);
     let provider;
 
     if (providerName === 'brave') {
-      provider = new BraveSearch(decryptKey(settings.webSearch.brave.apiKey));
+      provider = new BraveSearch(decryptKey(settings.webSearch.brave.apiKey, context));
     } else if (providerName === 'tavily') {
-      provider = new TavilySearch(decryptKey(settings.webSearch.tavily.apiKey));
+      provider = new TavilySearch(decryptKey(settings.webSearch.tavily.apiKey, context));
     } else {
       provider = new DuckDuckGoSearch();
     }

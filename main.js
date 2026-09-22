@@ -10,6 +10,8 @@ protocol.registerSchemesAsPrivileged([
   { scheme: 'kl-screenshot', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
 ]);
 const AnthropicOAuth = require('./src/auth/anthropic-oauth');
+const { createSafeStorageCipher } = require('./src/platform/cipher');
+const { createVault } = require('./src/platform/vault');
 
 // E2E test bridge — loaded in app.whenReady() when KL_TEST_BRIDGE_PORT is set
 const { default: Store } = require('electron-store');
@@ -344,6 +346,8 @@ const mergeSettings = (settings = {}) => {
 };
 
 const vaultStore = new Store();
+const cipher = createSafeStorageCipher(safeStorage);
+const vault = createVault({ store: vaultStore, cipher });
 
 const store = new Store({
   name: 'chat-data',
@@ -835,22 +839,8 @@ const runHookEvent = async (eventName, context = {}) => {
   }
 };
 
-const encryptToken = (token) => {
-  if (!token) return null;
-  if (!safeStorage.isEncryptionAvailable()) {
-    throw new Error('Secure storage is not available on this system.');
-  }
-  return safeStorage.encryptString(token).toString('base64');
-};
-
-const decryptToken = (encrypted) => {
-  if (!encrypted) return null;
-  if (!safeStorage.isEncryptionAvailable()) {
-    throw new Error('Secure storage is not available on this system.');
-  }
-  const buffer = Buffer.from(encrypted, 'base64');
-  return safeStorage.decryptString(buffer);
-};
+const encryptToken = (token) => (token ? cipher.encryptString(token) : null);
+const decryptToken = (encrypted) => (encrypted ? cipher.decryptString(encrypted) : null);
 
 const anthropicOAuth = new AnthropicOAuth({
   clientId: store.get('anthropicOAuthClientId', ''),
@@ -2120,6 +2110,9 @@ const createToolExecutorWithApprovals = async (
       inferenceRouter,
       encryptToken,
       decryptToken,
+      vault,
+      getSettings,
+      getProviderToken: getDecryptedProviderToken,
       userDataPath: app.getPath('userData'),
       canvasAction: async ({ action, content, title }) => {
         const cid = executorOptions.chatId;

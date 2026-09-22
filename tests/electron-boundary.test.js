@@ -18,12 +18,6 @@ const KNOWN_VIOLATIONS = [
   'channels/channel-plugin.js:electron',
   'mesh/index.js:electron',
   'notifications/channels/ui-toast.js:electron',
-  'tools/builtin/browser-tool.js:electron-store',
-  'tools/builtin/image-generate-tool.js:electron',
-  'tools/builtin/image-generate-tool.js:electron-store',
-  'tools/builtin/vault-tool.js:electron-store',
-  'tools/builtin/web-search-tool.js:electron',
-  'tools/builtin/web-search-tool.js:electron-store',
 ];
 
 function walk(dir) {

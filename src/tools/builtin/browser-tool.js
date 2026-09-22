@@ -231,12 +231,9 @@ const actions = {
     if (!params.username || !params.password) {
       return { ok: false, error: '"username" and "password" parameters are required.' };
     }
-    const { encryptToken } = ctx || {};
-    if (!encryptToken) return { ok: false, error: 'Encryption unavailable (not running in Electron).' };
-    const Store = require('electron-store').default || require('electron-store');
-    const store = new Store();
-    const encrypted = encryptToken(JSON.stringify({ username: params.username, password: params.password }));
-    store.set(`__vault_${vaultKeyFor(profile, host)}`, encrypted);
+    const { vault } = ctx || {};
+    if (!vault) return { ok: false, error: 'Vault unavailable in this environment.' };
+    vault.set(vaultKeyFor(profile, host), JSON.stringify({ username: params.username, password: params.password }));
     return { ok: true, message: `Credentials saved for ${profile}@${host}.` };
   },
 
@@ -252,14 +249,12 @@ const actions = {
       if (!profile || !host) {
         return { ok: false, error: 'Provide either (username+password) or (profile+host) to look up vault creds.' };
       }
-      const { decryptToken } = ctx || {};
-      if (!decryptToken) return { ok: false, error: 'Decryption unavailable (not running in Electron).' };
-      const Store = require('electron-store').default || require('electron-store');
-      const store = new Store();
-      const encrypted = store.get(`__vault_${vaultKeyFor(profile, host)}`);
-      if (!encrypted) return { ok: false, error: `No credentials in vault for ${profile}@${host}.` };
+      const { vault } = ctx || {};
+      if (!vault) return { ok: false, error: 'Vault unavailable in this environment.' };
+      const raw = vault.get(vaultKeyFor(profile, host));
+      if (!raw) return { ok: false, error: `No credentials in vault for ${profile}@${host}.` };
       try {
-        const creds = JSON.parse(decryptToken(encrypted));
+        const creds = JSON.parse(raw);
         username = creds.username;
         password = creds.password;
       } catch (err) {
@@ -276,16 +271,14 @@ const actions = {
     if (!profile) return { ok: false, error: 'No active profile. Start the browser with a profile first.' };
     const host = params.host || hostFromUrl(b.page.url());
     if (!host) return { ok: false, error: 'Cannot determine host from current URL.' };
-    const { decryptToken } = ctx || {};
-    if (!decryptToken) return { ok: false, error: 'Decryption unavailable (not running in Electron).' };
-    const Store = require('electron-store').default || require('electron-store');
-    const store = new Store();
-    const encrypted = store.get(`__vault_${vaultKeyFor(profile, host)}`);
-    if (!encrypted) {
+    const { vault } = ctx || {};
+    if (!vault) return { ok: false, error: 'Vault unavailable in this environment.' };
+    const raw = vault.get(vaultKeyFor(profile, host));
+    if (!raw) {
       return { ok: false, error: `No credentials in vault for ${profile}@${host}. Use save_credentials first.` };
     }
     let creds;
-    try { creds = JSON.parse(decryptToken(encrypted)); }
+    try { creds = JSON.parse(raw); }
     catch (err) { return { ok: false, error: `Could not decode credentials: ${err.message}` }; }
 
     const userSel = params.usernameSelector || await autoDetectField(b.page, [

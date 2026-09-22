@@ -12,40 +12,37 @@ function ensureOutputDir() {
   if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 }
 
-function decryptKey(encrypted) {
+function decryptKey(encrypted, context) {
   if (!encrypted) return null;
-  try {
-    const { safeStorage } = require('electron');
-    if (safeStorage && safeStorage.isEncryptionAvailable()) {
-      const buffer = Buffer.from(encrypted, 'base64');
-      return safeStorage.decryptString(buffer);
+  if (typeof context?.decryptToken === 'function') {
+    try {
+      return context.decryptToken(encrypted);
+    } catch (e) {
+      return encrypted; // Fallback
     }
-  } catch (_) { /* fallback */ }
-  return encrypted;
+  }
+  return encrypted; // In tests where decryptToken isn't available, or keys are stored plain
 }
 
-async function resolveProvider(settings, providerOverride) {
+async function resolveProvider(settings, providerOverride, context) {
   const imgSettings = settings?.imageGeneration || {};
   const chosen = providerOverride || imgSettings.defaultProvider || 'openai';
 
   if (chosen === 'fal') {
-    const apiKey = decryptKey(imgSettings.fal?.apiKey);
+    const apiKey = decryptKey(imgSettings.fal?.apiKey, context);
     if (!apiKey) throw new Error('Fal API key not configured. Add it in Settings > Providers.');
     const FalImageProvider = require('../../media/image-generation/fal-provider');
     return new FalImageProvider(apiKey);
   }
 
-  // Default: OpenAI — reuse the main OpenAI provider token
+  // Default: OpenAI — reuse the main OpenAI provider token (already decrypted).
   let apiKey;
   try {
-    const { default: Store } = await import('electron-store');
-    const store = new Store({ name: 'chat-data' });
-    const tokens = store.get('apiTokens', {});
-    apiKey = decryptKey(tokens.openai);
-  } catch (_) { /* test fallback */ }
+    apiKey = context?.getProviderToken?.('openai');
+  } catch (_) { /* no token saved / not available */ }
 
   if (!apiKey) {
-    apiKey = decryptKey(imgSettings.openai?.apiKey);
+    apiKey = decryptKey(imgSettings.openai?.apiKey, context);
   }
   if (!apiKey) throw new Error('OpenAI API key not configured. Add it in Settings > Providers.');
 
@@ -93,19 +90,14 @@ const ImageGenerateTool = new Tool({
   requiresApproval: true,
   concurrencySafe: false,
 
-  async execute(params) {
+  async execute(params, context) {
     const { prompt, provider: providerOverride, model, size, quality, count } = params;
 
-    let settings = {};
-    try {
-      const { default: Store } = await import('electron-store');
-      const store = new Store({ name: 'chat-data' });
-      settings = store.get('settings') || {};
-    } catch (_) { /* test fallback */ }
+    const settings = typeof context?.getSettings === 'function' ? (context.getSettings() || {}) : {};
 
     let imageProvider;
     try {
-      imageProvider = await resolveProvider(settings, providerOverride);
+      imageProvider = await resolveProvider(settings, providerOverride, context);
     } catch (err) {
       return { ok: false, error: err.message };
     }
