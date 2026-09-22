@@ -36,6 +36,14 @@ class ToolExecutor extends EventEmitter {
       typeof options.shouldAutoApprove === 'function'
         ? options.shouldAutoApprove
         : async () => false;
+    // Hosts that refuse remote approvals (createCore's remoteApprovals:
+    // 'deny') null the approvalRequester so the gate denies. That is only
+    // airtight if nothing grants approval *before* the gate, so this also
+    // shuts the three pre-gate grant paths: the persisted "always approve"
+    // list (shouldAutoApprove), an agent config's autoApproveTools, and an
+    // `allow` permission rule — which is downgraded to `ask`. `deny` rules
+    // are untouched, and tools that don't require approval still run.
+    this.denyAutoApproval = options.denyAutoApproval === true;
     this.runtimeEnvironmentPromise =
       options.runtimeEnvironment
         ? Promise.resolve(options.runtimeEnvironment)
@@ -206,7 +214,7 @@ class ToolExecutor extends EventEmitter {
         this.emit('postExecute', { toolName, parameters: hookDecoratedParameters, result: denied });
         return denied;
       }
-      if (ruleMatch.action === 'allow') {
+      if (ruleMatch.action === 'allow' && !this.denyAutoApproval) {
         approvalSource = { type: 'rule', rule: describeRule(ruleMatch.rule) };
         this.emit('approvalAutoGranted', {
           toolName,
@@ -218,12 +226,19 @@ class ToolExecutor extends EventEmitter {
     }
 
     const ruleSaysAsk = ruleMatch.matched && ruleMatch.action === 'ask';
-    const ruleSaysAllow = ruleMatch.matched && ruleMatch.action === 'allow';
-    const needsApprovalGate = ruleSaysAsk || (!ruleMatch.matched && tool.requiresApproval && this.requireApproval);
+    // Under denyAutoApproval an `allow` rule is demoted to `ask`: it neither
+    // announces an auto-grant nor skips the gate.
+    const allowRuleDemoted = ruleMatch.matched && ruleMatch.action === 'allow' && this.denyAutoApproval;
+    const ruleSaysAllow = ruleMatch.matched && ruleMatch.action === 'allow' && !this.denyAutoApproval;
+    const needsApprovalGate = ruleSaysAsk || allowRuleDemoted
+      || (!ruleMatch.matched && tool.requiresApproval && this.requireApproval);
 
     if (needsApprovalGate && !ruleSaysAllow) {
-      const autoApproved = await this.shouldAutoApprove(toolName, hookDecoratedParameters);
-      const agentAutoApproved = Array.isArray(options.autoApproveTools)
+      const autoApproved = this.denyAutoApproval
+        ? false
+        : await this.shouldAutoApprove(toolName, hookDecoratedParameters);
+      const agentAutoApproved = !this.denyAutoApproval
+        && Array.isArray(options.autoApproveTools)
         && options.autoApproveTools.includes(toolName);
 
       if (autoApproved || agentAutoApproved) {
@@ -251,7 +266,7 @@ class ToolExecutor extends EventEmitter {
         }
 
         const approved = await this.requestApproval(toolName, hookDecoratedParameters, {
-          ruleHint: ruleSaysAsk ? describeRule(ruleMatch.rule) : null
+          ruleHint: ruleSaysAsk || allowRuleDemoted ? describeRule(ruleMatch.rule) : null
         });
         if (approved === 'timeout') {
           // Inattention, not denial — don't penalize via denialTracker, and

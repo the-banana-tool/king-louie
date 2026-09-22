@@ -20,15 +20,21 @@ const { toolRegistry } = require('../src/tools');
 
 const FAKE_PROVIDER = 'kl-test-approval-fake';
 const PROBE_TOOL = 'KlTestApprovalProbe';
+// The built-in code-writer agent carries autoApproveTools: ['Bash', ...], so
+// Bash is the tool that exercises the agent-config grant path.
+const AGENT_AUTO_APPROVED_TOOL = 'Bash';
 
 let probeRuns = 0;
+// Which tool the fake provider asks for; the Bash cases swap it.
+let requestedTool = PROBE_TOOL;
 
 class FakeProvider {
   constructor() { this.calls = 0; }
   async sendMessageWithTools() {
     this.calls += 1;
     if (this.calls === 1) {
-      return { type: 'tool_use', toolName: PROBE_TOOL, toolUseId: 'call_1', parameters: {} };
+      const parameters = requestedTool === PROBE_TOOL ? {} : { command: 'echo hi' };
+      return { type: 'tool_use', toolName: requestedTool, toolUseId: 'call_1', parameters };
     }
     return { type: 'text', content: 'finished' };
   }
@@ -68,7 +74,7 @@ function buildCore(remoteApprovals) {
   return createCore(deps);
 }
 
-async function driveGatewayMessage(core) {
+async function driveGatewayMessage(core, agentId = 'main') {
   const tiers = { provider: FAKE_PROVIDER, model: 'fake' };
   const settings = core.getSettings();
   core.context.setSettings({
@@ -92,7 +98,7 @@ async function driveGatewayMessage(core) {
   const handlerCalls = [];
   const response = new Promise((resolve) => gateway.once('agent:response', resolve));
   gateway.emit('agent:message', {
-    agentId: 'main',
+    agentId,
     sessionKey: session.key,
     message: {
       runId: 'run-1',
@@ -124,5 +130,45 @@ describe('createCore remoteApprovals', () => {
 
   it('rejects an unknown remoteApprovals value', () => {
     assert.throws(() => buildCore('sometimes'), /remoteApprovals/);
+  });
+});
+
+// A remote origin that picks the built-in code-writer agent used to get Bash
+// for free: the agent's autoApproveTools granted approval before the gate the
+// null approval requester guards. Bash is stubbed for this file so the test
+// never runs a real shell command.
+describe('createCore remoteApprovals vs an agent with autoApproveTools', () => {
+  let realBash;
+  let bashRuns = 0;
+
+  before(() => {
+    realBash = toolRegistry.get(AGENT_AUTO_APPROVED_TOOL);
+    toolRegistry.register(new Tool({
+      name: AGENT_AUTO_APPROVED_TOOL,
+      description: 'Test-only stand-in for the real shell tool.',
+      parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] },
+      requiresApproval: true,
+      execute: async () => { bashRuns += 1; return { ok: true }; }
+    }));
+    requestedTool = AGENT_AUTO_APPROVED_TOOL;
+  });
+  after(() => {
+    requestedTool = PROBE_TOOL;
+    if (realBash) toolRegistry.register(realBash);
+  });
+
+  it("'deny' denies a tool the code-writer agent's autoApproveTools would have granted", async () => {
+    const before = bashRuns;
+    const { res, handlerCalls } = await driveGatewayMessage(buildCore('deny'), 'code-writer');
+    assert.strictEqual(res.error, undefined, `agent run failed: ${res.error}`);
+    assert.deepStrictEqual(handlerCalls, [], 'the remote approvalHandler must never be consulted');
+    assert.strictEqual(bashRuns, before, 'autoApproveTools must not bypass remoteApprovals: deny');
+  });
+
+  it("'allow' still lets the agent's autoApproveTools grant approval, as before", async () => {
+    const before = bashRuns;
+    const { res } = await driveGatewayMessage(buildCore('allow'), 'code-writer');
+    assert.strictEqual(res.error, undefined, `agent run failed: ${res.error}`);
+    assert.strictEqual(bashRuns, before + 1);
   });
 });

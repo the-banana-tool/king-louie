@@ -1880,6 +1880,11 @@ function createCore(deps = {}) {
       requireApproval: true,
       runtimeEnvironment: resolvedRuntimeEnvironment,
       approvalRequester: effectiveApprovalRequester,
+      // Nulling the requester only denies at the gate; this also closes the
+      // paths that grant approval before the gate is reached (the persisted
+      // "always approve" list below, an agent config's autoApproveTools, and
+      // `allow` permission rules).
+      denyAutoApproval: remoteApprovals === 'deny',
       shouldAutoApprove: async (toolName) => isToolAlwaysApproved(toolName),
       // Live callback — picks up rules added mid-session when the user
       // clicks "Always allow 'git *'" in an approval dialog.
