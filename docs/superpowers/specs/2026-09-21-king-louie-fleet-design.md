@@ -138,29 +138,76 @@ its dependencies through constructors.
 ### 4.2 Design
 
 `createCore(deps)` in `src/core/index.js` does what `main.js` currently does
-to wire things up, and takes these host-provided ports:
+to wire things up. **As built** (this table replaces the originally planned
+`approver`/`notifier`/`opener`/`secrets` ports; see the deviations below), it
+takes these host-provided deps. Every optional dep defaults to the Electron
+app's behaviour.
 
-| Port | Interface | Electron host | Service host |
+| Dep | Interface | Electron host | Service host |
 |---|---|---|---|
-| `paths` | `{ dataDir, logsDir, cacheDir }` | `app.getPath('userData')` | `--data-dir`, else OS default (`%ProgramData%\KingLouie`, `/var/lib/king-louie`, `~/Library/Application Support/KingLouie`) |
-| `store(name)` | `get/set/delete/has/keys`, JSON values | `electron-store` (**unchanged on disk**) | atomic JSON files (write-temp + rename) |
+| `paths` | `{ dataDir, logsDir?, cacheDir? }` | `{ dataDir: app.getPath('userData') }` | `--data-dir`, else OS default (`%ProgramData%\KingLouie\data`, `/var/lib/king-louie`, `/Library/Application Support/KingLouie/data`), plus `logs/` and `cache/` |
+| `store` | `get/set/delete/has`, JSON values (`chat-data`) | `electron-store` (**unchanged on disk**) | atomic JSON files (write-temp + rename) |
+| `vaultStore` | same as `store` (`config`), holds `cipher` ciphertext | `electron-store` (**unchanged on disk**) | atomic JSON file |
 | `cipher` | `encryptString(plain)` / `decryptString(token)` / `isEncryptionAvailable()` | `safeStorage`-backed (unchanged) | AES-256-GCM (`src/platform/cipher.js`), keyed by a per-install master key (see deviation below) |
-| `approver` | `requestApproval(action) → { decision, evidence }` | existing renderer dialog | stage 1: **deny all unsafe**; stage 3: phone |
-| `prompter` | `askUser(q)`, `requestDirectoryAccess(path)` | renderer dialogs | stage 1: deny / "no interactive user"; stage 3: phone |
-| `notifier` | `notify(event)` | toast | log only; stage 3: push |
-| `opener` | `openExternal(url)` | `shell` | log the URL; the auth flow prints a device code |
+| `prompter` | `askUser(q)`, `requestDirectoryAccess(path)` | renderer dialogs | headless: deny / "no interactive user"; stage 3: phone |
+| `ui` | `{ send(channel, payload), reportError(message, stack) }` | the main window's `webContents` | default no-ops |
+| `openExternal` | `(url) → Promise` | `shell.openExternal` | unset: the auth flow logs the URL |
+| `uiToastChannel` | notification channel | `UiToastChannel` (desktop toast) | unset: a toast channel with no `Notification`, so toasts are skipped |
+| `builtinSkillsDir` | path | `<app>/skills` | `<package>/skills` |
+| `features` | `{ gateway, webhooks, mesh, channels, appDiscovery }` booleans | all on | all off by default (`service.json` may turn on all but `mesh`, see §4.3) |
+| `ports` | `{ gateway, webhook }` | default 18789 / gateway + 1 | 18791 / 18792, overridable in `service.json` |
+| `remoteApprovals` | `'allow' \| 'deny'` | default `'allow'` | `'deny'` (stage 1); stage 3: phone approver |
+| `shutdownTimeoutMs` | number | default 5000 | default 5000 |
+
+**Deviation — no `approver` port (C1).** Approval stays where it was: the
+Electron renderer dialog answers approvals for sessions started in the local
+app, and remote origins (a chat channel's Approve button, a gateway client,
+cron, webhooks, mesh, and child agents that re-thread a parent's requester)
+attach an approval requester to the run. `remoteApprovals: 'deny'` makes core
+ignore every such requester at the one place they all reach a `ToolExecutor`,
+so approval-requiring tools are denied — this is how stage 1 meets "deny all
+unsafe" and trust principle 3 (§3.1) until stage 3's phone approver exists.
+The service host also defaults `channels` off, since a channel can't approve
+anything in stage 1.
+
+**Deviation — no `notifier` or `opener` port.** They are the optional
+`uiToastChannel` and `openExternal` deps above.
 
 **Deviation — no `secrets` port.** It was never built. Secrets still go
 through the plain `store` port (as `vaultStore`), now encrypted by the new
 `cipher` port before being written — the same shape as the Electron host's
 `vaultStore` + `safeStorage`, just with `cipher` swapped in. `cipher`'s
 master key comes from, in order: a systemd credential (`kl-master-key`,
-delivered via `LoadCredential=`) under systemd on Linux; Windows DPAPI in the
-service account's `CurrentUser` scope; otherwise a `0600` key file in the data
-directory (macOS, and Linux without systemd credentials). There is no macOS
-Keychain and no Linux libsecret backend: both would need either a native npm
-dependency (ruled out — no new npm dependencies) or a logged-in session/D-Bus
-secret service, which a service account run before login doesn't have.
+delivered via `LoadCredential=`) under systemd on Linux; for root outside the
+unit (the admin CLI), the same `/etc/king-louie/credentials/kl-master-key`
+file the unit loads; Windows DPAPI in the **LocalMachine** scope; otherwise a
+`0600` key file in the data directory (macOS, and Linux without systemd
+credentials). There is no macOS Keychain and no Linux libsecret backend: both
+would need either a native npm dependency (ruled out — no new npm
+dependencies) or a logged-in session/D-Bus secret service, which a service
+account run before login doesn't have. Stage 2+ trust anchors therefore do
+**not** live in a `secrets` store or any other service-writable file: public
+keys (enrolled phone keys) go in the root/admin-owned read-only config dir
+(§5.2), and the node's private identity key is encrypted under the master
+key. The exact layout is decided in the stage 2 and stage 3 specs.
+
+**Decision — admin CLI against an installed service (C2).** `token set` and
+`vault set` must resolve the same master key the service does, and must not
+leave files the service can't read:
+- Every data dir holds `key-check`, an AES-GCM ciphertext of a fixed constant
+  written on the first key resolution. Every later resolution (service `run`
+  and the CLI) must decrypt it, or it stops with an error naming the key
+  source instead of writing secrets under a different key.
+- Linux: root reads the unit's credential file (above). Windows: DPAPI moved
+  from the service account's `CurrentUser` scope to `LocalMachine`, so an
+  elevated admin and `LOCAL SERVICE` resolve the same key; what keeps
+  `master.key.dpapi` private is the data dir's protected DACL
+  (`LOCAL SERVICE`/`SYSTEM`/Administrators only). PowerShell is run by its
+  absolute System32 path.
+- On Linux and macOS, when the CLI runs as root, everything it creates in the
+  data dir is chowned back to the data dir's owner.
+- Both commands refuse (exit 1) while the service is running on that data
+  dir; `token set` only accepts known provider names.
 
 Rules:
 
@@ -192,7 +239,31 @@ Rules:
   - **macOS:** a launchd LaunchDaemon that runs as a dedicated user
 - Reinstalling is idempotent on every OS: it skips creating the service
   account if one already exists and never overwrites an existing master key,
-  so a second `install` reuses the key the first one generated.
+  so a second `install` reuses the key the first one generated. It also runs
+  the new definition: Linux restarts the unit after `enable --now`, and macOS
+  boots out any loaded LaunchDaemon before `bootstrap`.
+- **Decision — data-dir layout (I1).** The data dir is kept apart from stage
+  2's root/admin-owned, read-only config dir (§5.2): Windows
+  `%ProgramData%\KingLouie\data` beside `%ProgramData%\KingLouie\config`;
+  macOS `/Library/Application Support/KingLouie/data` beside `…/config`;
+  Linux `/var/lib/king-louie` with config in `/etc/king-louie`. On Windows
+  the installer creates a missing `KingLouie` parent Administrators-owned with
+  its own protected DACL (`SYSTEM`/Administrators full, `LOCAL SERVICE` read)
+  and verifies an existing one; on Linux it creates `/etc/king-louie` `0755`
+  root-owned and only `/etc/king-louie/credentials` `0700`. Each service runs
+  with the data dir as its working directory.
+- **Decision — ports and listener failures (I4).** The service host's
+  gateway and webhook listeners default to 18791/18792 (the Electron app keeps
+  18789/18790), overridable via `service.json` `ports`, so both hosts can run
+  on one machine. A listener that fails to bind logs a warning and stays off;
+  it never aborts `core.start()`.
+- In stage 1 `features.mesh` is forced off in service mode, whatever
+  `service.json` says: that file is writable by the service account, and mesh
+  binds a non-loopback listener.
+- Logs: the service appends every log record to `<dataDir>/logs/service.log`
+  on all OSes (the only log on Windows). On Windows `schtasks /End` is a hard
+  stop — there is no graceful shutdown there in stage 1 — and `status` checks
+  that the pidfile's process is alive.
 - The CLI's flag parsing is strict: an unknown `--flag`, a flag given with no
   value, and an empty `--data-dir` all exit 2, rather than silently falling
   back to a default. Both `--flag value` and `--flag=value` are accepted.
@@ -212,8 +283,9 @@ Rules:
 
 `src/gateway/gateway-server.js` listens on `127.0.0.1:18789` with **no
 authentication**, so any local process can drive the agent. In service mode
-both it and the webhook server (port +1) are **off by default** and refuse to
-bind to anything other than loopback. When the gateway is enabled it requires
+both it and the webhook server are **off by default** (on 18791/18792 when
+enabled, §4.3) and refuse to bind to anything other than a literal loopback
+address (`127.0.0.1` or `::1`; `localhost` is resolver-dependent and refused). When the gateway is enabled it requires
 a bearer token, generated on first use and encrypted through the `cipher`
 port into the `store` — not a `secrets` port, which was never built (§4.2).
 For local processes and CLI tooling, the same token is also written in the
@@ -255,8 +327,9 @@ approval is asked, so servers never have it.
   - Linux: an XDG autostart entry or a `systemd --user` unit
 - The helper connects to the service over local IPC: a Windows named pipe with
   an ACL for the user's SID, or a Unix socket that only the user can access.
-  Both sides authenticate each other with a per-install secret stored in
-  `secrets`.
+  Both sides authenticate each other with a per-install secret encrypted
+  under the master key (there is no `secrets` port, §4.2); where it lives
+  exactly is decided in the stage 5 spec.
 - The helper does GUI work **only**. It has no policy of its own and runs only
   what the service tells it to, with each request tagged by job ID for the
   audit log.
@@ -301,7 +374,8 @@ lease**, the one bounded exception to trust principle 3 (§3.1):
 
 - The ban on Electron imports (static scan).
 - Contract tests for each port, run against every implementation. The OS
-  secrets backends run only on their own OS, so CI needs all three.
+  master-key backends (systemd credential, DPAPI, key file) run only on their
+  own OS, so CI needs all three.
 - The runbook profile's module graph excludes the agent modules.
 - A smoke test: `king-louie-service run --data-dir <tmp>` starts, reports
   health and shuts down cleanly on SIGTERM / service stop.
@@ -319,8 +393,10 @@ door exists.
 
 ### 5.1 Node identity
 
-- Each node gets an **Ed25519 key pair** when it is first set up, stored in
-  `secrets`. Its node ID is `kl-<base32(sha256(pubkey))[0..16]>`, and each node
+- Each node gets an **Ed25519 key pair** when it is first set up. The
+  private key is encrypted under the master key (§4.2; there is no `secrets`
+  port) and is never stored in a service-writable file in the clear; the exact
+  layout is decided in the stage 2 spec. Its node ID is `kl-<base32(sha256(pubkey))[0..16]>`, and each node
   also has a human-readable name (`gpu-box`, `laptop`, `web-01`).
 - The mesh TLS certificate is self-signed with this key. Peers pin the
   **public key**, not a CA.
@@ -472,8 +548,10 @@ becomes the front door in stage 4.
   requires biometric user presence (`.biometryCurrentSet` /
   `setUserAuthenticationRequired(true)` with invalidation when new biometrics
   are enrolled).
-- Each node stores the enrolled phone public keys in `secrets` (the set of
-  approver keys).
+- Each node keeps the enrolled phone public keys (the set of approver keys)
+  in its root/admin-owned, read-only config dir (§5.2) — never in a file the
+  service account can write, since whoever can add a key can approve
+  anything. The exact format is decided in the stage 3 spec.
 
 ### 6.2 Approval request (created and signed by the executing node)
 
@@ -796,7 +874,8 @@ architecture level; the detail inside each stage is still open for changes.
 - **Q3 (delegate model):** The provider and model for `delegate` sessions are
   configured per node (`node.yaml` → `delegate.provider` / `delegate.model`,
   using the existing `src/providers/` routing and failover). **Each agent node
-  keeps its own API keys** in its own `secrets`. Keys never pass through the
+  keeps its own API keys** in its own vault, encrypted under its master key
+  (§4.2), set with `king-louie-service token set`. Keys never pass through the
   front door.
 - **Q4 (production pull/restart):** **Unsafe.** Anything that changes a
   production server's state is `unsafe`, so on runbook-profile nodes

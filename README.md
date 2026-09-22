@@ -161,14 +161,23 @@ standard user can register.
 
 Reinstalling is safe: it skips creating the service account if one already
 exists, and it never overwrites an existing master key — a second `install`
-run reuses the key the first one generated.
+run reuses the key the first one generated. It also picks up the new service
+definition: on Linux the unit is restarted after `enable --now`, and on macOS
+any previously loaded LaunchDaemon is booted out before it is loaded again.
 
 **Windows only:** the installer creates the data directory itself with a
 locked-down ACL (Full Control limited to `LOCAL SERVICE`, `SYSTEM` and
-Administrators, with inheritance disabled). If the directory already exists,
-the installer only *verifies* that ACL — a hand-created directory, or one with
-looser permissions, is refused rather than silently relocked. Fix or remove it
-manually before retrying.
+Administrators, with inheritance disabled). If its parent
+(`%ProgramData%\KingLouie` for the default data dir) doesn't exist, it is
+created Administrators-owned with its own protected ACL (Full Control to
+`SYSTEM` and Administrators, read-only to `LOCAL SERVICE`). If either directory
+already exists, the installer only *verifies* it — a hand-created directory, or
+one with looser permissions, is refused rather than silently relocked. Fix or
+remove it manually before retrying.
+
+**Linux only:** `/etc/king-louie` is created root-owned with mode `0755`
+(later stages keep read-only configuration there); only
+`/etc/king-louie/credentials`, which holds the master key, is `0700`.
 
 On every platform, if `node` or the entry script (`bin/king-louie-service.js`)
 lives under a home directory (`/home`, `/root`, `/Users`, or `C:\Users\`), the
@@ -177,14 +186,36 @@ could then rewrite the binary it runs. Move the install to a system path.
 
 ### Configure
 
-- `<dataDir>/service.json` sets `profile` (`agent` or `runbook`) and
-  `features`. Every listener (`gateway`, `webhooks`, `mesh`, `appDiscovery`)
-  is **off by default**; `channels` is on.
+- `<dataDir>/service.json` sets `profile` (`agent` or `runbook`), `features`
+  and `ports`. Every feature (`gateway`, `webhooks`, `mesh`, `channels`,
+  `appDiscovery`) is **off by default**. `mesh` cannot be enabled in service
+  mode yet: it is forced off (with a warning in the log) whatever
+  `service.json` says. `ports` defaults to `{ "gateway": 18791, "webhook": 18792 }`
+  — different from the desktop app's 18789/18790, so both can run on one
+  machine. A listener that can't bind its port logs a warning and stays off;
+  the rest of the service still starts.
 - `king-louie-service token set anthropic < keyfile` — stores a provider API
   key (read from stdin, never a CLI argument, so it doesn't end up in shell
-  history or `ps`).
+  history or `ps`). The provider must be one king-louie knows (`openai`,
+  `anthropic`, `groq`, …); an unknown name is rejected.
 - `king-louie-service vault set <key> < valuefile` — stores an arbitrary
   secret in the vault the same way.
+
+`token set` and `vault set` against an installed service:
+
+- **Stop the service first.** Both refuse (exit 1) while the service is
+  running on that data dir, because the running service would overwrite the
+  change with its own in-memory copy.
+- Run them as root (Linux, macOS) or from an elevated shell (Windows). On
+  Linux, root reads the same `/etc/king-louie/credentials/kl-master-key` the
+  unit hands the service; on Windows the key is DPAPI-protected in the
+  machine scope, readable by `LOCAL SERVICE` and Administrators only through
+  the data dir's ACL. On Linux and macOS, files the CLI creates in the data
+  dir are handed back to the data dir's owner.
+- Every data dir holds a `key-check` file written on first use. If a command
+  resolves a different master key than the one the data dir was encrypted
+  with (for example, run under the wrong account), it stops with an error
+  naming the key source instead of writing secrets the service can't read.
 
 The CLI's flag parsing is strict: an unknown `--flag`, a flag given with no
 value, and an empty `--data-dir` all exit with status 2 rather than silently
@@ -195,27 +226,39 @@ accepted.
 
 | Platform | Default `--data-dir` |
 |----------|----------------------|
-| Windows | `%ProgramData%\KingLouie` |
-| macOS | `/Library/Application Support/KingLouie` |
+| Windows | `%ProgramData%\KingLouie\data` |
+| macOS | `/Library/Application Support/KingLouie/data` |
 | Linux | `/var/lib/king-louie` |
+
+The service runs with its data directory as its working directory.
 
 ### Operate
 
 - `king-louie-service status [--data-dir DIR]` — reports whether the service
-  is running.
+  is running, by checking that the process named in `<dataDir>/service.pid`
+  is alive.
 - `king-louie-service doctor [--data-dir DIR]` — checks Node version, data
   directory permissions, and (on Windows) that the DPAPI-wrapped master key
   is present.
-- Logs: `journalctl -u king-louie` on Linux, `<dataDir>/logs/` on macOS
-  (the LaunchDaemon's stdout/stderr), and Event Viewer → Task Scheduler
-  Library → History on Windows.
+- Logs: on every platform the service appends its log to
+  `<dataDir>/logs/service.log` (mode `0600` on Linux and macOS). Also
+  `journalctl -u king-louie` on Linux and `<dataDir>/logs/service.out.log` /
+  `service.err.log` on macOS (the LaunchDaemon's stdout/stderr). On Windows,
+  `service.log` is the only log: Task Scheduler's History tab records only
+  that the task started and stopped, not its output.
+- Stopping on Windows: `schtasks /End /TN KingLouie` (and `uninstall`, which
+  runs it) terminates the process immediately — in stage 1 there is no
+  graceful shutdown on Windows, so in-flight work is cut off. Linux and macOS
+  send SIGTERM and the service shuts down cleanly.
 
 ### Security Notes
 
 - **Master key location, per OS:** a systemd credential (`kl-master-key`,
-  Linux with systemd); Windows DPAPI in the service account's `CurrentUser`
-  scope; otherwise a `0600` key file in the data directory (macOS, and Linux
-  without systemd credentials).
+  Linux with systemd; root outside the unit reads the same file from
+  `/etc/king-louie/credentials`); Windows DPAPI in the `LocalMachine` scope
+  in `master.key.dpapi`, kept private by the data directory's ACL; otherwise
+  a `0600` key file in the data directory (macOS, and Linux without systemd
+  credentials).
 - The gateway (when enabled) requires a bearer token stored encrypted and
   written to `<dataDir>/gateway-token` (mode `0600`, written atomically).
   If secure storage is unavailable on that host, the token falls back to
@@ -224,7 +267,10 @@ accepted.
   silently persisting in the clear.
 - The service denies every action that requires interactive approval —
   stage 1 has no remote approver (phone approvals arrive in a later stage),
-  so anything gated on approval simply fails.
+  so anything gated on approval simply fails. That includes requests from
+  chat channels: if you turn `channels` on, a channel is never asked to
+  approve (no Approve button is sent) and approval-gated tools are still
+  denied.
 - On Windows the service runs as `LOCAL SERVICE`, a low-privilege account
   with no access to any user's profile folders.
 
