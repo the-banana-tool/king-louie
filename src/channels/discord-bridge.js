@@ -8,6 +8,7 @@ const {
   formatApprovalRequest
 } = require('./discord-adapter');
 const { shouldRespond } = require('./mention-gating');
+const { NoticeLimiter, resolveApprovalTarget } = require('./sender-policy');
 const { skillRegistry } = require('../skills');
 const { createLogger } = require('../logging');
 const log = createLogger('discord-bridge');
@@ -58,6 +59,8 @@ class DiscordChannel extends ChannelPlugin {
     this.pendingRuns = new Map();
     this.pendingApprovals = new Map();
     this.discordToLocalChatMap = new Map();
+    // One "you are not on the allowlist" reply per sender, capped.
+    this.unknownSenderNotified = new NoticeLimiter();
 
     this.boundAgentResponse = this.handleAgentResponse.bind(this);
   }
@@ -201,15 +204,18 @@ class DiscordChannel extends ChannelPlugin {
     const inbound = this.normalizeInboundMessage(message);
     const text = inbound.text;
 
+    // Checked before anything else touches the message: an unrecognised sender
+    // gets one notice with their id and is otherwise ignored.
+    if (this.allowlistManager && !this.allowlistManager.isAllowed('discord', inbound.sender.id, inbound.group?.id || null)) {
+      await this.notifyUnknownSender(message.channelId, inbound.sender.id, inbound.group?.id || null);
+      return;
+    }
+
     const channelSettings = this.getChannelSettings() || {};
     const isGroup = Boolean(inbound.group);
     const isCommand = text.startsWith('/');
     const isReply = message.reference ? true : false;
-    const wasMentioned = this.hasMention(text) || message.mentions.has(this.client.user);
-
-    if (this.allowlistManager && !this.allowlistManager.isAllowed('discord', inbound.sender.id, inbound.group?.id || null)) {
-      return;
-    }
+    const wasMentioned = this.hasMention(text) || message.mentions.has(this.client?.user);
 
     if (!shouldRespond({
       isGroup,
@@ -306,8 +312,49 @@ class DiscordChannel extends ChannelPlugin {
     });
   }
 
-  createApprovalHandler(chatId) {
+  // Tell an unrecognised sender their id once, so the owner can allowlist them,
+  // without handing a stranger a reply for every message they send.
+  async notifyUnknownSender(channelId, senderId, groupId = null) {
+    const sender = String(senderId || '');
+    const group = groupId == null ? '' : String(groupId);
+    log.warn(`ignored message from unauthorized discord sender ${sender || '(unknown)'}${group ? ` in channel ${group}` : ''}`);
+
+    if (!this.unknownSenderNotified.shouldNotify(`${group}|${sender}`)) return;
+
+    const lines = [
+      'This King Louie instance does not accept messages from you.',
+      `Your user id: ${sender || '(unknown)'}`
+    ];
+    if (group) lines.push(`This channel id: ${group}`);
+    lines.push('Ask the owner to add it to the Discord allowlist.');
+
+    try {
+      await this.sendMessage(channelId, lines.join('\n'));
+    } catch (error) {
+      log.warn(`could not notify unauthorized sender: ${error.message}`);
+    }
+  }
+
+  // The channel that asked for the tool is never asked to approve it: the prompt
+  // goes to the owner's own channel (`channels.discord.approvalChatId`), and if
+  // there is no such surface the request is denied.
+  resolveApprover(originChannelId) {
+    const settings = this.getChannelSettings() || {};
+    return resolveApprovalTarget({
+      ownerTarget: settings.approvalChatId,
+      originTarget: originChannelId
+    });
+  }
+
+  createApprovalHandler(originChannelId) {
     return async ({ toolName, parameters }) => {
+      const origin = String(originChannelId);
+      const { target: approverChannelId, reason } = this.resolveApprover(origin);
+      if (!approverChannelId) {
+        log.warn(`denied ${toolName} requested from discord:${origin} — ${reason}`);
+        return false;
+      }
+
       const approvalId = crypto.randomBytes(16).toString('hex');
       const callbackApprove = `kl_a_${approvalId}_y`;
       const callbackDeny = `kl_a_${approvalId}_n`;
@@ -324,7 +371,7 @@ class DiscordChannel extends ChannelPlugin {
             .setStyle(ButtonStyle.Danger)
         );
 
-      await this.sendMessage(chatId, formatApprovalRequest({ toolName, parameters }), {
+      await this.sendMessage(approverChannelId, formatApprovalRequest({ toolName, parameters }), {
         components: [row]
       });
 
@@ -335,7 +382,8 @@ class DiscordChannel extends ChannelPlugin {
         }, 120000);
 
         this.pendingApprovals.set(approvalId, {
-          chatId,
+          approverChannelId,
+          originChannelId: origin,
           resolve,
           timer
         });
@@ -632,8 +680,9 @@ class DiscordChannel extends ChannelPlugin {
       return;
     }
 
-    if (pending.chatId !== interaction.channelId) {
-      await interaction.reply({ content: 'Only the originating chat can approve this action.', ephemeral: true });
+    if (pending.approverChannelId !== String(interaction.channelId)) {
+      log.warn(`rejected approval press for ${approvalId} from discord:${interaction.channelId}`);
+      await interaction.reply({ content: 'Only the owner channel can approve this action.', ephemeral: true });
       return;
     }
 

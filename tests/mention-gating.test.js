@@ -43,8 +43,14 @@ describe('AllowlistManager', () => {
     };
   }
 
-  it('allows all by default (default: allow)', () => {
+  it('denies by default until the owner configures the channel', () => {
     const mgr = new AllowlistManager(createStore());
+    assert.ok(!mgr.isAllowed('telegram', 'any-user', null));
+  });
+
+  it('allows all only when the owner explicitly set default: allow', () => {
+    const mgr = new AllowlistManager(createStore());
+    mgr.setPolicy('telegram', { default: 'allow', users: [], groups: [] });
     assert.ok(mgr.isAllowed('telegram', 'any-user', null));
   });
 

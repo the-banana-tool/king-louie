@@ -7,6 +7,7 @@ const {
 } = require('./telegram-adapter');
 const { ChannelPlugin } = require('./channel-plugin');
 const { shouldRespond } = require('./mention-gating');
+const { NoticeLimiter, resolveApprovalTarget } = require('./sender-policy');
 const { skillRegistry } = require('../skills');
 const { createLogger } = require('../logging');
 const log = createLogger('telegram-bridge');
@@ -66,6 +67,8 @@ class TelegramBridge extends ChannelPlugin {
     this.pendingRuns = new Map();
     this.pendingApprovals = new Map();
     this.telegramToLocalChatMap = new Map(); // Maps Telegram chat ID to local King Louie chat ID
+    // One "you are not on the allowlist" reply per sender, capped.
+    this.unknownSenderNotified = new NoticeLimiter();
 
     this.boundAgentResponse = this.handleAgentResponse.bind(this);
   }
@@ -351,6 +354,29 @@ class TelegramBridge extends ChannelPlugin {
     }
   }
 
+  // Tell an unrecognised sender their id once, so the owner can allowlist them,
+  // without handing a stranger a reply for every message they send.
+  async notifyUnknownSender(chatId, senderId, groupId = null) {
+    const sender = String(senderId || '');
+    const group = groupId == null ? '' : String(groupId);
+    log.warn(`ignored message from unauthorized telegram sender ${sender || '(unknown)'}${group ? ` in group ${group}` : ''}`);
+
+    if (!this.unknownSenderNotified.shouldNotify(`${group}|${sender}`)) return;
+
+    const lines = [
+      'This King Louie instance does not accept messages from you.',
+      `Your user id: ${sender || '(unknown)'}`
+    ];
+    if (group) lines.push(`This group id: ${group}`);
+    lines.push('Ask the owner to add it to the Telegram allowlist.');
+
+    try {
+      await this.sendMessage(chatId, lines.join('\n'));
+    } catch (error) {
+      log.warn(`could not notify unauthorized sender: ${error.message}`);
+    }
+  }
+
   async handleMessage(message = {}) {
     const inbound = this.normalizeInboundMessage(message);
     const chatId = String(message?.chat?.id || '');
@@ -364,6 +390,7 @@ class TelegramBridge extends ChannelPlugin {
     const wasMentioned = this.isMentioned(message, inbound);
 
     if (this.allowlistManager && !this.allowlistManager.isAllowed('telegram', inbound.sender.id, inbound.group?.id || null)) {
+      await this.notifyUnknownSender(chatId, inbound.sender.id, inbound.group?.id || null);
       return;
     }
 
@@ -626,13 +653,31 @@ class TelegramBridge extends ChannelPlugin {
     });
   }
 
-  createApprovalHandler(chatId) {
+  // The chat that asked for the tool is never asked to approve it: the prompt
+  // goes to the owner's own chat (`channels.telegram.approvalChatId`), and if
+  // there is no such surface the request is denied.
+  resolveApprover(originChatId) {
+    const settings = this.getChannelSettings() || {};
+    return resolveApprovalTarget({
+      ownerTarget: settings.approvalChatId,
+      originTarget: originChatId
+    });
+  }
+
+  createApprovalHandler(originChatId) {
     return async ({ toolName, parameters }) => {
+      const origin = String(originChatId);
+      const { target: approverChatId, reason } = this.resolveApprover(origin);
+      if (!approverChatId) {
+        log.warn(`denied ${toolName} requested from telegram:${origin} — ${reason}`);
+        return false;
+      }
+
       const approvalId = crypto.randomBytes(16).toString('hex');
       const callbackApprove = `kl_a_${approvalId}_y`;
       const callbackDeny = `kl_a_${approvalId}_n`;
 
-      await this.sendMessage(chatId, formatApprovalRequest({ toolName, parameters }), {
+      await this.sendMessage(approverChatId, formatApprovalRequest({ toolName, parameters }), {
         reply_markup: {
           inline_keyboard: [
             [
@@ -650,7 +695,8 @@ class TelegramBridge extends ChannelPlugin {
         }, 120000);
 
         this.pendingApprovals.set(approvalId, {
-          chatId,
+          approverChatId,
+          originChatId: origin,
           resolve,
           timer
         });
@@ -678,8 +724,9 @@ class TelegramBridge extends ChannelPlugin {
       return;
     }
 
-    if (pending.chatId !== chatId) {
-      await this.answerCallbackQuery(callbackId, 'Only the originating chat can approve this action.');
+    if (pending.approverChatId !== chatId) {
+      log.warn(`rejected approval press for ${approvalId} from telegram:${chatId}`);
+      await this.answerCallbackQuery(callbackId, 'Only the owner chat can approve this action.');
       return;
     }
 

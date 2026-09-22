@@ -8,7 +8,9 @@ class AllowlistManager {
     const policies = this.store?.get?.(this.storeKey, {}) || {};
     const current = policies[channel] || {};
     return {
-      default: current.default === 'deny' ? 'deny' : 'allow',
+      // A channel nobody has configured denies. Anyone who finds the bot's
+      // handle would otherwise be able to drive the agent.
+      default: current.default === 'allow' ? 'allow' : 'deny',
       users: Array.isArray(current.users) ? current.users.map((id) => String(id)) : [],
       groups: Array.isArray(current.groups) ? current.groups.map((id) => String(id)) : []
     };
@@ -19,7 +21,9 @@ class AllowlistManager {
     const next = {
       ...currentAll,
       [channel]: {
-        default: policy.default === 'deny' ? 'deny' : 'allow',
+        // Only an explicit 'allow' opens the channel up; anything else — including
+        // a policy object that just carries a user list — stays closed.
+        default: policy.default === 'allow' ? 'allow' : 'deny',
         users: Array.isArray(policy.users) ? Array.from(new Set(policy.users.map((id) => String(id)))) : [],
         groups: Array.isArray(policy.groups) ? Array.from(new Set(policy.groups.map((id) => String(id)))) : []
       }
