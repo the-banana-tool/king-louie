@@ -63,4 +63,71 @@ describe('Safety Policy Engine', () => {
     const routineRes = classifyToolCall('Write', { filePath: '/srv/site/log.txt', content: 'test' }, policy);
     assert.equal(routineRes.tier, 'routine');
   });
+  describe('command matching', () => {
+    const policy = {
+      allowed_roots: ['/'],
+      remote_sessions: {
+        always_confirm: ['Bash(git push*)', 'Bash(ssh *)'],
+        deny: ['Bash(rm -rf /*)']
+      }
+    };
+
+    it('normalises whitespace so extra spaces, tabs, and newlines cannot dodge a pattern', () => {
+      for (const command of ['rm  -rf /', '  rm -rf /  ', 'rm\t-rf /', 'rm \t -rf   /']) {
+        assert.equal(classifyToolCall('Bash', { command }, policy).tier, 'denied', JSON.stringify(command));
+      }
+      assert.ok(patternMatch('Bash(rm   -rf /*)', 'Bash(rm -rf /)'));
+    });
+
+    it('matches each segment of a compound command', () => {
+      const cases = [
+        ['echo hi; rm -rf /', 'denied'],
+        ['echo hi;rm -rf /', 'denied'],
+        ['true && git push', 'unsafe'],
+        ['cd x && git push origin', 'unsafe'],
+        ['false || git push', 'unsafe'],
+        ['cat f | ssh host', 'unsafe'],
+        ['echo hi & rm -rf /', 'denied'],
+        ['echo hi\nrm -rf /', 'denied'],
+        ['echo hi\r\ngit push', 'unsafe']
+      ];
+      for (const [command, tier] of cases) {
+        assert.equal(classifyToolCall('Bash', { command }, policy).tier, tier, JSON.stringify(command));
+      }
+    });
+
+    it('leaves compound commands with no matching segment routine', () => {
+      const res = classifyToolCall('Bash', { command: 'cd x && git status | grep main' }, policy);
+      assert.equal(res.tier, 'routine');
+    });
+
+    it('classifies command substitution as unsafe', () => {
+      for (const command of ['echo $(whoami)', 'echo `whoami`', 'ls "$(cat list)"', 'diff <(ls a) b', 'tee >(sh)']) {
+        const res = classifyToolCall('Bash', { command }, policy);
+        assert.equal(res.tier, 'unsafe', command);
+        assert.equal(res.reason, 'command_substitution');
+      }
+    });
+
+    it('still denies a deny match that also uses command substitution', () => {
+      const res = classifyToolCall('Bash', { command: 'rm -rf /$(echo x)' }, policy);
+      assert.equal(res.tier, 'denied');
+    });
+  });
+
+  it('treats regex metacharacters other than * and ? literally', () => {
+    assert.ok(patternMatch('Bash(npm run a.b+c(d))', 'Bash(npm run a.b+c(d))'));
+    // `.` must not act as "any char", `+` must not act as "one or more".
+    assert.ok(!patternMatch('Bash(a.b)', 'Bash(axb)'));
+    assert.ok(!patternMatch('Bash(a+)', 'Bash(aaa)'));
+    assert.ok(!patternMatch('Bash(f(x))', 'Bash(fx)'));
+    assert.ok(!patternMatch('Bash([ab])', 'Bash(a)'));
+    assert.ok(!patternMatch('Bash(a|b)', 'Bash(a)'));
+    assert.ok(!patternMatch('Bash(^a$)', 'Bash(a)'));
+    assert.ok(patternMatch('Bash(^a$)', 'Bash(^a$)'));
+    // The two wildcards still work.
+    assert.ok(patternMatch('Bash(a?c)', 'Bash(abc)'));
+    assert.ok(!patternMatch('Bash(a?c)', 'Bash(ac)'));
+    assert.ok(patternMatch('Bash(a*c)', 'Bash(ac)'));
+  });
 });

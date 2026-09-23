@@ -49,6 +49,14 @@ function readJsonFile(file) {
   }
 }
 
+// What service.json decides, for assertAdminOwned's refusals. node.yaml and
+// the runbooks go through the same check (src/service/node-config.js) and pass
+// their own wording, since they decide node policy rather than listeners.
+const SERVICE_CONFIG_CONTROLS = {
+  decides: 'which network listeners this service opens',
+  selfGrant: 'enable its own listeners'
+};
+
 // The admin config decides which listeners exist, so a service account that
 // could rewrite it would be back where it started. The installers create the
 // directory root-owned, but an operator can still get the mode wrong by hand,
@@ -61,7 +69,8 @@ function readJsonFile(file) {
 // create a root-owned file, can point it at their own uid; nothing reads it
 // from configuration, because a config-supplied answer to "who may configure
 // this" is no answer at all.
-function assertAdminOwned(file, geteuid, adminUid = 0) {
+// `controls` only words the refusal; it never changes what is checked.
+function assertAdminOwned(file, geteuid, adminUid = 0, controls = SERVICE_CONFIG_CONTROLS) {
   if (process.platform === 'win32') return;
   const euid = geteuid();
   // The containing directory as well as the file: whoever can write the
@@ -75,7 +84,7 @@ function assertAdminOwned(file, geteuid, adminUid = 0) {
     if (st.mode & 0o022) {
       throw new Error(
         `Refusing to read ${target}: it is group- or world-writable (mode ${(st.mode & 0o7777).toString(8)}). `
-        + 'It decides which network listeners this service opens and must be writable only by root/an administrator.'
+        + `It decides ${controls.decides} and must be writable only by root/an administrator.`
       );
     }
     // Not "owned by somebody other than me": that accepted a file planted by
@@ -85,10 +94,10 @@ function assertAdminOwned(file, geteuid, adminUid = 0) {
     // gateway and webhook listeners, or move them to ports of their choosing.
     if (st.uid !== adminUid) {
       const why = euid >= 0 && st.uid === euid
-        ? `it is owned by the account running the service (uid ${euid}), which could then enable its own listeners`
+        ? `it is owned by the account running the service (uid ${euid}), which could then ${controls.selfGrant}`
         : `it is owned by uid ${st.uid}, not by root/an administrator (uid ${adminUid})`;
       throw new Error(
-        `Refusing to read ${target}: ${why}. It decides which network listeners this service opens `
+        `Refusing to read ${target}: ${why}. It decides ${controls.decides} `
         + 'and must be owned by root/an administrator.'
       );
     }
@@ -159,4 +168,4 @@ function loadServiceConfig(dataDir, overrides = {}, {
   };
 }
 
-module.exports = { loadServiceConfig, PROFILES, DEFAULT_PORTS, DEFAULT_FEATURES, CONFIG_FILE };
+module.exports = { loadServiceConfig, assertAdminOwned, PROFILES, DEFAULT_PORTS, DEFAULT_FEATURES, CONFIG_FILE };

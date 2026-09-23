@@ -561,7 +561,7 @@ description: Reboot this machine.
 tier: unsafe
 params: {}
 steps:
-  - run: [sudo, -n, /sbin/shutdown, -r, +1, 'king-louie: remote reboot']
+  - run: [sudo, -n, /sbin/shutdown, -r, '+1', 'king-louie: remote reboot']
 ```
 
 Rules:

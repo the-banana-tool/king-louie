@@ -2,43 +2,66 @@ const fs = require('fs');
 const path = require('path');
 const { parseYaml } = require('../platform/yaml');
 const { adminConfigDir } = require('../platform/paths');
-const { createLogger } = require('../logging');
-
-const log = createLogger('service/node-config');
+const { assertAdminOwned: assertServiceAdminOwned } = require('./config');
 
 const NODE_CONFIG_FILE = 'node.yaml';
 
-function assertAdminOwned(file, geteuid, adminUid = 0) {
-  if (process.platform === 'win32') return;
-  const euid = typeof geteuid === 'function' ? geteuid() : -1;
+const DEFAULT_ALWAYS_CONFIRM = [
+  'Bash(ssh *)',
+  'Bash(scp *)',
+  'Bash(git push*)',
+  'Vault(*)',
+  'Bash(*deploy*)'
+];
+const DEFAULT_DENY = ['Bash(rm -rf /*)'];
+const DEFAULT_MAX_CONCURRENT_JOBS = 2;
 
-  for (const target of [path.dirname(file), file]) {
-    if (!fs.existsSync(target)) continue;
-    if (target === '/tmp' || target === '/var/tmp' || target === '/private/tmp') continue;
+// node.yaml and the runbooks beside it decide what this node lets remote
+// sessions and runbooks do, so they get the same ownership check as the
+// admin service.json — one implementation, so neither copy can drift weaker
+// than the other — worded for what these files control.
+const NODE_POLICY_CONTROLS = {
+  decides: 'what this node may do (its policy and runbooks)',
+  selfGrant: 'loosen its own node policy or runbooks'
+};
 
-    const st = fs.lstatSync(target);
-    if (st.isSymbolicLink()) {
-      throw new Error(`Refusing to read ${file}: ${target} is a symlink, so its real owner is not the one checked here.`);
-    }
-    if (st.mode & 0o022) {
-      throw new Error(
-        `Refusing to read ${target}: it is group- or world-writable (mode ${(st.mode & 0o7777).toString(8)}). `
-        + 'Node configuration must be writable only by root/an administrator.'
-      );
-    }
-    if (st.uid !== adminUid) {
-      const why = euid >= 0 && st.uid === euid
-        ? `it is owned by the account running the service (uid ${euid}), which could then alter its own node policy`
-        : `it is owned by uid ${st.uid}, not by root/an administrator (uid ${adminUid})`;
-      throw new Error(
-        `Refusing to read ${target}: ${why}. Node configuration must be owned by root/an administrator.`
-      );
-    }
-  }
+function assertAdminOwned(file, geteuid, adminUid = 0, controls = NODE_POLICY_CONTROLS) {
+  assertServiceAdminOwned(file, geteuid, adminUid, controls);
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isStringList(value, { nonEmpty = false } = {}) {
+  return Array.isArray(value)
+    && value.every((item) => typeof item === 'string' && (!nonEmpty || item.trim() !== ''));
+}
+
+function defaultNodeConfig(adminDir) {
+  return {
+    name: 'unnamed-node',
+    profile: 'agent',
+    capabilities: [],
+    policy: {
+      allowed_roots: [],
+      remote_sessions: {
+        always_confirm: [...DEFAULT_ALWAYS_CONFIRM],
+        deny: [...DEFAULT_DENY]
+      },
+      max_concurrent_jobs: DEFAULT_MAX_CONCURRENT_JOBS
+    },
+    runbooksDir: path.join(adminDir, 'runbooks')
+  };
 }
 
 /**
  * Loads and validates node.yaml from adminConfigDir.
+ *
+ * A key that is absent takes its default; a key that is present but malformed
+ * throws. Quietly swapping a typo'd policy value for the default would run the
+ * node under a policy its administrator never wrote — and for `deny` or
+ * `allowed_roots` the default may well be looser than what they meant.
  */
 function loadNodeConfig({
   dataDir,
@@ -49,26 +72,7 @@ function loadNodeConfig({
   const configFile = path.join(adminDir, NODE_CONFIG_FILE);
 
   if (!fs.existsSync(configFile)) {
-    return {
-      name: 'unnamed-node',
-      profile: 'agent',
-      capabilities: [],
-      policy: {
-        allowed_roots: [],
-        remote_sessions: {
-          always_confirm: [
-            'Bash(ssh *)',
-            'Bash(scp *)',
-            'Bash(git push*)',
-            'Vault(*)',
-            'Bash(*deploy*)'
-          ],
-          deny: ['Bash(rm -rf /*)']
-        },
-        max_concurrent_jobs: 2
-      },
-      runbooksDir: path.join(adminDir, 'runbooks')
-    };
+    return defaultNodeConfig(adminDir);
   }
 
   assertAdminOwned(configFile, geteuid, adminUid);
@@ -80,45 +84,77 @@ function loadNodeConfig({
     throw new Error(`Could not read ${configFile}: ${err.message}`);
   }
 
-  const parsed = parseYaml(raw);
-  if (!parsed || typeof parsed !== 'object') {
+  let parsed;
+  try {
+    parsed = parseYaml(raw);
+  } catch (err) {
+    throw new Error(`Invalid ${configFile}: ${err.message}`);
+  }
+  if (!isPlainObject(parsed)) {
     throw new Error(`Invalid ${configFile}: must contain a YAML object`);
   }
+  const invalid = (what) => new Error(`Invalid ${configFile}: ${what}`);
 
-  const name = typeof parsed.name === 'string' && parsed.name.trim() ? parsed.name.trim() : 'unnamed-node';
+  let name = 'unnamed-node';
+  if (parsed.name !== undefined) {
+    if (typeof parsed.name !== 'string' || !parsed.name.trim()) throw invalid('name must be a non-empty string');
+    name = parsed.name.trim();
+  }
   if (parsed.profile !== undefined && !['agent', 'runbook'].includes(parsed.profile)) {
-    throw new Error(`Invalid ${configFile}: unknown profile "${parsed.profile}"`);
+    throw invalid(`unknown profile "${parsed.profile}"`);
   }
   const profile = parsed.profile || 'agent';
   const frontDoor = typeof parsed.front_door === 'string' ? parsed.front_door.trim() : null;
-  const capabilities = Array.isArray(parsed.capabilities) ? parsed.capabilities.map(String) : [];
 
-  const rawPolicy = parsed.policy && typeof parsed.policy === 'object' ? parsed.policy : {};
-  const allowedRoots = Array.isArray(rawPolicy.allowed_roots)
-    ? rawPolicy.allowed_roots.map((r) => path.resolve(String(r)))
-    : [];
+  let capabilities = [];
+  if (parsed.capabilities !== undefined) {
+    if (!Array.isArray(parsed.capabilities)) throw invalid('capabilities must be a list');
+    capabilities = parsed.capabilities.map(String);
+  }
 
-  const rawRemoteSessions = rawPolicy.remote_sessions && typeof rawPolicy.remote_sessions === 'object'
-    ? rawPolicy.remote_sessions
-    : {};
+  let rawPolicy = {};
+  if (parsed.policy !== undefined) {
+    if (!isPlainObject(parsed.policy)) throw invalid('policy must be a mapping');
+    rawPolicy = parsed.policy;
+  }
 
-  const alwaysConfirm = Array.isArray(rawRemoteSessions.always_confirm)
-    ? rawRemoteSessions.always_confirm.map(String)
-    : [
-        'Bash(ssh *)',
-        'Bash(scp *)',
-        'Bash(git push*)',
-        'Vault(*)',
-        'Bash(*deploy*)'
-      ];
+  let allowedRoots = [];
+  if (rawPolicy.allowed_roots !== undefined) {
+    if (!isStringList(rawPolicy.allowed_roots, { nonEmpty: true })) {
+      throw invalid('policy.allowed_roots must be a list of non-empty strings');
+    }
+    allowedRoots = rawPolicy.allowed_roots.map((r) => path.resolve(r));
+  }
 
-  const deny = Array.isArray(rawRemoteSessions.deny)
-    ? rawRemoteSessions.deny.map(String)
-    : ['Bash(rm -rf /*)'];
+  let rawRemoteSessions = {};
+  if (rawPolicy.remote_sessions !== undefined) {
+    if (!isPlainObject(rawPolicy.remote_sessions)) throw invalid('policy.remote_sessions must be a mapping');
+    rawRemoteSessions = rawPolicy.remote_sessions;
+  }
 
-  const maxConcurrentJobs = Number.isInteger(rawPolicy.max_concurrent_jobs) && rawPolicy.max_concurrent_jobs > 0
-    ? rawPolicy.max_concurrent_jobs
-    : 2;
+  let alwaysConfirm = [...DEFAULT_ALWAYS_CONFIRM];
+  if (rawRemoteSessions.always_confirm !== undefined) {
+    if (!isStringList(rawRemoteSessions.always_confirm)) {
+      throw invalid('policy.remote_sessions.always_confirm must be a list of strings');
+    }
+    alwaysConfirm = [...rawRemoteSessions.always_confirm];
+  }
+
+  let deny = [...DEFAULT_DENY];
+  if (rawRemoteSessions.deny !== undefined) {
+    if (!isStringList(rawRemoteSessions.deny)) {
+      throw invalid('policy.remote_sessions.deny must be a list of strings');
+    }
+    deny = [...rawRemoteSessions.deny];
+  }
+
+  let maxConcurrentJobs = DEFAULT_MAX_CONCURRENT_JOBS;
+  if (rawPolicy.max_concurrent_jobs !== undefined) {
+    if (!Number.isInteger(rawPolicy.max_concurrent_jobs) || rawPolicy.max_concurrent_jobs < 1) {
+      throw invalid('policy.max_concurrent_jobs must be a positive integer');
+    }
+    maxConcurrentJobs = rawPolicy.max_concurrent_jobs;
+  }
 
   const rawRunbooksDir = typeof parsed.runbooks_dir === 'string' && parsed.runbooks_dir.trim()
     ? parsed.runbooks_dir.trim()

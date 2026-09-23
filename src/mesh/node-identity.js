@@ -24,34 +24,44 @@ function base32Encode(buffer) {
   return output;
 }
 
-function deriveNodeId(publicKeyBuffer) {
-  const buf = Buffer.isBuffer(publicKeyBuffer) ? publicKeyBuffer : Buffer.from(publicKeyBuffer, 'hex');
-  const hash = crypto.createHash('sha256').update(buf).digest();
+// The DER SubjectPublicKeyInfo header in front of every Ed25519 public key:
+// SEQUENCE { SEQUENCE { OID 1.3.101.112 }, BIT STRING (33 bytes, 0 unused bits) }.
+const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
+const ED25519_RAW_KEY_LENGTH = 32;
+
+// The node ID is kl-<base32(sha256(pubkey))[0..16]> (§5.1), where pubkey is
+// the raw 32-byte Ed25519 key — deliberately not the 44-byte DER encoding the
+// identity stores, so the ID depends only on the key and can be recomputed
+// by anything that holds it. `publicKey` is that DER (SPKI) encoding, as a
+// Buffer or hex string; anything that is not an Ed25519 SPKI key is refused
+// rather than hashed into an ID that no other implementation would match.
+// The mesh peer id (MeshIdentity._derivePeerId) is a different, older
+// derivation and is left alone so existing mesh pairings keep working.
+function deriveNodeId(publicKey) {
+  const der = Buffer.isBuffer(publicKey) ? publicKey : Buffer.from(publicKey, 'hex');
+  if (der.length !== ED25519_SPKI_PREFIX.length + ED25519_RAW_KEY_LENGTH
+    || !der.subarray(0, ED25519_SPKI_PREFIX.length).equals(ED25519_SPKI_PREFIX)) {
+    throw new Error('deriveNodeId: expected a DER (SPKI) encoded Ed25519 public key');
+  }
+  const raw = der.subarray(ED25519_SPKI_PREFIX.length);
+  const hash = crypto.createHash('sha256').update(raw).digest();
   return `kl-${base32Encode(hash).slice(0, 16)}`;
 }
 
+// A mesh identity plus the fleet's node ID and name. peerId is inherited
+// unchanged: it is what existing mesh pairings were made against.
 class NodeIdentity extends MeshIdentity {
   constructor(config = {}) {
     super(config);
     this.nodeName = config.nodeName || config.displayName || 'unnamed-node';
     this.nodeId = deriveNodeId(this.publicKey);
-    // Keep peerId in sync
-    this.peerId = this.nodeId;
-  }
-
-  _derivePeerId() {
-    return deriveNodeId(this.publicKey);
   }
 
   getPublicIdentity() {
     return {
+      ...super.getPublicIdentity(),
       nodeId: this.nodeId,
-      nodeName: this.nodeName,
-      peerId: this.nodeId,
-      displayName: this.nodeName,
-      capabilities: this.capabilities,
-      publicKey: this.publicKey.toString('hex'),
-      tlsFingerprint: this.tlsFingerprint
+      nodeName: this.nodeName
     };
   }
 }
