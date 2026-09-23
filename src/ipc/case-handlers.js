@@ -28,6 +28,9 @@ function registerCaseHandlers(ipcMain, context = {}) {
 
   ipcMain.handle(IPC.CASE_CREATE, wrapHandler(IPC.CASE_CREATE, async (_event, { title, type, objective, chatId } = {}) => {
     if (typeof title !== 'string' || !title.trim()) return { ok: false, error: 'A case needs a title.' };
+    if (type !== undefined && (typeof type !== 'string' || !type.trim())) return { ok: false, error: 'type must be a non-empty string.' };
+    if (objective !== undefined && (typeof objective !== 'string' || !objective.trim())) return { ok: false, error: 'objective must be a non-empty string.' };
+    if (chatId && !context.getChats().some((c) => c.id === chatId)) return { ok: false, error: 'Chat not found.' };
     const info = await runtime().createCase({ title: title.trim(), type: type || 'general', objective: objective || '' });
     return { ok: true, case: summarize(info), chat: chatId ? attach(chatId, info.id) : null };
   }));

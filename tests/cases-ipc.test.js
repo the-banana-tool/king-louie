@@ -75,4 +75,23 @@ describe('case IPC', () => {
     assert.strictEqual(r.ok, false);
     assert.match(r.error, /not available/);
   });
+
+  it('checks the chat before creating a case, so a bad chatId leaves nothing behind', async () => {
+    const { call } = setup();
+    const created = await call(IPC.CASE_CREATE, { title: 'Lakeside lot', chatId: 'nope' });
+    assert.strictEqual(created.ok, false);
+    assert.match(created.error, /Chat not found/);
+    const listed = await call(IPC.CASE_LIST);
+    assert.deepStrictEqual(listed.cases, []);
+  });
+
+  it('rejects a non-string, empty type or objective', async () => {
+    const { call } = setup();
+    assert.strictEqual((await call(IPC.CASE_CREATE, { title: 'A', type: 123 })).ok, false);
+    assert.strictEqual((await call(IPC.CASE_CREATE, { title: 'A', type: '  ' })).ok, false);
+    assert.strictEqual((await call(IPC.CASE_CREATE, { title: 'A', objective: [] })).ok, false);
+    assert.strictEqual((await call(IPC.CASE_CREATE, { title: 'A', objective: '  ' })).ok, false);
+    const listed = await call(IPC.CASE_LIST);
+    assert.deepStrictEqual(listed.cases, []);
+  });
 });
