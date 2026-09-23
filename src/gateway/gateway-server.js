@@ -1,11 +1,35 @@
 const { EventEmitter } = require('events');
+const crypto = require('crypto');
 const WebSocket = require('ws');
+const { publishGatewayToken, revokeGatewayToken } = require('./gateway-token');
+const { createLogger } = require('../logging');
+
+const log = createLogger('gateway-server');
+
+// Literal loopback addresses only: 'localhost' is resolved by the OS resolver
+// (hosts file, DNS) and so is not guaranteed to be loopback.
+const LOOPBACK = new Set(['127.0.0.1', '::1']);
+
+// The gateway protocol carries chat turns, not bulk data. `ws` defaults to
+// 100 MB, which is a lot of memory to hand a single frame.
+const MAX_PAYLOAD_BYTES = 4 * 1024 * 1024;
+const MAX_CONNECTIONS = 64;
+// Node's default is 60s; a loopback client has no excuse for taking that long
+// to finish its request headers.
+const HEADERS_TIMEOUT_MS = 10000;
 
 class GatewayServer extends EventEmitter {
   constructor(config = {}) {
     super();
-    this.port = config.port || (process.env.KL_TEST_MODE ? 0 : 18789);
+    // config.port may legitimately be 0 (bind an ephemeral port), so check
+    // for undefined/null explicitly rather than falling back on falsy 0.
+    this.port = config.port != null ? config.port : (process.env.KL_TEST_MODE ? 0 : 18789);
     this.host = config.host || '127.0.0.1';
+    this.authToken = config.authToken || null;
+    this.maxConnections = config.maxConnections != null ? config.maxConnections : MAX_CONNECTIONS;
+    // Where the plaintext bearer token is published for local clients — written
+    // only after the listener binds, removed when it stops.
+    this.tokenFileDir = config.tokenFileDir || null;
     this.connections = new Map();
     this.messageHandlers = new Map();
     this.nextConnectionId = 0;
@@ -15,23 +39,82 @@ class GatewayServer extends EventEmitter {
   async start() {
     if (this.wss) return;
 
+    if (!this.authToken) throw new Error('GatewayServer requires an authToken');
+    if (!LOOPBACK.has(this.host)) throw new Error('GatewayServer only binds to loopback');
+    const expected = crypto.createHash('sha256').update(this.authToken).digest();
+
     this.wss = new WebSocket.Server({
       host: this.host,
-      port: this.port
+      port: this.port,
+      maxPayload: MAX_PAYLOAD_BYTES,
+      verifyClient: ({ req }, done) => {
+        // Presence, not truthiness: an empty `Origin:` is still a browser-shaped
+        // header and must not slip through the check.
+        if ('origin' in req.headers) return done(false, 403, 'Forbidden');
+        const header = String(req.headers.authorization || '');
+        const presented = header.startsWith('Bearer ') ? header.slice(7) : '';
+        const ok = crypto.timingSafeEqual(crypto.createHash('sha256').update(presented).digest(), expected);
+        if (!ok) return done(false, 401, 'Unauthorized');
+        // Capped after the token check, so an unauthenticated peer can neither
+        // learn the cap nor flood the log with refusals.
+        if (this.connections.size >= this.maxConnections) {
+          log.warn(`refused connection: ${this.connections.size} already open`);
+          return done(false, 503, 'Too many connections');
+        }
+        return done(true);
+      }
     });
 
     this.wss.on('connection', (ws, req) => {
       this.handleConnection(ws, req);
     });
 
-    await new Promise((resolve, reject) => {
-      this.wss.once('listening', resolve);
-      this.wss.once('error', reject);
+    // `start()`'s once('error', reject) only covers the bind. A later server
+    // error must not reach the process as an unhandled 'error' event.
+    this.wss.on('error', (err) => {
+      log.error(`gateway server error: ${err.message}`);
     });
+
+    try {
+      await new Promise((resolve, reject) => {
+        this.wss.once('listening', resolve);
+        this.wss.once('error', reject);
+      });
+    } catch (err) {
+      // A failed bind leaves no listener to stop; forget it so stop() and a
+      // later start() don't act on a dead server.
+      this.wss = null;
+      throw err;
+    }
 
     // Update port to the actual bound port (important when using port 0)
     if (this.wss.address()) {
       this.port = this.wss.address().port;
+    }
+
+    const httpServer = this.wss._server;
+    if (httpServer) {
+      httpServer.headersTimeout = HEADERS_TIMEOUT_MS;
+      httpServer.on('clientError', (err, socket) => {
+        log.debug(`gateway client error before upgrade: ${err.message}`);
+        try { socket.destroy(); } catch { /* already gone */ }
+      });
+    }
+
+    // A bound listener nothing can authenticate to is worse than no listener:
+    // every local client follows the README to <dataDir>/gateway-token, finds
+    // nothing (or a stale token from an earlier run, which for a freshly
+    // minted token is just as useless), and the service still reports itself
+    // ready with `features.gateway` on. The return value used to be dropped,
+    // so a failed write was a log line and nothing else. Roll the listener
+    // back instead: `stop()` closes it, nulls `wss` and revokes any stale file,
+    // which is exactly what assertEnabledListenersBound reads in service mode.
+    if (this.tokenFileDir && !publishGatewayToken(this.tokenFileDir, this.authToken)) {
+      await this.stop();
+      throw new Error(
+        `gateway token could not be published to ${this.tokenFileDir}; refusing to serve a listener no local `
+        + 'client can authenticate to'
+      );
     }
   }
 
@@ -49,6 +132,10 @@ class GatewayServer extends EventEmitter {
 
     await new Promise((resolve) => this.wss.close(resolve));
     this.wss = null;
+
+    if (this.tokenFileDir) {
+      revokeGatewayToken(this.tokenFileDir);
+    }
   }
 
   handleConnection(ws) {
@@ -60,18 +147,37 @@ class GatewayServer extends EventEmitter {
         const message = JSON.parse(data);
         await this.routeMessage(connectionId, message);
       } catch (error) {
-        ws.send(
-          JSON.stringify({
-            type: 'error',
-            error: error.message
-          })
-        );
+        this.safeSend(ws, {
+          type: 'error',
+          error: error.message
+        });
       }
+    });
+
+    // A malformed frame makes `ws` emit 'error' on this socket. Without a
+    // listener that is an unhandled 'error' event, which takes the whole
+    // process down — the Electron main process, or the service. Drop the one
+    // connection instead.
+    ws.on('error', (err) => {
+      log.warn(`gateway connection ${connectionId} error: ${err.message}`);
+      this.connections.delete(connectionId);
+      try { ws.terminate(); } catch { /* already gone */ }
     });
 
     ws.on('close', () => {
       this.connections.delete(connectionId);
     });
+  }
+
+  safeSend(ws, payload) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    try {
+      ws.send(JSON.stringify(payload));
+      return true;
+    } catch (error) {
+      log.warn(`gateway send failed: ${error.message}`);
+      return false;
+    }
   }
 
   async routeMessage(connectionId, message) {
@@ -82,16 +188,11 @@ class GatewayServer extends EventEmitter {
 
     const result = await handler(message.params || {}, connectionId);
 
-    const ws = this.connections.get(connectionId);
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(
-        JSON.stringify({
-          type: 'response',
-          id: message.id,
-          result
-        })
-      );
-    }
+    this.safeSend(this.connections.get(connectionId), {
+      type: 'response',
+      id: message.id,
+      result
+    });
   }
 
   registerMethod(method, handler) {
@@ -107,16 +208,8 @@ class GatewayServer extends EventEmitter {
   }
 
   broadcast(event, data) {
-    const message = JSON.stringify({
-      type: 'event',
-      event,
-      data
-    });
-
     for (const ws of this.connections.values()) {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(message);
-      }
+      this.safeSend(ws, { type: 'event', event, data });
     }
   }
 }

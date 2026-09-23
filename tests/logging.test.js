@@ -1,6 +1,6 @@
 const { describe, it, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert');
-const { createLogger, setLogLevel, getLogLevel, setSubsystemFilter } = require('../src/logging');
+const { createLogger, setLogLevel, getLogLevel, setSubsystemFilter, addSink } = require('../src/logging');
 
 describe('logging', () => {
   let captured;
@@ -149,5 +149,53 @@ describe('logging', () => {
     log.info('clean message', {});
     assert.strictEqual(captured[0].args.length, 2);
     assert.strictEqual(captured[0].args[1], 'clean message');
+  });
+});
+
+describe('logging sinks', () => {
+  const origLog = console.log;
+  const origWarn = console.warn;
+  let consoleCalls;
+  beforeEach(() => {
+    consoleCalls = [];
+    console.log = (...args) => consoleCalls.push(args);
+    console.warn = (...args) => consoleCalls.push(args);
+    setLogLevel('info');
+  });
+  afterEach(() => {
+    console.log = origLog;
+    console.warn = origWarn;
+    setLogLevel('info');
+  });
+
+  it('delivers filtered records to a sink, alongside (not instead of) the console', () => {
+    const records = [];
+    const remove = addSink((r) => records.push(r));
+    try {
+      const log = createLogger('svc');
+      log.debug('below the level');
+      log.warn('degraded', { latencyMs: 430 });
+      log.withContext({ sessionId: 's-1' }).info('bound');
+    } finally {
+      remove();
+    }
+    assert.strictEqual(consoleCalls.length, 2);
+    assert.strictEqual(records.length, 2);
+    assert.strictEqual(records[0].level, 'warn');
+    assert.strictEqual(records[0].subsystem, 'svc');
+    assert.strictEqual(records[0].line, '[svc] degraded {latencyMs=430}');
+    assert.match(records[0].time, /^\d{4}-\d{2}-\d{2}T/);
+    assert.strictEqual(records[1].line, '[svc] bound {sessionId=s-1}');
+  });
+
+  it('stops delivering after the returned remover is called, and ignores a throwing sink', () => {
+    const records = [];
+    const removeBad = addSink(() => { throw new Error('broken sink'); });
+    const remove = addSink((r) => records.push(r));
+    remove();
+    createLogger('svc').info('after removal');
+    removeBad();
+    assert.strictEqual(records.length, 0);
+    assert.strictEqual(consoleCalls.length, 1);
   });
 });

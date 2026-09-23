@@ -606,4 +606,89 @@ describe('ToolExecutor', () => {
       assert.strictEqual(receivedSignal.aborted, false);
     });
   });
+
+  // remoteApprovals: 'deny' nulls the approval requester, but three paths used
+  // to hand out approval before the gate was ever reached: the persisted
+  // "always approve" list, an agent config's autoApproveTools, and an `allow`
+  // permission rule. denyAutoApproval closes all three.
+  describe('denyAutoApproval', () => {
+    toolRegistry.register(new Tool({
+      name: 'GatedTool',
+      description: 'an approval-requiring tool with a pattern-matchable command',
+      requiresApproval: true,
+      parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] },
+      execute: async (params) => ({ ok: true, ran: params.command })
+    }));
+
+    // No approvalRequester and no 'approvalRequired' listener — exactly the
+    // service-mode shape, where requestApproval resolves false.
+    const denyingExecutor = (options = {}) => {
+      const executor = new ToolExecutor({ requireApproval: true, denyAutoApproval: true, ...options });
+      const autoGranted = [];
+      executor.on('approvalAutoGranted', (evt) => autoGranted.push(evt));
+      return { executor, autoGranted };
+    };
+
+    it('ignores options.autoApproveTools', async () => {
+      const { executor, autoGranted } = denyingExecutor();
+      const result = await executor.execute('GatedTool', { command: 'ls' }, { autoApproveTools: ['GatedTool'] });
+
+      assert.strictEqual(result.success, false);
+      assert.strictEqual(result.deniedBy, 'user');
+      assert.deepStrictEqual(autoGranted, [], 'no approval may be auto-granted');
+    });
+
+    it('never consults shouldAutoApprove', async () => {
+      let consulted = false;
+      const { executor, autoGranted } = denyingExecutor({
+        shouldAutoApprove: async () => { consulted = true; return true; }
+      });
+      const result = await executor.execute('GatedTool', { command: 'ls' });
+
+      assert.strictEqual(result.success, false);
+      assert.strictEqual(result.deniedBy, 'user');
+      assert.strictEqual(consulted, false, 'shouldAutoApprove must not be consulted');
+      assert.deepStrictEqual(autoGranted, []);
+    });
+
+    it('treats an `allow` rule as `ask`, so it is denied rather than short-circuited', async () => {
+      const { executor, autoGranted } = denyingExecutor({
+        permissionRules: [{ tool: 'GatedTool', pattern: 'git *', action: 'allow', source: 'session' }]
+      });
+      const result = await executor.execute('GatedTool', { command: 'git status' });
+
+      assert.strictEqual(result.success, false);
+      assert.strictEqual(result.deniedBy, 'user');
+      assert.deepStrictEqual(autoGranted, []);
+    });
+
+    it('keeps a `deny` rule denying, with deniedBy "rule"', async () => {
+      const { executor } = denyingExecutor({
+        permissionRules: [{ tool: 'GatedTool', pattern: 'rm *', action: 'deny', source: 'safety' }]
+      });
+      const result = await executor.execute('GatedTool', { command: 'rm -rf /' });
+
+      assert.strictEqual(result.success, false);
+      assert.strictEqual(result.deniedBy, 'rule');
+      assert.match(result.error, /Blocked by rule/);
+    });
+
+    it('leaves all three grant paths intact when it is off (the default)', async () => {
+      const sources = [];
+      const run = async (options, executeOptions = {}) => {
+        const executor = new ToolExecutor({ requireApproval: true, ...options });
+        executor.on('approvalAutoGranted', (evt) => sources.push(evt.source.type));
+        return executor.execute('GatedTool', { command: 'git status' }, executeOptions);
+      };
+
+      assert.strictEqual((await run({}, { autoApproveTools: ['GatedTool'] })).ok, true);
+      assert.strictEqual((await run({ shouldAutoApprove: async () => true })).ok, true);
+      assert.strictEqual(
+        (await run({ permissionRules: [{ tool: 'GatedTool', pattern: 'git *', action: 'allow' }] })).ok,
+        true
+      );
+
+      assert.deepStrictEqual(sources, ['agent-config', 'global-auto-approve', 'rule']);
+    });
+  });
 });

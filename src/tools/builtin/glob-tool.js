@@ -1,7 +1,8 @@
 const Tool = require('../tool-schema').Tool;
 const fg = require('fast-glob');
 const path = require('path');
-const { isPathAllowed } = require('../utils');
+const { describePathDenial, isProtectedSecretPath } = require('../utils');
+const { boundedGlobOptions } = require('../bounded-walk');
 
 const globTool = new Tool({
   name: 'Glob',
@@ -26,8 +27,9 @@ const globTool = new Tool({
 
     const resolvedBase = path.resolve(baseDir);
 
-    if (!isPathAllowed(resolvedBase, workingDirectory, allowedDirectories)) {
-      return { ok: false, error: 'Access denied: Path outside working directory and allowed directories' };
+    const denial = describePathDenial(resolvedBase, workingDirectory, allowedDirectories);
+    if (denial) {
+      return { ok: false, error: denial };
     }
 
     try {
@@ -48,7 +50,16 @@ const globTool = new Tool({
         globOptions.onlyFiles = false;
       }
 
-      const files = await fg(pattern, globOptions);
+      // Bounded: Glob needs no approval, so a directory symlink loop must not
+      // be able to walk the process out of memory (src/tools/bounded-walk.js).
+      const matched = await fg(pattern, boundedGlobOptions(globOptions));
+
+      // Even naming the secret files is a gift: it tells the model (and through
+      // it a remote origin) exactly what to go after next. A glob rooted at the
+      // data dir lists the workspace and the logs, never the key material.
+      const files = matched.filter(
+        (f) => !isProtectedSecretPath(path.resolve(resolvedBase, f.path || f))
+      );
 
       // Sort by modification time (newest first)
       files.sort((a, b) => (b.stats?.mtimeMs || 0) - (a.stats?.mtimeMs || 0));

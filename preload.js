@@ -733,6 +733,42 @@ contextBridge.exposeInMainWorld(
     diagnostics: {
       run: () => ipcRenderer.invoke('diagnostics:run')
     },
+    channels: {
+      // Access control for Telegram/Discord. Only add and remove of single
+      // ids is exposed — there is deliberately no "allow everyone" call.
+      getAccess: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.channel, 'channel', { minLength: 1 });
+        return ipcRenderer.invoke('channel:accessGet', { channel: payload.channel });
+      },
+      allow: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.channel, 'channel', { minLength: 1 });
+        validateString(payload.kind, 'kind', { minLength: 1 });
+        validateString(payload.id, 'id', { minLength: 1 });
+        return ipcRenderer.invoke('channel:accessAllow', {
+          channel: payload.channel, kind: payload.kind, id: payload.id
+        });
+      },
+      remove: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.channel, 'channel', { minLength: 1 });
+        validateString(payload.kind, 'kind', { minLength: 1 });
+        validateString(payload.id, 'id', { minLength: 1 });
+        return ipcRenderer.invoke('channel:accessRemove', {
+          channel: payload.channel, kind: payload.kind, id: payload.id
+        });
+      },
+      // An empty approvalChatId is valid and means "deny every approval".
+      setApprovalTarget: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.channel, 'channel', { minLength: 1 });
+        validateString(payload.approvalChatId, 'approvalChatId');
+        return ipcRenderer.invoke('channel:setApprovalTarget', {
+          channel: payload.channel, approvalChatId: payload.approvalChatId
+        });
+      }
+    },
     mesh: {
       status: () => ipcRenderer.invoke('mesh:status'),
       listPeers: () => ipcRenderer.invoke('mesh:peers'),

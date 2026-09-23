@@ -47,6 +47,93 @@ describe('E2E: Settings — Channels', () => {
     assert.ok(enabled, 'Slack enabled toggle should exist');
   });
 
+  it('has an access-control pane for Telegram and Discord', async () => {
+    for (const channel of ['telegram', 'discord']) {
+      for (const suffix of ['users-list', 'groups-list', 'user-input', 'user-add-btn', 'approval-input', 'approval-save-btn']) {
+        const exists = await evaluate(ctx, `!!document.getElementById('channel-${channel}-${suffix}')`);
+        assert.ok(exists, `channel-${channel}-${suffix} should exist`);
+      }
+    }
+  });
+
+  it('says plainly that an unconfigured channel denies everyone', async () => {
+    const text = await evaluate(ctx, `document.getElementById('channel-telegram-users-list').textContent`);
+    assert.match(text, /nobody can reach the agent/i);
+  });
+
+  it('says plainly that approvals are denied until a target is set', async () => {
+    const status = await evaluate(ctx, `document.getElementById('channel-telegram-access-status').textContent`);
+    assert.match(status, /denied/i);
+  });
+
+  it('round-trips an allowed user id through IPC', async () => {
+    await evaluate(ctx, `
+      (async () => {
+        document.getElementById('channel-telegram-user-input').value = '1234509876';
+        document.getElementById('channel-telegram-user-add-btn').click();
+      })()
+    `);
+    await waitFor(ctx, `document.getElementById('channel-telegram-users-list').textContent.includes('1234509876')`);
+    const state = await evaluate(ctx, `
+      window.electron.channels.getAccess({ channel: 'telegram' }).then((r) => JSON.stringify(r.data.users))
+    `);
+    assert.match(state, /1234509876/);
+
+    // And remove it again, so the profile is left as it was found.
+    await evaluate(ctx, `
+      window.electron.channels.remove({ channel: 'telegram', kind: 'user', id: '1234509876' }).then((r) => r.ok)
+    `);
+  });
+
+  it('round-trips the approval target and reports that clearing it denies approvals', async () => {
+    await evaluate(ctx, `
+      window.electron.channels.setApprovalTarget({ channel: 'discord', approvalChatId: 'owner-only' }).then((r) => r.ok)
+    `);
+    const saved = await evaluate(ctx, `
+      window.electron.channels.getAccess({ channel: 'discord' }).then((r) => r.data.approvalChatId)
+    `);
+    assert.strictEqual(saved, 'owner-only');
+
+    const cleared = await evaluate(ctx, `
+      window.electron.channels.setApprovalTarget({ channel: 'discord', approvalChatId: '' }).then((r) => r.data.approvalChatId)
+    `);
+    assert.strictEqual(cleared, '');
+  });
+
+  // The pane used to ignore `defaultPolicy` entirely, so a store carrying the
+  // pre-deny-by-default `default: 'allow'` rendered "None — nobody can reach
+  // the agent this way" over a channel open to the entire internet. The
+  // manager no longer returns 'allow', but the pane must not be the thing that
+  // gets this wrong if it ever sees one.
+  it('never claims a channel is closed when the policy it was handed is open', async () => {
+    const rendered = await evaluate(ctx, `
+      (() => {
+        applyChannelAccess({ channel: 'telegram', defaultPolicy: 'allow', users: [], groups: [], approvalChatId: '' });
+        return JSON.stringify({
+          list: document.getElementById('channel-telegram-users-list').textContent,
+          status: document.getElementById('channel-telegram-access-status').textContent
+        });
+      })()
+    `);
+    const { list, status } = JSON.parse(rendered);
+    assert.doesNotMatch(list, /nobody can reach the agent/i);
+    assert.match(list, /open to everyone/i);
+    assert.match(status, /open to every sender/i);
+
+    // Put the pane back to the real state.
+    await evaluate(ctx, `refreshChannelAccess('telegram')`);
+    await waitFor(ctx, `document.getElementById('channel-telegram-users-list').textContent.includes('nobody can reach')`);
+  });
+
+  it('offers no control that re-opens a channel to everyone', async () => {
+    const defaultPolicy = await evaluate(ctx, `
+      window.electron.channels.getAccess({ channel: 'telegram' }).then((r) => r.data.defaultPolicy)
+    `);
+    assert.strictEqual(defaultPolicy, 'deny');
+    const hasAllowAll = await evaluate(ctx, `typeof window.electron.channels.allowEveryone`);
+    assert.strictEqual(hasAllowAll, 'undefined');
+  });
+
   it('has save and clear buttons for each channel', async () => {
     const saveTelegram = await evaluate(ctx, `!!document.getElementById('save-telegram-token-btn')`);
     const saveDiscord = await evaluate(ctx, `!!document.getElementById('save-discord-token-btn')`);

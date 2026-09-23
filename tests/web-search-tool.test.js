@@ -87,3 +87,23 @@ describe('WebSearch Tool', () => {
     assert.strictEqual(WebSearchTool.requiresApproval, false);
   });
 });
+
+describe('WebSearch tool context', () => {
+  it('reads settings and decrypts keys through the injected context', async () => {
+    let decrypted = null;
+    const context = {
+      getSettings: () => ({ webSearch: { brave: { apiKey: 'enc-brave' } } }),
+      decryptToken: (t) => { decrypted = t; return 'brave-key'; }
+    };
+    // Hermetic: stub fetch so the Brave provider's actual request never hits the
+    // network. We only care that the right key path (context.decryptToken) was taken.
+    const originalFetch = global.fetch;
+    global.fetch = async () => ({ ok: true, json: async () => ({ web: { results: [] } }) });
+    try {
+      await WebSearchTool.execute({ query: 'x', maxResults: 1 }, context);
+    } finally {
+      global.fetch = originalFetch;
+    }
+    assert.strictEqual(decrypted, 'enc-brave');
+  });
+});

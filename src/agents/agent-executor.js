@@ -26,6 +26,7 @@ class AgentExecutor {
     this.onUsageRecorded = typeof options.onUsageRecorded === 'function'
       ? options.onUsageRecorded
       : null;
+    this.prompter = options.prompter || null;
     this.templateEngine = new TemplateEngine({
       templatesDirectory: path.join(process.cwd(), 'templates')
     });
@@ -95,7 +96,8 @@ class AgentExecutor {
     const loop = new AgentLoop(this.provider, this.toolExecutor, {
       maxIterations: options.maxIterations || agent.maxIterations,
       usageTracker: this.usageTracker,
-      onUsageRecorded: this.onUsageRecorded
+      onUsageRecorded: this.onUsageRecorded,
+      prompter: this.prompter || undefined
     });
 
     const combinedSystemPrompt = [this.resolveAgentSystemPrompt(agent, options, userMessage), options.systemPrompt]

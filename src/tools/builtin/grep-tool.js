@@ -2,7 +2,8 @@ const { Tool } = require('../tool-schema');
 const fs = require('fs');
 const path = require('path');
 const fg = require('fast-glob');
-const { isPathAllowed } = require('../utils');
+const { describePathDenial, isProtectedSecretPath } = require('../utils');
+const { boundedGlobOptions } = require('../bounded-walk');
 
 function isBinary(filePath) {
   try {
@@ -53,8 +54,9 @@ const grepTool = new Tool({
     const allowedDirectories = context?.allowedDirectories || [];
     const baseDir = searchPath || workingDirectory;
 
-    if (!isPathAllowed(path.resolve(baseDir), workingDirectory, allowedDirectories)) {
-      return { ok: false, error: 'Access denied: Path outside working directory and allowed directories' };
+    const denial = describePathDenial(path.resolve(baseDir), workingDirectory, allowedDirectories);
+    if (denial) {
+      return { ok: false, error: denial };
     }
 
     let regex;
@@ -79,16 +81,24 @@ const grepTool = new Tool({
       files = [baseDir];
       // For single files, baseDir isn't an actual base directory for relativity, it's the file itself.
     } else {
-      files = await fg(fileGlob, {
+      // Bounded: Grep needs no approval, so a directory symlink loop must not
+      // be able to walk the process out of memory (src/tools/bounded-walk.js).
+      files = await fg(fileGlob, boundedGlobOptions({
         cwd: baseDir,
         absolute: true,
         dot: false,
         ignore: ['**/node_modules/**', '**/.git/**']
-      });
+      }));
     }
 
     for (const file of files) {
       if (matches.length >= maxResults) break;
+
+      // The root being in bounds says nothing about what the walk turned up:
+      // a search rooted at the data dir (or at anything that symlinks into it)
+      // would otherwise grep the master key and the vault ciphertext straight
+      // into the transcript.
+      if (isProtectedSecretPath(file)) continue;
 
       if (isBinary(file)) continue;
 

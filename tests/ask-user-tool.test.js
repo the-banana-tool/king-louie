@@ -52,6 +52,23 @@ describe('AskUser Tool', () => {
     assert.strictEqual(result.tools.length, 1);
     assert.strictEqual(result.tools[0].name, 'AskUser');
     assert.strictEqual(result.tools[0].result.ok, false);
-    assert.ok(result.tools[0].result.error.includes('Cannot ask user outside of Electron main process.'));
+    const { HEADLESS_ASK_USER_ERROR } = require('../src/platform/prompter');
+    assert.strictEqual(result.tools[0].result.error, HEADLESS_ASK_USER_ERROR);
+  });
+
+  it('routes AskUser through an injected prompter', async () => {
+    const mockProvider = {
+      sendMessageWithTools: async () => ({ type: 'tool_use', toolName: 'AskUser', parameters: { question: 'Color?' } })
+    };
+    const mockExecutor = { execute: async () => ({ ok: true }) };
+    const asked = [];
+    const prompter = {
+      askUser: async ({ question }) => { asked.push(question); return { ok: true, response: 'blue' }; },
+      requestDirectoryAccess: async () => false
+    };
+    const loop = new AgentLoop(mockProvider, mockExecutor, { maxIterations: 1, prompter });
+    const result = await loop.run([], [askUserTool.toFunctionDefinition()]);
+    assert.deepStrictEqual(asked, ['Color?']);
+    assert.deepStrictEqual(result.tools[0].result, { ok: true, response: 'blue' });
   });
 });

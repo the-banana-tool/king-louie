@@ -11,12 +11,18 @@ const HEARTBEAT_TIMEOUT_MS = 90000;
 const RECONNECT_DELAYS = [5000, 10000, 20000, 60000];
 const AUTH_TIMEOUT_MS = 10000;
 const NONCE_WINDOW_SIZE = 1000;
+// Mesh envelopes are JSON control messages; `ws` would otherwise allow a single
+// frame of up to its 100 MB default.
+const MAX_PAYLOAD_BYTES = 4 * 1024 * 1024;
 
 class MeshTransport extends EventEmitter {
   constructor(config = {}) {
     super();
     this.identity = config.identity;
-    this.port = config.port || DEFAULT_PORT;
+    // port 0 means "bind an ephemeral port" and is a legitimate value, so test
+    // for undefined/null rather than falling back on falsy 0 — that is how
+    // `KL_TEST_MODE` asks initializeMesh for an ephemeral port.
+    this.port = config.port != null ? config.port : DEFAULT_PORT;
     this.host = config.host || '0.0.0.0';
     this.trustedPeers = config.trustedPeers || new Map();
     this.useTls = config.useTls !== false; // TLS on by default
@@ -42,11 +48,13 @@ class MeshTransport extends EventEmitter {
         key: this.identity.tlsKey
       });
 
-      this.server = new WebSocket.Server({ server: this.httpsServer });
+      this.server = new WebSocket.Server({ server: this.httpsServer, maxPayload: MAX_PAYLOAD_BYTES });
 
       this.server.on('connection', (ws, req) => {
         this._handleInboundConnection(ws, req);
       });
+      this.server.on('error', (err) => log.error(`transport server error: ${err.message}`));
+      this.httpsServer.on('error', (err) => log.error(`transport https error: ${err.message}`));
 
       await new Promise((resolve, reject) => {
         this.httpsServer.listen(this.port, this.host, resolve);
@@ -59,12 +67,14 @@ class MeshTransport extends EventEmitter {
       // Fallback: plain WS (for tests or when TLS certs not available)
       this.server = new WebSocket.Server({
         host: this.host,
-        port: this.port
+        port: this.port,
+        maxPayload: MAX_PAYLOAD_BYTES
       });
 
       this.server.on('connection', (ws, req) => {
         this._handleInboundConnection(ws, req);
       });
+      this.server.on('error', (err) => log.error(`transport server error: ${err.message}`));
 
       await new Promise((resolve, reject) => {
         this.server.once('listening', resolve);
@@ -241,6 +251,16 @@ class MeshTransport extends EventEmitter {
     const authTimeout = setTimeout(() => {
       ws.close();
     }, AUTH_TIMEOUT_MS);
+
+    // A malformed frame makes `ws` emit 'error' on this socket. This listener
+    // is attached before authentication, because without one an unhandled
+    // 'error' event takes the whole process down — and this listener faces the
+    // LAN. The authenticated path adds its own listener later; both may run.
+    ws.on('error', (err) => {
+      log.warn(`inbound mesh connection error: ${err.message}`);
+      clearTimeout(authTimeout);
+      try { ws.terminate(); } catch { /* already gone */ }
+    });
 
     const onMessage = (data) => {
       try {

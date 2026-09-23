@@ -75,7 +75,7 @@ On first launch, the onboarding wizard walks you through selecting a provider an
 - **System App Discovery** — Auto-detects installed desktop applications (Excel, Photoshop, VS Code, etc.) so agents use local software instead of generating content via LLM
 - **Extensible Skill System** — Install, remove, enable, and pin custom skill plugins
 - **Mesh Networking** — Secure peer-to-peer communication between King Louie instances across machines
-- **Channel Integrations** — Bridge conversations to Telegram, Discord, and Slack bots
+- **Channel Integrations** — Bridge conversations to Telegram and Discord bots, behind a deny-by-default sender allowlist (Slack is connected but its inbound path is not wired to the agent yet)
 - **Cron Scheduling** — Schedule recurring or one-time agent tasks with cron expressions
 - **Semantic Memory** — Embedding-based memory with hot/warm/cold tiering and recall
 - **Voice / TTS** — System TTS or ElevenLabs for voice responses
@@ -116,16 +116,277 @@ touches.
 
 It is most often inherited from another Electron-based program that spawned
 your shell (VS Code's integrated terminal and Electron-based CLI agents both
-set it). Unset it for the launch:
+set it). Setting the variable to an empty string is not enough — Electron
+treats a present-but-empty value the same as `1`. It has to be removed from
+the environment entirely:
 
 ```bash
-ELECTRON_RUN_AS_NODE= npm start          # bash / zsh
+unset ELECTRON_RUN_AS_NODE && npm start      # bash / zsh
 $env:ELECTRON_RUN_AS_NODE=$null; npm start   # PowerShell
 ```
 
 The same applies when driving the app with Playwright's `_electron.launch` —
 delete the key from the env you pass to the child, or it will fail with
 "Process failed to launch!".
+
+## Running as a Service
+
+King Louie can also run headless, with no Electron and no UI — driven instead
+by chat channels (Telegram, Discord, Slack), cron, and, from later stages, a
+multi-machine fleet. This is a separate entry point (`bin/king-louie-service.js`)
+from the desktop app; the two can run side by side on one machine without
+sharing data.
+
+### Install
+
+Always try `--dry-run` first — it prints every step the installer would take
+without touching the system.
+
+```bash
+# Linux (systemd), from a root shell
+sudo node bin/king-louie-service.js install --profile agent
+
+# macOS (LaunchDaemon) — create a dedicated standard (non-root) account first,
+# then install under it
+sudo node bin/king-louie-service.js install --user <account>
+
+# Windows, from an elevated (Run as administrator) shell — a boot-time
+# Scheduled Task
+node bin\king-louie-service.js install
+```
+
+`install` (and `uninstall`) require an elevated/root shell on every platform —
+they write a systemd unit, a LaunchDaemon, or a Scheduled Task, none of which a
+standard user can register.
+
+Reinstalling is safe: it skips creating the service account if one already
+exists, and it never overwrites an existing master key — a second `install`
+run reuses the key the first one generated. It also picks up the new service
+definition: on Linux the unit is restarted after `enable --now`, and on macOS
+any previously loaded LaunchDaemon is booted out before it is loaded again.
+
+**Linux and macOS:** before anything is created, the installer checks that
+every ancestor of the data directory is a real, root-owned directory, that the
+data directory's immediate parent is neither group- nor world-writable, and
+that the data directory itself is not a symlink. A missing parent (the default
+macOS `…/KingLouie`) is created root-owned `0755`, so the service account
+cannot later replace the data directory with a link. `--data-dir /tmp/…` and
+any other path under a world-writable parent is refused: `install -d -o
+<account>` chowns by name and would follow such a link, handing its target to
+the service account on the next reinstall. No install step creates or chowns
+anything *inside* the data directory — the service creates `logs/` and
+`cache/` itself, under its own account.
+
+**Windows only:** the installer creates the data directory itself with a
+locked-down ACL (Full Control limited to `LOCAL SERVICE`, `SYSTEM` and
+Administrators, with inheritance disabled). If its parent
+(`%ProgramData%\KingLouie` for the default data dir) doesn't exist, it is
+created Administrators-owned with its own protected ACL (Full Control to
+`SYSTEM` and Administrators, read-only to `LOCAL SERVICE`). If either directory
+already exists, the installer only *verifies* it — a hand-created directory, or
+one with looser permissions, is refused rather than silently relocked. Fix or
+remove it manually before retrying.
+
+**Linux only:** `/etc/king-louie` is created root-owned with mode `0755`
+(later stages keep read-only configuration there); only
+`/etc/king-louie/credentials`, which holds the master key, is `0700`.
+
+On every platform, if `node` or the entry script (`bin/king-louie-service.js`)
+lives under a home directory (`/home`, `/root`, `/Users`, or `C:\Users\`), the
+installer prints a warning: the service account (or anyone with access to it)
+could then rewrite the binary it runs. Move the install to a system path.
+
+### Configure
+
+- **`<configDir>/service.json` sets `features` and `ports`.** The config
+  directory is owned by root/Administrators and is only *readable* by the
+  service account — the data directory is not, so nothing that decides
+  whether a network listener exists is read from there:
+
+  | Platform | `configDir` |
+  |----------|-------------|
+  | Linux | `/etc/king-louie` |
+  | macOS | `/Library/Application Support/KingLouie/config` |
+  | Windows | `%ProgramData%\KingLouie\config` |
+
+  The Linux and macOS installers create it. On Windows, create it from the
+  elevated shell after `install` (`mkdir %ProgramData%\KingLouie\config`);
+  it inherits the parent's protected ACL, which grants `LOCAL SERVICE` read
+  and execute only. If the file is missing, every feature stays off.
+
+  The table shows the *default* data directory's config directory. An
+  instance installed with a `--data-dir` of its own gets a config directory
+  of its own, `config` beside that data directory — including on Linux,
+  where every instance used to read the same `/etc/king-louie` and so
+  inherited the first instance's `ports`. Two services on one machine can
+  therefore carry different ports; the installer creates each one
+  root-owned, and a config file the service account owns or could write is
+  still refused.
+
+  Every feature (`gateway`, `webhooks`, `mesh`, `channels`, `appDiscovery`) is
+  **off by default**, and each one that is on is logged at startup naming the
+  file that enabled it. `mesh` cannot be enabled in service mode yet: it is
+  forced off (with a warning in the log) whatever the config says. On Linux
+  and macOS the service refuses to read a `service.json` that is group- or
+  world-writable, or one owned by the account the service runs as.
+
+  `ports` defaults to `{ "gateway": 18793, "webhook": 18794 }` — clear of
+  the desktop app's 18789/18790 *and* of the mesh port 18791, which the
+  desktop app binds on `0.0.0.0` by default. A listener that is enabled but
+  cannot bind its port is fatal: the service refuses to start rather than run
+  without the listener you asked for.
+
+- `profile` (`agent` or `runbook`) comes from `<configDir>/service.json` or
+  the unit's `--profile`, never from `<dataDir>/service.json`: which profile
+  runs decides whether the agent stack loads at all. `features`, `ports` and
+  `profile` in the service-writable `<dataDir>/service.json` are all
+  **ignored**, with a warning naming the file.
+- `king-louie-service token set anthropic < keyfile` — stores a provider API
+  key (read from stdin, never a CLI argument, so it doesn't end up in shell
+  history or `ps`). The provider must be one king-louie knows (`openai`,
+  `anthropic`, `groq`, …); an unknown name is rejected.
+- `king-louie-service vault set <key> < valuefile` — stores an arbitrary
+  secret in the vault the same way.
+- `king-louie-service channel list|allow|remove|approval <channel> …` —
+  manages who may drive the agent through Telegram or Discord, and where that
+  channel's approvals go. A channel with an empty allowlist refuses everyone,
+  so this is required before a channel does anything at all. See
+  [Channel Integrations](#channel-integrations).
+
+`token set`, `vault set` and the mutating `channel` subcommands against an
+installed service:
+
+- **Stop the service first.** They refuse (exit 1) while the service is
+  running on that data dir, because the running service would overwrite the
+  change with its own in-memory copy. `channel list` is read-only and stays
+  available.
+- Run them as root (Linux, macOS) or from an elevated shell (Windows). On
+  Linux, root reads the same `<configDir>/credentials/kl-master-key` the
+  unit hands the service; on Windows the key is DPAPI-protected in the
+  machine scope — unwrappable by anything on the box, so what keeps it
+  private is only the data dir's ACL, which grants `LOCAL SERVICE`,
+  `SYSTEM` and Administrators (see the known gap below). On Linux and macOS, files the CLI creates in the data
+  dir are handed back to the data dir's owner.
+- Every data dir holds a `key-check` file written on first use. If a command
+  resolves a different master key than the one the data dir was encrypted
+  with (for example, run under the wrong account), it stops with an error
+  naming the key source instead of writing secrets the service can't read.
+
+The CLI's flag parsing is strict: an unknown `--flag`, a flag given with no
+value, and an empty `--data-dir` all exit with status 2 rather than silently
+falling back to a default. Both `--flag value` and `--flag=value` are
+accepted.
+
+### Default Data Directory
+
+| Platform | Default `--data-dir` |
+|----------|----------------------|
+| Windows | `%ProgramData%\KingLouie\data` |
+| macOS | `/Library/Application Support/KingLouie/data` |
+| Linux | `/var/lib/king-louie` |
+
+The service's *working directory* is `<dataDir>/workspace`, not the data
+directory itself: the data directory holds the master key, the gateway
+token and the encrypted stores, and the agent's read tools (`Read`,
+`Grep`, `Glob`) are not approval-gated, so anything reachable from the
+working directory is reachable from a chat message. The secret files are
+additionally denied outright, whatever the working directory is. The
+service process chdirs into that workspace at startup, so anything it
+spawns without an explicit working directory — a stdio MCP server, for
+instance — starts there too rather than in the data directory.
+
+### Operate
+
+- `king-louie-service status [--data-dir DIR]` — reports whether the service
+  is running, by checking that the process named in `<dataDir>/service.pid`
+  is alive.
+- `king-louie-service doctor [--data-dir DIR]` — checks Node version, data
+  directory permissions, and (on Windows) that the DPAPI-wrapped master key
+  is present.
+- Logs: on every platform the service appends its log to
+  `<dataDir>/logs/service.log` (mode `0600` on Linux and macOS). Also
+  `journalctl -u king-louie` on Linux and `/var/log/king-louie/service.out.log`
+  / `service.err.log` on macOS (the LaunchDaemon's stdout/stderr, in a
+  root-owned directory: launchd opens those paths itself and follows symlinks,
+  so they must not sit anywhere the service account can write). On Windows,
+  `service.log` is the only log: Task Scheduler's History tab records only
+  that the task started and stopped, not its output.
+- Stopping on Windows: `schtasks /End /TN KingLouie` (and `uninstall`, which
+  runs it) terminates the process immediately — in stage 1 there is no
+  graceful shutdown on Windows, so in-flight work is cut off. Linux and macOS
+  send SIGTERM and the service shuts down cleanly.
+
+### Security Notes
+
+- **Master key location, per OS:** a systemd credential (`kl-master-key`,
+  Linux with systemd; root outside the unit reads the same file from
+  `/etc/king-louie/credentials`); Windows DPAPI in the `LocalMachine` scope
+  in `master.key.dpapi`, kept private *only* by the data directory's ACL
+  (`LocalMachine` scope means any code on the machine can unwrap it — see
+  the known gap below); otherwise a `0600` key file at
+  `<configDir>/credentials/kl-master-key` (macOS, and Linux without systemd
+  credentials). That file is **outside** the data directory on purpose: a
+  backup, a snapshot or a `tar` of the data directory would otherwise carry
+  both the ciphertext and the key that opens it. The directory is root-owned
+  and not writable by the service account, so the key can be read by the
+  service but not replaced by it. A key already at the old location
+  (`<dataDir>/master.key`) keeps working and the service logs where to move
+  it; if there is no config directory at all, the key still lands in the data
+  directory, with a warning saying so.
+- The gateway (when enabled) requires a bearer token, kept encrypted in the
+  store. A cleartext copy is written atomically to `<dataDir>/gateway-token`
+  so local clients and CLI tooling can read it — but **only while the listener
+  is actually bound**: the file is written after the bind succeeds and removed
+  again when the gateway stops, so a failed start never leaves a valid
+  credential on disk for a port nothing is listening on. On Linux and macOS it
+  is mode `0600`; on Windows the mode bits are meaningless and its only
+  protection is the data directory's ACL (`LOCAL SERVICE`, `SYSTEM` and
+  Administrators). If secure storage is unavailable on that host, the token
+  falls back to **session-only**: it still works for the current run but is
+  regenerated (and every existing client rejected) on the next restart,
+  rather than silently persisting in the clear.
+- The service denies every action that requires interactive approval —
+  stage 1 has no remote approver (phone approvals arrive in a later stage),
+  so anything gated on approval simply fails. That includes requests from
+  chat channels: if you turn `channels` on, a channel is never asked to
+  approve (no Approve button is sent) and approval-gated tools are still
+  denied. Setting a channel's approval target does not change that in service
+  mode — it only matters in the desktop app.
+- Chat channels are closed by default: a channel whose allowlist is empty
+  refuses every sender, so turning `channels` on does not by itself let
+  anyone in. `king-louie-service channel allow …` opens it one id at a time.
+- On Windows the service runs as `LOCAL SERVICE`. It is low-privilege and has
+  no access to any user's profile folders — but it is a **shared, built-in
+  account**, not a dedicated identity for King Louie. Every other service on
+  the machine that runs as `LOCAL SERVICE` (a third-party updater, an OEM
+  agent, anything an attacker gets code execution inside) has the same SID, so
+  the data directory's ACL grants it the same access: it can read the
+  cleartext `<dataDir>\gateway-token` and drive the gateway, and it can read
+  `master.key.dpapi` and run `ProtectedData.Unprotect` on it — the blob is
+  `LocalMachine`-scoped with null entropy, so nothing beyond that ACL keeps
+  it private — and from there decrypt every provider API key and vault
+  entry. Treat "anything on this machine running as `LOCAL SERVICE`" as
+  inside King Louie's trust boundary on Windows.
+
+#### Known gap — Windows service identity
+
+The shared-account problem above is a known gap, deferred to a dedicated
+Windows-hardening stage rather than patched around. The fix is a dedicated
+identity end to end:
+
+1. The installer creates a low-privilege local account for the service (or
+   uses a virtual service account, `NT SERVICE\KingLouie`, which Windows
+   gives its own per-service SID).
+2. The Scheduled Task's `<UserId>` becomes that SID instead of `S-1-5-19`.
+3. `master.key.dpapi` is protected in the `CurrentUser` scope of that account
+   (or `LocalMachine` with a per-install entropy blob) rather than plain
+   `LocalMachine` + null entropy.
+4. The data directory's SDDL names that SID alone in place of
+   `(A;OICI;FA;;;LS)`, so no other service on the box can read the data dir.
+
+Linux and macOS already have this: the installer creates a dedicated
+`king-louie` / `--user <account>` service account, and nothing else on the
+machine runs as it.
 
 ## Supported Providers
 
@@ -487,22 +748,82 @@ Skills are auto-discovered from the `skills/` directory on startup. User-install
 
 ## Channel Integrations
 
+A chat bot's handle is not a secret. Anyone who finds it can message it, so
+King Louie treats a channel as a **front door that starts locked**: a channel
+nobody has configured refuses every sender, including you. Set up the token
+first, then allowlist yourself.
+
 ### Telegram
 
 1. Create a bot via [@BotFather](https://t.me/BotFather)
 2. Add the token in Settings or via `/llm telegram add <token>`
 3. The bridge starts automatically
+4. Message the bot. It replies once with your user id and ignores you.
+5. Add that id under **Settings > Channels > Telegram Access** — it is waiting
+   there under "Recently refused" with an **Allow User** button.
 
 ### Discord
 
 1. Create a Discord application and bot
 2. Add the bot token in Settings
-3. Configure mention gating and channel allowlists
+3. Allowlist yourself under **Settings > Channels > Discord Access**, the same
+   way (Developer Mode → Copy User ID, or use the id the bot replies with)
+4. Mention gating (**Require @mention**) is a separate, narrower control: it
+   decides when an *already allowed* sender's message is answered in a group.
 
 ### Slack
 
 1. Create a Slack app with Socket Mode enabled
 2. Add the bot and app-level tokens in Settings
+
+Slack has **no allowlist and no approval routing** — its inbound path is not
+wired up to the agent yet, so nothing a Slack user sends reaches a tool. Do
+not treat it as gated; treat it as not finished.
+
+### Who may message the bot
+
+| Where | How |
+|-------|-----|
+| Desktop | **Settings > Channels > _channel_ Access** — allowed users, allowed groups/channels, add and remove, plus a one-click **Allow** for whoever was just refused |
+| Service | `king-louie-service channel list telegram`<br>`king-louie-service channel allow telegram 123456789`<br>`king-louie-service channel allow discord <channel-id> --group`<br>`king-louie-service channel remove telegram 123456789` |
+
+The allowlist holds **user ids** and **group/channel ids**: a message is
+accepted if its sender is allowed, *or* if it arrives in an allowed group.
+Allowing a group therefore trusts everyone in it. There is no "allow
+everyone" switch in either surface, and none on disk either: a stored
+`default: "allow"` — which every build before this one wrote for any policy
+that did not say otherwise — is ignored and rewritten to `deny` the first
+time it is read, with a warning naming the channel. The explicit ids are
+kept.
+
+An unrecognised sender who addressed the bot gets **one** reply telling them
+their id, and is ignored after that, so the refusal is discoverable without
+handing a stranger a message pump. In a group, someone who never addressed
+the bot gets no reply at all — the notice names their id and the group id,
+and that is not published into a room on a bystander's behalf. The owner
+still learns the id: the desktop pane lists whoever was just refused, and on
+a headless install the same ids are in `<dataDir>/logs/service.log` (the
+first message from each unknown sender logs at `warn`).
+
+### Tool approvals from a channel
+
+An approval prompt is **never sent back to the chat that asked for the tool** —
+that would let a sender approve their own `Bash` calls. It goes only to an
+owner chat you name explicitly:
+
+| Where | How |
+|-------|-----|
+| Desktop | **Settings > Channels > _channel_ Access > Approvals** |
+| Service | `king-louie-service channel approval telegram <your-chat-id>`<br>`king-louie-service channel approval telegram --clear` |
+
+**Until you set it, every approval-gated tool call from that channel is
+denied** — no Approve button is sent anywhere. The target must not be the chat
+the request came from; if it is, the approval is denied rather than
+self-served. Only the configured approver's button press counts; a press from
+the requesting chat is refused.
+
+In **service mode this is moot**: stage 1 has no remote approver at all and
+denies everything that needs approval, whatever `approvalChatId` says.
 
 ### Common Commands (all channels)
 
@@ -512,8 +833,6 @@ Skills are auto-discovered from the `skills/` directory on startup. User-install
 - `/agent <name>` — Switch agent
 - `/pin <skill-id>` — Pin a skill to the chat
 - `/unpin` — Remove pinned skill
-
-Tool approvals are handled inline with approve/deny buttons.
 
 ## Mesh Networking
 
@@ -610,7 +929,15 @@ All mesh communication is secured with multiple layers:
 | Nonce + expiry | Messages expire after 5 minutes, nonces tracked — prevents replay |
 | Trusted peers only | Connections from unknown peers rejected at TLS handshake |
 
-Private keys are encrypted at rest via Electron's `safeStorage` API.
+A peer's Ed25519 private key and its TLS private key are **encrypted at rest**
+under the host's cipher — Electron `safeStorage` in the desktop app, the
+service's master key headless — and only the public halves (peer id, public
+key, certificate, fingerprint) are stored in the clear. An identity created by
+an older build, which wrote both private keys in plaintext, is re-encrypted in
+place the first time it is loaded; the peer id and certificate fingerprint do
+not change, so existing pairings survive. On a host with no secure storage at
+all the keys fall back to plaintext with a warning in the log — a cipher that
+is available but fails is an error, never a silent fallback.
 
 ### Configuration
 
@@ -620,6 +947,15 @@ Private keys are encrypted at rest via Electron's `safeStorage` API.
 | LAN Discovery | Enabled | mDNS broadcast/browse for local peers |
 | TLS | Enabled | Self-signed cert encryption (disable only for debugging) |
 | Task Timeout | 5 minutes | Max time to wait for a remote task result |
+
+Ports used across the project, so nothing collides on a machine running both
+hosts:
+
+| Port | Used by | Binds |
+|------|---------|-------|
+| `18789` / `18790` | desktop app gateway / webhooks | `127.0.0.1` |
+| `18791` | mesh (desktop app; off in service mode) | `0.0.0.0` |
+| `18793` / `18794` | service-mode gateway / webhooks (default) | `127.0.0.1` |
 
 ### Network Requirements
 
@@ -653,9 +989,14 @@ Register HTTP webhooks for external automation:
 - `POST /webhooks/{webhookId}` — Trigger a webhook
 - `GET /health` — Health check
 - Signature verification via `X-Hub-Signature-256`
-- CORS support
+- **No browser may reach it.** A request carrying an `Origin` header, or any
+  `Sec-Fetch-*` fetch metadata, is refused with `403` — including a `no-cors`
+  `GET /health`, which sends no `Origin` and would otherwise tell any page you
+  visit that something is listening on that port.
 
-The webhook server runs on the gateway port + 1.
+The webhook server runs on the gateway port + 1 unless a port is set
+explicitly — in service mode that is `ports.webhook` in the admin-owned
+`<configDir>/service.json`, defaulting to `18794`.
 
 ## Voice / TTS
 
@@ -830,13 +1171,92 @@ npm run build:linux
 - Context isolation enabled — renderer has no direct Node.js access
 - All IPC calls validated through the preload bridge
 - HTML sanitized with DOMPurify
-- Tool execution requires approval (configurable auto-approve lists)
+- Tool execution requires approval. Your own permission rules decide what runs
+  unattended; an explicit `ask` or `deny` rule beats every auto-approve list,
+  including agent mode's and an agent definition's own
+- The host's own secrets (`master.key`, `master.key.dpapi`, `key-check`,
+  `gateway-token`, and the store/vault JSON) are out of bounds for every
+  path-gated tool — `Read`, `Grep` and `Glob` refuse them whatever the
+  working directory and allowed directories say
+- Chat channels deny unknown senders, and a channel's approval prompt goes
+  only to an owner chat you configured — never back to the requester
 - Pre-execution security hooks block dangerous commands
 - **Git safety guards** — Blocks `--amend` (always creates new commits), `--force`, `--no-verify`, interactive flags, `git add ./-A` (must stage specific files), and sensitive file patterns (.env, .pem, credentials.json, etc.)
 - **Worktree isolation** — Background agents can run in isolated git worktrees to prevent file conflicts
 - **Pattern-based permission rules** — First-match-wins rules with allow/ask/deny actions and denial tracking
 - Webhook signature verification
 - Mesh networking: TLS 1.3 encryption, Ed25519 signed messages, certificate pinning, replay protection
+
+## Breaking Changes
+
+Changes on this branch that will alter behaviour on an existing install.
+
+### Chat channels refuse unknown senders
+
+A Telegram or Discord channel whose allowlist is empty now **denies every
+sender**, where it used to allow everyone by default. Any stranger who found
+the bot's handle could previously drive the agent. That includes a channel
+carrying a stored `default: "allow"` from an earlier build: it is ignored and
+rewritten to `deny`, so a channel that looked closed in the settings pane
+while being open to everyone is now closed in fact.
+
+*If you were using a channel, it stops answering until you allowlist yourself*
+— Settings > Channels > _channel_ Access on the desktop, or
+`king-louie-service channel allow …` headless. The bot replies once to an
+unrecognised sender with the id to add.
+
+### Channel tool approvals need an owner target
+
+An approval prompt used to be sent to the chat that asked for the tool, which
+meant an attacker approved their own `Bash` calls. It now goes only to
+`channels.<channel>.approvalChatId`, and **every channel approval is denied
+until that is set** (and denied if it names the requesting chat). Set it in
+the same two places as the allowlist.
+
+### Desktop agent mode prompts again
+
+Agent mode hard-coded `Bash, Read, Edit, Write, Glob, Grep, Git` as
+auto-approved, which silently overrode the user's own `ask` rules for exactly
+the seven most dangerous tools. It no longer sets an auto-approve list at all:
+what runs unattended is decided by your permission rules and the persisted
+"always approve" list. **Expect approval prompts in agent mode where there
+were none.** Add `allow` rules for what you want unattended.
+
+### Service `features` and `ports` moved out of `<dataDir>/service.json`
+
+`features` and `ports` are now read **only** from `<configDir>/service.json`,
+which is root/Administrators-owned and read-only to the service account
+(`/etc/king-louie`, `/Library/Application Support/KingLouie/config`,
+`%ProgramData%\KingLouie\config`). The data dir is writable by the service
+account, so one `write_file` from a prompt injection could otherwise re-enable
+a network listener at the next restart.
+
+*`features`/`ports` left in `<dataDir>/service.json` are ignored, with a
+warning naming the file.* `profile` still comes from there. If the admin file
+is missing, every feature stays off.
+
+### Default service ports moved 18791/18792 → 18793/18794
+
+The old service defaults collided with the documented mesh port `18791`, which
+the desktop app binds on `0.0.0.0`. Update anything pointing at the old ports,
+or set `ports` in `<configDir>/service.json`.
+
+Relatedly, a listener the operator explicitly enabled that **cannot bind is
+now fatal** — the service refuses to start rather than running without it.
+
+### `<dataDir>/gateway-token` exists only while the gateway is up
+
+The cleartext bearer-token file is written after the listener binds and
+removed when it stops. Tooling that reads it at an arbitrary time, or that
+assumed it persists across a stopped service, needs to handle its absence.
+
+### Mesh identities are re-encrypted on first load
+
+Ed25519 and TLS private keys were written in plaintext despite the README
+saying otherwise. They are now encrypted at rest and an existing identity is
+upgraded in place on first load. The peer id and TLS fingerprint are
+unchanged, so **pairings survive** — but the on-disk record is no longer
+readable by an older build.
 
 ## License
 

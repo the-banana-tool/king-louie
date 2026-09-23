@@ -19,6 +19,18 @@ When iterating on a specific module, run just its test file directly with
 `node --test`. Output uses TAP format; look for `# fail 0` / `# pass N` in the
 summary block.
 
+`npm run test:e2e` launches the real Electron binary (`tests/e2e/helpers.js`),
+so it needs `ELECTRON_RUN_AS_NODE` actually gone from the environment, not set
+to an empty string — `tests/e2e/helpers.js` passes `process.env` through
+unfiltered, and Electron treats an empty value the same as `1`. From an agent
+shell:
+
+```bash
+unset ELECTRON_RUN_AS_NODE && npm run test:e2e
+```
+
+Unit tests (`npm test`) don't launch Electron and are unaffected either way.
+
 ## Running the app
 
 `npm start` launches Electron normally. If it dies instantly with
@@ -29,10 +41,13 @@ are all undefined.
 
 **This is the normal state of an agent shell.** Electron-based tools (VS Code's
 integrated terminal, Electron-based CLI agents) set it for their own child
-processes and it is inherited. Unset it for the launch:
+processes and it is inherited. Setting it to an empty string is **not**
+enough — Electron treats a present-but-empty `ELECTRON_RUN_AS_NODE` the same
+as `1` and still crashes at the same line. It has to be removed from the
+environment entirely:
 
 ```bash
-ELECTRON_RUN_AS_NODE= npm start
+unset ELECTRON_RUN_AS_NODE && npm start
 ```
 
 To drive the UI programmatically, use Playwright's `_electron` — it is already a
@@ -46,6 +61,13 @@ chats, settings, and the vault.
 Click through `page.evaluate(() => document.getElementById(id).click())` rather
 than `locator.click()`, and remember the onboarding wizard appears on a fresh
 profile (`#wizard-skip-btn` dismisses it).
+
+## Service mode
+
+`node bin/king-louie-service.js run --data-dir <tmp> --profile agent` runs King Louie
+headless (no Electron — `ELECTRON_RUN_AS_NODE` is irrelevant here). Everything under
+`src/` must stay Electron-free except `src/ipc/`; `tests/electron-boundary.test.js`
+enforces it. Host-specific behaviour is injected into `createCore(deps)` (`src/core/`).
 
 ## Logging
 

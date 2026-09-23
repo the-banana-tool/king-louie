@@ -101,6 +101,7 @@ class MeshRemoteControl extends EventEmitter {
       timeout
     });
 
+    let timeoutHandle;
     try {
       const result = await Promise.race([
         this.transport.sendRpc(peerId, 'mesh.task.dispatch', {
@@ -108,9 +109,9 @@ class MeshRemoteControl extends EventEmitter {
           message,
           agentId
         }),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('Task dispatch timeout')), timeout)
-        )
+        new Promise((_, reject) => {
+          timeoutHandle = setTimeout(() => reject(new Error('Task dispatch timeout')), timeout);
+        })
       ]);
 
       this.pendingTasks.delete(taskId);
@@ -147,6 +148,8 @@ class MeshRemoteControl extends EventEmitter {
       });
 
       throw err;
+    } finally {
+      clearTimeout(timeoutHandle);
     }
   }
 

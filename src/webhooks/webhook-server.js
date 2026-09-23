@@ -4,16 +4,19 @@ const { createLogger } = require('../logging');
 const log = createLogger('webhook-server');
 
 class WebhookServer {
-  constructor(gatewayServer, webhookHandler) {
+  constructor(gatewayServer, webhookHandler, options = {}) {
     this.gatewayServer = gatewayServer;
     this.webhookHandler = webhookHandler;
     this.httpServer = null;
     this._configuredPort = null;
+    // An explicit port; when unset, the gateway's port + 1.
+    this._requestedPort = options.port != null ? options.port : null;
   }
 
   get port() {
     // Derive from gateway's actual port (which may change after start when using port 0)
     if (this._configuredPort != null) return this._configuredPort;
+    if (this._requestedPort != null) return this._requestedPort;
     return this.gatewayServer.port + 1;
   }
 
@@ -23,15 +26,30 @@ class WebhookServer {
     const listenPort = this.gatewayServer.port === 0 ? 0 : this.port;
 
     this.httpServer = http.createServer((req, res) => {
-      this.handleHttpRequest(req, res);
-    });
-
-    await new Promise((resolve, reject) => {
-      this.httpServer.listen(listenPort, '127.0.0.1', (err) => {
-        if (err) reject(err);
-        else resolve();
+      // handleHttpRequest is async: an unhandled rejection here would take the
+      // process down on Node >= 15.
+      this.handleHttpRequest(req, res).catch((err) => {
+        log.error(`Unhandled request error: ${err.message}`);
+        try { req.destroy(); } catch { /* already gone */ }
+        try { res.destroy(); } catch { /* already gone */ }
       });
     });
+
+    // listen() reports a bind failure (EADDRINUSE, EACCES) through the
+    // 'error' event, not its callback — without this listener it would be an
+    // uncaught exception instead of a rejected start().
+    try {
+      await new Promise((resolve, reject) => {
+        this.httpServer.once('error', reject);
+        this.httpServer.listen(listenPort, '127.0.0.1', () => {
+          this.httpServer.off('error', reject);
+          resolve();
+        });
+      });
+    } catch (err) {
+      this.httpServer = null;
+      throw err;
+    }
 
     // Update port to the actual bound port (important when using port 0)
     const addr = this.httpServer.address();
@@ -50,14 +68,39 @@ class WebhookServer {
   }
 
   async handleHttpRequest(req, res) {
-    // Set CORS headers for development
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Hub-Signature, X-Hub-Signature-256');
-
-    // Handle preflight OPTIONS requests
+    // Presence, not truthiness: an empty `Origin:` is still a browser-shaped
+    // header and must not slip through the check.
+    //
+    // Origin alone is not enough. A `fetch(url, { mode: 'no-cors' })` GET
+    // sends no Origin at all, so a page in any browser could ask for /health
+    // and learn from the resolved promise that something is listening on this
+    // port — a port-existence oracle for anything that wants to find the
+    // service. Fetch metadata fills that gap: it is set by the browser, not
+    // forgeable from script, and covers no-cors GETs, subresource loads
+    // (`<img src>`, `<script src>`) and navigations alike.
+    //
+    // But only *some* of it is browser-exclusive. undici — Node's global
+    // `fetch`, and the same engine in Deno and Bun — always sends
+    // `sec-fetch-mode: cors` and nothing else, so keying on "any Sec-Fetch-*
+    // header" refused the most obvious modern client, for /health and for real
+    // webhook deliveries. Sec-Fetch-Site and Sec-Fetch-Dest are the
+    // discriminating pair: a browser sets both on every request it makes to a
+    // potentially-trustworthy origin (loopback is one), and no non-browser
+    // client sends either. Sec-Fetch-User comes with a user-activated
+    // navigation and is browser-only too.
+    //
+    // Site is checked by presence, not value: `none` (a typed URL or bookmark)
+    // and `same-origin` are just as much a browser as `cross-site` is, and
+    // this server serves no page that could legitimately be their referrer.
+    const BROWSER_ONLY_HEADERS = ['origin', 'sec-fetch-site', 'sec-fetch-dest', 'sec-fetch-user'];
+    const browserShaped = BROWSER_ONLY_HEADERS.some((name) => name in req.headers);
+    if (browserShaped) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Browser-originated requests are not accepted' }));
+      return;
+    }
     if (req.method === 'OPTIONS') {
-      res.writeHead(200);
+      res.writeHead(405);
       res.end();
       return;
     }

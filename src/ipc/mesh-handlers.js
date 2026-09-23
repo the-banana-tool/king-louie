@@ -146,8 +146,13 @@ function registerMeshHandlers(ipcMain, context = {}) {
       if (displayName !== undefined) mc.identity.displayName = displayName;
       if (capabilities !== undefined) mc.identity.capabilities = capabilities;
 
-      // Persist updated identity
-      store.set('mesh.identity', mc.identity.serialize());
+      // Persist updated identity. Goes through the mesh context so the private
+      // keys are re-encrypted rather than written back in the clear.
+      if (typeof mc.persistIdentity === 'function') {
+        mc.persistIdentity();
+      } else {
+        log.warn('mesh context cannot persist the identity; display name change is in-memory only');
+      }
     }
 
     return { saved: true, settings: updated };

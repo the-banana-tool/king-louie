@@ -1,6 +1,8 @@
 const crypto = require('crypto');
 const http = require('http');
-const { shell } = require('electron');
+const { createLogger } = require('../logging');
+
+const log = createLogger('auth/anthropic-oauth');
 
 const ANTHROPIC_AUTH_URL = 'https://console.anthropic.com/oauth/authorize';
 const ANTHROPIC_TOKEN_URL = 'https://console.anthropic.com/oauth/token';
@@ -9,11 +11,14 @@ const REDIRECT_URI = `http://localhost:${CALLBACK_PORT}/callback`;
 const SCOPES = 'user:inference';
 
 class AnthropicOAuth {
-  constructor({ clientId, encryptToken, decryptToken, store }) {
+  constructor({ clientId, encryptToken, decryptToken, store, openExternal }) {
     this.clientId = clientId;
     this.encryptToken = encryptToken;
     this.decryptToken = decryptToken;
     this.store = store;
+    this.openExternal = typeof openExternal === 'function'
+      ? openExternal
+      : (url) => log.info(`Open this URL to continue sign-in: ${url}`);
     this._server = null;
     this._pendingResolve = null;
     this._pendingReject = null;
@@ -103,7 +108,7 @@ class AnthropicOAuth {
       });
 
       this._server.listen(CALLBACK_PORT, '127.0.0.1', () => {
-        shell.openExternal(authUrl);
+        this.openExternal(authUrl);
       });
 
       this._server.on('error', (err) => {

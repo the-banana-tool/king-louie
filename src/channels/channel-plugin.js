@@ -95,12 +95,13 @@ class ChannelRegistry {
 }
 
 class DesktopChannelPlugin extends ChannelPlugin {
-  constructor() {
+  constructor({ sendToUi } = {}) {
     super({
       id: 'desktop',
       label: 'Desktop App',
       capabilities: ['send', 'receive']
     });
+    this.sendToUi = typeof sendToUi === 'function' ? sendToUi : null;
   }
 
   async initialize() {}
@@ -112,11 +113,8 @@ class DesktopChannelPlugin extends ChannelPlugin {
   }
 
   async send(target, message, options = {}) {
-    const { BrowserWindow } = require('electron');
-    const mainWindow = BrowserWindow.getAllWindows()[0];
-
-    if (mainWindow) {
-      mainWindow.webContents.send('channel:message', {
+    if (this.sendToUi) {
+      this.sendToUi('channel:message', {
         channel: 'desktop',
         target,
         message,

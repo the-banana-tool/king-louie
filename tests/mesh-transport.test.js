@@ -234,4 +234,31 @@ describe('MeshTransport', () => {
     assert.strictEqual(msg.payload.method, 'secure.hello');
     assert.strictEqual(msg.payload.params.secret, 'encrypted over TLS');
   });
+
+  it('survives a malformed frame from an unauthenticated peer', async () => {
+    const WebSocket = require('ws');
+    transport1 = new MeshTransport({ identity: identity1, port: 0, useTls: false, host: '127.0.0.1' });
+    await transport1.start();
+
+    const ws = new WebSocket(`ws://127.0.0.1:${transport1.port}`);
+    ws.on('error', () => {});
+    await new Promise((resolve, reject) => {
+      ws.once('open', resolve);
+      ws.once('error', reject);
+    });
+    // Reserved bits set: `ws` raises 'error' on the server socket, and an
+    // unauthenticated peer's socket had no 'error' listener at all.
+    ws._socket.write(Buffer.from([0x70, 0x00]));
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    assert.strictEqual(transport1.running, true);
+    // The listener is still usable.
+    const again = new WebSocket(`ws://127.0.0.1:${transport1.port}`);
+    again.on('error', () => {});
+    await new Promise((resolve, reject) => {
+      again.once('open', resolve);
+      again.once('error', reject);
+    });
+    again.close();
+  });
 });

@@ -1,7 +1,7 @@
 const fs = require('fs').promises;
 const path = require('path');
 const { Tool } = require('../tool-schema');
-const { isPathAllowed } = require('../utils');
+const { describePathDenial } = require('../utils');
 
 /**
  * MultiEdit — batch file editing in a single tool call.
@@ -87,11 +87,12 @@ const MultiEditTool = new Tool({
         continue;
       }
 
-      if (!isPathAllowed(resolvedPath, workingDirectory, allowedDirectories)) {
+      const denial = describePathDenial(resolvedPath, workingDirectory, allowedDirectories);
+      if (denial) {
         results.push({
           file: resolvedPath,
           success: false,
-          error: 'Access denied: path outside allowed directories'
+          error: denial
         });
         failedFiles.add(resolvedPath);
         continue;

@@ -1,5 +1,14 @@
 const crypto = require('crypto');
 const { X509Certificate } = require('crypto');
+const { createLogger } = require('../logging');
+
+const log = createLogger('mesh-identity');
+
+const IDENTITY_STORE_KEY = 'mesh.identity';
+// Written by an earlier version beside the plaintext identity and never read.
+// Removed when a stored identity is upgraded.
+const LEGACY_ENCRYPTED_KEY = 'mesh.encryptedPrivateKey';
+const KEY_ENCRYPTION_MARKER = 'cipher-v1';
 
 const PEER_ID_PREFIX = 'kl-';
 const PEER_ID_LENGTH = 12; // hex chars after prefix
@@ -277,6 +286,123 @@ class MeshIdentity {
   }
 }
 
+// --- Identity persistence ---
+//
+// The private halves of a mesh identity (the Ed25519 signing key and the TLS
+// server key) are encrypted under the host cipher before they go in the store;
+// only the public halves are written in the clear. An identity written by an
+// older build — plaintext keys, plus an orphan `mesh.encryptedPrivateKey` that
+// nothing read — is upgraded in place the first time it is loaded, keeping the
+// same peer id so paired peers still recognise it.
+
+function cipherUsable(cipher) {
+  if (!cipher || typeof cipher.encryptString !== 'function') return false;
+  try {
+    return cipher.isEncryptionAvailable ? Boolean(cipher.isEncryptionAvailable()) : true;
+  } catch {
+    return false;
+  }
+}
+
+function serializeIdentity(identity, cipher) {
+  const record = identity.serialize();
+  // No cipher, no write. This used to return the plaintext record with a
+  // warning, which left the Ed25519 signing key and the TLS server key sitting
+  // in config.json in the clear on exactly the hosts that cannot protect them
+  // — a Linux desktop with no Secret Service, a keychain that did not unlock.
+  // Anyone who can read that file can impersonate this peer to every peer it
+  // is paired with and terminate its TLS. Mesh initialization failure is
+  // already handled (src/mesh/index.js, and createCore only log.warns), and a
+  // record that is already on disk is never touched by this path, so failing
+  // closed costs a mesh session, not an identity.
+  if (!cipherUsable(cipher)) {
+    throw new Error(
+      'refusing to store the mesh identity: secure storage is unavailable on this host, so the private '
+      + 'keys could only be written in the clear'
+    );
+  }
+
+  try {
+    const encrypted = {
+      ...record,
+      privateKey: null,
+      tlsKey: null,
+      keyEncryption: KEY_ENCRYPTION_MARKER,
+      encryptedPrivateKey: cipher.encryptString(record.privateKey),
+      encryptedTlsKey: cipher.encryptString(record.tlsKey)
+    };
+    return encrypted;
+  } catch (err) {
+    // Never fall back to writing the key in the clear: a caller that cannot
+    // encrypt should know about it.
+    throw new Error(`could not encrypt mesh private key: ${err.message}`);
+  }
+}
+
+function deserializeIdentity(record, cipher) {
+  if (record?.keyEncryption !== KEY_ENCRYPTION_MARKER) {
+    // A record holding one half of the keypair is not a plaintext identity: it
+    // is an encrypted or half-written one that lost its marker. The MeshIdentity
+    // constructor would quietly mint a brand-new keypair from it — a new peer id
+    // and dead pairings — so refuse instead.
+    if (record && Boolean(record.publicKey) !== Boolean(record.privateKey)) {
+      throw new Error('stored mesh identity is incomplete: it has no usable private key');
+    }
+    return MeshIdentity.deserialize(record);
+  }
+
+  if (!cipherUsable(cipher)) {
+    throw new Error('stored mesh private key is encrypted but no cipher is available');
+  }
+
+  let privateKey;
+  let tlsKey;
+  try {
+    privateKey = cipher.decryptString(record.encryptedPrivateKey);
+    tlsKey = record.encryptedTlsKey ? cipher.decryptString(record.encryptedTlsKey) : record.tlsKey;
+  } catch (err) {
+    throw new Error(`stored mesh private key could not be decrypted: ${err.message}`);
+  }
+
+  return MeshIdentity.deserialize({ ...record, privateKey, tlsKey });
+}
+
+function deleteStoreKey(store, key) {
+  if (typeof store?.delete === 'function') {
+    store.delete(key);
+    return;
+  }
+  if (typeof store?.set === 'function') store.set(key, undefined);
+}
+
+function saveIdentity(store, identity, cipher) {
+  const record = serializeIdentity(identity, cipher);
+  store.set(IDENTITY_STORE_KEY, record);
+  if (record.keyEncryption === KEY_ENCRYPTION_MARKER && store.get(LEGACY_ENCRYPTED_KEY) !== undefined) {
+    deleteStoreKey(store, LEGACY_ENCRYPTED_KEY);
+  }
+  return record;
+}
+
+function loadIdentity(store, cipher) {
+  const record = store.get(IDENTITY_STORE_KEY);
+  if (!record) return null;
+
+  const identity = deserializeIdentity(record, cipher);
+
+  // In-place upgrade of a plaintext record.
+  if (record.keyEncryption !== KEY_ENCRYPTION_MARKER && cipherUsable(cipher)) {
+    try {
+      saveIdentity(store, identity, cipher);
+      log.info(`upgraded stored mesh identity ${identity.peerId} to an encrypted private key`);
+    } catch (err) {
+      log.warn(`could not upgrade stored mesh identity to an encrypted key: ${err.message}`);
+    }
+  }
+
+  return identity;
+}
+
 // --- ASN.1 DER encoding helpers (fallback cert generation) ---
 
 function _derLen(len) {
@@ -311,4 +437,13 @@ function _formatAsn1Time(date) {
   return `${p(y)}${p(date.getUTCMonth() + 1)}${p(date.getUTCDate())}${p(date.getUTCHours())}${p(date.getUTCMinutes())}${p(date.getUTCSeconds())}Z`;
 }
 
-module.exports = { MeshIdentity };
+module.exports = {
+  MeshIdentity,
+  saveIdentity,
+  loadIdentity,
+  serializeIdentity,
+  deserializeIdentity,
+  IDENTITY_STORE_KEY,
+  LEGACY_ENCRYPTED_KEY,
+  KEY_ENCRYPTION_MARKER
+};
