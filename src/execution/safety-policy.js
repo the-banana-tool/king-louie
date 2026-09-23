@@ -58,8 +58,8 @@ function matchesPatternList(toolName, parameters, patternList = []) {
  * Normalizes and checks if targetPath resides under one of allowedRoots.
  */
 function isPathUnderRoots(targetPath, allowedRoots = []) {
-  if (!targetPath || typeof targetPath !== 'string') return true; // No path specified
-  if (!Array.isArray(allowedRoots) || allowedRoots.length === 0) return false; // Roots configured, none matched
+  if (!targetPath || typeof targetPath !== 'string') return false;
+  if (!Array.isArray(allowedRoots) || allowedRoots.length === 0) return false;
 
   const resolvedTarget = path.resolve(targetPath);
   for (const root of allowedRoots) {
