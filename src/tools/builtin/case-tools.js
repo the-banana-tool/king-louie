@@ -14,6 +14,8 @@ const NO_CASE = Object.freeze({
 
 const SOURCE_KINDS = ['url', 'document', 'call', 'api'];
 const VALUE_DESCRIPTION = 'numbers and lists as JSON text';
+// Brief fields whose value is text: never parse these, so "2027" stays text.
+const BRIEF_TEXT_FIELDS = new Set(['objective', 'why', 'deadline']);
 
 // `value` is declared as a string so every provider accepts the schema
 // (Gemini needs a type on each property). JSON text for a number, list or
@@ -178,7 +180,7 @@ const BriefTool = acceptAnyValue(new Tool({
       return { ok: true, status: ctx.runtime.completeGating(ctx.caseId).status };
     }
     if (!params.field) return { ok: false, error: `${params.action} needs "field".` };
-    if (params.value !== undefined) params = { ...params, value: parseValue(params.value) };
+    if (params.value !== undefined && !BRIEF_TEXT_FIELDS.has(params.field)) params = { ...params, value: parseValue(params.value) };
     const provenance = params.provenance || 'model';
     let quoteNote = '';
     if (USER_ONLY_FIELDS.has(params.field) && provenance === 'user') {

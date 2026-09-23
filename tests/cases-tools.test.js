@@ -254,6 +254,23 @@ describe('case tool values through the executor', () => {
     assert.strictEqual(await assertValue('zip', '02134'), '02134');
     assert.strictEqual(await assertValue('flag', 'true'), 'true');
   });
+
+  it('parses Brief list values from JSON text but keeps text fields as text', async () => {
+    const { runtime, info, opts } = await setup();
+    const executor = new ToolExecutor({
+      workingDirectory: info.dir,
+      allowedDirectories: [info.dir],
+      runtimeEnvironment: { platform: process.platform },
+      requireApproval: false,
+      useSandbox: false,
+      extraToolOptions: opts
+    });
+    await executor.execute('Brief', { action: 'update', field: 'successCriteria', value: '["Closed by year end"]' });
+    await executor.execute('Brief', { action: 'update', field: 'objective', value: '2027' });
+    const { data } = runtime.brief(info.id).read();
+    assert.deepStrictEqual(data.successCriteria, ['Closed by year end']);
+    assert.strictEqual(data.objective, '2027');
+  });
 });
 
 describe('ToolExecutor child runs in case turns', () => {
