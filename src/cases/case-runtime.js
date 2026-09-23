@@ -2,6 +2,7 @@
 // The one object core holds for cases: turn lifecycle (spec §5.5), lock,
 // commits, and read access to each case's ledger, brief and records.
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const git = require('./git');
 const { CaseStore } = require('./case-store');
@@ -33,10 +34,18 @@ class CaseNotFoundError extends Error {
   }
 }
 
+const expandHome = (p) => (p === '~' || /^~[\/]/.test(p) ? path.join(os.homedir(), p.slice(1)) : p);
+
+// settings.cases.root: `~` is the home dir and a relative path is under the
+// data dir. KL_CASES_ROOT: `~` expanded; a relative path is left for the
+// process cwd to resolve, as before.
 function resolveCasesRoot({ settings, env = process.env, dataDir }) {
   const configured = settings?.cases?.root;
-  if (typeof configured === 'string' && configured.trim()) return configured.trim();
-  if (env && env.KL_CASES_ROOT) return env.KL_CASES_ROOT;
+  if (typeof configured === 'string' && configured.trim()) {
+    const root = expandHome(configured.trim());
+    return path.isAbsolute(root) ? root : path.resolve(dataDir, root);
+  }
+  if (env && env.KL_CASES_ROOT) return expandHome(env.KL_CASES_ROOT);
   return path.join(dataDir, 'cases');
 }
 
