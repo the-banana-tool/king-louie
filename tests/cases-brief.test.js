@@ -71,4 +71,15 @@ describe('Brief', () => {
     assert.deepStrictEqual(data, {});
     assert.match(body, /Just prose\./);
   });
+
+  it('reads a brief saved with a byte-order mark and does not duplicate its front matter on update', async () => {
+    const b = await newBrief();
+    fs.writeFileSync(b.path, '﻿---\nobjective: Convert the lot to cash\n---\n\nNotes on the Lakeside lot.\n');
+    assert.strictEqual(b.read().data.objective, 'Convert the lot to cash');
+    b.update('deadline', '2027-03-01', { provenance: 'model' });
+    const text = fs.readFileSync(b.path, 'utf8');
+    assert.strictEqual(text.split('\n').filter((l) => l.trim() === '---').length, 2);
+    assert.strictEqual(b.read().data.objective, 'Convert the lot to cash');
+    assert.match(b.read().body, /Notes on the Lakeside lot\./);
+  });
 });
