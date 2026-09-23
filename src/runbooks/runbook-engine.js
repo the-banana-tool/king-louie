@@ -5,7 +5,7 @@ const http = require('http');
 const https = require('https');
 const { parseYaml } = require('../platform/yaml');
 const { assertAdminOwned } = require('../service/node-config');
-const { isPathUnderRoots, realResolve } = require('../platform/path-roots');
+const { isPathUnderRoots } = require('../execution/safety-policy');
 const { EvidenceLedger } = require('../verification/evidence-ledger');
 const { createLogger } = require('../logging');
 
@@ -90,7 +90,7 @@ function validateParam(paramDef, value, allowedRoots = []) {
     if (!isPathUnderRoots(valPath, allowedRoots)) {
       throw new Error(`Path parameter "${valPath}" is not under configured allowed_roots`);
     }
-    return realResolve(valPath);
+    return path.resolve(valPath);
   }
 
   throw new Error(`Unknown parameter type "${type}"`);
@@ -348,25 +348,11 @@ class RunbookEngine {
  * In-memory Job Manager for runbook and delegation jobs.
  */
 class JobManager {
-  // maxConcurrentJobs is node policy (node.yaml policy.max_concurrent_jobs).
-  // Jobs awaiting approval run nothing, so only queued and running ones count.
-  constructor({ maxConcurrentJobs = Infinity } = {}) {
+  constructor() {
     this.jobs = new Map();
-    this.maxConcurrentJobs = maxConcurrentJobs;
-  }
-
-  activeJobCount() {
-    let n = 0;
-    for (const job of this.jobs.values()) {
-      if (job.status === 'queued' || job.status === 'running') n += 1;
-    }
-    return n;
   }
 
   createJob({ machine, runbook, params = {}, tier = 'routine' }) {
-    if (tier !== 'unsafe' && this.activeJobCount() >= this.maxConcurrentJobs) {
-      throw new Error(`max_concurrent_jobs: this node already has ${this.maxConcurrentJobs} job(s) running; try again when one finishes`);
-    }
     const jobId = `job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const job = {
       job_id: jobId,

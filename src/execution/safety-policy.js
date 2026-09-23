@@ -1,5 +1,5 @@
+const path = require('path');
 const { toolRegistry } = require('../tools');
-const { isPathUnderRoots } = require('../platform/path-roots');
 
 /**
  * Checks if a wildcard pattern matches a target string.
@@ -50,6 +50,24 @@ function matchesPatternList(toolName, parameters, patternList = []) {
     if (patternMatch(pattern, toolName)) return true;
     // Direct match against command/argument alone
     if (parameters?.command && patternMatch(pattern, String(parameters.command))) return true;
+  }
+  return false;
+}
+
+/**
+ * Normalizes and checks if targetPath resides under one of allowedRoots.
+ */
+function isPathUnderRoots(targetPath, allowedRoots = []) {
+  if (!targetPath || typeof targetPath !== 'string') return true; // No path specified
+  if (!Array.isArray(allowedRoots) || allowedRoots.length === 0) return false; // Roots configured, none matched
+
+  const resolvedTarget = path.resolve(targetPath);
+  for (const root of allowedRoots) {
+    const resolvedRoot = path.resolve(root);
+    const relative = path.relative(resolvedRoot, resolvedTarget);
+    if (!relative.startsWith('..') && !path.isAbsolute(relative)) {
+      return true;
+    }
   }
   return false;
 }

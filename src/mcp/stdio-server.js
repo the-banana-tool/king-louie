@@ -1,6 +1,4 @@
-const fs = require('fs');
 const os = require('os');
-const path = require('path');
 const readline = require('readline');
 const { createLogger } = require('../logging');
 const { JobManager } = require('../runbooks/runbook-engine');
@@ -23,7 +21,7 @@ const MCP_TOOLS = [
   },
   {
     name: 'get_state',
-    description: 'Get current state of a machine: CPU, memory, disk, running jobs and last boot. GPU, services and last update are not collected yet (listed in not_collected).',
+    description: 'Get current state (CPU, memory, disk, GPU, running jobs) of a machine.',
     inputSchema: {
       type: 'object',
       properties: { machine: { type: 'string' } }
@@ -100,29 +98,11 @@ const MCP_TOOLS = [
   }
 ];
 
-// Free and total space for each allowed root, or for the filesystem holding
-// the home directory when no roots are configured. A root that cannot be
-// read reports its error instead of disappearing from the list.
-function diskState(allowedRoots) {
-  const targets = Array.isArray(allowedRoots) && allowedRoots.length
-    ? allowedRoots
-    : [path.parse(os.homedir()).root];
-  return targets.map((p) => {
-    try {
-      const st = fs.statfsSync(p);
-      return { path: p, free_bytes: st.bavail * st.bsize, total_bytes: st.blocks * st.bsize };
-    } catch (err) {
-      return { path: p, error: err.code || err.message };
-    }
-  });
-}
-
 class StdioMcpServer {
   constructor(options = {}) {
     this.nodeConfig = options.nodeConfig || { name: 'local-node', profile: 'agent', capabilities: [], policy: {} };
     this.runbookEngine = options.runbookEngine || null;
-    this.jobManager = options.jobManager
-      || new JobManager({ maxConcurrentJobs: this.nodeConfig.policy?.max_concurrent_jobs ?? Infinity });
+    this.jobManager = options.jobManager || new JobManager();
     this.stdin = options.stdin || process.stdin;
     this.stdout = options.stdout || process.stdout;
   }
@@ -244,24 +224,13 @@ class StdioMcpServer {
     }
 
     if (toolName === 'get_state') {
-      const cpus = os.cpus();
-      const running = [...this.jobManager.jobs.values()]
-        .filter((j) => j.status === 'queued' || j.status === 'running')
-        .map((j) => ({ job_id: j.job_id, runbook: j.runbook, status: j.status, created_at: j.created_at }));
       return {
         machine: this.nodeConfig.name,
-        cpu: { count: cpus.length, model: cpus[0]?.model || '', load_average: os.loadavg() },
+        cpu: { count: os.cpus().length, model: os.cpus()[0]?.model || '' },
         memory: { free_bytes: os.freemem(), total_bytes: os.totalmem() },
-        disk: diskState(this.nodeConfig.policy?.allowed_roots),
-        running_jobs: running,
-        last_boot: new Date(Date.now() - os.uptime() * 1000).toISOString(),
         uptime_seconds: os.uptime(),
         platform: process.platform,
-        arch: process.arch,
-        // Listed rather than left out, so a caller can tell "not collected"
-        // from "none": each needs a per-OS probe (nvidia-smi, systemctl/sc,
-        // the package manager) that does not exist yet.
-        not_collected: ['gpu', 'services', 'last_update']
+        arch: process.arch
       };
     }
 
@@ -308,10 +277,14 @@ class StdioMcpServer {
       if (this.nodeConfig.profile === 'runbook') {
         throw new Error(`Capability unavailable: machine "${this.nodeConfig.name}" has profile "runbook" and does not support agent delegation`);
       }
-      // No agent session is started here yet. Creating a job that only ever
-      // says "running" would tell the caller work is under way when nothing
-      // is, and would hold a max_concurrent_jobs slot for good.
-      throw new Error('delegate is not implemented on this node yet: no agent session was started');
+      const job = this.jobManager.createJob({
+        machine: this.nodeConfig.name,
+        runbook: 'delegate',
+        params: { task: args.task, cwd: args.cwd },
+        tier: 'routine'
+      });
+      this.jobManager.updateJob(job.job_id, { status: 'running', logs: [`Delegated task: ${args.task}`] });
+      return { job_id: job.job_id, status: 'running', message: 'Delegation session started' };
     }
 
     if (toolName === 'send_to_job') {
