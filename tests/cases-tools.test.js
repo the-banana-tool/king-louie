@@ -9,7 +9,8 @@ const ToolExecutor = require('../src/execution/tool-executor');
 const { CaseRuntime } = require('../src/cases');
 const { LedgerTool, BriefTool, DecideTool, RecommendTool } = require('../src/tools/builtin/case-tools');
 const {
-  CASE_TOOL_NAMES, CASE_MODE_PROMPT, shapeToolDefinitions, buildCaseSystemPrompt, isProtectedCasePath
+  CASE_TOOL_NAMES, CASE_MODE_PROMPT, shapeToolDefinitions, buildCaseSystemPrompt, isProtectedCasePath,
+  CASE_BLOCKED_TOOL_NAMES
 } = require('../src/cases/chat-integration');
 
 initializeTools();
@@ -153,6 +154,15 @@ describe('case-mode helpers', () => {
     assert.deepStrictEqual(shapeToolDefinitions(base, true, toolRegistry).map((d) => d.name), ['Read', ...CASE_TOOL_NAMES]);
   });
 
+  it('drops tools that start child runs from a case turn, and keeps them otherwise', () => {
+    assert.ok(CASE_BLOCKED_TOOL_NAMES.includes('SpawnAgent'));
+    assert.ok(CASE_BLOCKED_TOOL_NAMES.includes('BackgroundTask'));
+    for (const name of CASE_BLOCKED_TOOL_NAMES) assert.ok(toolRegistry.get(name) || name === 'sessions_spawn', `${name} is not a registered tool`);
+    const base = [{ name: 'Read' }, ...CASE_BLOCKED_TOOL_NAMES.map((name) => ({ name }))];
+    assert.deepStrictEqual(shapeToolDefinitions(base, true, toolRegistry).map((d) => d.name), ['Read', ...CASE_TOOL_NAMES]);
+    assert.deepStrictEqual(shapeToolDefinitions(base, false, toolRegistry).map((d) => d.name), base.map((d) => d.name));
+  });
+
   it('puts the case prompt and orientation ahead of the base prompt', () => {
     const p = buildCaseSystemPrompt('ORIENT', 'BASE');
     assert.ok(p.startsWith(CASE_MODE_PROMPT));
@@ -206,6 +216,33 @@ describe('isProtectedCasePath hardening', () => {
       return;
     }
     assert.strictEqual(isProtectedCasePath(dir, path.join(link, 'facts.jsonl')), true);
+  });
+});
+
+describe('ToolExecutor child runs in case turns', () => {
+  const makeExecutor = (dir, extraToolOptions) => new ToolExecutor({
+    workingDirectory: dir,
+    allowedDirectories: [dir],
+    runtimeEnvironment: { platform: process.platform },
+    requireApproval: false,
+    useSandbox: false,
+    extraToolOptions
+  });
+
+  it('refuses SpawnAgent and BackgroundTask when a case is attached', async () => {
+    const { info } = await setup();
+    const executor = makeExecutor(info.dir, { caseContext: { dir: info.dir } });
+    for (const [name, params] of [['SpawnAgent', { task: 'Price the Lakeside lot' }], ['BackgroundTask', { task: 'Price the Lakeside lot' }]]) {
+      const r = await executor.execute(name, params);
+      assert.strictEqual(r.success, false, name);
+      assert.match(r.error, /not available in case turns/, name);
+    }
+  });
+
+  it('leaves SpawnAgent alone when no case is attached', async () => {
+    const { info } = await setup();
+    const r = await makeExecutor(info.dir, {}).execute('SpawnAgent', { task: 'Price the Lakeside lot' });
+    assert.doesNotMatch(String(r.error || ''), /case turns/);
   });
 });
 

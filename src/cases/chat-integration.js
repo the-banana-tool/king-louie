@@ -7,6 +7,12 @@ const path = require('path');
 
 const CASE_TOOL_NAMES = Object.freeze(['Ledger', 'Brief', 'Decide', 'Recommend']);
 
+// Tools that start another agent run (now, later, or on another machine).
+// That run has no caseContext, so the case write guard would be off; stage 1
+// keeps them out of case turns entirely.
+const CASE_BLOCKED_TOOL_NAMES = Object.freeze(['SpawnAgent', 'BackgroundTask', 'sessions_spawn', 'RemoteDispatch', 'Cron']);
+const CASE_BLOCKED_TOOL_ERROR = 'Sub-agents and background tasks are not available in case turns in stage 1. Do the work in this turn with the case tools and the other tools.';
+
 const CASE_MODE_PROMPT = [
   'Case mode. This chat is attached to a case. The orientation below was read from the case repository on disk at the start of this turn. It is the authoritative state and outranks anything earlier in the conversation.',
   '',
@@ -24,11 +30,12 @@ function shapeToolDefinitions(definitions, attached, registry) {
   const caseNames = new Set(CASE_TOOL_NAMES);
   const base = (definitions || []).filter((d) => !caseNames.has(d.name));
   if (!attached) return base;
+  const blocked = new Set(CASE_BLOCKED_TOOL_NAMES);
   const caseDefs = CASE_TOOL_NAMES
     .map((name) => registry.get(name))
     .filter(Boolean)
     .map((tool) => tool.toFunctionDefinition());
-  return [...base, ...caseDefs];
+  return [...base.filter((d) => !blocked.has(d.name)), ...caseDefs];
 }
 
 function buildCaseSystemPrompt(orientation, base) {
@@ -132,6 +139,8 @@ function requireOwnerQuote({ quote, ownerMessages }) {
 
 module.exports = {
   CASE_TOOL_NAMES,
+  CASE_BLOCKED_TOOL_NAMES,
+  CASE_BLOCKED_TOOL_ERROR,
   CASE_MODE_PROMPT,
   shapeToolDefinitions,
   buildCaseSystemPrompt,

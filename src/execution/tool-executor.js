@@ -3,7 +3,7 @@ const { toolRegistry } = require('../tools');
 const { getRuntimeEnvironment } = require('./runtime-environment');
 const { evaluateRules, describeRule } = require('../tools/permission-rules');
 const path = require('path');
-const { isProtectedCasePath } = require('../cases/chat-integration');
+const { isProtectedCasePath, CASE_BLOCKED_TOOL_NAMES, CASE_BLOCKED_TOOL_ERROR } = require('../cases/chat-integration');
 
 // Tools that write a file named by file_path (MultiEdit: per edit). In case
 // mode, facts.jsonl and .kl/ are written only through the case tools.
@@ -207,6 +207,11 @@ class ToolExecutor extends EventEmitter {
     }
 
     const caseContext = this.extraToolOptions.caseContext;
+    if (caseContext && CASE_BLOCKED_TOOL_NAMES.includes(toolName)) {
+      const refused = { success: false, error: CASE_BLOCKED_TOOL_ERROR };
+      this.emit('postExecute', { toolName, parameters: effectiveParameters, result: refused });
+      return refused;
+    }
     if (caseContext && FILE_WRITE_TOOLS.has(toolName)) {
       const base = options.workingDirectory || this.workingDirectory;
       const targets = [

@@ -51,6 +51,7 @@ const CronScheduler = require('../cron/cron-scheduler');
 const { MemoryStore, MemoryManager } = require('../memory');
 const { CheckpointManager } = require('../checkpoints');
 const { CaseRuntime, resolveCasesRoot } = require('../cases');
+const { shapeToolDefinitions } = require('../cases/chat-integration');
 const ContextAssembler = require('../context/context-assembler');
 const ConversationCompactor = require('../context/conversation-compactor');
 const { buildSystemSections } = require('../context/system-sections');
@@ -2082,7 +2083,9 @@ function createCore(deps = {}) {
       ...resolution,
       runtimeEnvironment,
       toolExecutor,
-      toolDefinitions: toolRegistry.getFunctionDefinitions()
+      // Child and workflow runs never carry a caseContext, so they never see
+      // the case tools.
+      toolDefinitions: shapeToolDefinitions(toolRegistry.getFunctionDefinitions(), false)
     };
   };
 
