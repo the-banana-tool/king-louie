@@ -111,6 +111,14 @@ describe('case tools', () => {
     assert.match(runtime.records(info.id).lastJournal().file, /-brief/);
   });
 
+  it('Brief journals the owner quote as JSON so quotes and newlines stay on the header line', async () => {
+    const { runtime, info, opts } = await setup('Lakeside lot', ['We call it "the back lot".\nI need the cash.']);
+    const r = await BriefTool.execute({ action: 'update', field: 'why', value: 'Need the cash', provenance: 'user', quote: 'it "the back lot".\nI need the cash' }, opts);
+    assert.strictEqual(r.ok, true);
+    const header = runtime.records(info.id).lastJournal().text.split('\n')[0];
+    assert.strictEqual(header, 'Brief why updated (user) (quote: "it \\"the back lot\\".\\nI need the cash")');
+  });
+
   it('Brief owner-only fields with provenance user are refused without a matching owner quote, and stay refused for the model', async () => {
     const { opts } = await setup('Lakeside lot', ['I have already tried listing it myself.']);
     const noQuote = await BriefTool.execute({ action: 'update', field: 'hardConstraints', value: ['No sale below cost'], provenance: 'user' }, opts);

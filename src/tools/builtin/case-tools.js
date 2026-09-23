@@ -186,7 +186,7 @@ const BriefTool = acceptAnyValue(new Tool({
     if (USER_ONLY_FIELDS.has(params.field) && provenance === 'user') {
       const check = requireOwnerQuote({ quote: params.quote, ownerMessages: ctx.ownerMessages });
       if (!check.ok) return check;
-      quoteNote = ` (quote: "${check.quote}")`;
+      quoteNote = ` (quote: ${JSON.stringify(check.quote)})`;
     }
     const data = params.action === 'append'
       ? brief.append(params.field, params.item, { provenance })
