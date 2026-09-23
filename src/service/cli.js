@@ -5,6 +5,8 @@ const HELP = `Usage:
   king-louie-service run [--data-dir DIR] [--profile agent|runbook]
   king-louie-service status [--data-dir DIR]
   king-louie-service doctor [--data-dir DIR]
+  king-louie-service mcp [--data-dir DIR]
+  king-louie-service pair <front-door-url> [--data-dir DIR]
   king-louie-service token set <provider> [--data-dir DIR]     (value read from stdin)
   king-louie-service vault set <key> [--data-dir DIR]          (value read from stdin)
   king-louie-service channel list <channel> [--data-dir DIR]
@@ -84,6 +86,20 @@ async function readStdin(stdin) {
   return Buffer.concat(chunks).toString('utf8').replace(/\r?\n$/, '');
 }
 
+// The MCP stdio transport owns stdout: one stray line there and the client
+// sees a corrupt message. The logger writes info and debug through
+// console.log/console.debug, which go to stdout, so for the life of `mcp`
+// every console method that would reach stdout writes to stderr instead.
+// Returns a function that puts the originals back.
+function routeConsoleToStderr(stderr) {
+  const util = require('util');
+  const methods = ['log', 'info', 'debug'];
+  const originals = Object.fromEntries(methods.map((m) => [m, console[m]]));
+  const toStderr = (...args) => { stderr.write(`${util.format(...args)}\n`); };
+  for (const m of methods) console[m] = toStderr;
+  return () => { for (const m of methods) console[m] = originals[m]; };
+}
+
 // Slack is absent on purpose: SlackChannel has no allowlist check yet, so
 // offering to configure one would claim a gate that does not exist.
 const KNOWN_CHANNELS = ['telegram', 'discord'];
@@ -97,8 +113,8 @@ function runningServicePid(dataDir) {
   return pid && isRunning(pid) ? pid : null;
 }
 
-// Opens the service's stores and runs `fn` against the resulting core.
-// Every path the ports create or write is reported as it happens, so a
+// Opens the service's stores and runs `fn(core, ports)` against them. The
+// ports go along because the core does not expose its cipher. Every path the ports create or write is reported as it happens, so a
 // failure partway through still hands back what it managed to write: run as
 // root, everything written here is root-owned and has to go back to the
 // service account that owns the data dir. Nothing else in the data dir is
@@ -110,12 +126,13 @@ function withServiceCore(dataDir, io, fn) {
   const { restoreDataDirOwnership } = require('./ownership');
   const writtenPaths = [];
   try {
-    const core = createCore(buildServicePorts({
+    const ports = buildServicePorts({
       dataDir,
       chatDataDefaults: CHAT_DATA_DEFAULTS,
       onPathWritten: (p) => writtenPaths.push(p)
-    }));
-    return fn(core);
+    });
+    const core = createCore(ports);
+    return fn(core, ports);
   } finally {
     restoreDataDirOwnership(dataDir, writtenPaths, io.ownership);
   }
@@ -249,6 +266,76 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
         const results = runDoctor({ dataDir });
         for (const r of results) io.stdout.write(`${r.ok ? 'ok  ' : 'FAIL'}  ${r.check}  (${r.detail})\n`);
         return results.every((r) => r.ok) ? 0 : 1;
+      }
+
+      case 'mcp': {
+        // Before anything that could log, so nothing reaches the protocol
+        // stream on stdout. Left in place once the server is up, since the
+        // command runs until the process exits; undone if startup fails.
+        const restoreConsole = routeConsoleToStderr(io.stderr);
+        try {
+          return withServiceCore(dataDir, io, (core) => {
+            const { loadNodeConfig } = require('./node-config');
+            const { RunbookEngine } = require('../runbooks/runbook-engine');
+            const StdioMcpServer = require('../mcp/stdio-server');
+
+            const nodeCfg = loadNodeConfig({ dataDir });
+
+            const runbookEngine = new RunbookEngine({
+              runbooksDir: nodeCfg.runbooksDir,
+              allowedRoots: nodeCfg.policy.allowed_roots
+            });
+            // Loaded once, here: a bad runbook file fails the command at
+            // startup with its error on stderr, instead of the server coming
+            // up with a catalog that is silently empty.
+            runbookEngine.loadRunbooks();
+
+            const server = new StdioMcpServer({
+              nodeConfig: nodeCfg,
+              runbookEngine,
+              stdin: io.stdin,
+              stdout: io.stdout
+            });
+
+            server.start();
+            return new Promise(() => {}); // keep listening on stdio
+          });
+        } catch (err) {
+          restoreConsole();
+          throw err;
+        }
+      }
+
+      case 'pair': {
+        // The URL is the first word after the command, i.e. `sub` here.
+        const frontDoorUrl = sub;
+        if (!frontDoorUrl) {
+          io.stderr.write('Usage: king-louie-service pair <front-door-url> [--data-dir DIR]\n');
+          return 2;
+        }
+        // Creating the identity writes to the service's store, which a
+        // running service would overwrite from its own in-memory copy.
+        const pid = runningServicePid(dataDir);
+        if (pid) {
+          io.stderr.write(`The service is running (pid ${pid}) on ${dataDir}. Stop it first, run this again, then start it.\n`);
+          return 1;
+        }
+        return withServiceCore(dataDir, io, (core, ports) => {
+          const { loadNodeConfig } = require('./node-config');
+          const { getOrGenerateNodeIdentity } = require('../mesh/node-identity');
+          const nodeCfg = loadNodeConfig({ dataDir });
+          const identity = getOrGenerateNodeIdentity(core.context.getStore(), ports.cipher, nodeCfg.name);
+
+          // What §5.1 step 1 shows the owner. The exchange that follows
+          // (one-time code, key pinning) needs a front door to talk to,
+          // which is built in stage 4, so this stops here and says so
+          // rather than asking for a code nothing would check.
+          io.stdout.write(`Node Name: ${nodeCfg.name}\n`);
+          io.stdout.write(`Node ID: ${identity.nodeId}\n`);
+          io.stdout.write(`TLS Fingerprint: ${identity.tlsFingerprint}\n`);
+          io.stderr.write(`Pairing with a front door is not available yet: the front door is built in stage 4. Nothing was sent to ${frontDoorUrl}.\n`);
+          return 1;
+        });
       }
 
       case 'channel':
