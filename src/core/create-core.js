@@ -1936,8 +1936,9 @@ function createCore(deps = {}) {
       extraToolOptions: {
         get agentExecutorAdapter() { return agentExecutorAdapter; },
         get backgroundTaskManager() { return backgroundTaskManager; },
-        // Case mode: the chat send path passes { runtime, caseId, turnId, dir }.
-        // The case tools read it, and ToolExecutor's ledger write guard uses dir.
+        // Case mode: the chat send path passes { ...caseTurn (caseId, dir,
+        // turnId, title, orientation), runtime, ownerMessages }. The case
+        // tools read it, and ToolExecutor's ledger write guard uses dir.
         get caseContext() { return executorOptions.caseContext || null; },
         getAgent,
         listAgents,

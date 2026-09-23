@@ -4,7 +4,7 @@ const assert = require('node:assert');
 const { registerChatHandlers } = require('../src/ipc/chat-handlers');
 const IPC = require('../src/ipc/constants');
 const { initializeTools, toolRegistry } = require('../src/tools');
-const { CaseBusyError } = require('../src/cases');
+const { CaseBusyError, CaseNotFoundError } = require('../src/cases');
 const { CASE_TOOL_NAMES } = require('../src/cases/chat-integration');
 
 initializeTools();
@@ -12,8 +12,8 @@ initializeTools();
 // A minimal context for chat:sendMessage. Anything not overridden resolves to
 // a function returning null, which the send path treats as "feature absent".
 // If the handler starts dereferencing another context function, add it here.
-function harness({ caseId = 'case-1', beginError = null, loopError = null } = {}) {
-  const calls = { begin: [], end: [], executorOptions: null, run: null };
+function harness({ caseId = 'case-1', beginError = null, loopError = null, hookResult = null, loopContent = 'Answer text' } = {}) {
+  const calls = { begin: [], end: [], executorOptions: null, run: null, resolveInferenceCalls: 0 };
   const chat = { id: 'chat-1', title: 'Case chat', caseId, messages: [{ id: 'm0', sender: 'assistant', text: 'How can I help you?' }] };
   const runtime = {
     beginTurn: async (id, opts) => {
@@ -27,19 +27,22 @@ function harness({ caseId = 'case-1', beginError = null, loopError = null } = {}
     async run(messages, tools, options) {
       calls.run = { messages, tools, options };
       if (loopError) throw loopError;
-      return { content: 'Answer text', llm: { calls: [], totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 } } };
+      return { content: loopContent, llm: { calls: [], totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 } } };
     }
   }
   const overrides = {
     getChats: () => [chat],
     setChats: () => {},
     appendMessageToChat: (_id, sender, text) => { chat.messages.push({ id: `m${chat.messages.length}`, sender, text }); return chat; },
-    runHookEvent: async () => ({}),
-    resolveInference: async () => ({
-      providerType: 'openai',
-      provider: { sendMessageWithTools: async () => ({}), streamMessage: async () => ({}) },
-      model: 'test-model', tier: 'standard', timeoutMs: 1000
-    }),
+    runHookEvent: async () => hookResult || {},
+    resolveInference: async () => {
+      calls.resolveInferenceCalls += 1;
+      return {
+        providerType: 'openai',
+        provider: { sendMessageWithTools: async () => ({}), streamMessage: async () => ({}) },
+        model: 'test-model', tier: 'standard', timeoutMs: 1000
+      };
+    },
     getConversationCompactor: () => null,
     getContextAssembler: () => null,
     getRuntimeEnvironment: async () => ({ platform: process.platform }),
@@ -62,7 +65,7 @@ function harness({ caseId = 'case-1', beginError = null, loopError = null } = {}
   registerChatHandlers({ handle: (channel, fn) => handlers.set(channel, fn), on: () => {} }, context);
   const event = { sender: { send() {}, isDestroyed: () => false } };
   const send = (payload = {}) => handlers.get(IPC.CHAT_SEND_MESSAGE)(event, { chatId: 'chat-1', message: 'What should I do next?', ...payload });
-  return { calls, send };
+  return { calls, send, chat };
 }
 
 describe('chat:sendMessage in case mode', () => {
@@ -95,12 +98,37 @@ describe('chat:sendMessage in case mode', () => {
   });
 
   it('refuses the turn when the case is busy and runs nothing', async () => {
-    const { calls, send } = harness({ beginError: new CaseBusyError('Lakeside lot') });
+    const { calls, send, chat } = harness({ beginError: new CaseBusyError('Lakeside lot') });
     const result = await send();
     assert.strictEqual(result.ok, false);
     assert.match(result.error, /busy/);
     assert.strictEqual(calls.run, null);
     assert.strictEqual(calls.end.length, 0);
+    assert.strictEqual(chat.messages.length, 1, 'no orphan user message');
+    assert.strictEqual(calls.resolveInferenceCalls, 0, 'no provider was ever resolved');
+  });
+
+  it('refuses the turn when the case is not found and runs nothing', async () => {
+    const { calls, send, chat } = harness({ beginError: new CaseNotFoundError('case-1') });
+    const result = await send();
+    assert.strictEqual(result.ok, false);
+    assert.match(result.error, /not found/i);
+    assert.strictEqual(calls.run, null);
+    assert.strictEqual(calls.end.length, 0);
+    assert.strictEqual(chat.messages.length, 1, 'no orphan user message');
+    assert.strictEqual(calls.resolveInferenceCalls, 0, 'no provider was ever resolved');
+  });
+
+  it('ends the turn when a hook blocks the prompt, and runs nothing', async () => {
+    const { calls, send, chat } = harness({ hookResult: { action: 'deny', message: 'not right now' } });
+    const result = await send();
+    assert.strictEqual(result.ok, false);
+    assert.match(result.error, /not right now/);
+    assert.strictEqual(calls.run, null);
+    assert.strictEqual(calls.end.length, 1);
+    assert.match(calls.end[0].summary, /^turn blocked: not right now/);
+    assert.strictEqual(calls.end[0].journal, null);
+    assert.strictEqual(chat.messages.length, 1, 'no orphan user message');
   });
 
   it('ends the turn when the agent loop fails', async () => {
@@ -109,6 +137,15 @@ describe('chat:sendMessage in case mode', () => {
     assert.strictEqual(calls.end.length, 1);
     assert.match(calls.end[0].summary, /^turn failed: provider exploded/);
     assert.strictEqual(calls.end[0].journal, null);
+  });
+
+  it('does not journal the "(No response)" placeholder', async () => {
+    const { calls, send } = harness({ loopContent: '' });
+    const result = await send();
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(calls.end.length, 1);
+    assert.strictEqual(calls.end[0].journal, null);
+    assert.strictEqual(calls.end[0].summary, 'What should I do next?');
   });
 
   it('passes ownerMessages with the prior and new user messages, excluding the assistant greeting', async () => {
