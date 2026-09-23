@@ -41,8 +41,8 @@ function assertAdminOwned(file, geteuid, adminUid = 0) {
  * Loads and validates node.yaml from adminConfigDir.
  */
 function loadNodeConfig({
-  adminConfigDir: adminDir = adminConfigDir(),
   dataDir,
+  adminConfigDir: adminDir = adminConfigDir({ dataDir }),
   geteuid = () => (typeof process.geteuid === 'function' ? process.geteuid() : -1),
   adminUid = 0
 } = {}) {
