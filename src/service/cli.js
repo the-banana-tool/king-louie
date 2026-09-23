@@ -5,6 +5,8 @@ const HELP = `Usage:
   king-louie-service run [--data-dir DIR] [--profile agent|runbook]
   king-louie-service status [--data-dir DIR]
   king-louie-service doctor [--data-dir DIR]
+  king-louie-service mcp [--data-dir DIR]
+  king-louie-service pair <front-door-url> [--code CODE] [--data-dir DIR]
   king-louie-service token set <provider> [--data-dir DIR]     (value read from stdin)
   king-louie-service vault set <key> [--data-dir DIR]          (value read from stdin)
   king-louie-service channel list <channel> [--data-dir DIR]
@@ -25,7 +27,7 @@ const CHANNEL_HELP = `Usage: king-louie-service channel list <channel> [--data-d
        king-louie-service channel approval <channel> (<chat-id> | --clear) [--data-dir DIR]
 `;
 
-const VALUE_FLAGS = new Set(['data-dir', 'profile', 'user']);
+const VALUE_FLAGS = new Set(['data-dir', 'profile', 'user', 'code']);
 // Flags that must never carry a value, whichever form produced it.
 const BOOLEAN_FLAGS = new Set(['dry-run', 'group', 'clear']);
 
@@ -249,6 +251,66 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
         const results = runDoctor({ dataDir });
         for (const r of results) io.stdout.write(`${r.ok ? 'ok  ' : 'FAIL'}  ${r.check}  (${r.detail})\n`);
         return results.every((r) => r.ok) ? 0 : 1;
+      }
+
+      case 'mcp': {
+        return withServiceCore(dataDir, io, (core) => {
+          const { loadNodeConfig } = require('./node-config');
+          const { RunbookEngine } = require('../runbooks/runbook-engine');
+          const StdioMcpServer = require('../mcp/stdio-server');
+
+          const currentUid = typeof process.getuid === 'function' ? process.getuid() : 0;
+          const nodeCfg = loadNodeConfig({ dataDir, geteuid: () => currentUid, adminUid: currentUid });
+
+          const runbookEngine = new RunbookEngine({
+            runbooksDir: nodeCfg.runbooksDir,
+            allowedRoots: nodeCfg.policy.allowed_roots,
+            geteuid: () => currentUid,
+            adminUid: currentUid
+          });
+
+          const server = new StdioMcpServer({
+            nodeConfig: nodeCfg,
+            runbookEngine,
+            stdin: io.stdin,
+            stdout: io.stdout
+          });
+
+          server.start();
+          return new Promise(() => {}); // keep listening on stdio
+        });
+      }
+
+      case 'pair': {
+        if (!arg) {
+          io.stderr.write('Usage: king-louie-service pair <front-door-url> [--code CODE] [--data-dir DIR]\n');
+          return 2;
+        }
+        const frontDoorUrl = arg;
+        return withServiceCore(dataDir, io, async (core) => {
+          const { loadNodeConfig } = require('./node-config');
+          const { getOrGenerateNodeIdentity } = require('../mesh/node-identity');
+          const nodeCfg = loadNodeConfig({ dataDir });
+          const identity = getOrGenerateNodeIdentity(core.context.getStore(), core.cipher, nodeCfg.name);
+
+          let code = flags.code;
+          if (!code) {
+            io.stdout.write(`Node Name: ${nodeCfg.name}\n`);
+            io.stdout.write(`Node ID: ${identity.nodeId}\n`);
+            io.stdout.write(`TLS Fingerprint: ${identity.tlsFingerprint}\n`);
+            io.stdout.write(`Connecting to ${frontDoorUrl}...\n`);
+            io.stdout.write('Enter one-time pairing code: ');
+            code = await readStdin(io.stdin);
+          }
+
+          if (!code || !code.trim()) {
+            io.stderr.write('Pairing failed: no code provided.\n');
+            return 1;
+          }
+
+          io.stdout.write(`Pairing request initiated for node "${nodeCfg.name}" (${identity.nodeId}) with ${frontDoorUrl}.\n`);
+          return 0;
+        });
       }
 
       case 'channel':

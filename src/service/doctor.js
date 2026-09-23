@@ -27,6 +27,30 @@ function runDoctor({ dataDir, platform = process.platform }) {
   } else {
     results.push({ check: 'DPAPI-wrapped master key present', ok: fs.existsSync(path.join(dataDir, 'master.key.dpapi')), detail: 'created on first run' });
   }
+
+  // Check Node Config & Runbooks health
+  try {
+    const { loadNodeConfig } = require('./node-config');
+    const { RunbookEngine } = require('../runbooks/runbook-engine');
+    const currentUid = typeof process.getuid === 'function' ? process.getuid() : 0;
+    const nodeCfg = loadNodeConfig({ dataDir, geteuid: () => currentUid, adminUid: currentUid });
+
+    results.push({ check: 'node configuration loaded', ok: true, detail: `name: ${nodeCfg.name}, profile: ${nodeCfg.profile}` });
+
+    if (fs.existsSync(nodeCfg.runbooksDir)) {
+      const engine = new RunbookEngine({
+        runbooksDir: nodeCfg.runbooksDir,
+        allowedRoots: nodeCfg.policy.allowed_roots,
+        geteuid: () => currentUid,
+        adminUid: currentUid
+      });
+      const runbooks = engine.loadRunbooks();
+      results.push({ check: 'runbooks loaded', ok: true, detail: `${runbooks.size} runbook(s) found in ${nodeCfg.runbooksDir}` });
+    }
+  } catch (err) {
+    results.push({ check: 'node config / runbooks health', ok: false, detail: err.message });
+  }
+
   return results;
 }
 
