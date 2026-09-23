@@ -703,7 +703,7 @@ body {
 }
 
 .chat-case-error {
-  color: #d9534f;
+  color: var(--error);
   font-size: 12px;
   min-height: 0;
 }

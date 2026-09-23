@@ -1746,6 +1746,7 @@ async function renderChatCaseSection(chat, container) {
   error.id = 'chat-case-error';
   error.className = 'chat-case-error';
   const showError = (message) => { error.textContent = message || ''; };
+  if (!listed?.ok) showError(`Could not load cases: ${listed?.error || 'unknown error'}`);
 
   const row = document.createElement('div');
   row.className = 'chat-info-row';
@@ -1818,15 +1819,22 @@ async function renderChatCaseSection(chat, container) {
   createBtn.addEventListener('click', async () => {
     showError('');
     const title = titleInput.value.trim();
-    if (!title) { titleInput.focus(); return; }
+    if (!title) { showError('Give the case a title.'); titleInput.focus(); return; }
     const result = await window.electron.cases.create({ title, chatId: chat.id });
     if (!result?.ok) { showError(result?.error || 'Could not create the case.'); return; }
     await adopt(result.chat);
   });
 
   orientationBtn.addEventListener('click', async () => {
+    showError('');
     const result = await window.electron.cases.orientation({ caseId: chat.caseId });
-    orientation.textContent = result?.ok ? result.text : (result?.error || 'Could not load the orientation.');
+    if (!result?.ok) {
+      showError(result?.error || 'Could not load the orientation.');
+      orientation.textContent = '';
+      orientation.hidden = true;
+      return;
+    }
+    orientation.textContent = result.text;
     orientation.hidden = false;
   });
 }
