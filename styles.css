@@ -675,6 +675,39 @@ body {
   border-color: var(--accent);
 }
 
+.chat-info-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  border: 1px solid rgba(127, 127, 127, 0.35);
+  background: transparent;
+  color: inherit;
+}
+
+.chat-case-new {
+  gap: 6px;
+}
+
+.chat-case-orientation {
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: 11px;
+  margin: 6px 0 0;
+  padding: 8px;
+  border-radius: 6px;
+  background: rgba(127, 127, 127, 0.12);
+}
+
+.chat-case-error {
+  color: #d9534f;
+  font-size: 12px;
+  min-height: 0;
+}
+
 /* Chat info popover – toggle switch */
 .chat-info-toggle {
   position: relative;

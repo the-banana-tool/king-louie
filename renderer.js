@@ -1737,6 +1737,100 @@ function renderChatList() {
   });
 }
 
+async function renderChatCaseSection(chat, container) {
+  container.innerHTML = '';
+  const listed = await window.electron.cases.list();
+  const cases = listed?.ok ? listed.cases : [];
+
+  const error = document.createElement('div');
+  error.id = 'chat-case-error';
+  error.className = 'chat-case-error';
+  const showError = (message) => { error.textContent = message || ''; };
+
+  const row = document.createElement('div');
+  row.className = 'chat-info-row';
+  const label = document.createElement('span');
+  label.className = 'chat-info-label';
+  label.appendChild(faIcon('fas fa-briefcase'));
+  label.appendChild(document.createTextNode('Attached case'));
+  const select = document.createElement('select');
+  select.className = 'chat-info-select';
+  select.id = 'chat-case-select';
+  const addOption = (value, text) => {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = text;
+    select.appendChild(opt);
+  };
+  addOption('', 'None');
+  cases.forEach((c) => addOption(c.id, `${c.title} (${c.status})`));
+  addOption('__new__', 'New case…');
+  select.value = chat.caseId && cases.some((c) => c.id === chat.caseId) ? chat.caseId : '';
+  row.append(label, select);
+
+  const newRow = document.createElement('div');
+  newRow.className = 'chat-info-row chat-case-new';
+  newRow.hidden = true;
+  const titleInput = document.createElement('input');
+  titleInput.type = 'text';
+  titleInput.id = 'chat-case-new-title';
+  titleInput.className = 'chat-info-input';
+  titleInput.placeholder = 'Case title';
+  const createBtn = document.createElement('button');
+  createBtn.type = 'button';
+  createBtn.id = 'chat-case-create-btn';
+  createBtn.className = 'secondary-button';
+  createBtn.textContent = 'Create';
+  newRow.append(titleInput, createBtn);
+
+  const orientationBtn = document.createElement('button');
+  orientationBtn.type = 'button';
+  orientationBtn.id = 'chat-case-orientation-btn';
+  orientationBtn.className = 'secondary-button';
+  orientationBtn.textContent = 'Show orientation';
+  orientationBtn.hidden = !chat.caseId;
+  const orientation = document.createElement('pre');
+  orientation.id = 'chat-case-orientation';
+  orientation.className = 'chat-case-orientation';
+  orientation.hidden = true;
+
+  container.append(row, newRow, orientationBtn, orientation, error);
+
+  const adopt = async (updatedChat) => {
+    if (!updatedChat) return;
+    appState.chats = appState.chats.map((c) => (c.id === updatedChat.id ? updatedChat : c));
+    await renderChatCaseSection(updatedChat, container);
+  };
+
+  select.addEventListener('change', async () => {
+    showError('');
+    if (select.value === '__new__') {
+      newRow.hidden = false;
+      titleInput.focus();
+      return;
+    }
+    newRow.hidden = true;
+    const result = await window.electron.cases.attach({ chatId: chat.id, caseId: select.value || null });
+    if (!result?.ok) { showError(result?.error || 'Could not attach the case.'); return; }
+    await adopt(result.chat);
+  });
+
+  createBtn.addEventListener('click', async () => {
+    showError('');
+    const title = titleInput.value.trim();
+    if (!title) { titleInput.focus(); return; }
+    const result = await window.electron.cases.create({ title, chatId: chat.id });
+    if (!result?.ok) { showError(result?.error || 'Could not create the case.'); return; }
+    await adopt(result.chat);
+  });
+
+  orientationBtn.addEventListener('click', async () => {
+    const result = await window.electron.cases.orientation({ caseId: chat.caseId });
+    orientation.textContent = result?.ok ? result.text : (result?.error || 'Could not load the orientation.');
+    orientation.hidden = false;
+  });
+}
+
 function renderChatInfoPopover() {
   if (!dom.chatInfoPopoverBody) return;
   const chat = getActiveChat();
@@ -1807,6 +1901,14 @@ function renderChatInfoPopover() {
   };
 
   rows.forEach(appendRow);
+
+  /* --- Case section (filled asynchronously into a fixed slot) --- */
+  appendRow({ divider: true });
+  appendRow({ section: 'Case' });
+  const caseSlot = document.createElement('div');
+  caseSlot.id = 'chat-case-section';
+  dom.chatInfoPopoverBody.appendChild(caseSlot);
+  renderChatCaseSection(chat, caseSlot).catch((err) => chatLog.warn(`Case section failed: ${err.message}`));
 
   /* --- Inference controls section --- */
   appendRow({ divider: true });
