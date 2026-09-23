@@ -188,6 +188,17 @@ describe('case-mode helpers', () => {
     assert.ok(p.indexOf('ORIENT') < p.indexOf('BASE'));
   });
 
+  it('protects case.yaml and brief.md at the case root, in any letter case', () => {
+    const dir = path.resolve(tmp(), 'case');
+    assert.strictEqual(isProtectedCasePath(dir, path.join(dir, 'case.yaml')), true);
+    assert.strictEqual(isProtectedCasePath(dir, path.join(dir, 'brief.md')), true);
+    assert.strictEqual(isProtectedCasePath(dir, path.join(dir, 'brief.md.')), true);
+    if (process.platform === 'win32' || process.platform === 'darwin') {
+      assert.strictEqual(isProtectedCasePath(dir, path.join(dir, 'BRIEF.MD')), true);
+    }
+    assert.strictEqual(isProtectedCasePath(dir, path.join(dir, 'artifacts', 'brief.md')), false);
+  });
+
   it('protects facts.jsonl and .kl/ but nothing else', () => {
     const dir = path.resolve(tmp(), 'case');
     assert.strictEqual(isProtectedCasePath(dir, path.join(dir, 'facts.jsonl')), true);
@@ -366,6 +377,26 @@ describe('ToolExecutor ledger write guard', () => {
     assert.match(m.error, /Ledger tool/);
     assert.strictEqual(fs.readFileSync(factsPath, 'utf8'), before);
     assert.strictEqual(fs.readFileSync(klFile, 'utf8'), beforeKl);
+  });
+
+  it('refuses Write to brief.md and case.yaml and points to the Brief tool', async () => {
+    const { info } = await setup();
+    const executor = new ToolExecutor({
+      workingDirectory: info.dir,
+      allowedDirectories: [info.dir],
+      runtimeEnvironment: { platform: process.platform },
+      requireApproval: false,
+      useSandbox: false,
+      extraToolOptions: { caseContext: { dir: info.dir } }
+    });
+    for (const name of ['brief.md', 'case.yaml']) {
+      const file = path.join(info.dir, name);
+      const before = fs.readFileSync(file, 'utf8');
+      const w = await executor.execute('Write', { file_path: file, content: 'status: active\n' });
+      assert.strictEqual(w.success, false, name);
+      assert.match(w.error, /Brief tool/);
+      assert.strictEqual(fs.readFileSync(file, 'utf8'), before);
+    }
   });
 
   it('refuses a case-insensitive bypass like FACTS.JSONL on a case-insensitive filesystem', async () => {

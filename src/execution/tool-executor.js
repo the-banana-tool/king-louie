@@ -221,7 +221,7 @@ class ToolExecutor extends EventEmitter {
       if (targets.some((p) => isProtectedCasePath(caseContext.dir, path.resolve(base, p)))) {
         const refused = {
           success: false,
-          error: 'facts.jsonl and .kl/ are written only through the case tools. Use the Ledger tool (or Brief, Decide, Recommend) instead.'
+          error: 'facts.jsonl, brief.md, case.yaml and .kl/ are written only through the case tools. Use the Ledger tool for facts and the Brief tool for the brief (or Decide, Recommend) instead.'
         };
         this.emit('postExecute', { toolName, parameters: effectiveParameters, result: refused });
         return refused;

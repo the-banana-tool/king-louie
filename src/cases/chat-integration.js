@@ -23,7 +23,7 @@ const CASE_MODE_PROMPT = [
   '- Load-bearing unknowns come first. If one blocks the objective, say so and ask. Do not work around it with an assumption.',
   '- Recommendations go through the Recommend tool. If it refuses, fix the cited facts or present the unknowns. Do not restate a refused recommendation in prose.',
   '- When an approach fails, report what happened and stop, with at most one recommendation. Do not start a new plan unasked.',
-  '- Never edit facts.jsonl or anything under .kl/ directly. The case tools are the only write path.'
+  '- Never edit facts.jsonl, brief.md, case.yaml or anything under .kl/ directly. The case tools are the only write path.'
 ].join('\n');
 
 function shapeToolDefinitions(definitions, attached, registry) {
@@ -72,6 +72,11 @@ function realpathNearest(absPath) {
   }
 }
 
+// Files at the case root the model changes only through the case tools
+// (Ledger for facts, Brief and gating for brief.md and case.yaml).
+// Compared after case folding, so the names are lower case.
+const PROTECTED_ROOT_FILES = new Set(['facts.jsonl', 'case.yaml', 'brief.md']);
+
 function isProtectedCasePath(caseDir, absolutePath) {
   if (!caseDir || !absolutePath) return false;
 
@@ -97,7 +102,7 @@ function isProtectedCasePath(caseDir, absolutePath) {
     return fold(base.replace(/[. ]+$/, ''));
   });
 
-  return segments[0] === '.kl' || segments.join('/') === fold('facts.jsonl');
+  return segments[0] === '.kl' || PROTECTED_ROOT_FILES.has(segments.join('/'));
 }
 
 const MIN_QUOTE_LENGTH = 3;
