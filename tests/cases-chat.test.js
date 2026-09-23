@@ -12,7 +12,7 @@ initializeTools();
 // A minimal context for chat:sendMessage. Anything not overridden resolves to
 // a function returning null, which the send path treats as "feature absent".
 // If the handler starts dereferencing another context function, add it here.
-function harness({ caseId = 'case-1', beginError = null, loopError = null, hookResult = null, loopContent = 'Answer text' } = {}) {
+function harness({ caseId = 'case-1', beginError = null, inferenceErrorOnCall = 0, loopWait = null, loopError = null, hookResult = null, loopContent = 'Answer text' } = {}) {
   const calls = { begin: [], end: [], executorOptions: null, run: null, resolveInferenceCalls: 0 };
   const chat = { id: 'chat-1', title: 'Case chat', caseId, messages: [{ id: 'm0', sender: 'assistant', text: 'How can I help you?' }] };
   const runtime = {
@@ -24,8 +24,13 @@ function harness({ caseId = 'case-1', beginError = null, loopError = null, hookR
     endTurn: async (turn, opts) => { calls.end.push({ turn, ...opts }); return 'abc1234'; }
   };
   class FakeLoop {
+    constructor(_provider, _executor, loopOptions = {}) {
+      calls.loopOptions = loopOptions;
+    }
+
     async run(messages, tools, options) {
       calls.run = { messages, tools, options };
+      if (loopWait) await loopWait;
       if (loopError) throw loopError;
       return { content: loopContent, llm: { calls: [], totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 } } };
     }
@@ -37,6 +42,7 @@ function harness({ caseId = 'case-1', beginError = null, loopError = null, hookR
     runHookEvent: async () => hookResult || {},
     resolveInference: async () => {
       calls.resolveInferenceCalls += 1;
+      if (calls.resolveInferenceCalls === inferenceErrorOnCall) throw new Error('no provider configured');
       return {
         providerType: 'openai',
         provider: { sendMessageWithTools: async () => ({}), streamMessage: async () => ({}) },
@@ -65,7 +71,8 @@ function harness({ caseId = 'case-1', beginError = null, loopError = null, hookR
   registerChatHandlers({ handle: (channel, fn) => handlers.set(channel, fn), on: () => {} }, context);
   const event = { sender: { send() {}, isDestroyed: () => false } };
   const send = (payload = {}) => handlers.get(IPC.CHAT_SEND_MESSAGE)(event, { chatId: 'chat-1', message: 'What should I do next?', ...payload });
-  return { calls, send, chat };
+  const stop = () => handlers.get(IPC.CHAT_STOP_RESPONSE)(event, { chatId: 'chat-1' });
+  return { calls, send, stop, chat };
 }
 
 describe('chat:sendMessage in case mode', () => {
@@ -137,6 +144,21 @@ describe('chat:sendMessage in case mode', () => {
     assert.strictEqual(calls.end.length, 1);
     assert.match(calls.end[0].summary, /^turn failed: provider exploded/);
     assert.strictEqual(calls.end[0].journal, null);
+  });
+
+  it('a second send that fails early leaves the running turn stoppable', async () => {
+    let release;
+    const loopWait = new Promise((r) => { release = r; });
+    const { calls, send, stop } = harness({ caseId: null, inferenceErrorOnCall: 2, loopWait });
+    const first = send({ agentMode: true });
+    while (!calls.run) await new Promise((r) => setImmediate(r));
+    const second = await send({ agentMode: true });
+    assert.strictEqual(second.ok, false);
+    const stopped = await stop();
+    assert.strictEqual(stopped.ok, true, 'the first run can still be stopped');
+    assert.strictEqual(calls.loopOptions.abortSignal.aborted, true);
+    release();
+    await first;
   });
 
   it('does not journal the "(No response)" placeholder', async () => {

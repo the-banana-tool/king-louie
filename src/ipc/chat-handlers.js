@@ -668,7 +668,8 @@ function registerChatHandlers(ipcMain, context = {}) {
 
       return updatedChat;
     } catch (error) {
-      activeRuns.delete(chatId);
+      // An early failure never registered this run; leave another run's controller alone.
+      if (activeRuns.get(chatId) === abortController) activeRuns.delete(chatId);
       await endCaseTurn({ summary: `turn failed: ${error?.message || error}`, journal: null });
       if (abortController.signal.aborted) {
         safeSend(event.sender, 'chat:messageComplete', {
