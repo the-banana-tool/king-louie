@@ -221,3 +221,45 @@ describe('createCore workingDirectory', () => {
     assert.strictEqual(fs.realpathSync(executor.workingDirectory), fs.realpathSync(perCall));
   });
 });
+
+// Copilot review comment C10 (PR #28): createCore starts the webhook listener
+// fire-and-forget. `WebhookServer.start()` assigns `this.httpServer`
+// synchronously and only nulls it when the bind rejects, so core.start() could
+// return with a non-null handle and a doomed bind — and service mode's
+// assertEnabledListenersBound, which reads exactly that handle, let the
+// service report {"event":"ready"} with features.webhooks on and no listener.
+describe('createCore: listener readiness', () => {
+  const http = require('http');
+
+  it('whenListenersSettled waits for a webhook bind that is going to fail', async () => {
+    const squatter = http.createServer(() => {});
+    await new Promise((resolve) => squatter.listen(0, '127.0.0.1', resolve));
+    const taken = squatter.address().port;
+
+    const { deps } = makeDeps();
+    const core = createCore({
+      ...deps,
+      features: { ...deps.features, webhooks: true },
+      ports: { gateway: 18793, webhook: taken }
+    });
+    try {
+      await core.start();
+      // This is the state run.js used to judge: a handle that is not a bind.
+      assert.notStrictEqual(core.getWebhookServer().httpServer, null);
+
+      await core.whenListenersSettled();
+      assert.strictEqual(core.getWebhookServer().httpServer, null, 'a refused bind must read as unbound');
+    } finally {
+      await core.shutdown();
+      await new Promise((resolve) => squatter.close(resolve));
+    }
+  });
+
+  it('whenListenersSettled resolves immediately when webhooks are off', async () => {
+    const { deps } = makeDeps();
+    const core = createCore(deps);
+    await core.start();
+    await core.whenListenersSettled();
+    await core.shutdown();
+  });
+});

@@ -115,3 +115,95 @@ describe('acquireInstanceLock', () => {
     assert.strictEqual(readPidfile(dir), 4242, 'a successor claim must survive our release');
   });
 });
+
+// The guard above is only worth anything if the object `runService` holds
+// actually answers these. It did not: `getGatewayServer`/`getWebhookServer`
+// lived on `core.context`, not on the object createCore returns, so
+// assertEnabledListenersBound threw "core.getGatewayServer is not a function"
+// the moment features.gateway or features.webhooks was on — the service
+// refused to start with a listener enabled, whether or not it bound, and the
+// squatted-port case it exists to catch was never reached. Copilot review
+// comment C10 (PR #28) is the other half: the webhook bind is fire-and-forget,
+// so its handle reads as non-null while the bind is still in flight.
+describe('loadProfile("agent") listener readiness', { timeout: 120000 }, () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const http = require('http');
+  const { loadProfile } = require('../src/service/run');
+  const { ensureServicePaths, ensurePrivateDir } = require('../src/platform/paths');
+
+  const dirs = [];
+  after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
+  function dataDir() {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-listen-'));
+    dirs.push(d);
+    ensureServicePaths(d);
+    const workspace = path.join(d, 'workspace');
+    ensurePrivateDir(workspace);
+    return { dataDir: d, workspace };
+  }
+  const allOff = { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false };
+
+  async function freePort() {
+    const s = http.createServer();
+    await new Promise((resolve) => s.listen(0, '127.0.0.1', resolve));
+    const port = s.address().port;
+    await new Promise((resolve) => s.close(resolve));
+    return port;
+  }
+
+  it('starts with the gateway and webhook listeners enabled and bound', async () => {
+    const { dataDir: dir, workspace } = dataDir();
+    const ports = { gateway: await freePort(), webhook: await freePort() };
+    const running = await loadProfile('agent').start({
+      dataDir: dir,
+      features: { ...allOff, gateway: true, webhooks: true },
+      ports,
+      workspace
+    });
+    await running.stop();
+  });
+
+  it('refuses to run when an enabled gateway port is already taken', async () => {
+    const { dataDir: dir, workspace } = dataDir();
+    const squatter = http.createServer(() => {});
+    await new Promise((resolve) => squatter.listen(0, '127.0.0.1', resolve));
+    const ports = { gateway: squatter.address().port, webhook: await freePort() };
+    try {
+      await assert.rejects(
+        () => loadProfile('agent').start({
+          dataDir: dir,
+          features: { ...allOff, gateway: true },
+          ports,
+          workspace
+        }),
+        /refusing to run without gateway/
+      );
+    } finally {
+      await new Promise((resolve) => squatter.close(resolve));
+    }
+  });
+
+  // The C10 race: the webhook handle is assigned synchronously inside start(),
+  // so without awaiting whenListenersSettled this read as bound.
+  it('refuses to run when an enabled webhook port is already taken', async () => {
+    const { dataDir: dir, workspace } = dataDir();
+    const squatter = http.createServer(() => {});
+    await new Promise((resolve) => squatter.listen(0, '127.0.0.1', resolve));
+    const ports = { gateway: await freePort(), webhook: squatter.address().port };
+    try {
+      await assert.rejects(
+        () => loadProfile('agent').start({
+          dataDir: dir,
+          features: { ...allOff, webhooks: true },
+          ports,
+          workspace
+        }),
+        /refusing to run without webhooks/
+      );
+    } finally {
+      await new Promise((resolve) => squatter.close(resolve));
+    }
+  });
+});

@@ -19,8 +19,11 @@ const log = createLogger('service');
 // notice. Refuse to start instead.
 function assertEnabledListenersBound(core, features) {
   const missing = [];
-  // Both servers null their handle when start() rejects, so "has a handle"
-  // is exactly "bound" (src/gateway/gateway-server.js, src/webhooks/webhook-server.js).
+  // Both servers null their handle when start() rejects, so "has a handle" is
+  // exactly "bound" (src/gateway/gateway-server.js,
+  // src/webhooks/webhook-server.js) — but only once that start() has settled.
+  // The webhook one assigns its handle synchronously and is kicked off
+  // fire-and-forget, so callers must await core.whenListenersSettled() first.
   if (features.gateway && !core.getGatewayServer()?.wss) missing.push('gateway');
   if (features.webhooks && !core.getWebhookServer()?.httpServer) missing.push('webhooks');
   if (missing.length === 0) return;
@@ -52,6 +55,10 @@ function loadProfile(profile) {
         });
         await core.start();
         try {
+          // createCore starts the webhook listener fire-and-forget, so
+          // core.start() can return while its bind is still in flight and its
+          // handle already non-null. Wait for it before judging.
+          await core.whenListenersSettled();
           assertEnabledListenersBound(core, features);
         } catch (err) {
           // Don't leave a half-started core (and its cron timers) behind.

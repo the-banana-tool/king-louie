@@ -187,6 +187,13 @@ function createCore(deps = {}) {
   let webhookRegistry;
   let webhookHandler;
   let webhookServer;
+  // Resolves once the webhook listener's bind has settled, one way or the
+  // other. `WebhookServer.start()` assigns `this.httpServer` synchronously and
+  // only nulls it when the bind rejects, so between the fire-and-forget call
+  // below and that rejection "has a handle" reads as "bound" to anyone
+  // checking — which is how service mode could report itself ready with
+  // `features.webhooks` on and no webhook listener (src/service/run.js).
+  let webhookListenerSettled = Promise.resolve();
   let workflowEngine;
   let plannerExecutor;
   let llmRouter;
@@ -2365,7 +2372,11 @@ function createCore(deps = {}) {
     webhookHandler = new WebhookHandler(webhookRegistry, sessionManager, agentExecutorAdapter);
     webhookServer = new WebhookServer(gatewayServer, webhookHandler, { port: ports.webhook });
     if (features.webhooks) {
-      webhookServer.start().catch(err => log.warn(`Webhook server start failed: ${err.message}`));
+      // Still not awaited here — a slow bind must not hold up start() for the
+      // Electron host — but the promise is kept so a host that needs to know
+      // can wait for it (core.whenListenersSettled).
+      webhookListenerSettled = webhookServer.start()
+        .catch(err => log.warn(`Webhook server start failed: ${err.message}`));
     }
 
     // Initialize mesh networking (peer-to-peer communication between king-louie instances)
@@ -2702,6 +2713,10 @@ function createCore(deps = {}) {
     webhookServer,
     getWebhookRegistry: () => webhookRegistry,
     getWebhookServer: () => webhookServer,
+    // Resolves when every listener start() this core kicked off has settled.
+    // A host that refuses to run without an enabled listener has to wait for
+    // this before deciding; see assertEnabledListenersBound.
+    whenListenersSettled: () => webhookListenerSettled,
 
     // Wizard / Diagnostics
     getStore: () => store,
@@ -2738,7 +2753,16 @@ function createCore(deps = {}) {
     vault,
     getSettings,
     saveProviderToken,
-    getMeshContext: () => meshContext
+    getMeshContext: () => meshContext,
+    // Service mode decides whether an enabled listener actually came up
+    // through these (assertEnabledListenersBound in src/service/run.js). They
+    // existed only on `context`, so that check threw
+    // "core.getGatewayServer is not a function" the moment `features.gateway`
+    // or `features.webhooks` was on — the service refused to start with a
+    // listener enabled, and the guard itself never ran.
+    getGatewayServer: () => gatewayServer,
+    getWebhookServer: () => webhookServer,
+    whenListenersSettled: () => webhookListenerSettled
   };
 }
 
