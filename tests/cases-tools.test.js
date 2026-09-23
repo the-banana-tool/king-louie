@@ -19,10 +19,10 @@ after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true 
 const tmp = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-tools-')); dirs.push(d); return d; };
 const src = { kind: 'url', ref: 'https://records.example.org/1' };
 
-async function setup(title = 'Lakeside lot') {
+async function setup(title = 'Lakeside lot', ownerMessages) {
   const runtime = new CaseRuntime({ root: tmp() });
   const info = await runtime.createCase({ title, objective: 'Convert the lot to cash' });
-  const caseContext = { runtime, caseId: info.id, turnId: 'turn-1', dir: info.dir };
+  const caseContext = { runtime, caseId: info.id, turnId: 'turn-1', dir: info.dir, ownerMessages };
   return { runtime, info, opts: { caseContext } };
 }
 
@@ -41,10 +41,10 @@ describe('case tools', () => {
   });
 
   it('Ledger asserts, infers, queries and fills in a user-message source', async () => {
-    const { opts } = await setup();
-    const a = await LedgerTool.execute({ action: 'assert', stmt: 'Owner needs cash by spring', subject: 'owner', attr: 'deadline', value: '2027-03', provenance: 'user' }, opts);
+    const { opts } = await setup('Lakeside lot', ['I need the cash by spring, no later than March 2027.']);
+    const a = await LedgerTool.execute({ action: 'assert', stmt: 'Owner needs cash by spring', subject: 'owner', attr: 'deadline', value: '2027-03', provenance: 'user', quote: 'I need the cash by spring' }, opts);
     assert.strictEqual(a.ok, true);
-    assert.deepStrictEqual(a.fact.source, { kind: 'user-message', ref: 'turn-1' });
+    assert.deepStrictEqual(a.fact.source, { kind: 'user-message', ref: 'turn-1', quote: 'I need the cash by spring' });
     assert.strictEqual(a.fact.addedBy, 'turn-1');
     const i = await LedgerTool.execute({ action: 'infer', stmt: 'Owner is motivated', subject: 'owner', attr: 'motivation', value: 'high', basis: [a.fact.id] }, opts);
     assert.strictEqual(i.fact.provenance, 'inferred');
@@ -53,6 +53,25 @@ describe('case tools', () => {
     assert.match(bad.error, /source/);
     const q = await LedgerTool.execute({ action: 'query', filter: { subject: 'owner' } }, opts);
     assert.strictEqual(q.facts.length, 2);
+  });
+
+  it('Ledger assert with provenance user is refused without a matching owner quote', async () => {
+    const noMessages = await setup('Lakeside lot');
+    const a = await LedgerTool.execute({ action: 'assert', stmt: 'Owner needs cash', subject: 'owner', attr: 'deadline', value: '2027-03', provenance: 'user', quote: 'I need the cash' }, noMessages.opts);
+    assert.strictEqual(a.ok, false);
+    assert.match(a.error, /owner/i);
+
+    const withMessages = await setup('Lakeside lot', ['The lot has a shed near the road.']);
+    const b = await LedgerTool.execute({ action: 'assert', stmt: 'Owner needs cash', subject: 'owner', attr: 'deadline', value: '2027-03', provenance: 'user', quote: 'I need the cash' }, withMessages.opts);
+    assert.strictEqual(b.ok, false);
+    assert.match(b.error, /quote/i);
+
+    const shortQuote = await LedgerTool.execute({ action: 'assert', stmt: 'Owner needs cash', subject: 'owner', attr: 'deadline', value: '2027-03', provenance: 'user', quote: 'ok' }, withMessages.opts);
+    assert.strictEqual(shortQuote.ok, false);
+    assert.match(shortQuote.error, /3 characters/);
+
+    const noQuote = await LedgerTool.execute({ action: 'assert', stmt: 'Owner needs cash', subject: 'owner', attr: 'deadline', value: '2027-03', provenance: 'user' }, withMessages.opts);
+    assert.strictEqual(noQuote.ok, false);
   });
 
   it('Ledger unknown refuses exact duplicates and surfaces other cases', async () => {
@@ -68,16 +87,32 @@ describe('case tools', () => {
   });
 
   it('Brief reads, refuses owner-only fields from the model, journals updates and completes gating', async () => {
-    const { runtime, info, opts } = await setup();
+    const { runtime, info, opts } = await setup('Lakeside lot', ['I need the cash from selling this lot.']);
     const read = await BriefTool.execute({ action: 'read' }, opts);
     assert.deepStrictEqual(read.missingForGating, ['why', 'successCriteria']);
     const refused = await BriefTool.execute({ action: 'update', field: 'why', value: 'I think they need cash', provenance: 'model' }, opts);
     assert.strictEqual(refused.ok, false);
-    await BriefTool.execute({ action: 'update', field: 'why', value: 'Need the cash', provenance: 'user', reason: 'Owner said so' }, opts);
+    await BriefTool.execute({ action: 'update', field: 'why', value: 'Need the cash', provenance: 'user', reason: 'Owner said so', quote: 'I need the cash' }, opts);
     await BriefTool.execute({ action: 'append', field: 'successCriteria', item: 'Closed by year end' }, opts);
     const done = await BriefTool.execute({ action: 'completeGating' }, opts);
     assert.deepStrictEqual(done, { ok: true, status: 'active' });
     assert.match(runtime.records(info.id).lastJournal().file, /-brief/);
+  });
+
+  it('Brief owner-only fields with provenance user are refused without a matching owner quote, and stay refused for the model', async () => {
+    const { opts } = await setup('Lakeside lot', ['I have already tried listing it myself.']);
+    const noQuote = await BriefTool.execute({ action: 'update', field: 'hardConstraints', value: ['No sale below cost'], provenance: 'user' }, opts);
+    assert.strictEqual(noQuote.ok, false);
+    assert.match(noQuote.error, /quote/i);
+
+    const nonMatching = await BriefTool.execute({ action: 'append', field: 'alreadyTried', item: 'Listed with an agent', provenance: 'user', quote: 'nothing like this appears anywhere' }, opts);
+    assert.strictEqual(nonMatching.ok, false);
+
+    const matching = await BriefTool.execute({ action: 'append', field: 'alreadyTried', item: 'Listed it myself', provenance: 'user', quote: 'I have already tried listing it myself' }, opts);
+    assert.strictEqual(matching.ok, true);
+
+    const modelOnly = await BriefTool.execute({ action: 'update', field: 'hardConstraints', value: ['No sale below cost'], provenance: 'model' }, opts);
+    assert.strictEqual(modelOnly.ok, false);
   });
 
   it('Decide records a decision and marks cited facts load-bearing', async () => {
@@ -134,9 +169,56 @@ describe('case-mode helpers', () => {
   });
 });
 
+describe('isProtectedCasePath hardening', () => {
+  it('is case-insensitive on win32/darwin, case-sensitive elsewhere', () => {
+    const dir = path.resolve(tmp(), 'case-ci');
+    const expectFold = process.platform === 'win32' || process.platform === 'darwin';
+    assert.strictEqual(isProtectedCasePath(dir, path.join(dir, 'FACTS.JSONL')), expectFold);
+    assert.strictEqual(isProtectedCasePath(dir, path.join(dir, '.KL', 'x')), expectFold);
+  });
+
+  it('strips an NTFS alternate-data-stream suffix from a segment', () => {
+    const dir = path.resolve(tmp(), 'case-ads');
+    assert.strictEqual(isProtectedCasePath(dir, `${path.join(dir, 'facts.jsonl')}::$DATA`), true);
+  });
+
+  it('strips trailing dots and spaces from the protected segment', () => {
+    const dir = path.resolve(tmp(), 'case-trail');
+    assert.strictEqual(isProtectedCasePath(dir, path.join(dir, '.kl ', 'x')), true);
+    assert.strictEqual(isProtectedCasePath(dir, path.join(dir, '.kl.', 'x')), true);
+  });
+
+  it('strips a \\\\?\\ long-path prefix before comparing', { skip: process.platform !== 'win32' }, () => {
+    const dir = path.resolve(tmp(), 'case-long');
+    const longPath = `\\\\?\\${path.join(dir, 'facts.jsonl')}`;
+    assert.strictEqual(isProtectedCasePath(dir, longPath), true);
+  });
+
+  it('resolves a symlink/junction into the case dir before comparing', (t) => {
+    const root = tmp();
+    const dir = path.join(root, 'case-target');
+    fs.mkdirSync(dir);
+    const link = path.join(root, 'case-link');
+    try {
+      fs.symlinkSync(dir, link, process.platform === 'win32' ? 'junction' : 'dir');
+    } catch (err) {
+      t.skip(`cannot create a symlink/junction in this environment: ${err.message}`);
+      return;
+    }
+    assert.strictEqual(isProtectedCasePath(dir, path.join(link, 'facts.jsonl')), true);
+  });
+});
+
 describe('ToolExecutor ledger write guard', () => {
   it('refuses Write, Edit and MultiEdit on protected case files', async () => {
     const { info } = await setup();
+    const factsPath = path.join(info.dir, 'facts.jsonl');
+    // Give both protected targets real content containing the Edit/MultiEdit
+    // old_string, so these checks would actually succeed (proving they
+    // exercise the guard) if the guard were removed.
+    fs.writeFileSync(factsPath, 'a\n');
+    const klFile = path.join(info.dir, '.kl', 'probe.json');
+    fs.writeFileSync(klFile, 'a\n');
     const executor = new ToolExecutor({
       workingDirectory: info.dir,
       allowedDirectories: [info.dir],
@@ -145,15 +227,43 @@ describe('ToolExecutor ledger write guard', () => {
       useSandbox: false,
       extraToolOptions: { caseContext: { dir: info.dir } }
     });
-    const factsPath = path.join(info.dir, 'facts.jsonl');
     const before = fs.readFileSync(factsPath, 'utf8');
+    const beforeKl = fs.readFileSync(klFile, 'utf8');
     const w = await executor.execute('Write', { file_path: factsPath, content: '{"kind":"fact"}\n' });
     assert.strictEqual(w.success, false);
     assert.match(w.error, /Ledger tool/);
-    const e = await executor.execute('Edit', { file_path: path.join(info.dir, '.kl', 'x.json'), old_string: 'a', new_string: 'b' });
+    const e = await executor.execute('Edit', { file_path: klFile, old_string: 'a', new_string: 'b' });
     assert.strictEqual(e.success, false);
+    assert.match(e.error, /Ledger tool/);
     const m = await executor.execute('MultiEdit', { edits: [{ file_path: factsPath, old_string: 'a', new_string: 'b' }] });
     assert.strictEqual(m.success, false);
+    assert.match(m.error, /Ledger tool/);
+    assert.strictEqual(fs.readFileSync(factsPath, 'utf8'), before);
+    assert.strictEqual(fs.readFileSync(klFile, 'utf8'), beforeKl);
+  });
+
+  it('refuses a case-insensitive bypass like FACTS.JSONL on a case-insensitive filesystem', async () => {
+    const { info } = await setup();
+    const factsPath = path.join(info.dir, 'facts.jsonl');
+    fs.writeFileSync(factsPath, 'a\n');
+    const executor = new ToolExecutor({
+      workingDirectory: info.dir,
+      allowedDirectories: [info.dir],
+      runtimeEnvironment: { platform: process.platform },
+      requireApproval: false,
+      useSandbox: false,
+      extraToolOptions: { caseContext: { dir: info.dir } }
+    });
+    const before = fs.readFileSync(factsPath, 'utf8');
+    const upperPath = path.join(info.dir, 'FACTS.JSONL');
+    const w = await executor.execute('Write', { file_path: upperPath, content: 'x\n' });
+    if (process.platform === 'win32' || process.platform === 'darwin') {
+      assert.strictEqual(w.success, false);
+      assert.match(w.error, /Ledger tool/);
+    } else {
+      // Not a real bypass on a case-sensitive filesystem: a distinct file.
+      fs.rmSync(upperPath, { force: true });
+    }
     assert.strictEqual(fs.readFileSync(factsPath, 'utf8'), before);
   });
 });

@@ -4,6 +4,8 @@
 // executor's extraToolOptions.
 const { Tool } = require('../tool-schema');
 const { recommendationGate, findDuplicates } = require('../../cases/gates');
+const { requireOwnerQuote } = require('../../cases/chat-integration');
+const { USER_ONLY_FIELDS } = require('../../cases/brief');
 
 const NO_CASE = Object.freeze({
   ok: false,
@@ -22,7 +24,7 @@ async function withCase(options, fn) {
 
 const LedgerTool = new Tool({
   name: 'Ledger',
-  description: 'Read and write the case fact ledger. assert: a fact with a source (provenance "sourced", "user" for what the owner said, or "external-agent"). infer: your own derivation, with basis fact ids. unknown: something not known, with what it changes, who can answer, and how. retract: withdraw a fact. query: list facts. Corrections supersede; nothing is edited in place.',
+  description: 'Read and write the case fact ledger. assert: a fact with a source (provenance "sourced" with a source object; "user" for what the owner actually said, which requires a "quote" of their own words matching this chat\'s owner messages; or "external-agent" with a source). infer: your own derivation, with basis fact ids. unknown: something not known, with what it changes, who can answer, and how. retract: withdraw a fact. query: list facts. Corrections supersede; nothing is edited in place.',
   parameters: {
     type: 'object',
     properties: {
@@ -34,6 +36,7 @@ const LedgerTool = new Tool({
       unit: { type: 'string' },
       provenance: { type: 'string', enum: ['sourced', 'user', 'external-agent'] },
       source: { type: 'object', description: '{ kind: "url" | "document" | "call" | "api" | "user-message", ref: string }' },
+      quote: { type: 'string', description: 'Required for assert with provenance "user": a substring (case/whitespace-insensitive) of something the owner actually said in this chat. The fact\'s source is built from this, not from "source".' },
       category: { type: 'string', enum: ['personal', 'financial', 'legal', 'health', 'property', 'ops', 'general'] },
       confidence: { type: 'number', minimum: 0, maximum: 1 },
       supersedes: { type: 'string', description: 'Fact id this corrects or answers' },
@@ -54,7 +57,11 @@ const LedgerTool = new Tool({
     switch (params.action) {
       case 'assert': {
         const input = { ...params, addedBy: ctx.turnId };
-        if (input.provenance === 'user' && !input.source) input.source = { kind: 'user-message', ref: ctx.turnId };
+        if (input.provenance === 'user') {
+          const check = requireOwnerQuote({ quote: input.quote, ownerMessages: ctx.ownerMessages });
+          if (!check.ok) return check;
+          input.source = { kind: 'user-message', ref: ctx.turnId, quote: check.quote };
+        }
         return { ok: true, fact: ledger.assert(input) };
       }
       case 'infer':
@@ -99,7 +106,7 @@ const LedgerTool = new Tool({
 
 const BriefTool = new Tool({
   name: 'Brief',
-  description: 'Read or update the case brief. "why", "hardConstraints" and "alreadyTried" can only be set from what the owner said (provenance "user"). completeGating marks the brief ready; recommendations are refused until then.',
+  description: 'Read or update the case brief. "why", "hardConstraints" and "alreadyTried" can only be set from what the owner said (provenance "user"), which also requires a "quote" of the owner\'s own words matching this chat\'s owner messages. completeGating marks the brief ready; recommendations are refused until then.',
   parameters: {
     type: 'object',
     properties: {
@@ -108,6 +115,7 @@ const BriefTool = new Tool({
       value: { description: 'For update: the new value' },
       item: { type: 'string', description: 'For append: one list entry' },
       provenance: { type: 'string', enum: ['user', 'model'] },
+      quote: { type: 'string', description: 'Required when updating/appending "why", "hardConstraints" or "alreadyTried" with provenance "user": a substring of something the owner actually said in this chat.' },
       reason: { type: 'string' }
     },
     required: ['action']
@@ -123,12 +131,18 @@ const BriefTool = new Tool({
     }
     if (!params.field) return { ok: false, error: `${params.action} needs "field".` };
     const provenance = params.provenance || 'model';
+    let quoteNote = '';
+    if (USER_ONLY_FIELDS.has(params.field) && provenance === 'user') {
+      const check = requireOwnerQuote({ quote: params.quote, ownerMessages: ctx.ownerMessages });
+      if (!check.ok) return check;
+      quoteNote = ` (quote: "${check.quote}")`;
+    }
     const data = params.action === 'append'
       ? brief.append(params.field, params.item, { provenance })
       : brief.update(params.field, params.value, { provenance });
     ctx.runtime.records(ctx.caseId).writeJournal(
       'brief',
-      `Brief ${params.field} ${params.action === 'append' ? 'appended' : 'updated'} (${provenance})${params.reason ? `: ${params.reason}` : ''}\n\n${JSON.stringify(params.action === 'append' ? params.item : params.value)}`
+      `Brief ${params.field} ${params.action === 'append' ? 'appended' : 'updated'} (${provenance})${params.reason ? `: ${params.reason}` : ''}${quoteNote}\n\n${JSON.stringify(params.action === 'append' ? params.item : params.value)}`
     );
     return { ok: true, brief: data };
   })
