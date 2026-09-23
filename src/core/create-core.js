@@ -50,6 +50,7 @@ const CronExecutor = require('../cron/cron-executor');
 const CronScheduler = require('../cron/cron-scheduler');
 const { MemoryStore, MemoryManager } = require('../memory');
 const { CheckpointManager } = require('../checkpoints');
+const { CaseRuntime, resolveCasesRoot } = require('../cases');
 const ContextAssembler = require('../context/context-assembler');
 const ConversationCompactor = require('../context/conversation-compactor');
 const { buildSystemSections } = require('../context/system-sections');
@@ -1935,6 +1936,9 @@ function createCore(deps = {}) {
       extraToolOptions: {
         get agentExecutorAdapter() { return agentExecutorAdapter; },
         get backgroundTaskManager() { return backgroundTaskManager; },
+        // Case mode: the chat send path passes { runtime, caseId, turnId, dir }.
+        // The case tools read it, and ToolExecutor's ledger write guard uses dir.
+        get caseContext() { return executorOptions.caseContext || null; },
         getAgent,
         listAgents,
         toolRegistry,
@@ -2590,6 +2594,12 @@ function createCore(deps = {}) {
     if (usageTracker) usageTracker.reset();
   };
 
+  // Constructing the runtime touches nothing on disk; the root directory is
+  // created with the first case.
+  const caseRuntime = new CaseRuntime({
+    root: resolveCasesRoot({ settings: getSettings(), env: process.env, dataDir: userDataPath })
+  });
+
   const context = {
     // Chat
     createId,
@@ -2618,6 +2628,7 @@ function createCore(deps = {}) {
     getUsageTracker: () => usageTracker,
     createUsageRecordFromMetrics,
     getSettings,
+    getCaseRuntime: () => caseRuntime,
 
     // Tool
     pendingApprovalResolvers,
