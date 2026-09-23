@@ -1,6 +1,7 @@
 // src/cases/gates.js
 // Pure gate functions (spec §7). No I/O: callers pass materialized facts.
-const norm = (v) => String(v ?? '').trim().toLowerCase();
+const { norm } = require('./jsonl');
+
 const key = (f) => `${norm(f.subject)}|${norm(f.attr)}`;
 
 function tokens(text) {

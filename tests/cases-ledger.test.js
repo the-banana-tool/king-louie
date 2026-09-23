@@ -125,4 +125,14 @@ describe('FactLedger', () => {
     assert.strictEqual(l.query({ provenance: 'unknown' }).length, 1);
     assert.strictEqual(l.query({ text: 'b' }).length, 1);
   });
+
+  it('keeps both facts when the file lost its final newline', () => {
+    const l = newLedger();
+    l.assert({ stmt: 'Lot is 2.12 acres', subject: 'lot', attr: 'acreage', value: 2.12, source: src });
+    fs.writeFileSync(l.path, fs.readFileSync(l.path, 'utf8').replace(/\n$/, ''));
+    l.assert({ stmt: 'Flood zone X', subject: 'lot', attr: 'flood-zone', value: 'X', source: src });
+    const { facts, errors } = l.view();
+    assert.deepStrictEqual(errors, []);
+    assert.deepStrictEqual([...facts.keys()], ['f-0001', 'f-0002']);
+  });
 });

@@ -93,4 +93,12 @@ describe('CaseRecords', () => {
     assert.ok(!text.includes('f-0003'));
     assert.match(text, /Ledger tool/);
   });
+
+  it('keeps both decisions when decisions.jsonl lost its final newline', () => {
+    const r = new CaseRecords(newCaseDir());
+    r.recordDecision({ decision: 'List the Lakeside lot at 65k' });
+    fs.writeFileSync(r.decisionsJsonl, fs.readFileSync(r.decisionsJsonl, 'utf8').replace(/\n$/, ''));
+    r.recordDecision({ decision: 'Drop the mailer channel' });
+    assert.deepStrictEqual(r.decisions().map((d) => d.id), ['D-001', 'D-002']);
+  });
 });

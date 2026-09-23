@@ -1,9 +1,9 @@
 // src/cases/ledger.js
 // Append-only fact ledger (spec §4.4). Every change is a new line; the
 // current state of each fact is derived by replaying the file.
-const fs = require('fs');
 const path = require('path');
 const { createLogger } = require('../logging');
+const { appendJsonl, readJsonl, norm } = require('./jsonl');
 
 const log = createLogger('cases/ledger');
 
@@ -17,7 +17,6 @@ class LedgerError extends Error {
   }
 }
 
-const norm = (v) => String(v ?? '').trim().toLowerCase();
 
 function requireText(input, field) {
   if (typeof input[field] !== 'string' || !input[field].trim()) {
@@ -32,24 +31,8 @@ class FactLedger {
   }
 
   _entries() {
-    let text = '';
-    try {
-      text = fs.readFileSync(this.path, 'utf8');
-    } catch (err) {
-      if (err.code !== 'ENOENT') throw err;
-    }
-    const entries = [];
-    const errors = [];
-    text.split('\n').forEach((raw, i) => {
-      const line = raw.replace(/\r$/, '').trim();
-      if (!line) return;
-      try {
-        const entry = JSON.parse(line);
-        if (!entry || typeof entry !== 'object' || !entry.kind) throw new Error('missing "kind"');
-        entries.push(entry);
-      } catch (err) {
-        errors.push({ line: i + 1, message: err.message });
-      }
+    const { entries, errors } = readJsonl(this.path, (entry) => {
+      if (!entry || typeof entry !== 'object' || !entry.kind) throw new Error('missing "kind"');
     });
     if (errors.length) log.warn(`${this.path}: skipped ${errors.length} malformed line(s)`);
     return { entries, errors };
@@ -78,7 +61,7 @@ class FactLedger {
   }
 
   _append(entry) {
-    fs.appendFileSync(this.path, `${JSON.stringify(entry)}\n`);
+    appendJsonl(this.path, entry);
   }
 
   _nextId(facts) {

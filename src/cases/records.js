@@ -4,28 +4,14 @@
 const fs = require('fs');
 const path = require('path');
 const { createLogger } = require('../logging');
+const { appendJsonl, readJsonl: readJsonlEntries } = require('./jsonl');
 
 const log = createLogger('cases/records');
 
 function readJsonl(file) {
-  let text = '';
-  try {
-    text = fs.readFileSync(file, 'utf8');
-  } catch (err) {
-    if (err.code === 'ENOENT') return [];
-    throw err;
-  }
-  const out = [];
-  for (const raw of text.split('\n')) {
-    const line = raw.replace(/\r$/, '').trim();
-    if (!line) continue;
-    try {
-      out.push(JSON.parse(line));
-    } catch (err) {
-      log.warn(`${file}: skipped malformed line: ${err.message}`);
-    }
-  }
-  return out;
+  const { entries, errors } = readJsonlEntries(file);
+  for (const err of errors) log.warn(`${file}: skipped malformed line: ${err.message}`);
+  return entries;
 }
 
 const stamp = (d) => d.toISOString().slice(0, 16).replace('T', '-').replace(':', '');
@@ -45,7 +31,7 @@ class CaseRecords {
     if (typeof decision !== 'string' || !decision.trim()) throw new Error('"decision" text is required.');
     const id = `D-${String(this.decisions().length + 1).padStart(3, '0')}`;
     const record = { id, decision: decision.trim(), factIds, alternatives, at: new Date().toISOString() };
-    fs.appendFileSync(this.decisionsJsonl, `${JSON.stringify(record)}\n`);
+    appendJsonl(this.decisionsJsonl, record);
     const md = [
       '',
       `## ${id} — ${record.decision}`,
@@ -89,7 +75,7 @@ class CaseRecords {
   }
 
   recordRecommendation(rec) {
-    fs.appendFileSync(this.recommendationsJsonl, `${JSON.stringify({ ...rec, at: new Date().toISOString() })}\n`);
+    appendJsonl(this.recommendationsJsonl, { ...rec, at: new Date().toISOString() });
   }
 
   renderOpenItems(facts) {
