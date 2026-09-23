@@ -2,6 +2,8 @@
 // Minimal git CLI wrapper for case repositories. Every call is execFile with
 // an argument array, so titles and messages are never shell-interpreted.
 const { execFile } = require('child_process');
+const fs = require('fs');
+const path = require('path');
 const { promisify } = require('util');
 
 const run = promisify(execFile);
@@ -14,9 +16,42 @@ class GitUnavailableError extends Error {
   }
 }
 
+// A case repo never runs the owner's hooks or signs with the owner's key:
+// either could block or prompt on every turn.
+const CASE_GIT_CONFIG = ['-c', 'commit.gpgsign=false', '-c', 'core.hooksPath='];
+
 async function git(cwd, args) {
-  const { stdout } = await run('git', args, { cwd, windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
-  return stdout;
+  try {
+    const { stdout } = await run('git', [...CASE_GIT_CONFIG, ...args], { cwd, windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
+    return stdout;
+  } catch (err) {
+    // spawn reports a missing cwd as ENOENT too; only a present cwd means git is missing.
+    if (err.code === 'ENOENT' && fs.existsSync(cwd)) throw new GitUnavailableError();
+    throw err;
+  }
+}
+
+function samePath(a, b) {
+  const real = (p) => {
+    try { return fs.realpathSync.native(p); } catch { return path.resolve(p); }
+  };
+  const x = path.resolve(real(a));
+  const y = path.resolve(real(b));
+  return process.platform === 'win32' ? x.toLowerCase() === y.toLowerCase() : x === y;
+}
+
+// A case dir that lost its .git sits inside whatever repo encloses it;
+// committing there would sweep the case into someone else's history.
+async function requireOwnRepo(dir) {
+  let top = '';
+  try {
+    top = (await git(dir, ['rev-parse', '--show-toplevel'])).trim();
+  } catch (err) {
+    if (err instanceof GitUnavailableError) throw err;
+  }
+  if (!top || !samePath(top, dir)) {
+    throw new Error(`Case directory ${dir} is not its own git repository${top ? ` (git resolves it to ${top})` : ''}. Restore its .git folder or run "git init" in it before the next turn.`);
+  }
 }
 
 async function isGitAvailable() {
@@ -42,6 +77,7 @@ async function isDirty(dir) {
 }
 
 async function commitAll(dir, message) {
+  await requireOwnRepo(dir);
   if (!(await isDirty(dir))) return null;
   await git(dir, ['add', '-A']);
   await git(dir, ['commit', '-q', '-m', message]);
