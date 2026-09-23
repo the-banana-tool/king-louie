@@ -107,3 +107,7 @@ git repo under `<dataDir>/cases/` (override with `settings.cases.root` or
   `caseContext.ownerMessages`. The chat send path fills that list with the
   owner's own messages. Without a match, the tool refuses. Tests that exercise
   user provenance must supply `ownerMessages`.
+- Only `user` provenance is host-verified. `sourced` is model-declared, so a
+  sourced fact is only as good as the source the model names. The write guard
+  covers Write, Edit and MultiEdit, not Bash: in stage 1 a shell command can
+  still rewrite `facts.jsonl`.
