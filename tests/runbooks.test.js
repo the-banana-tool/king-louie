@@ -172,3 +172,52 @@ describe('JobManager', () => {
     assert.equal(manager.getJob(job2.job_id).status, 'cancelled');
   });
 });
+
+describe('JobManager concurrency limit', () => {
+  it('refuses a new runnable job once max_concurrent_jobs are queued or running', () => {
+    const manager = new JobManager({ maxConcurrentJobs: 1 });
+    const first = manager.createJob({ machine: 'm', runbook: 'a', tier: 'routine' });
+    assert.throws(() => manager.createJob({ machine: 'm', runbook: 'b', tier: 'routine' }), /max_concurrent_jobs/);
+
+    // An unsafe job only waits for approval, so it does not take a slot.
+    assert.equal(manager.createJob({ machine: 'm', runbook: 'c', tier: 'unsafe' }).status, 'awaiting_approval');
+
+    manager.updateJob(first.job_id, { status: 'succeeded' });
+    assert.equal(manager.createJob({ machine: 'm', runbook: 'b', tier: 'routine' }).status, 'queued');
+  });
+});
+
+describe('path parameters and symlinks', () => {
+  it('rejects a path that reaches outside allowed_roots through a symlink', (t) => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-roots-'));
+    try {
+      const root = path.join(base, 'root');
+      const outside = path.join(base, 'outside');
+      fs.mkdirSync(root);
+      fs.mkdirSync(outside);
+      try {
+        fs.symlinkSync(outside, path.join(root, 'escape'), 'junction');
+      } catch (err) {
+        t.skip(`cannot create a link here: ${err.code}`);
+        return;
+      }
+      assert.throws(() => validateParam({ type: 'path' }, path.join(root, 'escape', 'x'), [root]), /allowed_roots/);
+      assert.equal(validateParam({ type: 'path' }, path.join(root, 'new', 'file'), [root]), path.join(fs.realpathSync.native(root), 'new', 'file'));
+    } finally {
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('runbook engine module graph', () => {
+  it('does not load the agent stack, so the runbook profile can use it', () => {
+    const { execFileSync } = require('child_process');
+    const root = path.join(__dirname, '..');
+    const out = execFileSync(process.execPath, ['-e',
+      "require('./src/runbooks/runbook-engine'); process.stdout.write(JSON.stringify(Object.keys(require.cache)))"
+    ], { cwd: root, env: { ...process.env, KING_LOUIE_LOG_LEVEL: 'silent' } }).toString();
+    const loaded = JSON.parse(out).map((p) => path.relative(root, p).split(path.sep).join('/'));
+    const forbidden = ['src/providers/', 'src/execution/', 'src/tools/', 'src/browser/', 'src/channels/', 'src/mcp/', 'src/core/create-core'];
+    assert.deepEqual(loaded.filter((p) => forbidden.some((f) => p.startsWith(f))), []);
+  });
+});
