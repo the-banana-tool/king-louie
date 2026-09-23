@@ -14,8 +14,12 @@ const { createLogger } = require('../logging');
 const log = createLogger('cases/runtime');
 
 class CaseBusyError extends Error {
-  constructor(title) {
-    super(`Case "${title}" is busy with another turn. Try again when it finishes.`);
+  constructor(title, { pid, lockPath } = {}) {
+    const holder = pid ? ` in process ${pid}` : '';
+    const recover = lockPath
+      ? ` If that process is stuck or is not King Louie, quit it or delete ${lockPath}.`
+      : '';
+    super(`Case "${title}" is busy with another turn${holder}. Try again when it finishes.${recover}`);
     this.name = 'CaseBusyError';
     this.code = 'CASE_BUSY';
   }
@@ -38,11 +42,32 @@ function resolveCasesRoot({ settings, env = process.env, dataDir }) {
 
 const oneLine = (s, max = 72) => String(s || '').replace(/\s+/g, ' ').trim().slice(0, max);
 
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === 'EPERM';
+  }
+}
+
+function readLock(lock) {
+  try {
+    const held = JSON.parse(fs.readFileSync(lock, 'utf8'));
+    return held && typeof held === 'object' ? held : null;
+  } catch {
+    return null;
+  }
+}
+
 class CaseRuntime {
   constructor({ root, staleLockMs = 30 * 60 * 1000, orientationMaxChars = DEFAULT_MAX_CHARS }) {
     this.store = new CaseStore({ root });
     this.staleLockMs = staleLockMs;
     this.orientationMaxChars = orientationMaxChars;
+    // turnId -> { dir, timer }: the locks this runtime holds right now.
+    this.held = new Map();
   }
 
   get root() {
@@ -119,21 +144,61 @@ class CaseRuntime {
         } finally {
           fs.closeSync(fd);
         }
+        this._hold(meta.dir, turnId);
         return;
       } catch (err) {
         if (err.code !== 'EEXIST') throw err;
-        const age = Date.now() - fs.statSync(lock).mtimeMs;
-        if (attempt === 0 && age > this.staleLockMs) {
-          log.warn(`Reclaiming stale lock on case ${meta.slug} (${Math.round(age / 60000)} min old)`);
+        const holder = readLock(lock);
+        const stale = this._staleReason(lock, holder);
+        if (attempt === 0 && stale) {
+          log.warn(`Reclaiming stale lock on case ${meta.slug} (${stale})`);
           fs.rmSync(lock, { force: true });
           continue;
         }
-        throw new CaseBusyError(meta.title);
+        throw new CaseBusyError(meta.title, { pid: holder?.pid, lockPath: lock });
       }
     }
   }
 
+  // Why an existing lock can be taken over, or null while its holder is live.
+  _staleReason(lock, holder) {
+    if (holder && Number.isInteger(holder.pid)) {
+      if (holder.pid === process.pid) {
+        if (!this.held.has(holder.turnId)) return 'left by an earlier turn in this process';
+      } else if (!pidAlive(holder.pid)) {
+        return `process ${holder.pid} is gone`;
+      }
+    }
+    const age = Date.now() - fs.statSync(lock).mtimeMs;
+    if (age > this.staleLockMs) return `${Math.round(age / 60000)} min old`;
+    return null;
+  }
+
+  // Keep the held lock's mtime fresh so a long turn never looks stale.
+  _hold(dir, turnId) {
+    const lock = this._lockPath(dir);
+    const timer = setInterval(() => {
+      try {
+        const now = new Date();
+        fs.utimesSync(lock, now, now);
+      } catch (err) {
+        log.warn(`Could not refresh lock in ${dir}: ${err.message}`);
+      }
+    }, Math.max(10, Math.floor(this.staleLockMs / 3)));
+    timer.unref?.();
+    this.held.set(turnId, { dir, timer });
+  }
+
+  releaseAll() {
+    for (const [turnId, { dir }] of [...this.held]) this._release(dir, turnId);
+  }
+
   _release(dir, turnId) {
+    const entry = this.held.get(turnId);
+    if (entry && entry.dir === dir) {
+      clearInterval(entry.timer);
+      this.held.delete(turnId);
+    }
     const lock = this._lockPath(dir);
     try {
       const held = JSON.parse(fs.readFileSync(lock, 'utf8'));

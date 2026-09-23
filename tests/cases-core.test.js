@@ -57,6 +57,16 @@ describe('createCore cases wiring', () => {
     assert.strictEqual(core.context.getCaseRuntime().root, elsewhere);
   });
 
+  it('shutdown releases case locks held by an unfinished turn', async () => {
+    delete process.env.KL_CASES_ROOT;
+    const core = createCore(makeDeps());
+    const runtime = core.context.getCaseRuntime();
+    const info = await runtime.createCase({ title: 'Lakeside lot' });
+    await runtime.beginTurn(info.id, { turnId: 'cut-off' });
+    await core.shutdown();
+    assert.strictEqual(fs.existsSync(path.join(info.dir, '.kl', 'lock')), false);
+  });
+
   it('threads caseContext through the tool executor to the case tools and the write guard', async () => {
     delete process.env.KL_CASES_ROOT;
     const core = createCore(makeDeps());

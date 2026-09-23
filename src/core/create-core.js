@@ -2592,6 +2592,12 @@ function createCore(deps = {}) {
       stops.map(([label, fn]) => withTimeout(fn(), shutdownTimeoutMs, label, warnTimeout))
     );
     results.forEach((r, i) => { if (r.status === 'rejected') log.warn(`${stops[i][0]} failed: ${r.reason?.message}`); });
+    // A turn cut off by quit must not leave its case locked.
+    try {
+      caseRuntime.releaseAll();
+    } catch (err) {
+      log.warn(`Releasing case locks failed: ${err.message}`);
+    }
     if (usageTracker) usageTracker.reset();
   };
 

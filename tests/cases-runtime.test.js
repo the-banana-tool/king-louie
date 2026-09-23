@@ -13,6 +13,12 @@ const tmp = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-runtime-
 const src = { kind: 'url', ref: 'https://records.example.org/1' };
 const commitCount = async (dir) => Number((await git.git(dir, ['rev-list', '--count', 'HEAD'])).trim());
 const lastSubject = async (dir) => (await git.git(dir, ['log', '-1', '--format=%s'])).trim();
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const writeLock = (dir, holder) => fs.writeFileSync(path.join(dir, '.kl', 'lock'), JSON.stringify({ at: new Date().toISOString(), ...holder }));
+const deadPid = () => {
+  const { spawnSync } = require('child_process');
+  return spawnSync(process.execPath, ['-e', '0']).pid;
+};
 
 describe('resolveCasesRoot', () => {
   it('prefers settings, then env, then the data dir', () => {
@@ -59,6 +65,56 @@ describe('CaseRuntime', () => {
     const t = await rt.beginTurn(info.id, { turnId: 'alive' });
     assert.strictEqual(JSON.parse(fs.readFileSync(lock, 'utf8')).turnId, 'alive');
     await rt.endTurn(t, {});
+  });
+
+  it('reclaims a fresh lock whose process is gone', async () => {
+    const rt = new CaseRuntime({ root: tmp() });
+    const info = await rt.createCase({ title: 'Lakeside lot' });
+    writeLock(info.dir, { turnId: 'crashed', pid: deadPid() });
+    const t = await rt.beginTurn(info.id, { turnId: 'alive' });
+    assert.strictEqual(JSON.parse(fs.readFileSync(path.join(info.dir, '.kl', 'lock'), 'utf8')).turnId, 'alive');
+    await rt.endTurn(t, {});
+  });
+
+  it('reclaims a lock with this process id and a turn this runtime is not holding', async () => {
+    const rt = new CaseRuntime({ root: tmp() });
+    const info = await rt.createCase({ title: 'Lakeside lot' });
+    writeLock(info.dir, { turnId: 'before-restart', pid: process.pid });
+    const t = await rt.beginTurn(info.id, { turnId: 'alive' });
+    await rt.endTurn(t, {});
+  });
+
+  it('stays busy while another live process holds the lock, and says how to recover', async () => {
+    const rt = new CaseRuntime({ root: tmp() });
+    const info = await rt.createCase({ title: 'Lakeside lot' });
+    writeLock(info.dir, { turnId: 'other', pid: process.ppid });
+    await assert.rejects(rt.beginTurn(info.id, { turnId: 't' }), (err) => (
+      err.code === 'CASE_BUSY' && err.message.includes(String(process.ppid)) && /delete/i.test(err.message)
+    ));
+  });
+
+  it('releaseAll removes every lock the runtime holds', async () => {
+    const rt = new CaseRuntime({ root: tmp() });
+    const a = await rt.createCase({ title: 'A' });
+    const b = await rt.createCase({ title: 'B' });
+    await rt.beginTurn(a.id, { turnId: 'ta' });
+    await rt.beginTurn(b.id, { turnId: 'tb' });
+    rt.releaseAll();
+    assert.strictEqual(fs.existsSync(path.join(a.dir, '.kl', 'lock')), false);
+    assert.strictEqual(fs.existsSync(path.join(b.dir, '.kl', 'lock')), false);
+    const t = await rt.beginTurn(a.id, { turnId: 'again' });
+    await rt.endTurn(t, {});
+  });
+
+  it('refreshes a held lock so a long turn does not go stale', async () => {
+    const rt = new CaseRuntime({ root: tmp(), staleLockMs: 300 });
+    const info = await rt.createCase({ title: 'Lakeside lot' });
+    const t1 = await rt.beginTurn(info.id, { turnId: 'long' });
+    await sleep(700);
+    const age = Date.now() - fs.statSync(path.join(info.dir, '.kl', 'lock')).mtimeMs;
+    assert.ok(age < 300, `lock is ${age}ms old`);
+    await assert.rejects(rt.beginTurn(info.id, { turnId: 'second' }), CaseBusyError);
+    await rt.endTurn(t1, {});
   });
 
   it('commits owner edits made outside King Louie before the turn starts', async () => {
