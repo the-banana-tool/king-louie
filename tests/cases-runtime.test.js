@@ -31,6 +31,8 @@ describe('resolveCasesRoot', () => {
     const dataDir = path.resolve(tmp());
     assert.strictEqual(resolveCasesRoot({ settings: { cases: { root: '~/cases' } }, env: {}, dataDir }), path.join(os.homedir(), 'cases'));
     assert.strictEqual(resolveCasesRoot({ settings: { cases: { root: '~' } }, env: {}, dataDir }), os.homedir());
+    // The platform separator: a backslash on Windows.
+    assert.strictEqual(resolveCasesRoot({ settings: { cases: { root: path.join('~', 'cases') } }, env: {}, dataDir }), path.join(os.homedir(), 'cases'));
     assert.strictEqual(resolveCasesRoot({ settings: { cases: { root: 'my-cases' } }, env: {}, dataDir }), path.join(dataDir, 'my-cases'));
     assert.strictEqual(resolveCasesRoot({ settings: {}, env: { KL_CASES_ROOT: '~/elsewhere' }, dataDir }), path.join(os.homedir(), 'elsewhere'));
     assert.strictEqual(resolveCasesRoot({ settings: {}, env: { KL_CASES_ROOT: 'rel' }, dataDir }), 'rel');

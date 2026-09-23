@@ -34,7 +34,7 @@ class CaseNotFoundError extends Error {
   }
 }
 
-const expandHome = (p) => (p === '~' || /^~[\/]/.test(p) ? path.join(os.homedir(), p.slice(1)) : p);
+const expandHome = (p) => (p === '~' || /^~[\\/]/.test(p) ? path.join(os.homedir(), p.slice(1)) : p);
 
 // settings.cases.root: `~` is the home dir and a relative path is under the
 // data dir. KL_CASES_ROOT: `~` expanded; a relative path is left for the

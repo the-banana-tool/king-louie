@@ -59,7 +59,7 @@ class Brief {
 
   read() {
     // Some editors save a UTF-8 byte-order mark; it would hide the opening '---'.
-    const text = fs.readFileSync(this.path, 'utf8').replace(/^﻿/, '').replace(/\r\n/g, '\n');
+    const text = fs.readFileSync(this.path, 'utf8').replace(/^\uFEFF/, '').replace(/\r\n/g, '\n');
     const lines = text.split('\n');
     if (lines[0] !== '---') return { data: {}, body: text };
     const end = lines.indexOf('---', 1);

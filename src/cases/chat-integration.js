@@ -107,9 +107,9 @@ const QUOTE_INSTRUCTION = "Quote the owner's words verbatim, or ask the owner.";
 // the plain characters; either form on either side must still match.
 function normalizeForQuote(s) {
   return String(s || '')
-    .replace(/[‘’‚‛′]/g, "'")
-    .replace(/[“”„‟″]/g, '"')
-    .replace(/[–—]/g, '-')
+    .replace(/[\u2018\u2019\u201A\u201B\u2032]/g, "'")
+    .replace(/[\u201C\u201D\u201E\u201F\u2033]/g, '"')
+    .replace(/[\u2013\u2014]/g, '-')
     .toLowerCase()
     .replace(/\s+/g, ' ')
     .trim();
