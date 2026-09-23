@@ -69,17 +69,22 @@ class CaseRecords {
   }
 
   lastJournal() {
-    let names = [];
+    const journalDir = path.join(this.dir, 'journal');
+    let names;
     try {
-      names = fs.readdirSync(path.join(this.dir, 'journal')).filter((n) => n.endsWith('.md'));
-    } catch {
-      return null;
+      names = fs.readdirSync(journalDir).filter((n) => n.endsWith('.md'));
+    } catch (err) {
+      if (err.code === 'ENOENT') return null;
+      throw err;
     }
     if (!names.length) return null;
-    // Same-minute entries get -2, -3 suffixes; sort those after the bare name.
+    // Order by write time (mtime), the actual "latest" signal. Same-minute
+    // entries of the same kind get -2, -3 suffixes with equal-ish mtimes, so
+    // break ties with that suffix key (bare name sorts before its suffixes).
     const key = (n) => n.replace(/\.md$/, '').replace(/-(\d+)$/, (_, k) => `~${k.padStart(4, '0')}`);
-    names.sort((a, b) => key(a).localeCompare(key(b)));
-    const file = `journal/${names[names.length - 1]}`;
+    const entries = names.map((n) => ({ n, m: fs.statSync(path.join(journalDir, n)).mtimeMs }));
+    entries.sort((a, b) => a.m - b.m || key(a.n).localeCompare(key(b.n)));
+    const file = `journal/${entries[entries.length - 1].n}`;
     return { file, text: fs.readFileSync(path.join(this.dir, file), 'utf8') };
   }
 

@@ -53,6 +53,33 @@ describe('CaseRecords', () => {
     assert.strictEqual(new CaseRecords(newCaseDir()).lastJournal(), null);
   });
 
+  it('returns the most recently written entry, not the alphabetically last name', () => {
+    const dir = newCaseDir();
+    const r = new CaseRecords(dir);
+    const when = new Date('2026-09-22T09:30:00Z');
+    // 'wake' sorts after 'brief' alphabetically, but is written first here —
+    // a name-only sort would wrongly pick 'wake' as "last".
+    const a = r.writeJournal('wake', 'first', when);
+    const b = r.writeJournal('brief', 'second', when);
+    const early = new Date('2026-09-22T09:30:00Z');
+    const late = new Date('2026-09-22T09:31:00Z');
+    fs.utimesSync(path.join(dir, a), early, early);
+    fs.utimesSync(path.join(dir, b), late, late);
+    const last = r.lastJournal();
+    assert.strictEqual(last.file, b);
+    assert.strictEqual(last.text.trim(), 'second');
+  });
+
+  it('propagates non-ENOENT errors from lastJournal', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-records-'));
+    dirs.push(dir);
+    fs.mkdirSync(path.join(dir, '.kl'));
+    fs.writeFileSync(path.join(dir, 'decisions.md'), '# Decisions\n');
+    fs.writeFileSync(path.join(dir, 'journal'), ''); // a file, not a directory
+    const r = new CaseRecords(dir);
+    assert.throws(() => r.lastJournal(), (err) => err.code === 'ENOTDIR');
+  });
+
   it('renders open-items.md from active unknowns, load-bearing first', () => {
     const dir = newCaseDir();
     const facts = new Map([
