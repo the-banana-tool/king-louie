@@ -12,6 +12,33 @@ const NO_CASE = Object.freeze({
   error: 'This chat is not attached to a case. The owner can attach one from Chat Info → Case.'
 });
 
+const SOURCE_KINDS = ['url', 'document', 'call', 'api'];
+const VALUE_DESCRIPTION = 'numbers and lists as JSON text';
+
+// `value` is declared as a string so every provider accepts the schema
+// (Gemini needs a type on each property). JSON text for a number, list or
+// object is parsed; any other text stays a string. Real numbers and lists
+// passed directly are kept as they are.
+function parseValue(value) {
+  if (typeof value !== 'string') return value;
+  try {
+    const parsed = JSON.parse(value);
+    if (typeof parsed === 'number' || (parsed && typeof parsed === 'object')) return parsed;
+  } catch { /* plain text */ }
+  return value;
+}
+
+// The executor validates top-level types against the schema; `value` must
+// still accept real numbers and lists, so it is left out of that check.
+function acceptAnyValue(tool) {
+  const validate = tool.validateParameters.bind(tool);
+  tool.validateParameters = (params = {}) => {
+    const { value, ...rest } = params || {};
+    return validate(rest);
+  };
+  return tool;
+}
+
 async function withCase(options, fn) {
   const ctx = options?.caseContext;
   if (!ctx || !ctx.runtime || !ctx.caseId) return NO_CASE;
@@ -22,7 +49,7 @@ async function withCase(options, fn) {
   }
 }
 
-const LedgerTool = new Tool({
+const LedgerTool = acceptAnyValue(new Tool({
   name: 'Ledger',
   description: 'Read and write the case fact ledger. assert: a fact with a source (provenance "sourced" with a source object; "user" for what the owner actually said, which requires a "quote" of their own words matching this chat\'s owner messages; or "external-agent" with a source). infer: your own derivation, with basis fact ids. unknown: something not known, with what it changes, who can answer, and how. retract: withdraw a fact. query: list facts. Corrections supersede; nothing is edited in place.',
   parameters: {
@@ -32,10 +59,18 @@ const LedgerTool = new Tool({
       stmt: { type: 'string', description: 'One-sentence statement of the fact or question' },
       subject: { type: 'string', description: 'What the fact is about, e.g. "lot", "house-loan"' },
       attr: { type: 'string', description: 'Which attribute, e.g. "acreage", "payoff"' },
-      value: { description: 'The value, if any' },
+      value: { type: 'string', description: `The value, if any; ${VALUE_DESCRIPTION}` },
       unit: { type: 'string' },
       provenance: { type: 'string', enum: ['sourced', 'user', 'external-agent'] },
-      source: { type: 'object', description: '{ kind: "url" | "document" | "call" | "api", ref: string }' },
+      source: {
+        type: 'object',
+        description: 'Where the fact comes from. Not used for provenance "user", which is sourced from the quote.',
+        properties: {
+          kind: { type: 'string', enum: SOURCE_KINDS },
+          ref: { type: 'string', description: 'URL, document path, call record, or API name' }
+        },
+        required: ['kind', 'ref']
+      },
       quote: { type: 'string', description: 'Required for assert with provenance "user": a substring (case/whitespace-insensitive) of something the owner actually said in this chat. The fact\'s source is built from this, not from "source".' },
       category: { type: 'string', enum: ['personal', 'financial', 'legal', 'health', 'property', 'ops', 'general'] },
       confidence: { type: 'number', minimum: 0, maximum: 1 },
@@ -47,13 +82,24 @@ const LedgerTool = new Tool({
       loadBearing: { type: 'boolean' },
       id: { type: 'string', description: 'For retract: the fact id' },
       reason: { type: 'string', description: 'For retract: why' },
-      filter: { type: 'object', description: 'For query: { subject?, attr?, provenance?, status?, text? }' }
+      filter: {
+        type: 'object',
+        description: 'For query: all fields optional',
+        properties: {
+          subject: { type: 'string' },
+          attr: { type: 'string' },
+          provenance: { type: 'string', enum: ['sourced', 'user', 'external-agent', 'inferred', 'unknown'] },
+          status: { type: 'string', enum: ['active', 'superseded', 'retracted', 'any'] },
+          text: { type: 'string', description: 'Substring of the statement' }
+        }
+      }
     },
     required: ['action']
   },
   requiresApproval: false,
   execute: (params, options) => withCase(options, async (ctx) => {
     const ledger = ctx.runtime.ledger(ctx.caseId);
+    if (params.value !== undefined) params = { ...params, value: parseValue(params.value) };
     switch (params.action) {
       case 'assert': {
         const input = { ...params, addedBy: ctx.turnId };
@@ -104,9 +150,9 @@ const LedgerTool = new Tool({
         return { ok: false, error: `Unknown action: ${params.action}` };
     }
   })
-});
+}));
 
-const BriefTool = new Tool({
+const BriefTool = acceptAnyValue(new Tool({
   name: 'Brief',
   description: 'Read or update the case brief. "why", "hardConstraints" and "alreadyTried" can only be set from what the owner said (provenance "user"), which also requires a "quote" of the owner\'s own words matching this chat\'s owner messages. completeGating marks the brief ready; recommendations are refused until then.',
   parameters: {
@@ -114,7 +160,7 @@ const BriefTool = new Tool({
     properties: {
       action: { type: 'string', enum: ['read', 'update', 'append', 'completeGating'] },
       field: { type: 'string', enum: ['objective', 'why', 'successCriteria', 'hardConstraints', 'alreadyTried', 'resources', 'deadline', 'materiality'] },
-      value: { description: 'For update: the new value' },
+      value: { type: 'string', description: `For update: the new value; ${VALUE_DESCRIPTION}` },
       item: { type: 'string', description: 'For append: one list entry' },
       provenance: { type: 'string', enum: ['user', 'model'] },
       quote: { type: 'string', description: 'Required when updating/appending "why", "hardConstraints" or "alreadyTried" with provenance "user": a substring of something the owner actually said in this chat.' },
@@ -132,6 +178,7 @@ const BriefTool = new Tool({
       return { ok: true, status: ctx.runtime.completeGating(ctx.caseId).status };
     }
     if (!params.field) return { ok: false, error: `${params.action} needs "field".` };
+    if (params.value !== undefined) params = { ...params, value: parseValue(params.value) };
     const provenance = params.provenance || 'model';
     let quoteNote = '';
     if (USER_ONLY_FIELDS.has(params.field) && provenance === 'user') {
@@ -148,7 +195,7 @@ const BriefTool = new Tool({
     );
     return { ok: true, brief: data };
   })
-});
+}));
 
 const DecideTool = new Tool({
   name: 'Decide',

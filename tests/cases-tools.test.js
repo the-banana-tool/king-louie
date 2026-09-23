@@ -230,6 +230,32 @@ describe('isProtectedCasePath hardening', () => {
   });
 });
 
+describe('case tool values through the executor', () => {
+  it('accepts real numbers and lists, and parses JSON text for numbers and lists', async () => {
+    const { info, opts } = await setup();
+    const executor = new ToolExecutor({
+      workingDirectory: info.dir,
+      allowedDirectories: [info.dir],
+      runtimeEnvironment: { platform: process.platform },
+      requireApproval: false,
+      useSandbox: false,
+      extraToolOptions: opts
+    });
+    const assertValue = async (attr, value) => {
+      const r = await executor.execute('Ledger', { action: 'assert', stmt: `Lot ${attr}`, subject: 'lot', attr, value, source: src });
+      assert.strictEqual(r.success !== false && r.result?.ok !== false, true, JSON.stringify(r));
+      return (r.result || r).fact.value;
+    };
+    assert.strictEqual(await assertValue('acreage', 1.85), 1.85);
+    assert.strictEqual(await assertValue('acreage-text', '2.12'), 2.12);
+    assert.deepStrictEqual(await assertValue('owners', '["A. Owner", "B. Owner"]'), ['A. Owner', 'B. Owner']);
+    assert.deepStrictEqual(await assertValue('neighbours', ['north', 'south']), ['north', 'south']);
+    assert.strictEqual(await assertValue('closing', '2027-03'), '2027-03');
+    assert.strictEqual(await assertValue('zip', '02134'), '02134');
+    assert.strictEqual(await assertValue('flag', 'true'), 'true');
+  });
+});
+
 describe('ToolExecutor child runs in case turns', () => {
   const makeExecutor = (dir, extraToolOptions) => new ToolExecutor({
     workingDirectory: dir,
