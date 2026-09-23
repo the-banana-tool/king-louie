@@ -299,6 +299,12 @@ describe('case tool values through the executor', () => {
     assert.strictEqual(await assertValue('closing', '2027-03'), '2027-03');
     assert.strictEqual(await assertValue('zip', '02134'), '02134');
     assert.strictEqual(await assertValue('flag', 'true'), 'true');
+    assert.strictEqual(await assertValue('payoff', '120000'), 120000);
+    // Anything that would not read back as the same text stays text: the
+    // ledger is append-only, so a silent rewrite would be permanent.
+    for (const [attr, text] of [['price', '1.50'], ['exp', '1e5'], ['asking', '65000.00'], ['parcel', '12345678901234567890']]) {
+      assert.strictEqual(await assertValue(attr, text), text, text);
+    }
   });
 
   it('parses Brief list values from JSON text but keeps text fields as text', async () => {

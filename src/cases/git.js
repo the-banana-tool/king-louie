@@ -17,12 +17,19 @@ class GitUnavailableError extends Error {
 }
 
 // A case repo never runs the owner's hooks or signs with the owner's key:
-// either could block or prompt on every turn.
-const CASE_GIT_CONFIG = ['-c', 'commit.gpgsign=false', '-c', 'core.hooksPath='];
+// either could block or prompt on every turn. An empty core.hooksPath does
+// not disable hooks (git then looks at the filesystem root), so hooks point
+// at an empty directory the case owns. It stays empty and untracked: git
+// does not track empty directories, and the write guard covers .kl/.
+function caseGitConfig(cwd) {
+  const hooksDir = path.resolve(cwd, '.kl', 'no-hooks');
+  if (fs.existsSync(cwd)) fs.mkdirSync(hooksDir, { recursive: true });
+  return ['-c', 'commit.gpgsign=false', '-c', `core.hooksPath=${hooksDir}`];
+}
 
 async function git(cwd, args) {
   try {
-    const { stdout } = await run('git', [...CASE_GIT_CONFIG, ...args], { cwd, windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
+    const { stdout } = await run('git', [...caseGitConfig(cwd), ...args], { cwd, windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
     return stdout;
   } catch (err) {
     // spawn reports a missing cwd as ENOENT too; only a present cwd means git is missing.

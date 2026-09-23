@@ -25,7 +25,10 @@ function parseValue(value) {
   if (typeof value !== 'string') return value;
   try {
     const parsed = JSON.parse(value);
-    if (typeof parsed === 'number' || (parsed && typeof parsed === 'object')) return parsed;
+    // A number only when it reads back as the same text: "1.50", "1e5" and
+    // long digit strings would otherwise change permanently in the ledger.
+    if (typeof parsed === 'number') return String(parsed) === value.trim() ? parsed : value;
+    if (parsed && typeof parsed === 'object') return parsed;
   } catch { /* plain text */ }
   return value;
 }

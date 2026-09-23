@@ -46,3 +46,14 @@ describe('case git wrapper', () => {
     }
   });
 });
+
+describe('case git hooks path', () => {
+  it('points core.hooksPath at an empty directory inside the case', async () => {
+    const dir = tmp();
+    await git.initRepo(dir);
+    const hook = (await git.git(dir, ['rev-parse', '--git-path', 'hooks/pre-commit'])).trim();
+    const hooksDir = path.join(dir, '.kl', 'no-hooks');
+    assert.strictEqual(path.resolve(dir, hook).toLowerCase(), path.join(hooksDir, 'pre-commit').toLowerCase());
+    assert.deepStrictEqual(fs.readdirSync(hooksDir), []);
+  });
+});
