@@ -3,6 +3,7 @@ const IPC = require('./constants');
 const ImageHandler = require('../media/image-handler');
 const Advisor = require('../execution/advisor');
 const { createLogger } = require('../logging');
+const { buildCaseSystemPrompt, shapeToolDefinitions } = require('../cases/chat-integration');
 
 const log = createLogger('chat');
 const advisorLog = createLogger('advisor');
@@ -355,6 +356,33 @@ function registerChatHandlers(ipcMain, context = {}) {
 
     const responseId = createId();
     const runId = createId();
+
+    // Case mode (spec §5): begin before anything is streamed so a busy case
+    // refuses cleanly. beginTurn commits owner edits and builds orientation.
+    const caseId = chatForDir?.caseId || null;
+    const caseRuntime = caseId && typeof context.getCaseRuntime === 'function' ? context.getCaseRuntime() : null;
+    let caseTurn = caseRuntime ? await caseRuntime.beginTurn(caseId, { turnId: `turn-${runId}` }) : null;
+    const endCaseTurn = async (fields) => {
+      if (!caseTurn) return;
+      const turn = caseTurn;
+      caseTurn = null;
+      await caseRuntime.endTurn(turn, fields).catch((err) => log.warn(`Case turn commit failed: ${err.message}`));
+    };
+    // The case tools accept provenance "user" only when the model's quote
+    // matches something the owner actually said in this chat (Task 8 fix
+    // round). Collect every user-sender message's text from the chat,
+    // plus the message being sent this turn if it isn't already there —
+    // it was persisted (above) before smart-routing prefix stripping, so
+    // the post-strip safeMessage may not textually match that entry.
+    const ownerMessages = caseTurn
+      ? (() => {
+          const messages = chatRaw.messages
+            .filter((m) => m.sender === 'user' && typeof m.text === 'string' && m.text)
+            .map((m) => m.text);
+          if (!messages.includes(safeMessage)) messages.push(safeMessage);
+          return messages;
+        })()
+      : null;
     const options = {
       model: inference.model,
       timeoutMs: inference.timeoutMs,
@@ -419,11 +447,16 @@ function registerChatHandlers(ipcMain, context = {}) {
         ].filter(Boolean).join('\n\n');
       }
 
+      if (caseTurn) {
+        options.systemPrompt = buildCaseSystemPrompt(caseTurn.orientation, options.systemPrompt);
+      }
+
       const executor = await createToolExecutorWithApprovals(event, runtimeEnvironment, null, {
         workingDirectory: chatWorkingDirectory,
         allowedDirectories,
         useSandbox: sandboxMode,
-        chatId
+        chatId,
+        caseContext: caseTurn ? { ...caseTurn, runtime: caseRuntime, ownerMessages } : null
       });
 
       executor.on('preExecute', ({ toolName, parameters }) => {
@@ -445,9 +478,14 @@ function registerChatHandlers(ipcMain, context = {}) {
         calls: [],
         totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
       };
-      const toolDefinitions = filterMcpTools(assembledTools || toolRegistry.getFunctionDefinitions());
+      const toolDefinitions = shapeToolDefinitions(
+        filterMcpTools(assembledTools || toolRegistry.getFunctionDefinitions()),
+        Boolean(caseTurn),
+        toolRegistry
+      );
       await withNotificationTiming('Chat response', async () => {
-        const canUseAgentMode = agentMode && toolDefinitions.length > 0 && typeof provider.sendMessageWithTools === 'function';
+        // A case turn always runs the agent loop: the case tools are how it works.
+        const canUseAgentMode = (agentMode || Boolean(caseTurn)) && toolDefinitions.length > 0 && typeof provider.sendMessageWithTools === 'function';
         if (canUseAgentMode) {
           const loopModel = resolveAgentLoopModel();
           const embeddingProvider = contextAssembler?.embeddingProvider || null;
@@ -567,6 +605,7 @@ function registerChatHandlers(ipcMain, context = {}) {
       });
 
       activeRuns.delete(chatId);
+      await endCaseTurn({ summary: safeMessage, journal: fullResponse || null });
 
       const updatedChat = appendMessageToChat(chatId, 'assistant', fullResponse || '(No response)', {
         llm: llmSummary
@@ -593,6 +632,7 @@ function registerChatHandlers(ipcMain, context = {}) {
       return updatedChat;
     } catch (error) {
       activeRuns.delete(chatId);
+      await endCaseTurn({ summary: `turn failed: ${error?.message || error}`, journal: null });
       if (abortController.signal.aborted) {
         safeSend(event.sender, 'chat:messageComplete', {
           chatId,
