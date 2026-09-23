@@ -103,8 +103,16 @@ function isProtectedCasePath(caseDir, absolutePath) {
 const MIN_QUOTE_LENGTH = 3;
 const QUOTE_INSTRUCTION = "Quote the owner's words verbatim, or ask the owner.";
 
+// Curly quotes and en/em dashes are what editors and phones substitute for
+// the plain characters; either form on either side must still match.
 function normalizeForQuote(s) {
-  return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  return String(s || '')
+    .replace(/[‘’‚‛′]/g, "'")
+    .replace(/[“”„‟″]/g, '"')
+    .replace(/[–—]/g, '-')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 // provenance "user" means "the owner said it; the message is the source"
@@ -120,21 +128,27 @@ function requireOwnerQuote({ quote, ownerMessages }) {
       error: `provenance "user" needs a "quote" of at least ${MIN_QUOTE_LENGTH} characters of the owner's own words. ${QUOTE_INSTRUCTION}`
     };
   }
-  if (!Array.isArray(ownerMessages) || ownerMessages.length === 0) {
+  // Only real message text counts; anything else would stringify to
+  // "[object Object]" and match a quote of those words.
+  const messages = Array.isArray(ownerMessages) ? ownerMessages : [];
+  const texts = messages.map((m) => (typeof m === 'string' ? m : null));
+  if (!texts.some((t) => t !== null)) {
     return {
       ok: false,
       error: `No owner messages are available in this chat to check that quote against. ${QUOTE_INSTRUCTION}`
     };
   }
   const needle = normalizeForQuote(trimmed);
-  const matched = ownerMessages.some((m) => normalizeForQuote(m).includes(needle));
-  if (!matched) {
+  // The most recent message that contains the quote; its index into
+  // ownerMessages (the chat's owner messages, oldest first) is recorded.
+  const messageIndex = texts.findLastIndex((t) => t !== null && normalizeForQuote(t).includes(needle));
+  if (messageIndex === -1) {
     return {
       ok: false,
       error: `That quote does not appear in anything the owner said in this chat. ${QUOTE_INSTRUCTION}`
     };
   }
-  return { ok: true, quote: trimmed };
+  return { ok: true, quote: trimmed, messageIndex };
 }
 
 module.exports = {

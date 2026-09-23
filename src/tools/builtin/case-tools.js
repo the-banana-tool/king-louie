@@ -108,7 +108,7 @@ const LedgerTool = acceptAnyValue(new Tool({
         if (input.provenance === 'user') {
           const check = requireOwnerQuote({ quote: input.quote, ownerMessages: ctx.ownerMessages });
           if (!check.ok) return check;
-          input.source = { kind: 'user-message', ref: ctx.turnId, quote: check.quote };
+          input.source = { kind: 'user-message', ref: ctx.turnId, quote: check.quote, messageIndex: check.messageIndex };
         } else if (input.source?.kind === 'user-message') {
           return { ok: false, error: 'What the owner said is recorded with provenance "user" and a "quote" of their own words, not with a "user-message" source.' };
         }

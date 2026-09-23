@@ -10,7 +10,7 @@ const { CaseRuntime } = require('../src/cases');
 const { LedgerTool, BriefTool, DecideTool, RecommendTool } = require('../src/tools/builtin/case-tools');
 const {
   CASE_TOOL_NAMES, CASE_MODE_PROMPT, shapeToolDefinitions, buildCaseSystemPrompt, isProtectedCasePath,
-  CASE_BLOCKED_TOOL_NAMES
+  CASE_BLOCKED_TOOL_NAMES, requireOwnerQuote
 } = require('../src/cases/chat-integration');
 
 initializeTools();
@@ -45,7 +45,7 @@ describe('case tools', () => {
     const { opts } = await setup('Lakeside lot', ['I need the cash by spring, no later than March 2027.']);
     const a = await LedgerTool.execute({ action: 'assert', stmt: 'Owner needs cash by spring', subject: 'owner', attr: 'deadline', value: '2027-03', provenance: 'user', quote: 'I need the cash by spring' }, opts);
     assert.strictEqual(a.ok, true);
-    assert.deepStrictEqual(a.fact.source, { kind: 'user-message', ref: 'turn-1', quote: 'I need the cash by spring' });
+    assert.deepStrictEqual(a.fact.source, { kind: 'user-message', ref: 'turn-1', quote: 'I need the cash by spring', messageIndex: 0 });
     assert.strictEqual(a.fact.addedBy, 'turn-1');
     const i = await LedgerTool.execute({ action: 'infer', stmt: 'Owner is motivated', subject: 'owner', attr: 'motivation', value: 'high', basis: [a.fact.id] }, opts);
     assert.strictEqual(i.fact.provenance, 'inferred');
@@ -187,6 +187,33 @@ describe('case-mode helpers', () => {
     assert.strictEqual(isProtectedCasePath(dir, path.join(dir, 'artifacts', 'sheet.md')), false);
     assert.strictEqual(isProtectedCasePath(dir, path.join(dir, '..', 'facts.jsonl')), false);
     assert.strictEqual(isProtectedCasePath(null, path.join(dir, 'facts.jsonl')), false);
+  });
+});
+
+describe('requireOwnerQuote', () => {
+  it('skips owner messages that are not strings', () => {
+    const r = requireOwnerQuote({ quote: 'object Object', ownerMessages: [{ text: 'x' }, null, 42, 'The lot is 2.12 acres.'] });
+    assert.strictEqual(r.ok, false);
+    const ok = requireOwnerQuote({ quote: '2.12 acres', ownerMessages: [{ text: 'x' }, null, 'The lot is 2.12 acres.'] });
+    assert.strictEqual(ok.ok, true);
+  });
+
+  it('treats curly quotes and en/em dashes like their plain forms, both ways', () => {
+    const owner = ['It’s the “lakeside” lot — 2 acres, 60–70k.'];
+    assert.strictEqual(requireOwnerQuote({ quote: 'It\'s the "lakeside" lot - 2 acres, 60-70k', ownerMessages: owner }).ok, true);
+    const plain = ['It\'s the "lakeside" lot - 2 acres'];
+    assert.strictEqual(requireOwnerQuote({ quote: 'It’s the “lakeside” lot – 2 acres', ownerMessages: plain }).ok, true);
+  });
+
+  it('reports which owner message matched', () => {
+    const r = requireOwnerQuote({ quote: 'by spring', ownerMessages: ['Hello there.', 'I need the cash by spring.'] });
+    assert.strictEqual(r.messageIndex, 1);
+  });
+
+  it('puts the matched message index in the fact source', async () => {
+    const { opts } = await setup('Lakeside lot', ['Hello there.', 'I need the cash by spring.']);
+    const a = await LedgerTool.execute({ action: 'assert', stmt: 'Owner needs cash by spring', subject: 'owner', attr: 'deadline', value: '2027-03', provenance: 'user', quote: 'I need the cash by spring' }, opts);
+    assert.strictEqual(a.fact.source.messageIndex, 1);
   });
 });
 
