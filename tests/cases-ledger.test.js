@@ -36,6 +36,14 @@ describe('FactLedger', () => {
     assert.throws(() => l.infer({ stmt: 's', subject: 'x', attr: 'y', value: 1, basis: ['f-0099'] }), /f-0099/);
   });
 
+  it('accepts a user-message source only on provenance user', () => {
+    const l = newLedger();
+    const owner = { kind: 'user-message', ref: 't1' };
+    assert.throws(() => l.assert({ stmt: 's', subject: 'x', attr: 'y', value: 1, provenance: 'sourced', source: owner }), LedgerError);
+    assert.throws(() => l.assert({ stmt: 's', subject: 'x', attr: 'y', value: 1, source: owner }), LedgerError);
+    assert.strictEqual(l.assert({ stmt: 's', subject: 'x', attr: 'y', value: 1, provenance: 'user', source: owner }).provenance, 'user');
+  });
+
   it('refuses unknown provenance values on assert', () => {
     const l = newLedger();
     assert.throws(() => l.assert({ stmt: 's', subject: 'x', attr: 'y', value: 1, source: src, provenance: 'inferred' }), /provenance/);

@@ -123,6 +123,11 @@ class FactLedger {
     if (!input.source || typeof input.source !== 'object' || !input.source.kind) {
       throw new LedgerError('assert requires a source { kind, ref }. If you have no source, record an unknown or an inference.');
     }
+    // A user-message source is what the verified owner-quote path writes; no
+    // other provenance may claim the owner as its source.
+    if (input.source.kind === 'user-message' && provenance !== 'user') {
+      throw new LedgerError('A "user-message" source is only valid with provenance "user". Use provenance "user" with a "quote" of the owner\'s words.');
+    }
     return this._write({ ...input, provenance });
   }
 

@@ -35,7 +35,7 @@ const LedgerTool = new Tool({
       value: { description: 'The value, if any' },
       unit: { type: 'string' },
       provenance: { type: 'string', enum: ['sourced', 'user', 'external-agent'] },
-      source: { type: 'object', description: '{ kind: "url" | "document" | "call" | "api" | "user-message", ref: string }' },
+      source: { type: 'object', description: '{ kind: "url" | "document" | "call" | "api", ref: string }' },
       quote: { type: 'string', description: 'Required for assert with provenance "user": a substring (case/whitespace-insensitive) of something the owner actually said in this chat. The fact\'s source is built from this, not from "source".' },
       category: { type: 'string', enum: ['personal', 'financial', 'legal', 'health', 'property', 'ops', 'general'] },
       confidence: { type: 'number', minimum: 0, maximum: 1 },
@@ -61,6 +61,8 @@ const LedgerTool = new Tool({
           const check = requireOwnerQuote({ quote: input.quote, ownerMessages: ctx.ownerMessages });
           if (!check.ok) return check;
           input.source = { kind: 'user-message', ref: ctx.turnId, quote: check.quote };
+        } else if (input.source?.kind === 'user-message') {
+          return { ok: false, error: 'What the owner said is recorded with provenance "user" and a "quote" of their own words, not with a "user-message" source.' };
         }
         return { ok: true, fact: ledger.assert(input) };
       }

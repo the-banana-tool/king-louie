@@ -75,6 +75,17 @@ describe('case tools', () => {
     assert.strictEqual(noQuote.ok, false);
   });
 
+  it('Ledger refuses a user-message source on any provenance but user', async () => {
+    const { runtime, info, opts } = await setup('Lakeside lot', ['I need the cash by spring.']);
+    for (const provenance of [undefined, 'sourced', 'external-agent']) {
+      const r = await LedgerTool.execute({ action: 'assert', stmt: 'Owner needs cash by spring', subject: 'owner', attr: 'deadline', value: '2027-03', provenance, source: { kind: 'user-message', ref: 'turn-1' } }, opts);
+      assert.strictEqual(r.ok, false, String(provenance));
+      assert.match(r.error, /provenance "user".*quote/);
+    }
+    assert.strictEqual(runtime.ledger(info.id).view().facts.size, 0);
+    assert.doesNotMatch(LedgerTool.parameters.properties.source.description || '', /user-message/);
+  });
+
   it('Ledger unknown refuses exact duplicates and surfaces other cases', async () => {
     const { runtime, opts } = await setup('Lakeside lot');
     const other = await runtime.createCase({ title: 'Household inventory' });
