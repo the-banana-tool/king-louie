@@ -32,17 +32,14 @@ function runDoctor({ dataDir, platform = process.platform }) {
   try {
     const { loadNodeConfig } = require('./node-config');
     const { RunbookEngine } = require('../runbooks/runbook-engine');
-    const currentUid = typeof process.getuid === 'function' ? process.getuid() : 0;
-    const nodeCfg = loadNodeConfig({ dataDir, geteuid: () => currentUid, adminUid: currentUid });
+    const nodeCfg = loadNodeConfig({ dataDir });
 
     results.push({ check: 'node configuration loaded', ok: true, detail: `name: ${nodeCfg.name}, profile: ${nodeCfg.profile}` });
 
     if (fs.existsSync(nodeCfg.runbooksDir)) {
       const engine = new RunbookEngine({
         runbooksDir: nodeCfg.runbooksDir,
-        allowedRoots: nodeCfg.policy.allowed_roots,
-        geteuid: () => currentUid,
-        adminUid: currentUid
+        allowedRoots: nodeCfg.policy.allowed_roots
       });
       const runbooks = engine.loadRunbooks();
       results.push({ check: 'runbooks loaded', ok: true, detail: `${runbooks.size} runbook(s) found in ${nodeCfg.runbooksDir}` });
