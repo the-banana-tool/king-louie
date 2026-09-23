@@ -1765,8 +1765,15 @@ async function renderChatCaseSection(chat, container) {
   };
   addOption('', 'None');
   cases.forEach((c) => addOption(c.id, `${c.title} (${c.status})`));
+  // The chat points at a case the store no longer lists (moved, deleted, or
+  // cases.root changed). Show it so the owner can see why and detach.
+  const caseMissing = Boolean(listed?.ok && chat.caseId && !cases.some((c) => c.id === chat.caseId));
+  if (caseMissing) {
+    addOption(chat.caseId, `Missing case (${chat.caseId})`);
+    showError(`This chat's case (${chat.caseId}) is no longer in the cases folder. Choose None to detach it, or pick another case.`);
+  }
   addOption('__new__', 'New case…');
-  select.value = chat.caseId && cases.some((c) => c.id === chat.caseId) ? chat.caseId : '';
+  select.value = chat.caseId && (caseMissing || cases.some((c) => c.id === chat.caseId)) ? chat.caseId : '';
   row.append(label, select);
 
   const newRow = document.createElement('div');
@@ -1789,7 +1796,7 @@ async function renderChatCaseSection(chat, container) {
   orientationBtn.id = 'chat-case-orientation-btn';
   orientationBtn.className = 'secondary-button';
   orientationBtn.textContent = 'Show orientation';
-  orientationBtn.hidden = !chat.caseId;
+  orientationBtn.hidden = !chat.caseId || caseMissing;
   const orientation = document.createElement('pre');
   orientation.id = 'chat-case-orientation';
   orientation.className = 'chat-case-orientation';
