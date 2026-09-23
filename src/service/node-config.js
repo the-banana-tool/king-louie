@@ -41,8 +41,8 @@ function assertAdminOwned(file, geteuid, adminUid = 0) {
  * Loads and validates node.yaml from adminConfigDir.
  */
 function loadNodeConfig({
-  adminConfigDir: adminDir = adminConfigDir(),
   dataDir,
+  adminConfigDir: adminDir = adminConfigDir({ dataDir }),
   geteuid = () => (typeof process.geteuid === 'function' ? process.geteuid() : -1),
   adminUid = 0
 } = {}) {
@@ -86,7 +86,10 @@ function loadNodeConfig({
   }
 
   const name = typeof parsed.name === 'string' && parsed.name.trim() ? parsed.name.trim() : 'unnamed-node';
-  const profile = parsed.profile === 'runbook' ? 'runbook' : 'agent';
+  if (parsed.profile !== undefined && !['agent', 'runbook'].includes(parsed.profile)) {
+    throw new Error(`Invalid ${configFile}: unknown profile "${parsed.profile}"`);
+  }
+  const profile = parsed.profile || 'agent';
   const frontDoor = typeof parsed.front_door === 'string' ? parsed.front_door.trim() : null;
   const capabilities = Array.isArray(parsed.capabilities) ? parsed.capabilities.map(String) : [];
 
