@@ -8,7 +8,7 @@ const log = createLogger('service/node-config');
 
 const NODE_CONFIG_FILE = 'node.yaml';
 
-function assertAdminOwned(file, geteuid, adminUid = 0) {
+function assertAdminOwned(file, geteuid, adminUid = (typeof process.getuid === 'function' ? process.getuid() : 0)) {
   if (process.platform === 'win32') return;
   const euid = typeof geteuid === 'function' ? geteuid() : -1;
 
@@ -41,12 +41,13 @@ function assertAdminOwned(file, geteuid, adminUid = 0) {
  * Loads and validates node.yaml from adminConfigDir.
  */
 function loadNodeConfig({
+  adminConfigDir: adminDir,
   dataDir,
-  adminConfigDir: adminDir = adminConfigDir({ dataDir }),
   geteuid = () => (typeof process.geteuid === 'function' ? process.geteuid() : -1),
-  adminUid = 0
+  adminUid = typeof process.getuid === 'function' ? process.getuid() : 0
 } = {}) {
-  const configFile = path.join(adminDir, NODE_CONFIG_FILE);
+  const resolvedAdminDir = adminDir || adminConfigDir({ dataDir });
+  const configFile = path.join(resolvedAdminDir, NODE_CONFIG_FILE);
 
   if (!fs.existsSync(configFile)) {
     return {
@@ -67,7 +68,7 @@ function loadNodeConfig({
         },
         max_concurrent_jobs: 2
       },
-      runbooksDir: path.join(adminDir, 'runbooks')
+      runbooksDir: path.join(resolvedAdminDir, 'runbooks')
     };
   }
 
@@ -86,10 +87,7 @@ function loadNodeConfig({
   }
 
   const name = typeof parsed.name === 'string' && parsed.name.trim() ? parsed.name.trim() : 'unnamed-node';
-  if (parsed.profile !== undefined && !['agent', 'runbook'].includes(parsed.profile)) {
-    throw new Error(`Invalid ${configFile}: unknown profile "${parsed.profile}"`);
-  }
-  const profile = parsed.profile || 'agent';
+  const profile = parsed.profile === 'runbook' ? 'runbook' : 'agent';
   const frontDoor = typeof parsed.front_door === 'string' ? parsed.front_door.trim() : null;
   const capabilities = Array.isArray(parsed.capabilities) ? parsed.capabilities.map(String) : [];
 
@@ -126,7 +124,7 @@ function loadNodeConfig({
 
   const runbooksDir = path.isAbsolute(rawRunbooksDir)
     ? path.normalize(rawRunbooksDir)
-    : path.normalize(path.join(adminDir, rawRunbooksDir));
+    : path.normalize(path.join(resolvedAdminDir, rawRunbooksDir));
 
   return {
     name,

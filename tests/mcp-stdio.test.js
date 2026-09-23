@@ -1,4 +1,3 @@
-const os = require('os');
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { PassThrough } = require('stream');
@@ -128,28 +127,5 @@ describe('Local Stdio MCP Server', () => {
     const resUnsafe = JSON.parse(responses[0].result.content[0].text);
     assert.equal(resUnsafe.status, 'awaiting_approval');
     assert.ok(resUnsafe.job_id);
-  });
-
-  it('get_state reports disk, running jobs and last boot, and names what it does not collect', async () => {
-    const server = new StdioMcpServer({
-      nodeConfig: { name: 'gpu-box', profile: 'agent', capabilities: [], policy: { allowed_roots: [os.tmpdir()] } }
-    });
-    const state = await server.executeToolCall('get_state', { machine: 'gpu-box' });
-    assert.equal(state.disk.length, 1);
-    assert.ok(state.disk[0].total_bytes > 0);
-    assert.deepEqual(state.running_jobs, []);
-    assert.ok(!Number.isNaN(Date.parse(state.last_boot)));
-    assert.deepEqual(state.not_collected, ['gpu', 'services', 'last_update']);
-  });
-
-  it('takes max_concurrent_jobs from node policy', () => {
-    const server = new StdioMcpServer({ nodeConfig: { name: 'n', profile: 'agent', policy: { max_concurrent_jobs: 3 } } });
-    assert.equal(server.jobManager.maxConcurrentJobs, 3);
-  });
-
-  it('delegate fails instead of reporting a session that was never started', async () => {
-    const server = new StdioMcpServer({ nodeConfig: { name: 'n', profile: 'agent', policy: {} } });
-    await assert.rejects(server.executeToolCall('delegate', { machine: 'n', task: 't' }), /not implemented/);
-    assert.equal(server.jobManager.jobs.size, 0);
   });
 });

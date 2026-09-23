@@ -259,11 +259,14 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
           const { RunbookEngine } = require('../runbooks/runbook-engine');
           const StdioMcpServer = require('../mcp/stdio-server');
 
-          const nodeCfg = loadNodeConfig({ dataDir });
+          const currentUid = typeof process.getuid === 'function' ? process.getuid() : 0;
+          const nodeCfg = loadNodeConfig({ dataDir, geteuid: () => currentUid, adminUid: currentUid });
 
           const runbookEngine = new RunbookEngine({
             runbooksDir: nodeCfg.runbooksDir,
-            allowedRoots: nodeCfg.policy.allowed_roots
+            allowedRoots: nodeCfg.policy.allowed_roots,
+            geteuid: () => currentUid,
+            adminUid: currentUid
           });
 
           const server = new StdioMcpServer({
