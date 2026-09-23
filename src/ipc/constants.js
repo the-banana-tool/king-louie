@@ -41,6 +41,12 @@ module.exports = {
   MEMORY_DELETE: 'memory:delete',
   MEMORY_CLEAR: 'memory:clear',
 
+  CASE_LIST: 'case:list',
+  CASE_CREATE: 'case:create',
+  CASE_ATTACH: 'case:attach',
+  CASE_ORIENTATION: 'case:orientation',
+  CASE_SET_DISCLOSABLE: 'case:setDisclosable',
+
   USAGE_GET_SESSION: 'usage:getSession',
   USAGE_GET_DAILY: 'usage:getDaily',
 
