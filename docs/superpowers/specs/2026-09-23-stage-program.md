@@ -547,7 +547,7 @@ the later stage rebases onto the earlier one.
 | `src/service/run.js` deps | F3 → F4 → F5 → F7; C3 `adminExecutors`, C4 `contactConfig`, C6 `examplesDir`, C7 `ingest` | each stage adds one dep read from admin config |
 | `src/workflows/workflow-engine.js`, `src/skills/skill-loader.js` | C3 | `WorkflowEngine.create` gains `executeExtras`; executor packages load through a validating loader, never registered as skills |
 | `src/cases/case-store.js` | C6 | `case.yaml` moves to the strict parser |
-| `src/frontdoor/extensions.js`, `src/desktop-bridge/allowlist.js` | F3/F7 create; C4, F5, C7 add one line each | route and domain registration only |
+| `src/frontdoor/extensions.js`, `src/desktop-bridge/allowlist.js` | F3/F7 create; C4, F5, C7 add one line each | route and domain registration only; a stage adding a proxied domain also updates the exact list in `tests/desktop-bridge-allowlist.test.js` |
 | `src/core/settings.js` | C2, C3, C4, C5, C6, C7, F7 | one namespace per stage: `cases.*` (C2; C5/C7 add `cases.<sub>` keys), `executors` (C3), `contactPolicy`/`channels.*`/`contact.*` (C4), `playbooks` (C6) |
 | `src/ipc/constants.js`, `register.js`, `preload.js` | C2, C3, C4, C5, C7, F7 | one handler module per stage (`src/ipc/<stage>-handlers.js`); F3 makes no IPC edits |
 | `src/ipc/chat-handlers.js`, `src/cases/chat-integration.js` | C2, C5 | only C2 edits the case-turn block; C5 adds the classification phase through the hook |

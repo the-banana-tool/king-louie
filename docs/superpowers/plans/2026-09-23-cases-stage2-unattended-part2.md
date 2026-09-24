@@ -4998,14 +4998,14 @@ Append to the end of `styles.css`:
 .case-status-row, .case-budget-row { flex-wrap: wrap; gap: 6px; align-items: center; }
 .case-budget-warning { width: 100%; font-size: 12px; color: var(--text-secondary); }
 .case-question-list { display: flex; flex-direction: column; gap: 6px; }
-.case-question { border: 1px solid var(--border-color); border-radius: 6px; padding: 8px; background: var(--bg-secondary); }
+.case-question { border: 1px solid var(--border-default); border-radius: 6px; padding: 8px; background: var(--bg-secondary); }
 .case-question-high { border-color: var(--accent); }
 .case-question-head { font-size: 12px; color: var(--text-secondary); margin-bottom: 4px; }
 .case-question-text { white-space: pre-wrap; margin-bottom: 6px; }
 .case-question-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .case-question-input { flex: 1 1 160px; }
 .case-question-none { font-size: 12px; color: var(--text-secondary); }
-.case-questions-bar { display: flex; flex-direction: column; gap: 6px; padding: 6px 12px; max-height: 30vh; overflow-y: auto; border-top: 1px solid var(--border-color); }
+.case-questions-bar { display: flex; flex-direction: column; gap: 6px; padding: 6px 12px; max-height: 30vh; overflow-y: auto; border-top: 1px solid var(--border-default); }
 .case-questions-bar[hidden] { display: none; }
 ```
 
