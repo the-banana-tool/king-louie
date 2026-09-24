@@ -78,8 +78,9 @@ Global Constraints.
   refusals are `{ success: false, error }`. Gate refusals are results, never throws.
 - Security-relevant configuration is read only from the root/admin-owned config dir
   (`<configDir>/node.yaml`, `service.json`); the data dir is service-writable and
-  never decides policy. `service.json` and `node.yaml` reject unknown keys with the key
-  path named (R11, R55).
+  never decides policy. `node.yaml` rejects unknown keys and `service.json` rejects unknown `features.*` and
+  `ports.*` keys, each with the key path named (R11, R55). Stages that add a feature
+  also add it to the four example `service.json` files under `examples/`.
 - Trust principle 3 (fleet §3.1): remote-origin unsafe actions run only with a fresh,
   single-use phone signature over the exact action. No setting, token or "remember
   this" stands in for it. The one exception is the computer-use lease (F5).
