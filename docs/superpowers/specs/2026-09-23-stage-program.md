@@ -473,8 +473,8 @@ writes from phone, channel or IPC paths use `answerQuestion` or `systemAction`.
 
 ### 4.21 Desktop origin and the approval seam — owners F7 (origin), F3 (phone branch)
 
-`src/core/origin.js`: `markLocalDesktopEvent(event)` / `isLocalDesktopEvent(event)`
-(WeakSet). In `create-core.js` the one merged rule for every `remoteApprovals` mode is
+`src/core/origin.js`: `markLocalDesktopEvent(event, { deviceId })` / `isLocalDesktopEvent(event)` /
+`localDesktopDeviceId(event)` (WeakMap); `markLocalRequester(fn, { deviceId? })` / `isLocalRequester(fn)`. In `create-core.js` the one merged rule for every `remoteApprovals` mode is
 
 ```js
 const local = isLocalDesktopEvent(event);
