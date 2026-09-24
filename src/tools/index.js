@@ -25,6 +25,7 @@ const { BackgroundTaskTool, TaskStatusTool } = require('./builtin/background-tas
 const MultiEditTool = require('./builtin/multi-edit-tool');
 const CanvasTool = require('./builtin/canvas-tool');
 const ImageGenerateTool = require('./builtin/image-generate-tool');
+const { LedgerTool, BriefTool, DecideTool, RecommendTool } = require('./builtin/case-tools');
 
 let initialized = false;
 
@@ -57,6 +58,10 @@ function initializeTools() {
   toolRegistry.register(TaskStatusTool);
   toolRegistry.register(CanvasTool);
   toolRegistry.register(ImageGenerateTool);
+  toolRegistry.register(LedgerTool);
+  toolRegistry.register(BriefTool);
+  toolRegistry.register(DecideTool);
+  toolRegistry.register(RecommendTool);
 
   initialized = true;
 }

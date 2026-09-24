@@ -18,6 +18,7 @@ const { registerChannelHandlers } = require('./channel-handlers');
 const { registerWorkflowHandlers } = require('./workflow-handlers');
 const { registerAppsHandlers } = require('./apps-handlers');
 const { registerCanvasHandlers } = require('./canvas-handlers');
+const { registerCaseHandlers } = require('./case-handlers');
 const { wrapHandler } = require('./wrap-handler');
 
 function registerHandlers(ipcMain, context = {}) {
@@ -41,6 +42,7 @@ function registerHandlers(ipcMain, context = {}) {
   registerWorkflowHandlers(ipcMain, context);
   registerAppsHandlers(ipcMain, context);
   registerCanvasHandlers(ipcMain, context);
+  registerCaseHandlers(ipcMain, context);
 }
 
 module.exports = {

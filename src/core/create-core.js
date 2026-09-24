@@ -50,6 +50,8 @@ const CronExecutor = require('../cron/cron-executor');
 const CronScheduler = require('../cron/cron-scheduler');
 const { MemoryStore, MemoryManager } = require('../memory');
 const { CheckpointManager } = require('../checkpoints');
+const { CaseRuntime, resolveCasesRoot } = require('../cases');
+const { shapeToolDefinitions } = require('../cases/chat-integration');
 const ContextAssembler = require('../context/context-assembler');
 const ConversationCompactor = require('../context/conversation-compactor');
 const { buildSystemSections } = require('../context/system-sections');
@@ -1935,6 +1937,10 @@ function createCore(deps = {}) {
       extraToolOptions: {
         get agentExecutorAdapter() { return agentExecutorAdapter; },
         get backgroundTaskManager() { return backgroundTaskManager; },
+        // Case mode: the chat send path passes { ...caseTurn (caseId, dir,
+        // turnId, title, orientation), runtime, ownerMessages }. The case
+        // tools read it, and ToolExecutor's ledger write guard uses dir.
+        get caseContext() { return executorOptions.caseContext || null; },
         getAgent,
         listAgents,
         toolRegistry,
@@ -2077,7 +2083,9 @@ function createCore(deps = {}) {
       ...resolution,
       runtimeEnvironment,
       toolExecutor,
-      toolDefinitions: toolRegistry.getFunctionDefinitions()
+      // Child and workflow runs never carry a caseContext, so they never see
+      // the case tools.
+      toolDefinitions: shapeToolDefinitions(toolRegistry.getFunctionDefinitions(), false)
     };
   };
 
@@ -2587,8 +2595,20 @@ function createCore(deps = {}) {
       stops.map(([label, fn]) => withTimeout(fn(), shutdownTimeoutMs, label, warnTimeout))
     );
     results.forEach((r, i) => { if (r.status === 'rejected') log.warn(`${stops[i][0]} failed: ${r.reason?.message}`); });
+    // A turn cut off by quit must not leave its case locked.
+    try {
+      caseRuntime.releaseAll();
+    } catch (err) {
+      log.warn(`Releasing case locks failed: ${err.message}`);
+    }
     if (usageTracker) usageTracker.reset();
   };
+
+  // Constructing the runtime touches nothing on disk; the root directory is
+  // created with the first case.
+  const caseRuntime = new CaseRuntime({
+    root: resolveCasesRoot({ settings: getSettings(), env: process.env, dataDir: userDataPath })
+  });
 
   const context = {
     // Chat
@@ -2618,6 +2638,7 @@ function createCore(deps = {}) {
     getUsageTracker: () => usageTracker,
     createUsageRecordFromMetrics,
     getSettings,
+    getCaseRuntime: () => caseRuntime,
 
     // Tool
     pendingApprovalResolvers,

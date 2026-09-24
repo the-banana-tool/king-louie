@@ -2,6 +2,12 @@ const { EventEmitter } = require('events');
 const { toolRegistry } = require('../tools');
 const { getRuntimeEnvironment } = require('./runtime-environment');
 const { evaluateRules, describeRule } = require('../tools/permission-rules');
+const path = require('path');
+const { isProtectedCasePath, CASE_BLOCKED_TOOL_NAMES, CASE_BLOCKED_TOOL_ERROR } = require('../cases/chat-integration');
+
+// Tools that write a file named by file_path (MultiEdit: per edit). In case
+// mode, facts.jsonl and .kl/ are written only through the case tools.
+const FILE_WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit']);
 
 // Extract a stable, telemetry-safe error code from an Error. Raw
 // error.message leaks local file paths and may contain
@@ -198,6 +204,28 @@ class ToolExecutor extends EventEmitter {
       const errorResult = { success: false, error: validationError.message };
       this.emit('postExecute', { toolName, parameters: effectiveParameters, result: errorResult });
       return errorResult;
+    }
+
+    const caseContext = this.extraToolOptions.caseContext;
+    if (caseContext && CASE_BLOCKED_TOOL_NAMES.includes(toolName)) {
+      const refused = { success: false, error: CASE_BLOCKED_TOOL_ERROR };
+      this.emit('postExecute', { toolName, parameters: effectiveParameters, result: refused });
+      return refused;
+    }
+    if (caseContext && FILE_WRITE_TOOLS.has(toolName)) {
+      const base = options.workingDirectory || this.workingDirectory;
+      const targets = [
+        effectiveParameters.file_path,
+        ...(Array.isArray(effectiveParameters.edits) ? effectiveParameters.edits.map((e) => e?.file_path) : [])
+      ].filter((p) => typeof p === 'string' && p);
+      if (targets.some((p) => isProtectedCasePath(caseContext.dir, path.resolve(base, p)))) {
+        const refused = {
+          success: false,
+          error: 'facts.jsonl, brief.md, case.yaml and .kl/ are written only through the case tools. Use the Ledger tool for facts and the Brief tool for the brief (or Decide, Recommend) instead.'
+        };
+        this.emit('postExecute', { toolName, parameters: effectiveParameters, result: refused });
+        return refused;
+      }
     }
 
     if (tool.isDangerous(effectiveParameters) && !options.bypassSafety) {

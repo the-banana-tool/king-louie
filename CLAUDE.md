@@ -88,3 +88,26 @@ const bound = log.withContext({ sessionId: 's-1' }); // metadata on every call
 
 Levels (low → high): `trace`, `debug`, `info`, `warn`, `error`, `fatal`, `silent`.
 Default is `info`. Override with `KING_LOUIE_LOG_LEVEL` or `LOG_LEVEL` env var.
+
+## Cases
+
+`src/cases/` implements case repositories (spec:
+`docs/superpowers/specs/2026-09-22-king-louie-cases-design.md`). A case is a
+git repo under `<dataDir>/cases/` (override with `settings.cases.root` or
+`KL_CASES_ROOT`), so **`git` must be on PATH** for anything that creates one.
+
+- A chat with `caseId` runs every turn in case mode: `CaseRuntime.beginTurn`
+  locks the case and builds the orientation, `endTurn` commits.
+- The model writes the case only through the `Ledger`, `Brief`, `Decide` and
+  `Recommend` tools. `facts.jsonl` is append-only; never rewrite it in code.
+- Tests that create cases use a temp root. The e2e suite sets
+  `KL_CASES_ROOT` before launching the app so the real profile is untouched.
+- `provenance: 'user'` (a Ledger assert, and the Brief owner-only fields `why`,
+  `hardConstraints`, `alreadyTried`) must carry a `quote` that appears in
+  `caseContext.ownerMessages`. The chat send path fills that list with the
+  owner's own messages. Without a match, the tool refuses. Tests that exercise
+  user provenance must supply `ownerMessages`.
+- Only `user` provenance is host-verified. `sourced` is model-declared, so a
+  sourced fact is only as good as the source the model names. The write guard
+  covers Write, Edit and MultiEdit, not Bash: in stage 1 a shell command can
+  still rewrite `facts.jsonl`.

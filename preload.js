@@ -646,6 +646,31 @@ contextBridge.exposeInMainWorld(
       },
       clear: () => ipcRenderer.invoke('memory:clear')
     },
+    cases: {
+      list: () => ipcRenderer.invoke('case:list'),
+      create: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.title, 'title', { minLength: 1 });
+        return ipcRenderer.invoke('case:create', payload);
+      },
+      attach: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.chatId, 'chatId', { minLength: 1 });
+        return ipcRenderer.invoke('case:attach', payload);
+      },
+      orientation: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        return ipcRenderer.invoke('case:orientation', payload);
+      },
+      setDisclosable: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        validateString(payload.factId, 'factId', { minLength: 1 });
+        if (typeof payload.disclosable !== 'boolean') throw new Error('Invalid disclosable: expected boolean');
+        return ipcRenderer.invoke('case:setDisclosable', payload);
+      }
+    },
     usage: {
       getSession: () => ipcRenderer.invoke('usage:getSession'),
       getDaily: (payload) => ipcRenderer.invoke('usage:getDaily', payload)

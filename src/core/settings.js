@@ -16,6 +16,11 @@ const DEFAULT_SETTINGS = {
     enabled: false,
     maxAgeDays: 14
   },
+  // Case repositories (docs/superpowers/specs/2026-09-22-king-louie-cases-design.md).
+  // Empty root means KL_CASES_ROOT, else <dataDir>/cases.
+  cases: {
+    root: ''
+  },
   activeProvider: 'openai',
   templateVariables: {
     name: '',
@@ -119,6 +124,10 @@ const mergeSettings = (settings = {}) => {
     checkpoints: {
       ...(DEFAULT_SETTINGS.checkpoints || {}),
       ...(source.checkpoints || {})
+    },
+    cases: {
+      ...(DEFAULT_SETTINGS.cases || {}),
+      ...(source.cases || {})
     },
     templateVariables: {
       ...(DEFAULT_SETTINGS.templateVariables || {}),

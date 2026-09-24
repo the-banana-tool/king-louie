@@ -3,6 +3,7 @@ const IPC = require('./constants');
 const ImageHandler = require('../media/image-handler');
 const Advisor = require('../execution/advisor');
 const { createLogger } = require('../logging');
+const { buildCaseSystemPrompt, shapeToolDefinitions } = require('../cases/chat-integration');
 
 const log = createLogger('chat');
 const advisorLog = createLogger('advisor');
@@ -293,81 +294,134 @@ function registerChatHandlers(ipcMain, context = {}) {
     const settings = typeof getSettings === 'function' ? getSettings() : {};
     const allowedDirectories = Array.isArray(settings.allowedDirectories) ? settings.allowedDirectories : [];
 
-    await runHookEvent('UserPromptSubmit', {
-      source: 'ui',
-      chatId,
-      prompt: safeMessage,
-      timestamp: new Date().toISOString(),
-      workingDirectory: chatWorkingDirectory
-    });
-
-    const userMessage = appendMessageToChat(chatId, 'user', safeMessage, {
-      ...(normalizedImages.length > 0 ? { images: normalizedImages } : {}),
-      ...(normalizedDocuments.length > 0 ? { documents: normalizedDocuments } : {})
-    });
-    if (!userMessage) {
-      throw new Error('Chat not found');
-    }
-
-    const inference = await resolveInference({ message: safeMessage, agentMode });
-    if (!['openai', 'anthropic', 'gemini'].includes(inference.providerType)) {
-      throw new Error('Active provider does not support chat completions yet.');
-    }
-
-    // If a prefix-type smart routing rule matched, strip the prefix from the message
-    if (inference.matchedPrefix) {
-      const { stripPrefix } = require('../providers/smart-routing');
-      safeMessage = stripPrefix(safeMessage, inference.matchedPrefix);
-    }
-
-    const provider = inference.provider;
-
-    const chatRaw = getChats().find((item) => item.id === chatId);
-    if (!chatRaw) {
-      throw new Error('Chat not found');
-    }
-    // Filter out persisted tool events — only user/assistant messages go to the LLM
-    const allContentMessages = chatRaw.messages.filter((m) => m.sender === 'user' || m.sender === 'assistant');
-
-    // Semantic conversation compaction: for large conversations, chunk every
-    // message into paragraphs, embed them, then retrieve only the chunks
-    // relevant to the current query.  One cheap embedding call (~$0.002),
-    // then pure local cosine similarity — no LLM call for the retrieval.
-    const compactor = typeof getConversationCompactor === 'function' ? getConversationCompactor() : null;
-    let chatMessages = allContentMessages;
-    if (compactor && compactor.shouldCompact(allContentMessages)) {
-      try {
-        chatMessages = await compactor.retrieve(safeMessage, allContentMessages, {
-          maxChunks: 20,
-          alwaysKeepRecent: 4,
-          minSimilarity: 0.25,
-          maxTokens: 4000
-        });
-        const origTokens = Math.ceil(allContentMessages.reduce((s, m) => s + (m.text?.length || 0), 0) / 4);
-        const compTokens = Math.ceil(chatMessages.reduce((s, m) => s + (m.text?.length || 0), 0) / 4);
-        log.info(`Compacted ${allContentMessages.length} messages → ${chatMessages.length} messages (~${origTokens} → ~${compTokens} tokens, ${Math.round((1 - compTokens / origTokens) * 100)}% reduction)`);
-      } catch (err) {
-        log.warn(`Conversation compaction failed, using full history: ${err.message}`);
-      }
-    }
-
-    const chat = { ...chatRaw, messages: chatMessages };
-
     const responseId = createId();
     const runId = createId();
-    const options = {
-      model: inference.model,
-      timeoutMs: inference.timeoutMs,
-      tier: inference.tier,
-      runId
+
+    // Case mode (spec §5): begin before the prompt hook fires or the user
+    // message is persisted. A busy or missing case must run nothing — no
+    // orphan user message, no hook/inference/provider call — so beginTurn is
+    // the very first thing this handler awaits. There is no enclosing try
+    // yet, so a thrown CaseBusyError or CaseNotFoundError propagates straight
+    // out of this handler to wrapHandler, which turns it into
+    // { ok: false, error }.
+    const caseId = chatForDir?.caseId || null;
+    const caseRuntime = caseId && typeof context.getCaseRuntime === 'function' ? context.getCaseRuntime() : null;
+    let caseTurn = caseRuntime ? await caseRuntime.beginTurn(caseId, { turnId: `turn-${runId}` }) : null;
+    const endCaseTurn = async (fields) => {
+      if (!caseTurn) return;
+      const turn = caseTurn;
+      caseTurn = null;
+      await caseRuntime.endTurn(turn, fields).catch((err) => log.warn(`Case turn commit failed: ${err.message}`));
     };
 
+    // From here on, beginTurn has already locked the case and committed any
+    // owner edits, so every exit — a hook block, a validation failure, a
+    // thrown error, or an abort — must end the turn exactly once. endCaseTurn
+    // is idempotent (it nulls caseTurn before awaiting endTurn), so wrapping
+    // the rest of the handler in one try/catch is enough: nothing before a
+    // `return` or a `throw` below needs its own endCaseTurn call.
+    let fullResponse = '';
+    let answerText = '';
+    let llmSummary = {
+      calls: [],
+      totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
+    };
     const abortController = new AbortController();
-    activeRuns.set(chatId, abortController);
-
-    safeSend(event.sender, 'chat:messageStart', { chatId, responseId });
 
     try {
+      const hookResult = await runHookEvent('UserPromptSubmit', {
+        source: 'ui',
+        chatId,
+        prompt: safeMessage,
+        timestamp: new Date().toISOString(),
+        workingDirectory: chatWorkingDirectory
+      });
+      const hookAction = String(hookResult?.action || 'allow').toLowerCase();
+      if (hookAction === 'deny') {
+        const reason = hookResult?.message || hookResult?.reason || 'Blocked by hook policy.';
+        await endCaseTurn({ summary: `turn blocked: ${reason}`, journal: null });
+        return { ok: false, error: reason };
+      }
+
+      const userMessage = appendMessageToChat(chatId, 'user', safeMessage, {
+        ...(normalizedImages.length > 0 ? { images: normalizedImages } : {}),
+        ...(normalizedDocuments.length > 0 ? { documents: normalizedDocuments } : {})
+      });
+      if (!userMessage) {
+        throw new Error('Chat not found');
+      }
+
+      const inference = await resolveInference({ message: safeMessage, agentMode });
+      if (!['openai', 'anthropic', 'gemini'].includes(inference.providerType)) {
+        throw new Error('Active provider does not support chat completions yet.');
+      }
+
+      // If a prefix-type smart routing rule matched, strip the prefix from the message
+      if (inference.matchedPrefix) {
+        const { stripPrefix } = require('../providers/smart-routing');
+        safeMessage = stripPrefix(safeMessage, inference.matchedPrefix);
+      }
+
+      const provider = inference.provider;
+
+      const chatRaw = getChats().find((item) => item.id === chatId);
+      if (!chatRaw) {
+        throw new Error('Chat not found');
+      }
+      // Filter out persisted tool events — only user/assistant messages go to the LLM
+      const allContentMessages = chatRaw.messages.filter((m) => m.sender === 'user' || m.sender === 'assistant');
+
+      // Semantic conversation compaction: for large conversations, chunk every
+      // message into paragraphs, embed them, then retrieve only the chunks
+      // relevant to the current query.  One cheap embedding call (~$0.002),
+      // then pure local cosine similarity — no LLM call for the retrieval.
+      const compactor = typeof getConversationCompactor === 'function' ? getConversationCompactor() : null;
+      let chatMessages = allContentMessages;
+      if (compactor && compactor.shouldCompact(allContentMessages)) {
+        try {
+          chatMessages = await compactor.retrieve(safeMessage, allContentMessages, {
+            maxChunks: 20,
+            alwaysKeepRecent: 4,
+            minSimilarity: 0.25,
+            maxTokens: 4000
+          });
+          const origTokens = Math.ceil(allContentMessages.reduce((s, m) => s + (m.text?.length || 0), 0) / 4);
+          const compTokens = Math.ceil(chatMessages.reduce((s, m) => s + (m.text?.length || 0), 0) / 4);
+          log.info(`Compacted ${allContentMessages.length} messages → ${chatMessages.length} messages (~${origTokens} → ~${compTokens} tokens, ${Math.round((1 - compTokens / origTokens) * 100)}% reduction)`);
+        } catch (err) {
+          log.warn(`Conversation compaction failed, using full history: ${err.message}`);
+        }
+      }
+
+      const chat = { ...chatRaw, messages: chatMessages };
+
+      // The case tools accept provenance "user" only when the model's quote
+      // matches something the owner actually said in this chat (Task 8 fix
+      // round). Collect every user-sender message's text from the chat,
+      // plus the message being sent this turn if it isn't already there —
+      // it was persisted (above) before smart-routing prefix stripping, so
+      // the post-strip safeMessage may not textually match that entry.
+      const ownerMessages = caseTurn
+        ? (() => {
+            const messages = chatRaw.messages
+              .filter((m) => m.sender === 'user' && typeof m.text === 'string' && m.text)
+              .map((m) => m.text);
+            if (!messages.includes(safeMessage)) messages.push(safeMessage);
+            return messages;
+          })()
+        : null;
+
+      const options = {
+        model: inference.model,
+        timeoutMs: inference.timeoutMs,
+        tier: inference.tier,
+        runId
+      };
+
+      activeRuns.set(chatId, abortController);
+
+      safeSend(event.sender, 'chat:messageStart', { chatId, responseId });
+
       const runtimeEnvironment = await getRuntimeEnvironment({
         workingDirectory: chatWorkingDirectory
       });
@@ -419,11 +473,16 @@ function registerChatHandlers(ipcMain, context = {}) {
         ].filter(Boolean).join('\n\n');
       }
 
+      if (caseTurn) {
+        options.systemPrompt = buildCaseSystemPrompt(caseTurn.orientation, options.systemPrompt);
+      }
+
       const executor = await createToolExecutorWithApprovals(event, runtimeEnvironment, null, {
         workingDirectory: chatWorkingDirectory,
         allowedDirectories,
         useSandbox: sandboxMode,
-        chatId
+        chatId,
+        caseContext: caseTurn ? { ...caseTurn, runtime: caseRuntime, ownerMessages } : null
       });
 
       executor.on('preExecute', ({ toolName, parameters }) => {
@@ -440,14 +499,20 @@ function registerChatHandlers(ipcMain, context = {}) {
         safeSend(event.sender, 'chat:toolProgress', { chatId, runId, toolName, progress });
       });
 
-      let fullResponse = '';
-      let llmSummary = {
-        calls: [],
-        totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
-      };
-      const toolDefinitions = filterMcpTools(assembledTools || toolRegistry.getFunctionDefinitions());
+      const toolDefinitions = shapeToolDefinitions(
+        filterMcpTools(assembledTools || toolRegistry.getFunctionDefinitions()),
+        Boolean(caseTurn),
+        toolRegistry
+      );
       await withNotificationTiming('Chat response', async () => {
-        const canUseAgentMode = agentMode && toolDefinitions.length > 0 && typeof provider.sendMessageWithTools === 'function';
+        // A case turn always runs the agent loop: the case tools are how it works.
+        const canUseAgentMode = (agentMode || Boolean(caseTurn)) && toolDefinitions.length > 0 && typeof provider.sendMessageWithTools === 'function';
+        if (caseTurn && !canUseAgentMode) {
+          const reason = typeof provider.sendMessageWithTools !== 'function'
+            ? 'the provider has no sendMessageWithTools'
+            : 'no tools were available to offer';
+          log.warn(`Case tools could not be offered for case ${caseId}: ${reason}.`);
+        }
         if (canUseAgentMode) {
           const loopModel = resolveAgentLoopModel();
           const embeddingProvider = contextAssembler?.embeddingProvider || null;
@@ -489,6 +554,10 @@ function registerChatHandlers(ipcMain, context = {}) {
             // (fullResponse accumulated deltas but result.content is the clean final text)
             fullResponse = result.content || fullResponse;
           }
+          // The case journal records the model's own answer, before any
+          // advisor review text is appended below, and never the
+          // '(No response)' placeholder (that isn't an answer to journal).
+          answerText = fullResponse;
           llmSummary = {
             calls: result?.llm?.calls || [],
             totals: result?.llm?.totals || llmSummary.totals
@@ -533,6 +602,10 @@ function registerChatHandlers(ipcMain, context = {}) {
             safeSend(event.sender, 'chat:messageChunk', { chatId, responseId, chunk });
           });
 
+          // No advisor review runs on this path, so the model's answer is
+          // just the accumulated response.
+          answerText = fullResponse;
+
           const singleCall = streamResult?.llmMetrics || null;
           const calls = singleCall ? [singleCall] : [];
           llmSummary = {
@@ -567,6 +640,9 @@ function registerChatHandlers(ipcMain, context = {}) {
       });
 
       activeRuns.delete(chatId);
+      // Never journal the '(No response)' placeholder — it isn't an answer.
+      const journal = answerText && answerText !== '(No response)' ? answerText : null;
+      await endCaseTurn({ summary: safeMessage, journal });
 
       const updatedChat = appendMessageToChat(chatId, 'assistant', fullResponse || '(No response)', {
         llm: llmSummary
@@ -592,7 +668,9 @@ function registerChatHandlers(ipcMain, context = {}) {
 
       return updatedChat;
     } catch (error) {
-      activeRuns.delete(chatId);
+      // An early failure never registered this run; leave another run's controller alone.
+      if (activeRuns.get(chatId) === abortController) activeRuns.delete(chatId);
+      await endCaseTurn({ summary: `turn failed: ${error?.message || error}`, journal: null });
       if (abortController.signal.aborted) {
         safeSend(event.sender, 'chat:messageComplete', {
           chatId,
