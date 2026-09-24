@@ -176,7 +176,9 @@ describe('case-mode helpers', () => {
   it('drops tools that start child runs from a case turn, and keeps them otherwise', () => {
     assert.ok(CASE_BLOCKED_TOOL_NAMES.includes('SpawnAgent'));
     assert.ok(CASE_BLOCKED_TOOL_NAMES.includes('BackgroundTask'));
-    for (const name of CASE_BLOCKED_TOOL_NAMES) assert.ok(toolRegistry.get(name) || name === 'sessions_spawn', `${name} is not a registered tool`);
+    // message and the sessions_* tools are registered by createCore, not initializeTools.
+    const coreOnly = new Set(['sessions_spawn', 'sessions_list', 'sessions_history', 'message']);
+    for (const name of CASE_BLOCKED_TOOL_NAMES) assert.ok(toolRegistry.get(name) || coreOnly.has(name), `${name} is not a registered tool`);
     const base = [{ name: 'Read' }, ...CASE_BLOCKED_TOOL_NAMES.map((name) => ({ name }))];
     assert.deepStrictEqual(shapeToolDefinitions(base, true, toolRegistry).map((d) => d.name), ['Read', ...CASE_TOOL_NAMES]);
     assert.deepStrictEqual(shapeToolDefinitions(base, false, toolRegistry).map((d) => d.name), base.map((d) => d.name));
@@ -428,5 +430,40 @@ describe('ToolExecutor ledger write guard', () => {
       fs.rmSync(upperPath, { force: true });
     }
     assert.strictEqual(fs.readFileSync(factsPath, 'utf8'), before);
+  });
+});
+
+describe('stage 2 confinement helpers', () => {
+  const { WAKEUP_BASE_TOOLS, casePrompter, CASE_BLOCKED_TOOL_ERROR } = require('../src/cases/chat-integration');
+
+  it('blocks tools that reach other sessions or change the tool list in every case turn', () => {
+    assert.deepStrictEqual([...CASE_BLOCKED_TOOL_NAMES], [
+      'SpawnAgent', 'BackgroundTask', 'sessions_spawn', 'RemoteDispatch', 'Cron',
+      'message', 'sessions_list', 'sessions_history', 'RequestTools', 'ToolSearch', 'Canvas'
+    ]);
+    assert.match(CASE_BLOCKED_TOOL_ERROR, /not available in case turns/);
+  });
+
+  it('strips AskUser from a case turn and keeps it otherwise', () => {
+    const base = [{ name: 'Read' }, { name: 'AskUser' }];
+    assert.ok(!shapeToolDefinitions(base, true, toolRegistry).some((d) => d.name === 'AskUser'));
+    assert.deepStrictEqual(shapeToolDefinitions(base, false, toolRegistry).map((d) => d.name), ['Read', 'AskUser']);
+  });
+
+  it('confines wake-ups to Read, Glob and Grep besides the case tools', () => {
+    assert.deepStrictEqual([...WAKEUP_BASE_TOOLS], ['Read', 'Glob', 'Grep']);
+    assert.ok(Object.isFrozen(WAKEUP_BASE_TOOLS));
+  });
+
+  it('casePrompter refuses AskUser and delegates directory access to the owner prompter only', async () => {
+    const asked = [];
+    const base = { askUser: async () => ({ ok: true, answer: 'yes' }), requestDirectoryAccess: async (req) => { asked.push(req.directory); return true; } };
+    const owner = casePrompter(base);
+    assert.deepStrictEqual(await owner.askUser({ question: 'Which lot?' }), { ok: false, error: 'In a case, ask the owner with the Ask tool.' });
+    assert.strictEqual(await owner.requestDirectoryAccess({ directory: '/tmp/x', toolName: 'Read' }), true);
+    assert.deepStrictEqual(asked, ['/tmp/x']);
+    const unattended = casePrompter(null);
+    assert.strictEqual(await unattended.requestDirectoryAccess({ directory: '/tmp/y', toolName: 'Read' }), false);
+    assert.strictEqual((await unattended.askUser({ question: 'x' })).ok, false);
   });
 });

@@ -692,3 +692,33 @@ describe('ToolExecutor', () => {
     });
   });
 });
+
+describe('ToolExecutor allowedToolNames', () => {
+  it('refuses a tool outside the set before approval is ever asked', async () => {
+    let approvals = 0;
+    const executor = new ToolExecutor({
+      requireApproval: true,
+      allowedToolNames: new Set(['TestTool']),
+      approvalRequester: async () => { approvals += 1; return true; }
+    });
+    const events = [];
+    executor.on('postExecute', (e) => events.push(e));
+    const refused = await executor.execute('DangerousTool', { force: false });
+    assert.deepStrictEqual(refused, { success: false, error: 'Tool "DangerousTool" is not available in this turn.' });
+    assert.strictEqual(approvals, 0);
+    assert.deepStrictEqual(events.map((e) => [e.toolName, e.result.success]), [['DangerousTool', false]]);
+    const ok = await executor.execute('TestTool', { input: 'hello' });
+    assert.strictEqual(ok.ok, true);
+  });
+
+  it('refuses a name that is not registered at all instead of throwing', async () => {
+    const executor = new ToolExecutor({ requireApproval: false, allowedToolNames: ['TestTool'] });
+    assert.deepStrictEqual(await executor.execute('message', { text: 'hi' }), { success: false, error: 'Tool "message" is not available in this turn.' });
+  });
+
+  it('leaves every tool available when allowedToolNames is null', async () => {
+    const executor = new ToolExecutor({ requireApproval: false, allowedToolNames: null });
+    assert.strictEqual((await executor.execute('TestTool', { input: 'x' })).ok, true);
+    assert.strictEqual(executor.allowedToolNames, null);
+  });
+});

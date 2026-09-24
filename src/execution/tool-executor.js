@@ -50,6 +50,15 @@ class ToolExecutor extends EventEmitter {
     // `allow` permission rule — which is downgraded to `ask`. `deny` rules
     // are untouched, and tools that don't require approval still run.
     this.denyAutoApproval = options.denyAutoApproval === true;
+    // Cases stage 2: a wake-up turn may run only these tools, whatever the
+    // model names. null means no restriction (every other caller).
+    if (options.allowedToolNames instanceof Set) {
+      this.allowedToolNames = new Set(options.allowedToolNames);
+    } else if (Array.isArray(options.allowedToolNames)) {
+      this.allowedToolNames = new Set(options.allowedToolNames);
+    } else {
+      this.allowedToolNames = null;
+    }
     this.runtimeEnvironmentPromise =
       options.runtimeEnvironment
         ? Promise.resolve(options.runtimeEnvironment)
@@ -119,6 +128,12 @@ class ToolExecutor extends EventEmitter {
   }
 
   async execute(toolName, parameters = {}, options = {}) {
+    if (this.allowedToolNames && !this.allowedToolNames.has(toolName)) {
+      const refused = { success: false, error: `Tool "${toolName}" is not available in this turn.` };
+      this.emit('postExecute', { toolName, parameters, result: refused });
+      return refused;
+    }
+
     const tool = toolRegistry.get(toolName);
     if (!tool) {
       throw new Error(`Tool not found: ${toolName}`);
