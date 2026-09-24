@@ -415,3 +415,64 @@ describe('InferenceRouter failover policy', () => {
     assert.strictEqual(openaiCalled, false);
   });
 });
+
+describe('InferenceRouter explicit target and streaming', () => {
+  const InferenceRouterForTarget = require('../src/providers/inference-router');
+
+  function routerWith(providers, calls) {
+    return new InferenceRouterForTarget({
+      getSettings: () => ({ inference: { tierMap: { fast: { provider: 'groq', model: 'llama-3.3' } }, activeTier: 'fast' }, activeProvider: 'openai' }),
+      getProviderModel: () => '',
+      getProviderToken: () => 'fake-token',
+      createProvider: (p) => { calls.push(p); return providers[p]; }
+    });
+  }
+
+  it('options.target replaces the tier config and is not passed to the provider', async () => {
+    const calls = [];
+    let seen = null;
+    const router = routerWith({
+      openai: { getDefaultModel: () => 'gpt-default', sendMessage: async (messages, options) => { seen = options; return 'from openai'; } },
+      groq: { getDefaultModel: () => 'llama', sendMessage: async () => 'from groq' }
+    }, calls);
+    const out = await router.routeWithFallback('fast', [{ role: 'user', content: 'hi' }], { target: { provider: 'OpenAI', model: 'gpt-4o' }, temperature: 0 });
+    assert.strictEqual(out, 'from openai');
+    assert.deepStrictEqual(calls, ['openai']);
+    assert.strictEqual(seen.model, 'gpt-4o');
+    assert.strictEqual(seen.temperature, 0);
+    assert.strictEqual('target' in seen, false);
+  });
+
+  it('streams tool calls when onChunk is given and the provider can stream', async () => {
+    const calls = [];
+    const chunks = [];
+    let streamedOptions = null;
+    const router = routerWith({
+      openai: {
+        getDefaultModel: () => 'gpt-default',
+        sendMessageWithTools: async () => ({ type: 'text', content: 'not streamed' }),
+        streamMessageWithTools: async (messages, tools, options, onChunk) => {
+          streamedOptions = options;
+          onChunk('par');
+          onChunk('tial');
+          return { type: 'text', content: 'partial' };
+        }
+      }
+    }, calls);
+    const tools = [{ name: 'Read' }];
+    const out = await router.routeWithFallback('fast', [], { target: { provider: 'openai' }, tools, onChunk: (c) => chunks.push(c) });
+    assert.deepStrictEqual(out, { type: 'text', content: 'partial' });
+    assert.deepStrictEqual(chunks, ['par', 'tial']);
+    assert.strictEqual('onChunk' in streamedOptions, false);
+    const plain = await router.routeWithFallback('fast', [], { target: { provider: 'openai' }, tools });
+    assert.deepStrictEqual(plain, { type: 'text', content: 'not streamed' });
+  });
+
+  it('falls back to sendMessageWithTools when the provider cannot stream', async () => {
+    const router = routerWith({
+      openai: { getDefaultModel: () => 'gpt-default', sendMessageWithTools: async () => ({ type: 'text', content: 'sent' }) }
+    }, []);
+    const out = await router.routeWithFallback('fast', [], { target: { provider: 'openai' }, tools: [{ name: 'Read' }], onChunk: () => {} });
+    assert.deepStrictEqual(out, { type: 'text', content: 'sent' });
+  });
+});
