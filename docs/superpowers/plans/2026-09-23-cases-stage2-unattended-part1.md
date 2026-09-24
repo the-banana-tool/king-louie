@@ -77,7 +77,7 @@ Part 1 consumes nothing unmerged. It reads two optional inputs that C3 will writ
 |---|---|---|
 | Program §4.7 `.kl/executors.json` (C3) | `{ [executorId]: { stale: boolean, material: object } }` | a literal object, or `null` (trigger inert) |
 | Program §4.7 `.kl/plan.json` (C3, R35) | `{ steps: [{ id, state: 'pending'\|'in-flight'\|'done'\|'failed'\|'cancelled' }] }` | a literal, or `null` (trigger inert) |
-| Spec §5.1 C6 `playbookChanges(id)` | `[{ name, from, to }]` | a literal array, or `[]` (trigger inert) |
+| Spec §5.1 C6 `playbookChanges(id)` | `[{ name, from, to, key?, detail? }]` | a literal array, or `[]` (trigger inert) |
 
 ## Deviations and resolved gaps (read before starting)
 
@@ -2432,6 +2432,11 @@ describe('detectTriggers', () => {
     assert.deepStrictEqual(t.map((x) => [x.kind, x.key]), [['playbook-update', 'playbook:land-sale:v2']]);
   });
 
+  it('playbook-update: uses the key and detail C6 supplies', () => {
+    const t = detectTriggers(input({ playbookChanges: [{ name: 'land-sale', from: '1.2.0', to: '1.2.0', key: 'playbook:land-sale:edited:ab12', detail: 'Playbook land-sale was edited locally.' }] }));
+    assert.deepStrictEqual(t.map((x) => [x.key, x.detail]), [['playbook:land-sale:edited:ab12', 'Playbook land-sale was edited locally.']]);
+  });
+
   it('hook triggers: kept unless acknowledged, and blocking unless they say otherwise', () => {
     const hookTriggers = [
       { kind: 'detour', key: 'detour:msg-7', detail: 'The owner changed the subject.' },
@@ -2602,9 +2607,11 @@ function detectTriggers(input = {}) {
     if (!p || !p.name) continue;
     out.push({
       kind: 'playbook-update',
-      key: `playbook:${p.name}:${p.to ?? 'removed'}`,
+      // C6 supplies its own `key` and `detail` (an `edited` change keeps the same version);
+      // fall back to the name/version form when they are absent.
+      key: typeof p.key === 'string' && p.key ? p.key : `playbook:${p.name}:${p.to ?? 'removed'}`,
       blocking: true,
-      detail: `Playbook ${p.name} changed (${p.from ?? 'none'} -> ${p.to ?? 'removed'}).`
+      detail: typeof p.detail === 'string' && p.detail ? p.detail : `Playbook ${p.name} changed (${p.from ?? 'none'} -> ${p.to ?? 'removed'}).`
     });
   }
 
