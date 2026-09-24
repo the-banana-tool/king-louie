@@ -118,7 +118,7 @@ class CronScheduler {
     const patch = { state: newState };
     if (job.schedule?.kind === 'at') {
         patch.enabled = false;
-    } else if (newState.consecutiveErrors >= 5) {
+    } else if (newState.consecutiveErrors >= 5 && job.system !== true) {
         patch.enabled = false;
         log.warn(`disabled job ${id} after 5 consecutive errors`);
     }
@@ -127,15 +127,37 @@ class CronScheduler {
     return result;
   }
 
+  // System jobs (payload.system) are created by King Louie through the
+  // store, never through the Cron tool or IPC, and cannot be changed there.
+  _refuseSystem(id) {
+    if (this.store.get(id)?.system === true) {
+      throw new Error(`"${id}" is a system job managed by King Louie.`);
+    }
+  }
+
+  _stripSystem(fields) {
+    const copy = { ...(fields || {}) };
+    delete copy.system;
+    if (copy.payload && typeof copy.payload === 'object') {
+      copy.payload = { ...copy.payload };
+      delete copy.payload.system;
+    }
+    return copy;
+  }
+
   async addJob(job) {
-    return this.store.add(job);
+    const clean = this._stripSystem(job);
+    if (clean.id) this._refuseSystem(clean.id);
+    return this.store.add(clean);
   }
 
   async updateJob(id, patch) {
-    return this.store.update(id, patch);
+    this._refuseSystem(id);
+    return this.store.update(id, this._stripSystem(patch));
   }
 
   async removeJob(id) {
+    this._refuseSystem(id);
     return this.store.remove(id);
   }
 

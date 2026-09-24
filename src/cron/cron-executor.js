@@ -7,11 +7,33 @@ class CronExecutor {
     this.agentExecutor = agentExecutor;
     this.sessionManager = sessionManager;
     this.gateway = gateway;
+    // Jobs King Louie itself owns (cases stage 2 spec §3.6). Dispatched by
+    // payload.system, never through the agent.
+    this.systemHandlers = new Map();
+  }
+
+  registerSystemJob(name, handler) {
+    if (typeof name !== 'string' || !name) throw new Error('registerSystemJob needs a job name');
+    if (typeof handler !== 'function') throw new Error('registerSystemJob needs a handler function');
+    this.systemHandlers.set(name, handler);
   }
 
   async execute(job) {
     if (!job || !job.payload) {
       throw new Error('Invalid job payload');
+    }
+
+    if (job.system === true && typeof job.payload.system === 'string') {
+      const name = job.payload.system;
+      const handler = this.systemHandlers.get(name);
+      if (!handler) return { ok: false, error: `No handler for system job ${name}` };
+      try {
+        const result = await handler(job);
+        return { ok: true, ...(result && typeof result === 'object' ? result : {}) };
+      } catch (err) {
+        log.error(`system job ${name} failed: ${err.message}`);
+        return { ok: false, error: err.message };
+      }
     }
 
     const { sessionTarget, message } = job.payload;

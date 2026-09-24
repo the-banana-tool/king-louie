@@ -160,4 +160,45 @@ class WakeupStore {
   }
 }
 
-module.exports = { WakeupStore, MIN_EVERY_MS, OUTCOMES, DEFAULT_BACKOFF_MINUTES };
+const WAKEUP_JOB_ID = 'cases:wakeups';
+const WAKEUP_JOB_SPEC = Object.freeze({
+  system: true,
+  enabled: true,
+  schedule: Object.freeze({ kind: 'every', everyMs: 60000 }),
+  payload: Object.freeze({ system: WAKEUP_JOB_ID })
+});
+
+// One system job per data dir, written through the store (not addJob, which
+// strips `system`). Idempotent: a job the owner disabled or that a bad run
+// left erroring is put back as specified on every start.
+async function ensureWakeupJob(cronStore) {
+  const spec = {
+    system: true,
+    enabled: true,
+    schedule: { ...WAKEUP_JOB_SPEC.schedule },
+    payload: { ...WAKEUP_JOB_SPEC.payload }
+  };
+  const existing = cronStore.get(WAKEUP_JOB_ID);
+  if (!existing) {
+    return cronStore.add({ id: WAKEUP_JOB_ID, name: 'Case wake-ups', ...spec });
+  }
+  const same = existing.system === true
+    && existing.enabled === true
+    && JSON.stringify(existing.schedule) === JSON.stringify(spec.schedule)
+    && JSON.stringify(existing.payload) === JSON.stringify(spec.payload)
+    && (existing.state?.consecutiveErrors || 0) === 0;
+  if (same) return existing;
+  return cronStore.update(WAKEUP_JOB_ID, {
+    ...spec,
+    state: { ...(existing.state || {}), consecutiveErrors: 0 }
+  });
+}
+
+module.exports = {
+  WakeupStore,
+  MIN_EVERY_MS,
+  OUTCOMES,
+  DEFAULT_BACKOFF_MINUTES,
+  WAKEUP_JOB_ID,
+  ensureWakeupJob
+};

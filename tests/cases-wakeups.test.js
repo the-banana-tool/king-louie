@@ -144,3 +144,93 @@ describe('WakeupStore', () => {
     assert.strictEqual(fs.statSync(file).mtimeMs, mtime);
   });
 });
+
+describe('cron system jobs', () => {
+  const CronStore = require('../src/cron/cron-store');
+  const CronExecutor = require('../src/cron/cron-executor');
+  const CronScheduler = require('../src/cron/cron-scheduler');
+  const { ensureWakeupJob, WAKEUP_JOB_ID } = require('../src/cases/wakeups');
+
+  async function cron({ tickIntervalMs = 20 } = {}) {
+    const d = caseDir();
+    const cronStore = new CronStore(path.join(d, 'cron', 'jobs.json'));
+    await cronStore.load();
+    const executor = new CronExecutor(null, null, null);
+    const scheduler = new CronScheduler(cronStore, executor, { tickIntervalMs });
+    return { d, cronStore, executor, scheduler };
+  }
+
+  it('ensureWakeupJob creates the job once and repairs it on every start', async () => {
+    const { cronStore, d } = await cron();
+    const job = await ensureWakeupJob(cronStore);
+    assert.strictEqual(job.id, WAKEUP_JOB_ID);
+    assert.strictEqual(job.system, true);
+    assert.strictEqual(job.enabled, true);
+    assert.deepStrictEqual(job.schedule, { kind: 'every', everyMs: 60000 });
+    assert.deepStrictEqual(job.payload, { system: 'cases:wakeups' });
+    await ensureWakeupJob(cronStore);
+    assert.strictEqual(cronStore.list().length, 1);
+
+    await cronStore.update(WAKEUP_JOB_ID, { enabled: false, schedule: { kind: 'every', everyMs: 999999 }, state: { lastRunAtMs: 5, consecutiveErrors: 4 } });
+    const again = new CronStore(path.join(d, 'cron', 'jobs.json'));
+    await again.load();
+    const repaired = await ensureWakeupJob(again);
+    assert.strictEqual(repaired.enabled, true);
+    assert.deepStrictEqual(repaired.schedule, { kind: 'every', everyMs: 60000 });
+    assert.strictEqual(repaired.state.consecutiveErrors, 0);
+    assert.strictEqual(repaired.state.lastRunAtMs, 5);
+  });
+
+  it('the real scheduler dispatches the system job and wraps the handler result', async () => {
+    const { cronStore, executor, scheduler } = await cron();
+    let calls = 0;
+    executor.registerSystemJob('cases:wakeups', async () => { calls += 1; return { ran: 1, quiet: 0 }; });
+    await ensureWakeupJob(cronStore);
+    scheduler.start();
+    try {
+      for (let i = 0; i < 100 && calls === 0; i += 1) await sleep(20);
+    } finally {
+      scheduler.stop();
+    }
+    assert.ok(calls >= 1, 'handler ran');
+    for (let i = 0; i < 50 && !cronStore.get(WAKEUP_JOB_ID).state?.lastResult; i += 1) await sleep(10);
+    assert.deepStrictEqual(cronStore.get(WAKEUP_JOB_ID).state.lastResult, { ok: true, ran: 1, quiet: 0 });
+  });
+
+  it('counts a throwing handler as an error without ever disabling the job', async () => {
+    const { cronStore, executor, scheduler } = await cron();
+    executor.registerSystemJob('cases:wakeups', async () => { throw new Error('boom'); });
+    await ensureWakeupJob(cronStore);
+    for (let i = 0; i < 6; i += 1) {
+      assert.deepStrictEqual(await scheduler.runNow(WAKEUP_JOB_ID), { ok: false, error: 'boom' });
+    }
+    const job = cronStore.get(WAKEUP_JOB_ID);
+    assert.strictEqual(job.state.consecutiveErrors, 6);
+    assert.strictEqual(job.enabled, true);
+  });
+
+  it('reports a system job with no handler', async () => {
+    const { executor } = await cron();
+    assert.deepStrictEqual(
+      await executor.execute({ id: 'x', system: true, payload: { system: 'nope' } }),
+      { ok: false, error: 'No handler for system job nope' }
+    );
+    assert.throws(() => executor.registerSystemJob('', () => {}), /name/);
+    assert.throws(() => executor.registerSystemJob('a', null), /function/);
+  });
+
+  it('refuses to update or remove a system job and strips system from new jobs', async () => {
+    const { cronStore, scheduler } = await cron();
+    await ensureWakeupJob(cronStore);
+    await assert.rejects(scheduler.updateJob(WAKEUP_JOB_ID, { enabled: false }), /"cases:wakeups" is a system job managed by King Louie\./);
+    await assert.rejects(scheduler.removeJob(WAKEUP_JOB_ID), /"cases:wakeups" is a system job managed by King Louie\./);
+    await assert.rejects(scheduler.addJob({ id: WAKEUP_JOB_ID, schedule: { kind: 'every', everyMs: 60000 }, payload: { message: 'hi' } }), /system job/);
+    const mine = await scheduler.addJob({ id: 'mine', system: true, schedule: { kind: 'every', everyMs: 60000 }, payload: { system: 'cases:wakeups', message: 'hi' } });
+    assert.strictEqual(mine.system, undefined);
+    assert.deepStrictEqual(mine.payload, { message: 'hi' });
+    const patched = await scheduler.updateJob('mine', { system: true, payload: { system: 'cases:wakeups', message: 'bye' } });
+    assert.strictEqual(patched.system, undefined);
+    assert.deepStrictEqual(patched.payload, { message: 'bye' });
+    assert.strictEqual(await scheduler.removeJob('mine'), true);
+  });
+});
