@@ -56,6 +56,8 @@ describe('status transitions', () => {
       ['needs-direction', 'active', 'owner', 'owner'],
       ['needs-direction', 'paused', 'owner', 'owner'],
       ['paused', 'active', 'runtime', 'direction'],
+      ['paused', 'active', 'runtime', 'owner'],
+      ['paused', 'active', 'owner', 'budget-grant'],
       ['paused', 'needs-direction', 'runtime', 'failure'],
       ['done', 'active', 'owner', 'owner'],
       ['done', 'abandoned', 'owner', 'owner'],
