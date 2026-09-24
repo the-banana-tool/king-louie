@@ -24,6 +24,7 @@ const BRIEF_TEMPLATE = (objective) => [
     resources: { executors: [], ownerLabor: [] },
     deadline: null,
     materiality: { tell: [], ignore: [] },
+    safeDefaults: [],
     gating: { complete: false }
   }).trimEnd(),
   '---',
