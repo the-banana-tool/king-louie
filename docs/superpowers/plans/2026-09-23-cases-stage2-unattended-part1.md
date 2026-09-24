@@ -3282,7 +3282,7 @@ function nextWakeupSection(w) {
 
 function buildOrientation({
   meta, brief, facts = new Map(), decisions = [], lastJournal = null, ledgerErrors = [], maxChars = DEFAULT_MAX_CHARS,
-  triggers = [], hookNotes = [], statusReason = null, failure = null, questions = [], budget = null, nextWakeup = null,
+  triggers = [], hookNotes = [], statusReason = null, failure = null, questions = [], budget: budgetStatus = null, nextWakeup = null,
   now = new Date()
 }) {
 ```
@@ -3318,7 +3318,7 @@ with
     ...(lbUnknowns.length ? lbUnknowns : ['- none recorded']),
     '',
     ...questionsSection(questions, now),
-    ...budgetSection(budget),
+    ...budgetSection(budgetStatus),
     ...nextWakeupSection(nextWakeup)
   ].join('\n');
 ```

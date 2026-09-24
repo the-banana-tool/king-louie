@@ -765,8 +765,16 @@ class CaseRuntime {
     return resolveCaseSettings(raw);
   }
 
-  createCase(opts) {
-    return this.store.create(opts);
+  // The wake-up sweep lists cases; a case still being created has no first commit yet,
+  // so a sweep that commits it would make `create` fail with "nothing to commit".
+  // `runDueWakeups` skips the whole tick while any creation is in flight.
+  async createCase(opts) {
+    this.creating = (this.creating || 0) + 1;
+    try {
+      return await this.store.create(opts);
+    } finally {
+      this.creating -= 1;
+    }
   }
 
   listCases() {
@@ -3476,6 +3484,8 @@ async function runDueWakeups(runtime, now = runtime.now()) {
   const counts = { ran: 0, quiet: 0, skipped: 0, busy: 0, failed: 0 };
   const cfg = runtime.settings().wakeups;
   if (!cfg.enabled || !runtime.host) return counts;
+  // A case being created has no first commit; sweeping it now would break `createCase`.
+  if (runtime.creating) return counts;
   let turns = 0;
   for (const meta of runtime.listCases()) {
     // An owner is mid-turn on this case in this process: leave it alone.
