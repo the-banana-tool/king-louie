@@ -46,6 +46,12 @@ module.exports = {
   CASE_ATTACH: 'case:attach',
   CASE_ORIENTATION: 'case:orientation',
   CASE_SET_DISCLOSABLE: 'case:setDisclosable',
+  CASE_QUESTIONS: 'case:questions',
+  CASE_ANSWER_QUESTION: 'case:answerQuestion',
+  CASE_ACKNOWLEDGE_BRIEFING: 'case:acknowledgeBriefing',
+  CASE_SET_STATUS: 'case:setStatus',
+  CASE_BUDGET: 'case:budget',
+  CASE_GRANT_BUDGET: 'case:grantBudget',
 
   USAGE_GET_SESSION: 'usage:getSession',
   USAGE_GET_DAILY: 'usage:getDaily',

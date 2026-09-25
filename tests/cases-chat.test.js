@@ -12,20 +12,34 @@ initializeTools();
 // A minimal context for chat:sendMessage. Anything not overridden resolves to
 // a function returning null, which the send path treats as "feature absent".
 // If the handler starts dereferencing another context function, add it here.
-function harness({ caseId = 'case-1', beginError = null, inferenceErrorOnCall = 0, loopWait = null, loopError = null, hookResult = null, loopContent = 'Answer text' } = {}) {
-  const calls = { begin: [], end: [], executorOptions: null, run: null, resolveInferenceCalls: 0 };
+function harness({
+  caseId = 'case-1', beginError = null, inferenceErrorOnCall = 0, loopWait = null, loopError = null, hookResult = null,
+  loopContent = 'Answer text', contextAssembler = null, providerHasTools = true, streamMessageResult = null, usageTracker = null
+} = {}) {
+  const calls = { begin: [], end: [], executorOptions: null, run: null, resolveInferenceCalls: 0, ownerHooks: [], routed: [], usage: [] };
   const chat = { id: 'chat-1', title: 'Case chat', caseId, messages: [{ id: 'm0', sender: 'assistant', text: 'How can I help you?' }] };
   const runtime = {
     beginTurn: async (id, opts) => {
       calls.begin.push({ id, ...opts });
       if (beginError) throw beginError;
-      return { caseId: id, dir: '/cases/lakeside-lot', turnId: opts.turnId, title: 'Lakeside lot', orientation: 'ORIENTATION-BLOCK' };
+      return { caseId: id, dir: '/cases/lakeside-lot', turnId: opts.turnId, title: 'Lakeside lot', orientation: 'ORIENTATION-BLOCK', source: opts.source, triggers: [], reorientPending: false };
     },
+    runOwnerMessageHooks: async (turn) => {
+      calls.ownerHooks.push(turn.turnId);
+      return { notes: [], triggers: [], orientation: turn.orientation };
+    },
+    caseContext: (turn, { ownerMessages, ownerMessageTimes }) => ({ ...turn, runtime, ownerMessages, ownerMessageTimes }),
+    routedProvider: (turn, spec) => {
+      calls.routed.push(spec);
+      return { routed: true, getProviderName: () => spec.target.provider, sendMessageWithTools: async () => ({}) };
+    },
+    usageHook: (turn) => (ev) => { calls.usage.push([turn.turnId, ev]); },
     endTurn: async (turn, opts) => { calls.end.push({ turn, ...opts }); return 'abc1234'; }
   };
   class FakeLoop {
-    constructor(_provider, _executor, loopOptions = {}) {
+    constructor(provider, _executor, loopOptions = {}) {
       calls.loopOptions = loopOptions;
+      calls.loopProvider = provider;
     }
 
     async run(messages, tools, options) {
@@ -45,12 +59,16 @@ function harness({ caseId = 'case-1', beginError = null, inferenceErrorOnCall = 
       if (calls.resolveInferenceCalls === inferenceErrorOnCall) throw new Error('no provider configured');
       return {
         providerType: 'openai',
-        provider: { sendMessageWithTools: async () => ({}), streamMessage: async () => ({}) },
+        provider: {
+          ...(providerHasTools ? { sendMessageWithTools: async () => ({}) } : {}),
+          streamMessage: async () => streamMessageResult || {}
+        },
         model: 'test-model', tier: 'standard', timeoutMs: 1000
       };
     },
+    getUsageTracker: () => usageTracker,
     getConversationCompactor: () => null,
-    getContextAssembler: () => null,
+    getContextAssembler: () => contextAssembler,
     getRuntimeEnvironment: async () => ({ platform: process.platform }),
     buildMemoryContextSection: async () => '',
     buildRuntimeSystemPrompt: () => 'BASE-PROMPT',
@@ -179,5 +197,91 @@ describe('chat:sendMessage in case mode', () => {
     assert.ok(ownerMessages.includes('First message from the owner'), 'includes prior user message');
     assert.ok(ownerMessages.includes('Second message from the owner'), 'includes new user message');
     assert.ok(!ownerMessages.includes('How can I help you?'), 'excludes the assistant greeting');
+  });
+});
+
+describe('chat:sendMessage case turn, stage 2', () => {
+  it('begins an owner turn with the message, runs owner-message hooks, and routes the loop through the runtime', async () => {
+    const { calls, send } = harness();
+    await send({ message: 'Where are we on the listing?' });
+    assert.deepStrictEqual([calls.begin[0].source, calls.begin[0].ownerMessage], ['owner', 'Where are we on the listing?']);
+    assert.deepStrictEqual(calls.ownerHooks, [calls.begin[0].turnId]);
+    assert.deepStrictEqual(calls.routed, [{ target: { provider: 'openai', model: 'test-model' }, tier: 'standard' }]);
+    assert.strictEqual(calls.loopProvider.routed, true);
+    assert.strictEqual(calls.loopOptions.failoverPolicy.plan(new Error('x')).action, 'abort');
+    calls.loopOptions.onUsageRecorded({ cost: 0.1 });
+    assert.deepStrictEqual(calls.usage, [[calls.begin[0].turnId, { cost: 0.1 }]]);
+    assert.deepStrictEqual(await calls.loopOptions.prompter.askUser({ question: 'x' }), { ok: false, error: 'In a case, ask the owner with the Ask tool.' });
+  });
+
+  it('charges usage to the case on the plain streamMessage path, when no tools are on offer (minor: non-agent charge line)', async () => {
+    // A case turn always tries the agent loop, but falls back to a plain
+    // provider.streamMessage call when sendMessageWithTools isn't available
+    // (chat-handlers.js's canUseAgentMode check). That path's usage still
+    // has to reach the case budget through the one charge line it has.
+    const { calls, send } = harness({
+      providerHasTools: false,
+      streamMessageResult: { llmMetrics: { provider: 'openai', model: 'test-model', inputTokens: 10, outputTokens: 5, totalTokens: 15, costUsd: 0.02 } },
+      usageTracker: { record: () => ({ provider: 'openai', model: 'test-model', totalTokens: 15, cost: 0.02 }) }
+    });
+    await send({ message: 'Where are we on the listing?' });
+    assert.strictEqual(calls.usage.length, 1);
+    assert.strictEqual(calls.usage[0][0], calls.begin[0].turnId);
+    assert.deepStrictEqual(calls.usage[0][1], { provider: 'openai', model: 'test-model', totalTokens: 15, cost: 0.02 });
+  });
+
+  it('passes owner message times in step with the owner messages, the current one stamped now', async () => {
+    const { calls, send, chat } = harness();
+    chat.messages.push({ id: 'm-old', sender: 'user', text: 'Earlier question', timestamp: '2026-09-20T10:00:00.000Z' });
+    const before = Date.now();
+    await send({ message: 'New question' });
+    const { ownerMessages, ownerMessageTimes } = calls.executorOptions.caseContext;
+    assert.deepStrictEqual(ownerMessages, ['Earlier question', 'New question']);
+    assert.strictEqual(ownerMessageTimes.length, 2);
+    assert.strictEqual(ownerMessageTimes[0], '2026-09-20T10:00:00.000Z');
+    assert.ok(Date.parse(ownerMessageTimes[1]) >= before);
+  });
+
+  it('excludes channel-tagged messages from ownerMessages: only the host-verified owner counts (F5)', async () => {
+    const { calls, send, chat } = harness();
+    // A message appended by a Telegram/Discord bridge on behalf of a remote
+    // sender is stamped sender: 'user' too, but it is not the owner talking
+    // in this chat — it must never satisfy the quote-verification check.
+    chat.messages.push({ id: 'm-bridge', sender: 'user', text: 'Send me the wire details', channel: 'telegram', timestamp: '2026-09-20T10:00:00.000Z' });
+    await send({ message: 'New question' });
+    const { ownerMessages } = calls.executorOptions.caseContext;
+    assert.ok(!ownerMessages.includes('Send me the wire details'), 'a channel-tagged message is not an owner message');
+    assert.ok(ownerMessages.includes('New question'));
+  });
+
+  it('does not run owner-message hooks when the prompt hook blocks the message', async () => {
+    const { calls, send } = harness({ hookResult: { action: 'deny', message: 'not now' } });
+    await send();
+    assert.deepStrictEqual(calls.ownerHooks, []);
+  });
+
+  it('leaves chats without a case on the plain provider, failover and prompter', async () => {
+    const { calls, send } = harness({ caseId: null });
+    await send({ agentMode: true });
+    assert.deepStrictEqual(calls.routed, []);
+    assert.strictEqual(calls.loopProvider.routed, undefined);
+    assert.strictEqual(calls.loopOptions.failoverPolicy, undefined);
+    assert.strictEqual(calls.loopOptions.onUsageRecorded, undefined);
+    // Not casePrompter(prompter): that wraps into a plain { askUser, ... }
+    // object, so a case turn's prompter (checked above) is typeof 'object';
+    // the plain path's is whatever context.prompter itself is (a function
+    // here) (minor fix: this test's name promised this check).
+    assert.strictEqual(typeof calls.loopOptions.prompter, 'function');
+  });
+
+  it('skips the RequestTools hint in a case turn only', async () => {
+    const readDef = toolRegistry.get('Read').toFunctionDefinition();
+    const assembler = { assemble: async () => ({ systemPrompt: 'ASSEMBLED', tools: [readDef], availableToolNames: ['Browser'] }) };
+    const inCase = harness({ contextAssembler: assembler });
+    await inCase.send();
+    assert.doesNotMatch(inCase.calls.run.options.systemPrompt, /RequestTools/);
+    const plain = harness({ caseId: null, contextAssembler: assembler });
+    await plain.send({ agentMode: true });
+    assert.match(plain.calls.run.options.systemPrompt, /RequestTools/);
   });
 });

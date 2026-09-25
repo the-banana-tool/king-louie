@@ -10,11 +10,11 @@ const { CaseRuntime } = require('../src/cases');
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
 
-function setup({ withRuntime = true } = {}) {
+function setup({ withRuntime = true, chats: initialChats = [{ id: 'chat-1', title: 'Chat', messages: [] }] } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-cases-ipc-'));
   dirs.push(root);
   const runtime = new CaseRuntime({ root });
-  let chats = [{ id: 'chat-1', title: 'Chat', messages: [] }];
+  let chats = initialChats;
   const context = {
     getCaseRuntime: () => (withRuntime ? runtime : null),
     getChats: () => chats,
@@ -49,6 +49,34 @@ describe('case IPC', () => {
     assert.match(badCase.error, /Case not found/);
     const badChat = await call(IPC.CASE_ATTACH, { chatId: 'nope', caseId: c.id });
     assert.strictEqual(badChat.ok, false);
+  });
+
+  it('refuses to attach a case to a bridge chat (F5)', async () => {
+    const { call } = setup({ chats: [{ id: 'chat-1', title: 'Chat', messages: [] }, { id: 'chat-2', title: '📱 Telegram: someone (1)', origin: 'telegram', messages: [] }] });
+    const { case: c } = await call(IPC.CASE_CREATE, { title: 'A' });
+    const refused = await call(IPC.CASE_ATTACH, { chatId: 'chat-2', caseId: c.id });
+    assert.strictEqual(refused.ok, false);
+    assert.match(refused.error, /telegram/i);
+    // Detaching (caseId: null) is not a case attachment and stays allowed;
+    // attaching a case to a plain chat is unaffected.
+    assert.strictEqual((await call(IPC.CASE_ATTACH, { chatId: 'chat-2', caseId: null })).ok, true);
+    assert.strictEqual((await call(IPC.CASE_ATTACH, { chatId: 'chat-1', caseId: c.id })).chat.caseId, c.id);
+  });
+
+  it('refuses to attach a case to a legacy bridge chat that has no origin tag, by its title prefix (F5 re-review)', async () => {
+    const { call } = setup({
+      chats: [
+        { id: 'chat-legacy-tg', title: '📱 Telegram: Alex (123)', messages: [] },
+        { id: 'chat-legacy-dc', title: '👾 Discord: Sam (456)', messages: [] }
+      ]
+    });
+    const { case: c } = await call(IPC.CASE_CREATE, { title: 'A' });
+    const tg = await call(IPC.CASE_ATTACH, { chatId: 'chat-legacy-tg', caseId: c.id });
+    assert.strictEqual(tg.ok, false);
+    assert.match(tg.error, /telegram/i);
+    const dc = await call(IPC.CASE_ATTACH, { chatId: 'chat-legacy-dc', caseId: c.id });
+    assert.strictEqual(dc.ok, false);
+    assert.match(dc.error, /discord/i);
   });
 
   it('returns the orientation text', async () => {
@@ -93,5 +121,128 @@ describe('case IPC', () => {
     assert.strictEqual((await call(IPC.CASE_CREATE, { title: 'A', objective: '  ' })).ok, false);
     const listed = await call(IPC.CASE_LIST);
     assert.deepStrictEqual(listed.cases, []);
+  });
+});
+
+describe('case IPC, stage 2', () => {
+  const { registerCaseUnattendedHandlers } = require('../src/ipc/case-unattended-handlers');
+
+  function setup2() {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-cases-ipc2-'));
+    dirs.push(root);
+    const runtime = new CaseRuntime({ root, getSettings: () => ({ cases: { timeZone: 'UTC' } }), host: { interactive: () => true, notify: () => {} } });
+    const handlers = new Map();
+    registerCaseUnattendedHandlers({ handle: (ch, fn) => handlers.set(ch, fn), on: () => {} }, { getCaseRuntime: () => runtime });
+    return { runtime, handlers, call: (channel, payload) => handlers.get(channel)({}, payload) };
+  }
+
+  async function activeCase(runtime, title = 'Lakeside lot') {
+    const info = await runtime.createCase({ title, objective: 'Convert the lot to cash' });
+    runtime.brief(info.id).update('why', 'Need the cash', { provenance: 'user' });
+    runtime.brief(info.id).append('successCriteria', 'Closed by year end', { provenance: 'model' });
+    runtime.completeGating(info.id);
+    return runtime.getCase(info.id);
+  }
+
+  it('registers the six channels', () => {
+    const { handlers } = setup2();
+    const channels = [IPC.CASE_QUESTIONS, IPC.CASE_ANSWER_QUESTION, IPC.CASE_ACKNOWLEDGE_BRIEFING, IPC.CASE_SET_STATUS, IPC.CASE_BUDGET, IPC.CASE_GRANT_BUDGET];
+    assert.deepStrictEqual(channels, ['case:questions', 'case:answerQuestion', 'case:acknowledgeBriefing', 'case:setStatus', 'case:budget', 'case:grantBudget']);
+    for (const ch of channels) assert.ok(handlers.has(ch), ch);
+  });
+
+  it('lists open questions except for done and abandoned cases, answers one, and refuses a second answer', async () => {
+    const { runtime, call } = setup2();
+    const a = await activeCase(runtime, 'Lot A');
+    const b = await activeCase(runtime, 'Lot B');
+    const qa = runtime.createQuestion(a.id, { kind: 'question', text: 'Is the well shared?', urgency: 'normal' });
+    runtime.createQuestion(b.id, { kind: 'question', text: 'Who mows the verge?', urgency: 'low' });
+    runtime.setStatus(b.id, 'done', { kind: 'owner', by: 'owner' });
+    const listed = await call(IPC.CASE_QUESTIONS, {});
+    assert.deepStrictEqual(listed.questions.map((q) => [q.id, q.caseId, q.caseTitle]), [[qa.id, a.id, 'Lot A']]);
+    assert.strictEqual((await call(IPC.CASE_QUESTIONS, { caseId: a.id })).questions.length, 1);
+    const answered = await call(IPC.CASE_ANSWER_QUESTION, { caseId: a.id, questionId: qa.id, text: 'Yes, with the north lot' });
+    assert.strictEqual(answered.ok, true);
+    assert.strictEqual(runtime.ledger(a.id).view().facts.get(answered.factId).source.kind, 'question');
+    const again = await call(IPC.CASE_ANSWER_QUESTION, { caseId: a.id, questionId: qa.id, text: 'No' });
+    assert.deepStrictEqual([again.ok, again.code, again.question.id], [false, 'ALREADY_ANSWERED', qa.id]);
+    assert.match(again.error, /already answered via in-app/);
+    assert.deepStrictEqual((await call(IPC.CASE_QUESTIONS, {})).questions, []);
+    assert.strictEqual((await call(IPC.CASE_ANSWER_QUESTION, { caseId: a.id, questionId: qa.id, text: 7 })).ok, false);
+  });
+
+  it('acknowledges a briefing', async () => {
+    const { runtime, call } = setup2();
+    const c = await activeCase(runtime);
+    const b = runtime.createQuestion(c.id, { kind: 'briefing', text: 'The listing went live.', urgency: 'low' });
+    const r = await call(IPC.CASE_ACKNOWLEDGE_BRIEFING, { caseId: c.id, questionId: b.id });
+    assert.deepStrictEqual([r.ok, r.question.answer.channel], [true, 'in-app']);
+  });
+
+  it('sets the status as the owner and refuses transitions the owner may not make', async () => {
+    const { runtime, call } = setup2();
+    const c = await activeCase(runtime);
+    const paused = await call(IPC.CASE_SET_STATUS, { caseId: c.id, status: 'paused', note: 'away this week' });
+    assert.deepStrictEqual([paused.case.status, paused.case.statusReason.by, paused.case.statusReason.note], ['paused', 'owner', 'away this week']);
+    assert.strictEqual((await call(IPC.CASE_SET_STATUS, { caseId: c.id, status: 'active' })).case.status, 'active');
+    const bad = await call(IPC.CASE_SET_STATUS, { caseId: c.id, status: 'draft' });
+    assert.deepStrictEqual([bad.ok, bad.code], [false, 'BAD_TRANSITION']);
+    assert.match((await call(IPC.CASE_SET_STATUS, { caseId: c.id, status: 'sleeping' })).error, /Unknown status/);
+  });
+
+  it('ignores a renderer-supplied kind and always sets status as the owner', async () => {
+    const { runtime, call } = setup2();
+    const c = await activeCase(runtime);
+    const seenKinds = [];
+    const original = runtime.setStatus.bind(runtime);
+    runtime.setStatus = (id, status, opts) => {
+      seenKinds.push(opts && opts.kind);
+      return original(id, status, opts);
+    };
+    const r = await call(IPC.CASE_SET_STATUS, { caseId: c.id, status: 'paused', kind: 'budget-grant' });
+    assert.strictEqual(r.ok, true);
+    assert.deepStrictEqual(seenKinds, ['owner']);
+  });
+
+  it('reports the budget and validates grants before writing an owner-action fact', async () => {
+    const { runtime, call } = setup2();
+    const c = await activeCase(runtime);
+    runtime.store.updateMeta(c.id, { budget: { usd: 1 } });
+    runtime.onCrossings(c.id, 'usd', runtime.budget(c.id).charge('usd', 1.5).crossedNow);
+    const b = await call(IPC.CASE_BUDGET, { caseId: c.id });
+    assert.deepStrictEqual([b.ok, b.budget.usd.spent, b.budget.usd.limit, b.case.status, b.case.statusReason.kind], [true, 1.5, 1, 'paused', 'budget']);
+    const refused = [
+      [{ category: 'tokens', limit: 5 }, /Unknown budget category/],
+      [{ category: 'usd', limit: 0 }, /above 0/],
+      [{ category: 'usd', limit: '5' }, /above 0/],
+      [{ category: 'usd', limit: 1.2 }, /above what the case has spent \(1\.5\)/],
+      [{ category: 'deadline', limit: 'soon' }, /YYYY-MM-DD/],
+      [{ category: 'turnsPerDay', limit: Infinity }, /above 0/],
+      // Shape-only checks in the IPC handler let these through; the runtime's
+      // own validation (F3) is what refuses them, before any fact is written.
+      [{ category: 'deadline', limit: '2001-01-01' }, /past/i],
+      [{ category: 'turnsPerDay', limit: 0.5 }, /whole number/i]
+    ];
+    for (const [payload, re] of refused) {
+      const r = await call(IPC.CASE_GRANT_BUDGET, { caseId: c.id, ...payload });
+      assert.strictEqual(r.ok, false, JSON.stringify(payload));
+      assert.match(r.error, re);
+    }
+    assert.strictEqual(runtime.ledger(c.id).query({ subject: 'budget' }).length, 0, 'refused grants write nothing');
+    const granted = await call(IPC.CASE_GRANT_BUDGET, { caseId: c.id, category: 'usd', limit: 5 });
+    assert.deepStrictEqual([granted.ok, granted.case.status, granted.budget.usd.limit], [true, 'active', 5]);
+    assert.strictEqual(runtime.ledger(c.id).view().facts.get(granted.factId).source.kind, 'owner-action');
+  });
+
+  it('says the case is busy while another process holds its lock', async () => {
+    const { runtime, call } = setup2();
+    const c = await activeCase(runtime);
+    const lock = path.join(c.dir, '.kl', 'lock');
+    fs.writeFileSync(lock, JSON.stringify({ turnId: 'other', pid: process.ppid, at: new Date().toISOString() }));
+    try {
+      assert.deepStrictEqual(await call(IPC.CASE_SET_STATUS, { caseId: c.id, status: 'paused' }), { ok: false, error: 'Case is busy with a wake-up; try again in a minute.' });
+    } finally {
+      fs.rmSync(lock, { force: true });
+    }
   });
 });

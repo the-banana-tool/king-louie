@@ -104,6 +104,65 @@ describe('CaseRuntime', () => {
     ));
   });
 
+  it('a same-process, non-wake-up holder gets "busy with another turn in this app", never quit-or-delete advice (F6 re-review)', async () => {
+    const rt = new CaseRuntime({ root: tmp() });
+    const info = await rt.createCase({ title: 'A' });
+    const t1 = await rt.beginTurn(info.id, { turnId: 't1', source: 'owner' });
+    await assert.rejects(rt.beginTurn(info.id, { turnId: 't2', source: 'owner' }), (err) => (
+      err instanceof CaseBusyError && err.code === 'CASE_BUSY'
+      && err.message === 'Case is busy with another turn in this app; try again in a moment.'
+      && !/quit|delete/i.test(err.message)
+    ));
+    await rt.endTurn(t1, {});
+  });
+
+  it('a wake-up beginTurn that finds another in-process wake-up holding the lock gets the spec §9 text, never quit-or-delete advice (F6 re-review)', async () => {
+    const rt = new CaseRuntime({ root: tmp() });
+    const info = await rt.createCase({ title: 'A' });
+    const w1 = await rt.beginTurn(info.id, { turnId: 'w1', source: 'wakeup' });
+    await assert.rejects(rt.beginTurn(info.id, { turnId: 'w2', source: 'wakeup' }), (err) => (
+      err instanceof CaseBusyError && err.code === 'CASE_BUSY'
+      && err.message === 'Case is busy with a wake-up; try again in a minute.'
+      && !/quit|delete/i.test(err.message)
+    ));
+    await rt.endTurn(w1, {});
+  });
+
+  it('an owner turn preempts an in-process wake-up: it aborts it, waits, and proceeds (F6)', async () => {
+    const rt = new CaseRuntime({ root: tmp(), wakeupPreemptTimeoutMs: 2000 });
+    const info = await rt.createCase({ title: 'Lot' });
+    const wake = await rt.beginTurn(info.id, { turnId: 'wakeup-1', source: 'wakeup' });
+    // Stands in for turn-runner.js noticing the abort and ending the turn,
+    // which is what actually releases the lock in the real wake-up path.
+    wake.signal.addEventListener('abort', () => {
+      rt.endTurn(wake, { summary: 'aborted' }).catch(() => {});
+    });
+    const owner = await rt.beginTurn(info.id, { turnId: 'owner-1', source: 'owner' });
+    assert.strictEqual(wake.signal.aborted, true, 'the wake-up turn was aborted so the owner could proceed');
+    await rt.endTurn(owner, {});
+  });
+
+  it('an owner turn does not preempt another in-process owner turn (unaffected by F6)', async () => {
+    const rt = new CaseRuntime({ root: tmp(), wakeupPreemptTimeoutMs: 50 });
+    const info = await rt.createCase({ title: 'A' });
+    const t1 = await rt.beginTurn(info.id, { turnId: 't1', source: 'owner' });
+    await assert.rejects(rt.beginTurn(info.id, { turnId: 't2', source: 'owner' }), (err) => (
+      err instanceof CaseBusyError && err.code === 'CASE_BUSY' && !/wake-up/i.test(err.message)
+    ));
+    await rt.endTurn(t1, {});
+  });
+
+  it('an owner turn refused after a bounded wait gets the wake-up busy message, not "quit it or delete" (F6)', async () => {
+    const rt = new CaseRuntime({ root: tmp(), wakeupPreemptTimeoutMs: 80 });
+    const info = await rt.createCase({ title: 'Lot' });
+    const wake = await rt.beginTurn(info.id, { turnId: 'wakeup-1', source: 'wakeup' });
+    // No listener releases the lock: the wake-up never notices the abort in time.
+    await assert.rejects(rt.beginTurn(info.id, { turnId: 'owner-1', source: 'owner' }), (err) => (
+      err.code === 'CASE_BUSY' && err.message === 'Case is busy with a wake-up; try again in a minute.'
+    ));
+    await rt.endTurn(wake, {});
+  });
+
   it('releaseAll removes every lock the runtime holds', async () => {
     const rt = new CaseRuntime({ root: tmp() });
     const a = await rt.createCase({ title: 'A' });

@@ -14,6 +14,7 @@ const os = require('os');
 const path = require('path');
 const { CaseRuntime } = require('../src/cases');
 const { LedgerTool, BriefTool, DecideTool, RecommendTool } = require('../src/tools/builtin/case-tools');
+const { AskTool, FailTool } = require('../src/tools/builtin/case-unattended-tools');
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -27,7 +28,9 @@ async function openCase(runtime, title, { active = true, ownerMessages = [] } = 
     runtime.brief(info.id).append('successCriteria', 'Closed within 90 days', { provenance: 'model' });
     runtime.completeGating(info.id);
   }
-  return { info, opts: { caseContext: { runtime, caseId: info.id, turnId: 'turn-1', dir: info.dir, ownerMessages } } };
+  // Stage 2: Decide and Recommend need a registered turn (requireReoriented).
+  const turn = await runtime.beginTurn(info.id, { turnId: 'turn-1' });
+  return { info, turn, opts: { caseContext: runtime.caseContext(turn, { ownerMessages }) } };
 }
 
 describe('F1: a guess never becomes a fact', () => {
@@ -118,5 +121,93 @@ describe('F6: state survives compaction and restarts', () => {
     const orientation = second.orientation(info.id);
     assert.match(orientation, /Recorded plat says 2\.120 acres/);
     assert.match(orientation, /D-001[^\n]*now superseded/);
+  });
+});
+
+describe('F4: a dead end becomes one failure report and a question, not a new plan', () => {
+  it('Fail with one recommendation waits for direction; Recommend, Fail and Plan are refused; an answer resumes', async () => {
+    const runtime = new CaseRuntime({ root: tmp() });
+    const { info, turn, opts } = await openCase(runtime, 'Lakeside lot');
+    const f = (await LedgerTool.execute({ action: 'assert', stmt: 'An auction house takes rural lots', subject: 'market', attr: 'auction', value: 'yes', source: web }, opts)).fact;
+    const failed = await FailTool.execute({
+      failureClass: 'dead-end',
+      what: 'County listing',
+      tried: ['Listed on the county site for 60 days'],
+      why: 'No buyer replied',
+      recommendation: { claims: [{ text: 'Try a land auction', factIds: [f.id] }] }
+    }, opts);
+    assert.strictEqual(failed.ok, true);
+    assert.match(failed.rendered, /Recommendation:\n- Try a land auction/);
+    assert.strictEqual(runtime.getCase(info.id).status, 'needs-direction');
+    const [q] = runtime.questions(info.id).open();
+    assert.deepStrictEqual([q.urgency, q.payload.type, q.payload.mcpAnswerable], ['high', 'direction', false]);
+    assert.strictEqual((await RecommendTool.execute({ claims: [{ text: 'Try a land auction', factIds: [f.id] }] }, opts)).ok, false);
+    assert.strictEqual((await FailTool.execute({ failureClass: 'dead-end', what: 'Another idea', tried: ['x'], why: 'y' }, opts)).ok, false);
+    assert.strictEqual(runtime.assertWritable(info.id, 'Plan').ok, false);
+    await runtime.endTurn(turn, {});
+    await runtime.answerQuestion(info.id, q.id, { channel: 'in-app', text: 'Go with the auction' });
+    assert.strictEqual(runtime.getCase(info.id).status, 'active');
+  });
+});
+
+describe('F9: the brief decides what reaches the owner', () => {
+  it('an ignored briefing is refused; an urgent briefing without a tell tag is stored low and lands in the panel', async () => {
+    const events = [];
+    const runtime = new CaseRuntime({ root: tmp(), host: { notify: (_e, p) => events.push(p) } });
+    const { info, opts } = await openCase(runtime, 'Lakeside lot');
+    runtime.brief(info.id).update('materiality', { tell: ['offer'], ignore: ['voicemail'] }, { provenance: 'user' });
+    const ignored = await AskTool.execute({ question: 'A buyer left a voicemail.', kind: 'briefing', materiality: 'voicemail' }, opts);
+    assert.strictEqual(ignored.ok, false);
+    const r = await AskTool.execute({ question: 'The listing went live.', kind: 'briefing', urgency: 'high' }, opts);
+    assert.strictEqual(r.urgency, 'low');
+    assert.strictEqual(runtime.questions(info.id).get(r.questionId).urgency, 'low');
+    assert.ok(events.some((p) => p.questionId === r.questionId && p.attention === 'panel'));
+  });
+});
+
+describe('F12: spending stops at the budget and only the owner raises it', () => {
+  it('pauses at 100 % of usd, refuses writes, ignores a quoted "ok", skips wake-ups, and resumes on an answered limit', async () => {
+    let routed = 0;
+    const runtime = new CaseRuntime({
+      root: tmp(),
+      host: { inferenceRouter: { routeWithFallback: async () => { routed += 1; return '{"changed": true}'; } }, notify: () => {} }
+    });
+    const { info, turn, opts } = await openCase(runtime, 'Lakeside lot', { ownerMessages: ['ok, go ahead'] });
+    runtime.store.updateMeta(info.id, { budget: { usd: 1 } });
+    const quoted = await LedgerTool.execute({ action: 'assert', provenance: 'user', quote: 'ok, go ahead', stmt: 'Owner raised the budget', subject: 'budget', attr: 'usd', value: '500' }, opts);
+    assert.strictEqual(quoted.ok, true);
+    assert.match(quoted.note, /only through the owner's answer or the Grant button/);
+    assert.strictEqual(runtime.getCase(info.id).budget.usd, 1);
+
+    runtime.usageHook(turn)({ provider: 'openai', model: 'gpt-4o', totalTokens: 1000, cost: 1.1 });
+    const meta = runtime.getCase(info.id);
+    assert.deepStrictEqual([meta.status, meta.statusReason.kind], ['paused', 'budget']);
+    const grantQ = runtime.questions(info.id).open().find((q) => q.payload.type === 'budget-grant');
+    assert.ok(grantQ);
+    assert.strictEqual((await LedgerTool.execute({ action: 'assert', stmt: 's', subject: 'lot', attr: 'x', value: '1', source: web }, opts)).ok, false);
+    assert.strictEqual((await LedgerTool.execute({ action: 'query' }, opts)).ok, true);
+    await runtime.endTurn(turn, {});
+
+    const wakeup = runtime.wakeups(info.id).register({ kind: 'retry', at: new Date(Date.now() - 60000).toISOString(), payload: { key: 'f12' } });
+    await runtime.runDueWakeups(new Date());
+    assert.strictEqual(routed, 0, 'a paused case runs no wake-up');
+    assert.ok(runtime.wakeups(info.id).list().some((w) => w.id === wakeup));
+
+    await runtime.answerQuestion(info.id, grantQ.id, { channel: 'in-app', text: '2' });
+    const after = runtime.getCase(info.id);
+    assert.deepStrictEqual([after.status, after.budget.usd], ['active', 2]);
+  });
+
+  it('a limit lowered below spend pauses the case on the next turn', async () => {
+    const runtime = new CaseRuntime({ root: tmp() });
+    const { info, turn } = await openCase(runtime, 'Lakeside lot');
+    runtime.budget(info.id).charge('usd', 5);
+    await runtime.endTurn(turn, {});
+    runtime.store.updateMeta(info.id, { budget: { usd: 4 } });
+    const next = await runtime.beginTurn(info.id, { turnId: 'turn-2' });
+    const meta = runtime.getCase(info.id);
+    assert.deepStrictEqual([meta.status, meta.statusReason.kind, meta.statusReason.ref], ['paused', 'budget', 'usd']);
+    assert.ok(runtime.questions(info.id).open().some((q) => q.payload.type === 'budget-grant'));
+    await runtime.endTurn(next, {});
   });
 });

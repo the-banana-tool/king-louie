@@ -125,10 +125,9 @@ const mergeSettings = (settings = {}) => {
       ...(DEFAULT_SETTINGS.checkpoints || {}),
       ...(source.checkpoints || {})
     },
-    cases: {
-      ...(DEFAULT_SETTINGS.cases || {}),
-      ...(source.cases || {})
-    },
+    // Cases stage 2 keys (budgets, roles, wakeups…) merge key by key over
+    // their defaults (src/cases/defaults.js).
+    cases: require('../cases/defaults').mergeCaseSettings(DEFAULT_SETTINGS.cases, source.cases),
     templateVariables: {
       ...(DEFAULT_SETTINGS.templateVariables || {}),
       ...(source.templateVariables || {})

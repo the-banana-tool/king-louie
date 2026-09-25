@@ -6,10 +6,12 @@ const yaml = require('js-yaml');
 
 const BRIEF_FIELDS = new Set([
   'objective', 'why', 'successCriteria', 'hardConstraints', 'alreadyTried',
-  'resources', 'deadline', 'materiality'
+  'resources', 'deadline', 'materiality', 'safeDefaults'
 ]);
-const USER_ONLY_FIELDS = new Set(['why', 'hardConstraints', 'alreadyTried']);
-const ARRAY_FIELDS = new Set(['successCriteria', 'hardConstraints', 'alreadyTried']);
+// Stage 2: materiality, deadline and safeDefaults feed gates (briefing
+// urgency, the deadline budget, acting on silence), so only the owner sets them.
+const USER_ONLY_FIELDS = new Set(['why', 'hardConstraints', 'alreadyTried', 'materiality', 'deadline', 'safeDefaults']);
+const ARRAY_FIELDS = new Set(['successCriteria', 'hardConstraints', 'alreadyTried', 'safeDefaults']);
 const OBJECT_FIELDS = new Set(['resources', 'materiality']);
 const GATING_REQUIRED = ['objective', 'why', 'successCriteria'];
 

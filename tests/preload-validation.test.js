@@ -164,6 +164,82 @@ describe('Preload Validation', () => {
     });
   });
 
+  describe('cases.questions', () => {
+    it('requires payload to be an object', () => {
+      assert.throws(() => api.cases.questions(null), /Invalid payload: expected object/);
+    });
+    it('requires caseId to be a string when given', () => {
+      assert.throws(() => api.cases.questions({ caseId: 5 }), /Invalid caseId: expected string/);
+    });
+    it('allows an empty payload (lists every case)', async () => {
+      await assert.doesNotReject(api.cases.questions());
+      await assert.doesNotReject(api.cases.questions({}));
+    });
+  });
+
+  describe('cases.answerQuestion', () => {
+    it('requires payload to be an object', () => {
+      assert.throws(() => api.cases.answerQuestion(), /Invalid payload: expected object/);
+    });
+    it('requires caseId and questionId to be strings', () => {
+      assert.throws(() => api.cases.answerQuestion({}), /Invalid caseId: expected string/);
+      assert.throws(() => api.cases.answerQuestion({ caseId: 'c-1' }), /Invalid questionId: expected string/);
+    });
+    it('rejects a non-string text or optionId', () => {
+      assert.throws(() => api.cases.answerQuestion({ caseId: 'c-1', questionId: 'q-0001', text: 7 }), /Invalid text: expected string/);
+      assert.throws(() => api.cases.answerQuestion({ caseId: 'c-1', questionId: 'q-0001', optionId: 7 }), /Invalid optionId: expected string/);
+    });
+    it('allows valid payload', async () => {
+      await assert.doesNotReject(api.cases.answerQuestion({ caseId: 'c-1', questionId: 'q-0001', text: 'yes' }));
+    });
+  });
+
+  describe('cases.acknowledgeBriefing', () => {
+    it('requires caseId and questionId to be strings', () => {
+      assert.throws(() => api.cases.acknowledgeBriefing({}), /Invalid caseId: expected string/);
+      assert.throws(() => api.cases.acknowledgeBriefing({ caseId: 'c-1' }), /Invalid questionId: expected string/);
+    });
+    it('allows valid payload', async () => {
+      await assert.doesNotReject(api.cases.acknowledgeBriefing({ caseId: 'c-1', questionId: 'q-0001' }));
+    });
+  });
+
+  describe('cases.setStatus', () => {
+    it('requires caseId and status to be strings', () => {
+      assert.throws(() => api.cases.setStatus({}), /Invalid caseId: expected string/);
+      assert.throws(() => api.cases.setStatus({ caseId: 'c-1' }), /Invalid status: expected string/);
+    });
+    it('rejects a non-string note', () => {
+      assert.throws(() => api.cases.setStatus({ caseId: 'c-1', status: 'paused', note: 7 }), /Invalid note: expected string/);
+    });
+    it('allows valid payload, ignoring an extra kind field', async () => {
+      await assert.doesNotReject(api.cases.setStatus({ caseId: 'c-1', status: 'paused', kind: 'budget-grant' }));
+    });
+  });
+
+  describe('cases.budget', () => {
+    it('requires caseId to be a string', () => {
+      assert.throws(() => api.cases.budget({}), /Invalid caseId: expected string/);
+    });
+    it('allows valid payload', async () => {
+      await assert.doesNotReject(api.cases.budget({ caseId: 'c-1' }));
+    });
+  });
+
+  describe('cases.grantBudget', () => {
+    it('requires caseId and category to be strings', () => {
+      assert.throws(() => api.cases.grantBudget({}), /Invalid caseId: expected string/);
+      assert.throws(() => api.cases.grantBudget({ caseId: 'c-1' }), /Invalid category: expected string/);
+    });
+    it('requires limit to be a number or string', () => {
+      assert.throws(() => api.cases.grantBudget({ caseId: 'c-1', category: 'usd', limit: true }), /Invalid limit: expected number or string/);
+    });
+    it('allows a numeric or string limit', async () => {
+      await assert.doesNotReject(api.cases.grantBudget({ caseId: 'c-1', category: 'usd', limit: 25 }));
+      await assert.doesNotReject(api.cases.grantBudget({ caseId: 'c-1', category: 'deadline', limit: '2026-01-01' }));
+    });
+  });
+
   describe('hooks.setEnabled', () => {
     it('requires payload to be an object', () => {
       assert.throws(() => api.hooks.setEnabled(), /Invalid payload: expected object/);

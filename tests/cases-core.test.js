@@ -34,8 +34,19 @@ function makeDeps() {
 
 describe('cases settings', () => {
   it('defaults cases.root to empty and merges an override', () => {
-    assert.deepStrictEqual(mergeSettings({}).cases, { root: '' });
+    assert.strictEqual(mergeSettings({}).cases.root, '');
     assert.strictEqual(mergeSettings({ cases: { root: '/elsewhere' } }).cases.root, '/elsewhere');
+  });
+
+  it('carries the stage 2 defaults and merges them key by key', () => {
+    const merged = mergeSettings({}).cases;
+    assert.strictEqual(merged.reorientAfterHours, 8);
+    assert.strictEqual(merged.timeZone, '');
+    assert.deepStrictEqual(merged.budgets, { usd: 20, turnsPerDay: 48, contactsPerDay: 20, questionsPerDay: 6, deadline: null });
+    assert.deepStrictEqual(merged.wakeups, { enabled: true, dailyAt: '09:00', maxIterations: 20, maxCasesPerTick: 3, retryBackoffMinutes: [5, 15, 60] });
+    assert.deepStrictEqual(merged.roles.judge, { tier: 'smart' });
+    const partial = mergeSettings({ cases: { budgets: { usd: 5 }, wakeups: { enabled: false } } }).cases;
+    assert.deepStrictEqual([partial.budgets.usd, partial.budgets.turnsPerDay, partial.wakeups.enabled, partial.wakeups.dailyAt], [5, 48, false, '09:00']);
   });
 });
 

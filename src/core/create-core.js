@@ -52,6 +52,7 @@ const { MemoryStore, MemoryManager } = require('../memory');
 const { CheckpointManager } = require('../checkpoints');
 const { CaseRuntime, resolveCasesRoot } = require('../cases');
 const { shapeToolDefinitions } = require('../cases/chat-integration');
+const { ensureWakeupJob } = require('../cases/wakeups');
 const ContextAssembler = require('../context/context-assembler');
 const ConversationCompactor = require('../context/conversation-compactor');
 const { buildSystemSections } = require('../context/system-sections');
@@ -184,6 +185,9 @@ function createCore(deps = {}) {
   let cronStore;
   let cronExecutor;
   let cronScheduler;
+  // The cases:wakeups system job's own currently-running promise, tracked so
+  // shutdown can await it before releasing case locks (see shutdown()).
+  let wakeupsInFlight = null;
   let mcpManager;
   let backgroundTaskManager;
   let webhookRegistry;
@@ -211,6 +215,42 @@ function createCore(deps = {}) {
 
   const getChats = () => store.get('chats', []);
   const setChats = (chats) => store.set('chats', chats);
+
+  // F5 re-review: a chat a Telegram/Discord bridge created before the
+  // origin/channel tagging existed carries neither, and the bridges keep
+  // their chat-id maps in memory only, so such a chat is never re-tagged
+  // by the normal getOrCreateLocalChat/addToLocalChat path — only a
+  // fresh chat for that remote sender would be tagged, leaving the old
+  // one (and any case already attached to it) exactly as exposed as
+  // before. This migration finds it by the exact title prefix each
+  // bridge still writes (TelegramBridge/DiscordChannel.CHAT_TITLE_PREFIX,
+  // not a duplicated literal), sets origin, and tags its user-sender
+  // messages with channel. Idempotent and cheap to run on every startup:
+  // a chat or message already tagged is left alone.
+  const LEGACY_BRIDGE_TITLE_PREFIXES = [
+    { prefix: TelegramBridge.CHAT_TITLE_PREFIX, origin: 'telegram' },
+    { prefix: DiscordChannel.CHAT_TITLE_PREFIX, origin: 'discord' }
+  ];
+  const migrateLegacyBridgeChatOrigins = () => {
+    const chats = getChats();
+    let count = 0;
+    const migrated = chats.map((chat) => {
+      if (chat.origin || typeof chat.title !== 'string') return chat;
+      const match = LEGACY_BRIDGE_TITLE_PREFIXES.find(({ prefix }) => chat.title.startsWith(prefix));
+      if (!match) return chat;
+      count += 1;
+      const messages = Array.isArray(chat.messages) ? chat.messages : [];
+      return {
+        ...chat,
+        origin: match.origin,
+        messages: messages.map((m) => (m && m.sender === 'user' && !m.channel ? { ...m, channel: match.origin } : m))
+      };
+    });
+    if (count) {
+      setChats(migrated);
+      log.info(`Tagged ${count} legacy bridge chat(s) by title prefix (F5 migration).`);
+    }
+  };
   const getActiveChatId = () => store.get('activeChatId', null);
   const setActiveChatId = (chatId) => store.set('activeChatId', chatId);
   const getApiTokens = () => store.get('apiTokens', {});
@@ -786,6 +826,10 @@ function createCore(deps = {}) {
 
   const appendMessageToChat = (chatId, sender, text, metadata = {}) => {
     const now = new Date().toISOString();
+    // id, sender and timestamp are this function's to set; a caller-supplied
+    // metadata object (e.g. CHAT_ADD_MESSAGE's IPC payload) must not be able
+    // to override them by spreading last (minor fix, F5 review).
+    const { id: _id, sender: _sender, timestamp: _timestamp, ...safeMetadata } = metadata || {};
     const chats = getChats();
     const updated = chats.map((chat) => {
       if (chat.id !== chatId) {
@@ -802,7 +846,7 @@ function createCore(deps = {}) {
             sender,
             text,
             timestamp: now,
-            ...(metadata || {})
+            ...safeMetadata
           }
         ],
         llmTotals: getChatLlmTotals({
@@ -812,7 +856,7 @@ function createCore(deps = {}) {
             {
               sender,
               text,
-              ...(metadata || {})
+              ...safeMetadata
             }
           ]
         })
@@ -1144,11 +1188,14 @@ function createCore(deps = {}) {
       getNotificationSettings: () => getSettings().notifications,
       getVoiceSettings,
       getTtsEngine: () => ttsEngine,
-      createLocalChat: (title) => {
+      createLocalChat: (title, { origin } = {}) => {
         const now = new Date().toISOString();
         const newChat = {
           id: createId(),
           title,
+          // F5: a chat a channel bridge created carries where it came from,
+          // so a case can never be attached to it (case-handlers.js).
+          ...(origin ? { origin } : {}),
           createdAt: now,
           updatedAt: now,
           messages: []
@@ -1160,7 +1207,7 @@ function createCore(deps = {}) {
 
         return newChat.id;
       },
-      addMessageToLocalChat: (chatId, sender, text) => {
+      addMessageToLocalChat: (chatId, sender, text, { channel } = {}) => {
         const chats = getChats();
         const chat = chats.find((c) => c.id === chatId);
         if (!chat) return;
@@ -1170,7 +1217,10 @@ function createCore(deps = {}) {
           id: createId(),
           sender,
           text,
-          timestamp: now
+          timestamp: now,
+          // F5: excludes this message from the owner-message pool
+          // (chat-handlers.js) even though sender is 'user'.
+          ...(channel ? { channel } : {})
         });
         chat.updatedAt = now;
 
@@ -1216,11 +1266,14 @@ function createCore(deps = {}) {
       getVoiceSettings,
       getTtsEngine: () => ttsEngine,
       // Callbacks for local chat management
-      createLocalChat: (title) => {
+      createLocalChat: (title, { origin } = {}) => {
         const now = new Date().toISOString();
         const newChat = {
           id: createId(),
           title,
+          // F5: a chat a channel bridge created carries where it came from,
+          // so a case can never be attached to it (case-handlers.js).
+          ...(origin ? { origin } : {}),
           createdAt: now,
           updatedAt: now,
           messages: []
@@ -1233,7 +1286,7 @@ function createCore(deps = {}) {
 
         return newChat.id;
       },
-      addMessageToLocalChat: (chatId, sender, text) => {
+      addMessageToLocalChat: (chatId, sender, text, { channel } = {}) => {
         const chats = getChats();
         const chat = chats.find((c) => c.id === chatId);
         if (!chat) return;
@@ -1243,7 +1296,10 @@ function createCore(deps = {}) {
           id: createId(),
           sender,
           text,
-          timestamp: now
+          timestamp: now,
+          // F5: excludes this message from the owner-message pool
+          // (chat-handlers.js) even though sender is 'user'.
+          ...(channel ? { channel } : {})
         });
         chat.updatedAt = now;
 
@@ -1911,6 +1967,14 @@ function createCore(deps = {}) {
     if (approvalRequester && !effectiveApprovalRequester) {
       log.debug('remoteApprovals is "deny": ignoring a remote approval requester');
     }
+    // A caller meaning to confine a turn's tools (a case wake-up) that
+    // somehow passes something other than a Set/Array must fail closed
+    // (nothing allowed), never fail open into ToolExecutor's own
+    // Set/Array check, which treats an unrecognised value as "no limit".
+    const rawAllowedToolNames = executorOptions.allowedToolNames;
+    const allowedToolNames = rawAllowedToolNames == null
+      ? null
+      : (rawAllowedToolNames instanceof Set || Array.isArray(rawAllowedToolNames) ? rawAllowedToolNames : new Set());
     const executor = new ToolExecutor({
       workingDirectory,
       allowedDirectories: executorOptions.allowedDirectories || [],
@@ -1921,7 +1985,10 @@ function createCore(deps = {}) {
       // paths that grant approval before the gate is reached (the persisted
       // "always approve" list below, an agent config's autoApproveTools, and
       // `allow` permission rules).
-      denyAutoApproval: remoteApprovals === 'deny',
+      // A caller (a case wake-up) may also ask for no auto-approval at all.
+      denyAutoApproval: remoteApprovals === 'deny' || executorOptions.denyAutoApproval === true,
+      // Cases stage 2: only these tools may run (wake-ups); null means no limit.
+      allowedToolNames,
       shouldAutoApprove: async (toolName) => isToolAlwaysApproved(toolName),
       // Live callback — picks up rules added mid-session when the user
       // clicks "Always allow 'git *'" in an approval dialog.
@@ -2294,7 +2361,11 @@ function createCore(deps = {}) {
         const settings = getSettings();
         const requestedTier = options.tier || agent?.inferenceTier || settings?.inference?.activeTier;
         const runtime = await createAgentRuntime(
-          { tier: requestedTier },
+          {
+            tier: requestedTier,
+            ...(options.provider ? { provider: options.provider } : {}),
+            ...(options.model ? { model: options.model } : {})
+          },
           null,
           options.approvalRequester || null,
           { workingDirectory: options.workingDirectory }
@@ -2374,6 +2445,18 @@ function createCore(deps = {}) {
 
     cronExecutor = new CronExecutor(agentExecutorAdapter, sessionManager, gatewayServer);
     cronScheduler = new CronScheduler(cronStore, cronExecutor);
+    // Cases stage 2: one protected system job per data dir sweeps the cases.
+    // The handler's own promise is tracked so shutdown() can await the
+    // in-flight sweep before releasing case locks.
+    cronExecutor.registerSystemJob('cases:wakeups', () => {
+      wakeupsInFlight = caseRuntime.runDueWakeups(caseRuntime.now());
+      return wakeupsInFlight;
+    });
+    try {
+      await ensureWakeupJob(cronStore);
+    } catch (err) {
+      log.error(`Could not set up the cases:wakeups system job; continuing without wake-ups: ${err.message}`);
+    }
     cronScheduler.start();
 
     webhookRegistry = new WebhookRegistry(store);
@@ -2558,6 +2641,7 @@ function createCore(deps = {}) {
   };
 
   const start = async () => {
+    migrateLegacyBridgeChatOrigins();
     initializeTools();
     await initializeAgentInfrastructure();
     const TASK_EVENTS = { taskCreated: 'task:created', taskUpdated: 'task:updated', taskUnblocked: 'task:unblocked' };
@@ -2579,7 +2663,21 @@ function createCore(deps = {}) {
   const shutdown = async () => {
     // Stop cron first so no job fires while the slower stops below drain.
     if (cronScheduler) cronScheduler.stop();
+    // Cases stage 2: no new wake-up turn may start from here on, and every
+    // in-flight one gets its abort signal — both before anything below
+    // could race a still-running wake-up's own lock and commit.
+    caseRuntime.beginShutdown();
+    caseRuntime.abortUnattended();
     const warnTimeout = (label, ms) => log.warn(`${label} timed out after ${ms}ms; continuing shutdown`);
+    // Let the in-flight cases:wakeups sweep actually finish (endTurn, lock
+    // release and all) before releaseAll() below can force the lock away
+    // out from under it.
+    if (wakeupsInFlight) {
+      await withTimeout(
+        Promise.resolve(wakeupsInFlight).catch((err) => log.warn(`In-flight cases:wakeups sweep failed while shutting down: ${err.message}`)),
+        shutdownTimeoutMs, 'cases:wakeups drain', warnTimeout
+      );
+    }
     await withTimeout(
       runHookEvent('SessionEnd', { source: 'main', endedAt: new Date().toISOString(), workingDirectory: hostWorkingDirectory }),
       shutdownTimeoutMs, 'SessionEnd hook', warnTimeout
@@ -2607,7 +2705,28 @@ function createCore(deps = {}) {
   // Constructing the runtime touches nothing on disk; the root directory is
   // created with the first case.
   const caseRuntime = new CaseRuntime({
-    root: resolveCasesRoot({ settings: getSettings(), env: process.env, dataDir: userDataPath })
+    root: resolveCasesRoot({ settings: getSettings(), env: process.env, dataDir: userDataPath }),
+    getSettings,
+    host: {
+      inferenceRouter,
+      resolveInference,
+      createToolExecutor: createToolExecutorWithApprovals,
+      toolRegistry,
+      AgentLoop,
+      getUsageTracker: () => usageTracker,
+      hasProviderToken: (provider) => {
+        try {
+          getDecryptedProviderToken(provider);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      notify: (event, payload) => ui.send(event, payload),
+      uiToast: deps.uiToastChannel || null,
+      // F7 replaces this with a bridge-connected check in attached mode (R50).
+      interactive: () => Boolean(deps.ui)
+    }
   });
 
   const context = {
@@ -2618,6 +2737,7 @@ function createCore(deps = {}) {
     getActiveChatId,
     setActiveChatId,
     appendMessageToChat,
+    migrateLegacyBridgeChatOrigins,
     getLastAssistantMessage,
     getVoiceSettings,
     runHookEvent,

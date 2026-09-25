@@ -41,14 +41,79 @@ function briefLines(brief) {
     `- Hard constraints: ${list(d.hardConstraints)}`,
     `- Already tried: ${list(d.alreadyTried)}`,
     `- Deadline: ${d.deadline || '—'}`,
+    `- Materiality: tell ${list(d.materiality?.tell)}; ignore ${list(d.materiality?.ignore)}`,
+    `- Safe defaults on silence: ${list(d.safeDefaults)}`,
     d.gating?.complete
       ? '- Gating pass: complete'
       : '- Gating pass: INCOMPLETE. Ask the owner only what they alone know (why, hard constraints, what has already been tried), record it with the Brief tool, then call Brief completeGating. Recommendations are refused until then.'
   ];
 }
 
+const clip = (text, max = JOURNAL_MAX) => (text.length > max ? `${text.slice(0, max)}…` : text);
+const oneLine = (s, max) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
+
+function reorientationSection(triggers = []) {
+  const blocking = triggers.filter((t) => t && t.blocking);
+  if (!blocking.length) return [];
+  return ['## Re-orientation required', ...blocking.map((t) => `- ${t.detail}`), 'Call Reorient before Recommend, Decide or Fail.', ''];
+}
+
+function sinceLastTurnSection(notes = []) {
+  if (!notes.length) return [];
+  return ['## Since last turn', ...notes.map((n) => `- ${n}`), ''];
+}
+
+function statusSection(meta, reason, failure) {
+  if (!['needs-direction', 'paused', 'done', 'abandoned'].includes(meta.status)) return [];
+  const detail = reason
+    ? ` (${[reason.kind, reason.by ? `by ${reason.by}` : '', reason.at || ''].filter(Boolean).join(', ')})${reason.note ? `: ${reason.note}` : ''}`
+    : '';
+  const lines = ['## Status', `- ${meta.status}${detail}`];
+  if (meta.status === 'needs-direction') {
+    lines.push("- Waiting for the owner's direction. Report status or ask; do not plan or recommend.");
+    if (failure?.text) lines.push(`### Failure report (${failure.file})`, clip(String(failure.text)).trimEnd());
+  }
+  if (meta.status === 'paused') lines.push('- Paused: only reading is available until the owner resumes the case.');
+  return [...lines, ''];
+}
+
+function questionsSection(questions = [], now = new Date()) {
+  if (!questions.length) return [];
+  const t = now.getTime();
+  const line = (q) => {
+    const overdue = q.expiresAt && Date.parse(q.expiresAt) <= t && q.defaultOnSilence === 'hold' ? ' — OVERDUE, still holding' : '';
+    return `- ${q.id} [${q.kind}, ${q.urgency}] ${oneLine(q.text, 200)}${overdue}`;
+  };
+  return ['## Open questions to the owner', ...questions.map(line), 'Do not assume answers to open questions.', ''];
+}
+
+function budgetSection(budget) {
+  if (!budget || typeof budget !== 'object') return [];
+  const passed = (e) => (Array.isArray(e?.crossed) && e.crossed.length ? ` (passed ${e.crossed.join(', ')} %)` : '');
+  const lines = [];
+  for (const [category, e] of Object.entries(budget)) {
+    if (!e) continue;
+    if (category === 'deadline') {
+      if (e.at) lines.push(`- deadline ${e.at}: ${Math.round(Math.min(Number(e.ratio) || 0, 9.99) * 100)} % of the time used${passed(e)}`);
+      continue;
+    }
+    if (!e.limit) continue;
+    lines.push(`- ${category}: ${e.spent} of ${e.limit}${e.day ? ` today (${e.day})` : ''}${passed(e)}`);
+  }
+  const unpriced = Number(budget.usd?.unpricedTokens) || 0;
+  if (unpriced > 0) lines.push(`- ${unpriced} tokens on providers with no price table are not counted against the $ budget.`);
+  return lines.length ? ['## Budget', ...lines, ''] : [];
+}
+
+function nextWakeupSection(w) {
+  if (!w) return [];
+  return ['## Next wake-up', `- ${w.id} ${w.kind} at ${w.nextAt}`, ''];
+}
+
 function buildOrientation({
-  meta, brief, facts = new Map(), decisions = [], lastJournal = null, ledgerErrors = [], maxChars = DEFAULT_MAX_CHARS
+  meta, brief, facts = new Map(), decisions = [], lastJournal = null, ledgerErrors = [], maxChars = DEFAULT_MAX_CHARS,
+  triggers = [], hookNotes = [], statusReason = null, failure = null, questions = [], budget: budgetStatus = null, nextWakeup = null,
+  now = new Date()
 }) {
   const all = [...facts.values()];
   const active = all.filter((f) => f.status === 'active');
@@ -59,12 +124,18 @@ function buildOrientation({
   const head = [
     `# Case: ${meta.title} (${meta.slug}) — status: ${meta.status}`,
     '',
+    ...reorientationSection(triggers),
+    ...sinceLastTurnSection(hookNotes),
+    ...statusSection(meta, statusReason, failure),
     '## Brief',
     ...briefLines(brief),
     '',
     '## Load-bearing unknowns (resolve or work around these before anything else)',
     ...(lbUnknowns.length ? lbUnknowns : ['- none recorded']),
-    ''
+    '',
+    ...questionsSection(questions, now),
+    ...budgetSection(budgetStatus),
+    ...nextWakeupSection(nextWakeup)
   ].join('\n');
 
   const decisionLines = decisions.map((d) => {

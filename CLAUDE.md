@@ -31,6 +31,10 @@ unset ELECTRON_RUN_AS_NODE && npm run test:e2e
 
 Unit tests (`npm test`) don't launch Electron and are unaffected either way.
 
+`tests/e2e/helpers.js`'s `launchApp()` already gives every launch its own fresh
+`--user-data-dir` (removed again in `closeApp()`), so the e2e suite never reads
+or writes your real King Louie profile — chats, settings, the vault.
+
 ## Running the app
 
 `npm start` launches Electron normally. If it dies instantly with
@@ -111,3 +115,53 @@ git repo under `<dataDir>/cases/` (override with `settings.cases.root` or
   sourced fact is only as good as the source the model names. The write guard
   covers Write, Edit and MultiEdit, not Bash: in stage 1 a shell command can
   still rewrite `facts.jsonl`.
+
+## Cases: unattended (stage 2)
+
+Spec: `docs/superpowers/specs/2026-09-23-cases-stage2-unattended.md`.
+
+- Status (`case.yaml` `status`, `statusReason`) changes only through
+  `CaseRuntime.setStatus`, which requires a `kind` naming why (`src/cases/status.js`'s
+  `REASON_KINDS`) and refuses without one; `status.js` also holds the
+  transition table and the per-status tool rules. Every case tool checks
+  `assertWritable`; `Decide`, `Recommend` and `Fail` also call
+  `requireReoriented`, which refuses when no turn is registered, so tests that
+  call them begin a turn first.
+- Wake-ups: the protected cron system job `cases:wakeups` (every minute,
+  `ensureWakeupJob`) calls `CaseRuntime.runDueWakeups`. A wake-up turn makes one
+  `orient` call (charged like any other usage), then runs a `judge` loop
+  confined to the case tools plus Read, Glob and Grep (`allowedToolNames`,
+  `denyAutoApproval`, no owner messages). A wake-up that fails backs off
+  through `retryBackoffMinutes` and briefs the owner on the third strike.
+  Settings: `settings.cases.wakeups`; off with `enabled: false`.
+- Budgets live in `.kl/budget.json`. `usd` and `deadline` at 100 % pause the
+  case and record `statusReason.resumeTo` (the status to return to); per-day
+  categories refuse their action until the local day rolls over. Raising a
+  limit applies only through two host-verified paths, checked in
+  `CaseRuntime.applyOwnerFact`: an answer to a host-created `budget-grant`
+  question (routed through `CaseRuntime.answerQuestion`; a grant reply is just
+  the amount), or an owner action (the case panel's Grant button,
+  `CaseRuntime.grantBudget`, which validates the limit and writes an
+  `owner-action`-sourced fact before applying the effect directly, no
+  question involved). A model-created question or a quoted user-message fact
+  naming the same budget subject/attr is recorded but changes no limit, so an
+  owner's quoted "ok" in chat cannot self-serve a raise.
+- Resuming from `needs-direction` is not limited to those two paths: any
+  host-verified `user`-provenance fact with subject `direction` resumes the
+  case in `applyOwnerFact`, whether it came from answering the `direction`
+  question or from a quote-verified user-message fact recorded straight from
+  chat (`caseContext.ownerMessages`) — the direction does not need to run
+  through a question first.
+- Questions live in `.kl/questions/`. Create them with
+  `CaseRuntime.createQuestion`; answer them only through
+  `CaseRuntime.answerQuestion` (exactly one host-verified `user` fact).
+- Case-file writes outside a turn go through `CaseRuntime.systemAction`. Tests
+  inject a fake clock with `new CaseRuntime({ now })` and a temp root.
+- On shutdown, `create-core.js`'s `shutdown()` stops cron, calls
+  `CaseRuntime.beginShutdown` and `abortUnattended` (blocking any new wake-up
+  turn and signalling in-flight ones), awaits the in-flight `cases:wakeups`
+  sweep (`wakeupsInFlight`, bounded by `shutdownTimeoutMs`), then calls
+  `CaseRuntime.releaseAll` so a turn cut off by quit doesn't leave its case
+  locked. The e2e suite runs every launch on its own throwaway
+  `--user-data-dir` (see Testing above), so it never touches a real case
+  store.

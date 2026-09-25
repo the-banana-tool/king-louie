@@ -62,6 +62,7 @@ function initializeTools() {
   toolRegistry.register(BriefTool);
   toolRegistry.register(DecideTool);
   toolRegistry.register(RecommendTool);
+  require('./builtin/case-unattended-tools').registerCaseUnattendedTools(toolRegistry);
 
   initialized = true;
 }

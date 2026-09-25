@@ -59,6 +59,80 @@ describe('preload → window.electron bridge resilience', () => {
   });
 });
 
+/**
+ * Like runPreload, but the fake ipcRenderer actually tracks `on`/`removeListener`
+ * calls per channel, so a test can drive a fake main→renderer broadcast and
+ * observe which callbacks the bridge invokes.
+ */
+function runPreloadWithFakeIpc() {
+  let exposedApi = null;
+  const listenersByChannel = new Map();
+  const ipcRenderer = {
+    invoke: async () => ({ ok: true }),
+    send: () => {},
+    on: (channel, fn) => {
+      const set = listenersByChannel.get(channel) || new Set();
+      set.add(fn);
+      listenersByChannel.set(channel, set);
+    },
+    removeListener: (channel, fn) => {
+      listenersByChannel.get(channel)?.delete(fn);
+    }
+  };
+  const sandbox = {
+    require: (mod) => {
+      if (mod === 'electron') {
+        return {
+          contextBridge: { exposeInMainWorld: (_name, api) => { exposedApi = api; } },
+          ipcRenderer
+        };
+      }
+      return require(mod);
+    },
+    console,
+    Date,
+    process: { env: {} }
+  };
+  vm.runInContext(preloadCode, vm.createContext(sandbox));
+  const emit = (channel, data) => {
+    for (const fn of listenersByChannel.get(channel) || []) fn({}, data);
+  };
+  return { exposedApi, emit, listenerCount: (channel) => (listenersByChannel.get(channel)?.size || 0) };
+}
+
+describe('cases.onChanged (additive listeners)', () => {
+  it('delivers a broadcast to two independently registered listeners', () => {
+    const { exposedApi, emit } = runPreloadWithFakeIpc();
+    const seenA = [];
+    const seenB = [];
+    exposedApi.cases.onChanged((payload) => seenA.push(payload));
+    exposedApi.cases.onChanged((payload) => seenB.push(payload));
+    emit('case:changed', { caseId: 'c-1', what: 'status' });
+    assert.deepStrictEqual(seenA, [{ caseId: 'c-1', what: 'status' }]);
+    assert.deepStrictEqual(seenB, [{ caseId: 'c-1', what: 'status' }]);
+  });
+
+  it('unsubscribing one listener leaves the other receiving broadcasts', () => {
+    const { exposedApi, emit } = runPreloadWithFakeIpc();
+    const seenA = [];
+    const seenB = [];
+    const unsubA = exposedApi.cases.onChanged((payload) => seenA.push(payload));
+    exposedApi.cases.onChanged((payload) => seenB.push(payload));
+    unsubA();
+    emit('case:changed', { caseId: 'c-1', what: 'budget' });
+    assert.deepStrictEqual(seenA, []);
+    assert.deepStrictEqual(seenB, [{ caseId: 'c-1', what: 'budget' }]);
+  });
+
+  it('registers exactly one underlying ipcRenderer listener no matter how many callbacks subscribe', () => {
+    const { exposedApi, listenerCount } = runPreloadWithFakeIpc();
+    exposedApi.cases.onChanged(() => {});
+    exposedApi.cases.onChanged(() => {});
+    exposedApi.cases.onChanged(() => {});
+    assert.strictEqual(listenerCount('case:changed'), 1);
+  });
+});
+
 describe('BrowserWindow webPreferences (preload contract)', () => {
   const mainSrc = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   // Grab the webPreferences object literal.

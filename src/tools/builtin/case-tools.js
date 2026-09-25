@@ -6,6 +6,7 @@ const { Tool } = require('../tool-schema');
 const { recommendationGate, findDuplicates } = require('../../cases/gates');
 const { requireOwnerQuote } = require('../../cases/chat-integration');
 const { USER_ONLY_FIELDS } = require('../../cases/brief');
+const { toMs } = require('../../cases/clock');
 
 const NO_CASE = Object.freeze({
   ok: false,
@@ -44,14 +45,35 @@ function acceptAnyValue(tool) {
   return tool;
 }
 
-async function withCase(options, fn) {
+// op is the status-rule op (stage 2 spec §3.1), a string or a function of
+// params. reoriented: Decide, Recommend and Fail also need no pending
+// re-orientation. Refusals are results, never throws.
+async function withCase(options, op, fn, { params = {}, reoriented = false } = {}) {
   const ctx = options?.caseContext;
   if (!ctx || !ctx.runtime || !ctx.caseId) return NO_CASE;
   try {
+    const opName = typeof op === 'function' ? op(params || {}) : op;
+    const refused = ctx.runtime.assertWritable(ctx.caseId, opName);
+    if (refused) return refused;
+    if (reoriented) {
+      const pending = ctx.runtime.requireReoriented(ctx.caseId);
+      if (pending) return pending;
+    }
     return await fn(ctx);
   } catch (err) {
     return { ok: false, error: err.message || String(err) };
   }
+}
+
+// A direction fact ends needs-direction, so its quote must be from this
+// turn's message or from a message sent after the failure report.
+function staleDirection(ctx, messageIndex) {
+  const messages = Array.isArray(ctx.ownerMessages) ? ctx.ownerMessages : [];
+  if (messageIndex === messages.length - 1) return null;
+  const failedAt = toMs(ctx.runtime.getCase(ctx.caseId).statusReason?.at);
+  const saidAt = toMs(Array.isArray(ctx.ownerMessageTimes) ? ctx.ownerMessageTimes[messageIndex] : null);
+  if (Number.isFinite(failedAt) && Number.isFinite(saidAt) && saidAt > failedAt) return null;
+  return { ok: false, error: 'Direction must come from something the owner said after the failure report.' };
 }
 
 const LedgerTool = acceptAnyValue(new Tool({
@@ -102,7 +124,7 @@ const LedgerTool = acceptAnyValue(new Tool({
     required: ['action']
   },
   requiresApproval: false,
-  execute: (params, options) => withCase(options, async (ctx) => {
+  execute: (params, options) => withCase(options, (p) => `Ledger.${p.action}`, async (ctx) => {
     const ledger = ctx.runtime.ledger(ctx.caseId);
     if (params.value !== undefined) params = { ...params, value: parseValue(params.value) };
     switch (params.action) {
@@ -111,11 +133,26 @@ const LedgerTool = acceptAnyValue(new Tool({
         if (input.provenance === 'user') {
           const check = requireOwnerQuote({ quote: input.quote, ownerMessages: ctx.ownerMessages });
           if (!check.ok) return check;
+          if (String(input.subject || '').trim().toLowerCase() === 'direction') {
+            const stale = staleDirection(ctx, check.messageIndex);
+            if (stale) return stale;
+          }
           input.source = { kind: 'user-message', ref: ctx.turnId, quote: check.quote, messageIndex: check.messageIndex };
         } else if (input.source?.kind === 'user-message') {
           return { ok: false, error: 'What the owner said is recorded with provenance "user" and a "quote" of their own words, not with a "user-message" source.' };
+        } else if (input.source?.kind && !SOURCE_KINDS.includes(input.source.kind)) {
+          return { ok: false, error: `Source kind "${input.source.kind}" is reserved for the host.` };
         }
-        return { ok: true, fact: ledger.assert(input) };
+        const fact = ledger.assert(input);
+        if (fact.provenance !== 'user') return { ok: true, fact };
+        const effect = ctx.runtime.applyOwnerFact(ctx.caseId, fact);
+        return {
+          ok: true,
+          fact,
+          ...(effect.applied ? { effect: effect.applied } : {}),
+          ...(effect.note ? { note: effect.note } : {}),
+          ...(effect.error ? { warning: effect.error } : {})
+        };
       }
       case 'infer':
         return {
@@ -154,27 +191,27 @@ const LedgerTool = acceptAnyValue(new Tool({
       default:
         return { ok: false, error: `Unknown action: ${params.action}` };
     }
-  })
+  }, { params })
 }));
 
 const BriefTool = acceptAnyValue(new Tool({
   name: 'Brief',
-  description: 'Read or update the case brief. "why", "hardConstraints" and "alreadyTried" can only be set from what the owner said (provenance "user"), which also requires a "quote" of the owner\'s own words matching this chat\'s owner messages. completeGating marks the brief ready; recommendations are refused until then.',
+  description: 'Read or update the case brief. "why", "hardConstraints", "alreadyTried", "materiality", "deadline" and "safeDefaults" can only be set from what the owner said (provenance "user"), which also requires a "quote" of the owner\'s own words matching this chat\'s owner messages. completeGating marks the brief ready; recommendations are refused until then.',
   parameters: {
     type: 'object',
     properties: {
       action: { type: 'string', enum: ['read', 'update', 'append', 'completeGating'] },
-      field: { type: 'string', enum: ['objective', 'why', 'successCriteria', 'hardConstraints', 'alreadyTried', 'resources', 'deadline', 'materiality'] },
+      field: { type: 'string', enum: ['objective', 'why', 'successCriteria', 'hardConstraints', 'alreadyTried', 'resources', 'deadline', 'materiality', 'safeDefaults'] },
       value: { type: 'string', description: `For update: the new value; ${VALUE_DESCRIPTION}` },
       item: { type: 'string', description: 'For append: one list entry' },
       provenance: { type: 'string', enum: ['user', 'model'] },
-      quote: { type: 'string', description: 'Required when updating/appending "why", "hardConstraints" or "alreadyTried" with provenance "user": a substring of something the owner actually said in this chat.' },
+      quote: { type: 'string', description: 'Required for the owner-only fields ("why", "hardConstraints", "alreadyTried", "materiality", "deadline", "safeDefaults") with provenance "user": a substring of something the owner actually said in this chat.' },
       reason: { type: 'string' }
     },
     required: ['action']
   },
   requiresApproval: false,
-  execute: (params, options) => withCase(options, async (ctx) => {
+  execute: (params, options) => withCase(options, (p) => `Brief.${p.action}`, async (ctx) => {
     const brief = ctx.runtime.brief(ctx.caseId);
     if (params.action === 'read') {
       return { ok: true, brief: brief.read().data, missingForGating: brief.missingForGating() };
@@ -199,7 +236,7 @@ const BriefTool = acceptAnyValue(new Tool({
       `Brief ${params.field} ${params.action === 'append' ? 'appended' : 'updated'} (${provenance})${params.reason ? `: ${params.reason}` : ''}${quoteNote}\n\n${JSON.stringify(params.action === 'append' ? params.item : params.value)}`
     );
     return { ok: true, brief: data };
-  })
+  }, { params })
 }));
 
 const DecideTool = new Tool({
@@ -215,7 +252,7 @@ const DecideTool = new Tool({
     required: ['decision', 'factIds']
   },
   requiresApproval: false,
-  execute: (params, options) => withCase(options, async (ctx) => {
+  execute: (params, options) => withCase(options, 'Decide', async (ctx) => {
     const ledger = ctx.runtime.ledger(ctx.caseId);
     const { facts } = ledger.view();
     const bad = params.factIds.filter((id) => facts.get(id)?.status !== 'active');
@@ -232,7 +269,7 @@ const DecideTool = new Tool({
       decision,
       ...(inferred.length ? { warning: `This decision rests on inferred facts (${inferred.join(', ')}). Say so when you report it.` } : {})
     };
-  })
+  }, { reoriented: true })
 });
 
 const RecommendTool = new Tool({
@@ -258,7 +295,7 @@ const RecommendTool = new Tool({
     required: ['claims']
   },
   requiresApproval: false,
-  execute: (params, options) => withCase(options, async (ctx) => {
+  execute: (params, options) => withCase(options, 'Recommend', async (ctx) => {
     const meta = ctx.runtime.getCase(ctx.caseId);
     const ledger = ctx.runtime.ledger(ctx.caseId);
     const { facts } = ledger.view();
@@ -287,7 +324,7 @@ const RecommendTool = new Tool({
       unknowns: open.map((u) => u.id)
     });
     return { ok: true, rendered, instruction: 'Present this to the owner as written: unknowns first, then the recommendation with its fact ids.' };
-  })
+  }, { reoriented: true })
 });
 
-module.exports = { LedgerTool, BriefTool, DecideTool, RecommendTool };
+module.exports = { LedgerTool, BriefTool, DecideTool, RecommendTool, withCase, SOURCE_KINDS };

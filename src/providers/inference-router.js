@@ -105,12 +105,16 @@ class InferenceRouter {
     const token = this.getProviderToken(config.provider);
     const providerInstance = this.createProvider(config.provider, token);
 
+    const { onChunk, ...rest } = options;
     const mergedOptions = {
-      ...options,
-      model: config.model || options.model || providerInstance.getDefaultModel()
+      ...rest,
+      model: config.model || rest.model || providerInstance.getDefaultModel()
     };
 
     if (Array.isArray(mergedOptions.tools) && mergedOptions.tools.length > 0) {
+      if (typeof onChunk === 'function' && typeof providerInstance.streamMessageWithTools === 'function') {
+        return providerInstance.streamMessageWithTools(messages, mergedOptions.tools, mergedOptions, onChunk);
+      }
       if (typeof providerInstance.sendMessageWithTools !== 'function') {
         throw new Error(`Provider ${config.provider} does not support tool calling.`);
       }
@@ -145,7 +149,12 @@ class InferenceRouter {
    * Now the classifier decides and FailoverPolicy budgets it.
    */
   async routeWithFallback(tier, messages, options = {}) {
-    let config = this.getTierConfig(tier);
+    // options.target ({ provider, model }) pins the first target (a case
+    // role, or the owner's chat selection); fallbacks still apply after it.
+    const { target, ...execOptions } = options || {};
+    let config = target && target.provider
+      ? { provider: String(target.provider).toLowerCase(), model: target.model || '', tier: this.getTierConfig(tier).tier }
+      : this.getTierConfig(tier);
     let payload = messages;
 
     const triedTargets = new Set([`${config.provider}:${config.model}`]);
@@ -160,7 +169,7 @@ class InferenceRouter {
     // backstop against a hook that never makes progress.
     for (let guard = 0; guard <= this.policy.maxTotalAttempts; guard += 1) {
       try {
-        return await this.execute(config, payload, options);
+        return await this.execute(config, payload, execOptions);
       } catch (err) {
         state.totalAttempts += 1;
 
@@ -169,7 +178,7 @@ class InferenceRouter {
           attemptsByReason,
           provider: config.provider,
           model: config.model,
-          aborted: options.abortSignal?.aborted
+          aborted: execOptions.abortSignal?.aborted
         });
 
         attemptsByReason[plan.reason] = (attemptsByReason[plan.reason] || 0) + 1;

@@ -458,8 +458,11 @@ class DiscordChannel extends ChannelPlugin {
     if (this.discordToLocalChatMap.has(key)) {
       return this.discordToLocalChatMap.get(key);
     }
-    const chatTitle = `👾 Discord: ${userName} (${discordChatId})`;
-    const localChatId = this.createLocalChat(chatTitle);
+    const chatTitle = `${DiscordChannel.CHAT_TITLE_PREFIX}${userName} (${discordChatId})`;
+    // Tagged with this bridge's origin (F5): a case can be attached only to
+    // a chat host-verified as the owner's, and this one carries whatever a
+    // remote Discord sender typed.
+    const localChatId = this.createLocalChat(chatTitle, { origin: this.id });
     if (localChatId) {
       this.discordToLocalChatMap.set(key, localChatId);
     }
@@ -469,7 +472,7 @@ class DiscordChannel extends ChannelPlugin {
   addToLocalChat(discordChatId, sender, text) {
     const localChatId = this.discordToLocalChatMap.get(String(discordChatId));
     if (localChatId) {
-      this.addMessageToLocalChat(localChatId, sender, text);
+      this.addMessageToLocalChat(localChatId, sender, text, { channel: this.id });
     }
   }
 
@@ -754,5 +757,10 @@ class DiscordChannel extends ChannelPlugin {
     await this.sendMessage(interaction.channelId, approved ? '✅ Tool execution approved.' : '❌ Tool execution denied.');
   }
 }
+
+// The exact prefix getOrCreateLocalChat writes into a chat's title.
+// create-core.js's legacy-chat migration (F5) matches on this, not a
+// duplicated literal, so the two can never drift apart.
+DiscordChannel.CHAT_TITLE_PREFIX = '👾 Discord: ';
 
 module.exports = DiscordChannel;

@@ -5,13 +5,23 @@
 const fs = require('fs');
 const path = require('path');
 
-const CASE_TOOL_NAMES = Object.freeze(['Ledger', 'Brief', 'Decide', 'Recommend']);
+const CASE_TOOL_NAMES = Object.freeze(['Ledger', 'Brief', 'Decide', 'Recommend', 'Reorient', 'Ask', 'Fail']);
 
-// Tools that start another agent run (now, later, or on another machine).
-// That run has no caseContext, so the case write guard would be off; stage 1
-// keeps them out of case turns entirely.
-const CASE_BLOCKED_TOOL_NAMES = Object.freeze(['SpawnAgent', 'BackgroundTask', 'sessions_spawn', 'RemoteDispatch', 'Cron']);
-const CASE_BLOCKED_TOOL_ERROR = 'Sub-agents and background tasks are not available in case turns in stage 1. Do the work in this turn with the case tools and the other tools.';
+// Tools kept out of every case turn (stage 2 spec §3.2). SpawnAgent,
+// BackgroundTask, sessions_spawn, RemoteDispatch and Cron start a run with
+// no caseContext; message sends text into a gateway session that has none;
+// sessions_list and sessions_history read other sessions; RequestTools and
+// ToolSearch inject tools; Canvas drives the UI.
+const CASE_BLOCKED_TOOL_NAMES = Object.freeze([
+  'SpawnAgent', 'BackgroundTask', 'sessions_spawn', 'RemoteDispatch', 'Cron',
+  'message', 'sessions_list', 'sessions_history', 'RequestTools', 'ToolSearch', 'Canvas'
+]);
+const CASE_BLOCKED_TOOL_ERROR = 'This tool is not available in case turns: it starts another run, reaches another session, or changes the tool list. Do the work in this turn with the case tools and the other tools.';
+
+// Everything a wake-up may use besides the case tools. WebFetch and
+// WebSearch join once the outbound gate (C3) exists: a GET URL is an
+// outbound channel.
+const WAKEUP_BASE_TOOLS = Object.freeze(['Read', 'Glob', 'Grep']);
 
 const CASE_MODE_PROMPT = [
   'Case mode. This chat is attached to a case. The orientation below was read from the case repository on disk at the start of this turn. It is the authoritative state and outranks anything earlier in the conversation.',
@@ -22,7 +32,9 @@ const CASE_MODE_PROMPT = [
   '- Ask the owner only what they alone know: history, constraints, preferences, authorization. Decide everything else yourself and record it with the Decide tool.',
   '- Load-bearing unknowns come first. If one blocks the objective, say so and ask. Do not work around it with an assumption.',
   '- Recommendations go through the Recommend tool. If it refuses, fix the cited facts or present the unknowns. Do not restate a refused recommendation in prose.',
-  '- When an approach fails, report what happened and stop, with at most one recommendation. Do not start a new plan unasked.',
+  '- When an approach fails, call Fail with what you tried and why, with at most one recommendation, then stop. Do not start a new plan unasked.',
+  '- If the orientation says "Re-orientation required", call Reorient first; Recommend, Decide and Fail are refused until you do.',
+  '- Contact the owner only through the Ask tool. The answer arrives later as an owner fact; never assume it.',
   '- Never edit facts.jsonl, brief.md, case.yaml or anything under .kl/ directly. The case tools are the only write path.'
 ].join('\n');
 
@@ -30,12 +42,29 @@ function shapeToolDefinitions(definitions, attached, registry) {
   const caseNames = new Set(CASE_TOOL_NAMES);
   const base = (definitions || []).filter((d) => !caseNames.has(d.name));
   if (!attached) return base;
-  const blocked = new Set(CASE_BLOCKED_TOOL_NAMES);
+  // AskUser is intercepted by the agent loop before the executor; in a case
+  // the Ask tool is the only way to ask the owner.
+  const blocked = new Set([...CASE_BLOCKED_TOOL_NAMES, 'AskUser']);
   const caseDefs = CASE_TOOL_NAMES
     .map((name) => registry.get(name))
     .filter(Boolean)
     .map((tool) => tool.toFunctionDefinition());
   return [...base.filter((d) => !blocked.has(d.name)), ...caseDefs];
+}
+
+// The agent loop calls the prompter for AskUser and for directory access.
+// In a case, AskUser is refused; directory access goes to the owner's own
+// prompter on owner turns, and is denied on wake-ups (base = null).
+function casePrompter(base) {
+  return {
+    async askUser() {
+      return { ok: false, error: 'In a case, ask the owner with the Ask tool.' };
+    },
+    async requestDirectoryAccess(request) {
+      if (!base || typeof base.requestDirectoryAccess !== 'function') return false;
+      return base.requestDirectoryAccess(request);
+    }
+  };
 }
 
 function buildCaseSystemPrompt(orientation, base) {
@@ -160,6 +189,8 @@ module.exports = {
   CASE_TOOL_NAMES,
   CASE_BLOCKED_TOOL_NAMES,
   CASE_BLOCKED_TOOL_ERROR,
+  WAKEUP_BASE_TOOLS,
+  casePrompter,
   CASE_MODE_PROMPT,
   shapeToolDefinitions,
   buildCaseSystemPrompt,

@@ -3,7 +3,8 @@ const IPC = require('./constants');
 const ImageHandler = require('../media/image-handler');
 const Advisor = require('../execution/advisor');
 const { createLogger } = require('../logging');
-const { buildCaseSystemPrompt, shapeToolDefinitions } = require('../cases/chat-integration');
+const { buildCaseSystemPrompt, shapeToolDefinitions, casePrompter } = require('../cases/chat-integration');
+const { NO_RETRY } = require('../cases/roles');
 
 const log = createLogger('chat');
 const advisorLog = createLogger('advisor');
@@ -306,7 +307,9 @@ function registerChatHandlers(ipcMain, context = {}) {
     // { ok: false, error }.
     const caseId = chatForDir?.caseId || null;
     const caseRuntime = caseId && typeof context.getCaseRuntime === 'function' ? context.getCaseRuntime() : null;
-    let caseTurn = caseRuntime ? await caseRuntime.beginTurn(caseId, { turnId: `turn-${runId}` }) : null;
+    let caseTurn = caseRuntime
+      ? await caseRuntime.beginTurn(caseId, { turnId: `turn-${runId}`, source: 'owner', ownerMessage: safeMessage })
+      : null;
     const endCaseTurn = async (fields) => {
       if (!caseTurn) return;
       const turn = caseTurn;
@@ -342,6 +345,10 @@ function registerChatHandlers(ipcMain, context = {}) {
         await endCaseTurn({ summary: `turn blocked: ${reason}`, journal: null });
         return { ok: false, error: reason };
       }
+
+      // Owner-message hooks (C5's classification) run only once the prompt
+      // hook has let the message through, and before the model sees it.
+      if (caseTurn) await caseRuntime.runOwnerMessageHooks(caseTurn);
 
       const userMessage = appendMessageToChat(chatId, 'user', safeMessage, {
         ...(normalizedImages.length > 0 ? { images: normalizedImages } : {}),
@@ -401,12 +408,26 @@ function registerChatHandlers(ipcMain, context = {}) {
       // plus the message being sent this turn if it isn't already there —
       // it was persisted (above) before smart-routing prefix stripping, so
       // the post-strip safeMessage may not textually match that entry.
+      // ownerMessageTimes runs in step with ownerMessages; this turn's
+      // message is stamped now (stage 2: a direction quote must be newer
+      // than the failure report).
+      let ownerMessageTimes = null;
       const ownerMessages = caseTurn
         ? (() => {
-            const messages = chatRaw.messages
-              .filter((m) => m.sender === 'user' && typeof m.text === 'string' && m.text)
-              .map((m) => m.text);
-            if (!messages.includes(safeMessage)) messages.push(safeMessage);
+            // A message a Telegram/Discord bridge appended on a remote
+            // sender's behalf is stamped sender: 'user' too, but it is not
+            // the owner talking in this chat — a channel tag (F5) excludes
+            // it from the quote-verified owner-message pool.
+            const owned = chatRaw.messages.filter((m) => m.sender === 'user' && !m.channel && typeof m.text === 'string' && m.text);
+            const messages = owned.map((m) => m.text);
+            ownerMessageTimes = owned.map((m) => m.timestamp || null);
+            const nowIso = new Date().toISOString();
+            if (!messages.includes(safeMessage)) {
+              messages.push(safeMessage);
+              ownerMessageTimes.push(nowIso);
+            } else {
+              ownerMessageTimes[messages.lastIndexOf(safeMessage)] = nowIso;
+            }
             return messages;
           })()
         : null;
@@ -457,7 +478,8 @@ function registerChatHandlers(ipcMain, context = {}) {
 
           // Tell the LLM which tools are available on-demand via RequestTools
           const availableNames = (assembled.availableToolNames || []).filter((n) => !isMcpToolDisabled(n));
-          if (availableNames.length > 0) {
+          // RequestTools is blocked in case turns, so do not advertise it there.
+          if (availableNames.length > 0 && !caseTurn) {
             options.systemPrompt += `\n\nAdditional tools available on request via the RequestTools tool: ${availableNames.join(', ')}`;
           }
         } catch (err) {
@@ -482,7 +504,7 @@ function registerChatHandlers(ipcMain, context = {}) {
         allowedDirectories,
         useSandbox: sandboxMode,
         chatId,
-        caseContext: caseTurn ? { ...caseTurn, runtime: caseRuntime, ownerMessages } : null
+        caseContext: caseTurn ? caseRuntime.caseContext(caseTurn, { ownerMessages, ownerMessageTimes }) : null
       });
 
       executor.on('preExecute', ({ toolName, parameters }) => {
@@ -517,14 +539,21 @@ function registerChatHandlers(ipcMain, context = {}) {
           const loopModel = resolveAgentLoopModel();
           const embeddingProvider = contextAssembler?.embeddingProvider || null;
           const toolResultsDir = typeof getToolResultsDir === 'function' ? getToolResultsDir() : null;
-          const loop = new AgentLoop(provider, executor, {
+          // A case turn routes through the runtime: the owner's selection is
+          // the first target of routeWithFallback, usage is charged to the
+          // case, and AskUser is refused in favour of the Ask tool.
+          const loopProvider = caseTurn
+            ? caseRuntime.routedProvider(caseTurn, { target: { provider: inference.providerType, model: inference.model }, tier: inference.tier })
+            : provider;
+          const loop = new AgentLoop(loopProvider, executor, {
             maxIterations: 40,
             loopModel,
             embeddingProvider,
             usageTracker: typeof getUsageTracker === 'function' ? getUsageTracker() : null,
+            ...(caseTurn ? { onUsageRecorded: caseRuntime.usageHook(caseTurn), failoverPolicy: NO_RETRY } : {}),
             abortSignal: abortController.signal,
             toolResultsDir,
-            prompter,
+            prompter: caseTurn ? casePrompter(prompter) : prompter,
             // Stream text deltas to the UI during agent loop iterations
             onChunk: (chunk) => {
               if (abortController.signal.aborted) return;
@@ -623,7 +652,7 @@ function registerChatHandlers(ipcMain, context = {}) {
 
           const usageTracker = typeof getUsageTracker === 'function' ? getUsageTracker() : null;
           if (usageTracker && singleCall && typeof usageTracker.record === 'function') {
-            usageTracker.record(
+            const usageEvent = usageTracker.record(
               typeof createUsageRecordFromMetrics === 'function'
                 ? createUsageRecordFromMetrics(singleCall, 0)
                 : {
@@ -635,6 +664,7 @@ function registerChatHandlers(ipcMain, context = {}) {
                     costUsd: singleCall.costUsd
                   }
             );
+            if (caseTurn && usageEvent) caseRuntime.usageHook(caseTurn)(usageEvent);
           }
         }
       });

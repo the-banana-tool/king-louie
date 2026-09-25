@@ -9,6 +9,7 @@ const log = createLogger('cases/ledger');
 
 const SENSITIVE_CATEGORIES = new Set(['personal', 'financial', 'legal', 'health']);
 const ASSERT_PROVENANCE = new Set(['sourced', 'user', 'external-agent']);
+const HOST_SOURCE_KINDS = new Set(['user-message', 'question', 'owner-action']);
 
 class LedgerError extends Error {
   constructor(message) {
@@ -95,7 +96,9 @@ class FactLedger {
       source: fields.source || null,
       confidence: typeof fields.confidence === 'number' ? fields.confidence : null,
       category: fields.category || null,
-      disclosable: !(
+      // A caller may make a fact private at birth (a question with
+      // payload.disclosable: false), never public against these rules.
+      disclosable: fields.disclosable === false ? false : !(
         fields.provenance === 'inferred'
         || fields.provenance === 'unknown'
         || SENSITIVE_CATEGORIES.has(fields.category)
@@ -127,6 +130,14 @@ class FactLedger {
     // other provenance may claim the owner as its source.
     if (input.source.kind === 'user-message' && provenance !== 'user') {
       throw new LedgerError('A "user-message" source is only valid with provenance "user". Use provenance "user" with a "quote" of the owner\'s words.');
+    }
+    // question and owner-action sources are written by host code only
+    // (answers and the Grant button), and "user" needs one of the three.
+    if (HOST_SOURCE_KINDS.has(input.source.kind) && provenance !== 'user') {
+      throw new LedgerError(`A "${input.source.kind}" source is written only by the host, with provenance "user".`);
+    }
+    if (provenance === 'user' && !HOST_SOURCE_KINDS.has(input.source.kind)) {
+      throw new LedgerError('provenance "user" needs a host-verified owner source (user-message, question or owner-action).');
     }
     return this._write({ ...input, provenance });
   }
@@ -183,4 +194,4 @@ class FactLedger {
   }
 }
 
-module.exports = { FactLedger, LedgerError, SENSITIVE_CATEGORIES };
+module.exports = { FactLedger, LedgerError, SENSITIVE_CATEGORIES, HOST_SOURCE_KINDS };

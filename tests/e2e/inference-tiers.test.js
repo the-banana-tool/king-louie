@@ -8,6 +8,10 @@ describe('E2E: Inference Tier UI', () => {
   before(async () => {
     ctx = await launchApp();
     await waitFor(ctx, `!!document.getElementById('user-input')`);
+    // A fresh --user-data-dir profile starts with no chats, so Chat Info has
+    // nothing to show without one (it used to rely on the real profile's
+    // leftover chats always leaving one active).
+    await evaluate(ctx, `document.getElementById('new-chat-btn').click(); true`);
 
     // Install native dialog trap
     await evaluate(ctx, `
