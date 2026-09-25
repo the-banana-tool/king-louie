@@ -85,27 +85,45 @@ function startStandaloneHost(deps) {
     else pending.resolve({ action: 'execute_js', result });
   });
 
+  const pauseCron = () => {
+    const cron = core.context.getCronScheduler();
+    if (cron) cron.pause();
+  };
+
   return {
     core,
     controller,
     async start() {
-      await core.start();
-      if (standaloneOnce) {
-        const cron = core.context.getCronScheduler();
-        if (cron) cron.pause();
-      }
-      // Notify the renderer that mesh is ready so it can refresh status.
-      const meshContext = core.getMeshContext();
-      const win = liveWindow();
-      if (meshContext && win) {
-        const sendReady = () => win.webContents.send('mesh:ready');
-        if (win.webContents.isLoading()) win.webContents.once('did-finish-load', sendReady);
-        else sendReady();
+      try {
+        await core.start();
+        // Pause as early as possible: core.start() is what constructs the
+        // cron scheduler, so this is the first moment it can be paused. A
+        // --kl-standalone-once session must not act as a second consumer of
+        // cron next to the live service.
+        if (standaloneOnce) pauseCron();
+        // Notify the renderer that mesh is ready so it can refresh status.
+        const meshContext = core.getMeshContext();
+        const win = liveWindow();
+        if (meshContext && win) {
+          const sendReady = () => win.webContents.send('mesh:ready');
+          if (win.webContents.isLoading()) win.webContents.once('did-finish-load', sendReady);
+          else sendReady();
+        }
+      } catch (err) {
+        // A core that failed to start must never keep acting: pause cron and
+        // give it a chance to shut down cleanly before the caller decides
+        // what to do about the failure (main.js shows it and quits).
+        pauseCron();
+        await core.shutdown().catch(() => {});
+        throw err;
       }
     },
     async shutdown() {
-      controller.dispose();
-      await core.shutdown();
+      try {
+        controller.dispose();
+      } finally {
+        await core.shutdown();
+      }
     }
   };
 }

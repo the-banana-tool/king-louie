@@ -43,6 +43,7 @@ function createDesktopController({
   let found = null;
   let foundError = null;
   let importSession = null;
+  let disposed = false;
 
   const send = (channel, payload) => {
     const win = getWindow();
@@ -119,14 +120,19 @@ function createDesktopController({
 
   // A pending pair persists across a desktop restart. Resume polling for
   // whatever's left of its window, or drop it outright if the window
-  // already ran out while the app was closed.
+  // already ran out while the app was closed. Clearing an already-expired
+  // pair is free and stays synchronous; starting to poll a live window is
+  // deferred — its first tick does a synchronous win32 PowerShell trust read
+  // (Task 13), which construction (and therefore app-ready) must not block on.
   function resumePendingPair() {
     const pending = state.pendingPair;
     if (!pending) return;
     const created = Date.parse(pending.createdAt);
     const until = Number.isFinite(created) ? created + pollWindowMs : Date.now() - 1;
     if (until > Date.now()) {
-      startPolling(until);
+      setImmediate(() => {
+        if (!disposed) startPolling(until);
+      });
     } else {
       state.setPendingPair(null);
       found = null;
@@ -373,6 +379,7 @@ function createDesktopController({
   }
 
   function dispose() {
+    disposed = true;
     stopPolling();
     closeImportSession();
     if (client && clientStateHandler) client.off('state', clientStateHandler);

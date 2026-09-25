@@ -1129,6 +1129,9 @@ function createCore(deps = {}) {
   };
 
   const startDiscordBridge = async (token) => {
+    // A --kl-standalone-once session runs next to a live service and must
+    // never act as a second consumer of a channel (fleet stage 7 §3.7).
+    if (!features.channels) return { ok: false, error: 'Channels are off in this session.' };
     if (!token || !gatewayServer || !sessionManager) return;
 
     await stopDiscordBridge();
@@ -1200,6 +1203,9 @@ function createCore(deps = {}) {
   };
 
   const startTelegramBridge = async (token) => {
+    // A --kl-standalone-once session runs next to a live service and must
+    // never act as a second consumer of a channel (fleet stage 7 §3.7).
+    if (!features.channels) return { ok: false, error: 'Channels are off in this session.' };
     if (!token || !gatewayServer || !sessionManager) return;
 
     await stopTelegramBridge();
@@ -1274,6 +1280,9 @@ function createCore(deps = {}) {
   };
 
   const startSlackChannel = async (appToken, botToken) => {
+    // A --kl-standalone-once session runs next to a live service and must
+    // never act as a second consumer of a channel (fleet stage 7 §3.7).
+    if (!features.channels) return { ok: false, error: 'Channels are off in this session.' };
     if (!appToken || !botToken || !gatewayServer || !sessionManager) return;
 
     await stopSlackChannel();
@@ -1465,7 +1474,8 @@ function createCore(deps = {}) {
 
         try {
           saveDiscordToken(token);
-          await startDiscordBridge(token);
+          const started = await startDiscordBridge(token);
+          if (started && started.ok === false) return started;
           updateStatus('discord', {
             ok: true,
             message: `Connected successfully`
@@ -1529,7 +1539,8 @@ function createCore(deps = {}) {
         try {
           const bot = await testTelegramConnection(token);
           saveTelegramToken(token);
-          await startTelegramBridge(token);
+          const started = await startTelegramBridge(token);
+          if (started && started.ok === false) return started;
           updateStatus('telegram', {
             ok: true,
             message: `Connected as @${bot?.username || 'telegram-bot'}`
@@ -1631,7 +1642,8 @@ function createCore(deps = {}) {
             }
           });
 
-          await startSlackChannel(appToken, botToken);
+          const started = await startSlackChannel(appToken, botToken);
+          if (started && started.ok === false) return started;
 
           // If we get here it started successfully
           updateStatus('slack', {
@@ -1661,7 +1673,8 @@ function createCore(deps = {}) {
         }
 
         try {
-          await startSlackChannel(appToken, botToken);
+          const started = await startSlackChannel(appToken, botToken);
+          if (started && started.ok === false) return started;
           updateStatus('slack', {
             ok: true,
             message: 'Connected to Slack Socket Mode'

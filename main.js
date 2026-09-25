@@ -14,9 +14,12 @@ protocol.registerSchemesAsPrivileged([
 const userDataArg = process.argv.find((a) => a.startsWith('--user-data-dir='));
 if (userDataArg) app.setPath('userData', path.resolve(userDataArg.slice('--user-data-dir='.length)));
 
+const { createLogger } = require('./src/logging');
 const { openDesktopState } = require('./src/ipc/desktop-state');
 const { startStandaloneHost } = require('./src/ipc/standalone-host');
 const { startAttachedHost } = require('./src/ipc/attached-host');
+
+const log = createLogger('main');
 
 let mainWindow = null;
 const getWindow = () => mainWindow;
@@ -75,7 +78,14 @@ app.whenReady().then(async () => {
 
   // Show the window immediately — don't block on infrastructure.
   createWindow();
-  await host.start();
+  try {
+    await host.start();
+  } catch (err) {
+    log.error(`host failed to start: ${err.message}`);
+    dialog.showErrorBox('King Louie failed to start', err.message || String(err));
+    app.quit();
+    return;
+  }
 
   app.on('activate', function () {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

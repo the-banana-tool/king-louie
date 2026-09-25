@@ -68,6 +68,15 @@ describe('markingIpcMain', () => {
     assert.strictEqual(seenHandle[1], 'x');
     assert.strictEqual(isLocalDesktopEvent(seenOn[0]), true);
   });
+
+  it('removeHandler removes the handler from the underlying ipcMain', () => {
+    const ipc = fakeIpcMain();
+    const wrapped = markingIpcMain(ipc);
+    wrapped.handle('chat:load', async () => 1);
+    assert.ok(ipc.handlers.has('chat:load'));
+    wrapped.removeHandler('chat:load');
+    assert.ok(!ipc.handlers.has('chat:load'));
+  });
 });
 
 describe('CronScheduler.pause', () => {
@@ -79,6 +88,24 @@ describe('CronScheduler.pause', () => {
     await scheduler.tick();
     assert.strictEqual(runs, 0);
     assert.strictEqual(scheduler.paused, true);
+  });
+
+  it('clears a running timer', () => {
+    const store = { list: () => [], update: async () => {} };
+    const scheduler = new CronScheduler(store, { execute: async () => ({ ok: true }) });
+    scheduler.start();
+    assert.ok(scheduler.timer, 'start() set a timer');
+    scheduler.pause();
+    assert.strictEqual(scheduler.timer, null, 'pause() cleared the running timer');
+  });
+
+  it('stop() still works after pause()', () => {
+    const store = { list: () => [], update: async () => {} };
+    const scheduler = new CronScheduler(store, { execute: async () => ({ ok: true }) });
+    scheduler.start();
+    scheduler.pause();
+    assert.doesNotThrow(() => scheduler.stop());
+    assert.strictEqual(scheduler.timer, null);
   });
 });
 
@@ -94,7 +121,7 @@ describe('startStandaloneHost', () => {
     assert.strictEqual(status.mode, 'standalone');
     assert.ok(ipc.listeners.has('canvas:executeJsResult'));
     await host.start();
-    assert.strictEqual(host.core.context.getCronScheduler().paused, undefined);
+    assert.notStrictEqual(host.core.context.getCronScheduler().paused, true);
   });
 
   it('--kl-standalone-once starts with channels, gateway and mesh off and cron paused', async () => {
@@ -102,6 +129,54 @@ describe('startStandaloneHost', () => {
     assert.deepStrictEqual(captured().features, { channels: false, gateway: false, mesh: false });
     await host.start();
     assert.strictEqual(host.core.context.getCronScheduler().paused, true);
+  });
+
+  // Fix round 1, I1: a --kl-standalone-once session runs next to a live
+  // service and must never restart a channel through /llm — startDiscordBridge
+  // et al. must refuse rather than actually connect.
+  it('--kl-standalone-once refuses to start a channel through runLlmCommand', async () => {
+    const { host } = startHost({ standaloneOnce: true });
+    await host.start();
+    const result = await host.core.context.runLlmCommand('/llm discord add faketoken');
+    assert.deepStrictEqual(result, { ok: false, error: 'Channels are off in this session.' });
+  });
+
+  // Fix round 1, I2: a core that fails to start must not keep acting — cron
+  // is paused and the core is given a chance to shut down before the
+  // failure reaches the caller (main.js shows it and quits).
+  it('a failing core.start() pauses cron, shuts the core down, and rethrows', async () => {
+    const userData = tmp();
+    const safeStorage = { isEncryptionAvailable: () => true, encryptString: (s) => Buffer.from(`sealed:${s}`), decryptString: (b) => Buffer.from(b).toString().replace(/^sealed:/, '') };
+    class StoreClass extends JsonFileStore {
+      constructor({ name = 'config', defaults = {} } = {}) { super({ dir: userData, name, defaults }); }
+    }
+    let shutdownCalled = false;
+    const host = startStandaloneHost({
+      app: { getPath: () => userData, relaunch() {}, exit() {}, quit() {} },
+      ipcMain: fakeIpcMain(),
+      safeStorage,
+      shell: { openExternal: async () => {} },
+      Notification: class { show() {} },
+      getWindow: () => null,
+      state: openDesktopState(userData, safeStorage, { storeFactory: ({ name, cwd, defaults }) => new JsonFileStore({ dir: cwd, name, defaults }) }),
+      appDir: path.join(__dirname, '..'),
+      standaloneOnce: false,
+      StoreClass,
+      // A real core (so context/getCronScheduler and shutdown() are the
+      // genuine article, cron scheduler included) whose start() fails right
+      // after the real initialization — including cron construction — runs.
+      createCoreFn: (deps) => {
+        const core = createCore({ ...deps, features: { ...(deps.features || {}), webhooks: false, appDiscovery: false, gateway: false, mesh: false, channels: false } });
+        const realStart = core.start.bind(core);
+        core.start = async () => { await realStart(); throw new Error('boom'); };
+        const realShutdown = core.shutdown.bind(core);
+        core.shutdown = async (...args) => { shutdownCalled = true; return realShutdown(...args); };
+        return core;
+      }
+    });
+    await assert.rejects(() => host.start(), /boom/);
+    assert.strictEqual(host.core.context.getCronScheduler().paused, true, 'cron was paused on failure');
+    assert.strictEqual(shutdownCalled, true, 'core.shutdown() was awaited on failure');
   });
 });
 
