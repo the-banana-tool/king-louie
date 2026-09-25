@@ -262,7 +262,7 @@ describe('parseReply picks an option only by an exact, unambiguous match', () =>
     assert.deepStrictEqual(r.answers.map((a) => [a.item.n, a.answer]), [[2, { optionId: 'a' }]]);
     const same = parseReply(batch, '#K7QD4M 1 a\n#7QD4KM No');
     assert.deepStrictEqual(same.answers.map((a) => [a.item.n, a.answer]), [[1, { optionId: 'a' }]]);
-    const threaded = parseReply(one, 'yes, up to 20 %\nno', { threaded: true });
+    const threaded = parseReply(one, 'yes, up to 20 %\nthanks', { threaded: true });
     assert.deepStrictEqual(threaded.answers, []);
     assert.strictEqual(threaded.ack, 'Which question? Reply "#K7QD4M <n> <answer>".');
   });
@@ -454,7 +454,9 @@ describe('fix round 1: threaded replies without a token (ruling T2-reply)', () =
     const r = parseReply(batch, '2 weeks from now works', T);
     assert.deepStrictEqual(r.answers, []);
     assert.strictEqual(r.ack, 'Which question? Reply "#K7QD4M <n> <answer>".');
-    assert.deepStrictEqual(pairs(parseReply(one, 'No\n\nSent from my iPhone', T)), [[1, { optionId: 'a' }]]);
+    // ruling T2-single: a single-item thread keeps free text, so a trailing
+    // line that differs from the pick makes the reply ambiguous
+    assert.deepStrictEqual(pairs(parseReply(one, 'No\n\nSent from my iPhone', T)), []);
     // with the token the same text is an answer
     assert.deepStrictEqual(pairs(parseReply(batch, '#K7QD4M 2 weeks from now works')), [[2, { text: 'weeks from now works' }]]);
   });
@@ -462,6 +464,22 @@ describe('fix round 1: threaded replies without a token (ruling T2-reply)', () =
   it('a tokenless option pick by exact match still works', () => {
     assert.deepStrictEqual(pairs(parseReply(batch, '1 yes, up to 20 %\n2 Oct 5', T)), [[1, { optionId: 'b' }], [2, { optionId: 'a' }]]);
     assert.deepStrictEqual(pairs(parseReply(one, 'no.', T)), [[1, { optionId: 'a' }]]);
+  });
+
+  it('ruling T2-single: a single-item thread takes free text; only the owner text survives the quoted history', () => {
+    const original = [
+      'King Louie: 1 question (1 high)',
+      '',
+      '1. [HIGH] Sell the lakeside lot — Is seller financing ever acceptable?',
+      '   a) No   b) Yes, up to 20 %',
+      '',
+      'Reply "#K7QD4M a". Start a free-text answer with #K7QD4M. Expires: 1) Sep 25 23:00.'
+    ];
+    const gmail = `Only if the buyer puts 30 % down\n\nOn Fri, Sep 25, 2026 at 9:00 AM King Louie <kl@example.com> wrote:\n${original.map((l) => `> ${l}`).join('\n')}`;
+    const outlook = ['Only if the buyer puts 30 % down', '', ...original].join('\n');
+    for (const body of [gmail, outlook]) {
+      assert.deepStrictEqual(pairs(parseReply(one, stripQuoted(body), T)), [[1, { text: 'Only if the buyer puts 30 % down' }]]);
+    }
   });
 
   it('the reply hint says free text needs the code', () => {

@@ -371,10 +371,12 @@ function isItemHeader(item, rest) {
 
 // batch: { batchToken, items: [{ n, token, options, caseTitle? }] }.
 // `threaded`: the reply is already tied to this batch (a Telegram/Discord
-// reply, an email in the thread), so the #TOKEN may be left out, but then a
-// line may only pick an option by exact match: free text needs the token
-// (a `{ text }` answer becomes a `user` fact, so stray signature or quoted
-// lines must never land as one). Returns { answers: [{ item, answer }], ack }
+// reply, an email in the thread), so the #TOKEN may be left out. In a
+// multi-item batch a tokenless line may then only pick an option by exact
+// match: free text needs the token (a `{ text }` answer becomes a `user`
+// fact, so a stray signature or quoted line must never land on the wrong
+// question). A single-item batch takes tokenless free text: there is only one
+// question it can answer (ruling T2-single). Returns { answers: [{ item, answer }], ack }
 // where ack is set only when nothing parsed. Ignored: `>` quoted lines, a
 // line repeating an item's header, and text that fits none of the named
 // item's options but exactly one of another item's (a swapped token or
@@ -384,11 +386,11 @@ function parseReply(batch, text, { threaded = false } = {}) {
   const items = batch.items || [];
   const byN = (n) => items.find((it) => it.n === n) || null;
   const found = [];
-  const answerFor = (item, rest, tokened) => {
+  const answerFor = (item, rest, freeText) => {
     if (!rest || isItemHeader(item, rest)) return;
     const answer = optionOrText(item.options, rest);
     if (!('optionId' in answer)) {
-      if (!tokened) return;
+      if (!freeText) return;
       if (items.some((other) => other !== item && 'optionId' in optionOrText(other.options, rest))) return;
     }
     found.push({ item, answer });
@@ -412,9 +414,9 @@ function parseReply(batch, text, { threaded = false } = {}) {
     }
     const numbered = /^(\d{1,2})[.)]?\s+(.+)$/.exec(rest);
     if (numbered && byN(Number(numbered[1]))) {
-      answerFor(byN(Number(numbered[1])), numbered[2], Boolean(m));
+      answerFor(byN(Number(numbered[1])), numbered[2], Boolean(m) || items.length === 1);
     } else if (items.length === 1) {
-      answerFor(items[0], rest, Boolean(m));
+      answerFor(items[0], rest, true); // one question: free text can't go astray (ruling T2-single)
     }
   }
   const answers = [];
