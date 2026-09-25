@@ -1,0 +1,3 @@
+# Exactly the privileged commands in site.pull_and_restart and server.reboot.
+king-louie ALL=(root) NOPASSWD: /usr/bin/systemctl restart site.service
+king-louie ALL=(root) NOPASSWD: /usr/sbin/shutdown -r +1

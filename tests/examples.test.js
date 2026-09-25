@@ -345,3 +345,97 @@ describe('example roles: load through the real loaders', () => {
     assert.equal(isPathUnderRoots(path.join(spaced, 'x.json'), [spaced]), true);
   });
 });
+
+describe('sudoers for web-01', () => {
+  const SUDOERS = path.join(EXAMPLES, 'sudoers', 'king-louie-web-01');
+
+  it('grants exactly the sudo -n commands of web-01 runbooks, once each', () => {
+    const lines = fs.readFileSync(SUDOERS, 'utf8').split(/\r?\n/).filter((l) => l.trim() && !l.trim().startsWith('#'));
+    const granted = lines.map((l) => {
+      const m = /^king-louie ALL=\(root\) NOPASSWD: (.+)$/.exec(l);
+      assert.ok(m, `unexpected sudoers line: ${l}`);
+      return m[1];
+    });
+    const needed = [];
+    for (const name of Object.keys(ROLE_RUNBOOKS['web-01'].runbooks)) {
+      const rb = parseYaml(fs.readFileSync(path.join(RUNBOOKS, `${name}.yaml`), 'utf8'));
+      for (const step of rb.steps) {
+        if (step.run && path.posix.basename(step.run[0]) === 'sudo' && step.run[1] === '-n') needed.push(step.run.slice(2).join(' '));
+      }
+    }
+    assert.equal(granted.length, new Set(granted).size, 'duplicate grant');
+    assert.deepEqual([...granted].sort(), [...new Set(needed)].sort());
+  });
+
+  // F5 ruling: the brief's original assertion checked path.basename(SUDOERS)
+  // against a literal this test built itself, so it could never fail. This
+  // reads the real examples/sudoers directory instead.
+  it('has a name sudo will read from sudoers.d (no dot)', () => {
+    const names = fs.readdirSync(path.join(EXAMPLES, 'sudoers'));
+    assert.ok(names.length > 0, 'no files in examples/sudoers');
+    for (const name of names) assert.ok(!name.includes('.'), `${name} has a dot; sudo skips it`);
+  });
+
+  it('passes visudo -cf', (t) => {
+    for (const cmd of ['/usr/sbin/visudo', 'visudo']) {
+      const r = spawnSync(cmd, ['-cf', SUDOERS], { encoding: 'utf8' });
+      if (r.error && r.error.code === 'ENOENT') continue;
+      assert.equal(r.status, 0, `${cmd} -cf: ${r.stdout}${r.stderr}`);
+      return;
+    }
+    t.skip('visudo is not installed');
+  });
+});
+
+describe('Windows ACL script', () => {
+  const SCRIPT = path.join(EXAMPLES, 'windows', 'runbook-acls.ps1');
+  const text = () => fs.readFileSync(SCRIPT, 'utf8');
+
+  it('declares WhatIf support, a mandatory role and runner, and the default base', () => {
+    const t = text();
+    assert.match(t, /\[CmdletBinding\(SupportsShouldProcess\)\]/);
+    assert.match(t, /\[Parameter\(Mandatory\)\]\[ValidateSet\('base', 'gpu-box', 'laptop'\)\]\[string\] \$Role/);
+    assert.match(t, /\[Parameter\(Mandatory\)\]\[string\] \$Runner/);
+    assert.ok(t.includes("[string] $Base = 'C:\\KingLouie'"));
+  });
+
+  it('calls icacls only by its full path, refuses to run unelevated, and resolves the runner to a SID', () => {
+    const t = text();
+    assert.ok(t.includes('$icacls = "$env:SystemRoot\\System32\\icacls.exe"'));
+    const invoked = [...t.matchAll(/^\s*&\s+(\S+)/gm)].map((m) => m[1]);
+    assert.deepEqual([...new Set(invoked)], ['$icacls']);
+    assert.ok(!/^\s*icacls/im.test(t), 'a bare icacls call');
+    assert.match(t, /WindowsBuiltInRole\]::Administrator/);
+    assert.match(t, /NTAccount\(\$Runner\)\)\.Translate\(\[Security\.Principal\.SecurityIdentifier\]\)/);
+  });
+
+  it('cuts inheritance on the base, tools, train and configs folders', () => {
+    const t = text();
+    for (const target of ['"$Base"', '"$Base\\tools"', "'D:\\train'", "'D:\\train\\configs'"]) {
+      assert.ok(t.includes(`Set-KlAcl -Path ${target} -CutInheritance`), `${target} keeps its inherited ACEs`);
+    }
+    assert.ok(t.includes("'/inheritance:r'"));
+  });
+
+  it('lets LOCAL SERVICE read the app folder', () => {
+    const t = text();
+    assert.ok(t.includes("$LocalService = '*S-1-5-19'"));
+    assert.ok(t.includes('Set-KlAcl -Path "$Base\\app" -Grants @("${LocalService}:(OI)(CI)RX")'));
+  });
+
+  it('grants only to SYSTEM, Administrators, LOCAL SERVICE and the runner, by SID', () => {
+    const t = text();
+    const sids = new Set([...t.matchAll(/\*S-1-[0-9-]+/g)].map((m) => m[0]));
+    assert.deepEqual([...sids].sort(), ['*S-1-5-18', '*S-1-5-19', '*S-1-5-32-544']);
+    const principals = new Set([...t.matchAll(/"\$\{(\w+)\}:\(/g)].map((m) => m[1]));
+    assert.deepEqual([...principals].sort(), ['Admins', 'LocalService', 'RunnerSid', 'System']);
+    assert.equal(/["'][A-Za-z][^"'$\r\n]*:\((?:OI|CI)\)/.test(t), false, 'a grant names an account literally');
+  });
+
+  it('parses without errors in Windows PowerShell', { skip: POSIX ? 'Windows PowerShell only' : false }, () => {
+    const ps = `$t = $null; $e = $null; [void][System.Management.Automation.Language.Parser]::ParseFile('${SCRIPT.replace(/'/g, "''")}', [ref]$t, [ref]$e); $e.Count`;
+    const r = spawnSync(windowsPowerShellExe(), ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout.trim(), '0');
+  });
+});
