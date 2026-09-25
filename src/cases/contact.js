@@ -11,7 +11,13 @@ const {
 const { ContactDeliveryError, GATE_PASSED } = require('../channels/channel-plugin');
 const { createLogger } = require('../logging');
 
-const AUTHENTICATED_ORDER = ['telegram', 'discord', 'mobile'];
+// Ruling T5-m22 (owner: "only the app or my paired phone"): the only
+// channels that may answer an approval or an app-only question. An
+// allowlist, so a channel added later is refused until it is named here.
+// `mobile` is F3's device-signed phone channel.
+const APP_ANSWER_CHANNELS = Object.freeze(['in-app', 'mobile']);
+// The channel named in "Answer in King Louie or <channel>" (the phone).
+const AUTHENTICATED_ORDER = ['mobile'];
 const TOKEN_IN_TEXT = /#([0-9A-Za-z]{6})\b/;
 const ENVELOPE_TYPES = new Set(['envelope', 'envelope-delta']);
 // A queued answer that keeps failing for a reason other than a busy case is
@@ -41,11 +47,11 @@ function sameAnswer(record, answer) {
   return String(a.text || '').trim().toLowerCase() === text.toLowerCase();
 }
 
-// Owner decision M22: questions C2 marks `mcpAnswerable: false` carry
-// authority (budget-grant, direction, commit-failed, budget-daily). Like
-// approvals they are answered only where the channel proves the sender (in
-// the app, the paired phone, Telegram/Discord DMs), never by SMS, email or
-// voice. A conflict follow-up is always mcpAnswerable:false (the model must
+// Owner decision M22 / ruling T5-m22: questions C2 marks `mcpAnswerable:
+// false` carry authority (budget-grant, budget-daily, direction,
+// commit-failed). Like approvals they are answered only in the app or on the
+// paired phone (APP_ANSWER_CHANNELS); every other channel, Telegram and
+// Discord included, is refused. A conflict follow-up is always mcpAnswerable:false (the model must
 // not settle it), so it carries the original's rule in `appOnly` instead.
 function appOnly(record) {
   const p = record?.payload || {};
@@ -142,10 +148,18 @@ class ContactRouter {
     return { enabled: true, configured: true };
   }
 
+  // Ruling T5-m22: whether a reply on this channel may answer an approval or
+  // an app-only question. The id must be allowlisted AND the adapter must
+  // report authenticated replies (fail closed on a misconfigured adapter).
+  answersInApp(channelId) {
+    if (!APP_ANSWER_CHANNELS.includes(channelId)) return false;
+    return this.adapter(channelId)?.contactCapabilities()?.authenticatedReplies === true;
+  }
+
   firstAuthenticated() {
     for (const id of AUTHENTICATED_ORDER) {
       const a = this.adapter(id);
-      if (a && a.contactConfigured() && a.contactCapabilities()?.authenticatedReplies) return id;
+      if (a && a.contactConfigured() && this.answersInApp(id)) return id;
     }
     return 'the King Louie app';
   }
@@ -161,7 +175,7 @@ class ContactRouter {
       batchToken: token,
       maxChars: caps.maxChars || 4000,
       maxOptions: caps.maxOptions ?? 6,
-      authenticated: caps.authenticatedReplies === true,
+      authenticated: this.answersInApp(channelId),
       firstAuthenticated: this.firstAuthenticated(),
       timeZone: this.getTimeZone()
     });
@@ -292,12 +306,13 @@ class ContactRouter {
     if (!caseMeta || !found) return { ok: false, outcome: 'unknown', ack: `${item.questionId} no longer exists.` };
     let record = found;
     // §3.5 step 2 and owner decision M22, all before answerQuestion.
-    const authenticated = caps.authenticatedReplies === true;
-    if (record.kind === 'approval' && !authenticated) {
-      return { ok: false, outcome: 'refused: approval', ack: `Approvals can't be answered by ${channelId}. Use King Louie or ${this.firstAuthenticated()}.` };
-    }
-    if (appOnly(record) && !authenticated) {
-      return { ok: false, outcome: 'refused: app-only', ack: `Answer this in the app: ${record.id} in ${caseMeta.title} can't be answered by ${channelId}.` };
+    const inApp = APP_ANSWER_CHANNELS.includes(channelId) && caps.authenticatedReplies === true;
+    if ((record.kind === 'approval' || appOnly(record)) && !inApp) {
+      return {
+        ok: false,
+        outcome: record.kind === 'approval' ? 'refused: approval' : 'refused: app-only',
+        ack: `Answer this in the app: ${record.id} in ${caseMeta.title} can't be answered by ${channelId}.`
+      };
     }
     if (item.answerable === false) {
       return { ok: false, outcome: 'refused: not-answerable', ack: `${record.id} can't be answered by ${channelId}. Answer this in the app.` };
@@ -318,7 +333,14 @@ class ContactRouter {
         try {
           await this.runtime.acknowledgeBriefing(caseMeta.id, record.id, { channel: channelId });
         } catch (err) {
-          if (err.code !== 'ALREADY_ANSWERED' && err.code !== 'CASE_BUSY') throw err;
+          // Ruling T5-brief: a busy case queues the acknowledgement like an answer.
+          if (err && err.code === 'CASE_BUSY') {
+            if (!fromInbox) {
+              this.state.appendInbox({ at: this.clock().toISOString(), channel: channelId, caseId: caseMeta.id, questionId: record.id, acknowledge: true, meta: { senderId: meta.senderId ?? null, ownerProven: true } });
+            }
+            return { ok: true, outcome: 'queued', ack: 'Received — recording it after the current step' };
+          }
+          if (!err || err.code !== 'ALREADY_ANSWERED') throw err;
         }
       }
       return { ok: true, outcome: 'acknowledged', ack: 'Noted.' };
@@ -413,7 +435,7 @@ class ContactRouter {
     for (const line of lines) {
       const valid = line && typeof line === 'object' && typeof line.channel === 'string'
         && typeof line.caseId === 'string' && typeof line.questionId === 'string'
-        && (typeof line.optionId === 'string' || typeof line.text === 'string');
+        && (typeof line.optionId === 'string' || typeof line.text === 'string' || line.acknowledge === true);
       if (!valid) {
         this.log.warn('contact inbox: dropped a malformed line');
         changed = true;
@@ -429,6 +451,7 @@ class ContactRouter {
         changed = true;
         if (attempts >= MAX_INBOX_ATTEMPTS) {
           this.log.error(`contact inbox: gave up on the answer to ${line.caseId}/${line.questionId} after ${attempts} tries: ${err?.message || err}`);
+          await this._journalDropped(line, attempts, err);
         } else {
           this.log.warn(`contact inbox: answer to ${line.caseId}/${line.questionId} failed (try ${attempts}): ${err?.message || err}`);
           keep.push({ ...line, attempts });
@@ -450,6 +473,20 @@ class ContactRouter {
       }
     }
     return { applied, kept: keep.length };
+  }
+
+  // A queued answer given up on is written to the case journal too, so the
+  // loss is visible in the case and not only in the log.
+  async _journalDropped(line, attempts, err) {
+    const what = line.acknowledge ? 'acknowledgement of' : 'answer to';
+    const text = `The owner's ${what} ${line.questionId} via ${line.channel} could not be recorded after ${attempts} tries and was dropped (${err?.message || err}). Ask again if it still matters.`;
+    try {
+      await this.runtime.systemAction(line.caseId, `contact: dropped ${line.questionId}`, () => {
+        this.runtime.records(line.caseId).writeJournal('question', text, this.runtime.now());
+      });
+    } catch (e) {
+      this.log.error(`contact inbox: could not journal the dropped ${what} ${line.caseId}/${line.questionId}: ${e?.message || e}`);
+    }
   }
 
   recordStatus(channelId, { externalRef = null, relayId = null, status, error = null } = {}) {

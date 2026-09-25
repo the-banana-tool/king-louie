@@ -30,11 +30,18 @@ async function world({ getGate = () => null, host = null } = {}) {
   ]);
   const router = new ContactRouter({ state, runtime, adapters, presence, getGate, clock, getTimeZone: () => 'UTC' });
   for (const [id, a] of adapters) a.onContactReply((cid, answer, meta) => router.handleReply(id, cid, answer, meta));
+  // The two channels ruling T5-m22 lets answer approvals and app-only questions.
+  const addChannel = (id, opts) => {
+    const a = new LoopbackChannel({ id, ...opts });
+    adapters.set(id, a);
+    a.onContactReply((cid, answer, meta) => router.handleReply(id, cid, answer, meta));
+    return a;
+  };
   const lot = await runtime.createCase({ title: 'Lakeside lot', objective: 'Sell the lot' });
   const kitchen = await runtime.createCase({ title: 'Kitchen quotes', objective: 'Pick a builder' });
   const ask = (caseId, record) => runtime.questions(caseId).create({ kind: 'question', urgency: 'normal', options: [], ...record });
   const entry = (caseInfo, record) => ({ caseId: caseInfo.id, caseTitle: caseInfo.title, token: state.newToken(), record });
-  return { runtime, state, router, adapters, noted, notedAt, lot, kitchen, ask, entry, clock, advance: (ms) => { now = new Date(now.getTime() + ms); } };
+  return { runtime, state, router, adapters, addChannel, noted, notedAt, lot, kitchen, ask, entry, clock, advance: (ms) => { now = new Date(now.getTime() + ms); } };
 }
 
 const facts = (runtime, caseId) => [...runtime.ledger(caseId).view().facts.values()];
@@ -120,7 +127,7 @@ describe('ContactRouter.handleReply', () => {
     assert.strictEqual(w.adapters.get('sms').last().message.items[0].answerable, false);
     const r = await w.router.handleReply('sms', null, { text: `#${e.token} approve` }, { ownerProven: true, senderId: '+15550100' });
     assert.strictEqual(r.outcome, 'refused: approval');
-    assert.strictEqual(r.ackText, "Approvals can't be answered by sms. Use King Louie or telegram.");
+    assert.strictEqual(r.ackText, `Answer this in the app: ${q.id} in Lakeside lot can't be answered by sms.`);
     assert.strictEqual(w.runtime.questions(w.lot.id).get(q.id).answer, null);
   });
 
@@ -148,6 +155,24 @@ describe('ContactRouter.handleReply', () => {
     fs.rmSync(lock);
     assert.deepStrictEqual(await w.router.drainInbox(), { applied: 1, kept: 0 });
     assert.strictEqual(w.runtime.questions(w.lot.id).get(q.id).answer.optionId, 'a');
+    assert.deepStrictEqual(w.state.readInbox(), []);
+  });
+
+  it('a briefing acknowledgement behind a busy case is queued and applied by drainInbox (ruling T5-brief)', async () => {
+    const w = await world();
+    const b = w.runtime.questions(w.lot.id).create({ kind: 'briefing', urgency: 'low', text: 'The listing went live today.' });
+    const e = w.entry(w.lot, b);
+    await w.router.deliver('telegram', [e]);
+    const lock = path.join(w.runtime.getCase(w.lot.id).dir, '.kl', 'lock');
+    fs.writeFileSync(lock, JSON.stringify({ turnId: 'other-process', pid: process.ppid, at: new Date().toISOString() }));
+    const r = await w.adapters.get('telegram').reply(e.token, { text: 'ok' });
+    assert.deepStrictEqual(r, { ok: true, outcome: 'queued', ackText: 'Received — recording it after the current step' });
+    assert.strictEqual(w.runtime.questions(w.lot.id).get(b.id).answer, null, 'not reported as done');
+    assert.strictEqual(w.state.readInbox()[0].acknowledge, true);
+    assert.deepStrictEqual(await w.router.drainInbox(), { applied: 0, kept: 1 });
+    fs.rmSync(lock);
+    assert.deepStrictEqual(await w.router.drainInbox(), { applied: 1, kept: 0 });
+    assert.strictEqual(w.runtime.questions(w.lot.id).get(b.id).answer.channel, 'telegram');
     assert.deepStrictEqual(w.state.readInbox(), []);
   });
 
@@ -219,15 +244,18 @@ describe('conflicting answers', () => {
     const revoked = [];
     const registry = { revokeEnvelope: async (caseId, envelopeId, reason) => { revoked.push({ caseId, envelopeId, reason }); return { ok: true, cancelled: [] }; } };
     const w = await world({ host: { getExecutorRegistry: () => registry } });
+    w.addChannel('in-app', { owner: 'desktop' });
+    w.addChannel('mobile', { owner: 'device-1' });
     const q = w.runtime.questions(w.lot.id).create({ kind: 'approval', urgency: 'normal', text: 'Approve envelope env-0001?', options: [{ id: 'approve', label: 'Approve' }, { id: 'reject', label: 'Reject' }], payload: { type: 'envelope', envelopeId: 'env-0001' } });
     const e = w.entry(w.lot, q);
-    await w.router.deliver('telegram', [e]);
-    await w.router.deliver('discord', [e]);
-    await w.adapters.get('telegram').reply(e.token, { optionId: 'approve' });
-    await w.adapters.get('discord').reply(e.token, { optionId: 'reject' });
+    await w.router.deliver('in-app', [e]);
+    await w.router.deliver('mobile', [e]);
+    await w.adapters.get('in-app').reply(e.token, { optionId: 'approve' });
+    await w.adapters.get('mobile').reply(e.token, { optionId: 'reject' });
     const follow = w.runtime.questions(w.lot.id).open().find((x) => x.payload.type === 'conflict');
     assert.strictEqual(follow.kind, 'approval', 'a conflict on an approval is itself an approval');
-    await w.runtime.answerQuestion(w.lot.id, follow.id, { channel: 'discord', optionId: 'change' });
+    assert.strictEqual(w.state.ladder().pins[`${w.lot.id}/${follow.id}`], 'mobile');
+    await w.runtime.answerQuestion(w.lot.id, follow.id, { channel: 'mobile', optionId: 'change' });
     assert.deepStrictEqual(revoked, [{ caseId: w.lot.id, envelopeId: 'env-0001', reason: 'owner changed the answer' }]);
   });
 });
@@ -360,7 +388,7 @@ describe('ContactRouter: app-only questions (owner decision M22)', () => {
     for (const [ref, text] of [[null, `#${e.token} approve`], [out.externalRef, 'approve']]) {
       const r = await w.router.handleReply('email', ref, { text }, { ownerProven: true, senderId: 'owner@example.com' });
       assert.strictEqual(r.outcome, 'refused: approval');
-      assert.strictEqual(r.ackText, "Approvals can't be answered by email. Use King Louie or telegram.");
+      assert.strictEqual(r.ackText, `Answer this in the app: ${q.id} in Lakeside lot can't be answered by email.`);
     }
     unchanged(w, q);
   });
@@ -377,25 +405,76 @@ describe('ContactRouter: app-only questions (owner decision M22)', () => {
     unchanged(w, approval);
   });
 
-  it('telegram (authenticated replies) may answer an app-only question', async () => {
+  // Ruling T5-m22: authenticated replies are not enough; only the app and
+  // the paired phone answer these.
+  for (const channel of ['telegram', 'discord']) {
+    it(`${channel} is refused for every app-only type and for an approval, with a button too`, async () => {
+      const w = await world();
+      const records = [...APP_ONLY.map((spec) => create(w, spec)), w.runtime.questions(w.lot.id).create({ kind: 'approval', urgency: 'normal', text: 'Send the offer letter?', options: [{ id: 'approve', label: 'Approve' }, { id: 'reject', label: 'Reject' }] })];
+      const a = w.adapters.get(channel);
+      for (const q of records) {
+        const e = w.entry(w.lot, q);
+        await w.router.deliver(channel, [e]);
+        if (q.kind === 'approval') assert.strictEqual(a.last().message.items[0].answerable, false, 'the approval is only announced');
+        for (const answer of [{ optionIndex: 0 }, { optionId: q.options[0].id }, { text: q.options[0].label }]) {
+          const r = await a.reply(e.token, answer);
+          assert.strictEqual(r.ok, false);
+          assert.strictEqual(r.outcome, q.kind === 'approval' ? 'refused: approval' : 'refused: app-only');
+          assert.strictEqual(r.ackText, `Answer this in the app: ${q.id} in Lakeside lot can't be answered by ${channel}.`);
+        }
+        unchanged(w, q);
+      }
+    });
+  }
+
+  it('in-app and the paired phone answer app-only questions and approvals', async () => {
     const w = await world();
-    const q = create(w, APP_ONLY[2]);
+    w.addChannel('in-app', { owner: 'desktop' });
+    w.addChannel('mobile', { owner: 'device-1' });
+    const grant = create(w, APP_ONLY[0]);
+    const approval = w.runtime.questions(w.lot.id).create({ kind: 'approval', urgency: 'normal', text: 'Send the offer letter?', options: [{ id: 'approve', label: 'Approve' }, { id: 'reject', label: 'Reject' }] });
+    const eg = w.entry(w.lot, grant);
+    const ea = w.entry(w.lot, approval);
+    await w.router.deliver('mobile', [ea]);
+    assert.strictEqual(w.adapters.get('mobile').last().message.items[0].answerable, true);
+    await w.router.deliver('in-app', [eg]);
+    assert.strictEqual((await w.adapters.get('in-app').reply(eg.token, { optionId: 'a' })).outcome, 'recorded');
+    assert.strictEqual((await w.adapters.get('mobile').reply(ea.token, { optionId: 'approve' })).outcome, 'recorded');
+  });
+
+  it('an unlisted channel is refused even when it claims authenticated replies', async () => {
+    const w = await world();
+    w.addChannel('pager', { owner: 'p-1' });
+    const q = create(w, APP_ONLY[1]);
     const e = w.entry(w.lot, q);
-    await w.router.deliver('telegram', [e]);
-    const r = await w.adapters.get('telegram').reply(e.token, { optionId: 'a' });
-    assert.strictEqual(r.outcome, 'recorded');
+    await w.router.deliver('pager', [e]);
+    assert.strictEqual((await w.adapters.get('pager').reply(e.token, { optionId: 'a' })).outcome, 'refused: app-only');
+    unchanged(w, q);
+  });
+
+  it('mobile with authenticatedReplies off is refused (fail closed)', async () => {
+    const w = await world();
+    w.addChannel('mobile', { owner: 'device-1', caps: { authenticatedReplies: false } });
+    const q = create(w, APP_ONLY[0]);
+    const e = w.entry(w.lot, q);
+    await w.router.deliver('mobile', [e]);
+    assert.strictEqual((await w.adapters.get('mobile').reply(e.token, { optionId: 'a' })).outcome, 'refused: app-only');
   });
 
   it('a conflict follow-up inherits app-only; an ordinary one stays answerable by email', async () => {
     const w = await world();
+    w.addChannel('in-app', { owner: 'desktop' });
+    w.addChannel('mobile', { owner: 'device-1' });
     const grant = create(w, APP_ONLY[2]);
     const plain = w.ask(w.lot.id, { text: 'Seller financing?', options: [{ id: 'a', label: 'No' }, { id: 'b', label: 'Yes' }] });
     const eg = w.entry(w.lot, grant);
     const ep = w.entry(w.lot, plain);
-    await w.router.deliver('telegram', [eg, ep]);
-    await w.router.deliver('discord', [eg, ep]);
-    await w.adapters.get('telegram').reply(eg.token, { optionId: 'a' });
-    await w.adapters.get('discord').reply(eg.token, { optionId: 'b' });
+    await w.router.deliver('in-app', [eg]);
+    await w.router.deliver('mobile', [eg]);
+    await w.router.deliver('telegram', [ep]);
+    await w.router.deliver('discord', [ep]);
+    await w.adapters.get('in-app').reply(eg.token, { optionId: 'a' });
+    await w.adapters.get('mobile').reply(eg.token, { optionId: 'b' });
     await w.adapters.get('telegram').reply(ep.token, { optionId: 'a' });
     await w.adapters.get('discord').reply(ep.token, { optionId: 'b' });
     const follows = w.runtime.questions(w.lot.id).open().filter((x) => x.payload.type === 'conflict');
@@ -416,14 +495,15 @@ describe('ContactRouter: reading replies (Task 2 carries)', () => {
 
   it('a free-text answer to an approval is refused even where approvals are allowed', async () => {
     const w = await world();
+    w.addChannel('mobile', { owner: 'device-1' });
     const q = approval(w);
     const e = w.entry(w.lot, q);
-    await w.router.deliver('telegram', [e]);
-    const r = await w.adapters.get('telegram').reply(e.token, { text: 'sure, go ahead' });
+    await w.router.deliver('mobile', [e]);
+    const r = await w.adapters.get('mobile').reply(e.token, { text: 'sure, go ahead' });
     assert.strictEqual(r.outcome, 'refused: approval-text');
     assert.strictEqual(r.ackText, `${q.id} is an approval: reply with one of its options (approve / reject).`);
     assert.strictEqual(w.runtime.questions(w.lot.id).get(q.id).answer, null);
-    const ok = await w.adapters.get('telegram').reply(e.token, { text: 'Approve' });
+    const ok = await w.adapters.get('mobile').reply(e.token, { text: 'Approve' });
     assert.strictEqual(ok.outcome, 'recorded', 'an exact option name is an option, not text');
   });
 
@@ -559,6 +639,9 @@ describe('ContactRouter: bad input returns an outcome, never throws', () => {
     assert.strictEqual(w.state.readInbox()[0].attempts, 1);
     for (let i = 0; i < 4; i += 1) await w.router.drainInbox();
     assert.deepStrictEqual(w.state.readInbox(), [], 'dropped after five failed tries');
+    const journalDir = path.join(w.runtime.getCase(w.lot.id).dir, 'journal');
+    const journal = fs.readdirSync(journalDir).map((n) => fs.readFileSync(path.join(journalDir, n), 'utf8')).join('\n');
+    assert.match(journal, new RegExp(`answer to ${q.id} via telegram could not be recorded after 5 tries and was dropped \\(disk full\\)`));
     w.runtime.answerQuestion = real;
     fs.writeFileSync(path.join(w.state.dir, 'inbox.jsonl'), 'not json\n');
     assert.deepStrictEqual(await w.router.drainInbox(), { applied: 0, kept: 0 });
