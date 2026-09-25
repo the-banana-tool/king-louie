@@ -133,8 +133,8 @@ HistoryStore
   createChat(chat)  updateChat(id, patch)  deleteChat(id)
   appendMessage(chatId, message) → { message, seq }
   truncateFrom(chatId, seq)            getMessages(chatId, { fromSeq, toSeq, limit })
-  searchText(query, { chatIds, kinds, limit }) → [{ chunkId, score }]
-  chunks(ids) → Chunk[]                vectors(model, chatIds) → { ids, matrix: Float32Array, dim }
+  searchText(query, { chatIds, kinds, limit, upToSeq? }) → [{ chunkId, score }]
+  chunks(ids) → Chunk[]                vectors(model, chatIds, { upToSeq? }) → { ids, matrix: Float32Array, dim }
   pendingEmbeddings(model, limit)      putEmbeddings(model, [{ chunkId, vec }])
   getLinks(chatId)  setLinks(chatId, ids)   recordImport(row)  findImport(sourceHash)
   calibration(model) / setCalibration(model, charsPerToken)
@@ -148,7 +148,8 @@ Retriever
     → [{ chunk, score, signals: { bm25Rank, vectorRank, rerank, recency, kindWeight } }]
 
 ContextBuilder
-  build({ chatId, message, model }) → { tail: Message[], recalled: { text, chunkIds, estTokens }, stats }
+  build({ chatId, message, model, upToSeq? }) → { tail: Message[], recalled: { text, chunkIds, estTokens }, stats }
+  // upToSeq: consider only messages with seq < upToSeq (used by the benchmark to ask at a point in time)
 
 EmbedRunner (host seam)
   start(embedderConfig)  embed(texts, kind)  stop()   events: ready, error, crashed
@@ -548,8 +549,8 @@ evaluation script; H4 scope, links, importers, the case nudge.
 | `main.js` | injects a `utilityProcess` embed runner; filters the `node:sqlite` ExperimentalWarning |
 | `renderer.js`, `styles.css`, `index.html` | active-chat loading via `chat:get`, recall line and excerpt drawer, chat menu items (scope, links, import, convert to case), settings section "History and recall", indexing and embedder badges |
 | `package.json` | `@huggingface/transformers` dependency; `asarUnpack` for `onnxruntime-node`; `!**/models/**` excluded from the build |
-| `scripts/history-eval.js` (new) | evaluation script (§13) |
-| `CLAUDE.md` | one section: where history lives, how to run the evaluation, the ExperimentalWarning |
+| `src/bench/`, `bin/king-louie-bench.js` | the session memory benchmark, specified separately (§13) |
+| `CLAUDE.md` | one section: where history lives, how to run the benchmark smoke test, the ExperimentalWarning |
 
 `src/memory/` (the memory panel and `MemoryManager`) is untouched.
 
@@ -581,18 +582,18 @@ each on a temp data directory:
 - e2e: send a message in a chat with 50 seeded messages on a temp data dir and
   assert the assistant message carries `context` and the recall line renders.
 
-**Evaluation script.** `node scripts/history-eval.js --transcript <path>
---questions <path> [--config <json>]` imports the transcript into a temp
-store, indexes it with the configured embedder, and for each question (`{
-"query": "...", "expectSeq": [..] }`) reports recall at 5, 10 and 20, the
-tokens the builder would send, and retrieval latency, for each configuration
-in `--config`. The owner's fixtures are his Claude Code sessions and the
-transcript exports in his Downloads folder; they stay outside the repo. A
-synthetic `examples/history-eval/` fixture keeps the script runnable in CI.
-The defaults in §14 are provisional until this script has been run on the
-2.2 million-token session; the acceptance target for that session is recall
-at 10 of at least 0.8 on a question set the owner writes, with the builder's
-output under 15K estimated tokens per turn.
+**Evaluation.** Retrieval quality is measured by the session memory benchmark
+(`2026-09-25-session-memory-benchmark-design.md`), which imports a session,
+asks verified questions at a point in the session, and reports evidence
+recall, answer correctness, tokens per turn and latency per configuration.
+This spec adds `upToSeq` to `ContextBuilder.build` and to the store's
+`vectors` and `searchText` so the benchmark can ask at a sequence number
+without leaking later messages. The owner's fixtures are his own sessions and
+the transcript exports in his Downloads folder; they stay outside the repo.
+The defaults in §14 are provisional until the benchmark has been run on the
+2.2 million-token session; the acceptance target for that session is evidence
+recall at a 6K recalled budget of at least 0.8 on its verified question set,
+with the builder's output under 15K estimated tokens per turn.
 
 ## 14. Settings
 
