@@ -50,6 +50,18 @@ class CaseNotFoundError extends Error {
   }
 }
 
+// Thrown by beginTurn for a wake-up turn started (or still starting) after
+// beginShutdown(): the process is on its way out, and nothing unattended
+// may pick up a fresh lock once it can no longer be trusted to finish and
+// release it cleanly.
+class RuntimeClosingError extends Error {
+  constructor() {
+    super('King Louie is shutting down; no new wake-up turn can start.');
+    this.name = 'RuntimeClosingError';
+    this.code = 'RUNTIME_CLOSING';
+  }
+}
+
 const expandHome = (p) => (p === '~' || /^~[\\/]/.test(p) ? path.join(os.homedir(), p.slice(1)) : p);
 
 // settings.cases.root: `~` is the home dir and a relative path is under the
@@ -112,6 +124,16 @@ class CaseRuntime {
     // tick while this is non-zero, since a case with no first commit yet
     // cannot be swept.
     this.creating = 0;
+    // Set by beginShutdown(): no new wake-up turn may start once true.
+    this.closing = false;
+  }
+
+  // Called once shutdown begins (create-core, right after the scheduler
+  // stops): refuses every wake-up turn from here on, so a turn straddling
+  // the shutdown never runs, writes or commits without a lock this process
+  // still recognizes as held.
+  beginShutdown() {
+    this.closing = true;
   }
 
   get root() {
@@ -616,6 +638,8 @@ class CaseRuntime {
   // ---- Turns (spec §3.10) ----
 
   async beginTurn(id, { turnId, source = 'owner', ownerMessage = null } = {}) {
+    // Shutting down: refuse before even taking the lock.
+    if (source === 'wakeup' && this.closing) throw new RuntimeClosingError();
     const meta = this.getCase(id);
     this._acquire(meta, turnId);
     try {
@@ -634,6 +658,10 @@ class CaseRuntime {
       const hook = await this._runHooks('turn-start', { caseId: meta.id, dir: meta.dir, turnId, source, ownerMessage });
       const fresh = this.getCase(meta.id);
       const { triggers, snapshot } = this._detect(fresh, { source, hookTriggers: hook.triggers });
+      // Re-check after the awaits above: shutdown may have begun while this
+      // call was in flight. Caught below, which releases the lock this
+      // attempt just took — the turn is never registered in `this.turns`.
+      if (source === 'wakeup' && this.closing) throw new RuntimeClosingError();
       const controller = new AbortController();
       const turn = {
         caseId: fresh.id,
@@ -1174,4 +1202,4 @@ class CaseRuntime {
   }
 }
 
-module.exports = { CaseRuntime, CaseBusyError, CaseNotFoundError, resolveCasesRoot, BUDGET_FACT_NOTE };
+module.exports = { CaseRuntime, CaseBusyError, CaseNotFoundError, RuntimeClosingError, resolveCasesRoot, BUDGET_FACT_NOTE };

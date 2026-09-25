@@ -47,9 +47,17 @@ describe('agent executor adapter', () => {
       features: { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false }
     });
     try {
+      // Tokens are saved after start(), not before: createCore snapshots
+      // getDecryptedProviderToken('openai') once during start() to decide
+      // whether to build a real embedding provider for the context
+      // assembler's background indexing. Saving the fake key first would
+      // make that indexing step try a real (and here, doomed) network call
+      // (M1). Every other use of these tokens (including this test's own
+      // adapter.execute) reads them fresh, so saving them after start()
+      // changes nothing else.
+      await core.start();
       core.saveProviderToken('openai', 'sk-test-openai');
       core.saveProviderToken('groq', 'gsk-test-groq');
-      await core.start();
       const adapter = core.context.getCronScheduler().executor.agentExecutor;
       const agent = listAgents().find((a) => a.id === 'main');
       const result = await adapter.execute(agent, 'Summarise the lot listing.', { provider: 'openai', model: 'gpt-stub' });

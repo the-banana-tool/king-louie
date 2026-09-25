@@ -185,6 +185,9 @@ function createCore(deps = {}) {
   let cronStore;
   let cronExecutor;
   let cronScheduler;
+  // The cases:wakeups system job's own currently-running promise, tracked so
+  // shutdown can await it before releasing case locks (see shutdown()).
+  let wakeupsInFlight = null;
   let mcpManager;
   let backgroundTaskManager;
   let webhookRegistry;
@@ -1912,6 +1915,14 @@ function createCore(deps = {}) {
     if (approvalRequester && !effectiveApprovalRequester) {
       log.debug('remoteApprovals is "deny": ignoring a remote approval requester');
     }
+    // A caller meaning to confine a turn's tools (a case wake-up) that
+    // somehow passes something other than a Set/Array must fail closed
+    // (nothing allowed), never fail open into ToolExecutor's own
+    // Set/Array check, which treats an unrecognised value as "no limit".
+    const rawAllowedToolNames = executorOptions.allowedToolNames;
+    const allowedToolNames = rawAllowedToolNames == null
+      ? null
+      : (rawAllowedToolNames instanceof Set || Array.isArray(rawAllowedToolNames) ? rawAllowedToolNames : new Set());
     const executor = new ToolExecutor({
       workingDirectory,
       allowedDirectories: executorOptions.allowedDirectories || [],
@@ -1925,7 +1936,7 @@ function createCore(deps = {}) {
       // A caller (a case wake-up) may also ask for no auto-approval at all.
       denyAutoApproval: remoteApprovals === 'deny' || executorOptions.denyAutoApproval === true,
       // Cases stage 2: only these tools may run (wake-ups); null means no limit.
-      allowedToolNames: executorOptions.allowedToolNames || null,
+      allowedToolNames,
       shouldAutoApprove: async (toolName) => isToolAlwaysApproved(toolName),
       // Live callback — picks up rules added mid-session when the user
       // clicks "Always allow 'git *'" in an approval dialog.
@@ -2383,8 +2394,17 @@ function createCore(deps = {}) {
     cronExecutor = new CronExecutor(agentExecutorAdapter, sessionManager, gatewayServer);
     cronScheduler = new CronScheduler(cronStore, cronExecutor);
     // Cases stage 2: one protected system job per data dir sweeps the cases.
-    cronExecutor.registerSystemJob('cases:wakeups', () => caseRuntime.runDueWakeups(caseRuntime.now()));
-    await ensureWakeupJob(cronStore);
+    // The handler's own promise is tracked so shutdown() can await the
+    // in-flight sweep before releasing case locks.
+    cronExecutor.registerSystemJob('cases:wakeups', () => {
+      wakeupsInFlight = caseRuntime.runDueWakeups(caseRuntime.now());
+      return wakeupsInFlight;
+    });
+    try {
+      await ensureWakeupJob(cronStore);
+    } catch (err) {
+      log.error(`Could not set up the cases:wakeups system job; continuing without wake-ups: ${err.message}`);
+    }
     cronScheduler.start();
 
     webhookRegistry = new WebhookRegistry(store);
@@ -2590,7 +2610,21 @@ function createCore(deps = {}) {
   const shutdown = async () => {
     // Stop cron first so no job fires while the slower stops below drain.
     if (cronScheduler) cronScheduler.stop();
+    // Cases stage 2: no new wake-up turn may start from here on, and every
+    // in-flight one gets its abort signal — both before anything below
+    // could race a still-running wake-up's own lock and commit.
+    caseRuntime.beginShutdown();
+    caseRuntime.abortUnattended();
     const warnTimeout = (label, ms) => log.warn(`${label} timed out after ${ms}ms; continuing shutdown`);
+    // Let the in-flight cases:wakeups sweep actually finish (endTurn, lock
+    // release and all) before releaseAll() below can force the lock away
+    // out from under it.
+    if (wakeupsInFlight) {
+      await withTimeout(
+        Promise.resolve(wakeupsInFlight).catch((err) => log.warn(`In-flight cases:wakeups sweep failed while shutting down: ${err.message}`)),
+        shutdownTimeoutMs, 'cases:wakeups drain', warnTimeout
+      );
+    }
     await withTimeout(
       runHookEvent('SessionEnd', { source: 'main', endedAt: new Date().toISOString(), workingDirectory: hostWorkingDirectory }),
       shutdownTimeoutMs, 'SessionEnd hook', warnTimeout
@@ -2608,7 +2642,6 @@ function createCore(deps = {}) {
     results.forEach((r, i) => { if (r.status === 'rejected') log.warn(`${stops[i][0]} failed: ${r.reason?.message}`); });
     // A turn cut off by quit must not leave its case locked.
     try {
-      caseRuntime.abortUnattended();
       caseRuntime.releaseAll();
     } catch (err) {
       log.warn(`Releasing case locks failed: ${err.message}`);

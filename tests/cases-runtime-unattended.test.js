@@ -479,3 +479,38 @@ describe('turn registry', () => {
     assert.strictEqual(rt.turns.size, 0);
   });
 });
+
+describe('beginShutdown (I1)', () => {
+  it('refuses a wake-up turn once beginShutdown() has run, holding no lock; an owner turn is unaffected', async () => {
+    const { rt } = makeRuntime();
+    const c = await activeCase(rt);
+    rt.beginShutdown();
+    await assert.rejects(
+      rt.beginTurn(c.id, { turnId: 'wakeup-1', source: 'wakeup' }),
+      (err) => err.code === 'RUNTIME_CLOSING'
+    );
+    assert.strictEqual(rt.held.size, 0);
+    assert.strictEqual(rt.turns.has(c.id), false);
+    assert.strictEqual(fs.existsSync(path.join(c.dir, '.kl', 'lock')), false);
+    // Shutdown only refuses wake-ups; the owner can still act.
+    const owner = await rt.beginTurn(c.id, { turnId: 'owner-1' });
+    assert.ok(owner);
+    await rt.endTurn(owner, {});
+  });
+
+  it('a wake-up beginTurn already past its lock still refuses once shutdown starts mid-flight, and releases the lock it took', async () => {
+    const { rt } = makeRuntime();
+    const c = await activeCase(rt);
+    // beginTurn's own turn-start hooks run (awaited) after the lock is
+    // taken and before the turn is registered — the exact window the
+    // re-check after beginTurn's awaits exists to close.
+    rt.addTurnStartHook('flip-closing-mid-flight', ({ runtime }) => { runtime.closing = true; });
+    await assert.rejects(
+      rt.beginTurn(c.id, { turnId: 'wakeup-race', source: 'wakeup' }),
+      (err) => err.code === 'RUNTIME_CLOSING'
+    );
+    assert.strictEqual(rt.held.size, 0);
+    assert.strictEqual(rt.turns.has(c.id), false);
+    assert.strictEqual(fs.existsSync(path.join(c.dir, '.kl', 'lock')), false);
+  });
+});

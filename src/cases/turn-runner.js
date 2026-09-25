@@ -49,8 +49,9 @@ function parseOrient(text) {
   }
 }
 
-// Providers' sendMessage usually returns bare text; charge the orient call
-// only when it reports metrics.
+// The orient call goes through sendMessageWithTools (see the comment at its
+// call site) precisely so it reports metrics; a bare-text reply (no metrics
+// object at all) still charges nothing rather than guessing at a cost.
 function recordOneShotUsage(runtime, turn, reply) {
   const m = reply && typeof reply === 'object' ? reply.llmMetrics : null;
   if (!m) return;
@@ -161,8 +162,9 @@ async function sweepCase(runtime, id, now) {
 }
 
 // Invariant: runDueWakeups is this function's sole caller, so a beginTurn
-// error rethrown below (anything but CASE_BUSY) is left unmarked here and
-// still ends up marked failed, by runDueWakeups's own try/catch around the call.
+// error rethrown below (anything but CASE_BUSY/RUNTIME_CLOSING) is left
+// unmarked here and still ends up marked failed, by runDueWakeups's own
+// try/catch around the call.
 async function runWakeupTurn(runtime, caseId, dueIds, now = runtime.now()) {
   const host = runtime.host || {};
   const turnId = `wakeup-${now.getTime()}-${crypto.randomBytes(3).toString('hex')}`;
@@ -170,7 +172,8 @@ async function runWakeupTurn(runtime, caseId, dueIds, now = runtime.now()) {
   try {
     turn = await runtime.beginTurn(caseId, { turnId, source: 'wakeup' });
   } catch (err) {
-    if (err && err.code === 'CASE_BUSY') return { outcome: 'busy' };
+    // Shutting down is not a failure: nothing to back off or brief about.
+    if (err && (err.code === 'CASE_BUSY' || err.code === 'RUNTIME_CLOSING')) return { outcome: 'busy' };
     throw err;
   }
   let closed = false;
@@ -213,13 +216,25 @@ async function runWakeupTurn(runtime, caseId, dueIds, now = runtime.now()) {
     if (status !== 'active' && status !== 'needs-direction') return await skipped(`case is ${status}`);
     if (turn.dailyTurnsSpent) return await skipped('daily turn budget spent');
 
+    // The same confined tool list the judge loop below gets. Orient is a
+    // one-shot classification call with no executor attached — nothing
+    // ever runs a tool it names — but it must go through sendMessageWithTools
+    // (the path judge/AgentLoop uses) rather than the plain sendMessage a
+    // tool-less call would take, because only that path returns llmMetrics
+    // for the providers King Louie ships (sendMessage returns bare text).
+    // Without this, orient calls are never charged to the case's usd budget.
+    const registry = host.toolRegistry;
+    const baseDefs = WAKEUP_BASE_TOOLS.map((n) => registry.get(n)).filter(Boolean).map((t) => t.toFunctionDefinition());
+    const toolDefs = shapeToolDefinitions(baseDefs, true, registry);
+
     let why = null;
     const answered = due.some((w) => w.kind === 'retry' && w.payload?.questionId);
     if (!turn.reorientPending && !answered) {
       let reply;
       try {
-        reply = await runtime.routedProvider(turn, { role: 'orient' }).sendMessage(
+        reply = await runtime.routedProvider(turn, { role: 'orient' }).sendMessageWithTools(
           [{ sender: 'user', text: [`Now: ${now.toISOString()}`, '', 'Due wake-ups:', ...dueLines(due), '', turn.orientation].join('\n') }],
+          toolDefs,
           { systemPrompt: ORIENT_PROMPT, abortSignal: turn.signal }
         );
       } catch (err) {
@@ -243,8 +258,6 @@ async function runWakeupTurn(runtime, caseId, dueIds, now = runtime.now()) {
         denyAutoApproval: true,
         allowedToolNames: new Set([...CASE_TOOL_NAMES, ...WAKEUP_BASE_TOOLS])
       });
-      const registry = host.toolRegistry;
-      const baseDefs = WAKEUP_BASE_TOOLS.map((n) => registry.get(n)).filter(Boolean).map((t) => t.toFunctionDefinition());
       const Loop = host.AgentLoop;
       const loop = new Loop(runtime.routedProvider(turn, { role: 'judge' }), executor, {
         maxIterations: cfg.maxIterations,
@@ -261,7 +274,7 @@ async function runWakeupTurn(runtime, caseId, dueIds, now = runtime.now()) {
         `Why now: ${why || 'a re-orientation trigger or an owner answer is pending.'}`,
         'Do what the case needs now, then stop.'
       ].join('\n');
-      const result = await loop.run([{ sender: 'user', text: message }], shapeToolDefinitions(baseDefs, true, registry), {
+      const result = await loop.run([{ sender: 'user', text: message }], toolDefs, {
         systemPrompt: buildCaseSystemPrompt(turn.orientation, WAKEUP_PROMPT)
       });
       if (turn.signal.aborted) return await skipped(String(turn.signal.reason || 'aborted'));
@@ -294,6 +307,9 @@ async function runDueWakeups(runtime, now = runtime.now()) {
   let turns = 0;
   let lastServed = -1;
   for (let i = 0; i < ordered.length; i += 1) {
+    // Shutdown began mid-sweep: stop picking up new cases. abortUnattended()
+    // handles whichever turn is already running.
+    if (runtime.closing) break;
     const meta = ordered[i];
     // An owner is mid-turn on this case in this process: leave it alone.
     if (runtime.turns.has(meta.id)) {

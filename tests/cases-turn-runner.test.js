@@ -32,9 +32,14 @@ function harness({ settings = {}, orient = '{"changed": true, "why": "a new answ
   let runtime = null;
   const router = {
     async routeWithFallback(tier, messages, opts) {
-      if (Array.isArray(opts.tools) && opts.tools.length) {
+      // Orient (role 'fast') and judge (role 'smart') both now call
+      // sendMessageWithTools with a non-empty tools array (cases stage 2
+      // I2 fix: orient must go through the metrics-returning path too), so
+      // the tier — not tools' presence — is what tells them apart here,
+      // same as it does for real through CaseRuntime.routedProvider/roleModel.
+      if (tier === 'smart') {
         calls.judge += 1;
-        calls.judgeTools.push(opts.tools.map((t) => t.name));
+        calls.judgeTools.push((opts.tools || []).map((t) => t.name));
         const next = script.shift() || { type: 'text', content: 'Nothing else to do.' };
         return typeof next === 'function' ? next(runtime) : next;
       }
@@ -137,6 +142,20 @@ describe('runDueWakeups', () => {
     for (const name of ['Read', 'Glob', 'Grep', ...CASE_TOOL_NAMES]) assert.ok(offered.includes(name), name);
     for (const name of ['Bash', 'WebFetch', 'WebSearch', 'AskUser', 'Write']) assert.ok(!offered.includes(name), name);
     assert.deepStrictEqual(calls.results.map(([name, r]) => [name, r.ok]), [['Ledger', true]]);
+  });
+
+  it('orient usage is charged too (I2): total usd delta equals the orient charge plus the judge charge', async () => {
+    // Real providers' plain sendMessage never carries llmMetrics; orient must
+    // go through sendMessageWithTools (like judge) to be charged at all.
+    const { runtime, clock, calls } = harness({
+      orient: { type: 'text', content: '{"changed": true, "why": "a new answer"}', llmMetrics: metrics(0.01) },
+      judge: [{ type: 'text', content: 'Done.', llmMetrics: metrics(0.02) }]
+    });
+    const c = await activeCase(runtime);
+    dueWakeup(runtime, c, clock);
+    assert.deepStrictEqual(await runtime.runDueWakeups(clock.now), { ...zero, ran: 1 });
+    assert.deepStrictEqual([calls.orient, calls.judge], [1, 1]);
+    assert.strictEqual(runtime.budget(c.id).status().usd.spent, 0.03);
   });
 
   it('a mock model calling message and Bash is refused by allowedToolNames', async () => {
