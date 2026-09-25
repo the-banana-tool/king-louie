@@ -7,6 +7,12 @@ const MIB = 1024 * 1024;
 
 const LIMITS = Object.freeze({
   preAuthFrameBytes: 4096,
+  // Raw socket bytes a pre-auth connection may send before we cut it off,
+  // checked against the underlying TCP stream as it arrives (not the
+  // reassembled WS message) so an oversized frame is never fully buffered
+  // just to be told "too large". Comfortably above preAuthFrameBytes to
+  // allow for WS framing overhead and a couple of small handshake frames.
+  preAuthSocketBytes: 8192,
   firstFrameMs: 2000,
   handshakeMs: 10000,
   maxPreAuthSockets: 16,
@@ -86,6 +92,24 @@ function peekFrameId(text) {
   return m ? Number(m[1]) : null;
 }
 
+// Truncates `text` to at most `maxBytes` UTF-8 bytes, always on a code-point
+// boundary. Used for close reasons: the WebSocket protocol caps a close
+// frame's reason at 123 bytes and `ws` throws (RangeError) if handed more —
+// slicing by JS string length instead of UTF-8 byte length can still exceed
+// that budget for non-ASCII text and would silently swallow the close
+// reason wherever the throw is caught.
+function truncateUtf8(text, maxBytes) {
+  const str = String(text);
+  if (Buffer.byteLength(str, 'utf8') <= maxBytes) return str;
+  let out = '';
+  for (const ch of str) {
+    const candidate = out + ch;
+    if (Buffer.byteLength(candidate, 'utf8') > maxBytes) break;
+    out = candidate;
+  }
+  return out;
+}
+
 class BridgeError extends Error {
   constructor(code, message) {
     super(message);
@@ -131,6 +155,7 @@ module.exports = {
   buildAuthC,
   parseFrame,
   peekFrameId,
+  truncateUtf8,
   BridgeError,
   MESSAGES
 };

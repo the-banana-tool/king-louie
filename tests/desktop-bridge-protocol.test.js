@@ -187,7 +187,7 @@ describe('DesktopBridgeServer handshake', () => {
       const out = await handshake(port, a, { tamper: (sig) => `${sig.slice(0, -4)}AAAA` });
       assert.strictEqual(out.close.code, 4401);
     }
-    assert.strictEqual((await handshake(port, a)).close.code, 4429);
+    assert.strictEqual((await handshake(port, a, { tamper: (sig) => `${sig.slice(0, -4)}AAAA` })).close.code, 4429);
     const okB = await handshake(port, b);
     assert.ok(okB.ready, 'no global lockout');
     okB.c.ws.close();
@@ -261,5 +261,175 @@ describe('DesktopBridgeServer handshake', () => {
     await server.stop();
     assert.deepStrictEqual(await out.c.next((f) => f.t === 'bye'), { t: 'bye', code: 'SERVICE_STOPPING' });
     assert.strictEqual((await out.c.closed).code, 1001);
+  });
+});
+
+describe('DesktopBridgeServer fix round 1 (review findings)', () => {
+  // C1: `String(frame.deviceId)` on an object whose `toString` isn't callable
+  // throws synchronously inside the ws 'message' listener, which is
+  // uncaught and kills the process. Every pre-auth field is now type-checked
+  // before it reaches a regex, and _onMessage runs inside a microtask so any
+  // remaining throw becomes a rejected promise instead of a synchronous one.
+  it('closes 4400 for object-typed deviceId or clientNonce, and the server stays alive for later clients', async () => {
+    const device = makeDevice();
+    const { port } = await startServer({ devices: [device] });
+    const attempts = [
+      { deviceId: { toString: 1 }, clientNonce: newNonce() },
+      { deviceId: device.deviceId, clientNonce: { toString: 1 } }
+    ];
+    for (const bad of attempts) {
+      const c = rawClient(port);
+      await c.opened;
+      await c.next((f) => f.t === 'challenge');
+      c.send({ t: 'clientHello', protocol: PROTOCOL, ...bad });
+      assert.strictEqual((await c.closed).code, 4400);
+    }
+    const out = await handshake(port, device);
+    assert.ok(out.ready, 'the server survived the malformed attempts and still accepts a real handshake');
+    out.c.ws.close();
+  });
+
+  // Pins the private ws field the pre-auth byte-budget guard (I2, below)
+  // depends on. If a future ws upgrade removes `_socket` from a server-side
+  // WebSocket, this fails loudly instead of the budget silently going inert.
+  // Built against ws 8.20.0 (see package.json).
+  it('ws internals: a server-side WebSocket exposes _socket (pins ws 8.20.x)', async () => {
+    const wss = new WebSocket.Server({ port: 0 });
+    const gotServerSocket = new Promise((resolve) => wss.once('connection', (ws) => resolve(ws._socket)));
+    const port = wss.address().port;
+    const client = new WebSocket(`ws://127.0.0.1:${port}/`);
+    client.on('error', () => {});
+    const serverSocket = await gotServerSocket;
+    try {
+      assert.ok(
+        serverSocket && typeof serverSocket.on === 'function' && typeof serverSocket.removeListener === 'function',
+        'ws stopped exposing a usable _socket on the server-side WebSocket; update the pre-auth byte-budget guard in bridge-server.js (built for ws 8.20.0)'
+      );
+    } finally {
+      client.terminate();
+      await new Promise((resolve) => wss.close(resolve));
+    }
+  });
+
+  // I2: a pre-auth frame must not be buffered up to the (much larger)
+  // post-auth maxPayload before its size is checked. The raw-socket byte
+  // counter must cut the connection off while the frame is still arriving.
+  it('closes 4400 for a multi-MiB pre-auth frame without waiting to buffer it all', async () => {
+    const { port } = await startServer({ devices: [makeDevice()] });
+    const c = rawClient(port);
+    await c.opened;
+    await c.next((f) => f.t === 'challenge');
+    const started = Date.now();
+    c.ws.send('x'.repeat(6 * 1024 * 1024));
+    const close = await c.closed;
+    assert.strictEqual(close.code, 4400);
+    assert.ok(Date.now() - started < 2000, 'closed promptly, not after buffering the whole 6 MiB frame');
+  });
+
+  // I3: stop() used to call dispatcher.onDisconnect itself for the live
+  // connection, and that connection's socket then firing 'close' called it
+  // again through _onClose. _onClose (guarded by conn.cleaned) is now the
+  // only call site.
+  it('calls onDisconnect exactly once when the connection closes via stop()', async () => {
+    const device = makeDevice();
+    const { port, server, dispatcher } = await startServer({ devices: [device] });
+    const out = await handshake(port, device);
+    assert.ok(out.ready);
+    await server.stop();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.deepStrictEqual(dispatcher.disconnects, [device.deviceId]);
+  });
+
+  // I4: a claimed device id is public, not secret, so keying the lockout on
+  // it let any local account lock the real owner out by spamming failures
+  // for the owner's id. Ed25519 can't be brute-forced, so a handshake that
+  // actually carries a valid signature must never be refused by lockout.
+  it('a valid signature is never refused by lockout, even after 5 failed attempts for the same claimed id', async () => {
+    const device = makeDevice();
+    const { port } = await startServer({ devices: [device] });
+    for (let i = 0; i < 5; i += 1) {
+      const out = await handshake(port, device, { tamper: (sig) => `${sig.slice(0, -4)}AAAA` });
+      assert.strictEqual(out.close.code, 4401);
+    }
+    assert.strictEqual((await handshake(port, device, { tamper: (sig) => `${sig.slice(0, -4)}AAAA` })).close.code, 4429);
+    const ok = await handshake(port, device);
+    assert.ok(ok.ready, 'the real device is never refused by a lockout recorded under its own claimed id');
+    ok.c.ws.close();
+  });
+
+  // M6: a post-auth frame that fails to parse but still carries a peekable
+  // id must get an error result, the same as an oversized one, so the
+  // caller's pending promise doesn't hang forever.
+  it('answers a malformed post-auth frame with a peekable id with a result error', async () => {
+    const device = makeDevice();
+    const { port } = await startServer({ devices: [device] });
+    const out = await handshake(port, device);
+    out.c.ws.send('{"t":"invoke","id":42,"channel":'); // truncated JSON
+    const reply = await out.c.next((f) => f.t === 'result' && f.id === 42);
+    assert.deepStrictEqual(reply, { t: 'result', id: 42, error: 'Malformed request', code: 'MALFORMED_REQUEST' });
+    out.c.send({ t: 'invoke', id: 43, channel: 'chat:load', args: [] });
+    assert.ok((await out.c.next((f) => f.t === 'result' && f.id === 43)).value.ok, 'the connection is still usable afterward');
+    out.c.ws.close();
+  });
+
+  // M10: an invoke sent before auth completes is rejected the same as any
+  // other unexpected pre-auth frame.
+  it('closes 4400 for an invoke frame sent before auth', async () => {
+    const { port } = await startServer({ devices: [makeDevice()] });
+    const c = rawClient(port);
+    await c.opened;
+    await c.next((f) => f.t === 'challenge');
+    c.send({ t: 'invoke', id: 1, channel: 'chat:load', args: [] });
+    assert.strictEqual((await c.closed).code, 4400);
+  });
+
+  // M10: the 10 s (here, shortened) handshake deadline fires even when the
+  // client sent a first frame (which resets the first-frame timer) but never
+  // completes the handshake.
+  it('closes 4400 when the handshake does not complete within handshakeMs', async () => {
+    const device = makeDevice();
+    const { port } = await startServer({ devices: [device], limits: { handshakeMs: 100, firstFrameMs: 10000 } });
+    const c = rawClient(port);
+    await c.opened;
+    await c.next((f) => f.t === 'challenge');
+    c.send({ t: 'clientHello', protocol: PROTOCOL, deviceId: device.deviceId, clientNonce: newNonce() });
+    await c.next((f) => f.t === 'hello');
+    // Never send `auth` — stall mid-handshake past handshakeMs.
+    assert.strictEqual((await c.closed).code, 4400);
+  });
+
+  // M10: a binary frame before auth is refused like any other malformed
+  // pre-auth input.
+  it('closes 4400 for a binary pre-auth frame', async () => {
+    const { port } = await startServer({ devices: [makeDevice()] });
+    const c = rawClient(port);
+    await c.opened;
+    await c.next((f) => f.t === 'challenge');
+    c.ws.send(Buffer.from([1, 2, 3]));
+    assert.strictEqual((await c.closed).code, 4400);
+  });
+
+  // M10: assertAdminOwned failing (POSIX ownership) must make the device
+  // lookup fail closed, the same as an unknown device. Windows has no mode
+  // bits to check (assertAdminOwned no-ops there), so this only runs on
+  // POSIX, matching the convention in tests/service-config.test.js.
+  it('refuses handshakes when assertAdminOwned rejects the devices file (POSIX ownership)', {
+    skip: process.platform === 'win32' ? 'POSIX ownership only' : false
+  }, async () => {
+    const device = makeDevice();
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-bridge-'));
+    dirs.push(configDir);
+    writeDevices(configDir, [device]);
+    const dispatcher = fakeDispatcher();
+    const server = new DesktopBridgeServer({
+      identity, configDir, port: 0, version: '26.9.0',
+      // The devices file is owned by selfUid; never the "administrator" here.
+      adminUid: selfUid + 1,
+      createDispatcher: () => dispatcher
+    });
+    servers.push(server);
+    const { port } = await server.start();
+    const out = await handshake(port, device);
+    assert.strictEqual(out.close.code, 4403, 'assertAdminOwned refused the file, so the device looks unknown');
   });
 });

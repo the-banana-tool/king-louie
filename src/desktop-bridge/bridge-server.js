@@ -10,7 +10,7 @@ const { createLogger } = require('../logging');
 const { assertAdminOwned } = require('../service/config');
 const {
   PROTOCOL, DEFAULT_DESKTOP_BRIDGE_PORT, LIMITS, CLOSE, DEVICE_ID_RE, NONCE_RE,
-  newNonce, buildAuthS, buildAuthC, parseFrame, peekFrameId
+  newNonce, buildAuthS, buildAuthC, parseFrame, peekFrameId, truncateUtf8
 } = require('./protocol');
 const { DEVICES_FILE, DEVICES_CONTROLS, parseDevices, findDevice } = require('./pairing');
 const { fromB64url, verifyWithRawKey } = require('./keys');
@@ -143,12 +143,11 @@ class DesktopBridgeServer extends EventEmitter {
     const wss = this.wss;
     this.wss = null;
     await new Promise((resolve) => wss.close(() => resolve()));
-    if (conn) await Promise.resolve(this.dispatcher.onDisconnect(conn)).catch(() => {});
     this.live = null;
   }
 
   _onConnection(ws) {
-    const state = { ws, stage: 'hello', serverNonce: newNonce(), clientNonce: null, deviceId: null, device: null, conn: null, timers: [] };
+    const state = { ws, stage: 'hello', serverNonce: newNonce(), clientNonce: null, deviceId: null, device: null, conn: null, timers: [], preAuthBytes: 0 };
     this.sockets.add(ws);
     this.preAuth.push(state);
     while (this.preAuth.length > this.limits.maxPreAuthSockets) {
@@ -156,8 +155,26 @@ class DesktopBridgeServer extends EventEmitter {
     }
     state.firstFrame = setTimeout(() => this._close(state, CLOSE.MALFORMED, 'no first frame'), this.limits.firstFrameMs);
     state.timers.push(state.firstFrame, setTimeout(() => this._close(state, CLOSE.MALFORMED, 'handshake timed out'), this.limits.handshakeMs));
+    // Counts raw bytes off the TCP stream, independent of ws's own frame
+    // reassembly, so an oversized pre-auth frame is cut off while it is
+    // still arriving rather than after `ws` has buffered the whole thing
+    // (its own maxPayload is the much larger post-auth limit at this point).
+    // Built for ws 8.20.0's `_socket` (see the "ws internals" test below);
+    // if that field disappears, this silently stops enforcing the budget
+    // early (the post-auth-stage frameBytes check still catches it late).
+    state.onRawData = (chunk) => {
+      if (state.stage === 'ready' || state.stage === 'closed') return;
+      state.preAuthBytes += chunk.length;
+      if (state.preAuthBytes > this.limits.preAuthSocketBytes) this._close(state, CLOSE.MALFORMED, 'oversized frame');
+    };
+    if (ws._socket && typeof ws._socket.on === 'function') ws._socket.on('data', state.onRawData);
     ws.on('message', (data, isBinary) => {
-      Promise.resolve(this._onMessage(state, data, isBinary)).catch((err) => log.warn(`desktop bridge frame failed: ${err.message}`));
+      Promise.resolve()
+        .then(() => this._onMessage(state, data, isBinary))
+        .catch((err) => {
+          log.warn(`desktop bridge frame failed: ${err && err.message}`);
+          this._close(state, CLOSE.MALFORMED, 'internal error');
+        });
     });
     ws.on('close', () => this._onClose(state));
     ws.on('error', (err) => log.debug(`desktop bridge socket error: ${err.message}`));
@@ -178,10 +195,20 @@ class DesktopBridgeServer extends EventEmitter {
   _onClientHello(state, frame) {
     if (frame.t !== 'clientHello') return this._close(state, CLOSE.MALFORMED, 'expected clientHello');
     if (frame.protocol !== PROTOCOL) return this._close(state, CLOSE.PROTOCOL_MISMATCH, String(PROTOCOL));
-    if (!DEVICE_ID_RE.test(String(frame.deviceId)) || !NONCE_RE.test(String(frame.clientNonce))) {
+    // Every field is type-checked before it reaches a regex: `frame` is
+    // attacker-controlled JSON, and `String()` on an object with a
+    // non-callable `toString` throws synchronously (that throw used to
+    // escape the ws 'message' listener and kill the process — see the
+    // "internal error" catch in _onConnection, kept as a backstop).
+    if (typeof frame.deviceId !== 'string' || typeof frame.clientNonce !== 'string'
+      || !DEVICE_ID_RE.test(frame.deviceId) || !NONCE_RE.test(frame.clientNonce)) {
       return this._close(state, CLOSE.MALFORMED, 'malformed clientHello');
     }
-    if (this._lockedOut(frame.deviceId)) return this._close(state, CLOSE.LOCKED_OUT, 'too many failed handshakes');
+    // Lockout is decided in _onAuth, once we know whether the signature was
+    // actually valid: a claimed device id is public, not secret, so refusing
+    // it here would let anyone on the machine lock out the real owner by
+    // spamming failures for the owner's id. Ed25519 can't be brute-forced,
+    // so nothing is gained by refusing the clientHello itself.
     const device = this._lookupDevice(frame.deviceId);
     if (!device) {
       this._recordFailure(frame.deviceId);
@@ -201,7 +228,11 @@ class DesktopBridgeServer extends EventEmitter {
     let sig;
     try { sig = fromB64url(frame.sig); } catch { sig = Buffer.alloc(0); }
     const raw = fromB64url(state.device.publicKey);
-    if (!verifyWithRawKey(raw, Buffer.from(buildAuthC(this._fields(state)), 'utf8'), sig)) {
+    const valid = verifyWithRawKey(raw, Buffer.from(buildAuthC(this._fields(state)), 'utf8'), sig);
+    if (!valid) {
+      // A valid signature is never refused by lockout (see _onClientHello);
+      // only a failing attempt for an already-locked-out id is throttled.
+      if (this._lockedOut(state.deviceId)) return this._close(state, CLOSE.LOCKED_OUT, 'too many failed handshakes');
       this._recordFailure(state.deviceId);
       return this._close(state, CLOSE.BAD_SIGNATURE, 'signature invalid');
     }
@@ -212,9 +243,12 @@ class DesktopBridgeServer extends EventEmitter {
     this._removePreAuth(state);
     state.timers.forEach(clearTimeout);
     state.timers = [];
+    this.failures.delete(state.deviceId);
+    this.lockouts.delete(state.deviceId);
     if (this.live) {
       const old = this.live;
       this.live = null;
+      old.markGone();
       old.close(CLOSE.NORMAL, 'replaced by a new connection');
     }
     state.stage = 'ready';
@@ -222,11 +256,10 @@ class DesktopBridgeServer extends EventEmitter {
       deviceId: device.deviceId,
       label: device.label,
       send: (obj) => this._send(state.ws, obj),
-      close: (code, reason) => { try { state.ws.close(code, reason); } catch { /* gone */ } }
+      close: (code, reason) => { try { state.ws.close(code, truncateUtf8(reason, 123)); } catch { /* gone */ } }
     });
     state.conn = conn;
     this.live = conn;
-    this.failures.delete(state.deviceId);
     this._sendRaw(state.ws, { t: 'ready', service: this.serviceInfo() });
     log.info(`desktop "${device.label}" (${device.deviceId}) attached`);
     this.emit('connected', { deviceId: conn.deviceId, label: conn.label });
@@ -245,6 +278,8 @@ class DesktopBridgeServer extends EventEmitter {
     const parsed = parseFrame(data, this.limits.frameBytes);
     if (parsed.error) {
       log.warn('dropped a malformed frame from the desktop');
+      const id = peekFrameId(data.subarray(0, 256).toString('utf8'));
+      if (id !== null) conn.send({ t: 'result', id, error: 'Malformed request', code: 'MALFORMED_REQUEST' });
       return;
     }
     await this.dispatcher.handleFrame(conn, parsed.frame);
@@ -256,14 +291,27 @@ class DesktopBridgeServer extends EventEmitter {
     state.timers = [];
     this._removePreAuth(state);
     state.stage = 'closed';
+    if (state.onRawData && state.ws._socket) {
+      try { state.ws._socket.removeListener('data', state.onRawData); } catch { /* gone */ }
+    }
     const conn = state.conn;
     if (!conn) return;
     state.conn = null;
     if (this.live === conn) this.live = null;
     conn.markGone();
-    Promise.resolve(this.dispatcher.onDisconnect(conn)).catch((err) => log.warn(`desktop disconnect cleanup failed: ${err.message}`));
+    this._disconnectOnce(conn);
     log.info(`desktop "${conn.label}" disconnected`);
     this.emit('disconnected', { deviceId: conn.deviceId, label: conn.label });
+  }
+
+  // The single call site for dispatcher.onDisconnect: stop() used to also
+  // call it directly for the live connection, which double-fired once that
+  // connection's socket then emitted 'close' too. `conn.cleaned` makes the
+  // call idempotent regardless of how many paths lead here.
+  _disconnectOnce(conn) {
+    if (conn.cleaned) return;
+    conn.cleaned = true;
+    Promise.resolve(this.dispatcher.onDisconnect(conn)).catch((err) => log.warn(`desktop disconnect cleanup failed: ${err.message}`));
   }
 
   _fields(state) {
@@ -294,7 +342,7 @@ class DesktopBridgeServer extends EventEmitter {
     state.timers.forEach(clearTimeout);
     state.timers = [];
     this._removePreAuth(state);
-    try { state.ws.close(code, String(reason).slice(0, 120)); } catch { /* gone */ }
+    try { state.ws.close(code, truncateUtf8(reason, 123)); } catch { /* gone */ }
     const kill = setTimeout(() => { try { state.ws.terminate(); } catch { /* gone */ } }, 1000);
     kill.unref?.();
     return undefined;
@@ -333,11 +381,22 @@ class DesktopBridgeServer extends EventEmitter {
     if (recent.length >= this.limits.failuresPerDevice) {
       this.lockouts.set(deviceId, now + this.limits.lockoutMs);
       log.warn(`desktop ${deviceId} failed ${recent.length} handshakes; refusing it for ${Math.round(this.limits.lockoutMs / 1000)} s`);
+      this._pruneLockouts(now);
       return;
     }
     this.failures.set(deviceId, recent);
     // Bounded: arbitrary device ids from a flood must not grow memory.
     while (this.failures.size > this.limits.maxTrackedFailures) this.failures.delete(this.failures.keys().next().value);
+  }
+
+  // Expired entries would otherwise sit in the map forever (nothing removes
+  // one except a matching _lockedOut() check for that exact id); a flood of
+  // distinct claimed ids must not grow it without bound either.
+  _pruneLockouts(now) {
+    for (const [id, until] of this.lockouts) {
+      if (now >= until) this.lockouts.delete(id);
+    }
+    while (this.lockouts.size > this.limits.maxTrackedFailures) this.lockouts.delete(this.lockouts.keys().next().value);
   }
 
   _lockedOut(deviceId) {
