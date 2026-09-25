@@ -515,4 +515,144 @@ describe('I2: the admin never follows a symlink in the service-writable staged d
     const ad = admin(l);
     assert.throws(() => ad.listStaged(), ApproverAdminError);
   });
+
+  it('refuses a staged entry named and shaped like an approver record, and leaves it in place', async () => {
+    // The re-review's race: the service swaps staged/ or staged/done/ for a
+    // junction into <configDir>/approvers/ between listing and the rename.
+    // A filename check that runs before any read or move means the swap can
+    // only ever expose nonce-shaped names, and an approver record's name
+    // (d-….json) never has that shape — so this is refused before the race
+    // even has anything to exploit.
+    const l = layout();
+    fs.mkdirSync(l.stagedDir, { recursive: true });
+    const evil = createFakePhone({ name: 'Evil' });
+    const planted = path.join(l.stagedDir, `${evil.deviceId}.json`);
+    fs.writeFileSync(planted, JSON.stringify(evil.approverRecord()));
+    const ad = admin(l);
+    const results = await ad.applyStaged({ confirm: async () => true });
+    assert.deepEqual(results.map((r) => r.result), ['rejected: misnamed']);
+    assert.equal(fs.existsSync(planted), true, 'left untouched');
+    assert.equal(fs.existsSync(path.join(l.stagedDir, 'done')), false, 'nothing was ever moved');
+  });
+
+  it('refuses a staged entry whose filename does not match its own signed nonce', async () => {
+    const { s, a, l } = await fleet();
+    const c = createFakePhone();
+    assert.deepEqual(s.stage(a.enroll({ device: c.device(), now: NOW })), { state: 'staged' });
+    const [name] = fs.readdirSync(l.stagedDir).filter((n) => n.endsWith('.json'));
+    const renamed = `${randomNonce()}.json`;
+    fs.renameSync(path.join(l.stagedDir, name), path.join(l.stagedDir, renamed));
+    const ad = admin(l);
+    const results = await ad.applyStaged({ confirm: async () => true });
+    assert.deepEqual(results.map((r) => r.result), ['rejected: misnamed']);
+    assert.equal(fs.existsSync(path.join(l.stagedDir, renamed)), true, 'left untouched');
+  });
+
+  it('refuses a staged entry that is hard-linked elsewhere (nlink > 1) without touching it', async () => {
+    const l = layout();
+    fs.mkdirSync(l.stagedDir, { recursive: true });
+    const nonce = randomNonce();
+    const file = path.join(l.stagedDir, `${nonce}.json`);
+    fs.writeFileSync(file, JSON.stringify({ received_at: iso(NOW), envelope: {} }));
+    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-hardlink-'));
+    tmp.push(elsewhere);
+    fs.linkSync(file, path.join(elsewhere, 'other.json'));
+    const ad = admin(l);
+    const results = await ad.applyStaged({ confirm: async () => true });
+    assert.deepEqual(results.map((r) => r.result), ['rejected: not a regular file']);
+    assert.equal(fs.existsSync(file), true, 'left untouched');
+  });
+});
+
+describe('M1 round 2 (critical): the admin snapshot must not use the Windows service probe', () => {
+  it('does not reject every staged item on win32 just because the admin process can write the approvers dir', async () => {
+    const l = layout();
+    const a = createFakePhone({ name: 'A' });
+    write(l.dir, a.approverRecord());
+    // platform 'linux' here only to legitimately produce a staged file; the
+    // bug under test is entirely in the admin's own snapshot below.
+    const s = store(l);
+    await s.ready();
+    const c = createFakePhone({ name: 'C' });
+    assert.deepEqual(s.stage(a.enroll({ device: c.device(), now: NOW })), { state: 'staged' });
+
+    const ad = admin(l, { platform: 'win32' });
+    const results = await ad.applyStaged({ confirm: async () => true });
+    assert.deepEqual(results.map((r) => r.result), ['enrolled']);
+    assert.equal(ad.read(c.deviceId).enrolled_by, a.deviceId);
+  });
+});
+
+describe('C1 round 2: created_at may not be far in the future', () => {
+  it('refuses to stage a message dated more than 5 minutes in the future', async () => {
+    const { s, a } = await fleet();
+    const c = createFakePhone();
+    const future = NOW + 6 * 60 * 1000;
+    assert.deepEqual(s.stage(a.enroll({ device: c.device(), now: future })), { state: 'rejected', reason: 'from_the_future' });
+    assert.deepEqual(s.stage(a.revoke(c.deviceId, { now: future })), { state: 'rejected', reason: 'from_the_future' });
+  });
+
+  it('applyStaged refuses a staged item dated in the future and moves it to done/ instead of deferring it forever', async () => {
+    const l = layout();
+    const a = createFakePhone();
+    write(l.dir, a.approverRecord());
+    const c = createFakePhone();
+    // ApproverStore.stage() already refuses this, so it is written directly
+    // to exercise applyStaged's own defense-in-depth check.
+    const nonce = randomNonce();
+    const future = NOW + 3650 * 24 * 60 * 60 * 1000;
+    const env = a.revoke(c.deviceId, { now: future, nonce });
+    fs.mkdirSync(l.stagedDir, { recursive: true });
+    fs.writeFileSync(path.join(l.stagedDir, `${nonce}.json`), JSON.stringify({ received_at: iso(NOW), envelope: env }));
+    const ad = admin(l);
+    const results = await ad.applyStaged({ confirm: async () => true });
+    assert.deepEqual(results.map((r) => r.result), ['rejected: created in the future']);
+    assert.equal(fs.existsSync(path.join(l.stagedDir, 'done', `${nonce}.json`)), true, 'moved to done/, not left deferred forever');
+  });
+
+  it('does not honour a deferral whose own signer is revoked in the same batch', async () => {
+    const l = layout();
+    const a = createFakePhone({ name: 'Owner' });
+    const b = createFakePhone({ name: 'Compromised' });
+    write(l.dir, a.approverRecord());
+    write(l.dir, b.approverRecord());
+    const s = store(l);
+    await s.ready();
+    const c = createFakePhone({ name: 'New phone' });
+    assert.deepEqual(s.stage(a.revoke(b.deviceId, { now: NOW })), { state: 'revoked-pending-apply' });
+    assert.deepEqual(s.stage(a.enroll({ device: c.device(), now: NOW })), { state: 'staged' });
+    assert.deepEqual(s.stage(b.revoke(c.deviceId, { now: NOW })), { state: 'revoked-pending-apply' });
+
+    const ad = admin(l);
+    const results = await ad.applyStaged({ confirm: async () => true });
+    const byType = (t) => results.filter((r) => r.type === t).map((r) => [r.signer === a.deviceId ? 'A' : 'B', r.result]).sort();
+    assert.deepEqual(byType('kl.device.revoke'), [
+      ['A', 'revoked'],
+      ['B', 'rejected: signer is not an active approver']
+    ].sort());
+    assert.deepEqual(byType('kl.device.enroll'), [['A', 'enrolled']]);
+    assert.equal(ad.read(c.deviceId).enrolled_by, a.deviceId);
+  });
+});
+
+describe('M3 round 2: a failed staging write is a result, not a throw', () => {
+  it('returns staging_write_failed instead of throwing, and a revoke still blocks immediately through the overlay', async () => {
+    const l = layout();
+    const a = createFakePhone();
+    write(l.dir, a.approverRecord());
+    // stagedDir is a plain file, so mkdirSync inside _writeStaged throws EEXIST.
+    fs.mkdirSync(path.dirname(l.stagedDir), { recursive: true });
+    fs.writeFileSync(l.stagedDir, 'not a directory');
+    const s = store(l);
+    await s.ready();
+    const c = createFakePhone();
+    assert.deepEqual(s.stage(a.enroll({ device: c.device(), now: NOW })), { state: 'rejected', reason: 'staging_write_failed' });
+    const b = createFakePhone({ name: 'B' });
+    write(l.dir, b.approverRecord());
+    s.refresh();
+    assert.deepEqual(s.stage(a.revoke(b.deviceId, { now: NOW })), { state: 'rejected', reason: 'staging_write_failed' });
+    // The overlay is set before the durable write is attempted, so the
+    // block still takes effect immediately even though the write failed.
+    assert.equal(s.isActive(b.deviceId), false);
+  });
 });

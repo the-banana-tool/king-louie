@@ -22,6 +22,11 @@ const APPROVER_CONTROLS = {
   selfGrant: 'add its own approver'
 };
 const CACHE_MS = 1000;
+// A staged message's own signed created_at may not be this far ahead of the
+// node's clock. Without this, a revoke dated far in the future would never
+// age out of MAX_STAGED_AGE_MS (age = now - created_at is negative), making
+// its deferral-blocking effect unbounded instead of capped at 7 days.
+const FUTURE_SKEW_MS = 5 * 60 * 1000;
 const defaultGeteuid = () => (typeof process.geteuid === 'function' ? process.geteuid() : -1);
 
 const nullOrTimestamp = (v) => v === null || (typeof v === 'string' && TIMESTAMP_RE.test(v));
@@ -47,9 +52,18 @@ function checkApproverRecord(record, fileName = null) {
 
 // null when the approver dir may be trusted, else the problem. A missing dir
 // is an empty set, not a problem. Sync so `doctor` can use it too.
-function checkApproverDir({ dir, platform = process.platform, geteuid = defaultGeteuid, adminUid = 0, fsImpl = fs }) {
+//
+// `serviceProbe` (default true) runs the Windows "can I write here?" probe,
+// which asks whether the *service* account's ACL is wrong. It must be
+// false for a store built by the admin CLI itself: on Windows the admin
+// process runs as Administrator, so the probe would always say "yes, I can
+// write" and mistake its own privilege for a broken ACL, treating every
+// approver as untrusted. POSIX is unaffected either way — assertAdminOwned
+// checks the actual owner/mode, not who is asking.
+function checkApproverDir({ dir, platform = process.platform, geteuid = defaultGeteuid, adminUid = 0, fsImpl = fs, serviceProbe = true }) {
   if (!fsImpl.existsSync(dir)) return null;
   if (platform === 'win32') {
+    if (!serviceProbe) return null;
     const probe = path.join(dir, `.probe-${crypto.randomBytes(6).toString('hex')}`);
     let fd = null;
     let openErr = null;
@@ -97,7 +111,7 @@ function writeFileAtomic(file, text, mode = 0o600) {
 
 class ApproverStore {
   constructor({ dir, stagedDir, geteuid = defaultGeteuid, adminUid = 0, platform = process.platform, now = Date.now,
-    allowTestKeys = false, fsImpl = fs } = {}) {
+    allowTestKeys = false, fsImpl = fs, serviceProbe = true } = {}) {
     if (!dir) throw new TypeError('ApproverStore needs a dir');
     this.dir = dir;
     this.stagedDir = stagedDir || null;
@@ -107,6 +121,7 @@ class ApproverStore {
     this.now = now;
     this.allowTestKeys = allowTestKeys === true;
     this.fs = fsImpl;
+    this.serviceProbe = serviceProbe !== false;
     this.problem = null;
     // Untrusted until ready() runs the probe: a store nobody has checked yet
     // must fail closed, the same as one that failed the check.
@@ -122,7 +137,9 @@ class ApproverStore {
   // process can create a file in the dir, the ACL is wrong, and the set is
   // treated as empty until an administrator fixes it.
   async ready() {
-    this.problem = checkApproverDir({ dir: this.dir, platform: this.platform, geteuid: this.geteuid, adminUid: this.adminUid, fsImpl: this.fs });
+    this.problem = checkApproverDir({
+      dir: this.dir, platform: this.platform, geteuid: this.geteuid, adminUid: this.adminUid, fsImpl: this.fs, serviceProbe: this.serviceProbe
+    });
     this.untrusted = this.problem !== null;
     if (this.problem) log.error(`approver set treated as empty: ${this.problem}`);
     this._scannedAt = -Infinity;
@@ -298,6 +315,10 @@ class ApproverStore {
     if (this._isKnownNonce(message.nonce)) return { state: 'duplicate' };
     const shape = validateMessage(type, message);
     if (shape) return rejected(shape);
+    // Checked before `expired`: a message dated far in the future would
+    // otherwise pass expiry (its expires_at is future too) and, for a
+    // revoke, defer forever instead of aging out within 7 days.
+    if (Date.parse(message.created_at) - this.now() > FUTURE_SKEW_MS) return rejected('from_the_future');
     if (this.now() > Date.parse(message.expires_at)) return rejected('expired');
 
     if (type === 'kl.device.enroll') {
@@ -316,14 +337,19 @@ class ApproverStore {
       const existing = this.get(message.device.device_id);
       if (existing && existing.revoked_at !== null) return rejected('revoked_device');
       if (existing && this.isAdminApplied(existing.device_id)) return { state: 'duplicate' };
-      this._writeStaged(message.nonce, envelope);
+      if (!this._writeStagedSafe(message.nonce, envelope)) return rejected('staging_write_failed');
       return { state: 'staged' };
     }
 
     const fault = this._checkRevoke(envelope, message);
     if (fault) return rejected(fault);
-    this._writeStaged(message.nonce, envelope);
+    // Overlay before the durable write: the overlay only ever removes
+    // trust, so setting it first can never grant anything by mistake, and
+    // it means the block takes effect immediately even if the write below
+    // then fails (a full disk, a permission flip) — the alternative order
+    // would let a write failure silently drop the revoke's only effect.
     this.overlay.add(message.device_id);
+    if (!this._writeStagedSafe(message.nonce, envelope)) return rejected('staging_write_failed');
     return { state: 'revoked-pending-apply' };
   }
 
@@ -331,6 +357,19 @@ class ApproverStore {
     this.fs.mkdirSync(this.stagedDir, { recursive: true, mode: 0o700 });
     writeFileAtomic(this._stagedFile(nonce), `${JSON.stringify({ received_at: new Date(this.now()).toISOString(), envelope })}\n`);
   }
+
+  // A gate refusal is a result, never a throw: if the staged dir cannot be
+  // written (missing parent, a file where a dir should be, disk full, …),
+  // stage() must report it, not crash whatever called it.
+  _writeStagedSafe(nonce, envelope) {
+    try {
+      this._writeStaged(nonce, envelope);
+      return true;
+    } catch (err) {
+      log.error(`failed to stage ${nonce}: ${err.message}`);
+      return false;
+    }
+  }
 }
 
-module.exports = { ApproverStore, checkApproverRecord, checkApproverDir, writeFileAtomic, APPROVER_CONTROLS };
+module.exports = { ApproverStore, checkApproverRecord, checkApproverDir, writeFileAtomic, APPROVER_CONTROLS, FUTURE_SKEW_MS };

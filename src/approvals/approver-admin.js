@@ -4,9 +4,9 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { ApproverStore, checkApproverRecord, writeFileAtomic } = require('./approver-store');
+const { ApproverStore, checkApproverRecord, writeFileAtomic, FUTURE_SKEW_MS } = require('./approver-store');
 const { open, verifyEs256 } = require('./envelope');
-const { validateMessage, iso, DEVICE_ID_RE } = require('./messages');
+const { validateMessage, iso, DEVICE_ID_RE, NONCE_RE } = require('./messages');
 const { isTestDeviceKey } = require('./test-keys');
 
 const MAX_STAGED_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -55,7 +55,12 @@ class ApproverAdmin {
     this.stagedDir = stagedDir;
     this.now = now;
     this.allowTestKeys = allowTestKeys === true;
-    this.storeOptions = { dir, stagedDir, allowTestKeys, adminUid, platform, now, ...(geteuid ? { geteuid } : {}) };
+    // serviceProbe: false — this snapshot is built by the admin CLI, which
+    // on Windows runs as Administrator and can always write approvers/.
+    // The service-writability probe would misread that as a broken ACL and
+    // treat every approver as untrusted; only the live service's own store
+    // (built elsewhere, with the default serviceProbe: true) needs it.
+    this.storeOptions = { dir, stagedDir, allowTestKeys, adminUid, platform, now, serviceProbe: false, ...(geteuid ? { geteuid } : {}) };
   }
 
   // Creating a file is the only reliable test on every platform: on Windows
@@ -114,13 +119,15 @@ class ApproverAdmin {
   }
 
   // Lists every staged item, including ones this admin cannot safely act on
-  // (`type: 'unsafe'`: a symlink or non-regular file — I2). Throws if
-  // staged/ or staged/done/ is itself a symlink.
+  // (`type: 'unsafe'`, carrying its own `reason` — I2). Throws if staged/ or
+  // staged/done/ is itself a symlink.
   listStaged() {
     if (!this.stagedDir) return [];
     assertDirNotSymlink(this.stagedDir);
     if (!fs.existsSync(this.stagedDir)) return [];
     assertDirNotSymlink(path.join(this.stagedDir, 'done'));
+
+    const unsafe = (file, reason) => ({ file, type: 'unsafe', reason, deviceId: null, signer: null, receivedAt: null, envelope: null, message: null });
 
     const items = [];
     for (const name of fs.readdirSync(this.stagedDir).filter((n) => n.endsWith('.json')).sort()) {
@@ -131,13 +138,32 @@ class ApproverAdmin {
       } catch {
         continue; // vanished between readdir and lstat
       }
-      if (lst.isSymbolicLink() || !lst.isFile()) {
-        items.push({ file, type: 'unsafe', deviceId: null, signer: null, receivedAt: null, envelope: null, message: null });
+      // nlink > 1: this inode is also linked somewhere this admin didn't
+      // check, so it is not the sole, trustworthy copy a staged file must be.
+      if (lst.isSymbolicLink() || !lst.isFile() || lst.nlink > 1) {
+        items.push(unsafe(file, 'not a regular file'));
+        continue;
+      }
+      // Only a name shaped exactly like the nonce that produced it, whose
+      // parsed message.nonce matches that same name, is ever read or moved.
+      // staged/ (or staged/done/) is checked once above, not re-checked
+      // before each rename, so a race that swaps it for some other
+      // directory afterward can still be exploited — but only through a
+      // nonce-shaped name, and an approver record (`d-….json`) never has
+      // that shape, so root's admin CLI can never be tricked into renaming
+      // one out of <configDir>/approvers/.
+      const stem = name.slice(0, -'.json'.length);
+      if (!NONCE_RE.test(stem)) {
+        items.push(unsafe(file, 'misnamed'));
         continue;
       }
       try {
         const { received_at: receivedAt, envelope } = JSON.parse(readRegularFile(file));
         const { message } = open(envelope);
+        if (message.nonce !== stem) {
+          items.push(unsafe(file, 'misnamed'));
+          continue;
+        }
         const revoke = message.type === 'kl.device.revoke';
         items.push({
           file,
@@ -169,6 +195,14 @@ class ApproverAdmin {
     return now - Date.parse(message.created_at) > MAX_STAGED_AGE_MS;
   }
 
+  // A created_at too far ahead of the admin's clock would otherwise pass
+  // both the expiry check and _tooOld (age = now - created_at is negative),
+  // making a revoke's deferral-blocking effect unbounded instead of capped
+  // at 7 days.
+  _fromFuture(message, now) {
+    return Date.parse(message.created_at) - now > FUTURE_SKEW_MS;
+  }
+
   // `confirm(items) → Promise<boolean>` sees the batch before anything is
   // written. Every item is judged against the admin set as it stood before
   // the batch. Revokes are collected first and always win (C1): an
@@ -176,7 +210,10 @@ class ApproverAdmin {
   // revoke lands in this batch or an earlier one, and a revoke of a device
   // with no record yet is left staged — `deferred: unknown device` — so the
   // block holds until either an admin-applied record exists to revoke or
-  // the revoke's own signed window ages out.
+  // the revoke's own signed window ages out. A deferral is not honoured,
+  // though, when its own signer is itself the target of a *different*
+  // valid revoke in this same batch: a compromised phone must not get to
+  // plant a lasting block moments before its own compromise is undone.
   async applyStaged({ now = this.now(), confirm }) {
     const items = this.listStaged();
     if (items.length === 0) return [];
@@ -195,23 +232,33 @@ class ApproverAdmin {
     const rest = items.filter((i) => i.type !== 'kl.device.revoke' && i.type !== 'unsafe');
     const unsafe = items.filter((i) => i.type === 'unsafe');
 
-    for (const item of revokes) {
-      let result;
+    // Pass 1: judge every revoke against the pre-batch snapshot only, and
+    // note which devices a *valid* revoke of an already-existing record
+    // names (only those can ever have signed anything, so only those can
+    // disqualify a signer).
+    const evaluated = revokes.map((item) => {
+      if (this._fromFuture(item.message, now)) return { item, reason: 'rejected: created in the future' };
+      if (this._tooOld(item.message, now)) return { item, reason: 'rejected: older than 7 days' };
+      if (validateMessage('kl.device.revoke', item.message)) return { item, reason: 'rejected: malformed' };
+      if (item.signer === item.deviceId) return { item, reason: 'rejected: a device cannot revoke itself' };
+      const signer = applied.get(item.signer);
+      const signedOk = signer && item.envelope.kid === item.signer && verifyEs256(item.envelope, signer.public_key);
+      if (!signedOk) return { item, reason: 'rejected: signer is not an active approver' };
+      return { item, reason: null, existing: this.read(item.deviceId) };
+    });
+    const revokedSigners = new Set(evaluated.filter((e) => e.reason === null && e.existing).map((e) => e.item.deviceId));
+
+    for (const { item, reason, existing } of evaluated) {
+      let result = reason;
       let done = true;
-      if (this._tooOld(item.message, now)) {
-        result = 'rejected: older than 7 days';
-      } else if (validateMessage('kl.device.revoke', item.message)) {
-        result = 'rejected: malformed';
-      } else if (item.signer === item.deviceId) {
-        result = 'rejected: a device cannot revoke itself';
-      } else {
-        const signer = applied.get(item.signer);
-        const signedOk = signer && item.envelope.kid === item.signer && verifyEs256(item.envelope, signer.public_key);
-        if (!signedOk) {
+      if (result === null) {
+        if (!existing && revokedSigners.has(item.signer)) {
+          // This deferral's own signer is revoked elsewhere in this same
+          // batch: honouring it would let a phone about to lose approver
+          // status plant an unbounded block on some unrelated device.
           result = 'rejected: signer is not an active approver';
         } else {
           revokedTargets.add(item.deviceId);
-          const existing = this.read(item.deviceId);
           if (existing) {
             this.markRevoked(item.deviceId, item.signer);
             result = 'revoked';
@@ -231,6 +278,8 @@ class ApproverAdmin {
       let result;
       if (!item.message) {
         result = `rejected: unreadable (${item.error})`;
+      } else if (this._fromFuture(item.message, now)) {
+        result = 'rejected: created in the future';
       } else if (this._tooOld(item.message, now)) {
         result = 'rejected: older than 7 days';
       } else if (validateMessage(item.type, item.message)) {
@@ -275,7 +324,7 @@ class ApproverAdmin {
     }
 
     for (const item of unsafe) {
-      results.push({ file: item.file, type: item.type, deviceId: item.deviceId, signer: item.signer, result: 'rejected: not a regular file' });
+      results.push({ file: item.file, type: item.type, deviceId: item.deviceId, signer: item.signer, result: `rejected: ${item.reason}` });
     }
 
     return results;
