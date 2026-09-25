@@ -326,7 +326,7 @@ class ToolExecutor extends EventEmitter {
           cwd: options.workingDirectory || this.workingDirectory
         });
       } catch (classifyError) {
-        log.warn('classifyCall threw', { toolName, error: classifyError.message });
+        log.warn('classifyCall threw', { toolName, error: classifyError?.message ?? String(classifyError) });
         raw = { tier: 'denied', reason: 'invalid_classification' };
       }
       // Only null/undefined means "no opinion" and falls through to the

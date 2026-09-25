@@ -7,6 +7,7 @@ const { initializeTools, toolRegistry } = require('../tools');
 const { registerSecretDataDir } = require('../tools/utils');
 const { adminCredentialPath } = require('../platform/paths');
 const ToolExecutor = require('../execution/tool-executor');
+const { approvalSeam } = require('../approvals/executor-options');
 const DenialTracker = require('../tools/denial-tracker');
 const AgentLoop = require('../execution/agent-loop');
 const {
@@ -143,8 +144,13 @@ function createCore(deps = {}) {
   // local UI listener (Electron IPC) or an auto-approve rule allows them.
   const ports = { gateway: DEFAULT_GATEWAY_PORT, ...(deps.ports || {}) };
   const remoteApprovals = deps.remoteApprovals ?? 'allow';
-  if (remoteApprovals !== 'allow' && remoteApprovals !== 'deny') {
-    throw new Error(`createCore: remoteApprovals must be 'allow' or 'deny', got ${JSON.stringify(remoteApprovals)}`);
+  if (!['allow', 'deny', 'phone'].includes(remoteApprovals)) {
+    throw new Error(`createCore: remoteApprovals must be 'allow', 'deny' or 'phone', got ${JSON.stringify(remoteApprovals)}`);
+  }
+  // 'phone' (fleet stage 3): remote-origin unsafe tools go to a signed phone
+  // approval and nothing else; local-desktop runs keep the on-screen dialog.
+  if (remoteApprovals === 'phone' && !deps.phoneApprover) {
+    throw new Error("createCore: remoteApprovals 'phone' needs deps.phoneApprover");
   }
 
   // ── moved from main.js ──
@@ -1906,22 +1912,32 @@ function createCore(deps = {}) {
     // Every approval requester — gateway/channel approvalHandler, cron,
     // webhook, mesh, and meta-tools re-threading a parent's requester — reaches
     // a ToolExecutor through here, so this is the single place that enforces
-    // remoteApprovals: 'deny'.
-    const effectiveApprovalRequester = remoteApprovals === 'deny' ? null : approvalRequester;
-    if (approvalRequester && !effectiveApprovalRequester) {
-      log.debug('remoteApprovals is "deny": ignoring a remote approval requester');
+    // remoteApprovals (program §4.21): 'deny' ignores remote requesters,
+    // 'phone' replaces them with the phone approver, and a local-desktop run
+    // (marked event or marked requester) keeps the on-screen dialog.
+    const seam = approvalSeam({
+      remoteApprovals,
+      event,
+      approvalRequester,
+      executorOptions,
+      phoneApprover: deps.phoneApprover || null,
+      auditLedger: deps.auditLedger || null,
+      nodePolicy: deps.nodePolicy || null
+    });
+    if (approvalRequester && seam.toolExecutorOptions.approvalRequester !== approvalRequester) {
+      log.debug(`remoteApprovals is "${remoteApprovals}": not using the caller's approval requester`);
     }
     const executor = new ToolExecutor({
       workingDirectory,
       allowedDirectories: executorOptions.allowedDirectories || [],
       requireApproval: true,
       runtimeEnvironment: resolvedRuntimeEnvironment,
-      approvalRequester: effectiveApprovalRequester,
-      // Nulling the requester only denies at the gate; this also closes the
+      // approvalRequester, denyAutoApproval and localOrigin, plus in phone
+      // mode approvalTimeoutMs and classifyCall. denyAutoApproval closes the
       // paths that grant approval before the gate is reached (the persisted
       // "always approve" list below, an agent config's autoApproveTools, and
-      // `allow` permission rules).
-      denyAutoApproval: remoteApprovals === 'deny',
+      // `allow` permission rules) for every non-local run outside 'allow'.
+      ...seam.toolExecutorOptions,
       shouldAutoApprove: async (toolName) => isToolAlwaysApproved(toolName),
       // Live callback — picks up rules added mid-session when the user
       // clicks "Always allow 'git *'" in an approval dialog.
@@ -1992,6 +2008,9 @@ function createCore(deps = {}) {
         }
       }
     });
+
+    // Phone mode: tier decisions and executions go to the audit ledger.
+    seam.attach(executor);
 
     if (event?.sender) {
       executor.on('approvalRequired', ({ toolName, parameters, resolve }) => {
@@ -2639,6 +2658,10 @@ function createCore(deps = {}) {
     createUsageRecordFromMetrics,
     getSettings,
     getCaseRuntime: () => caseRuntime,
+    // The signed-approval requester (program §4.12), or null: always null in
+    // 'allow' and 'deny' modes (the Electron host), and null while no device
+    // is enrolled or no relay link can deliver.
+    getPhoneApprover: () => (remoteApprovals === 'phone' && deps.phoneApprover && deps.phoneApprover.isAvailable() ? deps.phoneApprover : null),
 
     // Tool
     pendingApprovalResolvers,
