@@ -280,14 +280,14 @@ final class ProtocolVectorTests: XCTestCase {
         let raw = nodeKey.publicKey.rawRepresentation
         let pin = NodePin(id: Identifiers.nodeId(ed25519Raw: raw), name: "web-01", key: Identifiers.ed25519SpkiPrefix + Hex.encode(raw))
         let requestId = "0f8e7c2a-5b1d-4c3e-9a7f-2d6b8e1c4a90"
-        func status(_ edit: (inout [String: JSONValue]) -> Void = { _ in }) throws -> JSONValue {
+        func status(kid: String? = nil, _ edit: (inout [String: JSONValue]) -> Void = { _ in }) throws -> JSONValue {
             var fields: [String: JSONValue] = [
                 "v": .number("1"), "type": .string("kl.approval.status"), "request_id": .string(requestId),
                 "node_id": .string(pin.id), "state": .string("approved"), "device_id": .null, "reason": .null,
                 "at": .string("2026-09-23T18:04:31.201Z")
             ]
             edit(&fields)
-            return try Envelope.seal(.object(fields), alg: "Ed25519", kid: pin.id) { try nodeKey.signature(for: $0) }.json
+            return try Envelope.seal(.object(fields), alg: "Ed25519", kid: kid ?? pin.id) { try nodeKey.signature(for: $0) }.json
         }
         XCTAssertEqual(ApprovalStatus.verify(try status(), requestId: requestId, pin: pin), ApprovalStatus(state: "approved", deviceId: nil, reason: nil))
         XCTAssertNotNil(ApprovalStatus.verify(try status { $0["reason"] = .string(String(repeating: "x", count: 300)) }, requestId: requestId, pin: pin))
@@ -296,6 +296,12 @@ final class ProtocolVectorTests: XCTestCase {
         XCTAssertNil(ApprovalStatus.verify(try status { $0["extra"] = .null }, requestId: requestId, pin: pin))
         XCTAssertNil(ApprovalStatus.verify(try status { $0["device_id"] = .string("not-a-device") }, requestId: requestId, pin: pin))
         XCTAssertNil(ApprovalStatus.verify(try status(), requestId: "1f8e7c2a-5b1d-4c3e-9a7f-2d6b8e1c4a90", pin: pin))
+        // Signed by the pinned key, but kid names another node.
+        XCTAssertNil(ApprovalStatus.verify(try status(kid: "kl-aaaaaaaaaaaaaaaa"), requestId: requestId, pin: pin))
+        // A valid status about another node (kid still the pin).
+        XCTAssertNil(ApprovalStatus.verify(try status { $0["node_id"] = .string("kl-aaaaaaaaaaaaaaaa") }, requestId: requestId, pin: pin))
+        // `at` must be a real calendar moment.
+        XCTAssertNil(ApprovalStatus.verify(try status { $0["at"] = .string("2026-02-30T00:00:00Z") }, requestId: requestId, pin: pin))
         let other = Curve25519.Signing.PrivateKey().publicKey.rawRepresentation
         XCTAssertNil(ApprovalStatus.verify(try status(), requestId: requestId, pin: NodePin(id: pin.id, name: "web-01", key: Identifiers.ed25519SpkiPrefix + Hex.encode(other))))
     }

@@ -162,8 +162,9 @@ final class AppModel: ObservableObject {
         banner = describe(error)
     }
 
-    /// The Secure Enclave key stopped working (the enrolled biometrics
-    /// changed). Forget it, so the next pairing or invite makes a new one.
+    /// The Secure Enclave key is confirmed gone (its Keychain reference is
+    /// missing, or the enrolled biometrics changed; see DeviceKey). Forget
+    /// it, so the next pairing or invite makes a new one.
     private func dropInvalidKey() {
         stopPolling()
         DeviceKey.delete()
@@ -241,8 +242,18 @@ final class AppModel: ObservableObject {
         state.nodes.append(pin)
     }
 
+    /// The phone's key for a pairing or invite: the current one, unless a
+    /// signature failed without proof it is gone (unusable), in which case a
+    /// new pairing is the moment to replace it.
     private func ensureKey() throws -> DeviceKey {
-        if let key { return key }
+        if let key, !key.unusable { return key }
+        if key != nil {
+            stopPolling()
+            DeviceKey.delete()
+            client?.invalidate()
+            client = nil
+            key = nil
+        }
         let created = try DeviceKey.create()
         key = created
         return created
@@ -350,11 +361,11 @@ final class AppModel: ObservableObject {
 
     /// Waits for the node's answer. The status route is unauthenticated, so
     /// it counts against the relay's 10-per-minute per-IP budget: ask every
-    /// 7 s and honour a 429's retry_after.
+    /// 8 s and honour a 429's retry_after.
     private func consoleResult(_ client: RelayAPI, codeId: String) async throws -> String {
         let deadline = ContinuousClock.now + .seconds(11 * 60)
         while ContinuousClock.now < deadline {
-            try await Task.sleep(for: .seconds(7))
+            try await Task.sleep(for: .seconds(8))
             do {
                 let s = try await client.consoleEnrollState(codeId: codeId)
                 if s != "waiting" { return s }
@@ -490,6 +501,12 @@ final class AppModel: ObservableObject {
                 }
                 if let e = error as? ProtocolError, e == .keyInvalidated {
                     dropInvalidKey()
+                    return
+                }
+                if error is DeviceKeyUnusable {
+                    // Kept, not deleted: wait for the owner rather than retry the Secure Enclave.
+                    needsTap = true
+                    pollProblem = describe(error)
                     return
                 }
                 if let e = error as? RelayError, e.code == "pin_mismatch" {

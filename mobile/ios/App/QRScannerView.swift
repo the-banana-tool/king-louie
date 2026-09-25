@@ -17,6 +17,9 @@ struct QRScannerView: UIViewControllerRepresentable {
     final class ScannerController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
         var onCode: ((String) -> Void)?
         private let session = AVCaptureSession()
+        /// startRunning and stopRunning block, so they run here, in order,
+        /// never on the main thread.
+        private let sessionQueue = DispatchQueue(label: "kl.qr-scanner.session")
         private var preview: AVCaptureVideoPreviewLayer?
         private var delivered = false
 
@@ -36,7 +39,7 @@ struct QRScannerView: UIViewControllerRepresentable {
             layer.frame = view.layer.bounds
             view.layer.addSublayer(layer)
             preview = layer
-            DispatchQueue.global(qos: .userInitiated).async { [session] in session.startRunning() }
+            sessionQueue.async { [session] in session.startRunning() }
         }
 
         /// SwiftUI sizes the view after viewDidLoad; keep the preview filling it.
@@ -45,9 +48,8 @@ struct QRScannerView: UIViewControllerRepresentable {
             preview?.frame = view.layer.bounds
         }
 
-        /// startRunning and stopRunning block, so neither runs on the main thread.
         private func stop() {
-            DispatchQueue.global(qos: .userInitiated).async { [session] in session.stopRunning() }
+            sessionQueue.async { [session] in session.stopRunning() }
         }
 
         override func viewWillDisappear(_ animated: Bool) {

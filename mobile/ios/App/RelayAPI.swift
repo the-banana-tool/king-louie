@@ -30,6 +30,9 @@ final class RelayAPI: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     private var clockOffset: TimeInterval = 0
     /// Tasks whose server certificate did not match the pin.
     private var pinRefusedTasks: Set<Int> = []
+    /// Set by invalidate(); an invalidated session must never be asked for a
+    /// new task (URLSession raises NSGenericException).
+    private var invalidated = false
     private var session: URLSession!
 
     init(base: URL, spkiPin: String, deviceId: String?, signer: Signer?) {
@@ -61,6 +64,9 @@ final class RelayAPI: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     /// The session keeps its delegate (this object) alive; call this when the
     /// client is replaced so both go away.
     func invalidate() {
+        // The flag goes up under the lock that also covers task creation in
+        // send(), so no task can be created after this point.
+        locked { invalidated = true }
         session.invalidateAndCancel()
     }
 
@@ -105,7 +111,10 @@ final class RelayAPI: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
 
     /// Task-level on purpose: with no session-level handler, URLSession
     /// sends the server-trust challenge here, with the task, so a refusal is
-    /// recorded against the one request it belongs to.
+    /// recorded against the one request it belongs to. Do not add a
+    /// session-level `urlSession(_:didReceive:completionHandler:)`: it would
+    /// take server trust away from this method, and any such handler must
+    /// run exactly this pin check (and record the refusal) or the pin is gone.
     func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
         guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust else {
@@ -140,19 +149,33 @@ final class RelayAPI: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
         let handle = TaskHandle()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<(Data, URLResponse), Error>) in
-                let task = session.dataTask(with: request) { [weak self] data, response, error in
-                    let refused = self?.takePinRefusal(handle.identifier) ?? false
-                    if refused {
-                        continuation.resume(throwing: RelayError(status: 0, code: "pin_mismatch", message: "Relay certificate changed — scan a new relay code."))
-                    } else if let error {
-                        continuation.resume(throwing: error)
-                    } else if let data, let response {
-                        continuation.resume(returning: (data, response))
-                    } else {
-                        continuation.resume(throwing: URLError(.badServerResponse))
+                let once = ResumeOnce(continuation)
+                let task: URLSessionDataTask? = locked {
+                    guard !invalidated else { return nil }
+                    return session.dataTask(with: request) { [weak self] data, response, error in
+                        let refused = self?.takePinRefusal(handle.identifier) ?? false
+                        if refused {
+                            once.resume(throwing: RelayError(status: 0, code: "pin_mismatch", message: "Relay certificate changed — scan a new relay code."))
+                        } else if let error {
+                            once.resume(throwing: error)
+                        } else if let data, let response {
+                            once.resume(returning: (data, response))
+                        } else {
+                            once.resume(throwing: URLError(.badServerResponse))
+                        }
                     }
                 }
-                handle.start(task)
+                guard let task else {
+                    once.resume(throwing: URLError(.cancelled))
+                    return
+                }
+                // Cancelled before it could start: never resumed, so its
+                // completion may never run. Answer here; a late completion
+                // is ignored by ResumeOnce.
+                if !handle.start(task) {
+                    once.resume(throwing: URLError(.cancelled))
+                    task.cancel()
+                }
             }
         } onCancel: {
             handle.cancel()
@@ -288,15 +311,27 @@ private final class TaskHandle: @unchecked Sendable {
     private let lock = NSLock()
     private var task: URLSessionTask?
     private var cancelled = false
-    private(set) var identifier = -1
+    private var taskIdentifier = -1
 
-    func start(_ task: URLSessionTask) {
+    var identifier: Int {
         lock.lock()
+        defer { lock.unlock() }
+        return taskIdentifier
+    }
+
+    /// Resumes the task, or returns false (and leaves it alone) when the
+    /// request was already cancelled.
+    func start(_ task: URLSessionTask) -> Bool {
+        lock.lock()
+        guard !cancelled else {
+            lock.unlock()
+            return false
+        }
         self.task = task
-        identifier = task.taskIdentifier
-        let cancelNow = cancelled
+        taskIdentifier = task.taskIdentifier
         lock.unlock()
-        if cancelNow { task.cancel() } else { task.resume() }
+        task.resume()
+        return true
     }
 
     func cancel() {
@@ -305,5 +340,32 @@ private final class TaskHandle: @unchecked Sendable {
         let task = self.task
         lock.unlock()
         task?.cancel()
+    }
+}
+
+/// A continuation resumed at most once, whichever of the completion handler
+/// and the cancellation path gets there first.
+private final class ResumeOnce<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<T, Error>?
+
+    init(_ continuation: CheckedContinuation<T, Error>) {
+        self.continuation = continuation
+    }
+
+    private func take() -> CheckedContinuation<T, Error>? {
+        lock.lock()
+        defer { lock.unlock() }
+        let c = continuation
+        continuation = nil
+        return c
+    }
+
+    func resume(returning value: T) {
+        take()?.resume(returning: value)
+    }
+
+    func resume(throwing error: Error) {
+        take()?.resume(throwing: error)
     }
 }
