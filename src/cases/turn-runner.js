@@ -353,4 +353,6 @@ async function runDueWakeups(runtime, now = runtime.now()) {
   return counts;
 }
 
-module.exports = { ORIENT_PROMPT, WAKEUP_PROMPT, parseOrient, sweepCase, runWakeupTurn, runDueWakeups };
+module.exports = {
+  ORIENT_PROMPT, WAKEUP_PROMPT, parseOrient, sweepCase, runWakeupTurn, runDueWakeups, textOf, recordOneShotUsage
+};
