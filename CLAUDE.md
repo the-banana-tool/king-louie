@@ -224,7 +224,9 @@ work while attached appends it to `PROXIED_DOMAINS`).
   construction and builds cron paused (`createCore({ cronStartPaused: true })`,
   never started), so it can't act as a second consumer alongside the service;
   the `/llm` channel commands (Telegram/Slack/Discord) refuse while channels are
-  off, before saving anything.
+  off, before saving anything. Case wake-ups pause too (they run from the paused
+  cron), including retries queued when a question is answered, because the
+  desktop's cases may already have been copied into the service.
 - Over the bridge, `settings:runLlmCommand` refuses the `/llm` channel actions
   outright (`CHANNELS_NOT_PROXIED`): channels are managed on the service.
 - **Permission rules** the desktop adds are tagged `origin: 'desktop'` and are

@@ -369,8 +369,10 @@ that C2 adds are proxied with no edit.
 `chat:messageError`, `chat:toolUse`, `chat:toolResult`, `chat:toolProgress`,
 `chat:updated`, `chat:advisorStarted`, `chat:advisorCompleted`, `canvas:render`,
 `canvas:close`, `canvas:executeJs`, `tool:approvalRequired`,
-`tool:directoryAccessRequired`, `agent:askUser`, `backgroundTask:completed`, plus any
-`case:*` event. `PROMPT_EVENTS` is the three prompt channels among them.
+`tool:directoryAccessRequired`, `agent:askUser`, `backgroundTask:completed`, and
+`case:changed` (the only case event). A new case event is added to `RENDERER_EVENTS`
+by name; there is no `case:*` prefix match. `PROMPT_EVENTS` is the three prompt
+channels among them.
 
 `SERVED = (listIpcChannels() ∩ ALLOWED) − prestep`, computed by the service and sent in
 `ready.service.channels`. The desktop proxies `SERVED` ∩ its own allowlist. A channel the
@@ -637,7 +639,7 @@ It holds no secret values. For the CLI, `installId` comes from
 | F1 (merged) | `createCore(deps)`; the `context.*` members named in §3.4/§3.8 (`getSettings`, `setSettings`, `removePermissionRule`, `getCronScheduler`); `core.pendingCanvasJsResolvers`; the `ui` port; `JsonFileStore`; `withServiceCore`; `assertAdminOwned(file, geteuid, adminUid, controls)` (no-op on win32); `loadServiceConfig`; `adminConfigDir`, `defaultServiceDataDir`; `createElectronPrompter`; `WINDOWS_INSPECT_CSHARP` (`installers.js`, exported by F7); `ProviderFactory.registerProvider` (e2e stub provider) |
 | F2 (merged) | `getOrGenerateNodeIdentity`, `deriveNodeId`, `NodeIdentity.sign` (Ed25519), node key as DER SPKI hex; the `<configDir>` ownership rules |
 | C1 (merged) | `case:*` handlers (proxied as they are) |
-| C2 (wave 1) | new `case:*` channels and events are proxied by domain with no edit; C2's `cases.*` settings are imported by the `settings` rule; `host.interactive` is `() => boolean` and `host.presence` is a port (R50) |
+| C2 (wave 1) | new `case:*` channels are proxied by domain with no edit; of the events only `case:changed` is forwarded, and a new case event must be added to `RENDERER_EVENTS` by name; C2's `cases.*` settings are imported by the `settings` rule; `host.interactive` is `() => boolean` and `host.presence` is a port (R50) |
 | C4 (wave 2) | adds `contact`, `contactPolicy`, `presence` to `PROXIED_DOMAINS`; its §6 attached-mode note (the service's contact policy is edited from the desktop) |
 | F3 (wave 1), F3-owned | the phone branch of §3.5 and its test (F3 §3.7, §5.2 P22); `deriveDeviceId`, `ed25519RawToSpki` (P2); `startApprovals` objects for `bridge.approvalsStatus` (P9, P20); audit origin `{ client: 'desktop', deviceId }` (P20). Stubbed until F3 merges: no phone branch, `approvalsStatus` → `{ available: false }`, local copies of the two key helpers replaced on rebase |
 

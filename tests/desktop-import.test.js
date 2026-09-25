@@ -186,6 +186,25 @@ describe('DesktopImporter', () => {
     assert.ok(plan.counts.new >= 12);
   });
 
+  it('refuses a system cron job in a batch, so no writer can put one in the store (C2 cases:wakeups)', async () => {
+    const { importer } = await service();
+    const added = [];
+    const addJob = importer.targets.cron.addJob;
+    importer.targets.cron.addJob = (job) => { added.push(job); return addJob(job); };
+    // The running core already made its own cases:wakeups; the offline writer's
+    // store may not have one yet, which is the case this guards.
+    const has = importer.targets.cron.has;
+    importer.targets.cron.has = (id) => (id === 'cases:wakeups' ? false : has(id));
+    const wakeups = { id: 'cases:wakeups', name: 'Case wake-ups', system: true, enabled: true, schedule: { kind: 'every', everyMs: 60000 }, payload: { system: 'cases:wakeups' } };
+    const fx = desktopFixture();
+    fx.values.cron['cases:wakeups'] = wakeups;
+    fx.inventory.cron.push({ id: wakeups.id, name: wakeups.name });
+    const { report } = await runImport(importer, fx);
+    assert.deepStrictEqual(added.map((j) => j.id), ['cron_1']);
+    assert.ok(report.failures.some((f) => f.category === 'cron' && f.key === 'cases:wakeups' && /system job/.test(f.error)), JSON.stringify(report.failures));
+    assert.strictEqual(report.cronDisabled, 1);
+  });
+
   it('imports, lands cases through the staging dir, and a rerun gives skip-present', async () => {
     const { core, dataDir, importer } = await service();
     const fx = desktopFixture();

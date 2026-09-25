@@ -669,6 +669,10 @@ class DesktopImporter {
       }
       case 'cron': {
         if (!value || value.id !== item.key) throw new ImportError('BAD_VALUE', 'the cron job does not match the plan');
+        // System jobs (C2's cases:wakeups) belong to the receiving core, which
+        // creates its own. The offline import --from writer adds straight to the
+        // cron store, so refuse one here whatever the desktop sent.
+        if (value.system === true) throw new ImportError('BAD_VALUE', 'a system job is not imported; the service makes its own');
         // Written only if the id is still absent (fix round 1, I4).
         if (this.targets.cron.has(item.key)) {
           return { note: 'a cron job with this id was added to the service after the plan was made; not overwritten' };
