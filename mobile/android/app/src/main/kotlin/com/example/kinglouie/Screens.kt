@@ -186,9 +186,12 @@ fun Detail(model: AppModel, item: PendingItem, onBack: () -> Unit) {
             val status = item.status
             if (status != null) Text("Status: $status", Modifier.padding(top = 12.dp))
             else Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(top = 12.dp)) {
-                Button({ model.decide(item, true) }, enabled = item.timeLeftMs > 0) { Text("Approve") }
-                OutlinedButton({ model.decide(item, false) }, enabled = item.timeLeftMs > 0) { Text("Deny") }
+                val open = item.timeLeftMs > 0 && !item.deciding
+                Button({ model.decide(item, true) }, enabled = open) { Text("Approve") }
+                OutlinedButton({ model.decide(item, false) }, enabled = open) { Text("Deny") }
             }
+            // The node-signed status on demand: one tap, one signed fetch.
+            if (model.mode == AppMode.LIVE) TextButton({ model.openPushed(item.id) }) { Text("Refresh status") }
         }
     }
 }

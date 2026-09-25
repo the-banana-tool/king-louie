@@ -42,11 +42,15 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import java.net.URI
+import java.security.GeneralSecurityException
+import java.security.ProviderException
 
 /** A message meant for the owner as it stands (already worded and escaped). */
 class OwnerMessage(message: String) : Exception(message)
@@ -107,6 +111,9 @@ class PendingItem(
     initialStatus: String?
 ) {
     var status by mutableStateOf(initialStatus)
+
+    /** An approve or deny for this item is being signed or sent. */
+    var deciding by mutableStateOf(false)
 
     /** From receipt, on the monotonic clock. */
     val timeLeftMs: Long get() = (expiresInMs - (SystemClock.elapsedRealtime() - receivedAtMs)).coerceAtLeast(0)
@@ -177,9 +184,16 @@ class AppModel(context: Context) {
         storage.mode = m
     }
 
-    private suspend fun sign(k: DeviceKey, data: ByteArray, title: String, description: String? = null): ByteArray {
+    /**
+     * One biometric prompt at a time, app-wide: prompts on one activity share
+     * its BiometricViewModel, so a second live prompt would take over the
+     * first one's callback and leave it waiting forever.
+     */
+    private val signLock = Mutex()
+
+    private suspend fun sign(k: DeviceKey, data: ByteArray, title: String, description: String? = null): ByteArray = signLock.withLock {
         val a = activity ?: throw OwnerMessage("Open King Louie to sign.")
-        return k.sign(a, data, title, description)
+        k.sign(a, data, title, description)
     }
 
     private suspend fun signEnvelope(k: DeviceKey, message: JsonObject, title: String, description: String? = null): Envelope {
@@ -199,6 +213,7 @@ class AppModel(context: Context) {
     /** The words the owner sees. Never a key, signature or code; relay text is escaped like any display text. */
     private fun describe(e: Throwable): String = when (e) {
         is KeyInvalidatedException -> DeviceKey.INVALIDATED_MESSAGE
+        is KeyUnavailableException -> e.message ?: ""
         is OwnerMessage -> e.message ?: ""
         is ProtocolException -> "Refused as malformed: ${Display.escape(e.message ?: "")}."
         is BiometricException -> when (e.code) {
@@ -212,7 +227,7 @@ class AppModel(context: Context) {
             "rate_limited" -> e.retryAfter?.let { "The relay is busy. Try again in $it s." } ?: "The relay is busy. Try again shortly."
             "code_closed" -> "This pairing code was already used or is closed. Run enroll-device on the node for a new one."
             "unknown_code" -> "This code is unknown or already closed. Run enroll-device on the node for a new one."
-            "already_claimed" -> "Another phone already used this pairing code. Run enroll-device on the node for a new one."
+            "already_claimed" -> "This code was already used."
             "unknown_invite" -> "This invite is used, expired or unknown. Ask the other phone for a new one."
             "node_offline" -> "The node is offline."
             "gone" -> "Too late — this request has expired."
@@ -248,10 +263,14 @@ class AppModel(context: Context) {
 
     /**
      * The key for a pairing or invite: the existing one unless Android
-     * confirms it is invalidated, and only then a new one. A transient error
-     * leaves the existing key alone.
+     * confirms it is invalidated (KeyInvalidatedException), and only then a
+     * new one. A transient error, KeyUnavailableException included,
+     * propagates and leaves the existing key alone.
      */
     private fun ensureKey(): DeviceKey {
+        // A load that failed at startup is tried again (it throws on a
+        // Keystore error), so an enrolled alias is never overwritten by create().
+        if (key == null) key = DeviceKey.load()
         key?.let { existing ->
             try {
                 existing.checkUsable()
@@ -267,18 +286,26 @@ class AppModel(context: Context) {
 
     // Demo
 
+    /**
+     * Also runs from Application.onCreate when the app was left in demo. The
+     * demo fleet needs Ed25519 in java.security; without it the app goes back
+     * to Welcome (saved, so a restart does not try again) instead of crashing.
+     */
     fun startDemo() {
-        val fleet = DemoFleet()
-        demo = fleet
         client = null
-        changeMode(AppMode.DEMO)
         pending.clear()
-        listOf("nvidia-smi --gpu-reset", "rm -rf ~/Downloads/old", "systemctl restart site").forEachIndexed { i, command ->
-            try {
-                receive(JsonObject(mapOf("envelope" to fleet.request(i, command).json, "expires_in_ms" to jsonNumber("300000"), "status" to JsonNull)), fleet.pins)
-            } catch (e: ProtocolException) {
-                banner = describe(e)
-            }
+        try {
+            val fleet = DemoFleet()
+            val requests = listOf("nvidia-smi --gpu-reset", "rm -rf ~/Downloads/old", "systemctl restart site").mapIndexed { i, command -> fleet.request(i, command) }
+            demo = fleet
+            changeMode(AppMode.DEMO)
+            requests.forEach { receive(JsonObject(mapOf("envelope" to it.json, "expires_in_ms" to jsonNumber("300000"), "status" to JsonNull)), fleet.pins) }
+        } catch (e: Exception) {
+            if (e !is GeneralSecurityException && e !is ProviderException && e !is ProtocolException) throw e
+            demo = null
+            pending.clear()
+            changeMode(AppMode.WELCOME)
+            banner = "The demo needs Ed25519 signatures, which this phone does not provide."
         }
     }
 
@@ -297,6 +324,10 @@ class AppModel(context: Context) {
     fun scanned(text: String) = scope.launch {
         try {
             val payload = Messages.decodeQr(text.trim())
+            if (pairing) {
+                banner = "A pairing is already under way. Wait for it to finish."
+                return@launch
+            }
             when (payload["t"].str()) {
                 "kl.pair" -> pairAtConsole(payload)
                 "kl.invite" -> claimInvite(payload)
@@ -400,7 +431,12 @@ class AppModel(context: Context) {
                 val message = Messages.consoleEnroll(device, codeId, code, Timestamps.string(now), Timestamps.string(now.plusSeconds(600)), Messages.randomNonce())
                 val envelope = signEnvelope(k, message, "Enroll this phone", "Approver for ${Display.escape(pin.name)}")
                 fingerprintToCompare = "d-" + Identifiers.fingerprintGroups(k.deviceId)
-                api.consoleEnroll(codeId, envelope)
+                try {
+                    api.consoleEnroll(codeId, envelope)
+                } catch (e: RelayException) {
+                    if (e.code == "already_claimed") throw OwnerMessage("Another phone already used this pairing code. Run enroll-device on the node for a new one.")
+                    throw e
+                }
                 consoleResult(api, codeId)
             } catch (e: Exception) {
                 restore(before)
@@ -547,8 +583,9 @@ class AppModel(context: Context) {
             return
         }
         pollProblem = null
-        isPolling = true
+        // Set inside the job, so a job cancelled before it starts never leaves "Checking…" behind.
         pollJob = scope.launch {
+            isPolling = true
             try {
                 val items = api.approvals(25)
                 fingerprintToCompare = null
@@ -559,6 +596,9 @@ class AppModel(context: Context) {
                 throw e
             } catch (e: KeyInvalidatedException) {
                 dropInvalidKey()
+            } catch (e: KeyUnavailableException) {
+                banner = describe(e)
+                pollProblem = describe(e)
             } catch (e: RelayException) {
                 pruneExpired()
                 // A request that fails device auth counts against the relay's
@@ -575,16 +615,28 @@ class AppModel(context: Context) {
     }
 
     /** Approve or deny: a fresh biometric signature over the response, and only for an action whose hash the node signed. */
-    fun decide(item: PendingItem, approve: Boolean) = scope.launch {
+    fun decide(item: PendingItem, approve: Boolean) {
+        if (item.deciding) return
+        item.deciding = true
+        scope.launch {
+            try {
+                decideNow(item, approve)
+            } finally {
+                item.deciding = false
+            }
+        }
+    }
+
+    private suspend fun decideNow(item: PendingItem, approve: Boolean) {
         if (item.timeLeftMs == 0L) {
             setStatus(item.id, "expired")
             banner = "Too late — this request has expired."
-            return@launch
+            return
         }
         val action = item.message["action"]
         if (action == null || item.message["action_hash"].str() != Digest.sha256B64url(Jcs.bytes(action))) {
             banner = "This request's action does not match its signed hash. Nothing was signed."
-            return@launch
+            return
         }
         try {
             val fleet = demo
@@ -592,13 +644,13 @@ class AppModel(context: Context) {
                 val response = Messages.response(item.message, if (approve) "approve" else "deny", fleet.deviceId, Timestamps.string(java.time.Instant.now()))
                 Envelope.seal(response, fleet.deviceId) { fleet.sign(it) }
                 setStatus(item.id, if (approve) "approved (demo)" else "denied (demo)")
-                return@launch
+                return
             }
             val k = key
             val api = client
             if (k == null || api == null) {
                 banner = "This phone is not paired with a relay."
-                return@launch
+                return
             }
             val response = Messages.response(item.message, if (approve) "approve" else "deny", k.deviceId, Timestamps.string(api.now()))
             val summary = item.display["summary"].str() ?: "this action"
@@ -607,9 +659,9 @@ class AppModel(context: Context) {
             if (item.timeLeftMs == 0L) {
                 setStatus(item.id, "expired")
                 banner = "Too late — this request has expired."
-                return@launch
+                return
             }
-            val reply = sendResponse(api, item, envelope) ?: return@launch
+            val reply = sendResponse(api, item, envelope) ?: return
             // Only accepted: true with delivered: true is a verdict the node applied; null is never approval.
             when (val outcome = ResponseOutcome.from(reply)) {
                 is ResponseOutcome.Accepted -> setStatus(item.id, if (approve) "approved" else "denied")
@@ -839,6 +891,10 @@ class AppModel(context: Context) {
                 api.claimInvite(inviteId, device, mac)
             } catch (e: Exception) {
                 restore(before)
+                // A 404 here is about the invite (used, expired or unknown), never a console code.
+                if (e is RelayException && (e.status == 404 || e.code in setOf("already_claimed", "unknown_invite"))) {
+                    throw OwnerMessage("This invite is used, expired or unknown. Ask the other phone for a new one.")
+                }
                 throw e
             }
             fingerprintToCompare = "d-" + Identifiers.fingerprintGroups(k.deviceId)
@@ -865,9 +921,13 @@ class AppModel(context: Context) {
 
     // Push
 
+    /**
+     * Keeps the token only. It is sent after a check that got through or a
+     * pairing that finished (sendPushToken), never at startup: each send is a
+     * signed request, a fingerprint prompt on this phone.
+     */
     fun registerPushToken(token: String) {
         storage.pushToken = token
-        scope.launch { sendPushToken() }
     }
 
     /**

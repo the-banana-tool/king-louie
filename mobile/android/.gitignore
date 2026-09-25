@@ -5,4 +5,3 @@ app/src/fcm/google-services.json
 .gradle/
 .kotlin/
 build/
-app/build/

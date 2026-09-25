@@ -8,6 +8,8 @@ import androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG
 import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.example.kinglouie.protocol.B64Url
 import com.example.kinglouie.protocol.Identifiers
 import com.example.kinglouie.protocol.P1363
@@ -30,6 +32,13 @@ import kotlin.coroutines.resumeWithException
  */
 class KeyInvalidatedException : Exception(DeviceKey.INVALIDATED_MESSAGE)
 
+/**
+ * The Keystore could not hand out the key this time (an UnrecoverableKeyException,
+ * which Keystore2 also raises for transient failures). Not proof the key is
+ * gone: nothing deletes or replaces the key because of it; the owner retries.
+ */
+class KeyUnavailableException : Exception("This phone's key store did not answer. Try again in a moment.")
+
 /** The biometric prompt ended without a signature (cancelled, locked out, …). The key itself is fine. */
 class BiometricException(val code: Int, message: String) : Exception(message)
 
@@ -46,15 +55,17 @@ class DeviceKey private constructor(private val publicKey: ECPublicKey) {
     /**
      * A Signature initialised with the key, without a prompt: per-use
      * authentication is asked for only when it signs. Throws
-     * KeyInvalidatedException only when Android says the key is gone for good.
+     * KeyInvalidatedException only when the entry is missing or Android
+     * raises KeyPermanentlyInvalidatedException; an UnrecoverableKeyException
+     * becomes the retryable KeyUnavailableException.
      */
     private fun initialised(): Signature {
-        val stored: PrivateKey? = try {
-            keyStore().getKey(ALIAS, null) as? PrivateKey
+        val stored = try {
+            keyStore().getKey(ALIAS, null)
         } catch (e: UnrecoverableKeyException) {
-            null
+            throw KeyUnavailableException()
         }
-        val key = stored ?: throw KeyInvalidatedException()
+        val key = stored as? PrivateKey ?: throw KeyInvalidatedException()
         return Signature.getInstance("SHA256withECDSA").apply {
             try {
                 initSign(key)
@@ -64,27 +75,50 @@ class DeviceKey private constructor(private val publicKey: ECPublicKey) {
         }
     }
 
-    /** Throws KeyInvalidatedException when the key is confirmed unusable; any other error is not proof of that. */
+    /** Throws KeyInvalidatedException when the key is confirmed unusable; any other error (KeyUnavailableException included) is not proof of that. */
     fun checkUsable() {
         initialised()
     }
 
-    /** One biometric prompt, one signature (raw r||s). Must be called on the main thread. */
+    /**
+     * One biometric prompt, one signature (raw r||s). Must be called on the
+     * main thread, one prompt at a time (AppModel serialises it): prompts on
+     * one activity share its BiometricViewModel, so a second prompt would take
+     * over the first one's callback. If the activity is destroyed (including a
+     * configuration change, which resets that callback), the prompt ends as
+     * ERROR_CANCELED instead of never answering.
+     */
     suspend fun sign(activity: FragmentActivity, data: ByteArray, title: String, description: String? = null): ByteArray {
         val signature = initialised()
+        val lifecycle = activity.lifecycle
+        if (lifecycle.currentState == Lifecycle.State.DESTROYED) {
+            throw BiometricException(BiometricPrompt.ERROR_CANCELED, "The app closed before the fingerprint prompt.")
+        }
         val authorized = suspendCancellableCoroutine<Signature> { cont ->
             val executor = ContextCompat.getMainExecutor(activity)
+            var observer: LifecycleEventObserver? = null
+            // Every resume goes through here: at most once, and only while the caller still waits.
+            fun finish(result: Result<Signature>) {
+                observer?.let { lifecycle.removeObserver(it) }
+                observer = null
+                if (!cont.isActive) return
+                result.fold({ cont.resume(it) }, { cont.resumeWithException(it) })
+            }
             val prompt = BiometricPrompt(activity, executor, object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
                     val s = result.cryptoObject?.signature
-                    if (s == null) cont.resumeWithException(BiometricException(-1, "The fingerprint prompt returned no signature."))
-                    else cont.resume(s)
+                    finish(if (s == null) Result.failure(BiometricException(-1, "The fingerprint prompt returned no signature.")) else Result.success(s))
                 }
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                    cont.resumeWithException(BiometricException(errorCode, errString.toString()))
+                    finish(Result.failure(BiometricException(errorCode, errString.toString())))
                 }
             })
+            observer = LifecycleEventObserver { _, event ->
+                if (event == Lifecycle.Event.ON_DESTROY) {
+                    finish(Result.failure(BiometricException(BiometricPrompt.ERROR_CANCELED, "The app closed during the fingerprint prompt.")))
+                }
+            }.also { lifecycle.addObserver(it) }
             val info = BiometricPrompt.PromptInfo.Builder()
                 .setTitle(title)
                 .apply { if (!description.isNullOrEmpty()) setDescription(description) }
@@ -92,7 +126,13 @@ class DeviceKey private constructor(private val publicKey: ECPublicKey) {
                 .setNegativeButtonText("Cancel")
                 .build()
             prompt.authenticate(info, BiometricPrompt.CryptoObject(signature))
-            cont.invokeOnCancellation { executor.execute { prompt.cancelAuthentication() } }
+            cont.invokeOnCancellation {
+                executor.execute {
+                    observer?.let { lifecycle.removeObserver(it) }
+                    observer = null
+                    prompt.cancelAuthentication()
+                }
+            }
         }
         authorized.update(data)
         return P1363.fromDer(authorized.sign())
