@@ -1,0 +1,200 @@
+openapi: 3.1.0
+info:
+  title: Errands API
+  version: 1.0.0
+  description: >
+    The generic HTTP errands API the King Louie phone-agent executor speaks.
+    A provider runs a phone agent that places calls on the node's behalf and
+    reports what happened. King Louie polls; the webhook only hints to poll.
+servers:
+  - url: https://errands.example.com
+security:
+  - bearer: []
+paths:
+  /jobs:
+    post:
+      summary: Create a job
+      description: >
+        A retry with the same Idempotency-Key and the same body returns the
+        existing job (200). The same key with a different body is 409.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, description: "sha256hex(JCS({caseId, envelopeId, n}))" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/JobRequest' }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Job' } } } }
+        '200': { description: Idempotent replay, content: { application/json: { schema: { $ref: '#/components/schemas/Job' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '5XX': { $ref: '#/components/responses/Error' }
+    get:
+      summary: Find jobs by external reference
+      parameters:
+        - name: externalRef
+          in: query
+          required: true
+          schema: { type: string, description: "<caseId>/<jobId>, never a slug" }
+      responses:
+        '200':
+          description: Matching jobs
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [jobs]
+                properties:
+                  jobs: { type: array, items: { $ref: '#/components/schemas/Job' } }
+  /jobs/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      summary: Job status
+      responses:
+        '200': { description: The job, content: { application/json: { schema: { $ref: '#/components/schemas/Job' } } } }
+        '404': { $ref: '#/components/responses/Error' }
+    delete:
+      summary: Cancel a job
+      responses:
+        '200': { description: The cancelled job, content: { application/json: { schema: { $ref: '#/components/schemas/Job' } } } }
+        '404': { $ref: '#/components/responses/Error' }
+  /jobs/{id}/results:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+      - { name: after, in: query, required: false, schema: { type: string, description: Id of the last record already seen } }
+    get:
+      summary: Results after a cursor, oldest first
+      responses:
+        '200':
+          description: A page of records
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [records]
+                properties:
+                  records: { type: array, items: { $ref: '#/components/schemas/Record' } }
+                  next: { type: [string, 'null'], description: Pass as `after` to get the next page }
+        '404': { $ref: '#/components/responses/Error' }
+webhooks:
+  jobChanged:
+    post:
+      summary: Optional hint that a job changed; King Louie stage 3 ignores the body and polls
+      parameters:
+        - { name: X-Errands-Signature, in: header, required: true, schema: { type: string, description: HMAC-SHA256 of the body with a shared secret } }
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { jobId: { type: string }, externalRef: { type: string } } }
+      responses:
+        '204': { description: Accepted }
+components:
+  securitySchemes:
+    bearer: { type: http, scheme: bearer }
+  responses:
+    Error:
+      description: "Error. Status mapping: 401/403 auth, 404 not-found, 409 conflict, 422 invalid, 5xx unavailable."
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    RateLimited:
+      description: Too many requests
+      headers:
+        Retry-After: { schema: { type: integer, description: Seconds to wait } }
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, enum: [auth, not-found, conflict, invalid, rate-limited, unavailable, forced] }
+            message: { type: string }
+    JobRequest:
+      type: object
+      required: [externalRef, text, recipients, maxAttemptsPerContact, window]
+      properties:
+        externalRef: { type: string, description: "<caseId>/<jobId>" }
+        intent: { type: string }
+        text: { type: string, description: What the agent says; already passed King Louie's outbound gate }
+        recipients:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [address]
+            properties:
+              address: { type: string, description: E.164 phone number }
+              name: { type: string }
+        facts:
+          type: array
+          items:
+            type: object
+            properties: { id: { type: string }, statement: { type: string }, value: {} }
+        expect:
+          type: array
+          description: Questions whose answers come back in Record.fields under the same key
+          items:
+            type: object
+            required: [key, question]
+            properties: { key: { type: string, pattern: '^q[0-9]+$' }, question: { type: string } }
+        maxCostUsd: { type: number, minimum: 0 }
+        maxAttemptsPerContact: { type: integer, minimum: 1 }
+        window:
+          type: object
+          required: [notBefore, notAfter, tz]
+          properties:
+            notBefore: { type: string, format: date-time }
+            notAfter: { type: string, format: date-time }
+            tz: { type: string, description: IANA zone the window days were computed in }
+        extra: { type: object, description: Package payloadSchema fields (strings, numbers, booleans) }
+    Job:
+      type: object
+      required: [id, state, externalRef, contacts]
+      properties:
+        id: { type: string }
+        state: { type: string, enum: [queued, running, waiting, done, failed, cancelled] }
+        externalRef: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        costUsd: { type: number, description: Total cost so far }
+        contacts:
+          type: array
+          items:
+            type: object
+            required: [id, address, normalizedAddress, state]
+            properties:
+              id: { type: string }
+              address: { type: string }
+              normalizedAddress: { type: string, description: The number the provider will dial; must equal the node's }
+              state: { type: string, enum: [pending, in-progress, answered, no-answer, voicemail, failed, refused] }
+              attempts: { type: integer }
+              lastAttemptAt: { type: [string, 'null'], format: date-time }
+    Record:
+      type: object
+      required: [id, contactId, kind, at, summary]
+      properties:
+        id: { type: string }
+        contactId: { type: string }
+        kind: { type: string, enum: [call, voicemail, sms] }
+        at: { type: string, format: date-time }
+        summary: { type: string }
+        outcome: { type: string, enum: [answered, no-answer, voicemail, refused, failed] }
+        fields:
+          type: object
+          additionalProperties:
+            type: object
+            required: [value]
+            properties:
+              value: {}
+              type: { type: string, enum: [text, number, money, date] }
+              unit: { type: string }
