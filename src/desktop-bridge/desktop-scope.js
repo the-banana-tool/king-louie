@@ -200,8 +200,13 @@ function createDesktopScope({ dataDir, context, onPathWritten = () => {} }) {
   // source: 'service'. Without checking that regardless of ownedByDesktop,
   // an approval-dialog response for that same key (rules.json still says the
   // desktop owns it) would silently overwrite the service's rule again.
+  // Returns whether the rule was actually applied (fix round 2, residual
+  // I3): a caller that needs to tell a real import from a silent no-op —
+  // desktop-import.js reports "kept the service's rule" rather than
+  // claiming success — checks this return value instead of assuming every
+  // call took effect.
   const addPermissionRule = (rule) => {
-    if (!rule || !rule.tool || !rule.action) return;
+    if (!rule || !rule.tool || !rule.action) return false;
     const key = ruleKey(rule.tool, rule.pattern, rule.action);
     const ownedByDesktop = listRules().some((r) => ruleKey(r.tool, r.pattern, r.action) === key);
     const existing = context.getPermissionRules().find((r) => ruleKey(r.tool, r.pattern, r.action) === key);
@@ -209,18 +214,19 @@ function createDesktopScope({ dataDir, context, onPathWritten = () => {} }) {
       log.warn('refusing to take over a rule the service has reclaimed', {
         tool: rule.tool, pattern: rule.pattern || '*', action: rule.action
       });
-      return;
+      return false;
     }
     if (!ownedByDesktop && existing) {
       log.warn('refusing to replace an existing rule the desktop does not own', {
         tool: rule.tool, pattern: rule.pattern || '*', action: rule.action, existingSource: existing.source || null
       });
-      return;
+      return false;
     }
     context.addPermissionRule(rule);
     const rules = listRules().filter((r) => ruleKey(r.tool, r.pattern, r.action) !== key);
     rules.push({ tool: rule.tool, pattern: rule.pattern || '*', action: rule.action });
     write(RULES_FILE, 'rules', rules);
+    return true;
   };
 
   // Refuses unless the desktop's own record already owns this exact key

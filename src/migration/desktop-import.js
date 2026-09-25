@@ -112,23 +112,66 @@ function safeRelPath(relPath) {
   return parts.join('/');
 }
 
-// What the import never writes, no matter what the desktop sends (fix round
-// 1, C1): .git/config (could set core.fsmonitor, a hook or a filter driver
-// that runs a program on the service account's next `git status`/`add`),
-// .git/hooks/** (the actual hook scripts) and .kl/no-hooks/** (the empty
-// directory src/cases/git.js points core.hooksPath at — importable content
-// there would defeat that). Matched case-insensitively, per path segment, so
-// ".GIT/Config" or a mixed-case "Hooks" directory can't slip past a literal
-// comparison. The case's own git config is recreated after landing (see
-// DesktopImporter#finish) instead of trusting whatever the desktop sent.
+// What the import may write, may silently drop, or must refuse outright,
+// for a case file (fix round 1 C1, hardened in fix round 2 after the
+// reviewer's probe found a bypass). Matched case-insensitively, per path
+// segment.
+//
+// Round 1 blocked only the exact paths .git/config, .git/hooks/** and
+// .kl/no-hooks/** at the top of the case. The reviewer's probe showed two
+// ways past that: a ".git" *file* at the case root containing
+// "gitdir: inner/.git" (a normal git indirection — "gitfile" — that makes
+// git treat inner/.git as the real git directory for the whole working
+// tree), and a nested "inner/.git/config" (first path segment "inner", so
+// the old check's `segs[0] === '.git'` test never even looked at it). A
+// .gitattributes file naming a filter defined in that nested config, run on
+// `git add`, then executed the filter as the service account.
+//
+// Round 2's rule is an allow-list for what a LEADING .git/ may contain
+// (HEAD, objects/**, refs/**, packed-refs, info/exclude — everything else
+// under a leading .git/, such as config or hooks/**, is silently skipped,
+// same as round 1's git/config and .git/hooks/**), plus two outright
+// refusals that a silent skip cannot express: a ".git" segment anywhere but
+// the very start of the path (closes the "inner/.git/config" and
+// ".git/modules/x/config" routes — no legitimate case file ever needs a
+// nested git directory), and a bare ".git" *file* (a real case's own .git
+// is always a directory; a file there is exactly the gitfile trick). Both
+// refusals throw — the caller must never plant them, not even to skip them —
+// unlike a plain skip, which is a normal, "accepted but not written" outcome
+// counted the same way a landed file is (fix round 2, M8).
+//
+// Exported so the M8 count on the receiving side, and Task 9's desktop-side
+// walker, use exactly this decision — never a hand-rolled copy that could
+// silently drift out of step with what actually lands.
 function isSkippedCaseFile(rel) {
   const segs = rel.toLowerCase().split('/');
   if (segs.length === 2 && segs[0] === '.kl' && segs[1] === 'lock') return true;
-  if (segs[0] === '.git' && segs[1] === 'config' && segs.length === 2) return true;
-  if (segs[0] === '.git' && segs[1] === 'hooks') return true;
   if (segs[0] === '.kl' && segs[1] === 'no-hooks') return true;
-  if (segs[0] === '.git' && rel.toLowerCase().endsWith('.lock')) return true;
-  return false;
+  for (let i = 1; i < segs.length; i++) {
+    if (segs[i] === '.git') throw new ImportError('BAD_PATH', `${rel} has a .git segment that is not at the start of the path`);
+  }
+  if (segs[0] !== '.git') return false;
+  if (segs.length === 1) throw new ImportError('BAD_PATH', `${rel}: a ".git" file is not allowed`);
+  if (segs.length === 2 && (segs[1] === 'head' || segs[1] === 'packed-refs')) return false;
+  if (segs[1] === 'objects' || segs[1] === 'refs') return false;
+  if (segs.length === 3 && segs[1] === 'info' && segs[2] === 'exclude') return false;
+  return true; // everything else under a leading .git/ (config, hooks/**, etc.) is skipped
+}
+
+// Before trusting a landed (or about-to-be-initialized) case directory to
+// initRepo, make sure its .git — if present at all — really is a directory
+// (fix round 2, C1): defence in depth alongside isSkippedCaseFile's refusal
+// of a bare ".git" file, in case that file ever reached disk by some other
+// route than a case-file write.
+function assertGitDirSafe(caseDir) {
+  const gitPath = path.join(caseDir, '.git');
+  let st;
+  try {
+    st = fs.lstatSync(gitPath);
+  } catch {
+    return; // absent — initRepo will create it fresh
+  }
+  if (!st.isDirectory()) throw new ImportError('BAD_PATH', `${gitPath} exists but is not a directory`);
 }
 
 // Whether `child` is strictly inside `parent`. Compares the *first path
@@ -429,7 +472,7 @@ class DesktopImporter {
         log.warn(`importing ${category}${SECRET_CATEGORIES.has(category) ? '' : ` ${key}`} failed: ${err.message}`);
         results.push({ category, key, ok: false, error: err.message });
         if (category === 'case') {
-          const files = plan.caseFiles.get(key) || { count: 0, bytes: 0, failed: null };
+          const files = plan.caseFiles.get(key) || { count: 0, bytes: 0, failed: null, seen: new Map() };
           files.failed = files.failed || err.message;
           plan.caseFiles.set(key, files);
         } else {
@@ -482,8 +525,13 @@ class DesktopImporter {
         // holds — applies to an imported rule exactly as it does to one
         // added interactively. 'allow' rules are permitted; spec §8 does
         // not exclude them, only hooks/MCP/channels.
-        this.scope.addPermissionRule({ tool, pattern, action, source: 'desktop-import' });
-        return {};
+        //
+        // The scope can refuse this silently (a race since plan() also
+        // matched — the service claimed the key in between); its return
+        // value says which, so that refusal is reported rather than
+        // appearing to have imported the rule (fix round 2, residual I3).
+        const added = this.scope.addPermissionRule({ tool, pattern, action, source: 'desktop-import' });
+        return added ? {} : { note: "kept the service's rule" };
       }
       case 'alwaysApprove':
         ctx.setToolAlwaysApprove(item.key, true);
@@ -573,11 +621,11 @@ class DesktopImporter {
     }
   }
 
-  async writeChat(plan, item, value) {
-    if (!value || value.id !== item.key || !Array.isArray(value.messages)) throw new ImportError('BAD_VALUE', 'the chat does not match the plan');
-    const liveChats = this.context.getChats();
+  // Re-checks presence/updatedAt against `liveChats` exactly as write()'s
+  // pre-checkPath call did (fix round 1, I4); returns a result to short
+  // -circuit on, or null if the write is still safe to make.
+  chatRaceCheck(plan, item, value, liveChats) {
     if (item.action === 'new') {
-      // Written only if the id is still absent (fix round 1, I4).
       const collision = liveChats.find((c) => c.id === item.targetKey);
       if (collision) {
         return {
@@ -586,10 +634,6 @@ class DesktopImporter {
         };
       }
     } else if (item.action === 'update') {
-      // Updated only if the live target's updatedAt is still what the plan
-      // saw (fix round 1, I4): if the service's copy moved on since, this
-      // is a real conflict, not a routine race — surfaced as attention,
-      // never silently overwritten or silently dropped.
       const target = liveChats.find((c) => c.id === item.targetKey);
       const expected = plan.chatExpected.get(item.targetKey);
       if (!target || target.updatedAt !== expected) {
@@ -599,9 +643,24 @@ class DesktopImporter {
         };
       }
     }
+    return null;
+  }
+
+  async writeChat(plan, item, value) {
+    if (!value || value.id !== item.key || !Array.isArray(value.messages)) throw new ImportError('BAD_VALUE', 'the chat does not match the plan');
+    // Fail fast if the race has already happened, before doing any of the
+    // work below (in particular the checkPath await).
+    const early = this.chatRaceCheck(plan, item, value, this.context.getChats());
+    if (early) return early;
+
     let note = null;
     let chat = { ...value };
     if (chat.workingDirectory) {
+      // This await is exactly where fix round 2 found the gap: liveChats
+      // read before it can go stale by the time setChats below runs, so
+      // whatever changed the service's chats during this call — another
+      // apply(), a live chat edit — would be silently overwritten by a
+      // write built from a snapshot taken before the wait.
       const check = await this.checkPath(chat.workingDirectory);
       if (!check.readable || !check.isDirectory) {
         note = `the service cannot read the working directory ${chat.workingDirectory}; it was dropped`;
@@ -611,6 +670,14 @@ class DesktopImporter {
     chat = item.action === 'copy'
       ? { ...chat, id: item.targetKey, title: `${chat.title || 'Chat'}${COPY_SUFFIX}` }
       : { ...chat, id: item.targetKey };
+
+    // Read live state again immediately before writing, with no await
+    // between this read and setChats, and re-run the same check against
+    // it (fix round 2, I4): this is the read setChats below actually acts
+    // on, so it — and the presence/updatedAt decision — must be fresh.
+    const liveChats = this.context.getChats();
+    const late = this.chatRaceCheck(plan, item, value, liveChats);
+    if (late) return late;
     const updated = item.action === 'update'
       ? liveChats.map((c) => (c.id === item.targetKey ? chat : c))
       : [chat, ...liveChats.filter((c) => c.id !== chat.id)];
@@ -641,14 +708,42 @@ class DesktopImporter {
   writeCaseFile(plan, item, value) {
     if (!value || typeof value.relPath !== 'string' || typeof value.b64 !== 'string') throw new ImportError('BAD_VALUE', 'a case file needs relPath and b64');
     const rel = safeRelPath(value.relPath);
-    if (isSkippedCaseFile(rel)) return { note: 'not imported: git internals are recreated by the service, not carried over' };
+    // isSkippedCaseFile throws for a path this import refuses outright (a
+    // nested .git segment, a bare ".git" file) — that throw must happen
+    // before any accounting below, so a refused path is never counted as
+    // received (fix round 2, M8: only *accepted* paths — landed or
+    // deliberately skipped — count; a refusal is neither).
+    const land = !isSkippedCaseFile(rel);
+    const offset = Number.isInteger(value.offset) ? value.offset : 0;
+    const data = Buffer.from(value.b64, 'base64');
+
+    // Every accepted relPath is counted once, tracked by name rather than
+    // by "was this the chunk at offset 0" (fix round 2, M8): a desktop
+    // retry that resends a whole file from scratch (offset 0 again, for a
+    // relPath already seen) resets that file's byte tally instead of
+    // counting it a second time or adding its bytes on top of the earlier,
+    // now-superseded attempt.
+    const files = plan.caseFiles.get(item.key) || { count: 0, bytes: 0, failed: null, seen: new Map() };
+    const prevSize = files.seen.get(rel);
+    if (offset === 0) {
+      if (prevSize === undefined) files.count += 1;
+      else files.bytes -= prevSize;
+      files.seen.set(rel, data.length);
+      files.bytes += data.length;
+    } else {
+      if (prevSize === undefined || prevSize !== offset) throw new ImportError('BAD_OFFSET', `${value.relPath}: chunk at ${offset} does not follow the data received`);
+      files.seen.set(rel, prevSize + data.length);
+      files.bytes += data.length;
+    }
+    plan.caseFiles.set(item.key, files);
+
+    if (!land) return { note: 'not imported: git internals are recreated by the service, not carried over' };
+
     const root = this.casesRoot();
     const caseDir = path.join(root, `.import-${plan.planId}`, item.key);
     const target = path.join(caseDir, ...rel.split('/'));
     if (!isInside(caseDir, target)) throw new ImportError('BAD_PATH', `${value.relPath} escapes the case directory`);
     this.ensureRealDirs(root, path.dirname(target));
-    const data = Buffer.from(value.b64, 'base64');
-    const offset = Number.isInteger(value.offset) ? value.offset : 0;
     let existing = null;
     try { existing = fs.lstatSync(target); } catch { existing = null; }
     if (existing && (existing.isSymbolicLink() || !existing.isFile())) throw new ImportError('BAD_PATH', `${value.relPath} is a link or not a file`);
@@ -660,14 +755,6 @@ class DesktopImporter {
       fs.appendFileSync(target, data);
     }
     this.onPathWritten(target);
-    // Counted once per file (only on the chunk that starts it), bytes summed
-    // across every chunk — so a file arriving in several offset chunks isn't
-    // over-counted, but finish()'s M8 short-case check still sees its true
-    // total size.
-    const files = plan.caseFiles.get(item.key) || { count: 0, bytes: 0, failed: null };
-    if (offset === 0) files.count += 1;
-    files.bytes += data.length;
-    plan.caseFiles.set(item.key, files);
     return {};
   }
 
@@ -688,16 +775,45 @@ class DesktopImporter {
     for (const [dir, files] of plan.caseFiles) {
       const k = itemKey('case', dir);
       if (files.failed) { plan.results.set(k, { ok: false, error: files.failed }); continue; }
+      const stagedDir = path.join(staging, dir);
       const dest = path.join(root, dir);
+      if (fs.existsSync(dest)) {
+        plan.results.set(k, { ok: false, error: 'a case with this directory appeared on the service during the import' });
+        continue;
+      }
+      // The case's own git config is never imported (isSkippedCaseFile's
+      // allow-list keeps it out) — recreate it fresh with initRepo's safe
+      // settings (fix round 1, C1) rather than leave the landed repo
+      // running on whatever default git would pick up. Run while the case
+      // is still in staging, before the rename (fix round 2): on failure —
+      // git missing, or assertGitDirSafe's ".git must be a directory" check
+      // — the half-set-up case never reaches its real location; its staged
+      // files are removed and the outcome is reported as attention, not a
+      // hard failure, so a later plan() call offers it as 'new' again
+      // rather than leaving something broken and unfixable in place.
       try {
-        if (fs.existsSync(dest)) throw new ImportError('CASE_EXISTS', 'a case with this directory appeared on the service during the import');
-        fs.renameSync(path.join(staging, dir), dest);
+        assertGitDirSafe(stagedDir);
+        await initRepo(stagedDir);
+      } catch (err) {
+        try {
+          fs.rmSync(stagedDir, { recursive: true, force: true });
+        } catch (rmErr) {
+          log.warn("could not remove a case's staged files after its git setup failed", { dir, error: rmErr.message });
+        }
+        plan.results.set(k, {
+          ok: false,
+          attention: true,
+          error: err.message,
+          note: `the case's git setup failed after landing (${err.message}); its files were removed — import it again`
+        });
+        continue;
+      }
+      try {
+        fs.renameSync(stagedDir, dest);
+        // After initRepo (fix round 2), so onPathWritten sees the files
+        // initRepo itself just wrote (a freshly-created .git, or its
+        // rewritten config), not just what the batch delivered.
         this.reportTree(dest);
-        // The case's own git config is never imported (isSkippedCaseFile
-        // blocks .git/config) — recreate it fresh with initRepo's safe
-        // settings (fix round 1, C1) rather than leave the landed repo
-        // running on whatever default git would pick up.
-        await initRepo(dest);
         // A short delivery — fewer files or fewer bytes than the inventory
         // promised — is surfaced as attention, not silently reported ok
         // (fix round 1, M8): the batch may have been cut short by a
@@ -741,8 +857,16 @@ class DesktopImporter {
       const r = plan.results.get(k);
       if (!r || !r.ok) {
         const error = r ? r.error : 'not sent by the desktop';
-        failures.push({ category: item.category, key: item.key, error });
-        if (SECRET_CATEGORIES.has(item.category)) secretsMissing.push({ category: item.category, key: item.key });
+        // A result explicitly marked attention (fix round 2: a case whose
+        // git setup failed after landing, cleaned up and retryable) is
+        // reported there, not as a failure — it's still unwritten and
+        // still gets no manifest entry, so a later plan() offers it again,
+        // but it isn't a hard error the caller needs to investigate.
+        if (r && r.attention) attention.push({ category: item.category, key: item.key, note: r.note || error });
+        else {
+          failures.push({ category: item.category, key: item.key, error });
+          if (SECRET_CATEGORIES.has(item.category)) secretsMissing.push({ category: item.category, key: item.key });
+        }
         continue;
       }
       if (r.attention) attention.push({ category: item.category, key: item.key, note: r.note });
@@ -812,5 +936,6 @@ module.exports = {
   PLAN_TTL_MS,
   MAX_BATCH_BYTES,
   INSTALL_ID_RE,
-  CASE_DIR_RE
+  CASE_DIR_RE,
+  isSkippedCaseFile
 };

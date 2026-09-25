@@ -12,7 +12,7 @@ const { createHeadlessPrompter } = require('../src/platform/prompter');
 const { addSink } = require('../src/logging');
 const { createDesktopScope } = require('../src/desktop-bridge/desktop-scope');
 const { checkPath } = require('../src/desktop-bridge/check-path');
-const { DesktopImporter, buildImportTargets, MAX_BATCH_BYTES } = require('../src/migration/desktop-import');
+const { DesktopImporter, buildImportTargets, MAX_BATCH_BYTES, isSkippedCaseFile } = require('../src/migration/desktop-import');
 const { MemoryManager, MemoryStore } = require('../src/memory');
 const git = require('../src/cases/git');
 
@@ -30,22 +30,20 @@ after(async () => {
 });
 const tmp = (p = 'kl-import-') => { const d = fs.mkdtempSync(path.join(os.tmpdir(), p)); dirs.push(d); return d; };
 
-// Mirrors DesktopImporter's own isSkippedCaseFile (fix round 1, C1), so a
-// fixture's declared files/bytes count matches what will actually land —
-// otherwise every case import would be flagged 'short' (fix round 1, M8)
-// purely because of a lock file or git internal the importer always drops.
-const isSkippedForCount = (rel) => {
-  const segs = rel.toLowerCase().split('/');
-  if (segs.length === 2 && segs[0] === '.kl' && segs[1] === 'lock') return true;
-  if (segs[0] === '.git' && segs[1] === 'config' && segs.length === 2) return true;
-  if (segs[0] === '.git' && segs[1] === 'hooks') return true;
-  if (segs[0] === '.kl' && segs[1] === 'no-hooks') return true;
-  return false;
-};
-const caseInventoryEntry = (dir, files) => {
-  const kept = files.filter((f) => !isSkippedForCount(f.relPath));
-  return { dir, files: kept.length, bytes: kept.reduce((n, f) => n + Buffer.from(f.b64, 'base64').length, 0) };
-};
+// The receive side counts every accepted relPath — landed AND deliberately
+// skipped alike (fix round 2, M8: Task 9's walker counts every file it
+// sends, not just the ones the service will keep, so both sides have to
+// mean the same thing by "how many files"). A fixture's declared
+// files/bytes is therefore just the totals over every file it sends; no
+// hand-rolled filtering (the old isSkippedForCount) needed or wanted here —
+// that predicate lives only in desktop-import.js now, exported as
+// isSkippedCaseFile, and this file uses that export directly wherever it
+// needs to know whether a specific path lands (never to decide what counts).
+const caseInventoryEntry = (dir, files) => ({
+  dir,
+  files: files.length,
+  bytes: files.reduce((n, f) => n + Buffer.from(f.b64, 'base64').length, 0)
+});
 
 async function service({ cipher = createAesGcmCipher(crypto.randomBytes(32)), now } = {}) {
   const dataDir = tmp();
@@ -352,6 +350,218 @@ describe('DesktopImporter', () => {
     assert.ok(await git.commitAll(caseDir, 'first'), 'the commit succeeded, so no imported or planted hook, config or filter ran');
   });
 
+  // Fix round 2, C1: isSkippedCaseFile is an allow-list for what a LEADING
+  // .git/ may contain, plus two outright refusals a plain skip can't
+  // express. Exercised directly, since these are exactly the boundary
+  // conditions the reviewer's probe (gitfile-probe.js) found a bypass in.
+  describe('isSkippedCaseFile', () => {
+    it('allows exactly HEAD, objects/**, refs/**, packed-refs and info/exclude under a leading .git/', () => {
+      assert.strictEqual(isSkippedCaseFile('.git/HEAD'), false);
+      assert.strictEqual(isSkippedCaseFile('.git/objects/ab/cdef0123'), false);
+      assert.strictEqual(isSkippedCaseFile('.git/refs/heads/main'), false);
+      assert.strictEqual(isSkippedCaseFile('.git/packed-refs'), false);
+      assert.strictEqual(isSkippedCaseFile('.git/info/exclude'), false);
+      assert.strictEqual(isSkippedCaseFile('notes/a.md'), false);
+    });
+    it('skips everything else under a leading .git/, and .kl/lock and .kl/no-hooks/**', () => {
+      assert.strictEqual(isSkippedCaseFile('.git/config'), true);
+      assert.strictEqual(isSkippedCaseFile('.git/hooks/pre-commit'), true);
+      assert.strictEqual(isSkippedCaseFile('.git/info/other'), true);
+      // A git submodule's real config, absorbed under the superproject's
+      // .git — the reviewer's probe's third scenario. Still under a
+      // LEADING .git/, so the allow-list already keeps it from landing.
+      assert.strictEqual(isSkippedCaseFile('.git/modules/x/config'), true);
+      assert.strictEqual(isSkippedCaseFile('.kl/lock'), true);
+      assert.strictEqual(isSkippedCaseFile('.kl/no-hooks/pre-commit'), true);
+    });
+    it('refuses a ".git" segment anywhere but the very start, case-insensitively', () => {
+      assert.throws(() => isSkippedCaseFile('inner/.git/config'), /\.git segment/);
+      assert.throws(() => isSkippedCaseFile('inner/.GIT/config'), /\.git segment/);
+      assert.throws(() => isSkippedCaseFile('a/b/.git'), /\.git segment/);
+    });
+    it('refuses a ".git" that is a file (no sub-path), the gitfile trick', () => {
+      assert.throws(() => isSkippedCaseFile('.git'), /".git" file/);
+    });
+  });
+
+  // Fix round 2, C1: the reviewer's probe combined a ".git" gitfile
+  // (redirecting to "inner/.git") with a nested "inner/.git/config"
+  // defining a filter, run via .gitattributes — and confirmed (run directly
+  // against src/cases/git.js, bypassing the importer) that the filter runs
+  // as the service even with round 1's core.fsmonitor=false hardening.
+  // Sent through the normal import protocol, every part of that structure
+  // that lives under a nested or gitfile-reached .git must be refused
+  // outright, so it can never reach disk in the first place.
+  it('refuses the gitfile + nested config probe scenario, sent through the import protocol', async () => {
+    const { dataDir, importer } = await service();
+    const files = [
+      { relPath: 'notes.md', b64: Buffer.from('# A\n').toString('base64'), mode: 0o644 },
+      { relPath: '.gitattributes', b64: Buffer.from('*.md filter=evil\n').toString('base64'), mode: 0o644 },
+      // The gitfile itself: a FILE named ".git", not a directory.
+      { relPath: '.git', b64: Buffer.from('gitdir: inner/.git\n').toString('base64'), mode: 0o644 },
+      // The nested "real" repo the gitfile points at, carrying the filter.
+      { relPath: 'inner/.git/HEAD', b64: Buffer.from('ref: refs/heads/main\n').toString('base64'), mode: 0o644 },
+      {
+        relPath: 'inner/.git/config',
+        b64: Buffer.from('[core]\n\trepositoryformatversion = 0\n[filter "evil"]\n\tclean = "sh -c \'echo pwned\'"\n').toString('base64'),
+        mode: 0o644
+      }
+    ];
+    const inventory = {
+      installId: 'install-c1-probe', sourceVersion: '26.9.0', chats: [], settingsKeys: [], userProfile: false,
+      permissionRules: [], alwaysApprove: [], providerTokens: [], searchKeys: [], imageKeys: [], vault: [],
+      anthropicOAuth: false, memory: [], cron: [],
+      cases: [caseInventoryEntry('lakeside-lot', files)],
+      customCasesRoot: null, allowedDirectories: [], excluded: [], secrets: 'included'
+    };
+    const plan = await importer.plan({ installId: inventory.installId, inventory });
+    const batch = files.map((f) => ({ category: 'case', key: 'lakeside-lot', value: { ...f, offset: 0 } }));
+    const applied = await importer.apply({ planId: plan.planId, batch });
+    const refused = applied.results.filter((r) => r.ok === false);
+    assert.strictEqual(refused.length, 3, JSON.stringify(applied.results));
+    assert.ok(refused.every((r) => /\.git segment|"\.git" file/.test(r.error)), JSON.stringify(refused));
+
+    // The whole case fails as a result — nothing from it lands, including
+    // the harmless notes.md/.gitattributes that arrived alongside the
+    // malicious paths, and the manifest never records it as done.
+    const report = await importer.finish({ planId: plan.planId });
+    assert.ok(report.failures.some((f) => f.category === 'case' && f.key === 'lakeside-lot'));
+    assert.strictEqual(fs.existsSync(path.join(dataDir, 'cases', 'lakeside-lot')), false);
+    assert.deepStrictEqual(fs.readdirSync(path.join(dataDir, 'cases')).filter((n) => n.startsWith('.import-')), []);
+  });
+
+  // Fix round 2, C1: even if a gitfile-laden case somehow reached staging
+  // by some route other than a case-file write (which the tests above show
+  // is refused), finish() must never call initRepo/commitAll on it — the
+  // reviewer's probe (run directly against src/cases/git.js, confirmed
+  // below) shows that once git treats such a directory as real, its
+  // core.fsmonitor=false hardening does not stop a filter.*.clean command
+  // from running. assertGitDirSafe is the gate that keeps finish() from
+  // ever reaching that point.
+  it('a staged case whose .git is a file is refused before initRepo ever runs, and cleaned up as retryable attention', async () => {
+    const { dataDir, importer } = await service();
+    const files = [{ relPath: 'notes.md', b64: Buffer.from('# A\n').toString('base64'), mode: 0o644 }];
+    const inventory = {
+      installId: 'install-c1-staged', sourceVersion: '26.9.0', chats: [], settingsKeys: [], userProfile: false,
+      permissionRules: [], alwaysApprove: [], providerTokens: [], searchKeys: [], imageKeys: [], vault: [],
+      anthropicOAuth: false, memory: [], cron: [],
+      cases: [caseInventoryEntry('lakeside-lot', files)],
+      customCasesRoot: null, allowedDirectories: [], excluded: [], secrets: 'included'
+    };
+    const plan = await importer.plan({ installId: inventory.installId, inventory });
+    const batch = files.map((f) => ({ category: 'case', key: 'lakeside-lot', value: { ...f, offset: 0 } }));
+    await importer.apply({ planId: plan.planId, batch });
+    // Simulate the gitfile reaching the staged case by some other route
+    // than a normal case-file write (which is already refused above).
+    const staged = path.join(dataDir, 'cases', `.import-${plan.planId}`, 'lakeside-lot');
+    fs.writeFileSync(path.join(staged, '.git'), 'gitdir: /nowhere\n');
+    const marker = path.join(dataDir, 'PWNED');
+
+    const report = await importer.finish({ planId: plan.planId });
+    const attention = report.attention.find((a) => a.category === 'case' && a.key === 'lakeside-lot');
+    assert.ok(attention, JSON.stringify(report.attention));
+    assert.match(attention.note, /import it again/);
+    assert.deepStrictEqual(report.failures, []);
+    assert.strictEqual(fs.existsSync(staged), false, 'the staged case was removed');
+    assert.strictEqual(fs.existsSync(path.join(dataDir, 'cases', 'lakeside-lot')), false, 'it never reached its real location');
+    assert.strictEqual(fs.existsSync(marker), false, 'nothing ran');
+
+    // Retryable: a fresh plan offers it as 'new' again.
+    const again = await importer.plan({ installId: inventory.installId, inventory });
+    assert.strictEqual(actionOf(again, 'case', 'lakeside-lot'), 'new');
+  });
+
+  // Fix round 2, item 3: a case whose git setup fails after landing (git
+  // itself unavailable, here) is removed from staging and reported as
+  // retryable attention rather than a hard, unretryable failure.
+  it('a case whose git setup fails because git is unavailable is removed from staging and reported as retryable attention', async () => {
+    const { dataDir, importer } = await service();
+    const files = [{ relPath: 'case.yaml', b64: Buffer.from('title: Lakeside lot\n').toString('base64'), mode: 0o644 }];
+    const inventory = {
+      installId: 'install-c1-nogit', sourceVersion: '26.9.0', chats: [], settingsKeys: [], userProfile: false,
+      permissionRules: [], alwaysApprove: [], providerTokens: [], searchKeys: [], imageKeys: [], vault: [],
+      anthropicOAuth: false, memory: [], cron: [],
+      cases: [caseInventoryEntry('lakeside-lot', files)],
+      customCasesRoot: null, allowedDirectories: [], excluded: [], secrets: 'included'
+    };
+    const plan = await importer.plan({ installId: inventory.installId, inventory });
+    const batch = files.map((f) => ({ category: 'case', key: 'lakeside-lot', value: { ...f, offset: 0 } }));
+    await importer.apply({ planId: plan.planId, batch });
+
+    const savedPath = process.env.PATH;
+    const savedWinPath = process.env.Path;
+    process.env.PATH = '';
+    if (savedWinPath !== undefined) process.env.Path = '';
+    let report;
+    try {
+      report = await importer.finish({ planId: plan.planId });
+    } finally {
+      process.env.PATH = savedPath;
+      if (savedWinPath !== undefined) process.env.Path = savedWinPath;
+    }
+    assert.deepStrictEqual(report.failures, []);
+    const attention = report.attention.find((a) => a.category === 'case' && a.key === 'lakeside-lot');
+    assert.ok(attention, JSON.stringify(report.attention));
+    assert.match(attention.note, /import it again/);
+    assert.strictEqual(fs.existsSync(path.join(dataDir, 'cases', 'lakeside-lot')), false);
+    assert.deepStrictEqual(fs.readdirSync(path.join(dataDir, 'cases')).filter((n) => n.startsWith('.import-')), []);
+
+    const again = await importer.plan({ installId: inventory.installId, inventory });
+    assert.strictEqual(actionOf(again, 'case', 'lakeside-lot'), 'new');
+  });
+
+  // Fix round 2, M8: the receive side counts every accepted relPath —
+  // landed or deliberately skipped — so a realistic repo (hooks/*.sample,
+  // config, an index.lock) is never wrongly flagged short just because most
+  // of it is intentionally not written to disk.
+  it('counts hooks, config and a lock file as received even though they are skipped, so a realistic repo is never flagged short', async () => {
+    const { importer } = await service();
+    const files = [
+      { relPath: 'case.yaml', b64: Buffer.from('title: Lakeside lot\n').toString('base64'), mode: 0o644 },
+      { relPath: '.git/HEAD', b64: Buffer.from('ref: refs/heads/main\n').toString('base64'), mode: 0o644 },
+      { relPath: '.git/config', b64: Buffer.from('[core]\n\trepositoryformatversion = 0\n').toString('base64'), mode: 0o644 },
+      { relPath: '.git/hooks/pre-commit.sample', b64: Buffer.from('#!/bin/sh\nexit 0\n').toString('base64'), mode: 0o755 },
+      { relPath: '.git/hooks/commit-msg.sample', b64: Buffer.from('#!/bin/sh\nexit 0\n').toString('base64'), mode: 0o755 },
+      { relPath: '.git/index.lock', b64: Buffer.from('').toString('base64'), mode: 0o644 }
+    ];
+    const inventory = {
+      installId: 'install-m8-realistic', sourceVersion: '26.9.0', chats: [], settingsKeys: [], userProfile: false,
+      permissionRules: [], alwaysApprove: [], providerTokens: [], searchKeys: [], imageKeys: [], vault: [],
+      anthropicOAuth: false, memory: [], cron: [],
+      cases: [caseInventoryEntry('lakeside-lot', files)],
+      customCasesRoot: null, allowedDirectories: [], excluded: [], secrets: 'included'
+    };
+    const plan = await importer.plan({ installId: inventory.installId, inventory });
+    const batch = files.map((f) => ({ category: 'case', key: 'lakeside-lot', value: { ...f, offset: 0 } }));
+    const applied = await importer.apply({ planId: plan.planId, batch });
+    assert.ok(applied.results.every((r) => r.ok), JSON.stringify(applied.results));
+    const report = await importer.finish({ planId: plan.planId });
+    assert.deepStrictEqual(report.failures, []);
+    assert.ok(!report.attention.some((a) => a.category === 'case'), JSON.stringify(report.attention));
+  });
+
+  // Fix round 2, M8: a resent offset-0 chunk for a relPath already seen
+  // resets that file's tally instead of counting it (or its bytes) twice.
+  it('does not double-count a relPath whose offset-0 chunk is resent', async () => {
+    const { importer } = await service();
+    const content = Buffer.from('title: Lakeside lot\n');
+    const files = [{ relPath: 'case.yaml', b64: content.toString('base64'), mode: 0o644 }];
+    const inventory = {
+      installId: 'install-m8-resend', sourceVersion: '26.9.0', chats: [], settingsKeys: [], userProfile: false,
+      permissionRules: [], alwaysApprove: [], providerTokens: [], searchKeys: [], imageKeys: [], vault: [],
+      anthropicOAuth: false, memory: [], cron: [],
+      cases: [{ dir: 'lakeside-lot', files: 1, bytes: content.length }],
+      customCasesRoot: null, allowedDirectories: [], excluded: [], secrets: 'included'
+    };
+    const plan = await importer.plan({ installId: inventory.installId, inventory });
+    const entry = { category: 'case', key: 'lakeside-lot', value: { ...files[0], offset: 0 } };
+    await importer.apply({ planId: plan.planId, batch: [entry] });
+    await importer.apply({ planId: plan.planId, batch: [entry] }); // resent, e.g. after a dropped ack
+    const report = await importer.finish({ planId: plan.planId });
+    assert.deepStrictEqual(report.failures, []);
+    assert.ok(!report.attention.some((a) => a.category === 'case'), JSON.stringify(report.attention));
+  });
+
   // Fix round 1, I2: the import plan's own present-check normalizes both
   // sides, matching desktop-scope's addDirectory/getSettings.
   it('normalizes an allowed directory before comparing, so a re-spelled service directory plans as already present', async () => {
@@ -373,6 +583,26 @@ describe('DesktopImporter', () => {
     assert.ok(core.context.getPermissionRules().some((r) => r.tool === 'Bash' && r.pattern === 'git *' && r.action === 'allow'));
     assert.doesNotThrow(() => importer.scope.removePermissionRule('Bash', 'git *', 'allow'));
     assert.ok(!core.context.getPermissionRules().some((r) => r.tool === 'Bash' && r.pattern === 'git *' && r.action === 'allow'));
+  });
+
+  // Fix round 2, residual I3: the scope can refuse an imported rule (the
+  // service claimed the exact key between plan() and apply()) — that
+  // refusal must be visible, not indistinguishable from a real import.
+  it("reports \"kept the service's rule\" when the scope refuses an imported rule the service now owns", async () => {
+    const { core, importer } = await service();
+    const fx = desktopFixture();
+    const plan = await importer.plan({ installId: fx.inventory.installId, inventory: fx.inventory });
+    assert.strictEqual(actionOf(plan, 'permissionRule', 'Bash|git *|allow'), 'new');
+    // The service claims the exact same key before the batch is applied.
+    core.context.addPermissionRule({ tool: 'Bash', pattern: 'git *', action: 'allow', source: 'service' });
+    const { results } = await importer.apply({
+      planId: plan.planId,
+      batch: [{ category: 'permissionRule', key: 'Bash|git *|allow', value: { tool: 'Bash', pattern: 'git *', action: 'allow' } }]
+    });
+    const r = results.find((x) => x.category === 'permissionRule');
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.note, "kept the service's rule");
+    assert.ok(core.context.getPermissionRules().some((rule) => rule.pattern === 'git *' && rule.source === 'service'), 'the service rule is untouched');
   });
 
   // Fix round 1, I4: apply() re-checks live state for every write, not just
@@ -438,6 +668,64 @@ describe('DesktopImporter', () => {
     assert.strictEqual(core.context.getChats().find((c) => c.id === 'c1').title, 'Changed on service', 'not overwritten');
     const report = await importer.finish({ planId: plan.planId });
     assert.ok(report.attention.some((a) => a.category === 'chat' && a.key === 'c1'));
+  });
+
+  // Fix round 2, item 4: writeChat used to read liveChats once, before the
+  // checkPath await, and build its write from that stale snapshot — a chat
+  // added to the service during the await (another apply(), a live edit)
+  // would be silently discarded when setChats replaced the whole array.
+  // The fix re-reads getChats() and re-runs the presence check immediately
+  // before setChats, with no await in between.
+  it('re-checks live chats immediately before writing, catching a chat added to the service during the checkPath await', async () => {
+    const dataDir = tmp();
+    process.env.KL_CASES_ROOT = path.join(dataDir, 'cases');
+    const cipher = createAesGcmCipher(crypto.randomBytes(32));
+    const core = createCore({
+      paths: { dataDir },
+      store: new JsonFileStore({ dir: dataDir, name: 'chat-data', defaults: { chats: [], activeChatId: null, apiTokens: {}, apiStatus: {}, toolApprovals: { alwaysApproveTools: {} } } }),
+      vaultStore: new JsonFileStore({ dir: dataDir, name: 'config' }),
+      cipher,
+      prompter: createHeadlessPrompter(),
+      builtinSkillsDir: path.join(__dirname, '..', 'skills'),
+      features: { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false }
+    });
+    cores.push(core);
+    await core.start();
+    const targets = await buildImportTargets({ context: core.context, dataDir });
+    const workDir = tmp('kl-import-wd-');
+    let raced = false;
+    const racyCheckPath = async (target) => {
+      if (!raced && target === workDir) {
+        raced = true;
+        // Simulate whatever happened during the await: a chat with the
+        // same id the desktop chat is about to be written under appears
+        // on the service.
+        core.context.setChats([{ id: 'c1', title: 'Raced in', createdAt: '2026-09-01T00:00:00Z', updatedAt: '2026-09-05T00:00:00Z', messages: [] }]);
+      }
+      return checkPath(target);
+    };
+    const importer = new DesktopImporter({
+      context: core.context, targets, dataDir, cipher, checkPath: racyCheckPath,
+      scope: createDesktopScope({ dataDir, context: core.context })
+    });
+    const desktopChat = {
+      id: 'c1', title: 'From desktop', createdAt: '2026-09-01T10:00:00Z', updatedAt: '2026-09-02T10:00:00Z',
+      workingDirectory: workDir, messages: [{ id: 'c1-m1', sender: 'user', text: 'hi', timestamp: '2026-09-02T10:00:00Z' }]
+    };
+    const inventory = {
+      installId: 'install-race', sourceVersion: '26.9.0', chats: [{ id: 'c1', updatedAt: desktopChat.updatedAt, title: desktopChat.title }],
+      settingsKeys: [], userProfile: false, permissionRules: [], alwaysApprove: [], providerTokens: [], searchKeys: [], imageKeys: [], vault: [],
+      anthropicOAuth: false, memory: [], cron: [], cases: [], customCasesRoot: null, allowedDirectories: [], excluded: [], secrets: 'included'
+    };
+    const plan = await importer.plan({ installId: inventory.installId, inventory });
+    assert.strictEqual(actionOf(plan, 'chat', 'c1'), 'new');
+    const { results } = await importer.apply({ planId: plan.planId, batch: [{ category: 'chat', key: 'c1', value: desktopChat }] });
+    assert.ok(raced, 'the race actually happened inside checkPath');
+    const r = results.find((x) => x.category === 'chat' && x.key === 'c1');
+    assert.strictEqual(r.ok, true);
+    assert.match(r.note, /added to the service/);
+    assert.strictEqual(core.context.getChats().length, 1, 'the raced-in chat was not joined by a second, overwriting write');
+    assert.strictEqual(core.context.getChats().find((c) => c.id === 'c1').title, 'Raced in', 'the chat that raced in during checkPath is untouched');
   });
 
   // Fix round 1, M7: leading-dot case dirs, Windows reserved device names
