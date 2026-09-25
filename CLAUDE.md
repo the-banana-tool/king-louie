@@ -136,16 +136,22 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage2-unattended.md`.
   Settings: `settings.cases.wakeups`; off with `enabled: false`.
 - Budgets live in `.kl/budget.json`. `usd` and `deadline` at 100 % pause the
   case and record `statusReason.resumeTo` (the status to return to); per-day
-  categories refuse their action until the local day rolls over. Effects
-  (raising a limit, resuming from `needs-direction`) apply only through two
-  host-verified paths, checked in `CaseRuntime.applyOwnerFact`: an answer to a
-  host-created `budget-grant` or `direction` question (routed through
-  `CaseRuntime.answerQuestion`; a grant reply is just the amount), or an owner
-  action (the case panel's Grant button, `CaseRuntime.grantBudget`, which
-  writes an `owner-action`-sourced fact and applies the effect directly, no
+  categories refuse their action until the local day rolls over. Raising a
+  limit applies only through two host-verified paths, checked in
+  `CaseRuntime.applyOwnerFact`: an answer to a host-created `budget-grant`
+  question (routed through `CaseRuntime.answerQuestion`; a grant reply is just
+  the amount), or an owner action (the case panel's Grant button,
+  `CaseRuntime.grantBudget`, which validates the limit and writes an
+  `owner-action`-sourced fact before applying the effect directly, no
   question involved). A model-created question or a quoted user-message fact
-  naming the same subject/attr is recorded but changes nothing, so an owner's
-  quoted "ok" in chat cannot self-serve a raise.
+  naming the same budget subject/attr is recorded but changes no limit, so an
+  owner's quoted "ok" in chat cannot self-serve a raise.
+- Resuming from `needs-direction` is not limited to those two paths: any
+  host-verified `user`-provenance fact with subject `direction` resumes the
+  case in `applyOwnerFact`, whether it came from answering the `direction`
+  question or from a quote-verified user-message fact recorded straight from
+  chat (`caseContext.ownerMessages`) — the direction does not need to run
+  through a question first.
 - Questions live in `.kl/questions/`. Create them with
   `CaseRuntime.createQuestion`; answer them only through
   `CaseRuntime.answerQuestion` (exactly one host-verified `user` fact).
