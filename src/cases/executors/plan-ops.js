@@ -6,9 +6,27 @@
 const { createLogger } = require('../../logging');
 const { validateTaskGraph, TaskGraphValidationError } = require('../../workflows/task-graph-validator');
 const { parseSteps, stepsToTaskGraph, checkPlan, renderPlanCard, PlanStore } = require('./plan');
-const { pickTimeZone, cut } = require('./util');
+const { pickTimeZone } = require('./util');
 
 const log = createLogger('executors/plans');
+// C2 question text limit: the owner must see every step they approve.
+const QUESTION_MAX = 2000;
+const TOO_LONG = 'the plan is too long to show the owner in full; split it';
+
+// The owner's own steps and what approving consents to, shown before the card.
+function ownerLines(plan) {
+  const owner = (plan.steps || []).filter((s) => s.executor === 'owner');
+  if (!owner.length) return [];
+  const lines = ['Steps you would do yourself if you approve:'];
+  for (const s of owner) {
+    const consent = s.check?.status === 'needs-consent'
+      ? 'needs your consent'
+      : `you agreed earlier (${String(s.check?.consent || '').replace(/^recorded:/, '')})`;
+    lines.push(`- ${s.id}: ${s.title} (${s.capability}, ${s.quantity} ${s.unit}; ${consent})`);
+  }
+  if ((plan.consentCapabilities || []).length) lines.push(`Approving records your consent to: ${plan.consentCapabilities.join(', ')}.`);
+  return [...lines, ''];
+}
 
 function planInputs(reg, caseId) {
   const rt = reg.caseRuntime;
@@ -76,6 +94,11 @@ async function proposePlanUnsafe(reg, { caseId, turnId = null } = {}, params = {
     estimateUsd: checked.estimateUsd, warnings: checked.warnings, consentCapabilities: checked.consentCapabilities,
     createdAt: now.toISOString(), turnId, steps: checked.steps
   };
+  const card = renderPlanCard(plan);
+  const approvable = !plan.steps.some((s) => s.check.status === 'flagged');
+  const questionText = [...ownerLines(plan), card].join('\n');
+  // Checked before anything is written: the previous plan stays as it is.
+  if (approvable && questionText.length > QUESTION_MAX) return { ok: false, error: TOO_LONG };
   if (current) {
     if (live) {
       current.status = 'superseded';
@@ -89,12 +112,10 @@ async function proposePlanUnsafe(reg, { caseId, turnId = null } = {}, params = {
     }
     store.archive(current);
   }
-  const card = renderPlanCard(plan);
-  const approvable = !plan.steps.some((s) => s.check.status === 'flagged');
   if (approvable) {
     const needsConsent = plan.steps.some((s) => s.check.status === 'needs-consent');
     const q = rt.createQuestion(caseId, {
-      kind: 'approval', urgency: 'normal', defaultOnSilence: 'hold', text: cut(card, 2000),
+      kind: 'approval', urgency: 'normal', defaultOnSilence: 'hold', text: questionText,
       options: [
         { id: 'approve', label: 'Approve' },
         ...(needsConsent ? [{ id: 'approve-no-owner', label: "Approve, except the owner's steps" }] : []),

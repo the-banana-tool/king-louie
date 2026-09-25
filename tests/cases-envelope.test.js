@@ -155,23 +155,23 @@ describe('envelopeFit', () => {
   it('raises the usd and contacts caps as deltas', () => {
     const env = activeEnvelope({ usage: { usd: 19, contacts: ['+15550100', '+15550101', '+15550103'], attempts: {} } });
     const r = envelopeFit(env, {}, fitOpts({ recipients: ['+15550101'], estimateUsd: 2 }));
-    assert.deepStrictEqual(r.deltas.map((d) => [d.kind, d.value]), [['usd', 21]]);
+    assert.deepStrictEqual(r.deltas.map((d) => [d.kind, d.value, d.text]), [['usd', 21, 'raises usd cap from $20.00 to $21.00']]);
     const more = envelopeFit(activeEnvelope({ caps: { usd: 20, contacts: 1, attemptsPerContact: 2 } }), {}, fitOpts({ recipients: ['+15550100', '+15550101'] }));
-    assert.deepStrictEqual(more.deltas.map((d) => [d.kind, d.value]), [['contacts', 2]]);
+    assert.deepStrictEqual(more.deltas.map((d) => [d.kind, d.value, d.text]), [['contacts', 2, 'raises contacts cap from 1 to 2']]);
   });
 
   it('attempts cap counts payload attempts', () => {
     const env = activeEnvelope({ usage: { usd: 0, contacts: ['+15550100'], attempts: { '+15550100': 1 } } });
     assert.deepStrictEqual(envelopeFit(env, { attemptsPerContact: 1 }, fitOpts()).deltas, []);
     const r = envelopeFit(env, { attemptsPerContact: 2 }, fitOpts());
-    assert.deepStrictEqual(r.deltas.map((d) => [d.text, d.value]), [['raises attempts per contact', 3]]);
+    assert.deepStrictEqual(r.deltas.map((d) => [d.text, d.value]), [['raises attempts per contact from 2 to 3', 3]]);
   });
 
   it('window is local calendar days across DST', () => {
     const env = activeEnvelope({ window: { start: '2026-10-30', end: '2026-11-01', tz: 'America/Chicago' } });
     assert.deepStrictEqual(envelopeFit(env, {}, fitOpts({ now: new Date('2026-11-02T05:30:00Z') })).deltas, []);
     const late = envelopeFit(env, {}, fitOpts({ now: new Date('2026-11-02T06:30:00Z') }));
-    assert.deepStrictEqual(late.deltas.map((d) => d.text), ['extends window end to 2026-11-02']);
+    assert.deepStrictEqual(late.deltas.map((d) => d.text), ['extends window end from 2026-11-01 to 2026-11-02']);
     assert.deepStrictEqual(envelopeFit(env, {}, fitOpts({ now: new Date('2026-10-30T04:30:00Z') })).refusals, ['envelope env-01 opens 2026-10-30']);
     assert.strictEqual(windowInstants('2026-10-30', '2026-11-01', 'America/Chicago').notAfter, '2026-11-02T05:59:59Z');
   });
@@ -192,6 +192,27 @@ describe('envelopeFit', () => {
     const text = renderDeltaQuestion(activeEnvelope(), deltas);
     assert.match(text, /^Envelope env-01 \(phone-agent\) needs your approval for:\n- adds recipient \+15550102/);
     assert.strictEqual(deltasEqual(deltas, [{ text: 'adds recipient +15550102', value: '+15550102', kind: 'recipient' }]), true);
+  });
+
+  it("the owner sees every change with its amount, never the caller's wording", () => {
+    const deltas = [
+      { kind: 'usd', value: 5000, text: 'raises usd cap' },
+      { kind: 'contacts', value: 10, text: 'a small change' },
+      { kind: 'attempts', value: 3, text: 'raises attempts per contact' },
+      { kind: 'window', value: '2026-11-06', text: 'x' },
+      { kind: 'fact', value: 'f-0003', text: 'discloses nothing much' },
+      { kind: 'recipient', value: '+15550102', text: 'y' }
+    ];
+    const text = renderDeltaQuestion(activeEnvelope(), deltas, { facts: all });
+    assert.deepStrictEqual(text.split('\n').slice(1, 7), [
+      '- raises usd cap from $20.00 to $5000.00',
+      '- raises contacts cap from 3 to 10',
+      '- raises attempts per contact from 2 to 3',
+      '- extends window end from 2026-10-30 to 2026-11-06',
+      '- discloses f-0003 "Zoned R-1"',
+      '- adds recipient +15550102'
+    ]);
+    assert.doesNotMatch(text, /a small change|discloses nothing much/);
   });
 });
 

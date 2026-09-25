@@ -7,8 +7,10 @@
 // executors that declare authority 'signed' go through the phone.
 const { createLogger } = require('../../logging');
 const {
-  EnvelopeStore, envelopeHash, envelopeIntact, validateEnvelopeRequest, renderEnvelopeQuestion, applyDeltas, renderDeltaQuestion, deltasEqual
+  EnvelopeStore, envelopeHash, envelopeIntact, validateEnvelopeRequest, renderEnvelopeQuestion, applyDeltas, renderDeltaQuestion, deltasEqual,
+  deltaText
 } = require('./envelope');
+const { AUTHORITIES } = require('./builtins');
 const { approvalHelpers, signedAction, verifySignedGrant } = require('./signed');
 const { JobStore, isOpen } = require('./job-store');
 const jobs = require('./jobs');
@@ -38,6 +40,16 @@ function caseDeadline(rt, caseId) {
 // a file or anything the model can write: an entry there is a grant.
 function signedOutcomesFor(reg, caseId, envelopeId) {
   return [...(reg.signedOutcomes.get(grantKey(caseId, envelopeId)) || [])];
+}
+
+// The authority an envelope runs under: the higher of the one recorded when
+// it was requested and the executor's current one, so lowering an executor
+// never downgrades an envelope already sent to the owner.
+function effectiveAuthority(reg, caseId, env) {
+  const current = reg.get(env?.executor, { caseId })?.authority;
+  const rank = (a) => AUTHORITIES.indexOf(a);
+  const best = [env?.authority, current].filter((a) => rank(a) >= 0).sort((a, b) => rank(b) - rank(a))[0];
+  return best || 'envelope';
 }
 
 // Everything verifySignedGrant needs for one envelope. The approver store,
@@ -94,6 +106,7 @@ async function requestEnvelopeUnsafe(reg, { caseId, turnId = null, signal = null
     id: store.nextId(),
     version: 1,
     status: 'requested',
+    authority: entry.authority,
     ...v.core,
     recipients: { ...v.core.recipients, addRequiresApproval: true },
     hash: envelopeHash(v.core),
@@ -260,14 +273,15 @@ function requestDelta(reg, caseId, env, deltas) {
     const pending = rt.questions(caseId).get(env.pendingDelta.questionId);
     if (pending && !pending.answer && !pending.closed) return pending.id;
   }
+  const facts = rt.ledger(caseId).view().facts;
   const q = rt.createQuestion(caseId, {
-    kind: 'approval', urgency: 'normal', defaultOnSilence: 'hold', text: renderDeltaQuestion(env, deltas), options: APPROVE_REJECT,
+    kind: 'approval', urgency: 'normal', defaultOnSilence: 'hold', text: renderDeltaQuestion(env, deltas, { facts }), options: APPROVE_REJECT,
     payload: { type: 'envelope-delta', envelopeId: env.id, fromHash: env.hash, deltas, mcpAnswerable: true }
   }, { charge: false });
   const current = store.get(env.id) || env;
   current.pendingDelta = { questionId: q.id, deltas, fromHash: env.hash };
   store.write(current);
-  journal(reg, caseId, `Envelope ${env.id} needs the owner's approval for: ${deltas.map((d) => d.text).join('; ')} (${q.id}).`);
+  journal(reg, caseId, `Envelope ${env.id} needs the owner's approval for: ${deltas.map((d) => deltaText(env, d, { facts })).join('; ')} (${q.id}).`);
   return q.id;
 }
 
@@ -281,31 +295,45 @@ function syncOne(reg, caseId, env, { store, questions, now, move, transitions })
     move(env, 'tampered', 'envelope changed since approval; request it again');
     return;
   }
-  const signed = reg.get(env.executor, { caseId })?.authority === 'signed';
+  const signed = effectiveAuthority(reg, caseId, env) === 'signed';
   if (env.status === 'requested' && !signed && env.questionId) {
     const q = questions.get(env.questionId);
-    const forThis = q && q.payload?.type === 'envelope' && q.payload.envelopeId === env.id;
-    if (forThis && q.answer && q.answer.optionId === 'approve' && q.payload.hash === env.hash) {
+    const bound = q && q.payload?.type === 'envelope' && q.payload.envelopeId === env.id && q.payload.hash === env.hash;
+    if (bound && q.answer && q.answer.optionId === 'approve') {
       env.grantedBy = { channel: q.answer.channel, at: q.answer.at, questionId: q.id, factId: q.answer.factId || null, evidence: null };
       move(env, 'active', `approved via ${q.answer.channel}`);
-    } else if (forThis && q.answer && q.answer.optionId === 'reject') {
+    } else if (bound && q.answer && q.answer.optionId === 'reject') {
       move(env, 'rejected', 'the owner rejected it');
       return;
+    } else if (q && q.answer && q.answer.optionId === 'approve' && env.staleAnswer !== q.id) {
+      // Journaled once per answer; the envelope stays requested.
+      env.staleAnswer = q.id;
+      store.write(env);
+      journal(reg, caseId, `Envelope ${env.id}: the owner approved a different version; request it again (${q.id}).`);
     }
   }
   if (env.pendingDelta) {
     const q = questions.get(env.pendingDelta.questionId);
     const p = q?.payload || {};
-    const approved = q && q.answer && q.answer.optionId === 'approve'
-      && p.type === 'envelope-delta' && p.envelopeId === env.id && p.fromHash === env.hash;
-    if (approved && !deltasEqual(p.deltas, env.pendingDelta.deltas)) {
+    const clear = (why) => {
       env.pendingDelta = null;
       store.write(env);
-      journal(reg, caseId, `Envelope ${env.id}: the pending change differs from what the owner approved in ${q.id}; not applied.`);
-      return;
-    }
-    if (approved) {
-      const next = applyDeltas(env, p.deltas, { questionId: q.id, factId: q.answer.factId || null, at: q.answer.at });
+      journal(reg, caseId, `Envelope ${env.id}: ${why}`);
+    };
+    if (q && q.answer && q.answer.optionId === 'approve') {
+      const bound = p.type === 'envelope-delta' && p.envelopeId === env.id && p.fromHash === env.hash
+        && deltasEqual(p.deltas, env.pendingDelta.deltas);
+      if (!bound) {
+        clear(`the owner approved a different version; request it again (${q.id}).`);
+        return;
+      }
+      let next;
+      try {
+        next = applyDeltas(env, p.deltas, { questionId: q.id, factId: q.answer.factId || null, at: q.answer.at });
+      } catch (err) {
+        clear(`the approved change could not be applied (${q.id}): ${err.message}.`);
+        return;
+      }
       next.pendingDelta = null;
       if (signed) {
         next.status = 'requested';
@@ -313,14 +341,14 @@ function syncOne(reg, caseId, env, { store, questions, now, move, transitions })
       }
       store.write(next);
       transitions.push({ envelopeId: env.id, status: next.status });
-      journal(reg, caseId, `Envelope ${env.id} is version ${next.version} (${next.hash}): ${p.deltas.map((d) => d.text).join('; ')}.`);
+      journal(reg, caseId, `Envelope ${env.id} is version ${next.version} (${next.hash}): ${p.deltas.map((d) => deltaText(env, d)).join('; ')}.`);
       if (signed) {
         const approver = reg.getPhoneApprover();
         if (approver) startSignedRequest(reg, caseId, next, approver, null);
       }
       return;
     }
-    if (q && (q.closed || (q.answer && q.answer.optionId !== 'approve'))) {
+    if (q && (q.closed || q.answer)) {
       env.pendingDelta = null;
       store.write(env);
     }
@@ -388,6 +416,7 @@ module.exports = {
   applyPendingSignedGrants,
   revokeEnvelope,
   signedOutcomesFor,
+  effectiveAuthority,
   grantCheckOptions,
   verifyEnvelopeGrant
 };

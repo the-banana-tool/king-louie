@@ -47,6 +47,45 @@ describe('Plan propose', () => {
     assert.deepStrictEqual([q.options.map((o) => o.id), q.payload.consentCapabilities], [['approve', 'approve-no-owner', 'reject'], ['web-form']]);
   });
 
+  it('shows the owner steps and the consent first in the question', async () => {
+    const s = await setup({ browserDisabled: true });
+    const r = await propose(s, [FORMS, NOTES]);
+    const q = s.rt.questions(s.meta.id).get(r.questionId);
+    assert.ok(q.text.startsWith([
+      'Steps you would do yourself if you approve:',
+      '- s1: File nine permit forms (web-form, 9 forms; needs your consent)',
+      'Approving records your consent to: web-form.',
+      '',
+      'Plan plan-001: Get the permits'
+    ].join('\n')), q.text);
+  });
+
+  it('refuses a plan too long to show the owner in full, writing nothing', async () => {
+    const s = await setup();
+    const steps = Array.from({ length: 30 }, (_, i) => ({
+      id: `n${i}`, title: `Write up the zoning notes for parcel number ${i} of the lakeside subdivision`, executor: 'files', capability: 'write-files'
+    }));
+    assert.deepStrictEqual(await propose(s, steps), { ok: false, error: 'the plan is too long to show the owner in full; split it' });
+    assert.strictEqual(new PlanStore(s.meta.dir).read(), null);
+    assert.deepStrictEqual(s.rt.questions(s.meta.id).list().filter((q) => q.payload?.type === 'plan'), []);
+  });
+
+  it('an answer to a question bound to another plan never approves this one', async () => {
+    const s = await setup();
+    await propose(s, [FORMS]);
+    const other = s.rt.createQuestion(s.meta.id, {
+      kind: 'approval', urgency: 'normal', defaultOnSilence: 'hold', text: 'Plan plan-999', options: [{ id: 'approve', label: 'Approve' }, { id: 'reject', label: 'Reject' }],
+      payload: { type: 'plan', planId: 'plan-999', consentCapabilities: [], mcpAnswerable: true }
+    }, { charge: false });
+    const store = new PlanStore(s.meta.dir);
+    const plan = store.read();
+    plan.questionId = other.id;
+    store.write(plan);
+    await s.rt.answerQuestion(s.meta.id, other.id, { channel: 'in-app', optionId: 'approve' });
+    assert.strictEqual(planOps.syncPlan(s.reg, s.meta.id), null);
+    assert.strictEqual(new PlanStore(s.meta.dir).read().status, 'proposed');
+  });
+
   it('records owner labor from the approval, and the next plan honours it', async () => {
     const s = await setup({ browserDisabled: true });
     const r = await propose(s, [FORMS]);
@@ -127,6 +166,20 @@ describe('Plan complete', () => {
     assert.deepStrictEqual([done.ok, done.step.state, done.planStatus], [true, 'done', 'approved']);
     new PlanStore(s.meta.dir).updateStep('s1', { state: 'done' });
     assert.strictEqual(planOps.planStatus(s.reg, s.ctx).plan.status, 'done');
+  });
+
+  it('maps a refused updateStep to a result', async () => {
+    const s = await setup();
+    const r = await propose(s, [NOTES].map((x) => ({ ...x, dependsOn: [] })));
+    await s.rt.answerQuestion(s.meta.id, r.questionId, { channel: 'in-app', optionId: 'approve' });
+    planOps.syncPlan(s.reg, s.meta.id);
+    const real = PlanStore.prototype.updateStep;
+    PlanStore.prototype.updateStep = () => ({ ok: false, error: 'step s2 is done and cannot move to done' });
+    try {
+      assert.deepStrictEqual(planOps.completeStep(s.reg, s.ctx, { stepId: 's2', note: 'x' }), { ok: false, error: 'step s2 is done and cannot move to done' });
+    } finally {
+      PlanStore.prototype.updateStep = real;
+    }
   });
 });
 

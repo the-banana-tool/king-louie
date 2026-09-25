@@ -223,13 +223,43 @@ function renderSignedSummary(core, envelopeId) {
   return `${envelopeId} · ${core.executor}: ${core.intent} (${core.recipients.allow.length} recipients, ${money(core.caps.usd)}, ${core.window.start} to ${core.window.end})`;
 }
 
+// The owner-facing line for one delta, built from its kind and value against
+// the envelope as it is now (before → after), never from the caller's text.
+// The "after" of a cap is what applyDeltas will set: the higher of the two.
+function deltaText(env, d, { facts = null } = {}) {
+  const caps = env?.caps || {};
+  const num = (v) => Number(v) || 0;
+  switch (d?.kind) {
+    case 'recipient':
+      return `adds recipient ${d.value}`;
+    case 'fact': {
+      const f = facts && typeof facts.get === 'function' ? facts.get(String(d.value)) : null;
+      return f ? `discloses ${d.value} "${f.stmt}"` : `discloses ${d.value}`;
+    }
+    case 'usd':
+      return `raises usd cap from ${money(caps.usd)} to ${money(Math.max(num(caps.usd), num(d.value)))}`;
+    case 'contacts':
+      return `raises contacts cap from ${num(caps.contacts)} to ${Math.max(num(caps.contacts), num(d.value))}`;
+    case 'attempts':
+      return `raises attempts per contact from ${num(caps.attemptsPerContact)} to ${Math.max(num(caps.attemptsPerContact), num(d.value))}`;
+    case 'window': {
+      const end = String(env?.window?.end || '');
+      return `extends window end from ${end} to ${String(d.value) > end ? d.value : end}`;
+    }
+    default:
+      return `unrecognised change "${d?.kind}" (it will not be applied)`;
+  }
+}
+
 function envelopeFit(env, payload = {}, {
   facts = new Map(), recipients = [], now = new Date(), estimateUsd = 0, gateBlocked = [], executorId = null
 } = {}) {
   const refusals = [];
   const deltas = [];
+  let core = null;
+  // Texts are rendered against the approved core once it is known.
   const addDelta = (d) => {
-    if (!deltas.some((x) => x.kind === d.kind && x.value === d.value)) deltas.push(d);
+    if (!deltas.some((x) => x.kind === d.kind && x.value === d.value)) deltas.push({ ...d, text: deltaText(core, d, { facts }) });
   };
   const refuse = (text) => ({ fits: false, refusals: [text], deltas: [] });
   if (!env) return refuse('no envelope');
@@ -240,7 +270,6 @@ function envelopeFit(env, payload = {}, {
   if (typeof estimateUsd !== 'number' || !Number.isFinite(estimateUsd) || estimateUsd < 0) return refuse('estimateUsd must be a finite number ≥ 0');
   // Every limit below is read from the core, the part the owner approved and
   // the hash covers, never from the raw file fields.
-  let core;
   try {
     core = envelopeCore(env);
   } catch (err) {
@@ -253,7 +282,7 @@ function envelopeFit(env, payload = {}, {
 
   const usage = { usd: 0, contacts: [], attempts: {}, ...(env.usage || {}) };
   for (const r of recipients) {
-    if (!core.recipients.allow.includes(r)) addDelta({ kind: 'recipient', value: r, text: `adds recipient ${r}` });
+    if (!core.recipients.allow.includes(r)) addDelta({ kind: 'recipient', value: r });
   }
   const declared = [
     ...(Array.isArray(payload.facts) ? payload.facts.map(String) : []),
@@ -273,24 +302,24 @@ function envelopeFit(env, payload = {}, {
       refusals.push(`${id} cannot be disclosed (${why})`);
       continue;
     }
-    if (!core.facts.includes(id)) addDelta({ kind: 'fact', value: id, text: `discloses ${id} "${f.stmt}"` });
+    if (!core.facts.includes(id)) addDelta({ kind: 'fact', value: id });
   }
   const caps = core.caps;
   const needUsd = roundUsd((Number(usage.usd) || 0) + estimateUsd);
-  if (needUsd > caps.usd) addDelta({ kind: 'usd', value: needUsd, text: 'raises usd cap' });
+  if (needUsd > caps.usd) addDelta({ kind: 'usd', value: needUsd });
   const distinct = new Set([...(usage.contacts || []), ...recipients]);
-  if (distinct.size > caps.contacts) addDelta({ kind: 'contacts', value: distinct.size, text: 'raises contacts cap' });
+  if (distinct.size > caps.contacts) addDelta({ kind: 'contacts', value: distinct.size });
   const attempts = recipients.map((r) => (Number(usage.attempts?.[r]) || 0) + per);
   const maxAttempts = attempts.length ? Math.max(...attempts) : 0;
-  if (maxAttempts > caps.attemptsPerContact) addDelta({ kind: 'attempts', value: maxAttempts, text: 'raises attempts per contact' });
+  if (maxAttempts > caps.attemptsPerContact) addDelta({ kind: 'attempts', value: maxAttempts });
   const today = localDate(now, core.window.tz);
   if (today < core.window.start) refusals.push(`envelope ${env.id} opens ${core.window.start}`);
-  else if (today > core.window.end) addDelta({ kind: 'window', value: today, text: `extends window end to ${today}` });
+  else if (today > core.window.end) addDelta({ kind: 'window', value: today });
   if (env.status === 'exhausted' && !deltas.some((d) => d.kind === 'usd' || d.kind === 'contacts' || d.kind === 'attempts')) {
     if ((usage.contacts || []).length >= caps.contacts) {
-      addDelta({ kind: 'contacts', value: caps.contacts + Math.max(1, recipients.length), text: 'raises contacts cap' });
+      addDelta({ kind: 'contacts', value: caps.contacts + Math.max(1, recipients.length) });
     } else {
-      addDelta({ kind: 'usd', value: roundUsd(Math.max(needUsd, caps.usd) + 1), text: 'raises usd cap' });
+      addDelta({ kind: 'usd', value: roundUsd(Math.max(needUsd, caps.usd) + 1) });
     }
   }
   return { fits: refusals.length === 0 && deltas.length === 0, refusals, deltas };
@@ -318,10 +347,10 @@ function applyDeltas(env, deltas, { questionId = null, factId = null, at = new D
   return next;
 }
 
-function renderDeltaQuestion(env, deltas) {
+function renderDeltaQuestion(env, deltas, { facts = null } = {}) {
   return cut([
     `Envelope ${env.id} (${env.executor}) needs your approval for:`,
-    ...deltas.map((d) => `- ${d.text}`),
+    ...deltas.map((d) => `- ${deltaText(env, d, { facts })}`),
     `Intent: ${env.intent}`
   ].join('\n'));
 }
@@ -344,5 +373,6 @@ module.exports = {
   envelopeFit,
   applyDeltas,
   renderDeltaQuestion,
+  deltaText,
   deltasEqual
 };

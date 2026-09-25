@@ -6,6 +6,7 @@ const path = require('path');
 const fx = require('./helpers/executor-fixtures');
 const ops = require('../src/cases/executors/envelope-ops');
 const { EnvelopeStore, JobStore } = require('../src/cases/executors');
+const { envelopeCore, envelopeHash } = require('../src/cases/executors/envelope');
 const { approvalHelpers, signedAction } = require('../src/cases/executors/signed');
 
 after(fx.cleanup);
@@ -25,6 +26,9 @@ const body = (factId, over = {}) => ({
   facts: [factId], rules: [], caps: { usd: 20, contacts: 3, attemptsPerContact: 2 }, window: { start: '2026-10-26', end: '2026-10-30' }, ...over
 });
 const envelopeOf = (s, id = 'env-01') => new EnvelopeStore(s.meta.dir).get(id);
+const journalText = (s) => fs.readdirSync(path.join(s.meta.dir, 'journal')).filter((n) => n.includes('-envelope'))
+  .map((n) => fs.readFileSync(path.join(s.meta.dir, 'journal', n), 'utf8')).join('\n');
+const rehash = (e) => ({ ...e, hash: envelopeHash(envelopeCore(e)) });
 
 describe('requesting and approving', () => {
   it('writes a requested envelope and an approval question; an owner approve activates it', async () => {
@@ -49,6 +53,45 @@ describe('requesting and approving', () => {
     await s.rt.answerQuestion(s.meta.id, r.questionId, { channel: 'in-app', optionId: 'reject' });
     ops.syncEnvelopes(s.reg, s.meta.id);
     assert.strictEqual(envelopeOf(s).status, 'rejected');
+  });
+
+  it("approving env-01's question never activates env-02 (question bound to its envelope)", async () => {
+    const s = await setup();
+    const r1 = await ops.requestEnvelope(s.reg, { caseId: s.meta.id }, body(s.factId));
+    await ops.requestEnvelope(s.reg, { caseId: s.meta.id }, body(s.factId));
+    const e2 = envelopeOf(s, 'env-02');
+    assert.strictEqual(e2.hash, r1.hash, 'same core, same hash: only the envelope id tells them apart');
+    e2.questionId = r1.questionId;
+    new EnvelopeStore(s.meta.dir).write(e2);
+    await s.rt.answerQuestion(s.meta.id, r1.questionId, { channel: 'in-app', optionId: 'approve' });
+    assert.deepStrictEqual(ops.syncEnvelopes(s.reg, s.meta.id), [{ envelopeId: 'env-01', status: 'active' }]);
+    assert.strictEqual(envelopeOf(s, 'env-02').status, 'requested');
+    assert.match(journalText(s), /env-02: the owner approved a different version; request it again/);
+  });
+
+  it('a file edited and re-hashed after the question stays requested when approved', async () => {
+    const s = await setup();
+    const r = await ops.requestEnvelope(s.reg, { caseId: s.meta.id }, body(s.factId));
+    const e = envelopeOf(s);
+    e.caps.usd = 500;
+    new EnvelopeStore(s.meta.dir).write(rehash(e));
+    await s.rt.answerQuestion(s.meta.id, r.questionId, { channel: 'in-app', optionId: 'approve' });
+    assert.deepStrictEqual(ops.syncEnvelopes(s.reg, s.meta.id), []);
+    assert.strictEqual(envelopeOf(s).status, 'requested');
+    ops.syncEnvelopes(s.reg, s.meta.id);
+    const said = journalText(s).match(/approved a different version/g) || [];
+    assert.strictEqual(said.length, 1, 'journaled once, not on every sync');
+  });
+
+  it('keeps the authority recorded at request time when the executor is later lowered', async () => {
+    const s = await setup({ authority: 'signed', approver: { requestAction: () => new Promise(() => {}) } });
+    const r = await ops.requestEnvelope(s.reg, { caseId: s.meta.id }, body(s.factId));
+    assert.strictEqual(envelopeOf(s).authority, 'signed');
+    s.env.settings.executors.entries['fake-agent'].authority = 'envelope';
+    await s.rt.answerQuestion(s.meta.id, r.questionId, { channel: 'in-app', optionId: 'approve' });
+    ops.syncEnvelopes(s.reg, s.meta.id);
+    assert.strictEqual(envelopeOf(s).status, 'requested', 'an in-app answer never grants an envelope requested as signed');
+    assert.strictEqual(ops.effectiveAuthority(s.reg, s.meta.id, envelopeOf(s)), 'signed');
   });
 
   it('an edited envelope turns tampered', async () => {
@@ -91,11 +134,55 @@ describe('deltas', () => {
     assert.strictEqual(ops.requestDelta(s.reg, s.meta.id, envelopeOf(s), deltas), q1, 'reused while pending');
     const q = s.rt.questions(s.meta.id).get(q1);
     assert.deepStrictEqual([q.payload.type, q.payload.fromHash, q.payload.deltas], ['envelope-delta', r.hash, deltas]);
+    assert.match(q.text, /\n- adds recipient \+15550102\n/);
     await s.rt.answerQuestion(s.meta.id, q1, { channel: 'in-app', optionId: 'approve' });
     ops.syncEnvelopes(s.reg, s.meta.id);
     const e = envelopeOf(s);
     assert.deepStrictEqual([e.status, e.version, e.recipients.allow, e.pendingDelta], ['active', 2, ['+15550100', '+15550101', '+15550102'], null]);
     assert.notStrictEqual(e.hash, r.hash);
+  });
+
+  it('shows the owner the amount of a cap raise', async () => {
+    const s = await setup();
+    const r = await ops.requestEnvelope(s.reg, { caseId: s.meta.id }, body(s.factId));
+    await s.rt.answerQuestion(s.meta.id, r.questionId, { channel: 'in-app', optionId: 'approve' });
+    ops.syncEnvelopes(s.reg, s.meta.id);
+    const qid = ops.requestDelta(s.reg, s.meta.id, envelopeOf(s), [{ kind: 'usd', value: 5000, text: 'raises usd cap' }]);
+    assert.match(s.rt.questions(s.meta.id).get(qid).text, /- raises usd cap from \$20\.00 to \$5000\.00/);
+  });
+
+  it('a delta approved against a stale fromHash does not apply and is cleared', async () => {
+    const s = await setup();
+    const r = await ops.requestEnvelope(s.reg, { caseId: s.meta.id }, body(s.factId));
+    await s.rt.answerQuestion(s.meta.id, r.questionId, { channel: 'in-app', optionId: 'approve' });
+    ops.syncEnvelopes(s.reg, s.meta.id);
+    const qid = ops.requestDelta(s.reg, s.meta.id, envelopeOf(s), [{ kind: 'usd', value: 30, text: 'raises usd cap' }]);
+    const e = envelopeOf(s);
+    e.caps.contacts = 5;
+    new EnvelopeStore(s.meta.dir).write(rehash(e));
+    await s.rt.answerQuestion(s.meta.id, qid, { channel: 'in-app', optionId: 'approve' });
+    assert.deepStrictEqual(ops.syncEnvelopes(s.reg, s.meta.id), []);
+    const after = envelopeOf(s);
+    assert.deepStrictEqual([after.caps.usd, after.version, after.pendingDelta], [20, 1, null]);
+    assert.match(journalText(s), /env-01: the owner approved a different version; request it again/);
+  });
+
+  it("a delta approved for env-01 never changes env-02 (delta question bound to its envelope)", async () => {
+    const s = await setup();
+    const r1 = await ops.requestEnvelope(s.reg, { caseId: s.meta.id }, body(s.factId));
+    const r2 = await ops.requestEnvelope(s.reg, { caseId: s.meta.id }, body(s.factId));
+    await s.rt.answerQuestion(s.meta.id, r1.questionId, { channel: 'in-app', optionId: 'approve' });
+    await s.rt.answerQuestion(s.meta.id, r2.questionId, { channel: 'in-app', optionId: 'approve' });
+    ops.syncEnvelopes(s.reg, s.meta.id);
+    const qid = ops.requestDelta(s.reg, s.meta.id, envelopeOf(s), [{ kind: 'usd', value: 30, text: 'raises usd cap' }]);
+    const store = new EnvelopeStore(s.meta.dir);
+    const e2 = store.get('env-02');
+    assert.strictEqual(e2.hash, envelopeOf(s).hash, 'same core, same hash: only the envelope id tells them apart');
+    e2.pendingDelta = { ...envelopeOf(s).pendingDelta };
+    store.write(e2);
+    await s.rt.answerQuestion(s.meta.id, qid, { channel: 'in-app', optionId: 'approve' });
+    assert.deepStrictEqual(ops.syncEnvelopes(s.reg, s.meta.id), [{ envelopeId: 'env-01', status: 'active' }]);
+    assert.deepStrictEqual([envelopeOf(s, 'env-02').caps.usd, envelopeOf(s, 'env-02').version, envelopeOf(s, 'env-02').pendingDelta], [20, 1, null]);
   });
 
   it('applies only what the owner saw: a changed pending delta is not applied', async () => {
@@ -141,7 +228,8 @@ describe('deltas', () => {
     e1.usage.usd = 20;
     new EnvelopeStore(s.meta.dir).write(e1);
     assert.deepStrictEqual(ops.syncEnvelopes(s.reg, s.meta.id), [{ envelopeId: 'env-01', status: 'exhausted' }]);
-    assert.deepStrictEqual([envelopeOf(s, 'env-02').status, envelopeOf(s, 'env-02').version], ['requested', 1]);
+    assert.deepStrictEqual([envelopeOf(s, 'env-02').status, envelopeOf(s, 'env-02').version, envelopeOf(s, 'env-02').pendingDelta], ['requested', 1, null]);
+    assert.match(journalText(s), /env-02: the approved change could not be applied/);
   });
 });
 
