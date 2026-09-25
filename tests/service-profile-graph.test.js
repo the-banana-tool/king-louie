@@ -6,7 +6,7 @@ const os = require('os');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
-const FORBIDDEN = ['src/providers/', 'src/execution/agent-loop', 'src/tools/', 'src/browser/', 'src/channels/', 'src/mcp/', 'src/core/create-core'];
+const FORBIDDEN = ['src/providers/', 'src/execution/agent-loop', 'src/tools/', 'src/browser/', 'src/channels/', 'src/mcp/', 'src/core/create-core', 'src/execution/safety-policy'];
 
 describe('runbook profile module graph', () => {
   it('never loads the agent stack, even after actually starting and stopping', () => {
@@ -29,6 +29,7 @@ describe('runbook profile module graph', () => {
       }).toString();
       const loaded = JSON.parse(out).map((p) => path.relative(ROOT, p).split(path.sep).join('/'));
       assert.ok(loaded.includes('src/service/ports.js'), 'start() must have run (ports.js is only required inside it)');
+      assert.ok(loaded.includes('src/approvals/service-wiring.js'), 'the runbook profile starts phone approvals');
       assert.ok(fs.existsSync(path.join(dataDir, 'key-check')), 'start() resolved the master key');
       const bad = loaded.filter((p) => FORBIDDEN.some((f) => p.startsWith(f)));
       assert.deepStrictEqual(bad, []);

@@ -38,22 +38,35 @@ function assertEnabledListenersBound(core, features) {
 function loadProfile(profile) {
   if (profile === 'agent') {
     return {
-      async start({ dataDir, features, ports, workspace }) {
+      async start({ dataDir, features, ports, workspace, audit }) {
         const { createCore } = require('../core');
         const { CHAT_DATA_DEFAULTS } = require('../core/settings');
         const { buildServicePorts } = require('./ports');
+        const { loadNodeConfig } = require('./node-config');
+        const { startApprovals } = require('../approvals/service-wiring');
         const servicePorts = buildServicePorts({ dataDir, chatDataDefaults: CHAT_DATA_DEFAULTS });
+        const nodeConfig = loadNodeConfig({ dataDir });
+        // Fleet stage 3: an unsafe tool from anything remote (chat channels,
+        // gateway clients, cron, webhooks) runs only with a signed phone
+        // approval; with no enrolled phone or no relay it is refused.
+        const approvals = await startApprovals({ dataDir, nodeConfig, ports: servicePorts, profile: 'agent', serviceConfig: { audit } });
         const core = createCore({
           ...servicePorts,
           features,
           ports,
           workingDirectory: workspace,
-          // Stage 1: nothing remote (chat channels, gateway clients, cron,
-          // webhooks) may approve an unsafe tool; stage 3 adds the phone approver.
-          remoteApprovals: 'deny',
+          remoteApprovals: 'phone',
+          phoneApprover: approvals.phoneApprover,
+          auditLedger: approvals.auditLedger,
+          nodePolicy: nodeConfig.policy,
           builtinSkillsDir: path.join(__dirname, '..', '..', 'skills')
         });
-        await core.start();
+        try {
+          await core.start();
+        } catch (err) {
+          await approvals.stop().catch(() => {});
+          throw err;
+        }
         try {
           // createCore starts the webhook listener fire-and-forget, so
           // core.start() can return while its bind is still in flight and its
@@ -63,20 +76,32 @@ function loadProfile(profile) {
         } catch (err) {
           // Don't leave a half-started core (and its cron timers) behind.
           await core.shutdown().catch(() => {});
+          await approvals.stop().catch(() => {});
           throw err;
         }
-        return { stop: () => core.shutdown(), masterKeySource: servicePorts.masterKeySource };
+        return {
+          stop: async () => {
+            await core.shutdown();
+            await approvals.stop();
+          },
+          masterKeySource: servicePorts.masterKeySource,
+          approvals
+        };
       }
     };
   }
   if (profile === 'runbook') {
     return {
-      async start({ dataDir }) {
+      async start({ dataDir, audit }) {
         const { buildServicePorts } = require('./ports');
+        const { loadNodeConfig } = require('./node-config');
+        const { startApprovals } = require('../approvals/service-wiring');
         const servicePorts = buildServicePorts({ dataDir });
-        // Stage 2 adds the runbook engine here. Stage 1 only proves the
-        // profile boots with its own identity-free, agent-free module graph.
-        return { stop: async () => {}, masterKeySource: servicePorts.masterKeySource };
+        // The runbook profile runs the relay link and the courier that the
+        // `mcp` process sends its approval requests through; still no agent stack.
+        const nodeConfig = loadNodeConfig({ dataDir });
+        const approvals = await startApprovals({ dataDir, nodeConfig, ports: servicePorts, profile: 'runbook', serviceConfig: { audit } });
+        return { stop: () => approvals.stop(), masterKeySource: servicePorts.masterKeySource, approvals };
       }
     };
   }
@@ -148,7 +173,7 @@ async function runService({ dataDir: requestedDataDir, profile: profileOverride,
       const config = loadServiceConfig(dataDir, { profile: profileOverride });
       profile = config.profile;
       log.info('service starting', { profile, dataDir, workspace, pid: process.pid });
-      running = await loadProfile(profile).start({ dataDir, features: config.features, ports: config.ports, workspace });
+      running = await loadProfile(profile).start({ dataDir, features: config.features, ports: config.ports, workspace, audit: config.audit });
     } catch (err) {
       // On Windows nothing reads the task's stderr, so the log file is the
       // only place a startup failure is visible.
