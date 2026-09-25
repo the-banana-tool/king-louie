@@ -403,11 +403,12 @@ describe('import --from: reader and writer split (fix round 1)', () => {
 
   // A dropped child reports the uid it runs as; on this host it can't
   // actually drop, so the shim rewrites the uid in its answer to `open`, as
-  // a child spawned with that uid would report it.
+  // a child spawned with that uid would report it. The undropped child
+  // reports null on Windows and its real uid (0 as root) on POSIX.
   const reportingUid = (child, uid) => {
     const { Transform } = require('stream');
     const stdout = new Transform({
-      transform(chunk, _enc, cb) { cb(null, chunk.toString().replace(/"uid":null/, `"uid":${uid}`)); }
+      transform(chunk, _enc, cb) { cb(null, chunk.toString().replace(/"uid":(?:null|\d+)/, `"uid":${uid}`)); }
     });
     child.stdout.pipe(stdout);
     return { stdin: child.stdin, stdout, stderr: child.stderr, on: child.on.bind(child), kill: child.kill.bind(child) };
