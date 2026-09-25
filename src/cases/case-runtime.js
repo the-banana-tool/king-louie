@@ -18,6 +18,7 @@ const { Budget, CATEGORIES } = require('./budget');
 const { WakeupStore } = require('./wakeups');
 const { QuestionStore } = require('./questions');
 const { detectTriggers, emptyBaseline, underminedKeys } = require('./triggers');
+const { localDay, isRealCalendarDate } = require('./clock');
 const { readJson, writeJsonIfChanged } = require('./jsonfile');
 const { resolveCaseSettings } = require('./defaults');
 const { resolveRole } = require('./roles');
@@ -28,7 +29,6 @@ const { createLogger } = require('../logging');
 const log = createLogger('cases/runtime');
 
 const BUDGET_FACT_NOTE = "Budget limits change only through the owner's answer or the Grant button.";
-const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 class CaseBusyError extends Error {
   constructor(title, { pid, lockPath } = {}) {
@@ -259,7 +259,7 @@ class CaseRuntime {
 
   // ---- Status (spec §3.1) ----
 
-  setStatus(id, status, { kind, by = 'runtime', ref = null, note = '', failureClass = null } = {}) {
+  setStatus(id, status, { kind, by = 'runtime', ref = null, note = '', failureClass = null, resumeTo = null } = {}) {
     if (!REASON_KINDS.includes(kind)) {
       throw new StatusError('BAD_KIND', `setStatus needs a "kind" naming why (one of ${REASON_KINDS.join(', ')}); got ${kind === undefined ? 'nothing' : JSON.stringify(kind)}.`);
     }
@@ -267,7 +267,7 @@ class CaseRuntime {
     if (!canTransition(meta.status, status, by, kind)) {
       throw new StatusError('BAD_TRANSITION', `A case cannot go from ${meta.status} to ${status} (${by}, ${kind || 'no reason'}).`);
     }
-    if (status === 'active' && kind === 'budget-grant' && meta.statusReason?.kind !== 'budget') {
+    if ((status === 'active' || status === 'needs-direction') && kind === 'budget-grant' && meta.statusReason?.kind !== 'budget') {
       throw new StatusError('BAD_TRANSITION', 'A budget grant lifts only a budget pause.');
     }
     if (status === 'active') {
@@ -280,6 +280,7 @@ class CaseRuntime {
       ref: ref ?? null,
       note: String(note || ''),
       failureClass: failureClass ?? null,
+      resumeTo: (status === 'paused' && (resumeTo === 'active' || resumeTo === 'needs-direction')) ? resumeTo : null,
       at: this.now().toISOString()
     };
     const updated = this.store.updateMeta(meta.id, { status, statusReason });
@@ -772,38 +773,69 @@ class CaseRuntime {
     if (!Array.isArray(crossedNow) || !crossedNow.includes(100)) return null;
     const meta = this.getCase(id);
     if (meta.status === 'done' || meta.status === 'abandoned') return null;
-    const entry = this.budget(meta.id).status()[category] || {};
     if (category === 'usd' || category === 'deadline') {
       if (meta.status === 'active' || meta.status === 'needs-direction') {
         try {
-          this.setStatus(meta.id, 'paused', { kind: 'budget', ref: category });
+          this.setStatus(meta.id, 'paused', { kind: 'budget', ref: category, resumeTo: meta.status });
         } catch (err) {
           log.warn(`Case ${meta.slug}: could not pause at the ${category} limit: ${err.message}`);
         }
       }
-      const text = category === 'deadline'
-        ? `${meta.title} reached its deadline (${entry.at}) and is paused. Reply with a new deadline (YYYY-MM-DD) to continue.`
-        : `${meta.title} spent ${entry.spent} of its ${entry.limit} ${category} budget and is paused. Reply with a new limit to continue.`;
-      return this.createQuestion(meta.id, {
-        kind: 'question',
-        urgency: 'normal',
-        text,
-        payload: {
-          type: 'budget-grant',
-          budget: category,
-          spent: category === 'deadline' ? null : entry.spent,
-          limit: category === 'deadline' ? entry.at : entry.limit,
-          mcpAnswerable: false,
-          key: `budget-grant:${category}`
-        }
-      }, { charge: false });
+      return this._askBudgetGrant(this.getCase(meta.id), category);
     }
+    const entry = this.budget(meta.id).status()[category] || {};
     return this.createQuestion(meta.id, {
       kind: 'briefing',
       urgency: 'low',
       text: `${meta.title} used its ${category} allowance for ${entry.day} (${entry.spent} of ${entry.limit}). It resumes when the day rolls over.`,
       payload: { type: 'budget-daily', budget: category, key: `budget-daily:${category}:${entry.day}`, mcpAnswerable: false }
     }, { charge: false });
+  }
+
+  // Creates (or returns the existing open) budget-grant question for
+  // `category`, reading budget numbers live at call time so the payload
+  // never goes stale (controller ruling I3 on Task 11 review).
+  _askBudgetGrant(meta, category) {
+    const entry = this.budget(meta.id).status()[category] || {};
+    const text = category === 'deadline'
+      ? `${meta.title} reached its deadline (${entry.at}) and is paused. Reply with a new deadline (YYYY-MM-DD) to continue.`
+      : `${meta.title} spent ${entry.spent} of its ${entry.limit} ${category} budget and is paused. Reply with a new limit to continue.`;
+    return this.createQuestion(meta.id, {
+      kind: 'question',
+      urgency: 'normal',
+      text,
+      payload: {
+        type: 'budget-grant',
+        budget: category,
+        spent: category === 'deadline' ? null : entry.spent,
+        limit: category === 'deadline' ? entry.at : entry.limit,
+        mcpAnswerable: false,
+        key: `budget-grant:${category}`
+      }
+    }, { charge: false });
+  }
+
+  // Public entry point for answer-handlers.js (outside the class) to raise
+  // a fresh budget-grant question, e.g. after a reply that named no usable
+  // amount, without reaching into the runtime's private helpers.
+  askBudgetGrant(id, category) {
+    return this._askBudgetGrant(this.getCase(id), category);
+  }
+
+  // Closes every other open budget-grant question for `category`: once a
+  // grant is applied, a stale question carrying old numbers must not still
+  // be answerable (controller ruling I3 on Task 11 review).
+  _closeSupersededBudgetQuestions(id, category) {
+    const store = this.questions(id);
+    for (const q of store.open()) {
+      if (q.kind === 'question' && q.payload?.type === 'budget-grant' && q.payload?.budget === category) {
+        try {
+          store.close(q.id, { reason: 'superseded', by: 'system' });
+        } catch (err) {
+          log.warn(`Could not close superseded budget question ${q.id}: ${err.message}`);
+        }
+      }
+    }
   }
 
   usageHook(turn) {
@@ -876,14 +908,21 @@ class CaseRuntime {
   applyOwnerFact(id, fact, { questionId = null } = {}) {
     if (!fact || fact.provenance !== 'user' || (fact.status && fact.status !== 'active')) return { applied: false };
     const meta = this.getCase(id);
+    // A fact sourced from a question can grant or resume only when that
+    // question was actually of the matching type — otherwise a plain 'ask'
+    // question, whose fact happens to share subject/attr with a budget or
+    // direction fact, could be answered into a grant or a resume it never
+    // asked for (controller ruling I1 on Task 11 review).
+    const sourceQuestion = fact.source?.kind === 'question' ? this.questions(meta.id).get(fact.source.ref) : null;
     if (fact.subject === 'direction' && meta.status === 'needs-direction') {
+      if (fact.source?.kind === 'question' && sourceQuestion?.payload?.type !== 'direction') return { applied: false };
       try {
         this.setStatus(meta.id, 'active', { kind: 'direction', ref: fact.id });
         return { applied: 'direction' };
       } catch (err) {
         if (err.code !== 'BUDGET_EXHAUSTED') throw err;
         const category = this.budget(meta.id).exhausted()[0];
-        this.setStatus(meta.id, 'paused', { kind: 'budget', ref: category, note: err.message });
+        this.setStatus(meta.id, 'paused', { kind: 'budget', ref: category, note: err.message, resumeTo: meta.status });
         const qid = questionId || (fact.source?.kind === 'question' ? fact.source.ref : null);
         if (qid) {
           try {
@@ -898,15 +937,31 @@ class CaseRuntime {
     }
     if (fact.subject === 'budget' && CATEGORIES.includes(fact.attr)) {
       if (!['question', 'owner-action'].includes(fact.source?.kind)) return { applied: false, note: BUDGET_FACT_NOTE };
+      if (fact.source?.kind === 'question' && sourceQuestion?.payload?.type !== 'budget-grant') return { applied: false };
+      // Validate against the budget's CURRENT numbers, never numbers a
+      // question captured when it was asked — those can be stale by the
+      // time the owner answers (controller ruling I3 on Task 11 review).
+      const before = this.budget(meta.id).status()[fact.attr] || {};
       let value = null;
       if (fact.attr === 'deadline') {
-        value = typeof fact.value === 'string' && DAY_PATTERN.test(fact.value) ? fact.value : null;
+        const today = localDay(this.now(), this.settings().timeZone);
+        if (
+          typeof fact.value === 'string' && isRealCalendarDate(fact.value)
+          && (!before.at || fact.value > before.at)
+          && fact.value >= today
+        ) {
+          value = fact.value;
+        }
       } else {
         const n = Number(fact.value);
-        value = Number.isFinite(n) && n > 0 ? n : null;
+        const spent = Number(before.spent) || 0;
+        value = Number.isFinite(n) && n > spent ? n : null;
       }
       if (value === null) {
-        return { applied: false, note: `A ${fact.attr} limit must be ${fact.attr === 'deadline' ? 'a YYYY-MM-DD date' : 'a number above 0'}.` };
+        const hint = fact.attr === 'deadline'
+          ? 'a real calendar date, later than the current deadline and not in the past'
+          : 'a number above the current spend';
+        return { applied: false, note: `A ${fact.attr} limit must be ${hint}.` };
       }
       const current = meta.budget && typeof meta.budget === 'object' ? meta.budget : {};
       this.store.updateMeta(meta.id, { budget: { ...current, [fact.attr]: value } });
@@ -914,13 +969,22 @@ class CaseRuntime {
       budget.recordGrant(fact.attr, fact.id);
       for (const [category, crossed] of Object.entries(budget.reconcile())) this.onCrossings(meta.id, category, crossed);
       if (fact.attr === 'deadline') this.wakeups(meta.id).ensure('deadline-check', { every: 86400000, payload: { key: 'deadline' } });
+      // A grant supersedes every other open budget-grant question for this
+      // category: a stale one must not still be answerable.
+      this._closeSupersededBudgetQuestions(meta.id, fact.attr);
       this._notify('case:changed', { caseId: meta.id, what: 'budget' });
       const after = this.getCase(meta.id);
+      let resumed = false;
       if (after.status === 'paused' && after.statusReason?.kind === 'budget' && !budget.exhausted().length) {
-        this.setStatus(meta.id, 'active', { kind: 'budget-grant', ref: fact.id });
-        return { applied: 'budget', resumed: true };
+        const resumeTo = after.statusReason.resumeTo === 'needs-direction' ? 'needs-direction' : 'active';
+        this.setStatus(meta.id, resumeTo, { kind: 'budget-grant', ref: fact.id });
+        resumed = true;
       }
-      return { applied: 'budget', resumed: false };
+      // Defensive: if the category is still exhausted after applying the
+      // grant, the stale question was just closed above, so ask again with
+      // current numbers rather than leaving the owner with nothing open.
+      if (budget.exhausted().includes(fact.attr)) this._askBudgetGrant(this.getCase(meta.id), fact.attr);
+      return { applied: 'budget', resumed };
     }
     return { applied: false };
   }
@@ -958,6 +1022,12 @@ class CaseRuntime {
   // recommendation, needs-direction, and a high direction question.
   recordFailure(id, { failureClass, what, tried = [], why, unknowns = [], recommendation = null, turnId = null }) {
     const meta = this.getCase(id);
+    // Check the transition before writing anything: a refused transition
+    // (e.g. the case isn't `active`) must leave no partial journal,
+    // recommendation or load-bearing marks (Task 11 review, minor fix).
+    if (!canTransition(meta.status, 'needs-direction', 'runtime', 'failure')) {
+      throw new StatusError('BAD_TRANSITION', `A case cannot go from ${meta.status} to needs-direction (runtime, failure).`);
+    }
     const { facts } = new FactLedger(meta.dir).view();
     const claims = Array.isArray(recommendation?.claims) ? recommendation.claims : [];
     const body = [
@@ -966,15 +1036,15 @@ class CaseRuntime {
       `Class: ${failureClass}`,
       '',
       'Tried:',
-      ...tried.map((t) => `- ${t}`),
+      ...tried.map((t) => `- ${oneLine(t, 300)}`),
       '',
-      `Why: ${why}`,
+      `Why: ${oneLine(why, 500)}`,
       '',
       'Unknowns:',
       ...(unknowns.length ? unknowns.map((fid) => `- ${fid}${facts.get(fid) ? ` ${facts.get(fid).stmt}` : ''}`) : ['- none']),
       '',
       'Recommendation:',
-      ...(claims.length ? claims.map((c) => `- ${c.text}${c.factIds?.length ? ` [${c.factIds.join(', ')}]` : ''}`) : ['none']),
+      ...(claims.length ? claims.map((c) => `- ${oneLine(c.text, 300)}${c.factIds?.length ? ` [${c.factIds.join(', ')}]` : ''}`) : ['none']),
       '',
       "Waiting for the owner's direction."
     ].join('\n');

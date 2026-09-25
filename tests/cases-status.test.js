@@ -32,6 +32,7 @@ describe('status transitions', () => {
       ['needs-direction', 'active', 'runtime', 'direction'],
       ['needs-direction', 'active', 'owner', 'direction'],
       ['paused', 'active', 'runtime', 'budget-grant'],
+      ['paused', 'needs-direction', 'runtime', 'budget-grant'],
       ['paused', 'active', 'owner', 'owner'],
       ...['active', 'needs-direction', 'paused'].flatMap((from) => [
         [from, 'done', 'owner', 'owner'],

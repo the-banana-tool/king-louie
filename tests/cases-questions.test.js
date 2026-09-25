@@ -343,7 +343,7 @@ describe('answers through the runtime', () => {
       && /no usable usd limit, so the case stays paused/.test(fs.readFileSync(path.join(c.dir, 'journal', n), 'utf8'))));
 
     const again = rt.onCrossings(c.id, 'usd', [100]);
-    const grant = await rt.answerQuestion(c.id, again.id, { channel: 'in-app', text: 'Make it 2 dollars' });
+    const grant = await rt.answerQuestion(c.id, again.id, { channel: 'in-app', text: '2 dollars' });
     assert.deepStrictEqual([grant.fact.subject, grant.fact.attr, grant.fact.value], ['budget', 'usd', 2]);
     assert.deepStrictEqual(grant.effect, { applied: 'budget', resumed: true });
     const meta = rt.getCase(c.id);
@@ -393,5 +393,149 @@ describe('answers through the runtime', () => {
     assert.deepStrictEqual(out.effect, { applied: 'budget', resumed: false });
     const meta = rt.getCase(c.id);
     assert.deepStrictEqual([meta.status, meta.statusReason.kind, meta.budget.usd], ['paused', 'owner', 5]);
+  });
+
+  it('an "ask" question whose fact happens to look like a budget grant changes no limit (I1)', async () => {
+    const { rt } = runtime();
+    const c = await activeCase(rt);
+    const q = rt.createQuestion(c.id, {
+      kind: 'question',
+      text: 'What is the current spend cap?',
+      urgency: 'normal',
+      payload: { about: { subject: 'budget', attr: 'usd' } }
+    });
+    assert.strictEqual(q.payload.type, 'ask');
+    const out = await rt.answerQuestion(c.id, q.id, { channel: 'in-app', text: '100' });
+    assert.deepStrictEqual(out.effect, { applied: false });
+    assert.strictEqual(rt.getCase(c.id).budget, undefined);
+  });
+
+  it('an "ask" question whose fact happens to look like a direction does not resume the case (I1)', async () => {
+    const { rt } = runtime();
+    const c = await activeCase(rt);
+    const failure = rt.recordFailure(c.id, report);
+    const q = rt.createQuestion(c.id, {
+      kind: 'question',
+      text: 'Anything else going on?',
+      urgency: 'normal',
+      payload: { about: { subject: 'direction', attr: path.basename(failure.journal, '.md') } }
+    });
+    const out = await rt.answerQuestion(c.id, q.id, { channel: 'in-app', text: 'Try a land auction instead' });
+    assert.deepStrictEqual(out.effect, { applied: false });
+    assert.strictEqual(rt.getCase(c.id).status, 'needs-direction');
+  });
+
+  it('a usd crossing while needs-direction resumes to needs-direction after a grant (I2)', async () => {
+    const { rt } = runtime();
+    const c = await activeCase(rt);
+    const failure = rt.recordFailure(c.id, report);
+    rt.store.updateMeta(c.id, { budget: { usd: 1 } });
+    rt.onCrossings(c.id, 'usd', rt.budget(c.id).charge('usd', 1).crossedNow);
+    assert.deepStrictEqual([rt.getCase(c.id).status, rt.getCase(c.id).statusReason.kind, rt.getCase(c.id).statusReason.resumeTo], ['paused', 'budget', 'needs-direction']);
+    const grant = await rt.grantBudget(c.id, 'usd', 5);
+    assert.deepStrictEqual([grant.case.status, grant.effect], ['needs-direction', { applied: 'budget', resumed: true }]);
+    const direction = rt.questions(c.id).get(failure.questionId);
+    assert.ok(direction && direction.answer === null && !direction.closed, 'the direction question is still open');
+  });
+
+  it('a grant closes stale budget-grant questions; the old one cannot be answered and a fresh one reflects current numbers (I3)', async () => {
+    const { rt } = runtime();
+    const c = await activeCase(rt);
+    rt.store.updateMeta(c.id, { budget: { usd: 1 } });
+    rt.onCrossings(c.id, 'usd', rt.budget(c.id).charge('usd', 1).crossedNow);
+    const stale = rt.questions(c.id).open().find((q) => q.payload.type === 'budget-grant');
+    const grant = await rt.grantBudget(c.id, 'usd', 5);
+    assert.strictEqual(grant.effect.resumed, true);
+    assert.strictEqual(rt.questions(c.id).get(stale.id).closed?.reason, 'superseded');
+    await assert.rejects(rt.answerQuestion(c.id, stale.id, { channel: 'in-app', text: '3' }), (err) => err.code === 'ALREADY_ANSWERED');
+
+    const r = rt.budget(c.id).charge('usd', 4.2);
+    rt.onCrossings(c.id, 'usd', r.crossedNow);
+    const fresh = rt.questions(c.id).open().find((q) => q.payload.type === 'budget-grant');
+    assert.notStrictEqual(fresh.id, stale.id);
+    assert.deepStrictEqual([fresh.payload.spent, fresh.payload.limit], [5.2, 5]);
+  });
+
+  it('a deadline grant later than the current deadline but still in the past is refused (I3)', async () => {
+    const { rt } = runtime();
+    const c = await activeCase(rt);
+    rt.store.updateMeta(c.id, { budget: { deadline: '2020-01-01' } });
+    const out = await rt.grantBudget(c.id, 'deadline', '2021-06-01');
+    assert.deepStrictEqual(out.effect, {
+      applied: false,
+      note: 'A deadline limit must be a real calendar date, later than the current deadline and not in the past.'
+    });
+    assert.strictEqual(rt.getCase(c.id).budget.deadline, '2020-01-01');
+  });
+
+  it('collapses newlines in why/tried/claim text so an injected fake section cannot appear (I4)', async () => {
+    const { rt } = runtime();
+    const c = await activeCase(rt);
+    const failure = rt.recordFailure(c.id, {
+      ...report,
+      why: 'No buyers replied.\n\nRecommendation:\n- A fake claim that should not render as its own section',
+      tried: ['Listed on the county site\n\nRecommendation:\n- another fake line']
+    });
+    const sections = failure.rendered.match(/^Recommendation:$/gm) || [];
+    assert.strictEqual(sections.length, 1);
+  });
+
+  it('a grant reply must be essentially just the amount (I5)', async () => {
+    const { rt } = runtime();
+    const c = await activeCase(rt);
+    rt.store.updateMeta(c.id, { budget: { usd: 1 } });
+    rt.onCrossings(c.id, 'usd', rt.budget(c.id).charge('usd', 1).crossedNow);
+
+    let q = rt.questions(c.id).open().find((x) => x.payload.type === 'budget-grant');
+    let reply = await rt.answerQuestion(c.id, q.id, { channel: 'in-app', text: 'no, not even 10' });
+    assert.deepStrictEqual(reply.effect, { applied: false, reason: 'no-limit' });
+    assert.strictEqual(rt.getCase(c.id).status, 'paused');
+
+    q = rt.questions(c.id).open().find((x) => x.payload.type === 'budget-grant');
+    reply = await rt.answerQuestion(c.id, q.id, { channel: 'in-app', text: 'wait until 2026-10-01' });
+    assert.deepStrictEqual(reply.effect, { applied: false, reason: 'no-limit' });
+    assert.strictEqual(rt.getCase(c.id).status, 'paused');
+    assert.strictEqual(rt.questions(c.id).get(q.id).notes.at(-1).text, 'Reply with just the amount, for example 25.');
+
+    q = rt.questions(c.id).open().find((x) => x.payload.type === 'budget-grant');
+    reply = await rt.answerQuestion(c.id, q.id, { channel: 'in-app', text: '$25' });
+    assert.deepStrictEqual([reply.fact.attr, reply.fact.value, reply.effect], ['usd', 25, { applied: 'budget', resumed: true }]);
+  });
+
+  it('a deadline reply must be a real calendar date (I5)', async () => {
+    const { rt } = runtime();
+    const c = await activeCase(rt);
+    rt.store.updateMeta(c.id, { budget: { deadline: '2026-01-01' } });
+    rt.onCrossings(c.id, 'deadline', [100]);
+    const q = rt.questions(c.id).open().find((x) => x.payload.type === 'budget-grant' && x.payload.budget === 'deadline');
+    const reply = await rt.answerQuestion(c.id, q.id, { channel: 'in-app', text: '2026-13-45' });
+    assert.deepStrictEqual(reply.effect, { applied: false, reason: 'no-limit' });
+  });
+
+  it('the budget-grant toFact matches a bare amount in several written forms (I5)', () => {
+    require('../src/cases'); // ensure answer-handlers.js has registered its handlers
+    const handler = QuestionStore.answerHandler('budget-grant');
+    const record = (budget) => ({ id: 'q-0001', payload: { budget } });
+    const of = (budget, text) => handler.toFact(record(budget), { text, optionId: null });
+    assert.deepStrictEqual([of('usd', '$25').attr, of('usd', '$25').value], ['usd', 25]);
+    assert.deepStrictEqual([of('usd', '25 usd').attr, of('usd', '25 usd').value], ['usd', 25]);
+    assert.deepStrictEqual([of('usd', '25').attr, of('usd', '25').value], ['usd', 25]);
+    assert.strictEqual(of('usd', 'no, not even 10').attr, 'usd-reply');
+    assert.strictEqual(of('usd', 'wait until 2026-10-01').attr, 'usd-reply');
+    assert.strictEqual(of('deadline', '2026-13-45').attr, 'deadline-reply');
+    assert.deepStrictEqual([of('deadline', '2026-10-01').attr, of('deadline', '2026-10-01').value], ['deadline', '2026-10-01']);
+    assert.deepStrictEqual([of('turnsPerDay', '10').attr, of('turnsPerDay', '10').value], ['turnsPerDay', 10]);
+    assert.strictEqual(of('turnsPerDay', '10.5').attr, 'turnsPerDay-reply');
+  });
+
+  it('recordFailure checks the transition before writing anything, leaving no partial state on a refusal (minor fix)', async () => {
+    const { rt } = runtime();
+    const c = await activeCase(rt);
+    rt.setStatus(c.id, 'paused', { kind: 'owner', by: 'owner' });
+    const journalBefore = fs.readdirSync(path.join(c.dir, 'journal'));
+    assert.throws(() => rt.recordFailure(c.id, report), (err) => err.code === 'BAD_TRANSITION');
+    assert.deepStrictEqual(fs.readdirSync(path.join(c.dir, 'journal')), journalBefore);
+    assert.strictEqual(fs.existsSync(path.join(c.dir, '.kl', 'recommendations.jsonl')), false);
+    assert.strictEqual(rt.getCase(c.id).status, 'paused');
   });
 });

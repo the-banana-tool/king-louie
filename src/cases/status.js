@@ -18,6 +18,7 @@ const TRANSITIONS = Object.freeze([
   row(['active'], 'paused', ['owner'], ['owner']),
   row(['needs-direction'], 'active', ['runtime', 'owner'], ['direction']),
   row(['paused'], 'active', ['runtime'], ['budget-grant']),
+  row(['paused'], 'needs-direction', ['runtime'], ['budget-grant']),
   row(['paused'], 'active', ['owner'], ['owner']),
   row(['active', 'needs-direction', 'paused'], 'done', ['owner'], ['owner']),
   row(['active', 'needs-direction', 'paused'], 'abandoned', ['owner'], ['owner'])

@@ -51,6 +51,15 @@ function addDays(day, n) {
   return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
 }
 
+// True only for a YYYY-MM-DD string that names a real calendar date: no
+// month/day rollover (e.g. "2026-13-45" or "2026-02-30" are rejected).
+function isRealCalendarDate(s) {
+  if (typeof s !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const [y, m, d] = s.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+}
+
 // Milliseconds the zone is ahead of UTC at instant `ts`.
 function offsetMs(ts, timeZone) {
   const p = parts(new Date(ts), timeZone);
@@ -101,6 +110,7 @@ module.exports = {
   validTimeZone,
   localDay,
   addDays,
+  isRealCalendarDate,
   zonedTime,
   parseHhmm,
   nextLocalTime,

@@ -44,7 +44,7 @@ describe('setStatus', () => {
     const { rt, events } = makeRuntime();
     const c = await activeCase(rt);
     assert.strictEqual(c.status, 'active');
-    assert.deepStrictEqual(c.statusReason, { kind: 'gating', by: 'runtime', ref: null, note: '', failureClass: null, at: '2026-09-23T12:00:00.000Z' });
+    assert.deepStrictEqual(c.statusReason, { kind: 'gating', by: 'runtime', ref: null, note: '', failureClass: null, resumeTo: null, at: '2026-09-23T12:00:00.000Z' });
     assert.deepStrictEqual(rt.wakeups(c.id).list().map((w) => w.kind), ['daily-orientation'], 'active registers the daily wake-up');
     const paused = rt.setStatus(c.id, 'paused', { kind: 'owner', by: 'owner', note: 'on holiday' });
     assert.strictEqual(paused.status, 'paused');

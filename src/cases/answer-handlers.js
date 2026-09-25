@@ -3,18 +3,23 @@
 // case-runtime.js for its side effect; `commit-failed` uses the default fact.
 const path = require('path');
 const { QuestionStore } = require('./questions');
+const { PER_DAY } = require('./budget');
+const { isRealCalendarDate } = require('./clock');
+const { createLogger } = require('../logging');
 
-const DAY = /\d{4}-\d{2}-\d{2}/;
+const log = createLogger('cases/answer-handlers');
+
+// A grant reply must be essentially just the amount (controller ruling I5 on
+// Task 11 review): a money category matches "$25", "25", "25 usd" or
+// "25 dollars"; a per-day category a bare integer; a deadline a real
+// calendar date. Anything else is recorded as a reply, not a grant.
+const MONEY_RE = /^\s*\$?\s*(\d+(?:\.\d+)?)\s*(?:usd|dollars?)?\s*$/i;
+const INT_RE = /^\s*(\d+)\s*$/;
+const NO_LIMIT_NOTE = 'Reply with just the amount, for example 25.';
 
 function optionOrText(record, answer) {
   const option = answer.optionId ? (record.options || []).find((o) => o.id === answer.optionId) : null;
   return option ? option.label : answer.text;
-}
-
-// "1,500.50 dollars" -> 1500.5; null when the text holds no number.
-function firstNumber(text) {
-  const m = String(text || '').replace(/(\d),(?=\d{3}\b)/g, '$1').match(/-?\d+(?:\.\d+)?/);
-  return m ? Number(m[0]) : null;
 }
 
 QuestionStore.registerAnswerHandler('direction', {
@@ -27,16 +32,22 @@ QuestionStore.registerAnswerHandler('direction', {
 });
 
 QuestionStore.registerAnswerHandler('budget-grant', {
+  // Only the reply's format decides whether it names an amount at all;
+  // whether that amount actually raises the limit is checked against the
+  // budget's CURRENT numbers in CaseRuntime.applyOwnerFact, never against
+  // numbers this record captured when the question was asked (I3).
   toFact: (record, answer) => {
     const category = String(record.payload?.budget || 'usd');
-    const text = String(optionOrText(record, answer) ?? '');
+    const text = String(optionOrText(record, answer) ?? '').trim();
     let value = null;
     if (category === 'deadline') {
-      const m = text.match(DAY);
-      if (m && m[0] > String(record.payload?.limit || '')) value = m[0];
+      value = isRealCalendarDate(text) ? text : null;
+    } else if (PER_DAY.includes(category)) {
+      const m = text.match(INT_RE);
+      value = m ? Number(m[1]) : null;
     } else {
-      const n = firstNumber(text);
-      if (n !== null && n > Number(record.payload?.spent || 0)) value = n;
+      const m = text.match(MONEY_RE);
+      value = m ? Number(m[1]) : null;
     }
     if (value !== null) {
       return { stmt: `Owner set the ${category} budget to ${value} (answer to ${record.id}).`, subject: 'budget', attr: category, value };
@@ -51,10 +62,18 @@ QuestionStore.registerAnswerHandler('budget-grant', {
         `${record.id}: the reply had no usable ${category} limit, so the case stays paused. Answer with a number, or use the Grant button.`,
         runtime.now()
       );
+      try {
+        runtime.questions(caseId).note(record.id, NO_LIMIT_NOTE);
+      } catch (err) {
+        log.warn(`Could not note the unusable reply on ${record.id}: ${err.message}`);
+      }
+      try {
+        runtime.askBudgetGrant(caseId, category);
+      } catch (err) {
+        log.warn(`Could not raise a fresh ${category} grant question after ${record.id}: ${err.message}`);
+      }
       return { applied: false, reason: 'no-limit' };
     }
     return runtime.applyOwnerFact(caseId, fact);
   }
 });
-
-module.exports = { firstNumber };
