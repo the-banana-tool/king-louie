@@ -1,12 +1,14 @@
 // tests/approvals-approver-store.test.js
 const { describe, it, after } = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { ApproverStore } = require('../src/approvals/approver-store');
 const { ApproverAdmin, ApproverAdminError } = require('../src/approvals/approver-admin');
 const { seal } = require('../src/approvals/envelope');
+const { iso, randomNonce } = require('../src/approvals/messages');
 const { createFakePhone } = require('./helpers/fake-phone');
 
 const tmp = [];
@@ -64,7 +66,9 @@ describe('ApproverStore reading', () => {
     const a = createFakePhone({ seed: 'A' });
     assert.equal(s.get(a.deviceId).device_id, a.deviceId);
     assert.equal(s.isActive(a.deviceId), false);
-    assert.equal(store(l, { allowTestKeys: true }).isActive(a.deviceId), true);
+    const allowed = store(l, { allowTestKeys: true });
+    await allowed.ready();
+    assert.equal(allowed.isActive(a.deviceId), true);
   });
 
   it('never counts demo or revoked devices as active', async () => {
@@ -263,5 +267,252 @@ describe('ApproverAdmin', () => {
     const fresh = store(l2);
     await fresh.ready();
     assert.equal(fresh.isActive(c.deviceId), true);
+  });
+});
+
+describe('ApproverStore starts untrusted (M1)', () => {
+  it('treats itself as empty until ready() runs', async () => {
+    const l = layout();
+    write(l.dir, createFakePhone().approverRecord());
+    const s = store(l);
+    assert.equal(s.list().length, 0);
+    assert.equal(s.activeCount(), 0);
+    await s.ready();
+    assert.equal(s.activeCount(), 1);
+  });
+});
+
+describe('ApproverStore.stage refuses demo and test-key enrollments unless allowed (M7)', () => {
+  it('rejects staging an enrollment of a demo device', async () => {
+    const { s, a } = await fleet();
+    const demo = createFakePhone({ platform: 'demo' });
+    assert.deepEqual(s.stage(a.enroll({ device: demo.device(), now: NOW })), { state: 'rejected', reason: 'demo_device' });
+  });
+
+  it('rejects staging an enrollment of a published test key unless allowTestKeys', async () => {
+    const { s, a, l } = await fleet();
+    const testPhone = createFakePhone({ seed: 'A' });
+    assert.deepEqual(s.stage(a.enroll({ device: testPhone.device(), now: NOW })), { state: 'rejected', reason: 'test_key' });
+    const allowed = store(l, { allowTestKeys: true });
+    await allowed.ready();
+    assert.deepEqual(allowed.stage(a.enroll({ device: testPhone.device(), now: NOW })), { state: 'staged' });
+  });
+});
+
+async function fleet() {
+  const l = layout();
+  const a = createFakePhone({ name: 'Owner phone' });
+  const b = createFakePhone({ name: 'Second phone' });
+  write(l.dir, a.approverRecord());
+  write(l.dir, b.approverRecord());
+  const s = store(l);
+  await s.ready();
+  return { l, a, b, s };
+}
+
+describe('ApproverStore.stage additional reasons (M8)', () => {
+  it('rejects staging an enrollment of a previously revoked device_id', async () => {
+    const { s, a, l } = await fleet();
+    const c = createFakePhone();
+    const ad = admin(l);
+    ad.writeApprover(c.approverRecord());
+    ad.markRevoked(c.deviceId, 'console');
+    s.refresh();
+    assert.deepEqual(s.stage(a.enroll({ device: c.device(), now: NOW })), { state: 'rejected', reason: 'revoked_device' });
+  });
+
+  it('refuses to relay a console-style enrollment (enrolled_by: null)', async () => {
+    const { s } = await fleet();
+    const c = createFakePhone();
+    const codeEnv = c.enroll({ codeId: 'A'.repeat(22), code: crypto.randomBytes(32).toString('base64url'), now: NOW });
+    assert.deepEqual(s.stage(codeEnv), { state: 'rejected', reason: 'console_enrollment_is_not_relayed' });
+  });
+
+  it('rejects staging when this store has no staging dir configured', async () => {
+    const l = layout();
+    const a = createFakePhone();
+    write(l.dir, a.approverRecord());
+    const noStage = new ApproverStore({ dir: l.dir, geteuid: () => OWN_UID, adminUid: OWN_UID, platform: 'linux', now: () => NOW });
+    await noStage.ready();
+    const c = createFakePhone();
+    assert.deepEqual(noStage.stage(a.enroll({ device: c.device(), now: NOW })), { state: 'rejected', reason: 'no_staging_dir' });
+  });
+
+  it('rejects a message with an unsupported version', async () => {
+    const { s, a } = await fleet();
+    const c = createFakePhone();
+    const bad = seal({
+      v: 2,
+      type: 'kl.device.enroll',
+      device: c.device(),
+      enrolled_by: a.deviceId,
+      created_at: iso(NOW),
+      expires_at: iso(NOW + 10 * 60 * 1000),
+      nonce: randomNonce()
+    }, a.signer);
+    assert.deepEqual(s.stage(bad), { state: 'rejected', reason: 'unsupported_version' });
+  });
+});
+
+describe('ApproverAdmin.applyStaged additional results (M8)', () => {
+  it('rejects a self-revoke reaching applyStaged directly (defense in depth)', async () => {
+    const l = layout();
+    const a = createFakePhone();
+    write(l.dir, a.approverRecord());
+    // ApproverStore.stage() already refuses a self-revoke, so this envelope
+    // is written directly to bypass it and exercise applyStaged's own check.
+    const nonce = randomNonce();
+    const env = seal({
+      v: 1, type: 'kl.device.revoke', device_id: a.deviceId, revoked_by: a.deviceId, reason: 'x',
+      created_at: iso(NOW), expires_at: iso(NOW + 60 * 60 * 1000), nonce
+    }, a.signer);
+    fs.mkdirSync(l.stagedDir, { recursive: true });
+    fs.writeFileSync(path.join(l.stagedDir, `${nonce}.json`), JSON.stringify({ received_at: iso(NOW), envelope: env }));
+    const ad = admin(l);
+    const results = await ad.applyStaged({ confirm: async () => true });
+    assert.deepEqual(results.map((r) => r.result), ['rejected: a device cannot revoke itself']);
+  });
+
+  it('rejects re-enrolling a device that is already an approver (defense in depth)', async () => {
+    const { a, b, l } = await fleet();
+    // ApproverStore.stage() already turns this into { state: 'duplicate' }
+    // without writing a file, so this envelope is written directly to
+    // exercise applyStaged's own "already enrolled" check.
+    const nonce = randomNonce();
+    const env = a.enroll({ device: b.device(), now: NOW, nonce });
+    fs.mkdirSync(l.stagedDir, { recursive: true });
+    fs.writeFileSync(path.join(l.stagedDir, `${nonce}.json`), JSON.stringify({ received_at: iso(NOW), envelope: env }));
+    const ad = admin(l);
+    const results = await ad.applyStaged({ confirm: async () => true });
+    assert.deepEqual(results.map((r) => r.result), ['rejected: already enrolled']);
+  });
+
+  it('rejects applying an enrollment of a demo or test-key device when the admin does not allow test keys (M7)', async () => {
+    const l = layout();
+    const a = createFakePhone();
+    write(l.dir, a.approverRecord());
+    // A permissive store stages what a stricter admin must still refuse.
+    const permissive = store(l, { allowTestKeys: true });
+    await permissive.ready();
+    const testPhone = createFakePhone({ seed: 'B' });
+    assert.deepEqual(permissive.stage(a.enroll({ device: testPhone.device(), now: NOW })), { state: 'staged' });
+    const ad = admin(l); // allowTestKeys defaults to false
+    const results = await ad.applyStaged({ confirm: async () => true });
+    assert.deepEqual(results.map((r) => r.result), ['rejected: test key']);
+    assert.equal(ad.read(testPhone.deviceId), null);
+  });
+});
+
+describe('C1: a revoke always wins', () => {
+  it('defers a revoke of a not-yet-enrolled device instead of moving it to done/, and refuses the matching enroll', async () => {
+    // Exact repro: A enrolls C (staged); the owner revokes C (staged). At
+    // apply, the revoke must not be discarded as "unknown device" — it must
+    // keep blocking C, in this batch and after a restart.
+    const l = layout();
+    const a = createFakePhone({ name: 'Owner' });
+    write(l.dir, a.approverRecord());
+    const s = store(l);
+    await s.ready();
+    const c = createFakePhone({ name: 'New phone' });
+    assert.deepEqual(s.stage(a.enroll({ device: c.device(), now: NOW })), { state: 'staged' });
+    assert.deepEqual(s.stage(a.revoke(c.deviceId, { now: NOW })), { state: 'revoked-pending-apply' });
+
+    const ad = admin(l);
+    const results = await ad.applyStaged({ confirm: async () => true });
+    assert.deepEqual(results.map((r) => [r.type, r.result]), [
+      ['kl.device.revoke', 'deferred: unknown device'],
+      ['kl.device.enroll', 'rejected: device was revoked']
+    ]);
+    assert.equal(ad.read(c.deviceId), null);
+
+    // The deferred revoke stays in staged/, not moved to done/.
+    assert.equal(fs.readdirSync(l.stagedDir).filter((n) => n.endsWith('.json')).length, 1);
+    const doneDir = path.join(l.stagedDir, 'done');
+    assert.equal(fs.existsSync(doneDir) ? fs.readdirSync(doneDir).length : 0, 1, 'only the enroll moved to done/');
+
+    // After a restart, the overlay (rebuilt from staged/) still blocks C.
+    const restarted = store(l);
+    await restarted.ready();
+    assert.equal(restarted.isActive(c.deviceId), false);
+    assert.equal(ad.read(c.deviceId), null, 'C never became an approver');
+  });
+});
+
+describe('I1: staged-item age is judged on the signed created_at, never received_at', () => {
+  it('refuses an enrollment whose signed created_at is over 7 days old even when received_at is forged fresh', async () => {
+    const l = layout();
+    const a = createFakePhone();
+    const c = createFakePhone({ name: 'New phone' });
+    write(l.dir, a.approverRecord());
+    const past = NOW - 8 * 24 * 60 * 60 * 1000;
+    const pastStore = store(l, { now: () => past });
+    await pastStore.ready();
+    const env = a.enroll({ device: c.device(), now: past });
+    assert.deepEqual(pastStore.stage(env), { state: 'staged' });
+
+    // Forge received_at to look freshly received just now.
+    const [stagedName] = fs.readdirSync(l.stagedDir).filter((n) => n.endsWith('.json'));
+    const stagedFile = path.join(l.stagedDir, stagedName);
+    const staged = JSON.parse(fs.readFileSync(stagedFile, 'utf8'));
+    fs.writeFileSync(stagedFile, JSON.stringify({ ...staged, received_at: iso(NOW) }));
+
+    const ad = admin(l); // now = NOW
+    const results = await ad.applyStaged({ confirm: async () => true });
+    assert.deepEqual(results.map((r) => r.result), ['rejected: older than 7 days']);
+  });
+});
+
+describe('I2: the admin never follows a symlink in the service-writable staged dir', () => {
+  function trySymlink(t, target, linkPath, type) {
+    try {
+      fs.symlinkSync(target, linkPath, type);
+      return true;
+    } catch (err) {
+      if (err.code === 'EPERM') {
+        t.skip('creating a symlink needs elevated privileges (or Developer Mode) on this host');
+        return false;
+      }
+      throw err;
+    }
+  }
+
+  it('refuses a symlinked staged entry without touching it', async (t) => {
+    const l = layout();
+    fs.mkdirSync(l.stagedDir, { recursive: true });
+    const real = path.join(l.stagedDir, 'real-target.json');
+    fs.writeFileSync(real, JSON.stringify({ received_at: iso(NOW), envelope: {} }));
+    const linkPath = path.join(l.stagedDir, `${'a'.repeat(43)}.json`);
+    if (!trySymlink(t, real, linkPath, 'file')) return;
+    const ad = admin(l);
+    const results = await ad.applyStaged({ confirm: async () => true });
+    assert.deepEqual(results.map((r) => r.result), ['rejected: not a regular file']);
+    assert.equal(fs.lstatSync(linkPath).isSymbolicLink(), true, 'left untouched, not moved to done/');
+  });
+
+  it('refuses a non-regular staged entry (a directory in staged/)', async () => {
+    const l = layout();
+    fs.mkdirSync(l.stagedDir, { recursive: true });
+    fs.mkdirSync(path.join(l.stagedDir, `${'b'.repeat(43)}.json`));
+    const ad = admin(l);
+    const results = await ad.applyStaged({ confirm: async () => true });
+    assert.deepEqual(results.map((r) => r.result), ['rejected: not a regular file']);
+  });
+
+  it('aborts apply with ApproverAdminError when staged/ itself is a symlink', async (t) => {
+    const l = layout();
+    fs.mkdirSync(path.dirname(l.stagedDir), { recursive: true });
+    if (!trySymlink(t, path.dirname(l.stagedDir), l.stagedDir, 'dir')) return;
+    const ad = admin(l);
+    assert.throws(() => ad.listStaged(), ApproverAdminError);
+  });
+
+  it('aborts apply with ApproverAdminError when staged/done is a symlink', async (t) => {
+    const l = layout();
+    fs.mkdirSync(l.stagedDir, { recursive: true });
+    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-elsewhere-'));
+    tmp.push(elsewhere);
+    if (!trySymlink(t, elsewhere, path.join(l.stagedDir, 'done'), 'dir')) return;
+    const ad = admin(l);
+    assert.throws(() => ad.listStaged(), ApproverAdminError);
   });
 });

@@ -52,12 +52,20 @@ function checkApproverDir({ dir, platform = process.platform, geteuid = defaultG
   if (platform === 'win32') {
     const probe = path.join(dir, `.probe-${crypto.randomBytes(6).toString('hex')}`);
     let fd = null;
+    let openErr = null;
     try {
       fd = fsImpl.openSync(probe, 'wx');
-    } catch {
-      fd = null;
+    } catch (err) {
+      openErr = err;
     }
-    if (fd === null) return null;
+    if (fd === null) {
+      // Only "denied" proves the ACL is right. Any other failure (the dir
+      // vanished, a device error, …) means the probe proved nothing, so it
+      // must not be read as "trusted" — that would be trusting silence.
+      if (openErr && (openErr.code === 'EACCES' || openErr.code === 'EPERM')) return null;
+      const why = openErr ? (openErr.code || openErr.message) : 'unknown error';
+      return `${dir}: could not verify the approver directory is protected (${why}); no approver is trusted until this is fixed`;
+    }
     try { fsImpl.closeSync(fd); } catch { /* ignore */ }
     try { fsImpl.unlinkSync(probe); } catch { /* ignore */ }
     return `${dir} is writable by the account running the service; no approver is trusted until an administrator fixes its ACL`;
@@ -72,8 +80,19 @@ function checkApproverDir({ dir, platform = process.platform, geteuid = defaultG
 
 function writeFileAtomic(file, text, mode = 0o600) {
   const tmp = `${file}.tmp-${crypto.randomBytes(4).toString('hex')}`;
-  fs.writeFileSync(tmp, text, { mode });
-  fs.renameSync(tmp, file);
+  let fd;
+  try {
+    fd = fs.openSync(tmp, 'w', mode);
+    fs.writeSync(fd, text);
+    fs.fsyncSync(fd); // the rename must not land before the bytes it points at do
+    fs.closeSync(fd);
+    fd = undefined;
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* ignore */ } }
+    try { fs.unlinkSync(tmp); } catch { /* ignore: never had a fd, or already gone */ }
+    throw err;
+  }
 }
 
 class ApproverStore {
@@ -89,7 +108,9 @@ class ApproverStore {
     this.allowTestKeys = allowTestKeys === true;
     this.fs = fsImpl;
     this.problem = null;
-    this.untrusted = false;
+    // Untrusted until ready() runs the probe: a store nobody has checked yet
+    // must fail closed, the same as one that failed the check.
+    this.untrusted = true;
     this.overlay = new Set();
     this._files = new Map();
     this._scannedAt = -Infinity;
@@ -120,11 +141,25 @@ class ApproverStore {
     const nowMs = Date.now();
     if (nowMs - this._scannedAt < CACHE_MS) return;
     this._scannedAt = nowMs;
-    if (this.untrusted || !this.fs.existsSync(this.dir)) {
+    if (this.untrusted) {
       this._files.clear();
       return;
     }
-    const names = this.fs.readdirSync(this.dir).filter((n) => n.endsWith('.json'));
+    let names;
+    try {
+      if (!this.fs.existsSync(this.dir)) {
+        this._files.clear();
+        return;
+      }
+      names = this.fs.readdirSync(this.dir).filter((n) => n.endsWith('.json'));
+    } catch (err) {
+      // A gate refusal is a result, never a throw: a directory that becomes
+      // unreadable mid-run (removed, a permission flip, a flaky mount) must
+      // fail closed to an empty set, not crash whatever called isActive/get.
+      this._logOnce(`readdir:${this.dir}`, `treating the approver set as empty: cannot read ${this.dir}: ${err.message}`);
+      this._files.clear();
+      return;
+    }
     const seen = new Set(names);
     for (const name of [...this._files.keys()]) if (!seen.has(name)) this._files.delete(name);
     for (const name of names) {
@@ -224,8 +259,18 @@ class ApproverStore {
 
   _rebuildOverlay() {
     this.overlay.clear();
-    if (!this.stagedDir || !this.fs.existsSync(this.stagedDir)) return;
-    for (const name of this.fs.readdirSync(this.stagedDir).filter((n) => n.endsWith('.json'))) {
+    if (!this.stagedDir) return;
+    let names;
+    try {
+      if (!this.fs.existsSync(this.stagedDir)) return;
+      names = this.fs.readdirSync(this.stagedDir).filter((n) => n.endsWith('.json'));
+    } catch (err) {
+      // Same fail-closed rule as _scan(): an unreadable staged dir yields no
+      // overlay entries rather than an uncaught throw out of ready().
+      log.error(`treating the revoke overlay as empty: cannot read ${this.stagedDir}: ${err.message}`);
+      return;
+    }
+    for (const name of names) {
       try {
         const { envelope } = JSON.parse(this.fs.readFileSync(path.join(this.stagedDir, name), 'utf8'));
         const { message } = open(envelope);
@@ -261,6 +306,13 @@ class ApproverStore {
       // Enrolls are checked against the admin set AND the overlay.
       if (!this.isActive(message.enrolled_by)) return rejected('signer_not_active');
       if (!verifyEs256(envelope, this.get(message.enrolled_by).public_key)) return rejected('bad_signature');
+      // The device being enrolled, not the signer: a demo or published test
+      // key must never become a real approver unless the store was built to
+      // allow it (tests only).
+      if (!this.allowTestKeys) {
+        if (message.device.platform === 'demo') return rejected('demo_device');
+        if (isTestDeviceKey(message.device.public_key)) return rejected('test_key');
+      }
       const existing = this.get(message.device.device_id);
       if (existing && existing.revoked_at !== null) return rejected('revoked_device');
       if (existing && this.isAdminApplied(existing.device_id)) return { state: 'duplicate' };
