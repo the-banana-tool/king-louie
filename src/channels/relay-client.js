@@ -2,6 +2,15 @@
 // The contact relay contract (cases stage 4 spec §4.5): email via relay, SMS
 // and voice. Send with an Idempotency-Key, poll /v1/events with a persisted
 // cursor, and accept a co-located relay's signed push. fetch and crypto only.
+//
+// Hardening: relay requests never follow a redirect (a 3xx would re-send the
+// owner's number and the question text to wherever it points), time out, and
+// read at most MAX_RESPONSE_BYTES of a response.
+//
+// Each relay needs its own webhook secret (vault
+// contact.relay.<name>.webhookSecret). The signature covers the timestamp and
+// the body, not the <name> in the push URL, so two relays sharing a secret
+// could push events in each other's name.
 const crypto = require('crypto');
 const { ContactDeliveryError } = require('./channel-plugin');
 const { assertRelayBaseUrl } = require('../cases/contact-format');
@@ -14,6 +23,33 @@ const BACKOFF_MAX_MS = 10 * 60 * 1000;
 const REQUEST_TIMEOUT_MS = 15 * 1000;
 // Accepted push signatures remembered until their timestamp goes stale.
 const MAX_SEEN_PUSHES = 10000;
+// A relay response is a page of at most 100 events; anything bigger is refused.
+const MAX_RESPONSE_BYTES = 1024 * 1024;
+const MAX_CURSOR_CHARS = 256;
+
+// The body as text, reading no more than `limit` bytes. Throws past the cap.
+async function readCapped(res, limit) {
+  const tooBig = () => new Error(`response is over ${limit} bytes`);
+  if (!res.body || typeof res.body.getReader !== 'function') {
+    const text = await res.text();
+    if (Buffer.byteLength(text) > limit) throw tooBig();
+    return text;
+  }
+  const reader = res.body.getReader();
+  const chunks = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > limit) {
+      reader.cancel().catch(() => {});
+      throw tooBig();
+    }
+    chunks.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength));
+  }
+  return Buffer.concat(chunks, size).toString('utf8');
+}
 
 // The bearer token never reaches an error message or a log line, even when
 // the relay (or the network stack) echoes it back.
@@ -55,9 +91,10 @@ class ContactRelayClient {
         method,
         headers: { authorization: `Bearer ${token}`, ...(body ? { 'content-type': 'application/json' } : {}), ...headers },
         body: body ? JSON.stringify(body) : undefined,
+        redirect: 'error',
         signal: controller.signal
       });
-      text = await res.text();
+      text = await readCapped(res, MAX_RESPONSE_BYTES);
     } catch (err) {
       const why = controller.signal.aborted ? `timed out after ${this.timeoutMs} ms` : redact(err?.message || err, token);
       throw new ContactDeliveryError('unreachable', `relay ${this.name} is unreachable: ${why}`);
@@ -90,7 +127,9 @@ class ContactRelayClient {
   async events(cursor) {
     const q = cursor ? `after=${encodeURIComponent(cursor)}&limit=100` : 'limit=100';
     const out = await this._request('GET', `/v1/events?${q}`);
-    return { events: Array.isArray(out.events) ? out.events : [], cursor: out.cursor ?? cursor ?? null };
+    const ok = typeof out.cursor === 'string' && out.cursor.length <= MAX_CURSOR_CHARS;
+    if (!ok && out.cursor !== undefined && out.cursor !== null) this.log.warn(`relay ${this.name} sent an invalid cursor; keeping the old one`);
+    return { events: Array.isArray(out.events) ? out.events : [], cursor: ok ? out.cursor : (cursor ?? null) };
   }
 }
 
@@ -101,7 +140,7 @@ class RelayPoller {
     this.client = client;
     this.state = state;
     this.onEvents = onEvents;
-    this.pollMs = Math.max(1, pollSec) * 1000;
+    this.pollMs = (Number.isFinite(+pollSec) ? Math.max(1, +pollSec) : 30) * 1000;
     this.log = log;
     this.setTimer = setTimer;
     this.clearTimer = clearTimer;
@@ -131,6 +170,7 @@ class RelayPoller {
   }
 
   start() {
+    if (this.running) return;
     this.running = true;
     const loop = async () => {
       if (!this.running) return;
@@ -165,9 +205,11 @@ function verifyRelayPush({ secret, timestamp, signature, rawBody, now = Date.now
 }
 
 // The handler behind POST /contact/relay/<name> on the loopback webhook server.
-// A verified signature is accepted once: a replay inside the ± 300 s window
-// is refused (409). Only verified signatures are remembered, so a forged
-// push can't block the real one. The router also drops duplicate event ids.
+// A verified push is applied once: a replay inside the ± 300 s window gets
+// 200 { replay: true } (a relay retrying after a lost response sees success)
+// without reaching onEvents. The signature is remembered only after onEvents
+// resolves, so a retry after a failed apply is processed, and a forged push
+// can't block the real one. The router also drops duplicate event ids.
 function createRelayPushHandler({ getSecret, hasRelay = () => true, onEvents, clock = () => new Date() }) {
   const seen = new Map(); // `${name}:${signature}` → forget-after ms
   return async (name, rawBody, headers = {}) => {
@@ -176,11 +218,6 @@ function createRelayPushHandler({ getSecret, hasRelay = () => true, onEvents, cl
     const signature = headers['x-kl-signature'];
     const v = verifyRelayPush({ secret: getSecret(name), timestamp: headers['x-kl-timestamp'], signature, rawBody, now });
     if (!v.ok) return { status: 401, body: { error: v.reason } };
-    for (const [k, until] of seen) if (until < now) seen.delete(k);
-    const key = `${name}:${String(signature).toLowerCase()}`;
-    if (seen.has(key)) return { status: 409, body: { error: 'replayed signature' } };
-    seen.set(key, now + 2 * PUSH_SKEW_MS);
-    while (seen.size > MAX_SEEN_PUSHES) seen.delete(seen.keys().next().value);
     let payload;
     try {
       payload = JSON.parse(rawBody);
@@ -188,12 +225,17 @@ function createRelayPushHandler({ getSecret, hasRelay = () => true, onEvents, cl
       return { status: 400, body: { error: 'Invalid JSON' } };
     }
     const events = Array.isArray(payload?.events) ? payload.events : [payload];
+    for (const [k, until] of seen) if (until < now) seen.delete(k);
+    const key = `${name}:${String(signature).toLowerCase()}`;
+    if (seen.has(key)) return { status: 200, body: { ok: true, replay: true, applied: 0, skipped: events.length } };
     const r = await onEvents(name, events);
+    seen.set(key, now + 2 * PUSH_SKEW_MS);
+    while (seen.size > MAX_SEEN_PUSHES) seen.delete(seen.keys().next().value);
     return { status: 200, body: { ok: true, ...r } };
   };
 }
 
 module.exports = {
   ContactRelayClient, RelayPoller, assertRelayBaseUrl, errorForStatus, verifyRelayPush, createRelayPushHandler,
-  BACKOFF_MIN_MS, BACKOFF_MAX_MS, REQUEST_TIMEOUT_MS
+  BACKOFF_MIN_MS, BACKOFF_MAX_MS, REQUEST_TIMEOUT_MS, MAX_RESPONSE_BYTES
 };

@@ -187,7 +187,7 @@ describe('signed relay push: missing, future and replayed (carry)', () => {
     assert.strictEqual(verifyRelayPush({ secret, timestamp: ts, signature: upper, rawBody: body, now }).ok, true);
   });
 
-  it('refuses a replayed signature and never hands its events on twice', async () => {
+  it('answers a replayed signature 200 without handing its events on twice', async () => {
     let calls = 0;
     const handler = createRelayPushHandler({
       getSecret: () => secret,
@@ -197,15 +197,39 @@ describe('signed relay push: missing, future and replayed (carry)', () => {
     const headers = { 'x-kl-timestamp': ts, 'x-kl-signature': sign(secret, ts, body) };
     assert.strictEqual((await handler('main', body, headers)).status, 200);
     const again = await handler('main', body, headers);
-    assert.strictEqual(again.status, 409);
-    assert.match(again.body.error, /replayed/);
+    assert.deepStrictEqual(again, { status: 200, body: { ok: true, replay: true, applied: 0, skipped: 1 } });
     assert.strictEqual(calls, 1);
+    const batch = JSON.stringify({ events: [{ id: 'ev-a' }, { id: 'ev-b' }] });
+    const hb = { 'x-kl-timestamp': ts, 'x-kl-signature': sign(secret, ts, batch) };
+    await handler('main', batch, hb);
+    assert.deepStrictEqual((await handler('main', batch, hb)).body, { ok: true, replay: true, applied: 0, skipped: 2 });
+    assert.strictEqual(calls, 2);
+    calls = 0;
     // A forged push with a bad signature is not remembered, so it can't block the real one.
     const ts2 = '2026-09-25T14:00:01Z';
     const body2 = JSON.stringify({ id: 'ev-10', type: 'status', messageId: 'msg-1', status: 'delivered' });
     const good2 = sign(secret, ts2, body2);
     assert.strictEqual((await handler('main', `${body2} `, { 'x-kl-timestamp': ts2, 'x-kl-signature': good2 })).status, 401);
     assert.strictEqual((await handler('main', body2, { 'x-kl-timestamp': ts2, 'x-kl-signature': good2 })).status, 200);
+    assert.strictEqual(calls, 1);
+  });
+
+  it('a push whose apply failed is processed again when the relay retries it', async () => {
+    let calls = 0;
+    const handler = createRelayPushHandler({
+      getSecret: () => secret,
+      onEvents: async (name, events) => {
+        calls += 1;
+        if (calls === 1) throw new Error('disk full');
+        return { applied: events.length, skipped: 0 };
+      },
+      clock: () => new Date(now)
+    });
+    const headers = { 'x-kl-timestamp': ts, 'x-kl-signature': sign(secret, ts, body) };
+    await assert.rejects(handler('main', body, headers), /disk full/);
+    assert.deepStrictEqual(await handler('main', body, headers), { status: 200, body: { ok: true, applied: 1, skipped: 0 } });
+    assert.strictEqual(calls, 2);
+    assert.strictEqual((await handler('main', body, headers)).body.replay, true);
     assert.strictEqual(calls, 2);
   });
 
@@ -213,5 +237,66 @@ describe('signed relay push: missing, future and replayed (carry)', () => {
     const handler = createRelayPushHandler({ getSecret: () => secret, onEvents: async () => ({ applied: 0, skipped: 0 }), clock: () => new Date(now) });
     const out = await handler('main', body, { 'x-kl-timestamp': ts, 'x-kl-signature': sign('x', ts, body) });
     assert.ok(!JSON.stringify(out).includes(secret));
+  });
+});
+
+describe('relay client hardening (review T7 round 1)', () => {
+  const http = require('http');
+  const listen = async (handler) => {
+    const server = http.createServer(handler);
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    return { server, url: `http://127.0.0.1:${server.address().port}`, close: () => new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); }) };
+  };
+  const stubFetch = (json) => async () => ({ status: 200, text: async () => JSON.stringify(json) });
+
+  it('never follows a redirect: a 307 is unreachable and nothing reaches the other server', async () => {
+    const hits = [];
+    const other = await listen((req, res) => { hits.push(req.url); res.writeHead(202, { 'content-type': 'application/json' }); res.end('{"id":"stolen"}'); });
+    const redirector = await listen((req, res) => { req.resume(); res.writeHead(307, { location: `${other.url}/v1/messages` }); res.end(); });
+    try {
+      const client = new ContactRelayClient({ name: 'main', baseUrl: redirector.url, getToken: () => 'relay-token' });
+      await assert.rejects(client.send({ channel: 'sms', to: '+15550100', text: 'Accept the 41k offer?' }, { idempotencyKey: 'd-r' }),
+        (err) => err.code === 'unreachable');
+      await assert.rejects(client.events(null), (err) => err.code === 'unreachable');
+      assert.deepStrictEqual(hits, []);
+    } finally {
+      await other.close();
+      await redirector.close();
+    }
+  });
+
+  it('refuses a response body over the cap as unreachable', async () => {
+    const big = await listen((req, res) => { req.resume(); res.writeHead(200, { 'content-type': 'application/json' }); res.end(`{"events":[],"pad":"${'a'.repeat(2 * 1024 * 1024)}"}`); });
+    try {
+      const client = new ContactRelayClient({ name: 'main', baseUrl: big.url, getToken: () => 'relay-token' });
+      await assert.rejects(client.events(null), (err) => err.code === 'unreachable' && /over 1048576 bytes/.test(err.message));
+    } finally {
+      await big.close();
+    }
+  });
+
+  it('keeps the old cursor unless the relay sends a string of at most 256 characters', async () => {
+    const mk = (cursor) => new ContactRelayClient({ name: 'main', baseUrl: 'https://relay.example.com', getToken: () => 't', fetchImpl: stubFetch({ events: [], cursor }) });
+    assert.strictEqual((await mk('c-2').events('c-1')).cursor, 'c-2');
+    assert.strictEqual((await mk('x'.repeat(256)).events('c-1')).cursor, 'x'.repeat(256));
+    assert.strictEqual((await mk('x'.repeat(257)).events('c-1')).cursor, 'c-1');
+    assert.strictEqual((await mk(42).events('c-1')).cursor, 'c-1');
+    assert.strictEqual((await mk({ a: 1 }).events(null)).cursor, null);
+  });
+
+  it('pollSec falls back to 30 s when not a number, and start() twice starts one loop', () => {
+    const client = { name: 'main' };
+    assert.strictEqual(new RelayPoller({ client, pollSec: 'soon' }).nextDelay(), 30000);
+    assert.strictEqual(new RelayPoller({ client, pollSec: '5' }).nextDelay(), 5000);
+    assert.strictEqual(new RelayPoller({ client, pollSec: 0 }).nextDelay(), 1000);
+    let timers = 0;
+    const poller = new RelayPoller({ client, setTimer: () => { timers += 1; return { id: timers }; }, clearTimer: () => {} });
+    poller.start();
+    poller.start();
+    assert.strictEqual(timers, 1);
+    poller.stop();
+    poller.start();
+    assert.strictEqual(timers, 2);
+    poller.stop();
   });
 });

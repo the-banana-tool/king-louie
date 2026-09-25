@@ -507,7 +507,9 @@ HTTP status → `ContactDeliveryError`: `400/422 → rejected`, `401/403 → not
 http://127.0.0.1:<webhookPort>/contact/relay/<name>` (`features.webhooks`) with `X-KL-Timestamp` (± 300 s)
 and `X-KL-Signature: sha256=<hex HMAC-SHA256(vault contact.relay.<name>.webhookSecret, timestamp + "." +
 rawBody)>`, compared with `crypto.timingSafeEqual`. Both paths call `router.ingestRelayEvents`; events are
-deduplicated by `id`; inbound events whose normalized `from` is not the owner are dropped.
+deduplicated by `id`; inbound events whose normalized `from` is not the owner are dropped. Each relay needs
+its own `webhookSecret`: the signature does not cover `<name>`, so relays that share a secret can push in
+each other's name. Relay requests never follow redirects and read at most 1 MB of a response.
 
 ## 5. Interfaces
 
