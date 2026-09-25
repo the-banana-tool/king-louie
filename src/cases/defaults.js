@@ -85,7 +85,7 @@ function resolveCaseSettings(source = {}) {
     },
     detours: {
       ...m.detours,
-      classifyOwnerMessages: m.detours.classifyOwnerMessages !== false,
+      classifyOwnerMessages: typeof m.detours.classifyOwnerMessages === 'boolean' ? m.detours.classifyOwnerMessages : d.detours.classifyOwnerMessages,
       minConfidence: fraction(m.detours.minConfidence, d.detours.minConfidence),
       classifyTimeoutMs: positiveInt(m.detours.classifyTimeoutMs, d.detours.classifyTimeoutMs),
       recentDays: positive(m.detours.recentDays, d.detours.recentDays),

@@ -39,6 +39,9 @@ describe('stage 5 settings', () => {
     const fixed = resolveCaseSettings({ detours: { minConfidence: 5, classifyTimeoutMs: -1, classifyOwnerMessages: false }, duplicates: { createSimilarity: 0 }, softwareRepo: { refreshBudgetMs: 'x' } });
     assert.deepStrictEqual([fixed.detours.minConfidence, fixed.detours.classifyTimeoutMs, fixed.detours.classifyOwnerMessages], [0.7, 4000, false]);
     assert.deepStrictEqual([fixed.duplicates.createSimilarity, fixed.softwareRepo.refreshBudgetMs], [0.6, 6000]);
+    for (const v of ['false', 0, null, 'no']) {
+      assert.strictEqual(resolveCaseSettings({ detours: { classifyOwnerMessages: v } }).detours.classifyOwnerMessages, true, `non-boolean ${JSON.stringify(v)} falls back to the default`);
+    }
   });
 });
 
@@ -131,6 +134,16 @@ describe('type-aware briefs and extras', () => {
     assert.match(text, /Other cases on this repo: "Phone agent webhook retry" \(draft\)/);
     rt._typeSnapshots = new Map([[a.id, { ...snap, fetchedAt: '2026-09-23T15:01:00.000Z', state: { ...snap.state, openPrs: [] } }]]);
     assert.deepStrictEqual(rt.caseTypeMaterial(a.id).openPrs, []);
+    // A disk snapshot without fetchedAt is the oldest: the in-memory one wins.
+    const undated = { ...snap };
+    delete undated.fetchedAt;
+    fs.writeFileSync(path.join(a.dir, '.kl', 'case-type.json'), JSON.stringify(undated));
+    assert.deepStrictEqual(rt.caseTypeMaterial(a.id).openPrs, []);
+    // A disk value that is an array is no snapshot at all.
+    rt._typeSnapshots = new Map();
+    fs.writeFileSync(path.join(a.dir, '.kl', 'case-type.json'), JSON.stringify([snap]));
+    assert.strictEqual(rt.caseTypeSnapshot(a.id), null);
+    assert.strictEqual(rt.caseTypeMaterial(a.id), null);
   });
 });
 
@@ -143,6 +156,7 @@ describe('related links', () => {
     assert.throws(() => rt.addRelation(a.id, { id: b.id, relation: 'parent' }), /relation must be one of spawned, blocked-by, blocks, related/);
     assert.throws(() => rt.addRelation(a.id, { id: b.id, relation: 'related', detour: 'x-1' }), /detour must look like d-0001/);
     assert.throws(() => rt.addRelation(a.id, { id: a.id, relation: 'related' }), /itself/);
+    assert.throws(() => rt.addRelation(a.id, { id: 'no-such-case', relation: 'related' }), /No case with id no-such-case exists/);
     rt.addRelation(a.id, { id: b.id, relation: 'related', note: 'first' });
     const row = rt.addRelation(a.id, { id: b.id, relation: 'related', note: `second ${'n'.repeat(400)}`, detour: 'd-0003' });
     assert.deepStrictEqual(Object.keys(row), ['id', 'relation', 'note', 'detour', 'at']);

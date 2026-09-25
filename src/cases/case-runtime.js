@@ -230,6 +230,8 @@ class CaseRuntime {
   async createCase(opts = {}) {
     assertKnownType(opts.type || 'general');
     if (opts.force !== true) {
+      // Advisory only, so it fails open: when the index errors,
+      // openCaseHeads() logs a warning and returns [], and creation goes ahead.
       const { exact, similar } = findSimilarCases({
         title: opts.title,
         objective: opts.objective || '',
@@ -408,6 +410,7 @@ class CaseRuntime {
     if (!RELATIONS.includes(entry.relation)) throw new Error(`relation must be one of ${RELATIONS.join(', ')}.`);
     if (entry.detour !== undefined && entry.detour !== null && !DETOUR_ID.test(String(entry.detour))) throw new Error(`detour must look like d-0001, not ${JSON.stringify(entry.detour)}.`);
     if (entry.id === meta.id) throw new Error('A case cannot be related to itself.');
+    if (!entry.id.startsWith('pending:') && !this.store.get(entry.id)) throw new Error(`No case with id ${entry.id} exists to relate to.`);
     const row = {
       id: entry.id,
       relation: entry.relation,
@@ -448,8 +451,10 @@ class CaseRuntime {
     } catch (err) {
       log.warn(`Reading the case-type snapshot of ${meta.slug} failed: ${err.message}`);
     }
-    if (disk && typeof disk !== 'object') disk = null;
-    if (mem && (!disk || String(mem.fetchedAt) >= String(disk.fetchedAt))) return mem;
+    if (disk && (typeof disk !== 'object' || Array.isArray(disk))) disk = null;
+    // A snapshot with no string fetchedAt counts as the oldest.
+    const fetched = (s) => (typeof s?.fetchedAt === 'string' ? s.fetchedAt : '');
+    if (mem && (!disk || fetched(mem) >= fetched(disk))) return mem;
     return disk;
   }
 

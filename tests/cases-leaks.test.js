@@ -63,6 +63,10 @@ describe('cross-case leak paths', () => {
     // Relate A to B so the orientation names B, and a tool call that tries to
     // steer the search at B: the runtime's own case id wins over tool input.
     rt.addRelation(a.id, { id: b.id, relation: 'related', note: 'Same household' });
+    // A's own active fact matches the stmt (on another key, so the unknown is
+    // not refused as an exact duplicate): excludeCaseId from params must not
+    // bring it back as a cross-case hit.
+    rt.ledger(a.id).assert({ stmt: 'Need the house loan payoff letter from the bank', subject: 'bank', attr: 'letter', value: 'requested', source: { kind: 'url', ref: 'https://records.example.org/2' } });
     const turn = await rt.beginTurn(a.id, { turnId: 'turn-1' });
     const out = await LedgerTool.execute({
       action: 'unknown', stmt: 'Need the house loan payoff letter', subject: 'house-loan', attr: 'payoff',
@@ -71,6 +75,7 @@ describe('cross-case leak paths', () => {
     }, { caseContext: rt.caseContext(turn) });
     assert.strictEqual(out.ok, true);
     assert.deepStrictEqual(out.similarInOtherCases.map((m) => [m.caseId, m.caseTitle]), [[b.id, 'Household inventory']]);
+    assert.ok(!out.similarInOtherCases.some((m) => m.caseId === a.id), "A's own fact is not a cross-case hit");
     assert.ok(out.similarInOtherCases.every((m) => !('score' in m) && !('coverage' in m)), 'no raw index scores reach the model');
     assert.strictEqual(leaks(out.similarInOtherCases), false);
     await rt.endTurn(turn, { summary: 'unknown recorded' });
