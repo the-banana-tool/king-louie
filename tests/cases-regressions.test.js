@@ -27,7 +27,9 @@ async function openCase(runtime, title, { active = true, ownerMessages = [] } = 
     runtime.brief(info.id).append('successCriteria', 'Closed within 90 days', { provenance: 'model' });
     runtime.completeGating(info.id);
   }
-  return { info, opts: { caseContext: { runtime, caseId: info.id, turnId: 'turn-1', dir: info.dir, ownerMessages } } };
+  // Stage 2: Decide and Recommend need a registered turn (requireReoriented).
+  const turn = await runtime.beginTurn(info.id, { turnId: 'turn-1' });
+  return { info, turn, opts: { caseContext: runtime.caseContext(turn, { ownerMessages }) } };
 }
 
 describe('F1: a guess never becomes a fact', () => {

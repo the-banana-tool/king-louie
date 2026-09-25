@@ -5,7 +5,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const CASE_TOOL_NAMES = Object.freeze(['Ledger', 'Brief', 'Decide', 'Recommend']);
+const CASE_TOOL_NAMES = Object.freeze(['Ledger', 'Brief', 'Decide', 'Recommend', 'Reorient', 'Ask', 'Fail']);
 
 // Tools kept out of every case turn (stage 2 spec §3.2). SpawnAgent,
 // BackgroundTask, sessions_spawn, RemoteDispatch and Cron start a run with
@@ -32,7 +32,9 @@ const CASE_MODE_PROMPT = [
   '- Ask the owner only what they alone know: history, constraints, preferences, authorization. Decide everything else yourself and record it with the Decide tool.',
   '- Load-bearing unknowns come first. If one blocks the objective, say so and ask. Do not work around it with an assumption.',
   '- Recommendations go through the Recommend tool. If it refuses, fix the cited facts or present the unknowns. Do not restate a refused recommendation in prose.',
-  '- When an approach fails, report what happened and stop, with at most one recommendation. Do not start a new plan unasked.',
+  '- When an approach fails, call Fail with what you tried and why, with at most one recommendation, then stop. Do not start a new plan unasked.',
+  '- If the orientation says "Re-orientation required", call Reorient first; Recommend, Decide and Fail are refused until you do.',
+  '- Contact the owner only through the Ask tool. The answer arrives later as an owner fact; never assume it.',
   '- Never edit facts.jsonl, brief.md, case.yaml or anything under .kl/ directly. The case tools are the only write path.'
 ].join('\n');
 
