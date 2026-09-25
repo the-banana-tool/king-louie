@@ -4,7 +4,17 @@ const path = require('path');
 const readline = require('readline');
 const { createLogger } = require('../logging');
 const { JobManager } = require('../runbooks/runbook-engine');
+const { runbookAction, actionHash } = require('../approvals/messages');
+const { canonicalize, sha256b64url } = require('../platform/jcs');
 const { version: SERVER_VERSION } = require('../../package.json');
+
+function paramsSha256(params) {
+  try {
+    return sha256b64url(canonicalize(params === undefined || params === null ? {} : params));
+  } catch {
+    return null;
+  }
+}
 
 const log = createLogger('stdio-mcp-server');
 
@@ -32,7 +42,7 @@ const MCP_TOOLS = [
   },
   {
     name: 'run_runbook',
-    description: 'Start a named runbook on a machine. Returns job_id right away; poll get_job for the outcome. Unsafe runbooks are denied until phone approval exists.',
+    description: 'Start a named runbook on a machine. Returns job_id right away; poll get_job for the outcome. An unsafe runbook waits in awaiting_approval until the owner approves it on an enrolled phone, and is denied when no phone can be asked.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -157,6 +167,30 @@ class StdioMcpServer {
     // One entry per job whose execution has not settled yet, so a caller
     // (a test, a shutdown) can wait for background work to finish.
     this.jobRuns = new Map();
+    // Fleet stage 3: a PhoneApprover (or null) for unsafe runbooks, and the
+    // node's audit ledger (writer 'mcp').
+    this.approver = options.approver || null;
+    this.auditLedger = options.auditLedger || null;
+    // The directory a runbook's steps actually run in. Resolved fresh
+    // (resolveCwd()) whenever it goes into a hashed action, so a symlink
+    // swapped after approval is caught at the pre-run re-check instead of
+    // trusting a value cached at request time.
+    this.workingDirectory = options.workingDirectory || process.cwd();
+  }
+
+  // Re-resolved every call: a symlink in this.workingDirectory that moves
+  // between the initial request and the pre-run re-check must change the
+  // action's cwd (and so its hash), not silently keep the approved value. If
+  // the directory cannot be resolved at all (e.g. removed), the raw,
+  // unresolved path is used instead so the action still hashes to something
+  // — and, since that no longer matches a previously resolved value, the
+  // pre-run re-check fails closed as action_changed rather than throwing.
+  resolveCwd() {
+    try {
+      return fs.realpathSync(this.workingDirectory);
+    } catch {
+      return this.workingDirectory;
+    }
   }
 
   start() {
@@ -410,44 +444,47 @@ class StdioMcpServer {
     throw new Error(`Unknown tool: ${toolName}`);
   }
 
+  // Audit is best effort for the inbound record; exec.start is not (below).
+  auditBestEffort(kind, data) {
+    if (!this.auditLedger) return;
+    Promise.resolve()
+      .then(() => this.auditLedger.append({ kind, data }))
+      .catch((err) => log.warn(`audit ${kind} failed: ${err.message}`));
+  }
+
   // Everything that can be refused is checked before a job exists, so a
   // refusal leaves nothing behind (§9); then the job starts in the
-  // background and its id goes back at once (§8.2).
+  // background and its id goes back at once (§8.2). An unsafe runbook waits
+  // in awaiting_approval for a signed phone approval (fleet stage 3, §3.8).
   runRunbook(args) {
+    const name = args.runbook;
+    const params = args.params || {};
+    const origin = { client: 'stdio-mcp', session: null, job_id: null };
+    this.auditBestEffort('request.inbound', {
+      client: 'stdio-mcp', method: 'tools/call', name: typeof name === 'string' ? name : null,
+      params_sha256: paramsSha256(params), job_id: null, origin
+    });
     this.assertThisMachine(args.machine, { required: true });
     const engine = this.runbookEngine;
     if (!engine) {
       throw new Error('Runbook engine not configured on this node');
     }
-    const name = args.runbook;
-    const params = args.params || {};
     const runbook = engine.getRunbook(name);
     if (!runbook) {
       throw new ToolError('runbook_not_found', `runbook_not_found: no runbook "${name}" on node ${this.nodeConfig.name}`);
     }
 
-    // §5.5: in stage 2 unsafe actions are denied outright. Parking them in
-    // awaiting_approval would wait for an approver that does not exist yet.
-    if (runbook.tier === 'unsafe') {
-      const job = this.jobManager.createJob({
-        machine: this.nodeConfig.name,
-        runbook: name,
-        params,
-        tier: runbook.tier,
-        status: 'denied',
-        reason: 'denied_by_policy: unsafe runbooks need phone approval, which is not available until stage 3'
-      });
-      return { job_id: job.job_id, status: job.status, reason: job.reason };
-    }
-
+    let validated;
     try {
-      engine.validateParameters(name, params);
+      validated = engine.validateParameters(name, params);
     } catch (err) {
       if (err.code === 'invalid_params') {
         throw new ToolError('invalid_params', `invalid_params: ${err.message}`);
       }
       throw err;
     }
+
+    if (runbook.tier === 'unsafe') return this.startUnsafe(runbook, params, validated);
 
     // From the rate-limit check to recording this run there is no await, so
     // two requests read from one stdin chunk cannot both pass the check: the
@@ -473,23 +510,118 @@ class StdioMcpServer {
     }
     const reservation = engine.recordExecution(name);
 
-    const run = this.executeJob(job.job_id, name, params, reservation)
-      .catch((err) => log.error(`Job ${job.job_id} execution threw past its handler: ${err.message}`))
-      .finally(() => this.jobRuns.delete(job.job_id));
-    this.jobRuns.set(job.job_id, run);
+    this.track(job.job_id, this.executeJob(job.job_id, name, params, reservation, { validatedParams: validated }));
     return { job_id: job.job_id, status: job.status };
+  }
+
+  track(jobId, promise) {
+    const run = promise
+      .catch((err) => log.error(`Job ${jobId} execution threw past its handler: ${err.message}`))
+      .finally(() => this.jobRuns.delete(jobId));
+    this.jobRuns.set(jobId, run);
+  }
+
+  startUnsafe(runbook, params, validated) {
+    const approver = this.approver;
+    const unavailable = !approver
+      ? 'unsafe runbooks need a phone approval and no device is enrolled on this node'
+      : approver.unavailableReason();
+    if (unavailable) {
+      const job = this.jobManager.createJob({
+        machine: this.nodeConfig.name, runbook: runbook.name, params, tier: runbook.tier,
+        status: 'denied', reason: `denied_by_policy: ${unavailable}`
+      });
+      return { job_id: job.job_id, status: job.status, reason: job.reason };
+    }
+    const job = this.jobManager.createJob({ machine: this.nodeConfig.name, runbook: runbook.name, params, tier: runbook.tier, status: 'awaiting_approval' });
+    this.track(job.job_id, this.awaitApproval(job.job_id, runbook, params, validated));
+    return { job_id: job.job_id, status: job.status };
+  }
+
+  // Never rejects: every path ends the job in a terminal status.
+  async awaitApproval(jobId, runbook, params, validated) {
+    const jobs = this.jobManager;
+    const engine = this.runbookEngine;
+    const name = runbook.name;
+    const nodeName = this.nodeConfig.name;
+    let lastValidated = validated;
+    let lastCwd = this.resolveCwd();
+    // Rebuilt from live state: validation re-runs (so a realpath that moved
+    // changes the action) and cwd is re-resolved (so a working directory
+    // that moved does too); the result is kept for the run.
+    const currentAction = () => {
+      lastValidated = engine.validateParameters(name, params);
+      lastCwd = this.resolveCwd();
+      return runbookAction(engine.getRunbook(name), lastValidated, nodeName, lastCwd);
+    };
+    let outcome;
+    try {
+      outcome = await this.approver.requestAction(runbookAction(runbook, validated, nodeName, lastCwd), {
+        origin: { client: 'stdio-mcp', session: null, job_id: jobId },
+        signal: jobs.getSignal(jobId),
+        currentAction
+      });
+    } catch (err) {
+      outcome = { decision: 'error', reason: err.message };
+    }
+
+    if (jobs.isTerminal(jobId)) return; // cancel_job already decided it
+    if (outcome.decision === 'deny') {
+      jobs.updateJob(jobId, { status: 'denied', reason: `denied: ${outcome.reason || 'the phone denied it'}` });
+      return;
+    }
+    if (outcome.decision === 'expired') {
+      jobs.updateJob(jobId, { status: 'expired', reason: 'expired: no phone answered in time' });
+      return;
+    }
+    if (outcome.decision === 'withdrawn') {
+      jobs.updateJob(jobId, { status: 'cancelled' });
+      return;
+    }
+    if (outcome.decision !== 'approve') {
+      jobs.updateJob(jobId, { status: 'denied', reason: `denied_by_policy: ${outcome.reason || outcome.decision}` });
+      return;
+    }
+
+    const rate = engine.checkRateLimit(name);
+    if (rate && rate.allowed === false) {
+      jobs.updateJob(jobId, { status: 'failed', result: `rate_limited: retry after ${rate.retryAfterSeconds}s` });
+      return;
+    }
+    try {
+      jobs.transition(jobId, 'awaiting_approval', 'queued');
+    } catch (err) {
+      jobs.updateJob(jobId, { status: 'failed', result: err.message });
+      return;
+    }
+    const reservation = engine.recordExecution(name);
+    // The pre-run re-check: the action about to run is still the approved one.
+    let liveHash = null;
+    try {
+      liveHash = actionHash(currentAction());
+    } catch {
+      liveHash = null;
+    }
+    if (liveHash !== outcome.action_hash) {
+      engine.releaseExecution(name, reservation);
+      jobs.updateJob(jobId, { status: 'failed', result: 'action_changed: the runbook or its parameters changed after approval; nothing ran' });
+      return;
+    }
+    await this.executeJob(jobId, name, params, reservation, { validatedParams: lastValidated, requestId: outcome.request_id, cwd: lastCwd });
   }
 
   // Never rejects: whatever the engine does, the job ends in a terminal
   // status, and a failure becomes that job's result instead of an unhandled
   // rejection that would take the process down.
   //
-  // `reservation` is the rate-limit entry runRunbook recorded for this job.
-  // The engine is told the run was admitted so it does not count it again.
-  async executeJob(jobId, name, params, reservation) {
+  // `reservation` is the rate-limit entry recorded for this job. The engine
+  // is told the run was admitted so it does not count it again, and runs
+  // exactly `validatedParams`.
+  async executeJob(jobId, name, params, reservation, { validatedParams = null, requestId = null, cwd = null } = {}) {
     const jobs = this.jobManager;
     const engine = this.runbookEngine;
     const signal = jobs.getSignal(jobId);
+    const origin = { client: 'stdio-mcp', session: null, job_id: jobId };
     // Yield first, so the caller has its job_id before any work starts.
     await Promise.resolve();
     if (jobs.isTerminal(jobId) || signal?.aborted) {
@@ -498,13 +630,26 @@ class StdioMcpServer {
       engine.releaseExecution(name, reservation);
       return;
     }
+    if (this.auditLedger) {
+      try {
+        await this.auditLedger.append({ kind: 'exec.start', data: { kind: 'runbook', name, request_id: requestId, job_id: jobId, origin } });
+      } catch (err) {
+        engine.releaseExecution(name, reservation);
+        jobs.updateJob(jobId, { status: 'failed', result: 'Audit ledger unavailable; nothing ran.' });
+        return;
+      }
+    }
     jobs.updateJob(jobId, { status: 'running' });
     // The slot is held until the execution settles, not until the status
     // turns terminal: after cancel_job the step may still be exiting.
     jobs.markExecuting(jobId);
+    let ok = false;
+    let error = null;
     try {
-      const res = await engine.executeRunbook(name, params, { signal, admitted: true });
+      const res = await engine.executeRunbook(name, params, { signal, admitted: true, validatedParams, cwd });
       const logs = Array.isArray(res?.logs) ? res.logs : [];
+      ok = Boolean(res?.success);
+      error = ok ? null : (res?.error || 'runbook failed');
       // cancel_job already marked it cancelled; keep that, add what ran.
       if (jobs.isTerminal(jobId)) {
         jobs.updateJob(jobId, { logs });
@@ -519,10 +664,12 @@ class StdioMcpServer {
       const result = err.code === 'rate_limited' && err.retryAfterSeconds !== undefined
         ? `rate_limited: retry after ${err.retryAfterSeconds}s`
         : err.message;
+      error = result;
       log.warn(`Job ${jobId} (${name}) failed: ${err.message}`);
       if (!jobs.isTerminal(jobId)) jobs.updateJob(jobId, { status: 'failed', result });
     } finally {
       jobs.markSettled(jobId);
+      this.auditBestEffort('exec.result', { kind: 'runbook', name, request_id: requestId, job_id: jobId, origin, ok, exit_status: null, error });
     }
   }
 }

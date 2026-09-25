@@ -585,7 +585,10 @@ class RunbookEngine {
       );
     }
 
-    const validatedParams = this.validateParameters(runbookName, rawParams);
+    // `validatedParams`: the caller already validated (and a phone approved)
+    // exactly these values, paths realpath'd; running them as given means
+    // nothing is re-resolved after the last check.
+    const validatedParams = options.validatedParams || this.validateParameters(runbookName, rawParams);
     if (!Array.isArray(runbook.steps) || runbook.steps.length === 0) {
       throw new Error(`Runbook "${runbookName}" has no steps`);
     }
@@ -777,8 +780,26 @@ class JobManager {
       result: null
     };
     this.jobs.set(jobId, job);
-    if (initialStatus === 'queued') this.controllers.set(jobId, new AbortController());
+    // A job waiting for a phone approval gets its controller now, so
+    // cancel_job can withdraw the request.
+    if (initialStatus === 'queued' || initialStatus === 'awaiting_approval') this.controllers.set(jobId, new AbortController());
     return job;
+  }
+
+  // The one non-terminal transition besides running: an approved job leaves
+  // awaiting_approval for queued, and only if a slot is free.
+  transition(jobId, from, to) {
+    const job = this.jobs.get(jobId);
+    if (!job || job.status !== from) {
+      throw Object.assign(new Error(`job ${jobId} is not ${from}`), { code: 'bad_transition' });
+    }
+    if (!(from === 'awaiting_approval' && to === 'queued')) {
+      throw Object.assign(new Error(`a job cannot move from ${from} to ${to}`), { code: 'bad_transition' });
+    }
+    if (this.activeJobCount() >= this.maxConcurrentJobs) {
+      throw Object.assign(new Error(`max_concurrent_jobs: this node already has ${this.maxConcurrentJobs} job(s) running`), { code: 'max_concurrent_jobs' });
+    }
+    return this.updateJob(jobId, { status: 'queued' });
   }
 
   getJob(jobId) {
