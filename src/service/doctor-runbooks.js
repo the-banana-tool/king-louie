@@ -9,7 +9,6 @@ const path = require('path');
 const childProcess = require('child_process');
 
 const PLACEHOLDER = /\{\{([^{}]*)\}\}/g;
-const SUDO_NAME = /^sudo(\.exe)?$/i;
 const SHIM_EXTS = ['.cmd', '.bat'];
 const SUDO_TIMEOUT_MS = 5000;
 
@@ -171,7 +170,7 @@ function checkRunbookCommands(runbooks, {
         fail(where, 'the program must be fixed, not a parameter');
         return;
       }
-      const isSudo = SUDO_NAME.test(baseName(argv0));
+      const isSudo = ['sudo', 'sudo.exe'].includes(baseName(argv0).toLowerCase());
 
       if (platform === 'win32') {
         if (isSudo) {
