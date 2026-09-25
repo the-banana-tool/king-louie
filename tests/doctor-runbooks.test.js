@@ -203,3 +203,37 @@ describe('checkRunbookCommands', () => {
     assert.deepEqual(details, [`${sudo} not found`]);
   });
 });
+
+describe('runDoctor', () => {
+  const EUID = typeof process.geteuid === 'function' ? process.geteuid() : 0;
+  const POSIX = process.platform !== 'win32';
+
+  it('appends the runbook command rows right after "runbooks loaded"', {
+    skip: POSIX && EUID !== 0
+      ? 'runDoctor accepts only root-owned runbooks on POSIX, which an unprivileged run cannot create'
+      : false
+  }, () => {
+    const { runDoctor } = require('../src/service/doctor');
+    const root = tmp();
+    const dataDir = path.join(root, 'data');
+    const runbooksDir = path.join(root, 'config', 'runbooks');
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.mkdirSync(runbooksDir, { recursive: true });
+    if (POSIX) {
+      fs.chmodSync(dataDir, 0o700);
+      fs.chmodSync(path.join(root, 'config'), 0o755);
+      fs.chmodSync(runbooksDir, 0o755);
+    }
+    const file = path.join(runbooksDir, 'probe.yaml');
+    fs.writeFileSync(file, 'name: probe\ntier: read\nsteps:\n  - run: [git, --version]\nrate_limit: { max: 1, per: 1h }\n');
+    if (POSIX) fs.chmodSync(file, 0o644);
+
+    const rows = runDoctor({ dataDir, platform: 'win32' });
+    const loaded = rows.findIndex((r) => r.check === 'runbooks loaded');
+    assert.notEqual(loaded, -1, JSON.stringify(rows));
+    const next = rows[loaded + 1];
+    assert.equal(next.check, 'runbook probe step 1');
+    assert.equal(next.ok, false);
+    assert.match(next.detail, /^"git" is not an absolute path; Windows looks in the current directory/);
+  });
+});

@@ -43,6 +43,14 @@ function runDoctor({ dataDir, platform = process.platform }) {
       });
       const runbooks = engine.loadRunbooks();
       results.push({ check: 'runbooks loaded', ok: true, detail: `${runbooks.size} runbook(s) found in ${nodeCfg.runbooksDir}` });
+      const { checkRunbookCommands } = require('./doctor-runbooks');
+      results.push(...checkRunbookCommands(runbooks, {
+        platform,
+        env: process.env,
+        cwd: process.cwd(),
+        geteuid: typeof process.geteuid === 'function' ? () => process.geteuid() : null,
+        spawnSync: require('child_process').spawnSync
+      }));
     }
   } catch (err) {
     results.push({ check: 'node config / runbooks health', ok: false, detail: err.message });
