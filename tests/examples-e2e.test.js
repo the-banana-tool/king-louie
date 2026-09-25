@@ -265,3 +265,98 @@ describe('web-01 examples end to end', () => {
     }
   });
 });
+
+const LAPTOP_FILES = ['laptop.build_then_deploy.yaml'];
+const NPM_CLI = 'C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js';
+const laptopRewrite = (tmp) => ({
+  programs: { 'C:\\Program Files\\Git\\cmd\\git.exe': 'git', 'C:\\Program Files\\nodejs\\node.exe': 'node' },
+  prefixes: { 'C:\\build\\site': path.join(tmp, 'build', 'site'), [NPM_CLI]: path.join(tmp, 'fakes', 'npm-cli.js') }
+});
+
+const GPU_FILES = ['models.hf_download.yaml', 'train.run.yaml'];
+const HF = 'C:\\KingLouie\\tools\\py\\Scripts\\hf.exe';
+const PYTHON = 'C:\\KingLouie\\tools\\py\\Scripts\\python.exe';
+const gpuRewrite = (hf = 'hf') => (tmp) => ({
+  programs: { [HF]: typeof hf === 'function' ? hf(tmp) : hf, [PYTHON]: 'python' },
+  prefixes: { 'D:\\models': path.join(tmp, 'ML Data', 'models'), 'D:\\train': path.join(tmp, 'ML Data', 'train') }
+});
+
+describe('laptop and gpu-box examples end to end', () => {
+  it('laptop.build_then_deploy over MCP: fetch, checkout, then npm ci, build and test through node.exe', async () => {
+    const node = await setupNode('laptop', LAPTOP_FILES, laptopRewrite, ['git', 'node']);
+    try {
+      const job = await runOverMcp(node, 'laptop', 'laptop.build_then_deploy', { ref: 'release/2.1' });
+      assert.equal(job.status, 'succeeded', JSON.stringify(job));
+      const site = path.join(node.tmp, 'build', 'site');
+      const npmCli = path.join(node.tmp, 'fakes', 'npm-cli.js');
+      assert.deepEqual(node.calls(), [
+        { fake: 'git', argv: ['-C', site, 'fetch', '--prune', 'origin', 'release/2.1'] },
+        { fake: 'git', argv: ['-C', site, 'checkout', '--detach', 'FETCH_HEAD'] },
+        { fake: 'node', argv: [npmCli, '--prefix', site, 'ci'] },
+        { fake: 'node', argv: [npmCli, '--prefix', site, 'run', 'build'] },
+        { fake: 'node', argv: [npmCli, '--prefix', site, 'test'] }
+      ]);
+    } finally {
+      await node.cleanup();
+    }
+  });
+
+  it('models.hf_download over MCP passes the spaced destination as one argument', async () => {
+    const node = await setupNode('gpu-box', GPU_FILES, gpuRewrite(), ['hf', 'python']);
+    try {
+      const job = await runOverMcp(node, 'gpu-box', 'models.hf_download', { repo: 'example-org/example-model', dest: 'example' });
+      assert.equal(job.status, 'succeeded', JSON.stringify(job));
+      assert.deepEqual(node.calls(), [{
+        fake: 'hf',
+        argv: ['download', 'example-org/example-model', '--revision', 'main', '--local-dir', `${path.join(node.tmp, 'ML Data', 'models')}\\example`]
+      }]);
+    } finally {
+      await node.cleanup();
+    }
+  });
+
+  it('train.run over MCP reads its config from the admin-owned configs folder, with the defaults filled in', async () => {
+    const node = await setupNode('gpu-box', GPU_FILES, gpuRewrite(), ['hf', 'python']);
+    try {
+      const job = await runOverMcp(node, 'gpu-box', 'train.run', { config: 'base' });
+      assert.equal(job.status, 'succeeded', JSON.stringify(job));
+      const train = path.join(node.tmp, 'ML Data', 'train');
+      assert.deepEqual(node.calls(), [{
+        fake: 'python',
+        argv: [`${train}\\train.py`, '--config', `${train}\\configs\\base.json`, '--epochs', '1', '--precision', 'bf16', '--resume=false']
+      }]);
+    } finally {
+      await node.cleanup();
+    }
+  });
+
+  it('hf.exe missing: the job fails with ENOENT', async () => {
+    const node = await setupNode('gpu-box', GPU_FILES, gpuRewrite((tmp) => ({ path: path.join(tmp, 'missing', 'hf.exe') })), ['python']);
+    try {
+      const job = await runOverMcp(node, 'gpu-box', 'models.hf_download', { repo: 'example-org/example-model', dest: 'example' });
+      assert.equal(job.status, 'failed', JSON.stringify(job));
+      assert.match(job.result, /ENOENT/);
+      assert.deepEqual(node.calls(), []);
+    } finally {
+      await node.cleanup();
+    }
+  });
+
+  it('every rewrite key of every role is hit by the examples', async () => {
+    const roles = [
+      ['web-01', WEB01_FILES, web01Rewrite('http://127.0.0.1:9'), WEB01_FAKES],
+      ['laptop', LAPTOP_FILES, laptopRewrite, ['git', 'node']],
+      ['gpu-box', GPU_FILES, gpuRewrite(), ['hf', 'python']]
+    ];
+    for (const [role, files, rewriteFor, fakes] of roles) {
+      // setupNode's own assert.deepEqual (unhit-key check) is the actual
+      // check here: every rewrite key of every role must be hit.
+      const node = await setupNode(role, files, rewriteFor, fakes);
+      try {
+        assert.ok(rewriteKeys(node.rewrite).length > 0);
+      } finally {
+        await node.cleanup();
+      }
+    }
+  });
+});
