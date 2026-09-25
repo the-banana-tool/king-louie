@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { parseYaml } = require('../platform/yaml');
 const { adminConfigDir } = require('../platform/paths');
-const { assertAdminOwned: assertServiceAdminOwned } = require('./config');
+const { assertAdminOwned: assertServiceAdminOwned, unknownKeyError } = require('./config');
 
 const NODE_CONFIG_FILE = 'node.yaml';
 
@@ -15,6 +15,18 @@ const DEFAULT_ALWAYS_CONFIRM = [
 ];
 const DEFAULT_DENY = ['Bash(rm -rf /*)'];
 const DEFAULT_MAX_CONCURRENT_JOBS = 2;
+
+// Every key node.yaml may carry, per level. A key that is not listed stops
+// the node from loading. A misspelled `always_confirm` used to fall back
+// silently to the defaults, which can be looser than what the administrator
+// wrote. A later stage that parses a new top-level key appends it here in the
+// same change (fleet stage 3 `approvers`, stage 4 `frontdoor`, stage 5 `gui`)
+// and validates that key's own subtree itself.
+const NODE_YAML_KEYS = Object.freeze({
+  top: Object.freeze(['name', 'profile', 'front_door', 'capabilities', 'policy', 'runbooks_dir']),
+  policy: Object.freeze(['allowed_roots', 'remote_sessions', 'max_concurrent_jobs']),
+  remote_sessions: Object.freeze(['always_confirm', 'deny'])
+});
 
 // node.yaml and the runbooks beside it decide what this node lets remote
 // sessions and runbooks do, so they get the same ownership check as the
@@ -36,6 +48,14 @@ function isPlainObject(value) {
 function isStringList(value, { nonEmpty = false } = {}) {
   return Array.isArray(value)
     && value.every((item) => typeof item === 'string' && (!nonEmpty || item.trim() !== ''));
+}
+
+function assertKnownKeys(mapping, known, prefix, file) {
+  for (const key of Object.keys(mapping)) {
+    if (!known.includes(key)) {
+      throw unknownKeyError(file, `${prefix}${key}`, known);
+    }
+  }
 }
 
 function defaultNodeConfig(adminDir) {
@@ -94,6 +114,16 @@ function loadNodeConfig({
     throw new Error(`Invalid ${configFile}: must contain a YAML object`);
   }
   const invalid = (what) => new Error(`Invalid ${configFile}: ${what}`);
+
+  // Before any per-key validation, so a typo is reported as the typo and not
+  // as whatever default it would have left in place.
+  assertKnownKeys(parsed, NODE_YAML_KEYS.top, '', configFile);
+  if (isPlainObject(parsed.policy)) {
+    assertKnownKeys(parsed.policy, NODE_YAML_KEYS.policy, 'policy.', configFile);
+    if (isPlainObject(parsed.policy.remote_sessions)) {
+      assertKnownKeys(parsed.policy.remote_sessions, NODE_YAML_KEYS.remote_sessions, 'policy.remote_sessions.', configFile);
+    }
+  }
 
   let name = 'unnamed-node';
   if (parsed.name !== undefined) {
@@ -181,4 +211,4 @@ function loadNodeConfig({
   };
 }
 
-module.exports = { loadNodeConfig, assertAdminOwned, NODE_CONFIG_FILE };
+module.exports = { loadNodeConfig, assertAdminOwned, NODE_CONFIG_FILE, NODE_YAML_KEYS };

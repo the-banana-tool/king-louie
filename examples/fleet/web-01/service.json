@@ -1,0 +1,5 @@
+{
+  "profile": "runbook",
+  "features": { "gateway": false, "webhooks": false, "mesh": false, "channels": false, "appDiscovery": false },
+  "ports": { "gateway": 18793, "webhook": 18794 }
+}

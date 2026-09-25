@@ -1,0 +1,9 @@
+# Files a Linux or macOS tool reads byte for byte keep LF on every checkout,
+# including a Windows clone or export with core.autocrlf=true: visudo rejects
+# a sudoers file with CRLF line endings, and a shell script with CRLF fails
+# at its first line. The Windows ACL script (*.ps1) is left to the default.
+examples/sudoers/* text eol=lf
+*.sh text eol=lf
+examples/**/*.yaml text eol=lf
+examples/**/*.json text eol=lf
+examples/**/*.py text eol=lf

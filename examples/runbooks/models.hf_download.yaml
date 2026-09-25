@@ -1,0 +1,17 @@
+# gpu-box (Windows, profile agent). Install to C:\KingLouie\mcp\config\runbooks\.
+# Prerequisite: an Administrators-owned venv at C:\KingLouie\tools\py with
+# huggingface_hub[cli] installed, so hf.exe has a fixed path the runner cannot
+# replace (install guide section 6). Public repos only.
+# `dest` is a plain folder name under D:\models, never a path: a path param
+# would accept any allowed root, including folders other jobs write.
+name: models.hf_download
+description: Download a public Hugging Face repo into D:\models\<dest>.
+tier: routine
+params:
+  repo:     { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$' }
+  revision: { type: string, pattern: '^(main|[0-9a-f]{40}|v[0-9]{1,4}(\.[0-9]{1,4}){0,2})$', default: main }
+  dest:     { type: string, pattern: '^(?!(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][0-9]|[Ll][Pp][Tt][0-9])$)[A-Za-z0-9][A-Za-z0-9_-]{0,63}$' }
+steps:
+  - run: ['C:\KingLouie\tools\py\Scripts\hf.exe', download, '{{repo}}', --revision, '{{revision}}', --local-dir, 'D:\models\{{dest}}']
+timeout_s: 21600
+rate_limit: { max: 10, per: 1h }

@@ -165,3 +165,20 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage2-unattended.md`.
   locked. The e2e suite runs every launch on its own throwaway
   `--user-data-dir` (see Testing above), so it never touches a real case
   store.
+
+## Examples
+
+`examples/` (fleet node configs, runbooks, sudoers, the Windows ACL script,
+MCP client configs) and `docs/install-guide.md` hold invented values only.
+`tests/examples.test.js` loads every example through the real loaders
+(`loadNodeConfig`, `loadServiceConfig`, `RunbookEngine`), and
+`tests/examples-e2e.test.js` runs every example runbook with its programs
+faked. A new value in either place must pass `scanForPersonalValues` in
+`tests/helpers/example-denylist.js`: `example.com` hosts, documentation IP
+ranges, `+15550100`–`+15550199`, `<placeholder>` path segments.
+
+`node.yaml`, and `features.*`/`ports.*` in the admin `service.json`, reject
+unknown keys. A stage that parses a new `node.yaml` top-level key appends it to
+`NODE_YAML_KEYS` in `src/service/node-config.js` in the same change. A new
+feature or port is known once it is in `DEFAULT_FEATURES`/`DEFAULT_PORTS`, and
+the four `examples/fleet/*/service.json` files must list it too.

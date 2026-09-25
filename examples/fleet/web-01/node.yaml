@@ -1,0 +1,16 @@
+# web-01: Linux, profile runbook. Serves the site; runs no agent sessions, so
+# policy.remote_sessions is left out (the defaults apply).
+# Install the same file in both config dirs (install guide section 5):
+#   /etc/king-louie/node.yaml               read by the installed service
+#   /opt/king-louie/mcp/config/node.yaml    read by the stdio MCP instance
+# Edit one, copy it over the other, then compare them with diff.
+# Only the keys below are allowed; anything else stops the node from loading.
+name: web-01
+profile: runbook
+# front_door: https://kl.example.com   # used from stage 4
+capabilities: [site]
+policy:
+  allowed_roots:
+    - /srv/site
+  max_concurrent_jobs: 1
+runbooks_dir: runbooks

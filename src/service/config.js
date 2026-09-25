@@ -22,6 +22,31 @@ const CONFIG_FILE = 'service.json';
 // come from the admin-owned config dir; see below.
 const ADMIN_ONLY_KEYS = ['features', 'ports', 'profile'];
 
+// The one formatter for "this config file carries a key we don't know
+// about." node-config.js's node.yaml check and this file's own service.json
+// check (stage 6 Task 2) both throw through this, so the message can't drift
+// between the two files.
+function unknownKeyError(file, keyPath, knownList) {
+  return new Error(`Invalid ${file}: unknown key "${keyPath}" (known: ${knownList.join(', ')})`);
+}
+
+// The admin service.json decides which listeners exist and where they bind,
+// so a key it does not know is an error, not a silent no-op: a misspelled
+// feature used to be merged in and then ignored. The known names are the
+// defaults' own keys, so a stage that adds a default makes its key known.
+function validateFeatures(features, file) {
+  if (features === undefined) return {};
+  if (!features || typeof features !== 'object' || Array.isArray(features)) {
+    throw new Error(`Invalid ${file}: "features" must be an object`);
+  }
+  for (const name of Object.keys(features)) {
+    if (!Object.prototype.hasOwnProperty.call(DEFAULT_FEATURES, name)) {
+      throw unknownKeyError(file, `features.${name}`, Object.keys(DEFAULT_FEATURES));
+    }
+  }
+  return features;
+}
+
 function validatePorts(ports, file) {
   if (ports === undefined) return {};
   if (!ports || typeof ports !== 'object' || Array.isArray(ports)) {
@@ -30,7 +55,7 @@ function validatePorts(ports, file) {
   const out = {};
   for (const [name, value] of Object.entries(ports)) {
     if (!Object.prototype.hasOwnProperty.call(DEFAULT_PORTS, name)) {
-      throw new Error(`Invalid ${file}: ports.${name} is not a known port (expected ${Object.keys(DEFAULT_PORTS).join(', ')})`);
+      throw unknownKeyError(file, `ports.${name}`, Object.keys(DEFAULT_PORTS));
     }
     if (!Number.isInteger(value) || value < 1 || value > 65535) {
       throw new Error(`Invalid ${file}: ports.${name} must be an integer from 1 to 65535`);
@@ -143,7 +168,7 @@ function loadServiceConfig(dataDir, overrides = {}, {
   const profile = overrides.profile || adminCfg.profile || 'agent';
   if (!PROFILES.has(profile)) throw new Error(`Unknown profile "${profile}". Expected one of: ${[...PROFILES].join(', ')}`);
 
-  const features = { ...DEFAULT_FEATURES, ...(adminCfg.features || {}), ...(overrides.features || {}) };
+  const features = { ...DEFAULT_FEATURES, ...validateFeatures(adminCfg.features, adminFile), ...(overrides.features || {}) };
   // mesh binds a non-loopback listener and stage 1 has no remote approver, so
   // it stays off even when an administrator asks for it.
   if (features.mesh) {
@@ -168,4 +193,4 @@ function loadServiceConfig(dataDir, overrides = {}, {
   };
 }
 
-module.exports = { loadServiceConfig, assertAdminOwned, PROFILES, DEFAULT_PORTS, DEFAULT_FEATURES, CONFIG_FILE };
+module.exports = { loadServiceConfig, assertAdminOwned, PROFILES, DEFAULT_PORTS, DEFAULT_FEATURES, CONFIG_FILE, unknownKeyError };

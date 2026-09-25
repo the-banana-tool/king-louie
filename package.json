@@ -37,7 +37,8 @@
       "**/*",
       "!tests/**",
       "!product-management/**",
-      "!.github/**"
+      "!.github/**",
+      "!examples/**"
     ],
     "win": {
       "target": [

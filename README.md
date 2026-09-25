@@ -388,6 +388,23 @@ Linux and macOS already have this: the installer creates a dedicated
 `king-louie` / `--user <account>` service account, and nothing else on the
 machine runs as it.
 
+### Fleet setup and examples
+
+`examples/` holds a complete, invented fleet: `node.yaml` and `service.json`
+for four roles (`gpu-box`, `laptop`, `mac`, `web-01`), six runbooks, the
+sudoers file and Windows ACL script those runbooks need, and Claude Desktop
+configs that start the stdio MCP server in a pinned working directory.
+[docs/install-guide.md](docs/install-guide.md) walks through setting up a node
+from them: the service, the admin-owned config dirs, the privileges, `doctor`,
+and a first runbook over stdio MCP.
+
+`doctor` also checks every runbook step's program: that it exists and is
+not a `.cmd`/`.bat` file; on Windows, that it is an absolute path (a bare
+name is looked up in the current directory first); on Linux and macOS, that
+a bare name is on `PATH` (the examples still use absolute paths), and that
+each `sudo -n` step is allowed by sudoers (`sudo -n -l`, which lists and
+never runs). Run it as the account that runs the runbooks.
+
 ## Supported Providers
 
 | Provider | Models | Local |
@@ -1243,6 +1260,34 @@ or set `ports` in `<configDir>/service.json`.
 
 Relatedly, a listener the operator explicitly enabled that **cannot bind is
 now fatal** — the service refuses to start rather than running without it.
+
+### node.yaml rejects unknown keys
+
+`node.yaml` used to ignore any key it did not know. A misspelled
+`always_confirm` or `allowed_roots` therefore fell back silently to the
+defaults, which can be looser than what you wrote. That applies to the copy in
+`<configDir>` and to the one in a stdio MCP instance's config dir. **A node whose `node.yaml` carries a stray or
+misspelled key now refuses to start** (`mcp` exits at startup, and the service
+refuses to start). The error names the key and the keys allowed at that level:
+
+```
+Invalid /etc/king-louie/node.yaml: unknown key "policy.allowed_root" (known: allowed_roots, remote_sessions, max_concurrent_jobs)
+```
+
+`king-louie-service doctor` shows the same message on its
+`node config / runbooks health` row. Fix it by removing or correcting the key.
+
+### Unknown `features` and `ports` keys in `service.json` are errors
+
+`<configDir>/service.json` used to accept any feature name and ignore the
+ones it did not know, so `"webhook": true` (for `webhooks`) quietly left the
+listener off. An unknown key under `features` or `ports` now stops the service
+from starting, with the same wording as `node.yaml`:
+
+    Invalid /etc/king-louie/service.json: unknown key "features.webhook" (known: gateway, webhooks, mesh, channels, appDiscovery)
+
+The service-writable `<dataDir>/service.json` is unchanged: its `features` and
+`ports` are still ignored with a warning.
 
 ### `<dataDir>/gateway-token` exists only while the gateway is up
 

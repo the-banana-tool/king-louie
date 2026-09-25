@@ -1,0 +1,25 @@
+# laptop (Windows, profile agent). Install to C:\KingLouie\mcp\config\runbooks\.
+# Routine because the ref set is closed to your own main, release/* and
+# vX.Y.Z on your own remote: whoever can push those already controls the
+# code that `npm ci`, the build and the tests run. Widening the ref pattern
+# makes this runbook unsafe.
+# npm runs as node.exe npm-cli.js --prefix <dir>: npm.cmd cannot be started
+# without a shell, and a step has no working directory of its own.
+# Edit the Git path if Git for Windows is installed elsewhere.
+name: laptop.build_then_deploy
+description: Build and test a ref on this laptop. Deploying is web-01's own runbook (stage-4 hook below).
+tier: routine   # local build of a closed ref set (§8 row 3); the deploy is unsafe on web-01
+params:
+  ref: { type: string, pattern: '^(main|release/[A-Za-z0-9][A-Za-z0-9._-]{0,39}|v[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4})$', default: main }
+steps:
+  - run: ['C:\Program Files\Git\cmd\git.exe', -C, 'C:\build\site', fetch, --prune, origin, '{{ref}}']
+  - run: ['C:\Program Files\Git\cmd\git.exe', -C, 'C:\build\site', checkout, --detach, FETCH_HEAD]
+  - run: ['C:\Program Files\nodejs\node.exe', 'C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js', --prefix, 'C:\build\site', ci]
+  - run: ['C:\Program Files\nodejs\node.exe', 'C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js', --prefix, 'C:\build\site', run, build]
+  - run: ['C:\Program Files\nodejs\node.exe', 'C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js', --prefix, 'C:\build\site', test]
+  # ---- stage-4 hook (fleet stage 4 adds a cross-node step kind) ----
+  # Until then, the client calls run_runbook(web-01, site.pull_and_restart, {ref}) itself
+  # after this job succeeds. Servers manage themselves: no SSH, no remote-host target.
+  # - call: { machine: web-01, runbook: site.pull_and_restart, params: { ref: '{{ref}}' } }
+timeout_s: 1800
+rate_limit: { max: 12, per: 1h }

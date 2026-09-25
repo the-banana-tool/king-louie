@@ -6,7 +6,10 @@ function posixPrivate(file) {
   return { ok: (mode & 0o077) === 0, detail: `mode ${mode.toString(8)}` };
 }
 
-function runDoctor({ dataDir, platform = process.platform }) {
+// adminUid is the uid that must own node.yaml and the runbooks on POSIX
+// (default root). The CLI never passes it; tests pass their own euid so the
+// wiring runs unprivileged too.
+function runDoctor({ dataDir, platform = process.platform, adminUid = 0 }) {
   const results = [];
   const major = Number(process.versions.node.split('.')[0]);
   results.push({ check: 'node >= 22', ok: major >= 22, detail: process.versions.node });
@@ -32,17 +35,26 @@ function runDoctor({ dataDir, platform = process.platform }) {
   try {
     const { loadNodeConfig } = require('./node-config');
     const { RunbookEngine } = require('../runbooks/runbook-engine');
-    const nodeCfg = loadNodeConfig({ dataDir });
+    const nodeCfg = loadNodeConfig({ dataDir, adminUid });
 
     results.push({ check: 'node configuration loaded', ok: true, detail: `name: ${nodeCfg.name}, profile: ${nodeCfg.profile}` });
 
     if (fs.existsSync(nodeCfg.runbooksDir)) {
       const engine = new RunbookEngine({
         runbooksDir: nodeCfg.runbooksDir,
-        allowedRoots: nodeCfg.policy.allowed_roots
+        allowedRoots: nodeCfg.policy.allowed_roots,
+        adminUid
       });
       const runbooks = engine.loadRunbooks();
       results.push({ check: 'runbooks loaded', ok: true, detail: `${runbooks.size} runbook(s) found in ${nodeCfg.runbooksDir}` });
+      const { checkRunbookCommands } = require('./doctor-runbooks');
+      results.push(...checkRunbookCommands(runbooks, {
+        platform,
+        env: process.env,
+        cwd: process.cwd(),
+        geteuid: typeof process.geteuid === 'function' ? () => process.geteuid() : null,
+        spawnSync: require('child_process').spawnSync
+      }));
     }
   } catch (err) {
     results.push({ check: 'node config / runbooks health', ok: false, detail: err.message });

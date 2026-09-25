@@ -1,0 +1,11 @@
+# web-01 (Linux, profile runbook). Install to /opt/king-louie/mcp/config/runbooks/.
+# Unsafe: denied over MCP until fleet stage 3 brings phone approval.
+# The sudo step must match examples/sudoers/king-louie-web-01 exactly.
+name: server.reboot
+description: Reboot this machine in one minute.
+tier: unsafe
+params: {}
+steps:
+  - run: [/usr/bin/sudo, -n, /usr/sbin/shutdown, -r, '+1']
+timeout_s: 30
+rate_limit: { max: 2, per: 1d }
