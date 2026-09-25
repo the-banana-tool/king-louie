@@ -45,15 +45,20 @@ struct QRScannerView: UIViewControllerRepresentable {
             preview?.frame = view.layer.bounds
         }
 
+        /// startRunning and stopRunning block, so neither runs on the main thread.
+        private func stop() {
+            DispatchQueue.global(qos: .userInitiated).async { [session] in session.stopRunning() }
+        }
+
         override func viewWillDisappear(_ animated: Bool) {
             super.viewWillDisappear(animated)
-            session.stopRunning()
+            stop()
         }
 
         func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput metadataObjects: [AVMetadataObject], from connection: AVCaptureConnection) {
             guard !delivered, let code = (metadataObjects.first as? AVMetadataMachineReadableCodeObject)?.stringValue else { return }
             delivered = true
-            session.stopRunning()
+            stop()
             onCode?(code)
         }
     }

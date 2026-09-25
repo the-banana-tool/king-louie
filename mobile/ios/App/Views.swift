@@ -108,7 +108,7 @@ struct PendingListView: View {
                                 Text(problem).font(.caption).foregroundStyle(.secondary)
                             }
                             if !model.isPolling {
-                                Button("Check for requests") { model.startPolling() }
+                                Button("Check for requests") { model.checkNow() }
                             }
                         }
                     }
@@ -307,14 +307,16 @@ struct DevicesView: View {
                 Section("Devices") {
                     ForEach(Array(model.devices.enumerated()), id: \.offset) { _, device in
                         let id = device["device_id"]?.stringValue ?? ""
+                        let name = device["name"]?.stringValue ?? ""
                         VStack(alignment: .leading) {
-                            Text("\(Display.escape(device["name"]?.stringValue ?? "")) (\(Display.escape(device["platform"]?.stringValue ?? "")))")
-                            Text("d-" + Identifiers.fingerprintGroups(id)).font(.caption.monospaced())
+                            Text("\(Display.escape(name)) (\(Display.escape(device["platform"]?.stringValue ?? "")))")
+                            // The relay's list, not a pin: escaped like any other relay text.
+                            Text(Display.escape("d-" + Identifiers.fingerprintGroups(id))).font(.caption.monospaced())
                             ForEach(Array((device["nodes"]?.arrayValue ?? []).enumerated()), id: \.offset) { _, n in
                                 Text("\(nodeLabel(n["node_id"]?.stringValue ?? "")): \(Display.escape(n["state"]?.stringValue ?? ""))").font(.caption)
                             }
                             if id != model.deviceId {
-                                Button("Revoke", role: .destructive) { Task { await model.revoke(deviceId: id) } }
+                                Button("Revoke", role: .destructive) { Task { await model.revoke(deviceId: id, name: name) } }
                             }
                         }
                     }

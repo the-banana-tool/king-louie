@@ -71,6 +71,14 @@ final class DeviceKey {
         }
     }
 
+    /// A phone-signed envelope over the canonical bytes of `message`, after a
+    /// fresh biometric prompt: responses, enrollments and revocations.
+    func signEnvelope(_ message: JSONValue, reason: String) async throws -> Envelope {
+        let bytes = JCS.data(message)
+        let signature = try await sign(bytes, reason: reason)
+        return Envelope(alg: "ES256", kid: deviceId, payload: Base64URL.encode(bytes), sig: Base64URL.encode(signature))
+    }
+
     /// Signs API requests with a context unlocked once per session. If the
     /// cached context no longer works, unlock once more before concluding
     /// the key itself is gone.

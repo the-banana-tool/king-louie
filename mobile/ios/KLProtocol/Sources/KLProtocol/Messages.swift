@@ -171,6 +171,7 @@ enum Rules {
     static let byType: [String: (Fields) -> Bool] = [
         "kl.approval.request": request,
         "kl.approval.response": response,
+        "kl.approval.status": status,
         "kl.device.enroll": enroll,
         "kl.device.revoke": revoke,
         "kl.audit.slice": auditSlice
@@ -180,6 +181,8 @@ enum Rules {
     static let nodeNameMax = 64
     static let originStringMax = 200
     static let revokeReasonMax = 200
+    static let statusReasonMax = 300
+    static let statusStates = ["approved", "denied", "expired", "withdrawn", "refused"]
     static let enrollMaxMs: Int64 = 10 * 60 * 1000
     static let revokeMaxMs: Int64 = 7 * 24 * 60 * 60 * 1000
     static let platforms = ["ios", "android", "demo"]
@@ -318,6 +321,16 @@ enum Rules {
         hasExactKeys(m, ["v", "type", "request_id", "node_id", "action_hash", "nonce", "decision", "expires_at", "device_id", "signed_at"])
             && isUuidV4(m["request_id"]) && isNodeId(m["node_id"]) && isHash(m["action_hash"]) && isNonce(m["nonce"])
             && isOneOf(m["decision"], ["approve", "deny"]) && isTimestamp(m["expires_at"]) && isDeviceId(m["device_id"]) && isTimestamp(m["signed_at"])
+    }
+
+    /// kl.approval.status (node-signed): `device_id` null or a device id,
+    /// `reason` null or at most 300 code points (the node's REASON_MAX).
+    static func status(_ m: Fields) -> Bool {
+        hasExactKeys(m, ["v", "type", "request_id", "node_id", "state", "device_id", "reason", "at"])
+            && isUuidV4(m["request_id"]) && isNodeId(m["node_id"]) && isOneOf(m["state"], statusStates)
+            && (m["device_id"]?.isNull == true || isDeviceId(m["device_id"]))
+            && (m["reason"]?.isNull == true || withinLength(m["reason"], statusReasonMax))
+            && isTimestamp(m["at"])
     }
 
     static func enroll(_ m: Fields) -> Bool {

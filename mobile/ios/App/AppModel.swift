@@ -53,6 +53,10 @@ struct HistoryPage {
 
 @MainActor
 final class AppModel: ObservableObject {
+    /// A request lives at most 300 s (approval-v1 §3.1); a relay cannot stretch it.
+    static let maxExpiresInMs = 300_000
+    static let retryingStatuses: Set<String> = ["node offline — retrying", "relay busy — retrying"]
+
     @Published var state = StoredState.load()
     @Published var pending: [PendingItem] = []
     /// A modal message for something the owner did (or must act on).
@@ -61,6 +65,10 @@ final class AppModel: ObservableObject {
     /// Pending screen rather than as an alert every few seconds.
     @Published var pollProblem: String?
     @Published private(set) var isPolling = false
+    /// Polling waits for the owner's tap: after a cancelled unlock (so the
+    /// app never loops on Face ID), and on an invited phone until the other
+    /// phone has added it.
+    @Published private(set) var needsTap = false
     @Published var onlineNodes: [String: Bool] = [:]
     @Published var devices: [JSONValue] = []
     @Published var history: HistoryPage?
@@ -73,7 +81,9 @@ final class AppModel: ObservableObject {
     private var client: RelayAPI?
     private var pollTask: Task<Void, Never>?
     private var pollGeneration = 0
-    /// Requests already reported as signed by a changed node key.
+    /// A pairing is in progress; the scene must not start a poll under it.
+    private var pairing = false
+    /// Requests already reported as signed by a changed node key (bounded).
     private var warnedPayloads: Set<String> = []
 
     var mode: AppMode { state.mode }
@@ -86,15 +96,15 @@ final class AppModel: ObservableObject {
     }
 
     /// The only place a network client is made. RelayClientFactory hands one
-    /// out in live mode only, so demo (and welcome) never has one.
+    /// out in live mode only, so demo (and welcome) never has one; without a
+    /// usable key there is nothing to sign requests with, so no client either.
     private func connect() {
         client?.invalidate()
         client = nil
-        guard let base = state.relayURL.flatMap({ URL(string: $0) }) else { return }
+        guard let key, let base = state.relayURL.flatMap({ URL(string: $0) }) else { return }
         let pin = state.relaySpki ?? ""
-        let deviceId = key?.deviceId
-        var signer: RelayAPI.Signer?
-        if let key { signer = { data in try await key.signForSession(data) } }
+        let deviceId = key.deviceId
+        let signer: RelayAPI.Signer = { data in try await key.signForSession(data) }
         let factory = RelayClientFactory<RelayAPI> { RelayAPI(base: base, spkiPin: pin, deviceId: deviceId, signer: signer) }
         client = factory.client(for: state.mode)
     }
@@ -111,7 +121,7 @@ final class AppModel: ObservableObject {
     }
 
     /// The words the owner sees for an error. Never includes a key,
-    /// signature or code.
+    /// signature or code; relay text is escaped like any other display text.
     private func describe(_ error: Error) -> String {
         if let e = error as? ProtocolError {
             switch e {
@@ -129,7 +139,8 @@ final class AppModel: ObservableObject {
             case "node_offline": return "The node is offline."
             case "gone": return "Too late — this request has expired."
             case "unknown_device": return "The relay does not know this phone yet."
-            default: return e.message.isEmpty ? "The relay refused the request (\(e.code))." : e.message
+            case "pin_mismatch": return e.message
+            default: return e.message.isEmpty ? "The relay refused the request (\(Display.escape(e.code)))." : Display.escape(e.message)
             }
         }
         if let e = error as? LAError {
@@ -144,8 +155,23 @@ final class AppModel: ObservableObject {
     }
 
     private func fail(_ error: Error) {
-        if let e = error as? ProtocolError, e == .keyInvalidated { stopPolling() }
+        if let e = error as? ProtocolError, e == .keyInvalidated {
+            dropInvalidKey()
+            return
+        }
         banner = describe(error)
+    }
+
+    /// The Secure Enclave key stopped working (the enrolled biometrics
+    /// changed). Forget it, so the next pairing or invite makes a new one.
+    private func dropInvalidKey() {
+        stopPolling()
+        DeviceKey.delete()
+        key = nil
+        client?.invalidate()
+        client = nil
+        banner = DeviceKey.invalidatedMessage
+        pollProblem = DeviceKey.invalidatedMessage
     }
 
     // MARK: Demo
@@ -230,12 +256,20 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Puts back the pins and mode from before a pairing that did not finish.
+    /// Puts back the pins and mode from before a pairing that did not finish,
+    /// demo included.
     private func restore(_ before: StoredState) {
+        if before.mode == .demo {
+            client?.invalidate()
+            client = nil
+            state = before
+            startDemo()
+            return
+        }
         state = before
         state.save()
         connect()
-        startPolling()
+        if !needsTap { startPolling() }
     }
 
     /// base64url text that decodes to exactly `count` bytes.
@@ -244,10 +278,25 @@ final class AppModel: ObservableObject {
         return data.count == count
     }
 
+    /// Switches to the pins of a pairing or invite code, remembering what
+    /// was there before (demo included) for `restore`.
+    private func beginPairing(relay: (url: String, spki: String), pins: [NodePin]) -> StoredState {
+        let before = state
+        if mode == .demo { leaveDemo() }
+        stopPolling()
+        state.relayURL = relay.url
+        state.relaySpki = relay.spki
+        for pin in pins { pinNode(pin) }
+        state.mode = .live
+        connect()
+        return before
+    }
+
     // MARK: Console enrollment
 
     /// Console enrollment (spec §3.10): the phone signs its own enrollment with
-    /// the key it enrolls and proves it scanned the code with code_mac.
+    /// the key it enrolls and proves it scanned the code with code_mac. Its
+    /// timestamps come from the relay's clock, which the node's is close to.
     private func pairAtConsole(_ payload: JSONValue) async throws {
         guard let codeId = payload["code_id"]?.stringValue, isToken(codeId, bytes: 16),
               let code = payload["code"]?.stringValue, isToken(code, bytes: 32), let node = payload["node"] else {
@@ -255,40 +304,38 @@ final class AppModel: ObservableObject {
         }
         let relay = try relayPin(payload)
         let pin = try nodePin(node)
-        // Key, message and signature first: nothing below changes until the
-        // owner has signed.
         let key = try ensureKey()
-        let now = Date()
-        let message = try Messages.consoleEnroll(device: try deviceObject(for: key), codeId: codeId, code: code, createdAt: Timestamps.string(now),
-                                                 expiresAt: Timestamps.string(now.addingTimeInterval(600)), nonce: Messages.randomNonce())
-        let bytes = JCS.data(message)
-        let signature = try await key.sign(bytes, reason: "Enroll this phone as an approver for \(Display.escape(pin.name)).")
-        let envelope = Envelope(alg: "ES256", kid: key.deviceId, payload: Base64URL.encode(bytes), sig: Base64URL.encode(signature))
-        if mode == .demo { leaveDemo() }
-        stopPolling()
-        let before = state
-        state.relayURL = relay.url
-        state.relaySpki = relay.spki
-        pinNode(pin)
-        state.mode = .live
-        connect()
+        let device = try deviceObject(for: key)
+        pairing = true
+        defer { pairing = false }
+        let before = beginPairing(relay: relay, pins: [pin])
         guard let client else {
             restore(before)
             throw ProtocolError.malformed("Could not reach the relay named in this code.")
         }
-        fingerprintToCompare = "d-" + Identifiers.fingerprintGroups(key.deviceId)
-        defer { fingerprintToCompare = nil }
         let result: String
         do {
+            let now = try await client.syncClock()
+            let message = try Messages.consoleEnroll(device: device, codeId: codeId, code: code, createdAt: Timestamps.string(now),
+                                                     expiresAt: Timestamps.string(now.addingTimeInterval(600)), nonce: Messages.randomNonce())
+            let envelope = try await key.signEnvelope(message, reason: "Enroll this phone as an approver for \(Display.escape(pin.name)).")
+            fingerprintToCompare = "d-" + Identifiers.fingerprintGroups(key.deviceId)
             try await client.consoleEnroll(codeId: codeId, envelope: envelope)
             result = try await consoleResult(client, codeId: codeId)
+        } catch let e as RelayError where e.code == "already_claimed" {
+            fingerprintToCompare = nil
+            restore(before)
+            throw ProtocolError.malformed("Another phone already used this pairing code. Run enroll-device on the node for a new one.")
         } catch {
+            fingerprintToCompare = nil
             restore(before)
             throw error
         }
+        fingerprintToCompare = nil
         switch result {
         case "done":
             state.save()
+            needsTap = false
             banner = "Enrolled. This phone now approves for \(Display.escape(pin.name))."
             startPolling()
             await sendPushToken()
@@ -312,7 +359,7 @@ final class AppModel: ObservableObject {
                 let s = try await client.consoleEnrollState(codeId: codeId)
                 if s != "waiting" { return s }
             } catch let e as RelayError where e.code == "rate_limited" {
-                try await Task.sleep(for: .seconds(e.retryAfter ?? 10))
+                try await Task.sleep(for: .seconds(max(e.retryAfter ?? 10, 1)))
             } catch let e as RelayError where e.code == "unknown_code" {
                 // The relay dropped the code: it closed long enough ago.
                 return "expired"
@@ -333,22 +380,18 @@ final class AppModel: ObservableObject {
         state.save()
         connect()
         banner = "Relay pinned again."
+        needsTap = false
         startPolling()
     }
 
     // MARK: Approvals
 
-    /// A status counts only when the pinned node signed it for this request
-    /// (kl.approval.status, approval-v1 §3.3).
+    /// A status counts only when the pinned node signed a valid
+    /// kl.approval.status for this request (the core's ApprovalStatus).
     private func verifiedStatus(_ json: JSONValue?, requestId: String, pin: NodePin) -> String? {
-        guard let json, !json.isNull, let env = try? Envelope(json: json), env.kid == pin.id,
-              env.verifyEd25519(spkiHex: pin.key), let m = try? env.message(),
-              m["type"]?.stringValue == "kl.approval.status", m["v"] == .number("1"),
-              m["request_id"]?.stringValue == requestId, m["node_id"]?.stringValue == pin.id,
-              let state = m["state"]?.stringValue,
-              ["approved", "denied", "expired", "withdrawn", "refused"].contains(state) else { return nil }
-        if let reason = m["reason"]?.stringValue, !reason.isEmpty { return "\(state): \(friendlyReason(reason))" }
-        return state
+        guard let json, !json.isNull, let status = ApprovalStatus.verify(json, requestId: requestId, pin: pin) else { return nil }
+        if let reason = status.reason, !reason.isEmpty { return "\(status.state): \(friendlyReason(reason))" }
+        return status.state
     }
 
     /// Shows a request only when the core says so (shape, pin, node
@@ -358,6 +401,7 @@ final class AppModel: ObservableObject {
         let view = Display.view(envJSON, pinned: pins)
         guard view.shown, let display = view.display else {
             if view.reason == "bad_node_signature", let payload = envJSON["payload"]?.stringValue, !warnedPayloads.contains(payload) {
+                if warnedPayloads.count >= 64 { warnedPayloads.removeAll() }
                 warnedPayloads.insert(payload)
                 banner = "Node key changed — pair again."
             }
@@ -371,7 +415,7 @@ final class AppModel: ObservableObject {
             pending[i].status = status ?? pending[i].status
             return
         }
-        let expiresInMs = item["expires_in_ms"]?.intValue ?? 0
+        let expiresInMs = min(item["expires_in_ms"]?.intValue ?? 0, Self.maxExpiresInMs)
         // Already over when it arrived: nothing to decide.
         guard expiresInMs > 0 else { return }
         var fullText: [String: String] = [:]
@@ -388,6 +432,25 @@ final class AppModel: ObservableObject {
         pending.removeAll { item in
             item.timeLeft == .zero && (item.status == nil || ContinuousClock.now - item.receivedAt > .milliseconds(item.expiresInMs) + .seconds(60))
         }
+    }
+
+    /// From the scene becoming active: polls unless the owner must tap first
+    /// or a pairing is under way.
+    func resumePolling() {
+        guard !needsTap, !pairing else { return }
+        startPolling()
+    }
+
+    /// The owner's "Check for requests".
+    func checkNow() {
+        guard !pairing else { return }
+        needsTap = false
+        pollProblem = nil
+        if client == nil, mode == .live {
+            pollProblem = key == nil ? "This phone has no approval key. Scan a pairing code from a node console." : "This phone is not paired with a relay."
+            return
+        }
+        startPolling()
     }
 
     /// Foreground long-poll (the no-push mode, and the fetch after a tap).
@@ -420,16 +483,19 @@ final class AppModel: ObservableObject {
             } catch {
                 if Task.isCancelled { return }
                 if error is LAError {
+                    // A cancelled or failed unlock: wait for the owner, never re-prompt on our own.
+                    needsTap = true
                     pollProblem = "Locked. Tap “Check for requests” to unlock."
                     return
                 }
                 if let e = error as? ProtocolError, e == .keyInvalidated {
-                    banner = DeviceKey.invalidatedMessage
+                    dropInvalidKey()
                     return
                 }
                 if let e = error as? RelayError, e.code == "pin_mismatch" {
                     banner = e.message
                     pollProblem = e.message
+                    needsTap = true
                     return
                 }
                 pollProblem = describe(error)
@@ -446,6 +512,10 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Cancelling drops our connection, but the relay keeps a parked long
+    /// poll for up to its 25 s wait. It allows two per device, so one
+    /// stop-and-start is fine; a third quick one gets a 429, which the loop
+    /// waits out.
     func stopPolling() {
         pollGeneration += 1
         pollTask?.cancel()
@@ -454,11 +524,17 @@ final class AppModel: ObservableObject {
         key?.endSession()
     }
 
-    /// Approve or deny: a fresh biometric signature over the response.
+    /// Approve or deny: a fresh biometric signature over the response, and
+    /// only for an action whose hash the node signed.
     func decide(_ item: PendingItem, approve: Bool) async {
         guard item.timeLeft > .zero else {
             setStatus(item.id, "expired")
             banner = "Too late — this request has expired."
+            return
+        }
+        guard let action = item.message["action"], let actionHash = item.message["action_hash"]?.stringValue,
+              actionHash == Digest.sha256B64url(JCS.data(action)) else {
+            banner = "This request's action does not match its signed hash. Nothing was signed."
             return
         }
         do {
@@ -472,17 +548,16 @@ final class AppModel: ObservableObject {
                 banner = "This phone is not paired with a relay."
                 return
             }
-            let response = try Messages.response(to: item.message, decision: approve ? "approve" : "deny", deviceId: key.deviceId, signedAt: Timestamps.string(Date()))
-            let bytes = JCS.data(response)
+            let response = try Messages.response(to: item.message, decision: approve ? "approve" : "deny", deviceId: key.deviceId,
+                                                 signedAt: Timestamps.string(client.now()))
             let summary = item.display["summary"]?.stringValue ?? "this action"
-            let signature = try await key.sign(bytes, reason: approve ? "Approve: \(summary)" : "Deny: \(summary)")
+            let envelope = try await key.signEnvelope(response, reason: approve ? "Approve: \(summary)" : "Deny: \(summary)")
             // The prompt takes time; never send once the request has run out.
             guard item.timeLeft > .zero else {
                 setStatus(item.id, "expired")
                 banner = "Too late — this request has expired."
                 return
             }
-            let envelope = Envelope(alg: "ES256", kid: key.deviceId, payload: Base64URL.encode(bytes), sig: Base64URL.encode(signature))
             guard let reply = try await sendResponse(client, item: item, envelope: envelope) else { return }
             // Only accepted: true is a verdict the node applied. null is never shown as approved.
             switch ResponseOutcome(reply: reply) {
@@ -495,6 +570,7 @@ final class AppModel: ObservableObject {
         } catch let e as RelayError where e.code == "gone" {
             setStatus(item.id, "expired")
         } catch {
+            clearRetrying(item.id)
             fail(error)
         }
     }
@@ -520,6 +596,13 @@ final class AppModel: ObservableObject {
         if let i = pending.firstIndex(where: { $0.id == id }) { pending[i].status = status }
     }
 
+    /// After an error that ends the retries, the request is undecided again.
+    private func clearRetrying(_ id: String) {
+        if let i = pending.firstIndex(where: { $0.id == id }), let status = pending[i].status, Self.retryingStatuses.contains(status) {
+            pending[i].status = nil
+        }
+    }
+
     // MARK: History, nodes, devices
 
     func loadHistory(nodeId: String, beforeSeq: Int? = nil) async {
@@ -528,11 +611,16 @@ final class AppModel: ObservableObject {
             guard let envelope = try await client.history(nodeId: nodeId, limit: 50, beforeSeq: beforeSeq) else { return }
             let result = AuditSlice.verify(envelope, nodeKeyHex: pin.key)
             guard result.ok else {
-                banner = "History from \(Display.escape(pin.name)) did not verify (\(result.reason ?? "unknown"))."
+                banner = "History from \(Display.escape(pin.name)) did not verify (\(Display.escape(result.reason ?? "unknown")))."
                 return
             }
-            let asOf = (try? Envelope(json: envelope).message())?["created_at"]?.stringValue ?? ""
-            history = HistoryPage(nodeId: nodeId, entries: Array(result.entries.reversed()), asOf: asOf)
+            // Signed by the pinned key, and about the node that was asked for.
+            let slice = try? Envelope(json: envelope).message()
+            guard let sliceNode = slice?["node_id"]?.stringValue, sliceNode == pin.id else {
+                banner = "History from \(Display.escape(pin.name)) is about a different node."
+                return
+            }
+            history = HistoryPage(nodeId: nodeId, entries: Array(result.entries.reversed()), asOf: slice?["created_at"]?.stringValue ?? "")
         } catch {
             fail(error)
         }
@@ -581,10 +669,18 @@ final class AppModel: ObservableObject {
                 "secret": .string(secret),
                 "nodes": .array(state.nodes.map { .object(["id": .string($0.id), "name": .string($0.name), "key": .string($0.key)]) })
             ]))
-            // Device-authenticated, so polling every 2 s stays well inside the
-            // per-device budget. The invite lives 10 minutes.
-            for _ in 0..<300 {
-                if let claim = try await client.inviteClaim(inviteId), !claim.isNull {
+            // Device-authenticated, so asking every 2 s stays inside the
+            // per-device budget; a 429 is waited out. The invite lives 10 minutes.
+            let deadline = ContinuousClock.now + .seconds(10 * 60)
+            while ContinuousClock.now < deadline {
+                let claim: JSONValue?
+                do {
+                    claim = try await client.inviteClaim(inviteId)
+                } catch let e as RelayError where e.code == "rate_limited" {
+                    try await Task.sleep(for: .seconds(max(e.retryAfter ?? 10, 1)))
+                    continue
+                }
+                if let claim, !claim.isNull {
                     inviteQR = nil
                     guard let device = verifiedClaim(claim, secret: secret) else {
                         banner = "The invite was claimed by something that did not scan it. Nothing was enrolled."
@@ -622,16 +718,15 @@ final class AppModel: ObservableObject {
         guard let device = inviteClaimToConfirm, let key, let client else { return }
         inviteClaimToConfirm = nil
         do {
-            let now = Date()
+            let now = client.now()
             let message = try Messages.signedEnroll(device: device, enrolledBy: key.deviceId, createdAt: Timestamps.string(now),
                                                     expiresAt: Timestamps.string(now.addingTimeInterval(600)), nonce: Messages.randomNonce())
-            let bytes = JCS.data(message)
             let name = Display.escape(device["name"]?.stringValue ?? "the new phone")
-            let signature = try await key.sign(bytes, reason: "Add \(name) as an approver.")
-            let result = try await client.enrollDevice(Envelope(alg: "ES256", kid: key.deviceId, payload: Base64URL.encode(bytes), sig: Base64URL.encode(signature)))
+            let envelope = try await key.signEnvelope(message, reason: "Add \(name) as an approver.")
+            let result = try await client.enrollDevice(envelope)
             let lines = (result?["nodes"]?.arrayValue ?? []).map { n -> String in
                 let id = n["node_id"]?.stringValue ?? ""
-                let label = state.nodes.first(where: { $0.id == id }).map { Display.escape($0.name) } ?? id
+                let label = state.nodes.first(where: { $0.id == id }).map { Display.escape($0.name) } ?? Display.escape(id)
                 return "\(label): \(Display.escape(n["state"]?.stringValue ?? "unknown"))"
             }
             banner = "Sent to \(lines.count) node(s)" + (lines.isEmpty ? "." : " — " + lines.joined(separator: ", ") + ".")
@@ -641,7 +736,8 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Phone B: claim an invite from phone A.
+    /// Phone B: claim an invite from phone A. It does not poll until the
+    /// owner taps: the relay knows this phone only once phone A has added it.
     private func claimInvite(_ payload: JSONValue) async throws {
         guard let inviteId = payload["invite_id"]?.stringValue, isToken(inviteId, bytes: 16),
               let secret = payload["secret"]?.stringValue, isToken(secret, bytes: 32),
@@ -653,14 +749,9 @@ final class AppModel: ObservableObject {
         let key = try ensureKey()
         let device = try deviceObject(for: key)
         let mac = try Messages.inviteMac(secret: secret, device: device)
-        if mode == .demo { leaveDemo() }
-        stopPolling()
-        let before = state
-        state.relayURL = relay.url
-        state.relaySpki = relay.spki
-        for pin in pins { pinNode(pin) }
-        state.mode = .live
-        connect()
+        pairing = true
+        defer { pairing = false }
+        let before = beginPairing(relay: relay, pins: pins)
         guard let client else {
             restore(before)
             throw ProtocolError.malformed("Could not reach the relay named in this invite.")
@@ -673,20 +764,21 @@ final class AppModel: ObservableObject {
         }
         state.save()
         fingerprintToCompare = "d-" + Identifiers.fingerprintGroups(key.deviceId)
+        needsTap = true
+        pollProblem = "When the other phone has added this one, tap “Check for requests”."
         banner = "Check that the other phone shows the same id, then confirm there."
-        startPolling()
         await sendPushToken()
     }
 
-    func revoke(deviceId target: String) async {
+    func revoke(deviceId target: String, name: String) async {
         guard let key, let client else { return }
         do {
-            let now = Date()
+            let now = client.now()
             let message = try Messages.revoke(deviceId: target, revokedBy: key.deviceId, reason: "revoked from a phone",
                                               createdAt: Timestamps.string(now), expiresAt: Timestamps.string(now.addingTimeInterval(3600)), nonce: Messages.randomNonce())
-            let bytes = JCS.data(message)
-            let signature = try await key.sign(bytes, reason: "Revoke this device on every node.")
-            _ = try await client.revokeDevice(Envelope(alg: "ES256", kid: key.deviceId, payload: Base64URL.encode(bytes), sig: Base64URL.encode(signature)))
+            let label = name.isEmpty ? "d-" + Identifiers.fingerprintGroups(target) : name
+            let envelope = try await key.signEnvelope(message, reason: "Revoke \(Display.escape(label)) on every node.")
+            _ = try await client.revokeDevice(envelope)
             await refreshDevices()
         } catch {
             fail(error)
@@ -732,6 +824,8 @@ final class AppModel: ObservableObject {
         inviteQR = nil
         inviteClaimToConfirm = nil
         fingerprintToCompare = nil
+        needsTap = false
+        pollProblem = nil
         state = StoredState()
         state.save()
     }

@@ -17,8 +17,9 @@ struct RelayError: Error, LocalizedError {
 
 /// The relay's phone API over HTTPS (approval-v1 §7). The TLS leaf
 /// certificate's public key must match the pinned SPKI hash; certificate
-/// authorities are ignored. Nothing here logs a key, signature or code.
-final class RelayAPI: NSObject, URLSessionDelegate, @unchecked Sendable {
+/// authorities are ignored; redirects are refused. Nothing here logs a key,
+/// signature or code.
+final class RelayAPI: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     typealias Signer = @MainActor (Data) async throws -> Data
 
     let base: URL
@@ -27,14 +28,34 @@ final class RelayAPI: NSObject, URLSessionDelegate, @unchecked Sendable {
     private let signer: Signer?
     private let lock = NSLock()
     private var clockOffset: TimeInterval = 0
-    private var pinRefused = false
-    private lazy var session = URLSession(configuration: .ephemeral, delegate: self, delegateQueue: nil)
+    /// Tasks whose server certificate did not match the pin.
+    private var pinRefusedTasks: Set<Int> = []
+    private var session: URLSession!
 
     init(base: URL, spkiPin: String, deviceId: String?, signer: Signer?) {
         self.base = base
         self.spkiPin = spkiPin
         self.deviceId = deviceId
         self.signer = signer
+        super.init()
+        session = URLSession(configuration: .ephemeral, delegate: self, delegateQueue: nil)
+    }
+
+    /// The relay's clock as far as this client knows it (local time plus the
+    /// offset learned from a clock_skew answer or GET /v1/time).
+    func now() -> Date {
+        Date().addingTimeInterval(locked { clockOffset })
+    }
+
+    /// Asks the relay for its time (unauthenticated) and keeps the offset.
+    func syncClock() async throws -> Date {
+        guard let text = try await request("GET", "/v1/time", auth: false).1?["server_time"]?.stringValue,
+              let server = Timestamps.date(text) else {
+            throw RelayError(status: 0, code: "bad_reply", message: "The relay sent a reply this app cannot read.")
+        }
+        let offset = server.timeIntervalSinceNow
+        locked { clockOffset = offset }
+        return server
     }
 
     /// The session keeps its delegate (this object) alive; call this when the
@@ -82,7 +103,10 @@ final class RelayAPI: NSObject, URLSessionDelegate, @unchecked Sendable {
         return "sha256/" + Digest.sha256B64url(Data(header) + raw)
     }
 
-    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+    /// Task-level on purpose: with no session-level handler, URLSession
+    /// sends the server-trust challenge here, with the task, so a refusal is
+    /// recorded against the one request it belongs to.
+    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
         guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust else {
             completionHandler(.performDefaultHandling, nil)
@@ -91,11 +115,48 @@ final class RelayAPI: NSObject, URLSessionDelegate, @unchecked Sendable {
         guard let trust = challenge.protectionSpace.serverTrust,
               let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
               let leaf = chain.first, let pin = Self.spkiPin(of: leaf), pin == spkiPin else {
-            locked { pinRefused = true }
+            let id = task.taskIdentifier
+            locked { _ = pinRefusedTasks.insert(id) }
             completionHandler(.cancelAuthenticationChallenge, nil)
             return
         }
         completionHandler(.useCredential, URLCredential(trust: trust))
+    }
+
+    private func takePinRefusal(_ taskId: Int) -> Bool {
+        locked { pinRefusedTasks.remove(taskId) != nil }
+    }
+
+    /// Redirects are refused: the 3xx itself comes back and is an error.
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
+    }
+
+    /// One data task, cancelled with the calling Swift task. A pin refusal
+    /// for this task becomes `pin_mismatch`; any other cancellation stays a
+    /// URLError.
+    private func send(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        let handle = TaskHandle()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<(Data, URLResponse), Error>) in
+                let task = session.dataTask(with: request) { [weak self] data, response, error in
+                    let refused = self?.takePinRefusal(handle.identifier) ?? false
+                    if refused {
+                        continuation.resume(throwing: RelayError(status: 0, code: "pin_mismatch", message: "Relay certificate changed — scan a new relay code."))
+                    } else if let error {
+                        continuation.resume(throwing: error)
+                    } else if let data, let response {
+                        continuation.resume(returning: (data, response))
+                    } else {
+                        continuation.resume(throwing: URLError(.badServerResponse))
+                    }
+                }
+                handle.start(task)
+            }
+        } onCancel: {
+            handle.cancel()
+        }
     }
 
     // MARK: Requests
@@ -132,14 +193,7 @@ final class RelayAPI: NSObject, URLSessionDelegate, @unchecked Sendable {
             request.setValue(timestamp, forHTTPHeaderField: "X-KL-Timestamp")
             request.setValue(Base64URL.encode(signature), forHTTPHeaderField: "X-KL-Signature")
         }
-        locked { pinRefused = false }
-        let result: (Data, URLResponse)
-        do {
-            result = try await session.data(for: request)
-        } catch let error as URLError where error.code == .cancelled && locked({ pinRefused }) {
-            throw RelayError(status: 0, code: "pin_mismatch", message: "Relay certificate changed — scan a new relay code.")
-        }
-        let (data, response) = result
+        let (data, response) = try await send(request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         if (200..<300).contains(status) {
             guard !data.isEmpty else { return (status, nil) }
@@ -225,5 +279,31 @@ final class RelayAPI: NSObject, URLSessionDelegate, @unchecked Sendable {
     /// waiting | done | refused | expired.
     func consoleEnrollState(codeId: String) async throws -> String {
         try await request("GET", "/v1/enroll/\(Self.segment(codeId))", auth: false).1?["state"]?.stringValue ?? "waiting"
+    }
+}
+
+/// The data task behind one request: started once, cancellable from any
+/// thread, including before it starts.
+private final class TaskHandle: @unchecked Sendable {
+    private let lock = NSLock()
+    private var task: URLSessionTask?
+    private var cancelled = false
+    private(set) var identifier = -1
+
+    func start(_ task: URLSessionTask) {
+        lock.lock()
+        self.task = task
+        identifier = task.taskIdentifier
+        let cancelNow = cancelled
+        lock.unlock()
+        if cancelNow { task.cancel() } else { task.resume() }
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        let task = self.task
+        lock.unlock()
+        task?.cancel()
     }
 }

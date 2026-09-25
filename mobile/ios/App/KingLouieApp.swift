@@ -62,7 +62,7 @@ struct KingLouieApp: App {
         // unlock it is waiting for.
         .onChange(of: scenePhase) { _, phase in
             switch phase {
-            case .active: model.startPolling()
+            case .active: model.resumePolling()
             case .background: model.stopPolling()
             default: break
             }

@@ -226,6 +226,27 @@ public enum Display {
     }
 }
 
+/// A node-signed kl.approval.status (approval-v1 §3.3) for one request.
+public struct ApprovalStatus: Equatable {
+    public let state: String
+    public let deviceId: String?
+    public let reason: String?
+
+    /// The status, or nil unless: the envelope opens strictly, `kid` is the
+    /// pinned node, its signature verifies against the pinned key, the
+    /// message is a valid kl.approval.status, and it names this request and
+    /// this node.
+    public static func verify(_ envelopeJSON: JSONValue, requestId: String, pin: NodePin) -> ApprovalStatus? {
+        guard let envelope = try? Envelope(json: envelopeJSON), ExactText.same(envelope.kid, pin.id),
+              envelope.verifyEd25519(spkiHex: pin.key), let message = try? envelope.message(),
+              Messages.validate("kl.approval.status", message) == nil,
+              let rid = message["request_id"]?.stringValue, ExactText.same(rid, requestId),
+              let nodeId = message["node_id"]?.stringValue, ExactText.same(nodeId, pin.id),
+              let state = message["state"]?.stringValue else { return nil }
+        return ApprovalStatus(state: state, deviceId: message["device_id"]?.stringValue, reason: message["reason"]?.stringValue)
+    }
+}
+
 /// History comes as node-signed kl.audit.slice envelopes; the phone checks
 /// them in the order of approval-v1 §3.6 (`verifyAuditSlice` in
 /// src/audit/audit-ledger.js). The first failure decides the reason.
