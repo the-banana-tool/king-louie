@@ -25,6 +25,48 @@ const log = createLogger('desktop-bridge/desktop-scope');
 const DIRS_FILE = 'allowed-directories.json';
 const RULES_FILE = 'rules.json';
 
+// Absolute-only, then a canonical form: path.resolve handles mixed "/"
+// and "\" separators, "." and ".." segments and duplicate separators, and
+// strips any trailing separator (resolve already does this for every
+// path except a bare root, hence the extra check below); on win32 the
+// drive letter's case is also folded, since resolve() alone leaves it as
+// given. Two different spellings of the same real directory — a trailing
+// "\", a lowercase drive letter, a stray "..\" a path picker left in —
+// now normalize to the same string, so a `list.includes(normalized)`
+// dedup or presence check actually catches them instead of silently
+// growing a duplicate entry or missing a match. Empty and relative input
+// is rejected outright rather than silently resolved against the
+// service's cwd, which would be a surprising place for a
+// security-relevant allow-list entry to come from.
+//
+// Symlinks are *not* resolved here (path.resolve is purely syntactic, no
+// fs access). A directory does not need to exist yet to be allow-listed
+// (the desktop may add a mount point before it's mounted), and baking in
+// today's realpath would go stale if the symlink's target changes later.
+// Live access — including whatever a symlink resolves to at that moment —
+// is checked when it actually matters, by checkPath's
+// fs.stat/opendir/open, which follow symlinks the ordinary OS way.
+//
+// Exported (Task 8 fix round 1, I2) so every comparison that decides
+// whether a directory is "the same one" — desktop-scope's own, and the
+// import plan's present-check in src/migration/desktop-import.js — uses
+// this one definition of "same", instead of each comparing a normalized
+// value against a raw one and missing a re-spelling.
+function normalizeDirectory(directory) {
+  if (typeof directory !== 'string') return null;
+  const trimmed = directory.trim();
+  if (!trimmed || !path.isAbsolute(trimmed)) return null;
+  let resolved = path.resolve(trimmed);
+  const rootLength = path.parse(resolved).root.length;
+  if (resolved.length > rootLength && resolved.endsWith(path.sep)) {
+    resolved = resolved.slice(0, -1);
+  }
+  if (process.platform === 'win32' && /^[a-z]:/.test(resolved)) {
+    resolved = resolved[0].toUpperCase() + resolved.slice(1);
+  }
+  return resolved;
+}
+
 function createDesktopScope({ dataDir, context, onPathWritten = () => {} }) {
   const dir = path.join(dataDir, 'desktop');
   const writing = new Set();
@@ -82,7 +124,11 @@ function createDesktopScope({ dataDir, context, onPathWritten = () => {} }) {
   const getSettings = () => {
     const s = context.getSettings();
     const own = Array.isArray(s.allowedDirectories) ? s.allowedDirectories : [];
-    return { ...s, allowedDirectories: [...own, ...listDirectories().filter((d) => !own.includes(d))] };
+    // own is unnormalized (exactly as the service last wrote it); the
+    // desktop list from listDirectories() is already normalized. Comparing
+    // them directly would let a re-spelled service directory show up twice.
+    const ownNormalized = own.map((d) => normalizeDirectory(d)).filter(Boolean);
+    return { ...s, allowedDirectories: [...own, ...listDirectories().filter((d) => !ownNormalized.includes(d))] };
   };
 
   const setSettings = (next = {}) => {
@@ -114,41 +160,6 @@ function createDesktopScope({ dataDir, context, onPathWritten = () => {} }) {
     return context.setSettings({ ...next, allowedDirectories: own });
   };
 
-  // Absolute-only, then a canonical form: path.resolve handles mixed "/"
-  // and "\" separators, "." and ".." segments and duplicate separators, and
-  // strips any trailing separator (resolve already does this for every
-  // path except a bare root, hence the extra check below); on win32 the
-  // drive letter's case is also folded, since resolve() alone leaves it as
-  // given. Two different spellings of the same real directory — a trailing
-  // "\", a lowercase drive letter, a stray "..\" a path picker left in —
-  // now normalize to the same string, so the `list.includes(normalized)`
-  // dedup check below actually catches them instead of silently growing a
-  // duplicate entry. Empty and relative input is rejected outright rather
-  // than silently resolved against the service's cwd, which would be a
-  // surprising place for a security-relevant allow-list entry to come from.
-  //
-  // Symlinks are *not* resolved here (path.resolve is purely syntactic, no
-  // fs access). A directory does not need to exist yet to be allow-listed
-  // (the desktop may add a mount point before it's mounted), and baking in
-  // today's realpath would go stale if the symlink's target changes later.
-  // Live access — including whatever a symlink resolves to at that moment —
-  // is checked when it actually matters, by checkPath's
-  // fs.stat/opendir/open, which follow symlinks the ordinary OS way.
-  const normalizeDirectory = (directory) => {
-    if (typeof directory !== 'string') return null;
-    const trimmed = directory.trim();
-    if (!trimmed || !path.isAbsolute(trimmed)) return null;
-    let resolved = path.resolve(trimmed);
-    const rootLength = path.parse(resolved).root.length;
-    if (resolved.length > rootLength && resolved.endsWith(path.sep)) {
-      resolved = resolved.slice(0, -1);
-    }
-    if (process.platform === 'win32' && /^[a-z]:/.test(resolved)) {
-      resolved = resolved[0].toUpperCase() + resolved.slice(1);
-    }
-    return resolved;
-  };
-
   const addDirectory = (directory) => {
     const normalized = normalizeDirectory(directory);
     if (!normalized) {
@@ -157,7 +168,11 @@ function createDesktopScope({ dataDir, context, onPathWritten = () => {} }) {
       throw err;
     }
     const list = listDirectories();
-    if (!list.includes(normalized) && !serviceDirectories().includes(normalized)) {
+    // serviceDirectories() is unnormalized; compare against its normalized
+    // form so a re-spelling of a directory the service already allows
+    // isn't added to the desktop's own list too (I2).
+    const ownNormalized = serviceDirectories().map((d) => normalizeDirectory(d)).filter(Boolean);
+    if (!list.includes(normalized) && !ownNormalized.includes(normalized)) {
       list.push(normalized);
       write(DIRS_FILE, 'directories', list);
     }
@@ -229,4 +244,4 @@ function createDesktopScope({ dataDir, context, onPathWritten = () => {} }) {
   return { getSettings, setSettings, addDirectory, listDirectories, addPermissionRule, removePermissionRule, listRules };
 }
 
-module.exports = { createDesktopScope };
+module.exports = { createDesktopScope, normalizeDirectory };

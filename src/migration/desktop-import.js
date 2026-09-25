@@ -8,9 +8,11 @@ const path = require('path');
 const { createLogger } = require('../logging');
 const { DEFAULT_SETTINGS, mergeSettings } = require('../core/settings');
 const { resolveCasesRoot } = require('../cases');
+const { initRepo } = require('../cases/git');
 const UserProfile = require('../telos/user-profile');
 const { writeFileAtomic } = require('../desktop-bridge/pairing');
 const { MESSAGES } = require('../desktop-bridge/protocol');
+const { normalizeDirectory } = require('../desktop-bridge/desktop-scope');
 
 const log = createLogger('desktop-import');
 
@@ -22,9 +24,30 @@ const CATEGORY_ORDER = Object.freeze(['settings', 'userProfile', 'permissionRule
 const ACTIONS = Object.freeze(['new', 'update', 'copy', 'skip-present', 'skip-excluded', 'needs-attention', 'needs-desktop']);
 const WRITE_ACTIONS = new Set(['new', 'update', 'copy']);
 const INSTALL_ID_RE = /^[A-Za-z0-9-]{1,64}$/;
-const CASE_DIR_RE = /^[A-Za-z0-9._-]{1,128}$/;
+// No leading dot (fix round 1, M7): a top-level case directory named like a
+// dotfile (".git", ".kl") could collide with the case's own internals.
+const CASE_DIR_RE = /^(?!\.)[A-Za-z0-9._-]{1,128}$/;
 const COPY_SUFFIX = ' (from desktop)';
 const ELEVENLABS_TOKEN = '__elevenlabs_api_key';
+// Allow-listed the same way provider tokens are (fix round 1, M10): a name
+// not in this set never reaches a 'new'/'skip-present' action, only
+// 'skip-excluded', so an unknown key can't be planned for import.
+const KNOWN_SEARCH_KEYS = new Set(['brave', 'tavily']);
+const KNOWN_IMAGE_KEYS = new Set(['fal']);
+
+// Windows reserved device names, with or without an extension (fix round 1,
+// M7): CON.txt still opens the console device, not a file named CON.txt.
+const RESERVED_DEVICE_NAMES = new Set([
+  'con', 'prn', 'aux', 'nul',
+  'com1', 'com2', 'com3', 'com4', 'com5', 'com6', 'com7', 'com8', 'com9',
+  'lpt1', 'lpt2', 'lpt3', 'lpt4', 'lpt5', 'lpt6', 'lpt7', 'lpt8', 'lpt9'
+]);
+const isReservedDeviceName = (name) => RESERVED_DEVICE_NAMES.has(String(name).split('.')[0].toLowerCase());
+// A trailing dot or space is silently stripped by Windows, so "notes." and
+// "notes" name the same file there — never obviously true on POSIX, so
+// refused everywhere rather than only where it would matter.
+const hasTrailingDotOrSpace = (name) => /[. ]$/.test(String(name));
+const isValidCaseDir = (dir) => typeof dir === 'string' && CASE_DIR_RE.test(dir) && !isReservedDeviceName(dir) && !hasTrailingDotOrSpace(dir);
 
 // What stays behind, and why (spec §3.8 "Stays behind").
 const EXCLUDED = Object.freeze({
@@ -70,20 +93,56 @@ function countActions(items) {
   return counts;
 }
 
-// A relative path inside a case: no NUL, not absolute, no drive letter, no '.'/'..'/empty segments.
+// A relative path inside a case: no NUL, not absolute, no drive letter, no
+// '.'/'..'/empty segments, no segment that is a Windows reserved device name
+// or ends in a dot or space (fix round 1, M7 — these apply per segment, not
+// just to the case directory name itself, since any of them could name a
+// file the import writes).
 function safeRelPath(relPath) {
   const text = String(relPath);
   if (text.includes('\0')) throw new ImportError('BAD_PATH', 'a NUL byte is not allowed in a case path');
   const norm = text.replace(/\\/g, '/');
   if (norm.startsWith('/') || /^[A-Za-z]:/.test(norm)) throw new ImportError('BAD_PATH', `${text} escapes the case directory`);
   const parts = norm.split('/');
-  if (parts.some((s) => s === '' || s === '.' || s === '..')) throw new ImportError('BAD_PATH', `${text} escapes the case directory`);
+  for (const s of parts) {
+    if (s === '' || s === '.' || s === '..') throw new ImportError('BAD_PATH', `${text} escapes the case directory`);
+    if (isReservedDeviceName(s)) throw new ImportError('BAD_PATH', `${text} uses a reserved device name`);
+    if (hasTrailingDotOrSpace(s)) throw new ImportError('BAD_PATH', `${text} has a trailing dot or space`);
+  }
   return parts.join('/');
 }
-const isSkippedCaseFile = (rel) => rel === '.kl/lock' || (rel.startsWith('.git/') && rel.endsWith('.lock'));
+
+// What the import never writes, no matter what the desktop sends (fix round
+// 1, C1): .git/config (could set core.fsmonitor, a hook or a filter driver
+// that runs a program on the service account's next `git status`/`add`),
+// .git/hooks/** (the actual hook scripts) and .kl/no-hooks/** (the empty
+// directory src/cases/git.js points core.hooksPath at — importable content
+// there would defeat that). Matched case-insensitively, per path segment, so
+// ".GIT/Config" or a mixed-case "Hooks" directory can't slip past a literal
+// comparison. The case's own git config is recreated after landing (see
+// DesktopImporter#finish) instead of trusting whatever the desktop sent.
+function isSkippedCaseFile(rel) {
+  const segs = rel.toLowerCase().split('/');
+  if (segs.length === 2 && segs[0] === '.kl' && segs[1] === 'lock') return true;
+  if (segs[0] === '.git' && segs[1] === 'config' && segs.length === 2) return true;
+  if (segs[0] === '.git' && segs[1] === 'hooks') return true;
+  if (segs[0] === '.kl' && segs[1] === 'no-hooks') return true;
+  if (segs[0] === '.git' && rel.toLowerCase().endsWith('.lock')) return true;
+  return false;
+}
+
+// Whether `child` is strictly inside `parent`. Compares the *first path
+// segment* of the relative path, not a raw string prefix (fix round 1, M6):
+// path.relative can legitimately return a string that starts with the two
+// characters ".." without meaning "go up a directory" — a file literally
+// named "..notes.md" resolves to a relative path of "..notes.md", which
+// starts with ".." as a substring but is a single segment naming a file
+// inside `parent`, not an escape. Only a segment that IS exactly ".." means
+// "go up".
 const isInside = (parent, child) => {
   const rel = path.relative(parent, child);
-  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+  if (rel === '' || path.isAbsolute(rel)) return false;
+  return rel.split(path.sep)[0] !== '..';
 };
 
 class DesktopImporter {
@@ -103,10 +162,41 @@ class DesktopImporter {
     this.randomId = randomId;
     this.onPathWritten = onPathWritten;
     this.plans = new Map();
+    this.cleanupOrphanedStaging();
   }
 
   casesRoot() {
     return resolveCasesRoot({ settings: this.context.getSettings(), dataDir: this.dataDir });
+  }
+
+  // A staging directory (.import-<planId>) is normally removed by finish()
+  // (success or failure) or by dropPlan() (expiry, connection close). One can
+  // still be orphaned if the process exits between apply() and finish() —
+  // there's no plan left in memory to expire, so nothing would ever clean it
+  // up (fix round 1, M9). Best-effort and non-fatal: a resolution failure or
+  // a removal failure just gets logged, never thrown from the constructor.
+  cleanupOrphanedStaging() {
+    let root;
+    try {
+      root = this.casesRoot();
+    } catch (err) {
+      log.warn('could not resolve the cases root to clean up orphaned import staging directories', { error: err.message });
+      return;
+    }
+    let entries = [];
+    try {
+      entries = fs.readdirSync(root);
+    } catch {
+      return; // cases root doesn't exist yet — nothing to clean up
+    }
+    for (const name of entries) {
+      if (!name.startsWith('.import-')) continue;
+      try {
+        fs.rmSync(path.join(root, name), { recursive: true, force: true });
+      } catch (err) {
+        log.warn('could not remove an orphaned import staging directory', { dir: name, error: err.message });
+      }
+    }
   }
 
   manifestPath(installId) {
@@ -203,15 +293,30 @@ class DesktopImporter {
       add('alwaysApprove', tool, approvals[tool] ? 'skip-present' : 'new', 'applies only to runs started from the desktop');
     }
 
+    // Both sides normalized before comparing (fix round 1, I2): the
+    // desktop's own list is already normalized, but the service's raw
+    // settings.allowedDirectories is exactly as last written, and the
+    // incoming inventory entry is whatever the desktop happened to spell it
+    // as. Comparing without normalizing both sides misses a re-spelling
+    // (trailing separator, drive-letter case) of a directory that's already
+    // allowed, and plans it as 'new' when it's really already present.
+    const desktopNormalized = this.scope.listDirectories().map((d) => normalizeDirectory(d)).filter(Boolean);
+    const serviceNormalized = arr(settings.allowedDirectories).map((d) => normalizeDirectory(d)).filter(Boolean);
     for (const dir of arr(inventory.allowedDirectories)) {
       if (typeof dir !== 'string' || !dir) continue;
-      if (this.scope.listDirectories().includes(dir) || arr(settings.allowedDirectories).includes(dir)) { add('allowedDirectory', dir, 'skip-present'); continue; }
-      const check = await this.checkPath(dir);
+      const normalized = normalizeDirectory(dir);
+      if (!normalized) { add('allowedDirectory', dir, 'needs-attention', `${dir} is not an absolute directory path`); continue; }
+      if (desktopNormalized.includes(normalized) || serviceNormalized.includes(normalized)) { add('allowedDirectory', dir, 'skip-present'); continue; }
+      const check = await this.checkPath(normalized);
       if (check.readable && check.isDirectory) add('allowedDirectory', dir, 'new', 'applies only to runs started from the desktop');
       else add('allowedDirectory', dir, 'needs-attention', `the service cannot read ${dir}`);
     }
 
     const chats = this.context.getChats();
+    // Remembers the live updatedAt an 'update' action was planned against,
+    // so apply() can tell whether the service's copy is still the one the
+    // plan looked at (fix round 1, I4) before overwriting it.
+    const chatExpected = new Map();
     for (const c of arr(inventory.chats)) {
       if (!c || typeof c.id !== 'string' || !c.id) continue;
       const entry = done('chat', c.id);
@@ -220,7 +325,7 @@ class DesktopImporter {
         const sourceChanged = c.updatedAt !== entry.sourceUpdatedAt;
         const targetChanged = !target || target.updatedAt !== entry.targetUpdatedAt;
         if (!sourceChanged) add('chat', c.id, 'skip-present', null, entry.targetKey);
-        else if (!targetChanged) add('chat', c.id, 'update', null, entry.targetKey);
+        else if (!targetChanged) { add('chat', c.id, 'update', null, entry.targetKey); chatExpected.set(entry.targetKey, target.updatedAt); }
         else add('chat', c.id, 'copy', 'changed on both sides; imported as a copy', this.copyId(c.id, chats));
         continue;
       }
@@ -242,12 +347,20 @@ class DesktopImporter {
       add('case', inventory.customCasesRoot, 'needs-attention', `cases under a custom cases.root (${inventory.customCasesRoot}) are not copied; move them by hand`);
     }
     const root = this.casesRoot();
+    // What the inventory said a case should land with, kept so finish() can
+    // tell a short delivery (fix round 1, M8) from a complete one.
+    const caseExpected = new Map();
     for (const c of arr(inventory.cases)) {
       const dir = c && c.dir;
-      if (typeof dir !== 'string' || !CASE_DIR_RE.test(dir) || dir === '.' || dir === '..') { add('case', String(dir), 'needs-attention', 'not a valid case directory name'); continue; }
+      if (!isValidCaseDir(dir)) { add('case', String(dir), 'needs-attention', 'not a valid case directory name'); continue; }
       const exists = fs.existsSync(path.join(root, dir));
-      if (!exists) add('case', dir, 'new');
-      else if (done('case', dir)) add('case', dir, 'skip-present');
+      if (!exists) {
+        add('case', dir, 'new');
+        caseExpected.set(dir, {
+          files: Number.isFinite(c.files) ? c.files : null,
+          bytes: Number.isFinite(c.bytes) ? c.bytes : null
+        });
+      } else if (done('case', dir)) add('case', dir, 'skip-present');
       else add('case', dir, 'needs-attention', 'a case with this directory already exists on the service');
     }
 
@@ -264,8 +377,14 @@ class DesktopImporter {
       if (!knownTokens.has(p)) { add('providerToken', p, 'skip-excluded', 'not a provider key this service uses'); continue; }
       secret('providerToken', p, Boolean(tokens[p]));
     }
-    for (const p of arr(inventory.searchKeys)) secret('searchKey', p, Boolean(settings.webSearch && settings.webSearch[p] && settings.webSearch[p].apiKey));
-    for (const p of arr(inventory.imageKeys)) secret('imageKey', p, Boolean(settings.imageGeneration && settings.imageGeneration[p] && settings.imageGeneration[p].apiKey));
+    for (const p of arr(inventory.searchKeys)) {
+      if (!KNOWN_SEARCH_KEYS.has(p)) { add('searchKey', p, 'skip-excluded', 'not a search provider key this service uses'); continue; }
+      secret('searchKey', p, Boolean(settings.webSearch && settings.webSearch[p] && settings.webSearch[p].apiKey));
+    }
+    for (const p of arr(inventory.imageKeys)) {
+      if (!KNOWN_IMAGE_KEYS.has(p)) { add('imageKey', p, 'skip-excluded', 'not an image provider key this service uses'); continue; }
+      secret('imageKey', p, Boolean(settings.imageGeneration && settings.imageGeneration[p] && settings.imageGeneration[p].apiKey));
+    }
     for (const k of arr(inventory.vault)) secret('vault', k, this.context.vault.has(k));
     if (inventory.anthropicOAuth) {
       const stored = this.context.getStore().get('anthropicOAuth');
@@ -280,7 +399,9 @@ class DesktopImporter {
       createdAt: this.now().getTime(),
       items: new Map(items.map((i) => [itemKey(i.category, i.key), i])),
       results: new Map(),
-      caseFiles: new Map()
+      caseFiles: new Map(),
+      caseExpected,
+      chatExpected
     });
     log.info(`planned a desktop import: ${items.length} items`, { planId, source });
     return { planId, items, counts: countActions(items) };
@@ -308,7 +429,7 @@ class DesktopImporter {
         log.warn(`importing ${category}${SECRET_CATEGORIES.has(category) ? '' : ` ${key}`} failed: ${err.message}`);
         results.push({ category, key, ok: false, error: err.message });
         if (category === 'case') {
-          const files = plan.caseFiles.get(key) || { count: 0, failed: null };
+          const files = plan.caseFiles.get(key) || { count: 0, bytes: 0, failed: null };
           files.failed = files.failed || err.message;
           plan.caseFiles.set(key, files);
         } else {
@@ -342,13 +463,26 @@ class DesktopImporter {
         ctx.setSettings({ ...s, [item.key]: next });
         return {};
       }
-      case 'userProfile':
+      case 'userProfile': {
+        // Written only if the service's profile is still the default one
+        // (fix round 1, I4): re-checked here, not just at plan time, since
+        // the owner could have filled it in between plan() and apply().
+        if (stable(this.targets.userProfile.get()) !== stable(UserProfile.getDefaultProfile())) {
+          return { note: 'a profile was set on the service after the plan was made; not overwritten' };
+        }
         this.targets.userProfile.update(value && typeof value === 'object' ? value : {});
         return {};
+      }
       case 'permissionRule': {
         const [tool, pattern, action] = item.key.split('|');
         if (!value || value.tool !== tool || (value.pattern || '*') !== pattern || value.action !== action) throw new ImportError('BAD_VALUE', 'the rule does not match the plan');
-        ctx.addPermissionRule({ tool, pattern, action, source: 'desktop-import' });
+        // Through the scope (fix round 1, I3), so the desktop owns the
+        // imported rule (can later remove it itself) and the scope's own
+        // ownership check — never replace a rule the service already
+        // holds — applies to an imported rule exactly as it does to one
+        // added interactively. 'allow' rules are permitted; spec §8 does
+        // not exclude them, only hooks/MCP/channels.
+        this.scope.addPermissionRule({ tool, pattern, action, source: 'desktop-import' });
         return {};
       }
       case 'alwaysApprove':
@@ -361,7 +495,7 @@ class DesktopImporter {
         return {};
       }
       case 'chat':
-        return this.writeChat(item, value);
+        return this.writeChat(plan, item, value);
       case 'memory': {
         if (!value || value.id !== item.key) throw new ImportError('BAD_VALUE', 'the memory entry does not match the plan');
         const out = this.targets.memory.importEntry(value);
@@ -369,6 +503,10 @@ class DesktopImporter {
       }
       case 'cron': {
         if (!value || value.id !== item.key) throw new ImportError('BAD_VALUE', 'the cron job does not match the plan');
+        // Written only if the id is still absent (fix round 1, I4).
+        if (this.targets.cron.has(item.key)) {
+          return { note: 'a cron job with this id was added to the service after the plan was made; not overwritten' };
+        }
         await this.targets.cron.addJob({ ...value, enabled: false });
         return { note: 'imported disabled' };
       }
@@ -378,6 +516,10 @@ class DesktopImporter {
         this.requireCipher();
         this.requireSecretString(value);
         const tokens = { ...(ctx.getApiTokens() || {}) };
+        // Written only if still absent (fix round 1, I4).
+        if (tokens[item.key]) {
+          return { note: 'a token for this provider was added to the service after the plan was made; not overwritten' };
+        }
         tokens[item.key] = ctx.encryptToken(value);
         ctx.setApiTokens(tokens);
         return {};
@@ -389,6 +531,10 @@ class DesktopImporter {
         const s = ctx.getSettings();
         const section = item.category === 'searchKey' ? 'webSearch' : 'imageGeneration';
         const current = { ...(s[section] || {}) };
+        // Written only if still absent (fix round 1, I4).
+        if (current[item.key] && current[item.key].apiKey) {
+          return { note: 'a key for this provider was added to the service after the plan was made; not overwritten' };
+        }
         current[item.key] = { ...(current[item.key] || {}), apiKey: ctx.encryptToken(value) };
         ctx.setSettings({ ...s, [section]: current });
         return {};
@@ -396,6 +542,10 @@ class DesktopImporter {
       case 'vault': {
         this.requireCipher();
         this.requireSecretString(value);
+        // Written only if still absent (fix round 1, I4).
+        if (ctx.vault.has(item.key)) {
+          return { note: 'a secret with this name was added to the service after the plan was made; not overwritten' };
+        }
         ctx.vault.set(item.key, value);
         if (ctx.vault.get(item.key) !== value) throw new ImportError('VERIFY_FAILED', 'the secret did not read back as written');
         return {};
@@ -404,6 +554,11 @@ class DesktopImporter {
         this.requireCipher();
         if (!value || typeof value.accessToken !== 'string' || !value.accessToken) throw new ImportError('BAD_VALUE', 'the OAuth record is incomplete');
         const store = ctx.getStore();
+        // Written only if still absent (fix round 1, I4).
+        const stored = store.get('anthropicOAuth');
+        if (stored && stored.accessToken) {
+          return { note: 'an Anthropic OAuth connection was added to the service after the plan was made; not overwritten' };
+        }
         store.set('anthropicOAuth', {
           accessToken: ctx.encryptToken(value.accessToken),
           refreshToken: value.refreshToken ? ctx.encryptToken(value.refreshToken) : null,
@@ -418,8 +573,32 @@ class DesktopImporter {
     }
   }
 
-  async writeChat(item, value) {
+  async writeChat(plan, item, value) {
     if (!value || value.id !== item.key || !Array.isArray(value.messages)) throw new ImportError('BAD_VALUE', 'the chat does not match the plan');
+    const liveChats = this.context.getChats();
+    if (item.action === 'new') {
+      // Written only if the id is still absent (fix round 1, I4).
+      const collision = liveChats.find((c) => c.id === item.targetKey);
+      if (collision) {
+        return {
+          note: 'a chat with this id was added to the service after the plan was made; not overwritten',
+          record: { sourceUpdatedAt: value.updatedAt || null, targetKey: collision.id, targetUpdatedAt: collision.updatedAt || null }
+        };
+      }
+    } else if (item.action === 'update') {
+      // Updated only if the live target's updatedAt is still what the plan
+      // saw (fix round 1, I4): if the service's copy moved on since, this
+      // is a real conflict, not a routine race — surfaced as attention,
+      // never silently overwritten or silently dropped.
+      const target = liveChats.find((c) => c.id === item.targetKey);
+      const expected = plan.chatExpected.get(item.targetKey);
+      if (!target || target.updatedAt !== expected) {
+        return {
+          note: 'the chat changed on the service after the plan was made; import again to pick up the current version',
+          attention: true
+        };
+      }
+    }
     let note = null;
     let chat = { ...value };
     if (chat.workingDirectory) {
@@ -432,10 +611,9 @@ class DesktopImporter {
     chat = item.action === 'copy'
       ? { ...chat, id: item.targetKey, title: `${chat.title || 'Chat'}${COPY_SUFFIX}` }
       : { ...chat, id: item.targetKey };
-    const chats = this.context.getChats();
     const updated = item.action === 'update'
-      ? chats.map((c) => (c.id === item.targetKey ? chat : c))
-      : [chat, ...chats.filter((c) => c.id !== chat.id)];
+      ? liveChats.map((c) => (c.id === item.targetKey ? chat : c))
+      : [chat, ...liveChats.filter((c) => c.id !== chat.id)];
     this.context.setChats(updated);
     return {
       note,
@@ -463,7 +641,7 @@ class DesktopImporter {
   writeCaseFile(plan, item, value) {
     if (!value || typeof value.relPath !== 'string' || typeof value.b64 !== 'string') throw new ImportError('BAD_VALUE', 'a case file needs relPath and b64');
     const rel = safeRelPath(value.relPath);
-    if (isSkippedCaseFile(rel)) return { note: 'lock file skipped' };
+    if (isSkippedCaseFile(rel)) return { note: 'not imported: git internals are recreated by the service, not carried over' };
     const root = this.casesRoot();
     const caseDir = path.join(root, `.import-${plan.planId}`, item.key);
     const target = path.join(caseDir, ...rel.split('/'));
@@ -482,8 +660,13 @@ class DesktopImporter {
       fs.appendFileSync(target, data);
     }
     this.onPathWritten(target);
-    const files = plan.caseFiles.get(item.key) || { count: 0, failed: null };
-    files.count += 1;
+    // Counted once per file (only on the chunk that starts it), bytes summed
+    // across every chunk — so a file arriving in several offset chunks isn't
+    // over-counted, but finish()'s M8 short-case check still sees its true
+    // total size.
+    const files = plan.caseFiles.get(item.key) || { count: 0, bytes: 0, failed: null };
+    if (offset === 0) files.count += 1;
+    files.bytes += data.length;
     plan.caseFiles.set(item.key, files);
     return {};
   }
@@ -510,12 +693,41 @@ class DesktopImporter {
         if (fs.existsSync(dest)) throw new ImportError('CASE_EXISTS', 'a case with this directory appeared on the service during the import');
         fs.renameSync(path.join(staging, dir), dest);
         this.reportTree(dest);
-        plan.results.set(k, { ok: true, record: { targetKey: dir } });
+        // The case's own git config is never imported (isSkippedCaseFile
+        // blocks .git/config) — recreate it fresh with initRepo's safe
+        // settings (fix round 1, C1) rather than leave the landed repo
+        // running on whatever default git would pick up.
+        await initRepo(dest);
+        // A short delivery — fewer files or fewer bytes than the inventory
+        // promised — is surfaced as attention, not silently reported ok
+        // (fix round 1, M8): the batch may have been cut short by a
+        // connection drop the caller didn't otherwise notice.
+        const expected = plan.caseExpected.get(dir);
+        const short = Boolean(expected) && (
+          (expected.files !== null && files.count !== expected.files)
+          || (expected.bytes !== null && files.bytes !== expected.bytes)
+        );
+        plan.results.set(k, {
+          ok: true,
+          attention: short,
+          note: short
+            ? `received ${files.count} file(s)/${files.bytes} byte(s); the inventory listed ${expected.files ?? '?'} file(s)/${expected.bytes ?? '?'} byte(s) — the case may be incomplete`
+            : null,
+          record: { targetKey: dir }
+        });
       } catch (err) {
         plan.results.set(k, { ok: false, error: err.message });
       }
     }
-    fs.rmSync(staging, { recursive: true, force: true });
+    // Best-effort: a removal failure (e.g. a file still briefly open on
+    // Windows) is logged, not thrown — finish() has already recorded every
+    // case's outcome above, and cleanupOrphanedStaging() sweeps anything
+    // left behind here the next time this importer is constructed (M9).
+    try {
+      fs.rmSync(staging, { recursive: true, force: true });
+    } catch (err) {
+      log.warn('could not remove the import staging directory', { staging, error: err.message });
+    }
 
     const items = [...plan.items.values()];
     const failures = [];

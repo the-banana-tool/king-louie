@@ -21,10 +21,20 @@ class GitUnavailableError extends Error {
 // not disable hooks (git then looks at the filesystem root), so hooks point
 // at an empty directory the case owns. It stays empty and untracked: git
 // does not track empty directories, and the write guard covers .kl/.
+//
+// core.fsmonitor=false and core.hooksPath are passed as -c flags on every
+// invocation, never left to whatever is in the repo's own .git/config: an
+// imported case (fleet stage 7 §3.8/C1) could otherwise carry a config that
+// sets core.fsmonitor (runs an arbitrary program on every `git status`) or
+// core.hooksPath (points hooks somewhere the import didn't block) as the
+// service account. The importer also never writes .git/config or
+// .git/hooks/** for exactly this reason (src/migration/desktop-import.js),
+// but this flag is defence in depth: it holds even for a case whose .git
+// directory was created some other way.
 function caseGitConfig(cwd) {
   const hooksDir = path.resolve(cwd, '.kl', 'no-hooks');
   if (fs.existsSync(cwd)) fs.mkdirSync(hooksDir, { recursive: true });
-  return ['-c', 'commit.gpgsign=false', '-c', `core.hooksPath=${hooksDir}`];
+  return ['-c', 'commit.gpgsign=false', '-c', `core.hooksPath=${hooksDir}`, '-c', 'core.fsmonitor=false'];
 }
 
 async function git(cwd, args) {
