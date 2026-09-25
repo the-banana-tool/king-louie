@@ -166,10 +166,13 @@ function createPowerShellDpapi({ powershellExe = windowsPowerShellExe() } = {}) 
 function verifyKeyCheck({ dataDir, key, source, onPath = () => {}, create = true }) {
   const file = path.join(dataDir, KEY_CHECK_FILE);
   const cipher = createAesGcmCipher(key);
-  if (!create && !fs.existsSync(file)) {
-    throw new Error(`${file} does not exist; start the service once first so it sets up its data dir`);
-  }
+  // One existence check, with the refusal nested under it: two separate
+  // checks let a file removed between them reach the create branch even
+  // with create: false.
   if (!fs.existsSync(file)) {
+    if (!create) {
+      throw new Error(`${file} does not exist; start the service once first so it sets up its data dir`);
+    }
     try {
       writePrivateFileExclusive(file, cipher.encryptString(KEY_CHECK_PLAINTEXT));
       onPath(file);
