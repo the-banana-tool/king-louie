@@ -62,11 +62,29 @@ function readJson(file) {
   }
 }
 
+function isPlainObject(v) {
+  return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+
+// `{ inbox, key } | null` — anything else (an array, a string, extra keys, a
+// non-string inbox/key) is refused outright: it is never coerced, and it is
+// never passed on to _reply/_writeTo, which is what let an array reply_to.inbox
+// reach path.join and throw.
+function isValidReplyTo(v) {
+  return v === null || (isPlainObject(v) && Object.keys(v).length === 2 && typeof v.inbox === 'string' && typeof v.key === 'string');
+}
+
 // Reads a courier drop that has already been matched against its exact
 // filename pattern. Refuses anything that isn't a regular, non-symlink file
-// under the size cap, and never reads past that cap. Returns null for
-// anything else (vanished, symlink, directory, oversized, unreadable,
-// unparseable) so a hostile or malformed drop is dropped, never thrown.
+// no larger than MAX_FILE_BYTES — a directory that happens to have a name
+// shaped like an outbox/inbox file is silently ignored by the same lstat,
+// with no extra stat call or logging just for that case. The read itself is
+// capped at MAX_FILE_BYTES + 1 bytes so a file that grows between the lstat
+// and the read (TOCTOU) is still caught: reading that many bytes back means
+// the file is at least that large, so it is refused rather than trusted.
+// Returns null for anything else (vanished, symlink, directory, oversized,
+// unreadable, unparseable) so a hostile or malformed drop is dropped, never
+// thrown.
 function readCourierFile(file) {
   let lst;
   try {
@@ -78,12 +96,29 @@ function readCourierFile(file) {
   let fd;
   try {
     fd = fs.openSync(file, fs.constants.O_RDONLY | O_NOFOLLOW);
-    return JSON.parse(fs.readFileSync(fd, 'utf8'));
+    const cap = MAX_FILE_BYTES + 1;
+    const buf = Buffer.allocUnsafe(cap);
+    const read = fs.readSync(fd, buf, 0, cap, 0);
+    if (read > MAX_FILE_BYTES) return null;
+    return JSON.parse(buf.toString('utf8', 0, read));
   } catch {
     return null;
   } finally {
     if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* already closed above */ } }
   }
+}
+
+// The relay-bound params rebuilt from scratch for each forwarded method, so
+// an outbox entry can never smuggle extra keys through to the relay call.
+function forwardParams(method, params) {
+  if (method === 'message.submit') {
+    return {
+      envelope: params.envelope,
+      push: Object.prototype.hasOwnProperty.call(params, 'push') ? params.push : null,
+      to_device: Object.prototype.hasOwnProperty.call(params, 'to_device') ? params.to_device : null
+    };
+  }
+  return { envelope: params.envelope };
 }
 
 class CourierError extends Error {
@@ -169,7 +204,13 @@ class FileCourier extends EventEmitter {
       }, timeoutMs);
       if (typeof timer.unref === 'function') timer.unref();
       this.waiting.set(key, { resolve, reject, timer });
-      this._post(method, params, { inbox: this.inboxName, key });
+      try {
+        this._post(method, params, { inbox: this.inboxName, key });
+      } catch (err) {
+        this.waiting.delete(key);
+        clearTimeout(timer);
+        reject(err);
+      }
     });
   }
 
@@ -212,8 +253,7 @@ class FileCourier extends EventEmitter {
       const body = readCourierFile(file);
       try { fs.unlinkSync(file); } catch { /* gone */ }
       if (replyMatch) {
-        const key = replyMatch[1];
-        if (!KEY_RE.test(key)) continue; // defensive: the capture group already matches this, but never trust it further than that
+        const key = replyMatch[1]; // already exactly 16 hex chars: REPLY_FILE_RE's capture group guarantees it
         const waiter = this.waiting.get(key);
         if (!waiter) {
           log.warn(`dropping a reply nobody asked for: ${name}`);
@@ -288,13 +328,23 @@ class CourierPump {
   _writeTo(inboxName, fileName, body) {
     if (!INBOX_DIR_RE.test(inboxName)) return false;
     const dir = path.join(this.inboxRoot, inboxName);
-    if (!fs.existsSync(dir)) return false;
+    let lst;
+    try {
+      lst = fs.lstatSync(dir);
+    } catch {
+      return false;
+    }
+    // Must be a real directory: refuse a symlink or junction standing in for it.
+    if (!lst.isDirectory() || lst.isSymbolicLink()) return false;
     writeFileAtomic(path.join(dir, fileName), `${JSON.stringify(body)}\n`);
     return true;
   }
 
+  // `replyTo` reaches here only as null or already shape-validated by
+  // _handle (isValidReplyTo: exactly { inbox: string, key: string }), so
+  // there is nothing left to coerce — only the format is checked.
   _reply(replyTo, body) {
-    if (!replyTo || !INBOX_DIR_RE.test(String(replyTo.inbox)) || !KEY_RE.test(String(replyTo.key))) return;
+    if (!replyTo || !INBOX_DIR_RE.test(replyTo.inbox) || !KEY_RE.test(replyTo.key)) return;
     this._writeTo(replyTo.inbox, `${replyTo.key}.json`, body);
   }
 
@@ -320,8 +370,29 @@ class CourierPump {
     return this._writeTo(inboxName, `m-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.json`, { method, params });
   }
 
+  // entry is whatever readCourierFile handed back for an outbox file: it may
+  // be null (non-JSON, oversized, a symlink) or any JSON value at all, so
+  // its shape is never trusted past this point. Anything that isn't exactly
+  // { method: string, params: object, reply_to: null | { inbox: string, key: string } }
+  // is dropped and logged, never dispatched to relayClient/rpcHandler and
+  // never used to build a path.
   async _handle(entry) {
-    const { method, params = {}, reply_to: replyTo = null } = entry || {};
+    if (!isPlainObject(entry)) {
+      log.warn('dropping a malformed outbox entry: not an object');
+      return;
+    }
+    const { method, params, reply_to: replyTo } = entry;
+    if (!isValidReplyTo(replyTo)) {
+      // reply_to itself can't be trusted enough to answer through — an
+      // array here, for instance, must never reach _reply/_writeTo/path.join.
+      log.warn('dropping a malformed outbox entry: malformed reply_to');
+      return;
+    }
+    if (typeof method !== 'string' || !isPlainObject(params)) {
+      log.warn(`dropping a malformed outbox entry (method=${JSON.stringify(method)}): params must be an object`);
+      this._reply(replyTo, { error: { code: 'malformed', message: 'malformed outbox entry' } });
+      return;
+    }
     if (Object.prototype.hasOwnProperty.call(SIGNED_METHODS, method)) {
       const message = this._nodeSigned(params.envelope, SIGNED_METHODS[method]);
       if (!message) {
@@ -329,6 +400,7 @@ class CourierPump {
         this._reply(replyTo, { error: { code: 'rejected', message: 'not signed by this node' } });
         return;
       }
+      const inbox = replyTo && INBOX_DIR_RE.test(replyTo.inbox) ? replyTo.inbox : null;
       if (method === 'enroll.done') {
         const code = this.codes.get(message.code_id);
         if (!code || this.now() > code.expiresAt) {
@@ -337,11 +409,29 @@ class CourierPump {
           return;
         }
       }
-      const inbox = replyTo && INBOX_DIR_RE.test(String(replyTo.inbox)) ? replyTo.inbox : null;
-      if (method === 'approval.submit' && inbox) this.routes.set(message.request_id, { inbox, expiresAt: Date.parse(message.expires_at) });
-      if (method === 'enroll.open' && inbox) this.codes.set(message.code_id, { inbox, expiresAt: Date.parse(message.expires_at) });
+      // First binding wins: an id already bound — to this inbox or any
+      // other — is never rebound, and is never forwarded a second time.
+      if (method === 'approval.submit') {
+        if (this.routes.has(message.request_id)) {
+          log.warn(`dropping a duplicate approval.submit for ${message.request_id}`);
+          this._reply(replyTo, { error: { code: 'rejected', message: 'request_id already bound' } });
+          return;
+        }
+        if (inbox) this.routes.set(message.request_id, { inbox, expiresAt: Date.parse(message.expires_at) });
+      }
+      if (method === 'enroll.open') {
+        if (this.codes.has(message.code_id)) {
+          log.warn(`dropping a duplicate enroll.open for ${message.code_id}`);
+          this._reply(replyTo, { error: { code: 'rejected', message: 'code_id already bound' } });
+          return;
+        }
+        // Recorded even without a producer to reply to (inbox: null), so a
+        // later enroll.done still finds it; routeFor('enroll.claim', …) then
+        // simply has no inbox to deliver the claim to.
+        this.codes.set(message.code_id, { inbox, expiresAt: Date.parse(message.expires_at) });
+      }
       try {
-        this._reply(replyTo, { result: await this.relayClient.call(method, params) });
+        this._reply(replyTo, { result: await this.relayClient.call(method, forwardParams(method, params)) });
       } catch (err) {
         this._reply(replyTo, { error: { code: err.code || 'error', message: err.message } });
       }
@@ -395,7 +485,14 @@ class CourierPump {
         // Removed whether it parsed or not, signed or not: a bad file must
         // never be retried, or it could loop the pump forever.
         try { fs.unlinkSync(file); } catch { continue; }
-        await this._handle(entry);
+        try {
+          await this._handle(entry);
+        } catch (err) {
+          // One bad entry must never skip the rest of the batch or the
+          // sweep below — _handle already guards against the shapes it
+          // knows about, but this is the backstop for anything it doesn't.
+          log.warn(`outbox entry ${name} failed: ${err.message}`);
+        }
       }
       this._sweep();
     } finally {

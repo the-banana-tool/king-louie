@@ -118,3 +118,122 @@ describe('FileCourier and CourierPump', () => {
     assert.equal(fs.existsSync(courier.inbox), true);
   });
 });
+
+// Fix round 1 (opus review): a malformed or hostile outbox/inbox entry must
+// never be dispatched, never throw out of pollOnce (which would skip the
+// rest of the batch and the sweep behind it), and must never reach
+// path.join with something other than a string.
+describe('FileCourier and CourierPump (fix round 1)', () => {
+  it('_handle drops a null/non-object entry without throwing or dispatching', async () => {
+    const { pump, relayClient } = pair({ rpcHandler: async () => { throw new Error('must not be called'); } });
+    for (const entry of [null, 'just a string', 42, ['array']]) {
+      await pump._handle(entry);
+    }
+    assert.deepEqual(relayClient.calls, []);
+  });
+
+  it('_handle drops params: null (the exact shape that used to throw out of pollOnce) without throwing', async () => {
+    const { pump, relayClient } = pair();
+    await pump._handle({ method: 'approval.submit', params: null, reply_to: null });
+    assert.deepEqual(relayClient.calls, []);
+  });
+
+  it('_handle drops a non-string method without dispatching to rpcHandler', async () => {
+    const { pump } = pair({ rpcHandler: async () => { throw new Error('must not be called'); } });
+    await pump._handle({ method: 123, params: {}, reply_to: null });
+    await pump._handle({ method: undefined, params: {}, reply_to: null });
+  });
+
+  it('_handle drops reply_to given as an array instead of throwing in path.join', async () => {
+    const { pump, relayClient } = pair();
+    await pump._handle({ method: 'approval.submit', params: {}, reply_to: ['p-1-deadbeef', 'aaaaaaaaaaaaaaaa'] });
+    assert.deepEqual(relayClient.calls, []);
+  });
+
+  it('_handle drops a reply_to with extra keys or non-string fields', async () => {
+    const { pump } = pair();
+    await pump._handle({ method: 'jobs.get', params: {}, reply_to: { inbox: 'p-1-deadbeef', key: 'aaaaaaaaaaaaaaaa', extra: 1 } });
+    await pump._handle({ method: 'jobs.get', params: {}, reply_to: { inbox: 123, key: 'aaaaaaaaaaaaaaaa' } });
+  });
+
+  it('a malformed outbox file never stalls the pump: the rest of the batch and the sweep still run', async () => {
+    const { pump, courier } = pair({ rpcHandler: async (method, params) => ({ handled: method, params }) });
+    fs.writeFileSync(path.join(pump.outbox, '0-deadbeef.json'), JSON.stringify({ method: 'approval.submit', params: null, reply_to: null }));
+    assert.deepEqual(await courier.call('jobs.get', { job_id: 'job-1' }), { handled: 'jobs.get', params: { job_id: 'job-1' } });
+  });
+
+  it('drops an oversized outbox file without reading or forwarding it', async () => {
+    const { pump, relayClient } = pair();
+    const big = JSON.stringify({ method: 'approval.submit', params: { pad: 'x'.repeat(2 * 1024 * 1024) }, reply_to: null });
+    const file = path.join(pump.outbox, '0-deadbeef.json');
+    fs.writeFileSync(file, big);
+    await pump.pollOnce();
+    assert.equal(fs.existsSync(file), false);
+    assert.deepEqual(relayClient.calls, []);
+  });
+
+  it('drops a non-JSON outbox file without crashing the pump', async () => {
+    const { pump, courier } = pair({ rpcHandler: async (method) => ({ handled: method }) });
+    const file = path.join(pump.outbox, '0-deadbeef.json');
+    fs.writeFileSync(file, 'not json at all {{{');
+    await pump.pollOnce();
+    assert.equal(fs.existsSync(file), false);
+    assert.deepEqual(await courier.call('jobs.get', {}), { handled: 'jobs.get' });
+  });
+
+  it('leaves outbox and inbox files with names that do not match the pattern untouched', async () => {
+    const { pump, courier } = pair();
+    const outboxStray = path.join(pump.outbox, 'not-a-real-name.json');
+    const inboxStray = path.join(courier.inbox, 'not-a-real-name.json');
+    fs.writeFileSync(outboxStray, '{}');
+    fs.writeFileSync(inboxStray, '{}');
+    await tick(80);
+    assert.equal(fs.existsSync(outboxStray), true);
+    assert.equal(fs.existsSync(inboxStray), true);
+  });
+
+  it('first binding wins: a duplicate approval.submit for the same request_id is refused, not re-forwarded', async () => {
+    const { courier, relayClient, identity } = pair();
+    const { envelope } = m.buildRequest({ identity, action: m.toolAction('Bash', { command: 'ls' }, null) });
+    assert.deepEqual(await courier.submit(envelope), { ok: true });
+    await assert.rejects(courier.submit(envelope), (err) => err.code === 'rejected');
+    assert.deepEqual(relayClient.calls, [['approval.submit', { envelope }]]);
+  });
+
+  it('rebuilds the forwarded params instead of passing the outbox entry through verbatim', async () => {
+    const { courier, relayClient, identity } = pair();
+    const { envelope } = m.buildRequest({ identity, action: m.toolAction('Bash', { command: 'ls' }, null) });
+    // A hostile-shaped params blob with an injected key alongside the envelope.
+    fs.writeFileSync(path.join(courier.outbox, `${Date.now()}-deadbeef.json`), JSON.stringify({
+      method: 'approval.submit',
+      params: { envelope, injected: 'evil' },
+      reply_to: null
+    }));
+    await tick(80);
+    assert.deepEqual(relayClient.calls, [['approval.submit', { envelope }]]);
+  });
+
+  it('refuses a symlinked outbox file', { skip: process.platform === 'win32' ? 'symlinks need elevated privileges on Windows' : false }, async () => {
+    const { pump, relayClient } = pair();
+    const target = path.join(pump.outbox, 'target.json');
+    fs.writeFileSync(target, JSON.stringify({ method: 'jobs.get', params: {}, reply_to: null }));
+    const link = path.join(pump.outbox, '0-deadbeef.json');
+    fs.symlinkSync(target, link, 'file');
+    await pump.pollOnce();
+    assert.equal(fs.existsSync(link), false);
+    assert.equal(fs.existsSync(target), true); // the symlink is removed, never its target
+    assert.deepEqual(relayClient.calls, []);
+  });
+
+  it('refuses a symlinked inbox reply file', { skip: process.platform === 'win32' ? 'symlinks need elevated privileges on Windows' : false }, async () => {
+    const { courier } = pair();
+    const target = path.join(courier.inbox, 'target.json');
+    fs.writeFileSync(target, JSON.stringify({ result: { ok: true } }));
+    const key = 'b'.repeat(16);
+    const link = path.join(courier.inbox, `${key}.json`);
+    fs.symlinkSync(target, link, 'file');
+    await tick(80);
+    assert.equal(fs.existsSync(link), false);
+    assert.equal(fs.existsSync(target), true);
+  });
+});
