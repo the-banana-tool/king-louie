@@ -39,6 +39,13 @@ function request(label = 'web-01 desk') {
   return pairing.encodePairRequest({ publicKeyRaw: keys.rawFromPublicKeyObject(publicKey), label });
 }
 
+// A flat directory's contents as a comparable value: names and bytes, not
+// timestamps. Used to prove a refused pairing left dataDir/configDir
+// byte-identical (fix round 2, I1b).
+function snapshotDir(dir) {
+  return fs.readdirSync(dir).sort().map((name) => [name, fs.readFileSync(path.join(dir, name))]);
+}
+
 const deps = (l, extra = {}) => ({
   isAdmin: () => true,
   configDir: l.configDir,
@@ -124,21 +131,26 @@ describe('desktop pair', () => {
     assert.strictEqual(JSON.parse(fs.readFileSync(path.join(l.configDir, 'desktop-bridge.json'), 'utf8')).nodeId, created.nodeId);
   });
 
-  it('creates a missing config dir with mode 0o755', { skip: process.platform === 'win32' ? 'POSIX modes only' : false }, async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-desktop-cli-'));
-    dirs.push(root);
-    const dataDir = path.join(root, 'data');
-    const configDir = path.join(root, 'config'); // deliberately not created
-    fs.mkdirSync(dataDir, { mode: 0o700 });
-    const identity = new NodeIdentity({ nodeName: 'gpu-box' });
-    fs.writeFileSync(path.join(dataDir, 'chat-data.json'), JSON.stringify({ mesh: { identity: { publicKey: identity.publicKey.toString('hex') } } }));
-    const c = capture();
-    const code = await runDesktopCommand({
-      sub: 'pair', arg: request(), dataDir, io: c.io,
-      deps: deps({ configDir }, {})
-    });
-    assert.strictEqual(code, 0, c.out.stderr);
-    assert.strictEqual(fs.statSync(configDir).mode & 0o777, 0o755);
+  it('creates a missing config dir with mode 0o755, regardless of umask', { skip: process.platform === 'win32' ? 'POSIX modes only' : false }, async () => {
+    const originalUmask = process.umask(0o077);
+    try {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-desktop-cli-'));
+      dirs.push(root);
+      const dataDir = path.join(root, 'data');
+      const configDir = path.join(root, 'config'); // deliberately not created
+      fs.mkdirSync(dataDir, { mode: 0o700 });
+      const identity = new NodeIdentity({ nodeName: 'gpu-box' });
+      fs.writeFileSync(path.join(dataDir, 'chat-data.json'), JSON.stringify({ mesh: { identity: { publicKey: identity.publicKey.toString('hex') } } }));
+      const c = capture();
+      const code = await runDesktopCommand({
+        sub: 'pair', arg: request(), dataDir, io: c.io,
+        deps: deps({ configDir }, {})
+      });
+      assert.strictEqual(code, 0, c.out.stderr);
+      assert.strictEqual(fs.statSync(configDir).mode & 0o777, 0o755);
+    } finally {
+      process.umask(originalUmask);
+    }
   });
 });
 
@@ -157,15 +169,21 @@ describe('desktop pair confirmation (fix round 1, I1)', () => {
     assert.ok(!fs.existsSync(path.join(l.configDir, 'desktop-bridge.json')), 'nothing was written');
   });
 
-  it('refuses without --yes when stdin is not a TTY, writing nothing', async () => {
+  it('refuses without --yes when stdin is not a TTY, before printing or reading anything (fix round 2, I1b)', async () => {
     const l = layout({ serviceJson: { profile: 'agent' } });
     const c = capture();
     const code = await runDesktopCommand({
       sub: 'pair', arg: request(), dataDir: l.dataDir, io: c.io,
-      deps: deps(l, { isTTY: () => false, confirm: async () => { throw new Error('must not prompt without a TTY'); } })
+      deps: deps(l, {
+        isTTY: () => false,
+        confirm: async () => { throw new Error('must not prompt without a TTY'); },
+        withServiceCore: () => { throw new Error('must not resolve/create an identity before the TTY gate'); }
+      })
     });
     assert.strictEqual(code, 2);
-    assert.ok(c.out.stdout.includes(PAIR_WARNING), 'the info is printed before the refusal');
+    // I1b: the TTY/--yes gate runs before anything else, so nothing is
+    // printed yet either (not even the label/fingerprint/PAIR_WARNING block).
+    assert.strictEqual(c.out.stdout, '');
     assert.match(c.out.stderr, /--yes/);
     assert.ok(!fs.existsSync(path.join(l.configDir, 'desktop-devices.json')), 'nothing was written');
   });
@@ -195,10 +213,93 @@ describe('desktop pair confirmation (fix round 1, I1)', () => {
     assert.match(asked, /Trust this device\? \[y\/N\]/);
     assert.ok(fs.existsSync(path.join(l.configDir, 'desktop-devices.json')));
     assert.ok(c.out.stdout.includes(`desktop unpair ${deviceId}`));
+    // the identity already existed, so its fingerprint is shown before the
+    // prompt, not with the first-pair "compare this on your desktop" phrasing.
+    assert.ok(!c.out.stdout.includes('compare this on your desktop'));
+  });
+
+  it('treats EOF at the prompt as a decline (fix round 2, minor)', async () => {
+    const l = layout({ serviceJson: { profile: 'agent' } });
+    const out = { stdout: '', stderr: '' };
+    const { Readable } = require('stream');
+    const stdin = new Readable({ read() { this.push(null); } }); // EOF, no answer
+    const io = {
+      stdin,
+      stdout: { write: (s) => { out.stdout += s; } },
+      stderr: { write: (s) => { out.stderr += s; } },
+      ownership: { getuid: () => 1000 }
+    };
+    const code = await runDesktopCommand({
+      sub: 'pair', arg: request(), dataDir: l.dataDir, io,
+      deps: deps(l, { isTTY: () => true, confirm: undefined }) // exercise the real readline-based confirm
+    });
+    assert.strictEqual(code, 1);
+    assert.strictEqual(out.stderr, 'Not pairing without confirmation.\n');
+    assert.ok(!fs.existsSync(path.join(l.configDir, 'desktop-devices.json')), 'nothing was written');
   });
 });
 
-describe('applyWindowsAcls (fix round 1, minor)', () => {
+describe('desktop pair confirmation with no existing identity (fix round 2, I1b)', () => {
+  it('a non-TTY run without --yes leaves the data dir and configDir byte-identical', async () => {
+    const l = layout({ serviceJson: { profile: 'agent' }, identity: null });
+    const beforeData = snapshotDir(l.dataDir);
+    const beforeConfig = snapshotDir(l.configDir);
+    const c = capture();
+    const code = await runDesktopCommand({
+      sub: 'pair', arg: request(), dataDir: l.dataDir, io: c.io,
+      deps: deps(l, {
+        isTTY: () => false,
+        confirm: async () => { throw new Error('must not prompt without a TTY'); },
+        withServiceCore: () => { throw new Error('must not create an identity before confirmation'); }
+      })
+    });
+    assert.strictEqual(code, 2);
+    assert.strictEqual(c.out.stdout, '');
+    assert.deepStrictEqual(snapshotDir(l.dataDir), beforeData, 'data dir unchanged');
+    assert.deepStrictEqual(snapshotDir(l.configDir), beforeConfig, 'configDir unchanged');
+  });
+
+  it('an interactive decline leaves the data dir and configDir byte-identical', async () => {
+    const l = layout({ serviceJson: { profile: 'agent' }, identity: null });
+    const beforeData = snapshotDir(l.dataDir);
+    const beforeConfig = snapshotDir(l.configDir);
+    const c = capture();
+    const code = await runDesktopCommand({
+      sub: 'pair', arg: request(), dataDir: l.dataDir, io: c.io,
+      deps: deps(l, {
+        isTTY: () => true,
+        confirm: async () => false,
+        withServiceCore: () => { throw new Error('must not create an identity before confirmation'); }
+      })
+    });
+    assert.strictEqual(code, 1);
+    // The label/fingerprint + PAIR_WARNING are printed (no identity exists
+    // yet, so no "Service:" line is printed pre-confirmation).
+    assert.ok(c.out.stdout.includes(PAIR_WARNING));
+    assert.ok(!c.out.stdout.includes('Service:'));
+    assert.deepStrictEqual(snapshotDir(l.dataDir), beforeData, 'data dir unchanged');
+    assert.deepStrictEqual(snapshotDir(l.configDir), beforeConfig, 'configDir unchanged');
+  });
+
+  it('prints the service fingerprint with "compare this on your desktop" only after creating a first identity', async () => {
+    const l = layout({ serviceJson: { profile: 'agent' }, identity: null });
+    const created = new NodeIdentity({ nodeName: 'gpu-box' });
+    let calls = 0;
+    const c = capture();
+    const code = await runDesktopCommand({
+      sub: 'pair', arg: request(), dataDir: l.dataDir, io: c.io,
+      deps: deps(l, {
+        withServiceCore: (_dir, _io, fn) => { calls += 1; return fn({ context: { getStore: () => null } }, { cipher: null }); },
+        createIdentity: () => created
+      })
+    });
+    assert.strictEqual(code, 0, c.out.stderr);
+    assert.strictEqual(calls, 1);
+    assert.ok(c.out.stdout.includes('compare this on your desktop'));
+  });
+});
+
+describe('applyWindowsAcls (fix round 1/2, minor)', () => {
   it('grants the bridge-file ACL, sets its owner to Administrators, and checks configDir ownership', () => {
     const calls = [];
     const execFile = (exe, args) => {
@@ -214,6 +315,14 @@ describe('applyWindowsAcls (fix round 1, minor)', () => {
     assert.ok(icaclsCalls.some((c) => c.args[0] === 'C:\\kl\\config\\desktop-bridge.json' && c.args.includes('/inheritance:r') && c.args.includes('*S-1-5-18:F')));
     assert.ok(icaclsCalls.some((c) => c.args[0] === 'C:\\kl\\config\\desktop-bridge.json' && c.args.includes('/setowner') && c.args.includes('*S-1-5-32-544')), 'sets owner to Administrators');
     assert.ok(icaclsCalls.some((c) => c.args[0] === 'C:\\kl\\config' && c.args.includes('/grant')), 'grants read on configDir');
+  });
+
+  it('also writes the configDir ownership warning to io.stderr, not only the logger (fix round 2, minor)', () => {
+    const execFile = (exe) => (/powershell\.exe$/i.test(exe) ? 'me S-1-5-21-1-2-3-1001\nS-1-5-21-1-2-3-1001 plain\n' : '');
+    let stderrText = '';
+    const io = { stderr: { write: (s) => { stderrText += s; } } };
+    applyWindowsAcls({ bridgeFile: 'C:\\kl\\config\\desktop-bridge.json', configDir: 'C:\\kl\\config', execFile, env: process.env, io });
+    assert.match(stderrText, /C:\\kl\\config is not owned by SYSTEM or Administrators/);
   });
 });
 
@@ -286,6 +395,15 @@ describe('CLI dispatch', () => {
     const c2 = capture();
     assert.strictEqual(await main(['import'], { stdin: process.stdin, ...c2.io }), 2);
     assert.match(c2.out.stderr, /import --from/);
+  });
+
+  it('rejects --yes on any command other than desktop pair (fix round 2, minor)', async () => {
+    const c = capture();
+    assert.strictEqual(await main(['status', '--yes'], { stdin: process.stdin, ...c.io }), 2);
+    assert.match(c.out.stderr, /--yes.*only valid for "desktop pair"/);
+    const c2 = capture();
+    assert.strictEqual(await main(['desktop', 'list', '--yes'], { stdin: process.stdin, ...c2.io }), 2);
+    assert.match(c2.out.stderr, /--yes.*only valid for "desktop pair"/);
   });
 });
 

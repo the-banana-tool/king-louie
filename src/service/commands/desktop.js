@@ -35,8 +35,10 @@ function grantDirectoryReadControl(dir, { execFile = execFileSync, env = process
 
 // Best-effort only (fix round 1): the bridge-file trust check at connection
 // time is what actually enforces this; a failure here just means the owner
-// doesn't get the early warning.
-function warnIfConfigDirNotAdminOwned(configDir, { execFile, env }) {
+// doesn't get the early warning. Goes to both the logger and io.stderr (fix
+// round 2, minor): a CLI operator watching the command's own output should
+// see it too, not only whoever reads the service log.
+function warnIfConfigDirNotAdminOwned(configDir, { execFile, env, io }) {
   let report;
   try {
     report = inspectWindowsOwners([configDir], { execFile, env });
@@ -45,18 +47,20 @@ function warnIfConfigDirNotAdminOwned(configDir, { execFile, env }) {
   }
   const owner = report && Array.isArray(report.entries) && report.entries[0] ? report.entries[0].owner : null;
   if (!owner || !ADMIN_OWNER_SIDS.includes(owner)) {
-    log.warn(`${configDir} is not owned by SYSTEM or Administrators (owner: ${owner || 'unknown'}); the desktop bridge trust check may refuse it.`);
+    const message = `${configDir} is not owned by SYSTEM or Administrators (owner: ${owner || 'unknown'}); the desktop bridge trust check may refuse it.`;
+    log.warn(message);
+    if (io && io.stderr) io.stderr.write(`${message}\n`);
   }
 }
 
-function applyWindowsAcls({ bridgeFile, configDir, execFile = execFileSync, env = process.env }) {
+function applyWindowsAcls({ bridgeFile, configDir, io, execFile = execFileSync, env = process.env }) {
   execFile(icaclsExe(env), [bridgeFile, '/inheritance:r', '/grant:r', '*S-1-5-18:F', '*S-1-5-32-544:F', '*S-1-5-19:R', '*S-1-5-11:R'], { windowsHide: true, stdio: 'pipe' });
   // Ownership becomes Administrators, not whichever admin happened to run
   // `desktop pair` (fix round 1, minor): ownership decides who can re-ACL
   // the file later, and that should never be one admin's personal account.
   execFile(icaclsExe(env), [bridgeFile, '/setowner', '*S-1-5-32-544'], { windowsHide: true, stdio: 'pipe' });
   grantDirectoryReadControl(configDir, { execFile, env });
-  warnIfConfigDirNotAdminOwned(configDir, { execFile, env });
+  warnIfConfigDirNotAdminOwned(configDir, { execFile, env, io });
 }
 
 function readJsonIfExists(file) {
@@ -97,17 +101,27 @@ function defaultCreateIdentity(core, ports, nodeName) {
   return getOrGenerateNodeIdentity(core.context.getStore(), ports.cipher, nodeName);
 }
 
-// The node identity, read-only from <dataDir>/chat-data.json; created only
-// when the service is stopped (a running service would overwrite the store).
-async function resolveNodePublicKey({ dataDir, io, deps }) {
+// Read-only lookup of the node identity from <dataDir>/chat-data.json. Never
+// creates one (fix round 2, I1b): resolving/creating the identity is a write
+// (it may run withServiceCore, which persists a freshly generated identity),
+// and it must never happen before the owner has confirmed pairing.
+function readExistingNodePublicKey(dataDir) {
   const file = path.join(dataDir, 'chat-data.json');
   try {
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
     const hex = data && data.mesh && data.mesh.identity && data.mesh.identity.publicKey;
     if (hex) return { ok: true, publicKey: hex };
+    return { ok: false };
   } catch (err) {
-    if (err.code !== 'ENOENT') return { ok: false, error: `Cannot read ${file}: ${err.message}` };
+    if (err.code === 'ENOENT') return { ok: false };
+    return { ok: false, error: `Cannot read ${file}: ${err.message}` };
   }
+}
+
+// Creates the node identity when none exists yet. Only called after the
+// owner has confirmed pairing (fix round 2, I1b): a running service would
+// overwrite the store, so this refuses rather than racing it.
+async function createNodeIdentity({ dataDir, io, deps }) {
   if (deps.runningServicePid(dataDir)) return { ok: false, error: 'No node identity yet. Stop the service once and rerun this command.' };
   const nodeName = deps.nodeName ? deps.nodeName() : defaultNodeName(dataDir);
   const create = deps.createIdentity ? (() => deps.createIdentity()) : null;
@@ -119,6 +133,9 @@ function defaultIsTTY(io) {
   return Boolean(io && io.stdin && io.stdin.isTTY);
 }
 
+// EOF at the prompt (stdin closed before an answer) counts as a decline
+// (fix round 2, minor): 'close' fires whether or not 'line' ever did, so a
+// resolve() already delivered by the question callback is a no-op here.
 function defaultConfirm(io, question) {
   return new Promise((resolve) => {
     const rl = readline.createInterface({ input: io.stdin, output: io.stdout });
@@ -126,14 +143,17 @@ function defaultConfirm(io, question) {
       rl.close();
       resolve(/^y(es)?$/i.test(String(answer).trim()));
     });
+    rl.on('close', () => resolve(false));
   });
 }
 
-// I1 (fix round 1): a pasted pairing request is never trusted before the
-// owner sees the fingerprint. `--yes` skips the prompt outright; otherwise a
-// non-TTY stdin is a hard refusal (a script piping a request in is never
-// silently trusted) and a TTY asks, defaulting to no. `deps.isTTY` and
-// `deps.confirm` make both paths testable without a real terminal.
+// A pasted pairing request is never trusted before the owner sees the
+// fingerprint. `--yes` skips the prompt outright; otherwise a TTY asks,
+// defaulting to no. The non-TTY-without-`--yes` refusal is also checked by
+// the caller before anything else runs (I1b, fix round 2); it is repeated
+// here as a defensive backstop so this function is correct in isolation.
+// `deps.isTTY` and `deps.confirm` make both paths testable without a real
+// terminal.
 async function confirmPairing({ io, deps, yes }) {
   if (yes) return { ok: true };
   const isTTY = deps.isTTY ? deps.isTTY() : defaultIsTTY(io);
@@ -200,6 +220,19 @@ async function runDesktopCommand({ sub, arg, dataDir, io, deps = {}, yes = false
     return 0;
   }
 
+  // I1b (fix round 2): with no --yes, a non-TTY is refused before anything
+  // else runs — before even reading service.json or decoding the request.
+  // The prior order let a non-interactive run that was always going to be
+  // refused still trigger resolveNodePublicKey's side effect (persisting a
+  // freshly generated node identity via withServiceCore) before the refusal.
+  if (!yes) {
+    const isTTY = deps.isTTY ? deps.isTTY() : defaultIsTTY(io);
+    if (!isTTY) {
+      io.stderr.write('Refusing to pair without confirmation on a non-interactive terminal; pass --yes.\n');
+      return 2;
+    }
+  }
+
   const serviceFile = path.join(configDir, 'service.json');
   const serviceCfg = readJsonIfExists(serviceFile);
   if (serviceCfg.profile === 'runbook') {
@@ -213,28 +246,44 @@ async function runDesktopCommand({ sub, arg, dataDir, io, deps = {}, yes = false
     io.stderr.write(`Not a pairing request: ${err.message}\n`);
     return 2;
   }
-  const node = await resolveNodePublicKey({ dataDir, io, deps });
-  if (!node.ok) {
-    io.stderr.write(`${node.error}\n`);
-    return 1;
-  }
 
   const configured = serviceCfg.ports && Number.isInteger(serviceCfg.ports.desktopBridge) ? serviceCfg.ports.desktopBridge : undefined;
   const port = configured && configured > 0 ? configured : DEFAULT_DESKTOP_BRIDGE_PORT;
   const bridgeFile = path.join(configDir, BRIDGE_FILE);
-  const record = bridgeFileRecord({ publicKey: node.publicKey, port });
 
-  // I1: printed BEFORE anything is written, so the owner sees exactly what
-  // they are about to trust.
+  // I1b: label/fingerprint + PAIR_WARNING are printed before anything else
+  // is read or written, so the owner sees what they're about to trust.
   io.stdout.write(`Desktop: ${request.label} (${fingerprintGroups(request.deviceId)})\n`);
-  io.stdout.write(`Service: ${record.nodeId} (${fingerprintGroups(record.nodeId)})\n`);
   io.stdout.write(`Port: ${port}\n`);
   io.stdout.write(`${PAIR_WARNING}\n`);
+
+  // A read-only lookup, never a creation (I1b): only shown pre-confirmation
+  // when an identity already exists, so a first pair never persists
+  // anything before the owner has agreed to it.
+  const existing = readExistingNodePublicKey(dataDir);
+  if (existing.error) {
+    io.stderr.write(`${existing.error}\n`);
+    return 1;
+  }
+  let record = existing.ok ? bridgeFileRecord({ publicKey: existing.publicKey, port }) : null;
+  if (record) io.stdout.write(`Service: ${record.nodeId} (${fingerprintGroups(record.nodeId)})\n`);
 
   const trust = await confirmPairing({ io, deps, yes });
   if (!trust.ok) {
     io.stderr.write(trust.message);
     return trust.code;
+  }
+
+  // I1b: only after confirmation does a missing identity get created —
+  // this is the one place this command can write to <dataDir>/chat-data.json.
+  if (!record) {
+    const created = await createNodeIdentity({ dataDir, io, deps });
+    if (!created.ok) {
+      io.stderr.write(`${created.error}\n`);
+      return 1;
+    }
+    record = bridgeFileRecord({ publicKey: created.publicKey, port });
+    io.stdout.write(`Service: ${record.nodeId} (${fingerprintGroups(record.nodeId)}) — compare this on your desktop.\n`);
   }
 
   // I2: created 0o755 and chmod'd when new, since a restrictive umask
@@ -257,7 +306,7 @@ async function runDesktopCommand({ sub, arg, dataDir, io, deps = {}, yes = false
   };
   writeKeepingOwnership(serviceFile, `${JSON.stringify(merged, null, 2)}\n`);
 
-  if (platform === 'win32') (deps.applyWindowsAcls || applyWindowsAcls)({ bridgeFile, configDir });
+  if (platform === 'win32') (deps.applyWindowsAcls || applyWindowsAcls)({ bridgeFile, configDir, io });
   else fs.chmodSync(bridgeFile, 0o644);
 
   io.stdout.write(`If this fingerprint differs from the one on your desktop, run \`desktop unpair ${request.deviceId}\` now.\n`);

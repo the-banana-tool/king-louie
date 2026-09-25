@@ -241,6 +241,14 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
   // above, so the default is used only when the flag was never given.
   const dataDir = flags.dataDir || defaultServiceDataDir();
 
+  // --yes only means anything for "desktop pair" (fix round 2, minor):
+  // every other command either doesn't ask for confirmation or has its own
+  // gate, so accepting the flag there would silently do nothing.
+  if (flags.yes && !(command === 'desktop' && sub === 'pair')) {
+    io.stderr.write('Flag "--yes" is only valid for "desktop pair".\n');
+    return 2;
+  }
+
   try {
     switch (command) {
       case undefined:
