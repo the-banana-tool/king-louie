@@ -691,6 +691,7 @@ contextBridge.exposeInMainWorld(
       create: (payload) => {
         validateObject(payload, 'payload');
         validateString(payload.title, 'title', { minLength: 1 });
+        if (payload.force !== undefined && typeof payload.force !== 'boolean') throw new Error('Invalid force: expected boolean');
         return ipcRenderer.invoke('case:create', payload);
       },
       attach: (payload) => {
@@ -748,6 +749,22 @@ contextBridge.exposeInMainWorld(
         if (typeof payload.limit !== 'number' && typeof payload.limit !== 'string') throw new Error('Invalid limit: expected number or string');
         return ipcRenderer.invoke('case:grantBudget', payload);
       },
+      detours: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        return ipcRenderer.invoke('case:detours', payload);
+      },
+      resolveDetour: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        validateString(payload.detourId, 'detourId', { minLength: 1 });
+        validateString(payload.optionId, 'optionId', { minLength: 1 });
+        if (payload.title !== undefined) validateString(payload.title, 'title');
+        if (payload.objective !== undefined) validateString(payload.objective, 'objective');
+        if (payload.force !== undefined && typeof payload.force !== 'boolean') throw new Error('Invalid force: expected boolean');
+        return ipcRenderer.invoke('case:resolveDetour', payload);
+      },
+      reindex: () => ipcRenderer.invoke('case:reindex', {}),
       onChanged: (callback) => registerAdditive('case:changed', callback)
     },
     usage: {

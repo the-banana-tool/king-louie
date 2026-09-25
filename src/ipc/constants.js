@@ -52,6 +52,9 @@ module.exports = {
   CASE_SET_STATUS: 'case:setStatus',
   CASE_BUDGET: 'case:budget',
   CASE_GRANT_BUDGET: 'case:grantBudget',
+  CASE_DETOURS: 'case:detours',
+  CASE_RESOLVE_DETOUR: 'case:resolveDetour',
+  CASE_REINDEX: 'case:reindex',
 
   USAGE_GET_SESSION: 'usage:getSession',
   USAGE_GET_DAILY: 'usage:getDaily',

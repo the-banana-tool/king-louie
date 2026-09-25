@@ -43,12 +43,21 @@ function registerCaseHandlers(ipcMain, context = {}) {
     { ok: true, cases: runtime().listCases().map(summarize) }
   )));
 
-  ipcMain.handle(IPC.CASE_CREATE, wrapHandler(IPC.CASE_CREATE, async (_event, { title, type, objective, chatId } = {}) => {
+  ipcMain.handle(IPC.CASE_CREATE, wrapHandler(IPC.CASE_CREATE, async (_event, { title, type, objective, chatId, force } = {}) => {
     if (typeof title !== 'string' || !title.trim()) return { ok: false, error: 'A case needs a title.' };
     if (type !== undefined && (typeof type !== 'string' || !type.trim())) return { ok: false, error: 'type must be a non-empty string.' };
     if (objective !== undefined && (typeof objective !== 'string' || !objective.trim())) return { ok: false, error: 'objective must be a non-empty string.' };
+    if (force !== undefined && typeof force !== 'boolean') return { ok: false, error: 'force must be true or false.' };
     if (chatId && !context.getChats().some((c) => c.id === chatId)) return { ok: false, error: 'Chat not found.' };
-    const info = await runtime().createCase({ title: title.trim(), type: type || 'general', objective: objective || '' });
+    let info;
+    try {
+      info = await runtime().createCase({ title: title.trim(), type: type || 'general', objective: objective || '', force: force === true });
+    } catch (err) {
+      // Cases stage 5: a similar open case needs the owner's confirmation (force).
+      if (err && err.code === 'SIMILAR_CASES') return { ok: false, error: err.message, code: 'SIMILAR_CASES', similar: err.similar };
+      if (err && err.code === 'UNKNOWN_CASE_TYPE') return { ok: false, error: err.message, code: err.code };
+      throw err;
+    }
     return { ok: true, case: summarize(info), chat: chatId ? attach(chatId, info.id) : null };
   }));
 
