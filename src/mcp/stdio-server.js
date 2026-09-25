@@ -180,11 +180,12 @@ class StdioMcpServer {
 
   // Re-resolved every call: a symlink in this.workingDirectory that moves
   // between the initial request and the pre-run re-check must change the
-  // action's cwd (and so its hash), not silently keep the approved value. If
-  // the directory cannot be resolved at all (e.g. removed), the raw,
-  // unresolved path is used instead so the action still hashes to something
-  // — and, since that no longer matches a previously resolved value, the
-  // pre-run re-check fails closed as action_changed rather than throwing.
+  // action's cwd (and so its hash), not silently keep the approved value.
+  // Never throws: if the directory cannot be resolved at all (e.g.
+  // removed), the raw, unresolved path is returned instead, which still
+  // hashes to something — and, no longer matching a previously resolved
+  // value, is exactly what makes the pre-run re-check fail closed as
+  // action_changed.
   resolveCwd() {
     try {
       return fs.realpathSync(this.workingDirectory);
@@ -583,7 +584,15 @@ class StdioMcpServer {
       return;
     }
 
-    const rate = engine.checkRateLimit(name);
+    let rate;
+    try {
+      rate = engine.checkRateLimit(name);
+    } catch (err) {
+      // Never leave the job in awaiting_approval: a throw here must still
+      // end it in a terminal status like every other path.
+      jobs.updateJob(jobId, { status: 'failed', result: err.message });
+      return;
+    }
     if (rate && rate.allowed === false) {
       jobs.updateJob(jobId, { status: 'failed', result: `rate_limited: retry after ${rate.retryAfterSeconds}s` });
       return;
@@ -595,14 +604,22 @@ class StdioMcpServer {
       return;
     }
     const reservation = engine.recordExecution(name);
-    // The pre-run re-check: the action about to run is still the approved one.
+    // The pre-run re-check: the action about to run is still the approved
+    // one. A throw building the live action is a mismatch on its own — it
+    // never falls back to comparing against a stale hash — and a response
+    // whose action_hash is not a string can never match, however it got
+    // here (a scripted or buggy approver included).
     let liveHash = null;
-    try {
-      liveHash = actionHash(currentAction());
-    } catch {
-      liveHash = null;
+    let mismatch = typeof outcome.action_hash !== 'string';
+    if (!mismatch) {
+      try {
+        liveHash = actionHash(currentAction());
+      } catch {
+        mismatch = true;
+      }
     }
-    if (liveHash !== outcome.action_hash) {
+    if (!mismatch && liveHash !== outcome.action_hash) mismatch = true;
+    if (mismatch) {
       engine.releaseExecution(name, reservation);
       jobs.updateJob(jobId, { status: 'failed', result: 'action_changed: the runbook or its parameters changed after approval; nothing ran' });
       return;
@@ -635,9 +652,18 @@ class StdioMcpServer {
         await this.auditLedger.append({ kind: 'exec.start', data: { kind: 'runbook', name, request_id: requestId, job_id: jobId, origin } });
       } catch (err) {
         engine.releaseExecution(name, reservation);
-        jobs.updateJob(jobId, { status: 'failed', result: 'Audit ledger unavailable; nothing ran.' });
+        if (!jobs.isTerminal(jobId)) jobs.updateJob(jobId, { status: 'failed', result: 'Audit ledger unavailable; nothing ran.' });
         return;
       }
+    }
+    // cancel_job can land while the append above was pending: exec.start
+    // may already be on the ledger for a run that must still never spawn.
+    // Re-checking here (not just relying on updateJob's terminal guard)
+    // means the reservation is released and nothing downstream ever calls
+    // executeRunbook for a job that is already decided.
+    if (jobs.isTerminal(jobId) || signal?.aborted) {
+      engine.releaseExecution(name, reservation);
+      return;
     }
     jobs.updateJob(jobId, { status: 'running' });
     // The slot is held until the execution settles, not until the status

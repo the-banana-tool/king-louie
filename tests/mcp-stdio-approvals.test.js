@@ -48,6 +48,25 @@ function recordingLedger() {
   return ledger;
 }
 
+// A ledger whose append() for a chosen kind does not resolve until the test
+// calls the release function `hold(kind)` returns, so a test can land
+// cancel_job while that append is still pending.
+function gatedLedger() {
+  const ledger = { entries: [], gates: new Map() };
+  ledger.append = async (entry) => {
+    const gate = ledger.gates.get(entry.kind);
+    if (gate) await gate;
+    ledger.entries.push(entry);
+    return entry;
+  };
+  ledger.hold = (kind) => {
+    let release;
+    ledger.gates.set(kind, new Promise((resolve) => { release = resolve; }));
+    return release;
+  };
+  return ledger;
+}
+
 // An approver whose answer the test decides.
 function scriptedApprover(decide) {
   const approver = {
@@ -206,6 +225,165 @@ describe('run_runbook with a phone approver', () => {
     await new Promise((r) => setImmediate(r));
     assert.deepEqual(ledger.entries.filter((e) => e.kind === 'request.inbound').map((e) => e.data.name), ['site.status', 'nope', 'site.touch']);
     assert.ok(ledger.entries.every((e) => e.kind !== 'request.inbound' || e.data.client === 'stdio-mcp'));
+  });
+
+  // Fix round 1, Important (plan-mandated, reproduced): a cancel_job that
+  // lands while the awaited exec.start ledger append is still pending must
+  // not bring the job back to 'running' or let anything spawn once the
+  // append finally resolves — the audit entry can land (it already happened
+  // before the cancellation was known), but the run itself must not.
+  it('cancel_job during a pending exec.start append leaves the job cancelled and nothing spawns', async () => {
+    const { root } = sandbox();
+    const ledger = gatedLedger();
+    const release = ledger.hold('exec.start');
+    const s = server({ root, approver: scriptedApprover(approve), auditLedger: ledger });
+    const res = await s.executeToolCall('run_runbook', { machine: 'web-01', runbook: 'site.touch', params: { target: path.join(root, 'a') } });
+    // Let every already-resolved microtask run (approval, rate check,
+    // transition, the pre-run re-check) so the flow is parked on the held
+    // exec.start append before cancel_job is sent.
+    await new Promise((r) => setImmediate(r));
+    const cancelled = await s.executeToolCall('cancel_job', { job_id: res.job_id });
+    assert.equal(cancelled.success, true);
+    assert.equal(s.jobManager.getJob(res.job_id).status, 'cancelled');
+    release();
+    const job = await settle(s, res.job_id);
+    assert.equal(job.status, 'cancelled');
+    assert.equal(job.started_at, null);
+    assert.equal(fs.existsSync(path.join(root, 'a', 'marker.txt')), false);
+    assert.equal(ledger.entries.some((e) => e.kind === 'exec.result'), false);
+  });
+
+  // Fix round 1, minor: a throw building the live action for the pre-run
+  // re-check is a mismatch on its own, never compared against a stale hash.
+  it('a thrown pre-run re-check is refused as action_changed', async () => {
+    const { root } = sandbox();
+    const engine = engineFor(root);
+    const validateParameters = engine.validateParameters.bind(engine);
+    let calls = 0;
+    // Call 1 is runRunbook's own validation; call 2 is the pre-run re-check.
+    engine.validateParameters = (...args) => {
+      calls += 1;
+      if (calls > 1) throw new Error('boom-validate');
+      return validateParameters(...args);
+    };
+    const s = server({ root, approver: scriptedApprover(approve), engine });
+    const res = await s.executeToolCall('run_runbook', { machine: 'web-01', runbook: 'site.touch', params: { target: path.join(root, 'a') } });
+    const job = await settle(s, res.job_id);
+    assert.equal(job.status, 'failed');
+    assert.match(job.result, /^action_changed/);
+    assert.equal(fs.existsSync(path.join(root, 'a', 'marker.txt')), false);
+  });
+
+  // Fix round 1, minor: outcome.action_hash must be a string. Without this,
+  // a thrown re-check (liveHash forced to null by the catch) would
+  // coincidentally "match" an outcome whose action_hash is also null.
+  it('a non-string action_hash is refused even when it would coincidentally match a thrown re-check', async () => {
+    const { root } = sandbox();
+    const engine = engineFor(root);
+    const validateParameters = engine.validateParameters.bind(engine);
+    let calls = 0;
+    engine.validateParameters = (...args) => {
+      calls += 1;
+      if (calls > 1) throw new Error('boom-validate');
+      return validateParameters(...args);
+    };
+    const approver = scriptedApprover(() => ({ decision: 'approve', request_id: 'r-1', device_id: 'd-aaaaaaaaaaaaaaaa', action_hash: null, reason: null }));
+    const s = server({ root, approver, engine });
+    const res = await s.executeToolCall('run_runbook', { machine: 'web-01', runbook: 'site.touch', params: { target: path.join(root, 'a') } });
+    const job = await settle(s, res.job_id);
+    assert.equal(job.status, 'failed');
+    assert.match(job.result, /^action_changed/);
+    assert.equal(fs.existsSync(path.join(root, 'a', 'marker.txt')), false);
+  });
+
+  // Fix round 1, minor: the job actually runs with the cwd it was approved
+  // with — a relative-path step only lands its marker in the right place if
+  // this.workingDirectory really reached engine.executeRunbook's options.cwd.
+  it('runs in the approved working directory: a relative-path step lands its marker there', async () => {
+    const { root } = sandbox();
+    const engine = new RunbookEngine({ runbooksDir: null, allowedRoots: [root] });
+    const step = { run: [process.execPath, '-e', "require('fs').writeFileSync('marker.txt', 'ran')"] };
+    engine.runbooks.set('site.touch', { name: 'site.touch', description: '', tier: 'unsafe', params: {}, steps: [step], timeout_s: 30, rate_limit: null });
+    const s = server({ root, approver: scriptedApprover(approve), engine, workingDirectory: path.join(root, 'a') });
+    const res = await s.executeToolCall('run_runbook', { machine: 'web-01', runbook: 'site.touch', params: {} });
+    const job = await settle(s, res.job_id);
+    assert.equal(job.status, 'succeeded');
+    assert.equal(fs.readFileSync(path.join(root, 'a', 'marker.txt'), 'utf8'), 'ran');
+  });
+
+  // Fix round 1, minor: the withdrawn branch on its own (not through
+  // cancel_job), and the exact reason text for deny/expired/unavailable/error.
+  it('withdrawn (not via cancel_job) cancels with no reason set', async () => {
+    const { root } = sandbox();
+    const approver = scriptedApprover(() => ({ decision: 'withdrawn', request_id: 'r-1', device_id: null, action_hash: null, reason: null }));
+    const s = server({ root, approver });
+    const res = await s.executeToolCall('run_runbook', { machine: 'web-01', runbook: 'site.touch', params: { target: path.join(root, 'a') } });
+    const job = await settle(s, res.job_id);
+    assert.equal(job.status, 'cancelled');
+    assert.equal(job.reason, null);
+    assert.equal(fs.existsSync(path.join(root, 'a', 'marker.txt')), false);
+  });
+
+  it('reason text follows the phone when it gives one', async () => {
+    for (const [decision, status, reason] of [
+      ['deny', 'denied', 'denied: the battery is low'],
+      ['unavailable', 'denied', 'denied_by_policy: the battery is low'],
+      ['error', 'denied', 'denied_by_policy: the battery is low']
+    ]) {
+      const { root } = sandbox();
+      const approver = scriptedApprover(() => ({ decision, request_id: null, device_id: null, action_hash: null, reason: 'the battery is low' }));
+      const s = server({ root, approver });
+      const res = await s.executeToolCall('run_runbook', { machine: 'web-01', runbook: 'site.touch', params: { target: path.join(root, 'a') } });
+      const job = await settle(s, res.job_id);
+      assert.equal(job.status, status, decision);
+      assert.equal(job.reason, reason, decision);
+    }
+  });
+
+  it('falls back to fixed reason text when the phone gives none', async () => {
+    for (const [decision, status, reason] of [
+      ['deny', 'denied', 'denied: the phone denied it'],
+      ['expired', 'expired', 'expired: no phone answered in time'],
+      ['unavailable', 'denied', 'denied_by_policy: unavailable'],
+      ['error', 'denied', 'denied_by_policy: error']
+    ]) {
+      const { root } = sandbox();
+      const approver = scriptedApprover(() => ({ decision, request_id: null, device_id: null, action_hash: null, reason: null }));
+      const s = server({ root, approver });
+      const res = await s.executeToolCall('run_runbook', { machine: 'web-01', runbook: 'site.touch', params: { target: path.join(root, 'a') } });
+      const job = await settle(s, res.job_id);
+      assert.equal(job.status, status, decision);
+      assert.equal(job.reason, reason, decision);
+    }
+  });
+
+  // Fix round 1, minor: an approved job that hits its rate limit at the
+  // final check, and one whose rate-limit check throws — both must fail
+  // the job, and the throw must never leave it stuck in awaiting_approval.
+  it('an approved job that then hits its rate limit fails without running', async () => {
+    const { root } = sandbox();
+    const engine = engineFor(root);
+    const checkRateLimit = engine.checkRateLimit.bind(engine);
+    engine.checkRateLimit = (name) => (name === 'site.touch' ? { allowed: false, retryAfterSeconds: 42 } : checkRateLimit(name));
+    const s = server({ root, approver: scriptedApprover(approve), engine });
+    const res = await s.executeToolCall('run_runbook', { machine: 'web-01', runbook: 'site.touch', params: { target: path.join(root, 'a') } });
+    const job = await settle(s, res.job_id);
+    assert.equal(job.status, 'failed');
+    assert.equal(job.result, 'rate_limited: retry after 42s');
+    assert.equal(fs.existsSync(path.join(root, 'a', 'marker.txt')), false);
+  });
+
+  it('a checkRateLimit throw fails the job instead of leaving it awaiting_approval', async () => {
+    const { root } = sandbox();
+    const engine = engineFor(root);
+    engine.checkRateLimit = () => { throw new Error('boom-rate-limit'); };
+    const s = server({ root, approver: scriptedApprover(approve), engine });
+    const res = await s.executeToolCall('run_runbook', { machine: 'web-01', runbook: 'site.touch', params: { target: path.join(root, 'a') } });
+    const job = await settle(s, res.job_id);
+    assert.notEqual(job.status, 'awaiting_approval');
+    assert.equal(job.status, 'failed');
+    assert.equal(job.result, 'boom-rate-limit');
+    assert.equal(fs.existsSync(path.join(root, 'a', 'marker.txt')), false);
   });
 
   it('unavailable immediately with the service-not-running reason', async () => {

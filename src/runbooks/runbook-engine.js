@@ -814,11 +814,20 @@ class JobManager {
   // Timing follows the status, so no caller can forget to stamp it: the
   // first move to running sets started_at, and the first terminal status sets
   // finished_at. A terminal job's controller is no longer needed.
+  //
+  // A terminal job never moves back out of it. A status racing in behind a
+  // decision that already landed (cancel_job while an await such as the
+  // audit ledger's exec.start append is pending, say) is dropped rather than
+  // reviving the job; every other field in the same call still applies.
   updateJob(jobId, updates = {}) {
     const job = this.jobs.get(jobId);
     if (!job) return null;
     const now = new Date().toISOString();
-    Object.assign(job, updates, { updated_at: now });
+    const safeUpdates = { ...updates };
+    if (TERMINAL_JOB_STATUSES.includes(job.status) && 'status' in safeUpdates && !TERMINAL_JOB_STATUSES.includes(safeUpdates.status)) {
+      delete safeUpdates.status;
+    }
+    Object.assign(job, safeUpdates, { updated_at: now });
     if (job.status === 'running' && !job.started_at) job.started_at = now;
     if (TERMINAL_JOB_STATUSES.includes(job.status)) {
       if (!job.finished_at) job.finished_at = now;
