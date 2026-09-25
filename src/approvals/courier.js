@@ -409,20 +409,26 @@ class CourierPump {
           return;
         }
       }
-      // First binding wins: an id already bound — to this inbox or any
-      // other — is never rebound, and is never forwarded a second time.
+      // First binding wins, but a retry is not a rebind: a second forward of
+      // the same id from the SAME inbox is PhoneApprover resubmitting after
+      // the link was down (it resubmits every pending request on
+      // 'connected'), and must go through again, or approvals break across
+      // every relay reconnect. Only a DIFFERENT inbox claiming an id someone
+      // else already bound is refused.
       if (method === 'approval.submit') {
-        if (this.routes.has(message.request_id)) {
-          log.warn(`dropping a duplicate approval.submit for ${message.request_id}`);
-          this._reply(replyTo, { error: { code: 'rejected', message: 'request_id already bound' } });
+        const existing = this.routes.get(message.request_id);
+        if (existing && existing.inbox !== inbox) {
+          log.warn(`dropping approval.submit for ${message.request_id}: already bound to a different inbox`);
+          this._reply(replyTo, { error: { code: 'rejected', message: 'request_id already bound to a different inbox' } });
           return;
         }
         if (inbox) this.routes.set(message.request_id, { inbox, expiresAt: Date.parse(message.expires_at) });
       }
       if (method === 'enroll.open') {
-        if (this.codes.has(message.code_id)) {
-          log.warn(`dropping a duplicate enroll.open for ${message.code_id}`);
-          this._reply(replyTo, { error: { code: 'rejected', message: 'code_id already bound' } });
+        const existing = this.codes.get(message.code_id);
+        if (existing && existing.inbox !== inbox) {
+          log.warn(`dropping enroll.open for ${message.code_id}: already bound to a different inbox`);
+          this._reply(replyTo, { error: { code: 'rejected', message: 'code_id already bound to a different inbox' } });
           return;
         }
         // Recorded even without a producer to reply to (inbox: null), so a
@@ -433,6 +439,11 @@ class CourierPump {
       try {
         this._reply(replyTo, { result: await this.relayClient.call(method, forwardParams(method, params)) });
       } catch (err) {
+        // Unbind on failure: nothing was actually forwarded, so the id must
+        // not be left looking claimed — the next attempt (a retry, or a
+        // different inbox once this one has given up) starts fresh.
+        if (method === 'approval.submit') this.routes.delete(message.request_id);
+        if (method === 'enroll.open') this.codes.delete(message.code_id);
         this._reply(replyTo, { error: { code: err.code || 'error', message: err.message } });
       }
       return;

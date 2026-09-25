@@ -125,11 +125,13 @@ describe('FileCourier and CourierPump', () => {
 // path.join with something other than a string.
 describe('FileCourier and CourierPump (fix round 1)', () => {
   it('_handle drops a null/non-object entry without throwing or dispatching', async () => {
-    const { pump, relayClient } = pair({ rpcHandler: async () => { throw new Error('must not be called'); } });
+    const rpcCalls = [];
+    const { pump, relayClient } = pair({ rpcHandler: async (method, params) => { rpcCalls.push([method, params]); return {}; } });
     for (const entry of [null, 'just a string', 42, ['array']]) {
       await pump._handle(entry);
     }
     assert.deepEqual(relayClient.calls, []);
+    assert.deepEqual(rpcCalls, []);
   });
 
   it('_handle drops params: null (the exact shape that used to throw out of pollOnce) without throwing', async () => {
@@ -139,9 +141,11 @@ describe('FileCourier and CourierPump (fix round 1)', () => {
   });
 
   it('_handle drops a non-string method without dispatching to rpcHandler', async () => {
-    const { pump } = pair({ rpcHandler: async () => { throw new Error('must not be called'); } });
+    const rpcCalls = [];
+    const { pump } = pair({ rpcHandler: async (method, params) => { rpcCalls.push([method, params]); return {}; } });
     await pump._handle({ method: 123, params: {}, reply_to: null });
     await pump._handle({ method: undefined, params: {}, reply_to: null });
+    assert.deepEqual(rpcCalls, []);
   });
 
   it('_handle drops reply_to given as an array instead of throwing in path.join', async () => {
@@ -151,9 +155,11 @@ describe('FileCourier and CourierPump (fix round 1)', () => {
   });
 
   it('_handle drops a reply_to with extra keys or non-string fields', async () => {
-    const { pump } = pair();
+    const rpcCalls = [];
+    const { pump } = pair({ rpcHandler: async (method, params) => { rpcCalls.push([method, params]); return {}; } });
     await pump._handle({ method: 'jobs.get', params: {}, reply_to: { inbox: 'p-1-deadbeef', key: 'aaaaaaaaaaaaaaaa', extra: 1 } });
     await pump._handle({ method: 'jobs.get', params: {}, reply_to: { inbox: 123, key: 'aaaaaaaaaaaaaaaa' } });
+    assert.deepEqual(rpcCalls, []);
   });
 
   it('a malformed outbox file never stalls the pump: the rest of the batch and the sweep still run', async () => {
@@ -192,11 +198,36 @@ describe('FileCourier and CourierPump (fix round 1)', () => {
     assert.equal(fs.existsSync(inboxStray), true);
   });
 
-  it('first binding wins: a duplicate approval.submit for the same request_id is refused, not re-forwarded', async () => {
-    const { courier, relayClient, identity } = pair();
+  it('a same-inbox retry is re-forwarded after a failed relay call; a different inbox claiming the same id is refused', async () => {
+    // PhoneApprover resubmits every pending request, with the same
+    // envelope, when the link comes back — that resubmit must reach the
+    // relay again, not be refused as "already bound" (fix round 1's first
+    // ruling on M1 broke exactly this). Only a genuinely different inbox
+    // trying to claim someone else's request_id is refused.
+    const dir = dataDir();
+    const identity = testNodeIdentity();
+    const relayClient = fakeRelayClient();
+    const pump = new CourierPump({ dataDir: dir, relayClient, identity, pollMs: 10 }).start();
+    const courierA = new FileCourier({ dataDir: dir, identity, pollMs: 10 }).start();
+    const courierB = new FileCourier({ dataDir: dir, identity, pollMs: 10 }).start();
+    cleanups.push(() => { courierA.stop(); courierB.stop(); pump.stop(); });
+
     const { envelope } = m.buildRequest({ identity, action: m.toolAction('Bash', { command: 'ls' }, null) });
-    assert.deepEqual(await courier.submit(envelope), { ok: true });
-    await assert.rejects(courier.submit(envelope), (err) => err.code === 'rejected');
+
+    // The relay is down for the first attempt: the call fails, and the
+    // binding must be released, not left claimed by a request that never
+    // actually reached the relay.
+    relayClient.call = async () => { throw new Error('relay down'); };
+    await assert.rejects(courierA.submit(envelope), (err) => err.code === 'error');
+
+    // The retry, same envelope, same inbox, once the relay is back: this
+    // must succeed.
+    relayClient.call = async (method, params) => { relayClient.calls.push([method, params]); return { ok: true }; };
+    assert.deepEqual(await courierA.submit(envelope), { ok: true });
+
+    // A different inbox trying to claim the same request_id is refused,
+    // and never reaches the relay.
+    await assert.rejects(courierB.submit(envelope), (err) => err.code === 'rejected');
     assert.deepEqual(relayClient.calls, [['approval.submit', { envelope }]]);
   });
 
@@ -214,9 +245,14 @@ describe('FileCourier and CourierPump (fix round 1)', () => {
   });
 
   it('refuses a symlinked outbox file', { skip: process.platform === 'win32' ? 'symlinks need elevated privileges on Windows' : false }, async () => {
-    const { pump, relayClient } = pair();
+    // A node-signed approval.submit: were the symlink refusal not in place,
+    // this envelope would otherwise be forwarded to the relay, so the
+    // relayClient.calls assertion below actually proves the security
+    // boundary held (a jobs.get would never reach the relay anyway).
+    const { pump, relayClient, identity } = pair();
+    const { envelope } = m.buildRequest({ identity, action: m.toolAction('Bash', { command: 'ls' }, null) });
     const target = path.join(pump.outbox, 'target.json');
-    fs.writeFileSync(target, JSON.stringify({ method: 'jobs.get', params: {}, reply_to: null }));
+    fs.writeFileSync(target, JSON.stringify({ method: 'approval.submit', params: { envelope }, reply_to: null }));
     const link = path.join(pump.outbox, '0-deadbeef.json');
     fs.symlinkSync(target, link, 'file');
     await pump.pollOnce();
