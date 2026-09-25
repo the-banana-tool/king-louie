@@ -270,7 +270,7 @@ describe('loadServiceConfig: unknown keys in the admin service.json (R55)', () =
     assert.throws(() => loadServiceConfig(tmp(), {}, opts(admin)), (err) => {
       assert.strictEqual(
         err.message,
-        `Invalid ${file}: unknown key "features.webhook" (known: gateway, webhooks, mesh, channels, appDiscovery)`
+        `Invalid ${file}: unknown key "features.webhook" (known: gateway, webhooks, mesh, channels, appDiscovery, desktopBridge)`
       );
       return true;
     });
@@ -280,7 +280,7 @@ describe('loadServiceConfig: unknown keys in the admin service.json (R55)', () =
     const admin = tmp();
     const file = writeAdmin(admin, { ports: { gateway: 18793, mesh: 18791 } });
     assert.throws(() => loadServiceConfig(tmp(), {}, opts(admin)), (err) => {
-      assert.strictEqual(err.message, `Invalid ${file}: unknown key "ports.mesh" (known: gateway, webhook)`);
+      assert.strictEqual(err.message, `Invalid ${file}: unknown key "ports.mesh" (known: gateway, webhook, desktopBridge)`);
       return true;
     });
   });
@@ -295,12 +295,12 @@ describe('loadServiceConfig: unknown keys in the admin service.json (R55)', () =
     const admin = tmp();
     writeAdmin(admin, {
       profile: 'runbook',
-      features: { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false },
-      ports: { gateway: 18793, webhook: 18794 }
+      features: { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false, desktopBridge: false },
+      ports: { gateway: 18793, webhook: 18794, desktopBridge: 18796 }
     });
     const cfg = loadServiceConfig(tmp(), {}, opts(admin));
     assert.strictEqual(cfg.profile, 'runbook');
-    assert.deepStrictEqual(Object.keys(cfg.features).sort(), ['appDiscovery', 'channels', 'gateway', 'mesh', 'webhooks']);
+    assert.deepStrictEqual(Object.keys(cfg.features).sort(), ['appDiscovery', 'channels', 'desktopBridge', 'gateway', 'mesh', 'webhooks']);
   });
 
   // The brief's own wording ("still only warns... whatever their names") never

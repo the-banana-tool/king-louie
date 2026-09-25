@@ -223,14 +223,15 @@ could then rewrite the binary it runs. Move the install to a system path.
   root-owned, and a config file the service account owns or could write is
   still refused.
 
-  Every feature (`gateway`, `webhooks`, `mesh`, `channels`, `appDiscovery`) is
+  Every feature (`gateway`, `webhooks`, `mesh`, `channels`, `appDiscovery`,
+  `desktopBridge`) is
   **off by default**, and each one that is on is logged at startup naming the
   file that enabled it. `mesh` cannot be enabled in service mode yet: it is
   forced off (with a warning in the log) whatever the config says. On Linux
   and macOS the service refuses to read a `service.json` that is group- or
   world-writable, or one owned by the account the service runs as.
 
-  `ports` defaults to `{ "gateway": 18793, "webhook": 18794 }` — clear of
+  `ports` defaults to `{ "gateway": 18793, "webhook": 18794, "desktopBridge": 18796 }` — clear of
   the desktop app's 18789/18790 *and* of the mesh port 18791, which the
   desktop app binds on `0.0.0.0` by default. A listener that is enabled but
   cannot bind its port is fatal: the service refuses to start rather than run
@@ -1284,7 +1285,7 @@ ones it did not know, so `"webhook": true` (for `webhooks`) quietly left the
 listener off. An unknown key under `features` or `ports` now stops the service
 from starting, with the same wording as `node.yaml`:
 
-    Invalid /etc/king-louie/service.json: unknown key "features.webhook" (known: gateway, webhooks, mesh, channels, appDiscovery)
+    Invalid /etc/king-louie/service.json: unknown key "features.webhook" (known: gateway, webhooks, mesh, channels, appDiscovery, desktopBridge)
 
 The service-writable `<dataDir>/service.json` is unchanged: its `features` and
 `ports` are still ignored with a warning.
