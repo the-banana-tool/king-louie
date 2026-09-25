@@ -91,3 +91,67 @@ describe('cross-case leak paths', () => {
     assert.strictEqual(hits[0].text, `${PRIVATE_STMT} ${PRIVATE_VALUE}`);
   });
 });
+
+describe('cross-case leak paths through detours', () => {
+  const { DetourRouter } = require('../src/cases/detours/router');
+  const { DetourLog } = require('../src/cases/detours/log');
+
+  async function routed() {
+    const rt = new CaseRuntime({ root: tmp(), getSettings: () => ({}), host: { interactive: () => true } });
+    const door = await rt.createCase({ title: 'Rear door quotes', type: 'outreach', objective: 'Three written quotes for the rear door' });
+    rt.brief(door.id).update('why', 'The landlord threatened to keep the deposit', { provenance: 'user' });
+    rt.ledger(door.id).assert({ stmt: 'Door budget is capped by the savings account balance of 1834', subject: 'door', attr: 'budget', value: 1834, category: 'financial', source: { kind: 'document', ref: 'sources/bank.pdf' } });
+    const phone = await rt.createCase({ title: 'Phone agent maintenance', objective: 'Keep the phone agent answering calls and reporting status' });
+    const router = new DetourRouter({ runtime: rt });
+    const p = await router.propose(door.id, { summary: 'Fix the phone agent status polling', reason: 'A different project' });
+    return { rt, router, door, phone, p };
+  }
+
+  it('incoming row copies only the shown text', async () => {
+    const { rt, router, door, phone, p } = await routed();
+    await router.resolve(door.id, p.detour.id, { optionId: 'attach-1', by: 'in-app' });
+    const [incoming] = new DetourLog(phone.dir).incoming();
+    assert.deepStrictEqual(Object.keys(incoming), ['type', 'id', 'at', 'fromCaseId', 'fromTitle', 'summary', 'reason', 'blocks']);
+    const shown = rt.questions(door.id).get(p.questionId).text;
+    assert.ok(shown.includes(incoming.summary) && shown.includes(incoming.reason) && shown.includes(incoming.fromTitle));
+    const targetFiles = JSON.stringify([
+      fs.readFileSync(path.join(phone.dir, '.kl', 'detours.jsonl'), 'utf8'),
+      fs.readdirSync(path.join(phone.dir, 'journal')).map((n) => fs.readFileSync(path.join(phone.dir, 'journal', n), 'utf8')),
+      fs.readFileSync(path.join(phone.dir, 'case.yaml'), 'utf8')
+    ]);
+    for (const secret of ['landlord', 'deposit', '1834', 'savings account']) assert.ok(!targetFiles.includes(secret), secret);
+  });
+
+  it('routing answer fact is non-disclosable', async () => {
+    const { rt, door, p } = await routed();
+    const out = await rt.answerQuestion(door.id, p.questionId, { channel: 'in-app', optionId: 'attach-1' });
+    assert.deepStrictEqual([out.fact.provenance, out.fact.disclosable, out.fact.subject, out.fact.attr], ['user', false, 'detour', 'd-0001']);
+    assert.strictEqual(out.fact.value, 'Attach to "Phone agent maintenance" (draft)');
+    const hits = rt.index.search({ text: 'attach phone agent maintenance', kinds: ['fact'] });
+    assert.ok(hits.some((h) => h.caseId === door.id), 'the routing answer fact is indexed');
+    assert.ok(hits.filter((h) => h.caseId === door.id).every((h) => h.text === null));
+  });
+
+  it('routing question and propose result name other cases by title and status only', async () => {
+    const rt = new CaseRuntime({ root: tmp(), getSettings: () => ({}), host: { interactive: () => true } });
+    const door = await rt.createCase({ title: 'Rear door quotes', type: 'outreach', objective: 'Three written quotes for the rear door' });
+    const phone = await rt.createCase({ title: 'Phone agent maintenance', objective: 'Keep the phone agent answering calls and reporting status' });
+    // Phone's private fact: its subject is in the summary, so phone is a candidate through it.
+    rt.ledger(phone.id).assert({ stmt: 'Status polling vendor contract costs 4471 through the escrow account', subject: 'status-polling', attr: 'contract', value: 4471, category: 'financial', source: { kind: 'document', ref: 'sources/contract.pdf' } });
+    const router = new DetourRouter({ runtime: rt });
+    const p = await router.propose(door.id, { summary: 'Fix the phone agent status polling', reason: 'A different project' });
+    const q = rt.questions(door.id).get(p.questionId);
+    assert.strictEqual(q.payload.targets['attach-1'], phone.id, 'phone is offered, so its private fact was searched');
+    const shown = JSON.stringify([q.text, q.options, p]);
+    for (const secret of ['4471', 'escrow', 'vendor contract', 'contract.pdf']) assert.ok(!shown.includes(secret), secret);
+    assert.ok(!/"(score|coverage|hits?)"/.test(JSON.stringify(p)), 'no raw index scores or hits in the result');
+  });
+
+  it('proposal rows store no candidate titles', async () => {
+    const { door, phone } = await routed();
+    const [row] = new DetourLog(door.dir).rows().filter((r) => r.type === 'proposal');
+    assert.deepStrictEqual(row.candidates.map((c) => Object.keys(c)), [['caseId', 'score', 'optionId']]);
+    assert.strictEqual(row.candidates[0].caseId, phone.id);
+    assert.ok(!JSON.stringify(row).includes('Phone agent maintenance'));
+  });
+});
