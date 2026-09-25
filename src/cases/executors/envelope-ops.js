@@ -160,6 +160,17 @@ function requestIdHolder(reg, caseId, envelopeId, requestId) {
   return null;
 }
 
+// The action hash the phone must have signed for this envelope as it is now,
+// or null when the envelope is missing or malformed.
+function liveActionHash(reg, caseId, env) {
+  try {
+    const helpers = approvalHelpers();
+    return env ? helpers.actionHash(signedAction(env, caseId, helpers)) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function activateSigned(reg, caseId, envelopeId, outcome) {
   const store = new EnvelopeStore(reg.caseDir(caseId));
   const env = store.get(envelopeId);
@@ -168,6 +179,11 @@ async function activateSigned(reg, caseId, envelopeId, outcome) {
     env.status = 'tampered';
     store.write(env);
     journal(reg, caseId, `Envelope ${envelopeId} is tampered: it changed since it was sent to the phone.`);
+    return false;
+  }
+  // Ruling T10-hash: an envelope reads active only when its grant would verify.
+  if (outcome.action_hash !== liveActionHash(reg, caseId, env)) {
+    journal(reg, caseId, `Envelope ${envelopeId} not activated: phone request ${outcome.request_id} approved a different action.`);
     return false;
   }
   const holder = requestIdHolder(reg, caseId, envelopeId, outcome.request_id);
@@ -207,6 +223,11 @@ async function applySignedOutcome(reg, caseId, envelopeId, outcome) {
   if (holder) {
     log.warn(`Signed approval for ${envelopeId} reuses request ${outcome.request_id} (already granted ${holder}); ignored.`);
     return { applied: false, error: `request ${outcome.request_id} already granted ${holder}` };
+  }
+  const live = liveActionHash(reg, caseId, new EnvelopeStore(reg.caseDir(caseId)).get(envelopeId));
+  if (!live || outcome.action_hash !== live) {
+    log.warn(`Signed approval for ${envelopeId} (request ${outcome.request_id}) is for a different action; ignored.`);
+    return { applied: false, error: 'the phone approved a different action; request it again' };
   }
   const key = grantKey(caseId, envelopeId);
   reg.signedOutcomes.set(key, [...signedOutcomesFor(reg, caseId, envelopeId), outcome]);

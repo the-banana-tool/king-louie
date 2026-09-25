@@ -6,7 +6,7 @@ const path = require('path');
 const fx = require('./helpers/executor-fixtures');
 const ops = require('../src/cases/executors/envelope-ops');
 const { EnvelopeStore, JobStore } = require('../src/cases/executors');
-const { approvalHelpers } = require('../src/cases/executors/signed');
+const { approvalHelpers, signedAction } = require('../src/cases/executors/signed');
 
 after(fx.cleanup);
 
@@ -194,11 +194,24 @@ describe('signed envelopes', () => {
       err.name = 'CaseBusyError';
       throw err;
     };
-    const outcome = { decision: 'approve', request_id: 'r-2', action_hash: 'h', device_id: 'd-1' };
+    const outcome = { decision: 'approve', request_id: 'r-2', action_hash: helpers.actionHash(signedAction(envelopeOf(s), s.meta.id, helpers)), device_id: 'd-1' };
     assert.deepStrictEqual(await ops.applySignedOutcome(s.reg, s.meta.id, 'env-01', outcome), { applied: false, pending: true });
     s.rt.systemAction = real;
     await ops.applyPendingSignedGrants(s.reg, s.meta.id);
     assert.deepStrictEqual([envelopeOf(s).status, s.reg.pendingSignedGrants.size], ['active', 0]);
+  });
+
+  it('refuses an Outcome whose action hash is not the live envelope action (T10-hash)', async () => {
+    const approver = { requestAction: () => new Promise(() => {}) };
+    const s = await setup({ authority: 'signed', approver });
+    await ops.requestEnvelope(s.reg, { caseId: s.meta.id }, body(s.factId));
+    const outcome = { decision: 'approve', request_id: 'r-3', action_hash: 'h', device_id: 'd-1' };
+    assert.deepStrictEqual(await ops.applySignedOutcome(s.reg, s.meta.id, 'env-01', outcome), { applied: false, error: 'the phone approved a different action; request it again' });
+    assert.deepStrictEqual([envelopeOf(s).status, ops.signedOutcomesFor(s.reg, s.meta.id, 'env-01')], ['requested', []]);
+    // The pending path (busy case) checks it again at the turn start.
+    s.reg.pendingSignedGrants.set(`${s.meta.id}/env-01`, outcome);
+    await ops.applyPendingSignedGrants(s.reg, s.meta.id);
+    assert.deepStrictEqual([envelopeOf(s).status, s.reg.pendingSignedGrants.size], ['requested', 0]);
   });
 
   it('refuses a request_id another envelope already used', async () => {
@@ -206,7 +219,7 @@ describe('signed envelopes', () => {
     const s = await setup({ authority: 'signed', approver });
     await ops.requestEnvelope(s.reg, { caseId: s.meta.id }, body(s.factId));
     await ops.requestEnvelope(s.reg, { caseId: s.meta.id }, body(s.factId));
-    const outcome = { decision: 'approve', request_id: 'r-7', action_hash: 'h', device_id: 'd-1' };
+    const outcome = { decision: 'approve', request_id: 'r-7', action_hash: helpers.actionHash(signedAction(envelopeOf(s), s.meta.id, helpers)), device_id: 'd-1' };
     assert.deepStrictEqual(await ops.applySignedOutcome(s.reg, s.meta.id, 'env-01', outcome), { applied: true });
     const again = await ops.applySignedOutcome(s.reg, s.meta.id, 'env-02', { ...outcome });
     assert.strictEqual(again.applied, false);
