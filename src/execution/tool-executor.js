@@ -5,6 +5,9 @@ const { evaluateRules, describeRule } = require('../tools/permission-rules');
 const path = require('path');
 const { isProtectedCasePath, CASE_BLOCKED_TOOL_NAMES, CASE_BLOCKED_TOOL_ERROR } = require('../cases/chat-integration');
 const { markLocalRequester } = require('../core/origin');
+const { createLogger } = require('../logging');
+
+const log = createLogger('tool-executor');
 
 // Tools that write a file named by file_path (MultiEdit: per edit). In case
 // mode, facts.jsonl and .kl/ are written only through the case tools.
@@ -323,10 +326,15 @@ class ToolExecutor extends EventEmitter {
           cwd: options.workingDirectory || this.workingDirectory
         });
       } catch (classifyError) {
+        log.warn('classifyCall threw', { toolName, error: classifyError.message });
         raw = { tier: 'denied', reason: 'invalid_classification' };
       }
-      const decision = raw || null;
-      if (decision) {
+      // Only null/undefined means "no opinion" and falls through to the
+      // ordinary rule/gate flow. Every other value — including a falsy one
+      // like 0, '' or false — is not a valid decision and must be denied
+      // below, not silently treated as unclassified.
+      const decision = raw === null || raw === undefined ? null : raw;
+      if (decision !== null) {
         const validTiers = ['read', 'routine', 'unsafe', 'denied'];
         const wellFormed = typeof decision === 'object'
           && !Array.isArray(decision)

@@ -163,7 +163,7 @@ describe('ToolExecutor classifyCall', () => {
 });
 
 describe('ToolExecutor classifyCall fails closed', () => {
-  const malformed = ['denied', { tier: 'DENIED' }, { reason: 'x' }, ['denied']];
+  const malformed = ['denied', { tier: 'DENIED' }, { reason: 'x' }, ['denied'], 0, '', false];
   for (const bad of malformed) {
     it(`malformed classifyCall result ${JSON.stringify(bad)} is denied, never run`, async () => {
       const decisions = [];
