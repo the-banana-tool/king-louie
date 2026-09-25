@@ -1,13 +1,11 @@
 // Ed25519 helpers for desktop device keys (program §4.17). Device keys are
 // raw 32-byte keys in base64url; node keys are DER SPKI hex.
 //
-// Fleet stage 3 (src/approvals/envelope.js) defines equivalent
-// deriveDeviceId/ed25519RawToSpki helpers (same algorithm, same vectors).
-// That file does not exist on this branch yet, so this module carries its
-// own copies; whichever of that stage or this one merges second should
-// dedupe against the other's implementation.
+// deriveDeviceId and ed25519RawToSpki are fleet stage 3's
+// (src/approvals/envelope.js; same algorithm, same vectors), re-exported so
+// device ids and keys have one implementation.
 const crypto = require('crypto');
-const { base32Encode } = require('../mesh/node-identity');
+const { deriveDeviceId, ed25519RawToSpki } = require('../approvals/envelope');
 
 const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 const B64URL_RE = /^[A-Za-z0-9_-]*$/;
@@ -25,17 +23,6 @@ function fromB64url(text) {
   const bytes = Buffer.from(text, 'base64url');
   if (bytes.toString('base64url') !== text) throw new Error('not canonical base64url');
   return bytes;
-}
-
-function deriveDeviceId(rawPublicKey, prefix = 'd-') {
-  const raw = Buffer.from(rawPublicKey);
-  return prefix + base32Encode(crypto.createHash('sha256').update(raw).digest()).slice(0, 16);
-}
-
-function ed25519RawToSpki(raw32) {
-  const raw = Buffer.from(raw32);
-  if (raw.length !== 32) throw new Error('an Ed25519 key is 32 bytes');
-  return Buffer.concat([ED25519_SPKI_PREFIX, raw]);
 }
 
 function rawFromPublicKeyObject(keyObject) {
