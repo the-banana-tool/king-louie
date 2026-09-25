@@ -180,6 +180,7 @@ const { markLocalDesktopEvent } = require('../src/core/origin');
 const DENIED_TOOL = 'KlTestNodePolicyDenied';
 const CAPTURE_TOOL = 'KlTestCaptureRequester';
 let capturedRequester = null;
+let capturedOptions = null;
 
 function phoneDeps({ available = true, answer = true } = {}) {
   const calls = [];
@@ -207,6 +208,20 @@ async function answerDialog(core, sent, approved) {
   core.context.pendingApprovalResolvers.get(request.payload.approvalId).resolve(approved);
 }
 
+// Wires FAKE_PROVIDER as every tier's provider, the same way
+// driveGatewayMessage does, so a child run created off-gateway (via
+// agentExecutorAdapter.execute directly) can still resolve a provider.
+function configureFakeProvider(core) {
+  const tiers = { provider: FAKE_PROVIDER, model: 'fake' };
+  const settings = core.getSettings();
+  core.context.setSettings({
+    ...settings,
+    activeProvider: FAKE_PROVIDER,
+    inference: { ...settings.inference, llmRouting: { enabled: false }, tierMap: { fast: tiers, standard: tiers, smart: tiers } }
+  });
+  core.saveProviderToken(FAKE_PROVIDER, 'fake-token-123456');
+}
+
 async function startedPhoneCore(options) {
   const phone = phoneDeps(options);
   const core = buildCore('phone', phone.deps);
@@ -214,7 +229,7 @@ async function startedPhoneCore(options) {
   for (const [name, execute] of [
     [PROBE_TOOL, async () => { probeRuns += 1; return { ok: true }; }],
     [DENIED_TOOL, async () => ({ ok: true })],
-    [CAPTURE_TOOL, async (_p, opts) => { capturedRequester = opts.approvalRequester; return { ok: true }; }]
+    [CAPTURE_TOOL, async (_p, opts) => { capturedRequester = opts.approvalRequester; capturedOptions = opts; return { ok: true }; }]
   ]) {
     toolRegistry.register(new Tool({
       name, description: 'test', parameters: { type: 'object', properties: {} }, requiresApproval: name === PROBE_TOOL, execute
@@ -405,5 +420,186 @@ describe("createCore remoteApprovals: 'phone'", () => {
     } finally {
       await core.shutdown();
     }
+  });
+
+  it("a local event with an unmarked caller requester drops the requester and answers on screen (never the caller, never the phone)", async () => {
+    const { core, calls } = await startedPhoneCore();
+    try {
+      const { event, sent } = desktopEvent();
+      let remoteAsked = 0;
+      const executor = await core.context.createToolExecutorWithApprovals(
+        event, null, async () => { remoteAsked += 1; return true; }, { chatId: 'chat-1' }
+      );
+      const before = probeRuns;
+      const running = executor.execute(PROBE_TOOL, {});
+      await answerDialog(core, sent, true);
+      assert.equal((await running).ok, true);
+      assert.equal(probeRuns, before + 1);
+      assert.equal(remoteAsked, 0, 'the unmarked caller requester must never be consulted');
+      assert.deepEqual(calls, [], 'the phone must never be asked either');
+    } finally {
+      await core.shutdown();
+    }
+  });
+
+  it('executorOptions.denyAutoApproval true forces denyAutoApproval even on a local run', async () => {
+    const { core } = await startedPhoneCore();
+    try {
+      const { event } = desktopEvent();
+      const local = await core.context.createToolExecutorWithApprovals(event, null, null, { denyAutoApproval: true });
+      assert.equal(local.denyAutoApproval, true);
+    } finally {
+      await core.shutdown();
+    }
+  });
+
+  it('an audit append that rejects does not crash the executor or the tool call', async () => {
+    const auditLedger = { append: async () => { throw new Error('audit down'); } };
+    const nodePolicy = { allowed_roots: [os.tmpdir()], remote_sessions: { always_confirm: [], deny: [] } };
+    const phoneApprover = { ttlMs: 300000, isAvailable: () => true, requestApproval: async () => true };
+    const core = buildCore('phone', { phoneApprover, auditLedger, nodePolicy });
+    await core.start();
+    if (!toolRegistry.get(PROBE_TOOL)) {
+      toolRegistry.register(new Tool({
+        name: PROBE_TOOL, description: 'test', parameters: { type: 'object', properties: {} }, requiresApproval: true,
+        execute: async () => { probeRuns += 1; return { ok: true }; }
+      }));
+    }
+    try {
+      const executor = await core.context.createToolExecutorWithApprovals(null, null, null, {});
+      const before = probeRuns;
+      assert.deepEqual(await executor.execute(PROBE_TOOL, {}), { ok: true });
+      assert.equal(probeRuns, before + 1);
+      // Let the rejected append's own .catch settle so a broken test (one
+      // that let the rejection go unhandled) would surface here.
+      await new Promise((r) => setImmediate(r));
+    } finally {
+      await core.shutdown();
+    }
+  });
+
+  // I2 (fix round 1): exec.start means "the tool is about to run" — it must
+  // never be written for a call that was denied before reaching the tool.
+  describe('exec.start only after every gate has passed', () => {
+    it('a tier-denied call writes no exec.start', async () => {
+      const { core, audit } = await startedPhoneCore();
+      try {
+        const executor = await core.context.createToolExecutorWithApprovals(null, null, null, {});
+        await executor.execute(DENIED_TOOL, {});
+        await new Promise((r) => setImmediate(r));
+        assert.ok(audit.some((e) => e.kind === 'tier.decision' && e.data.tier === 'denied'));
+        assert.ok(!audit.some((e) => e.kind === 'exec.start'), 'a tier-denied call must write no exec.start');
+      } finally {
+        await core.shutdown();
+      }
+    });
+
+    it('a phone-denied call writes no exec.start', async () => {
+      const { core, audit } = await startedPhoneCore({ answer: false });
+      try {
+        const executor = await core.context.createToolExecutorWithApprovals(null, null, null, {});
+        const result = await executor.execute(PROBE_TOOL, {});
+        assert.equal(result.success, false);
+        await new Promise((r) => setImmediate(r));
+        assert.ok(!audit.some((e) => e.kind === 'exec.start'), 'a phone-denied call must write no exec.start');
+      } finally {
+        await core.shutdown();
+      }
+    });
+
+    it('an approved phone call writes exactly one exec.start, after approval.response', async () => {
+      const audit = [];
+      const auditLedger = { append: async (entry) => { audit.push(entry); return entry; } };
+      const nodePolicy = { allowed_roots: [os.tmpdir()], remote_sessions: { always_confirm: [], deny: [] } };
+      const phoneApprover = {
+        ttlMs: 300000,
+        isAvailable: () => true,
+        // Mirrors the real PhoneApprover: it audits the phone's decision
+        // itself before requestApproval resolves.
+        requestApproval: async (toolName) => {
+          await auditLedger.append({ kind: 'approval.response', data: { tool: toolName, decision: 'approve' } });
+          return true;
+        }
+      };
+      const core = buildCore('phone', { phoneApprover, auditLedger, nodePolicy });
+      await core.start();
+      if (!toolRegistry.get(PROBE_TOOL)) {
+        toolRegistry.register(new Tool({
+          name: PROBE_TOOL, description: 'test', parameters: { type: 'object', properties: {} }, requiresApproval: true,
+          execute: async () => { probeRuns += 1; return { ok: true }; }
+        }));
+      }
+      try {
+        const executor = await core.context.createToolExecutorWithApprovals(null, null, null, {});
+        const before = probeRuns;
+        assert.deepEqual(await executor.execute(PROBE_TOOL, {}), { ok: true });
+        assert.equal(probeRuns, before + 1);
+        const execStarts = audit.filter((e) => e.kind === 'exec.start');
+        assert.equal(execStarts.length, 1);
+        const responseIndex = audit.findIndex((e) => e.kind === 'approval.response');
+        const execStartIndex = audit.findIndex((e) => e.kind === 'exec.start');
+        assert.ok(responseIndex >= 0, 'approval.response must have been audited');
+        assert.ok(responseIndex < execStartIndex, 'exec.start must come after approval.response');
+      } finally {
+        await core.shutdown();
+      }
+    });
+  });
+
+  // I1 (fix round 1): a child of a running executor (SpawnAgent,
+  // BackgroundTask, workflow runners — here driven directly through
+  // agentExecutorAdapter.execute, the shared entry point they all use) must
+  // inherit the parent's exact origin, not a freshly recomputed, poorer one
+  // that has lost the deviceId or the session.
+  describe("a child's origin (agentExecutorAdapter.execute -> createAgentRuntime -> createToolExecutorWithApprovals)", () => {
+    afterEach(() => { requestedTool = PROBE_TOOL; });
+
+    it("a child of a desktop run keeps client 'desktop' plus the parent's deviceId and session", async () => {
+      const { core, audit } = await startedPhoneCore();
+      try {
+        configureFakeProvider(core);
+        const { event, sent } = desktopEvent();
+        const parent = await core.context.createToolExecutorWithApprovals(event, null, null, { chatId: 'chat-1' });
+        await parent.execute(CAPTURE_TOOL, {});
+
+        requestedTool = PROBE_TOOL;
+        const before = probeRuns;
+        const agent = capturedOptions.getAgent('main');
+        const running = capturedOptions.agentExecutorAdapter.execute(
+          agent, 'run the probe', { approvalRequester: capturedOptions.approvalRequester }
+        );
+        await answerDialog(core, sent, true);
+        await running;
+        assert.equal(probeRuns, before + 1);
+        const start = audit.find((e) => e.kind === 'exec.start' && e.data.name === PROBE_TOOL);
+        assert.ok(start, 'the child tool call was audited');
+        assert.deepEqual(start.data.origin, {
+          client: 'desktop', deviceId: 'kld-testdesktop00001', session: 'chat-1', job_id: null
+        });
+      } finally {
+        await core.shutdown();
+      }
+    });
+
+    it('a child of a remote run keeps its session', async () => {
+      const { core, calls } = await startedPhoneCore();
+      try {
+        configureFakeProvider(core);
+        const remote = await core.context.createToolExecutorWithApprovals(null, null, null, { chatId: 'chat-2' });
+        await remote.execute(CAPTURE_TOOL, {});
+
+        requestedTool = PROBE_TOOL;
+        const before = probeRuns;
+        const agent = capturedOptions.getAgent('main');
+        await capturedOptions.agentExecutorAdapter.execute(
+          agent, 'run the probe', { approvalRequester: capturedOptions.approvalRequester }
+        );
+        assert.equal(probeRuns, before + 1);
+        assert.deepEqual(calls.map((c) => c.toolName), [PROBE_TOOL]);
+        assert.deepEqual(calls[0].origin, { client: 'king-louie', session: 'chat-2', job_id: null });
+      } finally {
+        await core.shutdown();
+      }
+    });
   });
 });

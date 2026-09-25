@@ -145,6 +145,12 @@ class ToolExecutor extends EventEmitter {
     // to tools (and so to child agents) is marked local, so children keep the
     // on-screen dialog instead of going to the phone (program §4.21).
     this.localOrigin = options.localOrigin === true;
+    // This run's audit origin (program §4.21), or null outside phone mode.
+    // Carried on the rethreaded requester so a child executor built from it
+    // (SpawnAgent, BackgroundTask, workflow runners) inherits the exact same
+    // origin instead of recomputing a fresh, poorer one that has lost the
+    // parent's deviceId/session.
+    this.origin = options.origin || null;
   }
 
   get permissionRules() {
@@ -485,6 +491,13 @@ class ToolExecutor extends EventEmitter {
         });
       };
 
+      // Every gate (hooks, rules, node-policy tier, the approval gate, the
+      // abort check) has passed by here: the tool is actually about to run.
+      // Distinct from 'preExecute', which fires before those gates and so
+      // also fires for calls later denied — audit's exec.start listens here
+      // instead, so it means "the tool is about to run", not "was asked for".
+      this.emit('executeStart', { toolName, parameters: effectiveParameters });
+
       const result = await tool.execute(effectiveParameters, {
         ...this.extraToolOptions,
         ...options,
@@ -538,6 +551,11 @@ class ToolExecutor extends EventEmitter {
   // asks. For a local-desktop run it is marked local (program §4.21).
   _rethreadedRequester() {
     const requester = (toolName, parameters, metadata) => this.requestApproval(toolName, parameters, metadata);
+    // Carried as a plain property (not a WeakMap mark) so create-core's
+    // agentExecutorAdapter.execute can read it straight off
+    // options.approvalRequester and forward it to the child's origin, the
+    // same way the tool already forwards this same function unchanged.
+    requester.origin = this.origin;
     return this.localOrigin ? markLocalRequester(requester) : requester;
   }
 

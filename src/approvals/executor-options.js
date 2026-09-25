@@ -30,14 +30,27 @@ function runOrigin({ executorOptions, event, local, helpers }) {
 
 // Phone-mode options merged into the ToolExecutor, plus the audit listeners.
 function phoneExecutorOptions({ phoneApprover, auditLedger = null, nodePolicy = null, origin, local, approvalRequester = null }) {
-  const options = { localOrigin: local };
+  // Fail fast: a phone approver whose TTL isn't usable would otherwise
+  // surface as a silently broken (or negative/NaN) approvalTimeoutMs deep
+  // inside a remote run, instead of at the point this seam is built.
+  if (!Number.isFinite(phoneApprover.ttlMs) || phoneApprover.ttlMs <= 0) {
+    throw new Error(`phoneApprover.ttlMs must be a finite positive number, got ${phoneApprover.ttlMs}`);
+  }
+  if (!nodePolicy) {
+    log.warn('remoteApprovals "phone" without deps.nodePolicy: node-policy tiers are not enforced (classifyCall is not set)');
+  }
+  if (!auditLedger) {
+    log.warn('remoteApprovals "phone" without deps.auditLedger: tier.decision/exec.start/exec.result are not audited');
+  }
+
+  const options = { localOrigin: local, origin };
   if (local) {
     options.approvalRequester = approvalRequester;
   } else {
     // The same metadata object goes on to the phone approver, so the refusal
     // it writes there reaches ToolExecutor's mapApprovalResult.
     options.approvalRequester = (toolName, parameters, metadata = {}) => {
-      if (!metadata.origin) metadata.origin = origin;
+      metadata.origin = origin;
       return phoneApprover.requestApproval(toolName, parameters, metadata);
     };
     // The phone's own expiry answers first ('timeout' from the approver).
@@ -54,12 +67,16 @@ function phoneExecutorOptions({ phoneApprover, auditLedger = null, nodePolicy = 
     const append = (kind, data) => {
       Promise.resolve()
         .then(() => auditLedger.append({ kind, data }))
-        .catch((err) => log.warn(`audit ${kind} failed: ${err.message}`));
+        .catch((err) => log.warn(`audit ${kind} failed: ${err?.message ?? String(err)}`));
     };
     executor.on('tierDecision', ({ toolName, parameters, tier, reason }) => {
       append('tier.decision', { tool: toolName, tier, reason, params_sha256: paramsSha256(parameters), origin });
     });
-    executor.on('preExecute', ({ toolName }) => {
+    // 'executeStart' fires only after every gate (hooks, rules, node-policy
+    // tier, the approval gate, the abort check) has passed, immediately
+    // before the tool's execute — unlike 'preExecute', which also fires for
+    // calls later denied. exec.start means "the tool is about to run".
+    executor.on('executeStart', ({ toolName }) => {
       append('exec.start', { kind: 'tool', name: toolName, request_id: null, job_id: origin.job_id || null, origin });
     });
     executor.on('postExecute', ({ toolName, result }) => {
@@ -92,7 +109,7 @@ function approvalSeam({ remoteApprovals, event = null, approvalRequester = null,
   if (remoteApprovals === 'allow') requester = approvalRequester;
   else requester = local && helpers.isLocalRequester(approvalRequester) ? approvalRequester : null;
   return {
-    toolExecutorOptions: { approvalRequester: requester, denyAutoApproval, localOrigin: local },
+    toolExecutorOptions: { approvalRequester: requester, denyAutoApproval, localOrigin: local, origin },
     attach: () => {},
     local,
     origin

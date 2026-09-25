@@ -1932,11 +1932,12 @@ function createCore(deps = {}) {
       allowedDirectories: executorOptions.allowedDirectories || [],
       requireApproval: true,
       runtimeEnvironment: resolvedRuntimeEnvironment,
-      // approvalRequester, denyAutoApproval and localOrigin, plus in phone
-      // mode approvalTimeoutMs and classifyCall. denyAutoApproval closes the
-      // paths that grant approval before the gate is reached (the persisted
-      // "always approve" list below, an agent config's autoApproveTools, and
-      // `allow` permission rules) for every non-local run outside 'allow'.
+      // approvalRequester, denyAutoApproval, localOrigin and origin, plus in
+      // phone mode approvalTimeoutMs and classifyCall. denyAutoApproval closes
+      // the paths that grant approval before the gate is reached (the
+      // persisted "always approve" list below, an agent config's
+      // autoApproveTools, and `allow` permission rules) for every non-local
+      // run outside 'allow'.
       ...seam.toolExecutorOptions,
       shouldAutoApprove: async (toolName) => isToolAlwaysApproved(toolName),
       // Live callback — picks up rules added mid-session when the user
@@ -2095,7 +2096,11 @@ function createCore(deps = {}) {
       event,
       runtimeEnvironment,
       approvalRequester,
-      { workingDirectory, allowedDirectories }
+      // origin: forwarded from agentExecutorAdapter.execute (program §4.21) so
+      // a child run's audit trail inherits the parent's deviceId/session
+      // instead of recomputing a fresh, poorer origin from a null event and
+      // an unmarked-for-origin-purposes requester.
+      { workingDirectory, allowedDirectories, origin: runtimeOptions.origin || null }
     );
 
     return {
@@ -2316,7 +2321,16 @@ function createCore(deps = {}) {
           { tier: requestedTier },
           null,
           options.approvalRequester || null,
-          { workingDirectory: options.workingDirectory }
+          {
+            workingDirectory: options.workingDirectory,
+            // The rethreaded requester every meta-tool (SpawnAgent,
+            // BackgroundTask, workflow runners) already forwards unchanged
+            // carries the parent executor's origin as a plain property
+            // (ToolExecutor#_rethreadedRequester); read it back here so the
+            // child inherits it instead of a freshly (and more poorly)
+            // computed one.
+            origin: (options.approvalRequester && options.approvalRequester.origin) || options.origin || null
+          }
         );
         const executor = new AgentExecutor(runtime.provider, runtime.toolExecutor, {
           usageTracker,
