@@ -208,11 +208,7 @@ describe('runDoctor', () => {
   const EUID = typeof process.geteuid === 'function' ? process.geteuid() : 0;
   const POSIX = process.platform !== 'win32';
 
-  it('appends the runbook command rows right after "runbooks loaded"', {
-    skip: POSIX && EUID !== 0
-      ? 'runDoctor accepts only root-owned runbooks on POSIX, which an unprivileged run cannot create'
-      : false
-  }, () => {
+  it('appends the runbook command rows right after "runbooks loaded"', () => {
     const { runDoctor } = require('../src/service/doctor');
     const root = tmp();
     const dataDir = path.join(root, 'data');
@@ -228,7 +224,7 @@ describe('runDoctor', () => {
     fs.writeFileSync(file, 'name: probe\ntier: read\nsteps:\n  - run: [git, --version]\nrate_limit: { max: 1, per: 1h }\n');
     if (POSIX) fs.chmodSync(file, 0o644);
 
-    const rows = runDoctor({ dataDir, platform: 'win32' });
+    const rows = runDoctor({ dataDir, platform: 'win32', adminUid: EUID });
     const loaded = rows.findIndex((r) => r.check === 'runbooks loaded');
     assert.notEqual(loaded, -1, JSON.stringify(rows));
     const next = rows[loaded + 1];

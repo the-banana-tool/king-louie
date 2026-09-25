@@ -111,16 +111,12 @@ describe('loadNodeConfig rejects unknown keys', () => {
     }
   });
 
-  it('makes runDoctor report the typo as the node config FAIL row', {
-    skip: POSIX && EUID !== 0
-      ? 'runDoctor accepts only a root-owned node.yaml on POSIX, which an unprivileged run cannot create'
-      : false
-  }, () => {
+  it('makes runDoctor report the typo as the node config FAIL row', () => {
     withAdminDir('name: n\npolicy:\n  alowed_roots: []\n', ({ root }) => {
       const dataDir = path.join(root, 'data');
       fs.mkdirSync(dataDir);
       if (POSIX) fs.chmodSync(dataDir, 0o700);
-      const rows = runDoctor({ dataDir });
+      const rows = runDoctor({ dataDir, adminUid: EUID });
       const row = rows.find((r) => r.check === 'node config / runbooks health');
       assert.ok(row, JSON.stringify(rows));
       assert.equal(row.ok, false);
