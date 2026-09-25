@@ -432,6 +432,48 @@ describe('Windows ACL script', () => {
     assert.equal(/["'][A-Za-z][^"'$\r\n]*:\((?:OI|CI)\)/.test(t), false, 'a grant names an account literally');
   });
 
+  it('resets ownership and clears explicit child ACEs on every admin-owned path before granting', () => {
+    const t = text();
+    assert.match(t, /\[switch\]\s*\$ResetOwnership/);
+    assert.ok(t.includes("'/setowner'"));
+    assert.ok(t.includes("'/reset'"));
+    const resetCalls = [...t.matchAll(/Set-KlAcl -Path (\S+) -CutInheritance -ResetOwnership/g)].map((m) => m[1]);
+    assert.deepEqual(resetCalls.sort(), ['"$Base"', '"$Base\\tools"', "'D:\\train'", "'D:\\train\\configs'"].sort());
+    for (const target of ['"$Base\\mcp\\data"', "'D:\\train\\runs'", "'D:\\models'", "'C:\\build\\site'"]) {
+      assert.ok(!t.includes(`-Path ${target} -CutInheritance -ResetOwnership`) && !t.includes(`-Path ${target} -ResetOwnership`), `${target} should not reset ownership`);
+    }
+  });
+
+  it('cuts inheritance on the two runner-writable data paths without resetting ownership', () => {
+    const t = text();
+    for (const target of ["'C:\\build\\site'", "'D:\\models'"]) {
+      assert.ok(t.includes(`Set-KlAcl -Path ${target} -CutInheritance -Grants`), `${target} keeps its inherited ACEs`);
+      assert.ok(!t.includes(`-Path ${target} -CutInheritance -ResetOwnership`), `${target} should not reset ownership`);
+    }
+  });
+
+  it("refuses a gpu-box Python venv whose interpreter is not installed for all users", () => {
+    const t = text();
+    assert.match(t, /tools\\py\\pyvenv\.cfg/);
+    assert.match(t, /\$env:ProgramFiles/);
+    assert.match(t, /for all users/);
+  });
+
+  it('validates -Base is rooted, not a drive root, and outside $env:SystemRoot', () => {
+    const t = text();
+    assert.match(t, /IsPathRooted\(\$Base\)/);
+    assert.match(t, /drive root/);
+    assert.match(t, /\$env:SystemRoot/);
+  });
+
+  it("documents that changing -Runner leaves the old runner's entries behind", () => {
+    assert.match(text(), /old runner/i);
+  });
+
+  it('includes the underlying exception message when -Runner cannot be resolved', () => {
+    assert.match(text(), /catch \{[^}]*\$_\.Exception\.Message[^}]*\}/s);
+  });
+
   it('parses without errors in Windows PowerShell', { skip: POSIX ? 'Windows PowerShell only' : false }, () => {
     const ps = `$t = $null; $e = $null; [void][System.Management.Automation.Language.Parser]::ParseFile('${SCRIPT.replace(/'/g, "''")}', [ref]$t, [ref]$e); $e.Count`;
     const r = spawnSync(windowsPowerShellExe(), ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8' });
