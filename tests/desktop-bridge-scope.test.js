@@ -188,7 +188,7 @@ describe('desktop-scoped settings', () => {
   // key, so a stale local record could overwrite a rule the service had
   // since reclaimed for that same (tool, pattern, action). The check must
   // run regardless of ownedByDesktop whenever the context's current rule for
-  // that key is source: 'service'.
+  // that key is not origin: 'desktop' (a service add drops the origin).
   it('addPermissionRule refuses to take back a key the service has reclaimed, even though the desktop\'s own record still says it owns it', () => {
     const dataDir = tmp();
     const context = fakeContext();

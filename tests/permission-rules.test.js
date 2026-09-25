@@ -119,3 +119,60 @@ describe('describeRule', () => {
     assert.ok(!desc.includes("'*'"));
   });
 });
+
+// Final review I4 (fleet stage 7 §8): rules the desktop adds (origin
+// 'desktop') are consulted only when no service rule matched, so a desktop
+// allow can never shadow a service deny; service rules keep plain
+// first-match order.
+describe('evaluateRules two-tier order', () => {
+  const bash = (command) => ({ command });
+
+  it('a desktop allow followed by a hand-written deny evaluates to deny', () => {
+    const rules = [
+      { tool: 'Bash', pattern: 'git *', action: 'allow', source: 'approval-dialog', origin: 'desktop' },
+      { tool: 'Bash', pattern: 'git push*', action: 'deny', source: 'user' }
+    ];
+    const out = evaluateRules(rules, 'Bash', bash('git push origin main'));
+    assert.strictEqual(out.action, 'deny');
+    assert.strictEqual(out.rule.source, 'user');
+    // The desktop allow still applies where no service rule speaks.
+    assert.strictEqual(evaluateRules(rules, 'Bash', bash('git status')).action, 'allow');
+  });
+
+  it('a service allow beats a desktop deny, wherever the desktop rule sits', () => {
+    const rules = [
+      { tool: 'Bash', pattern: 'npm *', action: 'deny', origin: 'desktop' },
+      { tool: 'Bash', pattern: 'npm test', action: 'allow', source: 'user' }
+    ];
+    assert.strictEqual(evaluateRules(rules, 'Bash', bash('npm test')).action, 'allow');
+    assert.strictEqual(evaluateRules(rules, 'Bash', bash('npm publish')).action, 'deny');
+  });
+
+  it('standalone first-match is unchanged: allow specific, deny broad', () => {
+    const rules = [
+      { tool: 'Bash', pattern: 'rm -rf ./build', action: 'allow', source: 'user' },
+      { tool: 'Bash', pattern: 'rm *', action: 'deny', source: 'user' }
+    ];
+    assert.strictEqual(evaluateRules(rules, 'Bash', bash('rm -rf ./build')).action, 'allow');
+    assert.strictEqual(evaluateRules(rules, 'Bash', bash('rm -rf /')).action, 'deny');
+    // And the reverse order still means the broad deny wins, as before.
+    const reversed = [rules[1], rules[0]];
+    assert.strictEqual(evaluateRules(reversed, 'Bash', bash('rm -rf ./build')).action, 'deny');
+  });
+
+  it('desktop rules keep first-match order among themselves', () => {
+    const rules = [
+      { tool: 'Bash', pattern: 'git *', action: 'ask', origin: 'desktop' },
+      { tool: 'Bash', pattern: 'git status', action: 'allow', origin: 'desktop' }
+    ];
+    assert.strictEqual(evaluateRules(rules, 'Bash', bash('git status')).action, 'ask');
+  });
+
+  it('only origin === "desktop" is second-tier', () => {
+    const rules = [
+      { tool: 'Bash', pattern: 'ls', action: 'allow', origin: 'Desktop' },
+      { tool: 'Bash', pattern: 'ls', action: 'deny', source: 'user' }
+    ];
+    assert.strictEqual(evaluateRules(rules, 'Bash', bash('ls')).action, 'allow');
+  });
+});

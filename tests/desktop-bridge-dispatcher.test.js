@@ -430,3 +430,43 @@ describe('runLlmCommand channel actions', () => {
     assert.match(discord.output, /- Token: missing/);
   });
 });
+
+describe('desktop-scoped permission rules (final review I4)', () => {
+  const { createDesktopScope } = require('../src/desktop-bridge/desktop-scope');
+  const { evaluateRules } = require('../src/tools/permission-rules');
+
+  it('tags rules the desktop adds with origin desktop, and the core keeps only that origin', () => {
+    const scopeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-i4-'));
+    try {
+      const scope = createDesktopScope({ dataDir: scopeDir, context: core.context });
+      assert.strictEqual(scope.addPermissionRule({ tool: 'Bash', pattern: 'kli4tag *', action: 'allow', source: 'approval-dialog' }), true);
+      const added = core.context.getPermissionRules().find((r) => r.pattern === 'kli4tag *');
+      assert.strictEqual(added.origin, 'desktop');
+      core.context.addPermissionRule({ tool: 'Bash', pattern: 'kli4other *', action: 'allow', source: 'approval-dialog', origin: 'elsewhere' });
+      assert.strictEqual(core.context.getPermissionRules().find((r) => r.pattern === 'kli4other *').origin, undefined);
+      // The service re-adding the same key reclaims it: the origin is gone and
+      // the desktop can neither remove it nor take it back.
+      core.context.addPermissionRule({ tool: 'Bash', pattern: 'kli4tag *', action: 'allow', source: 'user' });
+      assert.strictEqual(core.context.getPermissionRules().find((r) => r.pattern === 'kli4tag *').origin, undefined);
+      assert.throws(() => scope.removePermissionRule('Bash', 'kli4tag *', 'allow'), (err) => err.code === 'RULE_NOT_DESKTOP');
+      assert.strictEqual(scope.addPermissionRule({ tool: 'Bash', pattern: 'kli4tag *', action: 'allow' }), false);
+    } finally {
+      fs.rmSync(scopeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('a desktop allow plus a later hand-written deny evaluates to deny', () => {
+    const scopeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-i4-'));
+    try {
+      const scope = createDesktopScope({ dataDir: scopeDir, context: core.context });
+      scope.addPermissionRule({ tool: 'Bash', pattern: 'kli4 *', action: 'allow', source: 'approval-dialog' });
+      core.context.addPermissionRule({ tool: 'Bash', pattern: 'kli4 push*', action: 'deny', source: 'user' });
+      const rules = core.context.getPermissionRules();
+      assert.ok(rules.findIndex((r) => r.pattern === 'kli4 *') < rules.findIndex((r) => r.pattern === 'kli4 push*'), 'the desktop allow comes first in the list');
+      assert.strictEqual(evaluateRules(rules, 'Bash', { command: 'kli4 push origin' }).action, 'deny');
+      assert.strictEqual(evaluateRules(rules, 'Bash', { command: 'kli4 status' }).action, 'allow');
+    } finally {
+      fs.rmSync(scopeDir, { recursive: true, force: true });
+    }
+  });
+});

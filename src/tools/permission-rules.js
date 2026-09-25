@@ -8,9 +8,17 @@
  * `npm test` without asking, but always ask before `rm`".
  *
  * This module evaluates ordered rules of shape:
- *   { tool, pattern, action: 'allow'|'ask'|'deny', source }
+ *   { tool, pattern, action: 'allow'|'ask'|'deny', source, origin? }
  *
- * Match precedence: first matching rule wins. If no rule matches,
+ * Match precedence is two-tier (fleet stage 7 §8, final review I4):
+ *   1. every rule that is NOT desktop-scoped (`origin !== 'desktop'`), in
+ *      order, first match wins — exactly the standalone behaviour;
+ *   2. only when none of those matched, the desktop-scoped rules (added by
+ *      an attached desktop through src/desktop-bridge/desktop-scope.js), in
+ *      order, first match wins.
+ * So a rule the desktop adds can never shadow one written on the service
+ * (a desktop `allow` cannot lift a service `deny`), while an existing
+ * "allow specific, deny broad" list keeps working. If no rule matches,
  * evaluation falls back to the tool's default (`requiresApproval`).
  *
  * Pattern syntax:
@@ -71,10 +79,16 @@ function matchKeyForTool(toolName, params = {}) {
   return null;
 }
 
+// The origin desktop-scope stamps on the rules an attached desktop adds.
+const DESKTOP_RULE_ORIGIN = 'desktop';
+const isDesktopRule = (rule) => Boolean(rule) && rule.origin === DESKTOP_RULE_ORIGIN;
+
 /**
  * Evaluate rules against a tool call. Returns:
  *   { matched: true, action: 'allow'|'ask'|'deny', rule } on first match
  *   { matched: false } when no rule applied
+ * Service (non-desktop) rules are consulted first; desktop-scoped rules
+ * only when no service rule matched (see the header).
  */
 function evaluateRules(rules, toolName, parameters = {}) {
   if (!Array.isArray(rules) || rules.length === 0) {
@@ -82,7 +96,12 @@ function evaluateRules(rules, toolName, parameters = {}) {
   }
 
   const callKey = matchKeyForTool(toolName, parameters);
+  const serviceMatch = firstMatch(rules.filter((rule) => !isDesktopRule(rule)), toolName, callKey);
+  if (serviceMatch.matched) return serviceMatch;
+  return firstMatch(rules.filter(isDesktopRule), toolName, callKey);
+}
 
+function firstMatch(rules, toolName, callKey) {
   for (const rule of rules) {
     if (!rule || rule.tool !== toolName) continue;
     const action = String(rule.action || '').toLowerCase();
@@ -126,6 +145,8 @@ function describeRule(rule) {
 }
 
 module.exports = {
+  DESKTOP_RULE_ORIGIN,
+  isDesktopRule,
   evaluateRules,
   describeRule,
   compilePattern,

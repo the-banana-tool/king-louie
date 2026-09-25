@@ -6,6 +6,7 @@ const InferenceRouter = require('../providers/inference-router');
 const { initializeTools, toolRegistry } = require('../tools');
 const { registerSecretDataDir } = require('../tools/utils');
 const { tokenizeCommand } = require('./llm-command');
+const { DESKTOP_RULE_ORIGIN } = require('../tools/permission-rules');
 const { adminCredentialPath } = require('../platform/paths');
 const ToolExecutor = require('../execution/tool-executor');
 const DenialTracker = require('../tools/denial-tracker');
@@ -395,6 +396,11 @@ function createCore(deps = {}) {
       pattern: rule.pattern || '*',
       action: rule.action,
       source: rule.source || 'user',
+      // Desktop-scoped rules are evaluated only after every service rule
+      // (src/tools/permission-rules.js). Only desktop-scope sets this; any
+      // other add of the same key replaces the rule without it, which is
+      // how the service reclaims a key.
+      ...(rule.origin === DESKTOP_RULE_ORIGIN ? { origin: DESKTOP_RULE_ORIGIN } : {}),
       createdAt: new Date().toISOString()
     });
     setPermissionRules(filtered);

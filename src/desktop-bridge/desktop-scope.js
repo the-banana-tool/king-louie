@@ -1,6 +1,8 @@
 // Desktop-scoped widening (fleet stage 7 §3.4, §8). Directories the desktop
-// allows and rules it adds apply to desktop runs only: these wrappers exist
-// only in the bridge dispatcher's context, so only marked runs see them.
+// allows apply to desktop runs only: these wrappers exist only in the bridge
+// dispatcher's context, so only marked runs see them. Rules it adds join the
+// service's rule list tagged origin: 'desktop', and rule evaluation consults
+// them only when no service rule matched (src/tools/permission-rules.js).
 //
 // Concurrency: every read and write below is synchronous (fs.*Sync, and
 // Task 2's writeFileAtomic, which is itself openSync/writeSync/fsyncSync/
@@ -20,6 +22,7 @@ const { createLogger } = require('../logging');
 const { writeFileAtomic } = require('./pairing');
 const { guardCheck } = require('../platform/write-guard');
 const { MESSAGES } = require('./protocol');
+const { DESKTOP_RULE_ORIGIN } = require('../tools/permission-rules');
 
 const log = createLogger('desktop-bridge/desktop-scope');
 
@@ -188,24 +191,18 @@ function createDesktopScope({ dataDir, context, onPathWritten = () => {}, writeG
   const ruleKey = (tool, pattern, action) => `${tool}\u0000${pattern || '*'}\u0000${action}`;
   const listRules = () => read(RULES_FILE, 'rules').filter((r) => r && r.tool && r.action);
 
-  // context.addPermissionRule dedups by (tool, pattern, action) and REPLACES
-  // whatever rule already held that key — including a service-set one,
-  // overwriting its `source`. Without this check, the desktop could lift a
-  // service deny rule by re-adding the exact same key through the approval
-  // dialog (which the dispatcher always routes here) and then removing it,
-  // since desktop-scope would otherwise happily "own" a key that used to
-  // belong to the service. Ownership is decided by this scope's own record
-  // (rules.json), not by the context's current `source` field, so re-adding
-  // a rule the desktop *does* already own (e.g. upgrading ask -> allow) still
-  // works normally.
+  // Every rule added here carries origin: 'desktop' in the context, which
+  // puts it in the second tier of rule evaluation (src/tools/permission-
+  // rules.js): it applies only when no service rule matched, so a desktop
+  // `allow` can never lift a service `deny`, wherever it sits in the list.
   //
-  // The `existing` check must run even when the desktop's own record already
-  // owns the key: the service can reclaim a key out from under a stale
-  // desktop-owned record (see removePermissionRule's matching check below),
-  // and once it has, the context's current rule for that key carries
-  // source: 'service'. Without checking that regardless of ownedByDesktop,
-  // an approval-dialog response for that same key (rules.json still says the
-  // desktop owns it) would silently overwrite the service's rule again.
+  // context.addPermissionRule dedups by (tool, pattern, action) and REPLACES
+  // whatever rule already held that key. A rule whose context entry is not
+  // desktop-origin belongs to the service — it was written there, or the
+  // service re-added (reclaimed) a key the desktop once held, which drops
+  // the origin — and is never replaced from here, whatever this scope's own
+  // record (rules.json) says. Re-adding a key the desktop does hold (e.g.
+  // upgrading ask -> allow) works normally.
   // Returns whether the rule was actually applied (fix round 2, residual
   // I3): a caller that needs to tell a real import from a silent no-op —
   // desktop-import.js reports "kept the service's rule" rather than
@@ -216,14 +213,10 @@ function createDesktopScope({ dataDir, context, onPathWritten = () => {}, writeG
     const key = ruleKey(rule.tool, rule.pattern, rule.action);
     const ownedByDesktop = listRules().some((r) => ruleKey(r.tool, r.pattern, r.action) === key);
     const existing = context.getPermissionRules().find((r) => ruleKey(r.tool, r.pattern, r.action) === key);
-    if (ownedByDesktop && existing && existing.source === 'service') {
-      log.warn('refusing to take over a rule the service has reclaimed', {
-        tool: rule.tool, pattern: rule.pattern || '*', action: rule.action
-      });
-      return false;
-    }
-    if (!ownedByDesktop && existing) {
-      log.warn('refusing to replace an existing rule the desktop does not own', {
+    if (existing && existing.origin !== DESKTOP_RULE_ORIGIN) {
+      log.warn(ownedByDesktop
+        ? 'refusing to take over a rule the service has reclaimed'
+        : 'refusing to replace an existing rule the desktop does not own', {
         tool: rule.tool, pattern: rule.pattern || '*', action: rule.action, existingSource: existing.source || null
       });
       return false;
@@ -231,7 +224,7 @@ function createDesktopScope({ dataDir, context, onPathWritten = () => {}, writeG
     // Checked before the context changes, so a refused scope write can't
     // leave a rule in the context that the desktop's record doesn't list.
     guardCheck(writeGuard, path.join(dir, RULES_FILE));
-    context.addPermissionRule(rule);
+    context.addPermissionRule({ ...rule, origin: DESKTOP_RULE_ORIGIN });
     const rules = listRules().filter((r) => ruleKey(r.tool, r.pattern, r.action) !== key);
     rules.push({ tool: rule.tool, pattern: rule.pattern || '*', action: rule.action });
     write(RULES_FILE, 'rules', rules);
@@ -239,15 +232,15 @@ function createDesktopScope({ dataDir, context, onPathWritten = () => {}, writeG
   };
 
   // Refuses unless the desktop's own record already owns this exact key
-  // AND the context's current rule for it is not service-sourced — both
-  // must hold, so a key the desktop never legitimately owned (or that a
-  // service rule has since reclaimed) can't be removed from here either.
+  // AND the context's current rule for it is desktop-origin — both must
+  // hold, so a key the desktop never legitimately owned (or that the
+  // service has since reclaimed) can't be removed from here either.
   const removePermissionRule = (tool, pattern, action) => {
     const key = ruleKey(tool, pattern, action);
     const rules = listRules();
     const ownedByDesktop = rules.some((r) => ruleKey(r.tool, r.pattern, r.action) === key);
     const current = context.getPermissionRules().find((r) => ruleKey(r.tool, r.pattern, r.action) === key);
-    if (!ownedByDesktop || !current || current.source === 'service') {
+    if (!ownedByDesktop || !current || current.origin !== DESKTOP_RULE_ORIGIN) {
       const err = new Error(MESSAGES.RULE_NOT_DESKTOP);
       err.code = 'RULE_NOT_DESKTOP';
       throw err;
