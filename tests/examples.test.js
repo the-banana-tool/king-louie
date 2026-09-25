@@ -807,3 +807,58 @@ describe('MCP client configs', () => {
     assert.equal(fs.realpathSync.native(r.stdout.trim()), fs.realpathSync.native(work));
   });
 });
+
+describe('install guide', () => {
+  const HEADINGS = [
+    '# King Louie fleet install guide',
+    '## 1. What you are setting up',
+    '## 2. Before you start',
+    '## 3. Get the code and lock the install directory',
+    '## 4. Install the service',
+    '## 5. Write the config directories',
+    '## 6. Grant exact privileges',
+    '## 7. Check with doctor',
+    '## 8. Your first runbook over stdio MCP',
+    '## 9. Troubleshooting',
+    '## 10. Stage 3: Approving unsafe runbooks from your phone',
+    '## 11. Stage 4: Reaching the fleet through the front door',
+    '## 12. Stage 5: Desktop apps on agent nodes'
+  ];
+  const lines = () => fs.readFileSync(GUIDE, 'utf8').split(/\r?\n/);
+
+  it('has the fixed headings, in order', () => {
+    const found = lines().filter((l) => /^#{1,2} /.test(l));
+    assert.deepEqual(found, HEADINGS);
+  });
+
+  it('reserves sections 10 to 12 for wave 4 with one marker line each', () => {
+    const all = lines();
+    for (const [heading, stage] of [[HEADINGS[10], 3], [HEADINGS[11], 4], [HEADINGS[12], 5]]) {
+      const i = all.indexOf(heading);
+      const body = [];
+      for (let j = i + 1; j < all.length && !/^#{1,2} /.test(all[j]); j += 1) {
+        if (all[j].trim()) body.push(all[j]);
+      }
+      assert.deepEqual(body, [`Not available yet. This section is written when fleet stage ${stage} merges.`], heading);
+    }
+  });
+
+  it('gives the commands the examples depend on', () => {
+    const text = lines().join('\n');
+    for (const needle of [
+      'runbook-acls.ps1 -Role base -Runner',
+      'install --profile runbook --dry-run',
+      'install --user _kinglouie --dry-run',
+      'visudo -cf /opt/king-louie/app/examples/sudoers/king-louie-web-01',
+      'install -o root -g root -m 0440',
+      'doctor --data-dir C:\\KingLouie\\mcp\\data',
+      'sudo -u king-louie /usr/bin/env --chdir=/opt/king-louie/mcp/work',
+      'safe.directory=*',
+      'fc.exe',
+      'untrusted_output',
+      'huggingface_hub[cli]'
+    ]) {
+      assert.ok(text.includes(needle), `guide does not mention ${needle}`);
+    }
+  });
+});
