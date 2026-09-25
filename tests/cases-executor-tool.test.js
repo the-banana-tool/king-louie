@@ -217,8 +217,8 @@ describe('Executor.submit to built-in executors', () => {
       payload: JSON.stringify({ url: 'https://permits.example.com/apply', fields: [{ selector: '#acres', value: `{{${s.acres.id}}}` }], submit: { selector: '#go' }, waitFor: '#done', login: true })
     });
     assert.strictEqual(r.ok, true, r.error);
-    // The page's origin is read back after navigate and again before the click.
-    assert.deepStrictEqual(calls.map((c) => c[0]), ['status', 'start', 'navigate', 'status', 'fill_credentials', 'fill', 'status', 'click', 'wait_for', 'content']);
+    // The page's origin is read back after navigate, before each fill and before the click.
+    assert.deepStrictEqual(calls.map((c) => c[0]), ['status', 'start', 'navigate', 'status', 'fill_credentials', 'status', 'fill', 'status', 'click', 'wait_for', 'content']);
     assert.deepStrictEqual(calls.find((c) => c[0] === 'fill')[1], { selector: '#acres', text: '2.12 acres' });
     // Ruling M17: login runs in the named 'kl-cases' profile; the vault key is profile@host.
     assert.deepStrictEqual(calls.find((c) => c[0] === 'start')[1], { profile: 'kl-cases' });
@@ -540,7 +540,7 @@ describe('Executor.submit browser failures and profiles', () => {
     const same = await browserSetup({ running: true, active: 'kl-cases' });
     const r = await same.send({ login: true });
     assert.strictEqual(r.ok, true, r.error);
-    assert.deepStrictEqual(same.calls.map((c) => c[0]), ['status', 'profile_current', 'navigate', 'status', 'fill_credentials', 'fill', 'status', 'click', 'wait_for', 'content']);
+    assert.deepStrictEqual(same.calls.map((c) => c[0]), ['status', 'profile_current', 'navigate', 'status', 'fill_credentials', 'status', 'fill', 'status', 'click', 'wait_for', 'content']);
 
     const stopped = await browserSetup({ running: false });
     const r2 = await stopped.send();
@@ -605,5 +605,198 @@ describe('Executor.submit recipients', () => {
       ok: false, error: 'recipient +15550100 is listed more than once'
     });
     assert.strictEqual(s.ctl.calls.filter((c) => c[0] === 'submit').length, 0);
+  });
+});
+
+describe('Executor results, status and draft', () => {
+  const { fetchResults, jobStatus, draftPayload } = require('../src/cases/executors/results');
+  const { recommendationGate } = require('../src/cases/gates');
+  const { LedgerTool } = require('../src/tools/builtin/case-tools');
+  const { FactLedger } = require('../src/cases/ledger');
+  const phoneAgent = require('../examples/executors/phone-agent/adapter').createAdapter({ baseUrl: 'https://errands.example.com', token: 'x' }, { fetch: async () => null });
+
+  async function callWithExpect(s, expect) {
+    const envelopeId = await approvedEnvelope(s);
+    const r = await submit(s, { executor: 'fake-agent', envelopeId, payload: call(s, { expect }) });
+    assert.strictEqual(r.ok, true, r.error);
+    return r.jobId;
+  }
+
+  it('results conflicting with a user fact create an unknown and never supersede', async () => {
+    const s = await setup({ agent: { recordToFacts: phoneAgent.recordToFacts } });
+    const owner = s.rt.ledger(s.meta.id).assert({ stmt: 'The owner says the lot is 2.12 acres', subject: 'lot', attr: 'size', value: 2.12, unit: 'acres', provenance: 'user', source: { kind: 'question', ref: 'q-0098' } });
+    const jobId = await callWithExpect(s, [{ subject: 'lot', attr: 'size', question: 'What acreage does the listing show?' }]);
+    s.ctl.records.set('ext-1', [{
+      id: 'r1', contactId: 'c1', kind: 'call', at: '2026-10-26T16:00:00Z', summary: 'The listing shows 2.5 acres', outcome: 'answered',
+      fields: { q1: { value: 2.5, type: 'number', unit: 'acres' } }
+    }]);
+    const r = await fetchResults(s.reg, { caseId: s.meta.id, turnId: 'turn-1' }, { jobId });
+    assert.strictEqual(r.ok, true, r.error);
+    assert.deepStrictEqual(r.saved, [`sources/fake-agent/${jobId}/r1.json`]);
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(s.meta.dir, 'sources', 'fake-agent', jobId, 'r1.json'), 'utf8')).id, 'r1');
+    assert.strictEqual(r.conflicts.length, 1);
+    const { facts } = s.rt.ledger(s.meta.id).view();
+    assert.strictEqual(facts.get(owner.id).status, 'active', 'the owner fact is never superseded');
+    const reported = facts.get(r.conflicts[0].reportedFactId);
+    assert.deepStrictEqual([reported.provenance, reported.value, reported.source.kind, reported.source.ref, reported.supersedes], ['external-agent', 2.5, 'call', `sources/fake-agent/${jobId}/r1.json`, null]);
+    const unknown = facts.get(r.conflicts[0].unknownId);
+    assert.deepStrictEqual([unknown.provenance, unknown.loadBearing, unknown.answerable], ['unknown', true, 'owner']);
+    assert.match(unknown.stmt, /^Conflict: The owner says the lot is 2\.12 acres vs fake-agent reported 2\.5 acres$/);
+    const gate = recommendationGate({ status: 'active', claims: [{ text: 'The lot is 2.12 acres', factIds: [owner.id] }], facts });
+    assert.strictEqual(gate.ok, false);
+  });
+
+  it('saves each record once and advances the cursor', async () => {
+    const s = await setup();
+    const jobId = await callWithExpect(s, undefined);
+    s.ctl.records.set('ext-1', [{ id: 'r1', contactId: 'c1', kind: 'call', summary: 'Left a message', outcome: 'voicemail' }]);
+    assert.strictEqual((await fetchResults(s.reg, { caseId: s.meta.id }, { jobId })).saved.length, 1);
+    s.ctl.records.get('ext-1').push({ id: 'r2', contactId: 'c1', kind: 'call', summary: 'Spoke to the broker', outcome: 'answered' });
+    const again = await fetchResults(s.reg, { caseId: s.meta.id }, { jobId });
+    assert.deepStrictEqual(again.saved, [`sources/fake-agent/${jobId}/r2.json`]);
+    assert.deepStrictEqual(s.ctl.calls.filter((c) => c[0] === 'results').map((c) => c[2]), [null, 'r1']);
+    const facts = [...s.rt.ledger(s.meta.id).view().facts.values()].filter((f) => f.provenance === 'external-agent');
+    assert.deepStrictEqual(facts.map((f) => [f.subject, f.attr, f.value, f.status]), [
+      [`job:${jobId}`, 'record-r1', 'voicemail', 'active'], [`job:${jobId}`, 'record-r2', 'answered', 'active']
+    ]);
+  });
+
+  it('results are refused while the executor is stale', async () => {
+    const s = await setup();
+    const jobId = await callWithExpect(s, undefined);
+    s.ctl.statusThrows = 1;
+    await s.reg.refreshCase(s.meta.id, { force: true });
+    assert.match((await fetchResults(s.reg, { caseId: s.meta.id }, { jobId })).error, /^fake-agent is unreachable since .*; results cannot be trusted until it answers$/);
+    const status = await jobStatus(s.reg, { caseId: s.meta.id }, { jobId });
+    assert.deepStrictEqual([status.ok, status.jobs[0].jobId, status.jobs[0].stale], [true, jobId, false], 'a successful status poll clears it');
+  });
+
+  it('returns workflow facts as proposals, never asserted', async () => {
+    const s = await setup();
+    const job = new JobStore(s.meta.dir).create({ caseId: s.meta.id, executor: 'workflow', kind: 'workflow', state: 'done', copied: true });
+    const dir = path.join(s.meta.dir, 'sources', 'workflow', job.id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 't1.md'), 'Found it.\n\n```facts\n[{"stmt":"Zoned R-1","subject":"lot","attr":"zoning","value":"R-1","source":{"kind":"url","ref":"https://records.example.org/zoning"}}]\n```\n');
+    const before = s.rt.ledger(s.meta.id).view().facts.size;
+    const r = await fetchResults(s.reg, { caseId: s.meta.id }, { jobId: job.id });
+    assert.deepStrictEqual(r.proposedFacts, [{ stmt: 'Zoned R-1', subject: 'lot', attr: 'zoning', value: 'R-1', source: { kind: 'url', ref: 'https://records.example.org/zoning' }, sourceRef: `sources/workflow/${job.id}/t1.md` }]);
+    assert.strictEqual(s.rt.ledger(s.meta.id).view().facts.size, before);
+  });
+
+  it('Ledger refuses external-agent', async () => {
+    const s = await setup();
+    const r = await LedgerTool.execute({
+      action: 'assert', stmt: 'The broker says 2.5 acres', subject: 'lot', attr: 'size', value: '2.5', provenance: 'external-agent', source: { kind: 'call', ref: 'sources/fake-agent/job-0001/r1.json' }
+    }, { caseContext: s.caseContext });
+    assert.deepStrictEqual(r, { ok: false, error: 'external-agent facts are written only by Executor results.' });
+    assert.ok(!LedgerTool.parameters.properties.provenance.enum.includes('external-agent'));
+    const ledger = new FactLedger(s.meta.dir, { executorIds: new Set(['fake-agent']) });
+    assert.throws(() => ledger.assert({ stmt: 'x', subject: 'a', attr: 'b', provenance: 'external-agent', source: { kind: 'url', ref: 'sources/fake-agent/x.json' } }), /written only by Executor results/);
+    assert.throws(() => ledger.assert({ stmt: 'x', subject: 'a', attr: 'b', provenance: 'external-agent', source: { kind: 'call', ref: 'sources/other-agent/x.json' } }), /written only by Executor results/);
+    assert.throws(() => new FactLedger(s.meta.dir).assert({ stmt: 'x', subject: 'a', attr: 'b', provenance: 'external-agent', source: { kind: 'call', ref: 'notes/x.json' } }), /written only by Executor results/);
+    assert.strictEqual(ledger.assert({ stmt: 'x', subject: 'a', attr: 'b', provenance: 'external-agent', source: { kind: 'api', ref: 'sources/fake-agent/job-0001/r9.json' } }).provenance, 'external-agent');
+  });
+
+  it('draft spend is charged', async () => {
+    const tracked = [];
+    const s = await setup({ registryOptions: { usageTracker: { record: (ev) => { tracked.push(ev); return { ...ev, cost: ev.costUsd, totalTokens: 120 }; } } } });
+    const envelopeId = await approvedEnvelope(s);
+    const prompts = [];
+    s.rt.routedProvider = (turn, spec) => ({
+      getProviderName: () => 'stub', getDefaultModel: () => 'stub-1',
+      sendMessage: async (messages) => {
+        prompts.push([spec, messages[0].content]);
+        return { content: `Hello about the {{${s.acres.id}}} lot. Offers are due by Friday November 14.`, llmMetrics: { inputTokens: 100, outputTokens: 20, costUsd: 0.02 } };
+      }
+    });
+    const r = await draftPayload(s.reg, { caseId: s.meta.id }, { executor: 'fake-agent', envelopeId, instructions: 'Keep it short.' });
+    assert.strictEqual(r.ok, true, r.error);
+    assert.deepStrictEqual(prompts[0][0], { role: 'draft' });
+    assert.match(prompts[0][1], new RegExp(`\\{\\{${s.acres.id}\\}\\}: Lot size is 2\\.12 acres`));
+    assert.match(prompts[0][1], /Say who you are calling for\./);
+    assert.deepStrictEqual(tracked.map((e) => [e.provider, e.model, e.costUsd]), [['stub', 'stub-1', 0.02]]);
+    assert.strictEqual(s.rt.budget(s.meta.id).status().usd.spent, 0.02);
+    assert.strictEqual(r.gate.ok, false);
+    assert.ok(r.gate.blocked.some((b) => b.reason === 'unsourced-constraint'));
+    assert.strictEqual(r.gate.rendered, 'Hello about the 2.12 acres lot. Offers are due by Friday November 14.');
+    assert.strictEqual(s.ctl.calls.filter((c) => c[0] === 'submit').length, 0, 'nothing is sent');
+  });
+});
+
+// ---- Task 12 carries: adapter text is bounded; one origin check per fill ----
+
+describe('Executor results and status bound adapter text', () => {
+  const { fetchResults, jobStatus } = require('../src/cases/executors/results');
+
+  it('status caps contacts and cuts adapter text', async () => {
+    const s = await setup();
+    const long = 'x'.repeat(5000);
+    const contacts = Array.from({ length: 250 }, (_, i) => ({ id: `c${i}`, address: long, nested: { a: 1 } }));
+    const job = new JobStore(s.meta.dir).create({ caseId: s.meta.id, executor: 'fake-agent', kind: 'external', state: 'failed', externalId: 'ext-9', contacts, reason: long, error: long, lastChange: long });
+    const r = await jobStatus(s.reg, { caseId: s.meta.id }, { jobId: job.id });
+    assert.strictEqual(r.ok, true, r.error);
+    const j = r.jobs[0];
+    assert.strictEqual(j.contacts.length, 200);
+    assert.strictEqual(j.contacts[0].address.length, 300);
+    assert.strictEqual(j.contacts[0].nested, undefined);
+    assert.ok(j.reason.length <= 300 && j.lastChange.length <= 300);
+  });
+
+  it('results cut adapter text before it reaches the ledger or the reply', async () => {
+    const long = 'y'.repeat(5000);
+    const s = await setup({ agent: { recordToFacts: () => [{ stmt: long, subject: 'lot', attr: 'size', value: long, unit: long }] } });
+    const envelopeId = await approvedEnvelope(s);
+    const sent = await submit(s, { executor: 'fake-agent', envelopeId, payload: call(s) });
+    assert.strictEqual(sent.ok, true, sent.error);
+    s.ctl.records.set('ext-1', [{ id: 'r1', contactId: 'c1', kind: 'call', summary: long, outcome: long }]);
+    const r = await fetchResults(s.reg, { caseId: s.meta.id }, { jobId: sent.jobId });
+    assert.strictEqual(r.ok, true, r.error);
+    const f = s.rt.ledger(s.meta.id).view().facts.get(r.facts[0]);
+    assert.deepStrictEqual([f.provenance, f.stmt.length, f.value.length, f.unit.length], ['external-agent', 300, 300, 300]);
+  });
+
+  it('the default record fact is cut too, and a throwing recordToFacts falls back to it', async () => {
+    const long = 'z'.repeat(5000);
+    const s = await setup({ agent: { recordToFacts: () => { throw new Error('bad record'); } } });
+    const envelopeId = await approvedEnvelope(s);
+    const sent = await submit(s, { executor: 'fake-agent', envelopeId, payload: call(s) });
+    s.ctl.records.set('ext-1', [{ id: 'r1', contactId: 'c1', kind: 'call', summary: long, outcome: long }]);
+    const r = await fetchResults(s.reg, { caseId: s.meta.id }, { jobId: sent.jobId });
+    assert.strictEqual(r.ok, true, r.error);
+    const f = s.rt.ledger(s.meta.id).view().facts.get(r.facts[0]);
+    assert.deepStrictEqual([f.subject, f.attr, f.stmt.length, f.value.length], [`job:${sent.jobId}`, 'record-r1', 300, 300]);
+  });
+});
+
+describe('Executor.submit browser origin per field', () => {
+  it('checks the origin before each fill: a navigation by the first fill never receives the second value', async () => {
+    const calls = [];
+    let currentUrl = null;
+    const act = (name, effect = null, result = {}) => async (params) => {
+      calls.push([name, params]);
+      if (effect) effect(params);
+      return { ok: true, ...(typeof result === 'function' ? result() : result) };
+    };
+    const browserActions = {
+      status: act('status', null, () => ({ running: false, currentUrl })), start: act('start'),
+      navigate: act('navigate', (p) => { currentUrl = p.url; }), fill_credentials: act('fill_credentials'),
+      fill: act('fill', () => { currentUrl = 'https://forms.example.net/collect'; }),
+      click: act('click'), wait_for: act('wait_for'), content: act('content', null, { html: '' })
+    };
+    const s = await setup({ registryOptions: { browserActions } });
+    const r0 = await envelopeOps.requestEnvelope(s.reg, { caseId: s.meta.id }, {
+      executor: 'browser', intent: 'File the county permit form', recipients: { allow: ['https://permits.example.com/apply'] },
+      facts: [s.acres.id], caps: { usd: 5, contacts: 1, attemptsPerContact: 1 }, window: { start: '2026-10-26', end: '2026-10-30' }
+    });
+    await s.rt.answerQuestion(s.meta.id, r0.questionId, { channel: 'in-app', optionId: 'approve' });
+    envelopeOps.syncEnvelopes(s.reg, s.meta.id);
+    const r = await submit(s, {
+      executor: 'browser', envelopeId: r0.envelopeId,
+      payload: JSON.stringify({ url: 'https://permits.example.com/apply', fields: [{ selector: '#name', value: 'Lakeside lot' }, { selector: '#acres', value: `{{${s.acres.id}}}` }], submit: { selector: '#go' } })
+    });
+    assert.strictEqual(r.ok, false);
+    assert.match(r.error, /before a field fill the page is https:\/\/forms\.example\.net\/collect/);
+    assert.deepStrictEqual(calls.filter((c) => c[0] === 'fill').map((c) => c[1].selector), ['#name'], 'the second value never reached the page');
+    assert.strictEqual(calls.some((c) => c[0] === 'click'), false);
   });
 });

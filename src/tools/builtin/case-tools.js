@@ -13,6 +13,17 @@ const NO_CASE = Object.freeze({
   error: 'This chat is not attached to a case. The owner can attach one from Chat Info → Case.'
 });
 
+// Ops memory (cases stage 3 §3.11) lives on the executor registry, when the
+// host has one.
+function opsMemoryOf(ctx) {
+  try {
+    const registry = ctx?.runtime?.host?.getExecutorRegistry?.();
+    return registry ? registry.opsMemory : null;
+  } catch {
+    return null;
+  }
+}
+
 const SOURCE_KINDS = ['url', 'document', 'call', 'api'];
 const VALUE_DESCRIPTION = 'numbers and lists as JSON text';
 // Brief fields whose value is text: never parse these, so "2027" stays text.
@@ -78,7 +89,7 @@ function staleDirection(ctx, messageIndex) {
 
 const LedgerTool = acceptAnyValue(new Tool({
   name: 'Ledger',
-  description: 'Read and write the case fact ledger. assert: a fact with a source (provenance "sourced" with a source object; "user" for what the owner actually said, which requires a "quote" of their own words matching this chat\'s owner messages; or "external-agent" with a source). infer: your own derivation, with basis fact ids. unknown: something not known, with what it changes, who can answer, and how. retract: withdraw a fact. query: list facts. Corrections supersede; nothing is edited in place.',
+  description: 'Read and write the case fact ledger. assert: a fact with a source (provenance "sourced" with a source object; "user" for what the owner actually said, which requires a "quote" of their own words matching this chat\'s owner messages. external-agent facts are written only by Executor results). infer: your own derivation, with basis fact ids. unknown: something not known, with what it changes, who can answer, and how. retract: withdraw a fact. query: list facts. Corrections supersede; nothing is edited in place.',
   parameters: {
     type: 'object',
     properties: {
@@ -88,7 +99,7 @@ const LedgerTool = acceptAnyValue(new Tool({
       attr: { type: 'string', description: 'Which attribute, e.g. "acreage", "payoff"' },
       value: { type: 'string', description: `The value, if any; ${VALUE_DESCRIPTION}` },
       unit: { type: 'string' },
-      provenance: { type: 'string', enum: ['sourced', 'user', 'external-agent'] },
+      provenance: { type: 'string', enum: ['sourced', 'user'] },
       source: {
         type: 'object',
         description: 'Where the fact comes from. Not used for provenance "user", which is sourced from the quote.',
@@ -143,7 +154,10 @@ const LedgerTool = acceptAnyValue(new Tool({
         } else if (input.source?.kind && !SOURCE_KINDS.includes(input.source.kind)) {
           return { ok: false, error: `Source kind "${input.source.kind}" is reserved for the host.` };
         }
+        // After the owner-quote and user-message checks, so their errors win.
+        if (input.provenance === 'external-agent') return { ok: false, error: 'external-agent facts are written only by Executor results.' };
         const fact = ledger.assert(input);
+        opsMemoryOf(ctx)?.afterAssert(fact, { caseId: ctx.caseId, caseTitle: ctx.title, facts: ledger.view().facts });
         if (fact.provenance !== 'user') return { ok: true, fact };
         const effect = ctx.runtime.applyOwnerFact(ctx.caseId, fact);
         return {
@@ -185,7 +199,11 @@ const LedgerTool = acceptAnyValue(new Tool({
       }
       case 'retract':
         if (!params.id || !params.reason) return { ok: false, error: 'retract needs "id" and "reason".' };
-        return { ok: true, fact: ledger.retract(params.id, params.reason) };
+        {
+          const retracted = ledger.retract(params.id, params.reason);
+          opsMemoryOf(ctx)?.retract(ctx.caseId, params.id);
+          return { ok: true, fact: retracted };
+        }
       case 'query':
         return { ok: true, facts: ledger.query(params.filter || {}) };
       default:

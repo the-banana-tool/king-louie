@@ -171,7 +171,12 @@ async function submitBrowser(reg, { caseId }, { entry, job, notes }) {
     await run('navigate', { url: p.url });
     await onOrigin('after navigate');
     if (p.login === true) await run('fill_credentials', { host: new URL(p.url).hostname.toLowerCase(), profile: CASES_BROWSER_PROFILE });
-    for (const f of p.fields || []) await run('fill', { selector: f.selector, text: f.value });
+    // Before each fill: a navigation set off by filling one field must not
+    // receive the values of the fields after it.
+    for (const f of p.fields || []) {
+      await onOrigin('before a field fill');
+      await run('fill', { selector: f.selector, text: f.value });
+    }
     await onOrigin('before the submit click');
     await run('click', { selector: p.submit.selector });
     clicked = true;

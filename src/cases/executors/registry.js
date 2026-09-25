@@ -16,6 +16,7 @@ const { JobStore, readSnapshot, OPEN_STATES } = require('./job-store');
 const jobs = require('./jobs');
 const envelopeOps = require('./envelope-ops');
 const turnHook = require('./turn-hook');
+const { OpsMemory, renderOpsNotes } = require('../ops-memory');
 
 const log = createLogger('executors');
 const AUTHORITY_RANK = Object.freeze({ none: 0, envelope: 1, signed: 2 });
@@ -559,7 +560,34 @@ class ExecutorRegistry {
     };
   }
 
-  // ---- operations (Tasks 11–12) ----
+  // ---- Ops memory (Task 12) ----
+
+  get opsMemory() {
+    if (!this._opsMemory) {
+      this._opsMemory = new OpsMemory(this.dataDir, {
+        now: this.now,
+        resolveFact: (caseId, factId) => this.caseRuntime.ledger(caseId).view().facts.get(factId) || null
+      });
+    }
+    return this._opsMemory;
+  }
+
+  // Keys: the executors themselves and the origins of their baseUrl.
+  opsNotes(caseId, executorIds = []) {
+    const keys = new Set(executorIds);
+    const configured = this._configured();
+    for (const id of executorIds) {
+      try {
+        const base = configured[id]?.config?.baseUrl;
+        if (base) keys.add(new URL(base).origin);
+      } catch {
+        // not a URL
+      }
+    }
+    return renderOpsNotes(this.opsMemory.entriesFor([...keys], { max: this.settings().opsMemory.maxEntries, excludeCaseId: caseId }));
+  }
+
+  // ---- operations (Task 13 adds none; the tools call the modules directly) ----
 }
 
 module.exports = { ExecutorRegistry, intersectWindow, AUTHORITY_RANK };
