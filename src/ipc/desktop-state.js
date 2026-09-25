@@ -48,7 +48,16 @@ function openDesktopState(userDataDir, safeStorage, { storeFactory = null, platf
     },
     get installId() { return store.get('installId'); },
     get pairing() { return store.get('pairing') || null; },
-    setPairing(pairing) { store.set('pairing', pairing); },
+    setPairing(pairing) {
+      if (!pairing || typeof pairing !== 'object') throw new Error('setPairing needs a pairing record');
+      if (Object.prototype.hasOwnProperty.call(pairing, 'privateKey')) {
+        throw new Error('setPairing refuses a record with a raw privateKey field; seal it first');
+      }
+      if (typeof pairing.privateKeySealed !== 'string' || !pairing.privateKeySealed) {
+        throw new Error('setPairing needs a sealed privateKeySealed field');
+      }
+      store.set('pairing', pairing);
+    },
     clearPairing() { store.set('pairing', null); },
     get pendingPair() { return store.get('pendingPair') || null; },
     setPendingPair(pending) { store.set('pendingPair', pending); },
@@ -57,7 +66,8 @@ function openDesktopState(userDataDir, safeStorage, { storeFactory = null, platf
     secureStorageUsable: usable,
     seal(text) {
       if (!usable()) throw unavailable();
-      return safeStorage.encryptString(String(text)).toString('base64');
+      if (typeof text !== 'string') throw new Error('seal() needs a string');
+      return safeStorage.encryptString(text).toString('base64');
     },
     unseal(sealedText) {
       if (!usable()) throw unavailable();
