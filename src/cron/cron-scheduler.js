@@ -15,7 +15,8 @@ class CronScheduler {
   }
 
   start() {
-    if (this.timer) return;
+    // A paused scheduler stays paused: nothing restarts it for this process.
+    if (this.timer || this.paused) return;
     this.timer = setInterval(() => this.tick(), this.tickIntervalMs);
     setTimeout(() => this.tick(), 100);
   }

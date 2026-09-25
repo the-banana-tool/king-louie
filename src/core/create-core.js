@@ -2394,7 +2394,12 @@ function createCore(deps = {}) {
 
     cronExecutor = new CronExecutor(agentExecutorAdapter, sessionManager, gatewayServer);
     cronScheduler = new CronScheduler(cronStore, cronExecutor);
-    cronScheduler.start();
+    // deps.cronStartPaused (fleet stage 7, --kl-standalone-once): the
+    // scheduler is built paused and never started, so no tick can fire while
+    // start() is still awaiting skills/gateway below and a live service owns
+    // cron. Only `=== true` pauses.
+    if (deps.cronStartPaused === true) cronScheduler.pause();
+    else cronScheduler.start();
 
     webhookRegistry = new WebhookRegistry(store);
     webhookHandler = new WebhookHandler(webhookRegistry, sessionManager, agentExecutorAdapter);

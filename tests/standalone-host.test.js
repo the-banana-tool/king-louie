@@ -10,6 +10,8 @@ const { isLocalDesktopEvent } = require('../src/core/origin');
 const { openDesktopState } = require('../src/ipc/desktop-state');
 const { startStandaloneHost, markingIpcMain } = require('../src/ipc/standalone-host');
 const CronScheduler = require('../src/cron/cron-scheduler');
+const CronExecutor = require('../src/cron/cron-executor');
+const SkillLoader = require('../src/skills/skill-loader');
 
 const dirs = [];
 const hosts = [];
@@ -99,6 +101,14 @@ describe('CronScheduler.pause', () => {
     assert.strictEqual(scheduler.timer, null, 'pause() cleared the running timer');
   });
 
+  it('start() after pause() starts nothing', () => {
+    const store = { list: () => [], update: async () => {} };
+    const scheduler = new CronScheduler(store, { execute: async () => ({ ok: true }) });
+    scheduler.pause();
+    scheduler.start();
+    assert.strictEqual(scheduler.timer, null);
+  });
+
   it('stop() still works after pause()', () => {
     const store = { list: () => [], update: async () => {} };
     const scheduler = new CronScheduler(store, { execute: async () => ({ ok: true }) });
@@ -126,9 +136,59 @@ describe('startStandaloneHost', () => {
 
   it('--kl-standalone-once starts with channels, gateway and mesh off and cron paused', async () => {
     const { host, captured } = startHost({ standaloneOnce: true });
-    assert.deepStrictEqual(captured().features, { channels: false, gateway: false, mesh: false });
+    assert.deepStrictEqual(captured().features, { channels: false, gateway: false, mesh: false, webhooks: false });
+    assert.strictEqual(captured().cronStartPaused, true);
     await host.start();
     assert.strictEqual(host.core.context.getCronScheduler().paused, true);
+  });
+
+  // Final review I1: the scheduler used to be started inside core.start()
+  // (first tick at 100 ms) and paused only after start() returned, so a job
+  // due at launch ran whenever skills took longer than that to load. Built
+  // paused, it never ticks. The control run (a normal standalone launch)
+  // proves the same setup does run the job, so the test can tell.
+  async function runWithDueJobAndSlowSkills(standaloneOnce) {
+    const realLoadAll = SkillLoader.prototype.loadAll;
+    const realExecute = CronExecutor.prototype.execute;
+    let executed = 0;
+    let loadingDone = false;
+    let executedWhileLoading = 0;
+    SkillLoader.prototype.loadAll = async function slowLoadAll(...args) {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      const n = await realLoadAll.apply(this, args);
+      loadingDone = true;
+      return n;
+    };
+    CronExecutor.prototype.execute = async function countingExecute() {
+      executed += 1;
+      if (!loadingDone) executedWhileLoading += 1;
+      return { ok: true };
+    };
+    try {
+      const { host, captured } = startHost({ standaloneOnce });
+      const cronDir = path.join(captured().paths.dataDir, 'cron');
+      fs.mkdirSync(cronDir, { recursive: true });
+      const job = { id: 'due-at-launch', name: 'due', enabled: true, schedule: { kind: 'every', everyMs: 60000 }, payload: { message: 'hi' }, state: { lastRunAtMs: 0 } };
+      fs.writeFileSync(path.join(cronDir, 'jobs.json'), JSON.stringify({ [job.id]: job }));
+      await host.start();
+      // Give an already-scheduled tick time to land after start() returns.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      const scheduler = host.core.context.getCronScheduler();
+      scheduler.stop();
+      return { executed, executedWhileLoading, scheduler };
+    } finally {
+      SkillLoader.prototype.loadAll = realLoadAll;
+      CronExecutor.prototype.execute = realExecute;
+    }
+  }
+
+  it('--kl-standalone-once never runs a job due at launch, even with slow skill loading', async () => {
+    const control = await runWithDueJobAndSlowSkills(false);
+    assert.ok(control.executedWhileLoading >= 1, 'control: a normal launch runs the due job while skills load');
+    const once = await runWithDueJobAndSlowSkills(true);
+    assert.strictEqual(once.executed, 0, 'the standalone-once session ran no cron job');
+    assert.strictEqual(once.scheduler.paused, true);
+    assert.strictEqual(once.scheduler.timer, null, 'the scheduler was never started');
   });
 
   // Fix round 1, I1: a --kl-standalone-once session runs next to a live

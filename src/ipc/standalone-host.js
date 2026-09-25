@@ -58,7 +58,9 @@ function startStandaloneHost(deps) {
     uiToastChannel: new UiToastChannel({ Notification }),
     builtinSkillsDir: path.join(appDir, 'skills'),
     // One session next to a running service: nothing here may act for it.
-    ...(standaloneOnce ? { features: { channels: false, gateway: false, mesh: false } } : {})
+    // Cron is built paused (never started) so no job can fire while
+    // core.start() is still loading skills.
+    ...(standaloneOnce ? { features: { channels: false, gateway: false, mesh: false, webhooks: false }, cronStartPaused: true } : {})
   });
 
   const controller = createDesktopController({
@@ -96,10 +98,8 @@ function startStandaloneHost(deps) {
     async start() {
       try {
         await core.start();
-        // Pause as early as possible: core.start() is what constructs the
-        // cron scheduler, so this is the first moment it can be paused. A
-        // --kl-standalone-once session must not act as a second consumer of
-        // cron next to the live service.
+        // Belt and braces: the scheduler was already built paused
+        // (cronStartPaused), so this is a no-op unless a core ignored it.
         if (standaloneOnce) pauseCron();
         // Notify the renderer that mesh is ready so it can refresh status.
         const meshContext = core.getMeshContext();
