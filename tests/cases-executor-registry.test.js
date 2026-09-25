@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const fx = require('./helpers/executor-fixtures');
 const { ExecutorUnavailableError, JobStore } = require('../src/cases/executors');
+const { readSnapshot } = require('../src/cases/executors/job-store');
 const { writeJsonAtomic, readJsonSafe } = require('../src/cases/executors/util');
 
 after(fx.cleanup);
@@ -60,6 +61,16 @@ describe('resolution', () => {
     const env = fx.setupExecutors({ executors: { entries: { 'Bad Id': { kind: 'external-agent', package: 'x' } } } });
     const bad = env.registry.list().find((e) => e.id === 'Bad Id');
     assert.deepStrictEqual([bad.available, bad.reason], [false, 'executor ids are lowercase slugs of 2 to 40 characters']);
+  });
+
+  it('skips configured ids whose entry is not an object', () => {
+    const env = fx.setupExecutors({ executors: { entries: { 'x-y': null, 'str-entry': 'fake-agent', 'arr-entry': [1] } } });
+    const list = env.registry.list();
+    assert.ok(list.every((e) => e && typeof e.id === 'string'), 'no null rows');
+    assert.deepStrictEqual(list.map((e) => e.id), ['bash', 'files', 'web', 'browser', 'workflow', 'runbook', 'owner']);
+    assert.strictEqual(env.registry.get('x-y'), null);
+    const svc = fx.setupExecutors({ registryOptions: { isService: true, adminExecutors: { entries: { 'x-y': null }, packageRoots: 'notarray' } } });
+    assert.strictEqual(svc.registry.list().length, 7);
   });
 
   it('narrows with a per-case override and ignores anything that widens', async () => {
@@ -131,6 +142,25 @@ describe('adapters and brief rules', () => {
     await assert.rejects(env.registry.adapter('nope'), /nope is unavailable: not a known executor/);
   });
 
+  it('reloads the adapter when the resolved config changes, with no secret in the cache key', async () => {
+    const vault = fx.fakeVault({ 'errands-token': 'tok-secret-one' });
+    const env = fx.setupExecutors({ registryOptions: { vault } });
+    const ctl = fx.withFakeAgent(env);
+    const a = await env.registry.adapter('fake-agent');
+    assert.strictEqual(ctl.config.token, 'tok-secret-one');
+    vault.set('errands-token', 'tok-secret-two');
+    const b = await env.registry.adapter('fake-agent');
+    assert.notStrictEqual(b, a, 'a rotated vault secret reloads');
+    assert.strictEqual(ctl.config.token, 'tok-secret-two');
+    env.settings.executors.entries['fake-agent'].config.baseUrl = 'https://errands2.example.com';
+    const c = await env.registry.adapter('fake-agent');
+    assert.notStrictEqual(c, b, 'a changed baseUrl reloads');
+    assert.strictEqual(await env.registry.adapter('fake-agent'), c, 'unchanged config stays cached');
+    const key = env.registry._adapters.get('fake-agent').key;
+    assert.match(key, /^[0-9a-f]{64}:[0-9a-f]{64}$/);
+    assert.ok(!key.includes('tok-secret') && !key.includes('errands2'), 'no config value in the key');
+  });
+
   it('orders brief rules adapter, override, extra sources, without duplicates', async () => {
     const env = fx.setupExecutors();
     fx.withFakeAgent(env, 'fake-agent', { briefRules: ['Say who you are calling for.', 'Shared rule'] });
@@ -155,6 +185,37 @@ describe('jobs', () => {
     assert.deepStrictEqual([a.id, b.id], ['job-0001', 'job-0002']);
     assert.strictEqual(store.update('job-0001', { state: 'running' }).state, 'running');
     assert.deepStrictEqual(env.registry.jobs(c.id).list().map((j) => j.id), ['job-0001', 'job-0002']);
+  });
+
+  it('refuses unknown job states and moves out of a terminal state', async () => {
+    const env = fx.setupExecutors();
+    const c = await env.runtime.createCase({ title: 'Lakeside lot', objective: 'Convert the lot to cash' });
+    const store = new JobStore(c.dir);
+    const j = store.create({ executor: 'fake-agent', state: 'submitting' });
+    assert.throws(() => store.update(j.id, { state: 'bogus' }), (err) => err.code === 'JOB_STATE' && /unknown state "bogus"/.test(err.message));
+    assert.throws(() => store.create({ state: 'bogus' }), /unknown state "bogus"/);
+    store.update(j.id, { state: 'cancelled', reason: 'owner' });
+    assert.throws(() => store.update(j.id, { state: 'running' }), /job-0001 is cancelled and cannot move to running/);
+    assert.throws(() => store.write({ ...store.get(j.id), state: 'running' }), /job-0001 is cancelled and cannot move to running/);
+    assert.strictEqual(store.get(j.id).state, 'cancelled', 'nothing was written');
+    assert.strictEqual(store.update(j.id, { copied: true }).copied, true, 'a terminal job can still take other fields');
+    assert.strictEqual(store.update(j.id, { state: 'cancelled', note: 'x' }).state, 'cancelled');
+  });
+
+  it('list and readSnapshot skip unreadable entries; liveState skips non-object rows', async () => {
+    const env = fx.setupExecutors();
+    const c = await env.runtime.createCase({ title: 'Lakeside lot', objective: 'Convert the lot to cash' });
+    const store = new JobStore(c.dir);
+    store.create({ executor: 'fake-agent', state: 'running' });
+    fs.mkdirSync(path.join(c.dir, '.kl', 'jobs', 'job-0002.json'));
+    store.create({ executor: 'fake-agent', state: 'running' });
+    assert.deepStrictEqual(store.list().map((j) => j.id), ['job-0001', 'job-0003']);
+    fs.mkdirSync(path.join(c.dir, '.kl', 'executors.json'), { recursive: true });
+    assert.deepStrictEqual(readSnapshot(c.dir), {});
+    writeJsonAtomic(path.join(env.dataDir, 'executors', 'jobs.json'), {
+      'a/job-0001': null, 'a/job-0002': 'x', 'b/job-0001': { executor: 'browser', state: 'running' }
+    });
+    assert.deepStrictEqual(env.registry.liveState().map((r) => `${r.caseId}/${r.jobId}`), ['b/job-0001']);
   });
 
   it('liveState lists open jobs across cases in the C5 shape', async () => {
@@ -210,6 +271,49 @@ describe('global daily cap', () => {
     const again = await restarted.reserveContacts('fake-agent', 1, { caseId: 'case-9' });
     assert.strictEqual(again.ok, false);
     assert.strictEqual(again.error, 'fake-agent daily cap 5 reached (used by 3 cases); resets 2026-10-27 00:00 UTC');
+  });
+
+  it('a time-zone change does not reset the day; the new zone applies from the next rollover', async () => {
+    const env = fx.setupExecutors();
+    fx.withFakeAgent(env);
+    assert.strictEqual((await env.registry.reserveContacts('fake-agent', 5, { caseId: 'case-a' })).ok, true);
+    env.settings.cases.timeZone = 'Pacific/Kiritimati';
+    const flipped = await env.registry.reserveContacts('fake-agent', 5, { caseId: 'case-a' });
+    assert.deepStrictEqual([flipped.ok, flipped.used, flipped.day], [false, 5, '2026-10-26']);
+    assert.match(flipped.error, /resets 2026-10-27 00:00 UTC$/);
+    assert.strictEqual(env.registry.globalRemaining('fake-agent'), 0);
+    assert.deepStrictEqual(await env.registry.releaseContacts('fake-agent', 1, { caseId: 'case-a' }), { ok: true, released: 1 });
+    env.settings.cases.timeZone = 'UTC';
+    assert.strictEqual((await env.registry.reserveContacts('fake-agent', 2, { caseId: 'case-a' })).ok, false);
+    env.settings.cases.timeZone = 'Pacific/Kiritimati';
+    // The UTC day ends: the record rolls over and adopts the configured zone.
+    env.clock.now = new Date('2026-10-27T00:30:00Z');
+    assert.strictEqual(env.registry.globalRemaining('fake-agent'), 5);
+    const next = await env.registry.reserveContacts('fake-agent', 1, { caseId: 'case-a' });
+    assert.deepStrictEqual(next, { ok: true, used: 1, limit: 5, day: '2026-10-27' });
+    const usage = readJsonSafe(path.join(env.dataDir, 'executors', 'usage.json'), null)['fake-agent'];
+    assert.deepStrictEqual([usage.day, usage.tz], ['2026-10-27', 'Pacific/Kiritimati']);
+  });
+
+  it('refuses an unknown executor and a non-finite count without storing anything', async () => {
+    const env = fx.setupExecutors();
+    assert.deepStrictEqual(await env.registry.reserveContacts('nope', 3, { caseId: 'case-a' }), {
+      ok: false, used: 0, limit: null, day: null, error: 'not a known executor'
+    });
+    const inf = await env.registry.reserveContacts('browser', Infinity, { caseId: 'case-a' });
+    assert.strictEqual(inf.ok, false);
+    assert.strictEqual(fs.existsSync(path.join(env.dataDir, 'executors', 'usage.json')), false);
+    assert.strictEqual((await env.registry.reserveContacts('browser', 4, { caseId: 'case-a' })).used, 4);
+  });
+
+  it('a string used count in the usage file is read as a number', async () => {
+    const env = fx.setupExecutors();
+    fx.withFakeAgent(env);
+    writeJsonAtomic(path.join(env.dataDir, 'executors', 'usage.json'), { 'fake-agent': { day: '2026-10-26', tz: 'UTC', used: '4', byCase: { 'case-a': '4' } } });
+    assert.strictEqual(env.registry.globalRemaining('fake-agent'), 1);
+    const r = await env.registry.reserveContacts('fake-agent', 1, { caseId: 'case-a' });
+    assert.deepStrictEqual([r.ok, r.used], [true, 5]);
+    assert.deepStrictEqual(readJsonSafe(path.join(env.dataDir, 'executors', 'usage.json'), null)['fake-agent'].byCase, { 'case-a': 5 });
   });
 
   it('a corrupt usage file starts the day fresh instead of throwing', async () => {

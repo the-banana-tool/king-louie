@@ -9,7 +9,9 @@ const { createLogger } = require('../../logging');
 const { builtinEntry, BUILTIN_IDS, OUTBOUND_CAPABILITIES, LATENCIES, STATE_MODES, OUTBOUND_MODES } = require('./builtins');
 const { checkPackage, loadAdapter, ExecutorUnavailableError } = require('./package-loader');
 const { resolveExecutorSettings } = require('./defaults');
-const { readJsonSafe, writeJsonAtomic, localDate, pickTimeZone, addDays, EXECUTOR_ID_PATTERN } = require('./util');
+const {
+  readJsonSafe, writeJsonAtomic, localDate, pickTimeZone, addDays, EXECUTOR_ID_PATTERN, DAY_PATTERN, validTimeZone, sha256hex
+} = require('./util');
 const { JobStore, readSnapshot, OPEN_STATES } = require('./job-store');
 
 const log = createLogger('executors');
@@ -135,7 +137,9 @@ class ExecutorRegistry {
   }
 
   ids() {
-    const configured = Object.keys(this._configured()).filter((id) => !BUILTIN_IDS.includes(id)).sort();
+    // An entry that is not an object (null, a string) is not configured.
+    const conf = this._configured();
+    const configured = Object.keys(conf).filter((id) => !BUILTIN_IDS.includes(id) && isObject(conf[id])).sort();
     return [...BUILTIN_IDS, ...configured];
   }
 
@@ -309,7 +313,10 @@ class ExecutorRegistry {
     if (!entry) throw new ExecutorUnavailableError(id, 'not a known executor');
     if (entry.kind !== 'external-agent') throw new ExecutorUnavailableError(id, 'only external-agent executors have an adapter');
     if (!entry.available) throw new ExecutorUnavailableError(id, entry.reason);
-    const key = entry._checked.computed;
+    // The package hash plus a hash of the resolved config, so a rotated vault
+    // secret or a changed baseUrl loads a new adapter. The key holds digests
+    // only, never a config value.
+    const key = `${entry._checked.computed}:${sha256hex(JSON.stringify(entry._checked.config || {}))}`;
     const cached = this._adapters.get(id);
     if (cached && cached.key === key) return cached.promise;
     const promise = loadAdapter(entry._checked, {
@@ -379,45 +386,65 @@ class ExecutorRegistry {
     return Number.isInteger(entry?.constraints?.contactsPerDay) ? entry.constraints.contactsPerDay : null;
   }
 
+  // Today's usage record for an executor, or null when there is none. A
+  // record stays current until its own local day ends in the zone it was
+  // opened in; only a new record adopts the configured zone. So changing the
+  // zone mid-day (the data dir decides it) never resets the count. Counts read
+  // from the file are coerced to whole numbers of 0 or more.
+  _currentUsage(rec) {
+    if (!isObject(rec) || !DAY_PATTERN.test(String(rec.day)) || !validTimeZone(rec.tz)) return null;
+    if (localDate(this.now(), rec.tz) !== rec.day) return null;
+    const count = (v) => {
+      const x = Number(v);
+      return Number.isFinite(x) && x > 0 ? Math.floor(x) : 0;
+    };
+    const byCase = {};
+    if (isObject(rec.byCase)) for (const [k, v] of Object.entries(rec.byCase)) byCase[k] = count(v);
+    return { day: rec.day, tz: rec.tz, limit: Number.isInteger(rec.limit) ? rec.limit : null, used: count(rec.used), byCase };
+  }
+
   async reserveContacts(id, n, { caseId = null } = {}) {
     const entry = this._resolve(id, null);
+    if (!entry) return { ok: false, used: 0, limit: null, day: null, error: 'not a known executor' };
     const limit = this._capLimit(entry);
-    const tz = this._capTimeZone(entry);
-    const add = Math.max(0, Math.floor(Number(n) || 0));
+    const count = Number(n);
+    if (!Number.isFinite(count)) {
+      return { ok: false, used: 0, limit, day: null, error: 'the number of contacts to reserve must be a finite number' };
+    }
+    const add = Math.max(0, Math.floor(count));
     return this.mutex.run('usage', async () => {
       const data = this._readObject(this.usagePath);
-      const day = localDate(this.now(), tz);
-      const rec = isObject(data[id]) && data[id].day === day ? data[id] : { day, tz, limit, used: 0, byCase: {} };
+      const tz = this._capTimeZone(entry);
+      const rec = this._currentUsage(data[id]) || { day: localDate(this.now(), tz), tz, limit, used: 0, byCase: {} };
       rec.limit = limit;
-      rec.tz = tz;
       if (limit !== null && rec.used + add > limit) {
-        const cases = Object.values(rec.byCase || {}).filter((v) => v > 0).length;
+        const cases = Object.values(rec.byCase).filter((v) => v > 0).length;
         return {
-          ok: false, used: rec.used, limit, day,
-          error: `${id} daily cap ${limit} reached (used by ${cases} case${cases === 1 ? '' : 's'}); resets ${addDays(day, 1)} 00:00 ${tz}`
+          ok: false, used: rec.used, limit, day: rec.day,
+          error: `${id} daily cap ${limit} reached (used by ${cases} case${cases === 1 ? '' : 's'}); resets ${addDays(rec.day, 1)} 00:00 ${rec.tz}`
         };
       }
       const key = caseId || 'none';
       rec.used += add;
-      rec.byCase = { ...(rec.byCase || {}), [key]: ((rec.byCase || {})[key] || 0) + add };
+      rec.byCase[key] = (rec.byCase[key] || 0) + add;
       data[id] = rec;
       writeJsonAtomic(this.usagePath, data);
-      return { ok: true, used: rec.used, limit, day };
+      return { ok: true, used: rec.used, limit, day: rec.day };
     });
   }
 
   async releaseContacts(id, n, { caseId = null } = {}) {
-    const entry = this._resolve(id, null);
-    const tz = this._capTimeZone(entry);
-    const sub = Math.max(0, Math.floor(Number(n) || 0));
+    const count = Number(n);
+    const sub = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
     return this.mutex.run('usage', async () => {
       const data = this._readObject(this.usagePath);
-      const rec = data[id];
-      if (!isObject(rec) || rec.day !== localDate(this.now(), tz) || !sub) return { ok: true, released: 0 };
+      const rec = this._currentUsage(data[id]);
+      if (!rec || !sub) return { ok: true, released: 0 };
       const key = caseId || 'none';
-      const take = Math.min(sub, (rec.byCase || {})[key] || 0, rec.used);
+      const take = Math.min(sub, rec.byCase[key] || 0, rec.used);
       rec.used -= take;
-      rec.byCase = { ...(rec.byCase || {}), [key]: ((rec.byCase || {})[key] || 0) - take };
+      rec.byCase[key] = (rec.byCase[key] || 0) - take;
+      data[id] = rec;
       writeJsonAtomic(this.usagePath, data);
       return { ok: true, released: take };
     });
@@ -427,9 +454,9 @@ class ExecutorRegistry {
     const entry = this._resolve(id, null);
     const limit = this._capLimit(entry);
     if (limit === null) return null;
-    const rec = this._readObject(this.usagePath)[id];
-    if (!isObject(rec) || rec.day !== localDate(this.now(), this._capTimeZone(entry))) return limit;
-    return Math.max(0, limit - (Number(rec.used) || 0));
+    const rec = this._currentUsage(this._readObject(this.usagePath)[id]);
+    if (!rec) return limit;
+    return Math.max(0, limit - rec.used);
   }
 
   // ---- Jobs ----
@@ -461,6 +488,7 @@ class ExecutorRegistry {
 
   liveState({ caseId = null } = {}) {
     return Object.entries(this._readObject(this.jobsPath))
+      .filter(([, row]) => isObject(row))
       .map(([key, row]) => {
         const i = key.lastIndexOf('/');
         return {
