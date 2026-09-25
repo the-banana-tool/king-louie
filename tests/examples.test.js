@@ -553,11 +553,24 @@ describe('Windows ACL script', () => {
       assert.match(fnBody(t, 'Set-KlAdminOwnedTree'), /-OwnerSid \$AdminsSecurityId/);
     });
 
-    it('enables SeTakeOwnership and SeRestore only after the elevation check', () => {
+    it('enables SeBackup, SeTakeOwnership and SeRestore only after the elevation check', () => {
       const t = text();
       const elevated = t.indexOf("throw 'Run this script from an elevated PowerShell");
-      assert.ok(elevated > -1 && elevated < t.indexOf("[KlNative]::EnablePrivilege('SeTakeOwnershipPrivilege')"));
-      assert.ok(t.includes("[KlNative]::EnablePrivilege('SeRestorePrivilege')"));
+      // SeBackup: LockItem's READ_CONTROL open must work on an item whose DACL shuts Administrators out.
+      for (const privilege of ['SeBackupPrivilege', 'SeTakeOwnershipPrivilege', 'SeRestorePrivilege']) {
+        const at = t.indexOf(`[KlNative]::EnablePrivilege('${privilege}')`);
+        assert.ok(elevated > -1 && at > elevated, `${privilege} is not enabled after the elevation check`);
+      }
+    });
+
+    it('checks -Base, the runner account and the Python venv through the functions the tests run', () => {
+      const t = text();
+      assert.match(t, /^\$baseFull = Resolve-KlBase -Base \$Base$/m);
+      assert.match(t, /^Assert-KlRunnerIsUser -Sid \$sid -Name \$Runner$/m);
+      assert.match(t, /^\s+\$runnerIsAdmin = Test-KlLocalAdministrator -Sid \$sid$/m);
+      assert.match(t, /^\s+Assert-KlAllUsersPythonVenv -PyvenvCfg \$pyvenvCfg -AllUsersRoot \$allUsersRoot$/m);
+      // The runner being an administrator is a warning, never a refusal.
+      assert.match(t, /if \(\$runnerIsAdmin\) \{\s*Write-Warning /);
     });
 
     it('prints each change of the walk under -WhatIf', () => {
@@ -781,6 +794,99 @@ $elevated = (New-Object Security.Principal.WindowsPrincipal([Security.Principal.
 @{ held = (Invoke-Try { [KlNative]::EnablePrivilege('SeChangeNotifyPrivilege') }); notHeld = (Invoke-Try { [KlNative]::EnablePrivilege('SeTakeOwnershipPrivilege') }); elevated = $elevated } | ConvertTo-Json -Compress`);
       assert.equal(out.held, null);
       if (!out.elevated) assert.match(out.notHeld || '', /does not hold SeTakeOwnershipPrivilege/);
+    });
+
+    it('verification refuses an item with a NULL DACL, naming it', () => {
+      const root = scratch();
+      const out = runWalk(root, String.raw`
+Lock-KlAdminOwnedTree -Path "$root\tree" -OwnerSid $me -TopRules $topRules
+$a = Get-Acl -LiteralPath "$root\tree\a\f.txt"
+$a.SetSecurityDescriptorSddlForm('D:NO_ACCESS_CONTROL')
+Set-Acl -LiteralPath "$root\tree\a\f.txt" -AclObject $a
+@{ err = (Invoke-Try { Confirm-KlTreeLockedDown -Path "$root\tree" -OwnerSid $me }) } | ConvertTo-Json -Compress`);
+      assert.match(out.err || '', /f\.txt has no DACL at all \(a NULL DACL\)/);
+    });
+
+    it('Resolve-KlBase: normalizes a new path, refuses a bad shape, and refuses an existing folder not owned by Administrators or SYSTEM', () => {
+      const root = tmp();
+      fs.mkdirSync(path.join(root, 'mine'));
+      const out = runWalk(root, String.raw`
+$mineOwner = (Get-Acl -LiteralPath "$root\mine").GetOwner([Security.Principal.SecurityIdentifier]).Value
+$pdOwner = (Get-Acl -LiteralPath $env:ProgramData).GetOwner([Security.Principal.SecurityIdentifier]).Value
+@{
+  fresh = Resolve-KlBase -Base "$root\new\KingLouie\"
+  expectedFresh = "$root\new\KingLouie"
+  bare = Invoke-Try { Resolve-KlBase -Base 'C:' }
+  driveRoot = Invoke-Try { Resolve-KlBase -Base 'C:\' }
+  systemRoot = Invoke-Try { Resolve-KlBase -Base "$env:SystemRoot\KingLouie" }
+  mine = Invoke-Try { Resolve-KlBase -Base "$root\mine" }
+  mineOwner = $mineOwner
+  programData = Invoke-Try { Resolve-KlBase -Base $env:ProgramData }
+  pdOwner = $pdOwner
+} | ConvertTo-Json -Compress`);
+      const ADMIN_OWNERS = ['S-1-5-32-544', 'S-1-5-18'];
+      assert.equal(out.fresh, out.expectedFresh);
+      assert.match(out.bare || '', /must be rooted with a drive and a separator/);
+      assert.match(out.driveRoot || '', /cannot be a drive root/);
+      assert.match(out.systemRoot || '', /cannot be under \$env:SystemRoot/);
+      if (ADMIN_OWNERS.includes(out.mineOwner)) {
+        // An elevated test run creates folders owned by Administrators: the empty folder is accepted.
+        assert.equal(out.mine, null);
+      } else {
+        assert.match(out.mine || '', new RegExp(`already exists and is owned by ${out.mineOwner}, not by Administrators or SYSTEM`));
+      }
+      // An admin-owned folder still has to be empty or a King Louie install.
+      if (ADMIN_OWNERS.includes(out.pdOwner)) {
+        assert.match(out.programData || '', /already exists, is not empty, and has no app\\package\.json/);
+      }
+    });
+
+    it('Assert-KlRunnerIsUser accepts a user account and refuses groups and built-in accounts', () => {
+      const out = runWalk(tmp(), String.raw`
+$refused = @{}
+foreach ($s in 'S-1-5-32-545', 'S-1-1-0', 'S-1-5-11', 'S-1-5-19', 'S-1-5-18', 'S-1-5-32-544') {
+  $refused[$s] = Invoke-Try { Assert-KlRunnerIsUser -Sid $s -Name $s }
+}
+@{ me = (Invoke-Try { Assert-KlRunnerIsUser -Sid $me -Name 'me' }); refused = $refused } | ConvertTo-Json -Compress`);
+      assert.equal(out.me, null);
+      for (const [sid, err] of Object.entries(out.refused)) {
+        assert.match(err || '', /is not a user account/, sid);
+      }
+    });
+
+    it('Test-KlLocalAdministrator agrees with whoami /groups for the current user, and is false for LOCAL SERVICE', () => {
+      const out = runWalk(tmp(), String.raw`
+$groups = (& "$env:SystemRoot\System32\whoami.exe" /groups /fo csv | Out-String)
+@{
+  me = Test-KlLocalAdministrator -Sid $me
+  expected = $groups.Contains('"S-1-5-32-544"')
+  localService = Test-KlLocalAdministrator -Sid $localService
+} | ConvertTo-Json -Compress`);
+      assert.equal(out.me, out.expected);
+      assert.equal(out.localService, false);
+    });
+
+    it('Assert-KlAllUsersPythonVenv accepts an all-users home and refuses per-user, sibling, dot-dot, missing and system-site-packages venvs', () => {
+      const root = tmp();
+      const out = runWalk(root, String.raw`
+$pf = "$root\Program Files"
+function Cfg($name, [string[]] $lines) { $p = "$root\$name.cfg"; Set-Content -LiteralPath $p -Value $lines; $p }
+function Check($cfg) { Invoke-Try { Assert-KlAllUsersPythonVenv -PyvenvCfg $cfg -AllUsersRoot $pf } }
+@{
+  ok = Check (Cfg 'ok' @("home = $pf\Python312", 'include-system-site-packages = false', 'version = 3.12.0'))
+  okSpaced = Check (Cfg 'spaced' @("  home  =  $pf\Python312\  "))
+  perUser = Check (Cfg 'user' @("home = $root\Users\someone\AppData\Local\Programs\Python\Python312"))
+  sibling = Check (Cfg 'sibling' @("home = $root\Program Files2\Python312"))
+  dotDot = Check (Cfg 'dotdot' @("home = $pf\..\elsewhere\Python312"))
+  noHome = Check (Cfg 'nohome' @('version = 3.12.0'))
+  sitePackages = Check (Cfg 'site' @("home = $pf\Python312", 'include-system-site-packages = true'))
+} | ConvertTo-Json -Compress`);
+      assert.equal(out.ok, null);
+      assert.equal(out.okSpaced, null);
+      for (const key of ['perUser', 'sibling', 'dotDot', 'noHome']) {
+        assert.match(out[key] || '', /is not under .*Reinstall Python 'for all users'/, key);
+      }
+      assert.match(out.sitePackages || '', /include-system-site-packages = true/);
     });
   });
 });

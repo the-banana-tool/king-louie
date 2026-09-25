@@ -7,7 +7,13 @@
   copying the code to $Base\app and before installing the service, so the
   install folder is locked from the start. Then run it again with the
   machine's role (gpu-box or laptop). -WhatIf prints every change this
-  script would make without making it.
+  script would make without making it. An existing $Base must be owned by
+  Administrators or SYSTEM (create it from an elevated PowerShell, as the
+  install guide shows); the script refuses one anybody else created.
+
+  -Runner must be a single user account, never a group or a built-in
+  account. The script warns, but goes on, when that user is a local
+  administrator: with UAC at its default setting that is not a boundary.
 
   -Runner is the signed-in Windows user who runs Claude Code or Claude
   Desktop, and so the stdio MCP server and every runbook step. These ACLs
@@ -64,6 +70,7 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Text;
 using Microsoft.Win32.SafeHandles;
 
 public static class KlNative {
@@ -116,6 +123,9 @@ public static class KlNative {
 
   [DllImport("advapi32.dll", SetLastError = true)]
   private static extern bool GetKernelObjectSecurity(SafeFileHandle handle, uint information, byte[] descriptor, uint length, out uint needed);
+
+  [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  private static extern bool LookupAccountSidW(string system, byte[] sid, StringBuilder name, ref uint nameLength, StringBuilder domain, ref uint domainLength, out int use);
 
   private const uint OwnerSecurityInformation = 0x1;
   private const uint DaclSecurityInformation = 0x4;
@@ -194,6 +204,23 @@ public static class KlNative {
       }
       return new uint[] { info.FileAttributes, info.NumberOfLinks };
     }
+  }
+
+  // Returns the SID_NAME_USE of an account: 1 is a user; groups, aliases
+  // (BUILTIN\Users) and well-known groups (Everyone, LOCAL SERVICE) are not.
+  public static int GetSidType(string sidValue) {
+    SecurityIdentifier sid = new SecurityIdentifier(sidValue);
+    byte[] bytes = new byte[sid.BinaryLength];
+    sid.GetBinaryForm(bytes, 0);
+    uint nameLength = 512;
+    uint domainLength = 512;
+    StringBuilder name = new StringBuilder((int) nameLength);
+    StringBuilder domain = new StringBuilder((int) domainLength);
+    int use;
+    if (!LookupAccountSidW(null, bytes, name, ref nameLength, domain, ref domainLength, out use)) {
+      throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot look up the account type of " + sidValue);
+    }
+    return use;
   }
 
   public static void EnablePrivilege(string name) {
@@ -413,6 +440,13 @@ function Confirm-KlTreeLockedDown {
       }
     }
     $acl = Get-Acl -LiteralPath $full
+    # A NULL DACL (no DACL at all) grants everyone full access. .NET shows it
+    # as one Everyone rule, which the write check below would catch too, but
+    # this says what is actually wrong.
+    $rawDescriptor = New-Object Security.AccessControl.RawSecurityDescriptor($acl.GetSecurityDescriptorBinaryForm(), 0)
+    if ($null -eq $rawDescriptor.DiscretionaryAcl) {
+      throw "$full has no DACL at all (a NULL DACL), which grants everyone full access."
+    }
     if (-not $insideData) {
       $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier])
       if ($owner.Value -ne $OwnerSid.Value) {
@@ -483,40 +517,116 @@ function Set-KlAdminOwnedTree {
   }
 }
 
+# Checks -Base and returns it normalized. -Base must be a real installation
+# folder: rooted with a drive and a separator (a bare 'C:' is drive-relative,
+# not a real path), not a drive root (every grant in -Role base would then
+# apply to the whole drive instead of one folder), and outside
+# $env:SystemRoot (Windows update and repair tooling depends on that tree
+# keeping its own ACLs). Every path the script builds comes from the
+# returned $baseFull, so a trailing '\' on -Base changes nothing.
+#
+# This script takes ownership of, and rewrites the ACLs under, whatever
+# -Base names. If it already exists:
+#   - it must not be a junction, symbolic link or other reparse point;
+#   - its owner must be Administrators or SYSTEM, which is what an elevated
+#     New-Item gives it (install guide section 3). A folder anyone else
+#     created may have been filled, or had its ACL set, by that account
+#     before this script ever ran, and the elevated steps that follow
+#     (git clone, npm ci, this script) would then run what they put there;
+#   - and it must be empty or look like a King Louie install (have
+#     app\package.json), so a typo cannot hand this script someone's home
+#     folder or another app's install directory.
+function Resolve-KlBase {
+  param([Parameter(Mandatory)][string] $Base)
+  if ($Base -notmatch '^[A-Za-z]:[\\/]') {
+    throw "-Base '$Base' must be rooted with a drive and a separator, e.g. C:\KingLouie (not just C:)."
+  }
+  $baseFull = [System.IO.Path]::GetFullPath($Base).TrimEnd('\')
+  $baseRoot = [System.IO.Path]::GetPathRoot($baseFull + '\').TrimEnd('\')
+  if ($baseFull -eq $baseRoot) {
+    throw "-Base '$Base' cannot be a drive root; use a subfolder such as $baseRoot\KingLouie."
+  }
+  $systemRootFull = [System.IO.Path]::GetFullPath($env:SystemRoot).TrimEnd('\')
+  if (Test-KlPathUnder -Path $baseFull -Root $systemRootFull) {
+    throw "-Base '$Base' cannot be under `$env:SystemRoot ($env:SystemRoot)."
+  }
+  if (Test-Path -LiteralPath $baseFull) {
+    Assert-KlNotReparsePoint -Path $baseFull
+    $baseOwner = (Get-Acl -LiteralPath $baseFull).GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if ($baseOwner -ne 'S-1-5-32-544' -and $baseOwner -ne 'S-1-5-18') {
+      throw "-Base '$Base' already exists and is owned by $baseOwner, not by Administrators or SYSTEM; refusing to trust a folder an administrator did not create. Move it aside, then create $baseFull again from an elevated PowerShell as install guide section 3 shows."
+    }
+    $hasChildren = @(Get-ChildItem -LiteralPath $baseFull -Force -ErrorAction Stop).Count -gt 0
+    $looksLikeKingLouie = Test-Path -LiteralPath "$baseFull\app\package.json"
+    if ($hasChildren -and -not $looksLikeKingLouie) {
+      throw "-Base '$Base' already exists, is not empty, and has no app\package.json under it; refusing to take ownership of a folder that might not be the King Louie install. Point -Base at an empty folder or an existing King Louie install."
+    }
+  }
+  $baseFull
+}
+
+# Throws unless $Sid is a single user account. A group (BUILTIN\Users,
+# Everyone, Authenticated Users) or a service account (LOCAL SERVICE) as the
+# runner would get Modify on mcp\data, which holds the MCP instance's master
+# key, for every account in it.
+function Assert-KlRunnerIsUser {
+  param([Parameter(Mandatory)][Security.Principal.SecurityIdentifier] $Sid, [Parameter(Mandatory)][string] $Name)
+  Initialize-KlNative
+  $sidType = [KlNative]::GetSidType($Sid.Value)
+  # SID_NAME_USE 1 is SidTypeUser.
+  if ($sidType -ne 1) {
+    throw "-Runner '$Name' ($($Sid.Value)) is not a user account (account type $sidType). Pass the one Windows user who runs Claude, as MACHINE\user or DOMAIN\user, never a group or a built-in account."
+  }
+}
+
+# True when $Sid is a member of the local Administrators group, directly or
+# through a nested group.
+function Test-KlLocalAdministrator {
+  param([Parameter(Mandatory)][Security.Principal.SecurityIdentifier] $Sid)
+  Add-Type -AssemblyName System.DirectoryServices.AccountManagement
+  $context = New-Object System.DirectoryServices.AccountManagement.PrincipalContext([System.DirectoryServices.AccountManagement.ContextType]::Machine)
+  try {
+    $group = [System.DirectoryServices.AccountManagement.GroupPrincipal]::FindByIdentity($context, [System.DirectoryServices.AccountManagement.IdentityType]::Sid, 'S-1-5-32-544')
+    try {
+      foreach ($member in $group.GetMembers($true)) {
+        if ($member.Sid -and $member.Sid.Value -eq $Sid.Value) { return $true }
+      }
+      return $false
+    } finally {
+      $group.Dispose()
+    }
+  } finally {
+    $context.Dispose()
+  }
+}
+
+# gpu-box's Python venv (train.run, models.hf_download) is created from the
+# interpreter recorded in its pyvenv.cfg. A per-user install lives under the
+# runner's own profile, which none of this script's grants protect: the
+# runner could repoint the venv at an interpreter under their control, or at
+# one that can see packages outside the venv. Throws unless the cfg's home
+# is under $AllUsersRoot (Python installed "for all users", guide section
+# 2/6) and the venv does not include the system site-packages.
+function Assert-KlAllUsersPythonVenv {
+  param([Parameter(Mandatory)][string] $PyvenvCfg, [Parameter(Mandatory)][string] $AllUsersRoot)
+  $cfgLines = @(Get-Content -LiteralPath $PyvenvCfg)
+  $homeLine = $cfgLines | Where-Object { $_ -match '^\s*home\s*=\s*(.+?)\s*$' } | Select-Object -First 1
+  $pyHome = if ($homeLine -and $homeLine -match '^\s*home\s*=\s*(.+?)\s*$') { [IO.Path]::GetFullPath($Matches[1]).TrimEnd('\') } else { '' }
+  $root = [IO.Path]::GetFullPath($AllUsersRoot).TrimEnd('\')
+  if (-not $pyHome -or -not (Test-KlPathUnder -Path $pyHome -Root $root)) {
+    throw "$PyvenvCfg's home ('$pyHome') is not under $root. Reinstall Python 'for all users' (guide section 2) so the interpreter chain is admin-owned."
+  }
+  $systemSitePackages = $cfgLines | Where-Object { $_ -match '^\s*include-system-site-packages\s*=\s*true\s*$' }
+  if ($systemSitePackages) {
+    throw "$PyvenvCfg sets include-system-site-packages = true, which lets the venv import packages outside itself. Recreate the venv without --system-site-packages."
+  }
+}
+
 # ---------------------------------------------------------------------------
 # Checks, before anything changes.
 # ---------------------------------------------------------------------------
 
-# -Base must be a real installation folder: rooted with a drive and a
-# separator (a bare 'C:' is drive-relative, not a real path), not a drive
-# root (every grant in -Role base would then apply to the whole drive
-# instead of one folder), and outside $env:SystemRoot (Windows update and
-# repair tooling depends on that tree keeping its own ACLs). Every path below
-# is built from the normalized $baseFull, so a trailing '\' on -Base changes
-# nothing.
-if ($Base -notmatch '^[A-Za-z]:[\\/]') {
-  throw "-Base '$Base' must be rooted with a drive and a separator, e.g. C:\KingLouie (not just C:)."
-}
-$baseFull = [System.IO.Path]::GetFullPath($Base).TrimEnd('\')
-$baseRoot = [System.IO.Path]::GetPathRoot($baseFull + '\').TrimEnd('\')
-if ($baseFull -eq $baseRoot) {
-  throw "-Base '$Base' cannot be a drive root; use a subfolder such as $baseRoot\KingLouie."
-}
-$systemRootFull = [System.IO.Path]::GetFullPath($env:SystemRoot).TrimEnd('\')
-if ($baseFull -eq $systemRootFull -or $baseFull.StartsWith("$systemRootFull\", [StringComparison]::OrdinalIgnoreCase)) {
-  throw "-Base '$Base' cannot be under `$env:SystemRoot ($env:SystemRoot)."
-}
-# This script takes ownership of, and rewrites the ACLs under, whatever
-# -Base names. If it already exists it must look like a King Louie install
-# (or be empty), so a typo cannot hand this script someone's home folder or
-# another app's install directory.
-if (Test-Path -LiteralPath $baseFull) {
-  $hasChildren = @(Get-ChildItem -LiteralPath $baseFull -Force -ErrorAction Stop).Count -gt 0
-  $looksLikeKingLouie = Test-Path -LiteralPath "$baseFull\app\package.json"
-  if ($hasChildren -and -not $looksLikeKingLouie) {
-    throw "-Base '$Base' already exists, is not empty, and has no app\package.json under it; refusing to take ownership of a folder that might not be the King Louie install. Point -Base at an empty folder or an existing King Louie install."
-  }
-}
+$baseFull = Resolve-KlBase -Base $Base
 
 # Never a bare icacls: Windows looks in the current directory before PATH.
 $icacls = "$env:SystemRoot\System32\icacls.exe"
@@ -532,6 +642,21 @@ try {
 } catch {
   throw "Cannot turn -Runner '$Runner' into a Windows account SID. Pass the account that runs Claude as MACHINE\user or DOMAIN\user. ($($_.Exception.Message))"
 }
+Assert-KlRunnerIsUser -Sid $sid -Name $Runner
+
+# UAC's default setting is not a security boundary: a program an
+# administrator runs unelevated can elevate without a prompt the user
+# notices, and an elevated Claude can change everything these ACLs protect.
+# Warn, but go on: the ACLs are still worth having.
+try {
+  $runnerIsAdmin = Test-KlLocalAdministrator -Sid $sid
+} catch {
+  $runnerIsAdmin = $null
+  Write-Warning "Could not check whether -Runner '$Runner' is a local administrator: $($_.Exception.Message)"
+}
+if ($runnerIsAdmin) {
+  Write-Warning "-Runner '$Runner' is a member of the local Administrators group. These ACLs hold only while Claude runs unelevated, and with UAC at its default setting an administrator's programs can elevate without a real prompt. Make the runner a standard user, or at least set UAC to 'Always notify' (install guide section 2)."
+}
 
 $System = '*S-1-5-18'
 $Admins = '*S-1-5-32-544'
@@ -544,39 +669,24 @@ $LocalService = '*S-1-5-19'
 # only on those folders; everything below them inherits.
 $RunnerSid = "*$sid"
 
-# gpu-box's Python venv (train.run, models.hf_download) is created from the
-# interpreter recorded in its pyvenv.cfg. A per-user install lives under the
-# runner's own profile, which none of this script's grants protect: the
-# runner could repoint the venv at an interpreter under their control, or at
-# one that can see packages outside the venv. Refuse until Python is
-# (re)installed "for all users" (guide section 2/6) with no system-wide
-# site-packages leak.
 $pyvenvCfg = "$baseFull\tools\py\pyvenv.cfg"
 if (Test-Path -LiteralPath $pyvenvCfg) {
-  $cfgLines = Get-Content -LiteralPath $pyvenvCfg
-  $homeLine = $cfgLines | Where-Object { $_ -match '^\s*home\s*=\s*(.+?)\s*$' } | Select-Object -First 1
-  $pyHome = if ($homeLine -and $homeLine -match '^\s*home\s*=\s*(.+?)\s*$') { [IO.Path]::GetFullPath($Matches[1]) } else { '' }
   # $env:ProgramW6432 is the real 64-bit Program Files even when this script
   # runs as a 32-bit process on 64-bit Windows, where $env:ProgramFiles would
   # otherwise read "Program Files (x86)". Fall back to $env:ProgramFiles on a
   # 32-bit OS, where ProgramW6432 is not set.
   $allUsersRoot = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
-  $allUsersRoot = [IO.Path]::GetFullPath($allUsersRoot).TrimEnd('\')
-  $underAllUsers = $pyHome -and (($pyHome.TrimEnd('\') -eq $allUsersRoot) -or ($pyHome.TrimEnd('\') -like "$allUsersRoot\*"))
-  if (-not $underAllUsers) {
-    throw "$pyvenvCfg's home ('$pyHome') is not under $allUsersRoot. Reinstall Python 'for all users' (guide section 2) so the interpreter chain is admin-owned."
-  }
-  $systemSitePackages = $cfgLines | Where-Object { $_ -match '^\s*include-system-site-packages\s*=\s*true\s*$' }
-  if ($systemSitePackages) {
-    throw "$pyvenvCfg sets include-system-site-packages = true, which lets the venv import packages outside itself. Recreate the venv without --system-site-packages."
-  }
+  Assert-KlAllUsersPythonVenv -PyvenvCfg $pyvenvCfg -AllUsersRoot $allUsersRoot
 }
 
-# An administrator holds these, but they start disabled. SeTakeOwnership lets
-# the walk take a file the runner owns and has shut Administrators out of;
-# SeRestore lets it set Administrators as the owner and write the DACL
-# whatever the old DACL says.
+# An administrator holds these, but they start disabled. SeBackup lets the
+# walk open an item with READ_CONTROL even when its DACL shuts
+# Administrators out (a runner-planted item can); SeTakeOwnership lets it
+# take a file the runner owns; SeRestore lets it set Administrators as the
+# owner and write the DACL whatever the old DACL says. All three apply only
+# to handles opened with FILE_FLAG_BACKUP_SEMANTICS, as LockItem's are.
 Initialize-KlNative
+[KlNative]::EnablePrivilege('SeBackupPrivilege')
 [KlNative]::EnablePrivilege('SeTakeOwnershipPrivilege')
 [KlNative]::EnablePrivilege('SeRestorePrivilege')
 
