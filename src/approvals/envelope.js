@@ -39,6 +39,10 @@ function isPlainObject(v) {
     && (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null);
 }
 
+function isBufferLike(v) {
+  return Buffer.isBuffer(v) || v instanceof Uint8Array;
+}
+
 function seal(message, signer) {
   if (!signer || typeof signer.sign !== 'function') throw new TypeError('seal needs a signer { alg, kid, sign(bytes) }');
   const bytes = Buffer.from(canonicalize(message), 'utf8');
@@ -83,6 +87,10 @@ function verifyEd25519(envelope, spkiDerHex) {
     const sig = fromB64url(envelope.sig);
     if (sig.length !== 64) return false;
     const key = crypto.createPublicKey({ key: Buffer.from(spkiDerHex, 'hex'), format: 'der', type: 'spki' });
+    // A P-256 SPKI key parses fine and a P1363-encoded P-256 signature can be
+    // exactly 64 bytes too, so without this check a type-confused key/sig
+    // pair could slip past the length check above.
+    if (key.asymmetricKeyType !== 'ed25519') return false;
     return crypto.verify(null, bytes, key, sig);
   } catch {
     return false;
@@ -95,7 +103,12 @@ function isDeviceJwk(jwk) {
   if (keys.join(',') !== 'crv,kty,x,y') return false;
   if (jwk.kty !== 'EC' || jwk.crv !== 'P-256') return false;
   try {
-    return fromB64url(jwk.x).length === 32 && fromB64url(jwk.y).length === 32;
+    if (fromB64url(jwk.x).length !== 32 || fromB64url(jwk.y).length !== 32) return false;
+    // x/y of the right length is not enough: confirm (x, y) is actually a
+    // point on the P-256 curve. crypto.createPublicKey rejects an off-curve
+    // JWK point.
+    crypto.createPublicKey({ key: jwk, format: 'jwk' });
+    return true;
   } catch {
     return false;
   }
@@ -108,6 +121,14 @@ function verifyEs256(envelope, jwk) {
     const sig = fromB64url(envelope.sig);
     if (sig.length !== 64) return false;
     const key = crypto.createPublicKey({ key: { kty: 'EC', crv: 'P-256', x: jwk.x, y: jwk.y }, format: 'jwk' });
+    // ECDSA is malleable: (r, s) and (r, n-s) are both valid signatures over
+    // the same message (negating s negates the recovered point, which has
+    // the same x-coordinate r). Phones do not normalize to low-S, and this
+    // verify doesn't enforce it either, so a device may submit either
+    // encoding for the same signed message. That means `sig` bytes are NOT a
+    // stable, unique identifier for a signed message — no dedupe, replay or
+    // audit key may be derived from `sig`; key on the message (or device id
+    // + payload hash) instead.
     return crypto.verify('sha256', bytes, { key, dsaEncoding: 'ieee-p1363' }, sig);
   } catch {
     return false;
@@ -117,6 +138,9 @@ function verifyEs256(envelope, jwk) {
 // The node's Ed25519 identity as an envelope signer. `identity` is a
 // NodeIdentity or anything with nodeId and sign(bytes).
 function nodeSigner(identity) {
+  if (!identity || typeof identity.nodeId !== 'string' || typeof identity.sign !== 'function') {
+    throw new EnvelopeError('malformed', 'nodeSigner needs an identity with nodeId and sign(bytes)');
+  }
   return { alg: 'Ed25519', kid: identity.nodeId, sign: (bytes) => identity.sign(bytes) };
 }
 
@@ -124,6 +148,7 @@ function nodeSigner(identity) {
 // Phones: raw is the 65-byte uncompressed P-256 point. Desktops (F7): the
 // 32-byte Ed25519 key with prefix `kld-`.
 function deriveDeviceId(rawPublicKey, prefix = 'd-') {
+  if (!isBufferLike(rawPublicKey)) throw new EnvelopeError('malformed', 'raw public key must be a Buffer or Uint8Array');
   const raw = Buffer.isBuffer(rawPublicKey) ? rawPublicKey : Buffer.from(rawPublicKey);
   return prefix + base32Encode(crypto.createHash('sha256').update(raw).digest()).slice(0, 16);
 }
@@ -134,7 +159,8 @@ function deviceIdFromJwk(jwk) {
 }
 
 function ed25519RawToSpki(raw32) {
-  const raw = Buffer.from(raw32);
+  if (!isBufferLike(raw32)) throw new EnvelopeError('malformed', 'an Ed25519 key must be a Buffer or Uint8Array');
+  const raw = Buffer.isBuffer(raw32) ? raw32 : Buffer.from(raw32);
   if (raw.length !== 32) throw new EnvelopeError('malformed', 'an Ed25519 key is 32 bytes');
   return Buffer.concat([ED25519_SPKI_PREFIX, raw]);
 }

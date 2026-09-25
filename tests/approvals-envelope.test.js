@@ -18,7 +18,20 @@ function p256() {
   const { kty, crv, x, y } = publicKey.export({ format: 'jwk' });
   const jwk = { kty, crv, x, y };
   const id = deviceIdFromJwk(jwk);
-  return { jwk, id, signer: { alg: 'ES256', kid: id, sign: (b) => crypto.sign('sha256', b, { key: privateKey, dsaEncoding: 'ieee-p1363' }) } };
+  return {
+    jwk,
+    id,
+    privateKey,
+    signer: { alg: 'ES256', kid: id, sign: (b) => crypto.sign('sha256', b, { key: privateKey, dsaEncoding: 'ieee-p1363' }) }
+  };
+}
+
+function bufToBigInt(buf) {
+  return BigInt(`0x${buf.toString('hex')}`);
+}
+
+function bigIntToBuf32(n) {
+  return Buffer.from(n.toString(16).padStart(64, '0'), 'hex');
 }
 
 describe('seal / open', () => {
@@ -60,6 +73,25 @@ describe('seal / open', () => {
     assert.equal(verifyEd25519({ ...env, alg: 'ES256' }, node.spkiHex), false);
     assert.equal(verifyEd25519(env, ed25519().spkiHex), false);
   });
+
+  it('rejects Ed25519 verification against a non-Ed25519 key (type confusion)', () => {
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+    const spki = publicKey.export({ type: 'spki', format: 'der' });
+    const bytes = Buffer.from('{"a":1}');
+    // A P1363-encoded P-256 signature is 64 bytes too, so it clears the
+    // length check; only the key-type check catches the mismatch.
+    const sig = crypto.sign('sha256', bytes, { key: privateKey, dsaEncoding: 'ieee-p1363' });
+    const envelope = { alg: 'Ed25519', kid: 'x', payload: toB64url(bytes), sig: toB64url(sig) };
+    assert.equal(verifyEd25519(envelope, spki.toString('hex')), false);
+  });
+
+  it('returns false, not throw, for a null envelope or garbage key material', () => {
+    const node = ed25519();
+    const env = seal({ a: 1 }, nodeSigner(node.identity));
+    assert.equal(verifyEd25519(null, node.spkiHex), false);
+    assert.equal(verifyEd25519(env, 'not-hex-garbage'), false);
+    assert.equal(verifyEs256(null, { kty: 'EC', crv: 'P-256', x: 'AA', y: 'AA' }), false);
+  });
 });
 
 describe('ES256 device signatures', () => {
@@ -69,10 +101,27 @@ describe('ES256 device signatures', () => {
     assert.equal(verifyEs256(env, phone.jwk), true);
     assert.equal(verifyEs256(env, p256().jwk), false);
     assert.equal(verifyEs256({ ...env, alg: 'Ed25519' }, phone.jwk), false);
-    // A DER-encoded signature (what Android's Signature produces) is not P1363.
-    const { privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
-    const derSig = crypto.sign('sha256', fromB64url(env.payload), privateKey);
+    // The phone's own key, P1363-encoded (the wire format), still verifies...
+    const bytes = fromB64url(env.payload);
+    const p1363Sig = crypto.sign('sha256', bytes, { key: phone.privateKey, dsaEncoding: 'ieee-p1363' });
+    assert.equal(verifyEs256({ ...env, sig: toB64url(p1363Sig) }, phone.jwk), true);
+    // ...but a DER-encoded signature from that SAME key (what Android's
+    // Signature class produces by default) is not P1363 and must be rejected.
+    const derSig = crypto.sign('sha256', bytes, phone.privateKey);
     assert.equal(verifyEs256({ ...env, sig: toB64url(derSig) }, phone.jwk), false);
+  });
+
+  it('accepts a signature with the malleable high-S encoding (sig bytes are not a stable dedupe key)', () => {
+    // secp256r1/P-256 group order n.
+    const P256_N = BigInt('0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551');
+    const phone = p256();
+    const env = seal({ v: 1 }, phone.signer);
+    const sig = fromB64url(env.sig);
+    const r = sig.subarray(0, 32);
+    const s = bufToBigInt(sig.subarray(32));
+    const flippedSig = Buffer.concat([r, bigIntToBuf32(P256_N - s)]);
+    assert.notDeepEqual(flippedSig, sig);
+    assert.equal(verifyEs256({ ...env, sig: toB64url(flippedSig) }, phone.jwk), true);
   });
 
   it('accepts only a JWK with exactly kty, crv, x, y', () => {
@@ -82,6 +131,13 @@ describe('ES256 device signatures', () => {
     assert.equal(isDeviceJwk({ ...jwk, crv: 'P-384' }), false);
     assert.equal(isDeviceJwk({ kty: 'EC', crv: 'P-256', x: jwk.x }), false);
     assert.throws(() => deviceIdFromJwk({ ...jwk, d: 'secret' }), EnvelopeError);
+  });
+
+  it('rejects a JWK whose (x, y) is not a point on the curve', () => {
+    const { jwk } = p256();
+    const offCurve = { ...jwk, y: toB64url(Buffer.alloc(32, 1)) };
+    assert.equal(isDeviceJwk(offCurve), false);
+    assert.throws(() => deviceIdFromJwk(offCurve), EnvelopeError);
   });
 });
 
@@ -102,6 +158,18 @@ describe('identifiers', () => {
     const spki = publicKey.export({ type: 'spki', format: 'der' });
     assert.deepEqual(ed25519RawToSpki(spki.subarray(12)), spki);
     assert.throws(() => ed25519RawToSpki(Buffer.alloc(31)), EnvelopeError);
+  });
+
+  it('rejects non-Buffer inputs to deriveDeviceId and ed25519RawToSpki', () => {
+    assert.throws(() => deriveDeviceId(undefined), EnvelopeError);
+    assert.throws(() => deriveDeviceId('not a buffer'), EnvelopeError);
+    assert.throws(() => ed25519RawToSpki(undefined), EnvelopeError);
+    assert.throws(() => ed25519RawToSpki('not a buffer'), EnvelopeError);
+  });
+
+  it('rejects a malformed identity in nodeSigner', () => {
+    assert.throws(() => nodeSigner(null), EnvelopeError);
+    assert.throws(() => nodeSigner({}), EnvelopeError);
   });
 
   it('groups a fingerprint in fours after the prefix', () => {
