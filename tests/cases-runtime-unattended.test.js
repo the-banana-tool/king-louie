@@ -277,6 +277,42 @@ describe('re-orientation through the runtime', () => {
     await rt.endTurn(t6, {});
   });
 
+  it('Reorient acknowledges only the decision-undermined triggers it was shown, so one undermined mid-turn still fires next time', async () => {
+    const { rt } = makeRuntime();
+    const c = await activeCase(rt);
+    const a = rt.ledger(c.id).assert({ stmt: 'A', subject: 'lot', attr: 'a', value: 1, source: src });
+    const b = rt.ledger(c.id).assert({ stmt: 'B', subject: 'lot', attr: 'b', value: 1, source: src });
+    rt.records(c.id).recordDecision({ decision: 'D1', factIds: [a.id] });
+    rt.records(c.id).recordDecision({ decision: 'D2', factIds: [b.id] });
+    rt.ledger(c.id).assert({ stmt: 'A2', subject: 'lot', attr: 'a', value: 2, source: src, supersedes: a.id });
+    const t1 = await rt.beginTurn(c.id, { turnId: 't1' });
+    assert.deepStrictEqual(t1.triggers.map((t) => t.decisionIds), [['D-001']], 'only D-001 is shown at turn start');
+    // D-002's cited fact is superseded mid-turn, after the model was shown t1.triggers.
+    rt.ledger(c.id).assert({ stmt: 'B2', subject: 'lot', attr: 'b', value: 2, source: src, supersedes: b.id });
+    rt.recordReorientation(c.id, t1, { changed: 'Acreage corrected', affects: ['D-001'], action: 'adjust', note: 'Reprice off the plat.' });
+    await rt.endTurn(t1, {});
+    assert.deepStrictEqual(readBaseline(c).undermined, [`D-001:${a.id}`], 'D-002 was never shown, so it is not acknowledged');
+    const t2 = await rt.beginTurn(c.id, { turnId: 't2' });
+    assert.deepStrictEqual(t2.triggers.map((t) => t.decisionIds), [['D-002']], 'D-002 fires now that it is finally shown');
+    await rt.endTurn(t2, {});
+  });
+
+  it('a budget crossing that happens mid-turn, before Reorient, is not silently acknowledged and still fires next turn', async () => {
+    const { rt } = makeRuntime();
+    const c = await activeCase(rt);
+    rt.store.updateMeta(c.id, { budget: { usd: 10 }, lastOwnerTurnAt: '2026-09-23T02:00:00.000Z' });
+    const t1 = await rt.beginTurn(c.id, { turnId: 't1' });
+    assert.deepStrictEqual(t1.triggers.map((t) => t.kind), ['time-gap'], 'nothing budget-related is shown at turn start');
+    // Crosses the 80 % usd threshold mid-turn, after the turn-start snapshot was taken.
+    rt.budget(c.id).charge('usd', 8.5);
+    rt.recordReorientation(c.id, t1, { changed: 'Owner gap', affects: [], action: 'continue', note: 'Nothing changed.' });
+    await rt.endTurn(t1, {});
+    assert.deepStrictEqual(readBaseline(c).budgetCrossed.usd, [], 'the mid-turn crossing was never shown, so it is not acknowledged');
+    const t2 = await rt.beginTurn(c.id, { turnId: 't2' });
+    assert.deepStrictEqual(t2.triggers.map((t) => t.key), ['budget:usd:80'], 'it fires now, on the next turn');
+    await rt.endTurn(t2, {});
+  });
+
   it('executor-change and playbook-update come from the C3 file and the C6 method stubs', async () => {
     const { rt } = makeRuntime();
     const c = await activeCase(rt);

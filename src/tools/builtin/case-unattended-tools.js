@@ -190,11 +190,16 @@ const FailTool = new Tool({
       return { ok: false, error: `failureClass must be one of ${FAILURE_CLASSES.join(', ')}.` };
     }
     if (!text(params.what) || !text(params.why)) return { ok: false, error: '"what" and "why" are required.' };
-    const tried = Array.isArray(params.tried) ? params.tried.map((t) => String(t).trim()).filter(Boolean) : [];
+    const triedRaw = Array.isArray(params.tried) ? params.tried : [];
+    if (triedRaw.some((t) => typeof t !== 'string')) return { ok: false, error: '"tried" must be a list of strings.' };
+    const tried = triedRaw.map((t) => t.trim()).filter(Boolean);
     if (!tried.length) return { ok: false, error: '"tried" must list at least one thing you tried.' };
     const unknowns = Array.isArray(params.unknowns) ? params.unknowns.map(String) : [];
     const { facts } = ctx.runtime.ledger(ctx.caseId).view();
-    const notUnknown = unknowns.filter((id) => facts.get(id)?.provenance !== 'unknown');
+    const notUnknown = unknowns.filter((id) => {
+      const f = facts.get(id);
+      return !f || f.provenance !== 'unknown' || f.status !== 'active';
+    });
     if (notUnknown.length) return { ok: false, error: `"unknowns" must be unknown fact ids; these are not: ${notUnknown.join(', ')}.` };
     let recommendation = null;
     if (params.recommendation) {

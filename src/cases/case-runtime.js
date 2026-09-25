@@ -17,7 +17,7 @@ const { canTransition, check: checkStatus, StatusError, AUTONOMY_KEY, REASON_KIN
 const { Budget, CATEGORIES } = require('./budget');
 const { WakeupStore } = require('./wakeups');
 const { QuestionStore } = require('./questions');
-const { detectTriggers, emptyBaseline, underminedKeys } = require('./triggers');
+const { detectTriggers, emptyBaseline } = require('./triggers');
 const { localDay, isRealCalendarDate } = require('./clock');
 const { readJson, writeJsonIfChanged } = require('./jsonfile');
 const { resolveCaseSettings } = require('./defaults');
@@ -583,14 +583,24 @@ class CaseRuntime {
       `Note: ${note}`
     ].join('\n');
     const journal = new CaseRecords(meta.dir).writeJournal('reorient', body, this.now());
-    const snap = this._materialSnapshot(meta);
     const b = this._baseline(meta.dir);
     b.acknowledgedAt = this.now().toISOString();
-    b.undermined = underminedKeys(new CaseRecords(meta.dir).decisions(), new FactLedger(meta.dir).view().facts).map((u) => u.key);
-    b.executorsMaterial = snap.executorsMaterial;
-    b.budgetCrossed = snap.budgetCrossed;
+    // Only acknowledge what this turn actually showed the model (its
+    // decision-undermined triggers), plus whatever the baseline already had.
+    // A decision undermined mid-turn, never shown, must still fire next time
+    // (controller ruling, Task 12 review I2).
+    const shown = (turn.triggers || []).filter((t) => t.kind === 'decision-undermined').map((t) => t.key);
+    b.undermined = [...new Set([...(b.undermined || []), ...shown])];
+    // Likewise, material and budget crossings acknowledge the turn-start
+    // snapshot the model was oriented from, not whatever is current now —
+    // otherwise a crossing that happens mid-turn, before Reorient runs,
+    // would be silently acknowledged without ever being shown.
+    if (turn.snapshot) {
+      b.executorsMaterial = { ...(b.executorsMaterial || {}), ...turn.snapshot.executorsMaterial };
+      b.budgetCrossed = turn.snapshot.budgetCrossed;
+      if (turn.snapshot.caseTypeMaterial) b.caseTypeMaterial = turn.snapshot.caseTypeMaterial;
+    }
     b.acknowledgedKeys = [...new Set([...(b.acknowledgedKeys || []), ...(turn.hookTriggers || []).map((t) => t.key)])];
-    if (snap.caseTypeMaterial) b.caseTypeMaterial = snap.caseTypeMaterial;
     writeJsonIfChanged(this._baselinePath(meta.dir), b);
     if (typeof this.acknowledgePlaybooks === 'function') {
       try {
@@ -1041,10 +1051,10 @@ class CaseRuntime {
       `Why: ${oneLine(why, 500)}`,
       '',
       'Unknowns:',
-      ...(unknowns.length ? unknowns.map((fid) => `- ${fid}${facts.get(fid) ? ` ${facts.get(fid).stmt}` : ''}`) : ['- none']),
+      ...(unknowns.length ? unknowns.map((fid) => `- ${fid}${facts.get(fid) ? ` ${oneLine(facts.get(fid).stmt, 300)}` : ''}`) : ['- none']),
       '',
       'Recommendation:',
-      ...(claims.length ? claims.map((c) => `- ${oneLine(c.text, 300)}${c.factIds?.length ? ` [${c.factIds.join(', ')}]` : ''}`) : ['none']),
+      ...(claims.length ? claims.map((c) => `- ${oneLine(c.text, 300)}${c.factIds?.length ? ` [${oneLine(c.factIds.join(', '), 300)}]` : ''}`) : ['none']),
       '',
       "Waiting for the owner's direction."
     ].join('\n');
