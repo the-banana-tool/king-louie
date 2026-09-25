@@ -1,0 +1,64 @@
+{
+  "name": "jcs",
+  "consumers": [
+    "node",
+    "ios",
+    "android"
+  ],
+  "given": {},
+  "input": {
+    "cases": [
+      {
+        "device": {
+          "platform": "ios",
+          "name": "Owner phone",
+          "device_id": "d-3vmwrihhdbnit4oi"
+        },
+        "v": 1,
+        "type": "kl.test"
+      },
+      {
+        "quote": "\"",
+        "backslash": "\\",
+        "newline": "\n",
+        "tab": "\t",
+        "nul": "\u0000",
+        "del": ""
+      },
+      {
+        "euro": "€",
+        "emoji": "😀",
+        "ls": " ",
+        "rtl": "‮"
+      },
+      {
+        "1": 4,
+        "€": 1,
+        "\r": 2,
+        "דּ": 3,
+        "😀": 5,
+        "": 6,
+        "ö": 7
+      },
+      {
+        "a": {
+          "c": {
+            "e": 0,
+            "d": -1
+          },
+          "b": []
+        },
+        "z": 42
+      }
+    ]
+  },
+  "expect": {
+    "canonical": [
+      "{\"device\":{\"device_id\":\"d-3vmwrihhdbnit4oi\",\"name\":\"Owner phone\",\"platform\":\"ios\"},\"type\":\"kl.test\",\"v\":1}",
+      "{\"backslash\":\"\\\\\",\"del\":\"\",\"newline\":\"\\n\",\"nul\":\"\\u0000\",\"quote\":\"\\\"\",\"tab\":\"\\t\"}",
+      "{\"emoji\":\"😀\",\"euro\":\"€\",\"ls\":\" \",\"rtl\":\"‮\"}",
+      "{\"\\r\":2,\"1\":4,\"\":6,\"ö\":7,\"€\":1,\"😀\":5,\"דּ\":3}",
+      "{\"a\":{\"b\":[],\"c\":{\"d\":-1,\"e\":0}},\"z\":42}"
+    ]
+  }
+}

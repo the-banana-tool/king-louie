@@ -1,0 +1,25 @@
+{
+  "name": "enroll-console",
+  "consumers": [
+    "node",
+    "ios",
+    "android"
+  ],
+  "given": {
+    "now": "2026-09-23T18:05:11.201Z",
+    "code_id": "dAEMnC18UoZQV-skmzsqzg",
+    "code": "uMl9rw5jwz4VTBOaDPaMMVummWUHRA0cO_MrmT078as",
+    "allow_test_keys": true
+  },
+  "input": {
+    "alg": "ES256",
+    "kid": "d-futyo75nn4w4reil",
+    "payload": "eyJjb2RlX2lkIjoiZEFFTW5DMThVb1pRVi1za216c3F6ZyIsImNvZGVfbWFjIjoiWU1mWktKVi1sSDB1cTBITHZWMnloajhFY3haZ2FRTHUzNXZlR0V2RXkzcyIsImNyZWF0ZWRfYXQiOiIyMDI2LTA5LTIzVDE4OjA0OjExLjIwMVoiLCJkZXZpY2UiOnsiZGV2aWNlX2lkIjoiZC1mdXR5bzc1bm40dzRyZWlsIiwibmFtZSI6IlBob25lIGZ1dHkiLCJwbGF0Zm9ybSI6ImFuZHJvaWQiLCJwdWJsaWNfa2V5Ijp7ImNydiI6IlAtMjU2Iiwia3R5IjoiRUMiLCJ4IjoiUnNjVGFEemdSbGFWcU40SXJydFJnYkJadzhocnAwMHhpSXU3Ql8xQUo2dyIsInkiOiJnQmFtMERGM2tyY2N4WWRXbktyNmZSUDR5SEtOTEtmQnlQNzZsOGRFdzc4In19LCJlbnJvbGxlZF9ieSI6bnVsbCwiZXhwaXJlc19hdCI6IjIwMjYtMDktMjNUMTg6MTQ6MTEuMjAxWiIsIm5vbmNlIjoiQVdrUGdOUVhFbXBaVHVDbHhQamtvMzdRWVA5Y2FtVnZRSXl1V0ZyNDdEYyIsInR5cGUiOiJrbC5kZXZpY2UuZW5yb2xsIiwidiI6MX0",
+    "sig": "HUcjevEIElAzYqbFTrBgN3SbAMX7me_eiRXI61uY4dc69QpDIN54Xb8eYY2h4FAKdl-1rz_WCiaFq8cbMv49hQ"
+  },
+  "expect": {
+    "accepted": true,
+    "reason": null,
+    "device_id": "d-futyo75nn4w4reil"
+  }
+}

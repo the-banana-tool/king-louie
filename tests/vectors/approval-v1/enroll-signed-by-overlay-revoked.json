@@ -1,0 +1,68 @@
+{
+  "name": "enroll-signed-by-overlay-revoked",
+  "consumers": [
+    "node"
+  ],
+  "given": {
+    "now": "2026-09-23T18:05:11.201Z",
+    "approvers": [
+      {
+        "v": 1,
+        "device_id": "d-3vmwrihhdbnit4oi",
+        "name": "Test phone 3vmw",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "krcyG5D6HPx9P3Gi5oaR6OyU9D1gIrc3UD6pIRcDq74",
+          "y": "9XqgPXsMAYplX5IZVn-9FRP2sN4oHFRPjnZyfG-GpaI"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      },
+      {
+        "v": 1,
+        "device_id": "d-6xdlbxglhnvfa3lw",
+        "name": "Test phone 6xdl",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "GnDHGfxMVkv5iRyStQIsJbqWKUtPy6ijuA1UiWKlYDc",
+          "y": "LLhIvQ_y0DmIXI_qxojWRICKfjPE_orjZBTwRhje91k"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      }
+    ],
+    "overlay": [
+      "d-3vmwrihhdbnit4oi"
+    ],
+    "allow_test_keys": true
+  },
+  "input": [
+    {
+      "alg": "ES256",
+      "kid": "d-3vmwrihhdbnit4oi",
+      "payload": "eyJjcmVhdGVkX2F0IjoiMjAyNi0wOS0yM1QxODowNDoxMS4yMDFaIiwiZGV2aWNlIjp7ImRldmljZV9pZCI6ImQtZnV0eW83NW5uNHc0cmVpbCIsIm5hbWUiOiJQaG9uZSBmdXR5IiwicGxhdGZvcm0iOiJpb3MiLCJwdWJsaWNfa2V5Ijp7ImNydiI6IlAtMjU2Iiwia3R5IjoiRUMiLCJ4IjoiUnNjVGFEemdSbGFWcU40SXJydFJnYkJadzhocnAwMHhpSXU3Ql8xQUo2dyIsInkiOiJnQmFtMERGM2tyY2N4WWRXbktyNmZSUDR5SEtOTEtmQnlQNzZsOGRFdzc4In19LCJlbnJvbGxlZF9ieSI6ImQtM3Ztd3JpaGhkYm5pdDRvaSIsImV4cGlyZXNfYXQiOiIyMDI2LTA5LTIzVDE4OjE0OjExLjIwMVoiLCJub25jZSI6IjRwV2ZhOUFRSkdPNzRta1J2REFNSWVyNWhiY1prNjRkU2lzMmNJS2lwajQiLCJ0eXBlIjoia2wuZGV2aWNlLmVucm9sbCIsInYiOjF9",
+      "sig": "-Nf2GNRq1q4TsmdIzcm7uYjHjkxif9kLn_paayDH4sZEvc5cS53jrOvM89OihwKGUx6C4ruHjJcMXBCVrCLwYg"
+    }
+  ],
+  "expect": {
+    "results": [
+      {
+        "state": "rejected",
+        "reason": "signer_not_active"
+      }
+    ],
+    "active": [
+      "d-6xdlbxglhnvfa3lw"
+    ]
+  }
+}
