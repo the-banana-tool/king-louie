@@ -69,6 +69,13 @@ function loadProfile(profile) {
           });
           await core.start();
         } catch (err) {
+          // `core` is only assigned once createCore() itself has returned,
+          // so a throw from createCore leaves it undefined here — nothing to
+          // shut down. A rejecting core.start() is different: core.start()
+          // may have partially started the core (cron timers, a listener
+          // bind in flight) before rejecting, so it still needs a best-effort
+          // shutdown ahead of stopping approvals.
+          if (core) await core.shutdown().catch(() => {});
           await approvals.stop().catch(() => {});
           throw err;
         }

@@ -12,6 +12,8 @@ const { MeshTransport } = require('../src/mesh/mesh-transport');
 const { NodeIdentity } = require('../src/mesh/node-identity');
 const { createLinkRpc } = require('../src/approvals/link-rpc');
 const { startApprovals, startMcpApprovals, createRelayDispatcher, trackDeviceStates } = require('../src/approvals/service-wiring');
+const { RelayClient } = require('../src/approvals/relay-client');
+const { PhoneApprover } = require('../src/approvals/phone-approver');
 const { open, verifyEd25519 } = require('../src/approvals/envelope');
 const { parseRelayConfig, parseAuditConfig, loadServiceConfig } = require('../src/service/config');
 const { loadNodeConfig } = require('../src/service/node-config');
@@ -171,6 +173,48 @@ describe('startApprovals', () => {
     }
     assert.equal(transportStopped, true);
     assert.equal(live.size, 0);
+  });
+
+  // Fix round 2 (opus re-review, minor): stopTracking() and
+  // phoneApprover.stop() are guarded in teardown so a throw from either
+  // never skips relayClient.stop() — the whole point of teardown is to not
+  // leave a live relay link behind, so it must run no matter what came
+  // before it. RelayClient.off and PhoneApprover.stop are monkey-patched
+  // for the duration of this one test (there's no other seam to make either
+  // throw) and restored in the finally.
+  it('teardown still stops the relay client even when stopTracking() and phoneApprover.stop() throw', async () => {
+    const l = layout();
+    l.ports.store.set('approvals.relay', {
+      relay_id: 'kl-fake-relay', peerId: 'kl-fake-relay-peer', publicKey: relayIdentity.publicKey.toString('hex'),
+      tlsFingerprint: null, address: '127.0.0.1', port: 1, pairedAt: new Date().toISOString()
+    });
+    let transportStopped = false;
+    const failingTransportFactory = () => ({
+      on() {},
+      removeListener() {},
+      addTrustedPeer() {},
+      start: () => Promise.reject(new Error('bind failed')),
+      stop: async () => { transportStopped = true; }
+    });
+
+    const hadOwnOff = Object.prototype.hasOwnProperty.call(RelayClient.prototype, 'off');
+    const originalOff = RelayClient.prototype.off;
+    const originalStop = PhoneApprover.prototype.stop;
+    RelayClient.prototype.off = function throwingOff() { throw new Error('relayClient.off boom'); };
+    PhoneApprover.prototype.stop = function throwingStop() { throw new Error('phoneApprover.stop boom'); };
+    try {
+      await assert.rejects(
+        startApprovals({
+          dataDir: l.dataDir, configDir: l.configDir, nodeConfig: nodeConfig({ relay: 'wss://127.0.0.1:1', requestTtlS: 300 }),
+          ports: l.ports, identity: nodeIdentity, approverStoreOptions: storeOptions, transportFactory: failingTransportFactory
+        }),
+        /bind failed/
+      );
+    } finally {
+      if (hadOwnOff) RelayClient.prototype.off = originalOff; else delete RelayClient.prototype.off;
+      PhoneApprover.prototype.stop = originalStop;
+    }
+    assert.equal(transportStopped, true);
   });
 });
 
@@ -397,6 +441,8 @@ describe('relay and audit configuration', () => {
     assert.throws(load, /approvers\.relay must be wss:\/\/host:port/);
     write('approvers:\n  relay: "wss://[::1]:18795"\n');
     assert.deepEqual(load().approvers, { relay: 'wss://[::1]:18795', requestTtlS: 300 });
+    write('approvers:\n  relay: "wss://10.0.0.5:443"\n'); // wss's own default port, dropped by WHATWG on parse
+    assert.deepEqual(load().approvers, { relay: 'wss://10.0.0.5:443', requestTtlS: 300 });
     write('approvers:\n  request_ttl_s: 600\n');
     assert.throws(load, /from 30 to 300/);
     write('approvers:\n  phone: yes\n');

@@ -169,9 +169,25 @@ async function startApprovals({ dataDir, configDir = adminConfigDir({ dataDir })
 
   const teardown = async () => {
     clearInterval(pruneTimer);
-    stopTracking();
-    if (phoneApprover) phoneApprover.stop();
-    if (courierPump) courierPump.stop();
+    // Each step is guarded on its own: a throw from stopTracking() or
+    // phoneApprover.stop() must never skip relayClient.stop() — leaving a
+    // live relay link behind is exactly what this teardown exists to
+    // prevent, and it must run no matter what any earlier step does.
+    try {
+      stopTracking();
+    } catch (err) {
+      log.warn(`stopTracking failed during teardown: ${err.message}`);
+    }
+    try {
+      if (phoneApprover) phoneApprover.stop();
+    } catch (err) {
+      log.warn(`phoneApprover.stop failed during teardown: ${err.message}`);
+    }
+    try {
+      if (courierPump) courierPump.stop();
+    } catch (err) {
+      log.warn(`courierPump.stop failed during teardown: ${err.message}`);
+    }
     if (relayClient) await relayClient.stop();
   };
 

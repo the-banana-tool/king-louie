@@ -452,6 +452,14 @@ class CourierPump {
         // different inbox once this one has given up) starts fresh.
         if (method === 'approval.submit') this.routes.delete(message.request_id);
         if (method === 'enroll.open') this.codes.delete(message.code_id);
+        // enroll.done never reached the relay, so the code was never
+        // actually closed: reopen it (same class as the approval.submit/
+        // enroll.open unbinds above) so a retry of enroll.done is forwarded
+        // again instead of being refused as an unknown/closed code.
+        if (method === 'enroll.done') {
+          const code = this.codes.get(message.code_id);
+          if (code) code.closed = false;
+        }
         this._reply(replyTo, { error: { code: err.code || 'error', message: err.message } });
       }
       return;

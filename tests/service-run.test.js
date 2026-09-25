@@ -248,4 +248,71 @@ describe('loadProfile("agent") listener readiness', { timeout: 120000 }, () => {
     }
     assert.equal(live.size, 0);
   });
+
+  // Fix round 2 (opus re-review, minor): core.start() rejecting is different
+  // from createCore() itself throwing — core.start() may have partially
+  // started the core (cron timers, a listener bind in flight) before it
+  // rejects, so it still needs a best-effort core.shutdown() ahead of
+  // stopping approvals, not just approvals.stop() on its own.
+  it("core.start() rejecting also calls core.shutdown() (best effort) before stopping approvals", async () => {
+    const { dataDir: dir, workspace } = dataDir();
+    const coreEntry = require.resolve('../src/core');
+    const original = require.cache[coreEntry];
+    let shutdownCalled = false;
+    require.cache[coreEntry] = {
+      id: coreEntry, filename: coreEntry, loaded: true,
+      exports: {
+        createCore: () => ({
+          start: async () => { throw new Error('core.start boom'); },
+          shutdown: async () => { shutdownCalled = true; }
+        })
+      }
+    };
+    try {
+      await assert.rejects(
+        loadProfile('agent').start({ dataDir: dir, features: allOff, ports: {}, workspace }),
+        /core\.start boom/
+      );
+    } finally {
+      if (original) require.cache[coreEntry] = original; else delete require.cache[coreEntry];
+    }
+    assert.equal(shutdownCalled, true);
+  });
+
+  // Fix round 2 (opus re-review, minor, explicitly requested test): the
+  // returned stop() already runs core.shutdown() in a try with
+  // approvals.stop() in the finally (round 1); this pins that a rejecting
+  // core.shutdown() still leaves approvals genuinely stopped (its prune
+  // timer cleared), not merely that stop() itself rejects.
+  it('a rejecting core.shutdown() still stops approvals', async () => {
+    const { dataDir: dir, workspace } = dataDir();
+    const coreEntry = require.resolve('../src/core');
+    const original = require.cache[coreEntry];
+    require.cache[coreEntry] = {
+      id: coreEntry, filename: coreEntry, loaded: true,
+      exports: {
+        createCore: () => ({
+          start: async () => {},
+          whenListenersSettled: async () => {},
+          getGatewayServer: () => ({ wss: null }),
+          getWebhookServer: () => ({ httpServer: null }),
+          shutdown: async () => { throw new Error('shutdown boom'); }
+        })
+      }
+    };
+    const realSetInterval = global.setInterval;
+    const realClearInterval = global.clearInterval;
+    const live = new Set();
+    global.setInterval = (...args) => { const t = realSetInterval(...args); live.add(t); return t; };
+    global.clearInterval = (t) => { live.delete(t); return realClearInterval(t); };
+    try {
+      const running = await loadProfile('agent').start({ dataDir: dir, features: allOff, ports: {}, workspace });
+      await assert.rejects(running.stop(), /shutdown boom/);
+    } finally {
+      global.setInterval = realSetInterval;
+      global.clearInterval = realClearInterval;
+      if (original) require.cache[coreEntry] = original; else delete require.cache[coreEntry];
+    }
+    assert.equal(live.size, 0);
+  });
 });

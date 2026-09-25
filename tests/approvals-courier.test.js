@@ -305,3 +305,30 @@ describe('CourierPump.routeFor(enroll.claim) and code state (fix round 1)', () =
     assert.equal(pump.routeFor('enroll.claim', { code_id: codeId }), courier.inboxName);
   });
 });
+
+// Task 20 review round 1 re-review (opus, ruling N1): closed = true was set
+// before the relayClient.call for enroll.done, so a relay failure left the
+// code closed even though enroll.done never actually reached the relay —
+// the same class of bug as the Task 15 M1 same-inbox-retry correction for
+// approval.submit/enroll.open. A retry after a transient relay failure must
+// still be forwarded.
+describe('CourierPump: enroll.done reopens the code on a failed relay call (fix round 2)', () => {
+  it('reopens the code when the enroll.done forward fails, so a retry is forwarded', async () => {
+    const { pump, courier, relayClient, identity } = pair();
+    const codeId = crypto.randomBytes(16).toString('base64url');
+    await courier.call('enroll.open', { envelope: m.buildEnrollOpen({ identity, codeId, expiresAt: Date.now() + 600000 }) });
+    const done = m.buildEnrollDone({ identity, codeId, refused: true });
+
+    relayClient.call = async () => { throw new Error('relay down'); };
+    await assert.rejects(courier.call('enroll.done', { envelope: done }), (err) => err.code === 'error');
+    // The failed attempt must not leave the code closed: a claim (and a
+    // retry of enroll.done itself) must still find it open.
+    assert.equal(pump.routeFor('enroll.claim', { code_id: codeId }), courier.inboxName);
+
+    relayClient.call = async (method, params) => { relayClient.calls.push([method, params]); return { ok: true }; };
+    await courier.call('enroll.done', { envelope: done });
+    assert.deepEqual(relayClient.calls.map((c) => c[0]), ['enroll.open', 'enroll.done']);
+    // Once it genuinely reaches the relay, the code is closed again.
+    assert.equal(pump.routeFor('enroll.claim', { code_id: codeId }), null);
+  });
+});

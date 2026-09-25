@@ -61,10 +61,12 @@ function defaultNodeConfig(adminDir) {
 const DEFAULT_APPROVERS = { relay: null, requestTtlS: 300 };
 
 // wss://host:port, nothing else: no userinfo, no path/query/fragment, and an
-// explicit port in 1..65535 (the WHATWG default-port fallback — `.port ===
-// ''` for the special `wss` scheme's own default 443 — is refused rather
-// than silently accepted, since "host:port" is what operators are told to
-// write and what the error message says back to them).
+// explicit port in 1..65535. WHATWG drops a port that matches the scheme's
+// own default (wss: → 443) when serializing — `url.port` reads back as ''
+// for `wss://host:443` exactly as it would for `wss://host` — so an
+// explicit :443 can't be told apart from "no port written" through `.port`
+// alone. The raw string's authority is checked instead: whatever WHATWG
+// parsed as the host must be followed there by exactly ":<digits>".
 function isValidRelayUrl(value) {
   let url;
   try {
@@ -77,8 +79,11 @@ function isValidRelayUrl(value) {
   if (!url.hostname) return false;
   if (url.pathname !== '' && url.pathname !== '/') return false;
   if (url.search !== '' || url.hash !== '') return false;
-  if (!url.port) return false;
-  const port = Number(url.port);
+  const authority = value.slice(value.indexOf('://') + 3).split(/[/?#]/, 1)[0];
+  const hostPart = authority.startsWith('[') ? authority.slice(0, authority.indexOf(']') + 1) : authority.split(':')[0];
+  const afterHost = authority.slice(hostPart.length);
+  if (!/^:\d+$/.test(afterHost)) return false;
+  const port = Number(afterHost.slice(1));
   return Number.isInteger(port) && port >= 1 && port <= 65535;
 }
 
