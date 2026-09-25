@@ -72,7 +72,13 @@ describe('personal-value denylist', () => {
     '10.1.2.3',
     '/home/alice/',
     'C:\\Users\\bob\\',
-    '+442071234567'
+    '+442071234567',
+    'C:\\Users\\bob for details',
+    '/home/alice for',
+    '/Users/alice.',
+    '212-555-0250',
+    '(212) 555-0250',
+    '+1-212-555-0250'
   ];
   const mustPass = [
     'example.com',
@@ -81,7 +87,9 @@ describe('personal-value denylist', () => {
     '192.0.2.10',
     '+15550100',
     '/home/<user>/',
-    'git@github.com'
+    'git@github.com',
+    '212.555.0199',
+    'released 2024-05-01, version 1.12.0, port 8080'
   ];
   for (const text of mustFail) {
     it(`flags ${text}`, () => {

@@ -33,11 +33,38 @@ function ipAllowed([a, b, c, d]) {
   return false;
 }
 
+// A phone number is fictional (reserved for fiction, RFC-3092-style) when its
+// last 7 digits are the 555 exchange with a line number from 0100 to 0199 —
+// the same test the bare "+15550100" form already used, now applied to every
+// digit string regardless of which separators produced it.
+function isFictionalPhone(digits) {
+  if (digits.length < 7) return false;
+  const exchange = digits.slice(-7, -4);
+  const line = Number(digits.slice(-4));
+  return exchange === '555' && line >= 100 && line <= 199;
+}
+
+// No bare-digit rule: every pattern requires a separator (or a leading `+`)
+// so dates, ports and version numbers are never mistaken for a phone number.
+const PHONE_PATTERNS = [
+  /\+\d{1,3}(?:[ -]\d{2,4}){2,4}/g, // +1 212 555 0199, +1-212-555-0199
+  /\+\d{8,}/g, // +15550100 (bare digits after a leading +)
+  /\(\d{3}\)\s?\d{3}-\d{4}/g, // (212) 555-0199
+  /\b\d{3}-\d{3}-\d{4}\b/g, // 212-555-0199
+  /\b\d{3}\.\d{3}\.\d{4}\b/g, // 212.555.0199
+  /\b\d{3} \d{3} \d{4}\b/g // 212 555 0199
+];
+
+// A path name is a hit whether it is followed by the real separator or ends
+// the reference: end of text, or a boundary character (whitespace, quote,
+// backtick, `,` `.` `;` `:` or a closing bracket). A name that starts with
+// `<` (an unresolved placeholder like <user>) never enters the capture, so
+// placeholders stay allowed either way.
 const HOME_RULES = [
-  { re: /\/home\/([^/\s<>'"`]+)\//g, allowed: () => false },
-  { re: /\/Users\/([^/\s<>'"`]+)\//g, allowed: (name) => name === 'Shared' },
-  { re: /[A-Za-z]:\\Users\\([^\\\s<>'"`]+)\\/g, allowed: (name) => ['public', 'default'].includes(name.toLowerCase()) },
-  { re: /~([A-Za-z0-9._-]+)\//g, allowed: () => false }
+  { re: /\/home\/([^/\s<>'"`]+)(?:\/|(?=[\s'"`,.;:)\]}]|$))/g, allowed: () => false },
+  { re: /\/Users\/([^/\s<>'"`]+)(?:\/|(?=[\s'"`,.;:)\]}]|$))/g, allowed: (name) => name === 'Shared' },
+  { re: /[A-Za-z]:\\Users\\([^\\\s<>'"`]+)(?:\\|(?=[\s'"`,.;:)\]}]|$))/g, allowed: (name) => ['public', 'default'].includes(name.toLowerCase()) },
+  { re: /~([A-Za-z0-9._-]+)(?:\/|(?=[\s'"`,.;:)\]}]|$))/g, allowed: () => false }
 ];
 
 function scanForPersonalValues(text) {
@@ -75,9 +102,10 @@ function scanForPersonalValues(text) {
     if (!hostAllowed(host)) add('host', host);
   }
 
-  for (const m of src.matchAll(/\+(\d{8,})/g)) {
-    const n = Number(m[1]);
-    if (!(m[1].length === 8 && n >= 15550100 && n <= 15550199)) add('phone', m[0]);
+  for (const re of PHONE_PATTERNS) {
+    for (const m of src.matchAll(re)) {
+      if (!isFictionalPhone(m[0].replace(/\D/g, ''))) add('phone', m[0]);
+    }
   }
 
   return findings;
