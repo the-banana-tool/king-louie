@@ -305,6 +305,42 @@ describe('RelayClient', () => {
     }
   });
 
+  // Integration fix: on Windows the atomic rename fails with EPERM while
+  // another process (doctor, the desktop, a test polling the file) has
+  // link.json open; the state must still land once the reader lets go.
+  it('retries a link.json write that fails, landing the latest state, and stops retrying on stop()', async () => {
+    const { writeFileAtomic } = require('../src/approvals/approver-store');
+    const relay = await fakeRelay();
+    cleanups.push(relay.stop);
+    let failures = 2;
+    let alwaysFail = false;
+    const eperm = () => Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' });
+    const { c, dataDir } = client(relay, {
+      linkRetryMs: 10,
+      writeLinkFile: (file, text) => {
+        if (alwaysFail) throw eperm();
+        if (failures > 0) { failures -= 1; throw eperm(); }
+        return writeFileAtomic(file, text);
+      }
+    });
+    const connected = once(c, 'connected');
+    await c.start();
+    await connected;
+    const deadline = Date.now() + 5000;
+    while (!(fs.existsSync(path.join(dataDir, 'approvals', 'link.json')) && readLink(dataDir).connected === true)) {
+      assert.ok(Date.now() < deadline, 'link.json never showed the connected state');
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    assert.equal(failures, 0);
+    assert.equal(c.linkRetryTimer, null);
+
+    alwaysFail = true;
+    c._writeLink();
+    assert.notEqual(c.linkRetryTimer, null, 'a failed write arms a retry');
+    await c.stop();
+    assert.equal(c.linkRetryTimer, null, 'stop() clears the retry and does not re-arm it');
+  });
+
   it('stop() writes link.json connected:false and settles a pending call', async () => {
     const relay = await fakeRelay();
     cleanups.push(relay.stop);

@@ -48,13 +48,19 @@ function readFrontDoor(configDir) {
 class RelayClient extends EventEmitter {
   constructor({ identity, nodeName = null, relayPin = null, configDir = null, dataDir = null,
     transportFactory = (options) => new MeshTransport(options), useTls = true,
-    reconnectDelays = [1000, 5000, 15000, 30000], callTimeoutMs = 10000, now = Date.now } = {}) {
+    reconnectDelays = [1000, 5000, 15000, 30000], callTimeoutMs = 10000, now = Date.now,
+    writeLinkFile = writeFileAtomic, linkRetryMs = 100, linkRetryLimit = 50 } = {}) {
     super();
     this.identity = identity;
     this.nodeName = nodeName || identity.nodeName;
     this.pin = relayPin;
     this.configDir = configDir;
     this.linkFile = dataDir ? path.join(dataDir, 'approvals', 'link.json') : null;
+    this.writeLinkFile = writeLinkFile;
+    this.linkRetryMs = linkRetryMs;
+    this.linkRetryLimit = linkRetryLimit;
+    this.linkRetries = 0;
+    this.linkRetryTimer = null;
     this.transportFactory = transportFactory;
     this.useTls = useTls;
     this.reconnectDelays = reconnectDelays;
@@ -222,18 +228,36 @@ class RelayClient extends EventEmitter {
     if (typeof this.retryTimer.unref === 'function') this.retryTimer.unref();
   }
 
+  // link.json is the only place another process (doctor, the desktop's
+  // approvalsStatus, a test) sees the link state. On Windows the rename in
+  // writeFileAtomic fails with EPERM while another process has the file open
+  // for reading, which would leave a stale state until the link next
+  // changes; a failed write is therefore retried (the latest state, on a
+  // short unref'd timer) until it lands, the limit is reached or the client
+  // stops.
   _writeLink() {
     if (!this.linkFile) return;
+    clearTimeout(this.linkRetryTimer);
+    this.linkRetryTimer = null;
     try {
       fs.mkdirSync(path.dirname(this.linkFile), { recursive: true, mode: 0o700 });
-      writeFileAtomic(this.linkFile, `${JSON.stringify({
+      this.writeLinkFile(this.linkFile, `${JSON.stringify({
         connected: this.connected,
         since: this.connected ? this.since : null,
         relay_id: this.pin.relay_id,
         relay_public_url: this.relayInfo ? this.relayInfo.public_url : null,
         relay_spki: this.relayInfo ? this.relayInfo.phone_spki : null
       })}\n`);
+      this.linkRetries = 0;
     } catch (err) {
+      if (!this.stopped && this.linkRetries < this.linkRetryLimit) {
+        this.linkRetries += 1;
+        log.debug(`could not write ${this.linkFile} (${err.message}); retrying`);
+        this.linkRetryTimer = setTimeout(() => this._writeLink(), this.linkRetryMs);
+        if (typeof this.linkRetryTimer.unref === 'function') this.linkRetryTimer.unref();
+        return;
+      }
+      this.linkRetries = 0;
       log.warn(`could not write ${this.linkFile}: ${err.message}`);
     }
   }
@@ -243,6 +267,8 @@ class RelayClient extends EventEmitter {
     this.stopped = true;
     clearTimeout(this.retryTimer);
     this.retryTimer = null;
+    clearTimeout(this.linkRetryTimer);
+    this.linkRetryTimer = null;
     // A dial in flight when stop() runs must not wedge a later start()'s
     // _dial() behind a `dialing` flag stop() never cleared.
     this.dialing = false;
