@@ -790,6 +790,10 @@ function createCore(deps = {}) {
 
   const appendMessageToChat = (chatId, sender, text, metadata = {}) => {
     const now = new Date().toISOString();
+    // id, sender and timestamp are this function's to set; a caller-supplied
+    // metadata object (e.g. CHAT_ADD_MESSAGE's IPC payload) must not be able
+    // to override them by spreading last (minor fix, F5 review).
+    const { id: _id, sender: _sender, timestamp: _timestamp, ...safeMetadata } = metadata || {};
     const chats = getChats();
     const updated = chats.map((chat) => {
       if (chat.id !== chatId) {
@@ -806,7 +810,7 @@ function createCore(deps = {}) {
             sender,
             text,
             timestamp: now,
-            ...(metadata || {})
+            ...safeMetadata
           }
         ],
         llmTotals: getChatLlmTotals({
@@ -816,7 +820,7 @@ function createCore(deps = {}) {
             {
               sender,
               text,
-              ...(metadata || {})
+              ...safeMetadata
             }
           ]
         })

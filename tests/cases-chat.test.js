@@ -12,7 +12,10 @@ initializeTools();
 // A minimal context for chat:sendMessage. Anything not overridden resolves to
 // a function returning null, which the send path treats as "feature absent".
 // If the handler starts dereferencing another context function, add it here.
-function harness({ caseId = 'case-1', beginError = null, inferenceErrorOnCall = 0, loopWait = null, loopError = null, hookResult = null, loopContent = 'Answer text', contextAssembler = null } = {}) {
+function harness({
+  caseId = 'case-1', beginError = null, inferenceErrorOnCall = 0, loopWait = null, loopError = null, hookResult = null,
+  loopContent = 'Answer text', contextAssembler = null, providerHasTools = true, streamMessageResult = null, usageTracker = null
+} = {}) {
   const calls = { begin: [], end: [], executorOptions: null, run: null, resolveInferenceCalls: 0, ownerHooks: [], routed: [], usage: [] };
   const chat = { id: 'chat-1', title: 'Case chat', caseId, messages: [{ id: 'm0', sender: 'assistant', text: 'How can I help you?' }] };
   const runtime = {
@@ -56,10 +59,14 @@ function harness({ caseId = 'case-1', beginError = null, inferenceErrorOnCall = 
       if (calls.resolveInferenceCalls === inferenceErrorOnCall) throw new Error('no provider configured');
       return {
         providerType: 'openai',
-        provider: { sendMessageWithTools: async () => ({}), streamMessage: async () => ({}) },
+        provider: {
+          ...(providerHasTools ? { sendMessageWithTools: async () => ({}) } : {}),
+          streamMessage: async () => streamMessageResult || {}
+        },
         model: 'test-model', tier: 'standard', timeoutMs: 1000
       };
     },
+    getUsageTracker: () => usageTracker,
     getConversationCompactor: () => null,
     getContextAssembler: () => contextAssembler,
     getRuntimeEnvironment: async () => ({ platform: process.platform }),
@@ -207,6 +214,22 @@ describe('chat:sendMessage case turn, stage 2', () => {
     assert.deepStrictEqual(await calls.loopOptions.prompter.askUser({ question: 'x' }), { ok: false, error: 'In a case, ask the owner with the Ask tool.' });
   });
 
+  it('charges usage to the case on the plain streamMessage path, when no tools are on offer (minor: non-agent charge line)', async () => {
+    // A case turn always tries the agent loop, but falls back to a plain
+    // provider.streamMessage call when sendMessageWithTools isn't available
+    // (chat-handlers.js's canUseAgentMode check). That path's usage still
+    // has to reach the case budget through the one charge line it has.
+    const { calls, send } = harness({
+      providerHasTools: false,
+      streamMessageResult: { llmMetrics: { provider: 'openai', model: 'test-model', inputTokens: 10, outputTokens: 5, totalTokens: 15, costUsd: 0.02 } },
+      usageTracker: { record: () => ({ provider: 'openai', model: 'test-model', totalTokens: 15, cost: 0.02 }) }
+    });
+    await send({ message: 'Where are we on the listing?' });
+    assert.strictEqual(calls.usage.length, 1);
+    assert.strictEqual(calls.usage[0][0], calls.begin[0].turnId);
+    assert.deepStrictEqual(calls.usage[0][1], { provider: 'openai', model: 'test-model', totalTokens: 15, cost: 0.02 });
+  });
+
   it('passes owner message times in step with the owner messages, the current one stamped now', async () => {
     const { calls, send, chat } = harness();
     chat.messages.push({ id: 'm-old', sender: 'user', text: 'Earlier question', timestamp: '2026-09-20T10:00:00.000Z' });
@@ -244,6 +267,11 @@ describe('chat:sendMessage case turn, stage 2', () => {
     assert.strictEqual(calls.loopProvider.routed, undefined);
     assert.strictEqual(calls.loopOptions.failoverPolicy, undefined);
     assert.strictEqual(calls.loopOptions.onUsageRecorded, undefined);
+    // Not casePrompter(prompter): that wraps into a plain { askUser, ... }
+    // object, so a case turn's prompter (checked above) is typeof 'object';
+    // the plain path's is whatever context.prompter itself is (a function
+    // here) (minor fix: this test's name promised this check).
+    assert.strictEqual(typeof calls.loopOptions.prompter, 'function');
   });
 
   it('skips the RequestTools hint in a case turn only', async () => {

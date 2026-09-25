@@ -119,4 +119,30 @@ describe('roleModel and routedProvider', () => {
     assert.deepStrictEqual([calls.at(-1).tier, calls.at(-1).opts.target], ['smart', { provider: 'openai', model: 'gpt-4o' }]);
     assert.throws(() => new CaseRuntime({ root: root() }).routedProvider(turn, { role: 'judge' }), /inference router/);
   });
+
+  it("a per-call model option travels as the target's model, so the AgentLoop's loopModel actually switches on later iterations (minor fix)", async () => {
+    const calls = [];
+    const router = { routeWithFallback: async (tier, messages, opts) => { calls.push({ tier, opts }); return { type: 'text', content: 'ok' }; } };
+    const host = { inferenceRouter: router, resolveInference: async () => {} };
+    const rt = new CaseRuntime({ root: root(), getSettings: () => settings(), host });
+    const info = await rt.createCase({ title: 'Lakeside lot' });
+    const controller = new AbortController();
+    const turn = { caseId: info.id, turnId: 't1', signal: controller.signal };
+    const owner = rt.routedProvider(turn, { target: { provider: 'openai', model: 'gpt-4o' }, tier: 'smart' });
+    // Iteration 1: no per-call model, the resolved target's model is used.
+    await owner.sendMessageWithTools([], [{ name: 'Ledger' }], {});
+    assert.deepStrictEqual(calls.at(-1).opts.target, { provider: 'openai', model: 'gpt-4o' });
+    // Iteration >= 2: AgentLoop passes options.model = this.loopModel
+    // (agent-loop.js). inference-router.js's execute() prefers
+    // config.model (built from target.model) over a bare options.model, so
+    // without this the case kept paying for the first iteration's model on
+    // every later one too.
+    await owner.sendMessageWithTools([], [{ name: 'Ledger' }], { model: 'gpt-4o-mini' });
+    assert.deepStrictEqual(calls.at(-1).opts.target, { provider: 'openai', model: 'gpt-4o-mini' });
+    assert.strictEqual(calls.at(-1).opts.model, 'gpt-4o-mini');
+    // The base target used when no override is given is unaffected by the
+    // earlier override call (no shared mutable state between calls).
+    await owner.sendMessageWithTools([], [{ name: 'Ledger' }], {});
+    assert.deepStrictEqual(calls.at(-1).opts.target, { provider: 'openai', model: 'gpt-4o' });
+  });
 });

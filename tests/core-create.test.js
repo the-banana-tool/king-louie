@@ -48,6 +48,24 @@ describe('createCore', () => {
     assert.strictEqual(core.context.safeStorage, undefined);
   });
 
+  it("appendMessageToChat generates id/timestamp itself; metadata cannot override them or the sender (minor fix, F5 review)", () => {
+    const { deps } = makeDeps();
+    const core = createCore(deps);
+    core.context.setChats([{ id: 'chat-1', title: 'Chat', messages: [] }]);
+    const updated = core.context.appendMessageToChat('chat-1', 'user', 'hi', {
+      id: 'spoofed-id',
+      sender: 'assistant',
+      timestamp: '1999-01-01T00:00:00.000Z',
+      channel: 'telegram'
+    });
+    const message = updated.messages[0];
+    assert.notStrictEqual(message.id, 'spoofed-id');
+    assert.strictEqual(message.sender, 'user');
+    assert.notStrictEqual(message.timestamp, '1999-01-01T00:00:00.000Z');
+    assert.strictEqual(message.text, 'hi');
+    assert.strictEqual(message.channel, 'telegram', 'metadata keys other than id/sender/timestamp still apply');
+  });
+
   it('starts headless with every optional feature off, then shuts down cleanly', async () => {
     const { deps } = makeDeps();
     const core = createCore(deps);

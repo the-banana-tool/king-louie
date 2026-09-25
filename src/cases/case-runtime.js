@@ -1291,8 +1291,10 @@ class CaseRuntime {
   }
 
   // A provider-shaped object whose every call goes through
-  // routeWithFallback with an explicit target, so case calls fail over and
-  // are charged like any other (spec §3.8).
+  // routeWithFallback with an explicit target, so case calls fail over the
+  // same way any other call does (spec §3.8). Charging itself happens
+  // elsewhere: the caller's onUsageRecorded hook (usageHook(turn)), wired
+  // into the AgentLoop/orient call that uses this provider.
   routedProvider(turn, spec = {}) {
     const router = this.host?.inferenceRouter;
     if (!router || typeof router.routeWithFallback !== 'function') {
@@ -1318,12 +1320,21 @@ class CaseRuntime {
     };
     const call = async (messages, opts = {}, tools = null, onChunk = null) => {
       await refresh();
+      // inference-router.js's execute() builds its final model as
+      // `config.model || rest.model || ...`, where config comes from
+      // `target`: target.model always wins over a plain options.model. The
+      // AgentLoop switches to the cheaper loopModel on iterations after the
+      // first by setting exactly that plain options.model (agent-loop.js),
+      // so without folding it into target here, every case-turn iteration
+      // after the first silently kept running the turn's original model
+      // (minor fix, final review).
+      const callTarget = opts?.model ? { ...target, model: opts.model } : target;
       return router.routeWithFallback(tier, messages, {
         ...(opts || {}),
         ...(Array.isArray(tools) ? { tools } : {}),
         ...(typeof onChunk === 'function' ? { onChunk } : {}),
         ...(!opts?.abortSignal && turn.signal ? { abortSignal: turn.signal } : {}),
-        target
+        target: callTarget
       });
     };
     return {

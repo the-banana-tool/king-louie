@@ -20,11 +20,11 @@ const APP_PATH = path.resolve(__dirname, '..', '..');
  * Every launch gets its own fresh --user-data-dir (a temp directory), so the
  * suite never reads or writes the real King Louie profile (chats, settings,
  * the vault). closeApp() removes it afterward. Because each launchApp() call
- * gets an isolated profile, tests that need data to persist across a
- * close+relaunch must launch once, keep ctx.userDataDir, and pass it back in
- * via KL_E2E_USER_DATA_DIR-style reuse rather than relying on the OS-default
- * profile; no current e2e test does this (each file launches once in
- * `before` and closes once in `after`).
+ * generates its own isolated profile, a test that needs data to persist
+ * across a close+relaunch would have to keep the same userDataDir across
+ * both launches itself — launchApp() takes no such option today. No current
+ * e2e test needs this (each file launches once in `before` and closes once
+ * in `after`).
  */
 async function launchApp() {
   const electronPath = require('electron');

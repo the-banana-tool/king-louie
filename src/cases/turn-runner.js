@@ -246,7 +246,15 @@ async function runWakeupTurn(runtime, caseId, dueIds, now = runtime.now()) {
         mark('quiet');
         return await close('quiet', `quiet: ${ids.join(', ')} — ${oneLine(parsed.why || 'nothing changed')}`, 'wake-up quiet');
       }
-      why = parsed ? parsed.why : 'The orient step gave no usable answer, so the case acts to be safe.';
+      // parsed.why can itself be '' (a valid reply that just didn't say
+      // why): falling through to the "Why now:" line's own default would
+      // then claim a re-orientation trigger or owner answer is pending,
+      // which is what that default means for the *skipped-orient* case
+      // below, not for "orient ran and said something changed" (minor fix,
+      // final review).
+      why = parsed
+        ? (parsed.why || 'The orient step said something changed but gave no reason.')
+        : 'The orient step gave no usable answer, so the case acts to be safe.';
     }
 
     try {

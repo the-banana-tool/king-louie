@@ -27,7 +27,7 @@ const zero = { ran: 0, quiet: 0, skipped: 0, busy: 0, failed: 0 };
 
 function harness({ settings = {}, orient = '{"changed": true, "why": "a new answer"}', judge = [], host = {} } = {}) {
   const clock = { now: new Date('2026-09-23T12:00:00.000Z') };
-  const calls = { orient: 0, judge: 0, judgeTools: [], results: [], executorOptions: null };
+  const calls = { orient: 0, judge: 0, judgeTools: [], judgeMessages: [], results: [], executorOptions: null };
   const script = [...judge];
   let runtime = null;
   const router = {
@@ -40,6 +40,7 @@ function harness({ settings = {}, orient = '{"changed": true, "why": "a new answ
       if (tier === 'smart') {
         calls.judge += 1;
         calls.judgeTools.push((opts.tools || []).map((t) => t.name));
+        calls.judgeMessages.push(messages);
         const next = script.shift() || { type: 'text', content: 'Nothing else to do.' };
         return typeof next === 'function' ? next(runtime) : next;
       }
@@ -156,6 +157,18 @@ describe('runDueWakeups', () => {
     assert.deepStrictEqual(await runtime.runDueWakeups(clock.now), { ...zero, ran: 1 });
     assert.deepStrictEqual([calls.orient, calls.judge], [1, 1]);
     assert.strictEqual(runtime.budget(c.id).status().usd.spent, 0.03);
+  });
+
+  it('an orient reply with changed: true but an empty why still gives the judge a reason, not the "re-orientation trigger" default (minor fix)', async () => {
+    const { runtime, clock, calls } = harness({
+      orient: { type: 'text', content: '{"changed": true, "why": ""}' },
+      judge: [{ type: 'text', content: 'Done.' }]
+    });
+    const c = await activeCase(runtime);
+    dueWakeup(runtime, c, clock);
+    await runtime.runDueWakeups(clock.now);
+    const whyLine = calls.judgeMessages[0][0].text.split('\n').find((l) => l.startsWith('Why now:'));
+    assert.strictEqual(whyLine, 'Why now: The orient step said something changed but gave no reason.');
   });
 
   it('a mock model calling message and Bash is refused by allowedToolNames', async () => {
