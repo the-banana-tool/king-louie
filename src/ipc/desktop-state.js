@@ -28,6 +28,19 @@ function unavailable() {
   return err;
 }
 
+// Shared by setPairing and setPendingPair (fix round 1, Task 13 review): a
+// record that will be persisted must already carry its private key sealed,
+// never the raw key itself.
+function assertSealedPairingRecord(record, methodName) {
+  if (!record || typeof record !== 'object') throw new Error(`${methodName} needs a pairing record`);
+  if (Object.prototype.hasOwnProperty.call(record, 'privateKey')) {
+    throw new Error(`${methodName} refuses a record with a raw privateKey field; seal it first`);
+  }
+  if (typeof record.privateKeySealed !== 'string' || !record.privateKeySealed) {
+    throw new Error(`${methodName} needs a sealed privateKeySealed field`);
+  }
+}
+
 function openDesktopState(userDataDir, safeStorage, { storeFactory = null, platform = process.platform } = {}) {
   const make = storeFactory || defaultStoreFactory();
   const store = make({
@@ -49,18 +62,16 @@ function openDesktopState(userDataDir, safeStorage, { storeFactory = null, platf
     get installId() { return store.get('installId'); },
     get pairing() { return store.get('pairing') || null; },
     setPairing(pairing) {
-      if (!pairing || typeof pairing !== 'object') throw new Error('setPairing needs a pairing record');
-      if (Object.prototype.hasOwnProperty.call(pairing, 'privateKey')) {
-        throw new Error('setPairing refuses a record with a raw privateKey field; seal it first');
-      }
-      if (typeof pairing.privateKeySealed !== 'string' || !pairing.privateKeySealed) {
-        throw new Error('setPairing needs a sealed privateKeySealed field');
-      }
+      assertSealedPairingRecord(pairing, 'setPairing');
       store.set('pairing', pairing);
     },
     clearPairing() { store.set('pairing', null); },
     get pendingPair() { return store.get('pendingPair') || null; },
-    setPendingPair(pending) { store.set('pendingPair', pending); },
+    setPendingPair(pending) {
+      if (pending === null) { store.set('pendingPair', null); return; }
+      assertSealedPairingRecord(pending, 'setPendingPair');
+      store.set('pendingPair', pending);
+    },
     get lastImport() { return store.get('lastImport') || null; },
     setLastImport(entry) { store.set('lastImport', entry); },
     secureStorageUsable: usable,

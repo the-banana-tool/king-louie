@@ -37,6 +37,7 @@ function createDesktopController({
   const readFile = readBridgeFile || (() => readTrustedBridgeFile(bridgeFile(), { env, platform }));
   const makeClient = clientFactory || ((options) => new DesktopBridgeClient(options));
   let client = null;
+  let clientStateHandler = null;
   let connection = { status: mode === 'attached' ? 'connecting' : 'idle', code: null, error: null, nextRetryAt: null };
   let pollTimer = null;
   let found = null;
@@ -84,14 +85,29 @@ function createDesktopController({
     pollTimer = null;
   }
 
-  function startPolling() {
+  // `until` is an absolute epoch ms deadline, computed from the pending
+  // pair's own createdAt (fresh from pairStart, or resumed at construction)
+  // so a desktop restart mid-pairing does not reset its own clock.
+  function startPolling(until) {
     stopPolling();
-    const until = Date.now() + pollWindowMs;
     const tick = () => {
+      if (Date.now() >= until) {
+        pollTimer = null;
+        // The window ran out: the owner never ran `desktop pair`, or never
+        // will. Go back to unpaired rather than leave a stale pending pair
+        // (with its sealed, now-orphaned key) sitting in the store forever.
+        if (state.pendingPair) {
+          state.setPendingPair(null);
+          found = null;
+          foundError = null;
+          notify();
+        }
+        return;
+      }
       const r = readFile();
       if (r && r.ok) { found = r.record; foundError = null; } else { found = null; foundError = r ? { code: r.code || null, error: r.error || null } : null; }
       notify();
-      if (state.pendingPair && Date.now() < until) {
+      if (state.pendingPair) {
         pollTimer = setTimeout(tick, pollMs);
         pollTimer.unref?.();
       } else {
@@ -99,6 +115,23 @@ function createDesktopController({
       }
     };
     tick();
+  }
+
+  // A pending pair persists across a desktop restart. Resume polling for
+  // whatever's left of its window, or drop it outright if the window
+  // already ran out while the app was closed.
+  function resumePendingPair() {
+    const pending = state.pendingPair;
+    if (!pending) return;
+    const created = Date.parse(pending.createdAt);
+    const until = Number.isFinite(created) ? created + pollWindowMs : Date.now() - 1;
+    if (until > Date.now()) {
+      startPolling(until);
+    } else {
+      state.setPendingPair(null);
+      found = null;
+      foundError = null;
+    }
   }
 
   const pairCommand = (request) => (platform === 'win32'
@@ -166,26 +199,34 @@ function createDesktopController({
     const raw = rawFromPublicKeyObject(publicKey);
     const label = defaultDeviceLabel(username || currentUsername());
     const request = encodePairRequest({ publicKeyRaw: raw, label });
+    const createdAt = now();
     state.setPendingPair({
       deviceId: request.split('.')[1],
       publicKey: raw.toString('base64url'),
       privateKeySealed: state.seal(privateKey.export({ type: 'pkcs8', format: 'pem' })),
       label,
       request,
-      startedAt: now().toISOString()
+      createdAt: createdAt.toISOString()
     });
     found = null;
     foundError = null;
-    startPolling();
+    startPolling(createdAt.getTime() + pollWindowMs);
     return status();
   }
 
   async function pairConfirm() {
     const pending = state.pendingPair;
     if (!pending) return { ok: false, code: 'NOT_PAIRING', error: 'Start pairing first.' };
-    const r = readFile() || {};
-    if (!r.ok) return { ok: false, code: r.code || 'BRIDGE_FILE_MISSING', error: r.error || 'No local service found.' };
-    const service = { nodeId: r.record.nodeId, publicKey: r.record.publicKey, port: r.record.port };
+    // Pin `found`: the record whose fingerprint the owner was shown while
+    // polling, never a fresh read taken at confirm time (a symlink/file
+    // swap between the two could substitute a different service the owner
+    // never actually compared).
+    if (!found) return { ok: false, code: 'PAIR_NOT_FOUND', error: MESSAGES.PAIR_NOT_FOUND };
+    const fresh = readFile() || {};
+    if (!fresh.ok || fresh.record.nodeId !== found.nodeId || fresh.record.publicKey !== found.publicKey) {
+      return { ok: false, code: 'PAIR_SERVICE_CHANGED', error: MESSAGES.PAIR_SERVICE_CHANGED };
+    }
+    const service = { nodeId: found.nodeId, publicKey: found.publicKey, port: found.port };
     const probe = makeClient(clientOptionsFor(pending, service));
     let info;
     try {
@@ -195,6 +236,11 @@ function createDesktopController({
       return { ok: false, code: err.code || 'SERVICE_UNREACHABLE', error: err.message };
     }
     probe.close();
+    // The handshake above is the only await in this function; a pairCancel
+    // that ran while it was in flight must win over this confirm.
+    if (!state.pendingPair || state.pendingPair.request !== pending.request) {
+      return { ok: false, code: 'NOT_PAIRING', error: 'Start pairing first.' };
+    }
     state.setPairing({
       deviceId: pending.deviceId,
       publicKey: pending.publicKey,
@@ -236,6 +282,7 @@ function createDesktopController({
   async function unpair() {
     const pairing = state.pairing;
     const wasAttached = state.mode === 'attached';
+    closeImportSession();
     state.clearPairing();
     state.setPendingPair(null);
     state.setMode('standalone');
@@ -314,18 +361,25 @@ function createDesktopController({
   }
 
   function setClient(next) {
+    if (client && clientStateHandler) client.off('state', clientStateHandler);
     client = next;
+    clientStateHandler = null;
     if (!client) return;
-    client.on('state', (s) => {
+    clientStateHandler = (s) => {
       connection = { status: s.status, code: s.code, error: s.error, nextRetryAt: s.nextRetryAt };
       notify();
-    });
+    };
+    client.on('state', clientStateHandler);
   }
 
   function dispose() {
     stopPolling();
     closeImportSession();
+    if (client && clientStateHandler) client.off('state', clientStateHandler);
+    clientStateHandler = null;
   }
+
+  resumePendingPair();
 
   return {
     status, pairStart, pairConfirm, pairCancel, attach, detach, standaloneOnce, unpair, retry,

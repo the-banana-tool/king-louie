@@ -66,6 +66,52 @@ describe('desktop state: setPairing guards', () => {
   });
 });
 
+const validPendingPair = () => ({
+  deviceId: 'kld-abcdefghijklmnop',
+  publicKey: 'x',
+  privateKeySealed: 'y',
+  label: 'desk',
+  request: 'klpair1.kld-abcdefghijklmnop.raw.label'
+});
+
+describe('desktop state: setPendingPair gets the same guard as setPairing (fix round 1)', () => {
+  it('accepts a record with only privateKeySealed', () => {
+    const state = openState();
+    state.setPendingPair(validPendingPair());
+    assert.strictEqual(state.pendingPair.privateKeySealed, 'y');
+  });
+
+  it('refuses a record carrying a raw privateKey field, and stores nothing', () => {
+    const state = openState();
+    const record = { ...validPendingPair(), privateKey: 'RAW PRIVATE KEY MATERIAL' };
+    assert.throws(() => state.setPendingPair(record));
+    assert.strictEqual(state.pendingPair, null);
+  });
+
+  it('refuses a record without privateKeySealed, and stores nothing', () => {
+    const state = openState();
+    const record = validPendingPair();
+    delete record.privateKeySealed;
+    assert.throws(() => state.setPendingPair(record));
+    assert.strictEqual(state.pendingPair, null);
+  });
+
+  it('still accepts null, the way pairCancel/pairConfirm/unpair clear it', () => {
+    const state = openState();
+    state.setPendingPair(validPendingPair());
+    assert.ok(state.pendingPair);
+    state.setPendingPair(null);
+    assert.strictEqual(state.pendingPair, null);
+  });
+
+  it('does not clobber a previously stored valid pending pair when a later call is refused', () => {
+    const state = openState();
+    state.setPendingPair(validPendingPair());
+    assert.throws(() => state.setPendingPair({ ...validPendingPair(), privateKey: 'leak' }));
+    assert.strictEqual(state.pendingPair.privateKeySealed, 'y');
+  });
+});
+
 describe('desktop state: seal() rejects non-strings', () => {
   it('seals a real string', () => {
     const state = openState();

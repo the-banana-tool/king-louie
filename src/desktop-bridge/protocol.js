@@ -128,6 +128,8 @@ const MESSAGES = Object.freeze({
   PAYLOAD_TOO_LARGE: 'That request is too large for the local service (64 MiB limit).',
   DEVICE_UNPAIRED: 'The service does not know this desktop. Pair again in Settings > Local service.',
   SERVICE_KEY_CHANGED: (oldId, newId) => `The service's identity changed from ${oldId} to ${newId}. If you reinstalled the service, pair again.`,
+  PAIR_NOT_FOUND: 'No local service was found yet. Wait for its fingerprint to appear, then confirm.',
+  PAIR_SERVICE_CHANGED: 'The local service changed since its fingerprint was shown. Cancel and start pairing again.',
   ANOTHER_DEVICE: (label) => `Another desktop (${label}) is attached to this service.`,
   PROTOCOL_MISMATCH: (theirs) => `This app speaks desktop-bridge protocol ${PROTOCOL}; the service speaks ${theirs}. Upgrade the older one.`,
   SERVICE_TOO_OLD: (version, channel) => `The local service (version ${version}) does not support ${channel}. Upgrade the service.`,
