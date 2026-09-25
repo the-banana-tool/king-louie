@@ -268,19 +268,24 @@ class AppModel(context: Context) {
      * propagates and leaves the existing key alone.
      */
     private fun ensureKey(): DeviceKey {
-        // A load that failed at startup is tried again (it throws on a
-        // Keystore error), so an enrolled alias is never overwritten by create().
+        // A load that failed at startup is tried again.
         if (key == null) key = DeviceKey.load()
-        key?.let { existing ->
+        val existing = key
+        if (existing != null) {
             try {
                 existing.checkUsable()
                 return existing
             } catch (e: KeyInvalidatedException) {
+                // Confirmed invalidated: the one case where the alias is replaced.
                 runCatching { DeviceKey.delete() }
                 key = null
                 client = null
+                return DeviceKey.create().also { key = it }
             }
         }
+        // load() gives null on a transient Keystore2 error too; create() runs
+        // only once the Keystore confirms there is no key at all.
+        DeviceKey.requireAbsent()
         return DeviceKey.create().also { key = it }
     }
 

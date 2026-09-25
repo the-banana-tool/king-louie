@@ -15,6 +15,8 @@ import com.example.kinglouie.protocol.Identifiers
 import com.example.kinglouie.protocol.P1363
 import com.example.kinglouie.protocol.P256
 import kotlinx.coroutines.suspendCancellableCoroutine
+import java.io.IOException
+import java.security.GeneralSecurityException
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.PrivateKey
@@ -144,9 +146,32 @@ class DeviceKey private constructor(private val publicKey: ECPublicKey) {
 
         private fun keyStore(): KeyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
 
+        /**
+         * The key, or null. Not proof there is none: on Keystore2 a transient
+         * error in getCertificate also comes back as null. See requireAbsent.
+         */
         fun load(): DeviceKey? {
             val cert = keyStore().getCertificate(ALIAS) ?: return null
             return DeviceKey(cert.publicKey as ECPublicKey)
+        }
+
+        /**
+         * Returns only when the Keystore confirms there is no key under the
+         * alias (getKey answers null), the one case where create() may run.
+         * A key that is there (but did not load), or any Keystore error,
+         * throws the retryable KeyUnavailableException, so an enrolled key is
+         * never overwritten because of a transient failure.
+         */
+        fun requireAbsent() {
+            val found = try {
+                keyStore().getKey(ALIAS, null)
+            } catch (e: GeneralSecurityException) {
+                // UnrecoverableKeyException, KeyStoreException, …
+                throw KeyUnavailableException()
+            } catch (e: IOException) {
+                throw KeyUnavailableException()
+            }
+            if (found != null) throw KeyUnavailableException()
         }
 
         /** Made at the first real pairing (never in demo mode). */
