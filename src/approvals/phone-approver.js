@@ -29,6 +29,7 @@ class PhoneApprover {
     this.clearTimer = clearTimer;
     this.build = build;
     this.pendingRequests = new PendingRequests({ now });
+    this.stopped = false;
     this._onConnected = () => this._resubmitAll();
     if (this.link && typeof this.link.on === 'function') this.link.on('connected', this._onConnected);
   }
@@ -40,13 +41,30 @@ class PhoneApprover {
   // Why no request could reach a phone right now, or null. A store nobody
   // has run ready() on yet (or one whose probe failed) must read as
   // unavailable, the same as an empty approver set — never as "0 active
-  // devices" dressed up to look like a normal, checked-and-empty set.
+  // devices" dressed up to look like a normal, checked-and-empty set. A
+  // stopped approver is unavailable outright. Neither the link's nor the
+  // store's own checks are trusted not to throw (a flaky transport, a
+  // filesystem error): a throw here must still resolve to a plain
+  // "unavailable" reason, never an uncaught exception out of isAvailable()
+  // or requestAction().
   unavailableReason() {
+    if (this.stopped) return 'the service is stopping';
     if (!this.link) return 'no relay link on this node';
-    const delivery = this.link.canDeliver();
+    let delivery;
+    try {
+      delivery = this.link.canDeliver();
+    } catch (err) {
+      return `the relay link could not be checked: ${err.message}`;
+    }
     if (!delivery || !delivery.ok) return (delivery && delivery.reason) || 'the relay link cannot deliver';
     if (this.approverStore.untrusted) return this.approverStore.problem || 'the approver set has not been verified as admin-owned on this node';
-    if (this.approverStore.activeCount() === 0) return 'no enrolled device on this node';
+    let activeCount;
+    try {
+      activeCount = this.approverStore.activeCount();
+    } catch (err) {
+      return `the approver set could not be checked: ${err.message}`;
+    }
+    if (activeCount === 0) return 'no enrolled device on this node';
     return null;
   }
 
@@ -87,6 +105,15 @@ class PhoneApprover {
     } catch (err) {
       log.error(`approval.request not audited, so not sent: ${err.message}`);
       return this._outcome('error', { ...ids, reason: 'audit_unavailable' });
+    }
+    // stop() may have run while the audit above was in flight (it saw no
+    // pending entry yet, so its own sweep never reached this request): check
+    // again before this request is ever added to pendingRequests or handed
+    // to the link, or a request built just before shutdown could still be
+    // submitted, answered and approved after stop().
+    if (this.stopped) {
+      this._auditBestEffort('approval.outcome', { request_id: message.request_id, state: 'withdrawn', reason: 'the service is stopping', job_id: message.origin.job_id });
+      return this._outcome('unavailable', { ...ids, reason: 'the service is stopping' });
     }
     if (signal && signal.aborted) {
       this._auditBestEffort('approval.outcome', { request_id: message.request_id, state: 'withdrawn', reason: null, job_id: message.origin.job_id });
@@ -136,9 +163,15 @@ class PhoneApprover {
       .catch((err) => log.warn(`approval.status failed: ${err.message}`));
   }
 
-  _finish(requestId, decision, { deviceId = null, reason = null, statusState = null } = {}) {
+  // `cause` is what a handleResponse racing this same request through its
+  // step-13 audit await should blame once it finds the request gone
+  // (withdrawn / stopped / expired); it defaults to `decision`, which is
+  // right for the timer (`expired`) and the abort listener (`withdrawn`) —
+  // only stop() needs to say something other than its own decision name.
+  _finish(requestId, decision, { deviceId = null, reason = null, statusState = null, cause = null } = {}) {
     const entry = this.pendingRequests.take(requestId);
     if (!entry) return;
+    entry.finishedCause = cause || decision;
     this.clearTimer(entry.timer);
     if (entry.signal && entry.onAbort) entry.signal.removeEventListener('abort', entry.onAbort);
     this._auditBestEffort('approval.outcome', { request_id: requestId, state: statusState || decision, reason, job_id: entry.request.origin.job_id });
@@ -158,6 +191,11 @@ class PhoneApprover {
   }
 
   async handleResponse(envelope) {
+    // Nothing is approved after stop(): checked first, ahead of even
+    // verifying the envelope, since a stopped approver has no pending
+    // requests of its own left to bind this response to anyway.
+    if (this.stopped) return this._reject(envelope, null, null, 'stopped');
+
     // Checks 1–8.
     const verified = verifyDeviceEnvelope(envelope, {
       approverStore: this.approverStore,
@@ -206,8 +244,34 @@ class PhoneApprover {
       log.error(`approval.response not audited, so not accepted: ${err.message}`);
       return { accepted: false, reason: 'audit_unavailable' };
     }
-    if (!this.pendingRequests.get(requestId)) return { accepted: false, reason: 'expired' };
+    // The request may have been withdrawn (abort), stopped, or timed out on
+    // its own timer while the audit above was in flight; report whichever of
+    // those actually finished it rather than always guessing 'expired'.
+    if (!this.pendingRequests.get(requestId)) return this._reject(envelope, requestId, deviceId, entry.finishedCause || 'expired');
     this.pendingRequests.nonces.add(message.nonce, bytesSha256(bytes));
+
+    // 12 and 11, re-run: the step-13 await can itself take long enough for
+    // the live action to change or the deadline to pass before this
+    // decision is committed, and the pre-audit checks only proved the
+    // request was still good *then*. The post-await hash is the only
+    // guarantee the approval covers what will actually run.
+    let liveAfterAudit = null;
+    try {
+      liveAfterAudit = actionHash(entry.currentAction());
+    } catch {
+      liveAfterAudit = null;
+    }
+    if (liveAfterAudit !== message.action_hash) {
+      this._reject(envelope, requestId, deviceId, 'action_changed');
+      this._finish(requestId, 'deny', { deviceId, reason: 'action_changed', statusState: 'refused' });
+      return { accepted: false, reason: 'action_changed' };
+    }
+    if (this.now() > Date.parse(req.expires_at)) {
+      this._reject(envelope, requestId, deviceId, 'expired');
+      this._finish(requestId, 'expired', { deviceId, statusState: 'expired' });
+      return { accepted: false, reason: 'expired' };
+    }
+
     const approved = message.decision === 'approve';
     this._finish(requestId, approved ? 'approve' : 'deny', { deviceId, statusState: approved ? 'approved' : 'denied' });
     return { accepted: true, reason: null };
@@ -216,22 +280,30 @@ class PhoneApprover {
   // The ToolExecutor requester: returns only true | false | 'timeout' |
   // 'unavailable' (program §3), and on a refusal says why in metadata.refusal.
   async requestApproval(toolName, parameters, metadata = {}) {
-    const cwd = metadata.workingDirectory || null;
+    // `metadata = {}` only covers `undefined`; an explicit `null` (a caller
+    // that has no metadata object at all) must still be tolerated cleanly —
+    // read through `meta`, and only ever write `.refusal` back onto a real
+    // object.
+    const hasMetadata = metadata !== null && typeof metadata === 'object';
+    const meta = hasMetadata ? metadata : {};
     const refuse = (deniedBy, error) => {
-      metadata.refusal = { deniedBy, error };
+      if (hasMetadata) metadata.refusal = { deniedBy, error };
       return 'unavailable';
     };
     let action;
     try {
-      action = toolAction(toolName, parameters, cwd);
+      action = toolAction(toolName, parameters, meta.workingDirectory || null);
     } catch (err) {
       if (err instanceof MessageError) return refuse('unavailable', `Action cannot be shown on the phone (${err.reason}); nothing ran.`);
       throw err;
     }
     const outcome = await this.requestAction(action, {
-      origin: metadata.origin || null,
-      signal: metadata.signal || null,
-      currentAction: () => toolAction(toolName, parameters, cwd)
+      origin: meta.origin || null,
+      signal: meta.signal || null,
+      // Read live: metadata.workingDirectory at the moment a phone response
+      // is being checked against reality, not the value captured when the
+      // request was first signed.
+      currentAction: () => toolAction(toolName, parameters, meta.workingDirectory || null)
     });
     switch (outcome.decision) {
       case 'approve':
@@ -254,9 +326,10 @@ class PhoneApprover {
   }
 
   stop() {
+    this.stopped = true;
     if (this.link && typeof this.link.off === 'function') this.link.off('connected', this._onConnected);
     for (const entry of this.pendingRequests.list()) {
-      this._finish(entry.request.request_id, 'unavailable', { reason: 'the service is stopping', statusState: 'withdrawn' });
+      this._finish(entry.request.request_id, 'unavailable', { reason: 'the service is stopping', statusState: 'withdrawn', cause: 'stopped' });
     }
   }
 }

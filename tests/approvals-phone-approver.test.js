@@ -2,9 +2,13 @@
 const { describe, it, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('events');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const { PhoneApprover } = require('../src/approvals/phone-approver');
 const { open, verifyEd25519 } = require('../src/approvals/envelope');
 const { toolAction, actionHash } = require('../src/approvals/messages');
+const { ApproverStore } = require('../src/approvals/approver-store');
 const { createFakePhone, testNodeIdentity } = require('./helpers/fake-phone');
 const { approverStoreWith } = require('./helpers/approver-set');
 
@@ -61,6 +65,40 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
 async function waitForSubmit(link, n = 1) {
   for (let i = 0; i < 100 && link.submitted.length < n; i += 1) await tick();
   return link.submitted[n - 1];
+}
+
+// A ledger whose append() blocks on `kind` the first time it is called with
+// it, until the test calls `release()`. Used to land a handleResponse (or
+// requestAction) exactly inside its awaited audit, so a concurrent
+// stop()/abort()/timer fire can race it.
+function gatedLedger(kind) {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const ledger = { entries: [], failing: false };
+  ledger.append = async (entry) => {
+    if (entry.kind === kind) await gate;
+    if (ledger.failing) throw new Error('audit_unavailable: disk full');
+    ledger.entries.push(entry);
+    return entry;
+  };
+  ledger.kinds = () => ledger.entries.map((e) => e.kind);
+  ledger.release = () => release();
+  return ledger;
+}
+
+// A raw setup, like setup(), but letting the caller supply its own ledger
+// (setup() always builds a plain fakeLedger()).
+async function rawSetup({ link = fakeLink(), ledger = fakeLedger(), ttlMs = 300000, now } = {}) {
+  const identity = testNodeIdentity();
+  const phone = createFakePhone();
+  const store = await approverStoreWith([phone.approverRecord()]);
+  stores.push(store);
+  const timers = manualTimers();
+  const approver = new PhoneApprover({
+    identity, approverStore: store, link, auditLedger: ledger, ttlMs, now,
+    setTimer: timers.setTimer, clearTimer: timers.clearTimer
+  });
+  return { identity, phone, store, ledger, link, timers, approver };
 }
 
 describe('PhoneApprover.requestAction', () => {
@@ -251,11 +289,162 @@ describe('PhoneApprover.requestApproval', () => {
     assert.match(meta.refusal.error, /^Phone approval unavailable: no enrolled device on this node\. Nothing ran\.$/);
   });
 
-  it('stop() ends every pending request without approving it', async () => {
+  it('stop() ends every pending request without approving it, with the reason in metadata.refusal', async () => {
     const ctx = await setup();
-    const pending = ctx.approver.requestApproval('Bash', { command: 'ls' }, {});
+    const metadata = {};
+    const pending = ctx.approver.requestApproval('Bash', { command: 'ls' }, metadata);
     await waitForSubmit(ctx.link);
     ctx.approver.stop();
     assert.equal(await pending, 'unavailable');
+    assert.deepEqual(metadata.refusal, { deniedBy: 'unavailable', error: 'Phone approval unavailable: the service is stopping. Nothing ran.' });
+  });
+
+  it('tolerates a null metadata: a clean unavailable, nothing thrown, no refusal to set', async () => {
+    const none = await setup({ records: [] });
+    await assert.doesNotReject(async () => {
+      const result = await none.approver.requestApproval('Bash', { command: 'ls' }, null);
+      assert.equal(result, 'unavailable');
+    });
+  });
+});
+
+describe('PhoneApprover: nothing is approved after stop()', () => {
+  it('a request whose approval.request audit is still in flight when stop() runs is never submitted or approved', async () => {
+    const ledger = gatedLedger('approval.request');
+    const { approver, link } = await rawSetup({ ledger });
+    const pending = approver.requestApproval('Bash', { command: 'ls' }, {});
+    await tick();
+    // stop() runs before the audit above resolves, so it sees no pending
+    // entry yet for this request — its own sweep cannot withdraw it.
+    approver.stop();
+    ledger.release();
+    for (let i = 0; i < 10; i += 1) await tick();
+    assert.equal(link.submitted.length, 0, 'a request built before stop() must never reach the phone once stopped');
+    assert.equal(await pending, 'unavailable');
+  });
+
+  it('handleResponse refuses everything once stop() has run, even a genuine approval', async () => {
+    const { approver, link, phone } = await rawSetup();
+    const pending = approver.requestAction(toolAction('Bash', { command: 'ls' }, null), { currentAction: () => toolAction('Bash', { command: 'ls' }, null) });
+    const request = await waitForSubmit(link);
+    approver.stop();
+    assert.equal((await pending).decision, 'unavailable');
+    assert.deepEqual(await approver.handleResponse(phone.respond(request, 'approve')), { accepted: false, reason: 'stopped' });
+  });
+});
+
+describe('PhoneApprover: the action can change or expire during the step-13 audit', () => {
+  it('a mutated action during the step-13 audit denies instead of approving', async () => {
+    const ledger = gatedLedger('approval.response');
+    const { approver, link, phone } = await rawSetup({ ledger });
+    const params = { command: 'ls' };
+    const pending = approver.requestApproval('Bash', params, {});
+    const request = await waitForSubmit(link);
+    const handled = approver.handleResponse(phone.respond(request, 'approve'));
+    await tick();
+    params.command = 'rm -rf /';
+    ledger.release();
+    assert.deepEqual(await handled, { accepted: false, reason: 'action_changed' });
+    assert.equal(await pending, false);
+  });
+
+  it('the deadline passing during the step-13 audit finishes as expired, not approved', async () => {
+    let clock = 0;
+    const ledger = gatedLedger('approval.response');
+    const { approver, link, phone } = await rawSetup({ ledger, now: () => clock });
+    const pending = approver.requestAction(toolAction('Bash', { command: 'ls' }, null), { currentAction: () => toolAction('Bash', { command: 'ls' }, null) });
+    const request = await waitForSubmit(link);
+    const handled = approver.handleResponse(phone.respond(request, 'approve'));
+    await tick();
+    clock = 400000; // past the 300000 ms default TTL, though the manual timer never auto-fires
+    ledger.release();
+    assert.deepEqual(await handled, { accepted: false, reason: 'expired' });
+    assert.equal((await pending).decision, 'expired');
+  });
+});
+
+describe('PhoneApprover: a response racing expiry, abort or stop during step 13', () => {
+  it('the timer firing during step 13 reports expired, not the generic guess', async () => {
+    const ledger = gatedLedger('approval.response');
+    const { approver, link, phone, timers } = await rawSetup({ ledger });
+    const pending = approver.requestAction(toolAction('Bash', { command: 'ls' }, null), { currentAction: () => toolAction('Bash', { command: 'ls' }, null) });
+    const request = await waitForSubmit(link);
+    const handled = approver.handleResponse(phone.respond(request, 'approve'));
+    await tick();
+    timers.fireAll();
+    ledger.release();
+    assert.deepEqual(await handled, { accepted: false, reason: 'expired' });
+    assert.equal((await pending).decision, 'expired');
+    assert.ok(ledger.kinds().includes('approval.rejected'));
+  });
+
+  it('an abort during step 13 reports withdrawn, not the generic guess', async () => {
+    const ledger = gatedLedger('approval.response');
+    const { approver, link, phone } = await rawSetup({ ledger });
+    const controller = new AbortController();
+    const pending = approver.requestAction(toolAction('Bash', { command: 'ls' }, null), { signal: controller.signal, currentAction: () => toolAction('Bash', { command: 'ls' }, null) });
+    const request = await waitForSubmit(link);
+    const handled = approver.handleResponse(phone.respond(request, 'approve'));
+    await tick();
+    controller.abort();
+    ledger.release();
+    assert.deepEqual(await handled, { accepted: false, reason: 'withdrawn' });
+    assert.equal((await pending).decision, 'withdrawn');
+  });
+
+  it('stop() during step 13 reports stopped, not the generic guess', async () => {
+    const ledger = gatedLedger('approval.response');
+    const { approver, link, phone } = await rawSetup({ ledger });
+    const pending = approver.requestAction(toolAction('Bash', { command: 'ls' }, null), { currentAction: () => toolAction('Bash', { command: 'ls' }, null) });
+    const request = await waitForSubmit(link);
+    const handled = approver.handleResponse(phone.respond(request, 'approve'));
+    await tick();
+    approver.stop();
+    ledger.release();
+    assert.deepEqual(await handled, { accepted: false, reason: 'stopped' });
+    assert.equal((await pending).decision, 'unavailable');
+  });
+});
+
+describe('PhoneApprover availability', () => {
+  it('an approver store nobody has called ready() on is unavailable, not silently "0 devices"', async () => {
+    const identity = testNodeIdentity();
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-untrusted-'));
+    const store = new ApproverStore({ dir: path.join(base, 'approvers'), platform: 'linux' });
+    const approver = new PhoneApprover({ identity, approverStore: store, link: fakeLink(), auditLedger: fakeLedger() });
+    assert.equal(approver.isAvailable(), false);
+    assert.equal(typeof approver.unavailableReason(), 'string');
+    fs.rmSync(base, { recursive: true, force: true });
+  });
+
+  it('an approver store with a problem is unavailable, naming the problem', async () => {
+    const identity = testNodeIdentity();
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-problem-'));
+    const dir = path.join(base, 'approvers');
+    fs.mkdirSync(dir, { recursive: true });
+    // platform: 'win32' forces the writable-directory probe regardless of
+    // the real OS; a fresh temp dir is writable, so ready() reports a problem.
+    const store = new ApproverStore({ dir, platform: 'win32' });
+    await store.ready();
+    assert.equal(store.untrusted, true);
+    assert.ok(store.problem);
+    const approver = new PhoneApprover({ identity, approverStore: store, link: fakeLink(), auditLedger: fakeLedger() });
+    assert.equal(approver.isAvailable(), false);
+    assert.equal(approver.unavailableReason(), store.problem);
+    fs.rmSync(base, { recursive: true, force: true });
+  });
+
+  it('a link or store that throws while being checked is unavailable, never an unhandled rejection', async () => {
+    const { approver: withBadLink } = await rawSetup({ link: (() => { const l = fakeLink(); l.canDeliver = () => { throw new Error('link boom'); }; return l; })() });
+    assert.equal(withBadLink.isAvailable(), false);
+    assert.match(withBadLink.unavailableReason(), /link boom/);
+    const outcome = await withBadLink.requestAction(toolAction('Bash', { command: 'ls' }, null), { currentAction: () => ({}) });
+    assert.equal(outcome.decision, 'unavailable');
+    assert.match(outcome.reason, /link boom/);
+
+    const { approver: withBadStore, store } = await rawSetup();
+    store.activeCount = () => { throw new Error('store boom'); };
+    assert.equal(withBadStore.isAvailable(), false);
+    assert.match(withBadStore.unavailableReason(), /store boom/);
   });
 });
