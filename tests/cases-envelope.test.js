@@ -215,6 +215,12 @@ describe('envelope core and fit inputs (review fixes)', () => {
     assert.match(r.refusals.join('; '), /envelope env-01 is malformed: .*caps\.usd/);
   });
 
+  it('fit refuses an envelope whose core no longer matches its hash', () => {
+    const env = activeEnvelope();
+    env.caps.usd = 500;
+    assert.deepStrictEqual(envelopeFit(env, {}, fitOpts()), { fits: false, refusals: ['envelope env-01 changed since approval; request it again'], deltas: [] });
+  });
+
   it('refuses a missing executor, no recipients, bad attempts and a bad estimate', () => {
     const env = activeEnvelope();
     assert.deepStrictEqual(envelopeFit(env, {}, fitOpts({ executorId: null })).refusals, ['no executor named for the fit']);

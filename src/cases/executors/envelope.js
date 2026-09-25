@@ -246,6 +246,7 @@ function envelopeFit(env, payload = {}, {
   } catch (err) {
     return refuse(`envelope ${env.id} is malformed: ${err.message}`);
   }
+  if (!envelopeIntact(env)) return refuse(`envelope ${env.id} changed since approval; request it again`);
   if (!FITTABLE_STATUSES.includes(env.status)) refusals.push(`envelope ${env.id} is ${env.status}`);
   if (core.executor !== executorId) refusals.push(`envelope ${env.id} is for ${core.executor}, not ${executorId}`);
   if (refusals.length) return { fits: false, refusals, deltas };

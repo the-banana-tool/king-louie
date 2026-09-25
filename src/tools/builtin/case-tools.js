@@ -221,6 +221,15 @@ const BriefTool = acceptAnyValue(new Tool({
     }
     if (!params.field) return { ok: false, error: `${params.action} needs "field".` };
     if (params.value !== undefined && !BRIEF_TEXT_FIELDS.has(params.field)) params = { ...params, value: parseValue(params.value) };
+    // brief.resources.ownerLabor is host-only (R41): only syncPlan writes it.
+    if (params.field === 'resources' && params.value && typeof params.value === 'object' && !Array.isArray(params.value)) {
+      const stored = brief.read().data?.resources?.ownerLabor ?? [];
+      if (params.value.ownerLabor === undefined) {
+        params = { ...params, value: { ...params.value, ownerLabor: stored } };
+      } else if (JSON.stringify(params.value.ownerLabor) !== JSON.stringify(stored)) {
+        return { ok: false, error: "ownerLabor is recorded only from the owner's answer to a plan or owner task." };
+      }
+    }
     const provenance = params.provenance || 'model';
     let quoteNote = '';
     if (USER_ONLY_FIELDS.has(params.field) && provenance === 'user') {

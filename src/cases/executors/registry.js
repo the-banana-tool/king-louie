@@ -14,6 +14,8 @@ const {
 } = require('./util');
 const { JobStore, readSnapshot, OPEN_STATES } = require('./job-store');
 const jobs = require('./jobs');
+const envelopeOps = require('./envelope-ops');
+const turnHook = require('./turn-hook');
 
 const log = createLogger('executors');
 const AUTHORITY_RANK = Object.freeze({ none: 0, envelope: 1, signed: 2 });
@@ -47,6 +49,7 @@ class ExecutorRegistry {
   constructor({
     dataDir, getSettings = () => ({}), adminExecutors = null, isService = false, vault = null, caseRuntime = null,
     getWorkflowEngine = () => null, getRunbookEngine = () => null, getPhoneApprover = () => null, getAuditLedger = () => null,
+    getApprovalTrust = () => null,
     usageTracker = null, now = () => new Date(), packageRoot = null, assertRoot = null, fetchImpl = null, browserActions = null,
     adminUid = 0, geteuid = undefined
   } = {}) {
@@ -62,6 +65,10 @@ class ExecutorRegistry {
     this.getRunbookEngine = fn(getRunbookEngine);
     this.getPhoneApprover = fn(getPhoneApprover);
     this.getAuditLedger = fn(getAuditLedger);
+    // → { approverStore, nodeId, nodePublicKey } for verifySignedGrant's audit
+    // path: F3's ADMIN-owned ApproverStore (built from the config dir, never
+    // the data dir) and this node's identity. Missing → that path fails closed.
+    this.getApprovalTrust = fn(getApprovalTrust);
     this._usageTracker = usageTracker;
     this.now = typeof now === 'function' ? now : () => new Date();
     this.dir = path.join(dataDir, 'executors');
@@ -524,7 +531,34 @@ class ExecutorRegistry {
     return jobs.cancelJobAsOwner(this, caseId, jobId, reason);
   }
 
-  // ---- operations (Tasks 10–12) ----
+  // ---- Envelopes and the turn-start hook (Task 10) ----
+
+  // IPC case:revokeEnvelope and C4's conflict follow-up; runs in systemAction.
+  revokeEnvelope(caseId, envelopeId, reason) {
+    return envelopeOps.revokeEnvelope(this, caseId, envelopeId, reason);
+  }
+
+  // Registered as caseRuntime.addTurnStartHook('executors', …) by createCore.
+  turnStartHook(ctx) {
+    return turnHook.turnStartHook(this, ctx);
+  }
+
+  // The signing trust for verifySignedGrant; each part null when absent.
+  approvalTrust() {
+    let t = null;
+    try {
+      t = this.getApprovalTrust();
+    } catch (err) {
+      log.warn(`Reading the approval trust failed: ${err.message}`);
+    }
+    return {
+      approverStore: isObject(t?.approverStore) ? t.approverStore : null,
+      nodeId: typeof t?.nodeId === 'string' && t.nodeId ? t.nodeId : null,
+      nodePublicKey: t?.nodePublicKey || null
+    };
+  }
+
+  // ---- operations (Tasks 11–12) ----
 }
 
 module.exports = { ExecutorRegistry, intersectWindow, AUTHORITY_RANK };

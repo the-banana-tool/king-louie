@@ -96,6 +96,21 @@ class Brief {
     return this.update(field, next, { provenance });
   }
 
+  // Host-only (cases stage 3, R41): syncPlan records the owner's consent from
+  // their answer to a plan question. No tool reaches this.
+  recordOwnerLabor(entry) {
+    const { data, body } = this.read();
+    const resources = data.resources && typeof data.resources === 'object' && !Array.isArray(data.resources) ? { ...data.resources } : {};
+    const labor = Array.isArray(resources.ownerLabor) ? [...resources.ownerLabor] : [];
+    labor.push({
+      planId: entry.planId, stepId: entry.stepId, capability: entry.capability, title: entry.title, factId: entry.factId, at: entry.at
+    });
+    resources.ownerLabor = labor;
+    data.resources = resources;
+    this._write(data, body);
+    return labor;
+  }
+
   missingForGating() {
     const { data } = this.read();
     return GATING_REQUIRED.filter((f) => isEmpty(data[f]));
