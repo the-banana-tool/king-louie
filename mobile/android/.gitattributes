@@ -1,0 +1,5 @@
+# The wrapper script runs under a POSIX shell (including in Linux containers
+# that bind-mount this directory from Windows), so it keeps LF everywhere.
+gradlew text eol=lf
+*.bat text eol=crlf
+*.jar binary
