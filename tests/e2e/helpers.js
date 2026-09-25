@@ -8,18 +8,30 @@
 const { spawn } = require('child_process');
 const path = require('path');
 const http = require('http');
+const fs = require('fs');
+const os = require('os');
 
 const APP_PATH = path.resolve(__dirname, '..', '..');
 
 /**
  * Launch King Louie with the test bridge enabled.
  * Returns a context object used by all other helpers.
+ *
+ * Every launch gets its own fresh --user-data-dir (a temp directory), so the
+ * suite never reads or writes the real King Louie profile (chats, settings,
+ * the vault). closeApp() removes it afterward. Because each launchApp() call
+ * gets an isolated profile, tests that need data to persist across a
+ * close+relaunch must launch once, keep ctx.userDataDir, and pass it back in
+ * via KL_E2E_USER_DATA_DIR-style reuse rather than relying on the OS-default
+ * profile; no current e2e test does this (each file launches once in
+ * `before` and closes once in `after`).
  */
 async function launchApp() {
   const electronPath = require('electron');
   const bridgeScript = path.join(__dirname, '_bridge.js');
+  const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-e2e-profile-'));
 
-  const child = spawn(electronPath, [APP_PATH], {
+  const child = spawn(electronPath, [APP_PATH, `--user-data-dir=${userDataDir}`], {
     env: {
       ...process.env,
       KL_TEST_BRIDGE_PORT: '1', // truthy — bridge picks its own port via port 0
@@ -57,11 +69,11 @@ async function launchApp() {
   // Verify the bridge is responsive
   await waitForBridge(bridgePort, 10000);
 
-  return { child, bridgePort, closed: false };
+  return { child, bridgePort, closed: false, userDataDir };
 }
 
 /**
- * Close the Electron app cleanly.
+ * Close the Electron app cleanly and remove its temp profile.
  */
 async function closeApp(ctx) {
   if (!ctx || ctx.closed) return;
@@ -73,6 +85,9 @@ async function closeApp(ctx) {
   await new Promise((r) => setTimeout(r, 500));
   try { ctx.child.kill(); } catch { /* Already dead */ }
   await new Promise((r) => setTimeout(r, 300));
+  if (ctx.userDataDir) {
+    try { fs.rmSync(ctx.userDataDir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
+  }
 }
 
 /**

@@ -31,6 +31,10 @@ unset ELECTRON_RUN_AS_NODE && npm run test:e2e
 
 Unit tests (`npm test`) don't launch Electron and are unaffected either way.
 
+`tests/e2e/helpers.js`'s `launchApp()` already gives every launch its own fresh
+`--user-data-dir` (removed again in `closeApp()`), so the e2e suite never reads
+or writes your real King Louie profile — chats, settings, the vault.
+
 ## Running the app
 
 `npm start` launches Electron normally. If it dies instantly with
