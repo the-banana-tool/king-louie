@@ -10,7 +10,8 @@ const { NodeIdentity, deriveNodeId } = require('../src/mesh/node-identity');
 const keys = require('../src/desktop-bridge/keys');
 const pairing = require('../src/desktop-bridge/pairing');
 const { assertAdminOwned } = require('../src/service/config');
-const { runDesktopCommand, grantDirectoryReadControl, applyWindowsAcls, PAIR_WARNING } = require('../src/service/commands/desktop');
+const { PassThrough, Readable } = require('stream');
+const { runDesktopCommand, grantDirectoryReadControl, applyWindowsAcls, defaultConfirm, PAIR_WARNING } = require('../src/service/commands/desktop');
 const { main, parseArgs } = require('../src/service/cli');
 
 const selfUid = typeof process.getuid === 'function' ? process.getuid() : 0;
@@ -221,7 +222,6 @@ describe('desktop pair confirmation (fix round 1, I1)', () => {
   it('treats EOF at the prompt as a decline (fix round 2, minor)', async () => {
     const l = layout({ serviceJson: { profile: 'agent' } });
     const out = { stdout: '', stderr: '' };
-    const { Readable } = require('stream');
     const stdin = new Readable({ read() { this.push(null); } }); // EOF, no answer
     const io = {
       stdin,
@@ -236,6 +236,53 @@ describe('desktop pair confirmation (fix round 1, I1)', () => {
     assert.strictEqual(code, 1);
     assert.strictEqual(out.stderr, 'Not pairing without confirmation.\n');
     assert.ok(!fs.existsSync(path.join(l.configDir, 'desktop-devices.json')), 'nothing was written');
+  });
+});
+
+describe('defaultConfirm over a real readline interface (fix round 3, critical)', () => {
+  // fix round 3: rl.close() fires 'close' synchronously, so resolving
+  // AFTER close (the round-2 code) let the 'close' handler's resolve(false)
+  // always win — typing "y" at a real prompt still refused. These drive
+  // the real defaultConfirm, not a stub, over a PassThrough so a raw TTY
+  // is never required.
+  function pipe(text) {
+    const stdin = new PassThrough();
+    if (text !== undefined) stdin.end(text);
+    else stdin.end(); // EOF with nothing written: no line ever arrives
+    return { stdin, stdout: new PassThrough() };
+  }
+
+  it('resolves true for "y\\n"', async () => {
+    assert.strictEqual(await defaultConfirm(pipe('y\n'), 'Trust this device? [y/N] '), true);
+  });
+
+  it('resolves true for "yes\\n"', async () => {
+    assert.strictEqual(await defaultConfirm(pipe('yes\n'), 'Trust this device? [y/N] '), true);
+  });
+
+  it('resolves false for "n\\n"', async () => {
+    assert.strictEqual(await defaultConfirm(pipe('n\n'), 'Trust this device? [y/N] '), false);
+  });
+
+  it('resolves false on EOF with no answer', async () => {
+    assert.strictEqual(await defaultConfirm(pipe(), 'Trust this device? [y/N] '), false);
+  });
+
+  it('runDesktopCommand with the real confirm and "y\\n" exits 0 and writes', async () => {
+    const l = layout({ serviceJson: { profile: 'agent' } });
+    const out = { stdout: '', stderr: '' };
+    const io = {
+      stdin: (() => { const s = new PassThrough(); s.end('y\n'); return s; })(),
+      stdout: { write: (s) => { out.stdout += s; } },
+      stderr: { write: (s) => { out.stderr += s; } },
+      ownership: { getuid: () => 1000 }
+    };
+    const code = await runDesktopCommand({
+      sub: 'pair', arg: request(), dataDir: l.dataDir, io,
+      deps: deps(l, { isTTY: () => true, confirm: undefined }) // exercises the real defaultConfirm
+    });
+    assert.strictEqual(code, 0, out.stderr);
+    assert.ok(fs.existsSync(path.join(l.configDir, 'desktop-devices.json')));
   });
 });
 

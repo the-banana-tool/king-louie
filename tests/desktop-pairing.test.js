@@ -164,7 +164,7 @@ describe('pairing request', () => {
   });
 
   it('rejects zero-width/formatting characters and line/paragraph separators (fix round 1)', () => {
-    for (const ch of ['؜', '​', '‏', ' ', ' ', '﻿']) {
+    for (const ch of ['\u061c', '\u200b', '\u200f', '\u2028', '\u2029', '\ufeff']) {
       assert.throws(() => pairing.encodePairRequest({ publicKeyRaw: newRawKey(), label: `bad${ch}label` }), /control characters/);
     }
   });

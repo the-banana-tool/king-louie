@@ -134,16 +134,25 @@ function defaultIsTTY(io) {
 }
 
 // EOF at the prompt (stdin closed before an answer) counts as a decline
-// (fix round 2, minor): 'close' fires whether or not 'line' ever did, so a
-// resolve() already delivered by the question callback is a no-op here.
+// (fix round 2, minor). `rl.close()` fires 'close' synchronously (fix
+// round 3, critical fix: resolving AFTER close meant the 'close' handler's
+// resolve(false) always settled the promise first, so typing "y" still
+// refused) — the answer is resolved before closing, and the `answered`
+// flag makes the 'close' handler's resolve(false) a no-op once that's
+// already happened. Without it (a real EOF, 'close' with no 'line' first),
+// the flag is still false and the decline goes through as intended.
 function defaultConfirm(io, question) {
   return new Promise((resolve) => {
+    let answered = false;
     const rl = readline.createInterface({ input: io.stdin, output: io.stdout });
     rl.question(question, (answer) => {
-      rl.close();
+      answered = true;
       resolve(/^y(es)?$/i.test(String(answer).trim()));
+      rl.close();
     });
-    rl.on('close', () => resolve(false));
+    rl.on('close', () => {
+      if (!answered) resolve(false);
+    });
   });
 }
 
@@ -314,4 +323,4 @@ async function runDesktopCommand({ sub, arg, dataDir, io, deps = {}, yes = false
   return 0;
 }
 
-module.exports = { runDesktopCommand, grantDirectoryReadControl, applyWindowsAcls, DESKTOP_HELP, PAIR_WARNING };
+module.exports = { runDesktopCommand, grantDirectoryReadControl, applyWindowsAcls, defaultConfirm, DESKTOP_HELP, PAIR_WARNING };
