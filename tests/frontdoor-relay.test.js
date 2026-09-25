@@ -630,6 +630,31 @@ describe('relay trust rules', () => {
     }
   });
 
+  it('a shared address with many phones is not refused at the old cap of 16 sockets (final review I1)', async () => {
+    // Phones behind one NAT each hold a long poll plus request sockets; the
+    // per-IP cap must leave room for dozens of them. 64 concurrent sockets
+    // from one address are all kept.
+    const server = createPhoneServer({ useTls: false, handler: (req, res) => { res.end('ok'); } });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const sockets = [];
+    try {
+      for (let i = 0; i < 64; i++) {
+        sockets.push(await new Promise((resolve, reject) => {
+          const sock = net.connect(server.address().port, '127.0.0.1', () => resolve(sock));
+          sock.on('error', () => {});
+          setTimeout(() => reject(new Error('connect timeout')), 2000).unref();
+        }));
+      }
+      await sleep(200);
+      assert.equal(sockets.filter((sk) => sk.destroyed).length, 0, 'no socket from the shared address was dropped');
+      assert.ok(PHONE_LISTENER.perIpConnections < PHONE_LISTENER.maxConnections, 'one address still cannot take every connection');
+    } finally {
+      for (const sk of sockets) sk.destroy();
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
   it('caps long polls per device, and stop() returns promptly with polls parked', async () => {
     const pollRelay = await startRelay({
       dataDir: tempDir('kl-relay-poll-'),

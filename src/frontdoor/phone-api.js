@@ -104,6 +104,27 @@ function createPhoneApi({ devices, rateLimits = {}, now = Date.now, relay = null
     chargeLimit(key);
   }
 
+  // A device-route request that failed before its signature verified:
+  // answers 429 without charging when the IP's bucket is already full,
+  // otherwise charges it and keeps the original error. A refused body keeps
+  // its `Connection: close` either way, since it was never drained.
+  function failBeforeVerify(ipKey, err) {
+    // An aborted request still counts, but its caller is gone: keep the
+    // abort so the handler answers it quietly.
+    if (err && err.clientAbort) {
+      chargeLimit(ipKey);
+      return err;
+    }
+    try {
+      checkLimit(ipKey, limits.unauthPerMin);
+    } catch (limited) {
+      if (err && err.code === 'body_too_large') limited.closeConnection = true;
+      return limited;
+    }
+    chargeLimit(ipKey);
+    return err;
+  }
+
   // Buckets are keyed on the route pattern too only when the route defines
   // its own `rate` — a dedicated budget for that route. Otherwise every
   // route without one shares a single ip:/device: bucket, so the spec's
@@ -163,8 +184,19 @@ function createPhoneApi({ devices, rateLimits = {}, now = Date.now, relay = null
         }
         chunks.push(chunk);
       });
-      req.on('end', () => { if (!failed) resolve(Buffer.concat(chunks)); });
-      req.on('error', (err) => { if (!failed) { failed = true; reject(err); } });
+      let ended = false;
+      req.on('end', () => { ended = true; if (!failed) resolve(Buffer.concat(chunks)); });
+      // A stream error here is the client going away mid-body (an abort or
+      // a reset): client noise, marked so the handler answers it quietly.
+      const aborted = (err) => {
+        if (failed || ended) return;
+        failed = true;
+        const e = err || new Error('aborted');
+        e.clientAbort = true;
+        reject(e);
+      };
+      req.on('error', aborted);
+      req.on('close', () => aborted(null));
     });
   }
 
@@ -208,14 +240,14 @@ function createPhoneApi({ devices, rateLimits = {}, now = Date.now, relay = null
       let device = null;
 
       if (route.auth === 'device') {
-        // Checked, not charged, ahead of the body and the signature: valid
-        // device traffic is bounded only by devicePerMin below, never by
-        // this per-IP budget. The limit here is always the global
-        // unauthPerMin — a route's own `rate` sets its device bucket's
-        // budget only, never how much unauthenticated traffic that route
-        // tolerates (a generous device allowance must not become a
-        // generous attacker allowance).
-        checkLimit(ipKey, limits.unauthPerMin);
+        // No per-IP refusal ahead of the body and the signature: a request
+        // that verifies always gets through, even from an IP whose bucket
+        // other callers have filled (a shared CGNAT or office address), and
+        // valid device traffic is bounded only by devicePerMin below. The
+        // IP budget is the global unauthPerMin — a route's own `rate` sets
+        // its device bucket's budget only, never how much unauthenticated
+        // traffic that route tolerates. Resource use before verification is
+        // bounded by bodyLimit and the server's timeouts and connection caps.
         let verified = false;
         try {
           // Everything between here and a verified signature is one unit:
@@ -235,8 +267,9 @@ function createPhoneApi({ devices, rateLimits = {}, now = Date.now, relay = null
         } catch (err) {
           // A verified signature that then hits its own device-rate limit
           // does not charge the IP bucket; anything short of a verified
-          // signature does.
-          if (!verified) chargeLimit(ipKey);
+          // signature does, and once that IP's bucket is full the failure
+          // answers 429 instead of its own error.
+          if (!verified) throw failBeforeVerify(ipKey, err);
           throw err;
         }
       } else {
@@ -275,7 +308,7 @@ function createPhoneApi({ devices, rateLimits = {}, now = Date.now, relay = null
         // destroying the socket outright before the response reaches the
         // caller — killing it mid-flight resets the connection instead of
         // delivering the 413).
-        const headers = err.code === 'body_too_large' ? { connection: 'close' } : {};
+        const headers = err.code === 'body_too_large' || err.closeConnection ? { connection: 'close' } : {};
         send(res, err.status, { error: err.code, message: err.message, ...err.extra }, headers);
         return;
       }
@@ -285,6 +318,11 @@ function createPhoneApi({ devices, rateLimits = {}, now = Date.now, relay = null
       }
       // Never the concrete path: invite and enrollment code ids inside it are
       // bearer credentials. route.pattern is the generic template.
+      if (err && err.clientAbort) {
+        // The caller is gone; there is no one to answer.
+        log.debug(`phone API ${req.method} ${route ? route.pattern : '(unmatched route)'}: client aborted the request`);
+        return;
+      }
       log.error(`phone API ${req.method} ${route ? route.pattern : '(unmatched route)'} failed: ${err && err.message}`);
       send(res, 500, { error: 'internal', message: 'the relay could not handle this request' });
     }

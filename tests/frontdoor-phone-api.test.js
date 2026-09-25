@@ -205,6 +205,22 @@ describe('phone API limits and routing', () => {
     assert.equal(limited.body.error, 'rate_limited');
   });
 
+  it('a valid signature is never locked out by failures from the same IP (final review I1)', async () => {
+    // A shared IP (CGNAT, office NAT) where a neighbour fills the unauth
+    // bucket with bad signatures: the neighbour gets 429, but a phone
+    // behind the same IP whose request verifies still gets through.
+    const { call, signed } = await start({ rateLimits: { unauthPerMin: 2 } });
+    const bad = { 'x-kl-device': 'd-nobody', 'x-kl-timestamp': new Date().toISOString(), 'x-kl-signature': 'AAAA' };
+    assert.equal((await call('POST', '/v1/echo/a', { body: '{}', headers: bad })).status, 401);
+    assert.equal((await call('POST', '/v1/echo/a', { body: '{}', headers: bad })).status, 401);
+    assert.equal((await call('POST', '/v1/echo/a', { body: '{}', headers: bad })).status, 429);
+    const ok = await signed('POST', '/v1/echo/valid', '{}');
+    assert.equal(ok.status, 202);
+    assert.equal(ok.body.thing, 'valid');
+    // The neighbour is still throttled afterwards.
+    assert.equal((await call('POST', '/v1/echo/a', { body: '{}', headers: bad })).status, 429);
+  });
+
   it('repeated body overflows on a device route still reach 429 (N3)', async () => {
     // Regression: round 1 only charged the IP bucket when the signature
     // itself failed to verify, so an exit before verification ever
@@ -241,6 +257,36 @@ describe('phone API limits and routing', () => {
       remove();
     }
     assert.deepEqual(errors, []);
+  });
+
+  it('a client that aborts mid-body is answered quietly: no error log, and it still charges the IP bucket', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-phone-api-'));
+    cleanups.push(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const devices = new DeviceRegistry({ file: path.join(dir, 'devices.json') });
+    const api = createPhoneApi({ devices, rateLimits: { unauthPerMin: 1 } });
+    api.registerRoute('POST', '/v1/echo/{thing}', { auth: 'device', handler: async () => ({ status: 202, body: {} }) });
+    const handled = [];
+    const server = http.createServer((req, res) => { handled.push(api.handler(req, res)); });
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    cleanups.push(() => new Promise((r) => server.close(r)));
+    const { port } = server.address();
+
+    const errors = [];
+    const remove = addSink((r) => { if (r.level === 'error' || r.level === 'fatal') errors.push(r); });
+    try {
+      const socket = require('net').connect(port, '127.0.0.1');
+      await new Promise((r) => socket.once('connect', r));
+      socket.write('POST /v1/echo/a HTTP/1.1\r\nHost: x\r\nContent-Length: 1000\r\n\r\n{"partial":');
+      while (handled.length === 0) await new Promise((r) => setTimeout(r, 5));
+      socket.destroy();
+      await Promise.race([handled[0], new Promise((_, rej) => setTimeout(() => rej(new Error('the handler never settled after the abort')), 3000))]);
+    } finally {
+      remove();
+    }
+    assert.deepEqual(errors, []);
+    const base = `http://127.0.0.1:${port}`;
+    const next = await fetch(base + '/v1/echo/a', { method: 'POST', body: '{}' });
+    assert.equal(next.status, 429, 'the aborted request was charged against the IP bucket');
   });
 
   it("a 429 does not use up the replay entry: the exact same signed request still succeeds once the device's window clears", async () => {

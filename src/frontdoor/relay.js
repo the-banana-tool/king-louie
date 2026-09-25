@@ -30,8 +30,12 @@ const SWEEP_MS = 30000;
 // socket forever); long polls wait on the response side and are unaffected.
 // maxConnections also bounds how far concurrent failing requests can burst
 // past the per-IP limit before they are charged; perIpConnections keeps one
-// address from taking all of them (and locking every other phone out).
-const PHONE_LISTENER = Object.freeze({ requestTimeoutMs: 30000, headersTimeoutMs: 15000, maxConnections: 256, perIpConnections: 16 });
+// address from taking all of them (and locking every other phone out). It is
+// a quarter of maxConnections, not a handful: many phones can share one
+// address (CGNAT, office NAT), each holding a long poll and request sockets,
+// and a valid phone there must not be refused because its neighbours are
+// busy (final review I1).
+const PHONE_LISTENER = Object.freeze({ requestTimeoutMs: 30000, headersTimeoutMs: 15000, maxConnections: 256, perIpConnections: 64 });
 
 // The phone API's rate limits are keyed on the socket's remote address, and
 // there is deliberately no trusted forwarded-for setting: the relay must see
