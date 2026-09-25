@@ -64,6 +64,15 @@ class DesktopBridgeClient extends EventEmitter {
     super();
     if (host !== '127.0.0.1') throw new Error('DesktopBridgeClient connects only to 127.0.0.1');
     if (!pin || !pin.nodeId || !pin.publicKey) throw new Error('DesktopBridgeClient needs the pinned service key');
+    // Checked once, here, rather than on every challenge: a pin whose
+    // publicKey doesn't actually derive its own nodeId is a caller/config
+    // bug, not a runtime "the service's identity changed" condition — left
+    // unchecked, the challenge-stage comparison could report
+    // SERVICE_KEY_CHANGED(X, X) (old and new both X) when the *pin* was
+    // self-inconsistent rather than the service's key having changed.
+    if (safeNodeId(pin.publicKey) !== pin.nodeId) {
+      throw new Error(`DesktopBridgeClient pin is internally inconsistent: publicKey does not derive nodeId ${pin.nodeId}`);
+    }
     if (typeof sign !== 'function') throw new Error('DesktopBridgeClient needs a sign function');
     this.port = port;
     this.getPort = getPort;
@@ -116,7 +125,19 @@ class DesktopBridgeClient extends EventEmitter {
     this.nextRetryAt = null;
     const ws = this.ws;
     this.ws = null;
-    if (ws) { try { ws.close(1000, 'closed by the desktop'); } catch { /* gone */ } }
+    if (ws) {
+      try {
+        // Once fully connected there's a real session to say goodbye to;
+        // mid-handshake (this.ws is set as soon as the socket is created,
+        // not just once 'ready' arrives — see _handshake) there is nothing
+        // to negotiate a graceful close with, and _attempt/_handshake's own
+        // `stopped` checks are what stop that in-flight attempt from ever
+        // reviving into 'connected' — this just makes sure the socket
+        // itself doesn't linger open underneath it.
+        if (this.status === 'connected') ws.close(1000, 'closed by the desktop');
+        else ws.terminate();
+      } catch { /* gone */ }
+    }
     this._rejectPending(new BridgeError('SERVICE_UNREACHABLE', MESSAGES.SERVICE_UNREACHABLE(this.port)));
     this._setState('stopped');
   }
@@ -160,6 +181,11 @@ class DesktopBridgeClient extends EventEmitter {
     this._setState('connecting');
     try {
       if (this.getPort) this.port = await this.getPort();
+      // close() may have run while getPort() was pending, before any socket
+      // existed for it to terminate. Check here, before _handshake ever
+      // opens one, rather than let a cancelled attempt open a socket that
+      // then has to be cleaned up after the fact.
+      if (this.stopped) throw new BridgeError('CANCELLED', 'closed while connecting');
       const service = await this._handshake(this.port);
       this.attempt = 0;
       this.service = service;
@@ -191,11 +217,20 @@ class DesktopBridgeClient extends EventEmitter {
 
   _handshake(port) {
     return new Promise((resolve, reject) => {
+      // Belt-and-suspenders alongside _attempt's own check: this is the
+      // function that actually opens the socket, so it refuses to open one
+      // for an attempt that's already been cancelled, however it got here.
+      if (this.stopped) { reject(new BridgeError('CANCELLED', 'closed while connecting')); return; }
       const ws = new WebSocket(`ws://127.0.0.1:${port}/`, {
         perMessageDeflate: false,
         maxPayload: LIMITS.wsMaxPayload,
         handshakeTimeout: this.handshakeTimeoutMs
       });
+      // Stored immediately, not just once 'ready' arrives: close() needs a
+      // handle on the socket for the whole lifetime of the attempt (not
+      // just once it's authenticated) so a close() mid-handshake has
+      // something to terminate instead of finding this.ws still null.
+      this.ws = ws;
       let stage = 'challenge';
       let settled = false;
       let fields = null;
@@ -205,6 +240,7 @@ class DesktopBridgeClient extends EventEmitter {
         settled = true;
         clearTimeout(timer);
         try { ws.terminate(); } catch { /* gone */ }
+        if (this.ws === ws) this.ws = null;
         reject(err);
       };
       const malformed = () => fail(new BridgeError('MALFORMED', MESSAGES.MALFORMED));
@@ -219,8 +255,10 @@ class DesktopBridgeClient extends EventEmitter {
             // The server proves itself first: verify its claimed nodeId
             // against the pinned key before this desktop's own signature
             // (over AUTH_C, computed next stage) ever leaves. A mismatch
-            // here means the service's identity changed — fatal.
-            if (frame.nodeId !== this.pin.nodeId || safeNodeId(this.pin.publicKey) !== this.pin.nodeId) {
+            // here means the service's identity changed — fatal. (The pin
+            // itself is already known self-consistent — checked once in
+            // the constructor — so old and new here are never the same.)
+            if (frame.nodeId !== this.pin.nodeId) {
               fail(new BridgeError('SERVICE_KEY_CHANGED', MESSAGES.SERVICE_KEY_CHANGED(this.pin.nodeId, frame.nodeId)));
               return;
             }
@@ -246,6 +284,21 @@ class DesktopBridgeClient extends EventEmitter {
             ws.send(JSON.stringify({ t: 'auth', sig: Buffer.from(mine).toString('base64url') }));
           } else if (stage === 'auth') {
             if (frame.t !== 'ready' || !frame.service) { malformed(); return; }
+            // Checked again here, not just before the socket was opened:
+            // close() may have run after this handshake was already under
+            // way (this.ws already terminated by close() itself in the
+            // ordinary case), but if a 'ready' frame still arrives before
+            // that takes effect, resolving anyway would revive a client
+            // that close() already declared 'stopped' into 'connected'
+            // with a live socket nothing else will ever close.
+            if (this.stopped) {
+              settled = true;
+              clearTimeout(timer);
+              try { ws.terminate(); } catch { /* gone */ }
+              if (this.ws === ws) this.ws = null;
+              reject(new BridgeError('CANCELLED', 'closed while connecting'));
+              return;
+            }
             stage = 'ready';
             settled = true;
             clearTimeout(timer);

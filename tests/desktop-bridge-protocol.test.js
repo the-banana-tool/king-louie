@@ -530,6 +530,38 @@ async function impostorServer({ nodeId = identity.nodeId } = {}) {
   return { frames, port: wss.address().port, close: () => new Promise((r) => { for (const c of wss.clients) c.terminate(); wss.close(r); }) };
 }
 
+// A fake service that performs a genuine, valid mutual handshake up through
+// its own proof (a real `hello.sig` over the real identity), then closes
+// with an arbitrary code/reason either right after `clientHello` (for codes
+// the real server sends before ever proving itself: MALFORMED,
+// PROTOCOL_MISMATCH, UNKNOWN_DEVICE) or right after `auth` (for codes the
+// real server only reaches once a signature has been checked: BAD_SIGNATURE,
+// OTHER_DEVICE, LOCKED_OUT). This isolates the client's own close-code
+// mapping (`errorForClose`) from the server's pairing/lockout state — which
+// is already covered by tests/desktop-bridge-protocol.test.js's server suite
+// — the same way `impostorServer` isolates the "never trust an unproven
+// service" behavior above.
+async function closingServer({ after = 'clientHello', code, reason = '' } = {}) {
+  const wss = new WebSocket.Server({ host: '127.0.0.1', port: 0 });
+  await new Promise((resolve) => wss.once('listening', resolve));
+  wss.on('connection', (ws) => {
+    const serverNonce = newNonce();
+    ws.send(JSON.stringify({ t: 'challenge', protocol: 1, nodeId: identity.nodeId, serverNonce }));
+    ws.on('message', (data) => {
+      const frame = JSON.parse(data.toString('utf8'));
+      if (frame.t === 'clientHello') {
+        if (after === 'clientHello') { ws.close(code, reason); return; }
+        const fields = { nodeId: identity.nodeId, deviceId: frame.deviceId, port: wss.address().port, serverNonce, clientNonce: frame.clientNonce };
+        const sig = identity.sign(Buffer.from(buildAuthS(fields), 'utf8'));
+        ws.send(JSON.stringify({ t: 'hello', sig: keys.toB64url(Buffer.from(sig)) }));
+      } else if (frame.t === 'auth' && after === 'auth') {
+        ws.close(code, reason);
+      }
+    });
+  });
+  return { port: wss.address().port, close: () => new Promise((r) => { for (const c of wss.clients) c.terminate(); wss.close(r); }) };
+}
+
 describe('DesktopBridgeClient', () => {
   it('connects, invokes and receives events', async () => {
     const device = makeDevice();
@@ -624,6 +656,122 @@ describe('DesktopBridgeClient', () => {
       && err.message === 'The service does not know this desktop. Pair again in Settings > Local service.');
     assert.strictEqual(client.status, 'failed');
     assert.strictEqual(client.nextRetryAt, null);
+    client.close();
+  });
+});
+
+describe('DesktopBridgeClient fix round 1 (review findings)', () => {
+  it('rejects a pin whose publicKey does not derive its own nodeId', () => {
+    const device = makeDevice();
+    assert.throws(() => new DesktopBridgeClient({
+      port: 1,
+      pin: { nodeId: 'kl-aaaaaaaaaaaaaaaa', publicKey: identity.publicKey.toString('hex') },
+      deviceId: device.deviceId,
+      sign: async (bytes) => crypto.sign(null, bytes, device.privateKey)
+    }), /pin is internally inconsistent/);
+  });
+
+  it('close() during a handshake cancels it instead of letting it revive into connected', async () => {
+    const device = makeDevice();
+    const { port } = await startServer({ devices: [device] });
+    const client = clientFor(port, device);
+    const states = [];
+    client.on('state', (s) => states.push(s.status));
+    const pending = client.connect();
+    // No await between connect() and close(): the socket exists (this.ws is
+    // set as soon as _handshake creates it) but the real network round trip
+    // for the challenge/hello/auth/ready exchange cannot have happened yet.
+    const inFlightWs = client.ws;
+    assert.ok(inFlightWs, 'the socket is stored before the handshake completes');
+    client.close();
+    await assert.rejects(pending, () => true);
+    assert.strictEqual(client.status, 'stopped');
+    assert.strictEqual(client.ws, null);
+    // Give the real handshake — which was never cancelled on the wire, only
+    // locally — however long it needs to actually finish, so a lingering
+    // bug (this.stopped not checked on 'ready') would show up as a late
+    // 'connected' state event rather than the test just not having waited.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.strictEqual(client.status, 'stopped', 'must not have revived into connected');
+    assert.ok(!states.includes('connected'), 'no connected state event ever fires');
+    assert.strictEqual(inFlightWs.readyState, WebSocket.CLOSED, 'no socket stays open');
+  });
+
+  it('maps 4400 (malformed) to a non-fatal MALFORMED error', async () => {
+    const fake = await closingServer({ after: 'clientHello', code: 4400, reason: 'bad frame' });
+    const client = clientFor(fake.port, makeDevice(), { backoffMs: [20] });
+    await assert.rejects(client.connect(), (err) => err.code === 'MALFORMED');
+    assert.strictEqual(client.status, 'disconnected');
+    assert.ok(client.nextRetryAt !== null, 'not fatal — a retry is scheduled');
+    client.close();
+    await fake.close();
+  });
+
+  it('maps 4401 (bad signature) to a non-fatal BAD_SIGNATURE error', async () => {
+    const fake = await closingServer({ after: 'auth', code: 4401, reason: 'signature invalid' });
+    const client = clientFor(fake.port, makeDevice(), { backoffMs: [20] });
+    await assert.rejects(client.connect(), (err) => err.code === 'BAD_SIGNATURE');
+    assert.strictEqual(client.status, 'disconnected');
+    assert.ok(client.nextRetryAt !== null, 'not fatal — a retry is scheduled');
+    client.close();
+    await fake.close();
+  });
+
+  it('maps 4409 (another device) to a fatal ANOTHER_DEVICE error carrying the label', async () => {
+    const fake = await closingServer({ after: 'auth', code: 4409, reason: 'gpu-box desk' });
+    const client = clientFor(fake.port, makeDevice(), { backoffMs: [20] });
+    await assert.rejects(client.connect(), (err) => err.code === 'ANOTHER_DEVICE' && /gpu-box desk/.test(err.message));
+    assert.strictEqual(client.status, 'failed');
+    assert.strictEqual(client.nextRetryAt, null, 'fatal — no retry until retryNow()');
+    client.close();
+    await fake.close();
+  });
+
+  it('maps 4426 (protocol mismatch) to a fatal PROTOCOL_MISMATCH error', async () => {
+    const fake = await closingServer({ after: 'clientHello', code: 4426, reason: '2' });
+    const client = clientFor(fake.port, makeDevice(), { backoffMs: [20] });
+    await assert.rejects(client.connect(), (err) => err.code === 'PROTOCOL_MISMATCH');
+    assert.strictEqual(client.status, 'failed');
+    assert.strictEqual(client.nextRetryAt, null, 'fatal — no retry until retryNow()');
+    client.close();
+    await fake.close();
+  });
+
+  it('maps 4429 (locked out) to a non-fatal LOCKED_OUT error — retryable, not held', async () => {
+    const fake = await closingServer({ after: 'auth', code: 4429, reason: 'too many failed handshakes' });
+    const client = clientFor(fake.port, makeDevice(), { backoffMs: [20] });
+    await assert.rejects(client.connect(), (err) => err.code === 'LOCKED_OUT');
+    assert.strictEqual(client.status, 'disconnected', 'not fatal, unlike DEVICE_UNPAIRED/ANOTHER_DEVICE/PROTOCOL_MISMATCH/SERVICE_KEY_CHANGED');
+    assert.ok(client.nextRetryAt !== null, 'a retry is scheduled on the normal backoff schedule — this client always signs correctly, so the lockout does not apply to its own retries');
+    client.close();
+    await fake.close();
+  });
+
+  it('send() returns false before connecting and delivers a one-way frame once connected', async () => {
+    const device = makeDevice();
+    const { port, dispatcher } = await startServer({ devices: [device] });
+    const client = clientFor(port, device);
+    assert.strictEqual(client.send('chat:updated', [{ id: 1 }]), false);
+    await client.connect();
+    assert.strictEqual(client.send('chat:updated', [{ id: 1 }]), true);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const sent = dispatcher.frames.find((f) => f.t === 'send' && f.channel === 'chat:updated');
+    assert.ok(sent, 'the dispatcher received the send frame');
+    assert.deepStrictEqual(sent.args, [{ id: 1 }]);
+    client.close();
+  });
+
+  it('call() sends a call frame and resolves with the reply value', async () => {
+    const device = makeDevice();
+    const { port, dispatcher } = await startServer({ devices: [device] });
+    dispatcher.handleFrame = async (conn, frame) => {
+      dispatcher.frames.push(frame);
+      if (frame.t === 'call') conn.send({ t: 'result', id: frame.id, value: { method: frame.method, params: frame.params } });
+    };
+    const client = clientFor(port, device);
+    await client.connect();
+    const result = await client.call('ping', { a: 1 });
+    assert.deepStrictEqual(result, { method: 'ping', params: { a: 1 } });
     client.close();
   });
 });
