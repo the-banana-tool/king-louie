@@ -31,9 +31,10 @@ function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+// Same message as features/ports and node.yaml (unknownKeyError, below).
 function rejectUnknownKeys(obj, allowed, where, file) {
   for (const key of Object.keys(obj)) {
-    if (!allowed.includes(key)) throw new Error(`Invalid ${file}: ${where}.${key} is not a known key (expected ${allowed.join(', ')})`);
+    if (!allowed.includes(key)) throw unknownKeyError(file, `${where}.${key}`, allowed);
   }
 }
 

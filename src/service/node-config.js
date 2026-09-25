@@ -23,9 +23,10 @@ const DEFAULT_MAX_CONCURRENT_JOBS = 2;
 // same change (fleet stage 3 `approvers`, stage 4 `frontdoor`, stage 5 `gui`)
 // and validates that key's own subtree itself.
 const NODE_YAML_KEYS = Object.freeze({
-  top: Object.freeze(['name', 'profile', 'front_door', 'capabilities', 'policy', 'runbooks_dir']),
+  top: Object.freeze(['name', 'profile', 'front_door', 'capabilities', 'policy', 'runbooks_dir', 'approvers']),
   policy: Object.freeze(['allowed_roots', 'remote_sessions', 'max_concurrent_jobs']),
-  remote_sessions: Object.freeze(['always_confirm', 'deny'])
+  remote_sessions: Object.freeze(['always_confirm', 'deny']),
+  approvers: Object.freeze(['relay', 'request_ttl_s'])
 });
 
 // node.yaml and the runbooks beside it decide what this node lets remote
@@ -107,12 +108,10 @@ function isValidRelayUrl(value) {
   return Number.isInteger(port) && port >= 1 && port <= 65535;
 }
 
-function parseApprovers(raw, invalid) {
+function parseApprovers(raw, invalid, file) {
   if (raw === undefined) return { ...DEFAULT_APPROVERS };
   if (!isPlainObject(raw)) throw invalid('approvers must be a mapping');
-  for (const key of Object.keys(raw)) {
-    if (!['relay', 'request_ttl_s'].includes(key)) throw invalid(`approvers.${key} is not a known key (expected relay, request_ttl_s)`);
-  }
+  assertKnownKeys(raw, NODE_YAML_KEYS.approvers, 'approvers.', file);
   const out = { ...DEFAULT_APPROVERS };
   if (raw.relay !== undefined && raw.relay !== null) {
     if (typeof raw.relay !== 'string' || !isValidRelayUrl(raw.relay.trim())) throw invalid('approvers.relay must be wss://host:port');
@@ -260,7 +259,7 @@ function loadNodeConfig({
       max_concurrent_jobs: maxConcurrentJobs
     },
     runbooksDir,
-    approvers: parseApprovers(parsed.approvers, invalid)
+    approvers: parseApprovers(parsed.approvers, invalid, configFile)
   };
 }
 

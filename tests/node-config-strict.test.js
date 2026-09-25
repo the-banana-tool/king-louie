@@ -12,8 +12,11 @@ const POSIX = process.platform !== 'win32';
 
 // <root>/config/node.yaml, admin-owned the way the loader wants it: the test's
 // own uid stands in for root, the dir is 0755 and the file 0644.
+// fn may be async (runDoctor is); the dir is removed once it settles.
 function withAdminDir(yaml, fn) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-strict-'));
+  const cleanup = () => fs.rmSync(root, { recursive: true, force: true });
+  let result;
   try {
     const dir = path.join(root, 'config');
     fs.mkdirSync(dir);
@@ -21,10 +24,14 @@ function withAdminDir(yaml, fn) {
     const file = path.join(dir, 'node.yaml');
     fs.writeFileSync(file, yaml, 'utf8');
     if (POSIX) fs.chmodSync(file, 0o644);
-    return fn({ root, dir, file });
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
+    result = fn({ root, dir, file });
+  } catch (err) {
+    cleanup();
+    throw err;
   }
+  if (result && typeof result.then === 'function') return Promise.resolve(result).finally(cleanup);
+  cleanup();
+  return result;
 }
 
 const load = (dir) => loadNodeConfig({ adminConfigDir: dir, geteuid: () => EUID, adminUid: EUID });
@@ -40,9 +47,10 @@ function expectUnknown(yaml, keyPath, known) {
 
 describe('NODE_YAML_KEYS', () => {
   it('lists every key node.yaml may carry, per level, frozen', () => {
-    assert.deepEqual([...NODE_YAML_KEYS.top], ['name', 'profile', 'front_door', 'capabilities', 'policy', 'runbooks_dir']);
+    assert.deepEqual([...NODE_YAML_KEYS.top], ['name', 'profile', 'front_door', 'capabilities', 'policy', 'runbooks_dir', 'approvers']);
     assert.deepEqual([...NODE_YAML_KEYS.policy], ['allowed_roots', 'remote_sessions', 'max_concurrent_jobs']);
     assert.deepEqual([...NODE_YAML_KEYS.remote_sessions], ['always_confirm', 'deny']);
+    assert.deepEqual([...NODE_YAML_KEYS.approvers], ['relay', 'request_ttl_s']);
     assert.ok(Object.isFrozen(NODE_YAML_KEYS));
     for (const level of Object.values(NODE_YAML_KEYS)) assert.ok(Object.isFrozen(level));
   });
@@ -63,6 +71,10 @@ describe('loadNodeConfig rejects unknown keys', () => {
       'policy.remote_sessions.always_confirmm',
       NODE_YAML_KEYS.remote_sessions
     );
+  });
+
+  it('names an unknown approvers key with its dotted path, in the same format', () => {
+    expectUnknown('approvers:\n  phone: yes\n', 'approvers.phone', NODE_YAML_KEYS.approvers);
   });
 
   it('checks the top level before policy', () => {
@@ -92,6 +104,9 @@ describe('loadNodeConfig rejects unknown keys', () => {
       "    deny: ['Bash(rm -rf /*)']",
       '  max_concurrent_jobs: 1',
       'runbooks_dir: runbooks',
+      'approvers:',
+      '  relay: wss://10.0.0.5:18795',
+      '  request_ttl_s: 120',
       ''
     ].join('\n');
     withAdminDir(yaml, ({ dir }) => {
@@ -99,6 +114,7 @@ describe('loadNodeConfig rejects unknown keys', () => {
       assert.equal(cfg.name, 'web-01');
       assert.equal(cfg.frontDoor, 'https://kl.example.com');
       assert.equal(cfg.policy.max_concurrent_jobs, 1);
+      assert.deepEqual(cfg.approvers, { relay: 'wss://10.0.0.5:18795', requestTtlS: 120 });
     });
   });
 
@@ -111,12 +127,12 @@ describe('loadNodeConfig rejects unknown keys', () => {
     }
   });
 
-  it('makes runDoctor report the typo as the node config FAIL row', () => {
-    withAdminDir('name: n\npolicy:\n  alowed_roots: []\n', ({ root }) => {
+  it('makes runDoctor report the typo as the node config FAIL row', async () => {
+    await withAdminDir('name: n\npolicy:\n  alowed_roots: []\n', async ({ root }) => {
       const dataDir = path.join(root, 'data');
       fs.mkdirSync(dataDir);
       if (POSIX) fs.chmodSync(dataDir, 0o700);
-      const rows = runDoctor({ dataDir, adminUid: EUID });
+      const rows = await runDoctor({ dataDir, adminUid: EUID });
       const row = rows.find((r) => r.check === 'node config / runbooks health');
       assert.ok(row, JSON.stringify(rows));
       assert.equal(row.ok, false);

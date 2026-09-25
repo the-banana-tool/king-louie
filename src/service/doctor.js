@@ -61,13 +61,13 @@ async function runDoctor({ dataDir, platform = process.platform, adminUid = 0 })
     results.push({ check: 'node config / runbooks health', ok: false, detail: err.message });
   }
 
-  results.push(...(await approvalChecks({ dataDir, platform })));
+  results.push(...(await approvalChecks({ dataDir, platform, adminUid })));
   return results;
 }
 
 // Fleet stage 3: the approver set must be admin-only, the relay linked when
 // one is configured, and the audit chain intact.
-async function approvalChecks({ dataDir, platform }) {
+async function approvalChecks({ dataDir, platform, adminUid = 0 }) {
   const out = [];
   const attempt = async (check, fn) => {
     try {
@@ -104,7 +104,7 @@ async function approvalChecks({ dataDir, platform }) {
   });
   await attempt('relay paired and linked', () => {
     const { loadNodeConfig } = require('./node-config');
-    const nodeCfg = loadNodeConfig({ dataDir });
+    const nodeCfg = loadNodeConfig({ dataDir, adminUid });
     if (!nodeCfg.approvers.relay) return { ok: true, detail: 'no relay configured (phone approvals off)' };
     let link = null;
     try {

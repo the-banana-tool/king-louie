@@ -376,7 +376,7 @@ describe('relay and audit configuration', () => {
   });
 
   it('rejects unknown keys (naming the path), a missing tls block and a non-https public_url', () => {
-    assert.throws(() => parseRelayConfig({ ...minimal, extra: 1 }, file), /relay\.extra is not a known key/);
+    assert.throws(() => parseRelayConfig({ ...minimal, extra: 1 }, file), /unknown key "relay\.extra" \(known: phone_listen, tls, mesh_listen, public_url, push\)/);
     assert.throws(() => parseRelayConfig({ ...minimal, mesh_listen: { host: '10.0.0.5', bind: 1 } }, file), /relay\.mesh_listen\.bind/);
     assert.throws(() => parseRelayConfig({ ...minimal, tls: undefined }, file), /relay\.tls/);
     assert.throws(() => parseRelayConfig({ ...minimal, public_url: 'http://kl.example.com' }, file), /https/);
@@ -446,6 +446,6 @@ describe('relay and audit configuration', () => {
     write('approvers:\n  request_ttl_s: 600\n');
     assert.throws(load, /from 30 to 300/);
     write('approvers:\n  phone: yes\n');
-    assert.throws(load, /approvers\.phone is not a known key/);
+    assert.throws(load, /unknown key "approvers\.phone" \(known: relay, request_ttl_s\)/);
   });
 });
