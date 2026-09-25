@@ -31,45 +31,58 @@ async function launchApp() {
   const bridgeScript = path.join(__dirname, '_bridge.js');
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-e2e-profile-'));
 
-  const child = spawn(electronPath, [APP_PATH, `--user-data-dir=${userDataDir}`], {
-    env: {
-      ...process.env,
-      KL_TEST_BRIDGE_PORT: '1', // truthy — bridge picks its own port via port 0
-      KL_TEST_BRIDGE_SCRIPT: bridgeScript,
-      KL_TEST_MODE: '1'
-    },
-    stdio: ['pipe', 'pipe', 'pipe']
-  });
+  try {
+    const child = spawn(electronPath, [APP_PATH, `--user-data-dir=${userDataDir}`], {
+      env: {
+        ...process.env,
+        KL_TEST_BRIDGE_PORT: '1', // truthy — bridge picks its own port via port 0
+        KL_TEST_BRIDGE_SCRIPT: bridgeScript,
+        KL_TEST_MODE: '1'
+      },
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
 
-  let stderr = '';
-  child.stderr.on('data', (d) => { stderr += d.toString(); });
+    let stderr = '';
+    child.stderr.on('data', (d) => { stderr += d.toString(); });
 
-  // Read the port from stdout (bridge prints KL_BRIDGE_PORT=NNNNN)
-  const bridgePort = await new Promise((resolve, reject) => {
-    let buf = '';
-    const timeout = setTimeout(() => {
-      reject(new Error(`Bridge did not report port in time. stderr: ${stderr.slice(0, 500)}`));
-    }, 25000);
+    // Read the port from stdout (bridge prints KL_BRIDGE_PORT=NNNNN)
+    const bridgePort = await new Promise((resolve, reject) => {
+      let buf = '';
+      const timeout = setTimeout(() => {
+        reject(new Error(`Bridge did not report port in time. stderr: ${stderr.slice(0, 500)}`));
+      }, 25000);
 
-    child.stdout.on('data', (d) => {
-      buf += d.toString();
-      const match = buf.match(/KL_BRIDGE_PORT=(\d+)/);
-      if (match) {
+      child.stdout.on('data', (d) => {
+        buf += d.toString();
+        const match = buf.match(/KL_BRIDGE_PORT=(\d+)/);
+        if (match) {
+          clearTimeout(timeout);
+          resolve(parseInt(match[1], 10));
+        }
+      });
+
+      child.on('exit', (code) => {
         clearTimeout(timeout);
-        resolve(parseInt(match[1], 10));
-      }
+        reject(new Error(`App exited with code ${code} before bridge ready. stderr: ${stderr.slice(0, 500)}`));
+      });
     });
 
-    child.on('exit', (code) => {
-      clearTimeout(timeout);
-      reject(new Error(`App exited with code ${code} before bridge ready. stderr: ${stderr.slice(0, 500)}`));
-    });
-  });
+    // Verify the bridge is responsive
+    await waitForBridge(bridgePort, 10000);
 
-  // Verify the bridge is responsive
-  await waitForBridge(bridgePort, 10000);
+    return { child, bridgePort, closed: false, userDataDir };
+  } catch (err) {
+    removeUserDataDir(userDataDir);
+    throw err;
+  }
+}
 
-  return { child, bridgePort, closed: false, userDataDir };
+function removeUserDataDir(userDataDir) {
+  try {
+    fs.rmSync(userDataDir, { recursive: true, force: true });
+  } catch (err) {
+    console.warn(`Could not remove e2e temp profile dir ${userDataDir}: ${err.message}`);
+  }
 }
 
 /**
@@ -85,9 +98,7 @@ async function closeApp(ctx) {
   await new Promise((r) => setTimeout(r, 500));
   try { ctx.child.kill(); } catch { /* Already dead */ }
   await new Promise((r) => setTimeout(r, 300));
-  if (ctx.userDataDir) {
-    try { fs.rmSync(ctx.userDataDir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
-  }
+  if (ctx.userDataDir) removeUserDataDir(ctx.userDataDir);
 }
 
 /**

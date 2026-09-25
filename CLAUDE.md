@@ -115,3 +115,39 @@ git repo under `<dataDir>/cases/` (override with `settings.cases.root` or
   sourced fact is only as good as the source the model names. The write guard
   covers Write, Edit and MultiEdit, not Bash: in stage 1 a shell command can
   still rewrite `facts.jsonl`.
+
+## Cases: unattended (stage 2)
+
+Spec: `docs/superpowers/specs/2026-09-23-cases-stage2-unattended.md`.
+
+- Status (`case.yaml` `status`, `statusReason`) changes only through
+  `CaseRuntime.setStatus`, which requires a `kind` naming why (`src/cases/status.js`'s
+  `REASON_KINDS`) and refuses without one; `status.js` also holds the
+  transition table and the per-status tool rules. Every case tool checks
+  `assertWritable`; `Decide`, `Recommend` and `Fail` also call
+  `requireReoriented`, which refuses when no turn is registered, so tests that
+  call them begin a turn first.
+- Wake-ups: the protected cron system job `cases:wakeups` (every minute,
+  `ensureWakeupJob`) calls `CaseRuntime.runDueWakeups`. A wake-up turn makes one
+  `orient` call (charged like any other usage), then runs a `judge` loop
+  confined to the case tools plus Read, Glob and Grep (`allowedToolNames`,
+  `denyAutoApproval`, no owner messages). A wake-up that fails backs off
+  through `retryBackoffMinutes` and briefs the owner on the third strike.
+  Settings: `settings.cases.wakeups`; off with `enabled: false`.
+- Budgets live in `.kl/budget.json`. `usd` and `deadline` at 100 % pause the
+  case and record `statusReason.resumeTo` (the status to return to); per-day
+  categories refuse their action until the local day rolls over. Effects
+  (raising a limit, resuming from `needs-direction`) apply only when the
+  answer to a host-created `budget-grant` or `direction` question is what
+  supplies the fact — a `user-message` or model-sourced fact naming the same
+  subject/attr is recorded but changes nothing, so an owner's quoted "ok" in
+  chat cannot self-serve a raise; a reply must be routed through
+  `CaseRuntime.answerQuestion` (a grant reply is just the amount).
+- Questions live in `.kl/questions/`. Create them with
+  `CaseRuntime.createQuestion`; answer them only through
+  `CaseRuntime.answerQuestion` (exactly one host-verified `user` fact).
+- Case-file writes outside a turn go through `CaseRuntime.systemAction`. Tests
+  inject a fake clock with `new CaseRuntime({ now })` and a temp root.
+- `CaseRuntime.shutdown` drains in-flight wake-ups before releasing locks. The
+  e2e suite runs every launch on its own throwaway `--user-data-dir` (see
+  Testing above), so it never touches a real case store.
