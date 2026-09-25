@@ -111,3 +111,31 @@ git repo under `<dataDir>/cases/` (override with `settings.cases.root` or
   sourced fact is only as good as the source the model names. The write guard
   covers Write, Edit and MultiEdit, not Bash: in stage 1 a shell command can
   still rewrite `facts.jsonl`.
+
+## Approvals and relay
+
+Fleet stage 3 (spec `docs/superpowers/specs/2026-09-23-fleet-stage3-approvals.md`, wire protocol
+`docs/protocol/approval-v1.md`). On a service node, an unsafe remote tool call or `unsafe` runbook runs
+only after an enrolled phone signs an approval over the exact action; only `=== true` approves. The
+service only reads the approver set in `<configDir>/approvers/`; the admin CLI writes it.
+
+- Relay host (admin `service.json` `relay` block; the mesh listener must be a loopback or private IP):
+  `king-louie-service relay run`, `relay code <node-name>`, `relay nodes`, `relay remove-node <name>`, `relay qr`.
+- Node, as the administrator: `king-louie-service pair wss://<relay-host>:<port>` and type the code at its
+  prompt (piped on stdin also works), set `approvers.relay` in `node.yaml`, start the service, then
+  `king-louie-service enroll-device`. The pairing proof binds the whole identity and `pair` refuses a
+  missing or mismatched TLS fingerprint; after a refusal, run `relay remove-node <name>` on the relay and
+  get a new code. `enroll-device` enrolls only on `y`/`yes` at its `[y/N]` prompt, which expires with
+  the code.
+  Enrollments and revocations relayed from phones are staged per node: apply them with
+  `king-louie-service device apply` (`--yes` skips the `[y/N]` prompt, never the signature checks);
+  `device list`, `device revoke <device-id>`.
+- `mcp` asks through the running service (file courier); with the service stopped every unsafe runbook
+  is denied at once.
+- Audit: `<dataDir>/audit/ledger-YYYY-MM.jsonl`, hash-chained; `doctor` verifies the chain.
+- Tests: `tests/approvals-*.test.js`, `tests/frontdoor-*.test.js`, `tests/audit-ledger.test.js`,
+  `tests/service-cli-devices.test.js`, `tests/service-cli-relay.test.js`. Vectors live in
+  `tests/vectors/approval-v1/`; after changing a message, run `node tests/vectors/approval-v1/generate.js`
+  and commit the files (`--check` must say `40 vectors match`). `tests/approvals-e2e.test.js` spawns real
+  processes and runs on Windows or as root; on Windows it denies itself write access to a temp
+  `approvers/` dir with `icacls` (as an installer's ACL would) and lifts the deny before cleanup.
