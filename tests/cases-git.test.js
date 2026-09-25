@@ -93,4 +93,51 @@ describe('case git hooks path', () => {
     }
     await git.git(dir, ['status']);
   });
+
+  // Fix round 5: on a shared POSIX /tmp another user can learn the name, wait
+  // for a tmp cleaner to remove it, and re-create it as their own. The
+  // directory must be ours and private on every check, and a directory that
+  // fails a check (or vanished) is replaced by a fresh mkdtemp, never reused
+  // by name. lstat and getuid are stubbed so the owner/mode cases run on any
+  // platform (Windows has no uid and reports synthetic modes).
+  function withStat(dirToFake, fake, fn) {
+    const realLstat = fs.lstatSync;
+    const hadGetuid = typeof process.getuid === 'function';
+    const realGetuid = process.getuid;
+    const uid = hadGetuid ? process.getuid() : 1000;
+    if (!hadGetuid) process.getuid = () => uid;
+    fs.lstatSync = (p, ...rest) => {
+      const st = realLstat(p, ...rest);
+      if (!path.basename(String(p)).startsWith('kl-no-hooks-')) return st;
+      const overrides = path.resolve(String(p)) === path.resolve(dirToFake) ? fake(uid) : { uid, mode: 0o40700 };
+      return Object.assign(Object.create(Object.getPrototypeOf(st)), st, overrides);
+    };
+    try {
+      return fn();
+    } finally {
+      fs.lstatSync = realLstat;
+      if (!hadGetuid) delete process.getuid; else process.getuid = realGetuid;
+    }
+  }
+
+  it('replaces a hooks directory owned by another user with a fresh one', () => {
+    const first = withStat('', () => ({}), () => git.noHooksDir());
+    const second = withStat(first, (uid) => ({ uid: uid + 1, mode: 0o40700 }), () => git.noHooksDir());
+    assert.notStrictEqual(second, first);
+    assert.deepStrictEqual(fs.readdirSync(second), []);
+  });
+
+  it('replaces a group- or world-accessible hooks directory with a fresh one', () => {
+    const first = withStat('', () => ({}), () => git.noHooksDir());
+    const second = withStat(first, (uid) => ({ uid, mode: 0o40770 }), () => git.noHooksDir());
+    assert.notStrictEqual(second, first);
+  });
+
+  it('never reuses the name of a hooks directory that vanished', () => {
+    const first = git.noHooksDir();
+    fs.rmdirSync(first);
+    const second = git.noHooksDir();
+    assert.notStrictEqual(second, first);
+    assert.strictEqual(fs.existsSync(first), false, 'the old name was not re-created');
+  });
 });

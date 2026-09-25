@@ -41,20 +41,51 @@ class GitUnavailableError extends Error {
 // .git/hooks/** for exactly this reason (src/migration/desktop-import.js),
 // but this flag is defence in depth: it holds even for a case whose .git
 // directory was created some other way.
+//
+// On a shared POSIX /tmp another user can list the name, wait for a tmp
+// cleaner to remove the directory and re-create it as their own (fix round
+// 5). So every check also requires, where the platform has uids, that the
+// directory is owned by this process's user and not accessible to group or
+// others. A directory that vanished or fails any check is abandoned, never
+// re-created or reused by name: a fresh mkdtemp replaces it.
 let hooksDir = null;
+const createdHooksDirs = new Set();
+let exitCleanupRegistered = false;
 
-function noHooksDir() {
-  if (hooksDir && !fs.existsSync(hooksDir)) hooksDir = null; // e.g. a temp cleaner removed it
-  if (!hooksDir) {
-    hooksDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-no-hooks-'));
-    const created = hooksDir;
+// Why `dir` can't serve as the hooks directory, or null when it can.
+function hooksDirProblem(dir) {
+  let st;
+  try { st = fs.lstatSync(dir); } catch { return 'it is missing'; }
+  if (st.isSymbolicLink() || !st.isDirectory()) return 'it is not a plain directory';
+  if (typeof process.getuid === 'function') {
+    if (st.uid !== process.getuid()) return 'it is owned by another user';
+    if ((st.mode & 0o077) !== 0) return 'other users can access it';
+  }
+  return null;
+}
+
+function freshHooksDir() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-no-hooks-'));
+  createdHooksDirs.add(dir);
+  if (!exitCleanupRegistered) {
+    exitCleanupRegistered = true;
     process.once('exit', () => {
-      try { fs.rmdirSync(created); } catch { /* not empty or already gone; leave it */ }
+      for (const d of createdHooksDirs) {
+        // Only a directory that is still ours; rmdir leaves a non-empty one.
+        if (hooksDirProblem(d)) continue;
+        try { fs.rmdirSync(d); } catch { /* not empty or already gone; leave it */ }
+      }
     });
   }
-  const st = fs.lstatSync(hooksDir);
-  if (st.isSymbolicLink() || !st.isDirectory() || fs.readdirSync(hooksDir).length > 0) {
-    throw new Error(`The case git hooks directory ${hooksDir} is not empty (or not a plain directory). Something placed files where only an empty directory belongs, so git was not run. Remove its contents to continue.`);
+  const problem = hooksDirProblem(dir);
+  if (problem) throw new Error(`The case git hooks directory ${dir} can't be used (${problem}), so git was not run.`);
+  return dir;
+}
+
+function noHooksDir() {
+  if (!hooksDir || hooksDirProblem(hooksDir)) hooksDir = freshHooksDir();
+  if (fs.readdirSync(hooksDir).length > 0) {
+    throw new Error(`The case git hooks directory ${hooksDir} is not empty. Something placed files where only an empty directory belongs, so git was not run. Remove its contents to continue.`);
   }
   return hooksDir;
 }
