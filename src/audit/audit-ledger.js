@@ -10,6 +10,9 @@ const path = require('path');
 const { canonicalize } = require('../platform/jcs');
 const { seal, open, verifyEd25519, nodeSigner } = require('../approvals/envelope');
 const { validateMessage } = require('../approvals/messages');
+const { createLogger } = require('../logging');
+
+const log = createLogger('audit-ledger');
 
 const SEGMENT_RE = /^ledger-(\d{4})-(\d{2})\.jsonl$/;
 const WRITERS = ['service', 'mcp', 'cli'];
@@ -61,38 +64,94 @@ class AuditLedger {
     return fs.readdirSync(this.dir).filter((f) => SEGMENT_RE.test(f)).sort();
   }
 
-  _readSegment(name) {
+  _segmentNameFor(atIso) {
+    return `ledger-${atIso.slice(0, 7)}.jsonl`;
+  }
+
+  // The auditor's view: every non-blank raw line, including a trailing
+  // fragment left by a write that never returned. verify() uses this so an
+  // unhealed tear is surfaced as a problem, not quietly skipped.
+  _rawSegmentLines(name) {
     const text = fs.readFileSync(path.join(this.dir, name), 'utf8');
     return text.split('\n').filter((line) => line.trim() !== '');
   }
 
-  _allLines() {
+  // The convenience readers' view: the same lines, minus a trailing
+  // fragment that isn't newline-terminated. That fragment was never an
+  // acknowledged append, so tail/slice/head/entriesAfter treat it as absent
+  // rather than throwing on it.
+  _completeSegmentLines(name) {
+    const filePath = path.join(this.dir, name);
+    if (!fs.existsSync(filePath)) return [];
+    const raw = fs.readFileSync(filePath, 'utf8');
+    if (raw === '') return [];
+    const parts = raw.split('\n');
+    if (!raw.endsWith('\n')) parts.pop();
+    return parts.filter((line) => line !== '');
+  }
+
+  _allRawLines() {
     const lines = [];
-    for (const seg of this._segments()) for (const line of this._readSegment(seg)) lines.push(line);
+    for (const seg of this._segments()) for (const line of this._rawSegmentLines(seg)) lines.push(line);
+    return lines;
+  }
+
+  _allCompleteLines() {
+    const lines = [];
+    for (const seg of this._segments()) for (const line of this._completeSegmentLines(seg)) lines.push(line);
     return lines;
   }
 
   _entries() {
-    return this._allLines().map((line) => JSON.parse(line));
+    return this._allCompleteLines().map((line) => JSON.parse(line));
   }
 
-  _lastEntry() {
-    const segs = this._segments();
-    for (let i = segs.length - 1; i >= 0; i -= 1) {
-      const lines = this._readSegment(segs[i]);
-      if (lines.length) return JSON.parse(lines[lines.length - 1]);
+  // Moves a trailing, non-newline-terminated fragment of `segmentName` aside
+  // to `<segment>.torn-<ms>` and truncates it off the live segment. Called
+  // only under the append lock, on the segment we are about to extend, so
+  // there is no writer racing us for it.
+  _healTornTail(segmentName) {
+    const filePath = path.join(this.dir, segmentName);
+    let buf;
+    try {
+      buf = fs.readFileSync(filePath);
+    } catch (err) {
+      if (err.code === 'ENOENT') return;
+      throw err;
     }
-    return null;
+    if (buf.length === 0 || buf[buf.length - 1] === 0x0a) return;
+    const lastNewline = buf.lastIndexOf(0x0a);
+    const torn = buf.subarray(lastNewline + 1);
+    const tornPath = `${filePath}.torn-${Date.now()}`;
+    fs.writeFileSync(tornPath, torn);
+    fs.truncateSync(filePath, lastNewline + 1);
+    log.warn(`healed a torn tail in ${segmentName}`, { tornFile: path.basename(tornPath), tornBytes: torn.length });
+  }
+
+  // The last entry in `segmentName`, having first stripped any torn tail. A
+  // complete line that still fails to parse is corruption, not a crash
+  // artifact, and fails the append closed.
+  _lastValidEntry(segmentName) {
+    let last = null;
+    for (const line of this._completeSegmentLines(segmentName)) {
+      try {
+        last = JSON.parse(line);
+      } catch {
+        throw new Error(`audit_unavailable: unparseable ledger line in ${segmentName}`);
+      }
+    }
+    return last;
   }
 
   async _lock() {
     const deadline = Date.now() + this.lockTimeoutMs;
     for (;;) {
+      const token = crypto.randomBytes(8).toString('hex');
       try {
         const fd = fs.openSync(this.lockFile, 'wx', 0o600);
-        fs.writeSync(fd, String(process.pid));
+        fs.writeSync(fd, `${process.pid}:${token}`);
         fs.closeSync(fd);
-        return;
+        return token;
       } catch (err) {
         if (err.code !== 'EEXIST') throw err;
       }
@@ -102,34 +161,78 @@ class AuditLedger {
     }
   }
 
-  // A lock whose pid is gone, or that is older than staleLockMs, is moved
-  // aside with rename (atomic: only one breaker wins) and then deleted.
+  // A lock whose pid is gone, or that is older than staleLockMs, is a
+  // candidate to break. We rename it aside — a losing racer's rename fails
+  // with ENOENT and does nothing — then re-read the token we just moved: if
+  // it still matches what we inspected, the break is safe and we delete the
+  // aside file; if it changed, someone re-acquired a fresh lock in the gap
+  // between our inspection and our rename, and we restore it (when the path
+  // is free) instead of taking over, then back off and let the caller retry.
   _breakStaleLock() {
     let st;
-    let pid = null;
+    let content;
     try {
       st = fs.statSync(this.lockFile);
-      pid = Number(fs.readFileSync(this.lockFile, 'utf8').trim()) || null;
-    } catch {
-      return;
+      content = fs.readFileSync(this.lockFile, 'utf8');
+    } catch (err) {
+      if (err.code === 'ENOENT') return;
+      log.warn(`failed to inspect ${this.lockFile}`, { error: err.message });
+      throw err;
     }
+    const [pidStr] = content.split(':');
+    const pid = Number(pidStr) || null;
     const tooOld = Date.now() - st.mtimeMs > this.staleLockMs;
     const dead = pid !== null && pid !== process.pid && !pidAlive(pid);
     if (!tooOld && !dead) return;
     const aside = `${this.lockFile}.stale-${crypto.randomBytes(4).toString('hex')}`;
     try {
       fs.renameSync(this.lockFile, aside);
+    } catch (err) {
+      if (err.code === 'ENOENT') return;
+      log.warn(`failed to rename ${this.lockFile} aside`, { error: err.message });
+      throw err;
+    }
+    let asideContent;
+    try {
+      asideContent = fs.readFileSync(aside, 'utf8');
+    } catch {
+      asideContent = content;
+    }
+    if (asideContent !== content) {
+      try {
+        fs.renameSync(aside, this.lockFile);
+      } catch {
+        // The path is occupied again, or the aside file is already gone;
+        // either way we leave it and simply back off.
+      }
+      return;
+    }
+    try {
       fs.unlinkSync(aside);
     } catch {
-      // Someone else broke it first.
+      // Already gone.
     }
   }
 
-  _unlock() {
+  // Unlinks the lock only if it still holds the token we wrote when we
+  // acquired it. If a stale-break has since handed the lock to someone
+  // else, their token is there instead and we must never delete it.
+  _unlock(token) {
+    let current;
+    try {
+      current = fs.readFileSync(this.lockFile, 'utf8');
+    } catch (err) {
+      if (err.code === 'ENOENT') return;
+      log.warn(`failed to read ${this.lockFile} during unlock`, { error: err.message });
+      throw err;
+    }
+    if (current.split(':')[1] !== token) return;
     try {
       fs.unlinkSync(this.lockFile);
-    } catch {
-      // Already gone.
+    } catch (err) {
+      if (err.code === 'ENOENT') return;
+      log.warn(`failed to remove ${this.lockFile} during unlock`, { error: err.message });
+      throw err;
     }
   }
 
@@ -137,9 +240,15 @@ class AuditLedger {
     if (typeof kind !== 'string' || !kind) throw new TypeError('audit entry needs a kind');
     canonicalize(data);
     this._ensureDir();
-    await this._lock();
+    const token = await this._lock();
     try {
-      const last = this._lastEntry();
+      const segs = this._segments();
+      const lastExisting = segs.length ? segs[segs.length - 1] : null;
+      let last = null;
+      if (lastExisting) {
+        this._healTornTail(lastExisting);
+        last = this._lastValidEntry(lastExisting);
+      }
       const at = new Date(this.now()).toISOString();
       const entry = {
         v: 1,
@@ -152,27 +261,40 @@ class AuditLedger {
         prev: last ? last.hash : null
       };
       entry.hash = entryHash(entry);
-      const file = path.join(this.dir, `ledger-${at.slice(0, 7)}.jsonl`);
+      // Write into whichever of "the segment `at` names" and "the segment we
+      // were already writing" sorts later, so a clock that runs backwards
+      // never starts an earlier-named file once a later one exists (that
+      // would put entries out of the order verify() reads segments in).
+      const candidate = this._segmentNameFor(at);
+      const targetName = lastExisting && lastExisting > candidate ? lastExisting : candidate;
+      const file = path.join(this.dir, targetName);
       const existed = fs.existsSync(file);
+      const line = `${JSON.stringify(entry)}\n`;
+      const expectedBytes = Buffer.byteLength(line, 'utf8');
       const fd = fs.openSync(file, 'a', 0o600);
       try {
-        fs.writeSync(fd, `${JSON.stringify(entry)}\n`);
+        const written = fs.writeSync(fd, line);
         fs.fsyncSync(fd);
+        if (written !== expectedBytes) {
+          throw new Error(`audit_unavailable: short write (${written} of ${expectedBytes} bytes) to ${targetName}`);
+        }
       } finally {
         fs.closeSync(fd);
       }
       if (!existed) this.onPathWritten(file);
       return entry;
     } finally {
-      this._unlock();
+      this._unlock(token);
     }
   }
 
   // The oldest retained entry's `prev` is trusted as the anchor, so a pruned
   // ledger still verifies; slices carry the anchor so a mirror can tell a
-  // prune gap from a fork.
+  // prune gap from a fork. Unlike the convenience readers, verify() looks at
+  // every raw line — an unhealed torn tail is exactly the kind of problem
+  // this function exists to surface.
   verify() {
-    const lines = this._allLines();
+    const lines = this._allRawLines();
     let previous = null;
     let count = 0;
     for (const line of lines) {
@@ -263,7 +385,9 @@ class AuditLedger {
   }
 
   // Whole segments whose month ended more than retentionDays ago. The newest
-  // segment is never removed, so the chain always has a head.
+  // (last, by name) segment is never removed, so the chain always has a
+  // head; append()'s I3 fix keeps "last by name" and "current" in sync even
+  // across a backwards clock jump.
   prune(now = this.now()) {
     const cutoff = now - this.retentionDays * DAY_MS;
     const segs = this._segments();
@@ -280,9 +404,10 @@ class AuditLedger {
   }
 }
 
-// Verifies a node-signed kl.audit.slice: signature, shape, and that each
-// entry's hash is right and chains to the one before it. Phones and F4's
-// mirror do the same.
+// Verifies a node-signed kl.audit.slice: signature, shape, that every entry
+// belongs to the claimed node and its hash/chain are right, and that the
+// entries are consistent with the slice's own signed head and anchor.
+// Phones and F4's mirror do the same.
 function verifyAuditSlice(envelope, nodeKeySpkiHex) {
   if (!verifyEd25519(envelope, nodeKeySpkiHex)) return { ok: false, reason: 'bad_signature' };
   let message;
@@ -297,11 +422,18 @@ function verifyAuditSlice(envelope, nodeKeySpkiHex) {
   let previous = null;
   for (const entry of message.entries) {
     if (!entry || typeof entry !== 'object') return { ok: false, reason: 'malformed' };
+    if (entry.node_id !== message.node_id) return { ok: false, reason: 'foreign_entry' };
     const { hash, ...rest } = entry;
     if (entryHash(rest) !== hash) return { ok: false, reason: 'hash_mismatch' };
     if (previous && (entry.seq !== previous.seq + 1 || entry.prev !== previous.hash)) return { ok: false, reason: 'broken_chain' };
     previous = entry;
   }
+  if (previous) {
+    if (previous.seq > message.head.seq) return { ok: false, reason: 'exceeds_head' };
+    if (previous.seq === message.head.seq && previous.hash !== message.head.hash) return { ok: false, reason: 'head_mismatch' };
+  }
+  const first = message.entries[0];
+  if (first && first.seq < message.anchor.seq) return { ok: false, reason: 'before_anchor' };
   return { ok: true, reason: null, message };
 }
 

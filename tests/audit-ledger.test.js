@@ -7,7 +7,7 @@ const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 const { deriveNodeId } = require('../src/mesh/node-identity');
-const { open } = require('../src/approvals/envelope');
+const { open, seal, nodeSigner } = require('../src/approvals/envelope');
 const { AuditLedger, verifyAuditSlice } = require('../src/audit/audit-ledger');
 
 const ROOT = path.join(__dirname, '..');
@@ -197,5 +197,153 @@ describe('AuditLedger retention', () => {
     assert.equal(anchor.seq, 5);
     assert.match(anchor.prev, /^[0-9a-f]{64}$/);
     assert.equal((await l.append({ kind: 'x', data: {} })).seq, 6);
+  });
+});
+
+describe('AuditLedger torn tail and corruption (fix round 1)', () => {
+  it('heals a torn tail on append: it succeeds, the .torn file exists, and verify stays ok', async () => {
+    const dir = tempDir();
+    const l = ledger(dir, { now: () => Date.parse('2026-09-23T00:00:00.000Z') });
+    await fill(l, 3);
+    const file = segmentFile(dir);
+    fs.appendFileSync(file, '{"v":1,"seq":4,"at":"20');
+    const entry = await l.append({ kind: 'x', data: {} });
+    assert.equal(entry.seq, 4);
+    const tornFiles = fs.readdirSync(dir).filter((f) => f.includes('.torn-'));
+    assert.equal(tornFiles.length, 1);
+    assert.deepEqual(l.verify(), { ok: true, entries: 4 });
+  });
+
+  it('rejects append when a complete middle line is unparseable', async () => {
+    const dir = tempDir();
+    const l = ledger(dir);
+    await fill(l, 5);
+    const file = segmentFile(dir);
+    const lines = fs.readFileSync(file, 'utf8').trim().split('\n');
+    lines[2] = '{not json';
+    fs.writeFileSync(file, `${lines.join('\n')}\n`);
+    await assert.rejects(l.append({ kind: 'x', data: {} }), /audit_unavailable: unparseable ledger line/);
+  });
+
+  it('verify walks multiple segments and catches a break at the segment boundary', async () => {
+    const dir = tempDir();
+    let clock = Date.parse('2026-01-15T00:00:00.000Z');
+    const l = ledger(dir, { now: () => clock });
+    await fill(l, 2);
+    clock = Date.parse('2026-02-15T00:00:00.000Z');
+    await fill(l, 2);
+    assert.deepEqual(fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')).sort(), ['ledger-2026-01.jsonl', 'ledger-2026-02.jsonl']);
+    assert.deepEqual(l.verify(), { ok: true, entries: 4 });
+    const febFile = path.join(dir, 'ledger-2026-02.jsonl');
+    const lines = fs.readFileSync(febFile, 'utf8').trim().split('\n');
+    const entry3 = JSON.parse(lines[0]);
+    entry3.data = { tampered: true };
+    lines[0] = JSON.stringify(entry3);
+    fs.writeFileSync(febFile, `${lines.join('\n')}\n`);
+    const result = l.verify();
+    assert.equal(result.ok, false);
+    assert.equal(result.brokenAt, 3);
+  });
+
+  it('keeps a single contiguous chain when the clock jumps backward across a month boundary', async () => {
+    const dir = tempDir();
+    let clock = Date.parse('2026-10-01T00:00:05.000Z');
+    const l = ledger(dir, { now: () => clock });
+    const e1 = await l.append({ kind: 'x', data: {} });
+    clock = Date.parse('2026-09-30T23:59:58.000Z');
+    const e2 = await l.append({ kind: 'x', data: {} });
+    clock = Date.parse('2026-10-01T00:00:10.000Z');
+    const e3 = await l.append({ kind: 'x', data: {} });
+    assert.deepEqual([e1.seq, e2.seq, e3.seq], [1, 2, 3]);
+    assert.deepEqual(fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')), ['ledger-2026-10.jsonl']);
+    assert.deepEqual(l.verify(), { ok: true, entries: 3 });
+  });
+});
+
+describe('AuditLedger lock ownership (fix round 1)', () => {
+  it('never unlocks a lock file that now belongs to a different token', async () => {
+    const dir = tempDir();
+    const l = ledger(dir);
+    l._ensureDir();
+    const tokenA = await l._lock();
+    const lockPath = path.join(dir, 'ledger.lock');
+    const old = new Date(Date.now() - 60000);
+    fs.utimesSync(lockPath, old, old);
+    const l2 = ledger(dir, { staleLockMs: 50 });
+    const tokenB = await l2._lock();
+    l._unlock(tokenA);
+    assert.equal(fs.existsSync(lockPath), true);
+    assert.equal(fs.readFileSync(lockPath, 'utf8').split(':')[1], tokenB);
+    l2._unlock(tokenB);
+  });
+});
+
+describe('verifyAuditSlice tamper branches (fix round 1)', () => {
+  it('flags a hash mismatch, a broken chain, a malformed shape and a foreign kid', async () => {
+    const identity = testIdentity();
+    const l = ledger(tempDir(), { identity });
+    await fill(l, 3);
+    const env = l.slice({});
+    const { message } = open(env);
+    const spki = identity.publicKey.toString('hex');
+    const reseal = (msg) => seal(msg, nodeSigner(identity));
+
+    const hashTampered = JSON.parse(JSON.stringify(message));
+    hashTampered.entries[0] = { ...hashTampered.entries[0], data: { i: 999 } };
+    assert.equal(verifyAuditSlice(reseal(hashTampered), spki).reason, 'hash_mismatch');
+
+    const swapped = JSON.parse(JSON.stringify(message));
+    [swapped.entries[0], swapped.entries[1]] = [swapped.entries[1], swapped.entries[0]];
+    assert.equal(verifyAuditSlice(reseal(swapped), spki).reason, 'broken_chain');
+
+    const malformed = JSON.parse(JSON.stringify(message));
+    delete malformed.anchor;
+    assert.equal(verifyAuditSlice(reseal(malformed), spki).reason, 'malformed');
+
+    const other = testIdentity();
+    const wrongKid = seal(message, nodeSigner(other));
+    assert.equal(verifyAuditSlice(wrongKid, other.publicKey.toString('hex')).reason, 'malformed');
+  });
+});
+
+describe('verifyAuditSlice bounds checks (M6, fix round 1)', () => {
+  it('refuses an entry foreign to the slice node_id', async () => {
+    const identity = testIdentity();
+    const l = ledger(tempDir(), { identity });
+    await fill(l, 2);
+    const { message } = open(l.slice({}));
+    const tampered = JSON.parse(JSON.stringify(message));
+    tampered.entries[0].node_id = `kl-${'a'.repeat(16)}`;
+    assert.equal(verifyAuditSlice(seal(tampered, nodeSigner(identity)), identity.publicKey.toString('hex')).reason, 'foreign_entry');
+  });
+
+  it('refuses entries that exceed the signed head', async () => {
+    const identity = testIdentity();
+    const l = ledger(tempDir(), { identity });
+    await fill(l, 2);
+    const { message } = open(l.slice({}));
+    const tampered = JSON.parse(JSON.stringify(message));
+    tampered.head = { seq: 1, hash: tampered.entries[0].hash };
+    assert.equal(verifyAuditSlice(seal(tampered, nodeSigner(identity)), identity.publicKey.toString('hex')).reason, 'exceeds_head');
+  });
+
+  it('refuses a head hash that does not match the last entry at the same seq', async () => {
+    const identity = testIdentity();
+    const l = ledger(tempDir(), { identity });
+    await fill(l, 2);
+    const { message } = open(l.slice({}));
+    const tampered = JSON.parse(JSON.stringify(message));
+    tampered.head = { seq: tampered.head.seq, hash: 'f'.repeat(64) };
+    assert.equal(verifyAuditSlice(seal(tampered, nodeSigner(identity)), identity.publicKey.toString('hex')).reason, 'head_mismatch');
+  });
+
+  it('refuses an entry older than the signed anchor', async () => {
+    const identity = testIdentity();
+    const l = ledger(tempDir(), { identity });
+    await fill(l, 3);
+    const { message } = open(l.slice({}));
+    const tampered = JSON.parse(JSON.stringify(message));
+    tampered.anchor = { seq: tampered.entries[0].seq + 1, prev: tampered.anchor.prev };
+    assert.equal(verifyAuditSlice(seal(tampered, nodeSigner(identity)), identity.publicKey.toString('hex')).reason, 'before_anchor');
   });
 });
