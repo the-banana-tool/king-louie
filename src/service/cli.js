@@ -27,7 +27,7 @@ const CHANNEL_HELP = `Usage: king-louie-service channel list <channel> [--data-d
        king-louie-service channel approval <channel> (<chat-id> | --clear) [--data-dir DIR]
 `;
 
-const VALUE_FLAGS = new Set(['data-dir', 'profile', 'user']);
+const VALUE_FLAGS = new Set(['data-dir', 'profile', 'user', 'from']);
 // Flags that must never carry a value, whichever form produced it.
 const BOOLEAN_FLAGS = new Set(['dry-run', 'group', 'clear']);
 
@@ -371,6 +371,16 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
         });
         io.stdout.write(`${command === 'token' ? 'Token' : 'Secret'} "${name}" saved (encrypted).\n`);
         return 0;
+      }
+
+      case 'desktop': {
+        const { runDesktopCommand } = require('./commands/desktop');
+        return await runDesktopCommand({ sub, arg, dataDir, io, deps: { runningServicePid, withServiceCore } });
+      }
+
+      case 'import': {
+        const { runImportCommand } = require('./commands/import');
+        return await runImportCommand({ flags, dataDir, io, deps: { runningServicePid } });
       }
 
       case 'install':
