@@ -4,18 +4,23 @@
 // no sandbox: the protections are the load root, the required pin and no
 // Skill exposure (the adapter runs with full privileges once loaded).
 //
-// The pin must cover every file that gets loaded, so:
-// - the hash walks the package without following links, and a link whose
-//   real target is outside the package (or inside node_modules/, which the
-//   hash skips) makes the package unhashable;
-// - loadAdapter re-hashes right before it requires main, and a resolve hook
-//   refuses any require from a pinned package that lands on a file the pin
-//   does not cover (node_modules/, a parent directory, a sibling) or on a
-//   pinned file whose bytes changed since (a lazy require after a swap).
-//   Builtins and the app's own king-louie/* aliases stay allowed.
+// What the pin does and does not cover:
+// - The pin covers the package's own files: every file outside node_modules/
+//   (the spec formula). A link whose real target leaves the package makes it
+//   unhashable, and loadAdapter re-hashes right before it requires main.
+// - A package that ships a node_modules directory, at any depth, is refused:
+//   executor packages bundle their dependencies into their own files.
+// - Bare requires (`require('x')`) are resolved by Node from the package's
+//   own location upward: a node_modules beside or above the package root, then
+//   NODE_PATH and the global folders. They do NOT reach King Louie's own
+//   installed dependencies (those sit under the app, not above the root), and
+//   nothing here pins what they do find. Builtins and the king-louie/* aliases
+//   (installed by the skill loader) resolve as usual.
+// - A loaded adapter runs in-process with full privileges (spec §3.2 Trust):
+//   it can require or read anything and bypass host.fetch. The load checks
+//   decide what gets loaded; nothing confines it afterwards.
 const fs = require('fs');
 const path = require('path');
-const Module = require('module');
 const { createLogger } = require('../../logging');
 // Requiring the skill loader installs the king-louie/* aliases packages use.
 require('../../skills/skill-loader');
@@ -32,8 +37,6 @@ const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 // say) could send the request somewhere other than the URL checked here.
 const FETCH_INIT_KEYS = Object.freeze(['method', 'headers', 'body', 'signal', 'duplex', 'keepalive']);
 const DEFAULT_REQUEST_TIMEOUT_MS = 20000;
-// Where the king-louie/* aliases resolve (the app's own src/).
-const SRC_DIR = path.resolve(__dirname, '..', '..');
 // assertAdminOwned's refusal wording for the executor roots (M16).
 const EXECUTOR_ROOT_CONTROLS = Object.freeze({
   decides: 'which executor packages this service loads',
@@ -73,6 +76,16 @@ function inside(child, parent) {
 // hash covers.
 function covered(real, realDir) {
   return inside(real, realDir) && !path.relative(realDir, real).split(path.sep).includes('node_modules');
+}
+
+// True when the package has a node_modules entry at any depth (links are
+// not followed).
+function hasNodeModules(dir) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === 'node_modules') return true;
+    if (entry.isDirectory() && hasNodeModules(path.join(dir, entry.name))) return true;
+  }
+  return false;
 }
 
 // Every file the pin covers, without following links. A link is hashed by
@@ -226,6 +239,8 @@ function checkPackage({
       }
     }
 
+    if (hasNodeModules(realDir)) return fail('executor packages must bundle their dependencies (node_modules is not allowed)');
+
     result.computed = hashPackage(realDir).sha;
     const pin = entry && typeof entry.packageSha256 === 'string' ? entry.packageSha256 : '';
     if (!pin) return fail(`pin required: set packageSha256 to ${result.computed}`);
@@ -241,76 +256,13 @@ function checkPackage({
   }
 }
 
-// ---- the pin guard on module resolution ----
-
-// keyOf(realDir) → { realDir, files: Map<keyOf(real file), digest>, cacheKeys }
-const pinned = new Map();
-// parent module filename → its pinned package record, or null.
-const parentPackage = new Map();
-
-function packageOf(filename) {
-  if (typeof filename !== 'string') return null;
-  if (parentPackage.has(filename)) return parentPackage.get(filename);
-  let found = null;
-  const real = realOrNull(filename);
-  if (real) {
-    for (const rec of pinned.values()) {
-      if (inside(real, rec.realDir)) {
-        found = rec;
-        break;
-      }
-    }
+// A re-pinned package must load its new code, not modules cached from the
+// previous load.
+function dropCachedModules(realDir) {
+  for (const key of Object.keys(require.cache)) {
+    const real = realOrNull(key);
+    if (real && inside(real, realDir)) delete require.cache[key];
   }
-  parentPackage.set(filename, found);
-  return found;
-}
-
-function assertPinned(rec, resolved, request) {
-  const real = realOrNull(resolved);
-  const digest = real ? rec.files.get(keyOf(real)) : undefined;
-  let same = false;
-  if (digest) {
-    try {
-      same = sha256hex(fs.readFileSync(real)) === digest;
-    } catch {
-      same = false;
-    }
-  }
-  if (!same) {
-    const label = real && inside(real, rec.realDir) ? posixRel(rec.realDir, real) : String(request);
-    const err = new Error(`${label} is not covered by the package pin`);
-    err.code = 'EXECUTOR_UNPINNED';
-    throw err;
-  }
-}
-
-const previousResolveFilename = Module._resolveFilename;
-Module._resolveFilename = function resolveWithinPin(request, parent, isMain, options) {
-  const resolved = previousResolveFilename.call(this, request, parent, isMain, options);
-  if (pinned.size === 0 || !parent) return resolved;
-  const rec = packageOf(parent.filename);
-  if (!rec) return resolved;
-  if (Module.isBuiltin(resolved)) return resolved;
-  if (typeof request === 'string' && request.startsWith('king-louie/') && inside(resolved, SRC_DIR)) return resolved;
-  assertPinned(rec, resolved, request);
-  rec.cacheKeys.add(resolved);
-  return resolved;
-};
-
-// Records the files a load may require and drops the package's previously
-// cached modules, so a re-pinned package loads its new code.
-function registerPin(realDir, files) {
-  const key = keyOf(realDir);
-  const old = pinned.get(key);
-  if (old) for (const cached of old.cacheKeys) delete require.cache[cached];
-  const rec = {
-    realDir,
-    files: new Map(files.filter((f) => f.abs).map((f) => [keyOf(f.abs), f.digest])),
-    cacheKeys: new Set()
-  };
-  pinned.set(key, rec);
-  parentPackage.clear();
-  return rec;
 }
 
 // ---- host.fetch ----
@@ -391,14 +343,11 @@ async function loadAdapter(checked, {
   if (hashed.sha !== checked.computed) {
     throw unavailable(`package changed since it was checked: expected ${checked.computed}, found ${hashed.sha}`);
   }
-  const rec = registerPin(hashed.realDir, hashed.files);
+  dropCachedModules(hashed.realDir);
 
   let mod;
   try {
-    const mainKey = require.resolve(checked.mainPath);
-    delete require.cache[mainKey];
-    rec.cacheKeys.add(mainKey);
-    mod = require(mainKey);
+    mod = require(checked.mainPath);
   } catch (err) {
     throw unavailable(`main failed to load: ${messageOf(err)}`);
   }

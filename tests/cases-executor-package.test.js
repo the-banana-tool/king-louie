@@ -282,6 +282,20 @@ describe('package pin: links cannot escape', () => {
 });
 
 describe('checkPackage: main and roots', () => {
+  it('refuses a package that ships node_modules at any depth', () => {
+    const root = tmp();
+    const top = writePackage(root, 'phone-x');
+    fs.mkdirSync(path.join(top, 'node_modules', 'dep'), { recursive: true });
+    fs.writeFileSync(path.join(top, 'node_modules', 'dep', 'index.js'), 'module.exports = 1;');
+    assert.strictEqual(check(root, top).error, 'executor packages must bundle their dependencies (node_modules is not allowed)');
+    const nested = writePackage(root, 'phone-y');
+    fs.mkdirSync(path.join(nested, 'lib', 'node_modules'), { recursive: true });
+    assert.strictEqual(check(root, nested, 'phone-y').error, 'executor packages must bundle their dependencies (node_modules is not allowed)');
+    const empty = writePackage(root, 'phone-z');
+    fs.mkdirSync(path.join(empty, 'node_modules'));
+    assert.strictEqual(check(root, empty, 'phone-z').error, 'executor packages must bundle their dependencies (node_modules is not allowed)');
+  });
+
   it('refuses main reached through a junction that leaves the package', () => {
     const root = tmp();
     const outside = tmp();
@@ -399,7 +413,7 @@ describe('secrets stay out of logs and errors', () => {
   });
 });
 
-describe('loadAdapter never crashes and loads only pinned files', () => {
+describe('loadAdapter never crashes and loads the checked bytes', () => {
   const REQUIRING = (spec, extra = '') => ADAPTER.replace(
     'module.exports.createAdapter = (config, host) => ({',
     `${extra}const dep = require(${JSON.stringify(spec)});\nmodule.exports.createAdapter = (config, host) => ({\n  dep,`
@@ -425,35 +439,6 @@ describe('loadAdapter never crashes and loads only pinned files', () => {
     const checked = check(root, dir);
     fs.appendFileSync(path.join(dir, 'adapter.js'), '\n// swapped\n');
     await assert.rejects(loadAdapter(checked, { id: 'phone-x', entry: {} }), (err) => err instanceof ExecutorUnavailableError && /package changed since it was checked/.test(err.reason));
-  });
-
-  it('refuses a require that resolves into node_modules, above the package or beside it', async () => {
-    const root = tmp();
-    const inPkg = writePackage(root, 'phone-x', { adapter: REQUIRING('dep') });
-    fs.mkdirSync(path.join(inPkg, 'node_modules', 'dep'), { recursive: true });
-    fs.writeFileSync(path.join(inPkg, 'node_modules', 'dep', 'index.js'), 'module.exports = 1;');
-    await assert.rejects(loadAdapter(check(root, inPkg), { id: 'phone-x', entry: {} }), (err) => err instanceof ExecutorUnavailableError && /is not covered by the package pin/.test(err.reason));
-    fs.mkdirSync(path.join(root, 'node_modules', 'up'), { recursive: true });
-    fs.writeFileSync(path.join(root, 'node_modules', 'up', 'index.js'), 'module.exports = 1;');
-    const upward = writePackage(root, 'phone-y', { adapter: REQUIRING('up') });
-    await assert.rejects(loadAdapter(check(root, upward, 'phone-y'), { id: 'phone-y', entry: {} }), /is not covered by the package pin/);
-    fs.writeFileSync(path.join(root, 'sibling.js'), 'module.exports = 1;');
-    const rel = writePackage(root, 'phone-z', { adapter: REQUIRING('../sibling.js') });
-    await assert.rejects(loadAdapter(check(root, rel, 'phone-z'), { id: 'phone-z', entry: {} }), /is not covered by the package pin/);
-  });
-
-  it('allows builtins, the king-louie aliases and pinned files; a lazily required file must still match its pin', async () => {
-    const root = tmp();
-    const dir = writePackage(root, 'phone-x', {
-      adapter: REQUIRING('./lib.js', "require('node:crypto');\nrequire('path');\nrequire('king-louie/skill-interface');\n")
-        .replace('  dep,', '  dep,\n  lazy: () => require("./later.js"),')
-    });
-    fs.writeFileSync(path.join(dir, 'lib.js'), 'module.exports = "v1";');
-    fs.writeFileSync(path.join(dir, 'later.js'), 'module.exports = "later-v1";');
-    const { adapter } = await loadAdapter(check(root, dir), { id: 'phone-x', entry: {} });
-    assert.strictEqual(adapter.dep, 'v1');
-    fs.writeFileSync(path.join(dir, 'later.js'), 'module.exports = "swapped";');
-    assert.throws(() => adapter.lazy(), /later\.js is not covered by the package pin/);
   });
 
   it('a re-pinned package loads its new code, not cached modules', async () => {
