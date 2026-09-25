@@ -6,8 +6,13 @@
 //
 // What the pin does and does not cover:
 // - The pin covers the package's own files: every file outside node_modules/
-//   (the spec formula). A link whose real target leaves the package makes it
-//   unhashable, and loadAdapter re-hashes right before it requires main.
+//   (the spec formula). A link whose real target leaves the package, or an
+//   entry that is not a regular file, directory or link (a FIFO, a device),
+//   makes it unhashable. In service mode every directory from the root down
+//   and every entry must be admin-owned and not group/world-writable.
+// - loadAdapter re-runs all of these refusals and the hash right before it
+//   loads, and compiles main from the bytes it just hashed. Files main
+//   requires are read from disk by Node after that re-check.
 // - A package that ships a node_modules directory, at any depth, is refused:
 //   executor packages bundle their dependencies into their own files.
 // - Bare requires (`require('x')`) are resolved by Node from the package's
@@ -24,6 +29,7 @@
 //   decide what gets loaded; nothing confines it afterwards.
 const fs = require('fs');
 const path = require('path');
+const Module = require('module');
 const { createLogger } = require('../../logging');
 // Requiring the skill loader installs the king-louie/* aliases packages use.
 require('../../skills/skill-loader');
@@ -61,6 +67,10 @@ const messageOf = (err) => (err && typeof err.message === 'string' ? err.message
 // Windows paths compare case-insensitively.
 const keyOf = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
 const posixRel = (from, to) => path.relative(from, to).split(path.sep).join('/');
+// Where Node would find `node_modules` under another case too.
+const CASE_INSENSITIVE_NAMES = process.platform === 'win32' || process.platform === 'darwin';
+const isNodeModulesName = (name) => (CASE_INSENSITIVE_NAMES ? name.toLowerCase() : name) === 'node_modules';
+const NODE_MODULES_REFUSED = 'executor packages must bundle their dependencies (node_modules is not allowed)';
 
 function realOrNull(p) {
   try {
@@ -78,17 +88,7 @@ function inside(child, parent) {
 // Inside the package and outside every node_modules/ in it: the files the
 // hash covers.
 function covered(real, realDir) {
-  return inside(real, realDir) && !path.relative(realDir, real).split(path.sep).includes('node_modules');
-}
-
-// True when the package has a node_modules entry at any depth (links are
-// not followed).
-function hasNodeModules(dir) {
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (entry.name === 'node_modules') return true;
-    if (entry.isDirectory() && hasNodeModules(path.join(dir, entry.name))) return true;
-  }
-  return false;
+  return inside(real, realDir) && !path.relative(realDir, real).split(path.sep).some(isNodeModulesName);
 }
 
 // The first node_modules a bare require from the package would search on the
@@ -111,15 +111,22 @@ function isLink(p) {
 
 // Every file the pin covers, without following links. A link is hashed by
 // its real target relative to the package; the target's own bytes are
-// hashed at its own path.
-function walkPackage(realDir) {
+// hashed at its own path. Anything that is not a regular file, directory or
+// link is refused (a FIFO named `helper` would shadow `helper.js`).
+// `strict` refuses a node_modules entry instead of skipping it;
+// `assertEntry(path, lstat)` is the service-mode ownership check.
+function walkPackage(realDir, { strict = false, assertEntry = null } = {}) {
   const files = [];
   const visit = (dir) => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name === 'node_modules') continue;
+      if (isNodeModulesName(entry.name)) {
+        if (strict) throw new Error(NODE_MODULES_REFUSED);
+        continue;
+      }
       const full = path.join(dir, entry.name);
       const rel = posixRel(realDir, full);
       const st = fs.lstatSync(full);
+      if (assertEntry) assertEntry(full, st);
       if (st.isSymbolicLink()) {
         const target = realOrNull(full);
         if (!target) throw new Error(`${rel} is a link that does not resolve`);
@@ -128,7 +135,10 @@ function walkPackage(realDir) {
       } else if (st.isDirectory()) {
         visit(full);
       } else if (st.isFile()) {
-        files.push({ rel, abs: full, digest: sha256hex(fs.readFileSync(full)) });
+        const bytes = fs.readFileSync(full);
+        files.push({ rel, abs: full, digest: sha256hex(bytes), bytes });
+      } else {
+        throw new Error(`${rel} is not a regular file, directory or link`);
       }
     }
   };
@@ -136,11 +146,32 @@ function walkPackage(realDir) {
   return files.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
 }
 
+const shaOf = (files) => sha256hex(files.map((f) => `${f.rel}\0${f.digest}\n`).join(''));
+
 function hashPackage(dir) {
   const realDir = fs.realpathSync.native(dir);
   const files = walkPackage(realDir);
-  const sha = sha256hex(files.map((f) => `${f.rel}\0${f.digest}\n`).join(''));
-  return { realDir, sha, files };
+  return { realDir, sha: shaOf(files), files };
+}
+
+// The directories below `root` down to and including `realDir`.
+function dirsBelowRoot(root, realDir) {
+  const out = [];
+  for (let d = realDir; inside(d, root); d = path.dirname(d)) out.unshift(d);
+  return out;
+}
+
+// Everything checkPackage refuses about the package's files, run again right
+// before loading: ownership (service mode), no node_modules in the package or
+// on the way up to the root, and the hash.
+function inspectPackage(realDir, root, assertEntry = null) {
+  if (assertEntry) for (const d of dirsBelowRoot(root, realDir)) assertEntry(d, fs.lstatSync(d));
+  const files = walkPackage(realDir, { strict: true, assertEntry });
+  const above = nodeModulesUpToRoot(realDir, root);
+  if (above) {
+    throw new Error(`executor roots must not contain node_modules: bare requires from the package would load it unpinned (found ${posixRel(root, above)})`);
+  }
+  return { realDir, sha: shaOf(files), files };
 }
 
 // SHA-256 over the sorted `relative-path\0sha256(file)\n` lines of every
@@ -217,10 +248,40 @@ function makeRootAssert({ adminUid = 0, geteuid = defaultGeteuid } = {}) {
   return (root) => serviceConfig.assertAdminOwned(root, geteuid, adminUid, EXECUTOR_ROOT_CONTROLS);
 }
 
+// The service-mode ownership check for everything below the root: each
+// directory from the root down to the package and each entry in it must be
+// owned by adminUid and not group- or world-writable (the same rule as
+// assertAdminOwned; a link's own mode bits mean nothing and are not read).
+// null on win32, where assertAdminOwned is a no-op and the installer's ACL is
+// the protection.
+function makeEntryCheck({ adminUid = 0, geteuid = defaultGeteuid, platform = process.platform } = {}) {
+  if (platform === 'win32') return null;
+  const { decides, selfGrant } = EXECUTOR_ROOT_CONTROLS;
+  return (p, st) => {
+    if (!st.isSymbolicLink() && (st.mode & 0o022)) {
+      throw new Error(
+        `Refusing to load ${p}: it is group- or world-writable (mode ${(st.mode & 0o7777).toString(8)}). `
+        + `It decides ${decides} and must be writable only by root/an administrator.`
+      );
+    }
+    if (st.uid !== adminUid) {
+      const euid = geteuid();
+      const why = euid >= 0 && st.uid === euid
+        ? `it is owned by the account running the service (uid ${euid}), which could then ${selfGrant}`
+        : `it is owned by uid ${st.uid}, not by root/an administrator (uid ${adminUid})`;
+      throw new Error(`Refusing to load ${p}: ${why}. It decides ${decides} and must be owned by root/an administrator.`);
+    }
+  };
+}
+
 // Checks 1–5. Never throws. The resolved config is a copy, kept off the
 // enumerable result so logging or serializing the result cannot leak it.
+// Service mode checks the root with `assertRoot` (default makeRootAssert) and
+// everything below it with `assertEntry(path, lstat)` (default
+// makeEntryCheck), both bound to `adminUid`.
 function checkPackage({
-  id, entry = {}, dir, roots = [], isService = false, assertRoot = null, vault = null, adminUid = 0, geteuid = defaultGeteuid
+  id, entry = {}, dir, roots = [], isService = false, assertRoot = null, assertEntry = undefined, vault = null,
+  adminUid = 0, geteuid = defaultGeteuid
 }) {
   const base = { ok: false, error: null, dir, manifest: null, pkg: null, computed: null };
   if (typeof id !== 'string' || !EXECUTOR_ID_PATTERN.test(id)) return { ...base, error: `executor id ${JSON.stringify(String(id))} is not valid` };
@@ -243,6 +304,8 @@ function checkPackage({
     if (!inside(realMain, realDir) && keyOf(realMain) !== keyOf(realDir)) return fail('main resolves outside the package');
     if (!covered(realMain, realDir) && keyOf(realMain) !== keyOf(realDir)) return fail('main is inside node_modules, which the pin does not cover');
     if (!fs.statSync(realMain).isFile()) return fail('main must name a file in the package');
+    // loadAdapter compiles main from the hashed bytes as CommonJS.
+    if (!['.js', '.cjs'].includes(path.extname(realMain).toLowerCase())) return fail('main must be a CommonJS script (.js or .cjs)');
 
     const root = (Array.isArray(roots) ? roots : [])
       .filter((r) => typeof r === 'string' && r !== '')
@@ -260,21 +323,18 @@ function checkPackage({
       }
     }
 
-    if (hasNodeModules(realDir)) return fail('executor packages must bundle their dependencies (node_modules is not allowed)');
-    const above = nodeModulesUpToRoot(realDir, root);
-    if (above) {
-      return fail(`executor roots must not contain node_modules: bare requires from the package would load it unpinned (found ${posixRel(root, above)})`);
-    }
-
-    result.computed = hashPackage(realDir).sha;
+    const entryCheck = isService ? (assertEntry === undefined ? makeEntryCheck({ adminUid, geteuid }) : assertEntry) : null;
+    result.computed = inspectPackage(realDir, root, entryCheck).sha;
     const pin = entry && typeof entry.packageSha256 === 'string' ? entry.packageSha256 : '';
     if (!pin) return fail(`pin required: set packageSha256 to ${result.computed}`);
     if (pin !== result.computed) return fail(`package changed: expected ${pin}, found ${result.computed}`);
 
     const cfg = resolveConfig(m.manifest.configSchema ?? {}, entry.config ?? {}, vault);
     if (!cfg.ok) return fail(cfg.error);
-    const ok = { ...result, ok: true, error: null, realDir, mainPath: realMain };
+    const ok = { ...result, ok: true, error: null, realDir, root, mainPath: realMain };
     Object.defineProperty(ok, 'config', { value: Object.freeze(cfg.config), enumerable: false });
+    // loadAdapter re-runs the same ownership check right before it loads.
+    Object.defineProperty(ok, 'entryCheck', { value: entryCheck, enumerable: false });
     return ok;
   } catch (err) {
     return fail(messageOf(err));
@@ -288,6 +348,26 @@ function dropCachedModules(realDir) {
     const real = realOrNull(key);
     if (real && inside(real, realDir)) delete require.cache[key];
   }
+}
+
+// Compiles main from the bytes that were just hashed, so main itself cannot
+// change between the hash and the load. (Files main requires are read from
+// disk by Node; the re-check just before narrows that window.)
+function compileMain(filename, bytes) {
+  let source = bytes.toString('utf8');
+  if (source.charCodeAt(0) === 0xfeff) source = source.slice(1);
+  const mod = new Module(filename, module);
+  mod.filename = filename;
+  mod.paths = Module._nodeModulePaths(path.dirname(filename));
+  require.cache[filename] = mod;
+  try {
+    mod._compile(source, filename);
+  } catch (err) {
+    delete require.cache[filename];
+    throw err;
+  }
+  mod.loaded = true;
+  return mod.exports;
 }
 
 // ---- host.fetch ----
@@ -358,21 +438,25 @@ async function loadAdapter(checked, {
   const unavailable = (reason) => new ExecutorUnavailableError(execId, redact(reason, secrets));
   if (!checked || !checked.ok) throw unavailable(checked?.error || 'the package has not passed its load checks');
 
-  // The bytes about to load must be the bytes that were checked.
-  let hashed;
+  // Drop modules cached from a previous load first, then re-run every file
+  // refusal and the hash: the bytes about to load must be the bytes that
+  // were checked.
+  dropCachedModules(checked.realDir);
+  let inspected;
   try {
-    hashed = hashPackage(checked.realDir);
+    inspected = inspectPackage(checked.realDir, checked.root, checked.entryCheck || null);
   } catch (err) {
     throw unavailable(messageOf(err));
   }
-  if (hashed.sha !== checked.computed) {
-    throw unavailable(`package changed since it was checked: expected ${checked.computed}, found ${hashed.sha}`);
+  if (inspected.sha !== checked.computed) {
+    throw unavailable(`package changed since it was checked: expected ${checked.computed}, found ${inspected.sha}`);
   }
-  dropCachedModules(hashed.realDir);
+  const mainFile = inspected.files.find((f) => f.abs && keyOf(f.abs) === keyOf(checked.mainPath));
+  if (!mainFile) throw unavailable('main is not among the pinned files');
 
   let mod;
   try {
-    mod = require(checked.mainPath);
+    mod = compileMain(checked.mainPath, mainFile.bytes);
   } catch (err) {
     throw unavailable(`main failed to load: ${messageOf(err)}`);
   }
@@ -416,6 +500,7 @@ module.exports = {
   readManifest,
   resolveConfig,
   makeRootAssert,
+  makeEntryCheck,
   checkPackage,
   makeHostFetch,
   loadAdapter

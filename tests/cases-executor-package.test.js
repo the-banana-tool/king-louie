@@ -540,3 +540,147 @@ describe('makeHostFetch reaches only the declared origins', () => {
     await assert.rejects(fetch('https://errands.example.com/slow'), /timeout|aborted/i);
   });
 });
+
+// ---- review fix round 1 probes ----
+const childProcess = require('child_process');
+const CASE_INSENSITIVE_FS = process.platform === 'win32' || process.platform === 'darwin';
+
+describe('the pre-require re-check enforces every refusal (fix round 1)', () => {
+  it('refuses a node_modules planted in the package after the check', async () => {
+    const root = tmp();
+    const dir = writePackage(root, 'phone-x');
+    const checked = check(root, dir);
+    assert.strictEqual(checked.ok, true, checked.error);
+    fs.mkdirSync(path.join(dir, 'node_modules', 'dep'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'node_modules', 'dep', 'index.js'), 'module.exports = 1;');
+    await assert.rejects(loadAdapter(checked, { id: 'phone-x', entry: {} }), (err) => (
+      err instanceof ExecutorUnavailableError && err.reason === 'executor packages must bundle their dependencies (node_modules is not allowed)'
+    ));
+  });
+
+  it('refuses a node_modules planted in the root after the check', async () => {
+    const root = tmp();
+    const dir = writePackage(root, 'phone-x');
+    const checked = check(root, dir);
+    fs.mkdirSync(path.join(root, 'node_modules', 'dep'), { recursive: true });
+    await assert.rejects(loadAdapter(checked, { id: 'phone-x', entry: {} }), (err) => (
+      err instanceof ExecutorUnavailableError && /executor roots must not contain node_modules/.test(err.reason)
+    ));
+  });
+
+  it('matches node_modules case-insensitively where the file system does', { skip: CASE_INSENSITIVE_FS ? false : 'case-sensitive platform' }, () => {
+    const root = tmp();
+    const dir = writePackage(root, 'phone-x');
+    fs.mkdirSync(path.join(dir, 'lib', 'Node_Modules'), { recursive: true });
+    assert.strictEqual(check(root, dir).error, 'executor packages must bundle their dependencies (node_modules is not allowed)');
+    const plain = writePackage(root, 'phone-y');
+    const pin = computePackageSha256(plain);
+    fs.mkdirSync(path.join(plain, 'NODE_MODULES'));
+    fs.writeFileSync(path.join(plain, 'NODE_MODULES', 'x.js'), 'x');
+    assert.strictEqual(computePackageSha256(plain), pin, 'the pin skips it like node_modules');
+  });
+});
+
+describe('the pin refuses entries it cannot hash (fix round 1)', () => {
+  it('refuses a FIFO that would shadow a module', { skip: process.platform === 'win32' ? 'no FIFOs on win32' : false }, (t) => {
+    const root = tmp();
+    const dir = writePackage(root, 'phone-x');
+    const made = childProcess.spawnSync('mkfifo', [path.join(dir, 'helper')]);
+    if (made.error || made.status !== 0) {
+      t.skip('mkfifo is not available');
+      return;
+    }
+    assert.throws(() => computePackageSha256(dir), /helper is not a regular file, directory or link/);
+    assert.strictEqual(check(root, dir, 'phone-x', { entry: { packageSha256: PIN_A, config: CONFIG_OK } }).error, 'helper is not a regular file, directory or link');
+  });
+
+  it('refuses main that is not a CommonJS script', () => {
+    const root = tmp();
+    for (const [id, main] of [['phone-x', 'adapter.mjs'], ['phone-y', 'adapter.json'], ['phone-z', 'adapter.node']]) {
+      const dir = writePackage(root, id, { pkg: { main } });
+      fs.writeFileSync(path.join(dir, main), '{}');
+      assert.strictEqual(check(root, dir, id).error, 'main must be a CommonJS script (.js or .cjs)');
+    }
+  });
+});
+
+describe('service mode checks ownership of the whole package (fix round 1)', () => {
+  it('runs the entry check on every directory from the root down and every entry, at check and at load', async () => {
+    const root = tmp();
+    const dir = writePackage(path.join(root, 'group'), 'phone-x');
+    fs.mkdirSync(path.join(dir, 'lib'));
+    fs.writeFileSync(path.join(dir, 'lib', 'a.js'), 'x');
+    const seen = [];
+    let refuse = null;
+    const assertEntry = (p, st) => {
+      assert.strictEqual(typeof st.isDirectory, 'function');
+      seen.push(posixRelTo(root, p));
+      if (refuse && p.endsWith(refuse)) throw new Error(`Refusing to load ${refuse}`);
+    };
+    const opts = { isService: true, assertRoot: () => {}, assertEntry };
+    const checked = check(root, dir, 'phone-x', opts);
+    assert.strictEqual(checked.ok, true, checked.error);
+    assert.deepStrictEqual([...seen].sort(), ['group', 'group/phone-x', 'group/phone-x/adapter.js', 'group/phone-x/lib', 'group/phone-x/lib/a.js', 'group/phone-x/package.json'].sort());
+    refuse = 'a.js';
+    assert.strictEqual(check(root, dir, 'phone-x', opts).error, 'Refusing to load a.js');
+    await assert.rejects(loadAdapter(checked, { id: 'phone-x', entry: {} }), (err) => err instanceof ExecutorUnavailableError && err.reason === 'Refusing to load a.js');
+  });
+
+  it('does not run the entry check in desktop mode', () => {
+    const root = tmp();
+    const dir = writePackage(root, 'phone-x');
+    const r = check(root, dir, 'phone-x', { assertEntry: () => { throw new Error('should not run'); } });
+    assert.strictEqual(r.ok, true, r.error);
+  });
+
+  const posix = process.platform === 'win32' ? 'assertAdminOwned is a no-op on win32' : false;
+  it('refuses a service-writable subdirectory on POSIX', { skip: posix }, () => {
+    const root = tmp();
+    const dir = writePackage(root, 'phone-x');
+    fs.mkdirSync(path.join(dir, 'lib'));
+    const uid = process.geteuid();
+    const opts = { isService: true, assertRoot: () => {}, adminUid: uid, geteuid: () => uid + 1 };
+    assert.strictEqual(check(root, dir, 'phone-x', opts).ok, true);
+    fs.chmodSync(path.join(dir, 'lib'), 0o777);
+    assert.match(check(root, dir, 'phone-x', opts).error, /lib: it is group- or world-writable .*which executor packages this service loads/);
+  });
+
+  it('refuses package entries not owned by the admin uid on POSIX', { skip: posix }, () => {
+    const root = tmp();
+    const dir = writePackage(root, 'phone-x');
+    const uid = process.geteuid();
+    const r = check(root, dir, 'phone-x', { isService: true, assertRoot: () => {}, adminUid: uid + 1, geteuid: () => uid });
+    assert.match(r.error, /owned by the account running the service .*swap an executor package/);
+  });
+});
+
+describe('skill loader refuses to load an executor package (fix round 1)', () => {
+  it('loadSkill returns null without requiring main', async () => {
+    const root = tmp();
+    const flag = `__klExecutorLoaded_${Date.now()}`;
+    const dir = writePackage(root, 'phone-x', { adapter: `globalThis.${flag} = true;\n${ADAPTER}` });
+    const loader = new SkillLoader({ skillsDirectory: root, userDataPath: root });
+    assert.strictEqual(await loader.loadSkill(dir), null);
+    assert.strictEqual(globalThis[flag], undefined);
+  });
+});
+
+function posixRelTo(from, to) {
+  return path.relative(fs.realpathSync.native(from), to).split(path.sep).join('/');
+}
+
+describe('makeEntryCheck (fix round 1, runs on every platform)', () => {
+  const { makeEntryCheck } = require('../src/cases/executors/package-loader');
+  const stat = (over) => ({ isSymbolicLink: () => false, mode: 0o40755, uid: 0, ...over });
+  it('refuses group/world-writable entries and non-admin owners with the executor wording', () => {
+    const checkEntry = makeEntryCheck({ adminUid: 0, geteuid: () => 900, platform: 'linux' });
+    assert.doesNotThrow(() => checkEntry('/r/pkg/a.js', stat({ mode: 0o100644 })));
+    assert.throws(() => checkEntry('/r/pkg/lib', stat({ mode: 0o40777 })), /Refusing to load \/r\/pkg\/lib: it is group- or world-writable \(mode 777\)\. It decides which executor packages this service loads/);
+    assert.throws(() => checkEntry('/r/pkg/lib', stat({ mode: 0o40775 })), /group- or world-writable/);
+    assert.throws(() => checkEntry('/r/pkg/a.js', stat({ uid: 900 })), /owned by the account running the service \(uid 900\), which could then swap an executor package/);
+    assert.throws(() => checkEntry('/r/pkg/a.js', stat({ uid: 901 })), /owned by uid 901, not by root\/an administrator \(uid 0\)/);
+    assert.doesNotThrow(() => checkEntry('/r/pkg/link', stat({ isSymbolicLink: () => true, mode: 0o120777 })), 'a link is judged by owner, not mode');
+    assert.throws(() => checkEntry('/r/pkg/link', stat({ isSymbolicLink: () => true, mode: 0o120777, uid: 900 })), /owned by the account/);
+    assert.strictEqual(makeEntryCheck({ platform: 'win32' }), null);
+  });
+});

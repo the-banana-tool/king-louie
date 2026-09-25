@@ -254,6 +254,12 @@ class SkillLoader {
    * @returns {Promise<Object|null>} - Skill instance or null if failed
    */
   async loadSkill(skillPath) {
+    // Never require an executor package's main as a skill (install and
+    // update paths call this directly, not through discoverSkills).
+    if (isExecutorPackage(skillPath)) {
+      log.warn(`Refusing to load ${skillPath} as a skill: it is an executor package`);
+      return null;
+    }
     try {
       // Check for package.json
       const packageJsonPath = path.join(skillPath, 'package.json');
