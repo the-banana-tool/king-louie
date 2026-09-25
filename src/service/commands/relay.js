@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { createLogger } = require('../../logging');
 const { loadServiceConfig } = require('../config');
+const { restoreDataDirOwnership } = require('../ownership');
 const { runningServicePid, renderQr } = require('./io');
 
 const log = createLogger('relay');
@@ -61,11 +62,22 @@ async function runRelayServer({ dataDir, io, deps }) {
     log.info(`relay ${identity.nodeId} fingerprint ${fingerprint}`);
     io.stdout.write(`${JSON.stringify({ event: 'ready', relay_id: identity.nodeId, fingerprint, phone_spki: relay.phoneSpki, ...relay.address() })}\n`);
     await new Promise((resolve) => {
-      const done = () => resolve();
+      const onMessage = (m) => { if (m && m.type === 'shutdown') done(); };
+      // Every way to stop removes all of them, so nothing outlives the relay.
+      function done() {
+        process.removeListener('SIGTERM', done);
+        process.removeListener('SIGINT', done);
+        process.removeListener('message', onMessage);
+        if (deps.signal) deps.signal.removeEventListener('abort', done);
+        resolve();
+      }
       process.once('SIGTERM', done);
       process.once('SIGINT', done);
-      process.on('message', (m) => { if (m && m.type === 'shutdown') done(); });
-      if (deps.signal) deps.signal.addEventListener('abort', done, { once: true });
+      process.on('message', onMessage);
+      if (deps.signal) {
+        if (deps.signal.aborted) done();
+        else deps.signal.addEventListener('abort', done, { once: true });
+      }
     });
     await relay.stop();
     return 0;
@@ -87,12 +99,23 @@ function runCode({ dataDir, name, io, deps }) {
   const words = Array.from(crypto.randomBytes(6), (b) => WORDLIST[b]);
   const code = words.join(' ');
   const expiresAt = new Date((deps.now || Date.now)() + CODE_TTL_MS).toISOString();
-  const codesDir = path.join(dataDir, 'relay', 'codes');
-  fs.mkdirSync(codesDir, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(path.join(codesDir, `${crypto.randomBytes(6).toString('hex')}.json`), JSON.stringify({ code, node_name: name, expires_at: expiresAt }), { mode: 0o600 });
+  const relayDir = path.join(dataDir, 'relay');
+  const codesDir = path.join(relayDir, 'codes');
+  // Run as root on a service-owned data dir, what this writes goes back to
+  // the data dir's owner, as pair and the device commands do.
+  const written = [relayDir, codesDir].filter((d) => !fs.existsSync(d));
+  try {
+    fs.mkdirSync(codesDir, { recursive: true, mode: 0o700 });
+    const file = path.join(codesDir, `${crypto.randomBytes(6).toString('hex')}.json`);
+    fs.writeFileSync(file, JSON.stringify({ code, node_name: name, expires_at: expiresAt }), { mode: 0o600 });
+    written.push(file);
+  } finally {
+    restoreDataDirOwnership(dataDir, written, io.ownership);
+  }
   io.stdout.write(`Pairing code for ${name}: ${code}\n`);
-  io.stdout.write(`It works once, until ${expiresAt}. On ${name}, as the administrator:\n`);
-  io.stdout.write(`  echo '${code}' | king-louie-service pair wss://<relay-host>:<mesh-port>\n`);
+  io.stdout.write(`It works once, until ${expiresAt}. On ${name}, as the administrator, run\n`);
+  io.stdout.write('  king-louie-service pair wss://<relay-host>:<mesh-port>\n');
+  io.stdout.write('and type the code when it asks (typed, it stays out of your shell history).\n');
   if (!runningServicePid(dataDir)) io.stderr.write('The relay is not running here; start `relay run` before the code expires.\n');
   return 0;
 }

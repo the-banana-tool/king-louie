@@ -6,7 +6,7 @@ const os = require('os');
 const path = require('path');
 const { PassThrough } = require('stream');
 const { main } = require('../src/service/cli');
-const { runEnrollDevice, runDevice } = require('../src/service/commands/devices');
+const { runEnrollDevice, runDevice, describeAge } = require('../src/service/commands/devices');
 const { CourierPump } = require('../src/approvals/courier');
 const { ApproverStore } = require('../src/approvals/approver-store');
 const { checkApproverDir } = require('../src/approvals/approver-store');
@@ -143,6 +143,91 @@ describe('enroll-device', () => {
   });
 });
 
+describe('enroll-device ends without enrolling', () => {
+  // Starts enroll-device and returns once the code is on screen.
+  async function start(extraDeps = {}, phoneOptions = {}) {
+    const n = node();
+    const { pump, calls } = servicePump(n);
+    const io = streamIo();
+    const phone = createFakePhone({ name: 'Pixel 9', ...phoneOptions });
+    const running = runEnrollDevice({ ...n, io, deps: { ...deps, ...extraDeps } });
+    const text = await waitFor(() => /Or paste this into the app: (kl1:\S+)/.exec(io.text.out), 'the pairing code');
+    const qr = decodeQr(text[1]);
+    const claim = (envelope) => pump.deliver(pump.routeFor('enroll.claim', { code_id: qr.code_id }), 'enroll.claim', { code_id: qr.code_id, envelope });
+    const claimRight = () => claim(phone.enroll({ codeId: qr.code_id, code: qr.code }));
+    const prompted = () => waitFor(() => /does the phone show the same\? \[y\/N\]/.test(io.text.out), 'the prompt');
+    const done = async () => {
+      await waitFor(() => calls.some(([m]) => m === 'enroll.done'), 'enroll.done');
+      return open(calls.find(([m]) => m === 'enroll.done')[1].envelope).message;
+    };
+    const approverFile = path.join(n.configDir, 'approvers', `${phone.deviceId}.json`);
+    return { n, io, phone, qr, running, claim, claimRight, prompted, done, approverFile };
+  }
+
+  it('stdin closing at the question refuses', async () => {
+    const t = await start();
+    t.claimRight();
+    await t.prompted();
+    t.io.stdin.end();
+    assert.equal(await t.running, 1);
+    assert.equal((await t.done()).refused, true);
+    assert.equal(fs.existsSync(t.approverFile), false);
+  });
+
+  it('no claim before the timeout refuses', async () => {
+    const t = await start({ timeoutMs: 100 });
+    assert.equal(await t.running, 1);
+    assert.match(t.io.text.err, /No phone answered/);
+    assert.equal((await t.done()).refused, true);
+  });
+
+  it('a claim that fails verification refuses without asking', async () => {
+    const t = await start();
+    // Names this code id but carries a MAC made with some other code.
+    t.claim(t.phone.enroll({ codeId: t.qr.code_id, code: Buffer.alloc(32, 7).toString('base64url') }));
+    assert.equal(await t.running, 1);
+    assert.match(t.io.text.err, /The phone's enrollment was refused \(/);
+    assert.doesNotMatch(t.io.text.out, /\[y\/N\]/);
+    assert.equal((await t.done()).refused, true);
+    assert.equal(fs.existsSync(t.approverFile), false);
+  });
+
+  it('the code expiring while the question is open refuses, and a late y changes nothing', async () => {
+    const t = await start({ codeTtlMs: 2000 });
+    t.claimRight();
+    await t.prompted();
+    assert.equal(await t.running, 1);
+    assert.match(t.io.text.err, /expired before you answered/, t.io.text.err);
+    assert.equal((await t.done()).refused, true);
+    t.io.stdin.write('y\n');
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(fs.existsSync(t.approverFile), false);
+  });
+
+  it('control and bidi characters in the phone-supplied name are not printed', async () => {
+    const t = await start({}, { name: 'Pix\u001b[2Jel‮ 9\u0085' });
+    t.claimRight();
+    await t.prompted();
+    assert.match(t.io.text.out, /Device "Pix\[2Jel 9" \(android\)/);
+    assert.doesNotMatch(t.io.text.out, /[\u001b‮\u0085]/);
+    t.io.stdin.write('n\n');
+    assert.equal(await t.running, 1);
+  });
+
+  it('a failure writing the approver after y tells the relay refused and exits non-zero', async () => {
+    const t = await start();
+    t.claimRight();
+    await t.prompted();
+    // A directory where the approver file must go: the write cannot land.
+    fs.mkdirSync(t.approverFile);
+    t.io.stdin.write('y\n');
+    assert.equal(await t.running, 1);
+    assert.match(t.io.text.err, new RegExp(`Enrolling ${t.phone.deviceId} failed: `));
+    assert.equal((await t.done()).refused, true);
+    assert.equal(fs.statSync(t.approverFile).isDirectory(), true);
+  });
+});
+
 describe('device list | revoke | apply', () => {
   it('apply --yes enrolls a staged device, list shows it, revoke ends it', async () => {
     const n = node();
@@ -215,7 +300,9 @@ describe('device list | revoke | apply', () => {
     // A revoke of a device with no approver record yet: applyStaged defers
     // it (`deferred: unknown device`) instead of rejecting or crashing.
     const ghost = createFakePhone({ name: 'Ghost phone' });
-    assert.equal(store.stage(a.revoke(ghost.deviceId)).state, 'revoked-pending-apply');
+    const ghostRevoke = a.revoke(ghost.deviceId);
+    const ghostNonce = open(ghostRevoke).message.nonce;
+    assert.equal(store.stage(ghostRevoke).state, 'revoked-pending-apply');
 
     // A misnamed file in staged/ that Task 7's listStaged() reports as
     // type: 'unsafe' rather than reading it.
@@ -228,11 +315,22 @@ describe('device list | revoke | apply', () => {
     assert.match(io.text.out, new RegExp(`${b.deviceId}: enrolled`));
     assert.match(io.text.out, new RegExp(`${ghost.deviceId}: deferred: unknown device`));
     assert.match(io.text.out, /unsafe .*not-a-nonce\.json.* \(misnamed\)/);
+    // Its result line names the file, never "null".
+    assert.match(io.text.out, /not-a-nonce\.json: rejected: misnamed/);
+    assert.doesNotMatch(io.text.out, /^null:/m);
 
-    // The deferred revoke must still be staged (not moved to done/), so a
-    // later apply after the device is enrolled would still see it.
-    const stillStaged = fs.readdirSync(path.join(n.dataDir, 'approvals', 'staged')).filter((f) => f.endsWith('.json'));
-    assert.ok(stillStaged.length >= 1);
+    // The deferred revoke's own nonce file must still be staged (not moved
+    // to done/), so a later apply after the device is enrolled still sees it.
+    const stillStaged = fs.readdirSync(path.join(n.dataDir, 'approvals', 'staged'));
+    assert.ok(stillStaged.includes(`${ghostNonce}.json`), stillStaged.join(', '));
+  });
+
+  it('an unparseable signed time reads "age unknown" and a future one "just now"', () => {
+    const now = Date.parse('2026-09-23T18:10:00.000Z');
+    assert.equal(describeAge('2026-09-23T18:00:00.000Z', now), '10 min ago');
+    assert.equal(describeAge('2026-09-23T18:30:00.000Z', now), 'just now');
+    assert.equal(describeAge('not a time', now), 'age unknown');
+    assert.equal(describeAge(undefined, now), 'age unknown');
   });
 });
 
@@ -277,23 +375,37 @@ describe('device list and doctor run the approver-dir check as an administrator 
     assert.match(io.text.out, new RegExp(a.deviceId));
   });
 
-  it('doctor does not treat a truly-writable dir as untrusted on win32 either', () => {
+  it('doctor does not treat a truly-writable dir as untrusted on win32, and says it cannot verify it', async () => {
     const n = node();
-    const results = runDoctor({ dataDir: n.dataDir, platform: 'win32' });
+    const results = await runDoctor({ dataDir: n.dataDir, platform: 'win32' });
     const check = results.find((r) => r.check === 'approvers dir is writable only by an administrator');
     assert.ok(check);
     assert.equal(check.ok, true);
+    assert.equal(check.detail, 'not verifiable from an admin shell on Windows; the service checks it at start');
   });
 });
 
 describe('doctor', () => {
-  it('counts a real approver as active, not permanently untrusted', () => {
+  it('counts a real approver as active, not permanently untrusted', async () => {
     const n = node();
     const a = createFakePhone({ name: 'Owner phone' });
     fs.writeFileSync(path.join(n.configDir, 'approvers', `${a.deviceId}.json`), JSON.stringify(a.approverRecord()), { mode: 0o644 });
-    const results = runDoctor({ dataDir: n.dataDir, platform: 'win32' });
+    const results = await runDoctor({ dataDir: n.dataDir, platform: 'win32' });
     const check = results.find((r) => r.check === 'active phone approvers');
     assert.equal(check.detail, '1');
+  });
+
+  it('does not count a device whose verified revoke waits for device apply', async () => {
+    const n = node();
+    const a = createFakePhone({ name: 'Owner phone' });
+    const b = createFakePhone({ name: 'Second phone' });
+    for (const p of [a, b]) fs.writeFileSync(path.join(n.configDir, 'approvers', `${p.deviceId}.json`), JSON.stringify(p.approverRecord()), { mode: 0o644 });
+    const count = async () => (await runDoctor({ dataDir: n.dataDir, platform: 'win32' })).find((r) => r.check === 'active phone approvers').detail;
+    assert.equal(await count(), '2');
+    const store = new ApproverStore({ dir: path.join(n.configDir, 'approvers'), stagedDir: path.join(n.dataDir, 'approvals', 'staged'), ...storeOptions });
+    await store.ready();
+    assert.equal(store.stage(b.revoke(a.deviceId)).state, 'revoked-pending-apply');
+    assert.equal(await count(), '1');
   });
 
   it('reports the approver dir, the relay link and the audit chain', async () => {
@@ -302,7 +414,7 @@ describe('doctor', () => {
     await ledger.append({ kind: 'x', data: { i: 1 } });
     await ledger.append({ kind: 'x', data: { i: 2 } });
     const byCheck = (results) => Object.fromEntries(results.map((r) => [r.check, r]));
-    let results = byCheck(runDoctor({ dataDir: n.dataDir, platform: 'linux' }));
+    let results = byCheck(await runDoctor({ dataDir: n.dataDir, platform: 'linux' }));
     assert.equal(results['audit ledger chain'].ok, true);
     // On POSIX this test's node.yaml is not root-owned, so the check fails
     // there and says why; on Windows the link.json above is what it reads.
@@ -312,7 +424,7 @@ describe('doctor', () => {
     const seg = fs.readdirSync(path.join(n.dataDir, 'audit')).find((f) => f.endsWith('.jsonl'));
     const file = path.join(n.dataDir, 'audit', seg);
     fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('"i":2', '"i":3'));
-    results = byCheck(runDoctor({ dataDir: n.dataDir, platform: 'linux' }));
+    results = byCheck(await runDoctor({ dataDir: n.dataDir, platform: 'linux' }));
     assert.equal(results['audit ledger chain'].ok, false);
     assert.match(results['audit ledger chain'].detail, /broken at seq 2/);
   });

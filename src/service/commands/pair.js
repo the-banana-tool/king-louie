@@ -5,7 +5,7 @@
 const { buildServicePorts } = require('../ports');
 const { loadNodeConfig } = require('../node-config');
 const { restoreDataDirOwnership } = require('../ownership');
-const { runningServicePid } = require('./io');
+const { readLine, runningServicePid } = require('./io');
 
 const USAGE = 'Usage: king-louie-service pair <front-door-url> [--data-dir DIR]\n'
   + '       pair wss://relay-host:port pairs with a phone-approval relay; the one-time code is read from stdin\n';
@@ -64,7 +64,17 @@ async function runPair({ url, dataDir, io, deps = {} }) {
       io.stderr.write('The relay URL needs a host and a port, like wss://10.0.0.5:18795\n');
       return 2;
     }
-    const code = (deps.code !== undefined ? deps.code : await readAll(io.stdin)).trim();
+    let code;
+    if (deps.code !== undefined) {
+      code = deps.code;
+    } else if (io.stdin && io.stdin.isTTY) {
+      // Typed at a prompt, so the code stays out of shell history.
+      io.stdout.write('Pairing code (from `relay code` on the relay host): ');
+      code = await readLine(io.stdin);
+    } else {
+      code = await readAll(io.stdin);
+    }
+    code = String(code).trim();
     if (!code) {
       io.stderr.write('No pairing code on stdin. Get one on the relay host with `king-louie-service relay code <node-name>`.\n');
       return 2;
@@ -94,6 +104,20 @@ async function runPair({ url, dataDir, io, deps = {} }) {
     if (info.peerId !== derivedPeerId) {
       io.stderr.write(`Pairing failed: the relay's peer id does not match its public key (got ${info.peerId}, expected ${derivedPeerId}). Refusing to pair.\n`);
       return 1;
+    }
+    // The pairing proof binds the TLS fingerprint the relay claims (I4), so
+    // it cannot be swapped on path; this checks the claim against the
+    // certificate this connection was actually served. Over TLS a missing
+    // claim would leave nothing to pin, so it is refused too.
+    if (useTls) {
+      if (!info.tlsFingerprint) {
+        io.stderr.write('Pairing failed: the relay did not present a TLS fingerprint. Refusing to pair.\n');
+        return 1;
+      }
+      if (info.servedTlsFingerprint && info.servedTlsFingerprint !== info.tlsFingerprint) {
+        io.stderr.write('Pairing failed: the certificate the relay served does not match the fingerprint it claimed. Refusing to pair.\n');
+        return 1;
+      }
     }
     const relayId = deriveNodeId(info.publicKey);
     ports.store.set('approvals.relay', {

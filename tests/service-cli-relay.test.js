@@ -61,6 +61,8 @@ describe('relay run', () => {
   it('starts, prints a ready line with the fingerprint, and stops on abort', async () => {
     const { dataDir } = dirs();
     const io = streamIo();
+    const listeners = () => ['SIGTERM', 'SIGINT', 'message'].map((e) => process.listenerCount(e));
+    const before = listeners();
     const controller = new AbortController();
     const running = runRelayCommand({ sub: 'run', dataDir, io, deps: { useTls: false, signal: controller.signal, loadConfig: () => ({ relay: relayConfig('127.0.0.1') }) } });
     for (let i = 0; i < 500 && !io.text.out.includes('"event":"ready"'); i += 1) await new Promise((r) => setTimeout(r, 10));
@@ -68,13 +70,40 @@ describe('relay run', () => {
     assert.match(ready.relay_id, /^kl-[a-z2-7]{16}$/);
     assert.equal(ready.fingerprint, ready.relay_id.slice(3).match(/.{4}/g).join(' '));
     assert.ok(ready.mesh.port > 0 && ready.phone.port > 0);
+    assert.notDeepEqual(listeners(), before);
     controller.abort();
     assert.equal(await running, 0);
     assert.equal(fs.existsSync(path.join(dataDir, 'service.pid')), false);
+    // Stopping removes every stop listener it added.
+    assert.deepEqual(listeners(), before);
   });
 });
 
 describe('relay code / nodes / remove-node / qr', () => {
+  it('code hands what it wrote back to the data dir owner when run as root', async () => {
+    const { dataDir } = dirs();
+    // Pretend: running as root, on a data dir owned by uid 1000. Record the
+    // paths restoreDataDirOwnership is asked to consider (lstat on anything
+    // but the data dir fails, so nothing is actually chowned).
+    const considered = [];
+    const ownership = {
+      getuid: () => 0,
+      log: { warn: () => {} },
+      fsImpl: {
+        lstatSync: (p) => {
+          if (path.resolve(p) === path.resolve(dataDir)) return { isDirectory: () => true, uid: 1000, gid: 1000 };
+          considered.push(path.resolve(p));
+          throw Object.assign(new Error('not here'), { code: 'ENOENT' });
+        }
+      }
+    };
+    const io = { ...streamIo(), ownership };
+    assert.equal(await runRelayCommand({ sub: 'code', arg: 'web-01', dataDir, io }), 0);
+    const codesDir = path.join(dataDir, 'relay', 'codes');
+    const file = path.join(codesDir, fs.readdirSync(codesDir)[0]);
+    for (const p of [path.join(dataDir, 'relay'), codesDir, file]) assert.ok(considered.includes(path.resolve(p)), p);
+  });
+
   it('code drops a one-time code for the running relay and refuses a taken or bad name', async () => {
     const { dataDir } = dirs();
     const io = streamIo();
@@ -85,6 +114,13 @@ describe('relay code / nodes / remove-node / qr', () => {
     const dropped = JSON.parse(fs.readFileSync(path.join(dataDir, 'relay', 'codes', files[0]), 'utf8'));
     assert.equal(dropped.code, code);
     assert.equal(dropped.node_name, 'web-01');
+    if (process.platform !== 'win32') {
+      assert.equal(fs.statSync(path.join(dataDir, 'relay', 'codes', files[0])).mode & 0o777, 0o600);
+      assert.equal(fs.statSync(path.join(dataDir, 'relay', 'codes')).mode & 0o777, 0o700);
+    }
+    // The hint says to type the code, never to echo it into shell history.
+    assert.doesNotMatch(io.text.out, /echo/);
+    assert.match(io.text.out, /type the code when it asks/);
     fs.writeFileSync(path.join(dataDir, 'relay', 'nodes.json'), JSON.stringify({ nodes: [{ node_id: 'kl-aaaaaaaaaaaaaaaa', node_name: 'web-01', public_key: 'x', peer_id: 'kl-x', paired_at: '2026-09-23T18:00:00.000Z' }] }));
     const taken = streamIo();
     assert.equal(await runRelayCommand({ sub: 'code', arg: 'web-01', dataDir, io: taken }), 1);
@@ -181,5 +217,61 @@ describe('pair against a test relay', () => {
     assert.match(io.text.err, /peer id does not match its public key/);
     const pin = new JsonFileStore({ dir: nodeDirs.dataDir, name: 'chat-data' }).get('approvals.relay');
     assert.equal(pin, undefined);
+  });
+});
+
+describe('pair over TLS (the relay proves its certificate)', () => {
+  // A TLS relay whose phone API serves the relay identity's own certificate,
+  // with a fresh code for the default node name, and an optional change to
+  // what it claims about itself during pairing.
+  async function tlsRelay(claim = (id) => id) {
+    const relayDirs = dirs();
+    const relayIdentity = new NodeIdentity({ nodeName: 'relay' });
+    const certFile = path.join(relayDirs.base, 'relay.crt');
+    const keyFile = path.join(relayDirs.base, 'relay.key');
+    fs.writeFileSync(certFile, relayIdentity.tlsCert);
+    fs.writeFileSync(keyFile, relayIdentity.tlsKey);
+    const relay = await startRelay({ dataDir: relayDirs.dataDir, identity: relayIdentity, useTls: true, config: relayConfig('127.0.0.1', { tls: { certFile, keyFile } }) });
+    cleanups.push(() => relay.stop());
+    const codeIo = streamIo();
+    await runRelayCommand({ sub: 'code', arg: 'unnamed-node', dataDir: relayDirs.dataDir, io: codeIo });
+    const code = /Pairing code for unnamed-node: (.+)$/m.exec(codeIo.text.out)[1];
+    for (let i = 0; i < 300 && fs.readdirSync(path.join(relayDirs.dataDir, 'relay', 'codes')).length; i += 1) await new Promise((r) => setTimeout(r, 10));
+    const original = relayIdentity.getPublicIdentity.bind(relayIdentity);
+    relayIdentity.getPublicIdentity = () => claim(original());
+    return { relay, relayIdentity, code, url: `wss://127.0.0.1:${relay.address().mesh.port}` };
+  }
+
+  const pinOf = (dataDir) => new JsonFileStore({ dir: dataDir, name: 'chat-data' }).get('approvals.relay');
+
+  it('pins the served certificate, and asks for the code when stdin is a terminal', async () => {
+    const { relayIdentity, code, url } = await tlsRelay();
+    const nodeDirs = dirs();
+    const io = streamIo();
+    io.stdin.isTTY = true;
+    const running = runPair({ url, dataDir: nodeDirs.dataDir, io });
+    for (let i = 0; i < 300 && !/Pairing code/.test(io.text.out); i += 1) await new Promise((r) => setTimeout(r, 10));
+    assert.match(io.text.out, /Pairing code \(from `relay code` on the relay host\): /);
+    io.stdin.write(`${code}\n`);
+    assert.equal(await running, 0, io.text.err);
+    assert.equal(pinOf(nodeDirs.dataDir).tlsFingerprint, relayIdentity.tlsFingerprint);
+  });
+
+  it('refuses a relay that claims a certificate other than the one it serves', async () => {
+    const { code, url } = await tlsRelay((id) => ({ ...id, tlsFingerprint: 'ab'.repeat(32) }));
+    const nodeDirs = dirs();
+    const io = streamIo();
+    assert.equal(await runPair({ url, dataDir: nodeDirs.dataDir, io, deps: { code } }), 1);
+    assert.match(io.text.err, /certificate the relay served does not match the fingerprint it claimed/);
+    assert.equal(pinOf(nodeDirs.dataDir), undefined);
+  });
+
+  it('refuses a relay that claims no TLS fingerprint at all', async () => {
+    const { code, url } = await tlsRelay((id) => ({ ...id, tlsFingerprint: null }));
+    const nodeDirs = dirs();
+    const io = streamIo();
+    assert.equal(await runPair({ url, dataDir: nodeDirs.dataDir, io, deps: { code } }), 1);
+    assert.match(io.text.err, /did not present a TLS fingerprint/);
+    assert.equal(pinOf(nodeDirs.dataDir), undefined);
   });
 });

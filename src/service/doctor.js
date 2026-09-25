@@ -6,7 +6,8 @@ function posixPrivate(file) {
   return { ok: (mode & 0o077) === 0, detail: `mode ${mode.toString(8)}` };
 }
 
-function runDoctor({ dataDir, platform = process.platform }) {
+// Async: the approval checks wait for the approver store to load.
+async function runDoctor({ dataDir, platform = process.platform }) {
   const results = [];
   const major = Number(process.versions.node.split('.')[0]);
   results.push({ check: 'node >= 22', ok: major >= 22, detail: process.versions.node });
@@ -48,48 +49,48 @@ function runDoctor({ dataDir, platform = process.platform }) {
     results.push({ check: 'node config / runbooks health', ok: false, detail: err.message });
   }
 
-  results.push(...approvalChecks({ dataDir, platform }));
+  results.push(...(await approvalChecks({ dataDir, platform })));
   return results;
 }
 
 // Fleet stage 3: the approver set must be admin-only, the relay linked when
 // one is configured, and the audit chain intact.
-function approvalChecks({ dataDir, platform }) {
+async function approvalChecks({ dataDir, platform }) {
   const out = [];
-  const attempt = (check, fn) => {
+  const attempt = async (check, fn) => {
     try {
-      out.push({ check, ...fn() });
+      out.push({ check, ...(await fn()) });
     } catch (err) {
       out.push({ check, ok: false, detail: err.message });
     }
   };
   const { adminConfigDir } = require('../platform/paths');
   const dir = path.join(adminConfigDir({ dataDir }), 'approvers');
+  const stagedDir = path.join(dataDir, 'approvals', 'staged');
   let problem = null;
-  attempt('approvers dir is writable only by an administrator', () => {
+  await attempt('approvers dir is writable only by an administrator', () => {
     const { checkApproverDir } = require('../approvals/approver-store');
-    // serviceProbe: false — doctor is run by an administrator (this check
-    // covers the same ground as `device list`'s carry), and on Windows that
-    // account can always write approvers/; only the service's own probe
-    // (serviceProbe: true, run as the service account) means anything there.
+    // serviceProbe: false — doctor is run by an administrator, and on
+    // Windows that account can always write approvers/, so a probe from here
+    // proves nothing either way. Only the service's own probe (run as the
+    // service account, at start) can tell, and the row says so.
     problem = checkApproverDir({ dir, platform, serviceProbe: false });
-    return { ok: problem === null, detail: problem || dir };
+    if (problem) return { ok: false, detail: problem };
+    if (platform === 'win32') {
+      return { ok: true, detail: 'not verifiable from an admin shell on Windows; the service checks it at start' };
+    }
+    return { ok: true, detail: dir };
   });
-  attempt('active phone approvers', () => {
+  await attempt('active phone approvers', async () => {
     const { ApproverStore } = require('../approvals/approver-store');
     if (problem) return { ok: true, detail: '0 (the set is not trusted)' };
-    const store = new ApproverStore({ dir, platform, serviceProbe: false });
-    // ready() is async only for interface symmetry with the service's own
-    // (long-lived) use; its body awaits nothing, so this call's side effects
-    // — untrusted/problem and the revoke overlay, from the same sync
-    // checkApproverDir() this module already ran above — are already
-    // applied by the time it returns. Without this, the store stays
-    // permanently untrusted (its constructor's default) and activeCount()
-    // would report 0 even for a healthy approver set.
-    store.ready();
+    // stagedDir: a verified revoke waiting for `device apply` already ends
+    // that device's trust (the overlay), so it is not counted as active.
+    const store = new ApproverStore({ dir, stagedDir, platform, serviceProbe: false });
+    await store.ready();
     return { ok: true, detail: String(store.activeCount()) };
   });
-  attempt('relay paired and linked', () => {
+  await attempt('relay paired and linked', () => {
     const { loadNodeConfig } = require('./node-config');
     const nodeCfg = loadNodeConfig({ dataDir });
     if (!nodeCfg.approvers.relay) return { ok: true, detail: 'no relay configured (phone approvals off)' };
@@ -102,7 +103,7 @@ function approvalChecks({ dataDir, platform }) {
     if (!link) return { ok: false, detail: `not paired with ${nodeCfg.approvers.relay} (run pair)` };
     return { ok: link.connected === true, detail: `${link.relay_id} ${link.connected ? 'connected' : 'disconnected'}` };
   });
-  attempt('audit ledger chain', () => {
+  await attempt('audit ledger chain', () => {
     const { AuditLedger } = require('../audit/audit-ledger');
     const result = new AuditLedger({ dir: path.join(dataDir, 'audit'), nodeId: null }).verify();
     return { ok: result.ok, detail: result.ok ? `${result.entries} entries` : `broken at seq ${result.brokenAt} (${result.reason})` };

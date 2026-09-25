@@ -7,7 +7,7 @@ const { adminConfigDir } = require('../../platform/paths');
 const { buildServicePorts } = require('../ports');
 const { loadNodeConfig } = require('../node-config');
 const { restoreDataDirOwnership } = require('../ownership');
-const { readLine, runningServicePid, renderQr } = require('./io');
+const { readLine, printable, runningServicePid, renderQr } = require('./io');
 
 const ENROLL_TTL_MS = 10 * 60 * 1000;
 const DEVICE_HELP = `Usage: king-louie-service device list [--data-dir DIR]
@@ -80,11 +80,20 @@ async function runEnrollDevice({ dataDir, configDir = adminConfigDir({ dataDir }
   const courier = new FileCourier({ dataDir, identity, onPathWritten: (p) => written.push(p), ...(deps.pollMs ? { pollMs: deps.pollMs } : {}) }).start();
   const codeId = crypto.randomBytes(16).toString('base64url');
   const code = crypto.randomBytes(32).toString('base64url');
-  const finish = (claim, refused) => courier.call('enroll.done', { envelope: buildEnrollDone({ identity, codeId, enroll: refused ? null : claim, refused }) })
+  const codeTtlMs = deps.codeTtlMs || ENROLL_TTL_MS;
+  // The code dies codeTtlMs after it is opened; nothing is enrolled after
+  // that, including on an answer to the [y/N] question that comes too late.
+  // The CLI stops waiting a little before, so its `refused` still reaches
+  // the service (which drops enroll.done for a code already expired).
+  const deadlineMs = codeTtlMs - Math.min(5000, Math.floor(codeTtlMs / 10));
+  const expired = new AbortController();
+  const expiry = setTimeout(() => expired.abort(), deadlineMs);
+  if (typeof expiry.unref === 'function') expiry.unref();
+  const finish =(claim, refused) => courier.call('enroll.done', { envelope: buildEnrollDone({ identity, codeId, enroll: refused ? null : claim, refused }) })
     .catch((err) => io.stderr.write(`Could not tell the relay: ${err.message}\n`));
   try {
     const claimed = new Promise((resolve) => {
-      const timer = setTimeout(() => resolve(null), deps.timeoutMs || ENROLL_TTL_MS);
+      const timer = setTimeout(() => resolve(null), Math.min(deps.timeoutMs || deadlineMs, deadlineMs));
       if (typeof timer.unref === 'function') timer.unref();
       courier.onMessage(async (method, params) => {
         if (method === 'enroll.claim' && params.code_id === codeId) {
@@ -93,7 +102,7 @@ async function runEnrollDevice({ dataDir, configDir = adminConfigDir({ dataDir }
         }
       });
     });
-    await courier.call('enroll.open', { envelope: buildEnrollOpen({ identity, codeId, expiresAt: now() + ENROLL_TTL_MS }) });
+    await courier.call('enroll.open', { envelope: buildEnrollOpen({ identity, codeId, expiresAt: now() + codeTtlMs }) });
     const qr = encodeQr({
       t: 'kl.pair',
       relay: link.relay_public_url,
@@ -120,30 +129,49 @@ async function runEnrollDevice({ dataDir, configDir = adminConfigDir({ dataDir }
       return 1;
     }
     const { device } = check.message;
-    io.stdout.write(`Device "${device.name}" (${device.platform}) ${device.device_id.slice(0, 2)}${fingerprintGroups(device.device_id)} — does the phone show the same? [y/N] `);
-    const answer = await readLine(io.stdin);
+    // The name and platform come from the phone: printed without control or
+    // bidi characters so they cannot rewrite what the administrator reads.
+    io.stdout.write(`Device "${printable(device.name)}" (${printable(device.platform)}) ${device.device_id.slice(0, 2)}${fingerprintGroups(device.device_id)} — does the phone show the same? [y/N] `);
+    const answer = await readLine(io.stdin, { signal: expired.signal });
+    if (answer === null) {
+      await finish(null, true);
+      io.stderr.write('\nThe pairing code expired before you answered. Nothing was enrolled.\n');
+      return 1;
+    }
     if (!/^y(es)?$/i.test(answer.trim())) {
       await finish(null, true);
       io.stdout.write('Not enrolled.\n');
       return 1;
     }
-    admin.writeApprover({
-      v: 1,
-      device_id: device.device_id,
-      name: device.name,
-      platform: device.platform,
-      public_key: device.public_key,
-      enrolled_at: new Date(now()).toISOString(),
-      enrolled_by: 'console',
-      revoked_at: null,
-      revoked_by: null,
-      enrollment: claim
-    });
-    await auditLedger(dataDir, identity, written).append({ kind: 'device.enrolled', data: { device_id: device.device_id, by: 'console', envelope: claim } });
+    let wroteApprover = false;
+    try {
+      admin.writeApprover({
+        v: 1,
+        device_id: device.device_id,
+        name: device.name,
+        platform: device.platform,
+        public_key: device.public_key,
+        enrolled_at: new Date(now()).toISOString(),
+        enrolled_by: 'console',
+        revoked_at: null,
+        revoked_by: null,
+        enrollment: claim
+      });
+      wroteApprover = true;
+      await auditLedger(dataDir, identity, written).append({ kind: 'device.enrolled', data: { device_id: device.device_id, by: 'console', envelope: claim } });
+    } catch (err) {
+      await finish(null, true);
+      io.stderr.write(`Enrolling ${device.device_id} failed: ${err.message}\n`);
+      if (wroteApprover) {
+        io.stderr.write(`Its approver file was written but not audited; run "device revoke ${device.device_id}" unless you mean to keep it.\n`);
+      }
+      return 1;
+    }
     await finish(claim, false);
     io.stdout.write(`Enrolled ${device.device_id}. It can approve unsafe actions on ${nodeCfg.name} now.\n`);
     return 0;
   } finally {
+    clearTimeout(expiry);
     courier.stop();
     restoreDataDirOwnership(dataDir, written, io.ownership);
   }
@@ -169,10 +197,16 @@ function describeStagedItem(item, now) {
   // Age is judged on the message's own signed created_at (never ageMs, and
   // never the data dir's received_at, which the service itself writes and so
   // does not get to use to set policy or displayed trust).
-  const age = item.message && item.message.created_at
-    ? `${Math.round((now - Date.parse(item.message.created_at)) / 60000)} min ago`
-    : 'unreadable';
-  return `${label}  ${item.deviceId}  signed by ${item.signer}  (${age})`;
+  return `${label}  ${item.deviceId}  signed by ${item.signer}  (${describeAge(item.message && item.message.created_at, now)})`;
+}
+
+// "N min ago" from a signed timestamp; a phone clock ahead of this one reads
+// "just now", and anything unparseable "age unknown".
+function describeAge(createdAt, now) {
+  const at = typeof createdAt === 'string' ? Date.parse(createdAt) : NaN;
+  if (!Number.isFinite(at)) return 'age unknown';
+  if (at >= now) return 'just now';
+  return `${Math.round((now - at) / 60000)} min ago`;
 }
 
 async function runDevice({ sub, arg, flags = {}, dataDir, configDir = adminConfigDir({ dataDir }), io, deps = {} }) {
@@ -191,7 +225,7 @@ async function runDevice({ sub, arg, flags = {}, dataDir, configDir = adminConfi
     const records = store.list();
     if (records.length === 0) io.stdout.write('No approver devices on this node.\n');
     for (const r of records) {
-      io.stdout.write(`${fingerprintGroups(r.device_id)}  ${r.device_id}  ${r.name} (${r.platform})  ${describeState(store, r)}  enrolled by ${r.enrolled_by}\n`);
+      io.stdout.write(`${fingerprintGroups(r.device_id)}  ${r.device_id}  ${printable(r.name)} (${printable(r.platform)})  ${describeState(store, r)}  enrolled by ${r.enrolled_by}\n`);
     }
     try {
       const staged = admin.listStaged();
@@ -263,7 +297,8 @@ async function runDevice({ sub, arg, flags = {}, dataDir, configDir = adminConfi
       // admin-applied record exists or its own signed window ages out) and
       // the various `rejected: …` reasons, including unsafe/unreadable
       // entries — all just displayed, since only enrolled/revoked write audit.
-      io.stdout.write(`${r.deviceId}: ${r.result}\n`);
+      // Unsafe and unreadable entries have no device id: name the file.
+      io.stdout.write(`${r.deviceId || r.file}: ${r.result}\n`);
       if (r.result === 'enrolled') await ledger.append({ kind: 'device.enrolled', data: { device_id: r.deviceId, by: r.signer, envelope: null } });
       if (r.result === 'revoked') await ledger.append({ kind: 'device.revoked', data: { device_id: r.deviceId, by: r.signer, envelope: null } });
     }
@@ -273,4 +308,4 @@ async function runDevice({ sub, arg, flags = {}, dataDir, configDir = adminConfi
   }
 }
 
-module.exports = { runEnrollDevice, runDevice, DEVICE_HELP };
+module.exports = { runEnrollDevice, runDevice, DEVICE_HELP, describeAge };
