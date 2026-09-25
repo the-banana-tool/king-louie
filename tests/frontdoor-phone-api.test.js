@@ -205,6 +205,30 @@ describe('phone API limits and routing', () => {
     assert.equal(limited.body.error, 'rate_limited');
   });
 
+  it('repeated body overflows on a device route still reach 429 (N3)', async () => {
+    // Regression: round 1 only charged the IP bucket when the signature
+    // itself failed to verify, so an exit before verification ever
+    // happened — a 413 from an oversized body, in particular — never
+    // charged it, and unlimited 413s never became a 429.
+    const { signed } = await start({ rateLimits: { unauthPerMin: 2 } });
+    const big = JSON.stringify({ x: 'y'.repeat(262144) });
+    assert.equal((await signed('POST', '/v1/echo/a', big)).status, 413);
+    assert.equal((await signed('POST', '/v1/echo/a', big)).status, 413);
+    const limited = await signed('POST', '/v1/echo/a', big);
+    assert.equal(limited.status, 429);
+  });
+
+  it("a device route's own rate governs only its device bucket, never the pre-auth IP check (minor)", async () => {
+    const { api, call } = await start({ rateLimits: { unauthPerMin: 2 } });
+    // A generous device-bucket allowance must not become a generous
+    // attacker allowance on the same route's pre-auth IP check.
+    api.registerRoute('POST', '/v1/echo/{thing}', { auth: 'device', rate: { perMin: 50 }, handler: async (req, ctx) => ({ status: 202, body: { thing: ctx.params.thing } }) });
+    assert.equal((await call('POST', '/v1/echo/a', { body: '{}' })).body.error, 'unauthorized');
+    assert.equal((await call('POST', '/v1/echo/a', { body: '{}' })).body.error, 'unauthorized');
+    const limited = await call('POST', '/v1/echo/a', { body: '{}' });
+    assert.equal(limited.status, 429);
+  });
+
   it('a malformed percent-escape in a path segment answers 404 with no error log (I3)', async () => {
     const { call } = await start();
     const errors = [];

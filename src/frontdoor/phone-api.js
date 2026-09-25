@@ -203,46 +203,58 @@ function createPhoneApi({ devices, rateLimits = {}, now = Date.now, relay = null
       const ip = (req.socket && req.socket.remoteAddress) || 'unknown';
       const suffix = bucketSuffix(route);
       const ipKey = `ip:${ip}${suffix}`;
-      const ipLimit = (route.rate && route.rate.perMin) || limits.unauthPerMin;
+
+      let body;
+      let device = null;
 
       if (route.auth === 'device') {
         // Checked, not charged, ahead of the body and the signature: valid
         // device traffic is bounded only by devicePerMin below, never by
-        // this per-IP budget. The IP bucket is only charged once the
-        // signature actually fails to verify (see the catch below), so it
-        // still bounds traffic that never authenticates.
-        checkLimit(ipKey, ipLimit);
+        // this per-IP budget. The limit here is always the global
+        // unauthPerMin — a route's own `rate` sets its device bucket's
+        // budget only, never how much unauthenticated traffic that route
+        // tolerates (a generous device allowance must not become a
+        // generous attacker allowance).
+        checkLimit(ipKey, limits.unauthPerMin);
+        let verified = false;
+        try {
+          // Everything between here and a verified signature is one unit:
+          // a body-size refusal, a stream error or abort, or a signature
+          // that fails to verify are all exits before verification and all
+          // charge the IP bucket the same way.
+          const declaredLength = Number(req.headers['content-length']);
+          if (Number.isFinite(declaredLength) && declaredLength > bodyLimit) {
+            throw new ApiError(413, 'body_too_large', `bodies are limited to ${bodyLimit} bytes`);
+          }
+          body = await readBody(req);
+          const result = verifyDeviceSignature(req, pathWithQuery, body);
+          verified = true;
+          rateLimit(`device:${result.device.device_id}${suffix}`, (route.rate && route.rate.perMin) || limits.devicePerMin);
+          replay.set(result.replayKey, now() + REPLAY_MS);
+          device = result.device;
+        } catch (err) {
+          // A verified signature that then hits its own device-rate limit
+          // does not charge the IP bucket; anything short of a verified
+          // signature does.
+          if (!verified) chargeLimit(ipKey);
+          throw err;
+        }
       } else {
         // Routes that aren't device-authenticated have no signature to
         // succeed or fail, so every call counts against the IP budget, as
-        // it always has.
-        rateLimit(ipKey, ipLimit);
-      }
-
-      const declaredLength = Number(req.headers['content-length']);
-      if (Number.isFinite(declaredLength) && declaredLength > bodyLimit) {
-        // Refused before a byte of the body is read.
-        throw new ApiError(413, 'body_too_large', `bodies are limited to ${bodyLimit} bytes`);
-      }
-      const body = await readBody(req);
-
-      let device = null;
-      if (route.auth === 'device') {
-        let verified;
-        try {
-          verified = verifyDeviceSignature(req, pathWithQuery, body);
-        } catch (authErr) {
-          chargeLimit(ipKey);
-          throw authErr;
+        // it always has; a route's own `rate` can still raise or lower it.
+        rateLimit(ipKey, (route.rate && route.rate.perMin) || limits.unauthPerMin);
+        const declaredLength = Number(req.headers['content-length']);
+        if (Number.isFinite(declaredLength) && declaredLength > bodyLimit) {
+          throw new ApiError(413, 'body_too_large', `bodies are limited to ${bodyLimit} bytes`);
         }
-        rateLimit(`device:${verified.device.device_id}${suffix}`, (route.rate && route.rate.perMin) || limits.devicePerMin);
-        replay.set(verified.replayKey, now() + REPLAY_MS);
-        device = verified.device;
-      } else if (route.auth === 'code' && !(relay && relay.invites && relay.invites.getCode(params.code_id))) {
-        throw new ApiError(404, 'unknown_code', 'no enrollment code with that id');
-      } else if (route.auth === 'invite') {
-        const invite = relay && relay.invites && relay.invites.getInvite(params.id);
-        if (!invite || invite.claim) throw new ApiError(404, 'unknown_invite', 'no open invite with that id');
+        body = await readBody(req);
+        if (route.auth === 'code' && !(relay && relay.invites && relay.invites.getCode(params.code_id))) {
+          throw new ApiError(404, 'unknown_code', 'no enrollment code with that id');
+        } else if (route.auth === 'invite') {
+          const invite = relay && relay.invites && relay.invites.getInvite(params.id);
+          if (!invite || invite.claim) throw new ApiError(404, 'unknown_invite', 'no open invite with that id');
+        }
       }
 
       let parsed = null;
