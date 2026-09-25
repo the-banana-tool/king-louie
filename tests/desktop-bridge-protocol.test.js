@@ -501,3 +501,129 @@ describe('DesktopBridgeServer fix round 2 (review findings)', () => {
     out.c.ws.close();
   });
 });
+
+const { DesktopBridgeClient } = require('../src/desktop-bridge/bridge-client');
+
+function clientFor(port, device, extra = {}) {
+  return new DesktopBridgeClient({
+    port,
+    pin: { nodeId: identity.nodeId, publicKey: identity.publicKey.toString('hex') },
+    deviceId: device.deviceId,
+    sign: async (bytes) => crypto.sign(null, bytes, device.privateKey),
+    ...extra
+  });
+}
+
+// A fake service that sends a challenge for the pinned node and a garbage hello.
+async function impostorServer({ nodeId = identity.nodeId } = {}) {
+  const frames = [];
+  const wss = new WebSocket.Server({ host: '127.0.0.1', port: 0 });
+  await new Promise((resolve) => wss.once('listening', resolve));
+  wss.on('connection', (ws) => {
+    ws.send(JSON.stringify({ t: 'challenge', protocol: 1, nodeId, serverNonce: newNonce() }));
+    ws.on('message', (data) => {
+      const frame = JSON.parse(data.toString('utf8'));
+      frames.push(frame.t);
+      if (frame.t === 'clientHello') ws.send(JSON.stringify({ t: 'hello', sig: keys.toB64url(crypto.randomBytes(64)) }));
+    });
+  });
+  return { frames, port: wss.address().port, close: () => new Promise((r) => { for (const c of wss.clients) c.terminate(); wss.close(r); }) };
+}
+
+describe('DesktopBridgeClient', () => {
+  it('connects, invokes and receives events', async () => {
+    const device = makeDevice();
+    const { port } = await startServer({ devices: [device] });
+    const client = clientFor(port, device);
+    const service = await client.connect();
+    assert.strictEqual(service.nodeId, identity.nodeId);
+    assert.strictEqual(client.connected, true);
+    assert.deepStrictEqual(await client.invoke('chat:load', []), { ok: true, data: { echo: [] } });
+    client.close();
+    assert.strictEqual(client.status, 'stopped');
+  });
+
+  it('never sends auth when hello.sig does not verify', async () => {
+    const fake = await impostorServer();
+    const client = clientFor(fake.port, makeDevice());
+    await assert.rejects(client.connect(), (err) => err.code === 'SERVICE_KEY_CHANGED');
+    assert.deepStrictEqual(fake.frames, ['clientHello'], 'no auth frame, so no device signature leaves');
+    assert.strictEqual(client.status, 'failed');
+    client.close();
+    await fake.close();
+  });
+
+  it('closes before saying anything when the challenge names another node', async () => {
+    const fake = await impostorServer({ nodeId: 'kl-aaaaaaaaaaaaaaaa' });
+    const client = clientFor(fake.port, makeDevice());
+    await assert.rejects(client.connect(), (err) => err.code === 'SERVICE_KEY_CHANGED' && /changed from kl-/.test(err.message));
+    assert.deepStrictEqual(fake.frames, []);
+    client.close();
+    await fake.close();
+  });
+
+  it('client ignores HTTP_PROXY', async () => {
+    const device = makeDevice();
+    const { port } = await startServer({ devices: [device] });
+    const saved = { HTTP_PROXY: process.env.HTTP_PROXY, HTTPS_PROXY: process.env.HTTPS_PROXY, ALL_PROXY: process.env.ALL_PROXY };
+    process.env.HTTP_PROXY = 'http://127.0.0.1:9';
+    process.env.HTTPS_PROXY = 'http://127.0.0.1:9';
+    process.env.ALL_PROXY = 'http://127.0.0.1:9';
+    try {
+      const client = clientFor(port, device);
+      assert.strictEqual((await client.connect()).nodeId, identity.nodeId);
+      client.close();
+    } finally {
+      for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    }
+    assert.throws(() => new DesktopBridgeClient({ host: 'localhost', port, pin: { nodeId: identity.nodeId, publicKey: 'aa' }, deviceId: device.deviceId, sign: () => {} }), /127\.0\.0\.1/);
+  });
+
+  it('times out ordinary calls but not chat:sendMessage', async () => {
+    const device = makeDevice();
+    const { port } = await startServer({ devices: [device] });
+    const client = clientFor(port, device, { defaultTimeoutMs: 50 });
+    await client.connect();
+    // The fake dispatcher answers chat:sendMessage after 200 ms, well past the 50 ms default.
+    assert.deepStrictEqual(await client.invoke('chat:sendMessage', [{ chatId: 'c1' }]), { ok: true, data: { echo: [{ chatId: 'c1' }] } });
+    const slow = await startServer({ devices: [device] });
+    slow.dispatcher.handleFrame = async (conn, frame) => { await new Promise((r) => setTimeout(r, 200)); conn.send({ t: 'result', id: frame.id, value: 'late' }); };
+    const client2 = clientFor(slow.port, device, { defaultTimeoutMs: 50 });
+    await client2.connect();
+    await assert.rejects(client2.invoke('chat:load', []), (err) => err.code === 'BRIDGE_TIMEOUT' && err.message === 'The local service did not answer in time.');
+    assert.strictEqual(await client2.invoke('chat:sendMessage', [{ chatId: 'c1' }]), 'late');
+    client.close();
+    client2.close();
+  });
+
+  it('rejects pending calls on disconnect and reconnects to a restarted service', async () => {
+    const device = makeDevice();
+    const first = await startServer({ devices: [device] });
+    let currentPort = first.port;
+    const client = clientFor(first.port, device, { backoffMs: [20], getPort: async () => currentPort });
+    await client.connect();
+    const states = [];
+    client.on('state', (s) => states.push(s.status));
+    first.dispatcher.handleFrame = async () => {};
+    const pending = client.invoke('chat:load', []);
+    await first.server.stop();
+    await assert.rejects(pending, (err) => err.code === 'SERVICE_UNREACHABLE');
+    const second = await startServer({ devices: [device] });
+    currentPort = second.port;
+    await new Promise((resolve) => { const check = () => (client.connected ? resolve() : setTimeout(check, 10)); check(); });
+    assert.ok(states.includes('disconnected'));
+    assert.strictEqual(client.port, second.port, 'the port is re-read before every reconnect');
+    client.close();
+  });
+
+  it('stops retrying once the device is unpaired (4403)', async () => {
+    const device = makeDevice();
+    const { port } = await startServer({ devices: [] });
+    const client = clientFor(port, device, { backoffMs: [20] });
+    await assert.rejects(client.connect(), (err) => err.code === 'DEVICE_UNPAIRED'
+      && err.message === 'The service does not know this desktop. Pair again in Settings > Local service.');
+    assert.strictEqual(client.status, 'failed');
+    assert.strictEqual(client.nextRetryAt, null);
+    client.close();
+  });
+});
