@@ -423,6 +423,25 @@ describe('budgets and question creation', () => {
     await rt.endTurn(turn, {});
   });
 
+  it('counts a real provider\'s costUsd: 0 as unpriced too, and clamps a negative cost to 0 (F4)', async () => {
+    const { rt } = makeRuntime();
+    const c = await activeCase(rt);
+    const turn = await rt.beginTurn(c.id, { turnId: 't1' });
+    const hook = rt.usageHook(turn);
+    // Real providers report costUsd: 0 for a model with no price table
+    // (base-provider.js), never cost: null — the case must count that the
+    // same way it counts a null cost, as unpriced tokens.
+    hook({ provider: 'openai', model: 'unlisted', totalTokens: 900, cost: 0 });
+    let usd = rt.budget(c.id).status().usd;
+    assert.deepStrictEqual([usd.spent, usd.unpricedTokens], [0, 900]);
+    // A priced charge that comes back negative (a provider bug, a bad
+    // refund) must never reduce spend below what was actually charged.
+    hook({ provider: 'openai', model: 'gpt-4o', totalTokens: 10, cost: -5 });
+    usd = rt.budget(c.id).status().usd;
+    assert.deepStrictEqual([usd.spent, usd.unpricedTokens], [0, 900]);
+    await rt.endTurn(turn, {});
+  });
+
   it('createQuestion charges questionsPerDay, holds at the cap, returns duplicates, and delivers in-app', async () => {
     const { rt, events } = makeRuntime({ settings: { budgets: { questionsPerDay: 1 } } });
     const c = await activeCase(rt);

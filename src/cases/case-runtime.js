@@ -880,13 +880,24 @@ class CaseRuntime {
     return (ev) => {
       if (!ev || typeof ev !== 'object') return;
       try {
-        const unpriced = ev.cost === null || ev.cost === undefined;
-        const cost = unpriced ? 0 : Number(ev.cost) || 0;
+        const totalTokens = Number(ev.totalTokens) || 0;
+        const rawCost = Number(ev.cost);
+        // Real providers report costUsd: 0 for a model with no price table
+        // (base-provider.js), not cost: null — both must count as unpriced.
+        // A non-finite cost (NaN, Infinity) is unusable data, treated the
+        // same way rather than charged or silently dropped (spec §3.5, F4).
+        const unpriced = ev.cost === null || ev.cost === undefined || !Number.isFinite(rawCost)
+          || (rawCost === 0 && totalTokens > 0);
+        let cost = unpriced ? 0 : rawCost;
+        if (cost < 0) {
+          log.warn(`Case ${turn.caseId}: usage event reported a negative cost (${cost}); clamped to 0.`);
+          cost = 0;
+        }
         const r = this.budget(turn.caseId).charge('usd', cost, {
           turnId: turn.turnId,
           provider: ev.provider,
           model: ev.model,
-          unpricedTokens: unpriced ? Number(ev.totalTokens) || 0 : 0
+          unpricedTokens: unpriced ? totalTokens : 0
         });
         if (r.crossedNow.length) this.onCrossings(turn.caseId, 'usd', r.crossedNow);
       } catch (err) {
