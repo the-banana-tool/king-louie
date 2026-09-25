@@ -308,6 +308,39 @@ describe('ApproverStore: Windows owners', () => {
     assert.equal(reads, 2, 'again once ChangeTime moves');
   });
 
+  it('a failed owner read is not cached: it is retried about 30 s later and then trusts the set (final review I4)', async () => {
+    const l = layout();
+    const phone = createFakePhone();
+    write(l.dir, phone.approverRecord());
+    let clock = NOW;
+    let reads = 0;
+    const readOwners = () => {
+      reads += 1;
+      if (reads === 1) throw new Error('powershell timed out');
+      return ADMIN_OWNED();
+    };
+    const s = store(l, { platform: 'win32', fsImpl: locked, readOwners, now: () => clock });
+    const first = await s.ready();
+    assert.match(first.problem, /could not read the owners .*powershell timed out/);
+    assert.equal(s.isActive(phone.deviceId), false);
+    // Within the retry window the failure stands; no PowerShell storm.
+    clock += 5000;
+    s.refresh();
+    assert.equal(s.isActive(phone.deviceId), false);
+    assert.equal(reads, 1);
+    // After it, the owners are read again, and a good read trusts the set.
+    clock += 30000;
+    s.refresh();
+    assert.equal(s.isActive(phone.deviceId), true);
+    assert.equal(reads, 2);
+    assert.equal(s.problem, null);
+    // A good read is cached as before.
+    clock += 60000;
+    s.refresh();
+    s.list();
+    assert.equal(reads, 2);
+  });
+
   it('a junction standing in for approvers is refused', async () => {
     const l = layout();
     const elsewhere = path.join(path.dirname(path.dirname(l.dir)), 'elsewhere');

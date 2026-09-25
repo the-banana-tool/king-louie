@@ -103,6 +103,8 @@ const WINDOWS_TRUSTED_OWNERS = new Set(['S-1-5-32-544', 'S-1-5-18']);
 const WINDOWS_SERVICE_ACCOUNTS = new Set(['S-1-5-19']);
 const SID_RE = /^S-1-(?:\d+-)*\d+$/;
 const OWNER_READ_TIMEOUT_MS = 15000;
+// How long a failed owner read stands before the next scan reads again.
+const OWNER_RETRY_MS = 30000;
 
 // Framework types only, no Get-Acl: the cmdlet lives in a module that fails
 // to autoload where PSModulePath points elsewhere (see the installer tests).
@@ -140,25 +142,32 @@ function readWindowsOwners({ dir, configDir }) {
 
 // null when the owners allow trusting `dir`, else the problem. Any failure
 // to read them is a problem: an owner nobody could check is not trusted.
-function checkWindowsOwners({ dir, configDir, readOwners = readWindowsOwners }) {
+// → { problem, readFailed }: readFailed when the owners could not be read at
+// all (as opposed to a verdict on owners that were read), which the store
+// must not cache.
+function windowsOwnerVerdict({ dir, configDir, readOwners = readWindowsOwners }) {
   let owners;
   try {
     owners = readOwners({ dir, configDir });
   } catch (err) {
-    return `${dir}: could not read the owners of the approver and config directories (${err.message}); no approver is trusted until this is fixed`;
+    return { readFailed: true, problem: `${dir}: could not read the owners of the approver and config directories (${err.message}); no approver is trusted until this is fixed` };
   }
   const { approvers, config } = owners || {};
   if (!SID_RE.test(String(approvers)) || !SID_RE.test(String(config))) {
-    return `${dir}: could not read the owners of the approver and config directories; no approver is trusted until this is fixed`;
+    return { readFailed: true, problem: `${dir}: could not read the owners of the approver and config directories; no approver is trusted until this is fixed` };
   }
   if (WINDOWS_SERVICE_ACCOUNTS.has(config)) {
-    return `${configDir} is owned by the service account (${config}); no approver is trusted until an administrator takes ownership of it`;
+    return { readFailed: false, problem: `${configDir} is owned by the service account (${config}); no approver is trusted until an administrator takes ownership of it` };
   }
   if (!WINDOWS_TRUSTED_OWNERS.has(approvers) && approvers !== config) {
-    return `${dir} is owned by ${approvers}, which is neither Administrators, SYSTEM nor the owner of ${configDir} (${config}); `
-      + 'a directory\'s owner can always rewrite its ACL, so no approver is trusted until an administrator takes ownership of it';
+    return { readFailed: false, problem: `${dir} is owned by ${approvers}, which is neither Administrators, SYSTEM nor the owner of ${configDir} (${config}); `
+      + 'a directory\'s owner can always rewrite its ACL, so no approver is trusted until an administrator takes ownership of it' };
   }
-  return null;
+  return { readFailed: false, problem: null };
+}
+
+function checkWindowsOwners(args) {
+  return windowsOwnerVerdict(args).problem;
 }
 
 function writeFileAtomic(file, text, mode = 0o600) {
@@ -300,7 +309,10 @@ class ApproverStore {
   // The Windows owner verdict, cached on the approvers and config dirs'
   // (ino, ChangeTime). A missing approvers dir is no approvers (and forgets
   // the cache, so a dir that appears later is checked); a junction there is
-  // refused outright.
+  // refused outright. Only a verdict is cached: an owner read that failed
+  // (a PowerShell timeout under load at boot) stands for OWNER_RETRY_MS and
+  // is then read again, instead of disabling every approver until the ACL
+  // changes or the service restarts.
   _checkOwners() {
     const configDir = path.dirname(this.dir);
     let key;
@@ -314,9 +326,19 @@ class ApproverStore {
       if (err.code === 'ENOENT') return null;
       return `${this.dir}: could not check its owner (${err.code || err.message}); no approver is trusted until this is fixed`;
     }
-    if (key !== this._ownerKey) {
-      this._ownerProblem = checkWindowsOwners({ dir: this.dir, configDir, readOwners: this.readOwners });
-      this._ownerKey = key;
+    const t = this.now();
+    const waitingToRetry = this._ownerRetryKey === key && t < this._ownerRetryAt;
+    if (key !== this._ownerKey && !waitingToRetry) {
+      const { problem, readFailed } = windowsOwnerVerdict({ dir: this.dir, configDir, readOwners: this.readOwners });
+      this._ownerProblem = problem;
+      if (readFailed) {
+        this._ownerKey = null;
+        this._ownerRetryKey = key;
+        this._ownerRetryAt = t + OWNER_RETRY_MS;
+      } else {
+        this._ownerKey = key;
+        this._ownerRetryKey = null;
+      }
     }
     return this._ownerProblem;
   }
