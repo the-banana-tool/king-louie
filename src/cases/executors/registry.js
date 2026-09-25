@@ -13,6 +13,7 @@ const {
   readJsonSafe, writeJsonAtomic, localDate, pickTimeZone, addDays, EXECUTOR_ID_PATTERN, DAY_PATTERN, validTimeZone, sha256hex
 } = require('./util');
 const { JobStore, readSnapshot, OPEN_STATES } = require('./job-store');
+const jobs = require('./jobs');
 
 const log = createLogger('executors');
 const AUTHORITY_RANK = Object.freeze({ none: 0, envelope: 1, signed: 2 });
@@ -504,7 +505,26 @@ class ExecutorRegistry {
       .filter((r) => OPEN_STATES.includes(r.state) && (!caseId || r.caseId === caseId));
   }
 
-  // ---- operations (Tasks 9–12) ----
+  // ---- Job lifecycle (Task 9) ----
+
+  refreshCase(caseId, opts = {}) {
+    return jobs.refreshCase(this, caseId, opts);
+  }
+
+  pollWakeup(caseId, wakeup) {
+    return jobs.pollWakeup(this, caseId, wakeup);
+  }
+
+  cancelOpenJobs(caseId, reason) {
+    return jobs.cancelOpenJobs(this, caseId, reason);
+  }
+
+  // The owner's cancel (IPC): runs in systemAction.
+  cancelJob(caseId, jobId, reason) {
+    return jobs.cancelJobAsOwner(this, caseId, jobId, reason);
+  }
+
+  // ---- operations (Tasks 10–12) ----
 }
 
 module.exports = { ExecutorRegistry, intersectWindow, AUTHORITY_RANK };
