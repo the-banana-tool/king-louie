@@ -143,28 +143,36 @@ async function submitBrowser(reg, { caseId }, { entry, job, notes }) {
     if (failed) throw new Error(`${name}: ${clip(r.error)}`);
     return r || {};
   };
+  // The page the browser is on must stay on the fitted origin: a redirect
+  // from the approved page to another site is refused before any
+  // credential or field is typed there, and again right before the click.
+  const onOrigin = async (when) => {
+    const at = (await run('status', {})).currentUrl;
+    const n = normalizeRecipient(String(at ?? ''), { channel: 'url' });
+    if (!n.ok || n.value !== job.recipients[0]) {
+      throw new Error(`${when} the page is ${clip(at ?? 'unknown')}, not on ${job.recipients[0]}`);
+    }
+  };
   let html = '';
   try {
+    // Ruling T11-always-profile: every browser job runs in the cases
+    // profile. A running browser in another profile, or one whose profile
+    // cannot be read, is refused and never used with its cookies.
     const st = await run('status', {});
-    if (p.login === true) {
-      // Ruling T11-profile: never log in with another profile's cookies. A
-      // running browser must be in the cases profile; when the actions cannot
-      // say which profile is active, a running browser is refused.
-      if (st.running) {
-        const current = typeof actions.profile_current === 'function' ? await run('profile_current', {}) : null;
-        if (!current || current.active !== CASES_BROWSER_PROFILE) {
-          await failJob(reg, caseId, job, 'browser: open with another profile');
-          return { ok: false, error: OTHER_PROFILE };
-        }
+    if (st.running) {
+      const current = typeof actions.profile_current === 'function' ? await run('profile_current', {}) : null;
+      if (!current || current.active !== CASES_BROWSER_PROFILE) {
+        await failJob(reg, caseId, job, 'browser: open with another profile');
+        return { ok: false, error: OTHER_PROFILE };
       }
-      if (!st.running) await run('start', { profile: CASES_BROWSER_PROFILE });
-      await run('navigate', { url: p.url });
-      await run('fill_credentials', { host: new URL(p.url).hostname.toLowerCase(), profile: CASES_BROWSER_PROFILE });
     } else {
-      if (!st.running) await run('start', {});
-      await run('navigate', { url: p.url });
+      await run('start', { profile: CASES_BROWSER_PROFILE });
     }
+    await run('navigate', { url: p.url });
+    await onOrigin('after navigate');
+    if (p.login === true) await run('fill_credentials', { host: new URL(p.url).hostname.toLowerCase(), profile: CASES_BROWSER_PROFILE });
     for (const f of p.fields || []) await run('fill', { selector: f.selector, text: f.value });
+    await onOrigin('before the submit click');
     await run('click', { selector: p.submit.selector });
     clicked = true;
     if (p.waitFor) await run('wait_for', { selector: p.waitFor });
@@ -172,7 +180,8 @@ async function submitBrowser(reg, { caseId }, { entry, job, notes }) {
   } catch (err) {
     const message = clip(err && err.message ? err.message : err);
     // Ruling T11-click: after the click the form may have gone, so the job
-    // keeps its contact reservation; before it, nothing left and it is released.
+    // counts as sent (reservation kept, envelope and case contacts recorded).
+    // Before it nothing left, and the reservation is released.
     if (clicked) {
       log.warn(`Browser job ${job.id} in ${caseId} failed after its submit click: ${message}`);
       await failJob(reg, caseId, job, `browser: ${message}; ${MAY_HAVE_BEEN_SENT}`, { keepReservation: true });
@@ -181,14 +190,23 @@ async function submitBrowser(reg, { caseId }, { entry, job, notes }) {
     await failJob(reg, caseId, job, `browser: ${message}`);
     return { ok: false, error: `the ${entry.id} job failed: ${message}`, jobId: job.id };
   }
+  // From here the form was sent: a failure keeps what the job counts against.
   const rel = `sources/browser/${job.id}.md`;
-  const file = path.join(reg.caseDir(caseId), ...rel.split('/'));
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, [
-    `# Browser job ${job.id}`, '', `URL: ${p.url}`, `At: ${reg.now().toISOString()}`, '', '## Steps', '',
-    ...steps.map((s) => `- ${s}`), '', '## Page after submit', '', '```html', String(html), '```', ''
-  ].join('\n'));
-  const committed = await jobs.commitSubmit(reg, caseId, job, { jobId: job.id, state: 'done' });
+  let committed;
+  try {
+    const file = path.join(reg.caseDir(caseId), ...rel.split('/'));
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, [
+      `# Browser job ${job.id}`, '', `URL: ${p.url}`, `At: ${reg.now().toISOString()}`, '', '## Steps', '',
+      ...steps.map((s) => `- ${s}`), '', '## Page after submit', '', '```html', String(html), '```', ''
+    ].join('\n'));
+    committed = await jobs.commitSubmit(reg, caseId, job, { jobId: job.id, state: 'done' });
+  } catch (err) {
+    const message = clip(err && err.message ? err.message : err);
+    log.warn(`Browser job ${job.id} in ${caseId} could not be recorded after its submit: ${message}`);
+    await failJob(reg, caseId, job, `browser: recording failed: ${message}; ${MAY_HAVE_BEEN_SENT}`, { keepReservation: true });
+    return { ok: false, error: `the ${entry.id} job was submitted but could not be recorded: ${message}; ${MAY_HAVE_BEEN_SENT}`, jobId: job.id };
+  }
   const problem = commitProblem(committed, job);
   if (problem) return { ok: false, error: problem, jobId: job.id };
   return withNote({ ok: true, jobId: committed.id, externalId: committed.externalId, source: rel }, notes);

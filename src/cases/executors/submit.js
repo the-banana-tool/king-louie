@@ -42,6 +42,9 @@ function validatePayload(entry, kind, p) {
       if (!isObj(r) || !isStr(r.address) || Object.keys(r).some((k) => k !== 'address' && k !== 'name') || (r.name !== undefined && typeof r.name !== 'string')) {
         return 'each payload.recipients entry is { address, name? }';
       }
+      // An address is fitted as written; a fact reference would be rendered
+      // into an address the envelope never saw.
+      if (r.address.includes('{{')) return 'payload.recipients[].address must be written out, not a {{fact}} reference';
     }
     if (!isStr(p.text)) return 'payload.text is required';
     if (p.facts !== undefined && (!Array.isArray(p.facts) || !p.facts.every((f) => typeof f === 'string'))) return 'payload.facts must be a list of fact ids';
@@ -165,7 +168,9 @@ async function submitChecked(reg, ctx, params) {
     for (const address of addresses) {
       const n = normalizeRecipient(address, { channel, defaultCountryCode: settings.defaultCountryCode });
       if (!n.ok) return fail(n.error);
-      if (!recipients.includes(n.value)) recipients.push(n.value);
+      // Refused, not merged: adapters map contacts to recipients by position.
+      if (recipients.includes(n.value)) return fail(`recipient ${n.value} is listed more than once`);
+      recipients.push(n.value);
     }
   }
 

@@ -197,8 +197,12 @@ describe('Executor.submit to built-in executors', () => {
   it('fills a web form through the browser actions and saves the page', async () => {
     const calls = [];
     const act = (name, result = {}) => async (params) => { calls.push([name, params]); return { ok: true, ...result }; };
+    let currentUrl = null;
     const browserActions = {
-      status: act('status', { running: false }), start: act('start'), navigate: act('navigate'), fill_credentials: act('fill_credentials'),
+      status: async (params) => { calls.push(['status', params]); return { ok: true, running: false, currentUrl }; },
+      start: act('start'),
+      navigate: async (params) => { calls.push(['navigate', params]); currentUrl = params.url; return { ok: true }; },
+      fill_credentials: act('fill_credentials'),
       fill: act('fill'), click: act('click'), wait_for: act('wait_for'), content: act('content', { html: '<p>Application received</p>' })
     };
     const s = await setup({ registryOptions: { browserActions } });
@@ -213,7 +217,8 @@ describe('Executor.submit to built-in executors', () => {
       payload: JSON.stringify({ url: 'https://permits.example.com/apply', fields: [{ selector: '#acres', value: `{{${s.acres.id}}}` }], submit: { selector: '#go' }, waitFor: '#done', login: true })
     });
     assert.strictEqual(r.ok, true, r.error);
-    assert.deepStrictEqual(calls.map((c) => c[0]), ['status', 'start', 'navigate', 'fill_credentials', 'fill', 'click', 'wait_for', 'content']);
+    // The page's origin is read back after navigate and again before the click.
+    assert.deepStrictEqual(calls.map((c) => c[0]), ['status', 'start', 'navigate', 'status', 'fill_credentials', 'fill', 'status', 'click', 'wait_for', 'content']);
     assert.deepStrictEqual(calls.find((c) => c[0] === 'fill')[1], { selector: '#acres', text: '2.12 acres' });
     // Ruling M17: login runs in the named 'kl-cases' profile; the vault key is profile@host.
     assert.deepStrictEqual(calls.find((c) => c[0] === 'start')[1], { profile: 'kl-cases' });
@@ -462,16 +467,23 @@ describe('Executor.submit outbound gate in service mode', () => {
 
 describe('Executor.submit browser failures and profiles', () => {
   // A browser with a daily cap of 5, so the reservation can be read back.
-  async function browserSetup({ running = false, active = null, failAt = null, withProfileCurrent = true } = {}) {
+  // `redirectTo` lands navigate on another url; `redirectOnFill` moves the
+  // page there when a field is filled (a script on the page).
+  async function browserSetup({ running = false, active = null, failAt = null, withProfileCurrent = true, redirectTo = null, redirectOnFill = null } = {}) {
     const calls = [];
-    const act = (name, result = {}) => async (params) => {
+    let currentUrl = null;
+    const act = (name, result = {}, effect = null) => async (params) => {
       calls.push([name, params]);
       if (name === failAt) return { ok: false, error: `${name} timed out` };
-      return { ok: true, ...result };
+      if (effect) effect(params);
+      return { ok: true, ...(typeof result === 'function' ? result() : result) };
     };
     const browserActions = {
-      status: act('status', { running }), start: act('start'), navigate: act('navigate'), fill_credentials: act('fill_credentials'),
-      fill: act('fill'), click: act('click'), wait_for: act('wait_for'), content: act('content', { html: '<p>ok</p>' })
+      status: act('status', () => ({ running, currentUrl })), start: act('start'),
+      navigate: act('navigate', {}, (params) => { currentUrl = redirectTo || params.url; }),
+      fill_credentials: act('fill_credentials'),
+      fill: act('fill', {}, () => { if (redirectOnFill) currentUrl = redirectOnFill; }),
+      click: act('click'), wait_for: act('wait_for'), content: act('content', { html: '<p>ok</p>' })
     };
     if (withProfileCurrent) browserActions.profile_current = act('profile_current', { active, running });
     const s = await setup({ executors: { entries: { browser: { constraints: { contactsPerDay: 5 } } } }, registryOptions: { browserActions } });
@@ -486,7 +498,7 @@ describe('Executor.submit browser failures and profiles', () => {
       executor: 'browser', envelopeId: r0.envelopeId,
       payload: JSON.stringify({ url: 'https://permits.example.com/apply', fields: [{ selector: '#acres', value: `{{${s.acres.id}}}` }], submit: { selector: '#go' }, waitFor: '#done', ...over })
     });
-    return { s, calls, send };
+    return { s, calls, send, envelopeId: r0.envelopeId };
   }
 
   it('a failure after the submit click keeps the reservation: the form may have been sent', async () => {
@@ -510,7 +522,11 @@ describe('Executor.submit browser failures and profiles', () => {
     assert.strictEqual(s.reg.globalRemaining('browser'), 5);
   });
 
-  it('login refuses a browser already open with another profile, and one whose profile cannot be read', async () => {
+  it('every job refuses a browser already open with another profile, and one whose profile cannot be read', async () => {
+    const plain = await browserSetup({ running: true, active: 'personal' });
+    assert.deepStrictEqual(await plain.send(), { ok: false, error: 'the browser is open with another profile; close it or retry' });
+    assert.deepStrictEqual(plain.calls.map((c) => c[0]), ['status', 'profile_current'], 'a job without login is refused too');
+
     const other = await browserSetup({ running: true, active: 'personal' });
     assert.deepStrictEqual(await other.send({ login: true }), { ok: false, error: 'the browser is open with another profile; close it or retry' });
     assert.deepStrictEqual(other.calls.map((c) => c[0]), ['status', 'profile_current'], 'nothing navigated, no credentials filled');
@@ -524,6 +540,70 @@ describe('Executor.submit browser failures and profiles', () => {
     const same = await browserSetup({ running: true, active: 'kl-cases' });
     const r = await same.send({ login: true });
     assert.strictEqual(r.ok, true, r.error);
-    assert.deepStrictEqual(same.calls.map((c) => c[0]), ['status', 'profile_current', 'navigate', 'fill_credentials', 'fill', 'click', 'wait_for', 'content']);
+    assert.deepStrictEqual(same.calls.map((c) => c[0]), ['status', 'profile_current', 'navigate', 'status', 'fill_credentials', 'fill', 'status', 'click', 'wait_for', 'content']);
+
+    const stopped = await browserSetup({ running: false });
+    const r2 = await stopped.send();
+    assert.strictEqual(r2.ok, true, r2.error);
+    assert.deepStrictEqual(stopped.calls.find((c) => c[0] === 'start')[1], { profile: 'kl-cases' }, 'a job without login starts in the cases profile too');
+  });
+
+  it('a redirect off the approved origin fails before credentials, fields or the click', async () => {
+    const away = await browserSetup({ redirectTo: 'https://login.example.net/phish' });
+    const r = await away.send({ login: true });
+    assert.strictEqual(r.ok, false);
+    assert.match(r.error, /after navigate the page is https:\/\/login\.example\.net\/phish, not on https:\/\/permits\.example\.com/);
+    assert.deepStrictEqual(away.calls.map((c) => c[0]), ['status', 'start', 'navigate', 'status']);
+    assert.strictEqual(new JobStore(away.s.meta.dir).get(r.jobId).state, 'failed');
+    assert.strictEqual(away.s.reg.globalRemaining('browser'), 5, 'failed before the click: released');
+
+    const late = await browserSetup({ redirectOnFill: 'https://forms.example.net/collect' });
+    const r2 = await late.send();
+    assert.match(r2.error, /before the submit click the page is https:\/\/forms\.example\.net\/collect/);
+    assert.strictEqual(late.calls.some((c) => c[0] === 'click'), false);
+    assert.strictEqual(late.s.reg.globalRemaining('browser'), 5);
+  });
+
+  it('failures after the click count as sent: envelope usage, payloads and case contacts, until the attempts cap', async () => {
+    const b = await browserSetup({ failAt: 'wait_for' });
+    const r = await b.send();
+    assert.match(r.error, /the form may have been sent/);
+    const env = new EnvelopeStore(b.s.meta.dir).get(b.envelopeId);
+    assert.deepStrictEqual([env.payloads.length, env.payloads[0].jobId, env.usage.contacts, env.usage.attempts], [1, r.jobId, ['https://permits.example.com'], { 'https://permits.example.com': 1 }]);
+    assert.strictEqual(b.s.rt.budget(b.s.meta.id).status().contactsPerDay.spent, 1);
+    const again = await b.send();
+    assert.deepStrictEqual([again.ok, again.needsApproval], [false, true]);
+    assert.match(again.deltas.join(' '), /raises attempts per contact from 1 to 2/);
+    assert.strictEqual(b.calls.filter((c) => c[0] === 'click').length, 1, 'the second attempt never reached the page');
+  });
+
+  it('a commit that throws after the click keeps the reservation', async () => {
+    const b = await browserSetup();
+    const real = jobs.commitSubmit;
+    jobs.commitSubmit = async () => { throw new Error('disk full'); };
+    let r;
+    try {
+      r = await b.send();
+    } finally {
+      jobs.commitSubmit = real;
+    }
+    assert.strictEqual(r.ok, false);
+    assert.match(r.error, /submitted but could not be recorded: disk full; the form may have been sent/);
+    assert.strictEqual(new JobStore(b.s.meta.dir).get(r.jobId).state, 'failed');
+    assert.strictEqual(b.s.reg.globalRemaining('browser'), 4);
+  });
+});
+
+describe('Executor.submit recipients', () => {
+  it('refuses a fact reference in an address and a recipient listed twice', async () => {
+    const s = await setup();
+    const envelopeId = await approvedEnvelope(s);
+    assert.deepStrictEqual(await submit(s, { executor: 'fake-agent', envelopeId, payload: call(s, { recipients: [{ address: `{{${s.acres.id}}}@example.com` }] }) }), {
+      ok: false, error: 'payload.recipients[].address must be written out, not a {{fact}} reference'
+    });
+    assert.deepStrictEqual(await submit(s, { executor: 'fake-agent', envelopeId, payload: call(s, { recipients: [{ address: '+15550100' }, { address: '+1 555 0100' }] }) }), {
+      ok: false, error: 'recipient +15550100 is listed more than once'
+    });
+    assert.strictEqual(s.ctl.calls.filter((c) => c[0] === 'submit').length, 0);
   });
 });

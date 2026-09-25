@@ -488,10 +488,36 @@ function takeReservation(job) {
   return n;
 }
 
+// What a job that reached its recipients counts against: the envelope's
+// payloads record and usage (contacts, attempts), then the case's
+// contactsPerDay. The envelope side is idempotent per job id; the caller
+// guards the budget charge with job.contactsCharged.
+function recordSend(reg, caseId, caseDir, job, after, { at, chargeContacts }) {
+  updateEnvelope(caseDir, job.envelopeId, (env) => {
+    const payloads = Array.isArray(env.payloads) ? env.payloads : [];
+    if (payloads.some((p) => p && p.jobId === job.id)) return false;
+    env.payloads = [...payloads, {
+      n: job.n, at, jobId: job.id, payload: job.originalPayload, rendered: job.payload, hash: job.payloadHash, estimateUsd: job.estimateUsd
+    }];
+    const attempts = Number(job.originalPayload?.attemptsPerContact) || 1;
+    for (const r of job.recipients || []) {
+      if (!env.usage.contacts.includes(r)) env.usage.contacts.push(r);
+      env.usage.attempts = { ...(env.usage.attempts || {}), [r]: (Number(env.usage.attempts?.[r]) || 0) + attempts };
+    }
+    return true;
+  });
+  if (chargeContacts && job.newContacts > 0) {
+    const r = reg.caseRuntime.budget(caseId).charge('contactsPerDay', job.newContacts, { executor: job.executor, jobId: job.id });
+    if (r && Array.isArray(r.crossedNow) && r.crossedNow.length) after.crossings.push(['contactsPerDay', r.crossedNow]);
+  }
+}
+
 // A submit whose answer cannot be committed: the job fails, nothing is
 // charged, and the executor is asked to drop the job it accepted.
 // `keepReservation`: the contacts may already have been reached (a browser
-// form clicked before the failure), so the daily-cap reservation stays used.
+// form clicked before the failure), so the job counts as sent: the daily-cap
+// reservation stays used, and the envelope and case contacts record it
+// (recordSend), exactly as commitSubmit would.
 async function failSubmit(reg, caseId, job, submitted = {}, reason = 'failed', { keepReservation = false } = {}) {
   const caseDir = reg.caseDir(caseId);
   const store = new JobStore(caseDir);
@@ -510,10 +536,16 @@ async function failSubmit(reg, caseId, job, submitted = {}, reason = 'failed', {
   // Released only while the job on disk is still `submitting`: a committed
   // job keeps its reservation (contacts may already have been reached).
   const release = !keepReservation && (!isObject(fresh) || fresh.state === 'submitting') ? takeReservation(job) : 0;
+  const after = newAfter();
+  if (keepReservation) {
+    const contactsCharged = job.contactsCharged === true || (isObject(fresh) && fresh.contactsCharged === true);
+    job.contactsCharged = true;
+    writeAhead(store, job, ['contactsCharged']);
+    recordSend(reg, caseId, caseDir, job, after, { at: reg.now().toISOString(), chargeContacts: !contactsCharged });
+  }
   job.state = 'failed';
   job.reason = clip(reason);
   job.lastChange = reg.now().toISOString();
-  const after = newAfter();
   finishJob(reg, caseId, caseDir, job, after);
   saveJob(store, job);
   if (release) await reg.releaseContacts(job.executor, release, { caseId });
@@ -563,23 +595,7 @@ async function commitSubmit(reg, caseId, job, submitted = {}) {
   }
   job.state = submitted.state || 'submitted';
   job.lastChange = job.submittedAt;
-  updateEnvelope(caseDir, job.envelopeId, (env) => {
-    const payloads = Array.isArray(env.payloads) ? env.payloads : [];
-    if (payloads.some((p) => p && p.jobId === job.id)) return false;
-    env.payloads = [...payloads, {
-      n: job.n, at: job.submittedAt, jobId: job.id, payload: job.originalPayload, rendered: job.payload, hash: job.payloadHash, estimateUsd: job.estimateUsd
-    }];
-    const attempts = Number(job.originalPayload?.attemptsPerContact) || 1;
-    for (const r of job.recipients || []) {
-      if (!env.usage.contacts.includes(r)) env.usage.contacts.push(r);
-      env.usage.attempts = { ...(env.usage.attempts || {}), [r]: (Number(env.usage.attempts?.[r]) || 0) + attempts };
-    }
-    return true;
-  });
-  if (!contactsCharged && job.newContacts > 0) {
-    const r = rt.budget(caseId).charge('contactsPerDay', job.newContacts, { executor: job.executor, jobId: job.id });
-    if (r && Array.isArray(r.crossedNow) && r.crossedNow.length) after.crossings.push(['contactsPerDay', r.crossedNow]);
-  }
+  recordSend(reg, caseId, caseDir, job, after, { at: job.submittedAt, chargeContacts: !contactsCharged });
   if (entry && entry.latency !== 'interactive' && isOpen(job.state)) {
     const every = Math.max(MIN_POLL_MS, Number(entry.pollEveryMs) || reg.settings().pollEveryMs);
     job.wakeupId = rt.wakeups(caseId).ensure('poll-executor', { every, payload: { key: `poll:${job.id}`, executor: job.executor, jobId: job.id } });
