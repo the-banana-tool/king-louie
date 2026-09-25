@@ -377,6 +377,60 @@ describe('RelayClient', () => {
     assert.equal(c.isConnected(), true);
   });
 
+  it("start() failing resets `started`, so a later start() is not a silent no-op", async () => {
+    const relay = await fakeRelay();
+    cleanups.push(relay.stop);
+    const dataDir = tempDir();
+    let calls = 0;
+    const transportFactory = (options) => {
+      calls += 1;
+      const t = new MeshTransport(options);
+      if (calls === 1) t.start = async () => { throw new Error('boom'); };
+      return t;
+    };
+    const c = new RelayClient({ identity: nodeIdentity, relayPin: pinFor(relay), dataDir, useTls: false, reconnectDelays: [50, 100], transportFactory });
+    cleanups.push(() => c.stop());
+    await assert.rejects(c.start(), /boom/);
+    assert.equal(c.started, false);
+    const connected = once(c, 'connected');
+    await c.start();
+    await connected;
+    assert.equal(c.isConnected(), true);
+    assert.equal(calls, 2);
+  });
+
+  it('stop() while a dial is in flight resets `dialing`, so a later start() can dial again', async () => {
+    const relay = await fakeRelay();
+    cleanups.push(relay.stop);
+    const dataDir = tempDir();
+    let factoryCalls = 0;
+    let hungConnect = null;
+    const transportFactory = (options) => {
+      factoryCalls += 1;
+      const t = new MeshTransport(options);
+      if (factoryCalls === 1) {
+        // The very first dial never settles, so `dialing` is still true
+        // when stop() runs.
+        t.connectToPeer = () => new Promise((resolve, reject) => { hungConnect = reject; });
+      }
+      return t;
+    };
+    const c = new RelayClient({ identity: nodeIdentity, relayPin: pinFor(relay), dataDir, useTls: false, reconnectDelays: [50, 100], transportFactory });
+    await c.start();
+    for (let i = 0; i < 50 && !hungConnect; i += 1) await new Promise((r) => setTimeout(r, 5));
+    assert.ok(hungConnect, 'the first dial should be in flight (never resolved) by now');
+    assert.equal(c.dialing, true);
+
+    await c.stop();
+    assert.equal(c.dialing, false);
+
+    const connected = once(c, 'connected');
+    await c.start();
+    cleanups.push(() => c.stop());
+    await connected;
+    assert.equal(c.isConnected(), true);
+  });
+
   it('dials front-door.json through connectPinned when the transport has it (E7)', async () => {
     const relay = await fakeRelay();
     cleanups.push(relay.stop);

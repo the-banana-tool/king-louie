@@ -193,6 +193,74 @@ describe('MeshTransport', () => {
     assert.strictEqual(events[0].peerId, identity2.peerId);
   });
 
+  it('removeTrustedPeer emits peerDisconnected exactly once on the removing side (and once on the remote side)', async () => {
+    transport1 = new MeshTransport({ identity: identity1, port: 19043, useTls: false });
+    transport2 = new MeshTransport({ identity: identity2, port: 19044, useTls: false });
+    transport1.addTrustedPeer(identity2.peerId, identity2.publicKey);
+    transport2.addTrustedPeer(identity1.peerId, identity1.publicKey);
+    await transport1.start();
+    await transport2.start();
+    const connected = new Promise((resolve) => transport1.once('peerConnected', resolve));
+    await transport2.connectToPeer('127.0.0.1', transport1.port);
+    await connected;
+
+    let removingSideEvents = 0;
+    let remoteSideEvents = 0;
+    transport1.on('peerDisconnected', () => { removingSideEvents += 1; });
+    transport2.on('peerDisconnected', () => { remoteSideEvents += 1; });
+    transport1.removeTrustedPeer(identity2.peerId);
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Before this fix, deleting the peer from `peers` before its socket's
+    // close event fired made the stale-socket guard in _handlePeerDisconnect
+    // treat that close as a late echo and swallow it — removing a peer
+    // never told the UI/gateway, and a link-rpc call to it would just wait
+    // out its timeout instead of rejecting on disconnect.
+    assert.strictEqual(removingSideEvents, 1);
+    assert.strictEqual(remoteSideEvents, 1);
+    assert.strictEqual(transport1.getPeer(identity2.peerId), null);
+    assert.strictEqual(transport1.trustedPeers.has(identity2.peerId), false);
+  });
+
+  it('a real heartbeat timeout terminates the socket, disconnects exactly once via _checkHeartbeats, and falls back to the trusted address to redial an inbound peer', async () => {
+    transport1 = new MeshTransport({ identity: identity1, port: 19045, useTls: false });
+    transport2 = new MeshTransport({ identity: identity2, port: 19046, useTls: false });
+    // identity2 dials INTO transport1, so transport1's own record of that
+    // connection (peerInfo.address/port) is null — its trustedPeers entry is
+    // the only place transport1 has an address to redial identity2 at.
+    transport1.addTrustedPeer(identity2.peerId, identity2.publicKey, { address: '127.0.0.1', port: 19046 });
+    transport2.addTrustedPeer(identity1.peerId, identity1.publicKey);
+    await transport1.start();
+    await transport2.start();
+    const connected = new Promise((resolve) => transport1.once('peerConnected', resolve));
+    await transport2.connectToPeer('127.0.0.1', transport1.port);
+    await connected;
+
+    const peer = transport1.getPeer(identity2.peerId);
+    assert.ok(peer, 'the peer must be connected before driving the timeout');
+    assert.equal(peer.address, null, 'this connection is inbound: peerInfo itself carries no address');
+    // Back-date lastSeen instead of waiting out the real
+    // HEARTBEAT_INTERVAL_MS/HEARTBEAT_TIMEOUT_MS, then drive the actual
+    // per-tick timeout-detection method (not _handlePeerDisconnect) so the
+    // real terminate() -> 'close' -> _handlePeerDisconnect path runs.
+    peer.lastSeen = Date.now() - 91000;
+
+    let events = 0;
+    const disconnected = new Promise((resolve) => transport1.once('peerDisconnected', (info) => { events += 1; resolve(info); }));
+    transport1._checkHeartbeats();
+    const info = await disconnected;
+    assert.strictEqual(info.reason, 'timeout');
+    await new Promise((r) => setTimeout(r, 30));
+    assert.strictEqual(events, 1, 'exactly one peerDisconnected for the timed-out peer');
+    assert.strictEqual(transport1.getPeer(identity2.peerId), null);
+    // The reconnect gate in _handlePeerDisconnect only reaches
+    // _scheduleReconnect for a heartbeat timeout when peerInfo itself has no
+    // address — proving it used trustedPeers' stored address, not the
+    // (null) connection-level one, the way the original heartbeat code did
+    // before it was consolidated onto _handlePeerDisconnect.
+    assert.strictEqual(transport1.reconnectTimers.has(identity2.peerId), true);
+  });
+
   it('sendRpc sends and receives RPC response', async () => {
     transport1 = new MeshTransport({ identity: identity1, port: 19012, useTls: false });
     transport2 = new MeshTransport({ identity: identity2, port: 19013, useTls: false });

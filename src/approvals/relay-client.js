@@ -126,7 +126,15 @@ class RelayClient extends EventEmitter {
     // No address on the trusted peer: this client, not the transport, decides
     // when to dial again.
     this.transport.addTrustedPeer(this.relayPeerId, this.pin.publicKey, { displayName: 'relay', tlsFingerprint: this.pin.tlsFingerprint || null });
-    await this.transport.start();
+    try {
+      await this.transport.start();
+    } catch (err) {
+      // A transport that never actually started must not leave start()
+      // looking like it already ran — the idempotency guard above would
+      // otherwise turn every later start() into a silent no-op forever.
+      this.started = false;
+      throw err;
+    }
     this._writeLink();
     this._dial();
   }
@@ -235,6 +243,9 @@ class RelayClient extends EventEmitter {
     this.stopped = true;
     clearTimeout(this.retryTimer);
     this.retryTimer = null;
+    // A dial in flight when stop() runs must not wedge a later start()'s
+    // _dial() behind a `dialing` flag stop() never cleared.
+    this.dialing = false;
     const was = this.connected;
     this.connected = false;
     try {

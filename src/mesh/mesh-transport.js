@@ -115,7 +115,13 @@ class MeshTransport extends EventEmitter {
     for (const peer of this.peers.values()) {
       try { peer.ws.close(); } catch { /* ignore */ }
     }
-    this.peers.clear();
+    // Not peers.clear(): same reasoning as removeTrustedPeer/disconnectPeer
+    // — the close listener is the one place that deletes from `peers` and
+    // emits 'peerDisconnected'; clearing it here first would hit the
+    // stale-socket guard and drop every one of those events during
+    // shutdown, the same regression removeTrustedPeer had. `running` is
+    // already false, so _scheduleReconnect (which each disconnect still
+    // reaches) is a no-op.
 
     for (const pending of this.pendingAuth.values()) {
       try { pending.ws.close(); } catch { /* ignore */ }
@@ -153,11 +159,15 @@ class MeshTransport extends EventEmitter {
 
   removeTrustedPeer(peerId) {
     this.trustedPeers.delete(peerId);
-    const peer = this.peers.get(peerId);
-    if (peer) {
-      try { peer.ws.close(); } catch { /* ignore */ }
-      this.peers.delete(peerId);
-    }
+    // disconnectPeer (below) closes the socket without touching `peers`
+    // itself, so the one close listener (_handlePeerDisconnect) does the
+    // single cleanup and emits 'peerDisconnected' — deleting it here first
+    // used to make that handler's stale-socket guard (added for the
+    // superseded-reconnect case) treat this as a late echo and swallow the
+    // event entirely, so removing a peer never told the UI or the gateway,
+    // and a link-rpc call to it just waited out its timeout instead of
+    // rejecting on disconnect.
+    this.disconnectPeer(peerId);
   }
 
   // Force-closes a connected peer's socket without untrusting it, so a
@@ -583,28 +593,34 @@ class MeshTransport extends EventEmitter {
   // --- Heartbeat ---
 
   _startHeartbeat() {
-    this.heartbeatInterval = setInterval(() => {
-      const now = Date.now();
+    this.heartbeatInterval = setInterval(() => this._checkHeartbeats(), HEARTBEAT_INTERVAL_MS);
+  }
 
-      for (const [peerId, peer] of this.peers) {
-        if (now - peer.lastSeen > HEARTBEAT_TIMEOUT_MS) {
-          log.info(`peer timed out: ${peerId}`);
-          // Tag the reason and let the socket's own 'close' handler
-          // (_handlePeerDisconnect, below) do the one canonical cleanup —
-          // deleting here too, and emitting a second 'peerDisconnected' when
-          // that handler also runs, is the double-emit this used to cause.
-          // terminate() (not close()) forces the close event even on a
-          // socket that is no longer responsive.
-          peer.disconnectReason = 'timeout';
-          try { peer.ws.terminate(); } catch { /* ignore */ }
-          continue;
-        }
+  // Extracted from the interval callback so a test can drive the real
+  // timeout-detection code directly (with a manipulated peer.lastSeen)
+  // instead of waiting out HEARTBEAT_INTERVAL_MS/HEARTBEAT_TIMEOUT_MS in
+  // real time, or reaching into _handlePeerDisconnect directly.
+  _checkHeartbeats() {
+    const now = Date.now();
 
-        if (peer.ws.readyState === WebSocket.OPEN) {
-          peer.ws.send(JSON.stringify({ type: 'mesh:heartbeat' }));
-        }
+    for (const [peerId, peer] of this.peers) {
+      if (now - peer.lastSeen > HEARTBEAT_TIMEOUT_MS) {
+        log.info(`peer timed out: ${peerId}`);
+        // Tag the reason and let the socket's own 'close' handler
+        // (_handlePeerDisconnect, below) do the one canonical cleanup —
+        // deleting here too, and emitting a second 'peerDisconnected' when
+        // that handler also runs, is the double-emit this used to cause.
+        // terminate() (not close()) forces the close event even on a
+        // socket that is no longer responsive.
+        peer.disconnectReason = 'timeout';
+        try { peer.ws.terminate(); } catch { /* ignore */ }
+        continue;
       }
-    }, HEARTBEAT_INTERVAL_MS);
+
+      if (peer.ws.readyState === WebSocket.OPEN) {
+        peer.ws.send(JSON.stringify({ type: 'mesh:heartbeat' }));
+      }
+    }
   }
 
   // --- Reconnection ---
@@ -622,7 +638,15 @@ class MeshTransport extends EventEmitter {
     log.info(`peer disconnected: ${peerId} (${reason})`);
     this.emit('peerDisconnected', { peerId, reason });
 
-    if (peerInfo.address && peerInfo.port) {
+    // Reconnect a peer we dialed ourselves (peerInfo carries the
+    // address/port connectToPeer recorded). A heartbeat timeout is the one
+    // exception: before this path was consolidated onto
+    // _handlePeerDisconnect, it called _scheduleReconnect unconditionally,
+    // which falls back to the trusted peer's own stored address — so an
+    // inbound (listen: true) peer that stopped answering heartbeats is
+    // still worth redialing if trustedPeers has an address for it, even
+    // though this particular connection didn't originate from us.
+    if ((peerInfo.address && peerInfo.port) || reason === 'timeout') {
       this._scheduleReconnect(peerId);
     }
   }
