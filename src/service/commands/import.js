@@ -26,23 +26,44 @@ const path = require('path');
 const { readDesktopSource, createSafeReader, planBatches } = require('../../migration/desktop-source');
 const { spawnWriter, printable } = require('./import-channel');
 const { isAdmin: defaultIsAdmin } = require('./admin-check');
+const { resolveMasterKeyReadOnly } = require('../../platform/master-key');
 
 const IMPORT_USAGE = 'Usage: king-louie-service import --from <desktop user-data dir> [--data-dir DIR] [--dry-run]\n';
+
+// The primary group of `uid`, from id(1) (fix round 2, N2). Absolute paths
+// only, the uid passed as one argument after `--`; /usr/bin/id first, then
+// /bin/id. Throws when neither gives a number: the caller refuses rather than
+// guess a group.
+function primaryGroupOf(uid, { spawnSync = require('child_process').spawnSync } = {}) {
+  const problems = [];
+  for (const exe of ['/usr/bin/id', '/bin/id']) {
+    const out = spawnSync(exe, ['-g', '--', String(uid)], { encoding: 'utf8', timeout: 10000 });
+    if (out.error) { problems.push(`${exe}: ${out.error.code || out.error.message}`); continue; }
+    const text = String(out.stdout || '').trim();
+    if (out.status === 0 && /^\d+$/.test(text)) return Number(text);
+    problems.push(`${exe}: ${String(out.stderr || '').trim() || `exit ${out.status}`}`);
+    break;
+  }
+  throw new Error(`cannot resolve the primary group of uid ${uid} (${problems.join('; ')})`);
+}
 
 // The { uid, gid } the writer child drops to, or null for no drop: only
 // when this process is root on POSIX and the data dir belongs to someone
 // else. A root-owned data dir is written as root (the service account does
 // not control it); Windows has no setuid (the write guard applies instead).
+// The gid is the owner's primary group, not the data dir's group (fix round
+// 2, N2): the macOS installer leaves the directory's group as admin/wheel.
 function writerIdentity(dataDir, {
   platform = process.platform,
   getuid = () => (typeof process.getuid === 'function' ? process.getuid() : -1),
-  lstat = fs.lstatSync
+  lstat = fs.lstatSync,
+  primaryGid = (uid) => primaryGroupOf(uid)
 } = {}) {
   if (platform === 'win32') return null;
   if (getuid() !== 0) return null;
   const st = lstat(dataDir);
   if (st.uid === 0) return null;
-  return { uid: st.uid, gid: st.gid };
+  return { uid: st.uid, gid: primaryGid(st.uid) };
 }
 
 function printPlan(io, plan, attention) {
@@ -80,6 +101,8 @@ async function runImportCommand({ flags = {}, dataDir, io, deps = {} }) {
   const platform = deps.platform || process.platform;
   const isAdmin = deps.isAdmin || (() => defaultIsAdmin({ platform }));
   const identityFor = deps.writerIdentity || ((dir) => writerIdentity(dir, { platform }));
+  // Read-only (fix round 2, N1): never creates a key, never writes a file.
+  const resolveKey = deps.resolveMasterKey || ((dir, ownerUid) => resolveMasterKeyReadOnly({ platform, dataDir: dir, dataDirOwnerUid: ownerUid }));
   const openWriter = deps.openWriter || ((opts) => spawnWriter({ ...opts, spawn: deps.spawn || require('child_process').spawn }));
   if (!flags.from) {
     io.stderr.write(IMPORT_USAGE);
@@ -126,6 +149,25 @@ async function runImportCommand({ flags = {}, dataDir, io, deps = {} }) {
     io.stderr.write(`Cannot find the owner of ${target}: ${err.message}\n`);
     return 1;
   }
+  // The writer never resolves the key itself (fix round 2, N1): as the
+  // service account it can't read the root-only credential, and resolving
+  // would mint and write a new key. This process resolves it read-only and
+  // sends it down the channel, never in argv, the environment or a log line.
+  let masterKey = null;
+  if (!dryRun) {
+    let resolved;
+    try {
+      resolved = resolveKey(target, platform === 'win32' ? null : dirStat.uid);
+    } catch (err) {
+      io.stderr.write(`Cannot read the master key for ${target}: ${err.message}\n`);
+      return 1;
+    }
+    if (!resolved || !Buffer.isBuffer(resolved.key) || resolved.key.length !== 32) {
+      io.stderr.write(`${target} has no master key yet; start the service once first, then import.\n`);
+      return 1;
+    }
+    masterKey = resolved.key.toString('hex');
+  }
   let writer;
   try {
     writer = openWriter({ dataDir: target, identity, onStderr: (s) => io.stderr.write(s) });
@@ -134,9 +176,10 @@ async function runImportCommand({ flags = {}, dataDir, io, deps = {} }) {
     return 1;
   }
   try {
-    const info = (await writer.request('open', { dataDir: target, dryRun, guard: !identity })) || {};
-    if (identity && typeof info.uid === 'number' && info.uid !== identity.uid) {
-      throw new Error(`the import writer runs as uid ${info.uid}, not ${identity.uid}; nothing was imported`);
+    const info = (await writer.request('open', { dataDir: target, dryRun, guard: !identity, ...(masterKey ? { masterKey } : {}) })) || {};
+    masterKey = null;
+    if (identity && !(Number.isInteger(info.uid) && info.uid === identity.uid)) {
+      throw new Error(`the import writer runs as uid ${String(info.uid)}, not ${identity.uid}; nothing was imported`);
     }
     const attention = [...source.attention];
     if (typeof info.casesRoot === 'string' && info.casesRootInDataDir === false && !identity) {
@@ -169,4 +212,4 @@ async function runImportCommand({ flags = {}, dataDir, io, deps = {} }) {
   }
 }
 
-module.exports = { runImportCommand, writerIdentity, IMPORT_USAGE };
+module.exports = { runImportCommand, writerIdentity, primaryGroupOf, IMPORT_USAGE };

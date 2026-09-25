@@ -44,7 +44,11 @@ async function statOnlyCheckPath(target, { fsp = fs.promises } = {}) {
   return { ok: true, exists: true, isDirectory: st.isDirectory(), readable: true, writable: false, unverified: true };
 }
 
-function openCore(dataDir, onPathWritten, dryRun) {
+// `masterKey` (a real run only) is the key the root parent resolved
+// read-only and sent over the channel (fix round 2, N1). This process never
+// resolves, creates or writes one: buildServicePorts checks it against the
+// data dir's existing key-check before creating anything.
+function openCore(dataDir, onPathWritten, dryRun, masterKey = null) {
   const { createCore } = require('../../core');
   const { CHAT_DATA_DEFAULTS } = require('../../core/settings');
   const { createHeadlessPrompter } = require('../../platform/prompter');
@@ -63,7 +67,8 @@ function openCore(dataDir, onPathWritten, dryRun) {
     return { core: createCore({ paths: { dataDir }, store, vaultStore, cipher, prompter: createHeadlessPrompter() }), cipher };
   }
   const { buildServicePorts } = require('../ports');
-  const ports = buildServicePorts({ dataDir, chatDataDefaults: CHAT_DATA_DEFAULTS, onPathWritten });
+  if (!masterKey) throw Object.assign(new Error('a real import needs the master key from the admin process'), { code: 'BAD_REQUEST' });
+  const ports = buildServicePorts({ dataDir, chatDataDefaults: CHAT_DATA_DEFAULTS, onPathWritten, masterKey });
   return { core: createCore(ports), cipher: ports.cipher };
 }
 
@@ -100,12 +105,17 @@ function createWriterSession({ env = process.env, getuid = () => (typeof process
   };
 
   return {
-    async open({ dataDir, dryRun = false, guard = true }) {
+    async open({ dataDir, dryRun = false, guard = true, masterKey = null }) {
       if (state) throw Object.assign(new Error('the import writer is already open'), { code: 'BAD_REQUEST' });
       if (typeof dataDir !== 'string' || !path.isAbsolute(dataDir)) throw Object.assign(new Error('dataDir must be an absolute path'), { code: 'BAD_REQUEST' });
       const envRoot = typeof env.KL_CASES_ROOT === 'string' && env.KL_CASES_ROOT ? path.resolve(env.KL_CASES_ROOT) : null;
       const writeGuard = guard ? createWriteGuard({ anchors: [dataDir, envRoot].filter(Boolean) }) : null;
-      const { core, cipher } = openCore(dataDir, record, dryRun);
+      let key = null;
+      if (!dryRun) {
+        if (typeof masterKey !== 'string' || !/^[0-9a-f]{64}$/.test(masterKey)) throw Object.assign(new Error('a real import needs the master key from the admin process'), { code: 'BAD_REQUEST' });
+        key = Buffer.from(masterKey, 'hex');
+      }
+      const { core, cipher } = openCore(dataDir, record, dryRun, key);
       const targets = await buildImportTargets({ context: core.context, dataDir, offline: true, writeGuard });
       if (dryRun) {
         targets.memory = { ...targets.memory, has: readOnlyMemoryHas(dataDir) };

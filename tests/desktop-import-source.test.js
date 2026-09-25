@@ -13,6 +13,18 @@ after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true 
 const tmp = (p = 'kl-src-') => { const d = fs.mkdtempSync(path.join(os.tmpdir(), p)); dirs.push(d); return d; };
 const MARKER = 'PLANTED-TARGET-CONTENT-0451';
 
+// A real import needs the service's master key, which the admin parent
+// resolves read-only and hands to the writer over the channel (Task 9 fix
+// round 2, N1). Tests stub that resolution and prepare a data dir whose
+// key-check was written with the same key, as a first service start would.
+const TEST_KEY = require('crypto').randomBytes(32);
+const withKey = { resolveMasterKey: () => ({ key: TEST_KEY, source: 'test' }) };
+function keyedDataDir(key = TEST_KEY) {
+  const dir = tmp();
+  require('../src/platform/master-key').verifyKeyCheck({ dataDir: dir, key, source: 'test' });
+  return dir;
+}
+
 function userData() {
   const root = tmp('kl-userdata-');
   const write = (rel, content) => { const f = path.join(root, rel); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, typeof content === 'string' ? content : JSON.stringify(content)); };
@@ -258,12 +270,12 @@ describe('king-louie-service import --from', () => {
   });
 
   it('imports everything but secrets, which it lists as needs-desktop', async () => {
-    const dataDir = tmp();
+    const dataDir = keyedDataDir();
     const savedRoot = process.env.KL_CASES_ROOT;
     delete process.env.KL_CASES_ROOT;
     try {
       const o = io();
-      const code = await runImportCommand({ flags: { from: userData() }, dataDir, io: o.io, deps: { isAdmin: () => true, runningServicePid: () => null } });
+      const code = await runImportCommand({ flags: { from: userData() }, dataDir, io: o.io, deps: { isAdmin: () => true, runningServicePid: () => null, ...withKey } });
       assert.strictEqual(code, 0, o.out.stderr);
       const store = JSON.parse(fs.readFileSync(path.join(dataDir, 'chat-data.json'), 'utf8'));
       assert.ok(store.chats.some((c) => c.id === 'c1'));
@@ -383,10 +395,23 @@ describe('import --from: reader and writer split (fix round 1)', () => {
       for (const k of Object.keys(saved)) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
     }
   };
-  const base = { isAdmin: () => true, runningServicePid: () => null };
+  const base = { isAdmin: () => true, runningServicePid: () => null, ...withKey };
+
+  // A dropped child reports the uid it runs as; on this host it can't
+  // actually drop, so the shim rewrites the uid in its answer to `open`, as
+  // a child spawned with that uid would report it.
+  const reportingUid = (child, uid) => {
+    const { Transform } = require('stream');
+    const stdout = new Transform({
+      transform(chunk, _enc, cb) { cb(null, chunk.toString().replace(/"uid":null/, `"uid":${uid}`)); }
+    });
+    child.stdout.pipe(stdout);
+    return { stdin: child.stdin, stdout, stderr: child.stderr, on: child.on.bind(child), kill: child.kill.bind(child) };
+  };
 
   it('the parent never builds a core and writes nothing; the child, given the owner uid/gid, writes it all', async (t) => {
-    const dataDir = tmp();
+    const dataDir = keyedDataDir();
+    const keyCheckBefore = fs.readFileSync(path.join(dataDir, 'key-check'), 'utf8');
     const from = userData();
     const core = require('../src/core');
     let coresBuilt = 0;
@@ -403,7 +428,7 @@ describe('import --from: reader and writer split (fix round 1)', () => {
     const spawn = (cmd, args, opts) => {
       spawned.push({ cmd, args, uid: opts.uid, gid: opts.gid, cwd: opts.cwd, env: opts.env });
       const { uid, gid, ...rest } = opts;
-      return childProcess.spawn(cmd, args, { ...rest, env: { ...process.env, ...rest.env } });
+      return reportingUid(childProcess.spawn(cmd, args, { ...rest, env: { ...process.env, ...rest.env } }), uid);
     };
     const o = io();
     const code = await withEnv({ KL_CASES_ROOT: undefined }, () => runImportCommand({ flags: { from }, dataDir, io: o.io, deps: { ...base, writerIdentity: () => ({ uid: 4321, gid: 8765 }), spawn } }));
@@ -418,14 +443,45 @@ describe('import --from: reader and writer split (fix round 1)', () => {
     assert.ok(JSON.parse(fs.readFileSync(path.join(dataDir, 'chat-data.json'), 'utf8')).chats.some((c) => c.id === 'c1'));
     assert.ok(fs.existsSync(path.join(dataDir, 'cases', 'lakeside-lot', 'notes', 'a.md')));
     assert.ok(fs.existsSync(path.join(dataDir, 'cron', 'jobs.json')));
+    // N1: the key never lands in the data dir, key-check is untouched, and
+    // the key reached the child only over the channel.
+    for (const name of ['master.key', 'master.key.dpapi']) assert.strictEqual(fs.existsSync(path.join(dataDir, name)), false, name);
+    assert.strictEqual(fs.readFileSync(path.join(dataDir, 'key-check'), 'utf8'), keyCheckBefore);
+    const hex = TEST_KEY.toString('hex');
+    assert.ok(!JSON.stringify(spawned[0].args).includes(hex) && !JSON.stringify(spawned[0].env).includes(hex), 'not in argv or env');
+    assert.ok(!o.out.stdout.includes(hex) && !o.out.stderr.includes(hex), 'not in any output');
   });
 
-  it('asks for the data dir owner uid/gid only when root on POSIX and the owner is not root', () => {
+  // N2: the gid is the owner's primary group, not the data dir's group (the
+  // macOS installer leaves the directory's group as admin/wheel).
+  it('asks for the owner uid and its primary group only when root on POSIX and the owner is not root', () => {
     const st = (uid, gid) => ({ uid, gid, isDirectory: () => true, isSymbolicLink: () => false });
-    assert.deepStrictEqual(writerIdentity('/srv/kl', { platform: 'linux', getuid: () => 0, lstat: () => st(990, 991) }), { uid: 990, gid: 991 });
-    assert.strictEqual(writerIdentity('/srv/kl', { platform: 'linux', getuid: () => 0, lstat: () => st(0, 0) }), null);
-    assert.strictEqual(writerIdentity('/srv/kl', { platform: 'linux', getuid: () => 1000, lstat: () => st(990, 991) }), null);
-    assert.strictEqual(writerIdentity('C:\\kl', { platform: 'win32', getuid: () => 0, lstat: () => st(0, 0) }), null);
+    const primaryGid = (uid) => { assert.strictEqual(uid, 990); return 20; };
+    assert.deepStrictEqual(writerIdentity('/srv/kl', { platform: 'darwin', getuid: () => 0, lstat: () => st(990, 80), primaryGid }), { uid: 990, gid: 20 });
+    assert.strictEqual(writerIdentity('/srv/kl', { platform: 'linux', getuid: () => 0, lstat: () => st(0, 0), primaryGid }), null);
+    assert.strictEqual(writerIdentity('/srv/kl', { platform: 'linux', getuid: () => 1000, lstat: () => st(990, 991), primaryGid }), null);
+    assert.strictEqual(writerIdentity('C:\\kl', { platform: 'win32', getuid: () => 0, lstat: () => st(0, 0), primaryGid }), null);
+    assert.throws(() => writerIdentity('/srv/kl', { platform: 'linux', getuid: () => 0, lstat: () => st(990, 991), primaryGid: () => { throw new Error('no such user'); } }), /no such user/);
+  });
+
+  it('resolves a primary group with id -g, falling back to /bin/id, and refuses when neither answers', () => {
+    const { primaryGroupOf } = require('../src/service/commands/import');
+    const calls = [];
+    const spawnSync = (answers) => (cmd, args) => { calls.push([cmd, args]); return answers[cmd] || { error: Object.assign(new Error('missing'), { code: 'ENOENT' }) }; };
+    assert.strictEqual(primaryGroupOf(990, { spawnSync: spawnSync({ '/usr/bin/id': { status: 0, stdout: '20\n' } }) }), 20);
+    assert.deepStrictEqual(calls[0], ['/usr/bin/id', ['-g', '--', '990']]);
+    calls.length = 0;
+    assert.strictEqual(primaryGroupOf(990, { spawnSync: spawnSync({ '/bin/id': { status: 0, stdout: '991\n' } }) }), 991);
+    assert.deepStrictEqual(calls.map((c) => c[0]), ['/usr/bin/id', '/bin/id']);
+    assert.throws(() => primaryGroupOf(990, { spawnSync: spawnSync({ '/usr/bin/id': { status: 1, stdout: '', stderr: 'no such user' } }) }), /primary group/);
+    assert.throws(() => primaryGroupOf(990, { spawnSync: spawnSync({ '/usr/bin/id': { status: 0, stdout: 'wheel\n' } }) }), /primary group/);
+  });
+
+  it('refuses to import when the owner primary group cannot be resolved', async () => {
+    const o = io();
+    const code = await runImportCommand({ flags: { from: userData() }, dataDir: tmp(), io: o.io, deps: { ...base, writerIdentity: () => { throw new Error('cannot resolve the primary group of uid 990'); }, openWriter: () => { throw new Error('must not spawn'); } } });
+    assert.strictEqual(code, 1);
+    assert.match(o.out.stderr, /primary group of uid 990/);
   });
 
   // A writer that is not what it should be (the service account can ptrace a
@@ -462,13 +518,18 @@ describe('import --from: reader and writer split (fix round 1)', () => {
     assert.ok(!JSON.stringify(sent).includes(Buffer.from(MARKER).toString('base64')));
   });
 
-  it('aborts when the writer does not run as the uid it was spawned with', async () => {
-    const writer = fakeWriter({ open: () => ({ uid: 0, casesRoot: 'x', casesRootInDataDir: true, casesRootWritable: true }) });
+  it('aborts when the writer does not report exactly the uid it was spawned with', async () => {
+    for (const reported of [0, null, '990', 990.5, undefined]) {
+      const writer = fakeWriter({ open: () => ({ uid: reported, casesRoot: 'x', casesRootInDataDir: true, casesRootWritable: true }) });
+      const o = io();
+      const code = await runImportCommand({ flags: { from: userData() }, dataDir: tmp(), io: o.io, deps: { ...base, writerIdentity: () => ({ uid: 990, gid: 991 }), openWriter: () => writer } });
+      assert.strictEqual(code, 1, String(reported));
+      assert.match(o.out.stderr, /not 990/);
+      assert.ok(!writer.calls.some((c) => c.method === 'plan'));
+    }
+    const ok = fakeWriter({ open: () => ({ uid: 990, casesRoot: 'x', casesRootInDataDir: true, casesRootWritable: true }) });
     const o = io();
-    const code = await runImportCommand({ flags: { from: userData() }, dataDir: tmp(), io: o.io, deps: { ...base, writerIdentity: () => ({ uid: 990, gid: 991 }), openWriter: () => writer } });
-    assert.strictEqual(code, 1);
-    assert.match(o.out.stderr, /runs as uid 0, not 990/);
-    assert.ok(!writer.calls.some((c) => c.method === 'plan'));
+    assert.strictEqual(await runImportCommand({ flags: { from: userData() }, dataDir: tmp(), io: o.io, deps: { ...base, writerIdentity: () => ({ uid: 990, gid: 991 }), openWriter: () => ok } }), 0, o.out.stderr);
   });
 
   it('reports a failed apply or finish and exits 1 (I6)', async () => {
@@ -485,7 +546,7 @@ describe('import --from: reader and writer split (fix round 1)', () => {
   });
 
   it('a chat larger than a batch is reported, not sent, and the import exits 1 (I6)', async () => {
-    const dataDir = tmp();
+    const dataDir = keyedDataDir();
     const from = userData();
     const doc = JSON.parse(fs.readFileSync(path.join(from, 'chat-data.json'), 'utf8'));
     doc.chats.push({ id: 'big', title: 'Big', updatedAt: '2026-09-20T10:00:00Z', messages: [{ id: 'm', text: 'x'.repeat(2500 * 1024) }] });
@@ -495,6 +556,54 @@ describe('import --from: reader and writer split (fix round 1)', () => {
     assert.strictEqual(code, 1);
     assert.match(o.out.stdout, /not read chat big: larger than the/);
     assert.ok(JSON.parse(fs.readFileSync(path.join(dataDir, 'chat-data.json'), 'utf8')).chats.some((c) => c.id === 'c1'));
+  });
+
+  // N1: the parent resolves the key read-only and never creates one.
+  it('refuses a real import when there is no master key yet, and creates nothing', async () => {
+    const dataDir = tmp();
+    const o = io();
+    let spawned = false;
+    const code = await runImportCommand({ flags: { from: userData() }, dataDir, io: o.io, deps: { ...base, resolveMasterKey: () => null, openWriter: () => { spawned = true; throw new Error('must not spawn'); } } });
+    assert.strictEqual(code, 1);
+    assert.match(o.out.stderr, /start the service once first/);
+    assert.strictEqual(spawned, false);
+    assert.deepStrictEqual(fs.readdirSync(dataDir), []);
+  });
+
+  it('the writer refuses, writing nothing, when key-check is missing or was made with another key', async () => {
+    const fresh = tmp();
+    let o = io();
+    assert.strictEqual(await withEnv({ KL_CASES_ROOT: undefined }, () => runImportCommand({ flags: { from: userData() }, dataDir: fresh, io: o.io, deps: base })), 1);
+    assert.match(o.out.stderr, /start the service once first/);
+    assert.deepStrictEqual(fs.readdirSync(fresh), []);
+    const other = keyedDataDir(require('crypto').randomBytes(32));
+    o = io();
+    assert.strictEqual(await withEnv({ KL_CASES_ROOT: undefined }, () => runImportCommand({ flags: { from: userData() }, dataDir: other, io: o.io, deps: base })), 1);
+    assert.match(o.out.stderr, /different master key/);
+    assert.deepStrictEqual(fs.readdirSync(other), ['key-check']);
+  });
+
+  it('resolves the key read-only: nothing is created when there is none', () => {
+    const { resolveMasterKeyReadOnly } = require('../src/platform/master-key');
+    const dataDir = tmp();
+    const credDir = tmp('kl-cred-');
+    const credentialPath = path.join(credDir, 'kl-master-key');
+    assert.strictEqual(resolveMasterKeyReadOnly({ platform: 'linux', dataDir, env: {}, getuid: () => 1000, credentialPath }), null);
+    assert.deepStrictEqual(fs.readdirSync(dataDir), []);
+    assert.deepStrictEqual(fs.readdirSync(credDir), []);
+    fs.writeFileSync(credentialPath, TEST_KEY.toString('hex'), { mode: 0o600 });
+    const found = resolveMasterKeyReadOnly({ platform: 'linux', dataDir, env: {}, getuid: () => 1000, credentialPath, checkMode: false });
+    assert.ok(found.key.equals(TEST_KEY));
+    assert.strictEqual(resolveMasterKeyReadOnly({ platform: 'win32', dataDir, env: {}, dpapi: { unprotect: () => { throw new Error('no'); } } }), null);
+  });
+
+  it('will not read a data-dir master.key that is a link', (t) => {
+    const { resolveMasterKeyReadOnly } = require('../src/platform/master-key');
+    const dataDir = tmp();
+    const planted = path.join(tmp(), 'someone-elses-key');
+    fs.writeFileSync(planted, TEST_KEY.toString('hex'));
+    if (!trySymlink(t, planted, path.join(dataDir, 'master.key'), 'file')) return;
+    assert.throws(() => resolveMasterKeyReadOnly({ platform: 'linux', dataDir, env: {}, getuid: () => 1000, credentialPath: path.join(tmp(), 'none'), checkMode: false }), /link/);
   });
 
   it('requires runningServicePid (I7)', async () => {
