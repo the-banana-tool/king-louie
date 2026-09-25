@@ -89,3 +89,39 @@ describe('contact adapter: loopback (tests/helpers/loopback-channel.js)', () => 
     await ch.send('999', 'hello', { [GATE_PASSED]: true });
   });
 });
+
+describe('contact adapter: sms and voice (fake relay)', () => {
+  const { TelephonyChannel } = require('../src/channels/telephony-channel');
+  const { ContactRelayClient } = require('../src/channels/relay-client');
+  const { startFakeRelay } = require('./helpers/fake-contact-relay');
+
+  it('meets the contract', async () => {
+    const relay = await startFakeRelay();
+    try {
+      const client = new ContactRelayClient({ name: 'main', baseUrl: relay.baseUrl, getToken: () => relay.token });
+      const sms = new TelephonyChannel({ kind: 'sms', relay: client, getConfig: () => ({ owner: '+15550100' }) });
+      const voice = new TelephonyChannel({ kind: 'voice', relay: client, getConfig: () => ({ owner: '+15550100' }) });
+      assert.strictEqual(sms.contactCapabilities().authenticatedReplies, false);
+      assert.strictEqual(sms.contactCapabilities().requiresToken, true);
+      assert.strictEqual(voice.contactCapabilities().voice, true);
+      assert.strictEqual((await sms.sendContact(MESSAGE, META)).deliveryId, 'd-test-1');
+      assert.strictEqual((await voice.sendContact(MESSAGE, { ...META, deliveryId: 'd-test-2' })).deliveryId, 'd-test-2');
+
+      const calls = [];
+      sms.onContactReply(async (correlationId, answer, meta) => { calls.push({ correlationId, answer, meta }); return { ok: true, outcome: 'recorded', ackText: null }; });
+      await sms.ingestRelayEvent({ id: 'e1', type: 'inbound', channel: 'sms', from: '+15550100', text: '#K7QD4M a' });
+      assert.strictEqual(calls[0].correlationId, 'K7QD4M');
+      assert.strictEqual(calls[0].meta.ownerProven, true);
+      await sms.ingestRelayEvent({ id: 'e2', type: 'inbound', channel: 'sms', from: '+15550177', text: '#K7QD4M a' });
+      assert.strictEqual(calls[1].meta.ownerProven, false);
+
+      relay.failNext(413);
+      await assert.rejects(sms.sendContact(MESSAGE, { ...META, deliveryId: 'd-test-3' }), (err) => err instanceof ContactDeliveryError && err.code === 'too-large');
+      const unset = new TelephonyChannel({ kind: 'sms', relay: client, getConfig: () => ({}) });
+      assert.strictEqual(unset.contactConfigured(), false);
+      await assert.rejects(unset.sendContact(MESSAGE, META), (err) => err.code === 'not-configured');
+    } finally {
+      await relay.close();
+    }
+  });
+});
