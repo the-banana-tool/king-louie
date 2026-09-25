@@ -322,7 +322,12 @@ describe('DesktopBridgeServer fix round 1 (review findings)', () => {
     const started = Date.now();
     c.ws.send('x'.repeat(6 * 1024 * 1024));
     const close = await c.closed;
-    assert.strictEqual(close.code, 4400);
+    // Round 2: the server terminates immediately once the byte budget trips
+    // (no 1 s grace window), so the queued 4400 close frame may not reach
+    // the client before the socket is torn down underneath it — an abrupt
+    // 1006 is an acceptable client-side outcome. What the socket actually
+    // read is pinned precisely in "stops reading immediately..." below.
+    assert.ok([4400, 1006].includes(close.code), `expected 4400 or 1006, got ${close.code}`);
     assert.ok(Date.now() - started < 2000, 'closed promptly, not after buffering the whole 6 MiB frame');
   });
 
@@ -431,5 +436,68 @@ describe('DesktopBridgeServer fix round 1 (review findings)', () => {
     const { port } = await server.start();
     const out = await handshake(port, device);
     assert.strictEqual(out.close.code, 4403, 'assertAdminOwned refused the file, so the device looks unknown');
+  });
+});
+
+describe('DesktopBridgeServer fix round 2 (review findings)', () => {
+  // I2 (still open after round 1): the counter tripped and queued a
+  // graceful close, but the socket kept reading — ws fed the receiver up to
+  // the (much larger) post-auth maxPayload until the 1 s terminate fallback.
+  // The reviewer's probe (scratchpad/i2probe.js) measured 62.9 MB read for a
+  // 60 MiB frame. pause()+terminate() must happen immediately, no 1 s window.
+  it('stops reading immediately once the pre-auth byte budget trips (bytesRead bounded)', async () => {
+    const { server, port } = await startServer({ devices: [makeDevice()] });
+    let serverWs = null;
+    server.wss.on('connection', (ws) => { serverWs = ws; });
+    const c = rawClient(port);
+    await c.opened;
+    await c.next((f) => f.t === 'challenge');
+    c.ws.send('x'.repeat(60 * 1024 * 1024));
+    await c.closed;
+    // Let any already-in-flight read settle before taking the final count.
+    await new Promise((r) => setTimeout(r, 100));
+    assert.ok(serverWs && serverWs._socket, 'captured the server-side socket via the connection event');
+    const budget = server.limits.preAuthSocketBytes + 64 * 1024;
+    assert.ok(
+      serverWs._socket.bytesRead <= budget,
+      `expected bytesRead <= ${budget} (budget + 64 KiB slack), got ${serverWs._socket.bytesRead}`
+    );
+  });
+
+  // New: the C1 backstop closed 4400 on *every* rejection, including a
+  // post-auth error from dispatcher.handleFrame or _send — killing the
+  // owner's authenticated connection and aborting its in-flight runs. It
+  // must only close pre-auth; post-auth it answers a result error (when the
+  // frame id is peekable) and leaves the connection open.
+  it('answers a result error and keeps the connection open when the dispatcher throws after auth', async () => {
+    const device = makeDevice();
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-bridge-'));
+    dirs.push(configDir);
+    writeDevices(configDir, [device]);
+    const dispatcher = {
+      served: { handle: ['chat:load'], on: [] },
+      providersConfigured: () => true,
+      async handleFrame(conn, frame) {
+        if (frame.id === 99) throw new Error('boom');
+        conn.send({ t: 'result', id: frame.id, value: { ok: true } });
+      },
+      onDisconnect() {},
+      forwardAmbient() {}
+    };
+    const server = new DesktopBridgeServer({
+      identity, configDir, port: 0, version: '26.9.0', adminUid: selfUid, createDispatcher: () => dispatcher
+    });
+    servers.push(server);
+    const { port } = await server.start();
+    const out = await handshake(port, device);
+    assert.ok(out.ready);
+    out.c.send({ t: 'invoke', id: 99, channel: 'chat:load', args: [] });
+    const errResult = await out.c.next((f) => f.t === 'result' && f.id === 99);
+    assert.deepStrictEqual(errResult, { t: 'result', id: 99, error: 'Internal error', code: 'INTERNAL_ERROR' });
+    // The connection itself must still be usable afterward.
+    out.c.send({ t: 'invoke', id: 100, channel: 'chat:load', args: [] });
+    const ok = await out.c.next((f) => f.t === 'result' && f.id === 100);
+    assert.deepStrictEqual(ok.value, { ok: true });
+    out.c.ws.close();
   });
 });

@@ -162,19 +162,19 @@ class DesktopBridgeServer extends EventEmitter {
     // Built for ws 8.20.0's `_socket` (see the "ws internals" test below);
     // if that field disappears, this silently stops enforcing the budget
     // early (the post-auth-stage frameBytes check still catches it late).
+    // Keeps counting even once 'closed' — pause()/terminate() below should
+    // stop further reads, but if they somehow don't, this is the backstop
+    // that keeps re-issuing the kill rather than trusting it happened once.
     state.onRawData = (chunk) => {
-      if (state.stage === 'ready' || state.stage === 'closed') return;
+      if (state.stage === 'ready') return;
       state.preAuthBytes += chunk.length;
-      if (state.preAuthBytes > this.limits.preAuthSocketBytes) this._close(state, CLOSE.MALFORMED, 'oversized frame');
+      if (state.preAuthBytes > this.limits.preAuthSocketBytes) this._killOversizedPreAuth(state);
     };
     if (ws._socket && typeof ws._socket.on === 'function') ws._socket.on('data', state.onRawData);
     ws.on('message', (data, isBinary) => {
       Promise.resolve()
         .then(() => this._onMessage(state, data, isBinary))
-        .catch((err) => {
-          log.warn(`desktop bridge frame failed: ${err && err.message}`);
-          this._close(state, CLOSE.MALFORMED, 'internal error');
-        });
+        .catch((err) => this._onFrameError(state, data, isBinary, err));
     });
     ws.on('close', () => this._onClose(state));
     ws.on('error', (err) => log.debug(`desktop bridge socket error: ${err.message}`));
@@ -190,6 +190,25 @@ class DesktopBridgeServer extends EventEmitter {
     if (parsed.error) return this._close(state, CLOSE.MALFORMED, parsed.error);
     if (state.stage === 'hello') return this._onClientHello(state, parsed.frame);
     return this._onAuth(state, parsed.frame);
+  }
+
+  // The backstop for anything _onMessage's handlers don't catch themselves
+  // (see the C1 fix). Before auth, any failure is still an untrusted,
+  // unauthenticated connection, so closing 4400 is correct and matches every
+  // other malformed-input path. After auth, this is the owner's paired
+  // desktop: a bug in the dispatcher (or in _send) must not kill its
+  // connection or abort its in-flight runs. Answer the specific call when
+  // its id can be recovered and leave the socket open.
+  _onFrameError(state, data, isBinary, err) {
+    log.warn(`desktop bridge frame failed: ${err && err.message}`);
+    if (state.stage !== 'ready') {
+      this._close(state, CLOSE.MALFORMED, 'internal error');
+      return;
+    }
+    const conn = state.conn;
+    if (!conn || !conn.live || isBinary) return;
+    const id = peekFrameId(Buffer.isBuffer(data) ? data.subarray(0, 256).toString('utf8') : String(data).slice(0, 256));
+    if (id !== null) conn.send({ t: 'result', id, error: 'Internal error', code: 'INTERNAL_ERROR' });
   }
 
   _onClientHello(state, frame) {
@@ -346,6 +365,26 @@ class DesktopBridgeServer extends EventEmitter {
     const kill = setTimeout(() => { try { state.ws.terminate(); } catch { /* gone */ } }, 1000);
     kill.unref?.();
     return undefined;
+  }
+
+  // Unlike _close, no 1 s grace window: the socket is actively being fed an
+  // oversized pre-auth frame, so every extra millisecond before terminate()
+  // lets more of it be read off the wire. pause() stops the socket's own
+  // reads (so no further 'data' chunks arrive), then terminate() tears the
+  // connection down immediately; queuing the close frame first is what gives
+  // a well-behaved client a chance to see the 4400 before that happens.
+  // Safe to call more than once (the onRawData backstop may re-trigger it).
+  _killOversizedPreAuth(state) {
+    const first = state.stage !== 'closed';
+    state.stage = 'closed';
+    state.timers.forEach(clearTimeout);
+    state.timers = [];
+    this._removePreAuth(state);
+    if (first) {
+      try { state.ws.close(CLOSE.MALFORMED, truncateUtf8('oversized frame', 123)); } catch { /* gone */ }
+    }
+    try { if (state.ws._socket) state.ws._socket.pause(); } catch { /* gone */ }
+    try { state.ws.terminate(); } catch { /* gone */ }
   }
 
   _removePreAuth(state) {
