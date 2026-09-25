@@ -48,27 +48,38 @@ What works today:
 
 On every machine:
 
-- **Node.js 22 or later.** On Windows and macOS, install from nodejs.org,
-  where its installer puts it: `C:\Program Files\nodejs\node.exe` on Windows,
-  `/usr/local/bin/node` on macOS (Homebrew uses `/opt/homebrew/bin/node`
-  instead). On Linux, install from your distribution's or NodeSource's
-  package, not a manual download: that is what puts it at the fixed path
-  `/usr/bin/node` the Linux runbooks and `examples/mcp/` assume. If yours is
-  elsewhere on any OS, use your own path everywhere this guide or
-  `examples/mcp/` names node.
+- **Node.js 22 or later, with npm.** On Windows, install from nodejs.org
+  with the traditional "Windows installer (64-bit)"; it puts node at
+  `C:\Program Files\nodejs\node.exe` with npm alongside it. On macOS, install
+  from nodejs.org too; its installer puts node at `/usr/local/bin/node`
+  (Homebrew uses `/opt/homebrew/bin/node` instead). On Linux, install from
+  your distribution's or NodeSource's package, not a manual download: that
+  is what puts node at the fixed path `/usr/bin/node` the Linux runbooks and
+  `examples/mcp/` assume. Some distributions (Debian, Ubuntu) split npm into
+  its own `npm` package — install that too, or use NodeSource's combined
+  package, which installs both together. If yours is elsewhere on any OS,
+  use your own path everywhere this guide or `examples/mcp/` names node.
 - **An administrator account**: root through `sudo` on Linux and macOS, an
   elevated PowerShell ("Run as administrator") on Windows. You need it for the
   install steps.
 - **The runner**: the ordinary account you run Claude from. On Windows this is
   the signed-in user. Everything a runbook step does, it does as this account.
 - **Claude Code or Claude Desktop**, signed in as the runner.
+- **Linux and macOS: don't let Claude inherit your own `sudo`.** If the
+  runner's account can run `sudo` for anything beyond the narrow,
+  password-less rules this guide installs (sections 6 and 8), anything that
+  account runs — including an agent session — can ride a cached `sudo`
+  timestamp to run arbitrary commands as root. Run Claude from an account
+  with no broader `sudo` rights, or run `sudo -k` to clear the cached
+  timestamp before every session.
 
 Per role:
 
-- **Git on `laptop` and `web-01`.** On Windows the runbooks call
+- **Git on every machine**, to clone the King Louie code itself (section 3).
+  `laptop` and `web-01` also call it from a runbook: on Windows,
   `C:\Program Files\Git\cmd\git.exe`, where the Git for Windows installer
-  (git-scm.com) puts it. If Git is installed elsewhere, edit the path in
-  `laptop.build_then_deploy.yaml`. On Linux the runbooks call `/usr/bin/git`.
+  (git-scm.com) puts it — if it's installed elsewhere, edit the path in
+  `laptop.build_then_deploy.yaml`; on Linux, `/usr/bin/git`.
 - **`gpu-box`: Python 3** from www.python.org. When you run the installer,
   choose **Customize installation** and check **Install for all users** (or
   the equivalent option), so it lands under `C:\Program Files\Python3xx`
@@ -120,16 +131,25 @@ a real, rooted path — a drive letter and a separator, never a bare `C:` —
 and not a drive root or a folder under `%SystemRoot%`. If it already exists,
 it must either be empty or already look like a King Louie install (contain
 `app\package.json`); the script refuses to take ownership of anything else.
+The runbooks and the MCP configs (`examples/fleet/gpu-box/node.yaml`,
+`examples/runbooks/*.yaml`, `examples/mcp/claude-desktop.windows.json`) all
+hardcode `C:\KingLouie`, so a different `-Base` must be matched by editing
+every one of them to the new path. Simplest: leave `-Base` out and keep the
+default.
 
 The script locks every admin-owned folder from the top down, one folder at a
 time, and never follows a junction, symbolic link or other reparse point, or
 changes a file that has a second hard link — it stops with an error naming
 the path instead of touching whatever that link or file points at. After
 locking a tree it walks the whole thing again by hand to verify it. Running
-the script again later is always safe. **Close Claude Code, Claude Desktop
-and every other program the runner has open before running it**: a handle a
-program opened earlier keeps the access it was opened with, and the
-verification step can fail on whatever such a program still has open.
+the script again later is always safe for these locked trees. **Close Claude
+Code, Claude Desktop and every other program the runner has open before
+running it.** A program that already has one of these files or folders open
+keeps its earlier write handle even after the script changes that item's
+owner and ACL, so it can still change what's inside it afterward — and the
+script's walk only checks ownership and permissions, never open handles or
+file contents, so a clean verification would not catch that. Close
+everything first, so no handle survives the lock.
 
 `-Runner` is the runner's account; `whoami` in the runner's own terminal
 prints it, for example `gpu-box\<runner>`. Run it with `-WhatIf` first to see
@@ -210,7 +230,7 @@ sudo install -o root -g root -m 0644 fleet/web-01/node.yaml /opt/king-louie/mcp/
 sudo install -o root -g root -m 0644 runbooks/site.status.yaml runbooks/site.pull_and_restart.yaml runbooks/server.reboot.yaml /opt/king-louie/mcp/config/runbooks/
 ```
 
-**macOS (`mac`)**, as root. The MCP data dir belongs to you, the runner:
+**macOS (`mac`)**, as the runner, with sudo. The MCP data dir belongs to you:
 
 ```sh
 cd /opt/king-louie/app/examples
@@ -300,11 +320,13 @@ touch a junction, symbolic link or other reparse point, or a file that has a
 second hard link: it stops with an error naming the path instead of
 touching whatever that link or file points at. After locking a tree it walks
 the whole thing again by hand and refuses to finish if anything is wrong.
-Running it again is always safe.
+Running it again is always safe for these admin-owned trees.
 
-Close the runner's programs, including Claude, again before this run, the
-same as in section 3. You ran `-Role base` there. Now run the machine's own
-role, `-WhatIf` first, from an elevated PowerShell:
+Close the runner's programs, including Claude, again before every run
+below, the same as in section 3. You ran `-Role base` there. Now run the
+machine's own role, `-WhatIf` first, from an elevated PowerShell. **This is
+the `gpu-box` role**; `laptop`'s own role run comes later in this section,
+after you clone the site (it must already exist, or the script refuses):
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\KingLouie\app\examples\windows\runbook-acls.ps1 -Role gpu-box -Runner 'gpu-box\<runner>' -WhatIf
@@ -343,14 +365,17 @@ Python must be installed "for all users" (section 2): a per-user install
 lives under the runner's own profile, which none of this script's grants
 protect, so the runner could repoint the venv at an interpreter under their
 own control. `runbook-acls.ps1` checks this itself, but only once the venv
-already exists — so **create the venv first**, from the elevated
-PowerShell, so it belongs to Administrators and the runner cannot replace
-`hf.exe` or `python.exe`; put the training script and at least one config in
-place; then **re-run `-Role gpu-box`** so the Python check fires and the
-walk locks the venv's own files down too:
+already exists. Next, create the venv, from the elevated PowerShell, using
+the all-users `python.exe` by its full path (not the `py` launcher, which
+can resolve to a different, per-user install) — replace `Python3xx` with
+the version you installed, for example `Python312` — so the venv belongs to
+Administrators and the runner cannot replace `hf.exe` or `python.exe`; put
+the training script and at least one config in place; then run
+`-Role gpu-box` again so the Python check fires and the walk locks the
+venv's own files down too:
 
 ```powershell
-py -3 -m venv C:\KingLouie\tools\py
+& 'C:\Program Files\Python3xx\python.exe' -m venv C:\KingLouie\tools\py
 C:\KingLouie\tools\py\Scripts\python.exe -m pip install "huggingface_hub[cli]"
 Copy-Item C:\KingLouie\app\examples\scripts\train.py D:\train\train.py
 Set-Content -Path D:\train\configs\base.json -Value '{ "learning_rate": 0.0001 }'
@@ -370,11 +395,18 @@ any other folder the runner can write. A script that does must be run by an
 `unsafe` runbook. `models.hf_download` fetches public repositories only.
 
 **`laptop`: the site checkout.** As the runner (an ordinary PowerShell), clone
-your site first, so that git sees the runner as the folder's owner. Then run
-`-Role laptop` from the elevated PowerShell:
+your site first, so that git sees the runner as the folder's owner:
 
 ```powershell
 & 'C:\Program Files\Git\cmd\git.exe' clone <repository-url> C:\build\site
+```
+
+Then, from an elevated PowerShell, run `-Role laptop`, `-WhatIf` first, the
+same way you ran `-Role gpu-box` above:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\KingLouie\app\examples\windows\runbook-acls.ps1 -Role laptop -Runner 'laptop\<runner>' -WhatIf
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\KingLouie\app\examples\windows\runbook-acls.ps1 -Role laptop -Runner 'laptop\<runner>'
 ```
 
 `laptop.build_then_deploy` is `routine` although `npm ci`, the build and the
@@ -467,15 +499,19 @@ needs it. The instance always starts in the admin-owned work dir
 that dir but not write it, and it holds no secrets. Runbook steps start
 there too, so a program planted in a project dir is never picked up.
 
-| OS | data dir (runner-owned, private) | config dir (admin-owned) | how the start dir is pinned | runs as |
+| OS | data dir (private) | config dir (admin-owned) | how the start dir is pinned | runs as |
 |---|---|---|---|---|
 | Windows | `C:\KingLouie\mcp\data` | `C:\KingLouie\mcp\config` | `C:\Windows\System32\cmd.exe /d /c cd /d C:\KingLouie\mcp\work && "C:\Program Files\nodejs\node.exe" C:\KingLouie\app\bin\king-louie-service.js mcp --data-dir C:\KingLouie\mcp\data` | the runner |
 | macOS | `/opt/king-louie/mcp/data` | `/opt/king-louie/mcp/config` | `/bin/sh -c 'cd /opt/king-louie/mcp/work && exec /usr/local/bin/node /opt/king-louie/app/bin/king-louie-service.js mcp --data-dir /opt/king-louie/mcp/data'` | the runner |
 | Linux (`web-01`) | `/opt/king-louie/mcp/data` | `/opt/king-louie/mcp/config` | `/usr/bin/sudo -n -u king-louie /usr/bin/env --chdir=/opt/king-louie/mcp/work /usr/bin/node /opt/king-louie/app/bin/king-louie-service.js mcp --data-dir /opt/king-louie/mcp/data` | `king-louie` |
 
-The config dir is always `config` beside the data dir: an instance with data
-dir `C:\KingLouie\mcp\data` reads `C:\KingLouie\mcp\config\node.yaml`. On
-macOS and Linux, the first start logs a warning that the master key is being
+The data dir always belongs to whichever account is in the "runs as"
+column: the runner on Windows and macOS, but on Linux it belongs to
+`king-louie` — not the runner — because that is the account the instance
+itself runs as (section 5 creates it that way). The config dir is always
+`config` beside the data dir: an instance with data dir
+`C:\KingLouie\mcp\data` reads `C:\KingLouie\mcp\config\node.yaml`. On macOS
+and Linux, the first start logs a warning that the master key is being
 written inside the data dir. That is expected for this instance, which has no
 admin-owned key location of its own.
 
