@@ -30,7 +30,7 @@ function createDesktopHandler(channel, getController) {
         ? result
         : { ok: true, data: result };
     } catch (err) {
-      return { ok: false, code: err.code || 'DESKTOP_ERROR', error: err.message || String(err) };
+      return { ok: false, code: err?.code || 'DESKTOP_ERROR', error: err?.message || String(err) };
     }
   };
 }

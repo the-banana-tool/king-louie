@@ -50,6 +50,12 @@ describe('classifyChannel (spec §3.6, first match wins)', () => {
   it('lists the proxied domains', () => {
     assert.deepStrictEqual([...PROXIED_DOMAINS], ['chat', 'settings', 'case', 'cron', 'memory', 'tool', 'usage', 'checkpoint', 'canvas']);
   });
+
+  it('defaults to deny for anything that is not an allow-listed channel', () => {
+    for (const channel of ['', null, 123, '__proto__', 'constructor']) {
+      assert.strictEqual(classifyChannel(channel), 'deny', String(channel));
+    }
+  });
 });
 
 describe('renderer events', () => {
@@ -133,5 +139,19 @@ describe('desktop:* handlers', () => {
     assert.deepStrictEqual(await handlers.get('desktop:detach')({}, { confirmed: true }), { ok: true, data: { confirmed: true } });
     assert.deepStrictEqual(await handlers.get('desktop:pairStart')({}), { ok: false, code: 'SECURE_STORAGE_UNAVAILABLE', error: 'no secure storage' });
     assert.strictEqual((await handlers.get('desktop:attach')({})).code, 'ATTACHED_UNAVAILABLE');
+  });
+
+  it('still returns {ok:false} when the controller throws a null or undefined', async () => {
+    const { handlers, ipc } = record();
+    registerDesktopHandlers(ipc, {
+      desktopBridge: {
+        // eslint-disable-next-line no-throw-literal
+        status: async () => { throw null; },
+        // eslint-disable-next-line no-throw-literal
+        detach: async () => { throw undefined; }
+      }
+    });
+    assert.deepStrictEqual(await handlers.get('desktop:status')({}), { ok: false, code: 'DESKTOP_ERROR', error: 'null' });
+    assert.deepStrictEqual(await handlers.get('desktop:detach')({}), { ok: false, code: 'DESKTOP_ERROR', error: 'undefined' });
   });
 });
