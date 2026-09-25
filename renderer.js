@@ -1900,6 +1900,10 @@ function renderCaseQuestionCard(q, { onDone, showError }) {
   const submit = async (answer) => {
     const r = await window.electron.cases.answerQuestion({ caseId: q.caseId, questionId: q.id, ...answer });
     if (!r?.ok) { showError(r?.error || 'Could not send the answer.'); return; }
+    // The answer was recorded, but a rejected grant or direction has no
+    // further effect (r.effect.applied === false): tell the owner why
+    // instead of silently closing the card as if it worked (F2).
+    if (r.effect && r.effect.applied === false) showError(r.effect.note || r.effect.error || 'The answer had no effect.');
     onDone();
   };
   const actions = document.createElement('div');
@@ -1965,6 +1969,7 @@ function renderCaseBudgetLine(caseId, budget, { showError, refresh }) {
     const value = category.value === 'deadline' ? raw : Number(raw);
     const r = await window.electron.cases.grantBudget({ caseId, category: category.value, limit: value });
     if (!r?.ok) { showError(r?.error || 'Could not change the budget.'); return; }
+    if (r.effect && r.effect.applied === false) showError(r.effect.note || r.effect.error || 'The grant had no effect.');
     refresh();
   });
   row.append(category, limit, grant);

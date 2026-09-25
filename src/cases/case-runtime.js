@@ -1004,7 +1004,22 @@ class CaseRuntime {
         const hint = fact.attr === 'deadline'
           ? 'a real calendar date, later than the current deadline and not in the past'
           : 'a number above the current spend';
-        return { applied: false, note: `A ${fact.attr} limit must be ${hint}.` };
+        const note = `A ${fact.attr} limit must be ${hint}.`;
+        // A question-sourced reply that named a number but not one that
+        // clears the budget must not be swallowed: note it on the question
+        // and open a fresh budget-grant question with current numbers, the
+        // same as a reply with no usable amount at all (F2) — otherwise the
+        // owner is left paused with nothing open to answer.
+        const qid = questionId || (fact.source?.kind === 'question' ? fact.source.ref : null);
+        if (qid) {
+          try {
+            this.questions(meta.id).note(qid, note);
+          } catch (err) {
+            log.warn(`Could not note the rejected ${fact.attr} grant on ${qid}: ${err.message}`);
+          }
+          this._askBudgetGrant(meta, fact.attr);
+        }
+        return { applied: false, note };
       }
       const current = meta.budget && typeof meta.budget === 'object' ? meta.budget : {};
       this.store.updateMeta(meta.id, { budget: { ...current, [fact.attr]: value } });

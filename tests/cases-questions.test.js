@@ -374,6 +374,21 @@ describe('answers through the runtime', () => {
     assert.deepStrictEqual(rt.budget(c.id).status().usd.grantedBy, [grant.fact.id]);
   });
 
+  it('a question-sourced grant reply below current spend notes the question and re-asks (F2)', async () => {
+    const { rt } = runtime();
+    const c = await activeCase(rt);
+    rt.store.updateMeta(c.id, { budget: { usd: 1 } });
+    rt.onCrossings(c.id, 'usd', rt.budget(c.id).charge('usd', 1.2).crossedNow);
+    const first = rt.questions(c.id).open().find((q) => q.payload.type === 'budget-grant');
+    const reply = await rt.answerQuestion(c.id, first.id, { channel: 'in-app', text: '1' });
+    assert.deepStrictEqual([reply.fact.subject, reply.fact.attr, reply.fact.value], ['budget', 'usd', 1]);
+    assert.deepStrictEqual(reply.effect, { applied: false, note: 'A usd limit must be a number above the current spend.' });
+    assert.strictEqual(rt.questions(c.id).get(first.id).notes[0].text, 'A usd limit must be a number above the current spend.');
+    assert.strictEqual(rt.getCase(c.id).status, 'paused');
+    const fresh = rt.questions(c.id).open().find((q) => q.payload.type === 'budget-grant');
+    assert.ok(fresh && fresh.id !== first.id, 'a fresh budget-grant question is open so the owner can try again');
+  });
+
   it('a budget fact quoted from chat changes no limit', async () => {
     const { rt } = runtime();
     const c = await activeCase(rt);
