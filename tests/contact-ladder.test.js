@@ -358,8 +358,9 @@ describe('LadderEngine lease', () => {
     assert.deepStrictEqual(Object.keys(other.list()), Object.keys(w.ladder.list()), 'read-only view of the holder\'s ladder');
 
     w.advance(91 * 1000);
-    assert.strictEqual(other.tryAcquire(), true, 'older than 3 × tickMs');
+    assert.strictEqual(other.tryAcquire(), false, 'older than 3 × tickMs: the takeover lease is written, not yet confirmed');
     assert.strictEqual(JSON.parse(fs.readFileSync(path.join(w.root, '.contact.lock'), 'utf8')).host, 'web-01');
+    assert.strictEqual(other.tryAcquire(), true, 'the next check confirms the lock is still ours');
     await other.stop();
     assert.strictEqual(fs.existsSync(path.join(w.root, '.contact.lock')), false);
   });
@@ -467,5 +468,126 @@ describe('LadderEngine carries', () => {
     assert.strictEqual(fs.existsSync(path.join(w.root, '.contact.lock')), true);
     await w.ladder.stop();
     assert.strictEqual(fs.existsSync(path.join(w.root, '.contact.lock')), false);
+  });
+});
+
+// Fix round 1: per-case isolation, lease keeping and loss, quiet-hours spacing.
+describe('LadderEngine fix round 1', () => {
+  it('a case whose questions cannot be read does not block another case\'s delivery', async () => {
+    const w = await world();
+    const kitchen = await w.runtime.createCase({ title: 'Kitchen quotes', objective: 'Pick a builder' });
+    w.ask({ text: 'Which week?' }, kitchen.id);
+    const q = w.ask({ text: 'Seller financing?' });
+    const questions = w.runtime.questions.bind(w.runtime);
+    w.runtime.questions = (id) => {
+      const store = questions(id);
+      if (id === kitchen.id) store.open = () => { throw new Error('questions.jsonl: Unexpected token'); };
+      return store;
+    };
+    await w.tickAt('2026-09-25T09:01:00Z');
+    await w.tickAt('2026-09-25T09:30:00Z');
+    assert.deepStrictEqual(outcomes(w.entry(q)), ['present:absent', 'telegram:sent']);
+    assert.strictEqual(w.adapters.get('telegram').last().message.items.length, 1);
+  });
+
+  it('a journal or mirror write that fails for one case is logged and the other cases go on', async () => {
+    const w = await world();
+    const kitchen = await w.runtime.createCase({ title: 'Kitchen quotes', objective: 'Pick a builder' });
+    const low = w.ask({ text: 'Is the well shared?', urgency: 'low' });
+    const q = w.ask({ text: 'Which week?' }, kitchen.id);
+    const systemAction = w.runtime.systemAction.bind(w.runtime);
+    w.runtime.systemAction = (id, ...rest) => {
+      if (id === w.lot.id) return Promise.reject(Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' }));
+      return systemAction(id, ...rest);
+    };
+    await w.tickAt('2026-09-25T09:01:00Z');
+    await w.tickAt('2026-09-25T09:01:30Z');
+    assert.deepStrictEqual(outcomes(w.entry(low)), ['in-app:skipped:not-configured', 'journal:failed']);
+    await w.tickAt('2026-09-25T09:30:00Z');
+    assert.deepStrictEqual(outcomes(w.entry(q, kitchen.id)), ['present:absent', 'telegram:sent']);
+    assert.strictEqual(w.entry(q, kitchen.id).attempts[1].mirrored, true);
+    assert.deepStrictEqual(w.runtime.questions(kitchen.id).get(q.id).deliveries.map((d) => d.channel), ['telegram']);
+  });
+
+  it('a long tick keeps its lease: the heartbeat runs while a tick is in flight', async () => {
+    const { holdEventLoop } = require('./helpers/hold-event-loop');
+    const releaseLoop = holdEventLoop();
+    try {
+      const w = await world();
+      w.ask({ text: 'Seller financing?' });
+      w.at('2026-09-25T09:30:00Z');
+      const ladder = new LadderEngine({ state: w.state, casesRoot: w.root, runtime: w.runtime, router: w.router, presence: w.presence, getPolicy: () => w.policy, clock: w.now, tickMs: 20, dataDir: w.data });
+      const release = w.adapters.get('telegram').holdNext();
+      ladder.start();
+      const lock = path.join(w.root, '.contact.lock');
+      for (let i = 0; i < 500 && !ladder.inflight; i += 1) await new Promise((r) => setTimeout(r, 5));
+      assert.ok(ladder.inflight, 'a tick is in flight');
+      w.advance(10 * 60 * 1000);
+      await new Promise((r) => setTimeout(r, 100));
+      assert.strictEqual(JSON.parse(fs.readFileSync(lock, 'utf8')).heartbeatAt, w.now().toISOString(), 'the heartbeat moved with the clock');
+      const other = new LadderEngine({ state: new ContactState({ dir: path.join(tmp('kl-ladder-other-'), 'contact'), clock: w.now }), casesRoot: w.root, runtime: w.runtime, router: w.router, presence: w.presence, getPolicy: () => w.policy, clock: w.now, tickMs: 20, hostName: 'web-01' });
+      assert.strictEqual(other.tryAcquire(), false);
+      assert.strictEqual(JSON.parse(fs.readFileSync(lock, 'utf8')).pid, process.pid, 'not taken over');
+      release();
+      await ladder.stop();
+    } finally {
+      releaseLoop();
+    }
+  });
+
+  it('a lost lease stops delivery mid-tick', async () => {
+    const policy = quietPolicy();
+    policy.ladders.normal = [{ channel: 'telegram' }];
+    policy.ladders.high = [{ channel: 'sms' }];
+    const w = await world({ policy });
+    const q1 = w.ask({ text: 'Seller financing?' });
+    const q2 = w.ask({ text: 'Accept the offer by noon?', urgency: 'high' });
+    assert.strictEqual(w.ladder.tryAcquire(), true);
+    const lock = path.join(w.root, '.contact.lock');
+    for (const id of ['telegram', 'sms']) {
+      const a = w.adapters.get(id);
+      const send = a.sendContact.bind(a);
+      a.sendContact = async (...args) => {
+        const r = await send(...args);
+        fs.writeFileSync(lock, JSON.stringify({ pid: 1, host: 'web-01', dataDir: 'elsewhere', heartbeatAt: w.now().toISOString() }));
+        return r;
+      };
+    }
+    await w.tickAt('2026-09-25T09:01:00Z');
+    const sent = w.adapters.get('telegram').sent.length + w.adapters.get('sms').sent.length;
+    assert.strictEqual(sent, 1, 'the second channel is not sent once the lease is gone');
+    assert.strictEqual(w.entry(q1).attempts.length + w.entry(q2).attempts.length, 1, 'no inFlight attempt is recorded for the unsent one');
+    assert.strictEqual(w.ladder.status().runsHere, false);
+  });
+
+  it('two processes taking over one stale lease: only the last writer confirms', async () => {
+    const w = await world();
+    fs.writeFileSync(path.join(w.root, '.contact.lock'), JSON.stringify({ pid: 1, host: 'gpu-box', dataDir: 'elsewhere', heartbeatAt: '2026-09-25T08:00:00Z' }));
+    const mk = (host) => new LadderEngine({ state: new ContactState({ dir: path.join(tmp('kl-ladder-x-'), 'contact'), clock: w.now }), casesRoot: w.root, runtime: w.runtime, router: w.router, presence: w.presence, getPolicy: () => w.policy, clock: w.now, hostName: host });
+    const a = mk('web-01');
+    const b = mk('web-02');
+    assert.strictEqual(a.tryAcquire(), false, 'a writes its takeover lease');
+    // b read the same stale lock before a wrote; its write lands last.
+    fs.writeFileSync(path.join(w.root, '.contact.lock'), JSON.stringify(b._lease()));
+    assert.strictEqual(a.tryAcquire(), false, 'b wrote last: a stays passive');
+    assert.strictEqual(a.status().holder.host, 'web-02');
+    assert.strictEqual(b.tryAcquire(), true);
+  });
+
+  it('after a quiet-hours deferred send the next step keeps its spacing', async () => {
+    const policy = quietPolicy();
+    policy.quietHours = { start: '22:00', end: '07:00', breakthrough: ['high'] };
+    policy.ladders.normal = [{ channel: 'present' }, { channel: 'telegram', afterMin: 30 }, { channel: 'sms', afterMin: 60 }];
+    const w = await world({ start: '2026-11-01T04:00:00Z', tz: 'America/Chicago', policy });
+    const q = w.ask({ text: 'Seller financing?' });
+    await w.tickAt('2026-11-01T04:01:00Z');
+    await w.tickAt('2026-11-01T04:30:00Z');
+    await w.tickAt('2026-11-01T13:00:00Z');
+    assert.strictEqual(w.adapters.get('telegram').sent.length, 1);
+    assert.strictEqual(w.entry(q).nextAt, '2026-11-01T13:30:00.000Z', 'sentAt + (60 - 30) min, not the overdue 05:00Z');
+    await w.tickAt('2026-11-01T13:00:30Z');
+    assert.strictEqual(w.adapters.get('sms').sent.length, 0, 'no SMS 30 s after the Telegram');
+    await w.tickAt('2026-11-01T13:30:00Z');
+    assert.strictEqual(w.adapters.get('sms').sent.length, 1);
   });
 });

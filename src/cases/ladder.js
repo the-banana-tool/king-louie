@@ -43,6 +43,7 @@ class LadderEngine {
     this.inflight = null;
     this.recovered = false;
     this.notConfiguredLogged = new Set();
+    this.warned = new Set();
   }
 
   // ---- The cases-root lease ----
@@ -67,7 +68,9 @@ class LadderEngine {
     return Boolean(lock && lock.pid === process.pid && lock.host === this.hostName && lock.dataDir === this.dataDir);
   }
 
-  // true when this process holds (or just took) the lease.
+  // true when this process holds the lease. Taking over a stale lease
+  // writes it and returns false; the next call returns true only if the
+  // lock still names this process (two contenders: the last writer wins).
   tryAcquire() {
     // No cases root yet means no cases: nothing to ladder, and nothing is
     // created on disk until the first case is (CaseRuntime's rule).
@@ -93,7 +96,9 @@ class LadderEngine {
     if (!held || !Number.isFinite(beat) || this.clock().getTime() - beat > 3 * this.tickMs) {
       this.log.warn(`taking over a stale contact ladder lease${held ? ` from ${held.host}:${held.pid}` : ''}`);
       fs.writeFileSync(this.lockPath(), JSON.stringify(this._lease()));
-      return this._becomeActive();
+      this.active = false;
+      this.holder = null;
+      return false;
     }
     if (!this.holder || this.holder.pid !== held.pid || this.holder.host !== held.host) {
       this.log.info(`contact ladder runs in ${held.host}:${held.pid}`);
@@ -107,6 +112,24 @@ class LadderEngine {
     this.active = true;
     this.holder = null;
     return true;
+  }
+
+  // False when another process now holds the lease (no lock file: nobody
+  // else does, as when a test drives tick() directly).
+  _stillLeased() {
+    const held = this._readLock();
+    if (!held || this._mine(held)) return true;
+    if (this.active) this.log.warn(`lost the contact ladder lease to ${held.host}:${held.pid}; stopping delivery`);
+    this.active = false;
+    this.holder = held;
+    return false;
+  }
+
+  // One warning per distinct failure, not one per tick.
+  _warnOnce(key, message) {
+    if (this.warned.has(key)) return;
+    this.warned.add(key);
+    this.log.warn(message);
   }
 
   _heartbeat() {
@@ -124,7 +147,6 @@ class LadderEngine {
     this.tryAcquire();
     if (this.timer) return;
     this.timer = setInterval(() => {
-      if (this.inflight) return;
       let ok;
       try {
         ok = this.active ? this._heartbeat() : this.tryAcquire();
@@ -133,7 +155,7 @@ class LadderEngine {
         this.log.warn(`contact ladder lease check failed: ${err.message}`);
         return;
       }
-      if (!ok) return;
+      if (!ok || this.inflight) return;
       this.inflight = this.tick()
         .catch((err) => this.log.warn(`contact ladder tick failed: ${err.message}`))
         .finally(() => { this.inflight = null; });
@@ -173,6 +195,14 @@ class LadderEngine {
     entry.step += 1;
     entry.nextAt = now !== null ? iso(now) : (entry.step < entry.steps.length ? iso(this._nominal(entry, entry.step, policy)) : null);
     entry.quietDeferred = false;
+  }
+
+  // A step quiet hours held back went out late; the next one keeps its gap
+  // from it (an SMS must not follow the deferred Telegram seconds later).
+  _keepSpacing(e, sentMs) {
+    if (e.step >= e.steps.length) return;
+    const gap = (e.steps[e.step].afterMin - e.steps[e.step - 1].afterMin) * MINUTE;
+    e.nextAt = iso(Math.max(Date.parse(e.nextAt), sentMs + Math.max(gap, 0)));
   }
 
   // 8. A briefing (never has options) stops after its first sent step.
@@ -217,7 +247,15 @@ class LadderEngine {
     // 1. Scan: enqueue every open record without an entry.
     for (const c of cases.values()) {
       if (CLOSED_CASE.has(c.status)) continue;
-      for (const rec of this.runtime.questions(c.id).open()) {
+      let open;
+      try {
+        open = this.runtime.questions(c.id).open();
+      } catch (err) {
+        // One unreadable case must not starve the others.
+        this._warnOnce(`scan|${c.id}|${err.message}`, `contact ladder: cannot read the questions of case ${c.id}: ${err.message}`);
+        continue;
+      }
+      for (const rec of open) {
         const key = `${c.id}/${rec.id}`;
         if (ladder.entries[key]) continue;
         const pinned = this.state.takePin(key);
@@ -284,7 +322,11 @@ class LadderEngine {
         this._advance(e, policy);
         this._afterSent(e);
       } catch (err) {
-        if (err.code !== 'CASE_BUSY') throw err;
+        if (err.code === 'CASE_BUSY') continue;
+        // Like a failed send: record it and move to the next step.
+        this._attempt(e, { channel: 'journal', outcome: 'failed', error: { code: err.code || 'error', message: err.message } });
+        this._advance(e, policy, { now: nowMs });
+        this.log.warn(`contact ladder: journaling ${e.caseId}/${e.questionId} failed: ${err.message}`);
       }
     }
 
@@ -298,7 +340,7 @@ class LadderEngine {
         await this._journal(e.caseId, `contact: ${e.questionId} held until ${until}`, `${e.questionId} held until ${until} (quiet hours): ${rec ? rec.text : ''}`, now);
         e.heldJournaled = true;
       } catch (err) {
-        if (err.code !== 'CASE_BUSY') throw err;
+        if (err.code !== 'CASE_BUSY') this._warnOnce(`held|${e.caseId}/${e.questionId}|${err.message}`, `contact ladder: journaling the quiet-hours hold of ${e.caseId}/${e.questionId} failed: ${err.message}`);
       }
     }
 
@@ -321,7 +363,7 @@ class LadderEngine {
           await this._journal(e.caseId, `contact: ladder exhausted for ${e.questionId}`, `Ladder exhausted for ${e.questionId}: tried ${tried}. The question stays open.`, now);
           e.exhaustJournaled = true;
         } catch (err) {
-          if (err.code !== 'CASE_BUSY') throw err;
+          if (err.code !== 'CASE_BUSY') this._warnOnce(`exhaust|${e.caseId}/${e.questionId}|${err.message}`, `contact ladder: journaling the exhausted ladder of ${e.caseId}/${e.questionId} failed: ${err.message}`);
         }
       }
     }
@@ -440,17 +482,20 @@ class LadderEngine {
   async _deliver(channel, entries, policy, now) {
     const out = { delivered: 0, failed: 0 };
     const items = entries.map((e) => this._item(e)).filter(Boolean);
-    if (!items.length) return out;
+    if (!items.length || !this._stillLeased()) return out;
     const deliveryId = this.state.newDeliveryId();
     const batchToken = this.state.newToken();
     for (const e of entries) this._attempt(e, { channel, outcome: 'inFlight', deliveryId, batchToken, idempotencyKey: deliveryId, mirrored: false });
     this.state.saveLadder();
     try {
       await this.router.deliver(channel, items, { deliveryId, batchToken });
+      const sentMs = this.clock().getTime();
       for (const e of entries) {
         const a = e.attempts[e.attempts.length - 1];
         a.outcome = 'sent';
+        const deferred = e.quietDeferred;
         this._advance(e, policy);
+        if (deferred) this._keepSpacing(e, sentMs);
         this._afterSent(e);
       }
       out.delivered += entries.length;
@@ -481,6 +526,7 @@ class LadderEngine {
       byDelivery.get(a.deliveryId).entries.push(e);
     }
     for (const [deliveryId, g] of byDelivery) {
+      if (!this._stillLeased()) return;
       const caps = this.router.adapter(g.channel)?.contactCapabilities() || {};
       if (caps.idempotentSend) {
         const items = g.entries.map((e) => this._item(e)).filter(Boolean);
@@ -532,6 +578,7 @@ class LadderEngine {
       return;
     }
     const items = entries.map((e) => this._item(e)).filter(Boolean);
+    if (!this._stillLeased()) return;
     const deliveryId = this.state.newDeliveryId();
     try {
       await this.router.deliver(d.channel, items, { deliveryId });
@@ -568,7 +615,8 @@ class LadderEngine {
         });
         for (const { a } of list) a.mirrored = true;
       } catch (err) {
-        if (err.code !== 'CASE_BUSY' && err.code !== 'CASE_NOT_FOUND') throw err;
+        // Retried next tick; one case's failure never blocks another's mirror.
+        if (err.code !== 'CASE_BUSY' && err.code !== 'CASE_NOT_FOUND') this._warnOnce(`mirror|${caseId}|${err.message}`, `contact ladder: mirroring deliveries into case ${caseId} failed: ${err.message}`);
       }
     }
     this.state.saveLadder();
