@@ -55,9 +55,10 @@ function scale(num, suffix) {
 const PRICE_PATTERNS = [
   { re: /\$\s?(\d[\d,]*(?:\.\d+)?)(?:\s?(k|m|bn|thousand|million|billion)\b)?/gi, value: (m) => scale(m[1], m[2]) },
   { re: /\b(\d[\d,]*(?:\.\d+)?)\s?(k|m|bn|thousand|million|billion)?\s?(?:dollars|usd)\b/gi, value: (m) => scale(m[1], m[2]) },
-  // A scaled amount without a currency ("1250k", "1.25 million") still
-  // reads as money; a bare count ("Lot 12") does not.
-  { re: /\b(\d[\d,]*(?:\.\d+)?)(?:(k|m|bn)|\s?(thousand|million|billion))\b/gi, value: (m) => scale(m[1], m[2] || m[3]) }
+  // A scaled amount without a currency ("1250k", "1.25 million") may be
+  // money, so rule 1 compares it with fact values. It is `bare`: rule 3
+  // does not treat it as a price constraint ("40m of frontage", "a 5k").
+  { re: /\b(\d[\d,]*(?:\.\d+)?)(?:(k|m|bn)|\s?(thousand|million|billion))\b/gi, value: (m) => scale(m[1], m[2] || m[3]), bare: true }
 ];
 
 const DEADLINE_RE = /\b(?:due(?:\s+(?:by|on|before))?|deadlines?|no later than|expires?(?:\s+on)?|must be (?:received|submitted|filed) by|closes? on)\b/gi;
@@ -101,7 +102,7 @@ function collect(scan, patterns, kind) {
       }
       const start = starts[m.index];
       const end = ends[m.index + m[0].length - 1];
-      out.push({ kind, start, end, text: orig.slice(start, end), value: p.value(m) });
+      out.push({ kind, start, end, text: orig.slice(start, end), value: p.value(m), ...(p.bare ? { bare: true } : {}) });
     }
   }
   return out;

@@ -328,3 +328,21 @@ describe('review round 1: splicing, leaves, keys, entity spans', () => {
     assert.strictEqual(gateLeaves({ a: shared, b: shared }, { facts: facts(), mode: 'query' }).ok, true, 'a shared object is not a cycle');
   });
 });
+
+describe('review round 2: bare amounts and duplicate reports', () => {
+  it('a bare scaled number is not a price constraint in message mode', () => {
+    for (const text of ['The lot has 40m of frontage', 'About 3 million people live nearby', 'I ran a 5k', 'Photos are 4K resolution', '2 thousand acres']) {
+      assert.deepStrictEqual(outboundGate({ payloadText: text, facts: facts() }).blocked, [], text);
+    }
+  });
+
+  it('a bare amount matching a private fact is still blocked by rule 1', () => {
+    const r = outboundGate({ payloadText: 'We think 1.25 million is fair', facts: facts(FLOOR) });
+    assert.deepStrictEqual(r.blocked.map((b) => [b.reason, b.factId, b.span.text]), [['non-disclosable', 'f-0005', '1.25 million']]);
+  });
+
+  it('reports a value once when one hit sits inside another for the same fact', () => {
+    const r = outboundGate({ payloadText: 'Floor $1,250,000 firm', facts: facts(FLOOR), mode: 'query' });
+    assert.deepStrictEqual(r.blocked.map((b) => [b.reason, b.span.text]), [['non-disclosable', '$1,250,000']]);
+  });
+});

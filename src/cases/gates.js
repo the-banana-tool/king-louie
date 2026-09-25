@@ -272,7 +272,16 @@ function outboundGate({
       return own ? null : renderedToInput(refs.refs, sp.start, sp.end);
     });
   }
-  for (const { span, scanned, facts: set } of hits.values()) {
+  // One report per value: drop a fact from a hit that sits inside another
+  // hit for the same fact ("1,250,000" inside "$1,250,000").
+  const hitList = [...hits.values()];
+  for (const h of hitList) {
+    for (const f of [...h.facts]) {
+      if (hitList.some((o) => o !== h && o.facts.has(f) && o.span.start <= h.span.start && h.span.end <= o.span.end)) h.facts.delete(f);
+    }
+  }
+  for (const { span, scanned, facts: set } of hitList) {
+    if (!set.size) continue;
     if (isRecipient(scanned, recipients)) continue;
     const matched = [...set];
     const live = matched.filter((f) => f.status === 'active');
@@ -320,7 +329,8 @@ function outboundGate({
       if (r.ok && BACKING.has(r.fact.provenance)) backedSentences.add(sentenceOf(sentences, r.start));
     }
     const spans = detect(masked);
-    for (const sp of spans.filter((s) => s.kind === 'date' || s.kind === 'price')) {
+    // A bare scaled number ("40m", "3 million") is not a price constraint.
+    for (const sp of spans.filter((s) => s.kind === 'date' || (s.kind === 'price' && !s.bare))) {
       if (backing.some((f) => spanMatchesValue(sp, f.value)) || isApproved(sp.text)) {
         backedSentences.add(sp.sentence);
         continue;
