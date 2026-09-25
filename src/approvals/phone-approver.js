@@ -57,13 +57,16 @@ class PhoneApprover {
       return `the relay link could not be checked: ${err.message}`;
     }
     if (!delivery || !delivery.ok) return (delivery && delivery.reason) || 'the relay link cannot deliver';
-    if (this.approverStore.untrusted) return this.approverStore.problem || 'the approver set has not been verified as admin-owned on this node';
+    // Counted first: the count is what rescans the store, and on Windows the
+    // rescan re-runs the ACL probe, so `untrusted` below is current rather
+    // than whatever the last scan left.
     let activeCount;
     try {
       activeCount = this.approverStore.activeCount();
     } catch (err) {
       return `the approver set could not be checked: ${err.message}`;
     }
+    if (this.approverStore.untrusted) return this.approverStore.problem || 'the approver set has not been verified as admin-owned on this node';
     if (activeCount === 0) return 'no enrolled device on this node';
     return null;
   }

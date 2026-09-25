@@ -434,6 +434,38 @@ describe('PhoneApprover availability', () => {
     fs.rmSync(base, { recursive: true, force: true });
   });
 
+  it('Windows: availability follows the approvers dir ACL as it changes, not the startup verdict', async () => {
+    const identity = testNodeIdentity();
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-reprobe-'));
+    const dir = path.join(base, 'approvers');
+    fs.mkdirSync(dir);
+    const phone = createFakePhone();
+    fs.writeFileSync(path.join(dir, `${phone.deviceId}.json`), JSON.stringify(phone.approverRecord()));
+    const state = { writable: true };
+    const isProbe = (file) => path.basename(file).startsWith('.probe-');
+    const fsImpl = {
+      ...fs,
+      openSync: (file, ...rest) => {
+        if (!isProbe(file)) return fs.openSync(file, ...rest);
+        if (state.writable) return 42;
+        throw Object.assign(new Error('denied'), { code: 'EPERM' });
+      },
+      closeSync: (fd) => { if (fd !== 42) fs.closeSync(fd); },
+      unlinkSync: (file) => { if (!isProbe(file)) fs.unlinkSync(file); }
+    };
+    const store = new ApproverStore({ dir, platform: 'win32', fsImpl });
+    await store.ready();
+    const approver = new PhoneApprover({ identity, approverStore: store, link: fakeLink(), auditLedger: fakeLedger() });
+    assert.match(approver.unavailableReason(), /writable by the account running the service/);
+    state.writable = false;
+    store.refresh();
+    assert.equal(approver.unavailableReason(), null);
+    state.writable = true;
+    store.refresh();
+    assert.match(approver.unavailableReason(), /writable by the account running the service/);
+    fs.rmSync(base, { recursive: true, force: true });
+  });
+
   it('a link or store that throws while being checked is unavailable, never an unhandled rejection', async () => {
     const { approver: withBadLink } = await rawSetup({ link: (() => { const l = fakeLink(); l.canDeliver = () => { throw new Error('link boom'); }; return l; })() });
     assert.equal(withBadLink.isAvailable(), false);

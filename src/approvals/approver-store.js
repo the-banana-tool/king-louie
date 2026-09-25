@@ -130,6 +130,7 @@ class ApproverStore {
     this._files = new Map();
     this._scannedAt = -Infinity;
     this._logged = new Set();
+    this._readied = false;
   }
 
   // Startup probe. POSIX: the dir must be admin-owned and not writable by
@@ -141,6 +142,7 @@ class ApproverStore {
       dir: this.dir, platform: this.platform, geteuid: this.geteuid, adminUid: this.adminUid, fsImpl: this.fs, serviceProbe: this.serviceProbe
     });
     this.untrusted = this.problem !== null;
+    this._readied = true;
     if (this.problem) log.error(`approver set treated as empty: ${this.problem}`);
     this._scannedAt = -Infinity;
     this._rebuildOverlay();
@@ -158,6 +160,15 @@ class ApproverStore {
     const nowMs = Date.now();
     if (nowMs - this._scannedAt < CACHE_MS) return;
     this._scannedAt = nowMs;
+    // Windows: the dir's ACL is the only guard (files carry no owner check
+    // there), and it can change under a running service, or the dir can be
+    // created after startup by whoever may write its parent. So the write
+    // probe runs again on every scan, never just once in ready(): a dir the
+    // service can write is untrusted (no approver counts) until a later
+    // probe finds it locked, and a missing dir is simply no approvers.
+    // Only once ready() has run: until then the store stays untrusted (and
+    // its revoke overlay unbuilt), whatever a probe would say.
+    if (this.platform === 'win32' && this.serviceProbe && this._readied) this._reprobe();
     if (this.untrusted) {
       this._files.clear();
       return;
@@ -201,6 +212,19 @@ class ApproverStore {
       }
       this._files.set(name, { mtimeMs: st.mtimeMs, size: st.size, record });
     }
+  }
+
+  // Re-runs the Windows write probe; logs only when the verdict changes.
+  _reprobe() {
+    const problem = checkApproverDir({
+      dir: this.dir, platform: this.platform, geteuid: this.geteuid, adminUid: this.adminUid, fsImpl: this.fs, serviceProbe: this.serviceProbe
+    });
+    if (problem !== this.problem) {
+      if (problem) log.error(`approver set treated as empty: ${problem}`);
+      else log.info(`approver directory ${this.dir} is protected again; its approvers count`);
+    }
+    this.problem = problem;
+    this.untrusted = problem !== null;
   }
 
   // Forget the one-second cache, so the next read sees files written just now.

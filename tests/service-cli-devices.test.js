@@ -54,24 +54,27 @@ function node({ relay = true, running = true, linked = true } = {}) {
 }
 
 // The running service's side of the courier, with a relay that records calls.
-function servicePump(n) {
+function servicePump(n, { now = Date.now } = {}) {
   const ports = buildServicePorts({ dataDir: n.dataDir });
   const identity = getOrGenerateNodeIdentity(ports.store, ports.cipher, 'web-01');
   const calls = [];
-  const pump = new CourierPump({ dataDir: n.dataDir, relayClient: { call: async (method, params) => { calls.push([method, params]); return { ok: true }; } }, identity, pollMs: 10 }).start();
+  const pump = new CourierPump({ dataDir: n.dataDir, relayClient: { call: async (method, params) => { calls.push([method, params]); return { ok: true }; } }, identity, pollMs: 10, now }).start();
   cleanups.push(() => pump.stop());
   return { pump, calls, identity };
 }
 
 const deps = { storeOptions, renderQr: async () => '[QR]', pollMs: 10, timeoutMs: 5000 };
 
-async function waitFor(check, what) {
-  for (let i = 0; i < 400; i += 1) {
+// Wall-clock budget (default 4 s), not an iteration count: under full-suite
+// load each 10 ms sleep stretches, and a count would stretch with it.
+async function waitFor(check, what, ms = 4000) {
+  const deadline = Date.now() + ms;
+  for (;;) {
     const v = check();
     if (v) return v;
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
     await new Promise((r) => setTimeout(r, 10));
   }
-  throw new Error(`timed out waiting for ${what}`);
 }
 
 describe('enroll-device refusals', () => {
@@ -145,9 +148,9 @@ describe('enroll-device', () => {
 
 describe('enroll-device ends without enrolling', () => {
   // Starts enroll-device and returns once the code is on screen.
-  async function start(extraDeps = {}, phoneOptions = {}) {
+  async function start(extraDeps = {}, phoneOptions = {}, pumpOptions = {}) {
     const n = node();
-    const { pump, calls } = servicePump(n);
+    const { pump, calls } = servicePump(n, pumpOptions);
     const io = streamIo();
     const phone = createFakePhone({ name: 'Pixel 9', ...phoneOptions });
     const running = runEnrollDevice({ ...n, io, deps: { ...deps, ...extraDeps } });
@@ -156,8 +159,8 @@ describe('enroll-device ends without enrolling', () => {
     const claim = (envelope) => pump.deliver(pump.routeFor('enroll.claim', { code_id: qr.code_id }), 'enroll.claim', { code_id: qr.code_id, envelope });
     const claimRight = () => claim(phone.enroll({ codeId: qr.code_id, code: qr.code }));
     const prompted = () => waitFor(() => /does the phone show the same\? \[y\/N\]/.test(io.text.out), 'the prompt');
-    const done = async () => {
-      await waitFor(() => calls.some(([m]) => m === 'enroll.done'), 'enroll.done');
+    const done = async (ms) => {
+      await waitFor(() => calls.some(([m]) => m === 'enroll.done'), 'enroll.done', ms);
       return open(calls.find(([m]) => m === 'enroll.done')[1].envelope).message;
     };
     const approverFile = path.join(n.configDir, 'approvers', `${phone.deviceId}.json`);
@@ -193,12 +196,18 @@ describe('enroll-device ends without enrolling', () => {
   });
 
   it('the code expiring while the question is open refuses, and a late y changes nothing', async () => {
-    const t = await start({ codeTtlMs: 2000 });
+    // The CLI sends its refusal ttl/10 (200 ms here) before the code dies,
+    // and the service drops an enroll.done for a code already expired on its
+    // clock. Under full-suite load that 200 ms can pass before the pump reads
+    // the outbox, so the pump's clock is held 5 s back here: this test is
+    // about the CLI refusing, not about that margin.
+    const t = await start({ codeTtlMs: 2000 }, {}, { now: () => Date.now() - 5000 });
     t.claimRight();
     await t.prompted();
     assert.equal(await t.running, 1);
     assert.match(t.io.text.err, /expired before you answered/, t.io.text.err);
-    assert.equal((await t.done()).refused, true);
+    assert.doesNotMatch(t.io.text.err, /Could not tell the relay/, t.io.text.err);
+    assert.equal((await t.done(15000)).refused, true);
     t.io.stdin.write('y\n');
     await new Promise((r) => setTimeout(r, 50));
     assert.equal(fs.existsSync(t.approverFile), false);

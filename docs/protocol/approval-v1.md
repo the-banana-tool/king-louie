@@ -272,6 +272,16 @@ This table is also what feeds `reason` in the relay's
 the exact cause, including `action_changed`, `expired` or `stopped`, rather
 than a generic failure.
 
+`accepted` is `true` or `false` only when the node's service judged the
+response itself. When the request belongs to a local requester in another
+process on the node (a `mcp` process asking through the service's file
+courier), the service forwards the response to that requester and answers
+`{ delivered: true, accepted: null, reason: null }`: the response was
+forwarded to a local requester, and the relay does not know the verdict. The
+phone shows "sent to <node>" for `accepted: null`. It never shows it as
+approved, and the node never treats it as one; only `=== true` approves. The
+outcome shows up later in the request's status and in the node's history.
+
 ## 5. What the phone checks and shows
 
 - **Shape first.** The same shape check a node runs (`validateMessage` against
@@ -392,7 +402,7 @@ device.
 | `GET /v1/enroll/{code_id}` | code | → `{ state: 'waiting'\|'done'\|'refused'\|'expired', node }` |
 | `GET /v1/approvals?wait=0..25` | device | → `[{ envelope, expires_in_ms, status }]`; waits up to `wait` s for something new since this device's last call |
 | `GET /v1/approvals/{request_id}` | device | → `{ envelope, expires_in_ms, status }` / `404` |
-| `POST /v1/approvals/{request_id}/response` | device | response envelope → `202 { delivered: true, accepted, reason }` / `503 node_offline` / `410 gone` |
+| `POST /v1/approvals/{request_id}/response` | device | response envelope → `202 { delivered: true, accepted, reason }` (`accepted`: `true`/`false` as the node judged it, or `null` when it was forwarded to a local requester and the verdict is not known to the relay, §4) / `503 node_offline` / `410 gone` |
 | `GET /v1/nodes` | device | → `[{ node_id, node_name, online }]` (no keys) |
 | `GET /v1/nodes/{node_id}/history?limit&before_seq` | device | → `kl.audit.slice` envelope |
 | `POST /v1/pairing-codes` | device | `{ node_name }` → `{ code, expires_at }` |

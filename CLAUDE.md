@@ -117,7 +117,10 @@ git repo under `<dataDir>/cases/` (override with `settings.cases.root` or
 Fleet stage 3 (spec `docs/superpowers/specs/2026-09-23-fleet-stage3-approvals.md`, wire protocol
 `docs/protocol/approval-v1.md`). On a service node, an unsafe remote tool call or `unsafe` runbook runs
 only after an enrolled phone signs an approval over the exact action; only `=== true` approves. The
-service only reads the approver set in `<configDir>/approvers/`; the admin CLI writes it.
+service only reads the approver set in `<configDir>/approvers/`; the admin CLI writes it. On Windows
+the directory's ACL is the only guard, so `approvers\` must not be writable by the service account:
+`install` creates it (and the config dir) admin-owned, with read and execute only for the service, and
+the service re-probes it on every scan, trusting no approver while it can write there.
 
 - Relay host (admin `service.json` `relay` block; the mesh listener must be a loopback or private IP):
   `king-louie-service relay run`, `relay code <node-name>`, `relay nodes`, `relay remove-node <name>`, `relay qr`.

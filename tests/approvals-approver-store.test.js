@@ -125,6 +125,94 @@ describe('ApproverStore reading', () => {
   });
 });
 
+// Task 23 review, Ruling A: on Windows the ACL is the only guard, so the
+// write probe runs on every scan, not once at startup.
+describe('ApproverStore: the Windows probe runs on every scan', () => {
+  const denied = () => Object.assign(new Error('denied'), { code: 'EPERM' });
+  // The probe's openSync answers from `state`; everything else is real fs.
+  function probed(state) {
+    return {
+      ...fs,
+      openSync: (file, ...rest) => {
+        if (path.basename(file).startsWith('.probe-')) {
+          if (!state.writable) throw denied();
+          return 42;
+        }
+        return fs.openSync(file, ...rest);
+      },
+      closeSync: (fd) => { if (fd !== 42) fs.closeSync(fd); },
+      unlinkSync: (file) => { if (!path.basename(file).startsWith('.probe-')) fs.unlinkSync(file); }
+    };
+  }
+
+  it('a dir missing at startup that appears writable is never trusted; locked later, it is', async () => {
+    const l = layout();
+    fs.rmSync(l.dir, { recursive: true });
+    const state = { writable: true };
+    const s = store(l, { platform: 'win32', fsImpl: probed(state) });
+    assert.deepEqual(await s.ready(), { ok: true });
+    assert.equal(s.activeCount(), 0, 'a missing dir is no approvers');
+    // The service account creates approvers/ and plants a record.
+    fs.mkdirSync(l.dir);
+    const planted = createFakePhone();
+    write(l.dir, planted.approverRecord());
+    s.refresh();
+    assert.equal(s.isActive(planted.deviceId), false);
+    assert.equal(s.activeCount(), 0);
+    assert.equal(s.untrusted, true);
+    assert.match(s.problem, /writable by the account running the service/);
+    // An administrator fixes the ACL: the next scan trusts the dir.
+    state.writable = false;
+    s.refresh();
+    assert.equal(s.isActive(planted.deviceId), true);
+    assert.equal(s.untrusted, false);
+    assert.equal(s.problem, null);
+  });
+
+  it('a trusted dir that becomes writable while running stops counting at once', async () => {
+    const l = layout();
+    const phone = createFakePhone();
+    write(l.dir, phone.approverRecord());
+    const state = { writable: false };
+    const s = store(l, { platform: 'win32', fsImpl: probed(state) });
+    assert.deepEqual(await s.ready(), { ok: true });
+    assert.equal(s.isActive(phone.deviceId), true);
+    state.writable = true;
+    s.refresh();
+    assert.equal(s.isActive(phone.deviceId), false);
+    assert.equal(s.get(phone.deviceId), null);
+    assert.match(s.problem, /writable by the account running the service/);
+  });
+
+  it('before ready() the store stays untrusted, whatever the probe would say', () => {
+    const l = layout();
+    const phone = createFakePhone();
+    write(l.dir, phone.approverRecord());
+    const s = store(l, { platform: 'win32', fsImpl: probed({ writable: false }) });
+    assert.equal(s.isActive(phone.deviceId), false);
+    assert.equal(s.untrusted, true);
+  });
+
+  it('the admin snapshot (serviceProbe: false) and POSIX never run the probe', async () => {
+    const l = layout();
+    const phone = createFakePhone();
+    write(l.dir, phone.approverRecord());
+    let probes = 0;
+    const counting = { ...fs, openSync: (file, ...rest) => { if (path.basename(file).startsWith('.probe-')) probes += 1; return fs.openSync(file, ...rest); } };
+    const adminView = store(l, { platform: 'win32', serviceProbe: false, fsImpl: counting });
+    await adminView.ready();
+    adminView.refresh();
+    assert.equal(adminView.isActive(phone.deviceId), true);
+    const posix = store(l, { fsImpl: counting });
+    if (POSIX) {
+      await posix.ready();
+      posix.refresh();
+      assert.equal(posix.isActive(phone.deviceId), true);
+    }
+    assert.equal(probes, 0);
+  });
+});
+
 describe('ApproverStore.stage', () => {
   async function fleet() {
     const l = layout();

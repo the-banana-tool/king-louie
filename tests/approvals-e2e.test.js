@@ -78,11 +78,12 @@ async function stopChildren(children) {
   }));
 }
 
-// The service trusts the approver set only when it cannot write it. On
-// Windows the test user is also the "service account", so once the phone is
-// enrolled the test denies itself write access to approvers/ (a temp dir), as
-// an installer's ACL would. The returned function lifts the deny again so the
-// temp dir can be removed.
+// Both the service's approver store and mcp's trust the approver set only
+// while they cannot write it, and on Windows they re-check that on every
+// scan. The test user is also the "service account" here, so once the phone
+// is enrolled the test denies itself write access to approvers/ (a temp
+// dir), as the installer's ACL would. The returned function lifts the deny
+// again so the temp dir can be removed.
 function lockApproversDir(dir) {
   if (process.platform !== 'win32') return () => {};
   const who = process.env.USERDOMAIN ? `${process.env.USERDOMAIN}\\${os.userInfo().username}` : os.userInfo().username;
@@ -124,6 +125,7 @@ describe('phone approvals end to end', { skip: !CAN_RUN && 'needs root-owned adm
   it('an unsafe runbook asked for through mcp runs after a phone approves it', async () => {
     const children = [];
     let unlock = null;
+    let mcp = null;
     const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'kl-e2e-approvals-')));
     try {
       // ── Relay host ──────────────────────────────────────────────────────
@@ -182,7 +184,19 @@ describe('phone approvals end to end', { skip: !CAN_RUN && 'needs root-owned adm
       const codesDir = path.join(relayData, 'relay', 'codes');
       await until(() => fs.readdirSync(codesDir).length === 0, () => `the relay to pick up the code (${relay.errors()})`);
       const pairIo = streamIo(`${code}\n`);
-      assert.equal(await runPair({ url: `wss://127.0.0.1:${meshPort}`, dataDir: nodeData, io: pairIo }), 0, pairIo.text.err);
+      // pair creates the node's identity in process, and the logger reports
+      // that on the console; captured here so it stays out of the test output.
+      const logged = [];
+      const consoleLog = console.log;
+      console.log = (...args) => { logged.push(args.join(' ')); };
+      let paired;
+      try {
+        paired = await runPair({ url: `wss://127.0.0.1:${meshPort}`, dataDir: nodeData, io: pairIo });
+      } finally {
+        console.log = consoleLog;
+      }
+      assert.equal(paired, 0, pairIo.text.err);
+      assert.ok(logged.some((l) => l.includes('Generated new Node Identity') && l.includes('"web-01"')), logged.join('\n'));
 
       const service = spawnCli(children, ['run', '--profile', 'runbook', '--data-dir', nodeData]);
       await until(() => service.output().includes('"event":"ready"'), () => `node ready (${service.errors()})`);
@@ -204,17 +218,44 @@ describe('phone approvals end to end', { skip: !CAN_RUN && 'needs root-owned adm
       enrollIo.stdin.write('y\n');
       assert.equal(await enrolling, 0, enrollIo.text.err);
       await until(async () => (await anonymous('GET', `/v1/enroll/${qr.code_id}`)).body.state === 'done', 'enrollment done');
-      unlock = lockApproversDir(path.join(nodeConfig, 'approvers'));
 
       // ── The unsafe runbook through mcp ──────────────────────────────────
-      const mcp = spawnCli(children, ['mcp', '--data-dir', nodeData]);
-      const rpc = (id, method, params) => {
+      mcp = spawnCli(children, ['mcp', '--data-dir', nodeData]);
+      let nextId = 1;
+      const rpc = (method, params) => {
+        const id = nextId;
+        nextId += 1;
         mcp.child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
         return until(() => mcp.output().split('\n').filter(Boolean).map((l) => JSON.parse(l)).find((m) => m.id === id), () => `mcp reply ${id} (${mcp.errors()})`);
       };
-      await rpc(1, 'initialize', {});
-      const started = await rpc(2, 'tools/call', { name: 'run_runbook', arguments: { machine: 'web-01', runbook: 'site.touch', params: { target: root } } });
-      const job = JSON.parse(started.result.content[0].text);
+      const tool = async (name, args) => JSON.parse((await rpc('tools/call', { name, arguments: args })).result.content[0].text);
+      const runRunbook = () => tool('run_runbook', { machine: 'web-01', runbook: 'site.touch', params: { target: root } });
+      await rpc('initialize', {});
+
+      if (process.platform === 'win32') {
+        // Unlocked, approvers/ is writable by the account both stores run as,
+        // so neither trusts it. mcp's store: the runbook is denied at once.
+        const refused = await runRunbook();
+        assert.equal(refused.status, 'denied', JSON.stringify(refused));
+        assert.match(refused.reason, /^denied_by_policy: .*writable by the account running the service/);
+        // The service's store: approvers/ did not exist when the service
+        // started, and was created (writable) by enroll-device since. Its
+        // device poll (every 5 s) rescans, and the rescan refuses the dir.
+        const serviceLog = () => service.output() + service.errors();
+        await until(() => /approver set treated as empty: .*writable by the account running the service/.test(serviceLog()),
+          () => `the service to refuse the writable approver set (${serviceLog()})`, 15000);
+        assert.equal(fs.existsSync(path.join(root, 'marker.txt')), false);
+      }
+
+      unlock = lockApproversDir(path.join(nodeConfig, 'approvers'));
+      if (process.platform === 'win32') {
+        await until(() => /approvers are trusted again|its approvers count/.test(service.output() + service.errors()),
+          () => `the service to trust the locked approver set (${service.errors()})`, 15000);
+      }
+      // The same mcp process trusts the set on its next scan (the store
+      // rescans at most once a second), with no restart.
+      await sleep(1100);
+      const job = await runRunbook();
       assert.equal(job.status, 'awaiting_approval', JSON.stringify(job));
 
       // The relay lists a request only to a device active on its node; the
@@ -234,19 +275,30 @@ describe('phone approvals end to end', { skip: !CAN_RUN && 'needs root-owned adm
       // is null, never true. The job's outcome below is the verdict.
       assert.deepEqual(answer.body, { delivered: true, accepted: null, reason: null });
 
-      let finalJob = null;
-      for (let id = 10; ; id += 1) {
-        const res = await rpc(id, 'tools/call', { name: 'get_job', arguments: { job_id: job.job_id } });
-        finalJob = JSON.parse(res.result.content[0].text);
-        if (!['awaiting_approval', 'queued', 'running'].includes(finalJob.status)) break;
-        await sleep(200);
-      }
+      let lastSeen = null;
+      const finalJob = await until(async () => {
+        lastSeen = await tool('get_job', { job_id: job.job_id });
+        return ['awaiting_approval', 'queued', 'running'].includes(lastSeen.status) ? null : lastSeen;
+      }, () => `the job to finish (last seen ${JSON.stringify(lastSeen)})`, 60000);
       assert.equal(finalJob.status, 'succeeded', JSON.stringify(finalJob));
       assert.equal(fs.readFileSync(path.join(root, 'marker.txt'), 'utf8'), 'ran');
     } finally {
+      // mcp stops cleanly when its stdin ends; stopChildren kills whatever is
+      // still running after that.
+      if (mcp && mcp.child.exitCode === null) {
+        const exited = new Promise((resolve) => mcp.child.once('exit', resolve));
+        mcp.child.stdin.end();
+        await Promise.race([exited, sleep(5000)]);      }
       await stopChildren(children);
-      // The deny must go before the temp dir can be removed.
-      if (unlock) unlock();
+      // The deny must go before the temp dir can be removed. A failed unlock
+      // is reported, and cleanup still runs (and says what it left behind).
+      if (unlock) {
+        try {
+          unlock();
+        } catch (err) {
+          process.stderr.write(`could not lift the deny on ${path.join(base, 'node', 'config', 'approvers')}: ${err.message}\n`);
+        }
+      }
       fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     }
   });
