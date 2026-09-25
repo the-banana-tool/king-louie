@@ -216,7 +216,9 @@ describe('loadProfile("agent") with the desktop bridge', () => {
       host.stop = async (...args) => { order.push('bridge'); return originalStop(...args); };
       return host;
     };
+    const startApprovalsOpts = [];
     approvalsWiring.startApprovals = async (startOpts) => {
+      startApprovalsOpts.push(startOpts);
       const approvals = await originalStartApprovals(startOpts);
       const originalStop = approvals.stop;
       approvals.stop = async (...args) => { order.push('approvals'); return originalStop(...args); };
@@ -233,6 +235,9 @@ describe('loadProfile("agent") with the desktop bridge', () => {
       });
       try {
         assert.strictEqual(running.approvals.approverStore.dir, path.join(configDir, 'approvers'));
+        // The approver store checks approvers/ against the same adminUid.
+        assert.deepStrictEqual(startApprovalsOpts[0].approverStoreOptions, { adminUid: selfUid });
+        assert.strictEqual(running.approvals.approverStore.adminUid, selfUid);
         assert.strictEqual(bridgeStartApprovals, running.approvals);
         // approvalsStatus (F7 item 5) on F3's real objects: seq/at come from
         // the ledger's own entries.
@@ -249,6 +254,22 @@ describe('loadProfile("agent") with the desktop bridge', () => {
         await running.stop();
       }
       assert.deepStrictEqual(order, ['bridge', 'core', 'approvals']);
+
+      // The runbook profile threads the same configDir and adminUid.
+      const runbook = await loadProfile('runbook').start({ dataDir, configDir, adminUid: selfUid });
+      try {
+        assert.strictEqual(runbook.approvals.approverStore.dir, path.join(configDir, 'approvers'));
+        assert.deepStrictEqual(startApprovalsOpts[1].approverStoreOptions, { adminUid: selfUid });
+      } finally {
+        await runbook.stop();
+      }
+      // Without an adminUid nothing is injected: the store keeps its default.
+      const plain = await loadProfile('runbook').start({ dataDir, configDir });
+      try {
+        assert.strictEqual(startApprovalsOpts[2].approverStoreOptions, undefined);
+      } finally {
+        await plain.stop();
+      }
     } finally {
       coreModule.createCore = originalCreateCore;
       wiring.createDesktopBridgeHost = originalCreateHost;

@@ -13,6 +13,15 @@ const { writeFileAtomic } = require('./approver-store');
 
 const log = createLogger('approvals/relay-client');
 
+// link.json write failures worth retrying (a Windows reader holding the file).
+const TRANSIENT_WIN32_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
+// The final write in stop(): a few synchronous attempts, linkRetryMs apart.
+const STOP_SYNC_RETRIES = 5;
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(0, ms));
+}
+
 // F3's own link methods (§4.6); nobody else may register these names.
 const F3_METHODS = new Set([
   'relay.hello', 'approval.submit', 'approval.status', 'approval.response', 'message.submit',
@@ -49,7 +58,7 @@ class RelayClient extends EventEmitter {
   constructor({ identity, nodeName = null, relayPin = null, configDir = null, dataDir = null,
     transportFactory = (options) => new MeshTransport(options), useTls = true,
     reconnectDelays = [1000, 5000, 15000, 30000], callTimeoutMs = 10000, now = Date.now,
-    writeLinkFile = writeFileAtomic, linkRetryMs = 100, linkRetryLimit = 50 } = {}) {
+    writeLinkFile = writeFileAtomic, linkRetryMs = 100, linkRetryLimit = 50, platform = process.platform } = {}) {
     super();
     this.identity = identity;
     this.nodeName = nodeName || identity.nodeName;
@@ -61,6 +70,7 @@ class RelayClient extends EventEmitter {
     this.linkRetryLimit = linkRetryLimit;
     this.linkRetries = 0;
     this.linkRetryTimer = null;
+    this.platform = platform;
     this.transportFactory = transportFactory;
     this.useTls = useTls;
     this.reconnectDelays = reconnectDelays;
@@ -228,37 +238,53 @@ class RelayClient extends EventEmitter {
     if (typeof this.retryTimer.unref === 'function') this.retryTimer.unref();
   }
 
+  // Windows refuses the rename in writeFileAtomic while another process has
+  // link.json open (EPERM, EBUSY or EACCES). Only that is worth retrying;
+  // anything else, or any error elsewhere, is reported at once.
+  _isTransientLinkError(err) {
+    return this.platform === 'win32' && Boolean(err) && TRANSIENT_WIN32_CODES.has(err.code);
+  }
+
   // link.json is the only place another process (doctor, the desktop's
-  // approvalsStatus, a test) sees the link state. On Windows the rename in
-  // writeFileAtomic fails with EPERM while another process has the file open
-  // for reading, which would leave a stale state until the link next
-  // changes; a failed write is therefore retried (the latest state, on a
-  // short unref'd timer) until it lands, the limit is reached or the client
-  // stops.
-  _writeLink() {
+  // approvalsStatus, a test) sees the link state. A transient Windows failure
+  // is retried with the latest state on a short unref'd timer while running
+  // (bounded by linkRetryLimit); the final write from stop() instead retries
+  // synchronously a few times (syncRetries), so a stopped node is not left
+  // reading `connected: true`.
+  _writeLink({ syncRetries = 0 } = {}) {
     if (!this.linkFile) return;
     clearTimeout(this.linkRetryTimer);
     this.linkRetryTimer = null;
-    try {
-      fs.mkdirSync(path.dirname(this.linkFile), { recursive: true, mode: 0o700 });
-      this.writeLinkFile(this.linkFile, `${JSON.stringify({
-        connected: this.connected,
-        since: this.connected ? this.since : null,
-        relay_id: this.pin.relay_id,
-        relay_public_url: this.relayInfo ? this.relayInfo.public_url : null,
-        relay_spki: this.relayInfo ? this.relayInfo.phone_spki : null
-      })}\n`);
-      this.linkRetries = 0;
-    } catch (err) {
-      if (!this.stopped && this.linkRetries < this.linkRetryLimit) {
-        this.linkRetries += 1;
-        log.debug(`could not write ${this.linkFile} (${err.message}); retrying`);
-        this.linkRetryTimer = setTimeout(() => this._writeLink(), this.linkRetryMs);
-        if (typeof this.linkRetryTimer.unref === 'function') this.linkRetryTimer.unref();
+    const text = `${JSON.stringify({
+      connected: this.connected,
+      since: this.connected ? this.since : null,
+      relay_id: this.pin.relay_id,
+      relay_public_url: this.relayInfo ? this.relayInfo.public_url : null,
+      relay_spki: this.relayInfo ? this.relayInfo.phone_spki : null
+    })}\n`;
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        fs.mkdirSync(path.dirname(this.linkFile), { recursive: true, mode: 0o700 });
+        this.writeLinkFile(this.linkFile, text);
+        this.linkRetries = 0;
+        return;
+      } catch (err) {
+        const transient = this._isTransientLinkError(err);
+        if (transient && attempt < syncRetries) {
+          sleepSync(this.linkRetryMs);
+          continue;
+        }
+        if (transient && !this.stopped && this.linkRetries < this.linkRetryLimit) {
+          this.linkRetries += 1;
+          log.debug(`could not write ${this.linkFile} (${err.message}); retrying`);
+          this.linkRetryTimer = setTimeout(() => this._writeLink(), this.linkRetryMs);
+          if (typeof this.linkRetryTimer.unref === 'function') this.linkRetryTimer.unref();
+          return;
+        }
+        this.linkRetries = 0;
+        log.warn(`could not write ${this.linkFile}: ${err.message}`);
         return;
       }
-      this.linkRetries = 0;
-      log.warn(`could not write ${this.linkFile}: ${err.message}`);
     }
   }
 
@@ -278,7 +304,7 @@ class RelayClient extends EventEmitter {
       if (this.rpc) this.rpc.close();
       if (this.transport) await this.transport.stop();
     } finally {
-      this._writeLink();
+      this._writeLink({ syncRetries: STOP_SYNC_RETRIES });
     }
     if (was) this.emit('disconnected');
   }

@@ -317,6 +317,7 @@ describe('RelayClient', () => {
     const eperm = () => Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' });
     const { c, dataDir } = client(relay, {
       linkRetryMs: 10,
+      platform: 'win32',
       writeLinkFile: (file, text) => {
         if (alwaysFail) throw eperm();
         if (failures > 0) { failures -= 1; throw eperm(); }
@@ -339,6 +340,52 @@ describe('RelayClient', () => {
     assert.notEqual(c.linkRetryTimer, null, 'a failed write arms a retry');
     await c.stop();
     assert.equal(c.linkRetryTimer, null, 'stop() clears the retry and does not re-arm it');
+  });
+
+  it('retries only a Windows EPERM/EBUSY/EACCES: another error, or another platform, warns at once with no retry', () => {
+    const calls = { n: 0 };
+    const make = (platform, code) => new RelayClient({
+      identity: nodeIdentity, relayPin: { relay_id: 'r', publicKey: nodeIdentity.publicKey.toString('hex') }, dataDir: tempDir(),
+      useTls: false, linkRetryMs: 1, platform,
+      writeLinkFile: () => { calls.n += 1; throw Object.assign(new Error(code), { code }); }
+    });
+    for (const [platform, code] of [['win32', 'ENOSPC'], ['linux', 'EPERM'], ['darwin', 'EBUSY']]) {
+      const c = make(platform, code);
+      calls.n = 0;
+      c._writeLink();
+      assert.equal(c.linkRetryTimer, null, `${platform} ${code}: no delayed retry`);
+      assert.equal(calls.n, 1);
+    }
+    for (const code of ['EPERM', 'EBUSY', 'EACCES']) {
+      const c = make('win32', code);
+      c._writeLink();
+      assert.notEqual(c.linkRetryTimer, null, `win32 ${code}: a delayed retry is armed`);
+      clearTimeout(c.linkRetryTimer);
+    }
+  });
+
+  it('stop() retries its final write synchronously on a Windows lock, so link.json ends connected:false', async () => {
+    const { writeFileAtomic } = require('../src/approvals/approver-store');
+    const relay = await fakeRelay();
+    cleanups.push(relay.stop);
+    let failStop = 0;
+    const { c, dataDir } = client(relay, {
+      linkRetryMs: 5,
+      platform: 'win32',
+      writeLinkFile: (file, text) => {
+        if (failStop > 0 && text.includes('"connected":false')) { failStop -= 1; throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' }); }
+        return writeFileAtomic(file, text);
+      }
+    });
+    const connected = once(c, 'connected');
+    await c.start();
+    await connected;
+    assert.equal(readLink(dataDir).connected, true);
+    failStop = 3;
+    await c.stop();
+    assert.equal(failStop, 0);
+    assert.equal(readLink(dataDir).connected, false);
+    assert.equal(c.linkRetryTimer, null);
   });
 
   it('stop() writes link.json connected:false and settles a pending call', async () => {

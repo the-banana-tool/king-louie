@@ -80,7 +80,6 @@ const { createVault } = require('../platform/vault');
 const { ensureGatewayToken } = require('../gateway/gateway-token');
 const { createHeadlessPrompter } = require('../platform/prompter');
 const { withTimeout } = require('./with-timeout');
-const { isLocalDesktopEvent, isLocalRequester } = require('./origin');
 
 const DEFAULT_FEATURES = { gateway: true, webhooks: true, mesh: true, channels: true, appDiscovery: true };
 // Every provider king-louie can hold a token for (keys) and its display name.

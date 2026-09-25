@@ -44,6 +44,15 @@ function adminDirOptions({ dataDir, adminUid, configDir }) {
   };
 }
 
+// The same admin dir and owner for startApprovals: the approver store checks
+// approvers/ against adminUid, like node.yaml above.
+function adminDirApprovalOptions({ adminUid, configDir }) {
+  return {
+    ...(configDir ? { configDir } : {}),
+    ...(adminUid === undefined ? {} : { approverStoreOptions: { adminUid } })
+  };
+}
+
 // Each profile is required lazily so the runbook profile never loads the agent stack.
 function loadProfile(profile) {
   if (profile === 'agent') {
@@ -69,7 +78,8 @@ function loadProfile(profile) {
         // gateway clients, cron, webhooks) runs only with a signed phone
         // approval; with no enrolled phone or no relay it is refused.
         const approvals = await startApprovals({
-          dataDir, ...(configDir ? { configDir } : {}), nodeConfig, ports: servicePorts, profile: 'agent', serviceConfig: { audit }
+          dataDir, ...adminDirApprovalOptions({ adminUid, configDir }),
+          nodeConfig, ports: servicePorts, profile: 'agent', serviceConfig: { audit }
         });
         let core;
         try {
@@ -151,7 +161,8 @@ function loadProfile(profile) {
         // `mcp` process sends its approval requests through; still no agent stack.
         const nodeConfig = loadNodeConfig(adminDirOptions({ dataDir, adminUid, configDir }));
         const approvals = await startApprovals({
-          dataDir, ...(configDir ? { configDir } : {}), nodeConfig, ports: servicePorts, profile: 'runbook', serviceConfig: { audit }
+          dataDir, ...adminDirApprovalOptions({ adminUid, configDir }),
+          nodeConfig, ports: servicePorts, profile: 'runbook', serviceConfig: { audit }
         });
         return { stop: () => approvals.stop(), masterKeySource: servicePorts.masterKeySource, approvals };
       }
