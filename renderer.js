@@ -1874,6 +1874,26 @@ function caseButton(text, className = 'secondary-button') {
   return button;
 }
 
+// F2 re-review: our own explicit refresh (with pendingMessage) is not the
+// only render that can happen right after an answer/grant — the runtime's
+// own case:changed notification (the same action triggers it) fires the
+// onChanged listener below, which re-renders with no pendingMessage of its
+// own and would otherwise win the race and wipe the message a second time.
+// A short-lived, per-case message survives either render, whichever runs
+// last, without the two call sites needing to coordinate.
+const CASE_PANEL_MESSAGE_TTL_MS = 4000;
+const casePanelMessages = new Map();
+function setCasePanelMessage(caseId, message) {
+  if (!caseId || !message) return;
+  casePanelMessages.set(caseId, { message, expiresAt: Date.now() + CASE_PANEL_MESSAGE_TTL_MS });
+}
+function peekCasePanelMessage(caseId) {
+  const entry = caseId ? casePanelMessages.get(caseId) : null;
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) { casePanelMessages.delete(caseId); return null; }
+  return entry.message;
+}
+
 function renderCaseQuestionCard(q, { onDone, showError }) {
   const card = document.createElement('div');
   card.className = `case-question case-question-${q.urgency}`;
@@ -1885,6 +1905,20 @@ function renderCaseQuestionCard(q, { onDone, showError }) {
   text.className = 'case-question-text';
   text.textContent = q.text;
   card.append(head, text);
+
+  // Notes the runtime attached to this question (e.g. why a reply had no
+  // effect) — textContent only, never innerHTML (F2 re-review).
+  if (Array.isArray(q.notes) && q.notes.length) {
+    const notes = document.createElement('div');
+    notes.className = 'case-question-notes';
+    q.notes.forEach((note) => {
+      const line = document.createElement('div');
+      line.className = 'case-question-note';
+      line.textContent = note?.text || '';
+      notes.appendChild(line);
+    });
+    card.appendChild(notes);
+  }
 
   if (q.kind === 'briefing') {
     const dismiss = caseButton('Dismiss', 'secondary-button case-question-dismiss');
@@ -1902,9 +1936,20 @@ function renderCaseQuestionCard(q, { onDone, showError }) {
     if (!r?.ok) { showError(r?.error || 'Could not send the answer.'); return; }
     // The answer was recorded, but a rejected grant or direction has no
     // further effect (r.effect.applied === false): tell the owner why
-    // instead of silently closing the card as if it worked (F2).
-    if (r.effect && r.effect.applied === false) showError(r.effect.note || r.effect.error || 'The answer had no effect.');
-    onDone();
+    // instead of silently closing the card as if it worked (F2). onDone
+    // rebuilds the container (renderCaseUnattendedSection clears it), so
+    // the message must be set on the *new* container after that finishes,
+    // never on this card's own (about-to-be-discarded) showError — setting
+    // it first only for the rebuild to immediately wipe it (F2 re-review).
+    const pendingMessage = (r.effect && r.effect.applied === false)
+      ? (r.effect.note || r.effect.error || 'The answer had no effect.')
+      : null;
+    // Also stashed case-scoped (see setCasePanelMessage above): the
+    // runtime's own case:changed notification for this same answer can
+    // trigger another render with no pendingMessage of its own, shortly
+    // after this one, which would otherwise wipe the message again.
+    setCasePanelMessage(q.caseId, pendingMessage);
+    await onDone(pendingMessage);
   };
   const actions = document.createElement('div');
   actions.className = 'case-question-actions';
@@ -1969,8 +2014,14 @@ function renderCaseBudgetLine(caseId, budget, { showError, refresh }) {
     const value = category.value === 'deadline' ? raw : Number(raw);
     const r = await window.electron.cases.grantBudget({ caseId, category: category.value, limit: value });
     if (!r?.ok) { showError(r?.error || 'Could not change the budget.'); return; }
-    if (r.effect && r.effect.applied === false) showError(r.effect.note || r.effect.error || 'The grant had no effect.');
-    refresh();
+    // Same ordering fix as the answer path above: set the message after
+    // refresh rebuilds the container, on the new one, not the old
+    // (about-to-be-discarded) showError (F2 re-review).
+    const pendingMessage = (r.effect && r.effect.applied === false)
+      ? (r.effect.note || r.effect.error || 'The grant had no effect.')
+      : null;
+    setCasePanelMessage(caseId, pendingMessage);
+    await refresh(pendingMessage);
   });
   row.append(category, limit, grant);
   return row;
@@ -1978,7 +2029,12 @@ function renderCaseBudgetLine(caseId, budget, { showError, refresh }) {
 
 // Full mode fills the Chat Info case section; compact mode fills the bar
 // above the composer with what needs the owner's attention.
-async function renderCaseUnattendedSection(chat, container, { compact = false } = {}) {
+// pendingMessage (F2 re-review): a message from an action that just
+// completed (e.g. a rejected budget-grant reply) to show in *this*
+// render's error slot — set before the compact-mode hidden check and
+// before the full-mode append, so it survives the rebuild that would
+// otherwise wipe a message set on the previous (discarded) container.
+async function renderCaseUnattendedSection(chat, container, { compact = false, pendingMessage = null } = {}) {
   if (!container) return;
   if (!chat?.caseId || !window.electron?.cases?.questions) {
     container.innerHTML = '';
@@ -1992,19 +2048,23 @@ async function renderCaseUnattendedSection(chat, container, { compact = false } 
   error.className = 'chat-case-error case-unattended-error';
   const showError = (message) => { error.textContent = message || ''; };
   if (!listed?.ok) showError(listed?.error || 'Could not load the case questions.');
+  else {
+    const carried = pendingMessage || peekCasePanelMessage(chat.caseId);
+    if (carried) showError(carried);
+  }
 
   if (compact) {
     const shown = questions.filter((q) => (q.kind !== 'briefing' && q.urgency !== 'low') || (q.kind === 'briefing' && q.urgency === 'high'));
-    shown.forEach((q) => container.appendChild(renderCaseQuestionCard(q, { onDone: () => refreshCaseQuestionsBar(), showError })));
+    shown.forEach((q) => container.appendChild(renderCaseQuestionCard(q, { onDone: (msg) => refreshCaseQuestionsBar(msg), showError })));
     container.appendChild(error);
     container.hidden = shown.length === 0 && !error.textContent;
     return;
   }
 
-  const refresh = () => {
-    renderCaseUnattendedSection(chat, container, { compact: false }).catch((err) => chatLog.warn(`Case panel failed: ${err.message}`));
-    refreshCaseQuestionsBar();
-  };
+  const refresh = (msg) => Promise.all([
+    renderCaseUnattendedSection(chat, container, { compact: false, pendingMessage: msg }).catch((err) => chatLog.warn(`Case panel failed: ${err.message}`)),
+    refreshCaseQuestionsBar()
+  ]);
   const budget = await window.electron.cases.budget({ caseId: chat.caseId });
   if (budget?.ok) {
     const info = budget.case;
@@ -2059,10 +2119,10 @@ function ensureCaseQuestionsBar() {
   return bar;
 }
 
-function refreshCaseQuestionsBar() {
+function refreshCaseQuestionsBar(pendingMessage) {
   const bar = ensureCaseQuestionsBar();
-  if (!bar) return;
-  renderCaseUnattendedSection(getActiveChat(), bar, { compact: true })
+  if (!bar) return Promise.resolve();
+  return renderCaseUnattendedSection(getActiveChat(), bar, { compact: true, pendingMessage })
     .catch((err) => chatLog.warn(`Case questions bar failed: ${err.message}`));
 }
 

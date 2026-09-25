@@ -157,4 +157,48 @@ describe('E2E: cases', { skip: gitAvailable ? false : 'git is not on PATH' }, ()
     assert.match(fact.stmt, /Yes, with the north lot/);
     await waitFor(ctx, `!document.querySelector('#case-questions-bar [data-question-id="q-0001"]')`);
   });
+
+  it('shows a question note in the panel (F2 re-review)', async () => {
+    // Depends on the case attached by the tests above. A note is normally
+    // written by the runtime onto a question that has just been answered
+    // (so it never shows up in the open-question listing this panel reads);
+    // this seeds one directly onto a still-open question, to test the
+    // rendering path itself regardless of when the runtime would produce it.
+    const dir = path.join(casesRoot, 'e2e-question-case');
+    const record = {
+      id: 'q-0002', kind: 'question', caseId: 'seeded', text: 'A second question.',
+      options: [], urgency: 'normal', createdAt: new Date().toISOString(), expiresAt: null, defaultOnSilence: 'hold',
+      deliveries: [], payload: { type: 'ask', mcpAnswerable: true }, answer: null, closed: null,
+      notes: [{ at: new Date().toISOString(), text: 'A usd limit must be a number above the current spend.' }]
+    };
+    fs.writeFileSync(path.join(dir, '.kl', 'questions', 'q-0002.json'), JSON.stringify(record));
+
+    await evaluate(ctx, `document.getElementById('chat-info-btn').click(); true`);
+    await evaluate(ctx, `document.getElementById('chat-info-btn').click(); true`);
+    await waitFor(ctx, `!!document.querySelector('#case-question-list [data-question-id="q-0002"]')`);
+    const noteText = await evaluate(ctx, `
+      document.querySelector('#case-question-list [data-question-id="q-0002"] .case-question-note')?.textContent || ''
+    `);
+    assert.strictEqual(noteText, 'A usd limit must be a number above the current spend.');
+  });
+
+  it("a rejected answer's message survives the panel refresh instead of being wiped (F2 re-review)", async () => {
+    // q-0002 (seeded above) has no registered answer handler for its
+    // subject/attr, so answering it always resolves to effect: { applied:
+    // false } with no note or error — exactly the case the renderer falls
+    // back to "The answer had no effect." for. Before the fix, showError
+    // ran before the refresh that rebuilds the container, so the message
+    // never survived to be read.
+    await evaluate(ctx, `(() => {
+      const card = document.querySelector('#case-question-list [data-question-id="q-0002"]');
+      card.querySelector('.case-question-input').value = 'Nothing new';
+      card.querySelector('.case-question-answer').click();
+      return true;
+    })()`);
+    await waitFor(ctx, `(document.querySelector('.case-unattended-error')?.textContent || '').includes('The answer had no effect.')`);
+    // Confirm it is not a one-frame flash that a later render wipes again.
+    await new Promise((r) => setTimeout(r, 500));
+    const stillThere = await evaluate(ctx, `document.querySelector('.case-unattended-error')?.textContent || ''`);
+    assert.match(stillThere, /The answer had no effect\./);
+  });
 });
