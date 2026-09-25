@@ -686,6 +686,29 @@ contextBridge.exposeInMainWorld(
       },
       clear: () => ipcRenderer.invoke('memory:clear')
     },
+    executors: {
+      list: (payload = {}) => {
+        validateObject(payload, 'payload');
+        return ipcRenderer.invoke('executors:list', payload);
+      },
+      envelopes: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        return ipcRenderer.invoke('case:envelopes', payload);
+      },
+      cancelJob: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        validateString(payload.jobId, 'jobId', { minLength: 1 });
+        return ipcRenderer.invoke('case:cancelJob', payload);
+      },
+      revokeEnvelope: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        validateString(payload.envelopeId, 'envelopeId', { minLength: 1 });
+        return ipcRenderer.invoke('case:revokeEnvelope', payload);
+      }
+    },
     cases: {
       list: () => ipcRenderer.invoke('case:list'),
       create: (payload) => {

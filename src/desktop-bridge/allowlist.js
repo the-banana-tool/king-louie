@@ -15,7 +15,9 @@ const PROXIED_DOMAINS = Object.freeze([
   'tool',
   'usage',
   'checkpoint',
-  'canvas'
+  'canvas',
+  // Cases stage 3: executors:list (the case:* executor channels ride 'case').
+  'executors'
 ]);
 const PROXIED_CHANNELS = Object.freeze(['agent:userResponse']);
 

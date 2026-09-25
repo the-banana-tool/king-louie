@@ -4,7 +4,7 @@ const { getRuntimeEnvironment } = require('./runtime-environment');
 const { evaluateRules, describeRule } = require('../tools/permission-rules');
 const path = require('path');
 const { isProtectedCasePath, CASE_BLOCKED_TOOL_NAMES, CASE_BLOCKED_TOOL_ERROR } = require('../cases/chat-integration');
-const { caseToolGuard } = require('../cases/executors/case-guard');
+const { caseToolGuard, caseBrowserProfileGuard } = require('../cases/executors/case-guard');
 const { markLocalRequester } = require('../core/origin');
 const { createLogger } = require('../logging');
 
@@ -319,6 +319,12 @@ class ToolExecutor extends EventEmitter {
       if (refusedByGuard) {
         this.emit('postExecute', { toolName, parameters: effectiveParameters, result: refusedByGuard });
         return refusedByGuard;
+      }
+      // A browser the owner opened in their own profile is not used by a case run.
+      const refusedByProfile = await caseBrowserProfileGuard(toolName, effectiveParameters, { caseContext, guardContext });
+      if (refusedByProfile) {
+        this.emit('postExecute', { toolName, parameters: effectiveParameters, result: refusedByProfile });
+        return refusedByProfile;
       }
     }
 

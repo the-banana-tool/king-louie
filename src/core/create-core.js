@@ -56,6 +56,10 @@ const { CheckpointManager } = require('../checkpoints');
 const { CaseRuntime, resolveCasesRoot } = require('../cases');
 const { shapeToolDefinitions } = require('../cases/chat-integration');
 const { ensureWakeupJob } = require('../cases/wakeups');
+const { ExecutorRegistry } = require('../cases/executors');
+const { configureCaseGuard } = require('../cases/executors/case-guard');
+const { makeRootAssert } = require('../cases/executors/package-loader');
+const { buildChildContext, childRuntimeOptions } = require('../agents/child-context');
 const ContextAssembler = require('../context/context-assembler');
 const ConversationCompactor = require('../context/conversation-compactor');
 const { buildSystemSections } = require('../context/system-sections');
@@ -2062,6 +2066,8 @@ function createCore(deps = {}) {
         // turnId, title, orientation), runtime, ownerMessages }. The case
         // tools read it, and ToolExecutor's ledger write guard uses dir.
         get caseContext() { return executorOptions.caseContext || null; },
+        // Cases stage 3: a child run's { caseId }, checked by the case-turn guard.
+        get guardContext() { return executorOptions.guardContext || null; },
         getAgent,
         listAgents,
         toolRegistry,
@@ -2204,7 +2210,14 @@ function createCore(deps = {}) {
       // a child run's audit trail inherits the parent's deviceId/session
       // instead of recomputing a fresh, poorer origin from a null event and
       // an unmarked-for-origin-purposes requester.
-      { workingDirectory, allowedDirectories, origin: runtimeOptions.origin || null }
+      {
+        workingDirectory,
+        allowedDirectories,
+        origin: runtimeOptions.origin || null,
+        // Cases stage 3: isolated children run only their agent's tools, guarded.
+        guardContext: runtimeOptions.guardContext || null,
+        allowedToolNames: runtimeOptions.allowedToolNames || null
+      }
     );
 
     return {
@@ -2430,6 +2443,8 @@ function createCore(deps = {}) {
           null,
           options.approvalRequester || null,
           {
+            // Cases stage 3: an isolated child's guardContext and tool list.
+            ...childRuntimeOptions(agent, options),
             workingDirectory: options.workingDirectory,
             // The rethreaded requester every meta-tool (SpawnAgent,
             // BackgroundTask, workflow runners) already forwards unchanged
@@ -2451,17 +2466,17 @@ function createCore(deps = {}) {
           model: options.model || runtime.model || agent.model,
           timeoutMs: options.timeoutMs || runtime.timeoutMs,
           tools: runtime.toolDefinitions,
-          userProfile: getUserProfile(),
-          templateContext: {
-            ...buildTemplateContextFromSettings(),
-            ...(options.templateContext || {})
-          },
-          systemPrompt: [
-            buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
-            await buildMemoryContextSection(message),
-            formatUserContextSection(),
-            formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || hostWorkingDirectory)
-          ].join('\n\n'),
+          // Cases stage 3: an isolated child gets no memory, profile or project context.
+          ...(await buildChildContext({
+            message,
+            options,
+            runtimeSection: buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
+            memorySection: (m) => buildMemoryContextSection(m),
+            userSection: () => formatUserContextSection(),
+            projectSection: () => formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || hostWorkingDirectory),
+            getUserProfile,
+            baseTemplateContext: buildTemplateContextFromSettings
+          })),
           onUsageRecorded: options.onUsageRecorded
         });
       }
@@ -2482,6 +2497,9 @@ function createCore(deps = {}) {
       getAgent,
       maxConcurrentTasks: 3,
       getConversationCompactor: () => conversationCompactor,
+      // Cases stage 3: a case workflow's children run with the extras the
+      // registry rebuilds from its job index, never the workflow file's own.
+      resolveExecuteExtras: (wf) => executorRegistry?.workflowChildExtras(wf.id) ?? null,
       getParentChatMessages: (chatId) => {
         const chat = getChats().find((c) => c.id === chatId);
         if (!chat || !Array.isArray(chat.messages)) return [];
@@ -2801,9 +2819,40 @@ function createCore(deps = {}) {
       uiToast: deps.uiToastChannel || null,
       // Fleet stage 7 (R50): a service host with the desktop bridge injects a
       // bridge-connected check; otherwise "a UI is attached" (the Electron host).
-      interactive: deps.host?.interactive ?? (() => Boolean(deps.ui))
+      interactive: deps.host?.interactive ?? (() => Boolean(deps.ui)),
+      // Cases stage 3.
+      getExecutorRegistry: () => executorRegistry
     }
   });
+
+  // Cases stage 3: executors. In service mode run.js passes the admin
+  // service.json `executors` as deps.adminExecutors (R42); its presence is
+  // what puts the registry in service mode. There the package root check is
+  // bound to the service's adminUid (M16), and the signed-grant audit path
+  // gets startApprovals' admin-owned approver store and this node's identity
+  // (deps.approvalTrust); without it that path fails closed.
+  const executorIsService = Object.prototype.hasOwnProperty.call(deps, 'adminExecutors');
+  const executorAdminUid = deps.adminUid ?? 0;
+  const executorRegistry = new ExecutorRegistry({
+    dataDir: userDataPath,
+    getSettings,
+    adminExecutors: deps.adminExecutors || null,
+    isService: executorIsService,
+    vault,
+    caseRuntime,
+    getWorkflowEngine: () => workflowEngine,
+    getRunbookEngine: () => deps.runbookEngine || null,
+    getPhoneApprover: () => (typeof context.getPhoneApprover === 'function' ? context.getPhoneApprover() : null),
+    getAuditLedger: () => deps.auditLedger || null,
+    getApprovalTrust: () => deps.approvalTrust || null,
+    usageTracker: () => usageTracker,
+    adminUid: executorAdminUid,
+    assertRoot: executorIsService ? makeRootAssert({ adminUid: executorAdminUid }) : null
+  });
+  caseRuntime.addTurnStartHook('executors', (hookContext) => executorRegistry.turnStartHook(hookContext));
+  // Until this runs the case-turn guard has no case runtime for a child's
+  // { caseId } and no data dir to protect.
+  configureCaseGuard({ getCaseRuntime: () => caseRuntime, dataDir: userDataPath });
 
   const context = {
     // Chat
@@ -2835,6 +2884,7 @@ function createCore(deps = {}) {
     createUsageRecordFromMetrics,
     getSettings,
     getCaseRuntime: () => caseRuntime,
+    getExecutorRegistry: () => executorRegistry,
     // The signed-approval requester (program §4.12), or null: always null in
     // 'allow' and 'deny' modes (the Electron host), and null while no device
     // is enrolled or no relay link can deliver.

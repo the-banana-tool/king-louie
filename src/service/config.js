@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { createLogger } = require('../logging');
 const { adminConfigDir } = require('../platform/paths');
+const { EXECUTOR_ID_PATTERN } = require('../cases/executors/util');
 
 const log = createLogger('service/config');
 
@@ -23,8 +24,10 @@ const CONFIG_FILE = 'service.json';
 // which profile — and so whether the agent stack loads at all. These may only
 // come from the admin-owned config dir; see below.
 // `relay` (the relay's listeners, TLS files and push credentials) and `audit`
-// (ledger retention) joined in fleet stage 3.
-const ADMIN_ONLY_KEYS = ['features', 'ports', 'profile', 'relay', 'audit'];
+// (ledger retention) joined in fleet stage 3. `executors` (which executor
+// packages load, from where) joined in cases stage 3 (R42).
+const ADMIN_ONLY_KEYS = ['features', 'ports', 'profile', 'relay', 'audit', 'executors'];
+const EXECUTOR_KEYS = ['entries', 'packageRoots'];
 const RELAY_DEFAULTS = { phoneListen: { host: '0.0.0.0', port: 8443 }, meshPort: 18795, auditRetentionDays: 365 };
 
 function isPlainObject(value) {
@@ -120,6 +123,24 @@ function parseAuditConfig(raw, file) {
 // between the two files.
 function unknownKeyError(file, keyPath, knownList) {
   return new Error(`Invalid ${file}: unknown key "${keyPath}" (known: ${knownList.join(', ')})`);
+}
+
+// Cases stage 3 (R42, R55): executors come only from the admin service.json.
+function validateExecutors(value, file) {
+  if (value === undefined) return { entries: {}, packageRoots: [] };
+  if (!isPlainObject(value)) throw new Error(`Invalid ${file}: "executors" must be an object`);
+  rejectUnknownKeys(value, EXECUTOR_KEYS, 'executors', file);
+  const entries = value.entries === undefined ? {} : value.entries;
+  if (!isPlainObject(entries)) throw new Error(`Invalid ${file}: executors.entries must be an object`);
+  for (const [id, entry] of Object.entries(entries)) {
+    if (!EXECUTOR_ID_PATTERN.test(id)) throw new Error(`Invalid ${file}: executors.entries.${id} is not a lowercase executor id`);
+    if (!isPlainObject(entry)) throw new Error(`Invalid ${file}: executors.entries.${id} must be an object`);
+  }
+  const roots = value.packageRoots === undefined ? [] : value.packageRoots;
+  if (!Array.isArray(roots) || !roots.every((r) => typeof r === 'string' && path.isAbsolute(r))) {
+    throw new Error(`Invalid ${file}: executors.packageRoots must be a list of absolute paths`);
+  }
+  return { entries: JSON.parse(JSON.stringify(entries)), packageRoots: [...roots] };
 }
 
 // The admin service.json decides which listeners exist and where they bind,
@@ -297,8 +318,9 @@ function loadServiceConfig(dataDir, overrides = {}, {
     features,
     ports,
     relay: parseRelayConfig(adminCfg.relay, adminFile),
-    audit: parseAuditConfig(adminCfg.audit, adminFile)
+    audit: parseAuditConfig(adminCfg.audit, adminFile),
+    executors: validateExecutors(adminCfg.executors, adminFile)
   };
 }
 
-module.exports = { loadServiceConfig, assertAdminOwned, parseRelayConfig, parseAuditConfig, PROFILES, DEFAULT_PORTS, DEFAULT_FEATURES, CONFIG_FILE, unknownKeyError };
+module.exports = { loadServiceConfig, assertAdminOwned, parseRelayConfig, parseAuditConfig, validateExecutors, PROFILES, DEFAULT_PORTS, DEFAULT_FEATURES, CONFIG_FILE, unknownKeyError };

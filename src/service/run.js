@@ -57,7 +57,7 @@ function adminDirApprovalOptions({ adminUid, configDir }) {
 function loadProfile(profile) {
   if (profile === 'agent') {
     return {
-      async start({ dataDir, features, ports, workspace, audit, adminUid, configDir }) {
+      async start({ dataDir, features, ports, workspace, audit, adminUid, configDir, executors }) {
         const { createCore } = require('../core');
         const { CHAT_DATA_DEFAULTS } = require('../core/settings');
         const { buildServicePorts } = require('./ports');
@@ -97,7 +97,20 @@ function loadProfile(profile) {
             phoneApprover: approvals.phoneApprover,
             auditLedger: approvals.auditLedger,
             nodePolicy: nodeConfig.policy,
-            builtinSkillsDir: path.join(__dirname, '..', '..', 'skills')
+            builtinSkillsDir: path.join(__dirname, '..', '..', 'skills'),
+            // Cases stage 3: executors only from the admin service.json (R42);
+            // always present, so the registry is always in service mode here.
+            adminExecutors: executors || { entries: {}, packageRoots: [] },
+            // The executor package root check is bound to the same admin
+            // owner as node.yaml and the approver store (M16).
+            ...(adminUid === undefined ? {} : { adminUid }),
+            // The signed-grant audit path checks phone signatures against the
+            // admin-owned approver store and this node's identity.
+            approvalTrust: {
+              approverStore: approvals.approverStore,
+              nodeId: approvals.identity.nodeId,
+              nodePublicKey: approvals.identity.publicKey
+            }
           });
           await core.start();
         } catch (err) {
@@ -237,7 +250,7 @@ async function runService({ dataDir: requestedDataDir, profile: profileOverride,
       const config = loadServiceConfig(dataDir, { profile: profileOverride }, adminUid === undefined ? {} : { adminUid });
       profile = config.profile;
       log.info('service starting', { profile, dataDir, workspace, pid: process.pid });
-      running = await loadProfile(profile).start({ dataDir, features: config.features, ports: config.ports, workspace, audit: config.audit, adminUid });
+      running = await loadProfile(profile).start({ dataDir, features: config.features, ports: config.ports, workspace, audit: config.audit, adminUid, executors: config.executors });
     } catch (err) {
       // On Windows nothing reads the task's stderr, so the log file is the
       // only place a startup failure is visible.

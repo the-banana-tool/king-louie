@@ -279,6 +279,49 @@ describe('loadProfile("agent") listener readiness', { timeout: 120000 }, () => {
     assert.equal(shutdownCalled, true);
   });
 
+  // Cases stage 3 (M22, R42): the agent profile hands createCore the admin
+  // service.json executors (their presence is what puts the registry in
+  // service mode), the service adminUid (the executor root check), and the
+  // signing trust from startApprovals (the signed-grant audit path).
+  it('passes adminExecutors, adminUid and the approval trust to createCore', async () => {
+    const { dataDir: dir, workspace } = dataDir();
+    const coreEntry = require.resolve('../src/core');
+    const original = require.cache[coreEntry];
+    const seen = [];
+    require.cache[coreEntry] = {
+      id: coreEntry, filename: coreEntry, loaded: true,
+      exports: {
+        createCore: (deps) => {
+          seen.push(deps);
+          return {
+            start: async () => {},
+            whenListenersSettled: async () => {},
+            getGatewayServer: () => ({ wss: null }),
+            getWebhookServer: () => ({ httpServer: null }),
+            shutdown: async () => {}
+          };
+        }
+      }
+    };
+    const executors = { entries: { 'phone-agent': { package: 'phone-agent' } }, packageRoots: [path.resolve('/opt/kl/executors')] };
+    try {
+      const running = await loadProfile('agent').start({ dataDir: dir, features: allOff, ports: {}, workspace, executors });
+      const second = dataDir();
+      const plain = await loadProfile('agent').start({ dataDir: second.dataDir, features: allOff, ports: {}, workspace: second.workspace });
+      await running.stop();
+      await plain.stop();
+      assert.deepStrictEqual(seen[0].adminExecutors, executors);
+      assert.deepStrictEqual(seen[1].adminExecutors, { entries: {}, packageRoots: [] }, 'always present: the service is always in service mode');
+      assert.strictEqual('adminUid' in seen[1], false, 'production leaves adminUid to the default');
+      const { approverStore, identity } = running.approvals;
+      assert.ok(approverStore && identity && identity.nodeId && identity.publicKey);
+      assert.deepStrictEqual(seen[0].approvalTrust, { approverStore, nodeId: identity.nodeId, nodePublicKey: identity.publicKey });
+      assert.strictEqual(seen[0].approvalTrust.approverStore, approverStore, 'the admin-owned store startApprovals built');
+    } finally {
+      if (original) require.cache[coreEntry] = original; else delete require.cache[coreEntry];
+    }
+  });
+
   // Fix round 2 (opus re-review, minor, explicitly requested test): the
   // returned stop() already runs core.shutdown() in a try with
   // approvals.stop() in the finally (round 1); this pins that a rejecting

@@ -29,6 +29,7 @@ describe('classifyChannel (spec §3.6, first match wins)', () => {
     'usage:getDaily': 'proxy',
     'checkpoint:restore': 'proxy',
     'canvas:getState': 'proxy',
+    'executors:list': 'proxy',
     'agent:userResponse': 'proxy',
     'agent:executeWithDeps': 'deny',
     'hooks:list': 'deny',
@@ -56,7 +57,7 @@ describe('classifyChannel (spec §3.6, first match wins)', () => {
   });
 
   it('lists the proxied domains', () => {
-    assert.deepStrictEqual([...PROXIED_DOMAINS], ['chat', 'settings', 'case', 'cron', 'memory', 'tool', 'usage', 'checkpoint', 'canvas']);
+    assert.deepStrictEqual([...PROXIED_DOMAINS], ['chat', 'settings', 'case', 'cron', 'memory', 'tool', 'usage', 'checkpoint', 'canvas', 'executors']);
   });
 
   it('defaults to deny for anything that is not an allow-listed channel', () => {

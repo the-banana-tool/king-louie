@@ -36,11 +36,22 @@ const BROWSER_START_REFUSAL = `In a case, the browser starts only with profile "
 const DATA_DIR_GUARDED = new Set(['ops-memory.jsonl', 'executors', 'workflows']);
 const DATA_DIR_REFUSAL = 'ops-memory.jsonl, the executors folder and workflow files are written only by King Louie, not by tools in a case.';
 
-let host = { getCaseRuntime: () => null, dataDir: null };
+// Which profile the running browser uses: the browser tool's own state,
+// read only when a case run uses a browser tool.
+const readBrowserProfile = () => require('../../tools/builtin/browser-tool').actions.profile_current();
+// Browser actions that never act on a page: they may run whatever profile is open.
+const PROFILE_FREE = new Set(['start', 'stop', 'status', 'profile_list', 'profile_current']);
+
+let host = { getCaseRuntime: () => null, dataDir: null, browserProfile: readBrowserProfile };
 
 // createCore calls this once: a child's guardContext is only { caseId }.
-function configureCaseGuard({ getCaseRuntime = null, dataDir = null } = {}) {
-  host = { getCaseRuntime: typeof getCaseRuntime === 'function' ? getCaseRuntime : () => null, dataDir: dataDir || null };
+// browserProfile: tests only.
+function configureCaseGuard({ getCaseRuntime = null, dataDir = null, browserProfile = null } = {}) {
+  host = {
+    getCaseRuntime: typeof getCaseRuntime === 'function' ? getCaseRuntime : () => null,
+    dataDir: dataDir || null,
+    browserProfile: typeof browserProfile === 'function' ? browserProfile : readBrowserProfile
+  };
 }
 
 function gateQuery(toolName, text, ctx) {
@@ -119,4 +130,29 @@ function caseToolGuard(toolName, params = {}, ctx = {}) {
   return null;
 }
 
-module.exports = { caseToolGuard, configureCaseGuard, BROWSER_ALLOWED, BROWSER_REFUSAL };
+// Ruling T11-always-profile for direct browser tools: in a case run a
+// browser already open in another profile (the owner's cookies) is not
+// used; only the cases profile is. Asynchronous, so it runs after
+// caseToolGuard. Nothing running: the action fails on its own.
+async function caseBrowserProfileGuard(toolName, params = {}, ctx = {}) {
+  if (!ctx.caseContext && !ctx.guardContext) return null;
+  if (!BROWSER_ALLOWED[toolName] || PROFILE_FREE.has(params?.action)) return null;
+  let current;
+  try {
+    current = await host.browserProfile();
+  } catch (err) {
+    current = { error: err.message };
+  }
+  if (!current || typeof current !== 'object' || current.error || current.ok === false) {
+    const why = current?.error ? ` (${current.error})` : '';
+    return { success: false, error: `In a case, browser actions are refused: which profile the browser is open with could not be read${why}.` };
+  }
+  if (current.running !== true || current.active === CASES_BROWSER_PROFILE) return null;
+  const open = current.active ? `profile "${current.active}"` : 'no named profile';
+  return {
+    success: false,
+    error: `In a case, the browser is used only with profile "${CASES_BROWSER_PROFILE}", and it is open with ${open}. Stop it, then start it with profile "${CASES_BROWSER_PROFILE}".`
+  };
+}
+
+module.exports = { caseToolGuard, caseBrowserProfileGuard, configureCaseGuard, BROWSER_ALLOWED, BROWSER_REFUSAL };

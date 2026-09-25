@@ -52,6 +52,10 @@ module.exports = {
   CASE_SET_STATUS: 'case:setStatus',
   CASE_BUDGET: 'case:budget',
   CASE_GRANT_BUDGET: 'case:grantBudget',
+  EXECUTORS_LIST: 'executors:list',
+  CASE_ENVELOPES: 'case:envelopes',
+  CASE_CANCEL_JOB: 'case:cancelJob',
+  CASE_REVOKE_ENVELOPE: 'case:revokeEnvelope',
 
   USAGE_GET_SESSION: 'usage:getSession',
   USAGE_GET_DAILY: 'usage:getDaily',
