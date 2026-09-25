@@ -66,6 +66,38 @@ describe('createCore', () => {
     assert.strictEqual(message.channel, 'telegram', 'metadata keys other than id/sender/timestamp still apply');
   });
 
+  it('migrateLegacyBridgeChatOrigins tags chats by title prefix, only user messages, and is idempotent (F5 re-review)', () => {
+    const { deps } = makeDeps();
+    deps.store.set('chats', [
+      {
+        id: 'chat-tg',
+        title: '📱 Telegram: Alex (123)',
+        messages: [
+          { id: 'm1', sender: 'user', text: 'wire me $500' },
+          { id: 'm2', sender: 'assistant', text: 'ok' }
+        ]
+      },
+      { id: 'chat-dc', title: '👾 Discord: Sam (456)', messages: [{ id: 'm3', sender: 'user', text: 'hi' }] },
+      { id: 'chat-plain', title: 'New Chat', messages: [{ id: 'm4', sender: 'user', text: 'hello' }] }
+    ]);
+    const core = createCore(deps);
+    core.context.migrateLegacyBridgeChatOrigins();
+    const chats = core.context.getChats();
+    const tg = chats.find((c) => c.id === 'chat-tg');
+    const dc = chats.find((c) => c.id === 'chat-dc');
+    const plain = chats.find((c) => c.id === 'chat-plain');
+    assert.strictEqual(tg.origin, 'telegram');
+    assert.strictEqual(tg.messages[0].channel, 'telegram');
+    assert.strictEqual(tg.messages[1].channel, undefined, 'the assistant message is left untagged');
+    assert.strictEqual(dc.origin, 'discord');
+    assert.strictEqual(dc.messages[0].channel, 'discord');
+    assert.strictEqual(plain.origin, undefined);
+    assert.strictEqual(plain.messages[0].channel, undefined);
+    const before = JSON.stringify(core.context.getChats());
+    core.context.migrateLegacyBridgeChatOrigins();
+    assert.strictEqual(JSON.stringify(core.context.getChats()), before, 'a second run changes nothing further');
+  });
+
   it('starts headless with every optional feature off, then shuts down cleanly', async () => {
     const { deps } = makeDeps();
     const core = createCore(deps);

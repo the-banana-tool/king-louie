@@ -63,6 +63,22 @@ describe('case IPC', () => {
     assert.strictEqual((await call(IPC.CASE_ATTACH, { chatId: 'chat-1', caseId: c.id })).chat.caseId, c.id);
   });
 
+  it('refuses to attach a case to a legacy bridge chat that has no origin tag, by its title prefix (F5 re-review)', async () => {
+    const { call } = setup({
+      chats: [
+        { id: 'chat-legacy-tg', title: '📱 Telegram: Alex (123)', messages: [] },
+        { id: 'chat-legacy-dc', title: '👾 Discord: Sam (456)', messages: [] }
+      ]
+    });
+    const { case: c } = await call(IPC.CASE_CREATE, { title: 'A' });
+    const tg = await call(IPC.CASE_ATTACH, { chatId: 'chat-legacy-tg', caseId: c.id });
+    assert.strictEqual(tg.ok, false);
+    assert.match(tg.error, /telegram/i);
+    const dc = await call(IPC.CASE_ATTACH, { chatId: 'chat-legacy-dc', caseId: c.id });
+    assert.strictEqual(dc.ok, false);
+    assert.match(dc.error, /discord/i);
+  });
+
   it('returns the orientation text', async () => {
     const { call } = setup();
     const { case: c } = await call(IPC.CASE_CREATE, { title: 'Lakeside lot' });

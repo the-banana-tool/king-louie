@@ -340,7 +340,7 @@ class TelegramBridge extends ChannelPlugin {
     }
 
     // Create a new local chat
-    const chatTitle = `📱 Telegram: ${userName} (${telegramChatId})`;
+    const chatTitle = `${TelegramBridge.CHAT_TITLE_PREFIX}${userName} (${telegramChatId})`;
     // Tagged with this bridge's origin (F5): a case can be attached only to
     // a chat host-verified as the owner's, and this one carries whatever a
     // remote Telegram sender typed.
@@ -949,5 +949,10 @@ class TelegramBridge extends ChannelPlugin {
     return json.result;
   }
 }
+
+// The exact prefix getOrCreateLocalChat writes into a chat's title.
+// create-core.js's legacy-chat migration (F5) matches on this, not a
+// duplicated literal, so the two can never drift apart.
+TelegramBridge.CHAT_TITLE_PREFIX = '📱 Telegram: ';
 
 module.exports = TelegramBridge;

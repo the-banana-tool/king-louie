@@ -41,6 +41,10 @@ describe('bridge-created chats and messages carry their origin channel (F5)', ()
     bridge.addToLocalChat('12345', 'user', 'hello there');
     assert.strictEqual(createCalls.length, 1);
     assert.deepStrictEqual(createCalls[0].meta, { origin: 'telegram' });
+    // The title still starts with the exact prefix create-core.js's F5
+    // legacy-chat migration matches on (TelegramBridge.CHAT_TITLE_PREFIX,
+    // not a duplicated literal).
+    assert.ok(createCalls[0].title.startsWith(TelegramBridge.CHAT_TITLE_PREFIX));
     assert.strictEqual(appendCalls.length, 1);
     assert.deepStrictEqual(appendCalls[0].meta, { channel: 'telegram' });
   });
@@ -59,6 +63,7 @@ describe('bridge-created chats and messages carry their origin channel (F5)', ()
     bridge.addToLocalChat('67890', 'assistant', 'reply text');
     assert.strictEqual(createCalls.length, 1);
     assert.deepStrictEqual(createCalls[0].meta, { origin: 'discord' });
+    assert.ok(createCalls[0].title.startsWith(DiscordChannel.CHAT_TITLE_PREFIX));
     assert.strictEqual(appendCalls.length, 1);
     assert.deepStrictEqual(appendCalls[0].meta, { channel: 'discord' });
   });

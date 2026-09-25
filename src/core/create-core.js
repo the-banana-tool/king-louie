@@ -215,6 +215,42 @@ function createCore(deps = {}) {
 
   const getChats = () => store.get('chats', []);
   const setChats = (chats) => store.set('chats', chats);
+
+  // F5 re-review: a chat a Telegram/Discord bridge created before the
+  // origin/channel tagging existed carries neither, and the bridges keep
+  // their chat-id maps in memory only, so such a chat is never re-tagged
+  // by the normal getOrCreateLocalChat/addToLocalChat path — only a
+  // fresh chat for that remote sender would be tagged, leaving the old
+  // one (and any case already attached to it) exactly as exposed as
+  // before. This migration finds it by the exact title prefix each
+  // bridge still writes (TelegramBridge/DiscordChannel.CHAT_TITLE_PREFIX,
+  // not a duplicated literal), sets origin, and tags its user-sender
+  // messages with channel. Idempotent and cheap to run on every startup:
+  // a chat or message already tagged is left alone.
+  const LEGACY_BRIDGE_TITLE_PREFIXES = [
+    { prefix: TelegramBridge.CHAT_TITLE_PREFIX, origin: 'telegram' },
+    { prefix: DiscordChannel.CHAT_TITLE_PREFIX, origin: 'discord' }
+  ];
+  const migrateLegacyBridgeChatOrigins = () => {
+    const chats = getChats();
+    let count = 0;
+    const migrated = chats.map((chat) => {
+      if (chat.origin || typeof chat.title !== 'string') return chat;
+      const match = LEGACY_BRIDGE_TITLE_PREFIXES.find(({ prefix }) => chat.title.startsWith(prefix));
+      if (!match) return chat;
+      count += 1;
+      const messages = Array.isArray(chat.messages) ? chat.messages : [];
+      return {
+        ...chat,
+        origin: match.origin,
+        messages: messages.map((m) => (m && m.sender === 'user' && !m.channel ? { ...m, channel: match.origin } : m))
+      };
+    });
+    if (count) {
+      setChats(migrated);
+      log.info(`Tagged ${count} legacy bridge chat(s) by title prefix (F5 migration).`);
+    }
+  };
   const getActiveChatId = () => store.get('activeChatId', null);
   const setActiveChatId = (chatId) => store.set('activeChatId', chatId);
   const getApiTokens = () => store.get('apiTokens', {});
@@ -2605,6 +2641,7 @@ function createCore(deps = {}) {
   };
 
   const start = async () => {
+    migrateLegacyBridgeChatOrigins();
     initializeTools();
     await initializeAgentInfrastructure();
     const TASK_EVENTS = { taskCreated: 'task:created', taskUpdated: 'task:updated', taskUnblocked: 'task:unblocked' };
@@ -2700,6 +2737,7 @@ function createCore(deps = {}) {
     getActiveChatId,
     setActiveChatId,
     appendMessageToChat,
+    migrateLegacyBridgeChatOrigins,
     getLastAssistantMessage,
     getVoiceSettings,
     runHookEvent,
