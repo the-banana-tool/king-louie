@@ -184,7 +184,9 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
   const oauth = chatData.anthropicOAuth && chatData.anthropicOAuth.accessToken ? chatData.anthropicOAuth : null;
   const casesRootSetting = settings.cases && typeof settings.cases.root === 'string' ? settings.cases.root.trim() : '';
   const memoryEntries = arr(memoryDoc.entries).filter((e) => e && typeof e.id === 'string' && e.id);
-  const cronJobs = Object.values(cronDoc).filter((j) => j && typeof j.id === 'string' && j.id);
+  // System jobs (cases stage 2's cases:wakeups) are created by every core for
+  // itself and can't be written through the cron API, so they are never sent.
+  const cronJobs = Object.values(cronDoc).filter((j) => j && typeof j.id === 'string' && j.id && j.system !== true);
 
   // The receiving importer refuses a whole case outright if any file in it
   // resolves under a nested (non-top-level) .git segment, or is a bare .git

@@ -38,7 +38,11 @@ function userData() {
   });
   write('config.json', { __vault_github: 'ENC-github' });
   write(path.join('memory', 'memory-store.json'), { entries: [{ id: 'm-1', type: 'preference', content: 'likes tea', created: '2026-01-01T00:00:00.000Z' }] });
-  write(path.join('cron', 'jobs.json'), { cron_1: { id: 'cron_1', name: 'daily', enabled: true, schedule: { kind: 'cron', expr: '0 9 * * *' } } });
+  write(path.join('cron', 'jobs.json'), {
+    cron_1: { id: 'cron_1', name: 'daily', enabled: true, schedule: { kind: 'cron', expr: '0 9 * * *' } },
+    // C2's protected system job: every core creates its own, so it is never imported.
+    'cases:wakeups': { id: 'cases:wakeups', name: 'Case wake-ups', system: true, enabled: true, schedule: { kind: 'every', everyMs: 60000 }, payload: { system: 'cases:wakeups' } }
+  });
   write(path.join('cases', 'lakeside-lot', 'case.yaml'), 'title: Lakeside lot\n');
   write(path.join('cases', 'lakeside-lot', 'notes', 'a.md'), '# A\n');
   return root;
