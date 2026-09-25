@@ -1,16 +1,24 @@
 // src/cases/index.js
-const { CaseRuntime, CaseBusyError, CaseNotFoundError, resolveCasesRoot } = require('./case-runtime');
+const { CaseRuntime, CaseBusyError, CaseNotFoundError, SimilarCaseError, resolveCasesRoot } = require('./case-runtime');
+const { CrossCaseIndex } = require('./index-store');
 const { CaseStore } = require('./case-store');
 const { FactLedger, LedgerError } = require('./ledger');
 const { Brief, BriefError } = require('./brief');
 const { CaseRecords } = require('./records');
 const { buildOrientation } = require('./orientation');
-const { recommendationGate, findDuplicates } = require('./gates');
+const {
+  recommendationGate, findDuplicates, findDuplicateQuestion, findDuplicateJob, findSimilarCases, jobSignature
+} = require('./gates');
+const {
+  getCaseType, knownCaseTypes, assertKnownType, gatingQuestionsFor, registerGatingSource
+} = require('./case-types');
 
 module.exports = {
   CaseRuntime,
   CaseBusyError,
   CaseNotFoundError,
+  SimilarCaseError,
+  CrossCaseIndex,
   resolveCasesRoot,
   CaseStore,
   FactLedger,
@@ -20,5 +28,14 @@ module.exports = {
   CaseRecords,
   buildOrientation,
   recommendationGate,
-  findDuplicates
+  findDuplicates,
+  findDuplicateQuestion,
+  findDuplicateJob,
+  findSimilarCases,
+  jobSignature,
+  getCaseType,
+  knownCaseTypes,
+  assertKnownType,
+  gatingQuestionsFor,
+  registerGatingSource
 };

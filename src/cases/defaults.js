@@ -20,7 +20,17 @@ const CASE_SETTINGS_DEFAULTS = Object.freeze({
     maxIterations: 20,
     maxCasesPerTick: 3,
     retryBackoffMinutes: Object.freeze([5, 15, 60])
-  })
+  }),
+  // Cases stage 5 (docs/superpowers/specs/2026-09-23-cases-stage5-detours.md §6).
+  detours: Object.freeze({
+    classifyOwnerMessages: true,
+    minConfidence: 0.7,
+    classifyTimeoutMs: 4000,
+    recentDays: 30,
+    maxCandidates: 2
+  }),
+  duplicates: Object.freeze({ createSimilarity: 0.6 }),
+  softwareRepo: Object.freeze({ refreshBudgetMs: 6000 })
 });
 
 const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
@@ -37,7 +47,10 @@ function mergeCaseSettings(base = {}, source = {}) {
     ...s,
     budgets: { ...d.budgets, ...obj(b.budgets), ...obj(s.budgets) },
     roles: { ...d.roles, ...obj(b.roles), ...obj(s.roles) },
-    wakeups: { ...d.wakeups, ...obj(b.wakeups), ...obj(s.wakeups) }
+    wakeups: { ...d.wakeups, ...obj(b.wakeups), ...obj(s.wakeups) },
+    detours: { ...d.detours, ...obj(b.detours), ...obj(s.detours) },
+    duplicates: { ...d.duplicates, ...obj(b.duplicates), ...obj(s.duplicates) },
+    softwareRepo: { ...d.softwareRepo, ...obj(b.softwareRepo), ...obj(s.softwareRepo) }
   };
 }
 
@@ -48,6 +61,10 @@ const positive = (v, fallback) => {
 const positiveInt = (v, fallback) => {
   const n = Number(v);
   return Number.isInteger(n) && n > 0 ? n : fallback;
+};
+const fraction = (v, fallback) => {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 && n <= 1 ? n : fallback;
 };
 
 // The merged settings with every value the runtime relies on made valid.
@@ -65,7 +82,17 @@ function resolveCaseSettings(source = {}) {
       maxIterations: positiveInt(m.wakeups.maxIterations, d.wakeups.maxIterations),
       maxCasesPerTick: positiveInt(m.wakeups.maxCasesPerTick, d.wakeups.maxCasesPerTick),
       retryBackoffMinutes: Array.isArray(m.wakeups.retryBackoffMinutes) ? m.wakeups.retryBackoffMinutes : [...d.wakeups.retryBackoffMinutes]
-    }
+    },
+    detours: {
+      ...m.detours,
+      classifyOwnerMessages: m.detours.classifyOwnerMessages !== false,
+      minConfidence: fraction(m.detours.minConfidence, d.detours.minConfidence),
+      classifyTimeoutMs: positiveInt(m.detours.classifyTimeoutMs, d.detours.classifyTimeoutMs),
+      recentDays: positive(m.detours.recentDays, d.detours.recentDays),
+      maxCandidates: positiveInt(m.detours.maxCandidates, d.detours.maxCandidates)
+    },
+    duplicates: { ...m.duplicates, createSimilarity: fraction(m.duplicates.createSimilarity, d.duplicates.createSimilarity) },
+    softwareRepo: { ...m.softwareRepo, refreshBudgetMs: positiveInt(m.softwareRepo.refreshBudgetMs, d.softwareRepo.refreshBudgetMs) }
   };
 }
 

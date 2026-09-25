@@ -224,14 +224,16 @@ describe('CaseRuntime', () => {
     assert.strictEqual(rt.completeGating(info.id).status, 'active');
   });
 
-  it('lists facts of the other cases for duplicate search', async () => {
+  it('endTurn commits when updating the case index throws', async () => {
     const rt = new CaseRuntime({ root: tmp() });
     const a = await rt.createCase({ title: 'A' });
-    const b = await rt.createCase({ title: 'B' });
-    rt.ledger(b.id).assert({ stmt: 'x', subject: 's', attr: 'a', value: 1, source: src });
-    const others = rt.otherCaseFacts(a.id);
-    assert.deepStrictEqual(others.map((o) => o.title), ['B']);
-    assert.strictEqual(others[0].facts.size, 1);
+    const turn = await rt.beginTurn(a.id, { turnId: 'turn-1' });
+    rt.ledger(a.id).assert({ stmt: 'x', subject: 's', attr: 'a', value: 1, source: src });
+    rt.index.upsertCase = () => { throw new Error('index disk full'); };
+    await rt.endTurn(turn, { summary: 'recorded x' });
+    const git = require('../src/cases/git');
+    assert.strictEqual(await git.isDirty(a.dir), false);
+    assert.strictEqual(rt.turns.has(a.id), false);
   });
 
   it('throws CaseNotFoundError for an unknown case', () => {

@@ -3,7 +3,7 @@
 // options.caseContext, injected by the chat send path through the tool
 // executor's extraToolOptions.
 const { Tool } = require('../tool-schema');
-const { recommendationGate, findDuplicates } = require('../../cases/gates');
+const { recommendationGate, findDuplicates, OPEN_CASE_STATUSES } = require('../../cases/gates');
 const { requireOwnerQuote } = require('../../cases/chat-integration');
 const { USER_ONLY_FIELDS } = require('../../cases/brief');
 const { toMs } = require('../../cases/clock');
@@ -161,12 +161,23 @@ const LedgerTool = acceptAnyValue(new Tool({
           note: 'Inferred facts cannot support a recommendation or leave the system.'
         };
       case 'unknown': {
+        // Other open cases through the index, which redacts their private
+        // facts before the hits reach this case (cases stage 5 spec §3.2).
+        const crossCaseHits = ctx.runtime.index.search({
+          text: params.stmt,
+          subject: params.subject,
+          attr: params.attr,
+          kinds: ['fact'],
+          forCaseId: ctx.caseId,
+          excludeCaseId: ctx.caseId,
+          statuses: OPEN_CASE_STATUSES
+        });
         const dups = findDuplicates({
           subject: params.subject,
           attr: params.attr,
           text: params.stmt,
           facts: ledger.view().facts,
-          otherCases: ctx.runtime.otherCaseFacts(ctx.caseId)
+          crossCaseHits
         });
         if (dups.exact.length) {
           return {

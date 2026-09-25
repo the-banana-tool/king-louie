@@ -137,7 +137,8 @@ describe('case IPC, stage 2', () => {
   }
 
   async function activeCase(runtime, title = 'Lakeside lot') {
-    const info = await runtime.createCase({ title, objective: 'Convert the lot to cash' });
+    // force: several cases here share an objective (stage 5 refuses that otherwise).
+    const info = await runtime.createCase({ title, objective: 'Convert the lot to cash', force: true });
     runtime.brief(info.id).update('why', 'Need the cash', { provenance: 'user' });
     runtime.brief(info.id).append('successCriteria', 'Closed by year end', { provenance: 'model' });
     runtime.completeGating(info.id);

@@ -83,7 +83,8 @@ function harness({ settings = {}, orient = '{"changed": true, "why": "a new answ
 }
 
 async function activeCase(rt, title = 'Lakeside lot') {
-  const info = await rt.createCase({ title, objective: 'Convert the lot to cash' });
+  // force: several cases here share an objective (stage 5 refuses that otherwise).
+  const info = await rt.createCase({ title, objective: 'Convert the lot to cash', force: true });
   rt.brief(info.id).update('why', 'Need the cash', { provenance: 'user' });
   rt.brief(info.id).append('successCriteria', 'Closed by year end', { provenance: 'model' });
   rt.completeGating(info.id);

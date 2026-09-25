@@ -270,7 +270,8 @@ describe('cases:wakeups in a service-style core', () => {
       try {
         const runtime = core.context.getCaseRuntime();
         const a = await runtime.createCase({ title: 'Lot A' });
-        const b = await runtime.createCase({ title: 'Lot B' });
+        // force: "Lot B" is close to "Lot A" (stage 5 refuses that otherwise).
+        const b = await runtime.createCase({ title: 'Lot B', force: true });
         runtime.setStatus(a.id, 'active', { kind: 'gating' });
         runtime.setStatus(b.id, 'active', { kind: 'gating' });
         const past = new Date(runtime.now().getTime() - 1000).toISOString();

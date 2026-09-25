@@ -22,6 +22,9 @@ const { localDay, isRealCalendarDate } = require('./clock');
 const { readJson, writeJsonIfChanged } = require('./jsonfile');
 const { resolveCaseSettings } = require('./defaults');
 const { resolveRole } = require('./roles');
+const { CrossCaseIndex } = require('./index-store');
+const { findSimilarCases } = require('./gates');
+const { assertKnownType, resolveCaseType, briefFieldsFor, gatingQuestionsFor } = require('./case-types');
 // Registers the direction and budget-grant answer handlers.
 require('./answer-handlers');
 const { createLogger } = require('../logging');
@@ -71,6 +74,22 @@ class WakeupBusyError extends Error {
     this.code = 'CASE_BUSY';
   }
 }
+
+// Case creation found an open case with the same or a close title or
+// objective (cases stage 5 spec §3.2). The owner may retry with force.
+class SimilarCaseError extends Error {
+  constructor(similar) {
+    const first = similar[0];
+    super(`A similar case exists: "${first.title}" (${first.status}). Attach this work to it, or create the new case anyway with force.`);
+    this.name = 'SimilarCaseError';
+    this.code = 'SIMILAR_CASES';
+    this.similar = similar;
+  }
+}
+
+const RELATIONS = Object.freeze(['spawned', 'blocked-by', 'blocks', 'related']);
+const RELATED_ID = /^(?:[A-Za-z0-9-]{1,64}|pending:d-\d{4,})$/;
+const DETOUR_ID = /^d-\d{4,}$/;
 
 class CaseNotFoundError extends Error {
   constructor(id) {
@@ -188,13 +207,43 @@ class CaseRuntime {
     return resolveCaseSettings(raw);
   }
 
+  // The cross-case index at <root>/.index/ (cases stage 5 spec §3.1).
+  get index() {
+    if (!this._index) this._index = new CrossCaseIndex(this.root, { store: this.store });
+    return this._index;
+  }
+
+  // Never fails the caller: a stale index is refreshed by the next search.
+  _reindex(id) {
+    try {
+      this.index.upsertCase(id);
+    } catch (err) {
+      log.warn(`Updating the case index for ${id} failed: ${err.message}`);
+    }
+  }
+
   // The wake-up sweep lists cases; a case still being created has no first commit yet,
   // so a sweep that commits it would make `create` fail with "nothing to commit".
   // `runDueWakeups` skips the whole tick while any creation is in flight.
-  async createCase(opts) {
+  // A same or close title/objective of an open case refuses creation with
+  // SimilarCaseError unless opts.force === true (the owner confirmed).
+  async createCase(opts = {}) {
+    assertKnownType(opts.type || 'general');
+    if (opts.force !== true) {
+      const { exact, similar } = findSimilarCases({
+        title: opts.title,
+        objective: opts.objective || '',
+        candidates: this.index.openCaseHeads(),
+        threshold: this.settings().duplicates.createSimilarity
+      });
+      const found = [...exact, ...similar].map(({ caseId, title, status, match }) => ({ caseId, title, status, match }));
+      if (found.length) throw new SimilarCaseError(found);
+    }
     this.creating = (this.creating || 0) + 1;
     try {
-      return await this.store.create(opts);
+      const info = await this.store.create({ title: opts.title, type: opts.type, objective: opts.objective });
+      this._reindex(info.id);
+      return info;
     } finally {
       this.creating -= 1;
     }
@@ -212,7 +261,21 @@ class CaseRuntime {
 
   ledger(id) { return new FactLedger(this.getCase(id).dir); }
 
-  brief(id) { return new Brief(this.getCase(id).dir); }
+  // The brief with the case type's fields and required field-backed gating
+  // questions (cases stage 5 spec §3.7).
+  brief(id) {
+    const meta = this.getCase(id);
+    return new Brief(meta.dir, { extraFields: briefFieldsFor(meta.type), gatingFields: this._gatingFields(meta) });
+  }
+
+  _gatingFields(meta) {
+    try {
+      return gatingQuestionsFor(this, meta.id).filter((q) => q.required && typeof q.field === 'string').map((q) => q.field);
+    } catch (err) {
+      log.warn(`Gating questions for ${meta.slug} unavailable: ${err.message}`);
+      return [];
+    }
+  }
 
   records(id) { return new CaseRecords(this.getCase(id).dir); }
 
@@ -282,8 +345,127 @@ class CaseRuntime {
       questions,
       budget,
       nextWakeup,
-      now: this.now()
+      now: this.now(),
+      detours: safely('detours', () => this._detourLines(meta), []),
+      extras: this._extras(meta)
     });
+  }
+
+  // `## Case type: <type>`: the type's extras from the cached snapshot.
+  _extras(meta) {
+    const t = resolveCaseType(meta.type);
+    const lines = [];
+    if (meta.type && t.type !== meta.type) lines.push(`Unknown case type "${meta.type}"; treated as general.`);
+    try {
+      const text = t.orientationExtras(this, meta.id);
+      if (text) lines.push(text);
+    } catch (err) {
+      log.warn(`Case-type extras for ${meta.slug} failed: ${err.message}`);
+      lines.push(`Case-type details are unavailable: ${err.message}`);
+    }
+    return { type: t.type, text: lines.join('\n') };
+  }
+
+  // `## Detours and related cases`. Stage 5 Part 2 adds the proposals.
+  _detourLines(meta) {
+    return this._relatedLines(meta);
+  }
+
+  _relatedLines(meta) {
+    return (Array.isArray(meta.related) ? meta.related : []).map((r) => {
+      if (!r || typeof r.id !== 'string') return null;
+      const note = r.note ? ` — ${oneLine(r.note, 200)}` : '';
+      if (r.id.startsWith('pending:')) return `${r.relation}: routing ${r.id.slice(8)} is waiting for the owner${note}`;
+      const other = this.store.get(r.id);
+      if (!other) return `${r.relation}: (case ${r.id} no longer exists)${note}`;
+      const done = r.relation === 'blocked-by' && other.status === 'done' ? ' (done — check whether it still blocks)' : '';
+      return `${r.relation}: "${other.title}" (${other.status})${done}${note}`;
+    }).filter(Boolean);
+  }
+
+  // blocked-by entries for open-items.md.
+  _blockers(caseId) {
+    const meta = this.getCase(caseId);
+    return (Array.isArray(meta.related) ? meta.related : [])
+      .filter((r) => r && r.relation === 'blocked-by' && typeof r.id === 'string')
+      .map((r) => {
+        const other = r.id.startsWith('pending:') ? null : this.store.get(r.id);
+        return {
+          id: r.id,
+          title: other ? other.title : (r.id.startsWith('pending:') ? `routing ${r.id.slice(8)} (not decided yet)` : `case ${r.id} (no longer exists)`),
+          status: other ? other.status : 'pending',
+          note: r.note || ''
+        };
+      });
+  }
+
+  // ---- Related cases (cases stage 5 spec §3.8): the only writers of case.yaml related ----
+
+  // The caller holds the case lock (a turn or systemAction). Deduped on (id, relation).
+  addRelation(id, entry = {}) {
+    const meta = this.getCase(id);
+    if (typeof entry.id !== 'string' || !RELATED_ID.test(entry.id)) throw new Error(`A related entry needs a case id or pending:<detourId>, not ${JSON.stringify(entry.id)}.`);
+    if (!RELATIONS.includes(entry.relation)) throw new Error(`relation must be one of ${RELATIONS.join(', ')}.`);
+    if (entry.detour !== undefined && entry.detour !== null && !DETOUR_ID.test(String(entry.detour))) throw new Error(`detour must look like d-0001, not ${JSON.stringify(entry.detour)}.`);
+    if (entry.id === meta.id) throw new Error('A case cannot be related to itself.');
+    const row = {
+      id: entry.id,
+      relation: entry.relation,
+      ...(entry.note ? { note: oneLine(entry.note, 300) } : {}),
+      ...(entry.detour ? { detour: String(entry.detour) } : {}),
+      at: this.now().toISOString()
+    };
+    const related = (Array.isArray(meta.related) ? meta.related : []).filter((r) => !(r && r.id === row.id && r.relation === row.relation));
+    related.push(row);
+    this.store.updateMeta(meta.id, { related });
+    this._reindex(meta.id);
+    return row;
+  }
+
+  // Removes every entry matching all given keys of { id, relation, detour }.
+  removeRelation(id, match = {}) {
+    const meta = this.getCase(id);
+    const keys = Object.entries(match || {}).filter(([k, v]) => ['id', 'relation', 'detour'].includes(k) && v !== undefined);
+    if (!keys.length) throw new Error('removeRelation needs id, relation or detour to match.');
+    const before = Array.isArray(meta.related) ? meta.related : [];
+    const kept = before.filter((r) => !(r && keys.every(([k, v]) => r[k] === v)));
+    if (kept.length !== before.length) {
+      this.store.updateMeta(meta.id, { related: kept });
+      this._reindex(meta.id);
+    }
+    return before.length - kept.length;
+  }
+
+  // ---- Case types (cases stage 5 spec §3.7) ----
+
+  // The newest snapshot: a background refresh kept in memory, else .kl/case-type.json.
+  caseTypeSnapshot(id) {
+    const meta = this.getCase(id);
+    const mem = this._typeSnapshots instanceof Map ? this._typeSnapshots.get(meta.id) || null : null;
+    let disk = null;
+    try {
+      disk = readJson(path.join(meta.dir, '.kl', 'case-type.json'), null);
+    } catch (err) {
+      log.warn(`Reading the case-type snapshot of ${meta.slug} failed: ${err.message}`);
+    }
+    if (disk && typeof disk !== 'object') disk = null;
+    if (mem && (!disk || String(mem.fetchedAt) >= String(disk.fetchedAt))) return mem;
+    return disk;
+  }
+
+  // { [field]: value } for C2's .kl/triggers.json baseline; null when the
+  // type has no material fields or nothing has been fetched.
+  caseTypeMaterial(id) {
+    const meta = this.getCase(id);
+    const t = resolveCaseType(meta.type);
+    const fields = t.materialFields();
+    if (!fields.length) return null;
+    const snapshot = this.caseTypeSnapshot(meta.id);
+    if (!snapshot) return null;
+    const all = typeof t.materialOf === 'function' ? t.materialOf(snapshot) : (snapshot.state || {});
+    const out = {};
+    for (const f of fields) out[f] = all[f] ?? null;
+    return out;
   }
 
   _failureReport(meta) {
@@ -299,17 +481,11 @@ class CaseRuntime {
     }
   }
 
-  otherCaseFacts(id) {
-    const self = this.getCase(id);
-    return this.listCases()
-      .filter((c) => c.id !== self.id)
-      .map((c) => ({ caseId: c.id, title: c.title, facts: new FactLedger(c.dir).view().facts }));
-  }
-
   completeGating(id) {
     const meta = this.getCase(id);
-    new Brief(meta.dir).completeGating();
+    this.brief(meta.id).completeGating();
     if (meta.status === 'draft') this.setStatus(meta.id, 'active', { kind: 'gating' });
+    this._reindex(meta.id);
     return this.getCase(meta.id);
   }
 
@@ -794,10 +970,18 @@ class CaseRuntime {
   async endTurn(turn, { summary = '', journal = null, journalKind = 'turn' } = {}) {
     try {
       const records = new CaseRecords(turn.dir);
-      records.renderOpenItems(new FactLedger(turn.dir).view().facts);
+      let blockers = [];
+      try {
+        blockers = this._blockers(turn.caseId);
+      } catch (err) {
+        log.warn(`Blockers for ${turn.caseId} unavailable: ${err.message}`);
+      }
+      records.renderOpenItems(new FactLedger(turn.dir).view().facts, { blockers });
       if (journal && String(journal).trim()) records.writeJournal(journalKind, journal, this.now());
       this._closeTurnMeta(turn);
-      return await this._commit(turn.dir, `${turn.turnId}: ${oneLine(summary) || 'turn'}`, turn.caseId);
+      const committed = await this._commit(turn.dir, `${turn.turnId}: ${oneLine(summary) || 'turn'}`, turn.caseId);
+      this._reindex(turn.caseId);
+      return committed;
     } finally {
       if (this.turns.get(turn.caseId) === turn) this.turns.delete(turn.caseId);
       this._release(turn.dir, turn.turnId);
@@ -1163,6 +1347,7 @@ class CaseRuntime {
         });
       }
       this._notify('case:changed', { caseId: meta.id, what: 'questions', questionId });
+      this._reindex(meta.id);
       return { question: store.get(questionId) || question, fact, effect };
     });
   }
@@ -1378,5 +1563,6 @@ class CaseRuntime {
 }
 
 module.exports = {
-  CaseRuntime, CaseBusyError, WakeupBusyError, CaseNotFoundError, RuntimeClosingError, resolveCasesRoot, BUDGET_FACT_NOTE
+  CaseRuntime, CaseBusyError, WakeupBusyError, CaseNotFoundError, RuntimeClosingError, SimilarCaseError, resolveCasesRoot,
+  BUDGET_FACT_NOTE, RELATIONS
 };

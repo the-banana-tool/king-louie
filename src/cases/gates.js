@@ -66,7 +66,7 @@ const privateStmt = (title) => `(private fact in "${title}" — open that case t
 // close wording. A redacted hit has no text, so it matches by key or by the
 // index's `coverage` (share of the query's tokens it holds), and its row
 // never carries the fact's words.
-function findDuplicates({ subject, attr, text = '', facts, crossCaseHits = [], otherCases = [] }) {
+function findDuplicates({ subject, attr, text = '', facts, crossCaseHits = [] }) {
   const wanted = `${norm(subject)}|${norm(attr)}`;
   const words = tokens(text);
   const exact = [];
@@ -90,16 +90,6 @@ function findDuplicates({ subject, attr, text = '', facts, crossCaseHits = [], o
       stmt: hit.redacted ? privateStmt(hit.title) : hit.text,
       provenance: hit.provenance
     });
-  }
-  // Stage-1 callers pass whole ledgers of other cases; removed once
-  // Ledger.unknown reads the cross-case index (cases stage 5, Task 5).
-  for (const other of otherCases) {
-    for (const f of other.facts.values()) {
-      if (f.status !== 'active') continue;
-      if (key(f) === wanted || jaccard(words, tokens(f.stmt)) >= 0.5) {
-        similar.push({ caseId: other.caseId, caseTitle: other.title, id: f.id, stmt: f.stmt, provenance: f.provenance });
-      }
-    }
   }
   return { exact, similar };
 }

@@ -69,13 +69,11 @@ describe('findDuplicates', () => {
     fact('f-0002', { subject: 'lot', attr: 'tap', provenance: 'unknown', stmt: 'Water tap installed?' }),
     fact('f-0003', { subject: 'parcel-12', attr: 'kind', provenance: 'inferred', stmt: 'Parcel 12 is timber' })
   ]);
-  const other = {
-    caseId: 'c-other', title: 'Household inventory',
-    facts: new Map([
-      fact('f-0009', { subject: 'house', attr: 'payoff', stmt: 'Mortgage payoff quote for the house good through September' }),
-      fact('f-0010', { subject: 'lot', attr: 'tap', status: 'retracted' })
-    ])
-  };
+  // Cross-case index hits (cases stage 5): the index holds active facts only.
+  const otherHits = [
+    { kind: 'fact', caseId: 'c-other', title: 'Household inventory', id: 'f-0009', subject: 'house', attr: 'payoff', text: 'Mortgage payoff quote for the house good through September', redacted: false, provenance: 'sourced', coverage: 0.2 },
+    { kind: 'brief', caseId: 'c-other', title: 'Household inventory', id: 'objective', subject: null, attr: 'objective', text: 'Mortgage payoff quote for the house', redacted: false, provenance: null, coverage: 1 }
+  ];
 
   it('reports exact matches in the current case, facts and unknowns alike', () => {
     const d = findDuplicates({ subject: 'Loan', attr: 'PAYOFF', text: '', facts: here, otherCases: [] });
@@ -89,16 +87,16 @@ describe('findDuplicates', () => {
     assert.deepStrictEqual(d.exact, []);
   });
 
-  it('reports similar active facts in other cases by subject/attr or wording', () => {
-    const bySubject = findDuplicates({ subject: 'house', attr: 'payoff', text: 'x', facts: new Map(), otherCases: [other] });
+  it('reports similar cross-case fact hits by subject/attr or wording', () => {
+    const bySubject = findDuplicates({ subject: 'house', attr: 'payoff', text: 'x', facts: new Map(), crossCaseHits: otherHits });
     assert.deepStrictEqual(bySubject.similar.map((m) => [m.caseId, m.id]), [['c-other', 'f-0009']]);
-    const byWords = findDuplicates({ subject: 'property', attr: 'loan-balance', text: 'mortgage payoff quote for the house', facts: new Map(), otherCases: [other] });
+    const byWords = findDuplicates({ subject: 'property', attr: 'loan-balance', text: 'mortgage payoff quote for the house', facts: new Map(), crossCaseHits: otherHits });
     assert.deepStrictEqual(byWords.similar.map((m) => m.id), ['f-0009']);
     assert.strictEqual(byWords.similar[0].caseTitle, 'Household inventory');
   });
 
-  it('ignores inactive facts in other cases', () => {
-    const d = findDuplicates({ subject: 'lot', attr: 'tap', text: '', facts: new Map(), otherCases: [other] });
+  it('ignores hits that are not facts', () => {
+    const d = findDuplicates({ subject: 'lot', attr: 'tap', text: 'mortgage payoff quote for the house', facts: new Map(), crossCaseHits: otherHits.slice(1) });
     assert.deepStrictEqual(d.similar, []);
   });
 });
