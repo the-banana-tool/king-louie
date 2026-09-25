@@ -411,7 +411,10 @@ retries once), a registered device, a valid signature, and that
 routes need no signature: the unguessable `code_id` / `invite_id` in the path is
 the credential. Errors are `{ "error": "<code>", "message": "…" }`; `429`
 carries `retry_after`. Rate limits: 10/min per IP unauthenticated, 120/min per
-device.
+device. On a device route only a request that fails before its signature
+verifies counts against its IP, and a request whose signature verifies is
+never refused by the per-IP limit, so phones sharing an address (CGNAT, an
+office NAT) are not locked out by a neighbour's failures.
 
 | Method, path | Auth | Body → reply |
 |---|---|---|
