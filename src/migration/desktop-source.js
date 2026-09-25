@@ -221,6 +221,7 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
     const listed = reader.listDir('cases');
     for (const r of listed.refused) attention.push({ category: 'case', key: r.relPath, note: r.reason });
     for (const dir of listed.dirs) {
+      if (dir === '.index') continue; // cases stage 5: the cross-case index cache, not a case (M9)
       if (!CASE_DIR_RE.test(dir)) {
         attention.push({ category: 'case', key: dir, note: 'not a valid case directory name; it was not copied' });
         continue;

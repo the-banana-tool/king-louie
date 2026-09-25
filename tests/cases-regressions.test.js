@@ -103,6 +103,9 @@ describe('F5: existing state is checked before claiming something is missing', (
     assert.strictEqual(r.ok, true);
     assert.deepStrictEqual(r.similarInOtherCases.map((m) => m.caseTitle), ['Household inventory']);
     assert.match(r.note, /Check them before asking the owner/);
+    // Cases stage 5: the hit comes from the index, which redacts the financial fact.
+    assert.strictEqual(r.similarInOtherCases[0].stmt, '(private fact in "Household inventory" — open that case to see it)');
+    assert.ok(!JSON.stringify(r).includes('good through the 7th'));
   });
 });
 
@@ -209,5 +212,99 @@ describe('F12: spending stops at the budget and only the owner raises it', () =>
     assert.deepStrictEqual([meta.status, meta.statusReason.kind, meta.statusReason.ref], ['paused', 'budget', 'usd']);
     assert.ok(runtime.questions(info.id).open().some((q) => q.payload.type === 'budget-grant'));
     await runtime.endTurn(next, {});
+  });
+});
+
+// Cases stage 5 (docs/superpowers/specs/2026-09-23-cases-stage5-detours.md §10).
+describe('F4-detour: off-objective work is routed, not done inline', () => {
+  const { execFileSync } = require('child_process');
+  const { DetourTool } = require('../src/tools/builtin/detour-tool');
+  const { registerDetourHandlers } = require('../src/ipc/detour-handlers');
+  const IPC = require('../src/ipc/constants');
+  const { DetourLog } = require('../src/cases/detours/log');
+  const MOCK = '{"onCase":false,"confidence":0.9,"reason":"Fixing the phone agent\'s code does not collect quotes"}';
+
+  it('refuses the patch, proposes the phone agent case, links both cases, and leaves the repository alone', async () => {
+    const repo = tmp();
+    const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' });
+    git('init', '-q');
+    git('config', 'user.email', 'test@example.com');
+    git('config', 'user.name', 'Test');
+    fs.writeFileSync(path.join(repo, 'status.js'), 'module.exports = { poll: () => "completed" };\n');
+    git('add', '.');
+    git('commit', '-q', '-m', 'init');
+    const headBefore = git('rev-parse', 'HEAD');
+
+    const runtime = new CaseRuntime({
+      root: tmp(),
+      host: { inferenceRouter: { routeWithFallback: async () => MOCK }, interactive: () => true }
+    });
+    const door = await runtime.createCase({ title: 'Rear door quotes', type: 'outreach', objective: 'Three written quotes for the rear door' });
+    runtime.brief(door.id).update('why', 'Rain gets in under the door', { provenance: 'user' });
+    runtime.brief(door.id).append('successCriteria', 'Three written quotes', { provenance: 'model' });
+    runtime.completeGating(door.id);
+    const phone = await runtime.createCase({ title: 'Phone agent maintenance', type: 'software-repo', objective: 'Keep the phone agent reporting call status correctly' });
+    runtime.brief(phone.id).update('why', 'Dropped calls show as completed', { provenance: 'user' });
+    runtime.brief(phone.id).append('successCriteria', 'Status polling reports dropped calls', { provenance: 'model' });
+    runtime.brief(phone.id).update('repo', repo, { provenance: 'user' });
+    runtime.completeGating(phone.id);
+    const phoneTurn = await runtime.beginTurn(phone.id, { turnId: 'wakeup-1', source: 'wakeup' });
+    await runtime.endTurn(phoneTurn, { summary: 'looked at the repository' });
+
+    const turn = await runtime.beginTurn(door.id, { turnId: 'turn-1', source: 'owner', ownerMessage: 'Also fix the phone agent status polling that drops calls' });
+    const gate = await runtime.detourGate(door.id, { source: 'executor', serves: 'fix dropped-call status', text: 'Patch status polling in the phone agent', turnId: 'turn-1' });
+    assert.strictEqual(gate.ok, false);
+    assert.match(gate.error, /^This work looks like a detour from the case objective \("Three written quotes for the rear door"\): Fixing the phone agent's code does not collect quotes\. Do not do it in this case\. Call Detour with action "propose"/);
+
+    const opts = { caseContext: runtime.caseContext(turn, { ownerMessages: ['Also fix the phone agent status polling that drops calls'] }) };
+    const proposed = await DetourTool.execute({ action: 'propose', summary: 'Patch status polling in the phone agent', reason: "Fixing the phone agent's code does not collect quotes" }, opts);
+    assert.strictEqual(proposed.options[0].label, 'Attach to "Phone agent maintenance" (active)');
+
+    await runtime.runOwnerMessageHooks(turn);
+    await runtime.runOwnerMessageHooks(turn);
+    const fromOwner = new DetourLog(door.dir).rows().filter((r) => r.type === 'proposal' && r.source === 'owner-message');
+    assert.strictEqual(fromOwner.length, 1, 'the same owner message yields one proposal');
+    await runtime.endTurn(turn, { summary: 'quotes and a detour' });
+
+    const handlers = new Map();
+    registerDetourHandlers({ handle: (ch, fn) => handlers.set(ch, fn), on: () => {} }, { getCaseRuntime: () => runtime });
+    const resolved = await handlers.get(IPC.CASE_RESOLVE_DETOUR)({}, { caseId: door.id, detourId: proposed.detourId, optionId: 'attach-1' });
+    assert.deepStrictEqual([resolved.ok, resolved.linkedCaseId], [true, phone.id]);
+    assert.ok(runtime.getCase(door.id).related.some((r) => r.id === phone.id && r.relation === 'related'));
+    assert.ok(runtime.getCase(phone.id).related.some((r) => r.id === door.id && r.relation === 'related'));
+    assert.strictEqual(runtime.getCase(door.id).status, 'active');
+
+    assert.strictEqual(git('rev-parse', 'HEAD'), headBefore);
+    assert.strictEqual(git('status', '--porcelain'), '');
+  });
+});
+
+describe('F5-cross-case: one index answers every duplicate check without leaking', () => {
+  const { AskTool } = require('../src/tools/builtin/case-unattended-tools');
+  const { DetourRouter } = require('../src/cases/detours/router');
+
+  it('similar case creation, routing, Ask and unknowns all go through the index', async () => {
+    const runtime = new CaseRuntime({ root: tmp(), host: { interactive: () => true } });
+    const site = await runtime.createCase({ title: 'Website redesign', objective: 'Refresh the public website' });
+    runtime.ledger(site.id).assert({ stmt: 'The hosting contract renews on 1 November for 240 dollars', subject: 'hosting', attr: 'renewal', value: 240, category: 'financial', source: { kind: 'document', ref: 'sources/hosting.pdf' } });
+    runtime.records(site.id).writeJournal('plan', '# Plan\n\nMove the booking page to the static generator');
+    runtime.createQuestion(site.id, { kind: 'question', text: 'Which hosting plan should the new booking site use?', urgency: 'low' });
+
+    await assert.rejects(runtime.createCase({ title: 'Redesign the website' }), (err) => err.code === 'SIMILAR_CASES' && err.similar[0].caseId === site.id);
+
+    const shop = await runtime.createCase({ title: 'Shop opening', objective: 'Open the pop-up shop on Saturday' });
+    const routed = await new DetourRouter({ runtime }).propose(shop.id, { summary: 'redesign the website homepage', reason: 'Not the shop' });
+    assert.strictEqual(routed.detour.options[0].label, 'Attach to "Website redesign" (draft)');
+
+    const turn = await runtime.beginTurn(shop.id, { turnId: 'turn-1' });
+    const asked = await AskTool.execute({ question: 'Which hosting plan should the new booking site use?' }, { caseContext: runtime.caseContext(turn) });
+    assert.strictEqual(asked.ok, true);
+    assert.match(asked.note, /A similar question is open in case "Website redesign"\./);
+    assert.ok(!JSON.stringify(asked).includes('240'));
+
+    const unknown = await LedgerTool.execute({ action: 'unknown', stmt: 'When does the hosting contract renew?', subject: 'hosting', attr: 'renewal', changes: 'Budget', answerable: 'owner', how: 'Ask' }, { caseContext: runtime.caseContext(turn) });
+    assert.deepStrictEqual(unknown.similarInOtherCases.map((m) => [m.caseTitle, m.stmt]), [['Website redesign', '(private fact in "Website redesign" — open that case to see it)']]);
+    assert.ok(!JSON.stringify(unknown).includes('240 dollars'));
+    await runtime.endTurn(turn, { summary: 'x' });
   });
 });

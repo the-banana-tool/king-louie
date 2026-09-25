@@ -2900,7 +2900,7 @@ body {
 /* Cases stage 5: detours and related cases */
 .case-detours-section { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
 .case-detours-heading { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
-.case-detour { border: 1px solid var(--border-default); border-radius: 6px; padding: 8px; background: var(--bg-secondary); }
+.case-detour { border: 1px solid var(--border-default); border-radius: 6px; padding: 8px; background: var(--bg-overlay); }
 .case-detour-blocker { border-color: var(--accent); }
 .case-detour-text { white-space: pre-wrap; margin-bottom: 6px; }
 .case-detour-state { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }

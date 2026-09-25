@@ -352,6 +352,15 @@ describe('the R51 walker (fix round 1)', () => {
     assert.ok(source.attention.some((a) => a.key === 'bad name' && /not a valid case directory name/.test(a.note)));
   });
 
+  it('skips the cross-case index cache silently, with no attention row (M9)', () => {
+    const root = userData();
+    fs.mkdirSync(path.join(root, 'cases', '.index'));
+    fs.writeFileSync(path.join(root, 'cases', '.index', 'meta.json'), '{}');
+    const source = readDesktopSource({ userDataDir: root, reader: createSafeReader({ root }), secrets: 'needs-desktop' });
+    assert.ok(!source.attention.some((a) => a.key === '.index'));
+    assert.ok(!source.inventory.cases.some((c) => c.dir === '.index'));
+  });
+
   it('holds back a case with a file name the service would refuse (reserved name, trailing dot or space)', () => {
     const root = userData();
     const real = createSafeReader({ root });

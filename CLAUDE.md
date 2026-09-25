@@ -298,3 +298,44 @@ the e2e test), the owner check cannot tell them apart.
   `swift test` in `mobile/ios/KLProtocol` (macOS) and `../gradlew test` in `mobile/android/protocol`
   (JDK 17, no Android SDK); both read `tests/vectors/approval-v1`. `mobile/PRIVACY.md` says what the
   relay operator can see.
+
+## Cases: detours and the cross-case index (stage 5)
+
+Spec: `docs/superpowers/specs/2026-09-23-cases-stage5-detours.md`.
+
+- The cross-case index is `<casesRoot>/.index/` (`src/cases/index-store.js`,
+  BM25). It is a cache: deleting `.index/` is always safe, and IPC
+  `case:reindex` rebuilds it. Private facts never cross cases: a hit from
+  another case carries text only for a `disclosable: true` fact or a brief
+  `title`/`objective`; every other cross-case hit is `text: null, redacted:
+  true`. Never pass `includePrivate` outside `index-store.js`; a test greps
+  `src/` for it.
+- `CaseRuntime.createCase` refuses an open case with the same or a close
+  title/objective (`SimilarCaseError`, `code: 'SIMILAR_CASES'`) unless
+  `force: true`. The model can never pass `force` itself — no case tool
+  accepts it — it flows only from the owner's own choices: IPC `case:create`
+  and the owner's pick of "new" on a routing question. Tests that create
+  several cases sharing a title or an objective pass `force: true`.
+- Detours live in `src/cases/detours/` and `.kl/detours.jsonl`. The owner's
+  message is classified (`classify` role) after `UserPromptSubmit` passes; a
+  host without an inference router skips it, and the classifier fails open —
+  a timeout, a call error or a malformed reply is always treated as on-case
+  (never as a detour), with at most one `detour` journal line per turn.
+  Routing answers are applied at turn start, from `case:detours` and after
+  `case:resolveDetour`.
+- A routing question is answered one of two ways: the owner picks an option
+  directly (case panel, IPC `case:resolveDetour`, `channel: 'in-app'`), or the
+  owner answers in words to whatever agent session is running the case — this
+  app's own chat or a remote session started over MCP (the fleet's `delegate`
+  tool runs the same agent stack) — and that agent calls `Detour` with
+  `action: 'resolve'` (`by: 'model-mapped'`). The router itself is
+  channel-agnostic, but delivering the question on any other channel
+  (chat platforms, email, SMS, voice) is not wired yet.
+- Case types are code in `src/cases/case-types/` (`general`, `outreach`,
+  `software-repo`); `case.yaml.type` is validated at creation. A
+  `software-repo` case runs read-only `git` and `gh` at turn start (tests
+  inject `host.exec`); `gh` uses its own login. Its `repo` brief field
+  (owner-only) must match a whole whitespace-separated token of the owner's
+  quote — never a prefix, a substring, or text assembled across tokens.
+- `case.yaml` `related` is written only by `CaseRuntime.addRelation` and
+  `removeRelation`.
