@@ -29,8 +29,9 @@ const SWEEP_MS = 30000;
 // send its whole request (never 0, which would let a slow sender hold a
 // socket forever); long polls wait on the response side and are unaffected.
 // maxConnections also bounds how far concurrent failing requests can burst
-// past the per-IP limit before they are charged.
-const PHONE_LISTENER = Object.freeze({ requestTimeoutMs: 30000, headersTimeoutMs: 15000, maxConnections: 256 });
+// past the per-IP limit before they are charged; perIpConnections keeps one
+// address from taking all of them (and locking every other phone out).
+const PHONE_LISTENER = Object.freeze({ requestTimeoutMs: 30000, headersTimeoutMs: 15000, maxConnections: 256, perIpConnections: 16 });
 
 // The phone API's rate limits are keyed on the socket's remote address, and
 // there is deliberately no trusted forwarded-for setting: the relay must see
@@ -42,6 +43,21 @@ function createPhoneServer({ useTls, cert = null, key = null, handler }) {
   server.requestTimeout = PHONE_LISTENER.requestTimeoutMs;
   server.headersTimeout = PHONE_LISTENER.headersTimeoutMs;
   server.maxConnections = PHONE_LISTENER.maxConnections;
+  const perIp = new Map();
+  server.on('connection', (socket) => {
+    const ip = socket.remoteAddress || 'unknown';
+    const open = perIp.get(ip) || 0;
+    if (open >= PHONE_LISTENER.perIpConnections) {
+      socket.destroy();
+      return;
+    }
+    perIp.set(ip, open + 1);
+    socket.once('close', () => {
+      const left = (perIp.get(ip) || 1) - 1;
+      if (left > 0) perIp.set(ip, left);
+      else perIp.delete(ip);
+    });
+  });
   return server;
 }
 
@@ -133,6 +149,8 @@ async function startRelay({ dataDir, config, identity, listeners = 'own', regist
     },
     async stop() {
       clearInterval(sweeper);
+      // Parked long polls answer now instead of holding their sockets.
+      approvals.releaseWaiters();
       if (server) {
         const closed = new Promise((resolve) => server.close(resolve));
         // Idle keep-alive sockets and parked long polls would hold close() open.

@@ -24,6 +24,7 @@ const { open, seal, nodeSigner } = require('../src/approvals/envelope');
 const { verifyAuditSlice } = require('../src/audit/audit-ledger');
 const { createFakePhone } = require('./helpers/fake-phone');
 const https = require('https');
+const net = require('net');
 const { createLinkRpc } = require('../src/approvals/link-rpc');
 const { buildRequest, toolAction } = require('../src/approvals/messages');
 const { relaySpkiPin } = require('../src/frontdoor/tls');
@@ -283,7 +284,7 @@ describe('relay trust rules', () => {
     const answers = {
       'enroll.claim': (params) => { claims.push(params); return { delivered: true }; },
       // A node answering with a truthy non-true value must not read as accepted.
-      'approval.response': () => ({ accepted: 'yes', reason: null })
+      'approval.response': () => ({ delivered: true, accepted: 'yes', reason: null })
     };
     a = await fakeNode('lab-a', answers);
     b = await fakeNode('lab-b', answers);
@@ -422,19 +423,194 @@ describe('relay trust rules', () => {
     assert.ok(Date.parse(body.server_time) > 0);
   });
 
-  it('picks up `relay code` files within a second and ignores bad ones without logging them', async () => {
+  it('picks up `relay code` files within a second and drops bad ones quietly (M3, M8)', async () => {
     const codesDir = path.join(trustData, 'relay', 'codes');
     const code = 'alpha bravo cactus dawn eagle frost';
     secrets.add(code);
-    fs.writeFileSync(path.join(codesDir, 'bad.json'), `{"code": "${code}", oops`);
-    fs.writeFileSync(path.join(codesDir, 'good.json'), JSON.stringify({ code, node_name: 'lab-c', expires_at: new Date(Date.now() + 60000).toISOString() }));
-    await until(() => fs.readdirSync(codesDir).length === 0, 'the code files to be picked up', 3000);
+    const warnings = [];
+    const removeSink = addSink((rec) => { if (rec.level === 'warn' && rec.subsystem === 'frontdoor/node-hub') warnings.push(rec.message); });
+    const originalWarn = console.warn;
+    console.warn = () => {};
+    try {
+      fs.mkdirSync(path.join(codesDir, 'folder.json'));
+      fs.writeFileSync(path.join(codesDir, 'bad.json'), `{"code": "${code}", oops`);
+      fs.writeFileSync(path.join(codesDir, 'big.json'), JSON.stringify({ code, node_name: 'lab-big', expires_at: new Date(Date.now() + 60000).toISOString(), pad: 'x'.repeat(5000) }));
+      let linked = false;
+      fs.writeFileSync(path.join(trustData, 'outside.json'), JSON.stringify({ code, node_name: 'lab-link', expires_at: new Date(Date.now() + 60000).toISOString() }));
+      try {
+        fs.symlinkSync(path.join(trustData, 'outside.json'), path.join(codesDir, 'link.json'));
+        linked = true;
+      } catch (err) {
+        if (err.code !== 'EPERM') throw err; // Windows without the symlink privilege
+      }
+      fs.writeFileSync(path.join(codesDir, 'good.json'), JSON.stringify({ code, node_name: 'lab-c', expires_at: new Date(Date.now() + 60000).toISOString() }));
+      await until(() => fs.readdirSync(codesDir).filter((n) => n !== 'folder.json').length === 0, 'the code files to be picked up', 3000);
+      await sleep(2200); // two more polls: the directory is still only warned about once
+      assert.ok(fs.existsSync(path.join(codesDir, 'folder.json')), 'a directory is left alone');
+      assert.ok(fs.existsSync(path.join(trustData, 'outside.json')), 'a symlink target is never removed');
+      assert.equal(warnings.filter((w) => w === 'ignoring a directory in the pairing code folder').length, 1);
+      assert.ok(warnings.includes('ignoring a pairing code file: unreadable'));
+      assert.ok(warnings.includes('ignoring a pairing code file: too large'));
+      if (linked) assert.ok(warnings.includes('ignoring a pairing code file: not a regular file'));
+      assert.ok(warnings.every((w) => !w.includes(code)));
+    } finally {
+      console.warn = originalWarn;
+      removeSink();
+    }
     const identity = new NodeIdentity({ nodeName: 'lab-c' });
     const transport = new MeshTransport({ identity, listen: false, useTls: false });
     const pairing = new MeshPairing(identity, transport, { timeoutMs: 5000 });
     cleanups.push(async () => { pairing.cleanup(); await transport.stop(); });
     await pairing.acceptCode(code, '127.0.0.1', r.address().mesh.port);
     await until(() => r.nodeHub.nodeByName('lab-c'), 'lab-c to be paired');
+    assert.equal(r.nodeHub.nodeByName('lab-big'), null);
+    assert.equal(r.nodeHub.nodeByName('lab-link'), null);
+  });
+
+  it('refuses a pairing with pair:reject before trusting or accepting it', async () => {
+    const first = r.nodeHub.addCode('lab-x');
+    const second = r.nodeHub.addCode('lab-x');
+    secrets.add(first.code);
+    secrets.add(second.code);
+    const pairWith = async (code) => {
+      const identity = new NodeIdentity({ nodeName: 'lab-x' });
+      const transport = new MeshTransport({ identity, listen: false, useTls: false });
+      const pairing = new MeshPairing(identity, transport, { timeoutMs: 5000 });
+      cleanups.push(async () => { pairing.cleanup(); await transport.stop(); });
+      return pairing.acceptCode(code, '127.0.0.1', r.address().mesh.port);
+    };
+    await pairWith(first.code);
+    await until(() => r.nodeHub.nodeByName('lab-x'), 'lab-x paired');
+    const count = r.nodeHub.nodes().length;
+    await assert.rejects(pairWith(second.code), /name_taken/);
+    assert.equal(r.nodeHub.nodes().length, count);
+  });
+
+  it('keeps each device to its own nodes: no view of, answer to or poll of another node\'s requests', async () => {
+    const { envelope } = buildRequest({ identity: b.identity, action: toolAction('Bash', { command: 'whoami' }, '/srv'), origin: { client: 'agent' }, ttlMs: 60000 });
+    await b.call('approval.submit', { envelope });
+    const requestId = open(envelope).message.request_id;
+    assert.equal((await call(phone, 'GET', `/v1/approvals/${requestId}`)).status, 404);
+    assert.equal((await call(phone, 'POST', `/v1/approvals/${requestId}/response`, phone.respond(envelope, 'approve'))).status, 403);
+    const list = await call(phone, 'GET', '/v1/approvals?wait=0');
+    assert.ok(list.body.every((e) => open(e.envelope).message.node_id !== b.identity.nodeId));
+    assert.equal((await call(phone, 'GET', `/v1/nodes/${b.identity.nodeId}/history`)).status, 404);
+  });
+
+  it('refuses a replayed signed call', async () => {
+    const p = '/v1/nodes';
+    const headers = phone.signApi('GET', p, '');
+    secrets.add(headers['X-KL-Signature']);
+    assert.equal((await fetch(trustBase() + p, { headers })).status, 200);
+    const again = await fetch(trustBase() + p, { headers });
+    assert.equal(again.status, 401);
+    assert.equal((await again.json()).error, 'replay');
+  });
+
+  it('validates push hints: unknown kind or a bad expiry is refused before anything is stored', async () => {
+    const signer = nodeSigner(a.identity);
+    const before_ = r.mailbox.list({ nodeIds: [a.identity.nodeId] }).length;
+    const ping = () => seal({ v: 1, type: 'kl.test.ping', node_id: a.identity.nodeId, nonce: crypto.randomBytes(32).toString('base64url') }, signer);
+    await assert.rejects(a.call('message.submit', { envelope: ping(), push: { kind: 'bogus', id: 'x' } }), (e) => e.code === 'bad_push');
+    await assert.rejects(a.call('message.submit', { envelope: ping(), push: { kind: 'lease', id: 'x', expires_at: 'tomorrow' } }), (e) => e.code === 'bad_push');
+    assert.equal(r.mailbox.list({ nodeIds: [a.identity.nodeId] }).length, before_);
+    assert.equal((await a.call('message.submit', { envelope: ping(), push: { kind: 'lease', id: 'x', expires_at: new Date(Date.now() + 60000).toISOString() } })).ok, true);
+  });
+
+  it('device.state touches only the calling node\'s column, and only known devices', async () => {
+    await b.call('device.state', { device_id: phone.deviceId, state: 'revoked', node_id: a.identity.nodeId });
+    const states = Object.fromEntries(r.devices.nodesForDevice(phone.deviceId).map((n) => [n.node_id, n.state]));
+    assert.equal(states[a.identity.nodeId], 'active');
+    assert.equal(states[b.identity.nodeId], 'revoked');
+    await assert.rejects(b.call('device.state', { device_id: createFakePhone().deviceId, state: 'active' }), (e) => e.code === 'unknown_device');
+  });
+
+  it('logs one revocation per target, still forwarding each', async () => {
+    const target = createFakePhone({ name: 'Lost phone' });
+    await call(phone, 'POST', '/v1/devices/enroll', phone.enroll({ device: target.device() }));
+    assert.equal((await call(phone, 'POST', '/v1/devices/revoke', phone.revoke(target.deviceId))).status, 200);
+    assert.equal((await call(phone, 'POST', '/v1/devices/revoke', phone.revoke(target.deviceId, { reason: 'again' }))).status, 200);
+    const revokes = r.devices.log().filter((e) => { const { message } = open(e); return message.type === 'kl.device.revoke' && message.device_id === target.deviceId; });
+    assert.equal(revokes.length, 1);
+  });
+
+  it('runs one device-log replay per node at a time', async () => {
+    let calls = 0;
+    const slow = async () => { calls += 1; await sleep(50); return { state: 'duplicate' }; };
+    const node = await fakeNode('lab-r', { 'device.enroll': slow, 'device.revoke': slow });
+    await Promise.all([node.call('relay.hello', { node_id: node.identity.nodeId }), node.call('relay.hello', { node_id: node.identity.nodeId })]);
+    const entries = r.devices.log().length;
+    await until(() => calls >= entries, 'the replay', 5000);
+    await sleep(200);
+    assert.equal(calls, entries, 'a second hello during a replay does not start another pass');
+  });
+
+  it('a device active on no node loses every relay-wide power', async () => {
+    await a.call('device.state', { device_id: phone.deviceId, state: 'revoked' });
+    await until(() => !r.devices.nodesForDevice(phone.deviceId).some((n) => n.state === 'active'), 'phone revoked everywhere');
+    try {
+      assert.equal((await call(phone, 'POST', '/v1/pairing-codes', { node_name: 'lab-z' })).status, 403);
+      assert.equal((await call(phone, 'POST', '/v1/devices/invites', {})).status, 403);
+      assert.equal((await call(phone, 'GET', `/v1/devices/invites/${crypto.randomBytes(16).toString('base64url')}`)).status, 403);
+      assert.equal((await call(phone, 'POST', '/v1/devices/revoke', phone.revoke(other.deviceId))).status, 403);
+      assert.equal((await call(phone, 'GET', '/v1/devices')).status, 403);
+      assert.equal((await call(phone, 'POST', '/v1/devices/enroll', phone.enroll({ device: createFakePhone().device() }))).status, 403);
+    } finally {
+      await a.call('device.state', { device_id: phone.deviceId, state: 'active' });
+    }
+  });
+
+  it('caps connections per IP on the phone listener', async () => {
+    const server = createPhoneServer({ useTls: false, handler: (req, res) => { res.end('ok'); } });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const sockets = [];
+    try {
+      const connect = () => new Promise((resolve, reject) => {
+        const sock = net.connect(server.address().port, '127.0.0.1', () => resolve(sock));
+        sock.on('error', () => {});
+        sockets.push(sock);
+        setTimeout(() => reject(new Error('connect timeout')), 2000).unref();
+      });
+      for (let i = 0; i < PHONE_LISTENER.perIpConnections; i++) await connect();
+      await sleep(100);
+      const extra = await connect();
+      const closed = await new Promise((resolve) => { extra.once('close', () => resolve(true)); setTimeout(() => resolve(false), 1500).unref(); });
+      assert.equal(closed, true, 'the connection over the cap is dropped');
+      assert.equal(sockets.slice(0, PHONE_LISTENER.perIpConnections).every((sk) => !sk.destroyed), true);
+    } finally {
+      for (const sk of sockets) sk.destroy();
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it('caps long polls per device, and stop() returns promptly with polls parked', async () => {
+    const pollRelay = await startRelay({
+      dataDir: tempDir('kl-relay-poll-'),
+      identity: new NodeIdentity({ nodeName: 'relay' }),
+      useTls: false,
+      config: { phoneListen: { host: '127.0.0.1', port: 0 }, meshListen: { host: '127.0.0.1', port: 0 }, publicUrl: 'https://kl.example.com', tls: {}, push: {} }
+    });
+    let stopped = false;
+    cleanups.push(() => (stopped ? null : pollRelay.stop()));
+    const poller = createFakePhone({ name: 'Poller' });
+    // Test setup only: an active device without a node behind it.
+    pollRelay.devices.register({ device_id: poller.deviceId, jwk: poller.jwk, name: 'Poller', platform: 'android' });
+    pollRelay.devices.setNodeState(poller.deviceId, 'kl-aaaaaaaaaaaaaaaa', 'active');
+    const url = (p) => `http://127.0.0.1:${pollRelay.address().phone.port}${p}`;
+    const get = (p) => fetch(url(p), { headers: poller.signApi('GET', p, '') });
+    assert.equal((await get('/v1/approvals?wait=0')).status, 200);
+    const parked = [get('/v1/approvals?wait=25&n=1').catch(() => null), get('/v1/approvals?wait=25&n=2').catch(() => null)];
+    await sleep(300);
+    const started = Date.now();
+    const third = await get('/v1/approvals?wait=25&n=3');
+    assert.equal(third.status, 429);
+    assert.ok(Date.now() - started < 2000, 'answered at once');
+    const stopAt = Date.now();
+    await pollRelay.stop();
+    stopped = true;
+    assert.ok(Date.now() - stopAt < 3000, `stop() took ${Date.now() - stopAt} ms`);
+    await Promise.all(parked);
   });
 
   it('logs no code ids, codes, invite ids, push tokens or signatures', () => {

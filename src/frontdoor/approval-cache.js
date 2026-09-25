@@ -21,6 +21,12 @@ class ApprovalCache extends EventEmitter {
     this.now = now;
     this.items = new Map();
     this.seq = 0;
+    // Parked long polls wait here, not as one 'change' listener each: any
+    // number of them is one listener, and no MaxListeners warning.
+    this.waiters = new Set();
+    this.on('change', (seq) => {
+      for (const wake of [...this.waiters]) wake(seq);
+    });
   }
 
   // `nodeId` is the mesh-authenticated identity of the caller, never read
@@ -34,6 +40,9 @@ class ApprovalCache extends EventEmitter {
       throw err('bad_request', 'not a valid approval request for this node');
     }
     const existing = this.items.get(message.request_id);
+    // A request id is bound to the node that first submitted it: another
+    // node can never replace (or take over the answers to) that request.
+    if (existing && existing.node_id !== nodeId) throw err('bad_request', 'that request id belongs to another node');
     this.seq += 1;
     const entry = {
       request_id: message.request_id,
@@ -87,18 +96,23 @@ class ApprovalCache extends EventEmitter {
   }
 
   // Resolves once anything newer than afterSeq exists, or after timeoutMs
-  // (clamped to MAX_WAIT_MS either way). The listener it registers is always
+  // (clamped to MAX_WAIT_MS either way). The waiter it registers is always
   // removed, on whichever path resolves the promise, so a caller that never
   // comes back for the result (a disconnected phone) leaves nothing behind.
   waitForChange(afterSeq, timeoutMs) {
     const limit = Math.min(Math.max(0, timeoutMs), MAX_WAIT_MS);
     if (this.seq > afterSeq || limit <= 0) return Promise.resolve(this.seq);
     return new Promise((resolve) => {
-      const onChange = (seq) => { clearTimeout(timer); resolve(seq); };
-      const timer = setTimeout(() => { this.removeListener('change', onChange); resolve(this.seq); }, limit);
+      const wake = (seq) => { clearTimeout(timer); this.waiters.delete(wake); resolve(seq); };
+      const timer = setTimeout(() => wake(this.seq), limit);
       if (typeof timer.unref === 'function') timer.unref();
-      this.once('change', onChange);
+      this.waiters.add(wake);
     });
+  }
+
+  // Resolves every parked wait now (the relay is stopping).
+  releaseWaiters() {
+    for (const wake of [...this.waiters]) wake(this.seq);
   }
 
   sweep() {

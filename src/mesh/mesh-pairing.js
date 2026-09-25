@@ -48,6 +48,10 @@ class MeshPairing {
     this.transport = transport;
     this.timeoutMs = timeoutMs;
     this.pendingPairings = new Map();
+    // Optional admit(remoteIdentity, meta) → null | reason: a last say on a
+    // proof-valid pairing, asked before anything is trusted or answered, so
+    // a refused peer gets pair:reject rather than a pair:accept taken back.
+    this.admit = null;
   }
 
   generateCode(meta = {}) {
@@ -246,6 +250,22 @@ class MeshPairing {
       ws.send(JSON.stringify({ type: 'pair:reject', reason: 'name_mismatch' }));
       ws.close();
       return null;
+    }
+
+    if (typeof this.admit === 'function') {
+      let reason;
+      try {
+        reason = this.admit(remoteIdentity || {}, meta);
+      } catch {
+        reason = 'refused';
+      }
+      if (reason) {
+        clearTimeout(pairing.timeout);
+        this.pendingPairings.delete(pairingId);
+        ws.send(JSON.stringify({ type: 'pair:reject', reason: String(reason) }));
+        ws.close();
+        return null;
+      }
     }
 
     // Send back our proof

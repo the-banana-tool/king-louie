@@ -2,9 +2,10 @@
 // against that node's key before the relay stores or forwards it; the relay
 // never alters a signed message.
 const { open, verifyEd25519, verifyEs256 } = require('../approvals/envelope');
-const { validateMessage } = require('../approvals/messages');
+const { validateMessage, isTimestamp } = require('../approvals/messages');
 const { LinkRpcError } = require('../approvals/link-rpc');
 const { TTL_MS: CODE_TTL_MS } = require('./invites');
+const { KINDS: PUSH_KINDS } = require('./push/text');
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const MAX_PUSH_ID = 128;
@@ -67,7 +68,19 @@ function registerNodeMethods(relay) {
 
   // Every enrollment and revocation the relay relayed, so a node that was
   // offline catches up (it answers `duplicate` for what it already has).
+  const replaying = new Set();
   const replayDeviceLog = async (nodeId) => {
+    // One replay per node at a time: a node that says hello again while its
+    // last replay is still running does not start a second pass.
+    if (replaying.has(nodeId)) return;
+    replaying.add(nodeId);
+    try {
+      await replayOnce(nodeId);
+    } finally {
+      replaying.delete(nodeId);
+    }
+  };
+  const replayOnce = async (nodeId) => {
     for (const envelope of devices.log()) {
       let message;
       try {
@@ -115,13 +128,18 @@ function registerNodeMethods(relay) {
   // the mailbox itself refuses the approval-protocol types (kl.enroll.* …).
   nodeHub.onNodeMessage('message.submit', async ({ envelope, push = null, to_device: toDevice = null }, { nodeId }) => {
     const { node } = fromNode(nodeId, envelope);
+    if (push !== null && push !== undefined) {
+      const ok = isPlainObject(push) && PUSH_KINDS.includes(push.kind) && typeof push.id === 'string' && push.id.length > 0 && push.id.length <= MAX_PUSH_ID
+        && (push.expires_at === undefined || push.expires_at === null || isTimestamp(push.expires_at));
+      if (!ok) throw new LinkRpcError('bad_push', `push must be { kind: ${PUSH_KINDS.join('|')}, id, expires_at? }`);
+    }
     let result;
     try {
       result = mailbox.put(nodeId, envelope, { to_device: toDevice });
     } catch (err) {
       throw new LinkRpcError(err.code || 'error', err.message);
     }
-    if (isPlainObject(push) && typeof push.kind === 'string' && typeof push.id === 'string' && push.id && push.id.length <= MAX_PUSH_ID) {
+    if (push) {
       // Pushed only to phones that approve on this node.
       const targets = devices.devicesForNode(nodeId).filter((d) => toDevice === null || d.device_id === toDevice);
       pushTo(targets, { kind: push.kind, id: push.id, node_name: node.node_name, expires_at: typeof push.expires_at === 'string' ? push.expires_at : null });
@@ -175,6 +193,8 @@ function registerNodeMethods(relay) {
 
   nodeHub.onNodeMessage('device.state', async ({ device_id: deviceId, state }, { nodeId }) => {
     if (!['active', 'revoked'].includes(state)) throw new LinkRpcError('malformed', 'state must be active or revoked');
+    // Only this link's node's column, and only for a device the relay knows.
+    if (!devices.get(deviceId)) throw new LinkRpcError('unknown_device', 'the relay has no such device');
     devices.setNodeState(deviceId, nodeId, state);
     return { ok: true };
   });

@@ -3,12 +3,24 @@
 // each relay.hello). Nodes never trust any of it; they verify signatures.
 const fs = require('fs');
 const path = require('path');
-const { deviceIdFromJwk } = require('../approvals/envelope');
+const { deviceIdFromJwk, open } = require('../approvals/envelope');
 const { writeFileAtomic } = require('../approvals/approver-store');
 const { DEVICE_ID_RE, NODE_ID_RE } = require('../approvals/messages');
 const { err } = require('./errors');
 
 const PLATFORMS = ['ios', 'android', 'demo'];
+// The log is replayed to every node on each relay.hello, so it is bounded:
+// past this many lines new entries are refused rather than appended.
+const MAX_LOG_LINES = 10000;
+
+function revokeTarget(envelope) {
+  try {
+    const { message } = open(envelope);
+    return message.type === 'kl.device.revoke' ? message.device_id : null;
+  } catch {
+    return null;
+  }
+}
 
 class DeviceRegistry {
   constructor({ file, now = Date.now } = {}) {
@@ -107,9 +119,17 @@ class DeviceRegistry {
     return had;
   }
 
+  // → true when appended, false when it is a revocation of a device the log
+  // already revokes (one is enough: nodes never re-activate a revoked id).
+  // Throws `log_full` once the log holds MAX_LOG_LINES entries.
   appendLog(envelope) {
+    const entries = this.log();
+    const target = revokeTarget(envelope);
+    if (target && entries.some((e) => revokeTarget(e) === target)) return false;
+    if (entries.length >= MAX_LOG_LINES) throw err('log_full', `the device log is full (${MAX_LOG_LINES} entries)`);
     fs.mkdirSync(path.dirname(this.logFile), { recursive: true, mode: 0o700 });
     fs.appendFileSync(this.logFile, `${JSON.stringify(envelope)}\n`, { mode: 0o600 });
+    return true;
   }
 
   log() {
@@ -121,4 +141,4 @@ class DeviceRegistry {
   }
 }
 
-module.exports = { DeviceRegistry };
+module.exports = { DeviceRegistry, MAX_LOG_LINES };

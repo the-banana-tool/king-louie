@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { DeviceRegistry } = require('../src/frontdoor/device-registry');
+const { DeviceRegistry, MAX_LOG_LINES } = require('../src/frontdoor/device-registry');
 const { ApprovalCache, MAX_WAIT_MS: CACHE_MAX_WAIT_MS } = require('../src/frontdoor/approval-cache');
 const { Invites } = require('../src/frontdoor/invites');
 const { Mailbox, MAX_WAIT_MS: MAX_WAIT_MS_BOX } = require('../src/frontdoor/mailbox');
@@ -45,6 +45,21 @@ describe('DeviceRegistry', () => {
     reg.appendLog(a.enroll({ device: b.device() }));
     reg.appendLog(a.revoke(b.deviceId));
     assert.equal(reg.log().length, 2);
+  });
+
+  it('keeps one revocation per target and refuses entries past the cap', () => {
+    const reg = new DeviceRegistry({ file: registryFile() });
+    const a = createFakePhone();
+    const b = createFakePhone();
+    assert.equal(reg.appendLog(a.revoke(b.deviceId)), true);
+    assert.equal(reg.appendLog(a.revoke(b.deviceId)), false, 'a second revoke of the same device is not logged');
+    assert.equal(reg.appendLog(b.revoke(b.deviceId, { reason: 'other' })), false);
+    assert.equal(reg.log().length, 1);
+    const line = `${JSON.stringify(a.enroll({ device: b.device() }))}\n`;
+    fs.appendFileSync(reg.logFile, line.repeat(MAX_LOG_LINES - 1));
+    assert.equal(reg.log().length, MAX_LOG_LINES);
+    assert.throws(() => reg.appendLog(a.enroll({ device: b.device() })), (e) => e.code === 'log_full');
+    assert.equal(reg.log().length, MAX_LOG_LINES);
   });
 
   it('never lets an outside id become a key: bad device_id and node_id are refused, not stored', () => {
@@ -106,10 +121,47 @@ describe('ApprovalCache', () => {
   it('waitForChange clamps to MAX_WAIT_MS and never leaks its listener on timeout', async () => {
     assert.equal(CACHE_MAX_WAIT_MS, 25000);
     const cache = new ApprovalCache();
-    assert.equal(cache.listenerCount('change'), 0);
+    const listeners = cache.listenerCount('change');
+    assert.equal(cache.waiters.size, 0);
     const result = await cache.waitForChange(0, 20);
     assert.equal(result, 0);
-    assert.equal(cache.listenerCount('change'), 0);
+    assert.equal(cache.waiters.size, 0);
+    assert.equal(cache.listenerCount('change'), listeners);
+  });
+
+  it('parks any number of waits on one listener, wakes them all, and can release them', async () => {
+    const cache = new ApprovalCache();
+    const node = testNodeIdentity();
+    const warnings = [];
+    const onWarning = (w) => warnings.push(w);
+    process.on('warning', onWarning);
+    try {
+      const listeners = cache.listenerCount('change');
+      const parked = Array.from({ length: 30 }, () => cache.waitForChange(0, 5000));
+      assert.equal(cache.waiters.size, 30);
+      assert.equal(cache.listenerCount('change'), listeners);
+      cache.put(node.nodeId, m.buildRequest({ identity: node, action: m.toolAction('Bash', { command: 'ls' }, null) }).envelope);
+      assert.deepEqual(await Promise.all(parked), Array(30).fill(1));
+      assert.equal(cache.waiters.size, 0);
+      const more = [cache.waitForChange(1, 5000), cache.waitForChange(1, 5000)];
+      cache.releaseWaiters();
+      assert.deepEqual(await Promise.all(more), [1, 1]);
+      assert.equal(cache.waiters.size, 0);
+    } finally {
+      process.removeListener('warning', onWarning);
+    }
+    assert.deepEqual(warnings.filter((w) => w.name === 'MaxListenersExceededWarning'), []);
+  });
+
+  it('refuses a request id already held for another node', () => {
+    const cache = new ApprovalCache();
+    const node = testNodeIdentity();
+    const { envelope, message } = m.buildRequest({ identity: node, action: m.toolAction('Bash', { command: 'ls' }, null) });
+    cache.put(node.nodeId, envelope);
+    const other = testNodeIdentity('gpu-box');
+    const stolen = m.buildRequest({ identity: other, action: m.toolAction('Bash', { command: 'id' }, null), origin: { client: 'agent' }, requestId: message.request_id });
+    assert.throws(() => cache.put(other.nodeId, stolen.envelope), (e) => e.code === 'bad_request');
+    assert.equal(cache.get(message.request_id).node_id, node.nodeId);
   });
 });
 

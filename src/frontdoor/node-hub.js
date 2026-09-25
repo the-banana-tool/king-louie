@@ -16,6 +16,36 @@ const log = createLogger('frontdoor/node-hub');
 const NODE_NAME_RE = /^[A-Za-z0-9._-]{1,64}$/;
 // A `relay code` file is a few dozen bytes; anything much larger is not one.
 const MAX_CODE_FILE_BYTES = 4096;
+const OPEN_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0);
+
+// One open, one fstat, one bounded read, all on the same descriptor.
+function readCodeFile(file) {
+  let fd;
+  try {
+    fd = fs.openSync(file, OPEN_FLAGS);
+  } catch (err) {
+    throw new Error(err.code === 'ELOOP' ? 'a symlink' : 'unreadable');
+  }
+  try {
+    if (!fs.fstatSync(fd).isFile()) throw new Error('not a regular file');
+    const buf = Buffer.alloc(MAX_CODE_FILE_BYTES + 1);
+    let size = 0;
+    for (;;) {
+      const n = fs.readSync(fd, buf, size, buf.length - size, null);
+      if (n === 0) break;
+      size += n;
+      if (size > MAX_CODE_FILE_BYTES) throw new Error('too large');
+    }
+    try {
+      return JSON.parse(buf.subarray(0, size).toString('utf8')) || {};
+    } catch {
+      // Never the parser's own message: it quotes the file, i.e. the code.
+      throw new Error('unreadable');
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+}
 
 // A registry row is only trusted when its ids really derive from its key:
 // nodes.json lives in the service-writable data dir, and node_id is what
@@ -43,7 +73,13 @@ class NodeHub extends EventEmitter {
     this.handlers = new Map();
     this.rpcLink = createLinkRpc(transport);
     this.codeTimer = null;
+    this.warnedDirs = new Set();
     this._onChange = () => this._loadPeers();
+    this.pairing.admit = (remote, meta) => {
+      const reason = this._admitPairing(remote, meta);
+      if (reason) log.info(`pairing refused: ${reason}`);
+      return reason;
+    };
   }
 
   _loadRegistry() {
@@ -116,8 +152,10 @@ class NodeHub extends EventEmitter {
   }
 
   // `relay code <name>` drops { code, node_name, expires_at } files here.
-  // The directory is in the data dir, so every entry is untrusted: only
-  // small regular files are read, and a pairing code is never logged.
+  // The directory is in the data dir, so every entry is untrusted: a file is
+  // opened once (never through a symlink where the platform can refuse one),
+  // checked with fstat, and at most MAX_CODE_FILE_BYTES are read from that
+  // same descriptor. A pairing code is never logged.
   _pickUpCodes() {
     let names = [];
     try {
@@ -127,17 +165,24 @@ class NodeHub extends EventEmitter {
     }
     for (const name of names) {
       const file = path.join(this.codesDir, name);
+      let st;
       try {
-        const st = fs.lstatSync(file);
-        if (!st.isFile() || st.size > MAX_CODE_FILE_BYTES) throw new Error('not a small regular file');
-        let parsed;
-        try {
-          parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
-        } catch {
-          // Never the parser's own message: it quotes the file, i.e. the code.
-          throw new Error('unreadable');
+        st = fs.lstatSync(file);
+      } catch {
+        continue;
+      }
+      if (st.isDirectory()) {
+        // Left in place (removing someone's directory is not ours to do),
+        // and warned about once, not on every poll.
+        if (!this.warnedDirs.has(name)) {
+          this.warnedDirs.add(name);
+          log.warn('ignoring a directory in the pairing code folder');
         }
-        const { code, node_name: nodeName, expires_at: expiresAt } = parsed || {};
+        continue;
+      }
+      try {
+        if (!st.isFile()) throw new Error('not a regular file');
+        const { code, node_name: nodeName, expires_at: expiresAt } = readCodeFile(file);
         if (typeof code !== 'string' || !code.trim() || typeof nodeName !== 'string' || !NODE_NAME_RE.test(nodeName)) throw new Error('malformed');
         if (!(Date.parse(expiresAt) > Date.now())) throw new Error('expired');
         if (this.nodeByName(nodeName)) throw new Error(`a node named "${nodeName}" is already paired`);
@@ -145,35 +190,43 @@ class NodeHub extends EventEmitter {
       } catch (err) {
         log.warn(`ignoring a pairing code file: ${err.message}`);
       }
-      try { fs.rmSync(file, { force: true }); } catch { /* gone */ }
+      // Removes the entry itself (a symlink, never its target).
+      try { fs.unlinkSync(file); } catch { /* gone */ }
     }
+  }
+
+  // Why a proof-valid pairing must be refused, or null. Asked by MeshPairing
+  // before it trusts the peer or answers pair:accept.
+  _admitPairing(remote, meta) {
+    const nodeName = (meta && meta.nodeName) || remote.nodeName;
+    let nodeId;
+    try {
+      nodeId = deriveNodeId(remote.publicKey);
+      if (remote.peerId !== derivePeerId(remote.publicKey)) return 'bad_identity';
+    } catch {
+      return 'bad_identity';
+    }
+    if (typeof nodeName !== 'string' || !NODE_NAME_RE.test(nodeName)) return 'bad_node_name';
+    if (this.nodeByName(nodeName)) return 'name_taken';
+    if (this.nodeById(nodeId)) return 'already_paired';
+    return null;
   }
 
   _onPairingRequest(ws, msg) {
     const info = this.pairing.handlePairingRequest(ws, msg);
     if (!info) return;
     const nodeName = (info.meta && info.meta.nodeName) || info.nodeName;
-    let nodeId = null;
-    let problem = null;
-    try {
-      nodeId = deriveNodeId(info.publicKey);
-      if (info.peerId !== derivePeerId(info.publicKey)) problem = 'peer id does not derive from the key';
-    } catch {
-      problem = 'not an Ed25519 node key';
-    }
-    if (!problem && (typeof nodeName !== 'string' || !NODE_NAME_RE.test(nodeName))) problem = 'bad node name';
-    if (!problem && this.nodeByName(nodeName)) problem = 'name_taken';
-    if (!problem && this.nodeById(nodeId)) problem = 'this node is already paired under another name';
+    // admit() already ran before the reply; this re-check only guards a
+    // pairing object without the hook.
+    const problem = this._admitPairing(info, info.meta);
     if (problem) {
       log.warn(`pairing ignored: ${problem}`);
-      // MeshPairing already trusted the peer. Take that back, unless the
-      // peer id is a node that is already paired: then put its registered
-      // entry back rather than evicting it.
       const existing = this.nodeByPeer(info.peerId);
       if (existing) this._trust(existing);
       else this.transport.removeTrustedPeer(info.peerId);
       return;
     }
+    const nodeId = deriveNodeId(info.publicKey);
     this.registry.push({ node_id: nodeId, node_name: nodeName, public_key: info.publicKey, peer_id: info.peerId, tls_fingerprint: info.tlsFingerprint || null, paired_at: new Date().toISOString() });
     this._saveRegistry();
     log.info(`paired node ${nodeName} (${nodeId})`);

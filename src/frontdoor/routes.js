@@ -8,6 +8,8 @@ const { isConsoleEnrollment, sameEnvelope } = require('./node-methods');
 
 const NODE_NAME_RE = /^[A-Za-z0-9._-]{1,64}$/;
 const MAX_WAIT_S = 25;
+// Long polls one device may have parked at once; more answer 429 at once.
+const MAX_POLLS_PER_DEVICE = 2;
 // Node answers the relay records for a relayed enrollment or revocation (a
 // node reply never makes a device `active` here).
 const ENROLL_STATES = ['staged', 'rejected'];
@@ -27,8 +29,25 @@ function registerPhoneRoutes(relay) {
   const { phoneApi, nodeHub, approvals, devices, invites } = relay;
   const now = relay.now || Date.now;
   const lastSeen = new Map();
+  const polling = new Map();
 
   const activeNodes = (deviceId) => devices.nodesForDevice(deviceId).filter((n) => n.state === 'active').map((n) => n.node_id);
+  // Relay-wide powers (pairing codes, invites, enrolling or revoking
+  // devices, the device list) belong to a device that approves somewhere.
+  // One revoked or rejected everywhere (a stolen phone) keeps none of them.
+  const requireActive = (ctx) => {
+    const nodes = activeNodes(ctx.deviceId);
+    if (nodes.length === 0) throw new ApiError(403, 'forbidden', 'this device is not an approver on any node');
+    return nodes;
+  };
+  const appendLog = (envelope) => {
+    try {
+      return devices.appendLog(envelope);
+    } catch (err) {
+      if (err.code === 'log_full') throw new ApiError(503, 'log_full', err.message);
+      throw err;
+    }
+  };
   const toNode = async (nodeId, method, params) => {
     try {
       return await nodeHub.rpc(nodeId, method, params);
@@ -91,7 +110,18 @@ function registerPhoneRoutes(relay) {
     handler: async (req, ctx) => {
       const wait = Math.min(MAX_WAIT_S, Math.max(0, Number.parseInt(ctx.query.wait || '0', 10) || 0));
       const cursor = lastSeen.get(ctx.deviceId) || 0;
-      if (wait > 0 && approvals.seq <= cursor) await approvals.waitForChange(cursor, wait * 1000);
+      if (wait > 0 && approvals.seq <= cursor) {
+        const parked = polling.get(ctx.deviceId) || 0;
+        if (parked >= MAX_POLLS_PER_DEVICE) throw new ApiError(429, 'rate_limited', `at most ${MAX_POLLS_PER_DEVICE} long polls per device`);
+        polling.set(ctx.deviceId, parked + 1);
+        try {
+          await approvals.waitForChange(cursor, wait * 1000);
+        } finally {
+          const left = (polling.get(ctx.deviceId) || 1) - 1;
+          if (left > 0) polling.set(ctx.deviceId, left);
+          else polling.delete(ctx.deviceId);
+        }
+      }
       lastSeen.set(ctx.deviceId, approvals.seq);
       return { body: approvals.list(activeNodes(ctx.deviceId)).map(view) };
     }
@@ -121,7 +151,7 @@ function registerPhoneRoutes(relay) {
       const result = await toNode(entry.node_id, 'approval.response', { envelope: ctx.body });
       const accepted = result && result.accepted === true ? true : (result && result.accepted === false ? false : null);
       const reason = result && typeof result.reason === 'string' ? result.reason : null;
-      return { status: 202, body: { delivered: !(result && result.delivered === false), accepted, reason } };
+      return { status: 202, body: { delivered: Boolean(result && result.delivered === true), accepted, reason } };
     }
   });
 
@@ -138,7 +168,9 @@ function registerPhoneRoutes(relay) {
       const beforeSeq = Number.parseInt(ctx.query.before_seq, 10);
       if (Number.isInteger(beforeSeq)) params.before_seq = beforeSeq;
       const result = await toNode(ctx.params.node_id, 'audit.slice', params);
-      return { body: result && result.envelope };
+      const envelope = result && result.envelope;
+      if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) throw new ApiError(502, 'bad_node_answer', 'the node did not return a history slice');
+      return { body: envelope };
     }
   });
 
@@ -146,6 +178,7 @@ function registerPhoneRoutes(relay) {
   phoneApi.registerRoute('POST', '/v1/pairing-codes', {
     auth: 'device',
     handler: async (req, ctx) => {
+      requireActive(ctx);
       const nodeName = ctx.body && ctx.body.node_name;
       if (typeof nodeName !== 'string' || !NODE_NAME_RE.test(nodeName)) throw new ApiError(400, 'bad_node_name', 'node_name must be 1–64 of A–Z, a–z, 0–9, . _ -');
       return { body: nodeHub.addCode(nodeName) };
@@ -154,7 +187,10 @@ function registerPhoneRoutes(relay) {
 
   phoneApi.registerRoute('POST', '/v1/devices/invites', {
     auth: 'device',
-    handler: async (req, ctx) => ({ body: invites.createInvite(ctx.deviceId) })
+    handler: async (req, ctx) => {
+      requireActive(ctx);
+      return { body: invites.createInvite(ctx.deviceId) };
+    }
   });
 
   // Records a claim for the inviting phone to read. It registers nothing:
@@ -179,6 +215,7 @@ function registerPhoneRoutes(relay) {
   phoneApi.registerRoute('GET', '/v1/devices/invites/{id}', {
     auth: 'device',
     handler: async (req, ctx) => {
+      requireActive(ctx);
       try {
         return { body: { claim: invites.getClaim(ctx.params.id, ctx.deviceId) } };
       } catch (err) {
@@ -199,15 +236,16 @@ function registerPhoneRoutes(relay) {
       if (message.enrolled_by !== ctx.deviceId || ctx.body.kid !== ctx.deviceId || !verifyEs256(ctx.body, ctx.device.jwk)) {
         throw new ApiError(400, 'bad_enroll', 'the enrollment must be signed by the calling device');
       }
-      const signerNodes = activeNodes(ctx.deviceId);
-      if (signerNodes.length === 0) throw new ApiError(403, 'forbidden', 'this device is not an approver on any node');
+      const signerNodes = requireActive(ctx);
       const d = message.device;
+      // Logged first: a full log refuses the enrollment before anything is
+      // registered (the message was validated, so register cannot refuse it).
+      appendLog(ctx.body);
       try {
         devices.register({ device_id: d.device_id, jwk: d.public_key, name: d.name, platform: d.platform });
       } catch (err) {
         throw new ApiError(400, 'bad_device', err.message);
       }
-      devices.appendLog(ctx.body);
       const nodes = [];
       for (const nodeId of signerNodes) {
         let state = 'offline';
@@ -231,7 +269,10 @@ function registerPhoneRoutes(relay) {
       if (message.revoked_by !== ctx.deviceId || ctx.body.kid !== ctx.deviceId || !verifyEs256(ctx.body, ctx.device.jwk)) {
         throw new ApiError(400, 'bad_revoke', 'the revocation must be signed by the calling device');
       }
-      devices.appendLog(ctx.body);
+      requireActive(ctx);
+      // A second revocation of the same device is still forwarded but not
+      // logged again (appendLog keeps one per target).
+      appendLog(ctx.body);
       const nodes = [];
       for (const { node_id: nodeId } of devices.nodesForDevice(message.device_id)) {
         let state = 'offline';
@@ -250,9 +291,10 @@ function registerPhoneRoutes(relay) {
 
   phoneApi.registerRoute('GET', '/v1/devices', {
     auth: 'device',
-    handler: async () => ({
-      body: devices.list().map((d) => ({ device_id: d.device_id, name: d.name, platform: d.platform, nodes: devices.nodesForDevice(d.device_id) }))
-    })
+    handler: async (req, ctx) => {
+      requireActive(ctx);
+      return { body: devices.list().map((d) => ({ device_id: d.device_id, name: d.name, platform: d.platform, nodes: devices.nodesForDevice(d.device_id) })) };
+    }
   });
 
   phoneApi.registerRoute('PUT', '/v1/push-token', {
