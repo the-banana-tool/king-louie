@@ -117,6 +117,14 @@ function Set-KlAcl {
       # before the grants run.
       & $icacls $Path '/setowner' $Admins '/T' '/C'
       if ($LASTEXITCODE -ne 0) { throw "icacls /setowner failed on $Path (exit code $LASTEXITCODE)" }
+      # icacls's own exit code cannot be trusted here: assigning ownership to
+      # a SID the caller lacks the privilege for still exits 0. Read the
+      # owner back and verify it really is Administrators.
+      $ownerAccount = (Get-Acl -LiteralPath $Path).Owner
+      $ownerSid = ([Security.Principal.NTAccount] $ownerAccount).Translate([Security.Principal.SecurityIdentifier]).Value
+      if ($ownerSid -ne 'S-1-5-32-544') {
+        throw "icacls /setowner did not make Administrators the owner of $Path (owner is $ownerAccount, $ownerSid)"
+      }
       & $icacls "$Path\*" '/reset' '/T' '/C'
       if ($LASTEXITCODE -ne 0) { throw "icacls /reset failed on $Path (exit code $LASTEXITCODE)" }
     }

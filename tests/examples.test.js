@@ -444,6 +444,18 @@ describe('Windows ACL script', () => {
     }
   });
 
+  it('verifies the owner after /setowner instead of trusting its exit code', () => {
+    const t = text();
+    assert.match(t, /\(Get-Acl -LiteralPath \$Path\)\.Owner/);
+    assert.match(t, /\[Security\.Principal\.NTAccount\]\s*\$ownerAccount\)\.Translate\(\[Security\.Principal\.SecurityIdentifier\]\)/);
+    assert.match(t, /\$ownerSid -ne 'S-1-5-32-544'/);
+    // the verification must run between the /setowner and /reset calls
+    const setownerIdx = t.indexOf("'/setowner'");
+    const verifyIdx = t.indexOf('Get-Acl -LiteralPath $Path');
+    const resetIdx = t.indexOf("'/reset'");
+    assert.ok(setownerIdx < verifyIdx && verifyIdx < resetIdx, 'owner verification is not between /setowner and /reset');
+  });
+
   it('cuts inheritance on the two runner-writable data paths without resetting ownership', () => {
     const t = text();
     for (const target of ["'C:\\build\\site'", "'D:\\models'"]) {
