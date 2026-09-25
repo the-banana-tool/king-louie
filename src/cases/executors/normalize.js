@@ -35,6 +35,12 @@ function normalizePhone(address, defaultCountryCode) {
   if (/^\+\d{8,15}$/.test(s)) return { ok: true, value: s };
   const cc = String(defaultCountryCode || '').replace(/^\+/, '');
   if (/^\d+$/.test(s) && /^\d{1,3}$/.test(cc)) {
+    // Bare digits that already start with the default country code are
+    // ambiguous (is the leading digit the code, or part of the number?);
+    // refuse rather than guess by prepending it again.
+    if (s.startsWith(cc)) {
+      return { ok: false, error: `ambiguous "${raw}": write it in +E.164 form, e.g. "+${s}"` };
+    }
     const full = `+${cc}${s}`;
     if (/^\+\d{8,15}$/.test(full)) return { ok: true, value: full };
   }
@@ -60,6 +66,9 @@ function normalizeUrl(address) {
     return { ok: false, error: `"${raw}" is not an http(s) URL` };
   }
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return { ok: false, error: `"${raw}" is not an http(s) URL` };
+  // A trailing DNS root label ("example.com.") is the same host to any
+  // resolver but a different string to a naive allow-list; fold it away.
+  if (u.hostname.endsWith('.')) u.hostname = u.hostname.slice(0, -1);
   // URL lowercases the host and drops a default port.
   return { ok: true, value: u.origin };
 }
@@ -96,13 +105,35 @@ function phoneMatchers(value) {
   return [...forms].map(digitMatcher);
 }
 
+// Thousands-grouping styles other than the en-US comma: plain space, the two
+// "no-break" spaces some locales and typesetting use, a dot, and an
+// apostrophe (Swiss style).
+const GROUP_SEPARATORS = [' ', ' ', ' ', ' ', '.', "'"];
+
+function groupDigits(digits, sep) {
+  return digits.replace(/\B(?=(\d{3})+(?!\d))/g, sep);
+}
+
 function numberMatchers(n, unit) {
   if (!Number.isFinite(n)) return [];
   if (!unit && Number.isInteger(n) && Math.abs(n) < 100) return [];
   const forms = new Set([String(n), n.toLocaleString('en-US', { maximumFractionDigits: 20 })]);
-  if (MONEY_UNITS.test(String(unit || '')) || !Number.isInteger(n)) {
+  const hasFraction = !Number.isInteger(n);
+  if (MONEY_UNITS.test(String(unit || '')) || hasFraction) {
     forms.add(n.toFixed(2));
     forms.add(n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+  }
+  // Grouping only reads as grouping past three integer digits; below that,
+  // every separator would just repeat the bare digits already in `forms`.
+  const neg = n < 0 ? '-' : '';
+  const intPart = String(Math.trunc(Math.abs(n)));
+  if (intPart.length > 3) {
+    const fracDigits = hasFraction ? Math.abs(n).toFixed(2).split('.')[1] : null;
+    for (const sep of GROUP_SEPARATORS) {
+      const grouped = neg + groupDigits(intPart, sep);
+      forms.add(grouped);
+      if (fracDigits) forms.add(`${grouped},${fracDigits}`);
+    }
   }
   return [...forms].map((form) => ({
     kind: 'number',
@@ -112,7 +143,10 @@ function numberMatchers(n, unit) {
 }
 
 function wordMatcher(kind, form) {
-  const pattern = escapeRe(form).replace(/ /g, '\\s+');
+  // \s* (not \s+): the scanned text has already had invisible format
+  // characters deleted (foldForScan), so two words a sender split apart
+  // with a zero-width character now sit with nothing between them.
+  const pattern = escapeRe(form).replace(/ /g, '\\s*');
   return { kind, form, re: new RegExp(`(?<![\\p{L}\\p{N}])${pattern}(?![\\p{L}\\p{N}])`, 'giu') };
 }
 
@@ -159,10 +193,42 @@ function valueMatchers(value, unit = null) {
   return textMatchers(s);
 }
 
-// Every match of every matcher; where one span contains another only the
-// outer one is kept.
-function matchSpans(text, matchers) {
+// Unicode format characters: zero-width space/joiner, the BOM, and the
+// like. Invisible on screen, but they defeat a literal-text search by
+// splitting a flagged phrase or number apart, so the scan drops them.
+const FORMAT_CHAR = /\p{Cf}/gu;
+
+// Folds `text` for scanning (NFKC per source character, then format
+// characters dropped) while keeping a map from each folded UTF-16 unit back to the
+// [start, end) span of the original character that produced it. NFKC runs
+// per character, not over the whole string, so composition never merges
+// what were two distinct source characters into one mapped position.
+function foldForScan(text) {
   const s = String(text ?? '');
+  let folded = '';
+  const starts = [];
+  const ends = [];
+  let i = 0;
+  while (i < s.length) {
+    const ch = String.fromCodePoint(s.codePointAt(i));
+    const origStart = i;
+    i += ch.length;
+    const piece = ch.normalize('NFKC').replace(FORMAT_CHAR, '');
+    for (let k = 0; k < piece.length; k += 1) {
+      folded += piece[k];
+      starts.push(origStart);
+      ends.push(i);
+    }
+  }
+  return { folded, starts, ends };
+}
+
+// Every match of every matcher, scanned against the folded text but
+// reported as the original span and substring; where one span contains
+// another only the outer one is kept.
+function matchSpans(text, matchers) {
+  const orig = String(text ?? '');
+  const { folded: s, starts, ends } = foldForScan(orig);
   const found = [];
   for (const m of matchers) {
     m.re.lastIndex = 0;
@@ -172,7 +238,9 @@ function matchSpans(text, matchers) {
         m.re.lastIndex += 1;
         continue;
       }
-      found.push({ start: hit.index, end: hit.index + hit[0].length, text: hit[0] });
+      const start = starts[hit.index];
+      const end = ends[hit.index + hit[0].length - 1];
+      found.push({ start, end, text: orig.slice(start, end) });
     }
   }
   found.sort((a, b) => a.start - b.start || b.end - a.end);

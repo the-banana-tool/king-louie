@@ -19,6 +19,15 @@ describe('normalizeRecipient', () => {
     assert.strictEqual(normalizeRecipient('+12', { channel: 'call' }).ok, false);
   });
 
+  it('refuses as ambiguous rather than guessing when bare digits already start with the country code', () => {
+    assert.deepStrictEqual(normalizeRecipient('15550100', { channel: 'call', defaultCountryCode: '1' }), {
+      ok: false,
+      error: 'ambiguous "15550100": write it in +E.164 form, e.g. "+15550100"'
+    });
+    // Doesn't start with the country code: still gets prefixed.
+    assert.deepStrictEqual(normalizeRecipient('5550100', { channel: 'call', defaultCountryCode: '1' }), { ok: true, value: '+15550100' });
+  });
+
   it('lowercases the email domain and refuses non-addresses', () => {
     assert.deepStrictEqual(normalizeRecipient(' Clerk@Records.Example.org ', { channel: 'email' }), { ok: true, value: 'Clerk@records.example.org' });
     assert.deepStrictEqual(normalizeRecipient('nobody', { channel: 'email' }), { ok: false, error: '"nobody" is not an email address' });
@@ -28,6 +37,7 @@ describe('normalizeRecipient', () => {
     assert.deepStrictEqual(normalizeRecipient('HTTPS://Permits.Example.com:443/apply?x=1', { channel: 'web-form' }), { ok: true, value: 'https://permits.example.com' });
     assert.deepStrictEqual(normalizeRecipient('http://permits.example.com:8080/a', { channel: 'url' }), { ok: true, value: 'http://permits.example.com:8080' });
     assert.deepStrictEqual(normalizeRecipient('ftp://permits.example.com', { channel: 'url' }), { ok: false, error: '"ftp://permits.example.com" is not an http(s) URL' });
+    assert.deepStrictEqual(normalizeRecipient('https://permits.example.com./apply', { channel: 'url' }), { ok: true, value: 'https://permits.example.com' });
   });
 
   it('picks the channel from an executor\'s capabilities', () => {
@@ -72,6 +82,34 @@ describe('value forms', () => {
   it('finds an email case-insensitively and walks array values', () => {
     assert.deepStrictEqual(spans('clerk@records.example.org', null, 'Write to Clerk@Records.Example.org.'), ['Clerk@Records.Example.org']);
     assert.deepStrictEqual(spans(['Lakeside Lot', 1250000], 'USD', 'Lakeside lot at $1,250,000'), ['Lakeside lot', '1,250,000']);
+  });
+
+  it('finds grouped numbers written with alternate separators and comma-decimal cents', () => {
+    const text = "Wire 1.250,50 then 1 250,50 then 1 250,50 then 1 250,50 then 1 250,50 then 1'250,50 done";
+    assert.deepStrictEqual(spans(1250.5, 'USD', text), [
+      '1.250,50', '1 250,50', '1 250,50', '1 250,50', '1 250,50', "1'250,50"
+    ]);
+    // A form built from an unrelated grouping separator must not match a plain decimal elsewhere.
+    assert.deepStrictEqual(spans(1250.5, 'USD', 'The rate is 1.25 percent'), []);
+  });
+
+  it('folds full-width and invisible characters in the scanned text, mapping spans back to the original', () => {
+    const fullWidthPhone = '５５５－０１００'; // "555-0100"
+    assert.deepStrictEqual(spans('+15550100', null, `Call ${fullWidthPhone} today`), [fullWidthPhone]);
+
+    const zwspLot = 'lakeside​lot'; // zero-width space hides the word break
+    assert.deepStrictEqual(spans('Lakeside Lot', null, `The ${zwspLot} is for sale`), [zwspLot]);
+
+    const fullWidthAmount = '１，２５０'; // "1,250"
+    assert.deepStrictEqual(spans('$1,250', null, `Offer ${fullWidthAmount} now`), [fullWidthAmount]);
+
+    const fullWidthDate = '２０２６－１１－１４'; // "2026-11-14"
+    assert.deepStrictEqual(spans('2026-11-14', null, `Due ${fullWidthDate}.`), [fullWidthDate]);
+
+    // The "fi" ligature expands to two characters under NFKC, so this also
+    // checks that a span maps back correctly when folding changes length.
+    const ligatureOffice = 'ofﬁce lot'; // NFKC-folds to "office lot"
+    assert.deepStrictEqual(spans('Office Lot', null, `Visit the ${ligatureOffice} today`), [ligatureOffice]);
   });
 });
 
