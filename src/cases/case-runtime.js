@@ -20,9 +20,15 @@ const { QuestionStore } = require('./questions');
 const { detectTriggers, emptyBaseline, underminedKeys } = require('./triggers');
 const { readJson, writeJsonIfChanged } = require('./jsonfile');
 const { resolveCaseSettings } = require('./defaults');
+const { resolveRole } = require('./roles');
+// Registers the direction and budget-grant answer handlers.
+require('./answer-handlers');
 const { createLogger } = require('../logging');
 
 const log = createLogger('cases/runtime');
+
+const BUDGET_FACT_NOTE = "Budget limits change only through the owner's answer or the Grant button.";
+const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 class CaseBusyError extends Error {
   constructor(title, { pid, lockPath } = {}) {
@@ -862,6 +868,220 @@ class CaseRuntime {
       if (turn.source === 'wakeup' && typeof turn.abort === 'function') turn.abort(reason);
     }
   }
+
+  // ---- Owner facts, answers and failure reports (spec §3.4, §3.9) ----
+
+  // Runs after every successful `user` fact. Only host-written sources
+  // (question, owner-action) can change a budget limit.
+  applyOwnerFact(id, fact, { questionId = null } = {}) {
+    if (!fact || fact.provenance !== 'user' || (fact.status && fact.status !== 'active')) return { applied: false };
+    const meta = this.getCase(id);
+    if (fact.subject === 'direction' && meta.status === 'needs-direction') {
+      try {
+        this.setStatus(meta.id, 'active', { kind: 'direction', ref: fact.id });
+        return { applied: 'direction' };
+      } catch (err) {
+        if (err.code !== 'BUDGET_EXHAUSTED') throw err;
+        const category = this.budget(meta.id).exhausted()[0];
+        this.setStatus(meta.id, 'paused', { kind: 'budget', ref: category, note: err.message });
+        const qid = questionId || (fact.source?.kind === 'question' ? fact.source.ref : null);
+        if (qid) {
+          try {
+            this.questions(meta.id).note(qid, err.message);
+          } catch (e) {
+            log.warn(`Could not note the budget refusal on ${qid}: ${e.message}`);
+          }
+        }
+        this.onCrossings(meta.id, category, [100]);
+        return { applied: false, error: err.message };
+      }
+    }
+    if (fact.subject === 'budget' && CATEGORIES.includes(fact.attr)) {
+      if (!['question', 'owner-action'].includes(fact.source?.kind)) return { applied: false, note: BUDGET_FACT_NOTE };
+      let value = null;
+      if (fact.attr === 'deadline') {
+        value = typeof fact.value === 'string' && DAY_PATTERN.test(fact.value) ? fact.value : null;
+      } else {
+        const n = Number(fact.value);
+        value = Number.isFinite(n) && n > 0 ? n : null;
+      }
+      if (value === null) {
+        return { applied: false, note: `A ${fact.attr} limit must be ${fact.attr === 'deadline' ? 'a YYYY-MM-DD date' : 'a number above 0'}.` };
+      }
+      const current = meta.budget && typeof meta.budget === 'object' ? meta.budget : {};
+      this.store.updateMeta(meta.id, { budget: { ...current, [fact.attr]: value } });
+      const budget = this.budget(meta.id);
+      budget.recordGrant(fact.attr, fact.id);
+      for (const [category, crossed] of Object.entries(budget.reconcile())) this.onCrossings(meta.id, category, crossed);
+      if (fact.attr === 'deadline') this.wakeups(meta.id).ensure('deadline-check', { every: 86400000, payload: { key: 'deadline' } });
+      this._notify('case:changed', { caseId: meta.id, what: 'budget' });
+      const after = this.getCase(meta.id);
+      if (after.status === 'paused' && after.statusReason?.kind === 'budget' && !budget.exhausted().length) {
+        this.setStatus(meta.id, 'active', { kind: 'budget-grant', ref: fact.id });
+        return { applied: 'budget', resumed: true };
+      }
+      return { applied: 'budget', resumed: false };
+    }
+    return { applied: false };
+  }
+
+  // Every host path that answers a question comes through here (program §4.3).
+  async answerQuestion(caseId, questionId, { channel = 'in-app', text = null, optionId = null } = {}) {
+    return this.systemAction(caseId, `answer ${questionId}`, async (meta) => {
+      const store = this.questions(meta.id);
+      const question = store.answer(questionId, { channel, text, optionId });
+      const fact = question.answer?.factId ? new FactLedger(meta.dir).view().facts.get(question.answer.factId) || null : null;
+      const handler = QuestionStore.answerHandler(question.payload?.type);
+      let effect = null;
+      if (handler?.onAnswered) effect = await handler.onAnswered(question, fact, { runtime: this, caseId: meta.id });
+      else if (fact) effect = this.applyOwnerFact(meta.id, fact, { questionId });
+      if (question.kind !== 'briefing') {
+        this.wakeups(meta.id).ensure('retry', {
+          at: this.now().toISOString(),
+          payload: { key: `answered:${questionId}`, questionId }
+        });
+      }
+      this._notify('case:changed', { caseId: meta.id, what: 'questions', questionId });
+      return { question: store.get(questionId) || question, fact, effect };
+    });
+  }
+
+  async acknowledgeBriefing(caseId, questionId, { channel = 'in-app' } = {}) {
+    return this.systemAction(caseId, `acknowledge ${questionId}`, async (meta) => {
+      const question = this.questions(meta.id).acknowledge(questionId, { channel });
+      this._notify('case:changed', { caseId: meta.id, what: 'questions', questionId });
+      return question;
+    });
+  }
+
+  // What the Fail tool records (spec §3.4): the report, the one allowed
+  // recommendation, needs-direction, and a high direction question.
+  recordFailure(id, { failureClass, what, tried = [], why, unknowns = [], recommendation = null, turnId = null }) {
+    const meta = this.getCase(id);
+    const { facts } = new FactLedger(meta.dir).view();
+    const claims = Array.isArray(recommendation?.claims) ? recommendation.claims : [];
+    const body = [
+      `# Failure report — ${oneLine(what, 120)}`,
+      '',
+      `Class: ${failureClass}`,
+      '',
+      'Tried:',
+      ...tried.map((t) => `- ${t}`),
+      '',
+      `Why: ${why}`,
+      '',
+      'Unknowns:',
+      ...(unknowns.length ? unknowns.map((fid) => `- ${fid}${facts.get(fid) ? ` ${facts.get(fid).stmt}` : ''}`) : ['- none']),
+      '',
+      'Recommendation:',
+      ...(claims.length ? claims.map((c) => `- ${c.text}${c.factIds?.length ? ` [${c.factIds.join(', ')}]` : ''}`) : ['none']),
+      '',
+      "Waiting for the owner's direction."
+    ].join('\n');
+    const records = new CaseRecords(meta.dir);
+    const journal = records.writeJournal('failure', body, this.now());
+    if (claims.length) {
+      new FactLedger(meta.dir).markLoadBearing([...new Set(claims.flatMap((c) => c.factIds || []))]);
+      records.recordRecommendation({ turnId, claims, unknowns, failure: journal });
+    }
+    this.setStatus(meta.id, 'needs-direction', { kind: 'failure', ref: journal, failureClass });
+    const question = this.createQuestion(meta.id, {
+      kind: 'question',
+      urgency: 'high',
+      text: `${meta.title}: "${oneLine(what, 200)}" did not work (${journal}). How should the case proceed?`,
+      payload: {
+        type: 'direction',
+        failure: journal,
+        about: { subject: 'direction', attr: path.basename(journal, '.md') },
+        mcpAnswerable: false
+      }
+    }, { charge: false });
+    return { journal, rendered: body, questionId: question.id };
+  }
+
+  // The Grant button (IPC case:grantBudget). The caller validates the limit.
+  async grantBudget(id, category, limit, { channel = 'in-app' } = {}) {
+    return this.systemAction(id, `grant ${category}`, async (meta) => {
+      const at = this.now().toISOString();
+      const fact = new FactLedger(meta.dir).assert({
+        stmt: `Owner set the ${category} budget to ${limit} from the case panel.`,
+        subject: 'budget',
+        attr: category,
+        value: limit,
+        provenance: 'user',
+        source: { kind: 'owner-action', ref: 'grant-budget', channel, at },
+        addedBy: 'owner-action'
+      });
+      const effect = this.applyOwnerFact(meta.id, fact);
+      return { fact, effect, case: this.getCase(meta.id) };
+    });
+  }
+
+  // ---- Model roles (spec §3.8) ----
+
+  roleModel(id, role) {
+    const meta = this.getCase(id);
+    let settings = {};
+    try {
+      settings = this.getSettings() || {};
+    } catch (err) {
+      log.warn(`Reading settings for role ${role} failed: ${err.message}`);
+    }
+    const hasToken = (provider) => {
+      if (typeof this.host?.hasProviderToken !== 'function') return true;
+      try {
+        return Boolean(this.host.hasProviderToken(provider));
+      } catch {
+        return false;
+      }
+    };
+    return resolveRole(role, { settings: { ...settings, cases: this.settings() }, caseMeta: meta, hasToken });
+  }
+
+  // A provider-shaped object whose every call goes through
+  // routeWithFallback with an explicit target, so case calls fail over and
+  // are charged like any other (spec §3.8).
+  routedProvider(turn, spec = {}) {
+    const router = this.host?.inferenceRouter;
+    if (!router || typeof router.routeWithFallback !== 'function') {
+      throw new Error('Routed providers need a host with an inference router.');
+    }
+    const resolved = spec.role
+      ? this.roleModel(turn.caseId, spec.role)
+      : { provider: spec.target?.provider, model: spec.target?.model || '', tier: spec.tier || 'standard' };
+    if (!resolved.provider) throw new Error('A routed provider needs a role or a target provider.');
+    const tier = resolved.tier || 'standard';
+    const target = { provider: String(resolved.provider).toLowerCase(), model: resolved.model || '' };
+    let refreshed = null;
+    // Once per provider object: resolveInference refreshes an OAuth token.
+    const refresh = () => {
+      if (!refreshed) {
+        refreshed = Promise.resolve()
+          .then(() => (typeof this.host.resolveInference === 'function'
+            ? this.host.resolveInference({ provider: target.provider, model: target.model || undefined, tier })
+            : null))
+          .catch((err) => log.warn(`Refreshing ${target.provider} before a case call failed: ${err.message}`));
+      }
+      return refreshed;
+    };
+    const call = async (messages, opts = {}, tools = null, onChunk = null) => {
+      await refresh();
+      return router.routeWithFallback(tier, messages, {
+        ...(opts || {}),
+        ...(Array.isArray(tools) ? { tools } : {}),
+        ...(typeof onChunk === 'function' ? { onChunk } : {}),
+        ...(!opts?.abortSignal && turn.signal ? { abortSignal: turn.signal } : {}),
+        target
+      });
+    };
+    return {
+      getProviderName: () => target.provider,
+      getDefaultModel: () => target.model,
+      sendMessage: (messages, opts) => call(messages, opts),
+      sendMessageWithTools: (messages, tools, opts) => call(messages, opts, tools),
+      streamMessageWithTools: (messages, tools, opts, onChunk) => call(messages, opts, tools, onChunk)
+    };
+  }
 }
 
-module.exports = { CaseRuntime, CaseBusyError, CaseNotFoundError, resolveCasesRoot };
+module.exports = { CaseRuntime, CaseBusyError, CaseNotFoundError, resolveCasesRoot, BUDGET_FACT_NOTE };

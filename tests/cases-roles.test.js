@@ -75,3 +75,48 @@ describe('resolveRole', () => {
     assert.deepStrictEqual(NO_RETRY.plan(new Error('503')), { action: 'abort', reason: 'routed', waitMs: 0 });
   });
 });
+
+describe('roleModel and routedProvider', () => {
+  const { after } = require('node:test');
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const { CaseRuntime } = require('../src/cases');
+  const roots = [];
+  after(() => { for (const d of roots) fs.rmSync(d, { recursive: true, force: true }); });
+  const root = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-roles-')); roots.push(d); return d; };
+
+  it('roleModel prefers case.yaml roles over settings', async () => {
+    const rt = new CaseRuntime({ root: root(), getSettings: () => ({ ...settings(), cases: { roles: { judge: { tier: 'standard' } } } }) });
+    const info = await rt.createCase({ title: 'Lakeside lot' });
+    assert.deepStrictEqual(rt.roleModel(info.id, 'judge'), { provider: 'openai', model: 'gpt-4o-mini', tier: 'standard' });
+    rt.store.updateMeta(info.id, { roles: { judge: { provider: 'gemini', model: 'gemini-2.0-pro' } } });
+    assert.deepStrictEqual(rt.roleModel(info.id, 'judge'), { provider: 'gemini', model: 'gemini-2.0-pro', tier: 'standard' });
+  });
+
+  it('routedProvider sends every call through routeWithFallback with the target, refreshing the token once', async () => {
+    const calls = [];
+    const router = { routeWithFallback: async (tier, messages, opts) => { calls.push({ tier, opts }); return { type: 'text', content: 'ok' }; } };
+    const host = { inferenceRouter: router, resolveInference: async (sel) => { calls.push({ resolve: sel }); } };
+    const rt = new CaseRuntime({ root: root(), getSettings: () => settings(), host });
+    const info = await rt.createCase({ title: 'Lakeside lot' });
+    const controller = new AbortController();
+    const turn = { caseId: info.id, turnId: 't1', signal: controller.signal };
+    const orient = rt.routedProvider(turn, { role: 'orient' });
+    assert.deepStrictEqual([orient.getProviderName(), orient.getDefaultModel()], ['groq', 'llama-3.3-70b-versatile']);
+    await orient.sendMessage([{ role: 'user', content: 'x' }], { systemPrompt: 'S' });
+    await orient.streamMessageWithTools([], [{ name: 'Read' }], {}, () => {});
+    assert.strictEqual(calls.filter((c) => c.resolve).length, 1);
+    assert.deepStrictEqual(calls[0], { resolve: { provider: 'groq', model: 'llama-3.3-70b-versatile', tier: 'fast' } });
+    assert.strictEqual(calls[1].tier, 'fast');
+    assert.deepStrictEqual(calls[1].opts.target, { provider: 'groq', model: 'llama-3.3-70b-versatile' });
+    assert.strictEqual(calls[1].opts.systemPrompt, 'S');
+    assert.strictEqual(calls[1].opts.abortSignal, controller.signal);
+    assert.deepStrictEqual(calls[2].opts.tools, [{ name: 'Read' }]);
+    assert.strictEqual(typeof calls[2].opts.onChunk, 'function');
+    const owner = rt.routedProvider(turn, { target: { provider: 'OpenAI', model: 'gpt-4o' }, tier: 'smart' });
+    await owner.sendMessageWithTools([], [{ name: 'Ledger' }], {});
+    assert.deepStrictEqual([calls.at(-1).tier, calls.at(-1).opts.target], ['smart', { provider: 'openai', model: 'gpt-4o' }]);
+    assert.throws(() => new CaseRuntime({ root: root() }).routedProvider(turn, { role: 'judge' }), /inference router/);
+  });
+});

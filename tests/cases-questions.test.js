@@ -244,3 +244,154 @@ describe('briefings, deliveries, expiry and closing', () => {
     assert.throws(() => s.answer(q.id, { channel: 'in-app', text: 'late' }), code('ALREADY_ANSWERED'));
   });
 });
+
+describe('answers through the runtime', () => {
+  const { CaseRuntime } = require('../src/cases');
+  const git = require('../src/cases/git');
+
+  function runtime() {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-answers-'));
+    dirs.push(root);
+    const events = [];
+    const rt = new CaseRuntime({
+      root,
+      now: () => T0,
+      getSettings: () => ({ cases: { timeZone: 'UTC' } }),
+      host: { notify: (e, p) => events.push([e, p]), interactive: () => true }
+    });
+    return { rt, events };
+  }
+
+  async function activeCase(rt, title = 'Lakeside lot') {
+    const info = await rt.createCase({ title, objective: 'Convert the lot to cash' });
+    rt.brief(info.id).update('why', 'Need the cash', { provenance: 'user' });
+    rt.brief(info.id).append('successCriteria', 'Closed by year end', { provenance: 'model' });
+    rt.completeGating(info.id);
+    return rt.getCase(info.id);
+  }
+
+  const report = { failureClass: 'dead-end', what: 'County listing', tried: ['Listed on the county site'], why: 'No buyers replied in 60 days', unknowns: [] };
+
+  it('answerQuestion writes the fact, registers a retry wake-up, notifies, commits, and refuses a second answer', async () => {
+    const { rt, events } = runtime();
+    const c = await activeCase(rt);
+    const q = rt.createQuestion(c.id, { kind: 'question', text: 'Is the well shared?', urgency: 'normal' });
+    const out = await rt.answerQuestion(c.id, q.id, { channel: 'in-app', text: 'Yes, with the north lot' });
+    assert.strictEqual(out.fact.source.kind, 'question');
+    assert.strictEqual(out.question.answer.factId, out.fact.id);
+    assert.deepStrictEqual(out.effect, { applied: false });
+    const retry = rt.wakeups(c.id).list().find((w) => w.kind === 'retry');
+    assert.deepStrictEqual(retry.payload, { key: `answered:${q.id}`, questionId: q.id });
+    assert.strictEqual(retry.nextAt, T0.toISOString());
+    assert.ok(events.some(([e, p]) => e === 'case:changed' && p.what === 'questions' && p.questionId === q.id));
+    assert.strictEqual(await git.isDirty(c.dir), false, 'systemAction committed the answer');
+    await assert.rejects(rt.answerQuestion(c.id, q.id, { channel: 'in-app', text: 'No' }), (err) => err.code === 'ALREADY_ANSWERED');
+    assert.strictEqual(rt.ledger(c.id).query({ subject: 'question' }).length, 1);
+  });
+
+  it('recordFailure writes the report, waits for direction, and asks a high direction question', async () => {
+    const { rt } = runtime();
+    const c = await activeCase(rt);
+    const f = rt.ledger(c.id).assert({ stmt: 'An auction house takes rural lots', subject: 'market', attr: 'auction', value: 'yes', source: { kind: 'url', ref: 'https://auctions.example.com/rural' } });
+    const failure = rt.recordFailure(c.id, { ...report, recommendation: { claims: [{ text: 'Try an auction house', factIds: [f.id] }] }, turnId: 't1' });
+    assert.strictEqual(failure.journal, 'journal/2026-09-23-1200-failure.md');
+    assert.match(failure.rendered, /^# Failure report — County listing\n\nClass: dead-end\n\nTried:\n- Listed on the county site\n\nWhy: No buyers replied in 60 days\n\nUnknowns:\n- none\n\nRecommendation:\n- Try an auction house \[f-0001\]\n\nWaiting for the owner's direction\.$/);
+    const meta = rt.getCase(c.id);
+    assert.deepStrictEqual([meta.status, meta.statusReason.kind, meta.statusReason.ref, meta.statusReason.failureClass], ['needs-direction', 'failure', failure.journal, 'dead-end']);
+    const q = rt.questions(c.id).get(failure.questionId);
+    assert.deepStrictEqual([q.urgency, q.payload.type, q.payload.mcpAnswerable, q.payload.failure], ['high', 'direction', false, failure.journal]);
+    const recs = fs.readFileSync(path.join(c.dir, '.kl', 'recommendations.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    assert.strictEqual(recs.at(-1).failure, failure.journal);
+    assert.strictEqual(rt.ledger(c.id).view().facts.get(f.id).loadBearing, true);
+  });
+
+  it('a direction answer resumes the case', async () => {
+    const { rt } = runtime();
+    const c = await activeCase(rt);
+    const failure = rt.recordFailure(c.id, report);
+    const out = await rt.answerQuestion(c.id, failure.questionId, { channel: 'in-app', text: 'Try a land auction instead' });
+    assert.deepStrictEqual([out.fact.subject, out.fact.attr], ['direction', '2026-09-23-1200-failure']);
+    assert.deepStrictEqual(out.effect, { applied: 'direction' });
+    const meta = rt.getCase(c.id);
+    assert.deepStrictEqual([meta.status, meta.statusReason.kind, meta.statusReason.ref], ['active', 'direction', out.fact.id]);
+  });
+
+  it('a direction answer while usd is spent leaves the case paused and notes why on the question', async () => {
+    const { rt } = runtime();
+    const c = await activeCase(rt);
+    const failure = rt.recordFailure(c.id, report);
+    rt.store.updateMeta(c.id, { budget: { usd: 1 } });
+    rt.budget(c.id).charge('usd', 1);
+    const out = await rt.answerQuestion(c.id, failure.questionId, { channel: 'in-app', text: 'Go ahead with the auction' });
+    assert.strictEqual(out.effect.applied, false);
+    assert.deepStrictEqual([rt.getCase(c.id).status, rt.getCase(c.id).statusReason.kind], ['paused', 'budget']);
+    assert.strictEqual(rt.questions(c.id).get(failure.questionId).notes[0].text, 'Raise the usd budget first.');
+    assert.ok(rt.questions(c.id).open().some((q) => q.payload.type === 'budget-grant'));
+  });
+
+  it('a budget-grant answer with a number above spend resumes; a reply without one keeps the case paused', async () => {
+    const { rt } = runtime();
+    const c = await activeCase(rt);
+    rt.store.updateMeta(c.id, { budget: { usd: 1 } });
+    rt.onCrossings(c.id, 'usd', rt.budget(c.id).charge('usd', 1.2).crossedNow);
+    const first = rt.questions(c.id).open().find((q) => q.payload.type === 'budget-grant');
+    const reply = await rt.answerQuestion(c.id, first.id, { channel: 'in-app', text: 'sure, go on' });
+    assert.deepStrictEqual([reply.fact.attr, reply.fact.value], ['usd-reply', 'sure, go on']);
+    assert.deepStrictEqual(reply.effect, { applied: false, reason: 'no-limit' });
+    assert.strictEqual(rt.getCase(c.id).status, 'paused');
+    assert.ok(fs.readdirSync(path.join(c.dir, 'journal')).some((n) => /-question(-\d+)?\.md$/.test(n)
+      && /no usable usd limit, so the case stays paused/.test(fs.readFileSync(path.join(c.dir, 'journal', n), 'utf8'))));
+
+    const again = rt.onCrossings(c.id, 'usd', [100]);
+    const grant = await rt.answerQuestion(c.id, again.id, { channel: 'in-app', text: 'Make it 2 dollars' });
+    assert.deepStrictEqual([grant.fact.subject, grant.fact.attr, grant.fact.value], ['budget', 'usd', 2]);
+    assert.deepStrictEqual(grant.effect, { applied: 'budget', resumed: true });
+    const meta = rt.getCase(c.id);
+    assert.deepStrictEqual([meta.status, meta.statusReason.kind, meta.budget.usd], ['active', 'budget-grant', 2]);
+    assert.deepStrictEqual(rt.budget(c.id).status().usd.grantedBy, [grant.fact.id]);
+  });
+
+  it('a budget fact quoted from chat changes no limit', async () => {
+    const { rt } = runtime();
+    const c = await activeCase(rt);
+    const fact = rt.ledger(c.id).assert({ stmt: 'Owner said ok', subject: 'budget', attr: 'usd', value: 500, provenance: 'user', source: { kind: 'user-message', ref: 't1', quote: 'ok' } });
+    assert.deepStrictEqual(rt.applyOwnerFact(c.id, fact), { applied: false, note: "Budget limits change only through the owner's answer or the Grant button." });
+    assert.strictEqual(rt.getCase(c.id).budget, undefined);
+  });
+
+  it('grantBudget writes an owner-action fact and resumes a budget pause', async () => {
+    const { rt } = runtime();
+    const c = await activeCase(rt);
+    rt.store.updateMeta(c.id, { budget: { usd: 1 } });
+    rt.onCrossings(c.id, 'usd', rt.budget(c.id).charge('usd', 1).crossedNow);
+    const out = await rt.grantBudget(c.id, 'usd', 5);
+    assert.deepStrictEqual([out.fact.provenance, out.fact.source.kind, out.fact.value], ['user', 'owner-action', 5]);
+    assert.deepStrictEqual([out.case.status, out.case.budget.usd], ['active', 5]);
+    const deadline = await rt.grantBudget(c.id, 'deadline', '2099-12-31');
+    assert.strictEqual(deadline.case.budget.deadline, '2099-12-31');
+    assert.ok(rt.wakeups(c.id).list().some((w) => w.kind === 'deadline-check'));
+  });
+
+  it('acknowledgeBriefing dismisses a briefing without a fact or a wake-up', async () => {
+    const { rt } = runtime();
+    const c = await activeCase(rt);
+    const b = rt.createQuestion(c.id, { kind: 'briefing', text: 'The listing went live.', urgency: 'low' });
+    const acked = await rt.acknowledgeBriefing(c.id, b.id);
+    assert.strictEqual(acked.answer.channel, 'in-app');
+    assert.strictEqual(rt.ledger(c.id).query({}).length, 0);
+    assert.ok(!rt.wakeups(c.id).list().some((w) => w.kind === 'retry'));
+  });
+
+  it('a budget grant on a case the owner paused raises the limit but leaves the case paused with its owner reason', async () => {
+    const { rt } = runtime();
+    const c = await activeCase(rt);
+    rt.setStatus(c.id, 'paused', { kind: 'owner', by: 'owner' });
+    rt.store.updateMeta(c.id, { budget: { usd: 1 } });
+    rt.budget(c.id).charge('usd', 1.5);
+    const out = await rt.grantBudget(c.id, 'usd', 5);
+    assert.deepStrictEqual([out.fact.subject, out.fact.attr, out.fact.value], ['budget', 'usd', 5]);
+    assert.deepStrictEqual(out.effect, { applied: 'budget', resumed: false });
+    const meta = rt.getCase(c.id);
+    assert.deepStrictEqual([meta.status, meta.statusReason.kind, meta.budget.usd], ['paused', 'owner', 5]);
+  });
+});
