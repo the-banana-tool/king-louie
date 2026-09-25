@@ -63,6 +63,18 @@ describe('setStatus', () => {
     assert.throws(() => rt.setStatus(c.id, 'active', { kind: 'budget-grant' }), /budget pause/);
   });
 
+  it('refuses a missing or unknown kind before checking the transition, so an omitted kind cannot slip through the budget-grant row', async () => {
+    const { rt } = makeRuntime();
+    const c = await activeCase(rt);
+    const badKind = (err) => err instanceof StatusError && err.code === 'BAD_KIND';
+    assert.throws(() => rt.setStatus(c.id, 'active'), badKind);
+    assert.throws(() => rt.setStatus(c.id, 'active', {}), badKind);
+    assert.throws(() => rt.setStatus(c.id, 'active', { kind: 'not-a-real-kind' }), badKind);
+    rt.setStatus(c.id, 'paused', { kind: 'owner', by: 'owner' });
+    assert.throws(() => rt.setStatus(c.id, 'active'), badKind, 'an owner pause is not lifted by an omitted kind');
+    assert.strictEqual(rt.getCase(c.id).status, 'paused');
+  });
+
   it('refuses every path to active while usd is at 100 %', async () => {
     const { rt } = makeRuntime();
     const exhausted = (err) => err instanceof StatusError && err.code === 'BUDGET_EXHAUSTED' && err.message === 'Raise the usd budget first.';

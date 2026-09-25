@@ -13,7 +13,7 @@ const { FactLedger } = require('./ledger');
 const { Brief } = require('./brief');
 const { CaseRecords } = require('./records');
 const { buildOrientation, DEFAULT_MAX_CHARS } = require('./orientation');
-const { canTransition, check: checkStatus, StatusError, AUTONOMY_KEY } = require('./status');
+const { canTransition, check: checkStatus, StatusError, AUTONOMY_KEY, REASON_KINDS } = require('./status');
 const { Budget, CATEGORIES } = require('./budget');
 const { WakeupStore } = require('./wakeups');
 const { QuestionStore } = require('./questions');
@@ -102,6 +102,10 @@ class CaseRuntime {
     // caseId -> the turn this process is running on that case.
     this.turns = new Map();
     this.hooks = [];
+    // Cases currently mid-`createCase`: the wake-up sweep (Task 13) skips a
+    // tick while this is non-zero, since a case with no first commit yet
+    // cannot be swept.
+    this.creating = 0;
   }
 
   get root() {
@@ -250,6 +254,9 @@ class CaseRuntime {
   // ---- Status (spec §3.1) ----
 
   setStatus(id, status, { kind, by = 'runtime', ref = null, note = '', failureClass = null } = {}) {
+    if (!REASON_KINDS.includes(kind)) {
+      throw new StatusError('BAD_KIND', `setStatus needs a "kind" naming why (one of ${REASON_KINDS.join(', ')}); got ${kind === undefined ? 'nothing' : JSON.stringify(kind)}.`);
+    }
     const meta = this.getCase(id);
     if (!canTransition(meta.status, status, by, kind)) {
       throw new StatusError('BAD_TRANSITION', `A case cannot go from ${meta.status} to ${status} (${by}, ${kind || 'no reason'}).`);
