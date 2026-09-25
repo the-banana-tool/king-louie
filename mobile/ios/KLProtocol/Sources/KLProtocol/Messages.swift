@@ -278,39 +278,10 @@ enum Rules {
 
     /// expires_at − created_at in (0, max] milliseconds.
     static func spanWithin(_ m: Fields, _ max: Int64) -> Bool {
-        guard let created = m["created_at"]?.stringValue.flatMap(epochMillis),
-              let expires = m["expires_at"]?.stringValue.flatMap(epochMillis) else { return false }
+        guard let created = m["created_at"]?.stringValue.flatMap(Timestamps.epochMillis),
+              let expires = m["expires_at"]?.stringValue.flatMap(Timestamps.epochMillis) else { return false }
         let span = expires - created
         return span > 0 && span <= max
-    }
-
-    /// Milliseconds since 1970 of a valid approval-v1 timestamp (Date.parse).
-    static func epochMillis(_ text: String) -> Int64? {
-        guard Timestamps.isValid(text) else { return nil }
-        let b = Array(text.utf8)
-        func num(_ from: Int, _ count: Int) -> Int64 {
-            var v: Int64 = 0
-            for k in from..<(from + count) { v = v * 10 + Int64(b[k] - 0x30) }
-            return v
-        }
-        var y = num(0, 4)
-        let mo = num(5, 2), d = num(8, 2)
-        // Days from civil (proleptic Gregorian), H. Hinnant's algorithm.
-        y -= mo <= 2 ? 1 : 0
-        let era = (y >= 0 ? y : y - 399) / 400
-        let yoe = y - era * 400
-        let doy = (153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5 + d - 1
-        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
-        let days = era * 146097 + doe - 719468
-        var ms = ((days * 24 + num(11, 2)) * 60 + num(14, 2)) * 60 + num(17, 2)
-        ms *= 1000
-        if b.count > 20 {
-            let digits = b.count - 21
-            var frac = num(20, digits)
-            for _ in digits..<3 { frac *= 10 }
-            ms += frac
-        }
-        return ms
     }
 
     // MARK: per type

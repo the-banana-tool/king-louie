@@ -30,8 +30,8 @@ final class ProtocolVectorTests: XCTestCase {
     }
 
     func testEveryIosVectorIsCovered() throws {
+        // The vector set has no fixed size (approval-v1 §9); the iOS set is exact.
         let vectors = try allVectors()
-        XCTAssertEqual(vectors.count, 40)
         let names = Set(vectors.filter { ($0["consumers"]?.arrayValue ?? []).contains(.string("ios")) }.compactMap { $0["name"]?.stringValue })
         XCTAssertEqual(names, ["jcs", "device-id-p256", "device-id-ed25519", "request-valid", "request-bad-node-signature",
                                "request-unpinned-node", "request-malformed", "request-display", "request-display-edge",
@@ -132,6 +132,51 @@ final class ProtocolVectorTests: XCTestCase {
         XCTAssertEqual(wrongKey.reason, "bad_signature")
     }
 
+    /// The audit-slice vector's message, edited, then signed again with the
+    /// web-01 test seed from keys.json (published test keys, tests only).
+    func resealedSlice(_ edit: (inout [String: JSONValue]) -> Void) throws -> JSONValue {
+        var m = try Envelope(json: try vector("audit-slice")["input"]!).message().objectValue!
+        edit(&m)
+        let seed = try Hex.decode(try keys()["nodes"]!["web-01"]!["seed"]!.stringValue!)
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: seed)
+        return try Envelope.seal(.object(m), alg: "Ed25519", kid: m["node_id"]!.stringValue!) { try key.signature(for: $0) }.json
+    }
+
+    /// Rewrites entry `index` (without recomputing its hash).
+    func editEntry(_ m: inout [String: JSONValue], _ index: Int, _ edit: (inout [String: JSONValue]) -> Void) {
+        var entries = m["entries"]!.arrayValue!
+        var entry = entries[index].objectValue!
+        edit(&entry)
+        entries[index] = .object(entry)
+        m["entries"] = .array(entries)
+    }
+
+    /// One tampered slice per failure branch of approval-v1 §3.6.
+    func testAuditSliceFailureBranches() throws {
+        let key = try vector("audit-slice")["given"]!["node"]!["key"]!.stringValue!
+        func reason(_ slice: JSONValue) -> String? { AuditSlice.verify(slice, nodeKeyHex: key).reason }
+        let entries = try Envelope(json: try vector("audit-slice")["input"]!).message()["entries"]!.arrayValue!
+        let gpuBox = try keys()["nodes"]!["gpu-box"]!["id"]!.stringValue!
+
+        // The helper itself: an unedited re-seal verifies.
+        XCTAssertTrue(AuditSlice.verify(try resealedSlice { _ in }, nodeKeyHex: key).ok)
+        XCTAssertEqual(reason(try resealedSlice { m in self.editEntry(&m, 0) { $0["node_id"] = .string(gpuBox) } }), "foreign_entry")
+        XCTAssertEqual(reason(try resealedSlice { m in self.editEntry(&m, 1) { $0["kind"] = .string("approval.tampered") } }), "hash_mismatch")
+        XCTAssertEqual(reason(try resealedSlice { m in m["entries"] = .array([entries[0], entries[2]]) }), "broken_chain")
+        XCTAssertEqual(reason(try resealedSlice { m in m["head"] = .object(["seq": .number("2"), "hash": entries[1]["hash"]!]) }), "exceeds_head")
+        XCTAssertEqual(reason(try resealedSlice { m in m["head"] = .object(["seq": .number("3"), "hash": entries[1]["hash"]!]) }), "head_mismatch")
+        XCTAssertEqual(reason(try resealedSlice { m in m["anchor"] = .object(["seq": .number("2"), "prev": entries[0]["hash"]!]) }), "before_anchor")
+
+        // Signed correctly but misshapen: malformed, as the JS verifier says.
+        var extra = try vector("audit-slice")["input"]!.objectValue!
+        extra["note"] = .string("x")
+        XCTAssertEqual(reason(.object(extra)), "malformed")
+        var otherKid = try vector("audit-slice")["input"]!.objectValue!
+        otherKid["kid"] = .string(gpuBox)
+        XCTAssertEqual(reason(.object(otherKid)), "malformed")
+        XCTAssertEqual(reason(.string("not an envelope")), "bad_signature")
+    }
+
     func testPhoneApiAuth() throws {
         let v = try vector("phone-api-auth")
         let g = v["given"]!
@@ -208,8 +253,14 @@ final class ProtocolVectorTests: XCTestCase {
         XCTAssertFalse(Timestamps.isValid("2026-09-23T18:04:11.2012Z"))
         XCTAssertFalse(Timestamps.isValid("2026-09-23T18:04:11.Z"))
         XCTAssertFalse(Timestamps.isValid("0099-01-01T00:00:00Z"))
-        XCTAssertEqual(Rules.epochMillis("1970-01-01T00:00:01.5Z"), 1500)
-        XCTAssertEqual(Rules.epochMillis("2026-09-23T18:04:11.201Z"), 1790186651201)
+        XCTAssertEqual(Timestamps.epochMillis("1970-01-01T00:00:01.5Z"), 1500)
+        XCTAssertEqual(Timestamps.epochMillis("2026-09-23T18:04:11.201Z"), 1790186651201)
+        // Fractions of 1–3 digits parse, as isValid accepts them.
+        XCTAssertEqual(Timestamps.date("1970-01-01T00:00:01.5Z")?.timeIntervalSince1970, 1.5)
+        XCTAssertEqual(Timestamps.date("1970-01-01T00:00:01.50Z")?.timeIntervalSince1970, 1.5)
+        XCTAssertEqual(Timestamps.date("1970-01-01T00:00:01.501Z")?.timeIntervalSince1970, 1.501)
+        XCTAssertEqual(Timestamps.date("1970-01-01T00:00:01Z")?.timeIntervalSince1970, 1)
+        XCTAssertNil(Timestamps.date("2026-02-30T00:00:00Z"))
         XCTAssertTrue(Timestamps.isValid(Timestamps.string(Date())))
     }
 

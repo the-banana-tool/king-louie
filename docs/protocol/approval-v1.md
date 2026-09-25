@@ -295,6 +295,17 @@ shows it as not delivered, never as sent or approved.
   vector `request-malformed`), even one that happens to be signed by a node
   the phone has pinned. Only a message that is already shape-valid is checked
   further.
+- **Keys equal under Unicode normalization.** Phones refuse as `malformed`
+  any JSON they parse (envelope payloads, QR codes, relay replies) with a
+  duplicate object key, and also with two keys in one object that are equal
+  under Unicode canonical equivalence (NFC/NFD, e.g. the keys U+00E9 and
+  U+0065 U+0301). Both apps must refuse them. Swift's `String` compares by
+  canonical equivalence and so cannot keep both keys; Kotlin compares by
+  UTF-16 units, but Android refuses them too, so that the two apps agree. A
+  node does not normalize. It treats such keys as distinct, and its canonical
+  check refuses only exact duplicates. So a request whose parameters carry
+  such a key pair is valid on the node, but no phone shows it, and it ends
+  as timed out, never approved.
 - A request is shown only if its `node_id` is pinned (from a pairing or invite
   QR code, never from the relay's node list) and `kid === node_id`
   (`unpinned_node` otherwise), and its signature verifies against the pinned

@@ -167,12 +167,39 @@ public enum Timestamps {
         formatter.string(from: date)
     }
 
+    /// The moment of a valid approval-v1 timestamp, fractions of 1–3
+    /// digits included (".5Z" is 500 ms); nil for anything `isValid` refuses.
     public static func date(_ text: String) -> Date? {
+        epochMillis(text).map { Date(timeIntervalSince1970: Double($0) / 1000) }
+    }
+
+    /// Milliseconds since 1970 of a valid approval-v1 timestamp (the node's Date.parse).
+    public static func epochMillis(_ text: String) -> Int64? {
         guard isValid(text) else { return nil }
-        if let d = formatter.date(from: text) { return d }
-        let plain = ISO8601DateFormatter()
-        plain.timeZone = TimeZone(identifier: "UTC")
-        return plain.date(from: text)
+        let b = Array(text.utf8)
+        func num(_ from: Int, _ count: Int) -> Int64 {
+            var v: Int64 = 0
+            for k in from..<(from + count) { v = v * 10 + Int64(b[k] - 0x30) }
+            return v
+        }
+        var y = num(0, 4)
+        let mo = num(5, 2), d = num(8, 2)
+        // Days from civil (proleptic Gregorian), H. Hinnant's algorithm.
+        y -= mo <= 2 ? 1 : 0
+        let era = (y >= 0 ? y : y - 399) / 400
+        let yoe = y - era * 400
+        let doy = (153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5 + d - 1
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+        let days = era * 146097 + doe - 719468
+        var ms = ((days * 24 + num(11, 2)) * 60 + num(14, 2)) * 60 + num(17, 2)
+        ms *= 1000
+        if b.count > 20 {
+            let digits = b.count - 21
+            var frac = num(20, digits)
+            for _ in digits..<3 { frac *= 10 }
+            ms += frac
+        }
+        return ms
     }
 
     /// The approval-v1 timestamp rule: `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$`

@@ -232,12 +232,17 @@ public enum Display {
 public enum AuditSlice {
     public static func verify(_ envelopeJSON: JSONValue, nodeKeyHex: String) -> (ok: Bool, reason: String?, entries: [JSONValue]) {
         func fail(_ reason: String) -> (ok: Bool, reason: String?, entries: [JSONValue]) { (false, reason, []) }
-        // 1. Signature against the pinned node key.
-        guard let envelope = try? Envelope(json: envelopeJSON), envelope.verifyEd25519(spkiHex: nodeKeyHex) else {
+        // 1. Signature against the pinned node key. Like the JS verifier,
+        // this looks only at alg, payload and sig; the envelope's full shape
+        // is step 2, so a correctly signed but misshapen envelope is
+        // `malformed`, not `bad_signature`.
+        guard let alg = envelopeJSON["alg"]?.stringValue, let payload = envelopeJSON["payload"]?.stringValue,
+              let sig = envelopeJSON["sig"]?.stringValue,
+              Envelope(alg: alg, kid: "", payload: payload, sig: sig).verifyEd25519(spkiHex: nodeKeyHex) else {
             return fail("bad_signature")
         }
-        // 2. Opens, and is a kl.audit.slice.
-        guard let message = try? envelope.message() else { return fail("malformed") }
+        // 2. Opens (exactly alg, kid, payload, sig; canonical bytes), and is a kl.audit.slice.
+        guard let envelope = try? Envelope(json: envelopeJSON), let message = try? envelope.message() else { return fail("malformed") }
         if let reason = Messages.validate("kl.audit.slice", message) { return fail(reason) }
         // 3. kid is the node inside.
         guard let nodeId = message["node_id"]?.stringValue, ExactText.same(envelope.kid, nodeId),
