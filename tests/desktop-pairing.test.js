@@ -8,6 +8,7 @@ const path = require('path');
 const { base32Encode, NodeIdentity, deriveNodeId } = require('../src/mesh/node-identity');
 const keys = require('../src/desktop-bridge/keys');
 const pairing = require('../src/desktop-bridge/pairing');
+const protocol = require('../src/desktop-bridge/protocol');
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -93,6 +94,37 @@ describe('device keys', () => {
   });
 });
 
+describe('wire protocol frame parsing', () => {
+  it('parseFrame accepts only a string or a Buffer, and only an integer maxBytes', () => {
+    assert.deepStrictEqual(protocol.parseFrame('{"t":"ping"}', 4096), { frame: { t: 'ping' } });
+    assert.deepStrictEqual(protocol.parseFrame(Buffer.from('{"t":"ping"}'), 4096), { frame: { t: 'ping' } });
+    // Not a string or a Buffer: fails closed rather than risking a wrong
+    // size or throwing out of Buffer.from on something it can't coerce.
+    assert.deepStrictEqual(protocol.parseFrame(new ArrayBuffer(10), 4096), { error: 'malformed' });
+    assert.deepStrictEqual(protocol.parseFrame(new Uint8Array([1, 2, 3]), 4096), { error: 'malformed' });
+    assert.deepStrictEqual(protocol.parseFrame({ t: 'ping' }, 4096), { error: 'malformed' });
+    assert.deepStrictEqual(protocol.parseFrame(null, 4096), { error: 'malformed' });
+    // A missing/non-integer maxBytes fails closed instead of comparing
+    // against undefined/NaN, which would let anything through.
+    assert.deepStrictEqual(protocol.parseFrame('{"t":"ping"}'), { error: 'malformed' });
+    assert.deepStrictEqual(protocol.parseFrame('{"t":"ping"}', NaN), { error: 'malformed' });
+    assert.deepStrictEqual(protocol.parseFrame('{"t":"ping"}', '4096'), { error: 'malformed' });
+    assert.deepStrictEqual(protocol.parseFrame('{"t":"ping"}', Infinity), { error: 'malformed' });
+  });
+
+  it('peekFrameId slices a Buffer to 256 bytes before decoding it, not after', () => {
+    // A multi-megabyte tail that, if fully decoded first, would still
+    // exercise the regex correctly but at the cost of decoding all of it —
+    // this is a correctness check that slicing-then-decoding still finds
+    // the id, sized like the 64 MiB frameBytes limit to make the point.
+    const huge = Buffer.concat([Buffer.from('{"t":"invoke","id":42,"rest":"'), Buffer.alloc(2 * 1024 * 1024, 0x41)]);
+    assert.strictEqual(protocol.peekFrameId(huge), 42);
+    assert.strictEqual(protocol.peekFrameId(Buffer.from('{"t":"call","id":7}')), 7);
+    assert.strictEqual(protocol.peekFrameId(Buffer.from('{"t":"result","id":1}')), null);
+    assert.strictEqual(protocol.peekFrameId('{"t":"invoke","id":9}'), 9);
+  });
+});
+
 describe('pairing request', () => {
   it('round-trips', () => {
     const raw = newRawKey();
@@ -121,6 +153,34 @@ describe('pairing request', () => {
 
   it('builds a default label from the OS user', () => {
     assert.strictEqual(pairing.defaultDeviceLabel('alex'), "alex's desktop");
+  });
+
+  it('rejects C1 controls and bidi override/isolate characters, not just C0/DEL', () => {
+    assert.throws(() => pairing.encodePairRequest({ publicKeyRaw: newRawKey(), label: 'bad\u0085label' }), /control characters/);
+    assert.throws(() => pairing.encodePairRequest({ publicKeyRaw: newRawKey(), label: 'bad\u009flabel' }), /control characters/);
+    assert.throws(() => pairing.encodePairRequest({ publicKeyRaw: newRawKey(), label: 'bad‮label' }), /control characters/);
+    assert.throws(() => pairing.encodePairRequest({ publicKeyRaw: newRawKey(), label: 'bad⁦label' }), /control characters/);
+    assert.doesNotThrow(() => pairing.encodePairRequest({ publicKeyRaw: newRawKey(), label: 'ordinary label' }));
+  });
+
+  it('builds a default label that always fits 64 bytes for a non-ASCII username, on a code-point boundary', () => {
+    const label = pairing.defaultDeviceLabel('日本語ユーザー名'.repeat(5));
+    assert.ok(Buffer.byteLength(label, 'utf8') <= 64);
+    // Round-trips cleanly: a split multi-byte sequence would decode as U+FFFD
+    // and no longer match the original string.
+    assert.strictEqual(Buffer.from(label, 'utf8').toString('utf8'), label);
+    assert.match(label, /'s desktop$/);
+  });
+
+  it('builds a default label that never splits a surrogate pair', () => {
+    const label = pairing.defaultDeviceLabel('😀'.repeat(30));
+    assert.ok(Buffer.byteLength(label, 'utf8') <= 64);
+    assert.strictEqual(Buffer.from(label, 'utf8').toString('utf8'), label);
+  });
+
+  it('caps the total pairing request length before splitting it', () => {
+    const huge = `klpair1.${'x'.repeat(10000)}`;
+    assert.throws(() => pairing.decodePairRequest(huge), (e) => e.code === 'MALFORMED_REQUEST' && /longer than/.test(e.message));
   });
 });
 
@@ -170,11 +230,79 @@ describe('desktop-bridge.json', () => {
     assert.strictEqual(deriveNodeId(record.publicKey), record.nodeId);
   });
 
+  it('requires publicKey to be exactly 88 lowercase hex characters', () => {
+    const identity = new NodeIdentity({ nodeName: 'gpu-box' });
+    const record = pairing.bridgeFileRecord({ publicKey: identity.publicKey, port: 18795 });
+    assert.strictEqual(record.publicKey.length, 88);
+    assert.throws(
+      () => pairing.parseBridgeFile(JSON.stringify({ ...record, publicKey: record.publicKey.toUpperCase() })),
+      (e) => e.code === 'BRIDGE_FILE_INVALID' && /88 lowercase hex/.test(e.message)
+    );
+    assert.throws(
+      () => pairing.parseBridgeFile(JSON.stringify({ ...record, publicKey: record.publicKey.slice(0, -2) })),
+      (e) => e.code === 'BRIDGE_FILE_INVALID' && /88 lowercase hex/.test(e.message)
+    );
+    assert.throws(
+      () => pairing.parseBridgeFile(JSON.stringify({ ...record, publicKey: `${record.publicKey.slice(0, -2)}zz` })),
+      (e) => e.code === 'BRIDGE_FILE_INVALID' && /88 lowercase hex/.test(e.message)
+    );
+    assert.throws(
+      () => pairing.parseBridgeFile(JSON.stringify({ ...record, publicKey: 123 })),
+      (e) => e.code === 'BRIDGE_FILE_INVALID' && /88 lowercase hex/.test(e.message)
+    );
+  });
+
   it('finds the file beside the default service data dir unless KL_DESKTOP_BRIDGE_FILE says otherwise', () => {
     assert.strictEqual(pairing.bridgeFilePath({ env: {}, platform: 'linux' }), '/etc/king-louie/desktop-bridge.json');
     assert.strictEqual(pairing.bridgeFilePath({ env: {}, platform: 'darwin' }), '/Library/Application Support/KingLouie/config/desktop-bridge.json');
     assert.strictEqual(pairing.bridgeFilePath({ env: { ProgramData: 'C:\\ProgramData' }, platform: 'win32' }), 'C:\\ProgramData\\KingLouie\\config\\desktop-bridge.json');
     assert.strictEqual(pairing.bridgeFilePath({ env: { KL_DESKTOP_BRIDGE_FILE: '/srv/kl/config/desktop-bridge.json' }, platform: 'linux' }), '/srv/kl/config/desktop-bridge.json');
+  });
+});
+
+describe('writeFileAtomic', () => {
+  it('writes the file with the requested content and mode, atomically', () => {
+    const file = path.join(tmp(), 'out.json');
+    pairing.writeFileAtomic(file, '{"a":1}', 0o600);
+    assert.strictEqual(fs.readFileSync(file, 'utf8'), '{"a":1}');
+    // No leftover temp file: the rename either succeeded and left only the
+    // final name, or writeFileAtomic cleaned up after itself on failure.
+    assert.deepStrictEqual(fs.readdirSync(path.dirname(file)), ['out.json']);
+  });
+
+  it('overwrites an existing file at the same path', () => {
+    const file = path.join(tmp(), 'out.json');
+    pairing.writeFileAtomic(file, 'first');
+    pairing.writeFileAtomic(file, 'second');
+    assert.strictEqual(fs.readFileSync(file, 'utf8'), 'second');
+  });
+
+  it('opens the temp file exclusively (wx) and fsyncs it before renaming', () => {
+    const file = path.join(tmp(), 'out.json');
+    const calls = [];
+    const originalOpen = fs.openSync;
+    const originalFsync = fs.fsyncSync;
+    fs.openSync = (target, flags, mode) => {
+      calls.push({ fn: 'open', target, flags, mode });
+      return originalOpen(target, flags, mode);
+    };
+    fs.fsyncSync = (fd) => {
+      calls.push({ fn: 'fsync', fd });
+      return originalFsync(fd);
+    };
+    try {
+      pairing.writeFileAtomic(file, 'content', 0o600);
+    } finally {
+      fs.openSync = originalOpen;
+      fs.fsyncSync = originalFsync;
+    }
+    const open = calls.find((c) => c.fn === 'open');
+    assert.ok(open, 'fs.openSync was not called');
+    assert.strictEqual(open.flags, 'wx');
+    assert.strictEqual(open.mode, 0o600);
+    const fsyncIndex = calls.findIndex((c) => c.fn === 'fsync');
+    assert.ok(fsyncIndex > -1, 'fs.fsyncSync was not called');
+    assert.strictEqual(fsyncIndex, calls.indexOf(open) + 1, 'fsync must happen right after the write, before rename');
   });
 });
 
@@ -245,6 +373,47 @@ describe('bridge-file trust (Windows rules, injected inspector)', () => {
 
   it('exports the installers handle-based inspector', () => {
     assert.match(require('../src/service/installers').WINDOWS_INSPECT_CSHARP, /public static class KlFsInspect/);
+  });
+
+  // The brief's original test: a real powershell.exe process running the
+  // real Add-Type/C# glue, proving the script text is actually valid
+  // PowerShell and the C# actually compiles and runs — something no amount
+  // of injected-execFile testing below can prove. Kept alongside the
+  // injected tests, not instead of them (round 1 fix: this was dropped by
+  // mistake, see task-2-report.md).
+  it('reads a real owner through PowerShell as a normal user', { skip: process.platform !== 'win32' ? 'Windows only' : false }, () => {
+    const f = path.join(tmp(), 'probe.json');
+    fs.writeFileSync(f, '{}');
+    const out = pairing.inspectWindowsOwners([path.dirname(f), f]);
+    assert.match(out.me, /^S-1-5-/);
+    assert.strictEqual(out.entries.length, 2);
+    assert.match(out.entries[1].owner, /^S-1-5-/);
+    assert.strictEqual(out.entries[1].link, false);
+  });
+
+  it('refuses (never throws) when the inspector reports no entries, or fewer than asked about', () => {
+    const empty = pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: inspector([]) });
+    assert.strictEqual(empty.ok, false);
+    assert.strictEqual(empty.code, 'BRIDGE_FILE_UNTRUSTED');
+    const short = pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: inspector([{ owner: 'S-1-5-18', link: false }]) });
+    assert.strictEqual(short.ok, false);
+    assert.strictEqual(short.code, 'BRIDGE_FILE_UNTRUSTED');
+  });
+
+  it('refuses (never throws) when the inspector returns a non-array entries', () => {
+    const notArray = () => ({ me: 'S-1-5-21-1-2-3-1001', entries: undefined });
+    assert.doesNotThrow(() => pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: notArray }));
+    const out = pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: notArray });
+    assert.strictEqual(out.ok, false);
+    assert.strictEqual(out.code, 'BRIDGE_FILE_UNTRUSTED');
+
+    const stringEntries = () => ({ me: 'S-1-5-21-1-2-3-1001', entries: 'not an array' });
+    assert.doesNotThrow(() => pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: stringEntries }));
+    assert.strictEqual(pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: stringEntries }).ok, false);
+
+    const noReport = () => undefined;
+    assert.doesNotThrow(() => pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: noReport }));
+    assert.strictEqual(pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: noReport }).ok, false);
   });
 
   // Injects execFile rather than shelling out to a real powershell.exe: this

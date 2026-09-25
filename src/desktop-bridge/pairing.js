@@ -14,8 +14,18 @@ const PAIR_PREFIX = 'klpair1';
 const DEVICES_FILE = 'desktop-devices.json';
 const BRIDGE_FILE = 'desktop-bridge.json';
 const LABEL_MAX_BYTES = 64;
+const LABEL_SUFFIX = "'s desktop";
+// C0 controls, DEL and the C1 controls (U+0080-009F, spec §4.1) so a raw
+// terminal-control byte can never reach a device list or a pairing UI; the
+// bidi override/isolate controls (U+202A-202E, U+2066-2069) so a label can't
+// be crafted to display as something other than what it is.
 // eslint-disable-next-line no-control-regex
-const CONTROL_RE = /[\u0000-\u001f\u007f]/;
+const CONTROL_RE = new RegExp('[\\u0000-\\u001f\\u007f-\\u009f\\u202a-\\u202e\\u2066-\\u2069]');
+const MAX_PAIR_REQUEST_LENGTH = 256;
+// A DER SPKI Ed25519 key is exactly 44 bytes (12-byte prefix + 32-byte raw
+// key), so exactly 88 lowercase hex characters — anything else is refused
+// before it is even handed to deriveNodeId.
+const ED25519_SPKI_HEX_RE = /^[0-9a-f]{88}$/;
 const ADMIN_OWNER_SIDS = Object.freeze(['S-1-5-18', 'S-1-5-32-544']);
 const DEVICES_CONTROLS = Object.freeze({ decides: 'which desktops may drive this service', selfGrant: 'pair its own desktops' });
 
@@ -44,9 +54,27 @@ function currentUsername() {
   }
 }
 
+// Truncates `text` to at most `maxBytes` UTF-8 bytes, always on a code-point
+// boundary: iterating a string with `for...of` yields whole code points
+// (never one half of a surrogate pair), so appending one at a time and
+// stopping just before the byte budget would be exceeded can never split a
+// multi-byte UTF-8 sequence either.
+function truncateUtf8(text, maxBytes) {
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text;
+  let out = '';
+  for (const ch of text) {
+    const candidate = out + ch;
+    if (Buffer.byteLength(candidate, 'utf8') > maxBytes) break;
+    out = candidate;
+  }
+  return out;
+}
+
 function defaultDeviceLabel(username = currentUsername()) {
-  const name = String(username || '').replace(new RegExp(CONTROL_RE.source, 'g'), '').slice(0, 40) || 'owner';
-  return `${name}'s desktop`;
+  const cleaned = String(username || '').replace(new RegExp(CONTROL_RE.source, 'g'), '');
+  const maxNameBytes = LABEL_MAX_BYTES - Buffer.byteLength(LABEL_SUFFIX, 'utf8');
+  const name = truncateUtf8(cleaned, maxNameBytes) || 'owner';
+  return `${name}${LABEL_SUFFIX}`;
 }
 
 function encodePairRequest({ publicKeyRaw, label }) {
@@ -56,8 +84,14 @@ function encodePairRequest({ publicKeyRaw, label }) {
   return [PAIR_PREFIX, deriveDeviceId(raw, 'kld-'), toB64url(raw), toB64url(Buffer.from(label, 'utf8'))].join('.');
 }
 
+// The length is capped before anything else runs, so an arbitrarily long
+// string never reaches split/regex/base64 work over attacker-controlled data.
 function decodePairRequest(text) {
-  const parts = String(text || '').trim().split('.');
+  const trimmed = String(text || '').trim();
+  if (trimmed.length > MAX_PAIR_REQUEST_LENGTH) {
+    throw new PairingError('MALFORMED_REQUEST', `a pairing request is longer than ${MAX_PAIR_REQUEST_LENGTH} characters`);
+  }
+  const parts = trimmed.split('.');
   if (parts.length !== 4 || parts[0] !== PAIR_PREFIX) {
     throw new PairingError('MALFORMED_REQUEST', `a pairing request looks like ${PAIR_PREFIX}.<device id>.<key>.<label>`);
   }
@@ -155,6 +189,9 @@ function parseBridgeFile(text, file = BRIDGE_FILE) {
   if (doc.host !== '127.0.0.1') throw invalid('host must be 127.0.0.1');
   if (!Number.isInteger(doc.port) || doc.port < 1 || doc.port > 65535) throw invalid('port must be an integer from 1 to 65535');
   if (!Number.isInteger(doc.protocol)) throw invalid('protocol must be an integer');
+  if (typeof doc.publicKey !== 'string' || !ED25519_SPKI_HEX_RE.test(doc.publicKey)) {
+    throw invalid('publicKey must be 88 lowercase hex characters (a DER SPKI Ed25519 key)');
+  }
   let nodeId;
   try {
     nodeId = deriveNodeId(doc.publicKey);
@@ -165,9 +202,19 @@ function parseBridgeFile(text, file = BRIDGE_FILE) {
   return { nodeId: doc.nodeId, publicKey: doc.publicKey, host: doc.host, port: doc.port, protocol: doc.protocol };
 }
 
+// The temp file is opened 'wx' (exclusive create — fails rather than
+// silently overwriting anything already at that name) and fsynced before
+// the rename, so a crash between the write and the rename can never leave
+// the rename pointing at a file whose content didn't actually reach disk.
 function writeFileAtomic(file, text, mode = 0o600) {
   const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(tmp, text, { mode });
+  const fd = fs.openSync(tmp, 'wx', mode);
+  try {
+    fs.writeSync(fd, text);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
   try {
     fs.renameSync(tmp, file);
   } catch (err) {
@@ -249,10 +296,18 @@ function checkBridgeFileTrust(file, {
   const dir = path.dirname(file);
   const testMode = env.KL_TEST_MODE === '1' && Boolean(env.KL_DESKTOP_BRIDGE_FILE);
   if (platform === 'win32') {
+    const paths = [dir, file];
     let report;
     try {
-      report = inspectOwners([dir, file], { env });
+      report = inspectOwners(paths, { env });
     } catch {
+      return untrusted(file);
+    }
+    // No evidence is not trust: an inspector that didn't report back exactly
+    // one entry per path asked about (wrong shape, wrong count, or threw
+    // something that got swallowed upstream) is refused, never treated as
+    // an empty "nothing to check" pass and never thrown from here.
+    if (!report || !Array.isArray(report.entries) || report.entries.length !== paths.length) {
       return untrusted(file);
     }
     for (const entry of report.entries) {

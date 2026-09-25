@@ -54,13 +54,20 @@ function authString(tag, { nodeId, deviceId, port, serverNonce, clientNonce } = 
 const buildAuthS = (fields) => authString('kl.desktop.hello.v1', fields);
 const buildAuthC = (fields) => authString('kl.desktop.auth.v1', fields);
 
-// The size is checked before JSON.parse ever sees the bytes.
+// The size is checked before JSON.parse ever sees the bytes. Only a string
+// or a Buffer is accepted — anything else (an ArrayBuffer, a plain object,
+// undefined) fails closed rather than risking a wrong size or a throw from
+// `Buffer.from` on something it can't coerce. A non-integer `maxBytes` (a
+// caller bug) fails closed the same way rather than comparing against NaN
+// or undefined, which would let an oversized frame through.
 function parseFrame(data, maxBytes) {
-  const size = typeof data === 'string' ? Buffer.byteLength(data) : data.length;
+  if (!Number.isInteger(maxBytes)) return { error: 'malformed' };
+  if (typeof data !== 'string' && !Buffer.isBuffer(data)) return { error: 'malformed' };
+  const size = Buffer.byteLength(data);
   if (size > maxBytes) return { error: 'too-large' };
   let frame;
   try {
-    frame = JSON.parse(typeof data === 'string' ? data : Buffer.from(data).toString('utf8'));
+    frame = JSON.parse(typeof data === 'string' ? data : data.toString('utf8'));
   } catch {
     return { error: 'malformed' };
   }
@@ -69,9 +76,13 @@ function parseFrame(data, maxBytes) {
 }
 
 // The id of an oversized invoke/call, read from its first bytes without
-// parsing the rest (the client always serializes `t` then `id` first).
+// parsing the rest (the client always serializes `t` then `id` first). A
+// Buffer is sliced to its first 256 bytes BEFORE being turned into a string,
+// so an oversized (up to 64 MiB) frame is never fully UTF-8 decoded just to
+// throw away everything past the prefix.
 function peekFrameId(text) {
-  const m = /^\{\s*"t"\s*:\s*"(?:invoke|call)"\s*,\s*"id"\s*:\s*(\d{1,15})/.exec(String(text).slice(0, 256));
+  const head = Buffer.isBuffer(text) ? text.subarray(0, 256).toString('utf8') : String(text).slice(0, 256);
+  const m = /^\{\s*"t"\s*:\s*"(?:invoke|call)"\s*,\s*"id"\s*:\s*(\d{1,15})/.exec(head);
   return m ? Number(m[1]) : null;
 }
 
