@@ -1,0 +1,420 @@
+// tests/contact-format.test.js — cases stage 4 §3.5, §4.1, §4.4 (pure parts).
+const { describe, it } = require('node:test');
+const assert = require('node:assert');
+const {
+  validatePolicy, resolveSteps, defaultPolicy, effectivePolicy, newToken, TOKEN_RE, normalizeAddress,
+  renderBatch, parseReply, optionOrText, stripQuoted, formatShort, SLACK_ERROR, assertRelayBaseUrl
+} = require('../src/cases/contact-format');
+
+const NOW = new Date('2026-09-25T14:00:00Z');
+
+describe('validatePolicy', () => {
+  it('accepts the default policy unchanged', () => {
+    const r = validatePolicy(defaultPolicy(), { now: NOW });
+    assert.strictEqual(r.ok, true);
+    assert.deepStrictEqual(r.policy.ladders.high.map((s) => [s.channel, s.afterMin]), [['present', 0], ['sms', 15], ['voice', 30]]);
+    assert.deepStrictEqual(r.policy.ladders.low[2], { channel: 'email', afterMin: 0, digest: true });
+  });
+
+  it('names slack and unknown channels', () => {
+    const p = defaultPolicy();
+    p.ladders.normal = [{ channel: 'slack' }];
+    assert.deepStrictEqual(validatePolicy(p), { ok: false, error: SLACK_ERROR });
+    p.ladders.normal = [{ channel: 'pager' }];
+    assert.deepStrictEqual(validatePolicy(p), { ok: false, error: 'unknown contact channel "pager"' });
+  });
+
+  it('refuses decreasing afterMin, a digest before the last step, equal quiet hours and bad away', () => {
+    const p = defaultPolicy();
+    p.ladders.normal = [{ channel: 'present' }, { channel: 'telegram', afterMin: 30 }, { channel: 'email', afterMin: 10 }];
+    assert.match(validatePolicy(p).error, /must not be smaller/);
+    const q = defaultPolicy();
+    q.ladders.low = [{ channel: 'email', digest: true }, { channel: 'journal' }];
+    assert.match(validatePolicy(q).error, /only the last step/);
+    assert.match(validatePolicy({ quietHours: { start: '22:00', end: '22:00' } }).error, /must differ/);
+    assert.match(validatePolicy({ away: { mode: 'email-only' } }).error, /RFC3339/);
+    assert.match(validatePolicy({ away: { mode: 'sms-only', until: '2026-09-26T00:00:00Z' } }).error, /away.mode/);
+    assert.match(validatePolicy({ surprise: 1 }).error, /contactPolicy.surprise is not a known key/);
+  });
+
+  it('defaults breakthrough to high and clears a past away', () => {
+    const r = validatePolicy({ quietHours: { start: '22:00', end: '07:00' }, away: { mode: 'email-only', until: '2026-09-24T00:00:00Z' } }, { now: NOW });
+    assert.deepStrictEqual(r.policy.quietHours, { start: '22:00', end: '07:00', breakthrough: ['high'] });
+    assert.strictEqual(r.policy.away, null);
+    const future = validatePolicy({ away: { mode: 'in-app-only', until: '2026-09-26T00:00:00Z' } }, { now: NOW });
+    assert.deepStrictEqual(future.policy.away, { mode: 'in-app-only', until: '2026-09-26T00:00:00Z' });
+  });
+
+  it('effectivePolicy fills what a stored policy leaves out', () => {
+    const p = effectivePolicy({ batchDelaySec: 5 });
+    assert.strictEqual(p.batchDelaySec, 5);
+    assert.strictEqual(p.digest.channel, 'email');
+    assert.strictEqual(p.presence.desktopIdleMin, 5);
+  });
+});
+
+describe('resolveSteps and case.yaml overrides (§4.4)', () => {
+  const policy = validatePolicy(defaultPolicy()).policy;
+
+  it('uses the owner ladder by urgency', () => {
+    assert.deepStrictEqual(resolveSteps(policy, 'normal').map((s) => `${s.channel}@${s.afterMin}`), ['present@0', 'telegram@30', 'email@240']);
+  });
+
+  it('a bare name takes the owner afterMin at its position, past the end last + 30; call means voice', () => {
+    const steps = resolveSteps(policy, 'high', { high: ['present', 'sms', { channel: 'call', afterMin: 20 }, 'email'] });
+    assert.deepStrictEqual(steps.map((s) => `${s.channel}@${s.afterMin}`), ['present@0', 'sms@15', 'voice@20', 'email@60']);
+  });
+
+  it('accepts the dotted urgency.<u> alias and drops channels the host cannot use', () => {
+    const steps = resolveSteps(policy, 'normal', { 'urgency.normal': ['present', 'slack', 'email'] });
+    assert.deepStrictEqual(steps.map((s) => s.channel), ['present', 'email']);
+  });
+});
+
+describe('tokens and addresses', () => {
+  it('makes 6-character Crockford tokens', () => {
+    for (let i = 0; i < 200; i += 1) assert.match(newToken(), TOKEN_RE);
+    assert.strictEqual(newToken(() => Buffer.from([0, 0, 0, 0])), '000000');
+    assert.strictEqual(newToken(() => Buffer.from([255, 255, 255, 255])), 'ZZZZZZ');
+  });
+
+  it('normalizes phone numbers to E.164 and email to lowercase', () => {
+    assert.strictEqual(normalizeAddress('sms', '+1 (555) 010-0'), '+15550100');
+    assert.strictEqual(normalizeAddress('voice', '0015550100'), '+15550100');
+    assert.strictEqual(normalizeAddress('sms', '5550100'), null);
+    assert.strictEqual(normalizeAddress('email', 'Owner <Owner@Example.COM>'), 'owner@example.com');
+    assert.strictEqual(normalizeAddress('email', 'not an address'), null);
+    assert.strictEqual(normalizeAddress('telegram', ' 123 '), '123');
+  });
+
+  it('a relay baseUrl is https:, or http: to loopback only', () => {
+    assert.strictEqual(assertRelayBaseUrl('https://relay.example.com/'), 'https://relay.example.com');
+    assert.strictEqual(assertRelayBaseUrl('http://[::1]:8080'), 'http://[::1]:8080');
+    assert.throws(() => assertRelayBaseUrl('http://relay.example.com'), /https:, or http: to loopback/);
+    assert.throws(() => assertRelayBaseUrl('not a url'), /is not a URL/);
+  });
+});
+
+describe('renderBatch', () => {
+  const lot = { caseId: 'c-1', caseTitle: 'Sell the lakeside lot', token: '7QD4KM', record: { id: 'q-0012', kind: 'question', urgency: 'high', createdAt: '2026-09-25T13:00:00Z', expiresAt: '2026-09-25T23:00:00Z', text: 'Is seller financing ever acceptable?', options: [{ id: 'a', label: 'No' }, { id: 'b', label: 'Yes, up to 20 %' }] } };
+  const kitchen = { caseId: 'c-2', caseTitle: 'Kitchen quotes', token: 'M2P8RT', record: { id: 'q-0003', kind: 'question', urgency: 'normal', createdAt: '2026-09-25T12:00:00Z', expiresAt: null, text: 'Which week suits the site visit?', options: [{ id: 'a', label: 'Oct 5' }, { id: 'b', label: 'Oct 12' }] } };
+
+  it('renders the spec example: high first, numbered, one batch token, expiries in the owner zone', () => {
+    const m = renderBatch([kitchen, lot], { batchToken: 'K7QD4M', timeZone: 'UTC' });
+    assert.strictEqual(m.subject, 'King Louie: 2 questions (1 high)');
+    assert.strictEqual(m.text, [
+      'King Louie: 2 questions (1 high)',
+      '',
+      '1. [HIGH] Sell the lakeside lot — Is seller financing ever acceptable?',
+      '   a) No   b) Yes, up to 20 %',
+      '2. Kitchen quotes — Which week suits the site visit?',
+      '   a) Oct 5   b) Oct 12',
+      '',
+      'Reply "#K7QD4M 1 a" / "#K7QD4M 2 a". Expires: 1) Sep 25 23:00.'
+    ].join('\n'));
+    assert.deepStrictEqual(m.items.map((i) => [i.n, i.token, i.questionId, i.caseId]), [[1, '7QD4KM', 'q-0012', 'c-1'], [2, 'M2P8RT', 'q-0003', 'c-2']]);
+  });
+
+  it('announces an approval without options on an unauthenticated channel', () => {
+    const approval = { caseId: 'c-3', caseTitle: 'Lakeside lot', token: 'A1B2C3', record: { id: 'q-0020', kind: 'approval', urgency: 'normal', createdAt: '2026-09-25T13:00:00Z', text: 'Send the offer letter to the buyer?', options: [{ id: 'approve', label: 'Approve' }, { id: 'reject', label: 'Reject' }] } };
+    const m = renderBatch([approval], { batchToken: 'K7QD4M', authenticated: false, firstAuthenticated: 'telegram' });
+    assert.strictEqual(m.items[0].answerable, false);
+    assert.deepStrictEqual(m.items[0].options, []);
+    assert.match(m.text, /Approval needed in Lakeside lot: Send the offer letter to the buyer\? Answer in King Louie or telegram\./);
+    assert.doesNotMatch(m.text, /Reply "#/);
+  });
+
+  it('cuts long items to 280 characters when the message is over maxChars', () => {
+    const long = { ...kitchen, record: { ...kitchen.record, text: 'x'.repeat(900) } };
+    const m = renderBatch([long], { batchToken: 'K7QD4M', maxChars: 600 });
+    assert.match(m.text, /x{280} \(open King Louie for the full text\)/);
+    assert.strictEqual(m.tooLarge, false);
+  });
+
+  it('formatShort uses the zone', () => {
+    assert.strictEqual(formatShort('2026-09-25T23:00:00Z', 'America/Chicago'), 'Sep 25 18:00');
+  });
+});
+
+describe('parseReply', () => {
+  const batch = {
+    batchToken: 'K7QD4M',
+    items: [
+      { n: 1, token: '7QD4KM', options: [{ id: 'a', label: 'No' }, { id: 'b', label: 'Yes, up to 20 %' }] },
+      { n: 2, token: 'M2P8RT', options: [{ id: 'a', label: 'Oct 5' }, { id: 'b', label: 'Oct 12' }] }
+    ]
+  };
+
+  it('reads "#<batch> <n> <rest>" lines, one answer per line', () => {
+    const r = parseReply(batch, '#K7QD4M 1 a\n#k7qd4m 2 Oct 12.');
+    assert.deepStrictEqual(r.answers.map((a) => [a.item.n, a.answer]), [[1, { optionId: 'a' }], [2, { optionId: 'b' }]]);
+    assert.strictEqual(r.ack, null);
+  });
+
+  it('reads "#<questionToken> <answer>" and free text', () => {
+    const r = parseReply(batch, '#M2P8RT the week after, please');
+    assert.deepStrictEqual(r.answers.map((a) => [a.item.n, a.answer]), [[2, { text: 'the week after, please' }]]);
+  });
+
+  it('a single-item batch takes "#<batch> <rest>"; a threaded reply may omit the token', () => {
+    const one = { batchToken: 'K7QD4M', items: [batch.items[0]] };
+    assert.deepStrictEqual(parseReply(one, '#K7QD4M no!').answers[0].answer, { optionId: 'a' });
+    assert.deepStrictEqual(parseReply(one, 'yes, up to 20 %', { threaded: true }).answers[0].answer, { optionId: 'b' });
+    assert.deepStrictEqual(parseReply(batch, '2 b', { threaded: true }).answers[0].item.n, 2);
+  });
+
+  it('anything else is not parsed and asks which question', () => {
+    const r = parseReply(batch, 'sounds good');
+    assert.deepStrictEqual(r.answers, []);
+    assert.strictEqual(r.ack, 'Which question? Reply "#K7QD4M <n> <answer>".');
+    assert.strictEqual(parseReply(batch, '#K7QD4M maybe').answers.length, 0, 'a two-item batch needs the number');
+  });
+
+  it('optionOrText matches id or label case-insensitively', () => {
+    assert.deepStrictEqual(optionOrText([{ id: 'keep', label: 'Keep "No"' }], ' KEEP. '), { optionId: 'keep' });
+    assert.deepStrictEqual(optionOrText([{ id: 'a', label: 'No' }], 'not sure'), { text: 'not sure' });
+  });
+});
+
+describe('stripQuoted', () => {
+  it('drops quoted lines and the history after "On … wrote:"', () => {
+    const body = '#K7QD4M 1 a\nthanks\n\nOn Fri, Sep 25, 2026 at 9:00 AM King Louie <kl@example.com> wrote:\n> King Louie: 1 question\n> 1. Lakeside lot';
+    assert.strictEqual(stripQuoted(body), '#K7QD4M 1 a\nthanks');
+    assert.strictEqual(stripQuoted('> quoted only\nreal line'), 'real line');
+  });
+});
+
+// Trust boundary: inbound SMS, email and voice text become owner answers.
+
+describe('tokens are unguessable and TOKEN_RE admits only a whole token', () => {
+  it('newToken draws from crypto.randomBytes by default', () => {
+    const crypto = require('crypto');
+    const real = crypto.randomBytes;
+    const calls = [];
+    crypto.randomBytes = (n) => { calls.push(n); return real(n); };
+    try {
+      assert.match(newToken(), TOKEN_RE);
+    } finally {
+      crypto.randomBytes = real;
+    }
+    assert.deepStrictEqual(calls, [4]);
+  });
+
+  it('uses all 30 random bits: every Crockford character shows up at every position', () => {
+    const seen = Array.from({ length: 6 }, () => new Set());
+    for (let i = 0; i < 3000; i += 1) [...newToken()].forEach((c, pos) => seen[pos].add(c));
+    for (const s of seen) assert.strictEqual(s.size, 32);
+    // bit layout: the low 2 bits of the 4 bytes are dropped, the rest map 5 bits per character
+    assert.strictEqual(newToken(() => Buffer.from([0x08, 0, 0, 0])), '100000');
+    assert.strictEqual(newToken(() => Buffer.from([0, 0, 0, 0x04])), '000001');
+    assert.strictEqual(newToken(() => Buffer.from([0, 0, 0, 0x03])), '000000');
+  });
+
+  it('refuses partial, embedded, padded, lowercase and non-Crockford tokens', () => {
+    assert.match('K7QD4M', TOKEN_RE);
+    for (const bad of ['K7QD4', 'K7QD4MX', 'xK7QD4M', ' K7QD4M', 'K7QD4M ', 'K7QD4M\n', '\nK7QD4M', '#K7QD4M',
+      'k7qd4m', 'K7QD4I', 'K7QD4L', 'K7QD4O', 'K7QD4U', 'K7QD4M\nK7QD4M', '']) {
+      assert.doesNotMatch(bad, TOKEN_RE, JSON.stringify(bad));
+    }
+    assert.strictEqual(TOKEN_RE.global || TOKEN_RE.sticky || TOKEN_RE.multiline, false, 'stateless, whole-string');
+  });
+});
+
+describe('parseReply picks an option only by an exact, unambiguous match', () => {
+  const batch = {
+    batchToken: 'K7QD4M',
+    items: [
+      { n: 1, token: '7QD4KM', options: [{ id: 'a', label: 'No' }, { id: 'b', label: 'Yes, up to 20 %' }] },
+      { n: 2, token: 'M2P8RT', options: [{ id: 'a', label: 'Oct 5' }, { id: 'b', label: 'Oct 12' }] }
+    ]
+  };
+  const one = { batchToken: 'K7QD4M', items: [batch.items[0]] };
+
+  it('never falls back to the first option', () => {
+    for (const rest of ['yes', 'n', 'no way', 'a b', 'ab', 'Yes up to 20 %', 'option a', '?', 'Oct']) {
+      const r = parseReply(batch, `#K7QD4M 1 ${rest}`);
+      assert.deepStrictEqual(r.answers.map((a) => a.answer), [{ text: rest }], rest);
+    }
+    assert.deepStrictEqual(parseReply(one, '#K7QD4M ok').answers[0].answer, { text: 'ok' });
+  });
+
+  it('an option id that is also another option label is ambiguous: no option', () => {
+    const crossed = [{ id: 'a', label: 'b' }, { id: 'b', label: 'a' }];
+    assert.deepStrictEqual(optionOrText(crossed, 'a'), { text: 'a' });
+    assert.deepStrictEqual(optionOrText([{ id: 'x', label: 'Yes' }, { id: 'y', label: 'yes.' }], 'YES'), { text: 'YES' });
+    assert.deepStrictEqual(optionOrText([{ id: 'approve', label: 'Approve' }, { id: 'reject', label: 'Reject' }], 'approve'), { optionId: 'approve' });
+  });
+
+  it('an empty or punctuation-only reply is never an option', () => {
+    assert.deepStrictEqual(optionOrText([{ id: 'a', label: '' }], '...'), { text: '...' });
+    assert.deepStrictEqual(optionOrText([{ id: 'a', label: 'No' }], ''), { text: '' });
+    assert.deepStrictEqual(parseReply(one, '#K7QD4M').answers, []);
+    assert.deepStrictEqual(parseReply(batch, '#K7QD4M 1').answers, []);
+  });
+
+  it('labels are compared the same way as the reply (trailing punctuation dropped on both)', () => {
+    assert.deepStrictEqual(optionOrText([{ id: 'b', label: 'Oct 12.' }], 'oct 12'), { optionId: 'b' });
+    assert.deepStrictEqual(optionOrText([{ id: 7, label: 'Seven' }], '7'), { optionId: 7 });
+  });
+
+  it('two different answers to one item in one reply are ambiguous: neither applies', () => {
+    const r = parseReply(batch, '#K7QD4M 1 a\n#K7QD4M 1 b\n#K7QD4M 2 a');
+    assert.deepStrictEqual(r.answers.map((a) => [a.item.n, a.answer]), [[2, { optionId: 'a' }]]);
+    const same = parseReply(batch, '#K7QD4M 1 a\n#7QD4KM No');
+    assert.deepStrictEqual(same.answers.map((a) => [a.item.n, a.answer]), [[1, { optionId: 'a' }]]);
+    const threaded = parseReply(one, 'yes, up to 20 %\nthanks', { threaded: true });
+    assert.deepStrictEqual(threaded.answers, []);
+    assert.strictEqual(threaded.ack, 'Which question? Reply "#K7QD4M <n> <answer>".');
+  });
+
+  it('ignores tokens that are embedded, partial, too long, of another batch, or not at the line start', () => {
+    for (const text of ['Please see #K7QD4M 1 a', '##K7QD4M 1 a', '#K7QD4M1 a', '#K7QD4MX 1 a', '#K7QD4 1 a',
+      '#ZZZZZZ 1 a', '#K7QD4M 3 a', '#K7QD4M 0 a', '> #K7QD4M 1 a', '#K7QD4M:1 a']) {
+      assert.deepStrictEqual(parseReply(batch, text).answers, [], text);
+    }
+  });
+
+  it('without a thread an untokened line never answers, even on a single-item batch', () => {
+    assert.deepStrictEqual(parseReply(one, 'no').answers, []);
+    assert.deepStrictEqual(parseReply(batch, '1 a').answers, []);
+  });
+
+  it('a threaded reply ignores ">" quoted lines', () => {
+    assert.deepStrictEqual(parseReply(one, '> No', { threaded: true }).answers, []);
+  });
+});
+
+describe('stripQuoted: a top-posted reply that quotes the original batch', () => {
+  const batch = {
+    batchToken: 'K7QD4M',
+    items: [
+      { n: 1, token: '7QD4KM', options: [{ id: 'a', label: 'No' }, { id: 'b', label: 'Yes, up to 20 %' }] },
+      { n: 2, token: 'M2P8RT', options: [{ id: 'a', label: 'Oct 5' }, { id: 'b', label: 'Oct 12' }] }
+    ]
+  };
+  const original = [
+    'King Louie: 2 questions (1 high)',
+    '',
+    '1. [HIGH] Sell the lakeside lot — Is seller financing ever acceptable?',
+    '   a) No   b) Yes, up to 20 %',
+    '2. Kitchen quotes — Which week suits the site visit?',
+    '   a) Oct 5   b) Oct 12',
+    '',
+    'Reply "#K7QD4M 1 a" / "#K7QD4M 2 a". Expires: 1) Sep 25 23:00.'
+  ];
+  const quoted = original.map((l) => (l ? `> ${l}` : '>')).join('\n');
+  const parsed = (body) => parseReply(batch, stripQuoted(body), { threaded: true }).answers.map((a) => [a.item.n, a.answer]);
+
+  it('Gmail/Apple: "On … wrote:" then ">" lines', () => {
+    const body = `2 b\n\nOn Fri, Sep 25, 2026 at 9:00 AM King Louie <kl@example.com> wrote:\n\n${quoted}\n`;
+    assert.strictEqual(stripQuoted(body), '2 b');
+    assert.deepStrictEqual(parsed(body), [[2, { optionId: 'b' }]]);
+  });
+
+  it('Gmail with the "On … wrote:" header wrapped over two lines', () => {
+    const body = `#K7QD4M 1 b\n\nOn Fri, Sep 25, 2026 at 9:00 AM King Louie <\nkl@example.com> wrote:\n${quoted}`;
+    assert.strictEqual(stripQuoted(body), '#K7QD4M 1 b');
+  });
+
+  it('Outlook: a separator and a From:/Sent:/To:/Subject: block, the original not ">"-quoted', () => {
+    const body = ['1 a', '', '________________________________', 'From: King Louie <kl@example.com>',
+      'Sent: Friday, September 25, 2026 9:00 AM', 'To: owner@example.com',
+      'Subject: King Louie: 2 questions (1 high) [KL-K7QD4M]', '', ...original].join('\r\n');
+    assert.strictEqual(stripQuoted(body), '1 a');
+    assert.deepStrictEqual(parsed(body), [[1, { optionId: 'a' }]]);
+  });
+
+  it('Outlook desktop: "-----Original Message-----"; Android: "-------- Original message --------"', () => {
+    for (const sep of ['-----Original Message-----', '-------- Original message --------']) {
+      const body = ['2 a', '', sep, 'From: King Louie <kl@example.com>', 'Date: 9/25/26 9:00 AM', '', ...original].join('\n');
+      assert.strictEqual(stripQuoted(body), '2 a', sep);
+    }
+  });
+
+  it('a From: header block without a separator', () => {
+    const body = ['1 b', '', 'From: King Louie <kl@example.com>', 'Date: Friday, September 25, 2026', 'Subject: King Louie: 2 questions', '', ...original].join('\n');
+    assert.strictEqual(stripQuoted(body), '1 b');
+  });
+
+  it('the original pasted back with no header at all is cut at its own first line', () => {
+    const body = ['2 b', '', ...original].join('\n');
+    assert.strictEqual(stripQuoted(body), '2 b');
+    assert.deepStrictEqual(parsed(body), [[2, { optionId: 'b' }]]);
+  });
+
+  it('without stripping, the unquoted original would answer: the numbered lines look like replies', () => {
+    const body = ['2 b', '', ...original].join('\n');
+    assert.notDeepStrictEqual(parseReply(batch, body, { threaded: true }).answers.map((a) => [a.item.n, a.answer]), [[2, { optionId: 'b' }]]);
+  });
+
+  it('cuts at a "-- " signature delimiter', () => {
+    assert.strictEqual(stripQuoted('1 a\n-- \nOwner\nexample.com'), '1 a');
+  });
+
+  it('keeps an owner line that merely starts with "On" or "From"', () => {
+    assert.strictEqual(stripQuoted('On reflection, 1 b\nFrom now on ask me by text'), 'On reflection, 1 b\nFrom now on ask me by text');
+  });
+
+  it('a reply that is only quoted history is empty and parses to nothing', () => {
+    const body = `On Fri, Sep 25, 2026 at 9:00 AM King Louie <kl@example.com> wrote:\n${quoted}`;
+    assert.strictEqual(stripQuoted(body), '');
+    assert.deepStrictEqual(parsed(body), []);
+  });
+});
+
+describe('validatePolicy rejects bad values', () => {
+  const withLadder = (normal) => { const p = defaultPolicy(); p.ladders.normal = normal; return p; };
+
+  it('bad and non-string channels, in ladders and the digest', () => {
+    assert.match(validatePolicy(withLadder([{ channel: 7 }])).error, /needs a channel/);
+    assert.match(validatePolicy(withLadder([{}])).error, /needs a channel/);
+    assert.match(validatePolicy(withLadder(['present'])).error, /needs a channel/);
+    assert.match(validatePolicy(withLadder([])).error, /non-empty/);
+    assert.match(validatePolicy(withLadder([{ channel: 'Email' }])).error, /unknown contact channel "Email"/);
+    assert.match(validatePolicy({ ladders: { urgent: [{ channel: 'present' }] } }).error, /not an urgency/);
+    assert.deepStrictEqual(validatePolicy({ digest: { channel: 'slack', at: '08:00' } }), { ok: false, error: SLACK_ERROR });
+    assert.match(validatePolicy({ digest: { channel: 'pager', at: '08:00' } }).error, /unknown contact channel "pager"/);
+    assert.match(validatePolicy({ digest: { channel: 'journal', at: '08:00' } }).error, /digest.channel must be a contact channel/);
+  });
+
+  it('negative, fractional, non-numeric and huge delays', () => {
+    for (const afterMin of [-1, 1.5, '15', Infinity, NaN, 10081, 1e12]) {
+      assert.strictEqual(validatePolicy(withLadder([{ channel: 'present' }, { channel: 'email', afterMin }])).ok, false, String(afterMin));
+    }
+    assert.strictEqual(validatePolicy(withLadder([{ channel: 'present' }, { channel: 'email', afterMin: 10080 }])).ok, true);
+    for (const batchDelaySec of [-1, 0.5, '60', 3601, 1e12]) {
+      assert.match(validatePolicy({ batchDelaySec }).error, /batchDelaySec/, String(batchDelaySec));
+    }
+    assert.strictEqual(validatePolicy({ batchDelaySec: 3600 }).ok, true);
+    assert.strictEqual(validatePolicy({ batchDelaySec: 0 }).ok, true);
+    for (const v of [0, -5, 1441, 2.5]) {
+      assert.match(validatePolicy({ presence: { desktopIdleMin: v } }).error, /presence.desktopIdleMin/, String(v));
+    }
+  });
+
+  it('a stored policy with a huge or negative batchDelaySec falls back to the default', () => {
+    assert.strictEqual(effectivePolicy({ batchDelaySec: 1e12 }).batchDelaySec, 60);
+    assert.strictEqual(effectivePolicy({ batchDelaySec: -3 }).batchDelaySec, 60);
+  });
+
+  it('bad times and dates', () => {
+    for (const start of ['7:00', '24:00', '22:60', '22-00', 2200]) {
+      assert.match(validatePolicy({ quietHours: { start, end: '07:00' } }).error, /HH:MM/, String(start));
+    }
+    assert.match(validatePolicy({ quietHours: { start: '22:00', end: '07:00', breakthrough: ['urgent'] } }).error, /breakthrough/);
+    assert.match(validatePolicy({ digest: { channel: 'email', at: '8am' } }).error, /digest.at/);
+    for (const until of ['2026-02-30T00:00:00Z', '2026-09-26T24:00:00Z', '2026-09-26T10:00:00+25:00', '2026-09-26', 'tomorrow', 1790467200000]) {
+      assert.match(validatePolicy({ away: { mode: 'email-only', until } }, { now: NOW }).error, /RFC3339/, String(until));
+    }
+    assert.strictEqual(validatePolicy({ away: { mode: 'email-only', until: '2026-09-26T09:00:00-05:00' } }, { now: NOW }).ok, true);
+  });
+
+  it('the time zone is not a policy key (it is settings.cases.timeZone); a bad zone falls back to the host zone', () => {
+    assert.match(validatePolicy({ timeZone: 'Mars/Olympus' }).error, /contactPolicy.timeZone is not a known key/);
+    assert.strictEqual(formatShort('2026-09-25T23:00:00Z', 'Mars/Olympus'), formatShort('2026-09-25T23:00:00Z', ''));
+  });
+
+  it('non-object input', () => {
+    for (const input of [null, [], 'x', 3]) assert.strictEqual(validatePolicy(input).ok, false);
+  });
+});
