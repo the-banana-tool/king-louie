@@ -1,0 +1,112 @@
+// tests/desktop-pane.test.js
+const { describe, it } = require('node:test');
+const assert = require('node:assert');
+const fs = require('fs');
+const path = require('path');
+const { describeServicePane, describeImportReport, UNAVAILABLE_TAB_NOTICE } = require('../src/desktop-bridge/pane-model');
+
+const ROOT = path.join(__dirname, '..');
+const read = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
+const ids = (model) => model.actions.map((a) => a.id);
+
+describe('describeServicePane', () => {
+  it('unpaired: no service found, Pair still allowed', () => {
+    const m = describeServicePane({ view: 'unpaired', bridgeFile: '/etc/king-louie/desktop-bridge.json', bridge: { ok: false, code: 'BRIDGE_FILE_MISSING', error: 'No local service found at /etc/king-louie.' } });
+    assert.strictEqual(m.lines[0], 'No local service found at /etc/king-louie.');
+    assert.match(m.lines[1], /king-louie-service/);
+    assert.deepStrictEqual(ids(m), ['pair']);
+  });
+
+  it('unpaired with an untrusted file shows the refusal', () => {
+    const m = describeServicePane({ view: 'unpaired', bridge: { ok: false, code: 'BRIDGE_FILE_UNTRUSTED', error: 'C:\\x is not owned by an administrator; refusing to trust it.' } });
+    assert.strictEqual(m.lines[0], 'C:\\x is not owned by an administrator; refusing to trust it.');
+  });
+
+  it('pairing: request, command, both fingerprints, Confirm only once the service is found', () => {
+    const waiting = describeServicePane({ view: 'pairing', pendingPair: { request: 'klpair1.x', command: 'sudo king-louie-service desktop pair klpair1.x', deviceFingerprint: 'abcd efgh ijkl mnop', service: null, error: null } });
+    assert.strictEqual(waiting.request, 'klpair1.x');
+    assert.strictEqual(waiting.command, 'sudo king-louie-service desktop pair klpair1.x');
+    assert.ok(waiting.lines.includes('This desktop: abcd efgh ijkl mnop'));
+    assert.deepStrictEqual(waiting.actions, [{ id: 'pairConfirm', label: 'Confirm', disabled: true }, { id: 'pairCancel', label: 'Cancel' }]);
+    const found = describeServicePane({ view: 'pairing', pendingPair: { request: 'r', command: 'c', deviceFingerprint: 'a', service: { fingerprint: 'wxyz 2345 6789 abcd', port: 18795 } } });
+    assert.ok(found.lines.includes('Service: wxyz 2345 6789 abcd (port 18795)'));
+    assert.strictEqual(found.actions[0].disabled, false);
+  });
+
+  it('paired standalone: account warning and Import, Attach, Unpair', () => {
+    const m = describeServicePane({ view: 'paired', pairing: { service: { fingerprint: 'wxyz 2345 6789 abcd' } }, service: { version: '26.9.0', account: 'LOCAL SERVICE' } });
+    assert.ok(m.lines.includes('Service: wxyz 2345 6789 abcd'));
+    assert.ok(m.lines.includes('Version 26.9.0, running as LOCAL SERVICE.'));
+    assert.ok(m.lines.includes('Tools will run as LOCAL SERVICE.'));
+    assert.deepStrictEqual(ids(m), ['import', 'attach', 'unpair']);
+  });
+
+  it('attached and connected: the no-provider line and the approvals section', () => {
+    const m = describeServicePane({
+      view: 'attached-connected', detachWarning: 'W', pairing: { service: { fingerprint: 'f' } },
+      service: { version: '26.9.0', account: 'LOCAL SERVICE', providersConfigured: false },
+      approvals: { available: false }
+    });
+    assert.ok(m.lines.includes('The service has no provider key yet — import or add one in Providers.'));
+    assert.deepStrictEqual(ids(m), ['import', 'detach', 'unpair']);
+    assert.strictEqual(m.detachWarning, 'W');
+    assert.deepStrictEqual(m.approvals.lines, ['Phone approvals are not set up on this service.']);
+    const full = describeServicePane({
+      view: 'attached-connected', pairing: { service: { fingerprint: 'f' } }, service: { version: '26.9.0', account: 'LOCAL SERVICE' },
+      approvals: { available: true, relay: { configured: true, connected: true, since: '2026-09-23T10:00:00Z', relay_id: 'kl-relayrelayrelay1' }, devices: [{ device_id: 'd-1', name: 'Phone', platform: 'android', active: true }], pending: [{ request_id: 'r-1', summary: 'Bash: ls', expires_at: '2026-09-23T10:05:00Z' }], audit: { last_seq: 12, last_at: '2026-09-23T10:01:00Z' } }
+    });
+    assert.deepStrictEqual(full.approvals.lines, [
+      'Relay kl-relayrelayrelay1: connected since 2026-09-23T10:00:00Z',
+      'Phone (android)',
+      'Waiting: Bash: ls (until 2026-09-23T10:05:00Z)',
+      'Audit ledger: entry 12 at 2026-09-23T10:01:00Z'
+    ]);
+    assert.deepStrictEqual(full.approvals.commands, ['king-louie-service enroll-device', 'king-louie-service device revoke <device-id>']);
+  });
+
+  it('attached, not connected: the error, Retry now, Use standalone this time, Detach', () => {
+    const m = describeServicePane({ view: 'attached-disconnected', connection: { status: 'disconnected', error: 'The local King Louie service is not reachable (127.0.0.1:18795).', nextRetryAt: null } });
+    assert.strictEqual(m.lines[0], 'The local King Louie service is not reachable (127.0.0.1:18795).');
+    assert.deepStrictEqual(m.actions.map((a) => a.label), ['Retry now', 'Use standalone this time', 'Detach']);
+  });
+
+  it('summarizes an import report', () => {
+    const lines = describeImportReport({ counts: { new: 3, 'skip-present': 1, failed: 1 }, failures: [{ category: 'vault', key: 'github', error: 'Encryption unavailable in the service.' }], secretsMissing: [{ category: 'vault', key: 'github' }], attention: [], notes: ['1 cron job(s) were imported disabled; enable them in Settings > Scheduler.'], skipped: [] });
+    assert.deepStrictEqual(lines, [
+      'new: 3, skip-present: 1, failed: 1',
+      'Failed: vault github — Encryption unavailable in the service.',
+      'Secrets that did not arrive: vault github',
+      '1 cron job(s) were imported disabled; enable them in Settings > Scheduler.'
+    ]);
+    assert.strictEqual(UNAVAILABLE_TAB_NOTICE, 'Managed by the local service; not available while attached.');
+  });
+});
+
+describe('pane wiring', () => {
+  it('preload exposes window.electron.desktop over the desktop:* channels', () => {
+    const preload = read('preload.js');
+    for (const ch of ['status', 'pairStart', 'pairConfirm', 'pairCancel', 'attach', 'detach', 'standaloneOnce', 'unpair', 'retry', 'importPlan', 'importApply']) {
+      assert.ok(preload.includes(`ipcRenderer.invoke('desktop:${ch}'`), `desktop:${ch}`);
+    }
+    assert.ok(preload.includes("registerOnce('desktop:statusChanged'"));
+    assert.ok(preload.includes("registerOnce('desktop:importProgress'"));
+  });
+
+  it('index.html has the Local service tab and pane', () => {
+    const html = read('index.html');
+    assert.ok(html.includes('<option value="service">Local service</option>'));
+    assert.ok(html.includes('class="settings-tab-content" data-tab="service"'));
+    for (const id of ['service-pane-status', 'service-pane-request', 'service-pair-request', 'service-pair-command', 'service-pane-actions', 'service-pane-import', 'service-pane-approvals']) {
+      assert.ok(html.includes(`id="${id}"`), id);
+    }
+  });
+
+  it('renderer renders the pane from switchSettingsTab and subscribes once', () => {
+    const renderer = read('renderer.js');
+    assert.match(renderer, /async function renderServiceSection\(\)/);
+    assert.match(renderer, /function markUnavailableTabs\(/);
+    const switchBody = renderer.slice(renderer.indexOf('function switchSettingsTab('), renderer.indexOf('function sortSettingsNavOptions('));
+    assert.match(switchBody, /tabName === 'service'/);
+    assert.strictEqual((renderer.match(/desktop\.onStatusChanged\(/g) || []).length, 1);
+  });
+});

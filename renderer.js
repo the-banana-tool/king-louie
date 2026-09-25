@@ -2298,6 +2298,9 @@ function switchSettingsTab(tabName) {
   if (tabName === 'channels' && typeof loadChannelAccess === 'function') {
     loadChannelAccess().catch(() => {});
   }
+  if (tabName === 'service' && typeof renderServiceSection === 'function') {
+    renderServiceSection().catch(() => {});
+  }
 }
 
 function sortSettingsNavOptions() {
@@ -10043,3 +10046,193 @@ loadSettings();
 renderAgentModeButton();
 renderHistoryToggleButton();
 checkFirstRun();
+
+// ── Settings > Local service (fleet stage 7) ──────────────────────────────
+const servicePaneState = { detachArmed: false, busy: false, error: null, pendingNodeId: null };
+let serviceLastConnection = null;
+
+function serviceLinesInto(el, lines) {
+  el.innerHTML = '';
+  for (const line of lines) {
+    const p = document.createElement('p');
+    p.textContent = line;
+    el.appendChild(p);
+  }
+}
+
+async function renderServiceSection() {
+  const statusEl = document.getElementById('service-pane-status');
+  if (!statusEl || !window.electron.desktop) return;
+  const status = await window.electron.desktop.status();
+  if (!status || status.ok === false) {
+    serviceLinesInto(statusEl, [(status && status.error) || 'The local service pane is not available.']);
+    return;
+  }
+  const model = window.electron.desktop.describe(status);
+  if (!model) return;
+  // The Confirm button must send the nodeId the owner actually saw here,
+  // not whatever `found` becomes on a later poll tick — otherwise a service
+  // swap between this render and the click could pin a service the owner
+  // never compared.
+  servicePaneState.pendingNodeId = (status.pendingPair && status.pendingPair.service && status.pendingPair.service.nodeId) || null;
+  const lines = [...model.lines];
+  if (servicePaneState.error) lines.push(servicePaneState.error);
+  if (servicePaneState.detachArmed && model.detachWarning) lines.push(model.detachWarning);
+  serviceLinesInto(statusEl, lines);
+
+  const requestBox = document.getElementById('service-pane-request');
+  requestBox.hidden = !model.request;
+  if (model.request) {
+    document.getElementById('service-pair-request').textContent = model.request;
+    document.getElementById('service-pair-command').textContent = model.command || '';
+    const copyBtn = document.getElementById('service-copy-request-btn');
+    copyBtn.onclick = () => navigator.clipboard.writeText(model.request).catch(() => {});
+  }
+
+  const actionsEl = document.getElementById('service-pane-actions');
+  actionsEl.innerHTML = '';
+  for (const action of model.actions) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.id = `service-action-${action.id}`;
+    btn.className = action.id === 'detach' || action.id === 'unpair' ? 'btn btn-danger btn-sm' : 'btn btn-primary btn-sm';
+    btn.textContent = action.id === 'detach' && servicePaneState.detachArmed ? 'Detach anyway' : action.label;
+    btn.disabled = Boolean(action.disabled) || servicePaneState.busy;
+    btn.addEventListener('click', () => { runServiceAction(action.id).catch(() => {}); });
+    actionsEl.appendChild(btn);
+  }
+
+  const approvalsEl = document.getElementById('service-pane-approvals');
+  approvalsEl.hidden = !model.approvals;
+  if (model.approvals) {
+    serviceLinesInto(approvalsEl, ['Approvals and relay', ...model.approvals.lines, `Change them on the service: ${model.approvals.commands.join(', ')}`]);
+  }
+  markUnavailableTabs(status.unavailableTabs || []);
+}
+
+function renderImportPlan(result) {
+  const box = document.getElementById('service-pane-import');
+  if (!box) return;
+  box.hidden = false;
+  const counts = Object.entries(result.plan.counts || {}).filter(([, n]) => n).map(([a, n]) => `${a}: ${n}`).join(', ');
+  const notes = result.plan.items.filter((i) => i.action === 'needs-attention' || i.action === 'needs-desktop').map((i) => `${i.action}: ${i.category} ${i.key}${i.note ? ` — ${i.note}` : ''}`);
+  serviceLinesInto(box, [`Dry run — ${counts}`, ...notes, ...(result.attention || []).map((a) => `needs-attention: ${a.key} — ${a.note}`)]);
+  const apply = document.createElement('button');
+  apply.type = 'button';
+  apply.id = 'service-action-importApply';
+  apply.className = 'btn btn-primary btn-sm';
+  apply.textContent = 'Import';
+  apply.addEventListener('click', () => { runServiceAction('importApply').catch(() => {}); });
+  box.appendChild(apply);
+}
+
+function renderImportReport(report) {
+  const box = document.getElementById('service-pane-import');
+  if (!box) return;
+  box.hidden = false;
+  serviceLinesInto(box, ['Import finished', ...window.electron.desktop.describeImport(report)]);
+}
+
+async function runServiceAction(id) {
+  const desktop = window.electron.desktop;
+  servicePaneState.busy = true;
+  servicePaneState.error = null;
+  try {
+    let result = null;
+    if (id === 'pair') result = await desktop.pairStart();
+    else if (id === 'pairConfirm') result = await desktop.pairConfirm(servicePaneState.pendingNodeId);
+    else if (id === 'pairCancel') result = await desktop.pairCancel();
+    else if (id === 'attach') result = await desktop.attach();
+    else if (id === 'standaloneOnce') result = await desktop.standaloneOnce();
+    else if (id === 'retry') result = await desktop.retry();
+    else if (id === 'unpair') result = await desktop.unpair();
+    else if (id === 'detach') {
+      if (!servicePaneState.detachArmed) {
+        servicePaneState.detachArmed = true;
+      } else {
+        servicePaneState.detachArmed = false;
+        result = await desktop.detach({ confirmed: true });
+      }
+    } else if (id === 'import') {
+      result = await desktop.importPlan();
+      if (result && result.ok) renderImportPlan(result);
+    } else if (id === 'importApply') {
+      result = await desktop.importApply();
+      if (result && result.ok) renderImportReport(result.report);
+    }
+    if (result && result.ok === false) servicePaneState.error = result.error || result.code;
+  } finally {
+    servicePaneState.busy = false;
+    await renderServiceSection().catch(() => {});
+  }
+}
+
+function markUnavailableTabs(tabs = []) {
+  const unavailable = new Set(tabs);
+  document.querySelectorAll('.settings-tab-content').forEach((pane) => {
+    const existing = pane.querySelector(':scope > .service-unavailable-notice');
+    if (unavailable.has(pane.dataset.tab)) {
+      if (!existing) {
+        const note = document.createElement('div');
+        note.className = 'settings-alert service-unavailable-notice';
+        note.textContent = 'Managed by the local service; not available while attached.';
+        pane.prepend(note);
+      }
+    } else if (existing) {
+      existing.remove();
+    }
+  });
+}
+
+function renderAttachedBanner(status) {
+  let banner = document.getElementById('attached-service-banner');
+  const show = status && status.view === 'attached-disconnected';
+  if (!show) {
+    if (banner) banner.remove();
+    return;
+  }
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'attached-service-banner';
+    banner.className = 'settings-alert attached-service-banner';
+    const host = dom.chatMessages && dom.chatMessages.parentElement ? dom.chatMessages.parentElement : document.body;
+    host.prepend(banner);
+  }
+  banner.innerHTML = '';
+  const text = document.createElement('span');
+  text.textContent = (status.connection && status.connection.error) || 'The local King Louie service is not reachable.';
+  banner.appendChild(text);
+  const buttons = [
+    ['Retry now', () => window.electron.desktop.retry()],
+    ['Use standalone this time', () => window.electron.desktop.standaloneOnce()],
+    ['Local service settings', () => { document.getElementById('open-settings-btn')?.click(); switchSettingsTab('service'); }]
+  ];
+  for (const [label, fn] of buttons) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn-secondary btn-sm';
+    btn.textContent = label;
+    btn.addEventListener('click', () => { Promise.resolve(fn()).catch(() => {}); });
+    banner.appendChild(btn);
+  }
+}
+
+async function refreshServiceStatus() {
+  const status = await window.electron.desktop.status().catch(() => null);
+  if (!status || status.ok === false) return;
+  markUnavailableTabs(status.unavailableTabs || []);
+  renderAttachedBanner(status);
+  const conn = status.connection ? status.connection.status : null;
+  if (conn === 'connected' && serviceLastConnection && serviceLastConnection !== 'connected') loadChats();
+  serviceLastConnection = conn;
+  if (dom.settingsNavSelect && dom.settingsNavSelect.value === 'service') renderServiceSection().catch(() => {});
+}
+
+if (window.electron.desktop) {
+  unsubscribeHandlers.push(window.electron.desktop.onStatusChanged(() => { refreshServiceStatus().catch(() => {}); }));
+  unsubscribeHandlers.push(window.electron.desktop.onImportProgress(({ sent, total } = {}) => {
+    const box = document.getElementById('service-pane-import');
+    if (box) box.dataset.progress = `${sent}/${total}`;
+  }));
+  refreshServiceStatus().catch(() => {});
+}

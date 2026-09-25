@@ -236,6 +236,40 @@ describe('desktop controller', () => {
     controller.dispose();
   });
 
+  // --- Task 16 carry: Confirm sends the nodeId the pane displayed, so a
+  // poll tick that changes `found` between render and click cannot pin a
+  // service the owner never actually compared.
+
+  it('pairConfirm refuses when the passed nodeId no longer matches found (a poll tick raced the render)', async () => {
+    const svc = await startService();
+    const record = pairing.bridgeFileRecord({ publicKey: identity.publicKey, port: svc.port });
+    const { controller } = controllerFor({ readBridgeFile: () => ({ ok: true, record: pairing.parseBridgeFile(JSON.stringify(record)) }) });
+    await controller.pairStart();
+    await new Promise((r) => setTimeout(r, 60));
+    const polled = await controller.status();
+    assert.strictEqual(polled.pendingPair.service.nodeId, identity.nodeId, 'this is what the pane would have shown');
+    const out = await controller.pairConfirm({ nodeId: 'kld-somethingelsesomethin' });
+    assert.deepStrictEqual(out, { ok: false, code: 'PAIR_SERVICE_CHANGED', error: MESSAGES.PAIR_SERVICE_CHANGED });
+    controller.dispose();
+  });
+
+  it('pairConfirm succeeds when the passed nodeId matches found', async () => {
+    const svc = await startService();
+    const record = pairing.bridgeFileRecord({ publicKey: identity.publicKey, port: svc.port });
+    const { controller, state } = controllerFor({ readBridgeFile: () => ({ ok: true, record: pairing.parseBridgeFile(JSON.stringify(record)) }) });
+    const started = await controller.pairStart();
+    const decoded = pairing.decodePairRequest(started.pendingPair.request);
+    await new Promise((r) => setTimeout(r, 60));
+    const polled = await controller.status();
+    pairing.writeFileAtomic(path.join(svc.configDir, pairing.DEVICES_FILE), JSON.stringify(pairing.upsertDevice(pairing.emptyDevices(), {
+      deviceId: decoded.deviceId, publicKey: decoded.publicKey, label: decoded.label, pairedAt: '2026-09-23T14:02:11Z'
+    })), 0o644);
+    const confirmed = await controller.pairConfirm({ nodeId: polled.pendingPair.service.nodeId });
+    assert.strictEqual(confirmed.view, 'paired', JSON.stringify(confirmed));
+    assert.strictEqual(state.pairing.service.nodeId, identity.nodeId);
+    controller.dispose();
+  });
+
   // --- Fix round 1: poll-window expiry and resuming a persisted pending pair
 
   it('clears an expired pending pair and notifies the window', async () => {

@@ -26,6 +26,15 @@ try {
 
 const markdownLog = createLogger('markdown');
 
+// Settings > Local service wording (pure module); optional like the other
+// bundled requires, so a blocked require never aborts the preload.
+let paneModel = null;
+try {
+  paneModel = require('./src/desktop-bridge/pane-model');
+} catch {
+  paneModel = null;
+}
+
 let domPurify = null;
 try {
   const createDOMPurify = require('dompurify');
@@ -887,6 +896,23 @@ contextBridge.exposeInMainWorld(
       sendUserAction: (payload) => ipcRenderer.send('canvas:userAction', payload),
       getState: (chatId) => ipcRenderer.invoke('canvas:getState', { chatId }),
       close: (chatId) => ipcRenderer.invoke('canvas:close', { chatId })
+    },
+    desktop: {
+      status: () => ipcRenderer.invoke('desktop:status'),
+      pairStart: () => ipcRenderer.invoke('desktop:pairStart'),
+      pairConfirm: (nodeId) => ipcRenderer.invoke('desktop:pairConfirm', { nodeId }),
+      pairCancel: () => ipcRenderer.invoke('desktop:pairCancel'),
+      attach: () => ipcRenderer.invoke('desktop:attach'),
+      detach: (payload = {}) => ipcRenderer.invoke('desktop:detach', { confirmed: Boolean(payload && payload.confirmed === true) }),
+      standaloneOnce: () => ipcRenderer.invoke('desktop:standaloneOnce'),
+      unpair: () => ipcRenderer.invoke('desktop:unpair'),
+      retry: () => ipcRenderer.invoke('desktop:retry'),
+      importPlan: () => ipcRenderer.invoke('desktop:importPlan'),
+      importApply: () => ipcRenderer.invoke('desktop:importApply'),
+      onStatusChanged: (callback) => registerOnce('desktop:statusChanged', callback),
+      onImportProgress: (callback) => registerOnce('desktop:importProgress', callback),
+      describe: (status) => (paneModel ? paneModel.describeServicePane(status) : null),
+      describeImport: (report) => (paneModel ? paneModel.describeImportReport(report) : [])
     },
     markdown: {
       parse: (text) => safeMarkdownParse(text),

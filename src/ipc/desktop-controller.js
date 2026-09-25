@@ -220,7 +220,7 @@ function createDesktopController({
     return status();
   }
 
-  async function pairConfirm() {
+  async function pairConfirm(payload = {}) {
     const pending = state.pendingPair;
     if (!pending) return { ok: false, code: 'NOT_PAIRING', error: 'Start pairing first.' };
     // Pin `found`: the record whose fingerprint the owner was shown while
@@ -228,6 +228,15 @@ function createDesktopController({
     // swap between the two could substitute a different service the owner
     // never actually compared).
     if (!found) return { ok: false, code: 'PAIR_NOT_FOUND', error: MESSAGES.PAIR_NOT_FOUND };
+    // The pane passes the nodeId it actually displayed. A poll tick can
+    // update `found` (and notify()) between that render and this call; if
+    // the owner confirmed what they saw, not what `found` now holds, that
+    // is the same "never compared" gap the fresh-read check below covers,
+    // just on the controller's own polling instead of the bridge file.
+    const expectedNodeId = payload && typeof payload.nodeId === 'string' ? payload.nodeId : null;
+    if (expectedNodeId && expectedNodeId !== found.nodeId) {
+      return { ok: false, code: 'PAIR_SERVICE_CHANGED', error: MESSAGES.PAIR_SERVICE_CHANGED };
+    }
     const fresh = readFile() || {};
     if (!fresh.ok || fresh.record.nodeId !== found.nodeId || fresh.record.publicKey !== found.publicKey) {
       return { ok: false, code: 'PAIR_SERVICE_CHANGED', error: MESSAGES.PAIR_SERVICE_CHANGED };

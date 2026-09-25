@@ -179,6 +179,7 @@
           <option value="mesh">Mesh Network</option>
           <option value="diagnostics">Diagnostics</option>
           <option value="commands">Commands</option>
+          <option value="service">Local service</option>
         </select>
       </div>
 
@@ -1074,6 +1075,27 @@
           <section class="template-variables-card">
             <h3>Results</h3>
             <pre id="diagnostics-results" style="white-space: pre-wrap; font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-secondary);"></pre>
+          </section>
+        </div>
+
+        <!-- Tab: Local service (fleet stage 7) -->
+        <div class="settings-tab-content" data-tab="service">
+          <section class="template-variables-card service-pane" id="service-pane">
+            <h3>Local service</h3>
+            <p>Use this app as the window onto a King Louie service running on this computer.</p>
+            <div class="service-pane-status" id="service-pane-status"></div>
+            <div class="service-pane-request" id="service-pane-request" hidden>
+              <label for="service-pair-request">Pairing request</label>
+              <div class="service-pane-row">
+                <code id="service-pair-request"></code>
+                <button class="btn btn-secondary btn-sm" id="service-copy-request-btn" type="button">Copy</button>
+              </div>
+              <label for="service-pair-command">Run as an administrator</label>
+              <code id="service-pair-command"></code>
+            </div>
+            <div class="service-pane-actions" id="service-pane-actions"></div>
+            <div class="service-pane-import" id="service-pane-import" hidden></div>
+            <div class="service-pane-approvals" id="service-pane-approvals" hidden></div>
           </section>
         </div>
 

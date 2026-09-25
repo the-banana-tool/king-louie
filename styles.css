@@ -2881,3 +2881,47 @@ body {
 .canvas-resize-handle:hover::after {
   background: var(--accent);
 }
+
+/* Settings > Local service (fleet stage 7) */
+.service-pane .service-pane-status p,
+.service-pane .service-pane-import p,
+.service-pane .service-pane-approvals p {
+  margin: 0 0 6px;
+}
+
+.service-pane .service-pane-request {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 10px 0;
+}
+
+.service-pane .service-pane-request code {
+  word-break: break-all;
+  user-select: all;
+}
+
+.service-pane .service-pane-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.service-pane .service-pane-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.service-pane .service-pane-import,
+.service-pane .service-pane-approvals {
+  margin-top: 12px;
+}
+
+.attached-service-banner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
