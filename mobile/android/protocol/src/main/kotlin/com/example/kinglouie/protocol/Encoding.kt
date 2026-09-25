@@ -516,7 +516,6 @@ fun JsonElement?.obj(): JsonObject? = this as? JsonObject
 fun JsonElement?.arr(): JsonArray? = this as? JsonArray
 fun JsonElement?.int(): Int? = takeIf { it.isNumber() }?.let { (it as JsonPrimitive).content.toIntOrNull() }
 fun JsonElement?.bool(): Boolean? = (this as? JsonPrimitive)?.takeIf { !it.isString && this !is JsonNull }?.content?.toBooleanStrictOrNull()
-fun JsonElement?.isNull(): Boolean = this is JsonNull
 
 /** A JSON number (not a string, boolean or null). */
 fun JsonElement?.isNumber(): Boolean {

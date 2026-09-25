@@ -434,8 +434,9 @@ class ProtocolVectorTest {
         assertNull(ApprovalStatus.verify(status { it["at"] = jsonString("2026-02-30T00:00:00Z") }, requestId, pin))
         val other = KeyPairGenerator.getInstance("Ed25519").generateKeyPair().public.encoded
         assertNull(ApprovalStatus.verify(status(), requestId, NodePin(pin.id, "web-01", Hex.encode(other))))
-        // No generic fallback: a type without rules here is malformed.
+        // A status missing its required members is malformed.
         assertEquals("malformed", Messages.validate("kl.approval.status", JsonText.parse("{\"v\":1,\"type\":\"kl.approval.status\"}")))
+        // No generic fallback: a type without rules here is malformed.
         assertEquals("malformed", Messages.validate("kl.lease.grant", JsonText.parse("{\"v\":1,\"type\":\"kl.lease.grant\"}")))
     }
 
