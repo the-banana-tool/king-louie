@@ -457,3 +457,73 @@ describe('Executor.submit outbound gate in service mode', () => {
     assert.strictEqual(calls.length, 0);
   });
 });
+
+// ---- Task 11 fix round: rulings T11-click and T11-profile ----
+
+describe('Executor.submit browser failures and profiles', () => {
+  // A browser with a daily cap of 5, so the reservation can be read back.
+  async function browserSetup({ running = false, active = null, failAt = null, withProfileCurrent = true } = {}) {
+    const calls = [];
+    const act = (name, result = {}) => async (params) => {
+      calls.push([name, params]);
+      if (name === failAt) return { ok: false, error: `${name} timed out` };
+      return { ok: true, ...result };
+    };
+    const browserActions = {
+      status: act('status', { running }), start: act('start'), navigate: act('navigate'), fill_credentials: act('fill_credentials'),
+      fill: act('fill'), click: act('click'), wait_for: act('wait_for'), content: act('content', { html: '<p>ok</p>' })
+    };
+    if (withProfileCurrent) browserActions.profile_current = act('profile_current', { active, running });
+    const s = await setup({ executors: { entries: { browser: { constraints: { contactsPerDay: 5 } } } }, registryOptions: { browserActions } });
+    const r0 = await envelopeOps.requestEnvelope(s.reg, { caseId: s.meta.id }, {
+      executor: 'browser', intent: 'File the county permit form', recipients: { allow: ['https://permits.example.com/apply'] },
+      facts: [s.acres.id], caps: { usd: 5, contacts: 1, attemptsPerContact: 1 }, window: { start: '2026-10-26', end: '2026-10-30' }
+    });
+    assert.strictEqual(r0.ok, true, r0.error);
+    await s.rt.answerQuestion(s.meta.id, r0.questionId, { channel: 'in-app', optionId: 'approve' });
+    envelopeOps.syncEnvelopes(s.reg, s.meta.id);
+    const send = (over = {}) => submit(s, {
+      executor: 'browser', envelopeId: r0.envelopeId,
+      payload: JSON.stringify({ url: 'https://permits.example.com/apply', fields: [{ selector: '#acres', value: `{{${s.acres.id}}}` }], submit: { selector: '#go' }, waitFor: '#done', ...over })
+    });
+    return { s, calls, send };
+  }
+
+  it('a failure after the submit click keeps the reservation: the form may have been sent', async () => {
+    const { s, send } = await browserSetup({ failAt: 'wait_for' });
+    const r = await send();
+    assert.strictEqual(r.ok, false);
+    assert.match(r.error, /the form may have been sent/);
+    const job = new JobStore(s.meta.dir).get(r.jobId);
+    assert.strictEqual(job.state, 'failed');
+    assert.match(job.reason, /the form may have been sent/);
+    assert.strictEqual(s.reg.globalRemaining('browser'), 4, 'the contact slot stays used');
+  });
+
+  it('a failure before the submit click releases the reservation', async () => {
+    const { s, send, calls } = await browserSetup({ failAt: 'navigate' });
+    const r = await send();
+    assert.strictEqual(r.ok, false);
+    assert.doesNotMatch(r.error, /may have been sent/);
+    assert.strictEqual(calls.some((c) => c[0] === 'click'), false);
+    assert.strictEqual(new JobStore(s.meta.dir).get(r.jobId).state, 'failed');
+    assert.strictEqual(s.reg.globalRemaining('browser'), 5);
+  });
+
+  it('login refuses a browser already open with another profile, and one whose profile cannot be read', async () => {
+    const other = await browserSetup({ running: true, active: 'personal' });
+    assert.deepStrictEqual(await other.send({ login: true }), { ok: false, error: 'the browser is open with another profile; close it or retry' });
+    assert.deepStrictEqual(other.calls.map((c) => c[0]), ['status', 'profile_current'], 'nothing navigated, no credentials filled');
+    assert.strictEqual(new JobStore(other.s.meta.dir).get('job-0001').state, 'failed');
+    assert.strictEqual(other.s.reg.globalRemaining('browser'), 5);
+
+    const unknown = await browserSetup({ running: true, withProfileCurrent: false });
+    assert.deepStrictEqual(await unknown.send({ login: true }), { ok: false, error: 'the browser is open with another profile; close it or retry' });
+    assert.deepStrictEqual(unknown.calls.map((c) => c[0]), ['status']);
+
+    const same = await browserSetup({ running: true, active: 'kl-cases' });
+    const r = await same.send({ login: true });
+    assert.strictEqual(r.ok, true, r.error);
+    assert.deepStrictEqual(same.calls.map((c) => c[0]), ['status', 'profile_current', 'navigate', 'fill_credentials', 'fill', 'click', 'wait_for', 'content']);
+  });
+});

@@ -490,7 +490,9 @@ function takeReservation(job) {
 
 // A submit whose answer cannot be committed: the job fails, nothing is
 // charged, and the executor is asked to drop the job it accepted.
-async function failSubmit(reg, caseId, job, submitted = {}, reason = 'failed') {
+// `keepReservation`: the contacts may already have been reached (a browser
+// form clicked before the failure), so the daily-cap reservation stays used.
+async function failSubmit(reg, caseId, job, submitted = {}, reason = 'failed', { keepReservation = false } = {}) {
   const caseDir = reg.caseDir(caseId);
   const store = new JobStore(caseDir);
   if (validExternalId(submitted?.jobId)) job.externalId = submitted.jobId;
@@ -507,7 +509,7 @@ async function failSubmit(reg, caseId, job, submitted = {}, reason = 'failed') {
   job.reservedContacts = isObject(fresh) ? fresh.reservedContacts : job.reservedContacts;
   // Released only while the job on disk is still `submitting`: a committed
   // job keeps its reservation (contacts may already have been reached).
-  const release = !isObject(fresh) || fresh.state === 'submitting' ? takeReservation(job) : 0;
+  const release = !keepReservation && (!isObject(fresh) || fresh.state === 'submitting') ? takeReservation(job) : 0;
   job.state = 'failed';
   job.reason = clip(reason);
   job.lastChange = reg.now().toISOString();
