@@ -189,7 +189,11 @@ describe('case IPC, stage 2', () => {
       [{ category: 'usd', limit: '5' }, /above 0/],
       [{ category: 'usd', limit: 1.2 }, /above what the case has spent \(1\.5\)/],
       [{ category: 'deadline', limit: 'soon' }, /YYYY-MM-DD/],
-      [{ category: 'turnsPerDay', limit: Infinity }, /above 0/]
+      [{ category: 'turnsPerDay', limit: Infinity }, /above 0/],
+      // Shape-only checks in the IPC handler let these through; the runtime's
+      // own validation (F3) is what refuses them, before any fact is written.
+      [{ category: 'deadline', limit: '2001-01-01' }, /past/i],
+      [{ category: 'turnsPerDay', limit: 0.5 }, /whole number/i]
     ];
     for (const [payload, re] of refused) {
       const r = await call(IPC.CASE_GRANT_BUDGET, { caseId: c.id, ...payload });

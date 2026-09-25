@@ -14,7 +14,7 @@ const { Brief } = require('./brief');
 const { CaseRecords } = require('./records');
 const { buildOrientation, DEFAULT_MAX_CHARS } = require('./orientation');
 const { canTransition, check: checkStatus, StatusError, AUTONOMY_KEY, REASON_KINDS } = require('./status');
-const { Budget, CATEGORIES } = require('./budget');
+const { Budget, CATEGORIES, PER_DAY } = require('./budget');
 const { WakeupStore } = require('./wakeups');
 const { QuestionStore } = require('./questions');
 const { detectTriggers, emptyBaseline } = require('./triggers');
@@ -1127,8 +1127,53 @@ class CaseRuntime {
     return { journal, rendered: body, questionId: question.id };
   }
 
-  // The Grant button (IPC case:grantBudget). The caller validates the limit.
+  // Every grant path (the Grant button today, others later) goes through
+  // this before a fact is ever written: a refused grant must leave no
+  // permanent trace in the append-only ledger (F3). The IPC handler's own
+  // checks only cover the shape of the payload (a number, a YYYY-MM-DD
+  // string); this is the one place that knows the case's current numbers.
+  _validateGrant(meta, category, limit) {
+    if (!CATEGORIES.includes(category)) {
+      throw new StatusError('BAD_GRANT', `Unknown budget category "${category}". Categories: ${CATEGORIES.join(', ')}.`);
+    }
+    const entry = this.budget(meta.id).status()[category] || {};
+    if (category === 'deadline') {
+      if (typeof limit !== 'string' || !isRealCalendarDate(limit)) {
+        throw new StatusError('BAD_GRANT', 'A deadline must be a real calendar date (YYYY-MM-DD).');
+      }
+      const today = localDay(this.now(), this.settings().timeZone);
+      if (limit < today) {
+        throw new StatusError('BAD_GRANT', 'A deadline cannot be in the past.');
+      }
+      if (entry.at && limit <= entry.at) {
+        throw new StatusError('BAD_GRANT', `A deadline must be later than the current deadline (${entry.at}).`);
+      }
+      return;
+    }
+    const n = Number(limit);
+    if (!Number.isFinite(n)) {
+      throw new StatusError('BAD_GRANT', `A ${category} limit must be a number.`);
+    }
+    if (PER_DAY.includes(category)) {
+      if (!Number.isInteger(n)) {
+        throw new StatusError('BAD_GRANT', `A ${category} limit must be a whole number.`);
+      }
+      const used = Number(entry.spent) || 0;
+      if (n <= used) {
+        throw new StatusError('BAD_GRANT', `A ${category} limit must be above today's use (${used}).`);
+      }
+      return;
+    }
+    const spent = Number(entry.spent) || 0;
+    if (n <= spent) {
+      throw new StatusError('BAD_GRANT', `A ${category} limit must be above what the case has spent (${spent}).`);
+    }
+  }
+
+  // The Grant button (IPC case:grantBudget). Validated by _validateGrant
+  // before anything is written (F3).
   async grantBudget(id, category, limit, { channel = 'in-app' } = {}) {
+    this._validateGrant(this.getCase(id), category, limit);
     return this.systemAction(id, `grant ${category}`, async (meta) => {
       const at = this.now().toISOString();
       const fact = new FactLedger(meta.dir).assert({

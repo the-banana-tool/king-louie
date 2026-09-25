@@ -494,16 +494,48 @@ describe('answers through the runtime', () => {
     assert.deepStrictEqual([fresh.payload.spent, fresh.payload.limit], [5.2, 5]);
   });
 
-  it('a deadline grant later than the current deadline but still in the past is refused (I3)', async () => {
+  it('grantBudget refuses a deadline later than the current one but still in the past, before writing anything (F3, was I3)', async () => {
     const { rt } = runtime();
     const c = await activeCase(rt);
     rt.store.updateMeta(c.id, { budget: { deadline: '2020-01-01' } });
-    const out = await rt.grantBudget(c.id, 'deadline', '2021-06-01');
-    assert.deepStrictEqual(out.effect, {
-      applied: false,
-      note: 'A deadline limit must be a real calendar date, later than the current deadline and not in the past.'
-    });
+    const before = rt.ledger(c.id).query({}).length;
+    await assert.rejects(
+      rt.grantBudget(c.id, 'deadline', '2021-06-01'),
+      (err) => (err.name === 'StatusError' || err.name === 'QuestionError') && /past/i.test(err.message)
+    );
     assert.strictEqual(rt.getCase(c.id).budget.deadline, '2020-01-01');
+    assert.strictEqual(rt.ledger(c.id).query({}).length, before, 'a refused grant writes no fact');
+  });
+
+  it('grantBudget validates before writing a fact: a past deadline, a fractional per-day limit, a negative usd limit and an unknown category are all refused (F3)', async () => {
+    const { rt } = runtime();
+    const c = await activeCase(rt);
+    const factCount = () => rt.ledger(c.id).query({}).length;
+    const before = factCount();
+
+    await assert.rejects(
+      rt.grantBudget(c.id, 'deadline', '2001-01-01'),
+      (err) => (err.name === 'StatusError' || err.name === 'QuestionError') && /past/i.test(err.message)
+    );
+    assert.strictEqual(factCount(), before, 'a past deadline writes no fact');
+
+    await assert.rejects(
+      rt.grantBudget(c.id, 'turnsPerDay', 0.5),
+      (err) => (err.name === 'StatusError' || err.name === 'QuestionError') && /whole number/i.test(err.message)
+    );
+    assert.strictEqual(factCount(), before, 'a fractional per-day limit writes no fact');
+
+    await assert.rejects(
+      rt.grantBudget(c.id, 'usd', -5),
+      (err) => (err.name === 'StatusError' || err.name === 'QuestionError') && /above what the case has spent/i.test(err.message)
+    );
+    assert.strictEqual(factCount(), before, 'a negative usd limit writes no fact');
+
+    await assert.rejects(
+      rt.grantBudget(c.id, 'not-a-category', 5),
+      (err) => (err.name === 'StatusError' || err.name === 'QuestionError') && /Unknown budget category/.test(err.message)
+    );
+    assert.strictEqual(factCount(), before, 'an unknown category writes no fact');
   });
 
   it('collapses newlines in why/tried/claim text so an injected fake section cannot appear (I4)', async () => {
