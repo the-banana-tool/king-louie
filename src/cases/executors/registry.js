@@ -566,6 +566,7 @@ class ExecutorRegistry {
     if (!this._opsMemory) {
       this._opsMemory = new OpsMemory(this.dataDir, {
         now: this.now,
+        resolveFacts: (caseId) => this.caseRuntime.ledger(caseId).view().facts,
         resolveFact: (caseId, factId) => this.caseRuntime.ledger(caseId).view().facts.get(factId) || null
       });
     }

@@ -23,6 +23,10 @@ const keyOf = (subject, attr) => `${String(subject).trim().toLowerCase()}|${Stri
 // a job or the journal (300 characters).
 const MAX_TEXT = 300;
 const MAX_RULES = 20;
+// A hostile or broken adapter cannot flood the ledger: facts per record and
+// per results call are capped.
+const MAX_INPUTS_PER_RECORD = 20;
+const MAX_FACTS_PER_CALL = 200;
 const clip = (text) => (text === undefined || text === null ? text : cut(String(text), MAX_TEXT));
 
 // A value an adapter reported, bounded: strings cut, a list or object whose
@@ -34,6 +38,12 @@ function boundValue(value) {
     return json.length > MAX_TEXT ? clip(json) : value;
   }
   return value;
+}
+
+// A record's time as ISO 8601, or null when it does not parse.
+function isoOrNull(value) {
+  const d = new Date(typeof value === 'number' ? value : typeof value === 'string' ? Date.parse(value) : NaN);
+  return Number.isFinite(d.getTime()) ? d.toISOString() : null;
 }
 
 function boundInput(input) {
@@ -90,6 +100,30 @@ function assertExternal(ledger, input, { executor, rel, record, turnId }) {
   return { fact: ledger.assert({ ...fields, ...(earlier && !owned ? { supersedes: earlier.id } : {}) }) };
 }
 
+// An adapter's fact inputs for one record: at most MAX_INPUTS_PER_RECORD,
+// each an object with a non-blank string subject and attr. A throwing
+// recordToFacts falls back to the record summary.
+function recordInputs(adapter, record, job, recordId) {
+  let inputs = [{
+    stmt: `${job.executor} reported: ${record.summary || JSON.stringify(record)}`,
+    subject: `job:${job.id}`, attr: `record-${recordId}`, value: record.outcome || record.summary || null
+  }];
+  if (typeof adapter.recordToFacts === 'function') {
+    try {
+      const mapped = adapter.recordToFacts(record, job);
+      inputs = Array.isArray(mapped) ? mapped : [];
+    } catch (err) {
+      log.warn(`${job.executor} recordToFacts failed on ${job.id}/${recordId}; keeping the record summary: ${clip(err && err.message ? err.message : err)}`);
+    }
+  }
+  if (inputs.length > MAX_INPUTS_PER_RECORD) {
+    log.warn(`${job.executor} gave ${inputs.length} facts for ${job.id}/${recordId}; keeping the first ${MAX_INPUTS_PER_RECORD}`);
+  }
+  return inputs.slice(0, MAX_INPUTS_PER_RECORD);
+}
+
+const isText = (v) => typeof v === 'string' && v.trim() !== '';
+
 async function externalResults(reg, { caseId, turnId }, job, store) {
   const dir = reg.caseDir(caseId);
   const adapter = await reg.adapter(job.executor);
@@ -97,35 +131,46 @@ async function externalResults(reg, { caseId, turnId }, job, store) {
   const saved = [];
   const asserted = [];
   const conflicts = [];
+  let more = false;
   let cursor = job.resultsCursor || null;
-  for (let page = 0; page < MAX_PAGES; page += 1) {
+  pages: for (let page = 0; page < MAX_PAGES; page += 1) {
     const res = await adapter.results(job.externalId, cursor ? { after: cursor } : {});
     const records = Array.isArray(res?.records) ? res.records : [];
     for (const record of records) {
       const recordId = String(record?.id ?? '');
       if (!RECORD_ID.test(recordId)) continue;
+      if ((job.recordsSaved || []).includes(recordId)) {
+        cursor = recordId;
+        continue;
+      }
+      const inputs = recordInputs(adapter, record, job, recordId);
+      // The per-call cap: a record that does not fit waits, unsaved, for the
+      // next call (the saved cursor still points before it).
+      if (asserted.length + inputs.length > MAX_FACTS_PER_CALL) {
+        more = true;
+        break pages;
+      }
       cursor = recordId;
-      if ((job.recordsSaved || []).includes(recordId)) continue;
       const rel = `sources/${job.executor}/${job.id}/${recordId}.json`;
       const file = path.join(dir, ...rel.split('/'));
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.writeFileSync(file, JSON.stringify(record, null, 2));
-      const fallback = [{ stmt: `${job.executor} reported: ${record.summary || JSON.stringify(record)}`, subject: `job:${job.id}`, attr: `record-${recordId}`, value: record.outcome || record.summary || null }];
-      let inputs = fallback;
-      if (typeof adapter.recordToFacts === 'function') {
+      const at = isoOrNull(record.at);
+      for (const raw of inputs) {
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !isText(raw.subject) || !isText(raw.attr)) {
+          log.warn(`${job.executor} gave a fact without a subject and attr for ${job.id}/${recordId}; skipped`);
+          continue;
+        }
         try {
-          const mapped = adapter.recordToFacts(record, job);
-          inputs = Array.isArray(mapped) ? mapped : [];
+          const r = assertExternal(ledger, boundInput(raw), { executor: job.executor, rel, record: { kind: record.kind, at }, turnId });
+          asserted.push(r.fact.id);
+          if (r.conflict) conflicts.push(r.conflict);
         } catch (err) {
-          log.warn(`${job.executor} recordToFacts failed on ${job.id}/${recordId}; keeping the record summary: ${clip(err && err.message ? err.message : err)}`);
+          log.warn(`A fact from ${job.executor} for ${job.id}/${recordId} was not recorded: ${clip(err && err.message ? err.message : err)}`);
         }
       }
-      for (const raw of inputs) {
-        if (!raw || typeof raw !== 'object' || !raw.subject || !raw.attr) continue;
-        const r = assertExternal(ledger, boundInput(raw), { executor: job.executor, rel, record, turnId });
-        asserted.push(r.fact.id);
-        if (r.conflict) conflicts.push(r.conflict);
-      }
+      // Saved even when inputs were skipped, so a retry never asserts this
+      // record's facts (or its conflict unknowns) twice.
       job.recordsSaved = [...(job.recordsSaved || []), recordId];
       job.resultsCursor = recordId;
       store.write(job);
@@ -134,9 +179,14 @@ async function externalResults(reg, { caseId, turnId }, job, store) {
     if (!res?.next || !records.length) break;
     cursor = res.next;
   }
+  const notes = [
+    ...(conflicts.length ? ['Some reports contradict facts you hold; each is recorded as a load-bearing unknown for the owner.'] : []),
+    ...(more ? [`More results are waiting (at most ${MAX_FACTS_PER_CALL} facts per call); call results again.`] : [])
+  ];
   return {
     ok: true, jobId: job.id, state: job.state, saved, facts: asserted, conflicts,
-    ...(conflicts.length ? { note: 'Some reports contradict facts you hold; each is recorded as a load-bearing unknown for the owner.' } : {})
+    ...(more ? { more: true } : {}),
+    ...(notes.length ? { note: notes.join(' ') } : {})
   };
 }
 

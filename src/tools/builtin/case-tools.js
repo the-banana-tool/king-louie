@@ -14,13 +14,15 @@ const NO_CASE = Object.freeze({
 });
 
 // Ops memory (cases stage 3 §3.11) lives on the executor registry, when the
-// host has one.
-function opsMemoryOf(ctx) {
+// host has one. It runs after the ledger write, and its failure never undoes
+// that write: the tool still returns ok, with a warning.
+function updateOpsMemory(ctx, fn) {
   try {
     const registry = ctx?.runtime?.host?.getExecutorRegistry?.();
-    return registry ? registry.opsMemory : null;
-  } catch {
+    if (registry && registry.opsMemory) fn(registry.opsMemory);
     return null;
+  } catch (err) {
+    return `Ops memory was not updated: ${err && err.message ? err.message : err}`;
   }
 }
 
@@ -157,15 +159,15 @@ const LedgerTool = acceptAnyValue(new Tool({
         // After the owner-quote and user-message checks, so their errors win.
         if (input.provenance === 'external-agent') return { ok: false, error: 'external-agent facts are written only by Executor results.' };
         const fact = ledger.assert(input);
-        opsMemoryOf(ctx)?.afterAssert(fact, { caseId: ctx.caseId, caseTitle: ctx.title, facts: ledger.view().facts });
-        if (fact.provenance !== 'user') return { ok: true, fact };
-        const effect = ctx.runtime.applyOwnerFact(ctx.caseId, fact);
+        const effect = fact.provenance === 'user' ? ctx.runtime.applyOwnerFact(ctx.caseId, fact) : {};
+        const opsWarning = updateOpsMemory(ctx, (m) => m.afterAssert(fact, { caseId: ctx.caseId, caseTitle: ctx.title, facts: ledger.view().facts }));
+        const warning = [effect.error, opsWarning].filter(Boolean).join(' ');
         return {
           ok: true,
           fact,
           ...(effect.applied ? { effect: effect.applied } : {}),
           ...(effect.note ? { note: effect.note } : {}),
-          ...(effect.error ? { warning: effect.error } : {})
+          ...(warning ? { warning } : {})
         };
       }
       case 'infer':
@@ -201,8 +203,8 @@ const LedgerTool = acceptAnyValue(new Tool({
         if (!params.id || !params.reason) return { ok: false, error: 'retract needs "id" and "reason".' };
         {
           const retracted = ledger.retract(params.id, params.reason);
-          opsMemoryOf(ctx)?.retract(ctx.caseId, params.id);
-          return { ok: true, fact: retracted };
+          const opsWarning = updateOpsMemory(ctx, (m) => m.retract(ctx.caseId, params.id));
+          return { ok: true, fact: retracted, ...(opsWarning ? { warning: opsWarning } : {}) };
         }
       case 'query':
         return { ok: true, facts: ledger.query(params.filter || {}) };
