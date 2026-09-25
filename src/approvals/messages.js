@@ -370,6 +370,7 @@ module.exports = {
   TTL_MAX_MS,
   PLATFORMS,
   iso,
+  isTimestamp,
   randomNonce,
   clampTtl,
   cutSummary,

@@ -10,6 +10,7 @@ const { createPhoneApi } = require('../src/frontdoor/phone-api');
 const { DeviceRegistry } = require('../src/frontdoor/device-registry');
 const { Invites } = require('../src/frontdoor/invites');
 const { createFakePhone } = require('./helpers/fake-phone');
+const { addSink } = require('../src/logging');
 
 const cleanups = [];
 after(async () => { for (const c of cleanups.reverse()) await c(); });
@@ -92,7 +93,8 @@ describe('phone API code and invite routes', () => {
     assert.deepEqual((await call('GET', `/v1/enroll/${codeId}`)).body, { code: codeId });
     const { invite_id: inviteId } = relay.invites.createInvite(phone.deviceId);
     assert.equal((await call('POST', `/v1/devices/invites/${inviteId}/claim`, { body: '{}' })).status, 202);
-    relay.invites.claim(inviteId, { device: { device_id: phone.deviceId }, mac: 'x' });
+    const claimant = createFakePhone();
+    relay.invites.claim(inviteId, { device: { device_id: claimant.deviceId }, mac: 'x' });
     assert.equal((await call('POST', `/v1/devices/invites/${inviteId}/claim`, { body: '{}' })).body.error, 'unknown_invite');
   });
 });
@@ -125,5 +127,85 @@ describe('phone API limits and routing', () => {
     assert.equal(api.routes().filter((r) => r.pattern === '/v1/time').length, 1);
     assert.throws(() => api.registerRoute('GET', '/v2/x', { auth: 'none', handler: () => ({}) }));
     assert.throws(() => api.registerRoute('GET', '/v1/x', { auth: 'oauth', handler: () => ({}) }));
+  });
+
+  it('refuses a timestamp that is not RFC 3339 UTC, including a syntactically valid but nonexistent date', async () => {
+    const { call, phone } = await start();
+    const notATimestamp = phone.signApi('POST', '/v1/echo/a', '{}', { timestamp: 'not-a-timestamp' });
+    assert.equal((await call('POST', '/v1/echo/a', { body: '{}', headers: notATimestamp })).body.error, 'bad_timestamp');
+    // Date.parse would silently roll this forward to March; isTimestamp must not.
+    const feb30 = phone.signApi('POST', '/v1/echo/a', '{}', { timestamp: '2026-02-30T00:00:00Z' });
+    assert.equal((await call('POST', '/v1/echo/a', { body: '{}', headers: feb30 })).body.error, 'bad_timestamp');
+  });
+
+  it("a handler error carrying status and code is answered with them, and an ordinary throw answers 500 internal", async () => {
+    const { call, api } = await start();
+    api.registerRoute('GET', '/v1/boom', { auth: 'none', handler: async () => {
+      const e = new Error('the teapot refuses');
+      e.status = 418;
+      e.code = 'teapot';
+      throw e;
+    } });
+    api.registerRoute('GET', '/v1/crash', { auth: 'none', handler: async () => { throw new Error('unexpected'); } });
+    const boom = await call('GET', '/v1/boom');
+    assert.equal(boom.status, 418);
+    assert.equal(boom.body.error, 'teapot');
+    const crash = await call('GET', '/v1/crash');
+    assert.equal(crash.status, 500);
+    assert.equal(crash.body.error, 'internal');
+  });
+
+  it('an unauthenticated failure on a device route is rate-limited by IP too (I1)', async () => {
+    const { call } = await start({ rateLimits: { unauthPerMin: 2 } });
+    assert.equal((await call('POST', '/v1/echo/a', { body: '{}' })).body.error, 'unauthorized');
+    assert.equal((await call('POST', '/v1/echo/a', { body: '{}' })).body.error, 'unauthorized');
+    const limited = await call('POST', '/v1/echo/a', { body: '{}' });
+    assert.equal(limited.status, 429);
+    assert.equal(limited.body.error, 'rate_limited');
+  });
+
+  it('a malformed percent-escape in a path segment answers 404 with no error log (I3)', async () => {
+    const { call } = await start();
+    const errors = [];
+    const remove = addSink((r) => { if (r.level === 'error') errors.push(r); });
+    try {
+      const res = await call('GET', '/v1/enroll/%zz');
+      assert.equal(res.status, 404);
+      assert.equal(res.body.error, 'not_found');
+    } finally {
+      remove();
+    }
+    assert.deepEqual(errors, []);
+  });
+
+  it("a 429 does not use up the replay entry: the exact same signed request still succeeds once the device's window clears", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-phone-api-'));
+    cleanups.push(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const devices = new DeviceRegistry({ file: path.join(dir, 'devices.json') });
+    let clock = Date.now();
+    const api = createPhoneApi({ devices, rateLimits: { devicePerMin: 1 }, now: () => clock });
+    api.registerRoute('POST', '/v1/echo/{thing}', { auth: 'device', handler: async (req, ctx) => ({ status: 202, body: { thing: ctx.params.thing } }) });
+    const server = http.createServer(api.handler);
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    cleanups.push(() => new Promise((r) => server.close(r)));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const phone = createFakePhone();
+    devices.register({ device_id: phone.deviceId, jwk: phone.jwk, name: 'Pixel 9', platform: 'android' });
+    const call = async (p, headers, body) => {
+      const res = await fetch(base + p, { method: 'POST', headers, body });
+      const text = await res.text();
+      return { status: res.status, body: text ? JSON.parse(text) : null };
+    };
+
+    const headersA = phone.signApi('POST', '/v1/echo/a', '{}', { timestamp: new Date(clock).toISOString() });
+    assert.equal((await call('/v1/echo/a', headersA, '{}')).status, 202);
+
+    const headersB = phone.signApi('POST', '/v1/echo/b', '{}', { timestamp: new Date(clock).toISOString() });
+    const limited = await call('/v1/echo/b', headersB, '{}');
+    assert.equal(limited.body.error, 'rate_limited');
+
+    clock += 61000; // the device's 60 s window clears
+    const retry = await call('/v1/echo/b', headersB, '{}');
+    assert.equal(retry.status, 202, 'the request blocked by the 429 was never marked as used');
   });
 });
