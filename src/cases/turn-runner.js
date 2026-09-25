@@ -1,0 +1,283 @@
+// src/cases/turn-runner.js
+// The cases:wakeups sweep and the headless wake-up turn (cases stage 2 spec
+// §3.6, §3.7). A cheap orient call decides whether anything changed; only
+// then does a judge loop act, confined to the case tools and Read/Glob/Grep.
+const crypto = require('crypto');
+const {
+  CASE_TOOL_NAMES, WAKEUP_BASE_TOOLS, shapeToolDefinitions, buildCaseSystemPrompt, casePrompter
+} = require('./chat-integration');
+const { NO_RETRY } = require('./roles');
+const { createLogger } = require('../logging');
+
+const log = createLogger('cases/wakeups');
+
+const ORIENT_PROMPT = [
+  'You are the orient step of an unattended case wake-up. Nobody is watching.',
+  'Read the orientation and the due wake-ups. Decide only whether anything changed that needs work now: a new answer or fact, a deadline or budget line, a wake-up that asks for work.',
+  'Reply with JSON only: {"changed": true or false, "why": "<one sentence>"}.',
+  'When unsure, answer "changed": true.'
+].join('\n');
+
+const WAKEUP_PROMPT = [
+  'Wake-up mode. Nobody is watching this turn.',
+  '- Contact the owner only through the Ask tool, and never assume an answer.',
+  "- The brief's materiality decides whether something is worth a briefing: tags in \"tell\" may be briefed, tags in \"ignore\" are only journaled.",
+  '- Only the case tools and Read, Glob and Grep are available. Other tools are refused.',
+  '- If you are blocked or the approach is a dead end, call Fail with what you tried, and stop.',
+  '- End with a short summary of what you did; it is journaled.'
+].join('\n');
+
+const oneLine = (s, max = 200) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
+
+function textOf(reply) {
+  if (typeof reply === 'string') return reply;
+  if (reply && typeof reply.content === 'string') return reply.content;
+  return '';
+}
+
+function parseOrient(text) {
+  const s = String(text || '');
+  const start = s.indexOf('{');
+  const end = s.lastIndexOf('}');
+  if (start === -1 || end <= start) return null;
+  try {
+    const v = JSON.parse(s.slice(start, end + 1));
+    if (!v || typeof v.changed !== 'boolean') return null;
+    return { changed: v.changed, why: typeof v.why === 'string' ? v.why : '' };
+  } catch {
+    return null;
+  }
+}
+
+// Providers' sendMessage usually returns bare text; charge the orient call
+// only when it reports metrics.
+function recordOneShotUsage(runtime, turn, reply) {
+  const m = reply && typeof reply === 'object' ? reply.llmMetrics : null;
+  if (!m) return;
+  const tracker = typeof runtime.host?.getUsageTracker === 'function' ? runtime.host.getUsageTracker() : null;
+  if (!tracker || typeof tracker.record !== 'function') return;
+  runtime.usageHook(turn)(tracker.record({
+    provider: m.provider, model: m.model, inputTokens: m.inputTokens, outputTokens: m.outputTokens, totalTokens: m.totalTokens, costUsd: m.costUsd
+  }));
+}
+
+const dueLines = (due) => due.map((w) => `- ${w.id} ${w.kind}${w.payload?.key ? ` (${w.payload.key})` : ''}, due ${w.nextAt}`);
+
+// Runs inside systemAction('sweep'): housekeeping every case gets each tick,
+// then the ids of the due wake-ups that need a turn.
+async function sweepCase(runtime, id, now) {
+  const meta = runtime.getCase(id);
+  const store = runtime.wakeups(meta.id);
+  store.reanchor(now);
+  runtime.questions(meta.id).expire(now);
+  const budget = runtime.budget(meta.id);
+  const deadlineNow = budget.charge('deadline', 0).crossedNow;
+  if (deadlineNow.length) runtime.onCrossings(meta.id, 'deadline', deadlineNow);
+  const reconciled = budget.reconcile();
+  for (const [category, crossed] of Object.entries(reconciled)) runtime.onCrossings(meta.id, category, crossed);
+  const newDeadline = [...deadlineNow, ...(reconciled.deadline || [])];
+
+  const status = runtime.getCase(meta.id).status;
+  if (status === 'done' || status === 'abandoned') {
+    store.cancelAll();
+    return { due: [], quiet: 0 };
+  }
+  if (status === 'draft' || status === 'paused') return { due: [], quiet: 0 };
+
+  const registry = typeof runtime.host?.getExecutorRegistry === 'function' ? runtime.host.getExecutorRegistry() : null;
+  const due = [];
+  let quiet = 0;
+  for (const w of store.due(now)) {
+    if (w.kind === 'deadline-check') {
+      if (newDeadline.some((t) => t >= 80)) due.push(w.id);
+      else {
+        store.markRan(w.id, { outcome: 'quiet', now });
+        quiet += 1;
+      }
+      continue;
+    }
+    if (w.kind === 'poll-executor') {
+      let material = false;
+      if (registry && typeof registry.pollWakeup === 'function') {
+        try {
+          material = Boolean((await registry.pollWakeup(meta.id, w))?.material);
+        } catch (err) {
+          store.markRan(w.id, { outcome: 'failed', error: err.message, now });
+          continue;
+        }
+      }
+      if (material) due.push(w.id);
+      else {
+        store.markRan(w.id, { outcome: 'quiet', now });
+        quiet += 1;
+      }
+      continue;
+    }
+    if (status === 'needs-direction') continue;
+    due.push(w.id);
+  }
+  return { due, quiet };
+}
+
+async function runWakeupTurn(runtime, caseId, dueIds, now = runtime.now()) {
+  const host = runtime.host || {};
+  const turnId = `wakeup-${now.getTime()}-${crypto.randomBytes(3).toString('hex')}`;
+  let turn;
+  try {
+    turn = await runtime.beginTurn(caseId, { turnId, source: 'wakeup' });
+  } catch (err) {
+    if (err && err.code === 'CASE_BUSY') return { outcome: 'busy' };
+    throw err;
+  }
+  let closed = false;
+  const close = async (outcome, journal, summary) => {
+    if (closed) return { outcome };
+    closed = true;
+    try {
+      await runtime.endTurn(turn, { summary, journal, journalKind: 'wakeup' });
+    } catch (err) {
+      log.warn(`Wake-up commit for case ${caseId} failed: ${err.message}`);
+    }
+    return { outcome };
+  };
+
+  try {
+    const store = runtime.wakeups(caseId);
+    // Another process may have run them while this one waited for the lock.
+    const due = store.due(now).filter((w) => dueIds.includes(w.id));
+    if (!due.length) return await close('none', null, 'wake-up: nothing due');
+    const ids = due.map((w) => w.id);
+    const mark = (outcome, error = null) => {
+      for (const id of ids) store.markRan(id, { outcome, error, now: runtime.now() });
+    };
+    const skipped = (why) => {
+      mark('skipped');
+      return close('skipped', `skipped: ${why}`, `wake-up skipped: ${why}`);
+    };
+    const failed = (err) => {
+      if (turn.signal.aborted) return skipped(String(turn.signal.reason || 'aborted'));
+      const message = err?.message || String(err);
+      mark('failed', message);
+      const attempts = Math.max(0, ...ids.map((id) => store.list().find((w) => w.id === id)?.attempts || 0));
+      if (attempts >= 3) {
+        try {
+          runtime.createQuestion(caseId, {
+            kind: 'briefing',
+            urgency: 'normal',
+            text: `${turn.title}: wake-ups have failed ${attempts} times in a row (${oneLine(message, 160)}). The case keeps retrying with backoff.`,
+            payload: { type: 'wakeups-failing', key: 'wakeups-failing', mcpAnswerable: false }
+          }, { charge: false });
+        } catch (e) {
+          log.warn(`Could not brief about failing wake-ups on ${caseId}: ${e.message}`);
+        }
+      }
+      return close('failed', `failed: ${oneLine(message, 300)}`, 'wake-up failed');
+    };
+
+    const status = runtime.getCase(caseId).status;
+    if (status !== 'active' && status !== 'needs-direction') return await skipped(`case is ${status}`);
+    if (turn.dailyTurnsSpent) return await skipped('daily turn budget spent');
+
+    let why = null;
+    const answered = due.some((w) => w.kind === 'retry' && w.payload?.questionId);
+    if (!turn.reorientPending && !answered) {
+      let reply;
+      try {
+        reply = await runtime.routedProvider(turn, { role: 'orient' }).sendMessage(
+          [{ sender: 'user', text: [`Now: ${now.toISOString()}`, '', 'Due wake-ups:', ...dueLines(due), '', turn.orientation].join('\n') }],
+          { systemPrompt: ORIENT_PROMPT, abortSignal: turn.signal }
+        );
+      } catch (err) {
+        return await failed(err);
+      }
+      recordOneShotUsage(runtime, turn, reply);
+      const parsed = parseOrient(textOf(reply));
+      if (parsed && parsed.changed === false) {
+        mark('quiet');
+        return await close('quiet', `quiet: ${ids.join(', ')} — ${oneLine(parsed.why || 'nothing changed')}`, 'wake-up quiet');
+      }
+      why = parsed ? parsed.why : 'The orient step gave no usable answer, so the case acts to be safe.';
+    }
+
+    try {
+      const cfg = runtime.settings().wakeups;
+      const executor = await host.createToolExecutor(null, null, null, {
+        workingDirectory: turn.dir,
+        allowedDirectories: [],
+        caseContext: runtime.caseContext(turn, { ownerMessages: [], ownerMessageTimes: [] }),
+        denyAutoApproval: true,
+        allowedToolNames: new Set([...CASE_TOOL_NAMES, ...WAKEUP_BASE_TOOLS])
+      });
+      const registry = host.toolRegistry;
+      const baseDefs = WAKEUP_BASE_TOOLS.map((n) => registry.get(n)).filter(Boolean).map((t) => t.toFunctionDefinition());
+      const Loop = host.AgentLoop;
+      const loop = new Loop(runtime.routedProvider(turn, { role: 'judge' }), executor, {
+        maxIterations: cfg.maxIterations,
+        usageTracker: typeof host.getUsageTracker === 'function' ? host.getUsageTracker() : null,
+        onUsageRecorded: runtime.usageHook(turn),
+        failoverPolicy: NO_RETRY,
+        abortSignal: turn.signal,
+        prompter: casePrompter(null)
+      });
+      const message = [
+        'Wake-ups due:',
+        ...dueLines(due),
+        '',
+        `Why now: ${why || 'a re-orientation trigger or an owner answer is pending.'}`,
+        'Do what the case needs now, then stop.'
+      ].join('\n');
+      const result = await loop.run([{ sender: 'user', text: message }], shapeToolDefinitions(baseDefs, true, registry), {
+        systemPrompt: buildCaseSystemPrompt(turn.orientation, WAKEUP_PROMPT)
+      });
+      if (turn.signal.aborted) return await skipped(String(turn.signal.reason || 'aborted'));
+      mark('acted');
+      return await close('acted', `# Wake-up ${ids.join(', ')}\n\n${String(result?.content || '(no summary)').trim()}`, `wake-up ${ids.join(', ')}`);
+    } catch (err) {
+      return await failed(err);
+    }
+  } catch (err) {
+    log.warn(`Wake-up turn on case ${caseId} failed: ${err.message}`);
+    return close('failed', `failed: ${oneLine(err.message, 300)}`, 'wake-up failed');
+  }
+}
+
+async function runDueWakeups(runtime, now = runtime.now()) {
+  const counts = { ran: 0, quiet: 0, skipped: 0, busy: 0, failed: 0 };
+  const cfg = runtime.settings().wakeups;
+  if (!cfg.enabled || !runtime.host) return counts;
+  // A case being created has no first commit; sweeping it now would break `createCase`.
+  if (runtime.creating) return counts;
+  let turns = 0;
+  for (const meta of runtime.listCases()) {
+    // An owner is mid-turn on this case in this process: leave it alone.
+    if (runtime.turns.has(meta.id)) {
+      counts.busy += 1;
+      continue;
+    }
+    let sweep;
+    try {
+      sweep = await runtime.systemAction(meta.id, 'sweep', () => sweepCase(runtime, meta.id, now));
+    } catch (err) {
+      if (err && err.code === 'CASE_BUSY') counts.busy += 1;
+      else {
+        log.warn(`Wake-up sweep failed for case ${meta.slug}: ${err.message}`);
+        counts.failed += 1;
+      }
+      continue;
+    }
+    counts.quiet += sweep.quiet;
+    if (!sweep.due.length || turns >= cfg.maxCasesPerTick) continue;
+    turns += 1;
+    try {
+      const { outcome } = await runWakeupTurn(runtime, meta.id, sweep.due, now);
+      if (outcome === 'acted') counts.ran += 1;
+      else if (Object.prototype.hasOwnProperty.call(counts, outcome)) counts[outcome] += 1;
+    } catch (err) {
+      log.warn(`Wake-up turn failed for case ${meta.slug}: ${err.message}`);
+      counts.failed += 1;
+    }
+  }
+  return counts;
+}
+
+module.exports = { ORIENT_PROMPT, WAKEUP_PROMPT, parseOrient, sweepCase, runWakeupTurn, runDueWakeups };

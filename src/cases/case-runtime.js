@@ -1162,6 +1162,16 @@ class CaseRuntime {
       streamMessageWithTools: (messages, tools, opts, onChunk) => call(messages, opts, tools, onChunk)
     };
   }
+
+  // ---- Wake-ups (spec §3.6); required lazily, turn-runner needs this module's exports ----
+
+  sweep(id, now = this.now()) {
+    return require('./turn-runner').sweepCase(this, id, now);
+  }
+
+  runDueWakeups(now = this.now()) {
+    return require('./turn-runner').runDueWakeups(this, now);
+  }
 }
 
 module.exports = { CaseRuntime, CaseBusyError, CaseNotFoundError, resolveCasesRoot, BUDGET_FACT_NOTE };
