@@ -390,6 +390,12 @@ describe('sudoers for web-01', () => {
 describe('Windows ACL script', () => {
   const SCRIPT = path.join(EXAMPLES, 'windows', 'runbook-acls.ps1');
   const text = () => fs.readFileSync(SCRIPT, 'utf8');
+  const fnBody = (t, name) => {
+    const start = t.indexOf(`function ${name} {`);
+    assert.ok(start > -1, `no function ${name}`);
+    const next = t.indexOf('\nfunction ', start + 1);
+    return t.slice(start, next === -1 ? undefined : next);
+  };
 
   it('declares WhatIf support, a mandatory role and runner, and the default base', () => {
     const t = text();
@@ -397,32 +403,45 @@ describe('Windows ACL script', () => {
     assert.match(t, /\[Parameter\(Mandatory\)\]\[ValidateSet\('base', 'gpu-box', 'laptop'\)\]\[string\] \$Role/);
     assert.match(t, /\[Parameter\(Mandatory\)\]\[string\] \$Runner/);
     assert.ok(t.includes("[string] $Base = 'C:\\KingLouie'"));
+    assert.match(t, /^Set-StrictMode -Version Latest$/m);
+    assert.match(t, /^\$ErrorActionPreference = 'Stop'$/m);
   });
 
-  it('calls icacls and takeown only by their full path, refuses to run unelevated, and resolves the runner to a SID', () => {
+  it('calls icacls only by its full path, never recursively, refuses to run unelevated, and resolves the runner to a SID', () => {
     const t = text();
     assert.ok(t.includes('$icacls = "$env:SystemRoot\\System32\\icacls.exe"'));
-    assert.ok(t.includes('$takeown = "$env:SystemRoot\\System32\\takeown.exe"'));
     const invoked = [...t.matchAll(/^\s*&\s+(\S+)/gm)].map((m) => m[1]);
-    assert.deepEqual([...new Set(invoked)].sort(), ['$icacls', '$takeown']);
+    assert.deepEqual([...new Set(invoked)], ['$icacls']);
     assert.ok(!/^\s*icacls\b/im.test(t), 'a bare icacls call');
-    assert.ok(!/^\s*takeown\b/im.test(t), 'a bare takeown call');
+    // takeown /R and icacls /T follow junctions out of the tree (reproduced).
+    assert.ok(!/takeown\.exe/i.test(t), 'takeown is back');
+    assert.ok(!/['"]\/[TR]['"]/i.test(t), 'a recursive /T or /R argument');
+    assert.ok(!/\s-Recurse\b/.test(t), 'Get-ChildItem -Recurse does not see through junctions and must not drive the walk or the check');
     assert.match(t, /WindowsBuiltInRole\]::Administrator/);
     assert.match(t, /NTAccount\(\$Runner\)\)\.Translate\(\[Security\.Principal\.SecurityIdentifier\]\)/);
   });
 
-  it('validates -Base: rooted with a separator (rejects a bare drive), not a drive root, outside $env:SystemRoot, and either empty or an existing King Louie install', () => {
+  it('validates -Base: rooted with a separator, not a drive root, outside $env:SystemRoot, and either empty or an existing King Louie install', () => {
     const t = text();
     assert.match(t, /\$Base -notmatch '\^\[A-Za-z\]:\[\\\\\/\]'/);
     assert.match(t, /drive root/);
     assert.match(t, /\$env:SystemRoot/);
     assert.match(t, /app\\package\.json/);
+    assert.ok(t.includes('Get-ChildItem -LiteralPath $baseFull -Force -ErrorAction Stop'));
+    assert.ok(!t.includes('SilentlyContinue'), 'an error is swallowed');
+  });
+
+  it('builds every path from the normalized $baseFull', () => {
+    const t = text();
+    assert.ok(!/"\$Base\\/.test(t), 'a path is built from the raw -Base');
+    assert.ok(!/Join-Path \$Base\b/.test(t), 'a path is built from the raw -Base');
+    assert.match(t, /\$baseFull = \[System\.IO\.Path\]::GetFullPath\(\$Base\)\.TrimEnd\('\\'\)/);
   });
 
   it('lets LOCAL SERVICE read the app folder', () => {
     const t = text();
     assert.ok(t.includes("$LocalService = '*S-1-5-19'"));
-    assert.ok(t.includes('Set-KlAcl -Path "$Base\\app" -Grants @("${LocalService}:(OI)(CI)RX")'));
+    assert.ok(t.includes('Set-KlAcl -Path "$baseFull\\app" -Grants @("${LocalService}:(OI)(CI)RX")'));
   });
 
   it('grants only to SYSTEM, Administrators, LOCAL SERVICE and the runner, by SID', () => {
@@ -432,84 +451,115 @@ describe('Windows ACL script', () => {
     const principals = new Set([...t.matchAll(/"\$\{(\w+)\}:\(/g)].map((m) => m[1]));
     assert.deepEqual([...principals].sort(), ['Admins', 'LocalService', 'RunnerSid', 'System']);
     assert.equal(/["'][A-Za-z][^"'$\r\n]*:\((?:OI|CI)\)/.test(t), false, 'a grant names an account literally');
+    const ruleSids = new Set([...t.matchAll(/New-KlAccessRule \$(\w+)/g)].map((m) => m[1]));
+    assert.deepEqual([...ruleSids].sort(), ['AdminsSecurityId', 'RunnerSecurityId', 'SystemSecurityId']);
   });
 
-  describe('reclaiming an admin-owned tree', () => {
-    it('takes ownership of the top folder alone, verifies it by SID, then replaces its DACL wholesale', () => {
+  describe('locking an admin-owned tree (Ruling C1)', () => {
+    it('locks each folder (owner verified by SID, DACL replaced) before listing its children, one level at a time', () => {
       const t = text();
-      assert.match(t, /function Confirm-KlOwnerIsAdmins/);
-      assert.match(t, /\(Get-Acl -LiteralPath \$Path\)\.Owner/);
-      assert.match(t, /\[Security\.Principal\.NTAccount\]\s*\$ownerAccount\)\.Translate\(\[Security\.Principal\.SecurityIdentifier\]\)/);
-      assert.match(t, /\$ownerSid -ne 'S-1-5-32-544'/);
-      assert.ok(t.includes("& $icacls $Path '/setowner' $Admins"), 'the top-folder setowner call must not use /T (that is step 3, on takeown)');
-      assert.match(t, /SetAccessRuleProtection\(\$true, \$false\)/);
-      assert.match(t, /RemoveAccessRule\(\$rule\)/);
-      assert.match(t, /AddAccessRule\(\$rule\)/);
-      assert.match(t, /Set-Acl -LiteralPath \$Path -AclObject \$acl/);
-      // order: setowner call, then the owner check, then the DACL replace
-      const setownerIdx = t.indexOf("& $icacls $Path '/setowner' $Admins");
-      const verifyIdx = t.indexOf('Confirm-KlOwnerIsAdmins -Path $Path');
-      const daclIdx = t.indexOf('$acl.SetAccessRuleProtection');
-      assert.ok(setownerIdx > -1 && setownerIdx < verifyIdx && verifyIdx < daclIdx, 'setowner, verify and DACL-replace are not in order');
+      const fn = fnBody(t, 'Lock-KlAdminOwnedTree');
+      const lockTop = fn.indexOf('[KlNative]::LockItem($top, $true, $OwnerSid.Value, $topDacl)');
+      const list = fn.indexOf('Get-ChildItem -LiteralPath $dir -Force)');
+      assert.ok(lockTop > -1 && lockTop < list, 'the top folder is not locked before it is listed');
+      assert.ok(fn.includes("$topDacl = 'D:PAI' +"), 'the top DACL is not protected');
+      // A child folder is locked before it is queued, and listed only when popped.
+      const lockChild = fn.indexOf('[KlNative]::LockItem($full, $true, $OwnerSid.Value, $folderDacl)', list);
+      const push = fn.indexOf('$pending.Push($full)');
+      assert.ok(lockChild > -1 && lockChild < push, 'a child folder is queued before it is locked');
+      // LockItem: owner written, read back and compared by SID, then the DACL.
+      const setOwner = t.indexOf('SetKernelObjectSecurity(handle, OwnerSecurityInformation');
+      const verify = t.indexOf('actual.Value != owner.Value');
+      const setDacl = t.indexOf('SetKernelObjectSecurity(handle, DaclSecurityInformation');
+      assert.ok(setOwner > -1 && setOwner < verify && verify < setDacl, 'owner, verify, DACL are not in order');
     });
 
-    it('takes ownership below the top folder with takeown, then resets with icacls /reset /T, neither swallowed by /C', () => {
+    it('changes one item per write: a handle on the item itself, no SetNamedSecurityInfo (Set-Acl, icacls) inside the walk', () => {
       const t = text();
-      assert.ok(t.includes("& $takeown '/F' $Path '/A' '/R' '/D' 'Y'"));
-      assert.ok(t.includes('& $icacls "$Path\\*" \'/reset\' \'/T\''));
-      assert.ok(!t.includes("'/reset' '/T' '/C'"), 'the recursive reset must not use /C: /C makes icacls exit 0 on failure (reproduced: without /C it exits 1307)');
-      assert.ok(!t.includes("'/setowner' $Admins '/T' '/C'"), 'a recursive /T /C setowner is exactly the exit-code bug this rewrite fixes');
-      const takeownIdx = t.indexOf("& $takeown '/F' $Path '/A' '/R' '/D' 'Y'");
-      const resetIdx = t.indexOf('& $icacls "$Path\\*" \'/reset\' \'/T\'');
-      assert.ok(takeownIdx > -1 && takeownIdx < resetIdx, 'takeown must run before the recursive reset');
+      assert.ok(!/Set-Acl\s+-/.test(t), 'Set-Acl propagates into the subtree before the walk has checked it');
+      assert.ok(!/SetAccessControl\(/.test(t), 'SetAccessControl propagates into the subtree before the walk has checked it');
+      const lockItem = t.slice(t.indexOf('public static void LockItem('), t.indexOf('// Returns { attributes, number of links }.'));
+      const open = lockItem.indexOf('CreateFileW(path, access, 0x7, IntPtr.Zero, 3, 0x00200000 | 0x02000000');
+      const reparse = lockItem.indexOf('FileAttributeReparsePoint) != 0');
+      const links = lockItem.indexOf('info.NumberOfLinks > 1');
+      const write = lockItem.indexOf('SetKernelObjectSecurity(');
+      assert.ok(open > -1 && open < reparse && reparse < links && links < write, 'the checks do not come before the writes on the same handle');
+      assert.ok(!fnBody(t, 'Lock-KlAdminOwnedTree').includes('& $icacls'), 'icacls inside the walk');
     });
 
-    it('re-applies the data subfolders\' runner-Modify grants after the wipe, then verifies the whole tree by hand', () => {
+    it('throws on a reparse point before touching it, and re-checks each item after locking it', () => {
       const t = text();
-      assert.match(t, /function Confirm-KlTreeLockedDown/);
-      assert.match(t, /Confirm-KlTreeLockedDown -Path \$Path -WritableExceptions @\(\$DataGrants\.Keys\)/);
-      assert.match(t, /Set-KlAcl -Path \$dataPath -Grants @\(\$DataGrants\[\$dataPath\]\)/);
-      // the data-grant loop must run before the final verification
-      const grantIdx = t.indexOf('Set-KlAcl -Path $dataPath -Grants');
-      const verifyTreeIdx = t.indexOf('Confirm-KlTreeLockedDown -Path $Path');
-      assert.ok(grantIdx > -1 && grantIdx < verifyTreeIdx, 'data subfolders must be re-granted before the tree-wide verification');
+      const fn = fnBody(t, 'Lock-KlAdminOwnedTree');
+      const reparse = fn.indexOf('$child.Attributes -band [IO.FileAttributes]::ReparsePoint');
+      assert.ok(reparse > -1, 'no reparse check on listed children');
+      assert.match(fnBody(t, 'Assert-KlNotReparsePoint'), /throw "\$Path is a junction, symbolic link or other reparse point/);
+      assert.ok(reparse < fn.indexOf('[KlNative]::LockItem($full'), 'the reparse check does not come first');
+      assert.match(fn, /Assert-KlSingleLinkFile -Path \$full/);
     });
 
-    it("verification requires every item to be owned by Administrators and forbids write access for anyone but SYSTEM, Administrators, or an exempted data subfolder's runner/LOCAL SERVICE entry", () => {
+    it('refuses a file with a second hard link, read with GetFileInformationByHandle on a handle that does not follow reparse points', () => {
       const t = text();
-      assert.match(t, /Get-ChildItem -LiteralPath \$Path -Recurse -Force/);
-      assert.match(t, /\[Security\.AccessControl\.FileSystemRights\]/);
-      assert.match(t, /\$ruleSid -eq \$sid -or \$ruleSid -eq 'S-1-5-19'/);
-      assert.match(t, /throw ".*is not owned by Administrators/);
-      assert.match(t, /throw ".*grants write access to/);
+      assert.match(t, /GetFileInformationByHandle/);
+      assert.match(t, /NumberOfLinks/);
+      assert.match(t, /0x00200000/, 'FILE_FLAG_OPEN_REPARSE_POINT');
+      assert.match(t, /Add-Type -TypeDefinition/);
+      assert.match(fnBody(t, 'Assert-KlSingleLinkFile'), /\$facts\[1\] -gt 1/);
     });
 
-    it('applies the five-step reclaim to $Base, $Base\\tools, D:\\train and D:\\train\\configs only', () => {
+    it('resets files and inner folders to inherited-only: the top rules as inherited entries, nothing explicit', () => {
       const t = text();
-      const targets = [...t.matchAll(/Set-KlAdminOwnedTree -Path (\S+)/g)].map((m) => m[1]);
-      assert.deepEqual(targets.sort(), ['"$Base"', '"$Base\\tools"', "'D:\\train'", "'D:\\train\\configs'"].sort());
-      for (const target of ['"$Base\\mcp\\data"', "'D:\\train\\runs'", "'D:\\models'", "'C:\\build\\site'"]) {
-        assert.ok(!t.includes(`Set-KlAdminOwnedTree -Path ${target}`), `${target} must not go through the admin-owned-tree reclaim`);
-      }
+      const fn = fnBody(t, 'Lock-KlAdminOwnedTree');
+      assert.ok(fn.includes("$folderDacl = 'D:AI' + (ConvertTo-KlAceSddl -Rules $TopRules -Kind Folder)"));
+      assert.ok(fn.includes("$fileDacl = 'D:AI' + (ConvertTo-KlAceSddl -Rules $TopRules -Kind File)"));
+      assert.ok(fnBody(t, 'ConvertTo-KlAceSddl').includes("@{ Top = 'OICI'; Folder = 'OICIID'; File = 'ID' }"));
     });
 
-    it("passes the runner's mcp\\data and train\\runs grants in as DataGrants, and nothing for tools or configs", () => {
-      const t = text();
-      assert.ok(t.includes('"$Base\\mcp\\data" = "${RunnerSid}:(OI)(CI)M"'));
-      assert.ok(t.includes("'D:\\train\\runs' = \"${RunnerSid}:(OI)(CI)M\""));
-      assert.ok(t.includes('Set-KlAdminOwnedTree -Path "$Base\\tools" -TopRules $AdminOwnedTopRules -DataGrants @{}'));
-      assert.ok(t.includes("Set-KlAdminOwnedTree -Path 'D:\\train\\configs' -TopRules $AdminOwnedTopRules -DataGrants @{}"));
+    it('never walks into a data folder: locks the folder itself and moves on', () => {
+      const fn = fnBody(text(), 'Lock-KlAdminOwnedTree');
+      const dataBranch = fn.slice(fn.indexOf('if ($dataKey.Count -gt 0) {'), fn.indexOf('continue', fn.indexOf('if ($dataKey.Count -gt 0) {')));
+      assert.ok(dataBranch.includes('[KlNative]::LockItem($full, $true, $OwnerSid.Value, $data[$dataKey[0]])'));
+      assert.ok(!dataBranch.includes('$pending.Push'), 'a data folder is walked');
     });
 
-    it('prints every step of the reclaim under -WhatIf instead of one blanket message', () => {
+    it('verifies by hand: throws on any reparse point, counts GENERIC_WRITE and GENERIC_ALL as write, and exempts no LOCAL SERVICE write', () => {
+      const fn = fnBody(text(), 'Confirm-KlTreeLockedDown');
+      assert.match(fn, /\$item\.Attributes -band \[IO\.FileAttributes\]::ReparsePoint/);
+      assert.match(fn, /0x40000000/);
+      assert.match(fn, /0x10000000/);
+      assert.ok(!fn.includes('S-1-5-19'), 'LOCAL SERVICE may not write anywhere in an admin-owned tree');
+      assert.match(fn, /throw ".*is not owned by/);
+      assert.match(fn, /throw ".*grants write access to/);
+    });
+
+    it('applies the walk to $baseFull, $baseFull\\tools, D:\\train and D:\\train\\configs only, with mcp\\data and train\\runs as data folders', () => {
       const t = text();
-      const fn = t.slice(t.indexOf('function Set-KlAdminOwnedTree'), t.indexOf('$AdminFull ='));
-      const shouldProcessCalls = [...fn.matchAll(/\$PSCmdlet\.ShouldProcess\(/g)];
-      assert.ok(shouldProcessCalls.length >= 4, `expected at least 4 ShouldProcess calls in Set-KlAdminOwnedTree, found ${shouldProcessCalls.length}`);
+      const targets = [...t.matchAll(/^\s*Set-KlAdminOwnedTree -Path (\S+)/gm)].map((m) => m[1]);
+      assert.deepEqual(targets.sort(), ['"$baseFull\\tools"', '$baseFull', "'D:\\train'", "'D:\\train\\configs'"].sort());
+      assert.ok(t.includes('-DataFolders @{ "$baseFull\\mcp\\data" = $RunnerDataRules }'));
+      assert.ok(t.includes("-DataFolders @{ 'D:\\train\\runs' = $RunnerDataRules }"));
+      assert.ok(t.includes('$RunnerDataRules = @((New-KlAccessRule $RunnerSecurityId \'Modify\'))'));
+      assert.match(fnBody(t, 'Set-KlAdminOwnedTree'), /-OwnerSid \$AdminsSecurityId/);
+    });
+
+    it('enables SeTakeOwnership and SeRestore only after the elevation check', () => {
+      const t = text();
+      const elevated = t.indexOf("throw 'Run this script from an elevated PowerShell");
+      assert.ok(elevated > -1 && elevated < t.indexOf("[KlNative]::EnablePrivilege('SeTakeOwnershipPrivilege')"));
+      assert.ok(t.includes("[KlNative]::EnablePrivilege('SeRestorePrivilege')"));
+    });
+
+    it('prints each change of the walk under -WhatIf', () => {
+      const fn = fnBody(text(), 'Lock-KlAdminOwnedTree');
+      assert.ok([...fn.matchAll(/\$PSCmdlet\.ShouldProcess\(/g)].length >= 5);
     });
   });
 
-  it('cuts inheritance on the two runner-writable data paths that are not swept by any admin-owned-tree reclaim', () => {
+  it('refuses to icacls a path that is a reparse point', () => {
+    const fn = fnBody(text(), 'Set-KlAcl');
+    assert.ok(fn.indexOf('Assert-KlNotReparsePoint -Path $Path') < fn.indexOf('& $icacls'));
+  });
+
+  it('cuts inheritance on the two runner-writable data paths no walk reaches', () => {
     const t = text();
     for (const target of ["'C:\\build\\site'", "'D:\\models'"]) {
       assert.ok(t.includes(`Set-KlAcl -Path ${target} -CutInheritance -Grants`), `${target} keeps its inherited ACEs`);
@@ -552,5 +602,173 @@ describe('Windows ACL script', () => {
     const r = spawnSync(windowsPowerShellExe(), ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
     assert.equal(r.stdout.trim(), '0');
+  });
+
+  // The walk run for real, unelevated, on a scratch tree. The script's own
+  // functions are loaded from its AST (the script body refuses to run
+  // unelevated), and the owner is the current user instead of
+  // Administrators: an unelevated token cannot assign Administrators.
+  describe('the walk on a scratch tree', { skip: POSIX ? 'Windows only' : false }, () => {
+    const PRELUDE = String.raw`
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+$tokens = $null; $parseErrors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($env:KL_ACL_SCRIPT, [ref]$tokens, [ref]$parseErrors)
+foreach ($fn in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
+  . ([ScriptBlock]::Create($fn.Extent.Text))
+}
+$root = $env:KL_ACL_ROOT
+$me = [Security.Principal.WindowsIdentity]::GetCurrent().User
+$users = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-545')
+$everyone = New-Object Security.Principal.SecurityIdentifier('S-1-1-0')
+$localService = New-Object Security.Principal.SecurityIdentifier('S-1-5-19')
+$sy = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
+$topRules = @((New-KlAccessRule $sy 'FullControl'), (New-KlAccessRule $me 'FullControl'), (New-KlAccessRule $users 'ReadAndExecute'))
+$dataRules = @((New-KlAccessRule $localService 'Modify'))
+function Info($p) {
+  $a = Get-Acl -LiteralPath $p
+  @{
+    owner = $a.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    isProtected = $a.AreAccessRulesProtected
+    explicit = @($a.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value })
+    all = @($a.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value + '=' + [int] $_.FileSystemRights })
+    sddl = $a.Sddl
+  }
+}
+function AddExplicit($p, $sid, $rights) {
+  $a = Get-Acl -LiteralPath $p
+  $a.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($sid, $rights, 'Allow')))
+  if ((Get-Item -LiteralPath $p -Force).PSIsContainer) { [IO.Directory]::SetAccessControl($p, $a) } else { [IO.File]::SetAccessControl($p, $a) }
+}
+# A file that keeps exactly these explicit entries and inherits nothing.
+function ProtectFile($p, $rules) {
+  $a = Get-Acl -LiteralPath $p
+  $a.SetAccessRuleProtection($true, $false)
+  foreach ($r in @($a.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]))) { [void] $a.RemoveAccessRuleSpecific($r) }
+  foreach ($r in $rules) { $a.AddAccessRule($r) }
+  [IO.File]::SetAccessControl($p, $a)
+}
+function Invoke-Try($block) { try { & $block; $null } catch { $_.Exception.Message } }
+`;
+    function runWalk(root, body) {
+      const file = path.join(root, 'harness.ps1');
+      fs.writeFileSync(file, `${PRELUDE}\n${body}\n`);
+      const r = spawnSync(windowsPowerShellExe(), ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file], {
+        encoding: 'utf8',
+        env: { ...process.env, KL_ACL_SCRIPT: SCRIPT, KL_ACL_ROOT: root },
+      });
+      assert.equal(r.status, 0, `powershell failed:\n${r.stdout}\n${r.stderr}`);
+      return JSON.parse(r.stdout.trim().split(/\r?\n/).pop());
+    }
+    // An outside folder with a file, each given an explicit Everyone entry,
+    // so any change the walk made to them would show in their SDDL.
+    function scratch() {
+      const root = tmp();
+      fs.mkdirSync(path.join(root, 'tree', 'a'), { recursive: true });
+      fs.mkdirSync(path.join(root, 'outside'));
+      fs.writeFileSync(path.join(root, 'outside', 'secret.txt'), 'x');
+      fs.writeFileSync(path.join(root, 'tree', 'a', 'f.txt'), 'x');
+      return root;
+    }
+    const OUTSIDE_SETUP = String.raw`
+AddExplicit "$root\outside" $everyone 'ReadAndExecute'
+AddExplicit "$root\outside\secret.txt" $everyone 'Read'
+$before = @{ dir = Info "$root\outside"; file = Info "$root\outside\secret.txt" }
+`;
+
+    for (const where of [['tree', 'j'], ['tree', 'a', 'j']]) {
+      it(`a junction at ${where.join('\\')} makes the walk throw before its target is touched`, () => {
+        const root = scratch();
+        fs.symlinkSync(path.join(root, 'outside'), path.join(root, ...where), 'junction');
+        const out = runWalk(root, `${OUTSIDE_SETUP}
+$err = Invoke-Try { Lock-KlAdminOwnedTree -Path "$root\\tree" -OwnerSid $me -TopRules $topRules }
+@{ err = $err; before = $before; after = @{ dir = Info "$root\\outside"; file = Info "$root\\outside\\secret.txt" }; top = Info "$root\\tree" } | ConvertTo-Json -Compress -Depth 5`);
+        assert.ok(out.err, 'the walk did not throw');
+        assert.match(out.err, /junction, symbolic link or other reparse point/);
+        assert.ok(out.err.includes(path.join(root, ...where)), out.err);
+        // The walk got past the top folder: the throw is the junction check, not a failed lock.
+        assert.equal(out.top.isProtected, true);
+        assert.deepEqual(out.after, out.before, "the junction's target changed");
+      });
+    }
+
+    it('a file with a second hard link makes the walk throw before the file is touched', () => {
+      const root = scratch();
+      fs.linkSync(path.join(root, 'outside', 'secret.txt'), path.join(root, 'tree', 'a', 'h.txt'));
+      const out = runWalk(root, `${OUTSIDE_SETUP}
+$err = Invoke-Try { Lock-KlAdminOwnedTree -Path "$root\\tree" -OwnerSid $me -TopRules $topRules }
+@{ err = $err; before = $before; after = @{ dir = Info "$root\\outside"; file = Info "$root\\outside\\secret.txt" } } | ConvertTo-Json -Compress -Depth 5`);
+      assert.ok(out.err, 'the walk did not throw');
+      assert.match(out.err, /h\.txt has 2 hard links/);
+      assert.deepEqual(out.after, out.before, 'the hard-linked file changed');
+    });
+
+    it('locks a clean tree: top protected with exactly its rules, everything below inherited-only, data folders locked but not walked', () => {
+      const root = scratch();
+      fs.mkdirSync(path.join(root, 'tree', 'a', 'b'));
+      fs.writeFileSync(path.join(root, 'tree', 'a', 'b', 'g.txt'), 'x');
+      fs.mkdirSync(path.join(root, 'tree', 'data'));
+      fs.writeFileSync(path.join(root, 'tree', 'data', 'd.txt'), 'x');
+      // Inside a data folder a junction is never followed by the walk; the check still refuses it.
+      fs.symlinkSync(path.join(root, 'outside'), path.join(root, 'tree', 'data', 'jj'), 'junction');
+      const out = runWalk(root, `${OUTSIDE_SETUP}
+AddExplicit "$root\\tree\\a\\f.txt" $everyone 'Modify'
+AddExplicit "$root\\tree\\a\\b" $everyone 'Modify'
+# The runner's own file in its data folder: the walk must leave it exactly as it is.
+ProtectFile "$root\\tree\\data\\d.txt" @((New-Object Security.AccessControl.FileSystemAccessRule($me, 'FullControl', 'Allow')), (New-Object Security.AccessControl.FileSystemAccessRule($everyone, 'ReadAndExecute', 'Allow')))
+$dataFileBefore = Info "$root\\tree\\data\\d.txt"
+Lock-KlAdminOwnedTree -Path "$root\\tree" -OwnerSid $me -TopRules $topRules -DataFolders @{ "$root\\tree\\data" = $dataRules } -EnsureFolders @("$root\\tree\\mcp\\config")
+$inner = @{}
+foreach ($p in 'a', 'a\\f.txt', 'a\\b', 'a\\b\\g.txt', 'mcp', 'mcp\\config') { $inner[$p] = Info "$root\\tree\\$p" }
+$checkWithJunction = Invoke-Try { Confirm-KlTreeLockedDown -Path "$root\\tree" -OwnerSid $me -DataFolders @("$root\\tree\\data") -DataWriterSid $localService }
+cmd /c rmdir "$root\\tree\\data\\jj"
+$checkClean = Invoke-Try { Confirm-KlTreeLockedDown -Path "$root\\tree" -OwnerSid $me -DataFolders @("$root\\tree\\data") -DataWriterSid $localService }
+AddExplicit "$root\\tree\\a\\b\\g.txt" $everyone 'Write'
+$checkWritable = Invoke-Try { Confirm-KlTreeLockedDown -Path "$root\\tree" -OwnerSid $me -DataFolders @("$root\\tree\\data") -DataWriterSid $localService }
+@{
+  me = $me.Value; top = Info "$root\\tree"; inner = $inner
+  data = Info "$root\\tree\\data"; dataFile = Info "$root\\tree\\data\\d.txt"; dataFileBefore = $dataFileBefore
+  before = $before; after = @{ dir = Info "$root\\outside"; file = Info "$root\\outside\\secret.txt" }
+  checkWithJunction = $checkWithJunction; checkClean = $checkClean; checkWritable = $checkWritable
+} | ConvertTo-Json -Compress -Depth 5`);
+      assert.equal(out.top.owner, out.me);
+      assert.equal(out.top.isProtected, true);
+      assert.deepEqual([...out.top.explicit].sort(), [out.me, 'S-1-5-18', 'S-1-5-32-545'].sort());
+      for (const [p, info] of Object.entries(out.inner)) {
+        assert.equal(info.owner, out.me, `${p} owner`);
+        assert.equal(info.isProtected, false, `${p} is protected`);
+        assert.deepEqual(info.explicit, [], `${p} keeps an explicit entry`);
+        assert.deepEqual([...info.all].sort(), [...out.top.all].sort(), `${p} does not inherit exactly the top folder's entries`);
+      }
+      assert.equal(out.data.owner, out.me);
+      assert.equal(out.data.isProtected, false);
+      assert.deepEqual(out.data.explicit, ['S-1-5-19']);
+      assert.deepEqual(out.dataFile, out.dataFileBefore, 'the walk went inside the data folder');
+      assert.deepEqual(out.after, out.before, 'the junction target inside the data folder changed');
+      assert.match(out.checkWithJunction || '', /jj is a junction, symbolic link or other reparse point/);
+      assert.equal(out.checkClean, null);
+      assert.match(out.checkWritable || '', /g\.txt grants write access to S-1-1-0/);
+    });
+
+    it('changes nothing under -WhatIf', () => {
+      const root = scratch();
+      const out = runWalk(root, String.raw`
+AddExplicit "$root\tree\a\f.txt" $everyone 'Modify'
+$before = @{ top = Info "$root\tree"; a = Info "$root\tree\a"; f = Info "$root\tree\a\f.txt" }
+Lock-KlAdminOwnedTree -Path "$root\tree" -OwnerSid $me -TopRules $topRules -EnsureFolders @("$root\tree\mcp\work") -WhatIf 6>$null | Out-Null
+@{ before = $before; after = @{ top = Info "$root\tree"; a = Info "$root\tree\a"; f = Info "$root\tree\a\f.txt" }; created = (Test-Path "$root\tree\mcp") } | ConvertTo-Json -Compress -Depth 5`);
+      assert.deepEqual(out.after, out.before);
+      assert.equal(out.created, false);
+    });
+
+    it('enables a privilege the token holds and refuses one it does not', () => {
+      const root = tmp();
+      const out = runWalk(root, String.raw`
+Initialize-KlNative
+$elevated = (New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+@{ held = (Invoke-Try { [KlNative]::EnablePrivilege('SeChangeNotifyPrivilege') }); notHeld = (Invoke-Try { [KlNative]::EnablePrivilege('SeTakeOwnershipPrivilege') }); elevated = $elevated } | ConvertTo-Json -Compress`);
+      assert.equal(out.held, null);
+      if (!out.elevated) assert.match(out.notHeld || '', /does not hold SeTakeOwnershipPrivilege/);
+    });
   });
 });

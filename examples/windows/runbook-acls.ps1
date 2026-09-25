@@ -3,27 +3,38 @@
   Sets the Windows ACLs the King Louie example runbooks rely on.
 
 .DESCRIPTION
-  Run from an elevated PowerShell. Run -Role base first, right after copying
-  the code to $Base\app and before installing the service, so the install
-  folder is locked from the start. Then run it again with the machine's role
-  (gpu-box or laptop). -WhatIf prints every call this script would make
-  without making it.
+  Run from an elevated Windows PowerShell. Run -Role base first, right after
+  copying the code to $Base\app and before installing the service, so the
+  install folder is locked from the start. Then run it again with the
+  machine's role (gpu-box or laptop). -WhatIf prints every change this
+  script would make without making it.
 
   -Runner is the signed-in Windows user who runs Claude Code or Claude
   Desktop, and so the stdio MCP server and every runbook step. These ACLs
   stop that user from changing the admin-owned files only while Claude runs
   unelevated: an elevated session is an administrator and can change anything.
+  Close Claude and every other program the runner has open before running
+  this script: a handle the runner opened earlier keeps the access it was
+  opened with.
 
   Every grant names a SID, so the script works in any Windows display
   language: *S-1-5-18 is SYSTEM, *S-1-5-32-544 is Administrators and
-  *S-1-5-19 is LOCAL SERVICE, the installed service's account. Running it
-  again is safe: /grant:r replaces an account's explicit entry instead of
-  adding a second one, and the admin-owned folders are fully re-verified
-  each time.
+  *S-1-5-19 is LOCAL SERVICE, the installed service's account.
+
+  Running it again is safe. Each admin-owned folder is locked again from the
+  top down, one folder at a time: a folder is locked before its contents are
+  listed, so the runner cannot add anything to it while the walk runs. The
+  walk never follows a junction, symbolic link or other reparse point, and
+  never changes a file that has a second hard link: it stops with an error
+  naming the path instead, before changing anything that path points at.
+  The runner's data folders (mcp\data, D:\train\runs) are locked themselves
+  but never walked into. /grant:r replaces an account's explicit entry
+  instead of adding a second one.
 
 .EXAMPLE
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\KingLouie\app\examples\windows\runbook-acls.ps1 -Role base -Runner 'gpu-box\<runner>' -WhatIf
 #>
+#Requires -PSEdition Desktop
 [CmdletBinding(SupportsShouldProcess)]
 param(
   [Parameter(Mandatory)][ValidateSet('base', 'gpu-box', 'laptop')][string] $Role,
@@ -34,11 +45,455 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# ---------------------------------------------------------------------------
+# Functions. None of them reads the script's parameters: each takes what it
+# needs as arguments, so tests/examples.test.js can load them into an
+# unelevated session and run the walk against a scratch folder.
+# ---------------------------------------------------------------------------
+
+# Compiles the Win32 calls PowerShell has no cmdlet for, once per session:
+# reading the attributes and hard-link count of a file, and writing its
+# owner and DACL, each through a handle opened on the item itself (never on
+# what a reparse point names); and enabling a privilege this process
+# already holds.
+function Initialize-KlNative {
+  if ('KlNative' -as [type]) { return }
+  Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Principal;
+using Microsoft.Win32.SafeHandles;
+
+public static class KlNative {
+  [StructLayout(LayoutKind.Sequential, Pack = 4)]
+  // BY_HANDLE_FILE_INFORMATION. Pack = 4: each FILETIME is two DWORDs, so
+  // the three longs below must not be 8-byte aligned.
+  private struct ByHandleFileInformation {
+    public uint FileAttributes;
+    public long CreationTime;
+    public long LastAccessTime;
+    public long LastWriteTime;
+    public uint VolumeSerialNumber;
+    public uint FileSizeHigh;
+    public uint FileSizeLow;
+    public uint NumberOfLinks;
+    public uint FileIndexHigh;
+    public uint FileIndexLow;
+  }
+
+  [StructLayout(LayoutKind.Sequential, Pack = 4)]
+  private struct TokenPrivilege {
+    public uint Count;
+    public long Luid;
+    public uint Attributes;
+  }
+
+  [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  private static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out ByHandleFileInformation info);
+
+  [DllImport("kernel32.dll")]
+  private static extern IntPtr GetCurrentProcess();
+
+  [DllImport("kernel32.dll")]
+  private static extern bool CloseHandle(IntPtr handle);
+
+  [DllImport("advapi32.dll", SetLastError = true)]
+  private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+
+  [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  private static extern bool LookupPrivilegeValueW(string system, string name, out long luid);
+
+  [DllImport("advapi32.dll", SetLastError = true)]
+  private static extern bool AdjustTokenPrivileges(IntPtr token, bool disableAll, ref TokenPrivilege state, uint length, IntPtr previous, IntPtr returnLength);
+
+  [DllImport("advapi32.dll", SetLastError = true)]
+  private static extern bool SetKernelObjectSecurity(SafeFileHandle handle, uint information, byte[] descriptor);
+
+  [DllImport("advapi32.dll", SetLastError = true)]
+  private static extern bool GetKernelObjectSecurity(SafeFileHandle handle, uint information, byte[] descriptor, uint length, out uint needed);
+
+  private const uint OwnerSecurityInformation = 0x1;
+  private const uint DaclSecurityInformation = 0x4;
+  private const uint FileAttributeDirectory = 0x10;
+  private const uint FileAttributeReparsePoint = 0x400;
+
+  private static byte[] ToBytes(RawSecurityDescriptor descriptor) {
+    byte[] bytes = new byte[descriptor.BinaryLength];
+    descriptor.GetBinaryForm(bytes, 0);
+    return bytes;
+  }
+
+  // Locks one file or folder through a single handle opened on the item
+  // itself (FILE_FLAG_OPEN_REPARSE_POINT), never on what a link names:
+  // checks on that handle that it is not a reparse point, is the kind of
+  // item the caller listed, and (a file) has one hard link; writes the owner
+  // and reads it back by SID; then writes the DACL. SetKernelObjectSecurity
+  // changes this one item only. SetNamedSecurityInfo, which Set-Acl and
+  // icacls use, also rewrites the inherited entries of everything below the
+  // item, before this walk has checked any of it (reproduced: a hard link
+  // below the top folder was rewritten by the top folder's lock).
+  public static void LockItem(string path, bool isDirectory, string ownerSid, string daclSddl) {
+    // READ_CONTROL | WRITE_DAC | WRITE_OWNER | FILE_READ_ATTRIBUTES
+    uint access = 0x20000 | 0x40000 | 0x80000 | 0x80;
+    using (SafeFileHandle handle = CreateFileW(path, access, 0x7, IntPtr.Zero, 3, 0x00200000 | 0x02000000, IntPtr.Zero)) {
+      if (handle.IsInvalid) {
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot open " + path + " to change its owner and ACL");
+      }
+      ByHandleFileInformation info;
+      if (!GetFileInformationByHandle(handle, out info)) {
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot read the file information of " + path);
+      }
+      if ((info.FileAttributes & FileAttributeReparsePoint) != 0) {
+        throw new InvalidOperationException(path + " is a junction, symbolic link or other reparse point. This script never follows one. Remove it (as an administrator) and run the script again.");
+      }
+      if (((info.FileAttributes & FileAttributeDirectory) != 0) != isDirectory) {
+        throw new InvalidOperationException(path + " changed between being listed and being locked. Close every program the runner has open and run the script again.");
+      }
+      if (!isDirectory && info.NumberOfLinks > 1) {
+        throw new InvalidOperationException(path + " has " + info.NumberOfLinks + " hard links: it is also reachable under another name, possibly outside this folder, and changing its ACL here would change it there too. Replace it with a plain copy (as an administrator) and run the script again.");
+      }
+
+      SecurityIdentifier owner = new SecurityIdentifier(ownerSid);
+      byte[] ownerOnly = ToBytes(new RawSecurityDescriptor(ControlFlags.SelfRelative, owner, null, null, null));
+      if (!SetKernelObjectSecurity(handle, OwnerSecurityInformation, ownerOnly)) {
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot make " + ownerSid + " the owner of " + path);
+      }
+      uint needed;
+      GetKernelObjectSecurity(handle, OwnerSecurityInformation, null, 0, out needed);
+      byte[] current = new byte[needed];
+      if (!GetKernelObjectSecurity(handle, OwnerSecurityInformation, current, needed, out needed)) {
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot read the owner of " + path);
+      }
+      SecurityIdentifier actual = new RawSecurityDescriptor(current, 0).Owner;
+      if (actual == null || actual.Value != owner.Value) {
+        throw new InvalidOperationException("Could not make " + ownerSid + " the owner of " + path + " (owner is still " + actual + ").");
+      }
+
+      if (!SetKernelObjectSecurity(handle, DaclSecurityInformation, ToBytes(new RawSecurityDescriptor(daclSddl)))) {
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot write the ACL of " + path);
+      }
+    }
+  }
+
+  // Returns { attributes, number of links }. FILE_READ_ATTRIBUTES only, every
+  // share mode, FILE_FLAG_OPEN_REPARSE_POINT (the handle is on the link, not
+  // its target) and FILE_FLAG_BACKUP_SEMANTICS (so a folder opens too).
+  public static uint[] GetFileFacts(string path) {
+    using (SafeFileHandle handle = CreateFileW(path, 0x80, 0x7, IntPtr.Zero, 3, 0x00200000 | 0x02000000, IntPtr.Zero)) {
+      if (handle.IsInvalid) {
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot open " + path);
+      }
+      ByHandleFileInformation info;
+      if (!GetFileInformationByHandle(handle, out info)) {
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot read the file information of " + path);
+      }
+      return new uint[] { info.FileAttributes, info.NumberOfLinks };
+    }
+  }
+
+  public static void EnablePrivilege(string name) {
+    IntPtr token;
+    // TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY
+    if (!OpenProcessToken(GetCurrentProcess(), 0x20 | 0x8, out token)) {
+      throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot open this process's token");
+    }
+    try {
+      long luid;
+      if (!LookupPrivilegeValueW(null, name, out luid)) {
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "Unknown privilege " + name);
+      }
+      TokenPrivilege state = new TokenPrivilege();
+      state.Count = 1;
+      state.Luid = luid;
+      state.Attributes = 0x2; // SE_PRIVILEGE_ENABLED
+      if (!AdjustTokenPrivileges(token, false, ref state, 0, IntPtr.Zero, IntPtr.Zero)) {
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot enable " + name);
+      }
+      // AdjustTokenPrivileges succeeds with ERROR_NOT_ALL_ASSIGNED when the
+      // token does not hold the privilege at all.
+      int error = Marshal.GetLastWin32Error();
+      if (error != 0) {
+        throw new Win32Exception(error, "This process does not hold " + name);
+      }
+    } finally {
+      CloseHandle(token);
+    }
+  }
+}
+'@
+}
+
+function Test-KlPathUnder {
+  param([Parameter(Mandatory)][string] $Path, [Parameter(Mandatory)][string] $Root)
+  $Path.Equals($Root, [StringComparison]::OrdinalIgnoreCase) -or $Path.StartsWith("$Root\", [StringComparison]::OrdinalIgnoreCase)
+}
+
+# Throws unless $Path is a plain folder or file: not a junction, symbolic
+# link or other reparse point. GetAttributes reads the link itself, never
+# its target.
+function Assert-KlNotReparsePoint {
+  param([Parameter(Mandatory)][string] $Path)
+  $attributes = [IO.File]::GetAttributes($Path)
+  if ($attributes -band [IO.FileAttributes]::ReparsePoint) {
+    throw "$Path is a junction, symbolic link or other reparse point. This script never follows one: nothing a King Louie install needs is one, and following it would change the ACLs of whatever it points at. Remove it (as an administrator) and run the script again."
+  }
+}
+
+# Throws unless $Path is a plain file with exactly one name. A second hard
+# link is the same file under another name, possibly outside this tree, so
+# changing its owner or ACL here would change it there too.
+function Assert-KlSingleLinkFile {
+  param([Parameter(Mandatory)][string] $Path)
+  $facts = [KlNative]::GetFileFacts($Path)
+  if ($facts[0] -band [uint32] [IO.FileAttributes]::ReparsePoint) {
+    throw "$Path is a symbolic link or other reparse point. This script never follows one. Remove it (as an administrator) and run the script again."
+  }
+  if ($facts[1] -gt 1) {
+    throw "$Path has $($facts[1]) hard links: it is also reachable under another name, possibly outside this folder, and changing its ACL here would change it there too. Replace it with a plain copy (as an administrator) and run the script again."
+  }
+}
+
+# Turns access rules into the SDDL of a DACL. -Kind picks the ACE flags:
+#   Top      explicit, inherited by folders and files below   (OICI)
+#   Folder   inherited from the parent, passed on again        (OICIID)
+#   File     inherited from the parent                         (ID)
+# Only plain Allow rules inherited by folders and files are accepted, the
+# one shape this script grants, so what the walk writes as "inherited" is
+# exactly what Windows would compute from the parent.
+function ConvertTo-KlAceSddl {
+  param(
+    [Parameter(Mandatory)][Security.AccessControl.FileSystemAccessRule[]] $Rules,
+    [Parameter(Mandatory)][ValidateSet('Top', 'Folder', 'File')][string] $Kind
+  )
+  $flags = @{ Top = 'OICI'; Folder = 'OICIID'; File = 'ID' }[$Kind]
+  $aces = foreach ($rule in $Rules) {
+    if ($rule.AccessControlType -ne 'Allow' -or $rule.InheritanceFlags -ne 'ContainerInherit, ObjectInherit' -or $rule.PropagationFlags -ne 'None') {
+      throw "Unsupported access rule for $($rule.IdentityReference): only Allow rules inherited by folders and files."
+    }
+    $ruleSid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+    '(A;{0};0x{1:x};;;{2})' -f $flags, [int] $rule.FileSystemRights, $ruleSid
+  }
+  -join $aces
+}
+
+# Locks the tree under $Path top-down, one folder at a time. For each folder:
+# lock it first (owner $OwnerSid, verified by SID, and its DACL replaced),
+# and only then list what is directly inside it. For each thing inside:
+#   - a junction, symbolic link or other reparse point: throw, before
+#     touching it or anything it points at;
+#   - a file: throw if it has a second hard link, else make $OwnerSid its
+#     owner and reset it to inherited-only;
+#   - a folder in $DataFolders: lock the folder itself (owner, inherited-only
+#     plus its extra rules) and never walk into it: its contents are the
+#     runner's;
+#   - any other folder: lock it the same way (inherited-only) and walk it.
+# The top folder gets $TopRules, protected. $EnsureFolders and the
+# $DataFolders keys are created, if missing, only once their parent is
+# locked. Every lock goes through [KlNative]::LockItem, which changes one
+# item and nothing below it. No call here recurses on its own (no takeown
+# /R, no icacls recursion): both follow junctions out of the tree.
+function Lock-KlAdminOwnedTree {
+  [CmdletBinding(SupportsShouldProcess)]
+  param(
+    [Parameter(Mandatory)][string] $Path,
+    [Parameter(Mandatory)][Security.Principal.SecurityIdentifier] $OwnerSid,
+    [Parameter(Mandatory)][Security.AccessControl.FileSystemAccessRule[]] $TopRules,
+    [hashtable] $DataFolders = @{},
+    [string[]] $EnsureFolders = @()
+  )
+  Initialize-KlNative
+  $top = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+  $topDacl = 'D:PAI' + (ConvertTo-KlAceSddl -Rules $TopRules -Kind Top)
+  $folderDacl = 'D:AI' + (ConvertTo-KlAceSddl -Rules $TopRules -Kind Folder)
+  $fileDacl = 'D:AI' + (ConvertTo-KlAceSddl -Rules $TopRules -Kind File)
+  $data = @{}
+  foreach ($key in $DataFolders.Keys) {
+    $data[[IO.Path]::GetFullPath($key).TrimEnd('\')] = 'D:AI' + (ConvertTo-KlAceSddl -Rules @($DataFolders[$key]) -Kind Top) + (ConvertTo-KlAceSddl -Rules $TopRules -Kind Folder)
+  }
+  # Every folder to create, with each missing ancestor between it and $top.
+  $wanted = New-Object 'System.Collections.Generic.List[string]'
+  foreach ($folder in @($EnsureFolders) + @($data.Keys)) {
+    $full = [IO.Path]::GetFullPath($folder).TrimEnd('\')
+    if (-not $full.StartsWith("$top\", [StringComparison]::OrdinalIgnoreCase)) {
+      throw "$full is not inside $top."
+    }
+    while ($full.Length -gt $top.Length) {
+      if (-not $wanted.Contains($full)) { $wanted.Add($full) }
+      $full = [IO.Path]::GetDirectoryName($full)
+    }
+  }
+
+  if (-not (Test-Path -LiteralPath $top)) {
+    if (-not $PSCmdlet.ShouldProcess($top, 'create the folder')) { return }
+    [void] [IO.Directory]::CreateDirectory($top)
+  }
+  Assert-KlNotReparsePoint -Path $top
+  if ($PSCmdlet.ShouldProcess($top, "make $OwnerSid the owner and replace the DACL with $topDacl")) {
+    [KlNative]::LockItem($top, $true, $OwnerSid.Value, $topDacl)
+  }
+
+  $pending = New-Object System.Collections.Stack
+  $pending.Push($top)
+  while ($pending.Count -gt 0) {
+    $dir = $pending.Pop()
+    $children = @(Get-ChildItem -LiteralPath $dir -Force)
+    foreach ($folder in $wanted) {
+      if (-not [IO.Path]::GetDirectoryName($folder).Equals($dir, [StringComparison]::OrdinalIgnoreCase)) { continue }
+      if (@($children | Where-Object { $_.FullName -eq $folder }).Count -gt 0) { continue }
+      if ($PSCmdlet.ShouldProcess($folder, 'create the folder')) {
+        [void] [IO.Directory]::CreateDirectory($folder)
+        $children += Get-Item -LiteralPath $folder -Force
+      }
+    }
+    foreach ($child in $children) {
+      $full = $child.FullName
+      if ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        Assert-KlNotReparsePoint -Path $full
+      }
+      if ($child.PSIsContainer) {
+        $dataKey = @($data.Keys | Where-Object { $_ -eq $full })
+        if ($dataKey.Count -gt 0) {
+          if ($PSCmdlet.ShouldProcess($full, "make $OwnerSid the owner and replace the DACL with $($data[$dataKey[0]]) (contents not walked)")) {
+            [KlNative]::LockItem($full, $true, $OwnerSid.Value, $data[$dataKey[0]])
+          }
+          continue
+        }
+        if ($PSCmdlet.ShouldProcess($full, "make $OwnerSid the owner and reset to inherited-only")) {
+          [KlNative]::LockItem($full, $true, $OwnerSid.Value, $folderDacl)
+        }
+        $pending.Push($full)
+      } else {
+        Assert-KlSingleLinkFile -Path $full
+        if ($PSCmdlet.ShouldProcess($full, "make $OwnerSid the owner and reset to inherited-only")) {
+          [KlNative]::LockItem($full, $false, $OwnerSid.Value, $fileDacl)
+        }
+      }
+    }
+  }
+}
+
+# Walks $Path and everything under it (never through a reparse point: it
+# throws on one instead) and throws, naming the path, unless every item is
+# owned by $OwnerSid and grants no write-capable access to any SID other
+# than SYSTEM or $OwnerSid. A $DataFolders folder and its contents may also
+# grant write access to $DataWriterSid, and the contents' owner is not
+# checked (the runner owns what it writes there).
+function Confirm-KlTreeLockedDown {
+  param(
+    [Parameter(Mandatory)][string] $Path,
+    [Parameter(Mandatory)][Security.Principal.SecurityIdentifier] $OwnerSid,
+    [string[]] $DataFolders = @(),
+    [Security.Principal.SecurityIdentifier] $DataWriterSid
+  )
+  # GENERIC_WRITE (0x40000000) and GENERIC_ALL (0x10000000) are not
+  # FileSystemRights names but can appear in an entry's mask.
+  $writeMask = [int] [Security.AccessControl.FileSystemRights] 'WriteData, AppendData, WriteAttributes, WriteExtendedAttributes, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership'
+  $writeMask = $writeMask -bor 0x40000000 -bor 0x10000000
+  $top = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+  $dataRoots = @($DataFolders | ForEach-Object { [IO.Path]::GetFullPath($_).TrimEnd('\') })
+  $pending = New-Object System.Collections.Stack
+  $pending.Push((Get-Item -LiteralPath $top -Force))
+  while ($pending.Count -gt 0) {
+    $item = $pending.Pop()
+    $full = $item.FullName.TrimEnd('\')
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+      throw "$full is a junction, symbolic link or other reparse point; nothing under an admin-owned folder may be one. Remove it (as an administrator) and run the script again."
+    }
+    $inData = $false
+    $insideData = $false
+    foreach ($dataRoot in $dataRoots) {
+      if (Test-KlPathUnder -Path $full -Root $dataRoot) {
+        $inData = $true
+        if (-not $full.Equals($dataRoot, [StringComparison]::OrdinalIgnoreCase)) { $insideData = $true }
+      }
+    }
+    $acl = Get-Acl -LiteralPath $full
+    if (-not $insideData) {
+      $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier])
+      if ($owner.Value -ne $OwnerSid.Value) {
+        throw "$full is not owned by $OwnerSid (owner is $owner)."
+      }
+    }
+    foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+      if ($rule.AccessControlType -ne 'Allow') { continue }
+      if (([int] $rule.FileSystemRights -band $writeMask) -eq 0) { continue }
+      $ruleSid = $rule.IdentityReference.Value
+      if ($ruleSid -eq 'S-1-5-18' -or $ruleSid -eq $OwnerSid.Value) { continue }
+      if ($inData -and $DataWriterSid -and $ruleSid -eq $DataWriterSid.Value) { continue }
+      throw "$full grants write access to $ruleSid, which is not SYSTEM or $OwnerSid."
+    }
+    if ($item.PSIsContainer) {
+      foreach ($child in @(Get-ChildItem -LiteralPath $full -Force)) { $pending.Push($child) }
+    }
+  }
+}
+
+function New-KlAccessRule {
+  param(
+    [Parameter(Mandatory)][Security.Principal.SecurityIdentifier] $Sid,
+    [Parameter(Mandatory)][Security.AccessControl.FileSystemRights] $Rights
+  )
+  New-Object Security.AccessControl.FileSystemAccessRule($Sid, $Rights, 'ContainerInherit, ObjectInherit', 'None', 'Allow')
+}
+
+# Creates $Path if it is missing and sets each grant with /grant:r. With
+# -WhatIf it only prints the icacls call. Refuses a $Path that is a reparse
+# point, like the walk does.
+function Set-KlAcl {
+  [CmdletBinding(SupportsShouldProcess)]
+  param(
+    [Parameter(Mandatory)][string] $Path,
+    [switch] $CutInheritance,
+    [string[]] $Grants = @()
+  )
+  $icaclsArgs = @($Path)
+  if ($CutInheritance) { $icaclsArgs += '/inheritance:r' }
+  foreach ($grant in $Grants) { $icaclsArgs += @('/grant:r', $grant) }
+  if (Test-Path -LiteralPath $Path) { Assert-KlNotReparsePoint -Path $Path }
+  if ($PSCmdlet.ShouldProcess($Path, "icacls $($icaclsArgs -join ' ')")) {
+    if (-not (Test-Path -LiteralPath $Path)) {
+      New-Item -ItemType Directory -Path $Path -Force | Out-Null
+    }
+    if ($icaclsArgs.Count -gt 1) {
+      & $icacls @icaclsArgs
+      if ($LASTEXITCODE -ne 0) { throw "icacls failed on $Path (exit code $LASTEXITCODE)" }
+    }
+  }
+}
+
+# Locks one admin-owned tree (Lock-KlAdminOwnedTree), then verifies all of
+# it by hand (Confirm-KlTreeLockedDown). The owner is Administrators and the
+# data folders' writer is the runner. With -WhatIf the walk prints each
+# change and the verification does not run (nothing real to verify).
+function Set-KlAdminOwnedTree {
+  [CmdletBinding(SupportsShouldProcess)]
+  param(
+    [Parameter(Mandatory)][string] $Path,
+    [hashtable] $DataFolders = @{},
+    [string[]] $EnsureFolders = @()
+  )
+  Lock-KlAdminOwnedTree -Path $Path -OwnerSid $AdminsSecurityId -TopRules $AdminOwnedTopRules -DataFolders $DataFolders -EnsureFolders $EnsureFolders
+  if ($PSCmdlet.ShouldProcess($Path, 'verify the whole tree is locked down (Confirm-KlTreeLockedDown)')) {
+    Confirm-KlTreeLockedDown -Path $Path -OwnerSid $AdminsSecurityId -DataFolders @($DataFolders.Keys) -DataWriterSid $RunnerSecurityId
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Checks, before anything changes.
+# ---------------------------------------------------------------------------
+
 # -Base must be a real installation folder: rooted with a drive and a
 # separator (a bare 'C:' is drive-relative, not a real path), not a drive
 # root (every grant in -Role base would then apply to the whole drive
 # instead of one folder), and outside $env:SystemRoot (Windows update and
-# repair tooling depends on that tree keeping its own ACLs).
+# repair tooling depends on that tree keeping its own ACLs). Every path below
+# is built from the normalized $baseFull, so a trailing '\' on -Base changes
+# nothing.
 if ($Base -notmatch '^[A-Za-z]:[\\/]') {
   throw "-Base '$Base' must be rooted with a drive and a separator, e.g. C:\KingLouie (not just C:)."
 }
@@ -56,17 +511,15 @@ if ($baseFull -eq $systemRootFull -or $baseFull.StartsWith("$systemRootFull\", [
 # (or be empty), so a typo cannot hand this script someone's home folder or
 # another app's install directory.
 if (Test-Path -LiteralPath $baseFull) {
-  $hasChildren = @(Get-ChildItem -LiteralPath $baseFull -Force -ErrorAction SilentlyContinue).Count -gt 0
-  $looksLikeKingLouie = Test-Path -LiteralPath (Join-Path $baseFull 'app\package.json')
+  $hasChildren = @(Get-ChildItem -LiteralPath $baseFull -Force -ErrorAction Stop).Count -gt 0
+  $looksLikeKingLouie = Test-Path -LiteralPath "$baseFull\app\package.json"
   if ($hasChildren -and -not $looksLikeKingLouie) {
     throw "-Base '$Base' already exists, is not empty, and has no app\package.json under it; refusing to take ownership of a folder that might not be the King Louie install. Point -Base at an empty folder or an existing King Louie install."
   }
 }
 
-# Never a bare icacls or takeown: Windows looks in the current directory
-# before PATH.
+# Never a bare icacls: Windows looks in the current directory before PATH.
 $icacls = "$env:SystemRoot\System32\icacls.exe"
-$takeown = "$env:SystemRoot\System32\takeown.exe"
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
@@ -86,7 +539,9 @@ $LocalService = '*S-1-5-19'
 # Running again with a different -Runner does not remove the previous
 # runner's explicit ACEs: /grant:r only replaces the entry for the account
 # named in this call. After changing who runs Claude, remove the old
-# runner's entries by hand: icacls <path> /remove:g *<old runner's SID> /T.
+# runner's entry by hand from each folder this script grants it on:
+# icacls <folder> /remove:g *<old runner's SID>. Those entries are explicit
+# only on those folders; everything below them inherits.
 $RunnerSid = "*$sid"
 
 # gpu-box's Python venv (train.run, models.hf_download) is created from the
@@ -96,7 +551,7 @@ $RunnerSid = "*$sid"
 # one that can see packages outside the venv. Refuse until Python is
 # (re)installed "for all users" (guide section 2/6) with no system-wide
 # site-packages leak.
-$pyvenvCfg = Join-Path $Base 'tools\py\pyvenv.cfg'
+$pyvenvCfg = "$baseFull\tools\py\pyvenv.cfg"
 if (Test-Path -LiteralPath $pyvenvCfg) {
   $cfgLines = Get-Content -LiteralPath $pyvenvCfg
   $homeLine = $cfgLines | Where-Object { $_ -match '^\s*home\s*=\s*(.+?)\s*$' } | Select-Object -First 1
@@ -117,148 +572,17 @@ if (Test-Path -LiteralPath $pyvenvCfg) {
   }
 }
 
-# Creates $Path if it is missing and sets each grant with /grant:r. With
-# -WhatIf it only prints the icacls call.
-function Set-KlAcl {
-  [CmdletBinding(SupportsShouldProcess)]
-  param(
-    [Parameter(Mandatory)][string] $Path,
-    [switch] $CutInheritance,
-    [string[]] $Grants = @()
-  )
-  $icaclsArgs = @($Path)
-  if ($CutInheritance) { $icaclsArgs += '/inheritance:r' }
-  foreach ($grant in $Grants) { $icaclsArgs += @('/grant:r', $grant) }
-  if ($PSCmdlet.ShouldProcess($Path, "icacls $($icaclsArgs -join ' ')")) {
-    if (-not (Test-Path -LiteralPath $Path)) {
-      New-Item -ItemType Directory -Path $Path -Force | Out-Null
-    }
-    if ($icaclsArgs.Count -gt 1) {
-      & $icacls @icaclsArgs
-      if ($LASTEXITCODE -ne 0) { throw "icacls failed on $Path (exit code $LASTEXITCODE)" }
-    }
-  }
-}
+# An administrator holds these, but they start disabled. SeTakeOwnership lets
+# the walk take a file the runner owns and has shut Administrators out of;
+# SeRestore lets it set Administrators as the owner and write the DACL
+# whatever the old DACL says.
+Initialize-KlNative
+[KlNative]::EnablePrivilege('SeTakeOwnershipPrivilege')
+[KlNative]::EnablePrivilege('SeRestorePrivilege')
 
-# icacls's own exit code cannot be trusted for a setowner it lacks the
-# privilege for: it still exits 0 (reproduced on this host; the same call
-# without /C exits 1307). Read the owner back with Get-Acl and verify it by
-# SID instead of trusting any exit code.
-function Confirm-KlOwnerIsAdmins {
-  param([Parameter(Mandatory)][string] $Path)
-  $ownerAccount = (Get-Acl -LiteralPath $Path).Owner
-  $ownerSid = ([Security.Principal.NTAccount] $ownerAccount).Translate([Security.Principal.SecurityIdentifier]).Value
-  if ($ownerSid -ne 'S-1-5-32-544') {
-    throw "icacls /setowner did not make Administrators the owner of $Path (owner is $ownerAccount, $ownerSid)"
-  }
-}
-
-# Walks $Path and everything under it and throws, naming the path, unless
-# every item is owned by Administrators and grants no write-capable access
-# to any SID other than SYSTEM or Administrators. $WritableExceptions are
-# subfolders (and everything under them) where the runner's or LOCAL
-# SERVICE's own explicit grant is allowed too. This is the only check in
-# this script that can be trusted on its own: exit codes and one-level
-# checks cannot be, once /C is involved (see Confirm-KlOwnerIsAdmins) or
-# once a call recurses (icacls's own /T can still exit 0 on a per-file
-# failure).
-function Confirm-KlTreeLockedDown {
-  param(
-    [Parameter(Mandatory)][string] $Path,
-    [string[]] $WritableExceptions = @()
-  )
-  $writeRights = [Security.AccessControl.FileSystemRights] 'WriteData, AppendData, WriteAttributes, WriteExtendedAttributes, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership, Write, Modify, FullControl'
-  $items = @(Get-Item -LiteralPath $Path) + @(Get-ChildItem -LiteralPath $Path -Recurse -Force)
-  foreach ($item in $items) {
-    $itemAcl = Get-Acl -LiteralPath $item.FullName
-    $ownerSid = ([Security.Principal.NTAccount] $itemAcl.Owner).Translate([Security.Principal.SecurityIdentifier]).Value
-    if ($ownerSid -ne 'S-1-5-32-544') {
-      throw "$($item.FullName) is not owned by Administrators (owner is $ownerSid)"
-    }
-    $exempt = $false
-    foreach ($exceptionPath in $WritableExceptions) {
-      if ($item.FullName -eq $exceptionPath -or $item.FullName.StartsWith("$exceptionPath\", [StringComparison]::OrdinalIgnoreCase)) {
-        $exempt = $true
-        break
-      }
-    }
-    foreach ($rule in $itemAcl.Access) {
-      if ($rule.AccessControlType -ne 'Allow') { continue }
-      if (([int] $rule.FileSystemRights -band [int] $writeRights) -eq 0) { continue }
-      $ruleSid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
-      if ($ruleSid -eq 'S-1-5-18' -or $ruleSid -eq 'S-1-5-32-544') { continue }
-      if ($exempt -and ($ruleSid -eq $sid -or $ruleSid -eq 'S-1-5-19')) { continue }
-      throw "$($item.FullName) grants write access to $ruleSid, which is not SYSTEM or Administrators"
-    }
-  }
-}
-
-function New-KlAccessRule {
-  param(
-    [Parameter(Mandatory)][Security.Principal.SecurityIdentifier] $Sid,
-    [Parameter(Mandatory)][Security.AccessControl.FileSystemRights] $Rights
-  )
-  New-Object Security.AccessControl.FileSystemAccessRule($Sid, $Rights, 'ContainerInherit, ObjectInherit', 'None', 'Allow')
-}
-
-# Fully reclaims an admin-owned tree in five steps, in order, because none of
-# icacls's shortcuts for doing this in one call can be trusted (see the
-# functions above):
-#   1. Take ownership of the top folder alone (no /T) and verify it by SID.
-#   2. Replace the top folder's DACL wholesale (Get-Acl / SetAccessRuleProtection
-#      / remove every rule / add exactly $TopRules / Set-Acl), so no stray
-#      explicit ACE from before this script ever ran survives.
-#   3. Take ownership of everything below the top folder with takeown (not
-#      icacls /setowner /T, which stays /C-swallowed even without /C's flag
-#      once it recurses) and reset every descendant to pure inheritance from
-#      the top folder.
-#   4. Re-apply the explicit grants the data subfolders under this tree still
-#      need, now that step 3 wiped them along with everything else.
-#   5. Verify the whole tree by hand (Confirm-KlTreeLockedDown).
-# With -WhatIf, each step prints what it would do without doing it, and step
-# 5 does not run (there is nothing real to verify).
-function Set-KlAdminOwnedTree {
-  [CmdletBinding(SupportsShouldProcess)]
-  param(
-    [Parameter(Mandatory)][string] $Path,
-    [Parameter(Mandatory)][Security.AccessControl.FileSystemAccessRule[]] $TopRules,
-    [hashtable] $DataGrants = @{}
-  )
-  if (-not (Test-Path -LiteralPath $Path)) {
-    if ($PSCmdlet.ShouldProcess($Path, 'create the folder')) {
-      New-Item -ItemType Directory -Path $Path -Force | Out-Null
-    }
-  }
-
-  if ($PSCmdlet.ShouldProcess($Path, 'icacls /setowner the top folder, then verify the owner by SID')) {
-    & $icacls $Path '/setowner' $Admins
-    if ($LASTEXITCODE -ne 0) { throw "icacls /setowner failed on $Path (exit code $LASTEXITCODE)" }
-    Confirm-KlOwnerIsAdmins -Path $Path
-  }
-
-  if ($PSCmdlet.ShouldProcess($Path, 'replace the DACL wholesale (Get-Acl / Set-Acl)')) {
-    $acl = Get-Acl -LiteralPath $Path
-    $acl.SetAccessRuleProtection($true, $false)
-    foreach ($rule in @($acl.Access)) { [void] $acl.RemoveAccessRule($rule) }
-    foreach ($rule in $TopRules) { $acl.AddAccessRule($rule) }
-    Set-Acl -LiteralPath $Path -AclObject $acl
-  }
-
-  if ($PSCmdlet.ShouldProcess("$Path (recursively)", 'takeown /A /R, then icacls /reset /T (no /C)')) {
-    & $takeown '/F' $Path '/A' '/R' '/D' 'Y'
-    if ($LASTEXITCODE -ne 0) { throw "takeown failed under $Path (exit code $LASTEXITCODE)" }
-    & $icacls "$Path\*" '/reset' '/T'
-    if ($LASTEXITCODE -ne 0) { throw "icacls /reset failed under $Path (exit code $LASTEXITCODE)" }
-  }
-
-  foreach ($dataPath in $DataGrants.Keys) {
-    Set-KlAcl -Path $dataPath -Grants @($DataGrants[$dataPath])
-  }
-
-  if ($PSCmdlet.ShouldProcess($Path, 'verify the whole tree is locked down (Confirm-KlTreeLockedDown)')) {
-    Confirm-KlTreeLockedDown -Path $Path -WritableExceptions @($DataGrants.Keys)
-  }
-}
+# ---------------------------------------------------------------------------
+# Changes.
+# ---------------------------------------------------------------------------
 
 $AdminFull = @("${System}:(OI)(CI)F", "${Admins}:(OI)(CI)F")
 $SystemSecurityId = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
@@ -266,61 +590,55 @@ $AdminsSecurityId = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-5
 $RunnerSecurityId = New-Object Security.Principal.SecurityIdentifier($sid)
 # The rule set every admin-owned tree's top folder gets: SYSTEM and
 # Administrators keep full control, the runner can read and run but not
-# write, and none of it is negotiable by anyone else.
+# write.
 $AdminOwnedTopRules = @(
   (New-KlAccessRule $SystemSecurityId 'FullControl'),
   (New-KlAccessRule $AdminsSecurityId 'FullControl'),
   (New-KlAccessRule $RunnerSecurityId 'ReadAndExecute')
 )
+# The runner's own data folders: Modify, inherited by what it writes there.
+$RunnerDataRules = @((New-KlAccessRule $RunnerSecurityId 'Modify'))
 
 switch ($Role) {
   'base' {
     # Every runbook: the install folder. Only SYSTEM and Administrators can
     # change it; the runner can read the code and the MCP config but not
-    # replace them.
-    Set-KlAdminOwnedTree -Path "$Base" -TopRules $AdminOwnedTopRules -DataGrants @{
-      # Step 3's takeover reassigns ownership of this data subfolder to
-      # Administrators too; the runner keeps write access here by this
-      # explicit grant (step 4), not by owning it.
-      "$Base\mcp\data" = "${RunnerSid}:(OI)(CI)M"
-    }
+    # replace them. mcp\config holds node.yaml and runbooks/*.yaml, and
+    # mcp\work is the folder steps start in: both inherit from $baseFull, so
+    # the runner can neither loosen the policy nor plant a program there.
+    # mcp\data is the stdio MCP instance's own data dir (its store and
+    # master key): Administrators own the folder, the runner writes in it by
+    # its Modify entry, and the walk never goes inside it.
+    Set-KlAdminOwnedTree -Path $baseFull -DataFolders @{ "$baseFull\mcp\data" = $RunnerDataRules } -EnsureFolders @("$baseFull\mcp\config", "$baseFull\mcp\work")
     # The installed service runs as LOCAL SERVICE and must still read its
     # code once inheritance from C:\ is cut.
-    Set-KlAcl -Path "$Base\app" -Grants @("${LocalService}:(OI)(CI)RX")
-    # Every runbook: node.yaml and runbooks/*.yaml, and the folder steps start
-    # in. Both inherit from $Base (admin full control, runner read), so the
-    # runner can neither loosen the policy nor plant a program there.
-    Set-KlAcl -Path "$Base\mcp\config"
-    Set-KlAcl -Path "$Base\mcp\work"
+    Set-KlAcl -Path "$baseFull\app" -Grants @("${LocalService}:(OI)(CI)RX")
   }
   'gpu-box' {
     # models.hf_download and train.run start hf.exe and python.exe from the
     # venv under here; the runner must not be able to replace them.
-    Set-KlAdminOwnedTree -Path "$Base\tools" -TopRules $AdminOwnedTopRules -DataGrants @{}
+    Set-KlAdminOwnedTree -Path "$baseFull\tools" -DataFolders @{}
     # models.hf_download writes its downloads here. Cutting inheritance
     # removes the Authenticated Users Modify entry a new folder on a data
     # drive inherits from the drive root; the runner keeps Modify by
-    # explicit grant instead. This path is not nested under $Base or
-    # D:\train, so the takeover above never touches it: its ownership is
-    # left alone, since the runner may already own the files it downloaded
-    # here.
+    # explicit grant instead. This path is not inside $baseFull or D:\train,
+    # so no walk reaches it: its ownership is left alone, since the runner
+    # may already own the files it downloaded here.
     Set-KlAcl -Path 'D:\models' -CutInheritance -Grants ($AdminFull + "${RunnerSid}:(OI)(CI)M")
-    # train.run: train.py and the configs stay admin-owned. Cutting
-    # inheritance removes the Authenticated Users Modify entry a new folder
-    # on a data drive inherits from the drive root.
-    Set-KlAdminOwnedTree -Path 'D:\train' -TopRules $AdminOwnedTopRules -DataGrants @{
-      # Same reasoning as $Base\mcp\data above.
-      'D:\train\runs' = "${RunnerSid}:(OI)(CI)M"
-    }
-    Set-KlAdminOwnedTree -Path 'D:\train\configs' -TopRules $AdminOwnedTopRules -DataGrants @{}
+    # train.run: train.py and the configs stay admin-owned; the runs folder
+    # is training output. Locking D:\train also removes the Authenticated
+    # Users Modify entry a new folder on a data drive inherits from the
+    # drive root.
+    Set-KlAdminOwnedTree -Path 'D:\train' -DataFolders @{ 'D:\train\runs' = $RunnerDataRules } -EnsureFolders @('D:\train\configs')
+    Set-KlAdminOwnedTree -Path 'D:\train\configs' -DataFolders @{}
   }
   'laptop' {
     # laptop.build_then_deploy fetches, installs and builds here. The runner
     # clones it first, so git sees the runner as the folder's owner. This
-    # path is not nested under $Base or D:\train, so the takeover above
-    # never touches it: cutting inheritance and granting Modify does not
-    # disturb who owns it, and its ownership is deliberately left alone --
-    # git needs to keep owning its own checkout.
+    # path is not inside $baseFull or D:\train, so no walk reaches it:
+    # cutting inheritance and granting Modify does not change who owns it,
+    # and its ownership is deliberately left alone -- git needs to keep
+    # owning its own checkout.
     if (-not (Test-Path -LiteralPath 'C:\build\site')) {
       throw 'C:\build\site does not exist. Clone your site repository there as the runner first (install guide section 6).'
     }
