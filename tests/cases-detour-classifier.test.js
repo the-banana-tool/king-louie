@@ -177,6 +177,13 @@ describe('DetourClassifier', () => {
     assert.strictEqual(journalLines(info.dir).length, 1);
   });
 
+  it('a tool-call reply (the model reached for a tool instead of answering) is malformed, same as orient', async () => {
+    const h = host(() => ({ type: 'tool_use', toolCalls: [{ toolName: 'Read', toolUseId: 't1', parameters: { path: 'x' } }] }));
+    const { classifier, info, turn } = await activeCase(h);
+    const r = await classifier.classify(info.id, { source: 'plan', text: 'Patch the phone agent', turn });
+    assert.deepStrictEqual([r.onCase, r.detour, r.failed], [true, false, 'malformed']);
+  });
+
   it('skips without a row when the host has no inference router', async () => {
     const rt = new CaseRuntime({ root: tmp() });
     const info = await rt.createCase({ title: 'Rear door quotes', objective: 'Three written quotes' });
