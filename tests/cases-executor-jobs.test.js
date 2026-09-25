@@ -374,3 +374,142 @@ describe('charges land exactly once', () => {
     assert.strictEqual(s.env.runtime.wakeups(s.meta.id).list().filter((w) => w.kind === 'poll-executor').length, 1);
   });
 });
+
+// Fix round 1 (Task 9 review).
+const { CaseRecords } = require('../src/cases/records');
+
+describe('fix round 1', () => {
+  it('a lower reported cost never refunds; the decrease is journaled', async () => {
+    const s = await setup();
+    const job = await submitted(s);
+    s.ctl.jobs.get('ext-1').costUsd = 15;
+    await s.reg.refreshCase(s.meta.id, { force: true });
+    assert.strictEqual(budgetSpent(s.env, s.meta.id, 'usd'), 15);
+    s.ctl.jobs.get('ext-1').costUsd = 0;
+    await s.reg.refreshCase(s.meta.id, { force: true });
+    await s.reg.refreshCase(s.meta.id, { force: true });
+    assert.strictEqual(new JobStore(s.dir).get(job.id).chargedUsd, 15);
+    assert.strictEqual(budgetSpent(s.env, s.meta.id, 'usd'), 15);
+    assert.strictEqual(new EnvelopeStore(s.dir).get('env-01').usage.usd, 15);
+    const notes = journalText(s.dir).match(/reported a cost of \$0\.00 for job-0001, below the \$15\.00 already charged/g) || [];
+    assert.strictEqual(notes.length, 1, 'journaled once, not on every poll');
+  });
+
+  it('a reported cost above maxCostUsd is recorded in full and journaled', async () => {
+    const s = await setup();
+    const job = await submitted(s, { maxCostUsd: 1 });
+    s.ctl.jobs.get('ext-1').costUsd = 1.25;
+    await s.reg.refreshCase(s.meta.id, { force: true });
+    assert.strictEqual(new JobStore(s.dir).get(job.id).chargedUsd, 1.25);
+    assert.strictEqual(budgetSpent(s.env, s.meta.id, 'usd'), 1.25);
+    assert.match(journalText(s.dir), /reported a cost of \$1\.25 for job-0001, above the \$1\.00 maximum sent at submit/);
+  });
+
+  it('an external submit without a job id fails the submit', async () => {
+    const s = await setup();
+    await s.reg.reserveContacts('fake-agent', 1, { caseId: s.meta.id });
+    const job = newJob(s);
+    const out = await jobs.commitSubmit(s.reg, s.meta.id, job, { contacts: [] });
+    assert.deepStrictEqual([out.state, out.reason, out.reservedContacts], ['failed', 'the executor returned no job id', 0]);
+    assert.strictEqual(budgetSpent(s.env, s.meta.id, 'contactsPerDay'), 0);
+    assert.strictEqual(s.reg.globalRemaining('fake-agent'), 5);
+    assert.strictEqual(new PlanStore(s.dir).read().steps[0].state, 'failed');
+    assert.strictEqual(s.env.runtime.wakeups(s.meta.id).list().some((w) => w.kind === 'poll-executor'), false);
+  });
+
+  it('an open external job with no external id is a poll error, not a quiet success', async () => {
+    const s = await setup();
+    const job = newJob(s, { state: 'submitted' });
+    await s.reg.refreshCase(s.meta.id, { force: true });
+    const j = new JobStore(s.dir).get(job.id);
+    assert.deepStrictEqual([j.state, j.pollErrors, j.stale], ['submitted', 1, true]);
+    assert.match(j.error, /no external id/);
+  });
+
+  it('adapter text is cut to 300 characters', async () => {
+    const s = await setup();
+    const job = await submitted(s);
+    const adapter = await s.reg.adapter('fake-agent');
+    const status = adapter.status;
+    adapter.status = async () => ({ state: 'x'.repeat(5000), costUsd: 'y'.repeat(5000) });
+    try {
+      await s.reg.refreshCase(s.meta.id, { force: true });
+      adapter.status = async () => { throw new Error('z'.repeat(5000)); };
+      s.env.settings.executors.maxPollErrors = 2;
+      await s.reg.refreshCase(s.meta.id, { force: true });
+    } finally {
+      adapter.status = status;
+    }
+    const j = new JobStore(s.dir).get(job.id);
+    assert.strictEqual(j.state, 'unreachable');
+    assert.ok(j.error.length <= 300 && j.reason.length <= 300, 'error and reason are cut');
+    const snap = readJsonSafe(path.join(s.dir, '.kl', 'executors.json'), null)['fake-agent'];
+    assert.ok(JSON.stringify(snap).length < 1000, 'the snapshot carries no long adapter text');
+    for (const n of fs.readdirSync(path.join(s.dir, 'journal'))) {
+      assert.ok(!/z{301}/.test(fs.readFileSync(path.join(s.dir, 'journal', n), 'utf8')), `${n} has no long adapter text`);
+    }
+  });
+
+  it('the unreachable job is saved even when its journal line fails', async () => {
+    const s = await setup();
+    const job = await submitted(s);
+    s.env.settings.executors.maxPollErrors = 1;
+    s.ctl.statusThrows = 1;
+    const restore = failOnce(CaseRecords.prototype, 'writeJournal', (kind, text) => /unreachable/.test(String(text)));
+    try {
+      await s.reg.refreshCase(s.meta.id, { force: true });
+    } finally {
+      restore();
+    }
+    const j = new JobStore(s.dir).get(job.id);
+    assert.deepStrictEqual([j.state, j.wakeupId], ['unreachable', null]);
+  });
+
+  it('refreshCase never throws: an index or snapshot failure is logged', async () => {
+    const s = await setup();
+    const job = await submitted(s);
+    const indexJob = s.reg.indexJob;
+    s.reg.indexJob = async () => { throw new Error('index down'); };
+    fs.mkdirSync(path.join(s.dir, '.kl', 'executors.json'), { recursive: true });
+    try {
+      const r = await s.reg.refreshCase(s.meta.id, { force: true });
+      assert.strictEqual(r.material, false);
+    } finally {
+      s.reg.indexJob = indexJob;
+    }
+    assert.strictEqual(new JobStore(s.dir).get(job.id).state, 'running', 'the poll itself was saved');
+  });
+
+  it('copyBackgroundOutput re-reads the job, refuses unknown run states and marks copied once', async () => {
+    const s = await setup();
+    const store = new JobStore(s.dir);
+    const first = store.create({ caseId: s.meta.id, executor: 'runbook', kind: 'runbook', state: 'running' });
+    const late = store.create({ caseId: s.meta.id, executor: 'runbook', kind: 'runbook', state: 'running' });
+    const odd = store.create({ caseId: s.meta.id, executor: 'runbook', kind: 'runbook', state: 'running' });
+    for (const j of [first, late]) {
+      writeJsonAtomic(path.join(jobs.runDir(s.reg, s.meta.id, j.id), 'output.json'), { success: true });
+      jobs.writeRunStatus(s.reg, s.meta.id, j.id, { state: 'done', finishedAt: '2026-10-26T15:30:00Z' });
+    }
+    writeJsonAtomic(path.join(jobs.runDir(s.reg, s.meta.id, odd.id), 'output.json'), { success: true });
+    jobs.writeRunStatus(s.reg, s.meta.id, odd.id, { state: 'finished' });
+    // A cancel lands while the loop awaits the index write of the first job.
+    const indexJob = s.reg.indexJob.bind(s.reg);
+    let once = true;
+    s.reg.indexJob = async (caseId, job) => {
+      if (once) {
+        once = false;
+        store.update(late.id, { state: 'cancelled', reason: 'case paused' });
+      }
+      return indexJob(caseId, job);
+    };
+    try {
+      assert.deepStrictEqual(await jobs.copyBackgroundOutput(s.reg, s.meta.id), [first.id, late.id]);
+    } finally {
+      s.reg.indexJob = indexJob;
+    }
+    assert.deepStrictEqual([store.get(first.id).state, store.get(first.id).copied], ['done', true]);
+    assert.deepStrictEqual([store.get(late.id).state, store.get(late.id).copied], ['cancelled', true]);
+    assert.deepStrictEqual([store.get(odd.id).state, store.get(odd.id).copied], ['running', false]);
+    assert.deepStrictEqual(await jobs.copyBackgroundOutput(s.reg, s.meta.id), [], 'never copied twice');
+  });
+});

@@ -16,7 +16,9 @@
 // A crash after 2 leaves the marker: the next poll completes step 4 and
 // reports the charge as interrupted. The budget charge (3) is not
 // idempotent, so it is never replayed: an interrupted charge can be missing
-// from the budget, but it is never counted twice.
+// from the budget, but it is never counted twice. A charge never goes down:
+// a lower reported cost is journaled, not refunded (money spent stays spent,
+// and the envelope's usd cap stays closed).
 // Every mutation after an await re-reads the job from disk, and the steps
 // from the re-read to the save run with no await in between, so a cancel
 // that lands while a poll is out wins and the poll charges nothing.
@@ -28,7 +30,7 @@ const {
 } = require('./job-store');
 const { EnvelopeStore } = require('./envelope');
 const { PlanStore } = require('./plan');
-const { readJsonSafe, writeJsonAtomic, roundUsd, money } = require('./util');
+const { readJsonSafe, writeJsonAtomic, roundUsd, money, cut } = require('./util');
 
 const log = createLogger('executors/jobs');
 const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
@@ -44,6 +46,10 @@ const runKey = (caseId, jobId) => `${caseId}/${jobId}`;
 const isTerminal = (state) => TERMINAL_STATES.includes(state);
 const isObject = (v) => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
 const isJobStateError = (err) => Boolean(err) && err.code === 'JOB_STATE';
+// Executor-sourced text is bounded before it reaches a job, the journal or
+// the snapshot.
+const clip = (text) => cut(String(text ?? ''), 300);
+const validExternalId = (id) => typeof id === 'string' && id.trim() !== '';
 
 function kindOf(entry) {
   if (!entry) return 'external';
@@ -90,7 +96,7 @@ function updateEnvelope(caseDir, envelopeId, fn) {
 function stateProblem(state, { optional = false } = {}) {
   if (optional && (state === undefined || state === null)) return null;
   if (typeof state === 'string' && ADAPTER_STATES.includes(state)) return null;
-  return `the executor reported an unknown job state ${JSON.stringify(state ?? null)} (expected one of ${ADAPTER_STATES.join(', ')})`;
+  return `the executor reported an unknown job state ${clip(JSON.stringify(state ?? null))} (expected one of ${ADAPTER_STATES.join(', ')})`;
 }
 
 function statusProblem(status) {
@@ -99,21 +105,33 @@ function statusProblem(status) {
   if (bad) return bad;
   const cost = status.costUsd;
   if (cost !== undefined && cost !== null && !(typeof cost === 'number' && Number.isFinite(cost) && cost >= 0)) {
-    return `the executor reported an invalid cost ${JSON.stringify(cost)}`;
+    return `the executor reported an invalid cost ${clip(JSON.stringify(cost))}`;
   }
   return null;
 }
 
-// Budget crossings are applied after the job is saved: a crossing can pause
-// the case, which cancels its open jobs.
-function applyCrossings(reg, caseId, crossings) {
-  for (const [category, crossedNow] of crossings) {
+function journal(reg, caseId, text) {
+  try {
+    reg.caseRuntime.records(caseId).writeJournal('envelope', text, reg.now());
+  } catch (err) {
+    log.warn(`Case ${caseId}: writing a journal line failed: ${err.message}`);
+  }
+}
+
+// Effects that run after the job is saved: budget crossings (a crossing can
+// pause the case, which cancels its open jobs) and journal lines (a failing
+// journal write never costs the job its save).
+const newAfter = () => ({ crossings: [], journal: [] });
+
+function flushAfter(reg, caseId, after) {
+  for (const [category, crossedNow] of after.crossings) {
     try {
       reg.caseRuntime.onCrossings(caseId, category, crossedNow);
     } catch (err) {
       log.warn(`Case ${caseId}: handling the ${category} crossing failed: ${err.message}`);
     }
   }
+  for (const text of after.journal) journal(reg, caseId, text);
 }
 
 // Writes the listed fields of `job` onto the job as it is on disk, keeping
@@ -162,27 +180,23 @@ function envelopeCharge(caseDir, envelopeId, jobId, total) {
 
 // A charge interrupted after its write-ahead: finish the envelope side and
 // say so; the budget side is not replayed (see the header).
-function settlePendingCharge(reg, caseId, caseDir, job) {
+function settlePendingCharge(caseId, caseDir, job, after) {
   const p = job.pendingCharge;
   if (!p) return;
   envelopeCharge(caseDir, job.envelopeId, job.id, roundUsd(job.chargedUsd));
   const text = `The charge of ${money(p.usd)} for ${job.id} on ${job.executor} was interrupted. `
     + 'Its envelope usage is complete; the case budget may not include it (it is not re-applied, so it is never counted twice).';
   log.warn(`Case ${caseId}: ${text}`);
-  try {
-    reg.caseRuntime.records(caseId).writeJournal('envelope', text, reg.now());
-  } catch (err) {
-    log.warn(`Case ${caseId}: journaling the interrupted charge failed: ${err.message}`);
-  }
+  after.journal.push(text);
   job.pendingCharge = null;
 }
 
 // The one charging point for executor cost: charge the difference from what
-// was already charged, and count it against the envelope.
-function chargeTo(reg, caseId, caseDir, job, costUsd, crossings) {
-  const total = roundUsd(costUsd);
+// was already charged, and count it against the envelope. Never negative.
+function chargeTo(reg, caseId, caseDir, job, costUsd, after) {
+  const total = Math.max(roundUsd(costUsd), roundUsd(job.chargedUsd));
   const delta = roundUsd(total - (Number(job.chargedUsd) || 0));
-  if (!delta) return;
+  if (!(delta > 0)) return;
   const prev = { chargedUsd: job.chargedUsd, pendingCharge: job.pendingCharge };
   job.chargedUsd = total;
   job.pendingCharge = { usd: delta, total, at: reg.now().toISOString() };
@@ -193,16 +207,36 @@ function chargeTo(reg, caseId, caseDir, job, costUsd, crossings) {
     throw err;
   }
   const r = reg.caseRuntime.budget(caseId).charge('usd', delta, { executor: job.executor, jobId: job.id });
-  if (r && Array.isArray(r.crossedNow) && r.crossedNow.length) crossings.push(['usd', r.crossedNow]);
+  if (r && Array.isArray(r.crossedNow) && r.crossedNow.length) after.crossings.push(['usd', r.crossedNow]);
   envelopeCharge(caseDir, job.envelopeId, job.id, total);
   job.pendingCharge = null;
 }
 
+// Journals a reported cost below what was charged (not refunded) or above
+// the maxCostUsd sent at submit (recorded in full), once per figure.
+function noteReportedCost(caseId, job, cost, after) {
+  const charged = roundUsd(job.chargedUsd);
+  if (cost < charged && job.lowCostNoted !== cost) {
+    job.lowCostNoted = cost;
+    after.journal.push(`${job.executor} reported a cost of ${money(cost)} for ${job.id}, below the ${money(charged)} already charged. `
+      + `The charge stays at ${money(charged)}: a charge is never refunded.`);
+  }
+  const max = job.maxCostUsd;
+  if (typeof max === 'number' && Number.isFinite(max) && cost > max && job.overCostNoted !== cost) {
+    job.overCostNoted = cost;
+    const text = `${job.executor} reported a cost of ${money(cost)} for ${job.id}, above the ${money(max)} maximum sent at submit. `
+      + 'The full cost is recorded.';
+    log.warn(`Case ${caseId}: ${text}`);
+    after.journal.push(text);
+  }
+}
+
 // Settles a job that has just become terminal. Callers save the job after
-// it; pass `crossings` (an array) to apply budget crossings after that save.
-function finishJob(reg, caseId, caseDir, job, crossings = null) {
-  const sink = crossings || [];
-  settlePendingCharge(reg, caseId, caseDir, job);
+// it; pass `after` (newAfter()) to run crossings and journal lines after
+// that save. Without it they run at the end of this call.
+function finishJob(reg, caseId, caseDir, job, after = null) {
+  const sink = after || newAfter();
+  settlePendingCharge(caseId, caseDir, job, sink);
   if (job.submittedAt && !job.costReported && (Number(job.estimateUsd) || 0) > (Number(job.chargedUsd) || 0)) {
     chargeTo(reg, caseId, caseDir, job, job.estimateUsd, sink);
   }
@@ -220,21 +254,23 @@ function finishJob(reg, caseId, caseDir, job, crossings = null) {
       ? { state: 'done' }
       : { state: 'failed', reason: job.state === 'cancelled' ? 'cancelled' : (job.reason || job.state) });
   }
-  if (!crossings) applyCrossings(reg, caseId, sink);
+  if (!after) flushAfter(reg, caseId, sink);
 }
 
 // Throws (before any side effect) when the status cannot be applied.
-function applyStatus(reg, caseId, caseDir, job, status, now, crossings = null) {
+function applyStatus(reg, caseId, caseDir, job, status, now, after = null) {
   const problem = statusProblem(status);
   if (problem) throw new Error(problem);
-  const sink = crossings || [];
-  settlePendingCharge(reg, caseId, caseDir, job);
+  const sink = after || newAfter();
+  settlePendingCharge(caseId, caseDir, job, sink);
   const before = job.state;
   // Charges first, while the job still has its old state (a write-ahead
   // never persists a transition that finishJob has not settled yet).
   if (typeof status.costUsd === 'number') {
     job.costReported = true;
-    chargeTo(reg, caseId, caseDir, job, status.costUsd, sink);
+    const cost = roundUsd(status.costUsd);
+    noteReportedCost(caseId, job, cost, sink);
+    chargeTo(reg, caseId, caseDir, job, cost, sink);
   }
   if (status.resultFactId !== undefined) job.resultFactId = status.resultFactId;
   if (status.state !== before && !isTerminal(before)) {
@@ -245,12 +281,14 @@ function applyStatus(reg, caseId, caseDir, job, status, now, crossings = null) {
   }
   if (Array.isArray(status.contacts)) job.contacts = mergeContacts(job.contacts, status.contacts);
   if (isTerminal(job.state) && !isTerminal(before)) finishJob(reg, caseId, caseDir, job, sink);
-  if (!crossings) applyCrossings(reg, caseId, sink);
+  if (!after) flushAfter(reg, caseId, sink);
 }
 
 async function statusFromSource(reg, caseId, job) {
   if (job.kind === 'external') {
-    if (!job.externalId) return null;
+    // commitSubmit refuses an external job without one; an open job that
+    // still lacks it can never settle, so it is a poll error (then unreachable).
+    if (!validExternalId(job.externalId)) throw new Error('the job has no external id to poll (the executor never returned one)');
     const adapter = await reg.adapter(job.executor);
     return adapter.status(job.externalId);
   }
@@ -283,34 +321,35 @@ async function pollJob(reg, caseId, caseDir, store, listed, settings, now) {
   // Re-read after the await: a cancel may have landed while the poll was out.
   const job = store.get(listed.id);
   if (!isObject(job) || !isOpen(job.state) || job.state === 'submitting') return null;
-  const crossings = [];
-  settlePendingCharge(reg, caseId, caseDir, job);
+  const after = newAfter();
+  settlePendingCharge(caseId, caseDir, job, after);
   if (!failure) {
     job.lastPolledAt = now.toISOString();
     job.pollErrors = 0;
     job.stale = false;
     job.error = null;
     job.nextPollAt = new Date(now.getTime() + every).toISOString();
-    if (status) applyStatus(reg, caseId, caseDir, job, status, now, crossings);
+    if (status) applyStatus(reg, caseId, caseDir, job, status, now, after);
   } else {
+    const message = clip(failure.message);
     job.pollErrors = (Number(job.pollErrors) || 0) + 1;
-    job.error = failure.message;
+    job.error = message;
     if (job.pollErrors >= settings.maxPollErrors) {
       // Unreachable is material; stale is cleared so C2's trigger compares it.
       job.state = 'unreachable';
       job.stale = false;
       job.nextPollAt = null;
       job.lastChange = now.toISOString();
-      job.reason = `unreachable after ${job.pollErrors} failed polls: ${failure.message}`;
-      finishJob(reg, caseId, caseDir, job, crossings);
-      reg.caseRuntime.records(caseId).writeJournal('envelope', `Job ${job.id} on ${job.executor} is unreachable after ${job.pollErrors} failed polls: ${failure.message}`, now);
+      job.reason = clip(`unreachable after ${job.pollErrors} failed polls: ${message}`);
+      finishJob(reg, caseId, caseDir, job, after);
+      after.journal.push(`Job ${job.id} on ${job.executor} is unreachable after ${job.pollErrors} failed polls: ${message}`);
     } else {
       job.stale = true;
       job.nextPollAt = new Date(now.getTime() + Math.min(every * 2 ** job.pollErrors, SIX_HOURS_MS)).toISOString();
     }
   }
   const saved = saveJob(store, job);
-  applyCrossings(reg, caseId, crossings);
+  flushAfter(reg, caseId, after);
   return saved ? job : null;
 }
 
@@ -341,8 +380,8 @@ function buildSnapshot(reg, caseId, allJobs, before) {
       ...(next[id] || {}),
       fetchedAt: list.map((j) => j.lastPolledAt).filter(Boolean).sort().pop() || null,
       stale: Boolean(staleJob),
-      error: staleJob ? staleJob.error : null,
-      state: { jobs: Object.fromEntries(list.map((j) => [j.id, { externalId: j.externalId || null, state: j.state }])) },
+      error: staleJob ? clip(staleJob.error) : null,
+      state: { jobs: Object.fromEntries(list.map((j) => [j.id, { externalId: j.externalId ? clip(j.externalId) : null, state: j.state }])) },
       material
     };
   }
@@ -357,6 +396,16 @@ function materialChanged(before, next) {
   return false;
 }
 
+async function indexQuietly(reg, caseId, job) {
+  try {
+    await reg.indexJob(caseId, job);
+  } catch (err) {
+    log.warn(`Case ${caseId}: indexing ${job.id} failed: ${err.message}`);
+  }
+}
+
+// Spec §3.12: a throw never leaves the refresh. A failed job poll, index
+// write or snapshot is logged; a failed snapshot reports no material change.
 async function refreshCase(reg, caseId, { force = false, budgetMs = null, jobIds = null } = {}) {
   return reg.caseRuntime.systemAction(caseId, 'executor refresh', async (meta) => {
     const caseDir = meta.dir;
@@ -380,13 +429,18 @@ async function refreshCase(reg, caseId, { force = false, budgetMs = null, jobIds
         log.warn(`Case ${caseId}: applying the poll of ${listed.id} failed: ${err.message}`);
         continue;
       }
-      if (job) await reg.indexJob(caseId, job);
+      if (job) await indexQuietly(reg, caseId, job);
     }
-    const before = readSnapshot(caseDir);
-    const next = buildSnapshot(reg, caseId, store.list(), before);
-    const material = materialChanged(before, next);
-    writeSnapshot(caseDir, next);
-    return { material, snapshot: next };
+    try {
+      const before = readSnapshot(caseDir);
+      const next = buildSnapshot(reg, caseId, store.list(), before);
+      const material = materialChanged(before, next);
+      writeSnapshot(caseDir, next);
+      return { material, snapshot: next };
+    } catch (err) {
+      log.warn(`Case ${caseId}: writing the executor snapshot failed: ${err.message}`);
+      return { material: false, snapshot: null };
+    }
   });
 }
 
@@ -410,13 +464,13 @@ function takeReservation(job) {
 async function failSubmit(reg, caseId, job, submitted, reason) {
   const caseDir = reg.caseDir(caseId);
   const store = new JobStore(caseDir);
-  job.externalId = submitted.jobId ?? job.externalId ?? null;
+  if (validExternalId(submitted.jobId)) job.externalId = submitted.jobId;
   let note = null;
-  if (job.kind === 'external' && job.externalId) {
+  if (job.kind === 'external' && validExternalId(job.externalId)) {
     try {
       await (await reg.adapter(job.executor)).cancel(job.externalId);
     } catch (err) {
-      note = `the executor did not confirm the cancel of ${job.externalId}: ${err.message}`;
+      note = clip(`the executor did not confirm the cancel of ${job.externalId}: ${err.message}`);
     }
   }
   const fresh = store.get(job.id);
@@ -424,15 +478,15 @@ async function failSubmit(reg, caseId, job, submitted, reason) {
   job.reservedContacts = isObject(fresh) ? fresh.reservedContacts : job.reservedContacts;
   const release = takeReservation(job);
   job.state = 'failed';
-  job.reason = reason;
+  job.reason = clip(reason);
   job.lastChange = reg.now().toISOString();
-  const crossings = [];
-  finishJob(reg, caseId, caseDir, job, crossings);
+  const after = newAfter();
+  finishJob(reg, caseId, caseDir, job, after);
   saveJob(store, job);
   if (release) await reg.releaseContacts(job.executor, release, { caseId });
-  applyCrossings(reg, caseId, crossings);
-  await reg.indexJob(caseId, job);
-  reg.caseRuntime.records(caseId).writeJournal('envelope', `Job ${job.id} on ${job.executor} failed at submit: ${reason}${note ? ` (${note})` : ''}.`, reg.now());
+  after.journal.push(`Job ${job.id} on ${job.executor} failed at submit: ${job.reason}${note ? ` (${note})` : ''}.`);
+  flushAfter(reg, caseId, after);
+  await indexQuietly(reg, caseId, job);
   return job;
 }
 
@@ -444,12 +498,16 @@ async function commitSubmit(reg, caseId, job, submitted = {}) {
   submitted = isObject(submitted) ? submitted : {};
   const problem = stateProblem(submitted.state, { optional: true });
   if (problem) return failSubmit(reg, caseId, job, submitted, problem);
+  // An external job the node cannot poll would stay open forever.
+  if (job.kind === 'external' && !validExternalId(submitted.jobId)) {
+    return failSubmit(reg, caseId, job, submitted, 'the executor returned no job id');
+  }
   const rt = reg.caseRuntime;
   const caseDir = reg.caseDir(caseId);
   const store = new JobStore(caseDir);
   const now = reg.now();
   const entry = reg.get(job.executor, { caseId });
-  const crossings = [];
+  const after = newAfter();
   job.externalId = submitted.jobId ?? job.externalId ?? null;
   if (Array.isArray(submitted.contacts)) job.contacts = mergeContacts(job.contacts, submitted.contacts);
   job.submittedAt = job.submittedAt || now.toISOString();
@@ -461,7 +519,7 @@ async function commitSubmit(reg, caseId, job, submitted = {}) {
     if (!isJobStateError(err)) throw err;
     // Cancelled while the executor had it: nothing is committed or charged.
     log.warn(`Not committing ${job.id}: ${err.message}`);
-    if (job.kind === 'external' && job.externalId) {
+    if (job.kind === 'external' && validExternalId(job.externalId)) {
       try {
         await (await reg.adapter(job.executor)).cancel(job.externalId);
       } catch (e) {
@@ -487,7 +545,7 @@ async function commitSubmit(reg, caseId, job, submitted = {}) {
   });
   if (!contactsCharged && job.newContacts > 0) {
     const r = rt.budget(caseId).charge('contactsPerDay', job.newContacts, { executor: job.executor, jobId: job.id });
-    if (r && Array.isArray(r.crossedNow) && r.crossedNow.length) crossings.push(['contactsPerDay', r.crossedNow]);
+    if (r && Array.isArray(r.crossedNow) && r.crossedNow.length) after.crossings.push(['contactsPerDay', r.crossedNow]);
   }
   if (entry && entry.latency !== 'interactive' && isOpen(job.state)) {
     const every = Math.max(MIN_POLL_MS, Number(entry.pollEveryMs) || reg.settings().pollEveryMs);
@@ -495,19 +553,19 @@ async function commitSubmit(reg, caseId, job, submitted = {}) {
     job.nextPollAt = new Date(now.getTime() + every).toISOString();
   }
   if (job.planStepId) new PlanStore(caseDir).updateStep(job.planStepId, { state: 'in-flight', addJob: job.id });
-  if (isTerminal(job.state)) finishJob(reg, caseId, caseDir, job, crossings);
+  if (isTerminal(job.state)) finishJob(reg, caseId, caseDir, job, after);
   saveJob(store, job);
-  applyCrossings(reg, caseId, crossings);
-  await reg.indexJob(caseId, job);
-  rt.records(caseId).writeJournal('envelope', [
-    `Job ${job.id} submitted to ${job.executor}${job.envelopeId ? ` under ${job.envelopeId}` : ''}${job.externalId ? ` (external id ${job.externalId})` : ''}.`,
+  after.journal.unshift([
+    `Job ${job.id} submitted to ${job.executor}${job.envelopeId ? ` under ${job.envelopeId}` : ''}${job.externalId ? ` (external id ${clip(job.externalId)})` : ''}.`,
     '',
     'Payload as sent:',
     '',
     '```json',
     JSON.stringify(job.payload, null, 2),
     '```'
-  ].join('\n'), now);
+  ].join('\n'));
+  flushAfter(reg, caseId, after);
+  await indexQuietly(reg, caseId, job);
   return job;
 }
 
@@ -520,7 +578,7 @@ async function cancelJob(reg, caseId, jobId, reason = 'cancelled') {
   if (!isOpen(listed.state)) return { ok: false, error: `${jobId} is already ${listed.state}.` };
   let note = null;
   try {
-    if (listed.kind === 'external' && listed.externalId) {
+    if (listed.kind === 'external' && validExternalId(listed.externalId)) {
       await (await reg.adapter(listed.executor)).cancel(listed.externalId);
     } else if (listed.kind === 'workflow' && listed.externalId) {
       const engine = reg.getWorkflowEngine();
@@ -539,26 +597,30 @@ async function cancelJob(reg, caseId, jobId, reason = 'cancelled') {
       rt.questions(caseId).close(listed.questionId, { reason, by: 'system' });
     }
   } catch (err) {
-    note = `the executor did not confirm the cancel: ${err.message}`;
+    note = clip(`the executor did not confirm the cancel: ${err.message}`);
   }
   // Re-read after the executor call: a poll may have settled it meanwhile.
   const job = store.get(jobId);
   if (!isObject(job) || !isOpen(job.state)) return { ok: false, error: `${jobId} is already ${job?.state}.` };
   const release = takeReservation(job);
-  const crossings = [];
+  const after = newAfter();
   job.state = 'cancelled';
   job.reason = reason;
   job.lastChange = reg.now().toISOString();
-  finishJob(reg, caseId, caseDir, job, crossings);
+  finishJob(reg, caseId, caseDir, job, after);
   saveJob(store, job);
   if (release) await reg.releaseContacts(job.executor, release, { caseId });
-  applyCrossings(reg, caseId, crossings);
-  await reg.indexJob(caseId, job);
-  rt.records(caseId).writeJournal('envelope', `Job ${job.id} on ${job.executor} cancelled: ${reason}${note ? ` (${note})` : ''}.`, reg.now());
+  after.journal.push(`Job ${job.id} on ${job.executor} cancelled: ${reason}${note ? ` (${note})` : ''}.`);
+  flushAfter(reg, caseId, after);
+  await indexQuietly(reg, caseId, job);
   return { ok: true, job, ...(note ? { note } : {}) };
 }
 
-// C2's setStatus calls this inside the case lock.
+// C2's _cancelExecutorJobs fires this without awaiting it, after setStatus
+// has released the case lock, so it can interleave with a refresh or another
+// cancel. What keeps that safe is the invariant in the header: each
+// re-read-to-save section (cancelJob after its executor call, pollJob after
+// its status fetch) has no await inside it.
 async function cancelOpenJobs(reg, caseId, reason) {
   const cancelled = [];
   for (const job of reg.jobs(caseId).list().filter((j) => isOpen(j.state))) {
@@ -588,7 +650,7 @@ async function reconcileSubmitting(reg, caseId) {
     if (reg.inFlight.has(runKey(caseId, job.id))) continue;
     let found = null;
     if (job.kind === 'external') {
-      if (job.externalId) {
+      if (validExternalId(job.externalId)) {
         found = { jobId: job.externalId };
       } else {
         try {
@@ -611,41 +673,58 @@ async function reconcileSubmitting(reg, caseId) {
     fresh.state = 'failed';
     fresh.reason = 'interrupted';
     fresh.lastChange = reg.now().toISOString();
-    const crossings = [];
-    finishJob(reg, caseId, caseDir, fresh, crossings);
+    const after = newAfter();
+    finishJob(reg, caseId, caseDir, fresh, after);
     saveJob(store, fresh);
     if (release) await reg.releaseContacts(fresh.executor, release, { caseId });
-    applyCrossings(reg, caseId, crossings);
-    await reg.indexJob(caseId, fresh);
+    flushAfter(reg, caseId, after);
+    await indexQuietly(reg, caseId, fresh);
     out.push({ jobId: fresh.id, state: 'failed' });
   }
   return out;
 }
 
 // Background runs write only under <dataDir>/executors/runs/; the case copy
-// happens here, under the case lock (R37).
+// happens here, under the case lock (R37). `copied` is saved on its own right
+// after the copy, before the state is applied, so a failure later never
+// copies the output again; refreshCase settles the state from status.json.
 async function copyBackgroundOutput(reg, caseId) {
   const caseDir = reg.caseDir(caseId);
   const store = new JobStore(caseDir);
   const copied = [];
-  for (const job of store.list()) {
-    if ((job.kind !== 'workflow' && job.kind !== 'runbook') || job.copied) continue;
-    const st = readRunStatus(reg, caseId, job.id);
-    if (!st || !isTerminal(st.state)) continue;
-    const from = runDir(reg, caseId, job.id);
-    const to = path.join(caseDir, 'sources', job.executor, job.id);
-    fs.mkdirSync(to, { recursive: true });
-    for (const name of fs.readdirSync(from)) {
-      if (name === 'status.json') continue;
-      fs.cpSync(path.join(from, name), path.join(to, name), { recursive: true });
+  for (const listed of store.list()) {
+    if ((listed.kind !== 'workflow' && listed.kind !== 'runbook') || listed.copied) continue;
+    try {
+      const st = readRunStatus(reg, caseId, listed.id);
+      if (!isObject(st)) continue;
+      if (!ADAPTER_STATES.includes(st.state)) {
+        log.warn(`Case ${caseId}: ${listed.id} has an unknown run state ${clip(JSON.stringify(st.state ?? null))}; not copying`);
+        continue;
+      }
+      if (!isTerminal(st.state)) continue;
+      const from = runDir(reg, caseId, listed.id);
+      const to = path.join(caseDir, 'sources', listed.executor, listed.id);
+      fs.mkdirSync(to, { recursive: true });
+      for (const name of fs.readdirSync(from)) {
+        if (name === 'status.json') continue;
+        fs.cpSync(path.join(from, name), path.join(to, name), { recursive: true });
+      }
+      // Re-read: the loop has awaited since the list was read.
+      const job = store.get(listed.id);
+      if (!isObject(job) || job.copied) continue;
+      job.copied = true;
+      store.write(job);
+      copied.push(job.id);
+      if (isOpen(job.state)) {
+        const after = newAfter();
+        applyStatus(reg, caseId, caseDir, job, { state: st.state, lastChange: st.finishedAt || null }, reg.now(), after);
+        saveJob(store, job);
+        flushAfter(reg, caseId, after);
+      }
+      await indexQuietly(reg, caseId, job);
+    } catch (err) {
+      log.warn(`Case ${caseId}: copying the output of ${listed.id} failed: ${err.message}`);
     }
-    job.copied = true;
-    const crossings = [];
-    if (isOpen(job.state)) applyStatus(reg, caseId, caseDir, job, { state: st.state, lastChange: st.finishedAt || null }, reg.now(), crossings);
-    saveJob(store, job);
-    applyCrossings(reg, caseId, crossings);
-    await reg.indexJob(caseId, job);
-    copied.push(job.id);
   }
   return copied;
 }
