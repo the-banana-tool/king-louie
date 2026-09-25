@@ -1,9 +1,9 @@
 // Checks, for `doctor`, that every program a runbook step starts can be
 // started the way the engine starts it: argv only, no shell, in the working
 // directory of whichever process hosts the engine. Every host fact (platform,
-// env, cwd, euid, spawnSync) is passed in, so each OS's rules can be tested
-// on any OS. Pure Node; nothing here runs a runbook command. `sudo -l` only
-// lists what sudoers allows.
+// env, cwd, euid, spawnSync, fsCheck) is passed in, so each OS's rules can be
+// tested on any OS. Pure Node; nothing here runs a runbook command. `sudo -l`
+// only lists what sudoers allows.
 const fs = require('fs');
 const path = require('path');
 const childProcess = require('child_process');
@@ -18,7 +18,7 @@ function baseName(p) {
   return parts[parts.length - 1];
 }
 
-function isFile(p) {
+function realIsFile(p) {
   try {
     return fs.statSync(p).isFile();
   } catch {
@@ -26,8 +26,8 @@ function isFile(p) {
   }
 }
 
-function isExecutable(p) {
-  if (!isFile(p)) return false;
+function realIsExecutable(p) {
+  if (!realIsFile(p)) return false;
   try {
     fs.accessSync(p, fs.constants.X_OK);
     return true;
@@ -35,6 +35,11 @@ function isExecutable(p) {
     return false;
   }
 }
+
+// Default fsCheck: the real filesystem. Callers inject a fake to exercise
+// one OS's file-existence rules from another OS (e.g. faking a POSIX `sudo`
+// binary as present while running the suite on win32).
+const DEFAULT_FS_CHECK = { isFile: realIsFile, isExecutable: realIsExecutable };
 
 function pathDirs(env, platform) {
   const key = Object.keys(env || {}).find((k) => (platform === 'win32' ? k.toUpperCase() === 'PATH' : k === 'PATH'));
@@ -58,7 +63,13 @@ function win32Candidates(dir, name) {
  * shell for it), but one found where an .exe was expected is reported as
  * `cmdShim` so the caller can say why the lookup failed.
  */
-function resolveCommand(argv0, { platform = process.platform, env = process.env, cwd = process.cwd() } = {}) {
+function resolveCommand(argv0, {
+  platform = process.platform,
+  env = process.env,
+  cwd = process.cwd(),
+  fsCheck = DEFAULT_FS_CHECK
+} = {}) {
+  const { isFile, isExecutable } = fsCheck;
   const name = String(argv0);
   if (platform === 'win32') {
     if (path.win32.isAbsolute(name)) {
@@ -133,7 +144,8 @@ function checkRunbookCommands(runbooks, {
   env = process.env,
   cwd = process.cwd(),
   geteuid = null,
-  spawnSync = childProcess.spawnSync
+  spawnSync = childProcess.spawnSync,
+  fsCheck = DEFAULT_FS_CHECK
 } = {}) {
   const list = runbooks instanceof Map ? [...runbooks.values()] : [...(runbooks || [])];
   const rows = [];
@@ -166,7 +178,7 @@ function checkRunbookCommands(runbooks, {
           fail(where, 'sudo steps run only on Linux and macOS');
           return;
         }
-        const resolved = resolveCommand(argv0, { platform, env, cwd });
+        const resolved = resolveCommand(argv0, { platform, env, cwd, fsCheck });
         if (!path.win32.isAbsolute(argv0)) {
           const found = resolved.path ? `; resolves to ${resolved.path} via ${resolved.via}` : '';
           fail(where, `"${argv0}" is not an absolute path; Windows looks in the current directory (${cwd}) before PATH, so a planted ${argv0}.exe would run. Use the full path${found}`);
@@ -180,7 +192,7 @@ function checkRunbookCommands(runbooks, {
         return;
       }
 
-      const resolved = resolveCommand(argv0, { platform, env, cwd });
+      const resolved = resolveCommand(argv0, { platform, env, cwd, fsCheck });
       if (!path.posix.isAbsolute(argv0)) {
         if (argv0.includes('/')) {
           fail(where, `"${argv0}" is not an absolute path; it resolves against the current directory (${cwd}). Use the full path`);

@@ -135,39 +135,42 @@ describe('checkRunbookCommands', () => {
     assert.ok(relative.includes('sudo target must be absolute to match sudoers'), JSON.stringify(relative));
   });
 
-  const noRealSudo = process.platform === 'win32' ? '/usr/bin/sudo does not exist on this filesystem, so resolveCommand reports it not found and the F15 skip-probe guard fires before the mocked spawnSync is reached' : false;
+  // Fakes `/usr/bin/sudo` as present without touching the real filesystem,
+  // so the probeSudo path (gated on resolveCommand finding the sudo binary)
+  // runs identically on every OS, including this Windows dev host.
+  const sudoPresent = { isFile: (p) => p === '/usr/bin/sudo', isExecutable: (p) => p === '/usr/bin/sudo' };
 
-  it('asks sudo -n -l about the exact command, with parameter defaults filled in', { skip: noRealSudo }, () => {
+  it('asks sudo -n -l about the exact command, with parameter defaults filled in', () => {
     const calls = [];
     const spawnSync = (cmd, args, opts) => { calls.push({ cmd, args, opts }); return { status: 0, stdout: '/usr/bin/systemctl restart site.service\n', stderr: '' }; };
     const rows = checkRunbookCommands(
       runbooks('site.pull_and_restart', [['/usr/bin/sudo', '-n', '/usr/bin/systemctl', 'restart', '{{unit}}']], { unit: { type: 'string', pattern: '^[a-z.]+$', default: 'site.service' } }),
-      linux({ spawnSync })
+      linux({ spawnSync, fsCheck: sudoPresent })
     );
     assert.deepEqual(calls, [{ cmd: '/usr/bin/sudo', args: ['-n', '-l', '/usr/bin/systemctl', 'restart', 'site.service'], opts: { timeout: 5000, encoding: 'utf8' } }]);
     assert.ok(rows.some((r) => r.ok && r.check === 'runbook site.pull_and_restart step 1'
       && r.detail === 'permitted: /usr/bin/sudo -n /usr/bin/systemctl restart site.service'), JSON.stringify(rows));
   });
 
-  it('reports a sudo -l refusal naming the command', { skip: noRealSudo }, () => {
+  it('reports a sudo -l refusal naming the command', () => {
     const spawnSync = () => ({ status: 1, stdout: '', stderr: 'Sorry, user king-louie is not allowed to execute \'/usr/sbin/shutdown -r +1\' as root on web-01.\n' });
-    const rows = checkRunbookCommands(runbooks('server.reboot', [['/usr/bin/sudo', '-n', '/usr/sbin/shutdown', '-r', '+1']]), linux({ spawnSync }));
+    const rows = checkRunbookCommands(runbooks('server.reboot', [['/usr/bin/sudo', '-n', '/usr/sbin/shutdown', '-r', '+1']]), linux({ spawnSync, fsCheck: sudoPresent }));
     const row = rows.find((r) => r.check === 'runbook server.reboot step 1' && r.detail.startsWith('not permitted by sudoers'));
     assert.ok(row, JSON.stringify(rows));
     assert.equal(row.ok, false);
     assert.equal(row.detail, 'not permitted by sudoers: Sorry, user king-louie is not allowed to execute \'/usr/sbin/shutdown -r +1\' as root on web-01.');
   });
 
-  it('treats a sudo -l timeout as not permitted', { skip: noRealSudo }, () => {
+  it('treats a sudo -l timeout as not permitted', () => {
     const spawnSync = () => ({ status: null, stdout: '', stderr: '', error: Object.assign(new Error('spawnSync /usr/bin/sudo ETIMEDOUT'), { code: 'ETIMEDOUT' }) });
-    const rows = checkRunbookCommands(runbooks('t', [['/usr/bin/sudo', '-n', '/usr/sbin/shutdown', '-r', '+1']]), linux({ spawnSync }));
+    const rows = checkRunbookCommands(runbooks('t', [['/usr/bin/sudo', '-n', '/usr/sbin/shutdown', '-r', '+1']]), linux({ spawnSync, fsCheck: sudoPresent }));
     assert.ok(rows.some((r) => !r.ok && r.detail === 'not permitted by sudoers: spawnSync /usr/bin/sudo ETIMEDOUT'), JSON.stringify(rows));
   });
 
-  it('does not probe a sudo step whose parameters have no default', { skip: noRealSudo }, () => {
+  it('does not probe a sudo step whose parameters have no default', () => {
     const rows = checkRunbookCommands(
       runbooks('u', [['/usr/bin/sudo', '-n', '/usr/bin/systemctl', 'restart', '{{unit}}']], { unit: { type: 'string', pattern: '^[a-z.]+$' } }),
-      linux()
+      linux({ fsCheck: sudoPresent })
     );
     assert.ok(rows.some((r) => r.ok && r.detail === 'not checked: uses parameters without defaults'), JSON.stringify(rows));
   });
