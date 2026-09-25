@@ -5,7 +5,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const CASE_TOOL_NAMES = Object.freeze(['Ledger', 'Brief', 'Decide', 'Recommend', 'Reorient', 'Ask', 'Fail']);
+const CASE_TOOL_NAMES = Object.freeze(['Ledger', 'Brief', 'Decide', 'Recommend', 'Reorient', 'Ask', 'Fail', 'Detour']);
 
 // Tools kept out of every case turn (stage 2 spec §3.2). SpawnAgent,
 // BackgroundTask, sessions_spawn, RemoteDispatch and Cron start a run with
@@ -35,7 +35,8 @@ const CASE_MODE_PROMPT = [
   '- When an approach fails, call Fail with what you tried and why, with at most one recommendation, then stop. Do not start a new plan unasked.',
   '- If the orientation says "Re-orientation required", call Reorient first; Recommend, Decide and Fail are refused until you do.',
   '- Contact the owner only through the Ask tool. The answer arrives later as an owner fact; never assume it.',
-  '- Never edit facts.jsonl, brief.md, case.yaml or anything under .kl/ directly. The case tools are the only write path.'
+  '- Never edit facts.jsonl, brief.md, case.yaml or anything under .kl/ directly. The case tools are the only write path.',
+  '- Work that does not serve the objective is a detour: propose it with the Detour tool and continue; never do it inline.'
 ].join('\n');
 
 function shapeToolDefinitions(definitions, attached, registry) {

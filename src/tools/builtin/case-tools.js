@@ -5,7 +5,7 @@
 const { Tool } = require('../tool-schema');
 const { recommendationGate, findDuplicates, OPEN_CASE_STATUSES } = require('../../cases/gates');
 const { requireOwnerQuote } = require('../../cases/chat-integration');
-const { USER_ONLY_FIELDS } = require('../../cases/brief');
+const { caseTypeForField, resolveCaseType } = require('../../cases/case-types');
 const { toMs } = require('../../cases/clock');
 
 const NO_CASE = Object.freeze({
@@ -16,7 +16,7 @@ const NO_CASE = Object.freeze({
 const SOURCE_KINDS = ['url', 'document', 'call', 'api'];
 const VALUE_DESCRIPTION = 'numbers and lists as JSON text';
 // Brief fields whose value is text: never parse these, so "2027" stays text.
-const BRIEF_TEXT_FIELDS = new Set(['objective', 'why', 'deadline']);
+const BRIEF_TEXT_FIELDS = new Set(['objective', 'why', 'deadline', 'repo']);
 
 // `value` is declared as a string so every provider accepts the schema
 // (Gemini needs a type on each property). JSON text for a number, list or
@@ -207,16 +207,16 @@ const LedgerTool = acceptAnyValue(new Tool({
 
 const BriefTool = acceptAnyValue(new Tool({
   name: 'Brief',
-  description: 'Read or update the case brief. "why", "hardConstraints", "alreadyTried", "materiality", "deadline" and "safeDefaults" can only be set from what the owner said (provenance "user"), which also requires a "quote" of the owner\'s own words matching this chat\'s owner messages. completeGating marks the brief ready; recommendations are refused until then.',
+  description: 'Read or update the case brief. "why", "hardConstraints", "alreadyTried", "materiality", "deadline", "safeDefaults" and a software-repo case\'s "repo" can only be set from what the owner said (provenance "user"), which also requires a "quote" of the owner\'s own words matching this chat\'s owner messages. completeGating marks the brief ready; recommendations are refused until then.',
   parameters: {
     type: 'object',
     properties: {
       action: { type: 'string', enum: ['read', 'update', 'append', 'completeGating'] },
-      field: { type: 'string', enum: ['objective', 'why', 'successCriteria', 'hardConstraints', 'alreadyTried', 'resources', 'deadline', 'materiality', 'safeDefaults'] },
+      field: { type: 'string', enum: ['objective', 'why', 'successCriteria', 'hardConstraints', 'alreadyTried', 'resources', 'deadline', 'materiality', 'safeDefaults', 'repo'] },
       value: { type: 'string', description: `For update: the new value; ${VALUE_DESCRIPTION}` },
       item: { type: 'string', description: 'For append: one list entry' },
       provenance: { type: 'string', enum: ['user', 'model'] },
-      quote: { type: 'string', description: 'Required for the owner-only fields ("why", "hardConstraints", "alreadyTried", "materiality", "deadline", "safeDefaults") with provenance "user": a substring of something the owner actually said in this chat.' },
+      quote: { type: 'string', description: 'Required for the owner-only fields ("why", "hardConstraints", "alreadyTried", "materiality", "deadline", "safeDefaults", "repo") with provenance "user": a substring of something the owner actually said in this chat.' },
       reason: { type: 'string' }
     },
     required: ['action']
@@ -231,10 +231,14 @@ const BriefTool = acceptAnyValue(new Tool({
       return { ok: true, status: ctx.runtime.completeGating(ctx.caseId).status };
     }
     if (!params.field) return { ok: false, error: `${params.action} needs "field".` };
+    const declaredBy = caseTypeForField(params.field);
+    if (declaredBy && declaredBy !== resolveCaseType(ctx.runtime.getCase(ctx.caseId).type).type) {
+      return { ok: false, error: `Field "${params.field}" is only for ${declaredBy} cases.` };
+    }
     if (params.value !== undefined && !BRIEF_TEXT_FIELDS.has(params.field)) params = { ...params, value: parseValue(params.value) };
     const provenance = params.provenance || 'model';
     let quoteNote = '';
-    if (USER_ONLY_FIELDS.has(params.field) && provenance === 'user') {
+    if (brief.isUserOnly(params.field) && provenance === 'user') {
       const check = requireOwnerQuote({ quote: params.quote, ownerMessages: ctx.ownerMessages });
       if (!check.ok) return check;
       quoteNote = ` (quote: ${JSON.stringify(check.quote)})`;

@@ -156,3 +156,48 @@ describe('cross-case leak paths through detours', () => {
     assert.ok(!JSON.stringify(row).includes('Phone agent maintenance'));
   });
 });
+
+describe('cross-case leak paths through Ask', () => {
+  const { AskTool } = require('../src/tools/builtin/case-unattended-tools');
+
+  it('Ask similar across cases returns title only', async () => {
+    const rt = new CaseRuntime({ root: tmp(), host: { interactive: () => true } });
+    const site = await rt.createCase({ title: 'Website redesign', objective: 'Refresh the public website' });
+    rt.createQuestion(site.id, { kind: 'question', text: 'Which hosting plan should the new booking site use, the 12 dollar one?', urgency: 'low', options: [{ id: 'a', label: 'Static hosting at 12 dollars' }] });
+    const shop = await rt.createCase({ title: 'Shop opening', objective: 'Open the pop-up shop' });
+    const turn = await rt.beginTurn(shop.id, { turnId: 'turn-1' });
+    const out = await AskTool.execute({ question: 'Which hosting plan should the shop booking site use?' }, { caseContext: rt.caseContext(turn) });
+    assert.strictEqual(out.ok, true);
+    assert.match(out.note, /A similar question is open in case "Website redesign"\./);
+    assert.strictEqual(out.similar, undefined);
+    const blob = JSON.stringify(out);
+    for (const secret of ['12 dollar', 'Static hosting', 'new booking site']) assert.ok(!blob.includes(secret), secret);
+    await rt.endTurn(turn, { summary: 'x' });
+  });
+});
+
+describe('cross-case leak paths through the Detour tool', () => {
+  const { DetourTool } = require('../src/tools/builtin/detour-tool');
+
+  it('Detour propose and list name other cases by title and status only', async () => {
+    const rt = new CaseRuntime({ root: tmp(), host: { interactive: () => true } });
+    const phone = await rt.createCase({ title: 'Phone agent maintenance', objective: 'Keep the phone agent answering calls and reporting status' });
+    // Its subject is in the summary, so phone is a candidate through this private fact.
+    rt.ledger(phone.id).assert({ stmt: 'Status polling vendor contract costs 4471 through the escrow account', subject: 'status-polling', attr: 'contract', value: 4471, category: 'financial', source: { kind: 'document', ref: 'sources/contract.pdf' } });
+    rt.createQuestion(phone.id, { kind: 'question', text: 'Should the escrow account keep paying the polling vendor?', urgency: 'low' });
+    const door = await rt.createCase({ title: 'Rear door quotes', type: 'outreach', objective: 'Three written quotes for the rear door' });
+    const turn = await rt.beginTurn(door.id, { turnId: 'turn-1' });
+    const opts = { caseContext: rt.caseContext(turn) };
+    const p = await DetourTool.execute({ action: 'propose', summary: 'Fix the phone agent status polling', reason: 'A different project' }, opts);
+    assert.strictEqual(p.ok, true);
+    assert.ok(p.options.some((o) => o.label === 'Attach to "Phone agent maintenance" (draft)'), 'phone is offered');
+    await rt.answerQuestion(door.id, p.questionId, { channel: 'in-app', optionId: 'attach-1' });
+    await rt.detours.reconcile(door.id);
+    const list = await DetourTool.execute({ action: 'list' }, opts);
+    assert.deepStrictEqual(list.related.map((r) => [r.title, r.status]), [['Phone agent maintenance', 'draft']]);
+    const blob = JSON.stringify([p, list]);
+    for (const secret of ['4471', 'escrow', 'vendor contract', 'contract.pdf', 'keep paying']) assert.ok(!blob.includes(secret), secret);
+    assert.ok(!/"(score|coverage|hits?|text)"/.test(blob), 'no raw index rows or scores in the results');
+    await rt.endTurn(turn, { summary: 'x' });
+  });
+});

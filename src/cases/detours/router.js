@@ -329,7 +329,9 @@ class DetourRouter {
   // IPC `case:resolveDetour` path passes it, after the owner explicitly chose
   // to create a case despite a similar one. The router never sets it on its
   // own (spec §3.4), and the Detour tool's schema must not expose it.
-  async resolve(caseId, detourId, { optionId, by = 'in-app', title = null, objective = null, force = false } = {}) {
+  // `expectStatus` refuses unless the detour is in that status when its turn
+  // in the per-case queue comes (the Detour tool passes 'awaiting-mapping').
+  async resolve(caseId, detourId, { optionId, by = 'in-app', title = null, objective = null, force = false, expectStatus = null } = {}) {
     const rt = this.runtime;
     let meta = null;
     try {
@@ -337,7 +339,7 @@ class DetourRouter {
       const refused = rt.assertWritable(meta.id, 'Detour.resolve');
       if (refused) return refused;
       return await this._serial(meta.id, () => rt.systemAction(meta.id, `detour ${detourId}: ${optionId}`,
-        () => this._resolve(meta.id, detourId, { optionId, by, title, objective, force })));
+        () => this._resolve(meta.id, detourId, { optionId, by, title, objective, force, expectStatus })));
     } catch (err) {
       return this._failure('resolve', err, meta);
     }
@@ -366,12 +368,13 @@ class DetourRouter {
     return { ok: false, error: `The owner has not answered routing question ${d.questionId} for ${d.id} yet. Wait for the answer; do not pick an option for the owner.` };
   }
 
-  async _resolve(caseId, detourId, { optionId, by, title, objective, force }) {
+  async _resolve(caseId, detourId, { optionId, by, title, objective, force, expectStatus = null }) {
     const rt = this.runtime;
     const meta = rt.getCase(caseId);
     const log = new DetourLog(meta.dir);
     const d = log.detours().get(detourId);
     if (!d) return { ok: false, error: `There is no detour ${detourId} in this case.` };
+    if (expectStatus && d.status !== expectStatus) return { ok: false, error: `Detour ${detourId} is ${d.status}, not ${expectStatus}.` };
     if (d.last && FINAL_STATUSES.includes(d.last.status)) {
       return { ok: true, detour: this._view(meta, d), linkedCaseId: d.last.targetCaseId || null, existing: true };
     }

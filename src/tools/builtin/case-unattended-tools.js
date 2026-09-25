@@ -3,7 +3,7 @@
 // stage-1 case tools they read options.caseContext and refuse by result.
 const { Tool } = require('../tool-schema');
 const { withCase } = require('./case-tools');
-const { recommendationGate } = require('../../cases/gates');
+const { recommendationGate, findDuplicateQuestion, OPEN_CASE_STATUSES } = require('../../cases/gates');
 const { FAILURE_CLASSES } = require('../../cases/status');
 
 const ACTIONS = Object.freeze(['continue', 'adjust', 'ask']);
@@ -133,6 +133,20 @@ const AskTool = new Tool({
         return { ok: false, error: `"resolves" must name an active unknown; ${params.resolves} is not one.` };
       }
     }
+    // Duplicates (cases stage 5 spec §3.2): the same open question here is
+    // refused; a close one here is shown; one open in another case is named
+    // by that case's title only.
+    const dup = findDuplicateQuestion({
+      text: params.question,
+      openQuestions: ctx.runtime.questions(ctx.caseId).open(),
+      crossCaseHits: ctx.runtime.index.search({
+        text: params.question, kinds: ['question'], forCaseId: ctx.caseId, excludeCaseId: ctx.caseId, statuses: OPEN_CASE_STATUSES
+      })
+    });
+    if (dup.exact) {
+      return { ok: false, error: `This question is already open as ${dup.exact.id} (asked ${String(dup.exact.createdAt).slice(0, 10)}). Wait for its answer instead of asking again.` };
+    }
+    for (const title of [...new Set(dup.elsewhere.map((e) => e.caseTitle))]) notes.push(`A similar question is open in case "${title}".`);
     const payload = { type: 'ask', turnId: ctx.turnId };
     if (params.resolves) payload.resolves = params.resolves;
     if (about) payload.about = { subject: String(about.subject || ''), attr: String(about.attr || '') };
@@ -154,6 +168,7 @@ const AskTool = new Tool({
       questionId: created.id,
       urgency: created.urgency,
       delivered: Array.isArray(created.deliveries) && created.deliveries.length > 0,
+      ...(dup.similar.length ? { similar: dup.similar } : {}),
       note: notes.join(' ')
     };
   })
