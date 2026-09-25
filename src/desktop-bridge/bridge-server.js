@@ -279,7 +279,8 @@ class DesktopBridgeServer extends EventEmitter {
     const valid = verifyWithRawKey(raw, Buffer.from(buildAuthC(this._fields(state)), 'utf8'), sig);
     if (!valid) {
       // A valid signature is never refused by lockout (see _onClientHello);
-      // only a failing attempt for an already-locked-out id is throttled.
+      // only a failing attempt for an already-locked-out id is refused
+      // (closed 4429 at once; nothing is delayed).
       if (this._lockedOut(state.deviceId)) return this._close(state, CLOSE.LOCKED_OUT, 'too many failed handshakes');
       this._recordFailure(state.deviceId);
       return this._close(state, CLOSE.BAD_SIGNATURE, 'signature invalid');

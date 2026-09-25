@@ -129,10 +129,13 @@ work while attached appends it to `PROXIED_DOMAINS`).
   prints the device's label and fingerprint first and asks "Trust this device?
   [y/N]" on a TTY (default no); off a TTY it needs `--yes` or refuses (exit 2).
   Nothing is written, not even a new node identity, before that consent. `--yes`
-  passed to any other command is a usage error. The desktop's Confirm step sends
-  back the `nodeId` it displayed; the service refuses with `PAIR_SERVICE_CHANGED`
-  (the record changed), `PAIR_NOT_FOUND`, or `PAIR_CONFIRM_STALE` (no `nodeId`
-  echoed back) rather than trust a stale or swapped record. Pending pairs expire.
+  passed to any other command is a usage error. The desktop's Confirm step passes
+  the `nodeId` it displayed, and the desktop controller
+  (`src/ipc/desktop-controller.js`) refuses with `PAIR_SERVICE_CHANGED` (the
+  record changed), `PAIR_NOT_FOUND`, or `PAIR_CONFIRM_STALE` (no `nodeId`)
+  rather than trust a stale or swapped record. Pending pairs expire. On Windows
+  the bridge-file trust read is a PowerShell child process; keep it async
+  (`readTrustedBridgeFile`), never on a synchronous path in the main process.
   Also `desktop unpair <device-id>`, `desktop list`, and
   `import --from <desktop userData> [--dry-run]` (service stopped; secrets only
   arrive through the desktop's own Import, never the CLI).
@@ -140,14 +143,23 @@ work while attached appends it to `PROXIED_DOMAINS`).
   before "Detach anyway" is armed, and the second click only confirms if at least
   400 ms have passed since the warning painted — a fast double-click re-arms
   instead of detaching.
-- **Unpair** returns a follow-up command (e.g. to also stop standalone use of the
-  same data); the pane keeps showing it, surviving repaints and relaunches, until
-  the owner dismisses it or starts pairing again.
+- **Unpair** forgets the pairing on the desktop and returns the administrator's
+  follow-up, `king-louie-service desktop unpair <device-id>` (with `sudo` off
+  Windows), which removes the device on the service side; the pane keeps showing
+  it, surviving repaints and relaunches, until the owner dismisses it or starts
+  pairing again.
 - `--kl-standalone-once` runs one standalone session without changing the
-  persisted mode: it turns channels, gateway and mesh off from construction and
-  pauses cron right after `core.start()`, so it can't act as a second consumer
-  alongside an attached run; the `/llm` channel commands (Telegram/Slack/Discord)
-  refuse while channels are off.
+  persisted mode: it turns channels, gateway, mesh and webhooks off from
+  construction and builds cron paused (`createCore({ cronStartPaused: true })`,
+  never started), so it can't act as a second consumer alongside the service;
+  the `/llm` channel commands (Telegram/Slack/Discord) refuse while channels are
+  off, before saving anything.
+- Over the bridge, `settings:runLlmCommand` refuses the `/llm` channel actions
+  outright (`CHANNELS_NOT_PROXIED`): channels are managed on the service.
+- **Permission rules** the desktop adds are tagged `origin: 'desktop'` and are
+  consulted only when no service rule matched (`src/tools/permission-rules.js`),
+  so a desktop `allow` never lifts a service `deny`; service rules keep plain
+  first-match order.
 - A failed host start (attached or standalone) shows an error dialog
   (`dialog.showErrorBox`) and quits rather than leaving a half-started app.
 - Only events marked by `markLocalDesktopEvent` (the standalone host's ipcMain
@@ -165,7 +177,7 @@ work while attached appends it to `PROXIED_DOMAINS`).
   service-account swap mid-write — documented as a residual, not a promise.
 - **Lockout:** a handshake with a valid device signature is never refused by
   lockout; only further *failing* attempts for an already-locked-out device id
-  are throttled, closed `4429` (owner ruling, 2026-09-25).
+  are refused, closed `4429` at once (no delay is added).
 - **E2E:** `launchAttached()` in `tests/e2e/helpers.js` starts a temporary
   service (`tests/e2e/_attach-service.js`, stub provider), pairs, attaches and
   relaunches; `ctx.service` has `kill()`, `restart()`, `stop()`. Every launch
