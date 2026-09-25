@@ -41,4 +41,10 @@ describe('Electron import boundary', () => {
     assert.deepStrictEqual(findViolations(), [...KNOWN_VIOLATIONS].sort(),
       'If you removed a violation, delete it from KNOWN_VIOLATIONS. If you added one, inject the dependency instead.');
   });
+
+  it('walks the fleet stage 7 desktop bridge and migration modules', () => {
+    const files = walk(SRC).map((f) => path.relative(SRC, f).split(path.sep).join('/'));
+    assert.ok(files.some((f) => f.startsWith('desktop-bridge/')), 'src/desktop-bridge/ is checked');
+    assert.ok(files.some((f) => f.startsWith('migration/')), 'src/migration/ is checked');
+  });
 });
