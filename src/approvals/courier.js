@@ -361,7 +361,11 @@ class CourierPump {
     }
     if (method === 'enroll.claim') {
       const route = this.codes.get(params.code_id);
-      return route ? route.inbox : null;
+      // A closed (enroll.done already forwarded) or expired code is no
+      // longer open (Task 19 carry: any path that acts on a code must check
+      // its state is open), so a late claim has nowhere left to be routed.
+      if (!route || route.closed || this.now() > route.expiresAt) return null;
+      return route.inbox;
     }
     return null;
   }
@@ -403,11 +407,15 @@ class CourierPump {
       const inbox = replyTo && INBOX_DIR_RE.test(replyTo.inbox) ? replyTo.inbox : null;
       if (method === 'enroll.done') {
         const code = this.codes.get(message.code_id);
-        if (!code || this.now() > code.expiresAt) {
+        if (!code || code.closed || this.now() > code.expiresAt) {
           log.warn(`dropping enroll.done for a code this service never opened (${message.code_id})`);
           this._reply(replyTo, { error: { code: 'rejected', message: 'unknown code_id' } });
           return;
         }
+        // Marks the code closed as part of forwarding enroll.done: a claim
+        // that arrives after this must not be routed anywhere, the same as
+        // one that arrives after the code's own expiry.
+        code.closed = true;
       }
       // First binding wins, but a retry is not a rebind: a second forward of
       // the same id from the SAME inbox is PhoneApprover resubmitting after
@@ -434,7 +442,7 @@ class CourierPump {
         // Recorded even without a producer to reply to (inbox: null), so a
         // later enroll.done still finds it; routeFor('enroll.claim', …) then
         // simply has no inbox to deliver the claim to.
-        this.codes.set(message.code_id, { inbox, expiresAt: Date.parse(message.expires_at) });
+        this.codes.set(message.code_id, { inbox, expiresAt: Date.parse(message.expires_at), closed: false });
       }
       try {
         this._reply(replyTo, { result: await this.relayClient.call(method, forwardParams(method, params)) });

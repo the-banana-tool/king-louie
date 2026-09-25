@@ -206,4 +206,46 @@ describe('loadProfile("agent") listener readiness', { timeout: 120000 }, () => {
       await new Promise((resolve) => squatter.close(resolve));
     }
   });
+
+  // Fix round 1 (opus review, ruling I2): createCore and core.start() are in
+  // one try that stops approvals on failure. There is no dependency-injection
+  // seam for createCore itself, so this substitutes require.cache's entry
+  // for '../core' with a stub that throws — the same lazy `require('../core')`
+  // inside start() picks it up — and restores the real module afterward.
+  //
+  // Asserting only that the promise rejects with the right message is not
+  // enough: an async function auto-wraps ANY synchronous throw in a
+  // rejection, including one from code that was never inside a try at all —
+  // that was exactly the bug this ruling fixes (createCore was constructed
+  // outside the try, so a throw from it skipped approvals.stop() entirely
+  // while still producing a passing-looking rejection). setInterval/
+  // clearInterval are wrapped so the test can see whether startApprovals's
+  // prune timer — the one live handle this scenario creates (no relay is
+  // configured, so there is no trackDeviceStates timer too) — was actually
+  // cleared by approvals.stop(), not just that the error propagated.
+  it('createCore throwing leaves approvals stopped (its prune timer cleared), not just a rejected promise', async () => {
+    const { dataDir: dir, workspace } = dataDir();
+    const coreEntry = require.resolve('../src/core');
+    const original = require.cache[coreEntry];
+    require.cache[coreEntry] = {
+      id: coreEntry, filename: coreEntry, loaded: true,
+      exports: { createCore: () => { throw new Error('createCore boom'); } }
+    };
+    const realSetInterval = global.setInterval;
+    const realClearInterval = global.clearInterval;
+    const live = new Set();
+    global.setInterval = (...args) => { const t = realSetInterval(...args); live.add(t); return t; };
+    global.clearInterval = (t) => { live.delete(t); return realClearInterval(t); };
+    try {
+      await assert.rejects(
+        loadProfile('agent').start({ dataDir: dir, features: allOff, ports: {}, workspace }),
+        /createCore boom/
+      );
+    } finally {
+      global.setInterval = realSetInterval;
+      global.clearInterval = realClearInterval;
+      if (original) require.cache[coreEntry] = original; else delete require.cache[coreEntry];
+    }
+    assert.equal(live.size, 0);
+  });
 });

@@ -59,7 +59,14 @@ function parseRelayConfig(raw, file) {
   if (!isPlainObject(raw.tls)) throw new Error(`Invalid ${file}: relay.tls with cert_file and key_file is required`);
   rejectUnknownKeys(raw.tls, ['cert_file', 'key_file'], 'relay.tls', file);
   const publicUrl = requiredString(raw.public_url, 'relay.public_url', file);
-  if (!/^https:\/\//.test(publicUrl)) throw new Error(`Invalid ${file}: relay.public_url must be an https:// URL`);
+  let parsedPublicUrl;
+  try {
+    parsedPublicUrl = new URL(publicUrl);
+  } catch {
+    throw new Error(`Invalid ${file}: relay.public_url must be a valid URL`);
+  }
+  if (parsedPublicUrl.protocol !== 'https:') throw new Error(`Invalid ${file}: relay.public_url must be an https:// URL`);
+  if (!parsedPublicUrl.hostname) throw new Error(`Invalid ${file}: relay.public_url must include a host`);
   const push = {};
   if (raw.push !== undefined) {
     if (!isPlainObject(raw.push)) throw new Error(`Invalid ${file}: relay.push must be an object`);
@@ -98,7 +105,9 @@ function parseAuditConfig(raw, file) {
   if (!isPlainObject(raw)) throw new Error(`Invalid ${file}: "audit" must be an object`);
   rejectUnknownKeys(raw, ['retention_days'], 'audit', file);
   const days = raw.retention_days === undefined ? RELAY_DEFAULTS.auditRetentionDays : raw.retention_days;
-  if (!Number.isInteger(days) || days < 30) throw new Error(`Invalid ${file}: audit.retention_days must be an integer of at least 30`);
+  if (!Number.isInteger(days) || days < 30 || days > 3650) {
+    throw new Error(`Invalid ${file}: audit.retention_days must be an integer of at least 30 (up to 3650)`);
+  }
   return { retentionDays: days };
 }
 

@@ -50,18 +50,23 @@ function loadProfile(profile) {
         // gateway clients, cron, webhooks) runs only with a signed phone
         // approval; with no enrolled phone or no relay it is refused.
         const approvals = await startApprovals({ dataDir, nodeConfig, ports: servicePorts, profile: 'agent', serviceConfig: { audit } });
-        const core = createCore({
-          ...servicePorts,
-          features,
-          ports,
-          workingDirectory: workspace,
-          remoteApprovals: 'phone',
-          phoneApprover: approvals.phoneApprover,
-          auditLedger: approvals.auditLedger,
-          nodePolicy: nodeConfig.policy,
-          builtinSkillsDir: path.join(__dirname, '..', '..', 'skills')
-        });
+        let core;
         try {
+          // createCore itself can throw synchronously (bad deps, a bad
+          // phoneApprover.ttlMs, …), not just its start() — both go in the
+          // one try, or a throw from createCore would skip the approvals
+          // teardown below entirely and leave a live relay link behind.
+          core = createCore({
+            ...servicePorts,
+            features,
+            ports,
+            workingDirectory: workspace,
+            remoteApprovals: 'phone',
+            phoneApprover: approvals.phoneApprover,
+            auditLedger: approvals.auditLedger,
+            nodePolicy: nodeConfig.policy,
+            builtinSkillsDir: path.join(__dirname, '..', '..', 'skills')
+          });
           await core.start();
         } catch (err) {
           await approvals.stop().catch(() => {});
@@ -81,8 +86,11 @@ function loadProfile(profile) {
         }
         return {
           stop: async () => {
-            await core.shutdown();
-            await approvals.stop();
+            try {
+              await core.shutdown();
+            } finally {
+              await approvals.stop();
+            }
           },
           masterKeySource: servicePorts.masterKeySource,
           approvals

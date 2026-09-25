@@ -13,9 +13,9 @@ const { NodeIdentity } = require('../src/mesh/node-identity');
 const { createLinkRpc } = require('../src/approvals/link-rpc');
 const { startApprovals, startMcpApprovals, createRelayDispatcher, trackDeviceStates } = require('../src/approvals/service-wiring');
 const { open, verifyEd25519 } = require('../src/approvals/envelope');
-const { toolAction } = require('../src/approvals/messages');
 const { parseRelayConfig, parseAuditConfig, loadServiceConfig } = require('../src/service/config');
 const { loadNodeConfig } = require('../src/service/node-config');
+const { addSink } = require('../src/logging');
 const { createFakePhone } = require('./helpers/fake-phone');
 const { approverStoreWith } = require('./helpers/approver-set');
 
@@ -75,12 +75,20 @@ describe('startApprovals', () => {
     assert.ok(fs.existsSync(path.join(l.dataDir, 'audit')));
   });
 
-  it('with approvers.relay but no pairing: says to pair', async () => {
+  it('with approvers.relay but no pairing: says to pair, and logs why', async () => {
     const l = layout();
-    const a = await startApprovals({ dataDir: l.dataDir, configDir: l.configDir, nodeConfig: nodeConfig({ relay: 'wss://127.0.0.1:18795', requestTtlS: 120 }), ports: l.ports, identity: nodeIdentity, approverStoreOptions: storeOptions });
+    const warnings = [];
+    const remove = addSink((r) => { if (r.level === 'warn') warnings.push(r.message); });
+    let a;
+    try {
+      a = await startApprovals({ dataDir: l.dataDir, configDir: l.configDir, nodeConfig: nodeConfig({ relay: 'wss://127.0.0.1:18795', requestTtlS: 120 }), ports: l.ports, identity: nodeIdentity, approverStoreOptions: storeOptions });
+    } finally {
+      remove();
+    }
     cleanups.push(() => a.stop());
     assert.match(a.phoneApprover.unavailableReason(), /not paired with its relay/);
     assert.equal(a.phoneApprover.ttlMs, 120000);
+    assert.ok(warnings.some((w) => /not paired with its relay/.test(w)));
   });
 
   it('paired: links to the relay, answers audit and device calls, and accepts a phone response', async () => {
@@ -119,6 +127,141 @@ describe('startApprovals', () => {
     assert.equal(await pending, true);
     const slice = await relay.rpc.call(nodeIdentity.peerId, 'audit.slice', { limit: 10 });
     assert.ok(open(slice.envelope).message.entries.some((e) => e.kind === 'approval.response'));
+  });
+
+  // Fix round 1 (opus review, ruling I2): everything after the prune timer
+  // is created runs in one try/catch that tears down exactly what `stop()`
+  // would, then rethrows — a failed start must not leave a live relay link,
+  // a live prune timer or a live device-state poll running. `relayClient.start()`
+  // failing (a transport that never binds/dials) is the realistic failure
+  // point inside that region; `ApproverStore.ready()` is designed to fail
+  // closed rather than throw (an unreadable dir is an empty, untrusted set,
+  // not an exception), so it has no organic way to exercise this path.
+  it('a failing relayClient.start() tears everything down: the transport is stopped and no timer/listener is left running', async () => {
+    const l = layout();
+    l.ports.store.set('approvals.relay', {
+      relay_id: 'kl-fake-relay', peerId: 'kl-fake-relay-peer', publicKey: relayIdentity.publicKey.toString('hex'),
+      tlsFingerprint: null, address: '127.0.0.1', port: 1, pairedAt: new Date().toISOString()
+    });
+    let transportStopped = false;
+    const failingTransportFactory = () => ({
+      on() {},
+      removeListener() {},
+      addTrustedPeer() {},
+      start: () => Promise.reject(new Error('bind failed')),
+      stop: async () => { transportStopped = true; }
+    });
+
+    const realSetInterval = global.setInterval;
+    const realClearInterval = global.clearInterval;
+    const live = new Set();
+    global.setInterval = (...args) => { const t = realSetInterval(...args); live.add(t); return t; };
+    global.clearInterval = (t) => { live.delete(t); return realClearInterval(t); };
+    try {
+      await assert.rejects(
+        startApprovals({
+          dataDir: l.dataDir, configDir: l.configDir, nodeConfig: nodeConfig({ relay: 'wss://127.0.0.1:1', requestTtlS: 300 }),
+          ports: l.ports, identity: nodeIdentity, approverStoreOptions: storeOptions, transportFactory: failingTransportFactory
+        }),
+        /bind failed/
+      );
+    } finally {
+      global.setInterval = realSetInterval;
+      global.clearInterval = realClearInterval;
+    }
+    assert.equal(transportStopped, true);
+    assert.equal(live.size, 0);
+  });
+});
+
+describe('createRelayDispatcher: enroll.claim routing', () => {
+  it('delivers only while the courierPump can still route it, and { delivered: false } once it cannot', async () => {
+    let route = 'p-1-abcdef01';
+    const delivered = [];
+    const courierPump = {
+      routeFor: (method) => (method === 'enroll.claim' ? route : null),
+      deliver: (inbox, method, params) => { delivered.push([inbox, method, params]); return true; }
+    };
+    const dispatch = createRelayDispatcher({ phoneApprover: null, approverStore: null, auditLedger: null, courierPump });
+    assert.deepEqual(await dispatch('enroll.claim', { code_id: 'x' }), { delivered: true, accepted: null, reason: null });
+    assert.deepEqual(delivered, [['p-1-abcdef01', 'enroll.claim', { code_id: 'x' }]]);
+    route = null; // expired or closed, per CourierPump.routeFor
+    assert.deepEqual(await dispatch('enroll.claim', { code_id: 'x' }), { delivered: false });
+  });
+});
+
+// Fix round 1 (opus review, minors): the audited type/device_id come from
+// the envelope itself, never the rpc method name; a duplicate is never
+// audited; device.rejected auditing is rate-capped.
+describe('createRelayDispatcher: device.enroll and device.revoke auditing', () => {
+  function fakeAuditLedger() {
+    const entries = [];
+    return { entries, append: async (entry) => { entries.push(entry); return { ...entry, seq: entries.length }; } };
+  }
+
+  it('audits a rejected device.enroll as device.rejected, typed from the envelope', async () => {
+    const phone = createFakePhone();
+    const auditLedger = fakeAuditLedger();
+    const approverStore = { stage: () => ({ state: 'rejected', reason: 'bad_signature' }) };
+    const dispatch = createRelayDispatcher({ phoneApprover: null, approverStore, auditLedger, courierPump: null });
+    const envelope = phone.enroll({ device: createFakePhone().device() });
+    const result = await dispatch('device.enroll', { envelope });
+    assert.deepEqual(result, { state: 'rejected', reason: 'bad_signature' });
+    assert.equal(auditLedger.entries.length, 1);
+    assert.equal(auditLedger.entries[0].kind, 'device.rejected');
+    assert.equal(auditLedger.entries[0].data.type, 'kl.device.enroll');
+  });
+
+  it('audits a staged device.revoke as device.staged, typed from the envelope (not the rpc method)', async () => {
+    const phone = createFakePhone();
+    const target = createFakePhone();
+    const auditLedger = fakeAuditLedger();
+    const approverStore = { stage: () => ({ state: 'revoked-pending-apply' }) };
+    const dispatch = createRelayDispatcher({ phoneApprover: null, approverStore, auditLedger, courierPump: null });
+    const envelope = phone.revoke(target.deviceId);
+    const result = await dispatch('device.revoke', { envelope });
+    assert.deepEqual(result, { state: 'revoked-pending-apply' });
+    assert.equal(auditLedger.entries.length, 1);
+    assert.equal(auditLedger.entries[0].kind, 'device.staged');
+    assert.equal(auditLedger.entries[0].data.type, 'kl.device.revoke');
+    assert.equal(auditLedger.entries[0].data.device_id, target.deviceId);
+  });
+
+  it('never audits a duplicate', async () => {
+    const auditLedger = fakeAuditLedger();
+    const approverStore = { stage: () => ({ state: 'duplicate' }) };
+    const dispatch = createRelayDispatcher({ phoneApprover: null, approverStore, auditLedger, courierPump: null });
+    const result = await dispatch('device.enroll', { envelope: {} });
+    assert.deepEqual(result, { state: 'duplicate' });
+    assert.deepEqual(auditLedger.entries, []);
+  });
+
+  it('audits the envelope type as null when the envelope is malformed, not the rpc method', async () => {
+    const auditLedger = fakeAuditLedger();
+    const approverStore = { stage: () => ({ state: 'rejected', reason: 'malformed' }) };
+    const dispatch = createRelayDispatcher({ phoneApprover: null, approverStore, auditLedger, courierPump: null });
+    await dispatch('device.enroll', { envelope: { not: 'an envelope' } });
+    assert.equal(auditLedger.entries[0].data.type, null);
+    assert.equal(auditLedger.entries[0].data.device_id, null);
+  });
+
+  it('caps device.rejected auditing at 20 per rolling minute and logs a summary line, without throwing or dropping the result', async () => {
+    const auditLedger = fakeAuditLedger();
+    const approverStore = { stage: () => ({ state: 'rejected', reason: 'bad_signature' }) };
+    const dispatch = createRelayDispatcher({ phoneApprover: null, approverStore, auditLedger, courierPump: null });
+    const warnings = [];
+    const remove = addSink((r) => { if (r.level === 'warn') warnings.push(r.message); });
+    try {
+      for (let i = 0; i < 25; i += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        const result = await dispatch('device.enroll', { envelope: {} });
+        assert.deepEqual(result, { state: 'rejected', reason: 'bad_signature' });
+      }
+    } finally {
+      remove();
+    }
+    assert.equal(auditLedger.entries.length, 20);
+    assert.equal(warnings.filter((w) => /device\.rejected audit entries are being rate-limited/.test(w)).length, 1);
   });
 });
 
@@ -196,18 +339,44 @@ describe('relay and audit configuration', () => {
     assert.throws(() => parseRelayConfig({ ...minimal, push: { apns: { team_id: 'T', key_id: 'K', key_file: 'f', topic: 't', environment: 'dev' } } }, file), /environment/);
   });
 
-  it('audit.retention_days defaults to 365 and must be at least 30', () => {
+  it('audit.retention_days defaults to 365, must be at least 30 and at most 3650', () => {
     assert.deepEqual(parseAuditConfig(undefined, file), { retentionDays: 365 });
     assert.deepEqual(parseAuditConfig({ retention_days: 30 }, file), { retentionDays: 30 });
+    assert.deepEqual(parseAuditConfig({ retention_days: 3650 }, file), { retentionDays: 3650 });
     assert.throws(() => parseAuditConfig({ retention_days: 29 }, file), /at least 30/);
+    assert.throws(() => parseAuditConfig({ retention_days: 3651 }, file), /at least 30/);
   });
 
-  it('reads relay only from the admin config, never from the data dir', () => {
+  it('rejects a public_url that is not a valid URL at all', () => {
+    // new URL() itself refuses an empty or missing host for a special scheme
+    // like https, so relay.public_url's own host check is a defensive
+    // backstop rather than independently reachable — this only pins the
+    // "not parseable at all" branch.
+    assert.throws(() => parseRelayConfig({ ...minimal, public_url: 'https://' }, file), /public_url must be a valid URL/);
+    assert.throws(() => parseRelayConfig({ ...minimal, public_url: 'not a url' }, file), /public_url must be a valid URL/);
+  });
+
+  it('reads relay only from the admin config, never from the data dir, and logs why', () => {
     const l = layout();
     fs.writeFileSync(path.join(l.dataDir, 'service.json'), JSON.stringify({ relay: minimal }));
     fs.writeFileSync(path.join(l.configDir, 'service.json'), JSON.stringify({ relay: { ...minimal, mesh_listen: { host: '127.0.0.1' } } }), { mode: 0o644 });
-    const cfg = loadServiceConfig(l.dataDir, {}, { adminConfigDir: l.configDir, geteuid: () => UID, adminUid: UID });
+    const warnings = [];
+    const remove = addSink((r) => { if (r.level === 'warn') warnings.push(r.message); });
+    let cfg;
+    try {
+      cfg = loadServiceConfig(l.dataDir, {}, { adminConfigDir: l.configDir, geteuid: () => UID, adminUid: UID });
+    } finally {
+      remove();
+    }
     assert.equal(cfg.relay.meshListen.host, '127.0.0.1');
+    assert.ok(warnings.some((w) => /ignoring "relay"/.test(w)));
+  });
+
+  it('a relay set only in the data-dir service.json (no admin file at all) is ignored entirely', () => {
+    const l = layout();
+    fs.writeFileSync(path.join(l.dataDir, 'service.json'), JSON.stringify({ relay: minimal }));
+    const cfg = loadServiceConfig(l.dataDir, {}, { adminConfigDir: l.configDir, geteuid: () => UID, adminUid: UID });
+    assert.equal(cfg.relay, null);
   });
 
   it('node.yaml approvers: relay URL and request TTL, validated', () => {
@@ -220,6 +389,14 @@ describe('relay and audit configuration', () => {
     assert.deepEqual(load().approvers, { relay: null, requestTtlS: 300 });
     write('approvers:\n  relay: https://kl.example.com\n');
     assert.throws(load, /approvers\.relay must be wss:\/\/host:port/);
+    write('approvers:\n  relay: "wss://user:pass@10.0.0.5:18795"\n');
+    assert.throws(load, /approvers\.relay must be wss:\/\/host:port/);
+    write('approvers:\n  relay: wss://10.0.0.5\n'); // no explicit port
+    assert.throws(load, /approvers\.relay must be wss:\/\/host:port/);
+    write('approvers:\n  relay: "wss://10.0.0.5:99999"\n');
+    assert.throws(load, /approvers\.relay must be wss:\/\/host:port/);
+    write('approvers:\n  relay: "wss://[::1]:18795"\n');
+    assert.deepEqual(load().approvers, { relay: 'wss://[::1]:18795', requestTtlS: 300 });
     write('approvers:\n  request_ttl_s: 600\n');
     assert.throws(load, /from 30 to 300/);
     write('approvers:\n  phone: yes\n');

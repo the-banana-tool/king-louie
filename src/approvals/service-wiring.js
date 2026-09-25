@@ -45,9 +45,42 @@ function envelopeSha(envelope) {
   }
 }
 
+// device.rejected fires on every malformed or forged device.enroll/revoke the
+// relay forwards, so a peer hammering the link with garbage envelopes must
+// not be able to grow the audit ledger without bound. At most REJECT_CAP are
+// audited individually per rolling REJECT_WINDOW_MS; once a window's cap is
+// hit, a single summary line is logged (never audited) and every further
+// rejection in that same window is refused but not itself logged again.
+const REJECT_WINDOW_MS = 60000;
+const REJECT_CAP = 20;
+
+function rejectedAuditLimiter() {
+  let windowStart = 0;
+  let count = 0;
+  let warnedThisWindow = false;
+  return () => {
+    const now = Date.now();
+    if (now - windowStart >= REJECT_WINDOW_MS) {
+      windowStart = now;
+      count = 0;
+      warnedThisWindow = false;
+    }
+    count += 1;
+    if (count > REJECT_CAP) {
+      if (!warnedThisWindow) {
+        warnedThisWindow = true;
+        log.warn(`device.rejected audit entries are being rate-limited (cap ${REJECT_CAP}/min); further rejections this minute are refused but not individually audited`);
+      }
+      return false;
+    }
+    return true;
+  };
+}
+
 // relay → node methods (spec §4.6). A response or claim for a request an
 // out-of-process producer (mcp, the admin CLI) made goes to its courier inbox.
 function createRelayDispatcher({ phoneApprover, approverStore, auditLedger, courierPump = null }) {
+  const admitRejectedAudit = rejectedAuditLimiter();
   return async (method, params = {}) => {
     if (method === 'approval.response' || method === 'enroll.claim') {
       const inbox = courierPump ? courierPump.routeFor(method, params) : null;
@@ -58,17 +91,25 @@ function createRelayDispatcher({ phoneApprover, approverStore, auditLedger, cour
     }
     if (method === 'device.enroll' || method === 'device.revoke') {
       const result = approverStore.stage(params.envelope);
+      // The audited type/device_id come from what the envelope actually
+      // says (open()'s message.type, null when the envelope is malformed),
+      // never from the rpc method the relay happened to call it through.
+      let type = null;
       let deviceId = null;
       try {
         const { message } = open(params.envelope);
-        deviceId = message.type === 'kl.device.enroll' ? message.device && message.device.device_id : message.device_id;
+        type = message.type;
+        deviceId = type === 'kl.device.enroll' ? message.device && message.device.device_id : message.device_id;
       } catch {
+        type = null;
         deviceId = null;
       }
-      const kind = result.state === 'rejected' ? 'device.rejected' : 'device.staged';
       if (result.state !== 'duplicate') {
-        auditLedger.append({ kind, data: { type: method === 'device.enroll' ? 'kl.device.enroll' : 'kl.device.revoke', device_id: deviceId, reason: result.reason || null, envelope_sha256: envelopeSha(params.envelope) } })
-          .catch((err) => log.warn(`audit ${kind} failed: ${err.message}`));
+        const kind = result.state === 'rejected' ? 'device.rejected' : 'device.staged';
+        if (kind !== 'device.rejected' || admitRejectedAudit()) {
+          auditLedger.append({ kind, data: { type, device_id: deviceId, reason: result.reason || null, envelope_sha256: envelopeSha(params.envelope) } })
+            .catch((err) => log.warn(`audit ${kind} failed: ${err.message}`));
+        }
       }
       return result;
     }
@@ -117,55 +158,76 @@ async function startApprovals({ dataDir, configDir = adminConfigDir({ dataDir })
   }, DAY_MS);
   if (typeof pruneTimer.unref === 'function') pruneTimer.unref();
 
-  const approverStore = new ApproverStore({
-    dir: path.join(configDir, 'approvers'),
-    stagedDir: path.join(dataDir, 'approvals', 'staged'),
-    allowTestKeys,
-    // Tests only: they cannot create root-owned files (geteuid, adminUid, platform).
-    ...approverStoreOptions,
-    serviceProbe: true
-  });
-  await approverStore.ready();
-
-  const approvers = nodeConfig.approvers || { relay: null, requestTtlS: 300 };
-  const relayPin = ports && ports.store ? ports.store.get(RELAY_PIN_KEY) || null : null;
-  const frontDoor = fs.existsSync(path.join(configDir, 'front-door.json'));
-  const wantsRelay = Boolean(approvers.relay) || frontDoor;
+  // Built incrementally below so the failure teardown only tears down what
+  // actually exists yet; `stop` (below) and the catch's teardown share this
+  // one function so a failed start and a normal stop leave the same result.
+  let approverStore = null;
+  let phoneApprover = null;
   let relayClient = null;
-  let link;
-  if (wantsRelay && relayPin) {
-    relayClient = new RelayClient({
-      identity: nodeIdentity, nodeName: nodeConfig.name, relayPin, configDir, dataDir, useTls,
-      ...(transportFactory ? { transportFactory } : {}), ...(reconnectDelays ? { reconnectDelays } : {})
-    });
-    link = relayClient;
-  } else {
-    const reason = wantsRelay
-      ? 'this node is not paired with its relay (run `king-louie-service pair wss://…`)'
-      : 'no relay is configured for this node (approvers.relay in node.yaml)';
-    if (wantsRelay) log.warn(reason);
-    link = nullLink(reason);
-  }
-
-  const phoneApprover = new PhoneApprover({
-    identity: nodeIdentity,
-    nodeName: nodeConfig.name,
-    approverStore,
-    link,
-    auditLedger,
-    ttlMs: (approvers.requestTtlS || 300) * 1000
-  });
-
   let courierPump = null;
   let stopTracking = () => {};
-  if (relayClient) {
-    courierPump = new CourierPump({ dataDir, relayClient, identity: nodeIdentity });
-    relayClient.onMessage(createRelayDispatcher({ phoneApprover, approverStore, auditLedger, courierPump }));
-    stopTracking = trackDeviceStates({ approverStore, relayClient });
-    await relayClient.start();
-    courierPump.start();
+
+  const teardown = async () => {
+    clearInterval(pruneTimer);
+    stopTracking();
+    if (phoneApprover) phoneApprover.stop();
+    if (courierPump) courierPump.stop();
+    if (relayClient) await relayClient.stop();
+  };
+
+  try {
+    approverStore = new ApproverStore({
+      dir: path.join(configDir, 'approvers'),
+      stagedDir: path.join(dataDir, 'approvals', 'staged'),
+      // Tests only: they cannot create root-owned files (geteuid, adminUid, platform).
+      ...approverStoreOptions,
+      allowTestKeys,
+      serviceProbe: true
+    });
+    await approverStore.ready();
+
+    const approvers = nodeConfig.approvers || { relay: null, requestTtlS: 300 };
+    const relayPin = ports && ports.store ? ports.store.get(RELAY_PIN_KEY) || null : null;
+    const frontDoor = fs.existsSync(path.join(configDir, 'front-door.json'));
+    const wantsRelay = Boolean(approvers.relay) || frontDoor;
+    let link;
+    if (wantsRelay && relayPin) {
+      relayClient = new RelayClient({
+        identity: nodeIdentity, nodeName: nodeConfig.name, relayPin, configDir, dataDir, useTls,
+        ...(transportFactory ? { transportFactory } : {}), ...(reconnectDelays ? { reconnectDelays } : {})
+      });
+      link = relayClient;
+    } else {
+      const reason = wantsRelay
+        ? 'this node is not paired with its relay (run `king-louie-service pair wss://…`)'
+        : 'no relay is configured for this node (approvers.relay in node.yaml)';
+      if (wantsRelay) log.warn(reason);
+      link = nullLink(reason);
+    }
+
+    phoneApprover = new PhoneApprover({
+      identity: nodeIdentity,
+      nodeName: nodeConfig.name,
+      approverStore,
+      link,
+      auditLedger,
+      ttlMs: (approvers.requestTtlS || 300) * 1000
+    });
+
+    if (relayClient) {
+      courierPump = new CourierPump({ dataDir, relayClient, identity: nodeIdentity });
+      relayClient.onMessage(createRelayDispatcher({ phoneApprover, approverStore, auditLedger, courierPump }));
+      stopTracking = trackDeviceStates({ approverStore, relayClient });
+      await relayClient.start();
+      courierPump.start();
+    }
+    log.info('phone approvals ready', { profile, relay: relayClient ? relayPin.relay_id : null, activeDevices: approverStore.activeCount() });
+  } catch (err) {
+    // A failed start must not leave a live relay link, a live prune timer or
+    // a live device-state poll behind it.
+    await teardown().catch((teardownErr) => log.error(`teardown after a failed start also failed: ${teardownErr.message}`));
+    throw err;
   }
-  log.info('phone approvals ready', { profile, relay: relayClient ? relayPin.relay_id : null, activeDevices: approverStore.activeCount() });
 
   return {
     phoneApprover,
@@ -174,13 +236,7 @@ async function startApprovals({ dataDir, configDir = adminConfigDir({ dataDir })
     approverStore,
     identity: nodeIdentity,
     courierPump,
-    async stop() {
-      clearInterval(pruneTimer);
-      stopTracking();
-      phoneApprover.stop();
-      if (courierPump) courierPump.stop();
-      if (relayClient) await relayClient.stop();
-    }
+    stop: teardown
   };
 }
 

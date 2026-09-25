@@ -59,7 +59,28 @@ function defaultNodeConfig(adminDir) {
 // Phone approvals (fleet stage 3): the relay's mesh endpoint and the request
 // lifetime. Absent → phone approvals off.
 const DEFAULT_APPROVERS = { relay: null, requestTtlS: 300 };
-const RELAY_URL = /^wss:\/\/([^\s/:[\]]+|\[[0-9a-fA-F:]+\]):\d{1,5}\/?$/;
+
+// wss://host:port, nothing else: no userinfo, no path/query/fragment, and an
+// explicit port in 1..65535 (the WHATWG default-port fallback — `.port ===
+// ''` for the special `wss` scheme's own default 443 — is refused rather
+// than silently accepted, since "host:port" is what operators are told to
+// write and what the error message says back to them).
+function isValidRelayUrl(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== 'wss:') return false;
+  if (url.username !== '' || url.password !== '') return false;
+  if (!url.hostname) return false;
+  if (url.pathname !== '' && url.pathname !== '/') return false;
+  if (url.search !== '' || url.hash !== '') return false;
+  if (!url.port) return false;
+  const port = Number(url.port);
+  return Number.isInteger(port) && port >= 1 && port <= 65535;
+}
 
 function parseApprovers(raw, invalid) {
   if (raw === undefined) return { ...DEFAULT_APPROVERS };
@@ -69,7 +90,7 @@ function parseApprovers(raw, invalid) {
   }
   const out = { ...DEFAULT_APPROVERS };
   if (raw.relay !== undefined && raw.relay !== null) {
-    if (typeof raw.relay !== 'string' || !RELAY_URL.test(raw.relay.trim())) throw invalid('approvers.relay must be wss://host:port');
+    if (typeof raw.relay !== 'string' || !isValidRelayUrl(raw.relay.trim())) throw invalid('approvers.relay must be wss://host:port');
     out.relay = raw.relay.trim();
   }
   if (raw.request_ttl_s !== undefined) {

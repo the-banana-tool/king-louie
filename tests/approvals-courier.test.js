@@ -273,3 +273,35 @@ describe('FileCourier and CourierPump (fix round 1)', () => {
     assert.equal(fs.existsSync(target), true);
   });
 });
+
+// Task 20 review round 1 (opus, ruling I1): any code path that acts on an
+// enrolment code must check the code is still open (Task 19 carry). A claim
+// arriving after the code's own expiry, or after enroll.done has forwarded
+// (closing it), must not be routed anywhere — routeFor('enroll.claim', …)
+// itself refuses, so createRelayDispatcher's enroll.claim branch falls
+// through to { delivered: false } rather than delivering a stale claim.
+describe('CourierPump.routeFor(enroll.claim) and code state (fix round 1)', () => {
+  it('refuses once the code has expired, even though it was never closed', async () => {
+    const { pump, courier, identity } = pair();
+    const codeId = crypto.randomBytes(16).toString('base64url');
+    await courier.call('enroll.open', { envelope: m.buildEnrollOpen({ identity, codeId, expiresAt: Date.now() - 1000 }) });
+    assert.equal(pump.routeFor('enroll.claim', { code_id: codeId }), null);
+  });
+
+  it('refuses once enroll.done has closed the code, even though it has not expired yet', async () => {
+    const { pump, courier, identity } = pair();
+    const codeId = crypto.randomBytes(16).toString('base64url');
+    await courier.call('enroll.open', { envelope: m.buildEnrollOpen({ identity, codeId, expiresAt: Date.now() + 600000 }) });
+    assert.equal(pump.routeFor('enroll.claim', { code_id: codeId }), courier.inboxName);
+    await courier.call('enroll.done', { envelope: m.buildEnrollDone({ identity, codeId, refused: true }) });
+    assert.equal(pump.routeFor('enroll.claim', { code_id: codeId }), null);
+  });
+
+  it('routes to the inbox while the code is open', async () => {
+    const { pump, courier, identity } = pair();
+    const codeId = crypto.randomBytes(16).toString('base64url');
+    assert.equal(pump.routeFor('enroll.claim', { code_id: codeId }), null); // unknown code
+    await courier.call('enroll.open', { envelope: m.buildEnrollOpen({ identity, codeId, expiresAt: Date.now() + 600000 }) });
+    assert.equal(pump.routeFor('enroll.claim', { code_id: codeId }), courier.inboxName);
+  });
+});
