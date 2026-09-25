@@ -152,6 +152,23 @@ function createCore(deps = {}) {
   if (remoteApprovals === 'phone' && !deps.phoneApprover) {
     throw new Error("createCore: remoteApprovals 'phone' needs deps.phoneApprover");
   }
+  if (remoteApprovals === 'phone') {
+    // Fail fast, once, at construction: a phone approver whose TTL isn't
+    // usable would otherwise surface as a silently broken (or
+    // negative/NaN) approvalTimeoutMs deep inside a remote run instead of
+    // here. This used to live in approvalSeam/phoneExecutorOptions, which
+    // runs on every ToolExecutor build; it belongs here, checked once.
+    if (!Number.isFinite(deps.phoneApprover.ttlMs) || deps.phoneApprover.ttlMs <= 0) {
+      throw new Error(`phoneApprover.ttlMs must be a finite positive number, got ${deps.phoneApprover.ttlMs}`);
+    }
+    const approvalsLog = createLogger('approvals/executor-options');
+    if (!deps.nodePolicy) {
+      approvalsLog.warn('remoteApprovals "phone" without deps.nodePolicy: node-policy tiers are not enforced (classifyCall is not set)');
+    }
+    if (!deps.auditLedger) {
+      approvalsLog.warn('remoteApprovals "phone" without deps.auditLedger: tier.decision/exec.start/exec.result are not audited');
+    }
+  }
 
   // ── moved from main.js ──
   const log = createLogger('main');

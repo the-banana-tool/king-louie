@@ -30,19 +30,10 @@ function runOrigin({ executorOptions, event, local, helpers }) {
 
 // Phone-mode options merged into the ToolExecutor, plus the audit listeners.
 function phoneExecutorOptions({ phoneApprover, auditLedger = null, nodePolicy = null, origin, local, approvalRequester = null }) {
-  // Fail fast: a phone approver whose TTL isn't usable would otherwise
-  // surface as a silently broken (or negative/NaN) approvalTimeoutMs deep
-  // inside a remote run, instead of at the point this seam is built.
-  if (!Number.isFinite(phoneApprover.ttlMs) || phoneApprover.ttlMs <= 0) {
-    throw new Error(`phoneApprover.ttlMs must be a finite positive number, got ${phoneApprover.ttlMs}`);
-  }
-  if (!nodePolicy) {
-    log.warn('remoteApprovals "phone" without deps.nodePolicy: node-policy tiers are not enforced (classifyCall is not set)');
-  }
-  if (!auditLedger) {
-    log.warn('remoteApprovals "phone" without deps.auditLedger: tier.decision/exec.start/exec.result are not audited');
-  }
-
+  // phoneApprover.ttlMs validity and the missing-nodePolicy/auditLedger
+  // warnings are checked once, at createCore construction (next to
+  // `remoteApprovals 'phone' needs deps.phoneApprover`), not here: this
+  // function runs on every ToolExecutor build.
   const options = { localOrigin: local, origin };
   if (local) {
     options.approvalRequester = approvalRequester;

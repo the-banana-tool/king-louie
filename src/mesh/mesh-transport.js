@@ -26,6 +26,9 @@ class MeshTransport extends EventEmitter {
     this.host = config.host || '0.0.0.0';
     this.trustedPeers = config.trustedPeers || new Map();
     this.useTls = config.useTls !== false; // TLS on by default
+    // listen: false — a fleet node only ever dials out (principle 4): start()
+    // binds nothing, and the transport is used for connectToPeer alone.
+    this.listen = config.listen !== false;
 
     this.httpsServer = null;
     this.server = null;
@@ -40,6 +43,13 @@ class MeshTransport extends EventEmitter {
 
   async start() {
     if (this.server) return;
+    if (!this.listen) {
+      if (this.running) return;
+      this.running = true;
+      this._startHeartbeat();
+      log.info('transport started without a listener (dial-out only)');
+      return;
+    }
 
     if (this.useTls && this.identity.tlsCert && this.identity.tlsKey) {
       // TLS mode: HTTPS server → WSS

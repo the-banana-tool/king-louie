@@ -145,8 +145,9 @@ class ToolExecutor extends EventEmitter {
     // to tools (and so to child agents) is marked local, so children keep the
     // on-screen dialog instead of going to the phone (program §4.21).
     this.localOrigin = options.localOrigin === true;
-    // This run's audit origin (program §4.21), or null outside phone mode.
-    // Carried on the rethreaded requester so a child executor built from it
+    // This run's audit origin (program §4.21), set by approvalSeam in every
+    // mode (null only if the caller never supplied one). Carried on the
+    // rethreaded requester so a child executor built from it
     // (SpawnAgent, BackgroundTask, workflow runners) inherits the exact same
     // origin instead of recomputing a fresh, poorer one that has lost the
     // parent's deviceId/session.

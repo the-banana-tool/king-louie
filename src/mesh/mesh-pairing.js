@@ -41,34 +41,44 @@ const PAIRING_CODE_WORDS = 6;
 const PAIRING_TIMEOUT_MS = 120000; // 2 minutes
 
 class MeshPairing {
-  constructor(identity, transport) {
+  // options.timeoutMs: how long a code stays valid and how long acceptCode
+  // waits (default two minutes).
+  constructor(identity, transport, { timeoutMs = PAIRING_TIMEOUT_MS } = {}) {
     this.identity = identity;
     this.transport = transport;
+    this.timeoutMs = timeoutMs;
     this.pendingPairings = new Map();
   }
 
-  generateCode() {
+  generateCode(meta = {}) {
     const bytes = crypto.randomBytes(PAIRING_CODE_WORDS);
     const words = [];
     for (let i = 0; i < PAIRING_CODE_WORDS; i++) {
       words.push(WORDLIST[bytes[i]]);
     }
+    const { pairingId, code } = this.addCode(words.join(' '), meta);
+    return { pairingId, code };
+  }
 
-    const code = words.join(' ');
-    const secret = crypto.createHash('sha256').update(code).digest();
-
+  // Registers a code made elsewhere (the relay's `relay code` CLI). `meta`
+  // travels with the code and comes back on success; `meta.nodeName`, when
+  // set, must equal the pairing node's name or the pairing is refused
+  // (`name_mismatch`).
+  addCode(code, meta = {}) {
+    const normalized = String(code).trim().toLowerCase();
+    const secret = crypto.createHash('sha256').update(normalized).digest();
     const pairingId = crypto.randomBytes(8).toString('hex');
     this.pendingPairings.set(pairingId, {
-      code,
+      code: normalized,
       secret,
+      meta,
       createdAt: Date.now(),
       direction: 'initiator',
       timeout: setTimeout(() => {
         this.pendingPairings.delete(pairingId);
-      }, PAIRING_TIMEOUT_MS)
+      }, this.timeoutMs)
     });
-
-    return { pairingId, code };
+    return { pairingId, code: normalized, expiresAt: Date.now() + this.timeoutMs };
   }
 
   async acceptCode(code, peerAddress, peerPort) {
@@ -79,7 +89,7 @@ class MeshPairing {
       const timeout = setTimeout(() => {
         this.pendingPairings.delete(pairingId);
         reject(new Error('Pairing timeout'));
-      }, PAIRING_TIMEOUT_MS);
+      }, this.timeoutMs);
 
       this.pendingPairings.set(pairingId, {
         code: code.trim().toLowerCase(),
@@ -160,6 +170,8 @@ class MeshPairing {
               displayName: msg.identity.displayName,
               capabilities: msg.identity.capabilities,
               tlsFingerprint: msg.identity.tlsFingerprint || null,
+              nodeId: msg.identity.nodeId || null,
+              nodeName: msg.identity.nodeName || null,
               address,
               port
             };
@@ -225,6 +237,16 @@ class MeshPairing {
     }
 
     const { id: pairingId, pairing } = matchedPairing;
+    const meta = pairing.meta || {};
+
+    // A code issued for one node name cannot pair a node with another.
+    if (meta.nodeName && remoteIdentity.nodeName !== meta.nodeName) {
+      clearTimeout(pairing.timeout);
+      this.pendingPairings.delete(pairingId);
+      ws.send(JSON.stringify({ type: 'pair:reject', reason: 'name_mismatch' }));
+      ws.close();
+      return null;
+    }
 
     // Send back our proof
     const responseNonce = crypto.randomBytes(16).toString('hex');
@@ -262,7 +284,7 @@ class MeshPairing {
     );
 
     ws.close();
-    return peerInfo;
+    return { ...peerInfo, nodeId: remoteIdentity.nodeId || null, nodeName: remoteIdentity.nodeName || null, meta };
   }
 
   cleanup() {
