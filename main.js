@@ -10,7 +10,11 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 // An explicit --user-data-dir wins before anything reads the profile (the
-// e2e harness gives every launch its own).
+// e2e harness gives every launch its own). This runs before app.whenReady()
+// and before openDesktopState/any store below reads app.getPath('userData'),
+// so the harness's own isolation check — asserting app.getPath('userData')
+// equals the temp dir it asked for — actually proves every store in this
+// process opened that dir too, not just that the argv switch was accepted.
 const userDataArg = process.argv.find((a) => a.startsWith('--user-data-dir='));
 if (userDataArg) app.setPath('userData', path.resolve(userDataArg.slice('--user-data-dir='.length)));
 

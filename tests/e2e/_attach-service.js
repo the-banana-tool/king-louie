@@ -18,6 +18,12 @@ const dataDir = path.resolve(process.argv[process.argv.indexOf('--data-dir') + 1
 const configDir = path.join(path.dirname(dataDir), 'config');
 const PROBE = 'KlE2eGatedProbe';
 
+// If the parent (the e2e harness's test process) goes away without sending
+// { type: 'shutdown' } first — a crash, a forced kill that somehow leaves
+// this child's IPC channel torn down before the process itself — this must
+// not become an orphan service (fix round 1, I1).
+process.on('disconnect', () => process.exit(0));
+
 // Registered as `openai`: the chat send path accepts only openai/anthropic/gemini types.
 class StubProvider {
   async sendMessage() { return 'Stub chat'; }

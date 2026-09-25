@@ -12,7 +12,7 @@ after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true 
 
 describe('e2e harness', () => {
   it('exports the harness API', () => {
-    for (const name of ['launchApp', 'relaunchApp', 'launchAttached', 'startTestService', 'closeApp', 'evaluate', 'waitFor', 'click', 'fill', 'getText', 'getValue', 'isVisible', 'count', 'childEnv', 'writeSeed', 'APP_PATH']) {
+    for (const name of ['launchApp', 'relaunchApp', 'launchAttached', 'startTestService', 'closeApp', 'evaluate', 'waitFor', 'click', 'fill', 'getText', 'getValue', 'isVisible', 'count', 'childEnv', 'launchEnv', 'writeSeed', 'APP_PATH']) {
       assert.ok(name in helpers, name);
     }
   });
@@ -36,6 +36,26 @@ describe('e2e harness', () => {
     helpers.writeSeed(dir, { 'chat-data.json': { onboardingComplete: true }, 'notes/a.txt': 'hello' });
     assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(dir, 'chat-data.json'), 'utf8')), { onboardingComplete: true });
     assert.strictEqual(fs.readFileSync(path.join(dir, 'notes', 'a.txt'), 'utf8'), 'hello');
+  });
+
+  it('never inherits a parent KL_CASES_ROOT into the child launch environment (fix round 1, I2)', () => {
+    const saved = process.env.KL_CASES_ROOT;
+    process.env.KL_CASES_ROOT = path.join(os.tmpdir(), 'a-real-cases-root-that-must-not-leak');
+    try {
+      const fakeUserDataDir = path.join(os.tmpdir(), 'kl-e2e-fake-profile');
+      const env = helpers.childEnv(helpers.launchEnv(fakeUserDataDir));
+      assert.strictEqual(env.KL_CASES_ROOT, path.join(fakeUserDataDir, 'cases'));
+      assert.notStrictEqual(env.KL_CASES_ROOT, process.env.KL_CASES_ROOT);
+    } finally {
+      if (saved === undefined) delete process.env.KL_CASES_ROOT; else process.env.KL_CASES_ROOT = saved;
+    }
+  });
+
+  it('lets launchApp opts.env override the KL_CASES_ROOT and KL_DESKTOP_BRIDGE_FILE defaults', () => {
+    const fakeUserDataDir = path.join(os.tmpdir(), 'kl-e2e-fake-profile-2');
+    const env = helpers.launchEnv(fakeUserDataDir, { KL_CASES_ROOT: '/explicit/cases', KL_DESKTOP_BRIDGE_FILE: '/explicit/bridge.json' });
+    assert.strictEqual(env.KL_CASES_ROOT, '/explicit/cases');
+    assert.strictEqual(env.KL_DESKTOP_BRIDGE_FILE, '/explicit/bridge.json');
   });
 
   it('the old HTTP test bridge is gone', () => {

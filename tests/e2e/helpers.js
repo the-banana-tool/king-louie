@@ -22,6 +22,23 @@ function childEnv(extra = {}) {
   return env;
 }
 
+/**
+ * The extra env launchApp gives the child, layered under childEnv. KL_CASES_ROOT
+ * is always pinned under the launch's own temp profile — never left to inherit
+ * whatever the parent shell (an agent's own dev environment, CI, ...) happens to
+ * have set (fix round 1, I2) — and a launch that isn't given a real bridge file
+ * (i.e. every launchApp call except launchAttached's) points KL_DESKTOP_BRIDGE_FILE
+ * at a path that can't exist, so it can never read a real administrator-owned
+ * bridge file on the host. `extra` (opts.env) overrides both.
+ */
+function launchEnv(userDataDir, extra = {}) {
+  return {
+    KL_CASES_ROOT: path.join(userDataDir, 'cases'),
+    KL_DESKTOP_BRIDGE_FILE: path.join(userDataDir, 'no-such-desktop-bridge.json'),
+    ...extra
+  };
+}
+
 function writeSeed(dir, seed) {
   for (const [rel, content] of Object.entries(seed || {})) {
     const file = path.join(dir, rel);
@@ -37,6 +54,9 @@ const realpath = (p) => {
 /**
  * Launch King Louie on an isolated profile. `seed` (default: onboarding
  * complete) is written into the profile first; `seed: null` writes nothing.
+ * On any failure to reach a usable window (isolation mismatch, no window, no
+ * #user-input), the app is closed and, if this call created the profile dir
+ * itself, that dir is removed before rethrowing (fix round 1, I1).
  */
 async function launchApp(opts = {}) {
   const ownsDir = !opts.userDataDir;
@@ -45,9 +65,9 @@ async function launchApp(opts = {}) {
   const electronApp = await _electron.launch({
     executablePath: require('electron'),
     args: [APP_PATH, `--user-data-dir=${userDataDir}`, ...(opts.args || [])],
-    env: childEnv(opts.env)
+    env: childEnv(launchEnv(userDataDir, opts.env))
   });
-  const ctx = { electronApp, userDataDir, ownsDir, extraDirs: [], service: null, closed: false, stdout: '', relaunchRequested: false, launchOpts: opts };
+  const ctx = { electronApp, userDataDir, ownsDir, extraDirs: [], service: null, closed: false, stdout: '', relaunchRequested: false, exited: false, launchOpts: opts };
   const proc = electronApp.process();
   if (proc.stdout) {
     proc.stdout.on('data', (d) => {
@@ -55,14 +75,27 @@ async function launchApp(opts = {}) {
       if (ctx.stdout.includes('KL_RELAUNCH_REQUESTED')) ctx.relaunchRequested = true;
     });
   }
-  const actual = await electronApp.evaluate(({ app }) => app.getPath('userData'));
-  if (realpath(actual) !== realpath(userDataDir)) {
-    await electronApp.close().catch(() => {});
-    throw new Error(`userData isolation failed: the app uses ${actual}, not ${userDataDir}`);
+  // Tracked with our own flag, not proc.exitCode: Node leaves exitCode null
+  // for a process that ends via a signal, so a later check of exitCode alone
+  // can't tell "already exited" from "still running" (fix round 1 carry —
+  // the same class of bug fixed on the test-service child in stop()/kill()).
+  proc.once('exit', () => { ctx.exited = true; });
+  try {
+    const actual = await electronApp.evaluate(({ app }) => app.getPath('userData'));
+    if (realpath(actual) !== realpath(userDataDir)) {
+      throw new Error(`userData isolation failed: the app uses ${actual}, not ${userDataDir}`);
+    }
+    await electronApp.firstWindow();
+    await waitFor(ctx, `!!document.getElementById('user-input')`, 20000);
+    return ctx;
+  } catch (err) {
+    await Promise.race([electronApp.close().catch(() => {}), delay(5000)]);
+    try { proc.kill(); } catch { /* already gone */ }
+    if (ownsDir) {
+      try { await removeDir(userDataDir); } catch { /* best effort; the original error is what matters */ }
+    }
+    throw err;
   }
-  await electronApp.firstWindow();
-  await waitFor(ctx, `!!document.getElementById('user-input')`, 20000);
-  return ctx;
 }
 
 /** After the app printed KL_RELAUNCH_REQUESTED and quit, start it again on the same profile. */
@@ -73,12 +106,16 @@ async function relaunchApp(ctx, { args } = {}) {
     await delay(100);
   }
   const proc = ctx.electronApp.process();
-  if (proc.exitCode === null) await Promise.race([new Promise((r) => proc.once('exit', r)), delay(10000)]);
-  ctx.closed = true;
+  if (!ctx.exited) await Promise.race([new Promise((r) => proc.once('exit', r)), delay(10000)]);
+  if (!ctx.exited) { try { proc.kill(); } catch { /* already gone */ } }
   const next = await launchApp({ ...ctx.launchOpts, userDataDir: ctx.userDataDir, seed: null, args: args || ctx.launchOpts.args });
   next.ownsDir = ctx.ownsDir;
   next.extraDirs = ctx.extraDirs;
   next.service = ctx.service;
+  // Only set once the new launch has actually succeeded — if launchApp threw,
+  // ctx (the still-live-in-spirit old context) must stay closable so a
+  // caller's cleanup (e.g. a test's after()) still tries to close/remove it.
+  ctx.closed = true;
   return next;
 }
 
@@ -189,7 +226,14 @@ async function startTestService({ root }) {
     if (process.platform !== 'win32') fs.chmodSync(serviceJson, 0o644);
   }
   const bridgeFile = path.join(configDir, 'desktop-bridge.json');
-  const child = fork(path.join(__dirname, '_attach-service.js'), ['--data-dir', dataDir], { silent: true, env: { ...process.env, KL_TEST_MODE: '1' } });
+  // KL_CASES_ROOT is pinned under this service's own temp data dir — never
+  // left to inherit whatever the host process's environment happens to have
+  // set (fix round 1, I2) — a real value there would otherwise point a case
+  // write at a directory this harness doesn't own or clean up.
+  const child = fork(path.join(__dirname, '_attach-service.js'), ['--data-dir', dataDir], {
+    silent: true,
+    env: { ...process.env, KL_TEST_MODE: '1', KL_CASES_ROOT: path.join(dataDir, 'cases') }
+  });
   // `child.exitCode` stays null for a process killed by a signal (only
   // `signalCode` is set then), so it can't tell "already exited" from
   // "still running" after kill('SIGKILL'). Track exit with our own flag.
@@ -199,7 +243,13 @@ async function startTestService({ root }) {
   child.stderr.on('data', (d) => { stderr += d.toString(); });
   const info = await new Promise((resolve, reject) => {
     let buf = '';
-    const timer = setTimeout(() => reject(new Error(`the test service did not start. stderr: ${stderr.slice(0, 800)}`)), 60000);
+    const timer = setTimeout(() => {
+      // A child that never reports readiness must not be left running (fix
+      // round 1, I1) — nothing else in this harness will ever call stop()
+      // on it, since startTestService itself is about to throw.
+      child.kill('SIGKILL');
+      reject(new Error(`the test service did not start. stderr: ${stderr.slice(0, 800)}`));
+    }, 60000);
     child.stdout.on('data', (d) => {
       buf += d.toString();
       const line = buf.split('\n').find((l) => l.startsWith('KL_ATTACH_SERVICE '));
@@ -232,9 +282,18 @@ async function startTestService({ root }) {
     async stop() {
       if (hasExited) return;
       const exited = new Promise((resolve) => child.once('exit', resolve));
-      child.send({ type: 'shutdown' });
+      // The IPC channel can already be gone (e.g. the child hit its own
+      // 'disconnect' exit) even though the 'exit' event hasn't fired yet;
+      // child.send() on a disconnected channel throws.
+      if (child.connected) child.send({ type: 'shutdown' });
       await Promise.race([exited, delay(10000)]);
-      if (!hasExited) child.kill('SIGKILL');
+      if (!hasExited) {
+        child.kill('SIGKILL');
+        // restart() forks a new child into the same dataDir/configDir right
+        // after stop() resolves — it must not race the old process's file
+        // handles, so wait for the actual exit rather than just requesting it.
+        await exited;
+      }
     },
     kill() {
       if (hasExited) return Promise.resolve();
@@ -251,27 +310,44 @@ async function startTestService({ root }) {
 
 /**
  * Launch the app attached to a temporary service: pair through the UI, run
- * the admin command in-process, confirm, attach, relaunch.
+ * the admin command in-process, confirm, attach, relaunch. On any failure
+ * after the service has started, the app (if launched) is closed and the
+ * service stopped, and both temp roots are removed before rethrowing (fix
+ * round 1, I1) — a partial pairing attempt must not leave the service child
+ * or either temp dir behind.
  */
 async function launchAttached(opts = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-e2e-svc-'));
   const service = await startTestService({ root });
-  let ctx = await launchApp({ ...opts, env: { ...(opts.env || {}), KL_DESKTOP_BRIDGE_FILE: service.bridgeFile } });
-  ctx.extraDirs.push(root);
-  ctx.service = service;
-  await click(ctx, '#open-settings-btn');
-  await evaluate(ctx, `switchSettingsTab('service'); true`);
-  await waitFor(ctx, `!!document.getElementById('service-action-pair')`, 15000);
-  await click(ctx, '#service-action-pair');
-  const request = await waitFor(ctx, `document.getElementById('service-pair-request')?.textContent || ''`, 15000);
-  await service.pair(request);
-  await waitFor(ctx, `(() => { const b = document.getElementById('service-action-pairConfirm'); return b && !b.disabled; })()`, 15000);
-  await click(ctx, '#service-action-pairConfirm');
-  await waitFor(ctx, `!!document.getElementById('service-action-attach')`, 20000);
-  await click(ctx, '#service-action-attach');
-  ctx = await relaunchApp(ctx);
-  await waitFor(ctx, `window.electron.desktop.status().then((s) => s.view === 'attached-connected')`, 30000);
-  return ctx;
+  let ctx = null;
+  try {
+    ctx = await launchApp({ ...opts, env: { ...(opts.env || {}), KL_DESKTOP_BRIDGE_FILE: service.bridgeFile } });
+    ctx.extraDirs.push(root);
+    ctx.service = service;
+    await click(ctx, '#open-settings-btn');
+    await evaluate(ctx, `switchSettingsTab('service'); true`);
+    await waitFor(ctx, `!!document.getElementById('service-action-pair')`, 15000);
+    await click(ctx, '#service-action-pair');
+    const request = await waitFor(ctx, `document.getElementById('service-pair-request')?.textContent || ''`, 15000);
+    await service.pair(request);
+    await waitFor(ctx, `(() => { const b = document.getElementById('service-action-pairConfirm'); return b && !b.disabled; })()`, 15000);
+    await click(ctx, '#service-action-pairConfirm');
+    await waitFor(ctx, `!!document.getElementById('service-action-attach')`, 20000);
+    await click(ctx, '#service-action-attach');
+    ctx = await relaunchApp(ctx);
+    await waitFor(ctx, `window.electron.desktop.status().then((s) => s.view === 'attached-connected')`, 30000);
+    return ctx;
+  } catch (err) {
+    if (ctx) {
+      // ctx already carries the service and root (pushed onto extraDirs)
+      // above, so closeApp alone stops the service and removes both roots.
+      await closeApp(ctx).catch(() => {});
+    } else {
+      await service.stop().catch(() => {});
+      await removeDir(root).catch(() => {});
+    }
+    throw err;
+  }
 }
 
 module.exports = {
@@ -289,6 +365,7 @@ module.exports = {
   isVisible,
   count,
   childEnv,
+  launchEnv,
   writeSeed,
   APP_PATH
 };

@@ -14,21 +14,20 @@ try { execFileSync('git', ['--version'], { stdio: 'ignore' }); } catch { gitAvai
 describe('E2E: cases', { skip: gitAvailable ? false : 'git is not on PATH' }, () => {
   let ctx;
   let casesRoot;
-  const savedRoot = process.env.KL_CASES_ROOT;
 
   before(async () => {
-    // helpers.launchApp passes process.env to the app, so case repos land in
-    // a temp dir instead of the real profile.
+    // launchApp itself now defaults KL_CASES_ROOT under the launch's own temp
+    // profile (fix round 1, I2) and never inherits this process's env for it,
+    // so this test's case repos are pointed at their own temp dir explicitly
+    // through opts.env rather than by mutating process.env.
     casesRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-e2e-cases-'));
-    process.env.KL_CASES_ROOT = casesRoot;
-    ctx = await launchApp();
+    ctx = await launchApp({ env: { KL_CASES_ROOT: casesRoot } });
     await waitFor(ctx, `!!document.getElementById('new-chat-btn')`);
     await evaluate(ctx, `document.getElementById('wizard-skip-btn')?.click(); true`);
   });
 
   after(async () => {
     await closeApp(ctx);
-    if (savedRoot === undefined) delete process.env.KL_CASES_ROOT; else process.env.KL_CASES_ROOT = savedRoot;
     fs.rmSync(casesRoot, { recursive: true, force: true });
   });
 
