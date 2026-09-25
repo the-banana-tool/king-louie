@@ -42,6 +42,21 @@ class CaseBusyError extends Error {
   }
 }
 
+// F6: an owner message arriving while an in-process wake-up holds the lock
+// is not the same situation as another process (or a stuck one) holding
+// it — the owner outranks unattended work, so beginTurn aborts the
+// wake-up and waits (bounded) for it to release. If that does not clear
+// the lock in time, this is thrown instead of CaseBusyError: never tell
+// the owner to quit the app or delete the lock over the runtime's own
+// in-process turn (spec §9 text).
+class WakeupBusyError extends Error {
+  constructor() {
+    super('Case is busy with a wake-up; try again in a minute.');
+    this.name = 'WakeupBusyError';
+    this.code = 'CASE_BUSY';
+  }
+}
+
 class CaseNotFoundError extends Error {
   constructor(id) {
     super(`Case not found: ${id}`);
@@ -103,10 +118,14 @@ const STOPS_WORK = new Set(['paused', 'done', 'abandoned']);
 
 class CaseRuntime {
   constructor({
-    root, staleLockMs = 30 * 60 * 1000, orientationMaxChars = DEFAULT_MAX_CHARS, getSettings = null, now = null, host = null
+    root, staleLockMs = 30 * 60 * 1000, wakeupPreemptTimeoutMs = 10000, orientationMaxChars = DEFAULT_MAX_CHARS,
+    getSettings = null, now = null, host = null
   } = {}) {
     this.store = new CaseStore({ root });
     this.staleLockMs = staleLockMs;
+    // F6: how long an owner turn waits for an in-process wake-up it just
+    // aborted to actually release the lock, before giving up.
+    this.wakeupPreemptTimeoutMs = wakeupPreemptTimeoutMs;
     this.orientationMaxChars = orientationMaxChars;
     // turnId -> { dir, timer }: the locks this runtime holds right now.
     this.held = new Map();
@@ -384,6 +403,55 @@ class CaseRuntime {
     return path.join(dir, '.kl', 'lock');
   }
 
+  // beginTurn's entry point (F6): an owner (or system) turn that finds the
+  // lock held by a wake-up this same process is running preempts it —
+  // aborts it and waits, bounded, for the release — rather than failing
+  // with CaseBusyError's "quit it or delete the lock" message, which is
+  // meant for a different process, not this runtime's own turn. A wake-up
+  // turn never preempts anything: it just takes the normal busy error.
+  async _acquireForTurn(meta, turnId, source) {
+    try {
+      this._acquire(meta, turnId);
+      return;
+    } catch (err) {
+      if (err.code !== 'CASE_BUSY' || source === 'wakeup') throw err;
+      const holder = readLock(this._lockPath(meta.dir));
+      const held = holder && Number.isInteger(holder.pid) ? this.turns.get(meta.id) : null;
+      const inProcessWakeup = Boolean(
+        holder && holder.pid === process.pid && held && held.source === 'wakeup' && held.turnId === holder.turnId
+      );
+      if (!inProcessWakeup) throw err;
+      log.info(`Case ${meta.slug}: an owner turn is preempting the in-process wake-up ${held.turnId}.`);
+      if (typeof held.abort === 'function') held.abort('preempted by an owner message');
+      const released = await this._waitForLockRelease(meta.dir, held.turnId, this.wakeupPreemptTimeoutMs);
+      if (!released) throw new WakeupBusyError();
+      try {
+        this._acquire(meta, turnId);
+      } catch {
+        throw new WakeupBusyError();
+      }
+    }
+  }
+
+  // Polls (bounded) for the lock in `dir` to stop being held by `turnId` —
+  // used only to wait out an aborted in-process wake-up (F6), never a
+  // remote process, which cannot be waited on this way.
+  async _waitForLockRelease(dir, turnId, timeoutMs) {
+    const lock = this._lockPath(dir);
+    const stillHeld = () => {
+      const holder = readLock(lock);
+      return Boolean(holder && holder.turnId === turnId);
+    };
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    // Deliberately not unref()'d: this is an active wait for work this
+    // process itself is doing, not a background timer, and must keep the
+    // process alive until it resolves one way or the other.
+    while (stillHeld() && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return !stillHeld();
+  }
+
   _acquire(meta, turnId) {
     const lock = this._lockPath(meta.dir);
     fs.mkdirSync(path.dirname(lock), { recursive: true });
@@ -641,7 +709,7 @@ class CaseRuntime {
     // Shutting down: refuse before even taking the lock.
     if (source === 'wakeup' && this.closing) throw new RuntimeClosingError();
     const meta = this.getCase(id);
-    this._acquire(meta, turnId);
+    await this._acquireForTurn(meta, turnId, source);
     try {
       if (await git.isDirty(meta.dir)) await this._commit(meta.dir, 'owner edits', meta.id);
       const budget = this.budget(meta.id);
@@ -1278,4 +1346,6 @@ class CaseRuntime {
   }
 }
 
-module.exports = { CaseRuntime, CaseBusyError, CaseNotFoundError, RuntimeClosingError, resolveCasesRoot, BUDGET_FACT_NOTE };
+module.exports = {
+  CaseRuntime, CaseBusyError, WakeupBusyError, CaseNotFoundError, RuntimeClosingError, resolveCasesRoot, BUDGET_FACT_NOTE
+};
