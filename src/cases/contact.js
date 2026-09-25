@@ -6,7 +6,7 @@
 // gate-enforced path for any channel-targeted send by case code (R38, R39).
 const { QuestionStore } = require('./questions');
 const {
-  renderBatch, parseReply, optionOrText, normalizeAddress, formatShort, CONTACT_CHANNELS
+  renderBatch, parseReply, optionOrText, normalizeAddress, formatShort, CONTACT_CHANNELS, appOnly, needsApp
 } = require('./contact-format');
 const { ContactDeliveryError, GATE_PASSED } = require('../channels/channel-plugin');
 const { createLogger } = require('../logging');
@@ -35,7 +35,6 @@ const MAX_GATHERED_SCAN = 1000;
 const RELAY_EVENT_TYPES = new Set(['status', 'inbound', 'gathered']);
 const RELAY_EVENT_ID = /^[\x21-\x7e]{1,128}$/;
 const RELAY_STATUS = /^[a-z-]{1,32}$/;
-const needsApp = (record) => record.kind === 'approval' || appOnly(record);
 
 // The relay an adapter is served by: `relayName`, else its relay client's
 // `name` (TelephonyChannel/relay email take `relay`). null: no relay.
@@ -64,18 +63,6 @@ function sameAnswer(record, answer) {
   const text = String(answer.text || '').trim();
   if (a.optionId) return optionOrText(record.options, text).optionId === a.optionId;
   return String(a.text || '').trim().toLowerCase() === text.toLowerCase();
-}
-
-// Owner decision M22 / ruling T5-m22: questions C2 marks `mcpAnswerable:
-// false` carry authority (budget-grant, budget-daily, direction,
-// commit-failed). Like approvals they are answered only in the app or on the
-// paired phone (APP_ANSWER_CHANNELS); every other channel, Telegram and
-// Discord included, is refused. A conflict follow-up is always mcpAnswerable:false (the model must
-// not settle it), so it carries the original's rule in `appOnly` instead.
-function appOnly(record) {
-  const p = record?.payload || {};
-  if (p.type === 'conflict') return p.appOnly === true;
-  return p.mcpAnswerable === false;
 }
 
 // A timestamp the adapter reported, never later than now (Task 3's
@@ -195,13 +182,13 @@ class ContactRouter {
       maxChars: caps.maxChars || 4000,
       maxOptions: caps.maxOptions ?? 6,
       authenticated: this.answersInApp(channelId),
-      firstAuthenticated: this.firstAuthenticated(),
       timeZone: this.getTimeZone()
     });
     if (message.tooLarge) throw new ContactDeliveryError('too-large', `the batch is over ${caps.maxChars} characters even with items cut`);
     const expiries = message.items.map((i) => i.expiresAt).filter(Boolean).sort();
     const meta = {
-      expectsReply: caps.expectsReplies === true,
+      // A batch of app-only notices invites no reply (no gather, no buttons).
+      expectsReply: caps.expectsReplies === true && message.items.some((i) => i.answerable),
       options: message.items.length === 1 ? message.items[0].options : null,
       deliveryId: id,
       batchToken: token,

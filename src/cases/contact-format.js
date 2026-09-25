@@ -293,21 +293,36 @@ function subjectFor(items) {
   return `King Louie: ${plural(items.length, noun)}${high ? ` (${high} high)` : ''}`;
 }
 
+// Owner decision M22 / ruling T5-m22: questions C2 marks `mcpAnswerable:
+// false` carry authority (budget-grant, budget-daily, direction,
+// commit-failed). Like approvals they are answered only in the app or on the
+// paired phone. A conflict follow-up is always mcpAnswerable:false (the model
+// must not settle it), so it carries the original's rule in `appOnly` instead.
+function appOnly(record) {
+  const p = record?.payload || {};
+  if (p.type === 'conflict') return p.appOnly === true;
+  return p.mcpAnswerable === false;
+}
+
+// An approval or an app-only question: answerable only in-app or on the phone.
+const needsApp = (record) => record?.kind === 'approval' || appOnly(record);
+
 // entries: [{ caseId, caseTitle, token, record }] across cases. Returns the
-// §3.1 message { subject, text, items }. On a channel without authenticated
-// replies an approval is only announced (answerable: false).
+// §3.1 message { subject, text, items }. On a channel whose replies cannot
+// answer in the app's name (`authenticated: false`), an approval or an
+// app-only question is only announced: "Answer this in the app: …", with no
+// options and no reply hint (answerable: false).
 function renderBatch(entries, {
-  batchToken, maxChars = 4000, maxOptions = 6, authenticated = true,
-  firstAuthenticated = 'the King Louie app', timeZone = '', truncate = false
+  batchToken, maxChars = 4000, maxOptions = 6, authenticated = true, timeZone = '', truncate = false
 } = {}) {
   const sorted = [...entries].sort((a, b) => (URGENCY_RANK[a.record.urgency] ?? 1) - (URGENCY_RANK[b.record.urgency] ?? 1)
     || String(a.record.createdAt).localeCompare(String(b.record.createdAt)));
   const items = sorted.map((e, i) => {
     const r = e.record;
-    const answerable = !(r.kind === 'approval' && !authenticated);
+    const answerable = authenticated || !needsApp(r);
     let text = r.text;
     if (truncate && text.length > TRUNCATE_AT) text = `${text.slice(0, TRUNCATE_AT)}${TRUNCATED}`;
-    if (!answerable) text = `Approval needed in ${e.caseTitle}: ${text} Answer in King Louie or ${firstAuthenticated}.`;
+    if (!answerable) text = `Answer this in the app: ${text} (${e.caseTitle})`;
     const options = answerable ? (r.options || []).slice(0, maxOptions) : [];
     return {
       n: i + 1, token: e.token, caseId: e.caseId, questionId: r.id, caseTitle: e.caseTitle,
@@ -334,7 +349,7 @@ function renderBatch(entries, {
   }
   let text = lines.join('\n');
   if (text.length > maxChars && !truncate) {
-    return renderBatch(entries, { batchToken, maxChars, maxOptions, authenticated, firstAuthenticated, timeZone, truncate: true });
+    return renderBatch(entries, { batchToken, maxChars, maxOptions, authenticated, timeZone, truncate: true });
   }
   return { subject: subjectFor(items), text, items, tooLarge: text.length > maxChars };
 }
@@ -511,6 +526,8 @@ module.exports = {
   assertRelayBaseUrl,
   formatShort,
   renderBatch,
+  appOnly,
+  needsApp,
   optionOrText,
   parseReply,
   stripQuoted

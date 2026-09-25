@@ -117,11 +117,42 @@ describe('renderBatch', () => {
 
   it('announces an approval without options on an unauthenticated channel', () => {
     const approval = { caseId: 'c-3', caseTitle: 'Lakeside lot', token: 'A1B2C3', record: { id: 'q-0020', kind: 'approval', urgency: 'normal', createdAt: '2026-09-25T13:00:00Z', text: 'Send the offer letter to the buyer?', options: [{ id: 'approve', label: 'Approve' }, { id: 'reject', label: 'Reject' }] } };
-    const m = renderBatch([approval], { batchToken: 'K7QD4M', authenticated: false, firstAuthenticated: 'telegram' });
+    const m = renderBatch([approval], { batchToken: 'K7QD4M', authenticated: false });
     assert.strictEqual(m.items[0].answerable, false);
     assert.deepStrictEqual(m.items[0].options, []);
-    assert.match(m.text, /Approval needed in Lakeside lot: Send the offer letter to the buyer\? Answer in King Louie or telegram\./);
-    assert.doesNotMatch(m.text, /Reply "#/);
+    assert.strictEqual(m.text, 'King Louie: 1 approval\n\n1. Answer this in the app: Send the offer letter to the buyer? (Lakeside lot)');
+    assert.doesNotMatch(m.text, /Reply "#|#K7QD4M|A1B2C3|approve\)/);
+  });
+
+  // Owner decision M22: mcpAnswerable:false questions (and conflict follow-ups
+  // marked appOnly) are answered only in the app or on the paired phone.
+  const grant = { caseId: 'c-3', caseTitle: 'Lakeside lot', token: 'G7H8J9', record: { id: 'q-0021', kind: 'question', urgency: 'high', createdAt: '2026-09-25T13:00:00Z', text: 'Raise the usd limit for Lakeside lot?', options: [{ id: 'yes', label: 'Yes' }, { id: 'no', label: 'No' }], payload: { type: 'budget-grant', budget: 'usd', mcpAnswerable: false } } };
+  const follow = { caseId: 'c-3', caseTitle: 'Lakeside lot', token: 'F1F2F3', record: { id: 'q-0022', kind: 'question', urgency: 'normal', createdAt: '2026-09-25T13:00:00Z', text: 'Two answers to q-0021. Keep the first?', options: [{ id: 'keep', label: 'Keep' }, { id: 'change', label: 'Change' }], payload: { type: 'conflict', mcpAnswerable: false, appOnly: true } } };
+
+  it('renders an app-only question as an "Answer this in the app" notice on an unauthenticated channel', () => {
+    for (const entry of [grant, follow]) {
+      const m = renderBatch([entry], { batchToken: 'K7QD4M', authenticated: false });
+      assert.strictEqual(m.items[0].answerable, false);
+      assert.deepStrictEqual(m.items[0].options, []);
+      assert.strictEqual(m.items[0].text, `Answer this in the app: ${entry.record.text} (Lakeside lot)`);
+      for (const leak of ['Reply', '#K7QD4M', entry.token, 'yes)', 'keep)']) assert.ok(!m.text.includes(leak), `no "${leak}" in the notice`);
+    }
+  });
+
+  it('keeps the options of an app-only question on an authenticated (in-app, phone) channel', () => {
+    const m = renderBatch([grant], { batchToken: 'K7QD4M', authenticated: true });
+    assert.strictEqual(m.items[0].answerable, true);
+    assert.deepStrictEqual(m.items[0].options.map((o) => o.id), ['yes', 'no']);
+    assert.match(m.text, /Lakeside lot — Raise the usd limit/);
+    assert.match(m.text, /Reply "#K7QD4M yes"/);
+  });
+
+  it('a mixed batch offers the reply hint only for the answerable items', () => {
+    const m = renderBatch([grant, kitchen], { batchToken: 'K7QD4M', authenticated: false, timeZone: 'UTC' });
+    assert.deepStrictEqual(m.items.map((i) => [i.questionId, i.answerable]), [['q-0021', false], ['q-0003', true]]);
+    assert.match(m.text, /^1\. \[HIGH\] Answer this in the app: Raise the usd limit for Lakeside lot\? \(Lakeside lot\)$/m);
+    assert.match(m.text, /Reply "#K7QD4M 2 a"\./);
+    assert.doesNotMatch(m.text, /#K7QD4M 1 /);
   });
 
   it('cuts long items to 280 characters when the message is over maxChars', () => {
