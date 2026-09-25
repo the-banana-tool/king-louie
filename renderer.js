@@ -1814,6 +1814,15 @@ async function renderChatCaseSection(chat, container) {
   }
   refreshCaseQuestionsBar();
 
+  // Cases stage 5: detour proposals and related cases.
+  const detours = document.createElement('div');
+  detours.id = 'case-detours-section';
+  detours.className = 'case-detours-section';
+  container.appendChild(detours);
+  if (chat.caseId && !caseMissing) {
+    renderCaseDetoursSection(chat, detours).catch((err) => chatLog.warn(`Detours panel failed: ${err.message}`));
+  }
+
   const adopt = async (updatedChat) => {
     if (!updatedChat) return;
     appState.chats = appState.chats.map((c) => (c.id === updatedChat.id ? updatedChat : c));
@@ -1837,7 +1846,16 @@ async function renderChatCaseSection(chat, container) {
     showError('');
     const title = titleInput.value.trim();
     if (!title) { showError('Give the case a title.'); titleInput.focus(); return; }
-    const result = await window.electron.cases.create({ title, chatId: chat.id });
+    let result = await window.electron.cases.create({ title, chatId: chat.id });
+    // Cases stage 5: a similar open case exists; create anyway, or attach to it.
+    if (!result?.ok && result?.code === 'SIMILAR_CASES' && Array.isArray(result.similar) && result.similar.length) {
+      const match = result.similar[0];
+      if (await showConfirmDialog(`A similar case exists: "${match.title}" (${match.status}). Create anyway?`)) {
+        result = await window.electron.cases.create({ title, chatId: chat.id, force: true });
+      } else {
+        result = await window.electron.cases.attach({ chatId: chat.id, caseId: match.caseId });
+      }
+    }
     if (!result?.ok) { showError(result?.error || 'Could not create the case.'); return; }
     await adopt(result.chat);
   });
@@ -2133,7 +2151,102 @@ if (window.electron?.cases?.onChanged) {
     refreshCaseQuestionsBar();
     const slot = document.getElementById('case-unattended-section');
     if (slot) renderCaseUnattendedSection(chat, slot, { compact: false }).catch((err) => chatLog.warn(`Case panel failed: ${err.message}`));
+    const detourSlot = document.getElementById('case-detours-section');
+    if (detourSlot) renderCaseDetoursSection(chat, detourSlot).catch((err) => chatLog.warn(`Detours panel failed: ${err.message}`));
   });
+}
+
+/* --- Cases stage 5: detours and related cases (docs/superpowers/specs/2026-09-23-cases-stage5-detours.md §7) --- */
+
+const CASE_DETOUR_OPEN = ['proposed', 'held', 'awaiting-mapping'];
+
+function renderCaseDetourCard(chat, d, { refresh, showError }) {
+  const card = document.createElement('div');
+  card.id = `case-detour-${d.id}`;
+  card.className = `case-detour${d.blocks ? ' case-detour-blocker' : ''}`;
+  card.dataset.detourId = d.id;
+  const text = document.createElement('div');
+  text.className = 'case-detour-text';
+  text.textContent = `${d.blocks ? 'Blocker: ' : ''}${d.summary}${d.reason ? ` — ${d.reason}` : ''}`;
+  card.appendChild(text);
+  if (d.status !== 'proposed') {
+    const state = document.createElement('div');
+    state.className = 'case-detour-state';
+    state.textContent = d.status === 'held'
+      ? "Waiting: today's question allowance is spent."
+      : 'You answered in words; the case maps it to an option on its next turn. You can also pick one here.';
+    card.appendChild(state);
+  }
+  const actions = document.createElement('div');
+  actions.className = 'case-detour-actions';
+  for (const o of d.options) {
+    const button = caseButton(o.label, o.optionId === 'decline' ? 'secondary-button case-detour-drop' : 'secondary-button');
+    button.id = `case-detour-${d.id}-${o.optionId}`;
+    button.addEventListener('click', async () => {
+      showError('');
+      const payload = { caseId: chat.caseId, detourId: d.id, optionId: o.optionId };
+      let result = await window.electron.cases.resolveDetour(payload);
+      if (!result?.ok && o.optionId === 'new' && /similar case exists/i.test(result?.error || '')
+        && await showConfirmDialog(`${result.error} Create the new case anyway?`)) {
+        result = await window.electron.cases.resolveDetour({ ...payload, force: true });
+      }
+      if (!result?.ok) showError(result?.error || 'Could not route the detour.');
+      await refresh();
+    });
+    actions.appendChild(button);
+  }
+  card.appendChild(actions);
+  return card;
+}
+
+function relatedCaseLine(r) {
+  const li = document.createElement('li');
+  li.className = 'case-related-item';
+  if (r.gone) {
+    li.textContent = `${r.relation}: (case ${r.caseId} no longer exists)`;
+  } else {
+    const stillBlocks = r.relation === 'blocked-by' && r.status === 'done' ? ' (done — check whether it still blocks)' : '';
+    li.textContent = `${r.relation}: ${r.title} (${r.status})${stillBlocks}`;
+  }
+  return li;
+}
+
+async function renderCaseDetoursSection(chat, container) {
+  const error = document.createElement('div');
+  error.className = 'chat-case-error';
+  const showError = (message) => { error.textContent = message || ''; };
+  const refresh = async () => {
+    await renderCaseDetoursSection(chat, container);
+    refreshCaseQuestionsBar();
+  };
+  const result = await window.electron.cases.detours({ caseId: chat.caseId });
+  container.innerHTML = '';
+  if (!result?.ok) {
+    showError(`Could not load detours: ${result?.error || 'unknown error'}`);
+    container.appendChild(error);
+    return;
+  }
+  const open = result.detours.filter((d) => CASE_DETOUR_OPEN.includes(d.status));
+  if (!open.length && !result.related.length) return;
+  const heading = document.createElement('div');
+  heading.className = 'case-detours-heading';
+  heading.textContent = 'Detours and related cases';
+  container.appendChild(heading);
+  if (result.busy) {
+    const busy = document.createElement('div');
+    busy.className = 'case-detour-state';
+    busy.textContent = 'The case is busy with a turn; routing answers are applied when it finishes.';
+    container.appendChild(busy);
+  }
+  for (const d of open) container.appendChild(renderCaseDetourCard(chat, d, { refresh, showError }));
+  if (result.related.length) {
+    const list = document.createElement('ul');
+    list.id = 'case-related-list';
+    list.className = 'case-related-list';
+    for (const r of result.related) list.appendChild(relatedCaseLine(r));
+    container.appendChild(list);
+  }
+  container.appendChild(error);
 }
 
 function renderChatInfoPopover() {

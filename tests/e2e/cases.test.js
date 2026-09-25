@@ -56,7 +56,8 @@ describe('E2E: cases', { skip: gitAvailable ? false : 'git is not on PATH' }, ()
     await evaluate(ctx, `document.getElementById('chat-case-orientation-btn').click(); true`);
     await waitFor(ctx, `(document.getElementById('chat-case-orientation')?.textContent || '').includes('E2E lakeside lot')`);
 
-    const slugs = fs.readdirSync(casesRoot);
+    // The cross-case index lives in <casesRoot>/.index (cases stage 5).
+    const slugs = fs.readdirSync(casesRoot).filter((n) => !n.startsWith('.'));
     assert.deepStrictEqual(slugs, ['e2e-lakeside-lot']);
     assert.ok(fs.existsSync(path.join(casesRoot, 'e2e-lakeside-lot', 'facts.jsonl')));
   });
@@ -199,5 +200,32 @@ describe('E2E: cases', { skip: gitAvailable ? false : 'git is not on PATH' }, ()
     await new Promise((r) => setTimeout(r, 500));
     const stillThere = await evaluate(ctx, `document.querySelector('.case-unattended-error')?.textContent || ''`);
     assert.match(stillThere, /The answer had no effect\./);
+  });
+
+  it('shows a seeded detour in the case panel, and "Drop it" resolves it', async () => {
+    // The chat is attached to "E2E question case" by the test above. Seed a
+    // second case and a routing proposal from this process, as a turn would.
+    const { CaseRuntime } = require('../../src/cases');
+    const { DetourLog } = require('../../src/cases/detours/log');
+    const rt = new CaseRuntime({ root: casesRoot });
+    const attached = rt.getCase('e2e-question-case');
+    await rt.createCase({ title: 'E2E phone agent maintenance', objective: 'Keep the phone agent answering calls', force: true });
+    const proposed = await rt.detours.propose(attached.id, { summary: 'Fix the phone agent status polling', reason: 'A different project' });
+    assert.strictEqual(proposed.ok, true);
+
+    // Close and reopen Chat Info so the panel renders again.
+    await evaluate(ctx, `document.getElementById('chat-info-btn').click(); true`);
+    await evaluate(ctx, `document.getElementById('chat-info-btn').click(); true`);
+    await waitFor(ctx, `!!document.getElementById('case-detour-d-0001')`);
+    const shown = await evaluate(ctx, `document.querySelector('#case-detour-d-0001 .case-detour-text').textContent`);
+    assert.strictEqual(shown, 'Fix the phone agent status polling — A different project');
+    const labels = await evaluate(ctx, `[...document.querySelectorAll('#case-detour-d-0001 .case-detour-actions button')].map((b) => b.textContent)`);
+    assert.ok(labels.includes('Attach to "E2E phone agent maintenance" (draft)'));
+    assert.ok(labels.includes('Drop it'));
+
+    await evaluate(ctx, `document.getElementById('case-detour-d-0001-decline').click(); true`);
+    await waitFor(ctx, `!document.getElementById('case-detour-d-0001')`);
+    const resolution = new DetourLog(attached.dir).rows().find((r) => r.type === 'resolution' && r.id === 'd-0001');
+    assert.deepStrictEqual([resolution.status, resolution.by, resolution.optionId], ['declined', 'in-app', 'decline']);
   });
 });
