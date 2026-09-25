@@ -310,25 +310,41 @@ class ToolExecutor extends EventEmitter {
       // 'ask' falls through to the regular approval flow below.
     }
 
-    // Node policy tier, after the permission rules and before the gate.
+    // Node policy tier, after the permission rules and before the gate. A
+    // classifyCall that throws, or returns anything other than null or a
+    // well-formed { tier: read|routine|unsafe|denied, reason? } object,
+    // fails closed: treated as `denied` rather than let the call run
+    // unclassified.
     let tierUnsafe = false;
     if (this.classifyCall) {
-      const decision = this.classifyCall(toolName, effectiveParameters, {
-        cwd: options.workingDirectory || this.workingDirectory
-      }) || null;
+      let raw;
+      try {
+        raw = this.classifyCall(toolName, effectiveParameters, {
+          cwd: options.workingDirectory || this.workingDirectory
+        });
+      } catch (classifyError) {
+        raw = { tier: 'denied', reason: 'invalid_classification' };
+      }
+      const decision = raw || null;
       if (decision) {
+        const validTiers = ['read', 'routine', 'unsafe', 'denied'];
+        const wellFormed = typeof decision === 'object'
+          && !Array.isArray(decision)
+          && validTiers.includes(decision.tier);
+        const safeDecision = wellFormed ? decision : { tier: 'denied', reason: 'invalid_classification' };
+
         this.emit('tierDecision', {
           toolName,
           parameters: effectiveParameters,
-          tier: decision.tier,
-          reason: decision.reason || null
+          tier: safeDecision.tier,
+          reason: safeDecision.reason || null
         });
-        if (decision.tier === 'denied') {
+        if (safeDecision.tier === 'denied') {
           const denied = { success: false, error: 'Denied by node policy.', deniedBy: 'policy' };
           this.emit('postExecute', { toolName, parameters: effectiveParameters, result: denied });
           return denied;
         }
-        tierUnsafe = decision.tier === 'unsafe';
+        tierUnsafe = safeDecision.tier === 'unsafe';
       }
     }
 

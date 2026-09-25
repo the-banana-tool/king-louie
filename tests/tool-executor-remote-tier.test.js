@@ -41,6 +41,13 @@ before(() => {
     parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] },
     execute: async () => { runs.bash += 1; return { ok: true }; }
   }));
+  // requiresApproval: false, so a classification of `unsafe` can only come
+  // from the always_confirm pattern match, never from the tool's own flag.
+  toolRegistry.register(new Tool({
+    name: 'KlTierGitLike', description: 'test', requiresApproval: false,
+    parameters: { type: 'object', properties: { command: { type: 'string' } } },
+    execute: async () => { return { ok: true }; }
+  }));
 });
 
 after(() => {
@@ -103,6 +110,86 @@ describe('ToolExecutor classifyCall', () => {
     await ex.execute('KlTierFile', { edits: [{ file_path: 'ok.txt' }, { file_path: path.join(base, 'x.txt') }] });
     assert.equal(asked.length, 2);
     assert.equal(runs.file, before + 1);
+  });
+
+  it('read tier: emits tierDecision and runs normally, no forced gate', async () => {
+    const decisions = [];
+    const ex = executor({
+      classifyCall: () => ({ tier: 'read', reason: 'read_only_tool' }),
+      approvalRequester: async () => { throw new Error('should not be asked for a read-tier call'); }
+    });
+    ex.on('tierDecision', (d) => decisions.push(d));
+    const before = runs.routine;
+    const result = await ex.execute('KlTierRoutine', { x: 'y' });
+    assert.equal(result.ok, true);
+    assert.equal(runs.routine, before + 1);
+    assert.deepEqual(decisions.map((d) => [d.tier, d.reason]), [['read', 'read_only_tool']]);
+  });
+
+  it('unsafe blocks shouldAutoApprove', async () => {
+    const ex = executor({
+      classifyCall: () => ({ tier: 'unsafe', reason: 'test' }),
+      shouldAutoApprove: async () => true,
+      approvalRequester: async () => false
+    });
+    const before = runs.routine;
+    const result = await ex.execute('KlTierRoutine', { x: 'y' });
+    assert.equal(result.deniedBy, 'user');
+    assert.equal(runs.routine, before);
+  });
+
+  it('unsafe blocks options.autoApproveTools', async () => {
+    const ex = executor({
+      classifyCall: () => ({ tier: 'unsafe', reason: 'test' }),
+      approvalRequester: async () => false
+    });
+    const before = runs.routine;
+    const result = await ex.execute('KlTierRoutine', { x: 'y' }, { autoApproveTools: ['KlTierRoutine'] });
+    assert.equal(result.deniedBy, 'user');
+    assert.equal(runs.routine, before);
+  });
+
+  it('unsafe-beats-allow reason is matched_always_confirm (stand-in tool with requiresApproval:false)', async () => {
+    const localPolicy = { allowed_roots: [root], remote_sessions: { always_confirm: ['KlTierGitLike(push*)'], deny: [] } };
+    const localClassify = (t, p, { cwd }) => classifyToolCall(t, p, localPolicy, { cwd });
+    const rules = [{ tool: 'KlTierGitLike', pattern: '*', action: 'allow', source: 'test' }];
+    const decisions = [];
+    const ex = executor({ permissionRules: rules, classifyCall: localClassify, approvalRequester: async () => false });
+    ex.on('tierDecision', (d) => decisions.push(d));
+    const result = await ex.execute('KlTierGitLike', { command: 'push origin main' });
+    assert.equal(result.success, false);
+    assert.deepEqual(decisions.map((d) => [d.tier, d.reason]), [['unsafe', 'matched_always_confirm']]);
+  });
+});
+
+describe('ToolExecutor classifyCall fails closed', () => {
+  const malformed = ['denied', { tier: 'DENIED' }, { reason: 'x' }, ['denied']];
+  for (const bad of malformed) {
+    it(`malformed classifyCall result ${JSON.stringify(bad)} is denied, never run`, async () => {
+      const decisions = [];
+      const ex = executor({ classifyCall: () => bad, approvalRequester: async () => true });
+      ex.on('tierDecision', (d) => decisions.push(d));
+      const before = runs.routine;
+      const result = await ex.execute('KlTierRoutine', { x: 'y' });
+      assert.deepEqual(result, { success: false, error: 'Denied by node policy.', deniedBy: 'policy' });
+      assert.equal(runs.routine, before);
+      assert.deepEqual(decisions.map((d) => [d.tier, d.reason]), [['denied', 'invalid_classification']]);
+    });
+  }
+
+  it('a throwing classifyCall is caught: same policy refusal, postExecute runs, never throws out of execute()', async () => {
+    const postExecuteEvents = [];
+    const ex = executor({
+      classifyCall: () => { throw new Error('classifyCall boom'); },
+      approvalRequester: async () => true
+    });
+    ex.on('postExecute', (e) => postExecuteEvents.push(e));
+    const before = runs.routine;
+    const result = await ex.execute('KlTierRoutine', { x: 'y' });
+    assert.deepEqual(result, { success: false, error: 'Denied by node policy.', deniedBy: 'policy' });
+    assert.equal(runs.routine, before);
+    assert.equal(postExecuteEvents.length, 1);
+    assert.deepEqual(postExecuteEvents[0].result, result);
   });
 });
 
