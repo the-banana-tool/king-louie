@@ -5,7 +5,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const CASE_TOOL_NAMES = Object.freeze(['Ledger', 'Brief', 'Decide', 'Recommend', 'Reorient', 'Ask', 'Fail']);
+const CASE_TOOL_NAMES = Object.freeze(['Ledger', 'Brief', 'Decide', 'Recommend', 'Reorient', 'Ask', 'Fail', 'Plan', 'Executor']);
 
 // Tools kept out of every case turn (stage 2 spec §3.2). SpawnAgent,
 // BackgroundTask, sessions_spawn, RemoteDispatch and Cron start a run with
@@ -35,6 +35,9 @@ const CASE_MODE_PROMPT = [
   '- When an approach fails, call Fail with what you tried and why, with at most one recommendation, then stop. Do not start a new plan unasked.',
   '- If the orientation says "Re-orientation required", call Reorient first; Recommend, Decide and Fail are refused until you do.',
   '- Contact the owner only through the Ask tool. The answer arrives later as an owner fact; never assume it.',
+  '- Plan with the Plan tool: every step names an executor and the capability it uses. The owner does a step only after agreeing to it.',
+  '- Anything that leaves this machine (a call, a message, a web form) goes through the Executor tool inside an owner-approved envelope. Never type into a web page with the browser tools.',
+  '- In outbound text quote facts as {{f-0042}} references; never paste a private value, and never state a date, price, deadline or promise that no user or sourced fact backs.',
   '- Never edit facts.jsonl, brief.md, case.yaml or anything under .kl/ directly. The case tools are the only write path.'
 ].join('\n');
 

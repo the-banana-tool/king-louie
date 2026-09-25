@@ -146,7 +146,7 @@ describe('per-status rules', () => {
   });
 
   it('exposes the allowlists and denylists the spec names', () => {
-    assert.deepStrictEqual([...READ_OPS], ['Ledger.query', 'Brief.read', 'Playbook.list', 'Playbook.read']);
+    assert.deepStrictEqual([...READ_OPS], ['Ledger.query', 'Brief.read', 'Playbook.list', 'Playbook.read', 'Plan.status', 'Executor.status', 'Executor.results']);
     assert.deepStrictEqual([...ALLOWED.done], [...READ_OPS, 'Playbook.propose']);
     assert.deepStrictEqual([...ALLOWED.abandoned], [...READ_OPS]);
     assert.deepStrictEqual([...DENIED.draft], ['Recommend', 'Plan', 'Executor.submit', 'Fail']);
