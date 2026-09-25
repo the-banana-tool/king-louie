@@ -183,6 +183,29 @@ describe('desktop-scoped settings', () => {
     assert.ok(context.peek().rules.some((r) => r.pattern === 'git *' && r.source === 'service'));
   });
 
+  // Task 8 carry-over (a): addPermissionRule used to skip the existing-rule
+  // check entirely once rules.json already recorded the desktop as owning a
+  // key, so a stale local record could overwrite a rule the service had
+  // since reclaimed for that same (tool, pattern, action). The check must
+  // run regardless of ownedByDesktop whenever the context's current rule for
+  // that key is source: 'service'.
+  it('addPermissionRule refuses to take back a key the service has reclaimed, even though the desktop\'s own record still says it owns it', () => {
+    const dataDir = tmp();
+    const context = fakeContext();
+    const scope = createDesktopScope({ dataDir, context });
+    scope.addPermissionRule({ tool: 'Bash', pattern: 'git *', action: 'allow', source: 'approval-dialog' });
+    assert.deepStrictEqual(scope.listRules(), [{ tool: 'Bash', pattern: 'git *', action: 'allow' }], 'the desktop owns the key locally');
+    // The service independently reclaims the same key.
+    context.addPermissionRule({ tool: 'Bash', pattern: 'git *', action: 'allow', source: 'service' });
+    const warnings = [];
+    const remove = addSink((r) => { if (r.level === 'warn') warnings.push(r.message); });
+    try {
+      scope.addPermissionRule({ tool: 'Bash', pattern: 'git *', action: 'allow', source: 'approval-dialog' });
+    } finally { remove(); }
+    assert.ok(context.peek().rules.some((r) => r.pattern === 'git *' && r.source === 'service'), 'the service rule is untouched');
+    assert.ok(warnings.some((m) => m.includes('reclaimed')), 'logged the refusal');
+  });
+
   // M4: setSettings used to pass allowedDirectories through with only a
   // typeof/non-empty check, so a relative path or garbage value could land
   // in the desktop's own allow-list unnormalized (and un-deduped against a
@@ -201,6 +224,25 @@ describe('desktop-scoped settings', () => {
     } finally { remove(); }
     assert.deepStrictEqual(scope.listDirectories(), [projects], 'normalized, deduped, invalid entries dropped');
     assert.strictEqual(warnings.length, 4, 'warned about each invalid entry (relative/dir, empty string, null, 42)');
+  });
+
+  // Task 8 carry-over (b): setSettings compared a normalized incoming entry
+  // against `own` (the service's directories) exactly as the service last
+  // wrote them, unnormalized. A re-spelling of a service directory (trailing
+  // separator, different drive-letter case) that normalizeDirectory would
+  // fold to the same string as the service's own entry did not match it, so
+  // it landed in the desktop-only list too — a duplicate the service never
+  // actually widened past its own real directory.
+  it('setSettings normalizes the service\'s own directories too, so a re-spelling of one is not duplicated into the desktop list', () => {
+    const dataDir = tmp();
+    const context = fakeContext();
+    context.setSettings({ ...context.getSettings(), allowedDirectories: [`${SERVICE_ONLY}${path.sep}`] });
+    const scope = createDesktopScope({ dataDir, context });
+    const next = scope.getSettings();
+    next.allowedDirectories = [SERVICE_ONLY];
+    scope.setSettings(next);
+    assert.deepStrictEqual(scope.listDirectories(), [], 'the normalized spelling of the service directory is not duplicated into the desktop list');
+    assert.deepStrictEqual(context.peek().settings.allowedDirectories, [`${SERVICE_ONLY}${path.sep}`], 'the service list is left exactly as it was');
   });
 
   it('reports every path it writes', () => {

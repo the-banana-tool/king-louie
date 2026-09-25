@@ -87,6 +87,16 @@ function createDesktopScope({ dataDir, context, onPathWritten = () => {} }) {
 
   const setSettings = (next = {}) => {
     const own = serviceDirectories();
+    // own is read straight from the service's settings, unnormalized — a
+    // trailing separator or a differently-cased drive letter is exactly as
+    // the service last wrote it. Comparing an incoming, *normalized*
+    // directory against that raw list would miss a re-spelling of the same
+    // service directory and let it get added to the desktop-only list too
+    // (a real, if harmless-looking, duplicate that would then also survive
+    // getSettings' own own.includes(...) filter, since that filter compares
+    // the desktop list against the same raw `own`). Normalizing both sides
+    // here — while still writing `own` back unchanged — closes that gap.
+    const ownNormalized = own.map((d) => normalizeDirectory(d)).filter(Boolean);
     const incoming = Array.isArray(next.allowedDirectories) ? next.allowedDirectories : [];
     const desktopOnly = [];
     const seen = new Set();
@@ -96,7 +106,7 @@ function createDesktopScope({ dataDir, context, onPathWritten = () => {} }) {
         log.warn('dropping an invalid allowed directory', { value: candidate });
         continue;
       }
-      if (own.includes(normalized) || seen.has(normalized)) continue;
+      if (ownNormalized.includes(normalized) || seen.has(normalized)) continue;
       seen.add(normalized);
       desktopOnly.push(normalized);
     }
@@ -167,18 +177,30 @@ function createDesktopScope({ dataDir, context, onPathWritten = () => {} }) {
   // (rules.json), not by the context's current `source` field, so re-adding
   // a rule the desktop *does* already own (e.g. upgrading ask -> allow) still
   // works normally.
+  //
+  // The `existing` check must run even when the desktop's own record already
+  // owns the key: the service can reclaim a key out from under a stale
+  // desktop-owned record (see removePermissionRule's matching check below),
+  // and once it has, the context's current rule for that key carries
+  // source: 'service'. Without checking that regardless of ownedByDesktop,
+  // an approval-dialog response for that same key (rules.json still says the
+  // desktop owns it) would silently overwrite the service's rule again.
   const addPermissionRule = (rule) => {
     if (!rule || !rule.tool || !rule.action) return;
     const key = ruleKey(rule.tool, rule.pattern, rule.action);
     const ownedByDesktop = listRules().some((r) => ruleKey(r.tool, r.pattern, r.action) === key);
-    if (!ownedByDesktop) {
-      const existing = context.getPermissionRules().find((r) => ruleKey(r.tool, r.pattern, r.action) === key);
-      if (existing) {
-        log.warn('refusing to replace an existing rule the desktop does not own', {
-          tool: rule.tool, pattern: rule.pattern || '*', action: rule.action, existingSource: existing.source || null
-        });
-        return;
-      }
+    const existing = context.getPermissionRules().find((r) => ruleKey(r.tool, r.pattern, r.action) === key);
+    if (ownedByDesktop && existing && existing.source === 'service') {
+      log.warn('refusing to take over a rule the service has reclaimed', {
+        tool: rule.tool, pattern: rule.pattern || '*', action: rule.action
+      });
+      return;
+    }
+    if (!ownedByDesktop && existing) {
+      log.warn('refusing to replace an existing rule the desktop does not own', {
+        tool: rule.tool, pattern: rule.pattern || '*', action: rule.action, existingSource: existing.source || null
+      });
+      return;
     }
     context.addPermissionRule(rule);
     const rules = listRules().filter((r) => ruleKey(r.tool, r.pattern, r.action) !== key);
