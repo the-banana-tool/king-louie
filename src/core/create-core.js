@@ -1912,7 +1912,7 @@ function createCore(deps = {}) {
     // local parent) keeps the on-screen dialog, the always-approve list and
     // `allow` rules in every mode; everything else is remote-origin.
     const local = isLocalDesktopEvent(event) || isLocalRequester(approvalRequester);
-    const effectiveApprovalRequester = remoteApprovals === 'allow' || (local && isLocalRequester(approvalRequester))
+    const effectiveApprovalRequester = remoteApprovals === 'allow' || isLocalRequester(approvalRequester)
       ? approvalRequester
       : null;
     if (approvalRequester && !effectiveApprovalRequester) {

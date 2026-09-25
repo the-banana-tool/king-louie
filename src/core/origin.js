@@ -30,6 +30,11 @@ function localDesktopDeviceId(event) {
   return localEvents.get(event).deviceId;
 }
 
+// Mark only a fresh closure created for this one run — never a shared or
+// long-lived function such as a gateway approvalHandler or a module-level
+// prompter. Every run that later uses a marked function becomes local, so
+// marking anything longer-lived than a single run's requester silently opens
+// the local-origin bypass to whatever calls through it afterward.
 function markLocalRequester(fn, { deviceId = null } = {}) {
   if (typeof fn === 'function') localRequesters.set(fn, { deviceId: deviceId || null });
   return fn;

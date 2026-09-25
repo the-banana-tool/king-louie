@@ -61,6 +61,26 @@ function fakeSender() {
   return { sent, send: (channel, payload) => sent.push([channel, payload]), isDestroyed: () => false };
 }
 
+// Files (relative to the repo root, forward-slash separated) that call the
+// given mark function, found by walking src/ and bin/ and checking main.js.
+function findMarkCallers(callPattern) {
+  const root = path.join(__dirname, '..');
+  const callers = [];
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name.endsWith('.js') && callPattern.test(fs.readFileSync(full, 'utf8'))) {
+        callers.push(path.relative(root, full).split(path.sep).join('/'));
+      }
+    }
+  };
+  walk(path.join(root, 'src'));
+  walk(path.join(root, 'bin'));
+  if (callPattern.test(fs.readFileSync(path.join(root, 'main.js'), 'utf8'))) callers.push('main.js');
+  return callers;
+}
+
 // Resolves with the approvalRequired payload once the sender gets one; cancel() stops polling.
 function watchForPrompt(sender) {
   let timer = null;
@@ -114,21 +134,20 @@ describe('origin marks', () => {
     assert.strictEqual(isLocalRequester('not a function'), false);
   });
 
-  it('is called only by the standalone wrapper and the bridge dispatcher', () => {
-    const root = path.join(__dirname, '..');
+  it('markLocalDesktopEvent is called only by the standalone wrapper and the bridge dispatcher', () => {
     const allowed = new Set(['src/core/origin.js', 'src/ipc/standalone-host.js', 'src/desktop-bridge/bridge-dispatcher.js']);
-    const callers = [];
-    const walk = (dir) => {
-      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) walk(full);
-        else if (entry.name.endsWith('.js') && /markLocalDesktopEvent\(/.test(fs.readFileSync(full, 'utf8'))) {
-          callers.push(path.relative(root, full).split(path.sep).join('/'));
-        }
-      }
-    };
-    walk(path.join(root, 'src'));
-    if (/markLocalDesktopEvent\(/.test(fs.readFileSync(path.join(root, 'main.js'), 'utf8'))) callers.push('main.js');
+    const callers = findMarkCallers(/markLocalDesktopEvent\(/);
+    assert.deepStrictEqual(callers.filter((f) => !allowed.has(f)), []);
+  });
+
+  it('markLocalRequester is called only by origin.js, the ToolExecutor, the standalone wrapper and the bridge dispatcher', () => {
+    const allowed = new Set([
+      'src/core/origin.js',
+      'src/execution/tool-executor.js',
+      'src/ipc/standalone-host.js',
+      'src/desktop-bridge/bridge-dispatcher.js'
+    ]);
+    const callers = findMarkCallers(/markLocalRequester\(/);
     assert.deepStrictEqual(callers.filter((f) => !allowed.has(f)), []);
   });
 });
@@ -204,3 +223,56 @@ for (const mode of ['deny', 'allow']) {
     });
   });
 }
+
+describe("createToolExecutorWithApprovals, remoteApprovals 'deny', a requester-only local run", () => {
+  it('a null event with a marked requester keeps the always-approve list', async () => {
+    const core = await buildCore('deny');
+    core.context.setToolAlwaysApprove(PROBE, true);
+    let calls = 0;
+    const requester = markLocalRequester(async () => { calls += 1; return true; });
+    const out = await runProbe(core, { requester });
+    assert.strictEqual(calls, 0, 'auto-approved before the requester is ever asked');
+    assert.strictEqual(out.ran, true);
+  });
+
+  it('a null event with a marked requester keeps `allow` rules', async () => {
+    const core = await buildCore('deny');
+    core.context.addPermissionRule({ tool: PROBE, pattern: '*', action: 'allow' });
+    let calls = 0;
+    const requester = markLocalRequester(async () => { calls += 1; return true; });
+    const out = await runProbe(core, { requester });
+    assert.strictEqual(calls, 0, 'auto-approved before the requester is ever asked');
+    assert.strictEqual(out.ran, true);
+  });
+
+  it('the same run with an unmarked requester loses the always-approve grant', async () => {
+    const core = await buildCore('deny');
+    core.context.setToolAlwaysApprove(PROBE, true);
+    let calls = 0;
+    const requester = async () => { calls += 1; return true; };
+    const out = await runProbe(core, { requester });
+    assert.strictEqual(calls, 0, "'deny' ignores an unmarked requester entirely");
+    assert.strictEqual(out.ran, false);
+  });
+
+  it('the same run with an unmarked requester loses `allow` rules', async () => {
+    const core = await buildCore('deny');
+    core.context.addPermissionRule({ tool: PROBE, pattern: '*', action: 'allow' });
+    let calls = 0;
+    const requester = async () => { calls += 1; return true; };
+    const out = await runProbe(core, { requester });
+    assert.strictEqual(calls, 0, "'deny' ignores an unmarked requester entirely");
+    assert.strictEqual(out.ran, false);
+  });
+
+  it('a marked requester that answers false results in a refusal', async () => {
+    const core = await buildCore('deny');
+    let calls = 0;
+    const requester = markLocalRequester(async () => { calls += 1; return false; });
+    const out = await runProbe(core, { requester });
+    assert.strictEqual(calls, 1, 'the marked requester is asked directly');
+    assert.strictEqual(out.ran, false);
+    assert.strictEqual(out.result.success, false);
+    assert.strictEqual(out.result.deniedBy, 'user');
+  });
+});
