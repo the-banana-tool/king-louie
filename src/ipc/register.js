@@ -43,6 +43,7 @@ function registerHandlers(ipcMain, context = {}) {
   registerAppsHandlers(ipcMain, context);
   registerCanvasHandlers(ipcMain, context);
   registerCaseHandlers(ipcMain, context);
+  require('./desktop-handlers').registerDesktopHandlers(ipcMain, context);
 }
 
 module.exports = {

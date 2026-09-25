@@ -160,5 +160,19 @@ module.exports = {
   CANVAS_CLOSE: 'canvas:close',
   CANVAS_GET_STATE: 'canvas:getState',
   CANVAS_SET_STATE: 'canvas:setState',
-  CANVAS_USER_ACTION: 'canvas:userAction'
+  CANVAS_USER_ACTION: 'canvas:userAction',
+
+  DESKTOP_STATUS: 'desktop:status',
+  DESKTOP_PAIR_START: 'desktop:pairStart',
+  DESKTOP_PAIR_CONFIRM: 'desktop:pairConfirm',
+  DESKTOP_PAIR_CANCEL: 'desktop:pairCancel',
+  DESKTOP_ATTACH: 'desktop:attach',
+  DESKTOP_DETACH: 'desktop:detach',
+  DESKTOP_STANDALONE_ONCE: 'desktop:standaloneOnce',
+  DESKTOP_UNPAIR: 'desktop:unpair',
+  DESKTOP_IMPORT_PLAN: 'desktop:importPlan',
+  DESKTOP_IMPORT_APPLY: 'desktop:importApply',
+  DESKTOP_RETRY: 'desktop:retry',
+  DESKTOP_STATUS_CHANGED: 'desktop:statusChanged',
+  DESKTOP_IMPORT_PROGRESS: 'desktop:importProgress'
 };

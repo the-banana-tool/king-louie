@@ -158,8 +158,8 @@ describe('pairing request', () => {
   it('rejects C1 controls and bidi override/isolate characters, not just C0/DEL', () => {
     assert.throws(() => pairing.encodePairRequest({ publicKeyRaw: newRawKey(), label: 'bad\u0085label' }), /control characters/);
     assert.throws(() => pairing.encodePairRequest({ publicKeyRaw: newRawKey(), label: 'bad\u009flabel' }), /control characters/);
-    assert.throws(() => pairing.encodePairRequest({ publicKeyRaw: newRawKey(), label: 'bad‮label' }), /control characters/);
-    assert.throws(() => pairing.encodePairRequest({ publicKeyRaw: newRawKey(), label: 'bad⁦label' }), /control characters/);
+    assert.throws(() => pairing.encodePairRequest({ publicKeyRaw: newRawKey(), label: 'bad\u202elabel' }), /control characters/);
+    assert.throws(() => pairing.encodePairRequest({ publicKeyRaw: newRawKey(), label: 'bad\u2066label' }), /control characters/);
     assert.doesNotThrow(() => pairing.encodePairRequest({ publicKeyRaw: newRawKey(), label: 'ordinary label' }));
   });
 
