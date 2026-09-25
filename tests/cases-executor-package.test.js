@@ -9,6 +9,7 @@ const {
 } = require('../src/cases/executors/package-loader');
 const { builtinEntry, BUILTIN_IDS, OUTBOUND_CAPABILITIES, DIRECT_TOOLS } = require('../src/cases/executors/builtins');
 const SkillLoader = require('../src/skills/skill-loader');
+const { holdEventLoop } = require('./helpers/hold-event-loop');
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -532,12 +533,19 @@ describe('makeHostFetch reaches only the declared origins', () => {
   });
 
   it('aborts at requestTimeoutMs', async () => {
-    const fetch = makeHostFetch({
-      origins: ['https://errands.example.com'],
-      requestTimeoutMs: 20,
-      fetchImpl: (url, init) => new Promise((resolve, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason)))
-    });
-    await assert.rejects(fetch('https://errands.example.com/slow'), /timeout|aborted/i);
+    // AbortSignal.timeout's timer is unref'd and the stub holds no handle;
+    // keep the loop alive so Node 22 does not cancel the test.
+    const release = holdEventLoop();
+    try {
+      const fetch = makeHostFetch({
+        origins: ['https://errands.example.com'],
+        requestTimeoutMs: 20,
+        fetchImpl: (url, init) => new Promise((resolve, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason)))
+      });
+      await assert.rejects(fetch('https://errands.example.com/slow'), /timeout|aborted/i);
+    } finally {
+      release();
+    }
   });
 });
 
@@ -591,7 +599,16 @@ describe('the pin refuses entries it cannot hash (fix round 1)', () => {
       return;
     }
     assert.throws(() => computePackageSha256(dir), /helper is not a regular file, directory or link/);
-    assert.strictEqual(check(root, dir, 'phone-x', { entry: { packageSha256: PIN_A, config: CONFIG_OK } }).error, 'helper is not a regular file, directory or link');
+    const r = checkPackage({ id: 'phone-x', entry: { packageSha256: PIN_A, config: CONFIG_OK }, dir, roots: [root], vault });
+    assert.strictEqual(r.error, 'helper is not a regular file, directory or link');
+  });
+
+  it('refuses an ES module package (type: module)', () => {
+    const root = tmp();
+    const dir = writePackage(root, 'phone-x', { pkg: { type: 'module' } });
+    assert.strictEqual(check(root, dir).error, 'package.json "type": "module" is not supported: main is loaded as CommonJS');
+    const cjs = writePackage(root, 'phone-y', { pkg: { type: 'commonjs' } });
+    assert.strictEqual(check(root, cjs, 'phone-y').ok, true);
   });
 
   it('refuses main that is not a CommonJS script', () => {

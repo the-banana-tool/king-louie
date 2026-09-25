@@ -306,6 +306,7 @@ function checkPackage({
     if (!fs.statSync(realMain).isFile()) return fail('main must name a file in the package');
     // loadAdapter compiles main from the hashed bytes as CommonJS.
     if (!['.js', '.cjs'].includes(path.extname(realMain).toLowerCase())) return fail('main must be a CommonJS script (.js or .cjs)');
+    if (m.pkg.type === 'module') return fail('package.json "type": "module" is not supported: main is loaded as CommonJS');
 
     const root = (Array.isArray(roots) ? roots : [])
       .filter((r) => typeof r === 'string' && r !== '')
