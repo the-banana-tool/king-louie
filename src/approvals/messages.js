@@ -14,6 +14,11 @@ class MessageError extends Error {
 }
 
 const TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
+// Same syntax as TIMESTAMP_RE, but with the date/time fields captured so
+// isTimestamp can round-trip them through Date.UTC and catch a
+// syntactically valid but nonexistent date (e.g. 2026-02-30), which
+// JavaScript's Date silently normalizes forward instead of rejecting.
+const TIMESTAMP_PARTS_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/;
 const NONCE_RE = /^[A-Za-z0-9_-]{43}$/;
 const HASH_RE = /^[A-Za-z0-9_-]{43}$/;
 const CODE_ID_RE = /^[A-Za-z0-9_-]{22}$/;
@@ -22,6 +27,9 @@ const NODE_ID_RE = /^kl-[a-z2-7]{16}$/;
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_ACTION_BYTES = 262144;
 const SUMMARY_MAX = 300;
+const NODE_NAME_MAX = 64;
+const ORIGIN_STRING_MAX = 200;
+const REASON_MAX = 300;
 const TTL_MIN_MS = 30000;
 const TTL_MAX_MS = 300000;
 const ENROLL_MAX_MS = 10 * 60 * 1000;
@@ -31,7 +39,32 @@ const STATUS_STATES = ['approved', 'denied', 'expired', 'withdrawn', 'refused'];
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const isString = (v) => typeof v === 'string';
-const isTimestamp = (v) => isString(v) && TIMESTAMP_RE.test(v) && Number.isFinite(Date.parse(v));
+
+// Code-point length, not UTF-16 units, so a surrogate pair never costs two
+// against the cap.
+function withinLength(text, max) {
+  return isString(text) && Array.from(text).length <= max;
+}
+
+function isTimestamp(v) {
+  if (!isString(v)) return false;
+  const match = TIMESTAMP_PARTS_RE.exec(v);
+  if (!match) return false;
+  const [, y, mo, d, h, mi, s, frac] = match;
+  const year = Number(y);
+  const month = Number(mo);
+  const day = Number(d);
+  const hour = Number(h);
+  const minute = Number(mi);
+  const second = Number(s);
+  const ms = frac ? Number(frac.padEnd(3, '0')) : 0;
+  const utc = Date.UTC(year, month - 1, day, hour, minute, second, ms);
+  if (!Number.isFinite(utc)) return false;
+  const dt = new Date(utc);
+  return dt.getUTCFullYear() === year && dt.getUTCMonth() === month - 1 && dt.getUTCDate() === day
+    && dt.getUTCHours() === hour && dt.getUTCMinutes() === minute && dt.getUTCSeconds() === second;
+}
+
 const nullOr = (test) => (v) => v === null || test(v);
 const iso = (ms) => new Date(ms).toISOString();
 const randomNonce = () => crypto.randomBytes(32).toString('base64url');
@@ -70,8 +103,12 @@ function toolAction(toolName, params, cwd) {
 
 // `validatedParams` are the engine's validated values (defaults applied,
 // paths realpath'd); `steps` are the argv each `run` step will execute with
-// them substituted, and every `check` as written (parent §8.4).
-function runbookAction(runbook, validatedParams, nodeName) {
+// them substituted, and every `check` as written (parent §8.4). `cwd` is the
+// directory the engine will run those steps in (options.cwd) — it changes
+// what a relative argv actually does, so it is part of the hashed action,
+// not left to be assumed from context. `env` and `timeout` are deliberately
+// left out.
+function runbookAction(runbook, validatedParams, nodeName, cwd = null) {
   const { substituteArgv } = require('../runbooks/runbook-engine');
   const values = validatedParams || {};
   const steps = (runbook.steps || []).map((step) => (Array.isArray(step.run)
@@ -82,6 +119,7 @@ function runbookAction(runbook, validatedParams, nodeName) {
     name: String(runbook.name),
     params: cloneJson(values),
     steps: cloneJson(steps),
+    cwd: cwd === undefined || cwd === null ? null : String(cwd),
     summary: cutSummary(`Run runbook ${runbook.name} on ${nodeName}`)
   };
 }
@@ -192,7 +230,15 @@ function encodeQr(object) {
 
 function decodeQr(text) {
   if (typeof text !== 'string' || !text.startsWith('kl1:')) throw new MessageError('malformed', 'not a kl1: code');
-  const parsed = JSON.parse(fromB64url(text.slice(4)).toString('utf8'));
+  // The base64url decode and the JSON parse both run over attacker-controlled
+  // QR text, so their raw errors (EnvelopeError, SyntaxError) must not escape
+  // as-is — callers only expect a MessageError from this module.
+  let parsed;
+  try {
+    parsed = JSON.parse(fromB64url(text.slice(4)).toString('utf8'));
+  } catch (err) {
+    throw new MessageError('malformed', err instanceof Error ? err.message : String(err));
+  }
   if (!isPlainObject(parsed) || !isString(parsed.t)) throw new MessageError('malformed', 'QR payload has no type');
   return parsed;
 }
@@ -201,9 +247,9 @@ function decodeQr(text) {
 // Each returns null when the message is well formed, else the reason.
 
 function checkAction(action) {
-  if (!isPlainObject(action) || !isString(action.summary) || !isString(action.name)) return false;
+  if (!isPlainObject(action) || !withinLength(action.summary, SUMMARY_MAX) || !isString(action.name)) return false;
   if (action.kind === 'tool') return hasExactKeys(action, ['kind', 'name', 'params', 'cwd', 'summary']) && isPlainObject(action.params) && (action.cwd === null || isString(action.cwd));
-  if (action.kind === 'runbook') return hasExactKeys(action, ['kind', 'name', 'params', 'steps', 'summary']) && isPlainObject(action.params) && Array.isArray(action.steps);
+  if (action.kind === 'runbook') return hasExactKeys(action, ['kind', 'name', 'params', 'steps', 'cwd', 'summary']) && isPlainObject(action.params) && Array.isArray(action.steps) && (action.cwd === null || isString(action.cwd));
   if (action.kind === 'envelope') {
     return hasExactKeys(action, ['kind', 'name', 'params', 'summary']) && isPlainObject(action.params)
       && hasExactKeys(action.params, ['case_id', 'envelope_hash']) && isString(action.params.case_id) && isString(action.params.envelope_hash);
@@ -214,7 +260,7 @@ function checkAction(action) {
 function checkOrigin(origin) {
   if (!isPlainObject(origin) || !isString(origin.client)) return false;
   const keys = origin.client === 'desktop' ? ['client', 'session', 'job_id', 'deviceId'] : ['client', 'session', 'job_id'];
-  return hasExactKeys(origin, keys) && Object.values(origin).every((v) => v === null || isString(v));
+  return hasExactKeys(origin, keys) && Object.values(origin).every((v) => v === null || withinLength(v, ORIGIN_STRING_MAX));
 }
 
 function isDevice(device) {
@@ -226,14 +272,14 @@ function isDevice(device) {
 
 const VALIDATORS = {
   'kl.approval.request': (m) => hasExactKeys(m, ['v', 'type', 'request_id', 'node_id', 'node_name', 'action', 'action_hash', 'origin', 'created_at', 'expires_at', 'nonce'])
-    && UUID_V4_RE.test(m.request_id) && NODE_ID_RE.test(m.node_id) && isString(m.node_name) && checkAction(m.action)
+    && UUID_V4_RE.test(m.request_id) && NODE_ID_RE.test(m.node_id) && withinLength(m.node_name, NODE_NAME_MAX) && checkAction(m.action)
     && HASH_RE.test(m.action_hash) && checkOrigin(m.origin) && isTimestamp(m.created_at) && isTimestamp(m.expires_at) && NONCE_RE.test(m.nonce),
   'kl.approval.response': (m) => hasExactKeys(m, ['v', 'type', 'request_id', 'node_id', 'action_hash', 'nonce', 'decision', 'expires_at', 'device_id', 'signed_at'])
     && UUID_V4_RE.test(m.request_id) && NODE_ID_RE.test(m.node_id) && HASH_RE.test(m.action_hash) && NONCE_RE.test(m.nonce)
     && (m.decision === 'approve' || m.decision === 'deny') && isTimestamp(m.expires_at) && DEVICE_ID_RE.test(m.device_id) && isTimestamp(m.signed_at),
   'kl.approval.status': (m) => hasExactKeys(m, ['v', 'type', 'request_id', 'node_id', 'state', 'device_id', 'reason', 'at'])
     && UUID_V4_RE.test(m.request_id) && NODE_ID_RE.test(m.node_id) && STATUS_STATES.includes(m.state)
-    && nullOr((v) => DEVICE_ID_RE.test(v))(m.device_id) && nullOr(isString)(m.reason) && isTimestamp(m.at),
+    && nullOr((v) => DEVICE_ID_RE.test(v))(m.device_id) && nullOr((v) => withinLength(v, REASON_MAX))(m.reason) && isTimestamp(m.at),
   'kl.device.enroll': (m) => {
     const base = ['v', 'type', 'device', 'enrolled_by', 'created_at', 'expires_at', 'nonce'];
     const consoleEnroll = m.enrolled_by === null;
@@ -246,7 +292,7 @@ const VALIDATORS = {
   },
   'kl.device.revoke': (m) => {
     if (!hasExactKeys(m, ['v', 'type', 'device_id', 'revoked_by', 'reason', 'created_at', 'expires_at', 'nonce'])) return false;
-    if (!DEVICE_ID_RE.test(m.device_id) || !DEVICE_ID_RE.test(m.revoked_by) || !isString(m.reason) || m.reason.length > 200) return false;
+    if (!DEVICE_ID_RE.test(m.device_id) || !DEVICE_ID_RE.test(m.revoked_by) || !withinLength(m.reason, 200)) return false;
     if (!isTimestamp(m.created_at) || !isTimestamp(m.expires_at) || !NONCE_RE.test(m.nonce)) return false;
     const span = Date.parse(m.expires_at) - Date.parse(m.created_at);
     return span > 0 && span <= REVOKE_MAX_MS;
@@ -265,27 +311,33 @@ const VALIDATORS = {
 };
 
 // F5 (`kl.lease.*`) and C4 (`kl.question.answer`) register their own types.
-// An unregistered type gets the fields verifyDeviceEnvelope relies on.
+// `Object.hasOwn` (not `VALIDATORS[type]`) so a type name that collides with
+// an inherited Object.prototype member (`constructor`, `toString`, …) is
+// judged by whether *this* map has it, never by the prototype chain.
 function registerMessageValidator(type, validator) {
-  if (VALIDATORS[type]) throw new Error(`message type ${type} already has a validator`);
+  if (Object.hasOwn(VALIDATORS, type)) throw new Error(`message type ${type} already has a validator`);
   VALIDATORS[type] = validator;
 }
 
+// Exported for callers that explicitly want the shared device-message
+// fields (device_id, node_id, nonce) checked on their own registered type;
+// validateMessage no longer falls back to it for an unregistered type.
 function genericDeviceMessage(m) {
   return DEVICE_ID_RE.test(m.device_id) && NODE_ID_RE.test(m.node_id) && NONCE_RE.test(m.nonce);
 }
 
 function validateMessage(type, message) {
-  if (!isPlainObject(message) || message.type !== type || !Number.isInteger(message.v)) return 'malformed';
-  if (message.v !== 1) return 'unsupported_version';
-  const check = VALIDATORS[type] || genericDeviceMessage;
-  let ok = false;
   try {
-    ok = check(message) === true;
+    if (!isPlainObject(message) || message.type !== type || !Number.isInteger(message.v)) return 'malformed';
+    if (message.v !== 1) return 'unsupported_version';
+    // Object.hasOwn: an unregistered type (including one that collides with
+    // an inherited name like 'constructor') is simply unrecognised, never
+    // silently accepted through the prototype chain.
+    if (!Object.hasOwn(VALIDATORS, type)) return 'malformed';
+    return VALIDATORS[type](message) === true ? null : 'malformed';
   } catch {
-    ok = false;
+    return 'malformed';
   }
-  return ok ? null : 'malformed';
 }
 
 // Opens an envelope and validates it as `type`: { message, bytes } or a
@@ -337,6 +389,7 @@ module.exports = {
   decodeQr,
   validateMessage,
   registerMessageValidator,
+  genericDeviceMessage,
   parseMessage,
   parseResponse,
   parseEnroll,
