@@ -6,7 +6,17 @@ describe('E2E: Inference Tier UI', () => {
   let ctx;
 
   before(async () => {
-    ctx = await launchApp();
+    // The chat info popover shows "No active chat." with no tier controls
+    // unless a chat exists (fleet stage 7 Task 17: the isolated harness's
+    // default seed has no chats, unlike the old harness's shared real profile).
+    ctx = await launchApp({
+      seed: {
+        'chat-data.json': {
+          onboardingComplete: true,
+          chats: [{ id: 'chat-1', title: 'Test chat', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), messages: [] }]
+        }
+      }
+    });
     await waitFor(ctx, `!!document.getElementById('user-input')`);
 
     // Install native dialog trap

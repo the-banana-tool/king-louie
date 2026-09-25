@@ -71,11 +71,6 @@ app.whenReady().then(async () => {
     }
   });
 
-  // E2E test bridge (removed with the Playwright harness in fleet stage 7 Task 17).
-  if (process.env.KL_TEST_BRIDGE_PORT) {
-    require(process.env.KL_TEST_BRIDGE_SCRIPT || path.join(__dirname, 'tests', 'e2e', '_bridge.js'));
-  }
-
   // Show the window immediately — don't block on infrastructure.
   createWindow();
   try {
