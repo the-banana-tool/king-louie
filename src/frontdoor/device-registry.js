@@ -7,6 +7,9 @@ const { deviceIdFromJwk, open } = require('../approvals/envelope');
 const { writeFileAtomic } = require('../approvals/approver-store');
 const { DEVICE_ID_RE, NODE_ID_RE } = require('../approvals/messages');
 const { err } = require('./errors');
+const { createLogger } = require('../logging');
+
+const log = createLogger('frontdoor/device-registry');
 
 const PLATFORMS = ['ios', 'android', 'demo'];
 // The log is replayed to every node on each relay.hello, so it is bounded.
@@ -151,19 +154,54 @@ class DeviceRegistry {
     if (decision === 'duplicate') return false;
     if (decision === 'full') throw err('log_full', `the device log is full (${MAX_LOG_LINES} entries)`);
     fs.mkdirSync(path.dirname(this.logFile), { recursive: true, mode: 0o700 });
-    fs.appendFileSync(this.logFile, `${JSON.stringify(envelope)}\n`, { mode: 0o600 });
+    // A crash mid-append leaves a torn tail with no newline; start on a fresh
+    // line so this entry never fuses with the fragment.
+    const lead = this._endsTorn() ? '\n' : '';
+    fs.appendFileSync(this.logFile, `${lead}${JSON.stringify(envelope)}\n`, { mode: 0o600 });
     this.logLines += 1;
     const { key } = logKey(envelope);
     if (key) this.logKeys.add(key);
     return true;
   }
 
-  log() {
+  _endsTorn() {
+    let fd;
     try {
-      return fs.readFileSync(this.logFile, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
+      fd = fs.openSync(this.logFile, 'r');
+      const { size } = fs.fstatSync(fd);
+      if (size === 0) return false;
+      const last = Buffer.alloc(1);
+      fs.readSync(fd, last, 0, 1, size - 1);
+      return last[0] !== 0x0a;
+    } catch {
+      return false; // no log yet
+    } finally {
+      if (fd !== undefined) fs.closeSync(fd);
+    }
+  }
+
+  // Every parseable entry, in order. An unparseable line (a torn append) is
+  // skipped with a warning rather than hiding every other entry: the log is
+  // what carries revocations to nodes that were offline.
+  log() {
+    let text;
+    try {
+      text = fs.readFileSync(this.logFile, 'utf8');
     } catch {
       return [];
     }
+    const entries = [];
+    let skipped = 0;
+    for (const line of text.split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        entries.push(JSON.parse(line));
+      } catch {
+        skipped += 1;
+      }
+    }
+    if (skipped > 0) log.warn(`device log: skipped ${skipped} unparseable line(s)`, { file: this.logFile });
+    return entries;
   }
 }
 

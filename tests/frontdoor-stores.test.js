@@ -12,6 +12,7 @@ const { Mailbox, MAX_WAIT_MS: MAX_WAIT_MS_BOX } = require('../src/frontdoor/mail
 const { seal } = require('../src/approvals/envelope');
 const m = require('../src/approvals/messages');
 const { createFakePhone, testNodeIdentity } = require('./helpers/fake-phone');
+const { addSink } = require('../src/logging');
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -75,6 +76,38 @@ describe('DeviceRegistry', () => {
     assert.equal(reg.appendLog(a.revoke(b.deviceId)), true, 'a revocation is logged past the cap');
     assert.equal(reg.log().length, MAX_LOG_LINES + 1);
     assert.equal(reg.logLines, MAX_LOG_LINES + 1);
+  });
+
+  it('skips torn lines with a warning, keeps count and dedupe, and heals a torn tail before appending (final review I2)', () => {
+    const file = registryFile();
+    const a = createFakePhone();
+    const b = createFakePhone();
+    const c = createFakePhone();
+    const enroll = JSON.stringify(a.enroll({ device: b.device() }));
+    const revoke = JSON.stringify(a.revoke(b.deviceId));
+    const logFile = path.join(path.dirname(file), 'device-log.jsonl');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    // A torn line in the middle (a crash mid-append, later appended past) and
+    // a torn tail with no newline.
+    fs.writeFileSync(logFile, [enroll, revoke.slice(0, 40), revoke, enroll.slice(0, 25)].join('\n'));
+    const warnings = [];
+    const remove = addSink((r) => { if (r.level === 'warn' && r.subsystem === 'frontdoor/device-registry') warnings.push(r); });
+    let reg;
+    try {
+      reg = new DeviceRegistry({ file });
+      assert.deepEqual(reg.log().map((e) => JSON.stringify(e)), [enroll, revoke], 'revocations are still replayed');
+    } finally {
+      remove();
+    }
+    assert.ok(warnings.length >= 1, 'the torn lines are reported');
+    assert.equal(reg.logLines, 2);
+    assert.equal(reg.appendLog(a.revoke(b.deviceId, { reason: 'again' })), false, 'dedupe still holds');
+    const next = a.revoke(c.deviceId);
+    assert.equal(reg.appendLog(next), true);
+    assert.equal(reg.logLines, 3);
+    const entries = new DeviceRegistry({ file }).log();
+    assert.equal(entries.length, 3);
+    assert.deepEqual(entries[2], next, 'the entry appended after a torn tail parses');
   });
 
   it('never lets an outside id become a key: bad device_id and node_id are refused, not stored', () => {
