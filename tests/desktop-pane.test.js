@@ -3,7 +3,10 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
-const { describeServicePane, describeImportReport, decideDetachClick, UNAVAILABLE_TAB_NOTICE } = require('../src/desktop-bridge/pane-model');
+const {
+  describeServicePane, describeImportReport, decideDetachClick, paneShapeChanged,
+  DETACH_CONFIRM_DELAY_MS, UNAVAILABLE_TAB_NOTICE
+} = require('../src/desktop-bridge/pane-model');
 
 const ROOT = path.join(__dirname, '..');
 const read = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
@@ -90,31 +93,90 @@ describe('describeServicePane', () => {
     ]);
     assert.strictEqual(UNAVAILABLE_TAB_NOTICE, 'Managed by the local service; not available while attached.');
   });
+
+  it('carries a pending service command across views (survives an unpair that changes the view)', () => {
+    const withCommand = describeServicePane({ view: 'paired', pendingServiceCommand: { command: 'king-louie-service desktop unpair kld-abc', at: '2026-09-23T10:00:00Z' } });
+    assert.deepStrictEqual(withCommand.serviceCommand, {
+      command: 'king-louie-service desktop unpair kld-abc',
+      line: 'Run this on the service to finish removing this desktop: king-louie-service desktop unpair kld-abc'
+    });
+    const withoutCommand = describeServicePane({ view: 'unpaired' });
+    assert.strictEqual(withoutCommand.serviceCommand, null);
+  });
 });
 
 describe('decideDetachClick', () => {
   it('arms on a first click (not armed yet)', () => {
-    assert.deepStrictEqual(decideDetachClick({ armed: false, armedAtToken: null, currentToken: 3 }), { confirm: false, arm: true });
+    assert.deepStrictEqual(decideDetachClick({ armed: false, armedAtToken: null, currentToken: 3, armedAt: null, now: 1000 }), { confirm: false, arm: true });
   });
 
-  it('confirms a second click on the exact render that showed the warning', () => {
-    assert.deepStrictEqual(decideDetachClick({ armed: true, armedAtToken: 4, currentToken: 4 }), { confirm: true, arm: false });
+  it('confirms a second click on the exact render that showed the warning, once enough time has passed', () => {
+    const armedAt = 1_000_000;
+    assert.deepStrictEqual(
+      decideDetachClick({ armed: true, armedAtToken: 4, currentToken: 4, armedAt, now: armedAt + DETACH_CONFIRM_DELAY_MS }),
+      { confirm: true, arm: false }
+    );
   });
 
   it('re-arms instead of confirming when a render happened since arming (the race this closes)', () => {
-    assert.deepStrictEqual(decideDetachClick({ armed: true, armedAtToken: 4, currentToken: 5 }), { confirm: false, arm: true });
+    const armedAt = 1_000_000;
+    assert.deepStrictEqual(
+      decideDetachClick({ armed: true, armedAtToken: 4, currentToken: 5, armedAt, now: armedAt + DETACH_CONFIRM_DELAY_MS }),
+      { confirm: false, arm: true }
+    );
+  });
+
+  it('re-arms instead of confirming when the second click beats the confirm delay (a double-click)', () => {
+    const armedAt = 1_000_000;
+    assert.deepStrictEqual(
+      decideDetachClick({ armed: true, armedAtToken: 4, currentToken: 4, armedAt, now: armedAt + DETACH_CONFIRM_DELAY_MS - 1 }),
+      { confirm: false, arm: true }
+    );
+  });
+
+  it('confirms right at the delay boundary (>=), not only strictly after it', () => {
+    const armedAt = 1_000_000;
+    assert.deepStrictEqual(
+      decideDetachClick({ armed: true, armedAtToken: 4, currentToken: 4, armedAt, now: armedAt + DETACH_CONFIRM_DELAY_MS }),
+      { confirm: true, arm: false }
+    );
+  });
+});
+
+describe('paneShapeChanged', () => {
+  it('is true with no previous model (first paint)', () => {
+    assert.strictEqual(paneShapeChanged(null, { view: 'paired', actions: [] }), true);
+  });
+
+  it('is false when the view and actions are the same (a background repaint with new lines only)', () => {
+    const prev = { view: 'attached-disconnected', actions: [{ id: 'retry', label: 'Retry now' }], lines: ['old error'] };
+    const next = { view: 'attached-disconnected', actions: [{ id: 'retry', label: 'Retry now' }], lines: ['new error'] };
+    assert.strictEqual(paneShapeChanged(prev, next), false);
+  });
+
+  it('is true when the view changed', () => {
+    const prev = { view: 'paired', actions: [] };
+    const next = { view: 'attached-connected', actions: [] };
+    assert.strictEqual(paneShapeChanged(prev, next), true);
+  });
+
+  it('is true when an action (e.g. disabled) changed even with the same view', () => {
+    const prev = { view: 'pairing', actions: [{ id: 'pairConfirm', label: 'Confirm', disabled: true }] };
+    const next = { view: 'pairing', actions: [{ id: 'pairConfirm', label: 'Confirm', disabled: false }] };
+    assert.strictEqual(paneShapeChanged(prev, next), true);
   });
 });
 
 describe('pane wiring', () => {
   it('preload exposes window.electron.desktop over the desktop:* channels', () => {
     const preload = read('preload.js');
-    for (const ch of ['status', 'pairStart', 'pairConfirm', 'pairCancel', 'attach', 'detach', 'standaloneOnce', 'unpair', 'retry', 'importPlan', 'importApply']) {
+    for (const ch of ['status', 'pairStart', 'pairConfirm', 'pairCancel', 'attach', 'detach', 'standaloneOnce', 'unpair', 'retry', 'dismissServiceCommand', 'importPlan', 'importApply']) {
       assert.ok(preload.includes(`ipcRenderer.invoke('desktop:${ch}'`), `desktop:${ch}`);
     }
     assert.ok(preload.includes("registerOnce('desktop:statusChanged'"));
     assert.ok(preload.includes("registerOnce('desktop:importProgress'"));
     assert.ok(preload.includes('paneModel.decideDetachClick'), 'decideDetachClick is exposed alongside describe/describeImport');
+    assert.ok(preload.includes('paneModel.paneShapeChanged'), 'paneShapeChanged is exposed alongside decideDetachClick');
   });
 
   it('index.html has the Local service tab and pane', () => {

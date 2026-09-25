@@ -112,6 +112,43 @@ describe('desktop state: setPendingPair gets the same guard as setPairing (fix r
   });
 });
 
+describe('desktop state: pendingServiceCommand (fix round 2, Task 16 review)', () => {
+  it('is null by default, and clears back to null', () => {
+    const state = openState();
+    assert.strictEqual(state.pendingServiceCommand, null);
+    state.setPendingServiceCommand({ command: 'king-louie-service desktop unpair kld-abc' });
+    assert.ok(state.pendingServiceCommand);
+    state.setPendingServiceCommand(null);
+    assert.strictEqual(state.pendingServiceCommand, null);
+  });
+
+  it('stamps an `at` timestamp when none is given', () => {
+    const state = openState();
+    state.setPendingServiceCommand({ command: 'x' });
+    assert.strictEqual(state.pendingServiceCommand.command, 'x');
+    assert.ok(Date.parse(state.pendingServiceCommand.at));
+  });
+
+  it('refuses a missing or empty command', () => {
+    const state = openState();
+    assert.throws(() => state.setPendingServiceCommand({}));
+    assert.throws(() => state.setPendingServiceCommand({ command: '' }));
+  });
+
+  // The bug this closes: `notify()` (and, in attached mode, a relaunch)
+  // can happen before the renderer ever paints the reply that carried the
+  // command, so the command must survive in the state a fresh controller
+  // reads, not just in that one reply.
+  it('survives a repaint (a fresh read of the same state) and a new controller built over the same state', () => {
+    const dir = tmp();
+    const first = openDesktopState(dir, fakeSafeStorage(), { storeFactory });
+    first.setPendingServiceCommand({ command: 'king-louie-service desktop unpair kld-abc' });
+
+    const rebuilt = openDesktopState(dir, fakeSafeStorage(), { storeFactory });
+    assert.strictEqual(rebuilt.pendingServiceCommand.command, 'king-louie-service desktop unpair kld-abc');
+  });
+});
+
 describe('desktop state: seal() rejects non-strings', () => {
   it('seals a real string', () => {
     const state = openState();

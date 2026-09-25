@@ -46,7 +46,7 @@ function openDesktopState(userDataDir, safeStorage, { storeFactory = null, platf
   const store = make({
     name: 'desktop-bridge',
     cwd: userDataDir,
-    defaults: { mode: 'standalone', installId: null, pairing: null, pendingPair: null, lastImport: null }
+    defaults: { mode: 'standalone', installId: null, pairing: null, pendingPair: null, lastImport: null, pendingServiceCommand: null }
   });
   if (!store.get('installId')) store.set('installId', crypto.randomUUID());
   const usable = () => secureStorageUsable(safeStorage, platform);
@@ -74,6 +74,19 @@ function openDesktopState(userDataDir, safeStorage, { storeFactory = null, platf
     },
     get lastImport() { return store.get('lastImport') || null; },
     setLastImport(entry) { store.set('lastImport', entry); },
+    // A follow-up CLI command the owner still needs to run on the service
+    // (e.g. after unpair). Persisted rather than kept only in the reply to
+    // the call that produced it, because `notify()` races the renderer's
+    // repaint (fix round 2, Task 16 review): a fresh render, or a relaunch
+    // into attached mode, must still be able to show it.
+    get pendingServiceCommand() { return store.get('pendingServiceCommand') || null; },
+    setPendingServiceCommand(entry) {
+      if (entry === null) { store.set('pendingServiceCommand', null); return; }
+      if (!entry || typeof entry.command !== 'string' || !entry.command) {
+        throw new Error('setPendingServiceCommand needs a { command } string');
+      }
+      store.set('pendingServiceCommand', { command: entry.command, at: entry.at || new Date().toISOString() });
+    },
     secureStorageUsable: usable,
     seal(text) {
       if (!usable()) throw unavailable();

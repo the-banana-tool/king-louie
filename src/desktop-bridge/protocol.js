@@ -130,6 +130,7 @@ const MESSAGES = Object.freeze({
   SERVICE_KEY_CHANGED: (oldId, newId) => `The service's identity changed from ${oldId} to ${newId}. If you reinstalled the service, pair again.`,
   PAIR_NOT_FOUND: 'No local service was found yet. Wait for its fingerprint to appear, then confirm.',
   PAIR_SERVICE_CHANGED: 'The local service changed since its fingerprint was shown. Cancel and start pairing again.',
+  PAIR_CONFIRM_STALE: 'This confirm did not say which service it was for. Reopen Settings > Local service and try again.',
   ANOTHER_DEVICE: (label) => `Another desktop (${label}) is attached to this service.`,
   PROTOCOL_MISMATCH: (theirs) => `This app speaks desktop-bridge protocol ${PROTOCOL}; the service speaks ${theirs}. Upgrade the older one.`,
   SERVICE_TOO_OLD: (version, channel) => `The local service (version ${version}) does not support ${channel}. Upgrade the service.`,

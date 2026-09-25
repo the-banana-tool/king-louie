@@ -173,6 +173,7 @@ module.exports = {
   DESKTOP_IMPORT_PLAN: 'desktop:importPlan',
   DESKTOP_IMPORT_APPLY: 'desktop:importApply',
   DESKTOP_RETRY: 'desktop:retry',
+  DESKTOP_DISMISS_SERVICE_COMMAND: 'desktop:dismissServiceCommand',
   DESKTOP_STATUS_CHANGED: 'desktop:statusChanged',
   DESKTOP_IMPORT_PROGRESS: 'desktop:importProgress'
 };

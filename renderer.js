@@ -10050,7 +10050,7 @@ checkFirstRun();
 // ── Settings > Local service (fleet stage 7) ──────────────────────────────
 const serviceLog = createLogger('desktop-service');
 const servicePaneState = {
-  detachArmed: false, detachArmToken: null, busy: false, error: null, notice: null,
+  detachArmed: false, detachArmToken: null, detachArmedAt: null, busy: false, error: null,
   pendingNodeId: null, lastView: null, lastModel: null, lastStatus: null
 };
 let serviceRenderToken = 0;
@@ -10066,18 +10066,20 @@ function serviceLinesInto(el, lines) {
 }
 
 function disableServiceActionButtons() {
-  document.querySelectorAll('#service-pane-actions button, #service-pane-import button').forEach((btn) => { btn.disabled = true; });
+  document.querySelectorAll('#service-pane-actions button, #service-pane-import button, #service-pane-status button').forEach((btn) => { btn.disabled = true; });
 }
 
 // The one place that actually writes the pane's DOM from a model. Pure with
 // respect to the network — it never awaits anything — so `runServiceAction`
 // can call it synchronously right after flipping `busy` back to false, and
 // the buttons it draws reflect that final state instead of a stale one.
-// Every call stamps `serviceRenderToken`; arming Detach records that token,
-// and `decideDetachClick` (pane-model.js) refuses to confirm if a later
-// paint — this one or any other — has happened since.
+// `serviceRenderToken` only advances when the pane's shape (view + actions)
+// actually changed (paneShapeChanged, pane-model.js) — a background repaint
+// that only refreshes wording must not by itself un-arm a pending Detach.
+// Arming records the token as of its own paint; `decideDetachClick` refuses
+// to confirm once a shape-changing paint has happened since.
 function paintServicePane(model, status) {
-  serviceRenderToken += 1;
+  if (window.electron.desktop.paneShapeChanged(servicePaneState.lastModel, model)) serviceRenderToken += 1;
   servicePaneState.lastModel = model;
   servicePaneState.lastStatus = status;
   if (servicePaneState.lastView && servicePaneState.lastView !== model.view) {
@@ -10100,12 +10102,26 @@ function paintServicePane(model, status) {
     p.textContent = servicePaneState.error;
     statusEl.appendChild(p);
   }
-  if (servicePaneState.notice) {
+  if (model.serviceCommand) {
+    // Persisted server-side (desktop-state's pendingServiceCommand), not
+    // renderer state: it must survive a repaint and, in attached mode, a
+    // relaunch, and stays until the owner dismisses it or a new pairing
+    // starts (fix round 2, Task 16 review).
+    const row = document.createElement('div');
+    row.className = 'service-pane-command';
     const p = document.createElement('p');
     p.className = 'service-pane-notice';
-    p.textContent = servicePaneState.notice;
-    statusEl.appendChild(p);
-    servicePaneState.notice = null;
+    p.textContent = model.serviceCommand.line;
+    row.appendChild(p);
+    const dismissBtn = document.createElement('button');
+    dismissBtn.type = 'button';
+    dismissBtn.id = 'service-dismiss-command-btn';
+    dismissBtn.className = 'btn btn-secondary btn-sm';
+    dismissBtn.textContent = 'Dismiss';
+    dismissBtn.disabled = servicePaneState.busy;
+    dismissBtn.addEventListener('click', () => { runServiceAction('dismissServiceCommand').catch((err) => serviceLog.warn('service action failed', { action: 'dismissServiceCommand', error: err && err.message })); });
+    row.appendChild(dismissBtn);
+    statusEl.appendChild(row);
   }
 
   const requestBox = document.getElementById('service-pane-request');
@@ -10195,6 +10211,7 @@ function armDetachWarning() {
   servicePaneState.busy = false;
   if (servicePaneState.lastModel) paintServicePane(servicePaneState.lastModel, servicePaneState.lastStatus);
   servicePaneState.detachArmToken = serviceRenderToken;
+  servicePaneState.detachArmedAt = Date.now();
 }
 
 async function runServiceAction(id) {
@@ -10212,7 +10229,9 @@ async function runServiceAction(id) {
     const decision = window.electron.desktop.decideDetachClick({
       armed: servicePaneState.detachArmed,
       armedAtToken: servicePaneState.detachArmToken,
-      currentToken: serviceRenderToken
+      currentToken: serviceRenderToken,
+      armedAt: servicePaneState.detachArmedAt,
+      now: Date.now()
     });
     if (decision.arm) {
       armDetachWarning();
@@ -10231,12 +10250,9 @@ async function runServiceAction(id) {
     else if (id === 'standaloneOnce') result = await desktop.standaloneOnce();
     else if (id === 'retry') result = await desktop.retry();
     else if (id === 'detach') result = await desktop.detach({ confirmed: true });
-    else if (id === 'unpair') {
-      result = await desktop.unpair();
-      if (result && result.ok !== false && result.command) {
-        servicePaneState.notice = `Remove this desktop's pairing on the service with: ${result.command}`;
-      }
-    } else if (id === 'import') {
+    else if (id === 'unpair') result = await desktop.unpair();
+    else if (id === 'dismissServiceCommand') result = await desktop.dismissServiceCommand();
+    else if (id === 'import') {
       result = await desktop.importPlan();
       if (result && result.ok) renderImportPlan(result);
     } else if (id === 'importApply') {
@@ -10255,6 +10271,11 @@ async function runServiceAction(id) {
     servicePaneState.busy = false;
     if (fetched && fetched.status && fetched.status.ok !== false && fetched.model) {
       paintServicePane(fetched.model, fetched.status);
+    } else if (servicePaneState.lastModel) {
+      // The re-fetch failed; repaint the last known model now that `busy`
+      // is already false, so the buttons come back enabled instead of
+      // staying disabled with no further paint to fix that.
+      paintServicePane(servicePaneState.lastModel, servicePaneState.lastStatus);
     } else {
       const statusEl = document.getElementById('service-pane-status');
       if (statusEl) serviceLinesInto(statusEl, [(fetched && fetched.status && fetched.status.error) || 'The local service pane is not available.']);

@@ -224,6 +224,9 @@ describe('desktop controller', () => {
   // --- Fix round 1 (Task 16 review): the nodeId argument is required, not
   // just checked when present — a caller that never names what it saw must
   // not be able to confirm on the controller's say-so alone.
+  // Fix round 2: a missing nodeId gets its own message (PAIR_CONFIRM_STALE)
+  // distinct from PAIR_SERVICE_CHANGED, which is reserved for a nodeId that
+  // was named but no longer matches — the two are different problems.
 
   it('pairConfirm refuses with no nodeId argument even when a service was found', async () => {
     const svc = await startService();
@@ -231,7 +234,7 @@ describe('desktop controller', () => {
     const { controller } = controllerFor({ readBridgeFile: () => ({ ok: true, record: pairing.parseBridgeFile(JSON.stringify(record)) }) });
     await controller.pairStart();
     const out = await controller.pairConfirm();
-    assert.deepStrictEqual(out, { ok: false, code: 'PAIR_SERVICE_CHANGED', error: MESSAGES.PAIR_SERVICE_CHANGED });
+    assert.deepStrictEqual(out, { ok: false, code: 'PAIR_CONFIRM_STALE', error: MESSAGES.PAIR_CONFIRM_STALE });
     controller.dispose();
   });
 
@@ -383,6 +386,58 @@ describe('desktop controller', () => {
     assert.strictEqual(out.command, 'sudo king-louie-service desktop unpair kld-abcdefghijklmnop');
     assert.strictEqual(state.pairing, null);
     assert.strictEqual(state.mode, 'standalone');
+    controller.dispose();
+  });
+
+  // --- Fix round 2 (Task 16 re-review): the unpair follow-up command must
+  // survive both a repaint (status() read after the fact) and a relaunch
+  // (a fresh controller built over the same persisted state) — notify()
+  // (or, in attached mode, the relaunch itself) can beat the original
+  // reply back to the renderer, so the reply alone is not enough.
+
+  it("unpair's command survives in status() after the reply, and in a new controller over the same state", async () => {
+    const { controller, state, userDataDir } = controllerFor({ readBridgeFile: () => ({ ok: false }) });
+    state.setPairing(pairedRecord());
+    const out = await controller.unpair();
+    assert.strictEqual(out.command, 'sudo king-louie-service desktop unpair kld-abcdefghijklmnop');
+
+    const afterStatus = await controller.status();
+    assert.strictEqual(afterStatus.pendingServiceCommand.command, out.command);
+    controller.dispose();
+
+    // A fresh controller over the same userDataDir stands in for a relaunch:
+    // the command must have been persisted, not just returned.
+    const rebuiltState = openDesktopState(userDataDir, fakeSafeStorage(), { storeFactory });
+    const rebuilt = createDesktopController({
+      state: rebuiltState, mode: 'standalone', app: fakeApp(), getWindow: () => null, env: {}, platform: 'linux',
+      userDataDir, safeStorage: fakeSafeStorage(), stdout: { write: () => {} }, argv: ['electron', '.'],
+      readBridgeFile: () => ({ ok: false }), pollMs: 20, username: 'alex'
+    });
+    const rebuiltStatus = await rebuilt.status();
+    assert.strictEqual(rebuiltStatus.pendingServiceCommand.command, out.command);
+    rebuilt.dispose();
+  });
+
+  it('dismissServiceCommand clears the command and notifies', async () => {
+    const { controller, state, sentToWindow } = controllerFor({ readBridgeFile: () => ({ ok: false }) });
+    state.setPairing(pairedRecord());
+    await controller.unpair();
+    assert.ok(state.pendingServiceCommand);
+    sentToWindow.length = 0;
+    const out = await controller.dismissServiceCommand();
+    assert.strictEqual(out.pendingServiceCommand, null);
+    assert.strictEqual(state.pendingServiceCommand, null);
+    assert.ok(sentToWindow.some(([ch]) => ch === 'desktop:statusChanged'));
+    controller.dispose();
+  });
+
+  it('a new pairing (pairStart) clears any leftover pendingServiceCommand', async () => {
+    const { controller, state } = controllerFor({ readBridgeFile: () => ({ ok: false }) });
+    state.setPairing(pairedRecord());
+    await controller.unpair();
+    assert.ok(state.pendingServiceCommand);
+    await controller.pairStart();
+    assert.strictEqual(state.pendingServiceCommand, null);
     controller.dispose();
   });
 

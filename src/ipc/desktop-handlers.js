@@ -14,7 +14,8 @@ const DESKTOP_METHODS = Object.freeze({
   [IPC.DESKTOP_UNPAIR]: 'unpair',
   [IPC.DESKTOP_IMPORT_PLAN]: 'importPlan',
   [IPC.DESKTOP_IMPORT_APPLY]: 'importApply',
-  [IPC.DESKTOP_RETRY]: 'retry'
+  [IPC.DESKTOP_RETRY]: 'retry',
+  [IPC.DESKTOP_DISMISS_SERVICE_COMMAND]: 'dismissServiceCommand'
 });
 
 const unavailable = () => ({ ok: false, code: 'ATTACHED_UNAVAILABLE', error: 'Not available here.' });

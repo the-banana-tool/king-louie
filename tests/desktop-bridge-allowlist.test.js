@@ -115,8 +115,9 @@ describe('desktop:* handlers', () => {
     assert.strictEqual(IPC.DESKTOP_STATUS_CHANGED, 'desktop:statusChanged');
     assert.strictEqual(IPC.DESKTOP_IMPORT_PROGRESS, 'desktop:importProgress');
     assert.deepStrictEqual(Object.keys(DESKTOP_METHODS).sort(), [
-      'desktop:attach', 'desktop:detach', 'desktop:importApply', 'desktop:importPlan', 'desktop:pairCancel',
-      'desktop:pairConfirm', 'desktop:pairStart', 'desktop:retry', 'desktop:standaloneOnce', 'desktop:status', 'desktop:unpair'
+      'desktop:attach', 'desktop:detach', 'desktop:dismissServiceCommand', 'desktop:importApply', 'desktop:importPlan',
+      'desktop:pairCancel', 'desktop:pairConfirm', 'desktop:pairStart', 'desktop:retry', 'desktop:standaloneOnce',
+      'desktop:status', 'desktop:unpair'
     ]);
   });
 

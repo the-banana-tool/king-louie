@@ -2929,6 +2929,19 @@ body {
   font-style: italic;
 }
 
+.service-pane .service-pane-command {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin: 6px 0;
+}
+
+.service-pane .service-pane-command .service-pane-notice {
+  margin: 0;
+  flex: 1 1 auto;
+}
+
 .attached-service-banner {
   display: flex;
   flex-wrap: wrap;

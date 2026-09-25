@@ -88,7 +88,21 @@ function describeServicePane(status = {}) {
       actions.push({ id: 'pair', label: 'Pair' });
     }
   }
-  return { view: s.view || 'unpaired', lines, actions, request, command, detachWarning: s.detachWarning || null, approvals: describeApprovals(s) };
+  return {
+    view: s.view || 'unpaired', lines, actions, request, command,
+    detachWarning: s.detachWarning || null, approvals: describeApprovals(s),
+    serviceCommand: describeServiceCommand(s)
+  };
+}
+
+// A follow-up CLI command the owner still needs to run on the service (e.g.
+// after unpair). Independent of `view` — it survives a repaint, an unpair
+// that changes the view, and (persisted server-side) a relaunch — and is
+// shown until the owner dismisses it or a new pairing starts.
+function describeServiceCommand(status) {
+  const p = status.pendingServiceCommand;
+  if (!p || typeof p.command !== 'string' || !p.command) return null;
+  return { command: p.command, line: `Run this on the service to finish removing this desktop: ${p.command}` };
 }
 
 function describeImportReport(report = {}) {
@@ -108,14 +122,35 @@ function describeImportReport(report = {}) {
 // anyway"), not just a flag — a click can outrun the render that shows
 // that warning (e.g. while the pane awaits a status() round trip), and a
 // stale click must not confirm on the strength of `armed` alone. The
-// renderer stamps every paint with a token that only increases; arming
-// records the token of the paint that showed the warning, and a click
-// confirms only if no repaint (this one or any other, such as a
-// background statusChanged) happened since. Pure and tiny so it is unit
-// tested without a DOM.
-function decideDetachClick({ armed, armedAtToken, currentToken } = {}) {
-  if (armed && armedAtToken === currentToken) return { confirm: true, arm: false };
+// renderer stamps every paint that changes the pane's shape with a token
+// that only increases; arming records the token of the paint that showed
+// the warning, and a click confirms only if no such repaint happened since
+// (`armedAtToken === currentToken`) AND at least DETACH_CONFIRM_DELAY_MS
+// has passed since that paint — a second click that beats even that short
+// delay is a double-click, not a deliberate second decision, and re-arms
+// instead. Pure and tiny so it is unit tested without a DOM.
+const DETACH_CONFIRM_DELAY_MS = 400;
+
+function decideDetachClick({ armed, armedAtToken, currentToken, armedAt, now } = {}) {
+  const sameRender = armed && armedAtToken === currentToken;
+  const elapsed = typeof armedAt === 'number' && typeof now === 'number' ? now - armedAt : -Infinity;
+  if (sameRender && elapsed >= DETACH_CONFIRM_DELAY_MS) return { confirm: true, arm: false };
   return { confirm: false, arm: true };
 }
 
-module.exports = { describeServicePane, describeApprovals, describeImportReport, decideDetachClick, UNAVAILABLE_TAB_NOTICE };
+// A repaint that changes nothing the owner could act on — same view, same
+// exact set of actions — must not by itself invalidate an armed Detach.
+// Only a change the owner could actually see and react to (a different
+// view, or different/disabled actions) should force a re-arm. Compared by
+// value, not identity, since the renderer rebuilds the model object on
+// every render even when nothing meaningful changed.
+function paneShapeChanged(prevModel, nextModel) {
+  if (!prevModel || !nextModel) return true;
+  if (prevModel.view !== nextModel.view) return true;
+  return JSON.stringify(prevModel.actions) !== JSON.stringify(nextModel.actions);
+}
+
+module.exports = {
+  describeServicePane, describeApprovals, describeImportReport, describeServiceCommand,
+  decideDetachClick, paneShapeChanged, DETACH_CONFIRM_DELAY_MS, UNAVAILABLE_TAB_NOTICE
+};

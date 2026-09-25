@@ -195,12 +195,16 @@ function createDesktopController({
       approvals,
       lastImport: state.lastImport,
       unavailableTabs: mode === 'attached' ? [...ATTACHED_UNAVAILABLE_TABS] : [],
-      detachWarning: DETACH_WARNING
+      detachWarning: DETACH_WARNING,
+      pendingServiceCommand: state.pendingServiceCommand
     };
   }
 
   async function pairStart() {
     if (!state.secureStorageUsable()) return { ok: false, code: 'SECURE_STORAGE_UNAVAILABLE', error: MESSAGES.SECURE_STORAGE_UNAVAILABLE };
+    // A follow-up command from a previous unpair is moot once a new pairing
+    // starts; the owner dismisses it or it's superseded, never both shown.
+    state.setPendingServiceCommand(null);
     const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
     const raw = rawFromPublicKeyObject(publicKey);
     const label = defaultDeviceLabel(username || currentUsername());
@@ -229,14 +233,16 @@ function createDesktopController({
     // never actually compared).
     if (!found) return { ok: false, code: 'PAIR_NOT_FOUND', error: MESSAGES.PAIR_NOT_FOUND };
     // The pane must pass the nodeId it actually displayed — required, not
-    // just checked when present. A poll tick can update `found` (and
-    // notify()) between that render and this call; if the caller doesn't
-    // name what it saw, or names something other than the current `found`,
-    // that is the same "never compared" gap the fresh-read check below
-    // covers, just on the controller's own polling instead of the bridge
-    // file.
+    // just checked when present. A caller that names nothing never
+    // compared anything (a stale/incompatible caller, not a race); that
+    // gets its own message. A poll tick can update `found` (and notify())
+    // between the render and this call, so a caller that names something
+    // other than the current `found` is the race the fresh-read check
+    // below also covers, just on the controller's own polling instead of
+    // the bridge file — that one is PAIR_SERVICE_CHANGED.
     const expectedNodeId = payload && typeof payload.nodeId === 'string' ? payload.nodeId : null;
-    if (!expectedNodeId || expectedNodeId !== found.nodeId) {
+    if (!expectedNodeId) return { ok: false, code: 'PAIR_CONFIRM_STALE', error: MESSAGES.PAIR_CONFIRM_STALE };
+    if (expectedNodeId !== found.nodeId) {
       return { ok: false, code: 'PAIR_SERVICE_CHANGED', error: MESSAGES.PAIR_SERVICE_CHANGED };
     }
     const fresh = readFile() || {};
@@ -305,9 +311,20 @@ function createDesktopController({
     state.setMode('standalone');
     stopPolling();
     const command = pairing ? `${platform === 'win32' ? '' : 'sudo '}king-louie-service desktop unpair ${pairing.deviceId}` : null;
+    // Persisted, not just returned: notify() below (or, in attached mode,
+    // the relaunch) can reach the pane before this reply ever does, and the
+    // pane needs to keep showing this on every repaint — including one
+    // after a relaunch — until the owner dismisses it or pairs again.
+    if (command) state.setPendingServiceCommand({ command, at: now().toISOString() });
     if (wasAttached && mode === 'attached') return { ...relaunch(), command };
     notify();
     return { ok: true, command };
+  }
+
+  async function dismissServiceCommand() {
+    state.setPendingServiceCommand(null);
+    notify();
+    return status();
   }
 
   async function retry() {
@@ -401,7 +418,7 @@ function createDesktopController({
 
   return {
     status, pairStart, pairConfirm, pairCancel, attach, detach, standaloneOnce, unpair, retry,
-    importPlan, importApply, createClient, setClient, dispose,
+    importPlan, importApply, dismissServiceCommand, createClient, setClient, dispose,
     on: (event, fn) => emitter.on(event, fn)
   };
 }
