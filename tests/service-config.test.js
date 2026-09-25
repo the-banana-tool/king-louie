@@ -262,3 +262,63 @@ describe('two instances on one Linux box', () => {
     assert.strictEqual(loadServiceConfig(tmp(), {}, opts(adminB)).ports.gateway, 20002);
   });
 });
+
+describe('loadServiceConfig: unknown keys in the admin service.json (R55)', () => {
+  it('rejects an unknown features key and names it', () => {
+    const admin = tmp();
+    const file = writeAdmin(admin, { features: { gateway: false, webhook: true } });
+    assert.throws(() => loadServiceConfig(tmp(), {}, opts(admin)), (err) => {
+      assert.strictEqual(
+        err.message,
+        `Invalid ${file}: unknown key "features.webhook" (known: gateway, webhooks, mesh, channels, appDiscovery)`
+      );
+      return true;
+    });
+  });
+
+  it('rejects an unknown ports key with the same wording', () => {
+    const admin = tmp();
+    const file = writeAdmin(admin, { ports: { gateway: 18793, mesh: 18791 } });
+    assert.throws(() => loadServiceConfig(tmp(), {}, opts(admin)), (err) => {
+      assert.strictEqual(err.message, `Invalid ${file}: unknown key "ports.mesh" (known: gateway, webhook)`);
+      return true;
+    });
+  });
+
+  it('rejects features that is not an object', () => {
+    const admin = tmp();
+    writeAdmin(admin, { features: ['gateway'] });
+    assert.throws(() => loadServiceConfig(tmp(), {}, opts(admin)), /"features" must be an object/);
+  });
+
+  it('accepts every known features and ports key', () => {
+    const admin = tmp();
+    writeAdmin(admin, {
+      profile: 'runbook',
+      features: { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false },
+      ports: { gateway: 18793, webhook: 18794 }
+    });
+    const cfg = loadServiceConfig(tmp(), {}, opts(admin));
+    assert.strictEqual(cfg.profile, 'runbook');
+    assert.deepStrictEqual(Object.keys(cfg.features).sort(), ['appDiscovery', 'channels', 'gateway', 'mesh', 'webhooks']);
+  });
+
+  // The brief's own wording ("still only warns... whatever their names") never
+  // checked the warning it describes; capture it with addSink, the same
+  // pattern the profile/feature tests above use, so the warning is asserted
+  // rather than merely possible.
+  it('still only warns about features in the service-writable <dataDir>/service.json, whatever their names', () => {
+    const dir = tmp();
+    writeCfg(dir, { features: { bogus: true } });
+    const warnings = [];
+    const remove = addSink((r) => { if (r.level === 'warn') warnings.push(r.message); });
+    let cfg;
+    try { cfg = loadServiceConfig(dir, {}, opts(tmp())); } finally { remove(); }
+    assert.strictEqual(cfg.features.gateway, false);
+    assert.strictEqual(cfg.features.bogus, undefined);
+    assert.ok(
+      warnings.some((m) => m.includes('service.json') && /features/.test(m)),
+      `expected a warning naming the file, got ${JSON.stringify(warnings)}`
+    );
+  });
+});

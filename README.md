@@ -1260,6 +1260,18 @@ Invalid /etc/king-louie/node.yaml: unknown key "policy.allowed_root" (known: all
 `king-louie-service doctor` shows the same message on its
 `node config / runbooks health` row. Fix it by removing or correcting the key.
 
+### Unknown `features` and `ports` keys in `service.json` are errors
+
+`<configDir>/service.json` used to accept any feature name and ignore the
+ones it did not know, so `"webhook": true` (for `webhooks`) quietly left the
+listener off. An unknown key under `features` or `ports` now stops the service
+from starting, with the same wording as `node.yaml`:
+
+    Invalid /etc/king-louie/service.json: unknown key "features.webhook" (known: gateway, webhooks, mesh, channels, appDiscovery)
+
+The service-writable `<dataDir>/service.json` is unchanged: its `features` and
+`ports` are still ignored with a warning.
+
 ### `<dataDir>/gateway-token` exists only while the gateway is up
 
 The cleartext bearer-token file is written after the listener binds and
