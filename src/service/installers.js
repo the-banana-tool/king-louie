@@ -864,5 +864,7 @@ async function runInstallCommand(command, flags, io) {
 module.exports = {
   renderSystemdUnit, renderLaunchdPlist, renderWindowsTaskXml,
   planInstall, planUninstall, executeSteps, runInstallCommand,
-  ensureSafeDataDirParent, DARWIN_LOG_DIR
+  ensureSafeDataDirParent, DARWIN_LOG_DIR,
+  // Fleet stage 7: the desktop's bridge-file owner check reuses the inspector.
+  WINDOWS_INSPECT_CSHARP
 };
