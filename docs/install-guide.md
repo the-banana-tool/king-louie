@@ -49,7 +49,7 @@ What works today:
 On every machine:
 
 - **Node.js 22 or later, with npm.** On Windows, install from nodejs.org
-  with the traditional "Windows installer (64-bit)"; it puts node at
+  with the "Windows Installer (.msi)"; it puts node at
   `C:\Program Files\nodejs\node.exe` with npm alongside it. On macOS, install
   from nodejs.org too; its installer puts node at `/usr/local/bin/node`
   (Homebrew uses `/opt/homebrew/bin/node` instead). On Linux, install from
@@ -80,10 +80,12 @@ Per role:
   `C:\Program Files\Git\cmd\git.exe`, where the Git for Windows installer
   (git-scm.com) puts it — if it's installed elsewhere, edit the path in
   `laptop.build_then_deploy.yaml`; on Linux, `/usr/bin/git`.
-- **`gpu-box`: Python 3** from www.python.org. When you run the installer,
-  choose **Customize installation** and check **Install for all users** (or
-  the equivalent option), so it lands under `C:\Program Files\Python3xx`
-  rather than under your own profile. Section 6 creates an
+- **`gpu-box`: Python 3** from www.python.org, using the "Windows installer
+  (64-bit)" download — not the newer install manager, which is per-user
+  only. When you run it, choose **Customize installation** and check
+  **Install Python for all users**, so it lands under
+  `C:\Program Files\Python3xx` rather than under your own profile. Section 6
+  creates an
   administrator-owned virtual environment at `C:\KingLouie\tools\py` with the
   Hugging Face CLI in it, from that interpreter, after the ACL script has
   locked `C:\KingLouie` — and section 6 explains why a per-user install will
@@ -131,11 +133,13 @@ a real, rooted path — a drive letter and a separator, never a bare `C:` —
 and not a drive root or a folder under `%SystemRoot%`. If it already exists,
 it must either be empty or already look like a King Louie install (contain
 `app\package.json`); the script refuses to take ownership of anything else.
-The runbooks and the MCP configs (`examples/fleet/gpu-box/node.yaml`,
-`examples/runbooks/*.yaml`, `examples/mcp/claude-desktop.windows.json`) all
-hardcode `C:\KingLouie`, so a different `-Base` must be matched by editing
-every one of them to the new path. Simplest: leave `-Base` out and keep the
-default.
+Several things hardcode `C:\KingLouie`: the `gpu-box` runbooks
+`examples/runbooks/models.hf_download.yaml` and
+`examples/runbooks/train.run.yaml`; `examples/mcp/claude-desktop.windows.json`;
+every command this guide gives from here on; and §8's `claude mcp add`
+line. (`examples/fleet/gpu-box/node.yaml` has it only in a comment.) A
+different `-Base` means editing all of those to match. Simplest: leave
+`-Base` out and keep the default.
 
 The script locks every admin-owned folder from the top down, one folder at a
 time, and never follows a junction, symbolic link or other reparse point, or
@@ -547,7 +551,10 @@ claude mcp add --scope user king-louie -- /bin/sh -c 'cd /opt/king-louie/mcp/wor
 with no terminal to type a password into. First allow your own account to
 start exactly that command as `king-louie` without a password. Create the
 rule with `sudo visudo -f /etc/sudoers.d/king-louie-mcp`, where `<you>` is
-your login name and `\=` is how sudoers writes an `=` inside an argument:
+the runner's own account — the one you run Claude from, not whatever admin
+login you used for this section's `sudo` commands, if you followed the
+sudo note in section 2 — and `\=` is how sudoers writes an `=` inside an
+argument:
 
 ```
 <you> ALL=(king-louie) NOPASSWD: /usr/bin/env --chdir\=/opt/king-louie/mcp/work /usr/bin/node /opt/king-louie/app/bin/king-louie-service.js mcp --data-dir /opt/king-louie/mcp/data
