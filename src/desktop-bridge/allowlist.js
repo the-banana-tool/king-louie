@@ -26,7 +26,10 @@ const RENDERER_EVENTS = new Set([
   'chat:advisorStarted', 'chat:advisorCompleted',
   'canvas:render', 'canvas:close', 'canvas:executeJs',
   ...PROMPT_EVENTS,
-  'backgroundTask:completed'
+  'backgroundTask:completed',
+  // Cases stage 2: the one event the case runtime emits (status, questions,
+  // budget). A later case event is added here by name, not by prefix.
+  'case:changed'
 ]);
 
 // Settings tabs whose domains the service does not serve while attached.
@@ -57,7 +60,7 @@ function servedChannels({ handle = [], on = [] } = {}) {
 
 function isRendererEvent(channel) {
   const ch = String(channel);
-  return RENDERER_EVENTS.has(ch) || ch.startsWith('case:');
+  return RENDERER_EVENTS.has(ch);
 }
 
 function isTimeoutExempt(channel) {

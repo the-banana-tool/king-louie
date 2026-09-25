@@ -47,6 +47,14 @@ describe('classifyChannel (spec §3.6, first match wins)', () => {
     it(`${channel} → ${route}`, () => assert.strictEqual(classifyChannel(channel), route));
   }
 
+  it('proxies every case channel C2 registers', () => {
+    const caseChannels = Object.values(IPC).filter((ch) => typeof ch === 'string' && ch.startsWith('case:'));
+    for (const ch of ['case:questions', 'case:answerQuestion', 'case:acknowledgeBriefing', 'case:setStatus', 'case:budget', 'case:grantBudget']) {
+      assert.ok(caseChannels.includes(ch), ch);
+    }
+    for (const ch of caseChannels) assert.strictEqual(classifyChannel(ch), 'proxy', ch);
+  });
+
   it('lists the proxied domains', () => {
     assert.deepStrictEqual([...PROXIED_DOMAINS], ['chat', 'settings', 'case', 'cron', 'memory', 'tool', 'usage', 'checkpoint', 'canvas']);
   });
@@ -59,11 +67,11 @@ describe('classifyChannel (spec §3.6, first match wins)', () => {
 });
 
 describe('renderer events', () => {
-  it('forwards chat, canvas and prompt events and any case event', () => {
-    for (const ch of ['chat:messageChunk', 'chat:updated', 'canvas:executeJs', 'tool:approvalRequired', 'agent:askUser', 'backgroundTask:completed', 'case:statusChanged']) {
+  it('forwards chat, canvas and prompt events and case:changed only among case events', () => {
+    for (const ch of ['chat:messageChunk', 'chat:updated', 'canvas:executeJs', 'tool:approvalRequired', 'agent:askUser', 'backgroundTask:completed', 'case:changed']) {
       assert.strictEqual(isRendererEvent(ch), true, ch);
     }
-    for (const ch of ['workflow:progress', 'task:created', 'mesh:ready', 'desktop:statusChanged']) {
+    for (const ch of ['workflow:progress', 'task:created', 'mesh:ready', 'desktop:statusChanged', 'case:statusChanged', 'case:list', 'case:answerQuestion']) {
       assert.strictEqual(isRendererEvent(ch), false, ch);
     }
     for (const ch of PROMPT_EVENTS) assert.ok(RENDERER_EVENTS.has(ch));

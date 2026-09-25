@@ -157,6 +157,10 @@ function createBridgeDispatcher({
       conn.send({ t: 'result', id, error: MESSAGES.CHANNEL_NOT_PROXIED(String(channel)), code: 'CHANNEL_NOT_PROXIED' });
       return;
     }
+    // Only chat:sendMessage starts a run bound to this connection. No case:*
+    // channel does: a case turn runs inside chat:sendMessage, and
+    // case:answerQuestion only schedules an unattended wake-up, which must
+    // outlive the desktop.
     const chatId = channel === 'chat:sendMessage' && args[0] && typeof args[0].chatId === 'string' ? args[0].chatId : null;
     if (chatId) conn.runs.add(chatId);
     try {
@@ -321,7 +325,7 @@ function createBridgeDispatcher({
     conn.runs.clear();
   }
 
-  // The core's own ui.send (chat:updated, backgroundTask:completed, case:*):
+  // The core's own ui.send (chat:updated, backgroundTask:completed, case:changed):
   // never a prompt, so a remote-origin run cannot borrow the dialog.
   function forwardAmbient(channel, payload) {
     const conn = getConnection();
