@@ -168,11 +168,20 @@ async function readPrs(exec, remoteKey, notes) {
 async function refresh(ctx = {}) {
   const exec = typeof ctx.exec === 'function' ? ctx.exec : defaultExec;
   const now = ctx.now instanceof Date ? ctx.now : new Date();
-  const repo = typeof ctx.brief?.repo === 'string' ? ctx.brief.repo.trim() : '';
+  const raw = typeof ctx.brief?.repo === 'string' ? ctx.brief.repo.trim() : '';
   const notes = [];
-  const state = { repo: repo || null, branch: null, head: null, dirty: null, branches: [], remoteKey: null, openPrs: null };
-  if (!repo) {
+  const state = { repo: raw || null, branch: null, head: null, dirty: null, branches: [], remoteKey: null, openPrs: null };
+  if (!raw) {
     notes.push("No repository is set; ask the owner for the brief's repo.");
+    return { type: TYPE, fetchedAt: now.toISOString(), stale: false, state, notes };
+  }
+  let repo;
+  try {
+    repo = validateRepo(raw);
+  } catch (err) {
+    // Refused before any git/gh call: an invalid brief value is never
+    // handed to exec, and never mistaken for a path that merely moved.
+    notes.push(`${err.message} Ask the owner to fix the brief's repo.`);
     return { type: TYPE, fetchedAt: now.toISOString(), stale: false, state, notes };
   }
   if (isCloneUrl(repo)) {
@@ -277,11 +286,24 @@ const overlaps = (words, other) => {
   return shared >= 2 || jaccard(words, other) >= 0.25;
 };
 
+// A missing or stale snapshot means the PR/branch check below has nothing
+// current to go on; a caller must not read the resulting `null` as "nothing
+// is in flight" when it really means "not checked recently". Worded to
+// match renderExtras's own "not fetched yet" / "stale, fetched …" text.
+function staleCaveat(snapshot) {
+  if (!snapshot) return 'Repository state not fetched yet.';
+  if (snapshot.stale) return `Repository state is stale (fetched ${snapshot.fetchedAt}).`;
+  return null;
+}
+
 // The owner's request against open PRs, branches and the other cases on
-// the repo: a note to check them before writing code, or null.
+// the repo: a note to check them before writing code, or null. When the
+// repo state is missing or stale, that caveat replaces a bare `null` when
+// nothing else was found, and is appended when something was.
 function checkBeforeWrite({ text, snapshot, others = [] }) {
   const words = tokenSet(text);
   if (!words.size) return null;
+  const caveat = staleCaveat(snapshot);
   const found = [];
   const prBranches = new Set();
   for (const pr of Array.isArray(snapshot?.state?.openPrs) ? snapshot.state.openPrs : []) {
@@ -297,8 +319,11 @@ function checkBeforeWrite({ text, snapshot, others = [] }) {
   for (const c of others) {
     if (overlaps(words, tokenSet(c.title))) found.push(`case ${quoted(c.title)} (${c.status})`);
   }
-  if (!found.length) return null;
-  return `Before writing code: this may already be in flight — ${found.join('; ')}. Check them first and say which you are building on.`;
+  if (found.length) {
+    const note = `Before writing code: this may already be in flight — ${found.join('; ')}. Check them first and say which you are building on.`;
+    return caveat ? `${note} ${caveat}` : note;
+  }
+  return caveat ? `${caveat} Check the repo directly before writing code.` : null;
 }
 
 function checkBeforeWriteFor(runtime, id, text) {

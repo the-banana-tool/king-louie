@@ -206,6 +206,19 @@ describe('software-repo: refresh', () => {
     assert.deepStrictEqual(snap.state.openPrs.map((p) => p.number), [12, 13]);
   });
 
+  // Fix round 1, item 2: an invalid `repo` is refused by validateRepo
+  // before refresh spawns anything, rather than being treated as a local
+  // path that merely doesn't exist yet.
+  it('refuses an invalid repo before doing any exec', async () => {
+    const { exec, calls } = fakeExec({});
+    const snap = await repoType.refresh({ brief: { repo: 'phone-agent' }, exec, now: NOW });
+    assert.strictEqual(calls.length, 0);
+    assert.deepStrictEqual(snap.notes, [`${repoType.REPO_ERROR} Ask the owner to fix the brief's repo.`]);
+    assert.strictEqual(snap.state.branch, null);
+    assert.strictEqual(snap.state.openPrs, null);
+    assert.strictEqual(snap.state.repo, 'phone-agent');
+  });
+
   it('git status leaves .git/index untouched', async () => {
     const repo = tmp();
     const git = (...args) => execFileSync('git', ['-C', repo, ...args], { stdio: 'pipe' });
@@ -286,5 +299,40 @@ describe('software-repo: extras and check-before-write', () => {
     assert.strictEqual(note, 'Before writing code: this may already be in flight — PR #12 "Fix status polling" (fix/status-poll); case "Phone agent maintenance" (active). Check them first and say which you are building on.');
     assert.strictEqual(repoType.checkBeforeWrite({ text: 'Finish the chore deps update', snapshot, others: [] }), 'Before writing code: this may already be in flight — branch chore/deps. Check them first and say which you are building on.');
     assert.strictEqual(repoType.checkBeforeWrite({ text: 'Write the release notes for October', snapshot, others }), null);
+  });
+
+  // Fix round 1, item 1: a caller must not read `null` as "nothing is in
+  // flight" when the repo state is missing or stale — it means "not
+  // checked recently", not "checked and clean".
+  it('check-before-write: a missing (null) snapshot warns instead of returning null', () => {
+    assert.strictEqual(
+      repoType.checkBeforeWrite({ text: 'Write the release notes for October', snapshot: null, others: [] }),
+      'Repository state not fetched yet. Check the repo directly before writing code.'
+    );
+  });
+
+  it('check-before-write-for: an unfetched snapshot (case never refreshed) warns instead of returning null', () => {
+    const runtime = {
+      getCase: () => ({ id: 'c-1' }),
+      brief: () => ({ read: () => ({ data: { repo: '/work/phone-agent' } }) }),
+      caseTypeSnapshot: () => undefined,
+      index: { casesWithKey: () => [] }
+    };
+    assert.strictEqual(
+      repoType.checkBeforeWriteFor(runtime, 'c-1', 'Write the release notes for October'),
+      'Repository state not fetched yet. Check the repo directly before writing code.'
+    );
+  });
+
+  it('check-before-write: a stale snapshot warns when nothing else is found, and appends the caveat to a real conflict', () => {
+    const stale = { ...snapshot, stale: true };
+    assert.strictEqual(
+      repoType.checkBeforeWrite({ text: 'Write the release notes for October', snapshot: stale, others }),
+      `Repository state is stale (fetched ${stale.fetchedAt}). Check the repo directly before writing code.`
+    );
+    assert.strictEqual(
+      repoType.checkBeforeWrite({ text: 'Can you fix the status polling bug in the phone agent?', snapshot: stale, others }),
+      `Before writing code: this may already be in flight — PR #12 "Fix status polling" (fix/status-poll); case "Phone agent maintenance" (active). Check them first and say which you are building on. Repository state is stale (fetched ${stale.fetchedAt}).`
+    );
   });
 });
