@@ -8,6 +8,16 @@ const { err } = require('./errors');
 
 const PER_NODE = 1000;
 const MAX_WAIT_MS = 25000;
+// The approval protocol's own types travel only over their dedicated link
+// methods and routes, where the relay checks them; none of them may ever be
+// fetched from the mailbox (a kl.enroll.* message there would bypass the
+// open-code checks). A prefix that covers one of these (`kl.`) or sits inside
+// one (`kl.enroll.x.`) is refused as well.
+const RESERVED_PREFIXES = ['kl.approval.', 'kl.device.', 'kl.enroll.', 'kl.audit.'];
+
+function overlapsReserved(prefix) {
+  return RESERVED_PREFIXES.some((r) => r.startsWith(prefix) || prefix.startsWith(r));
+}
 
 class Mailbox extends EventEmitter {
   constructor({ now = Date.now } = {}) {
@@ -25,6 +35,7 @@ class Mailbox extends EventEmitter {
     if (typeof prefix !== 'string' || !prefix.endsWith('.') || !Number.isInteger(ttlMs) || ttlMs <= 0) {
       throw new TypeError("registerType(prefix, { ttlMs }) needs a prefix ending in '.' and a positive ttlMs");
     }
+    if (overlapsReserved(prefix)) throw err('type_reserved', `${prefix} overlaps an approval-protocol type and cannot be routed through the mailbox`);
     this.types.set(prefix, { ttlMs, maxBytes });
   }
 
@@ -37,7 +48,7 @@ class Mailbox extends EventEmitter {
     if (!NODE_ID_RE.test(nodeId)) throw err('bad_node', 'node id is not well-formed');
     if (toDevice !== null && !DEVICE_ID_RE.test(toDevice)) throw err('bad_device', 'to_device is not well-formed');
     const { message, bytes } = open(envelope);
-    const config = this._typeConfig(message.type);
+    const config = RESERVED_PREFIXES.some((r) => String(message.type).startsWith(r)) ? null : this._typeConfig(message.type);
     if (!config) throw err('type_not_routed', `no consumer routes ${message.type}`);
     if (bytes.length > config.maxBytes) throw err('too_large', `${message.type} is over ${config.maxBytes} bytes`);
     this.seq += 1;
@@ -90,4 +101,4 @@ class Mailbox extends EventEmitter {
   }
 }
 
-module.exports = { Mailbox, MAX_WAIT_MS };
+module.exports = { Mailbox, MAX_WAIT_MS, RESERVED_PREFIXES };

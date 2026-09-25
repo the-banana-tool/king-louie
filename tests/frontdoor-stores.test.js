@@ -204,17 +204,26 @@ describe('Mailbox', () => {
     assert.equal(box.list({ nodeIds: [node.nodeId] }).length, 0);
   });
 
-  it('a prefix near-miss never routes: kl.enrollx. is not kl.enroll.', () => {
+  it('a prefix near-miss never routes: kl.leasex. is not kl.lease.', () => {
     const box = new Mailbox();
-    box.registerType('kl.enroll.', { ttlMs: 60000 });
-    assert.throws(() => box.put(node.nodeId, msg('kl.enrollx.foo')), (e) => e.code === 'type_not_routed');
+    box.registerType('kl.lease.', { ttlMs: 60000 });
+    assert.throws(() => box.put(node.nodeId, msg('kl.leasex.foo')), (e) => e.code === 'type_not_routed');
     // The near-miss type must match a full segment when registered the other
-    // way around too: registering 'kl.enrollx.' never lets 'kl.enroll.done'
+    // way around too: registering 'kl.leasex.' never lets 'kl.lease.done'
     // through it.
     const box2 = new Mailbox();
-    box2.registerType('kl.enrollx.', { ttlMs: 60000 });
-    assert.throws(() => box2.put(node.nodeId, msg('kl.enroll.done')), (e) => e.code === 'type_not_routed');
-    assert.throws(() => box.registerType('kl.enroll', { ttlMs: 1000 }), TypeError);
+    box2.registerType('kl.leasex.', { ttlMs: 60000 });
+    assert.throws(() => box2.put(node.nodeId, msg('kl.lease.done')), (e) => e.code === 'type_not_routed');
+    assert.throws(() => box.registerType('kl.lease', { ttlMs: 1000 }), TypeError);
+  });
+
+  it('never routes approval-protocol types: kl.enroll.* and friends are reserved', () => {
+    const box = new Mailbox();
+    for (const prefix of ['kl.enroll.', 'kl.approval.', 'kl.device.', 'kl.audit.', 'kl.', 'kl.enroll.sub.']) {
+      assert.throws(() => box.registerType(prefix, { ttlMs: 1000 }), (e) => e.code === 'type_reserved', prefix);
+    }
+    box.registerType('kl.lease.', { ttlMs: 60000 });
+    assert.throws(() => box.put(node.nodeId, msg('kl.enroll.done')), (e) => e.code === 'type_not_routed');
   });
 
   it('refuses a malformed node id or to_device before either is stored', () => {
