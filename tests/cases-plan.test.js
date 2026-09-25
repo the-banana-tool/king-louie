@@ -168,4 +168,52 @@ describe('PlanStore', () => {
     const done = store.updateStep('s1', { state: 'done', note: 'filed' });
     assert.deepStrictEqual([done.status, done.steps[0].note], ['done', 'filed']);
   });
+
+  it('refuses an unknown state and writes nothing', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-plan-'));
+    dirs.push(dir);
+    const store = new PlanStore(dir);
+    store.write({ id: 'plan-001', status: 'approved', steps: [{ id: 's1', state: 'pending', jobIds: [] }] });
+    const r = store.updateStep('s1', { state: 'bogus' });
+    assert.deepStrictEqual(r, { ok: false, error: 'step s1: unknown state "bogus"' });
+    assert.deepStrictEqual(store.read().steps[0], { id: 's1', state: 'pending', jobIds: [] });
+  });
+
+  it('refuses to move a done step to another state', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-plan-'));
+    dirs.push(dir);
+    const store = new PlanStore(dir);
+    store.write({ id: 'plan-001', status: 'approved', steps: [{ id: 's1', state: 'done', jobIds: [] }] });
+    const r = store.updateStep('s1', { state: 'pending' });
+    assert.deepStrictEqual(r, { ok: false, error: 'step s1 is done and cannot move to pending' });
+    assert.strictEqual(store.read().steps[0].state, 'done');
+  });
+
+  it('refuses a new job on a cancelled step', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-plan-'));
+    dirs.push(dir);
+    const store = new PlanStore(dir);
+    store.write({ id: 'plan-001', status: 'approved', steps: [{ id: 's1', state: 'cancelled', jobIds: [] }] });
+    const r = store.updateStep('s1', { addJob: 'job-0002' });
+    assert.deepStrictEqual(r, { ok: false, error: 'step s1 is cancelled and cannot take a new job' });
+    assert.deepStrictEqual(store.read().steps[0].jobIds, []);
+  });
+
+  it('keeps plan.status consistent with its steps in both directions', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-plan-'));
+    dirs.push(dir);
+    const store = new PlanStore(dir);
+    store.write({
+      id: 'plan-001', status: 'approved',
+      steps: [{ id: 's1', state: 'pending', jobIds: [] }, { id: 's2', state: 'cancelled', jobIds: [] }]
+    });
+    const done = store.updateStep('s1', { state: 'done' });
+    assert.strictEqual(done.status, 'done', 'promotes to done once every step is terminal');
+
+    // A plan.json that disagrees with its own steps (e.g. hand-edited) must
+    // be corrected back down the next time updateStep touches it.
+    store.write({ id: 'plan-001', status: 'done', steps: [{ id: 's1', state: 'done', jobIds: [] }, { id: 's2', state: 'pending', jobIds: [] }] });
+    const corrected = store.updateStep('s2', { note: 'still working' });
+    assert.strictEqual(corrected.status, 'approved', 'demotes back to approved when a step is no longer terminal');
+  });
 });

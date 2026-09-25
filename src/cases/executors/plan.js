@@ -10,6 +10,9 @@ const {
 
 const STEP_UNITS = Object.freeze(['items', 'contacts', 'forms', 'pages']);
 const STEP_STATES = Object.freeze(['pending', 'in-flight', 'done', 'failed', 'cancelled']);
+// Not part of the module's public contract (task-5-brief.md's export list) —
+// used only inside PlanStore.updateStep to lock a finished step in place.
+const TERMINAL_STEP_STATES = new Set(['done', 'failed', 'cancelled']);
 const PLAN_STATUSES = Object.freeze(['proposed', 'approved', 'rejected', 'superseded', 'done']);
 const LATENCY_ORDER = Object.freeze(['interactive', 'async-minutes', 'async-hours', 'async-days']);
 const STEP_FIELDS = new Set(['id', 'title', 'description', 'dependsOn', 'priority', 'estimatedComplexity', 'executor', 'capability', 'serves', 'quantity', 'unit']);
@@ -257,17 +260,41 @@ class PlanStore {
     return `plan-${String(max + 1).padStart(3, '0')}`;
   }
 
+  // Fix round 1: a terminal step (done/failed/cancelled) is locked — it
+  // cannot move to a different state and cannot take a new job — and an
+  // unknown `state` is refused outright. Both refusals write nothing and
+  // return `{ ok: false, error }` instead of the plan (the success path
+  // below still returns the plan itself, unchanged, to keep the brief's
+  // tests — which read `.status`/`.steps[…]` straight off the return value
+  // — passing).
   updateStep(stepId, { state, addJob, note, reason } = {}) {
     const plan = this.read();
     if (!plan) return null;
     const step = (plan.steps || []).find((s) => s.id === stepId);
     if (!step) return plan;
+    if (state !== undefined && !STEP_STATES.includes(state)) {
+      return { ok: false, error: `step ${stepId}: unknown state "${state}"` };
+    }
+    const wasTerminal = TERMINAL_STEP_STATES.has(step.state);
+    if (wasTerminal && state !== undefined && state !== step.state) {
+      return { ok: false, error: `step ${stepId} is ${step.state} and cannot move to ${state}` };
+    }
+    if (wasTerminal && addJob) {
+      return { ok: false, error: `step ${stepId} is ${step.state} and cannot take a new job` };
+    }
     if (!Array.isArray(step.jobIds)) step.jobIds = [];
     if (addJob && !step.jobIds.includes(addJob)) step.jobIds.push(addJob);
     if (state) step.state = state;
     if (note !== undefined) step.note = note;
     if (reason !== undefined) step.reason = reason;
-    if (plan.status === 'approved' && plan.steps.every((s) => s.state === 'done' || s.state === 'cancelled')) plan.status = 'done';
+    // plan.status is derived from the steps, not stored independently: it
+    // is 'done' exactly when every step is done/cancelled and the plan was
+    // approved, recomputed both ways so it can never disagree with its
+    // steps (e.g. a hand-edited plan.json that says 'done' while a step is
+    // still open is corrected back to 'approved').
+    const allTerminal = plan.steps.every((s) => s.state === 'done' || s.state === 'cancelled');
+    if (plan.status === 'approved' && allTerminal) plan.status = 'done';
+    else if (plan.status === 'done' && !allTerminal) plan.status = 'approved';
     this.write(plan);
     return plan;
   }
