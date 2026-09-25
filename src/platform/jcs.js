@@ -21,7 +21,7 @@ function serializeString(s) {
   return JSON.stringify(s);
 }
 
-function serialize(value) {
+function serialize(value, ancestors) {
   if (value === null) return 'null';
   switch (typeof value) {
     case 'boolean':
@@ -33,15 +33,23 @@ function serialize(value) {
     case 'string':
       return serializeString(value);
     case 'object': {
-      // Array.from visits holes as undefined, which is refused below.
-      if (Array.isArray(value)) return `[${Array.from(value, serialize).join(',')}]`;
-      const proto = Object.getPrototypeOf(value);
-      if (proto !== Object.prototype && proto !== null) {
-        throw new JcsError('non_canonical_value', 'not a plain object');
+      // A container already on the current recursion path would recurse forever;
+      // the same container reached twice via different paths (no cycle) is fine.
+      if (ancestors.has(value)) throw new JcsError('non_canonical_value', 'circular reference');
+      ancestors.add(value);
+      try {
+        // Array.from visits holes as undefined, which is refused below.
+        if (Array.isArray(value)) return `[${Array.from(value, (v) => serialize(v, ancestors)).join(',')}]`;
+        const proto = Object.getPrototypeOf(value);
+        if (proto !== Object.prototype && proto !== null) {
+          throw new JcsError('non_canonical_value', 'not a plain object');
+        }
+        // Default sort compares UTF-16 code units, which is the RFC 8785 order.
+        const keys = Object.keys(value).sort();
+        return `{${keys.map((k) => `${serializeString(k)}:${serialize(value[k], ancestors)}`).join(',')}}`;
+      } finally {
+        ancestors.delete(value);
       }
-      // Default sort compares UTF-16 code units, which is the RFC 8785 order.
-      const keys = Object.keys(value).sort();
-      return `{${keys.map((k) => `${serializeString(k)}:${serialize(value[k])}`).join(',')}}`;
     }
     default:
       throw new JcsError('non_canonical_value', `unsupported type ${typeof value}`);
@@ -49,7 +57,7 @@ function serialize(value) {
 }
 
 function canonicalize(value) {
-  return serialize(value);
+  return serialize(value, new Set());
 }
 
 // base64url (no padding) of SHA-256 over the UTF-8 bytes of a string, or over a Buffer.

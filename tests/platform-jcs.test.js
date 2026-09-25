@@ -62,6 +62,23 @@ describe('canonicalize (RFC 8785)', () => {
     obj.k = cp(0x1f600);
     assert.equal(canonicalize(obj), `{"k":"${cp(0x1f600)}"}`);
   });
+
+  it('refuses a self-referencing object as a circular reference', () => {
+    const o = {};
+    o.self = o;
+    assert.throws(() => canonicalize(o), (err) => err instanceof JcsError && err.code === 'non_canonical_value');
+  });
+
+  it('refuses a self-referencing array as a circular reference', () => {
+    const a = [1];
+    a.push(a);
+    assert.throws(() => canonicalize(a), (err) => err instanceof JcsError && err.code === 'non_canonical_value');
+  });
+
+  it('still serializes a shared reference used twice without a cycle', () => {
+    const shared = { x: 1 };
+    assert.equal(canonicalize({ a: shared, b: shared }), '{"a":{"x":1},"b":{"x":1}}');
+  });
 });
 
 describe('sha256b64url', () => {
