@@ -1,0 +1,9 @@
+# Machine-local configuration and build output of the mobile apps.
+android/local.properties
+android/.gradle/
+android/.kotlin/
+android/**/build/
+android/app/src/fcm/google-services.json
+ios/KingLouie.xcodeproj/
+ios/KLProtocol/.build/
+ios/KLProtocol/.swiftpm/

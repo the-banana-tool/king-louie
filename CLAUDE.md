@@ -146,3 +146,7 @@ the e2e test), the owner check cannot tell them apart.
   and commit the files (`--check` must say `40 vectors match`). `tests/approvals-e2e.test.js` spawns real
   processes and runs on Windows or as root; on Windows it denies itself write access to a temp
   `approvers/` dir with `icacls` (as an installer's ACL would) and lifts the deny before cleanup.
+- Mobile apps (`mobile/`, built from `docs/protocol/approval-v1.md`): protocol-core tests are
+  `swift test` in `mobile/ios/KLProtocol` (macOS) and `../gradlew test` in `mobile/android/protocol`
+  (JDK 17, no Android SDK); both read `tests/vectors/approval-v1`. `mobile/PRIVACY.md` says what the
+  relay operator can see.
