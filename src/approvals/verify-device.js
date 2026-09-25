@@ -107,7 +107,10 @@ function verifyConsoleEnrollment(envelope, { codeId, code, now = Date.now(), all
   const expected = Buffer.from(enrollMac(code, withoutMac));
   const given = Buffer.from(String(mac));
   if (expected.length !== given.length || !crypto.timingSafeEqual(expected, given)) return fail('bad_mac');
-  if (now > Date.parse(message.expires_at)) return fail('expired');
+  // `!(now <= expires)` rather than `now > expires`: a NaN or otherwise
+  // non-number `now` makes both comparisons false, and the negated form is
+  // the one that fails closed (rejects as expired) in that case.
+  if (!(now <= Date.parse(message.expires_at))) return fail('expired');
   return { ok: true, message, deviceId: message.device.device_id };
 }
 

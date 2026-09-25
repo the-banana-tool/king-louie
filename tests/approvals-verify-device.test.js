@@ -97,6 +97,32 @@ describe('verifyDeviceEnvelope', () => {
     stores.push(s2);
     assert.deepEqual(verifyDeviceEnvelope(second.respond(request, 'deny'), { approverStore: s2, type: 'kl.approval.response', nodeId: opened.message.node_id, nonces }), { ok: false, reason: 'already_decided' });
   });
+
+  it('check-order: a revoked device with a bad signature is revoked_device, not bad_signature', async () => {
+    const revoked = createFakePhone();
+    const { request, verify } = await setup({
+      extraRecords: [revoked.approverRecord({ revokedAt: '2026-09-23T17:00:00.000Z', revokedBy: 'console' })]
+    });
+    const good = revoked.respond(request, 'approve');
+    const deny = revoked.respond(request, 'deny');
+    assert.deepEqual(verify({ ...good, sig: deny.sig }), { ok: false, reason: 'revoked_device' });
+  });
+
+  it('check-order: a wrong node with a bad signature is bad_signature, not wrong_node', async () => {
+    const { phone, verify } = await setup();
+    const elsewhere = m.buildRequest({ identity: testNodeIdentity({ nodeName: 'gpu-box' }), action: m.toolAction('Bash', { command: 'ls' }, null) }).envelope;
+    const good = phone.respond(elsewhere, 'approve');
+    const deny = phone.respond(elsewhere, 'deny');
+    assert.deepEqual(verify({ ...good, sig: deny.sig }), { ok: false, reason: 'bad_signature' });
+  });
+
+  it('an admin-revoked device is refused even with overlay:false', async () => {
+    const revoked = createFakePhone();
+    const { request, verify } = await setup({
+      extraRecords: [revoked.approverRecord({ revokedAt: '2026-09-23T17:00:00.000Z', revokedBy: 'console' })]
+    });
+    assert.deepEqual(verify(revoked.respond(request, 'approve'), { overlay: false }), { ok: false, reason: 'revoked_device' });
+  });
 });
 
 describe('NonceCache', () => {
@@ -107,6 +133,7 @@ describe('NonceCache', () => {
     cache.add('b', 'y');
     cache.add('c', 'z');
     assert.equal(cache.get('a'), null);
+    assert.deepEqual(cache.get('b'), { sha256: 'y' });
     assert.deepEqual(cache.get('c'), { sha256: 'z' });
     now = 2000;
     assert.equal(cache.get('b'), null);
@@ -133,5 +160,22 @@ describe('verifyConsoleEnrollment', () => {
     const other = createFakePhone();
     const signedByOther = seal({ ...JSON.parse(fromB64url(phone.enroll({ codeId, code }).payload)) }, { ...other.signer, kid: phone.deviceId });
     assert.deepEqual(verifyConsoleEnrollment(signedByOther, { codeId, code }), { ok: false, reason: 'bad_signature' });
+  });
+
+  it('fails closed (expired) when now is NaN', () => {
+    const phone = createFakePhone();
+    const envelope = phone.enroll({ codeId, code });
+    assert.deepEqual(verifyConsoleEnrollment(envelope, { codeId, code, now: NaN }), { ok: false, reason: 'expired' });
+  });
+
+  it('refuses a demo device', () => {
+    const demo = createFakePhone({ platform: 'demo' });
+    assert.deepEqual(verifyConsoleEnrollment(demo.enroll({ codeId, code }), { codeId, code }), { ok: false, reason: 'demo_device' });
+  });
+
+  it('a relayed enrollment (non-null enrolled_by) is malformed here: only the console path is checked', () => {
+    const phone = createFakePhone();
+    const relayed = phone.enroll({}); // no codeId → enrolled_by is the phone's own device id, not null
+    assert.deepEqual(verifyConsoleEnrollment(relayed, { codeId, code }), { ok: false, reason: 'malformed' });
   });
 });
