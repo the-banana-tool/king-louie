@@ -63,6 +63,45 @@ function recordOneShotUsage(runtime, turn, reply) {
 
 const dueLines = (due) => due.map((w) => `- ${w.id} ${w.kind}${w.payload?.key ? ` (${w.payload.key})` : ''}, due ${w.nextAt}`);
 
+// Every failure path — inside a live turn, inside the sweep, or a case this
+// process never managed to lock at all — converges here. Safe to call
+// whether or not this process already holds the case's lock: `systemAction`
+// runs inline (no extra commit) when it does, and acquires + commits a
+// fresh system turn when it does not. Never throws (a wake-up failure must
+// never break the tick for other cases).
+//
+// `ids`, when falsy or empty, falls back to whatever the wake-up store
+// currently reports due — the caller may be reporting a failure that
+// happened before it had a due list of its own (a sweep that crashed, or a
+// turn that never opened).
+async function markWakeupsFailed(runtime, caseId, ids, err, title) {
+  const message = err?.message || String(err);
+  try {
+    await runtime.systemAction(caseId, 'wake-up failed', () => {
+      const now = runtime.now();
+      const store = runtime.wakeups(caseId);
+      const targets = Array.isArray(ids) && ids.length ? ids : store.due(now).map((w) => w.id);
+      if (!targets.length) return;
+      for (const id of targets) store.markRan(id, { outcome: 'failed', error: message, now });
+      const attempts = Math.max(0, ...targets.map((id) => store.list().find((w) => w.id === id)?.attempts || 0));
+      if (attempts >= 3) {
+        try {
+          runtime.createQuestion(caseId, {
+            kind: 'briefing',
+            urgency: 'normal',
+            text: `${title}: wake-ups have failed ${attempts} times in a row (${oneLine(message, 160)}). The case keeps retrying with backoff.`,
+            payload: { type: 'wakeups-failing', key: 'wakeups-failing', mcpAnswerable: false }
+          }, { charge: false });
+        } catch (e) {
+          log.warn(`Could not brief about failing wake-ups on ${caseId}: ${e.message}`);
+        }
+      }
+    });
+  } catch (e) {
+    log.warn(`Could not mark failed wake-ups on case ${caseId}: ${e.message}`);
+  }
+}
+
 // Runs inside systemAction('sweep'): housekeeping every case gets each tick,
 // then the ids of the due wake-ups that need a turn.
 async function sweepCase(runtime, id, now) {
@@ -80,13 +119,14 @@ async function sweepCase(runtime, id, now) {
   const status = runtime.getCase(meta.id).status;
   if (status === 'done' || status === 'abandoned') {
     store.cancelAll();
-    return { due: [], quiet: 0 };
+    return { due: [], quiet: 0, failed: 0 };
   }
-  if (status === 'draft' || status === 'paused') return { due: [], quiet: 0 };
+  if (status === 'draft' || status === 'paused') return { due: [], quiet: 0, failed: 0 };
 
   const registry = typeof runtime.host?.getExecutorRegistry === 'function' ? runtime.host.getExecutorRegistry() : null;
   const due = [];
   let quiet = 0;
+  let failed = 0;
   for (const w of store.due(now)) {
     if (w.kind === 'deadline-check') {
       if (newDeadline.some((t) => t >= 80)) due.push(w.id);
@@ -102,7 +142,8 @@ async function sweepCase(runtime, id, now) {
         try {
           material = Boolean((await registry.pollWakeup(meta.id, w))?.material);
         } catch (err) {
-          store.markRan(w.id, { outcome: 'failed', error: err.message, now });
+          await markWakeupsFailed(runtime, meta.id, [w.id], err, meta.title);
+          failed += 1;
           continue;
         }
       }
@@ -116,7 +157,7 @@ async function sweepCase(runtime, id, now) {
     if (status === 'needs-direction') continue;
     due.push(w.id);
   }
-  return { due, quiet };
+  return { due, quiet, failed };
 }
 
 async function runWakeupTurn(runtime, caseId, dueIds, now = runtime.now()) {
@@ -130,6 +171,10 @@ async function runWakeupTurn(runtime, caseId, dueIds, now = runtime.now()) {
     throw err;
   }
   let closed = false;
+  // Hoisted above the inner try, falling back to the caller's due set: a
+  // failure before `due`/`ids` are recomputed below (or the outer catch
+  // itself) must still have something to mark failed.
+  let ids = dueIds;
   const close = async (outcome, journal, summary) => {
     if (closed) return { outcome };
     closed = true;
@@ -146,7 +191,7 @@ async function runWakeupTurn(runtime, caseId, dueIds, now = runtime.now()) {
     // Another process may have run them while this one waited for the lock.
     const due = store.due(now).filter((w) => dueIds.includes(w.id));
     if (!due.length) return await close('none', null, 'wake-up: nothing due');
-    const ids = due.map((w) => w.id);
+    ids = due.map((w) => w.id);
     const mark = (outcome, error = null) => {
       for (const id of ids) store.markRan(id, { outcome, error, now: runtime.now() });
     };
@@ -154,23 +199,10 @@ async function runWakeupTurn(runtime, caseId, dueIds, now = runtime.now()) {
       mark('skipped');
       return close('skipped', `skipped: ${why}`, `wake-up skipped: ${why}`);
     };
-    const failed = (err) => {
+    const failed = async (err) => {
       if (turn.signal.aborted) return skipped(String(turn.signal.reason || 'aborted'));
       const message = err?.message || String(err);
-      mark('failed', message);
-      const attempts = Math.max(0, ...ids.map((id) => store.list().find((w) => w.id === id)?.attempts || 0));
-      if (attempts >= 3) {
-        try {
-          runtime.createQuestion(caseId, {
-            kind: 'briefing',
-            urgency: 'normal',
-            text: `${turn.title}: wake-ups have failed ${attempts} times in a row (${oneLine(message, 160)}). The case keeps retrying with backoff.`,
-            payload: { type: 'wakeups-failing', key: 'wakeups-failing', mcpAnswerable: false }
-          }, { charge: false });
-        } catch (e) {
-          log.warn(`Could not brief about failing wake-ups on ${caseId}: ${e.message}`);
-        }
-      }
+      await markWakeupsFailed(runtime, caseId, ids, err, turn.title);
       return close('failed', `failed: ${oneLine(message, 300)}`, 'wake-up failed');
     };
 
@@ -237,6 +269,7 @@ async function runWakeupTurn(runtime, caseId, dueIds, now = runtime.now()) {
     }
   } catch (err) {
     log.warn(`Wake-up turn on case ${caseId} failed: ${err.message}`);
+    await markWakeupsFailed(runtime, caseId, ids, err, turn.title);
     return close('failed', `failed: ${oneLine(err.message, 300)}`, 'wake-up failed');
   }
 }
@@ -247,8 +280,18 @@ async function runDueWakeups(runtime, now = runtime.now()) {
   if (!cfg.enabled || !runtime.host) return counts;
   // A case being created has no first commit; sweeping it now would break `createCase`.
   if (runtime.creating) return counts;
+  const cases = runtime.listCases();
+  if (!cases.length) return counts;
+  // Rotate the starting case each tick so that when more cases are due than
+  // `maxCasesPerTick`, the same handful at the front of the list cannot
+  // starve the rest forever: the cursor persists on the runtime across
+  // ticks and always starts just past whichever case last used a turn slot.
+  const cursor = Number.isInteger(runtime._wakeupCursor) ? ((runtime._wakeupCursor % cases.length) + cases.length) % cases.length : 0;
+  const ordered = [...cases.slice(cursor), ...cases.slice(0, cursor)];
   let turns = 0;
-  for (const meta of runtime.listCases()) {
+  let lastServed = -1;
+  for (let i = 0; i < ordered.length; i += 1) {
+    const meta = ordered[i];
     // An owner is mid-turn on this case in this process: leave it alone.
     if (runtime.turns.has(meta.id)) {
       counts.busy += 1;
@@ -258,25 +301,28 @@ async function runDueWakeups(runtime, now = runtime.now()) {
     try {
       sweep = await runtime.systemAction(meta.id, 'sweep', () => sweepCase(runtime, meta.id, now));
     } catch (err) {
-      if (err && err.code === 'CASE_BUSY') counts.busy += 1;
-      else {
-        log.warn(`Wake-up sweep failed for case ${meta.slug}: ${err.message}`);
-        counts.failed += 1;
-      }
+      if (err && err.code === 'CASE_BUSY') { counts.busy += 1; continue; }
+      log.warn(`Wake-up sweep failed for case ${meta.slug}: ${err.message}`);
+      await markWakeupsFailed(runtime, meta.id, null, err, meta.title);
+      counts.failed += 1;
       continue;
     }
     counts.quiet += sweep.quiet;
+    counts.failed += sweep.failed || 0;
     if (!sweep.due.length || turns >= cfg.maxCasesPerTick) continue;
     turns += 1;
+    lastServed = i;
     try {
       const { outcome } = await runWakeupTurn(runtime, meta.id, sweep.due, now);
       if (outcome === 'acted') counts.ran += 1;
       else if (Object.prototype.hasOwnProperty.call(counts, outcome)) counts[outcome] += 1;
     } catch (err) {
       log.warn(`Wake-up turn failed for case ${meta.slug}: ${err.message}`);
+      await markWakeupsFailed(runtime, meta.id, sweep.due, err, meta.title);
       counts.failed += 1;
     }
   }
+  if (lastServed >= 0) runtime._wakeupCursor = (cursor + lastServed + 1) % cases.length;
   return counts;
 }
 

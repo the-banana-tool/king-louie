@@ -10,6 +10,8 @@ const ToolExecutor = require('../src/execution/tool-executor');
 const AgentLoop = require('../src/execution/agent-loop');
 const { CaseRuntime } = require('../src/cases');
 const { CASE_TOOL_NAMES } = require('../src/cases/chat-integration');
+const { WakeupStore } = require('../src/cases/wakeups');
+const { Budget } = require('../src/cases/budget');
 const { parseOrient } = require('../src/cases/turn-runner');
 
 initializeTools();
@@ -289,5 +291,196 @@ describe('runDueWakeups', () => {
     dueWakeup(off.runtime, d, off.clock);
     assert.deepStrictEqual(await off.runtime.runDueWakeups(off.clock.now), zero);
     assert.strictEqual(off.calls.orient, 0);
+  });
+
+  // Fix round 1 (controller ruling): every failure path must mark the due
+  // wake-up (backoff, and a three-strike briefing), not just the ones a
+  // model actually got a turn for. Each of the three origins below is
+  // exercised once; the full 5/15/60-minute, three-strike cycle is already
+  // covered end to end by "orient provider down" above, so these focus on
+  // the origin, not re-proving the backoff schedule.
+
+  it('beginTurn failing outright (not busy) still marks the due wake-up, with backoff and a three-strike briefing', async () => {
+    const { runtime, clock } = harness();
+    const c = await activeCase(runtime);
+    const id = dueWakeup(runtime, c, clock);
+    // beginTurn calls this.orientation(...) near the end of its own try
+    // block; a throw there is a non-busy beginTurn failure that propagates
+    // out of runWakeupTurn entirely (it never opens its own try), and must
+    // be caught by runDueWakeups.
+    runtime.orientation = () => { throw new Error('orientation boom'); };
+    const failing = () => runtime.questions(c.id).open().filter((q) => q.payload.type === 'wakeups-failing');
+    assert.deepStrictEqual(await runtime.runDueWakeups(clock.now), { ...zero, failed: 1 });
+    let w = runtime.wakeups(c.id).list().find((x) => x.id === id);
+    assert.deepStrictEqual([w.attempts, w.nextAt], [1, new Date(clock.now.getTime() + 5 * MIN).toISOString()]);
+    assert.deepStrictEqual(failing(), []);
+    for (const minutes of [5, 15]) {
+      advance(clock, minutes * MIN);
+      assert.deepStrictEqual(await runtime.runDueWakeups(clock.now), { ...zero, failed: 1 });
+    }
+    w = runtime.wakeups(c.id).list().find((x) => x.id === id);
+    assert.strictEqual(w.attempts, 3);
+    assert.strictEqual(failing().length, 1);
+  });
+
+  it('a due-list lookup failing inside runWakeupTurn (before ids is recomputed) still marks the caller-supplied ids failed', async () => {
+    const { runtime, clock } = harness();
+    const c = await activeCase(runtime);
+    const id = dueWakeup(runtime, c, clock);
+    // sweepCase's own store.due(now) call must succeed (it is what makes the
+    // wake-up due in the first place); only runWakeupTurn's later call to
+    // store.due(now) — before `ids` would normally be recomputed from it —
+    // fails. `ids` must then fall back to the caller's dueIds.
+    const realDue = WakeupStore.prototype.due;
+    let n = 0;
+    WakeupStore.prototype.due = function patchedDue(...args) {
+      n += 1;
+      if (n === 2) throw new Error('due() boom');
+      return realDue.apply(this, args);
+    };
+    try {
+      assert.deepStrictEqual(await runtime.runDueWakeups(clock.now), { ...zero, failed: 1 });
+    } finally {
+      WakeupStore.prototype.due = realDue;
+    }
+    const w = runtime.wakeups(c.id).list().find((x) => x.id === id);
+    assert.deepStrictEqual([w.lastOutcome, w.attempts], ['failed', 1]);
+  });
+
+  it('a sweep that throws outright still marks whatever is due, inside a systemAction', async () => {
+    const { runtime, clock } = harness();
+    const c = await activeCase(runtime);
+    const id = dueWakeup(runtime, c, clock);
+    // Break sweepCase itself (after it has resolved the case and the store,
+    // so this is not just another getCase failure) so it never returns a
+    // due list at all.
+    const realReconcile = Budget.prototype.reconcile;
+    let n = 0;
+    Budget.prototype.reconcile = function patchedReconcile(...args) {
+      n += 1;
+      if (n === 1) throw new Error('reconcile boom');
+      return realReconcile.apply(this, args);
+    };
+    try {
+      assert.deepStrictEqual(await runtime.runDueWakeups(clock.now), { ...zero, failed: 1 });
+    } finally {
+      Budget.prototype.reconcile = realReconcile;
+    }
+    const w = runtime.wakeups(c.id).list().find((x) => x.id === id);
+    assert.deepStrictEqual([w.lastOutcome, w.attempts], ['failed', 1]);
+  });
+
+  it('poll-executor failures count in counts.failed and escalate after three attempts', async () => {
+    const registry = { pollWakeup: async () => { throw new Error('poll boom'); }, cancelOpenJobs: () => {} };
+    const { runtime, clock } = harness({ host: { getExecutorRegistry: () => registry } });
+    const c = await activeCase(runtime);
+    const id = runtime.wakeups(c.id).register({ kind: 'poll-executor', every: 5 * MIN, payload: { key: 'phone-agent' } });
+    advance(clock, 5 * MIN);
+    const failing = () => runtime.questions(c.id).open().filter((q) => q.payload.type === 'wakeups-failing');
+    assert.deepStrictEqual(await runtime.runDueWakeups(clock.now), { ...zero, failed: 1 });
+    let w = runtime.wakeups(c.id).list().find((x) => x.id === id);
+    assert.strictEqual(w.attempts, 1);
+    for (const minutes of [5, 15]) {
+      advance(clock, minutes * MIN);
+      assert.deepStrictEqual(await runtime.runDueWakeups(clock.now), { ...zero, failed: 1 });
+    }
+    w = runtime.wakeups(c.id).list().find((x) => x.id === id);
+    assert.strictEqual(w.attempts, 3);
+    assert.strictEqual(failing().length, 1);
+  });
+
+  it('rotates the starting case across ticks so maxCasesPerTick cannot starve later cases', async () => {
+    const { runtime, clock } = harness({ settings: { wakeups: { maxCasesPerTick: 1 } } });
+    const a = await activeCase(runtime, 'Case A');
+    const b = await activeCase(runtime, 'Case B');
+    const qa = runtime.createQuestion(a.id, { kind: 'question', text: 'A well?', urgency: 'normal' });
+    await runtime.answerQuestion(a.id, qa.id, { channel: 'in-app', text: 'Yes' });
+    const qb = runtime.createQuestion(b.id, { kind: 'question', text: 'B well?', urgency: 'normal' });
+    await runtime.answerQuestion(b.id, qb.id, { channel: 'in-app', text: 'Yes' });
+    advance(clock, MIN);
+    const first = await runtime.runDueWakeups(clock.now);
+    assert.strictEqual(first.ran, 1);
+    const second = await runtime.runDueWakeups(clock.now);
+    assert.strictEqual(second.ran, 1);
+    // Each active case also carries a daily-orientation wake-up (not due for
+    // ~24h), so check for the retry specifically rather than an empty list.
+    assert.strictEqual(runtime.wakeups(a.id).list().some((w) => w.kind === 'retry'), false, 'case A got its turn');
+    assert.strictEqual(runtime.wakeups(b.id).list().some((w) => w.kind === 'retry'), false, 'case B got its turn too, within two ticks');
+  });
+
+  it('maxCasesPerTick limits turns per tick, leaving the rest due for later', async () => {
+    const { runtime, clock, calls } = harness({ settings: { wakeups: { maxCasesPerTick: 2 } } });
+    const cases = [];
+    for (let i = 0; i < 3; i += 1) {
+      const c = await activeCase(runtime, `Case ${i}`);
+      const q = runtime.createQuestion(c.id, { kind: 'question', text: `Q${i}?`, urgency: 'normal' });
+      await runtime.answerQuestion(c.id, q.id, { channel: 'in-app', text: 'Yes' });
+      cases.push(c);
+    }
+    advance(clock, MIN);
+    const result = await runtime.runDueWakeups(clock.now);
+    assert.strictEqual(result.ran, 2, 'exactly the cap ran this tick');
+    assert.strictEqual(calls.orient, 0, 'answered-question retries skip orient');
+    // Each active case also carries a daily-orientation wake-up (not due),
+    // so check for the retry specifically rather than a non-empty list.
+    const remaining = cases.filter((c) => runtime.wakeups(c.id).list().some((w) => w.kind === 'retry'));
+    assert.strictEqual(remaining.length, 1, 'the case past the cap is still waiting for a turn');
+  });
+
+  it("another process's lock counts busy and leaves the wake-up untouched", async () => {
+    const { runtime, clock, calls } = harness();
+    const c = await activeCase(runtime);
+    const id = dueWakeup(runtime, c, clock);
+    const lockPath = path.join(c.dir, '.kl', 'lock');
+    fs.writeFileSync(lockPath, JSON.stringify({ turnId: 'other', pid: process.ppid, at: new Date().toISOString() }));
+    try {
+      assert.deepStrictEqual(await runtime.runDueWakeups(clock.now), { ...zero, busy: 1 });
+    } finally {
+      fs.rmSync(lockPath, { force: true });
+    }
+    assert.strictEqual(calls.orient, 0);
+    assert.strictEqual(runtime.wakeups(c.id).list().find((w) => w.id === id).lastOutcome, null);
+  });
+
+  it('returns zeros while a case is still being created', async () => {
+    const { runtime, clock, calls } = harness();
+    const c = await activeCase(runtime);
+    dueWakeup(runtime, c, clock);
+    runtime.creating = 1;
+    try {
+      assert.deepStrictEqual(await runtime.runDueWakeups(clock.now), zero);
+    } finally {
+      runtime.creating = 0;
+    }
+    assert.strictEqual(calls.orient, 0);
+  });
+
+  it('a draft or paused case gets no turn at sweep time', async () => {
+    const { runtime, clock } = harness();
+    const draft = await runtime.createCase({ title: 'Draft case', objective: 'Not gated yet' });
+    runtime.wakeups(draft.id).register({ kind: 'retry', at: clock.now.toISOString(), payload: { key: 'draft' } });
+    const c = await activeCase(runtime, 'Paused case');
+    runtime.setStatus(c.id, 'paused', { kind: 'owner', by: 'owner' });
+    runtime.wakeups(c.id).register({ kind: 'retry', at: clock.now.toISOString(), payload: { key: 'paused' } });
+    advance(clock, MIN);
+    assert.deepStrictEqual(await runtime.runDueWakeups(clock.now), zero);
+    // The active case also carries a daily-orientation wake-up, so check the
+    // registered retry specifically rather than the raw list length.
+    const draftRetry = runtime.wakeups(draft.id).list().find((w) => w.payload?.key === 'draft');
+    const pausedRetry = runtime.wakeups(c.id).list().find((w) => w.payload?.key === 'paused');
+    assert.ok(draftRetry && draftRetry.lastOutcome === null, 'the draft case wake-up is untouched');
+    assert.ok(pausedRetry && pausedRetry.lastOutcome === null, 'the paused case wake-up is untouched');
+  });
+
+  it('after a judge-loop throw, the lock is released and runtime.turns is empty', async () => {
+    const { runtime, clock } = harness({ judge: [() => { throw new Error('judge boom'); }] });
+    const c = await activeCase(runtime);
+    const id = dueWakeup(runtime, c, clock);
+    assert.deepStrictEqual(await runtime.runDueWakeups(clock.now), { ...zero, failed: 1 });
+    assert.strictEqual(runtime.turns.size, 0);
+    assert.strictEqual(fs.existsSync(path.join(c.dir, '.kl', 'lock')), false);
+    assert.strictEqual(await git.isDirty(c.dir), false);
+    const w = runtime.wakeups(c.id).list().find((x) => x.id === id);
+    assert.deepStrictEqual([w.lastOutcome, w.attempts], ['failed', 1]);
   });
 });
