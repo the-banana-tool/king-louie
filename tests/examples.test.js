@@ -862,3 +862,22 @@ describe('install guide', () => {
     }
   });
 });
+
+describe('packaging and docs', () => {
+  it('keeps examples/ out of the desktop app build', () => {
+    const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+    assert.ok(pkg.build.files.includes('!examples/**'), JSON.stringify(pkg.build.files));
+  });
+
+  it('points readers at the examples and the guide', () => {
+    const readme = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
+    const service = readme.indexOf('## Running as a Service');
+    const section = readme.indexOf('### Fleet setup and examples');
+    const next = readme.indexOf('## Supported Providers');
+    assert.ok(service !== -1 && section > service && section < next, 'the README section sits at the end of Running as a Service');
+    assert.ok(readme.includes('(docs/install-guide.md)'));
+    const claude = fs.readFileSync(path.join(ROOT, 'CLAUDE.md'), 'utf8');
+    assert.match(claude, /^## Examples$/m);
+    assert.ok(claude.includes('tests/helpers/example-denylist.js'));
+  });
+});

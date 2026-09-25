@@ -388,6 +388,21 @@ Linux and macOS already have this: the installer creates a dedicated
 `king-louie` / `--user <account>` service account, and nothing else on the
 machine runs as it.
 
+### Fleet setup and examples
+
+`examples/` holds a complete, invented fleet: `node.yaml` and `service.json`
+for four roles (`gpu-box`, `laptop`, `mac`, `web-01`), six runbooks, the
+sudoers file and Windows ACL script those runbooks need, and Claude Desktop
+configs that start the stdio MCP server in a pinned working directory.
+[docs/install-guide.md](docs/install-guide.md) walks through setting up a node
+from them: the service, the admin-owned config dirs, the privileges, `doctor`,
+and a first runbook over stdio MCP.
+
+`doctor` also checks every runbook step's program: that it is an absolute
+path that exists and is not a `.cmd`/`.bat` file, and, on Linux and macOS,
+that each `sudo -n` step is allowed by sudoers (`sudo -n -l`, which lists and
+never runs). Run it as the account that runs the runbooks.
+
 ## Supported Providers
 
 | Provider | Models | Local |
