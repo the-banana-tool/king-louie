@@ -1,0 +1,19 @@
+# gpu-box (Windows, profile agent). Install to C:\KingLouie\mcp\config\runbooks\.
+# `config` names one of the Administrators-written files in D:\train\configs,
+# which the runner can read but not change, so a routine caller cannot pick a
+# file that it, an agent session or models.hf_download wrote.
+# While this runbook is routine, D:\train\train.py must not load pickled
+# weights or trust_remote_code models from D:\models or any other folder the
+# runner can write. A script that does must be run by an unsafe runbook.
+name: train.run
+description: Run D:\train\train.py with D:\train\configs\<config>.json (admin-owned configs only).
+tier: routine
+params:
+  config:    { type: string, pattern: '^(?!(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][0-9]|[Ll][Pp][Tt][0-9])$)[A-Za-z0-9][A-Za-z0-9_-]{0,63}$' }
+  epochs:    { type: integer, min: 1, max: 1000, default: 1 }
+  precision: { type: enum, values: [fp32, fp16, bf16], default: bf16 }
+  resume:    { type: boolean, default: false }
+steps:
+  - run: ['C:\KingLouie\tools\py\Scripts\python.exe', 'D:\train\train.py', --config, 'D:\train\configs\{{config}}.json', --epochs, '{{epochs}}', --precision, '{{precision}}', '--resume={{resume}}']
+timeout_s: 43200
+rate_limit: { max: 4, per: 1d }

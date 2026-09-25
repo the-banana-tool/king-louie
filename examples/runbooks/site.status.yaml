@@ -1,0 +1,15 @@
+# web-01 (Linux, profile runbook). Install to /opt/king-louie/mcp/config/runbooks/.
+# Read tier: runs at once over stdio MCP. A failed job means the site is not
+# healthy: /healthz did not answer 200, or `systemctl is-active` exited 3
+# because site.service is not active. The health check runs first, so its
+# evidence is recorded even when the unit is inactive.
+name: site.status
+description: Deployed commit, /healthz, then whether site.service is active (exit 3 = inactive, job fails).
+tier: read
+params: {}
+steps:
+  - run: [/usr/bin/git, -C, /srv/site, log, '-1', '--format=%H %cI %s']
+  - check: { http_get: 'http://127.0.0.1:8080/healthz', expect_status: 200, retries: 1 }
+  - run: [/usr/bin/systemctl, is-active, site.service]
+timeout_s: 30
+rate_limit: { max: 60, per: 1h }

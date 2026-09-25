@@ -131,3 +131,126 @@ describe('personal-value denylist', () => {
     assert.deepEqual(problems, []);
   });
 });
+
+const REF_PATTERN = String.raw`^(main|release/[A-Za-z0-9][A-Za-z0-9._-]{0,39}|v[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4})$`;
+const FOLDER_NAME = String.raw`^(?!(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][0-9]|[Ll][Pp][Tt][0-9])$)[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`;
+const STRING_PATTERNS = {
+  'site.status': {},
+  'site.pull_and_restart': { ref: REF_PATTERN },
+  'server.reboot': {},
+  'models.hf_download': {
+    repo: String.raw`^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$`,
+    revision: String.raw`^(main|[0-9a-f]{40}|v[0-9]{1,4}(\.[0-9]{1,4}){0,2})$`,
+    dest: FOLDER_NAME
+  },
+  'train.run': { config: FOLDER_NAME },
+  'laptop.build_then_deploy': { ref: REF_PATTERN }
+};
+const VALID_PARAMS = {
+  'site.status': {},
+  'site.pull_and_restart': { ref: 'release/2.1' },
+  'server.reboot': {},
+  'models.hf_download': { repo: 'example-org/example-model', revision: 'v1.2', dest: 'example' },
+  'train.run': { config: 'base' },
+  'laptop.build_then_deploy': { ref: 'v1.2.3' }
+};
+const HOSTILE_VALUES = [
+  'x;id', '$(id)', '`id`', '../x', 'a\u2215b', 'a\uFF0Fb', 'a\u0000b', '-oProxyCommand=x',
+  'main\n', 'a b', '', 'a'.repeat(200), '\uFF4D\uFF41\uFF49\uFF4E', 'CON', 'nul'
+];
+
+// All six runbooks in one admin-owned dir, loaded by the real engine.
+function loadAllRunbooks() {
+  const dir = path.join(tmp(), 'config', 'runbooks');
+  installInto(dir, runbookFiles().map((f) => path.join(RUNBOOKS, f)));
+  const engine = new RunbookEngine({ runbooksDir: dir, allowedRoots: [], ...adminOpts });
+  engine.loadRunbooks();
+  return engine;
+}
+
+describe('example runbooks: shape', () => {
+  it('ships exactly the six runbooks of spec §3.3, and the engine loads them all', () => {
+    assert.deepEqual(runbookFiles(), Object.keys(STRING_PATTERNS).map((n) => `${n}.yaml`).sort());
+    assert.equal(loadAllRunbooks().runbooks.size, 6);
+  });
+
+  for (const name of Object.keys(STRING_PATTERNS)) {
+    it(`${name}: absolute programs, anchored patterns, no path params, rate limited`, () => {
+      const rb = parseYaml(fs.readFileSync(path.join(RUNBOOKS, `${name}.yaml`), 'utf8'));
+      assert.equal(rb.name, name);
+      assert.ok(rb.rate_limit && Number.isInteger(rb.rate_limit.max) && rb.rate_limit.max > 0, 'rate_limit');
+      rb.steps.forEach((step, i) => {
+        assert.equal(('run' in step) + ('check' in step), 1, `step ${i + 1} must be exactly one of run or check`);
+        if (!step.run) return;
+        const argv0 = step.run[0];
+        assert.ok(path.win32.isAbsolute(argv0) || path.posix.isAbsolute(argv0), `step ${i + 1}: ${argv0} is not absolute`);
+        assert.ok(!argv0.includes('{{'), `step ${i + 1}: the program is a parameter`);
+      });
+      const patterns = {};
+      for (const [pName, p] of Object.entries(rb.params || {})) {
+        assert.notEqual(p.type, 'path', `${pName}: examples use no path params (spec D3)`);
+        if (p.type !== 'string') continue;
+        assert.ok(p.pattern.startsWith('^') && p.pattern.endsWith('$'), `${pName} pattern is not anchored`);
+        assert.equal(new RegExp(p.pattern).test('-x'), false, `${pName} accepts a leading "-"`);
+        patterns[pName] = p.pattern;
+      }
+      assert.deepEqual(patterns, STRING_PATTERNS[name]);
+    });
+  }
+
+  it('train.run passes nothing under a runner-writable root to the training script', () => {
+    const rb = parseYaml(fs.readFileSync(path.join(RUNBOOKS, 'train.run.yaml'), 'utf8'));
+    for (const step of rb.steps.filter((s) => s.run)) {
+      for (const arg of step.run) {
+        for (const root of ['D:\\models', 'D:\\datasets', 'D:\\ML Data']) {
+          assert.ok(!arg.startsWith(root), `${arg} starts with ${root}`);
+        }
+      }
+    }
+  });
+
+  it('laptop.build_then_deploy keeps the stage-4 hook commented out under its marker', () => {
+    const lines = fs.readFileSync(path.join(RUNBOOKS, 'laptop.build_then_deploy.yaml'), 'utf8').split(/\r?\n/);
+    const marker = lines.indexOf('  # ---- stage-4 hook (fleet stage 4 adds a cross-node step kind) ----');
+    assert.notEqual(marker, -1, 'marker line missing');
+    assert.ok(
+      lines.slice(marker + 1).some((l) => l === "  # - call: { machine: web-01, runbook: site.pull_and_restart, params: { ref: '{{ref}}' } }"),
+      'commented call step missing'
+    );
+    assert.ok(!lines.some((l) => /^\s*-\s*call:/.test(l)), 'no live call: step until fleet stage 4');
+  });
+
+  it('train.py is a stdlib-only stand-in that writes only under D:\\train\\runs', () => {
+    const text = fs.readFileSync(path.join(EXAMPLES, 'scripts', 'train.py'), 'utf8');
+    const imports = [...text.matchAll(/^(?:import|from) (\w+)/gm)].map((m) => m[1]).sort();
+    assert.deepEqual(imports, ['argparse', 'json', 'pathlib', 're', 'sys', 'time']);
+    assert.ok(text.includes('RUNS_ROOT = pathlib.Path(r"D:\\train\\runs")'));
+    assert.ok(!/getcwd|chdir|import pickle|torch/.test(text));
+  });
+});
+
+describe('example runbooks: parameter injection', () => {
+  const engine = fs.existsSync(RUNBOOKS) ? loadAllRunbooks() : null;
+  for (const [name, patterns] of Object.entries(STRING_PATTERNS)) {
+    for (const [pName, pattern] of Object.entries(patterns)) {
+      const hostile = pattern === FOLDER_NAME ? [...HOSTILE_VALUES, 'a.b'] : HOSTILE_VALUES;
+      it(`${name}.${pName} rejects every hostile value`, () => {
+        for (const bad of hostile) {
+          assert.throws(
+            () => engine.validateParameters(name, { ...VALID_PARAMS[name], [pName]: bad }),
+            (err) => err.code === 'invalid_params' && err.message.startsWith(`Parameter "${pName}"`),
+            `${JSON.stringify(bad)} was accepted`
+          );
+        }
+      });
+      it(`${name}.${pName} accepts a valid sample and its default`, () => {
+        assert.equal(engine.validateParameters(name, VALID_PARAMS[name])[pName], VALID_PARAMS[name][pName]);
+        const def = engine.getRunbook(name).params[pName].default;
+        if (def !== undefined) {
+          const { [pName]: _omitted, ...rest } = VALID_PARAMS[name];
+          assert.equal(engine.validateParameters(name, rest)[pName], def);
+        }
+      });
+    }
+  }
+});

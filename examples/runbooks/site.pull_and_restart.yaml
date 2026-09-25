@@ -1,0 +1,22 @@
+# web-01 (Linux, profile runbook). Install to /opt/king-louie/mcp/config/runbooks/.
+# Unsafe: it changes production. Denied over MCP until fleet stage 3 brings
+# phone approval. `fetch origin <ref>` then `checkout --detach FETCH_HEAD`
+# treats a branch and a tag the same way and never merges. A force-pushed
+# main therefore deploys without complaint: protect main on the remote.
+# The sudo step must match examples/sudoers/king-louie-web-01 exactly.
+name: site.pull_and_restart
+description: Fetch a ref, check it out detached, rebuild, restart site.service, confirm /healthz.
+tier: unsafe   # changes production (parent Q4)
+params:
+  ref:
+    type: string
+    pattern: '^(main|release/[A-Za-z0-9][A-Za-z0-9._-]{0,39}|v[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4})$'
+    default: main
+steps:
+  - run: [/usr/bin/git, -C, /srv/site, fetch, --prune, origin, '{{ref}}']
+  - run: [/usr/bin/git, -C, /srv/site, checkout, --detach, FETCH_HEAD]
+  - run: [/srv/site/bin/build]   # owner's script: must cd /srv/site itself; non-zero on failure
+  - run: [/usr/bin/sudo, -n, /usr/bin/systemctl, restart, site.service]
+  - check: { http_get: 'http://127.0.0.1:8080/healthz', expect_status: 200, retries: 10 }
+timeout_s: 600
+rate_limit: { max: 6, per: 1h }
