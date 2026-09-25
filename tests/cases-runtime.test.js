@@ -104,6 +104,30 @@ describe('CaseRuntime', () => {
     ));
   });
 
+  it('a same-process, non-wake-up holder gets "busy with another turn in this app", never quit-or-delete advice (F6 re-review)', async () => {
+    const rt = new CaseRuntime({ root: tmp() });
+    const info = await rt.createCase({ title: 'A' });
+    const t1 = await rt.beginTurn(info.id, { turnId: 't1', source: 'owner' });
+    await assert.rejects(rt.beginTurn(info.id, { turnId: 't2', source: 'owner' }), (err) => (
+      err instanceof CaseBusyError && err.code === 'CASE_BUSY'
+      && err.message === 'Case is busy with another turn in this app; try again in a moment.'
+      && !/quit|delete/i.test(err.message)
+    ));
+    await rt.endTurn(t1, {});
+  });
+
+  it('a wake-up beginTurn that finds another in-process wake-up holding the lock gets the spec §9 text, never quit-or-delete advice (F6 re-review)', async () => {
+    const rt = new CaseRuntime({ root: tmp() });
+    const info = await rt.createCase({ title: 'A' });
+    const w1 = await rt.beginTurn(info.id, { turnId: 'w1', source: 'wakeup' });
+    await assert.rejects(rt.beginTurn(info.id, { turnId: 'w2', source: 'wakeup' }), (err) => (
+      err instanceof CaseBusyError && err.code === 'CASE_BUSY'
+      && err.message === 'Case is busy with a wake-up; try again in a minute.'
+      && !/quit|delete/i.test(err.message)
+    ));
+    await rt.endTurn(w1, {});
+  });
+
   it('an owner turn preempts an in-process wake-up: it aborts it, waits, and proceeds (F6)', async () => {
     const rt = new CaseRuntime({ root: tmp(), wakeupPreemptTimeoutMs: 2000 });
     const info = await rt.createCase({ title: 'Lot' });

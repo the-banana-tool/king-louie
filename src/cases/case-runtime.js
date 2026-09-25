@@ -30,13 +30,28 @@ const log = createLogger('cases/runtime');
 
 const BUDGET_FACT_NOTE = "Budget limits change only through the owner's answer or the Grant button.";
 
+// F6 re-review: "quit it or delete the lock" is advice for a *different*
+// process (a real one, possibly stuck, possibly not even King Louie) —
+// it never makes sense when this same process holds the lock, whatever
+// called _acquire (an in-process systemAction, a second owner turn while
+// one is running, or a wake-up's own beginTurn finding another wake-up
+// still in flight). `sameProcess` routes to one of two fixed messages
+// instead, and never builds the quit/delete sentence at all.
 class CaseBusyError extends Error {
-  constructor(title, { pid, lockPath } = {}) {
-    const holder = pid ? ` in process ${pid}` : '';
-    const recover = lockPath
-      ? ` If that process is stuck or is not King Louie, quit it or delete ${lockPath}.`
-      : '';
-    super(`Case "${title}" is busy with another turn${holder}. Try again when it finishes.${recover}`);
+  constructor(title, { pid, lockPath, sameProcess = false, holderIsWakeup = false } = {}) {
+    let message;
+    if (sameProcess) {
+      message = holderIsWakeup
+        ? 'Case is busy with a wake-up; try again in a minute.'
+        : 'Case is busy with another turn in this app; try again in a moment.';
+    } else {
+      const holder = pid ? ` in process ${pid}` : '';
+      const recover = lockPath
+        ? ` If that process is stuck or is not King Louie, quit it or delete ${lockPath}.`
+        : '';
+      message = `Case "${title}" is busy with another turn${holder}. Try again when it finishes.${recover}`;
+    }
+    super(message);
     this.name = 'CaseBusyError';
     this.code = 'CASE_BUSY';
   }
@@ -474,7 +489,12 @@ class CaseRuntime {
           fs.rmSync(lock, { force: true });
           continue;
         }
-        throw new CaseBusyError(meta.title, { pid: holder?.pid, lockPath: lock });
+        {
+          const sameProcess = Boolean(holder && Number.isInteger(holder.pid) && holder.pid === process.pid);
+          const heldTurn = sameProcess ? this.turns.get(meta.id) : null;
+          const holderIsWakeup = Boolean(heldTurn && heldTurn.source === 'wakeup' && heldTurn.turnId === holder.turnId);
+          throw new CaseBusyError(meta.title, { pid: holder?.pid, lockPath: lock, sameProcess, holderIsWakeup });
+        }
       }
     }
   }
