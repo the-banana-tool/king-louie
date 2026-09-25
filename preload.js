@@ -25,6 +25,7 @@ try {
 }
 
 const markdownLog = createLogger('markdown');
+const casesLog = createLogger('cases');
 
 let domPurify = null;
 try {
@@ -359,6 +360,36 @@ const registerOnce = (channel, callback, transform = (value) => value) => {
   return unsubscribe;
 };
 
+// Additive listener registration: unlike registerOnce (one callback per
+// channel; a second registration silently drops the first), every callback
+// added here stays registered until its own unsubscribe is called. Backs
+// cases.onChanged, where multiple UI surfaces (case panel, chat banner,
+// notifications) each need their own subscription on 'case:changed'.
+const additiveListeners = new Map();
+const registerAdditive = (channel, callback) => {
+  if (typeof callback !== 'function') return () => {};
+
+  let entry = additiveListeners.get(channel);
+  if (!entry) {
+    const callbacks = new Set();
+    const wrapped = (_event, data) => {
+      for (const cb of callbacks) {
+        try {
+          cb(data);
+        } catch (err) {
+          casesLog.error(`listener for ${channel} failed: ${err?.message || err}`);
+        }
+      }
+    };
+    ipcRenderer.on(channel, wrapped);
+    entry = { callbacks, wrapped };
+    additiveListeners.set(channel, entry);
+  }
+
+  entry.callbacks.add(callback);
+  return () => { entry.callbacks.delete(callback); };
+};
+
 // Expose protected methods that allow the renderer process to use
 // the ipcRenderer without exposing the entire object
 contextBridge.exposeInMainWorld(
@@ -669,7 +700,46 @@ contextBridge.exposeInMainWorld(
         validateString(payload.factId, 'factId', { minLength: 1 });
         if (typeof payload.disclosable !== 'boolean') throw new Error('Invalid disclosable: expected boolean');
         return ipcRenderer.invoke('case:setDisclosable', payload);
-      }
+      },
+      questions: (payload = {}) => {
+        validateObject(payload, 'payload');
+        if (payload.caseId !== undefined) validateString(payload.caseId, 'caseId', { minLength: 1 });
+        return ipcRenderer.invoke('case:questions', payload);
+      },
+      answerQuestion: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        validateString(payload.questionId, 'questionId', { minLength: 1 });
+        if (payload.text !== undefined) validateString(payload.text, 'text');
+        if (payload.optionId !== undefined) validateString(payload.optionId, 'optionId', { minLength: 1 });
+        return ipcRenderer.invoke('case:answerQuestion', payload);
+      },
+      acknowledgeBriefing: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        validateString(payload.questionId, 'questionId', { minLength: 1 });
+        return ipcRenderer.invoke('case:acknowledgeBriefing', payload);
+      },
+      setStatus: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        validateString(payload.status, 'status', { minLength: 1 });
+        if (payload.note !== undefined) validateString(payload.note, 'note');
+        return ipcRenderer.invoke('case:setStatus', payload);
+      },
+      budget: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        return ipcRenderer.invoke('case:budget', payload);
+      },
+      grantBudget: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        validateString(payload.category, 'category', { minLength: 1 });
+        if (typeof payload.limit !== 'number' && typeof payload.limit !== 'string') throw new Error('Invalid limit: expected number or string');
+        return ipcRenderer.invoke('case:grantBudget', payload);
+      },
+      onChanged: (callback) => registerAdditive('case:changed', callback)
     },
     usage: {
       getSession: () => ipcRenderer.invoke('usage:getSession'),
