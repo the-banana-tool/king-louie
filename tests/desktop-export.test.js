@@ -142,6 +142,84 @@ describe('desktop export over a bridge client', () => {
     };
     const plan = await planImport({ client, source });
     const report = await applyImport({ client, plan, source });
-    assert.deepStrictEqual(report.sendFailures, [{ category: 'chat', key: 'c1', ok: false, error: 'The import plan expired; plan the import again.' }]);
+    assert.deepStrictEqual(report.sendFailures, [{ category: 'chat', key: 'c1', ok: false, error: 'The import plan expired; plan the import again.', code: 'PLAN_EXPIRED' }]);
+  });
+});
+
+// Final pass (Task 12 parked): applyImport robustness.
+describe('applyImport robustness', () => {
+  // Three ~1 MB items: each batch holds one, so there are three batches.
+  const bigSource = { getValue: (category, key) => `${key}:${'x'.repeat(1000000)}` };
+  const bigPlan = { planId: 'p1', items: ['m1', 'm2', 'm3'].map((key) => ({ category: 'memory', key, action: 'new' })) };
+  const finishReport = { planId: 'p1', counts: {}, failures: [], attention: [], secretsMissing: [], cronDisabled: 0, notes: [] };
+
+  function recordingClient(onApply, onFinish = async () => finishReport) {
+    const calls = [];
+    return {
+      calls,
+      call: async (method, params) => {
+        calls.push(method);
+        if (method === 'import.apply') return onApply(params, calls.filter((m) => m === 'import.apply').length);
+        if (method === 'import.finish') return onFinish();
+        throw new Error(`unexpected ${method}`);
+      }
+    };
+  }
+
+  it('a malformed apply answer fails that batch, keeps going, and still finishes', async () => {
+    const client = recordingClient((params, n) => (n === 2 ? {} : { results: params.batch.map((e) => ({ category: e.category, key: e.key, ok: true })) }));
+    const progress = [];
+    const report = await applyImport({ client, plan: bigPlan, source: bigSource, onProgress: (x) => progress.push(x) });
+    assert.deepStrictEqual(client.calls, ['import.apply', 'import.apply', 'import.apply', 'import.finish']);
+    assert.deepStrictEqual(report.sendFailures, [{ category: 'memory', key: 'm2', ok: false, error: 'The service sent no per-item results for this batch.', code: 'MALFORMED_RESPONSE' }]);
+    assert.deepStrictEqual(progress[progress.length - 1], { sent: 3, total: 3 });
+  });
+
+  it('per-item ok:false results are send failures; ok must be true', async () => {
+    const client = recordingClient((params) => ({ results: params.batch.map((e) => ({ category: e.category, key: e.key, ok: e.key === 'm1' ? true : (e.key === 'm2' ? 'yes' : false), error: 'refused' })) }));
+    const report = await applyImport({ client, plan: bigPlan, source: bigSource });
+    assert.deepStrictEqual(report.sendFailures.map((f) => f.key), ['m2', 'm3']);
+  });
+
+  it('PLAN_EXPIRED stops sending, keeps the code, and still asks for the report', async () => {
+    const client = recordingClient(() => { throw Object.assign(new Error('The import plan expired; plan the import again.'), { code: 'PLAN_EXPIRED' }); });
+    const progress = [];
+    const report = await applyImport({ client, plan: bigPlan, source: bigSource, onProgress: (x) => progress.push(x) });
+    assert.deepStrictEqual(client.calls, ['import.apply', 'import.finish']);
+    assert.deepStrictEqual(report.sendFailures, [{ category: 'memory', key: 'm1', ok: false, error: 'The import plan expired; plan the import again.', code: 'PLAN_EXPIRED' }]);
+    assert.deepStrictEqual(progress[progress.length - 1], { sent: 3, total: 3 });
+  });
+
+  it('a closed connection stops sending and surfaces the apply error when finish fails too', async () => {
+    const gone = () => Object.assign(new Error('The local King Louie service is not reachable (127.0.0.1:18796).'), { code: 'SERVICE_UNREACHABLE' });
+    const client = recordingClient(() => { throw gone(); }, async () => { throw Object.assign(new Error('finish failed'), { code: 'OTHER' }); });
+    await assert.rejects(applyImport({ client, plan: bigPlan, source: bigSource }), (err) => err.code === 'SERVICE_UNREACHABLE');
+    assert.deepStrictEqual(client.calls, ['import.apply', 'import.finish']);
+  });
+
+  it('a non-fatal apply error (timeout) keeps going', async () => {
+    const client = recordingClient((params, n) => {
+      if (n === 1) throw Object.assign(new Error('The local service did not answer in time.'), { code: 'BRIDGE_TIMEOUT' });
+      return { results: params.batch.map((e) => ({ category: e.category, key: e.key, ok: true })) };
+    });
+    const report = await applyImport({ client, plan: bigPlan, source: bigSource });
+    assert.deepStrictEqual(client.calls, ['import.apply', 'import.apply', 'import.apply', 'import.finish']);
+    assert.deepStrictEqual(report.sendFailures.map((f) => [f.key, f.code]), [['m1', 'BRIDGE_TIMEOUT']]);
+  });
+
+  it('secrets unavailable: a vault item the plan still asks for is skipped, never sent', async () => {
+    const root = tmp('kl-export-profile-');
+    fs.writeFileSync(path.join(root, 'chat-data.json'), JSON.stringify({ chats: [], settings: {} }));
+    fs.writeFileSync(path.join(root, 'config.json'), JSON.stringify({ __vault_github: sealed('ghp_example_token') }));
+    const source = loadDesktopSource({ userDataDir: root, safeStorage: fakeSafeStorage(false), platform: 'win32' });
+    assert.strictEqual(source.inventory.secrets, 'unavailable');
+    const sent = [];
+    const client = recordingClient((params) => { sent.push(params); return { results: [] }; });
+    const plan = { planId: 'p1', items: [{ category: 'vault', key: 'github', action: 'new' }] };
+    const report = await applyImport({ client, plan, source });
+    assert.strictEqual(report.skipped.length, 1);
+    assert.strictEqual(report.skipped[0].key, 'github');
+    assert.ok(!JSON.stringify(sent).includes('ghp_example_token'), 'the secret never left');
+    assert.deepStrictEqual(client.calls, ['import.finish']);
   });
 });
