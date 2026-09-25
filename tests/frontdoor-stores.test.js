@@ -13,6 +13,11 @@ const { seal } = require('../src/approvals/envelope');
 const m = require('../src/approvals/messages');
 const { createFakePhone, testNodeIdentity } = require('./helpers/fake-phone');
 const { addSink } = require('../src/logging');
+const { holdEventLoop } = require('./helpers/hold-event-loop');
+
+// The courier and relay stores unref their timers; keep the loop alive while
+// tests await them (Node 22 cancels tests otherwise).
+after(holdEventLoop());
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });

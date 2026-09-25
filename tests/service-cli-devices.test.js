@@ -17,6 +17,11 @@ const { runDoctor } = require('../src/service/doctor');
 const { buildServicePorts } = require('../src/service/ports');
 const { getOrGenerateNodeIdentity } = require('../src/mesh/node-identity');
 const { createFakePhone } = require('./helpers/fake-phone');
+const { holdEventLoop } = require('./helpers/hold-event-loop');
+
+// The courier and relay stores unref their timers; keep the loop alive while
+// tests await them (Node 22 cancels tests otherwise).
+after(holdEventLoop());
 
 const POSIX = process.platform !== 'win32';
 const UID = POSIX ? process.getuid() : 0;

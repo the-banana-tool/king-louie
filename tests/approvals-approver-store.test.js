@@ -709,7 +709,9 @@ describe('I2: the admin never follows a symlink in the service-writable staged d
   it('refuses a symlinked staged entry without touching it', async (t) => {
     const l = layout();
     fs.mkdirSync(l.stagedDir, { recursive: true });
-    const real = path.join(l.stagedDir, 'real-target.json');
+    // The target lives outside staged/, so the only staged entry is the link
+    // itself (a target inside staged/ would be reported too, as misnamed).
+    const real = path.join(path.dirname(l.stagedDir), 'real-target.json');
     fs.writeFileSync(real, JSON.stringify({ received_at: iso(NOW), envelope: {} }));
     const linkPath = path.join(l.stagedDir, `${'a'.repeat(43)}.json`);
     if (!trySymlink(t, real, linkPath, 'file')) return;
