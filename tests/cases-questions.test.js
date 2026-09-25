@@ -329,6 +329,29 @@ describe('answers through the runtime', () => {
     assert.ok(rt.questions(c.id).open().some((q) => q.payload.type === 'budget-grant'));
   });
 
+  it('a direction given over budget resumes to active once granted, not needs-direction (F1)', async () => {
+    const { rt } = runtime();
+    const c = await activeCase(rt);
+    const failure = rt.recordFailure(c.id, report);
+    rt.store.updateMeta(c.id, { budget: { usd: 1 } });
+    rt.budget(c.id).charge('usd', 1);
+    const out = await rt.answerQuestion(c.id, failure.questionId, { channel: 'in-app', text: 'Go ahead with the auction' });
+    assert.strictEqual(out.effect.applied, false);
+    // The direction fact was already applied to the ledger; only the
+    // budget stands in the way, so resuming must land on active, not
+    // needs-direction (where nothing is open any more — the direction
+    // question was already answered and consumed).
+    assert.deepStrictEqual(
+      [rt.getCase(c.id).status, rt.getCase(c.id).statusReason.kind, rt.getCase(c.id).statusReason.resumeTo],
+      ['paused', 'budget', 'active']
+    );
+    const grantQ = rt.questions(c.id).open().find((q) => q.payload.type === 'budget-grant');
+    const grant = await rt.answerQuestion(c.id, grantQ.id, { channel: 'in-app', text: '5 dollars' });
+    assert.deepStrictEqual(grant.effect, { applied: 'budget', resumed: true });
+    assert.strictEqual(rt.getCase(c.id).status, 'active');
+    assert.deepStrictEqual(rt.questions(c.id).open(), []);
+  });
+
   it('a budget-grant answer with a number above spend resumes; a reply without one keeps the case paused', async () => {
     const { rt } = runtime();
     const c = await activeCase(rt);

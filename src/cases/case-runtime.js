@@ -960,7 +960,12 @@ class CaseRuntime {
       } catch (err) {
         if (err.code !== 'BUDGET_EXHAUSTED') throw err;
         const category = this.budget(meta.id).exhausted()[0];
-        this.setStatus(meta.id, 'paused', { kind: 'budget', ref: category, note: err.message, resumeTo: meta.status });
+        // The direction fact is already applied to the ledger by the time
+        // setStatus above throws; only the budget stands in the way, so a
+        // grant must resume straight to active. resumeTo: meta.status
+        // (still 'needs-direction' here) would strand the case there with
+        // the direction already consumed and no question left open (F1).
+        this.setStatus(meta.id, 'paused', { kind: 'budget', ref: category, note: err.message, resumeTo: 'active' });
         const qid = questionId || (fact.source?.kind === 'question' ? fact.source.ref : null);
         if (qid) {
           try {
