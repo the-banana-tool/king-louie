@@ -100,15 +100,41 @@ describe('phone API code and invite routes', () => {
 });
 
 describe('phone API limits and routing', () => {
-  it('rate-limits unauthenticated calls per IP and devices per device, with retry_after', async () => {
-    const { call, signed } = await start({ rateLimits: { unauthPerMin: 3, devicePerMin: 2 } });
+  it('rate-limits unauthenticated calls per IP, with retry_after', async () => {
+    // /v1/time never authenticates, so every call always counts against the
+    // shared IP bucket, unaffected by N1 (which only changes device routes).
+    const { call } = await start({ rateLimits: { unauthPerMin: 3 } });
     for (let i = 0; i < 3; i += 1) assert.equal((await call('GET', '/v1/time')).status, 200);
     const limited = await call('GET', '/v1/time');
     assert.equal(limited.status, 429);
     assert.ok(limited.body.retry_after >= 1);
+  });
+
+  it('rate-limits validly signed device calls per device, with retry_after', async () => {
+    // Run in isolation from any /v1/time traffic: since neither route sets
+    // its own `rate`, they'd otherwise share one IP bucket (per the
+    // per-route-key ruling), which is exactly what the next test exercises.
+    const { signed } = await start({ rateLimits: { devicePerMin: 2 } });
     assert.equal((await signed('POST', '/v1/echo/1', '{}')).status, 202);
     assert.equal((await signed('POST', '/v1/echo/2', '{}')).status, 202);
-    assert.equal((await signed('POST', '/v1/echo/3', '{}')).status, 429);
+    const limited = await signed('POST', '/v1/echo/3', '{}');
+    assert.equal(limited.status, 429);
+    assert.ok(limited.body.retry_after >= 1);
+  });
+
+  it('valid device traffic is limited only by devicePerMin, never by unauthPerMin (N1)', async () => {
+    const { call, signed } = await start({ rateLimits: { unauthPerMin: 3, devicePerMin: 20 } });
+    // More than unauthPerMin validly signed requests from the same IP all
+    // succeed: a verified signature is never charged against the IP bucket.
+    for (let i = 0; i < 5; i += 1) {
+      assert.equal((await signed('POST', `/v1/echo/${i}`, '{}')).status, 202);
+    }
+    // Failing-auth traffic from that same IP is still bounded by unauthPerMin.
+    assert.equal((await call('POST', '/v1/echo/x', { body: '{}' })).body.error, 'unauthorized');
+    assert.equal((await call('POST', '/v1/echo/x', { body: '{}' })).body.error, 'unauthorized');
+    assert.equal((await call('POST', '/v1/echo/x', { body: '{}' })).body.error, 'unauthorized');
+    const limited = await call('POST', '/v1/echo/x', { body: '{}' });
+    assert.equal(limited.status, 429);
   });
 
   it('caps bodies at 256 KiB and refuses bad JSON', async () => {
@@ -150,9 +176,24 @@ describe('phone API limits and routing', () => {
     const boom = await call('GET', '/v1/boom');
     assert.equal(boom.status, 418);
     assert.equal(boom.body.error, 'teapot');
-    const crash = await call('GET', '/v1/crash');
+
+    // The crash logs an error, as it should; capture it via addSink (N2) and
+    // silence the underlying console.error so the expected log line doesn't
+    // clutter the test output.
+    const errors = [];
+    const removeSink = addSink((r) => { if (r.level === 'error') errors.push(r); });
+    const originalConsoleError = console.error;
+    console.error = () => {};
+    let crash;
+    try {
+      crash = await call('GET', '/v1/crash');
+    } finally {
+      console.error = originalConsoleError;
+      removeSink();
+    }
     assert.equal(crash.status, 500);
     assert.equal(crash.body.error, 'internal');
+    assert.equal(errors.length, 1);
   });
 
   it('an unauthenticated failure on a device route is rate-limited by IP too (I1)', async () => {

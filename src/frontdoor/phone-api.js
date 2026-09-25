@@ -65,24 +65,52 @@ function createPhoneApi({ devices, rateLimits = {}, now = Date.now, relay = null
   }
 
   // Sweeps every bucket of hits older than the 60 s window before ever
-  // growing one (so an IP or device that calls once and never again doesn't
-  // linger), then bounds the map's overall size so an unbounded set of
-  // IPs/devices can't grow it forever.
-  function rateLimit(key, perMin) {
-    const t = now();
+  // checking or growing one (so an IP or device that calls once and never
+  // again doesn't linger).
+  function sweepBuckets(t) {
     for (const [k, hits] of buckets) {
       const fresh = hits.filter((at) => t - at < 60000);
       if (fresh.length === 0) buckets.delete(k);
       else if (fresh.length !== hits.length) buckets.set(k, fresh);
     }
+  }
+
+  // Throws 429 if `key` is already at `perMin` for the current window,
+  // without recording a hit — a check that can run ahead of knowing whether
+  // this particular request will end up counting against the bucket.
+  function checkLimit(key, perMin) {
+    const t = now();
+    sweepBuckets(t);
     const hits = buckets.get(key) || [];
     if (hits.length >= perMin) {
       const retryAfter = Math.max(1, Math.ceil((hits[0] + 60000 - t) / 1000));
       throw new ApiError(429, 'rate_limited', 'too many requests', { retry_after: retryAfter });
     }
-    hits.push(t);
+  }
+
+  // Records a hit against `key`, then bounds the map's overall size so an
+  // unbounded set of IPs/devices can't grow it forever.
+  function chargeLimit(key) {
+    const hits = buckets.get(key) || [];
+    hits.push(now());
     buckets.set(key, hits);
     boundMap(buckets, MAX_BUCKETS);
+  }
+
+  // Check-and-charge in one step: traffic that always counts against the
+  // bucket, whether it's let through or not.
+  function rateLimit(key, perMin) {
+    checkLimit(key, perMin);
+    chargeLimit(key);
+  }
+
+  // Buckets are keyed on the route pattern too only when the route defines
+  // its own `rate` — a dedicated budget for that route. Otherwise every
+  // route without one shares a single ip:/device: bucket, so the spec's
+  // 10/min-per-IP and 120/min-per-device hold across the whole API, not
+  // per route.
+  function bucketSuffix(route) {
+    return route.rate ? `|${route.pattern}` : '';
   }
 
   // Verifies the device signature and returns { device, replayKey } without
@@ -173,13 +201,23 @@ function createPhoneApi({ devices, rateLimits = {}, now = Date.now, relay = null
       }
       const params = Object.fromEntries(route.names.map((n, i) => [n, values[i]]));
       const ip = (req.socket && req.socket.remoteAddress) || 'unknown';
+      const suffix = bucketSuffix(route);
+      const ipKey = `ip:${ip}${suffix}`;
+      const ipLimit = (route.rate && route.rate.perMin) || limits.unauthPerMin;
 
-      // The per-IP limit runs for every route, before the body is even read,
-      // so that traffic that never authenticates (a device route with a
-      // missing or bad signature) is still bounded. The per-device limit
-      // below runs later, only once a device route's signature has actually
-      // verified.
-      rateLimit(`ip:${ip}|${route.pattern}`, route.auth === 'device' ? limits.unauthPerMin : (route.rate && route.rate.perMin) || limits.unauthPerMin);
+      if (route.auth === 'device') {
+        // Checked, not charged, ahead of the body and the signature: valid
+        // device traffic is bounded only by devicePerMin below, never by
+        // this per-IP budget. The IP bucket is only charged once the
+        // signature actually fails to verify (see the catch below), so it
+        // still bounds traffic that never authenticates.
+        checkLimit(ipKey, ipLimit);
+      } else {
+        // Routes that aren't device-authenticated have no signature to
+        // succeed or fail, so every call counts against the IP budget, as
+        // it always has.
+        rateLimit(ipKey, ipLimit);
+      }
 
       const declaredLength = Number(req.headers['content-length']);
       if (Number.isFinite(declaredLength) && declaredLength > bodyLimit) {
@@ -190,8 +228,14 @@ function createPhoneApi({ devices, rateLimits = {}, now = Date.now, relay = null
 
       let device = null;
       if (route.auth === 'device') {
-        const verified = verifyDeviceSignature(req, pathWithQuery, body);
-        rateLimit(`device:${verified.device.device_id}|${route.pattern}`, (route.rate && route.rate.perMin) || limits.devicePerMin);
+        let verified;
+        try {
+          verified = verifyDeviceSignature(req, pathWithQuery, body);
+        } catch (authErr) {
+          chargeLimit(ipKey);
+          throw authErr;
+        }
+        rateLimit(`device:${verified.device.device_id}${suffix}`, (route.rate && route.rate.perMin) || limits.devicePerMin);
         replay.set(verified.replayKey, now() + REPLAY_MS);
         device = verified.device;
       } else if (route.auth === 'code' && !(relay && relay.invites && relay.invites.getCode(params.code_id))) {
