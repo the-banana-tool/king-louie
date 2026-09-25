@@ -19,11 +19,12 @@ When iterating on a specific module, run just its test file directly with
 `node --test`. Output uses TAP format; look for `# fail 0` / `# pass N` in the
 summary block.
 
-`npm run test:e2e` launches the real Electron binary (`tests/e2e/helpers.js`),
-so it needs `ELECTRON_RUN_AS_NODE` actually gone from the environment, not set
-to an empty string — `tests/e2e/helpers.js` passes `process.env` through
-unfiltered, and Electron treats an empty value the same as `1`. From an agent
-shell:
+`npm run test:e2e` launches the real Electron binary through Playwright's
+`_electron` (`tests/e2e/helpers.js`). Every launch gets its own temporary
+`--user-data-dir` (the helper throws `userData isolation failed` otherwise), so
+e2e tests never touch the real profile; give `launchApp({ seed })` any files a
+test needs. The helper deletes `ELECTRON_RUN_AS_NODE` from the child's env
+(Electron treats an empty value the same as `1`); unset it in the shell too:
 
 ```bash
 unset ELECTRON_RUN_AS_NODE && npm run test:e2e
@@ -111,3 +112,65 @@ git repo under `<dataDir>/cases/` (override with `settings.cases.root` or
   sourced fact is only as good as the source the model names. The write guard
   covers Write, Edit and MultiEdit, not Bash: in stage 1 a shell command can
   still rewrite `facts.jsonl`.
+
+## Attached mode
+
+The desktop app can be a window onto a local `king-louie-service` (fleet stage 7,
+spec `docs/superpowers/specs/2026-09-23-fleet-stage7-desktop-ui.md`). The service
+opens a loopback desktop bridge (`127.0.0.1`, default port `18795`) behind
+`features.desktopBridge` in `<configDir>/service.json`, which is **off by default**
+and binds to loopback only; port `0` (ephemeral, test-only) logs a warning. In
+attached mode `main.js` builds no core and `src/ipc/attached-host.js` proxies the
+allowlisted channels (`src/desktop-bridge/allowlist.js`; a stage whose domain must
+work while attached appends it to `PROXIED_DOMAINS`).
+
+- **Pairing:** start from Settings > Local service, then run the command it shows
+  as root/Administrator: `king-louie-service desktop pair <request>`. The CLI
+  prints the device's label and fingerprint first and asks "Trust this device?
+  [y/N]" on a TTY (default no); off a TTY it needs `--yes` or refuses (exit 2).
+  Nothing is written, not even a new node identity, before that consent. `--yes`
+  passed to any other command is a usage error. The desktop's Confirm step sends
+  back the `nodeId` it displayed; the service refuses with `PAIR_SERVICE_CHANGED`
+  (the record changed), `PAIR_NOT_FOUND`, or `PAIR_CONFIRM_STALE` (no `nodeId`
+  echoed back) rather than trust a stale or swapped record. Pending pairs expire.
+  Also `desktop unpair <device-id>`, `desktop list`, and
+  `import --from <desktop userData> [--dry-run]` (service stopped; secrets only
+  arrive through the desktop's own Import, never the CLI).
+- **Detach** is a two-step confirm in the settings pane: the warning must render
+  before "Detach anyway" is armed, and the second click only confirms if at least
+  400 ms have passed since the warning painted — a fast double-click re-arms
+  instead of detaching.
+- **Unpair** returns a follow-up command (e.g. to also stop standalone use of the
+  same data); the pane keeps showing it, surviving repaints and relaunches, until
+  the owner dismisses it or starts pairing again.
+- `--kl-standalone-once` runs one standalone session without changing the
+  persisted mode: it turns channels, gateway and mesh off from construction and
+  pauses cron right after `core.start()`, so it can't act as a second consumer
+  alongside an attached run; the `/llm` channel commands (Telegram/Slack/Discord)
+  refuse while channels are off.
+- A failed host start (attached or standalone) shows an error dialog
+  (`dialog.showErrorBox`) and quits rather than leaving a half-started app.
+- Only events marked by `markLocalDesktopEvent` (the standalone host's ipcMain
+  wrapper and the bridge dispatcher; `src/core/origin.js`) get the on-screen
+  approval dialog in the service.
+- **`import --from`** never lets an administrator write the data dir directly.
+  On POSIX, a root reader walks the desktop profile and a separate writer child
+  drops to the data dir owner's uid and primary gid before running the importer;
+  the master key is resolved read-only by the root reader and handed to the
+  writer only over their stdio channel, never argv/env/logs. It refuses when
+  there is no key yet (start the service once first) or the data dir doesn't
+  exist. Windows has no setuid, so writes instead go through a write guard
+  (`src/platform/write-guard.js`) that refuses a path routed through a symlink
+  or junction; the guard narrows the window but can't close it against a
+  service-account swap mid-write — documented as a residual, not a promise.
+- **Lockout:** a handshake with a valid device signature is never refused by
+  lockout; only further *failing* attempts for an already-locked-out device id
+  are throttled, closed `4429` (owner ruling, 2026-09-25).
+- **E2E:** `launchAttached()` in `tests/e2e/helpers.js` starts a temporary
+  service (`tests/e2e/_attach-service.js`, stub provider), pairs, attaches and
+  relaunches; `ctx.service` has `kill()`, `restart()`, `stop()`. Every launch
+  (attached or not) gets a fresh temp `--user-data-dir`, asserted by the app
+  itself; `KL_CASES_ROOT` and `KL_DESKTOP_BRIDGE_FILE` are pinned per launch so
+  an agent shell's own env never leaks in, and the forked test service pins its
+  own `KL_CASES_ROOT` under its data dir. The old `KL_TEST_BRIDGE_*` escape hatch
+  is gone.
