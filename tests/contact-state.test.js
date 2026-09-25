@@ -47,6 +47,14 @@ describe('ContactState', () => {
     assert.deepStrictEqual(s.ladder().entries, {});
     s.saveLadder();
     assert.strictEqual(fs.readFileSync(path.join(dir, 'ladder.json'), 'utf8'), '{ not json');
+    const before = fs.readdirSync(dir).sort();
+    s.writeInbox([{ caseId: 'c-1', questionId: 'q-0001', text: 'yes' }]);
+    s.writeCursor('main', 'c-42');
+    assert.strictEqual(s.markEventSeen('ev-1'), true);
+    assert.deepStrictEqual(fs.readdirSync(dir).sort(), before, 'writeInbox, writeCursor and markEventSeen wrote nothing');
+    assert.strictEqual(fs.existsSync(path.join(dir, 'inbox.jsonl')), false);
+    assert.strictEqual(fs.existsSync(path.join(dir, 'relay-main.cursor')), false);
+    assert.strictEqual(fs.existsSync(path.join(dir, 'relay-events.json')), false);
   });
 
   it('never hands out a token still in use by a ladder entry or a delivery', () => {
@@ -91,6 +99,7 @@ describe('ContactState', () => {
     const s = new ContactState({ dir: tmp(), clock: () => NOW });
     s.pin('c-1/q-0002', 'telegram');
     assert.strictEqual(s.takePin('c-1/q-0002'), 'telegram');
+    assert.strictEqual(new ContactState({ dir: s.dir, clock: () => NOW }).takePin('c-1/q-0002'), null, 'takePin persists the removal to ladder.json');
     assert.strictEqual(s.takePin('c-1/q-0002'), null);
     s.appendInbox({ caseId: 'c-1', questionId: 'q-0001', text: 'yes' });
     s.appendInbox({ caseId: 'c-1', questionId: 'q-0002', optionId: 'a' });
