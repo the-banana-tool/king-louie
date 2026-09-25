@@ -22,6 +22,15 @@ Module._resolveFilename = function (request, parent, isMain, options) {
   return originalResolveFilename.call(this, request, parent, isMain, options);
 };
 
+function isExecutorPackage(dir) {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+    return Boolean(pkg && pkg.kingLouie && pkg.kingLouie.executor);
+  } catch {
+    return false;
+  }
+}
+
 const isPlainObject = (value) => {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 };
@@ -222,6 +231,12 @@ class SkillLoader {
       const entries = fs.readdirSync(dir, { withFileTypes: true });
       for (const entry of entries) {
         if ((entry.isDirectory() || entry.isSymbolicLink()) && !seen.has(entry.name)) {
+          // Executor packages use the skill layout but are not skills: the
+          // Skill tool must not reach them (cases stage 3, ruling 16).
+          if (isExecutorPackage(path.join(dir, entry.name))) {
+            log.info(`Skipping executor package ${entry.name}: executors are not skills`);
+            continue;
+          }
           seen.add(entry.name);
           skillDirs.push(path.join(dir, entry.name));
         }
@@ -344,3 +359,4 @@ class SkillLoader {
 }
 
 module.exports = SkillLoader;
+module.exports.isExecutorPackage = isExecutorPackage;
