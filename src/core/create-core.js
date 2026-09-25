@@ -76,6 +76,7 @@ const { createVault } = require('../platform/vault');
 const { ensureGatewayToken } = require('../gateway/gateway-token');
 const { createHeadlessPrompter } = require('../platform/prompter');
 const { withTimeout } = require('./with-timeout');
+const { isLocalDesktopEvent, isLocalRequester } = require('./origin');
 
 const DEFAULT_FEATURES = { gateway: true, webhooks: true, mesh: true, channels: true, appDiscovery: true };
 // Every provider king-louie can hold a token for (keys) and its display name.
@@ -1906,10 +1907,16 @@ function createCore(deps = {}) {
     // Every approval requester — gateway/channel approvalHandler, cron,
     // webhook, mesh, and meta-tools re-threading a parent's requester — reaches
     // a ToolExecutor through here, so this is the single place that enforces
-    // remoteApprovals: 'deny'.
-    const effectiveApprovalRequester = remoteApprovals === 'deny' ? null : approvalRequester;
+    // remoteApprovals (program §4.21). A local-desktop run (an event marked by
+    // the Electron host or the desktop bridge, or a requester marked by a
+    // local parent) keeps the on-screen dialog, the always-approve list and
+    // `allow` rules in every mode; everything else is remote-origin.
+    const local = isLocalDesktopEvent(event) || isLocalRequester(approvalRequester);
+    const effectiveApprovalRequester = remoteApprovals === 'allow' || (local && isLocalRequester(approvalRequester))
+      ? approvalRequester
+      : null;
     if (approvalRequester && !effectiveApprovalRequester) {
-      log.debug('remoteApprovals is "deny": ignoring a remote approval requester');
+      log.debug(`remoteApprovals is "${remoteApprovals}": ignoring a remote approval requester`);
     }
     const executor = new ToolExecutor({
       workingDirectory,
@@ -1921,7 +1928,7 @@ function createCore(deps = {}) {
       // paths that grant approval before the gate is reached (the persisted
       // "always approve" list below, an agent config's autoApproveTools, and
       // `allow` permission rules).
-      denyAutoApproval: remoteApprovals === 'deny',
+      denyAutoApproval: (remoteApprovals !== 'allow' && !local) || executorOptions.denyAutoApproval === true,
       shouldAutoApprove: async (toolName) => isToolAlwaysApproved(toolName),
       // Live callback — picks up rules added mid-session when the user
       // clicks "Always allow 'git *'" in an approval dialog.
