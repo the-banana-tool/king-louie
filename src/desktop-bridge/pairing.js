@@ -1,5 +1,6 @@
 // Pairing request, <configDir>/desktop-devices.json and desktop-bridge.json
 // (fleet stage 7 §3.2, §4.1–§4.3).
+const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -206,8 +207,11 @@ function parseBridgeFile(text, file = BRIDGE_FILE) {
 // silently overwriting anything already at that name) and fsynced before
 // the rename, so a crash between the write and the rename can never leave
 // the rename pointing at a file whose content didn't actually reach disk.
+// The name is random, not pid/clock-derived (fleet stage 7 Task 9, fix round
+// 1): an admin CLI writes some of these inside a directory the service
+// account controls, and a predictable name there can be squatted in advance.
 function writeFileAtomic(file, text, mode = 0o600) {
-  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  const tmp = `${file}.${crypto.randomBytes(8).toString('hex')}.tmp`;
   const fd = fs.openSync(tmp, 'wx', mode);
   try {
     fs.writeSync(fd, text);

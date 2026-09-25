@@ -13,6 +13,7 @@ const UserProfile = require('../telos/user-profile');
 const { writeFileAtomic } = require('../desktop-bridge/pairing');
 const { MESSAGES } = require('../desktop-bridge/protocol');
 const { normalizeDirectory } = require('../desktop-bridge/desktop-scope');
+const { guardCheck } = require('../platform/write-guard');
 
 const log = createLogger('desktop-import');
 
@@ -286,11 +287,20 @@ function assertCanonicalPathAllowed(caseDir, target, rel) {
 }
 
 class DesktopImporter {
+  // `cleanupStaging: false` skips the constructor's orphaned-staging sweep: a
+  // dry run must not delete anything (Task 9 fix round 1, I1). `writeGuard`
+  // (src/platform/write-guard.js) is passed only by the admin CLI's writer,
+  // which on Windows writes as an Administrator inside a data dir the
+  // service account controls (C1); every write, mkdir and removal below then
+  // refuses a path that runs through a link. The bridge passes neither and
+  // behaves as before.
   constructor({
     context, targets, dataDir, scope, checkPath, cipher = null,
     now = () => new Date(),
     randomId = () => crypto.randomBytes(8).toString('hex'),
-    onPathWritten = () => {}
+    onPathWritten = () => {},
+    cleanupStaging = true,
+    writeGuard = null
   }) {
     this.context = context;
     this.targets = targets;
@@ -301,8 +311,9 @@ class DesktopImporter {
     this.now = now;
     this.randomId = randomId;
     this.onPathWritten = onPathWritten;
+    this.writeGuard = writeGuard;
     this.plans = new Map();
-    this.cleanupOrphanedStaging();
+    if (cleanupStaging) this.cleanupOrphanedStaging();
   }
 
   casesRoot() {
@@ -321,6 +332,12 @@ class DesktopImporter {
       root = this.casesRoot();
     } catch (err) {
       log.warn('could not resolve the cases root to clean up orphaned import staging directories', { error: err.message });
+      return;
+    }
+    try {
+      guardCheck(this.writeGuard, root);
+    } catch (err) {
+      log.warn('not cleaning up orphaned import staging directories', { error: err.message });
       return;
     }
     let entries = [];
@@ -355,9 +372,11 @@ class DesktopImporter {
 
   writeManifest(manifest) {
     const dir = path.join(this.dataDir, 'imports');
+    const file = this.manifestPath(manifest.installId);
+    guardCheck(this.writeGuard, file);
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     this.onPathWritten(dir);
-    const file = this.manifestPath(manifest.installId);
+    guardCheck(this.writeGuard, file);
     writeFileAtomic(file, `${JSON.stringify(manifest, null, 2)}\n`, 0o600);
     this.onPathWritten(file);
   }
@@ -372,8 +391,10 @@ class DesktopImporter {
   dropPlan(planId) {
     this.plans.delete(planId);
     try {
-      fs.rmSync(path.join(this.casesRoot(), `.import-${planId}`), { recursive: true, force: true });
-    } catch { /* nothing staged */ }
+      const staging = path.join(this.casesRoot(), `.import-${planId}`);
+      guardCheck(this.writeGuard, staging);
+      fs.rmSync(staging, { recursive: true, force: true });
+    } catch { /* nothing staged, or not safe to touch */ }
   }
 
   expireConnection(connectionId) {
@@ -787,7 +808,20 @@ class DesktopImporter {
   }
 
   ensureRealDirs(root, dir) {
-    fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+    guardCheck(this.writeGuard, dir);
+    // mkdirSync returns the first directory it had to create; that one and
+    // every one below it down to the root are new, and reported so the
+    // ownership backstop can hand them back (Task 9 fix round 1, I2).
+    const first = fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+    if (first) {
+      const created = [];
+      for (let p = path.resolve(root); ; p = path.dirname(p)) {
+        created.unshift(p);
+        if (p === path.resolve(first) || path.dirname(p) === p) break;
+      }
+      for (const p of created) this.onPathWritten(p);
+    }
+    guardCheck(this.writeGuard, dir);
     const rel = path.relative(root, dir);
     let cur = root;
     for (const part of rel.split(path.sep).filter(Boolean)) {
@@ -800,6 +834,7 @@ class DesktopImporter {
         this.onPathWritten(cur);
       }
     }
+    guardCheck(this.writeGuard, dir);
   }
 
   writeCaseFile(plan, item, value) {
@@ -849,15 +884,33 @@ class DesktopImporter {
     // isSkippedCaseFile judged the spelling the desktop sent; judge the real
     // path too (fix rounds 3 and 4, see assertCanonicalPathAllowed).
     assertCanonicalPathAllowed(caseDir, target, rel);
+    guardCheck(this.writeGuard, target);
     let existing = null;
     try { existing = fs.lstatSync(target); } catch { existing = null; }
     if (existing && (existing.isSymbolicLink() || !existing.isFile())) throw new ImportError('BAD_PATH', `${value.relPath} is a link or not a file`);
+    if (existing && existing.nlink > 1) throw new ImportError('BAD_PATH', `${value.relPath} has ${existing.nlink} hard links`);
     const mode = Number.isInteger(value.mode) ? ((value.mode & 0o755) | 0o600) : 0o600;
+    // Never write through whatever is at the name (Task 9 fix round 1): a
+    // first chunk replaces the file with a fresh exclusive create; a later
+    // chunk opens without following a link (where the platform can) and
+    // appends only if the handle is the very file just checked.
     if (offset === 0) {
-      fs.writeFileSync(target, data, { mode });
+      if (existing) fs.rmSync(target, { force: true });
+      const fd = fs.openSync(target, 'wx', mode);
+      try { fs.writeSync(fd, data); } finally { fs.closeSync(fd); }
     } else {
       if (!existing || existing.size !== offset) throw new ImportError('BAD_OFFSET', `${value.relPath}: chunk at ${offset} does not follow the data received`);
-      fs.appendFileSync(target, data);
+      const c = fs.constants;
+      const fd = fs.openSync(target, c.O_WRONLY | c.O_APPEND | (c.O_NOFOLLOW || 0));
+      try {
+        const st = fs.fstatSync(fd);
+        if (st.ino !== existing.ino || st.dev !== existing.dev || st.nlink > 1 || st.size !== offset) {
+          throw new ImportError('BAD_PATH', `${value.relPath} changed while it was being written`);
+        }
+        fs.writeSync(fd, data);
+      } finally {
+        fs.closeSync(fd);
+      }
     }
     this.onPathWritten(target);
     return {};
@@ -882,6 +935,13 @@ class DesktopImporter {
       if (files.failed) { plan.results.set(k, { ok: false, error: files.failed }); continue; }
       const stagedDir = path.join(staging, dir);
       const dest = path.join(root, dir);
+      try {
+        guardCheck(this.writeGuard, stagedDir);
+        guardCheck(this.writeGuard, dest);
+      } catch (err) {
+        plan.results.set(k, { ok: false, error: err.message });
+        continue;
+      }
       if (fs.existsSync(dest)) {
         plan.results.set(k, { ok: false, error: 'a case with this directory appeared on the service during the import' });
         continue;
@@ -950,6 +1010,7 @@ class DesktopImporter {
     // case's outcome above, and cleanupOrphanedStaging() sweeps anything
     // left behind here the next time this importer is constructed (M9).
     try {
+      guardCheck(this.writeGuard, staging);
       fs.rmSync(staging, { recursive: true, force: true });
     } catch (err) {
       log.warn('could not remove the import staging directory', { staging, error: err.message });
@@ -1004,7 +1065,7 @@ class DesktopImporter {
 // Where memory, cron and the user profile are written. The running service
 // uses its started core; the CLI (offline) opens the stores directly, so it
 // never starts a core (and never launches MCP servers or hooks) as root.
-async function buildImportTargets({ context, dataDir, offline = false }) {
+async function buildImportTargets({ context, dataDir, offline = false, writeGuard = null }) {
   if (!offline) {
     const memory = context.getMemoryManager();
     const cron = context.getCronScheduler();
@@ -1019,9 +1080,9 @@ async function buildImportTargets({ context, dataDir, offline = false }) {
   const { MemoryStore, MemoryManager } = require('../memory');
   const CronStore = require('../cron/cron-store');
   const memoryFile = path.join(dataDir, 'memory', 'memory-store.json');
-  const memory = new MemoryManager({ store: new MemoryStore({ storageFile: memoryFile }) });
+  const memory = new MemoryManager({ store: new MemoryStore({ storageFile: memoryFile, writeGuard }) });
   const cronFile = path.join(dataDir, 'cron', 'jobs.json');
-  const cronStore = new CronStore(cronFile);
+  const cronStore = new CronStore(cronFile, { writeGuard });
   await cronStore.load();
   const store = context.getStore();
   return {
@@ -1047,5 +1108,7 @@ module.exports = {
   MAX_BATCH_BYTES,
   INSTALL_ID_RE,
   CASE_DIR_RE,
-  isSkippedCaseFile
+  isSkippedCaseFile,
+  safeRelPath,
+  isValidCaseDir
 };

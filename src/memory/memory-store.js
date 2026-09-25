@@ -1,9 +1,15 @@
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { guardCheck } = require('../platform/write-guard');
 
 class MemoryStore {
+  // `writeGuard` (src/platform/write-guard.js) is passed only by the admin
+  // CLI's import writer, which may run as an Administrator inside a data dir
+  // the service account controls; without one, writes are unchanged.
   constructor(options = {}) {
     this.storageFile = options.storageFile || path.join(process.cwd(), 'memory-store.json');
+    this.writeGuard = options.writeGuard || null;
     this.cache = null;
     this._writeQueue = Promise.resolve();
   }
@@ -15,8 +21,10 @@ class MemoryStore {
 
   ensureDirectory() {
     const directory = path.dirname(this.storageFile);
+    guardCheck(this.writeGuard, this.storageFile);
     if (!fs.existsSync(directory)) {
       fs.mkdirSync(directory, { recursive: true });
+      guardCheck(this.writeGuard, this.storageFile);
     }
   }
 
@@ -63,9 +71,23 @@ class MemoryStore {
     this.ensureDirectory();
     this.cache = this.normalizeDocument(document);
     const data = `${JSON.stringify(this.cache, null, 2)}\n`;
-    const tempFile = `${this.storageFile}.tmp`;
-    fs.writeFileSync(tempFile, data, 'utf-8');
-    fs.renameSync(tempFile, this.storageFile);
+    // An unpredictable name opened with 'wx' (O_CREAT|O_EXCL): nothing can
+    // be planted there in advance, and an existing entry is never followed
+    // or truncated (fleet stage 7 Task 9, fix round 1).
+    const tempFile = `${this.storageFile}.${crypto.randomBytes(8).toString('hex')}.tmp`;
+    guardCheck(this.writeGuard, tempFile);
+    const fd = fs.openSync(tempFile, 'wx');
+    try {
+      fs.writeFileSync(fd, data, 'utf-8');
+    } finally {
+      fs.closeSync(fd);
+    }
+    try {
+      fs.renameSync(tempFile, this.storageFile);
+    } catch (err) {
+      fs.rmSync(tempFile, { force: true });
+      throw err;
+    }
     return this.cache;
   }
 

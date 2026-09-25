@@ -18,6 +18,7 @@ const fs = require('fs');
 const path = require('path');
 const { createLogger } = require('../logging');
 const { writeFileAtomic } = require('./pairing');
+const { guardCheck } = require('../platform/write-guard');
 const { MESSAGES } = require('./protocol');
 
 const log = createLogger('desktop-bridge/desktop-scope');
@@ -67,7 +68,10 @@ function normalizeDirectory(directory) {
   return resolved;
 }
 
-function createDesktopScope({ dataDir, context, onPathWritten = () => {} }) {
+// `writeGuard` (src/platform/write-guard.js) is passed only by the admin
+// CLI's import writer (fleet stage 7 Task 9, fix round 1); the bridge's scope
+// has none and writes exactly as before.
+function createDesktopScope({ dataDir, context, onPathWritten = () => {}, writeGuard = null }) {
   const dir = path.join(dataDir, 'desktop');
   const writing = new Set();
 
@@ -105,9 +109,11 @@ function createDesktopScope({ dataDir, context, onPathWritten = () => {} }) {
     }
     writing.add(name);
     try {
+      const file = path.join(dir, name);
+      guardCheck(writeGuard, file);
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
       onPathWritten(dir);
-      const file = path.join(dir, name);
+      guardCheck(writeGuard, file);
       writeFileAtomic(file, `${JSON.stringify({ v: 1, [key]: list }, null, 2)}\n`, 0o600);
       onPathWritten(file);
     } finally {
@@ -222,6 +228,9 @@ function createDesktopScope({ dataDir, context, onPathWritten = () => {} }) {
       });
       return false;
     }
+    // Checked before the context changes, so a refused scope write can't
+    // leave a rule in the context that the desktop's record doesn't list.
+    guardCheck(writeGuard, path.join(dir, RULES_FILE));
     context.addPermissionRule(rule);
     const rules = listRules().filter((r) => ruleKey(r.tool, r.pattern, r.action) !== key);
     rules.push({ tool: rule.tool, pattern: rule.pattern || '*', action: rule.action });
