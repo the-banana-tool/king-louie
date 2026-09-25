@@ -105,6 +105,22 @@ function budgetSection(budget) {
   return lines.length ? ['## Budget', ...lines, ''] : [];
 }
 
+const DETOURS_MAX = 1500;
+const EXTRAS_MAX = 2500;
+const cap = (text, max) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
+
+// Detour proposals and related-case lines (cases stage 5 spec §3.8).
+function detoursSection(detours = []) {
+  if (!detours.length) return [];
+  return [cap(['## Detours and related cases', ...detours.map((d) => `- ${d}`)].join('\n'), DETOURS_MAX), ''];
+}
+
+// The case type's extras, rendered last (cases stage 5 spec §3.7).
+function extrasBlock(extras) {
+  if (!extras || !String(extras.text || '').trim()) return '';
+  return cap(`## Case type: ${extras.type}\n${String(extras.text).trimEnd()}`, EXTRAS_MAX);
+}
+
 function nextWakeupSection(w) {
   if (!w) return [];
   return ['## Next wake-up', `- ${w.id} ${w.kind} at ${w.nextAt}`, ''];
@@ -113,7 +129,7 @@ function nextWakeupSection(w) {
 function buildOrientation({
   meta, brief, facts = new Map(), decisions = [], lastJournal = null, ledgerErrors = [], maxChars = DEFAULT_MAX_CHARS,
   triggers = [], hookNotes = [], statusReason = null, failure = null, questions = [], budget: budgetStatus = null, nextWakeup = null,
-  now = new Date()
+  now = new Date(), detours = [], extras = null
 }) {
   const all = [...facts.values()];
   const active = all.filter((f) => f.status === 'active');
@@ -134,6 +150,7 @@ function buildOrientation({
     ...(lbUnknowns.length ? lbUnknowns : ['- none recorded']),
     '',
     ...questionsSection(questions, now),
+    ...detoursSection(detours),
     ...budgetSection(budgetStatus),
     ...nextWakeupSection(nextWakeup)
   ].join('\n');
@@ -178,7 +195,8 @@ function buildOrientation({
     })));
   }
 
-  const budget = maxChars - head.length - tail.length - 200;
+  const typeBlock = extrasBlock(extras);
+  const budget = maxChars - head.length - tail.length - typeBlock.length - 200;
   const kept = ['## Facts (active)'];
   let used = kept[0].length + 1;
   let omitted = 0;
@@ -193,7 +211,7 @@ function buildOrientation({
   if (omitted) kept.push(`- … ${omitted} more facts not shown; use the Ledger tool's query action.`);
   if (kept.length === 1) kept.push('- none yet');
 
-  return [head, kept.join('\n'), '', tail].join('\n');
+  return [head, kept.join('\n'), '', tail, ...(typeBlock ? [typeBlock, ''] : [])].join('\n');
 }
 
 module.exports = { buildOrientation, DEFAULT_MAX_CHARS };

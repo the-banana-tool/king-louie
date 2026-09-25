@@ -5,6 +5,7 @@ const path = require('path');
 const yaml = require('js-yaml');
 const git = require('./git');
 const { uniqueSlug } = require('./slug');
+const { assertKnownType } = require('./case-types');
 const { createLogger } = require('../logging');
 
 const log = createLogger('cases');
@@ -43,6 +44,7 @@ class CaseStore {
   }
 
   async create({ title, type = 'general', objective = '' } = {}) {
+    assertKnownType(type);
     if (!(await git.isGitAvailable())) throw new git.GitUnavailableError();
     fs.mkdirSync(this.root, { recursive: true });
     const slug = uniqueSlug(this.root, title);

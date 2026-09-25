@@ -78,7 +78,9 @@ class CaseRecords {
     appendJsonl(this.recommendationsJsonl, { ...rec, at: new Date().toISOString() });
   }
 
-  renderOpenItems(facts) {
+  // blockers: [{ id, title, status, note }] from case.yaml related entries
+  // with relation blocked-by (cases stage 5 spec §3.8).
+  renderOpenItems(facts, { blockers = [] } = {}) {
     const open = [...facts.values()].filter((f) => f.provenance === 'unknown' && f.status === 'active');
     const item = (f) => [
       `- **${f.id}** ${f.subject}.${f.attr} — ${f.stmt}`,
@@ -92,7 +94,10 @@ class CaseRecords {
       '_Generated from facts.jsonl at the end of each turn. Change facts with the Ledger tool, not by editing this file._',
       '',
       ...section('Load-bearing unknowns', open.filter((f) => f.loadBearing)),
-      ...section('Other unknowns', open.filter((f) => !f.loadBearing))
+      ...section('Other unknowns', open.filter((f) => !f.loadBearing)),
+      ...(blockers.length
+        ? ['## Blocked by', '', ...blockers.map((b) => `- **${b.title || b.id}** (${b.status || 'unknown'})${b.note ? ` — ${b.note}` : ''}`), '']
+        : [])
     ].join('\n');
     fs.writeFileSync(path.join(this.dir, 'open-items.md'), text);
     return text;

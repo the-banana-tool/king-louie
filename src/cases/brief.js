@@ -22,9 +22,9 @@ class BriefError extends Error {
   }
 }
 
-function validate(field, value) {
+function validate(field, value, extraNames = []) {
   if (!BRIEF_FIELDS.has(field)) {
-    throw new BriefError(`Unknown brief field "${field}". Fields: ${[...BRIEF_FIELDS].join(', ')}.`);
+    throw new BriefError(`Unknown brief field "${field}". Fields: ${[...BRIEF_FIELDS, ...extraNames].join(', ')}.`);
   }
   if (ARRAY_FIELDS.has(field)) {
     if (!Array.isArray(value) || !value.every((v) => typeof v === 'string')) {
@@ -43,20 +43,47 @@ function validate(field, value) {
   }
 }
 
-function checkProvenance(field, provenance) {
-  if (USER_ONLY_FIELDS.has(field) && provenance !== 'user') {
-    throw new BriefError(`"${field}" can only be set from something the owner said (provenance "user"). Ask the owner instead of filling it in.`);
-  }
-}
-
 const isEmpty = (v) => v === undefined || v === null
   || (typeof v === 'string' && !v.trim())
   || (Array.isArray(v) && v.length === 0);
 
 class Brief {
-  constructor(dir) {
+  // extraFields: the case type's brief fields ([{ name, kind: 'text',
+  // userOnly, validate? }]); gatingFields: the fields of required
+  // field-backed gating questions (cases stage 5 spec §3.7).
+  constructor(dir, { extraFields = [], gatingFields = [] } = {}) {
     this.dir = dir;
     this.path = path.join(dir, 'brief.md');
+    this.extra = new Map((Array.isArray(extraFields) ? extraFields : [])
+      .filter((f) => f && typeof f.name === 'string')
+      .map((f) => [f.name, f]));
+    this.gatingFields = (Array.isArray(gatingFields) ? gatingFields : []).filter((f) => typeof f === 'string');
+  }
+
+  isUserOnly(field) {
+    return USER_ONLY_FIELDS.has(field) || Boolean(this.extra.get(field)?.userOnly);
+  }
+
+  _validate(field, value) {
+    const extra = this.extra.get(field);
+    if (!extra) {
+      validate(field, value, [...this.extra.keys()]);
+      return;
+    }
+    if (typeof value !== 'string') throw new BriefError(`"${field}" must be a string.`);
+    if (typeof extra.validate === 'function') {
+      try {
+        extra.validate(value);
+      } catch (err) {
+        throw new BriefError(err.message);
+      }
+    }
+  }
+
+  _checkProvenance(field, provenance) {
+    if (this.isUserOnly(field) && provenance !== 'user') {
+      throw new BriefError(`"${field}" can only be set from something the owner said (provenance "user"). Ask the owner instead of filling it in.`);
+    }
   }
 
   read() {
@@ -80,8 +107,8 @@ class Brief {
   }
 
   update(field, value, { provenance } = {}) {
-    validate(field, value);
-    checkProvenance(field, provenance);
+    this._validate(field, value);
+    this._checkProvenance(field, provenance);
     const { data, body } = this.read();
     data[field] = value;
     this._write(data, body);
@@ -90,7 +117,7 @@ class Brief {
 
   append(field, item, { provenance } = {}) {
     if (!ARRAY_FIELDS.has(field)) throw new BriefError(`"${field}" is not a list field.`);
-    checkProvenance(field, provenance);
+    this._checkProvenance(field, provenance);
     const { data } = this.read();
     const next = [...(Array.isArray(data[field]) ? data[field] : []), String(item)];
     return this.update(field, next, { provenance });
@@ -98,7 +125,15 @@ class Brief {
 
   missingForGating() {
     const { data } = this.read();
-    return GATING_REQUIRED.filter((f) => isEmpty(data[f]));
+    const required = [...GATING_REQUIRED, ...this.gatingFields.filter((f) => !GATING_REQUIRED.includes(f))];
+    return required.filter((f) => isEmpty(data[f]));
+  }
+
+  // The named writer for the prose under the front matter.
+  writeBody(text) {
+    const { data } = this.read();
+    this._write(data, `${String(text ?? '').trimEnd()}\n`);
+    return data;
   }
 
   isGatingComplete() {

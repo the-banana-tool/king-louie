@@ -336,3 +336,85 @@ describe('software-repo: extras and check-before-write', () => {
     );
   });
 });
+
+describe('type-aware brief, blockers, orientation sections and type validation', () => {
+  const { Brief } = require('../src/cases/brief');
+  const { CaseRecords } = require('../src/cases/records');
+  const { CaseStore } = require('../src/cases/case-store');
+  const { buildOrientation } = require('../src/cases/orientation');
+
+  async function freshCase(type = 'software-repo') {
+    const store = new CaseStore({ root: tmp() });
+    return store.create({ title: 'Phone agent maintenance', type, objective: 'Keep the phone agent healthy' });
+  }
+
+  it('repo is owner-only, validated, and required for gating on software-repo', async () => {
+    const info = await freshCase();
+    const brief = new Brief(info.dir, { extraFields: types.briefFieldsFor('software-repo'), gatingFields: ['repo'] });
+    assert.deepStrictEqual(brief.missingForGating(), ['why', 'successCriteria', 'repo']);
+    assert.strictEqual(brief.isUserOnly('repo'), true);
+    assert.throws(() => brief.update('repo', path.join(os.tmpdir(), 'phone-agent'), { provenance: 'model' }), /"repo" can only be set from something the owner said/);
+    assert.throws(() => brief.update('repo', 'phone-agent', { provenance: 'user' }), { message: 'repo must be an absolute path or a clone URL.' });
+    assert.throws(() => brief.update('repo', 42, { provenance: 'user' }), { message: '"repo" must be a string.' });
+    brief.update('repo', 'https://github.com/example/phone-agent.git', { provenance: 'user' });
+    assert.strictEqual(brief.read().data.repo, 'https://github.com/example/phone-agent.git');
+    assert.deepStrictEqual(brief.missingForGating(), ['why', 'successCriteria']);
+  });
+
+  it('a brief without the type\'s fields refuses repo as unknown', async () => {
+    const info = await freshCase('general');
+    assert.throws(() => new Brief(info.dir).update('repo', '/work/x', { provenance: 'user' }), /Unknown brief field "repo"/);
+  });
+
+  it('writeBody replaces the prose and keeps the front matter', async () => {
+    const info = await freshCase();
+    const brief = new Brief(info.dir);
+    brief.writeBody('Spawned from case "Rear door quotes": the phone agent drops calls.');
+    const { data, body } = brief.read();
+    assert.strictEqual(data.objective, 'Keep the phone agent healthy');
+    assert.strictEqual(body, 'Spawned from case "Rear door quotes": the phone agent drops calls.\n');
+  });
+
+  it('open-items.md gains "Blocked by" only when there are blockers', async () => {
+    const info = await freshCase('general');
+    const records = new CaseRecords(info.dir);
+    assert.ok(!records.renderOpenItems(new Map()).includes('Blocked by'));
+    const text = records.renderOpenItems(new Map(), { blockers: [{ id: 'c-9', title: 'Phone agent maintenance', status: 'active', note: 'Status polling reports dropped calls' }] });
+    assert.match(text, /## Blocked by\n\n- \*\*Phone agent maintenance\*\* \(active\) — Status polling reports dropped calls\n/);
+  });
+
+  it('orientation puts detours after the open questions and the case type last, each capped', () => {
+    const meta = { title: 'Rear door quotes', slug: 'rear-door-quotes', status: 'active' };
+    const text = buildOrientation({
+      meta,
+      brief: { data: { objective: 'Three quotes', gating: { complete: true } } },
+      questions: [{ id: 'q-0001', kind: 'question', urgency: 'low', text: 'Which color?' }],
+      budget: { usd: { spent: 1, limit: 20, crossed: [] } },
+      detours: ['d-0001 proposed (low): Fix the phone agent status polling — waiting on q-0002', `x${'y'.repeat(3000)}`],
+      extras: { type: 'software-repo', text: `Repository: /work/phone-agent\n${'z'.repeat(4000)}` },
+      lastJournal: { file: 'journal/a.md', text: 'Last turn' }
+    });
+    const q = text.indexOf('## Open questions to the owner');
+    const d = text.indexOf('## Detours and related cases');
+    const b = text.indexOf('## Budget');
+    const t = text.indexOf('## Case type: software-repo');
+    assert.ok(q < d && d < b, 'detours sit between the open questions and the budget');
+    assert.ok(t > text.indexOf('## Last journal entry'), 'the case type comes last');
+    const detourBlock = text.slice(d, text.indexOf('\n\n', d));
+    assert.ok(detourBlock.length <= 1500);
+    assert.ok(text.slice(t).trimEnd().length <= 2500);
+    const plain = buildOrientation({ meta, brief: { data: {} }, extras: { type: 'general', text: '' } });
+    assert.ok(!plain.includes('## Case type'));
+    assert.ok(!plain.includes('## Detours'));
+  });
+
+  it('CaseStore.create refuses an unknown type; a case already on disk with one still opens', async () => {
+    const store = new CaseStore({ root: tmp() });
+    await assert.rejects(store.create({ title: 'Mystery', type: 'land-sale' }), { message: 'Unknown case type "land-sale". Known types: general, outreach, software-repo.' });
+    const info = await store.create({ title: 'Legacy case' });
+    const yaml = require('js-yaml');
+    const file = path.join(info.dir, 'case.yaml');
+    fs.writeFileSync(file, yaml.dump({ ...yaml.load(fs.readFileSync(file, 'utf8')), type: 'land-sale' }));
+    assert.strictEqual(store.get(info.id).type, 'land-sale');
+  });
+});
