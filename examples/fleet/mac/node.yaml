@@ -1,0 +1,25 @@
+# mac: macOS, profile agent. No runbooks yet; it is here for the install
+# walk-through, and fleet stage 5 adds desktop apps on it.
+# Install the same file in both config dirs (install guide section 5):
+#   /Library/Application Support/KingLouie/config/node.yaml   the installed service
+#   /opt/king-louie/mcp/config/node.yaml                      the stdio MCP instance
+# Edit one, copy it over the other, then compare them with diff.
+# Only the keys below are allowed; anything else stops the node from loading.
+name: mac
+profile: agent
+# front_door: https://kl.example.com   # used from stage 4
+capabilities: [apple-silicon]
+policy:
+  allowed_roots:
+    - /opt/work
+  remote_sessions:
+    always_confirm:
+      - 'Bash(ssh *)'
+      - 'Bash(scp *)'
+      - 'Bash(git push*)'
+      - 'Vault(*)'
+      - 'Bash(*deploy*)'
+    deny:
+      - 'Bash(rm -rf /*)'
+  max_concurrent_jobs: 2
+runbooks_dir: runbooks

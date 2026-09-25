@@ -1,0 +1,27 @@
+# gpu-box: Windows, profile agent, with a GPU and a large data drive.
+# Install the same file in both config dirs (install guide section 5):
+#   %ProgramData%\KingLouie\config\node.yaml   read by the installed service
+#   C:\KingLouie\mcp\config\node.yaml          read by the stdio MCP instance
+# Edit one, copy it over the other, then compare them with fc.exe.
+# Only the keys below are allowed; anything else stops the node from loading.
+name: gpu-box
+profile: agent
+# front_door: https://kl.example.com   # used from stage 4
+capabilities: [gpu, cuda, large-disk]
+policy:
+  allowed_roots:
+    - 'D:\models'
+    - 'D:\datasets'
+    - 'D:\train'
+    - 'D:\ML Data'          # a root with a space works as written
+  remote_sessions:
+    always_confirm:
+      - 'Bash(ssh *)'
+      - 'Bash(scp *)'
+      - 'Bash(git push*)'
+      - 'Vault(*)'
+      - 'Bash(*deploy*)'
+    deny:
+      - 'Bash(rm -rf /*)'
+  max_concurrent_jobs: 2
+runbooks_dir: runbooks

@@ -254,3 +254,94 @@ describe('example runbooks: parameter injection', () => {
     }
   }
 });
+
+// Spec §3.1.1: which runbooks each role installs, and their tiers.
+const ROLE_RUNBOOKS = {
+  'gpu-box': { profile: 'agent', runbooks: { 'models.hf_download': 'routine', 'train.run': 'routine' } },
+  laptop: { profile: 'agent', runbooks: { 'laptop.build_then_deploy': 'routine' } },
+  mac: { profile: 'agent', runbooks: {} },
+  'web-01': { profile: 'runbook', runbooks: { 'site.status': 'read', 'site.pull_and_restart': 'unsafe', 'server.reboot': 'unsafe' } }
+};
+
+// Spec §4.1.
+const NODE_EXPECT = {
+  'gpu-box': { capabilities: ['gpu', 'cuda', 'large-disk'], roots: ['D:\\models', 'D:\\datasets', 'D:\\train', 'D:\\ML Data'], maxJobs: 2 },
+  laptop: { capabilities: ['build'], roots: ['C:\\build', 'C:\\src'], maxJobs: 1 },
+  mac: { capabilities: ['apple-silicon'], roots: ['/opt/work'], maxJobs: 2 },
+  'web-01': { capabilities: ['site'], roots: ['/srv/site'], maxJobs: 1 }
+};
+const F2_ALWAYS_CONFIRM = ['Bash(ssh *)', 'Bash(scp *)', 'Bash(git push*)', 'Vault(*)', 'Bash(*deploy*)'];
+const F2_DENY = ['Bash(rm -rf /*)'];
+
+// A role's node.yaml, service.json and runbooks, installed into
+// <tmp>/config the way the guide installs them into the MCP config dir.
+function installRole(role) {
+  const root = tmp();
+  const config = path.join(root, 'config');
+  const fleet = path.join(EXAMPLES, 'fleet', role);
+  installInto(config, [path.join(fleet, 'node.yaml'), path.join(fleet, 'service.json')]);
+  const names = Object.keys(ROLE_RUNBOOKS[role].runbooks);
+  if (names.length) installInto(path.join(config, 'runbooks'), names.map((n) => path.join(RUNBOOKS, `${n}.yaml`)));
+  return { root, config };
+}
+
+describe('example roles: files', () => {
+  it('has every file the role table lists, and every runbook belongs to a role', () => {
+    const claimed = new Set();
+    for (const [role, { runbooks }] of Object.entries(ROLE_RUNBOOKS)) {
+      for (const f of ['node.yaml', 'service.json']) {
+        assert.ok(fs.existsSync(path.join(EXAMPLES, 'fleet', role, f)), `${role}/${f} missing`);
+      }
+      for (const name of Object.keys(runbooks)) {
+        assert.ok(fs.existsSync(path.join(RUNBOOKS, `${name}.yaml`)), `${name}.yaml missing`);
+        claimed.add(`${name}.yaml`);
+      }
+    }
+    assert.deepEqual(runbookFiles().filter((f) => !claimed.has(f)), [], 'runbooks that belong to no role');
+    assert.ok(fs.existsSync(path.join(EXAMPLES, 'README.md')));
+    assert.ok(fs.existsSync(path.join(EXAMPLES, 'fleet', 'frontdoor', 'README.md')));
+    assert.ok(!fs.existsSync(path.join(EXAMPLES, 'fleet', 'frontdoor', 'node.yaml')), 'frontdoor/node.yaml arrives with fleet stage 4');
+  });
+});
+
+describe('example roles: load through the real loaders', () => {
+  for (const [role, expect] of Object.entries(ROLE_RUNBOOKS)) {
+    it(`${role} loads its node.yaml, service.json and runbooks`, () => {
+      const { root, config } = installRole(role);
+
+      const node = loadNodeConfig({ adminConfigDir: config, ...adminOpts });
+      assert.equal(node.name, role);
+      assert.equal(node.profile, expect.profile);
+      assert.equal(node.frontDoor, null, 'front_door stays commented out until fleet stage 4');
+      assert.deepEqual(node.capabilities, NODE_EXPECT[role].capabilities);
+      assert.deepEqual(node.policy.allowed_roots, NODE_EXPECT[role].roots.map((r) => path.resolve(r)));
+      assert.equal(node.policy.max_concurrent_jobs, NODE_EXPECT[role].maxJobs);
+      assert.deepEqual(node.policy.remote_sessions, { always_confirm: F2_ALWAYS_CONFIRM, deny: F2_DENY });
+      assert.equal(node.runbooksDir, path.join(config, 'runbooks'));
+
+      const raw = parseYaml(fs.readFileSync(path.join(config, 'node.yaml'), 'utf8'));
+      for (const key of Object.keys(raw)) assert.ok(NODE_YAML_KEYS.top.includes(key), `node.yaml key ${key}`);
+
+      const service = loadServiceConfig(path.join(root, 'data'), {}, { adminConfigDir: config, geteuid: () => -1, adminUid: EUID });
+      assert.equal(service.profile, expect.profile);
+      const rawService = JSON.parse(fs.readFileSync(path.join(config, 'service.json'), 'utf8'));
+      assert.deepEqual(Object.keys(rawService), ['profile', 'features', 'ports']);
+      assert.deepEqual(Object.keys(rawService.features), Object.keys(DEFAULT_FEATURES));
+      assert.deepEqual(Object.keys(rawService.ports), Object.keys(DEFAULT_PORTS));
+      assert.ok(Object.values(rawService.features).every((v) => v === false), 'every listener off in the examples');
+
+      const engine = new RunbookEngine({ runbooksDir: node.runbooksDir, allowedRoots: node.policy.allowed_roots, ...adminOpts });
+      const loaded = engine.loadRunbooks();
+      assert.deepEqual(
+        Object.fromEntries([...loaded.values()].map((r) => [r.name, r.tier])),
+        expect.runbooks
+      );
+    });
+  }
+
+  it('a Windows root with a space holds a file inside it', { skip: POSIX ? 'win32 path semantics' : false }, () => {
+    const spaced = path.join(tmp(), 'ML Data');
+    fs.mkdirSync(spaced);
+    assert.equal(isPathUnderRoots(path.join(spaced, 'x.json'), [spaced]), true);
+  });
+});

@@ -1,0 +1,25 @@
+# laptop: Windows, profile agent. Builds and tests the site.
+# Install the same file in both config dirs (install guide section 5):
+#   %ProgramData%\KingLouie\config\node.yaml   read by the installed service
+#   C:\KingLouie\mcp\config\node.yaml          read by the stdio MCP instance
+# Edit one, copy it over the other, then compare them with fc.exe.
+# Only the keys below are allowed; anything else stops the node from loading.
+name: laptop
+profile: agent
+# front_door: https://kl.example.com   # used from stage 4
+capabilities: [build]
+policy:
+  allowed_roots:
+    - 'C:\build'
+    - 'C:\src'
+  remote_sessions:
+    always_confirm:
+      - 'Bash(ssh *)'
+      - 'Bash(scp *)'
+      - 'Bash(git push*)'
+      - 'Vault(*)'
+      - 'Bash(*deploy*)'
+    deny:
+      - 'Bash(rm -rf /*)'
+  max_concurrent_jobs: 1
+runbooks_dir: runbooks
