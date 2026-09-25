@@ -1,0 +1,37 @@
+{
+  "note": "Fixed test keys for the approval-v1 vectors. Never use them for anything real: nodes refuse these device keys unless built with allowTestKeys (src/approvals/test-keys.js).",
+  "nodes": {
+    "web-01": {
+      "seed": "00f47b1c993fe0506bf6e606dca8c01afaaafc14cf44ee38c70bf6fb2b166727",
+      "spki": "302a300506032b65700321006f1962549a885918d3d8c5745499194f20289bda3e041e433e4fa15e16558423",
+      "id": "kl-c2ubd6jjqumalzt5"
+    },
+    "gpu-box": {
+      "seed": "25987fdeb838cd84203da80857dd70a62221c673e4ae8c7cea7b4190a2dd5aca",
+      "spki": "302a300506032b65700321004a5a5267be058370e223de879faa852150a2dd0c4113aa634d6259167ec7b950",
+      "id": "kl-hnef32472qzibi5r"
+    },
+    "relay": {
+      "seed": "c0f1e6a9d5ccbe58b4601ee2df1ab1a64a0146cdbad9059c90ec520aa8afad23",
+      "spki": "302a300506032b65700321007d85a245144905192e752ad2c1051643a6e966d934dcbc6baaaabffe1978a725",
+      "id": "kl-nt4ritcfj5kepq3y"
+    }
+  },
+  "devices": {
+    "A": {
+      "d": "hR06TbNHcAce7B80rS7Y4bgYu214JPpwmK7Or3Dh1Ts",
+      "jwk": { "kty": "EC", "crv": "P-256", "x": "krcyG5D6HPx9P3Gi5oaR6OyU9D1gIrc3UD6pIRcDq74", "y": "9XqgPXsMAYplX5IZVn-9FRP2sN4oHFRPjnZyfG-GpaI" },
+      "id": "d-3vmwrihhdbnit4oi"
+    },
+    "B": {
+      "d": "4XCV8YsX9pCFNbCUU4rkaZ_GJgURsFxM6W7lbAgYRFQ",
+      "jwk": { "kty": "EC", "crv": "P-256", "x": "GnDHGfxMVkv5iRyStQIsJbqWKUtPy6ijuA1UiWKlYDc", "y": "LLhIvQ_y0DmIXI_qxojWRICKfjPE_orjZBTwRhje91k" },
+      "id": "d-6xdlbxglhnvfa3lw"
+    },
+    "C": {
+      "d": "qOUXdbyjhl0jf43zlVAs6BXELTf23qVZsCf4uHUxoIk",
+      "jwk": { "kty": "EC", "crv": "P-256", "x": "RscTaDzgRlaVqN4IrrtRgbBZw8hrp00xiIu7B_1AJ6w", "y": "gBam0DF3krccxYdWnKr6fRP4yHKNLKfByP76l8dEw78" },
+      "id": "d-futyo75nn4w4reil"
+    }
+  }
+}
