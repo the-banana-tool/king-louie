@@ -25,6 +25,9 @@ const { resolveRole } = require('./roles');
 const { CrossCaseIndex } = require('./index-store');
 const { findSimilarCases } = require('./gates');
 const { assertKnownType, resolveCaseType, briefFieldsFor, gatingQuestionsFor } = require('./case-types');
+const { DetourClassifier } = require('./detours/classifier');
+const { DetourRouter } = require('./detours/router');
+const { registerDetourHooks } = require('./detours/hooks');
 // Registers the direction and budget-grant answer handlers.
 require('./answer-handlers');
 const { createLogger } = require('../logging');
@@ -179,6 +182,9 @@ class CaseRuntime {
     this.creating = 0;
     // Set by beginShutdown(): no new wake-up turn may start once true.
     this.closing = false;
+    // Cases stage 5: detour routing and the case-type refresh (spec §3.6).
+    // Registered last, once every field above exists (controller ruling M3).
+    registerDetourHooks(this);
   }
 
   // Called once shutdown begins (create-core, right after the scheduler
@@ -368,9 +374,57 @@ class CaseRuntime {
     return { type: t.type, text: lines.join('\n') };
   }
 
-  // `## Detours and related cases`. Stage 5 Part 2 adds the proposals.
+  // `## Detours and related cases`: open proposals, answers waiting to be
+  // mapped, incoming detours, then related cases.
   _detourLines(meta) {
-    return this._relatedLines(meta);
+    return [...this.detours.orientationLines(meta.id), ...this._relatedLines(meta)];
+  }
+
+  // ---- Detours (cases stage 5 spec §3.3–§3.5) ----
+
+  get classifier() {
+    if (!this._classifier) this._classifier = new DetourClassifier({ runtime: this });
+    return this._classifier;
+  }
+
+  get detours() {
+    if (!this._detours) this._detours = new DetourRouter({ runtime: this, classifier: this.classifier });
+    return this._detours;
+  }
+
+  // C3 calls this once per plan and once per new job. A detour is refused
+  // with the instruction to propose it; an unsure or failed classification
+  // lets the work through, and so does any error here (logged): the gate
+  // fails open like the classifier. Only a wrong `source` throws, since that
+  // is a caller bug rather than a runtime failure.
+  async detourGate(id, { source, serves = null, text, turnId = null } = {}) {
+    if (!['plan', 'executor'].includes(source)) throw new Error(`detourGate source must be plan or executor, not "${source}".`);
+    try {
+      const meta = this.getCase(id);
+      const turn = this.turns.get(meta.id) || { caseId: meta.id, turnId, signal: null };
+      const classification = await this.classifier.classify(meta.id, { source, serves, text, turn });
+      if (classification.detour) {
+        let objective = '';
+        try {
+          objective = this.brief(meta.id).read().data?.objective || '';
+        } catch {
+          objective = '';
+        }
+        const reason = classification.reason.replace(/[.\s]+$/, '');
+        return {
+          ok: false,
+          error: `This work looks like a detour from the case objective ("${objective || meta.title}"): ${reason}. Do not do it in this case. Call Detour with action "propose" (blocks: true if this case cannot proceed without it), then continue with on-case work.`,
+          classification
+        };
+      }
+      if (!classification.failed && classification.onCase === false) {
+        return { ok: true, note: `The classifier was unsure this serves the objective: ${classification.reason.replace(/[.\s]+$/, '')}.` };
+      }
+      return { ok: true };
+    } catch (err) {
+      log.warn(`detourGate (${source}) on case ${id} failed; letting the work through: ${err && err.message ? err.message : String(err)}`);
+      return { ok: true };
+    }
   }
 
   _relatedLines(meta) {
