@@ -3,6 +3,7 @@
 const { EventEmitter } = require('events');
 const { open } = require('../approvals/envelope');
 const { validateMessage, NODE_ID_RE } = require('../approvals/messages');
+const { err } = require('./errors');
 
 const GRACE_MS = 60000;
 // Long polls never wait longer than this, matching the mailbox's own cap:
@@ -13,8 +14,6 @@ const MAX_WAIT_MS = 25000;
 // far-future expiry cannot be relied on to age out before sweep() is next
 // called. Oldest entries (by insertion order, which tracks seq) go first.
 const MAX_ITEMS = 5000;
-
-const err = (code, message) => Object.assign(new Error(message || code), { code });
 
 class ApprovalCache extends EventEmitter {
   constructor({ now = Date.now } = {}) {

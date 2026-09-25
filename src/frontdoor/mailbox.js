@@ -4,11 +4,10 @@
 const { EventEmitter } = require('events');
 const { open } = require('../approvals/envelope');
 const { NODE_ID_RE, DEVICE_ID_RE } = require('../approvals/messages');
+const { err } = require('./errors');
 
 const PER_NODE = 1000;
 const MAX_WAIT_MS = 25000;
-
-const err = (code, message) => Object.assign(new Error(message || code), { code });
 
 class Mailbox extends EventEmitter {
   constructor({ now = Date.now } = {}) {

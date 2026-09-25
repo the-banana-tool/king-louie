@@ -3,6 +3,7 @@
 // ids are 16 random bytes: knowing one is the credential for its routes.
 const crypto = require('crypto');
 const { CODE_ID_RE, NODE_ID_RE, DEVICE_ID_RE } = require('../approvals/messages');
+const { err } = require('./errors');
 
 const TTL_MS = 10 * 60 * 1000;
 const KEEP_MS = 10 * 60 * 1000;
@@ -12,8 +13,6 @@ const MAX_CODES = 2000;
 const MAX_INVITES = 5000;
 // 'waiting' and 'expired' are computed by getCode, never written directly.
 const CLOSE_STATES = ['done', 'refused'];
-
-const err = (code, message) => Object.assign(new Error(message || code), { code });
 
 function boundMap(map, max) {
   if (map.size <= max) return;

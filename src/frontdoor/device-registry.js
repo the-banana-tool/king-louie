@@ -6,10 +6,9 @@ const path = require('path');
 const { deviceIdFromJwk } = require('../approvals/envelope');
 const { writeFileAtomic } = require('../approvals/approver-store');
 const { DEVICE_ID_RE, NODE_ID_RE } = require('../approvals/messages');
+const { err } = require('./errors');
 
 const PLATFORMS = ['ios', 'android', 'demo'];
-
-const err = (code, message) => Object.assign(new Error(message || code), { code });
 
 class DeviceRegistry {
   constructor({ file, now = Date.now } = {}) {

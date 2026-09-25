@@ -143,6 +143,19 @@ describe('Invites', () => {
     assert.throws(() => inv.claim('nope', { device: b.device(), mac: 'm' }), (e) => e.code === 'unknown_invite');
   });
 
+  it('an expired invite is unknown to getInvite, claim and getClaim alike', () => {
+    let now = 0;
+    const inv = new Invites({ now: () => now });
+    const a = createFakePhone();
+    const b = createFakePhone();
+    const { invite_id: inviteId } = inv.createInvite(a.deviceId);
+    assert.notEqual(inv.getInvite(inviteId), null);
+    now += 10 * 60 * 1000 + 1;
+    assert.equal(inv.getInvite(inviteId), null);
+    assert.throws(() => inv.claim(inviteId, { device: b.device(), mac: 'm' }), (e) => e.code === 'unknown_invite');
+    assert.throws(() => inv.getClaim(inviteId, a.deviceId), (e) => e.code === 'unknown_invite');
+  });
+
   it('rejects ids and states that do not fit their regex before they ever become a key', () => {
     const inv = new Invites();
     assert.throws(() => inv.openCode('not-a-code', 'kl-aaaaaaaaaaaaaaaa', 600000), (e) => e.code === 'bad_code');
