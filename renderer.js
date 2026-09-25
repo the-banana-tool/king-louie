@@ -1804,6 +1804,16 @@ async function renderChatCaseSection(chat, container) {
 
   container.append(row, newRow, orientationBtn, orientation, error);
 
+  // Cases stage 2: status, budget and questions for the attached case.
+  const unattended = document.createElement('div');
+  unattended.id = 'case-unattended-section';
+  unattended.className = 'case-unattended-section';
+  container.appendChild(unattended);
+  if (chat.caseId && !caseMissing) {
+    renderCaseUnattendedSection(chat, unattended, { compact: false }).catch((err) => chatLog.warn(`Case panel failed: ${err.message}`));
+  }
+  refreshCaseQuestionsBar();
+
   const adopt = async (updatedChat) => {
     if (!updatedChat) return;
     appState.chats = appState.chats.map((c) => (c.id === updatedChat.id ? updatedChat : c));
@@ -1843,6 +1853,221 @@ async function renderChatCaseSection(chat, container) {
     }
     orientation.textContent = result.text;
     orientation.hidden = false;
+  });
+}
+
+/* --- Cases stage 2: status, budget and questions (docs/superpowers/specs/2026-09-23-cases-stage2-unattended.md §7) --- */
+
+const CASE_STATUS_ACTIONS = [
+  { status: 'paused', label: 'Pause', from: ['active'] },
+  { status: 'active', label: 'Resume', from: ['paused'] },
+  { status: 'done', label: 'Done', from: ['active', 'needs-direction', 'paused'], confirm: 'Mark this case done? It becomes read-only.' },
+  { status: 'abandoned', label: 'Abandon', from: ['draft', 'active', 'needs-direction', 'paused'], confirm: 'Abandon this case? It becomes read-only and its wake-ups stop.' }
+];
+const CASE_BUDGET_CATEGORIES = ['usd', 'deadline', 'turnsPerDay', 'contactsPerDay', 'questionsPerDay'];
+
+function caseButton(text, className = 'secondary-button') {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = className;
+  button.textContent = text;
+  return button;
+}
+
+function renderCaseQuestionCard(q, { onDone, showError }) {
+  const card = document.createElement('div');
+  card.className = `case-question case-question-${q.urgency}`;
+  card.dataset.questionId = q.id;
+  const head = document.createElement('div');
+  head.className = 'case-question-head';
+  head.textContent = `${q.caseTitle ? `${q.caseTitle} · ` : ''}${q.kind === 'briefing' ? 'Briefing' : 'Question'} ${q.id}`;
+  const text = document.createElement('div');
+  text.className = 'case-question-text';
+  text.textContent = q.text;
+  card.append(head, text);
+
+  if (q.kind === 'briefing') {
+    const dismiss = caseButton('Dismiss', 'secondary-button case-question-dismiss');
+    dismiss.addEventListener('click', async () => {
+      const r = await window.electron.cases.acknowledgeBriefing({ caseId: q.caseId, questionId: q.id });
+      if (!r?.ok) { showError(r?.error || 'Could not dismiss the briefing.'); return; }
+      onDone();
+    });
+    card.appendChild(dismiss);
+    return card;
+  }
+
+  const submit = async (answer) => {
+    const r = await window.electron.cases.answerQuestion({ caseId: q.caseId, questionId: q.id, ...answer });
+    if (!r?.ok) { showError(r?.error || 'Could not send the answer.'); return; }
+    onDone();
+  };
+  const actions = document.createElement('div');
+  actions.className = 'case-question-actions';
+  (q.options || []).forEach((option) => {
+    const b = caseButton(option.label);
+    b.dataset.optionId = option.id;
+    b.addEventListener('click', () => submit({ optionId: option.id }));
+    actions.appendChild(b);
+  });
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'chat-info-input case-question-input';
+  input.placeholder = 'Answer…';
+  const send = caseButton('Answer', 'secondary-button case-question-answer');
+  send.addEventListener('click', () => {
+    const value = input.value.trim();
+    if (!value) { input.focus(); return; }
+    submit({ text: value });
+  });
+  actions.append(input, send);
+  card.appendChild(actions);
+  return card;
+}
+
+function renderCaseBudgetLine(caseId, budget, { showError, refresh }) {
+  const row = document.createElement('div');
+  row.className = 'chat-info-row case-budget-row';
+  const text = document.createElement('span');
+  text.id = 'case-budget-text';
+  const usd = budget.usd || {};
+  const parts = [usd.limit ? `$${Number(usd.spent || 0).toFixed(2)} of $${usd.limit}` : `$${Number(usd.spent || 0).toFixed(2)} (no limit)`];
+  if (budget.deadline?.at) parts.push(`deadline ${budget.deadline.at}`);
+  if (budget.turnsPerDay?.limit) parts.push(`${budget.turnsPerDay.spent || 0}/${budget.turnsPerDay.limit} turns today`);
+  if (budget.questionsPerDay?.limit) parts.push(`${budget.questionsPerDay.spent || 0}/${budget.questionsPerDay.limit} questions today`);
+  text.textContent = `Budget: ${parts.join(' · ')}`;
+  row.appendChild(text);
+  if (Number(usd.unpricedTokens) > 0) {
+    const warning = document.createElement('div');
+    warning.className = 'case-budget-warning';
+    warning.textContent = `${usd.unpricedTokens} tokens on providers with no price table are not counted against the $ budget.`;
+    row.appendChild(warning);
+  }
+  const category = document.createElement('select');
+  category.className = 'chat-info-select';
+  category.id = 'case-grant-category';
+  CASE_BUDGET_CATEGORIES.forEach((c) => {
+    const option = document.createElement('option');
+    option.value = c;
+    option.textContent = c;
+    category.appendChild(option);
+  });
+  const limit = document.createElement('input');
+  limit.type = 'text';
+  limit.className = 'chat-info-input';
+  limit.id = 'case-grant-limit';
+  limit.placeholder = 'New limit';
+  const grant = caseButton('Grant');
+  grant.id = 'case-grant-btn';
+  grant.addEventListener('click', async () => {
+    const raw = limit.value.trim();
+    if (!raw) { limit.focus(); return; }
+    const value = category.value === 'deadline' ? raw : Number(raw);
+    const r = await window.electron.cases.grantBudget({ caseId, category: category.value, limit: value });
+    if (!r?.ok) { showError(r?.error || 'Could not change the budget.'); return; }
+    refresh();
+  });
+  row.append(category, limit, grant);
+  return row;
+}
+
+// Full mode fills the Chat Info case section; compact mode fills the bar
+// above the composer with what needs the owner's attention.
+async function renderCaseUnattendedSection(chat, container, { compact = false } = {}) {
+  if (!container) return;
+  if (!chat?.caseId || !window.electron?.cases?.questions) {
+    container.innerHTML = '';
+    if (compact) container.hidden = true;
+    return;
+  }
+  const listed = await window.electron.cases.questions({ caseId: chat.caseId });
+  const questions = listed?.ok ? listed.questions : [];
+  container.innerHTML = '';
+  const error = document.createElement('div');
+  error.className = 'chat-case-error case-unattended-error';
+  const showError = (message) => { error.textContent = message || ''; };
+  if (!listed?.ok) showError(listed?.error || 'Could not load the case questions.');
+
+  if (compact) {
+    const shown = questions.filter((q) => (q.kind !== 'briefing' && q.urgency !== 'low') || (q.kind === 'briefing' && q.urgency === 'high'));
+    shown.forEach((q) => container.appendChild(renderCaseQuestionCard(q, { onDone: () => refreshCaseQuestionsBar(), showError })));
+    container.appendChild(error);
+    container.hidden = shown.length === 0 && !error.textContent;
+    return;
+  }
+
+  const refresh = () => {
+    renderCaseUnattendedSection(chat, container, { compact: false }).catch((err) => chatLog.warn(`Case panel failed: ${err.message}`));
+    refreshCaseQuestionsBar();
+  };
+  const budget = await window.electron.cases.budget({ caseId: chat.caseId });
+  if (budget?.ok) {
+    const info = budget.case;
+    const statusRow = document.createElement('div');
+    statusRow.className = 'chat-info-row case-status-row';
+    const statusText = document.createElement('span');
+    statusText.id = 'case-status-text';
+    const reason = info.statusReason
+      ? ` (${info.statusReason.kind}${info.statusReason.note ? `: ${info.statusReason.note}` : ''})`
+      : '';
+    statusText.textContent = `Status: ${info.status}${reason}`;
+    statusRow.appendChild(statusText);
+    CASE_STATUS_ACTIONS.filter((a) => a.from.includes(info.status)).forEach((action) => {
+      const b = caseButton(action.label);
+      b.id = `case-status-${action.status}`;
+      b.addEventListener('click', async () => {
+        if (action.confirm && !(await showConfirmDialog(action.confirm))) return;
+        const r = await window.electron.cases.setStatus({ caseId: chat.caseId, status: action.status });
+        if (!r?.ok) { showError(r?.error || 'Could not change the status.'); return; }
+        refresh();
+      });
+      statusRow.appendChild(b);
+    });
+    container.append(statusRow, renderCaseBudgetLine(chat.caseId, budget.budget, { showError, refresh }));
+  } else {
+    showError(budget?.error || 'Could not load the case budget.');
+  }
+
+  const list = document.createElement('div');
+  list.className = 'case-question-list';
+  list.id = 'case-question-list';
+  if (!questions.length) {
+    const none = document.createElement('div');
+    none.className = 'case-question-none';
+    none.textContent = 'No open questions.';
+    list.appendChild(none);
+  }
+  questions.forEach((q) => list.appendChild(renderCaseQuestionCard(q, { onDone: refresh, showError })));
+  container.append(list, error);
+}
+
+function ensureCaseQuestionsBar() {
+  let bar = document.getElementById('case-questions-bar');
+  if (bar) return bar;
+  const input = document.getElementById('input-container');
+  if (!input || !input.parentNode) return null;
+  bar = document.createElement('div');
+  bar.id = 'case-questions-bar';
+  bar.className = 'case-questions-bar';
+  bar.hidden = true;
+  input.parentNode.insertBefore(bar, input);
+  return bar;
+}
+
+function refreshCaseQuestionsBar() {
+  const bar = ensureCaseQuestionsBar();
+  if (!bar) return;
+  renderCaseUnattendedSection(getActiveChat(), bar, { compact: true })
+    .catch((err) => chatLog.warn(`Case questions bar failed: ${err.message}`));
+}
+
+if (window.electron?.cases?.onChanged) {
+  window.electron.cases.onChanged((payload) => {
+    const chat = getActiveChat();
+    if (!chat?.caseId || (payload?.caseId && payload.caseId !== chat.caseId)) return;
+    refreshCaseQuestionsBar();
+    const slot = document.getElementById('case-unattended-section');
+    if (slot) renderCaseUnattendedSection(chat, slot, { compact: false }).catch((err) => chatLog.warn(`Case panel failed: ${err.message}`));
   });
 }
 
@@ -6708,6 +6933,7 @@ async function loadChats() {
   appState.isAgentModeEnabled = !!(activeChat && activeChat.agentMode);
   appState.isSandboxModeEnabled = activeChat ? activeChat.sandboxMode !== false : true;
   refreshUI();
+  refreshCaseQuestionsBar();
 }
 
 function persistAgentMode() {
@@ -6749,6 +6975,7 @@ async function handleSelectChat(chatId) {
   appState.isSandboxModeEnabled = chat ? chat.sandboxMode !== false : true;
   unwrapIpcResult(await window.electron.chat.setActive(chatId), 'Unable to switch active chat.');
   refreshUI();
+  refreshCaseQuestionsBar();
 
   if (chat?.canvasState?.visible && chat.canvasState.content) {
     showCanvas(chat.canvasState.title, chat.canvasState.content);
