@@ -2919,6 +2919,16 @@ body {
   margin-top: 12px;
 }
 
+.service-pane .service-pane-error {
+  color: var(--error);
+  font-weight: 500;
+}
+
+.service-pane .service-pane-notice {
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
 .attached-service-banner {
   display: flex;
   flex-wrap: wrap;

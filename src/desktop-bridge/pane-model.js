@@ -73,7 +73,8 @@ function describeServicePane(status = {}) {
       break;
     case 'attached-disconnected': {
       const c = s.connection || {};
-      lines.push(c.error || MESSAGES.SERVICE_UNREACHABLE(18795));
+      const knownPort = s.pairing && s.pairing.service && s.pairing.service.port;
+      lines.push(c.error || MESSAGES.SERVICE_UNREACHABLE(knownPort || 18795));
       if (c.nextRetryAt) lines.push(`Next retry at ${new Date(c.nextRetryAt).toLocaleTimeString()}.`);
       actions.push({ id: 'retry', label: 'Retry now' }, { id: 'standaloneOnce', label: 'Use standalone this time' }, { id: 'detach', label: 'Detach' });
       break;
@@ -103,4 +104,18 @@ function describeImportReport(report = {}) {
   return lines;
 }
 
-module.exports = { describeServicePane, describeApprovals, describeImportReport, UNAVAILABLE_TAB_NOTICE };
+// Detach needs a genuine second click on the rendered warning ("Detach
+// anyway"), not just a flag — a click can outrun the render that shows
+// that warning (e.g. while the pane awaits a status() round trip), and a
+// stale click must not confirm on the strength of `armed` alone. The
+// renderer stamps every paint with a token that only increases; arming
+// records the token of the paint that showed the warning, and a click
+// confirms only if no repaint (this one or any other, such as a
+// background statusChanged) happened since. Pure and tiny so it is unit
+// tested without a DOM.
+function decideDetachClick({ armed, armedAtToken, currentToken } = {}) {
+  if (armed && armedAtToken === currentToken) return { confirm: true, arm: false };
+  return { confirm: false, arm: true };
+}
+
+module.exports = { describeServicePane, describeApprovals, describeImportReport, decideDetachClick, UNAVAILABLE_TAB_NOTICE };

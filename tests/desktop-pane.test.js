@@ -3,7 +3,7 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
-const { describeServicePane, describeImportReport, UNAVAILABLE_TAB_NOTICE } = require('../src/desktop-bridge/pane-model');
+const { describeServicePane, describeImportReport, decideDetachClick, UNAVAILABLE_TAB_NOTICE } = require('../src/desktop-bridge/pane-model');
 
 const ROOT = path.join(__dirname, '..');
 const read = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
@@ -70,6 +70,16 @@ describe('describeServicePane', () => {
     assert.deepStrictEqual(m.actions.map((a) => a.label), ['Retry now', 'Use standalone this time', 'Detach']);
   });
 
+  it('attached, not connected, no connection.error: falls back using the paired service\'s own port', () => {
+    const m = describeServicePane({ view: 'attached-disconnected', connection: { status: 'disconnected', error: null, nextRetryAt: null }, pairing: { service: { port: 18888 } } });
+    assert.strictEqual(m.lines[0], 'The local King Louie service is not reachable (127.0.0.1:18888).');
+  });
+
+  it('attached, not connected, no connection.error and no known port: falls back to the default port', () => {
+    const m = describeServicePane({ view: 'attached-disconnected', connection: { status: 'disconnected', error: null, nextRetryAt: null } });
+    assert.strictEqual(m.lines[0], 'The local King Louie service is not reachable (127.0.0.1:18795).');
+  });
+
   it('summarizes an import report', () => {
     const lines = describeImportReport({ counts: { new: 3, 'skip-present': 1, failed: 1 }, failures: [{ category: 'vault', key: 'github', error: 'Encryption unavailable in the service.' }], secretsMissing: [{ category: 'vault', key: 'github' }], attention: [], notes: ['1 cron job(s) were imported disabled; enable them in Settings > Scheduler.'], skipped: [] });
     assert.deepStrictEqual(lines, [
@@ -82,6 +92,20 @@ describe('describeServicePane', () => {
   });
 });
 
+describe('decideDetachClick', () => {
+  it('arms on a first click (not armed yet)', () => {
+    assert.deepStrictEqual(decideDetachClick({ armed: false, armedAtToken: null, currentToken: 3 }), { confirm: false, arm: true });
+  });
+
+  it('confirms a second click on the exact render that showed the warning', () => {
+    assert.deepStrictEqual(decideDetachClick({ armed: true, armedAtToken: 4, currentToken: 4 }), { confirm: true, arm: false });
+  });
+
+  it('re-arms instead of confirming when a render happened since arming (the race this closes)', () => {
+    assert.deepStrictEqual(decideDetachClick({ armed: true, armedAtToken: 4, currentToken: 5 }), { confirm: false, arm: true });
+  });
+});
+
 describe('pane wiring', () => {
   it('preload exposes window.electron.desktop over the desktop:* channels', () => {
     const preload = read('preload.js');
@@ -90,6 +114,7 @@ describe('pane wiring', () => {
     }
     assert.ok(preload.includes("registerOnce('desktop:statusChanged'"));
     assert.ok(preload.includes("registerOnce('desktop:importProgress'"));
+    assert.ok(preload.includes('paneModel.decideDetachClick'), 'decideDetachClick is exposed alongside describe/describeImport');
   });
 
   it('index.html has the Local service tab and pane', () => {

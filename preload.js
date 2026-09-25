@@ -912,7 +912,8 @@ contextBridge.exposeInMainWorld(
       onStatusChanged: (callback) => registerOnce('desktop:statusChanged', callback),
       onImportProgress: (callback) => registerOnce('desktop:importProgress', callback),
       describe: (status) => (paneModel ? paneModel.describeServicePane(status) : null),
-      describeImport: (report) => (paneModel ? paneModel.describeImportReport(report) : [])
+      describeImport: (report) => (paneModel ? paneModel.describeImportReport(report) : []),
+      decideDetachClick: (args) => (paneModel ? paneModel.decideDetachClick(args) : { confirm: false, arm: true })
     },
     markdown: {
       parse: (text) => safeMarkdownParse(text),

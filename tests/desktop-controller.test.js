@@ -139,7 +139,7 @@ describe('desktop controller', () => {
     pairing.writeFileAtomic(path.join(svc.configDir, pairing.DEVICES_FILE), JSON.stringify(pairing.upsertDevice(pairing.emptyDevices(), {
       deviceId: decoded.deviceId, publicKey: decoded.publicKey, label: decoded.label, pairedAt: '2026-09-23T14:02:11Z'
     })), 0o644);
-    const confirmed = await controller.pairConfirm();
+    const confirmed = await controller.pairConfirm({ nodeId: identity.nodeId });
     assert.strictEqual(confirmed.view, 'paired', JSON.stringify(confirmed));
     assert.strictEqual(state.pairing.service.nodeId, identity.nodeId);
     assert.strictEqual(state.pairing.service.info.account, 'LOCAL SERVICE');
@@ -152,7 +152,7 @@ describe('desktop controller', () => {
     const record = pairing.bridgeFileRecord({ publicKey: identity.publicKey, port: svc.port });
     const { controller } = controllerFor({ readBridgeFile: () => ({ ok: true, record: pairing.parseBridgeFile(JSON.stringify(record)) }) });
     await controller.pairStart();
-    const out = await controller.pairConfirm();
+    const out = await controller.pairConfirm({ nodeId: identity.nodeId });
     assert.deepStrictEqual(out, { ok: false, code: 'DEVICE_UNPAIRED', error: 'The service does not know this desktop. Pair again in Settings > Local service.' });
     controller.dispose();
   });
@@ -221,6 +221,20 @@ describe('desktop controller', () => {
     controller.dispose();
   });
 
+  // --- Fix round 1 (Task 16 review): the nodeId argument is required, not
+  // just checked when present — a caller that never names what it saw must
+  // not be able to confirm on the controller's say-so alone.
+
+  it('pairConfirm refuses with no nodeId argument even when a service was found', async () => {
+    const svc = await startService();
+    const record = pairing.bridgeFileRecord({ publicKey: identity.publicKey, port: svc.port });
+    const { controller } = controllerFor({ readBridgeFile: () => ({ ok: true, record: pairing.parseBridgeFile(JSON.stringify(record)) }) });
+    await controller.pairStart();
+    const out = await controller.pairConfirm();
+    assert.deepStrictEqual(out, { ok: false, code: 'PAIR_SERVICE_CHANGED', error: MESSAGES.PAIR_SERVICE_CHANGED });
+    controller.dispose();
+  });
+
   it('pairConfirm refuses when the service changed since its fingerprint was shown', async () => {
     const svcA = await startService();
     const otherIdentity = new NodeIdentity({ nodeName: 'web-01' });
@@ -231,7 +245,10 @@ describe('desktop controller', () => {
     // The bridge file now points at a different service (a swap, or a
     // stale/rewritten file) — pairConfirm must not silently pin the new one.
     current = pairing.parseBridgeFile(JSON.stringify(pairing.bridgeFileRecord({ publicKey: otherIdentity.publicKey, port: svcA.port })));
-    const out = await controller.pairConfirm();
+    // Pass the nodeId the owner was actually shown (the first service's),
+    // so this exercises the fresh-read check below, not just the
+    // missing-nodeId refusal.
+    const out = await controller.pairConfirm({ nodeId: identity.nodeId });
     assert.deepStrictEqual(out, { ok: false, code: 'PAIR_SERVICE_CHANGED', error: MESSAGES.PAIR_SERVICE_CHANGED });
     controller.dispose();
   });
