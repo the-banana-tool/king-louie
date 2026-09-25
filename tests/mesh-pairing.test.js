@@ -181,6 +181,39 @@ describe('MeshPairing', () => {
       assert.ok(closed);
     });
 
+    it('rejects with name_mismatch when the code requires a name but the peer declares none', () => {
+      const crypto = require('crypto');
+      transportA = new MeshTransport({ identity: identityA, port: nextPort(), useTls: false });
+      pairingA = new MeshPairing(identityA, transportA);
+
+      const { code } = pairingA.generateCode({ nodeName: 'web-01' });
+      const secret = crypto.createHash('sha256').update(code).digest();
+      const nonce = crypto.randomBytes(16).toString('hex');
+      const proof = crypto.createHmac('sha256', secret).update(nonce).digest('hex');
+
+      const sent = [];
+      let closed = false;
+      const fakeWs = {
+        send: (data) => sent.push(JSON.parse(data)),
+        close: () => { closed = true; }
+      };
+
+      // identityB is a plain MeshIdentity: getPublicIdentity() carries no
+      // nodeName field at all (only NodeIdentity has one). "Absent", not
+      // merely "different", must still fail the meta.nodeName check.
+      const remoteIdentity = identityB.getPublicIdentity();
+      assert.strictEqual(remoteIdentity.nodeName, undefined);
+
+      const result = pairingA.handlePairingRequest(fakeWs, { nonce, proof, identity: remoteIdentity });
+
+      assert.strictEqual(result, null);
+      assert.strictEqual(sent.length, 1);
+      assert.strictEqual(sent[0].type, 'pair:reject');
+      assert.strictEqual(sent[0].reason, 'name_mismatch');
+      assert.ok(closed);
+      assert.strictEqual(pairingA.pendingPairings.size, 0);
+    });
+
     it('response proof is verifiable by the responder', () => {
       const crypto = require('crypto');
       transportA = new MeshTransport({ identity: identityA, port: nextPort(), useTls: false });

@@ -125,6 +125,10 @@ function createLinkRpc(transport, { defaultTimeoutMs = 10000 } = {}) {
       });
     },
     notify(peerId, method, params = {}) {
+      if (closed) {
+        log.debug(`notify ${method} to ${peerId} dropped: link closed`);
+        return;
+      }
       send(peerId, { rpc: 1, method, params });
     },
     handle(method, fn) {

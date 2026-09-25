@@ -17,6 +17,7 @@ const { createHeadlessPrompter } = require('../src/platform/prompter');
 const ProviderFactory = require('../src/providers/provider-factory');
 const { Tool } = require('../src/tools/tool-schema');
 const { toolRegistry } = require('../src/tools');
+const { addSink } = require('../src/logging');
 
 const FAKE_PROVIDER = 'kl-test-approval-fake';
 const PROBE_TOOL = 'KlTestApprovalProbe';
@@ -284,6 +285,70 @@ describe('approvalSeam matches the fleet stage 7 formulas for allow/deny', () =>
 describe("createCore remoteApprovals: 'phone'", () => {
   it("needs deps.phoneApprover", () => {
     assert.throws(() => buildCore('phone'), /remoteApprovals 'phone' needs deps.phoneApprover/);
+  });
+
+  // Task 13 review carry-over: these checks used to run inside
+  // phoneExecutorOptions (on every ToolExecutor build); they now run once, at
+  // createCore construction, so a direct test on createCore itself is needed
+  // — the surrounding gateway-driven tests only exercise what happens once
+  // construction has already succeeded.
+  it('the ttlMs check throws once, at construction, for a non-finite or non-positive ttlMs', () => {
+    const approverWith = (ttlMs) => ({ ttlMs, isAvailable: () => true, requestApproval: async () => true });
+    for (const bad of [NaN, 0, -1, Infinity, -Infinity]) {
+      assert.throws(
+        () => buildCore('phone', { phoneApprover: approverWith(bad) }),
+        new RegExp(`phoneApprover\\.ttlMs must be a finite positive number, got ${bad}`),
+        `ttlMs=${bad}`
+      );
+    }
+  });
+
+  it('warns once, at construction, when phone mode has no nodePolicy or no auditLedger — not once per ToolExecutor build', async () => {
+    const warnings = [];
+    const unsubscribe = addSink((record) => {
+      if (record.subsystem === 'approvals/executor-options' && record.level === 'warn') warnings.push(record.message);
+    });
+    try {
+      const phoneApprover = { ttlMs: 300000, isAvailable: () => true, requestApproval: async () => true };
+      const core = buildCore('phone', { phoneApprover });
+      assert.equal(warnings.length, 2, warnings.join('\n'));
+      assert.match(warnings[0], /without deps\.nodePolicy: node-policy tiers are not enforced/);
+      assert.match(warnings[1], /without deps\.auditLedger: tier\.decision\/exec\.start\/exec\.result are not audited/);
+
+      // Building more than one ToolExecutor off the same core (two agent
+      // runs) must not repeat the warnings — they belong to construction,
+      // which is the bug this check's move away from phoneExecutorOptions
+      // fixed.
+      if (!toolRegistry.get(PROBE_TOOL)) {
+        toolRegistry.register(new Tool({
+          name: PROBE_TOOL,
+          description: 'Test-only tool that requires approval.',
+          parameters: { type: 'object', properties: {} },
+          requiresApproval: true,
+          execute: async () => ({ ok: true })
+        }));
+      }
+      const tiers = { provider: FAKE_PROVIDER, model: 'fake' };
+      const settings = core.getSettings();
+      core.context.setSettings({
+        ...settings,
+        activeProvider: FAKE_PROVIDER,
+        inference: { ...settings.inference, llmRouting: { enabled: false }, tierMap: { fast: tiers, standard: tiers, smart: tiers } }
+      });
+      core.saveProviderToken(FAKE_PROVIDER, 'fake-token-123456');
+      await core.start();
+      const gateway = core.context.getGatewayServer();
+      const session = core.context.getSessionManager().getOrCreateSession('ttlms-once-session', 'main', { channel: 'test', peer: 'p', label: 'test' });
+      for (const runId of ['run-a', 'run-b']) {
+        const response = new Promise((resolve) => gateway.once('agent:response', resolve));
+        gateway.emit('agent:message', { agentId: 'main', sessionKey: session.key, message: { runId, message: 'please run the probe' } });
+        await response;
+      }
+      await core.shutdown();
+      assert.equal(warnings.length, 2, warnings.join('\n'));
+    } finally {
+      unsubscribe();
+    }
   });
 
   it('getPhoneApprover is the approver only in phone mode and only while it is available', () => {

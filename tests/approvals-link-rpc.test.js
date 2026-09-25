@@ -145,6 +145,15 @@ describe('createLinkRpc hardening', () => {
     await assert.rejects(b, (err) => err.code === 'closed');
   });
 
+  it('notify() after close() is a no-op, not a send', () => {
+    const transport = new FakeTransport();
+    transport.online.add('peer-a');
+    const rpc = createLinkRpc(transport, { defaultTimeoutMs: 5000 });
+    rpc.close();
+    assert.doesNotThrow(() => rpc.notify('peer-a', 'device.state', { a: 1 }));
+    assert.deepEqual(transport.sent, []);
+  });
+
   it('an oversized id or method name is dropped rather than matched or dispatched', async () => {
     const transport = new FakeTransport();
     transport.online.add('peer-a');
