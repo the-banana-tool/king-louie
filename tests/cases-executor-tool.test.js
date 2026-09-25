@@ -1,0 +1,459 @@
+// tests/cases-executor-tool.test.js
+const { describe, it, after } = require('node:test');
+const assert = require('node:assert');
+const fs = require('fs');
+const path = require('path');
+const fx = require('./helpers/executor-fixtures');
+const { submitJob } = require('../src/cases/executors/submit');
+const envelopeOps = require('../src/cases/executors/envelope-ops');
+const jobs = require('../src/cases/executors/jobs');
+const { JobStore, EnvelopeStore, PlanStore } = require('../src/cases/executors');
+const { sha256hex, readJsonSafe } = require('../src/cases/executors/util');
+const { canonicalize } = require('../src/platform/jcs');
+
+after(fx.cleanup);
+
+async function setup({ agent = {}, executors = {}, registryOptions = {}, title = 'Lakeside lot', env: shared = null } = {}) {
+  const env = shared || fx.setupExecutors({ executors, registryOptions });
+  const ctl = shared ? null : fx.withFakeAgent(env, 'fake-agent', agent);
+  const meta = await fx.activeCase(env.runtime, { title });
+  const L = env.runtime.ledger(meta.id);
+  const acres = L.assert({ stmt: 'Lot size is 2.12 acres', subject: 'lot', attr: 'acreage', value: 2.12, unit: 'acres', provenance: 'sourced', source: { kind: 'url', ref: 'https://records.example.org/lot' } });
+  const floor = L.assert({ stmt: 'Lowest acceptable price', subject: 'lot', attr: 'floor', value: 98000, unit: 'USD', provenance: 'user', category: 'financial', source: { kind: 'question', ref: 'q-0099' } });
+  const guess = L.infer({ stmt: 'Access is probably from the north', subject: 'lot', attr: 'access', value: 'Harbor Road access', basis: [acres.id] });
+  const { turn, caseContext } = await fx.openTurn(env.runtime, meta.id);
+  return { env, ctl, meta, reg: env.registry, rt: env.runtime, acres, floor, guess, turn, caseContext };
+}
+
+async function approvedEnvelope(s, over = {}) {
+  const r = await envelopeOps.requestEnvelope(s.reg, { caseId: s.meta.id }, {
+    executor: 'fake-agent', intent: 'Ask brokers for a listing quote', recipients: { allow: ['+15550100', '+15550101'] },
+    facts: [s.acres.id], rules: [], caps: { usd: 20, contacts: 3, attemptsPerContact: 2 }, window: { start: '2026-10-26', end: '2026-10-30' }, ...over
+  });
+  assert.strictEqual(r.ok, true, r.error);
+  await s.rt.answerQuestion(s.meta.id, r.questionId, { channel: 'in-app', optionId: 'approve' });
+  envelopeOps.syncEnvelopes(s.reg, s.meta.id);
+  return r.envelopeId;
+}
+
+const submit = (s, params) => submitJob(s.reg, { caseId: s.meta.id, turnId: 'turn-1' }, params);
+const call = (s, over = {}) => JSON.stringify({
+  recipients: [{ address: '+1 555 0100', name: 'Harbor Realty' }], text: `Hello, calling about the lot of {{${s.acres.id}}}.`, attemptsPerContact: 1, ...over
+});
+
+describe('Executor.submit refusals', () => {
+  it('refuses direct, unknown and unavailable executors', async () => {
+    const s = await setup();
+    assert.deepStrictEqual(await submit(s, { executor: 'bash', payload: '{}' }), { ok: false, error: 'bash is done with its own tools in this turn (Bash)' });
+    assert.deepStrictEqual(await submit(s, { executor: 'nope', payload: '{}' }), { ok: false, error: 'unknown executor "nope"' });
+    assert.deepStrictEqual(await submit(s, { executor: 'runbook', payload: '{}' }), { ok: false, error: 'runbook is unavailable: no runbook engine on this node' });
+  });
+
+  it('undeclared payloadSchema field refused', async () => {
+    const s = await setup();
+    const envelopeId = await approvedEnvelope(s);
+    const r = await submit(s, { executor: 'fake-agent', envelopeId, payload: call(s, { venue: 'phone', budgetCode: 'x' }) });
+    assert.deepStrictEqual(r, { ok: false, error: 'payload field "budgetCode" is not accepted by fake-agent (not in its payloadSchema)' });
+  });
+
+  it('refuses owner work the owner has not agreed to, and steps of unapproved plans', async () => {
+    const s = await setup();
+    assert.deepStrictEqual(await submit(s, { executor: 'owner', payload: JSON.stringify({ text: 'Please file the forms' }) }), {
+      ok: false, error: 'the owner has not agreed to do this work; plan it onto another executor or ask'
+    });
+    assert.deepStrictEqual(await submit(s, { executor: 'fake-agent', planStepId: 's1', payload: call(s) }), { ok: false, error: 'there is no approved plan with step s1' });
+  });
+
+  it('refuses a number it cannot normalize and a job without an envelope', async () => {
+    const s = await setup();
+    assert.deepStrictEqual(await submit(s, { executor: 'fake-agent', payload: call(s, { recipients: [{ address: '555-0100' }] }) }), {
+      ok: false, error: 'cannot normalize "555-0100" to E.164; give the country code'
+    });
+    assert.deepStrictEqual(await submit(s, { executor: 'fake-agent', payload: call(s) }), {
+      ok: false, error: 'fake-agent needs an approved envelope; request one with action "envelope"'
+    });
+  });
+
+  it('blocks private and inferred values in any leaf', async () => {
+    const s = await setup();
+    const envelopeId = await approvedEnvelope(s);
+    const priv = await submit(s, { executor: 'fake-agent', envelopeId, payload: call(s, { text: 'We will not go under 98,000 dollars.' }) });
+    assert.strictEqual(priv.error, 'blocked by the outbound gate');
+    assert.ok(priv.blocked.some((b) => b.path === 'text' && b.reason === 'non-disclosable' && b.factId === s.floor.id));
+  });
+
+  it('payload name leaf is gated', async () => {
+    const s = await setup();
+    const envelopeId = await approvedEnvelope(s);
+    const r = await submit(s, { executor: 'fake-agent', envelopeId, payload: call(s, { recipients: [{ address: '+15550100', name: 'Harbor Road access' }] }) });
+    assert.deepStrictEqual(r.blocked.map((b) => [b.path, b.reason]), [['recipients[0].name', 'inferred']]);
+  });
+});
+
+describe('Executor.submit to an external agent', () => {
+  it('submits the rendered payload under the envelope', async () => {
+    const s = await setup();
+    const envelopeId = await approvedEnvelope(s);
+    const r = await submit(s, { executor: 'fake-agent', envelopeId, payload: call(s) });
+    assert.deepStrictEqual(r, { ok: true, jobId: 'job-0001', externalId: 'ext-1' });
+    const [, jobView, envelopeView] = s.ctl.calls.find((c) => c[0] === 'submit');
+    assert.strictEqual(jobView.payload.text, 'Hello, calling about the lot of 2.12 acres.');
+    assert.deepStrictEqual([jobView.recipients, jobView.externalRef], [['+15550100'], `${s.meta.id}/job-0001`]);
+    assert.strictEqual(jobView.idempotencyKey, sha256hex(canonicalize({ caseId: s.meta.id, envelopeId, n: 1 })));
+    assert.deepStrictEqual(jobView.window, { notBefore: '2026-10-26T00:00:00Z', notAfter: '2026-10-30T23:59:59Z', tz: 'UTC' });
+    assert.strictEqual(jobView.maxCostUsd, 20);
+    assert.strictEqual(envelopeView.payloads, undefined, 'the adapter never sees earlier payloads');
+    assert.ok(Object.isFrozen(envelopeView));
+    const job = new JobStore(s.meta.dir).get('job-0001');
+    assert.deepStrictEqual([job.state, job.n, job.estimateUsd], ['submitted', 1, 1.75]);
+    assert.match(job.signature, /^[0-9a-f]{64}$/);
+    assert.strictEqual(new EnvelopeStore(s.meta.dir).get(envelopeId).payloads.length, 1);
+    assert.strictEqual(s.reg.globalRemaining('fake-agent'), 4);
+  });
+
+  it('asks one delta question for an added recipient and reuses it', async () => {
+    const s = await setup();
+    const envelopeId = await approvedEnvelope(s);
+    const payload = call(s, { recipients: [{ address: '+15550100' }, { address: '+15550102' }] });
+    const a = await submit(s, { executor: 'fake-agent', envelopeId, payload });
+    assert.deepStrictEqual([a.ok, a.needsApproval, a.deltas], [false, true, ['adds recipient +15550102']]);
+    const b = await submit(s, { executor: 'fake-agent', envelopeId, payload });
+    assert.strictEqual(b.questionId, a.questionId);
+    assert.strictEqual(s.ctl.calls.filter((c) => c[0] === 'submit').length, 0);
+  });
+
+  it('refuses a duplicate in the case and notes an overlap with another case', async () => {
+    const s = await setup();
+    const envelopeId = await approvedEnvelope(s);
+    await submit(s, { executor: 'fake-agent', envelopeId, payload: call(s) });
+    assert.deepStrictEqual(await submit(s, { executor: 'fake-agent', envelopeId, payload: call(s) }), {
+      ok: false, error: 'this duplicates job-0001 (submitted); wait for it or cancel it'
+    });
+    const other = await setup({ env: s.env, title: 'Harbor cottage' });
+    other.ctl = s.ctl;
+    const otherEnvelope = await approvedEnvelope(other);
+    const r = await submit(other, { executor: 'fake-agent', envelopeId: otherEnvelope, payload: call(other) });
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(r.note, `also contacted by case "Lakeside lot" (${s.meta.id})`);
+  });
+
+  it('refuses when the case budget or the global cap cannot cover it', async () => {
+    const s = await setup();
+    const envelopeId = await approvedEnvelope(s);
+    s.rt.store.updateMeta(s.meta.id, { budget: { usd: 1 } });
+    assert.deepStrictEqual(await submit(s, { executor: 'fake-agent', envelopeId, payload: call(s) }), {
+      ok: false, error: "estimate $1.75 exceeds the case's remaining $1.00"
+    });
+    s.rt.store.updateMeta(s.meta.id, { budget: { usd: 20 } });
+    await s.reg.reserveContacts('fake-agent', 5, { caseId: 'case-other' });
+    assert.match((await submit(s, { executor: 'fake-agent', envelopeId, payload: call(s) })).error, /^fake-agent daily cap 5 reached/);
+  });
+
+  it('normalization mismatch cancels', async () => {
+    const s = await setup();
+    const envelopeId = await approvedEnvelope(s);
+    s.ctl.normalizeAs = { '+15550100': '+15550101' };
+    const r = await submit(s, { executor: 'fake-agent', envelopeId, payload: call(s) });
+    assert.deepStrictEqual(r, { ok: false, error: 'recipient normalized differently: sent +15550100, executor used +15550101; job cancelled' });
+    assert.deepStrictEqual(s.ctl.calls.filter((c) => c[0] === 'cancel'), [['cancel', 'ext-1']]);
+    assert.strictEqual(new EnvelopeStore(s.meta.dir).get(envelopeId).payloads.length, 0);
+    assert.strictEqual(new JobStore(s.meta.dir).get('job-0001').state, 'failed');
+    assert.strictEqual(s.reg.globalRemaining('fake-agent'), 5, 'the reservation is released');
+  });
+
+  it('leaves a timed-out job submitting and fails an idempotency conflict', async () => {
+    const s = await setup({ executors: { submitTimeoutMs: 50 } });
+    const envelopeId = await approvedEnvelope(s);
+    s.ctl.submitDelayMs = 300;
+    const slow = await submit(s, { executor: 'fake-agent', envelopeId, payload: call(s) });
+    assert.match(slow.error, /did not answer within 0s; job-0001 stays submitting/);
+    assert.strictEqual(new JobStore(s.meta.dir).get('job-0001').state, 'submitting');
+    s.ctl.submitDelayMs = 0;
+    s.ctl.submitError = Object.assign(new Error('Idempotency-Key reused with a different body'), { code: 'conflict' });
+    const conflict = await submit(s, { executor: 'fake-agent', envelopeId, payload: call(s, { recipients: [{ address: '+15550101' }] }) });
+    assert.match(conflict.error, /idempotency/);
+    assert.strictEqual(s.reg.globalRemaining('fake-agent'), 4, 'the submitting job keeps its reservation; the failed one released its own');
+    assert.deepStrictEqual([new JobStore(s.meta.dir).get('job-0002').state, new JobStore(s.meta.dir).get('job-0002').reason], ['failed', 'idempotency conflict']);
+  });
+
+  it('in needs-direction allows only a retry of no-answer contacts', async () => {
+    const s = await setup();
+    const envelopeId = await approvedEnvelope(s);
+    await submit(s, { executor: 'fake-agent', envelopeId, payload: call(s) });
+    s.ctl.jobs.get('ext-1').state = 'done';
+    s.ctl.jobs.get('ext-1').contacts = [{ id: 'c1', state: 'no-answer', attempts: 1, lastAttemptAt: '2026-10-26T15:30:00Z' }];
+    await s.reg.refreshCase(s.meta.id, { force: true });
+    s.rt.store.updateMeta(s.meta.id, { autonomy: { onExecutorNoAnswer: 'retry-within-envelope' } });
+    s.rt.setStatus(s.meta.id, 'needs-direction', { kind: 'failure', failureClass: 'executor-no-answer', ref: 'journal/failure.md' });
+    assert.match((await submit(s, { executor: 'fake-agent', envelopeId, payload: call(s) })).error, /only a retry of a finished job/);
+    const other = await submit(s, { executor: 'fake-agent', envelopeId, retryOf: 'job-0001', payload: call(s, { recipients: [{ address: '+15550101' }] }) });
+    assert.match(other.error, /a retry may call only job-0001's no-answer and voicemail contacts/);
+    const retry = await submit(s, { executor: 'fake-agent', envelopeId, retryOf: 'job-0001', payload: call(s) });
+    assert.deepStrictEqual([retry.ok, retry.jobId], [true, 'job-0002']);
+  });
+});
+
+describe('Executor.submit to built-in executors', () => {
+  it('fills a web form through the browser actions and saves the page', async () => {
+    const calls = [];
+    const act = (name, result = {}) => async (params) => { calls.push([name, params]); return { ok: true, ...result }; };
+    const browserActions = {
+      status: act('status', { running: false }), start: act('start'), navigate: act('navigate'), fill_credentials: act('fill_credentials'),
+      fill: act('fill'), click: act('click'), wait_for: act('wait_for'), content: act('content', { html: '<p>Application received</p>' })
+    };
+    const s = await setup({ registryOptions: { browserActions } });
+    const r0 = await envelopeOps.requestEnvelope(s.reg, { caseId: s.meta.id }, {
+      executor: 'browser', intent: 'File the county permit form', recipients: { allow: ['https://permits.example.com/apply'] },
+      facts: [s.acres.id], caps: { usd: 5, contacts: 1, attemptsPerContact: 1 }, window: { start: '2026-10-26', end: '2026-10-30' }
+    });
+    await s.rt.answerQuestion(s.meta.id, r0.questionId, { channel: 'in-app', optionId: 'approve' });
+    envelopeOps.syncEnvelopes(s.reg, s.meta.id);
+    const r = await submit(s, {
+      executor: 'browser', envelopeId: r0.envelopeId,
+      payload: JSON.stringify({ url: 'https://permits.example.com/apply', fields: [{ selector: '#acres', value: `{{${s.acres.id}}}` }], submit: { selector: '#go' }, waitFor: '#done', login: true })
+    });
+    assert.strictEqual(r.ok, true, r.error);
+    assert.deepStrictEqual(calls.map((c) => c[0]), ['status', 'start', 'navigate', 'fill_credentials', 'fill', 'click', 'wait_for', 'content']);
+    assert.deepStrictEqual(calls.find((c) => c[0] === 'fill')[1], { selector: '#acres', text: '2.12 acres' });
+    // Ruling M17: login runs in the named 'kl-cases' profile; the vault key is profile@host.
+    assert.deepStrictEqual(calls.find((c) => c[0] === 'start')[1], { profile: 'kl-cases' });
+    assert.deepStrictEqual(calls.find((c) => c[0] === 'fill_credentials')[1], { host: 'permits.example.com', profile: 'kl-cases' });
+    assert.match(fs.readFileSync(path.join(s.meta.dir, 'sources', 'browser', `${r.jobId}.md`), 'utf8'), /Application received/);
+    assert.strictEqual(new JobStore(s.meta.dir).get(r.jobId).state, 'done');
+  });
+
+  it('runs a routine runbook in the background and refuses unsafe ones', async () => {
+    const released = [];
+    const engine = {
+      getRunbook: (name) => ({ 'site.status': { name, tier: 'read' }, 'db.wipe': { name, tier: 'unsafe' } }[name] || null),
+      validateParameters: (name, params) => ({ ...params }),
+      checkRateLimit: () => ({ allowed: true }),
+      recordExecution: () => 42,
+      releaseExecution: (name, stamp) => released.push([name, stamp]),
+      executeRunbook: async (name, params, opts) => ({ success: true, logs: [`${name} ok`], admitted: opts.admitted })
+    };
+    const s = await setup({ registryOptions: { getRunbookEngine: () => engine } });
+    assert.deepStrictEqual(await submit(s, { executor: 'runbook', payload: JSON.stringify({ runbook: 'db.wipe', params: {} }) }), {
+      ok: false, error: 'unsafe runbooks are not available to cases'
+    });
+    const r = await submit(s, { executor: 'runbook', payload: JSON.stringify({ runbook: 'site.status', params: { verbose: true } }) });
+    assert.strictEqual(r.ok, true, r.error);
+    await s.reg.lastBackgroundRun;
+    assert.strictEqual(jobs.readRunStatus(s.reg, s.meta.id, r.jobId).state, 'done');
+    assert.deepStrictEqual(await jobs.copyBackgroundOutput(s.reg, s.meta.id), [r.jobId]);
+    assert.deepStrictEqual(readJsonSafe(path.join(s.meta.dir, 'sources', 'runbook', r.jobId, 'output.json'), null), { success: true, logs: ['site.status ok'], admitted: true });
+    const early = await submit(s, { executor: 'runbook', payload: JSON.stringify({ runbook: 'site.status', params: { verbose: false } }) });
+    await jobs.cancelJob(s.reg, s.meta.id, early.jobId, 'not needed');
+    assert.deepStrictEqual(released, [['site.status', 42]]);
+  });
+
+  it('asks the owner for a consented plan step and waits', async () => {
+    const s = await setup();
+    new PlanStore(s.meta.dir).write({
+      id: 'plan-001', status: 'approved',
+      steps: [{ id: 's1', title: 'Sign the listing agreement', executor: 'owner', capability: 'sign', state: 'pending', jobIds: [], check: { status: 'ok', consent: 'recorded:f-0009' } }]
+    });
+    const r = await submit(s, { executor: 'owner', planStepId: 's1', payload: JSON.stringify({ text: 'Please sign the listing agreement.' }) });
+    assert.strictEqual(r.ok, true, r.error);
+    const job = new JobStore(s.meta.dir).get(r.jobId);
+    const q = s.rt.questions(s.meta.id).get(job.questionId);
+    assert.deepStrictEqual([job.state, q.payload.type, q.payload.capability, q.payload.mcpAnswerable], ['waiting', 'owner-task', 'sign', false]);
+    await s.rt.answerQuestion(s.meta.id, q.id, { channel: 'in-app', text: 'Signed and returned.' });
+    await s.reg.refreshCase(s.meta.id, { force: true });
+    assert.strictEqual(new JobStore(s.meta.dir).get(r.jobId).state, 'done');
+  });
+
+  it('fans research out to isolated case-researcher tasks', async () => {
+    let created = null;
+    const engine = {
+      create: async (graph, opts) => { created = { graph, opts }; return { id: 'wf-1' }; },
+      run: async () => ({ status: 'completed', tasks: [{ id: 't1', title: 'Find comparable sales', result: 'Found three comparable sales.' }] }),
+      cancel: () => {}
+    };
+    const s = await setup({ registryOptions: { getWorkflowEngine: () => engine } });
+    const r = await submit(s, { executor: 'workflow', payload: JSON.stringify({ tasks: [{ id: 't1', title: 'Find comparable sales', description: 'Search public listings near the lot', dependsOn: [] }] }) });
+    assert.strictEqual(r.ok, true, r.error);
+    const runs = jobs.runDir(s.reg, s.meta.id, r.jobId);
+    assert.deepStrictEqual(created.graph.tasks.map((t) => t.agentId), ['case-researcher']);
+    assert.deepStrictEqual(created.opts, {
+      chatId: null, workingDirectory: runs, modeSnapshot: { sandboxMode: true, allowedDirectories: [runs] },
+      executeExtras: { isolatedContext: true, guardContext: { caseId: s.meta.id } }
+    });
+    await s.reg.lastBackgroundRun;
+    assert.match(fs.readFileSync(path.join(runs, 't1.md'), 'utf8'), /Found three comparable sales/);
+    assert.strictEqual(jobs.readRunStatus(s.reg, s.meta.id, r.jobId).state, 'done');
+    const leak = await submit(s, { executor: 'workflow', payload: JSON.stringify({ tasks: [{ id: 't1', title: 'Check Harbor Road access', description: 'x' }] }) });
+    assert.deepStrictEqual(leak.blocked.map((b) => [b.path, b.reason]), [['tasks[0].title', 'inferred']]);
+  });
+});
+
+// ---- Task 11 carries (progress.md) ----
+
+const { approvalHelpers, signedAction } = require('../src/cases/executors/signed');
+const { envelopeCore, envelopeHash } = require('../src/cases/executors/envelope');
+
+// Wraps the loaded adapter's submit so a test can change what it returns.
+async function patchSubmit(s, fn) {
+  const adapter = await s.reg.adapter('fake-agent');
+  const real = adapter.submit.bind(adapter);
+  adapter.submit = async (job, envelope) => fn(await real(job, envelope), job);
+}
+
+describe('Executor.submit envelopes and grants', () => {
+  it('refuses an envelope with no recorded authority as tampered', async () => {
+    const s = await setup();
+    const envelopeId = await approvedEnvelope(s);
+    const store = new EnvelopeStore(s.meta.dir);
+    const e = store.get(envelopeId);
+    assert.strictEqual(e.authority, 'envelope');
+    assert.strictEqual(e.hash, envelopeHash(envelopeCore(e)), 'authority is part of the hashed core');
+    delete e.authority;
+    store.write(e);
+    const r = await submit(s, { executor: 'fake-agent', envelopeId, payload: call(s) });
+    assert.strictEqual(r.ok, false);
+    assert.match(r.error, /authority/);
+    assert.strictEqual(s.ctl.calls.filter((c) => c[0] === 'submit').length, 0);
+    envelopeOps.syncEnvelopes(s.reg, s.meta.id);
+    assert.strictEqual(store.get(envelopeId).status, 'tampered');
+  });
+
+  it('a signed envelope needs its grant; a file lowered to envelope and re-hashed has none', async () => {
+    const helpers = approvalHelpers();
+    const approver = { async requestAction(action) { return { decision: 'approve', request_id: 'r-1', device_id: 'd-1', action_hash: helpers.actionHash(action) }; } };
+    const s = await setup({ agent: { entry: { authority: 'signed' } }, registryOptions: { getPhoneApprover: () => approver } });
+    const r0 = await envelopeOps.requestEnvelope(s.reg, { caseId: s.meta.id }, {
+      executor: 'fake-agent', intent: 'Ask brokers for a listing quote', recipients: { allow: ['+15550100', '+15550101'] },
+      facts: [s.acres.id], caps: { usd: 20, contacts: 3, attemptsPerContact: 2 }, window: { start: '2026-10-26', end: '2026-10-30' }
+    });
+    assert.strictEqual(r0.ok, true, r0.error);
+    await s.reg.lastSignedRequest;
+    // The turn holds the case lock, so the grant waits for the next turn start.
+    await envelopeOps.applyPendingSignedGrants(s.reg, s.meta.id);
+    const store = new EnvelopeStore(s.meta.dir);
+    assert.strictEqual(store.get(r0.envelopeId).status, 'active');
+    const ok = await submit(s, { executor: 'fake-agent', envelopeId: r0.envelopeId, payload: call(s) });
+    assert.strictEqual(ok.ok, true, ok.error);
+
+    const e = store.get(r0.envelopeId);
+    e.authority = 'envelope';
+    e.hash = envelopeHash(envelopeCore(e));
+    store.write(e);
+    assert.notStrictEqual(helpers.actionHash(signedAction(e, s.meta.id, helpers)), s.reg.signedOutcomes.get(`${s.meta.id}/${r0.envelopeId}`)[0].action_hash);
+    const r = await submit(s, { executor: 'fake-agent', envelopeId: r0.envelopeId, payload: call(s, { recipients: [{ address: '+15550101' }] }) });
+    assert.deepStrictEqual(r, { ok: false, error: 'signed approval not found for this envelope; ask again' });
+  });
+
+  it('refuses an envelope of another executor', async () => {
+    const s = await setup();
+    const envelopeId = await approvedEnvelope(s);
+    const engine = { getRunbook: (name) => ({ name, tier: 'read' }), validateParameters: (n, p) => p, checkRateLimit: () => ({ allowed: true }) };
+    s.reg.getRunbookEngine = () => engine;
+    const r = await submit(s, { executor: 'runbook', envelopeId, payload: JSON.stringify({ runbook: 'site.status' }) });
+    assert.deepStrictEqual(r, { ok: false, error: `${envelopeId} is for fake-agent, not runbook` });
+  });
+});
+
+describe('Executor.submit adapter answers', () => {
+  it('reports a job the commit failed as a failure, and releases its reservation', async () => {
+    const s = await setup();
+    const envelopeId = await approvedEnvelope(s);
+    await patchSubmit(s, (res) => ({ ...res, state: 'in_progress' }));
+    const r = await submit(s, { executor: 'fake-agent', envelopeId, payload: call(s) });
+    assert.strictEqual(r.ok, false);
+    assert.match(r.error, /^job-0001 failed: the executor reported an unknown job state "in_progress"/);
+    assert.strictEqual(new JobStore(s.meta.dir).get('job-0001').state, 'failed');
+    assert.strictEqual(s.reg.globalRemaining('fake-agent'), 5);
+    assert.strictEqual(new EnvelopeStore(s.meta.dir).get(envelopeId).payloads.length, 0);
+  });
+
+  it('reports a job the executor answered as cancelled as a failure', async () => {
+    const s = await setup();
+    const envelopeId = await approvedEnvelope(s);
+    await patchSubmit(s, (res) => ({ ...res, state: 'cancelled' }));
+    const r = await submit(s, { executor: 'fake-agent', envelopeId, payload: call(s) });
+    assert.strictEqual(r.ok, false);
+    assert.match(r.error, /^job-0001 cancelled/);
+  });
+
+  it('caps the contacts the adapter reports before storing them', async () => {
+    const s = await setup();
+    const envelopeId = await approvedEnvelope(s);
+    await patchSubmit(s, (res) => ({
+      ...res,
+      contacts: [...res.contacts, ...Array.from({ length: 500 }, (_, i) => ({ id: `x${i}`, state: 'pending', note: 'y'.repeat(5000), nested: { a: 1 } }))]
+    }));
+    const r = await submit(s, { executor: 'fake-agent', envelopeId, payload: call(s) });
+    assert.strictEqual(r.ok, true, r.error);
+    const job = new JobStore(s.meta.dir).get(r.jobId);
+    assert.strictEqual(job.contacts.length, 200);
+    assert.strictEqual(job.contacts[0].normalizedAddress, '+15550100');
+    assert.ok(job.contacts.every((c) => Object.values(c).every((v) => typeof v !== 'string' || v.length <= 300)));
+    assert.ok(job.contacts.every((c) => c.nested === undefined));
+  });
+
+  it('cuts an adapter-reported address in the mismatch refusal', async () => {
+    const s = await setup();
+    const envelopeId = await approvedEnvelope(s);
+    await patchSubmit(s, (res) => ({ ...res, contacts: [{ id: 'c1', address: '+15550100', normalizedAddress: `+1${'9'.repeat(5000)}` }] }));
+    const r = await submit(s, { executor: 'fake-agent', envelopeId, payload: call(s) });
+    assert.strictEqual(r.ok, false);
+    assert.ok(r.error.length < 700, String(r.error.length));
+    assert.match(r.error, /^recipient normalized differently: sent \+15550100, executor used \+1999/);
+  });
+
+  it('sets maxCostUsd on the stored job', async () => {
+    const s = await setup();
+    const envelopeId = await approvedEnvelope(s);
+    const r = await submit(s, { executor: 'fake-agent', envelopeId, payload: call(s) });
+    assert.strictEqual(new JobStore(s.meta.dir).get(r.jobId).maxCostUsd, 20);
+  });
+});
+
+describe('Executor.submit never throws', () => {
+  it('returns a failure for an unknown case and for a workflow engine that throws', async () => {
+    const engine = { create: async () => { throw new Error('engine down'); }, run: async () => ({}), cancel: () => {} };
+    const s = await setup({ registryOptions: { getWorkflowEngine: () => engine } });
+    const unknown = await submitJob(s.reg, { caseId: 'case-nope' }, { executor: 'workflow', payload: '{}' });
+    assert.strictEqual(unknown.ok, false);
+    const r = await submit(s, { executor: 'workflow', payload: JSON.stringify({ tasks: [{ id: 't1', title: 'Find comparable sales', description: 'x' }] }) });
+    assert.strictEqual(r.ok, false);
+    assert.match(r.error, /engine down/);
+    assert.strictEqual(new JobStore(s.meta.dir).get('job-0001').state, 'failed');
+  });
+});
+
+describe('Executor.submit outbound gate in service mode', () => {
+  it('data-dir category keywords only add: { personal: [] } does not weaken the keyword rule', async () => {
+    const calls = [];
+    const act = (name, result = {}) => async (params) => { calls.push([name, params]); return { ok: true, ...result }; };
+    const browserActions = {
+      status: act('status', { running: true }), start: act('start'), navigate: act('navigate'), fill_credentials: act('fill_credentials'),
+      fill: act('fill'), click: act('click'), wait_for: act('wait_for'), content: act('content', { html: '' })
+    };
+    const s = await setup({
+      executors: { outbound: { categoryKeywords: { personal: [], legal: ['easement'] } } },
+      registryOptions: { isService: true, browserActions }
+    });
+    const kw = s.reg.settings().outbound.categoryKeywords;
+    assert.ok(kw.personal.includes('divorce'), 'the built-in personal keywords stay');
+    assert.ok(kw.legal.includes('lawsuit') && kw.legal.includes('easement'), 'an added keyword joins the built-ins');
+    s.rt.ledger(s.meta.id).assert({
+      stmt: 'The owner is selling because of a separation', subject: 'owner', attr: 'reason', value: 'separation from spouse',
+      provenance: 'user', category: 'personal', source: { kind: 'question', ref: 'q-0098' }
+    });
+    const r0 = await envelopeOps.requestEnvelope(s.reg, { caseId: s.meta.id }, {
+      executor: 'browser', intent: 'File the county permit form', recipients: { allow: ['https://permits.example.com/apply'] },
+      facts: [s.acres.id], caps: { usd: 5, contacts: 1, attemptsPerContact: 1 }, window: { start: '2026-10-26', end: '2026-10-30' }
+    });
+    assert.strictEqual(r0.ok, true, r0.error);
+    await s.rt.answerQuestion(s.meta.id, r0.questionId, { channel: 'in-app', optionId: 'approve' });
+    envelopeOps.syncEnvelopes(s.reg, s.meta.id);
+    const r = await submit(s, {
+      executor: 'browser', envelopeId: r0.envelopeId,
+      payload: JSON.stringify({ url: 'https://permits.example.com/apply', fields: [{ selector: '#reason', value: 'Sale after a divorce' }], submit: { selector: '#go' } })
+    });
+    assert.strictEqual(r.error, 'blocked by the outbound gate');
+    assert.deepStrictEqual(r.blocked.map((b) => [b.path, b.reason]), [['fields[0].value', 'category-keyword']]);
+    assert.strictEqual(calls.length, 0);
+  });
+});

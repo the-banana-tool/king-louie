@@ -109,7 +109,8 @@ class ExecutorRegistry {
     } catch (err) {
       log.warn(`Reading executor settings failed: ${err.message}`);
     }
-    return resolveExecutorSettings(raw);
+    // Service mode: the data dir may add outbound keywords, never remove them.
+    return resolveExecutorSettings(raw, { additiveKeywords: this.isService });
   }
 
   casesTimeZone() {

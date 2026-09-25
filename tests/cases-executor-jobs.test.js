@@ -77,7 +77,7 @@ describe('refreshCase', () => {
     const plan = new PlanStore(s.dir).read();
     assert.deepStrictEqual([plan.steps[0].state, plan.status], ['done', 'done']);
     const snap = readJsonSafe(path.join(s.dir, '.kl', 'executors.json'), null);
-    assert.deepStrictEqual(snap['fake-agent'].material, { openJobs: 0, lastChange: '2026-10-26T15:10:00Z', failedJobs: 0, unreachableJobs: 0 });
+    assert.deepStrictEqual(snap['fake-agent'].material, { openJobs: 0, lastChange: '2026-10-26T15:10:00.000Z', failedJobs: 0, unreachableJobs: 0 });
     assert.deepStrictEqual(snap['fake-agent'].state.jobs[job.id], { externalId: 'ext-1', state: 'done' });
     assert.strictEqual((await s.reg.refreshCase(s.meta.id, { force: true })).material, false);
     assert.strictEqual(budgetSpent(s.env, s.meta.id, 'usd'), 1.25, 'charged once');

@@ -50,6 +50,34 @@ const isJobStateError = (err) => Boolean(err) && err.code === 'JOB_STATE';
 // the snapshot.
 const clip = (text) => cut(String(text ?? ''), 300);
 const validExternalId = (id) => typeof id === 'string' && id.trim() !== '';
+const MAX_CONTACTS = 200;
+const MAX_CONTACT_FIELDS = 20;
+
+// Adapter-reported contacts are bounded before they are stored or shown:
+// at most MAX_CONTACTS entries, each a flat record of at most
+// MAX_CONTACT_FIELDS primitive fields, every string cut to 300 characters.
+// Nested values are dropped.
+function capContacts(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const c of list) {
+    if (out.length >= MAX_CONTACTS) break;
+    if (!isObject(c)) continue;
+    const flat = {};
+    for (const [k, v] of Object.entries(c).slice(0, MAX_CONTACT_FIELDS)) {
+      if (typeof v === 'string') flat[clip(k)] = clip(v);
+      else if (v === null || typeof v === 'boolean' || (typeof v === 'number' && Number.isFinite(v))) flat[clip(k)] = v;
+    }
+    out.push(flat);
+  }
+  return out;
+}
+
+// An executor's lastChange as ISO 8601, or `now` when it does not parse.
+function isoOr(value, now) {
+  const ms = typeof value === 'string' || typeof value === 'number' ? Date.parse(String(value)) : NaN;
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : now.toISOString();
+}
 
 function kindOf(entry) {
   if (!entry) return 'external';
@@ -70,14 +98,14 @@ function writeRunStatus(reg, caseId, jobId, status) {
   writeJsonAtomic(path.join(runDir(reg, caseId, jobId), 'status.json'), status);
 }
 
+// Both lists are capped (capContacts), and so is the merge.
 function mergeContacts(current = [], incoming = []) {
-  const byId = new Map((current || []).map((c) => [c.id, { ...c }]));
-  for (const c of incoming || []) {
-    if (!c || c.id === undefined) continue;
-    const defined = Object.fromEntries(Object.entries(c).filter(([, v]) => v !== undefined));
-    byId.set(c.id, { ...(byId.get(c.id) || {}), ...defined });
+  const byId = new Map(capContacts(current).map((c) => [c.id, { ...c }]));
+  for (const c of capContacts(incoming)) {
+    if (c.id === undefined) continue;
+    byId.set(c.id, { ...(byId.get(c.id) || {}), ...c });
   }
-  return [...byId.values()];
+  return capContacts([...byId.values()]);
 }
 
 // `fn` may return false to leave the envelope file untouched.
@@ -275,9 +303,10 @@ function applyStatus(reg, caseId, caseDir, job, status, now, after = null) {
   if (status.resultFactId !== undefined) job.resultFactId = status.resultFactId;
   if (status.state !== before && !isTerminal(before)) {
     job.state = status.state;
-    job.lastChange = status.lastChange || now.toISOString();
-  } else if (status.lastChange && String(status.lastChange) > String(job.lastChange || '')) {
-    job.lastChange = status.lastChange;
+    job.lastChange = isoOr(status.lastChange, now);
+  } else if (status.lastChange) {
+    const reported = isoOr(status.lastChange, now);
+    if (reported > String(job.lastChange || '')) job.lastChange = reported;
   }
   if (Array.isArray(status.contacts)) job.contacts = mergeContacts(job.contacts, status.contacts);
   if (isTerminal(job.state) && !isTerminal(before)) finishJob(reg, caseId, caseDir, job, sink);
@@ -461,10 +490,10 @@ function takeReservation(job) {
 
 // A submit whose answer cannot be committed: the job fails, nothing is
 // charged, and the executor is asked to drop the job it accepted.
-async function failSubmit(reg, caseId, job, submitted, reason) {
+async function failSubmit(reg, caseId, job, submitted = {}, reason = 'failed') {
   const caseDir = reg.caseDir(caseId);
   const store = new JobStore(caseDir);
-  if (validExternalId(submitted.jobId)) job.externalId = submitted.jobId;
+  if (validExternalId(submitted?.jobId)) job.externalId = submitted.jobId;
   let note = null;
   if (job.kind === 'external' && validExternalId(job.externalId)) {
     try {
@@ -476,7 +505,9 @@ async function failSubmit(reg, caseId, job, submitted, reason) {
   const fresh = store.get(job.id);
   if (isObject(fresh) && isTerminal(fresh.state)) return fresh;
   job.reservedContacts = isObject(fresh) ? fresh.reservedContacts : job.reservedContacts;
-  const release = takeReservation(job);
+  // Released only while the job on disk is still `submitting`: a committed
+  // job keeps its reservation (contacts may already have been reached).
+  const release = !isObject(fresh) || fresh.state === 'submitting' ? takeReservation(job) : 0;
   job.state = 'failed';
   job.reason = clip(reason);
   job.lastChange = reg.now().toISOString();
@@ -737,10 +768,12 @@ module.exports = {
   readRunStatus,
   writeRunStatus,
   mergeContacts,
+  capContacts,
   updateEnvelope,
   applyStatus,
   finishJob,
   commitSubmit,
+  failSubmit,
   refreshCase,
   pollWakeup,
   cancelJob,

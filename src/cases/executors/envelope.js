@@ -78,10 +78,22 @@ function capOf(caps, key, { integer }) {
   return v;
 }
 
-// Throws EnvelopeCoreError for malformed caps; callers that must not throw
-// use envelopeIntact.
+// The authority an envelope was requested under is part of what the owner
+// approved and the hash covers, so a file edit cannot lower it. An envelope
+// with none recorded is malformed (read as tampered), never a default.
+const ENVELOPE_AUTHORITIES = Object.freeze(['envelope', 'signed']);
+
+function authorityOf(env) {
+  const a = env ? env.authority : undefined;
+  if (!ENVELOPE_AUTHORITIES.includes(a)) throw new EnvelopeCoreError(`authority must be one of ${ENVELOPE_AUTHORITIES.join(', ')}`);
+  return a;
+}
+
+// Throws EnvelopeCoreError for malformed caps or authority; callers that
+// must not throw use envelopeIntact.
 function envelopeCore(env) {
   return {
+    authority: authorityOf(env),
     intent: String(env.intent || ''),
     executor: String(env.executor || ''),
     recipients: { allow: [...(env.recipients?.allow || [])].map(String) },
@@ -167,6 +179,7 @@ function validateEnvelopeRequest(body, {
   if (errors.length) return { ok: false, error: `Envelope refused: ${errors.join('; ')}.` };
 
   const core = {
+    authority: entry.authority,
     intent,
     executor: entry.id,
     recipients: { allow: normalized },
@@ -361,6 +374,7 @@ function deltasEqual(a, b) {
 
 module.exports = {
   ENVELOPE_STATUSES,
+  ENVELOPE_AUTHORITIES,
   FITTABLE_STATUSES,
   EnvelopeStore,
   EnvelopeCoreError,

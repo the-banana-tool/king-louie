@@ -43,7 +43,7 @@ const request = (over = {}) => ({
 });
 function activeEnvelope(over = {}) {
   const env = {
-    id: 'env-01', version: 1, status: 'active', executor: 'phone-agent',
+    id: 'env-01', version: 1, status: 'active', authority: 'envelope', executor: 'phone-agent',
     intent: 'Ask three brokers for a listing quote on the lot',
     recipients: { allow: ['+15550100', '+15550101'], addRequiresApproval: true },
     facts: ['f-0001'], rules: [], caps: { usd: 20, contacts: 3, attemptsPerContact: 2 },
