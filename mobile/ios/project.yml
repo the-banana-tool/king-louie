@@ -1,0 +1,43 @@
+# XcodeGen project for the King Louie approvals app (iOS 17+).
+# Generate the Xcode project with `xcodegen generate` in mobile/ios.
+# Bundle id, APNs topic/environment and signing are build-time settings in
+# Config/App.xcconfig; nothing here names a person, team or domain.
+name: KingLouie
+options:
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+configFiles:
+  Debug: Config/App.xcconfig
+  Release: Config/App.xcconfig
+packages:
+  KLProtocol:
+    path: KLProtocol
+targets:
+  KingLouie:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+        excludes:
+          - "*.entitlements"
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: King Louie
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        NSCameraUsageDescription: Scans pairing, invite and relay codes.
+        NSFaceIDUsageDescription: Every approval and device change is signed with your face or fingerprint.
+        KLApnsTopic: $(KL_APNS_TOPIC)
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+    dependencies:
+      - package: KLProtocol
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(KL_BUNDLE_ID)
+        CODE_SIGN_ENTITLEMENTS: $(KL_ENTITLEMENTS)
+        DEVELOPMENT_TEAM: $(KL_DEVELOPMENT_TEAM)
+        SWIFT_VERSION: "5.9"
+        TARGETED_DEVICE_FAMILY: "1"
