@@ -27,7 +27,7 @@ const PROMPT_RESPONSES = Object.freeze({
 const fail = (code, message) => Object.assign(new Error(message), { code });
 
 // Settings > Local service "Approvals and relay" (spec §3.9), read from F3's
-// startApprovals objects; { available: false } until F3 has merged.
+// startApprovals objects; { available: false } when there are none.
 function approvalsStatus({ approvals, dataDir }) {
   if (!approvals || !approvals.approverStore || !approvals.phoneApprover) return { available: false };
   let link = null;

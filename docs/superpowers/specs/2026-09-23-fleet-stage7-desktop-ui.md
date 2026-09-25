@@ -275,7 +275,7 @@ Bridge-native `call` methods:
 | `bridge.setWorkingDirectory` | `{ chatId, path }` | runs `checkPath`; on success delegates to the registered `chat:setWorkingDirectory` handler; else `PATH_NOT_ACCESSIBLE` |
 | `bridge.addAllowedDirectory` | `{ path }` | `checkPath`, then appends to the desktop-scoped list (above); returns `{ ok: true, allowedDirectories }` |
 | `bridge.canvasJsResult` | `{ requestId, result?, error? }` | resolves `core.pendingCanvasJsResolvers` (the code moved out of `main.js`) |
-| `bridge.approvalsStatus` | — | §3.9 "Approvals and relay"; `{ available: false }` until F3 has merged |
+| `bridge.approvalsStatus` | — | §3.9 "Approvals and relay", from F3's `startApprovals` objects; `{ available: false }` when there are none |
 | `import.plan` / `import.apply` / `import.finish` | §3.8 | §3.8 |
 
 **Service wiring.** `src/service/run.js` (last in the F3 → F4 → F5 → F7 order), `agent`
