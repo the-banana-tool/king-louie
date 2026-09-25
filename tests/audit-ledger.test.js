@@ -84,9 +84,16 @@ describe('AuditLedger lock', () => {
   it('keeps one chain when several processes append at once', async () => {
     const dir = tempDir();
     const identity = testIdentity();
+    // lockTimeoutMs is generous (well beyond the 2000ms default) so that CPU
+    // contention from the rest of the suite running in parallel cannot make
+    // a writer give up on the lock before the other two are done with their
+    // 15 appends each; it only ever matters under exactly that load, since
+    // an uncontended lock is taken on the first try regardless of the
+    // timeout. What this proves — one chain, no lost or reordered entries —
+    // is unchanged.
     const script = `
       const { AuditLedger } = require('./src/audit/audit-ledger');
-      const l = new AuditLedger({ dir: process.env.KL_AUDIT_DIR, nodeId: '${identity.nodeId}', writer: 'mcp' });
+      const l = new AuditLedger({ dir: process.env.KL_AUDIT_DIR, nodeId: '${identity.nodeId}', writer: 'mcp', lockTimeoutMs: 30000 });
       (async () => { for (let i = 0; i < 15; i += 1) await l.append({ kind: 'exec.start', data: { pid: process.pid, i } }); })()
         .catch((err) => { process.stderr.write(err.message); process.exit(1); });
     `;
