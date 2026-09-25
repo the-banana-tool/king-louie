@@ -6,7 +6,7 @@ const { Tool } = require('../tool-schema');
 const { recommendationGate, findDuplicates, OPEN_CASE_STATUSES } = require('../../cases/gates');
 const { requireOwnerQuote } = require('../../cases/chat-integration');
 const { caseTypeForField, resolveCaseType } = require('../../cases/case-types');
-const { validateRepo } = require('../../cases/case-types/software-repo');
+const { validateRepo, repoInQuote } = require('../../cases/case-types/software-repo');
 const { toMs } = require('../../cases/clock');
 
 const NO_CASE = Object.freeze({
@@ -244,10 +244,13 @@ const BriefTool = acceptAnyValue(new Tool({
       if (!check.ok) return check;
       // Ruling T9-repo: the refresh reads whatever `repo` names, so the owner
       // must have said the value itself. Validity first (its error is clearer),
-      // then the value inside the quote, with the quote's own normalizer.
+      // then the value as one whole token of the quote AND of the owner's own
+      // message: the quote check folds case, so only the message keeps the
+      // owner's casing (fix round 2: never a prefix, never a case variant).
       if (params.field === 'repo') {
         const repo = validateRepo(params.value);
-        if (!requireOwnerQuote({ quote: repo, ownerMessages: [check.quote] }).ok) {
+        const said = ctx.ownerMessages[check.messageIndex];
+        if (!repoInQuote(repo, check.quote) || !repoInQuote(repo, said)) {
           return { ok: false, error: `The owner's quote must contain the repo value itself (${JSON.stringify(repo)}). Ask the owner for the repository path or clone URL.` };
         }
       }

@@ -57,6 +57,40 @@ function remoteKeyOf(url) {
   return [m[1], ...rest].join('/').toLowerCase();
 }
 
+// Whether one whitespace-separated token of the owner's quote is exactly this
+// repo (never a prefix). Tokens lose surrounding quote marks and backticks
+// and trailing , ; : . ). URLs compare by remoteKeyOf (so ".git" does not
+// matter); paths without a trailing separator, case-folded on win32 and
+// darwin only. Pure string work: nothing is read from disk.
+const QUOTE_MARKS = /^["'`‘’“”]+|["'`‘’“”]+$/g;
+function quoteTokens(quote) {
+  return String(quote || '').split(/\s+/).map((t) => {
+    let prev;
+    do {
+      prev = t;
+      t = t.replace(QUOTE_MARKS, '').replace(/[,;:.)]+$/, '');
+    } while (t !== prev);
+    return t;
+  }).filter(Boolean);
+}
+function repoInQuote(repo, quote, { platform = process.platform } = {}) {
+  const value = String(repo || '').trim();
+  if (!value) return false;
+  const tokens = quoteTokens(quote);
+  if (isCloneUrl(value)) {
+    const key = remoteKeyOf(value);
+    const bare = (s) => s.replace(/\/+$/, '');
+    return tokens.some((t) => isCloneUrl(t) && (key ? remoteKeyOf(t) === key : bare(t) === bare(value)));
+  }
+  const fold = platform === 'win32' || platform === 'darwin';
+  const norm = (s) => {
+    const bare = s.length > 1 ? s.replace(/[\\/]+$/, '') || s : s;
+    return fold ? bare.toLowerCase() : bare;
+  };
+  const wanted = norm(value);
+  return tokens.some((t) => norm(t) === wanted);
+}
+
 // The real path of a local repo, case-folded where the file system is.
 function pathKey(repo) {
   const abs = path.resolve(expandHome(String(repo).trim()));
@@ -352,6 +386,7 @@ module.exports = {
   checkBeforeWriteFor,
   validateRepo,
   remoteKeyOf,
+  repoInQuote,
   isCloneUrl,
   pathKey,
   defaultExec,

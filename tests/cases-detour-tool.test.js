@@ -250,6 +250,61 @@ describe('Brief tool owner-only type fields', () => {
     assert.strictEqual(rt.brief(repo.id).read().data.repo, 'https://github.com/example/phone-agent.git');
     rt.releaseAll();
   });
+
+  // Fix round 2: a token of the quote must equal the value, not contain it.
+  it('refuses a prefix of what the owner said, and accepts the exact value', async () => {
+    const rt = new CaseRuntime({ root: tmp() });
+    const repo = await rt.createCase({ title: 'Phone agent maintenance', type: 'software-repo', objective: 'Keep the phone agent healthy' });
+    const turn = await rt.beginTurn(repo.id, { turnId: 'turn-1' });
+    const said = 'The checkout is "/work/phone-agent/", the remote is `https://github.com/example/phone-agent.git`.';
+    const opts = { caseContext: rt.caseContext(turn, { ownerMessages: [said] }) };
+    const set = (value) => BriefTool.execute({ action: 'update', field: 'repo', value, provenance: 'user', quote: said }, opts);
+    for (const value of ['/work/phone', 'https://github.com/example/phone', 'https://github.com/example/phone-agent/tree']) {
+      assert.match((await set(value)).error, /must contain the repo value itself/, value);
+    }
+    assert.strictEqual(rt.brief(repo.id).read().data.repo ?? null, null);
+    for (const value of ['/work/phone-agent', '/work/phone-agent/', 'https://github.com/example/phone-agent', 'https://github.com/example/phone-agent.git']) {
+      assert.strictEqual((await set(value)).ok, true, value);
+    }
+    rt.releaseAll();
+  });
+
+  it('refuses a case variant of the owner\'s path on linux, even with the quote in that casing', { skip: process.platform !== 'linux' && 'case-sensitive paths only' }, async () => {
+    const rt = new CaseRuntime({ root: tmp() });
+    const repo = await rt.createCase({ title: 'Phone agent maintenance', type: 'software-repo', objective: 'Keep the phone agent healthy' });
+    const turn = await rt.beginTurn(repo.id, { turnId: 'turn-1' });
+    const opts = { caseContext: rt.caseContext(turn, { ownerMessages: ['The checkout is /work/phone-agent on this box'] }) };
+    const r = await BriefTool.execute({ action: 'update', field: 'repo', value: '/work/Phone-Agent', provenance: 'user', quote: 'checkout is /work/Phone-Agent' }, opts);
+    assert.match(r.error, /must contain the repo value itself/);
+    rt.releaseAll();
+  });
+
+  it('checks the owner\'s own message text, not only the normalized quote', async () => {
+    const rt = new CaseRuntime({ root: tmp() });
+    const repo = await rt.createCase({ title: 'Phone agent maintenance', type: 'software-repo', objective: 'Keep the phone agent healthy' });
+    const turn = await rt.beginTurn(repo.id, { turnId: 'turn-1' });
+    // The quote check maps an en dash to "-"; the owner's path has the en dash.
+    const opts = { caseContext: rt.caseContext(turn, { ownerMessages: ['The checkout is /work/phone–agent on this box'] }) };
+    const r = await BriefTool.execute({ action: 'update', field: 'repo', value: '/work/phone-agent', provenance: 'user', quote: 'checkout is /work/phone-agent' }, opts);
+    assert.match(r.error, /must contain the repo value itself/);
+    rt.releaseAll();
+  });
+});
+
+describe('repoInQuote', () => {
+  const { repoInQuote } = require('../src/cases/case-types/software-repo');
+  it('matches one whole token of the quote, never a prefix', () => {
+    assert.strictEqual(repoInQuote('/work/phone', 'it lives in /work/phone-agent', { platform: 'linux' }), false);
+    assert.strictEqual(repoInQuote('C:\\Work\\phone', 'it lives in C:\\Work\\phone-agent', { platform: 'win32' }), false);
+    assert.strictEqual(repoInQuote('C:\\Work\\phone-agent', 'it lives in \'C:\\Work\\Phone-Agent\\\';', { platform: 'win32' }), true);
+    assert.strictEqual(repoInQuote('https://github.com/example/phone', 'see https://github.com/example/phone-agent.git', { platform: 'linux' }), false);
+    assert.strictEqual(repoInQuote('https://github.com/example/phone-agent', 'see https://github.com/example/phone-agent.git,', { platform: 'linux' }), true);
+  });
+  it('case-folds paths only on win32 and darwin', () => {
+    assert.strictEqual(repoInQuote('/work/Phone-Agent', 'at /work/phone-agent', { platform: 'linux' }), false);
+    assert.strictEqual(repoInQuote('/work/Phone-Agent', 'at /work/phone-agent', { platform: 'darwin' }), true);
+    assert.strictEqual(repoInQuote('/work/phone-agent/', 'at /work/phone-agent:', { platform: 'linux' }), true);
+  });
 });
 
 describe('Detour list errors', () => {
