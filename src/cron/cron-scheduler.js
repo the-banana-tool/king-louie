@@ -20,6 +20,13 @@ class CronScheduler {
     setTimeout(() => this.tick(), 100);
   }
 
+  // Fleet stage 7 --kl-standalone-once: the service is the instance that
+  // acts, so this app's scheduler runs nothing until the next launch.
+  pause() {
+    this.paused = true;
+    this.stop();
+  }
+
   stop() {
     if (this.timer) {
       clearInterval(this.timer);
@@ -71,6 +78,7 @@ class CronScheduler {
   }
 
   async tick() {
+    if (this.paused) return;
     const jobs = this.store.list();
     const dueJobs = jobs.filter(job => this.isDue(job) && !this.runningJobs.has(job.id));
 
