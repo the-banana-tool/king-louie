@@ -363,3 +363,184 @@ describe('planBatches (fix round 1)', () => {
     assert.match(skipped[0].error, /larger than/);
   });
 });
+
+// Task 9 fix round 1, C1: the root parent reads the desktop profile; a child
+// running as the data dir's owner builds the core and does every write. On
+// this host the child is spawned without uid/gid: the injection point that
+// supplies them is stubbed, and the spawn wrapper records what it was given.
+describe('import --from: reader and writer split (fix round 1)', () => {
+  const { writerIdentity } = require('../src/service/commands/import');
+
+  const childProcess = require('child_process');
+  const io = () => {
+    const out = { stdout: '', stderr: '' };
+    return { out, io: { stdout: { write: (s) => { out.stdout += s; } }, stderr: { write: (s) => { out.stderr += s; } } } };
+  };
+  const withEnv = async (vars, fn) => {
+    const saved = {};
+    for (const k of Object.keys(vars)) { saved[k] = process.env[k]; if (vars[k] === undefined) delete process.env[k]; else process.env[k] = vars[k]; }
+    try { return await fn(); } finally {
+      for (const k of Object.keys(saved)) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+    }
+  };
+  const base = { isAdmin: () => true, runningServicePid: () => null };
+
+  it('the parent never builds a core and writes nothing; the child, given the owner uid/gid, writes it all', async (t) => {
+    const dataDir = tmp();
+    const from = userData();
+    const core = require('../src/core');
+    let coresBuilt = 0;
+    t.mock.method(core, 'createCore', () => { coresBuilt += 1; throw new Error('the parent must not build a core'); });
+    const parentWrites = [];
+    const under = (p) => typeof p === 'string' && path.resolve(p).toLowerCase().startsWith(path.resolve(dataDir).toLowerCase());
+    for (const m of ['writeFileSync', 'appendFileSync', 'mkdirSync', 'renameSync', 'rmSync', 'unlinkSync', 'rmdirSync', 'copyFileSync']) {
+      const orig = fs[m];
+      t.mock.method(fs, m, function (...args) { if (under(args[0]) || under(args[1])) parentWrites.push(`${m} ${args[0]}`); return orig.apply(this, args); });
+    }
+    const origOpen = fs.openSync;
+    t.mock.method(fs, 'openSync', function (p, flags, ...rest) { if (under(p) && flags !== 'r' && flags !== undefined && flags !== fs.constants.O_RDONLY) parentWrites.push(`openSync ${p}`); return origOpen.call(this, p, flags, ...rest); });
+    const spawned = [];
+    const spawn = (cmd, args, opts) => {
+      spawned.push({ cmd, args, uid: opts.uid, gid: opts.gid, cwd: opts.cwd, env: opts.env });
+      const { uid, gid, ...rest } = opts;
+      return childProcess.spawn(cmd, args, { ...rest, env: { ...process.env, ...rest.env } });
+    };
+    const o = io();
+    const code = await withEnv({ KL_CASES_ROOT: undefined }, () => runImportCommand({ flags: { from }, dataDir, io: o.io, deps: { ...base, writerIdentity: () => ({ uid: 4321, gid: 8765 }), spawn } }));
+    assert.strictEqual(code, 0, o.out.stderr);
+    assert.strictEqual(spawned.length, 1);
+    assert.strictEqual(spawned[0].uid, 4321);
+    assert.strictEqual(spawned[0].gid, 8765);
+    assert.strictEqual(spawned[0].cwd, dataDir);
+    assert.strictEqual(spawned[0].env.HOME, undefined, 'a dropped child does not inherit the administrator HOME');
+    assert.strictEqual(coresBuilt, 0);
+    assert.deepStrictEqual(parentWrites, []);
+    assert.ok(JSON.parse(fs.readFileSync(path.join(dataDir, 'chat-data.json'), 'utf8')).chats.some((c) => c.id === 'c1'));
+    assert.ok(fs.existsSync(path.join(dataDir, 'cases', 'lakeside-lot', 'notes', 'a.md')));
+    assert.ok(fs.existsSync(path.join(dataDir, 'cron', 'jobs.json')));
+  });
+
+  it('asks for the data dir owner uid/gid only when root on POSIX and the owner is not root', () => {
+    const st = (uid, gid) => ({ uid, gid, isDirectory: () => true, isSymbolicLink: () => false });
+    assert.deepStrictEqual(writerIdentity('/srv/kl', { platform: 'linux', getuid: () => 0, lstat: () => st(990, 991) }), { uid: 990, gid: 991 });
+    assert.strictEqual(writerIdentity('/srv/kl', { platform: 'linux', getuid: () => 0, lstat: () => st(0, 0) }), null);
+    assert.strictEqual(writerIdentity('/srv/kl', { platform: 'linux', getuid: () => 1000, lstat: () => st(990, 991) }), null);
+    assert.strictEqual(writerIdentity('C:\\kl', { platform: 'win32', getuid: () => 0, lstat: () => st(0, 0) }), null);
+  });
+
+  // A writer that is not what it should be (the service account can ptrace a
+  // child running as itself) gets nothing from the parent but what the
+  // inventory already offered.
+  const fakeWriter = (overrides = {}) => {
+    const calls = [];
+    return {
+      calls,
+      request: async (method, params) => {
+        calls.push({ method, params });
+        if (overrides[method]) return overrides[method](params);
+        if (method === 'open') return { uid: null, casesRoot: 'x', casesRootInDataDir: true, casesRootWritable: true };
+        if (method === 'plan') return { planId: 'p1', items: [], counts: {} };
+        if (method === 'apply') return { results: [] };
+        if (method === 'finish') return { counts: {}, failures: [], attention: [], notes: [] };
+        return {};
+      },
+      close: async () => {}
+    };
+  };
+
+  it('never reads a case the inventory did not list, whatever the writer plans', async () => {
+    const dataDir = tmp();
+    const from = userData();
+    fs.mkdirSync(path.join(from, 'Cookies-dir'));
+    fs.writeFileSync(path.join(from, 'Cookies-dir', 'c.txt'), MARKER);
+    const writer = fakeWriter({ plan: () => ({ planId: 'p1', items: [{ category: 'case', key: '../Cookies-dir', action: 'new' }, { category: 'case', key: 'not-listed', action: 'new' }, { category: 'case', key: 'lakeside-lot', action: 'new' }], counts: {} }) });
+    const o = io();
+    await runImportCommand({ flags: { from }, dataDir, io: o.io, deps: { ...base, openWriter: () => writer } });
+    const sent = writer.calls.filter((c) => c.method === 'apply').flatMap((c) => c.params.batch);
+    assert.ok(sent.length > 0);
+    assert.ok(sent.every((e) => e.key === 'lakeside-lot'));
+    assert.ok(!JSON.stringify(sent).includes(Buffer.from(MARKER).toString('base64')));
+  });
+
+  it('aborts when the writer does not run as the uid it was spawned with', async () => {
+    const writer = fakeWriter({ open: () => ({ uid: 0, casesRoot: 'x', casesRootInDataDir: true, casesRootWritable: true }) });
+    const o = io();
+    const code = await runImportCommand({ flags: { from: userData() }, dataDir: tmp(), io: o.io, deps: { ...base, writerIdentity: () => ({ uid: 990, gid: 991 }), openWriter: () => writer } });
+    assert.strictEqual(code, 1);
+    assert.match(o.out.stderr, /runs as uid 0, not 990/);
+    assert.ok(!writer.calls.some((c) => c.method === 'plan'));
+  });
+
+  it('reports a failed apply or finish and exits 1 (I6)', async () => {
+    for (const failing of ['apply', 'finish']) {
+      const writer = fakeWriter({
+        plan: () => ({ planId: 'p1', items: [{ category: 'chat', key: 'c1', action: 'new' }], counts: {} }),
+        [failing]: () => { throw new Error(`${failing} went wrong`); }
+      });
+      const o = io();
+      const code = await runImportCommand({ flags: { from: userData() }, dataDir: tmp(), io: o.io, deps: { ...base, openWriter: () => writer } });
+      assert.strictEqual(code, 1, failing);
+      assert.match(o.out.stderr, new RegExp(`${failing} went wrong`));
+    }
+  });
+
+  it('a chat larger than a batch is reported, not sent, and the import exits 1 (I6)', async () => {
+    const dataDir = tmp();
+    const from = userData();
+    const doc = JSON.parse(fs.readFileSync(path.join(from, 'chat-data.json'), 'utf8'));
+    doc.chats.push({ id: 'big', title: 'Big', updatedAt: '2026-09-20T10:00:00Z', messages: [{ id: 'm', text: 'x'.repeat(2500 * 1024) }] });
+    fs.writeFileSync(path.join(from, 'chat-data.json'), JSON.stringify(doc));
+    const o = io();
+    const code = await withEnv({ KL_CASES_ROOT: undefined }, () => runImportCommand({ flags: { from }, dataDir, io: o.io, deps: base }));
+    assert.strictEqual(code, 1);
+    assert.match(o.out.stdout, /not read chat big: larger than the/);
+    assert.ok(JSON.parse(fs.readFileSync(path.join(dataDir, 'chat-data.json'), 'utf8')).chats.some((c) => c.id === 'c1'));
+  });
+
+  it('requires runningServicePid (I7)', async () => {
+    await assert.rejects(runImportCommand({ flags: { from: userData() }, dataDir: tmp(), io: io().io, deps: { isAdmin: () => true } }), /runningServicePid/);
+  });
+
+  it('a dry run leaves an orphaned staging directory alone (I1)', async () => {
+    const dataDir = tmp();
+    fs.mkdirSync(path.join(dataDir, 'cases', '.import-x'), { recursive: true });
+    const o = io();
+    const code = await withEnv({ KL_CASES_ROOT: undefined }, () => runImportCommand({ flags: { from: userData(), dryRun: true }, dataDir, io: o.io, deps: base }));
+    assert.strictEqual(code, 0, o.out.stderr);
+    assert.ok(fs.existsSync(path.join(dataDir, 'cases', '.import-x')));
+  });
+
+  it('refuses a data dir that does not exist, and creates nothing (I1)', async () => {
+    for (const dryRun of [true, false]) {
+      const dataDir = path.join(tmp(), 'missing');
+      const o = io();
+      const code = await runImportCommand({ flags: { from: userData(), dryRun }, dataDir, io: o.io, deps: base });
+      assert.strictEqual(code, 1);
+      assert.match(o.out.stderr, /does not exist/);
+      assert.strictEqual(fs.existsSync(dataDir), false);
+    }
+  });
+
+  it('a dry run marks allowed directories unverified and never probes them (I5)', async () => {
+    const from = userData();
+    const { statOnlyCheckPath } = require('../src/service/commands/import-writer');
+    const probed = [];
+    const out = await statOnlyCheckPath(from, { fsp: { stat: fs.promises.stat, open: async (p) => { probed.push(p); throw new Error('no'); }, opendir: async (p) => { probed.push(p); throw new Error('no'); } } });
+    assert.deepStrictEqual(probed, []);
+    assert.strictEqual(out.unverified, true);
+    assert.strictEqual(out.isDirectory, true);
+    const o = io();
+    const code = await runImportCommand({ flags: { from, dryRun: true }, dataDir: tmp(), io: o.io, deps: base });
+    assert.strictEqual(code, 0, o.out.stderr);
+    assert.match(o.out.stdout, /new\s+allowedDirectory .*not verified/);
+    assert.deepStrictEqual(fs.readdirSync(from).filter((n) => n.startsWith('.kl-write-probe')), []);
+  });
+
+  it('says so when the cases root is outside the data dir', async () => {
+    const casesRoot = tmp('kl-cases-');
+    const o = io();
+    const code = await withEnv({ KL_CASES_ROOT: casesRoot }, () => runImportCommand({ flags: { from: userData(), dryRun: true }, dataDir: tmp(), io: o.io, deps: base }));
+    assert.strictEqual(code, 0, o.out.stderr);
+    assert.match(o.out.stdout, /needs-attention\s+case .*outside the data dir/);
+  });
+});

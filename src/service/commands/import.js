@@ -4,91 +4,83 @@
 // desktop user's session.
 // CLI output goes to stdout/stderr on purpose; everything else logs via createLogger.
 //
-// A `--dry-run` must create or write nothing under --data-dir (a fresh data
-// dir is left exactly as it was, including the logs/cache dirs and the
-// master-key file). openCore therefore never provisions the data dir for a
-// dry run: it skips ensureServicePaths/resolveMasterKey (buildServicePorts'
-// job for a real import) and opens the stores read-only instead, with a
-// throwaway in-memory cipher plan() never actually uses. Either way, the
-// core returned here is never started — createCore() alone builds `context`
-// synchronously; only core.start() would launch MCP servers and hooks, and
-// doing that as root is exactly what this command must not do (fleet stage
-// 7 part 2 deviations). buildImportTargets({ offline: true }) writes memory,
-// cron and the user profile straight through their own stores instead.
-const crypto = require('crypto');
+// Reader and writer are split (Task 9 fix round 1, C1), the way the desktop
+// bridge splits them. This process may be root, and the data dir belongs to
+// the service account, which controls every name inside it: a root write
+// there is a root write wherever a planted link points. So this process
+// never opens the data dir. It reads the desktop profile through the R51
+// safe reader and drives plan/apply/finish; a child
+// (./import-writer.js) builds the core and runs DesktopImporter, talking
+// JSON lines over stdio (./import-channel.js). On POSIX, run as root against
+// a data dir owned by someone else, the child is spawned with that owner's
+// { uid, gid }. Windows has no setuid: the child runs as the Administrator,
+// and every importer write goes through a write guard instead (see
+// src/platform/write-guard.js for what that does and does not close).
+//
+// The child reports its uid; a POSIX child that is not the uid it was spawned
+// with is refused before anything is planned. Every plan item it returns is
+// treated as untrusted: a case is read only if this process's own inventory
+// listed it, and text that is printed is stripped of control characters.
 const fs = require('fs');
 const path = require('path');
 const { readDesktopSource, createSafeReader, planBatches } = require('../../migration/desktop-source');
-const { DesktopImporter, buildImportTargets } = require('../../migration/desktop-import');
-const { createDesktopScope } = require('../../desktop-bridge/desktop-scope');
-const { checkPath } = require('../../desktop-bridge/check-path');
-const { restoreDataDirOwnership } = require('../ownership');
+const { spawnWriter, printable } = require('./import-channel');
 const { isAdmin: defaultIsAdmin } = require('./admin-check');
 
 const IMPORT_USAGE = 'Usage: king-louie-service import --from <desktop user-data dir> [--data-dir DIR] [--dry-run]\n';
 
-function defaultOpenCore(dataDir, onPathWritten, dryRun) {
-  const { createCore } = require('../../core');
-  const { CHAT_DATA_DEFAULTS } = require('../../core/settings');
-  const { createHeadlessPrompter } = require('../../platform/prompter');
-  if (dryRun) {
-    const { JsonFileStore } = require('../../platform/json-file-store');
-    const { createAesGcmCipher } = require('../../platform/cipher');
-    // Read-only: no ensureServicePaths (no logs/cache dirs), no
-    // resolveMasterKey (no master.key / key-check file). Constructing a
-    // JsonFileStore writes nothing (its own contract) and only mkdirs a
-    // dataDir that must already exist for this command to run at all. The
-    // cipher never actually encrypts or decrypts anything during planning
-    // (secrets are always reported needs-desktop for the CLI), so a
-    // throwaway in-memory key is enough to satisfy createCore's shape check.
-    const store = new JsonFileStore({ dir: dataDir, name: 'chat-data', defaults: CHAT_DATA_DEFAULTS });
-    const vaultStore = new JsonFileStore({ dir: dataDir, name: 'config' });
-    const cipher = createAesGcmCipher(crypto.randomBytes(32));
-    return { core: createCore({ paths: { dataDir }, store, vaultStore, cipher, prompter: createHeadlessPrompter() }), cipher };
-  }
-  const { buildServicePorts } = require('../ports');
-  const ports = buildServicePorts({ dataDir, chatDataDefaults: CHAT_DATA_DEFAULTS, onPathWritten });
-  return { core: createCore(ports), cipher: ports.cipher };
-}
-
-// MemoryStore.load() writes a fresh default document the first time
-// anything reads from it if the file is missing (src/memory/memory-store.js)
-// — fine for a real import (the file is expected to exist afterwards
-// regardless), but exactly the write a dry run must not cause. Read the
-// file directly instead, without ever constructing a MemoryStore.
-function readOnlyMemoryHas(dataDir) {
-  const memoryFile = path.join(dataDir, 'memory', 'memory-store.json');
-  let ids = new Set();
-  try {
-    const doc = JSON.parse(fs.readFileSync(memoryFile, 'utf8'));
-    if (doc && Array.isArray(doc.entries)) {
-      for (const e of doc.entries) if (e && typeof e.id === 'string') ids.add(e.id);
-    }
-  } catch { /* nothing on disk yet — nothing is present */ }
-  return (id) => ids.has(id);
+// The { uid, gid } the writer child drops to, or null for no drop: only
+// when this process is root on POSIX and the data dir belongs to someone
+// else. A root-owned data dir is written as root (the service account does
+// not control it); Windows has no setuid (the write guard applies instead).
+function writerIdentity(dataDir, {
+  platform = process.platform,
+  getuid = () => (typeof process.getuid === 'function' ? process.getuid() : -1),
+  lstat = fs.lstatSync
+} = {}) {
+  if (platform === 'win32') return null;
+  if (getuid() !== 0) return null;
+  const st = lstat(dataDir);
+  if (st.uid === 0) return null;
+  return { uid: st.uid, gid: st.gid };
 }
 
 function printPlan(io, plan, attention) {
   for (const item of plan.items) {
-    io.stdout.write(`  ${item.action.padEnd(16)} ${item.category} ${item.key}${item.note ? `  (${item.note})` : ''}\n`);
+    io.stdout.write(printable(`  ${String(item.action).padEnd(16)} ${item.category} ${item.key}${item.note ? `  (${item.note})` : ''}`) + '\n');
   }
-  for (const a of attention) io.stdout.write(`  ${'needs-attention'.padEnd(16)} ${a.category} ${a.key}  (${a.note})\n`);
-  io.stdout.write(`${Object.entries(plan.counts).filter(([, n]) => n).map(([a, n]) => `${a}: ${n}`).join(', ')}\n`);
+  for (const a of attention) io.stdout.write(printable(`  ${'needs-attention'.padEnd(16)} ${a.category} ${a.key}  (${a.note})`) + '\n');
+  const counts = plan.counts && typeof plan.counts === 'object' ? plan.counts : {};
+  io.stdout.write(printable(Object.entries(counts).filter(([, n]) => n).map(([a, n]) => `${a}: ${n}`).join(', ')) + '\n');
 }
 
 function printReport(io, report, skipped) {
-  io.stdout.write(`Imported. ${Object.entries(report.counts).filter(([, n]) => n).map(([a, n]) => `${a}: ${n}`).join(', ')}\n`);
-  for (const f of report.failures) io.stdout.write(`  failed ${f.category} ${f.key}: ${f.error}\n`);
-  for (const s of skipped) io.stdout.write(`  not read ${s.category} ${s.key}: ${s.error}\n`);
-  for (const a of report.attention) io.stdout.write(`  needs attention ${a.category} ${a.key}: ${a.note}\n`);
-  for (const note of report.notes) io.stdout.write(`${note}\n`);
+  const arr = (v) => (Array.isArray(v) ? v : []);
+  const counts = report.counts && typeof report.counts === 'object' ? report.counts : {};
+  io.stdout.write(printable(`Imported. ${Object.entries(counts).filter(([, n]) => n).map(([a, n]) => `${a}: ${n}`).join(', ')}`) + '\n');
+  for (const f of arr(report.failures)) io.stdout.write(printable(`  failed ${f.category} ${f.key}: ${f.error}`) + '\n');
+  for (const s of skipped) io.stdout.write(printable(`  not read ${s.category} ${s.key}: ${s.error}`) + '\n');
+  for (const a of arr(report.attention)) io.stdout.write(printable(`  needs attention ${a.category} ${a.key}: ${a.note}`) + '\n');
+  for (const note of arr(report.notes)) io.stdout.write(`${printable(note)}\n`);
+}
+
+// Only plan items this process can vouch for are driven into batches: a
+// case must be one the inventory listed (anything else would have the
+// safe reader open whatever the writer names inside the desktop profile).
+function trustedItems(items, inventory) {
+  const cases = new Set(inventory.cases.map((c) => c.dir));
+  return (Array.isArray(items) ? items : []).filter((item) => item && typeof item.category === 'string' && typeof item.key === 'string'
+    && (item.category !== 'case' || cases.has(item.key)));
 }
 
 async function runImportCommand({ flags = {}, dataDir, io, deps = {} }) {
+  // No fail-open default (I7): a caller that forgets this would import into
+  // a running service's data dir underneath it.
+  if (typeof deps.runningServicePid !== 'function') throw new TypeError('runImportCommand needs deps.runningServicePid');
   const platform = deps.platform || process.platform;
   const isAdmin = deps.isAdmin || (() => defaultIsAdmin({ platform }));
-  const runningServicePid = deps.runningServicePid || (() => null);
-  const openCore = deps.openCore || defaultOpenCore;
+  const identityFor = deps.writerIdentity || ((dir) => writerIdentity(dir, { platform }));
+  const openWriter = deps.openWriter || ((opts) => spawnWriter({ ...opts, spawn: deps.spawn || require('child_process').spawn }));
   if (!flags.from) {
     io.stderr.write(IMPORT_USAGE);
     return 2;
@@ -97,11 +89,27 @@ async function runImportCommand({ flags = {}, dataDir, io, deps = {} }) {
     io.stderr.write(`import writes ${dataDir}; run it as root/an administrator.\n`);
     return 1;
   }
-  if (runningServicePid(dataDir)) {
+  if (deps.runningServicePid(dataDir)) {
     io.stderr.write(`Stop the service before importing into ${dataDir}.\n`);
     return 1;
   }
   const dryRun = Boolean(flags.dryRun);
+  const target = path.resolve(dataDir);
+  // The data dir must already exist (I1): a dry run creates nothing, and a
+  // real run needs its owner to know whom to write as.
+  let dirStat;
+  try {
+    dirStat = fs.lstatSync(target);
+  } catch (err) {
+    io.stderr.write(err.code === 'ENOENT'
+      ? `${target} does not exist. Install the service (or start it once) before importing into it.\n`
+      : `Cannot check ${target}: ${err.message}\n`);
+    return 1;
+  }
+  if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
+    io.stderr.write(`${target} is not a directory (links are refused).\n`);
+    return 1;
+  }
   const from = path.resolve(flags.from);
   let source;
   try {
@@ -110,43 +118,55 @@ async function runImportCommand({ flags = {}, dataDir, io, deps = {} }) {
     io.stderr.write(`Cannot read ${from}: ${err.message}\n`);
     return 1;
   }
-  const written = [];
-  const record = (p) => written.push(p);
+
+  let identity;
   try {
-    const { core, cipher } = openCore(dataDir, record, dryRun);
-    const targets = await buildImportTargets({ context: core.context, dataDir, offline: true });
-    if (dryRun) {
-      // See readOnlyMemoryHas above: never let the real target's .has()
-      // run and create memory-store.json just by being asked a question.
-      targets.memory = { ...targets.memory, has: readOnlyMemoryHas(dataDir) };
-    } else {
-      written.push(...targets.writtenPaths);
+    identity = identityFor(target);
+  } catch (err) {
+    io.stderr.write(`Cannot find the owner of ${target}: ${err.message}\n`);
+    return 1;
+  }
+  let writer;
+  try {
+    writer = openWriter({ dataDir: target, identity, onStderr: (s) => io.stderr.write(s) });
+  } catch (err) {
+    io.stderr.write(`Import failed: ${printable(err.message)}\n`);
+    return 1;
+  }
+  try {
+    const info = (await writer.request('open', { dataDir: target, dryRun, guard: !identity })) || {};
+    if (identity && typeof info.uid === 'number' && info.uid !== identity.uid) {
+      throw new Error(`the import writer runs as uid ${info.uid}, not ${identity.uid}; nothing was imported`);
     }
-    const importer = new DesktopImporter({
-      context: core.context,
-      targets,
-      dataDir,
-      cipher,
-      checkPath,
-      scope: createDesktopScope({ dataDir, context: core.context, onPathWritten: record }),
-      onPathWritten: record
-    });
-    const plan = await importer.plan({ installId: source.installId, inventory: source.inventory, source: 'cli' });
-    printPlan(io, plan, source.attention);
+    const attention = [...source.attention];
+    if (typeof info.casesRoot === 'string' && info.casesRootInDataDir === false && !identity) {
+      attention.push({
+        category: 'case',
+        key: info.casesRoot,
+        note: info.casesRootWritable === false
+          ? 'the cases root is outside the data dir and was not named by KL_CASES_ROOT; an administrator import does not write there, so cases are not copied'
+          : 'the cases root is outside the data dir; files written there are not handed back to the service account, so check it can write them'
+      });
+    }
+    const plan = await writer.request('plan', { installId: source.installId, inventory: source.inventory });
+    printPlan(io, plan, attention);
     if (dryRun) {
       io.stdout.write('Dry run: nothing was written.\n');
       return 0;
     }
     const skipped = [];
-    for (const batch of planBatches(plan.items, source, { skipped })) {
-      await importer.apply({ planId: plan.planId, batch });
+    for (const batch of planBatches(trustedItems(plan.items, source.inventory), source, { skipped })) {
+      await writer.request('apply', { planId: plan.planId, batch });
     }
-    const report = await importer.finish({ planId: plan.planId });
-    printReport(io, report, skipped);
-    return report.failures.length ? 1 : 0;
+    const report = await writer.request('finish', { planId: plan.planId });
+    printReport(io, report || {}, skipped);
+    return (report && Array.isArray(report.failures) && report.failures.length) || skipped.length ? 1 : 0;
+  } catch (err) {
+    io.stderr.write(`Import failed: ${printable(err.message)}\n`);
+    return 1;
   } finally {
-    restoreDataDirOwnership(dataDir, written, io.ownership);
+    await writer.close();
   }
 }
 
-module.exports = { runImportCommand, IMPORT_USAGE };
+module.exports = { runImportCommand, writerIdentity, IMPORT_USAGE };
