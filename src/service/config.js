@@ -22,6 +22,14 @@ const CONFIG_FILE = 'service.json';
 // come from the admin-owned config dir; see below.
 const ADMIN_ONLY_KEYS = ['features', 'ports', 'profile'];
 
+// The one formatter for "this config file carries a key we don't know
+// about." node-config.js's node.yaml check and this file's own service.json
+// check (stage 6 Task 2) both throw through this, so the message can't drift
+// between the two files.
+function unknownKeyError(file, keyPath, knownList) {
+  return new Error(`Invalid ${file}: unknown key "${keyPath}" (known: ${knownList.join(', ')})`);
+}
+
 function validatePorts(ports, file) {
   if (ports === undefined) return {};
   if (!ports || typeof ports !== 'object' || Array.isArray(ports)) {
@@ -168,4 +176,4 @@ function loadServiceConfig(dataDir, overrides = {}, {
   };
 }
 
-module.exports = { loadServiceConfig, assertAdminOwned, PROFILES, DEFAULT_PORTS, DEFAULT_FEATURES, CONFIG_FILE };
+module.exports = { loadServiceConfig, assertAdminOwned, PROFILES, DEFAULT_PORTS, DEFAULT_FEATURES, CONFIG_FILE, unknownKeyError };

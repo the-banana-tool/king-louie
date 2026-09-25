@@ -1244,6 +1244,22 @@ or set `ports` in `<configDir>/service.json`.
 Relatedly, a listener the operator explicitly enabled that **cannot bind is
 now fatal** — the service refuses to start rather than running without it.
 
+### node.yaml rejects unknown keys
+
+`node.yaml` used to ignore any key it did not know. A misspelled
+`always_confirm` or `allowed_roots` therefore fell back silently to the
+defaults, which can be looser than what you wrote. That applies to the copy in
+`<configDir>` and to the one in a stdio MCP instance's config dir. **A node whose `node.yaml` carries a stray or
+misspelled key now refuses to start** (`mcp` exits at startup, and the service
+refuses to start). The error names the key and the keys allowed at that level:
+
+```
+Invalid /etc/king-louie/node.yaml: unknown key "policy.allowed_root" (known: allowed_roots, remote_sessions, max_concurrent_jobs)
+```
+
+`king-louie-service doctor` shows the same message on its
+`node config / runbooks health` row. Fix it by removing or correcting the key.
+
 ### `<dataDir>/gateway-token` exists only while the gateway is up
 
 The cleartext bearer-token file is written after the listener binds and
