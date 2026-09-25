@@ -44,17 +44,30 @@ function nodeIdentity(name) {
 }
 
 // kid + payload → sig for every ES256 envelope in the committed files, plus
-// 'api:' + signing string → signature for the phone API vector.
+// 'api:' + signing string → signature for the phone API vector. Only a
+// signature that actually verifies is cached: a hand-edited or corrupted
+// committed file must never poison the cache with a broken signature that
+// then gets silently reused (and re-verified as broken) on every future run
+// — it must instead be signed fresh.
 function loadSigCache() {
   const cache = new Map();
-  const walk = (v) => {
+  const idToJwk = new Map(Object.values(KEYS.devices).map((d) => [deviceIdFromJwk(d.jwk), d.jwk]));
+  const walk = (v, apiDeviceJwk) => {
     if (!v || typeof v !== 'object') return;
-    if (v.alg === 'ES256' && typeof v.payload === 'string' && typeof v.sig === 'string') cache.set(`${v.kid}:${v.payload}`, v.sig);
-    if (typeof v.signing_string === 'string' && typeof v.signature === 'string') cache.set(`api:${v.signing_string}`, v.signature);
-    for (const child of Object.values(v)) walk(child);
+    if (v.alg === 'ES256' && typeof v.kid === 'string' && typeof v.payload === 'string' && typeof v.sig === 'string') {
+      const jwk = idToJwk.get(v.kid);
+      if (jwk && verifyEs256(v, jwk)) cache.set(`${v.kid}:${v.payload}`, v.sig);
+    }
+    if (apiDeviceJwk && typeof v.signing_string === 'string' && typeof v.signature === 'string') {
+      const probe = { alg: 'ES256', kid: '_', payload: Buffer.from(v.signing_string).toString('base64url'), sig: v.signature };
+      if (verifyEs256(probe, apiDeviceJwk)) cache.set(`api:${v.signing_string}`, v.signature);
+    }
+    for (const child of Object.values(v)) walk(child, apiDeviceJwk);
   };
   for (const f of fs.readdirSync(DIR).filter((n) => n.endsWith('.json') && n !== 'keys.json')) {
-    walk(JSON.parse(fs.readFileSync(path.join(DIR, f), 'utf8')));
+    const doc = JSON.parse(fs.readFileSync(path.join(DIR, f), 'utf8'));
+    const apiJwk = doc && doc.given && doc.given.device && doc.given.device.jwk ? doc.given.device.jwk : null;
+    walk(doc, apiJwk);
   }
   return cache;
 }
@@ -160,6 +173,67 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
     summary: 'Run runbook site.pull_and_restart on web-01'
   };
   phoneVector('request-display', request(web, 'display', runbookAction, { origin: { client: 'stdio-mcp', session: null, job_id: 'job-1' } }), pinnedWeb);
+
+  // A syntactically well-formed, canonical, correctly-signed envelope whose
+  // *message* is not a valid kl.approval.request (missing node_name): the
+  // phone's shape check runs before pinning/signature are even considered,
+  // so this is refused as malformed even though it is signed by a pinned
+  // node — never mistaken for (or leaking information about) a pinning or
+  // signature outcome.
+  const malformedMsg = JSON.parse(fromB64url(req.payload));
+  delete malformedMsg.node_name;
+  phoneVector('request-malformed', seal(malformedMsg, nodeSigner(web)), pinnedWeb);
+
+  // Edge cases in the display rules (§5) that request-display doesn't cover:
+  //  - collapse is counted in Unicode code points, not UTF-16 units: 1001
+  //    astral characters (2002 UTF-16 units, 1001 code points) must NOT
+  //    collapse (the threshold is 2000 code points).
+  //  - a flat key "a.b" and a nested a → b object must not collide: bracket-
+  //    quoting the flat key ("a.b") keeps their paths distinct.
+  //  - a key containing a bidi override and a literal newline is bracket-
+  //    quoted (not just escaped) so it can never be mistaken for path syntax.
+  //  - representative hidden characters from every range in the §5 list:
+  //    U+061C (ALM), U+2028 (line separator), U+2060 (word joiner),
+  //    U+00AD (soft hyphen), U+FE0F (variation selector), U+E0041 (a tag
+  //    character).
+  //  - empty object, empty array and null values.
+  //  - a list (non-command) path, nested two levels deep.
+  //  - UTF-16 code-unit key order: an astral-prefixed key sorts before a
+  //    key starting with U+FFFD under UTF-16 comparison even though its
+  //    code-point value is larger.
+  //  - argv items that are empty or contain whitespace/a quote are quoted so
+  //    the boundary between items is visible.
+  //  - escaping in node_name, name, summary, cwd and origin, all at once.
+  const hiddenChars = `${String.fromCodePoint(0x061c)}${String.fromCodePoint(0x2028)}${String.fromCodePoint(0x2060)}${String.fromCodePoint(0x00ad)}${String.fromCodePoint(0xfe0f)}${String.fromCodePoint(0xe0041)}`;
+  const edgeAction = {
+    kind: 'runbook',
+    name: `edge${String.fromCodePoint(0x061c)}.report`,
+    params: {
+      'a.b': 'flat-collision-value',
+      a: { b: 'nested-value' },
+      [`x${String.fromCodePoint(0x202e)}\ny`]: 'hidden-key-value',
+      hidden_chars: hiddenChars,
+      empty_obj: {},
+      empty_list: [],
+      nil: null,
+      nested: { inner: { deep: 'value' } },
+      list: [1, 'two', true, null],
+      [`${String.fromCodePoint(0x1f600)}a`]: 'astral-key',
+      [`${String.fromCodePoint(0xfffd)}b`]: 'bmp-key',
+      script: '😀'.repeat(1001)
+    },
+    steps: [
+      ['run.sh', '', 'has space', 'has"quote', 'plain'],
+      { check: { message: `ok${String.fromCodePoint(0x200b)}` } }
+    ],
+    cwd: `/srv${String.fromCodePoint(0x00ad)}/site`,
+    summary: `Edge${String.fromCodePoint(0x2060)} case summary`
+  };
+  phoneVector(
+    'request-display-edge',
+    request({ ...web, nodeName: `web${String.fromCodePoint(0x200b)}-01` }, 'edge', edgeAction, { origin: { client: 'stdio-mcp', session: `sess${String.fromCodePoint(0x2028)}ion`, job_id: 'job-2' } }),
+    pinnedWeb
+  );
 
   // ── Responses (node side) ─────────────────────────────────────────────────
   const reqMsg = JSON.parse(fromB64url(req.payload));

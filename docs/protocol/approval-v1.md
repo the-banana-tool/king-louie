@@ -18,7 +18,7 @@ number formatting.
 A signed message travels as an envelope:
 
 ```json
-{ "alg": "Ed25519", "kid": "kl-3v7q2m4k8d1x9c0a", "payload": "<b64url(JCS bytes)>", "sig": "<b64url>" }
+{ "alg": "Ed25519", "kid": "kl-c2ubd6jjqumalzt5", "payload": "<b64url(JCS bytes)>", "sig": "<b64url>" }
 ```
 
 - `alg` is `Ed25519` (nodes) or `ES256` (phones). `kid` is the signer's
@@ -59,6 +59,23 @@ by checking only its common fields. A node or phone that does not yet know a
 type (a future `kl.lease.*` or `kl.question.answer`, for example) must treat it
 as malformed, not silently pass it through.
 
+Field limits on the messages a phone writes (a node enforces every one of
+these; an app that wants a friendlier error than `malformed` should check them
+itself before signing):
+
+- `device.name` is 1–64 **UTF-16 units** (`String.length` in JS terms) — not
+  code points, unlike the code-point caps below. A name entirely of astral
+  characters (surrogate pairs) is capped at 32 of them, not 64.
+- `kl.device.revoke`'s `reason` is at most 200 **code points**.
+- `action.summary` is at most 300 code points; `origin.client`/`origin.session`/
+  `origin.job_id` are at most 200 code points each.
+- Every timestamp must be a real calendar date and time, not merely
+  regex-shaped: a receiver round-trips it through `Date.UTC` and rejects a
+  syntactically valid but nonexistent moment such as `2026-02-30T00:00:00Z`
+  or `2026-01-01T24:00:00Z`.
+- `nonce` is exactly 32 random bytes, base64url without padding (43
+  characters); `code_id` is 16 random bytes the same way (22 characters).
+
 ### 3.1 `kl.approval.request` (node-signed)
 
 ```json
@@ -81,9 +98,11 @@ runbook, the directory its `run` steps execute in, which is not always
 redundant with an explicit `-C`/absolute path inside the argv itself. It is
 part of the hashed action like everything else: two actions that differ only
 in `cwd` hash differently, and a response's `action_hash` only matches the one
-the node is really about to run. `tool` and `envelope` actions never omit
-`cwd` (`null` when there is none) or `summary`; a `runbook` or `tool` action
-missing the `cwd` key at all is malformed, not defaulted.
+the node is really about to run. `cwd` belongs only to `tool` and `runbook`
+actions (string or `null`, never omitted — a `tool` or `runbook` action
+missing the `cwd` key at all is malformed, not defaulted); `envelope` actions
+have no `cwd` field at all, since they name a C3 executor and case, not a
+directory. Every action kind requires `summary`.
 
 `origin` is `{ client, session, job_id }`, plus `deviceId` when `client` is `desktop`.
 The request lives at most 300 seconds (`expires_at − created_at`, 30–300 s).
@@ -128,17 +147,26 @@ A relayed enroll or revoke that a node stages is judged against its own
   revoke, that would let it defer an unresolved enrollment indefinitely
   instead of aging out within the normal 7-day window.
 - A **revoke always wins**: once a node accepts a well-formed, correctly
-  signed revoke, the target device is blocked immediately (an in-memory
-  overlay, applied before anything is durably written) and stays blocked even
-  if the revoked device was not enrolled yet — a matching enroll for that
-  device id is refused for as long as the revoke has not aged out or been
-  resolved by an administrator. A thief who revokes the owner's phone can
-  never use that revoke to also stop the owner's own counter-revoke: revokers
-  are judged against the node's admin-applied set, never the overlay.
-- An approver set a node has not yet verified as admin-owned (or has verified
-  and found wrong) is treated as empty, not as "trust nothing but also stage
-  nothing": staging itself does not require a verified set, only who may sign
-  as an active approver does.
+  signed revoke, the target device is blocked immediately through an
+  in-memory overlay (set before anything is durably written) and stays
+  blocked even if the revoked device was not enrolled yet. If an enroll for
+  that same device id is relayed too — in either order — the enroll itself
+  is still *staged* (staging only checks the signer, not whether the
+  target is currently blocked); it is the administrator's `device apply`
+  step that resolves the conflict and refuses it (`device was revoked`),
+  and the revoke stays staged (not moved aside as resolved) for as long as
+  it has not aged out or been applied. A thief who revokes the owner's
+  phone can never use that revoke to also stop the owner's own
+  counter-revoke: revokers are judged against the node's admin-applied set,
+  never the overlay.
+- An approver set a node has not yet verified as admin-owned (or has
+  verified and found wrong) is treated as empty for every purpose,
+  including staging: every signer check a relayed enroll or revoke needs
+  (`isActive`/admin-applied) reads that empty set, so nothing can be staged
+  at all while the store is untrusted — every attempt is refused
+  `signer_not_active`, the same reason as a signer that legitimately isn't
+  an approver. There is no separate "trust nothing but still accept
+  submissions" state.
 
 ### 3.5 Node control messages (node-signed)
 
@@ -164,7 +192,7 @@ this order; the first failure decides the reason:
 | # | Check | Reason |
 |---|---|---|
 | 1 | Signature verifies against the node's pinned key | `bad_signature` |
-| 2 | Envelope opens, shape matches `kl.audit.slice` | `malformed` |
+| 2 | Envelope opens, shape matches `kl.audit.slice` | `malformed`, `unsupported_version` |
 | 3 | `kid` equals `node_id` inside the payload | `malformed` |
 | 4 | Every entry's own `node_id` equals the slice's `node_id` | `foreign_entry` |
 | 5 | Every entry's `hash` matches SHA-256(JCS(entry without `hash`)) | `hash_mismatch` |
@@ -191,7 +219,7 @@ In this order; the first failure decides the reason (vectors `response-*`).
 | 6 | Signature | `bad_signature` |
 | 7 | `node_id` is this node | `wrong_node` |
 | 8 | Nonce not already used: same bytes → `replay`, other bytes → `already_decided` | `replay`, `already_decided` |
-| 9 | Request pending | `unknown_request` |
+| 9 | Request pending, and nobody else is already deciding it | `unknown_request`, `already_decided` |
 | 10 | `nonce`, `action_hash`, `expires_at` match the request | `nonce_mismatch`, `action_hash_mismatch`, `expires_mismatch` |
 | 11 | Node clock ≤ `expires_at` | `expired` |
 | 12 | The action rebuilt from live state hashes to `action_hash` | `action_changed` |
@@ -201,15 +229,35 @@ Ahead of all of this: a node that is shutting down refuses every response at
 once with reason `stopped`, without opening the envelope at all — there is
 nothing left to bind a decision to.
 
+`already_decided` at step 9 is a different mechanism from step 8's: step 8
+compares this response's nonce against ones already recorded as decided
+(a prior response, possibly minutes ago); step 9's is a live race — a second
+response for the same request arriving while a first one is still inside its
+step-13 audit await for that same request. Both are refused the same way for
+the same underlying reason (this request already has an answer, or is in the
+middle of getting one), just caught at different points.
+
 Steps 11 and 12 run a second time after step 13's audit append, before the
 decision is actually committed: appending to the audit ledger is an await, and
 in that window the live action a runbook or tool would execute can change, or
 the deadline can pass, even though the checks immediately before step 13
 proved the request was still good *at that moment*. Only the hash and clock
 read *after* the audit write is durable are trusted to describe what will
-really run. If either check fails on the second pass, the node reports
-`action_changed` or `expired` exactly as it would have on the first pass, and
-the request ends (denied) rather than staying pending.
+really run. The two second-pass failures end differently, matching what a
+first-pass failure at the same check would have done: a mismatched action
+(step 12 again) ends the request **denied**, with status `refused` and
+reason `action_changed`; an expired deadline (step 11 again) ends the request
+as **expired** (status `expired`), not denied — the phone did not answer too
+late in a way that should ever read as a "no", it simply ran out of time.
+
+A first-pass `action_changed` (step 12, before the audit) also *consumes*
+the response's nonce before ending the request: the nonce is recorded as
+decided on the spot, so the same phone resubmitting the identical envelope
+gets `replay`, and a different envelope reusing that nonce gets
+`already_decided` — either way, there is no way to "retry" a response that
+was refused for not matching the live action. Every other pre-audit rejection
+(steps 1–11) leaves the nonce unconsumed, since none of them commit to having
+seen a decision for this request.
 
 Separately, the same await can let the request finish for an unrelated reason
 while the audit write is in flight — it is withdrawn (the caller aborted),
@@ -225,6 +273,12 @@ than a generic failure.
 
 ## 5. What the phone checks and shows
 
+- **Shape first.** The same shape check a node runs (`validateMessage` against
+  `kl.approval.request`) runs before anything about pinning or signatures is
+  even considered: a malformed envelope or message is refused (`malformed`,
+  vector `request-malformed`), even one that happens to be signed by a node
+  the phone has pinned. Only a message that is already shape-valid is checked
+  further.
 - A request is shown only if its `node_id` is pinned (from a pairing or invite
   QR code, never from the relay's node list) and `kid === node_id`
   (`unpinned_node` otherwise), and its signature verifies against the pinned
@@ -232,21 +286,60 @@ than a generic failure.
   pair again".
 - Time left counts from receipt: the relay sends `expires_in_ms`; the phone
   counts it down on a monotonic clock and refuses to sign at zero.
-- The approval screen (vector `request-display`) shows:
-  - `node.name` and `node.id`, `kind`, `name`, `summary`, `cwd`, `origin`;
-  - `items`: every parameter, flattened in JCS key order with paths such as
+- The approval screen (vectors `request-display`, `request-display-edge`)
+  shows:
+  - `node.name` and `node.id`, `kind`, `name`, `summary`, `cwd`, `origin` — all
+    escaped as below.
+  - `items`: every parameter, flattened in JCS key order (`Object.keys(...)
+    .sort()`, comparing UTF-16 code units — the same order JCS itself uses,
+    under which an astral-prefixed key can sort before a key starting with
+    U+FFFD even though its code-point value is larger) with paths such as
     `params.a.b` and `params.list[0]`, then every runbook step as `steps[i]`.
     Strings are shown in full; numbers, booleans and null as their JSON text
     (the payload is canonical, so this is the text received); empty objects and
     arrays as `{}` and `[]`.
+  - **Path segments are escaped and, when ambiguous, bracket-quoted.** Each
+    key is run through the same hidden-character escaping as any other
+    displayed text. A key that would otherwise look like path syntax — one
+    containing `.`, `[`, `]`, `"`, or any hidden character — is instead shown
+    bracket-quoted, `["<escaped key>"]` (with `\` and `"` inside it
+    backslash-escaped), rather than appended after a dot. This keeps two
+    different structures from ever producing the same path text: an object
+    key literally named `"a.b"` displays as `params["a.b"]`, never colliding
+    with a nested `{ a: { b: … } }`'s `params.a.b`; a key containing a bidi
+    override and a newline displays as `params["x‹U+202E›‹U+000A›y"]`, never
+    as raw, potentially path-reordering text sitting after a plain dot. An
+    array index (`[0]`) is never quoted — only an object-key segment can be.
   - Command-like values (a key named `command`, `script` or `argv` anywhere on
-    the path, and every `run` step, whose argv is joined with single spaces)
-    longer than 2000 code points are collapsed to the first 1200 and the last
-    400 code points, with the count hidden between them ("N characters hidden —
-    Show all"). `check` steps are shown as their JCS text.
-  - In every displayed string, code points U+0000–U+001F, U+007F–U+009F,
-    U+200B–U+200F, U+202A–U+202E, U+2066–U+2069 and U+FEFF are replaced by
-    `‹U+XXXX›` (uppercase hex, at least four digits).
+    the path, and every `run` step) are joined into one string for display.
+    Joining quotes any item that is empty or contains whitespace or a `"`
+    (with `"` inside it backslash-escaped), so item boundaries stay visible
+    even when they wouldn't be with a plain space join — `["run.sh", "",
+    "has space"]` displays as `run.sh "" "has space"`, not
+    `run.sh  has space` (indistinguishable from three plain words).
+  - A command-like string longer than 2000 **Unicode code points** — not
+    UTF-16 units, so a value made entirely of astral characters (surrogate
+    pairs) can be twice as many UTF-16 units as this limit without
+    collapsing — is collapsed to its first 1200 and last 400 code points,
+    with the count of hidden code points between them ("N characters hidden —
+    Show all"). `check` steps are never collapsed; they are shown as their
+    JCS text.
+  - In every displayed string (`node.name`, `name`, `summary`, `cwd`, every
+    `origin` value, every item's `text`/`tail`, and every escaped path
+    segment), a code point in any of these EXACT ranges — not a live
+    Unicode-property lookup, which would drift across platform Unicode
+    versions — is replaced by `‹U+XXXX›` (uppercase hex, at least four
+    digits):
+    - **Cc** (control): U+0000–U+001F, U+007F, U+0080–U+009F
+    - **Zl/Zp** (line/paragraph separator): U+2028, U+2029
+    - **Bidi_Control**: U+061C, U+200E–U+200F, U+202A–U+202E, U+2066–U+2069
+    - **Default_Ignorable_Code_Point** (Unicode 15.1): U+00AD, U+034F,
+      U+115F–U+1160, U+17B4–U+17B5, U+180B–U+180F, U+200B–U+200F,
+      U+2060–U+206F, U+3164, U+FE00–U+FE0F, U+FEFF, U+FFA0, U+FFF0–U+FFF8,
+      U+1BCA0–U+1BCA3, U+1D173–U+1D17A, U+E0000–U+E0FFF
+    (vector `request-display-edge` exercises one representative from each
+    range: U+061C, U+2028, U+2060, U+00AD, U+FE0F, and the tag character
+    U+E0041.)
 - Each item in the vector is `{ path, text, tail, hidden }`: `tail` is null and
   `hidden` 0 unless the value was collapsed.
 - The `action_changed` and `expired` reasons above are not just node-internal:
@@ -322,7 +415,11 @@ the app long-polls `GET /v1/approvals?wait=25` while in the foreground.
 `keys.json` holds the fixed test keys (Ed25519 seeds for nodes, P-256 `d` for
 devices A, B, C); nodes refuse these device keys unless built with
 `allowTestKeys`. `generate.js` rebuilds every file; `phone-reference.js` is the
-phone rules above in JavaScript.
+phone rules above in JavaScript. The set of vectors is not fixed at any
+particular count — a change to this document is not complete until
+`generate.js` and the vectors are regenerated and every consumer (the node,
+and Part 4's iOS and Android protocol cores, which read every file in this
+directory) passes again.
 
 | Vectors | Consumers | Run as |
 |---|---|---|
@@ -334,3 +431,16 @@ phone rules above in JavaScript.
 | `enroll-signed*`, `revoke-*` | node | stage each `input[i]`; `expect.results`, `expect.active` |
 | `audit-slice` | all | signature, shape and chain of a history slice |
 | `phone-api-auth` | all | `S` and body hash equal `expect`; the signature verifies |
+
+**`keys.json`'s keys are not secret — never pin, embed or ship them.** Every
+private half in that file (the Ed25519 seeds under `nodes`, the P-256 `d`
+values under `devices`) is published in this repository's history, readable
+by anyone who clones it. They exist only so a test can sign real, verifiable
+envelopes without a genuine phone or a provisioned node identity. A node
+never accepts platform `demo` as an active approver (`demo_device`,
+unconditionally — see §3.4), and refuses a device whose public key matches
+one of these published test keys (`test_key`) unless it was explicitly built
+with `allowTestKeys: true` — production code never sets that flag. An app or
+node build that pins one of these keys, or ships `keys.json` itself outside
+`tests/`, has zero security from that key: anyone can produce a valid
+signature for it, today or after this document changes.

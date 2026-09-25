@@ -14,14 +14,22 @@ const { phoneAuthString } = require('../src/approvals/messages');
 const { verifyConsoleEnrollment } = require('../src/approvals/verify-device');
 const { PhoneApprover } = require('../src/approvals/phone-approver');
 const { verifyAuditSlice } = require('../src/audit/audit-ledger');
+const { setLogLevel } = require('../src/logging');
 const { testNodeIdentity, createFakePhone, KEYS } = require('./helpers/fake-phone');
 const { approverStoreWith } = require('./helpers/approver-set');
 const { buildVectors, serialize } = require('./vectors/approval-v1/generate');
 const { phoneView } = require('./vectors/approval-v1/phone-reference');
 
+// These vectors deliberately construct known-bad approver files (test-key,
+// demo-device) and a store that refuses to trust its own directory; the
+// resulting `log.error('ignoring approver file ...')` lines are expected
+// noise, not a signal, so this file's own run is silenced.
+setLogLevel('fatal');
+
 const DIR = path.join(__dirname, 'vectors', 'approval-v1');
 const EXPECTED = [
   'jcs', 'device-id-p256', 'device-id-ed25519', 'request-valid', 'request-bad-node-signature', 'request-unpinned-node', 'request-display',
+  'request-malformed', 'request-display-edge',
   'response-approve', 'response-deny',
   ...['malformed-noncanonical', 'unsupported-version', 'wrong-alg', 'kid-mismatch', 'unknown-device', 'demo-device', 'test-key', 'revoked-device',
     'revoked-via-overlay', 'bad-signature', 'wrong-node', 'replay', 'already-decided', 'unknown-request', 'nonce-mismatch', 'action-hash-mismatch',
