@@ -399,22 +399,24 @@ describe('Windows ACL script', () => {
     assert.ok(t.includes("[string] $Base = 'C:\\KingLouie'"));
   });
 
-  it('calls icacls only by its full path, refuses to run unelevated, and resolves the runner to a SID', () => {
+  it('calls icacls and takeown only by their full path, refuses to run unelevated, and resolves the runner to a SID', () => {
     const t = text();
     assert.ok(t.includes('$icacls = "$env:SystemRoot\\System32\\icacls.exe"'));
+    assert.ok(t.includes('$takeown = "$env:SystemRoot\\System32\\takeown.exe"'));
     const invoked = [...t.matchAll(/^\s*&\s+(\S+)/gm)].map((m) => m[1]);
-    assert.deepEqual([...new Set(invoked)], ['$icacls']);
-    assert.ok(!/^\s*icacls/im.test(t), 'a bare icacls call');
+    assert.deepEqual([...new Set(invoked)].sort(), ['$icacls', '$takeown']);
+    assert.ok(!/^\s*icacls\b/im.test(t), 'a bare icacls call');
+    assert.ok(!/^\s*takeown\b/im.test(t), 'a bare takeown call');
     assert.match(t, /WindowsBuiltInRole\]::Administrator/);
     assert.match(t, /NTAccount\(\$Runner\)\)\.Translate\(\[Security\.Principal\.SecurityIdentifier\]\)/);
   });
 
-  it('cuts inheritance on the base, tools, train and configs folders', () => {
+  it('validates -Base: rooted with a separator (rejects a bare drive), not a drive root, outside $env:SystemRoot, and either empty or an existing King Louie install', () => {
     const t = text();
-    for (const target of ['"$Base"', '"$Base\\tools"', "'D:\\train'", "'D:\\train\\configs'"]) {
-      assert.ok(t.includes(`Set-KlAcl -Path ${target} -CutInheritance`), `${target} keeps its inherited ACEs`);
-    }
-    assert.ok(t.includes("'/inheritance:r'"));
+    assert.match(t, /\$Base -notmatch '\^\[A-Za-z\]:\[\\\\\/\]'/);
+    assert.match(t, /drive root/);
+    assert.match(t, /\$env:SystemRoot/);
+    assert.match(t, /app\\package\.json/);
   });
 
   it('lets LOCAL SERVICE read the app folder', () => {
@@ -432,58 +434,117 @@ describe('Windows ACL script', () => {
     assert.equal(/["'][A-Za-z][^"'$\r\n]*:\((?:OI|CI)\)/.test(t), false, 'a grant names an account literally');
   });
 
-  it('resets ownership and clears explicit child ACEs on every admin-owned path before granting', () => {
-    const t = text();
-    assert.match(t, /\[switch\]\s*\$ResetOwnership/);
-    assert.ok(t.includes("'/setowner'"));
-    assert.ok(t.includes("'/reset'"));
-    const resetCalls = [...t.matchAll(/Set-KlAcl -Path (\S+) -CutInheritance -ResetOwnership/g)].map((m) => m[1]);
-    assert.deepEqual(resetCalls.sort(), ['"$Base"', '"$Base\\tools"', "'D:\\train'", "'D:\\train\\configs'"].sort());
-    for (const target of ['"$Base\\mcp\\data"', "'D:\\train\\runs'", "'D:\\models'", "'C:\\build\\site'"]) {
-      assert.ok(!t.includes(`-Path ${target} -CutInheritance -ResetOwnership`) && !t.includes(`-Path ${target} -ResetOwnership`), `${target} should not reset ownership`);
-    }
+  describe('reclaiming an admin-owned tree', () => {
+    it('takes ownership of the top folder alone, verifies it by SID, then replaces its DACL wholesale', () => {
+      const t = text();
+      assert.match(t, /function Confirm-KlOwnerIsAdmins/);
+      assert.match(t, /\(Get-Acl -LiteralPath \$Path\)\.Owner/);
+      assert.match(t, /\[Security\.Principal\.NTAccount\]\s*\$ownerAccount\)\.Translate\(\[Security\.Principal\.SecurityIdentifier\]\)/);
+      assert.match(t, /\$ownerSid -ne 'S-1-5-32-544'/);
+      assert.ok(t.includes("& $icacls $Path '/setowner' $Admins"), 'the top-folder setowner call must not use /T (that is step 3, on takeown)');
+      assert.match(t, /SetAccessRuleProtection\(\$true, \$false\)/);
+      assert.match(t, /RemoveAccessRule\(\$rule\)/);
+      assert.match(t, /AddAccessRule\(\$rule\)/);
+      assert.match(t, /Set-Acl -LiteralPath \$Path -AclObject \$acl/);
+      // order: setowner call, then the owner check, then the DACL replace
+      const setownerIdx = t.indexOf("& $icacls $Path '/setowner' $Admins");
+      const verifyIdx = t.indexOf('Confirm-KlOwnerIsAdmins -Path $Path');
+      const daclIdx = t.indexOf('$acl.SetAccessRuleProtection');
+      assert.ok(setownerIdx > -1 && setownerIdx < verifyIdx && verifyIdx < daclIdx, 'setowner, verify and DACL-replace are not in order');
+    });
+
+    it('takes ownership below the top folder with takeown, then resets with icacls /reset /T, neither swallowed by /C', () => {
+      const t = text();
+      assert.ok(t.includes("& $takeown '/F' $Path '/A' '/R' '/D' 'Y'"));
+      assert.ok(t.includes('& $icacls "$Path\\*" \'/reset\' \'/T\''));
+      assert.ok(!t.includes("'/reset' '/T' '/C'"), 'the recursive reset must not use /C: /C makes icacls exit 0 on failure (reproduced: without /C it exits 1307)');
+      assert.ok(!t.includes("'/setowner' $Admins '/T' '/C'"), 'a recursive /T /C setowner is exactly the exit-code bug this rewrite fixes');
+      const takeownIdx = t.indexOf("& $takeown '/F' $Path '/A' '/R' '/D' 'Y'");
+      const resetIdx = t.indexOf('& $icacls "$Path\\*" \'/reset\' \'/T\'');
+      assert.ok(takeownIdx > -1 && takeownIdx < resetIdx, 'takeown must run before the recursive reset');
+    });
+
+    it('re-applies the data subfolders\' runner-Modify grants after the wipe, then verifies the whole tree by hand', () => {
+      const t = text();
+      assert.match(t, /function Confirm-KlTreeLockedDown/);
+      assert.match(t, /Confirm-KlTreeLockedDown -Path \$Path -WritableExceptions @\(\$DataGrants\.Keys\)/);
+      assert.match(t, /Set-KlAcl -Path \$dataPath -Grants @\(\$DataGrants\[\$dataPath\]\)/);
+      // the data-grant loop must run before the final verification
+      const grantIdx = t.indexOf('Set-KlAcl -Path $dataPath -Grants');
+      const verifyTreeIdx = t.indexOf('Confirm-KlTreeLockedDown -Path $Path');
+      assert.ok(grantIdx > -1 && grantIdx < verifyTreeIdx, 'data subfolders must be re-granted before the tree-wide verification');
+    });
+
+    it("verification requires every item to be owned by Administrators and forbids write access for anyone but SYSTEM, Administrators, or an exempted data subfolder's runner/LOCAL SERVICE entry", () => {
+      const t = text();
+      assert.match(t, /Get-ChildItem -LiteralPath \$Path -Recurse -Force/);
+      assert.match(t, /\[Security\.AccessControl\.FileSystemRights\]/);
+      assert.match(t, /\$ruleSid -eq \$sid -or \$ruleSid -eq 'S-1-5-19'/);
+      assert.match(t, /throw ".*is not owned by Administrators/);
+      assert.match(t, /throw ".*grants write access to/);
+    });
+
+    it('applies the five-step reclaim to $Base, $Base\\tools, D:\\train and D:\\train\\configs only', () => {
+      const t = text();
+      const targets = [...t.matchAll(/Set-KlAdminOwnedTree -Path (\S+)/g)].map((m) => m[1]);
+      assert.deepEqual(targets.sort(), ['"$Base"', '"$Base\\tools"', "'D:\\train'", "'D:\\train\\configs'"].sort());
+      for (const target of ['"$Base\\mcp\\data"', "'D:\\train\\runs'", "'D:\\models'", "'C:\\build\\site'"]) {
+        assert.ok(!t.includes(`Set-KlAdminOwnedTree -Path ${target}`), `${target} must not go through the admin-owned-tree reclaim`);
+      }
+    });
+
+    it("passes the runner's mcp\\data and train\\runs grants in as DataGrants, and nothing for tools or configs", () => {
+      const t = text();
+      assert.ok(t.includes('"$Base\\mcp\\data" = "${RunnerSid}:(OI)(CI)M"'));
+      assert.ok(t.includes("'D:\\train\\runs' = \"${RunnerSid}:(OI)(CI)M\""));
+      assert.ok(t.includes('Set-KlAdminOwnedTree -Path "$Base\\tools" -TopRules $AdminOwnedTopRules -DataGrants @{}'));
+      assert.ok(t.includes("Set-KlAdminOwnedTree -Path 'D:\\train\\configs' -TopRules $AdminOwnedTopRules -DataGrants @{}"));
+    });
+
+    it('prints every step of the reclaim under -WhatIf instead of one blanket message', () => {
+      const t = text();
+      const fn = t.slice(t.indexOf('function Set-KlAdminOwnedTree'), t.indexOf('$AdminFull ='));
+      const shouldProcessCalls = [...fn.matchAll(/\$PSCmdlet\.ShouldProcess\(/g)];
+      assert.ok(shouldProcessCalls.length >= 4, `expected at least 4 ShouldProcess calls in Set-KlAdminOwnedTree, found ${shouldProcessCalls.length}`);
+    });
   });
 
-  it('verifies the owner after /setowner instead of trusting its exit code', () => {
-    const t = text();
-    assert.match(t, /\(Get-Acl -LiteralPath \$Path\)\.Owner/);
-    assert.match(t, /\[Security\.Principal\.NTAccount\]\s*\$ownerAccount\)\.Translate\(\[Security\.Principal\.SecurityIdentifier\]\)/);
-    assert.match(t, /\$ownerSid -ne 'S-1-5-32-544'/);
-    // the verification must run between the /setowner and /reset calls
-    const setownerIdx = t.indexOf("'/setowner'");
-    const verifyIdx = t.indexOf('Get-Acl -LiteralPath $Path');
-    const resetIdx = t.indexOf("'/reset'");
-    assert.ok(setownerIdx < verifyIdx && verifyIdx < resetIdx, 'owner verification is not between /setowner and /reset');
-  });
-
-  it('cuts inheritance on the two runner-writable data paths without resetting ownership', () => {
+  it('cuts inheritance on the two runner-writable data paths that are not swept by any admin-owned-tree reclaim', () => {
     const t = text();
     for (const target of ["'C:\\build\\site'", "'D:\\models'"]) {
       assert.ok(t.includes(`Set-KlAcl -Path ${target} -CutInheritance -Grants`), `${target} keeps its inherited ACEs`);
-      assert.ok(!t.includes(`-Path ${target} -CutInheritance -ResetOwnership`), `${target} should not reset ownership`);
     }
   });
 
-  it("refuses a gpu-box Python venv whose interpreter is not installed for all users", () => {
+  it('refuses a gpu-box Python venv whose interpreter is not installed for all users, comparing full paths against ProgramW6432 when set', () => {
     const t = text();
     assert.match(t, /tools\\py\\pyvenv\.cfg/);
+    assert.match(t, /\[IO\.Path\]::GetFullPath\(\$Matches\[1\]\)/);
+    assert.match(t, /\$env:ProgramW6432/);
     assert.match(t, /\$env:ProgramFiles/);
     assert.match(t, /for all users/);
   });
 
-  it('validates -Base is rooted, not a drive root, and outside $env:SystemRoot', () => {
-    const t = text();
-    assert.match(t, /IsPathRooted\(\$Base\)/);
-    assert.match(t, /drive root/);
-    assert.match(t, /\$env:SystemRoot/);
+  it('refuses a gpu-box Python venv with include-system-site-packages = true', () => {
+    assert.match(text(), /include-system-site-packages\s*=\s*true/);
   });
 
-  it("documents that changing -Runner leaves the old runner's entries behind", () => {
-    assert.match(text(), /old runner/i);
+  it("documents that changing -Runner leaves the old runner's entries behind, in icacls's *SID form", () => {
+    const t = text();
+    assert.match(t, /old runner/i);
+    assert.match(t, /\*<old runner's SID>/);
   });
 
   it('includes the underlying exception message when -Runner cannot be resolved', () => {
     assert.match(text(), /catch \{[^}]*\$_\.Exception\.Message[^}]*\}/s);
+  });
+
+  it('is ASCII only', () => {
+    const t = text();
+    for (let i = 0; i < t.length; i++) {
+      const code = t.codePointAt(i);
+      assert.ok(code <= 127, `non-ASCII character (U+${code.toString(16)}) at offset ${i}`);
+    }
   });
 
   it('parses without errors in Windows PowerShell', { skip: POSIX ? 'Windows PowerShell only' : false }, () => {
