@@ -43,8 +43,13 @@ exact action, and phones show only what a pinned node signed.
 Push is optional. When configured, a push carries only a kind and a request id
 (and the node's name in the alert text, such as "Approval needed on web-01");
 the app fetches the request from the relay and verifies it before showing it.
-Apple (APNs) or Google (FCM) deliver the push and see that it was sent. Without
-push, the app checks the relay only while it is open.
+
+- Apple (APNs) sees the request kind and node name in the alert it delivers.
+- Google (FCM) sees only the data fields, and the app builds the visible text
+  on the phone.
+- Neither sees the command, arguments or approval content.
+
+Without push, the app checks the relay only while it is open.
 
 ## Demo mode
 

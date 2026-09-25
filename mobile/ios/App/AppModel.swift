@@ -5,8 +5,8 @@ import SwiftUI
 import UIKit
 
 /// What the app keeps (mobile/PRIVACY.md): the relay pin, node pins, its key
-/// reference (in the Keychain), the push token and cached history. Nothing
-/// else, and no analytics.
+/// reference (in the Keychain) and the push token. Nothing else, and no
+/// analytics. History is held in memory only (see AppModel.history).
 struct StoredState: Codable {
     var mode: AppMode = .welcome
     var relayURL: String?
