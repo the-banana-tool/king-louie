@@ -337,14 +337,19 @@ describe("createCore remoteApprovals: 'phone'", () => {
       });
       core.saveProviderToken(FAKE_PROVIDER, 'fake-token-123456');
       await core.start();
-      const gateway = core.context.getGatewayServer();
-      const session = core.context.getSessionManager().getOrCreateSession('ttlms-once-session', 'main', { channel: 'test', peer: 'p', label: 'test' });
-      for (const runId of ['run-a', 'run-b']) {
-        const response = new Promise((resolve) => gateway.once('agent:response', resolve));
-        gateway.emit('agent:message', { agentId: 'main', sessionKey: session.key, message: { runId, message: 'please run the probe' } });
-        await response;
+      try {
+        const gateway = core.context.getGatewayServer();
+        const session = core.context.getSessionManager().getOrCreateSession('ttlms-once-session', 'main', { channel: 'test', peer: 'p', label: 'test' });
+        for (const runId of ['run-a', 'run-b']) {
+          const response = new Promise((resolve) => gateway.once('agent:response', resolve));
+          gateway.emit('agent:message', { agentId: 'main', sessionKey: session.key, message: { runId, message: 'please run the probe' } });
+          await response;
+        }
+      } finally {
+        // A started core (gateway/webhook servers, timers) must not leak
+        // into later tests even if an assertion above throws first.
+        await core.shutdown();
       }
-      await core.shutdown();
       assert.equal(warnings.length, 2, warnings.join('\n'));
     } finally {
       unsubscribe();

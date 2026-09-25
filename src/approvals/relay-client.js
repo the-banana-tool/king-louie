@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const { createLogger } = require('../logging');
 const { MeshTransport } = require('../mesh/mesh-transport');
+const { derivePeerId } = require('../mesh/mesh-identity');
 const { createLinkRpc, LinkRpcError } = require('./link-rpc');
 const { writeFileAtomic } = require('./approver-store');
 
@@ -29,9 +30,17 @@ function isReservedMethod(name) {
 function readFrontDoor(configDir) {
   if (!configDir) return null;
   const file = path.join(configDir, 'front-door.json');
+  let text;
   try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    if (err.code !== 'ENOENT') log.warn(`could not read ${file}: ${err.message}`);
+    return null;
+  }
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    log.warn(`${file} exists but is not valid JSON: ${err.message}`);
     return null;
   }
 }
@@ -53,67 +62,116 @@ class RelayClient extends EventEmitter {
     this.now = now;
     this.connected = false;
     this.relayInfo = null;
-    this.relayPeerId = relayPin ? relayPin.peerId : null;
+    // Spec §3.11's pair record has no peerId; recompute it from the pinned
+    // publicKey the same way the mesh itself assigns one (Task 22 carries
+    // storing peerId going forward, but old/minimal pins must keep working).
+    this.relayPeerId = relayPin ? (relayPin.peerId || derivePeerId(relayPin.publicKey)) : null;
     this.handler = null;
     this.methods = new Map();
+    this.started = false;
     this.stopped = false;
+    // Escalating-backoff state. dialAttempt resets to 0 only after a
+    // successful hello; mismatched is sticky (a relay_id mismatch means a
+    // relay bug or a corrupt pin, not a transient outage) until one
+    // succeeds, and always redials at the longest delay, logging an error
+    // every time — re-pairing can fix it at any moment, so this must never
+    // stop trying, but it also must never look like ordinary reconnect noise.
+    this.dialAttempt = 0;
+    this.mismatched = false;
+    this.dialing = false;
+    this.pendingFailureReason = null;
     this.retryTimer = null;
     this.transport = null;
     this.rpc = null;
   }
 
   async start() {
+    if (this.started) return; // idempotent: a second start() is a no-op
     if (!this.pin) throw new Error('RelayClient needs a relay pin (run `king-louie-service pair wss://…` first)');
+    this.started = true;
     this.stopped = false;
     this.transport = this.transportFactory({ identity: this.identity, listen: false, useTls: this.useTls, port: 0 });
     this.rpc = createLinkRpc(this.transport, { defaultTimeoutMs: this.callTimeoutMs });
+    const refuseUnlessLinked = (peerId) => {
+      if (!this.connected || peerId !== this.relayPeerId) {
+        throw new LinkRpcError('not_linked', 'the relay link is not established');
+      }
+    };
     for (const method of NODE_INBOUND) {
-      this.rpc.handle(method, (params) => {
+      this.rpc.handle(method, (params, { peerId }) => {
+        refuseUnlessLinked(peerId);
         if (!this.handler) throw new LinkRpcError('not_ready', 'the node is not ready for relay messages');
         return this.handler(method, params);
       });
     }
     this.rpc.onUnhandled((method, params, { peerId }) => {
+      refuseUnlessLinked(peerId);
       const handler = this.methods.get(method);
       if (!handler) throw new LinkRpcError('unknown_method', `no handler for ${method}`);
       return handler(params, { peer: peerId });
     });
     this.transport.on('peerConnected', (peer) => {
       if (peer.peerId !== this.relayPeerId) return;
-      this._onConnected().catch((err) => log.warn(`relay hello failed: ${err.message}`));
+      this._onConnected().catch((err) => log.warn(`relay hello handling failed unexpectedly: ${err.message}`));
     });
     this.transport.on('peerDisconnected', ({ peerId }) => {
-      if (peerId === this.relayPeerId) this._onDisconnected();
+      if (peerId !== this.relayPeerId) return;
+      // A fresh dial already in flight, or a peer the transport still shows
+      // as connected (a newer connection has already replaced this one):
+      // this is a stale echo of an earlier disconnect, not a new one.
+      if (this.dialing) return;
+      if (this.transport.getPeer(peerId)) return;
+      this._onDisconnected();
     });
     // No address on the trusted peer: this client, not the transport, decides
     // when to dial again.
-    this.transport.addTrustedPeer(this.pin.peerId, this.pin.publicKey, { displayName: 'relay', tlsFingerprint: this.pin.tlsFingerprint || null });
+    this.transport.addTrustedPeer(this.relayPeerId, this.pin.publicKey, { displayName: 'relay', tlsFingerprint: this.pin.tlsFingerprint || null });
     await this.transport.start();
     this._writeLink();
-    this._dial(0);
+    this._dial();
   }
 
-  _dial(attempt) {
-    if (this.stopped || this.connected) return;
+  // Single-flight: at most one dial attempt in progress at a time.
+  _dial() {
+    if (this.stopped || this.connected || this.dialing) return;
+    this.dialing = true;
     const frontDoor = readFrontDoor(this.configDir);
-    const attemptConnect = frontDoor && typeof this.transport.connectPinned === 'function'
-      ? this.transport.connectPinned(frontDoor)
-      : this.transport.connectToPeer(this.pin.address, this.pin.port);
-    Promise.resolve(attemptConnect).catch((err) => {
-      if (this.stopped) return;
-      const delay = this.reconnectDelays[Math.min(attempt, this.reconnectDelays.length - 1)];
-      log.info(`relay not reachable (${err.message}); retrying in ${delay} ms`);
-      this.retryTimer = setTimeout(() => this._dial(attempt + 1), delay);
-      if (typeof this.retryTimer.unref === 'function') this.retryTimer.unref();
-    });
+    let attemptConnect;
+    try {
+      attemptConnect = frontDoor && typeof this.transport.connectPinned === 'function'
+        ? this.transport.connectPinned(frontDoor)
+        : this.transport.connectToPeer(this.pin.address, this.pin.port);
+    } catch (err) {
+      // connectPinned may throw synchronously instead of rejecting.
+      attemptConnect = Promise.reject(err);
+    }
+    Promise.resolve(attemptConnect).then(
+      () => { this.dialing = false; },
+      (err) => {
+        this.dialing = false;
+        if (this.stopped) return;
+        log.info(`relay not reachable (${err.message})`);
+        this._handleLinkDown('connect_failed');
+      }
+    );
   }
 
   async _onConnected() {
-    const hello = await this.rpc.call(this.relayPeerId, 'relay.hello', { node_id: this.identity.nodeId, node_name: this.nodeName, versions: [1] });
-    if (!hello || hello.relay_id !== this.pin.relay_id) {
-      log.error(`relay answered as ${hello && hello.relay_id}, but this node paired with ${this.pin.relay_id}; not using the link`);
+    let hello;
+    try {
+      hello = await this.rpc.call(this.relayPeerId, 'relay.hello', { node_id: this.identity.nodeId, node_name: this.nodeName, versions: [1] });
+    } catch (err) {
+      log.warn(`relay hello failed: ${err.message}`);
+      this._failLink('hello_failed');
       return;
     }
+    if (!hello || hello.relay_id !== this.pin.relay_id) {
+      log.error(`relay answered as ${hello && hello.relay_id}, but this node paired with ${this.pin.relay_id}; not using the link`);
+      this._failLink('mismatch');
+      return;
+    }
+    this.dialAttempt = 0;
+    this.mismatched = false;
     this.connected = true;
     this.relayInfo = hello;
     this.since = new Date(this.now()).toISOString();
@@ -122,15 +180,38 @@ class RelayClient extends EventEmitter {
     this.emit('connected');
   }
 
+  // Drops the (transport-level connected, but not usable) peer and lets the
+  // 'peerDisconnected' that produces drive the actual redial — one path, so
+  // there is exactly one place that schedules it.
+  _failLink(reason) {
+    this.pendingFailureReason = reason;
+    if (this.transport && typeof this.transport.disconnectPeer === 'function') {
+      this.transport.disconnectPeer(this.relayPeerId);
+    }
+  }
+
   _onDisconnected() {
     const was = this.connected;
     this.connected = false;
     this._writeLink();
     if (was) this.emit('disconnected');
-    if (!this.stopped) {
-      this.retryTimer = setTimeout(() => this._dial(0), this.reconnectDelays[0]);
-      if (typeof this.retryTimer.unref === 'function') this.retryTimer.unref();
-    }
+    const reason = this.pendingFailureReason || 'link_down';
+    this.pendingFailureReason = null;
+    this._handleLinkDown(reason);
+  }
+
+  _handleLinkDown(reason) {
+    if (this.stopped) return;
+    if (reason === 'mismatch') this.mismatched = true;
+    const delay = this.mismatched
+      ? this.reconnectDelays[this.reconnectDelays.length - 1]
+      : this.reconnectDelays[Math.min(this.dialAttempt, this.reconnectDelays.length - 1)];
+    if (!this.mismatched) this.dialAttempt += 1;
+    const logAt = this.mismatched ? log.error : log.info;
+    logAt(`relay link down (${reason}); retrying in ${delay} ms`);
+    clearTimeout(this.retryTimer);
+    this.retryTimer = setTimeout(() => this._dial(), delay);
+    if (typeof this.retryTimer.unref === 'function') this.retryTimer.unref();
   }
 
   _writeLink() {
@@ -150,13 +231,18 @@ class RelayClient extends EventEmitter {
   }
 
   async stop() {
+    this.started = false;
     this.stopped = true;
     clearTimeout(this.retryTimer);
+    this.retryTimer = null;
     const was = this.connected;
     this.connected = false;
-    if (this.rpc) this.rpc.close();
-    if (this.transport) await this.transport.stop();
-    this._writeLink();
+    try {
+      if (this.rpc) this.rpc.close();
+      if (this.transport) await this.transport.stop();
+    } finally {
+      this._writeLink();
+    }
     if (was) this.emit('disconnected');
   }
 
@@ -177,7 +263,11 @@ class RelayClient extends EventEmitter {
   }
 
   notify(method, params = {}) {
-    if (this.connected) this.rpc.notify(this.relayPeerId, method, params);
+    if (!this.connected) {
+      log.debug(`notify ${method} dropped: the relay link is down`);
+      return;
+    }
+    this.rpc.notify(this.relayPeerId, method, params);
   }
 
   submit(envelope) {
@@ -201,6 +291,12 @@ class RelayClient extends EventEmitter {
   registerMethod(name, handler) {
     if (isReservedMethod(name)) {
       throw Object.assign(new Error(`method_reserved: ${name} belongs to the approval link or the mesh`), { code: 'method_reserved' });
+    }
+    if (typeof handler !== 'function') {
+      throw new TypeError(`registerMethod(${name}): handler must be a function`);
+    }
+    if (this.methods.has(name)) {
+      throw Object.assign(new Error(`method_exists: ${name} is already registered`), { code: 'method_exists' });
     }
     this.methods.set(name, handler);
   }

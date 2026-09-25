@@ -1,7 +1,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert');
 
-const { MeshIdentity } = require('../src/mesh/mesh-identity');
+const { MeshIdentity, derivePeerId } = require('../src/mesh/mesh-identity');
 
 describe('MeshIdentity', () => {
   it('generates a keypair and peer ID on construction', () => {
@@ -20,6 +20,16 @@ describe('MeshIdentity', () => {
     const restored = MeshIdentity.deserialize(serialized);
 
     assert.strictEqual(restored.peerId, identity.peerId);
+  });
+
+  it('the exported derivePeerId matches the peerId an identity assigns itself from the same publicKey', () => {
+    // RelayClient recomputes a relay's peerId from a pin's raw publicKey when
+    // the pin (spec §3.11's pair record) doesn't carry one. This is the
+    // equality that recomputation depends on — if it ever drifts, that
+    // derivation is silently wrong.
+    const identity = new MeshIdentity({ displayName: 'relay' });
+    assert.strictEqual(derivePeerId(identity.publicKey), identity.peerId);
+    assert.strictEqual(derivePeerId(identity.publicKey.toString('hex')), identity.peerId);
   });
 
   it('signs and verifies data correctly', () => {

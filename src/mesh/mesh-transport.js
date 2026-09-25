@@ -160,6 +160,19 @@ class MeshTransport extends EventEmitter {
     }
   }
 
+  // Force-closes a connected peer's socket without untrusting it, so a
+  // caller that has decided a link is unusable (e.g. RelayClient after a
+  // failed or mismatched hello) can drop it and let the normal
+  // 'peerDisconnected' path (below) do the one canonical cleanup — no
+  // separate bookkeeping here, so there is exactly one place that deletes
+  // `peers` and emits the event. Returns false if the peer wasn't connected.
+  disconnectPeer(peerId) {
+    const peer = this.peers.get(peerId);
+    if (!peer) return false;
+    try { peer.ws.terminate(); } catch { try { peer.ws.close(); } catch { /* already gone */ } }
+    return true;
+  }
+
   getPeer(peerId) {
     return this.peers.get(peerId) || null;
   }
@@ -576,10 +589,14 @@ class MeshTransport extends EventEmitter {
       for (const [peerId, peer] of this.peers) {
         if (now - peer.lastSeen > HEARTBEAT_TIMEOUT_MS) {
           log.info(`peer timed out: ${peerId}`);
-          try { peer.ws.close(); } catch { /* ignore */ }
-          this.peers.delete(peerId);
-          this.emit('peerDisconnected', { peerId, reason: 'timeout' });
-          this._scheduleReconnect(peerId);
+          // Tag the reason and let the socket's own 'close' handler
+          // (_handlePeerDisconnect, below) do the one canonical cleanup —
+          // deleting here too, and emitting a second 'peerDisconnected' when
+          // that handler also runs, is the double-emit this used to cause.
+          // terminate() (not close()) forces the close event even on a
+          // socket that is no longer responsive.
+          peer.disconnectReason = 'timeout';
+          try { peer.ws.terminate(); } catch { /* ignore */ }
           continue;
         }
 
@@ -593,9 +610,17 @@ class MeshTransport extends EventEmitter {
   // --- Reconnection ---
 
   _handlePeerDisconnect(peerId, peerInfo) {
+    // A 'close' listener is bound once per socket, in _promoteToPeer, over
+    // that socket's own peerInfo closure. If a newer connection for the same
+    // peerId has already replaced it in `peers` (a reconnect that beat the
+    // old socket's close event to the punch), this is a late echo of an
+    // already-superseded disconnect — it must not evict the live peer or
+    // schedule a redundant reconnect for it.
+    if (this.peers.get(peerId) !== peerInfo) return;
+    const reason = peerInfo.disconnectReason || 'closed';
     this.peers.delete(peerId);
-    log.info(`peer disconnected: ${peerId}`);
-    this.emit('peerDisconnected', { peerId, reason: 'closed' });
+    log.info(`peer disconnected: ${peerId} (${reason})`);
+    this.emit('peerDisconnected', { peerId, reason });
 
     if (peerInfo.address && peerInfo.port) {
       this._scheduleReconnect(peerId);

@@ -146,6 +146,53 @@ describe('MeshTransport', () => {
     );
   });
 
+  it('disconnectPeer closes a connected peer and emits peerDisconnected exactly once', async () => {
+    transport1 = new MeshTransport({ identity: identity1, port: 19040, useTls: false });
+    transport2 = new MeshTransport({ identity: identity2, port: 19041, useTls: false });
+    transport1.addTrustedPeer(identity2.peerId, identity2.publicKey);
+    transport2.addTrustedPeer(identity1.peerId, identity1.publicKey);
+    await transport1.start();
+    await transport2.start();
+    const connected = new Promise((resolve) => transport1.once('peerConnected', resolve));
+    await transport2.connectToPeer('127.0.0.1', transport1.port);
+    await connected;
+    assert.ok(transport1.getPeer(identity2.peerId));
+
+    const events = [];
+    transport1.on('peerDisconnected', (info) => events.push(info));
+    const disconnected = new Promise((resolve) => transport1.once('peerDisconnected', resolve));
+    assert.strictEqual(transport1.disconnectPeer(identity2.peerId), true);
+    await disconnected;
+    // A brief wait: if the close listener somehow ran twice (the bug the
+    // heartbeat-timeout path used to have), a second event would land here.
+    await new Promise((r) => setTimeout(r, 30));
+    assert.strictEqual(events.length, 1);
+    assert.strictEqual(transport1.getPeer(identity2.peerId), null);
+    // disconnectPeer on a peer that isn't connected is a no-op, not a throw.
+    assert.strictEqual(transport1.disconnectPeer('kl-nonexistent'), false);
+  });
+
+  it('a late close of an old socket does not evict a newer live peer for the same id', () => {
+    transport1 = new MeshTransport({ identity: identity1, port: 19042, useTls: false });
+    const oldPeerInfo = { peerId: identity2.peerId, ws: { close() {}, terminate() {} }, address: null, port: null };
+    const newPeerInfo = { peerId: identity2.peerId, ws: { close() {}, terminate() {} }, address: null, port: null };
+    // Simulate a reconnect: the new connection has already been promoted...
+    transport1.peers.set(identity2.peerId, newPeerInfo);
+    const events = [];
+    transport1.on('peerDisconnected', (info) => events.push(info));
+    // ...when the OLD socket's close handler (bound over oldPeerInfo, back
+    // when it was promoted) finally fires.
+    transport1._handlePeerDisconnect(identity2.peerId, oldPeerInfo);
+    assert.strictEqual(transport1.peers.get(identity2.peerId), newPeerInfo, 'the live peer must still be tracked');
+    assert.deepStrictEqual(events, [], 'a stale close must not emit peerDisconnected for the peer that replaced it');
+
+    // A close for the CURRENT peer object still works normally.
+    transport1._handlePeerDisconnect(identity2.peerId, newPeerInfo);
+    assert.strictEqual(transport1.peers.has(identity2.peerId), false);
+    assert.strictEqual(events.length, 1);
+    assert.strictEqual(events[0].peerId, identity2.peerId);
+  });
+
   it('sendRpc sends and receives RPC response', async () => {
     transport1 = new MeshTransport({ identity: identity1, port: 19012, useTls: false });
     transport2 = new MeshTransport({ identity: identity2, port: 19013, useTls: false });
