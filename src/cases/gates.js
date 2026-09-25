@@ -91,6 +91,9 @@ const GATE_REASONS = Object.freeze([
   'category-keyword', 'unsourced-constraint', 'non-disclosable-entity'
 ]);
 const REF_RE = /\{\{\s*(f-\d{4,})\s*\}\}/g;
+// Anything brace-wrapped: scanned on the folded text, so a look-alike
+// ("{{F-0005}}", "{{f-005}}", full-width braces) is reported, not sent.
+const LOOSE_REF_RE = /\{\{[^}]*\}\}/g;
 const RENDERABLE = new Set(['user', 'sourced', 'external-agent']);
 // external-agent facts never back a constraint (parent §7.2, R40).
 const BACKING = new Set(['user', 'sourced']);
@@ -98,6 +101,8 @@ const SENSITIVE = ['personal', 'financial', 'legal', 'health'];
 // An envelope's intent and rules count as approved wording only once the
 // owner approved them.
 const APPROVED_STATUSES = new Set(['active', 'expired', 'exhausted']);
+
+const isFact = (f) => Boolean(f) && typeof f === 'object';
 
 function refProblem(fact, envelope) {
   if (!fact) return { reason: 'bad-reference', detail: 'no such fact' };
@@ -111,34 +116,72 @@ function refProblem(fact, envelope) {
   return null;
 }
 
+// Each ref records its span in the input (start, end) and in `rendered`
+// (renderedStart, renderedEnd), so the gate can scan what actually leaves.
 function renderFactRefs(text, facts, { envelope = null } = {}) {
   const s = String(text ?? '');
   const map = facts instanceof Map ? facts : new Map();
   const blocked = [];
   const refs = [];
-  const rendered = s.replace(REF_RE, (whole, id, offset) => {
-    const fact = map.get(id) || null;
+  let rendered = '';
+  let last = 0;
+  const re = new RegExp(REF_RE.source, 'g');
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    const [whole, id] = m;
+    const start = m.index;
+    const end = start + whole.length;
+    const raw = map.get(id);
+    const fact = isFact(raw) ? raw : null;
     const problem = refProblem(fact, envelope);
-    refs.push({ start: offset, end: offset + whole.length, id, fact, ok: !problem });
+    let out = whole;
     if (problem) {
-      blocked.push({ span: { start: offset, end: offset + whole.length, text: whole }, reason: problem.reason, factId: id, detail: problem.detail });
-      return whole;
+      blocked.push({ span: { start, end, text: whole }, reason: problem.reason, factId: id, detail: problem.detail });
+    } else {
+      const v = valueText(fact.value);
+      out = fact.unit ? `${v} ${fact.unit}` : v;
     }
-    const v = valueText(fact.value);
-    return fact.unit ? `${v} ${fact.unit}` : v;
-  });
+    rendered += s.slice(last, start);
+    const renderedStart = rendered.length;
+    rendered += out;
+    refs.push({ start, end, renderedStart, renderedEnd: rendered.length, id, fact, ok: !problem });
+    last = end;
+  }
+  rendered += s.slice(last);
+  for (const sp of matchSpans(s, [{ re: new RegExp(LOOSE_REF_RE.source, 'g') }])) {
+    if (refs.some((r) => r.start === sp.start && r.end === sp.end)) continue;
+    blocked.push({ span: sp, reason: 'bad-reference', detail: 'not a fact reference; write {{f-NNNN}}' });
+  }
+  blocked.sort((a, b) => a.span.start - b.span.start);
   return { rendered, blocked, refs };
+}
+
+// Maps a [start, end) span of `rendered` back to the input text. A bound
+// inside a ref's output widens to the whole ref.
+function renderedToInput(refs, start, end) {
+  const map = (p, isEnd) => {
+    let delta = 0;
+    for (const r of refs) {
+      const inside = isEnd ? r.renderedStart < p && p <= r.renderedEnd : r.renderedStart <= p && p < r.renderedEnd;
+      if (inside) return isEnd ? r.end : r.start;
+      if (r.renderedEnd <= p) delta += (r.end - r.start) - (r.renderedEnd - r.renderedStart);
+    }
+    return p + delta;
+  };
+  return { start: map(start, false), end: map(end, true) };
 }
 
 function spanMatchesValue(sp, value) {
   const values = Array.isArray(value) ? value : [value];
   return values.some((v) => {
+    if (v === null || v === undefined || typeof v === 'boolean') return false;
     if (sp.kind === 'price') {
-      const n = typeof v === 'number' ? v : Number(String(v ?? '').replace(/[$,\s]/g, ''));
+      const str = String(v).replace(/[$,\s]/g, '');
+      const n = typeof v === 'number' ? v : (str === '' ? NaN : Number(str));
       return Number.isFinite(n) && n === sp.value;
     }
     if (sp.kind === 'date') {
-      const s = String(v ?? '');
+      const s = String(v);
       if (!DAY_PATTERN.test(s)) return false;
       return sp.value.startsWith('--') ? s.slice(5) === sp.value.slice(2) : s === sp.value;
     }
@@ -147,11 +190,33 @@ function spanMatchesValue(sp, value) {
 }
 
 // matchSpans scans the folded text, so full-width letters or zero-width
-// characters cannot hide a keyword, and reports original spans. \s* between
-// words: a zero-width character the fold removed may be all that split them.
+// characters cannot hide a keyword, and reports original spans. Words join
+// on any run of space, hyphen or underscore (or nothing: a zero-width
+// character the fold removed may be all that split them); the last word
+// may be plural ("salaries", "mortgages").
 function keywordSpans(text, keyword) {
-  const re = new RegExp(`(?<![\\p{L}\\p{N}])${escapeRe(keyword).replace(/ /g, '\\s*')}(?![\\p{L}\\p{N}])`, 'giu');
+  const words = String(keyword).split(' ').filter(Boolean);
+  if (!words.length) return [];
+  const parts = words.map((w, i) => {
+    if (i < words.length - 1) return escapeRe(w);
+    if (/[^aeiou]y$/.test(w)) return `${escapeRe(w.slice(0, -1))}(?:y|ies)`;
+    return `${escapeRe(w)}(?:e?s)?`;
+  });
+  const re = new RegExp(`(?<![\\p{L}\\p{N}])${parts.join('[\\s\\-_]*')}(?![\\p{L}\\p{N}])`, 'giu');
   return matchSpans(text, [{ re }]);
+}
+
+// Whole-word, exact-phrase occurrences (approved wording).
+function phraseSpans(text, phrase) {
+  const p = String(phrase).trim();
+  if (!p) return [];
+  const re = new RegExp(`(?<![\\p{L}\\p{N}])${escapeRe(p).replace(/ /g, '\\s+')}(?![\\p{L}\\p{N}])`, 'giu');
+  return matchSpans(text, [{ re }]);
+}
+
+function validEntitySpan(sp, text) {
+  return Boolean(sp) && Number.isInteger(sp.start) && Number.isInteger(sp.end)
+    && sp.start >= 0 && sp.end > sp.start && sp.end <= text.length;
 }
 
 function outboundGate({
@@ -159,8 +224,9 @@ function outboundGate({
 } = {}) {
   const text = String(payloadText ?? '');
   const factMap = facts instanceof Map ? facts : new Map();
-  const all = [...factMap.values()];
+  const all = [...factMap.values()].filter(isFact);
   const refs = renderFactRefs(text, factMap, { envelope });
+  const rendered = refs.rendered;
   const blocked = [...refs.blocked];
   const add = (span, reason, detail, factId = null) => blocked.push({
     span: { start: span.start, end: span.end, text: span.text }, reason, ...(factId ? { factId } : {}), detail
@@ -172,20 +238,43 @@ function outboundGate({
   const approved = envelope && APPROVED_STATUSES.has(envelope.status)
     ? foldText([envelope.intent, ...(envelope.rules || [])].join('\n'))
     : '';
-  const isApproved = (spanText) => Boolean(approved) && approved.includes(foldText(spanText));
+  const isApproved = (spanText) => Boolean(approved) && phraseSpans(approved, foldText(spanText)).length > 0;
 
-  // Rule 1: fact values, both modes.
+  // Rule 1: fact values, both modes. Scanned twice: the masked input, and
+  // the rendered text that actually leaves, so a value spliced together
+  // around a reference ("1,{{f-0021}},000") is caught. A rendered hit that
+  // lies entirely inside one reference's own output is that reference.
+  const valueFacts = all.filter((f) => f.provenance !== 'unknown' && f.status !== 'retracted');
   const hits = new Map();
-  for (const f of all) {
-    if (f.provenance === 'unknown' || f.status === 'retracted') continue;
-    for (const sp of matchSpans(masked, valueMatchers(f.value, f.unit))) {
-      const key = `${sp.start}:${sp.end}`;
-      if (!hits.has(key)) hits.set(key, { span: sp, facts: [] });
-      hits.get(key).facts.push(f);
+  const addHit = (span, scanned, f) => {
+    const key = `${span.start}:${span.end}`;
+    if (!hits.has(key)) hits.set(key, { span, scanned, facts: new Set() });
+    hits.get(key).facts.add(f);
+  };
+  const scanValues = (scanText, toInput) => {
+    const record = (sp, f) => {
+      const at = toInput(sp);
+      if (at) addHit({ ...at, text: text.slice(at.start, at.end) }, scanText.slice(sp.start, sp.end), f);
+    };
+    for (const f of valueFacts) {
+      for (const sp of matchSpans(scanText, valueMatchers(f.value, f.unit))) record(sp, f);
     }
+    // Other written forms of a date or price ("Nov 14, 2026", "$1.25M").
+    for (const sp of detect(scanText)) {
+      if (sp.kind !== 'date' && sp.kind !== 'price') continue;
+      for (const f of valueFacts) if (spanMatchesValue(sp, f.value)) record(sp, f);
+    }
+  };
+  scanValues(masked, (sp) => ({ start: sp.start, end: sp.end }));
+  if (refs.refs.length) {
+    scanValues(rendered, (sp) => {
+      const own = refs.refs.some((r) => r.renderedEnd > r.renderedStart && r.renderedStart <= sp.start && sp.end <= r.renderedEnd);
+      return own ? null : renderedToInput(refs.refs, sp.start, sp.end);
+    });
   }
-  for (const { span, facts: matched } of hits.values()) {
-    if (isRecipient(span.text, recipients)) continue;
+  for (const { span, scanned, facts: set } of hits.values()) {
+    if (isRecipient(scanned, recipients)) continue;
+    const matched = [...set];
     const live = matched.filter((f) => f.status === 'active');
     const open = live.filter((f) => RENDERABLE.has(f.provenance) && f.disclosable);
     if (open.length) {
@@ -217,7 +306,7 @@ function outboundGate({
     for (const cat of categories) {
       for (const kw of keywords[cat] || []) {
         const k = foldText(kw);
-        if (!k || isApproved(k)) continue;
+        if (!k || (approved && keywordSpans(approved, k).length)) continue;
         for (const sp of keywordSpans(masked, k)) add(sp, 'category-keyword', `${cat} keyword "${kw}"`);
       }
     }
@@ -245,43 +334,80 @@ function outboundGate({
   }
 
   // Rule 4: entity spans (C7), exempt when they name this send's recipient.
-  for (const e of entitySpans || []) {
-    const sp = e && e.span;
-    if (!sp || !Number.isInteger(sp.start) || !Number.isInteger(sp.end)) continue;
-    if (isRecipient(sp.text, recipients)) continue;
-    add(sp, 'non-disclosable-entity', `${e.entity || 'entity'}: ${e.reason || 'not disclosable'}`);
+  // The span's text is read from the payload, never taken from the index.
+  // A malformed list or span blocks the whole text: fail closed.
+  const whole = { start: 0, end: text.length, text };
+  if (!Array.isArray(entitySpans)) {
+    add(whole, 'non-disclosable-entity', 'the entity spans are not a list');
+  } else {
+    for (const e of entitySpans) {
+      const sp = e && e.span;
+      if (!validEntitySpan(sp, text)) {
+        add(whole, 'non-disclosable-entity', 'a malformed entity span');
+        continue;
+      }
+      const at = { start: sp.start, end: sp.end, text: text.slice(sp.start, sp.end) };
+      if (isRecipient(at.text, recipients)) continue;
+      add(at, 'non-disclosable-entity', `${e.entity || 'entity'}: ${e.reason || 'not disclosable'}`);
+    }
   }
 
   blocked.sort((a, b) => a.span.start - b.span.start);
-  return { ok: blocked.length === 0, blocked, rendered: refs.rendered };
+  return { ok: blocked.length === 0, blocked, rendered };
 }
 
-// Every string leaf (never a key) of a payload through outboundGate.
-// Senders send `rendered`, never the input.
+// Every string leaf of a payload through outboundGate; number leaves and
+// object keys through rule 1 only (ruling T3-keys). Senders send
+// `rendered`, never the input.
 function gateLeaves(payload, {
   recipients = [], envelope = null, facts = new Map(), mode = 'message', caseId = null, entityIndex = null, categoryKeywords = null
 } = {}) {
   const blocked = [];
+  const valuesOnly = (text, at) => {
+    const r = outboundGate({ payloadText: text, recipients, envelope, facts, mode: 'query' });
+    for (const b of r.blocked) blocked.push({ path: at, ...b });
+  };
+  const ancestors = new Set();
   const walk = (value, at) => {
     if (typeof value === 'string') {
       let entitySpans = [];
       if (entityIndex && typeof entityIndex.nonDisclosableSpans === 'function') {
+        let problem = null;
         try {
-          entitySpans = entityIndex.nonDisclosableSpans(value, { caseId }) || [];
+          const out = entityIndex.nonDisclosableSpans(value, { caseId });
+          if (Array.isArray(out)) entitySpans = out;
+          else problem = 'the entity index did not return a list';
         } catch (err) {
-          blocked.push({
-            path: at, span: { start: 0, end: value.length, text: value }, reason: 'non-disclosable-entity', detail: `the entity index failed: ${err.message}`
-          });
+          problem = `the entity index failed: ${err.message}`;
         }
+        if (problem) blocked.push({ path: at, span: { start: 0, end: value.length, text: value }, reason: 'non-disclosable-entity', detail: problem });
       }
       const r = outboundGate({ payloadText: value, recipients, envelope, facts, mode, entitySpans, categoryKeywords });
       for (const b of r.blocked) blocked.push({ path: at, ...b });
       return r.rendered;
     }
-    if (Array.isArray(value)) return value.map((v, i) => walk(v, `${at}[${i}]`));
+    if (typeof value === 'number') {
+      if (Number.isFinite(value)) valuesOnly(String(value), at);
+      return value;
+    }
     if (value && typeof value === 'object') {
-      const out = {};
-      for (const [k, v] of Object.entries(value)) out[k] = walk(v, at ? `${at}.${k}` : k);
+      if (ancestors.has(value)) {
+        blocked.push({ path: at, span: { start: 0, end: 0, text: '' }, reason: 'bad-reference', detail: 'the payload contains a cycle' });
+        return null;
+      }
+      ancestors.add(value);
+      let out;
+      if (Array.isArray(value)) {
+        out = value.map((v, i) => walk(v, `${at}[${i}]`));
+      } else {
+        out = {};
+        for (const [k, v] of Object.entries(value)) {
+          const path = at ? `${at}.${k}` : k;
+          valuesOnly(k, path);
+          out[k] = walk(v, path);
+        }
+      }
+      ancestors.delete(value);
       return out;
     }
     return value;

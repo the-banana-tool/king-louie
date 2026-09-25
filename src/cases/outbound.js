@@ -42,18 +42,22 @@ const DATE_PATTERNS = [
   }
 ];
 
+const MULTIPLIERS = { k: 1e3, thousand: 1e3, m: 1e6, million: 1e6, bn: 1e9, billion: 1e9 };
+
+// Rounded to cents so "1.1 million" is 1100000, not 1100000.0000000002.
 function scale(num, suffix) {
   const n = Number(String(num).replace(/,/g, ''));
   if (!Number.isFinite(n)) return null;
-  const s = String(suffix || '').toLowerCase();
-  if (s === 'k' || s === 'thousand') return n * 1e3;
-  if (s === 'm' || s === 'million') return n * 1e6;
-  return n;
+  const mult = MULTIPLIERS[String(suffix || '').toLowerCase()] || 1;
+  return Number((n * mult).toFixed(2));
 }
 
 const PRICE_PATTERNS = [
-  { re: /\$\s?(\d[\d,]*(?:\.\d+)?)(?:\s?(k|m|thousand|million)\b)?/gi, value: (m) => scale(m[1], m[2]) },
-  { re: /\b(\d[\d,]*(?:\.\d+)?)\s?(k|m|thousand|million)?\s?(?:dollars|usd)\b/gi, value: (m) => scale(m[1], m[2]) }
+  { re: /\$\s?(\d[\d,]*(?:\.\d+)?)(?:\s?(k|m|bn|thousand|million|billion)\b)?/gi, value: (m) => scale(m[1], m[2]) },
+  { re: /\b(\d[\d,]*(?:\.\d+)?)\s?(k|m|bn|thousand|million|billion)?\s?(?:dollars|usd)\b/gi, value: (m) => scale(m[1], m[2]) },
+  // A scaled amount without a currency ("1250k", "1.25 million") still
+  // reads as money; a bare count ("Lot 12") does not.
+  { re: /\b(\d[\d,]*(?:\.\d+)?)(?:(k|m|bn)|\s?(thousand|million|billion))\b/gi, value: (m) => scale(m[1], m[2] || m[3]) }
 ];
 
 const DEADLINE_RE = /\b(?:due(?:\s+(?:by|on|before))?|deadlines?|no later than|expires?(?:\s+on)?|must be (?:received|submitted|filed) by|closes? on)\b/gi;

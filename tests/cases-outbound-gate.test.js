@@ -180,7 +180,7 @@ describe('gateLeaves', () => {
     assert.strictEqual(r.rendered.attemptsPerContact, 2);
   });
 
-  it('gates values, never keys, and asks the entity index per leaf', () => {
+  it('gates keys with rule 1, and asks the entity index per value leaf only', () => {
     const calls = [];
     const entityIndex = {
       nonDisclosableSpans(text, { caseId }) {
@@ -190,7 +190,7 @@ describe('gateLeaves', () => {
       }
     };
     const r = gateLeaves({ 'Harbor Road access': 'ok', note: 'Ask for Pat Doe' }, { facts: facts(INFERRED), mode: 'query', caseId: 'case-1', entityIndex });
-    assert.deepStrictEqual(r.blocked.map((b) => [b.path, b.reason]), [['note', 'non-disclosable-entity']]);
+    assert.deepStrictEqual(r.blocked.map((b) => [b.path, b.reason]), [['Harbor Road access', 'inferred'], ['note', 'non-disclosable-entity']]);
     assert.deepStrictEqual(calls, [['ok', 'case-1'], ['Ask for Pat Doe', 'case-1']]);
   });
 
@@ -227,5 +227,104 @@ describe('detection survives full-width and zero-width characters', () => {
   it('an invented full-width deadline is still unsourced', () => {
     const r = outboundGate({ payloadText: 'Offers are due by ２０２６-11-14', facts: facts() });
     assert.deepStrictEqual(reasons(r), ['unsourced-constraint', 'unsourced-constraint']);
+  });
+});
+
+describe('review round 1: splicing, leaves, keys, entity spans', () => {
+  const PART = fact('f-0021', { value: 250 });
+  const ROAD = fact('f-0023', { value: 'Road' });
+  const EMPTY = fact('f-0024', { value: '' });
+
+  for (const mode of ['message', 'query']) {
+    it(`blocks a value spliced together around a reference (${mode})`, () => {
+      const r1 = outboundGate({ payloadText: '1,{{f-0021}},000', facts: facts(FLOOR, PART), mode });
+      assert.deepStrictEqual(r1.blocked.map((b) => [b.reason, b.factId, b.span.text]), [['non-disclosable', 'f-0005', '1,{{f-0021}},000']]);
+      const r2 = outboundGate({ payloadText: 'Harbor {{f-0023}} access', facts: facts(INFERRED, ROAD), mode });
+      assert.deepStrictEqual(r2.blocked.map((b) => [b.reason, b.factId, b.span.text]), [['inferred', 'f-0002', 'Harbor {{f-0023}} access']]);
+      const r3 = outboundGate({ payloadText: '1,250{{f-0024}},000', facts: facts(FLOOR, EMPTY), mode });
+      assert.deepStrictEqual(r3.blocked.map((b) => [b.reason, b.factId]), [['non-disclosable', 'f-0005']]);
+    });
+  }
+
+  it('gates number leaves with rule 1 and keeps their type', () => {
+    const r = gateLeaves({ amountUsd: 1250000, attemptsPerContact: 2 }, { facts: facts(FLOOR), mode: 'query' });
+    assert.deepStrictEqual(r.blocked.map((b) => [b.path, b.reason]), [['amountUsd', 'non-disclosable']]);
+    assert.strictEqual(r.rendered.amountUsd, 1250000);
+    assert.strictEqual(r.rendered.attemptsPerContact, 2);
+  });
+
+  it('gates keys with rule 1 only', () => {
+    const r = gateLeaves({ 'Harbor Road access': 'yes' }, { facts: facts(INFERRED), mode: 'message' });
+    assert.deepStrictEqual(r.blocked.map((b) => [b.path, b.reason]), [['Harbor Road access', 'inferred']]);
+    assert.strictEqual(gateLeaves({ 'floor price': 'x' }, { facts: facts(FLOOR) }).ok, true, 'rule 2 does not run on keys');
+  });
+
+  it('a malformed entity span blocks the whole leaf', () => {
+    const text = 'Ask for Pat Doe';
+    const i = text.indexOf('Pat Doe');
+    const bad = [
+      [{ span: { start: 1.5, end: 3, text: 'x' }, entity: 'person' }],
+      [{ entity: 'person' }],
+      [{ span: { start: i, end: 999, text: 'Pat Doe' } }],
+      [{ span: { start: 5, end: 2, text: '' } }],
+      'not a list'
+    ];
+    for (const entitySpans of bad) {
+      const r = outboundGate({ payloadText: text, facts: facts(), mode: 'query', entitySpans });
+      assert.deepStrictEqual(r.blocked.map((b) => [b.reason, b.span.start, b.span.end]), [['non-disclosable-entity', 0, text.length]], JSON.stringify(entitySpans));
+    }
+    const forged = [{ span: { start: i, end: i + 7, text: '+15550199' }, entity: 'person' }];
+    const r = outboundGate({ payloadText: text, facts: facts(), mode: 'query', entitySpans: forged, recipients: ['+15550199'] });
+    assert.deepStrictEqual(r.blocked.map((b) => [b.reason, b.span.text]), [['non-disclosable-entity', 'Pat Doe']]);
+  });
+
+  it('a non-array entity index result is a blocked result', () => {
+    for (const out of [Promise.resolve([]), null, {}, 'x']) {
+      const entityIndex = { nonDisclosableSpans: () => out };
+      const r = gateLeaves({ text: 'hello' }, { facts: facts(), mode: 'query', entityIndex });
+      assert.deepStrictEqual(r.blocked.map((b) => [b.path, b.reason]), [['text', 'non-disclosable-entity']]);
+    }
+  });
+
+  it('query mode blocks other written forms of a private date or price', () => {
+    const PDATE = fact('f-0030', { value: '2026-11-14', provenance: 'user', disclosable: false });
+    for (const probe of ['Nov 14, 2026', '14 November 2026', '11/14/2026', '$1.25M', '1.25 million', '1250k']) {
+      const r = outboundGate({ payloadText: `Note: ${probe} ok`, facts: facts(FLOOR, PDATE), mode: 'query' });
+      assert.deepStrictEqual([...new Set(reasons(r))], ['non-disclosable'], probe);
+    }
+  });
+
+  it('category keywords match joined, split and plural forms', () => {
+    for (const probe of ['floor-price', 'floor_price', 'bank-account number', 'salaries', 'mortgages', 'debts']) {
+      const r = outboundGate({ payloadText: `About the ${probe} today`, facts: facts(FLOOR) });
+      assert.deepStrictEqual(reasons(r), ['category-keyword'], probe);
+    }
+  });
+
+  it('approved wording matches whole words only', () => {
+    const LEGAL = fact('f-0031', { value: 'x', category: 'legal', disclosable: false });
+    const env = active({ intent: 'Ask about the courtyard' });
+    assert.deepStrictEqual(reasons(outboundGate({ payloadText: 'Ask about the court date', facts: facts(LEGAL), envelope: env })), ['category-keyword']);
+    const ok = active({ intent: 'Ask about the court' });
+    assert.strictEqual(outboundGate({ payloadText: 'Ask about the court date', facts: facts(LEGAL), envelope: ok }).ok, true);
+  });
+
+  it('look-alike references are bad references', () => {
+    for (const probe of ['{{F-0001}}', '{{f-001}}', '｛｛f-0001｝｝', '{{f-0001​}}', '{{ fact 1 }}']) {
+      const r = outboundGate({ payloadText: `See ${probe}`, facts: facts(ACRES), mode: 'query' });
+      assert.deepStrictEqual(r.blocked.map((b) => [b.reason, b.span.text]), [['bad-reference', probe]], probe);
+    }
+  });
+
+  it('bad input comes back as a result, never a throw', () => {
+    const map = new Map([['f-0001', null], ['f-0002', 'junk'], ['f-0005', FLOOR]]);
+    const r = outboundGate({ payloadText: 'hi {{f-0001}} 1,250,000', facts: map, mode: 'query' });
+    assert.deepStrictEqual(reasons(r), ['bad-reference', 'non-disclosable']);
+    const p = { a: 'x' };
+    p.self = p;
+    const c = gateLeaves(p, { facts: facts(), mode: 'query' });
+    assert.deepStrictEqual(c.blocked.map((b) => [b.path, b.reason]), [['self', 'bad-reference']]);
+    const shared = { note: 'hi' };
+    assert.strictEqual(gateLeaves({ a: shared, b: shared }, { facts: facts(), mode: 'query' }).ok, true, 'a shared object is not a cycle');
   });
 });
