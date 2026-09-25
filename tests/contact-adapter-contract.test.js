@@ -125,3 +125,57 @@ describe('contact adapter: sms and voice (fake relay)', () => {
     }
   });
 });
+
+describe('contact adapter: email over the relay and over IMAP/SMTP', () => {
+  const { EmailChannel } = require('../src/channels/email-channel');
+  const { createRelayEmailTransport, createImapSmtpTransport } = require('../src/channels/email-transports');
+  const { ContactRelayClient } = require('../src/channels/relay-client');
+  const { startFakeRelay } = require('./helpers/fake-contact-relay');
+  const { startFakeSmtp } = require('./helpers/fake-smtp');
+  const config = () => ({ owner: 'owner@example.com', from: 'kl@example.com', trustedAuthServId: 'mx.example.com' });
+
+  async function contract(email, fail) {
+    assert.strictEqual(email.contactCapabilities().authenticatedReplies, false);
+    const sent = await email.sendContact(MESSAGE, META);
+    assert.strictEqual(sent.deliveryId, 'd-test-1');
+    assert.strictEqual(sent.externalRef, '<kl-d-test-1@example.com>');
+    const calls = [];
+    email.onContactReply(async (correlationId, answer, meta) => { calls.push({ correlationId, answer, meta }); return { ok: true, outcome: 'recorded', ackText: null }; });
+    await email.ingestRelayEvent({ id: 'e1', type: 'inbound', channel: 'email', from: 'owner@example.com', subject: 'Re: [KL-K7QD4M]', text: 'a', inReplyTo: sent.externalRef });
+    assert.strictEqual(calls[0].correlationId, 'd-test-1');
+    assert.strictEqual(calls[0].meta.ownerProven, true);
+    await email.ingestRelayEvent({ id: 'e2', type: 'inbound', channel: 'email', from: 'someone@example.org', subject: 'Re: [KL-K7QD4M]', text: 'a', inReplyTo: sent.externalRef });
+    assert.strictEqual(calls[1].meta.ownerProven, false);
+    await fail();
+    await assert.rejects(email.sendContact(MESSAGE, META), (err) => err instanceof ContactDeliveryError);
+  }
+
+  it('relay transport meets the contract', async () => {
+    const relay = await startFakeRelay();
+    try {
+      const client = new ContactRelayClient({ name: 'main', baseUrl: relay.baseUrl, getToken: () => relay.token });
+      const email = new EmailChannel({ transport: createRelayEmailTransport({ relay: client }), getConfig: config });
+      await contract(email, async () => relay.failNext(429));
+    } finally {
+      await relay.close();
+    }
+  });
+
+  it('imap-smtp transport meets the contract (fake SMTP over net)', async () => {
+    const smtp = await startFakeSmtp();
+    let port = smtp.port;
+    const email = new EmailChannel({
+      transport: createImapSmtpTransport({ smtp: { get host() { return '127.0.0.1'; }, get port() { return port; }, secure: false, user: '' }, imap: { host: '127.0.0.1', port: 993, user: 'kl@example.com' } }),
+      getConfig: config
+    });
+    try {
+      await contract(email, async () => {
+        await smtp.close();
+        await email.transport.close();
+        port = 9;
+      });
+    } finally {
+      await email.shutdown();
+    }
+  });
+});
