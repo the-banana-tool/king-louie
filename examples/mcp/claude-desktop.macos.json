@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "king-louie": {
+      "command": "/bin/sh",
+      "args": [
+        "-c",
+        "cd /opt/king-louie/mcp/work && exec /usr/local/bin/node /opt/king-louie/app/bin/king-louie-service.js mcp --data-dir /opt/king-louie/mcp/data"
+      ]
+    }
+  }
+}

@@ -772,3 +772,38 @@ $elevated = (New-Object Security.Principal.WindowsPrincipal([Security.Principal.
     });
   });
 });
+
+describe('MCP client configs', () => {
+  const read = (name) => JSON.parse(fs.readFileSync(path.join(EXAMPLES, 'mcp', name), 'utf8'));
+  const WINDOWS_ARGS = [
+    '/d', '/c', 'cd', '/d', 'C:\\KingLouie\\mcp\\work', '&&',
+    'C:\\Program Files\\nodejs\\node.exe', 'C:\\KingLouie\\app\\bin\\king-louie-service.js',
+    'mcp', '--data-dir', 'C:\\KingLouie\\mcp\\data'
+  ];
+
+  it('Windows: starts the server in the admin-owned work dir, one argument per word', () => {
+    const server = read('claude-desktop.windows.json').mcpServers['king-louie'];
+    assert.equal(server.command, 'C:\\Windows\\System32\\cmd.exe');
+    assert.deepEqual(server.args, WINDOWS_ARGS);
+    assert.ok(server.args.every((a) => !a.includes('"')), 'a quote inside an argument reaches cmd.exe as \\" and breaks the command');
+  });
+
+  it('macOS: starts the server in the admin-owned work dir through /bin/sh', () => {
+    const server = read('claude-desktop.macos.json').mcpServers['king-louie'];
+    assert.equal(server.command, '/bin/sh');
+    assert.deepEqual(server.args, [
+      '-c',
+      'cd /opt/king-louie/mcp/work && exec /usr/local/bin/node /opt/king-louie/app/bin/king-louie-service.js mcp --data-dir /opt/king-louie/mcp/data'
+    ]);
+  });
+
+  it('Windows: the same argument shape runs through cmd.exe with a spaced directory', { skip: POSIX ? 'cmd.exe only' : false }, () => {
+    const server = read('claude-desktop.windows.json').mcpServers['king-louie'];
+    const work = path.join(tmp(), 'mcp work');
+    fs.mkdirSync(work);
+    const args = [...server.args.slice(0, 4), work, '&&', process.execPath, '-p', 'process.cwd()'];
+    const r = spawnSync(server.command, args, { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(fs.realpathSync.native(r.stdout.trim()), fs.realpathSync.native(work));
+  });
+});

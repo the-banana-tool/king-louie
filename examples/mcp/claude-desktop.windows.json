@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "king-louie": {
+      "command": "C:\\Windows\\System32\\cmd.exe",
+      "args": [
+        "/d", "/c",
+        "cd", "/d", "C:\\KingLouie\\mcp\\work",
+        "&&",
+        "C:\\Program Files\\nodejs\\node.exe",
+        "C:\\KingLouie\\app\\bin\\king-louie-service.js",
+        "mcp", "--data-dir", "C:\\KingLouie\\mcp\\data"
+      ]
+    }
+  }
+}
