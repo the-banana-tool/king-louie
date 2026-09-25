@@ -202,7 +202,10 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
   //    key starting with U+FFFD under UTF-16 comparison even though its
   //    code-point value is larger.
   //  - argv items that are empty or contain whitespace/a quote are quoted so
-  //    the boundary between items is visible.
+  //    the boundary between items is visible, including two whitespace code
+  //    points outside plain ASCII: U+00A0 (no-break space) and U+3000
+  //    (ideographic space) — both are whitespace per JS's `\s`, so both must
+  //    be quoted the same as an ordinary space.
   //  - escaping in node_name, name, summary, cwd and origin, all at once.
   const hiddenChars = `${String.fromCodePoint(0x061c)}${String.fromCodePoint(0x2028)}${String.fromCodePoint(0x2060)}${String.fromCodePoint(0x00ad)}${String.fromCodePoint(0xfe0f)}${String.fromCodePoint(0xe0041)}`;
   const edgeAction = {
@@ -223,7 +226,7 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
       script: '😀'.repeat(1001)
     },
     steps: [
-      ['run.sh', '', 'has space', 'has"quote', 'plain'],
+      ['run.sh', '', 'has space', 'has"quote', 'plain', `no${String.fromCodePoint(0x00a0)}break`, `ideo${String.fromCodePoint(0x3000)}graphic`],
       { check: { message: `ok${String.fromCodePoint(0x200b)}` } }
     ],
     cwd: `/srv${String.fromCodePoint(0x00ad)}/site`,

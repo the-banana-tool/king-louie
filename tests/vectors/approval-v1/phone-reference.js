@@ -73,14 +73,33 @@ function pathSegment(parentPath, key) {
   return keyNeedsQuoting(key) ? `${parentPath}["${quotedKey(key)}"]` : `${parentPath}.${escapeText(key)}`;
 }
 
-// Quotes an argv item that would otherwise be unreadable or ambiguous when
-// several items are joined with plain spaces: empty, or containing
-// whitespace or a quote character. Only '"' inside the item is escaped —
-// this is a display convenience, not a shell-quoting implementation, and the
-// unquoted items around it are never reinterpreted as shell syntax.
+// The EXACT code points docs/protocol/approval-v1.md §5 lists for argv
+// quoting, chosen to match JavaScript's `\s` exactly — not a regex `\s`
+// class, since JS's `\s`, Kotlin's (ASCII-only) `\s` and ICU's definition of
+// whitespace all disagree, which would make the node/iOS/Android apps quote
+// the same argv differently.
+const ARGV_SPACE_POINTS = new Set([0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x20, 0xa0, 0x1680, 0x202f, 0x205f, 0x3000, 0xfeff]);
+function isArgvSpace(cp) {
+  return ARGV_SPACE_POINTS.has(cp) || (cp >= 0x2000 && cp <= 0x200a) || (cp >= 0x2028 && cp <= 0x2029);
+}
+
+// Whether an argv item would otherwise be unreadable or ambiguous when
+// several items are joined with plain spaces: empty, or containing one of
+// the code points above, or a literal quote character.
+function needsArgvQuoting(item) {
+  if (item === '') return true;
+  for (const ch of item) {
+    const cp = ch.codePointAt(0);
+    if (cp === 0x22 || isArgvSpace(cp)) return true;
+  }
+  return false;
+}
+
+// Only '"' inside the item is escaped — this is a display convenience, not a
+// shell-quoting implementation, and the unquoted items around it are never
+// reinterpreted as shell syntax.
 function quoteArgvItem(item) {
-  if (item !== '' && !/[\s"]/.test(item)) return item;
-  return `"${item.replace(/"/g, '\\"')}"`;
+  return needsArgvQuoting(item) ? `"${item.replace(/"/g, '\\"')}"` : item;
 }
 
 function joinArgv(items) {

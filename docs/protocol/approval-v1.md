@@ -177,12 +177,13 @@ A relayed enroll or revoke that a node stages is judged against its own
   `prev` links to the previous entry. `anchor` is the oldest retained entry.
 - `kl.audit.slice.head { v, type, node_id, seq, hash, at }`
 
-A node's own ledger heals itself before it ever answers a history request: if
-a previous append was interrupted mid-write, the incomplete trailing line is
-moved aside and truncated off the live segment the next time anything appends,
-so a slice is built only from acknowledged entries — a torn tail is never
-silently treated as the current tail, and never handed to a phone or the relay
-as if it were real.
+If a previous append was interrupted mid-write, healing happens on the next
+append: only then is the incomplete trailing line moved aside and truncated
+off the live segment. In the meantime, any reader (a history slice, `tail`,
+`entriesAfter`, `head`) simply skips that unacknowledged trailing line rather
+than truncating it — a torn tail is never treated as the current tail, and
+never handed to a phone or the relay as if it were real, whether or not an
+append has come along yet to heal it for good.
 
 ### 3.6 Verifying `kl.audit.slice`
 
@@ -312,10 +313,15 @@ than a generic failure.
     array index (`[0]`) is never quoted — only an object-key segment can be.
   - Command-like values (a key named `command`, `script` or `argv` anywhere on
     the path, and every `run` step) are joined into one string for display.
-    Joining quotes any item that is empty or contains whitespace or a `"`
-    (with `"` inside it backslash-escaped), so item boundaries stay visible
-    even when they wouldn't be with a plain space join — `["run.sh", "",
-    "has space"]` displays as `run.sh "" "has space"`, not
+    Joining quotes any item that is empty or contains a `"` or a code point
+    from this EXACT list — not a language's built-in "whitespace" character
+    class, since JavaScript's `\s`, Kotlin's (ASCII-only) `\s` and ICU's
+    definition of whitespace all disagree, which would make the two apps
+    quote differently for the same argv: U+0009–U+000D, U+0020, U+00A0,
+    U+1680, U+2000–U+200A, U+2028–U+2029, U+202F, U+205F, U+3000, U+FEFF.
+    (with `"` inside a quoted item backslash-escaped), so item boundaries
+    stay visible even when they wouldn't be with a plain space join —
+    `["run.sh", "", "has space"]` displays as `run.sh "" "has space"`, not
     `run.sh  has space` (indistinguishable from three plain words).
   - A command-like string longer than 2000 **Unicode code points** — not
     UTF-16 units, so a value made entirely of astral characters (surrogate
