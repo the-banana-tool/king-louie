@@ -31,8 +31,9 @@ async function launchApp() {
   const bridgeScript = path.join(__dirname, '_bridge.js');
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-e2e-profile-'));
 
+  let child;
   try {
-    const child = spawn(electronPath, [APP_PATH, `--user-data-dir=${userDataDir}`], {
+    child = spawn(electronPath, [APP_PATH, `--user-data-dir=${userDataDir}`], {
       env: {
         ...process.env,
         KL_TEST_BRIDGE_PORT: '1', // truthy — bridge picks its own port via port 0
@@ -72,6 +73,9 @@ async function launchApp() {
 
     return { child, bridgePort, closed: false, userDataDir };
   } catch (err) {
+    if (child && child.exitCode === null && child.signalCode === null) {
+      try { child.kill(); } catch { /* already dead */ }
+    }
     removeUserDataDir(userDataDir);
     throw err;
   }

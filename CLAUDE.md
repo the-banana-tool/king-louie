@@ -137,17 +137,25 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage2-unattended.md`.
 - Budgets live in `.kl/budget.json`. `usd` and `deadline` at 100 % pause the
   case and record `statusReason.resumeTo` (the status to return to); per-day
   categories refuse their action until the local day rolls over. Effects
-  (raising a limit, resuming from `needs-direction`) apply only when the
-  answer to a host-created `budget-grant` or `direction` question is what
-  supplies the fact — a `user-message` or model-sourced fact naming the same
-  subject/attr is recorded but changes nothing, so an owner's quoted "ok" in
-  chat cannot self-serve a raise; a reply must be routed through
-  `CaseRuntime.answerQuestion` (a grant reply is just the amount).
+  (raising a limit, resuming from `needs-direction`) apply only through two
+  host-verified paths, checked in `CaseRuntime.applyOwnerFact`: an answer to a
+  host-created `budget-grant` or `direction` question (routed through
+  `CaseRuntime.answerQuestion`; a grant reply is just the amount), or an owner
+  action (the case panel's Grant button, `CaseRuntime.grantBudget`, which
+  writes an `owner-action`-sourced fact and applies the effect directly, no
+  question involved). A model-created question or a quoted user-message fact
+  naming the same subject/attr is recorded but changes nothing, so an owner's
+  quoted "ok" in chat cannot self-serve a raise.
 - Questions live in `.kl/questions/`. Create them with
   `CaseRuntime.createQuestion`; answer them only through
   `CaseRuntime.answerQuestion` (exactly one host-verified `user` fact).
 - Case-file writes outside a turn go through `CaseRuntime.systemAction`. Tests
   inject a fake clock with `new CaseRuntime({ now })` and a temp root.
-- `CaseRuntime.shutdown` drains in-flight wake-ups before releasing locks. The
-  e2e suite runs every launch on its own throwaway `--user-data-dir` (see
-  Testing above), so it never touches a real case store.
+- On shutdown, `create-core.js`'s `shutdown()` stops cron, calls
+  `CaseRuntime.beginShutdown` and `abortUnattended` (blocking any new wake-up
+  turn and signalling in-flight ones), awaits the in-flight `cases:wakeups`
+  sweep (`wakeupsInFlight`, bounded by `shutdownTimeoutMs`), then calls
+  `CaseRuntime.releaseAll` so a turn cut off by quit doesn't leave its case
+  locked. The e2e suite runs every launch on its own throwaway
+  `--user-data-dir` (see Testing above), so it never touches a real case
+  store.
