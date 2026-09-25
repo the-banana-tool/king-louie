@@ -10,8 +10,8 @@ const { NodeIdentity, deriveNodeId } = require('../src/mesh/node-identity');
 const keys = require('../src/desktop-bridge/keys');
 const pairing = require('../src/desktop-bridge/pairing');
 const { assertAdminOwned } = require('../src/service/config');
-const { runDesktopCommand, grantDirectoryReadControl, PAIR_WARNING } = require('../src/service/commands/desktop');
-const { main } = require('../src/service/cli');
+const { runDesktopCommand, grantDirectoryReadControl, applyWindowsAcls, PAIR_WARNING } = require('../src/service/commands/desktop');
+const { main, parseArgs } = require('../src/service/cli');
 
 const selfUid = typeof process.getuid === 'function' ? process.getuid() : 0;
 const dirs = [];
@@ -46,6 +46,11 @@ const deps = (l, extra = {}) => ({
   withServiceCore: () => { throw new Error('withServiceCore must not be called'); },
   applyWindowsAcls: () => {},
   now: () => new Date('2026-09-23T14:02:11.123Z'),
+  // fix round 1 (I1): pairing now confirms before writing. Tests that don't
+  // care about that flow simulate an already-confirmed TTY; the tests below
+  // that do care override these.
+  isTTY: () => true,
+  confirm: async () => true,
   ...extra
 });
 
@@ -65,6 +70,8 @@ describe('desktop pair', () => {
     const l2 = layout();
     c = capture();
     assert.strictEqual(await runDesktopCommand({ sub: 'pair', arg: 'klpair1.nope', dataDir: l2.dataDir, io: c.io, deps: deps(l2) }), 2);
+    // fix round 1: the malformed-request stderr text is pinned, not just the exit code.
+    assert.match(c.out.stderr, /^Not a pairing request: /);
   });
 
   it('writes the devices file, the bridge file and merges service.json', async () => {
@@ -116,6 +123,98 @@ describe('desktop pair', () => {
     assert.strictEqual(calls, 1);
     assert.strictEqual(JSON.parse(fs.readFileSync(path.join(l.configDir, 'desktop-bridge.json'), 'utf8')).nodeId, created.nodeId);
   });
+
+  it('creates a missing config dir with mode 0o755', { skip: process.platform === 'win32' ? 'POSIX modes only' : false }, async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-desktop-cli-'));
+    dirs.push(root);
+    const dataDir = path.join(root, 'data');
+    const configDir = path.join(root, 'config'); // deliberately not created
+    fs.mkdirSync(dataDir, { mode: 0o700 });
+    const identity = new NodeIdentity({ nodeName: 'gpu-box' });
+    fs.writeFileSync(path.join(dataDir, 'chat-data.json'), JSON.stringify({ mesh: { identity: { publicKey: identity.publicKey.toString('hex') } } }));
+    const c = capture();
+    const code = await runDesktopCommand({
+      sub: 'pair', arg: request(), dataDir, io: c.io,
+      deps: deps({ configDir }, {})
+    });
+    assert.strictEqual(code, 0, c.out.stderr);
+    assert.strictEqual(fs.statSync(configDir).mode & 0o777, 0o755);
+  });
+});
+
+describe('desktop pair confirmation (fix round 1, I1)', () => {
+  it('prints the fingerprints and warning before writing, then refuses when the owner declines', async () => {
+    const l = layout({ serviceJson: { profile: 'agent' } });
+    const c = capture();
+    const code = await runDesktopCommand({
+      sub: 'pair', arg: request(), dataDir: l.dataDir, io: c.io,
+      deps: deps(l, { isTTY: () => true, confirm: async () => false })
+    });
+    assert.strictEqual(code, 1);
+    assert.ok(c.out.stdout.includes(PAIR_WARNING), 'the info is printed before the refusal');
+    assert.strictEqual(c.out.stderr, 'Not pairing without confirmation.\n');
+    assert.ok(!fs.existsSync(path.join(l.configDir, 'desktop-devices.json')), 'nothing was written');
+    assert.ok(!fs.existsSync(path.join(l.configDir, 'desktop-bridge.json')), 'nothing was written');
+  });
+
+  it('refuses without --yes when stdin is not a TTY, writing nothing', async () => {
+    const l = layout({ serviceJson: { profile: 'agent' } });
+    const c = capture();
+    const code = await runDesktopCommand({
+      sub: 'pair', arg: request(), dataDir: l.dataDir, io: c.io,
+      deps: deps(l, { isTTY: () => false, confirm: async () => { throw new Error('must not prompt without a TTY'); } })
+    });
+    assert.strictEqual(code, 2);
+    assert.ok(c.out.stdout.includes(PAIR_WARNING), 'the info is printed before the refusal');
+    assert.match(c.out.stderr, /--yes/);
+    assert.ok(!fs.existsSync(path.join(l.configDir, 'desktop-devices.json')), 'nothing was written');
+  });
+
+  it('skips the prompt and pairs with --yes on a non-TTY', async () => {
+    const l = layout({ serviceJson: { profile: 'agent' } });
+    const c = capture();
+    const code = await runDesktopCommand({
+      sub: 'pair', arg: request(), dataDir: l.dataDir, io: c.io, yes: true,
+      deps: deps(l, { isTTY: () => false, confirm: async () => { throw new Error('must not prompt with --yes'); } })
+    });
+    assert.strictEqual(code, 0, c.out.stderr);
+    assert.ok(fs.existsSync(path.join(l.configDir, 'desktop-devices.json')));
+  });
+
+  it('pairs after an explicit yes on a TTY, printing the unpair-if-different note', async () => {
+    const l = layout({ serviceJson: { profile: 'agent' } });
+    const req = request();
+    const { deviceId } = pairing.decodePairRequest(req);
+    const c = capture();
+    let asked = null;
+    const code = await runDesktopCommand({
+      sub: 'pair', arg: req, dataDir: l.dataDir, io: c.io,
+      deps: deps(l, { isTTY: () => true, confirm: async (question) => { asked = question; return true; } })
+    });
+    assert.strictEqual(code, 0, c.out.stderr);
+    assert.match(asked, /Trust this device\? \[y\/N\]/);
+    assert.ok(fs.existsSync(path.join(l.configDir, 'desktop-devices.json')));
+    assert.ok(c.out.stdout.includes(`desktop unpair ${deviceId}`));
+  });
+});
+
+describe('applyWindowsAcls (fix round 1, minor)', () => {
+  it('grants the bridge-file ACL, sets its owner to Administrators, and checks configDir ownership', () => {
+    const calls = [];
+    const execFile = (exe, args) => {
+      calls.push({ exe, args });
+      // The ownership warning goes through the powershell-based inspector;
+      // answer with a non-admin owner so the code path that reads the
+      // result (and would warn) actually runs.
+      if (/powershell\.exe$/i.test(exe)) return 'me S-1-5-21-1-2-3-1001\nS-1-5-21-1-2-3-1001 plain\n';
+      return '';
+    };
+    applyWindowsAcls({ bridgeFile: 'C:\\kl\\config\\desktop-bridge.json', configDir: 'C:\\kl\\config', execFile, env: process.env });
+    const icaclsCalls = calls.filter((c) => /icacls\.exe$/i.test(c.exe));
+    assert.ok(icaclsCalls.some((c) => c.args[0] === 'C:\\kl\\config\\desktop-bridge.json' && c.args.includes('/inheritance:r') && c.args.includes('*S-1-5-18:F')));
+    assert.ok(icaclsCalls.some((c) => c.args[0] === 'C:\\kl\\config\\desktop-bridge.json' && c.args.includes('/setowner') && c.args.includes('*S-1-5-32-544')), 'sets owner to Administrators');
+    assert.ok(icaclsCalls.some((c) => c.args[0] === 'C:\\kl\\config' && c.args.includes('/grant')), 'grants read on configDir');
+  });
 });
 
 describe('desktop unpair and list', () => {
@@ -135,6 +234,47 @@ describe('desktop unpair and list', () => {
     assert.strictEqual(c.out.stderr, `No paired desktop ${deviceId}.\n`);
     c = capture();
     assert.strictEqual(await runDesktopCommand({ sub: 'list', dataDir: l.dataDir, io: c.io, deps: deps(l, { isAdmin: () => false }) }), 1);
+  });
+
+  it('refuses unpair without administrator rights', async () => {
+    const l = layout();
+    const c = capture();
+    assert.strictEqual(await runDesktopCommand({ sub: 'unpair', arg: 'kld-aaaaaaaaaaaaaaaa', dataDir: l.dataDir, io: c.io, deps: deps(l, { isAdmin: () => false }) }), 1);
+    assert.strictEqual(c.out.stderr, `desktop unpair writes ${l.configDir}; run it as root/an administrator.\n`);
+  });
+
+  it('rejects an unpair id that is not a device id, without echoing it back', async () => {
+    const l = layout();
+    const c = capture();
+    const code = await runDesktopCommand({ sub: 'unpair', arg: '../etc/passwd', dataDir: l.dataDir, io: c.io, deps: deps(l) });
+    assert.strictEqual(code, 2);
+    assert.strictEqual(c.out.stderr, 'Not a device id.\n');
+    assert.ok(!c.out.stdout.includes('etc/passwd') && !c.out.stderr.includes('etc/passwd'));
+  });
+});
+
+describe('import --from CLI wiring (fix round 1)', () => {
+  it('parseArgs keeps --from\'s value out of the positional list', () => {
+    const { positional, flags } = parseArgs(['import', '--from', '/some/dir']);
+    assert.deepStrictEqual(positional, ['import']);
+    assert.strictEqual(flags.from, '/some/dir');
+  });
+
+  it('reaches runImportCommand with flags.from, not as a positional', async () => {
+    const importCommand = require('../src/service/commands/import');
+    const original = importCommand.runImportCommand;
+    let received = null;
+    importCommand.runImportCommand = async (args) => { received = args; return 0; };
+    try {
+      const c = capture();
+      const code = await main(['import', '--from', 'C:\\some\\desktop-profile', '--dry-run'], { stdin: process.stdin, ...c.io });
+      assert.strictEqual(code, 0);
+      assert.strictEqual(received.flags.from, 'C:\\some\\desktop-profile');
+      assert.strictEqual(received.flags.dryRun, true);
+      assert.strictEqual(received.dataDir === undefined, false);
+    } finally {
+      importCommand.runImportCommand = original;
+    }
   });
 });
 

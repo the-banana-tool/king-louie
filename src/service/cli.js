@@ -13,6 +13,10 @@ const HELP = `Usage:
   king-louie-service channel allow <channel> <id> [--group] [--data-dir DIR]
   king-louie-service channel remove <channel> <id> [--group] [--data-dir DIR]
   king-louie-service channel approval <channel> (<chat-id> | --clear) [--data-dir DIR]
+  king-louie-service desktop pair <request> [--data-dir DIR] [--yes]
+  king-louie-service desktop unpair <device-id> [--data-dir DIR]
+  king-louie-service desktop list [--data-dir DIR]
+  king-louie-service import --from <desktop user-data dir> [--data-dir DIR] [--dry-run]
   king-louie-service install [--profile P] [--user NAME] [--data-dir DIR] [--dry-run]
   king-louie-service uninstall [--dry-run]
 
@@ -29,7 +33,7 @@ const CHANNEL_HELP = `Usage: king-louie-service channel list <channel> [--data-d
 
 const VALUE_FLAGS = new Set(['data-dir', 'profile', 'user', 'from']);
 // Flags that must never carry a value, whichever form produced it.
-const BOOLEAN_FLAGS = new Set(['dry-run', 'group', 'clear']);
+const BOOLEAN_FLAGS = new Set(['dry-run', 'group', 'clear', 'yes']);
 
 function parseArgs(argv) {
   const positional = [];
@@ -375,7 +379,7 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
 
       case 'desktop': {
         const { runDesktopCommand } = require('./commands/desktop');
-        return await runDesktopCommand({ sub, arg, dataDir, io, deps: { runningServicePid, withServiceCore } });
+        return await runDesktopCommand({ sub, arg, dataDir, io, yes: Boolean(flags.yes), deps: { runningServicePid, withServiceCore } });
       }
 
       case 'import': {

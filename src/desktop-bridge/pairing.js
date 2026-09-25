@@ -19,9 +19,13 @@ const LABEL_SUFFIX = "'s desktop";
 // C0 controls, DEL and the C1 controls (U+0080-009F, spec §4.1) so a raw
 // terminal-control byte can never reach a device list or a pairing UI; the
 // bidi override/isolate controls (U+202A-202E, U+2066-2069) so a label can't
-// be crafted to display as something other than what it is.
+// be crafted to display as something other than what it is; the zero-width
+// and formatting characters (U+200B-U+200F word joiners and marks, U+061C
+// Arabic letter mark, U+2028/U+2029 line/paragraph separators, U+FEFF
+// BOM/zero-width no-break space) so a label can't hide characters or break
+// line-oriented rendering of the device list (fix round 1, minor).
 // eslint-disable-next-line no-control-regex
-const CONTROL_RE = new RegExp('[\\u0000-\\u001f\\u007f-\\u009f\\u202a-\\u202e\\u2066-\\u2069]');
+const CONTROL_RE = new RegExp('[\\u0000-\\u001f\\u007f-\\u009f\\u061c\\u200b-\\u200f\\u2028\\u2029\\u202a-\\u202e\\u2066-\\u2069\\ufeff]');
 const MAX_PAIR_REQUEST_LENGTH = 256;
 // A DER SPKI Ed25519 key is exactly 44 bytes (12-byte prefix + 32-byte raw
 // key), so exactly 88 lowercase hex characters — anything else is refused

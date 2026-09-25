@@ -163,6 +163,12 @@ describe('pairing request', () => {
     assert.doesNotThrow(() => pairing.encodePairRequest({ publicKeyRaw: newRawKey(), label: 'ordinary label' }));
   });
 
+  it('rejects zero-width/formatting characters and line/paragraph separators (fix round 1)', () => {
+    for (const ch of ['؜', '​', '‏', ' ', ' ', '﻿']) {
+      assert.throws(() => pairing.encodePairRequest({ publicKeyRaw: newRawKey(), label: `bad${ch}label` }), /control characters/);
+    }
+  });
+
   it('builds a default label that always fits 64 bytes for a non-ASCII username, on a code-point boundary', () => {
     const label = pairing.defaultDeviceLabel('日本語ユーザー名'.repeat(5));
     assert.ok(Buffer.byteLength(label, 'utf8') <= 64);
