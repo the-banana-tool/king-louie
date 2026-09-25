@@ -38,14 +38,17 @@ function assertEnabledListenersBound(core, features) {
 function loadProfile(profile) {
   if (profile === 'agent') {
     return {
-      async start({ dataDir, features, ports, workspace, adminUid }) {
+      async start({ dataDir, features, ports, workspace, adminUid, configDir }) {
         const { createCore } = require('../core');
         const { CHAT_DATA_DEFAULTS } = require('../core/settings');
         const { buildServicePorts } = require('./ports');
         const servicePorts = buildServicePorts({ dataDir, chatDataDefaults: CHAT_DATA_DEFAULTS });
         // Fleet stage 7: the desktop bridge's ui/host ports, when enabled.
+        // configDir: injectable so tests never fall through to the real
+        // per-platform admin config dir (e.g. /etc/king-louie); production
+        // callers omit it and get service-wiring's own platform default.
         const { createDesktopBridgeHost } = require('../desktop-bridge/service-wiring');
-        const desktopBridge = createDesktopBridgeHost({ dataDir, features, ports, adminUid });
+        const desktopBridge = createDesktopBridgeHost({ dataDir, features, ports, adminUid, configDir });
         const core = createCore({
           ...servicePorts,
           ...desktopBridge.coreDeps,
@@ -72,10 +75,16 @@ function loadProfile(profile) {
           throw err;
         }
         return {
-          // The bridge says bye and closes before the core goes down.
+          // The bridge says bye and closes before the core goes down; the
+          // core must still shut down even if the bridge's own stop() throws
+          // (a wedged dispatcher, say) — never skip it and leave cron timers
+          // and stores running.
           stop: async () => {
-            await desktopBridge.stop();
-            await core.shutdown();
+            try {
+              await desktopBridge.stop();
+            } finally {
+              await core.shutdown();
+            }
           },
           masterKeySource: servicePorts.masterKeySource,
           desktopBridge

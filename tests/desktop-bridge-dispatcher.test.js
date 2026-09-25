@@ -87,7 +87,7 @@ function connection(label = 'desk a') {
   return conn;
 }
 
-function makeDispatcher({ overrides = {}, coreOverride = null, approvals = null } = {}) {
+function makeDispatcher({ overrides = {}, coreOverride = null, approvals = null, createImporter = null } = {}) {
   let current = null;
   const dispatcher = createBridgeDispatcher({
     core: coreOverride || core,
@@ -100,7 +100,8 @@ function makeDispatcher({ overrides = {}, coreOverride = null, approvals = null 
     registerHandlers: (ipc, ctx) => {
       registerHandlers(ipc, ctx);
       for (const [channel, fn] of Object.entries(overrides)) ipc.handle(channel, fn);
-    }
+    },
+    createImporter
   });
   return { dispatcher, use: (conn) => { current = conn; } };
 }
@@ -334,5 +335,44 @@ describe('bridge dispatcher', () => {
     assert.deepStrictEqual(resultFor(a, 15).value, { available: false });
     await dispatcher.handleFrame(a, { t: 'call', id: 16, method: 'import.plan', params: {} });
     assert.strictEqual(resultFor(a, 16).code, 'IMPORT_UNAVAILABLE');
+  });
+
+  // Task 11 fix round 1, I1: the old getImporter() checked `!importer` and
+  // only assigned it after awaiting createImporter(...), so a second
+  // import.plan/import.apply landing while that await was still in flight saw
+  // `importer` still null and built its own DesktopImporter — and the real
+  // DesktopImporter's constructor sweeps every `.import-*` staging dir on
+  // construction, so the second instance would delete the first one's live
+  // staging (Task 8 carry). getImporter now memoizes the PROMISE itself
+  // before any await, so both calls share the one in-flight construction.
+  it('builds exactly one importer when two import.plan calls race the construction', async () => {
+    let constructions = 0;
+    let cleanups = 0;
+    // Every in-flight construction's release, not just the first: if the fix
+    // regressed and a second DesktopImporter got built, this must still
+    // settle both instead of hanging the test on a resolver a second
+    // construction silently overwrote.
+    const releases = [];
+    const createImporter = async () => {
+      constructions += 1;
+      // Mirrors DesktopImporter's constructor: cleanupOrphanedStaging runs
+      // synchronously as part of construction, before the slow async setup
+      // (buildImportTargets does real file/store I/O) settles.
+      cleanups += 1;
+      await new Promise((resolve) => releases.push(resolve));
+      return { plan: async () => ({ planId: 'p-1', items: [], counts: {} }) };
+    };
+    const { dispatcher, use } = makeDispatcher({ createImporter });
+    const a = connection();
+    use(a);
+    const call1 = dispatcher.handleFrame(a, { t: 'call', id: 20, method: 'import.plan', params: {} });
+    const call2 = dispatcher.handleFrame(a, { t: 'call', id: 21, method: 'import.plan', params: {} });
+    await waitFor(() => releases.length > 0);
+    releases.forEach((release) => release());
+    await Promise.all([call1, call2]);
+    assert.strictEqual(constructions, 1, 'exactly one DesktopImporter constructed');
+    assert.strictEqual(cleanups, 1, 'exactly one cleanupOrphanedStaging sweep');
+    assert.strictEqual(resultFor(a, 20).value.planId, 'p-1');
+    assert.strictEqual(resultFor(a, 21).value.planId, 'p-1');
   });
 });

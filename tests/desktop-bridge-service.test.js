@@ -34,6 +34,15 @@ function layout(adminCfg = null) {
   return { dataDir, configDir };
 }
 const opts = (configDir) => ({ adminConfigDir: configDir, geteuid: () => -1, adminUid: selfUid });
+const waitFor = async (fn, ms = 5000) => {
+  const start = Date.now();
+  while (Date.now() - start < ms) {
+    const v = fn();
+    if (v) return v;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('waitFor timed out');
+};
 
 describe('service config', () => {
   it('adds desktopBridge off by default on port 18795', () => {
@@ -108,7 +117,7 @@ describe('createDesktopBridgeHost', () => {
       const states = [];
       client.on('state', (s) => states.push(s.status));
       await host.stop();
-      await new Promise((resolve) => { const check = () => (states.length ? resolve() : setTimeout(check, 10)); check(); });
+      await waitFor(() => states.length > 0);
       assert.strictEqual(host.coreDeps.host.interactive(), false);
       client.close();
     } finally {
@@ -120,19 +129,51 @@ describe('createDesktopBridgeHost', () => {
 
 describe('loadProfile("agent") with the desktop bridge', () => {
   it('starts the bridge after the core and stops it first', async () => {
-    const { dataDir } = layout();
-    const running = await loadProfile('agent').start({
-      dataDir,
-      features: { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false, desktopBridge: true },
-      ports: { gateway: 18793, webhook: 18794, desktopBridge: 0 },
-      workspace: dataDir,
-      adminUid: selfUid
-    });
+    // configDir is injected so this never falls through to the real
+    // per-platform admin config dir (e.g. /etc/king-louie) that
+    // loadNodeConfig would otherwise default to.
+    const { dataDir, configDir } = layout();
+
+    // Order spy: wrap createCore's and createDesktopBridgeHost's returned
+    // objects (via the cached modules run.js itself requires) rather than
+    // changing production code, to prove stop() really calls the bridge's
+    // stop before the core's shutdown — not just that both eventually run.
+    const coreModule = require('../src/core');
+    const wiring = require('../src/desktop-bridge/service-wiring');
+    const originalCreateCore = coreModule.createCore;
+    const originalCreateHost = wiring.createDesktopBridgeHost;
+    const order = [];
+    coreModule.createCore = (createOpts) => {
+      const core = originalCreateCore(createOpts);
+      const originalShutdown = core.shutdown;
+      core.shutdown = async (...args) => { order.push('core'); return originalShutdown(...args); };
+      return core;
+    };
+    wiring.createDesktopBridgeHost = (hostOpts) => {
+      const host = originalCreateHost(hostOpts);
+      const originalStop = host.stop;
+      host.stop = async (...args) => { order.push('bridge'); return originalStop(...args); };
+      return host;
+    };
     try {
-      assert.ok(running.desktopBridge.server.port > 0);
+      const running = await loadProfile('agent').start({
+        dataDir,
+        configDir,
+        features: { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false, desktopBridge: true },
+        ports: { gateway: 18793, webhook: 18794, desktopBridge: 0 },
+        workspace: dataDir,
+        adminUid: selfUid
+      });
+      try {
+        assert.ok(running.desktopBridge.server.port > 0);
+      } finally {
+        await running.stop();
+      }
+      assert.strictEqual(running.desktopBridge.server, null);
+      assert.deepStrictEqual(order, ['bridge', 'core']);
     } finally {
-      await running.stop();
+      coreModule.createCore = originalCreateCore;
+      wiring.createDesktopBridgeHost = originalCreateHost;
     }
-    assert.strictEqual(running.desktopBridge.server, null);
   });
 });

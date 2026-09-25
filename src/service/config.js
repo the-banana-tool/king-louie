@@ -34,10 +34,11 @@ function validatePorts(ports, file) {
       throw new Error(`Invalid ${file}: ports.${name} is not a known port (expected ${Object.keys(DEFAULT_PORTS).join(', ')})`);
     }
     // 0 (ephemeral) only for the desktop bridge, which tests bind anywhere;
-    // the desktop re-reads the bound port from desktop-bridge.json.
+    // a real paired desktop can't discover an ephemeral port, so this is not
+    // a production setting (see the load-time warning in loadServiceConfig).
     const min = name === 'desktopBridge' ? 0 : 1;
     if (!Number.isInteger(value) || value < min || value > 65535) {
-      throw new Error(`Invalid ${file}: ports.${name} must be an integer from 1 to 65535`);
+      throw new Error(`Invalid ${file}: ports.${name} must be an integer from ${min} to 65535`);
     }
     out[name] = value;
   }
@@ -170,11 +171,12 @@ function loadServiceConfig(dataDir, overrides = {}, {
     log.info(`feature "${name}" is ENABLED by ${source}`);
   }
 
-  return {
-    profile,
-    features,
-    ports: { ...DEFAULT_PORTS, ...validatePorts(adminCfg.ports, adminFile) }
-  };
+  const ports = { ...DEFAULT_PORTS, ...validatePorts(adminCfg.ports, adminFile) };
+  if (features.desktopBridge && ports.desktopBridge === 0) {
+    log.warn("ports.desktopBridge 0 is for tests; the paired desktop can't reach an ephemeral port");
+  }
+
+  return { profile, features, ports };
 }
 
 module.exports = { loadServiceConfig, assertAdminOwned, PROFILES, DEFAULT_PORTS, DEFAULT_FEATURES, CONFIG_FILE };

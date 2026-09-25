@@ -190,13 +190,26 @@ function createBridgeDispatcher({
     return { ok: true };
   }
 
+  // The one DesktopImporter for this dispatcher's lifetime (Task 8 carry: a
+  // second instance's cleanupOrphanedStaging would wipe the first one's live
+  // staging directories). The PROMISE — not its resolved value — is memoized
+  // before any await, so two import.plan/import.apply calls that land while
+  // construction is still in flight share the one in-flight construction
+  // instead of each starting their own createImporter(). Reset on rejection
+  // so a failed construction can be retried by a later call. `importer`
+  // (the resolved instance) stays a plain variable so onDisconnect's
+  // best-effort expireConnection can check it without awaiting.
+  let importerPromise = null;
   let importer = null;
   async function getImporter() {
-    if (!importer) {
-      if (!createImporter) throw fail('IMPORT_UNAVAILABLE', 'This service cannot import from a desktop.');
-      importer = await createImporter({ scope, checkPath });
-    }
-    return importer;
+    if (!createImporter) throw fail('IMPORT_UNAVAILABLE', 'This service cannot import from a desktop.');
+    importerPromise ||= createImporter({ scope, checkPath })
+      .then((instance) => { importer = instance; return instance; })
+      .catch((err) => {
+        importerPromise = null;
+        throw err;
+      });
+    return importerPromise;
   }
 
   async function readableDirectory(target) {
