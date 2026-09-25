@@ -323,38 +323,38 @@ describe('bridge-file trust (POSIX)', { skip: process.platform === 'win32' ? 'PO
     return file;
   };
 
-  it('refuses a file owned by an ordinary user outside test mode', (t) => {
+  it('refuses a file owned by an ordinary user outside test mode', async (t) => {
     if (process.getuid() === 0) { t.skip('running as root'); return; }
-    const out = pairing.checkBridgeFileTrust(setup(), { env: {}, platform: 'linux' });
+    const out = await pairing.checkBridgeFileTrust(setup(), { env: {}, platform: 'linux' });
     assert.strictEqual(out.ok, false);
     assert.strictEqual(out.code, 'BRIDGE_FILE_UNTRUSTED');
     assert.match(out.error, /is not owned by an administrator; refusing to trust it\./);
   });
 
-  it('accepts the current uid only with KL_TEST_MODE=1 and KL_DESKTOP_BRIDGE_FILE', () => {
+  it('accepts the current uid only with KL_TEST_MODE=1 and KL_DESKTOP_BRIDGE_FILE', async () => {
     const file = setup();
-    assert.strictEqual(pairing.checkBridgeFileTrust(file, { env: { KL_TEST_MODE: '1', KL_DESKTOP_BRIDGE_FILE: file }, platform: 'linux' }).ok, true);
-    assert.strictEqual(pairing.checkBridgeFileTrust(file, { env: { KL_TEST_MODE: '1' }, platform: 'linux' }).ok, process.getuid() === 0);
+    assert.strictEqual((await pairing.checkBridgeFileTrust(file, { env: { KL_TEST_MODE: '1', KL_DESKTOP_BRIDGE_FILE: file }, platform: 'linux' })).ok, true);
+    assert.strictEqual((await pairing.checkBridgeFileTrust(file, { env: { KL_TEST_MODE: '1' }, platform: 'linux' })).ok, process.getuid() === 0);
   });
 
-  it('refuses a group-writable file and a symlink even in test mode', () => {
+  it('refuses a group-writable file and a symlink even in test mode', async () => {
     const writable = setup(0o664);
-    assert.strictEqual(pairing.checkBridgeFileTrust(writable, { env: { KL_TEST_MODE: '1', KL_DESKTOP_BRIDGE_FILE: writable }, platform: 'linux' }).ok, false);
+    assert.strictEqual((await pairing.checkBridgeFileTrust(writable, { env: { KL_TEST_MODE: '1', KL_DESKTOP_BRIDGE_FILE: writable }, platform: 'linux' })).ok, false);
     const real = setup();
     const link = path.join(path.dirname(real), 'link.json');
     fs.symlinkSync(real, link);
-    assert.strictEqual(pairing.checkBridgeFileTrust(link, { env: { KL_TEST_MODE: '1', KL_DESKTOP_BRIDGE_FILE: link }, platform: 'linux' }).ok, false);
+    assert.strictEqual((await pairing.checkBridgeFileTrust(link, { env: { KL_TEST_MODE: '1', KL_DESKTOP_BRIDGE_FILE: link }, platform: 'linux' })).ok, false);
   });
 
-  it('reads a trusted file and reports a missing one', () => {
+  it('reads a trusted file and reports a missing one', async () => {
     const identity = new NodeIdentity({ nodeName: 'gpu-box' });
     const file = setup();
     fs.writeFileSync(file, JSON.stringify(pairing.bridgeFileRecord({ publicKey: identity.publicKey, port: 18796 })));
     const env = { KL_TEST_MODE: '1', KL_DESKTOP_BRIDGE_FILE: file };
-    const out = pairing.readTrustedBridgeFile(file, { env, platform: 'linux' });
+    const out = await pairing.readTrustedBridgeFile(file, { env, platform: 'linux' });
     assert.strictEqual(out.ok, true);
     assert.strictEqual(out.record.nodeId, identity.nodeId);
-    const missing = pairing.readTrustedBridgeFile(path.join(path.dirname(file), 'nope.json'), { env, platform: 'linux' });
+    const missing = await pairing.readTrustedBridgeFile(path.join(path.dirname(file), 'nope.json'), { env, platform: 'linux' });
     assert.strictEqual(missing.code, 'BRIDGE_FILE_MISSING');
   });
 });
@@ -363,18 +363,18 @@ describe('bridge-file trust (Windows rules, injected inspector)', () => {
   const file = 'C:\\ProgramData\\KingLouie\\config\\desktop-bridge.json';
   const inspector = (entries, me = 'S-1-5-21-1-2-3-1001') => () => ({ me, entries });
 
-  it('accepts SYSTEM or Administrators as owner of the file and its directory', () => {
-    const out = pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: inspector([{ owner: 'S-1-5-32-544', link: false }, { owner: 'S-1-5-18', link: false }]) });
+  it('accepts SYSTEM or Administrators as owner of the file and its directory', async () => {
+    const out = await pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: inspector([{ owner: 'S-1-5-32-544', link: false }, { owner: 'S-1-5-18', link: false }]) });
     assert.deepStrictEqual(out, { ok: true });
   });
 
-  it('refuses a user-owned directory, a reparse point and (outside test mode) the current user', () => {
+  it('refuses a user-owned directory, a reparse point and (outside test mode) the current user', async () => {
     const user = 'S-1-5-21-1-2-3-1001';
-    assert.strictEqual(pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: inspector([{ owner: user, link: false }, { owner: 'S-1-5-18', link: false }]) }).code, 'BRIDGE_FILE_UNTRUSTED');
-    assert.strictEqual(pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: inspector([{ owner: 'S-1-5-18', link: true }, { owner: 'S-1-5-18', link: false }]) }).code, 'BRIDGE_FILE_UNTRUSTED');
+    assert.strictEqual((await pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: inspector([{ owner: user, link: false }, { owner: 'S-1-5-18', link: false }]) })).code, 'BRIDGE_FILE_UNTRUSTED');
+    assert.strictEqual((await pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: inspector([{ owner: 'S-1-5-18', link: true }, { owner: 'S-1-5-18', link: false }]) })).code, 'BRIDGE_FILE_UNTRUSTED');
     const testEnv = { KL_TEST_MODE: '1', KL_DESKTOP_BRIDGE_FILE: file };
-    assert.strictEqual(pairing.checkBridgeFileTrust(file, { env: testEnv, platform: 'win32', inspectOwners: inspector([{ owner: user, link: false }, { owner: user, link: false }]) }).ok, true);
-    assert.strictEqual(pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: inspector([{ owner: 'S-1-5-18', link: false }, null]) }).code, 'BRIDGE_FILE_MISSING');
+    assert.strictEqual((await pairing.checkBridgeFileTrust(file, { env: testEnv, platform: 'win32', inspectOwners: inspector([{ owner: user, link: false }, { owner: user, link: false }]) })).ok, true);
+    assert.strictEqual((await pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: inspector([{ owner: 'S-1-5-18', link: false }, null]) })).code, 'BRIDGE_FILE_MISSING');
   });
 
   it('exports the installers handle-based inspector', () => {
@@ -397,29 +397,29 @@ describe('bridge-file trust (Windows rules, injected inspector)', () => {
     assert.strictEqual(out.entries[1].link, false);
   });
 
-  it('refuses (never throws) when the inspector reports no entries, or fewer than asked about', () => {
-    const empty = pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: inspector([]) });
+  it('refuses (never throws) when the inspector reports no entries, or fewer than asked about', async () => {
+    const empty = await pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: inspector([]) });
     assert.strictEqual(empty.ok, false);
     assert.strictEqual(empty.code, 'BRIDGE_FILE_UNTRUSTED');
-    const short = pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: inspector([{ owner: 'S-1-5-18', link: false }]) });
+    const short = await pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: inspector([{ owner: 'S-1-5-18', link: false }]) });
     assert.strictEqual(short.ok, false);
     assert.strictEqual(short.code, 'BRIDGE_FILE_UNTRUSTED');
   });
 
-  it('refuses (never throws) when the inspector returns a non-array entries', () => {
+  it('refuses (never throws) when the inspector returns a non-array entries', async () => {
     const notArray = () => ({ me: 'S-1-5-21-1-2-3-1001', entries: undefined });
-    assert.doesNotThrow(() => pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: notArray }));
-    const out = pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: notArray });
+    await assert.doesNotReject(() => pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: notArray }));
+    const out = await pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: notArray });
     assert.strictEqual(out.ok, false);
     assert.strictEqual(out.code, 'BRIDGE_FILE_UNTRUSTED');
 
     const stringEntries = () => ({ me: 'S-1-5-21-1-2-3-1001', entries: 'not an array' });
-    assert.doesNotThrow(() => pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: stringEntries }));
-    assert.strictEqual(pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: stringEntries }).ok, false);
+    await assert.doesNotReject(() => pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: stringEntries }));
+    assert.strictEqual((await pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: stringEntries })).ok, false);
 
     const noReport = () => undefined;
-    assert.doesNotThrow(() => pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: noReport }));
-    assert.strictEqual(pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: noReport }).ok, false);
+    await assert.doesNotReject(() => pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: noReport }));
+    assert.strictEqual((await pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners: noReport })).ok, false);
   });
 
   // Injects execFile rather than shelling out to a real powershell.exe: this
@@ -453,5 +453,52 @@ describe('bridge-file trust (Windows rules, injected inspector)', () => {
     const execFile = () => 'me S-1-5-21-1-2-3-1001\nmissing\nS-1-5-18 link\n';
     const out = pairing.inspectWindowsOwners(['C:\\gone', 'C:\\link'], { execFile, env: {} });
     assert.deepStrictEqual(out.entries, [null, { owner: 'S-1-5-18', link: true }]);
+  });
+
+  // Final review I2: the desktop's trust read must not block the Electron
+  // main process for the ~1.5 s PowerShell takes. The async inspector drives
+  // a callback-style execFile, and the event loop keeps turning meanwhile.
+  it('the async inspector uses a callback execFile and never blocks the event loop', async () => {
+    let captured;
+    let finish;
+    const execFile = (cmd, args, options, callback) => {
+      captured = { cmd, args, options };
+      finish = () => callback(null, 'me S-1-5-21-1-2-3-1001\nS-1-5-18 plain\nS-1-5-18 link\n');
+    };
+    const pending = pairing.inspectWindowsOwnersAsync(['C:\\dir', 'C:\\dir\\f.json'], { execFile, env: {} });
+    let loopTurned = false;
+    await new Promise((resolve) => setImmediate(() => { loopTurned = true; resolve(); }));
+    assert.strictEqual(loopTurned, true);
+    finish();
+    const out = await pending;
+    assert.deepStrictEqual(out, { me: 'S-1-5-21-1-2-3-1001', entries: [{ owner: 'S-1-5-18', link: false }, { owner: 'S-1-5-18', link: true }] });
+    assert.match(captured.cmd, /powershell\.exe$/i);
+    assert.strictEqual(captured.options.env.KL_INSPECT_PATHS, 'C:\\dir\nC:\\dir\\f.json');
+  });
+
+  it('the async inspector rejects on a PowerShell failure and the trust check refuses', async () => {
+    const execFile = (cmd, args, options, callback) => setImmediate(() => callback(new Error('exit 1')));
+    await assert.rejects(pairing.inspectWindowsOwnersAsync(['C:\\x'], { execFile, env: {} }), /exit 1/);
+    const inspectOwners = (paths, opts) => pairing.inspectWindowsOwnersAsync(paths, { ...opts, execFile });
+    const out = await pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners });
+    assert.strictEqual(out.code, 'BRIDGE_FILE_UNTRUSTED');
+  });
+
+  it('checkBridgeFileTrust and readTrustedBridgeFile return promises', () => {
+    const inspectOwners = () => ({ me: 'x', entries: [{ owner: 'S-1-5-18', link: false }, null] });
+    const a = pairing.checkBridgeFileTrust(file, { env: {}, platform: 'win32', inspectOwners });
+    const b = pairing.readTrustedBridgeFile(file, { env: {}, platform: 'win32', inspectOwners });
+    assert.ok(a instanceof Promise);
+    assert.ok(b instanceof Promise);
+    return Promise.all([a, b]);
+  });
+
+  it('reads a real owner through PowerShell asynchronously', { skip: process.platform !== 'win32' ? 'Windows only' : false }, async () => {
+    const f = path.join(tmp(), 'probe.json');
+    fs.writeFileSync(f, '{}');
+    const out = await pairing.inspectWindowsOwnersAsync([path.dirname(f), f]);
+    assert.match(out.me, /^S-1-5-/);
+    assert.strictEqual(out.entries.length, 2);
+    assert.strictEqual(out.entries[1].link, false);
   });
 });

@@ -55,7 +55,7 @@ async function startService() {
 
 function controllerFor({
   mode = 'standalone', safeStorage = fakeSafeStorage(), readBridgeFile, env = {},
-  pollWindowMs, clientFactory
+  pollWindowMs, clientFactory, pollMs = 20
 } = {}) {
   const userDataDir = tmp();
   const state = openDesktopState(userDataDir, safeStorage, { storeFactory });
@@ -65,7 +65,7 @@ function controllerFor({
   const window = { isDestroyed: () => false, webContents: { send: (ch, p) => sentToWindow.push([ch, p]) } };
   const controller = createDesktopController({
     state, mode, app, getWindow: () => window, env, platform: 'linux', userDataDir, safeStorage,
-    stdout: { write: (s) => out.push(s) }, argv: ['electron', '.'], readBridgeFile, pollMs: 20, username: 'alex',
+    stdout: { write: (s) => out.push(s) }, argv: ['electron', '.'], readBridgeFile, pollMs, username: 'alex',
     ...(pollWindowMs !== undefined ? { pollWindowMs } : {}),
     ...(clientFactory ? { clientFactory } : {})
   });
@@ -532,6 +532,81 @@ describe('desktop controller', () => {
     assert.strictEqual(applied.code, 'IMPORT_FAILED');
     assert.strictEqual(client.connected, false, 'the session is closed even though apply failed');
     assert.ok(sentToWindow.some(([ch]) => ch === 'desktop:importProgress'), 'progress notify still ran in the finally');
+    controller.dispose();
+  });
+});
+
+// Final review I2: the bridge-file trust read is async (a PowerShell child
+// process on Windows), so the pairing poll and confirm must await it and
+// cope with state changing while it runs.
+describe('desktop controller with an async bridge-file reader', () => {
+  const deferred = () => {
+    let resolve;
+    const promise = new Promise((r) => { resolve = r; });
+    return { promise, resolve };
+  };
+  const okRecord = () => ({ ok: true, record: pairing.parseBridgeFile(JSON.stringify(pairing.bridgeFileRecord({ publicKey: identity.publicKey, port: 18796 }))) });
+
+  it('pairStart answers with what the first (async) read found', async () => {
+    const { controller } = controllerFor({
+      readBridgeFile: () => new Promise((resolve) => setTimeout(() => resolve(okRecord()), 30)),
+      pollMs: 60000
+    });
+    const started = await controller.pairStart();
+    assert.strictEqual(started.pendingPair.service.fingerprint, keys.fingerprintGroups(identity.nodeId));
+    controller.dispose();
+  });
+
+  it('a cancel while a poll read is in flight discards that read and stops polling', async () => {
+    let reads = 0;
+    const second = deferred();
+    const { controller, sentToWindow } = controllerFor({
+      readBridgeFile: () => {
+        reads += 1;
+        return reads === 2 ? second.promise : { ok: false, code: 'BRIDGE_FILE_MISSING' };
+      },
+      pollMs: 10
+    });
+    await controller.pairStart();
+    while (reads < 2) await new Promise((r) => setTimeout(r, 5));
+    await controller.pairCancel();
+    const notifiesBefore = sentToWindow.length;
+    const readsBefore = reads;
+    second.resolve(okRecord());
+    await new Promise((r) => setTimeout(r, 60));
+    assert.strictEqual(sentToWindow.length, notifiesBefore, 'the stale read changed nothing');
+    assert.strictEqual(reads, readsBefore, 'no further polling after the cancel');
+    assert.strictEqual((await controller.status()).view, 'unpaired');
+    controller.dispose();
+  });
+
+  it("a cancel while pairConfirm's fresh read is in flight wins", async () => {
+    let hold = null;
+    const { controller, state } = controllerFor({
+      readBridgeFile: () => (hold ? hold.promise : okRecord()),
+      pollMs: 60000
+    });
+    await controller.pairStart();
+    hold = deferred();
+    const confirming = controller.pairConfirm({ nodeId: identity.nodeId });
+    const held = hold;
+    hold = null;
+    await controller.pairCancel();
+    held.resolve(okRecord());
+    assert.deepStrictEqual(await confirming, { ok: false, code: 'NOT_PAIRING', error: 'Start pairing first.' });
+    assert.strictEqual(state.pairing, null);
+    controller.dispose();
+  });
+
+  it('a reader that rejects is reported as an error, not thrown', async () => {
+    const { controller } = controllerFor({
+      readBridgeFile: async () => { throw Object.assign(new Error('powershell failed'), { code: 'EFAIL' }); },
+      pollMs: 60000
+    });
+    const status = await controller.status();
+    assert.deepStrictEqual(status.bridge, { ok: false, code: 'EFAIL', error: 'powershell failed' });
+    const started = await controller.pairStart();
+    assert.deepStrictEqual(started.pendingPair.error, { code: 'EFAIL', error: 'powershell failed' });
     controller.dispose();
   });
 });

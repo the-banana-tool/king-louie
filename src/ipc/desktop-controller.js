@@ -34,12 +34,17 @@ function createDesktopController({
 }) {
   const emitter = new EventEmitter();
   const bridgeFile = () => bridgeFilePath({ env, platform });
-  const readFile = readBridgeFile || (() => readTrustedBridgeFile(bridgeFile(), { env, platform }));
+  // Async (final review I2): on Windows the trust read is a ~1.5 s
+  // PowerShell child process; an injected reader may still be synchronous.
+  const readFile = async () => (readBridgeFile ? readBridgeFile() : readTrustedBridgeFile(bridgeFile(), { env, platform }));
   const makeClient = clientFactory || ((options) => new DesktopBridgeClient(options));
   let client = null;
   let clientStateHandler = null;
   let connection = { status: mode === 'attached' ? 'connecting' : 'idle', code: null, error: null, nextRetryAt: null };
   let pollTimer = null;
+  // Bumped by stopPolling/startPolling so a tick whose trust read is still
+  // in flight knows it was superseded and does nothing when it resumes.
+  let pollGeneration = 0;
   let found = null;
   let foundError = null;
   let importSession = null;
@@ -61,7 +66,7 @@ function createDesktopController({
   const clientOptionsFor = (pairing, service) => ({
     port: service.port,
     getPort: async () => {
-      const r = readFile();
+      const r = await readFile();
       return r && r.ok ? r.record.port : service.port;
     },
     pin: { nodeId: service.nodeId, publicKey: service.publicKey },
@@ -82,6 +87,7 @@ function createDesktopController({
   }
 
   function stopPolling() {
+    pollGeneration += 1;
     if (pollTimer) clearTimeout(pollTimer);
     pollTimer = null;
   }
@@ -89,9 +95,15 @@ function createDesktopController({
   // `until` is an absolute epoch ms deadline, computed from the pending
   // pair's own createdAt (fresh from pairStart, or resumed at construction)
   // so a desktop restart mid-pairing does not reset its own clock.
+  // Returns the first tick's promise, so pairStart can answer with whatever
+  // that first read found.
   function startPolling(until) {
     stopPolling();
-    const tick = () => {
+    const generation = pollGeneration;
+    const current = () => generation === pollGeneration && !disposed;
+    const tick = async () => {
+      pollTimer = null;
+      if (!current()) return;
       if (Date.now() >= until) {
         pollTimer = null;
         // The window ran out: the owner never ran `desktop pair`, or never
@@ -105,25 +117,30 @@ function createDesktopController({
         }
         return;
       }
-      const r = readFile();
+      let r;
+      try {
+        r = await readFile();
+      } catch (err) {
+        r = { ok: false, code: err.code || null, error: err.message };
+      }
+      // Cancelled, confirmed, restarted or disposed while the read ran.
+      if (!current()) return;
       if (r && r.ok) { found = r.record; foundError = null; } else { found = null; foundError = r ? { code: r.code || null, error: r.error || null } : null; }
       notify();
       if (state.pendingPair) {
         pollTimer = setTimeout(tick, pollMs);
         pollTimer.unref?.();
-      } else {
-        pollTimer = null;
       }
     };
-    tick();
+    return tick();
   }
 
   // A pending pair persists across a desktop restart. Resume polling for
   // whatever's left of its window, or drop it outright if the window
   // already ran out while the app was closed. Clearing an already-expired
   // pair is free and stays synchronous; starting to poll a live window is
-  // deferred — its first tick does a synchronous win32 PowerShell trust read
-  // (Task 13), which construction (and therefore app-ready) must not block on.
+  // deferred to the next turn so construction does no I/O of its own. The
+  // deferred start checks that the same pending pair is still there.
   function resumePendingPair() {
     const pending = state.pendingPair;
     if (!pending) return;
@@ -131,7 +148,9 @@ function createDesktopController({
     const until = Number.isFinite(created) ? created + pollWindowMs : Date.now() - 1;
     if (until > Date.now()) {
       setImmediate(() => {
-        if (!disposed) startPolling(until);
+        if (!disposed && state.pendingPair && state.pendingPair.request === pending.request) {
+          startPolling(until).catch((err) => log.warn(`pairing poll failed: ${err.message}`));
+        }
       });
     } else {
       state.setPendingPair(null);
@@ -166,7 +185,12 @@ function createDesktopController({
     }
     let bridge = null;
     if (current === 'unpaired') {
-      const r = readFile() || {};
+      let r;
+      try {
+        r = (await readFile()) || {};
+      } catch (err) {
+        r = { ok: false, code: err.code || null, error: err.message };
+      }
       bridge = r.ok ? { ok: true } : { ok: false, code: r.code || null, error: r.error || null };
     }
     const liveService = client && client.service ? client.service : null;
@@ -220,7 +244,7 @@ function createDesktopController({
     });
     found = null;
     foundError = null;
-    startPolling(createdAt.getTime() + pollWindowMs);
+    await startPolling(createdAt.getTime() + pollWindowMs);
     return status();
   }
 
@@ -245,11 +269,24 @@ function createDesktopController({
     if (expectedNodeId !== found.nodeId) {
       return { ok: false, code: 'PAIR_SERVICE_CHANGED', error: MESSAGES.PAIR_SERVICE_CHANGED };
     }
-    const fresh = readFile() || {};
-    if (!fresh.ok || fresh.record.nodeId !== found.nodeId || fresh.record.publicKey !== found.publicKey) {
+    // Held locally: a poll tick may replace or clear `found` during the
+    // fresh read's await below.
+    const shown = found;
+    let fresh;
+    try {
+      fresh = (await readFile()) || {};
+    } catch {
+      fresh = {};
+    }
+    // The fresh read is an await too: a pairCancel (or a new pairStart) that
+    // landed meanwhile wins.
+    if (!state.pendingPair || state.pendingPair.request !== pending.request) {
+      return { ok: false, code: 'NOT_PAIRING', error: 'Start pairing first.' };
+    }
+    if (!fresh.ok || fresh.record.nodeId !== shown.nodeId || fresh.record.publicKey !== shown.publicKey) {
       return { ok: false, code: 'PAIR_SERVICE_CHANGED', error: MESSAGES.PAIR_SERVICE_CHANGED };
     }
-    const service = { nodeId: found.nodeId, publicKey: found.publicKey, port: found.port };
+    const service = { nodeId: shown.nodeId, publicKey: shown.publicKey, port: shown.port };
     const probe = makeClient(clientOptionsFor(pending, service));
     let info;
     try {
@@ -259,8 +296,8 @@ function createDesktopController({
       return { ok: false, code: err.code || 'SERVICE_UNREACHABLE', error: err.message };
     }
     probe.close();
-    // The handshake above is the only await in this function; a pairCancel
-    // that ran while it was in flight must win over this confirm.
+    // A pairCancel that ran while the handshake was in flight must win over
+    // this confirm.
     if (!state.pendingPair || state.pendingPair.request !== pending.request) {
       return { ok: false, code: 'NOT_PAIRING', error: 'Start pairing first.' };
     }

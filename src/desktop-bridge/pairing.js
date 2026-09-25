@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const { execFileSync, execFile: execFileCallback } = require('child_process');
 const { deriveNodeId } = require('../mesh/node-identity');
 const { adminConfigDir, defaultServiceDataDir } = require('../platform/paths');
 const { windowsPowerShellExe } = require('../platform/windows-paths');
@@ -266,13 +266,37 @@ function inspectScript() {
   ].join('\n');
 }
 
-function inspectWindowsOwners(paths, { execFile = execFileSync, env = process.env } = {}) {
-  const out = execFile(windowsPowerShellExe(env), ['-NoProfile', '-NonInteractive', '-Command', inspectScript()], {
+function inspectInvocation(paths, env) {
+  return [windowsPowerShellExe(env), ['-NoProfile', '-NonInteractive', '-Command', inspectScript()], {
     env: { ...env, KL_INSPECT_PATHS: paths.join('\n') },
     encoding: 'utf8',
     windowsHide: true,
     timeout: 30000
+  }];
+}
+
+// Synchronous: for the admin CLI only, where blocking is harmless.
+function inspectWindowsOwners(paths, { execFile = execFileSync, env = process.env } = {}) {
+  return parseInspectOutput(execFile(...inspectInvocation(paths, env)));
+}
+
+// The desktop's variant (final review I2): PowerShell takes about 1.5 s, and
+// the Electron main process calls this on every pairing poll and every
+// reconnect, so it must never block the event loop.
+function inspectWindowsOwnersAsync(paths, { execFile = execFileCallback, env = process.env } = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(...inspectInvocation(paths, env), (err, stdout) => {
+      if (err) { reject(err); return; }
+      try {
+        resolve(parseInspectOutput(stdout));
+      } catch (parseErr) {
+        reject(parseErr);
+      }
+    });
   });
+}
+
+function parseInspectOutput(out) {
   const lines = String(out).trim().split(/\r?\n/);
   const me = (lines.shift() || '').replace(/^me /, '').trim();
   const entries = lines.map((line) => {
@@ -293,13 +317,14 @@ function missing(file) {
 
 // The file and its directory must be administrator-owned and not writable by
 // anyone else. With KL_TEST_MODE=1 and KL_DESKTOP_BRIDGE_FILE set, the current
-// user is accepted too (e2e only).
-function checkBridgeFileTrust(file, {
+// user is accepted too (e2e only). Async (final review I2): on Windows the
+// owner read is a PowerShell child process the caller awaits, never blocks on.
+async function checkBridgeFileTrust(file, {
   env = process.env,
   platform = process.platform,
   getuid = () => (typeof process.getuid === 'function' ? process.getuid() : -1),
   lstat = fs.lstatSync,
-  inspectOwners = inspectWindowsOwners
+  inspectOwners = inspectWindowsOwnersAsync
 } = {}) {
   const dir = path.dirname(file);
   const testMode = env.KL_TEST_MODE === '1' && Boolean(env.KL_DESKTOP_BRIDGE_FILE);
@@ -307,7 +332,7 @@ function checkBridgeFileTrust(file, {
     const paths = [dir, file];
     let report;
     try {
-      report = inspectOwners(paths, { env });
+      report = await inspectOwners(paths, { env });
     } catch {
       return untrusted(file);
     }
@@ -341,11 +366,11 @@ function checkBridgeFileTrust(file, {
   return { ok: true };
 }
 
-function readTrustedBridgeFile(file, options = {}) {
-  const trust = checkBridgeFileTrust(file, options);
+async function readTrustedBridgeFile(file, options = {}) {
+  const trust = await checkBridgeFileTrust(file, options);
   if (!trust.ok) return trust;
   try {
-    return { ok: true, record: parseBridgeFile(fs.readFileSync(file, 'utf8'), file) };
+    return { ok: true, record: parseBridgeFile(await fs.promises.readFile(file, 'utf8'), file) };
   } catch (err) {
     if (err.code === 'ENOENT') return missing(file);
     return { ok: false, code: err.code === 'BRIDGE_FILE_INVALID' ? err.code : 'BRIDGE_FILE_INVALID', error: err.message };
@@ -373,6 +398,7 @@ module.exports = {
   writeFileAtomic,
   bridgeFilePath,
   inspectWindowsOwners,
+  inspectWindowsOwnersAsync,
   checkBridgeFileTrust,
   readTrustedBridgeFile
 };
