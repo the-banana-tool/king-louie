@@ -498,20 +498,22 @@ describe('I2: the admin never follows a symlink in the service-writable staged d
     assert.deepEqual(results.map((r) => r.result), ['rejected: not a regular file']);
   });
 
-  it('aborts apply with ApproverAdminError when staged/ itself is a symlink', async (t) => {
+  it('aborts apply with ApproverAdminError when staged/ itself is a symlink', async () => {
     const l = layout();
     fs.mkdirSync(path.dirname(l.stagedDir), { recursive: true });
-    if (!trySymlink(t, path.dirname(l.stagedDir), l.stagedDir, 'dir')) return;
+    // A directory symlink (or, on Windows, a junction — which needs no
+    // elevated privilege) so this runs unprivileged on every host.
+    fs.symlinkSync(path.dirname(l.stagedDir), l.stagedDir, process.platform === 'win32' ? 'junction' : 'dir');
     const ad = admin(l);
     assert.throws(() => ad.listStaged(), ApproverAdminError);
   });
 
-  it('aborts apply with ApproverAdminError when staged/done is a symlink', async (t) => {
+  it('aborts apply with ApproverAdminError when staged/done is a symlink', async () => {
     const l = layout();
     fs.mkdirSync(l.stagedDir, { recursive: true });
     const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-elsewhere-'));
     tmp.push(elsewhere);
-    if (!trySymlink(t, elsewhere, path.join(l.stagedDir, 'done'), 'dir')) return;
+    fs.symlinkSync(elsewhere, path.join(l.stagedDir, 'done'), process.platform === 'win32' ? 'junction' : 'dir');
     const ad = admin(l);
     assert.throws(() => ad.listStaged(), ApproverAdminError);
   });
