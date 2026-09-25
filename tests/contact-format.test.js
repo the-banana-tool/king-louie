@@ -262,7 +262,8 @@ describe('parseReply picks an option only by an exact, unambiguous match', () =>
     assert.deepStrictEqual(r.answers.map((a) => [a.item.n, a.answer]), [[2, { optionId: 'a' }]]);
     const same = parseReply(batch, '#K7QD4M 1 a\n#7QD4KM No');
     assert.deepStrictEqual(same.answers.map((a) => [a.item.n, a.answer]), [[1, { optionId: 'a' }]]);
-    const threaded = parseReply(one, 'yes, up to 20 %\nthanks', { threaded: true });
+    // multi-item thread; a single-item thread is one joined answer (ruling T2-join)
+    const threaded = parseReply(batch, '1 a\n1 b', { threaded: true });
     assert.deepStrictEqual(threaded.answers, []);
     assert.strictEqual(threaded.ack, 'Which question? Reply "#K7QD4M <n> <answer>".');
   });
@@ -454,9 +455,8 @@ describe('fix round 1: threaded replies without a token (ruling T2-reply)', () =
     const r = parseReply(batch, '2 weeks from now works', T);
     assert.deepStrictEqual(r.answers, []);
     assert.strictEqual(r.ack, 'Which question? Reply "#K7QD4M <n> <answer>".');
-    // ruling T2-single: a single-item thread keeps free text, so a trailing
-    // line that differs from the pick makes the reply ambiguous
-    assert.deepStrictEqual(pairs(parseReply(one, 'No\n\nSent from my iPhone', T)), []);
+    // ruling T2-join: a trailing "Sent from my …" line is dropped
+    assert.deepStrictEqual(pairs(parseReply(one, 'No\n\nSent from my iPhone', T)), [[1, { optionId: 'a' }]]);
     // with the token the same text is an answer
     assert.deepStrictEqual(pairs(parseReply(batch, '#K7QD4M 2 weeks from now works')), [[2, { text: 'weeks from now works' }]]);
   });
@@ -563,5 +563,43 @@ describe('fix round 1: validatePolicy nested shapes', () => {
     assert.match(validatePolicy({ ladders: { low: [{ channel: 'journal', digest: true }] } }).error, /ladders.low\[0\]: a digest step must be a contact channel/);
     assert.match(validatePolicy({ ladders: { low: [{ channel: 'in-app' }, { channel: 'present', digest: true }] } }).error, /a digest step must be a contact channel/);
     assert.strictEqual(validatePolicy({ ladders: { low: [{ channel: 'journal' }, { channel: 'email', digest: true }] } }).ok, true);
+  });
+});
+
+describe('ruling T2-join: a single-item threaded reply is one answer', () => {
+  const one = { batchToken: 'K7QD4M', items: [{ n: 1, token: '7QD4KM', caseTitle: 'Sell the lakeside lot', urgency: 'high', options: [{ id: 'a', label: 'No' }, { id: 'b', label: 'Yes, up to 20 %' }] }] };
+  const T = { threaded: true };
+  const pairs = (r) => r.answers.map((a) => [a.item.n, a.answer]);
+
+  it('a two-line free-text answer is one text answer', () => {
+    assert.deepStrictEqual(pairs(parseReply(one, 'Only if the buyer puts 30 % down.\n\nAnd only for 5 years.', T)),
+      [[1, { text: 'Only if the buyer puts 30 % down.\nAnd only for 5 years.' }]]);
+  });
+
+  it('an answer plus a "-- " signature keeps only the answer', () => {
+    assert.deepStrictEqual(pairs(parseReply(one, 'Only if the buyer puts 30 % down\n-- \nJane Owner\n1 Main Street', T)),
+      [[1, { text: 'Only if the buyer puts 30 % down' }]]);
+  });
+
+  it('an answer plus "Sent from my iPhone" keeps only the answer', () => {
+    assert.deepStrictEqual(pairs(parseReply(one, 'Only if the buyer puts 30 % down\n\nSent from my iPhone', T)),
+      [[1, { text: 'Only if the buyer puts 30 % down' }]]);
+  });
+
+  it('an exact option with a signature is that option', () => {
+    assert.deepStrictEqual(pairs(parseReply(one, 'Yes, up to 20 %.\n-- \nJane Owner', T)), [[1, { optionId: 'b' }]]);
+    assert.deepStrictEqual(pairs(parseReply(one, 'b\n\nSent from my Android phone', T)), [[1, { optionId: 'b' }]]);
+  });
+
+  it('quoted history is stripped first; nothing left means no answer', () => {
+    const body = 'No\n\nOn Fri, Sep 25, 2026 at 9:00 AM King Louie <kl@example.com> wrote:\n> 1. [HIGH] Sell the lakeside lot — Is seller financing ever acceptable?';
+    assert.deepStrictEqual(pairs(parseReply(one, body, T)), [[1, { optionId: 'a' }]]);
+    const empty = parseReply(one, '\n-- \nJane Owner\n', T);
+    assert.deepStrictEqual(empty.answers, []);
+    assert.strictEqual(empty.ack, 'Which question? Reply "#K7QD4M <n> <answer>".');
+  });
+
+  it('with a #token line only the tokened lines count', () => {
+    assert.deepStrictEqual(pairs(parseReply(one, '#K7QD4M b\nthanks', T)), [[1, { optionId: 'b' }]]);
   });
 });

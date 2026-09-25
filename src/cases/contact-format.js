@@ -369,14 +369,29 @@ function isItemHeader(item, rest) {
   return body.startsWith(`${item.caseTitle} — `);
 }
 
+const SENT_FROM = /^Sent from my\b/i;
+
+// Ruling T2-join: a threaded reply to a single-item batch is ONE answer. Strip
+// the quoted history and a `-- ` signature block (stripQuoted), drop trailing
+// "Sent from my …" lines and quoted item headers; the rest is an option when
+// it exactly matches one, else one `{ text }` of its non-empty lines. null
+// when nothing is left.
+function singleThreadAnswer(item, text) {
+  const lines = stripQuoted(text).split('\n').map((l) => l.trim());
+  while (lines.length && (!lines[lines.length - 1] || SENT_FROM.test(lines[lines.length - 1]))) lines.pop();
+  const body = lines.filter((l) => l && !isItemHeader(item, l.replace(/^\d{1,2}[.)]?\s+/, '')));
+  return body.length ? optionOrText(item.options, body.join('\n')) : null;
+}
+
 // batch: { batchToken, items: [{ n, token, options, caseTitle? }] }.
 // `threaded`: the reply is already tied to this batch (a Telegram/Discord
 // reply, an email in the thread), so the #TOKEN may be left out. In a
 // multi-item batch a tokenless line may then only pick an option by exact
 // match: free text needs the token (a `{ text }` answer becomes a `user`
 // fact, so a stray signature or quoted line must never land on the wrong
-// question). A single-item batch takes tokenless free text: there is only one
-// question it can answer (ruling T2-single). Returns { answers: [{ item, answer }], ack }
+// question). A threaded reply to a single-item batch that names no token is
+// one answer, free text allowed (singleThreadAnswer, rulings T2-single and
+// T2-join); if it names a token, only its tokened lines count. Returns { answers: [{ item, answer }], ack }
 // where ack is set only when nothing parsed. Ignored: `>` quoted lines, a
 // line repeating an item's header, and text that fits none of the named
 // item's options but exactly one of another item's (a swapped token or
@@ -396,6 +411,15 @@ function parseReply(batch, text, { threaded = false } = {}) {
     found.push({ item, answer });
   };
   const lines = String(text ?? '').split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith('>'));
+  const namesToken = (line) => {
+    const m = LINE_TOKEN.exec(line);
+    const token = m ? m[1].toUpperCase() : null;
+    return Boolean(token) && (token === batch.batchToken || items.some((it) => it.token === token));
+  };
+  if (threaded && items.length === 1 && !lines.some(namesToken)) {
+    const answer = singleThreadAnswer(items[0], text);
+    return answer ? { answers: [{ item: items[0], answer }], ack: null } : { answers: [], ack: WHICH(batch.batchToken) };
+  }
   for (const line of lines) {
     const m = LINE_TOKEN.exec(line);
     let rest = line;
@@ -409,14 +433,15 @@ function parseReply(batch, text, { threaded = false } = {}) {
         continue;
       }
       if (token !== batch.batchToken) continue;
-    } else if (!threaded) {
+    } else if (!threaded || items.length === 1) {
+      // a single-item reply that names a token: only its tokened lines count
       continue;
     }
     const numbered = /^(\d{1,2})[.)]?\s+(.+)$/.exec(rest);
     if (numbered && byN(Number(numbered[1]))) {
-      answerFor(byN(Number(numbered[1])), numbered[2], Boolean(m) || items.length === 1);
+      answerFor(byN(Number(numbered[1])), numbered[2], Boolean(m));
     } else if (items.length === 1) {
-      answerFor(items[0], rest, true); // one question: free text can't go astray (ruling T2-single)
+      answerFor(items[0], rest, true);
     }
   }
   const answers = [];
