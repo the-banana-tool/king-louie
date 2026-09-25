@@ -34,7 +34,7 @@ function writeDevices(configDir, devices) {
   pairing.writeFileAtomic(path.join(configDir, pairing.DEVICES_FILE), JSON.stringify(doc), 0o644);
 }
 
-function fakeDispatcher() {
+function fakeDispatcher({ disconnectDelayMs = 0, hangDisconnect = false } = {}) {
   return {
     served: { handle: ['chat:load', 'chat:sendMessage'], on: ['tool:approvalResponse'] },
     frames: [],
@@ -47,16 +47,20 @@ function fakeDispatcher() {
         conn.send({ t: 'result', id: frame.id, value: { ok: true, data: { echo: frame.args } } });
       }
     },
-    onDisconnect(conn) { this.disconnects.push(conn.deviceId); },
+    async onDisconnect(conn) {
+      if (hangDisconnect) return new Promise(() => {}); // never settles
+      if (disconnectDelayMs) await new Promise((r) => setTimeout(r, disconnectDelayMs));
+      this.disconnects.push(conn.deviceId);
+    },
     forwardAmbient() {}
   };
 }
 
-async function startServer({ devices = [], limits = {} } = {}) {
+async function startServer({ devices = [], limits = {}, dispatcher: dispatcherOverride = null } = {}) {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-bridge-'));
   dirs.push(configDir);
   writeDevices(configDir, devices);
-  const dispatcher = fakeDispatcher();
+  const dispatcher = dispatcherOverride || fakeDispatcher();
   const server = new DesktopBridgeServer({
     identity, configDir, port: 0, version: '26.9.0', adminUid: selfUid, account: 'LOCAL SERVICE',
     createDispatcher: () => dispatcher, limits
@@ -561,6 +565,37 @@ async function closingServer({ after = 'clientHello', code, reason = '' } = {}) 
   });
   return { port: wss.address().port, close: () => new Promise((r) => { for (const c of wss.clients) c.terminate(); wss.close(r); }) };
 }
+
+// Task 7 carryover: stop() used to close the socket and return without ever
+// waiting for the dispatcher's cleanup (aborting that connection's runs,
+// denying its prompts) to actually finish — a caller that immediately exited
+// the process after `await server.stop()`, or that reused the port, could
+// race that cleanup. onDisconnect's promise now settles only once cleanup is
+// done, and stop() awaits it, bounded so a wedged handler cannot hang
+// shutdown forever.
+describe('DesktopBridgeServer fix round 3 (task 7 carryover)', () => {
+  it('stop() waits for the dispatcher\'s onDisconnect cleanup to finish before resolving', async () => {
+    const device = makeDevice();
+    const dispatcher = fakeDispatcher({ disconnectDelayMs: 50 });
+    const { port, server } = await startServer({ devices: [device], dispatcher });
+    const out = await handshake(port, device);
+    assert.ok(out.ready);
+    assert.deepStrictEqual(dispatcher.disconnects, [], 'cleanup has not started yet');
+    await server.stop();
+    assert.deepStrictEqual(dispatcher.disconnects, [device.deviceId], 'cleanup finished before stop() resolved');
+  });
+
+  it('stop() does not hang forever when onDisconnect never settles, bounded by disconnectCleanupMs', async () => {
+    const device = makeDevice();
+    const dispatcher = fakeDispatcher({ hangDisconnect: true });
+    const { port, server } = await startServer({ devices: [device], dispatcher, limits: { disconnectCleanupMs: 50 } });
+    const out = await handshake(port, device);
+    assert.ok(out.ready);
+    const started = Date.now();
+    await server.stop();
+    assert.ok(Date.now() - started < 2000, 'stop() returned promptly instead of waiting on a wedged onDisconnect');
+  });
+});
 
 describe('DesktopBridgeClient', () => {
   it('connects, invokes and receives events', async () => {

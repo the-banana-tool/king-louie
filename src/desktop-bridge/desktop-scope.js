@@ -16,8 +16,11 @@
 // guards exactly that case by throwing instead of silently losing a write.
 const fs = require('fs');
 const path = require('path');
+const { createLogger } = require('../logging');
 const { writeFileAtomic } = require('./pairing');
 const { MESSAGES } = require('./protocol');
+
+const log = createLogger('desktop-bridge/desktop-scope');
 
 const DIRS_FILE = 'allowed-directories.json';
 const RULES_FILE = 'rules.json';
@@ -26,13 +29,32 @@ function createDesktopScope({ dataDir, context, onPathWritten = () => {} }) {
   const dir = path.join(dataDir, 'desktop');
   const writing = new Set();
 
+  // A missing file (the common case — nothing has been written yet) is
+  // silently empty. A file that exists but fails to parse, or carries a
+  // version this code doesn't recognize, is *also* treated as empty — never
+  // trust unrecognized shape into a security-relevant allow-list — but
+  // that's a real problem with the file, not the ordinary "nothing here
+  // yet" case, so it's logged instead of swallowed.
   const read = (name, key) => {
+    const file = path.join(dir, name);
+    let text;
     try {
-      const doc = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
-      return Array.isArray(doc[key]) ? doc[key] : [];
+      text = fs.readFileSync(file, 'utf8');
     } catch {
       return [];
     }
+    let doc;
+    try {
+      doc = JSON.parse(text);
+    } catch (err) {
+      log.warn(`${name} is not valid JSON; treating it as empty`, { file, error: err.message });
+      return [];
+    }
+    if (!doc || typeof doc !== 'object' || doc.v !== 1) {
+      log.warn(`${name} has an unrecognized version; treating it as empty`, { file, v: doc && doc.v });
+      return [];
+    }
+    return Array.isArray(doc[key]) ? doc[key] : [];
   };
 
   const write = (name, key, list) => {
@@ -71,29 +93,39 @@ function createDesktopScope({ dataDir, context, onPathWritten = () => {} }) {
     return context.setSettings({ ...next, allowedDirectories: own });
   };
 
-  // Absolute-only, syntactic normalisation. path.isAbsolute treats a
-  // POSIX-style root ("/x") as absolute on every platform, including
-  // win32 (there it's drive-relative to the current drive), so this check
-  // accepts a path exactly as given — no path.resolve/normalize rewrite —
-  // which matters because resolve() on win32 would rewrite "/x" into
-  // "C:\x" using backslashes, changing what the desktop (or a test fixture
-  // written with POSIX paths) actually passed in. Empty and relative input
-  // is rejected outright rather than silently resolved against the
-  // service's cwd, which would be a surprising place for a security-
-  // relevant allow-list entry to come from.
+  // Absolute-only, then a canonical form: path.resolve handles mixed "/"
+  // and "\" separators, "." and ".." segments and duplicate separators, and
+  // strips any trailing separator (resolve already does this for every
+  // path except a bare root, hence the extra check below); on win32 the
+  // drive letter's case is also folded, since resolve() alone leaves it as
+  // given. Two different spellings of the same real directory — a trailing
+  // "\", a lowercase drive letter, a stray "..\" a path picker left in —
+  // now normalize to the same string, so the `list.includes(normalized)`
+  // dedup check below actually catches them instead of silently growing a
+  // duplicate entry. Empty and relative input is rejected outright rather
+  // than silently resolved against the service's cwd, which would be a
+  // surprising place for a security-relevant allow-list entry to come from.
   //
-  // Symlinks are *not* resolved here. A directory does not need to exist
-  // yet to be allow-listed (the desktop may add a mount point before it's
-  // mounted), and baking in today's realpath would go stale if the
-  // symlink's target changes later. Live access — including whatever a
-  // symlink resolves to at that moment — is checked when it actually
-  // matters, by checkPath's fs.stat/opendir/open, which follow symlinks the
-  // ordinary OS way.
+  // Symlinks are *not* resolved here (path.resolve is purely syntactic, no
+  // fs access). A directory does not need to exist yet to be allow-listed
+  // (the desktop may add a mount point before it's mounted), and baking in
+  // today's realpath would go stale if the symlink's target changes later.
+  // Live access — including whatever a symlink resolves to at that moment —
+  // is checked when it actually matters, by checkPath's
+  // fs.stat/opendir/open, which follow symlinks the ordinary OS way.
   const normalizeDirectory = (directory) => {
     if (typeof directory !== 'string') return null;
     const trimmed = directory.trim();
     if (!trimmed || !path.isAbsolute(trimmed)) return null;
-    return trimmed;
+    let resolved = path.resolve(trimmed);
+    const rootLength = path.parse(resolved).root.length;
+    if (resolved.length > rootLength && resolved.endsWith(path.sep)) {
+      resolved = resolved.slice(0, -1);
+    }
+    if (process.platform === 'win32' && /^[a-z]:/.test(resolved)) {
+      resolved = resolved[0].toUpperCase() + resolved.slice(1);
+    }
+    return resolved;
   };
 
   const addDirectory = (directory) => {

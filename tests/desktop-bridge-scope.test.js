@@ -6,10 +6,19 @@ const os = require('os');
 const path = require('path');
 const { createDesktopScope } = require('../src/desktop-bridge/desktop-scope');
 const { checkPath } = require('../src/desktop-bridge/check-path');
+const { addSink } = require('../src/logging');
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
 const tmp = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-scope-')); dirs.push(d); return d; };
+
+// A real, syntactically valid absolute directory for the current platform,
+// anchored at the current drive's root on win32 (never a literal machine
+// path — just its own root) and at "/" on POSIX. Needed once normalizeDirectory
+// started resolving its input: a bare POSIX-style "/home/..." literal would
+// otherwise get rewritten with the current drive letter on win32, breaking
+// an exact-string assertion that predates that change.
+const abs = (...parts) => path.join(path.parse(process.cwd()).root, ...parts);
 
 function fakeContext() {
   let settings = { allowedDirectories: ['/srv/service-only'], inference: { activeTier: 'standard' } };
@@ -29,11 +38,68 @@ describe('desktop-scoped settings', () => {
     const dataDir = tmp();
     const context = fakeContext();
     const scope = createDesktopScope({ dataDir, context });
-    assert.deepStrictEqual(scope.addDirectory('/home/example/projects'), ['/srv/service-only', '/home/example/projects']);
-    assert.deepStrictEqual(scope.getSettings().allowedDirectories, ['/srv/service-only', '/home/example/projects']);
+    const projects = abs('home', 'example', 'projects');
+    assert.deepStrictEqual(scope.addDirectory(projects), ['/srv/service-only', projects]);
+    assert.deepStrictEqual(scope.getSettings().allowedDirectories, ['/srv/service-only', projects]);
     assert.deepStrictEqual(context.peek().settings.allowedDirectories, ['/srv/service-only']);
     const file = JSON.parse(fs.readFileSync(path.join(dataDir, 'desktop', 'allowed-directories.json'), 'utf8'));
-    assert.deepStrictEqual(file, { v: 1, directories: ['/home/example/projects'] });
+    assert.deepStrictEqual(file, { v: 1, directories: [projects] });
+  });
+
+  it('normalizes a directory so a different spelling of the same one dedups', () => {
+    const dataDir = tmp();
+    const scope = createDesktopScope({ dataDir, context: fakeContext() });
+    const projects = abs('home', 'example', 'projects');
+    assert.deepStrictEqual(scope.addDirectory(`${projects}${path.sep}`), ['/srv/service-only', projects], 'a trailing separator is stripped');
+    assert.deepStrictEqual(scope.addDirectory(`${projects}${path.sep}sub${path.sep}..`), ['/srv/service-only', projects], "a '..' segment resolves away, landing back on the same entry");
+    if (process.platform === 'win32') {
+      const upper = `${projects[0].toUpperCase()}${projects.slice(1)}`;
+      const lower = `${projects[0].toLowerCase()}${projects.slice(1)}`;
+      assert.deepStrictEqual(scope.addDirectory(upper === projects ? lower : upper), ['/srv/service-only', projects], 'the drive letter case folds, so it dedups regardless of how it was typed');
+    }
+    assert.deepStrictEqual(scope.listDirectories(), [projects], 'still exactly one entry after every re-spelling');
+  });
+
+  it('throws INVALID_DIRECTORY for a relative or empty path', () => {
+    const scope = createDesktopScope({ dataDir: tmp(), context: fakeContext() });
+    for (const bad of ['relative/dir', '', '   ', null, undefined, 42]) {
+      assert.throws(() => scope.addDirectory(bad), (err) => err.code === 'INVALID_DIRECTORY');
+    }
+  });
+
+  it('treats a malformed or unknown-version file as empty, but warns about it', () => {
+    const dataDir = tmp();
+    const scope = createDesktopScope({ dataDir, context: fakeContext() });
+    const file = path.join(dataDir, 'desktop', 'allowed-directories.json');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+
+    fs.writeFileSync(file, '{not json');
+    let warnings = [];
+    let remove = addSink((r) => { if (r.level === 'warn') warnings.push(r.message); });
+    try {
+      assert.deepStrictEqual(scope.listDirectories(), [], 'malformed JSON fails closed');
+    } finally { remove(); }
+    assert.ok(warnings.some((m) => m.includes('allowed-directories.json')), 'warned about the malformed file');
+
+    fs.writeFileSync(file, JSON.stringify({ v: 2, directories: [abs('data', 'example')] }));
+    warnings = [];
+    remove = addSink((r) => { if (r.level === 'warn') warnings.push(r.message); });
+    try {
+      assert.deepStrictEqual(scope.listDirectories(), [], 'an unrecognized version fails closed too');
+    } finally { remove(); }
+    assert.ok(warnings.some((m) => m.includes('allowed-directories.json')), 'warned about the unknown version');
+
+    // A file this scope itself wrote (v: 1) is read normally, no warning.
+    // (Starting from no file at all: addDirectory's own pre-write read of
+    // the still-v:2 file above would otherwise warn a second time.)
+    fs.rmSync(file, { force: true });
+    warnings = [];
+    remove = addSink((r) => { if (r.level === 'warn') warnings.push(r.message); });
+    try {
+      scope.addDirectory(abs('data', 'example'));
+      assert.deepStrictEqual(scope.listDirectories(), [abs('data', 'example')]);
+    } finally { remove(); }
+    assert.deepStrictEqual(warnings, []);
   });
 
   it('diverts allowedDirectories writes and passes every other key through', () => {

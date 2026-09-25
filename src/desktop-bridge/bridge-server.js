@@ -19,6 +19,10 @@ const { createConnection } = require('./connection');
 const log = createLogger('desktop-bridge');
 const defaultGeteuid = () => (typeof process.geteuid === 'function' ? process.geteuid() : -1);
 const delay = (ms) => new Promise((resolve) => { const t = setTimeout(resolve, ms); t.unref?.(); });
+// A last-resort bound: stop() must not hang forever on a stuck dispatcher
+// cleanup (a wedged chat:stopResponse handler, say). It resolves anyway,
+// bounded, rather than leaving the process unable to exit.
+const DEFAULT_DISCONNECT_CLEANUP_MS = 5000;
 
 function currentAccount() {
   try {
@@ -57,6 +61,19 @@ class DesktopBridgeServer extends EventEmitter {
     this.failures = new Map();
     this.lockouts = new Map();
     this.recheckTimer = null;
+    // conn -> the promise of its dispatcher.onDisconnect cleanup (aborting
+    // that connection's runs, denying its prompts). Keyed on the connection
+    // object rather than a flag on it: `conn.cleaned` is the dispatcher's own
+    // idempotency guard (tests/desktop-bridge-dispatcher.test.js drives
+    // onDisconnect directly, without going through this server, so it must
+    // stay meaningful on its own). Deduping here too, on a key the dispatcher
+    // never touches, means _onClose and stop() can both call _disconnectOnce
+    // for the same conn without the second call re-running the dispatcher's
+    // cleanup — and, unlike a flag the dispatcher sets internally, this map
+    // also hands back the one promise to await regardless of which call
+    // first created it.
+    this.disconnectPromises = new Map();
+    this.disconnectCleanupMs = limits.disconnectCleanupMs || DEFAULT_DISCONNECT_CLEANUP_MS;
     const factory = createDispatcher || ((opts) => require('./bridge-dispatcher').createBridgeDispatcher(opts));
     this.dispatcher = factory({
       core, cipher, dataDir, approvals, account,
@@ -125,6 +142,10 @@ class DesktopBridgeServer extends EventEmitter {
     clearInterval(this.recheckTimer);
     this.recheckTimer = null;
     const conn = this.live;
+    // Kick off (or pick up) the live connection's disconnect cleanup right
+    // away, concurrently with tearing down its socket below, rather than
+    // waiting for the 'close' event to get around to it.
+    const disconnectDone = conn ? this._disconnectOnce(conn) : Promise.resolve();
     if (conn) {
       conn.send({ t: 'bye', code: 'SERVICE_STOPPING' });
       conn.close(CLOSE.GOING_AWAY, 'service stopping');
@@ -140,6 +161,12 @@ class DesktopBridgeServer extends EventEmitter {
     for (const ws of this.sockets) {
       try { ws.terminate(); } catch { /* gone */ }
     }
+    // Every run the desktop started, and every prompt it was shown, must be
+    // aborted/denied before stop() resolves — otherwise a caller that exits
+    // right after stop() (or reuses the port) can race that cleanup. Bounded
+    // so a wedged handler (e.g. a stuck chat:stopResponse) cannot hang
+    // shutdown forever.
+    await Promise.race([disconnectDone, delay(this.disconnectCleanupMs)]);
     const wss = this.wss;
     this.wss = null;
     await new Promise((resolve) => wss.close(() => resolve()));
@@ -323,14 +350,18 @@ class DesktopBridgeServer extends EventEmitter {
     this.emit('disconnected', { deviceId: conn.deviceId, label: conn.label });
   }
 
-  // The single call site for dispatcher.onDisconnect: stop() used to also
-  // call it directly for the live connection, which double-fired once that
-  // connection's socket then emitted 'close' too. `conn.cleaned` makes the
-  // call idempotent regardless of how many paths lead here.
+  // stop() and _onClose both lead here for the live connection (stop()
+  // closes its socket, which then emits 'close' too); disconnectPromises
+  // dedupes by the conn object so dispatcher.onDisconnect still runs exactly
+  // once, and both callers can await the same settled-when-cleanup-is-done
+  // promise it returns.
   _disconnectOnce(conn) {
-    if (conn.cleaned) return;
-    conn.cleaned = true;
-    Promise.resolve(this.dispatcher.onDisconnect(conn)).catch((err) => log.warn(`desktop disconnect cleanup failed: ${err.message}`));
+    let promise = this.disconnectPromises.get(conn);
+    if (!promise) {
+      promise = Promise.resolve(this.dispatcher.onDisconnect(conn)).catch((err) => log.warn(`desktop disconnect cleanup failed: ${err.message}`));
+      this.disconnectPromises.set(conn, promise);
+    }
+    return promise;
   }
 
   _fields(state) {
