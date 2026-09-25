@@ -71,9 +71,11 @@ class DesktopBridgeServer extends EventEmitter {
     // for the same conn without the second call re-running the dispatcher's
     // cleanup — and, unlike a flag the dispatcher sets internally, this map
     // also hands back the one promise to await regardless of which call
-    // first created it.
-    this.disconnectPromises = new Map();
-    this.disconnectCleanupMs = limits.disconnectCleanupMs || DEFAULT_DISCONNECT_CLEANUP_MS;
+    // first created it. A WeakMap: once a connection is gone and nothing else
+    // references it, its entry (and the conn object itself) can be collected
+    // instead of sitting in this map for the life of the server.
+    this.disconnectPromises = new WeakMap();
+    this.disconnectCleanupMs = this.limits.disconnectCleanupMs ?? DEFAULT_DISCONNECT_CLEANUP_MS;
     const factory = createDispatcher || ((opts) => require('./bridge-dispatcher').createBridgeDispatcher(opts));
     this.dispatcher = factory({
       core, cipher, dataDir, approvals, account,

@@ -19,9 +19,17 @@ const tmp = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-scope-')
 // otherwise get rewritten with the current drive letter on win32, breaking
 // an exact-string assertion that predates that change.
 const abs = (...parts) => path.join(path.parse(process.cwd()).root, ...parts);
+// Two fixed example directories reused across this file. Once
+// normalizeDirectory started actually resolving its input (fix round 1),
+// every path that flows through addDirectory/setSettings/getSettings needs
+// to already be in the form normalizeDirectory would produce, or an
+// exact-string assertion (or the own.includes(normalized) dedup check
+// inside setSettings) breaks on win32.
+const SERVICE_ONLY = abs('srv', 'service-only');
+const DATA_EXAMPLE = abs('data', 'example');
 
 function fakeContext() {
-  let settings = { allowedDirectories: ['/srv/service-only'], inference: { activeTier: 'standard' } };
+  let settings = { allowedDirectories: [SERVICE_ONLY], inference: { activeTier: 'standard' } };
   let rules = [];
   return {
     getSettings: () => JSON.parse(JSON.stringify(settings)),
@@ -39,9 +47,9 @@ describe('desktop-scoped settings', () => {
     const context = fakeContext();
     const scope = createDesktopScope({ dataDir, context });
     const projects = abs('home', 'example', 'projects');
-    assert.deepStrictEqual(scope.addDirectory(projects), ['/srv/service-only', projects]);
-    assert.deepStrictEqual(scope.getSettings().allowedDirectories, ['/srv/service-only', projects]);
-    assert.deepStrictEqual(context.peek().settings.allowedDirectories, ['/srv/service-only']);
+    assert.deepStrictEqual(scope.addDirectory(projects), [SERVICE_ONLY, projects]);
+    assert.deepStrictEqual(scope.getSettings().allowedDirectories, [SERVICE_ONLY, projects]);
+    assert.deepStrictEqual(context.peek().settings.allowedDirectories, [SERVICE_ONLY]);
     const file = JSON.parse(fs.readFileSync(path.join(dataDir, 'desktop', 'allowed-directories.json'), 'utf8'));
     assert.deepStrictEqual(file, { v: 1, directories: [projects] });
   });
@@ -50,12 +58,12 @@ describe('desktop-scoped settings', () => {
     const dataDir = tmp();
     const scope = createDesktopScope({ dataDir, context: fakeContext() });
     const projects = abs('home', 'example', 'projects');
-    assert.deepStrictEqual(scope.addDirectory(`${projects}${path.sep}`), ['/srv/service-only', projects], 'a trailing separator is stripped');
-    assert.deepStrictEqual(scope.addDirectory(`${projects}${path.sep}sub${path.sep}..`), ['/srv/service-only', projects], "a '..' segment resolves away, landing back on the same entry");
+    assert.deepStrictEqual(scope.addDirectory(`${projects}${path.sep}`), [SERVICE_ONLY, projects], 'a trailing separator is stripped');
+    assert.deepStrictEqual(scope.addDirectory(`${projects}${path.sep}sub${path.sep}..`), [SERVICE_ONLY, projects], "a '..' segment resolves away, landing back on the same entry");
     if (process.platform === 'win32') {
       const upper = `${projects[0].toUpperCase()}${projects.slice(1)}`;
       const lower = `${projects[0].toLowerCase()}${projects.slice(1)}`;
-      assert.deepStrictEqual(scope.addDirectory(upper === projects ? lower : upper), ['/srv/service-only', projects], 'the drive letter case folds, so it dedups regardless of how it was typed');
+      assert.deepStrictEqual(scope.addDirectory(upper === projects ? lower : upper), [SERVICE_ONLY, projects], 'the drive letter case folds, so it dedups regardless of how it was typed');
     }
     assert.deepStrictEqual(scope.listDirectories(), [projects], 'still exactly one entry after every re-spelling');
   });
@@ -81,7 +89,7 @@ describe('desktop-scoped settings', () => {
     } finally { remove(); }
     assert.ok(warnings.some((m) => m.includes('allowed-directories.json')), 'warned about the malformed file');
 
-    fs.writeFileSync(file, JSON.stringify({ v: 2, directories: [abs('data', 'example')] }));
+    fs.writeFileSync(file, JSON.stringify({ v: 2, directories: [DATA_EXAMPLE] }));
     warnings = [];
     remove = addSink((r) => { if (r.level === 'warn') warnings.push(r.message); });
     try {
@@ -96,8 +104,8 @@ describe('desktop-scoped settings', () => {
     warnings = [];
     remove = addSink((r) => { if (r.level === 'warn') warnings.push(r.message); });
     try {
-      scope.addDirectory(abs('data', 'example'));
-      assert.deepStrictEqual(scope.listDirectories(), [abs('data', 'example')]);
+      scope.addDirectory(DATA_EXAMPLE);
+      assert.deepStrictEqual(scope.listDirectories(), [DATA_EXAMPLE]);
     } finally { remove(); }
     assert.deepStrictEqual(warnings, []);
   });
@@ -107,14 +115,14 @@ describe('desktop-scoped settings', () => {
     const context = fakeContext();
     const scope = createDesktopScope({ dataDir, context });
     const next = scope.getSettings();
-    next.allowedDirectories = ['/srv/service-only', '/data/example'];
+    next.allowedDirectories = [SERVICE_ONLY, DATA_EXAMPLE];
     next.inference = { activeTier: 'smart' };
     scope.setSettings(next);
-    assert.deepStrictEqual(context.peek().settings, { allowedDirectories: ['/srv/service-only'], inference: { activeTier: 'smart' } });
-    assert.deepStrictEqual(scope.listDirectories(), ['/data/example']);
+    assert.deepStrictEqual(context.peek().settings, { allowedDirectories: [SERVICE_ONLY], inference: { activeTier: 'smart' } });
+    assert.deepStrictEqual(scope.listDirectories(), [DATA_EXAMPLE]);
     // The desktop cannot remove a service directory: it stays.
     scope.setSettings({ ...scope.getSettings(), allowedDirectories: [] });
-    assert.deepStrictEqual(context.peek().settings.allowedDirectories, ['/srv/service-only']);
+    assert.deepStrictEqual(context.peek().settings.allowedDirectories, [SERVICE_ONLY]);
     assert.deepStrictEqual(scope.listDirectories(), []);
   });
 
@@ -133,11 +141,73 @@ describe('desktop-scoped settings', () => {
     assert.ok(!context.peek().rules.some((r) => r.pattern === 'git *'));
   });
 
+  // Fix round 1, C1: the desktop could lift a service deny rule by re-adding
+  // the exact same (tool, pattern, action) key through the approval dialog
+  // — context.addPermissionRule dedups by key and replaces whatever rule
+  // held it, service-sourced or not — and then removing it, since
+  // desktop-scope would otherwise record itself as owning that key. Neither
+  // step may succeed: the "re-add" must be a no-op that leaves the service
+  // rule exactly as it was, so the desktop never actually comes to own the
+  // key, so the follow-up remove still refuses.
+  it('cannot lift a service rule by re-adding then removing the same key', () => {
+    const dataDir = tmp();
+    const context = fakeContext();
+    context.addPermissionRule({ tool: 'Bash', pattern: 'rm *', action: 'deny', source: 'service' });
+    const before = context.peek().rules.find((r) => r.pattern === 'rm *');
+    const scope = createDesktopScope({ dataDir, context });
+
+    // Step 1: the desktop "re-adds" the service's own rule (exactly what an
+    // approval-dialog ruleAction: 'deny' response sends).
+    scope.addPermissionRule({ tool: 'Bash', pattern: 'rm *', action: 'deny', source: 'approval-dialog' });
+    assert.deepStrictEqual(scope.listRules(), [], 'the desktop does not record itself as owning it');
+    assert.deepStrictEqual(context.peek().rules.find((r) => r.pattern === 'rm *'), before, 'the service rule (and its source) is untouched');
+
+    // Step 2: the desktop tries to remove what it just "added".
+    assert.throws(() => scope.removePermissionRule('Bash', 'rm *', 'deny'),
+      (err) => err.code === 'RULE_NOT_DESKTOP');
+    assert.deepStrictEqual(context.peek().rules.find((r) => r.pattern === 'rm *'), before, 'still there, still the service\'s');
+  });
+
+  it('removePermissionRule refuses a key the desktop owns locally once a service rule has reclaimed it', () => {
+    const dataDir = tmp();
+    const context = fakeContext();
+    const scope = createDesktopScope({ dataDir, context });
+    scope.addPermissionRule({ tool: 'Bash', pattern: 'git *', action: 'allow', source: 'approval-dialog' });
+    assert.deepStrictEqual(scope.listRules(), [{ tool: 'Bash', pattern: 'git *', action: 'allow' }]);
+    // The service independently sets a rule with the same key (replacing
+    // the desktop's one at the context level, the way addPermissionRule
+    // always dedups) — the desktop's local record now disagrees with reality.
+    context.addPermissionRule({ tool: 'Bash', pattern: 'git *', action: 'allow', source: 'service' });
+    assert.throws(() => scope.removePermissionRule('Bash', 'git *', 'allow'),
+      (err) => err.code === 'RULE_NOT_DESKTOP');
+    assert.ok(context.peek().rules.some((r) => r.pattern === 'git *' && r.source === 'service'));
+  });
+
+  // M4: setSettings used to pass allowedDirectories through with only a
+  // typeof/non-empty check, so a relative path or garbage value could land
+  // in the desktop's own allow-list unnormalized (and un-deduped against a
+  // differently-spelled entry already there).
+  it('setSettings normalizes incoming directories and drops invalid ones, logging it', () => {
+    const dataDir = tmp();
+    const scope = createDesktopScope({ dataDir, context: fakeContext() });
+    const projects = abs('home', 'example', 'projects');
+    const warnings = [];
+    const remove = addSink((r) => { if (r.level === 'warn') warnings.push(r.message); });
+    let next;
+    try {
+      next = scope.getSettings();
+      next.allowedDirectories = [`${projects}${path.sep}`, 'relative/dir', '', null, 42, projects];
+      scope.setSettings(next);
+    } finally { remove(); }
+    assert.deepStrictEqual(scope.listDirectories(), [projects], 'normalized, deduped, invalid entries dropped');
+    assert.strictEqual(warnings.length, 4, 'warned about each invalid entry (relative/dir, empty string, null, 42)');
+  });
+
   it('reports every path it writes', () => {
     const dataDir = tmp();
     const written = [];
     const scope = createDesktopScope({ dataDir, context: fakeContext(), onPathWritten: (p) => written.push(p) });
-    scope.addDirectory('/data/example');
+    scope.addDirectory(DATA_EXAMPLE);
     assert.ok(written.includes(path.join(dataDir, 'desktop')));
     assert.ok(written.includes(path.join(dataDir, 'desktop', 'allowed-directories.json')));
   });

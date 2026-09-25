@@ -284,6 +284,33 @@ describe('bridge dispatcher', () => {
     assert.deepStrictEqual(resolved, { action: 'execute_js', result: 42 });
   });
 
+  // Fix round 1, M5: a pending canvas:executeJs request bound to the
+  // disconnecting connection must be rejected immediately, not left to its
+  // own 10s execution timeout in create-core.js (the only other thing that
+  // would ever settle it) — never resolved, and removed from the map so
+  // nothing later mistakes it for still-pending.
+  it('rejects a pending canvas request on disconnect instead of leaving it pending', async () => {
+    const { dispatcher, use } = makeDispatcher();
+    const a = connection();
+    use(a);
+    let resolveCalled = false;
+    let rejectedWith = null;
+    const timeout = setTimeout(() => {}, 60000);
+    timeout.unref?.();
+    core.pendingCanvasJsResolvers.set('req-2', {
+      resolve: () => { resolveCalled = true; },
+      reject: (err) => { rejectedWith = err; },
+      timeout
+    });
+    a.prompts.canvas.add('req-2');
+    a.markGone();
+    await dispatcher.onDisconnect(a);
+    assert.strictEqual(resolveCalled, false, 'never resolved as if it had succeeded');
+    assert.ok(rejectedWith instanceof Error);
+    assert.strictEqual(rejectedWith.message, 'The desktop disconnected.');
+    assert.strictEqual(core.pendingCanvasJsResolvers.has('req-2'), false, 'removed, not left pending');
+  });
+
   it('reports approvals status, unavailable before fleet stage 3', async () => {
     assert.deepStrictEqual(approvalsStatus({ approvals: null, dataDir }), { available: false });
     fs.mkdirSync(path.join(dataDir, 'approvals'), { recursive: true });

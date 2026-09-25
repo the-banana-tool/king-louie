@@ -47,7 +47,16 @@ function fakeDispatcher({ disconnectDelayMs = 0, hangDisconnect = false } = {}) 
         conn.send({ t: 'result', id: frame.id, value: { ok: true, data: { echo: frame.args } } });
       }
     },
+    // Mirrors the real dispatcher's own guard (fix round 1, I3): the real
+    // onDisconnect checks/sets conn.cleaned itself, so a fake that doesn't
+    // would keep passing even if the server ever went back to flipping
+    // conn.cleaned before calling in (the exact bug fixed in this round) —
+    // the server would call in exactly once either way, but only a fake
+    // that behaves like the real one turns "called exactly once" into
+    // "and its guard didn't block that one call from doing real work".
     async onDisconnect(conn) {
+      if (conn.cleaned) return;
+      conn.cleaned = true;
       if (hangDisconnect) return new Promise(() => {}); // never settles
       if (disconnectDelayMs) await new Promise((r) => setTimeout(r, disconnectDelayMs));
       this.disconnects.push(conn.deviceId);
@@ -594,6 +603,84 @@ describe('DesktopBridgeServer fix round 3 (task 7 carryover)', () => {
     const started = Date.now();
     await server.stop();
     assert.ok(Date.now() - started < 2000, 'stop() returned promptly instead of waiting on a wedged onDisconnect');
+  });
+});
+
+// Fix round 1, I3: every other test above uses a fake dispatcher, so none of
+// them would have caught the conn.cleaned collision this round fixed (the
+// server used to flip the flag itself before calling in, so the real
+// dispatcher's own guard saw it already set and skipped its actual cleanup
+// body). This one wires the REAL createBridgeDispatcher (via a minimal
+// core/context — no full createCore(), just enough for registerHandlers and
+// for tool:execute's real approval flow) into a real DesktopBridgeServer,
+// runs a real handshake, and drives a real disconnect over the wire. It
+// asserts the thing a fake dispatcher's onDisconnect can't prove either way:
+// that the real dispatcher's cleanup actually ran and denied the prompt.
+describe('DesktopBridgeServer + the real dispatcher (fix round 1, I3)', () => {
+  it('a real disconnect through the real server denies a pending approval prompt', async () => {
+    const device = makeDevice();
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-bridge-'));
+    dirs.push(configDir);
+    writeDevices(configDir, [device]);
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-bridge-data-'));
+    dirs.push(dataDir);
+
+    const observedApprovals = [];
+    const pendingApprovalResolvers = new Map();
+    let settings = { allowedDirectories: [] };
+    let rules = [];
+    const core = {
+      context: {
+        pendingApprovalResolvers,
+        getApiTokens: () => ({}),
+        getSettings: () => JSON.parse(JSON.stringify(settings)),
+        setSettings: (next) => { settings = JSON.parse(JSON.stringify(next)); },
+        getPermissionRules: () => rules,
+        addPermissionRule: (rule) => rules.push({ ...rule }),
+        removePermissionRule: () => {},
+        // Stands in for a real ToolExecutor: on execute(), forwards a real
+        // tool:approvalRequired event to the desktop (exactly like
+        // markLocalDesktopEvent's sender does) and waits on the same
+        // pendingApprovalResolvers map the real tool-handlers.js listener
+        // resolves through.
+        createToolExecutorWithApprovals: async (event) => ({
+          execute: (toolName) => new Promise((resolve) => {
+            const approvalId = 'appr-real-disconnect-1';
+            pendingApprovalResolvers.set(approvalId, {
+              toolName,
+              resolve: (approved) => { observedApprovals.push(approved); resolve({ approved }); }
+            });
+            event.sender.send('tool:approvalRequired', { approvalId, toolName });
+          })
+        })
+      },
+      pendingCanvasJsResolvers: new Map()
+    };
+
+    const server = new DesktopBridgeServer({
+      identity, configDir, dataDir, port: 0, version: '26.9.0', adminUid: selfUid, account: 'LOCAL SERVICE', core
+    });
+    servers.push(server);
+    const { port } = await server.start();
+
+    const out = await handshake(port, device);
+    assert.ok(out.ready, 'the real dispatcher registered handlers and the handshake completed');
+
+    out.c.send({ t: 'invoke', id: 1, channel: 'tool:execute', args: [{ toolName: 'AnyTool', parameters: {} }] });
+    await out.c.next((f) => f.t === 'event' && f.channel === 'tool:approvalRequired');
+    assert.strictEqual(observedApprovals.length, 0, 'not resolved yet — the prompt is still pending');
+
+    // A real disconnect: close the socket, same as the desktop app quitting
+    // or losing the connection, and let the server's own 'close' handling
+    // (not a direct unit-test call to dispatcher.onDisconnect) drive cleanup.
+    out.c.ws.close();
+    await out.c.closed;
+
+    const deadline = Date.now() + 2000;
+    while (observedApprovals.length === 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    assert.deepStrictEqual(observedApprovals, [false], 'the real server drove the real dispatcher.onDisconnect, which denied the pending prompt');
   });
 });
 
