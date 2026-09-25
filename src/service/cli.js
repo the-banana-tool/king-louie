@@ -15,6 +15,9 @@ const HELP = `Usage:
   king-louie-service channel approval <channel> (<chat-id> | --clear) [--data-dir DIR]
   king-louie-service install [--profile P] [--user NAME] [--data-dir DIR] [--dry-run]
   king-louie-service uninstall [--dry-run]
+  king-louie-service enroll-device [--data-dir DIR]              (admin: pair a phone approver)
+  king-louie-service device list|revoke <device-id>|apply [--yes] [--data-dir DIR]
+  king-louie-service relay run|code <node-name>|nodes|remove-node <node-name>|qr [--data-dir DIR]
 
 A chat channel with an empty allowlist refuses every sender, and a channel
 approval is denied unless "channel approval" names an owner chat that is not
@@ -29,7 +32,7 @@ const CHANNEL_HELP = `Usage: king-louie-service channel list <channel> [--data-d
 
 const VALUE_FLAGS = new Set(['data-dir', 'profile', 'user']);
 // Flags that must never carry a value, whichever form produced it.
-const BOOLEAN_FLAGS = new Set(['dry-run', 'group', 'clear']);
+const BOOLEAN_FLAGS = new Set(['dry-run', 'group', 'clear', 'yes']);
 
 function parseArgs(argv) {
   const positional = [];
@@ -274,12 +277,15 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
         // command runs until the process exits; undone if startup fails.
         const restoreConsole = routeConsoleToStderr(io.stderr);
         try {
-          return withServiceCore(dataDir, io, (core) => {
+          return await withServiceCore(dataDir, io, async (core, ports) => {
             const { loadNodeConfig } = require('./node-config');
             const { RunbookEngine } = require('../runbooks/runbook-engine');
             const StdioMcpServer = require('../mcp/stdio-server');
+            const { startMcpApprovals } = require('../approvals/service-wiring');
 
             const nodeCfg = loadNodeConfig({ dataDir });
+            // Unsafe runbooks ask a phone through the running service (§3.9).
+            const approvals = await startMcpApprovals({ dataDir, nodeConfig: nodeCfg, ports });
 
             const runbookEngine = new RunbookEngine({
               runbooksDir: nodeCfg.runbooksDir,
@@ -293,6 +299,8 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
             const server = new StdioMcpServer({
               nodeConfig: nodeCfg,
               runbookEngine,
+              approver: approvals.approver,
+              auditLedger: approvals.auditLedger,
               stdin: io.stdin,
               stdout: io.stdout
             });
@@ -308,34 +316,23 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
 
       case 'pair': {
         // The URL is the first word after the command, i.e. `sub` here.
-        const frontDoorUrl = sub;
-        if (!frontDoorUrl) {
-          io.stderr.write('Usage: king-louie-service pair <front-door-url> [--data-dir DIR]\n');
-          return 2;
-        }
-        // Creating the identity writes to the service's store, which a
-        // running service would overwrite from its own in-memory copy.
-        const pid = runningServicePid(dataDir);
-        if (pid) {
-          io.stderr.write(`The service is running (pid ${pid}) on ${dataDir}. Stop it first, run this again, then start it.\n`);
-          return 1;
-        }
-        return withServiceCore(dataDir, io, (core, ports) => {
-          const { loadNodeConfig } = require('./node-config');
-          const { getOrGenerateNodeIdentity } = require('../mesh/node-identity');
-          const nodeCfg = loadNodeConfig({ dataDir });
-          const identity = getOrGenerateNodeIdentity(core.context.getStore(), ports.cipher, nodeCfg.name);
+        const { runPair } = require('./commands/pair');
+        return await runPair({ url: sub, dataDir, io });
+      }
 
-          // What §5.1 step 1 shows the owner. The exchange that follows
-          // (one-time code, key pinning) needs a front door to talk to,
-          // which is built in stage 4, so this stops here and says so
-          // rather than asking for a code nothing would check.
-          io.stdout.write(`Node Name: ${nodeCfg.name}\n`);
-          io.stdout.write(`Node ID: ${identity.nodeId}\n`);
-          io.stdout.write(`TLS Fingerprint: ${identity.tlsFingerprint}\n`);
-          io.stderr.write(`Pairing with a front door is not available yet: the front door is built in stage 4. Nothing was sent to ${frontDoorUrl}.\n`);
-          return 1;
-        });
+      case 'enroll-device': {
+        const { runEnrollDevice } = require('./commands/devices');
+        return await runEnrollDevice({ dataDir, io });
+      }
+
+      case 'device': {
+        const { runDevice } = require('./commands/devices');
+        return await runDevice({ sub, arg, flags, dataDir, io });
+      }
+
+      case 'relay': {
+        const { runRelayCommand } = require('./commands/relay');
+        return await runRelayCommand({ sub, arg, dataDir, io });
       }
 
       case 'channel':
