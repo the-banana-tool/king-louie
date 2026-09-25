@@ -13,18 +13,32 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { EXCLUDED, INSTALL_ID_RE, CASE_DIR_RE, isSkippedCaseFile } = require('./desktop-import');
+const { EXCLUDED, INSTALL_ID_RE, CASE_DIR_RE, isSkippedCaseFile, safeRelPath } = require('./desktop-import');
 
-const NOFOLLOW = fs.constants.O_NOFOLLOW || 0;
 const WRITE_ACTIONS = new Set(['new', 'update', 'copy']);
+// A desktop store file or a case file bigger than this is refused rather
+// than read into memory (fix round 1): the tree is user-controlled.
+const MAX_FILE_BYTES = 256 * 1024 * 1024;
 const arr = (v) => (Array.isArray(v) ? v : []);
 
-function createSafeReader({ root, platform = process.platform }) {
+// Windows residual (fix round 1, I3): there is no owner check on win32. The
+// owner SID of each file could be read through the installers' handle-based
+// inspector (src/desktop-bridge/pairing.js inspectWindowsOwners), but that
+// compiles and runs PowerShell per call, and this reader is synchronous and
+// per file. What holds on Windows is the lstat chain (links, junctions and
+// mount points refused), nlink === 1, the handle identity check, and the
+// root identity re-check on every call.
+function createSafeReader({ root, platform = process.platform, fsImpl = fs, maxFileBytes = MAX_FILE_BYTES }) {
   const rootPath = path.resolve(root);
-  const rootStat = fs.lstatSync(rootPath);
+  const rootStat = fsImpl.lstatSync(rootPath);
   if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) throw new Error(`${rootPath} is not a directory (links are refused)`);
   const ownerUid = rootStat.uid;
   const checkOwner = platform !== 'win32';
+  const c = fsImpl.constants;
+  // O_NONBLOCK so a FIFO swapped in after the lstat can't hang the open;
+  // O_NOCTTY so a terminal device can never become the controlling tty
+  // (fix round 1, I4). Each only where the platform defines it.
+  const OPEN_FLAGS = c.O_RDONLY | (c.O_NOFOLLOW || 0) | (c.O_NONBLOCK || 0) | (c.O_NOCTTY || 0);
 
   const parts = (rel) => {
     const segs = String(rel).split(/[\\/]+/).filter(Boolean);
@@ -40,12 +54,24 @@ function createSafeReader({ root, platform = process.platform }) {
   function check(rel) {
     const segs = parts(rel);
     if (!segs) return { refused: `${rel} leaves the profile directory` };
+    // The root itself is re-checked on every call (fix round 1, I3): a
+    // profile directory renamed away and replaced after the reader was
+    // built is a different tree, and nothing is read from it.
+    let now;
+    try {
+      now = fsImpl.lstatSync(rootPath);
+    } catch (err) {
+      return { refused: `${rootPath}: ${err.message}` };
+    }
+    if (now.isSymbolicLink() || !now.isDirectory() || now.ino !== rootStat.ino || now.dev !== rootStat.dev) {
+      return { refused: `${rootPath} was replaced after the import started` };
+    }
     let cur = rootPath;
     let st = rootStat;
     for (let i = 0; i < segs.length; i += 1) {
       cur = path.join(cur, segs[i]);
       try {
-        st = fs.lstatSync(cur);
+        st = fsImpl.lstatSync(cur);
       } catch (err) {
         return err.code === 'ENOENT' ? { missing: true } : { refused: `${cur}: ${err.message}` };
       }
@@ -62,16 +88,29 @@ function createSafeReader({ root, platform = process.platform }) {
     if (r.refused) return { ok: false, reason: r.refused };
     if (!r.stat.isFile()) return { ok: false, reason: `${r.path} is not a regular file` };
     if (r.stat.nlink > 1) return { ok: false, reason: `${r.path} has ${r.stat.nlink} hard links` };
+    if (r.stat.size > maxFileBytes) return { ok: false, reason: `${r.path} is larger than ${maxFileBytes} bytes` };
     let fd;
     try {
-      fd = fs.openSync(r.path, fs.constants.O_RDONLY | NOFOLLOW);
-      const st = fs.fstatSync(fd);
-      if (st.ino !== r.stat.ino || st.dev !== r.stat.dev || st.nlink > 1) return { ok: false, reason: `${r.path} changed while it was being read` };
-      return { ok: true, data: fs.readFileSync(fd) };
+      fd = fsImpl.openSync(r.path, OPEN_FLAGS);
+      const st = fsImpl.fstatSync(fd);
+      if (!st.isFile() || st.ino !== r.stat.ino || st.dev !== r.stat.dev || st.nlink > 1) return { ok: false, reason: `${r.path} changed while it was being read` };
+      // Read at most one byte past the cap, so a file that grows after the
+      // stat still can't make this read unbounded.
+      const chunks = [];
+      let total = 0;
+      for (;;) {
+        const buf = Buffer.allocUnsafe(Math.min(1024 * 1024, maxFileBytes + 1 - total));
+        const n = fsImpl.readSync(fd, buf, 0, buf.length, null);
+        if (n === 0) break;
+        chunks.push(buf.subarray(0, n));
+        total += n;
+        if (total > maxFileBytes) return { ok: false, reason: `${r.path} is larger than ${maxFileBytes} bytes` };
+      }
+      return { ok: true, data: Buffer.concat(chunks, total) };
     } catch (err) {
       return { ok: false, reason: `${r.path}: ${err.message}` };
     } finally {
-      if (fd !== undefined) fs.closeSync(fd);
+      if (fd !== undefined) fsImpl.closeSync(fd);
     }
   }
 
@@ -81,7 +120,7 @@ function createSafeReader({ root, platform = process.platform }) {
     if (r.refused) return { dirs: [], refused: [{ relPath: String(rel), reason: r.refused }] };
     const dirs = [];
     const refused = [];
-    for (const name of fs.readdirSync(r.path)) {
+    for (const name of fsImpl.readdirSync(r.path)) {
       const sub = check(path.join(String(rel), name));
       if (sub.refused) refused.push({ relPath: path.join(String(rel), name), reason: sub.refused });
       else if (sub.stat && sub.stat.isDirectory()) dirs.push(name);
@@ -98,7 +137,7 @@ function createSafeReader({ root, platform = process.platform }) {
       if (r.missing) return;
       if (r.refused) { refused.push({ relPath: sub || '.', reason: r.refused }); return; }
       if (r.stat.isDirectory()) {
-        for (const name of fs.readdirSync(r.path).sort()) walk(sub ? `${sub}/${name}` : name);
+        for (const name of fsImpl.readdirSync(r.path).sort()) walk(sub ? `${sub}/${name}` : name);
         return;
       }
       if (!r.stat.isFile()) { refused.push({ relPath: sub, reason: `${r.path} is not a regular file` }); return; }
@@ -148,20 +187,28 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
   const cronJobs = Object.values(cronDoc).filter((j) => j && typeof j.id === 'string' && j.id);
 
   // The receiving importer refuses a whole case outright if any file in it
-  // resolves under a nested (non-top-level) .git segment — isSkippedCaseFile
-  // throws for exactly that shape. Rather than send such a case only to have
-  // it bounce, the walker runs the same decision up front and reports it as
-  // needs-attention instead (Task 8 fix round 3 carry: "the walker reports a
-  // case containing a nested repo as needs-attention up front rather than
-  // sending it"). Every other skip/no-skip decision is not applied here —
-  // the walker counts and sends every file, landed or skipped, so both
-  // sides mean the same thing by "how many files" (M8).
-  const nestedRepoNote = (files) => {
+  // resolves under a nested (non-top-level) .git segment, or is a bare .git
+  // file — isSkippedCaseFile throws for exactly those shapes — and fails
+  // the whole case if any relPath breaks safeRelPath's rules (a reserved
+  // device name, a trailing dot or space). Rather than send such a case only
+  // to have it bounce, the walker runs the same decisions up front and
+  // reports it as needs-attention instead (Task 8 fix round 3 carry; Task 9
+  // fix round 1 minors). Every other skip/no-skip decision is not applied
+  // here — the walker counts and sends every file, landed or skipped, so
+  // both sides mean the same thing by "how many files" (M8).
+  const refusedCaseNote = (files) => {
     for (const f of files) {
+      try {
+        safeRelPath(f.relPath);
+      } catch (err) {
+        return `has a file the service cannot store and cannot be imported (${err.message})`;
+      }
       try {
         isSkippedCaseFile(f.relPath);
       } catch (err) {
-        return err.message;
+        return /"\.git" file/.test(err.message)
+          ? `has a .git file where a .git directory belongs (a git indirection) and cannot be imported (${err.message})`
+          : `contains a nested repository and cannot be imported (${err.message})`;
       }
     }
     return null;
@@ -172,12 +219,15 @@ function readDesktopSource({ userDataDir, reader, decrypt = null, secrets = decr
     const listed = reader.listDir('cases');
     for (const r of listed.refused) attention.push({ category: 'case', key: r.relPath, note: r.reason });
     for (const dir of listed.dirs) {
-      if (!CASE_DIR_RE.test(dir)) continue;
+      if (!CASE_DIR_RE.test(dir)) {
+        attention.push({ category: 'case', key: dir, note: 'not a valid case directory name; it was not copied' });
+        continue;
+      }
       const { files, refused } = reader.listFiles(path.join('cases', dir));
       for (const r of refused) attention.push({ category: 'case', key: `${dir}/${r.relPath}`, note: r.reason });
-      const nested = nestedRepoNote(files);
-      if (nested) {
-        attention.push({ category: 'case', key: dir, note: `contains a nested repository and cannot be imported (${nested})` });
+      const held = refusedCaseNote(files);
+      if (held) {
+        attention.push({ category: 'case', key: dir, note: held });
         continue;
       }
       cases.push({ dir, files: files.length, bytes: files.reduce((n, f) => n + f.size, 0) });
@@ -286,9 +336,17 @@ function* planBatches(planItems, source, { maxBytes = 1900000, chunkBytes = 1024
       skipped.push({ category: item.category, key: item.key, error: 'not found in the desktop profile' });
       continue;
     }
-    yield* push({ category: item.category, key: item.key, value });
+    const entry = { category: item.category, key: item.key, value };
+    // One entry that alone would overflow a batch can never be sent; the
+    // service would refuse the whole batch (fix round 1, I6).
+    const bytes = Buffer.byteLength(JSON.stringify(entry)) + 3;
+    if (bytes > maxBytes) {
+      skipped.push({ category: item.category, key: item.key, error: `larger than the ${maxBytes}-byte import batch limit (${bytes} bytes)` });
+      continue;
+    }
+    yield* push(entry);
   }
   if (batch.length) yield batch;
 }
 
-module.exports = { createSafeReader, readDesktopSource, planBatches };
+module.exports = { createSafeReader, readDesktopSource, planBatches, MAX_FILE_BYTES };

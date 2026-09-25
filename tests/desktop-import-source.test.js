@@ -280,3 +280,86 @@ describe('king-louie-service import --from', () => {
     }
   });
 });
+
+// Task 9 fix round 1: the reader and walker rulings (I3, I4, I6 and the
+// minors).
+describe('the R51 walker (fix round 1)', () => {
+  it('refuses every read once the profile root has been swapped for another directory (I3)', () => {
+    const root = userData();
+    const reader = createSafeReader({ root });
+    const moved = `${root}-moved`;
+    fs.renameSync(root, moved);
+    dirs.push(moved);
+    fs.mkdirSync(root);
+    fs.writeFileSync(path.join(root, 'chat-data.json'), JSON.stringify({ chats: [{ id: MARKER }] }));
+    const out = reader.readFile('chat-data.json');
+    assert.strictEqual(out.ok, false);
+    assert.match(out.reason, /replaced/);
+    assert.deepStrictEqual(reader.listFiles('cases').files, []);
+  });
+
+  it('opens with O_NONBLOCK and O_NOCTTY where the platform defines them (I4)', () => {
+    const root = userData();
+    let flags = null;
+    const fsImpl = {
+      ...fs,
+      constants: { ...fs.constants, O_NONBLOCK: 0x4000000, O_NOCTTY: 0x8000000 },
+      openSync: (p, f) => { flags = f; return fs.openSync(p, 'r'); }
+    };
+    const out = createSafeReader({ root, fsImpl }).readFile('chat-data.json');
+    assert.strictEqual(out.ok, true);
+    assert.ok(flags & 0x4000000, 'O_NONBLOCK');
+    assert.ok(flags & 0x8000000, 'O_NOCTTY');
+  });
+
+  it('refuses a file larger than the reader cap', () => {
+    const root = userData();
+    const out = createSafeReader({ root, maxFileBytes: 10 }).readFile('chat-data.json');
+    assert.strictEqual(out.ok, false);
+    assert.match(out.reason, /larger than 10 bytes/);
+  });
+
+  it('names a top-level .git file as such, not as a nested repository', () => {
+    const root = userData();
+    fs.writeFileSync(path.join(root, 'cases', 'lakeside-lot', '.git'), 'gitdir: inner/.git\n');
+    const source = readDesktopSource({ userDataDir: root, reader: createSafeReader({ root }), secrets: 'needs-desktop' });
+    const note = source.attention.find((a) => a.key === 'lakeside-lot');
+    assert.ok(note, 'the case is held back');
+    assert.match(note.note, /a \.git file/);
+    assert.doesNotMatch(note.note, /nested repository/);
+  });
+
+  it('reports a case directory whose name the service would refuse', () => {
+    const root = userData();
+    fs.mkdirSync(path.join(root, 'cases', 'bad name'));
+    const source = readDesktopSource({ userDataDir: root, reader: createSafeReader({ root }), secrets: 'needs-desktop' });
+    assert.ok(source.attention.some((a) => a.key === 'bad name' && /not a valid case directory name/.test(a.note)));
+  });
+
+  it('holds back a case with a file name the service would refuse (reserved name, trailing dot or space)', () => {
+    const root = userData();
+    const real = createSafeReader({ root });
+    for (const bad of ['aux.md', 'notes.', 'draft ']) {
+      const reader = { ...real, listFiles: (rel) => { const r = real.listFiles(rel); if (/lakeside-lot$/.test(rel)) r.files.push({ relPath: `sub/${bad}`, mode: 0o644, size: 1 }); return r; } };
+      const source = readDesktopSource({ userDataDir: root, reader, secrets: 'needs-desktop' });
+      assert.ok(!source.inventory.cases.some((c) => c.dir === 'lakeside-lot'), bad);
+      assert.ok(source.attention.some((a) => a.key === 'lakeside-lot' && /reserved device name|trailing dot or space/.test(a.note)), bad);
+    }
+  });
+});
+
+describe('planBatches (fix round 1)', () => {
+  it('skips, with the reason, a single entry larger than a batch (I6)', () => {
+    const root = userData();
+    const doc = JSON.parse(fs.readFileSync(path.join(root, 'chat-data.json'), 'utf8'));
+    doc.chats.push({ id: 'big', title: 'Big', updatedAt: '2026-09-20T10:00:00Z', messages: [{ id: 'm', text: 'x'.repeat(2500 * 1024) }] });
+    fs.writeFileSync(path.join(root, 'chat-data.json'), JSON.stringify(doc));
+    const source = readDesktopSource({ userDataDir: root, reader: createSafeReader({ root }), secrets: 'needs-desktop' });
+    const skipped = [];
+    const batches = [...planBatches([{ category: 'chat', key: 'big', action: 'new' }, { category: 'chat', key: 'c1', action: 'new' }], source, { skipped })];
+    assert.deepStrictEqual(batches.flat().map((e) => e.key), ['c1']);
+    assert.strictEqual(skipped.length, 1);
+    assert.strictEqual(skipped[0].key, 'big');
+    assert.match(skipped[0].error, /larger than/);
+  });
+});
