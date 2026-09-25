@@ -2759,8 +2759,9 @@ function createCore(deps = {}) {
       },
       notify: (event, payload) => ui.send(event, payload),
       uiToast: deps.uiToastChannel || null,
-      // F7 replaces this with a bridge-connected check in attached mode (R50).
-      interactive: () => Boolean(deps.ui)
+      // Fleet stage 7 (R50): a service host with the desktop bridge injects a
+      // bridge-connected check; otherwise "a UI is attached" (the Electron host).
+      interactive: deps.host?.interactive ?? (() => Boolean(deps.ui))
     }
   });
 

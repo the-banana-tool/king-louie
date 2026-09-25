@@ -60,6 +60,21 @@ describe('createCore cases wiring', () => {
     assert.strictEqual(fs.existsSync(runtime.root), false);
   });
 
+  it('uses an injected host.interactive (desktop bridge, R50) and falls back to "a UI is attached"', () => {
+    delete process.env.KL_CASES_ROOT;
+    let connected = false;
+    const bridged = createCore({ ...makeDeps(), host: { interactive: () => connected } });
+    const bridgedHost = bridged.context.getCaseRuntime().host;
+    assert.strictEqual(bridgedHost.interactive(), false, 'a service with a UI sink but no desktop connected is not interactive');
+    connected = true;
+    assert.strictEqual(bridgedHost.interactive(), true);
+
+    const withUi = createCore(makeDeps());
+    assert.strictEqual(withUi.context.getCaseRuntime().host.interactive(), true);
+    const headless = createCore({ ...makeDeps(), ui: undefined });
+    assert.strictEqual(headless.context.getCaseRuntime().host.interactive(), false);
+  });
+
   it('honours KL_CASES_ROOT', () => {
     const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-cases-env-'));
     tempDirs.push(elsewhere);
