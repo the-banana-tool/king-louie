@@ -29,7 +29,10 @@ const BIN = path.join(__dirname, '..', 'bin', 'king-louie-service.js');
 const CAN_RUN = process.platform === 'win32' || (typeof process.getuid === 'function' && process.getuid() === 0);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function until(check, what, ms = 30000) {
+// Budgets are generous: this test spawns the relay, the service and `mcp`
+// as real processes, and under full-suite load a child's first reply alone
+// has taken over 40 s. Alone, the whole test takes about 16 s.
+async function until(check, what, ms = 90000) {
   const deadline = Date.now() + ms;
   for (;;) {
     const value = await check();
@@ -124,7 +127,7 @@ function phoneHttps(baseUrl, spkiPin, phone) {
   });
 }
 
-describe('phone approvals end to end', { skip: !CAN_RUN && 'needs root-owned admin config dirs on POSIX', timeout: 180000 }, () => {
+describe('phone approvals end to end', { skip: !CAN_RUN && 'needs root-owned admin config dirs on POSIX', timeout: 600000 }, () => {
   it('an unsafe runbook asked for through mcp runs after a phone approves it', async () => {
     const children = [];
     let unlock = null;
@@ -246,14 +249,14 @@ describe('phone approvals end to end', { skip: !CAN_RUN && 'needs root-owned adm
         // device poll (every 5 s) rescans, and the rescan refuses the dir.
         const serviceLog = () => service.output() + service.errors();
         await until(() => /approver set treated as empty: .*writable by the account running the service/.test(serviceLog()),
-          () => `the service to refuse the writable approver set (${serviceLog()})`, 15000);
+          () => `the service to refuse the writable approver set (${serviceLog()})`, 60000);
         assert.equal(fs.existsSync(path.join(root, 'marker.txt')), false);
       }
 
       unlock = lockApproversDir(path.join(nodeConfig, 'approvers'));
       if (process.platform === 'win32') {
         await until(() => /is protected again; its approvers count/.test(service.output() + service.errors()),
-          () => `the service to trust the locked approver set (${service.errors()})`, 15000);
+          () => `the service to trust the locked approver set (${service.errors()})`, 60000);
       }
       // The same mcp process trusts the set on its next scan (the store
       // rescans at most once a second), with no restart.
@@ -282,7 +285,7 @@ describe('phone approvals end to end', { skip: !CAN_RUN && 'needs root-owned adm
       const finalJob = await until(async () => {
         lastSeen = await tool('get_job', { job_id: job.job_id });
         return ['awaiting_approval', 'queued', 'running'].includes(lastSeen.status) ? null : lastSeen;
-      }, () => `the job to finish (last seen ${JSON.stringify(lastSeen)})`, 60000);
+      }, () => `the job to finish (last seen ${JSON.stringify(lastSeen)})`, 120000);
       assert.equal(finalJob.status, 'succeeded', JSON.stringify(finalJob));
       assert.equal(fs.readFileSync(path.join(root, 'marker.txt'), 'utf8'), 'ran');
     } finally {
