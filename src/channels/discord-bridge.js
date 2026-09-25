@@ -459,7 +459,10 @@ class DiscordChannel extends ChannelPlugin {
       return this.discordToLocalChatMap.get(key);
     }
     const chatTitle = `👾 Discord: ${userName} (${discordChatId})`;
-    const localChatId = this.createLocalChat(chatTitle);
+    // Tagged with this bridge's origin (F5): a case can be attached only to
+    // a chat host-verified as the owner's, and this one carries whatever a
+    // remote Discord sender typed.
+    const localChatId = this.createLocalChat(chatTitle, { origin: this.id });
     if (localChatId) {
       this.discordToLocalChatMap.set(key, localChatId);
     }
@@ -469,7 +472,7 @@ class DiscordChannel extends ChannelPlugin {
   addToLocalChat(discordChatId, sender, text) {
     const localChatId = this.discordToLocalChatMap.get(String(discordChatId));
     if (localChatId) {
-      this.addMessageToLocalChat(localChatId, sender, text);
+      this.addMessageToLocalChat(localChatId, sender, text, { channel: this.id });
     }
   }
 

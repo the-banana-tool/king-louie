@@ -341,7 +341,10 @@ class TelegramBridge extends ChannelPlugin {
 
     // Create a new local chat
     const chatTitle = `📱 Telegram: ${userName} (${telegramChatId})`;
-    const localChatId = this.createLocalChat(chatTitle);
+    // Tagged with this bridge's origin (F5): a case can be attached only to
+    // a chat host-verified as the owner's, and this one carries whatever a
+    // remote Telegram sender typed.
+    const localChatId = this.createLocalChat(chatTitle, { origin: this.id });
 
     if (localChatId) {
       this.telegramToLocalChatMap.set(key, localChatId);
@@ -353,7 +356,7 @@ class TelegramBridge extends ChannelPlugin {
   addToLocalChat(telegramChatId, sender, text) {
     const localChatId = this.telegramToLocalChatMap.get(String(telegramChatId));
     if (localChatId) {
-      this.addMessageToLocalChat(localChatId, sender, text);
+      this.addMessageToLocalChat(localChatId, sender, text, { channel: this.id });
     }
   }
 

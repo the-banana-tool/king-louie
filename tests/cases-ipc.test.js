@@ -10,11 +10,11 @@ const { CaseRuntime } = require('../src/cases');
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
 
-function setup({ withRuntime = true } = {}) {
+function setup({ withRuntime = true, chats: initialChats = [{ id: 'chat-1', title: 'Chat', messages: [] }] } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-cases-ipc-'));
   dirs.push(root);
   const runtime = new CaseRuntime({ root });
-  let chats = [{ id: 'chat-1', title: 'Chat', messages: [] }];
+  let chats = initialChats;
   const context = {
     getCaseRuntime: () => (withRuntime ? runtime : null),
     getChats: () => chats,
@@ -49,6 +49,18 @@ describe('case IPC', () => {
     assert.match(badCase.error, /Case not found/);
     const badChat = await call(IPC.CASE_ATTACH, { chatId: 'nope', caseId: c.id });
     assert.strictEqual(badChat.ok, false);
+  });
+
+  it('refuses to attach a case to a bridge chat (F5)', async () => {
+    const { call } = setup({ chats: [{ id: 'chat-1', title: 'Chat', messages: [] }, { id: 'chat-2', title: '📱 Telegram: someone (1)', origin: 'telegram', messages: [] }] });
+    const { case: c } = await call(IPC.CASE_CREATE, { title: 'A' });
+    const refused = await call(IPC.CASE_ATTACH, { chatId: 'chat-2', caseId: c.id });
+    assert.strictEqual(refused.ok, false);
+    assert.match(refused.error, /telegram/i);
+    // Detaching (caseId: null) is not a case attachment and stays allowed;
+    // attaching a case to a plain chat is unaffected.
+    assert.strictEqual((await call(IPC.CASE_ATTACH, { chatId: 'chat-2', caseId: null })).ok, true);
+    assert.strictEqual((await call(IPC.CASE_ATTACH, { chatId: 'chat-1', caseId: c.id })).chat.caseId, c.id);
   });
 
   it('returns the orientation text', async () => {

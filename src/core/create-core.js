@@ -1148,11 +1148,14 @@ function createCore(deps = {}) {
       getNotificationSettings: () => getSettings().notifications,
       getVoiceSettings,
       getTtsEngine: () => ttsEngine,
-      createLocalChat: (title) => {
+      createLocalChat: (title, { origin } = {}) => {
         const now = new Date().toISOString();
         const newChat = {
           id: createId(),
           title,
+          // F5: a chat a channel bridge created carries where it came from,
+          // so a case can never be attached to it (case-handlers.js).
+          ...(origin ? { origin } : {}),
           createdAt: now,
           updatedAt: now,
           messages: []
@@ -1164,7 +1167,7 @@ function createCore(deps = {}) {
 
         return newChat.id;
       },
-      addMessageToLocalChat: (chatId, sender, text) => {
+      addMessageToLocalChat: (chatId, sender, text, { channel } = {}) => {
         const chats = getChats();
         const chat = chats.find((c) => c.id === chatId);
         if (!chat) return;
@@ -1174,7 +1177,10 @@ function createCore(deps = {}) {
           id: createId(),
           sender,
           text,
-          timestamp: now
+          timestamp: now,
+          // F5: excludes this message from the owner-message pool
+          // (chat-handlers.js) even though sender is 'user'.
+          ...(channel ? { channel } : {})
         });
         chat.updatedAt = now;
 
@@ -1220,11 +1226,14 @@ function createCore(deps = {}) {
       getVoiceSettings,
       getTtsEngine: () => ttsEngine,
       // Callbacks for local chat management
-      createLocalChat: (title) => {
+      createLocalChat: (title, { origin } = {}) => {
         const now = new Date().toISOString();
         const newChat = {
           id: createId(),
           title,
+          // F5: a chat a channel bridge created carries where it came from,
+          // so a case can never be attached to it (case-handlers.js).
+          ...(origin ? { origin } : {}),
           createdAt: now,
           updatedAt: now,
           messages: []
@@ -1237,7 +1246,7 @@ function createCore(deps = {}) {
 
         return newChat.id;
       },
-      addMessageToLocalChat: (chatId, sender, text) => {
+      addMessageToLocalChat: (chatId, sender, text, { channel } = {}) => {
         const chats = getChats();
         const chat = chats.find((c) => c.id === chatId);
         if (!chat) return;
@@ -1247,7 +1256,10 @@ function createCore(deps = {}) {
           id: createId(),
           sender,
           text,
-          timestamp: now
+          timestamp: now,
+          // F5: excludes this message from the owner-message pool
+          // (chat-handlers.js) even though sender is 'user'.
+          ...(channel ? { channel } : {})
         });
         chat.updatedAt = now;
 

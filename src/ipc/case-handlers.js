@@ -36,7 +36,15 @@ function registerCaseHandlers(ipcMain, context = {}) {
   }));
 
   ipcMain.handle(IPC.CASE_ATTACH, wrapHandler(IPC.CASE_ATTACH, async (_event, { chatId, caseId } = {}) => {
-    if (caseId) runtime().getCase(caseId);
+    if (caseId) {
+      runtime().getCase(caseId);
+      // A Telegram/Discord bridge chat (F5) can carry messages from a
+      // remote sender stamped sender: 'user'. Attaching a case would let
+      // those messages satisfy the quote-verified owner-message check
+      // (chat-handlers.js), so a case may never be attached to one.
+      const chat = context.getChats().find((c) => c.id === chatId);
+      if (chat?.origin) throw new Error(`A ${chat.origin} chat cannot be attached to a case; its messages are not verified as the owner's.`);
+    }
     return { ok: true, chat: attach(chatId, caseId) };
   }));
 

@@ -414,7 +414,11 @@ function registerChatHandlers(ipcMain, context = {}) {
       let ownerMessageTimes = null;
       const ownerMessages = caseTurn
         ? (() => {
-            const owned = chatRaw.messages.filter((m) => m.sender === 'user' && typeof m.text === 'string' && m.text);
+            // A message a Telegram/Discord bridge appended on a remote
+            // sender's behalf is stamped sender: 'user' too, but it is not
+            // the owner talking in this chat — a channel tag (F5) excludes
+            // it from the quote-verified owner-message pool.
+            const owned = chatRaw.messages.filter((m) => m.sender === 'user' && !m.channel && typeof m.text === 'string' && m.text);
             const messages = owned.map((m) => m.text);
             ownerMessageTimes = owned.map((m) => m.timestamp || null);
             const nowIso = new Date().toISOString();
