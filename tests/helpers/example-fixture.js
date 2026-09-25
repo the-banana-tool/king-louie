@@ -54,17 +54,21 @@ function prepareRunbook(file, { tmp, programs = {}, prefixes = {}, urls = {} }) 
     return value;
   };
 
-  for (const step of runbook.steps) {
+  runbook.steps.forEach((step, i) => {
     if (Array.isArray(step.run)) {
       const [program, ...rest] = step.run;
-      let head = [program];
-      if (Object.prototype.hasOwnProperty.call(programs, program)) {
-        hits.add(program);
-        const target = programs[program];
-        head = typeof target === 'string'
-          ? [process.execPath, path.join(tmp, 'fakes', `${target}.js`)]
-          : [target.path];
+      // Every argv[0] must be rewritten to a fake. A program this fixture
+      // does not know about would otherwise run for real, unnoticed.
+      if (!Object.prototype.hasOwnProperty.call(programs, program)) {
+        throw new Error(
+          `prepareRunbook: runbook "${runbook.name}" step ${i + 1}: program "${program}" is not in \`programs\`; every argv[0] must be rewritten to a fake`
+        );
       }
+      hits.add(program);
+      const target = programs[program];
+      const head = typeof target === 'string'
+        ? [process.execPath, path.join(tmp, 'fakes', `${target}.js`)]
+        : [target.path];
       step.run = [...head, ...rest.map(swapPrefix)];
     } else if (step.check && typeof step.check.http_get === 'string') {
       const key = urlKeys.find((k) => step.check.http_get.startsWith(k));
@@ -73,7 +77,7 @@ function prepareRunbook(file, { tmp, programs = {}, prefixes = {}, urls = {} }) 
         step.check.http_get = urls[key] + step.check.http_get.slice(key.length);
       }
     }
-  }
+  });
 
   const config = path.join(tmp, 'config');
   const dir = path.join(config, 'runbooks');

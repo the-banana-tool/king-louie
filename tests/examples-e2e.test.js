@@ -92,6 +92,25 @@ async function runOverMcp(node, machine, runbook, params = {}) {
   return node.client.waitForJob(started.job_id, ['succeeded', 'failed', 'cancelled']);
 }
 
+describe('prepareRunbook: every run step must be rewritten', () => {
+  it('throws naming the runbook, step and program when a run step\'s argv[0] is not in `programs`', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-example-rewrite-'));
+    try {
+      assert.throws(
+        () => prepareRunbook(path.join(EXAMPLES, 'runbooks', 'site.status.yaml'), { tmp, programs: {}, prefixes: {}, urls: {} }),
+        (err) => {
+          assert.match(err.message, /site\.status/);
+          assert.match(err.message, /step 1/);
+          assert.match(err.message, /"\/usr\/bin\/git"/);
+          return true;
+        }
+      );
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
 const WEB01_FILES = ['site.status.yaml', 'site.pull_and_restart.yaml', 'server.reboot.yaml'];
 const WEB01_FAKES = ['git', 'sudo', 'systemctl', 'build'];
 const web01Rewrite = (baseUrl) => (tmp) => ({
@@ -219,6 +238,7 @@ describe('web-01 examples end to end', () => {
       assert.equal(res.stepIndex, 1);
       assert.equal(res.error, 'Step 2 exited with status 128');
       assert.ok(res.logs.some((l) => l.includes('would be overwritten by checkout')), JSON.stringify(res.logs));
+      assert.deepEqual(node.evidence('site.pull_and_restart'), []);
       assert.deepEqual(node.calls().map((c) => c.fake), ['git', 'git']);
     } finally {
       await node.cleanup();

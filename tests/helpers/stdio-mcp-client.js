@@ -65,9 +65,29 @@ function connectStdioMcp(options = {}) {
     throw new Error(`job ${jobId} did not reach ${wanted.join('/')} within ${timeoutMs} ms (last: ${JSON.stringify(job)})`);
   }
 
-  async function close() {
+  // Waits for every pending job run to settle, but not forever: a hung run
+  // (a bug in the fake, a real program that never exits) must fail the test
+  // that leaked it rather than hang the whole suite.
+  async function close({ timeoutMs = 15000 } = {}) {
     stdin.end();
-    await Promise.allSettled([...server.jobRuns.values()]);
+    const pending = [...server.jobRuns.entries()];
+    if (pending.length === 0) return;
+    let timedOut = false;
+    const timer = new Promise((resolve) => {
+      const t = setTimeout(() => {
+        timedOut = true;
+        resolve();
+      }, timeoutMs);
+      t.unref?.();
+    });
+    await Promise.race([Promise.allSettled(pending.map(([, run]) => run)), timer]);
+    if (!timedOut) return;
+    for (const [jobId] of pending) {
+      if (server.jobRuns.has(jobId)) server.jobManager?.cancelJob?.(jobId);
+    }
+    throw new Error(
+      `connectStdioMcp: close() timed out after ${timeoutMs} ms waiting for ${pending.length} pending job run(s); cancelled what the server exposes`
+    );
   }
 
   return { server, request, callTool, waitForJob, close };
