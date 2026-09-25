@@ -376,6 +376,18 @@ describe('sudoers for web-01', () => {
     for (const name of names) assert.ok(!name.includes('.'), `${name} has a dot; sudo skips it`);
   });
 
+  // visudo rejects a CRLF sudoers file. A Windows checkout with
+  // core.autocrlf=true writes CRLF unless .gitattributes pins LF.
+  it('has LF line endings only, and git checks it out with LF on every OS', (t) => {
+    assert.ok(!fs.readFileSync(SUDOERS, 'utf8').includes('\r'), 'the sudoers file contains a carriage return');
+    const r = spawnSync('git', ['check-attr', 'eol', '--', path.relative(ROOT, SUDOERS).split(path.sep).join('/')], { cwd: ROOT, encoding: 'utf8' });
+    if (r.error || r.status !== 0) {
+      t.skip(`git check-attr unavailable: ${r.error ? r.error.message : r.stderr}`);
+      return;
+    }
+    assert.match(r.stdout, /: eol: lf\s*$/);
+  });
+
   it('passes visudo -cf', (t) => {
     for (const cmd of ['/usr/sbin/visudo', 'visudo']) {
       const r = spawnSync(cmd, ['-cf', SUDOERS], { encoding: 'utf8' });
