@@ -291,7 +291,7 @@ the e2e test), the owner check cannot tell them apart.
 - Tests: `tests/approvals-*.test.js`, `tests/frontdoor-*.test.js`, `tests/audit-ledger.test.js`,
   `tests/service-cli-devices.test.js`, `tests/service-cli-relay.test.js`. Vectors live in
   `tests/vectors/approval-v1/`; after changing a message, run `node tests/vectors/approval-v1/generate.js`
-  and commit the files (`--check` must say `40 vectors match`). `tests/approvals-e2e.test.js` spawns real
+  and commit the files (`--check` must say `41 vectors match`). `tests/approvals-e2e.test.js` spawns real
   processes and runs on Windows or as root; on Windows it denies itself write access to a temp
   `approvers/` dir with `icacls` (as an installer's ACL would) and lifts the deny before cleanup.
 - Mobile apps (`mobile/`, built from `docs/protocol/approval-v1.md`): protocol-core tests are

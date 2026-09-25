@@ -7,3 +7,7 @@ examples/sudoers/* text eol=lf
 examples/**/*.yaml text eol=lf
 examples/**/*.json text eol=lf
 examples/**/*.py text eol=lf
+# The approval-v1 vectors are compared byte for byte (generate.js --check,
+# tests/approvals-protocol.test.js) and read by the phone protocol cores; a
+# Windows checkout with core.autocrlf=true must not turn them into CRLF.
+tests/vectors/**/*.json text eol=lf
