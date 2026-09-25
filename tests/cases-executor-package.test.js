@@ -282,6 +282,18 @@ describe('package pin: links cannot escape', () => {
 });
 
 describe('checkPackage: main and roots', () => {
+  it('refuses a node_modules in the executor root or between it and the package', () => {
+    const root = tmp();
+    const dir = writePackage(root, 'phone-x');
+    assert.strictEqual(check(root, dir).ok, true);
+    fs.mkdirSync(path.join(root, 'node_modules', 'dep'), { recursive: true });
+    assert.strictEqual(check(root, dir).error, 'executor roots must not contain node_modules: bare requires from the package would load it unpinned (found node_modules)');
+    const root2 = tmp();
+    const deep = writePackage(path.join(root2, 'group'), 'phone-y');
+    fs.mkdirSync(path.join(root2, 'group', 'node_modules'));
+    assert.strictEqual(check(root2, deep, 'phone-y').error, 'executor roots must not contain node_modules: bare requires from the package would load it unpinned (found group/node_modules)');
+  });
+
   it('refuses a package that ships node_modules at any depth', () => {
     const root = tmp();
     const top = writePackage(root, 'phone-x');

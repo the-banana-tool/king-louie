@@ -11,11 +11,14 @@
 // - A package that ships a node_modules directory, at any depth, is refused:
 //   executor packages bundle their dependencies into their own files.
 // - Bare requires (`require('x')`) are resolved by Node from the package's
-//   own location upward: a node_modules beside or above the package root, then
-//   NODE_PATH and the global folders. They do NOT reach King Louie's own
-//   installed dependencies (those sit under the app, not above the root), and
-//   nothing here pins what they do find. Builtins and the king-louie/* aliases
-//   (installed by the skill loader) resolve as usual.
+//   own location upward, then NODE_PATH and the global folders. They do NOT
+//   reach King Louie's own installed dependencies (those sit under the app).
+//   So a node_modules directly inside the executor root, or in any directory
+//   between the root and the package, is refused as well. Directories above
+//   the root, NODE_PATH and the global folders are part of the admin's
+//   environment and are not checked; nothing pins what a bare require finds
+//   there. Builtins and the king-louie/* aliases (installed by the skill
+//   loader) resolve as usual.
 // - A loaded adapter runs in-process with full privileges (spec §3.2 Trust):
 //   it can require or read anything and bypass host.fetch. The load checks
 //   decide what gets loaded; nothing confines it afterwards.
@@ -86,6 +89,24 @@ function hasNodeModules(dir) {
     if (entry.isDirectory() && hasNodeModules(path.join(dir, entry.name))) return true;
   }
   return false;
+}
+
+// The first node_modules a bare require from the package would search on the
+// way up to the executor root (root included), or null.
+function nodeModulesUpToRoot(realDir, root) {
+  for (let d = path.dirname(realDir); ; d = path.dirname(d)) {
+    const candidate = path.join(d, 'node_modules');
+    if (fs.existsSync(candidate) || isLink(candidate)) return candidate;
+    if (keyOf(d) === keyOf(root) || path.dirname(d) === d) return null;
+  }
+}
+
+function isLink(p) {
+  try {
+    return fs.lstatSync(p).isSymbolicLink();
+  } catch {
+    return false;
+  }
 }
 
 // Every file the pin covers, without following links. A link is hashed by
@@ -240,6 +261,10 @@ function checkPackage({
     }
 
     if (hasNodeModules(realDir)) return fail('executor packages must bundle their dependencies (node_modules is not allowed)');
+    const above = nodeModulesUpToRoot(realDir, root);
+    if (above) {
+      return fail(`executor roots must not contain node_modules: bare requires from the package would load it unpinned (found ${posixRel(root, above)})`);
+    }
 
     result.computed = hashPackage(realDir).sha;
     const pin = entry && typeof entry.packageSha256 === 'string' ? entry.packageSha256 : '';
