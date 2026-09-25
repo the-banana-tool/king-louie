@@ -26,7 +26,7 @@ const validPairing = () => ({
   publicKey: 'x',
   privateKeySealed: 'y',
   label: 'desk',
-  service: { nodeId: 'kl-abc', publicKey: 'ab', port: 18795, pairedAt: '2026-09-23T14:02:11Z' }
+  service: { nodeId: 'kl-abc', publicKey: 'ab', port: 18796, pairedAt: '2026-09-23T14:02:11Z' }
 });
 
 describe('desktop state: setPairing guards', () => {

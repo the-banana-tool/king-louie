@@ -74,7 +74,7 @@ function controllerFor({
 
 const pairedRecord = ({ deviceId = 'kld-abcdefghijklmnop', service } = {}) => ({
   deviceId, publicKey: 'x', privateKeySealed: 'y', label: 'desk',
-  service: service || { nodeId: identity.nodeId, publicKey: identity.publicKey.toString('hex'), port: 18795, pairedAt: '2026-09-23T14:02:11Z' }
+  service: service || { nodeId: identity.nodeId, publicKey: identity.publicKey.toString('hex'), port: 18796, pairedAt: '2026-09-23T14:02:11Z' }
 });
 
 // A stand-in DesktopBridgeClient for import tests: real connect()/close()
@@ -160,7 +160,7 @@ describe('desktop controller', () => {
   it('attach, detach and standalone-once relaunch; in test mode they print KL_RELAUNCH_REQUESTED', async () => {
     const { controller, state, app, out } = controllerFor({ env: { KL_TEST_MODE: '1' }, readBridgeFile: () => ({ ok: false }) });
     assert.strictEqual((await controller.attach()).code, 'NOT_PAIRED');
-    state.setPairing({ deviceId: 'kld-abcdefghijklmnop', publicKey: 'x', privateKeySealed: 'y', label: 'desk', service: { nodeId: identity.nodeId, publicKey: identity.publicKey.toString('hex'), port: 18795, pairedAt: '2026-09-23T14:02:11Z' } });
+    state.setPairing({ deviceId: 'kld-abcdefghijklmnop', publicKey: 'x', privateKeySealed: 'y', label: 'desk', service: { nodeId: identity.nodeId, publicKey: identity.publicKey.toString('hex'), port: 18796, pairedAt: '2026-09-23T14:02:11Z' } });
     assert.deepStrictEqual(await controller.attach(), { ok: true, relaunching: true });
     assert.strictEqual(state.mode, 'attached');
     assert.deepStrictEqual(out, ['KL_RELAUNCH_REQUESTED\n']);

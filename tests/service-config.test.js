@@ -30,7 +30,7 @@ describe('loadServiceConfig', () => {
     assert.deepStrictEqual(loadServiceConfig(tmp()), {
       profile: 'agent',
       features: { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false, desktopBridge: false },
-      ports: { gateway: 18793, webhook: 18794, desktopBridge: 18795 }
+      ports: { gateway: 18793, webhook: 18794, desktopBridge: 18796 }
     });
   });
   it('reads the profile from the admin config and lets CLI overrides win', () => {

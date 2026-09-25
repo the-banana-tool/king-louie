@@ -6,7 +6,7 @@ const { listIpcChannels } = require('./channel-inventory');
 const { createDesktopHandler } = require('./desktop-handlers');
 const { createDesktopController } = require('./desktop-controller');
 const { classifyChannel, isRendererEvent } = require('../desktop-bridge/allowlist');
-const { MESSAGES } = require('../desktop-bridge/protocol');
+const { MESSAGES, DEFAULT_DESKTOP_BRIDGE_PORT } = require('../desktop-bridge/protocol');
 
 const log = createLogger('attached-host');
 
@@ -24,7 +24,7 @@ function startAttachedHost(deps) {
   controller.setClient(client);
   const openRuns = new Map(); // responseId -> chatId
 
-  const port = () => (client && client.port) || (state.pairing && state.pairing.service && state.pairing.service.port) || 18795;
+  const port = () => (client && client.port) || (state.pairing && state.pairing.service && state.pairing.service.port) || DEFAULT_DESKTOP_BRIDGE_PORT;
   const send = (channel, payload) => {
     const win = getWindow();
     if (win && !win.isDestroyed()) win.webContents.send(channel, payload);

@@ -45,13 +45,17 @@ const waitFor = async (fn, ms = 5000) => {
 };
 
 describe('service config', () => {
-  it('adds desktopBridge off by default on port 18795', () => {
+  it('adds desktopBridge off by default on port 18796', () => {
     assert.strictEqual(DEFAULT_FEATURES.desktopBridge, false);
-    assert.strictEqual(DEFAULT_PORTS.desktopBridge, 18795);
+    assert.strictEqual(DEFAULT_PORTS.desktopBridge, 18796);
+    // 18795 is the relay mesh listener's default (fleet stage 3); the two
+    // defaults must never collide, and the server's own default must agree.
+    assert.notStrictEqual(DEFAULT_PORTS.desktopBridge, 18795);
+    assert.strictEqual(require('../src/desktop-bridge/protocol').DEFAULT_DESKTOP_BRIDGE_PORT, DEFAULT_PORTS.desktopBridge);
     const { dataDir, configDir } = layout();
     const cfg = loadServiceConfig(dataDir, {}, opts(configDir));
     assert.strictEqual(cfg.features.desktopBridge, false);
-    assert.strictEqual(cfg.ports.desktopBridge, 18795);
+    assert.strictEqual(cfg.ports.desktopBridge, 18796);
   });
 
   it('accepts an ephemeral desktop bridge port but no other zero port', () => {

@@ -120,9 +120,9 @@ async function handshake(port, device, { tamper = null, protocol = PROTOCOL } = 
 
 describe('auth strings', () => {
   it('join the fixed fields with newlines, port included', () => {
-    const fields = { nodeId: identity.nodeId, deviceId: makeDevice().deviceId, port: 18795, serverNonce: newNonce(), clientNonce: newNonce() };
-    assert.strictEqual(buildAuthS(fields), ['kl.desktop.hello.v1', fields.nodeId, fields.deviceId, '18795', fields.serverNonce, fields.clientNonce].join('\n'));
-    assert.strictEqual(buildAuthC(fields), ['kl.desktop.auth.v1', fields.nodeId, fields.deviceId, '18795', fields.serverNonce, fields.clientNonce].join('\n'));
+    const fields = { nodeId: identity.nodeId, deviceId: makeDevice().deviceId, port: 18796, serverNonce: newNonce(), clientNonce: newNonce() };
+    assert.strictEqual(buildAuthS(fields), ['kl.desktop.hello.v1', fields.nodeId, fields.deviceId, '18796', fields.serverNonce, fields.clientNonce].join('\n'));
+    assert.strictEqual(buildAuthC(fields), ['kl.desktop.auth.v1', fields.nodeId, fields.deviceId, '18796', fields.serverNonce, fields.clientNonce].join('\n'));
     assert.throws(() => buildAuthS({ ...fields, port: 0 }), /malformed/);
     assert.throws(() => buildAuthC({ ...fields, clientNonce: 'short' }), /malformed/);
   });

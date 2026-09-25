@@ -91,13 +91,13 @@ describe('desktop pair', () => {
     const devices = pairing.parseDevices(fs.readFileSync(path.join(l.configDir, 'desktop-devices.json'), 'utf8'));
     assert.deepStrictEqual(devices.devices, [{ deviceId: decoded.deviceId, publicKey: decoded.publicKey, label: 'web-01 desk', pairedAt: '2026-09-23T14:02:11Z' }]);
     const bridge = JSON.parse(fs.readFileSync(path.join(l.configDir, 'desktop-bridge.json'), 'utf8'));
-    assert.deepStrictEqual(bridge, { v: 1, nodeId: l.identity.nodeId, publicKey: l.identity.publicKey.toString('hex'), host: '127.0.0.1', port: 18795, protocol: 1 });
+    assert.deepStrictEqual(bridge, { v: 1, nodeId: l.identity.nodeId, publicKey: l.identity.publicKey.toString('hex'), host: '127.0.0.1', port: 18796, protocol: 1 });
     assert.strictEqual(deriveNodeId(bridge.publicKey), bridge.nodeId);
     const svc = JSON.parse(fs.readFileSync(path.join(l.configDir, 'service.json'), 'utf8'));
-    assert.deepStrictEqual(svc, { profile: 'agent', features: { gateway: true, desktopBridge: true }, ports: { gateway: 18793, desktopBridge: 18795 } });
+    assert.deepStrictEqual(svc, { profile: 'agent', features: { gateway: true, desktopBridge: true }, ports: { gateway: 18793, desktopBridge: 18796 } });
     assert.ok(c.out.stdout.includes(keys.fingerprintGroups(decoded.deviceId)));
     assert.ok(c.out.stdout.includes(keys.fingerprintGroups(l.identity.nodeId)));
-    assert.ok(c.out.stdout.includes('Port: 18795'));
+    assert.ok(c.out.stdout.includes('Port: 18796'));
     assert.ok(c.out.stdout.includes(PAIR_WARNING));
     assert.ok(c.out.stdout.includes('Restart the service to open the desktop bridge.'));
     const again = capture();

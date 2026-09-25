@@ -16,7 +16,8 @@ const DEFAULT_FEATURES = { gateway: false, webhooks: false, mesh: false, channel
 // over a port, and an unprivileged local user squatting the mesh port cannot
 // keep the service's gateway off the air.
 // desktopBridge (fleet stage 7): the loopback listener the desktop app attaches to.
-const DEFAULT_PORTS = { gateway: 18793, webhook: 18794, desktopBridge: 18795 };
+// 18795 is taken by the relay mesh listener (fleet stage 3), hence 18796.
+const DEFAULT_PORTS = { gateway: 18793, webhook: 18794, desktopBridge: 18796 };
 const CONFIG_FILE = 'service.json';
 // Keys that decide whether a network listener exists and where it binds, and
 // which profile — and so whether the agent stack loads at all. These may only

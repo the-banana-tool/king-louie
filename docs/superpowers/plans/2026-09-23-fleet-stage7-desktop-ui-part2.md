@@ -49,7 +49,7 @@ Program §3, verbatim:
 Stage 7 spec constraints:
 
 - No new npm dependency (spec §14). `ws` carries the bridge; Ed25519 and SHA-256 come from `node:crypto`.
-- The bridge binds the literal `127.0.0.1` only, default port `18795` (`ports.desktopBridge` in `<configDir>/service.json`); `0` (ephemeral) is accepted for tests only. Upgrades carrying any `Origin` header get 403. HTTP header timeout 10000 ms.
+- The bridge binds the literal `127.0.0.1` only, default port `18796` (`ports.desktopBridge` in `<configDir>/service.json`); `0` (ephemeral) is accepted for tests only. Upgrades carrying any `Origin` header get 403. HTTP header timeout 10000 ms.
 - Pre-auth: each frame ≤ 4096 bytes (length checked before `JSON.parse`), first frame within 2000 ms, handshake within 10000 ms, at most 16 unauthenticated sockets (the oldest is closed with 1013 when a 17th arrives). 5 failed handshakes of one `deviceId` within 60 s refuse that device for 60 s; there is no global lockout.
 - Close codes: 4400 malformed/oversized/silent, 4401 bad signature, 4403 unknown or unpaired device, 4409 another device attached (reason = its label), 4426 protocol mismatch (reason = `"1"`), 4429 locked out. Shutdown sends `{ "t":"bye", "code":"SERVICE_STOPPING" }` then closes 1001.
 - `AUTH_S` = `kl.desktop.hello.v1\n<nodeId>\n<deviceId>\n<port>\n<serverNonce>\n<clientNonce>`; `AUTH_C` = `kl.desktop.auth.v1\n…` with the same fields. The server signs first.
@@ -2463,13 +2463,13 @@ describe('desktop pair', () => {
     const devices = pairing.parseDevices(fs.readFileSync(path.join(l.configDir, 'desktop-devices.json'), 'utf8'));
     assert.deepStrictEqual(devices.devices, [{ deviceId: decoded.deviceId, publicKey: decoded.publicKey, label: 'web-01 desk', pairedAt: '2026-09-23T14:02:11Z' }]);
     const bridge = JSON.parse(fs.readFileSync(path.join(l.configDir, 'desktop-bridge.json'), 'utf8'));
-    assert.deepStrictEqual(bridge, { v: 1, nodeId: l.identity.nodeId, publicKey: l.identity.publicKey.toString('hex'), host: '127.0.0.1', port: 18795, protocol: 1 });
+    assert.deepStrictEqual(bridge, { v: 1, nodeId: l.identity.nodeId, publicKey: l.identity.publicKey.toString('hex'), host: '127.0.0.1', port: 18796, protocol: 1 });
     assert.strictEqual(deriveNodeId(bridge.publicKey), bridge.nodeId);
     const svc = JSON.parse(fs.readFileSync(path.join(l.configDir, 'service.json'), 'utf8'));
-    assert.deepStrictEqual(svc, { profile: 'agent', features: { gateway: true, desktopBridge: true }, ports: { gateway: 18793, desktopBridge: 18795 } });
+    assert.deepStrictEqual(svc, { profile: 'agent', features: { gateway: true, desktopBridge: true }, ports: { gateway: 18793, desktopBridge: 18796 } });
     assert.ok(c.out.stdout.includes(keys.fingerprintGroups(decoded.deviceId)));
     assert.ok(c.out.stdout.includes(keys.fingerprintGroups(l.identity.nodeId)));
-    assert.ok(c.out.stdout.includes('Port: 18795'));
+    assert.ok(c.out.stdout.includes('Port: 18796'));
     assert.ok(c.out.stdout.includes(PAIR_WARNING));
     assert.ok(c.out.stdout.includes('Restart the service to open the desktop bridge.'));
     const again = capture();
@@ -2794,7 +2794,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: `DesktopBridgeServer` (Task 4), `createBridgeDispatcher` (Task 7, through the server), `DesktopImporter`/`buildImportTargets` (Task 8), `getOrGenerateNodeIdentity`, `loadNodeConfig`, `adminConfigDir`; F3's `approvals` object when present.
-- Produces: `DEFAULT_FEATURES.desktopBridge = false`, `DEFAULT_PORTS.desktopBridge = 18795` (0 accepted for this port only); `loadServiceConfig` throws `desktopBridge needs profile: agent` for `profile: runbook` with the feature on. `createDesktopBridgeHost({ dataDir, features, ports, adminUid, geteuid, configDir, version }) → { coreDeps, start({ core, ports: servicePorts, approvals }) → Promise<DesktopBridgeServer | null>, stop() → Promise<void>, server }` where `coreDeps = { ui: { send, reportError }, host: { interactive } }` only when the feature is on. `runService({ …, adminUid })` (tests only). `loadProfile('agent').start({ …, adminUid })` returns `desktopBridge` (the host) as well.
+- Produces: `DEFAULT_FEATURES.desktopBridge = false`, `DEFAULT_PORTS.desktopBridge = 18796` (0 accepted for this port only); `loadServiceConfig` throws `desktopBridge needs profile: agent` for `profile: runbook` with the feature on. `createDesktopBridgeHost({ dataDir, features, ports, adminUid, geteuid, configDir, version }) → { coreDeps, start({ core, ports: servicePorts, approvals }) → Promise<DesktopBridgeServer | null>, stop() → Promise<void>, server }` where `coreDeps = { ui: { send, reportError }, host: { interactive } }` only when the feature is on. `runService({ …, adminUid })` (tests only). `loadProfile('agent').start({ …, adminUid })` returns `desktopBridge` (the host) as well.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2839,13 +2839,13 @@ function layout(adminCfg = null) {
 const opts = (configDir) => ({ adminConfigDir: configDir, geteuid: () => -1, adminUid: selfUid });
 
 describe('service config', () => {
-  it('adds desktopBridge off by default on port 18795', () => {
+  it('adds desktopBridge off by default on port 18796', () => {
     assert.strictEqual(DEFAULT_FEATURES.desktopBridge, false);
-    assert.strictEqual(DEFAULT_PORTS.desktopBridge, 18795);
+    assert.strictEqual(DEFAULT_PORTS.desktopBridge, 18796);
     const { dataDir, configDir } = layout();
     const cfg = loadServiceConfig(dataDir, {}, opts(configDir));
     assert.strictEqual(cfg.features.desktopBridge, false);
-    assert.strictEqual(cfg.ports.desktopBridge, 18795);
+    assert.strictEqual(cfg.ports.desktopBridge, 18796);
   });
 
   it('accepts an ephemeral desktop bridge port but no other zero port', () => {
@@ -3047,7 +3047,7 @@ with:
 
 ```js
 // desktopBridge (fleet stage 7): the loopback listener the desktop app attaches to.
-const DEFAULT_PORTS = { gateway: 18793, webhook: 18794, desktopBridge: 18795 };
+const DEFAULT_PORTS = { gateway: 18793, webhook: 18794, desktopBridge: 18796 };
 ```
 
 In `validatePorts`, replace:
@@ -3094,7 +3094,7 @@ with:
 
 ```js
       features: { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false, desktopBridge: false },
-      ports: { gateway: 18793, webhook: 18794, desktopBridge: 18795 }
+      ports: { gateway: 18793, webhook: 18794, desktopBridge: 18796 }
 ```
 
 replace:

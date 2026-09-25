@@ -1,6 +1,6 @@
 // What Settings > Local service shows for each state (fleet stage 7 §3.9).
 // Pure, so the wording is tested in node; the preload exposes it to the renderer.
-const { MESSAGES } = require('./protocol');
+const { MESSAGES, DEFAULT_DESKTOP_BRIDGE_PORT } = require('./protocol');
 
 const UNAVAILABLE_TAB_NOTICE = 'Managed by the local service; not available while attached.';
 const INSTALL_HINT = 'Install king-louie-service on this computer and run it with the agent profile to use this app as its window.';
@@ -74,7 +74,7 @@ function describeServicePane(status = {}) {
     case 'attached-disconnected': {
       const c = s.connection || {};
       const knownPort = s.pairing && s.pairing.service && s.pairing.service.port;
-      lines.push(c.error || MESSAGES.SERVICE_UNREACHABLE(knownPort || 18795));
+      lines.push(c.error || MESSAGES.SERVICE_UNREACHABLE(knownPort || DEFAULT_DESKTOP_BRIDGE_PORT));
       if (c.nextRetryAt) lines.push(`Next retry at ${new Date(c.nextRetryAt).toLocaleTimeString()}.`);
       actions.push({ id: 'retry', label: 'Retry now' }, { id: 'standaloneOnce', label: 'Use standalone this time' }, { id: 'detach', label: 'Detach' });
       break;

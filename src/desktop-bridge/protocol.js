@@ -2,7 +2,8 @@
 const crypto = require('crypto');
 
 const PROTOCOL = 1;
-const DEFAULT_DESKTOP_BRIDGE_PORT = 18795;
+// 18796, not 18795: F3's relay mesh listener defaults to 18795.
+const DEFAULT_DESKTOP_BRIDGE_PORT = 18796;
 const MIB = 1024 * 1024;
 
 const LIMITS = Object.freeze({

@@ -117,7 +117,7 @@ git repo under `<dataDir>/cases/` (override with `settings.cases.root` or
 
 The desktop app can be a window onto a local `king-louie-service` (fleet stage 7,
 spec `docs/superpowers/specs/2026-09-23-fleet-stage7-desktop-ui.md`). The service
-opens a loopback desktop bridge (`127.0.0.1`, default port `18795`) behind
+opens a loopback desktop bridge (`127.0.0.1`, default port `18796`) behind
 `features.desktopBridge` in `<configDir>/service.json`, which is **off by default**
 and binds to loopback only; port `0` (ephemeral, test-only) logs a warning. In
 attached mode `main.js` builds no core and `src/ipc/attached-host.js` proxies the

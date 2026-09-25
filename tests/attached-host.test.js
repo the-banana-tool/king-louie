@@ -20,7 +20,7 @@ class FakeClient extends EventEmitter {
     super();
     this.connected = false;
     this.service = null;
-    this.port = 18795;
+    this.port = 18796;
     this.invoked = [];
     this.sent = [];
     this.calls = [];
@@ -49,7 +49,7 @@ class FakeClient extends EventEmitter {
   }
   drop() {
     this.connected = false;
-    this.emit('state', { status: 'disconnected', code: 'SERVICE_UNREACHABLE', error: 'The local King Louie service is not reachable (127.0.0.1:18795).', service: this.service, nextRetryAt: Date.now() + 1000 });
+    this.emit('state', { status: 'disconnected', code: 'SERVICE_UNREACHABLE', error: 'The local King Louie service is not reachable (127.0.0.1:18796).', service: this.service, nextRetryAt: Date.now() + 1000 });
   }
 }
 
@@ -70,7 +70,7 @@ function setup() {
   const safeStorage = { isEncryptionAvailable: () => true, encryptString: (s) => Buffer.from(s), decryptString: (b) => Buffer.from(b).toString() };
   const state = openDesktopState(userDataDir, safeStorage, { storeFactory: ({ name, cwd, defaults }) => new JsonFileStore({ dir: cwd, name, defaults }) });
   state.setMode('attached');
-  state.setPairing({ deviceId: 'kld-abcdefghijklmnop', publicKey: 'x', privateKeySealed: 'y', label: 'desk', service: { nodeId: 'kl-abcdefghijklmnop', publicKey: 'aa', port: 18795, pairedAt: '2026-09-23T14:02:11Z' } });
+  state.setPairing({ deviceId: 'kld-abcdefghijklmnop', publicKey: 'x', privateKeySealed: 'y', label: 'desk', service: { nodeId: 'kl-abcdefghijklmnop', publicKey: 'aa', port: 18796, pairedAt: '2026-09-23T14:02:11Z' } });
   const client = new FakeClient();
   const app = { getPath: () => userDataDir, relaunch() {}, exit() {}, quit() {} };
   const host = startAttachedHost({ app, ipcMain, safeStorage, dialog, getWindow: () => window, state, env: {}, platform: 'linux', clientFactory: () => client });

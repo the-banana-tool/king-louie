@@ -31,8 +31,8 @@ describe('describeServicePane', () => {
     assert.strictEqual(waiting.command, 'sudo king-louie-service desktop pair klpair1.x');
     assert.ok(waiting.lines.includes('This desktop: abcd efgh ijkl mnop'));
     assert.deepStrictEqual(waiting.actions, [{ id: 'pairConfirm', label: 'Confirm', disabled: true }, { id: 'pairCancel', label: 'Cancel' }]);
-    const found = describeServicePane({ view: 'pairing', pendingPair: { request: 'r', command: 'c', deviceFingerprint: 'a', service: { fingerprint: 'wxyz 2345 6789 abcd', port: 18795 } } });
-    assert.ok(found.lines.includes('Service: wxyz 2345 6789 abcd (port 18795)'));
+    const found = describeServicePane({ view: 'pairing', pendingPair: { request: 'r', command: 'c', deviceFingerprint: 'a', service: { fingerprint: 'wxyz 2345 6789 abcd', port: 18796 } } });
+    assert.ok(found.lines.includes('Service: wxyz 2345 6789 abcd (port 18796)'));
     assert.strictEqual(found.actions[0].disabled, false);
   });
 
@@ -68,8 +68,8 @@ describe('describeServicePane', () => {
   });
 
   it('attached, not connected: the error, Retry now, Use standalone this time, Detach', () => {
-    const m = describeServicePane({ view: 'attached-disconnected', connection: { status: 'disconnected', error: 'The local King Louie service is not reachable (127.0.0.1:18795).', nextRetryAt: null } });
-    assert.strictEqual(m.lines[0], 'The local King Louie service is not reachable (127.0.0.1:18795).');
+    const m = describeServicePane({ view: 'attached-disconnected', connection: { status: 'disconnected', error: 'The local King Louie service is not reachable (127.0.0.1:18796).', nextRetryAt: null } });
+    assert.strictEqual(m.lines[0], 'The local King Louie service is not reachable (127.0.0.1:18796).');
     assert.deepStrictEqual(m.actions.map((a) => a.label), ['Retry now', 'Use standalone this time', 'Detach']);
   });
 
@@ -80,7 +80,7 @@ describe('describeServicePane', () => {
 
   it('attached, not connected, no connection.error and no known port: falls back to the default port', () => {
     const m = describeServicePane({ view: 'attached-disconnected', connection: { status: 'disconnected', error: null, nextRetryAt: null } });
-    assert.strictEqual(m.lines[0], 'The local King Louie service is not reachable (127.0.0.1:18795).');
+    assert.strictEqual(m.lines[0], 'The local King Louie service is not reachable (127.0.0.1:18796).');
   });
 
   it('summarizes an import report', () => {

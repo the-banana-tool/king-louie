@@ -223,12 +223,12 @@ describe('desktop-devices.json', () => {
 describe('desktop-bridge.json', () => {
   it('records the node key as DER SPKI hex and checks nodeId', () => {
     const identity = new NodeIdentity({ nodeName: 'gpu-box' });
-    const record = pairing.bridgeFileRecord({ publicKey: identity.publicKey, port: 18795 });
+    const record = pairing.bridgeFileRecord({ publicKey: identity.publicKey, port: 18796 });
     assert.deepStrictEqual(record, {
-      v: 1, nodeId: identity.nodeId, publicKey: identity.publicKey.toString('hex'), host: '127.0.0.1', port: 18795, protocol: 1
+      v: 1, nodeId: identity.nodeId, publicKey: identity.publicKey.toString('hex'), host: '127.0.0.1', port: 18796, protocol: 1
     });
     assert.deepStrictEqual(pairing.parseBridgeFile(JSON.stringify(record)), {
-      nodeId: identity.nodeId, publicKey: record.publicKey, host: '127.0.0.1', port: 18795, protocol: 1
+      nodeId: identity.nodeId, publicKey: record.publicKey, host: '127.0.0.1', port: 18796, protocol: 1
     });
     assert.throws(() => pairing.parseBridgeFile(JSON.stringify({ ...record, nodeId: 'kl-aaaaaaaaaaaaaaaa' })), /nodeId does not match/);
     assert.throws(() => pairing.parseBridgeFile(JSON.stringify({ ...record, host: '0.0.0.0' })), /127\.0\.0\.1/);
@@ -238,7 +238,7 @@ describe('desktop-bridge.json', () => {
 
   it('requires publicKey to be exactly 88 lowercase hex characters', () => {
     const identity = new NodeIdentity({ nodeName: 'gpu-box' });
-    const record = pairing.bridgeFileRecord({ publicKey: identity.publicKey, port: 18795 });
+    const record = pairing.bridgeFileRecord({ publicKey: identity.publicKey, port: 18796 });
     assert.strictEqual(record.publicKey.length, 88);
     assert.throws(
       () => pairing.parseBridgeFile(JSON.stringify({ ...record, publicKey: record.publicKey.toUpperCase() })),
@@ -349,7 +349,7 @@ describe('bridge-file trust (POSIX)', { skip: process.platform === 'win32' ? 'PO
   it('reads a trusted file and reports a missing one', () => {
     const identity = new NodeIdentity({ nodeName: 'gpu-box' });
     const file = setup();
-    fs.writeFileSync(file, JSON.stringify(pairing.bridgeFileRecord({ publicKey: identity.publicKey, port: 18795 })));
+    fs.writeFileSync(file, JSON.stringify(pairing.bridgeFileRecord({ publicKey: identity.publicKey, port: 18796 })));
     const env = { KL_TEST_MODE: '1', KL_DESKTOP_BRIDGE_FILE: file };
     const out = pairing.readTrustedBridgeFile(file, { env, platform: 'linux' });
     assert.strictEqual(out.ok, true);
