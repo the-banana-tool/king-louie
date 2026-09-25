@@ -6,7 +6,7 @@
 // gate-enforced path for any channel-targeted send by case code (R38, R39).
 const { QuestionStore } = require('./questions');
 const {
-  renderBatch, parseReply, optionOrText, normalizeAddress, formatShort
+  renderBatch, parseReply, optionOrText, normalizeAddress, formatShort, CONTACT_CHANNELS
 } = require('./contact-format');
 const { ContactDeliveryError, GATE_PASSED } = require('../channels/channel-plugin');
 const { createLogger } = require('../logging');
@@ -24,6 +24,25 @@ const ENVELOPE_TYPES = new Set(['envelope', 'envelope-delta']);
 // dropped (and logged) after this many drains.
 const MAX_INBOX_ATTEMPTS = 5;
 const ERROR_ACK = "Couldn't record that. Answer it in King Louie.";
+// Ruling T5-inbox: an approval or app-only answer is never written to
+// inbox.jsonl (the data dir is writable by the model's Bash, so a file there
+// must never carry approval authority). On a busy case it is refused.
+const BUSY_ACK = 'The case is busy; answer again in a minute.';
+// Relay input bounds: a poll returns at most 100 events (§4.5); anything
+// past these limits is skipped, not processed.
+const MAX_RELAY_EVENTS = 1000;
+const MAX_GATHERED_SCAN = 1000;
+const RELAY_EVENT_TYPES = new Set(['status', 'inbound', 'gathered']);
+const RELAY_EVENT_ID = /^[\x21-\x7e]{1,128}$/;
+const RELAY_STATUS = /^[a-z-]{1,32}$/;
+const needsApp = (record) => record.kind === 'approval' || appOnly(record);
+
+// The relay an adapter is served by: `relayName`, else its relay client's
+// `name` (TelephonyChannel/relay email take `relay`). null: no relay.
+function relayOf(adapter) {
+  const name = adapter?.relayName ?? adapter?.relay?.name ?? null;
+  return typeof name === 'string' && name ? name : null;
+}
 const cut = (s, n) => {
   const t = String(s ?? '').replace(/\s+/g, ' ').trim();
   return t.length > n ? `${t.slice(0, n - 1)}…` : t;
@@ -203,13 +222,18 @@ class ContactRouter {
     return { deliveryId: id, externalRef: sent?.externalRef ?? null, batchToken: token };
   }
 
+  // { meta, record }; both null when the case is gone, record null when the
+  // question is. Any other failure (I/O) throws, so a queued answer is
+  // retried instead of dropped.
   _record(caseId, questionId) {
+    let meta;
     try {
-      const meta = this.runtime.getCase(caseId);
-      return { meta, record: this.runtime.questions(meta.id).get(questionId) };
-    } catch {
-      return { meta: null, record: null };
+      meta = this.runtime.getCase(caseId);
+    } catch (err) {
+      if (err && err.code === 'CASE_NOT_FOUND') return { meta: null, record: null };
+      throw err;
     }
+    return { meta, record: this.runtime.questions(meta.id).get(questionId) };
   }
 
   // A delivery as parseReply's batch. deliveries.json items store neither
@@ -305,6 +329,12 @@ class ContactRouter {
     const { meta: caseMeta, record: found } = this._record(item.caseId, item.questionId);
     if (!caseMeta || !found) return { ok: false, outcome: 'unknown', ack: `${item.questionId} no longer exists.` };
     let record = found;
+    // Ruling T5-inbox, defence in depth: whatever a line in inbox.jsonl
+    // says (channel 'in-app' included), it never answers these.
+    if (fromInbox && needsApp(record)) {
+      this.log.warn(`contact inbox: refused a queued answer to ${record.kind} ${caseMeta.id}/${record.id} (never queued by the router)`);
+      return { ok: false, outcome: 'refused: inbox-authority', ack: null };
+    }
     // §3.5 step 2 and owner decision M22, all before answerQuestion.
     const inApp = APP_ANSWER_CHANNELS.includes(channelId) && caps.authenticatedReplies === true;
     if ((record.kind === 'approval' || appOnly(record)) && !inApp) {
@@ -350,12 +380,7 @@ class ContactRouter {
         await this.runtime.answerQuestion(caseMeta.id, record.id, { channel: channelId, text: clean.text ?? null, optionId: clean.optionId ?? null });
         return { ok: true, outcome: 'recorded', ack: `Recorded for ${caseMeta.title}.` };
       } catch (err) {
-        if (err && err.code === 'CASE_BUSY') {
-          if (!fromInbox) {
-            this.state.appendInbox({ at: this.clock().toISOString(), channel: channelId, caseId: caseMeta.id, questionId: record.id, text: clean.text ?? null, optionId: clean.optionId ?? null, meta: { senderId: meta.senderId ?? null, ownerProven: true } });
-          }
-          return { ok: true, outcome: 'queued', ack: 'Received — recording it after the current step' };
-        }
+        if (err && err.code === 'CASE_BUSY') return this._busy(channelId, caseMeta, record, clean, meta, fromInbox);
         if (err && err.code === 'ALREADY_ANSWERED' && err.record) {
           record = err.record;
         } else if (err && err.name === 'QuestionError') {
@@ -370,15 +395,20 @@ class ContactRouter {
     try {
       await this._conflict(channelId, caseMeta, record, clean);
     } catch (err) {
-      if (err && err.code === 'CASE_BUSY') {
-        if (!fromInbox) {
-          this.state.appendInbox({ at: this.clock().toISOString(), channel: channelId, caseId: caseMeta.id, questionId: record.id, text: clean.text ?? null, optionId: clean.optionId ?? null, meta: { senderId: meta.senderId ?? null, ownerProven: true } });
-        }
-        return { ok: true, outcome: 'queued', ack: 'Received — recording it after the current step' };
-      }
+      if (err && err.code === 'CASE_BUSY') return this._busy(channelId, caseMeta, record, clean, meta, fromInbox);
       throw err;
     }
     return { ok: true, outcome: 'conflict', ack: 'That differs from your earlier answer, so I sent a follow-up: which one stands?' };
+  }
+
+  // A busy case: queue the answer for drainInbox, except an approval or
+  // app-only answer, which is refused (ruling T5-inbox).
+  _busy(channelId, caseMeta, record, clean, meta, fromInbox) {
+    if (needsApp(record)) return { ok: false, outcome: 'refused: busy', ack: BUSY_ACK };
+    if (!fromInbox) {
+      this.state.appendInbox({ at: this.clock().toISOString(), channel: channelId, caseId: caseMeta.id, questionId: record.id, text: clean.text ?? null, optionId: clean.optionId ?? null, meta: { senderId: meta.senderId ?? null, ownerProven: true } });
+    }
+    return { ok: true, outcome: 'queued', ack: 'Received — recording it after the current step' };
   }
 
   // §3.5 step 6: never overwrite; ask which answer stands, on this channel only.
@@ -420,17 +450,28 @@ class ContactRouter {
   // reason than a busy case is retried up to MAX_INBOX_ATTEMPTS drains. The
   // channel's current capabilities decide again (a channel that is gone
   // counts as unauthenticated, so an approval then stays in the app).
-  async drainInbox() {
-    let lines;
+  // One drain at a time: a caller while one runs joins it. Returns
+  // { applied, kept, refused, dropped }: refused = not applied (refused,
+  // unknown, invalid); dropped = malformed or given up after retries.
+  drainInbox() {
+    if (!this._draining) {
+      this._draining = this._drainInbox().finally(() => { this._draining = null; });
+    }
+    return this._draining;
+  }
+
+  async _drainInbox() {
+    const counts = { applied: 0, kept: 0, refused: 0, dropped: 0 };
+    let snapshot;
     try {
-      lines = this.state.readInbox();
+      snapshot = this.state.inboxSnapshot();
     } catch (err) {
       this.log.error(`contact inbox unreadable: ${err.message}`);
-      return { applied: 0, kept: 0 };
+      return counts;
     }
-    if (!lines.length) return { applied: 0, kept: 0 };
+    const lines = snapshot.lines;
+    if (!lines.length) return counts;
     const keep = [];
-    let applied = 0;
     let changed = false;
     for (const line of lines) {
       const valid = line && typeof line === 'object' && typeof line.channel === 'string'
@@ -438,6 +479,7 @@ class ContactRouter {
         && (typeof line.optionId === 'string' || typeof line.text === 'string' || line.acknowledge === true);
       if (!valid) {
         this.log.warn('contact inbox: dropped a malformed line');
+        counts.dropped += 1;
         changed = true;
         continue;
       }
@@ -452,6 +494,7 @@ class ContactRouter {
         if (attempts >= MAX_INBOX_ATTEMPTS) {
           this.log.error(`contact inbox: gave up on the answer to ${line.caseId}/${line.questionId} after ${attempts} tries: ${err?.message || err}`);
           await this._journalDropped(line, attempts, err);
+          counts.dropped += 1;
         } else {
           this.log.warn(`contact inbox: answer to ${line.caseId}/${line.questionId} failed (try ${attempts}): ${err?.message || err}`);
           keep.push({ ...line, attempts });
@@ -460,19 +503,23 @@ class ContactRouter {
       }
       if (r.outcome === 'queued') keep.push(line);
       else {
-        if (!r.ok) this.log.warn(`contact inbox: answer to ${line.caseId}/${line.questionId} not applied (${r.outcome})`);
-        applied += 1;
+        if (r.ok) counts.applied += 1;
+        else {
+          this.log.warn(`contact inbox: answer to ${line.caseId}/${line.questionId} not applied (${r.outcome})`);
+          counts.refused += 1;
+        }
         changed = true;
       }
     }
     if (changed) {
       try {
-        this.state.writeInbox(keep);
+        this.state.rewriteInbox(keep, snapshot.size);
       } catch (err) {
         this.log.error(`contact inbox: could not rewrite inbox.jsonl: ${err.message}`);
       }
     }
-    return { applied, kept: keep.length };
+    counts.kept = keep.length;
+    return counts;
   }
 
   // A queued answer given up on is written to the case journal too, so the
@@ -490,47 +537,90 @@ class ContactRouter {
   }
 
   recordStatus(channelId, { externalRef = null, relayId = null, status, error = null } = {}) {
-    return this.state.setDeliveryStatus(relayId || externalRef, status, error);
+    return this.state.setDeliveryStatus(relayId || externalRef, status, error, { channels: [channelId] });
+  }
+
+  // The contact channels whose adapter the named relay serves.
+  _relayChannels(relayName) {
+    return CONTACT_CHANNELS.filter((id) => relayOf(this.adapter(id)) === relayName);
   }
 
   // Relay events from polling or a signed push (§4.5); deduplicated by id.
+  // A relay only reaches what it serves: an inbound event goes only to an
+  // adapter that relay serves, a status only changes a delivery on one of
+  // those channels, and gathered digits only answer a voice delivery whose
+  // relayId is the event's messageId. Never throws.
   async ingestRelayEvents(relayName, events = []) {
     let applied = 0;
     let skipped = 0;
-    for (const ev of Array.isArray(events) ? events : []) {
-      if (!ev || !ev.id || !this.state.markEventSeen(`${relayName}:${ev.id}`)) {
-        skipped += 1;
-        continue;
+    if (!Array.isArray(events)) return { applied, skipped };
+    let list = events;
+    if (list.length > MAX_RELAY_EVENTS) {
+      this.log.warn(`relay ${relayName}: ${list.length} events in one batch; skipping all past the first ${MAX_RELAY_EVENTS}`);
+      skipped += list.length - MAX_RELAY_EVENTS;
+      list = list.slice(0, MAX_RELAY_EVENTS);
+    }
+    const channels = this._relayChannels(relayName);
+    for (const ev of list) {
+      let ok = false;
+      try {
+        ok = await this._relayEvent(relayName, channels, ev);
+      } catch (err) {
+        this.log.error(`relay ${relayName}: event failed: ${err?.message || err}`);
       }
-      if (ev.type === 'status') {
-        if (this.state.setDeliveryStatus(ev.messageId, ev.status, ev.error || null)) applied += 1;
-        else skipped += 1;
-      } else if (ev.type === 'inbound') {
-        const adapter = this.adapter(ev.channel);
-        if (adapter && typeof adapter.ingestRelayEvent === 'function') {
-          await adapter.ingestRelayEvent(ev);
-          applied += 1;
-        } else {
-          skipped += 1;
-        }
-      } else if (ev.type === 'gathered') {
-        const found = this.state.resolve(ev.messageId, { channel: 'voice' });
-        if (!found) {
-          skipped += 1;
-          continue;
-        }
-        for (const r of ev.results || []) {
-          const item = (found.delivery.items || []).find((it) => it.n === Number(r.n));
-          const digit = Number.parseInt(String(r.digits || ''), 10);
-          if (!item || !Number.isInteger(digit) || digit < 1) continue;
-          await this.handleReply('voice', item.token, { optionIndex: digit - 1 }, { channel: 'voice', senderId: 'call', at: ev.at || null, ownerProven: true });
-        }
-        applied += 1;
-      } else {
-        skipped += 1;
-      }
+      if (ok) applied += 1;
+      else skipped += 1;
     }
     return { applied, skipped };
+  }
+
+  async _relayEvent(relayName, channels, ev) {
+    if (!ev || typeof ev !== 'object' || typeof ev.id !== 'string' || !RELAY_EVENT_ID.test(ev.id) || !RELAY_EVENT_TYPES.has(ev.type)) return false;
+    if (!this.state.markEventSeen(`${relayName}:${ev.id}`)) return false;
+    if (ev.type === 'status') {
+      if (typeof ev.messageId !== 'string' || !ev.messageId || typeof ev.status !== 'string' || !RELAY_STATUS.test(ev.status)) return false;
+      const error = ev.error ? cut(ev.error, 500) : null;
+      return Boolean(this.state.setDeliveryStatus(ev.messageId, ev.status, error, { channels }));
+    }
+    if (ev.type === 'inbound') {
+      if (!channels.includes(ev.channel)) {
+        this.log.warn(`relay ${relayName}: skipped an inbound event for ${String(ev.channel).slice(0, 32)}, which it does not serve`);
+        return false;
+      }
+      const adapter = this.adapter(ev.channel);
+      if (typeof adapter?.ingestRelayEvent !== 'function') return false;
+      await adapter.ingestRelayEvent(ev);
+      return true;
+    }
+    // gathered: DTMF digits from a call to the owner number.
+    if (!channels.includes('voice')) {
+      this.log.warn(`relay ${relayName}: skipped gathered digits; it does not serve voice`);
+      return false;
+    }
+    if (typeof ev.messageId !== 'string' || !ev.messageId) return false;
+    const found = Object.values(this.state.deliveries()).find((d) => d.channel === 'voice' && d.relayId && d.relayId === ev.messageId);
+    if (!found) {
+      this.log.warn(`relay ${relayName}: gathered digits for an unknown voice call`);
+      return false;
+    }
+    const items = found.items || [];
+    const picks = [];
+    const seen = new Set();
+    const results = Array.isArray(ev.results) ? ev.results : [];
+    for (let i = 0; i < results.length && i < MAX_GATHERED_SCAN && picks.length < items.length; i += 1) {
+      const r = results[i];
+      const n = Number(r?.n);
+      if (seen.has(n)) continue;
+      const item = items.find((it) => it.n === n);
+      const digit = Number.parseInt(String(r?.digits ?? ''), 10);
+      if (!item || !Number.isInteger(digit) || digit < 1) continue;
+      seen.add(n);
+      picks.push({ item, digit });
+    }
+    for (const { item, digit } of picks) {
+      await this.handleReply('voice', item.token, { optionIndex: digit - 1 }, { channel: 'voice', senderId: 'call', at: ev.at || null, ownerProven: true });
+    }
+    return true;
   }
 
   // The owner exemption: the adapter's configured private owner target, never ntfy.
@@ -543,8 +633,17 @@ class ContactRouter {
     return Boolean(a && b && a === b);
   }
 
-  // R38/R39: the one gate-enforced channel send for case code.
-  async sendExternal({ caseId, channelId, target, text, envelope = null } = {}) {
+  // R38/R39: the one gate-enforced channel send for case code. Never throws.
+  async sendExternal(args = {}) {
+    try {
+      return await this._sendExternal(args && typeof args === 'object' ? args : {});
+    } catch (err) {
+      this.log.error(`sendExternal failed: ${err?.message || err}`);
+      return { ok: false, error: `send failed: ${err?.message || err}` };
+    }
+  }
+
+  async _sendExternal({ caseId, channelId, target, text, envelope = null }) {
     const adapter = this.adapter(channelId);
     if (!adapter) return { ok: false, error: `${channelId} is not configured` };
     const to = normalizeAddress(channelId, target);
@@ -558,8 +657,9 @@ class ContactRouter {
       }
       const facts = this.runtime.ledger(caseId).view().facts;
       const entityIndex = typeof this.runtime.entityIndex === 'function' ? this.runtime.entityIndex() : null;
-      const r = gate.gateLeaves({ text: body }, { recipients: [to], envelope, facts, mode: 'message', caseId, entityIndex });
-      if (!r.ok) return { ok: false, error: 'outbound gate blocked the message', blocked: r.blocked };
+      const r = await gate.gateLeaves({ text: body }, { recipients: [to], envelope, facts, mode: 'message', caseId, entityIndex });
+      if (!r || r.ok !== true) return { ok: false, error: 'outbound gate blocked the message', blocked: Array.isArray(r?.blocked) ? r.blocked : [] };
+      if (typeof r.rendered?.text !== 'string') return { ok: false, error: 'the outbound gate returned no rendered text' };
       body = r.rendered.text;
     }
     try {

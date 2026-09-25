@@ -13,6 +13,16 @@ const { createLogger } = require('../logging');
 const PRUNE_AFTER_MS = 30 * 24 * 3600 * 1000;
 const SEEN_EVENTS = 2000;
 
+function parseInbox(text) {
+  return text.split('\n').filter(Boolean).map((l) => {
+    try {
+      return JSON.parse(l);
+    } catch {
+      return null;
+    }
+  }).filter(Boolean);
+}
+
 function emptyLadder() {
   return { version: 1, entries: {}, digest: { lastSentDay: null }, pins: {} };
 }
@@ -133,8 +143,11 @@ class ContactState {
     return Boolean(this.resolve(token));
   }
 
-  setDeliveryStatus(match, status, error = null) {
+  // `channels`: only deliveries on these channels may match (a relay may
+  // only touch what it carries; recordStatus only its own channel).
+  setDeliveryStatus(match, status, error = null, { channels = null } = {}) {
     for (const [id, d] of Object.entries(this.deliveries())) {
+      if (channels && !channels.includes(d.channel)) continue;
       if (id === match || (match && (d.externalRef === match || d.relayId === match))) {
         d.status = status;
         if (error) d.error = String(error);
@@ -183,21 +196,37 @@ class ContactState {
     fs.appendFileSync(this.file('inbox.jsonl'), `${JSON.stringify(line)}\n`);
   }
 
-  readInbox() {
-    let text = '';
+  _inboxBytes() {
     try {
-      text = fs.readFileSync(this.file('inbox.jsonl'), 'utf8');
+      return fs.readFileSync(this.file('inbox.jsonl'));
     } catch (err) {
-      if (err.code === 'ENOENT') return [];
+      if (err.code === 'ENOENT') return Buffer.alloc(0);
       throw err;
     }
-    return text.split('\n').filter(Boolean).map((l) => {
-      try {
-        return JSON.parse(l);
-      } catch {
-        return null;
-      }
-    }).filter(Boolean);
+  }
+
+  readInbox() {
+    return parseInbox(this._inboxBytes().toString('utf8'));
+  }
+
+  // The inbox as { lines, size }: rewriteInbox(keep, size) later keeps
+  // whatever was appended after this snapshot (a drain awaits between the
+  // two; appendInbox only ever appends).
+  inboxSnapshot() {
+    const buf = this._inboxBytes();
+    return { lines: parseInbox(buf.toString('utf8')), size: buf.length };
+  }
+
+  rewriteInbox(keep, since) {
+    if (this.readOnly) return;
+    const buf = this._inboxBytes();
+    const tail = buf.length > since ? buf.subarray(since).toString('utf8') : '';
+    const text = keep.map((l) => `${JSON.stringify(l)}\n`).join('') + tail;
+    if (!text) {
+      fs.rmSync(this.file('inbox.jsonl'), { force: true });
+      return;
+    }
+    writeAtomic(this.file('inbox.jsonl'), text);
   }
 
   writeInbox(lines) {

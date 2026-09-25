@@ -28,11 +28,13 @@ async function world({ getGate = () => null, host = null } = {}) {
     ['sms', new LoopbackChannel({ id: 'sms', owner: '+15550100', caps: { authenticatedReplies: false, requiresToken: true, maxChars: 1200 } })],
     ['ntfy', new LoopbackChannel({ id: 'ntfy', owner: 'kl-topic', caps: { expectsReplies: false, authenticatedReplies: false, deliveryOnly: true } })]
   ]);
+  adapters.get('sms').relayName = 'main';
   const router = new ContactRouter({ state, runtime, adapters, presence, getGate, clock, getTimeZone: () => 'UTC' });
   for (const [id, a] of adapters) a.onContactReply((cid, answer, meta) => router.handleReply(id, cid, answer, meta));
   // The two channels ruling T5-m22 lets answer approvals and app-only questions.
-  const addChannel = (id, opts) => {
+  const addChannel = (id, { relayName, ...opts } = {}) => {
     const a = new LoopbackChannel({ id, ...opts });
+    if (relayName) a.relayName = relayName;
     adapters.set(id, a);
     a.onContactReply((cid, answer, meta) => router.handleReply(id, cid, answer, meta));
     return a;
@@ -151,9 +153,9 @@ describe('ContactRouter.handleReply', () => {
     const r = await w.adapters.get('telegram').reply(e.token, { optionId: 'a' });
     assert.deepStrictEqual(r, { ok: true, outcome: 'queued', ackText: 'Received — recording it after the current step' });
     assert.strictEqual(w.state.readInbox().length, 1);
-    assert.deepStrictEqual(await w.router.drainInbox(), { applied: 0, kept: 1 });
+    assert.deepStrictEqual(await w.router.drainInbox(), { applied: 0, kept: 1, refused: 0, dropped: 0 });
     fs.rmSync(lock);
-    assert.deepStrictEqual(await w.router.drainInbox(), { applied: 1, kept: 0 });
+    assert.deepStrictEqual(await w.router.drainInbox(), { applied: 1, kept: 0, refused: 0, dropped: 0 });
     assert.strictEqual(w.runtime.questions(w.lot.id).get(q.id).answer.optionId, 'a');
     assert.deepStrictEqual(w.state.readInbox(), []);
   });
@@ -169,9 +171,9 @@ describe('ContactRouter.handleReply', () => {
     assert.deepStrictEqual(r, { ok: true, outcome: 'queued', ackText: 'Received — recording it after the current step' });
     assert.strictEqual(w.runtime.questions(w.lot.id).get(b.id).answer, null, 'not reported as done');
     assert.strictEqual(w.state.readInbox()[0].acknowledge, true);
-    assert.deepStrictEqual(await w.router.drainInbox(), { applied: 0, kept: 1 });
+    assert.deepStrictEqual(await w.router.drainInbox(), { applied: 0, kept: 1, refused: 0, dropped: 0 });
     fs.rmSync(lock);
-    assert.deepStrictEqual(await w.router.drainInbox(), { applied: 1, kept: 0 });
+    assert.deepStrictEqual(await w.router.drainInbox(), { applied: 1, kept: 0, refused: 0, dropped: 0 });
     assert.strictEqual(w.runtime.questions(w.lot.id).get(b.id).answer.channel, 'telegram');
     assert.deepStrictEqual(w.state.readInbox(), []);
   });
@@ -316,16 +318,17 @@ describe('ContactRouter.sendExternal', () => {
 describe('ContactRouter.ingestRelayEvents', () => {
   it('applies status and gathered events once and skips duplicates', async () => {
     const w = await world();
-    w.adapters.set('voice', new (require('./helpers/loopback-channel').LoopbackChannel)({ id: 'voice', owner: '+15550100', caps: { authenticatedReplies: false, voice: true } }));
+    w.addChannel('voice', { owner: '+15550100', relayName: 'main', caps: { authenticatedReplies: false, voice: true } });
     const q = w.ask(w.lot.id, { text: 'Seller financing?', options: [{ id: 'a', label: 'No' }, { id: 'b', label: 'Yes' }] });
     const e = w.entry(w.lot, q);
     const sms = await w.router.deliver('sms', [e]);
     w.state.deliveries()[sms.deliveryId].relayId = 'relay-1';
     const voice = await w.router.deliver('voice', [e]);
+    w.state.deliveries()[voice.deliveryId].relayId = 'relay-v1';
     const r = await w.router.ingestRelayEvents('main', [
       { id: 'ev-1', type: 'status', messageId: 'relay-1', status: 'failed', error: 'unreachable', at: '2026-09-25T14:01:00Z' },
       { id: 'ev-1', type: 'status', messageId: 'relay-1', status: 'delivered' },
-      { id: 'ev-2', type: 'gathered', messageId: w.state.deliveries()[voice.deliveryId].externalRef, results: [{ n: 1, digits: '2' }] }
+      { id: 'ev-2', type: 'gathered', messageId: 'relay-v1', results: [{ n: 1, digits: '2' }] }
     ]);
     assert.deepStrictEqual(r, { applied: 2, skipped: 1 });
     assert.strictEqual(w.state.deliveries()[sms.deliveryId].status, 'failed');
@@ -395,12 +398,12 @@ describe('ContactRouter: app-only questions (owner decision M22)', () => {
 
   it('voice digits never answer an approval or an app-only question', async () => {
     const w = await world();
-    w.adapters.set('voice', new LoopbackChannel({ id: 'voice', owner: '+15550100', caps: { authenticatedReplies: false, voice: true } }));
+    w.addChannel('voice', { owner: '+15550100', relayName: 'main', caps: { authenticatedReplies: false, voice: true } });
     const grant = create(w, APP_ONLY[0]);
     const approval = w.runtime.questions(w.lot.id).create({ kind: 'approval', urgency: 'high', text: 'Send the offer letter?', options: [{ id: 'approve', label: 'Approve' }, { id: 'reject', label: 'Reject' }] });
     const call = await w.router.deliver('voice', [w.entry(w.lot, grant), w.entry(w.lot, approval)]);
-    const ref = w.state.deliveries()[call.deliveryId].externalRef;
-    await w.router.ingestRelayEvents('main', [{ id: 'ev-9', type: 'gathered', messageId: ref, results: [{ n: 1, digits: '1' }, { n: 2, digits: '1' }] }]);
+    w.state.deliveries()[call.deliveryId].relayId = 'relay-v9';
+    await w.router.ingestRelayEvents('main', [{ id: 'ev-9', type: 'gathered', messageId: 'relay-v9', results: [{ n: 1, digits: '1' }, { n: 2, digits: '1' }] }]);
     unchanged(w, grant);
     unchanged(w, approval);
   });
@@ -635,7 +638,7 @@ describe('ContactRouter: bad input returns an outcome, never throws', () => {
     w.state.appendInbox({ at: 'x', channel: 'telegram', caseId: w.lot.id, questionId: q.id, optionId: 'a', meta: {} });
     const real = w.runtime.answerQuestion.bind(w.runtime);
     w.runtime.answerQuestion = async () => { throw new Error('disk full'); };
-    assert.deepStrictEqual(await w.router.drainInbox(), { applied: 1, kept: 1 }, 'the unknown case is settled, the failing line waits');
+    assert.deepStrictEqual(await w.router.drainInbox(), { applied: 0, kept: 1, refused: 1, dropped: 1 }, 'malformed dropped, unknown case refused, the failing line waits');
     assert.strictEqual(w.state.readInbox()[0].attempts, 1);
     for (let i = 0; i < 4; i += 1) await w.router.drainInbox();
     assert.deepStrictEqual(w.state.readInbox(), [], 'dropped after five failed tries');
@@ -644,6 +647,209 @@ describe('ContactRouter: bad input returns an outcome, never throws', () => {
     assert.match(journal, new RegExp(`answer to ${q.id} via telegram could not be recorded after 5 tries and was dropped \\(disk full\\)`));
     w.runtime.answerQuestion = real;
     fs.writeFileSync(path.join(w.state.dir, 'inbox.jsonl'), 'not json\n');
-    assert.deepStrictEqual(await w.router.drainInbox(), { applied: 0, kept: 0 });
+    assert.deepStrictEqual(await w.router.drainInbox(), { applied: 0, kept: 0, refused: 0, dropped: 0 });
+  });
+});
+
+// Task 5 review, fix round 1: relay trust, the inbox race, ruling T5-inbox,
+// sendExternal and drain counting.
+describe('ContactRouter.ingestRelayEvents: only what the named relay serves', () => {
+  const spyIngest = (a) => {
+    a.ingested = [];
+    a.ingestRelayEvent = async (ev) => { a.ingested.push(ev); };
+    return a;
+  };
+
+  it('an inbound event is dispatched only to an adapter that relay serves', async () => {
+    const w = await world();
+    const mobile = spyIngest(w.addChannel('mobile', { owner: 'device-1' }));
+    const tg = spyIngest(w.adapters.get('telegram'));
+    const sms = spyIngest(w.adapters.get('sms'));
+    const r = await w.router.ingestRelayEvents('main', [
+      { id: 'in-1', type: 'inbound', channel: 'mobile', from: 'device-1', text: 'approve' },
+      { id: 'in-2', type: 'inbound', channel: 'telegram', from: '111', text: 'hi' },
+      { id: 'in-3', type: 'inbound', channel: 'in-app', text: 'hi' },
+      { id: 'in-4', type: 'inbound', channel: 'sms', from: '+15550100', text: '#K7QD4M a' }
+    ]);
+    assert.deepStrictEqual(r, { applied: 1, skipped: 3 });
+    assert.deepStrictEqual(mobile.ingested, []);
+    assert.deepStrictEqual(tg.ingested, []);
+    assert.deepStrictEqual(sms.ingested.map((e) => e.id), ['in-4']);
+    const other = await w.router.ingestRelayEvents('backup', [{ id: 'in-5', type: 'inbound', channel: 'sms', from: '+15550100', text: 'x' }]);
+    assert.deepStrictEqual(other, { applied: 0, skipped: 1 }, 'another relay does not serve sms');
+  });
+
+  it('a status event cannot touch a delivery on a channel the relay does not serve', async () => {
+    const w = await world();
+    const q = w.ask(w.lot.id, { text: 'Seller financing?', options: [{ id: 'a', label: 'No' }] });
+    const tg = await w.router.deliver('telegram', [w.entry(w.lot, q)]);
+    const r = await w.router.ingestRelayEvents('main', [
+      { id: 'st-1', type: 'status', messageId: 'telegram-msg-1', status: 'failed', error: 'unreachable' },
+      { id: 'st-2', type: 'status', messageId: tg.deliveryId, status: 'failed' }
+    ]);
+    assert.deepStrictEqual(r, { applied: 0, skipped: 2 });
+    assert.strictEqual(w.state.deliveries()[tg.deliveryId].status, 'sent');
+    assert.strictEqual(w.router.recordStatus('email', { externalRef: 'telegram-msg-1', status: 'bounced' }), null, 'recordStatus stays on its channel');
+    assert.strictEqual(w.state.deliveries()[tg.deliveryId].status, 'sent');
+  });
+
+  it('gathered digits need a voice delivery with that relay id: an SMS token or relay id is refused', async () => {
+    const w = await world();
+    w.addChannel('voice', { owner: '+15550100', relayName: 'main', caps: { authenticatedReplies: false, voice: true } });
+    const q = w.ask(w.lot.id, { text: 'Seller financing?', options: [{ id: 'a', label: 'No' }, { id: 'b', label: 'Yes' }] });
+    const e = w.entry(w.lot, q);
+    const sms = await w.router.deliver('sms', [e]);
+    w.state.deliveries()[sms.deliveryId].relayId = 'relay-s1';
+    const r = await w.router.ingestRelayEvents('main', [
+      { id: 'g-1', type: 'gathered', messageId: e.token, results: [{ n: 1, digits: '1' }] },
+      { id: 'g-2', type: 'gathered', messageId: 'relay-s1', results: [{ n: 1, digits: '1' }] },
+      { id: 'g-3', type: 'gathered', messageId: sms.batchToken, results: [{ n: 1, digits: '1' }] },
+      { id: 'g-4', type: 'gathered', messageId: sms.deliveryId, results: [{ n: 1, digits: '1' }] }
+    ]);
+    assert.deepStrictEqual(r, { applied: 0, skipped: 4 });
+    assert.strictEqual(w.runtime.questions(w.lot.id).get(q.id).answer, null);
+  });
+
+  it('gathered results are deduplicated by n and capped at the item count', async () => {
+    const w = await world();
+    w.addChannel('voice', { owner: '+15550100', relayName: 'main', caps: { authenticatedReplies: false, voice: true } });
+    const q1 = w.ask(w.lot.id, { text: 'Seller financing?', options: [{ id: 'a', label: 'No' }, { id: 'b', label: 'Yes' }, { id: 'c', label: 'Maybe' }] });
+    const q2 = w.ask(w.lot.id, { text: 'Which agent?', options: [{ id: 'a', label: 'Ana' }, { id: 'b', label: 'Bo' }, { id: 'c', label: 'Cy' }] });
+    const e1 = w.entry(w.lot, q1);
+    const e2 = w.entry(w.lot, q2);
+    await w.router.deliver('telegram', [e1]);
+    await w.adapters.get('telegram').reply(e1.token, { optionId: 'a' });
+    const call = await w.router.deliver('voice', [e1, e2]);
+    w.state.deliveries()[call.deliveryId].relayId = 'relay-v2';
+    const calls = [];
+    const real = w.router.handleReply.bind(w.router);
+    w.router.handleReply = (...args) => { calls.push(args); return real(...args); };
+    const results = [];
+    for (let i = 0; i < 5000; i += 1) results.push({ n: 1 + (i % 3), digits: String(2 + (i % 2)) });
+    const r = await w.router.ingestRelayEvents('main', [{ id: 'g-9', type: 'gathered', messageId: 'relay-v2', results }]);
+    assert.deepStrictEqual(r, { applied: 1, skipped: 0 });
+    assert.strictEqual(calls.length, 2, 'one reply per item, however long the list');
+    assert.strictEqual(w.runtime.questions(w.lot.id).open().filter((x) => x.payload.type === 'conflict').length, 1, 'at most one conflict per item');
+    assert.strictEqual(w.runtime.questions(w.lot.id).get(q2.id).answer.optionId, 'c', 'the first result for n 2 wins');
+  });
+
+  it('bad event ids and huge event lists are skipped without throwing', async () => {
+    const w = await world();
+    const r = await w.router.ingestRelayEvents('main', [
+      { id: {}, type: 'status', messageId: 'x', status: 'failed' },
+      { id: ['a'], type: 'status', messageId: 'x', status: 'failed' },
+      { id: 42, type: 'status', messageId: 'x', status: 'failed' },
+      { id: 'x'.repeat(10000), type: 'status', messageId: 'x', status: 'failed' },
+      null, 'junk', 7
+    ]);
+    assert.deepStrictEqual(r, { applied: 0, skipped: 7 });
+    const huge = [];
+    for (let i = 0; i < 200000; i += 1) huge.push({ id: `h-${i}`, type: 'nope' });
+    const started = Date.now();
+    const h = await w.router.ingestRelayEvents('main', huge);
+    assert.deepStrictEqual(h, { applied: 0, skipped: 200000 });
+    assert.ok(Date.now() - started < 5000, 'bounded work');
+    assert.deepStrictEqual(await w.router.ingestRelayEvents('main', { length: 3 }), { applied: 0, skipped: 0 });
+  });
+});
+
+describe('ContactRouter inbox: the race and ruling T5-inbox', () => {
+  it('an answer queued while a drain is running is not lost', async () => {
+    const w = await world();
+    const q1 = w.ask(w.lot.id, { text: 'Seller financing?', options: [{ id: 'a', label: 'No' }] });
+    const q2 = w.ask(w.kitchen.id, { text: 'Which week?', options: [{ id: 'a', label: 'Oct 5' }] });
+    w.state.appendInbox({ at: 'x', channel: 'telegram', caseId: w.lot.id, questionId: q1.id, optionId: 'a', meta: {} });
+    const real = w.runtime.answerQuestion.bind(w.runtime);
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    let entered;
+    const inside = new Promise((resolve) => { entered = resolve; });
+    w.runtime.answerQuestion = async (...args) => { entered(); await held; return real(...args); };
+    const draining = w.router.drainInbox();
+    await inside;
+    w.state.appendInbox({ at: 'y', channel: 'telegram', caseId: w.kitchen.id, questionId: q2.id, optionId: 'a', meta: {} });
+    const second = w.router.drainInbox();
+    release();
+    assert.deepStrictEqual(await draining, { applied: 1, kept: 0, refused: 0, dropped: 0 });
+    assert.strictEqual(await second, await draining, 'a drain already running is joined, not run twice');
+    assert.deepStrictEqual(w.state.readInbox().map((l) => l.questionId), [q2.id], 'the line appended mid-drain survives');
+    w.runtime.answerQuestion = real;
+    assert.deepStrictEqual(await w.router.drainInbox(), { applied: 1, kept: 0, refused: 0, dropped: 0 });
+    assert.strictEqual(w.runtime.questions(w.kitchen.id).get(q2.id).answer.optionId, 'a');
+  });
+
+  const busy = (w, caseInfo) => {
+    const lock = path.join(w.runtime.getCase(caseInfo.id).dir, '.kl', 'lock');
+    fs.writeFileSync(lock, JSON.stringify({ turnId: 'other-process', pid: process.ppid, at: new Date().toISOString() }));
+    return () => fs.rmSync(lock);
+  };
+
+  it('an approval or app-only answer on a busy case is refused, never queued', async () => {
+    const w = await world();
+    w.addChannel('mobile', { owner: 'device-1' });
+    w.addChannel('in-app', { owner: 'desktop' });
+    const approval = w.runtime.questions(w.lot.id).create({ kind: 'approval', urgency: 'normal', text: 'Send the offer letter?', options: [{ id: 'approve', label: 'Approve' }, { id: 'reject', label: 'Reject' }] });
+    const grant = w.runtime.questions(w.lot.id).create({ kind: 'question', urgency: 'high', text: 'Raise the limit?', options: [{ id: 'a', label: 'Yes' }], payload: { type: 'budget-grant', budget: 'usd', mcpAnswerable: false } });
+    const ea = w.entry(w.lot, approval);
+    const eg = w.entry(w.lot, grant);
+    await w.router.deliver('mobile', [ea]);
+    await w.router.deliver('in-app', [eg]);
+    const free = busy(w, w.lot);
+    for (const [ch, e, answer] of [['mobile', ea, { optionId: 'approve' }], ['in-app', eg, { optionId: 'a' }]]) {
+      const r = await w.adapters.get(ch).reply(e.token, answer);
+      assert.deepStrictEqual(r, { ok: false, outcome: 'refused: busy', ackText: 'The case is busy; answer again in a minute.' });
+    }
+    assert.deepStrictEqual(w.state.readInbox(), [], 'no authority in inbox.jsonl');
+    free();
+    assert.strictEqual(w.runtime.questions(w.lot.id).get(approval.id).answer, null);
+  });
+
+  it('a forged inbox line for an approval is refused on drain, even as in-app', async () => {
+    const w = await world();
+    w.addChannel('in-app', { owner: 'desktop' });
+    const approval = w.runtime.questions(w.lot.id).create({ kind: 'approval', urgency: 'normal', text: 'Send the offer letter?', options: [{ id: 'approve', label: 'Approve' }, { id: 'reject', label: 'Reject' }] });
+    const grant = w.runtime.questions(w.lot.id).create({ kind: 'question', urgency: 'high', text: 'Raise the limit?', options: [{ id: 'a', label: 'Yes' }], payload: { type: 'budget-grant', budget: 'usd', mcpAnswerable: false } });
+    w.state.appendInbox({ at: 'x', channel: 'in-app', caseId: w.lot.id, questionId: approval.id, optionId: 'approve', meta: { ownerProven: true } });
+    w.state.appendInbox({ at: 'x', channel: 'mobile', caseId: w.lot.id, questionId: grant.id, optionId: 'a', meta: { ownerProven: true } });
+    assert.deepStrictEqual(await w.router.drainInbox(), { applied: 0, kept: 0, refused: 2, dropped: 0 });
+    assert.strictEqual(w.runtime.questions(w.lot.id).get(approval.id).answer, null);
+    assert.strictEqual(w.runtime.questions(w.lot.id).get(grant.id).answer, null);
+    assert.deepStrictEqual(w.state.readInbox(), []);
+  });
+
+  it('a case lookup that fails for another reason than not-found is retried, not dropped', async () => {
+    const w = await world();
+    const q = w.ask(w.lot.id, { text: 'Seller financing?', options: [{ id: 'a', label: 'No' }] });
+    w.state.appendInbox({ at: 'x', channel: 'telegram', caseId: w.lot.id, questionId: q.id, optionId: 'a', meta: {} });
+    const real = w.runtime.getCase.bind(w.runtime);
+    w.runtime.getCase = () => { throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' }); };
+    assert.deepStrictEqual(await w.router.drainInbox(), { applied: 0, kept: 1, refused: 0, dropped: 0 });
+    assert.strictEqual(w.state.readInbox()[0].attempts, 1);
+    w.runtime.getCase = real;
+    assert.deepStrictEqual(await w.router.drainInbox(), { applied: 1, kept: 0, refused: 0, dropped: 0 });
+  });
+});
+
+describe('ContactRouter.sendExternal never throws', () => {
+  it('a throwing gate, an async gate, a malformed gate result and an unknown case', async () => {
+    const throwing = await world({ getGate: () => ({ gateLeaves: () => { throw new Error('gate exploded'); } }) });
+    const r1 = await throwing.router.sendExternal({ caseId: throwing.lot.id, channelId: 'telegram', target: '-100222', text: 'hi' });
+    assert.strictEqual(r1.ok, false);
+    assert.match(r1.error, /gate exploded/);
+    assert.deepStrictEqual(throwing.adapters.get('telegram').plain, []);
+
+    const asyncGate = await world({ getGate: () => ({ gateLeaves: async (p) => ({ ok: true, blocked: [], rendered: { text: p.text.toUpperCase() } }) }) });
+    const r2 = await asyncGate.router.sendExternal({ caseId: asyncGate.lot.id, channelId: 'telegram', target: '-100222', text: 'hi' });
+    assert.strictEqual(r2.ok, true);
+    assert.deepStrictEqual(asyncGate.adapters.get('telegram').plain, [{ target: '-100222', text: 'HI' }]);
+
+    const junk = await world({ getGate: () => ({ gateLeaves: () => ({ ok: true }) }) });
+    const r3 = await junk.router.sendExternal({ caseId: junk.lot.id, channelId: 'telegram', target: '-100222', text: 'hi' });
+    assert.strictEqual(r3.ok, false);
+    assert.deepStrictEqual(junk.adapters.get('telegram').plain, [], 'no rendered text, nothing sent');
+    const r4 = await junk.router.sendExternal({ caseId: 'no-such-case', channelId: 'telegram', target: '-100222', text: 'hi' });
+    assert.strictEqual(r4.ok, false);
+    const r5 = await junk.router.sendExternal(null);
+    assert.strictEqual(r5.ok, false);
   });
 });
