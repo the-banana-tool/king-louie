@@ -25,6 +25,8 @@ const TEXT_MAX = 2000;
 const DOCS_MAX = 5000;
 const JOURNAL_TITLE_MAX = 160;
 const ID_PATTERN = /^[A-Za-z0-9-]{1,64}$/;
+// Windows device names: `.index/cases/NUL.json` would open the device.
+const RESERVED_ID = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 const OPEN_STATUSES = Object.freeze(['draft', 'active', 'needs-direction', 'paused']);
 const BRIEF_FIELDS = Object.freeze(['title', 'objective', 'why', 'successCriteria', 'hardConstraints', 'alreadyTried', 'repo']);
 const KIND_ORDER = Object.freeze({ brief: 0, fact: 1, question: 2, journal: 3 });
@@ -51,8 +53,9 @@ function sortedTf(tokens) {
 }
 
 // [mtimeMs, size] for a file; for a directory, [newest mtime of it and its
-// entries, entry count]; [0, 0] when absent.
-function stamp(p) {
+// entries, entry count], or [mtimeMs, -1] when it cannot be listed (onError
+// hears why); [0, 0] when absent.
+function stamp(p, onError) {
   let st;
   try {
     st = fs.statSync(p);
@@ -60,9 +63,16 @@ function stamp(p) {
     return [0, 0];
   }
   if (!st.isDirectory()) return [st.mtimeMs, st.size];
+  let names;
+  try {
+    names = fs.readdirSync(p);
+  } catch (err) {
+    onError(p, st, err);
+    return [st.mtimeMs, -1];
+  }
   let newest = st.mtimeMs;
   let count = 0;
-  for (const name of fs.readdirSync(p)) {
+  for (const name of names) {
     count += 1;
     try {
       newest = Math.max(newest, fs.statSync(path.join(p, name)).mtimeMs);
@@ -73,11 +83,43 @@ function stamp(p) {
   return [newest, count];
 }
 
-function fingerprintOf(dir) {
+function fingerprintOf(dir, onError) {
   const fp = {};
-  for (const rel of FINGERPRINTED) fp[rel] = stamp(path.join(dir, ...rel.split('/')));
+  for (const rel of FINGERPRINTED) fp[rel] = stamp(path.join(dir, ...rel.split('/')), onError);
   return fp;
 }
+
+const isStr = (v) => typeof v === 'string';
+const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+const isStrOrNull = (v) => v === null || typeof v === 'string';
+
+// A stored document or record of the wrong shape is stale, never trusted.
+function validDoc(d) {
+  return isObj(d)
+    && Object.hasOwn(KIND_ORDER, d.kind)
+    && isStr(d.id)
+    && isStr(d.text)
+    && isStrOrNull(d.subject)
+    && isStrOrNull(d.attr)
+    && isStrOrNull(d.provenance)
+    && typeof d.disclosable === 'boolean'
+    && Number.isInteger(d.len) && d.len >= 0
+    && isObj(d.tf)
+    && Object.values(d.tf).every((n) => Number.isInteger(n) && n > 0);
+}
+
+function validRecord(rec, caseId) {
+  return isObj(rec)
+    && rec.caseId === caseId
+    && ['slug', 'title', 'objective', 'type', 'status', 'created'].every((k) => isStr(rec[k]))
+    && Array.isArray(rec.keys) && rec.keys.every(isStr)
+    && isObj(rec.fingerprint)
+    && Array.isArray(rec.docs) && rec.docs.every(validDoc);
+}
+
+// Only the part after the first `:` names the thing; an empty one would
+// match any text in searchCases.
+const keyHasValue = (k) => k.slice(k.indexOf(':') + 1).trim() !== '';
 
 const sameFingerprint = (a, b) => JSON.stringify(a || null) === JSON.stringify(b || null);
 
@@ -160,7 +202,7 @@ class CrossCaseIndex {
 
   _buildRecord(meta) {
     const dir = meta.dir;
-    const fingerprint = fingerprintOf(dir);
+    const fingerprint = this._fingerprint(dir);
     const fpKey = `${meta.id}:${JSON.stringify(fingerprint)}`;
     const part = (label, fn, fallback) => {
       try {
@@ -244,7 +286,7 @@ class CrossCaseIndex {
       type: String(meta.type || 'general'),
       status: String(meta.status || 'draft'),
       created: String(meta.created || ''),
-      keys: [...new Set(keys.map(norm))].sort(),
+      keys: [...new Set(keys.map(norm))].filter(keyHasValue).sort(),
       fingerprint,
       docs: docs.map(({ at, ...d }) => d)
     };
@@ -256,9 +298,13 @@ class CrossCaseIndex {
     this._writeFile(this._caseFile(record.caseId), `${JSON.stringify(record)}\n`);
   }
 
+  _fingerprint(dir) {
+    return fingerprintOf(dir, (p, st, err) => this._warnOnce(`unreadable:${p}:${st.mtimeMs}`, `Case index: cannot list ${p} (${err.message}); skipping it.`));
+  }
+
   _validId(id) {
-    if (typeof id === 'string' && ID_PATTERN.test(id)) return true;
-    this._warnOnce(`bad-id:${id}`, `Case index: skipped a case with id ${JSON.stringify(id)}; ids must match ${ID_PATTERN}.`);
+    if (typeof id === 'string' && ID_PATTERN.test(id) && !RESERVED_ID.test(id)) return true;
+    this._warnOnce(`bad-id:${id}`, `Case index: skipped a case with id ${JSON.stringify(id)}; ids must match ${ID_PATTERN} and not be a Windows device name.`);
     return false;
   }
 
@@ -285,9 +331,9 @@ class CrossCaseIndex {
       } catch {
         rec = null;
       }
-      // A corrupt file, or one whose caseId does not match its name, is
-      // stale: the next refresh rewrites it.
-      if (rec && rec.caseId === caseId && Array.isArray(rec.docs)) this.records.set(caseId, rec);
+      // A corrupt file, one whose caseId does not match its name, or one of
+      // the wrong shape is stale: the next refresh rewrites it.
+      if (validRecord(rec, caseId)) this.records.set(caseId, rec);
     }
   }
 
@@ -298,7 +344,7 @@ class CrossCaseIndex {
       if (!this._validId(meta.id)) continue;
       listed.add(meta.id);
       const rec = this.records.get(meta.id);
-      if (!rec || !sameFingerprint(rec.fingerprint, fingerprintOf(meta.dir))) this._store(this._buildRecord(meta));
+      if (!rec || !sameFingerprint(rec.fingerprint, this._fingerprint(meta.dir))) this._store(this._buildRecord(meta));
     }
     for (const caseId of [...this.records.keys()]) {
       if (!listed.has(caseId)) this._drop(caseId);
@@ -353,8 +399,19 @@ class CrossCaseIndex {
       this._store(rec);
     }
     if (!this.memoryOnly && fs.existsSync(this.casesDir)) {
-      for (const name of fs.readdirSync(this.casesDir)) {
-        if (!name.endsWith('.json') || !ids.has(name.slice(0, -5))) fs.rmSync(path.join(this.casesDir, name), { force: true });
+      let names = [];
+      try {
+        names = fs.readdirSync(this.casesDir);
+      } catch (err) {
+        this.log.warn(`Case index: cannot list ${this.casesDir} (${err.message}); stale files stay.`);
+      }
+      for (const name of names) {
+        if (name.endsWith('.json') && ids.has(name.slice(0, -5))) continue;
+        try {
+          fs.rmSync(path.join(this.casesDir, name), { force: true });
+        } catch (err) {
+          this.log.warn(`Case index: could not remove ${name}: ${err.message}`);
+        }
       }
     }
     if (ids.size || fs.existsSync(this.dir)) this._writeMeta();
@@ -362,24 +419,34 @@ class CrossCaseIndex {
     return { cases: ids.size, docs, ms: Date.now() - started };
   }
 
+  // Never throws: an index failure must not fail the write that called it.
   upsertCase(id) {
     if (!this._validId(id)) return { skipped: 'bad-id' };
-    this._load();
-    const meta = this.store.list().find((c) => c.id === id);
-    if (!meta) {
-      this.removeCase(id);
-      return { removed: true };
+    try {
+      this._load();
+      const meta = this.store.list().find((c) => c.id === id);
+      if (!meta) {
+        this.removeCase(id);
+        return { removed: true };
+      }
+      const rec = this._buildRecord(meta);
+      this._store(rec);
+      this._entities('upsertCase', id);
+      return { docs: rec.docs.length };
+    } catch (err) {
+      this.log.warn(`Case index: upsert of ${id} failed: ${err.message}`);
+      return { skipped: 'error' };
     }
-    const rec = this._buildRecord(meta);
-    this._store(rec);
-    this._entities('upsertCase', id);
-    return { docs: rec.docs.length };
   }
 
   removeCase(id) {
     if (!this._validId(id)) return;
-    this._load();
-    this._drop(id);
+    try {
+      this._load();
+      this._drop(id);
+    } catch (err) {
+      this.log.warn(`Case index: removing ${id} failed: ${err.message}`);
+    }
     this._entities('removeCase', id);
   }
 
@@ -456,16 +523,21 @@ class CrossCaseIndex {
           const shareable = (h.doc.kind === 'fact' && h.doc.disclosable === true)
             || (h.doc.kind === 'brief' && (h.doc.id === 'title' || h.doc.id === 'objective'));
           const visible = includePrivate === true || own || shareable;
+          // Hidden text hides its names too: a redacted fact keeps its slugs
+          // unless the caller named that pair, and a live-state id carries
+          // the branch name or PR number.
+          const liveState = h.doc.kind === 'brief' && /^(branch|pr):/.test(h.doc.id);
+          const slugs = visible || h.doc.kind !== 'fact' || h.key;
           return {
             caseId: h.rec.caseId,
             title: h.rec.title,
             kind: h.doc.kind,
-            id: h.doc.id,
+            id: visible || !liveState ? h.doc.id : null,
             score: round(h.score),
             text: visible ? h.doc.text : null,
             redacted: !visible,
-            subject: h.doc.subject,
-            attr: h.doc.attr,
+            subject: slugs ? h.doc.subject : null,
+            attr: slugs ? h.doc.attr : null,
             provenance: h.doc.provenance,
             disclosable: h.doc.disclosable,
             caseStatus: h.rec.status,

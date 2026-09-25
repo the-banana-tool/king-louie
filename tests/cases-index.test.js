@@ -107,6 +107,11 @@ describe('CrossCaseIndex relevance and keys', () => {
     const lot = c.byTitle['Sell the lakeside lot'];
     const [asOther] = idx.search({ text: 'house loan payoff letter', forCaseId: lot.id, kinds: ['fact'] });
     assert.deepStrictEqual([asOther.caseId, asOther.text, asOther.redacted, asOther.disclosable], [house.id, null, true, false]);
+    assert.deepStrictEqual([asOther.subject, asOther.attr], [null, null], 'a redacted fact keeps its private slugs');
+    assert.ok(!JSON.stringify(asOther).includes('house-loan'));
+    assert.ok(!JSON.stringify(asOther).includes('payoff'));
+    const [byKey] = idx.search({ text: 'zzz', subject: 'house-loan', attr: 'payoff', forCaseId: lot.id });
+    assert.deepStrictEqual([byKey.caseId, byKey.text, byKey.subject, byKey.attr], [house.id, null, 'house-loan', 'payoff'], 'the caller named this pair');
     const [asOwner] = idx.search({ text: 'house loan payoff letter', forCaseId: house.id, kinds: ['fact'] });
     assert.match(asOwner.text, /Payoff letter/);
     assert.strictEqual(asOwner.redacted, false);
@@ -325,6 +330,70 @@ describe('CrossCaseIndex storage and freshness', () => {
     assert.deepStrictEqual(calls, [['rebuild'], ['upsertCase', one.id], ['removeCase', one.id]]);
   });
 
+  it('an unreadable case directory skips that part and leaves the other cases searchable', async () => {
+    const { root, byTitle } = smallCorpus();
+    const garage = byTitle['Garage sale'];
+    const lot = byTitle['Sell the lakeside lot'];
+    const realReaddir = fs.readdirSync;
+    fs.readdirSync = function readdirSync(p, ...rest) {
+      if (String(p).startsWith(garage.dir)) throw Object.assign(new Error(`EACCES: permission denied, scandir '${p}'`), { code: 'EACCES' });
+      return realReaddir.call(fs, p, ...rest);
+    };
+    try {
+      const idx = new CrossCaseIndex(root);
+      assert.strictEqual(idx.search({ text: 'county gis polygon' })[0].caseId, lot.id);
+      assert.strictEqual(idx.search({ text: 'garage winter' })[0].caseId, garage.id);
+      assert.ok('docs' in idx.upsertCase(garage.id));
+      assert.ok(idx.rebuild().cases >= 4);
+    } finally {
+      fs.readdirSync = realReaddir;
+    }
+  });
+
+  it('a stored record of the wrong shape is stale and rebuilt', async () => {
+    const { root, byTitle } = smallCorpus();
+    new CrossCaseIndex(root).rebuild();
+    const lot = byTitle['Sell the lakeside lot'];
+    const file = path.join(root, '.index', 'cases', `${lot.id}.json`);
+    const good = fs.readFileSync(file, 'utf8');
+    const rec = JSON.parse(good);
+    for (const broken of [
+      { ...rec, docs: rec.docs.map((d, i) => (i === 0 ? { ...d, tf: null } : d)) },
+      { ...rec, docs: [null] },
+      { ...rec, keys: 'repo:x' },
+      { ...rec, created: 7 },
+      { ...rec, title: null }
+    ]) {
+      fs.writeFileSync(file, JSON.stringify(broken));
+      const idx = new CrossCaseIndex(root);
+      assert.strictEqual(idx.search({ text: 'county gis polygon' })[0].caseId, lot.id);
+      assert.strictEqual(fs.readFileSync(file, 'utf8'), good);
+    }
+  });
+
+  it('Windows reserved device names are bad ids', () => {
+    const idx = new CrossCaseIndex(tmp());
+    for (const id of ['CON', 'prn', 'Aux', 'nul', 'COM1', 'com9', 'LPT1', 'lpt9']) {
+      assert.deepStrictEqual(idx.upsertCase(id), { skipped: 'bad-id' }, id);
+    }
+    assert.deepStrictEqual(idx.upsertCase('console'), { removed: true });
+  });
+
+  it('drops index keys with an empty value', async () => {
+    const root = tmp();
+    const one = await new CaseStore({ root }).create({ title: 'Sell the lakeside lot', objective: 'Convert the lakeside lot to cash' });
+    const general = require('../src/cases/case-types/general');
+    const real = general.indexKeys;
+    general.indexKeys = () => ['repo:', 'repo:  ', 'repo:x'];
+    try {
+      new CrossCaseIndex(root).rebuild();
+    } finally {
+      if (real === undefined) delete general.indexKeys; else general.indexKeys = real;
+    }
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(root, '.index', 'cases', `${one.id}.json`), 'utf8')).keys, ['repo:x']);
+    assert.deepStrictEqual(new CrossCaseIndex(root).searchCases({ text: 'anything at all' }), []);
+  });
+
   it('never throws from search: an internal error logs and returns []', async () => {
     const root = tmp();
     const idx = new CrossCaseIndex(root, { store: { list: () => { throw new Error('disk gone'); } } });
@@ -352,6 +421,8 @@ describe('CrossCaseIndex storage and freshness', () => {
     const hits = idx.search({ text: 'status polling', forCaseId: repoCase.id });
     assert.deepStrictEqual(hits.map((h) => h.id).sort(), ['branch:fix/status-poll', 'pr:12']);
     const other = idx.search({ text: 'status polling' });
-    assert.ok(other.every((h) => h.text === null && h.redacted === true));
+    assert.ok(other.length > 0);
+    assert.ok(other.every((h) => h.text === null && h.redacted === true && h.id === null));
+    assert.ok(!JSON.stringify(other).includes('fix/status-poll'));
   });
 });
