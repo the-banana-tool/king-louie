@@ -62,6 +62,24 @@ class EnvelopeStore {
   }
 }
 
+class EnvelopeCoreError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'EnvelopeCoreError';
+  }
+}
+
+// A cap must be a real number: a missing, null or non-finite cap is never
+// read as 0 (or as "no limit"), it makes the envelope malformed.
+function capOf(caps, key, { integer }) {
+  const v = caps ? caps[key] : undefined;
+  const ok = typeof v === 'number' && Number.isFinite(v) && v >= 0 && (!integer || Number.isInteger(v));
+  if (!ok) throw new EnvelopeCoreError(`caps.${key} must be a finite ${integer ? 'integer' : 'number'} ≥ 0`);
+  return v;
+}
+
+// Throws EnvelopeCoreError for malformed caps; callers that must not throw
+// use envelopeIntact.
 function envelopeCore(env) {
   return {
     intent: String(env.intent || ''),
@@ -70,9 +88,9 @@ function envelopeCore(env) {
     facts: [...(env.facts || [])].map(String),
     rules: [...(env.rules || [])].map(String),
     caps: {
-      usd: Number(env.caps?.usd) || 0,
-      contacts: Number(env.caps?.contacts) || 0,
-      attemptsPerContact: Number(env.caps?.attemptsPerContact) || 0
+      usd: capOf(env.caps, 'usd', { integer: false }),
+      contacts: capOf(env.caps, 'contacts', { integer: true }),
+      attemptsPerContact: capOf(env.caps, 'attemptsPerContact', { integer: true })
     },
     window: { start: String(env.window?.start || ''), end: String(env.window?.end || ''), tz: String(env.window?.tz || '') }
   };
@@ -80,6 +98,16 @@ function envelopeCore(env) {
 
 function envelopeHash(core) {
   return `sha256:${sha256hex(canonicalize(core))}`;
+}
+
+// True when the envelope is well formed and its core still hashes to
+// env.hash. Never throws.
+function envelopeIntact(env) {
+  try {
+    return Boolean(env) && envelopeHash(envelopeCore(env)) === env.hash;
+  } catch {
+    return false;
+  }
 }
 
 function validateEnvelopeRequest(body, {
@@ -188,9 +216,11 @@ function renderEnvelopeQuestion(env, { facts = new Map(), caseTitle = '', notBac
   return cut(lines.join('\n'));
 }
 
-// The phone shows this; F3 cuts it to 300 characters.
-function renderSignedSummary(core) {
-  return `${core.executor}: ${core.intent} (${core.recipients.allow.length} recipients, ${money(core.caps.usd)}, ${core.window.start} to ${core.window.end})`;
+// The phone shows this; F3 cuts it to 300 characters. The summary is part of
+// the hashed action, so the envelope id in front binds an approval to one
+// envelope: two envelopes with the same core are different actions.
+function renderSignedSummary(core, envelopeId) {
+  return `${envelopeId} · ${core.executor}: ${core.intent} (${core.recipients.allow.length} recipients, ${money(core.caps.usd)}, ${core.window.start} to ${core.window.end})`;
 }
 
 function envelopeFit(env, payload = {}, {
@@ -201,21 +231,36 @@ function envelopeFit(env, payload = {}, {
   const addDelta = (d) => {
     if (!deltas.some((x) => x.kind === d.kind && x.value === d.value)) deltas.push(d);
   };
-  if (!env) return { fits: false, refusals: ['no envelope'], deltas };
+  const refuse = (text) => ({ fits: false, refusals: [text], deltas: [] });
+  if (!env) return refuse('no envelope');
+  if (typeof executorId !== 'string' || !executorId) return refuse('no executor named for the fit');
+  if (!Array.isArray(recipients) || !recipients.length) return refuse('the job names no recipients');
+  const per = payload.attemptsPerContact === undefined ? 1 : payload.attemptsPerContact;
+  if (!Number.isInteger(per) || per < 1) return refuse('attemptsPerContact must be a positive integer');
+  if (typeof estimateUsd !== 'number' || !Number.isFinite(estimateUsd) || estimateUsd < 0) return refuse('estimateUsd must be a finite number ≥ 0');
+  // Every limit below is read from the core, the part the owner approved and
+  // the hash covers, never from the raw file fields.
+  let core;
+  try {
+    core = envelopeCore(env);
+  } catch (err) {
+    return refuse(`envelope ${env.id} is malformed: ${err.message}`);
+  }
   if (!FITTABLE_STATUSES.includes(env.status)) refusals.push(`envelope ${env.id} is ${env.status}`);
-  if (executorId && env.executor !== executorId) refusals.push(`envelope ${env.id} is for ${env.executor}, not ${executorId}`);
+  if (core.executor !== executorId) refusals.push(`envelope ${env.id} is for ${core.executor}, not ${executorId}`);
   if (refusals.length) return { fits: false, refusals, deltas };
 
   const usage = { usd: 0, contacts: [], attempts: {}, ...(env.usage || {}) };
   for (const r of recipients) {
-    if (!env.recipients.allow.includes(r)) addDelta({ kind: 'recipient', value: r, text: `adds recipient ${r}` });
+    if (!core.recipients.allow.includes(r)) addDelta({ kind: 'recipient', value: r, text: `adds recipient ${r}` });
   }
   const declared = [
     ...(Array.isArray(payload.facts) ? payload.facts.map(String) : []),
     ...gateBlocked.filter((x) => x.reason === 'not-in-envelope' && x.factId).map((x) => x.factId)
   ];
+  // A fact already in the envelope is checked too: it may have been
+  // retracted or made private since the owner approved it.
   for (const id of [...new Set(declared)]) {
-    if (env.facts.includes(id)) continue;
     const f = facts.get(id);
     let why = null;
     if (!f) why = 'missing';
@@ -227,30 +272,35 @@ function envelopeFit(env, payload = {}, {
       refusals.push(`${id} cannot be disclosed (${why})`);
       continue;
     }
-    addDelta({ kind: 'fact', value: id, text: `discloses ${id} "${f.stmt}"` });
+    if (!core.facts.includes(id)) addDelta({ kind: 'fact', value: id, text: `discloses ${id} "${f.stmt}"` });
   }
-  const needUsd = roundUsd(Number(usage.usd || 0) + (Number(estimateUsd) || 0));
-  if (needUsd > env.caps.usd) addDelta({ kind: 'usd', value: needUsd, text: 'raises usd cap' });
+  const caps = core.caps;
+  const needUsd = roundUsd((Number(usage.usd) || 0) + estimateUsd);
+  if (needUsd > caps.usd) addDelta({ kind: 'usd', value: needUsd, text: 'raises usd cap' });
   const distinct = new Set([...(usage.contacts || []), ...recipients]);
-  if (distinct.size > env.caps.contacts) addDelta({ kind: 'contacts', value: distinct.size, text: 'raises contacts cap' });
-  const per = Number(payload.attemptsPerContact) || 1;
+  if (distinct.size > caps.contacts) addDelta({ kind: 'contacts', value: distinct.size, text: 'raises contacts cap' });
   const attempts = recipients.map((r) => (Number(usage.attempts?.[r]) || 0) + per);
   const maxAttempts = attempts.length ? Math.max(...attempts) : 0;
-  if (maxAttempts > env.caps.attemptsPerContact) addDelta({ kind: 'attempts', value: maxAttempts, text: 'raises attempts per contact' });
-  const today = localDate(now, env.window.tz);
-  if (today < env.window.start) refusals.push(`envelope ${env.id} opens ${env.window.start}`);
-  else if (today > env.window.end) addDelta({ kind: 'window', value: today, text: `extends window end to ${today}` });
+  if (maxAttempts > caps.attemptsPerContact) addDelta({ kind: 'attempts', value: maxAttempts, text: 'raises attempts per contact' });
+  const today = localDate(now, core.window.tz);
+  if (today < core.window.start) refusals.push(`envelope ${env.id} opens ${core.window.start}`);
+  else if (today > core.window.end) addDelta({ kind: 'window', value: today, text: `extends window end to ${today}` });
   if (env.status === 'exhausted' && !deltas.some((d) => d.kind === 'usd' || d.kind === 'contacts' || d.kind === 'attempts')) {
-    if ((usage.contacts || []).length >= env.caps.contacts) {
-      addDelta({ kind: 'contacts', value: env.caps.contacts + Math.max(1, recipients.length), text: 'raises contacts cap' });
+    if ((usage.contacts || []).length >= caps.contacts) {
+      addDelta({ kind: 'contacts', value: caps.contacts + Math.max(1, recipients.length), text: 'raises contacts cap' });
     } else {
-      addDelta({ kind: 'usd', value: roundUsd(Math.max(needUsd, env.caps.usd) + 1), text: 'raises usd cap' });
+      addDelta({ kind: 'usd', value: roundUsd(Math.max(needUsd, caps.usd) + 1), text: 'raises usd cap' });
     }
   }
   return { fits: refusals.length === 0 && deltas.length === 0, refusals, deltas };
 }
 
+// Throws for an envelope outside FITTABLE_STATUSES: a revoked, rejected,
+// tampered or never-approved envelope is never revived by a delta.
 function applyDeltas(env, deltas, { questionId = null, factId = null, at = new Date().toISOString() } = {}) {
+  if (!env || !FITTABLE_STATUSES.includes(env.status)) {
+    throw new Error(`applyDeltas: envelope ${env?.id} is ${env?.status}; only ${FITTABLE_STATUSES.join(', ')} envelopes take a delta`);
+  }
   const next = JSON.parse(JSON.stringify(env));
   for (const d of deltas) {
     if (d.kind === 'recipient' && !next.recipients.allow.includes(d.value)) next.recipients.allow.push(d.value);
@@ -283,8 +333,10 @@ module.exports = {
   ENVELOPE_STATUSES,
   FITTABLE_STATUSES,
   EnvelopeStore,
+  EnvelopeCoreError,
   envelopeCore,
   envelopeHash,
+  envelopeIntact,
   validateEnvelopeRequest,
   renderEnvelopeQuestion,
   renderSignedSummary,

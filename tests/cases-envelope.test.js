@@ -1,5 +1,5 @@
 // tests/cases-envelope.test.js
-const { describe, it, after } = require('node:test');
+const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
@@ -9,6 +9,9 @@ const {
   envelopeFit, applyDeltas, renderDeltaQuestion, deltasEqual
 } = require('../src/cases/executors/envelope');
 const { verifySignedGrant, signedAction, approvalHelpers } = require('../src/cases/executors/signed');
+const { buildRequest } = require('../src/approvals/messages');
+const { createFakePhone, testNodeIdentity } = require('./helpers/fake-phone');
+const { approverStoreWith } = require('./helpers/approver-set');
 const { windowInstants } = require('../src/cases/executors/util');
 
 const dirs = [];
@@ -192,15 +195,87 @@ describe('envelopeFit', () => {
   });
 });
 
+describe('envelope core and fit inputs (review fixes)', () => {
+  const all = facts(ACRES, ZONING, GUESS);
+  const fitOpts = (over = {}) => ({ facts: all, recipients: ['+15550100'], now: MONDAY_NOON, estimateUsd: 2, executorId: 'phone-agent', ...over });
+
+  it('envelopeCore rejects a missing or non-finite cap instead of reading it as 0', () => {
+    const env = activeEnvelope();
+    for (const usd of [undefined, null, NaN, Infinity, '20', -1]) {
+      assert.throws(() => envelopeCore({ ...env, caps: { ...env.caps, usd } }), /caps\.usd/);
+    }
+    assert.throws(() => envelopeCore({ ...env, caps: { usd: 20, contacts: 3 } }), /caps\.attemptsPerContact/);
+  });
+
+  it('fit checks the core: a deleted usd cap is refused, not unlimited', () => {
+    const env = activeEnvelope();
+    delete env.caps.usd;
+    const r = envelopeFit(env, {}, fitOpts({ estimateUsd: 5000 }));
+    assert.strictEqual(r.fits, false);
+    assert.match(r.refusals.join('; '), /envelope env-01 is malformed: .*caps\.usd/);
+  });
+
+  it('refuses a missing executor, no recipients, bad attempts and a bad estimate', () => {
+    const env = activeEnvelope();
+    assert.deepStrictEqual(envelopeFit(env, {}, fitOpts({ executorId: null })).refusals, ['no executor named for the fit']);
+    assert.deepStrictEqual(envelopeFit(env, {}, fitOpts({ recipients: [] })).refusals, ['the job names no recipients']);
+    for (const a of [0, -1, 1.5, '2', null, NaN]) {
+      assert.deepStrictEqual(envelopeFit(env, { attemptsPerContact: a }, fitOpts()).refusals, ['attemptsPerContact must be a positive integer'], String(a));
+    }
+    for (const e of [-1, NaN, Infinity, '2', null]) {
+      assert.deepStrictEqual(envelopeFit(env, {}, fitOpts({ estimateUsd: e })).refusals, ['estimateUsd must be a finite number ≥ 0'], String(e));
+    }
+    assert.strictEqual(envelopeFit(env, {}, fitOpts()).fits, true, 'attemptsPerContact undefined defaults to 1');
+  });
+
+  it('a fact already in the envelope is still checked for active and disclosable', () => {
+    const env = activeEnvelope();
+    const nowPrivate = facts({ ...ACRES, disclosable: false }, ZONING);
+    assert.deepStrictEqual(envelopeFit(env, { facts: ['f-0001'] }, fitOpts({ facts: nowPrivate })).refusals, ['f-0001 cannot be disclosed (not disclosable)']);
+    const retracted = facts({ ...ACRES, status: 'retracted' }, ZONING);
+    assert.deepStrictEqual(envelopeFit(env, { facts: ['f-0001'] }, fitOpts({ facts: retracted })).refusals, ['f-0001 cannot be disclosed (retracted)']);
+  });
+
+  it('applyDeltas never revives an envelope outside the fittable statuses', () => {
+    const deltas = [{ kind: 'contacts', value: 4, text: 'raises contacts cap' }];
+    for (const status of ['revoked', 'rejected', 'tampered', 'requested']) {
+      assert.throws(() => applyDeltas(activeEnvelope({ status }), deltas, {}), new RegExp(`envelope env-01 is ${status}`));
+    }
+  });
+});
+
 describe('signed grants', () => {
+  const REQ = '6f1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
+  const OTHER_REQ = '7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d';
   const env = activeEnvelope({
     status: 'active',
-    grantedBy: { channel: 'phone', at: '2026-10-26T17:00:00Z', questionId: 'q-0002', evidence: { request_id: 'r-1', action_hash: 'forged' } }
+    grantedBy: { channel: 'phone', at: '2026-10-26T17:00:00Z', questionId: 'q-0002', evidence: { request_id: REQ, action_hash: 'forged' } }
   });
   const helpers = approvalHelpers();
   const hash = helpers.actionHash(signedAction(env, 'case-1', helpers));
-  const sealed = (message) => ({ alg: 'ES256', kid: 'd-1', payload: Buffer.from(JSON.stringify(message)).toString('base64url'), sig: 'x' });
   const ledger = (entries, ok = true) => ({ verify: () => ({ ok }), tail: (n) => entries.slice(-n) });
+  const node = testNodeIdentity();
+  const phone = createFakePhone({ name: 'Owner phone' });
+  const stranger = createFakePhone({ name: 'Unknown phone' });
+  let store;
+  before(async () => { store = await approverStoreWith([phone.approverRecord()]); });
+  after(() => { if (store) store.cleanup(); });
+  const trust = () => ({ approverStore: store, nodeId: node.nodeId, nodePublicKey: node.publicKey });
+  const origin = { client: 'king-louie', session: 'case-1', job_id: null };
+  const request = ({ action = signedAction(env, 'case-1', helpers), requestId = REQ, identity = node } = {}) => buildRequest({ identity, action, origin, requestId });
+  const approved = (requestId = REQ) => ({ request_id: requestId, state: 'approved', reason: null, job_id: null });
+  // F3 phone-approver.js: approval.request (node-signed), approval.response
+  // (the phone-signed envelope, audited before the post-audit re-checks),
+  // then approval.outcome from _finish, the final decision (M13).
+  function audit({ req = request(), response = (r) => phone.respond(r.envelope, 'approve'), outcomes = [approved()] } = {}) {
+    return [
+      { kind: 'approval.request', data: { job_id: null, envelope: req.envelope } },
+      { kind: 'approval.response', data: { request_id: req.message.request_id, device_id: phone.deviceId, decision: 'approve', envelope: response(req), job_id: null } },
+      ...outcomes.map((data) => ({ kind: 'approval.outcome', data }))
+    ];
+  }
+  const check = (entries, over = {}) => verifySignedGrant(env, { caseId: 'case-1', auditLedger: ledger(entries), ...trust(), ...over });
+  const NOT_FOUND = { ok: false, error: 'signed approval not found for this envelope; ask again' };
 
   it('uses F3 envelopeAction and actionHash now that F3 has merged', () => {
     const messages = require('../src/approvals/messages');
@@ -208,14 +283,21 @@ describe('signed grants', () => {
     assert.strictEqual(helpers.actionHash, messages.actionHash);
   });
 
-  it('builds the F3 envelope action', () => {
+  it('builds the F3 envelope action, naming the envelope id in the signed summary', () => {
     const action = signedAction(env, 'case-1', helpers);
     assert.deepStrictEqual([action.kind, action.name, action.params], ['envelope', 'phone-agent', { case_id: 'case-1', envelope_hash: env.hash }]);
+    assert.match(action.summary, /^env-01 · phone-agent: /);
+  });
+
+  it('two envelopes with the same core are different signed actions', () => {
+    const other = { ...env, id: 'env-02' };
+    assert.strictEqual(other.hash, env.hash);
+    assert.notStrictEqual(helpers.actionHash(signedAction(other, 'case-1', helpers)), hash);
+    assert.strictEqual(verifySignedGrant(other, { caseId: 'case-1', outcomes: [{ decision: 'approve', action_hash: hash }] }).ok, false, 'the env-01 approval does not activate env-02');
   });
 
   it('signed grant file forgery', () => {
-    const r = verifySignedGrant(env, { caseId: 'case-1', outcomes: [], auditLedger: ledger([]) });
-    assert.deepStrictEqual(r, { ok: false, error: 'signed approval not found for this envelope; ask again' });
+    assert.deepStrictEqual(verifySignedGrant(env, { caseId: 'case-1', outcomes: [], auditLedger: ledger([]), ...trust() }), NOT_FOUND);
   });
 
   it('accepts an approve Outcome held in memory for the exact action', () => {
@@ -223,47 +305,63 @@ describe('signed grants', () => {
     assert.strictEqual(verifySignedGrant(env, { caseId: 'case-1', outcomes: [{ decision: 'deny', action_hash: hash }] }).ok, false);
   });
 
-  // F3 phone-approver.js: approval.request, then approval.response (audited
-  // before the post-audit re-checks), then approval.outcome from _finish,
-  // which is the final decision (ruling M13).
-  const auditEntries = (outcomes = [{ request_id: 'r-1', state: 'approved', reason: null, job_id: null }]) => [
-    { kind: 'approval.request', data: { job_id: null, envelope: sealed({ request_id: 'r-1', action_hash: hash }) } },
-    { kind: 'approval.response', data: { request_id: 'r-1', device_id: 'd-1', decision: 'approve', envelope: sealed({ request_id: 'r-1' }), job_id: null } },
-    ...outcomes.map((data) => ({ kind: 'approval.outcome', data }))
-  ];
-  const NOT_FOUND = { ok: false, error: 'signed approval not found for this envelope; ask again' };
+  it('accepts a verified audit ledger holding the signed request, the signed approval and an approved outcome', () => {
+    assert.deepStrictEqual(check(audit()), { ok: true, via: 'audit' });
+    assert.deepStrictEqual(verifySignedGrant(env, { caseId: 'case-1', auditLedger: ledger(audit(), false), ...trust() }), NOT_FOUND, 'a broken chain proves nothing');
+  });
 
-  it('accepts a verified audit ledger holding the request, its approval and an approved outcome', () => {
-    const entries = auditEntries();
-    assert.strictEqual(verifySignedGrant(env, { caseId: 'case-1', auditLedger: ledger(entries) }).via, 'audit');
-    assert.strictEqual(verifySignedGrant(env, { caseId: 'case-1', auditLedger: ledger(entries, false) }).ok, false, 'a broken chain proves nothing');
-    const otherHash = [{ ...entries[0], data: { envelope: sealed({ request_id: 'r-1', action_hash: 'other' }) } }, ...entries.slice(1)];
-    assert.strictEqual(verifySignedGrant(env, { caseId: 'case-1', auditLedger: ledger(otherHash) }).ok, false);
+  it('refuses without the approver store or the node key (fails closed)', () => {
+    assert.deepStrictEqual(check(audit(), { approverStore: null }), NOT_FOUND);
+    assert.deepStrictEqual(check(audit(), { nodePublicKey: null }), NOT_FOUND);
+    assert.deepStrictEqual(check(audit(), { nodeId: null }), NOT_FOUND);
+    assert.deepStrictEqual(check(audit(), { nodePublicKey: testNodeIdentity().publicKey }), NOT_FOUND, 'a key that is not this node');
+  });
+
+  it('refuses a forged, unsigned response', () => {
+    const badSig = (r) => ({ ...phone.respond(r.envelope, 'approve'), sig: Buffer.alloc(64).toString('base64url') });
+    assert.deepStrictEqual(check(audit({ response: badSig })), NOT_FOUND);
+    const plain = (r) => ({
+      alg: 'ES256', kid: phone.deviceId,
+      payload: Buffer.from(JSON.stringify({ request_id: r.message.request_id, action_hash: hash, decision: 'approve' })).toString('base64url'),
+      sig: 'x'
+    });
+    assert.deepStrictEqual(check(audit({ response: plain })), NOT_FOUND);
+  });
+
+  it('refuses a response signed by a device that is not an enrolled approver', () => {
+    assert.deepStrictEqual(check(audit({ response: (r) => stranger.respond(r.envelope, 'approve') })), NOT_FOUND);
+  });
+
+  it('refuses a valid signed response for another request or another hash', () => {
+    const other = request({ requestId: OTHER_REQ });
+    assert.deepStrictEqual(check(audit({ response: () => phone.respond(other.envelope, 'approve') })), NOT_FOUND);
+    const otherHash = helpers.actionHash({ ...signedAction(env, 'case-1', helpers), summary: 'something else' });
+    assert.deepStrictEqual(check(audit({ response: (r) => phone.respond(r.envelope, 'approve', { overrides: { action_hash: otherHash } }) })), NOT_FOUND);
+  });
+
+  it('refuses a signed request for another action or signed by another node', () => {
+    const otherAction = request({ action: signedAction({ ...env, id: 'env-02' }, 'case-1', helpers) });
+    assert.deepStrictEqual(check(audit({ req: otherAction })), NOT_FOUND);
+    const impostor = testNodeIdentity();
+    const forgedNode = request({ identity: { ...impostor, nodeId: node.nodeId } });
+    assert.deepStrictEqual(check(audit({ req: forgedNode })), NOT_FOUND);
+  });
+
+  it('refuses a signed deny, even with an approved outcome', () => {
+    assert.deepStrictEqual(check(audit({ response: (r) => phone.respond(r.envelope, 'deny') })), NOT_FOUND);
   });
 
   it('refuses an audited approval that F3 then refused', () => {
-    const entries = auditEntries([{ request_id: 'r-1', state: 'refused', reason: 'action_changed', job_id: null }]);
-    assert.deepStrictEqual(verifySignedGrant(env, { caseId: 'case-1', auditLedger: ledger(entries) }), NOT_FOUND);
+    assert.deepStrictEqual(check(audit({ outcomes: [{ request_id: REQ, state: 'refused', reason: 'action_changed', job_id: null }] })), NOT_FOUND);
   });
 
   it('refuses an audited approval with no outcome (fails closed)', () => {
-    assert.deepStrictEqual(verifySignedGrant(env, { caseId: 'case-1', auditLedger: ledger(auditEntries([])) }), NOT_FOUND);
+    assert.deepStrictEqual(check(audit({ outcomes: [] })), NOT_FOUND);
   });
 
-  it('refuses when any outcome for the request is not approved', () => {
-    const entries = auditEntries([
-      { request_id: 'r-1', state: 'approved', reason: null, job_id: null },
-      { request_id: 'r-1', state: 'expired', reason: null, job_id: null }
-    ]);
-    assert.deepStrictEqual(verifySignedGrant(env, { caseId: 'case-1', auditLedger: ledger(entries) }), NOT_FOUND);
-    const otherRequest = auditEntries([{ request_id: 'r-2', state: 'approved', reason: null, job_id: null }]);
-    assert.deepStrictEqual(verifySignedGrant(env, { caseId: 'case-1', auditLedger: ledger(otherRequest) }), NOT_FOUND, 'an outcome for another request proves nothing');
-  });
-
-  it('refuses when the audited response is a deny, even with an approved outcome', () => {
-    const entries = auditEntries();
-    entries[1] = { ...entries[1], data: { ...entries[1].data, decision: 'deny' } };
-    assert.deepStrictEqual(verifySignedGrant(env, { caseId: 'case-1', auditLedger: ledger(entries) }), NOT_FOUND);
+  it('refuses when any outcome for the request is not approved, or the outcome is for another request', () => {
+    assert.deepStrictEqual(check(audit({ outcomes: [approved(), { request_id: REQ, state: 'expired', reason: null, job_id: null }] })), NOT_FOUND);
+    assert.deepStrictEqual(check(audit({ outcomes: [approved(OTHER_REQ)] })), NOT_FOUND);
   });
 
   it('refuses a tampered envelope before anything else', () => {
@@ -271,5 +369,12 @@ describe('signed grants', () => {
     assert.deepStrictEqual(verifySignedGrant(tampered, { caseId: 'case-1', outcomes: [{ decision: 'approve', action_hash: hash }] }), {
       ok: false, error: 'envelope changed since approval; request it again'
     });
+  });
+
+  it('returns a refusal, never throws, for a malformed envelope or a failing hash step', () => {
+    const broken = { ...env, caps: { contacts: 3, attemptsPerContact: 2 } };
+    assert.deepStrictEqual(verifySignedGrant(broken, { caseId: 'case-1', outcomes: [] }), { ok: false, error: 'envelope changed since approval; request it again' });
+    const throwing = { envelopeAction: () => { throw new Error('non_canonical'); }, actionHash: () => 'x' };
+    assert.strictEqual(verifySignedGrant(env, { caseId: 'case-1', helpers: throwing }).ok, false);
   });
 });
