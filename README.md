@@ -398,9 +398,11 @@ configs that start the stdio MCP server in a pinned working directory.
 from them: the service, the admin-owned config dirs, the privileges, `doctor`,
 and a first runbook over stdio MCP.
 
-`doctor` also checks every runbook step's program: that it is an absolute
-path that exists and is not a `.cmd`/`.bat` file, and, on Linux and macOS,
-that each `sudo -n` step is allowed by sudoers (`sudo -n -l`, which lists and
+`doctor` also checks every runbook step's program: that it exists and is
+not a `.cmd`/`.bat` file; on Windows, that it is an absolute path (a bare
+name is looked up in the current directory first); on Linux and macOS, that
+a bare name is on `PATH` (the examples still use absolute paths), and that
+each `sudo -n` step is allowed by sudoers (`sudo -n -l`, which lists and
 never runs). Run it as the account that runs the runbooks.
 
 ## Supported Providers
