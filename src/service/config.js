@@ -9,13 +9,14 @@ const PROFILES = new Set(['agent', 'runbook']);
 // Chat channels are off by default: in stage 1 the service denies every
 // remote approval, and stage 3 brings the phone approver that makes channels
 // useful for unsafe work.
-const DEFAULT_FEATURES = { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false };
+const DEFAULT_FEATURES = { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false, desktopBridge: false };
 // Distinct from the Electron app's 18789/18790 *and* from mesh's documented
 // 18791 (src/mesh/mesh-transport.js), which the desktop app binds on 0.0.0.0
 // by default — so a service and a desktop app on one machine do not fight
 // over a port, and an unprivileged local user squatting the mesh port cannot
 // keep the service's gateway off the air.
-const DEFAULT_PORTS = { gateway: 18793, webhook: 18794 };
+// desktopBridge (fleet stage 7): the loopback listener the desktop app attaches to.
+const DEFAULT_PORTS = { gateway: 18793, webhook: 18794, desktopBridge: 18795 };
 const CONFIG_FILE = 'service.json';
 // Keys that decide whether a network listener exists and where it binds, and
 // which profile — and so whether the agent stack loads at all. These may only
@@ -32,7 +33,10 @@ function validatePorts(ports, file) {
     if (!Object.prototype.hasOwnProperty.call(DEFAULT_PORTS, name)) {
       throw new Error(`Invalid ${file}: ports.${name} is not a known port (expected ${Object.keys(DEFAULT_PORTS).join(', ')})`);
     }
-    if (!Number.isInteger(value) || value < 1 || value > 65535) {
+    // 0 (ephemeral) only for the desktop bridge, which tests bind anywhere;
+    // the desktop re-reads the bound port from desktop-bridge.json.
+    const min = name === 'desktopBridge' ? 0 : 1;
+    if (!Number.isInteger(value) || value < min || value > 65535) {
       throw new Error(`Invalid ${file}: ports.${name} must be an integer from 1 to 65535`);
     }
     out[name] = value;
@@ -149,6 +153,11 @@ function loadServiceConfig(dataDir, overrides = {}, {
   if (features.mesh) {
     log.warn('features.mesh is not supported in service mode yet; ignoring it and keeping mesh off');
     features.mesh = false;
+  }
+
+  // The desktop bridge needs the agent stack it proxies to.
+  if (features.desktopBridge && profile === 'runbook') {
+    throw new Error('desktopBridge needs profile: agent');
   }
 
   // Loud, per-feature, naming the file responsible: an operator reading the

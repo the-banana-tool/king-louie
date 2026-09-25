@@ -38,13 +38,17 @@ function assertEnabledListenersBound(core, features) {
 function loadProfile(profile) {
   if (profile === 'agent') {
     return {
-      async start({ dataDir, features, ports, workspace }) {
+      async start({ dataDir, features, ports, workspace, adminUid }) {
         const { createCore } = require('../core');
         const { CHAT_DATA_DEFAULTS } = require('../core/settings');
         const { buildServicePorts } = require('./ports');
         const servicePorts = buildServicePorts({ dataDir, chatDataDefaults: CHAT_DATA_DEFAULTS });
+        // Fleet stage 7: the desktop bridge's ui/host ports, when enabled.
+        const { createDesktopBridgeHost } = require('../desktop-bridge/service-wiring');
+        const desktopBridge = createDesktopBridgeHost({ dataDir, features, ports, adminUid });
         const core = createCore({
           ...servicePorts,
+          ...desktopBridge.coreDeps,
           features,
           ports,
           workingDirectory: workspace,
@@ -60,12 +64,22 @@ function loadProfile(profile) {
           // handle already non-null. Wait for it before judging.
           await core.whenListenersSettled();
           assertEnabledListenersBound(core, features);
+          await desktopBridge.start({ core, ports: servicePorts, approvals: null });
         } catch (err) {
           // Don't leave a half-started core (and its cron timers) behind.
+          await desktopBridge.stop().catch(() => {});
           await core.shutdown().catch(() => {});
           throw err;
         }
-        return { stop: () => core.shutdown(), masterKeySource: servicePorts.masterKeySource };
+        return {
+          // The bridge says bye and closes before the core goes down.
+          stop: async () => {
+            await desktopBridge.stop();
+            await core.shutdown();
+          },
+          masterKeySource: servicePorts.masterKeySource,
+          desktopBridge
+        };
       }
     };
   }
@@ -114,7 +128,8 @@ function ensureWorkspace(dataDir) {
   return workspace;
 }
 
-async function runService({ dataDir: requestedDataDir, profile: profileOverride, signal, stdout = process.stdout }) {
+// adminUid: tests only (who owns the admin config); never from argv or config.
+async function runService({ dataDir: requestedDataDir, profile: profileOverride, signal, stdout = process.stdout, adminUid }) {
   // Resolved once, here, because this is the only place that moves the
   // process: ensureWorkspace chdirs below, and a relative --data-dir would
   // then be re-resolved against the *new* cwd by everything built afterwards
@@ -145,10 +160,10 @@ async function runService({ dataDir: requestedDataDir, profile: profileOverride,
     let running;
     let profile;
     try {
-      const config = loadServiceConfig(dataDir, { profile: profileOverride });
+      const config = loadServiceConfig(dataDir, { profile: profileOverride }, adminUid === undefined ? {} : { adminUid });
       profile = config.profile;
       log.info('service starting', { profile, dataDir, workspace, pid: process.pid });
-      running = await loadProfile(profile).start({ dataDir, features: config.features, ports: config.ports, workspace });
+      running = await loadProfile(profile).start({ dataDir, features: config.features, ports: config.ports, workspace, adminUid });
     } catch (err) {
       // On Windows nothing reads the task's stderr, so the log file is the
       // only place a startup failure is visible.

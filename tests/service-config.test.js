@@ -29,8 +29,8 @@ describe('loadServiceConfig', () => {
   it('defaults to agent profile with listeners and chat channels off, on the service ports', () => {
     assert.deepStrictEqual(loadServiceConfig(tmp()), {
       profile: 'agent',
-      features: { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false },
-      ports: { gateway: 18793, webhook: 18794 }
+      features: { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false, desktopBridge: false },
+      ports: { gateway: 18793, webhook: 18794, desktopBridge: 18795 }
     });
   });
   it('reads the profile from the admin config and lets CLI overrides win', () => {
@@ -77,7 +77,7 @@ describe('loadServiceConfig', () => {
   it('lets the admin config override the ports', () => {
     const admin = tmp();
     writeAdmin(admin, { ports: { gateway: 28791 } });
-    assert.deepStrictEqual(loadServiceConfig(tmp(), {}, opts(admin)).ports, { gateway: 28791, webhook: DEFAULT_PORTS.webhook });
+    assert.deepStrictEqual(loadServiceConfig(tmp(), {}, opts(admin)).ports, { gateway: 28791, webhook: DEFAULT_PORTS.webhook, desktopBridge: DEFAULT_PORTS.desktopBridge });
   });
   it('rejects invalid ports', () => {
     for (const ports of [{ gateway: 0 }, { gateway: 70000 }, { webhook: '18792' }, { mesh: 1 }, [1]]) {
@@ -206,7 +206,7 @@ describe('loadServiceConfig: only an admin-owned file may enable a listener', ()
 
   it('defaults every feature off when there is no admin config at all', () => {
     assert.deepStrictEqual(loadServiceConfig(tmp(), {}, opts(path.join(tmp(), 'nope'))).features, {
-      gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false
+      gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false, desktopBridge: false
     });
   });
 });
