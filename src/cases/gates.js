@@ -59,7 +59,14 @@ function recommendationGate({ status, claims, facts }) {
   return { ok: failures.length === 0, failures };
 }
 
-function findDuplicates({ subject, attr, text = '', facts, otherCases = [] }) {
+const privateStmt = (title) => `(private fact in "${title}" — open that case to see it)`;
+
+// Exact: an active non-inferred fact on the same (subject, attr) in this
+// case. Similar: cross-case index hits of kind `fact` with the same key or
+// close wording. A redacted hit has no text, so it matches by key or by the
+// index's `coverage` (share of the query's tokens it holds), and its row
+// never carries the fact's words.
+function findDuplicates({ subject, attr, text = '', facts, crossCaseHits = [], otherCases = [] }) {
   const wanted = `${norm(subject)}|${norm(attr)}`;
   const words = tokens(text);
   const exact = [];
@@ -69,6 +76,23 @@ function findDuplicates({ subject, attr, text = '', facts, otherCases = [] }) {
     }
   }
   const similar = [];
+  for (const hit of crossCaseHits) {
+    if (!hit || hit.kind !== 'fact') continue;
+    const sameKey = key(hit) === wanted;
+    const close = hit.redacted
+      ? Number(hit.coverage) >= 0.5
+      : jaccard(words, tokens(hit.text)) >= 0.5;
+    if (!sameKey && !close) continue;
+    similar.push({
+      caseId: hit.caseId,
+      caseTitle: hit.title,
+      id: hit.id,
+      stmt: hit.redacted ? privateStmt(hit.title) : hit.text,
+      provenance: hit.provenance
+    });
+  }
+  // Stage-1 callers pass whole ledgers of other cases; removed once
+  // Ledger.unknown reads the cross-case index (cases stage 5, Task 5).
   for (const other of otherCases) {
     for (const f of other.facts.values()) {
       if (f.status !== 'active') continue;
@@ -81,3 +105,105 @@ function findDuplicates({ subject, attr, text = '', facts, otherCases = [] }) {
 }
 
 module.exports = { recommendationGate, findDuplicates };
+
+// ---- Cases stage 5: duplicate gates ----
+// docs/superpowers/specs/2026-09-23-cases-stage5-detours.md §3.2
+
+const { tokenSet } = require('./tokenize');
+
+// NFKC, lowercase, collapse whitespace, strip trailing ? ! and dots. Shared
+// by question text and case titles (identical normalization).
+function normQuestion(s) {
+  return String(s ?? '').normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim().replace(/[?!.\s]+$/, '');
+}
+
+// Exact: an open question in this case with the same normalized text.
+// Similar here: Jaccard >= 0.5, text shown. Elsewhere: open question hits
+// from other cases, by title, id and case status only.
+function findDuplicateQuestion({ text, openQuestions = [], crossCaseHits = [] }) {
+  const wanted = normQuestion(text);
+  const open = openQuestions.filter((q) => q && q.answer == null && !q.closed);
+  const exact = open.find((q) => normQuestion(q.text) === wanted) || null;
+  const words = tokens(text);
+  const similar = exact
+    ? []
+    : open
+      .filter((q) => jaccard(words, tokens(q.text)) >= 0.5)
+      .map((q) => ({ questionId: q.id, text: q.text }));
+  const elsewhere = [];
+  for (const hit of crossCaseHits) {
+    if (!hit || hit.kind !== 'question' || hit.attr !== 'open') continue;
+    if (Number(hit.coverage) < 0.5) continue;
+    if (elsewhere.some((e) => e.caseId === hit.caseId && e.questionId === hit.id)) continue;
+    elsewhere.push({ caseId: hit.caseId, caseTitle: hit.title, questionId: hit.id, status: hit.caseStatus });
+  }
+  return { exact, similar, elsewhere };
+}
+
+// Program §4.8, R36: non-terminal executor job states.
+const LIVE_JOB_STATES = Object.freeze(['submitting', 'submitted', 'running', 'waiting']);
+
+function normIntent(s) {
+  return String(s ?? '').normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+// SHA-256 hex of the JSON of { e, k, r (sorted), i } in that key order.
+function jobSignature(executorId, job = {}) {
+  const recipients = [...(Array.isArray(job?.recipients) ? job.recipients : [])].map(String).sort();
+  const body = JSON.stringify({ e: executorId, k: job?.kind || null, r: recipients, i: normIntent(job?.intent) });
+  return require('crypto').createHash('sha256').update(body).digest('hex');
+}
+
+// The live row this job would duplicate, or null.
+function findDuplicateJob({ executorId, job = {}, liveJobs = [] }) {
+  const signature = job.signature || jobSignature(executorId, job);
+  return (Array.isArray(liveJobs) ? liveJobs : []).find((r) => r
+    && r.executorId === executorId
+    && r.signature === signature
+    && LIVE_JOB_STATES.includes(r.state)) || null;
+}
+
+const OPEN_CASE_STATUSES = Object.freeze(['draft', 'active', 'needs-direction', 'paused']);
+
+// normTitle and normQuestion apply the same normalization; keep one function.
+const normTitle = normQuestion;
+
+// Exact: an open case with the same normalized title, or the same
+// non-empty objective. Similar: Jaccard >= threshold on the titles, or on
+// title + objective, whichever is higher.
+function findSimilarCases({ title, objective = '', candidates = [], threshold = 0.6 }) {
+  const t = normTitle(title);
+  const o = normTitle(objective);
+  const titleWords = tokenSet(title);
+  const allWords = tokenSet(`${title || ''} ${objective || ''}`);
+  const exact = [];
+  const similar = [];
+  for (const c of candidates) {
+    if (!c || !OPEN_CASE_STATUSES.includes(c.status)) continue;
+    const row = { caseId: c.caseId, title: c.title, status: c.status };
+    if (normTitle(c.title) === t || (o && normTitle(c.objective) === o)) {
+      exact.push({ ...row, match: 'exact' });
+      continue;
+    }
+    const score = Math.max(
+      jaccard(titleWords, tokenSet(c.title)),
+      jaccard(allWords, tokenSet(`${c.title || ''} ${c.objective || ''}`))
+    );
+    if (score >= threshold) similar.push({ ...row, match: 'similar', score: Math.round(score * 1000) / 1000 });
+  }
+  similar.sort((a, b) => b.score - a.score);
+  return { exact, similar };
+}
+
+Object.assign(module.exports, {
+  findDuplicateQuestion,
+  findDuplicateJob,
+  findSimilarCases,
+  jobSignature,
+  normQuestion,
+  normIntent,
+  tokens,
+  jaccard,
+  LIVE_JOB_STATES,
+  OPEN_CASE_STATUSES
+});
