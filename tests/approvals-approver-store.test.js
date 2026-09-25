@@ -38,8 +38,11 @@ function write(dir, record, name = `${record.device_id}.json`) {
 // The test process owns everything it creates, so it plays the administrator.
 // platform 'linux' selects the POSIX checks; on a Windows test machine
 // assertAdminOwned is a no-op, and the Windows probe has its own test below.
+// Windows owner reads are injected too (the real reader runs PowerShell):
+// by default both dirs are owned by Administrators, which trusts the set.
+const ADMIN_OWNED = () => ({ approvers: 'S-1-5-32-544', config: 'S-1-5-32-544' });
 function store(l, extra = {}) {
-  return new ApproverStore({ ...l, geteuid: () => OWN_UID, adminUid: OWN_UID, platform: 'linux', now: () => NOW, ...extra });
+  return new ApproverStore({ ...l, geteuid: () => OWN_UID, adminUid: OWN_UID, platform: 'linux', now: () => NOW, readOwners: ADMIN_OWNED, ...extra });
 }
 
 function admin(l, extra = {}) {
@@ -210,6 +213,112 @@ describe('ApproverStore: the Windows probe runs on every scan', () => {
       assert.equal(posix.isActive(phone.deviceId), true);
     }
     assert.equal(probes, 0);
+  });
+});
+
+// Task 23 re-review, Ruling A2: the owner of a Windows dir keeps WRITE_DAC,
+// so an unwritable approvers dir is still untrusted unless Administrators,
+// SYSTEM or the config dir's owner owns it.
+describe('ApproverStore: Windows owners', () => {
+  const USER = 'S-1-5-21-1000-2000-3000-1001';
+  const OTHER = 'S-1-5-21-1000-2000-3000-1002';
+  const locked = { ...fs, openSync: (file, ...rest) => {
+    if (path.basename(file).startsWith('.probe-')) throw Object.assign(new Error('denied'), { code: 'EPERM' });
+    return fs.openSync(file, ...rest);
+  } };
+  async function withOwners(owners, extra = {}) {
+    const l = layout();
+    const phone = createFakePhone();
+    write(l.dir, phone.approverRecord());
+    const calls = [];
+    const readOwners = (args) => {
+      calls.push(args);
+      if (typeof owners === 'function') return owners(args);
+      return owners;
+    };
+    const s = store(l, { platform: 'win32', fsImpl: locked, readOwners, ...extra });
+    const result = await s.ready();
+    return { l, s, phone, result, calls };
+  }
+
+  it("an unwritable approvers dir owned by someone other than the config dir's owner is untrusted", async () => {
+    const { s, phone, result, calls } = await withOwners({ approvers: OTHER, config: USER });
+    assert.equal(result.ok, false);
+    assert.match(result.problem, /is owned by S-1-5-21-1000-2000-3000-1002, which is neither Administrators, SYSTEM nor the owner of/);
+    assert.equal(s.isActive(phone.deviceId), false);
+    assert.deepEqual(calls[0], { dir: s.dir, configDir: path.dirname(s.dir) });
+  });
+
+  it("trusts approvers owned by the config dir's owner, by Administrators or by SYSTEM", async () => {
+    for (const owners of [
+      { approvers: USER, config: USER },
+      { approvers: 'S-1-5-32-544', config: USER },
+      { approvers: 'S-1-5-18', config: 'S-1-5-32-544' }
+    ]) {
+      const { s, phone, result } = await withOwners(owners);
+      assert.deepEqual(result, { ok: true }, JSON.stringify(owners));
+      assert.equal(s.isActive(phone.deviceId), true, JSON.stringify(owners));
+    }
+  });
+
+  it('a config dir owned by LOCAL SERVICE trusts nothing, whoever owns approvers', async () => {
+    const { s, phone, result } = await withOwners({ approvers: 'S-1-5-19', config: 'S-1-5-19' });
+    assert.match(result.problem, /is owned by the service account \(S-1-5-19\)/);
+    assert.equal(s.isActive(phone.deviceId), false);
+    const admin = await withOwners({ approvers: 'S-1-5-32-544', config: 'S-1-5-19' });
+    assert.equal(admin.result.ok, false);
+  });
+
+  it('owners that cannot be read, or are not SIDs, are untrusted', async () => {
+    const threw = await withOwners(() => { throw new Error('powershell failed'); });
+    assert.match(threw.result.problem, /could not read the owners .*powershell failed/);
+    for (const owners of [null, {}, { approvers: 'nobody', config: USER }, { approvers: USER, config: '' }]) {
+      const { result } = await withOwners(owners);
+      assert.match(result.problem, /could not read the owners/, JSON.stringify(owners));
+    }
+  });
+
+  it('re-reads owners only when the dir first appears or its ino/ChangeTime moves', async () => {
+    const l = layout();
+    fs.rmSync(l.dir, { recursive: true });
+    let bump = 0n;
+    const fsImpl = {
+      ...locked,
+      lstatSync: (p, opts) => {
+        const st = fs.lstatSync(p, opts);
+        if (p === l.dir && opts && opts.bigint) st.ctimeNs += bump;
+        return st;
+      }
+    };
+    let reads = 0;
+    const s = store(l, { platform: 'win32', fsImpl, readOwners: () => { reads += 1; return ADMIN_OWNED(); } });
+    assert.deepEqual(await s.ready(), { ok: true });
+    assert.equal(reads, 0, 'a missing dir needs no owner');
+    fs.mkdirSync(l.dir);
+    const phone = createFakePhone();
+    write(l.dir, phone.approverRecord());
+    s.refresh();
+    assert.equal(s.isActive(phone.deviceId), true);
+    assert.equal(reads, 1, 'read when the dir appears');
+    for (let i = 0; i < 3; i += 1) { s.refresh(); s.list(); }
+    assert.equal(reads, 1, 'not on every scan');
+    bump = 1n;
+    s.refresh();
+    s.list();
+    assert.equal(reads, 2, 'again once ChangeTime moves');
+  });
+
+  it('a junction standing in for approvers is refused', async () => {
+    const l = layout();
+    const elsewhere = path.join(path.dirname(path.dirname(l.dir)), 'elsewhere');
+    fs.mkdirSync(elsewhere);
+    write(elsewhere, createFakePhone().approverRecord());
+    fs.rmSync(l.dir, { recursive: true });
+    fs.symlinkSync(elsewhere, l.dir, process.platform === 'win32' ? 'junction' : 'dir');
+    const s = store(l, { platform: 'win32', fsImpl: locked });
+    const result = await s.ready();
+    assert.match(result.problem, /junction, symlink or not a directory/);
+    assert.equal(s.activeCount(), 0);
   });
 });
 

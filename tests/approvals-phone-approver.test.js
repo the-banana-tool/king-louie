@@ -453,7 +453,7 @@ describe('PhoneApprover availability', () => {
       closeSync: (fd) => { if (fd !== 42) fs.closeSync(fd); },
       unlinkSync: (file) => { if (!isProbe(file)) fs.unlinkSync(file); }
     };
-    const store = new ApproverStore({ dir, platform: 'win32', fsImpl });
+    const store = new ApproverStore({ dir, platform: 'win32', fsImpl, readOwners: () => ({ approvers: 'S-1-5-32-544', config: 'S-1-5-32-544' }) });
     await store.ready();
     const approver = new PhoneApprover({ identity, approverStore: store, link: fakeLink(), auditLedger: fakeLedger() });
     assert.match(approver.unavailableReason(), /writable by the account running the service/);

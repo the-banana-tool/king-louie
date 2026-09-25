@@ -79,11 +79,14 @@ async function stopChildren(children) {
 }
 
 // Both the service's approver store and mcp's trust the approver set only
-// while they cannot write it, and on Windows they re-check that on every
-// scan. The test user is also the "service account" here, so once the phone
-// is enrolled the test denies itself write access to approvers/ (a temp
-// dir), as the installer's ACL would. The returned function lifts the deny
-// again so the temp dir can be removed.
+// while they cannot write it (re-checked on every scan on Windows), and only
+// when approvers/ is owned by Administrators, SYSTEM or the config dir's
+// owner. The test user owns both temp dirs, so the owner check passes, and it
+// is also the "service account" here, so once the phone is enrolled the test
+// denies itself write access to approvers/, as the installer's ACL would.
+// (Being the owner, it could lift that deny again: that is why the owner
+// check exists, and why a real install leaves both dirs admin-owned.) The
+// returned function lifts the deny so the temp dir can be removed.
 function lockApproversDir(dir) {
   if (process.platform !== 'win32') return () => {};
   const who = process.env.USERDOMAIN ? `${process.env.USERDOMAIN}\\${os.userInfo().username}` : os.userInfo().username;
@@ -249,7 +252,7 @@ describe('phone approvals end to end', { skip: !CAN_RUN && 'needs root-owned adm
 
       unlock = lockApproversDir(path.join(nodeConfig, 'approvers'));
       if (process.platform === 'win32') {
-        await until(() => /approvers are trusted again|its approvers count/.test(service.output() + service.errors()),
+        await until(() => /is protected again; its approvers count/.test(service.output() + service.errors()),
           () => `the service to trust the locked approver set (${service.errors()})`, 15000);
       }
       // The same mcp process trusts the set on its next scan (the store
@@ -288,7 +291,8 @@ describe('phone approvals end to end', { skip: !CAN_RUN && 'needs root-owned adm
       if (mcp && mcp.child.exitCode === null) {
         const exited = new Promise((resolve) => mcp.child.once('exit', resolve));
         mcp.child.stdin.end();
-        await Promise.race([exited, sleep(5000)]);      }
+        await Promise.race([exited, sleep(5000)]);
+      }
       await stopChildren(children);
       // The deny must go before the temp dir can be removed. A failed unlock
       // is reported, and cleanup still runs (and says what it left behind).

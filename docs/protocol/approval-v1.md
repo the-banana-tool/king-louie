@@ -282,6 +282,11 @@ phone shows "sent to <node>" for `accepted: null`. It never shows it as
 approved, and the node never treats it as one; only `=== true` approves. The
 outcome shows up later in the request's status and in the node's history.
 
+`accepted: null` can also come with `delivered: false`: the service could not
+hand the response to that local requester (the write to its inbox failed, or
+the requester is gone). Nothing on the node saw the response, so the phone
+shows it as not delivered, never as sent or approved.
+
 ## 5. What the phone checks and shows
 
 - **Shape first.** The same shape check a node runs (`validateMessage` against
@@ -402,7 +407,7 @@ device.
 | `GET /v1/enroll/{code_id}` | code | → `{ state: 'waiting'\|'done'\|'refused'\|'expired', node }` |
 | `GET /v1/approvals?wait=0..25` | device | → `[{ envelope, expires_in_ms, status }]`; waits up to `wait` s for something new since this device's last call |
 | `GET /v1/approvals/{request_id}` | device | → `{ envelope, expires_in_ms, status }` / `404` |
-| `POST /v1/approvals/{request_id}/response` | device | response envelope → `202 { delivered: true, accepted, reason }` (`accepted`: `true`/`false` as the node judged it, or `null` when it was forwarded to a local requester and the verdict is not known to the relay, §4) / `503 node_offline` / `410 gone` |
+| `POST /v1/approvals/{request_id}/response` | device | response envelope → `202 { delivered, accepted, reason }` (`accepted`: `true`/`false` as the node judged it, or `null` when it was forwarded to a local requester and the verdict is not known to the relay; `delivered: false` with `accepted: null` when that hand-off failed, §4) / `503 node_offline` / `410 gone` |
 | `GET /v1/nodes` | device | → `[{ node_id, node_name, online }]` (no keys) |
 | `GET /v1/nodes/{node_id}/history?limit&before_seq` | device | → `kl.audit.slice` envelope |
 | `POST /v1/pairing-codes` | device | `{ node_name }` → `{ code, expires_at }` |

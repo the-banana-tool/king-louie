@@ -92,6 +92,75 @@ function checkApproverDir({ dir, platform = process.platform, geteuid = defaultG
   }
 }
 
+// Windows owners (Task 23 re-review, Ruling A2). A directory's owner always
+// keeps WRITE_DAC, so the write probe alone is not enough: an account that
+// owns approvers\ can plant a file, deny itself write access, pass the probe,
+// and give the access back later. So on Windows the approvers dir is trusted
+// only when its owner is Administrators, SYSTEM or whoever owns the config
+// dir above it, and the config dir itself is not owned by the service
+// account (LOCAL SERVICE, which the installer runs the service as).
+const WINDOWS_TRUSTED_OWNERS = new Set(['S-1-5-32-544', 'S-1-5-18']);
+const WINDOWS_SERVICE_ACCOUNTS = new Set(['S-1-5-19']);
+const SID_RE = /^S-1-(?:\d+-)*\d+$/;
+const OWNER_READ_TIMEOUT_MS = 15000;
+
+// Framework types only, no Get-Acl: the cmdlet lives in a module that fails
+// to autoload where PSModulePath points elsewhere (see the installer tests).
+// The paths travel in environment variables, never in the script text.
+const OWNER_SCRIPT = [
+  "$ErrorActionPreference = 'Stop'",
+  "$sections = [System.Security.AccessControl.AccessControlSections]::Owner",
+  'foreach ($p in @($env:KL_APPROVERS_DIR, $env:KL_CONFIG_DIR)) {',
+  '  $ds = New-Object -TypeName System.Security.AccessControl.DirectorySecurity -ArgumentList $p, $sections',
+  '  [Console]::Out.WriteLine($ds.GetOwner([System.Security.Principal.SecurityIdentifier]).Value)',
+  '}'
+].join('\n');
+
+// { approvers, config } owner SIDs, read through one bounded PowerShell call.
+function readWindowsOwners({ dir, configDir }) {
+  const { execFileSync } = require('child_process');
+  const { windowsPowerShellExe } = require('../platform/windows-paths');
+  let out;
+  try {
+    out = execFileSync(windowsPowerShellExe(), ['-NoProfile', '-NonInteractive', '-Command', OWNER_SCRIPT], {
+      env: { ...process.env, KL_APPROVERS_DIR: dir, KL_CONFIG_DIR: configDir },
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: OWNER_READ_TIMEOUT_MS,
+      windowsHide: true
+    });
+  } catch (err) {
+    // The first line PowerShell wrote to stderr, not the whole command line.
+    const first = String(err.stderr || '').split(/\r?\n/).map((l) => l.trim()).find(Boolean);
+    throw new Error(err.code === 'ETIMEDOUT' ? `timed out after ${OWNER_READ_TIMEOUT_MS} ms` : (first || err.code || 'powershell failed'));
+  }
+  const [approvers, config] = out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  return { approvers, config };
+}
+
+// null when the owners allow trusting `dir`, else the problem. Any failure
+// to read them is a problem: an owner nobody could check is not trusted.
+function checkWindowsOwners({ dir, configDir, readOwners = readWindowsOwners }) {
+  let owners;
+  try {
+    owners = readOwners({ dir, configDir });
+  } catch (err) {
+    return `${dir}: could not read the owners of the approver and config directories (${err.message}); no approver is trusted until this is fixed`;
+  }
+  const { approvers, config } = owners || {};
+  if (!SID_RE.test(String(approvers)) || !SID_RE.test(String(config))) {
+    return `${dir}: could not read the owners of the approver and config directories; no approver is trusted until this is fixed`;
+  }
+  if (WINDOWS_SERVICE_ACCOUNTS.has(config)) {
+    return `${configDir} is owned by the service account (${config}); no approver is trusted until an administrator takes ownership of it`;
+  }
+  if (!WINDOWS_TRUSTED_OWNERS.has(approvers) && approvers !== config) {
+    return `${dir} is owned by ${approvers}, which is neither Administrators, SYSTEM nor the owner of ${configDir} (${config}); `
+      + 'a directory\'s owner can always rewrite its ACL, so no approver is trusted until an administrator takes ownership of it';
+  }
+  return null;
+}
+
 function writeFileAtomic(file, text, mode = 0o600) {
   const tmp = `${file}.tmp-${crypto.randomBytes(4).toString('hex')}`;
   let fd;
@@ -111,7 +180,7 @@ function writeFileAtomic(file, text, mode = 0o600) {
 
 class ApproverStore {
   constructor({ dir, stagedDir, geteuid = defaultGeteuid, adminUid = 0, platform = process.platform, now = Date.now,
-    allowTestKeys = false, fsImpl = fs, serviceProbe = true } = {}) {
+    allowTestKeys = false, fsImpl = fs, serviceProbe = true, readOwners = readWindowsOwners } = {}) {
     if (!dir) throw new TypeError('ApproverStore needs a dir');
     this.dir = dir;
     this.stagedDir = stagedDir || null;
@@ -131,6 +200,12 @@ class ApproverStore {
     this._scannedAt = -Infinity;
     this._logged = new Set();
     this._readied = false;
+    // Windows owner check (Ruling A2): run again only when the approvers or
+    // config dir's identity or ChangeTime moves (an owner or ACL change moves
+    // NTFS ChangeTime), never on every scan.
+    this.readOwners = readOwners;
+    this._ownerKey = null;
+    this._ownerProblem = null;
   }
 
   // Startup probe. POSIX: the dir must be admin-owned and not writable by
@@ -138,9 +213,7 @@ class ApproverStore {
   // process can create a file in the dir, the ACL is wrong, and the set is
   // treated as empty until an administrator fixes it.
   async ready() {
-    this.problem = checkApproverDir({
-      dir: this.dir, platform: this.platform, geteuid: this.geteuid, adminUid: this.adminUid, fsImpl: this.fs, serviceProbe: this.serviceProbe
-    });
+    this.problem = this._checkTrust();
     this.untrusted = this.problem !== null;
     this._readied = true;
     if (this.problem) log.error(`approver set treated as empty: ${this.problem}`);
@@ -214,11 +287,43 @@ class ApproverStore {
     }
   }
 
-  // Re-runs the Windows write probe; logs only when the verdict changes.
-  _reprobe() {
+  // null when the dir may be trusted, else why not: the POSIX ownership
+  // check, or on Windows the write probe and then the owner check.
+  _checkTrust() {
     const problem = checkApproverDir({
       dir: this.dir, platform: this.platform, geteuid: this.geteuid, adminUid: this.adminUid, fsImpl: this.fs, serviceProbe: this.serviceProbe
     });
+    if (problem || this.platform !== 'win32' || !this.serviceProbe) return problem;
+    return this._checkOwners();
+  }
+
+  // The Windows owner verdict, cached on the approvers and config dirs'
+  // (ino, ChangeTime). A missing approvers dir is no approvers (and forgets
+  // the cache, so a dir that appears later is checked); a junction there is
+  // refused outright.
+  _checkOwners() {
+    const configDir = path.dirname(this.dir);
+    let key;
+    try {
+      const st = this.fs.lstatSync(this.dir, { bigint: true });
+      if (st.isSymbolicLink() || !st.isDirectory()) return `${this.dir} is a junction, symlink or not a directory; no approver is trusted`;
+      const cst = this.fs.lstatSync(configDir, { bigint: true });
+      key = `${st.ino}:${st.ctimeNs}|${cst.ino}:${cst.ctimeNs}`;
+    } catch (err) {
+      this._ownerKey = null;
+      if (err.code === 'ENOENT') return null;
+      return `${this.dir}: could not check its owner (${err.code || err.message}); no approver is trusted until this is fixed`;
+    }
+    if (key !== this._ownerKey) {
+      this._ownerProblem = checkWindowsOwners({ dir: this.dir, configDir, readOwners: this.readOwners });
+      this._ownerKey = key;
+    }
+    return this._ownerProblem;
+  }
+
+  // Re-runs the Windows write probe; logs only when the verdict changes.
+  _reprobe() {
+    const problem = this._checkTrust();
     if (problem !== this.problem) {
       if (problem) log.error(`approver set treated as empty: ${problem}`);
       else log.info(`approver directory ${this.dir} is protected again; its approvers count`);
@@ -396,4 +501,6 @@ class ApproverStore {
   }
 }
 
-module.exports = { ApproverStore, checkApproverRecord, checkApproverDir, writeFileAtomic, APPROVER_CONTROLS, FUTURE_SKEW_MS };
+module.exports = {
+  ApproverStore, checkApproverRecord, checkApproverDir, checkWindowsOwners, readWindowsOwners, writeFileAtomic, APPROVER_CONTROLS, FUTURE_SKEW_MS
+};
