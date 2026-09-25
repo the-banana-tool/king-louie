@@ -12,6 +12,9 @@ const clock = require('../clock');
 const jsonfile = require('../jsonfile');
 
 const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+// Executor ids (spec §3.1). The one copy: every executor module imports it
+// from here (M18).
+const EXECUTOR_ID_PATTERN = /^[a-z][a-z0-9-]{1,39}$/;
 const MINUTE_MS = 60 * 1000;
 // The widest UTC offsets are -12 h and +14 h, so a local day starts and ends
 // within 14 h of UTC midnight.
@@ -136,8 +139,19 @@ function roundUsd(n) {
   return Math.round((Number(n) || 0) * 10000) / 10000;
 }
 
+// The one money and cut helpers for owner-facing text (M18).
+function money(n) {
+  return `$${(Number(n) || 0).toFixed(2)}`;
+}
+
+function cut(text, max = 2000) {
+  const s = String(text);
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+}
+
 module.exports = {
   DAY_PATTERN,
+  EXECUTOR_ID_PATTERN,
   sha256hex,
   validTimeZone,
   hostTimeZone,
@@ -152,5 +166,7 @@ module.exports = {
   readJsonSafe,
   parseJsonObject,
   valueText,
-  roundUsd
+  roundUsd,
+  money,
+  cut
 };
