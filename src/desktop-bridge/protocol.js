@@ -140,6 +140,7 @@ const MESSAGES = Object.freeze({
   NO_PROVIDER: 'The service has no provider key yet — import or add one in Providers.',
   SECURE_STORAGE_UNAVAILABLE: "This system has no secure storage; the desktop can't hold a pairing key.",
   RULE_NOT_DESKTOP: 'This rule was set on the service and can only be removed there.',
+  CHANNELS_NOT_PROXIED: 'Channels (Telegram, Slack, Discord) are managed on the service, not from the desktop.',
   PATH_NOT_ACCESSIBLE: (account, target) => `The service runs as ${account || 'its own account'} and cannot read ${target}. Grant that account access or pick another folder.`,
   LOCKED_OUT: 'Too many failed handshakes from this desktop; try again in a minute.',
   BAD_SIGNATURE: "The service rejected this desktop's signature.",

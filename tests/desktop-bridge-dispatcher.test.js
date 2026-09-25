@@ -376,3 +376,57 @@ describe('bridge dispatcher', () => {
     assert.strictEqual(resultFor(a, 21).value.planId, 'p-1');
   });
 });
+
+// Final review I3: settings:runLlmCommand is proxied, but its channel
+// actions are not (spec §8) — the dispatcher refuses them before the core
+// sees them; and the core itself, with channels off, refuses a channel
+// sub-action before it saves anything.
+describe('runLlmCommand channel actions', () => {
+  it('refuses discord, telegram and slack actions from the desktop, however they are spelled', async () => {
+    const seen = [];
+    const spyCore = { ...core, context: { ...core.context, runLlmCommand: async (command) => { seen.push(command); return { ok: true, output: 'ran' }; } } };
+    const { dispatcher, use } = makeDispatcher({ coreOverride: spyCore });
+    const a = connection();
+    use(a);
+    const refused = [
+      '/llm telegram add 123456:ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+      '/llm slack add xapp-1 xoxb-2',
+      '/llm discord add token',
+      '/llm "Discord" add token',
+      '  /llm   TELEGRAM   remove',
+      '/llm slack status'
+    ];
+    let id = 100;
+    for (const command of refused) {
+      id += 1;
+      await dispatcher.handleFrame(a, { t: 'invoke', id, channel: 'settings:runLlmCommand', args: [{ command }] });
+      assert.deepStrictEqual(resultFor(a, id).value, {
+        ok: false, code: 'CHANNELS_NOT_PROXIED', error: 'Channels (Telegram, Slack, Discord) are managed on the service, not from the desktop.'
+      }, command);
+    }
+    assert.deepStrictEqual(seen, [], 'no channel action reached the core');
+    id += 1;
+    await dispatcher.handleFrame(a, { t: 'invoke', id, channel: 'settings:runLlmCommand', args: [{ command: '/llm help' }] });
+    assert.deepStrictEqual(resultFor(a, id).value, { ok: true, output: 'ran' });
+    assert.deepStrictEqual(seen, ['/llm help']);
+  });
+
+  it('with channels off, the core refuses a channel sub-action before saving any token or setting', async () => {
+    const off = { ok: false, error: 'Channels are off in this session.' };
+    const slackBefore = JSON.stringify((core.getSettings().channels || {}).slack || null);
+    assert.deepStrictEqual(await core.context.runLlmCommand('/llm telegram add 123456:ABCDEFGHIJKLMNOPQRSTUVWXYZ'), off);
+    assert.deepStrictEqual(await core.context.runLlmCommand('/llm telegram test'), off);
+    assert.deepStrictEqual(await core.context.runLlmCommand('/llm slack add xapp-1 xoxb-2'), off);
+    assert.deepStrictEqual(await core.context.runLlmCommand('/llm slack test'), off);
+    assert.deepStrictEqual(await core.context.runLlmCommand('/llm discord add token'), off);
+    assert.deepStrictEqual(await core.context.runLlmCommand('/llm discord remove'), off);
+    assert.strictEqual(JSON.stringify((core.getSettings().channels || {}).slack || null), slackBefore, 'slack settings untouched');
+    const telegram = await core.context.runLlmCommand('/llm telegram status');
+    assert.match(telegram.output, /- Token: missing/);
+    const slack = await core.context.runLlmCommand('/llm slack status');
+    assert.match(slack.output, /- App Token: missing/);
+    assert.match(slack.output, /- Bot Token: missing/);
+    const discord = await core.context.runLlmCommand('/llm discord status');
+    assert.match(discord.output, /- Token: missing/);
+  });
+});

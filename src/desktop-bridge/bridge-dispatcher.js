@@ -9,6 +9,7 @@ const { registerHandlers: defaultRegisterHandlers } = require('../ipc/register')
 const { listIpcChannels } = require('../ipc/channel-inventory');
 const { createElectronPrompter } = require('../platform/electron-prompter');
 const { markLocalDesktopEvent } = require('../core/origin');
+const { llmCommandAction, LLM_CHANNEL_ACTIONS } = require('../core/llm-command');
 const { servedChannels, isRendererEvent, PROMPT_EVENTS } = require('./allowlist');
 const { createDesktopScope } = require('./desktop-scope');
 const { checkPath: defaultCheckPath } = require('./check-path');
@@ -108,8 +109,20 @@ function createBridgeDispatcher({
     requestDirectoryAccess: (args) => inner.requestDirectoryAccess(args)
   };
 
+  // settings:runLlmCommand is proxied, but its channel actions are not
+  // (spec §8: channels are not proxied): refused here, before the core
+  // sees them, so the desktop can neither start a channel in the service
+  // nor store a channel token there.
+  const runLlmCommand = async (command) => {
+    if (LLM_CHANNEL_ACTIONS.includes(llmCommandAction(command))) {
+      return { ok: false, code: 'CHANNELS_NOT_PROXIED', error: MESSAGES.CHANNELS_NOT_PROXIED };
+    }
+    return context.runLlmCommand(command);
+  };
+
   const bridgeContext = {
     ...context,
+    runLlmCommand,
     getSettings: scope.getSettings,
     setSettings: scope.setSettings,
     addPermissionRule: scope.addPermissionRule,

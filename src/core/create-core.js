@@ -5,6 +5,7 @@ const ProviderFactory = require('../providers/provider-factory');
 const InferenceRouter = require('../providers/inference-router');
 const { initializeTools, toolRegistry } = require('../tools');
 const { registerSecretDataDir } = require('../tools/utils');
+const { tokenizeCommand } = require('./llm-command');
 const { adminCredentialPath } = require('../platform/paths');
 const ToolExecutor = require('../execution/tool-executor');
 const DenialTracker = require('../tools/denial-tracker');
@@ -1396,18 +1397,13 @@ function createCore(deps = {}) {
     return { ok: true, status };
   };
 
-  const tokenizeCommand = (input = '') => {
-    const regex = /"([^"\\]*(\\.[^"\\]*)*)"|'([^'\\]*(\\.[^'\\]*)*)'|`([^`\\]*(\\.[^`\\]*)*)`|(\S+)/g;
-    const tokens = [];
-    let match;
-
-    while ((match = regex.exec(input)) !== null) {
-      const token = match[1] ?? match[3] ?? match[5] ?? match[7] ?? '';
-      tokens.push(token.replace(/\\(["'`\\])/g, '$1'));
-    }
-
-    return tokens;
-  };
+  // Final review I3: with channels off, a channel sub-action other than
+  // status refuses before it saves a token, changes a setting or tests a
+  // connection — not after (startX alone would refuse only once the token
+  // was already written).
+  const channelsOff = (subAction) => (subAction !== 'status' && !features.channels
+    ? { ok: false, error: 'Channels are off in this session.' }
+    : null);
 
   const runLlmCommand = async (command = '') => {
     const trimmed = String(command || '').trim();
@@ -1454,6 +1450,8 @@ function createCore(deps = {}) {
 
     if (action === 'discord') {
       const subAction = (rest[0] || 'status').toLowerCase();
+      const off = channelsOff(subAction);
+      if (off) return off;
       const token = rest.slice(1).join(' ').trim();
 
       if (subAction === 'status') {
@@ -1515,6 +1513,8 @@ function createCore(deps = {}) {
 
     if (action === 'telegram') {
       const subAction = (rest[0] || 'status').toLowerCase();
+      const off = channelsOff(subAction);
+      if (off) return off;
       const token = rest.slice(1).join(' ').trim();
 
       if (subAction === 'status') {
@@ -1605,6 +1605,8 @@ function createCore(deps = {}) {
 
     if (action === 'slack') {
       const subAction = (rest[0] || 'status').toLowerCase();
+      const off = channelsOff(subAction);
+      if (off) return off;
 
       if (subAction === 'status') {
         const status = getApiStatus()?.slack || null;
