@@ -109,6 +109,7 @@ describe('cross-case leak paths through detours', () => {
 
   it('incoming row copies only the shown text', async () => {
     const { rt, router, door, phone, p } = await routed();
+    await rt.answerQuestion(door.id, p.questionId, { channel: 'in-app', optionId: 'attach-1' });
     await router.resolve(door.id, p.detour.id, { optionId: 'attach-1', by: 'in-app' });
     const [incoming] = new DetourLog(phone.dir).incoming();
     assert.deepStrictEqual(Object.keys(incoming), ['type', 'id', 'at', 'fromCaseId', 'fromTitle', 'summary', 'reason', 'blocks']);

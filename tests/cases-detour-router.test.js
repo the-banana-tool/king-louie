@@ -166,6 +166,7 @@ describe('DetourRouter.resolve', () => {
     const draft = await rt.createCase({ title: 'Phone agent status polling rewrite', objective: 'Rewrite the status polling of the phone agent' });
     const p = await router.propose(door.id, { summary: 'Rewrite the phone agent status polling', reason: 'Different project' });
     const option = p.detour.options.find((o) => o.label.includes('Phone agent status polling rewrite'));
+    await rt.answerQuestion(door.id, p.questionId, { channel: 'in-app', optionId: option.optionId });
     await router.resolve(door.id, p.detour.id, { optionId: option.optionId, by: 'in-app' });
     assert.strictEqual(rt.wakeups(draft.id).list().some((x) => x.kind === 'detours:incoming'), false);
     assert.strictEqual(new DetourLog(draft.dir).incoming().length, 1);
@@ -178,6 +179,7 @@ describe('DetourRouter.resolve', () => {
     assert.strictEqual(q.urgency, 'high');
     assert.match(q.text, /^Blocker: Detour from "Rear door quotes"/);
     assert.deepStrictEqual(rt.getCase(door.id).related.map((x) => [x.id, x.relation]), [['pending:d-0001', 'blocked-by']]);
+    await rt.answerQuestion(door.id, p.questionId, { channel: 'in-app', optionId: 'attach-1' });
     await router.resolve(door.id, 'd-0001', { optionId: 'attach-1', by: 'in-app' });
     assert.deepStrictEqual(rt.getCase(door.id).related.map((x) => [x.id, x.relation]), [[phone.id, 'blocked-by']]);
     assert.deepStrictEqual(rt.getCase(phone.id).related.map((x) => [x.id, x.relation]), [[door.id, 'blocks']]);
@@ -188,6 +190,7 @@ describe('DetourRouter.resolve', () => {
   it('new: creates a draft with the prefill and links spawned / related', async () => {
     const { rt, router, door } = await doorAndPhone();
     const p = await router.propose(door.id, { summary: 'Book a piano tuner for the living room', reason: 'Unrelated errand' });
+    await rt.answerQuestion(door.id, p.questionId, { channel: 'in-app', optionId: 'new' });
     const r = await router.resolve(door.id, p.detour.id, { optionId: 'new', by: 'in-app', title: 'Piano tuner' });
     assert.strictEqual(r.ok, true);
     const created = rt.getCase(r.linkedCaseId);
@@ -206,6 +209,7 @@ describe('DetourRouter.resolve', () => {
     const { rt, router, door } = await doorAndPhone();
     const p = await router.propose(door.id, { summary: 'Book a piano tuner for the living room', reason: 'Unrelated errand' });
     const tuner = await rt.createCase({ title: 'Book a piano tuner' });
+    await rt.answerQuestion(door.id, p.questionId, { channel: 'in-app', optionId: 'new' });
     const r = await router.resolve(door.id, p.detour.id, { optionId: 'new', by: 'in-app' });
     assert.strictEqual(r.ok, false);
     assert.match(r.error, /A similar case exists: "Book a piano tuner" \(draft\)/);
@@ -223,6 +227,7 @@ describe('DetourRouter.resolve', () => {
   it('decline drops a pending blocker and blocks the same proposal for 30 days', async () => {
     const { rt, router, door, clock } = await doorAndPhone();
     const p = await router.propose(door.id, { ...PHONE_FIX, blocks: true });
+    await rt.answerQuestion(door.id, p.questionId, { channel: 'in-app', optionId: 'decline' });
     const r = await router.resolve(door.id, p.detour.id, { optionId: 'decline', by: 'in-app' });
     assert.deepStrictEqual([r.ok, r.linkedCaseId, r.detour.status], [true, null, 'declined']);
     assert.deepStrictEqual(rt.getCase(door.id).related, []);
@@ -236,6 +241,7 @@ describe('DetourRouter.resolve', () => {
     const { rt, router, door, phone } = await doorAndPhone();
     const p = await router.propose(door.id, PHONE_FIX);
     rt.setStatus(phone.id, 'done', { kind: 'owner', by: 'owner' });
+    await rt.answerQuestion(door.id, p.questionId, { channel: 'in-app', optionId: 'attach-1' });
     const r = await router.resolve(door.id, p.detour.id, { optionId: 'attach-1', by: 'in-app' });
     assert.deepStrictEqual([r.ok, r.error], [false, 'Case "Phone agent maintenance" is done; pick another option.']);
     const retryQ = rt.questions(door.id).get(r.retry.questionId);
@@ -248,6 +254,7 @@ describe('DetourRouter.resolve', () => {
     const p = await router.propose(door.id, PHONE_FIX);
     // Another live process holds the target's turn lock.
     fs.writeFileSync(path.join(phone.dir, '.kl', 'lock'), JSON.stringify({ turnId: 'turn-9', pid: process.ppid, at: new Date().toISOString() }));
+    await rt.answerQuestion(door.id, p.questionId, { channel: 'in-app', optionId: 'attach-1' });
     const r = await router.resolve(door.id, p.detour.id, { optionId: 'attach-1', by: 'in-app' });
     assert.deepStrictEqual(r, { ok: false, error: 'Case "Phone agent maintenance" is busy with another turn. Try again when it finishes.' });
     assert.deepStrictEqual([rt.getCase(door.id).related, rt.getCase(phone.id).related], [[], []]);
@@ -322,6 +329,7 @@ describe('DetourRouter.reconcile, held proposals and views', () => {
   it('list gives titles and statuses only, and marks vanished cases', async () => {
     const { rt, router, door, phone } = await doorAndPhone();
     const p = await router.propose(door.id, PHONE_FIX);
+    await rt.answerQuestion(door.id, p.questionId, { channel: 'in-app', optionId: 'attach-1' });
     await router.resolve(door.id, p.detour.id, { optionId: 'attach-1', by: 'in-app' });
     const gone = await rt.createCase({ title: 'Old errand' });
     rt.addRelation(door.id, { id: gone.id, relation: 'related' });
@@ -332,5 +340,143 @@ describe('DetourRouter.reconcile, held proposals and views', () => {
       { caseId: phone.id, title: 'Phone agent maintenance', status: 'active', relation: 'related', detour: 'd-0001' },
       { caseId: gone.id, title: null, status: null, relation: 'related', gone: true }
     ]);
+  });
+});
+
+describe('DetourRouter: serialised per case, bound to the owner answer, never throwing', () => {
+  const NEW_WORK = { summary: 'Book a piano tuner for the living room', reason: 'Unrelated errand' };
+  const detourJournal = (dir) => fs.readdirSync(path.join(dir, 'journal'))
+    .filter((n) => /-detour\.md$/.test(n))
+    .map((n) => fs.readFileSync(path.join(dir, 'journal', n), 'utf8'))
+    .join('\n');
+  const count = (text, needle) => text.split(needle).length - 1;
+
+  it('resolve new racing reconcile creates exactly one case', async () => {
+    const { rt, router, door } = await doorAndPhone();
+    const p = await router.propose(door.id, NEW_WORK);
+    await rt.answerQuestion(door.id, p.questionId, { channel: 'in-app', optionId: 'new' });
+    const before = rt.listCases().length;
+    const [r] = await Promise.all([router.resolve(door.id, p.detour.id, { optionId: 'new', by: 'in-app' }), router.reconcile(door.id)]);
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(rt.listCases().length, before + 1);
+    assert.strictEqual(new DetourLog(door.dir).rows().filter((x) => x.type === 'resolution').length, 1);
+  });
+
+  it('two resolves of the same answer create exactly one case', async () => {
+    const { rt, router, door } = await doorAndPhone();
+    const p = await router.propose(door.id, NEW_WORK);
+    await rt.answerQuestion(door.id, p.questionId, { channel: 'in-app', optionId: 'new' });
+    const before = rt.listCases().length;
+    const [a, b] = await Promise.all([
+      router.resolve(door.id, p.detour.id, { optionId: 'new', by: 'in-app' }),
+      router.resolve(door.id, p.detour.id, { optionId: 'new', by: 'in-app' })
+    ]);
+    assert.strictEqual(rt.listCases().length, before + 1);
+    assert.deepStrictEqual([a.ok, b.ok, b.existing, b.linkedCaseId], [true, true, true, a.linkedCaseId]);
+  });
+
+  it('attach racing reconcile writes one incoming row, one journal entry and one wake-up', async () => {
+    const { rt, router, door, phone } = await doorAndPhone();
+    const p = await router.propose(door.id, PHONE_FIX);
+    await rt.answerQuestion(door.id, p.questionId, { channel: 'in-app', optionId: 'attach-1' });
+    await Promise.all([router.resolve(door.id, p.detour.id, { optionId: 'attach-1', by: 'in-app' }), router.reconcile(door.id)]);
+    assert.strictEqual(new DetourLog(phone.dir).rows().filter((x) => x.type === 'incoming').length, 1);
+    assert.strictEqual(count(detourJournal(phone.dir), '# Incoming detour d-0001'), 1);
+    assert.strictEqual(rt.wakeups(phone.id).list().filter((x) => x.kind === 'detours:incoming').length, 1);
+  });
+
+  it('refuses a resolve the owner has not answered, and one that differs from the answer', async () => {
+    const { rt, router, door } = await doorAndPhone();
+    const p = await router.propose(door.id, NEW_WORK);
+    const unanswered = await router.resolve(door.id, p.detour.id, { optionId: 'new', by: 'in-app' });
+    assert.strictEqual(unanswered.ok, false);
+    assert.match(unanswered.error, new RegExp(`has not answered routing question ${p.questionId}`));
+    await rt.answerQuestion(door.id, p.questionId, { channel: 'in-app', optionId: 'decline' });
+    const other = await router.resolve(door.id, p.detour.id, { optionId: 'new', by: 'in-app' });
+    assert.strictEqual(other.ok, false);
+    assert.match(other.error, /chose "decline"/);
+    assert.strictEqual(new DetourLog(door.dir).rows().some((x) => x.type === 'resolution'), false);
+    assert.strictEqual((await router.resolve(door.id, p.detour.id, { optionId: 'decline', by: 'in-app' })).ok, true);
+  });
+
+  it('a closed routing question can only be declined', async () => {
+    const { rt, router, door } = await doorAndPhone();
+    const p = await router.propose(door.id, NEW_WORK);
+    rt.questions(door.id).close(p.questionId, { reason: 'stale', by: 'panel' });
+    assert.strictEqual((await router.resolve(door.id, p.detour.id, { optionId: 'new', by: 'in-app' })).ok, false);
+    assert.strictEqual((await router.resolve(door.id, p.detour.id, { optionId: 'decline', by: 'in-app' })).ok, true);
+  });
+
+  it('refuses to resolve in a paused source case', async () => {
+    const { rt, router, door } = await doorAndPhone();
+    const p = await router.propose(door.id, NEW_WORK);
+    await rt.answerQuestion(door.id, p.questionId, { channel: 'in-app', optionId: 'new' });
+    rt.setStatus(door.id, 'paused', { kind: 'owner', by: 'owner' });
+    const r = await router.resolve(door.id, p.detour.id, { optionId: 'new', by: 'in-app' });
+    assert.deepStrictEqual(r, { ok: false, error: 'Case is paused (owner). Only reading is available.' });
+  });
+
+  it('an unknown case id is an error result from every public method', async () => {
+    const { router } = await doorAndPhone();
+    for (const r of [
+      await router.propose('no-such-case', PHONE_FIX),
+      await router.resolve('no-such-case', 'd-0001', { optionId: 'decline' })
+    ]) {
+      assert.strictEqual(r.ok, false);
+      assert.ok(r.error);
+    }
+    const rec = await router.reconcile('no-such-case');
+    assert.deepStrictEqual(rec.applied, []);
+    assert.ok(rec.error);
+    assert.deepStrictEqual(router.releaseHeld('no-such-case'), []);
+    assert.deepStrictEqual(router.orientationLines('no-such-case'), []);
+    const view = router.list('no-such-case');
+    assert.deepStrictEqual([view.detours, view.related], [[], []]);
+    assert.ok(view.error);
+  });
+
+  it('a git failure while creating the case is an error result and a failed row', async () => {
+    const { rt, router, door } = await doorAndPhone();
+    const p = await router.propose(door.id, NEW_WORK);
+    await rt.answerQuestion(door.id, p.questionId, { channel: 'in-app', optionId: 'new' });
+    const create = rt.store.create.bind(rt.store);
+    rt.store.create = async () => { throw new Error('git init failed (simulated)'); };
+    try {
+      const r = await router.resolve(door.id, p.detour.id, { optionId: 'new', by: 'in-app' });
+      assert.strictEqual(r.ok, false);
+      assert.match(r.error, /git init failed \(simulated\)/);
+    } finally {
+      rt.store.create = create;
+    }
+    const d = new DetourLog(door.dir).detours().get(p.detour.id);
+    assert.deepStrictEqual([d.status, d.last.targetCaseId], ['failed', null]);
+    assert.deepStrictEqual(await router.reconcile(door.id), { applied: [] }, 'a failed detour is not retried on every render');
+  });
+
+  it('a failure after the new case exists records it, and the next resolve reuses it', async () => {
+    const { rt, router, door } = await doorAndPhone();
+    const p = await router.propose(door.id, NEW_WORK);
+    await rt.answerQuestion(door.id, p.questionId, { channel: 'in-app', optionId: 'new' });
+    const before = rt.listCases().length;
+    const addRelation = rt.addRelation.bind(rt);
+    rt.addRelation = (id, entry) => {
+      if (entry.relation === 'spawned') throw new Error('case.yaml write failed (simulated)');
+      return addRelation(id, entry);
+    };
+    let first;
+    try {
+      first = await router.resolve(door.id, p.detour.id, { optionId: 'new', by: 'in-app' });
+    } finally {
+      rt.addRelation = addRelation;
+    }
+    assert.strictEqual(first.ok, false);
+    const d = new DetourLog(door.dir).detours().get(p.detour.id);
+    assert.strictEqual(d.status, 'failed');
+    assert.ok(d.last.targetCaseId && rt.store.get(d.last.targetCaseId), 'the orphan case is recorded');
+    assert.strictEqual(rt.listCases().length, before + 1);
+    const second = await router.resolve(door.id, p.detour.id, { optionId: 'new', by: 'in-app' });
+    assert.deepStrictEqual([second.ok, second.linkedCaseId], [true, d.last.targetCaseId]);
+    assert.strictEqual(rt.listCases().length, before + 1, 'no second case');
+    assert.deepStrictEqual(rt.getCase(door.id).related.map((x) => [x.id, x.relation]), [[d.last.targetCaseId, 'spawned']]);
   });
 });

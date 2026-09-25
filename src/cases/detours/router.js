@@ -39,6 +39,32 @@ class DetourRouter {
     this.getSettings = typeof getSettings === 'function' ? getSettings : () => runtime.settings();
     this.log = log || createLogger('cases/detours/router');
     this.now = typeof now === 'function' ? now : () => runtime.now();
+    // caseId → tail promise of the router work queued for that case.
+    this._inflight = new Map();
+  }
+
+  // systemAction runs inline when this process already holds the case lock,
+  // so it does not serialise two router calls in one process (a panel
+  // reconcile racing an IPC resolve would create two cases). propose, resolve
+  // and reconcile queue here per case. Never call a public router method from
+  // inside a queued function for the same case: it would wait on itself.
+  _serial(caseId, fn) {
+    const prev = this._inflight.get(caseId) || Promise.resolve();
+    const run = prev.then(() => fn());
+    const tail = run.catch(() => {});
+    this._inflight.set(caseId, tail);
+    tail.then(() => {
+      if (this._inflight.get(caseId) === tail) this._inflight.delete(caseId);
+    });
+    return run;
+  }
+
+  // Public methods return error results; they never throw into the caller.
+  _failure(what, err, meta = null) {
+    if (err && err.code === 'CASE_BUSY' && meta) return busyError(meta.title);
+    const message = err && err.message ? err.message : String(err);
+    this.log.warn(`Detour ${what}${meta ? ` in case ${meta.slug}` : ''} failed: ${message}`);
+    return { ok: false, error: message };
   }
 
   get index() {
@@ -51,16 +77,16 @@ class DetourRouter {
     const rt = this.runtime;
     const text = oneLine(summary, 300);
     if (!text) return { ok: false, error: 'A detour needs a summary of the off-objective work.' };
-    const meta = rt.getCase(caseId);
-    const refused = rt.assertWritable(meta.id, 'Detour.propose');
-    if (refused) return refused;
+    let meta = null;
     try {
-      return await rt.systemAction(meta.id, 'detour propose', () => this._propose(meta.id, {
+      meta = rt.getCase(caseId);
+      const refused = rt.assertWritable(meta.id, 'Detour.propose');
+      if (refused) return refused;
+      return await this._serial(meta.id, () => rt.systemAction(meta.id, 'detour propose', () => this._propose(meta.id, {
         summary: text, source, serves: serves ? oneLine(serves, 200) : null, blocks: blocks === true, reason: oneLine(reason, 200), turn, extraAttach
-      }));
+      })));
     } catch (err) {
-      if (err && err.code === 'CASE_BUSY') return busyError(meta.title);
-      throw err;
+      return this._failure('propose', err, meta);
     }
   }
 
@@ -275,17 +301,23 @@ class DetourRouter {
   }
 
   // Held proposals get their question once the daily allowance allows.
+  // Returns the released ids; on an error, the ones released before it.
   releaseHeld(caseId) {
     const rt = this.runtime;
-    const meta = rt.getCase(caseId);
-    const log = new DetourLog(meta.dir);
     const released = [];
-    for (const d of log.detours().values()) {
-      if (d.status !== 'held') continue;
-      const created = rt.createQuestion(meta.id, this._question(meta, d.id, d.proposal), { charge: true });
-      if (created.held) break;
-      log.append({ type: 'released', id: d.id, at: this.now().toISOString(), questionId: created.id });
-      released.push(d.id);
+    let meta = null;
+    try {
+      meta = rt.getCase(caseId);
+      const log = new DetourLog(meta.dir);
+      for (const d of log.detours().values()) {
+        if (d.status !== 'held') continue;
+        const created = rt.createQuestion(meta.id, this._question(meta, d.id, d.proposal), { charge: true });
+        if (created.held) break;
+        log.append({ type: 'released', id: d.id, at: this.now().toISOString(), questionId: created.id });
+        released.push(d.id);
+      }
+    } catch (err) {
+      this._failure('release', err, meta);
     }
     if (released.length) rt._notify('case:changed', { caseId: meta.id, what: 'detours' });
     return released;
@@ -299,13 +331,39 @@ class DetourRouter {
   // own (spec §3.4), and the Detour tool's schema must not expose it.
   async resolve(caseId, detourId, { optionId, by = 'in-app', title = null, objective = null, force = false } = {}) {
     const rt = this.runtime;
-    const meta = rt.getCase(caseId);
+    let meta = null;
     try {
-      return await rt.systemAction(meta.id, `detour ${detourId}: ${optionId}`, () => this._resolve(meta.id, detourId, { optionId, by, title, objective, force }));
+      meta = rt.getCase(caseId);
+      const refused = rt.assertWritable(meta.id, 'Detour.resolve');
+      if (refused) return refused;
+      return await this._serial(meta.id, () => rt.systemAction(meta.id, `detour ${detourId}: ${optionId}`,
+        () => this._resolve(meta.id, detourId, { optionId, by, title, objective, force })));
     } catch (err) {
-      if (err && err.code === 'CASE_BUSY') return busyError(meta.title);
-      throw err;
+      return this._failure('resolve', err, meta);
     }
+  }
+
+  // A resolve must carry the owner's decision (spec §3.4): the option the
+  // owner picked, decline for a closed question, or any option once the
+  // answer was in words (awaiting-mapping) or an earlier attempt failed.
+  // Task 9: when the Detour tool maps a questionId to a detour, it must check
+  // that the questionId equals the detour's questionId before calling resolve.
+  _answerRefusal(meta, d, optionId) {
+    if (d.status === 'awaiting-mapping' || d.status === 'failed') return null;
+    if (d.status === 'held' || !d.questionId) {
+      return { ok: false, error: `${d.id} is held: its routing question has not gone to the owner yet.` };
+    }
+    const q = this.runtime.questions(meta.id).get(d.questionId);
+    if (q && q.closed) {
+      return optionId === 'decline' ? null : { ok: false, error: `Routing question ${d.questionId} was closed, so ${d.id} can only be declined.` };
+    }
+    if (q && q.answer && q.answer.optionId) {
+      return q.answer.optionId === optionId ? null : { ok: false, error: `The owner chose "${q.answer.optionId}" for ${d.id} (${d.questionId}), not "${optionId}".` };
+    }
+    if (q && q.answer) {
+      return { ok: false, error: `The owner answered routing question ${d.questionId} in words; ${d.id} can be resolved once that answer is picked up.` };
+    }
+    return { ok: false, error: `The owner has not answered routing question ${d.questionId} for ${d.id} yet. Wait for the answer; do not pick an option for the owner.` };
   }
 
   async _resolve(caseId, detourId, { optionId, by, title, objective, force }) {
@@ -317,6 +375,8 @@ class DetourRouter {
     if (d.last && FINAL_STATUSES.includes(d.last.status)) {
       return { ok: true, detour: this._view(meta, d), linkedCaseId: d.last.targetCaseId || null, existing: true };
     }
+    const refusal = this._answerRefusal(meta, d, optionId);
+    if (refusal) return refusal;
     const p = d.proposal;
     // An answer in words that the model mapped: both cases journal the words.
     const words = d.status === 'awaiting-mapping' && d.last?.text ? `\nOwner's words (mapped by the model): "${oneLine(d.last.text, 500)}"` : '';
@@ -340,6 +400,25 @@ class DetourRouter {
       return { ok: false, error, retry: again };
     };
 
+    // A case created before a later step failed; recorded on the failed row.
+    let createdId = null;
+    try {
+      return await this._apply(meta, d, { optionId, title, objective, force, words, at, finish, retry, onCreated: (id) => { createdId = id; } });
+    } catch (err) {
+      if (err && err.code === 'CASE_BUSY') throw err;
+      const error = `Resolving ${detourId} failed: ${err && err.message ? err.message : String(err)}`;
+      this.log.warn(`Case ${meta.slug}: ${error}`);
+      const current = log.detours().get(detourId);
+      if (!current.last || !FINAL_STATUSES.includes(current.last.status)) resolution('failed', { error, targetCaseId: createdId });
+      return { ok: false, error };
+    }
+  }
+
+  // The option's writes. Throws on failure; _resolve records the failed row.
+  async _apply(meta, d, { optionId, title, objective, force, words, at, finish, retry, onCreated }) {
+    const rt = this.runtime;
+    const detourId = d.id;
+    const p = d.proposal;
     if (optionId === 'decline') return finish('declined', null);
 
     if (/^attach-\d+$/.test(String(optionId))) {
@@ -373,18 +452,22 @@ class DetourRouter {
 
     if (optionId === 'new') {
       if (!p.newCase) return { ok: false, error: `Option "new" is not one of ${detourId}'s options.` };
-      let created;
-      try {
-        created = await rt.createCase({
-          title: title && String(title).trim() ? String(title).trim() : p.newCase.title,
-          type: p.newCase.type,
-          objective: objective && String(objective).trim() ? String(objective).trim() : p.newCase.objective,
-          force: force === true
-        });
-      } catch (err) {
-        if (err && err.code === 'SIMILAR_CASES') return retry(err.message, err.similar.map((s) => s.caseId));
-        throw err;
+      // An earlier attempt created the case and then failed: finish that one.
+      let created = d.status === 'failed' && d.last?.targetCaseId ? rt.store.get(d.last.targetCaseId) : null;
+      if (!created) {
+        try {
+          created = await rt.createCase({
+            title: title && String(title).trim() ? String(title).trim() : p.newCase.title,
+            type: p.newCase.type,
+            objective: objective && String(objective).trim() ? String(objective).trim() : p.newCase.objective,
+            force: force === true
+          });
+        } catch (err) {
+          if (err && err.code === 'SIMILAR_CASES') return retry(err.message, err.similar.map((s) => s.caseId));
+          throw err;
+        }
       }
+      onCreated(created.id);
       await rt.systemAction(created.id, `detour ${detourId} from ${meta.slug}`, async () => {
         rt.brief(created.id).update('successCriteria', p.newCase.successCriteria, { provenance: 'model' });
         rt.brief(created.id).writeBody(p.newCase.body);
@@ -408,42 +491,47 @@ class DetourRouter {
   // The case panel calls this on every render, so it first checks without
   // the case lock and takes the lock (and runs git) only when there is work.
   async reconcile(caseId) {
-    const rt = this.runtime;
-    const meta = rt.getCase(caseId);
-    if (!this._hasAnsweredProposal(meta)) return { applied: [] };
+    let meta = null;
     try {
-      return await rt.systemAction(meta.id, 'detour reconcile', async () => {
-        const applied = [];
-        const log = new DetourLog(meta.dir);
-        const questions = rt.questions(meta.id);
-        for (const d of log.detours().values()) {
-          if (d.status !== 'proposed' || !d.questionId) continue;
-          const q = questions.get(d.questionId);
-          if (!q) continue;
-          if (q.closed) {
-            const r = await this._resolve(meta.id, d.id, { optionId: 'decline', by: q.closed.by });
-            if (r.ok) applied.push(d.id);
-            continue;
-          }
-          if (!q.answer) continue;
-          if (q.answer.optionId) {
-            const r = await this._resolve(meta.id, d.id, { optionId: q.answer.optionId, by: q.answer.channel });
-            if (r.ok || r.retry) applied.push(d.id);
-          } else {
-            log.append({
-              type: 'resolution', id: d.id, at: this.now().toISOString(), optionId: null, by: q.answer.channel,
-              status: 'awaiting-mapping', targetCaseId: null, error: null, text: oneLine(q.answer.text, 500)
-            });
-            applied.push(d.id);
-          }
-        }
-        if (applied.length) rt._notify('case:changed', { caseId: meta.id, what: 'detours' });
-        return { applied };
-      });
+      meta = this.runtime.getCase(caseId);
+      return await this._serial(meta.id, () => this._reconcile(meta));
     } catch (err) {
       if (err && err.code === 'CASE_BUSY') return { applied: [], busy: true };
-      throw err;
+      return { applied: [], error: this._failure('reconcile', err, meta).error };
     }
+  }
+
+  async _reconcile(meta) {
+    const rt = this.runtime;
+    if (!this._hasAnsweredProposal(meta)) return { applied: [] };
+    return rt.systemAction(meta.id, 'detour reconcile', async () => {
+      const applied = [];
+      const log = new DetourLog(meta.dir);
+      const questions = rt.questions(meta.id);
+      for (const d of log.detours().values()) {
+        if (d.status !== 'proposed' || !d.questionId) continue;
+        const q = questions.get(d.questionId);
+        if (!q) continue;
+        if (q.closed) {
+          await this._resolve(meta.id, d.id, { optionId: 'decline', by: q.closed.by });
+          if (log.detours().get(d.id).status !== 'proposed') applied.push(d.id);
+          continue;
+        }
+        if (!q.answer) continue;
+        if (q.answer.optionId) {
+          await this._resolve(meta.id, d.id, { optionId: q.answer.optionId, by: q.answer.channel });
+          if (log.detours().get(d.id).status !== 'proposed') applied.push(d.id);
+        } else {
+          log.append({
+            type: 'resolution', id: d.id, at: this.now().toISOString(), optionId: null, by: q.answer.channel,
+            status: 'awaiting-mapping', targetCaseId: null, error: null, text: oneLine(q.answer.text, 500)
+          });
+          applied.push(d.id);
+        }
+      }
+      if (applied.length) rt._notify('case:changed', { caseId: meta.id, what: 'detours' });
+      return { applied };
+    });
   }
 
   // Lock-free read: a proposed detour whose routing question is answered or closed.
@@ -480,6 +568,14 @@ class DetourRouter {
   }
 
   list(caseId) {
+    try {
+      return this._list(caseId);
+    } catch (err) {
+      return { detours: [], related: [], error: this._failure('list', err).error };
+    }
+  }
+
+  _list(caseId) {
     const rt = this.runtime;
     const meta = rt.getCase(caseId);
     const detours = [...new DetourLog(meta.dir).detours().values()].map((d) => this._view(meta, d));
@@ -501,6 +597,15 @@ class DetourRouter {
 
   // Orientation lines: open proposals, answers awaiting mapping, incoming detours.
   orientationLines(caseId) {
+    try {
+      return this._orientationLines(caseId);
+    } catch (err) {
+      this._failure('orientation', err);
+      return [];
+    }
+  }
+
+  _orientationLines(caseId) {
     const meta = this.runtime.getCase(caseId);
     const log = new DetourLog(meta.dir);
     const rows = log.rows();
