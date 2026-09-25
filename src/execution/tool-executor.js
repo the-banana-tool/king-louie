@@ -4,6 +4,7 @@ const { getRuntimeEnvironment } = require('./runtime-environment');
 const { evaluateRules, describeRule } = require('../tools/permission-rules');
 const path = require('path');
 const { isProtectedCasePath, CASE_BLOCKED_TOOL_NAMES, CASE_BLOCKED_TOOL_ERROR } = require('../cases/chat-integration');
+const { markLocalRequester } = require('../core/origin');
 
 // Tools that write a file named by file_path (MultiEdit: per edit). In case
 // mode, facts.jsonl and .kl/ are written only through the case tools.
@@ -26,6 +27,45 @@ function extractErrorCode(error) {
   if (msg.includes('rate limit') || msg.includes('429')) return 'RATE_LIMIT';
   if (msg.includes('overloaded') || msg.includes('529')) return 'OVERLOADED';
   return 'TOOL_ERROR';
+}
+
+const DEFAULT_UNAVAILABLE_REFUSAL = 'Phone approval unavailable: no enrolled device or no relay link on this node. Nothing ran.';
+
+// The one place a requester's answer becomes "run" or a refusal. Requesters
+// return true | false | 'timeout' | 'unavailable' (program §3) and only
+// `true` runs; a truthy string never does. `penalize` says whether the
+// denial tracker should count it (only a person's plain "no").
+function mapApprovalResult(result, metadata = {}, { timeoutMs = 0 } = {}) {
+  if (result === true) return { approved: true, penalize: false, refusal: null };
+  if (result === false) {
+    if (metadata.signal && metadata.signal.aborted) {
+      return { approved: false, penalize: false, refusal: { error: 'Approval withdrawn: the call was cancelled.', deniedBy: 'withdrawn' } };
+    }
+    return { approved: false, penalize: true, refusal: { error: 'User denied permission', deniedBy: 'user' } };
+  }
+  if (result === 'timeout') {
+    // Inattention, not denial: a distinct error so the agent can recover or
+    // explain instead of treating it as a hard "no".
+    return {
+      approved: false,
+      penalize: false,
+      refusal: {
+        error: `Approval timed out after ${Math.round(timeoutMs / 1000)}s — no user response. Try again when someone is watching, or ask the user to pre-approve this tool.`,
+        deniedBy: 'timeout'
+      }
+    };
+  }
+  if (result === 'unavailable') {
+    const r = metadata.refusal;
+    return {
+      approved: false,
+      penalize: false,
+      refusal: r && typeof r.error === 'string'
+        ? { error: r.error, deniedBy: r.deniedBy || 'unavailable' }
+        : { error: DEFAULT_UNAVAILABLE_REFUSAL, deniedBy: 'unavailable' }
+    };
+  }
+  return { approved: false, penalize: false, refusal: { error: 'Approval failed: unexpected requester result.', deniedBy: 'requester' } };
 }
 
 class ToolExecutor extends EventEmitter {
@@ -93,6 +133,15 @@ class ToolExecutor extends EventEmitter {
     // per-call. 0 disables the timeout entirely.
     this.approvalTimeoutMs =
       typeof options.approvalTimeoutMs === 'number' ? options.approvalTimeoutMs : 5 * 60 * 1000;
+
+    // Node policy tiers (fleet parent §5.3), wired by the phone approval mode:
+    // (toolName, params, { cwd }) → { tier, reason } | null. `denied` refuses,
+    // `unsafe` forces the approval gate even past an `allow` rule.
+    this.classifyCall = typeof options.classifyCall === 'function' ? options.classifyCall : null;
+    // A run that started at the local desktop: the approval requester handed
+    // to tools (and so to child agents) is marked local, so children keep the
+    // on-screen dialog instead of going to the phone (program §4.21).
+    this.localOrigin = options.localOrigin === true;
   }
 
   get permissionRules() {
@@ -179,14 +228,19 @@ class ToolExecutor extends EventEmitter {
       }
 
       if (action === 'confirm') {
-        const approved = await this.requestApproval(toolName, effectiveParameters, {
-          reason: preHookResult?.message || 'Hook policy requires explicit confirmation.'
-        });
+        const hookMetadata = {
+          reason: preHookResult?.message || 'Hook policy requires explicit confirmation.',
+          signal: options.signal || null,
+          workingDirectory: options.workingDirectory || this.workingDirectory
+        };
+        const approved = await this.requestApproval(toolName, effectiveParameters, hookMetadata);
+        const mapped = mapApprovalResult(approved, hookMetadata, { timeoutMs: this.approvalTimeoutMs });
 
-        if (!approved) {
+        if (!mapped.approved) {
           const denied = {
             success: false,
-            error: 'User denied permission',
+            error: mapped.refusal.error,
+            deniedBy: mapped.refusal.deniedBy,
             blockedByHook: true,
             hookResults: preHookResult?.results || []
           };
@@ -256,6 +310,28 @@ class ToolExecutor extends EventEmitter {
       // 'ask' falls through to the regular approval flow below.
     }
 
+    // Node policy tier, after the permission rules and before the gate.
+    let tierUnsafe = false;
+    if (this.classifyCall) {
+      const decision = this.classifyCall(toolName, effectiveParameters, {
+        cwd: options.workingDirectory || this.workingDirectory
+      }) || null;
+      if (decision) {
+        this.emit('tierDecision', {
+          toolName,
+          parameters: effectiveParameters,
+          tier: decision.tier,
+          reason: decision.reason || null
+        });
+        if (decision.tier === 'denied') {
+          const denied = { success: false, error: 'Denied by node policy.', deniedBy: 'policy' };
+          this.emit('postExecute', { toolName, parameters: effectiveParameters, result: denied });
+          return denied;
+        }
+        tierUnsafe = decision.tier === 'unsafe';
+      }
+    }
+
     const ruleSaysAsk = ruleMatch.matched && ruleMatch.action === 'ask';
     // What this tool would face with no rule written for it at all.
     const toolWouldGate = tool.requiresApproval && this.requireApproval;
@@ -267,8 +343,10 @@ class ToolExecutor extends EventEmitter {
     // restrictive than no rule, which is not a security property, just a bug.
     const allowRuleDemoted = ruleMatch.matched && ruleMatch.action === 'allow'
       && this.denyAutoApproval && toolWouldGate;
-    const ruleSaysAllow = ruleMatch.matched && ruleMatch.action === 'allow' && !allowRuleDemoted;
-    const needsApprovalGate = ruleSaysAsk || allowRuleDemoted
+    // An `unsafe` tier cancels an `allow` rule: `allow Bash(git *)` must not
+    // skip the gate for `always_confirm Bash(git push*)`.
+    const ruleSaysAllow = ruleMatch.matched && ruleMatch.action === 'allow' && !allowRuleDemoted && !tierUnsafe;
+    const needsApprovalGate = tierUnsafe || ruleSaysAsk || allowRuleDemoted
       || (!ruleMatch.matched && toolWouldGate);
 
     if (ruleSaysAllow) {
@@ -286,11 +364,12 @@ class ToolExecutor extends EventEmitter {
       // above evaluateRules has always claimed and the code did not do. Agent
       // mode's hard-coded list used to win here, leaving the whole `ask` tier
       // inert for Bash, Edit, Write and Git.
-      const autoApproved = this.denyAutoApproval || ruleSaysAsk
+      const autoApproved = this.denyAutoApproval || ruleSaysAsk || tierUnsafe
         ? false
         : await this.shouldAutoApprove(toolName, effectiveParameters);
       const agentAutoApproved = !this.denyAutoApproval
         && !ruleSaysAsk
+        && !tierUnsafe
         && Array.isArray(options.autoApproveTools)
         && options.autoApproveTools.includes(toolName);
 
@@ -318,24 +397,19 @@ class ToolExecutor extends EventEmitter {
           }
         }
 
-        const approved = await this.requestApproval(toolName, effectiveParameters, {
-          ruleHint: ruleSaysAsk || allowRuleDemoted ? describeRule(ruleMatch.rule) : null
-        });
-        if (approved === 'timeout') {
-          // Inattention, not denial — don't penalize via denialTracker, and
-          // surface a distinct error so the agent can recover or explain
-          // instead of treating it as a hard "no".
-          const timedOut = {
-            success: false,
-            error: `Approval timed out after ${Math.round(this.approvalTimeoutMs / 1000)}s — no user response. Try again when someone is watching, or ask the user to pre-approve this tool.`,
-            deniedBy: 'timeout'
-          };
-          this.emit('postExecute', { toolName, parameters: effectiveParameters, result: timedOut });
-          return timedOut;
-        }
-        if (!approved) {
-          if (this.denialTracker) this.denialTracker.recordDenial(toolName, effectiveParameters);
-          const denied = { success: false, error: 'User denied permission', deniedBy: 'user' };
+        const gateMetadata = {
+          ruleHint: ruleSaysAsk || allowRuleDemoted ? describeRule(ruleMatch.rule) : null,
+          signal: options.signal || null,
+          workingDirectory: options.workingDirectory || this.workingDirectory
+        };
+        const approved = await this.requestApproval(toolName, effectiveParameters, gateMetadata);
+        // Only `true` runs. A timeout, a withdrawal, an unavailable phone or
+        // anything unexpected is not a user's "no", so only a plain `false`
+        // counts against the denial tracker.
+        const mapped = mapApprovalResult(approved, gateMetadata, { timeoutMs: this.approvalTimeoutMs });
+        if (!mapped.approved) {
+          if (mapped.penalize && this.denialTracker) this.denialTracker.recordDenial(toolName, effectiveParameters);
+          const denied = { success: false, error: mapped.refusal.error, deniedBy: mapped.refusal.deniedBy };
           this.emit('postExecute', { toolName, parameters: effectiveParameters, result: denied });
           return denied;
         }
@@ -399,8 +473,7 @@ class ToolExecutor extends EventEmitter {
         // Expose this executor's approval channel so meta-tools (BackgroundTask,
         // SpawnAgent, workflow runners) can route their child agents' approval
         // prompts back to the originating chat UI instead of silently auto-denying.
-        approvalRequester: (toolName, parameters, metadata) =>
-          this.requestApproval(toolName, parameters, metadata)
+        approvalRequester: this._rethreadedRequester()
       });
 
       if (this.hookExecutor && typeof this.hookExecutor.run === 'function') {
@@ -436,6 +509,14 @@ class ToolExecutor extends EventEmitter {
     }
   }
 
+  // The approval channel handed to tools (BackgroundTask, SpawnAgent,
+  // workflow runners) so their children ask the same place this executor
+  // asks. For a local-desktop run it is marked local (program §4.21).
+  _rethreadedRequester() {
+    const requester = (toolName, parameters, metadata) => this.requestApproval(toolName, parameters, metadata);
+    return this.localOrigin ? markLocalRequester(requester) : requester;
+  }
+
   async requestApproval(toolName, parameters, metadata = {}) {
     const inner = this.approvalRequester
       ? this.approvalRequester(toolName, parameters, metadata)
@@ -463,3 +544,4 @@ class ToolExecutor extends EventEmitter {
 }
 
 module.exports = ToolExecutor;
+module.exports.mapApprovalResult = mapApprovalResult;
