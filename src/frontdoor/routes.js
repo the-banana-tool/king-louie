@@ -33,7 +33,7 @@ function registerPhoneRoutes(relay) {
 
   const activeNodes = (deviceId) => devices.nodesForDevice(deviceId).filter((n) => n.state === 'active').map((n) => n.node_id);
   // Relay-wide powers (pairing codes, invites, enrolling or revoking
-  // devices, the device list) belong to a device that approves somewhere.
+  // devices, the device and node lists) belong to a device that approves somewhere.
   // One revoked or rejected everywhere (a stolen phone) keeps none of them.
   const requireActive = (ctx) => {
     const nodes = activeNodes(ctx.deviceId);
@@ -155,9 +155,14 @@ function registerPhoneRoutes(relay) {
     }
   });
 
+  // The node list is a relay-wide view too: a device that approves nowhere
+  // (revoked everywhere) no longer learns every node id and name.
   phoneApi.registerRoute('GET', '/v1/nodes', {
     auth: 'device',
-    handler: async () => ({ body: nodeHub.nodes().map(({ node_id, node_name, online }) => ({ node_id, node_name, online })) })
+    handler: async (req, ctx) => {
+      requireActive(ctx);
+      return { body: nodeHub.nodes().map(({ node_id, node_name, online }) => ({ node_id, node_name, online })) };
+    }
   });
 
   phoneApi.registerRoute('GET', '/v1/nodes/{node_id}/history', {

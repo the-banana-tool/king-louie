@@ -282,10 +282,12 @@ phone shows "sent to <node>" for `accepted: null`. It never shows it as
 approved, and the node never treats it as one; only `=== true` approves. The
 outcome shows up later in the request's status and in the node's history.
 
-`accepted: null` can also come with `delivered: false`: the service could not
-hand the response to that local requester (the write to its inbox failed, or
-the requester is gone). Nothing on the node saw the response, so the phone
-shows it as not delivered, never as sent or approved.
+`accepted: null` can also come with `delivered: false`: that local
+requester's inbox is gone or unusable (the requester has exited, or its inbox
+is no longer a plain directory), so the service had nowhere to hand the
+response. Nothing on the node saw it, and the phone shows "not delivered",
+never "sent" or approved. (A failed write into an inbox that does exist is an
+error, not a 202: the phone sees the request fail and can send again.)
 
 ## 5. What the phone checks and shows
 
@@ -419,7 +421,7 @@ device.
 | `GET /v1/approvals?wait=0..25` | device | → `[{ envelope, expires_in_ms, status }]`; waits up to `wait` s for something new since this device's last call |
 | `GET /v1/approvals/{request_id}` | device | → `{ envelope, expires_in_ms, status }` / `404` |
 | `POST /v1/approvals/{request_id}/response` | device | response envelope → `202 { delivered, accepted, reason }` (`accepted`: `true`/`false` as the node judged it, or `null` when it was forwarded to a local requester and the verdict is not known to the relay; `delivered: false` with `accepted: null` when that hand-off failed, §4) / `503 node_offline` / `410 gone` |
-| `GET /v1/nodes` | device | → `[{ node_id, node_name, online }]` (no keys) |
+| `GET /v1/nodes` | device | → `[{ node_id, node_name, online }]` (no keys) / `403 forbidden` when the device approves on no node |
 | `GET /v1/nodes/{node_id}/history?limit&before_seq` | device | → `kl.audit.slice` envelope |
 | `POST /v1/pairing-codes` | device | `{ node_name }` → `{ code, expires_at }` |
 | `POST /v1/devices/invites` | device | → `{ invite_id, expires_at }` |

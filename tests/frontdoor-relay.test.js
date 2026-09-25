@@ -600,6 +600,10 @@ describe('relay trust rules', () => {
       assert.equal((await call(phone, 'GET', `/v1/devices/invites/${crypto.randomBytes(16).toString('base64url')}`)).status, 403);
       assert.equal((await call(phone, 'POST', '/v1/devices/revoke', phone.revoke(other.deviceId))).status, 403);
       assert.equal((await call(phone, 'GET', '/v1/devices')).status, 403);
+      // Nor does it keep the list of every node behind the relay.
+      const nodes = await call(phone, 'GET', '/v1/nodes');
+      assert.equal(nodes.status, 403);
+      assert.equal(nodes.body.error, 'forbidden');
       assert.equal((await call(phone, 'POST', '/v1/devices/enroll', phone.enroll({ device: createFakePhone().device() }))).status, 403);
     } finally {
       await a.call('device.state', { device_id: phone.deviceId, state: 'active' });
