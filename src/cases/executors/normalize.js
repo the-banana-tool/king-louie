@@ -283,6 +283,7 @@ module.exports = {
   normalizeRecipient,
   recipientChannel,
   valueMatchers,
+  foldForScan,
   matchSpans,
   isRecipient,
   valueKey
