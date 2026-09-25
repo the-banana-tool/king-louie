@@ -382,6 +382,37 @@ describe('DesktopImporter', () => {
     it('refuses a ".git" that is a file (no sub-path), the gitfile trick', () => {
       assert.throws(() => isSkippedCaseFile('.git'), /".git" file/);
     });
+
+    // Fix round 3, C1: NTFS answers to more than the literal string ".git".
+    it('treats the NTFS 8.3 short name (GIT~1, GIT~2, ...) and a trailing-dot/space spelling as ".git" itself', () => {
+      assert.strictEqual(isSkippedCaseFile('GIT~1/config'), true);
+      assert.strictEqual(isSkippedCaseFile('git~1/config'), true);
+      assert.strictEqual(isSkippedCaseFile('GIT~2/config'), true);
+      assert.strictEqual(isSkippedCaseFile('.git./config'), true);
+      assert.strictEqual(isSkippedCaseFile('.git /config'), true);
+      // The allow-list still applies once recognized as ".git" — HEAD
+      // through the alias lands exactly like HEAD through the real name.
+      assert.strictEqual(isSkippedCaseFile('GIT~1/HEAD'), false);
+      // A nested occurrence of any of these is refused exactly like a
+      // nested literal ".git" is.
+      assert.throws(() => isSkippedCaseFile('inner/GIT~1/config'), /\.git segment/);
+    });
+
+    // Fix round 3, item 2: objects/info/alternates (and http-alternates)
+    // point git at another object store entirely — a UNC path leaks the
+    // service's NTLM credentials to whoever controls that share, and a
+    // relative path reads another case's objects into this one.
+    it('skips objects/info/** entirely, even though objects/** is otherwise allowed', () => {
+      assert.strictEqual(isSkippedCaseFile('.git/objects/info/alternates'), true);
+      assert.strictEqual(isSkippedCaseFile('.git/objects/info/http-alternates'), true);
+      assert.strictEqual(isSkippedCaseFile('.git/objects/info/nested/whatever'), true);
+      // Ordinary loose and packed objects are unaffected.
+      assert.strictEqual(isSkippedCaseFile('.git/objects/ab/cdef0123'), false);
+      assert.strictEqual(isSkippedCaseFile('.git/objects/pack/pack-abc.pack'), false);
+      // .git/info/exclude (no "objects" in the path) is still allowed —
+      // only objects/info/** is excluded, not every "info" directory.
+      assert.strictEqual(isSkippedCaseFile('.git/info/exclude'), false);
+    });
   });
 
   // Fix round 2, C1: the reviewer's probe combined a ".git" gitfile
@@ -508,6 +539,130 @@ describe('DesktopImporter', () => {
 
     const again = await importer.plan({ installId: inventory.installId, inventory });
     assert.strictEqual(actionOf(again, 'case', 'lakeside-lot'), 'new');
+  });
+
+  // Fix round 3, C1: the re-review's probe showed the segment checks
+  // compared text against ".git" literally, but NTFS also answers to the
+  // 8.3 short name it auto-assigns a directory (usually "GIT~1") — once a
+  // landed ".git/HEAD" has created the real directory, a batch entry for
+  // "GIT~1/config" resolved to the very same place, and the probe's filter
+  // ran after initRepo and commitAll. Discovers the *actual* short name
+  // NTFS assigned on this host (never assumes "GIT~1" is exactly right)
+  // and sends a batch entry through it.
+  it('rejects the real NTFS 8.3 short-name alias for .git, discovered on this host, so a file sent through it never lands', async (t) => {
+    const { dataDir, importer } = await service();
+    const files = [{ relPath: '.git/HEAD', b64: Buffer.from('ref: refs/heads/main\n').toString('base64'), mode: 0o644 }];
+    const inventory = {
+      installId: 'install-c1-83', sourceVersion: '26.9.0', chats: [], settingsKeys: [], userProfile: false,
+      permissionRules: [], alwaysApprove: [], providerTokens: [], searchKeys: [], imageKeys: [], vault: [],
+      anthropicOAuth: false, memory: [], cron: [],
+      cases: [caseInventoryEntry('lakeside-lot', files)],
+      customCasesRoot: null, allowedDirectories: [], excluded: [], secrets: 'included'
+    };
+    const plan = await importer.plan({ installId: inventory.installId, inventory });
+    await importer.apply({ planId: plan.planId, batch: files.map((f) => ({ category: 'case', key: 'lakeside-lot', value: { ...f, offset: 0 } })) });
+
+    const stagingCaseDir = path.join(dataDir, 'cases', `.import-${plan.planId}`, 'lakeside-lot');
+    const realGitDir = (() => { try { return fs.realpathSync.native(path.join(stagingCaseDir, '.git')); } catch { return null; } })();
+    let alias = null;
+    if (realGitDir) {
+      for (let n = 1; n <= 4 && !alias; n++) {
+        const candidate = path.join(stagingCaseDir, `GIT~${n}`);
+        try { if (fs.realpathSync.native(candidate) === realGitDir) alias = `GIT~${n}`; } catch { /* not this one */ }
+      }
+    }
+    if (!alias) {
+      t.skip('8.3 short names are disabled on this volume (see fsutil 8dot3name query), so no short-name alias exists to test against');
+      return;
+    }
+
+    const { results } = await importer.apply({
+      planId: plan.planId,
+      batch: [{
+        category: 'case', key: 'lakeside-lot',
+        value: { relPath: `${alias}/config`, b64: Buffer.from('[filter "evil"]\n\tclean = "exit 1"\n').toString('base64'), mode: 0o644, offset: 0 }
+      }]
+    });
+    assert.strictEqual(results[0].ok, true, JSON.stringify(results)); // accepted, but skipped — never written
+    assert.strictEqual(fs.existsSync(path.join(stagingCaseDir, '.git', 'config')), false, 'nothing landed under the real .git directory through its short-name alias');
+
+    const report = await importer.finish({ planId: plan.planId });
+    assert.deepStrictEqual(report.failures, []);
+    const config = fs.readFileSync(path.join(dataDir, 'cases', 'lakeside-lot', '.git', 'config'), 'utf8');
+    assert.ok(!/evil/i.test(config), "the config initRepo wrote afterward was never touched by the alias 'write'");
+  });
+
+  // Fix round 3, C1: an NTFS alternate-data-stream reference
+  // (".git::$INDEX_ALLOCATION") reaches the very same directory ".git"
+  // does, through its metadata stream rather than its short name. Refused
+  // on every platform (the ':' check is a plain string test, not an
+  // NTFS-specific probe), so this test needs no platform skip.
+  it("refuses a path segment containing ':' (the NTFS alternate-data-stream route to .git), on every platform", async () => {
+    const { importer } = await service();
+    const inventory = {
+      installId: 'install-c1-ads', sourceVersion: '26.9.0', chats: [], settingsKeys: [], userProfile: false,
+      permissionRules: [], alwaysApprove: [], providerTokens: [], searchKeys: [], imageKeys: [], vault: [],
+      anthropicOAuth: false, memory: [], cron: [],
+      cases: [{ dir: 'lakeside-lot', files: 1, bytes: 1 }],
+      customCasesRoot: null, allowedDirectories: [], excluded: [], secrets: 'included'
+    };
+    const plan = await importer.plan({ installId: inventory.installId, inventory });
+    const { results } = await importer.apply({
+      planId: plan.planId,
+      batch: [{ category: 'case', key: 'lakeside-lot', value: { relPath: '.git::$INDEX_ALLOCATION/config', b64: 'eA==', mode: 0o644, offset: 0 } }]
+    });
+    assert.strictEqual(results[0].ok, false, JSON.stringify(results));
+    assert.match(results[0].error, /':'/);
+  });
+
+  // Fix round 3, C1: a trailing dot (or space) is silently stripped by
+  // NTFS/FAT when resolving a path, so ".git./config" and ".git/config"
+  // name the same file there. This is a plain string test too — no
+  // platform skip needed.
+  it('refuses ".git./config" (a trailing-dot alias NTFS/FAT resolve to .git), never landing', async () => {
+    const { importer } = await service();
+    const inventory = {
+      installId: 'install-c1-trailingdot', sourceVersion: '26.9.0', chats: [], settingsKeys: [], userProfile: false,
+      permissionRules: [], alwaysApprove: [], providerTokens: [], searchKeys: [], imageKeys: [], vault: [],
+      anthropicOAuth: false, memory: [], cron: [],
+      cases: [{ dir: 'lakeside-lot', files: 1, bytes: 1 }],
+      customCasesRoot: null, allowedDirectories: [], excluded: [], secrets: 'included'
+    };
+    const plan = await importer.plan({ installId: inventory.installId, inventory });
+    const { results } = await importer.apply({
+      planId: plan.planId,
+      batch: [{ category: 'case', key: 'lakeside-lot', value: { relPath: '.git./config', b64: Buffer.from('[filter "evil"]\n').toString('base64'), mode: 0o644, offset: 0 } }]
+    });
+    assert.strictEqual(results[0].ok, false, JSON.stringify(results));
+  });
+
+  // Fix round 3, item 2: objects/info/alternates is skipped entirely, sent
+  // through the normal import protocol, even though objects/** is
+  // otherwise allowed to land.
+  it('skips objects/info/alternates sent through the import protocol, even though objects/** otherwise lands', async () => {
+    const { dataDir, importer } = await service();
+    const files = [
+      { relPath: '.git/HEAD', b64: Buffer.from('ref: refs/heads/main\n').toString('base64'), mode: 0o644 },
+      { relPath: '.git/objects/info/alternates', b64: Buffer.from('/some/other/case/.git/objects\n').toString('base64'), mode: 0o644 },
+      { relPath: '.git/objects/ab/cdef0123456789', b64: Buffer.from('not a real object, just bytes\n').toString('base64'), mode: 0o644 }
+    ];
+    const inventory = {
+      installId: 'install-m-alternates', sourceVersion: '26.9.0', chats: [], settingsKeys: [], userProfile: false,
+      permissionRules: [], alwaysApprove: [], providerTokens: [], searchKeys: [], imageKeys: [], vault: [],
+      anthropicOAuth: false, memory: [], cron: [],
+      cases: [caseInventoryEntry('lakeside-lot', files)],
+      customCasesRoot: null, allowedDirectories: [], excluded: [], secrets: 'included'
+    };
+    const plan = await importer.plan({ installId: inventory.installId, inventory });
+    const batch = files.map((f) => ({ category: 'case', key: 'lakeside-lot', value: { ...f, offset: 0 } }));
+    const applied = await importer.apply({ planId: plan.planId, batch });
+    assert.ok(applied.results.every((r) => r.ok), JSON.stringify(applied.results));
+    const report = await importer.finish({ planId: plan.planId });
+    assert.deepStrictEqual(report.failures, []);
+    assert.ok(!report.attention.some((a) => a.category === 'case'), JSON.stringify(report.attention));
+    const caseDir = path.join(dataDir, 'cases', 'lakeside-lot');
+    assert.strictEqual(fs.existsSync(path.join(caseDir, '.git', 'objects', 'info', 'alternates')), false);
+    assert.strictEqual(fs.existsSync(path.join(caseDir, '.git', 'objects', 'ab', 'cdef0123456789')), true, 'an ordinary loose object still lands');
   });
 
   // Fix round 2, M8: the receive side counts every accepted relPath —

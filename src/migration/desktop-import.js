@@ -108,14 +108,62 @@ function safeRelPath(relPath) {
     if (s === '' || s === '.' || s === '..') throw new ImportError('BAD_PATH', `${text} escapes the case directory`);
     if (isReservedDeviceName(s)) throw new ImportError('BAD_PATH', `${text} uses a reserved device name`);
     if (hasTrailingDotOrSpace(s)) throw new ImportError('BAD_PATH', `${text} has a trailing dot or space`);
+    // A ':' names an NTFS alternate data stream (e.g. ".git::$INDEX_ALLOCATION"
+    // reaches the very same directory as ".git" through its metadata stream)
+    // — refused on every platform, not just Windows, since there's never a
+    // legitimate reason for a case file to need one (fix round 3, C1).
+    if (s.includes(':')) throw new ImportError('BAD_PATH', `${text} has a ':' in a path segment`);
   }
   return parts.join('/');
 }
 
+// Whether `segment` is ".git" itself, or one of the names a filesystem can
+// resolve to the very same directory entry without the segment ever
+// literally spelling ".git" (fix round 3, C1, after the reviewer's probe
+// found NTFS answers to more than the literal name):
+//   - a trailing dot or space — NTFS/FAT silently strip these when
+//     resolving a path, so ".git." and ".git " address the same directory
+//     ".git" does. (safeRelPath's own hasTrailingDotOrSpace check runs on
+//     every segment already, but throws outright; that's wrong for THIS
+//     name specifically, which needs the *same* leading-.git/ handling a
+//     literal ".git" gets, not a hard refusal that would apply even to an
+//     unrelated file that happens to end in a dot.)
+//   - the 8.3 short name NTFS auto-assigns to ".git" (and to any later
+//     colliding entry): GIT~1, GIT~2, … — this is exactly git's own
+//     is_ntfs_dotgit() rule, for the same reason git itself needs it.
+// (".git::$INDEX_ALLOCATION", the NTFS alternate-data-stream route to the
+// same directory, is caught upstream by safeRelPath's blanket refusal of
+// any ':' in a path segment — that one never even reaches here.)
+function isDotGitSegment(segment) {
+  const stripped = String(segment).replace(/[.\s]+$/, '');
+  if (stripped.toLowerCase() === '.git') return true;
+  return /^git~\d+$/i.test(stripped);
+}
+
+// Given the lowercased segments of a path already known to sit under a
+// leading .git/ (segs[0] is a .git alias per isDotGitSegment), whether the
+// rest of it is one of the few things this import trusts there: HEAD,
+// objects/** (except objects/info/**, see below), refs/**, packed-refs,
+// info/exclude.
+//
+// objects/info/** is excluded even though it's under objects/** (fix round
+// 3, item 2): objects/info/alternates (and http-alternates) tell git to
+// also read objects from another object store entirely. A UNC path there
+// makes git open that share as the service account — leaking its NTLM
+// credentials to whoever controls it — and a path relative to another
+// case's directory reads that case's objects into this one.
+function isAllowedUnderDotGit(segs) {
+  if (segs.length === 2 && (segs[1] === 'head' || segs[1] === 'packed-refs')) return true;
+  if (segs[1] === 'objects' && segs[2] === 'info') return false;
+  if (segs[1] === 'objects' || segs[1] === 'refs') return true;
+  if (segs.length === 3 && segs[1] === 'info' && segs[2] === 'exclude') return true;
+  return false;
+}
+
 // What the import may write, may silently drop, or must refuse outright,
-// for a case file (fix round 1 C1, hardened in fix round 2 after the
-// reviewer's probe found a bypass). Matched case-insensitively, per path
-// segment.
+// for a case file (fix round 1 C1, hardened in fix round 2 and round 3
+// after the reviewer's probes found bypasses). Matched case-insensitively,
+// per path segment.
 //
 // Round 1 blocked only the exact paths .git/config, .git/hooks/** and
 // .kl/no-hooks/** at the top of the case. The reviewer's probe showed two
@@ -127,18 +175,24 @@ function safeRelPath(relPath) {
 // .gitattributes file naming a filter defined in that nested config, run on
 // `git add`, then executed the filter as the service account.
 //
-// Round 2's rule is an allow-list for what a LEADING .git/ may contain
-// (HEAD, objects/**, refs/**, packed-refs, info/exclude — everything else
-// under a leading .git/, such as config or hooks/**, is silently skipped,
-// same as round 1's git/config and .git/hooks/**), plus two outright
-// refusals that a silent skip cannot express: a ".git" segment anywhere but
-// the very start of the path (closes the "inner/.git/config" and
-// ".git/modules/x/config" routes — no legitimate case file ever needs a
-// nested git directory), and a bare ".git" *file* (a real case's own .git
-// is always a directory; a file there is exactly the gitfile trick). Both
-// refusals throw — the caller must never plant them, not even to skip them —
-// unlike a plain skip, which is a normal, "accepted but not written" outcome
-// counted the same way a landed file is (fix round 2, M8).
+// Round 2's rule is an allow-list for what a LEADING .git/ may contain,
+// plus two outright refusals that a silent skip cannot express: a ".git"
+// segment anywhere but the very start of the path (closes the
+// "inner/.git/config" and ".git/modules/x/config" routes — no legitimate
+// case file ever needs a nested git directory), and a bare ".git" *file*.
+// Both refusals throw — the caller must never plant them, not even to skip
+// them — unlike a plain skip, which is a normal, "accepted but not
+// written" outcome counted the same way a landed file is (fix round 2,
+// M8).
+//
+// Round 3: every place this checked `segs[i] === '.git'` literally now
+// checks isDotGitSegment(segs[i]) instead — NTFS resolves "GIT~1/config" to
+// the very directory ".git/config" would name, once ".git" itself exists
+// (created, e.g., by a preceding ".git/HEAD" landing), and the segment
+// comparison never saw it. See DesktopImporter#writeCaseFile for the
+// second layer this round adds: re-checking the *canonical* path after
+// ensureRealDirs, in case some other aliasing this function doesn't yet
+// know about slips a write under the real .git anyway.
 //
 // Exported so the M8 count on the receiving side, and Task 9's desktop-side
 // walker, use exactly this decision — never a hand-rolled copy that could
@@ -148,14 +202,11 @@ function isSkippedCaseFile(rel) {
   if (segs.length === 2 && segs[0] === '.kl' && segs[1] === 'lock') return true;
   if (segs[0] === '.kl' && segs[1] === 'no-hooks') return true;
   for (let i = 1; i < segs.length; i++) {
-    if (segs[i] === '.git') throw new ImportError('BAD_PATH', `${rel} has a .git segment that is not at the start of the path`);
+    if (isDotGitSegment(segs[i])) throw new ImportError('BAD_PATH', `${rel} has a .git segment that is not at the start of the path`);
   }
-  if (segs[0] !== '.git') return false;
+  if (!isDotGitSegment(segs[0])) return false;
   if (segs.length === 1) throw new ImportError('BAD_PATH', `${rel}: a ".git" file is not allowed`);
-  if (segs.length === 2 && (segs[1] === 'head' || segs[1] === 'packed-refs')) return false;
-  if (segs[1] === 'objects' || segs[1] === 'refs') return false;
-  if (segs.length === 3 && segs[1] === 'info' && segs[2] === 'exclude') return false;
-  return true; // everything else under a leading .git/ (config, hooks/**, etc.) is skipped
+  return !isAllowedUnderDotGit(segs);
 }
 
 // Before trusting a landed (or about-to-be-initialized) case directory to
@@ -187,6 +238,34 @@ const isInside = (parent, child) => {
   if (rel === '' || path.isAbsolute(rel)) return false;
   return rel.split(path.sep)[0] !== '..';
 };
+
+// The backstop half of fix round 3's C1 fix (see isSkippedCaseFile's
+// comment): once ensureRealDirs has made target's parent directory exist,
+// ask the filesystem what that directory's real, canonical path is —
+// fs.realpathSync.native resolves NTFS short names (and anything else the
+// OS itself would) the same way opening the file eventually will — and, if
+// that canonical path turns out to sit under a real .git directory,
+// re-apply the same .git allow-list to it. `rel`'s own spelling already
+// passed isSkippedCaseFile; this catches the case where the *filesystem*
+// disagrees with that spelling about what directory it actually is.
+function assertCanonicalPathAllowed(caseDir, target, rel) {
+  let realParent;
+  let realCaseDir;
+  try {
+    realParent = fs.realpathSync.native(path.dirname(target));
+    realCaseDir = fs.realpathSync.native(caseDir);
+  } catch {
+    return; // nothing to compare yet (e.g. a race); the write below will surface any real problem
+  }
+  const canonicalRelDir = path.relative(realCaseDir, realParent);
+  if (!canonicalRelDir || canonicalRelDir.startsWith('..') || path.isAbsolute(canonicalRelDir)) return;
+  const canonicalSegs = canonicalRelDir.split(path.sep).map((s) => s.toLowerCase());
+  if (!isDotGitSegment(canonicalSegs[0])) return;
+  const fullCanonicalSegs = [...canonicalSegs, path.basename(rel).toLowerCase()];
+  if (!isAllowedUnderDotGit(fullCanonicalSegs)) {
+    throw new ImportError('BAD_PATH', `${rel} resolves under .git by its real filesystem name, and is not one of the paths this import trusts there`);
+  }
+}
 
 class DesktopImporter {
   constructor({
@@ -744,6 +823,17 @@ class DesktopImporter {
     const target = path.join(caseDir, ...rel.split('/'));
     if (!isInside(caseDir, target)) throw new ImportError('BAD_PATH', `${value.relPath} escapes the case directory`);
     this.ensureRealDirs(root, path.dirname(target));
+    // Defence in depth (fix round 3, C1): isSkippedCaseFile's decision was
+    // made from the *spelling* the desktop sent. Ask the filesystem itself
+    // what the parent directory's real, canonical name is — via
+    // fs.realpathSync.native, which resolves NTFS short names and any
+    // other aliasing the same way Windows itself would — and re-apply the
+    // .git allow-list to THAT. This is the backstop for any NTFS alias
+    // isDotGitSegment doesn't yet know to recognize: if the canonical path
+    // lands under a real .git directory but isn't one of the few names
+    // this import trusts there, refuse it even though its claimed spelling
+    // looked like an ordinary, unrelated path.
+    assertCanonicalPathAllowed(caseDir, target, rel);
     let existing = null;
     try { existing = fs.lstatSync(target); } catch { existing = null; }
     if (existing && (existing.isSymbolicLink() || !existing.isFile())) throw new ImportError('BAD_PATH', `${value.relPath} is a link or not a file`);
