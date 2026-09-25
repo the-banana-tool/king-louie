@@ -453,7 +453,7 @@ describe('stage 2 confinement helpers', () => {
   });
 
   it('confines wake-ups to Read, Glob and Grep besides the case tools', () => {
-    assert.deepStrictEqual([...WAKEUP_BASE_TOOLS], ['Read', 'Glob', 'Grep']);
+    assert.deepStrictEqual([...WAKEUP_BASE_TOOLS], ['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch']);
     assert.ok(Object.isFrozen(WAKEUP_BASE_TOOLS));
   });
 

@@ -19,9 +19,9 @@ const CASE_BLOCKED_TOOL_NAMES = Object.freeze([
 const CASE_BLOCKED_TOOL_ERROR = 'This tool is not available in case turns: it starts another run, reaches another session, or changes the tool list. Do the work in this turn with the case tools and the other tools.';
 
 // Everything a wake-up may use besides the case tools. WebFetch and
-// WebSearch join once the outbound gate (C3) exists: a GET URL is an
-// outbound channel.
-const WAKEUP_BASE_TOOLS = Object.freeze(['Read', 'Glob', 'Grep']);
+// WebSearch are gated in query mode by the case-turn guard (C3): a GET URL
+// is an outbound channel.
+const WAKEUP_BASE_TOOLS = Object.freeze(['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch']);
 
 const CASE_MODE_PROMPT = [
   'Case mode. This chat is attached to a case. The orientation below was read from the case repository on disk at the start of this turn. It is the authoritative state and outranks anything earlier in the conversation.',

@@ -137,11 +137,11 @@ describe('runDueWakeups', () => {
     const opts = calls.executorOptions;
     assert.strictEqual(opts.denyAutoApproval, true);
     assert.deepStrictEqual(opts.allowedDirectories, []);
-    assert.deepStrictEqual([...opts.allowedToolNames].sort(), [...CASE_TOOL_NAMES, 'Read', 'Glob', 'Grep'].sort());
+    assert.deepStrictEqual([...opts.allowedToolNames].sort(), [...CASE_TOOL_NAMES, 'Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch'].sort());
     assert.deepStrictEqual([opts.caseContext.ownerMessages, opts.caseContext.source], [[], 'wakeup']);
     const offered = calls.judgeTools[0];
     for (const name of ['Read', 'Glob', 'Grep', ...CASE_TOOL_NAMES]) assert.ok(offered.includes(name), name);
-    for (const name of ['Bash', 'WebFetch', 'WebSearch', 'AskUser', 'Write']) assert.ok(!offered.includes(name), name);
+    for (const name of ['Bash', 'AskUser', 'Write']) assert.ok(!offered.includes(name), name);
     assert.deepStrictEqual(calls.results.map(([name, r]) => [name, r.ok]), [['Ledger', true]]);
   });
 

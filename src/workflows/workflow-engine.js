@@ -12,6 +12,10 @@ const log = createLogger('workflow-engine');
 const DEP_RESULT_HEAD = 1500;
 const DEP_RESULT_TAIL = 500;
 
+// The executeExtras keys a workflow task's execute options may take (cases
+// stage 3: an isolated, guarded case-researcher child).
+const EXECUTE_EXTRA_KEYS = Object.freeze(['isolatedContext', 'guardContext']);
+
 function summarizeResult(text) {
   const raw = typeof text === 'string' ? text : String(text || '');
   if (raw.length <= DEP_RESULT_HEAD + DEP_RESULT_TAIL + 64) {
@@ -150,7 +154,12 @@ class WorkflowEngine extends EventEmitter {
         // sandboxMode doesn't silently change the workflow's permission
         // posture mid-flight. Audit trail today; enforcement is wired in
         // wherever the executor consumes these fields.
-        modeSnapshot: opts.modeSnapshot || null
+        modeSnapshot: opts.modeSnapshot || null,
+        // Cases stage 3: serializable options spread into every task's
+        // executeOptions (isolatedContext, guardContext).
+        executeExtras: opts.executeExtras && typeof opts.executeExtras === 'object'
+          ? JSON.parse(JSON.stringify(opts.executeExtras))
+          : null
       }
     };
 
@@ -459,6 +468,15 @@ class WorkflowEngine extends EventEmitter {
       : `${task.description}${allowedActionsBlock}`;
 
     const executeOptions = {};
+    // Only the named extras reach the child: workflow metadata (a file in the
+    // data dir) never sets a child's origin, approval requester, tools or
+    // working directory.
+    const extras = workflow.metadata?.executeExtras;
+    if (extras && typeof extras === 'object') {
+      for (const key of EXECUTE_EXTRA_KEYS) {
+        if (extras[key] !== undefined) executeOptions[key] = extras[key];
+      }
+    }
     if (workflow.metadata?.workingDirectory) {
       executeOptions.workingDirectory = workflow.metadata.workingDirectory;
     }
