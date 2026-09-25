@@ -52,6 +52,7 @@ const { MemoryStore, MemoryManager } = require('../memory');
 const { CheckpointManager } = require('../checkpoints');
 const { CaseRuntime, resolveCasesRoot } = require('../cases');
 const { shapeToolDefinitions } = require('../cases/chat-integration');
+const { ensureWakeupJob } = require('../cases/wakeups');
 const ContextAssembler = require('../context/context-assembler');
 const ConversationCompactor = require('../context/conversation-compactor');
 const { buildSystemSections } = require('../context/system-sections');
@@ -1921,7 +1922,10 @@ function createCore(deps = {}) {
       // paths that grant approval before the gate is reached (the persisted
       // "always approve" list below, an agent config's autoApproveTools, and
       // `allow` permission rules).
-      denyAutoApproval: remoteApprovals === 'deny',
+      // A caller (a case wake-up) may also ask for no auto-approval at all.
+      denyAutoApproval: remoteApprovals === 'deny' || executorOptions.denyAutoApproval === true,
+      // Cases stage 2: only these tools may run (wake-ups); null means no limit.
+      allowedToolNames: executorOptions.allowedToolNames || null,
       shouldAutoApprove: async (toolName) => isToolAlwaysApproved(toolName),
       // Live callback — picks up rules added mid-session when the user
       // clicks "Always allow 'git *'" in an approval dialog.
@@ -2294,7 +2298,11 @@ function createCore(deps = {}) {
         const settings = getSettings();
         const requestedTier = options.tier || agent?.inferenceTier || settings?.inference?.activeTier;
         const runtime = await createAgentRuntime(
-          { tier: requestedTier },
+          {
+            tier: requestedTier,
+            ...(options.provider ? { provider: options.provider } : {}),
+            ...(options.model ? { model: options.model } : {})
+          },
           null,
           options.approvalRequester || null,
           { workingDirectory: options.workingDirectory }
@@ -2374,6 +2382,9 @@ function createCore(deps = {}) {
 
     cronExecutor = new CronExecutor(agentExecutorAdapter, sessionManager, gatewayServer);
     cronScheduler = new CronScheduler(cronStore, cronExecutor);
+    // Cases stage 2: one protected system job per data dir sweeps the cases.
+    cronExecutor.registerSystemJob('cases:wakeups', () => caseRuntime.runDueWakeups(caseRuntime.now()));
+    await ensureWakeupJob(cronStore);
     cronScheduler.start();
 
     webhookRegistry = new WebhookRegistry(store);
@@ -2597,6 +2608,7 @@ function createCore(deps = {}) {
     results.forEach((r, i) => { if (r.status === 'rejected') log.warn(`${stops[i][0]} failed: ${r.reason?.message}`); });
     // A turn cut off by quit must not leave its case locked.
     try {
+      caseRuntime.abortUnattended();
       caseRuntime.releaseAll();
     } catch (err) {
       log.warn(`Releasing case locks failed: ${err.message}`);
@@ -2607,7 +2619,28 @@ function createCore(deps = {}) {
   // Constructing the runtime touches nothing on disk; the root directory is
   // created with the first case.
   const caseRuntime = new CaseRuntime({
-    root: resolveCasesRoot({ settings: getSettings(), env: process.env, dataDir: userDataPath })
+    root: resolveCasesRoot({ settings: getSettings(), env: process.env, dataDir: userDataPath }),
+    getSettings,
+    host: {
+      inferenceRouter,
+      resolveInference,
+      createToolExecutor: createToolExecutorWithApprovals,
+      toolRegistry,
+      AgentLoop,
+      getUsageTracker: () => usageTracker,
+      hasProviderToken: (provider) => {
+        try {
+          getDecryptedProviderToken(provider);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      notify: (event, payload) => ui.send(event, payload),
+      uiToast: deps.uiToastChannel || null,
+      // F7 replaces this with a bridge-connected check in attached mode (R50).
+      interactive: () => Boolean(deps.ui)
+    }
   });
 
   const context = {

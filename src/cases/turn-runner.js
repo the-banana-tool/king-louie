@@ -160,6 +160,9 @@ async function sweepCase(runtime, id, now) {
   return { due, quiet, failed };
 }
 
+// Invariant: runDueWakeups is this function's sole caller, so a beginTurn
+// error rethrown below (anything but CASE_BUSY) is left unmarked here and
+// still ends up marked failed, by runDueWakeups's own try/catch around the call.
 async function runWakeupTurn(runtime, caseId, dueIds, now = runtime.now()) {
   const host = runtime.host || {};
   const turnId = `wakeup-${now.getTime()}-${crypto.randomBytes(3).toString('hex')}`;
