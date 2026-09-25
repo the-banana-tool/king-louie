@@ -231,4 +231,32 @@ describe('Brief tool owner-only type fields', () => {
     assert.strictEqual(rt.brief(repo.id).read().data.repo ?? null, null);
     rt.releaseAll();
   });
+
+  // Ruling T9-repo: the git refresh reads whatever repo names, so the owner
+  // must have said the value itself, not just any words.
+  it('needs the repo value itself inside the owner\'s quote', async () => {
+    const rt = new CaseRuntime({ root: tmp() });
+    const repo = await rt.createCase({ title: 'Phone agent maintenance', type: 'software-repo', objective: 'Keep the phone agent healthy' });
+    const turn = await rt.beginTurn(repo.id, { turnId: 'turn-1' });
+    const said = 'Keep the agent healthy; the code is at https://github.com/example/phone-agent.git for now';
+    const opts = { caseContext: rt.caseContext(turn, { ownerMessages: [said] }) };
+    const vague = await BriefTool.execute({ action: 'update', field: 'repo', value: '~/private-notes', provenance: 'user', quote: 'the' }, opts);
+    assert.deepStrictEqual(vague, { ok: false, error: 'The owner\'s quote must contain the repo value itself ("~/private-notes"). Ask the owner for the repository path or clone URL.' });
+    const other = await BriefTool.execute({ action: 'update', field: 'repo', value: 'https://github.com/example/other.git', provenance: 'user', quote: 'the code is at https://github.com/example/phone-agent.git' }, opts);
+    assert.match(other.error, /must contain the repo value itself/);
+    assert.strictEqual(rt.brief(repo.id).read().data.repo ?? null, null);
+    const ok = await BriefTool.execute({ action: 'update', field: 'repo', value: 'https://github.com/example/phone-agent.git', provenance: 'user', quote: 'the code is at https://github.com/example/phone-agent.git' }, opts);
+    assert.strictEqual(ok.ok, true);
+    assert.strictEqual(rt.brief(repo.id).read().data.repo, 'https://github.com/example/phone-agent.git');
+    rt.releaseAll();
+  });
+});
+
+describe('Detour list errors', () => {
+  it('returns ok: false when the router cannot list', async () => {
+    const { rt, turn, opts } = await setup();
+    rt.detours._list = () => { throw new Error('detours.jsonl is unreadable'); };
+    assert.deepStrictEqual(await DetourTool.execute({ action: 'list' }, opts), { ok: false, error: 'detours.jsonl is unreadable' });
+    await rt.endTurn(turn, { summary: 'x' });
+  });
 });

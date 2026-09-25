@@ -143,6 +143,15 @@ describe('stage 5 duplicate gates', () => {
     assert.strictEqual(normQuestion('Ｉｓ the well shared'), 'is the well shared');
   });
 
+  it('normQuestion drops format characters and inner punctuation, so those are exact duplicates', () => {
+    assert.strictEqual(normQuestion('Is the side gate code still 4471​?'), 'is the side gate code still 4471');
+    assert.strictEqual(normQuestion('Is the side gate code, still 4471?'), 'is the side gate code still 4471');
+    const open = [{ id: 'q-0001', text: 'Is the side gate code still 4471?', answer: null, closed: null }];
+    for (const text of ['Is the side gate code still 4471​?', 'Is the side gate code, still 4471?', 'is the side­ gate code still 4471']) {
+      assert.strictEqual(findDuplicateQuestion({ text, openQuestions: open }).exact?.id, 'q-0001', text);
+    }
+  });
+
   it('findDuplicateQuestion: exact open question, similar here with text, answered ones ignored', () => {
     const open = [
       { id: 'q-0012', text: 'Is the well shared with the north lot?', answer: null, closed: null, createdAt: '2026-09-20T10:00:00.000Z' },

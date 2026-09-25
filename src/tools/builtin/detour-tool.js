@@ -75,8 +75,10 @@ const DetourTool = new Tool({
         if (!r.ok) return r;
         return { ok: true, detourId: detour.id, status: r.detour.status, linkedCaseId: r.linkedCaseId };
       }
-      case 'list':
-        return { ok: true, ...router.list(ctx.caseId) };
+      case 'list': {
+        const { detours, related, error } = router.list(ctx.caseId);
+        return error ? { ok: false, error } : { ok: true, detours, related };
+      }
       default:
         return { ok: false, error: `Unknown action: ${params.action}. Actions: ${ACTIONS.join(', ')}.` };
     }

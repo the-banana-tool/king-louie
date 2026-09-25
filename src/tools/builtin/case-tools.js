@@ -6,6 +6,7 @@ const { Tool } = require('../tool-schema');
 const { recommendationGate, findDuplicates, OPEN_CASE_STATUSES } = require('../../cases/gates');
 const { requireOwnerQuote } = require('../../cases/chat-integration');
 const { caseTypeForField, resolveCaseType } = require('../../cases/case-types');
+const { validateRepo } = require('../../cases/case-types/software-repo');
 const { toMs } = require('../../cases/clock');
 
 const NO_CASE = Object.freeze({
@@ -241,6 +242,15 @@ const BriefTool = acceptAnyValue(new Tool({
     if (brief.isUserOnly(params.field) && provenance === 'user') {
       const check = requireOwnerQuote({ quote: params.quote, ownerMessages: ctx.ownerMessages });
       if (!check.ok) return check;
+      // Ruling T9-repo: the refresh reads whatever `repo` names, so the owner
+      // must have said the value itself. Validity first (its error is clearer),
+      // then the value inside the quote, with the quote's own normalizer.
+      if (params.field === 'repo') {
+        const repo = validateRepo(params.value);
+        if (!requireOwnerQuote({ quote: repo, ownerMessages: [check.quote] }).ok) {
+          return { ok: false, error: `The owner's quote must contain the repo value itself (${JSON.stringify(repo)}). Ask the owner for the repository path or clone URL.` };
+        }
+      }
       quoteNote = ` (quote: ${JSON.stringify(check.quote)})`;
     }
     const data = params.action === 'append'

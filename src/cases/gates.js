@@ -101,10 +101,12 @@ module.exports = { recommendationGate, findDuplicates };
 
 const { tokenSet } = require('./tokenize');
 
-// NFKC, lowercase, collapse whitespace, strip trailing ? ! and dots. Shared
-// by question text and case titles (identical normalization).
+// NFKC, drop format characters (zero-width, soft hyphen), lowercase, strip
+// trailing ? ! and dots, turn other punctuation into a space, collapse
+// whitespace. Shared by question text and case titles (identical normalization).
 function normQuestion(s) {
-  return String(s ?? '').normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim().replace(/[?!.\s]+$/, '');
+  return String(s ?? '').normalize('NFKC').replace(/\p{Cf}/gu, '').toLowerCase()
+    .replace(/[?!.\s]+$/, '').replace(/\p{P}/gu, ' ').replace(/\s+/g, ' ').trim();
 }
 
 // Exact: an open question in this case with the same normalized text.
