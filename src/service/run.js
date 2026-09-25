@@ -34,6 +34,16 @@ function assertEnabledListenersBound(core, features) {
   );
 }
 
+// loadNodeConfig options for one admin dir: an injected configDir (tests)
+// and adminUid win; omitted, node-config's own platform defaults apply.
+function adminDirOptions({ dataDir, adminUid, configDir }) {
+  return {
+    dataDir,
+    ...(configDir ? { adminConfigDir: configDir } : {}),
+    ...(adminUid === undefined ? {} : { adminUid })
+  };
+}
+
 // Each profile is required lazily so the runbook profile never loads the agent stack.
 function loadProfile(profile) {
   if (profile === 'agent') {
@@ -49,14 +59,17 @@ function loadProfile(profile) {
         // configDir: injectable so tests never fall through to the real
         // per-platform admin config dir (e.g. /etc/king-louie); production
         // callers omit it and get service-wiring's own platform default.
+        // The same configDir (and adminUid) reach node.yaml and the approver
+        // store below, so the bridge, node config and approvals all read one
+        // admin dir.
         const { createDesktopBridgeHost } = require('../desktop-bridge/service-wiring');
         const desktopBridge = createDesktopBridgeHost({ dataDir, features, ports, adminUid, configDir });
-        const nodeConfig = loadNodeConfig({ dataDir });
+        const nodeConfig = loadNodeConfig(adminDirOptions({ dataDir, adminUid, configDir }));
         // Fleet stage 3: an unsafe tool from anything remote (chat channels,
         // gateway clients, cron, webhooks) runs only with a signed phone
         // approval; with no enrolled phone or no relay it is refused.
         const approvals = await startApprovals({
-          dataDir, nodeConfig, ports: servicePorts, profile: 'agent', serviceConfig: { audit }
+          dataDir, ...(configDir ? { configDir } : {}), nodeConfig, ports: servicePorts, profile: 'agent', serviceConfig: { audit }
         });
         let core;
         try {
@@ -129,16 +142,16 @@ function loadProfile(profile) {
   }
   if (profile === 'runbook') {
     return {
-      async start({ dataDir, audit }) {
+      async start({ dataDir, audit, adminUid, configDir }) {
         const { buildServicePorts } = require('./ports');
         const { loadNodeConfig } = require('./node-config');
         const { startApprovals } = require('../approvals/service-wiring');
         const servicePorts = buildServicePorts({ dataDir });
         // The runbook profile runs the relay link and the courier that the
         // `mcp` process sends its approval requests through; still no agent stack.
-        const nodeConfig = loadNodeConfig({ dataDir });
+        const nodeConfig = loadNodeConfig(adminDirOptions({ dataDir, adminUid, configDir }));
         const approvals = await startApprovals({
-          dataDir, nodeConfig, ports: servicePorts, profile: 'runbook', serviceConfig: { audit }
+          dataDir, ...(configDir ? { configDir } : {}), nodeConfig, ports: servicePorts, profile: 'runbook', serviceConfig: { audit }
         });
         return { stop: () => approvals.stop(), masterKeySource: servicePorts.masterKeySource, approvals };
       }

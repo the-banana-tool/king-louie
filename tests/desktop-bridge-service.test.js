@@ -180,4 +180,79 @@ describe('loadProfile("agent") with the desktop bridge', () => {
       wiring.createDesktopBridgeHost = originalCreateHost;
     }
   });
+
+  // Integration (F3 onto F7): node.yaml, the approver store and the bridge
+  // all read the injected configDir, the bridge gets F3's real approvals
+  // object, and stop runs bridge -> core -> approvals.
+  it('threads configDir into node config and approvals, hands the bridge the real approvals, and stops approvals last', async () => {
+    const { dataDir } = layout();
+    const root = path.dirname(dataDir);
+    // A config dir that is NOT the default sibling of the data dir. The
+    // default one gets a node.yaml that fails to load, so falling back to
+    // it (instead of the injected dir) fails the start.
+    const configDir = path.join(root, 'admin-config');
+    fs.mkdirSync(configDir, { mode: 0o755 });
+    fs.writeFileSync(path.join(root, 'config', 'node.yaml'), 'name: wrong-dir\nnot_a_key: 1\n', { mode: 0o644 });
+
+    const coreModule = require('../src/core');
+    const wiring = require('../src/desktop-bridge/service-wiring');
+    const approvalsWiring = require('../src/approvals/service-wiring');
+    const originalCreateCore = coreModule.createCore;
+    const originalCreateHost = wiring.createDesktopBridgeHost;
+    const originalStartApprovals = approvalsWiring.startApprovals;
+    const order = [];
+    let bridgeStartApprovals;
+    coreModule.createCore = (createOpts) => {
+      const core = originalCreateCore(createOpts);
+      const originalShutdown = core.shutdown;
+      core.shutdown = async (...args) => { order.push('core'); return originalShutdown(...args); };
+      return core;
+    };
+    wiring.createDesktopBridgeHost = (hostOpts) => {
+      const host = originalCreateHost(hostOpts);
+      const originalStart = host.start;
+      const originalStop = host.stop;
+      host.start = async (startOpts) => { bridgeStartApprovals = startOpts.approvals; return originalStart(startOpts); };
+      host.stop = async (...args) => { order.push('bridge'); return originalStop(...args); };
+      return host;
+    };
+    approvalsWiring.startApprovals = async (startOpts) => {
+      const approvals = await originalStartApprovals(startOpts);
+      const originalStop = approvals.stop;
+      approvals.stop = async (...args) => { order.push('approvals'); return originalStop(...args); };
+      return approvals;
+    };
+    try {
+      const running = await loadProfile('agent').start({
+        dataDir,
+        configDir,
+        features: { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false, desktopBridge: true },
+        ports: { gateway: 18793, webhook: 18794, desktopBridge: 0 },
+        workspace: dataDir,
+        adminUid: selfUid
+      });
+      try {
+        assert.strictEqual(running.approvals.approverStore.dir, path.join(configDir, 'approvers'));
+        assert.strictEqual(bridgeStartApprovals, running.approvals);
+        // approvalsStatus (F7 item 5) on F3's real objects: seq/at come from
+        // the ledger's own entries.
+        const { approvalsStatus } = require('../src/desktop-bridge/bridge-dispatcher');
+        await running.approvals.auditLedger.append({ kind: 'test.probe', data: {} });
+        const last = running.approvals.auditLedger.tail(1)[0];
+        const status = approvalsStatus({ approvals: running.approvals, dataDir });
+        assert.strictEqual(status.available, true);
+        assert.deepStrictEqual(status.devices, []);
+        assert.deepStrictEqual(status.pending, []);
+        assert.deepStrictEqual(status.audit, { last_seq: last.seq, last_at: last.at });
+        assert.ok(Number.isInteger(last.seq) && typeof last.at === 'string');
+      } finally {
+        await running.stop();
+      }
+      assert.deepStrictEqual(order, ['bridge', 'core', 'approvals']);
+    } finally {
+      coreModule.createCore = originalCreateCore;
+      wiring.createDesktopBridgeHost = originalCreateHost;
+      approvalsWiring.startApprovals = originalStartApprovals;
+    }
+  });
 });
