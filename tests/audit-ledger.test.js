@@ -130,6 +130,31 @@ describe('AuditLedger lock', () => {
     assert.equal((await l.append({ kind: 'x', data: {} })).seq, 1);
   });
 
+  it('on win32 an EPERM, EBUSY or EACCES on the lock is retried like EEXIST (final review I3)', async () => {
+    for (const code of ['EPERM', 'EBUSY', 'EACCES']) {
+      const dir = tempDir();
+      let failures = 0;
+      const lockOpen = (file) => {
+        // The other process's unlink is still pending: Windows refuses the
+        // create for a moment, then lets it through.
+        if (failures < 2) {
+          failures += 1;
+          throw Object.assign(new Error(`${code}: operation not permitted`), { code });
+        }
+        return fs.openSync(file, 'wx', 0o600);
+      };
+      const l = ledger(dir, { platform: 'win32', lockOpen });
+      assert.equal((await l.append({ kind: 'x', data: { code } })).seq, 1, code);
+      assert.equal(failures, 2);
+    }
+  });
+
+  it('elsewhere an EPERM on the lock is not retried, and on win32 it still gives up at the deadline', async () => {
+    const eperm = () => { throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' }); };
+    await assert.rejects(ledger(tempDir(), { platform: 'linux', lockOpen: eperm }).append({ kind: 'x', data: {} }), (err) => err.code === 'EPERM');
+    await assert.rejects(ledger(tempDir(), { platform: 'win32', lockOpen: eperm, lockTimeoutMs: 100 }).append({ kind: 'x', data: {} }), /audit_unavailable/);
+  });
+
   it('rejects with audit_unavailable when a live lock never clears', async () => {
     const dir = tempDir();
     const l = ledger(dir, { lockTimeoutMs: 100 });

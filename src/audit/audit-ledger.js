@@ -18,6 +18,7 @@ const SEGMENT_RE = /^ledger-(\d{4})-(\d{2})\.jsonl$/;
 const WRITERS = ['service', 'mcp', 'cli'];
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_SLICE = 200;
+const WIN32_BUSY_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
 const DEFAULT_MAX_BYTES = 524288;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -37,7 +38,8 @@ function pidAlive(pid) {
 
 class AuditLedger {
   constructor({ dir, nodeId, identity = null, writer = 'service', now = () => Date.now(), retentionDays = 365,
-    lockTimeoutMs = 2000, staleLockMs = 10000, onPathWritten = null } = {}) {
+    lockTimeoutMs = 2000, staleLockMs = 10000, onPathWritten = null, platform = process.platform,
+    lockOpen = (file) => fs.openSync(file, 'wx', 0o600) } = {}) {
     if (!dir) throw new TypeError('AuditLedger needs a dir');
     if (!WRITERS.includes(writer)) throw new TypeError(`AuditLedger writer must be one of ${WRITERS.join(', ')}`);
     this.dir = dir;
@@ -50,6 +52,8 @@ class AuditLedger {
     this.staleLockMs = staleLockMs;
     this.onPathWritten = onPathWritten || (() => {});
     this.lockFile = path.join(dir, 'ledger.lock');
+    this.platform = platform;
+    this.lockOpen = lockOpen;
   }
 
   _ensureDir() {
@@ -147,15 +151,22 @@ class AuditLedger {
     const deadline = Date.now() + this.lockTimeoutMs;
     for (;;) {
       const token = crypto.randomBytes(8).toString('hex');
+      let busy = false;
       try {
-        const fd = fs.openSync(this.lockFile, 'wx', 0o600);
+        const fd = this.lockOpen(this.lockFile);
         fs.writeSync(fd, `${process.pid}:${token}`);
         fs.closeSync(fd);
         return token;
       } catch (err) {
-        if (err.code !== 'EEXIST') throw err;
+        // On Windows, creating the lock while another process's unlink of
+        // it is still pending fails with EPERM (or EBUSY/EACCES), not
+        // EEXIST. The service and `mcp` share this lock, so that is a
+        // lock held for a moment longer: wait for it inside the deadline.
+        busy = this.platform === 'win32' && WIN32_BUSY_CODES.has(err.code);
+        if (err.code !== 'EEXIST' && !busy) throw err;
       }
-      this._breakStaleLock();
+      // A lock mid-delete has nothing stale to break.
+      if (!busy) this._breakStaleLock();
       if (Date.now() >= deadline) throw new Error(`audit_unavailable: could not take ${this.lockFile} within ${this.lockTimeoutMs} ms`);
       await sleep(10 + Math.floor(Math.random() * 15));
     }
