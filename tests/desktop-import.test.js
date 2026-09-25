@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { execFileSync } = require('child_process');
 const { createCore } = require('../src/core');
 const { JsonFileStore } = require('../src/platform/json-file-store');
 const { createAesGcmCipher } = require('../src/platform/cipher');
@@ -135,6 +136,16 @@ async function runImport(importer, fx) {
   return { plan, applied, report };
 }
 
+// The 8.3 short name NTFS assigned to `long` inside `dir`, read from
+// `dir /x` (a hash-form name such as "KL50A7~1" can't be guessed), or null
+// when the volume doesn't generate short names.
+function shortNameOf(dir, long) {
+  const out = execFileSync('cmd', ['/c', 'dir', '/x', '/a', dir], { encoding: 'utf8', windowsHide: true });
+  const line = out.split(/\r?\n/).find((l) => l.trim().endsWith(` ${long}`));
+  const cols = line ? line.trim().split(/\s+/) : [];
+  const short = cols.length >= 2 ? cols[cols.length - 2] : null;
+  return short && short !== long && short.includes('~') ? short : null;
+}
 const actionOf = (plan, category, key) => plan.items.find((i) => i.category === category && i.key === key)?.action;
 
 describe('MemoryManager.importEntry', () => {
@@ -312,8 +323,8 @@ describe('DesktopImporter', () => {
       { relPath: '.git/hooks/pre-commit', b64: Buffer.from('#!/bin/sh\nexit 1\n').toString('base64'), mode: 0o755 },
       // A config that would run an arbitrary command on `git status`/`add`.
       { relPath: '.git/config', b64: Buffer.from('[core]\n\tfsmonitor = "exit 1"\n[filter "evil"]\n\tclean = "exit 1"\n').toString('base64'), mode: 0o644 },
-      // The empty directory the *service's own* hooksPath override points
-      // at — importable content here would defeat that override.
+      // Where the service's hooksPath override used to point (before fix
+      // round 4 moved it outside every case). Still never imported.
       { relPath: '.kl/no-hooks/pre-commit', b64: Buffer.from('#!/bin/sh\nexit 1\n').toString('base64'), mode: 0o755 }
     ];
     const inventory = {
@@ -592,27 +603,136 @@ describe('DesktopImporter', () => {
     assert.ok(!/evil/i.test(config), "the config initRepo wrote afterward was never touched by the alias 'write'");
   });
 
-  // Fix round 3, C1: an NTFS alternate-data-stream reference
-  // (".git::$INDEX_ALLOCATION") reaches the very same directory ".git"
-  // does, through its metadata stream rather than its short name. Refused
-  // on every platform (the ':' check is a plain string test, not an
-  // NTFS-specific probe), so this test needs no platform skip.
-  it("refuses a path segment containing ':' (the NTFS alternate-data-stream route to .git), on every platform", async () => {
-    const { importer } = await service();
+  // Fix round 4, ruling (c): a ':' in a path segment. Windows cannot
+  // store such a name as a plain file — NTFS reads it as an
+  // alternate-data-stream reference (".git::$INDEX_ALLOCATION" reaches the
+  // very directory ".git" names) — so on win32 the file is skipped with an
+  // attention note, and the rest of the case still lands. macOS and Linux
+  // store the name as-is, so there it lands (the canonical backstop still
+  // refuses it should it ever resolve under .git).
+  it("skips a file with ':' in a path segment on win32 with an attention note, without failing the case (lands elsewhere)", async () => {
+    const { dataDir, importer } = await service();
+    const files = [
+      { relPath: 'case.yaml', b64: Buffer.from('title: Lakeside lot\n').toString('base64'), mode: 0o644 },
+      { relPath: '.git::$INDEX_ALLOCATION/config', b64: Buffer.from('[filter "evil"]\n').toString('base64'), mode: 0o644 },
+      { relPath: 'notes/10:30 call.md', b64: Buffer.from('# call\n').toString('base64'), mode: 0o644 }
+    ];
     const inventory = {
-      installId: 'install-c1-ads', sourceVersion: '26.9.0', chats: [], settingsKeys: [], userProfile: false,
+      installId: 'install-colon', sourceVersion: '26.9.0', chats: [], settingsKeys: [], userProfile: false,
       permissionRules: [], alwaysApprove: [], providerTokens: [], searchKeys: [], imageKeys: [], vault: [],
       anthropicOAuth: false, memory: [], cron: [],
-      cases: [{ dir: 'lakeside-lot', files: 1, bytes: 1 }],
+      cases: [caseInventoryEntry('lakeside-lot', files)],
       customCasesRoot: null, allowedDirectories: [], excluded: [], secrets: 'included'
     };
     const plan = await importer.plan({ installId: inventory.installId, inventory });
+    const batch = files.map((f) => ({ category: 'case', key: 'lakeside-lot', value: { ...f, offset: 0 } }));
+    const applied = await importer.apply({ planId: plan.planId, batch });
+    assert.ok(applied.results.every((r) => r.ok), JSON.stringify(applied.results));
+    const report = await importer.finish({ planId: plan.planId });
+    assert.deepStrictEqual(report.failures, []);
+    const caseDir = path.join(dataDir, 'cases', 'lakeside-lot');
+    assert.strictEqual(fs.readFileSync(path.join(caseDir, 'case.yaml'), 'utf8'), 'title: Lakeside lot\n');
+    const attention = report.attention.find((a) => a.category === 'case' && a.key === 'lakeside-lot');
+    if (process.platform === 'win32') {
+      assert.ok(attention, JSON.stringify(report.attention));
+      assert.match(attention.note, /':'/);
+      assert.match(attention.note, /notes\/10:30 call\.md/);
+      assert.match(attention.note, /\.git::\$INDEX_ALLOCATION\/config/);
+      assert.ok(!/evil/i.test(fs.readFileSync(path.join(caseDir, '.git', 'config'), 'utf8')), 'nothing reached .git/config through the stream reference');
+    } else {
+      assert.strictEqual(attention, undefined, JSON.stringify(report.attention));
+      assert.strictEqual(fs.readFileSync(path.join(caseDir, 'notes', '10:30 call.md'), 'utf8'), '# call\n');
+    }
+  });
+
+  // Fix round 4, ruling (a): round 3's canonical backstop only asked
+  // whether the real path sat under .git. The re-review's probe
+  // (round3-probe.js, part C) landed ".kl/readme.md", then sent
+  // "<.kl's 8.3 short name>/no-hooks/pre-commit": its spelling passed
+  // isSkippedCaseFile, and it landed as .kl/no-hooks/pre-commit, the very
+  // directory src/cases/git.js then pointed core.hooksPath at. The backstop
+  // now rebuilds the relPath from the real parent path and runs the full
+  // skip decision on it. NTFS gives ".kl" a hash-form short name (a leading
+  // dot rules out the plain "KL~1" form), so the test reads the name NTFS
+  // actually assigned from `dir /x` rather than guessing it.
+  it('refuses a file sent through the real NTFS 8.3 short name of .kl, so nothing lands in .kl/no-hooks', async (t) => {
+    if (process.platform !== 'win32') { t.skip('NTFS 8.3 short names exist only on Windows'); return; }
+    const { dataDir, importer } = await service();
+    const files = [{ relPath: '.kl/readme.md', b64: Buffer.from('# notes\n').toString('base64'), mode: 0o644 }];
+    const inventory = {
+      installId: 'install-kl-83', sourceVersion: '26.9.0', chats: [], settingsKeys: [], userProfile: false,
+      permissionRules: [], alwaysApprove: [], providerTokens: [], searchKeys: [], imageKeys: [], vault: [],
+      anthropicOAuth: false, memory: [], cron: [],
+      cases: [caseInventoryEntry('lakeside-lot', files)],
+      customCasesRoot: null, allowedDirectories: [], excluded: [], secrets: 'included'
+    };
+    const plan = await importer.plan({ installId: inventory.installId, inventory });
+    await importer.apply({ planId: plan.planId, batch: files.map((f) => ({ category: 'case', key: 'lakeside-lot', value: { ...f, offset: 0 } })) });
+
+    const stagingCaseDir = path.join(dataDir, 'cases', `.import-${plan.planId}`, 'lakeside-lot');
+    const alias = shortNameOf(stagingCaseDir, '.kl');
+    if (!alias) {
+      t.skip('8.3 short names are disabled on this volume (see fsutil 8dot3name query), so .kl has no short-name alias to test against');
+      return;
+    }
+    assert.match(alias, /~/);
+
+    const marker = path.join(dataDir, 'PWNED').replace(/\\/g, '/');
     const { results } = await importer.apply({
       planId: plan.planId,
-      batch: [{ category: 'case', key: 'lakeside-lot', value: { relPath: '.git::$INDEX_ALLOCATION/config', b64: 'eA==', mode: 0o644, offset: 0 } }]
+      batch: [{
+        category: 'case', key: 'lakeside-lot',
+        value: { relPath: `${alias}/no-hooks/pre-commit`, b64: Buffer.from(`#!/bin/sh\necho ran > '${marker}'\n`).toString('base64'), mode: 0o755, offset: 0 }
+      }]
     });
     assert.strictEqual(results[0].ok, false, JSON.stringify(results));
-    assert.match(results[0].error, /':'/);
+    assert.match(results[0].error, /real filesystem name/);
+    assert.strictEqual(fs.existsSync(path.join(stagingCaseDir, '.kl', 'no-hooks', 'pre-commit')), false, 'nothing landed in .kl/no-hooks through the short-name alias');
+
+    // The refusal fails the case, so nothing from it lands or commits.
+    const report = await importer.finish({ planId: plan.planId });
+    assert.ok(report.failures.some((f) => f.category === 'case' && f.key === 'lakeside-lot'), JSON.stringify(report));
+    assert.strictEqual(fs.existsSync(path.join(dataDir, 'cases', 'lakeside-lot')), false);
+    assert.strictEqual(fs.existsSync(path.join(dataDir, 'PWNED')), false, 'no imported hook ran');
+  });
+
+  // Fix round 4, ruling (a), the probe's part B: four names that also
+  // shorten to "GIT~N" land first, so NTFS has to give .git a hash-form short
+  // name (e.g. "GI2837~1"). isDotGitSegment's /^git~\d+$/ can't recognise
+  // that, so only the canonical backstop stands between it and .git/config.
+  it('refuses a file sent through a forced hash-form 8.3 short name of .git', async (t) => {
+    if (process.platform !== 'win32') { t.skip('NTFS 8.3 short names exist only on Windows'); return; }
+    const { dataDir, importer } = await service();
+    const files = ['g it', 'gi t', 'g i t', 'g  it'].map((relPath) => ({ relPath, b64: Buffer.from('x').toString('base64'), mode: 0o644 }))
+      .concat([{ relPath: '.git/HEAD', b64: Buffer.from('ref: refs/heads/main\n').toString('base64'), mode: 0o644 }]);
+    const inventory = {
+      installId: 'install-git-hash-83', sourceVersion: '26.9.0', chats: [], settingsKeys: [], userProfile: false,
+      permissionRules: [], alwaysApprove: [], providerTokens: [], searchKeys: [], imageKeys: [], vault: [],
+      anthropicOAuth: false, memory: [], cron: [],
+      cases: [caseInventoryEntry('lakeside-lot', files)],
+      customCasesRoot: null, allowedDirectories: [], excluded: [], secrets: 'included'
+    };
+    const plan = await importer.plan({ installId: inventory.installId, inventory });
+    await importer.apply({ planId: plan.planId, batch: files.map((f) => ({ category: 'case', key: 'lakeside-lot', value: { ...f, offset: 0 } })) });
+
+    const stagingCaseDir = path.join(dataDir, 'cases', `.import-${plan.planId}`, 'lakeside-lot');
+    const alias = shortNameOf(stagingCaseDir, '.git');
+    if (!alias) {
+      t.skip('8.3 short names are disabled on this volume (see fsutil 8dot3name query), so .git has no short-name alias to test against');
+      return;
+    }
+    assert.ok(!/^git~\d+$/i.test(alias), `expected a hash-form short name, got ${alias}`);
+
+    const { results } = await importer.apply({
+      planId: plan.planId,
+      batch: [{
+        category: 'case', key: 'lakeside-lot',
+        value: { relPath: `${alias}/config`, b64: Buffer.from('[filter "evil"]\n\tclean = "exit 1"\n').toString('base64'), mode: 0o644, offset: 0 }
+      }]
+    });
+    assert.strictEqual(results[0].ok, false, JSON.stringify(results));
+    assert.match(results[0].error, /real filesystem name/);
+    assert.strictEqual(fs.existsSync(path.join(stagingCaseDir, '.git', 'config')), false, 'nothing landed in .git/config through the hash-form alias');
   });
 
   // Fix round 3, C1: a trailing dot (or space) is silently stripped by

@@ -108,14 +108,19 @@ function safeRelPath(relPath) {
     if (s === '' || s === '.' || s === '..') throw new ImportError('BAD_PATH', `${text} escapes the case directory`);
     if (isReservedDeviceName(s)) throw new ImportError('BAD_PATH', `${text} uses a reserved device name`);
     if (hasTrailingDotOrSpace(s)) throw new ImportError('BAD_PATH', `${text} has a trailing dot or space`);
-    // A ':' names an NTFS alternate data stream (e.g. ".git::$INDEX_ALLOCATION"
-    // reaches the very same directory as ".git" through its metadata stream)
-    // — refused on every platform, not just Windows, since there's never a
-    // legitimate reason for a case file to need one (fix round 3, C1).
-    if (s.includes(':')) throw new ImportError('BAD_PATH', `${text} has a ':' in a path segment`);
   }
   return parts.join('/');
 }
+
+// Whether a case file's name can't be stored on this host (fix round 4,
+// ruling (c)). On Windows a ':' in a path segment names an NTFS alternate
+// data stream, not a file: ".git::$INDEX_ALLOCATION" reaches the very
+// directory ".git" names. Such a file is skipped with an attention note
+// rather than refused, so a case holding a name that's legal on macOS or
+// Linux ("10:30 call.md") still lands minus that file. Elsewhere ':' is an
+// ordinary character; the canonical backstop still refuses the write if the
+// name ever resolves somewhere this import doesn't write.
+const unstorableOnHost = (rel) => process.platform === 'win32' && rel.split('/').some((s) => s.includes(':'));
 
 // Whether `segment` is ".git" itself, or one of the names a filesystem can
 // resolve to the very same directory entry without the segment ever
@@ -132,8 +137,8 @@ function safeRelPath(relPath) {
 //     colliding entry): GIT~1, GIT~2, … — this is exactly git's own
 //     is_ntfs_dotgit() rule, for the same reason git itself needs it.
 // (".git::$INDEX_ALLOCATION", the NTFS alternate-data-stream route to the
-// same directory, is caught upstream by safeRelPath's blanket refusal of
-// any ':' in a path segment — that one never even reaches here.)
+// same directory, is caught by unstorableOnHost on Windows, where it's
+// skipped, never written.)
 function isDotGitSegment(segment) {
   const stripped = String(segment).replace(/[.\s]+$/, '');
   if (stripped.toLowerCase() === '.git') return true;
@@ -239,32 +244,45 @@ const isInside = (parent, child) => {
   return rel.split(path.sep)[0] !== '..';
 };
 
-// The backstop half of fix round 3's C1 fix (see isSkippedCaseFile's
-// comment): once ensureRealDirs has made target's parent directory exist,
-// ask the filesystem what that directory's real, canonical path is —
-// fs.realpathSync.native resolves NTFS short names (and anything else the
-// OS itself would) the same way opening the file eventually will — and, if
-// that canonical path turns out to sit under a real .git directory,
-// re-apply the same .git allow-list to it. `rel`'s own spelling already
-// passed isSkippedCaseFile; this catches the case where the *filesystem*
-// disagrees with that spelling about what directory it actually is.
+// The backstop behind isSkippedCaseFile (fix round 3, widened in fix round
+// 4). isSkippedCaseFile judges the spelling the desktop sent, but the
+// filesystem can resolve that spelling to a different real path: NTFS
+// answers to 8.3 short names ("GIT~1" for .git, a hash form such as
+// "KL50A7~1" for .kl), and there may be aliasing nobody has listed yet.
+// Once ensureRealDirs has made target's parent exist, ask the filesystem
+// (fs.realpathSync.native) for the real path, rebuild the relPath from it
+// relative to the real case directory, and run the full skip/refuse
+// decision on that rebuilt path. Refuse when it refuses or skips: the
+// spelling said "write this", the real name says "never write this". Round
+// 3 only rechecked "is it under .git", which let
+// "<.kl's short name>/no-hooks/pre-commit" land as .kl/no-hooks/pre-commit.
+// If realpath fails, refuse too: a path the filesystem can't name is not
+// one to write.
 function assertCanonicalPathAllowed(caseDir, target, rel) {
-  let realParent;
-  let realCaseDir;
+  const refuse = (why) => new ImportError('BAD_PATH', `${rel} resolves to a different path by its real filesystem name (${why}), and this import does not write it`);
+  let canonicalRel;
   try {
-    realParent = fs.realpathSync.native(path.dirname(target));
-    realCaseDir = fs.realpathSync.native(caseDir);
-  } catch {
-    return; // nothing to compare yet (e.g. a race); the write below will surface any real problem
+    const realCaseDir = fs.realpathSync.native(caseDir);
+    let exists = true;
+    try { fs.lstatSync(target); } catch { exists = false; }
+    // An existing target is resolved whole, so a short name in the file
+    // name itself is expanded too; a new one can only be the name given.
+    const realTarget = exists
+      ? fs.realpathSync.native(target)
+      : path.join(fs.realpathSync.native(path.dirname(target)), path.basename(target));
+    canonicalRel = path.relative(realCaseDir, realTarget);
+  } catch (err) {
+    throw refuse(`it could not be resolved: ${err.message}`);
   }
-  const canonicalRelDir = path.relative(realCaseDir, realParent);
-  if (!canonicalRelDir || canonicalRelDir.startsWith('..') || path.isAbsolute(canonicalRelDir)) return;
-  const canonicalSegs = canonicalRelDir.split(path.sep).map((s) => s.toLowerCase());
-  if (!isDotGitSegment(canonicalSegs[0])) return;
-  const fullCanonicalSegs = [...canonicalSegs, path.basename(rel).toLowerCase()];
-  if (!isAllowedUnderDotGit(fullCanonicalSegs)) {
-    throw new ImportError('BAD_PATH', `${rel} resolves under .git by its real filesystem name, and is not one of the paths this import trusts there`);
+  if (!canonicalRel || path.isAbsolute(canonicalRel) || canonicalRel.split(path.sep)[0] === '..') throw refuse('outside the case');
+  const canonical = canonicalRel.split(path.sep).join('/');
+  let skipped;
+  try {
+    skipped = isSkippedCaseFile(canonical);
+  } catch (err) {
+    throw refuse(err.message);
   }
+  if (skipped) throw refuse(canonical);
 }
 
 class DesktopImporter {
@@ -817,22 +835,19 @@ class DesktopImporter {
     plan.caseFiles.set(item.key, files);
 
     if (!land) return { note: 'not imported: git internals are recreated by the service, not carried over' };
+    if (unstorableOnHost(rel)) {
+      files.unstorable = files.unstorable || new Set();
+      files.unstorable.add(rel);
+      return { note: "not imported: Windows cannot store a file with ':' in its name" };
+    }
 
     const root = this.casesRoot();
     const caseDir = path.join(root, `.import-${plan.planId}`, item.key);
     const target = path.join(caseDir, ...rel.split('/'));
     if (!isInside(caseDir, target)) throw new ImportError('BAD_PATH', `${value.relPath} escapes the case directory`);
     this.ensureRealDirs(root, path.dirname(target));
-    // Defence in depth (fix round 3, C1): isSkippedCaseFile's decision was
-    // made from the *spelling* the desktop sent. Ask the filesystem itself
-    // what the parent directory's real, canonical name is — via
-    // fs.realpathSync.native, which resolves NTFS short names and any
-    // other aliasing the same way Windows itself would — and re-apply the
-    // .git allow-list to THAT. This is the backstop for any NTFS alias
-    // isDotGitSegment doesn't yet know to recognize: if the canonical path
-    // lands under a real .git directory but isn't one of the few names
-    // this import trusts there, refuse it even though its claimed spelling
-    // looked like an ordinary, unrelated path.
+    // isSkippedCaseFile judged the spelling the desktop sent; judge the real
+    // path too (fix rounds 3 and 4, see assertCanonicalPathAllowed).
     assertCanonicalPathAllowed(caseDir, target, rel);
     let existing = null;
     try { existing = fs.lstatSync(target); } catch { existing = null; }
@@ -913,12 +928,17 @@ class DesktopImporter {
           (expected.files !== null && files.count !== expected.files)
           || (expected.bytes !== null && files.bytes !== expected.bytes)
         );
+        const notes = [];
+        if (short) notes.push(`received ${files.count} file(s)/${files.bytes} byte(s); the inventory listed ${expected.files ?? '?'} file(s)/${expected.bytes ?? '?'} byte(s) — the case may be incomplete`);
+        // Fix round 4, ruling (c): names Windows can't store were skipped;
+        // the rest of the case landed, and the owner is told which.
+        if (files.unstorable && files.unstorable.size) {
+          notes.push(`${files.unstorable.size} file(s) with ':' in the name were not copied, because Windows cannot store that name: ${[...files.unstorable].join(', ')}`);
+        }
         plan.results.set(k, {
           ok: true,
-          attention: short,
-          note: short
-            ? `received ${files.count} file(s)/${files.bytes} byte(s); the inventory listed ${expected.files ?? '?'} file(s)/${expected.bytes ?? '?'} byte(s) — the case may be incomplete`
-            : null,
+          attention: notes.length > 0,
+          note: notes.length ? notes.join('; ') : null,
           record: { targetKey: dir }
         });
       } catch (err) {
