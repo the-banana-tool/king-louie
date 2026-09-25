@@ -42,6 +42,16 @@ const DEFAULT_CONTACT_POLICY = Object.freeze({
 
 const clone = (v) => JSON.parse(JSON.stringify(v));
 const isIntIn = (v, min, max) => Number.isInteger(v) && v >= min && v <= max;
+const isPlainObject = (v) => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
+const STEP_KEYS = ['channel', 'afterMin', 'digest'];
+const PRESENCE_KEYS = ['desktopIdleMin', 'recentInboundMin'];
+// Ladder steps that are not a contact channel: they can't carry a digest.
+const NON_CONTACT_STEPS = ['present', 'journal'];
+
+function unknownKey(obj, allowed, path) {
+  const key = Object.keys(obj).find((k) => !allowed.includes(k));
+  return key === undefined ? null : `contactPolicy.${path}.${key} is not a known key`;
+}
 
 function defaultPolicy() {
   return clone(DEFAULT_CONTACT_POLICY);
@@ -81,6 +91,9 @@ function validatePolicy(input, { now = new Date() } = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return fail('the contact policy must be an object');
   const known = ['batchDelaySec', 'ladders', 'quietHours', 'away', 'digest', 'presence'];
   for (const key of Object.keys(input)) if (!known.includes(key)) return fail(`contactPolicy.${key} is not a known key`);
+  for (const key of ['ladders', 'presence']) {
+    if (input[key] !== undefined && !isPlainObject(input[key])) return fail(`contactPolicy.${key} must be an object`);
+  }
   const p = effectivePolicy(input);
   if (input.batchDelaySec !== undefined && !isIntIn(input.batchDelaySec, 0, MAX_BATCH_DELAY_SEC)) {
     return fail(`batchDelaySec must be an integer from 0 to ${MAX_BATCH_DELAY_SEC}`);
@@ -95,8 +108,11 @@ function validatePolicy(input, { now = new Date() } = {}) {
     for (let i = 0; i < steps.length; i += 1) {
       const s = steps[i];
       if (!s || typeof s !== 'object' || typeof s.channel !== 'string') return fail(`ladders.${u}[${i}] needs a channel`);
+      const extra = unknownKey(s, STEP_KEYS, `ladders.${u}[${i}]`);
+      if (extra) return fail(extra);
       const err = channelError(s.channel);
       if (err) return fail(err);
+      if (s.digest === true && NON_CONTACT_STEPS.includes(s.channel)) return fail(`ladders.${u}[${i}]: a digest step must be a contact channel`);
       const afterMin = s.afterMin === undefined ? (i === 0 ? 0 : last) : s.afterMin;
       if (!isIntIn(afterMin, 0, MAX_AFTER_MIN)) return fail(`ladders.${u}[${i}].afterMin must be an integer from 0 to ${MAX_AFTER_MIN}`);
       if (afterMin < last) return fail(`ladders.${u}[${i}].afterMin must not be smaller than the step before it`);
@@ -109,7 +125,9 @@ function validatePolicy(input, { now = new Date() } = {}) {
   let quietHours = null;
   if (p.quietHours !== null) {
     const q = p.quietHours;
-    if (!q || typeof q !== 'object') return fail('quietHours must be null or { start, end, breakthrough }');
+    if (!isPlainObject(q)) return fail('quietHours must be null or { start, end, breakthrough }');
+    const extra = unknownKey(q, ['start', 'end', 'breakthrough'], 'quietHours');
+    if (extra) return fail(extra);
     if (typeof q.start !== 'string' || typeof q.end !== 'string' || !HHMM.test(q.start) || !HHMM.test(q.end)) {
       return fail('quietHours.start and end must be HH:MM');
     }
@@ -121,7 +139,9 @@ function validatePolicy(input, { now = new Date() } = {}) {
   let away = null;
   if (p.away !== null) {
     const a = p.away;
-    if (!a || typeof a !== 'object') return fail('away must be null or { mode, until }');
+    if (!isPlainObject(a)) return fail('away must be null or { mode, until }');
+    const extra = unknownKey(a, ['mode', 'until'], 'away');
+    if (extra) return fail(extra);
     if (!['email-only', 'in-app-only'].includes(a.mode)) return fail('away.mode must be email-only or in-app-only');
     if (!isRfc3339(a.until)) return fail('away.until must be an RFC3339 date-time');
     away = toMs(a.until) > now.getTime() ? { mode: a.mode, until: a.until } : null;
@@ -129,15 +149,19 @@ function validatePolicy(input, { now = new Date() } = {}) {
   let digest = null;
   if (p.digest !== null) {
     const d = p.digest;
-    if (!d || typeof d !== 'object') return fail('digest must be null or { channel, at }');
+    if (!isPlainObject(d)) return fail('digest must be null or { channel, at }');
+    const extra = unknownKey(d, ['channel', 'at'], 'digest');
+    if (extra) return fail(extra);
     const err = channelError(d.channel);
     if (err) return fail(err);
-    if (['present', 'journal'].includes(d.channel)) return fail('digest.channel must be a contact channel');
+    if (NON_CONTACT_STEPS.includes(d.channel)) return fail('digest.channel must be a contact channel');
     if (typeof d.at !== 'string' || !HHMM.test(d.at)) return fail('digest.at must be HH:MM');
     digest = { channel: d.channel, at: d.at };
   }
   const presence = {};
-  for (const key of ['desktopIdleMin', 'recentInboundMin']) {
+  const extraPresence = unknownKey(p.presence, PRESENCE_KEYS, 'presence');
+  if (extraPresence) return fail(extraPresence);
+  for (const key of PRESENCE_KEYS) {
     const v = p.presence[key];
     if (!isIntIn(v, 1, MAX_PRESENCE_MIN)) return fail(`presence.${key} must be an integer from 1 to ${MAX_PRESENCE_MIN}`);
     presence[key] = v;
@@ -145,39 +169,55 @@ function validatePolicy(input, { now = new Date() } = {}) {
   return { ok: true, policy: { batchDelaySec: p.batchDelaySec, ladders, quietHours, away, digest, presence } };
 }
 
+// The steps the host can run: known channels only, afterMin non-decreasing,
+// `digest` kept only on the (filtered) last step.
+function usableSteps(steps) {
+  const kept = steps.filter((s) => STEP_CHANNELS.includes(s.channel));
+  let last = 0;
+  return kept.map((s, i) => {
+    last = Math.max(last, s.afterMin);
+    return { channel: s.channel, afterMin: last, digest: s.digest === true && i === kept.length - 1 };
+  });
+}
+
+// An owner ladder as steps; a missing afterMin repeats the one before it.
+function ownerSteps(list) {
+  if (!Array.isArray(list)) return [];
+  let prev = 0;
+  return usableSteps(list.filter(isPlainObject).map((s) => {
+    prev = isIntIn(s.afterMin, 0, MAX_AFTER_MIN) ? s.afterMin : prev;
+    return { channel: s.channel, afterMin: prev, digest: s.digest === true };
+  }));
+}
+
 // The steps for one question: the owner ladder, replaced by case.yaml
 // `channels[urgency]` (or the dotted `urgency.<u>` alias) when present (§4.4).
-// Names the host cannot use are dropped; `call` means `voice`.
+// Names the host cannot use are dropped; `call` means `voice`. Never empty:
+// an override that keeps nothing falls back to the owner ladder, and an empty
+// owner ladder to `normal`, then to DEFAULT_CONTACT_POLICY.
 function resolveSteps(policy, urgency, caseChannels = null) {
-  const base = (policy.ladders && policy.ladders[urgency]) || policy.ladders?.normal || [];
-  let prev = 0;
-  const owner = base.map((s) => {
-    prev = Number.isInteger(s.afterMin) ? s.afterMin : prev;
-    return { channel: s.channel, afterMin: prev, digest: s.digest === true };
-  });
+  const ladders = isPlainObject(policy?.ladders) ? policy.ladders : {};
+  const d = DEFAULT_CONTACT_POLICY.ladders;
+  let owner = [];
+  for (const candidate of [ladders[urgency], ladders.normal, d[urgency], d.normal]) {
+    owner = ownerSteps(candidate);
+    if (owner.length) break;
+  }
   let override = null;
-  if (caseChannels && typeof caseChannels === 'object') {
+  if (isPlainObject(caseChannels)) {
     override = caseChannels[urgency] ?? caseChannels[`urgency.${urgency}`] ?? null;
   }
-  let steps = owner;
-  if (Array.isArray(override) && override.length) {
-    steps = override.map((raw, i) => {
-      const s = typeof raw === 'string' ? { channel: raw } : (raw && typeof raw === 'object' ? raw : {});
-      const channel = s.channel === 'call' ? 'voice' : s.channel;
-      let afterMin = s.afterMin;
-      if (!Number.isInteger(afterMin) || afterMin < 0) {
-        afterMin = i < owner.length ? owner[i].afterMin : (owner.length ? owner[owner.length - 1].afterMin : 0) + 30 * (i - owner.length + 1);
-      }
-      return { channel, afterMin, digest: s.digest === true };
-    });
-  }
-  let last = 0;
-  return steps
-    .filter((s) => STEP_CHANNELS.includes(s.channel))
-    .map((s) => {
-      last = Math.max(last, s.afterMin);
-      return { channel: s.channel, afterMin: last, digest: s.digest };
-    });
+  if (!Array.isArray(override) || !override.length) return owner;
+  const steps = usableSteps(override.map((raw, i) => {
+    const s = typeof raw === 'string' ? { channel: raw } : (isPlainObject(raw) ? raw : {});
+    const channel = s.channel === 'call' ? 'voice' : s.channel;
+    let afterMin = s.afterMin;
+    if (!isIntIn(afterMin, 0, MAX_AFTER_MIN)) {
+      afterMin = i < owner.length ? owner[i].afterMin : owner[owner.length - 1].afterMin + 30 * (i - owner.length + 1);
+    }
+    return { channel, afterMin, digest: s.digest === true };
+  }));
+  return steps.length ? steps : owner;
 }
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', '[::1]', 'localhost']);
@@ -286,7 +326,8 @@ function renderBatch(entries, {
       const answer = it.options.length ? it.options[0].id : '<answer>';
       return items.length === 1 ? `"#${batchToken} ${answer}"` : `"#${batchToken} ${it.n} ${answer}"`;
     };
-    let footer = `Reply ${replyable.slice(0, 2).map(hint).join(' / ')}.`;
+    // A reply without the code may only pick an option (parseReply).
+    let footer = `Reply ${replyable.slice(0, 2).map(hint).join(' / ')}. Start a free-text answer with #${batchToken}.`;
     const expiring = items.filter((it) => it.expiresAt);
     if (expiring.length) footer += ` Expires: ${expiring.map((it) => `${it.n}) ${formatShort(it.expiresAt, timeZone)}`).join(', ')}.`;
     lines.push('', footer);
@@ -320,16 +361,38 @@ const WHICH = (batchToken) => `Which question? Reply "#${batchToken} <n> <answer
 const LINE_TOKEN = /^#([0-9A-Za-z]{6})(?:\s+(.*))?$/;
 const sameAnswer = (a, b) => a.optionId === b.optionId && a.text === b.text;
 
-// batch: { batchToken, items: [{ n, token, options }] }. `threaded`: the reply
-// is already tied to this batch (a Telegram/Discord reply, an email in the
-// thread), so the #TOKEN may be left out. Returns { answers: [{ item, answer }],
-// ack } where ack is set only when nothing parsed. `>` quoted lines are
-// ignored. Two different answers to one item in one reply are ambiguous and
+// True when `rest` starts with the item's rendered header ("[HIGH] <caseTitle>
+// — "): a quoted copy of the question, not an answer.
+function isItemHeader(item, rest) {
+  if (!item.caseTitle) return false;
+  const body = rest.startsWith('[HIGH] ') ? rest.slice('[HIGH] '.length) : rest;
+  return body.startsWith(`${item.caseTitle} — `);
+}
+
+// batch: { batchToken, items: [{ n, token, options, caseTitle? }] }.
+// `threaded`: the reply is already tied to this batch (a Telegram/Discord
+// reply, an email in the thread), so the #TOKEN may be left out, but then a
+// line may only pick an option by exact match: free text needs the token
+// (a `{ text }` answer becomes a `user` fact, so stray signature or quoted
+// lines must never land as one). Returns { answers: [{ item, answer }], ack }
+// where ack is set only when nothing parsed. Ignored: `>` quoted lines, a
+// line repeating an item's header, and text that fits none of the named
+// item's options but exactly one of another item's (a swapped token or
+// number). Two different answers to one item in one reply are ambiguous and
 // that item is dropped.
 function parseReply(batch, text, { threaded = false } = {}) {
   const items = batch.items || [];
   const byN = (n) => items.find((it) => it.n === n) || null;
   const found = [];
+  const answerFor = (item, rest, tokened) => {
+    if (!rest || isItemHeader(item, rest)) return;
+    const answer = optionOrText(item.options, rest);
+    if (!('optionId' in answer)) {
+      if (!tokened) return;
+      if (items.some((other) => other !== item && 'optionId' in optionOrText(other.options, rest))) return;
+    }
+    found.push({ item, answer });
+  };
   const lines = String(text ?? '').split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith('>'));
   for (const line of lines) {
     const m = LINE_TOKEN.exec(line);
@@ -340,7 +403,7 @@ function parseReply(batch, text, { threaded = false } = {}) {
       if (!TOKEN_RE.test(token)) continue;
       const q = items.find((it) => it.token === token);
       if (q) {
-        if (rest) found.push({ item: q, answer: optionOrText(q.options, rest) });
+        answerFor(q, rest, true);
         continue;
       }
       if (token !== batch.batchToken) continue;
@@ -349,10 +412,9 @@ function parseReply(batch, text, { threaded = false } = {}) {
     }
     const numbered = /^(\d{1,2})[.)]?\s+(.+)$/.exec(rest);
     if (numbered && byN(Number(numbered[1]))) {
-      const it = byN(Number(numbered[1]));
-      found.push({ item: it, answer: optionOrText(it.options, numbered[2]) });
-    } else if (items.length === 1 && rest) {
-      found.push({ item: items[0], answer: optionOrText(items[0].options, rest) });
+      answerFor(byN(Number(numbered[1])), numbered[2], Boolean(m));
+    } else if (items.length === 1) {
+      answerFor(items[0], rest, Boolean(m));
     }
   }
   const answers = [];

@@ -110,7 +110,7 @@ describe('renderBatch', () => {
       '2. Kitchen quotes — Which week suits the site visit?',
       '   a) Oct 5   b) Oct 12',
       '',
-      'Reply "#K7QD4M 1 a" / "#K7QD4M 2 a". Expires: 1) Sep 25 23:00.'
+      'Reply "#K7QD4M 1 a" / "#K7QD4M 2 a". Start a free-text answer with #K7QD4M. Expires: 1) Sep 25 23:00.'
     ].join('\n'));
     assert.deepStrictEqual(m.items.map((i) => [i.n, i.token, i.questionId, i.caseId]), [[1, '7QD4KM', 'q-0012', 'c-1'], [2, 'M2P8RT', 'q-0003', 'c-2']]);
   });
@@ -262,7 +262,7 @@ describe('parseReply picks an option only by an exact, unambiguous match', () =>
     assert.deepStrictEqual(r.answers.map((a) => [a.item.n, a.answer]), [[2, { optionId: 'a' }]]);
     const same = parseReply(batch, '#K7QD4M 1 a\n#7QD4KM No');
     assert.deepStrictEqual(same.answers.map((a) => [a.item.n, a.answer]), [[1, { optionId: 'a' }]]);
-    const threaded = parseReply(one, 'yes, up to 20 %\nthanks', { threaded: true });
+    const threaded = parseReply(one, 'yes, up to 20 %\nno', { threaded: true });
     assert.deepStrictEqual(threaded.answers, []);
     assert.strictEqual(threaded.ack, 'Which question? Reply "#K7QD4M <n> <answer>".');
   });
@@ -300,7 +300,7 @@ describe('stripQuoted: a top-posted reply that quotes the original batch', () =>
     '2. Kitchen quotes — Which week suits the site visit?',
     '   a) Oct 5   b) Oct 12',
     '',
-    'Reply "#K7QD4M 1 a" / "#K7QD4M 2 a". Expires: 1) Sep 25 23:00.'
+    'Reply "#K7QD4M 1 a" / "#K7QD4M 2 a". Start a free-text answer with #K7QD4M. Expires: 1) Sep 25 23:00.'
   ];
   const quoted = original.map((l) => (l ? `> ${l}` : '>')).join('\n');
   const parsed = (body) => parseReply(batch, stripQuoted(body), { threaded: true }).answers.map((a) => [a.item.n, a.answer]);
@@ -342,9 +342,9 @@ describe('stripQuoted: a top-posted reply that quotes the original batch', () =>
     assert.deepStrictEqual(parsed(body), [[2, { optionId: 'b' }]]);
   });
 
-  it('without stripping, the unquoted original would answer: the numbered lines look like replies', () => {
+  it('even without stripping, the unquoted original is not an answer (tokenless free text is ignored)', () => {
     const body = ['2 b', '', ...original].join('\n');
-    assert.notDeepStrictEqual(parseReply(batch, body, { threaded: true }).answers.map((a) => [a.item.n, a.answer]), [[2, { optionId: 'b' }]]);
+    assert.deepStrictEqual(parseReply(batch, body, { threaded: true }).answers.map((a) => [a.item.n, a.answer]), [[2, { optionId: 'b' }]]);
   });
 
   it('cuts at a "-- " signature delimiter', () => {
@@ -416,5 +416,134 @@ describe('validatePolicy rejects bad values', () => {
 
   it('non-object input', () => {
     for (const input of [null, [], 'x', 3]) assert.strictEqual(validatePolicy(input).ok, false);
+  });
+});
+
+// Fix round 1 (review T2): a `{ text }` answer becomes a `user` fact, so
+// text must never be misassigned to the owner.
+
+describe('fix round 1: threaded replies without a token (ruling T2-reply)', () => {
+  const batch = {
+    batchToken: 'K7QD4M',
+    items: [
+      { n: 1, token: '7QD4KM', caseTitle: 'Sell the lakeside lot', urgency: 'high', options: [{ id: 'a', label: 'No' }, { id: 'b', label: 'Yes, up to 20 %' }] },
+      { n: 2, token: 'M2P8RT', caseTitle: 'Kitchen quotes', urgency: 'normal', options: [{ id: 'a', label: 'Oct 5' }, { id: 'b', label: 'Oct 12' }] }
+    ]
+  };
+  const one = { batchToken: 'K7QD4M', items: [batch.items[0]] };
+  const T = { threaded: true };
+  const pairs = (r) => r.answers.map((a) => [a.item.n, a.answer]);
+
+  it('an inline-quoted item line is not an answer', () => {
+    assert.deepStrictEqual(pairs(parseReply(batch, '2. Kitchen quotes — Which week suits the site visit?\n2 b', T)), [[2, { optionId: 'b' }]]);
+    assert.deepStrictEqual(pairs(parseReply(batch, '1. [HIGH] Sell the lakeside lot — Is seller financing ever acceptable?', T)), []);
+    // even behind the batch token the rendered header is never an answer
+    assert.deepStrictEqual(pairs(parseReply(batch, '#K7QD4M 2. Kitchen quotes — Which week suits the site visit?')), []);
+  });
+
+  it('a signature address is not an answer', () => {
+    assert.deepStrictEqual(pairs(parseReply(batch, stripQuoted('2 b\n\nJane Owner\n1 Main Street\nSpringfield'), T)), [[2, { optionId: 'b' }]]);
+  });
+
+  it('a French quote header followed by a quoted item line is not an answer', () => {
+    const body = '2 b\n\nLe ven. 25 sept. 2026 à 09:00, King Louie <kl@example.com> a écrit :\n1. [HIGH] Sell the lakeside lot — Is seller financing ever acceptable?\n   a) No   b) Yes, up to 20 %';
+    assert.deepStrictEqual(pairs(parseReply(batch, stripQuoted(body), T)), [[2, { optionId: 'b' }]]);
+  });
+
+  it('numbered free text without a token is not an answer', () => {
+    const r = parseReply(batch, '2 weeks from now works', T);
+    assert.deepStrictEqual(r.answers, []);
+    assert.strictEqual(r.ack, 'Which question? Reply "#K7QD4M <n> <answer>".');
+    assert.deepStrictEqual(pairs(parseReply(one, 'No\n\nSent from my iPhone', T)), [[1, { optionId: 'a' }]]);
+    // with the token the same text is an answer
+    assert.deepStrictEqual(pairs(parseReply(batch, '#K7QD4M 2 weeks from now works')), [[2, { text: 'weeks from now works' }]]);
+  });
+
+  it('a tokenless option pick by exact match still works', () => {
+    assert.deepStrictEqual(pairs(parseReply(batch, '1 yes, up to 20 %\n2 Oct 5', T)), [[1, { optionId: 'b' }], [2, { optionId: 'a' }]]);
+    assert.deepStrictEqual(pairs(parseReply(one, 'no.', T)), [[1, { optionId: 'a' }]]);
+  });
+
+  it('the reply hint says free text needs the code', () => {
+    const m = renderBatch([{ caseId: 'c-2', caseTitle: 'Kitchen quotes', token: 'M2P8RT', record: { id: 'q-3', kind: 'question', urgency: 'normal', createdAt: 'x', text: 'Which week?', options: [] } }], { batchToken: 'K7QD4M' });
+    assert.match(m.text, /Reply "#K7QD4M <answer>"\. Start a free-text answer with #K7QD4M\.$/);
+  });
+});
+
+describe('fix round 1: swapped tokens', () => {
+  const batch = {
+    batchToken: 'K7QD4M',
+    items: [
+      { n: 1, token: '7QD4KM', options: [{ id: 'a', label: 'No' }, { id: 'b', label: 'Yes, up to 20 %' }] },
+      { n: 2, token: 'M2P8RT', options: [{ id: 'a', label: 'Oct 5' }, { id: 'b', label: 'Oct 12' }] }
+    ]
+  };
+
+  it('an answer that only fits another item of the batch is dropped', () => {
+    const r = parseReply(batch, '#7QD4KM Oct 12');
+    assert.deepStrictEqual(r.answers, []);
+    assert.strictEqual(r.ack, 'Which question? Reply "#K7QD4M <n> <answer>".');
+    assert.deepStrictEqual(parseReply(batch, '#7QD4KM Oct 12\n#M2P8RT No').answers, []);
+    assert.deepStrictEqual(parseReply(batch, '#K7QD4M 1 Oct 12').answers, []);
+    // text that fits no option anywhere is still free text
+    assert.deepStrictEqual(parseReply(batch, '#7QD4KM maybe later').answers.map((a) => a.answer), [{ text: 'maybe later' }]);
+    assert.deepStrictEqual(parseReply(batch, '#7QD4KM b').answers.map((a) => a.answer), [{ optionId: 'b' }]);
+  });
+});
+
+describe('fix round 1: resolveSteps never returns an empty ladder', () => {
+  const policy = validatePolicy(defaultPolicy()).policy;
+  const chans = (steps) => steps.map((s) => `${s.channel}@${s.afterMin}${s.digest ? '+d' : ''}`);
+
+  it('non-empty for every override that filters to nothing', () => {
+    for (const bad of [['slack', 'pager'], [], [null, {}], [{ channel: 'call-me' }], 'present', [7]]) {
+      const steps = resolveSteps(policy, 'high', { high: bad });
+      assert.deepStrictEqual(chans(steps), ['present@0', 'sms@15', 'voice@30'], JSON.stringify(bad));
+    }
+  });
+
+  it('an empty or unusable owner ladder falls back to normal, then to the default', () => {
+    assert.deepStrictEqual(chans(resolveSteps({ ladders: { high: [], normal: [{ channel: 'present' }] } }, 'high')), ['present@0']);
+    assert.deepStrictEqual(chans(resolveSteps(policy, 'urgent')), ['present@0', 'telegram@30', 'email@240']);
+    assert.deepStrictEqual(chans(resolveSteps({ ladders: { high: [{ channel: 'pager' }] } }, 'high')), ['present@0', 'sms@15', 'voice@30']);
+    assert.deepStrictEqual(chans(resolveSteps({}, 'low')), ['in-app@0', 'journal@0', 'email@0+d']);
+    assert.deepStrictEqual(chans(resolveSteps({ ladders: { high: [], normal: [] } }, 'high', { high: ['slack'] })), ['present@0', 'sms@15', 'voice@30']);
+  });
+
+  it('an override afterMin out of range is unset: the positional default applies', () => {
+    for (const afterMin of [1e308, -1, 10081, 2.5, '15']) {
+      assert.deepStrictEqual(chans(resolveSteps(policy, 'high', { high: ['present', { channel: 'sms', afterMin }] })), ['present@0', 'sms@15'], String(afterMin));
+    }
+    assert.deepStrictEqual(chans(resolveSteps(policy, 'high', { high: ['present', { channel: 'sms', afterMin: 10080 }] })), ['present@0', 'sms@10080']);
+  });
+
+  it('digest only on the last step', () => {
+    assert.deepStrictEqual(chans(resolveSteps(policy, 'low', { low: [{ channel: 'email', digest: true }, 'sms'] })), ['email@0', 'sms@0']);
+    assert.deepStrictEqual(chans(resolveSteps(policy, 'low', { low: ['in-app', { channel: 'email', digest: true }, 'slack'] })), ['in-app@0', 'email@0+d']);
+  });
+});
+
+describe('fix round 1: validatePolicy nested shapes', () => {
+  it('ladders and presence must be objects', () => {
+    for (const ladders of ['x', null, [[{ channel: 'present' }]], 3]) {
+      assert.match(validatePolicy({ ladders }).error, /^contactPolicy.ladders must be an object/, JSON.stringify(ladders));
+    }
+    for (const presence of ['x', null, [5]]) {
+      assert.match(validatePolicy({ presence }).error, /^contactPolicy.presence must be an object/, JSON.stringify(presence));
+    }
+  });
+
+  it('refuses unknown nested keys, naming the path', () => {
+    assert.strictEqual(validatePolicy({ presence: { desktopIdleMin: 5, bogus: 1 } }).error, 'contactPolicy.presence.bogus is not a known key');
+    assert.strictEqual(validatePolicy({ quietHours: { start: '22:00', end: '07:00', extra: 1 } }).error, 'contactPolicy.quietHours.extra is not a known key');
+    assert.strictEqual(validatePolicy({ away: { mode: 'email-only', until: '2026-09-26T00:00:00Z', why: 'x' } }, { now: NOW }).error, 'contactPolicy.away.why is not a known key');
+    assert.strictEqual(validatePolicy({ digest: { channel: 'email', at: '08:00', to: 'x' } }).error, 'contactPolicy.digest.to is not a known key');
+    assert.strictEqual(validatePolicy({ ladders: { normal: [{ channel: 'present', afterMin: 0, foo: 1 }] } }).error, 'contactPolicy.ladders.normal[0].foo is not a known key');
+  });
+
+  it('refuses a digest step on journal or present', () => {
+    assert.match(validatePolicy({ ladders: { low: [{ channel: 'journal', digest: true }] } }).error, /ladders.low\[0\]: a digest step must be a contact channel/);
+    assert.match(validatePolicy({ ladders: { low: [{ channel: 'in-app' }, { channel: 'present', digest: true }] } }).error, /a digest step must be a contact channel/);
+    assert.strictEqual(validatePolicy({ ladders: { low: [{ channel: 'journal' }, { channel: 'email', digest: true }] } }).ok, true);
   });
 });
