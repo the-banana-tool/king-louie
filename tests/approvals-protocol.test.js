@@ -10,7 +10,7 @@ const path = require('path');
 const { EventEmitter } = require('events');
 const { canonicalize } = require('../src/platform/jcs');
 const { open, deviceIdFromJwk, deriveDeviceId, fingerprintGroups, fromB64url, verifyEs256 } = require('../src/approvals/envelope');
-const { phoneAuthString } = require('../src/approvals/messages');
+const { phoneAuthString, validateMessage } = require('../src/approvals/messages');
 const { verifyConsoleEnrollment } = require('../src/approvals/verify-device');
 const { PhoneApprover } = require('../src/approvals/phone-approver');
 const { verifyAuditSlice } = require('../src/audit/audit-ledger');
@@ -29,7 +29,7 @@ setLogLevel('fatal');
 const DIR = path.join(__dirname, 'vectors', 'approval-v1');
 const EXPECTED = [
   'jcs', 'device-id-p256', 'device-id-ed25519', 'request-valid', 'request-bad-node-signature', 'request-unpinned-node', 'request-display',
-  'request-malformed', 'request-display-edge',
+  'request-malformed', 'request-display-edge', 'request-malformed-equivalent-keys',
   'response-approve', 'response-deny',
   ...['malformed-noncanonical', 'unsupported-version', 'wrong-alg', 'kid-mismatch', 'unknown-device', 'demo-device', 'test-key', 'revoked-device',
     'revoked-via-overlay', 'bad-signature', 'wrong-node', 'replay', 'already-decided', 'unknown-request', 'nonce-mismatch', 'action-hash-mismatch',
@@ -139,6 +139,19 @@ describe('approval-v1 vectors', () => {
     assert.equal(s.split('\n')[4], v.expect.body_sha256);
     const env = { alg: 'ES256', kid: v.given.device.device_id, payload: Buffer.from(s).toString('base64url'), sig: v.input.signature };
     assert.equal(verifyEs256(env, v.given.device.jwk), v.expect.accepted);
+  });
+
+  it('keys equal under NFC/NFD are valid on the node but malformed on the phone (approval-v1 §5)', () => {
+    const v = byName.get('request-malformed-equivalent-keys');
+    assert.ok(v, 'the vector exists');
+    assert.deepEqual(v.consumers, ['ios', 'android']);
+    const { message } = open(v.input);
+    const keys = Object.keys(message.action.params);
+    const composed = String.fromCodePoint(0xe9);
+    const decomposed = `e${String.fromCodePoint(0x301)}`;
+    assert.ok(keys.includes(composed) && keys.includes(decomposed), 'the params carry both forms of the key');
+    assert.equal(validateMessage('kl.approval.request', message), null, 'the node keeps both keys and accepts the shape');
+    assert.deepEqual(phoneView(v.input, v.given.pinned_nodes), { shown: false, reason: 'malformed', display: null });
   });
 
   for (const v of vectors.filter((x) => x.consumers.includes('ios') && x.name.startsWith('request-'))) {

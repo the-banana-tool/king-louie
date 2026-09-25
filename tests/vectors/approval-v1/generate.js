@@ -238,6 +238,19 @@ function buildVectors({ sigCache = loadSigCache() } = {}) {
     pinnedWeb
   );
 
+  // Two params keys equal under Unicode canonical equivalence: U+00E9 and
+  // U+0065 U+0301. Distinct (and canonical) on the node, which accepts the
+  // shape; refused as malformed by both phones (§5), which cannot hold both.
+  phoneVector(
+    'request-malformed-equivalent-keys',
+    request(web, 'equivalent-keys', {
+      kind: 'tool', name: 'Bash',
+      params: { command: 'ls', [String.fromCodePoint(0xe9)]: 'composed', [`e${String.fromCodePoint(0x301)}`]: 'decomposed' },
+      cwd: '/srv/site', summary: 'Bash(ls)'
+    }),
+    pinnedWeb
+  );
+
   // ── Responses (node side) ─────────────────────────────────────────────────
   const reqMsg = JSON.parse(fromB64url(req.payload));
   const respond = (dev, overrides = {}) => seal({

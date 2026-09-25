@@ -162,6 +162,23 @@ function buildDisplay(message) {
   };
 }
 
+// approval-v1 §5: a phone refuses as malformed any object with two keys that
+// are equal under Unicode canonical equivalence (NFC/NFD). Swift's String
+// cannot keep both, so both apps refuse them; the node keeps them distinct.
+// NFC(a) === NFC(b) exactly when a and b are canonically equivalent.
+function hasEquivalentKeys(value) {
+  if (Array.isArray(value)) return value.some(hasEquivalentKeys);
+  if (!value || typeof value !== 'object') return false;
+  const seen = new Set();
+  for (const key of Object.keys(value)) {
+    const normalized = key.normalize('NFC');
+    if (seen.has(normalized)) return true;
+    seen.add(normalized);
+    if (hasEquivalentKeys(value[key])) return true;
+  }
+  return false;
+}
+
 // pinned: [{ id, key }] from pairing and invite QR codes only.
 function phoneView(envelope, pinned) {
   const hide = (reason) => ({ shown: false, reason, display: null });
@@ -176,11 +193,11 @@ function phoneView(envelope, pinned) {
   // is checked before anything about pinning or signatures, so a malformed
   // message is always refused for that reason, never mistaken for (or used to
   // probe) a pinning or signature outcome.
-  if (validateMessage('kl.approval.request', message)) return hide('malformed');
+  if (hasEquivalentKeys(message) || validateMessage('kl.approval.request', message)) return hide('malformed');
   const pin = pinned.find((n) => n.id === message.node_id);
   if (!pin || envelope.kid !== message.node_id) return hide('unpinned_node');
   if (!verifyEd25519(envelope, pin.key)) return hide('bad_node_signature');
   return { shown: true, reason: null, display: buildDisplay(message) };
 }
 
-module.exports = { phoneView, buildDisplay, escapeText, isHidden, joinArgv, pathSegment, COLLAPSE_OVER, HEAD, TAIL };
+module.exports = { phoneView, buildDisplay, escapeText, isHidden, joinArgv, pathSegment, hasEquivalentKeys, COLLAPSE_OVER, HEAD, TAIL };

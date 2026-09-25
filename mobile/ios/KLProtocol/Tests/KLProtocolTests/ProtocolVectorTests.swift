@@ -35,7 +35,7 @@ final class ProtocolVectorTests: XCTestCase {
         let names = Set(vectors.filter { ($0["consumers"]?.arrayValue ?? []).contains(.string("ios")) }.compactMap { $0["name"]?.stringValue })
         XCTAssertEqual(names, ["jcs", "device-id-p256", "device-id-ed25519", "request-valid", "request-bad-node-signature",
                                "request-unpinned-node", "request-malformed", "request-display", "request-display-edge",
-                               "enroll-console", "audit-slice", "phone-api-auth"])
+                               "request-malformed-equivalent-keys", "enroll-console", "audit-slice", "phone-api-auth"])
     }
 
     func testJcs() throws {
@@ -61,7 +61,7 @@ final class ProtocolVectorTests: XCTestCase {
 
     func testRequestVectors() throws {
         for name in ["request-valid", "request-bad-node-signature", "request-unpinned-node", "request-malformed",
-                     "request-display", "request-display-edge"] {
+                     "request-display", "request-display-edge", "request-malformed-equivalent-keys"] {
             let v = try vector(name)
             let pins = (v["given"]?["pinned_nodes"]?.arrayValue ?? []).map { NodePin(id: $0["id"]!.stringValue!, name: "", key: $0["key"]!.stringValue!) }
             let view = Display.view(v["input"]!, pinned: pins)
