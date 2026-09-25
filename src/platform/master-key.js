@@ -160,11 +160,19 @@ function createPowerShellDpapi({ powershellExe = windowsPowerShellExe() } = {}) 
 }
 
 // First resolution in a data dir writes key-check; every later one must be
-// able to decrypt it.
-function verifyKeyCheck({ dataDir, key, source, onPath }) {
+// able to decrypt it. `create: false` never writes: a missing key-check is
+// refused instead (the admin import's writer, Task 9 fix round 2, N1, must
+// not seal a data dir the service has never opened).
+function verifyKeyCheck({ dataDir, key, source, onPath = () => {}, create = true }) {
   const file = path.join(dataDir, KEY_CHECK_FILE);
   const cipher = createAesGcmCipher(key);
+  // One existence check, with the refusal nested under it: two separate
+  // checks let a file removed between them reach the create branch even
+  // with create: false.
   if (!fs.existsSync(file)) {
+    if (!create) {
+      throw new Error(`${file} does not exist; start the service once first so it sets up its data dir`);
+    }
     try {
       writePrivateFileExclusive(file, cipher.encryptString(KEY_CHECK_PLAINTEXT));
       onPath(file);
@@ -218,8 +226,70 @@ function resolveMasterKey({
   return resolved;
 }
 
+// Reads one key file without following a link at its last component and
+// without trusting a swapped file: a regular file with one link, owned by
+// `expectUid` when given, opened O_NOFOLLOW where the platform has it and
+// checked to be the inode that was lstatted. A missing file is null.
+function readKeyFileStrict(file, { expectUid = null, checkMode = process.platform !== 'win32' } = {}) {
+  let st;
+  try {
+    st = fs.lstatSync(file);
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    throw err;
+  }
+  if (st.isSymbolicLink()) throw new Error(`${file} is a link; refusing to read a master key through it`);
+  if (!st.isFile() || st.nlink > 1) throw new Error(`${file} is not a plain file with a single link`);
+  if (expectUid !== null && st.uid !== expectUid) throw new Error(`${file} is owned by uid ${st.uid}, not ${expectUid}`);
+  if (checkMode && (st.mode & 0o077)) throw new Error(`${file} has permissions ${(st.mode & 0o777).toString(8)}; it must be 600`);
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0));
+  try {
+    const now = fs.fstatSync(fd);
+    if (!now.isFile() || now.ino !== st.ino || now.dev !== st.dev || now.nlink > 1) throw new Error(`${file} changed while it was being read`);
+    if (now.size > 4096) throw new Error(`${file} is too large to be a master key`);
+    return fs.readFileSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// The admin import's resolution (Task 9 fix round 2, N1): the same sources in
+// the same order as resolveMasterKey, but it never creates a key, never
+// writes a file and never touches key-check. Null when no key exists yet.
+// Files inside the data dir are read with readKeyFileStrict, because the
+// service account controls every name there: a planted link must not make a
+// root process read someone else's key and hand it over.
+function resolveMasterKeyReadOnly({
+  platform = process.platform,
+  dataDir,
+  env = process.env,
+  dpapi,
+  getuid = () => (typeof process.getuid === 'function' ? process.getuid() : -1),
+  credentialPath = adminCredentialPath({ platform, dataDir }),
+  dataDirOwnerUid = null,
+  checkMode = process.platform !== 'win32'
+} = {}) {
+  const fromCred = fromSystemdCredential(env);
+  if (fromCred) return { key: fromCred, source: 'systemd-credential' };
+  const fromRootCred = fromRootCredentialFile({ platform, env, getuid, credentialPath });
+  if (fromRootCred) return { key: fromRootCred, source: 'credential-file' };
+  if (platform === 'win32') {
+    const blob = readKeyFileStrict(path.join(dataDir, 'master.key.dpapi'), { checkMode: false });
+    if (!blob) return null;
+    return { key: (dpapi || createPowerShellDpapi()).unprotect(blob), source: 'dpapi' };
+  }
+  const dataDirKey = path.join(dataDir, 'master.key');
+  const legacy = readKeyFileStrict(dataDirKey, { expectUid: dataDirOwnerUid, checkMode });
+  if (legacy) return { key: parseHexKey(legacy.toString('utf8'), dataDirKey), source: 'key-file' };
+  const admin = readKeyFileStrict(credentialPath, { checkMode });
+  if (admin) return { key: parseHexKey(admin.toString('utf8'), credentialPath), source: 'credential-file' };
+  return null;
+}
+
 module.exports = {
   resolveMasterKey,
+  resolveMasterKeyReadOnly,
+  verifyKeyCheck,
   createPowerShellDpapi,
   MASTER_KEY_CREDENTIAL,
   ROOT_CREDENTIAL_PATH,

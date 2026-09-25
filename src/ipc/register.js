@@ -44,6 +44,7 @@ function registerHandlers(ipcMain, context = {}) {
   registerCanvasHandlers(ipcMain, context);
   registerCaseHandlers(ipcMain, context);
   require('./case-unattended-handlers').registerCaseUnattendedHandlers(ipcMain, context);
+  require('./desktop-handlers').registerDesktopHandlers(ipcMain, context);
 }
 
 module.exports = {

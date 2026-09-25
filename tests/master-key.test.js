@@ -277,3 +277,31 @@ describe('master key files: mode is pinned on the descriptor, never by path', ()
     assert.deepStrictEqual(fs.chmodSync.mock.calls.map((c) => c.arguments[0]), []);
   });
 });
+
+// Final pass (Task 9 parked minor): create: false used to check existence
+// twice, so a key-check that vanished between the two checks reached the
+// create branch and was written. One check now: create: false never writes.
+describe('verifyKeyCheck({ create: false })', () => {
+  const { verifyKeyCheck } = require('../src/platform/master-key');
+
+  it('never creates key-check, even if it disappears between checks', (t) => {
+    const dataDir = tmp();
+    const file = path.join(dataDir, KEY_CHECK_FILE);
+    let calls = 0;
+    const realExists = fs.existsSync;
+    // Present at the first look, gone at any later one.
+    t.mock.method(fs, 'existsSync', (target) => {
+      if (target !== file) return realExists(target);
+      calls += 1;
+      return calls === 1;
+    });
+    assert.throws(() => verifyKeyCheck({ dataDir, key: Buffer.alloc(32, 7), source: 'test', create: false }));
+    assert.strictEqual(realExists(file), false, 'no key-check was written');
+  });
+
+  it('refuses a missing key-check without writing one', () => {
+    const dataDir = tmp();
+    assert.throws(() => verifyKeyCheck({ dataDir, key: Buffer.alloc(32, 7), source: 'test', create: false }), /does not exist; start the service once first/);
+    assert.strictEqual(fs.existsSync(path.join(dataDir, KEY_CHECK_FILE)), false);
+  });
+});

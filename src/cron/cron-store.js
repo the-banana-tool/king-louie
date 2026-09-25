@@ -2,11 +2,16 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { createLogger } = require('../logging');
+const { guardCheck } = require('../platform/write-guard');
 const log = createLogger('cron-store');
 
 class CronStore {
-  constructor(storageFile) {
+  // `writeGuard` (src/platform/write-guard.js) is passed only by the admin
+  // CLI's import writer, which may run as an Administrator inside a data dir
+  // the service account controls; without one, writes are unchanged.
+  constructor(storageFile, { writeGuard = null } = {}) {
     this.storageFile = storageFile;
+    this.writeGuard = writeGuard;
     this.jobs = new Map();
   }
 
@@ -24,17 +29,32 @@ class CronStore {
   }
 
   async save() {
-    const tempFile = `${this.storageFile}.tmp.${Date.now()}`;
+    // An unpredictable name opened with 'wx' (O_CREAT|O_EXCL): nothing can
+    // be planted there in advance, and an existing entry is never followed
+    // or truncated (fleet stage 7 Task 9, fix round 1).
+    const tempFile = `${this.storageFile}.tmp.${crypto.randomBytes(8).toString('hex')}`;
     const data = JSON.stringify(Object.fromEntries(this.jobs), null, 2);
 
     // Ensure directory exists
     const dir = path.dirname(this.storageFile);
+    guardCheck(this.writeGuard, tempFile);
     if (!fs.existsSync(dir)) {
       await fs.promises.mkdir(dir, { recursive: true });
+      guardCheck(this.writeGuard, tempFile);
     }
 
-    await fs.promises.writeFile(tempFile, data, 'utf8');
-    await fs.promises.rename(tempFile, this.storageFile);
+    const handle = await fs.promises.open(tempFile, 'wx');
+    try {
+      await handle.writeFile(data, 'utf8');
+    } finally {
+      await handle.close();
+    }
+    try {
+      await fs.promises.rename(tempFile, this.storageFile);
+    } catch (err) {
+      await fs.promises.rm(tempFile, { force: true });
+      throw err;
+    }
   }
 
   list() {

@@ -5,6 +5,8 @@ const ProviderFactory = require('../providers/provider-factory');
 const InferenceRouter = require('../providers/inference-router');
 const { initializeTools, toolRegistry } = require('../tools');
 const { registerSecretDataDir } = require('../tools/utils');
+const { tokenizeCommand } = require('./llm-command');
+const { DESKTOP_RULE_ORIGIN } = require('../tools/permission-rules');
 const { adminCredentialPath } = require('../platform/paths');
 const ToolExecutor = require('../execution/tool-executor');
 const DenialTracker = require('../tools/denial-tracker');
@@ -77,6 +79,7 @@ const { createVault } = require('../platform/vault');
 const { ensureGatewayToken } = require('../gateway/gateway-token');
 const { createHeadlessPrompter } = require('../platform/prompter');
 const { withTimeout } = require('./with-timeout');
+const { isLocalDesktopEvent, isLocalRequester } = require('./origin');
 
 const DEFAULT_FEATURES = { gateway: true, webhooks: true, mesh: true, channels: true, appDiscovery: true };
 // Every provider king-louie can hold a token for (keys) and its display name.
@@ -433,6 +436,11 @@ function createCore(deps = {}) {
       pattern: rule.pattern || '*',
       action: rule.action,
       source: rule.source || 'user',
+      // Desktop-scoped rules are evaluated only after every service rule
+      // (src/tools/permission-rules.js). Only desktop-scope sets this; any
+      // other add of the same key replaces the rule without it, which is
+      // how the service reclaims a key.
+      ...(rule.origin === DESKTOP_RULE_ORIGIN ? { origin: DESKTOP_RULE_ORIGIN } : {}),
       createdAt: new Date().toISOString()
     });
     setPermissionRules(filtered);
@@ -1172,6 +1180,9 @@ function createCore(deps = {}) {
   };
 
   const startDiscordBridge = async (token) => {
+    // A --kl-standalone-once session runs next to a live service and must
+    // never act as a second consumer of a channel (fleet stage 7 §3.7).
+    if (!features.channels) return { ok: false, error: 'Channels are off in this session.' };
     if (!token || !gatewayServer || !sessionManager) return;
 
     await stopDiscordBridge();
@@ -1249,6 +1260,9 @@ function createCore(deps = {}) {
   };
 
   const startTelegramBridge = async (token) => {
+    // A --kl-standalone-once session runs next to a live service and must
+    // never act as a second consumer of a channel (fleet stage 7 §3.7).
+    if (!features.channels) return { ok: false, error: 'Channels are off in this session.' };
     if (!token || !gatewayServer || !sessionManager) return;
 
     await stopTelegramBridge();
@@ -1329,6 +1343,9 @@ function createCore(deps = {}) {
   };
 
   const startSlackChannel = async (appToken, botToken) => {
+    // A --kl-standalone-once session runs next to a live service and must
+    // never act as a second consumer of a channel (fleet stage 7 §3.7).
+    if (!features.channels) return { ok: false, error: 'Channels are off in this session.' };
     if (!appToken || !botToken || !gatewayServer || !sessionManager) return;
 
     await stopSlackChannel();
@@ -1442,18 +1459,13 @@ function createCore(deps = {}) {
     return { ok: true, status };
   };
 
-  const tokenizeCommand = (input = '') => {
-    const regex = /"([^"\\]*(\\.[^"\\]*)*)"|'([^'\\]*(\\.[^'\\]*)*)'|`([^`\\]*(\\.[^`\\]*)*)`|(\S+)/g;
-    const tokens = [];
-    let match;
-
-    while ((match = regex.exec(input)) !== null) {
-      const token = match[1] ?? match[3] ?? match[5] ?? match[7] ?? '';
-      tokens.push(token.replace(/\\(["'`\\])/g, '$1'));
-    }
-
-    return tokens;
-  };
+  // Final review I3: with channels off, a channel sub-action other than
+  // status refuses before it saves a token, changes a setting or tests a
+  // connection — not after (startX alone would refuse only once the token
+  // was already written).
+  const channelsOff = (subAction) => (subAction !== 'status' && !features.channels
+    ? { ok: false, error: 'Channels are off in this session.' }
+    : null);
 
   const runLlmCommand = async (command = '') => {
     const trimmed = String(command || '').trim();
@@ -1500,6 +1512,8 @@ function createCore(deps = {}) {
 
     if (action === 'discord') {
       const subAction = (rest[0] || 'status').toLowerCase();
+      const off = channelsOff(subAction);
+      if (off) return off;
       const token = rest.slice(1).join(' ').trim();
 
       if (subAction === 'status') {
@@ -1520,7 +1534,8 @@ function createCore(deps = {}) {
 
         try {
           saveDiscordToken(token);
-          await startDiscordBridge(token);
+          const started = await startDiscordBridge(token);
+          if (started && started.ok === false) return started;
           updateStatus('discord', {
             ok: true,
             message: `Connected successfully`
@@ -1560,6 +1575,8 @@ function createCore(deps = {}) {
 
     if (action === 'telegram') {
       const subAction = (rest[0] || 'status').toLowerCase();
+      const off = channelsOff(subAction);
+      if (off) return off;
       const token = rest.slice(1).join(' ').trim();
 
       if (subAction === 'status') {
@@ -1584,7 +1601,8 @@ function createCore(deps = {}) {
         try {
           const bot = await testTelegramConnection(token);
           saveTelegramToken(token);
-          await startTelegramBridge(token);
+          const started = await startTelegramBridge(token);
+          if (started && started.ok === false) return started;
           updateStatus('telegram', {
             ok: true,
             message: `Connected as @${bot?.username || 'telegram-bot'}`
@@ -1649,6 +1667,8 @@ function createCore(deps = {}) {
 
     if (action === 'slack') {
       const subAction = (rest[0] || 'status').toLowerCase();
+      const off = channelsOff(subAction);
+      if (off) return off;
 
       if (subAction === 'status') {
         const status = getApiStatus()?.slack || null;
@@ -1686,7 +1706,8 @@ function createCore(deps = {}) {
             }
           });
 
-          await startSlackChannel(appToken, botToken);
+          const started = await startSlackChannel(appToken, botToken);
+          if (started && started.ok === false) return started;
 
           // If we get here it started successfully
           updateStatus('slack', {
@@ -1716,7 +1737,8 @@ function createCore(deps = {}) {
         }
 
         try {
-          await startSlackChannel(appToken, botToken);
+          const started = await startSlackChannel(appToken, botToken);
+          if (started && started.ok === false) return started;
           updateStatus('slack', {
             ok: true,
             message: 'Connected to Slack Socket Mode'
@@ -1962,10 +1984,16 @@ function createCore(deps = {}) {
     // Every approval requester — gateway/channel approvalHandler, cron,
     // webhook, mesh, and meta-tools re-threading a parent's requester — reaches
     // a ToolExecutor through here, so this is the single place that enforces
-    // remoteApprovals: 'deny'.
-    const effectiveApprovalRequester = remoteApprovals === 'deny' ? null : approvalRequester;
+    // remoteApprovals (program §4.21). A local-desktop run (an event marked by
+    // the Electron host or the desktop bridge, or a requester marked by a
+    // local parent) keeps the on-screen dialog, the always-approve list and
+    // `allow` rules in every mode; everything else is remote-origin.
+    const local = isLocalDesktopEvent(event) || isLocalRequester(approvalRequester);
+    const effectiveApprovalRequester = remoteApprovals === 'allow' || isLocalRequester(approvalRequester)
+      ? approvalRequester
+      : null;
     if (approvalRequester && !effectiveApprovalRequester) {
-      log.debug('remoteApprovals is "deny": ignoring a remote approval requester');
+      log.debug(`remoteApprovals is "${remoteApprovals}": ignoring a remote approval requester`);
     }
     // A caller meaning to confine a turn's tools (a case wake-up) that
     // somehow passes something other than a Set/Array must fail closed
@@ -1985,8 +2013,10 @@ function createCore(deps = {}) {
       // paths that grant approval before the gate is reached (the persisted
       // "always approve" list below, an agent config's autoApproveTools, and
       // `allow` permission rules).
-      // A caller (a case wake-up) may also ask for no auto-approval at all.
-      denyAutoApproval: remoteApprovals === 'deny' || executorOptions.denyAutoApproval === true,
+      // A caller (a case wake-up) may also ask for no auto-approval at all;
+      // that wins over a local-desktop origin (C2: unattended case runs never
+      // auto-approve).
+      denyAutoApproval: (remoteApprovals !== 'allow' && !local) || executorOptions.denyAutoApproval === true,
       // Cases stage 2: only these tools may run (wake-ups); null means no limit.
       allowedToolNames,
       shouldAutoApprove: async (toolName) => isToolAlwaysApproved(toolName),
@@ -2457,7 +2487,12 @@ function createCore(deps = {}) {
     } catch (err) {
       log.error(`Could not set up the cases:wakeups system job; continuing without wake-ups: ${err.message}`);
     }
-    cronScheduler.start();
+    // deps.cronStartPaused (fleet stage 7, --kl-standalone-once): the
+    // scheduler is built paused and never started, so no tick can fire while
+    // start() is still awaiting skills/gateway below and a live service owns
+    // cron. Only `=== true` pauses.
+    if (deps.cronStartPaused === true) cronScheduler.pause();
+    else cronScheduler.start();
 
     webhookRegistry = new WebhookRegistry(store);
     webhookHandler = new WebhookHandler(webhookRegistry, sessionManager, agentExecutorAdapter);

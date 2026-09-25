@@ -60,7 +60,7 @@ parent's event (workflows, tasks, background agents). All of it still works stan
 ## 3. Design
 
 Fixed here, not owner choices: mode switches relaunch the app (§3.7); one live desktop
-connection per service (§3.3); bridge port 18795 (§6); imported cron jobs arrive disabled (§3.8).
+connection per service (§3.3); bridge port 18796 (§6); imported cron jobs arrive disabled (§3.8).
 
 ### 3.1 Transport choice: a dedicated desktop bridge, not the gateway
 
@@ -576,7 +576,7 @@ Device fingerprint shown to the owner: the `deviceId`, in groups of 4.
 ### 4.3 `<configDir>/desktop-bridge.json` (admin-written, readable by every local account)
 
 ```json
-{ "v": 1, "nodeId": "kl-abcd2345efgh6789", "publicKey": "302a300506032b6570032100…", "host": "127.0.0.1", "port": 18795, "protocol": 1 }
+{ "v": 1, "nodeId": "kl-abcd2345efgh6789", "publicKey": "302a300506032b6570032100…", "host": "127.0.0.1", "port": 18796, "protocol": 1 }
 ```
 
 `publicKey` is the node key as DER SPKI hex (program §4.17, `NodeIdentity.publicKey`);
@@ -590,7 +590,7 @@ mirrors `service.json` `ports.desktopBridge`. There are no secrets in this file.
   "installId": "7c0e…uuid",
   "pairing": { "deviceId": "kld-…", "publicKey": "…", "privateKeySealed": "<safeStorage b64>",
                "label": "alice's desktop",
-               "service": { "nodeId": "kl-…", "publicKey": "…", "port": 18795, "pairedAt": "…" } },
+               "service": { "nodeId": "kl-…", "publicKey": "…", "port": 18796, "pairedAt": "…" } },
   "pendingPair": null,
   "lastImport": { "at": "…", "counts": { "new": 41, "skip-present": 3, "failed": 0 } } }
 ```
@@ -650,7 +650,7 @@ It holds no secret values. For the CLI, `installId` comes from
 | `WINDOWS_INSPECT_CSHARP` export | `src/service/installers.js` | F7's bridge-file check; F5 may reuse |
 | `PROXIED_DOMAINS`, `RENDERER_EVENTS`, `PROMPT_EVENTS`, `classifyChannel(ch) → 'local' \| 'prestep' \| 'proxy' \| 'deny'` | `src/desktop-bridge/allowlist.js` | C2, C4, C7 add one line per new proxied domain or event |
 | `listIpcChannels() → { handle: string[], on: string[] }` | `src/ipc/channel-inventory.js` | attached host, bridge dispatcher, tests |
-| `DesktopBridgeServer`, `DesktopBridgeClient`, protocol constants (`PROTOCOL = 1`, `DEFAULT_DESKTOP_BRIDGE_PORT = 18795`) | `src/desktop-bridge/*` | F5 may reuse the handshake pattern |
+| `DesktopBridgeServer`, `DesktopBridgeClient`, protocol constants (`PROTOCOL = 1`, `DEFAULT_DESKTOP_BRIDGE_PORT = 18796`) | `src/desktop-bridge/*` | F5 may reuse the handshake pattern |
 | IPC `desktop:status`, `desktop:pairStart`, `desktop:pairConfirm`, `desktop:pairCancel`, `desktop:attach`, `desktop:detach`, `desktop:standaloneOnce`, `desktop:unpair`, `desktop:importPlan`, `desktop:importApply`; events `desktop:statusChanged`, `desktop:importProgress` | `src/ipc/desktop-handlers.js`, preload `window.electron.desktop` | renderer |
 | `MemoryManager.importEntry(entry) → { imported: boolean }` | `src/memory/memory-manager.js` | import |
 | CLI `desktop pair <request>`, `desktop unpair <deviceId>`, `desktop list`, `import --from <dir> [--dry-run]` | `src/service/commands/{desktop,import}.js` | F6 install guide |
@@ -661,7 +661,7 @@ It holds no secret values. For the CLI, `installId` comes from
 | Key | File | Default | Notes |
 |---|---|---|---|
 | `features.desktopBridge` | `<configDir>/service.json` only (admin-only key, like every `features.*`) | `false` | ignored with a warning in `<dataDir>/service.json`; refused on `profile: runbook` |
-| `ports.desktopBridge` | `<configDir>/service.json` only | `18795` | added to `DEFAULT_PORTS` in `src/service/config.js`; clear of 18789–18794 |
+| `ports.desktopBridge` | `<configDir>/service.json` only | `18796` | added to `DEFAULT_PORTS` in `src/service/config.js`; clear of 18789–18795 (amended from 18795, which is fleet stage 3's relay mesh port) |
 | `desktop-devices.json`, `desktop-bridge.json` | `<configDir>` | absent | §4.2, §4.3 |
 | `mode`, `pairing` | desktop `<userData>/desktop-bridge.json` | `standalone`, `null` | never read by the service |
 | `KL_DESKTOP_BRIDGE_FILE` | env, desktop | unset | path of `desktop-bridge.json` for a service with a non-default data dir; the file must still pass the trust check, which accepts the current uid as owner **only** with `KL_TEST_MODE=1` (e2e) |
@@ -684,7 +684,7 @@ core exists, so it lives in the desktop's own store.
 - `main.js`: rewritten to §3.7. `src/ipc/standalone-host.js`, `attached-host.js`, `desktop-state.js`, `desktop-export.js`, `desktop-handlers.js` and `channel-inventory.js` are new.
 - `src/service/cli.js`: two dispatch lines, `desktop` and `import`, to `src/service/commands/desktop.js` and `import.js`.
 - `src/service/run.js` (last of F3 → F4 → F5 → F7): one block after `core.start()` (§3.4), plus the `ui` and `host.interactive`/`host.presence` deps when the feature is on, and an `adminUid` parameter threaded to `loadServiceConfig` for tests only (never from argv or config).
-- `src/service/config.js`: `desktopBridge` in `DEFAULT_FEATURES` (`false`) and `DEFAULT_PORTS` (`18795`). F7 adds **no** `node.yaml` key: its settings are `service.json` `features`/`ports` (§6), so the `desktopBridge` entry program §5 lists under `NODE_YAML_KEYS` is not needed (flagged for the program).
+- `src/service/config.js`: `desktopBridge` in `DEFAULT_FEATURES` (`false`) and `DEFAULT_PORTS` (`18796`). F7 adds **no** `node.yaml` key: its settings are `service.json` `features`/`ports` (§6), so the `desktopBridge` entry program §5 lists under `NODE_YAML_KEYS` is not needed (flagged for the program).
 - `CLAUDE.md`: a short "Attached mode" section with the pairing command and the new e2e helpers, replacing the harness paragraph that ruling 9 corrects.
 
 ## 8. Security and trust
@@ -717,7 +717,7 @@ through `bridge.checkPath`.
 
 | Situation | Behaviour | Owner sees |
 |---|---|---|
-| Service not running / port closed | client retries with backoff; proxied calls return `{ ok: false, code: 'SERVICE_UNREACHABLE' }` | pane and chat banner: `The local King Louie service is not reachable (127.0.0.1:18795).` with Retry now / Use standalone this time / Detach |
+| Service not running / port closed | client retries with backoff; proxied calls return `{ ok: false, code: 'SERVICE_UNREACHABLE' }` | pane and chat banner: `The local King Louie service is not reachable (127.0.0.1:18796).` with Retry now / Use standalone this time / Detach |
 | Bridge file missing | pairing waits; attached start behaves as unreachable | `No local service found at <configDir>.` |
 | Bridge file not admin-owned | refuse | `BRIDGE_FILE_UNTRUSTED`: `<path> is not owned by an administrator; refusing to trust it.` |
 | Protocol mismatch (close 4426) | stop retrying until relaunch | `This app speaks desktop-bridge protocol 1; the service speaks 2. Upgrade the older one.` |
@@ -824,7 +824,7 @@ Five conditions the parent is silent on:
 1. **"No data migration … the desktop app may later connect … (out of scope)"** (§4.2).
    This stage is that later step; the standalone stores are still never modified.
 2. **A dedicated desktop bridge, not the gateway** (§4.4): gateway clients are
-   remote-origin by design (§3.1). Port 18795 joins the §4.3 ports table.
+   remote-origin by design (§3.1). Port 18796 joins the §4.3 ports table.
 3. **Workflows, tasks and background agents are not proxied** (§3.1 principle 3, §13 "Local
    approvals"): their child runs would lose the dialog. Child agents keep it through the
    marked requester (F3, R49).

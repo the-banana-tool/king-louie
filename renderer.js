@@ -2588,6 +2588,9 @@ function switchSettingsTab(tabName) {
   if (tabName === 'channels' && typeof loadChannelAccess === 'function') {
     loadChannelAccess().catch(() => {});
   }
+  if (tabName === 'service' && typeof renderServiceSection === 'function') {
+    renderServiceSection().catch((err) => serviceLog.warn('rendering the local service pane failed', { error: err && err.message }));
+  }
 }
 
 function sortSettingsNavOptions() {
@@ -10335,3 +10338,316 @@ loadSettings();
 renderAgentModeButton();
 renderHistoryToggleButton();
 checkFirstRun();
+
+// ── Settings > Local service (fleet stage 7) ──────────────────────────────
+const serviceLog = createLogger('desktop-service');
+const servicePaneState = {
+  detachArmed: false, detachArmToken: null, detachArmedAt: null, busy: false, error: null,
+  pendingNodeId: null, lastView: null, lastModel: null, lastStatus: null
+};
+let serviceRenderToken = 0;
+let serviceLastConnection = null;
+
+function serviceLinesInto(el, lines) {
+  el.innerHTML = '';
+  for (const line of lines) {
+    const p = document.createElement('p');
+    p.textContent = line;
+    el.appendChild(p);
+  }
+}
+
+function disableServiceActionButtons() {
+  document.querySelectorAll('#service-pane-actions button, #service-pane-import button, #service-pane-status button').forEach((btn) => { btn.disabled = true; });
+}
+
+// The one place that actually writes the pane's DOM from a model. Pure with
+// respect to the network — it never awaits anything — so `runServiceAction`
+// can call it synchronously right after flipping `busy` back to false, and
+// the buttons it draws reflect that final state instead of a stale one.
+// `serviceRenderToken` only advances when the pane's shape (view + actions)
+// actually changed (paneShapeChanged, pane-model.js) — a background repaint
+// that only refreshes wording must not by itself un-arm a pending Detach.
+// Arming records the token as of its own paint; `decideDetachClick` refuses
+// to confirm once a shape-changing paint has happened since.
+function paintServicePane(model, status) {
+  if (window.electron.desktop.paneShapeChanged(servicePaneState.lastModel, model)) serviceRenderToken += 1;
+  servicePaneState.lastModel = model;
+  servicePaneState.lastStatus = status;
+  if (servicePaneState.lastView && servicePaneState.lastView !== model.view) {
+    servicePaneState.error = null;
+  }
+  servicePaneState.lastView = model.view;
+  // The Confirm button must send the nodeId the owner actually saw here,
+  // not whatever `found` becomes on a later poll tick — otherwise a service
+  // swap between this render and the click could pin a service the owner
+  // never compared.
+  servicePaneState.pendingNodeId = (status.pendingPair && status.pendingPair.service && status.pendingPair.service.nodeId) || null;
+
+  const statusEl = document.getElementById('service-pane-status');
+  const lines = [...model.lines];
+  if (servicePaneState.detachArmed && model.detachWarning) lines.push(model.detachWarning);
+  serviceLinesInto(statusEl, lines);
+  if (servicePaneState.error) {
+    const p = document.createElement('p');
+    p.className = 'service-pane-error';
+    p.textContent = servicePaneState.error;
+    statusEl.appendChild(p);
+  }
+  if (model.serviceCommand) {
+    // Persisted server-side (desktop-state's pendingServiceCommand), not
+    // renderer state: it must survive a repaint and, in attached mode, a
+    // relaunch, and stays until the owner dismisses it or a new pairing
+    // starts (fix round 2, Task 16 review).
+    const row = document.createElement('div');
+    row.className = 'service-pane-command';
+    const p = document.createElement('p');
+    p.className = 'service-pane-notice';
+    p.textContent = model.serviceCommand.line;
+    row.appendChild(p);
+    const dismissBtn = document.createElement('button');
+    dismissBtn.type = 'button';
+    dismissBtn.id = 'service-dismiss-command-btn';
+    dismissBtn.className = 'btn btn-secondary btn-sm';
+    dismissBtn.textContent = 'Dismiss';
+    dismissBtn.disabled = servicePaneState.busy;
+    dismissBtn.addEventListener('click', () => { runServiceAction('dismissServiceCommand').catch((err) => serviceLog.warn('service action failed', { action: 'dismissServiceCommand', error: err && err.message })); });
+    row.appendChild(dismissBtn);
+    statusEl.appendChild(row);
+  }
+
+  const requestBox = document.getElementById('service-pane-request');
+  requestBox.hidden = !model.request;
+  if (model.request) {
+    document.getElementById('service-pair-request').textContent = model.request;
+    document.getElementById('service-pair-command').textContent = model.command || '';
+    const copyBtn = document.getElementById('service-copy-request-btn');
+    copyBtn.onclick = () => navigator.clipboard.writeText(model.request).catch((err) => serviceLog.warn('copying the pairing request failed', { error: err && err.message }));
+  }
+
+  const actionsEl = document.getElementById('service-pane-actions');
+  actionsEl.innerHTML = '';
+  for (const action of model.actions) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.id = `service-action-${action.id}`;
+    btn.className = action.id === 'detach' || action.id === 'unpair' ? 'btn btn-danger btn-sm' : 'btn btn-primary btn-sm';
+    btn.textContent = action.id === 'detach' && servicePaneState.detachArmed ? 'Detach anyway' : action.label;
+    btn.disabled = Boolean(action.disabled) || servicePaneState.busy;
+    btn.addEventListener('click', () => { runServiceAction(action.id).catch((err) => serviceLog.warn('service action failed', { action: action.id, error: err && err.message })); });
+    actionsEl.appendChild(btn);
+  }
+
+  const approvalsEl = document.getElementById('service-pane-approvals');
+  approvalsEl.hidden = !model.approvals;
+  if (model.approvals) {
+    serviceLinesInto(approvalsEl, ['Approvals and relay', ...model.approvals.lines, `Change them on the service: ${model.approvals.commands.join(', ')}`]);
+  }
+  markUnavailableTabs(status.unavailableTabs || []);
+}
+
+// Fetches status + the pane's wording without touching the DOM, so callers
+// that need to sequence a state change (clearing `busy`) between the fetch
+// and the paint — `runServiceAction`'s finally — can do so without a second
+// network round trip.
+async function fetchServiceModel() {
+  const desktop = window.electron.desktop;
+  if (!desktop) return null;
+  const status = await desktop.status();
+  if (!status || status.ok === false) return { status, model: null };
+  return { status, model: desktop.describe(status) };
+}
+
+async function renderServiceSection() {
+  const statusEl = document.getElementById('service-pane-status');
+  if (!statusEl || !window.electron.desktop) return;
+  const fetched = await fetchServiceModel();
+  if (!fetched || !fetched.status || fetched.status.ok === false) {
+    serviceLinesInto(statusEl, [(fetched && fetched.status && fetched.status.error) || 'The local service pane is not available.']);
+    return;
+  }
+  if (!fetched.model) return;
+  paintServicePane(fetched.model, fetched.status);
+}
+
+function renderImportPlan(result) {
+  const box = document.getElementById('service-pane-import');
+  if (!box) return;
+  box.hidden = false;
+  const counts = Object.entries(result.plan.counts || {}).filter(([, n]) => n).map(([a, n]) => `${a}: ${n}`).join(', ');
+  const notes = result.plan.items.filter((i) => i.action === 'needs-attention' || i.action === 'needs-desktop').map((i) => `${i.action}: ${i.category} ${i.key}${i.note ? ` — ${i.note}` : ''}`);
+  serviceLinesInto(box, [`Dry run — ${counts}`, ...notes, ...(result.attention || []).map((a) => `needs-attention: ${a.key} — ${a.note}`)]);
+  const apply = document.createElement('button');
+  apply.type = 'button';
+  apply.id = 'service-action-importApply';
+  apply.className = 'btn btn-primary btn-sm';
+  apply.textContent = 'Import';
+  apply.addEventListener('click', () => { runServiceAction('importApply').catch((err) => serviceLog.warn('service action failed', { action: 'importApply', error: err && err.message })); });
+  box.appendChild(apply);
+}
+
+function renderImportReport(report) {
+  const box = document.getElementById('service-pane-import');
+  if (!box) return;
+  box.hidden = false;
+  serviceLinesInto(box, ['Import finished', ...window.electron.desktop.describeImport(report)]);
+}
+
+// Arms (or re-arms) the Detach warning: paints it synchronously from the
+// last known model/status, no network call, so there is no window where a
+// click could beat the render. Clearing `busy` before that paint (rather
+// than after) is what lets the freshly drawn "Detach anyway" button come
+// back enabled.
+function armDetachWarning() {
+  servicePaneState.detachArmed = true;
+  servicePaneState.busy = false;
+  if (servicePaneState.lastModel) paintServicePane(servicePaneState.lastModel, servicePaneState.lastStatus);
+  servicePaneState.detachArmToken = serviceRenderToken;
+  servicePaneState.detachArmedAt = Date.now();
+}
+
+async function runServiceAction(id) {
+  // A click that arrives while an earlier one is still in flight (including
+  // during the final re-render below, which can take a few seconds) must
+  // not act — the buttons are also disabled synchronously below, but a
+  // click already queued before that disable took effect would otherwise
+  // still run.
+  if (servicePaneState.busy) return;
+  servicePaneState.busy = true;
+  disableServiceActionButtons();
+  servicePaneState.error = null;
+
+  if (id === 'detach') {
+    const decision = window.electron.desktop.decideDetachClick({
+      armed: servicePaneState.detachArmed,
+      armedAtToken: servicePaneState.detachArmToken,
+      currentToken: serviceRenderToken,
+      armedAt: servicePaneState.detachArmedAt,
+      now: Date.now()
+    });
+    if (decision.arm) {
+      armDetachWarning();
+      return;
+    }
+    servicePaneState.detachArmed = false;
+  }
+
+  const desktop = window.electron.desktop;
+  try {
+    let result = null;
+    if (id === 'pair') result = await desktop.pairStart();
+    else if (id === 'pairConfirm') result = await desktop.pairConfirm(servicePaneState.pendingNodeId);
+    else if (id === 'pairCancel') result = await desktop.pairCancel();
+    else if (id === 'attach') result = await desktop.attach();
+    else if (id === 'standaloneOnce') result = await desktop.standaloneOnce();
+    else if (id === 'retry') result = await desktop.retry();
+    else if (id === 'detach') result = await desktop.detach({ confirmed: true });
+    else if (id === 'unpair') result = await desktop.unpair();
+    else if (id === 'dismissServiceCommand') result = await desktop.dismissServiceCommand();
+    else if (id === 'import') {
+      result = await desktop.importPlan();
+      if (result && result.ok) renderImportPlan(result);
+    } else if (id === 'importApply') {
+      result = await desktop.importApply();
+      if (result && result.ok) renderImportReport(result.report);
+    }
+    if (result && result.ok === false) servicePaneState.error = result.error || result.code;
+  } finally {
+    // Fetch first (busy still true, so no other click can act), then flip
+    // busy off and paint from that fetch in one synchronous step — the
+    // buttons this paints are drawn with the settled, non-busy value.
+    const fetched = await fetchServiceModel().catch((err) => {
+      serviceLog.warn('re-fetching the local service pane failed', { error: err && err.message });
+      return null;
+    });
+    servicePaneState.busy = false;
+    if (fetched && fetched.status && fetched.status.ok !== false && fetched.model) {
+      paintServicePane(fetched.model, fetched.status);
+    } else if (servicePaneState.lastModel) {
+      // The re-fetch failed; repaint the last known model now that `busy`
+      // is already false, so the buttons come back enabled instead of
+      // staying disabled with no further paint to fix that.
+      paintServicePane(servicePaneState.lastModel, servicePaneState.lastStatus);
+    } else {
+      const statusEl = document.getElementById('service-pane-status');
+      if (statusEl) serviceLinesInto(statusEl, [(fetched && fetched.status && fetched.status.error) || 'The local service pane is not available.']);
+    }
+  }
+}
+
+function markUnavailableTabs(tabs = []) {
+  const unavailable = new Set(tabs);
+  document.querySelectorAll('.settings-tab-content').forEach((pane) => {
+    const existing = pane.querySelector(':scope > .service-unavailable-notice');
+    if (unavailable.has(pane.dataset.tab)) {
+      if (!existing) {
+        const note = document.createElement('div');
+        note.className = 'settings-alert service-unavailable-notice';
+        note.textContent = 'Managed by the local service; not available while attached.';
+        pane.prepend(note);
+      }
+    } else if (existing) {
+      existing.remove();
+    }
+  });
+}
+
+function renderAttachedBanner(status) {
+  let banner = document.getElementById('attached-service-banner');
+  const show = status && status.view === 'attached-disconnected';
+  if (!show) {
+    if (banner) banner.remove();
+    return;
+  }
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'attached-service-banner';
+    banner.className = 'settings-alert attached-service-banner';
+    const host = dom.chatMessages && dom.chatMessages.parentElement ? dom.chatMessages.parentElement : document.body;
+    host.prepend(banner);
+  }
+  banner.innerHTML = '';
+  const text = document.createElement('span');
+  text.textContent = (status.connection && status.connection.error) || 'The local King Louie service is not reachable.';
+  banner.appendChild(text);
+  const buttons = [
+    ['Retry now', () => window.electron.desktop.retry()],
+    ['Use standalone this time', () => window.electron.desktop.standaloneOnce()],
+    ['Local service settings', () => { document.getElementById('open-settings-btn')?.click(); switchSettingsTab('service'); }]
+  ];
+  for (const [label, fn] of buttons) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn-secondary btn-sm';
+    btn.textContent = label;
+    btn.addEventListener('click', () => { Promise.resolve(fn()).catch((err) => serviceLog.warn('attached banner action failed', { label, error: err && err.message })); });
+    banner.appendChild(btn);
+  }
+}
+
+async function refreshServiceStatus() {
+  const status = await window.electron.desktop.status().catch((err) => {
+    serviceLog.warn('fetching desktop status failed', { error: err && err.message });
+    return null;
+  });
+  if (!status || status.ok === false) return;
+  markUnavailableTabs(status.unavailableTabs || []);
+  renderAttachedBanner(status);
+  const conn = status.connection ? status.connection.status : null;
+  if (conn === 'connected' && serviceLastConnection && serviceLastConnection !== 'connected') loadChats();
+  serviceLastConnection = conn;
+  if (dom.settingsNavSelect && dom.settingsNavSelect.value === 'service') {
+    renderServiceSection().catch((err) => serviceLog.warn('rendering the local service pane failed', { error: err && err.message }));
+  }
+}
+
+if (window.electron.desktop) {
+  unsubscribeHandlers.push(window.electron.desktop.onStatusChanged(() => {
+    refreshServiceStatus().catch((err) => serviceLog.warn('refreshing desktop status failed', { error: err && err.message }));
+  }));
+  unsubscribeHandlers.push(window.electron.desktop.onImportProgress(({ sent, total } = {}) => {
+    const box = document.getElementById('service-pane-import');
+    if (box) box.dataset.progress = `${sent}/${total}`;
+  }));
+  refreshServiceStatus().catch((err) => serviceLog.warn('refreshing desktop status failed', { error: err && err.message }));
+}

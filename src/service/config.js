@@ -9,13 +9,15 @@ const PROFILES = new Set(['agent', 'runbook']);
 // Chat channels are off by default: in stage 1 the service denies every
 // remote approval, and stage 3 brings the phone approver that makes channels
 // useful for unsafe work.
-const DEFAULT_FEATURES = { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false };
+const DEFAULT_FEATURES = { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false, desktopBridge: false };
 // Distinct from the Electron app's 18789/18790 *and* from mesh's documented
 // 18791 (src/mesh/mesh-transport.js), which the desktop app binds on 0.0.0.0
 // by default — so a service and a desktop app on one machine do not fight
 // over a port, and an unprivileged local user squatting the mesh port cannot
 // keep the service's gateway off the air.
-const DEFAULT_PORTS = { gateway: 18793, webhook: 18794 };
+// desktopBridge (fleet stage 7): the loopback listener the desktop app attaches to.
+// 18795 is taken by the relay mesh listener (fleet stage 3), hence 18796.
+const DEFAULT_PORTS = { gateway: 18793, webhook: 18794, desktopBridge: 18796 };
 const CONFIG_FILE = 'service.json';
 // Keys that decide whether a network listener exists and where it binds, and
 // which profile — and so whether the agent stack loads at all. These may only
@@ -57,8 +59,12 @@ function validatePorts(ports, file) {
     if (!Object.prototype.hasOwnProperty.call(DEFAULT_PORTS, name)) {
       throw unknownKeyError(file, `ports.${name}`, Object.keys(DEFAULT_PORTS));
     }
-    if (!Number.isInteger(value) || value < 1 || value > 65535) {
-      throw new Error(`Invalid ${file}: ports.${name} must be an integer from 1 to 65535`);
+    // 0 (ephemeral) only for the desktop bridge, which tests bind anywhere;
+    // a real paired desktop can't discover an ephemeral port, so this is not
+    // a production setting (see the load-time warning in loadServiceConfig).
+    const min = name === 'desktopBridge' ? 0 : 1;
+    if (!Number.isInteger(value) || value < min || value > 65535) {
+      throw new Error(`Invalid ${file}: ports.${name} must be an integer from ${min} to 65535`);
     }
     out[name] = value;
   }
@@ -176,6 +182,11 @@ function loadServiceConfig(dataDir, overrides = {}, {
     features.mesh = false;
   }
 
+  // The desktop bridge needs the agent stack it proxies to.
+  if (features.desktopBridge && profile === 'runbook') {
+    throw new Error('desktopBridge needs profile: agent');
+  }
+
   // Loud, per-feature, naming the file responsible: an operator reading the
   // log must be able to see at a glance which listener is open and why.
   for (const [name, on] of Object.entries(features)) {
@@ -186,11 +197,12 @@ function loadServiceConfig(dataDir, overrides = {}, {
     log.info(`feature "${name}" is ENABLED by ${source}`);
   }
 
-  return {
-    profile,
-    features,
-    ports: { ...DEFAULT_PORTS, ...validatePorts(adminCfg.ports, adminFile) }
-  };
+  const ports = { ...DEFAULT_PORTS, ...validatePorts(adminCfg.ports, adminFile) };
+  if (features.desktopBridge && ports.desktopBridge === 0) {
+    log.warn("ports.desktopBridge 0 is for tests; the paired desktop can't reach an ephemeral port");
+  }
+
+  return { profile, features, ports };
 }
 
 module.exports = { loadServiceConfig, assertAdminOwned, PROFILES, DEFAULT_PORTS, DEFAULT_FEATURES, CONFIG_FILE, unknownKeyError };

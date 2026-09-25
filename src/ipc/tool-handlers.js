@@ -33,9 +33,16 @@ function registerToolHandlers(ipcMain, context = {}) {
     pendingApprovalResolvers.delete(approvalId);
     const toolName = pendingApproval.toolName;
 
+    // Approval requesters return `true | false | 'timeout' | 'unavailable'`;
+    // only the exact boolean `true` approves (truthy strings like 'true' or
+    // a stray 1 never do). This handler is shared between the Electron host
+    // and the desktop bridge, so strict equality here is the one place that
+    // needs fixing for both.
+    const isApproved = approved === true;
+
     // Legacy "Always approve entire tool" checkbox — still supported but
     // strongly discouraged. A pattern rule is the preferred path.
-    if (Boolean(approved) && Boolean(alwaysApprove) && toolName) {
+    if (isApproved && Boolean(alwaysApprove) && toolName) {
       setToolAlwaysApprove(toolName, true);
     }
 
@@ -47,7 +54,7 @@ function registerToolHandlers(ipcMain, context = {}) {
       const pattern = typeof alwaysAllowPattern === 'string' && alwaysAllowPattern.trim()
         ? alwaysAllowPattern.trim()
         : (typeof rulePattern === 'string' && rulePattern.trim() ? rulePattern.trim() : null);
-      const action = ruleAction === 'deny' ? 'deny' : (approved ? 'allow' : null);
+      const action = ruleAction === 'deny' ? 'deny' : (isApproved ? 'allow' : null);
       if (pattern && action) {
         addPermissionRule({
           tool: toolName,
@@ -58,7 +65,7 @@ function registerToolHandlers(ipcMain, context = {}) {
       }
     }
 
-    pendingApproval.resolve(Boolean(approved));
+    pendingApproval.resolve(isApproved);
   });
 
   // Read current rules (for a settings UI).

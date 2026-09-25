@@ -114,6 +114,20 @@ class MemoryManager {
     return inserted;
   }
 
+  // Fleet stage 7 import: keeps the entry's own id and timestamps. It does not
+  // embed, and nothing rebuilds the vector index afterwards, so recall ranks
+  // an imported entry on its non-semantic signals only (a known gap, listed
+  // in the stage 7 PR). An id already present is left alone.
+  importEntry(entry = {}) {
+    const id = String((entry && entry.id) || '').trim();
+    if (!id) throw new Error('An imported memory entry needs an id.');
+    if (this.store.getById(id)) return { imported: false };
+    const content = String(entry.content || '').trim();
+    if (!content) throw new Error('Memory content is required.');
+    this.store.insert(this.normalizeEntry({ ...entry, id, content }));
+    return { imported: true };
+  }
+
   captureSuccess(what, why, options = {}) {
     const normalizedWhat = String(what || '').trim();
     const normalizedWhy = String(why || '').trim();

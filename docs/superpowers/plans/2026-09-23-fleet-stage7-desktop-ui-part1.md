@@ -49,7 +49,7 @@ Program §3, verbatim:
 Stage 7 spec constraints:
 
 - No new npm dependency (spec §14). `ws` carries the bridge; Ed25519 and SHA-256 come from `node:crypto`.
-- The bridge binds the literal `127.0.0.1` only, default port `18795` (`ports.desktopBridge` in `<configDir>/service.json`); `0` (ephemeral) is accepted for tests only. Upgrades carrying any `Origin` header get 403. HTTP header timeout 10000 ms.
+- The bridge binds the literal `127.0.0.1` only, default port `18796` (`ports.desktopBridge` in `<configDir>/service.json`); `0` (ephemeral) is accepted for tests only. Upgrades carrying any `Origin` header get 403. HTTP header timeout 10000 ms.
 - Pre-auth: each frame ≤ 4096 bytes (length checked before `JSON.parse`), first frame within 2000 ms, handshake within 10000 ms, at most 16 unauthenticated sockets (the oldest is closed with 1013 when a 17th arrives). 5 failed handshakes of one `deviceId` within 60 s refuse that device for 60 s; there is no global lockout.
 - Close codes: 4400 malformed/oversized/silent, 4401 bad signature, 4403 unknown or unpaired device, 4409 another device attached (reason = its label), 4426 protocol mismatch (reason = `"1"`), 4429 locked out. Shutdown sends `{ "t":"bye", "code":"SERVICE_STOPPING" }` then closes 1001.
 - `AUTH_S` = `kl.desktop.hello.v1\n<nodeId>\n<deviceId>\n<port>\n<serverNonce>\n<clientNonce>`; `AUTH_C` = `kl.desktop.auth.v1\n…` with the same fields. The server signs first.
@@ -463,7 +463,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 - Consumes: `base32Encode`, `deriveNodeId` (`src/mesh/node-identity.js`); `adminConfigDir`, `defaultServiceDataDir` (`src/platform/paths.js`); `windowsPowerShellExe` (`src/platform/windows-paths.js`); `WINDOWS_INSPECT_CSHARP` (`src/service/installers.js`); F3's `deriveDeviceId`/`ed25519RawToSpki` when `src/approvals/envelope.js` exists.
 - Produces:
   - `keys.js`: `toB64url(bytes)`, `fromB64url(text) → Buffer` (strict), `deriveDeviceId(raw, prefix = 'd-')`, `ed25519RawToSpki(raw32) → Buffer`, `rawFromPublicKeyObject(keyObject) → Buffer(32)`, `verifyWithRawKey(raw32, message, sig) → boolean`, `verifyWithSpkiHex(hex, message, sig) → boolean`, `fingerprintGroups(id) → 'abcd efgh ijkl mnop'`.
-  - `protocol.js`: `PROTOCOL = 1`, `DEFAULT_DESKTOP_BRIDGE_PORT = 18795`, `LIMITS`, `CLOSE`, `NODE_ID_RE`, `DEVICE_ID_RE`, `NONCE_RE`, `newNonce()`, `buildAuthS(fields)`, `buildAuthC(fields)`, `parseFrame(data, maxBytes) → { frame } | { error }`, `peekFrameId(text) → number | null`, `class BridgeError(code, message)`, `MESSAGES`.
+  - `protocol.js`: `PROTOCOL = 1`, `DEFAULT_DESKTOP_BRIDGE_PORT = 18796`, `LIMITS`, `CLOSE`, `NODE_ID_RE`, `DEVICE_ID_RE`, `NONCE_RE`, `newNonce()`, `buildAuthS(fields)`, `buildAuthC(fields)`, `parseFrame(data, maxBytes) → { frame } | { error }`, `peekFrameId(text) → number | null`, `class BridgeError(code, message)`, `MESSAGES`.
   - `pairing.js`: `PAIR_PREFIX`, `DEVICES_FILE`, `BRIDGE_FILE`, `DEVICES_CONTROLS`, `ADMIN_OWNER_SIDS`, `class PairingError(code, message)`, `defaultDeviceLabel(username)`, `encodePairRequest({ publicKeyRaw, label }) → string`, `decodePairRequest(text) → { deviceId, publicKey, publicKeyRaw, label }`, `emptyDevices()`, `parseDevices(text)`, `validateDevices(doc)`, `upsertDevice(doc, device)`, `removeDevice(doc, deviceId) → { doc, removed }`, `findDevice(doc, deviceId)`, `bridgeFileRecord({ publicKey, port })`, `parseBridgeFile(text, file)`, `writeFileAtomic(file, text, mode)`, `bridgeFilePath({ env, platform })`, `inspectWindowsOwners(paths, { execFile, env }) → { me, entries: [{ owner, link } | null] }`, `checkBridgeFileTrust(file, opts) → { ok } | { ok:false, code, error }`, `readTrustedBridgeFile(file, opts) → { ok:true, record } | { ok:false, code, error }`.
 
 - [ ] **Step 1: Write the failing test**
@@ -590,12 +590,12 @@ describe('desktop-devices.json', () => {
 describe('desktop-bridge.json', () => {
   it('records the node key as DER SPKI hex and checks nodeId', () => {
     const identity = new NodeIdentity({ nodeName: 'gpu-box' });
-    const record = pairing.bridgeFileRecord({ publicKey: identity.publicKey, port: 18795 });
+    const record = pairing.bridgeFileRecord({ publicKey: identity.publicKey, port: 18796 });
     assert.deepStrictEqual(record, {
-      v: 1, nodeId: identity.nodeId, publicKey: identity.publicKey.toString('hex'), host: '127.0.0.1', port: 18795, protocol: 1
+      v: 1, nodeId: identity.nodeId, publicKey: identity.publicKey.toString('hex'), host: '127.0.0.1', port: 18796, protocol: 1
     });
     assert.deepStrictEqual(pairing.parseBridgeFile(JSON.stringify(record)), {
-      nodeId: identity.nodeId, publicKey: record.publicKey, host: '127.0.0.1', port: 18795, protocol: 1
+      nodeId: identity.nodeId, publicKey: record.publicKey, host: '127.0.0.1', port: 18796, protocol: 1
     });
     assert.throws(() => pairing.parseBridgeFile(JSON.stringify({ ...record, nodeId: 'kl-aaaaaaaaaaaaaaaa' })), /nodeId does not match/);
     assert.throws(() => pairing.parseBridgeFile(JSON.stringify({ ...record, host: '0.0.0.0' })), /127\.0\.0\.1/);
@@ -648,7 +648,7 @@ describe('bridge-file trust (POSIX)', { skip: process.platform === 'win32' ? 'PO
   it('reads a trusted file and reports a missing one', () => {
     const identity = new NodeIdentity({ nodeName: 'gpu-box' });
     const file = setup();
-    fs.writeFileSync(file, JSON.stringify(pairing.bridgeFileRecord({ publicKey: identity.publicKey, port: 18795 })));
+    fs.writeFileSync(file, JSON.stringify(pairing.bridgeFileRecord({ publicKey: identity.publicKey, port: 18796 })));
     const env = { KL_TEST_MODE: '1', KL_DESKTOP_BRIDGE_FILE: file };
     const out = pairing.readTrustedBridgeFile(file, { env, platform: 'linux' });
     assert.strictEqual(out.ok, true);
@@ -795,7 +795,7 @@ Create `src/desktop-bridge/protocol.js`:
 const crypto = require('crypto');
 
 const PROTOCOL = 1;
-const DEFAULT_DESKTOP_BRIDGE_PORT = 18795;
+const DEFAULT_DESKTOP_BRIDGE_PORT = 18796;
 const MIB = 1024 * 1024;
 
 const LIMITS = Object.freeze({
@@ -1665,7 +1665,7 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 - Consumes: Task 2 (`protocol.js`, `pairing.js` `DEVICES_FILE`/`DEVICES_CONTROLS`/`parseDevices`/`findDevice`, `keys.js` `fromB64url`/`verifyWithRawKey`), Task 3 (`isRendererEvent`, `PROMPT_EVENTS`), `assertAdminOwned(file, geteuid, adminUid, controls)` (`src/service/config.js`), `NodeIdentity` (`nodeId`, `nodeName`, `sign(bytes) → Buffer`).
 - Produces:
   - `createConnection({ deviceId, label, send, close }) → { id, deviceId, label, live, send(frame), close(code, reason), runs: Set, prompts: { approvals, askUser, directory, canvas }: Sets, gone: Promise, markGone() }`.
-  - `class DesktopBridgeServer extends EventEmitter` — `constructor({ core, identity, cipher, configDir, dataDir, port = 18795, host = '127.0.0.1', version, geteuid, adminUid = 0, approvals = null, profile = 'agent', account, createDispatcher, limits })`; `start() → Promise<{ port }>`; `stop() → Promise<void>`; `forwardAmbient(channel, payload)`; `serviceInfo()`; getter `connected → { deviceId, label } | null`; events `'connected'`, `'disconnected'`. The dispatcher contract (Task 7 implements it): `{ served: { handle, on }, providersConfigured(), handleFrame(conn, frame), onDisconnect(conn), forwardAmbient(channel, payload) }`, created by `createDispatcher({ core, cipher, dataDir, approvals, account, getServiceInfo, getConnection })`.
+  - `class DesktopBridgeServer extends EventEmitter` — `constructor({ core, identity, cipher, configDir, dataDir, port = 18796, host = '127.0.0.1', version, geteuid, adminUid = 0, approvals = null, profile = 'agent', account, createDispatcher, limits })`; `start() → Promise<{ port }>`; `stop() → Promise<void>`; `forwardAmbient(channel, payload)`; `serviceInfo()`; getter `connected → { deviceId, label } | null`; events `'connected'`, `'disconnected'`. The dispatcher contract (Task 7 implements it): `{ served: { handle, on }, providersConfigured(), handleFrame(conn, frame), onDisconnect(conn), forwardAmbient(channel, payload) }`, created by `createDispatcher({ core, cipher, dataDir, approvals, account, getServiceInfo, getConnection })`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1781,9 +1781,9 @@ async function handshake(port, device, { tamper = null, protocol = PROTOCOL } = 
 
 describe('auth strings', () => {
   it('join the fixed fields with newlines, port included', () => {
-    const fields = { nodeId: identity.nodeId, deviceId: makeDevice().deviceId, port: 18795, serverNonce: newNonce(), clientNonce: newNonce() };
-    assert.strictEqual(buildAuthS(fields), ['kl.desktop.hello.v1', fields.nodeId, fields.deviceId, '18795', fields.serverNonce, fields.clientNonce].join('\n'));
-    assert.strictEqual(buildAuthC(fields), ['kl.desktop.auth.v1', fields.nodeId, fields.deviceId, '18795', fields.serverNonce, fields.clientNonce].join('\n'));
+    const fields = { nodeId: identity.nodeId, deviceId: makeDevice().deviceId, port: 18796, serverNonce: newNonce(), clientNonce: newNonce() };
+    assert.strictEqual(buildAuthS(fields), ['kl.desktop.hello.v1', fields.nodeId, fields.deviceId, '18796', fields.serverNonce, fields.clientNonce].join('\n'));
+    assert.strictEqual(buildAuthC(fields), ['kl.desktop.auth.v1', fields.nodeId, fields.deviceId, '18796', fields.serverNonce, fields.clientNonce].join('\n'));
     assert.throws(() => buildAuthS({ ...fields, port: 0 }), /malformed/);
     assert.throws(() => buildAuthC({ ...fields, clientNonce: 'short' }), /malformed/);
   });

@@ -49,7 +49,7 @@ Program §3, verbatim:
 Stage 7 spec constraints:
 
 - No new npm dependency (spec §14). `ws` carries the bridge; Ed25519 and SHA-256 come from `node:crypto`.
-- The bridge binds the literal `127.0.0.1` only, default port `18795` (`ports.desktopBridge` in `<configDir>/service.json`); `0` (ephemeral) is accepted for tests only. Upgrades carrying any `Origin` header get 403. HTTP header timeout 10000 ms.
+- The bridge binds the literal `127.0.0.1` only, default port `18796` (`ports.desktopBridge` in `<configDir>/service.json`); `0` (ephemeral) is accepted for tests only. Upgrades carrying any `Origin` header get 403. HTTP header timeout 10000 ms.
 - Pre-auth: each frame ≤ 4096 bytes (length checked before `JSON.parse`), first frame within 2000 ms, handshake within 10000 ms, at most 16 unauthenticated sockets (the oldest is closed with 1013 when a 17th arrives). 5 failed handshakes of one `deviceId` within 60 s refuse that device for 60 s; there is no global lockout.
 - Close codes: 4400 malformed/oversized/silent, 4401 bad signature, 4403 unknown or unpaired device, 4409 another device attached (reason = its label), 4426 protocol mismatch (reason = `"1"`), 4429 locked out. Shutdown sends `{ "t":"bye", "code":"SERVICE_STOPPING" }` then closes 1001.
 - `AUTH_S` = `kl.desktop.hello.v1\n<nodeId>\n<deviceId>\n<port>\n<serverNonce>\n<clientNonce>`; `AUTH_C` = `kl.desktop.auth.v1\n…` with the same fields. The server signs first.
@@ -568,7 +568,7 @@ describe('desktop controller', () => {
   it('attach, detach and standalone-once relaunch; in test mode they print KL_RELAUNCH_REQUESTED', async () => {
     const { controller, state, app, out } = controllerFor({ env: { KL_TEST_MODE: '1' }, readBridgeFile: () => ({ ok: false }) });
     assert.strictEqual((await controller.attach()).code, 'NOT_PAIRED');
-    state.setPairing({ deviceId: 'kld-abcdefghijklmnop', publicKey: 'x', privateKeySealed: 'y', label: 'desk', service: { nodeId: identity.nodeId, publicKey: identity.publicKey.toString('hex'), port: 18795, pairedAt: '2026-09-23T14:02:11Z' } });
+    state.setPairing({ deviceId: 'kld-abcdefghijklmnop', publicKey: 'x', privateKeySealed: 'y', label: 'desk', service: { nodeId: identity.nodeId, publicKey: identity.publicKey.toString('hex'), port: 18796, pairedAt: '2026-09-23T14:02:11Z' } });
     assert.deepStrictEqual(await controller.attach(), { ok: true, relaunching: true });
     assert.strictEqual(state.mode, 'attached');
     assert.deepStrictEqual(out, ['KL_RELAUNCH_REQUESTED\n']);
@@ -1023,7 +1023,7 @@ class FakeClient extends EventEmitter {
     super();
     this.connected = false;
     this.service = null;
-    this.port = 18795;
+    this.port = 18796;
     this.invoked = [];
     this.sent = [];
     this.calls = [];
@@ -1052,7 +1052,7 @@ class FakeClient extends EventEmitter {
   }
   drop() {
     this.connected = false;
-    this.emit('state', { status: 'disconnected', code: 'SERVICE_UNREACHABLE', error: 'The local King Louie service is not reachable (127.0.0.1:18795).', service: this.service, nextRetryAt: Date.now() + 1000 });
+    this.emit('state', { status: 'disconnected', code: 'SERVICE_UNREACHABLE', error: 'The local King Louie service is not reachable (127.0.0.1:18796).', service: this.service, nextRetryAt: Date.now() + 1000 });
   }
 }
 
@@ -1073,7 +1073,7 @@ function setup() {
   const safeStorage = { isEncryptionAvailable: () => true, encryptString: (s) => Buffer.from(s), decryptString: (b) => Buffer.from(b).toString() };
   const state = openDesktopState(userDataDir, safeStorage, { storeFactory: ({ name, cwd, defaults }) => new JsonFileStore({ dir: cwd, name, defaults }) });
   state.setMode('attached');
-  state.setPairing({ deviceId: 'kld-abcdefghijklmnop', publicKey: 'x', privateKeySealed: 'y', label: 'desk', service: { nodeId: 'kl-abcdefghijklmnop', publicKey: 'aa', port: 18795, pairedAt: '2026-09-23T14:02:11Z' } });
+  state.setPairing({ deviceId: 'kld-abcdefghijklmnop', publicKey: 'x', privateKeySealed: 'y', label: 'desk', service: { nodeId: 'kl-abcdefghijklmnop', publicKey: 'aa', port: 18796, pairedAt: '2026-09-23T14:02:11Z' } });
   const client = new FakeClient();
   const app = { getPath: () => userDataDir, relaunch() {}, exit() {}, quit() {} };
   const host = startAttachedHost({ app, ipcMain, safeStorage, dialog, getWindow: () => window, state, env: {}, platform: 'linux', clientFactory: () => client });
@@ -1219,7 +1219,7 @@ function startAttachedHost(deps) {
   controller.setClient(client);
   const openRuns = new Map(); // responseId -> chatId
 
-  const port = () => (client && client.port) || (state.pairing && state.pairing.service && state.pairing.service.port) || 18795;
+  const port = () => (client && client.port) || (state.pairing && state.pairing.service && state.pairing.service.port) || 18796;
   const send = (channel, payload) => {
     const win = getWindow();
     if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
@@ -1808,8 +1808,8 @@ describe('describeServicePane', () => {
     assert.strictEqual(waiting.command, 'sudo king-louie-service desktop pair klpair1.x');
     assert.ok(waiting.lines.includes('This desktop: abcd efgh ijkl mnop'));
     assert.deepStrictEqual(waiting.actions, [{ id: 'pairConfirm', label: 'Confirm', disabled: true }, { id: 'pairCancel', label: 'Cancel' }]);
-    const found = describeServicePane({ view: 'pairing', pendingPair: { request: 'r', command: 'c', deviceFingerprint: 'a', service: { fingerprint: 'wxyz 2345 6789 abcd', port: 18795 } } });
-    assert.ok(found.lines.includes('Service: wxyz 2345 6789 abcd (port 18795)'));
+    const found = describeServicePane({ view: 'pairing', pendingPair: { request: 'r', command: 'c', deviceFingerprint: 'a', service: { fingerprint: 'wxyz 2345 6789 abcd', port: 18796 } } });
+    assert.ok(found.lines.includes('Service: wxyz 2345 6789 abcd (port 18796)'));
     assert.strictEqual(found.actions[0].disabled, false);
   });
 
@@ -1845,8 +1845,8 @@ describe('describeServicePane', () => {
   });
 
   it('attached, not connected: the error, Retry now, Use standalone this time, Detach', () => {
-    const m = describeServicePane({ view: 'attached-disconnected', connection: { status: 'disconnected', error: 'The local King Louie service is not reachable (127.0.0.1:18795).', nextRetryAt: null } });
-    assert.strictEqual(m.lines[0], 'The local King Louie service is not reachable (127.0.0.1:18795).');
+    const m = describeServicePane({ view: 'attached-disconnected', connection: { status: 'disconnected', error: 'The local King Louie service is not reachable (127.0.0.1:18796).', nextRetryAt: null } });
+    assert.strictEqual(m.lines[0], 'The local King Louie service is not reachable (127.0.0.1:18796).');
     assert.deepStrictEqual(m.actions.map((a) => a.label), ['Retry now', 'Use standalone this time', 'Detach']);
   });
 
@@ -1977,7 +1977,7 @@ function describeServicePane(status = {}) {
       break;
     case 'attached-disconnected': {
       const c = s.connection || {};
-      lines.push(c.error || MESSAGES.SERVICE_UNREACHABLE(18795));
+      lines.push(c.error || MESSAGES.SERVICE_UNREACHABLE(18796));
       if (c.nextRetryAt) lines.push(`Next retry at ${new Date(c.nextRetryAt).toLocaleTimeString()}.`);
       actions.push({ id: 'retry', label: 'Retry now' }, { id: 'standaloneOnce', label: 'Use standalone this time' }, { id: 'detach', label: 'Detach' });
       break;
@@ -2933,7 +2933,7 @@ Append at the end of `CLAUDE.md`:
 
 The desktop app can be a window onto a local `king-louie-service` (fleet stage 7,
 spec `docs/superpowers/specs/2026-09-23-fleet-stage7-desktop-ui.md`). The service
-opens a loopback desktop bridge (`127.0.0.1:18795`, `features.desktopBridge` in
+opens a loopback desktop bridge (`127.0.0.1:18796`, `features.desktopBridge` in
 `<configDir>/service.json`); in attached mode `main.js` builds no core and
 `src/ipc/attached-host.js` proxies the allowlisted channels
 (`src/desktop-bridge/allowlist.js`; a stage whose domain must work while attached
