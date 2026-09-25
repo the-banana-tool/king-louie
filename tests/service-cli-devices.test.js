@@ -214,6 +214,36 @@ describe('enroll-device ends without enrolling', () => {
     assert.equal(await t.running, 1);
   });
 
+  it('an audit failure after y removes the new approver file before telling the relay refused', async () => {
+    const t = await start();
+    t.claimRight();
+    await t.prompted();
+    // A file where the audit directory must go: the audit append cannot land.
+    fs.writeFileSync(path.join(t.n.dataDir, 'audit'), 'not a dir');
+    t.io.stdin.write('y\n');
+    assert.equal(await t.running, 1);
+    assert.match(t.io.text.err, new RegExp(`Enrolling ${t.phone.deviceId} failed: `));
+    assert.match(t.io.text.err, /rolled back/);
+    assert.equal(fs.existsSync(t.approverFile), false, 'no file existed before, so none after');
+    assert.equal((await t.done()).refused, true);
+  });
+
+  it('an audit failure after y restores the exact bytes of an approver file that existed before', async () => {
+    const t = await start();
+    // Same device, already enrolled earlier (e.g. a re-enroll), in an
+    // idiosyncratic layout the rewrite would not reproduce.
+    const before = Buffer.from(`${JSON.stringify(t.phone.approverRecord())}\n\n`);
+    fs.writeFileSync(t.approverFile, before, { mode: 0o644 });
+    t.claimRight();
+    await t.prompted();
+    fs.writeFileSync(path.join(t.n.dataDir, 'audit'), 'not a dir');
+    t.io.stdin.write('y\n');
+    assert.equal(await t.running, 1);
+    assert.match(t.io.text.err, /rolled back/);
+    assert.deepEqual(fs.readFileSync(t.approverFile), before);
+    assert.equal((await t.done()).refused, true);
+  });
+
   it('a failure writing the approver after y tells the relay refused and exits non-zero', async () => {
     const t = await start();
     t.claimRight();

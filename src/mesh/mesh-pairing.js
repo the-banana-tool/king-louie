@@ -44,20 +44,22 @@ const NONCE_RE = /^[0-9a-f]{32}$/;
 const PROOF_RE = /^[0-9a-f]{64}$/;
 
 // Each side proves it knows the code with
-//   HMAC-SHA256(secret, nonce || JCS({ publicKey, peerId, tlsFingerprint }))
-// over the identity it presents in the same message. Binding the identity
-// means an on-path attacker who forwards a proof cannot swap in its own key,
-// peer id or TLS fingerprint: the code is exchanged out of band, so it cannot
-// compute a proof over them. The nonce is fixed-length hex, so the
-// concatenation is unambiguous. (A peer running the older, unbound proof
-// fails closed against this one: its proofs never verify.)
+//   HMAC-SHA256(secret, nonce || JCS(identity))
+// over the whole identity object it presents in the same message (key, peer
+// id, TLS fingerprint, display name, capabilities, node id and name — every
+// field as sent). An on-path attacker who forwards a proof cannot change any
+// of it: the code is exchanged out of band, so it cannot compute a proof over
+// anything else. The nonce is fixed-length hex, so the concatenation is
+// unambiguous. (A peer running the older, unbound proof fails closed against
+// this one: its proofs never verify.)
 function pairingProof(secret, nonce, identity) {
-  const bound = canonicalize({
-    publicKey: identity.publicKey,
-    peerId: identity.peerId,
-    tlsFingerprint: identity.tlsFingerprint || null
-  });
-  return crypto.createHmac('sha256', secret).update(nonce).update(bound).digest('hex');
+  return crypto.createHmac('sha256', secret).update(nonce).update(canonicalize(identity)).digest('hex');
+}
+
+// The identity exactly as it will arrive: what JSON carries (undefined
+// fields dropped), so both ends canonicalize the same object.
+function wireIdentity(identity) {
+  return JSON.parse(JSON.stringify(identity));
 }
 
 // Recomputes the proof over the identity actually received. Anything
@@ -177,7 +179,7 @@ class MeshPairing {
           }
         }
         const nonce = crypto.randomBytes(16).toString('hex');
-        const identity = this.identity.getPublicIdentity();
+        const identity = wireIdentity(this.identity.getPublicIdentity());
 
         ws.send(JSON.stringify({
           type: 'pair:request',
@@ -309,7 +311,7 @@ class MeshPairing {
 
     // Send back our proof, bound to the identity we answer with.
     const responseNonce = crypto.randomBytes(16).toString('hex');
-    const ownIdentity = this.identity.getPublicIdentity();
+    const ownIdentity = wireIdentity(this.identity.getPublicIdentity());
 
     ws.send(JSON.stringify({
       type: 'pair:accept',

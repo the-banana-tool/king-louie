@@ -13,6 +13,7 @@ const { decodeQr } = require('../src/approvals/messages');
 const { NodeIdentity } = require('../src/mesh/node-identity');
 const { derivePeerId } = require('../src/mesh/mesh-identity');
 const { MeshIdentity } = require('../src/mesh/mesh-identity');
+const { MeshPairing } = require('../src/mesh/mesh-pairing');
 const { JsonFileStore } = require('../src/platform/json-file-store');
 
 const cleanups = [];
@@ -263,6 +264,27 @@ describe('pair over TLS (the relay proves its certificate)', () => {
     const io = streamIo();
     assert.equal(await runPair({ url, dataDir: nodeDirs.dataDir, io, deps: { code } }), 1);
     assert.match(io.text.err, /certificate the relay served does not match the fingerprint it claimed/);
+    // The relay already recorded the node: the operator is told how to retry.
+    assert.match(io.text.err, /relay remove-node unnamed-node` before trying again/);
+    assert.equal(pinOf(nodeDirs.dataDir), undefined);
+  });
+
+  it('refuses, storing nothing, when the served certificate cannot be read', async () => {
+    const { code, url } = await tlsRelay();
+    const nodeDirs = dirs();
+    const io = streamIo();
+    // As if the socket exposed no peer certificate (no _socket, no
+    // getPeerCertificate, or an empty raw): nothing to check the claim against.
+    const original = MeshPairing.prototype.acceptCode;
+    MeshPairing.prototype.acceptCode = async function stubbed(...args) {
+      return { ...(await original.apply(this, args)), servedTlsFingerprint: null };
+    };
+    try {
+      assert.equal(await runPair({ url, dataDir: nodeDirs.dataDir, io, deps: { code } }), 1);
+    } finally {
+      MeshPairing.prototype.acceptCode = original;
+    }
+    assert.match(io.text.err, /could not read the certificate the relay served/);
     assert.equal(pinOf(nodeDirs.dataDir), undefined);
   });
 

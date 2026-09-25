@@ -89,7 +89,7 @@ async function runEnrollDevice({ dataDir, configDir = adminConfigDir({ dataDir }
   const expired = new AbortController();
   const expiry = setTimeout(() => expired.abort(), deadlineMs);
   if (typeof expiry.unref === 'function') expiry.unref();
-  const finish =(claim, refused) => courier.call('enroll.done', { envelope: buildEnrollDone({ identity, codeId, enroll: refused ? null : claim, refused }) })
+  const finish = (claim, refused) => courier.call('enroll.done', { envelope: buildEnrollDone({ identity, codeId, enroll: refused ? null : claim, refused }) })
     .catch((err) => io.stderr.write(`Could not tell the relay: ${err.message}\n`));
   try {
     const claimed = new Promise((resolve) => {
@@ -143,8 +143,12 @@ async function runEnrollDevice({ dataDir, configDir = adminConfigDir({ dataDir }
       io.stdout.write('Not enrolled.\n');
       return 1;
     }
+    const approverFile = path.join(configDir, 'approvers', `${device.device_id}.json`);
+    let prior;
     let wroteApprover = false;
     try {
+      // What was there before, so a failure below can put it back exactly.
+      prior = readPriorFile(approverFile);
       admin.writeApprover({
         v: 1,
         device_id: device.device_id,
@@ -160,11 +164,19 @@ async function runEnrollDevice({ dataDir, configDir = adminConfigDir({ dataDir }
       wroteApprover = true;
       await auditLedger(dataDir, identity, written).append({ kind: 'device.enrolled', data: { device_id: device.device_id, by: 'console', envelope: claim } });
     } catch (err) {
-      await finish(null, true);
       io.stderr.write(`Enrolling ${device.device_id} failed: ${err.message}\n`);
       if (wroteApprover) {
-        io.stderr.write(`Its approver file was written but not audited; run "device revoke ${device.device_id}" unless you mean to keep it.\n`);
+        // The phone must never be told "refused" while this node trusts it:
+        // the approver file goes back to what it was before telling it.
+        try {
+          restorePriorFile(approverFile, prior);
+        } catch (rollbackErr) {
+          io.stderr.write(`Could not roll back ${approverFile}: ${rollbackErr.message}. ${device.device_id} IS trusted on this node; run "device revoke ${device.device_id}" now.\n`);
+          return 1;
+        }
+        io.stderr.write(`The approver file was rolled back; ${device.device_id} is not enrolled.\n`);
       }
+      await finish(null, true);
       return 1;
     }
     await finish(claim, false);
@@ -175,6 +187,28 @@ async function runEnrollDevice({ dataDir, configDir = adminConfigDir({ dataDir }
     courier.stop();
     restoreDataDirOwnership(dataDir, written, io.ownership);
   }
+}
+
+// { bytes, mode } of an existing approver file, or null when there is none.
+// Anything but a regular file (or no file) is refused: there would be no
+// way to put it back as it was.
+function readPriorFile(file) {
+  let st;
+  try {
+    st = fs.lstatSync(file);
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    throw err;
+  }
+  if (!st.isFile()) throw new Error(`${file} exists and is not a regular file`);
+  return { bytes: fs.readFileSync(file), mode: st.mode & 0o777 };
+}
+
+// Puts back exactly what readPriorFile() saw: the same bytes, or no file.
+function restorePriorFile(file, prior) {
+  const { writeFileAtomic } = require('../../approvals/approver-store');
+  if (prior) writeFileAtomic(file, prior.bytes, prior.mode);
+  else fs.rmSync(file, { force: true });
 }
 
 function describeState(store, record) {

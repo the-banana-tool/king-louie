@@ -109,13 +109,21 @@ async function runPair({ url, dataDir, io, deps = {} }) {
     // it cannot be swapped on path; this checks the claim against the
     // certificate this connection was actually served. Over TLS a missing
     // claim would leave nothing to pin, so it is refused too.
+    // The certificate cannot be read → refuse too: fail closed, never pin
+    // a claim nothing checked. By now the relay has already recorded this
+    // node, so a retry first needs it removed there.
     if (useTls) {
+      const retry = `On the relay host run \`king-louie-service relay remove-node ${nodeCfg.name}\` before trying again.\n`;
       if (!info.tlsFingerprint) {
-        io.stderr.write('Pairing failed: the relay did not present a TLS fingerprint. Refusing to pair.\n');
+        io.stderr.write(`Pairing failed: the relay did not present a TLS fingerprint. Refusing to pair.\n${retry}`);
         return 1;
       }
-      if (info.servedTlsFingerprint && info.servedTlsFingerprint !== info.tlsFingerprint) {
-        io.stderr.write('Pairing failed: the certificate the relay served does not match the fingerprint it claimed. Refusing to pair.\n');
+      if (!info.servedTlsFingerprint) {
+        io.stderr.write(`Pairing failed: could not read the certificate the relay served. Refusing to pair.\n${retry}`);
+        return 1;
+      }
+      if (info.servedTlsFingerprint !== info.tlsFingerprint) {
+        io.stderr.write(`Pairing failed: the certificate the relay served does not match the fingerprint it claimed. Refusing to pair.\n${retry}`);
         return 1;
       }
     }

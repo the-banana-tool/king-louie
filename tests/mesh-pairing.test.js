@@ -9,12 +9,11 @@ const { wrapHandler } = require('../src/ipc/wrap-handler');
 const { registerMeshHandlers } = require('../src/ipc/mesh-handlers');
 const { canonicalize } = require('../src/platform/jcs');
 
-// The proof a side presents: HMAC(secret, nonce || JCS({ publicKey, peerId,
-// tlsFingerprint })) over the identity it sends. Computed here from scratch so
+// The proof a side presents: HMAC(secret, nonce || JCS(identity)) over the
+// whole identity object it sends, every field. Computed here from scratch so
 // the tests pin the wire format rather than reuse the module's own helper.
 function boundProof(secret, nonce, identity) {
-  const bound = canonicalize({ publicKey: identity.publicKey, peerId: identity.peerId, tlsFingerprint: identity.tlsFingerprint || null });
-  return crypto.createHmac('sha256', secret).update(nonce).update(bound).digest('hex');
+  return crypto.createHmac('sha256', secret).update(nonce).update(canonicalize(identity)).digest('hex');
 }
 
 describe('MeshPairing', () => {
@@ -267,7 +266,12 @@ describe('MeshPairing', () => {
         'whole identity': attacker,
         'key and peer id': { ...real, publicKey: attacker.publicKey, peerId: attacker.peerId },
         'tls fingerprint': { ...real, tlsFingerprint: attacker.tlsFingerprint },
-        'tls fingerprint dropped': { ...real, tlsFingerprint: null }
+        'tls fingerprint dropped': { ...real, tlsFingerprint: null },
+        'display name': { ...real, displayName: 'Mallory' },
+        capabilities: { ...real, capabilities: ['gpu', 'admin'] },
+        'node name added': { ...real, nodeName: 'web-01' },
+        'node id added': { ...real, nodeId: 'kl-aaaaaaaaaaaaaaaa' },
+        'extra field': { ...real, note: 'x' }
       };
       for (const [what, identity] of Object.entries(swaps)) {
         const sent = [];
@@ -380,6 +384,23 @@ describe('MeshPairing', () => {
     it('swapping the answering TLS fingerprint: B refuses', async () => {
       await assert.rejects(pairThrough(swapIn('pair:accept', (id) => ({ ...id, tlsFingerprint: attacker.tlsFingerprint }))), /Invalid pairing proof/);
       assert.strictEqual(transportB.trustedPeers.size, 0);
+    });
+
+    it('changing the answering display name or capabilities: B refuses', async () => {
+      await assert.rejects(pairThrough(swapIn('pair:accept', (id) => ({ ...id, displayName: 'Trusted server' }))), /Invalid pairing proof/);
+      assert.strictEqual(transportB.trustedPeers.size, 0);
+      if (pairingA) pairingA.cleanup();
+      if (transportA) await transportA.stop().catch(() => {});
+      for (const c of mitm.clients) c.terminate();
+      await new Promise((r) => mitm.close(r));
+      mitm = null;
+      await assert.rejects(pairThrough(swapIn('pair:accept', (id) => ({ ...id, capabilities: ['gpu', 'admin'] }))), /Invalid pairing proof/);
+      assert.strictEqual(transportB.trustedPeers.size, 0);
+    });
+
+    it('changing the requester display name: A refuses', async () => {
+      await assert.rejects(pairThrough(swapIn('pair:request', (id) => ({ ...id, displayName: 'Trusted server' }))), /no_matching_code/);
+      assert.strictEqual(transportA.trustedPeers.size, 0);
     });
   });
 
