@@ -1,6 +1,9 @@
 // src/cases/case-runtime.js
-// The one object core holds for cases: turn lifecycle (spec §5.5), lock,
-// commits, and read access to each case's ledger, brief and records.
+// The one object core holds for cases: turn lifecycle, lock and commits
+// (stage 1), plus the stage-2 machinery for unattended work: status,
+// re-orientation triggers, turn hooks, budgets, questions and wake-ups
+// (docs/superpowers/specs/2026-09-23-cases-stage2-unattended.md §3.10).
+const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -10,6 +13,13 @@ const { FactLedger } = require('./ledger');
 const { Brief } = require('./brief');
 const { CaseRecords } = require('./records');
 const { buildOrientation, DEFAULT_MAX_CHARS } = require('./orientation');
+const { canTransition, check: checkStatus, StatusError, AUTONOMY_KEY } = require('./status');
+const { Budget, CATEGORIES } = require('./budget');
+const { WakeupStore } = require('./wakeups');
+const { QuestionStore } = require('./questions');
+const { detectTriggers, emptyBaseline, underminedKeys } = require('./triggers');
+const { readJson, writeJsonIfChanged } = require('./jsonfile');
+const { resolveCaseSettings } = require('./defaults');
 const { createLogger } = require('../logging');
 
 const log = createLogger('cases/runtime');
@@ -70,21 +80,58 @@ function readLock(lock) {
   }
 }
 
+const HOOK_PHASES = Object.freeze(['turn-start', 'owner-message']);
+const STOPS_WORK = new Set(['paused', 'done', 'abandoned']);
+
 class CaseRuntime {
-  constructor({ root, staleLockMs = 30 * 60 * 1000, orientationMaxChars = DEFAULT_MAX_CHARS }) {
+  constructor({
+    root, staleLockMs = 30 * 60 * 1000, orientationMaxChars = DEFAULT_MAX_CHARS, getSettings = null, now = null, host = null
+  } = {}) {
     this.store = new CaseStore({ root });
     this.staleLockMs = staleLockMs;
     this.orientationMaxChars = orientationMaxChars;
     // turnId -> { dir, timer }: the locks this runtime holds right now.
     this.held = new Map();
+    this.getSettings = typeof getSettings === 'function' ? getSettings : () => ({});
+    this._clock = typeof now === 'function' ? now : () => new Date();
+    // Host services, all optional (spec §3.10): inferenceRouter,
+    // resolveInference, createToolExecutor, toolRegistry, AgentLoop,
+    // getUsageTracker, hasProviderToken, notify, uiToast, interactive,
+    // getExecutorRegistry. Without them wake-ups and routed providers are off.
+    this.host = host || null;
+    // caseId -> the turn this process is running on that case.
+    this.turns = new Map();
+    this.hooks = [];
   }
 
   get root() {
     return this.store.root;
   }
 
-  createCase(opts) {
-    return this.store.create(opts);
+  now() {
+    return this._clock();
+  }
+
+  settings() {
+    let raw = {};
+    try {
+      raw = this.getSettings()?.cases || {};
+    } catch (err) {
+      log.warn(`Reading case settings failed: ${err.message}`);
+    }
+    return resolveCaseSettings(raw);
+  }
+
+  // The wake-up sweep lists cases; a case still being created has no first commit yet,
+  // so a sweep that commits it would make `create` fail with "nothing to commit".
+  // `runDueWakeups` skips the whole tick while any creation is in flight.
+  async createCase(opts) {
+    this.creating = (this.creating || 0) + 1;
+    try {
+      return await this.store.create(opts);
+    } finally {
+      this.creating -= 1;
+    }
   }
 
   listCases() {
@@ -103,7 +150,35 @@ class CaseRuntime {
 
   records(id) { return new CaseRecords(this.getCase(id).dir); }
 
-  orientation(id) {
+  budget(id) {
+    const meta = this.getCase(id);
+    const cfg = this.settings();
+    return new Budget(meta.dir, {
+      defaults: cfg.budgets,
+      overrides: meta.budget && typeof meta.budget === 'object' ? meta.budget : {},
+      createdAt: meta.created,
+      now: () => this.now(),
+      timeZone: cfg.timeZone
+    });
+  }
+
+  wakeups(id) {
+    const meta = this.getCase(id);
+    const cfg = this.settings();
+    return new WakeupStore(meta.dir, {
+      now: () => this.now(),
+      timeZone: cfg.timeZone,
+      dailyAt: cfg.wakeups.dailyAt,
+      backoffMinutes: cfg.wakeups.retryBackoffMinutes
+    });
+  }
+
+  questions(id) {
+    const meta = this.getCase(id);
+    return new QuestionStore(meta.dir, { now: () => this.now(), caseId: meta.id });
+  }
+
+  orientation(id, { triggers = [], hookNotes = [] } = {}) {
     const meta = this.getCase(id);
     const { facts, errors } = new FactLedger(meta.dir).view();
     let brief;
@@ -113,6 +188,19 @@ class CaseRuntime {
       brief = { error: err.message };
     }
     const records = new CaseRecords(meta.dir);
+    const safely = (label, fn, fallback) => {
+      try {
+        return fn();
+      } catch (err) {
+        log.warn(`Orientation for ${meta.slug}: ${label} unavailable: ${err.message}`);
+        return fallback;
+      }
+    };
+    const budget = safely('budget', () => this.budget(meta.id).status(), null);
+    const questions = safely('questions', () => this.questions(meta.id).open(), []);
+    const nextWakeup = safely('wake-ups', () => this.wakeups(meta.id).list()
+      .slice()
+      .sort((a, b) => Date.parse(a.nextAt) - Date.parse(b.nextAt))[0] || null, null);
     return buildOrientation({
       meta,
       brief,
@@ -120,8 +208,29 @@ class CaseRuntime {
       decisions: records.decisions(),
       lastJournal: records.lastJournal(),
       ledgerErrors: errors,
-      maxChars: this.orientationMaxChars
+      maxChars: this.orientationMaxChars,
+      triggers,
+      hookNotes,
+      statusReason: meta.statusReason || null,
+      failure: this._failureReport(meta),
+      questions,
+      budget,
+      nextWakeup,
+      now: this.now()
     });
+  }
+
+  _failureReport(meta) {
+    const ref = meta.status === 'needs-direction' ? meta.statusReason?.ref : null;
+    if (typeof ref !== 'string' || !ref) return null;
+    const base = path.resolve(meta.dir);
+    const file = path.resolve(base, ref);
+    if (!file.startsWith(base + path.sep)) return null;
+    try {
+      return { file: ref, text: fs.readFileSync(file, 'utf8') };
+    } catch {
+      return null;
+    }
   }
 
   otherCaseFacts(id) {
@@ -134,9 +243,106 @@ class CaseRuntime {
   completeGating(id) {
     const meta = this.getCase(id);
     new Brief(meta.dir).completeGating();
-    if (meta.status === 'draft') this.store.updateMeta(meta.id, { status: 'active' });
+    if (meta.status === 'draft') this.setStatus(meta.id, 'active', { kind: 'gating' });
     return this.getCase(meta.id);
   }
+
+  // ---- Status (spec §3.1) ----
+
+  setStatus(id, status, { kind, by = 'runtime', ref = null, note = '', failureClass = null } = {}) {
+    const meta = this.getCase(id);
+    if (!canTransition(meta.status, status, by, kind)) {
+      throw new StatusError('BAD_TRANSITION', `A case cannot go from ${meta.status} to ${status} (${by}, ${kind || 'no reason'}).`);
+    }
+    if (status === 'active' && kind === 'budget-grant' && meta.statusReason?.kind !== 'budget') {
+      throw new StatusError('BAD_TRANSITION', 'A budget grant lifts only a budget pause.');
+    }
+    if (status === 'active') {
+      const exhausted = this.budget(meta.id).exhausted();
+      if (exhausted.length) throw new StatusError('BUDGET_EXHAUSTED', `Raise the ${exhausted[0]} budget first.`);
+    }
+    const statusReason = {
+      kind,
+      by,
+      ref: ref ?? null,
+      note: String(note || ''),
+      failureClass: failureClass ?? null,
+      at: this.now().toISOString()
+    };
+    const updated = this.store.updateMeta(meta.id, { status, statusReason });
+    this._notify('case:changed', { caseId: meta.id, what: 'status' });
+    if (STOPS_WORK.has(status)) {
+      this._abortTurn(meta.id, `case ${status}`);
+      this._cancelExecutorJobs(meta.id, `case ${status}`);
+    }
+    if (status === 'done' || status === 'abandoned') this.wakeups(meta.id).cancelAll();
+    if (status === 'active') this.ensureDefaultWakeups(meta.id);
+    return updated;
+  }
+
+  assertWritable(id, op) {
+    const meta = this.getCase(id);
+    return checkStatus(meta.status, op, {
+      autonomyAllows: this.autonomyAllows(meta.id, 'retry-within-envelope'),
+      reason: meta.statusReason || null
+    });
+  }
+
+  autonomyAllows(id, action) {
+    const meta = this.getCase(id);
+    if (meta.status !== 'needs-direction') return false;
+    const key = AUTONOMY_KEY[meta.statusReason?.failureClass];
+    return Boolean(key) && meta.autonomy?.[key] === action;
+  }
+
+  requireReoriented(id) {
+    const meta = this.getCase(id);
+    const turn = this.turns.get(meta.id);
+    if (!turn) {
+      return { ok: false, error: 'No case turn is running for this case, so re-orientation cannot be checked. Run this inside a case turn.' };
+    }
+    if (turn.reorientPending) {
+      const pending = (turn.triggers || []).filter((t) => t.blocking).map((t) => t.detail).join(' ');
+      return { ok: false, error: `Re-orientation is required first: ${pending} Call Reorient before Recommend, Decide or Fail.` };
+    }
+    return null;
+  }
+
+  ensureDefaultWakeups(id) {
+    const meta = this.getCase(id);
+    const store = this.wakeups(meta.id);
+    store.ensure('daily-orientation', { every: 86400000, payload: { key: 'daily' } });
+    if (this.budget(meta.id).limitFor('deadline')) {
+      store.ensure('deadline-check', { every: 86400000, payload: { key: 'deadline' } });
+    }
+  }
+
+  _notify(event, payload) {
+    try {
+      if (typeof this.host?.notify === 'function') this.host.notify(event, payload);
+    } catch (err) {
+      log.warn(`Notifying ${event} failed: ${err.message}`);
+    }
+  }
+
+  _abortTurn(caseId, reason) {
+    const turn = this.turns.get(caseId);
+    if (turn && turn.source === 'wakeup' && typeof turn.abort === 'function') turn.abort(reason);
+  }
+
+  _cancelExecutorJobs(caseId, reason) {
+    try {
+      const registry = typeof this.host?.getExecutorRegistry === 'function' ? this.host.getExecutorRegistry() : null;
+      if (registry && typeof registry.cancelOpenJobs === 'function') {
+        Promise.resolve(registry.cancelOpenJobs(caseId, reason))
+          .catch((err) => log.warn(`Cancelling executor jobs for ${caseId} failed: ${err.message}`));
+      }
+    } catch (err) {
+      log.warn(`Cancelling executor jobs for ${caseId} failed: ${err.message}`);
+    }
+  }
+
+  // ---- Lock ----
 
   _lockPath(dir) {
     return path.join(dir, '.kl', 'lock');
@@ -198,8 +404,14 @@ class CaseRuntime {
     this.held.set(turnId, { dir, timer });
   }
 
+  _holdsLock(dir) {
+    for (const h of this.held.values()) if (h.dir === dir) return true;
+    return false;
+  }
+
   releaseAll() {
     for (const [turnId, { dir }] of [...this.held]) this._release(dir, turnId);
+    this.turns.clear();
   }
 
   _release(dir, turnId) {
@@ -217,26 +429,430 @@ class CaseRuntime {
     }
   }
 
-  async beginTurn(id, { turnId }) {
+  // ---- Turn hooks (spec §3.3, program §4.20) ----
+
+  addTurnStartHook(name, fn, { phase = 'turn-start' } = {}) {
+    if (typeof name !== 'string' || !name) throw new Error('addTurnStartHook needs a name.');
+    if (typeof fn !== 'function') throw new Error('addTurnStartHook needs a function.');
+    if (!HOOK_PHASES.includes(phase)) throw new Error(`Unknown hook phase "${phase}". Phases: ${HOOK_PHASES.join(', ')}.`);
+    this.hooks = this.hooks.filter((h) => h.name !== name);
+    this.hooks.push({ name, fn, phase });
+  }
+
+  async _runHooks(phase, { caseId, dir, turnId, source, ownerMessage }) {
+    const notes = [];
+    const triggers = [];
+    for (const hook of this.hooks.filter((h) => h.phase === phase)) {
+      try {
+        const out = await hook.fn({
+          runtime: this, caseId, dir, meta: this.getCase(caseId), turnId, source, ownerMessage, now: this.now()
+        });
+        if (Array.isArray(out?.notes)) notes.push(...out.notes.map(String));
+        if (Array.isArray(out?.triggers)) {
+          triggers.push(...out.triggers.filter((t) => t && typeof t.kind === 'string' && typeof t.key === 'string'));
+        }
+      } catch (err) {
+        log.warn(`Turn-start hook ${hook.name} failed on case ${caseId}: ${err.message}`);
+        notes.push(`Turn-start hook ${hook.name} failed: ${err.message}`);
+      }
+    }
+    return { notes, triggers };
+  }
+
+  async runOwnerMessageHooks(turn) {
+    const hook = await this._runHooks('owner-message', {
+      caseId: turn.caseId, dir: turn.dir, turnId: turn.turnId, source: turn.source, ownerMessage: turn.ownerMessage
+    });
+    if (!hook.notes.length && !hook.triggers.length) return { notes: [], triggers: [], orientation: turn.orientation };
+    const baseline = this._baseline(turn.dir);
+    const fresh = hook.triggers
+      .filter((t) => !baseline.acknowledgedKeys.includes(t.key))
+      .map((t) => ({ ...t, blocking: t.blocking !== false, detail: String(t.detail || t.kind) }));
+    turn.hookTriggers = [...(turn.hookTriggers || []), ...hook.triggers];
+    turn.hookNotes = [...(turn.hookNotes || []), ...hook.notes];
+    turn.triggers = [...(turn.triggers || []), ...fresh];
+    if (fresh.some((t) => t.blocking)) turn.reorientPending = true;
+    turn.orientation = this.orientation(turn.caseId, { triggers: turn.triggers, hookNotes: turn.hookNotes });
+    return { notes: hook.notes, triggers: fresh, orientation: turn.orientation };
+  }
+
+  // ---- Triggers and the baseline (.kl/triggers.json) ----
+
+  _baselinePath(dir) {
+    return path.join(dir, '.kl', 'triggers.json');
+  }
+
+  _baseline(dir) {
+    const stored = readJson(this._baselinePath(dir), null);
+    return { ...emptyBaseline(), ...(stored && typeof stored === 'object' ? stored : {}) };
+  }
+
+  _materialSnapshot(meta) {
+    const executors = readJson(path.join(meta.dir, '.kl', 'executors.json'), null);
+    const executorsMaterial = {};
+    if (executors && typeof executors === 'object') {
+      for (const [eid, entry] of Object.entries(executors)) {
+        if (entry && !entry.stale) executorsMaterial[eid] = entry.material ?? null;
+      }
+    }
+    const budget = this.budget(meta.id).status();
+    const budgetCrossed = {};
+    for (const c of CATEGORIES) budgetCrossed[c] = [...(budget[c]?.crossed || [])];
+    let caseTypeMaterial = null;
+    if (typeof this.caseTypeMaterial === 'function') {
+      try {
+        caseTypeMaterial = this.caseTypeMaterial(meta.id) || null;
+      } catch (err) {
+        log.warn(`caseTypeMaterial failed for ${meta.slug}: ${err.message}`);
+      }
+    }
+    return { executors, executorsMaterial, budget, budgetCrossed, caseTypeMaterial };
+  }
+
+  _detect(meta, { source, hookTriggers = [] }) {
+    const baseline = this._baseline(meta.dir);
+    const snap = this._materialSnapshot(meta);
+    // A threshold that a grant, a raised limit or a new day removed can fire
+    // again later: prune it from the baseline (spec §3.3).
+    let pruned = false;
+    for (const c of Object.keys(baseline.budgetCrossed || {})) {
+      const was = Array.isArray(baseline.budgetCrossed[c]) ? baseline.budgetCrossed[c] : [];
+      const keep = was.filter((t) => (snap.budgetCrossed[c] || []).includes(t));
+      if (keep.length !== was.length) {
+        baseline.budgetCrossed[c] = keep;
+        pruned = true;
+      }
+    }
+    if (pruned) writeJsonIfChanged(this._baselinePath(meta.dir), baseline);
+    let playbookChanges = [];
+    if (typeof this.playbookChanges === 'function') {
+      try {
+        playbookChanges = this.playbookChanges(meta.id) || [];
+      } catch (err) {
+        log.warn(`playbookChanges failed for ${meta.slug}: ${err.message}`);
+      }
+    }
+    const triggers = detectTriggers({
+      source,
+      now: this.now(),
+      meta,
+      facts: new FactLedger(meta.dir).view().facts,
+      decisions: new CaseRecords(meta.dir).decisions(),
+      budget: snap.budget,
+      executors: snap.executors,
+      plan: readJson(path.join(meta.dir, '.kl', 'plan.json'), null),
+      playbookChanges,
+      hookTriggers,
+      baseline,
+      reorientAfterHours: this.settings().reorientAfterHours
+    });
+    return {
+      triggers,
+      snapshot: { executorsMaterial: snap.executorsMaterial, budgetCrossed: snap.budgetCrossed, caseTypeMaterial: snap.caseTypeMaterial }
+    };
+  }
+
+  // What the Reorient tool records: a journal entry, and a baseline that
+  // acknowledges everything pending now.
+  recordReorientation(id, turn, { changed, affects = [], action, note }) {
+    const meta = this.getCase(id);
+    const pending = (turn.triggers || []).filter((t) => t.blocking);
+    const body = [
+      '# Re-orientation',
+      '',
+      'Triggers:',
+      ...(pending.length ? pending.map((t) => `- ${t.detail}`) : ['- none']),
+      '',
+      `Changed: ${changed}`,
+      `Affects: ${affects.length ? affects.join(', ') : 'none'}`,
+      `Action: ${action}`,
+      `Note: ${note}`
+    ].join('\n');
+    const journal = new CaseRecords(meta.dir).writeJournal('reorient', body, this.now());
+    const snap = this._materialSnapshot(meta);
+    const b = this._baseline(meta.dir);
+    b.acknowledgedAt = this.now().toISOString();
+    b.undermined = underminedKeys(new CaseRecords(meta.dir).decisions(), new FactLedger(meta.dir).view().facts).map((u) => u.key);
+    b.executorsMaterial = snap.executorsMaterial;
+    b.budgetCrossed = snap.budgetCrossed;
+    b.acknowledgedKeys = [...new Set([...(b.acknowledgedKeys || []), ...(turn.hookTriggers || []).map((t) => t.key)])];
+    if (snap.caseTypeMaterial) b.caseTypeMaterial = snap.caseTypeMaterial;
+    writeJsonIfChanged(this._baselinePath(meta.dir), b);
+    if (typeof this.acknowledgePlaybooks === 'function') {
+      try {
+        this.acknowledgePlaybooks(meta.id);
+      } catch (err) {
+        log.warn(`acknowledgePlaybooks failed for ${meta.slug}: ${err.message}`);
+      }
+    }
+    turn.reorientPending = false;
+    return journal;
+  }
+
+  // ---- Turns (spec §3.10) ----
+
+  async beginTurn(id, { turnId, source = 'owner', ownerMessage = null } = {}) {
     const meta = this.getCase(id);
     this._acquire(meta, turnId);
     try {
-      if (await git.isDirty(meta.dir)) await git.commitAll(meta.dir, 'owner edits');
-      return { caseId: meta.id, dir: meta.dir, turnId, title: meta.title, orientation: this.orientation(meta.id) };
+      if (await git.isDirty(meta.dir)) await this._commit(meta.dir, 'owner edits', meta.id);
+      const budget = this.budget(meta.id);
+      for (const [category, crossed] of Object.entries(budget.reconcile())) this.onCrossings(meta.id, category, crossed);
+      // A wake-up is refused before charging once the day's turns are spent;
+      // owner turns are always charged and never refused.
+      let dailyTurnsSpent = false;
+      if (source === 'wakeup' && budget.atLimit('turnsPerDay')) {
+        dailyTurnsSpent = true;
+      } else {
+        const r = budget.charge('turnsPerDay', 1, { turnId });
+        if (r.crossedNow.length) this.onCrossings(meta.id, 'turnsPerDay', r.crossedNow);
+      }
+      const hook = await this._runHooks('turn-start', { caseId: meta.id, dir: meta.dir, turnId, source, ownerMessage });
+      const fresh = this.getCase(meta.id);
+      const { triggers, snapshot } = this._detect(fresh, { source, hookTriggers: hook.triggers });
+      const controller = new AbortController();
+      const turn = {
+        caseId: fresh.id,
+        dir: fresh.dir,
+        turnId,
+        title: fresh.title,
+        orientation: '',
+        source,
+        ownerMessage,
+        triggers,
+        reorientPending: triggers.some((t) => t.blocking),
+        hookTriggers: hook.triggers,
+        hookNotes: hook.notes,
+        snapshot,
+        dailyTurnsSpent,
+        signal: controller.signal,
+        abort: (reason) => controller.abort(reason)
+      };
+      turn.orientation = this.orientation(fresh.id, { triggers, hookNotes: hook.notes });
+      this.turns.set(fresh.id, turn);
+      return turn;
     } catch (err) {
       this._release(meta.dir, turnId);
       throw err;
     }
   }
 
-  async endTurn(turn, { summary = '', journal = null } = {}) {
+  caseContext(turn, { ownerMessages = [], ownerMessageTimes = [] } = {}) {
+    return {
+      caseId: turn.caseId,
+      dir: turn.dir,
+      turnId: turn.turnId,
+      title: turn.title,
+      orientation: turn.orientation,
+      source: turn.source || 'owner',
+      runtime: this,
+      ownerMessages,
+      ownerMessageTimes
+    };
+  }
+
+  async endTurn(turn, { summary = '', journal = null, journalKind = 'turn' } = {}) {
     try {
       const records = new CaseRecords(turn.dir);
       records.renderOpenItems(new FactLedger(turn.dir).view().facts);
-      if (journal && String(journal).trim()) records.writeJournal('turn', journal);
-      return await git.commitAll(turn.dir, `${turn.turnId}: ${oneLine(summary) || 'turn'}`);
+      if (journal && String(journal).trim()) records.writeJournal(journalKind, journal, this.now());
+      this._closeTurnMeta(turn);
+      return await this._commit(turn.dir, `${turn.turnId}: ${oneLine(summary) || 'turn'}`, turn.caseId);
     } finally {
+      if (this.turns.get(turn.caseId) === turn) this.turns.delete(turn.caseId);
       this._release(turn.dir, turn.turnId);
+    }
+  }
+
+  _closeTurnMeta(turn) {
+    let meta;
+    try {
+      meta = this.getCase(turn.caseId);
+    } catch {
+      return;
+    }
+    const at = this.now().toISOString();
+    const gapPending = Boolean(turn.reorientPending) && (turn.triggers || []).some((t) => t.kind === 'time-gap');
+    const patch = { lastTurnAt: at };
+    if ((turn.source || 'owner') === 'owner' && !gapPending) patch.lastOwnerTurnAt = at;
+    this.store.updateMeta(meta.id, patch);
+    // A turn that ended with nothing pending acknowledges the state it
+    // started from (spec §3.3); what changed during the turn fires next time.
+    if (!turn.reorientPending && turn.snapshot) {
+      const b = this._baseline(meta.dir);
+      b.executorsMaterial = { ...(b.executorsMaterial || {}), ...turn.snapshot.executorsMaterial };
+      b.budgetCrossed = turn.snapshot.budgetCrossed;
+      const raised = new Set((turn.hookTriggers || []).map((t) => t.key));
+      b.acknowledgedKeys = (b.acknowledgedKeys || []).filter((k) => raised.has(k));
+      if (turn.snapshot.caseTypeMaterial) b.caseTypeMaterial = turn.snapshot.caseTypeMaterial;
+      writeJsonIfChanged(this._baselinePath(meta.dir), b);
+    }
+  }
+
+  // commitAll with the consecutive-failure count of spec §3.4. A non-zero
+  // count is reset before committing so a success commits the reset too.
+  async _commit(dir, message, caseId) {
+    const file = this._baselinePath(dir);
+    const before = this._baseline(dir);
+    const prior = Number(before.commitFailures) || 0;
+    if (prior) {
+      before.commitFailures = 0;
+      writeJsonIfChanged(file, before);
+    }
+    try {
+      return await git.commitAll(dir, message);
+    } catch (err) {
+      const b = this._baseline(dir);
+      b.commitFailures = prior + 1;
+      writeJsonIfChanged(file, b);
+      if (b.commitFailures >= 2) this._onCommitFailures(caseId, err);
+      throw err;
+    }
+  }
+
+  _onCommitFailures(caseId, err) {
+    let meta;
+    try {
+      meta = this.getCase(caseId);
+    } catch {
+      return;
+    }
+    if (meta.status === 'active') {
+      try {
+        this.setStatus(meta.id, 'paused', { kind: 'commit', note: err.message });
+      } catch (e) {
+        log.warn(`Case ${meta.slug}: could not pause after commit failures: ${e.message}`);
+      }
+    }
+    try {
+      this.createQuestion(meta.id, {
+        kind: 'question',
+        urgency: 'high',
+        text: `${meta.title}: the case repository could not be committed twice (${oneLine(err.message, 200)}). Fix the repository, then resume.`,
+        payload: { type: 'commit-failed', mcpAnswerable: false, key: 'commit-failed' }
+      }, { charge: false });
+    } catch (e) {
+      log.warn(`Case ${meta.slug}: could not ask about commit failures: ${e.message}`);
+    }
+  }
+
+  // The only case-lock helper outside turns (R37). Inside a turn this
+  // process holds, it runs inline and the turn commits the writes.
+  async systemAction(id, label, fn, { commitMessage = null } = {}) {
+    const meta = this.getCase(id);
+    if (this._holdsLock(meta.dir)) return fn(meta);
+    const turnId = `system-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+    this._acquire(meta, turnId);
+    try {
+      const result = await fn(meta);
+      await this._commit(meta.dir, commitMessage || `system: ${label}`, meta.id)
+        .catch((err) => log.warn(`Case ${meta.slug}: commit after "${label}" failed: ${err.message}`));
+      return result;
+    } finally {
+      this._release(meta.dir, turnId);
+    }
+  }
+
+  // ---- Budgets and questions (spec §3.5, §3.9) ----
+
+  onCrossings(id, category, crossedNow = []) {
+    if (!Array.isArray(crossedNow) || !crossedNow.includes(100)) return null;
+    const meta = this.getCase(id);
+    if (meta.status === 'done' || meta.status === 'abandoned') return null;
+    const entry = this.budget(meta.id).status()[category] || {};
+    if (category === 'usd' || category === 'deadline') {
+      if (meta.status === 'active' || meta.status === 'needs-direction') {
+        try {
+          this.setStatus(meta.id, 'paused', { kind: 'budget', ref: category });
+        } catch (err) {
+          log.warn(`Case ${meta.slug}: could not pause at the ${category} limit: ${err.message}`);
+        }
+      }
+      const text = category === 'deadline'
+        ? `${meta.title} reached its deadline (${entry.at}) and is paused. Reply with a new deadline (YYYY-MM-DD) to continue.`
+        : `${meta.title} spent ${entry.spent} of its ${entry.limit} ${category} budget and is paused. Reply with a new limit to continue.`;
+      return this.createQuestion(meta.id, {
+        kind: 'question',
+        urgency: 'normal',
+        text,
+        payload: {
+          type: 'budget-grant',
+          budget: category,
+          spent: category === 'deadline' ? null : entry.spent,
+          limit: category === 'deadline' ? entry.at : entry.limit,
+          mcpAnswerable: false,
+          key: `budget-grant:${category}`
+        }
+      }, { charge: false });
+    }
+    return this.createQuestion(meta.id, {
+      kind: 'briefing',
+      urgency: 'low',
+      text: `${meta.title} used its ${category} allowance for ${entry.day} (${entry.spent} of ${entry.limit}). It resumes when the day rolls over.`,
+      payload: { type: 'budget-daily', budget: category, key: `budget-daily:${category}:${entry.day}`, mcpAnswerable: false }
+    }, { charge: false });
+  }
+
+  usageHook(turn) {
+    return (ev) => {
+      if (!ev || typeof ev !== 'object') return;
+      try {
+        const unpriced = ev.cost === null || ev.cost === undefined;
+        const cost = unpriced ? 0 : Number(ev.cost) || 0;
+        const r = this.budget(turn.caseId).charge('usd', cost, {
+          turnId: turn.turnId,
+          provider: ev.provider,
+          model: ev.model,
+          unpricedTokens: unpriced ? Number(ev.totalTokens) || 0 : 0
+        });
+        if (r.crossedNow.length) this.onCrossings(turn.caseId, 'usd', r.crossedNow);
+      } catch (err) {
+        log.warn(`Charging usage to case ${turn.caseId} failed: ${err.message}`);
+      }
+    };
+  }
+
+  // The charged, delivered creation path every stage uses (C5 §3.9).
+  createQuestion(id, record, { charge = record?.kind === 'question' } = {}) {
+    const meta = this.getCase(id);
+    const store = this.questions(meta.id);
+    const existing = store.findDuplicate(record);
+    if (existing) return existing;
+    const budget = charge ? this.budget(meta.id) : null;
+    if (budget && budget.atLimit('questionsPerDay')) return { held: true };
+    const rec = store.create(record);
+    if (budget) {
+      const r = budget.charge('questionsPerDay', 1, { questionId: rec.id });
+      if (r.crossedNow.length) this.onCrossings(meta.id, 'questionsPerDay', r.crossedNow);
+    }
+    this._deliver(meta, store, rec);
+    return store.get(rec.id) || rec;
+  }
+
+  _deliver(meta, store, rec) {
+    const attention = rec.urgency === 'low' ? 'panel' : 'banner';
+    this._notify('case:changed', { caseId: meta.id, what: 'questions', questionId: rec.id, attention });
+    if (rec.urgency === 'high' && typeof this.host?.uiToast?.send === 'function') {
+      Promise.resolve()
+        .then(() => this.host.uiToast.send({ title: meta.title, body: rec.text }))
+        .catch((err) => log.warn(`Toast for ${rec.id} failed: ${err.message}`));
+    }
+    let interactive = false;
+    try {
+      interactive = typeof this.host?.interactive === 'function' && this.host.interactive() === true;
+    } catch {
+      interactive = false;
+    }
+    if (interactive) {
+      store.recordDelivery(rec.id, { channel: 'in-app', at: this.now().toISOString(), deliveryId: `in-app-${rec.id}` });
+    } else {
+      log.warn(`Case ${meta.slug} asks ${rec.id} (${rec.urgency}): ${rec.text}. No channel can deliver it until stage 4; it waits.`);
+    }
+  }
+
+  abortUnattended(reason = 'shutdown') {
+    for (const turn of this.turns.values()) {
+      if (turn.source === 'wakeup' && typeof turn.abort === 'function') turn.abort(reason);
     }
   }
 }
