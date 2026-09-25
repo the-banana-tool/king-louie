@@ -217,22 +217,32 @@ class AuditLedger {
   // Unlinks the lock only if it still holds the token we wrote when we
   // acquired it. If a stale-break has since handed the lock to someone
   // else, their token is there instead and we must never delete it.
+  //
+  // This only ever runs after append() has already durably written the
+  // entry (byte-count-verified and fsynced), so a rejection here would
+  // discard a return value for an entry that genuinely exists on disk. A
+  // rejection from append() must mean the entry was not written, so a
+  // failure past this point is logged at error level and swallowed rather
+  // than thrown; the lock either clears now or is broken by the next
+  // acquisition attempt (see _breakStaleLock), and the ledger itself is
+  // unaffected either way.
   _unlock(token) {
     let current;
     try {
       current = fs.readFileSync(this.lockFile, 'utf8');
     } catch (err) {
-      if (err.code === 'ENOENT') return;
-      log.warn(`failed to read ${this.lockFile} during unlock`, { error: err.message });
-      throw err;
+      if (err.code !== 'ENOENT') {
+        log.error(`failed to read ${this.lockFile} during unlock`, { error: err.message, code: err.code });
+      }
+      return;
     }
     if (current.split(':')[1] !== token) return;
     try {
       fs.unlinkSync(this.lockFile);
     } catch (err) {
-      if (err.code === 'ENOENT') return;
-      log.warn(`failed to remove ${this.lockFile} during unlock`, { error: err.message });
-      throw err;
+      if (err.code !== 'ENOENT') {
+        log.error(`failed to remove ${this.lockFile} during unlock`, { error: err.message, code: err.code });
+      }
     }
   }
 

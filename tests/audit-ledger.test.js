@@ -9,6 +9,7 @@ const { spawn } = require('child_process');
 const { deriveNodeId } = require('../src/mesh/node-identity');
 const { open, seal, nodeSigner } = require('../src/approvals/envelope');
 const { AuditLedger, verifyAuditSlice } = require('../src/audit/audit-ledger');
+const { addSink } = require('../src/logging');
 
 const ROOT = path.join(__dirname, '..');
 const tmp = [];
@@ -275,6 +276,39 @@ describe('AuditLedger lock ownership (fix round 1)', () => {
     assert.equal(fs.existsSync(lockPath), true);
     assert.equal(fs.readFileSync(lockPath, 'utf8').split(':')[1], tokenB);
     l2._unlock(tokenB);
+  });
+});
+
+describe('AuditLedger unlock failure after a successful write (fix round 2)', () => {
+  it('resolves with the entry and logs an error when _unlock cannot read the lock file', async () => {
+    const dir = tempDir();
+    const l = ledger(dir);
+    const lockPath = path.join(dir, 'ledger.lock');
+    const originalReadFileSync = fs.readFileSync;
+    const records = [];
+    const removeSink = addSink((record) => records.push(record));
+    fs.readFileSync = (target, ...rest) => {
+      if (target === lockPath) {
+        const err = new Error('simulated I/O error reading the lock file');
+        err.code = 'EIO';
+        throw err;
+      }
+      return originalReadFileSync(target, ...rest);
+    };
+    let entry;
+    try {
+      entry = await l.append({ kind: 'x', data: {} });
+    } finally {
+      fs.readFileSync = originalReadFileSync;
+      removeSink();
+    }
+    assert.equal(entry.seq, 1);
+    const file = segmentFile(dir);
+    const lines = fs.readFileSync(file, 'utf8').trim().split('\n');
+    assert.equal(lines.length, 1);
+    const errorLogs = records.filter((r) => r.level === 'error' && r.subsystem === 'audit-ledger');
+    assert.equal(errorLogs.length, 1);
+    assert.equal(errorLogs[0].meta.code, 'EIO');
   });
 });
 
