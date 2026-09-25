@@ -258,7 +258,8 @@ final class ProtocolVectorTests: XCTestCase {
         // Fractions of 1–3 digits parse, as isValid accepts them.
         XCTAssertEqual(Timestamps.date("1970-01-01T00:00:01.5Z")?.timeIntervalSince1970, 1.5)
         XCTAssertEqual(Timestamps.date("1970-01-01T00:00:01.50Z")?.timeIntervalSince1970, 1.5)
-        XCTAssertEqual(Timestamps.date("1970-01-01T00:00:01.501Z")?.timeIntervalSince1970, 1.501)
+        XCTAssertEqual(Timestamps.epochMillis("1970-01-01T00:00:01.501Z"), 1501)
+        XCTAssertEqual(Timestamps.date("1970-01-01T00:00:01.501Z")?.timeIntervalSince1970 ?? 0, 1.501, accuracy: 1e-6)
         XCTAssertEqual(Timestamps.date("1970-01-01T00:00:01Z")?.timeIntervalSince1970, 1)
         XCTAssertNil(Timestamps.date("2026-02-30T00:00:00Z"))
         XCTAssertTrue(Timestamps.isValid(Timestamps.string(Date())))
