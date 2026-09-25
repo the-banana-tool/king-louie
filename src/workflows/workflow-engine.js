@@ -15,6 +15,8 @@ const DEP_RESULT_TAIL = 500;
 // The executeExtras keys a workflow task's execute options may take (cases
 // stage 3: an isolated, guarded case-researcher child).
 const EXECUTE_EXTRA_KEYS = Object.freeze(['isolatedContext', 'guardContext']);
+// The host's resolveExecuteExtras may also confine the child's tools.
+const TRUSTED_EXTRA_KEYS = Object.freeze([...EXECUTE_EXTRA_KEYS, 'allowedToolNames']);
 
 function summarizeResult(text) {
   const raw = typeof text === 'string' ? text : String(text || '');
@@ -56,6 +58,10 @@ const TASK_STATUS = {
 class WorkflowEngine extends EventEmitter {
   constructor(options = {}) {
     super();
+    // Cases stage 3: (workflow) → execute extras from a trusted record (the
+    // case job index), or null. When it answers, the workflow file's own
+    // executeExtras are ignored, so editing the file cannot unguard a child.
+    this.resolveExecuteExtras = typeof options.resolveExecuteExtras === 'function' ? options.resolveExecuteExtras : null;
     this.storageDir = options.storageDir || path.join(
       options.userDataPath || process.cwd(),
       'workflows'
@@ -468,13 +474,28 @@ class WorkflowEngine extends EventEmitter {
       : `${task.description}${allowedActionsBlock}`;
 
     const executeOptions = {};
-    // Only the named extras reach the child: workflow metadata (a file in the
-    // data dir) never sets a child's origin, approval requester, tools or
-    // working directory.
-    const extras = workflow.metadata?.executeExtras;
-    if (extras && typeof extras === 'object') {
-      for (const key of EXECUTE_EXTRA_KEYS) {
-        if (extras[key] !== undefined) executeOptions[key] = extras[key];
+    // The host's trusted extras first. Otherwise only the named extras of
+    // the workflow metadata (a file in the data dir) reach the child: it
+    // never sets a child's origin, approval requester, tools or working
+    // directory.
+    let trusted = null;
+    if (this.resolveExecuteExtras) {
+      try {
+        trusted = this.resolveExecuteExtras(workflow);
+      } catch (err) {
+        throw new Error(`Workflow ${workflow.id}: its task options could not be checked (${err.message})`);
+      }
+    }
+    if (trusted && typeof trusted === 'object') {
+      for (const key of TRUSTED_EXTRA_KEYS) {
+        if (trusted[key] !== undefined) executeOptions[key] = trusted[key];
+      }
+    } else {
+      const extras = workflow.metadata?.executeExtras;
+      if (extras && typeof extras === 'object') {
+        for (const key of EXECUTE_EXTRA_KEYS) {
+          if (extras[key] !== undefined) executeOptions[key] = extras[key];
+        }
       }
     }
     if (workflow.metadata?.workingDirectory) {

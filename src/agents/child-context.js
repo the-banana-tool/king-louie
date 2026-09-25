@@ -17,17 +17,27 @@ async function buildChildContext({
   };
 }
 
+function toolSet(value) {
+  if (value == null) return null;
+  // Anything but a Set or an Array fails closed: nothing allowed.
+  return value instanceof Set || Array.isArray(value) ? new Set(value) : new Set();
+}
+
 function childRuntimeOptions(agent, options = {}) {
   // The parent's origin (program §4.21), read the same way createCore's
   // agentExecutorAdapter reads it: a child of a remote-origin run stays
-  // remote-origin. An isolated child with no allowedTools gets an empty
-  // allow-list (nothing runs), never "no limit".
+  // remote-origin.
   const origin = (options.approvalRequester && options.approvalRequester.origin) || options.origin || null;
+  // An isolated child gets its agent's tools (none listed: nothing runs),
+  // never more than the parent run's allowedToolNames.
+  let tools = options.isolatedContext === true ? new Set(Array.isArray(agent?.allowedTools) ? agent.allowedTools : []) : null;
+  const parentTools = toolSet(options.allowedToolNames);
+  if (parentTools) tools = tools ? new Set([...tools].filter((name) => parentTools.has(name))) : parentTools;
   return {
     workingDirectory: options.workingDirectory,
     ...(origin ? { origin } : {}),
     ...(options.guardContext ? { guardContext: options.guardContext } : {}),
-    ...(options.isolatedContext === true ? { allowedToolNames: new Set(Array.isArray(agent?.allowedTools) ? agent.allowedTools : []) } : {})
+    ...(tools ? { allowedToolNames: tools } : {})
   };
 }
 

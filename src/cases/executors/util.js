@@ -149,7 +149,12 @@ function cut(text, max = 2000) {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
 }
 
+// The browser profile every case browser run uses (ruling T11-always-profile):
+// never the owner's personal cookies.
+const CASES_BROWSER_PROFILE = 'kl-cases';
+
 module.exports = {
+  CASES_BROWSER_PROFILE,
   DAY_PATTERN,
   EXECUTOR_ID_PATTERN,
   sha256hex,

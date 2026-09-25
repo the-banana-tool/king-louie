@@ -7,15 +7,14 @@ const path = require('path');
 const { createLogger } = require('../../logging');
 const jobs = require('./jobs');
 const { normalizeRecipient } = require('./normalize');
-const { writeJsonAtomic, cut } = require('./util');
+const { writeJsonAtomic, cut, CASES_BROWSER_PROFILE } = require('./util');
 
 const log = createLogger('executors/kinds');
 const TIMEOUT = Symbol('timeout');
 const OTHER_PROFILE = 'the browser is open with another profile; close it or retry';
 const MAY_HAVE_BEEN_SENT = 'the form may have been sent';
-// Ruling M17: a login runs in this named browser profile, so the vault key
-// fill_credentials reads is `kl-cases@<host>`.
-const CASES_BROWSER_PROFILE = 'kl-cases';
+// Ruling M17: a login runs in this named browser profile (CASES_BROWSER_PROFILE),
+// so the vault key fill_credentials reads is `kl-cases@<host>`.
 const TASK_ID = /^[A-Za-z0-9_-]{1,40}$/;
 const FAILED_STATES = new Set(['failed', 'cancelled', 'unreachable']);
 // Executor-sourced text is cut before the model sees it.

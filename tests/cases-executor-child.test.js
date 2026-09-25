@@ -149,3 +149,60 @@ describe('a child of a remote-origin case turn', () => {
     assert.deepStrictEqual([seen[0].origin, seen[0].allowedToolNames, seen[0].workingDirectory, seen[0].isolatedContext], [undefined, undefined, dir, true]);
   });
 });
+
+describe('child tools never exceed the parent run', () => {
+  it('intersects the child allow-list with the parent allowedToolNames', () => {
+    const researcher = getAgent('case-researcher');
+    const opts = childRuntimeOptions(researcher, { isolatedContext: true, allowedToolNames: new Set(['Read', 'WebFetch', 'Bash']) });
+    assert.deepStrictEqual([...opts.allowedToolNames], ['WebFetch', 'Read']);
+    assert.deepStrictEqual([...childRuntimeOptions(getAgent('main'), { allowedToolNames: ['Read'] }).allowedToolNames], ['Read']);
+    assert.deepStrictEqual([...childRuntimeOptions(researcher, { isolatedContext: true, allowedToolNames: 'Bash' }).allowedToolNames], []);
+  });
+});
+
+describe('a tampered workflow file cannot unguard a case child', () => {
+  it('rebuilds the child extras from the case job index, not the workflow file', async () => {
+    const env = fx.setupExecutors();
+    const meta = await fx.activeCase(env.runtime);
+    const dir = fx.tempDir('kl-wf-');
+    const seen = [];
+    const adapter = { execute: async (agent, message, options) => { seen.push([agent.id, options]); return { content: 'done' }; } };
+    const resolveExecuteExtras = (wf) => env.registry.workflowChildExtras(wf.id);
+    const first = new WorkflowEngine({ storageDir: dir, getAgent: (id) => getAgent(id), agentExecutorAdapter: adapter, resolveExecuteExtras });
+    await first.initialize();
+    const wf = await first.create({ tasks: [{ id: 't1', title: 'Find comps', description: 'Search listings', agentId: 'case-researcher' }] }, {
+      chatId: null, workingDirectory: dir, executeExtras: { isolatedContext: true, guardContext: { caseId: meta.id } }
+    });
+    await env.registry.indexJob(meta.id, { id: 'job-0001', executor: 'workflow', externalId: wf.id, state: 'running' });
+
+    const file = path.join(dir, `${wf.id}.json`);
+    const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+    saved.metadata.executeExtras = null;
+    saved.tasks[0].agentId = 'code-writer';
+    fs.writeFileSync(file, JSON.stringify(saved));
+
+    const second = new WorkflowEngine({ storageDir: dir, getAgent: (id) => getAgent(id), agentExecutorAdapter: adapter, resolveExecuteExtras });
+    await second.initialize();
+    await second.run(wf.id);
+    const [agentId, options] = seen[0];
+    assert.deepStrictEqual([agentId, options.isolatedContext, options.guardContext], ['code-writer', true, { caseId: meta.id }]);
+    const child = childRuntimeOptions(getAgent(agentId), options);
+    for (const name of child.allowedToolNames) assert.ok(['WebSearch', 'WebFetch', 'Read', 'Glob', 'Grep'].includes(name), name);
+    assert.strictEqual(env.registry.workflowChildExtras('wf-unknown'), null);
+  });
+
+  it('runs no task when the trusted extras cannot be read', async () => {
+    const dir = fx.tempDir('kl-wf-');
+    const seen = [];
+    const engine = new WorkflowEngine({
+      storageDir: dir,
+      getAgent: (id) => getAgent(id),
+      agentExecutorAdapter: { execute: async (agent, message, options) => { seen.push(options); return { content: 'done' }; } },
+      resolveExecuteExtras: () => { throw new Error('index unreadable'); }
+    });
+    await engine.initialize();
+    const wf = await engine.create({ tasks: [{ id: 't1', title: 'Find comps', description: 'Search listings', agentId: 'case-researcher' }] }, { chatId: null, workingDirectory: dir });
+    const done = await engine.run(wf.id);
+    assert.deepStrictEqual([seen.length, done.status], [0, 'failed']);
+  });
+});

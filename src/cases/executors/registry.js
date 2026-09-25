@@ -17,6 +17,7 @@ const jobs = require('./jobs');
 const envelopeOps = require('./envelope-ops');
 const turnHook = require('./turn-hook');
 const { OpsMemory, renderOpsNotes } = require('../ops-memory');
+const CaseResearcherAgent = require('../../agents/builtin/case-researcher');
 
 const log = createLogger('executors');
 const AUTHORITY_RANK = Object.freeze({ none: 0, envelope: 1, signed: 2 });
@@ -494,6 +495,23 @@ class ExecutorRegistry {
       };
       writeJsonAtomic(this.jobsPath, data);
     });
+  }
+
+  // The execute extras a case workflow's children run with, rebuilt from the
+  // jobs index (under the guarded executors folder), never from the workflow
+  // file: isolated case-researcher children, guarded for that case, confined
+  // to the researcher's tools. null for a workflow no case job started.
+  workflowChildExtras(workflowId) {
+    if (typeof workflowId !== 'string' || !workflowId) return null;
+    for (const [key, row] of Object.entries(this._readObject(this.jobsPath))) {
+      if (!isObject(row) || row.executor !== 'workflow' || row.externalId !== workflowId) continue;
+      return {
+        isolatedContext: true,
+        guardContext: { caseId: key.slice(0, key.lastIndexOf('/')) },
+        allowedToolNames: [...CaseResearcherAgent.allowedTools]
+      };
+    }
+    return null;
   }
 
   liveState({ caseId = null } = {}) {
