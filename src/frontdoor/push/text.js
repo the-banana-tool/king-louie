@@ -29,4 +29,4 @@ function alertText({ kind = 'approval', node_name: nodeName = null } = {}) {
   return name ? `${title} on ${name}` : title;
 }
 
-module.exports = { KINDS, TITLES, alertText };
+module.exports = { KINDS, TITLES, alertText, sanitizeNodeName };

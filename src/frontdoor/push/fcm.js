@@ -2,6 +2,7 @@
 // carrying { rid, n, k }. The OAuth token is cached until a minute before it
 // expires.
 const { signJwt, requestText } = require('./jwt');
+const { sanitizeNodeName } = require('./text');
 
 const SCOPE = 'https://www.googleapis.com/auth/firebase.messaging';
 
@@ -34,7 +35,7 @@ function createFcmSender({ serviceAccount, tokenUrl = 'https://oauth2.googleapis
       const body = JSON.stringify({
         message: {
           token: device.push.token,
-          data: { rid: String(payload.id), n: payload.node_name || '', k: payload.kind },
+          data: { rid: String(payload.id), n: sanitizeNodeName(payload.node_name) || '', k: payload.kind },
           android: { priority: 'HIGH', ttl: `${secondsLeft}s` }
         }
       });

@@ -133,6 +133,21 @@ describe('APNs sender', () => {
     await sender.notify(device('apns', 'd'), { kind: 'approval', id: 'r-4' });
     assert.notEqual(requests[3].auth, requests[2].auth, 'a 401 cleared the cached token');
   });
+
+  it('resolves as a failure, never hanging or throwing, when APNs accepts the request but never responds', async () => {
+    const { privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+    const server = http2.createServer();
+    // Accept the stream and simply never call stream.respond()/stream.end():
+    // a connected-but-silent APNs.
+    server.on('stream', () => {});
+    const port = await listen(server);
+    const sender = createApnsSender({
+      teamId: 'TEAM123456', keyId: 'KEY1234567', keyPem: privateKey.export({ type: 'pkcs8', format: 'pem' }),
+      topic: 'com.example.kinglouie', origin: `http://127.0.0.1:${port}`, timeoutMs: 50
+    });
+    const result = await sender.notify(device('apns', 'stuck'), { kind: 'approval', id: 'r-timeout' });
+    assert.deepEqual(result, { ok: false, dropToken: false, status: null });
+  });
 });
 
 describe('FCM sender', () => {
@@ -225,5 +240,36 @@ describe('FCM sender', () => {
     await sender.notify(device('fcm', 'c'), { kind: 'approval', id: 'r-3' });
     assert.equal(tokenRequests, 3, 'a 401 from FCM cleared the cached OAuth token');
     assert.deepEqual(authSeen, ['Bearer ya29.1', 'Bearer ya29.2', 'Bearer ya29.3']);
+  });
+
+  it('sanitises and caps node_name in the data payload, same as the APNs alert text', async () => {
+    const { privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const sends = [];
+    const server = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        if (req.url === '/token') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ access_token: 'ya29.test', expires_in: 3600 }));
+          return;
+        }
+        sends.push(JSON.parse(body));
+        res.writeHead(200);
+        res.end('{}');
+      });
+    });
+    const port = await listen(server);
+    const sender = createFcmSender({
+      serviceAccount: { client_email: 'relay@example.com', private_key: privateKey.export({ type: 'pkcs8', format: 'pem' }), project_id: 'kl-example' },
+      tokenUrl: `http://127.0.0.1:${port}/token`,
+      fcmOrigin: `http://127.0.0.1:${port}`
+    });
+    await sender.notify(device('fcm', 'a'), { kind: 'approval', id: 'r-1', node_name: 'web-01\nrm -rf /' });
+    await sender.notify(device('fcm', 'b'), { kind: 'approval', id: 'r-2', node_name: 'x'.repeat(80) });
+    await sender.notify(device('fcm', 'c'), { kind: 'approval', id: 'r-3', node_name: '\u0000\u0001' });
+    assert.equal(sends[0].message.data.n, 'web-01rm -rf /');
+    assert.ok(sends[1].message.data.n.length <= 40 && sends[1].message.data.n.endsWith('…'));
+    assert.equal(sends[2].message.data.n, '');
   });
 });
