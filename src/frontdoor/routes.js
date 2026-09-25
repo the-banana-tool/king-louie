@@ -238,14 +238,15 @@ function registerPhoneRoutes(relay) {
       }
       const signerNodes = requireActive(ctx);
       const d = message.device;
-      // Logged first: a full log refuses the enrollment before anything is
-      // registered (the message was validated, so register cannot refuse it).
-      appendLog(ctx.body);
+      // A full log refuses a new enrollment before anything is registered;
+      // it is logged only once register has succeeded.
+      if (devices.logDecision(ctx.body) === 'full') throw new ApiError(503, 'log_full', 'the device log is full');
       try {
         devices.register({ device_id: d.device_id, jwk: d.public_key, name: d.name, platform: d.platform });
       } catch (err) {
         throw new ApiError(400, 'bad_device', err.message);
       }
+      appendLog(ctx.body);
       const nodes = [];
       for (const nodeId of signerNodes) {
         let state = 'offline';
@@ -269,9 +270,12 @@ function registerPhoneRoutes(relay) {
       if (message.revoked_by !== ctx.deviceId || ctx.body.kid !== ctx.deviceId || !verifyEs256(ctx.body, ctx.device.jwk)) {
         throw new ApiError(400, 'bad_revoke', 'the revocation must be signed by the calling device');
       }
+      // Revoking a device takes a different device (spec §3.10); a device
+      // revoking itself (a thief covering tracks, say) is refused outright.
+      if (message.revoked_by === message.device_id) throw new ApiError(403, 'forbidden', 'a device cannot revoke itself');
       requireActive(ctx);
-      // A second revocation of the same device is still forwarded but not
-      // logged again (appendLog keeps one per target).
+      // Always logged (never capped) and always forwarded; a repeat by the
+      // same signer of the same target is forwarded but not logged again.
       appendLog(ctx.body);
       const nodes = [];
       for (const { node_id: nodeId } of devices.nodesForDevice(message.device_id)) {

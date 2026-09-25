@@ -9,17 +9,23 @@ const { DEVICE_ID_RE, NODE_ID_RE } = require('../approvals/messages');
 const { err } = require('./errors');
 
 const PLATFORMS = ['ios', 'android', 'demo'];
-// The log is replayed to every node on each relay.hello, so it is bounded:
-// past this many lines new entries are refused rather than appended.
+// The log is replayed to every node on each relay.hello, so it is bounded.
+// The cap binds enrollments only: a revocation must never be blockable, and
+// revocations are bounded by their own dedupe (one per signer and target).
 const MAX_LOG_LINES = 10000;
 
-function revokeTarget(envelope) {
+// The dedupe key of a log entry: one enrollment per enrolled device, one
+// revocation per (signer, target). A revocation by one device never shadows
+// another device's revocation of the same target.
+function logKey(envelope) {
   try {
     const { message } = open(envelope);
-    return message.type === 'kl.device.revoke' ? message.device_id : null;
+    if (message.type === 'kl.device.enroll' && message.device) return { kind: 'enroll', key: `enroll|${message.device.device_id}` };
+    if (message.type === 'kl.device.revoke') return { kind: 'revoke', key: `revoke|${message.revoked_by}|${message.device_id}` };
   } catch {
-    return null;
+    // not an envelope
   }
+  return { kind: 'other', key: null };
 }
 
 class DeviceRegistry {
@@ -27,6 +33,14 @@ class DeviceRegistry {
     if (!file) throw new TypeError('DeviceRegistry needs a file');
     this.file = file;
     this.logFile = path.join(path.dirname(file), 'device-log.jsonl');
+    // Read once here; appendLog keeps both up to date without re-reading.
+    this.logLines = 0;
+    this.logKeys = new Set();
+    for (const entry of this.log()) {
+      this.logLines += 1;
+      const { key } = logKey(entry);
+      if (key) this.logKeys.add(key);
+    }
     this.now = now;
     this.devices = new Map();
     try {
@@ -119,16 +133,28 @@ class DeviceRegistry {
     return had;
   }
 
-  // → true when appended, false when it is a revocation of a device the log
-  // already revokes (one is enough: nodes never re-activate a revoked id).
-  // Throws `log_full` once the log holds MAX_LOG_LINES entries.
+  // 'append', 'duplicate' (already logged: an enrollment of the same
+  // device, or a revocation by the same signer of the same target) or
+  // 'full' (an enrollment while the log holds MAX_LOG_LINES entries).
+  // Revocations are never 'full'.
+  logDecision(envelope) {
+    const { kind, key } = logKey(envelope);
+    if (key && this.logKeys.has(key)) return 'duplicate';
+    if (kind !== 'revoke' && this.logLines >= MAX_LOG_LINES) return 'full';
+    return 'append';
+  }
+
+  // → true when appended, false for a duplicate; throws `log_full` for an
+  // enrollment at the cap.
   appendLog(envelope) {
-    const entries = this.log();
-    const target = revokeTarget(envelope);
-    if (target && entries.some((e) => revokeTarget(e) === target)) return false;
-    if (entries.length >= MAX_LOG_LINES) throw err('log_full', `the device log is full (${MAX_LOG_LINES} entries)`);
+    const decision = this.logDecision(envelope);
+    if (decision === 'duplicate') return false;
+    if (decision === 'full') throw err('log_full', `the device log is full (${MAX_LOG_LINES} entries)`);
     fs.mkdirSync(path.dirname(this.logFile), { recursive: true, mode: 0o700 });
     fs.appendFileSync(this.logFile, `${JSON.stringify(envelope)}\n`, { mode: 0o600 });
+    this.logLines += 1;
+    const { key } = logKey(envelope);
+    if (key) this.logKeys.add(key);
     return true;
   }
 

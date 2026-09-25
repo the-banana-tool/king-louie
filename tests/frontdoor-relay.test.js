@@ -30,6 +30,7 @@ const { buildRequest, toolAction } = require('../src/approvals/messages');
 const { relaySpkiPin } = require('../src/frontdoor/tls');
 const { createPhoneServer, PHONE_LISTENER } = require('../src/frontdoor/relay');
 const { addSink } = require('../src/logging');
+const { MAX_LOG_LINES } = require('../src/frontdoor/device-registry');
 
 const POSIX = process.platform !== 'win32';
 const UID = POSIX ? process.getuid() : 0;
@@ -235,11 +236,11 @@ describe('relay trust rules', () => {
     return { status: res.status, body: raw ? JSON.parse(raw) : null };
   }
 
-  async function fakeNode(name, handlers = {}) {
+  async function fakeNode(name, handlers = {}, relayUnderTest = r) {
     const identity = new NodeIdentity({ nodeName: name });
-    const { code } = r.nodeHub.addCode(name);
+    const { code } = relayUnderTest.nodeHub.addCode(name);
     secrets.add(code);
-    const meshPort = r.address().mesh.port;
+    const meshPort = relayUnderTest.address().mesh.port;
     const transport = new MeshTransport({ identity, listen: false, useTls: false });
     const pairing = new MeshPairing(identity, transport, { timeoutMs: 5000 });
     const info = await pairing.acceptCode(code, '127.0.0.1', meshPort);
@@ -248,7 +249,7 @@ describe('relay trust rules', () => {
     await transport.start();
     await transport.connectToPeer('127.0.0.1', meshPort);
     cleanups.push(async () => { rpc.close(); pairing.cleanup(); await transport.stop(); });
-    await until(() => r.nodeHub.nodes().some((n) => n.node_name === name && n.online), `${name} online`);
+    await until(() => relayUnderTest.nodeHub.nodes().some((n) => n.node_name === name && n.online), `${name} online`);
     return {
       identity,
       call: (method, params) => rpc.call(info.peerId, method, params, { timeoutMs: 3000 }),
@@ -525,13 +526,58 @@ describe('relay trust rules', () => {
     await assert.rejects(b.call('device.state', { device_id: createFakePhone().deviceId, state: 'active' }), (e) => e.code === 'unknown_device');
   });
 
-  it('logs one revocation per target, still forwarding each', async () => {
+  it('logs one revocation per signer and target, still forwarding each, and refuses self-revocation', async () => {
     const target = createFakePhone({ name: 'Lost phone' });
     await call(phone, 'POST', '/v1/devices/enroll', phone.enroll({ device: target.device() }));
     assert.equal((await call(phone, 'POST', '/v1/devices/revoke', phone.revoke(target.deviceId))).status, 200);
     assert.equal((await call(phone, 'POST', '/v1/devices/revoke', phone.revoke(target.deviceId, { reason: 'again' }))).status, 200);
     const revokes = r.devices.log().filter((e) => { const { message } = open(e); return message.type === 'kl.device.revoke' && message.device_id === target.deviceId; });
     assert.equal(revokes.length, 1);
+    // A device cannot revoke itself (it takes another device), so a thief's
+    // self-revocation never reaches the log.
+    const self = await call(phone, 'POST', '/v1/devices/revoke', phone.revoke(phone.deviceId));
+    assert.equal(self.status, 403);
+    assert.ok(!r.devices.log().some((e) => { const { message } = open(e); return message.type === 'kl.device.revoke' && message.device_id === phone.deviceId; }));
+  });
+
+  it('with the device log full, refuses a new enrollment but forwards and logs a revocation', async () => {
+    const dataDir = tempDir('kl-relay-full-');
+    const owner_ = createFakePhone({ name: 'Owner' });
+    const lost = createFakePhone({ name: 'Lost' });
+    const filler = `${JSON.stringify(owner_.enroll({ device: createFakePhone().device() }))}\n`;
+    fs.mkdirSync(path.join(dataDir, 'relay'), { recursive: true });
+    fs.writeFileSync(path.join(dataDir, 'relay', 'device-log.jsonl'), filler.repeat(MAX_LOG_LINES));
+    const full = await startRelay({
+      dataDir,
+      identity: new NodeIdentity({ nodeName: 'relay' }),
+      useTls: false,
+      config: { phoneListen: { host: '127.0.0.1', port: 0 }, meshListen: { host: '127.0.0.1', port: 0 }, publicUrl: 'https://kl.example.com', tls: {}, push: {} }
+    });
+    cleanups.push(() => full.stop());
+    const revokes = [];
+    const node = await fakeNode('lab-full', {
+      'device.revoke': (params) => { revokes.push(params); return { state: 'revoked-pending-apply' }; },
+      'device.enroll': () => ({ state: 'staged' })
+    }, full);
+    // Test setup only: both phones known and active on the node.
+    for (const p_ of [owner_, lost]) {
+      full.devices.register({ device_id: p_.deviceId, jwk: p_.jwk, name: p_.name, platform: 'android' });
+      full.devices.setNodeState(p_.deviceId, node.identity.nodeId, 'active');
+    }
+    const sendAs = async (ph, p_, body) => {
+      const text = JSON.stringify(body);
+      const res = await fetch(`http://127.0.0.1:${full.address().phone.port}${p_}`, { method: 'POST', headers: { ...ph.signApi('POST', p_, text), 'content-type': 'application/json' }, body: text });
+      return { status: res.status, body: await res.json() };
+    };
+    const newcomer = createFakePhone({ name: 'Newcomer' });
+    const enrolled = await sendAs(owner_, '/v1/devices/enroll', owner_.enroll({ device: newcomer.device() }));
+    assert.equal(enrolled.status, 503);
+    assert.equal(enrolled.body.error, 'log_full');
+    assert.equal(full.devices.get(newcomer.deviceId), null, 'nothing registered when the log refuses');
+    const revoked = await sendAs(owner_, '/v1/devices/revoke', owner_.revoke(lost.deviceId));
+    assert.deepEqual(revoked, { status: 200, body: { nodes: [{ node_id: node.identity.nodeId, state: 'revoked-pending-apply' }] } });
+    assert.equal(revokes.length, 1);
+    assert.equal(full.devices.log().length, MAX_LOG_LINES + 1);
   });
 
   it('runs one device-log replay per node at a time', async () => {

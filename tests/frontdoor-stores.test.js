@@ -47,19 +47,34 @@ describe('DeviceRegistry', () => {
     assert.equal(reg.log().length, 2);
   });
 
-  it('keeps one revocation per target and refuses entries past the cap', () => {
+  it('dedupes revocations per (signer, target) and enrollments per device', () => {
     const reg = new DeviceRegistry({ file: registryFile() });
     const a = createFakePhone();
     const b = createFakePhone();
-    assert.equal(reg.appendLog(a.revoke(b.deviceId)), true);
-    assert.equal(reg.appendLog(a.revoke(b.deviceId)), false, 'a second revoke of the same device is not logged');
-    assert.equal(reg.appendLog(b.revoke(b.deviceId, { reason: 'other' })), false);
-    assert.equal(reg.log().length, 1);
+    const c = createFakePhone();
+    assert.equal(reg.appendLog(b.revoke(b.deviceId)), true, 'the registry does not judge validity');
+    assert.equal(reg.appendLog(a.revoke(b.deviceId)), true, "another signer's revocation of the same target is never shadowed");
+    assert.equal(reg.appendLog(a.revoke(b.deviceId, { reason: 'again' })), false, 'the same signer and target is logged once');
+    assert.equal(reg.appendLog(a.enroll({ device: c.device() })), true);
+    assert.equal(reg.appendLog(b.enroll({ device: c.device() })), false, 'one enrollment per device');
+    assert.equal(reg.log().length, 3);
+  });
+
+  it('caps enrollments only, counting the log once at start', () => {
+    const file = registryFile();
+    const a = createFakePhone();
+    const b = createFakePhone();
     const line = `${JSON.stringify(a.enroll({ device: b.device() }))}\n`;
-    fs.appendFileSync(reg.logFile, line.repeat(MAX_LOG_LINES - 1));
-    assert.equal(reg.log().length, MAX_LOG_LINES);
-    assert.throws(() => reg.appendLog(a.enroll({ device: b.device() })), (e) => e.code === 'log_full');
-    assert.equal(reg.log().length, MAX_LOG_LINES);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(path.join(path.dirname(file), 'device-log.jsonl'), line.repeat(MAX_LOG_LINES));
+    const reg = new DeviceRegistry({ file });
+    assert.equal(reg.logLines, MAX_LOG_LINES);
+    const fresh = createFakePhone();
+    assert.equal(reg.logDecision(a.enroll({ device: fresh.device() })), 'full');
+    assert.throws(() => reg.appendLog(a.enroll({ device: fresh.device() })), (e) => e.code === 'log_full');
+    assert.equal(reg.appendLog(a.revoke(b.deviceId)), true, 'a revocation is logged past the cap');
+    assert.equal(reg.log().length, MAX_LOG_LINES + 1);
+    assert.equal(reg.logLines, MAX_LOG_LINES + 1);
   });
 
   it('never lets an outside id become a key: bad device_id and node_id are refused, not stored', () => {
