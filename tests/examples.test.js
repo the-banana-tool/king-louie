@@ -979,6 +979,40 @@ describe('install guide', () => {
       assert.ok(text.includes(needle), `guide does not mention ${needle}`);
     }
   });
+
+  // Final review C1: an elevated clone into a folder that still inherits
+  // Authenticated Users Modify from C:\ lets the runner change what the
+  // owner then runs elevated.
+  it('Windows: closes the runner programs first, then cuts inheritance on C:\\KingLouie before cloning into it', () => {
+    const text = lines().join('\n');
+    const section = text.slice(text.indexOf(HEADINGS[3]), text.indexOf(HEADINGS[4]));
+    const close = section.indexOf('**Windows: close the runner\'s programs first.**');
+    const block = section.indexOf('```powershell');
+    assert.ok(close > -1 && close < block, 'the close-the-runner\'s-programs paragraph is not above the Windows block');
+    const code = section.slice(block, section.indexOf('```', block + 3));
+    const create = code.indexOf('New-Item -ItemType Directory C:\\KingLouie');
+    const cut = code.indexOf("icacls C:\\KingLouie /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F'");
+    const clone = code.indexOf('git clone <repository-url> C:\\KingLouie\\app');
+    assert.ok(create > -1 && create < cut && cut < clone, 'inheritance is not cut between New-Item and git clone');
+    assert.ok(code.indexOf("$owner -notin 'S-1-5-32-544', 'S-1-5-18'") < create, 'a pre-existing C:\\KingLouie is not checked first');
+    assert.ok(!code.includes('New-Item -ItemType Directory -Force'), '-Force would silently reuse a folder someone else created');
+  });
+
+  it('covers the final review notes: standard-user runner, protected main, requiretty, disk fill, orphaned children, SeBackupPrivilege', () => {
+    const text = lines().join('\n');
+    for (const needle of [
+      'Windows: make the runner a standard user.',
+      '**Always notify**',
+      'Protect `main`',
+      'Defaults:king-louie !requiretty',
+      'rate limit (10 an hour) is the only',
+      'orphaned',
+      '"Cannot open … to change its owner and ACL"',
+      'SeBackupPrivilege'
+    ]) {
+      assert.ok(text.includes(needle), `guide does not mention ${needle}`);
+    }
+  });
 });
 
 describe('packaging and docs', () => {

@@ -64,6 +64,19 @@ On every machine:
   install steps.
 - **The runner**: the ordinary account you run Claude from. On Windows this is
   the signed-in user. Everything a runbook step does, it does as this account.
+  It is one user account, never a group such as `Users` or `Everyone`:
+  `runbook-acls.ps1` refuses a group or a built-in account.
+- **Windows: make the runner a standard user.** The ACLs in section 6 stop
+  the runner only while Claude runs unelevated, and UAC at its default
+  setting is not a security boundary: a program an administrator runs
+  unelevated can get itself elevated without a prompt you would notice.
+  Make the runner a standard (non-administrator) account; "Run as
+  administrator" then asks for a separate administrator account's
+  password, which is what the install steps use. If the runner has to
+  stay an administrator, at least set UAC to **Always notify** (Control
+  Panel > User Accounts > Change User Account Control settings, slider at
+  the top). `runbook-acls.ps1` warns when the runner is a local
+  administrator.
 - **Claude Code or Claude Desktop**, signed in as the runner.
 - **Linux and macOS: don't let Claude inherit your own `sudo`.** If the
   runner's account can run `sudo` for anything beyond the narrow,
@@ -118,21 +131,52 @@ sudo chown -R root /opt/king-louie/app
 sudo chmod -R go-w /opt/king-louie/app
 ```
 
-**Windows**, from an elevated PowerShell:
+**Windows: close the runner's programs first.** Close Claude Code, Claude
+Desktop and every other program the runner has open before you start, and
+keep them closed until `runbook-acls.ps1` below has finished; do the same
+before every later run of that script. A program that already has one of
+these files or folders open keeps its earlier write handle even after the
+script changes that item's owner and ACL, so it can still change what's
+inside it afterward — and the script's walk only checks ownership and
+permissions, never open handles or file contents, so a clean verification
+would not catch that. Close everything first, so no handle survives the
+lock.
+
+**Windows**, from an elevated PowerShell. `C:\KingLouie` must be a folder
+you create here, elevated. A new folder under `C:\` inherits Modify for
+every signed-in user, so the lines below cut that inheritance the moment the
+folder exists, before anything is cloned into it: otherwise the runner could
+change the code, `node_modules` or `runbook-acls.ps1` itself before you run
+them elevated. If `C:\KingLouie` already exists and you did not create it
+with these lines from an elevated PowerShell, don't use it: move it aside
+(or delete it) and start again. The first lines refuse to go on when it is
+owned by anyone but Administrators or SYSTEM:
 
 ```powershell
-New-Item -ItemType Directory -Force C:\KingLouie | Out-Null
+if (Test-Path C:\KingLouie) {
+  $owner = (Get-Acl C:\KingLouie).GetOwner([Security.Principal.SecurityIdentifier]).Value
+  if ($owner -notin 'S-1-5-32-544', 'S-1-5-18') { throw "C:\KingLouie already exists and is owned by $owner. Move it aside and start again." }
+} else {
+  New-Item -ItemType Directory C:\KingLouie | Out-Null
+}
+icacls C:\KingLouie /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F'
 git clone <repository-url> C:\KingLouie\app
 cd C:\KingLouie\app; npm ci --omit=dev
 ```
+
+After the `icacls` line only SYSTEM and Administrators can open
+`C:\KingLouie`; the runner gets read access back from the ACL script next.
+(The grants are quoted because PowerShell would otherwise read `(OI)` as an
+expression.)
 
 Then, **immediately and before installing the service**, lock `C:\KingLouie`
 so the runner can read it but not change it, with
 `examples/windows/runbook-acls.ps1`. `-Base` (default `C:\KingLouie`) must be
 a real, rooted path — a drive letter and a separator, never a bare `C:` —
 and not a drive root or a folder under `%SystemRoot%`. If it already exists,
-it must either be empty or already look like a King Louie install (contain
-`app\package.json`); the script refuses to take ownership of anything else.
+it must be owned by Administrators or SYSTEM, and either be empty or already
+look like a King Louie install (contain `app\package.json`); the script
+refuses to take ownership of anything else.
 Several things hardcode `C:\KingLouie`: the `gpu-box` runbooks
 `examples/runbooks/models.hf_download.yaml` and
 `examples/runbooks/train.run.yaml`; `examples/mcp/claude-desktop.windows.json`;
@@ -146,14 +190,8 @@ time, and never follows a junction, symbolic link or other reparse point, or
 changes a file that has a second hard link — it stops with an error naming
 the path instead of touching whatever that link or file points at. After
 locking a tree it walks the whole thing again by hand to verify it. Running
-the script again later is always safe for these locked trees. **Close Claude
-Code, Claude Desktop and every other program the runner has open before
-running it.** A program that already has one of these files or folders open
-keeps its earlier write handle even after the script changes that item's
-owner and ACL, so it can still change what's inside it afterward — and the
-script's walk only checks ownership and permissions, never open handles or
-file contents, so a clean verification would not catch that. Close
-everything first, so no handle survives the lock.
+the script again later is always safe for these locked trees, as long as the
+runner's programs are closed each time (see above).
 
 `-Runner` is the runner's account; `whoami` in the runner's own terminal
 prints it, for example `gpu-box\<runner>`. Run it with `-WhatIf` first to see
@@ -164,7 +202,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\KingLouie\app\example
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\KingLouie\app\examples\windows\runbook-acls.ps1 -Role base -Runner 'gpu-box\<runner>'
 ```
 
-This cuts the inherited permissions on `C:\KingLouie`. Only SYSTEM and
+This keeps inheritance cut on `C:\KingLouie`, makes Administrators the owner
+of everything in it, and adds the runner's read access. Only SYSTEM and
 Administrators can change it, the runner can read it, and `LOCAL SERVICE` (the
 installed service) can read `C:\KingLouie\app`. It also creates
 `C:\KingLouie\mcp\config`, `C:\KingLouie\mcp\work` and the runner's own
@@ -398,6 +437,11 @@ never loads pickled weights or `trust_remote_code` models from `D:\models` or
 any other folder the runner can write. A script that does must be run by an
 `unsafe` runbook. `models.hf_download` fetches public repositories only.
 
+`models.hf_download` has no size limit: a download is as large as the
+repository it names, and the runbook's rate limit (10 an hour) is the only
+cap on how much it can fetch. Keep `D:\models` on a drive that can fill up
+without harming anything else, or set a disk quota for the runner on it.
+
 **`laptop`: the site checkout.** As the runner (an ordinary PowerShell), clone
 your site first, so that git sees the runner as the folder's owner:
 
@@ -418,6 +462,12 @@ tests run code from the repository. The reason is that it accepts only your
 own `main`, `release/…` and `vX.Y.Z` refs from your own remote: whoever can
 push those already controls that code. If you widen its `ref` pattern, make
 the runbook `unsafe`.
+
+Both `laptop.build_then_deploy` and `site.pull_and_restart` fetch the ref
+and check out exactly what the remote has, without merging, so a
+force-pushed `main` is built and deployed without complaint. Protect `main`
+(and your `release/…` branches and `v…` tags) on the remote: no force
+pushes and no deletion.
 
 ## 7. Check with doctor
 
@@ -566,6 +616,19 @@ Then:
 claude mcp add --scope user king-louie -- /usr/bin/sudo -n -u king-louie /usr/bin/env --chdir=/opt/king-louie/mcp/work /usr/bin/node /opt/king-louie/app/bin/king-louie-service.js mcp --data-dir /opt/king-louie/mcp/data
 ```
 
+Some older distributions (older RHEL and CentOS releases) ship
+`Defaults requiretty` in `/etc/sudoers`. It refuses `sudo` from any process
+without a terminal, which is every one here: Claude starting the instance,
+and each runbook's `sudo -n` step. Check with
+`sudo grep -rn requiretty /etc/sudoers /etc/sudoers.d`. If it is set, turn
+it off for these two accounts only, in its own file
+(`sudo visudo -f /etc/sudoers.d/king-louie-notty`), with `<you>` as above:
+
+```
+Defaults:<you> !requiretty
+Defaults:king-louie !requiretty
+```
+
 ### Try it
 
 1. **Ask Claude to describe the machine** ("use king-louie's
@@ -610,7 +673,13 @@ claude mcp add --scope user king-louie -- /usr/bin/sudo -n -u king-louie /usr/bi
    Until fleet stage 3, deploy on `web-01` by hand after
    `laptop.build_then_deploy` succeeds.
 5. **Jobs die with the MCP process.** Keep the Claude session open until a
-   long job such as `train.run` has finished.
+   long job such as `train.run` has finished. If the session closes
+   mid-job, `mcp` exits and the job's result is lost. The running step's
+   program may die with it or, on Windows in particular, keep running on
+   its own, orphaned: nothing is left to record what it did, and it still
+   holds its files (and, for `train.run`, the GPU). After closing a session
+   mid-job, look for it in Task Manager (`ps` on Linux and macOS) and end
+   it by hand. Fleet stage 4 moves jobs into the service.
 
 ### Writing your own runbooks
 
@@ -639,6 +708,7 @@ The examples follow rules that keep a runbook safe to hand to a model:
 | What you see | Cause | What to do |
 |---|---|---|
 | `mcp` exits at startup, or the service will not start, with `Invalid …: unknown key "…" (known: …)` | a misspelled or stray key in `node.yaml` (or under `features`/`ports` in `service.json`) | correct or remove the key named; `doctor` shows the same message |
+| `sudo` fails with `sorry, you must have a tty to run sudo`, when Claude starts the instance or in a runbook's `sudo -n` step | `Defaults requiretty` in `/etc/sudoers` (older RHEL and CentOS) | turn it off for `<you>` and `king-louie` only (section 8) |
 | a `site.pull_and_restart` job fails at step 4 with `sudo: a password is required` in its output | the sudoers file is missing, or its line does not match the step | install the sudoers file (section 6); `doctor` shows `not permitted by sudoers` |
 | a job fails at step 2 with git's `error: … would be overwritten by checkout` | local changes in `/srv/site` | nothing was built or restarted. Run `sudo -u king-louie /usr/bin/git -C /srv/site status` and clean up |
 | a `check` step fails with `Check step N result: FAILED` / `did not return 200`, with no TLS reason | an HTTPS URL with a self-signed or untrusted certificate (the reason is not reported) | check over loopback HTTP, as the examples do, or use a trusted certificate |
@@ -648,11 +718,15 @@ The examples follow rules that keep a runbook safe to hand to a model:
 | `site.status` fails after its health check passed | `systemctl is-active` exited 3: `site.service` is not active | the job's output says `inactive`; the check's evidence is still recorded |
 | a folder with a space in `allowed_roots` or a step argument | nothing: it is passed as one argument | — |
 | the service and the MCP instance behave differently | the two `node.yaml` copies have drifted apart | compare them (section 5) and run `doctor` on both |
-| a long job stops when you close Claude | the MCP process exits with the session and takes its jobs with it | keep the session open; fleet stage 4 moves jobs into the service |
+| a long job stops when you close Claude, or its program keeps running with no job to report to | the MCP process exits with the session and its jobs go with it; on Windows especially, a step's program can outlive it, orphaned | keep the session open; after closing one mid-job, end any leftover program by hand (Task Manager, or `ps`). Fleet stage 4 moves jobs into the service |
 | `git` refuses `/srv/site` with "detected dubious ownership" | the repository is owned by another account | `chown` it to `king-louie` (section 6). Never set `safe.directory=*` |
 | `runbook-acls.ps1`'s verification step fails, naming a file inside `mcp\data` or `D:\train\runs` that you never put there yourself | that data folder had contents, and old permissions, from before the first time you ran the script | clear the named file or folder by hand (as an administrator) and run the script again |
 | `runbook-acls.ps1` refuses a run with "is a junction, symbolic link or other reparse point", inside a data folder | something planted a link there | remove it by hand (as an administrator); the refusal is intended, not a bug |
 | `runbook-acls.ps1` throws "…'s home ('…') is not under …" | the `gpu-box` venv's Python was installed per-user, not "for all users" | reinstall Python for all users (section 2) and recreate the venv (section 6) |
+| `runbook-acls.ps1` stops with "Cannot open … to change its owner and ACL" | the script could not open that item even with its backup, restore and take-ownership privileges: a policy has removed one of those user rights from Administrators, or security software is blocking the item | in the elevated PowerShell, `whoami /priv` must list `SeBackupPrivilege`, `SeRestorePrivilege` and `SeTakeOwnershipPrivilege`. If one is missing, give it back to Administrators in Local Security Policy (User Rights Assignment), or take that one item by hand (`takeown /F <path> /A`, never `/R`), then run the script again |
+| `runbook-acls.ps1` refuses `-Base` with "already exists and is owned by …, not by Administrators or SYSTEM" | `C:\KingLouie` was not created from an elevated PowerShell | move it aside and create it again as section 3 shows |
+| `runbook-acls.ps1` refuses `-Runner` with "is not a user account" | `-Runner` names a group or a built-in account | pass the one user who runs Claude, as `MACHINE\user` |
+| `runbook-acls.ps1` warns that `-Runner` "is a member of the local Administrators group" | the runner is an administrator, and UAC's default setting lets its programs elevate | make the runner a standard user, or set UAC to Always notify (section 2) |
 
 ## 10. Stage 3: Approving unsafe runbooks from your phone
 
