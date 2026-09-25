@@ -585,7 +585,10 @@ class RunbookEngine {
       );
     }
 
-    const validatedParams = this.validateParameters(runbookName, rawParams);
+    // `validatedParams`: the caller already validated (and a phone approved)
+    // exactly these values, paths realpath'd; running them as given means
+    // nothing is re-resolved after the last check.
+    const validatedParams = options.validatedParams || this.validateParameters(runbookName, rawParams);
     if (!Array.isArray(runbook.steps) || runbook.steps.length === 0) {
       throw new Error(`Runbook "${runbookName}" has no steps`);
     }
@@ -777,8 +780,26 @@ class JobManager {
       result: null
     };
     this.jobs.set(jobId, job);
-    if (initialStatus === 'queued') this.controllers.set(jobId, new AbortController());
+    // A job waiting for a phone approval gets its controller now, so
+    // cancel_job can withdraw the request.
+    if (initialStatus === 'queued' || initialStatus === 'awaiting_approval') this.controllers.set(jobId, new AbortController());
     return job;
+  }
+
+  // The one non-terminal transition besides running: an approved job leaves
+  // awaiting_approval for queued, and only if a slot is free.
+  transition(jobId, from, to) {
+    const job = this.jobs.get(jobId);
+    if (!job || job.status !== from) {
+      throw Object.assign(new Error(`job ${jobId} is not ${from}`), { code: 'bad_transition' });
+    }
+    if (!(from === 'awaiting_approval' && to === 'queued')) {
+      throw Object.assign(new Error(`a job cannot move from ${from} to ${to}`), { code: 'bad_transition' });
+    }
+    if (this.activeJobCount() >= this.maxConcurrentJobs) {
+      throw Object.assign(new Error(`max_concurrent_jobs: this node already has ${this.maxConcurrentJobs} job(s) running`), { code: 'max_concurrent_jobs' });
+    }
+    return this.updateJob(jobId, { status: 'queued' });
   }
 
   getJob(jobId) {
@@ -793,11 +814,20 @@ class JobManager {
   // Timing follows the status, so no caller can forget to stamp it: the
   // first move to running sets started_at, and the first terminal status sets
   // finished_at. A terminal job's controller is no longer needed.
+  //
+  // A terminal job never moves back out of it. A status racing in behind a
+  // decision that already landed (cancel_job while an await such as the
+  // audit ledger's exec.start append is pending, say) is dropped rather than
+  // reviving the job; every other field in the same call still applies.
   updateJob(jobId, updates = {}) {
     const job = this.jobs.get(jobId);
     if (!job) return null;
     const now = new Date().toISOString();
-    Object.assign(job, updates, { updated_at: now });
+    const safeUpdates = { ...updates };
+    if (TERMINAL_JOB_STATUSES.includes(job.status) && 'status' in safeUpdates && !TERMINAL_JOB_STATUSES.includes(safeUpdates.status)) {
+      delete safeUpdates.status;
+    }
+    Object.assign(job, safeUpdates, { updated_at: now });
     if (job.status === 'running' && !job.started_at) job.started_at = now;
     if (TERMINAL_JOB_STATUSES.includes(job.status)) {
       if (!job.finished_at) job.finished_at = now;

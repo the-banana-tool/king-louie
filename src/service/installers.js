@@ -244,6 +244,87 @@ const WINDOWS_DATA_DIR_SCRIPT = [
   `}`
 ].join('\n');
 
+// The admin config dir (<configDir>, beside the data dir) and its `approvers`
+// subdir. The service reads node.yaml and service.json from the first, and the
+// phone approver set from the second: whoever can write `approvers` approves
+// anything on this node, and on Windows the directory's ACL is the only guard
+// (ApproverStore re-probes it on every scan). So both are created admin-owned
+// with a protected DACL (WINDOWS_CONFIG_DIR_SDDL: full control to SYSTEM and
+// Administrators, read and execute to LOCAL SERVICE), and an existing one is
+// only verified, never changed: every ACE must be a plain allow ACE for
+// SYSTEM or Administrators, or for LOCAL SERVICE with no right beyond read and
+// execute; the owner must be Administrators or SYSTEM; and neither it nor any
+// ancestor may be a reparse point or owned by anyone else. The path travels
+// through KL_CONFIG_DIR, never through the script's text.
+const WINDOWS_CONFIG_DIR_SDDL = 'O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;LS)';
+const WINDOWS_CONFIG_DIRS_SCRIPT = [
+  `$ErrorActionPreference = 'Stop'`,
+  `try {`,
+  `  $config = $env:KL_CONFIG_DIR`,
+  `  if (-not $config) { throw 'KL_CONFIG_DIR is not set' }`,
+  `  $config = [System.IO.Path]::GetFullPath($config)`,
+  `  Add-Type -TypeDefinition @'`,
+  WINDOWS_INSPECT_CSHARP,
+  `'@`,
+  `  $owners = @('S-1-5-32-544','S-1-5-18')`,
+  `  $ancestorOwners = @('S-1-5-32-544','S-1-5-18','${TRUSTED_INSTALLER_SID}')`,
+  `  $readExecute = 0x1200a9`,
+  `  function Read-Entry([string]$p) {`,
+  `    $r = [KlFsInspect]::Inspect($p)`,
+  `    if ($null -eq $r) { return $null }`,
+  `    return [PSCustomObject]@{ Attributes = [uint32]$r[0]; Sd = [System.Security.AccessControl.RawSecurityDescriptor]::new([byte[]]$r[1], 0) }`,
+  `  }`,
+  `  function Assert-SafeAncestors([string]$p, [bool]$mustExist) {`,
+  `    $a = [System.IO.Path]::GetDirectoryName($p)`,
+  `    while ($a) {`,
+  `      $e = Read-Entry $a`,
+  `      if ($null -eq $e) {`,
+  `        if ($mustExist) { throw "ancestor directory $($a) is not safe: it does not exist" }`,
+  `      } else {`,
+  `        if ($e.Attributes -band 0x400) { throw "ancestor directory $($a) is not safe: it is a symlink or junction" }`,
+  `        $o = if ($e.Sd.Owner) { $e.Sd.Owner.Value } else { '(none)' }`,
+  `        if ($ancestorOwners -notcontains $o) { throw "ancestor directory $($a) is not safe: owner $o is not Administrators, SYSTEM or TrustedInstaller" }`,
+  `      }`,
+  `      $a = [System.IO.Path]::GetDirectoryName($a)`,
+  `    }`,
+  `  }`,
+  `  foreach ($p in @($config, [System.IO.Path]::Combine($config, 'approvers'))) {`,
+  `    if ($null -eq (Read-Entry $p)) {`,
+  `      Assert-SafeAncestors $p $false`,
+  `      $ds = New-Object System.Security.AccessControl.DirectorySecurity`,
+  `      $ds.SetSecurityDescriptorSddlForm('${WINDOWS_CONFIG_DIR_SDDL}')`,
+  `      [System.IO.Directory]::CreateDirectory($p, $ds) | Out-Null`,
+  `    }`,
+  `    # VERIFY: always runs, for a freshly created dir and a pre-existing one alike`,
+  `    $bad = "the ACL of $($p) is not safe (the service must be able to read it, never write it) and must be fixed manually"`,
+  `    $e = Read-Entry $p`,
+  `    if ($null -eq $e) { throw "$($p) does not exist after creating it" }`,
+  `    if ($e.Attributes -band 0x400) { throw "refusing to use $($p): it is a symlink or junction" }`,
+  `    if (-not ($e.Attributes -band 0x10)) { throw "refusing to use $($p): it is not a directory" }`,
+  `    $dacl = $e.Sd.DiscretionaryAcl`,
+  `    if ($null -eq $dacl) { throw "$($bad): it has no DACL (everyone has full access)" }`,
+  `    foreach ($ace in $dacl) {`,
+  `      if (-not ($ace -is [System.Security.AccessControl.CommonAce]) -or $ace.AceType -ne [System.Security.AccessControl.AceType]::AccessAllowed) {`,
+  `        throw "$($bad): unexpected ACE of type $($ace.AceType) (only plain allow ACEs are permitted)"`,
+  `      }`,
+  `      $aceSid = $ace.SecurityIdentifier.Value`,
+  `      if ($aceSid -eq 'S-1-5-19') {`,
+  `        if (($ace.AccessMask -band (-bnot $readExecute)) -ne 0) { throw "$($bad): LOCAL SERVICE has more than read and execute" }`,
+  `      } elseif ($owners -notcontains $aceSid) {`,
+  `        throw "$($bad): unexpected ACE for $aceSid"`,
+  `      }`,
+  `    }`,
+  `    $ownerSid = if ($e.Sd.Owner) { $e.Sd.Owner.Value } else { '(none)' }`,
+  `    if ($owners -notcontains $ownerSid) { throw "$($bad): owner $ownerSid is not Administrators or SYSTEM" }`,
+  `    Assert-SafeAncestors $p $true`,
+  `  }`,
+  `  exit 0`,
+  `} catch {`,
+  `  [Console]::Error.WriteLine($_.Exception.Message)`,
+  `  exit 1`,
+  `}`
+].join('\n');
+
 // Every Windows executable the plans run is an absolute System32 path (see
 // src/platform/windows-paths.js), so an elevated install started from an
 // attacker-writable cwd can't pick up a planted powershell.exe/schtasks.exe.
@@ -691,6 +772,13 @@ function planInstall({ platform = process.platform, nodePath = process.execPath,
         description: 'create or verify the data dir with a locked-down ACL',
         run: [windowsPowerShellExe(), '-NoProfile', '-NonInteractive', '-Command', WINDOWS_DATA_DIR_SCRIPT],
         env: { KL_DATA_DIR: dataDir }
+      },
+      // The config dir beside the data dir, and `approvers` in it: admin-owned,
+      // read-only to the service (see WINDOWS_CONFIG_DIRS_SCRIPT).
+      {
+        description: 'create or verify the config and approvers dirs (read-only to the service)',
+        run: [windowsPowerShellExe(), '-NoProfile', '-NonInteractive', '-Command', WINDOWS_CONFIG_DIRS_SCRIPT],
+        env: { KL_CONFIG_DIR: adminConfigDir({ platform: 'win32', dataDir }) }
       },
       {
         description: 'write the task definition',

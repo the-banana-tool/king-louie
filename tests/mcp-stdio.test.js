@@ -223,12 +223,12 @@ describe('Local Stdio MCP Server: describe_machine', () => {
 });
 
 describe('Local Stdio MCP Server: run_runbook', () => {
-  it('denies an unsafe runbook by policy and runs nothing', async () => {
+  it('denies an unsafe runbook by policy and runs nothing when no phone approver is configured', async () => {
     const engine = fakeEngine({ 'server.reboot': { tier: 'unsafe' } });
     const server = new StdioMcpServer({ nodeConfig: NODE, runbookEngine: engine });
     const res = await server.executeToolCall('run_runbook', { machine: 'web-01', runbook: 'server.reboot' });
     assert.equal(res.status, 'denied');
-    assert.equal(res.reason, 'denied_by_policy: unsafe runbooks need phone approval, which is not available until stage 3');
+    assert.equal(res.reason, 'denied_by_policy: unsafe runbooks need a phone approval and no device is enrolled on this node');
     assert.ok(res.job_id);
 
     await new Promise((r) => setTimeout(r, 10));

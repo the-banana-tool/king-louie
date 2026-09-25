@@ -1309,3 +1309,64 @@ describe('Windows data dir: LOCAL SERVICE may be granted access but may not own 
     assert.ok(script.includes("$aceSids = @('S-1-5-19','S-1-5-18','S-1-5-32-544')"), 'LOCAL SERVICE must still be granted access');
   });
 });
+
+// Task 23 review, Ruling A: on Windows the approvers dir's ACL is the only
+// guard on the phone approver set, so the installer creates the config dir
+// and approvers beside the data dir admin-owned and read-only to the service.
+describe('Windows: the config and approvers dirs are read-only to the service', () => {
+  const win = { nodePath: 'C:\\node.exe', entryPath: 'C:\\kl\\bin\\king-louie-service.js', dataDir: 'C:\\ProgramData\\KingLouie\\data' };
+  const DESCRIPTION = 'create or verify the config and approvers dirs (read-only to the service)';
+
+  function configStepFor(dataDir) {
+    return planInstall({ platform: 'win32', ...win, dataDir }).find((s) => s.description === DESCRIPTION);
+  }
+
+  function runConfigScript(configDir) {
+    const step = configStepFor(win.dataDir);
+    try {
+      execFileSync(step.run[0], step.run.slice(1), { env: { ...process.env, KL_CONFIG_DIR: configDir }, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8' });
+      return { code: 0, stderr: '' };
+    } catch (err) {
+      return { code: typeof err.status === 'number' ? err.status : 1, stderr: String(err.stderr || err.message || '') };
+    }
+  }
+
+  it('runs right after the data dir step, on the config dir beside the data dir, via an env var', () => {
+    const steps = planInstall({ platform: 'win32', ...win });
+    const step = steps.find((s) => s.description === DESCRIPTION);
+    assert.ok(step, 'expected a config dir step');
+    assert.strictEqual(steps.indexOf(step), 1);
+    assert.strictEqual(step.run[0], POWERSHELL_EXE);
+    assert.deepStrictEqual(step.env, { KL_CONFIG_DIR: 'C:\\ProgramData\\KingLouie\\config' });
+    const script = step.run[4];
+    assert.ok(!script.includes('ProgramData'), 'the path must travel through KL_CONFIG_DIR, never the script text');
+    assert.ok(script.includes("[System.IO.Path]::Combine($config, 'approvers')"), 'approvers is created and verified too');
+    assert.ok(script.includes('O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;LS)'), 'admin full control, service read and execute');
+    assert.ok(script.includes("$owners = @('S-1-5-32-544','S-1-5-18')"), 'LOCAL SERVICE may not own it');
+    assert.ok(script.includes('LOCAL SERVICE has more than read and execute'));
+  });
+
+  it('a pre-existing config dir with a default ACL is refused', { skip: notWin32Skip }, () => {
+    const base2 = tmp();
+    try {
+      const dir = path.join(base2, 'config');
+      fs.mkdirSync(dir);
+      const result = runConfigScript(dir);
+      assert.notStrictEqual(result.code, 0);
+      assert.match(result.stderr, /ACL of .+ is not safe/);
+      assert.ok(!fs.existsSync(path.join(dir, 'approvers')), 'nothing is created inside a config dir that failed verification');
+    } finally { removeTempTree(base2); }
+  });
+
+  it('a new config dir under a user-owned temp dir fails the ancestor check before anything is created', { skip: notWin32Skip }, () => {
+    const base2 = tmp();
+    try {
+      setTestDirOwnerToCurrentUser(base2);
+      const dir = path.join(base2, 'config');
+      const result = runConfigScript(dir);
+      assert.notStrictEqual(result.code, 0);
+      assert.match(result.stderr, /ancestor directory .+ is not safe: owner S-1-5-\S+ is not Administrators, SYSTEM or TrustedInstaller/);
+      assert.ok(!fs.existsSync(dir));
+    } finally { removeTempTree(base2); }
+  });
+});

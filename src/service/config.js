@@ -22,7 +22,96 @@ const CONFIG_FILE = 'service.json';
 // Keys that decide whether a network listener exists and where it binds, and
 // which profile — and so whether the agent stack loads at all. These may only
 // come from the admin-owned config dir; see below.
-const ADMIN_ONLY_KEYS = ['features', 'ports', 'profile'];
+// `relay` (the relay's listeners, TLS files and push credentials) and `audit`
+// (ledger retention) joined in fleet stage 3.
+const ADMIN_ONLY_KEYS = ['features', 'ports', 'profile', 'relay', 'audit'];
+const RELAY_DEFAULTS = { phoneListen: { host: '0.0.0.0', port: 8443 }, meshPort: 18795, auditRetentionDays: 365 };
+
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function rejectUnknownKeys(obj, allowed, where, file) {
+  for (const key of Object.keys(obj)) {
+    if (!allowed.includes(key)) throw new Error(`Invalid ${file}: ${where}.${key} is not a known key (expected ${allowed.join(', ')})`);
+  }
+}
+
+function listenBlock(raw, where, file, { host = null, port }) {
+  const value = raw === undefined ? {} : raw;
+  if (!isPlainObject(value)) throw new Error(`Invalid ${file}: ${where} must be an object with host and port`);
+  rejectUnknownKeys(value, ['host', 'port'], where, file);
+  const out = { host: value.host === undefined ? host : value.host, port: value.port === undefined ? port : value.port };
+  if (typeof out.host !== 'string' || !out.host) throw new Error(`Invalid ${file}: ${where}.host is required`);
+  if (!Number.isInteger(out.port) || out.port < 1 || out.port > 65535) throw new Error(`Invalid ${file}: ${where}.port must be an integer from 1 to 65535`);
+  return out;
+}
+
+function requiredString(value, where, file) {
+  if (typeof value !== 'string' || !value.trim()) throw new Error(`Invalid ${file}: ${where} is required`);
+  return value.trim();
+}
+
+// The relay host's block (spec §6). Returns the shape startRelay takes, or
+// null when there is no relay block.
+function parseRelayConfig(raw, file) {
+  if (raw === undefined) return null;
+  if (!isPlainObject(raw)) throw new Error(`Invalid ${file}: "relay" must be an object`);
+  rejectUnknownKeys(raw, ['phone_listen', 'tls', 'mesh_listen', 'public_url', 'push'], 'relay', file);
+  if (!isPlainObject(raw.tls)) throw new Error(`Invalid ${file}: relay.tls with cert_file and key_file is required`);
+  rejectUnknownKeys(raw.tls, ['cert_file', 'key_file'], 'relay.tls', file);
+  const publicUrl = requiredString(raw.public_url, 'relay.public_url', file);
+  let parsedPublicUrl;
+  try {
+    parsedPublicUrl = new URL(publicUrl);
+  } catch {
+    throw new Error(`Invalid ${file}: relay.public_url must be a valid URL`);
+  }
+  if (parsedPublicUrl.protocol !== 'https:') throw new Error(`Invalid ${file}: relay.public_url must be an https:// URL`);
+  if (!parsedPublicUrl.hostname) throw new Error(`Invalid ${file}: relay.public_url must include a host`);
+  const push = {};
+  if (raw.push !== undefined) {
+    if (!isPlainObject(raw.push)) throw new Error(`Invalid ${file}: relay.push must be an object`);
+    rejectUnknownKeys(raw.push, ['apns', 'fcm'], 'relay.push', file);
+    if (raw.push.apns !== undefined) {
+      const a = raw.push.apns;
+      if (!isPlainObject(a)) throw new Error(`Invalid ${file}: relay.push.apns must be an object`);
+      rejectUnknownKeys(a, ['team_id', 'key_id', 'key_file', 'topic', 'environment'], 'relay.push.apns', file);
+      const environment = a.environment === undefined ? 'production' : a.environment;
+      if (!['production', 'sandbox'].includes(environment)) throw new Error(`Invalid ${file}: relay.push.apns.environment must be production or sandbox`);
+      push.apns = {
+        teamId: requiredString(a.team_id, 'relay.push.apns.team_id', file),
+        keyId: requiredString(a.key_id, 'relay.push.apns.key_id', file),
+        keyFile: requiredString(a.key_file, 'relay.push.apns.key_file', file),
+        topic: requiredString(a.topic, 'relay.push.apns.topic', file),
+        environment
+      };
+    }
+    if (raw.push.fcm !== undefined) {
+      if (!isPlainObject(raw.push.fcm)) throw new Error(`Invalid ${file}: relay.push.fcm must be an object`);
+      rejectUnknownKeys(raw.push.fcm, ['service_account_file'], 'relay.push.fcm', file);
+      push.fcm = { serviceAccountFile: requiredString(raw.push.fcm.service_account_file, 'relay.push.fcm.service_account_file', file) };
+    }
+  }
+  return {
+    phoneListen: listenBlock(raw.phone_listen, 'relay.phone_listen', file, RELAY_DEFAULTS.phoneListen),
+    tls: { certFile: requiredString(raw.tls.cert_file, 'relay.tls.cert_file', file), keyFile: requiredString(raw.tls.key_file, 'relay.tls.key_file', file) },
+    meshListen: listenBlock(raw.mesh_listen, 'relay.mesh_listen', file, { host: null, port: RELAY_DEFAULTS.meshPort }),
+    publicUrl,
+    push
+  };
+}
+
+function parseAuditConfig(raw, file) {
+  if (raw === undefined) return { retentionDays: RELAY_DEFAULTS.auditRetentionDays };
+  if (!isPlainObject(raw)) throw new Error(`Invalid ${file}: "audit" must be an object`);
+  rejectUnknownKeys(raw, ['retention_days'], 'audit', file);
+  const days = raw.retention_days === undefined ? RELAY_DEFAULTS.auditRetentionDays : raw.retention_days;
+  if (!Number.isInteger(days) || days < 30 || days > 3650) {
+    throw new Error(`Invalid ${file}: audit.retention_days must be an integer of at least 30 (up to 3650)`);
+  }
+  return { retentionDays: days };
+}
 
 // The one formatter for "this config file carries a key we don't know
 // about." node-config.js's node.yaml check and this file's own service.json
@@ -202,7 +291,13 @@ function loadServiceConfig(dataDir, overrides = {}, {
     log.warn("ports.desktopBridge 0 is for tests; the paired desktop can't reach an ephemeral port");
   }
 
-  return { profile, features, ports };
+  return {
+    profile,
+    features,
+    ports,
+    relay: parseRelayConfig(adminCfg.relay, adminFile),
+    audit: parseAuditConfig(adminCfg.audit, adminFile)
+  };
 }
 
-module.exports = { loadServiceConfig, assertAdminOwned, PROFILES, DEFAULT_PORTS, DEFAULT_FEATURES, CONFIG_FILE, unknownKeyError };
+module.exports = { loadServiceConfig, assertAdminOwned, parseRelayConfig, parseAuditConfig, PROFILES, DEFAULT_PORTS, DEFAULT_FEATURES, CONFIG_FILE, unknownKeyError };

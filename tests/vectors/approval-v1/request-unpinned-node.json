@@ -1,0 +1,27 @@
+{
+  "name": "request-unpinned-node",
+  "consumers": [
+    "ios",
+    "android"
+  ],
+  "given": {
+    "now": "2026-09-23T18:04:11.201Z",
+    "pinned_nodes": [
+      {
+        "id": "kl-c2ubd6jjqumalzt5",
+        "key": "302a300506032b65700321006f1962549a885918d3d8c5745499194f20289bda3e041e433e4fa15e16558423"
+      }
+    ]
+  },
+  "input": {
+    "alg": "Ed25519",
+    "kid": "kl-hnef32472qzibi5r",
+    "payload": "eyJhY3Rpb24iOnsiY3dkIjoiL3Nydi9zaXRlIiwia2luZCI6InRvb2wiLCJuYW1lIjoiQmFzaCIsInBhcmFtcyI6eyJjb21tYW5kIjoiZ2l0IHB1c2ggb3JpZ2luIG1haW4ifSwic3VtbWFyeSI6IkJhc2goZ2l0IHB1c2ggb3JpZ2luIG1haW4pIn0sImFjdGlvbl9oYXNoIjoiM0NXbnMxR2RmMEI3Y1BGZ0N6dmgyUXZmRmVSc1R2alNnRFcyQXZyZ2NqQSIsImNyZWF0ZWRfYXQiOiIyMDI2LTA5LTIzVDE4OjA0OjExLjIwMVoiLCJleHBpcmVzX2F0IjoiMjAyNi0wOS0yM1QxODowOToxMS4yMDFaIiwibm9kZV9pZCI6ImtsLWhuZWYzMjQ3MnF6aWJpNXIiLCJub2RlX25hbWUiOiJncHUtYm94Iiwibm9uY2UiOiJuMFlVRHNhVDlWalpSWllxVTR4V3BDcnlELTBiVmRqZkRvZ0J2dXpsWWdvIiwib3JpZ2luIjp7ImNsaWVudCI6ImdhdGV3YXkiLCJqb2JfaWQiOm51bGwsInNlc3Npb24iOiJjaGF0LTEifSwicmVxdWVzdF9pZCI6IjY2MTIyYWMzLTdmNzktNGZjYy04OTk5LWNhODAyMWZhYzRjNyIsInR5cGUiOiJrbC5hcHByb3ZhbC5yZXF1ZXN0IiwidiI6MX0",
+    "sig": "jgkTHhlEoW82j_bWqwSHMtMWhnlDsqJqY4vdeKD9XBNuADfFe142yjiIpTgLd7L4eO9tASUtLi_p4uTm3G-eCw"
+  },
+  "expect": {
+    "shown": false,
+    "reason": "unpinned_node",
+    "display": null
+  }
+}

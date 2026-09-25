@@ -14,6 +14,17 @@ const PEER_ID_PREFIX = 'kl-';
 const PEER_ID_LENGTH = 12; // hex chars after prefix
 const TLS_CERT_DAYS = 3650; // 10 years - long-lived, trust is via pinning not CA
 
+// The mesh peer id: kl- + the first 12 hex chars of sha256(publicKey), where
+// publicKey is the DER (SPKI) encoding MeshIdentity stores. Exported so
+// anything holding a pin's raw publicKey (e.g. RelayClient, when a pair
+// record predates carrying peerId) can recompute the same id the mesh itself
+// would have assigned, instead of duplicating this formula.
+function derivePeerId(publicKey) {
+  const buf = Buffer.isBuffer(publicKey) ? publicKey : Buffer.from(publicKey, 'hex');
+  const hash = crypto.createHash('sha256').update(buf).digest('hex');
+  return PEER_ID_PREFIX + hash.slice(0, PEER_ID_LENGTH);
+}
+
 class MeshIdentity {
   constructor(config = {}) {
     this.displayName = config.displayName || '';
@@ -50,8 +61,7 @@ class MeshIdentity {
   }
 
   _derivePeerId() {
-    const hash = crypto.createHash('sha256').update(this.publicKey).digest('hex');
-    return PEER_ID_PREFIX + hash.slice(0, PEER_ID_LENGTH);
+    return derivePeerId(this.publicKey);
   }
 
   sign(data) {
@@ -439,6 +449,7 @@ function _formatAsn1Time(date) {
 
 module.exports = {
   MeshIdentity,
+  derivePeerId,
   saveIdentity,
   loadIdentity,
   serializeIdentity,

@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const WebSocket = require('ws');
+const { canonicalize } = require('../platform/jcs');
 
 // BIP39-inspired wordlist (256 words = 8 bits per word, 6 words = 48 bits of entropy)
 const WORDLIST = [
@@ -39,36 +40,89 @@ const WORDLIST = [
 
 const PAIRING_CODE_WORDS = 6;
 const PAIRING_TIMEOUT_MS = 120000; // 2 minutes
+const NONCE_RE = /^[0-9a-f]{32}$/;
+const PROOF_RE = /^[0-9a-f]{64}$/;
+
+// Each side proves it knows the code with
+//   HMAC-SHA256(secret, nonce || JCS(identity))
+// over the whole identity object it presents in the same message (key, peer
+// id, TLS fingerprint, display name, capabilities, node id and name — every
+// field as sent). An on-path attacker who forwards a proof cannot change any
+// of it: the code is exchanged out of band, so it cannot compute a proof over
+// anything else. The nonce is fixed-length hex, so the concatenation is
+// unambiguous. (A peer running the older, unbound proof fails closed against
+// this one: its proofs never verify.)
+function pairingProof(secret, nonce, identity) {
+  return crypto.createHmac('sha256', secret).update(nonce).update(canonicalize(identity)).digest('hex');
+}
+
+// The identity exactly as it will arrive: what JSON carries (undefined
+// fields dropped), so both ends canonicalize the same object.
+function wireIdentity(identity) {
+  return JSON.parse(JSON.stringify(identity));
+}
+
+// Recomputes the proof over the identity actually received. Anything
+// malformed is simply "no match", never a throw.
+function proofMatches(secret, nonce, identity, proof) {
+  if (typeof nonce !== 'string' || !NONCE_RE.test(nonce)) return false;
+  if (typeof proof !== 'string' || !PROOF_RE.test(proof)) return false;
+  if (!identity || typeof identity !== 'object') return false;
+  if (typeof identity.publicKey !== 'string' || typeof identity.peerId !== 'string') return false;
+  const fp = identity.tlsFingerprint;
+  if (fp !== undefined && fp !== null && typeof fp !== 'string') return false;
+  let expected;
+  try {
+    expected = pairingProof(secret, nonce, identity);
+  } catch {
+    return false;
+  }
+  return crypto.timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(proof, 'hex'));
+}
 
 class MeshPairing {
-  constructor(identity, transport) {
+  // options.timeoutMs: how long a code stays valid and how long acceptCode
+  // waits (default two minutes).
+  constructor(identity, transport, { timeoutMs = PAIRING_TIMEOUT_MS } = {}) {
     this.identity = identity;
     this.transport = transport;
+    this.timeoutMs = timeoutMs;
     this.pendingPairings = new Map();
+    // Optional admit(remoteIdentity, meta) → null | reason: a last say on a
+    // proof-valid pairing, asked before anything is trusted or answered, so
+    // a refused peer gets pair:reject rather than a pair:accept taken back.
+    this.admit = null;
   }
 
-  generateCode() {
+  generateCode(meta = {}) {
     const bytes = crypto.randomBytes(PAIRING_CODE_WORDS);
     const words = [];
     for (let i = 0; i < PAIRING_CODE_WORDS; i++) {
       words.push(WORDLIST[bytes[i]]);
     }
+    const { pairingId, code } = this.addCode(words.join(' '), meta);
+    return { pairingId, code };
+  }
 
-    const code = words.join(' ');
-    const secret = crypto.createHash('sha256').update(code).digest();
-
+  // Registers a code made elsewhere (the relay's `relay code` CLI). `meta`
+  // travels with the code and comes back on success; `meta.nodeName`, when
+  // set, must equal the pairing node's name or the pairing is refused
+  // (`name_mismatch`).
+  addCode(code, meta = {}) {
+    const normalized = String(code).trim().toLowerCase();
+    const secret = crypto.createHash('sha256').update(normalized).digest();
     const pairingId = crypto.randomBytes(8).toString('hex');
     this.pendingPairings.set(pairingId, {
-      code,
+      code: normalized,
       secret,
+      meta,
       createdAt: Date.now(),
       direction: 'initiator',
       timeout: setTimeout(() => {
         this.pendingPairings.delete(pairingId);
-      }, PAIRING_TIMEOUT_MS)
+      }, this.timeoutMs)
     });
-
-    return { pairingId, code };
+    return { pairingId, code: normalized, expiresAt: Date.now() + this.timeoutMs };
   }
 
   async acceptCode(code, peerAddress, peerPort) {
@@ -79,7 +133,7 @@ class MeshPairing {
       const timeout = setTimeout(() => {
         this.pendingPairings.delete(pairingId);
         reject(new Error('Pairing timeout'));
-      }, PAIRING_TIMEOUT_MS);
+      }, this.timeoutMs);
 
       this.pendingPairings.set(pairingId, {
         code: code.trim().toLowerCase(),
@@ -113,18 +167,26 @@ class MeshPairing {
         reject(new Error('Pairing connection timeout'));
       }, 10000);
 
+      // The certificate the far side actually served, when TLS is on. The
+      // caller compares it with the fingerprint the peer claims (pair.js).
+      let servedTlsFingerprint = null;
+
       ws.on('open', () => {
+        if (useTls && ws._socket && typeof ws._socket.getPeerCertificate === 'function') {
+          const peerCert = ws._socket.getPeerCertificate(true);
+          if (peerCert && peerCert.raw) {
+            servedTlsFingerprint = crypto.createHash('sha256').update(peerCert.raw).digest('hex');
+          }
+        }
         const nonce = crypto.randomBytes(16).toString('hex');
-        const proof = crypto.createHmac('sha256', secret)
-          .update(nonce)
-          .digest('hex');
+        const identity = wireIdentity(this.identity.getPublicIdentity());
 
         ws.send(JSON.stringify({
           type: 'pair:request',
           pairingId,
           nonce,
-          proof,
-          identity: this.identity.getPublicIdentity()
+          proof: pairingProof(secret, nonce, identity),
+          identity
         }));
       });
 
@@ -133,11 +195,7 @@ class MeshPairing {
           const msg = JSON.parse(data);
 
           if (msg.type === 'pair:accept') {
-            const expectedProof = crypto.createHmac('sha256', secret)
-              .update(msg.nonce)
-              .digest('hex');
-
-            if (expectedProof !== msg.proof) {
+            if (!proofMatches(secret, msg.nonce, msg.identity, msg.proof)) {
               ws.close();
               clearTimeout(timeout);
               reject(new Error('Invalid pairing proof from peer'));
@@ -160,6 +218,9 @@ class MeshPairing {
               displayName: msg.identity.displayName,
               capabilities: msg.identity.capabilities,
               tlsFingerprint: msg.identity.tlsFingerprint || null,
+              nodeId: msg.identity.nodeId || null,
+              nodeName: msg.identity.nodeName || null,
+              servedTlsFingerprint,
               address,
               port
             };
@@ -207,11 +268,7 @@ class MeshPairing {
     let matchedPairing = null;
     for (const [id, pairing] of this.pendingPairings) {
       if (pairing.direction === 'initiator') {
-        const expectedProof = crypto.createHmac('sha256', pairing.secret)
-          .update(nonce)
-          .digest('hex');
-
-        if (expectedProof === proof) {
+        if (proofMatches(pairing.secret, nonce, remoteIdentity, proof)) {
           matchedPairing = { id, pairing };
           break;
         }
@@ -225,18 +282,42 @@ class MeshPairing {
     }
 
     const { id: pairingId, pairing } = matchedPairing;
+    const meta = pairing.meta || {};
 
-    // Send back our proof
+    // A code issued for one node name cannot pair a node with another.
+    if (meta.nodeName && remoteIdentity.nodeName !== meta.nodeName) {
+      clearTimeout(pairing.timeout);
+      this.pendingPairings.delete(pairingId);
+      ws.send(JSON.stringify({ type: 'pair:reject', reason: 'name_mismatch' }));
+      ws.close();
+      return null;
+    }
+
+    if (typeof this.admit === 'function') {
+      let reason;
+      try {
+        reason = this.admit(remoteIdentity || {}, meta);
+      } catch {
+        reason = 'refused';
+      }
+      if (reason) {
+        clearTimeout(pairing.timeout);
+        this.pendingPairings.delete(pairingId);
+        ws.send(JSON.stringify({ type: 'pair:reject', reason: String(reason) }));
+        ws.close();
+        return null;
+      }
+    }
+
+    // Send back our proof, bound to the identity we answer with.
     const responseNonce = crypto.randomBytes(16).toString('hex');
-    const responseProof = crypto.createHmac('sha256', pairing.secret)
-      .update(responseNonce)
-      .digest('hex');
+    const ownIdentity = wireIdentity(this.identity.getPublicIdentity());
 
     ws.send(JSON.stringify({
       type: 'pair:accept',
       nonce: responseNonce,
-      proof: responseProof,
-      identity: this.identity.getPublicIdentity()
+      proof: pairingProof(pairing.secret, responseNonce, ownIdentity),
+      identity: ownIdentity
     }));
 
     // Store the peer
@@ -262,7 +343,7 @@ class MeshPairing {
     );
 
     ws.close();
-    return peerInfo;
+    return { ...peerInfo, nodeId: remoteIdentity.nodeId || null, nodeName: remoteIdentity.nodeName || null, meta };
   }
 
   cleanup() {
@@ -273,4 +354,4 @@ class MeshPairing {
   }
 }
 
-module.exports = { MeshPairing, WORDLIST };
+module.exports = { MeshPairing, WORDLIST, pairingProof };

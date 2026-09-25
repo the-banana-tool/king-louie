@@ -7,6 +7,14 @@ const { MeshTransport } = require('../src/mesh/mesh-transport');
 const { MeshPairing, WORDLIST } = require('../src/mesh/mesh-pairing');
 const { wrapHandler } = require('../src/ipc/wrap-handler');
 const { registerMeshHandlers } = require('../src/ipc/mesh-handlers');
+const { canonicalize } = require('../src/platform/jcs');
+
+// The proof a side presents: HMAC(secret, nonce || JCS(identity)) over the
+// whole identity object it sends, every field. Computed here from scratch so
+// the tests pin the wire format rather than reuse the module's own helper.
+function boundProof(secret, nonce, identity) {
+  return crypto.createHmac('sha256', secret).update(nonce).update(canonicalize(identity)).digest('hex');
+}
 
 describe('MeshPairing', () => {
   let identityA, identityB;
@@ -143,7 +151,7 @@ describe('MeshPairing', () => {
       const { code } = pairingA.generateCode();
       const secret = crypto.createHash('sha256').update(code).digest();
       const nonce = crypto.randomBytes(16).toString('hex');
-      const proof = crypto.createHmac('sha256', secret).update(nonce).digest('hex');
+      const proof = boundProof(secret, nonce, identityB.getPublicIdentity());
 
       const sent = [];
       let closed = false;
@@ -181,6 +189,39 @@ describe('MeshPairing', () => {
       assert.ok(closed);
     });
 
+    it('rejects with name_mismatch when the code requires a name but the peer declares none', () => {
+      const crypto = require('crypto');
+      transportA = new MeshTransport({ identity: identityA, port: nextPort(), useTls: false });
+      pairingA = new MeshPairing(identityA, transportA);
+
+      const { code } = pairingA.generateCode({ nodeName: 'web-01' });
+      const secret = crypto.createHash('sha256').update(code).digest();
+      const nonce = crypto.randomBytes(16).toString('hex');
+      const proof = boundProof(secret, nonce, identityB.getPublicIdentity());
+
+      const sent = [];
+      let closed = false;
+      const fakeWs = {
+        send: (data) => sent.push(JSON.parse(data)),
+        close: () => { closed = true; }
+      };
+
+      // identityB is a plain MeshIdentity: getPublicIdentity() carries no
+      // nodeName field at all (only NodeIdentity has one). "Absent", not
+      // merely "different", must still fail the meta.nodeName check.
+      const remoteIdentity = identityB.getPublicIdentity();
+      assert.strictEqual(remoteIdentity.nodeName, undefined);
+
+      const result = pairingA.handlePairingRequest(fakeWs, { nonce, proof, identity: remoteIdentity });
+
+      assert.strictEqual(result, null);
+      assert.strictEqual(sent.length, 1);
+      assert.strictEqual(sent[0].type, 'pair:reject');
+      assert.strictEqual(sent[0].reason, 'name_mismatch');
+      assert.ok(closed);
+      assert.strictEqual(pairingA.pendingPairings.size, 0);
+    });
+
     it('response proof is verifiable by the responder', () => {
       const crypto = require('crypto');
       transportA = new MeshTransport({ identity: identityA, port: nextPort(), useTls: false });
@@ -189,7 +230,7 @@ describe('MeshPairing', () => {
       const { code } = pairingA.generateCode();
       const secret = crypto.createHash('sha256').update(code).digest();
       const nonce = crypto.randomBytes(16).toString('hex');
-      const proof = crypto.createHmac('sha256', secret).update(nonce).digest('hex');
+      const proof = boundProof(secret, nonce, identityB.getPublicIdentity());
 
       const sent = [];
       const fakeWs = {
@@ -204,11 +245,162 @@ describe('MeshPairing', () => {
       });
 
       const response = sent[0];
-      const expectedProof = crypto.createHmac('sha256', secret)
-        .update(response.nonce)
-        .digest('hex');
+      assert.strictEqual(response.identity.publicKey, identityA.getPublicIdentity().publicKey);
+      const expectedProof = boundProof(secret, response.nonce, response.identity);
 
       assert.strictEqual(response.proof, expectedProof, 'response proof should be verifiable');
+    });
+
+    it('refuses a forwarded proof whose identity or TLS fingerprint was swapped on path', () => {
+      transportA = new MeshTransport({ identity: identityA, port: nextPort(), useTls: false });
+      pairingA = new MeshPairing(identityA, transportA);
+
+      const { code } = pairingA.generateCode();
+      const secret = crypto.createHash('sha256').update(code).digest();
+      const nonce = crypto.randomBytes(16).toString('hex');
+      const real = identityB.getPublicIdentity();
+      const proof = boundProof(secret, nonce, real); // what B really sent
+      const attacker = new MeshIdentity({ displayName: 'Mallory' }).getPublicIdentity();
+
+      const swaps = {
+        'whole identity': attacker,
+        'key and peer id': { ...real, publicKey: attacker.publicKey, peerId: attacker.peerId },
+        'tls fingerprint': { ...real, tlsFingerprint: attacker.tlsFingerprint },
+        'tls fingerprint dropped': { ...real, tlsFingerprint: null },
+        'display name': { ...real, displayName: 'Mallory' },
+        capabilities: { ...real, capabilities: ['gpu', 'admin'] },
+        'node name added': { ...real, nodeName: 'web-01' },
+        'node id added': { ...real, nodeId: 'kl-aaaaaaaaaaaaaaaa' },
+        'extra field': { ...real, note: 'x' }
+      };
+      for (const [what, identity] of Object.entries(swaps)) {
+        const sent = [];
+        const result = pairingA.handlePairingRequest({ send: (d) => sent.push(JSON.parse(d)), close: () => {} }, { nonce, proof, identity });
+        assert.ok(!result, what);
+        assert.deepStrictEqual(sent.map((m) => [m.type, m.reason]), [['pair:reject', 'no_matching_code']], what);
+        assert.strictEqual(transportA.trustedPeers.size, 0, what);
+      }
+
+      // The code was not used up: B's own, unaltered request still pairs.
+      const sent = [];
+      assert.ok(pairingA.handlePairingRequest({ send: (d) => sent.push(JSON.parse(d)), close: () => {} }, { nonce, proof, identity: real }));
+      assert.strictEqual(sent[0].type, 'pair:accept');
+      assert.ok(transportA.trustedPeers.has(identityB.peerId));
+    });
+
+    it('refuses a malformed nonce or proof without throwing', () => {
+      transportA = new MeshTransport({ identity: identityA, port: nextPort(), useTls: false });
+      pairingA = new MeshPairing(identityA, transportA);
+      const { code } = pairingA.generateCode();
+      const secret = crypto.createHash('sha256').update(code).digest();
+      const nonce = crypto.randomBytes(16).toString('hex');
+      const identity = identityB.getPublicIdentity();
+      const proof = boundProof(secret, nonce, identity);
+      for (const msg of [
+        { nonce: nonce + 'x', proof, identity },
+        { nonce: 42, proof, identity },
+        { nonce, proof: proof.slice(2), identity },
+        { nonce, proof: null, identity },
+        { nonce, proof, identity: null },
+        { nonce, proof, identity: { ...identity, publicKey: 7 } }
+      ]) {
+        const sent = [];
+        assert.ok(!pairingA.handlePairingRequest({ send: (d) => sent.push(JSON.parse(d)), close: () => {} }, msg));
+        assert.strictEqual(sent[0].reason, 'no_matching_code');
+      }
+    });
+  });
+
+  describe('on-path attacker forwarding proofs (integration)', () => {
+    const WebSocket = require('ws');
+    let mitm = null;
+
+    afterEach(async () => {
+      if (!mitm) return;
+      for (const c of mitm.clients) c.terminate();
+      await new Promise((r) => mitm.close(r));
+      mitm = null;
+    });
+
+    // Sits between B and A, forwarding every frame through rewrite().
+    function startMitm(port, targetPort, rewrite) {
+      return new Promise((resolve) => {
+        const server = new WebSocket.Server({ host: '127.0.0.1', port }, () => resolve(server));
+        server.on('connection', (client) => {
+          const upstream = new WebSocket(`ws://127.0.0.1:${targetPort}`);
+          const queued = [];
+          upstream.on('open', () => { for (const m of queued.splice(0)) upstream.send(m); });
+          client.on('message', (d) => {
+            const out = JSON.stringify(rewrite(JSON.parse(d)));
+            if (upstream.readyState === WebSocket.OPEN) upstream.send(out);
+            else queued.push(out);
+          });
+          upstream.on('message', (d) => client.send(JSON.stringify(rewrite(JSON.parse(d)))));
+          upstream.on('close', () => client.close());
+          client.on('close', () => upstream.close());
+          upstream.on('error', () => {});
+          client.on('error', () => {});
+        });
+      });
+    }
+
+    async function pairThrough(rewrite) {
+      const portA = nextPort();
+      const portM = nextPort();
+      transportA = new MeshTransport({ identity: identityA, port: portA, useTls: false });
+      transportB = new MeshTransport({ identity: identityB, port: nextPort(), useTls: false });
+      pairingA = new MeshPairing(identityA, transportA);
+      pairingB = new MeshPairing(identityB, transportB);
+      transportA.onPairingRequest = (ws, msg) => pairingA.handlePairingRequest(ws, msg);
+      await transportA.start();
+      mitm = await startMitm(portM, portA, rewrite);
+      const { code } = pairingA.generateCode();
+      return pairingB.acceptCode(code, '127.0.0.1', portM);
+    }
+
+    const attacker = new MeshIdentity({ displayName: 'Mallory' }).getPublicIdentity();
+    const swapIn = (type, change) => (msg) => (msg.type === type ? { ...msg, identity: change(msg.identity) } : msg);
+
+    it('a forwarding relay that changes nothing still pairs (the proxy itself is sound)', async () => {
+      const info = await pairThrough((m) => m);
+      assert.strictEqual(info.peerId, identityA.peerId);
+    });
+
+    it('swapping the requester identity: A refuses, trusts no one', async () => {
+      await assert.rejects(pairThrough(swapIn('pair:request', () => attacker)), /no_matching_code/);
+      assert.strictEqual(transportA.trustedPeers.size, 0);
+    });
+
+    it('swapping the requester TLS fingerprint: A refuses', async () => {
+      await assert.rejects(pairThrough(swapIn('pair:request', (id) => ({ ...id, tlsFingerprint: attacker.tlsFingerprint }))), /no_matching_code/);
+      assert.strictEqual(transportA.trustedPeers.size, 0);
+    });
+
+    it('swapping the answering identity: B refuses and trusts no one', async () => {
+      await assert.rejects(pairThrough(swapIn('pair:accept', () => attacker)), /Invalid pairing proof/);
+      assert.strictEqual(transportB.trustedPeers.size, 0);
+    });
+
+    it('swapping the answering TLS fingerprint: B refuses', async () => {
+      await assert.rejects(pairThrough(swapIn('pair:accept', (id) => ({ ...id, tlsFingerprint: attacker.tlsFingerprint }))), /Invalid pairing proof/);
+      assert.strictEqual(transportB.trustedPeers.size, 0);
+    });
+
+    it('changing the answering display name or capabilities: B refuses', async () => {
+      await assert.rejects(pairThrough(swapIn('pair:accept', (id) => ({ ...id, displayName: 'Trusted server' }))), /Invalid pairing proof/);
+      assert.strictEqual(transportB.trustedPeers.size, 0);
+      if (pairingA) pairingA.cleanup();
+      if (transportA) await transportA.stop().catch(() => {});
+      for (const c of mitm.clients) c.terminate();
+      await new Promise((r) => mitm.close(r));
+      mitm = null;
+      await assert.rejects(pairThrough(swapIn('pair:accept', (id) => ({ ...id, capabilities: ['gpu', 'admin'] }))), /Invalid pairing proof/);
+      assert.strictEqual(transportB.trustedPeers.size, 0);
+    });
+
+    it('changing the requester display name: A refuses', async () => {
+      await assert.rejects(pairThrough(swapIn('pair:request', (id) => ({ ...id, displayName: 'Trusted server' }))), /no_matching_code/);
+      assert.strictEqual(transportA.trustedPeers.size, 0);
     });
   });
 
@@ -273,6 +465,9 @@ describe('MeshPairing', () => {
       // TLS fingerprint should be stored
       const trustedOnB = transportB.trustedPeers.get(identityA.peerId);
       assert.ok(trustedOnB.tlsFingerprint, 'TLS fingerprint should be stored');
+      // The certificate A actually served is reported next to the claim.
+      assert.strictEqual(peerInfo.servedTlsFingerprint, identityA.tlsFingerprint);
+      assert.strictEqual(peerInfo.tlsFingerprint, identityA.tlsFingerprint);
     });
 
     it('paired nodes can subsequently connect and exchange messages', async () => {

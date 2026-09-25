@@ -1,0 +1,16 @@
+{
+  "name": "device-id-ed25519",
+  "consumers": [
+    "node",
+    "ios",
+    "android"
+  ],
+  "given": {},
+  "input": {
+    "raw": "bxliVJqIWRjT2MV0VJkZTyAom9o-BB5DPk-hXhZVhCM",
+    "prefix": "kld-"
+  },
+  "expect": {
+    "device_id": "kld-c2ubd6jjqumalzt5"
+  }
+}

@@ -1,0 +1,7 @@
+# Per-machine settings (SDK path, application id): see local.properties.example.
+local.properties
+# Each owner's own Firebase project config for the `fcm` flavor.
+app/src/fcm/google-services.json
+.gradle/
+.kotlin/
+build/

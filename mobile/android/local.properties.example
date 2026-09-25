@@ -1,0 +1,12 @@
+# Copy to local.properties (never committed) and fill in.
+
+# Where the Android SDK is installed on this machine.
+sdk.dir=/path/to/Android/sdk
+
+# Your application id (the package users install).
+kl.applicationId=com.example.kinglouie
+
+# Push (optional, program Q-A). The `nopush` flavor needs nothing. For the
+# `fcm` flavor, download google-services.json from your own Firebase project
+# and put it at app/src/fcm/google-services.json; the build applies the
+# google-services plugin only when that file exists.

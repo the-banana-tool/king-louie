@@ -259,3 +259,42 @@ work while attached appends it to `PROXIED_DOMAINS`).
   an agent shell's own env never leaks in, and the forked test service pins its
   own `KL_CASES_ROOT` under its data dir. The old `KL_TEST_BRIDGE_*` escape hatch
   is gone.
+
+## Approvals and relay
+
+Fleet stage 3 (spec `docs/superpowers/specs/2026-09-23-fleet-stage3-approvals.md`, wire protocol
+`docs/protocol/approval-v1.md`). On a service node, an unsafe remote tool call or `unsafe` runbook runs
+only after an enrolled phone signs an approval over the exact action; only `=== true` approves. The
+service only reads the approver set in `<configDir>/approvers/`; the admin CLI writes it. On Windows
+the files carry no owner check, so the service trusts `approvers\` only while (a) it cannot create a
+file there (re-probed on every scan) and (b) the dir is owned by Administrators, SYSTEM or the config
+dir's owner, and the config dir is not owned by LOCAL SERVICE (re-read when either dir's ChangeTime
+moves). A dir's owner can always rewrite its ACL, so (b) is what stops a service-owned dir from
+locking itself. `install` creates both dirs Administrators-owned, read and execute only for the
+service. When the service runs as the same account that owns the config dir (a hand-made layout, like
+the e2e test), the owner check cannot tell them apart.
+
+- Relay host (admin `service.json` `relay` block; the mesh listener must be a loopback or private IP):
+  `king-louie-service relay run`, `relay code <node-name>`, `relay nodes`, `relay remove-node <name>`, `relay qr`.
+- Node, as the administrator: `king-louie-service pair wss://<relay-host>:<port>` and type the code at its
+  prompt (piped on stdin also works), set `approvers.relay` in `node.yaml`, start the service, then
+  `king-louie-service enroll-device`. The pairing proof binds the whole identity and `pair` refuses a
+  missing or mismatched TLS fingerprint; after a refusal, run `relay remove-node <name>` on the relay and
+  get a new code. `enroll-device` enrolls only on `y`/`yes` at its `[y/N]` prompt, which expires with
+  the code.
+  Enrollments and revocations relayed from phones are staged per node: apply them with
+  `king-louie-service device apply` (`--yes` skips the `[y/N]` prompt, never the signature checks);
+  `device list`, `device revoke <device-id>`.
+- `mcp` asks through the running service (file courier); with the service stopped every unsafe runbook
+  is denied at once.
+- Audit: `<dataDir>/audit/ledger-YYYY-MM.jsonl`, hash-chained; `doctor` verifies the chain.
+- Tests: `tests/approvals-*.test.js`, `tests/frontdoor-*.test.js`, `tests/audit-ledger.test.js`,
+  `tests/service-cli-devices.test.js`, `tests/service-cli-relay.test.js`. Vectors live in
+  `tests/vectors/approval-v1/`; after changing a message, run `node tests/vectors/approval-v1/generate.js`
+  and commit the files (`--check` must say `40 vectors match`). `tests/approvals-e2e.test.js` spawns real
+  processes and runs on Windows or as root; on Windows it denies itself write access to a temp
+  `approvers/` dir with `icacls` (as an installer's ACL would) and lifts the deny before cleanup.
+- Mobile apps (`mobile/`, built from `docs/protocol/approval-v1.md`): protocol-core tests are
+  `swift test` in `mobile/ios/KLProtocol` (macOS) and `../gradlew test` in `mobile/android/protocol`
+  (JDK 17, no Android SDK); both read `tests/vectors/approval-v1`. `mobile/PRIVACY.md` says what the
+  relay operator can see.

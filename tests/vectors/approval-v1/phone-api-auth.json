@@ -1,0 +1,32 @@
+{
+  "name": "phone-api-auth",
+  "consumers": [
+    "node",
+    "ios",
+    "android"
+  ],
+  "given": {
+    "device": {
+      "device_id": "d-3vmwrihhdbnit4oi",
+      "jwk": {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "krcyG5D6HPx9P3Gi5oaR6OyU9D1gIrc3UD6pIRcDq74",
+        "y": "9XqgPXsMAYplX5IZVn-9FRP2sN4oHFRPjnZyfG-GpaI"
+      }
+    },
+    "method": "POST",
+    "path": "/v1/approvals/23562e04-50df-41ed-9445-93fea7b3bee7/response",
+    "timestamp": "2026-09-23T18:04:32.201Z",
+    "body": "{\"alg\":\"ES256\",\"kid\":\"d-3vmwrihhdbnit4oi\",\"payload\":\"eyJhY3Rpb25faGFzaCI6IjNDV25zMUdkZjBCN2NQRmdDenZoMlF2ZkZlUnNUdmpTZ0RXMkF2cmdjakEiLCJkZWNpc2lvbiI6ImFwcHJvdmUiLCJkZXZpY2VfaWQiOiJkLTN2bXdyaWhoZGJuaXQ0b2kiLCJleHBpcmVzX2F0IjoiMjAyNi0wOS0yM1QxODowOToxMS4yMDFaIiwibm9kZV9pZCI6ImtsLWMydWJkNmpqcXVtYWx6dDUiLCJub25jZSI6Ind4RWRoRVZvS1RUVXMyT2VXV3AtcXlhdFVWZTJrejVKaXM1SlBhTU5RdFkiLCJyZXF1ZXN0X2lkIjoiMjM1NjJlMDQtNTBkZi00MWVkLTk0NDUtOTNmZWE3YjNiZWU3Iiwic2lnbmVkX2F0IjoiMjAyNi0wOS0yM1QxODowNDozMS4yMDFaIiwidHlwZSI6ImtsLmFwcHJvdmFsLnJlc3BvbnNlIiwidiI6MX0\",\"sig\":\"Sufsz2zyTWQnlS0twIbiWcaW5xeqGCGVrp2hjR4gN8aXI6kXgyJG4_IUDmKidrXdBUysD81_NZNdTFZ6Srd-vw\"}"
+  },
+  "input": {
+    "signing_string": "KL-PHONE-V1\nPOST\n/v1/approvals/23562e04-50df-41ed-9445-93fea7b3bee7/response\n2026-09-23T18:04:32.201Z\n3SEWopZehYj6zYhdAdy0KARPf8u5d_bJloQ7PFFgjkM",
+    "signature": "lfs3IZBFHr84kDM5sZQzhAb--4CqQhluPAtU_Ba59QJWD6sVg7vHkp9LvoJsfN7wKwUSIyend-10ixQml2wEXg"
+  },
+  "expect": {
+    "signing_string": "KL-PHONE-V1\nPOST\n/v1/approvals/23562e04-50df-41ed-9445-93fea7b3bee7/response\n2026-09-23T18:04:32.201Z\n3SEWopZehYj6zYhdAdy0KARPf8u5d_bJloQ7PFFgjkM",
+    "body_sha256": "3SEWopZehYj6zYhdAdy0KARPf8u5d_bJloQ7PFFgjkM",
+    "accepted": true
+  }
+}

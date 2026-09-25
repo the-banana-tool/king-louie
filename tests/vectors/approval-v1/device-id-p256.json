@@ -1,0 +1,43 @@
+{
+  "name": "device-id-p256",
+  "consumers": [
+    "node",
+    "ios",
+    "android"
+  ],
+  "given": {},
+  "input": {
+    "jwks": [
+      {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "krcyG5D6HPx9P3Gi5oaR6OyU9D1gIrc3UD6pIRcDq74",
+        "y": "9XqgPXsMAYplX5IZVn-9FRP2sN4oHFRPjnZyfG-GpaI"
+      },
+      {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "GnDHGfxMVkv5iRyStQIsJbqWKUtPy6ijuA1UiWKlYDc",
+        "y": "LLhIvQ_y0DmIXI_qxojWRICKfjPE_orjZBTwRhje91k"
+      },
+      {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "RscTaDzgRlaVqN4IrrtRgbBZw8hrp00xiIu7B_1AJ6w",
+        "y": "gBam0DF3krccxYdWnKr6fRP4yHKNLKfByP76l8dEw78"
+      }
+    ]
+  },
+  "expect": {
+    "device_ids": [
+      "d-3vmwrihhdbnit4oi",
+      "d-6xdlbxglhnvfa3lw",
+      "d-futyo75nn4w4reil"
+    ],
+    "grouped": [
+      "3vmw rihh dbni t4oi",
+      "6xdl bxgl hnvf a3lw",
+      "futy o75n n4w4 reil"
+    ]
+  }
+}

@@ -38,10 +38,12 @@ function assertEnabledListenersBound(core, features) {
 function loadProfile(profile) {
   if (profile === 'agent') {
     return {
-      async start({ dataDir, features, ports, workspace, adminUid, configDir }) {
+      async start({ dataDir, features, ports, workspace, audit, adminUid, configDir }) {
         const { createCore } = require('../core');
         const { CHAT_DATA_DEFAULTS } = require('../core/settings');
         const { buildServicePorts } = require('./ports');
+        const { loadNodeConfig } = require('./node-config');
+        const { startApprovals } = require('../approvals/service-wiring');
         const servicePorts = buildServicePorts({ dataDir, chatDataDefaults: CHAT_DATA_DEFAULTS });
         // Fleet stage 7: the desktop bridge's ui/host ports, when enabled.
         // configDir: injectable so tests never fall through to the real
@@ -49,57 +51,96 @@ function loadProfile(profile) {
         // callers omit it and get service-wiring's own platform default.
         const { createDesktopBridgeHost } = require('../desktop-bridge/service-wiring');
         const desktopBridge = createDesktopBridgeHost({ dataDir, features, ports, adminUid, configDir });
-        const core = createCore({
-          ...servicePorts,
-          ...desktopBridge.coreDeps,
-          features,
-          ports,
-          workingDirectory: workspace,
-          // Stage 1: nothing remote (chat channels, gateway clients, cron,
-          // webhooks) may approve an unsafe tool; stage 3 adds the phone approver.
-          remoteApprovals: 'deny',
-          builtinSkillsDir: path.join(__dirname, '..', '..', 'skills')
+        const nodeConfig = loadNodeConfig({ dataDir });
+        // Fleet stage 3: an unsafe tool from anything remote (chat channels,
+        // gateway clients, cron, webhooks) runs only with a signed phone
+        // approval; with no enrolled phone or no relay it is refused.
+        const approvals = await startApprovals({
+          dataDir, nodeConfig, ports: servicePorts, profile: 'agent', serviceConfig: { audit }
         });
-        await core.start();
+        let core;
+        try {
+          // createCore itself can throw synchronously (bad deps, a bad
+          // phoneApprover.ttlMs, …), not just its start() — both go in the
+          // one try, or a throw from createCore would skip the approvals
+          // teardown below entirely and leave a live relay link behind.
+          core = createCore({
+            ...servicePorts,
+            ...desktopBridge.coreDeps,
+            features,
+            ports,
+            workingDirectory: workspace,
+            remoteApprovals: 'phone',
+            phoneApprover: approvals.phoneApprover,
+            auditLedger: approvals.auditLedger,
+            nodePolicy: nodeConfig.policy,
+            builtinSkillsDir: path.join(__dirname, '..', '..', 'skills')
+          });
+          await core.start();
+        } catch (err) {
+          // `core` is only assigned once createCore() itself has returned,
+          // so a throw from createCore leaves it undefined here — nothing to
+          // shut down. A rejecting core.start() is different: core.start()
+          // may have partially started the core (cron timers, a listener
+          // bind in flight) before rejecting, so it still needs a best-effort
+          // shutdown ahead of stopping approvals.
+          await desktopBridge.stop().catch(() => {});
+          if (core) await core.shutdown().catch(() => {});
+          await approvals.stop().catch(() => {});
+          throw err;
+        }
         try {
           // createCore starts the webhook listener fire-and-forget, so
           // core.start() can return while its bind is still in flight and its
           // handle already non-null. Wait for it before judging.
           await core.whenListenersSettled();
           assertEnabledListenersBound(core, features);
-          await desktopBridge.start({ core, ports: servicePorts, approvals: null });
+          await desktopBridge.start({ core, ports: servicePorts, approvals });
         } catch (err) {
           // Don't leave a half-started core (and its cron timers) behind.
           await desktopBridge.stop().catch(() => {});
           await core.shutdown().catch(() => {});
+          await approvals.stop().catch(() => {});
           throw err;
         }
         return {
-          // The bridge says bye and closes before the core goes down; the
-          // core must still shut down even if the bridge's own stop() throws
-          // (a wedged dispatcher, say) — never skip it and leave cron timers
-          // and stores running.
+          // The bridge says bye and closes before the core goes down, and
+          // approvals (relay link, courier, audit ledger) stop last. Each
+          // later step runs even if an earlier stop() throws (a wedged
+          // dispatcher, say) — never skip one and leave cron timers, stores
+          // or a live relay link running.
           stop: async () => {
             try {
               await desktopBridge.stop();
             } finally {
-              await core.shutdown();
+              try {
+                await core.shutdown();
+              } finally {
+                await approvals.stop();
+              }
             }
           },
           masterKeySource: servicePorts.masterKeySource,
-          desktopBridge
+          desktopBridge,
+          approvals
         };
       }
     };
   }
   if (profile === 'runbook') {
     return {
-      async start({ dataDir }) {
+      async start({ dataDir, audit }) {
         const { buildServicePorts } = require('./ports');
+        const { loadNodeConfig } = require('./node-config');
+        const { startApprovals } = require('../approvals/service-wiring');
         const servicePorts = buildServicePorts({ dataDir });
-        // Stage 2 adds the runbook engine here. Stage 1 only proves the
-        // profile boots with its own identity-free, agent-free module graph.
-        return { stop: async () => {}, masterKeySource: servicePorts.masterKeySource };
+        // The runbook profile runs the relay link and the courier that the
+        // `mcp` process sends its approval requests through; still no agent stack.
+        const nodeConfig = loadNodeConfig({ dataDir });
+        const approvals = await startApprovals({
+          dataDir, nodeConfig, ports: servicePorts, profile: 'runbook', serviceConfig: { audit }
+        });
+        return { stop: () => approvals.stop(), masterKeySource: servicePorts.masterKeySource, approvals };
       }
     };
   }
@@ -172,7 +213,7 @@ async function runService({ dataDir: requestedDataDir, profile: profileOverride,
       const config = loadServiceConfig(dataDir, { profile: profileOverride }, adminUid === undefined ? {} : { adminUid });
       profile = config.profile;
       log.info('service starting', { profile, dataDir, workspace, pid: process.pid });
-      running = await loadProfile(profile).start({ dataDir, features: config.features, ports: config.ports, workspace, adminUid });
+      running = await loadProfile(profile).start({ dataDir, features: config.features, ports: config.ports, workspace, audit: config.audit, adminUid });
     } catch (err) {
       // On Windows nothing reads the task's stderr, so the log file is the
       // only place a startup failure is visible.

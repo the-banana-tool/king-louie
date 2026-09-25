@@ -9,6 +9,7 @@ const { tokenizeCommand } = require('./llm-command');
 const { DESKTOP_RULE_ORIGIN } = require('../tools/permission-rules');
 const { adminCredentialPath } = require('../platform/paths');
 const ToolExecutor = require('../execution/tool-executor');
+const { approvalSeam } = require('../approvals/executor-options');
 const DenialTracker = require('../tools/denial-tracker');
 const AgentLoop = require('../execution/agent-loop');
 const {
@@ -147,8 +148,30 @@ function createCore(deps = {}) {
   // local UI listener (Electron IPC) or an auto-approve rule allows them.
   const ports = { gateway: DEFAULT_GATEWAY_PORT, ...(deps.ports || {}) };
   const remoteApprovals = deps.remoteApprovals ?? 'allow';
-  if (remoteApprovals !== 'allow' && remoteApprovals !== 'deny') {
-    throw new Error(`createCore: remoteApprovals must be 'allow' or 'deny', got ${JSON.stringify(remoteApprovals)}`);
+  if (!['allow', 'deny', 'phone'].includes(remoteApprovals)) {
+    throw new Error(`createCore: remoteApprovals must be 'allow', 'deny' or 'phone', got ${JSON.stringify(remoteApprovals)}`);
+  }
+  // 'phone' (fleet stage 3): remote-origin unsafe tools go to a signed phone
+  // approval and nothing else; local-desktop runs keep the on-screen dialog.
+  if (remoteApprovals === 'phone' && !deps.phoneApprover) {
+    throw new Error("createCore: remoteApprovals 'phone' needs deps.phoneApprover");
+  }
+  if (remoteApprovals === 'phone') {
+    // Fail fast, once, at construction: a phone approver whose TTL isn't
+    // usable would otherwise surface as a silently broken (or
+    // negative/NaN) approvalTimeoutMs deep inside a remote run instead of
+    // here. This used to live in approvalSeam/phoneExecutorOptions, which
+    // runs on every ToolExecutor build; it belongs here, checked once.
+    if (!Number.isFinite(deps.phoneApprover.ttlMs) || deps.phoneApprover.ttlMs <= 0) {
+      throw new Error(`phoneApprover.ttlMs must be a finite positive number, got ${deps.phoneApprover.ttlMs}`);
+    }
+    const approvalsLog = createLogger('approvals/executor-options');
+    if (!deps.nodePolicy) {
+      approvalsLog.warn('remoteApprovals "phone" without deps.nodePolicy: node-policy tiers are not enforced (classifyCall is not set)');
+    }
+    if (!deps.auditLedger) {
+      approvalsLog.warn('remoteApprovals "phone" without deps.auditLedger: tier.decision/exec.start/exec.result are not audited');
+    }
   }
 
   // ── moved from main.js ──
@@ -1984,16 +2007,20 @@ function createCore(deps = {}) {
     // Every approval requester — gateway/channel approvalHandler, cron,
     // webhook, mesh, and meta-tools re-threading a parent's requester — reaches
     // a ToolExecutor through here, so this is the single place that enforces
-    // remoteApprovals (program §4.21). A local-desktop run (an event marked by
-    // the Electron host or the desktop bridge, or a requester marked by a
-    // local parent) keeps the on-screen dialog, the always-approve list and
-    // `allow` rules in every mode; everything else is remote-origin.
-    const local = isLocalDesktopEvent(event) || isLocalRequester(approvalRequester);
-    const effectiveApprovalRequester = remoteApprovals === 'allow' || isLocalRequester(approvalRequester)
-      ? approvalRequester
-      : null;
-    if (approvalRequester && !effectiveApprovalRequester) {
-      log.debug(`remoteApprovals is "${remoteApprovals}": ignoring a remote approval requester`);
+    // remoteApprovals (program §4.21): 'deny' ignores remote requesters,
+    // 'phone' replaces them with the phone approver, and a local-desktop run
+    // (marked event or marked requester) keeps the on-screen dialog.
+    const seam = approvalSeam({
+      remoteApprovals,
+      event,
+      approvalRequester,
+      executorOptions,
+      phoneApprover: deps.phoneApprover || null,
+      auditLedger: deps.auditLedger || null,
+      nodePolicy: deps.nodePolicy || null
+    });
+    if (approvalRequester && seam.toolExecutorOptions.approvalRequester !== approvalRequester) {
+      log.debug(`remoteApprovals is "${remoteApprovals}": not using the caller's approval requester`);
     }
     // A caller meaning to confine a turn's tools (a case wake-up) that
     // somehow passes something other than a Set/Array must fail closed
@@ -2008,15 +2035,13 @@ function createCore(deps = {}) {
       allowedDirectories: executorOptions.allowedDirectories || [],
       requireApproval: true,
       runtimeEnvironment: resolvedRuntimeEnvironment,
-      approvalRequester: effectiveApprovalRequester,
-      // Nulling the requester only denies at the gate; this also closes the
-      // paths that grant approval before the gate is reached (the persisted
-      // "always approve" list below, an agent config's autoApproveTools, and
-      // `allow` permission rules).
-      // A caller (a case wake-up) may also ask for no auto-approval at all;
-      // that wins over a local-desktop origin (C2: unattended case runs never
-      // auto-approve).
-      denyAutoApproval: (remoteApprovals !== 'allow' && !local) || executorOptions.denyAutoApproval === true,
+      // approvalRequester, denyAutoApproval, localOrigin and origin, plus in
+      // phone mode approvalTimeoutMs and classifyCall. denyAutoApproval closes
+      // the paths that grant approval before the gate is reached (the
+      // persisted "always approve" list below, an agent config's
+      // autoApproveTools, and `allow` permission rules) for every non-local
+      // run outside 'allow'.
+      ...seam.toolExecutorOptions,
       // Cases stage 2: only these tools may run (wake-ups); null means no limit.
       allowedToolNames,
       shouldAutoApprove: async (toolName) => isToolAlwaysApproved(toolName),
@@ -2089,6 +2114,9 @@ function createCore(deps = {}) {
         }
       }
     });
+
+    // Phone mode: tier decisions and executions go to the audit ledger.
+    seam.attach(executor);
 
     if (event?.sender) {
       executor.on('approvalRequired', ({ toolName, parameters, resolve }) => {
@@ -2173,7 +2201,11 @@ function createCore(deps = {}) {
       event,
       runtimeEnvironment,
       approvalRequester,
-      { workingDirectory, allowedDirectories }
+      // origin: forwarded from agentExecutorAdapter.execute (program §4.21) so
+      // a child run's audit trail inherits the parent's deviceId/session
+      // instead of recomputing a fresh, poorer origin from a null event and
+      // an unmarked-for-origin-purposes requester.
+      { workingDirectory, allowedDirectories, origin: runtimeOptions.origin || null }
     );
 
     return {
@@ -2398,7 +2430,16 @@ function createCore(deps = {}) {
           },
           null,
           options.approvalRequester || null,
-          { workingDirectory: options.workingDirectory }
+          {
+            workingDirectory: options.workingDirectory,
+            // The rethreaded requester every meta-tool (SpawnAgent,
+            // BackgroundTask, workflow runners) already forwards unchanged
+            // carries the parent executor's origin as a plain property
+            // (ToolExecutor#_rethreadedRequester); read it back here so the
+            // child inherits it instead of a freshly (and more poorly)
+            // computed one.
+            origin: (options.approvalRequester && options.approvalRequester.origin) || options.origin || null
+          }
         );
         const executor = new AgentExecutor(runtime.provider, runtime.toolExecutor, {
           usageTracker,
@@ -2795,6 +2836,10 @@ function createCore(deps = {}) {
     createUsageRecordFromMetrics,
     getSettings,
     getCaseRuntime: () => caseRuntime,
+    // The signed-approval requester (program §4.12), or null: always null in
+    // 'allow' and 'deny' modes (the Electron host), and null while no device
+    // is enrolled or no relay link can deliver.
+    getPhoneApprover: () => (remoteApprovals === 'phone' && deps.phoneApprover && deps.phoneApprover.isAvailable() ? deps.phoneApprover : null),
 
     // Tool
     pendingApprovalResolvers,

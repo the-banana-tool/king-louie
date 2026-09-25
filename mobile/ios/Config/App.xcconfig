@@ -1,0 +1,17 @@
+// Build-time configuration for the King Louie approvals app.
+// Copy this file's values into your own build settings or edit them here
+// before building; the defaults build an app without push.
+
+// Your bundle identifier.
+KL_BUNDLE_ID = com.example.kinglouie
+
+// Your Apple developer team id (leave empty to sign manually).
+KL_DEVELOPMENT_TEAM =
+
+// Push (optional, program Q-A). Leave KL_APNS_TOPIC empty for no push: the app
+// then long-polls the relay while it is open. To use APNs, set the topic to
+// your bundle id, KL_ENTITLEMENTS to App/Push.entitlements, and
+// KL_APNS_ENVIRONMENT to development or production.
+KL_APNS_TOPIC =
+KL_APNS_ENVIRONMENT = development
+KL_ENTITLEMENTS = App/NoPush.entitlements

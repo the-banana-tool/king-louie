@@ -1,0 +1,23 @@
+{
+  "name": "enroll-console-bad-mac",
+  "consumers": [
+    "node"
+  ],
+  "given": {
+    "now": "2026-09-23T18:05:11.201Z",
+    "code_id": "dAEMnC18UoZQV-skmzsqzg",
+    "code": "uMl9rw5jwz4VTBOaDPaMMVummWUHRA0cO_MrmT078as",
+    "allow_test_keys": true
+  },
+  "input": {
+    "alg": "ES256",
+    "kid": "d-futyo75nn4w4reil",
+    "payload": "eyJjb2RlX2lkIjoiZEFFTW5DMThVb1pRVi1za216c3F6ZyIsImNvZGVfbWFjIjoiMFoyQW9OU0VpakN6cUw3dDFJZmhVT0w1WkpZSmdWUElCZzFoZ2dfeXplOCIsImNyZWF0ZWRfYXQiOiIyMDI2LTA5LTIzVDE4OjA0OjExLjIwMVoiLCJkZXZpY2UiOnsiZGV2aWNlX2lkIjoiZC1mdXR5bzc1bm40dzRyZWlsIiwibmFtZSI6IlBob25lIGZ1dHkiLCJwbGF0Zm9ybSI6ImFuZHJvaWQiLCJwdWJsaWNfa2V5Ijp7ImNydiI6IlAtMjU2Iiwia3R5IjoiRUMiLCJ4IjoiUnNjVGFEemdSbGFWcU40SXJydFJnYkJadzhocnAwMHhpSXU3Ql8xQUo2dyIsInkiOiJnQmFtMERGM2tyY2N4WWRXbktyNmZSUDR5SEtOTEtmQnlQNzZsOGRFdzc4In19LCJlbnJvbGxlZF9ieSI6bnVsbCwiZXhwaXJlc19hdCI6IjIwMjYtMDktMjNUMTg6MTQ6MTEuMjAxWiIsIm5vbmNlIjoiQVdrUGdOUVhFbXBaVHVDbHhQamtvMzdRWVA5Y2FtVnZRSXl1V0ZyNDdEYyIsInR5cGUiOiJrbC5kZXZpY2UuZW5yb2xsIiwidiI6MX0",
+    "sig": "HWAZ6-bpPsAJNFvOb32sIWfJgzods34XTma1Gjkb9cO9MUKF0uT9Z4LZYTntF-tO1mvFXlczAfk8uTDUFFtopQ"
+  },
+  "expect": {
+    "accepted": false,
+    "reason": "bad_mac",
+    "device_id": null
+  }
+}

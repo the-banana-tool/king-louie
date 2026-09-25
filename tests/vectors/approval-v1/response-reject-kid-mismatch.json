@@ -1,0 +1,81 @@
+{
+  "name": "response-reject-kid-mismatch",
+  "consumers": [
+    "node"
+  ],
+  "check": 2,
+  "given": {
+    "now": "2026-09-23T18:04:41.201Z",
+    "node": {
+      "id": "kl-c2ubd6jjqumalzt5",
+      "name": "web-01",
+      "key": "302a300506032b65700321006f1962549a885918d3d8c5745499194f20289bda3e041e433e4fa15e16558423"
+    },
+    "approvers": [
+      {
+        "v": 1,
+        "device_id": "d-3vmwrihhdbnit4oi",
+        "name": "Test phone 3vmw",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "krcyG5D6HPx9P3Gi5oaR6OyU9D1gIrc3UD6pIRcDq74",
+          "y": "9XqgPXsMAYplX5IZVn-9FRP2sN4oHFRPjnZyfG-GpaI"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      },
+      {
+        "v": 1,
+        "device_id": "d-6xdlbxglhnvfa3lw",
+        "name": "Test phone 6xdl",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "GnDHGfxMVkv5iRyStQIsJbqWKUtPy6ijuA1UiWKlYDc",
+          "y": "LLhIvQ_y0DmIXI_qxojWRICKfjPE_orjZBTwRhje91k"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      }
+    ],
+    "overlay": [],
+    "allow_test_keys": true,
+    "pending": [
+      {
+        "alg": "Ed25519",
+        "kid": "kl-c2ubd6jjqumalzt5",
+        "payload": "eyJhY3Rpb24iOnsiY3dkIjoiL3Nydi9zaXRlIiwia2luZCI6InRvb2wiLCJuYW1lIjoiQmFzaCIsInBhcmFtcyI6eyJjb21tYW5kIjoiZ2l0IHB1c2ggb3JpZ2luIG1haW4ifSwic3VtbWFyeSI6IkJhc2goZ2l0IHB1c2ggb3JpZ2luIG1haW4pIn0sImFjdGlvbl9oYXNoIjoiM0NXbnMxR2RmMEI3Y1BGZ0N6dmgyUXZmRmVSc1R2alNnRFcyQXZyZ2NqQSIsImNyZWF0ZWRfYXQiOiIyMDI2LTA5LTIzVDE4OjA0OjExLjIwMVoiLCJleHBpcmVzX2F0IjoiMjAyNi0wOS0yM1QxODowOToxMS4yMDFaIiwibm9kZV9pZCI6ImtsLWMydWJkNmpqcXVtYWx6dDUiLCJub2RlX25hbWUiOiJ3ZWItMDEiLCJub25jZSI6Ind4RWRoRVZvS1RUVXMyT2VXV3AtcXlhdFVWZTJrejVKaXM1SlBhTU5RdFkiLCJvcmlnaW4iOnsiY2xpZW50IjoiZ2F0ZXdheSIsImpvYl9pZCI6bnVsbCwic2Vzc2lvbiI6ImNoYXQtMSJ9LCJyZXF1ZXN0X2lkIjoiMjM1NjJlMDQtNTBkZi00MWVkLTk0NDUtOTNmZWE3YjNiZWU3IiwidHlwZSI6ImtsLmFwcHJvdmFsLnJlcXVlc3QiLCJ2IjoxfQ",
+        "sig": "5rHroPqSFLqptJfajRLCk1TJqtig78EkOAM3YHEo8vriCG4gseWh-C55lbQyjYtJLReM1wtEXZBCasQSAUjABA"
+      }
+    ],
+    "used": [],
+    "current_action": {
+      "kind": "tool",
+      "name": "Bash",
+      "params": {
+        "command": "git push origin main"
+      },
+      "cwd": "/srv/site",
+      "summary": "Bash(git push origin main)"
+    }
+  },
+  "input": {
+    "alg": "ES256",
+    "kid": "d-6xdlbxglhnvfa3lw",
+    "payload": "eyJhY3Rpb25faGFzaCI6IjNDV25zMUdkZjBCN2NQRmdDenZoMlF2ZkZlUnNUdmpTZ0RXMkF2cmdjakEiLCJkZWNpc2lvbiI6ImFwcHJvdmUiLCJkZXZpY2VfaWQiOiJkLTN2bXdyaWhoZGJuaXQ0b2kiLCJleHBpcmVzX2F0IjoiMjAyNi0wOS0yM1QxODowOToxMS4yMDFaIiwibm9kZV9pZCI6ImtsLWMydWJkNmpqcXVtYWx6dDUiLCJub25jZSI6Ind4RWRoRVZvS1RUVXMyT2VXV3AtcXlhdFVWZTJrejVKaXM1SlBhTU5RdFkiLCJyZXF1ZXN0X2lkIjoiMjM1NjJlMDQtNTBkZi00MWVkLTk0NDUtOTNmZWE3YjNiZWU3Iiwic2lnbmVkX2F0IjoiMjAyNi0wOS0yM1QxODowNDozMS4yMDFaIiwidHlwZSI6ImtsLmFwcHJvdmFsLnJlc3BvbnNlIiwidiI6MX0",
+    "sig": "lnm-dzqx1JAvmW2Bw-O1IThKHzVTHBlfOumGt4QzqBwWdRL0FxsVhQRo5Rvy4cszEyRF1pXzxkGPuaKZ8t5NIw"
+  },
+  "expect": {
+    "accepted": false,
+    "reason": "malformed"
+  }
+}

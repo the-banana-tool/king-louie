@@ -71,8 +71,60 @@ function defaultNodeConfig(adminDir) {
       },
       max_concurrent_jobs: DEFAULT_MAX_CONCURRENT_JOBS
     },
-    runbooksDir: path.join(adminDir, 'runbooks')
+    runbooksDir: path.join(adminDir, 'runbooks'),
+    approvers: { ...DEFAULT_APPROVERS }
   };
+}
+
+// Phone approvals (fleet stage 3): the relay's mesh endpoint and the request
+// lifetime. Absent → phone approvals off.
+const DEFAULT_APPROVERS = { relay: null, requestTtlS: 300 };
+
+// wss://host:port, nothing else: no userinfo, no path/query/fragment, and an
+// explicit port in 1..65535. WHATWG drops a port that matches the scheme's
+// own default (wss: → 443) when serializing — `url.port` reads back as ''
+// for `wss://host:443` exactly as it would for `wss://host` — so an
+// explicit :443 can't be told apart from "no port written" through `.port`
+// alone. The raw string's authority is checked instead: whatever WHATWG
+// parsed as the host must be followed there by exactly ":<digits>".
+function isValidRelayUrl(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== 'wss:') return false;
+  if (url.username !== '' || url.password !== '') return false;
+  if (!url.hostname) return false;
+  if (url.pathname !== '' && url.pathname !== '/') return false;
+  if (url.search !== '' || url.hash !== '') return false;
+  const authority = value.slice(value.indexOf('://') + 3).split(/[/?#]/, 1)[0];
+  const hostPart = authority.startsWith('[') ? authority.slice(0, authority.indexOf(']') + 1) : authority.split(':')[0];
+  const afterHost = authority.slice(hostPart.length);
+  if (!/^:\d+$/.test(afterHost)) return false;
+  const port = Number(afterHost.slice(1));
+  return Number.isInteger(port) && port >= 1 && port <= 65535;
+}
+
+function parseApprovers(raw, invalid) {
+  if (raw === undefined) return { ...DEFAULT_APPROVERS };
+  if (!isPlainObject(raw)) throw invalid('approvers must be a mapping');
+  for (const key of Object.keys(raw)) {
+    if (!['relay', 'request_ttl_s'].includes(key)) throw invalid(`approvers.${key} is not a known key (expected relay, request_ttl_s)`);
+  }
+  const out = { ...DEFAULT_APPROVERS };
+  if (raw.relay !== undefined && raw.relay !== null) {
+    if (typeof raw.relay !== 'string' || !isValidRelayUrl(raw.relay.trim())) throw invalid('approvers.relay must be wss://host:port');
+    out.relay = raw.relay.trim();
+  }
+  if (raw.request_ttl_s !== undefined) {
+    if (!Number.isInteger(raw.request_ttl_s) || raw.request_ttl_s < 30 || raw.request_ttl_s > 300) {
+      throw invalid('approvers.request_ttl_s must be an integer from 30 to 300');
+    }
+    out.requestTtlS = raw.request_ttl_s;
+  }
+  return out;
 }
 
 /**
@@ -207,7 +259,8 @@ function loadNodeConfig({
       },
       max_concurrent_jobs: maxConcurrentJobs
     },
-    runbooksDir
+    runbooksDir,
+    approvers: parseApprovers(parsed.approvers, invalid)
   };
 }
 
