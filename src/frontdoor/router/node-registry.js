@@ -31,6 +31,8 @@ const PROFILES = ['agent', 'runbook'];
 // entries: at most this many, and a record too large to keep is cut to its id.
 const QUARANTINE_MAX_ENTRIES = 200;
 const QUARANTINE_MAX_ENTRY_BYTES = 64 * 1024;
+// Removals remembered so a retried removal succeeds (see removeSigned).
+const MAX_REMOVALS = 1000;
 const defaultGeteuid = () => (typeof process.geteuid === 'function' ? process.geteuid() : -1);
 
 function derivedId(raw) {
@@ -82,6 +84,13 @@ class NodeRegistry extends EventEmitter {
     this.rejectedFile = path.join(dataDir, 'frontdoor', 'nodes.rejected.json');
     this.nodes = new Map();
     this.status = new Map();
+    // Phone records this process removed, by node id → { record, saved }
+    // (bounded, oldest first out). `saved` is false while the removal has not
+    // reached nodes.json (the save threw); any successful save writes it.
+    // load() never brings a removed node back, and removeSigned() of a
+    // removed node saves if needed and succeeds again, so a retry after a
+    // failed save reports success. Enrolling the node again forgets it.
+    this.removals = new Map();
   }
 
   static consoleDir(configDir) {
@@ -200,6 +209,7 @@ class NodeRegistry extends EventEmitter {
     for (const r of this.nodes.values()) if (r.source === 'phone') nodes[r.node_id] = r;
     fs.mkdirSync(path.dirname(this.phoneFile), { recursive: true, mode: 0o700 });
     writeFileAtomic(this.phoneFile, `${JSON.stringify({ v: 1, nodes }, null, 2)}\n`);
+    for (const entry of this.removals.values()) entry.saved = true;
   }
 
   _quarantine(entries) {
@@ -225,11 +235,16 @@ class NodeRegistry extends EventEmitter {
     const at = new Date(this.now()).toISOString();
     const rejected = [];
     const { nodes: stored, unreadable } = this._readPhone();
+    let removedSince = false;
     if (unreadable !== null) {
       rejected.push({ record: null, raw: unreadable, reason: 'unreadable', at });
       this._invalid(null, 'unreadable');
     }
     for (const record of Object.values(stored)) {
+      if (record && this.removals.has(record.node_id)) {
+        removedSince = true;
+        continue;
+      }
       let reason = this._phoneProblem(record);
       if (!reason && nodes.has(record.node_id)) reason = nodes.get(record.node_id).source === 'console' ? 'shadowed_by_console' : 'duplicate_node';
       if (!reason && names.has(record.node_name)) reason = nodes.get(names.get(record.node_name)).source === 'console' ? 'shadowed_by_console' : 'duplicate_name';
@@ -245,6 +260,12 @@ class NodeRegistry extends EventEmitter {
     if (rejected.length) {
       this._quarantine(rejected);
       this._savePhone();
+    } else if (removedSince) {
+      try {
+        this._savePhone();
+      } catch (e) {
+        log.error(`saving ${this.phoneFile} failed (${e.code || e.message}); the removed nodes stay removed in memory`);
+      }
     }
     this.emit('change');
     return this.list();
@@ -272,22 +293,56 @@ class NodeRegistry extends EventEmitter {
     for (const old of [sameName, replacing]) if (old && old.node_id !== m.node_id) removed.add(old.node_id);
     for (const id of removed) this.nodes.delete(id);
     this.nodes.set(record.node_id, record);
+    this.removals.delete(record.node_id);
     this._savePhone();
     for (const id of removed) this.emit('replaced', { oldId: id, newId: record.node_id });
     this.emit('change');
     return record;
   }
 
-  // A verified kl.node.remove (challenge checked by the caller).
+  // A verified kl.node.remove (challenge checked by the caller). The node
+  // leaves memory, and its link is closed, even when saving fails: that
+  // throws `save_failed`. Removing a node this process already removed saves
+  // if that is still needed and succeeds, so a retry reports success.
   removeSigned(message) {
-    const r = this.byId(message.node_id);
-    if (!r) throw err('unknown_node', 'no such node');
+    const id = message && message.node_id;
+    const r = this.byId(id);
+    if (!r) {
+      const earlier = typeof id === 'string' ? this.removals.get(id) : undefined;
+      if (!earlier) throw err('unknown_node', 'no such node');
+      if (!earlier.saved) this._savePhoneOrThrow(earlier.record);
+      return earlier.record;
+    }
     if (r.source === 'console') throw err('console_record', `"${r.node_name}" was confirmed at the console; remove it there with frontdoor remove-node ${r.node_name}`);
     this.nodes.delete(r.node_id);
-    this._savePhone();
-    this.emit('removed', { nodeId: r.node_id, reason: 'phone' });
-    this.emit('change');
+    this.removals.set(r.node_id, { record: r, saved: false });
+    // Saved removals go first: forgetting an unsaved one would let a reload bring it back.
+    while (this.removals.size > MAX_REMOVALS) {
+      const [victim] = [...this.removals].find(([, e]) => e.saved) || [...this.removals][0];
+      this.removals.delete(victim);
+    }
+    try {
+      this._savePhoneOrThrow(r);
+    } finally {
+      this.emit('removed', { nodeId: r.node_id, reason: 'phone' });
+      this.emit('change');
+    }
     return r;
+  }
+
+  // A phone record this process removed (saved or not), else null.
+  removal(id) {
+    const entry = this.removals.get(id);
+    return entry ? entry.record : null;
+  }
+
+  _savePhoneOrThrow(r) {
+    try {
+      this._savePhone();
+    } catch (e) {
+      log.error(`saving ${this.phoneFile} failed (${e.code || e.message}); ${r.node_id} is removed in memory only`);
+      throw err('save_failed', 'the removal could not be saved');
+    }
   }
 
   byId(id) {
