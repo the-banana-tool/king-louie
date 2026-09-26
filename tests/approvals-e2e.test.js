@@ -27,6 +27,19 @@ const { createFakePhone } = require('./helpers/fake-phone');
 
 const BIN = path.join(__dirname, '..', 'bin', 'king-louie-service.js');
 const CAN_RUN = process.platform === 'win32' || (typeof process.getuid === 'function' && process.getuid() === 0);
+// On POSIX this test runs as root. The node's service runs as a service
+// account, as it does when installed: `mcp`, run as root, drops to the data
+// dir's owner and refuses a root-owned data dir (fleet stage 4, ruling
+// T13-dropprivs).
+const POSIX_ROOT = process.platform !== 'win32' && typeof process.getuid === 'function' && process.getuid() === 0;
+const SERVICE_UID = 1000;
+const SERVICE_GID = 1000;
+
+function chownTree(target, uid, gid) {
+  fs.lchownSync(target, uid, gid);
+  const st = fs.lstatSync(target);
+  if (st.isDirectory() && !st.isSymbolicLink()) for (const name of fs.readdirSync(target)) chownTree(path.join(target, name), uid, gid);
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Budgets are generous: this test spawns the relay, the service and `mcp`
@@ -50,10 +63,10 @@ async function freePort() {
   return port;
 }
 
-function spawnCli(children, args) {
+function spawnCli(children, args, { uid, gid } = {}) {
   const env = { ...process.env, KING_LOUIE_LOG_LEVEL: 'info' };
   delete env.ELECTRON_RUN_AS_NODE;
-  const child = fork(BIN, args, { silent: true, env });
+  const child = fork(BIN, args, { silent: true, env, ...(uid === undefined ? {} : { uid, gid }) });
   children.push(child);
   let out = '';
   let err = '';
@@ -204,7 +217,7 @@ describe('phone approvals end to end', { skip: !CAN_RUN && 'needs root-owned adm
       assert.equal(paired, 0, pairIo.text.err);
       assert.ok(logged.some((l) => l.includes('Generated new Node Identity') && l.includes('"web-01"')), logged.join('\n'));
 
-      const service = spawnCli(children, ['run', '--profile', 'runbook', '--data-dir', nodeData]);
+      let service = spawnCli(children, ['run', '--profile', 'runbook', '--data-dir', nodeData]);
       await until(() => service.output().includes('"event":"ready"'), () => `node ready (${service.errors()})`);
       const linkFile = path.join(nodeData, 'approvals', 'link.json');
       await until(() => fs.existsSync(linkFile) && JSON.parse(fs.readFileSync(linkFile, 'utf8')).connected, () => `the relay link (${service.errors()})`);
@@ -225,7 +238,30 @@ describe('phone approvals end to end', { skip: !CAN_RUN && 'needs root-owned adm
       assert.equal(await enrolling, 0, enrollIo.text.err);
       await until(async () => (await anonymous('GET', `/v1/enroll/${qr.code_id}`)).body.state === 'done', 'enrollment done');
 
+      if (POSIX_ROOT) {
+        // mcp run as root drops to the data dir's owner and refuses a
+        // root-owned data dir (ruling T13-dropprivs), so from here the node
+        // runs as a service account, as an installed node does: the service
+        // is restarted as that account, owning its data dir and the folder
+        // its runbook writes to. (Pairing and enrollment above ran with the
+        // service as root: F3's root-run enroll-device writes its courier
+        // files as root and hands them over only when it finishes.)
+        const exited = new Promise((resolve) => service.child.once('exit', resolve));
+        service.child.send({ type: 'shutdown' });
+        await exited;
+        for (const dir of [base, path.join(base, 'node')]) fs.chmodSync(dir, 0o755);
+        chownTree(nodeData, SERVICE_UID, SERVICE_GID);
+        chownTree(root, SERVICE_UID, SERVICE_GID);
+        fs.writeFileSync(linkFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(linkFile, 'utf8')), connected: false }));
+        fs.lchownSync(linkFile, SERVICE_UID, SERVICE_GID);
+        service = spawnCli(children, ['run', '--profile', 'runbook', '--data-dir', nodeData], { uid: SERVICE_UID, gid: SERVICE_GID });
+        await until(() => service.output().includes('"event":"ready"'), () => `node ready as the service account (${service.errors()})`);
+        await until(() => JSON.parse(fs.readFileSync(linkFile, 'utf8')).connected, () => `the relay link as the service account (${service.errors()})`);
+      }
+
       // ── The unsafe runbook through mcp ──────────────────────────────────
+      // Run as root on POSIX: it becomes the data dir's owner before it
+      // writes a request (ruling T13-dropprivs).
       mcp = spawnCli(children, ['mcp', '--data-dir', nodeData]);
       let nextId = 1;
       const rpc = (method, params) => {

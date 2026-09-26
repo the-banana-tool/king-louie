@@ -363,35 +363,106 @@ describe('mcp run as root (review item 7)', () => {
     fs.writeFileSync(path.join(l.dataDir, 'service.pid'), String(process.pid));
     const { runMcp } = require('../src/service/commands/mcp');
     await assert.rejects(
-      runMcp({ dataDir: l.dataDir, io: { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough() }, deps: { configDir: l.configDir, adminUid: EUID, getuid: () => 0 } }),
+      runMcp({ dataDir: l.dataDir, io: { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough() }, deps: { configDir: l.configDir, adminUid: EUID, proc: { getuid: () => 0 } } }),
       /refusing to run mcp as root/
     );
     assert.equal(fs.existsSync(path.join(l.dataDir, 'approvals')), false, 'nothing was created');
   });
 
-  it('as root, every request file and the inbox go to the data dir owner as they are written', { skip: !IS_ROOT && 'needs POSIX root to chown' }, async () => {
+  // Runs `mcp` (courier branch: the pidfile names the child) in a child
+  // process, because dropping privileges changes the whole process; the
+  // child reports its uid/euid/gid and what it created, then exits.
+  function runMcpChild(l) {
+    const { execFileSync } = require('child_process');
+    const script = `
+      const fs = require('fs');
+      const path = require('path');
+      const { PassThrough } = require('stream');
+      const dataDir = process.env.KL_T_DATA_DIR;
+      fs.writeFileSync(path.join(dataDir, 'service.pid'), String(process.pid));
+      const { runMcp } = require('./src/service/commands/mcp');
+      const stdin = new PassThrough();
+      runMcp({ dataDir, io: { stdin, stdout: new PassThrough(), stderr: new PassThrough() },
+        deps: { configDir: process.env.KL_T_CONFIG_DIR, adminUid: 0 } })
+        .catch((err) => { process.stdout.write(JSON.stringify({ error: err.message })); process.exit(0); });
+      setTimeout(() => stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'get_state', arguments: {} } }) + '\\n'), 100);
+      setTimeout(() => {
+        const outbox = path.join(dataDir, 'approvals', 'outbox');
+        const inboxRoot = path.join(dataDir, 'approvals', 'inbox');
+        const owners = (dir) => fs.readdirSync(dir).map((n) => ({ name: n, uid: fs.lstatSync(path.join(dir, n)).uid }));
+        process.stdout.write(JSON.stringify({ uid: process.getuid(), euid: process.geteuid(), gid: process.getgid(), groups: process.getgroups(), outbox: owners(outbox), inbox: owners(inboxRoot) }));
+        process.exit(0);
+      }, 800);
+    `;
+    const out = execFileSync(process.execPath, ['-e', script], {
+      cwd: path.join(__dirname, '..'),
+      env: { ...process.env, KL_T_DATA_DIR: l.dataDir, KL_T_CONFIG_DIR: l.configDir, KING_LOUIE_LOG_LEVEL: 'silent' }
+    }).toString();
+    return JSON.parse(out);
+  }
+
+  function serviceOwnedLayout(uid = 1000, gid = 1000) {
     const l = layout();
     courierDirs(l);
-    for (const d of ['', 'approvals', 'approvals/inbox', 'approvals/outbox']) fs.chownSync(path.join(l.dataDir, d), 1000, 1000);
-    fs.writeFileSync(path.join(l.dataDir, 'service.pid'), String(process.pid));
-    const { runMcp } = require('../src/service/commands/mcp');
-    const stdin = new PassThrough();
-    runMcp({ dataDir: l.dataDir, io: { stdin, stdout: new PassThrough(), stderr: new PassThrough() }, deps: { configDir: l.configDir, adminUid: EUID } }).catch(() => {});
-    try {
-      stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'get_state', arguments: {} } })}\n`);
-      const outbox = path.join(l.dataDir, 'approvals', 'outbox');
-      let files = [];
-      for (let i = 0; i < 200 && files.length === 0; i += 1) {
-        files = fs.readdirSync(outbox).filter((n) => /^\d+-[a-f0-9]{8}\.json$/.test(n));
-        if (files.length === 0) await new Promise((r) => setTimeout(r, 10));
-      }
-      assert.equal(files.length, 1);
-      assert.equal(fs.lstatSync(path.join(outbox, files[0])).uid, 1000, 'the service account can read the request');
-      const inboxes = fs.readdirSync(path.join(l.dataDir, 'approvals', 'inbox'));
-      assert.equal(inboxes.length, 1);
-      assert.equal(fs.lstatSync(path.join(l.dataDir, 'approvals', 'inbox', inboxes[0])).uid, 1000, 'the service account can write the reply');
-    } finally {
-      stdin.end();
+    for (const d of ['', 'approvals', 'approvals/inbox', 'approvals/outbox']) fs.chownSync(path.join(l.dataDir, d), uid, gid);
+    return l;
+  }
+
+  it('as root, mcp becomes the data dir owner before any courier write, and its request files are that owner\'s with no chown', { skip: !IS_ROOT && 'needs POSIX root' }, () => {
+    const l = serviceOwnedLayout(1000, 1001);
+    const r = runMcpChild(l);
+    assert.equal(r.error, undefined, r.error);
+    assert.equal(r.uid, 1000);
+    assert.equal(r.euid, 1000);
+    assert.equal(r.gid, 1001);
+    assert.ok(!r.groups.includes(0), `supplementary groups cleared: ${JSON.stringify(r.groups)}`);
+    const requests = r.outbox.filter((f) => /^\d+-[a-f0-9]{8}\.json$/.test(f.name));
+    assert.equal(requests.length, 1, JSON.stringify(r.outbox));
+    assert.equal(requests[0].uid, 1000, 'created by the data dir owner');
+    assert.equal(r.inbox.length, 1);
+    assert.equal(r.inbox[0].uid, 1000);
+  });
+
+  it('as root, a root-owned data dir is refused', { skip: !IS_ROOT && 'needs POSIX root' }, () => {
+    const l = layout();
+    courierDirs(l);
+    const r = runMcpChild(l);
+    assert.match(r.error || '', /refusing to run mcp as root: .* is owned by root/);
+  });
+
+  describe('dropToDataDirOwner (any platform, injected process)', () => {
+    const { dropToDataDirOwner } = require('../src/service/commands/mcp');
+    function fakeProc({ uid = 0, failSetuid = false, sticky = false } = {}) {
+      const calls = [];
+      const p = {
+        calls, uid, euid: uid,
+        getuid: () => p.uid,
+        geteuid: () => p.euid,
+        setgroups: (g) => calls.push(['setgroups', g]),
+        setgid: (g) => calls.push(['setgid', g]),
+        setuid: (u) => { calls.push(['setuid', u]); if (failSetuid) throw new Error('EPERM'); if (!sticky) { p.uid = u; p.euid = u; } }
+      };
+      return p;
     }
+    const fakeFs = (uid, gid, { dir = true, link = false } = {}) => ({ lstatSync: () => ({ uid, gid, isDirectory: () => dir, isSymbolicLink: () => link }) });
+
+    it('clears groups, then sets gid, then uid, and verifies', () => {
+      const proc = fakeProc();
+      assert.deepEqual(dropToDataDirOwner('/d', { proc, fsImpl: fakeFs(1000, 1001) }), { uid: 1000, gid: 1001 });
+      assert.deepEqual(proc.calls, [['setgroups', []], ['setgid', 1001], ['setuid', 1000]]);
+    });
+
+    it('does nothing when not root', () => {
+      const proc = fakeProc({ uid: 1000 });
+      assert.equal(dropToDataDirOwner('/d', { proc, fsImpl: fakeFs(1000, 1000) }), null);
+      assert.deepEqual(proc.calls, []);
+    });
+
+    it('refuses a root-owned or linked data dir, a failed setuid, and a drop that did not take', () => {
+      assert.throws(() => dropToDataDirOwner('/d', { proc: fakeProc(), fsImpl: fakeFs(0, 0) }), /owned by root/);
+      assert.throws(() => dropToDataDirOwner('/d', { proc: fakeProc(), fsImpl: fakeFs(1000, 1000, { link: true }) }), /not a real directory/);
+      assert.throws(() => dropToDataDirOwner('/d', { proc: fakeProc({ failSetuid: true }), fsImpl: fakeFs(1000, 1000) }), /could not become/);
+      assert.throws(() => dropToDataDirOwner('/d', { proc: fakeProc({ sticky: true }), fsImpl: fakeFs(1000, 1000) }), /still running as uid 0\/0/);
+    });
   });
 });

@@ -12,10 +12,11 @@ const log = createLogger('mcp');
 
 const defaultGetuid = () => (typeof process.getuid === 'function' ? process.getuid() : -1);
 
-// Run as root against a running service, this process writes into the
-// courier directories the service account owns. Before any write, each must
-// be a real directory (not a symlink or junction the service account could
-// point elsewhere) owned by the data dir's owner; otherwise mcp refuses.
+// Run as root against a running service, the courier directories must be
+// real directories (not a symlink or junction the service account could
+// point elsewhere) owned by the data dir's owner, or mcp refuses. An extra
+// layer only: the real protection is that mcp never writes there as root
+// (dropToDataDirOwner below).
 function assertCourierDirsSafe(dataDir, { getuid = defaultGetuid, fsImpl = fs } = {}) {
   if (getuid() !== 0) return;
   const owner = fsImpl.lstatSync(dataDir);
@@ -39,6 +40,43 @@ function assertCourierDirsSafe(dataDir, { getuid = defaultGetuid, fsImpl = fs } 
   }
 }
 
+// Ruling T13-dropprivs: run as root against a running service, `mcp` must
+// not write into the courier directories as root at all — the service
+// account owns approvals/ and could swap outbox/ or inbox/ for a link at any
+// moment, turning each root write (or chown) into a file planted wherever
+// root can write. So before the courier writes anything, the process becomes
+// the data dir's owner, once, for the rest of its life: supplementary groups
+// cleared, gid, then uid, then verified. A root-owned data dir has no one to
+// become and is refused. `proc` is injectable for tests; on Windows there is
+// no getuid and this is a no-op.
+function isRoot(proc) {
+  return (typeof proc.getuid === 'function' && proc.getuid() === 0)
+    || (typeof proc.geteuid === 'function' && proc.geteuid() === 0);
+}
+
+function dropToDataDirOwner(dataDir, { proc = process, fsImpl = fs } = {}) {
+  if (!isRoot(proc)) return null;
+  const st = fsImpl.lstatSync(dataDir);
+  if (st.isSymbolicLink() || !st.isDirectory()) {
+    throw new Error(`refusing to run mcp as root: ${dataDir} is not a real directory`);
+  }
+  const { uid, gid } = st;
+  if (uid === 0) {
+    throw new Error(`refusing to run mcp as root: ${dataDir} is owned by root, so there is no service account to run as; run mcp as the service account`);
+  }
+  try {
+    if (typeof proc.setgroups === 'function') proc.setgroups([]);
+    proc.setgid(gid);
+    proc.setuid(uid);
+  } catch (err) {
+    throw new Error(`refusing to run mcp as root: could not become the data dir's owner (uid ${uid}, gid ${gid}): ${err.message}`);
+  }
+  if (proc.getuid() !== uid || proc.geteuid() !== uid) {
+    throw new Error(`refusing to run mcp as root: still running as uid ${proc.getuid()}/${proc.geteuid()} after dropping to the data dir's owner (uid ${uid})`);
+  }
+  return { uid, gid };
+}
+
 async function runMcp({ dataDir, io, deps = {} }) {
   const { loadNodeConfig } = require('../node-config');
   const { restoreDataDirOwnership } = require('../ownership');
@@ -48,17 +86,18 @@ async function runMcp({ dataDir, io, deps = {} }) {
     ...(deps.configDir ? { adminConfigDir: deps.configDir } : {}),
     ...(deps.adminUid === undefined ? {} : { adminUid: deps.adminUid })
   };
-  const ownership = { ...(io.ownership || {}), ...(deps.getuid ? { getuid: deps.getuid } : {}) };
+  const proc = deps.proc || process;
   const nodeCfg = loadNodeConfig(adminOptions);
 
   if (runningServicePid(dataDir)) {
-    assertCourierDirsSafe(dataDir, { ...(deps.getuid ? { getuid: deps.getuid } : {}) });
+    // Checked as root first (an extra layer), then root is given up for good
+    // before the courier's first write (ruling T13-dropprivs).
+    assertCourierDirsSafe(dataDir, { getuid: () => (isRoot(proc) ? 0 : -1) });
     const { FileCourier } = require('../../approvals/courier');
     const { CourierFleetClient } = require('../../fleet/courier-client');
-    // Each path is handed to the service account as it is written (a no-op
-    // unless run as root): the inbox before the service must write replies
-    // into it, and every request file before it is renamed into the outbox.
-    const courier = new FileCourier({ dataDir, onPathWritten: (p) => restoreDataDirOwnership(dataDir, [p], ownership) }).start();
+    const dropped = dropToDataDirOwner(dataDir, { proc });
+    if (dropped) log.info(`running as the data dir's owner (uid ${dropped.uid}, gid ${dropped.gid})`);
+    const courier = new FileCourier({ dataDir }).start();
     const server = new StdioMcpServer({ handler: new CourierFleetClient({ courier, nodeConfig: nodeCfg }), stdin: io.stdin, stdout: io.stdout });
     server.start();
     return new Promise(() => {}); // keep listening on stdio
@@ -91,8 +130,8 @@ async function runMcp({ dataDir, io, deps = {} }) {
     server.start();
     return new Promise(() => {});
   } finally {
-    restoreDataDirOwnership(dataDir, written, ownership);
+    restoreDataDirOwnership(dataDir, written, io.ownership);
   }
 }
 
-module.exports = { runMcp, assertCourierDirsSafe };
+module.exports = { runMcp, assertCourierDirsSafe, dropToDataDirOwner };
