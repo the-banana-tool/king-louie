@@ -211,30 +211,44 @@ function describeError(err, cwd, args, timeoutMs) {
 // it: filter/diff/merge drivers, an external diff, credential helpers, URL
 // rewrites, transport switches, remote upload/receive-pack programs, gpg
 // programs, the pager/editor/askpass/proxy/ssh/sequence-editor/alternate-refs
-// commands, and per-command pagers. A case repo (an imported one included) or a fetched package may
-// carry any of these in .git/config, or in config.worktree when the repo sets
-// extensions.worktreeConfig, so git is not run in such a repo.
+// commands, and per-command pagers. A case repo (an imported one included)
+// or a fetched package may carry any of these in .git/config, in
+// config.worktree when the repo sets extensions.worktreeConfig, or in a
+// checked-out submodule's config, so git is not run in such a repo.
 const UNSAFE_CONFIG_RE = '^(filter|diff|merge)\\..+\\.(clean|smudge|process|command|textconv|driver)$|^diff\\.external$|^credential\\.|^url\\.|^protocol\\.|^core\\.(pager|editor|askpass|gitproxy|sshcommand)$|^remote\\..+\\.(uploadpack|receivepack)$|^gpg\\.|^sequence\\.editor$|^core\\.alternaterefscommand$|^pager\\.';
 const unsafeQuery = (scope) => ['config', scope, '--includes', '--name-only', '--get-regexp', UNSAFE_CONFIG_RE];
 const WORKTREE_FLAG_QUERY = ['config', '--local', '--type=bool', '--get', 'extensions.worktreeConfig'];
-const GIT_DIRS_QUERY = ['rev-parse', '--absolute-git-dir', '--git-common-dir'];
+const GIT_DIRS_QUERY = ['rev-parse', '--absolute-git-dir', '--git-common-dir', '--show-toplevel'];
+const GITLINKS_QUERY = ['ls-files', '--stage', '-z', '--full-name'];
+// Checked-out submodules are checked to this depth (the case repo is 0); a
+// populated submodule deeper than that is refused rather than left unchecked.
+const MAX_SUBMODULE_DEPTH = 3;
 // C locale so "not a repository" is recognisable whatever the owner's language.
 const QUERY_ENV = { LC_ALL: 'C', LANGUAGE: 'C' };
 const NOT_A_REPO_RE = /only be used inside a git repository|not a git repository/i;
 
-// <cwd>/.git → the config and HEAD text last found clean. Only a plain
-// repository whose own .git is the one git uses is cached: .git is a real
-// directory with HEAD, objects/ and refs/ and no commondir (which would move
-// the config to another repository), and on the miss that fills the cache,
-// rev-parse confirms git resolves both the git dir and the common dir to it
-// (a decoy .git that git does not accept sends git to an enclosing repo).
-// The structure is re-checked on every hit, and HEAD is part of the key.
+// <cwd>/.git → the key last found clean. Only a plain repository whose own
+// .git is the one git uses is cached: .git is a real directory with HEAD,
+// objects/ and refs/ and no commondir (which would move the config to another
+// repository), and on the miss that fills the cache, rev-parse confirms git
+// resolves both the git dir and the common dir to it (a decoy .git that git
+// does not accept sends git to an enclosing repo). The structure is
+// re-checked on every hit.
+//
+// The key is HEAD and config text, plus, for every checked-out submodule
+// (gitlinks read from the index, recursively to MAX_SUBMODULE_DEPTH), its
+// path, HEAD and config text: git reads a populated submodule's own config
+// (and runs its filters) on status, add and diff in the parent. A new
+// checkout, a removed one or an edited submodule config changes the key.
+// The cache is filled only when the submodules git reported (ls-files) are
+// exactly the ones the key was built from.
+//
 // Whenever the cwd's own .git is the repository checked (hit or confirmed
 // miss), the command runs with GIT_DIR/GIT_WORK_TREE pinned to it, so a .git
 // broken after the check makes git fail instead of walking up to a parent.
-// A config with an include or worktreeConfig is never cached (an included
-// file or config.worktree can change without this one changing), but is
-// still pinned after its own full check.
+// A config with an include or worktreeConfig, a split or sparse index, or a
+// submodule git dir with a commondir is never cached, but is still pinned
+// after its own full check.
 const cleanConfigs = new Map();
 
 function isPlainDir(p) {
@@ -245,11 +259,93 @@ function isPlainDir(p) {
   }
 }
 
-// The cwd's own .git when it looks like a plain repository, or null.
-// `cacheable` is false when the config has an include or worktreeConfig.
-function configCacheEntry(cwd) {
-  const workTree = path.resolve(cwd);
-  const gitDir = path.join(workTree, '.git');
+// The paths of gitlink (mode 160000) entries in a git index file, [] when
+// there is no index, or null when the file can't be read with certainty
+// (unknown version, split or sparse index, truncated).
+function indexGitlinks(indexFile, hashLen) {
+  let buf;
+  try {
+    buf = fs.readFileSync(indexFile);
+  } catch (err) {
+    return err.code === 'ENOENT' ? [] : null;
+  }
+  if (buf.length < 12 || buf.toString('latin1', 0, 4) !== 'DIRC') return null;
+  const version = buf.readUInt32BE(4);
+  if (version < 2 || version > 4) return null;
+  const count = buf.readUInt32BE(8);
+  const links = new Set();
+  let off = 12;
+  let prev = Buffer.alloc(0);
+  for (let i = 0; i < count; i++) {
+    const head = 40 + hashLen + 2;
+    if (off + head > buf.length) return null;
+    const mode = buf.readUInt32BE(off + 24);
+    const flags = buf.readUInt16BE(off + 40 + hashLen);
+    let p = off + head;
+    if (flags & 0x4000) {
+      if (version < 3) return null;
+      p += 2;
+    }
+    let name;
+    if (version === 4) {
+      if (p >= buf.length) return null;
+      let c = buf[p++];
+      let strip = c & 127;
+      while (c & 128) {
+        if (p >= buf.length) return null;
+        strip += 1;
+        c = buf[p++];
+        strip = (strip << 7) + (c & 127);
+      }
+      const end = buf.indexOf(0, p);
+      if (end < 0 || strip > prev.length) return null;
+      name = Buffer.concat([prev.subarray(0, prev.length - strip), buf.subarray(p, end)]);
+      off = end + 1;
+    } else {
+      const end = buf.indexOf(0, p);
+      if (end < 0) return null;
+      name = buf.subarray(p, end);
+      off += ((p - off) + (end - p) + 8) & ~7;
+    }
+    prev = name;
+    const type = mode & 0o170000;
+    if (type === 0o040000) return null; // sparse-index directory entry
+    if (type === 0o160000) links.add(name.toString('utf8'));
+  }
+  // Extensions: a split index keeps entries elsewhere, a sparse index hides them.
+  while (off + 8 <= buf.length - hashLen) {
+    const sig = buf.toString('latin1', off, off + 4);
+    if (sig === 'link' || sig === 'sdir') return null;
+    off += 8 + buf.readUInt32BE(off + 4);
+  }
+  return [...links].sort();
+}
+
+// The git dir a submodule's .git leads to: the directory itself, or the
+// target of a "gitdir:" file. undefined when there is no .git (not checked
+// out), null when there is one this can't resolve.
+function dotGitTarget(workTree) {
+  const dotGit = path.join(workTree, '.git');
+  let st;
+  try {
+    st = fs.lstatSync(dotGit);
+  } catch {
+    return undefined;
+  }
+  if (st.isDirectory()) return dotGit;
+  if (!st.isFile()) return null;
+  try {
+    const m = fs.readFileSync(dotGit, 'utf8').match(/^gitdir:\s*(.+?)\s*$/m);
+    return m ? path.resolve(workTree, m[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
+// { key, subs } for a repository's git dir and its checked-out submodules,
+// read from disk only, or null when any part can't be keyed with certainty.
+// `subs` lists the submodule paths (joined with "/"), depth first.
+function treeKey(workTree, gitDir, depth) {
   if (!isPlainDir(gitDir) || !isPlainDir(path.join(gitDir, 'objects')) || !isPlainDir(path.join(gitDir, 'refs'))) return null;
   if (fs.existsSync(path.join(gitDir, 'commondir'))) return null;
   let head;
@@ -260,22 +356,42 @@ function configCacheEntry(cwd) {
   } catch {
     return null;
   }
-  const cacheable = !(/^\s*\[\s*include/im.test(text) || /worktreeconfig/i.test(text));
-  return { gitDir, workTree, key: `${head}\0${text}`, cacheable };
+  if (/^\s*\[\s*include/im.test(text) || /worktreeconfig/i.test(text)) return null;
+  const hashLen = /objectformat\s*=\s*sha256/i.test(text) ? 32 : 20;
+  const links = indexGitlinks(path.join(gitDir, 'index'), hashLen);
+  if (!links) return null;
+  const parts = [head, text];
+  const subs = [];
+  for (const rel of links) {
+    const subTree = path.join(workTree, ...rel.split('/'));
+    const subGit = dotGitTarget(subTree);
+    if (subGit === undefined) continue;
+    if (subGit === null || depth >= MAX_SUBMODULE_DEPTH) return null;
+    const sub = treeKey(subTree, subGit, depth + 1);
+    if (!sub) return null;
+    parts.push(`${rel}\0${sub.key}`);
+    subs.push(rel, ...sub.subs.map((s) => `${rel}/${s}`));
+  }
+  return { key: JSON.stringify(parts), subs };
 }
 
-// True when git resolves both the git dir and the common dir to entry.gitDir.
-function isOwnGitDir(cwd, entry, { err, stdout }) {
-  if (err) return false;
-  const [gitDir, common] = String(stdout).split(/\r?\n/).map((l) => l.trim());
-  if (!gitDir || !common) return false;
-  return samePath(gitDir, entry.gitDir) && samePath(path.resolve(cwd, common), entry.gitDir);
+// The cwd's own .git when it looks like a plain repository, or null.
+// `key` is null (not cacheable) when treeKey can't key it.
+function configCacheEntry(cwd) {
+  const workTree = path.resolve(cwd);
+  const gitDir = path.join(workTree, '.git');
+  if (!isPlainDir(gitDir) || !isPlainDir(path.join(gitDir, 'objects')) || !isPlainDir(path.join(gitDir, 'refs'))) return null;
+  if (fs.existsSync(path.join(gitDir, 'commondir'))) return null;
+  if (!fs.existsSync(path.join(gitDir, 'HEAD'))) return null;
+  const tree = treeKey(workTree, gitDir, 0);
+  return { gitDir, workTree, key: tree ? tree.key : null, subs: tree ? tree.subs : null };
 }
 
-function unsafeConfigError(cwd, stdout) {
+function unsafeConfigError(cwd, stdout, submodule) {
   const keys = [...new Set(String(stdout).split(/\r?\n/).map((l) => l.trim()).filter(Boolean))];
-  const message = `Refusing to run git in ${cwd}: its repository config sets ${keys.join(', ')}, which can run a program or redirect git. Remove ${keys.length === 1 ? 'that key' : 'those keys'} from the repository's .git/config (or config.worktree) to continue.`;
-  return codedError(message, 'GIT_UNSAFE_CONFIG', { keys, firstLine: message });
+  const where = submodule ? `its submodule ${submodule} has a config that sets` : 'its repository config sets';
+  const message = `Refusing to run git in ${cwd}: ${where} ${keys.join(', ')}, which can run a program or redirect git. Remove ${keys.length === 1 ? 'that key' : 'those keys'} from ${submodule ? 'that submodule\'s' : 'the repository\'s'} git config to continue.`;
+  return codedError(message, 'GIT_UNSAFE_CONFIG', { keys, submodule: submodule || null, firstLine: message });
 }
 
 function exitOf(err) {
@@ -285,69 +401,129 @@ function exitOf(err) {
 // An unsafe-key query: exit 0 = something matched (refuse), exit 1 = nothing
 // matched ('clean'), "not inside a repository" = nothing to check
 // ('no-repo': git init, a bare temp dir).
-function settleUnsafeQuery(cwd, { err, stdout }, args) {
-  if (!err) throw unsafeConfigError(cwd, stdout);
+function settleUnsafeQuery(root, { err, stdout }, args, submodule) {
+  if (!err) throw unsafeConfigError(root, stdout, submodule);
   if (exitOf(err) === 1) return 'clean';
   if (err.code !== 'ENOENT' && NOT_A_REPO_RE.test(String(err.stderr || ''))) return 'no-repo';
-  throw describeError(err, cwd, args, 0);
+  throw describeError(err, root, args, 0);
 }
 
-function settleWorktreeFlag(cwd, { err, stdout }) {
+function settleWorktreeFlag(root, { err, stdout }) {
   if (!err) return String(stdout).trim() === 'true';
   if (exitOf(err) === 1) return false;
-  throw describeError(err, cwd, WORKTREE_FLAG_QUERY, 0);
+  throw describeError(err, root, WORKTREE_FLAG_QUERY, 0);
+}
+
+// { gitDir, commonDir, top } from GIT_DIRS_QUERY, or null (a bare repo, or
+// anything unexpected).
+function parseGitDirs(cwd, { err, stdout }) {
+  if (err) return null;
+  const [gitDir, common, top] = String(stdout).split(/\r?\n/).map((l) => l.trim());
+  if (!gitDir || !common || !top) return null;
+  return { gitDir: path.resolve(gitDir), commonDir: path.resolve(cwd, common), top: path.resolve(top) };
+}
+
+function parseGitlinks(root, { err, stdout }) {
+  if (err) throw describeError(err, root, GITLINKS_QUERY, 0);
+  const links = new Set();
+  for (const record of String(stdout).split('\0')) {
+    const tab = record.indexOf('\t');
+    if (tab > 0 && record.slice(0, tab).split(' ')[0] === '160000') links.add(record.slice(tab + 1));
+  }
+  return [...links].sort();
+}
+
+// The config check as a plan of git queries: yields { cwd, args } and gets
+// back { err, stdout }, so the async and sync runners share it. Checks the
+// repository git finds from `cwd`, then every checked-out submodule in it,
+// recursively. Returns { repo, dirs, subs } (subs: the checked submodule
+// paths, depth first).
+function* repoChecks(root, cwd, depth, label) {
+  const local = yield { cwd, args: unsafeQuery('--local') };
+  if (settleUnsafeQuery(root, local, unsafeQuery('--local'), label) === 'no-repo') return { repo: false };
+  if (settleWorktreeFlag(root, yield { cwd, args: WORKTREE_FLAG_QUERY })) {
+    settleUnsafeQuery(root, yield { cwd, args: unsafeQuery('--worktree') }, unsafeQuery('--worktree'), label);
+  }
+  const dirs = parseGitDirs(cwd, yield { cwd, args: GIT_DIRS_QUERY });
+  // A submodule whose .git git does not accept is not checked out as far as
+  // git is concerned: git found the enclosing repository, already checked.
+  if (depth > 0 && !(dirs && samePath(dirs.top, cwd))) return { repo: false };
+  if (!dirs) return { repo: true, dirs: null, subs: [] };
+  const subs = [];
+  for (const rel of parseGitlinks(root, yield { cwd: dirs.top, args: GITLINKS_QUERY })) {
+    const subTree = path.join(dirs.top, ...rel.split('/'));
+    if (!fs.existsSync(path.join(subTree, '.git'))) continue;
+    const subLabel = label ? `${label}/${rel}` : rel;
+    if (depth >= MAX_SUBMODULE_DEPTH) {
+      const message = `Refusing to run git in ${root}: submodule ${subLabel} is nested more than ${MAX_SUBMODULE_DEPTH} levels deep, so its config was not checked.`;
+      throw codedError(message, 'GIT_UNSAFE_CONFIG', { keys: [], submodule: subLabel, firstLine: message });
+    }
+    const sub = yield* repoChecks(root, subTree, depth + 1, subLabel);
+    if (sub.repo) subs.push(rel, ...sub.subs.map((s) => `${rel}/${s}`));
+  }
+  return { repo: true, dirs, subs };
+}
+
+// The whole check for `cwd`. Returns { gitDir, workTree } to pin git to when
+// the cwd's own .git is the repository checked, else null; fills the cache
+// when the on-disk key covers exactly the submodules git reported.
+function* configCheckPlan(cwd, entry) {
+  const result = yield* repoChecks(cwd, cwd, 0, '');
+  if (!result.repo || !entry || !result.dirs) return null;
+  if (!samePath(result.dirs.gitDir, entry.gitDir) || !samePath(result.dirs.commonDir, entry.gitDir)) return null;
+  if (entry.key !== null && JSON.stringify(entry.subs) === JSON.stringify(result.subs)) {
+    cleanConfigs.set(entry.gitDir, entry.key);
+  }
+  return entry;
 }
 
 function needsConfigCheck(cwd) {
   if (!fs.existsSync(cwd)) return { skip: true, pin: null };
   const entry = configCacheEntry(cwd);
-  if (entry && entry.cacheable && cleanConfigs.get(entry.gitDir) === entry.key) return { skip: true, pin: entry };
+  if (entry && entry.key !== null && cleanConfigs.get(entry.gitDir) === entry.key) return { skip: true, pin: entry };
   return { skip: false, entry };
 }
 
-// After a clean check: the cwd's own .git to pin git to, when rev-parse
-// confirms it is the repository git used (and so the one checked).
-function settlePin(cwd, entry, dirs) {
-  if (!entry || !isOwnGitDir(cwd, entry, dirs)) return null;
-  if (entry.cacheable) cleanConfigs.set(entry.gitDir, entry.key);
-  return entry;
-}
-
-// Refuses a repository whose config runs programs. Returns { gitDir,
-// workTree } when the cwd's own .git is the repository checked (git is then
-// pinned to it), or null.
+// Refuses a repository whose config (or a checked-out submodule's config)
+// runs programs. Returns { gitDir, workTree } when the cwd's own .git is the
+// repository checked (git is then pinned to it), or null.
 async function checkRepoConfig(cwd, hooksDir) {
   const { skip, entry, pin } = needsConfigCheck(cwd);
   if (skip) return pin;
-  const query = (args) => run('git', hardenedGitArgs(args, { hooksDir }), {
-    cwd, env: gitEnv(QUERY_ENV), windowsHide: true, maxBuffer: MAX_BUFFER
-  }).then(({ stdout }) => ({ err: null, stdout }), (err) => ({ err, stdout: '' }));
-  if (settleUnsafeQuery(cwd, await query(unsafeQuery('--local')), unsafeQuery('--local')) === 'no-repo') return null;
-  if (settleWorktreeFlag(cwd, await query(WORKTREE_FLAG_QUERY))) {
-    settleUnsafeQuery(cwd, await query(unsafeQuery('--worktree')), unsafeQuery('--worktree'));
+  const plan = configCheckPlan(cwd, entry);
+  let step = plan.next();
+  while (!step.done) {
+    const { cwd: at, args } = step.value;
+    const answer = await run('git', hardenedGitArgs(args, { hooksDir }), {
+      cwd: at, env: gitEnv(QUERY_ENV), windowsHide: true, maxBuffer: MAX_BUFFER
+    }).then(({ stdout }) => ({ err: null, stdout }), (err) => ({ err, stdout: '' }));
+    step = plan.next(answer);
   }
-  return entry ? settlePin(cwd, entry, await query(GIT_DIRS_QUERY)) : null;
+  return step.value;
 }
 
 function checkRepoConfigSync(cwd, hooksDir) {
   const { skip, entry, pin } = needsConfigCheck(cwd);
   if (skip) return pin;
-  const query = (args) => {
+  const plan = configCheckPlan(cwd, entry);
+  let step = plan.next();
+  while (!step.done) {
+    const { cwd: at, args } = step.value;
+    let answer;
     try {
-      const stdout = execFileSync('git', hardenedGitArgs(args, { hooksDir }), {
-        cwd, env: gitEnv(QUERY_ENV), windowsHide: true, maxBuffer: MAX_BUFFER,
-        encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']
-      });
-      return { err: null, stdout };
+      answer = {
+        err: null,
+        stdout: execFileSync('git', hardenedGitArgs(args, { hooksDir }), {
+          cwd: at, env: gitEnv(QUERY_ENV), windowsHide: true, maxBuffer: MAX_BUFFER,
+          encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']
+        })
+      };
     } catch (err) {
-      return { err, stdout: '' };
+      answer = { err, stdout: '' };
     }
-  };
-  if (settleUnsafeQuery(cwd, query(unsafeQuery('--local')), unsafeQuery('--local')) === 'no-repo') return null;
-  if (settleWorktreeFlag(cwd, query(WORKTREE_FLAG_QUERY))) {
-    settleUnsafeQuery(cwd, query(unsafeQuery('--worktree')), unsafeQuery('--worktree'));
+    step = plan.next(answer);
   }
-  return entry ? settlePin(cwd, entry, query(GIT_DIRS_QUERY)) : null;
+  return step.value;
 }
 
 // Caller arguments start with the subcommand. A leading global option (-C,
@@ -455,7 +631,8 @@ async function requireOwnRepo(dir) {
   try {
     top = (await git(dir, ['rev-parse', '--show-toplevel'])).trim();
   } catch (err) {
-    if (err instanceof GitUnavailableError) throw err;
+    // A config refusal names the key to remove; do not blur it into "not its own repository".
+    if (err instanceof GitUnavailableError || (err && err.code === 'GIT_UNSAFE_CONFIG')) throw err;
   }
   if (!top || !samePath(top, dir)) {
     throw new Error(`Case directory ${dir} is not its own git repository${top ? ` (git resolves it to ${top})` : ''}. Restore its .git folder or run "git init" in it before the next turn.`);

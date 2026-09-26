@@ -427,6 +427,125 @@ describe('runGit and runGitSync', () => {
   });
 });
 
+// Task 2b (ruling C6-submod): git reads a checked-out submodule's own config,
+// and runs its filters, on status, add and diff in the parent repository.
+describe('checked-out submodules', () => {
+  // A committed repo with one file.
+  async function sourceRepo(file = 's.txt') {
+    const dir = tmp();
+    await git.runGit(dir, ['init', '-q']);
+    fs.writeFileSync(path.join(dir, file), 'one\n');
+    await git.runGit(dir, ['add', '-A']);
+    await git.runGit(dir, ['commit', '-q', '-m', 'first'], { env: ID_ENV });
+    return dir;
+  }
+  async function addSubmodule(parent, source, rel) {
+    await git.runGit(parent, ['submodule', 'add', '-q', source, rel], { allowFile: true, env: ID_ENV });
+    await git.runGit(parent, ['commit', '-q', '-m', `add ${rel}`], { env: ID_ENV });
+  }
+  // Plants a clean filter over every file of the checked-out repo at `tree`
+  // (through its own git config) and dirties a file so git runs it.
+  function plantSubFilter(tree, marker, file = 's.txt') {
+    const out = spawnGit(tree, ['config', 'filter.evil.clean', `touch "${marker.replace(/\\/g, '/')}"; cat`]);
+    assert.strictEqual(out.status, 0, out.stderr);
+    fs.writeFileSync(path.join(tree, '.gitattributes'), '* filter=evil\n');
+    fs.writeFileSync(path.join(tree, file), 'two\n');
+  }
+  // Raw git, only to plant config the way an attacker would.
+  function spawnGit(cwd, args) {
+    const env = {};
+    for (const [k, v] of Object.entries(process.env)) if (!/^GIT_/i.test(k)) env[k] = v;
+    return require('child_process').spawnSync('git', args, { cwd, encoding: 'utf8', env });
+  }
+  const refusedFor = (submodule) => (err) => {
+    assert.strictEqual(err.code, 'GIT_UNSAFE_CONFIG');
+    assert.strictEqual(err.submodule, submodule);
+    assert.match(err.message, new RegExp(`submodule ${submodule.replace(/\//g, '\\/')}`));
+    assert.match(err.message, /filter\.evil\.clean/);
+    return true;
+  };
+
+  it('refuses status, add and diff in a case whose submodule defines a filter', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const parent = tmp();
+    await git.initRepo(parent);
+    await addSubmodule(parent, await sourceRepo(), 'sub');
+    const marker = path.join(parent, 'sub-filter-ran');
+    plantSubFilter(path.join(parent, 'sub'), marker);
+    await assert.rejects(git.git(parent, ['status', '--porcelain']), refusedFor('sub'));
+    await assert.rejects(git.git(parent, ['add', '-A']), refusedFor('sub'));
+    await assert.rejects(git.git(parent, ['diff', 'HEAD']), refusedFor('sub'));
+    await assert.rejects(git.commitAll(parent, 'turn'), refusedFor('sub'));
+    assert.throws(() => git.runGitSync(parent, ['status', '--porcelain']), refusedFor('sub'));
+    assert.strictEqual(fs.existsSync(marker), false, 'the submodule filter never ran');
+  });
+
+  it('refuses a filter in a nested submodule at depth 2', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const inner = await sourceRepo('i.txt');
+    const middle = await sourceRepo();
+    await addSubmodule(middle, inner, 'inner');
+    const parent = tmp();
+    await git.initRepo(parent);
+    await addSubmodule(parent, middle, 'sub');
+    await git.runGit(parent, ['submodule', 'update', '-q', '--init', '--recursive'], { allowFile: true });
+    assert.ok(fs.existsSync(path.join(parent, 'sub', 'inner', '.git')), 'the nested submodule is checked out');
+    await git.git(parent, ['status', '--porcelain']); // clean at every depth
+    const marker = path.join(parent, 'nested-filter-ran');
+    plantSubFilter(path.join(parent, 'sub', 'inner'), marker, 'i.txt');
+    await assert.rejects(git.git(parent, ['status', '--porcelain']), refusedFor('sub/inner'));
+    await assert.rejects(git.git(parent, ['add', '-A']), refusedFor('sub/inner'));
+    assert.strictEqual(fs.existsSync(marker), false, 'the nested submodule filter never ran');
+  });
+
+  it('re-checks after a submodule config is edited behind a clean cached check', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const parent = tmp();
+    await git.initRepo(parent);
+    await addSubmodule(parent, await sourceRepo(), 'sub');
+    await git.git(parent, ['status', '--porcelain']);
+    await git.git(parent, ['status', '--porcelain']); // a cache hit
+    // Edit the submodule's config file directly: no git command in the parent.
+    const subConfig = path.join(parent, '.git', 'modules', 'sub', 'config');
+    const marker = path.join(parent, 'edited-filter-ran');
+    fs.appendFileSync(subConfig, `[filter "evil"]\n\tclean = touch \\"${marker.replace(/\\/g, '/')}\\"; cat\n`);
+    fs.writeFileSync(path.join(parent, 'sub', '.gitattributes'), '* filter=evil\n');
+    fs.writeFileSync(path.join(parent, 'sub', 's.txt'), 'two\n');
+    await assert.rejects(git.git(parent, ['status', '--porcelain']), refusedFor('sub'));
+    assert.throws(() => git.runGitSync(parent, ['status', '--porcelain']), refusedFor('sub'));
+    assert.strictEqual(fs.existsSync(marker), false, 'the edited submodule filter never ran');
+  });
+
+  it('checks a submodule checked out after a clean cached check', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const parent = tmp();
+    await git.initRepo(parent);
+    await addSubmodule(parent, await sourceRepo(), 'sub');
+    // Deinit: the gitlink stays, nothing is checked out.
+    await git.runGit(parent, ['submodule', 'deinit', '-q', '-f', 'sub']);
+    assert.strictEqual(fs.existsSync(path.join(parent, 'sub', '.git')), false);
+    await git.git(parent, ['status', '--porcelain']);
+    await git.git(parent, ['status', '--porcelain']); // cached without the submodule
+    await git.runGit(parent, ['submodule', 'update', '-q', '--init'], { allowFile: true });
+    const marker = path.join(parent, 'late-filter-ran');
+    plantSubFilter(path.join(parent, 'sub'), marker);
+    await assert.rejects(git.git(parent, ['status', '--porcelain']), refusedFor('sub'));
+    assert.strictEqual(fs.existsSync(marker), false, 'the late submodule filter never ran');
+  });
+
+  it('leaves a clean submodule and a repo without submodules working as before', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const parent = tmp();
+    await git.initRepo(parent);
+    fs.writeFileSync(path.join(parent, 'a.txt'), 'one\n');
+    assert.ok(await git.commitAll(parent, 'plain'));
+    await addSubmodule(parent, await sourceRepo(), 'sub');
+    fs.writeFileSync(path.join(parent, 'a.txt'), 'two\n');
+    assert.ok(await git.commitAll(parent, 'with a clean submodule'));
+    assert.strictEqual((await git.git(parent, ['status', '--porcelain'])).trim(), '');
+  });
+});
+
 describe('.gitattributes (R31)', () => {
   it('a new case commits playbooks/** -text', async (t) => {
     if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
