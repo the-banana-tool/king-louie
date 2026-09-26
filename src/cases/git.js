@@ -249,6 +249,10 @@ const NOT_A_REPO_RE = /only be used inside a git repository|not a git repository
 // A config with an include or worktreeConfig, a split or sparse index, or a
 // submodule git dir with a commondir is never cached, but is still pinned
 // after its own full check.
+//
+// A hit is not free: it reads HEAD, config and the index (parsed for
+// gitlinks) of the case and of every checked-out submodule, but it spawns no
+// git process.
 const cleanConfigs = new Map();
 
 function isPlainDir(p) {
@@ -261,7 +265,20 @@ function isPlainDir(p) {
 
 // The paths of gitlink (mode 160000) entries in a git index file, [] when
 // there is no index, or null when the file can't be read with certainty
-// (unknown version, split or sparse index, truncated).
+// (unknown version, split or sparse index, truncated, or any entry that git
+// could read differently from this parser).
+//
+// Names are read the way git reads them (read-cache.c, create_from_disk):
+// the length comes from the entry's flags (flags & 0xfff), and only a name of
+// 0xfff or more bytes is measured to its NUL. In a v4 index the flags length
+// covers the whole name, of which the entry stores only the suffix after the
+// prefix it shares with the previous name. The entry size comes from that
+// length, never from where a NUL happens to be, so a name must end in a NUL
+// exactly where its length says: an index whose padding hides a longer
+// "name" (git reads "subz", a NUL search would read "subzzzzzz") is refused.
+const INDEX_NAME_MASK = 0xfff;
+const INDEX_MAX_NAME_BYTES = 64 * 1024 * 1024;
+
 function indexGitlinks(indexFile, hashLen) {
   let buf;
   try {
@@ -269,16 +286,20 @@ function indexGitlinks(indexFile, hashLen) {
   } catch (err) {
     return err.code === 'ENOENT' ? [] : null;
   }
-  if (buf.length < 12 || buf.toString('latin1', 0, 4) !== 'DIRC') return null;
+  if (buf.length < 12 + hashLen || buf.toString('latin1', 0, 4) !== 'DIRC') return null;
   const version = buf.readUInt32BE(4);
   if (version < 2 || version > 4) return null;
   const count = buf.readUInt32BE(8);
+  const entriesEnd = buf.length - hashLen;
+  // No entry is shorter than 62 bytes; a count beyond that is not an index.
+  if (count > entriesEnd / 62) return null;
+  const head = 40 + hashLen + 2;
   const links = new Set();
+  let nameBytes = 0;
   let off = 12;
   let prev = Buffer.alloc(0);
   for (let i = 0; i < count; i++) {
-    const head = 40 + hashLen + 2;
-    if (off + head > buf.length) return null;
+    if (off + head > entriesEnd) return null;
     const mode = buf.readUInt32BE(off + 24);
     const flags = buf.readUInt16BE(off + 40 + hashLen);
     let p = off + head;
@@ -286,34 +307,49 @@ function indexGitlinks(indexFile, hashLen) {
       if (version < 3) return null;
       p += 2;
     }
-    let name;
+    let copyLen = 0;
     if (version === 4) {
-      if (p >= buf.length) return null;
+      // Prefix strip length: git's offset varint, at most 4 bytes here.
+      let used = 0;
+      if (p >= entriesEnd) return null;
       let c = buf[p++];
+      used++;
       let strip = c & 127;
       while (c & 128) {
-        if (p >= buf.length) return null;
+        if (p >= entriesEnd || used >= 4) return null;
         strip += 1;
         c = buf[p++];
+        used++;
         strip = (strip << 7) + (c & 127);
       }
-      const end = buf.indexOf(0, p);
-      if (end < 0 || strip > prev.length) return null;
-      name = Buffer.concat([prev.subarray(0, prev.length - strip), buf.subarray(p, end)]);
-      off = end + 1;
-    } else {
-      const end = buf.indexOf(0, p);
-      if (end < 0) return null;
-      name = buf.subarray(p, end);
-      off += ((p - off) + (end - p) + 8) & ~7;
+      if (strip < 0 || strip > prev.length) return null;
+      copyLen = prev.length - strip;
     }
+    let nameLen = flags & INDEX_NAME_MASK;
+    const nul = buf.indexOf(0, p);
+    if (nul < 0 || nul >= entriesEnd) return null;
+    if (nameLen === INDEX_NAME_MASK) {
+      nameLen = (nul - p) + copyLen;
+    } else if (nameLen < copyLen || nul !== p + (nameLen - copyLen)) {
+      return null;
+    }
+    const suffixLen = nameLen - copyLen;
+    const name = version === 4
+      ? Buffer.concat([prev.subarray(0, copyLen), buf.subarray(p, p + suffixLen)])
+      : buf.subarray(p, p + suffixLen);
+    nameBytes += name.length;
+    if (nameBytes > INDEX_MAX_NAME_BYTES) return null;
+    off = version === 4
+      ? p + suffixLen + 1
+      : off + (((p - off) + nameLen + 8) & ~7);
+    if (off > entriesEnd) return null;
     prev = name;
     const type = mode & 0o170000;
     if (type === 0o040000) return null; // sparse-index directory entry
     if (type === 0o160000) links.add(name.toString('utf8'));
   }
   // Extensions: a split index keeps entries elsewhere, a sparse index hides them.
-  while (off + 8 <= buf.length - hashLen) {
+  while (off + 8 <= entriesEnd) {
     const sig = buf.toString('latin1', off, off + 4);
     if (sig === 'link' || sig === 'sdir') return null;
     off += 8 + buf.readUInt32BE(off + 4);

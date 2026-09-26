@@ -544,6 +544,121 @@ describe('checked-out submodules', () => {
     assert.ok(await git.commitAll(parent, 'with a clean submodule'));
     assert.strictEqual((await git.git(parent, ['status', '--porcelain'])).trim(), '');
   });
+
+  // A nested repo at `rel` inside `parent` with a committed s.txt; returns its HEAD.
+  async function nestedRepo(parent, rel) {
+    const tree = path.join(parent, rel);
+    fs.mkdirSync(tree, { recursive: true });
+    await git.runGit(tree, ['init', '-q']);
+    fs.writeFileSync(path.join(tree, 's.txt'), 'one\n');
+    await git.runGit(tree, ['add', '-A']);
+    await git.runGit(tree, ['commit', '-q', '-m', 'first'], { env: ID_ENV });
+    return (await git.runGit(tree, ['rev-parse', 'HEAD'])).trim();
+  }
+  // Records a gitlink in the parent's index only: no config, no .gitmodules.
+  function addGitlink(parent, rel, sha) {
+    const out = spawnGit(parent, ['update-index', '--add', '--cacheinfo', `160000,${sha},${rel}`]);
+    assert.strictEqual(out.status, 0, out.stderr);
+  }
+
+  it('refuses an index whose padding hides a longer name than the flags give', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const parent = tmp();
+    await git.initRepo(parent);
+    assert.ok(await git.commitAll(parent, 'plain'));
+    await git.git(parent, ['status', '--porcelain']);
+    await git.git(parent, ['status', '--porcelain']); // cached with no gitlinks
+    // The gitlink is recorded as "subz" (flags length 4), then its NUL padding
+    // is filled with "zzzzz". Git copies the byte after the 4 name bytes as the
+    // terminator and so uses the path "subzz", where the planted repository
+    // is; a NUL search reads "subzzzzzz", a path that does not exist, and
+    // would key the index as having no checked-out submodule.
+    const sha = await nestedRepo(parent, 'subzz');
+    const marker = path.join(parent, 'padded-filter-ran');
+    plantSubFilter(path.join(parent, 'subzz'), marker);
+    addGitlink(parent, 'subz', sha);
+    const indexFile = path.join(parent, '.git', 'index');
+    const buf = fs.readFileSync(indexFile);
+    const at = buf.indexOf(Buffer.from('subz\0\0\0\0\0\0', 'latin1'));
+    assert.ok(at > 0, 'the subz entry has six bytes of NUL padding');
+    assert.strictEqual(buf.readUInt16BE(at - 2) & 0xfff, 4);
+    buf.write('zzzzz', at + 4, 'latin1');
+    require('crypto').createHash('sha1').update(buf.subarray(0, buf.length - 20)).digest().copy(buf, buf.length - 20);
+    fs.writeFileSync(indexFile, buf);
+    const listed = spawnGit(parent, ['ls-files', '--stage']);
+    assert.strictEqual(listed.status, 0, listed.stderr);
+    assert.match(listed.stdout, /^160000 [0-9a-f]+ 0\tsubzz$/m, 'git reads the gitlink as subzz');
+    await assert.rejects(git.git(parent, ['status', '--porcelain']), refusedFor('subzz'));
+    await assert.rejects(git.git(parent, ['status', '--porcelain']), refusedFor('subzz')); // not cached either
+    assert.throws(() => git.runGitSync(parent, ['status', '--porcelain']), refusedFor('subzz'));
+    assert.strictEqual(fs.existsSync(marker), false, 'the filter behind the padded name never ran');
+  });
+
+  it('refuses a checked-out submodule nested 4 levels deep', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    // s4 inside s3 inside s2 inside s1 inside the case: sub/x/y/z is depth 4.
+    let inner = await sourceRepo();
+    for (const rel of ['z', 'y', 'x']) {
+      const outer = await sourceRepo();
+      await addSubmodule(outer, inner, rel);
+      inner = outer;
+    }
+    const parent = tmp();
+    await git.initRepo(parent);
+    await addSubmodule(parent, inner, 'sub');
+    await git.runGit(parent, ['submodule', 'update', '-q', '--init', '--recursive'], { allowFile: true });
+    assert.ok(fs.existsSync(path.join(parent, 'sub', 'x', 'y', 'z', '.git')), 'depth 4 is checked out');
+    await assert.rejects(git.git(parent, ['status', '--porcelain']), (err) => {
+      assert.strictEqual(err.code, 'GIT_UNSAFE_CONFIG');
+      assert.strictEqual(err.submodule, 'sub/x/y/z');
+      assert.match(err.message, /nested more than 3 levels deep/);
+      return true;
+    });
+  });
+
+  it('never caches a split index', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const parent = tmp();
+    await git.initRepo(parent);
+    assert.ok(await git.commitAll(parent, 'plain'));
+    await git.runGit(parent, ['update-index', '--split-index']);
+    assert.ok(fs.readdirSync(path.join(parent, '.git')).some((n) => n.startsWith('sharedindex.')), 'the index is split');
+    await git.git(parent, ['status', '--porcelain']);
+    await git.git(parent, ['status', '--porcelain']);
+    // A gitlink written straight into a fresh shared index: the main index
+    // file then lists no entries at all, only the "link" extension.
+    const sha = await nestedRepo(parent, 'sub');
+    const marker = path.join(parent, 'split-filter-ran');
+    plantSubFilter(path.join(parent, 'sub'), marker);
+    const out = spawnGit(parent, ['-c', 'splitIndex.maxPercentChange=0', 'update-index', '--add', '--cacheinfo', `160000,${sha},sub`]);
+    assert.strictEqual(out.status, 0, out.stderr);
+    await assert.rejects(git.git(parent, ['status', '--porcelain']), refusedFor('sub'));
+    assert.throws(() => git.runGitSync(parent, ['status', '--porcelain']), refusedFor('sub'));
+    assert.strictEqual(fs.existsSync(marker), false, 'the filter behind the shared index never ran');
+  });
+
+  it('checks a gitlink added after a cached check whose .git points outside the case', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const parent = tmp();
+    await git.initRepo(parent);
+    assert.ok(await git.commitAll(parent, 'plain'));
+    await git.git(parent, ['status', '--porcelain']);
+    await git.git(parent, ['status', '--porcelain']); // cached with no gitlinks
+    // A repository outside the case, checked out into the case through a
+    // "gitdir:" file.
+    const outside = tmp();
+    const sha = await nestedRepo(outside, 'repo');
+    const tree = path.join(parent, 'ext');
+    fs.mkdirSync(tree);
+    fs.writeFileSync(path.join(tree, '.git'), `gitdir: ${path.join(outside, 'repo', '.git').replace(/\\/g, '/')}\n`);
+    fs.writeFileSync(path.join(tree, 's.txt'), 'one\n');
+    const marker = path.join(parent, 'outside-filter-ran');
+    plantSubFilter(tree, marker);
+    addGitlink(parent, 'ext', sha);
+    await assert.rejects(git.git(parent, ['status', '--porcelain']), refusedFor('ext'));
+    assert.throws(() => git.runGitSync(parent, ['status', '--porcelain']), refusedFor('ext'));
+    assert.strictEqual(fs.existsSync(marker), false, 'the outside repository\'s filter never ran');
+  });
 });
 
 describe('.gitattributes (R31)', () => {
