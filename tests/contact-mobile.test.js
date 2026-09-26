@@ -431,7 +431,7 @@ describe('contact host: startMobile', () => {
 describe('question routes (relay side)', () => {
   const { registerQuestionRoutes, WEEK_MS } = require('../src/frontdoor/question-routes');
 
-  function relay({ offline = false } = {}) {
+  function relay({ offline = false, nodesForDevice = null } = {}) {
     const routes = new Map();
     const rpcs = [];
     const phoneApi = { registerRoute: (method, pattern, spec) => routes.set(`${method} ${pattern}`, spec) };
@@ -443,7 +443,7 @@ describe('question routes (relay side)', () => {
       }
     };
     const mailbox = new Mailbox({ now: () => Date.parse('2026-09-25T14:00:00Z') });
-    const devices = { nodesForDevice: (id) => [{ node_id: 'kl-aaaaaaaaaaaaaaaa', state: id === 'd-revokedrevokedre' ? 'revoked' : 'active' }] };
+    const devices = { nodesForDevice: nodesForDevice || ((id) => [{ node_id: 'kl-aaaaaaaaaaaaaaaa', state: id === 'd-revokedrevokedre' ? 'revoked' : 'active' }]) };
     const log = { warn() {}, debug() {}, info() {} };
     registerQuestionRoutes({ phoneApi, nodeHub, mailbox, devices, log });
     return { routes, rpcs, mailbox };
@@ -515,6 +515,30 @@ describe('question routes (relay side)', () => {
     const out = await r.routes.get('POST /v1/questions/{token}/answer').handler({}, { deviceId: phone.deviceId, params: { token: '7QD4KM' }, body: envelope });
     assert.deepStrictEqual(out.body, { ok: true, outcome: 'recorded', ack: 'Recorded for Lakeside lot.' });
     assert.deepStrictEqual(r.rpcs, [{ nodeId: NODE, method: 'question.answer', params: { envelope }, opts: { timeoutMs: 10000 } }]);
+  });
+
+  it('M5: the path token must itself be a question token, even when the signed body carries the same string', async () => {
+    const r = relay();
+    const phone = createFakePhone();
+    const route = r.routes.get('POST /v1/questions/{token}/answer');
+    // Six characters Crockford base32 never uses (I, L, O, U): only the path check refuses these.
+    for (const token of ['I0O1LU', '7qd4km', '7QD4K', '7QD4KMX']) {
+      await assert.rejects(route.handler({}, { deviceId: phone.deviceId, params: { token }, body: answerFor(phone, { token }) }), (err) => err.status === 400 && err.code === 'bad_token', token);
+    }
+    assert.strictEqual(r.rpcs.length, 0);
+  });
+
+  it('M5: GET /v1/questions lists only the active nodes of the device', async () => {
+    const OTHER = 'kl-bbbbbbbbbbbbbbbb';
+    const r = relay({ nodesForDevice: () => [{ node_id: NODE, state: 'active' }, { node_id: OTHER, state: 'revoked' }, { node_id: 'kl-cccccccccccccccc', state: 'pending' }] });
+    const phone = createFakePhone();
+    const node = testNodeIdentity({ key: 'web-01' });
+    const ask = (token) => seal({ v: 1, type: 'kl.question.ask', node_id: node.nodeId, token }, node.signer);
+    r.mailbox.put(NODE, ask('7QD4KM'), { to_device: phone.deviceId });
+    r.mailbox.put(OTHER, ask('K7QD4M'), { to_device: phone.deviceId });
+    r.mailbox.put('kl-cccccccccccccccc', ask('ABCDEF'), { to_device: phone.deviceId });
+    const listed = await r.routes.get('GET /v1/questions').handler({}, { deviceId: phone.deviceId, params: {}, query: {}, body: null });
+    assert.deepStrictEqual(listed.body.map((i) => i.node_id), [NODE]);
   });
 
   it('answers 502 node_offline when the node does not answer', async () => {
