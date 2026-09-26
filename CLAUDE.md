@@ -323,14 +323,13 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage5-detours.md`.
   (never as a detour), with at most one `detour` journal line per turn.
   Routing answers are applied at turn start, from `case:detours` and after
   `case:resolveDetour`.
-- A routing question is answered one of two ways: the owner picks an option
-  directly (case panel, IPC `case:resolveDetour`, `channel: 'in-app'`), or the
-  owner answers in words to whatever agent session is running the case — this
-  app's own chat or a remote session started over MCP (the fleet's `delegate`
-  tool runs the same agent stack) — and that agent calls `Detour` with
-  `action: 'resolve'` (`by: 'model-mapped'`). The router itself is
-  channel-agnostic, but delivering the question on any other channel
-  (chat platforms, email, SMS, voice) is not wired yet.
+- Today a routing question is answered in the app, either from the case panel
+  (`case:resolveDetour`) or by an agent session's `Detour.resolve`. Answering
+  over MCP is designed but not yet wired up: `src/mcp/stdio-server.js`'s
+  `delegate` always throws (no agent session starts there yet), so it isn't a
+  live path today. Future sources are `delegate` and C7's front-door
+  `answer_question`. Routing questions keep `mcpAnswerable` at its default of
+  `true`.
 - Case types are code in `src/cases/case-types/` (`general`, `outreach`,
   `software-repo`); `case.yaml.type` is validated at creation. A
   `software-repo` case runs read-only `git` and `gh` at turn start (tests
