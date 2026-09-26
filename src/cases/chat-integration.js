@@ -148,5 +148,7 @@ module.exports = {
   shapeToolDefinitions,
   buildCaseSystemPrompt,
   isProtectedCasePath,
-  requireOwnerQuote
+  requireOwnerQuote,
+  // Cases stage 7: ingest checks quotes with it.
+  normalizeForQuote
 };
