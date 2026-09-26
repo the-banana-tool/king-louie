@@ -1,4 +1,4 @@
-const { describe, it, beforeEach } = require('node:test');
+const { describe, it, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
@@ -309,6 +309,10 @@ describe('ConversationCompactor (chunk-level)', () => {
       const os = require('os');
       cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-emb-cache-'));
       cachePath = path.join(cacheDir, 'embeddings.jsonl');
+    });
+
+    afterEach(() => {
+      fs.rmSync(cacheDir, { recursive: true, force: true });
     });
 
     function countingProvider(stats = { calls: 0, embedded: 0 }) {

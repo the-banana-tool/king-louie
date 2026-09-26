@@ -138,11 +138,12 @@ describe('GatewayServer resilience', () => {
     assert.strictEqual(await connect(server.port, { Authorization: 'Bearer t' }), 'open');
   });
 
-  it('writes the token file only once the listener is bound, and removes it on stop', async () => {
+  it('writes the token file only once the listener is bound, and removes it on stop', async (t) => {
     const fs = require('fs');
     const os = require('os');
     const path = require('path');
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-gwfile-'));
+    t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
     const tokenFile = path.join(dataDir, 'gateway-token');
 
     // A port that is already taken: start() must leave no bearer token behind.
@@ -179,10 +180,12 @@ describe('GatewayServer: the token file is part of starting', () => {
   const os = require('os');
   const path = require('path');
 
-  it('refuses to serve when the token cannot be published, and leaves no listener behind', async () => {
+  it('refuses to serve when the token cannot be published, and leaves no listener behind', async (t) => {
     // A *file* where the token dir should be: writing <it>/gateway-token fails
     // on every platform, without needing permissions this test cannot set.
-    const notADir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'kl-gw-pub-')), 'tokens');
+    const pubDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-gw-pub-'));
+    t.after(() => fs.rmSync(pubDir, { recursive: true, force: true }));
+    const notADir = path.join(pubDir, 'tokens');
     fs.writeFileSync(notADir, 'x');
 
     // Assigned to the shared `server` so that a regression (start resolving
@@ -193,8 +196,9 @@ describe('GatewayServer: the token file is part of starting', () => {
     assert.strictEqual(server.wss, null, 'a listener nothing can authenticate to must not stay up');
   });
 
-  it('starts normally when the token can be published', async () => {
+  it('starts normally when the token can be published', async (t) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-gw-pub-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
     server = new GatewayServer({ port: 0, authToken: 't', tokenFileDir: dir });
     await server.start();
     assert.strictEqual(fs.readFileSync(path.join(dir, 'gateway-token'), 'utf8'), 't');

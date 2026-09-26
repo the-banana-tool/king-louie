@@ -13,8 +13,9 @@ function makeStore(initial = {}) {
 }
 
 describe('ensureGatewayToken', () => {
-  it('creates once and stores ciphertext, without touching the disk', () => {
+  it('creates once and stores ciphertext, without touching the disk', (t) => {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-gw-'));
+    t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
     const store = makeStore();
     const cipher = createAesGcmCipher(crypto.randomBytes(32));
     const t1 = ensureGatewayToken({ store, cipher, dataDir });
@@ -26,8 +27,9 @@ describe('ensureGatewayToken', () => {
     assert.deepStrictEqual(fs.readdirSync(dataDir), []);
   });
 
-  it('publishes and revokes the token file on demand', () => {
+  it('publishes and revokes the token file on demand', (t) => {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-gw-'));
+    t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
     const file = path.join(dataDir, 'gateway-token');
 
     publishGatewayToken(dataDir, 'a-token');
@@ -40,8 +42,9 @@ describe('ensureGatewayToken', () => {
     revokeGatewayToken(dataDir);
   });
 
-  it('falls back to a session-only token when secure storage is unavailable', () => {
+  it('falls back to a session-only token when secure storage is unavailable', (t) => {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-gw-'));
+    t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
     const store = makeStore();
     const cipher = {
       isEncryptionAvailable: () => false,
@@ -57,8 +60,9 @@ describe('ensureGatewayToken', () => {
     assert.strictEqual(fs.readFileSync(path.join(dataDir, 'gateway-token'), 'utf8'), token);
   });
 
-  it('generates a new token when the stored ciphertext fails to decrypt', () => {
+  it('generates a new token when the stored ciphertext fails to decrypt', (t) => {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-gw-'));
+    t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
     const store = makeStore({ 'gateway.authToken': 'not-valid-ciphertext' });
     const cipher = createAesGcmCipher(crypto.randomBytes(32));
 
@@ -69,8 +73,9 @@ describe('ensureGatewayToken', () => {
     assert.notStrictEqual(store.data['gateway.authToken'], 'not-valid-ciphertext');
   });
 
-  it('replaces a pre-existing world-readable token file with mode 0600', { skip: process.platform === 'win32' }, () => {
+  it('replaces a pre-existing world-readable token file with mode 0600', { skip: process.platform === 'win32' }, (t) => {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-gw-'));
+    t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
     const file = path.join(dataDir, 'gateway-token');
     fs.writeFileSync(file, 'stale-token', { mode: 0o644 });
     assert.notStrictEqual(fs.statSync(file).mode & 0o777, 0o600);

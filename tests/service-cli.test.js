@@ -216,6 +216,7 @@ describe('parseArgs flag validation', () => {
       assert.strictEqual(fs.existsSync(path.join(scratchCwd, '--profile')), false);
     } finally {
       process.chdir(originalCwd);
+      fs.rmSync(scratchCwd, { recursive: true, force: true });
     }
   });
 });

@@ -1,4 +1,4 @@
-const { describe, it, beforeEach } = require('node:test');
+const { describe, it, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
@@ -231,6 +231,10 @@ describe('EventLedger (file-backed)', () => {
   beforeEach(() => {
     tmpDir = makeTmpDir();
     clock = 1000;
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
   function makeLedger(opts = {}) {
