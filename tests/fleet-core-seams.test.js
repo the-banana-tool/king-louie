@@ -246,3 +246,72 @@ describe('refuseUnsafe fails closed in every approval mode', () => {
     assert.deepEqual(asked, []);
   });
 });
+
+// Fix round 1: pin the fail-closed wrap itself (the ToolExecutor constructor
+// wrap, refuseUnsafeGate's fallback, and the seam's phone-mode wrap).
+describe('the refuseUnsafe wrap is load-bearing', () => {
+  const ToolExecutor = require('../src/execution/tool-executor');
+  const { approvalSeam } = require('../src/approvals/executor-options');
+  const ABS = path.resolve(os.tmpdir(), 'kl-seams-abs', 'x.txt');
+  const spies = {};
+  const originals = {};
+
+  before(() => {
+    for (const name of ['Read', 'Glob']) {
+      const tool = toolRegistry.get(name);
+      originals[name] = tool.execute;
+      spies[name] = 0;
+      tool.execute = async () => { spies[name] += 1; return { success: true }; };
+    }
+  });
+  after(() => { for (const name of Object.keys(originals)) toolRegistry.get(name).execute = originals[name]; });
+
+  it('no classifier, refuseUnsafe: Read and Glob on an absolute path are refused, never run, never asked', async () => {
+    const asked = [];
+    const ex = new ToolExecutor({ runtimeEnvironment: {}, useSandbox: false, refuseUnsafe: true, approvalRequester: async (t) => { asked.push(t); return true; } });
+    const read = await ex.execute('Read', { file_path: ABS });
+    const glob = await ex.execute('Glob', { pattern: '*', cwd: path.dirname(ABS) });
+    assert.equal(read.error, REFUSE_UNSAFE_MESSAGE);
+    assert.equal(glob.error, REFUSE_UNSAFE_MESSAGE);
+    assert.deepEqual(spies, { Read: 0, Glob: 0 });
+    assert.deepEqual(asked, []);
+  });
+
+  it("'allow' mode: a delegate turn with refuseUnsafe that Reads a path is refused", async () => {
+    const { core, dataDir } = await phoneCore({ remoteApprovals: 'allow', withPolicy: false });
+    try {
+      const asked = [];
+      script = [{ type: 'tool_use', toolName: 'Read', toolUseId: 'c1', parameters: { file_path: path.join(dataDir, 'x.txt') } }];
+      const res = await core.context.getAgentExecutorAdapter().execute(core.context.getAgent('main'), 'go', {
+        workingDirectory: dataDir,
+        approvalRequester: async (t) => { asked.push(t); return true; },
+        executorOptions: { origin: ORIGIN, chatId: 'delegate:job-1', refuseUnsafe: true }
+      });
+      assert.equal(res.tools[0].result.error, REFUSE_UNSAFE_MESSAGE);
+      assert.equal(spies.Read, 0);
+      assert.deepEqual(asked, []);
+    } finally {
+      await core.shutdown();
+    }
+  });
+
+  it('a refuseUnsafe executor re-threads a requester that always answers false, keeping origin and the flag', async () => {
+    const asked = [];
+    const ex = new ToolExecutor({ refuseUnsafe: true, origin: ORIGIN, approvalRequester: async (t) => { asked.push(t); return true; } });
+    const requester = ex._rethreadedRequester();
+    assert.equal(await requester('Bash', { command: 'ls' }, {}), false);
+    assert.deepEqual(asked, []);
+    assert.equal(requester.refuseUnsafe, true);
+    assert.deepEqual(requester.origin, ORIGIN);
+  });
+
+  it('approvalSeam in phone mode wraps the node-policy classifier itself', () => {
+    const seam = approvalSeam({
+      remoteApprovals: 'phone',
+      phoneApprover: { ttlMs: 300000, requestApproval: async () => true },
+      nodePolicy: { allowed_roots: [os.tmpdir()], remote_sessions: { always_confirm: [GATED], deny: [] } },
+      executorOptions: { refuseUnsafe: true }
+    });
+    assert.deepEqual(seam.toolExecutorOptions.classifyCall(GATED, {}, {}), { tier: 'denied', reason: 'fleet_unsafe_not_granted', message: REFUSE_UNSAFE_MESSAGE });
+  });
+});

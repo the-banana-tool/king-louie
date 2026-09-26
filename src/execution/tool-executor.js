@@ -590,7 +590,10 @@ class ToolExecutor extends EventEmitter {
   // workflow runners) so their children ask the same place this executor
   // asks. For a local-desktop run it is marked local (program §4.21).
   _rethreadedRequester() {
-    const requester = (toolName, parameters, metadata) => this.requestApproval(toolName, parameters, metadata);
+    // A refuseUnsafe run never asks anyone, and neither do its children.
+    const requester = this.refuseUnsafe
+      ? async () => false
+      : (toolName, parameters, metadata) => this.requestApproval(toolName, parameters, metadata);
     // Carried as a plain property (not a WeakMap mark) so create-core's
     // agentExecutorAdapter.execute can read it straight off
     // options.approvalRequester and forward it to the child's origin, the
