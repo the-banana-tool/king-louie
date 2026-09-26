@@ -54,6 +54,11 @@ const SHAPE = {
 };
 const RELAY_SHAPE = { baseUrl: 'relayUrl', pollSec: 'seconds' };
 
+// Credentials in the userinfo, or a query or fragment, have no place in a
+// base URL: they would be logged and sent on every request.
+const EXTRAS = 'must not carry a user name, password, query or fragment';
+const hasExtras = (u) => Boolean(u.username || u.password || u.search || u.hash);
+
 // `where` is the key path ("contact.sms.owner"); `file` names service.json.
 function checkValue(kind, value, where, file) {
   const bad = (what) => new Error(`Invalid ${file}: ${where} ${what}`);
@@ -89,15 +94,21 @@ function checkValue(kind, value, where, file) {
         throw bad('must be a URL');
       }
       if (u.protocol !== 'https:') throw bad('must be an https: URL');
+      if (hasExtras(u)) throw bad(EXTRAS);
       return String(value);
     }
-    case 'relayUrl':
+    case 'relayUrl': {
       // https:, or http: only to loopback (spec §4.5; contact-format.js).
+      let base;
       try {
-        return assertRelayBaseUrl(value);
+        base = assertRelayBaseUrl(value);
       } catch (err) {
         throw bad(/is not a URL$/.test(err.message) ? 'is not a URL' : err.message.replace(/^relay baseUrl /, ''));
       }
+      // assertRelayBaseUrl drops these silently; in admin config they are a mistake.
+      if (hasExtras(new URL(String(value)))) throw bad(EXTRAS);
+      return base;
+    }
     default:
       throw bad('has an unknown type');
   }
@@ -172,4 +183,15 @@ function resolveContactConfig({ settings = {}, contactConfig = null, isService =
   return out;
 }
 
-module.exports = { CHANNEL_DEFAULTS, mergeContactSettings, validateContactConfig, resolveContactConfig };
+// Contact channel credentials (relay tokens, webhook secrets, mailbox
+// passwords) live in the vault under `contact.`. Neither the model's Vault
+// tool nor an MCP `${vault:…}` reference may reach them. The desktop vault
+// (electron-store) reads keys through dot-prop, which drops a backslash before
+// an ordinary character and treats `[` as a path separator, so compare the
+// first path segment with backslashes removed, trimmed and lowercased.
+function isContactVaultKey(key) {
+  const first = String(key ?? '').replace(/\\/g, '').split(/[.[]/)[0];
+  return first.trim().toLowerCase() === 'contact';
+}
+
+module.exports = { CHANNEL_DEFAULTS, mergeContactSettings, validateContactConfig, resolveContactConfig, isContactVaultKey };

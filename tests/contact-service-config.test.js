@@ -70,6 +70,12 @@ describe('the admin service.json contact block', () => {
     assert.throws(() => validateContactConfig({ relays: { main: { baseUrl: 'http://relay.example.com' } } }, 'service.json'), /contact\.relays\.main\.baseUrl must be https:, or http: to loopback/);
     assert.throws(() => validateContactConfig({ relays: { main: { baseUrl: 'not a url' } } }, 'service.json'), /contact\.relays\.main\.baseUrl is not a URL/);
     assert.throws(() => validateContactConfig({ ntfy: { baseUrl: 'http://ntfy.example.com' } }, 'service.json'), /contact\.ntfy\.baseUrl must be an https: URL/);
+    for (const extra of ['https://user:pw@ntfy.example.com', 'https://user@ntfy.example.com', 'https://ntfy.example.com/?t=1', 'https://ntfy.example.com/#x']) {
+      assert.throws(() => validateContactConfig({ ntfy: { baseUrl: extra } }, 'service.json'), /contact\.ntfy\.baseUrl must not carry a user name, password, query or fragment/, extra);
+      const relayUrl = extra.replace('ntfy.', 'relay.');
+      assert.throws(() => validateContactConfig({ relays: { main: { baseUrl: relayUrl } } }, 'service.json'), /contact\.relays\.main\.baseUrl must not carry a user name, password, query or fragment/, relayUrl);
+    }
+    assert.throws(() => validateContactConfig({ relays: { local: { baseUrl: 'http://127.0.0.1:8080/?k=1' } } }, 'service.json'), /contact\.relays\.local\.baseUrl must not carry/);
     assert.throws(() => validateContactConfig({ sms: { owner: '+15550100', relay: 'other' } }, 'service.json'), /contact\.sms\.relay names "other"/);
     assert.deepStrictEqual(validateContactConfig({ relays: { local: { baseUrl: 'http://127.0.0.1:8080' } } }, 'service.json'), { relays: { local: { baseUrl: 'http://127.0.0.1:8080' } } });
     assert.strictEqual(validateContactConfig(undefined, 'service.json'), null);
@@ -130,6 +136,27 @@ describe('Vault tool', () => {
     const listed = await vaultTool.execute({ action: 'list' }, { vault });
     assert.deepStrictEqual(listed, { ok: true, keys: ['api_key'], count: 1 });
     assert.strictEqual((await vaultTool.execute({ action: 'retrieve', key: 'api_key' }, { vault })).value, 'x');
+  });
+
+  it('refuses contact keys however they are spelled, and any key with a backslash (dot-prop escapes)', async () => {
+    const vault = fakeVault();
+    const refusal = { ok: false, error: 'contact credentials are managed in settings, not by the model' };
+    for (const key of ['\\contact.relay.main.token', 'cont\\act.relay.main.token']) {
+      for (const action of ['retrieve', 'store', 'delete']) {
+        assert.deepStrictEqual(await vaultTool.execute({ action, key, value: 'x' }, { vault }), refusal, `${action} ${key}`);
+      }
+    }
+    for (const key of ['Contact.x', ' contact.x', 'CONTACT', 'contact[0]', ' Contact [x]']) {
+      for (const action of ['retrieve', 'store', 'delete']) {
+        assert.deepStrictEqual(await vaultTool.execute({ action, key, value: 'x' }, { vault }), refusal, `${action} ${key}`);
+      }
+    }
+    const other = await vaultTool.execute({ action: 'store', key: 'a\\b', value: 'x' }, { vault });
+    assert.strictEqual(other.ok, false);
+    assert.match(other.error, /backslash/);
+    assert.strictEqual(vault.get('contact.relay.main.token'), 'secret');
+    assert.strictEqual((await vaultTool.execute({ action: 'store', key: 'service.token', value: 'v' }, { vault })).ok, true);
+    assert.strictEqual((await vaultTool.execute({ action: 'retrieve', key: 'service.token' }, { vault })).value, 'v');
   });
 
   it('keeps working for keys outside contact.', async () => {

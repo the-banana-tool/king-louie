@@ -1,8 +1,9 @@
 const { Tool } = require('../tool-schema');
 
 // Cases stage 4: relay tokens, webhook secrets and mailbox passwords live
-// under `contact.`; the model can neither read nor list them.
-const isContactKey = (key) => key === 'contact' || String(key || '').startsWith('contact.');
+// under `contact.`; the model can neither read nor list them, however it
+// spells the key (see isContactVaultKey).
+const { isContactVaultKey } = require('../../cases/contact-settings');
 
 /**
  * Vault Tool — Secure credential storage and retrieval.
@@ -57,8 +58,13 @@ const vaultTool = new Tool({
       return { ok: false, error: `"key" parameter is required for ${action} action.` };
     }
 
-    if (action !== 'list' && isContactKey(key)) {
+    if (action !== 'list' && isContactVaultKey(key)) {
       return { ok: false, error: 'contact credentials are managed in settings, not by the model' };
+    }
+    // The desktop vault treats a backslash as an escape, so such a key would
+    // not name what it appears to name.
+    if (action !== 'list' && String(key).includes('\\')) {
+      return { ok: false, error: 'vault keys may not contain a backslash' };
     }
 
     try {
@@ -80,7 +86,7 @@ const vaultTool = new Tool({
         }
 
         case 'list': {
-          const keys = vault.list().filter((k) => !isContactKey(k));
+          const keys = vault.list().filter((k) => !isContactVaultKey(k));
           return { ok: true, keys, count: keys.length };
         }
 
