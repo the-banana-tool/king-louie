@@ -135,11 +135,16 @@ class ContactRelayClient {
 
 // Polls /v1/events every pollSec, cursor persisted per relay, backing off
 // 30 s → 10 min on failure. onEvents(events) is router.ingestRelayEvents.
+// shouldPoll(): false on a passive host (another process holds the ladder
+// lease). A passive host neither fetches nor advances the cursor, so the
+// events stay queued for whichever host is active (final review I1); the
+// skip is not a failure and adds no backoff.
 class RelayPoller {
-  constructor({ client, state, onEvents, pollSec = 30, log = createLogger('contact/relay-poll'), setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
+  constructor({ client, state, onEvents, shouldPoll = () => true, pollSec = 30, log = createLogger('contact/relay-poll'), setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
     this.client = client;
     this.state = state;
     this.onEvents = onEvents;
+    this.shouldPoll = shouldPoll;
     this.pollMs = (Number.isFinite(+pollSec) ? Math.max(1, +pollSec) : 30) * 1000;
     this.log = log;
     this.setTimer = setTimer;
@@ -155,9 +160,12 @@ class RelayPoller {
   }
 
   async pollOnce() {
+    if (!this.shouldPoll()) return { ok: true, count: 0, passive: true };
     try {
       const cursor = this.state.readCursor(this.client.name);
       const { events, cursor: next } = await this.client.events(cursor);
+      // The lease can be lost while the fetch is in flight.
+      if (!this.shouldPoll()) return { ok: true, count: 0, passive: true };
       if (events.length) await this.onEvents(events);
       this.state.writeCursor(this.client.name, next);
       this.failures = 0;

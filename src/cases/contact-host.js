@@ -205,7 +205,13 @@ function createContactHost({
       for (const [name, r] of relays) {
         const poller = new RelayPoller({
           client: r.client, state, pollSec: r.pollSec,
-          onEvents: async (events) => (ladder.active ? router.ingestRelayEvents(name, events) : null)
+          // Final review I1: only the active host consumes relay events; a
+          // passive one leaves the cursor alone. The router dedupes by id.
+          shouldPoll: () => ladder.active,
+          onEvents: async (events) => {
+            if (!ladder.active) throw new PassiveHostError();
+            return router.ingestRelayEvents(name, events);
+          }
         });
         poller.start();
         pollers.push(poller);

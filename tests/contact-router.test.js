@@ -943,3 +943,35 @@ describe('ContactRouter: an explicit text token beats the reply-to reference', (
     assert.strictEqual(w.runtime.questions(w.lot.id).get(qx.id).answer.text, 'call #ZZZZZZ first');
   });
 });
+
+describe('ContactRouter relay events: seen only after handling (final review M2)', () => {
+  it('an event whose handler throws is not remembered, so the next delivery of it applies; a handled one is deduped', async () => {
+    const w = await world();
+    const sms = w.adapters.get('sms');
+    let calls = 0;
+    sms.ingestRelayEvent = async () => { calls += 1; if (calls === 1) throw new Error('disk hiccup'); };
+    const ev = { id: 'ev-m2', type: 'inbound', channel: 'sms', from: '+15550100', text: 'hi', at: '2026-09-25T14:00:00Z' };
+    assert.deepStrictEqual(await w.router.ingestRelayEvents('main', [ev]), { applied: 0, skipped: 1 });
+    assert.deepStrictEqual(await w.router.ingestRelayEvents('main', [ev]), { applied: 1, skipped: 0 }, 'retried after the failure');
+    assert.deepStrictEqual(await w.router.ingestRelayEvents('main', [ev]), { applied: 0, skipped: 1 }, 'then deduped');
+    assert.strictEqual(calls, 2);
+    const again = new ContactState({ dir: w.state.dir, clock: w.clock });
+    assert.strictEqual(again.claimEvent('main:ev-m2'), false, 'persisted as seen');
+  });
+
+  it('two concurrent deliveries of one id apply it once', async () => {
+    const w = await world();
+    const sms = w.adapters.get('sms');
+    let calls = 0;
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    sms.ingestRelayEvent = async () => { calls += 1; await gate; };
+    const ev = { id: 'ev-m2c', type: 'inbound', channel: 'sms', from: '+15550100', text: 'hi', at: '2026-09-25T14:00:00Z' };
+    const a = w.router.ingestRelayEvents('main', [ev]);
+    const b = w.router.ingestRelayEvents('main', [ev]);
+    release();
+    const results = await Promise.all([a, b]);
+    assert.strictEqual(calls, 1);
+    assert.deepStrictEqual(results.map((r) => r.applied).sort(), [0, 1]);
+  });
+});

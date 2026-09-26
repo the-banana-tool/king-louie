@@ -157,3 +157,18 @@ describe('ContactState.resolve by reference only', () => {
     assert.strictEqual(s.resolve('123456', { ref: true }), null, 'ref: true needs a channel');
   });
 });
+
+describe('ContactState relay event claims (final review M2)', () => {
+  it('a claim is in memory until settled: released → claimable again, settled done → seen on disk', () => {
+    const dir = tmp();
+    const s = new ContactState({ dir, clock: () => NOW });
+    assert.strictEqual(s.claimEvent('r:ev-1'), true);
+    assert.strictEqual(s.claimEvent('r:ev-1'), false, 'claimed');
+    assert.strictEqual(new ContactState({ dir }).claimEvent('r:ev-1'), true, 'a claim is not persisted');
+    s.settleEvent('r:ev-1', false);
+    assert.strictEqual(s.claimEvent('r:ev-1'), true, 'released');
+    s.settleEvent('r:ev-1', true);
+    assert.strictEqual(s.claimEvent('r:ev-1'), false);
+    assert.strictEqual(new ContactState({ dir }).claimEvent('r:ev-1'), false, 'seen on disk');
+  });
+});

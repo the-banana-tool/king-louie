@@ -604,7 +604,20 @@ class ContactRouter {
 
   async _relayEvent(relayName, channels, ev) {
     if (!ev || typeof ev !== 'object' || typeof ev.id !== 'string' || !RELAY_EVENT_ID.test(ev.id) || !RELAY_EVENT_TYPES.has(ev.type)) return false;
-    if (!this.state.markEventSeen(`${relayName}:${ev.id}`)) return false;
+    const key = `${relayName}:${ev.id}`;
+    if (!this.state.claimEvent(key)) return false;
+    let result;
+    try {
+      result = await this._relayEventOnce(relayName, channels, ev);
+    } catch (err) {
+      this.state.settleEvent(key, false);
+      throw err;
+    }
+    this.state.settleEvent(key, true);
+    return result;
+  }
+
+  async _relayEventOnce(relayName, channels, ev) {
     if (ev.type === 'status') {
       if (typeof ev.messageId !== 'string' || !ev.messageId || typeof ev.status !== 'string' || !RELAY_STATUS.test(ev.status)) return false;
       const error = ev.error ? cut(ev.error, 500) : null;

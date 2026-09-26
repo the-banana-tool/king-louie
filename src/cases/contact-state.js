@@ -272,6 +272,23 @@ class ContactState {
     return this._seen;
   }
 
+  // Final review M2: an event is claimed (in memory, synchronously, so two
+  // concurrent pushes of one id apply it once) before it is handled, and
+  // persisted as seen only after. A crash in between leaves it unseen, so a
+  // re-poll or retried push applies it again (the answer path is idempotent).
+  claimEvent(id) {
+    if (!this._claimed) this._claimed = new Set();
+    if (this._claimed.has(id) || this._seenIds().includes(id)) return false;
+    this._claimed.add(id);
+    return true;
+  }
+
+  // done: true persists the id as seen; false releases the claim.
+  settleEvent(id, done) {
+    if (this._claimed) this._claimed.delete(id);
+    if (done) this.markEventSeen(id);
+  }
+
   // true the first time an event id is seen; the last 2000 ids are kept.
   markEventSeen(id) {
     const ids = this._seenIds();

@@ -41,7 +41,7 @@ class FakeBridge extends LoopbackChannel {
   }
 }
 
-function makeHost({ interactive = true, isService = false, contactConfig = null, settings = {}, features = { channels: true }, webhook = null, extraAdapters = {}, casesRootIsFile = false } = {}) {
+function makeHost({ interactive = true, isService = false, contactConfig = null, settings = {}, features = { channels: true }, webhook = null, extraAdapters = {}, casesRootIsFile = false, fetchImpl = null } = {}) {
   let stored = mergeSettings(settings);
   const events = [];
   const casesRoot = path.join(tmp('kl-host-cases-'), 'cases');
@@ -64,7 +64,7 @@ function makeHost({ interactive = true, isService = false, contactConfig = null,
     getBridges: () => ({ telegram, discord: null }),
     getWebhookServer: () => webhook,
     tickMs: 60000,
-    fetchImpl: async () => { throw new Error('offline in tests'); },
+    fetchImpl: fetchImpl || (async () => { throw new Error('offline in tests'); }),
     extraAdapters
   };
   if (!isService) delete hostOpts.contactConfig;
@@ -327,6 +327,49 @@ describe('createContactHost: fix round 1', () => {
     } finally {
       await t.host.stop();
       await webhook.stop();
+    }
+  });
+
+  it('I1: a passive host neither fetches relay events nor advances the cursor; once active it applies the queued events once', async () => {
+    const tracked = trackPollers();
+    const queue = [{ id: 'ev-q1', type: 'status', messageId: 'msg-q1', status: 'delivered' }];
+    let fetches = 0;
+    const fetchImpl = async (url) => {
+      fetches += 1;
+      const u = new URL(url);
+      const after = u.searchParams.get('after');
+      const body = after === 'c-1' ? { events: [], cursor: 'c-1' } : { events: queue, cursor: 'c-1' };
+      return { status: 200, text: async () => JSON.stringify(body) };
+    };
+    const t = makeHost({ settings: desktopSettings, fetchImpl });
+    const seen = [];
+    const ingest = t.host.router.ingestRelayEvents.bind(t.host.router);
+    t.host.router.ingestRelayEvents = async (name, events) => { const r = await ingest(name, events); seen.push(r); return r; };
+    try {
+      t.host.state.recordDelivery('d-q1', { channel: 'sms', at: new Date().toISOString(), externalRef: null, relayId: 'msg-q1', batchToken: 'K7QD4M', idempotencyKey: 'd-q1', status: 'sent', items: [] });
+      await t.host.start();
+      const poller = tracked.started.find((p) => p.client.name === 'main');
+      assert.ok(poller);
+      poller.stop();
+      assert.strictEqual(t.host.ladder.active, false);
+      const passive = await poller.pollOnce();
+      assert.deepStrictEqual(passive, { ok: true, count: 0, passive: true });
+      assert.strictEqual(fetches, 0, 'a passive host does not fetch');
+      assert.strictEqual(t.host.state.readCursor('main'), null, 'the cursor did not move');
+      assert.strictEqual(poller.failures, 0, 'no backoff from a passive spell');
+      await t.runtime.createCase({ title: 'Lakeside lot', objective: 'Sell the lot' });
+      assert.strictEqual(t.host.ladder.tryAcquire(), true);
+      const active = await poller.pollOnce();
+      assert.strictEqual(active.ok, true);
+      assert.strictEqual(active.count, 1);
+      assert.strictEqual(t.host.state.readCursor('main'), 'c-1');
+      assert.deepStrictEqual(seen, [{ applied: 1, skipped: 0 }], 'ingested once, by the active host');
+      assert.strictEqual(t.host.state.deliveries()['d-q1'].status, 'delivered');
+      // The same event id again (a relay re-sending it) is deduped.
+      assert.deepStrictEqual(await t.host.router.ingestRelayEvents('main', queue), { applied: 0, skipped: 1 });
+    } finally {
+      tracked.restore();
+      await t.host.stop();
     }
   });
 
