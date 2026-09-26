@@ -312,15 +312,19 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage4-channels.md`.
   (`src/cases/contact.js`) and then `CaseRuntime.answerQuestion`. An adapter
   sets `ownerProven` only after its own check: Telegram and Discord accept
   only a private chat/DM with the contact owner id, and only from that
-  sender; email needs either an authenticated pass (topmost
-  `Authentication-Results`) or the thread's `[KL-<token>]` token from the
-  owner's address; SMS needs the owner number plus `#TOKEN`; voice and SMS
-  both go through the relay; the phone app needs a device-signed envelope
-  verified on the node. An explicit `#token` in a reply always beats
-  reply-to/thread correlation, so a stray in-reply-to match can't steal an
-  answer meant for a different question. Tokens are never rendered on a
-  delivery-only channel such as ntfy (`caps.expectsReplies !== true` drops
-  the reply footer), since there is nowhere for a reply to land.
+  sender; email must come from the owner's address, and have either an
+  authenticated pass (the topmost `Authentication-Results` header) or the
+  thread's `[KL-<token>]` token (`email-channel.js`); SMS needs the owner
+  number plus `#TOKEN`; voice and SMS both go through the relay; the phone
+  app needs a device-signed envelope verified on the node. An explicit
+  `#token` in a reply always beats reply-to/thread correlation, so a stray
+  in-reply-to match can't steal an answer meant for a different question.
+  Tokens are never rendered on a delivery-only channel such as ntfy
+  (`caps.expectsReplies !== true` drops the reply footer), since there is
+  nowhere for a reply to land. A different second answer never overwrites
+  the first: the first answer stands, and a follow-up question asks which
+  one stands, on the channel that gave the second answer
+  (`contact.js` `_conflict`/`conflictFact`).
 - Owner decision (M22): a question C2 marks `mcpAnswerable:false` — a
   budget-grant, a direction question, or a commit-failed question — is only
   answered in the app or from the owner's paired phone. Every other channel
