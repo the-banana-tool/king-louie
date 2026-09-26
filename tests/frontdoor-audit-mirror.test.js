@@ -169,15 +169,10 @@ describe('AuditMirror', () => {
     now += 31 * 86400000;
     await n.add(2);
     for (const k of [keepAll, limited]) await k.mirror.sync(NODE.nodeId, { fetchSlice: n.fetchSlice, spkiHex: SPKI });
-    // Fix round 1 (review): the first slice of a segment is evidence and is
-    // kept, so a third sync is what shows an ordinary old slice going.
-    now += 31 * 86400000;
-    await n.add(2);
-    for (const k of [keepAll, limited]) await k.mirror.sync(NODE.nodeId, { fetchSlice: n.fetchSlice, spkiHex: SPKI });
     const count = (k) => fs.readFileSync(path.join(k.mirror.dir, NODE.nodeId, 'slices.jsonl'), 'utf8').trim().split('\n').length;
-    assert.equal(count(keepAll), 3);
-    assert.equal(count(limited), 2, 'the day-31 slice is dropped; the first and the newest stay');
-    assert.equal(limited.mirror.cursor(NODE.nodeId).seq, 6);
+    assert.equal(count(keepAll), 2);
+    assert.equal(count(limited), 1);
+    assert.equal(limited.mirror.cursor(NODE.nodeId).seq, 4);
   });
   // --- hardening (carries) ---------------------------------------------
 
@@ -445,8 +440,9 @@ describe('AuditMirror', () => {
     await assert.rejects(mirror.sync(NODE.nodeId, { fetchSlice: n.fetchSlice, spkiHex: SPKI }));
     delete mirror._writeState;
     now += 31 * 86400000; // every stored slice is now past retention
-    assert.equal(mirror.prune(NODE.nodeId), 0, 'first of segment, head holder, newest');
-    assert.equal(count(mirror), 3);
+    assert.equal(mirror.prune(NODE.nodeId), 1, 'only the first (ordinary) slice goes');
+    const kept = fs.readFileSync(path.join(mirror.dir, NODE.nodeId, 'slices.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    assert.deepEqual(kept.map((r) => [r.first_seq, r.last_seq]), [[3, 4], [5, 6]], 'the head holder and the newest stay');
   });
 
   it('a torn last line is dropped before the next record is appended', async () => {
@@ -569,12 +565,12 @@ describe('AuditMirror', () => {
     now += 40 * DAY;
     await mirror.ingestSlice(ID, page(b, 5, 6, { headSeq: 6, oldest: 1 }), SPKI);
     mirror.prune(ID);
-    assert.deepEqual(records(mirror), [[0, 1, 3], [0, 4, 5], [1, 1, 4], [1, 5, 6]]);
+    assert.deepEqual(records(mirror), [[0, 4, 5], [1, 1, 4], [1, 5, 6]]);
     now += 40 * DAY;
     await mirror.ingestSlice(ID, page(b, 7, 8, { oldest: 1 }), SPKI);
     assert.equal(mirror.prune(ID), 1);
-    assert.deepEqual(records(mirror), [[0, 1, 3], [0, 4, 5], [1, 1, 4], [1, 7, 8]],
-      'the first slice of each segment and the forked-from head survive; ordinary old slices still go');
+    assert.deepEqual(records(mirror), [[0, 4, 5], [1, 1, 4], [1, 7, 8]],
+      'the forked-from head and the start of the segment the fork opened survive; ordinary old slices still go');
   });
 
   it('retention keeps the slices either side of a gap', async () => {
@@ -590,8 +586,8 @@ describe('AuditMirror', () => {
     await mirror.ingestSlice(ID, page(c, 10, 10, { oldest: 8 }), SPKI);
     now += 35 * DAY;
     await mirror.ingestSlice(ID, page(c, 11, 12, { oldest: 8 }), SPKI);
-    assert.equal(mirror.prune(ID), 1);
-    assert.deepEqual(records(mirror), [[0, 1, 3], [0, 4, 5], [0, 8, 9], [0, 11, 12]]);
+    assert.equal(mirror.prune(ID), 2);
+    assert.deepEqual(records(mirror), [[0, 4, 5], [0, 8, 9], [0, 11, 12]]);
   });
 
   it('the first break is never evicted by the cap', async () => {
@@ -614,26 +610,6 @@ describe('AuditMirror', () => {
     assert.equal(breaks.length, 1000);
     assert.equal(breaks[0].reason, 'first_one');
     assert.equal(breaks.at(-1).reason, 'broken_chain');
-  });
-
-  it('a fork already recorded for the same seq and mirror head is not recorded again', async () => {
-    const { mirror } = kit();
-    const original = nodeLedger();
-    await original.add(5);
-    await mirror.sync(ID, { fetchSlice: original.fetchSlice, spkiHex: SPKI });
-    const head = mirror.cursor(ID);
-    editState(mirror, (s) => {
-      s.breaks = [{ seq: 1, reason: 'fork', mirror_head: head, at: '2026-05-01T00:00:00.000Z' }];
-      s.status = 'broken';
-    });
-    const raised = [];
-    const reopened = new AuditMirror({ dir: mirror.dir, alerts: { raise: (k) => { raised.push(k); return {}; } } });
-    const rewritten = nodeLedger();
-    await rewritten.add(6, 'other.event');
-    assert.equal(await reopened.sync(ID, { fetchSlice: rewritten.fetchSlice, spkiHex: SPKI }), 'chain_break');
-    assert.deepEqual(reopened.breaks(ID).map((b) => [b.reason, b.seq]), [['fork', 1]]);
-    assert.deepEqual(raised, []);
-    assert.equal(reopened.cursor(ID).seq, 6);
   });
 
   it('a replayed old page is a replay break (head and segment stay); a repeated page through the head appends only what is new', async () => {
@@ -677,6 +653,103 @@ describe('AuditMirror', () => {
     assert.deepEqual(mirror.history(ID, {}), { segment: 1, envelope: forked });
   });
 
+  // --- fix round 2 -------------------------------------------------------
+
+  // A node that answers audit.slice like F3's ledger over chain `node.chain`:
+  // after a hash it holds, the entries that follow; otherwise from its oldest.
+  const fakeNode = (c) => {
+    const node = { chain: c, fetched: 0 };
+    node.fetchSlice = async ({ limit, after }) => {
+      node.fetched += 1;
+      const cc = node.chain;
+      const top = cc.length - 1;
+      const i = after === null ? -1 : cc.findIndex((e, k) => k > 0 && e.hash === after);
+      const start = i > 0 ? i + 1 : 1;
+      if (start > top) return signedSlice([], { seq: top, hash: cc[top].hash }, { seq: 1, prev: null });
+      return page(cc, start, Math.min(top, start + limit - 1), { oldest: 1 });
+    };
+    return node;
+  };
+
+  it('a fork past the first page (pageLimit 3) is a fork, not an endless replay', async () => {
+    const a = chain(6);
+    const b = [null, a[1], a[2], a[3], a[4]];
+    for (let i = 5; i <= 8; i += 1) b.push(entry(i, b[i - 1].hash, 'rewritten'));
+    const { mirror, raised } = kit({ pageLimit: 3 });
+    const node = fakeNode(a);
+    assert.equal(await mirror.sync(ID, { fetchSlice: node.fetchSlice, spkiHex: SPKI }), 'append');
+    assert.equal(mirror.cursor(ID).seq, 6);
+    node.chain = b; // rewritten from seq 5 and grown to 8: our head hash is gone
+    assert.equal(await mirror.sync(ID, { fetchSlice: node.fetchSlice, spkiHex: SPKI }), 'chain_break');
+    assert.deepEqual(mirror.cursor(ID), { seq: 8, hash: b[8].hash });
+    assert.deepEqual(mirror.breaks(ID).map((x) => x.reason), ['fork']);
+    assert.equal(raised.length, 1);
+    assert.equal(await mirror.sync(ID, { fetchSlice: node.fetchSlice, spkiHex: SPKI }), 'empty', 'and it moves on');
+  });
+
+  it('a node alternating between two chains cannot grow the mirror (40 syncs, 1-day retention)', async () => {
+    let now = Date.parse('2026-05-01T00:00:00.000Z');
+    const { mirror, raised } = kit({ retentionDays: 1, now: () => now });
+    const a = chain(3);
+    const b = chain(3, 'other.event');
+    const node = fakeNode(a);
+    const sizes = [];
+    for (let i = 0; i < 40; i += 1) {
+      node.chain = i % 2 ? b : a;
+      await mirror.sync(ID, { fetchSlice: node.fetchSlice, spkiHex: SPKI });
+      sizes.push(count(mirror));
+      now += DAY;
+    }
+    assert.ok(Math.max(...sizes) <= 3, `stored slices stay bounded: ${sizes.join(',')}`);
+    assert.deepEqual(mirror.breaks(ID).map((x) => [x.reason, x.segment]), [['fork', 1], ['fork', 2]]);
+    assert.equal(raised.length, 2, 'one alert per distinct fork');
+    assert.deepEqual(mirror.cursor(ID), { seq: 3, hash: b[3].hash });
+    assert.equal(mirror.history(ID, {}).segment, 1, 'back in the segment that holds chain b');
+    // Chain b grew while the node was on chain a: re-entering stores only what is new.
+    node.chain = a;
+    await mirror.sync(ID, { fetchSlice: node.fetchSlice, spkiHex: SPKI });
+    const before = count(mirror);
+    const grown = [...b, entry(4, b[3].hash, 'other.event')];
+    node.chain = grown;
+    await mirror.sync(ID, { fetchSlice: node.fetchSlice, spkiHex: SPKI });
+    assert.deepEqual(mirror.cursor(ID), { seq: 4, hash: grown[4].hash });
+    assert.equal(count(mirror), before + 1);
+    assert.equal(mirror.breaks(ID).length, 2);
+  });
+
+  it('a third chain from a known fork point is a new fork in a new segment, never re-entry into another chain', async () => {
+    const { mirror } = kit();
+    const a = chain(3);
+    const b = chain(3, 'other.event');
+    const c = chain(3, 'third.event');
+    const node = fakeNode(a);
+    for (const ch of [a, b, a, b]) {
+      node.chain = ch;
+      await mirror.sync(ID, { fetchSlice: node.fetchSlice, spkiHex: SPKI });
+    }
+    // In segment 1 (chain b); the recorded fork from b's head went to segment 2 (chain a).
+    node.chain = c;
+    assert.equal(await mirror.sync(ID, { fetchSlice: node.fetchSlice, spkiHex: SPKI }), 'chain_break');
+    assert.deepEqual(mirror.breaks(ID).map((x) => [x.reason, x.segment]), [['fork', 1], ['fork', 2], ['fork', 3]]);
+    assert.deepEqual(mirror.cursor(ID), { seq: 3, hash: c[3].hash });
+    assert.deepEqual(mirror.history(ID, {}), { segment: 3, envelope: page(c, 1, 3, { oldest: 1 }) });
+  });
+
+  it('two different tamperings at the same stuck head are two breaks, each recorded once', async () => {
+    const { mirror, raised } = kit();
+    const c = chain(5);
+    await mirror.ingestSlice(ID, page(c, 1, 2), SPKI);
+    const head5 = { seq: 5, hash: c[5].hash };
+    const first = signedSlice([{ ...c[3], data: { i: 'rewritten' } }, c[4]], head5);
+    const second = signedSlice([c[3], { ...c[4], data: { i: 'rewritten' } }], head5);
+    for (const env of [first, second, first, second]) {
+      assert.equal((await mirror.ingestSlice(ID, env, SPKI)).outcome, 'chain_break');
+    }
+    assert.deepEqual(mirror.breaks(ID).map((x) => [x.reason, x.seq]), [['hash_mismatch', 3], ['hash_mismatch', 4]]);
+    assert.equal(raised.length, 2);
+    assert.equal(mirror.cursor(ID).seq, 2);
+  });
+
   describe('an untrusted state.json', () => {
     async function synced() {
       const { mirror } = kit();
@@ -696,7 +769,11 @@ describe('AuditMirror', () => {
       'is deleted while slices remain': (f) => fs.rmSync(f),
       'claims ok despite a recorded break': (f) => rewrite(f, (s) => { s.breaks = [{ seq: 1, reason: 'fork', mirror_head: null, at: '2026-05-01T00:00:00.000Z' }]; }),
       'carries a __proto__ key': (f) => fs.writeFileSync(f, fs.readFileSync(f, 'utf8').replace('{', '{"__proto__":{"polluted":true},')),
-      'has a head that is not a hash': (f) => rewrite(f, (s) => { s.head.hash = '../../x'; })
+      'has a head that is not a hash': (f) => rewrite(f, (s) => { s.head.hash = '../../x'; }),
+      'has a fork segment that is not a number': (f) => rewrite(f, (s) => {
+        s.breaks = [{ seq: 1, reason: 'fork', mirror_head: null, at: '2026-05-01T00:00:00.000Z', segment: '1' }];
+        s.status = 'broken';
+      })
     };
     for (const [name, corrupt] of Object.entries(cases)) {
       it(`${name}: quarantined, broken, alerted, never reset to no history`, async () => {

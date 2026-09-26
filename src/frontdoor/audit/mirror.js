@@ -20,7 +20,7 @@
 const fs = require('fs');
 const path = require('path');
 const { createLogger } = require('../../logging');
-const { verifyAuditSlice } = require('../../audit/audit-ledger');
+const { verifyAuditSlice, entryHash } = require('../../audit/audit-ledger');
 const { open, verifyEd25519 } = require('../../approvals/envelope');
 const { NODE_ID_RE } = require('../../approvals/messages');
 const { writeFileAtomic } = require('../../approvals/approver-store');
@@ -97,12 +97,17 @@ function normGap(g) {
 }
 
 function normBreak(b) {
-  if (!isObj(b) || !exactKeys(b, ['at', 'mirror_head', 'reason', 'seq'])) return null;
+  if (!isObj(b) || !exactKeys(b, ['at', 'mirror_head', 'reason', 'seq'], ['segment'])) return null;
   if (typeof b.reason !== 'string' || !REASON_RE.test(b.reason)) return null;
   if (!(b.seq === null || (Number.isInteger(b.seq) && b.seq >= 0)) || !isIso(b.at)) return null;
   const mirrorHead = normHead(b.mirror_head);
   if (mirrorHead === undefined) return null;
-  return { seq: b.seq, reason: b.reason, mirror_head: mirrorHead, at: b.at };
+  const out = { seq: b.seq, reason: b.reason, mirror_head: mirrorHead, at: b.at };
+  if (Object.hasOwn(b, 'segment')) {
+    if (!Number.isInteger(b.segment) || b.segment < 0) return null;
+    out.segment = b.segment;
+  }
+  return out;
 }
 
 // A parsed state.json → a plain, validated state, or null when anything is
@@ -147,11 +152,43 @@ function normalizeRecord(raw) {
 function entriesProblem(entries) {
   let previous = null;
   for (const e of entries) {
-    if (!isObj(e) || !isSeq(e.seq) || !isHash(e.hash) || !(e.prev === null || isHash(e.prev))) return 'malformed_entry';
-    if (previous && (e.seq !== previous.seq + 1 || e.prev !== previous.hash)) return 'broken_chain';
+    if (!isObj(e) || !isSeq(e.seq) || !isHash(e.hash) || !(e.prev === null || isHash(e.prev))) {
+      return { reason: 'malformed_entry', seq: isObj(e) && isSeq(e.seq) ? e.seq : null };
+    }
+    if (previous && (e.seq !== previous.seq + 1 || e.prev !== previous.hash)) return { reason: 'broken_chain', seq: e.seq };
     previous = e;
   }
   return null;
+}
+
+// The seq of the first entry in a node-signed slice that fails its own
+// hash, chain or node id (else the last entry's, for a head/anchor
+// mismatch), so two different tamperings at the same mirror head are two
+// breaks. null when no whole-number seq can be named.
+function failingSeq(message, nodeId) {
+  const entries = isObj(message) && Array.isArray(message.entries) ? message.entries : [];
+  const named = (e) => (isObj(e) && Number.isInteger(e.seq) && e.seq >= 0 ? e.seq : null);
+  let previous = null;
+  for (const e of entries) {
+    if (!isObj(e) || e.node_id !== nodeId) return named(e);
+    let hashOk = false;
+    try {
+      const { hash, ...rest } = e;
+      hashOk = entryHash(rest) === hash;
+    } catch {
+      hashOk = false;
+    }
+    if (!hashOk || (previous && (e.seq !== previous.seq + 1 || e.prev !== previous.hash))) return named(e);
+    previous = e;
+  }
+  return named(previous);
+}
+
+// The highest segment number ever opened: the current one, or one a fork
+// break recorded. A new fork opens the next number; records in a segment
+// above this were never acknowledged.
+function lastSegment(s) {
+  return s.breaks.reduce((max, b) => (Number.isInteger(b.segment) && b.segment > max ? b.segment : max), s.segment);
 }
 
 const sameHead = (a, b) => (a === null || b === null ? a === b : a.seq === b.seq && a.hash === b.hash);
@@ -378,7 +415,8 @@ class AuditMirror {
   _reconcileTail(nodeId, s, record) {
     if (this.tailClean.has(nodeId)) return false;
     const { lines, torn } = this._readSlices(nodeId);
-    const beyond = (r) => r.segment > s.segment || (r.segment === s.segment && (s.head === null || r.last_seq > s.head.seq));
+    const top = lastSegment(s);
+    const beyond = (r) => r.segment > top || (r.segment === s.segment && (s.head === null || r.last_seq > s.head.seq));
     let keep = lines.length;
     while (keep > 0 && lines[keep - 1].rec && beyond(lines[keep - 1].rec)) keep -= 1;
     const unacked = lines.slice(keep).map((l) => l.rec);
@@ -430,10 +468,14 @@ class AuditMirror {
       log.warn(`could not read the ${nodeId} mirror history: ${e.message}`);
       return null;
     }
-    const acked = (r) => r.segment < s.segment || (r.segment === s.segment && s.head !== null && r.last_seq <= s.head.seq);
+    const top = lastSegment(s);
+    const acked = (r) => (r.segment !== s.segment && r.segment <= top) || (r.segment === s.segment && s.head !== null && r.last_seq <= s.head.seq);
     const candidates = recs.filter((r) => acked(r) && (!isSeq(beforeSeq) || r.first_seq < beforeSeq));
     if (candidates.length === 0) return null;
-    const better = (r, best) => r.segment > best.segment || (r.segment === best.segment && r.last_seq >= best.last_seq);
+    // The current segment first (after a re-entry it need not be the
+    // highest numbered), then the most recently opened, then the newest.
+    const rank = (r) => (r.segment === s.segment ? Infinity : r.segment);
+    const better = (r, best) => rank(r) > rank(best) || (r.segment === best.segment && r.last_seq >= best.last_seq);
     const pick = candidates.reduce((best, r) => (better(r, best) ? r : best));
     return { segment: pick.segment, envelope: { ...pick.envelope } };
   }
@@ -498,7 +540,9 @@ class AuditMirror {
       // Past the signature: the node itself signed entries that fail their
       // own hash or chain. Anything else (a bad signature, a bad shape)
       // is refused and changes nothing.
-      if (TAMPERED.has(v.reason) && this._signedFor(envelope, nodeId)) return this._break(nodeId, { seq: null, reason: v.reason });
+      if (TAMPERED.has(v.reason) && this._signedFor(envelope, nodeId)) {
+        return this._break(nodeId, { seq: failingSeq(open(envelope).message, nodeId), reason: v.reason });
+      }
       log.warn(`an audit slice from ${nodeId} was refused: ${v.reason}`);
       return invalid();
     }
@@ -507,7 +551,7 @@ class AuditMirror {
     if (m.entries.length > this.pageLimit) return this._refuseSigned(nodeId, 'oversize_page');
     if (m.head.seq < 0 || (m.head.seq === 0 ? m.head.hash !== null : !isHash(m.head.hash))) return this._refuseSigned(nodeId, 'malformed_head');
     const problem = entriesProblem(m.entries);
-    if (problem) return this._break(nodeId, { seq: null, reason: problem });
+    if (problem) return this._break(nodeId, problem);
 
     const s = this._state(nodeId);
     if (m.entries.length === 0) {
@@ -568,30 +612,70 @@ class AuditMirror {
       if (last.seq === s.head.seq) return { outcome: 'empty', more };
       return this._accept(nodeId, envelope, m, 'append', more, () => {});
     }
-    if (last.seq < s.head.seq && this._storedHash(nodeId, s, last.seq) === last.hash) {
-      // Entries the mirror already holds, ending below its head: the node
-      // lost what came after (its signed head says so), or an old page was
-      // replayed. Either way the chain did not fork; the head stays.
+    // Entries the mirror already holds, ending below its head. Which it is
+    // depends on the node's signed head: behind ours, the node lost what
+    // came after (truncated); exactly ours, an old page was replayed. A
+    // signed head past ours (or at our seq with another hash) means the
+    // node's chain no longer holds our head, so it paged from its oldest
+    // entry and the rewrite is past this page: that is a fork, below.
+    const sameAsOurs = m.head.seq === s.head.seq && m.head.hash === s.head.hash;
+    if (last.seq < s.head.seq && (m.head.seq < s.head.seq || sameAsOurs) && this._storedHash(nodeId, s.segment, last.seq) === last.hash) {
       return this._break(nodeId, { seq: last.seq, reason: m.head.seq < s.head.seq ? 'truncated' : 'replay' });
     }
-    // The node's chain no longer continues the mirror head: a fork. Record
-    // it and start a new segment from the node's current chain.
-    const brk = { seq: first.seq, reason: 'fork', mirror_head: { ...s.head }, at: this._iso() };
-    const known = s.breaks.some((b) => b.reason === 'fork' && b.seq === brk.seq && sameHead(b.mirror_head, brk.mirror_head));
-    log.error(`audit chain break on ${nodeId}: fork at seq ${first.seq} (mirror head ${s.head.seq})`);
-    if (!known) this._alert('audit_chain_break', nodeId, { reason: 'fork', seq: first.seq });
+    return this._fork(nodeId, s, envelope, m, more);
+  }
+
+  // The node's chain no longer continues the mirror head: a fork. A fork
+  // already recorded from this mirror head at this seq, whose stored
+  // segment this page matches, is the node going back to a chain the
+  // mirror already holds: the mirror re-enters that segment at its stored
+  // head (no new segment, nothing appended), so a node alternating between
+  // chains cannot grow the mirror. Anything else opens the next segment.
+  _fork(nodeId, s, envelope, m, more) {
+    const first = m.entries[0];
+    const known = s.breaks.find((b) => b.reason === 'fork' && b.seq === first.seq && sameHead(b.mirror_head, s.head) && Number.isInteger(b.segment));
+    const reentry = known ? this._segmentHeadMatching(nodeId, known.segment, m.entries) : null;
+    if (reentry) {
+      log.warn(`audit chain on ${nodeId} went back to mirror segment ${known.segment} (seen before)`);
+      const next = structuredClone(s);
+      next.segment = known.segment;
+      next.head = reentry;
+      next.anchor = { seq: first.seq, prev: first.prev };
+      next.status = 'broken';
+      this.tailClean.delete(nodeId);
+      this._commit(nodeId, next);
+      return { outcome: 'chain_break', more: true };
+    }
+    const segment = lastSegment(s) + 1;
+    const brk = { seq: first.seq, reason: 'fork', mirror_head: { ...s.head }, at: this._iso(), segment };
+    log.error(`audit chain break on ${nodeId}: fork at seq ${first.seq} (mirror head ${s.head.seq}), segment ${segment}`);
+    this._alert('audit_chain_break', nodeId, { reason: 'fork', seq: first.seq });
     return this._accept(nodeId, envelope, m, 'chain_break', more, (n) => {
-      if (!known) pushCapped(n.breaks, brk, { keepFirst: true });
+      pushCapped(n.breaks, brk, { keepFirst: true });
       n.status = 'broken';
-      n.segment += 1;
+      n.segment = segment;
       n.anchor = { seq: first.seq, prev: first.prev };
     });
   }
 
-  // The hash of entry `seq` in the current segment as the mirror stored it,
-  // or null when no stored slice of this segment holds it.
-  _storedHash(nodeId, s, seq) {
-    const recs = this._readSlices(nodeId).lines.map((l) => l.rec).filter((r) => r && r.segment === s.segment && r.first_seq <= seq && seq <= r.last_seq);
+  // The stored head of `segment` when the page's entries agree with what the
+  // mirror holds there (the hash at the highest seq both have), else null.
+  _segmentHeadMatching(nodeId, segment, entries) {
+    const recs = this._readSlices(nodeId).lines.map((l) => l.rec).filter((r) => r && r.segment === segment);
+    if (recs.length === 0) return null;
+    const top = recs.reduce((best, r) => (r.last_seq > best.last_seq ? r : best));
+    const topEntry = entriesOf(top).find((e) => e.seq === top.last_seq);
+    if (!topEntry || !isHash(topEntry.hash)) return null;
+    const k = Math.min(entries[entries.length - 1].seq, top.last_seq);
+    const ours = entries.find((e) => e.seq === k);
+    if (!ours || this._storedHash(nodeId, segment, k) !== ours.hash) return null;
+    return { seq: topEntry.seq, hash: topEntry.hash };
+  }
+
+  // The hash of entry `seq` in `segment` as the mirror stored it, or null
+  // when no stored slice of that segment holds it.
+  _storedHash(nodeId, segment, seq) {
+    const recs = this._readSlices(nodeId).lines.map((l) => l.rec).filter((r) => r && r.segment === segment && r.first_seq <= seq && seq <= r.last_seq);
     for (let i = recs.length - 1; i >= 0; i -= 1) {
       const e = entriesOf(recs[i]).find((x) => x.seq === seq);
       if (e && isHash(e.hash)) return e.hash;
@@ -692,7 +776,8 @@ class AuditMirror {
 
   // Drops whole stored slices received more than retentionDays ago, but
   // never one that is evidence: the newest, the one holding the current
-  // head, the first of each segment (where a fork's new chain starts), one
+  // head, the first of each segment a fork break names (where that chain
+  // starts), one
   // holding a break's mirror head (the chain the node walked away from),
   // the slices either side of a gap, or a line it cannot read.
   prune(nodeId) {
@@ -704,11 +789,14 @@ class AuditMirror {
     if (recs.length <= 1) return 0;
     const cutoff = this.now() - this.retentionDays * DAY_MS;
     const keep = new Set([recs[recs.length - 1]]);
+    // The first slice of a segment a (capped) fork break opened: where that
+    // chain starts. Segments no break names any more are ordinary history.
+    const referenced = new Set(s.breaks.filter((b) => Number.isInteger(b.segment)).map((b) => b.segment));
     const firstOfSegment = new Set();
     for (const l of recs) {
       if (!firstOfSegment.has(l.rec.segment)) {
         firstOfSegment.add(l.rec.segment);
-        keep.add(l);
+        if (referenced.has(l.rec.segment)) keep.add(l);
       }
     }
     const breakHeads = new Set(s.breaks.filter((b) => b.mirror_head).map((b) => b.mirror_head.hash));
