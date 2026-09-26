@@ -262,6 +262,53 @@ describe('conflicting answers', () => {
   });
 });
 
+// Integration ruling INT-detour: C5's detour router acts only on the first
+// answer to a routing question, so a second, different answer over a contact
+// channel must not open a C4 conflict follow-up whose "change" does nothing.
+describe('ContactRouter: a second answer to a detour routing question', () => {
+  const { DetourRouter } = require('../src/cases/detours/router');
+
+  it('leaves the detour as routed, opens no follow-up, journals nothing misleading, and acks that the first answer stands', async () => {
+    const w = await world();
+    const detours = new DetourRouter({ runtime: w.runtime });
+    const proposed = await detours.propose(w.lot.id, { summary: 'Collect kitchen builder quotes to pick a builder', reason: 'Not about selling the lot' });
+    assert.strictEqual(proposed.ok, true, JSON.stringify(proposed));
+    const detourId = proposed.detour.id;
+    const q = w.runtime.questions(w.lot.id).get(proposed.detour.questionId);
+    assert.strictEqual(q.payload.type, 'detour');
+    assert.notStrictEqual(q.payload.mcpAnswerable, false, 'routing questions are answerable off the app');
+    const attach = q.options.find((o) => q.payload.targets[o.id] === w.kitchen.id);
+    assert.ok(attach, `an attach option to the kitchen case: ${JSON.stringify(q.options)}`);
+    const e = w.entry(w.lot, q);
+    await w.router.deliver('telegram', [e]);
+
+    await w.runtime.answerQuestion(w.lot.id, q.id, { channel: 'in-app', optionId: attach.id });
+    await detours.reconcile(w.lot.id);
+    const before = detours.list(w.lot.id).detours.find((d) => d.id === detourId);
+    assert.strictEqual(before.status, 'attached');
+    const journal = () => {
+      const dir = path.join(w.runtime.getCase(w.lot.id).dir, 'journal');
+      return fs.readdirSync(dir).sort().map((n) => fs.readFileSync(path.join(dir, n), 'utf8'));
+    };
+    const journalBefore = journal();
+
+    const r = await w.adapters.get('telegram').reply(e.token, { optionId: 'decline' });
+    assert.deepStrictEqual(r, {
+      ok: true,
+      outcome: 'first-stands',
+      ackText: `${q.id} was already answered "${attach.label}"; that answer stands. To change it, open the case in the app.`
+    });
+    assert.deepStrictEqual(w.runtime.questions(w.lot.id).open().filter((x) => x.payload.type === 'conflict'), [], 'no conflict follow-up');
+    assert.strictEqual(w.runtime.questions(w.lot.id).get(q.id).answer.optionId, attach.id, 'the first answer is never overwritten');
+
+    await detours.reconcile(w.lot.id);
+    assert.strictEqual(detours.list(w.lot.id).detours.find((d) => d.id === detourId).status, 'attached');
+    assert.ok(w.runtime.getCase(w.lot.id).related.some((x) => x.id === w.kitchen.id));
+    assert.ok(w.runtime.getCase(w.kitchen.id).related.some((x) => x.id === w.lot.id));
+    assert.deepStrictEqual(journal(), journalBefore, 'no journal line claims the answer changed');
+  });
+});
+
 describe('ContactRouter.sendExternal', () => {
   const gateStub = (calls) => () => ({
     gateLeaves: (payload, opts) => {

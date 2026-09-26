@@ -467,6 +467,14 @@ class ContactRouter {
     }
     if (!record.answer) return { ok: false, outcome: 'closed', ack: `${record.id} is already closed.` };
     if (sameAnswer(record, clean)) return { ok: true, outcome: 'already', ack: 'Already recorded.' };
+    // Ruling INT-detour: the C5 detour router acts only on the first answer
+    // to a routing question (payload.type 'detour'), and conflictAnswered
+    // cannot re-route one. A different second answer gets no follow-up: the
+    // first answer stands, and the owner changes it in the app.
+    if (record.payload?.type === 'detour') {
+      const first = cut(answerLabel(record, record.answer), 80);
+      return { ok: true, outcome: 'first-stands', ack: `${record.id} was already answered "${first}"; that answer stands. To change it, open the case in the app.` };
+    }
     try {
       await this._conflict(channelId, caseMeta, record, clean);
     } catch (err) {

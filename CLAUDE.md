@@ -331,8 +331,15 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage5-detours.md`.
   chain's first id; once any detour of that chain is attached or created,
   the others get a `superseded` row, their open routing question is closed
   and their `pending:` blocker is removed.
-- Today a routing question is answered in the app, either from the case panel
-  (`case:resolveDetour`) or by an agent session's `Detour.resolve`. Answering
+- A routing question can be answered from any channel: in the app, from the
+  case panel (`case:resolveDetour`) or by an agent session's
+  `Detour.resolve`, or over any C4 contact channel (Telegram, Discord, email,
+  SMS, voice, the phone app). A contact-channel answer is applied at the next
+  turn start, `case:detours` or `case:resolveDetour`. The first answer
+  stands: a later, different answer gets no C4 conflict follow-up, only an ack
+  saying the first answer stands (`contact.js` `_apply`, ruling
+  INT-detour), and changes are made in the app. C5 has no re-route API, so
+  changing a routing already applied is a manual step there. Answering
   over MCP is designed but not yet wired up: `src/mcp/stdio-server.js`'s
   `delegate` always throws (no agent session starts there yet), so it isn't a
   live path today. Future sources are `delegate` and C7's front-door
@@ -376,8 +383,8 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage4-channels.md`.
   one stands, on the channel that gave the second answer
   (`contact.js` `_conflict`/`conflictFact`).
 - Owner decision (M22): a question C2 marks `mcpAnswerable:false` — a
-  budget-grant, a budget-daily, a direction question, or a commit-failed
-  question — is only
+  budget-grant, a budget-daily, a direction question, a commit-failed
+  question, or a wakeups-failing briefing — is only
   answered in the app or from the owner's paired phone. Every other channel
   (Telegram, Discord, email, SMS, voice) gets "Answer this in the app"
   instead of options or buttons; approvals follow the same rule and are
