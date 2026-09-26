@@ -101,3 +101,45 @@ describe('mcp module graph', () => {
     }
   });
 });
+
+describe('mcp module graph, courier branch', () => {
+  it('mcp with the service running routes through the courier and never loads the agent core', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-mcp-courier-graph-'));
+    const dataDir = path.join(base, 'data');
+    const configDir = path.join(base, 'config');
+    fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+    for (const d of ['approvals', 'approvals/inbox', 'approvals/outbox']) fs.mkdirSync(path.join(dataDir, d), { recursive: true, mode: 0o700 });
+    fs.mkdirSync(path.join(configDir, 'runbooks'), { recursive: true, mode: 0o755 });
+    if (process.platform !== 'win32') { fs.chmodSync(base, 0o755); fs.chmodSync(configDir, 0o755); fs.chmodSync(path.join(configDir, 'runbooks'), 0o755); }
+    fs.writeFileSync(path.join(configDir, 'node.yaml'), 'name: web-01\nprofile: runbook\n', { mode: 0o644 });
+    const adminUid = typeof process.geteuid === 'function' ? process.geteuid() : 0;
+    try {
+      // The pidfile names the child itself, so the service looks live and
+      // runMcp takes the courier branch.
+      const script = `
+        const fs = require('fs');
+        const path = require('path');
+        const { PassThrough } = require('stream');
+        const dataDir = process.env.KL_GRAPH_DATA_DIR;
+        fs.writeFileSync(path.join(dataDir, 'service.pid'), String(process.pid));
+        const { runMcp } = require('./src/service/commands/mcp');
+        runMcp({ dataDir, io: { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough() },
+          deps: { configDir: process.env.KL_GRAPH_CONFIG_DIR, adminUid: Number(process.env.KL_GRAPH_ADMIN_UID) } })
+          .catch((err) => { process.stderr.write(String(err && err.stack || err)); process.exit(1); });
+        setTimeout(() => { process.stdout.write(JSON.stringify(Object.keys(require.cache))); process.exit(0); }, 1000);
+      `;
+      const out = execFileSync(process.execPath, ['-e', script], {
+        cwd: ROOT,
+        env: { ...process.env, KL_GRAPH_DATA_DIR: dataDir, KL_GRAPH_CONFIG_DIR: configDir, KL_GRAPH_ADMIN_UID: String(adminUid), KING_LOUIE_LOG_LEVEL: 'silent' }
+      }).toString();
+      const loaded = JSON.parse(out).map((p) => path.relative(ROOT, p).split(path.sep).join('/'));
+      assert.ok(loaded.includes('src/fleet/courier-client.js'), 'the courier branch ran');
+      assert.ok(!loaded.includes('src/approvals/service-wiring.js'), 'no standalone approvals: the service owns them');
+      const forbidden = FORBIDDEN.filter((f) => f !== 'src/mcp/');
+      const bad = loaded.filter((p) => forbidden.some((f) => p.startsWith(f)) || p.startsWith('src/core/'));
+      assert.deepStrictEqual(bad, []);
+    } finally {
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+});

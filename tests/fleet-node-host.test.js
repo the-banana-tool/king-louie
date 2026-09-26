@@ -159,3 +159,239 @@ describe('the courier RPC path', () => {
     assert.equal(fleet.jobManager.getJob(job.job_id).status, 'cancelled');
   });
 });
+
+// Fix round 1 (Task 13 review).
+describe('fleet node shutdown and startup failure (review items 2, 5, 6)', () => {
+  const { startFleetNode } = require('../src/fleet/start');
+  const { ensureServicePaths, ensurePrivateDir } = require('../src/platform/paths');
+  const FAKE_IDENTITY = { publicKey: Buffer.alloc(32), nodeId: 'node-test' };
+  const allOff = { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false, desktopBridge: false };
+
+  function agentLayout() {
+    const l = layout();
+    fs.writeFileSync(path.join(l.configDir, 'node.yaml'), 'name: web-01\nprofile: agent\npolicy:\n  max_concurrent_jobs: 1\n', { mode: 0o644 });
+    ensureServicePaths(l.dataDir);
+    const workspace = path.join(l.dataDir, 'workspace');
+    ensurePrivateDir(workspace);
+    return { ...l, workspace };
+  }
+
+  function fakeRelay({ failRegister = false } = {}) {
+    return {
+      registerMethod: () => { if (failRegister) throw new Error('register boom'); },
+      on: () => {},
+      off: () => {},
+      call: async () => ({})
+    };
+  }
+
+  function stubCore(order) {
+    return {
+      start: async () => {},
+      whenListenersSettled: async () => {},
+      getGatewayServer: () => ({ wss: null }),
+      getWebhookServer: () => ({ httpServer: null }),
+      shutdown: async () => { order.push('core.shutdown'); },
+      context: { getAgentExecutorAdapter: () => ({ execute: async () => ({}) }), getAgent: () => ({ id: 'main' }), listAgents: () => [{ id: 'main' }] }
+    };
+  }
+
+  // Replaces src/core and startApprovals for one agent-profile start, and
+  // tracks every interval created while it runs.
+  async function withStubs(order, { relay }, fn) {
+    const coreEntry = require.resolve('../src/core');
+    const wiringEntry = require.resolve('../src/approvals/service-wiring');
+    const saved = { core: require.cache[coreEntry], wiring: require.cache[wiringEntry] };
+    require.cache[coreEntry] = { id: coreEntry, filename: coreEntry, loaded: true, exports: { createCore: () => stubCore(order) } };
+    require.cache[wiringEntry] = {
+      id: wiringEntry, filename: wiringEntry, loaded: true,
+      exports: {
+        startApprovals: async () => ({
+          phoneApprover: null, auditLedger: null, relayClient: relay, approverStore: null, identity: FAKE_IDENTITY, courierPump: null,
+          stop: async () => { order.push('approvals.stop'); }
+        })
+      }
+    };
+    const realSetInterval = global.setInterval;
+    const realClearInterval = global.clearInterval;
+    const live = new Set();
+    global.setInterval = (...args) => { const t = realSetInterval(...args); live.add(t); return t; };
+    global.clearInterval = (t) => { live.delete(t); return realClearInterval(t); };
+    try {
+      await fn();
+    } finally {
+      global.setInterval = realSetInterval;
+      global.clearInterval = realClearInterval;
+      for (const [entry, key] of [[coreEntry, 'core'], [wiringEntry, 'wiring']]) {
+        if (saved[key]) require.cache[entry] = saved[key]; else delete require.cache[entry];
+      }
+    }
+    return live;
+  }
+
+  it('the agent profile stops the fleet node (link methods first) before the core shuts down', async () => {
+    const l = agentLayout();
+    const order = [];
+    const live = await withStubs(order, { relay: fakeRelay() }, async () => {
+      const running = await loadProfile('agent').start({ dataDir: l.dataDir, features: allOff, ports: {}, workspace: l.workspace, adminUid: EUID, configDir: l.configDir });
+      assert.ok(running.fleet.fleetService, 'a relay link hosts the fleet link methods');
+      assert.ok(running.fleet.delegateSessions, 'the agent profile hosts delegate sessions');
+      const fleetService = running.fleet.fleetService;
+      const stopService = fleetService.stop.bind(fleetService);
+      fleetService.stop = () => { order.push('fleetService.stop'); stopService(); };
+      await running.stop();
+      assert.equal(fleetService.stopped, true);
+    });
+    assert.deepEqual(order, ['fleetService.stop', 'core.shutdown', 'approvals.stop']);
+    assert.equal(live.size, 0, 'no interval (delegate sweep, courier pump) outlives stop()');
+  });
+
+  it('a fleet node that fails to start leaves nothing running, and the agent profile still stops the core and approvals', async () => {
+    const l = agentLayout();
+    const order = [];
+    const live = await withStubs(order, { relay: fakeRelay({ failRegister: true }) }, async () => {
+      await assert.rejects(
+        loadProfile('agent').start({ dataDir: l.dataDir, features: allOff, ports: {}, workspace: l.workspace, adminUid: EUID, configDir: l.configDir }),
+        /register boom/
+      );
+    });
+    assert.deepEqual(order, ['core.shutdown', 'approvals.stop']);
+    assert.equal(live.size, 0, 'the delegate sweep and any pump are stopped by startFleetNode itself');
+  });
+
+  function directNode(l, extra = {}) {
+    const pump = new CourierPump({ dataDir: l.dataDir, relayClient: null, identity: FAKE_IDENTITY });
+    const nodeConfig = { name: 'web-01', profile: 'runbook', runbooksDir: path.join(l.configDir, 'runbooks'), policy: { allowed_roots: [], max_concurrent_jobs: 2 } };
+    return startFleetNode({
+      dataDir: l.dataDir, nodeConfig, adminUid: EUID, deps: { readGuiStatus: null, ...extra },
+      approvals: { courierPump: pump, identity: FAKE_IDENTITY, relayClient: null, phoneApprover: null, auditLedger: null }
+    });
+  }
+  const { CourierPump } = require('../src/approvals/courier');
+
+  it('stop() waits for running job executions to settle', async () => {
+    const l = layout();
+    const fleet = await directNode(l);
+    let settled = false;
+    fleet.handler.jobRuns.set('job-x', new Promise((r) => setTimeout(r, 150)).then(() => { settled = true; }));
+    await fleet.stop();
+    assert.equal(settled, true);
+  });
+
+  it('stop() gives up waiting after its bound and says so', async () => {
+    const l = layout();
+    const warnings = [];
+    const remove = addSink((r) => { if (r.level === 'warn') warnings.push(r.message); });
+    try {
+      const fleet = await directNode(l, { stopWaitMs: 50 });
+      fleet.handler.jobRuns.set('job-x', new Promise(() => {}));
+      const t0 = Date.now();
+      await fleet.stop();
+      assert.ok(Date.now() - t0 < 2000);
+      assert.ok(warnings.some((m) => /still running after 50 ms/.test(m)), warnings.join('\n'));
+    } finally {
+      remove();
+    }
+  });
+});
+
+describe('CourierFleetClient transport errors (review item 4)', () => {
+  const { CourierError } = require('../src/approvals/courier');
+  const client = (err) => new CourierFleetClient({ courier: { callService: async () => { throw err; } } });
+
+  it('maps unavailable and closed to service_unavailable, timeout to a coded timeout with retry_after', async () => {
+    for (const code of ['unavailable', 'closed']) {
+      await assert.rejects(client(new CourierError(code, 'x')).call('get_state', {}), (err) => err instanceof ToolError && err.code === 'service_unavailable');
+    }
+    await assert.rejects(client(new CourierError('timeout', 'x')).call('get_state', {}),
+      (err) => err instanceof ToolError && err.code === 'timeout' && err.data.retry_after === 5);
+    await assert.rejects(client(new CourierError('unknown_method', 'x')).call('get_state', {}), (err) => err instanceof ToolError && err.code === 'unknown_method');
+    await assert.rejects(client(new Error('C:\\secret\\path')).call('get_state', {}),
+      (err) => err instanceof ToolError && err.code === 'internal' && !/secret/.test(err.message));
+  });
+
+  it('the service answers a handler\'s plain error as a coded internal error without its text', async () => {
+    const { courierRpcHandler } = require('../src/fleet/start');
+    const rpc = courierRpcHandler({ call: async () => { throw new Error('ENOENT /etc/secret'); } });
+    assert.deepEqual(await rpc('fleet.get_state', { args: {} }), { tool_error: { code: 'internal', message: 'internal error', data: {} } });
+  });
+});
+
+describe('mcp run as root (review item 7)', () => {
+  const { assertCourierDirsSafe } = require('../src/service/commands/mcp');
+  const asRoot = { getuid: () => 0 };
+  const IS_ROOT = typeof process.getuid === 'function' && process.getuid() === 0;
+
+  function courierDirs(l) {
+    for (const d of ['approvals', 'approvals/inbox', 'approvals/outbox']) fs.mkdirSync(path.join(l.dataDir, d), { recursive: true, mode: 0o700 });
+  }
+
+  it('is a no-op when not root', () => {
+    const l = layout();
+    assertCourierDirsSafe(l.dataDir, { getuid: () => 1000 });
+  });
+
+  it('as root, refuses missing courier directories and accepts real ones owned by the data dir owner', () => {
+    const l = layout();
+    assert.throws(() => assertCourierDirsSafe(l.dataDir, asRoot), /refusing to run mcp as root: .*approvals.* does not exist/);
+    courierDirs(l);
+    assertCourierDirsSafe(l.dataDir, asRoot);
+  });
+
+  it('as root, refuses an outbox that is a link or junction', () => {
+    const l = layout();
+    courierDirs(l);
+    const outbox = path.join(l.dataDir, 'approvals', 'outbox');
+    fs.rmSync(outbox, { recursive: true });
+    const elsewhere = path.join(l.base, 'elsewhere');
+    fs.mkdirSync(elsewhere);
+    fs.symlinkSync(elsewhere, outbox, 'junction');
+    assert.throws(() => assertCourierDirsSafe(l.dataDir, asRoot), /outbox is not a real directory/);
+  });
+
+  it('as root, refuses a courier directory owned by someone other than the data dir owner', { skip: !IS_ROOT && 'needs POSIX root to chown' }, () => {
+    const l = layout();
+    courierDirs(l);
+    fs.chownSync(l.dataDir, 1000, 1000);
+    fs.chownSync(path.join(l.dataDir, 'approvals'), 1000, 1000);
+    fs.chownSync(path.join(l.dataDir, 'approvals', 'inbox'), 1000, 1000);
+    assert.throws(() => assertCourierDirsSafe(l.dataDir), /outbox is owned by uid 0, not the data dir's owner \(uid 1000\)/);
+  });
+
+  it('as root, runMcp refuses before writing anything when the courier directories are unsafe', async () => {
+    const l = layout();
+    fs.writeFileSync(path.join(l.dataDir, 'service.pid'), String(process.pid));
+    const { runMcp } = require('../src/service/commands/mcp');
+    await assert.rejects(
+      runMcp({ dataDir: l.dataDir, io: { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough() }, deps: { configDir: l.configDir, adminUid: EUID, getuid: () => 0 } }),
+      /refusing to run mcp as root/
+    );
+    assert.equal(fs.existsSync(path.join(l.dataDir, 'approvals')), false, 'nothing was created');
+  });
+
+  it('as root, every request file and the inbox go to the data dir owner as they are written', { skip: !IS_ROOT && 'needs POSIX root to chown' }, async () => {
+    const l = layout();
+    courierDirs(l);
+    for (const d of ['', 'approvals', 'approvals/inbox', 'approvals/outbox']) fs.chownSync(path.join(l.dataDir, d), 1000, 1000);
+    fs.writeFileSync(path.join(l.dataDir, 'service.pid'), String(process.pid));
+    const { runMcp } = require('../src/service/commands/mcp');
+    const stdin = new PassThrough();
+    runMcp({ dataDir: l.dataDir, io: { stdin, stdout: new PassThrough(), stderr: new PassThrough() }, deps: { configDir: l.configDir, adminUid: EUID } }).catch(() => {});
+    try {
+      stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'get_state', arguments: {} } })}\n`);
+      const outbox = path.join(l.dataDir, 'approvals', 'outbox');
+      let files = [];
+      for (let i = 0; i < 200 && files.length === 0; i += 1) {
+        files = fs.readdirSync(outbox).filter((n) => /^\d+-[a-f0-9]{8}\.json$/.test(n));
+        if (files.length === 0) await new Promise((r) => setTimeout(r, 10));
+      }
+      assert.equal(files.length, 1);
+      assert.equal(fs.lstatSync(path.join(outbox, files[0])).uid, 1000, 'the service account can read the request');
+      const inboxes = fs.readdirSync(path.join(l.dataDir, 'approvals', 'inbox'));
+      assert.equal(inboxes.length, 1);
+      assert.equal(fs.lstatSync(path.join(l.dataDir, 'approvals', 'inbox', inboxes[0])).uid, 1000, 'the service account can write the reply');
+    } finally {
+      stdin.end();
+    }
+  });
+});

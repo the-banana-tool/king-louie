@@ -13,6 +13,10 @@ const { CourierPump } = require('../approvals/courier');
 
 const log = createLogger('fleet/start');
 
+// How long stop() waits for running job executions and delegate turns to
+// settle after cancelling them, before the core is shut down under them.
+const STOP_WAIT_MS = 10000;
+
 // F5's gui status reader (src/gui/status.js), when F5 has merged.
 function defaultReadGuiStatus() {
   try {
@@ -25,6 +29,9 @@ function defaultReadGuiStatus() {
 }
 
 // The service side of CourierFleetClient: fleet.<tool> { args } → the handler.
+// Always as the node's own local MCP client (STDIO_ORIGIN): an `origin` in
+// the request file is never read. An error that is not a ToolError can name
+// paths and internals, so it is logged here and answered as `internal`.
 function courierRpcHandler(handler) {
   return async (method, params = {}) => {
     if (typeof method !== 'string' || !method.startsWith('fleet.')) {
@@ -34,12 +41,27 @@ function courierRpcHandler(handler) {
       return { result: await handler.call(method.slice('fleet.'.length), params.args || {}, { origin: STDIO_ORIGIN }) };
     } catch (err) {
       if (err instanceof ToolError) return { tool_error: { code: err.code, message: err.message, data: err.data || {} } };
-      throw err;
+      log.warn(`courier ${method} failed: ${err && err.message}`);
+      return { tool_error: { code: 'internal', message: 'internal error', data: {} } };
     }
   };
 }
 
+// Resolves once every promise has settled or after `ms`, whichever is first;
+// true when all settled.
+async function settleWithin(promises, ms) {
+  if (promises.length === 0) return true;
+  let timer;
+  const timedOut = new Promise((resolve) => { timer = setTimeout(() => resolve(false), ms); });
+  try {
+    return await Promise.race([Promise.allSettled(promises).then(() => true), timedOut]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function startFleetNode({ dataDir, nodeConfig, approvals, core = null, adminUid, geteuid, deps = {} } = {}) {
+  const stopWaitMs = deps.stopWaitMs === undefined ? STOP_WAIT_MS : deps.stopWaitMs;
   const runbookEngine = new RunbookEngine({
     runbooksDir: nodeConfig.runbooksDir,
     allowedRoots: nodeConfig.policy.allowed_roots,
@@ -51,33 +73,57 @@ async function startFleetNode({ dataDir, nodeConfig, approvals, core = null, adm
   const jobManager = new JobManager({ maxConcurrentJobs: nodeConfig.policy.max_concurrent_jobs });
 
   let delegateSessions = null;
-  if (nodeConfig.profile === 'agent' && core) {
-    // eslint-disable-next-line global-require -- agent profile only (it loads the provider registry)
-    const { DelegateSessions } = require('./delegate-sessions');
-    delegateSessions = new DelegateSessions({
-      core, nodeConfig, jobManager, auditLedger: approvals.auditLedger, leaseManager: deps.leaseManager || null
-    });
-  }
-
-  const readGuiStatus = deps.readGuiStatus === undefined ? defaultReadGuiStatus() : deps.readGuiStatus;
-  const gui = readGuiStatus ? () => readGuiStatus({ dataDir }) : null;
-  const handler = new FleetToolHandler({
-    nodeConfig, runbookEngine, jobManager, approver: approvals.phoneApprover, auditLedger: approvals.auditLedger, delegateSessions, gui
-  });
-
-  const bootId = crypto.randomBytes(16).toString('hex');
   let fleetService = null;
-  if (approvals.relayClient) {
-    fleetService = new NodeFleetService({ handler, relayClient: approvals.relayClient, nodeConfig: { ...nodeConfig, nodeId: approvals.identity.nodeId }, bootId }).start();
-  }
-
   let courierPump = approvals.courierPump || null;
   let ownPump = false;
-  if (courierPump) {
-    courierPump.setRpcHandler(courierRpcHandler(handler));
-  } else {
-    courierPump = new CourierPump({ dataDir, relayClient: null, identity: approvals.identity, rpcHandler: courierRpcHandler(handler) }).start();
-    ownPump = true;
+  let rpcInstalled = false;
+  // Undoes whatever has been started so far; used by stop() and by a
+  // startup that fails partway (nothing may be left running either way).
+  const teardown = () => {
+    if (fleetService) fleetService.stop();
+    if (delegateSessions) delegateSessions.stop();
+    if (courierPump && ownPump) courierPump.stop();
+    else if (courierPump && rpcInstalled) courierPump.setRpcHandler(null);
+    for (const jobId of [...jobManager.jobs.keys()]) jobManager.cancelJob(jobId);
+  };
+
+  let handler;
+  const bootId = crypto.randomBytes(16).toString('hex');
+  try {
+    if (nodeConfig.profile === 'agent' && core) {
+      // eslint-disable-next-line global-require -- agent profile only (it loads the provider registry)
+      const { DelegateSessions } = require('./delegate-sessions');
+      delegateSessions = new DelegateSessions({
+        core, nodeConfig, jobManager, auditLedger: approvals.auditLedger, leaseManager: deps.leaseManager || null
+      });
+    }
+
+    const readGuiStatus = deps.readGuiStatus === undefined ? defaultReadGuiStatus() : deps.readGuiStatus;
+    const gui = readGuiStatus ? () => readGuiStatus({ dataDir }) : null;
+    handler = new FleetToolHandler({
+      nodeConfig, runbookEngine, jobManager, approver: approvals.phoneApprover, auditLedger: approvals.auditLedger, delegateSessions, gui
+    });
+
+    if (approvals.relayClient) {
+      fleetService = new NodeFleetService({ handler, relayClient: approvals.relayClient, nodeConfig: { ...nodeConfig, nodeId: approvals.identity.nodeId }, bootId });
+      fleetService.start();
+    }
+
+    if (courierPump) {
+      courierPump.setRpcHandler(courierRpcHandler(handler));
+      rpcInstalled = true;
+    } else {
+      courierPump = new CourierPump({ dataDir, relayClient: null, identity: approvals.identity, rpcHandler: courierRpcHandler(handler) });
+      ownPump = true;
+      courierPump.start();
+    }
+  } catch (err) {
+    try {
+      teardown();
+    } catch (teardownErr) {
+      log.error(`fleet node teardown after a failed start also failed: ${teardownErr.message}`);
+    }
+    throw err;
   }
   log.info('fleet node ready', { profile: nodeConfig.profile, runbooks: runbookEngine.runbooks.size, delegate: Boolean(delegateSessions), link: Boolean(fleetService) });
 
@@ -89,14 +135,18 @@ async function startFleetNode({ dataDir, nodeConfig, approvals, core = null, adm
     fleetService,
     courierPump,
     bootId,
+    // Stops taking work (link methods refuse, the courier handler is
+    // removed), cancels every job, then waits (bounded) for running job
+    // executions and delegate turns to settle, so the core is not shut down
+    // underneath them.
     async stop() {
-      if (fleetService) fleetService.stop();
-      if (delegateSessions) delegateSessions.stop();
-      if (ownPump) courierPump.stop();
-      else courierPump.setRpcHandler(null);
-      for (const jobId of [...jobManager.jobs.keys()]) jobManager.cancelJob(jobId);
+      teardown();
+      const running = [...handler.jobRuns.values(), ...(delegateSessions ? delegateSessions.turns.values() : [])];
+      if (!(await settleWithin(running, stopWaitMs))) {
+        log.warn(`fleet node stop: ${running.length} job run(s) or delegate turn(s) still running after ${stopWaitMs} ms; shutting down anyway`);
+      }
     }
   };
 }
 
-module.exports = { startFleetNode, courierRpcHandler };
+module.exports = { startFleetNode, courierRpcHandler, STOP_WAIT_MS };

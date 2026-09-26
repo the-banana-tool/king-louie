@@ -337,3 +337,84 @@ describe('CourierPump: enroll.done reopens the code on a failed relay call (fix 
     assert.equal(pump.routeFor('enroll.claim', { code_id: codeId }), null);
   });
 });
+
+// Fleet stage 4 Task 13 review (ruling T13-fresh): a courier RPC runs only
+// for a live producer, with a reply_to, while the request is fresh.
+describe('courier RPC freshness (T13-fresh)', () => {
+  function rpcPump({ isAlive } = {}) {
+    const dir = dataDir();
+    const calls = [];
+    const pump = new CourierPump({
+      dataDir: dir, relayClient: fakeRelayClient(), identity: testNodeIdentity(), pollMs: 60000,
+      rpcHandler: async (method, params) => { calls.push([method, params]); return { ok: true }; },
+      ...(isAlive ? { isAlive } : {})
+    });
+    fs.mkdirSync(pump.outbox, { recursive: true });
+    fs.mkdirSync(pump.inboxRoot, { recursive: true });
+    return { dir, pump, calls };
+  }
+
+  function drop(pump, { stamp = Date.now(), inbox = `p-${process.pid}-abcdef01`, replyTo, mkInbox = true } = {}) {
+    if (mkInbox) fs.mkdirSync(path.join(pump.inboxRoot, inbox), { recursive: true });
+    const reply = replyTo === undefined ? { inbox, key: 'a'.repeat(16) } : replyTo;
+    fs.writeFileSync(path.join(pump.outbox, `${stamp}-deadbeef.json`), JSON.stringify({ method: 'fleet.run_runbook', params: { args: {} }, reply_to: reply }));
+  }
+
+  it('a fresh request from a live producer runs', async () => {
+    const { pump, calls } = rpcPump();
+    drop(pump);
+    await pump.pollOnce();
+    assert.equal(calls.length, 1);
+  });
+
+  it('a request older than 60 s never runs (a day-old file left at startup)', async () => {
+    const { pump, calls } = rpcPump();
+    drop(pump, { stamp: Date.now() - 24 * 60 * 60 * 1000 });
+    drop(pump, { stamp: Date.now() - 61000, inbox: `p-${process.pid}-abcdef02` });
+    await pump.pollOnce();
+    assert.deepEqual(calls, []);
+    assert.deepEqual(fs.readdirSync(pump.outbox), [], 'dropped, not retried');
+  });
+
+  it('a request whose producer is dead never runs', async () => {
+    const { pump, calls } = rpcPump({ isAlive: (pid) => pid === process.pid });
+    drop(pump, { inbox: 'p-999999-abcdef01' });
+    await pump.pollOnce();
+    assert.deepEqual(calls, []);
+  });
+
+  it('a request with a null reply_to, or whose inbox is missing, never runs', async () => {
+    const { pump, calls } = rpcPump();
+    drop(pump, { replyTo: null, mkInbox: false });
+    await pump.pollOnce();
+    drop(pump, { mkInbox: false, inbox: `p-${process.pid}-abcdef09` });
+    await pump.pollOnce();
+    assert.deepEqual(calls, []);
+  });
+
+  it('a request whose inbox is a link or junction never runs', async () => {
+    const { dir, pump, calls } = rpcPump();
+    const elsewhere = path.join(dir, 'elsewhere');
+    fs.mkdirSync(elsewhere);
+    const inbox = `p-${process.pid}-abcdef03`;
+    fs.symlinkSync(elsewhere, path.join(pump.inboxRoot, inbox), 'junction');
+    drop(pump, { inbox, mkInbox: false });
+    await pump.pollOnce();
+    assert.deepEqual(calls, []);
+  });
+
+  it('a producer never posts a file the pump could pick up before it is complete', () => {
+    const dir = dataDir();
+    const seen = [];
+    const courier = new FileCourier({
+      dataDir: dir,
+      onPathWritten: (p) => { if (p.includes('outbox')) seen.push({ p, visible: fs.readdirSync(path.dirname(p)).filter((n) => /^\d+-[a-f0-9]{8}\.json$/.test(n)) }); }
+    }).start();
+    cleanups.push(() => courier.stop());
+    courier.notify('fleet.get_state', { args: {} });
+    const posted = seen.filter((s) => s.p.endsWith('.json.new'));
+    assert.equal(posted.length, 1, 'the request is reported under its staging name');
+    assert.deepEqual(posted[0].visible, [], 'and is not yet visible to the pump');
+    assert.equal(fs.readdirSync(courier.outbox).filter((n) => /^\d+-[a-f0-9]{8}\.json$/.test(n)).length, 1);
+  });
+});

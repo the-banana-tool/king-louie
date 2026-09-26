@@ -30,6 +30,9 @@ const MSG_FILE_RE = /^m-\d+-[a-f0-9]{8}\.json$/;
 const INBOX_DIR_RE = /^p-(\d+)-[a-f0-9]{8}$/;
 const KEY_RE = /^[a-f0-9]{16}$/;
 const NOT_RUNNING = 'the King Louie service is not running on this node';
+// How far (by its file name's timestamp) a courier RPC may be from now and
+// still run (ruling T13-fresh).
+const RPC_MAX_AGE_MS = 60000;
 // Methods the pump forwards only with an envelope signed by this node, and
 // the message type each must carry (message.submit: any node-signed type).
 const SIGNED_METHODS = {
@@ -186,11 +189,21 @@ class FileCourier extends EventEmitter {
     return Boolean(link && link.connected === true);
   }
 
+  // Written under a name the pump never matches (OUTBOX_FILE_RE), reported
+  // (a root-run `mcp` hands it to the service account there), and only then
+  // renamed into place, so the pump can never see a file it cannot read yet.
   _post(method, params, replyTo) {
     const name = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}.json`;
     const file = path.join(this.outbox, name);
-    writeFileAtomic(file, `${JSON.stringify({ method, params, reply_to: replyTo })}\n`);
-    this.onPathWritten(file);
+    const staged = `${file}.new`;
+    writeFileAtomic(staged, `${JSON.stringify({ method, params, reply_to: replyTo })}\n`);
+    try {
+      this.onPathWritten(staged);
+      fs.renameSync(staged, file);
+    } catch (err) {
+      try { fs.unlinkSync(staged); } catch { /* already gone */ }
+      throw err;
+    }
   }
 
   call(method, params = {}, { timeoutMs = 10000 } = {}) {
@@ -398,7 +411,30 @@ class CourierPump {
   // { method: string, params: object, reply_to: null | { inbox: string, key: string } }
   // is dropped and logged, never dispatched to relayClient/rpcHandler and
   // never used to build a path.
-  async _handle(entry) {
+  // A courier RPC (anything handed to rpcHandler) runs only for a producer
+  // that is still there to read the answer, and only while the request is
+  // fresh: a file left in the outbox (a crashed producer, a stopped service)
+  // must never run later, e.g. at the next startup (ruling T13-fresh).
+  // `name` is the outbox file name the entry was read from. Returns why the
+  // request is dropped, or null.
+  _rpcRequestStale(replyTo, name) {
+    if (!replyTo) return 'no reply_to';
+    const dirMatch = INBOX_DIR_RE.exec(replyTo.inbox);
+    if (!dirMatch || !KEY_RE.test(replyTo.key)) return 'malformed reply_to';
+    let lst;
+    try {
+      lst = fs.lstatSync(path.join(this.inboxRoot, replyTo.inbox));
+    } catch {
+      return 'the producer inbox is gone';
+    }
+    if (lst.isSymbolicLink() || !lst.isDirectory()) return 'the producer inbox is not a real directory';
+    if (!this.isAlive(Number(dirMatch[1]))) return 'the producer is not running';
+    const stamp = typeof name === 'string' && OUTBOX_FILE_RE.test(name) ? Number(name.split('-')[0]) : NaN;
+    if (!Number.isFinite(stamp) || Math.abs(this.now() - stamp) > RPC_MAX_AGE_MS) return 'the request is stale';
+    return null;
+  }
+
+  async _handle(entry, { name = null } = {}) {
     if (!isPlainObject(entry)) {
       log.warn('dropping a malformed outbox entry: not an object');
       return;
@@ -488,6 +524,11 @@ class CourierPump {
       return;
     }
     if (this.rpcHandler) {
+      const stale = this._rpcRequestStale(replyTo, name);
+      if (stale) {
+        log.debug(`dropping ${method} from the outbox: ${stale}`);
+        return;
+      }
       try {
         this._reply(replyTo, { result: await this.rpcHandler(method, params) });
       } catch (err) {
@@ -536,7 +577,7 @@ class CourierPump {
         // never be retried, or it could loop the pump forever.
         try { fs.unlinkSync(file); } catch { continue; }
         try {
-          await this._handle(entry);
+          await this._handle(entry, { name });
         } catch (err) {
           // One bad entry must never skip the rest of the batch or the
           // sweep below — _handle already guards against the shapes it
@@ -551,4 +592,4 @@ class CourierPump {
   }
 }
 
-module.exports = { FileCourier, CourierPump, CourierError, NOT_RUNNING };
+module.exports = { FileCourier, CourierPump, CourierError, NOT_RUNNING, RPC_MAX_AGE_MS };
