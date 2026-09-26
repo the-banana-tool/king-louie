@@ -3,14 +3,7 @@
 // presence. Everything goes through core.context.getContact().
 const { wrapHandler } = require('./wrap-handler');
 const IPC = require('./constants');
-
-// F7's origin marks events proxied from an attached desktop. Absent before F7.
-let origin = null;
-try {
-  origin = require('../core/origin');
-} catch {
-  origin = null;
-}
+const { isLocalDesktopEvent } = require('../core/origin');
 
 const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
 
@@ -27,7 +20,7 @@ function registerContactHandlers(ipcMain, context = {}) {
     if (!win || (typeof win.isDestroyed === 'function' && win.isDestroyed())) return false;
     return Boolean(event && event.sender && event.sender === win.webContents);
   };
-  const fromAttachedDesktop = (event) => Boolean(origin && typeof origin.isLocalDesktopEvent === 'function' && origin.isLocalDesktopEvent(event));
+  const fromAttachedDesktop = (event) => Boolean(isLocalDesktopEvent(event));
 
   handle(IPC.CONTACT_LADDER_STATE, async () => ({ ok: true, state: contact().ladderState() }));
 
