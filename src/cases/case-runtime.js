@@ -831,7 +831,13 @@ class CaseRuntime {
     turn.hookNotes = [...(turn.hookNotes || []), ...hook.notes];
     turn.triggers = [...(turn.triggers || []), ...fresh];
     if (fresh.some((t) => t.blocking)) turn.reorientPending = true;
-    turn.orientation = this.orientation(turn.caseId, { triggers: turn.triggers, hookNotes: turn.hookNotes });
+    // A failed rebuild must not fail the owner's send: keep the orientation
+    // the turn already has (its triggers and notes are still recorded above).
+    try {
+      turn.orientation = this.orientation(turn.caseId, { triggers: turn.triggers, hookNotes: turn.hookNotes });
+    } catch (err) {
+      log.warn(`Rebuilding the orientation of case ${turn.caseId} after owner-message hooks failed: ${err.message}`);
+    }
     return { notes: hook.notes, triggers: fresh, orientation: turn.orientation };
   }
 

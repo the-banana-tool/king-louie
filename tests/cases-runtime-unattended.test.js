@@ -161,6 +161,26 @@ describe('turn-start and owner-message hooks', () => {
     assert.throws(() => rt.addTurnStartHook('x', () => {}, { phase: 'later' }), /phase/);
   });
 
+  it('an orientation rebuild that throws after owner-message hooks keeps the previous orientation', async () => {
+    const { rt } = makeRuntime();
+    const c = await activeCase(rt);
+    rt.addTurnStartHook('classify', async () => ({ notes: ['Classified'] }), { phase: 'owner-message' });
+    const turn = await rt.beginTurn(c.id, { turnId: 't1', source: 'owner', ownerMessage: 'Any news?' });
+    const before = turn.orientation;
+    const original = rt.orientation;
+    rt.orientation = () => { throw new Error('orientation exploded'); };
+    let out;
+    try {
+      out = await rt.runOwnerMessageHooks(turn);
+    } finally {
+      rt.orientation = original;
+    }
+    assert.deepStrictEqual(out.notes, ['Classified']);
+    assert.strictEqual(out.orientation, before);
+    assert.strictEqual(turn.orientation, before);
+    await rt.endTurn(turn, {});
+  });
+
   it('a hook trigger blocks until Reorient, stays quiet while still raised, and fires again after it stops', async () => {
     const { rt } = makeRuntime();
     const c = await activeCase(rt);
