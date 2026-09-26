@@ -151,8 +151,10 @@ function withFakeAgent(env, id = 'fake-agent', opts = {}) {
   return installFakeAdapter(id, opts);
 }
 
+// force: these fixtures open several cases with one objective on purpose;
+// the similar-case gate (cases stage 5) is not what they exercise.
 async function activeCase(runtime, { title = 'Lakeside lot', brief = {} } = {}) {
-  const info = await runtime.createCase({ title, objective: 'Convert the lot to cash' });
+  const info = await runtime.createCase({ title, objective: 'Convert the lot to cash', force: true });
   const b = runtime.brief(info.id);
   b.update('why', 'Paying for a move', { provenance: 'user' });
   b.update('successCriteria', ['Sold within the year'], { provenance: 'model' });
