@@ -18,6 +18,9 @@ const { localDate } = require('./util');
 
 const log = createLogger('executors/envelopes');
 const APPROVE_REJECT = Object.freeze([{ id: 'approve', label: 'Approve' }, { id: 'reject', label: 'Reject' }]);
+// A signed envelope is approved only on the phone; its question says so,
+// and a Reject there counts (an Approve there does not).
+const SIGNED_NOTE = 'Approve this on your phone: an approval here does not activate it. Rejecting it here withdraws the phone request.';
 const grantKey = (caseId, envelopeId) => `${caseId}/${envelopeId}`;
 
 function journal(reg, caseId, text) {
@@ -120,7 +123,8 @@ async function requestEnvelopeUnsafe(reg, { caseId, turnId = null, signal = null
     createdAt: reg.now().toISOString(),
     turnId
   };
-  const text = renderEnvelopeQuestion(env, { facts, caseTitle: meta.title, notBacked: v.notBacked });
+  const card = renderEnvelopeQuestion(env, { facts, caseTitle: meta.title, notBacked: v.notBacked });
+  const text = approver ? `${card}\n\n${SIGNED_NOTE}` : card;
   const q = rt.createQuestion(caseId, {
     kind: 'approval', urgency: 'normal', defaultOnSilence: 'hold', text, options: APPROVE_REJECT,
     payload: { type: 'envelope', envelopeId: env.id, hash: env.hash, envelope: v.core, mcpAnswerable: true }
@@ -136,14 +140,23 @@ async function requestEnvelopeUnsafe(reg, { caseId, turnId = null, signal = null
 }
 
 // The phone decides; the envelope turns active only from an approve Outcome.
+// The owner's in-app Reject withdraws it (withdrawSignedRequest).
 function startSignedRequest(reg, caseId, env, approver, signal) {
   const helpers = approvalHelpers();
   const current = () => signedAction(new EnvelopeStore(reg.caseDir(caseId)).get(env.id) || env, caseId, helpers);
+  const key = grantKey(caseId, env.id);
+  const controller = new AbortController();
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener('abort', () => controller.abort(), { once: true });
+  }
+  reg.signedRequests = reg.signedRequests || new Map();
+  reg.signedRequests.set(key, controller);
   let request;
   try {
     // Ruling M14: F3's origin type; no job exists yet.
     request = Promise.resolve(approver.requestAction(signedAction(env, caseId, helpers), {
-      origin: { client: 'king-louie', session: caseId, job_id: null }, signal: signal || undefined, currentAction: current
+      origin: { client: 'king-louie', session: caseId, job_id: null }, signal: controller.signal, currentAction: current
     }));
   } catch (err) {
     request = Promise.reject(err);
@@ -153,9 +166,17 @@ function startSignedRequest(reg, caseId, env, approver, signal) {
     .catch((err) => {
       log.warn(`Signed approval for ${env.id} failed: ${err.message}`);
       return { applied: false, error: err.message };
+    })
+    .finally(() => {
+      if (reg.signedRequests.get(key) === controller) reg.signedRequests.delete(key);
     });
   reg.lastSignedRequest = done;
   return done;
+}
+
+function withdrawSignedRequest(reg, caseId, envelopeId) {
+  const controller = reg.signedRequests?.get(grantKey(caseId, envelopeId));
+  if (controller) controller.abort();
 }
 
 // A phone request id grants one envelope. → the envelope (or case/envelope
@@ -296,6 +317,17 @@ function syncOne(reg, caseId, env, { store, questions, now, move, transitions })
     return;
   }
   const signed = effectiveAuthority(reg, caseId, env) === 'signed';
+  if (env.status === 'requested' && signed && env.questionId) {
+    // Final review minor 1: the in-app Reject of a signed envelope counts;
+    // an approve here does not (the phone approves).
+    const q = questions.get(env.questionId);
+    const bound = q && q.payload?.type === 'envelope' && q.payload.envelopeId === env.id && q.payload.hash === env.hash;
+    if (bound && q.answer && q.answer.optionId === 'reject') {
+      withdrawSignedRequest(reg, caseId, env.id);
+      move(env, 'rejected', 'the owner rejected it');
+      return;
+    }
+  }
   if (env.status === 'requested' && !signed && env.questionId) {
     const q = questions.get(env.questionId);
     const bound = q && q.payload?.type === 'envelope' && q.payload.envelopeId === env.id && q.payload.hash === env.hash;

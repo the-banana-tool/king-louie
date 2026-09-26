@@ -272,6 +272,31 @@ describe('signed envelopes', () => {
     assert.strictEqual(envelopeOf(d).status, 'requested');
   });
 
+  // Final review minor 1: the in-app Reject of a signed envelope is not
+  // dropped; it rejects the envelope and withdraws the phone request, so a
+  // later phone approve cannot activate it.
+  it('an in-app reject rejects a signed envelope and withdraws the phone request', async () => {
+    let signal = null;
+    let settle = null;
+    const approver = {
+      requestAction(action, opts) {
+        signal = opts.signal;
+        return new Promise((resolve) => {
+          settle = () => resolve({ decision: 'approve', request_id: 'r-9', device_id: 'd-1', action_hash: helpers.actionHash(action), reason: null });
+        });
+      }
+    };
+    const s = await setup({ authority: 'signed', approver });
+    const r = await ops.requestEnvelope(s.reg, { caseId: s.meta.id }, body(s.factId));
+    assert.match(s.rt.questions(s.meta.id).get(r.questionId).text, /Approve this on your phone/);
+    await s.rt.answerQuestion(s.meta.id, r.questionId, { channel: 'in-app', optionId: 'reject' });
+    ops.syncEnvelopes(s.reg, s.meta.id);
+    assert.deepStrictEqual([envelopeOf(s).status, signal.aborted], ['rejected', true]);
+    settle();
+    await s.reg.lastSignedRequest;
+    assert.strictEqual(envelopeOf(s).status, 'rejected', 'a late phone approve does not activate it');
+  });
+
   it('keeps a late grant in memory while the case is busy, then applies it', async () => {
     const approver = { requestAction: () => new Promise(() => {}) };
     const s = await setup({ authority: 'signed', approver });
