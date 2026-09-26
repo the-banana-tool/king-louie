@@ -705,15 +705,84 @@ describe('AuditMirror', () => {
     assert.equal(raised.length, 2, 'one alert per distinct fork');
     assert.deepEqual(mirror.cursor(ID), { seq: 3, hash: b[3].hash });
     assert.equal(mirror.history(ID, {}).segment, 1, 'back in the segment that holds chain b');
-    // Chain b grew while the node was on chain a: re-entering stores only what is new.
+    // Chain b grew while the node was on chain a: its signed head is not the
+    // stored head of b's segment, so this is a new fork (and a new alert), not a re-entry.
     node.chain = a;
     await mirror.sync(ID, { fetchSlice: node.fetchSlice, spkiHex: SPKI });
     const before = count(mirror);
     const grown = [...b, entry(4, b[3].hash, 'other.event')];
     node.chain = grown;
-    await mirror.sync(ID, { fetchSlice: node.fetchSlice, spkiHex: SPKI });
+    assert.equal(await mirror.sync(ID, { fetchSlice: node.fetchSlice, spkiHex: SPKI }), 'chain_break');
     assert.deepEqual(mirror.cursor(ID), { seq: 4, hash: grown[4].hash });
     assert.equal(count(mirror), before + 1);
+    assert.deepEqual(mirror.breaks(ID).map((x) => [x.reason, x.segment]), [['fork', 1], ['fork', 2], ['fork', 3]]);
+    assert.equal(raised.length, 3);
+  });
+
+  it('a third chain sharing the first page with two known chains is a new fork with an alert, without ping-pong', async () => {
+    const base = chain(5);
+    const variant = (kind) => {
+      const c = base.slice();
+      for (let i = 6; i <= 8; i += 1) c.push(entry(i, c[i - 1].hash, kind));
+      return c;
+    };
+    const a = variant('a.event');
+    const b = variant('b.event');
+    const c = variant('c.event');
+    const { mirror, raised } = kit({ pageLimit: 3 });
+    const node = fakeNode(a);
+    for (const ch of [a, b, a, b, a]) {
+      node.chain = ch;
+      await mirror.sync(ID, { fetchSlice: node.fetchSlice, spkiHex: SPKI });
+    }
+    assert.equal(raised.length, 2, 'two distinct forks so far');
+    node.chain = c;
+    node.fetched = 0;
+    assert.equal(await mirror.sync(ID, { fetchSlice: node.fetchSlice, spkiHex: SPKI }), 'chain_break');
+    assert.ok(node.fetched <= 4, `no ping-pong between known segments (${node.fetched} pages)`);
+    assert.deepEqual(mirror.breaks(ID).map((x) => [x.reason, x.segment]), [['fork', 1], ['fork', 2], ['fork', 3]]);
+    assert.equal(raised.length, 3);
+    assert.deepEqual(mirror.cursor(ID), { seq: 8, hash: c[8].hash });
+    node.fetched = 0;
+    assert.equal(await mirror.sync(ID, { fetchSlice: node.fetchSlice, spkiHex: SPKI }), 'empty');
+    assert.equal(node.fetched, 1);
+    assert.equal(raised.length, 3);
+  });
+
+  it('a known head signed over another chain\'s page is a new fork, not a re-entry', async () => {
+    const a = chain(3);
+    const b = chain(3, 'other.event');
+    const c = chain(3, 'third.event');
+    const { mirror, raised } = kit();
+    const node = fakeNode(a);
+    for (const ch of [a, b, a]) {
+      node.chain = ch;
+      await mirror.sync(ID, { fetchSlice: node.fetchSlice, spkiHex: SPKI });
+    }
+    // Chain c's entries 1..2 under chain b's (known) signed head.
+    const env = signedSlice([c[1], c[2]], { seq: 3, hash: b[3].hash });
+    assert.equal((await mirror.ingestSlice(ID, env, SPKI)).outcome, 'chain_break');
+    assert.deepEqual(mirror.breaks(ID).map((x) => [x.reason, x.segment]), [['fork', 1], ['fork', 2], ['fork', 3]]);
+    assert.deepEqual(mirror.cursor(ID), { seq: 2, hash: c[2].hash });
+    assert.equal(raised.length, 3);
+  });
+
+  it('a re-entry ends the sync: one re-entry per sync, no further paging', async () => {
+    const a = chain(3);
+    const b = chain(3, 'other.event');
+    const { mirror } = kit();
+    const node = fakeNode(a);
+    for (const ch of [a, b, a]) {
+      node.chain = ch;
+      await mirror.sync(ID, { fetchSlice: node.fetchSlice, spkiHex: SPKI });
+    }
+    // The node flips to b and then back to a on every fetch: without the limit
+    // a sync would re-enter segment 1, then segment 2, and so on to maxPages.
+    let fetches = 0;
+    const flipping = async (params) => { fetches += 1; node.chain = fetches % 2 ? b : a; return node.fetchSlice(params); };
+    assert.equal(await mirror.sync(ID, { fetchSlice: flipping, spkiHex: SPKI }), 'chain_break');
+    assert.equal(fetches, 1);
+    assert.deepEqual(mirror.cursor(ID), { seq: 3, hash: b[3].hash });
     assert.equal(mirror.breaks(ID).length, 2);
   });
 

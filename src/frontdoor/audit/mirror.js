@@ -626,15 +626,19 @@ class AuditMirror {
   }
 
   // The node's chain no longer continues the mirror head: a fork. A fork
-  // already recorded from this mirror head at this seq, whose stored
-  // segment this page matches, is the node going back to a chain the
-  // mirror already holds: the mirror re-enters that segment at its stored
-  // head (no new segment, nothing appended), so a node alternating between
-  // chains cannot grow the mirror. Anything else opens the next segment.
+  // already recorded from this mirror head at this seq is the node going
+  // back to a chain the mirror already holds only when the node's signed
+  // head IS that segment's stored head (and the page agrees with it): then
+  // the mirror re-enters the segment (no new segment, nothing appended, no
+  // further paging), so a node alternating between chains cannot grow the
+  // mirror. A node head anywhere else (grown, shortened, or a third chain
+  // that merely shares the page) is a new fork with a new alert. A
+  // re-entry ends the sync (more: false; the node's head is the mirror
+  // head), so there is at most one per sync and re-entries never ping-pong.
   _fork(nodeId, s, envelope, m, more) {
     const first = m.entries[0];
     const known = s.breaks.find((b) => b.reason === 'fork' && b.seq === first.seq && sameHead(b.mirror_head, s.head) && Number.isInteger(b.segment));
-    const reentry = known ? this._segmentHeadMatching(nodeId, known.segment, m.entries) : null;
+    const reentry = known ? this._segmentHeadMatching(nodeId, known.segment, m) : null;
     if (reentry) {
       log.warn(`audit chain on ${nodeId} went back to mirror segment ${known.segment} (seen before)`);
       const next = structuredClone(s);
@@ -644,7 +648,7 @@ class AuditMirror {
       next.status = 'broken';
       this.tailClean.delete(nodeId);
       this._commit(nodeId, next);
-      return { outcome: 'chain_break', more: true };
+      return { outcome: 'chain_break', more: false };
     }
     const segment = lastSegment(s) + 1;
     const brk = { seq: first.seq, reason: 'fork', mirror_head: { ...s.head }, at: this._iso(), segment };
@@ -658,14 +662,17 @@ class AuditMirror {
     });
   }
 
-  // The stored head of `segment` when the page's entries agree with what the
-  // mirror holds there (the hash at the highest seq both have), else null.
-  _segmentHeadMatching(nodeId, segment, entries) {
+  // The stored head of `segment` when the node's signed head is exactly it
+  // and the page's entries agree with what the mirror holds there (the hash
+  // at the highest seq both have), else null.
+  _segmentHeadMatching(nodeId, segment, m) {
+    const { entries } = m;
     const recs = this._readSlices(nodeId).lines.map((l) => l.rec).filter((r) => r && r.segment === segment);
     if (recs.length === 0) return null;
     const top = recs.reduce((best, r) => (r.last_seq > best.last_seq ? r : best));
     const topEntry = entriesOf(top).find((e) => e.seq === top.last_seq);
     if (!topEntry || !isHash(topEntry.hash)) return null;
+    if (m.head.seq !== topEntry.seq || m.head.hash !== topEntry.hash) return null;
     const k = Math.min(entries[entries.length - 1].seq, top.last_seq);
     const ours = entries.find((e) => e.seq === k);
     if (!ours || this._storedHash(nodeId, segment, k) !== ours.hash) return null;
