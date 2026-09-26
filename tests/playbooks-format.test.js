@@ -162,6 +162,18 @@ describe('parseSteps', () => {
     assert.strictEqual(r.steps.length, 1);
     assert.strictEqual(r.steps[0].title, `a${' '.repeat(60000)}b`);
   });
+
+  it('a heading ending in many repeated "{#" with no closing "}" parses in linear time', () => {
+    // /\{#([^}]*)\}$/ is quadratic here: with no "}" anywhere, every
+    // starting position makes [^}]* run to the end, fails, and backtracks
+    // one character at a time before the next starting position is tried.
+    const heading = `## 1. a ${'{#'.repeat(60000)}\n`;
+    const start = Date.now();
+    const r = f.parseSteps(heading, { executors });
+    assert.ok(Date.now() - start < 1000, 'parsing must not be quadratic in the repeated "{#"');
+    assert.strictEqual(r.steps.length, 1);
+    assert.strictEqual(r.steps[0].title, `a ${'{#'.repeat(60000)}`);
+  });
 });
 
 describe('parseBriefRules', () => {

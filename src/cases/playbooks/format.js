@@ -483,11 +483,21 @@ function parseSteps(text, { executors = null } = {}) {
         return;
       }
       let rest = m[2].trimEnd();
-      const idMatch = /\{#([^}]*)\}$/.exec(rest);
+      // Not a regex: `/\{#([^}]*)\}$/` is quadratic on a run of repeated
+      // "{#" with no closing "}" anywhere (every starting position makes
+      // [^}]* greedily consume to the end, fails to find "}", and
+      // backtracks one character at a time before the engine tries the
+      // next starting position — O(n) work at each of O(n) positions).
+      // lastIndexOf/indexOf are each a single linear scan, so this is
+      // O(n) however the text is shaped.
       let explicitId = null;
-      if (idMatch) {
-        explicitId = idMatch[1];
-        rest = rest.slice(0, idMatch.index).trimEnd();
+      const idOpen = rest.lastIndexOf('{#');
+      if (idOpen !== -1) {
+        const idClose = rest.indexOf('}', idOpen + 2);
+        if (idClose === rest.length - 1) {
+          explicitId = rest.slice(idOpen + 2, idClose);
+          rest = rest.slice(0, idOpen).trimEnd();
+        }
       }
       const id = explicitId !== null ? explicitId : slugify(rest);
       if (explicitId !== null && !SLUG_RE.test(id)) err(no, `step id "${truncateForMessage(id)}" must be a lowercase slug`);
