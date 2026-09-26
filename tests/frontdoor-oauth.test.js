@@ -185,8 +185,8 @@ describe('the mcp. dispatcher', () => {
 
   it('createMcpHttpServer sets the timeouts and header limits and never listens', () => {
     const server = createMcpHttpServer(() => {});
-    assert.equal(server.requestTimeout, 30000);
-    assert.equal(server.headersTimeout, 15000);
+    // Enforced by the front door's own per-connection timers (ruling T32-timers).
+    assert.deepEqual({ ...server.frontDoorLimits }, { requestTimeoutMs: 30000, headersTimeoutMs: 15000, idleTimeoutMs: 5000 });
     assert.equal(server.keepAliveTimeout, 5000);
     assert.equal(server.maxHeadersCount, 100);
     assert.equal(server.maxHeaderSize, 16384);

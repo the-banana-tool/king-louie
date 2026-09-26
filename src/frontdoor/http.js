@@ -94,35 +94,126 @@ function createFrontDoorHandler({ mcpHost, oauth, mcp = null, phoneApiHandler, p
   };
 }
 
-// Never listens: the SNI listener emits 'connection' with each mcp. TLS
-// socket it hands over.
-//
-// requestTimeout bounds only the time to RECEIVE a request (headers and
-// body); Node stops timing a request once its body has ended, so a response
-// held open afterwards (the MCP get_job long-poll, up to
-// frontdoor.mcp.progress_hold_s ≤ 55 s) is never cut by it (ruling T26-hold,
-// pinned end to end by tests/frontdoor-e2e.test.js with a hold longer than
-// the timeout). `limits` exists for that test, which scales the timings down.
-function createMcpHttpServer(handler, limits = {}) {
-  const l = { requestTimeoutMs: REQUEST_TIMEOUT_MS, headersTimeoutMs: HEADERS_TIMEOUT_MS, checkIntervalMs: undefined, ...limits };
-  const server = http.createServer({ maxHeaderSize: MAX_HEADER_SIZE, ...(l.checkIntervalMs ? { connectionsCheckingInterval: l.checkIntervalMs } : {}) }, handler);
-  server.requestTimeout = l.requestTimeoutMs;
-  server.headersTimeout = l.headersTimeoutMs;
-  server.keepAliveTimeout = KEEP_ALIVE_TIMEOUT_MS;
-  server.maxHeadersCount = MAX_HEADERS_COUNT;
-  return startConnectionTracking(server);
-}
+// Server-side deadlines for a server that is only ever handed sockets (the
+// SNI listener emits 'connection' with each TLS socket). Node enforces its
+// own requestTimeout/headersTimeout only on servers that listen, so these
+// servers keep their own per-connection timers (ruling T32-timers):
+// - headers: from the socket's handoff (and again once a keep-alive
+//   connection starts its next request) until the request's headers are in;
+// - request: from the headers until the request body has ENDED. Nothing is
+//   timed after that, so a response held open (the MCP get_job long-poll, up
+//   to frontdoor.mcp.progress_hold_s ≤ 55 s) outlives the 30 s limit;
+// - idle: after a response, a keep-alive connection that sends nothing is
+//   closed.
+// A request cut before it has an answer gets 408 and the connection closes.
+// An upgraded connection (a mesh WebSocket) leaves every timer behind.
+const END_GRACE_MS = 1000;
 
-// Node enforces requestTimeout and headersTimeout only on the connections it
-// tracks, and starts tracking when the server listens (its own 'listening'
-// handler). A server that is only handed sockets never listens, so without
-// this neither limit ever fires and a client may trickle headers or a body
-// forever. Stopped by server.close().
-function startConnectionTracking(server) {
-  const internal = server.listeners('listening').filter((fn) => fn.name === 'setupConnectionsTracking');
-  if (internal.length !== 1) throw new Error('this Node version tracks HTTP connections differently; the request timeouts cannot be enforced');
-  internal[0].call(server);
+function guardConnections(server, { headersTimeoutMs, requestTimeoutMs, idleTimeoutMs }) {
+  const state = new WeakMap(); // socket → { timer, phase }
+  const clear = (socket) => {
+    const st = state.get(socket);
+    if (st) {
+      clearTimeout(st.timer);
+      st.timer = null;
+      st.phase = null;
+    }
+  };
+  const arm = (socket, phase, ms, onExpire) => {
+    const st = state.get(socket);
+    if (!st) return;
+    clearTimeout(st.timer);
+    st.phase = phase;
+    st.timer = setTimeout(() => {
+      if (st.phase === phase) onExpire();
+    }, ms);
+    if (typeof st.timer.unref === 'function') st.timer.unref();
+  };
+  const cut = (socket, res) => {
+    clear(socket);
+    state.delete(socket);
+    try {
+      if (res && !res.headersSent) {
+        res.writeHead(408, { connection: 'close', 'content-length': '0' });
+        res.end();
+      } else if (!res) {
+        socket.end('HTTP/1.1 408 Request Timeout\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+      }
+    } catch {
+      // the socket is going anyway
+    }
+    const drop = setTimeout(() => socket.destroy(), END_GRACE_MS);
+    if (typeof drop.unref === 'function') drop.unref();
+  };
+  const awaitHeaders = (socket) => arm(socket, { kind: 'headers' }, headersTimeoutMs, () => cut(socket, null));
+
+  server.on('connection', (socket) => {
+    state.set(socket, { timer: null, phase: null });
+    awaitHeaders(socket);
+    socket.once('close', () => {
+      clear(socket);
+      state.delete(socket);
+    });
+  });
+  server.on('request', (req, res) => {
+    const socket = req.socket;
+    if (!state.has(socket)) return;
+    // Until the body has ended; a request already complete by then is not cut.
+    const phase = { kind: 'request', req };
+    arm(socket, phase, requestTimeoutMs, () => {
+      if (!req.complete) cut(socket, res);
+    });
+    req.once('end', () => {
+      const st = state.get(socket);
+      if (st && st.phase === phase) clear(socket);
+    });
+    res.once('finish', () => {
+      if (!state.has(socket)) return;
+      const readAt = socket.bytesRead;
+      arm(socket, { kind: 'idle' }, idleTimeoutMs, () => {
+        if (socket.bytesRead === readAt) socket.destroy();
+        else awaitHeaders(socket); // the next request has begun
+      });
+    });
+  });
+  server.on('upgrade', (req, socket) => {
+    clear(socket);
+    state.delete(socket);
+  });
   return server;
 }
 
-module.exports = { createFrontDoorHandler, createMcpHttpServer, startConnectionTracking, REQUEST_TIMEOUT_MS };
+const MCP_LIMITS = Object.freeze({ requestTimeoutMs: REQUEST_TIMEOUT_MS, headersTimeoutMs: HEADERS_TIMEOUT_MS, idleTimeoutMs: KEEP_ALIVE_TIMEOUT_MS });
+
+// The mcp. server. Never listens. `limits` exists for tests, which scale
+// the timings down.
+function createMcpHttpServer(handler, limits = {}) {
+  const l = { ...MCP_LIMITS, ...limits };
+  const server = http.createServer({ maxHeaderSize: MAX_HEADER_SIZE }, handler);
+  // Node's own request timers never run on a server that does not listen;
+  // guardConnections is what enforces l (server.frontDoorLimits).
+  server.requestTimeout = 0;
+  server.headersTimeout = 0;
+  server.keepAliveTimeout = KEEP_ALIVE_TIMEOUT_MS;
+  server.maxHeadersCount = MAX_HEADERS_COUNT;
+  server.frontDoorLimits = Object.freeze(l);
+  return guardConnections(server, l);
+}
+
+// The mesh. server: only pinned nodes reach it, and all it serves is the
+// WebSocket upgrade on /mesh/v1 (MeshTransport#attachServer); anything else
+// is 404. The same deadlines, until the upgrade.
+function createMeshHttpServer(limits = {}) {
+  const l = { ...MCP_LIMITS, ...limits };
+  const server = http.createServer({ maxHeaderSize: MAX_HEADER_SIZE }, (req, res) => {
+    res.writeHead(404, { 'content-length': '0' });
+    res.end();
+  });
+  server.requestTimeout = 0;
+  server.headersTimeout = 0;
+  server.maxHeadersCount = MAX_HEADERS_COUNT;
+  server.frontDoorLimits = Object.freeze(l);
+  return guardConnections(server, l);
+}
+
+module.exports = { createFrontDoorHandler, createMcpHttpServer, createMeshHttpServer, guardConnections, MCP_LIMITS, REQUEST_TIMEOUT_MS };

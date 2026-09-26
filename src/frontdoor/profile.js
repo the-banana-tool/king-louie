@@ -13,7 +13,6 @@
 // step that hangs on the way down is abandoned after STOP_STEP_TIMEOUT_MS.
 const crypto = require('crypto');
 const fs = require('fs');
-const http = require('http');
 const path = require('path');
 const tls = require('tls');
 const { createLogger } = require('../logging');
@@ -53,7 +52,7 @@ const { OperatorTls } = require('./tls/operator-tls');
 const { Challenges } = require('./protocol/challenges');
 const { spkiHexFromRaw, nodeFingerprint, NODE_NAME_RE } = require('./protocol/messages');
 const { RepinPublisher } = require('./repin');
-const { createFrontDoorHandler, createMcpHttpServer, startConnectionTracking } = require('./http');
+const { createFrontDoorHandler, createMcpHttpServer, createMeshHttpServer } = require('./http');
 const TOOL_EXTENSIONS = require('./tool-extensions');
 
 const log = createLogger('frontdoor');
@@ -65,8 +64,10 @@ const DUPLICATE_PING_MS = 5000;
 // A link RPC the audit mirror waits on. A fetch that never settled would
 // hold that node's mirror queue (sync and ingest) forever.
 const MIRROR_FETCH_TIMEOUT_MS = 30000;
-// Each shutdown step gets this long before the next one runs anyway.
+// Each shutdown step gets this long before the next one runs anyway, and
+// the whole shutdown this long (under systemd's 90 s TimeoutStopSec).
 const STOP_STEP_TIMEOUT_MS = 10000;
+const STOP_TOTAL_TIMEOUT_MS = 60000;
 const AUDIT_PRUNE_EVERY_MS = 24 * 3600000;
 // The mesh. context asks for a client certificate. Without a session id
 // context OpenSSL fails a resumption attempt outright, and a resumed
@@ -123,7 +124,9 @@ function mirrorFetcher(nodeHub, nodeId, timeoutMs = MIRROR_FETCH_TIMEOUT_MS) {
 
 // Runs each { name, fn } in order. A step that throws is logged; one that
 // has not settled after timeoutMs is abandoned. Either way the next runs.
-async function stopInOrder(steps, { timeoutMs = STOP_STEP_TIMEOUT_MS, onStep = null } = {}) {
+// Past totalMs the remaining steps are still started, but not waited for.
+async function stopInOrder(steps, { timeoutMs = STOP_STEP_TIMEOUT_MS, totalMs = STOP_TOTAL_TIMEOUT_MS, onStep = null } = {}) {
+  const deadline = Date.now() + totalMs;
   for (const { name, fn } of steps) {
     if (onStep) {
       try {
@@ -132,11 +135,18 @@ async function stopInOrder(steps, { timeoutMs = STOP_STEP_TIMEOUT_MS, onStep = n
         // a test hook
       }
     }
+    const left = deadline - Date.now();
+    if (left <= 0) {
+      log.warn(`shutdown passed its ${totalMs} ms deadline; stopping ${name} without waiting`);
+      Promise.resolve().then(fn).catch((err) => log.warn(`stopping ${name}: ${err.message}`));
+      continue;
+    }
+    const wait = Math.min(timeoutMs, left);
     let timer = null;
     try {
       await Promise.race([
         Promise.resolve().then(fn),
-        new Promise((resolve, reject) => { timer = setTimeout(() => reject(new Error(`did not stop within ${timeoutMs} ms`)), timeoutMs); })
+        new Promise((resolve, reject) => { timer = setTimeout(() => reject(new Error(`did not stop within ${wait} ms`)), wait); })
       ]);
     } catch (err) {
       log.warn(`stopping ${name}: ${err.message}`);
@@ -161,7 +171,7 @@ function warnAboutF3Nodes(dataDir) {
 
 // deps (tests only): ports, listen, publicPort, lookup, probeCa,
 // acmeAdapterFactory, allowTestKeys, approverStoreOptions, senders,
-// mcpServerLimits, probeAllowLoopbackForTests, onStop(name).
+// mcpServerLimits, meshServerLimits, probeAllowLoopbackForTests, onStop(name).
 async function startFrontDoor({ dataDir, configDir, adminUid = 0, geteuid = defaultGeteuid, nodeConfig, serviceConfig, toolExtensions = TOOL_EXTENSIONS, deps = {} } = {}) {
   runStartupChecks({ serviceConfig, nodeConfig });
   const fdConfig = nodeConfig.frontdoor;
@@ -217,6 +227,7 @@ async function startFrontDoor({ dataDir, configDir, adminUid = 0, geteuid = defa
     // before anything binds; ACME starts once the listener can answer
     // TLS-ALPN-01.
     let tlsSource;
+    let announceRotation = async () => { throw new Error('the front door is still starting'); };
     if (fdConfig.tls) {
       tlsSource = new OperatorTls({ host: hosts.mcp, certFile: fdConfig.tls.certFile, keyFile: fdConfig.tls.keyFile, alerts });
       started('tls', () => tlsSource.stop());
@@ -225,7 +236,10 @@ async function startFrontDoor({ dataDir, configDir, adminUid = 0, geteuid = defa
       const { AcmeManager } = require('./tls/acme');
       tlsSource = new AcmeManager({
         domain, email: fdConfig.acme.email, directoryUrl: fdConfig.acme.directory, termsAgreed: fdConfig.acme.termsAgreed,
-        dir: path.join(fdDir, 'acme'), cipher: ports.cipher, alerts, ...(deps.acmeAdapterFactory ? { adapterFactory: deps.acmeAdapterFactory } : {})
+        dir: path.join(fdDir, 'acme'), cipher: ports.cipher, alerts, ...(deps.acmeAdapterFactory ? { adapterFactory: deps.acmeAdapterFactory } : {}),
+        // Resolved only once repin.json is saved; until then AcmeManager keeps
+        // its next-key file and the next start announces the rotation again.
+        onRotated: (event) => announceRotation(event)
       });
       started('tls', () => tlsSource.stop());
     }
@@ -307,6 +321,9 @@ async function startFrontDoor({ dataDir, configDir, adminUid = 0, geteuid = defa
     });
     registerGrantRoutes(relay.phoneApi, {
       pending, grants, codes, clients, challenges, approverStore, frontdoorId,
+      // tokens: a backup. The token store already drops a revoked grant's
+      // tokens on the grant store's 'revoked' event and checks grants.live()
+      // on every use; revokeGrantEverywhere drops them here as well.
       scopeRules: () => scopeRegistry.rules(fdConfig.oauth.scopesEnabled), auditLedger: ownLedger, onGrantRevoked, tokens, nodes: registry
     });
     mcp = new McpHttpEndpoint({ mcpHost: hosts.mcp, resourceUrl: oauth.resourceUrl, tokens, grants, scopeRegistry, router, progressHoldS: fdConfig.mcp.progressHoldS });
@@ -337,11 +354,14 @@ async function startFrontDoor({ dataDir, configDir, adminUid = 0, geteuid = defa
     };
     // Re-pin (§3.3.1): a rotated mcp. key is announced with a signed envelope.
     const repin = new RepinPublisher({ identity, publicUrl, file: path.join(fdDir, 'repin.json'), auditLedger: ownLedger, onPinChanged: spkiChanged });
-    if (typeof tlsSource.on === 'function') {
-      tlsSource.on('rotated', (event) => {
-        repin.rotated(event).catch((err) => log.error(`publishing the re-pin failed: ${err.message}`));
-      });
-    }
+    announceRotation = async (event) => {
+      try {
+        await repin.rotated(event);
+      } catch (err) {
+        log.error(`publishing the re-pin failed: ${err.message}; it is published again at the next start`);
+        throw err;
+      }
+    };
 
     // After F3's routes (startRelay registered them): a front-door route
     // with the same method and path, POST /v1/pairing-codes, replaces F3's.
@@ -361,11 +381,8 @@ async function startFrontDoor({ dataDir, configDir, adminUid = 0, geteuid = defa
       probeHandler: createProbeHandler({ expects: (nonce) => Boolean(probe && probe.expects(nonce)) })
     });
     const mcpServer = createMcpHttpServer(handler, deps.mcpServerLimits || {});
-    const meshServer = http.createServer((req, res) => { res.writeHead(404); res.end(); });
-    meshServer.headersTimeout = 15000;
-    meshServer.requestTimeout = 30000;
-    startConnectionTracking(meshServer);
-    // Neither listens; close() only stops their request-timeout checks.
+    const meshServer = createMeshHttpServer(deps.meshServerLimits || {});
+    // Neither listens; the listener's stop() destroys the sockets they hold.
     started('http servers', () => { mcpServer.close(() => {}); meshServer.close(() => {}); });
     transport.attachServer(meshServer);
     const listener = new SniListener({
@@ -468,6 +485,6 @@ async function startFrontDoor({ dataDir, configDir, adminUid = 0, geteuid = defa
 }
 
 module.exports = {
-  startFrontDoor, NO_PHONE, DUPLICATE_PING_MS, MIRROR_FETCH_TIMEOUT_MS, STOP_STEP_TIMEOUT_MS,
+  startFrontDoor, NO_PHONE, DUPLICATE_PING_MS, MIRROR_FETCH_TIMEOUT_MS, STOP_STEP_TIMEOUT_MS, STOP_TOTAL_TIMEOUT_MS,
   makePinCheck, mirrorFetcher, stopInOrder, meshSecureContext
 };

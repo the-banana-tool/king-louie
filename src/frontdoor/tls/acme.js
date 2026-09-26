@@ -100,9 +100,13 @@ function createAcmeAdapter({ directoryUrl, accountKeyPem, email = null, termsAgr
 }
 
 class AcmeManager extends EventEmitter {
+  // onRotated(event) → Promise: the front door publishing the signed re-pin.
+  // The next-key file (from which a restart re-announces the rotation) is
+  // removed only once it has resolved and every 'rotated' listener returned.
   constructor({ domain, email = null, directoryUrl, termsAgreed = false, dir, cipher, alerts = null, now = Date.now, adapterFactory = createAcmeAdapter,
-    issueDeadlineMs = ISSUE_DEADLINE_MS, timers = { setTimeout, clearTimeout } } = {}) {
+    issueDeadlineMs = ISSUE_DEADLINE_MS, timers = { setTimeout, clearTimeout }, onRotated = null } = {}) {
     super();
+    this.onRotated = onRotated;
     this.host = `mcp.${domain}`;
     this.email = email;
     this.directoryUrl = directoryUrl;
@@ -253,18 +257,7 @@ class AcmeManager extends EventEmitter {
       await this.check();
       this._schedule();
       // Listeners attach before start(); phones re-pin from this event.
-      if (recovered) {
-        // The next file goes only once a listener has taken the event, so a
-        // throwing listener means the next start emits it again.
-        let delivered = false;
-        try {
-          this.emit('rotated', recovered);
-          delivered = true;
-        } catch (err) {
-          log.error(`a 'rotated' listener failed (${safeMessage(err)}); ${this.files.nextKey} is kept so the next start emits the new pin again`);
-        }
-        if (delivered) fs.rmSync(this.files.nextKey, { force: true });
-      }
+      if (recovered) await this._announce(recovered);
     } finally {
       this.starting = false;
     }
@@ -446,15 +439,32 @@ class AcmeManager extends EventEmitter {
     }
     // cert.json now holds the new certificate: from here a restart finishes
     // the rotation from cert-key.next.json even if the steps below fail.
+    // The next file stays until the rotation is announced (_announce): it
+    // is what lets a restart announce it again.
     this._writeKey(this.files.key, nextKey);
-    fs.rmSync(this.files.nextKey, { force: true });
     this.keyPem = nextKey;
     this._install(issued);
     this._succeeded();
     const event = { oldSpki, newSpki: this.leafSpki() };
     log.warn(`rotated the mcp. key ${oldSpki} → ${event.newSpki}: every phone must re-pin`);
-    this.emit('rotated', event);
+    await this._announce(event);
     return event;
+  }
+
+  // Emits 'rotated' and waits for onRotated. The next file goes only when
+  // both took the event; otherwise it is kept, so the next start announces
+  // the same rotation again (a phone must never miss its re-pin).
+  async _announce(event) {
+    let delivered = false;
+    try {
+      this.emit('rotated', event);
+      if (this.onRotated) await this.onRotated(event);
+      delivered = true;
+    } catch (err) {
+      log.error(`a 'rotated' listener failed (${safeMessage(err)}); ${this.files.nextKey} is kept so the next start emits the new pin again`);
+    }
+    if (delivered) fs.rmSync(this.files.nextKey, { force: true });
+    return delivered;
   }
 }
 
