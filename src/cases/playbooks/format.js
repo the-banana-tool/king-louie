@@ -16,7 +16,12 @@ const { parseYaml } = require('../../platform/yaml');
 // the same names are refused up front, whatever case they'd be typed in.
 const NAME_RE = /^(?!(?:con|prn|aux|nul|com\d|lpt\d)$)[a-z0-9][a-z0-9-]{0,47}$/;
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
-const VERSION_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
+// Each dot-separated pre-release identifier is a purely numeric string with
+// no leading zero (unless it is exactly "0"), or an alphanumeric one (which
+// carries no such restriction) — semver 2.0's own rule, so "1.0.0-alpha.01"
+// is invalid the same way a bare "01" MAJOR/MINOR/PATCH would be.
+const PRE_ID = '(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)';
+const VERSION_RE = new RegExp(`^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-(${PRE_ID}(?:\\.${PRE_ID})*))?$`);
 // C2's QuestionStore option id rule; a gating option becomes a question option.
 const OPTION_ID_RE = /^[a-z0-9-]{1,16}$/;
 
@@ -108,18 +113,41 @@ function canonicalJson(value) {
 
 // ---- Versions: MAJOR.MINOR.PATCH[-pre], semver 2.0 precedence ----
 
+const MAX_VERSION_LENGTH = 64;
+
 function parseVersion(v) {
   if (typeof v !== 'string') throw new TypeError(`A version must be a string, got ${typeof v}.`);
+  if (v.length > MAX_VERSION_LENGTH) {
+    throw new TypeError(`Invalid version "${truncateForMessage(v)}". A version is at most ${MAX_VERSION_LENGTH} characters.`);
+  }
   const m = VERSION_RE.exec(v);
-  if (!m) throw new TypeError(`Invalid version "${v}". Use MAJOR.MINOR.PATCH, optionally with -pre.`);
-  return { nums: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ? m[4].split('.') : [] };
+  if (!m) throw new TypeError(`Invalid version "${truncateForMessage(v)}". Use MAJOR.MINOR.PATCH, optionally with -pre.`);
+  // The matched digit strings are kept as strings, not converted with
+  // Number(): MAJOR/MINOR/PATCH (and a numeric pre-release identifier) have
+  // no length limit in semver beyond "no leading zero", so a hostile
+  // version could carry far more digits than Number can represent exactly.
+  // compareNumericStrings below compares them without ever going through
+  // Number, so precision is never on the table.
+  return { nums: [m[1], m[2], m[3]], pre: m[4] ? m[4].split('.') : [] };
+}
+
+// Two non-negative integer strings, neither with a leading zero (unless
+// the whole string is "0") — exactly what VERSION_RE's numeric groups can
+// capture. A longer string is always numerically larger; same length
+// compares lexicographically, which agrees with numeric order once the
+// leading-zero case is ruled out.
+function compareNumericStrings(a, b) {
+  if (a.length !== b.length) return a.length < b.length ? -1 : 1;
+  if (a === b) return 0;
+  return a < b ? -1 : 1;
 }
 
 function compareVersions(a, b) {
   const x = parseVersion(a);
   const y = parseVersion(b);
   for (let i = 0; i < 3; i += 1) {
-    if (x.nums[i] !== y.nums[i]) return x.nums[i] < y.nums[i] ? -1 : 1;
+    const c = compareNumericStrings(x.nums[i], y.nums[i]);
+    if (c !== 0) return c;
   }
   if (!x.pre.length && !y.pre.length) return 0;
   if (!x.pre.length) return 1;
@@ -133,7 +161,8 @@ function compareVersions(a, b) {
     const pNum = /^\d+$/.test(p);
     const qNum = /^\d+$/.test(q);
     if (pNum && qNum) {
-      if (Number(p) !== Number(q)) return Number(p) < Number(q) ? -1 : 1;
+      const c = compareNumericStrings(p, q);
+      if (c !== 0) return c;
     } else if (pNum) {
       return -1;
     } else if (qNum) {
@@ -145,7 +174,7 @@ function compareVersions(a, b) {
   return 0;
 }
 
-const majorOf = (v) => parseVersion(v).nums[0];
+const majorOf = (v) => Number(parseVersion(v).nums[0]);
 
 // ---- playbook.yaml ----
 

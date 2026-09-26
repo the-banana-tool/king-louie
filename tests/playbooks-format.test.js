@@ -370,6 +370,36 @@ describe('compareVersions', () => {
     assert.throws(() => f.compareVersions(1.2, '1.2.0'), /must be a string/);
     assert.throws(() => f.compareVersions('1.2', '1.2.0'), /Invalid version "1\.2"/);
   });
+
+  it('compares huge numeric parts by length then lexicographically, never through Number', () => {
+    // 20 nines vs. a 21-digit number one bigger: Number(smaller) and
+    // Number(bigger) both round to values well past MAX_SAFE_INTEGER and
+    // could easily compare equal or backwards if compareVersions ever ran
+    // them through Number().
+    const almost = '99999999999999999999.0.0';
+    const oneMore = '100000000000000000000.0.0';
+    assert.strictEqual(f.compareVersions(almost, oneMore), -1);
+    assert.strictEqual(f.compareVersions(oneMore, almost), 1);
+    // Same digit count, so it's a lexicographic (not length) comparison.
+    assert.strictEqual(f.compareVersions('123.0.0', '124.0.0'), -1);
+    // The same precision guard applies to a numeric pre-release identifier.
+    assert.strictEqual(f.compareVersions('1.0.0-99999999999999999999', '1.0.0-100000000000000000000'), -1);
+  });
+
+  it('forbids a leading zero in a numeric pre-release identifier', () => {
+    assert.throws(() => f.parseVersion('1.0.0-01'), /Invalid version/);
+    assert.throws(() => f.parseVersion('1.0.0-alpha.01'), /Invalid version/);
+    // A purely-numeric "0" alone, and an alphanumeric identifier that merely
+    // starts with a digit, are both still fine.
+    assert.doesNotThrow(() => f.parseVersion('1.0.0-0'));
+    assert.doesNotThrow(() => f.parseVersion('1.0.0-0a'));
+  });
+
+  it('caps a version at 64 characters', () => {
+    const long = `1.0.0-${'a'.repeat(70)}`;
+    assert.ok(long.length > 64);
+    assert.throws(() => f.parseVersion(long), /Invalid version/);
+  });
 });
 
 describe('canonicalJson', () => {
