@@ -128,6 +128,7 @@ function checkUrl(url) {
   if (u.username || u.password) throw refuse('client_id must not carry credentials');
   if (u.hash || url.includes('#')) throw refuse('client_id must not have a fragment');
   if (net.isIP(u.hostname.replace(/^\[|\]$/g, ''))) throw refuse('client_id must name a host, not an address');
+  if (u.hostname.endsWith('.')) throw refuse('client_id must not end its host with a dot');
   if (u.href !== url) throw refuse('client_id must be a URL in canonical form');
   return u;
 }

@@ -23,7 +23,8 @@ const LIMITS = Object.freeze({
   // Not in the spec; bounds on what an unauthenticated caller can make the
   // front door hold: every stored client (granted ones too), and the CIMD cache.
   maxClients: 1000,
-  cimdCacheMax: 500
+  cimdCacheMax: 500,
+  cimdInflightMax: 16
 });
 const REDIRECT_URI_MAX = 2048;
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '[::1]', 'localhost']);
@@ -39,7 +40,9 @@ function validRedirectUri(uri) {
   } catch {
     return false;
   }
-  if (u.hash) return false;
+  // Canonical form only, so the stored string is the one every parser reads
+  // the same way; no userinfo, which would hide the real host.
+  if (u.hash || u.username || u.password || u.href !== uri) return false;
   if (u.protocol === 'https:') return Boolean(u.hostname);
   return u.protocol === 'http:' && LOOPBACK_HOSTS.has(u.hostname); // RFC 8252 §7.3
 }
@@ -78,21 +81,43 @@ class ClientRegistry {
     this.cimd = new Map(); // client_id → { client, at }, oldest first
     this.inflight = new Map(); // client_id → Promise<client>
     this.byIp = new Map(); // rate key → [registration times]
-    let raw = null;
+    this._load();
+  }
+
+  // A file that cannot be loaded is moved aside, never overwritten: the next
+  // save would otherwise erase every granted client in it.
+  _load() {
+    let raw;
     try {
-      raw = fs.readFileSync(file, 'utf8');
+      raw = fs.readFileSync(this.file, 'utf8');
     } catch (err) {
-      if (err.code !== 'ENOENT') log.error(`cannot read ${file}: ${err.code || err.message}`);
+      if (err.code === 'ENOENT') return;
+      this._quarantine(`cannot be read (${err.code || err.message})`);
+      return;
     }
-    if (raw !== null) {
-      try {
-        for (const c of JSON.parse(raw).clients || []) {
-          if (c && typeof c === 'object' && DCR_CLIENT_ID_RE.test(c.client_id)) this.clients.set(c.client_id, c);
-        }
-      } catch (err) {
-        log.error(`${file} is not valid JSON; starting with no registered clients`);
-      }
+    let clients;
+    try {
+      clients = JSON.parse(raw).clients;
+    } catch {
+      clients = undefined;
     }
+    if (!Array.isArray(clients)) {
+      this._quarantine('is not a valid client list');
+      return;
+    }
+    for (const c of clients) {
+      if (c && typeof c === 'object' && DCR_CLIENT_ID_RE.test(c.client_id)) this.clients.set(c.client_id, c);
+    }
+  }
+
+  _quarantine(why) {
+    const aside = `${this.file}.corrupt-${this.now()}`;
+    try {
+      fs.renameSync(this.file, aside);
+    } catch (err) {
+      throw new Error(`${this.file} ${why} and cannot be moved aside (${err.code || err.message}); refusing to start with no registered clients`);
+    }
+    log.error(`${this.file} ${why}; moved it to ${aside} and starting with no registered clients`);
   }
 
   _save() {
@@ -105,7 +130,9 @@ class ClientRegistry {
   }
 
   get(clientId) {
-    return this.clients.get(clientId) || this.cimd.get(clientId)?.client || null;
+    if (this.clients.has(clientId)) return this.clients.get(clientId);
+    const cached = this.cimd.get(clientId);
+    return cached && this.now() - cached.at < LIMITS.cimdCacheMs ? cached.client : null;
   }
 
   _recentHits(key, t) {
@@ -167,6 +194,7 @@ class ClientRegistry {
     if (cached && this.now() - cached.at < LIMITS.cimdCacheMs) return cached.client;
     // Concurrent resolves of one URL share a single fetch.
     if (this.inflight.has(clientId)) return this.inflight.get(clientId);
+    if (this.inflight.size >= LIMITS.cimdInflightMax) throw busy('too many client metadata documents are being fetched; try again later');
     const pending = this._fetchCimd(clientId).finally(() => this.inflight.delete(clientId));
     this.inflight.set(clientId, pending);
     return pending;

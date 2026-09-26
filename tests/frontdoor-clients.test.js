@@ -76,7 +76,8 @@ describe('ClientRegistry', () => {
 describe('redirect URIs (hardening)', () => {
   it('refuses control characters, look-alike loopback hosts, empty fragments and oversize URIs', () => {
     for (const bad of ['https://client.example.com/c\nb', 'https://client.example.com/c\tb', ' https://client.example.com/cb', 'http://127.0.0.1.example.com/cb',
-      'http://localhost.example.com/cb', 'http://127.0.0.2/cb', 'http://[::1]/cb#', `https://client.example.com/${'a'.repeat(2048)}`, null, 42, ['https://client.example.com/cb']]) {
+      'http://localhost.example.com/cb', 'http://127.0.0.2/cb', 'http://[::1]/cb#', 'https://client.example.com@evil.example.com/cb', 'https://u:p@client.example.com/cb', 'HTTPS://client.example.com/cb',
+      'https:/client.example.com/cb', 'https://client.example.com', 'http://0x7f.1/cb', 'http://LOCALHOST/cb', `https://client.example.com/${'a'.repeat(2048)}`, null, 42, ['https://client.example.com/cb']]) {
       assert.equal(validRedirectUri(bad), false, String(bad));
     }
   });
@@ -165,5 +166,70 @@ describe('ClientRegistry (hardening)', () => {
     for (let i = 0; i < LIMITS.cimdCacheMax; i += 1) await r.resolve(`https://client.example.com/c${i}.json`);
     assert.equal(r.cimd.size, LIMITS.cimdCacheMax);
     assert.equal(r.get(url), null, 'the oldest entry was evicted');
+  });
+});
+
+describe('ClientRegistry (fix round 1)', () => {
+  const corrupt = (f) => fs.readdirSync(path.dirname(f)).filter((n) => n.startsWith('clients.json.corrupt-'));
+
+  for (const [label, content] of [['invalid JSON', '{"v":1,"clients":[{"client_id":'], ['clients not an array', '{"v":1,"clients":{"dcr_x":{}}}'], ['no clients key', '{"v":1}'], ['JSON null', 'null']]) {
+    it(`a file with ${label} is moved aside, kept, and never overwritten`, () => {
+      const f = file();
+      fs.writeFileSync(f, content);
+      const r = new ClientRegistry({ file: f, now: () => 1234 });
+      assert.deepEqual(r.list(), []);
+      assert.deepEqual(corrupt(f), ['clients.json.corrupt-1234']);
+      r.register(good(), { ip: '203.0.113.9' });
+      assert.equal(fs.readFileSync(path.join(path.dirname(f), 'clients.json.corrupt-1234'), 'utf8'), content);
+      assert.equal(JSON.parse(fs.readFileSync(f, 'utf8')).clients.length, 1);
+    });
+  }
+
+  it('a read error other than ENOENT moves the path aside too', () => {
+    const f = file();
+    fs.mkdirSync(f); // reading a directory fails with EISDIR (EPERM on some platforms)
+    const r = new ClientRegistry({ file: f, now: () => 7 });
+    assert.deepEqual(corrupt(f), ['clients.json.corrupt-7']);
+    r.register(good(), { ip: '203.0.113.9' });
+    assert.ok(fs.statSync(path.join(path.dirname(f), 'clients.json.corrupt-7')).isDirectory());
+  });
+
+  it('refuses to start when an unloadable file cannot be moved aside', () => {
+    const f = file();
+    fs.writeFileSync(f, 'not json');
+    const original = fs.renameSync;
+    fs.renameSync = () => { throw Object.assign(new Error('denied'), { code: 'EACCES' }); };
+    try {
+      assert.throws(() => new ClientRegistry({ file: f }), /cannot be moved aside \(EACCES\)/);
+    } finally {
+      fs.renameSync = original;
+    }
+    assert.equal(fs.readFileSync(f, 'utf8'), 'not json');
+  });
+
+  it('get() honours the 24 h CIMD cache age', async () => {
+    let now = 0;
+    const url = 'https://client.example.com/client.json';
+    const r = new ClientRegistry({ file: file(), now: () => now, fetchMetadata: async (u) => ({ client_id: u, client_name: 'Example Client', redirect_uris: [] }) });
+    await r.resolve(url);
+    assert.equal(r.get(url).client_id, url);
+    now += 24 * 3600000;
+    assert.equal(r.get(url), null);
+  });
+
+  it('at most 16 CIMD fetches in flight; past that, temporarily_unavailable (429)', async () => {
+    const { LIMITS } = require('../src/frontdoor/oauth/clients');
+    assert.equal(LIMITS.cimdInflightMax, 16);
+    const release = [];
+    const r = new ClientRegistry({ file: file(), fetchMetadata: (u) => new Promise((resolve) => release.push(() => resolve({ client_id: u, client_name: 'C', redirect_uris: [] }))) });
+    const pending = Array.from({ length: 16 }, (_, i) => r.resolve(`https://client.example.com/c${i}.json`));
+    await assert.rejects(r.resolve('https://client.example.com/c16.json'), (err) => err.error === 'temporarily_unavailable' && err.status === 429);
+    const same = r.resolve('https://client.example.com/c0.json'); // joins an existing fetch
+    for (const go of release) go();
+    await Promise.all([...pending, same]);
+    assert.equal(release.length, 16);
+    const last = r.resolve('https://client.example.com/c16.json'); // room again once the fetches finished
+    release[16]();
+    assert.equal((await last).client_id, 'https://client.example.com/c16.json');
   });
 });

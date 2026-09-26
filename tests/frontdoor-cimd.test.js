@@ -100,7 +100,7 @@ describe('isPublicAddress (special-purpose ranges)', () => {
   });
 
   it('refuses Teredo, local-use NAT64, the IETF block, site-local, discard-only and anything outside 2000::/3', () => {
-    for (const ip of ['2001:0:4136:e378:8000:63bf:3fff:fdd2', '2001::1', '2001:1ff::1', '64:ff9b:1::a00:1', 'fec0::1', '100::1', '::2', '1::', 'fe80::1%eth0', 'fe80::1%1', 'ff0e::1', 'fdff:ffff::1']) {
+    for (const ip of ['2001:0:4136:e378:8000:63bf:3fff:fdd2', '2001::1', '2001:1ff::1', '64:ff9b:1::a00:1', 'fec0::1', '100::1', '::2', '1::', 'fe80::1%eth0', 'fe80::1%1', '2606:4700::1%eth0', 'ff0e::1', 'fdff:ffff::1']) {
       assert.equal(isPublicAddress(ip), false, ip);
     }
     for (const ip of ['2606:4700:4700::1111', '2a00:1450:4001::1', '2001:200::1', '3fff:ffff::1']) assert.equal(isPublicAddress(ip), true, ip);
@@ -122,7 +122,7 @@ describe('fetchClientMetadata (hardening)', () => {
     for (const bad of ['https://CLIENT.example.com/client.json', 'https://client.example.com:443/client.json', 'https://client.example.com/a/../client.json',
       'https://client.example.com\\client.json', 'https://client.example.com/c lient.json', 'https://client.example.com', 'https://client.example.com/c.json#',
       'https://127.0.0.1/c.json', 'https://[::1]/c.json', 'https://0x7f.1/c.json', 'https://2130706433/c.json', 'ftp://client.example.com/c.json',
-      ' https://client.example.com/c.json', 'https://client.example.com/c.json\n', `https://client.example.com/${'a'.repeat(600)}`, '', null, 42]) {
+      ' https://client.example.com/c.json', 'https://client.example.com./c.json', 'https://client.example.com/c.json\n', `https://client.example.com/${'a'.repeat(600)}`, '', null, 42]) {
       await assert.rejects(fetchClientMetadata(bad, { lookup }), (err) => err instanceof OAuthError && err.error === 'invalid_client', String(bad));
       assert.equal(lookups, 0, String(bad));
     }
@@ -240,9 +240,20 @@ describe('fetchClientMetadata (hardening)', () => {
     await assert.rejects(fetchClientMetadata(URL_, opts(declared)), /64 KiB/);
   });
 
+  it('refuses a body cut short of its declared length', async () => {
+    const short = await docServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json', 'content-length': '200' });
+      res.write(`{"client_id":${JSON.stringify(URL_)}`);
+      setTimeout(() => req.socket.destroy(), 20);
+    });
+    await assert.rejects(fetchClientMetadata(URL_, opts(short)), (err) => err instanceof OAuthError && !/timed out/.test(err.message));
+  });
+
   it('refuses an encoded body, a JSON array, prototype keys, and bad redirect_uris', async () => {
-    const gz = await docServer((req, res) => json(res, good, { 'content-encoding': 'gzip' }));
+    let acceptEncoding = null;
+    const gz = await docServer((req, res) => { acceptEncoding = req.headers['accept-encoding']; json(res, good, { 'content-encoding': 'gzip' }); });
     await assert.rejects(fetchClientMetadata(URL_, opts(gz)), /encoded/);
+    assert.equal(acceptEncoding, 'identity');
     const arr = await docServer((req, res) => json(res, [good]));
     await assert.rejects(fetchClientMetadata(URL_, opts(arr)), OAuthError);
     for (const key of ['__proto__', 'constructor', 'prototype']) {
