@@ -298,3 +298,76 @@ the e2e test), the owner check cannot tell them apart.
   `swift test` in `mobile/ios/KLProtocol` (macOS) and `../gradlew test` in `mobile/android/protocol`
   (JDK 17, no Android SDK); both read `tests/vectors/approval-v1`. `mobile/PRIVACY.md` says what the
   relay operator can see.
+
+## Cases: executors (stage 3)
+
+Spec: `docs/superpowers/specs/2026-09-23-cases-stage3-executors.md`.
+
+- Executors live in `src/cases/executors/`. `ExecutorRegistry` resolves
+  built-ins (`bash`, `files`, `web`, `browser`, `workflow`, `runbook`,
+  `owner`), configured external agents, the per-case `override` in
+  `.kl/executors.json` (narrowing only) and the floors (an outbound capability
+  forces `outbound: message`, `authority ≥ envelope`).
+- External agents are packages with a `kingLouie.executor` block, loaded only
+  from `<dataDir>/executors/` (desktop) or the admin `service.json`
+  `executors.packageRoots` (service), and only with a matching
+  `packageSha256`; `executors:list` shows the hash to pin. Secrets are
+  `${vault:<key>}` references. The reference package is
+  `examples/executors/phone-agent/` (errands API: `openapi.yaml`).
+- The model plans with `Plan` and sends with `Executor`. Nothing leaves without
+  `gateLeaves` (`src/cases/gates.js`) over every string leaf and an
+  owner-approved envelope in `.kl/envelopes/`; senders send `rendered`.
+  Facts go out only as `{{f-0042}}` references.
+- `external-agent` facts are written only by `Executor.results`;
+  `brief.resources.ownerLabor` only by `syncPlan`. Tests that need a case with
+  executors use `tests/helpers/executor-fixtures.js` (a temp data dir, a fake
+  pinned package) and `tests/helpers/fake-errands-server.js`.
+- In a case turn the browser tools only look and click, `WebFetch`/`WebSearch`
+  are gated in query mode, and `Bash` is not guarded.
+- Envelopes activate when the owner approves the envelope question in the app
+  or remotely (the question is `mcpAnswerable`), on the desktop and in
+  service mode alike. Only an executor that declares `authority: signed`
+  needs the phone: its envelope activates only on a verified phone signature
+  over the live envelope hash. This is an owner decision and a deliberate
+  exception to trust principle 3 for envelopes. The envelope hash includes
+  `authority`; an `envelope`-authority hash has no key, so a Bash edit that
+  widens an envelope and recomputes the hash is not caught (the stage-1 Bash
+  write-guard gap).
+- The outbound gate: `{{f-NNNN}}` renders only an active, disclosable `user`,
+  `sourced` or `external-agent` fact (inside the envelope's `facts` when there
+  is one). Rule 1 (both modes) blocks a pasted value of an inferred, unknown,
+  non-disclosable or superseded fact, after NFKC folding and with grouped,
+  locale and scaled number forms; object keys and number leaves get rule 1
+  only. Rule 2 (message mode) blocks category keywords while the case holds a
+  private fact of that category. Rule 3 (message mode) blocks a date, price,
+  deadline or commitment that no `user` or `sourced` fact or approved wording
+  backs. Rule 4 blocks C7 entity spans. Known gaps: homoglyphs (confusable
+  letters are not folded), values split across sentences or leaves,
+  spelled-out amounts, URL-encoded or joined text values, and the Bash
+  write-guard gap above. The detectors are English only and fail closed.
+- Browser jobs always run in the `kl-cases` browser profile (refused while the
+  browser is open in another profile) and stay on the approved origin: a
+  redirect or a field-triggered navigation off it stops the job before the
+  next fill or click. A failure after the submit click counts as sent.
+- Executor packages are pinned by `packageSha256` over their own files and
+  must not contain `node_modules` (nor may the root or any directory between
+  it and the package); bundle dependencies. `type: module` packages are
+  refused. In service mode the package roots and every entry below them must
+  be owned by the admin (the `adminUid` that owns `service.json`). An adapter
+  runs with full privileges once loaded.
+- `external-agent` provenance is host-only: the Ledger tool refuses it, and it
+  never counts as the owner. It never satisfies rule 3, and a result that
+  contradicts a `user` fact records a load-bearing conflict unknown instead of
+  superseding it.
+- The global daily cap (`constraints.contactsPerDay`) is shared by every case
+  on this data dir (`<dataDir>/executors/usage.json`, under a mutex) and keeps
+  its time zone until the local day rolls over. The desktop and a service node
+  keep separate counters.
+- The case guard (`src/cases/executors/case-guard.js`) runs for case turns and
+  for any child run that carries a `guardContext` (`{ caseId }`). A case's
+  research children are isolated `case-researcher` runs: no memory, profile or
+  project context, only `WebSearch`, `WebFetch`, `Read`, `Glob` and `Grep`,
+  never more than the parent's tools. `SpawnAgent` is refused in every case
+  turn, since it would start an unguarded child.
+- Fixtures and docs use invented values only (`Lakeside lot`, `+15550100`,
+  `errands.example.com`); no personal names, numbers, paths or domains.

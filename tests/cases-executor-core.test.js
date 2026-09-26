@@ -249,6 +249,29 @@ describe('createCore wiring of the case guard and isolated children', () => {
     assert.ok(script.calls[0].systemPrompt.length > isolatedPrompt.length, 'a normal child gets the memory, profile and project sections');
   });
 
+  // SpawnAgent forwards neither guardContext nor allowedToolNames, so no case
+  // run may reach it: owner and wake-up case turns refuse it (C2), and a
+  // case's only children are isolated case-researchers without it.
+  it('no case run can start an unguarded child through SpawnAgent', async () => {
+    const { core, dataDir } = await shared();
+    const { WAKEUP_BASE_TOOLS, CASE_TOOL_NAMES } = require('../src/cases/chat-integration');
+    script.calls.length = 0;
+    const owner = await core.context.createToolExecutorWithApprovals(null, null, null, {
+      workingDirectory: dataDir, caseContext: { caseId: 'case-x', dir: dataDir }
+    });
+    const refused = await owner.execute('SpawnAgent', { task: 'Price the Lakeside lot' });
+    assert.deepStrictEqual([refused.success, /not available in case turns/.test(refused.error)], [false, true]);
+    assert.strictEqual(script.calls.length, 0, 'no child ran');
+    assert.ok(![...CASE_TOOL_NAMES, ...WAKEUP_BASE_TOOLS].includes('SpawnAgent'), 'a wake-up never offers SpawnAgent');
+    const researcher = owner.extraToolOptions.getAgent('case-researcher');
+    assert.ok(!researcher.allowedTools.includes('SpawnAgent'));
+    const child = await core.context.createAgentRuntime({ tier: 'standard' }, null, null,
+      require('../src/agents/child-context').childRuntimeOptions(researcher, { isolatedContext: true, guardContext: { caseId: 'case-x' } }));
+    const fromChild = await child.toolExecutor.execute('SpawnAgent', { task: 'Price the Lakeside lot' });
+    assert.deepStrictEqual([fromChild.success, fromChild.error], [false, 'Tool "SpawnAgent" is not available in this turn.']);
+    assert.strictEqual(script.calls.length, 0, 'no grandchild ran');
+  });
+
   it("gives the WorkflowEngine the registry's trusted child extras", async () => {
     const { core, dataDir } = await shared();
     const engine = core.context.getWorkflowEngine();

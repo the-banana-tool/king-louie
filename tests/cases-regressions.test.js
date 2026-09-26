@@ -211,3 +211,96 @@ describe('F12: spending stops at the budget and only the owner raises it', () =>
     await runtime.endTurn(next, {});
   });
 });
+
+describe('cases stage 3 regressions', () => {
+  const fx3 = require('./helpers/executor-fixtures');
+  const planOps3 = require('../src/cases/executors/plan-ops');
+  const envelopeOps3 = require('../src/cases/executors/envelope-ops');
+  const { submitJob: submit3 } = require('../src/cases/executors/submit');
+  const { gateLeaves: gate3 } = require('../src/cases/gates');
+  const { turnStartHook: hook3 } = require('../src/cases/executors/turn-hook');
+  const { writeJsonAtomic: writeJson3 } = require('../src/cases/executors/util');
+  after(fx3.cleanup);
+
+  async function world({ title = 'Lakeside lot', env = null } = {}) {
+    const e = env || fx3.setupExecutors();
+    const ctl = env ? null : fx3.withFakeAgent(e);
+    const meta = await fx3.activeCase(e.runtime, { title });
+    return { env: e, ctl, meta, reg: e.registry, rt: e.runtime, ctx: { caseId: meta.id, turnId: 'turn-1' } };
+  }
+  async function envelopeFor(w, over = {}) {
+    const r = await envelopeOps3.requestEnvelope(w.reg, w.ctx, {
+      executor: 'fake-agent', intent: 'Ask brokers for a listing quote', recipients: { allow: ['+15550100', '+15550101'] },
+      facts: [], caps: { usd: 20, contacts: 3, attemptsPerContact: 2 }, window: { start: '2026-10-26', end: '2026-10-30' }, ...over
+    });
+    await w.rt.answerQuestion(w.meta.id, r.questionId, { channel: 'in-app', optionId: 'approve' });
+    envelopeOps3.syncEnvelopes(w.reg, w.meta.id);
+    return r.envelopeId;
+  }
+  const payload3 = (recipients, over = {}) => JSON.stringify({ recipients: recipients.map((address) => ({ address })), text: 'Hello, we would like a listing quote for the lot.', ...over });
+  const FORMS = Array.from({ length: 9 }, (_, i) => ({ id: `s${i + 1}`, title: `File permit form ${i + 1}`, executor: 'owner', capability: 'web-form', quantity: 1, unit: 'forms' }));
+
+  it('F3: owner labor is never assumed', async () => {
+    const w = await world();
+    w.rt.brief(w.meta.id).update('resources', { executors: ['browser', 'owner'], ownerLabor: [] }, { provenance: 'model' });
+    const r = await planOps3.proposePlan(w.reg, w.ctx, { summary: 'File the permits', steps: JSON.stringify(FORMS) });
+    assert.deepStrictEqual([...new Set(r.steps.map((s) => `${s.executor}:${s.check.status}`))], ['browser:rewritten']);
+    writeJson3(path.join(w.meta.dir, '.kl', 'executors.json'), { browser: { override: { disabled: true } } });
+    const held = await planOps3.proposePlan(w.reg, w.ctx, { summary: 'File the permits', steps: JSON.stringify(FORMS) });
+    assert.deepStrictEqual([...new Set(held.steps.map((s) => `${s.executor}:${s.check.status}`))], ['owner:needs-consent']);
+    const asked = w.rt.questions(w.meta.id).get(held.questionId).text;
+    for (const f of FORMS) assert.ok(asked.includes(f.title), `the owner sees ${f.id}`);
+    assert.match((await submit3(w.reg, w.ctx, { executor: 'owner', payload: JSON.stringify({ text: 'File the forms' }) })).error, /the owner has not agreed/);
+  });
+
+  it('F7: no invented or private constraints', async () => {
+    const w = await world();
+    const L = w.rt.ledger(w.meta.id);
+    const due = L.assert({ stmt: 'Offers are due 2026-11-21', subject: 'sale', attr: 'offer-deadline', value: '2026-11-21', provenance: 'sourced', source: { kind: 'url', ref: 'https://auctions.example.com/lot' } });
+    L.assert({ stmt: 'Lowest acceptable price', subject: 'sale', attr: 'floor', value: 98000, unit: 'USD', provenance: 'user', category: 'financial', source: { kind: 'question', ref: 'q-0099' } });
+    const facts = L.view().facts;
+    const invented = gate3({ text: 'Offers are due by Friday November 14' }, { facts, mode: 'message' });
+    assert.ok(invented.blocked.every((b) => b.reason === 'unsourced-constraint') && invented.blocked.length > 0);
+    const sourced = gate3({ text: `Offers are due by {{${due.id}}}.` }, { facts, mode: 'message' });
+    assert.deepStrictEqual([sourced.ok, sourced.rendered.text], [true, 'Offers are due by 2026-11-21.']);
+    const pasted = gate3({ text: 'We cannot go below 98000 dollars.' }, { facts, mode: 'message' });
+    assert.ok(pasted.blocked.some((b) => b.reason === 'non-disclosable'));
+  });
+
+  it('F11: deltas name only the difference', async () => {
+    const w = await world();
+    const extra = w.rt.ledger(w.meta.id).assert({ stmt: 'Zoned R-1', subject: 'lot', attr: 'zoning', value: 'R-1', provenance: 'sourced', source: { kind: 'url', ref: 'https://records.example.org/zoning' } });
+    const envelopeId = await envelopeFor(w);
+    const trimmed = await submit3(w.reg, w.ctx, { executor: 'fake-agent', envelopeId, payload: payload3(['+15550100']) });
+    assert.strictEqual(trimmed.ok, true, trimmed.error);
+    const before = w.rt.questions(w.meta.id).open().length;
+    const wider = await submit3(w.reg, w.ctx, { executor: 'fake-agent', envelopeId, payload: payload3(['+15550101', '+15550102'], { facts: [extra.id] }) });
+    assert.deepStrictEqual([wider.needsApproval, wider.deltas], [true, ['adds recipient +15550102', `discloses ${extra.id} "Zoned R-1"`]]);
+    assert.strictEqual(w.rt.questions(w.meta.id).open().length, before + 1);
+  });
+
+  it('F10: ops lessons carry over, private ones do not', async () => {
+    const a = await world();
+    const L = a.rt.ledger(a.meta.id);
+    const shared = L.assert({ stmt: 'fake-agent drops calls longer than ten minutes', subject: 'ops', attr: 'fake-agent/call-length', value: '10m', provenance: 'sourced', source: { kind: 'url', ref: 'https://errands.example.com/docs' } });
+    a.reg.opsMemory.afterAssert(shared, { caseId: a.meta.id, caseTitle: a.meta.title, facts: L.view().facts });
+    const secret = L.assert({ stmt: 'fake-agent account is under the owner\'s personal card', subject: 'ops', attr: 'fake-agent/billing', value: 'card', provenance: 'sourced', category: 'personal', source: { kind: 'url', ref: 'https://errands.example.com/billing' } });
+    a.reg.opsMemory.afterAssert(secret, { caseId: a.meta.id, caseTitle: a.meta.title, facts: L.view().facts });
+    const b = await world({ title: 'Harbor cottage', env: a.env });
+    b.rt.brief(b.meta.id).update('resources', { executors: ['fake-agent'], ownerLabor: [] }, { provenance: 'model' });
+    const notes = (await hook3(b.reg, { caseId: b.meta.id })).notes.join('\n');
+    assert.match(notes, /^> fake-agent drops calls longer than ten minutes {2}— Lakeside lot, 2026-/m);
+    assert.doesNotMatch(notes, /personal card/);
+  });
+
+  it('F5: duplicate jobs', async () => {
+    const a = await world();
+    const envA = await envelopeFor(a);
+    assert.strictEqual((await submit3(a.reg, a.ctx, { executor: 'fake-agent', envelopeId: envA, payload: payload3(['+15550100']) })).ok, true);
+    assert.match((await submit3(a.reg, a.ctx, { executor: 'fake-agent', envelopeId: envA, payload: payload3(['+15550100']) })).error, /^this duplicates job-0001/);
+    const b = await world({ title: 'Harbor cottage', env: a.env });
+    const envB = await envelopeFor(b);
+    const other = await submit3(b.reg, b.ctx, { executor: 'fake-agent', envelopeId: envB, payload: payload3(['+15550100']) });
+    assert.deepStrictEqual([other.ok, other.note], [true, `also contacted by case "Lakeside lot" (${a.meta.id})`]);
+  });
+});

@@ -44,6 +44,9 @@ async function statOnlyCheckPath(target, { fsp = fs.promises } = {}) {
   return { ok: true, exists: true, isDirectory: st.isDirectory(), readable: true, writable: false, unverified: true };
 }
 
+// Service mode for executors (R42): an import loads no executor packages.
+const noAdminExecutors = () => ({ entries: {}, packageRoots: [] });
+
 // `masterKey` (a real run only) is the key the root parent resolved
 // read-only and sent over the channel (fix round 2, N1). This process never
 // resolves, creates or writes one: buildServicePorts checks it against the
@@ -64,12 +67,12 @@ function openCore(dataDir, onPathWritten, dryRun, masterKey = null) {
     const store = new JsonFileStore({ dir: dataDir, name: 'chat-data', defaults: CHAT_DATA_DEFAULTS });
     const vaultStore = new JsonFileStore({ dir: dataDir, name: 'config' });
     const cipher = createAesGcmCipher(crypto.randomBytes(32));
-    return { core: createCore({ paths: { dataDir }, store, vaultStore, cipher, prompter: createHeadlessPrompter() }), cipher };
+    return { core: createCore({ paths: { dataDir }, store, vaultStore, cipher, prompter: createHeadlessPrompter(), adminExecutors: noAdminExecutors() }), cipher };
   }
   const { buildServicePorts } = require('../ports');
   if (!masterKey) throw Object.assign(new Error('a real import needs the master key from the admin process'), { code: 'BAD_REQUEST' });
   const ports = buildServicePorts({ dataDir, chatDataDefaults: CHAT_DATA_DEFAULTS, onPathWritten, masterKey });
-  return { core: createCore(ports), cipher: ports.cipher };
+  return { core: createCore({ ...ports, adminExecutors: noAdminExecutors() }), cipher: ports.cipher };
 }
 
 // MemoryStore.load() writes a fresh default document the first time

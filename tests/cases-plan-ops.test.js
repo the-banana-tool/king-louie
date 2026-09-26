@@ -52,12 +52,32 @@ describe('Plan propose', () => {
     const r = await propose(s, [FORMS, NOTES]);
     const q = s.rt.questions(s.meta.id).get(r.questionId);
     assert.ok(q.text.startsWith([
-      'Steps you would do yourself if you approve:',
-      '- s1: File nine permit forms (web-form, 9 forms; needs your consent)',
-      'Approving records your consent to: web-form.',
+      'You would do the steps marked "you" yourself. Approving records your consent to: web-form. "Approve, except the owner\'s steps" cancels them instead.',
       '',
-      'Plan plan-001: Get the permits'
+      'Plan plan-001: Get the permits',
+      'Estimated cost: $0.00',
+      '- s1: File nine permit forms (web-form, 9 forms, you)',
+      '- s2: Write up the zoning notes (write-files, files)'
     ].join('\n')), q.text);
+  });
+
+  // Ruling T16-compact: the consent is explained once and every step gets
+  // one short line, so the spec's nine-form plan (F3) fits the question.
+  it('fits nine owner steps that need consent, listing every one', async () => {
+    const s = await setup({ browserDisabled: true });
+    const steps = Array.from({ length: 9 }, (_, i) => ({ id: `s${i + 1}`, title: `File permit form ${i + 1}`, executor: 'owner', capability: 'web-form', quantity: 1, unit: 'forms' }));
+    const r = await propose(s, steps);
+    assert.strictEqual(r.ok, true, r.error);
+    const q = s.rt.questions(s.meta.id).get(r.questionId);
+    for (const step of steps) assert.ok(q.text.includes(`- ${step.id}: ${step.title} (web-form, you)`), step.id);
+    assert.strictEqual(q.text.match(/Approving records your consent/g).length, 1);
+  });
+
+  it('still refuses a consent plan that cannot fit, writing nothing', async () => {
+    const s = await setup({ browserDisabled: true });
+    const steps = Array.from({ length: 40 }, (_, i) => ({ id: `s${i + 1}`, title: `File the permit form for parcel ${i + 1} of the lakeside subdivision`, executor: 'owner', capability: 'web-form' }));
+    assert.deepStrictEqual(await propose(s, steps), { ok: false, error: 'the plan is too long to show the owner in full; split it' });
+    assert.strictEqual(new PlanStore(s.meta.dir).read(), null);
   });
 
   it('refuses a plan too long to show the owner in full, writing nothing', async () => {

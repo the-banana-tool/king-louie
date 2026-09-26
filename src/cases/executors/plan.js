@@ -223,6 +223,44 @@ function renderPlanCard(plan) {
   return [...rows, ...(notes.length ? ['', ...notes] : [])].join('\n');
 }
 
+// The owner's plan question (ruling T16-compact): the consent explained
+// once, then one short line per step (title, capability, quantity when more
+// than one, and who does it), then the notes grouped by text. Every step is
+// listed; the full table is the card in the journal and the tool result.
+const who = (s) => {
+  if (s.executor !== 'owner') return s.executor;
+  return s.check?.status === 'needs-consent' ? 'you' : 'you, agreed earlier';
+};
+
+function renderPlanQuestion(plan) {
+  const steps = plan.steps || [];
+  const lines = [];
+  const consent = plan.consentCapabilities || [];
+  if (steps.some((s) => s.executor === 'owner')) {
+    const parts = ['You would do the steps marked "you" yourself.'];
+    if (consent.length) parts.push(`Approving records your consent to: ${consent.join(', ')}. "Approve, except the owner's steps" cancels them instead.`);
+    lines.push(parts.join(' '), '');
+  }
+  lines.push(`Plan ${plan.id}: ${plan.goal || plan.summary || ''}`.trim(), `Estimated cost: ${money(plan.estimateUsd)}`);
+  for (const s of steps) {
+    const qty = Number(s.quantity) > 1 ? `, ${s.quantity} ${s.unit}` : '';
+    lines.push(`- ${s.id}: ${String(s.title ?? '').replace(/\s+/g, ' ')} (${s.capability}${qty}, ${who(s)})`);
+  }
+  const grouped = new Map();
+  for (const s of steps) {
+    const why = (s.check?.reasons || []).join('; ');
+    let note = null;
+    if (s.check?.status === 'rewritten') note = `rewritten from ${s.check.from} to ${s.executor}: ${why}`;
+    else if (s.check?.status === 'flagged') note = `flagged: ${why}`;
+    if (!note) continue;
+    if (!grouped.has(note)) grouped.set(note, []);
+    grouped.get(note).push(s.id);
+  }
+  const notes = [...grouped].map(([note, ids]) => `- ${ids.join(', ')} ${note}`);
+  for (const w of plan.warnings || []) notes.push(`- Warning: ${w}`);
+  return [...lines, ...(notes.length ? ['', ...notes] : [])].join('\n');
+}
+
 class PlanStore {
   constructor(caseDir) {
     this.file = path.join(caseDir, '.kl', 'plan.json');
@@ -311,5 +349,6 @@ module.exports = {
   isConsentBacked,
   checkPlan,
   renderPlanCard,
+  renderPlanQuestion,
   PlanStore
 };
