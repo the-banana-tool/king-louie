@@ -349,6 +349,20 @@ describe('the MCP endpoint: hardening', () => {
     t.h.mcp.endSessionsForGrant(t.grantId);
     release();
     const res = await pending;
+    assert.equal(res.status, 401, 'the token no longer authenticates');
+    assert.doesNotMatch(res.text, /web-01/);
+  });
+
+  it('a session deleted while its call runs gets no result', async () => {
+    const t = await start();
+    const { id } = await session(t);
+    let release;
+    t.router.callTool = async () => { await new Promise((r) => { release = r; }); return [{ name: 'web-01' }]; };
+    const pending = rpc(t, call(25, 'list_machines', {}), { session: id });
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal((await request(t.h.base, { method: 'DELETE', path: '/mcp', headers: { authorization: `Bearer ${t.token}`, 'mcp-session-id': id } })).status, 204);
+    release();
+    const res = await pending;
     assert.equal(res.status, 404);
     assert.doesNotMatch(res.text, /web-01/);
   });
@@ -373,5 +387,117 @@ describe('the MCP endpoint: hardening', () => {
     assert.throws(() => new McpHttpEndpoint({ ...stubDeps(), progressHoldS: 56 }), RangeError);
     assert.throws(() => new McpHttpEndpoint({ ...stubDeps(), progressHoldS: -1 }), RangeError);
     assert.throws(() => new McpHttpEndpoint({ ...stubDeps(), maxSessionsPerGrant: 0 }), RangeError);
+  });
+});
+
+// Sends the headers and the first 10 bytes of `message`, runs `during()`, then
+// sends the rest: a request whose body is still arriving when something is
+// revoked, deleted or evicted.
+function slowRpc(t, message, { session, version = '2025-11-25' }, during) {
+  const http = require('http');
+  const body = Buffer.from(JSON.stringify(message));
+  return new Promise((resolve, reject) => {
+    const req = http.request(`${t.h.base}/mcp`, {
+      method: 'POST',
+      headers: { host: 'mcp.kl.example.com', authorization: `Bearer ${t.token}`, 'content-type': 'application/json', 'content-length': String(body.length), 'mcp-session-id': session, 'mcp-protocol-version': version }
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, text: Buffer.concat(chunks).toString('utf8') }));
+    });
+    req.on('error', reject);
+    req.flushHeaders();
+    req.write(body.subarray(0, 10));
+    setTimeout(async () => {
+      try {
+        await during();
+        req.end(body.subarray(10));
+      } catch (err) {
+        req.destroy();
+        reject(err);
+      }
+    }, 100);
+  });
+}
+
+const runbook = (id) => call(id, 'run_runbook', { machine: 'web-01', runbook: 'site.status' });
+const RUN = [{ scope: 'fleet:read', machines: null }, { scope: 'fleet:run', machines: null }];
+
+describe('the MCP endpoint: requests in flight', () => {
+  it('a grant revoked while the body arrives: tools/call, ping and tools/list are refused and nothing reaches the router', async () => {
+    for (const message of [runbook(30), { jsonrpc: '2.0', id: 31, method: 'ping' }, { jsonrpc: '2.0', id: 32, method: 'tools/list' }]) {
+      const t = await start({ scopes: RUN });
+      const { id } = await session(t);
+      const res = await slowRpc(t, message, { session: id }, async () => {
+        const { body: { challenge } } = await t.h.phoneCall(t.h.phone, 'POST', '/v1/challenges', { purpose: 'revoke' });
+        const r = await t.h.phoneCall(t.h.phone, 'POST', `/v1/clients/${t.grantId}/revoke`, t.h.phone.revokeClient({ frontdoorId: t.h.fd.nodeId, grantId: t.grantId, challenge }));
+        assert.equal(r.status, 204);
+      });
+      assert.equal(res.status, 401, message.method);
+      assert.match(res.headers['www-authenticate'], /invalid_token/);
+      assert.deepEqual(t.router.calls, []);
+    }
+  });
+
+  it('an access token revoked (/oauth/revoke) while the body arrives: refused, nothing reaches the router', async () => {
+    const t = await start({ scopes: RUN });
+    const { id } = await session(t);
+    const res = await slowRpc(t, runbook(33), { session: id }, async () => {
+      const r = await request(t.h.base, { method: 'POST', path: '/oauth/revoke', form: { token: t.token, client_id: t.clientId } });
+      assert.equal(r.status, 200);
+    });
+    assert.equal(res.status, 401);
+    assert.deepEqual(t.router.calls, []);
+  });
+
+  it('the session deleted while the body arrives: 404 for tools/call, ping and tools/list; nothing reaches the router', async () => {
+    for (const message of [runbook(34), { jsonrpc: '2.0', id: 37, method: 'ping' }, { jsonrpc: '2.0', id: 38, method: 'tools/list' }]) {
+      const t = await start({ scopes: RUN });
+      const { id } = await session(t);
+      const res = await slowRpc(t, message, { session: id }, async () => {
+        const r = await request(t.h.base, { method: 'DELETE', path: '/mcp', headers: { authorization: `Bearer ${t.token}`, 'mcp-session-id': id } });
+        assert.equal(r.status, 204);
+      });
+      assert.equal(res.status, 404, message.method);
+      assert.deepEqual(t.router.calls, []);
+    }
+  });
+
+  it('the session evicted (a 21st initialize) while the body arrives: 404 for tools/call, ping and tools/list; nothing reaches the router', async () => {
+    for (const message of [runbook(35), { jsonrpc: '2.0', id: 39, method: 'ping' }, { jsonrpc: '2.0', id: 40, method: 'tools/list' }]) {
+      const t = await start({ scopes: RUN });
+      const { id } = await session(t);
+      const res = await slowRpc(t, message, { session: id }, async () => {
+        for (let i = 0; i < 20; i += 1) await session(t);
+        assert.equal(t.h.mcp.sessionCount(t.grantId), 20);
+      });
+      assert.equal(res.status, 404, message.method);
+      assert.deepEqual(t.router.calls, []);
+    }
+  });
+
+  it('MCP-Protocol-Version must be the version the session negotiated', async () => {
+    const t = await start();
+    const { id } = await session(t, '2025-06-18');
+    assert.equal((await rpc(t, { jsonrpc: '2.0', id: 1, method: 'ping' }, { session: id, version: '2025-11-25' })).status, 400, 'supported, but not this session\'s');
+    assert.equal((await rpc(t, { jsonrpc: '2.0', method: 'notifications/initialized' }, { session: id, version: '2025-03-26' })).status, 400);
+    assert.equal((await rpc(t, { jsonrpc: '2.0', id: 2, method: 'ping' }, { session: id, version: '2025-06-18' })).status, 200);
+  });
+
+  it('a long-poll update without a status (log lines only) is not a status change', async () => {
+    const t = await start({ holdS: 5 });
+    const { id } = await session(t);
+    const pending = rpc(t, call(36, 'get_job', { job_id: 'web-01:job-5' }, { progressToken: 'p5' }), { session: id });
+    await new Promise((r) => setTimeout(r, 100));
+    t.router.jobs.emit('web-01:job-5', { log_lines: 4 });
+    t.router.jobs.emit('web-01:job-5', { status: 7, log_lines: 5 });
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(t.router.calls.filter((c) => c[0] === 'get_job').length, 1, 'still holding');
+    t.router.state.status = 'succeeded';
+    t.router.jobs.emit('web-01:job-5', { status: 'succeeded', log_lines: 6 });
+    const evs = events((await pending).text);
+    assert.deepEqual(evs.slice(0, 3).map((e) => e.params.progress), [4, 5, 6]);
+    assert.equal(evs[0].params.message, '');
+    assert.equal(JSON.parse(evs.at(-1).result.content[0].text).status, 'succeeded');
   });
 });

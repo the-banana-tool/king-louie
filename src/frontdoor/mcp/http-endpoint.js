@@ -115,6 +115,24 @@ class McpHttpEndpoint {
     return this.sessions.get(session.id) === session && Boolean(this.grants.live(session.grantId));
   }
 
+  // Whether a request may still act for its grant: the token authenticates
+  // again (not revoked, not expired, grant live) for the same grant, and the
+  // session, when there is one, is still this endpoint's. Checked after the
+  // body arrives and again right before anything reaches the router, since a
+  // revocation may land while the request is in flight.
+  // → null when it may; 'token' or 'session' naming what is gone.
+  _recheck(req, grantId, session) {
+    const auth = this._auth(req);
+    if (!auth || auth.grant.grant_id !== grantId) return 'token';
+    if (session && !this._live(session)) return 'session';
+    return null;
+  }
+
+  _refuse(res, why, id) {
+    if (why === 'token') this._unauthorized(res);
+    else sendJson(res, 404, { jsonrpc: '2.0', id, error: { code: -32001, message: 'the session ended' } });
+  }
+
   _unauthorized(res) {
     sendJson(res, 401, { error: 'invalid_token' }, { 'www-authenticate': `Bearer error="invalid_token", resource_metadata="${this.metadataUrl}"` });
   }
@@ -165,9 +183,12 @@ class McpHttpEndpoint {
       log.warn(`recording use of grant ${grantId} failed: ${err && err.message}`);
     }
     const sessionHeader = req.headers['mcp-session-id'];
-    const found = typeof sessionHeader === 'string' ? this.sessions.get(sessionHeader) : undefined;
-    const session = found && found.grantId === grantId ? found : null;
+    const lookup = () => {
+      const found = typeof sessionHeader === 'string' ? this.sessions.get(sessionHeader) : undefined;
+      return found && found.grantId === grantId ? found : null;
+    };
     if (req.method === 'DELETE') {
+      const session = lookup();
       if (!session) {
         sendJson(res, 404, { error: 'unknown_session' });
         return;
@@ -189,6 +210,15 @@ class McpHttpEndpoint {
       else sendJson(res, 400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } });
       return;
     }
+    // The body may have taken a while: whatever was revoked, deleted or
+    // evicted meanwhile counts. The token is authenticated again and the
+    // session looked up again by its id.
+    const fresh = this._auth(req);
+    if (!fresh || fresh.grant.grant_id !== grantId) {
+      this._unauthorized(res);
+      return;
+    }
+    const session = lookup();
     const kind = this._kind(message);
     if (!kind) {
       sendJson(res, 400, { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'one JSON-RPC 2.0 message per request' } });
@@ -199,14 +229,14 @@ class McpHttpEndpoint {
       this._initialize(res, message, grantId);
       return;
     }
-    // Everything after initialize needs this grant's session and a
-    // supported protocol version, notifications and responses included.
+    // Everything after initialize needs this grant's session and the
+    // protocol version it negotiated, notifications and responses included.
     if (!session) {
       sendJson(res, 404, { jsonrpc: '2.0', id, error: { code: -32001, message: 'unknown session; initialize again' } });
       return;
     }
-    if (!PROTOCOL_VERSIONS.includes(req.headers['mcp-protocol-version'])) {
-      sendJson(res, 400, { jsonrpc: '2.0', id, error: { code: -32600, message: `MCP-Protocol-Version must be one of ${PROTOCOL_VERSIONS.join(', ')}` } });
+    if (req.headers['mcp-protocol-version'] !== session.version) {
+      sendJson(res, 400, { jsonrpc: '2.0', id, error: { code: -32600, message: `MCP-Protocol-Version must be ${session.version}, the version this session negotiated` } });
       return;
     }
     session.lastUsed = this.now();
@@ -216,10 +246,10 @@ class McpHttpEndpoint {
       res.end();
       return;
     }
-    const scopes = auth.token.scopes;
+    const scopes = fresh.token.scopes;
     if (message.method === 'ping') return this._reply(res, id, {});
     if (message.method === 'tools/list') return this._reply(res, id, { tools: this._tools(scopes) });
-    if (message.method === 'tools/call') return this._call(req, res, message, session, { grant: auth.grant, scopes, session: session.id });
+    if (message.method === 'tools/call') return this._call(req, res, message, session, { grant: fresh.grant, scopes, session: session.id });
     sendJson(res, 200, { jsonrpc: '2.0', id, error: { code: -32601, message: 'Method not found' } });
     return undefined;
   }
@@ -303,22 +333,23 @@ class McpHttpEndpoint {
     const meta = isPlainObject(params._meta) ? params._meta : {};
     const progressToken = meta.progressToken;
     const wantsStream = /(^|,)\s*text\/event-stream\s*(;|,|$)/i.test(String(req.headers.accept || ''));
+    const before = this._recheck(req, session.grantId, session);
+    if (before) return this._refuse(res, before, message.id);
     const first = await this._route(name, args, ctx);
-    // The grant may have been revoked while the call ran.
-    if (!this._live(session)) {
-      return sendJson(res, 404, { jsonrpc: '2.0', id: message.id, error: { code: -32001, message: 'the session ended' } });
-    }
+    // The grant, token or session may have gone while the call ran.
+    const after = this._recheck(req, session.grantId, session);
+    if (after) return this._refuse(res, after, message.id);
     const streamable = name === 'get_job' && isRpcId(progressToken) && wantsStream && isPlainObject(first) && first.ok !== false
       && typeof args.job_id === 'string' && !this.router.isTerminal(first.status);
     if (!streamable) return this._reply(res, message.id, this._toolResult(first));
-    return this._stream(res, message, session, ctx, args, progressToken, first.status);
+    return this._stream(req, res, message, session, ctx, args, progressToken, first.status);
   }
 
   // Long-poll get_job (§3.5): progress notifications over SSE, then the
   // result at the first status change, the node going offline, or the hold.
   // Ending the session (DELETE, revocation, eviction) ends the stream with an
   // error and without asking the router again.
-  _stream(res, message, session, ctx, args, progressToken, initialStatus) {
+  _stream(req, res, message, session, ctx, args, progressToken, initialStatus) {
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
     const send = (obj) => {
       if (!res.writableEnded && !res.destroyed) res.write(`event: message\ndata: ${JSON.stringify(obj)}\n\n`);
@@ -349,13 +380,13 @@ class McpHttpEndpoint {
       if (state !== 'open') return;
       state = 'finishing';
       clearTimeout(timer);
-      if (!this._live(session)) {
+      if (this._recheck(req, session.grantId, session)) {
         end();
         return;
       }
       const result = await this._route('get_job', args, ctx);
       if (state === 'closed') return;
-      if (!this._live(session)) {
+      if (this._recheck(req, session.grantId, session)) {
         end();
         return;
       }
@@ -376,7 +407,8 @@ class McpHttpEndpoint {
         const status = typeof update.status === 'string' ? printable(update.status).slice(0, STATUS_MAX) : '';
         const lines = Number.isFinite(update.log_lines) && update.log_lines >= 0 ? update.log_lines : 0;
         send({ jsonrpc: '2.0', method: 'notifications/progress', params: { progressToken, progress: lines, message: status } });
-        if (update.offline === true || update.status !== initialStatus) finish();
+        // An update without a status (log lines only) is not a status change.
+        if (update.offline === true || (typeof update.status === 'string' && update.status !== initialStatus)) finish();
       });
       if (typeof unsub === 'function') unsubscribe = unsub;
     } catch (err) {

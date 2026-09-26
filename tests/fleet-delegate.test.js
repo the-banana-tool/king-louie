@@ -286,6 +286,12 @@ describe('DelegateSessions', () => {
     assert.equal(shouldRefuseUnsafe({ kind: 'frontdoor' }, node), true, 'a front-door origin with no scopes at all: refused');
     assert.equal(shouldRefuseUnsafe(origin(['fleet:delegate', 'fleet:unsafe']), node), false, 'front door with fleet:unsafe: not refused');
     assert.equal(shouldRefuseUnsafe(origin(['fleet:delegate', 'fleet:unsafe;machines=gpu-box']), node), false);
+    // Ruling T26-m19: fails closed for anything that is not this node's own caller.
+    assert.equal(shouldRefuseUnsafe({ kind: 'courier', scopes: [] }, node), true, 'an unknown kind: refused');
+    assert.equal(shouldRefuseUnsafe({ kind: 'courier', scopes: ['fleet:unsafe'] }, node), false, 'an unknown kind holding fleet:unsafe: not refused');
+    assert.equal(shouldRefuseUnsafe({ scopes: 'fleet:unsafe' }, node), true, 'a malformed origin: refused');
+    assert.equal(shouldRefuseUnsafe('stdio', node), true, 'a string is not an origin');
+    assert.equal(shouldRefuseUnsafe({ kind: 'STDIO' }, node), true, 'the kind matches exactly');
   });
 
   it('a throw after the executor returns (a JobManager listener) leaks neither the slot nor the session', async () => {
