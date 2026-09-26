@@ -21,7 +21,7 @@ const fs = require('fs');
 const path = require('path');
 const { createLogger } = require('../../logging');
 const { verifyAuditSlice } = require('../../audit/audit-ledger');
-const { open } = require('../../approvals/envelope');
+const { open, verifyEd25519 } = require('../../approvals/envelope');
 const { NODE_ID_RE } = require('../../approvals/messages');
 const { writeFileAtomic } = require('../../approvals/approver-store');
 const { err } = require('../errors');
@@ -46,6 +46,9 @@ const MAX_PAGE_BYTES = 524288; // the router's max_bytes
 // head, anchor, created_at and the JSON framing around the entries, before
 // base64url; the signature and key id sit outside the payload.
 const MESSAGE_SLACK = 1024;
+// Above this an oversize page is not even signature-checked (no link frame
+// carries it; the mesh caps payloads at 1 MiB).
+const HARD_PAYLOAD_CHARS = 16 * 1024 * 1024;
 const invalid = () => ({ outcome: 'invalid', more: false });
 
 const isSeq = (n) => Number.isInteger(n) && n >= 1;
@@ -166,13 +169,16 @@ class AuditMirror {
     this.alerts = alerts;
     this.retentionDays = retentionDays;
     this.now = now;
-    this.pageLimit = pageLimit;
-    this.pageBytes = pageBytes;
+    // Fixed at construction: the page caps are what bound every fetch and
+    // every stored line, so they are read-only afterwards.
+    Object.defineProperty(this, 'pageLimit', { value: pageLimit, enumerable: true, writable: false, configurable: false });
+    Object.defineProperty(this, 'pageBytes', { value: pageBytes, enumerable: true, writable: false, configurable: false });
     this.states = new Map();
     // Nodes whose slices.jsonl tail is known to match the saved head (no
     // unacknowledged record after it), so ingest can skip re-reading it.
     this.tailClean = new Set();
-    this.syncing = new Map();
+    // Per-node queue: sync and ingestSlice for one node run one at a time.
+    this.queues = new Map();
   }
 
   _nodeDir(nodeId) {
@@ -407,33 +413,79 @@ class AuditMirror {
     return { head_seq: s.head ? s.head.seq : 0, anchor: s.anchor ? { ...s.anchor } : null, gaps: structuredClone(s.gaps), breaks: structuredClone(s.breaks) };
   }
 
-  // The newest stored slice that starts below before_seq (or the newest
-  // of all), exactly as the node signed it.
+  // The stored slice that starts below before_seq (or the newest), exactly
+  // as the node signed it, with the mirror segment it belongs to. The
+  // current segment (the node's present chain) is preferred; an older
+  // segment answers only when the current one has nothing below before_seq.
+  // A record past the saved head (an unacknowledged tail) is never served.
   history(nodeId, { before_seq: beforeSeq } = {}) {
     if (typeof nodeId !== 'string' || !NODE_ID_RE.test(nodeId)) return null;
     if (beforeSeq !== undefined && beforeSeq !== null && !isSeq(beforeSeq)) return null;
     let recs;
+    let s;
     try {
+      s = this._state(nodeId);
       recs = this._readSlices(nodeId).lines.map((l) => l.rec).filter(Boolean);
     } catch (e) {
       log.warn(`could not read the ${nodeId} mirror history: ${e.message}`);
       return null;
     }
-    const candidates = isSeq(beforeSeq) ? recs.filter((r) => r.first_seq < beforeSeq) : recs;
+    const acked = (r) => r.segment < s.segment || (r.segment === s.segment && s.head !== null && r.last_seq <= s.head.seq);
+    const candidates = recs.filter((r) => acked(r) && (!isSeq(beforeSeq) || r.first_seq < beforeSeq));
     if (candidates.length === 0) return null;
-    return { ...candidates.reduce((best, r) => (r.last_seq >= best.last_seq ? r : best)).envelope };
+    const better = (r, best) => r.segment > best.segment || (r.segment === best.segment && r.last_seq >= best.last_seq);
+    const pick = candidates.reduce((best, r) => (better(r, best) ? r : best));
+    return { segment: pick.segment, envelope: { ...pick.envelope } };
   }
 
   // --- ingest ----------------------------------------------------------
 
-  _withinPage(envelope) {
-    return isObj(envelope) && typeof envelope.payload === 'string' && envelope.payload.length <= this._maxPayloadChars();
+  // Runs fn after every earlier sync/ingest of this node has settled. The
+  // returned promise carries fn's result or rejection; the queue link
+  // itself never rejects, so one failure never blocks the next caller.
+  _serial(nodeId, fn) {
+    const prior = this.queues.get(nodeId) || Promise.resolve();
+    const run = prior.then(fn);
+    const done = () => { if (this.queues.get(nodeId) === tracked) this.queues.delete(nodeId); };
+    const tracked = run.then(done, done);
+    this.queues.set(nodeId, tracked);
+    return run;
   }
 
+  // Public ingest goes through the same per-node queue as sync, so a direct
+  // ingest can never interleave with a sync's fetch-then-store.
   ingestSlice(nodeId, envelope, nodeKeySpkiHex) {
-    this._nodeDir(nodeId);
-    if (!this._withinPage(envelope)) {
-      log.warn(`an audit slice from ${nodeId} was refused: larger than ${this.pageBytes} bytes or not an envelope`);
+    try {
+      this._nodeDir(nodeId);
+    } catch (e) {
+      return Promise.reject(e);
+    }
+    return this._serial(nodeId, () => this._ingest(nodeId, envelope, nodeKeySpkiHex));
+  }
+
+  // A slice the node really signed but that the mirror cannot take (too big,
+  // naming another node, withholding entries, ...) would otherwise stall the
+  // mirror without a word. It is recorded once per mirror head as a break,
+  // with an alert, and the head does not move.
+  _refuseSigned(nodeId, reason, seq = null) {
+    log.error(`a signed audit slice from ${nodeId} was refused: ${reason}`);
+    this._break(nodeId, { seq, reason });
+    return invalid();
+  }
+
+  _ingest(nodeId, envelope, nodeKeySpkiHex) {
+    if (!isObj(envelope) || typeof envelope.payload !== 'string') {
+      log.warn(`an audit slice from ${nodeId} was refused: not an envelope`);
+      return invalid();
+    }
+    if (envelope.payload.length > this._maxPayloadChars()) {
+      // Too big to parse, but the signature is checked over the raw bytes
+      // first (up to a hard cap no link frame can exceed): only the node's
+      // own oversize page is recorded.
+      if (envelope.payload.length <= HARD_PAYLOAD_CHARS && envelope.kid === nodeId && verifyEd25519(envelope, nodeKeySpkiHex)) {
+        return this._refuseSigned(nodeId, 'oversize_entry');
+      }
+      log.warn(`an audit slice from ${nodeId} was refused: larger than ${this.pageBytes} bytes`);
       return invalid();
     }
     let v;
@@ -451,12 +503,9 @@ class AuditMirror {
       return invalid();
     }
     const m = v.message;
-    if (m.node_id !== nodeId) return invalid();
-    if (m.entries.length > this.pageLimit) {
-      log.warn(`an audit slice from ${nodeId} was refused: ${m.entries.length} entries over the page limit`);
-      return invalid();
-    }
-    if (m.head.seq < 0 || (m.head.seq === 0 ? m.head.hash !== null : !isHash(m.head.hash))) return invalid();
+    if (m.node_id !== nodeId) return this._refuseSigned(nodeId, 'wrong_node');
+    if (m.entries.length > this.pageLimit) return this._refuseSigned(nodeId, 'oversize_page');
+    if (m.head.seq < 0 || (m.head.seq === 0 ? m.head.hash !== null : !isHash(m.head.hash))) return this._refuseSigned(nodeId, 'malformed_head');
     const problem = entriesProblem(m.entries);
     if (problem) return this._break(nodeId, { seq: null, reason: problem });
 
@@ -467,17 +516,25 @@ class AuditMirror {
         // head: its history was truncated or rewritten.
         return this._break(nodeId, { seq: m.head.seq, reason: 'truncated' });
       }
-      if (m.head.seq > (s.head ? s.head.seq : 0)) {
-        log.warn(`an audit slice from ${nodeId} withheld entries up to its head ${m.head.seq}`);
-        return invalid();
-      }
+      if (m.head.seq > (s.head ? s.head.seq : 0)) return this._refuseSigned(nodeId, 'withheld_entries', m.head.seq);
       return { outcome: 'empty', more: false };
     }
     const first = m.entries[0];
     const last = m.entries[m.entries.length - 1];
     const more = last.seq < m.head.seq;
+    // F3's ledger answers `after` with the entries following that hash, or,
+    // when it no longer has the hash, from its oldest retained entry, which
+    // is the slice's signed anchor. So wherever the mirror cannot check
+    // continuity against its own head (a first sync, a gap), an honest page
+    // starts exactly at the anchor. A page that starts elsewhere is
+    // withholding the entries between. The limit: a node that also lies
+    // about its anchor (signs an anchor at the page's first entry) still
+    // reads as a gap or a prune anchor; only continuity with the mirror
+    // head, where there is one, catches that.
+    const startsAtAnchor = first.seq === m.anchor.seq && first.prev === m.anchor.prev;
 
     if (!s.head) {
+      if (!startsAtAnchor) return this._refuseSigned(nodeId, 'withheld_entries', first.seq);
       if (first.seq === 1) {
         if (first.prev !== null) return this._break(nodeId, { seq: 1, reason: 'first_prev_not_null' });
         return this._accept(nodeId, envelope, m, 'append', more, (n) => { n.anchor = { seq: 1, prev: null }; });
@@ -490,6 +547,11 @@ class AuditMirror {
     }
     if (first.seq === s.head.seq + 1 && first.prev === s.head.hash) return this._accept(nodeId, envelope, m, 'append', more, () => {});
     if (first.seq > s.head.seq + 1) {
+      // An honest gap: the page starts at the node's oldest retained entry
+      // (its anchor), which is past the mirror head. startsAtAnchor with
+      // first.seq > head + 1 is exactly that; an anchor at or below the head
+      // (the node still has entries the page skipped) fails startsAtAnchor.
+      if (!startsAtAnchor) return this._refuseSigned(nodeId, 'withheld_entries', first.seq);
       const gap = { kind: 'gap', from_seq: s.head.seq + 1, to_seq: first.seq - 1, at: this._iso() };
       log.warn(`audit gap on ${nodeId}: ${gap.from_seq}..${gap.to_seq} were pruned before the mirror saw them`);
       this._alert('audit_gap', nodeId, { from_seq: gap.from_seq, to_seq: gap.to_seq });
@@ -498,17 +560,43 @@ class AuditMirror {
         if (n.status === 'ok') n.status = 'gap';
       });
     }
+    // first.seq <= head.seq, or head + 1 with the wrong prev.
+    const atHead = m.entries.find((e) => e.seq === s.head.seq);
+    if (atHead && atHead.hash === s.head.hash) {
+      // The page overlaps what the mirror already has and runs through its
+      // head (a repeated page): nothing new, or append what follows the head.
+      if (last.seq === s.head.seq) return { outcome: 'empty', more };
+      return this._accept(nodeId, envelope, m, 'append', more, () => {});
+    }
+    if (last.seq < s.head.seq && this._storedHash(nodeId, s, last.seq) === last.hash) {
+      // Entries the mirror already holds, ending below its head: the node
+      // lost what came after (its signed head says so), or an old page was
+      // replayed. Either way the chain did not fork; the head stays.
+      return this._break(nodeId, { seq: last.seq, reason: m.head.seq < s.head.seq ? 'truncated' : 'replay' });
+    }
     // The node's chain no longer continues the mirror head: a fork. Record
     // it and start a new segment from the node's current chain.
     const brk = { seq: first.seq, reason: 'fork', mirror_head: { ...s.head }, at: this._iso() };
+    const known = s.breaks.some((b) => b.reason === 'fork' && b.seq === brk.seq && sameHead(b.mirror_head, brk.mirror_head));
     log.error(`audit chain break on ${nodeId}: fork at seq ${first.seq} (mirror head ${s.head.seq})`);
-    this._alert('audit_chain_break', nodeId, { reason: 'fork', seq: first.seq });
+    if (!known) this._alert('audit_chain_break', nodeId, { reason: 'fork', seq: first.seq });
     return this._accept(nodeId, envelope, m, 'chain_break', more, (n) => {
-      pushCapped(n.breaks, brk);
+      if (!known) pushCapped(n.breaks, brk, { keepFirst: true });
       n.status = 'broken';
       n.segment += 1;
       n.anchor = { seq: first.seq, prev: first.prev };
     });
+  }
+
+  // The hash of entry `seq` in the current segment as the mirror stored it,
+  // or null when no stored slice of this segment holds it.
+  _storedHash(nodeId, s, seq) {
+    const recs = this._readSlices(nodeId).lines.map((l) => l.rec).filter((r) => r && r.segment === s.segment && r.first_seq <= seq && seq <= r.last_seq);
+    for (let i = recs.length - 1; i >= 0; i -= 1) {
+      const e = entriesOf(recs[i]).find((x) => x.seq === seq);
+      if (e && isHash(e.hash)) return e.hash;
+    }
+    return null;
   }
 
   // The envelope names this node (kid and payload), read without trusting
@@ -550,6 +638,7 @@ class AuditMirror {
     return { outcome, more };
   }
 
+  // Records a break once per (reason, seq, mirror head), alerting first.
   _break(nodeId, record) {
     const s = this._state(nodeId);
     const same = s.breaks.find((b) => b.reason === record.reason && b.seq === record.seq && sameHead(b.mirror_head, s.head));
@@ -557,7 +646,7 @@ class AuditMirror {
     log.error(`audit chain break on ${nodeId}: ${record.reason}`);
     this._alert('audit_chain_break', nodeId, { reason: record.reason, seq: record.seq });
     const next = structuredClone(s);
-    pushCapped(next.breaks, { seq: record.seq, reason: record.reason, mirror_head: s.head ? { ...s.head } : null, at: this._iso() });
+    pushCapped(next.breaks, { seq: record.seq, reason: record.reason, mirror_head: s.head ? { ...s.head } : null, at: this._iso() }, { keepFirst: true });
     next.status = 'broken';
     this._commit(nodeId, next);
     return { outcome: 'chain_break', more: false };
@@ -565,9 +654,9 @@ class AuditMirror {
 
   // --- sync and retention ----------------------------------------------
 
-  // One sync per node at a time: two overlapping syncs would both page from
-  // the same head, and the second's (already stored) page would look like
-  // a fork.
+  // One sync (or ingest) per node at a time: two overlapping syncs would
+  // both page from the same head, and the second's (already stored) page
+  // would look like a fork.
   sync(nodeId, { fetchSlice, spkiHex, maxPages = 50 } = {}) {
     try {
       this._nodeDir(nodeId);
@@ -576,14 +665,7 @@ class AuditMirror {
     } catch (e) {
       return Promise.reject(e);
     }
-    // `tracked` never rejects (the caller gets `run`'s rejection), so the
-    // next sync in line always starts.
-    const prior = this.syncing.get(nodeId) || Promise.resolve();
-    const run = prior.then(() => this._sync(nodeId, fetchSlice, spkiHex, maxPages));
-    const done = () => { if (this.syncing.get(nodeId) === tracked) this.syncing.delete(nodeId); };
-    const tracked = run.then(done, done);
-    this.syncing.set(nodeId, tracked);
-    return run;
+    return this._serial(nodeId, () => this._sync(nodeId, fetchSlice, spkiHex, maxPages));
   }
 
   async _sync(nodeId, fetchSlice, spkiHex, maxPages) {
@@ -593,7 +675,7 @@ class AuditMirror {
     for (let page = 0; page < maxPages; page += 1) {
       const head = this.cursor(nodeId);
       const envelope = await fetchSlice({ limit: this.pageLimit, after: head ? head.hash : null, max_bytes: this.pageBytes });
-      const r = this.ingestSlice(nodeId, envelope, spkiHex);
+      const r = this._ingest(nodeId, envelope, spkiHex);
       outcome = r.outcome;
       more = r.more;
       if (['chain_break', 'gap', 'anchor'].includes(r.outcome) && !worst) worst = r.outcome;
@@ -609,8 +691,10 @@ class AuditMirror {
   }
 
   // Drops whole stored slices received more than retentionDays ago, but
-  // never the newest one, the one holding the current head, or a line it
-  // cannot read (that stays as evidence).
+  // never one that is evidence: the newest, the one holding the current
+  // head, the first of each segment (where a fork's new chain starts), one
+  // holding a break's mirror head (the chain the node walked away from),
+  // the slices either side of a gap, or a line it cannot read.
   prune(nodeId) {
     this._nodeDir(nodeId);
     if (this.retentionDays === null || this.retentionDays === undefined) return 0;
@@ -619,9 +703,20 @@ class AuditMirror {
     const recs = lines.filter((l) => l.rec);
     if (recs.length <= 1) return 0;
     const cutoff = this.now() - this.retentionDays * DAY_MS;
-    const newest = recs[recs.length - 1];
+    const keep = new Set([recs[recs.length - 1]]);
+    const firstOfSegment = new Set();
+    for (const l of recs) {
+      if (!firstOfSegment.has(l.rec.segment)) {
+        firstOfSegment.add(l.rec.segment);
+        keep.add(l);
+      }
+    }
+    const breakHeads = new Set(s.breaks.filter((b) => b.mirror_head).map((b) => b.mirror_head.hash));
     const holdsHead = (r) => s.head !== null && r.segment === s.segment && r.first_seq <= s.head.seq && s.head.seq <= r.last_seq;
-    const drop = (l) => l.rec && l !== newest && !holdsHead(l.rec) && Date.parse(l.rec.received_at) < cutoff;
+    const bordersGap = (r) => s.gaps.some((g) => g.kind === 'gap' && (r.last_seq === g.from_seq - 1 || r.first_seq === g.to_seq + 1));
+    const holdsBreakHead = (r) => breakHeads.size > 0 && entriesOf(r).some((e) => breakHeads.has(e.hash));
+    const drop = (l) => l.rec && !keep.has(l) && Date.parse(l.rec.received_at) < cutoff
+      && !holdsHead(l.rec) && !bordersGap(l.rec) && !holdsBreakHead(l.rec);
     const kept = lines.filter((l) => !drop(l));
     if (kept.length === lines.length) return 0;
     writeFileAtomic(path.join(this._nodeDir(nodeId), 'slices.jsonl'), kept.map((l) => `${l.raw}\n`).join(''));
@@ -629,9 +724,23 @@ class AuditMirror {
   }
 }
 
-function pushCapped(list, item) {
+// The entries of a stored record's envelope, read without re-verifying it
+// (it was verified when stored); [] when the stored line does not open.
+function entriesOf(record) {
+  try {
+    const { message } = open(record.envelope);
+    return Array.isArray(message.entries) ? message.entries.filter(isObj) : [];
+  } catch {
+    return [];
+  }
+}
+
+// Caps a gaps/breaks list, dropping the oldest; with keepFirst the first
+// record (the first break the owner was told about) is never the one dropped.
+function pushCapped(list, item, { keepFirst = false } = {}) {
   list.push(item);
-  if (list.length > MAX_RECORDS) list.splice(0, list.length - MAX_RECORDS);
+  const excess = list.length - MAX_RECORDS;
+  if (excess > 0) list.splice(keepFirst ? 1 : 0, excess);
 }
 
 module.exports = { AuditMirror };
