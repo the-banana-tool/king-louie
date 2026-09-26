@@ -266,14 +266,26 @@ describe('DelegateSessions', () => {
     assert.deepEqual(t.calls, [{ tool: GATED, origin: { client: 'Example Client', session: 'mcp-1', job_id: mine.job_id } }]);
   });
 
-  it('a local stdio session (no scopes) refuses unsafe calls (M19 provisional)', async () => {
+  it('a local stdio session sends its unsafe calls to the phone (owner decision M19)', async () => {
     const t = await setup();
     script = [use(GATED)];
     const { job_id: jobId } = await t.sessions.start({ task: 'push', origin: STDIO_ORIGIN });
     await t.sessions.turns.get(jobId);
-    assert.deepEqual(t.calls, []);
-    assert.equal(shouldRefuseUnsafe(STDIO_ORIGIN, { name: 'gpu-box' }), true);
-    assert.equal(shouldRefuseUnsafe(origin(['fleet:unsafe']), { name: 'gpu-box' }), false);
+    assert.deepEqual(t.calls.map((c) => c.tool), [GATED], 'the phone is asked, as for a stdio runbook');
+    const line = t.jobs.getJob(jobId).logs.find((l) => l.startsWith(`tool ${GATED}`));
+    assert.ok(!line.includes(REFUSE_UNSAFE_MESSAGE), line);
+  });
+
+  it('shouldRefuseUnsafe: only a front-door origin without fleet:unsafe for this node refuses (M19)', () => {
+    const node = { name: 'gpu-box' };
+    assert.equal(shouldRefuseUnsafe(STDIO_ORIGIN, node), false, 'stdio: goes to approval');
+    assert.equal(shouldRefuseUnsafe(undefined, node), false, "no origin is this node's own caller");
+    assert.equal(shouldRefuseUnsafe(origin(['fleet:delegate']), node), true, 'front door without fleet:unsafe: refused');
+    assert.equal(shouldRefuseUnsafe(origin(['fleet:delegate', 'fleet:unsafe;machines=web-01']), node), true, 'fleet:unsafe for another machine: refused');
+    assert.equal(shouldRefuseUnsafe(origin([]), node), true);
+    assert.equal(shouldRefuseUnsafe({ kind: 'frontdoor' }, node), true, 'a front-door origin with no scopes at all: refused');
+    assert.equal(shouldRefuseUnsafe(origin(['fleet:delegate', 'fleet:unsafe']), node), false, 'front door with fleet:unsafe: not refused');
+    assert.equal(shouldRefuseUnsafe(origin(['fleet:delegate', 'fleet:unsafe;machines=gpu-box']), node), false);
   });
 
   it('a throw after the executor returns (a JobManager listener) leaks neither the slot nor the session', async () => {

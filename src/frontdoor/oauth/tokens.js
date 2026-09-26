@@ -348,16 +348,21 @@ function createTokenHandlers({ tokens, codes, grants, alerts = null, auditLedger
       const r = tokens.refresh({ token: f.refresh_token, clientId: f.client_id, scope: f.scope });
       if (r.reuse) {
         log.warn(`refresh token reuse on ${r.reuse}; revoking the grant`);
-        // A detected theft is alerted and audited before the revocation, so
-        // it is reported even if revoking throws; and a failing alert never
-        // stops the revocation.
+        // No await sits between detecting the theft and revoking the grant:
+        // the stolen successor must not keep working while an audit append
+        // is pending. The alert is raised first (synchronously; a failing
+        // alert never stops the revocation), and the audit entry is written
+        // after the revocation, even when revoking throws.
         try {
           if (alerts) alerts.raise('refresh_reuse', { subject: `grant:${r.reuse}`, detail: { client_id: f.client_id } });
         } catch (err) {
           log.error(`raising refresh_reuse for ${r.reuse} failed: ${err && err.message}`);
         }
-        await recordFrontDoorEvent(auditLedger, 'frontdoor.refresh_reuse', { grant_id: r.reuse });
-        await revokeGrant(r.reuse, 'refresh_reuse');
+        try {
+          await revokeGrant(r.reuse, 'refresh_reuse');
+        } finally {
+          await recordFrontDoorEvent(auditLedger, 'frontdoor.refresh_reuse', { grant_id: r.reuse });
+        }
         throw new OAuthError('invalid_grant', 'this refresh token was already used; the grant is revoked');
       }
       const grant = grants.live(r.grantId);

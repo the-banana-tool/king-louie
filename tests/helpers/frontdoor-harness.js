@@ -31,7 +31,9 @@ const FLEET = ['fleet:read', 'fleet:run', 'fleet:unsafe', 'fleet:delegate'];
 const MACHINES = ['gpu-box', 'web-01'];
 const UID = process.platform !== 'win32' ? process.getuid() : 0;
 
-async function startFrontDoorHttp({ mcp = null, fetchMetadata = null, clientDefaults = [], scopesEnabled = FLEET, now = Date.now, pendingPerIp = null, machines = MACHINES } = {}) {
+// onAudit(entry): called with each audit entry as its append starts, before
+// it is recorded (tests that check what was already true at that moment).
+async function startFrontDoorHttp({ mcp = null, fetchMetadata = null, clientDefaults = [], scopesEnabled = FLEET, now = Date.now, pendingPerIp = null, machines = MACHINES, onAudit = null } = {}) {
   const fd = testNodeIdentity({ key: 'relay', nodeName: 'frontdoor' });
   const phone = createFakePhone({ seed: 'A', name: 'Owner phone' });
   const second = createFakePhone({ seed: 'C', name: 'Second phone' });
@@ -45,7 +47,7 @@ async function startFrontDoorHttp({ mcp = null, fetchMetadata = null, clientDefa
   const phoneApi = createPhoneApi({ devices });
   const alerts = new AlertCenter({ file: path.join(dataDir, 'frontdoor', 'alerts.json'), now });
   const audit = [];
-  const auditLedger = { append: async (e) => { audit.push(e); return e; } };
+  const auditLedger = { append: async (e) => { if (onAudit) onAudit(e); audit.push(e); return e; } };
   const pushes = [];
   // The node registry (Task 19), holding `machines` as console records.
   for (const name of machines) {

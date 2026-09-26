@@ -284,6 +284,25 @@ describe('grant abuse: refresh tokens', () => {
     assert.equal(h.tokens.find(next.json.refresh_token), null, 'and the tokens still die');
   });
 
+  it('refresh reuse: the grant is already revoked when the refresh_reuse audit append starts', async () => {
+    let t = Date.now();
+    let h = null;
+    const liveAtAudit = [];
+    h = await start({
+      now: () => t,
+      onAudit: (e) => { if (e.kind === 'frontdoor.refresh_reuse') liveAtAudit.push(h.grants.live(e.data.grant_id) !== null); }
+    });
+    const c = await approvedCode(h);
+    const pair = (await redeem(h, c)).json;
+    const next = await refresh(h, c.clientId, pair.refresh_token);
+    assert.equal(next.status, 200);
+    t += 30001;
+    const reuse = await refresh(h, c.clientId, pair.refresh_token);
+    assert.equal(reuse.status, 400);
+    assert.deepEqual(liveAtAudit, [false], 'no await sits between detecting the theft and revoking the grant');
+    assert.ok(h.alerts.unacked('refresh_reuse').some((a) => a.subject === `grant:${c.grantId}`));
+  });
+
   it('refresh may not narrow to a machine the grant did not pin', async () => {
     const h = await start({ pendingPerIp: 10 });
     const gpu = h.registry.byName('gpu-box');

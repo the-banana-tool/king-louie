@@ -25,14 +25,13 @@ const OPEN_STATES = new Set(['idle', 'turn']);
 const LIVE_BACKGROUND_STATES = new Set(['pending', 'running']);
 
 // Whether this delegate turn refuses unsafe calls itself (the phone is never
-// asked). §3.8: refused unless the client holds fleet:unsafe for THIS node; a
-// grant limited to other machines does not count here.
-// Owner question M19 (pending): a local stdio session (STDIO_ORIGIN) has no
-// scopes, so it refuses too. To send its unsafe calls to the phone instead,
-// like stdio runbooks, change the return to:
-//   return origin?.kind === 'frontdoor' && !covers(origin.scopes, 'fleet:unsafe', nodeConfig.name);
+// asked). §3.8: a front-door client is refused unless it holds fleet:unsafe
+// for THIS node; a grant limited to other machines does not count here.
+// Owner decision M19 (2026-09-26): a session this node started itself (a
+// local stdio caller, STDIO_ORIGIN) has no scopes and is not refused; its
+// unsafe calls go to the phone, like stdio runbooks.
 function shouldRefuseUnsafe(origin, nodeConfig) {
-  return !covers(origin && origin.scopes, 'fleet:unsafe', nodeConfig && nodeConfig.name);
+  return origin?.kind === 'frontdoor' && !covers(origin.scopes, 'fleet:unsafe', nodeConfig && nodeConfig.name);
 }
 
 function capText(value, max) {
