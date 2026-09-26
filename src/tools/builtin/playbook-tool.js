@@ -16,7 +16,8 @@ const { Tool } = require('../tool-schema');
 const { withCase } = require('./case-tools');
 const { NAME_RE, LIMITS } = require('../../cases/playbooks/format');
 const views = require('../../cases/playbooks/views');
-const { oneLine } = require('../../cases/playbooks/frame');
+const { oneLine, neutralize, cut } = require('../../cases/playbooks/frame');
+const { isFileName } = require('../../cases/playbooks/proposals');
 const { createLogger } = require('../../logging');
 
 const log = createLogger('tools/playbook');
@@ -27,8 +28,8 @@ const MAX_FILES = 8;
 const MAX_RATIONALE = 2000;
 const MAX_FACT_IDS = 100;
 const FACT_ID_RE = /^f-\d{4,9}$/;
-// A bare playbook file name (proposals.js checks it again, with Windows
-// device names).
+// A bare playbook file name; checkFiles also applies proposals.js
+// isFileName (Windows device names, dot prefix, trailing dot).
 const FILE_RE = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,99}\.(md|yaml|txt)$/;
 const PROPOSAL_ID_RE = /^pp-\d{3,4}$/;
 const REL_PATH_RE = /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/;
@@ -70,7 +71,7 @@ function checkFiles(files) {
   for (const f of files) {
     if (!f || typeof f !== 'object' || Array.isArray(f)) return { error: FILES_ERROR };
     const { path: p, content } = f;
-    if (typeof p !== 'string' || !FILE_RE.test(p)) return { error: FILES_ERROR };
+    if (typeof p !== 'string' || !FILE_RE.test(p) || !isFileName(p)) return { error: FILES_ERROR };
     if (typeof content !== 'string' || Buffer.byteLength(content, 'utf8') > LIMITS.fileBytes) return { error: FILES_ERROR };
     const key = p.toLowerCase();
     if (seen.has(key)) return { error: `files lists ${seen.get(key)} twice.` };
@@ -80,10 +81,12 @@ function checkFiles(files) {
   return { files: out };
 }
 
+// One line, capped, then tag-neutralised (it is stored in the journal and
+// the proposal record) and cut back to the manager's limit.
 function checkRationale(rationale) {
   if (typeof rationale !== 'string' || rationale.length > MAX_RATIONALE) return null;
   const line = oneLine(rationale, MAX_RATIONALE);
-  return line || null;
+  return line ? cut(neutralize(line), MAX_RATIONALE) : null;
 }
 
 // Fact ids of this case's active facts; the ids named in an error have
@@ -98,7 +101,13 @@ function checkFactIds(ctx, factIds) {
     seen.add(id);
   }
   if (!factIds.length) return { factIds: [] };
-  const facts = ctx.runtime.ledger(ctx.caseId).view().facts;
+  let facts;
+  try {
+    facts = ctx.runtime.ledger(ctx.caseId).view().facts;
+  } catch (err) {
+    log.warn('Playbook.propose could not read the ledger', { error: String(err && err.message) });
+    return { error: 'Facts could not be read (details in the log).' };
+  }
   const bad = factIds.filter((id) => facts.get(id)?.status !== 'active');
   if (bad.length) return { error: `These fact ids are missing or no longer active: ${bad.join(', ')}.` };
   return { factIds: [...factIds] };
@@ -236,20 +245,19 @@ const PlaybookTool = new Tool({
     required: ['action']
   },
   requiresApproval: false,
-  execute: (params, options) => withCase(
-    options,
-    (p) => `Playbook.${ACTIONS.includes(p.action) ? p.action : 'unknown'}`,
-    async (ctx) => {
-      const p = params || {};
-      if (!ACTIONS.includes(p.action)) return fail(`action must be one of ${ACTIONS.join(', ')}.`);
+  // The action is checked first, so an unknown one gets this error rather
+  // than a status refusal.
+  execute: async (params, options) => {
+    if (!ACTIONS.includes(params?.action)) return fail(`action must be one of ${ACTIONS.join(', ')}.`);
+    return withCase(options, (p) => `Playbook.${p.action}`, async (ctx) => {
+      const p = params;
       const manager = ctx.runtime.playbooks;
       if (!manager) return fail('Playbooks are not available in this host.');
       if (p.action === 'list') return list(manager, ctx.caseId);
       if (p.action === 'read') return read(manager, ctx.caseId, p);
       return propose(manager, ctx, p);
-    },
-    { params }
-  )
+    }, { params });
+  }
 });
 
 function registerPlaybookTools(registry) {

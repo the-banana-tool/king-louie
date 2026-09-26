@@ -751,6 +751,7 @@ module.exports = {
   MAX_PATCH_BYTES,
   MAX_PROPOSALS_BYTES,
   ProposalError,
+  isFileName,
   checkFiles,
   checkPatch,
   buildProposal,
