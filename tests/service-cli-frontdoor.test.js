@@ -184,6 +184,26 @@ describe('frontdoor code --confirm', () => {
     assert.deepEqual(consoleFiles(t.configDir), [`${fresh.nodeId}.json`]);
   });
 
+  it('when an older record of the name cannot be removed, the new record comes back out and the pairing is declined', async (t) => {
+    const tl = layout();
+    const old = testNodeIdentity({ nodeName: 'web-01' });
+    const fresh = testNodeIdentity({ nodeName: 'web-01' });
+    writeRecord(tl.configDir, old, 'web-01');
+    const oldFile = path.join(NodeRegistry.consoleDir(tl.configDir), `${old.nodeId}.json`);
+    const realRm = fs.rmSync;
+    t.mock.method(fs, 'rmSync', (file, opts) => {
+      if (file === oldFile) throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' });
+      return realRm(file, opts);
+    });
+    const courier = service(pendingFor(fresh, 'web-01', { replaces: old.nodeId }));
+    const { code, io } = await confirmRun(tl, 'web-01', courier);
+    assert.equal(code, 1);
+    assert.match(io.text.err, /Could not remove the older record of web-01 \(EPERM/);
+    assert.deepEqual(consoleFiles(tl.configDir), [`${old.nodeId}.json`]);
+    assert.ok(courier.calls.some(([m]) => m === 'frontdoor.declined'));
+    assert.ok(!courier.calls.some(([m]) => m === 'frontdoor.confirmed'));
+  });
+
   it('a "no" declines the pairing and writes nothing', async () => {
     const t = layout();
     const courier = service(pendingFor(testNodeIdentity(), 'web-01'));
@@ -192,6 +212,32 @@ describe('frontdoor code --confirm', () => {
     assert.match(io.text.out, /Not enrolled\. Nothing was written\./);
     assert.deepEqual(consoleFiles(t.configDir), []);
     assert.deepEqual(courier.calls.at(-1), ['frontdoor.declined', { pairing_id: `pr_${'A'.repeat(22)}` }]);
+  });
+});
+
+describe('frontdoor remove-node (Task 33 fix round)', () => {
+  it('removes every console record of the name', async () => {
+    const t = layout();
+    const one = testNodeIdentity();
+    const two = testNodeIdentity();
+    const other = testNodeIdentity();
+    writeRecord(t.configDir, one, 'web-01');
+    writeRecord(t.configDir, two, 'web-01');
+    writeRecord(t.configDir, other, 'gpu-box');
+    const io = streamIo();
+    assert.equal(await runFrontDoorCommand({ sub: 'remove-node', arg: 'web-01', dataDir: t.dataDir, configDir: t.configDir, io }), 0, io.text.err);
+    assert.match(io.text.out, /^Removed web-01\.$/m);
+    assert.deepEqual(consoleFiles(t.configDir), [`${other.nodeId}.json`]);
+  });
+
+  it('a delete that fails is reported as such, never as "no record"', async (t) => {
+    const tl = layout();
+    writeRecord(tl.configDir, testNodeIdentity(), 'web-01');
+    t.mock.method(fs, 'rmSync', () => { throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' }); });
+    const io = streamIo();
+    assert.equal(await runFrontDoorCommand({ sub: 'remove-node', arg: 'web-01', dataDir: tl.dataDir, configDir: tl.configDir, io }), 1);
+    assert.match(io.text.err, /Could not remove the console record for "web-01": EPERM/);
+    assert.doesNotMatch(io.text.err + io.text.out, /No console record|Removed/);
   });
 });
 
@@ -275,6 +321,31 @@ describe('frontdoor admin commands: arguments and secrets', () => {
       fs.symlinkSync(target, file);
       assert.equal(readFrontDoorLink(t.dataDir), null, 'a link is not followed');
     }
+  });
+});
+
+describe('link.json never blocks the reader (Task 33 fix round)', () => {
+  it('a FIFO planted as link.json is refused at once', { skip: process.platform === 'win32' && 'no FIFOs on Windows' }, () => {
+    const t = layout();
+    const dir = path.join(t.dataDir, 'approvals');
+    fs.mkdirSync(dir, { recursive: true });
+    require('child_process').execFileSync('mkfifo', ['--', path.join(dir, 'link.json')]);
+    const started = Date.now();
+    assert.equal(readFrontDoorLink(t.dataDir), null);
+    assert.ok(Date.now() - started < 2000);
+  });
+});
+
+describe('pair https:// warns about --code on a terminal (Task 33 fix round)', () => {
+  it('warns on a TTY, and not when stdin is not a terminal', async () => {
+    const t = layout();
+    const tty = streamIo();
+    tty.stdin.isTTY = true;
+    assert.equal(await runPair({ url: 'https://mcp.kl.example.com', dataDir: t.dataDir, io: tty, flags: { code: 'not a code' }, deps: { configDir: t.configDir } }), 2);
+    assert.match(tty.text.err, /^Warning: a code given with --code is visible in ps and your shell history/m);
+    const piped = streamIo();
+    assert.equal(await runPair({ url: 'https://mcp.kl.example.com', dataDir: t.dataDir, io: piped, flags: { code: 'not a code' }, deps: { configDir: t.configDir } }), 2);
+    assert.doesNotMatch(piped.text.err, /Warning/);
   });
 });
 

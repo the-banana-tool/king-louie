@@ -52,6 +52,7 @@ const { OperatorTls } = require('./tls/operator-tls');
 const { Challenges } = require('./protocol/challenges');
 const { spkiHexFromRaw, nodeFingerprint, NODE_NAME_RE } = require('./protocol/messages');
 const { RepinPublisher } = require('./repin');
+const { auditConsoleRemovals } = require('./console-removals');
 const { createFrontDoorHandler, createMcpHttpServer, createMeshHttpServer } = require('./http');
 const TOOL_EXTENSIONS = require('./tool-extensions');
 
@@ -254,6 +255,10 @@ async function startFrontDoor({ dataDir, configDir, adminUid = 0, geteuid = defa
     // Check 6: every registry record verifies (bad ones are quarantined).
     const registry = new NodeRegistry({ configDir, dataDir, approverStore, frontdoorId, alerts, adminUid, geteuid });
     registry.load();
+    // Console records removed while the front door was stopped are audited.
+    const consoleKnownFile = path.join(fdDir, 'console-nodes.json');
+    const auditRemovals = (noticed, alreadyAudited = []) => auditConsoleRemovals({ configDir, file: consoleKnownFile, ledger: ownLedger, noticed, alreadyAudited });
+    await auditRemovals('start');
     warnAboutF3Nodes(dataDir);
     const isPinnedNodeCert = makePinCheck(() => registry.peers().map((p) => p.tlsFingerprint));
 
@@ -433,6 +438,7 @@ async function startFrontDoor({ dataDir, configDir, adminUid = 0, geteuid = defa
           if (typeof params.removed === 'string' && NODE_NAME_RE.test(params.removed)) {
             await recordFrontDoorEvent(ownLedger, 'frontdoor.node.removed', { node_name: params.removed, by: 'console' });
           }
+          await auditRemovals('reload', typeof params.removed === 'string' ? [params.removed] : []);
           return { nodes: registry.list().length };
         case 'frontdoor.nodes':
           return registry.list().map((r) => {
@@ -458,6 +464,7 @@ async function startFrontDoor({ dataDir, configDir, adminUid = 0, geteuid = defa
       } catch (err) {
         log.warn(`re-reading the node registry failed: ${err.message}`);
       }
+      await auditRemovals('reload');
       await tlsSource.reload();
       spkiChanged();
     };

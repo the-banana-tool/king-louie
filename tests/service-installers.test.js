@@ -1379,7 +1379,11 @@ describe('the frontdoor unit (fleet stage 4 §3.14)', () => {
     assert.match(unit, /^CapabilityBoundingSet=CAP_NET_BIND_SERVICE$/m);
     assert.match(unit, /^ProtectHome=yes$/m);
     assert.match(unit, /--profile frontdoor$/m);
-    assert.doesNotMatch(renderSystemdUnit({ ...base, profile: 'agent' }), /CAP_NET_BIND_SERVICE/);
+    for (const line of ['PrivateDevices=yes', 'RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX', 'LockPersonality=yes', 'RestrictSUIDSGID=yes']) {
+      assert.ok(unit.split('\n').includes(line), line);
+    }
+    const agent = renderSystemdUnit({ ...base, profile: 'agent' });
+    assert.doesNotMatch(agent, /CAP_NET_BIND_SERVICE|RestrictAddressFamilies/);
   });
 
   it('installs on Linux only', () => {

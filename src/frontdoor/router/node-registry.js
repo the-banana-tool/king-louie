@@ -108,22 +108,27 @@ class NodeRegistry extends EventEmitter {
     writeFileAtomic(path.join(dir, `${record.node_id}.json`), `${JSON.stringify(record, null, 2)}\n`, 0o644);
   }
 
-  // Admin CLI only (`frontdoor remove-node <name>`).
+  // Admin CLI only (`frontdoor remove-node <name>`). Removes every console
+  // record with that name (there should be one; a leftover duplicate must not
+  // stay trusted) and returns whether any was removed. A file that cannot be
+  // read or parsed is not a record; a record that cannot be deleted throws.
   static removeConsoleRecord(configDir, nodeName) {
     const dir = NodeRegistry.consoleDir(configDir);
     if (!fs.existsSync(dir)) return false;
+    let removed = false;
     for (const name of fs.readdirSync(dir).filter((n) => n.endsWith('.json'))) {
+      let r = null;
       try {
-        const r = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
-        if (r.node_name === nodeName) {
-          fs.rmSync(path.join(dir, name));
-          return true;
-        }
+        r = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
       } catch {
-        // not a record
+        r = null; // not a record
+      }
+      if (r && r.node_name === nodeName) {
+        fs.rmSync(path.join(dir, name));
+        removed = true;
       }
     }
-    return false;
+    return removed;
   }
 
   _raise(kind, subject, detail) {
@@ -167,6 +172,19 @@ class NodeRegistry extends EventEmitter {
         continue;
       }
       out.set(record.node_id, { ...record, signed: null, confirmed_by: 'console' });
+    }
+    // Two console records with one name (an interrupted replacement, a copied
+    // file): which key is meant is unknown, so neither is trusted until the
+    // administrator removes one (fail closed).
+    const byName = new Map();
+    for (const r of out.values()) byName.set(r.node_name, [...(byName.get(r.node_name) || []), r]);
+    for (const [nodeName, records] of byName) {
+      if (records.length < 2) continue;
+      log.error(`${records.length} console records are named ${nodeName}; none of them is trusted until only one is left`);
+      for (const r of records) {
+        out.delete(r.node_id);
+        this._invalid(r, 'duplicate_console_name');
+      }
     }
     return out;
   }

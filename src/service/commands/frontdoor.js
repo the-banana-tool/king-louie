@@ -56,11 +56,12 @@ function malformed(what) {
 }
 
 // A small file in the service-writable data dir, read without following a
-// link and with a size cap: root may be the reader.
+// link, without blocking on a FIFO (O_NONBLOCK; fstat then refuses anything
+// but a regular file) and with a size cap: root may be the reader.
 function readSmallJson(file, max) {
   let fd;
   try {
-    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0));
     const st = fs.fstatSync(fd);
     if (!st.isFile() || st.size > max) return null;
     const buf = Buffer.alloc(st.size);
@@ -274,7 +275,17 @@ async function runCode({ name, confirm, dataDir, configDir, io, deps }) {
       await decline();
       throw err;
     }
-    for (const r of older) fs.rmSync(r.file, { force: true });
+    try {
+      for (const r of older) fs.rmSync(r.file, { force: true });
+    } catch (err) {
+      // Two records with one name would leave the old key in place (and the
+      // registry trusts neither): take the new one back out and decline.
+      fs.rmSync(recordFile, { force: true });
+      for (const r of older) if (!fs.existsSync(r.file)) writeFileAtomic(r.file, r.text, 0o644);
+      await decline();
+      io.stderr.write(`Could not remove the older record of ${p.node_name} (${printable(err.message)}). The new record was taken back out. Nothing was enrolled.\n`);
+      return 1;
+    }
     try {
       await call('frontdoor.confirmed', { pairing_id: p.pairing_id });
     } catch (err) {
@@ -327,7 +338,14 @@ async function runRemoveNode({ name, dataDir, configDir, io, deps }) {
     io.stderr.write(`${configDir} is not writable: run remove-node as an administrator.\n`);
     return 1;
   }
-  if (!NodeRegistry.removeConsoleRecord(configDir, name)) {
+  let removed;
+  try {
+    removed = NodeRegistry.removeConsoleRecord(configDir, name);
+  } catch (err) {
+    io.stderr.write(`Could not remove the console record for "${name}": ${printable(err.message)}\n`);
+    return 1;
+  }
+  if (!removed) {
     io.stderr.write(`No console record for "${name}" in ${NodeRegistry.consoleDir(configDir)}. A node a phone enrolled is removed in the phone app (Nodes).\n`);
     return 1;
   }

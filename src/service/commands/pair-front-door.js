@@ -133,6 +133,9 @@ async function pairWithFrontDoor({ target, configDir, nodeCfg, identity, io, fla
   const lookup = deps.lookup || null;
 
   let typed = flags.code;
+  if (typed !== undefined && io.stdin && io.stdin.isTTY) {
+    io.stderr.write('Warning: a code given with --code is visible in ps and your shell history; leave it out to type it at the prompt.\n');
+  }
   if (typed === undefined) {
     if (io.stdin && io.stdin.isTTY) {
       io.stdout.write('Pairing code (from the phone app, or `frontdoor code` on the front door): ');

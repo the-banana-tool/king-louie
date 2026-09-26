@@ -581,7 +581,12 @@ function renderSystemdUnit({ nodePath, entryPath, dataDir, user, profile = 'agen
     `LoadCredential=kl-master-key:${linuxCredPath(dataDir)}`,
     'NoNewPrivileges=yes',
     // The front door binds 443 as its service user (fleet stage 4 §3.14).
-    ...(profile === 'frontdoor' ? ['AmbientCapabilities=CAP_NET_BIND_SERVICE', 'CapabilityBoundingSet=CAP_NET_BIND_SERVICE'] : []),
+    ...(profile === 'frontdoor' ? [
+      'AmbientCapabilities=CAP_NET_BIND_SERVICE', 'CapabilityBoundingSet=CAP_NET_BIND_SERVICE',
+      // A network-facing process needs no devices, no other socket families,
+      // no personality changes and no setuid/setgid files.
+      'PrivateDevices=yes', 'RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX', 'LockPersonality=yes', 'RestrictSUIDSGID=yes'
+    ] : []),
     'ProtectSystem=strict',
     `ProtectHome=${profile === 'agent' ? 'read-only' : 'yes'}`,
     'PrivateTmp=yes',

@@ -109,6 +109,37 @@ async function layout({ fdRaw = {} } = {}) {
 
 const start = (l, over = {}) => startFrontDoor({ dataDir: l.dataDir, configDir: l.configDir, adminUid: UID, geteuid: () => UID, nodeConfig: l.nodeConfig, serviceConfig: l.serviceConfig, deps: l.deps, ...over });
 
+describe('console removals the front door did not see (Task 33 fix round)', () => {
+  it('a console record removed while the front door was stopped is audited at the next start; SIGHUP audits one removed by hand', async () => {
+    const l = await layout();
+    const record = (id, name) => ({
+      node_id: id.nodeId, node_name: name, profile: 'runbook', public_key: rawEd25519(id.publicKey),
+      tls_fingerprint: id.tlsFingerprint, source: 'console', accepted_at: new Date().toISOString()
+    });
+    const web = new NodeIdentity({ nodeName: 'web-02' });
+    const gpu = new NodeIdentity({ nodeName: 'gpu-box' });
+    NodeRegistry.writeConsoleRecord(l.configDir, record(web, 'web-02'));
+    NodeRegistry.writeConsoleRecord(l.configDir, record(gpu, 'gpu-box'));
+    let fd = await start(l);
+    let running = fd;
+    cleanups.push(() => running.stop());
+    const removals = (nodeId) => new AuditLedger({ dir: path.join(l.dataDir, 'audit'), nodeId }).tail(50)
+      .filter((e) => e.kind === 'frontdoor.node.removed').map((e) => e.data);
+    assert.deepEqual(removals(fd.identity.nodeId), [], 'the first start only records the set');
+    await fd.stop();
+
+    assert.equal(NodeRegistry.removeConsoleRecord(l.configDir, 'web-02'), true); // while stopped
+    fd = await start(l);
+    running = fd;
+    assert.deepEqual(removals(fd.identity.nodeId), [{ node_name: 'web-02', node_id: web.nodeId, by: 'console', noticed: 'start' }]);
+
+    fs.rmSync(path.join(NodeRegistry.consoleDir(l.configDir), `${gpu.nodeId}.json`)); // by hand, then SIGHUP
+    await fd.reloadTls();
+    assert.deepEqual(removals(fd.identity.nodeId).slice(1), [{ node_name: 'gpu-box', node_id: gpu.nodeId, by: 'console', noticed: 'reload' }]);
+    await fd.stop();
+  });
+});
+
 describe('startFrontDoor refusals', () => {
   it('refuses before binding when a §3.1 check fails', async () => {
     const l = await layout();

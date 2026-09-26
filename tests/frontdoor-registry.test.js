@@ -171,6 +171,38 @@ describe('NodeRegistry', () => {
   });
 });
 
+describe('console records with one name (Task 33 fix round)', () => {
+  it('two console records named alike: neither is trusted, and each raises node_record_invalid', async () => {
+    const { registry, configDir, alerts } = await setup();
+    const one = node('web-01');
+    const two = node('web-01');
+    const other = node('gpu-box');
+    for (const n of [one, two, other]) NodeRegistry.writeConsoleRecord(configDir, consoleRecord(n));
+    if (POSIX) fs.chmodSync(NodeRegistry.consoleDir(configDir), 0o755);
+    registry.load();
+    assert.equal(registry.byName('web-01'), null);
+    assert.equal(registry.byId(one.id.nodeId), null);
+    assert.equal(registry.byId(two.id.nodeId), null);
+    assert.equal(registry.byName('gpu-box').node_id, other.id.nodeId);
+    assert.ok(!registry.pinnedCertSet().has(one.tls) && !registry.pinnedCertSet().has(two.tls));
+    const dup = alerts.raised.filter(([k, o]) => k === 'node_record_invalid' && o.detail.reason === 'duplicate_console_name').map(([, o]) => o.subject).sort();
+    assert.deepEqual(dup, [`node:${one.id.nodeId}`, `node:${two.id.nodeId}`].sort());
+  });
+
+  it('removeConsoleRecord removes every record of the name, and a failed delete throws instead of reading as "none"', async (t) => {
+    const { configDir } = await setup();
+    const one = node('web-01');
+    const two = node('web-01');
+    const other = node('gpu-box');
+    for (const n of [one, two, other]) NodeRegistry.writeConsoleRecord(configDir, consoleRecord(n));
+    assert.equal(NodeRegistry.removeConsoleRecord(configDir, 'web-01'), true);
+    assert.deepEqual(fs.readdirSync(NodeRegistry.consoleDir(configDir)), [`${other.id.nodeId}.json`]);
+    assert.equal(NodeRegistry.removeConsoleRecord(configDir, 'web-01'), false);
+    t.mock.method(fs, 'rmSync', () => { throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' }); });
+    assert.throws(() => NodeRegistry.removeConsoleRecord(configDir, 'gpu-box'), /EPERM/);
+  });
+});
+
 describe('NodeRegistry trust rules', () => {
   it('a stored node_id that does not derive from the key is never trusted (phone and console)', async () => {
     const { registry, configDir, dataDir, alerts } = await setup();
