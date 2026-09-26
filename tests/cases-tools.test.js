@@ -453,7 +453,7 @@ describe('stage 2 confinement helpers', () => {
   });
 
   it('confines wake-ups to Read, Glob and Grep besides the case tools', () => {
-    assert.deepStrictEqual([...WAKEUP_BASE_TOOLS], ['Read', 'Glob', 'Grep']);
+    assert.deepStrictEqual([...WAKEUP_BASE_TOOLS], ['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch']);
     assert.ok(Object.isFrozen(WAKEUP_BASE_TOOLS));
   });
 
@@ -484,7 +484,7 @@ describe('stage 2 case tools', () => {
   const report = { failureClass: 'dead-end', what: 'County listing', tried: ['Listed on the county site'], why: 'No replies in 60 days' };
 
   it('registers Reorient, Ask and Fail with the other case tools, none needing approval', () => {
-    assert.deepStrictEqual([...CASE_TOOL_NAMES], ['Ledger', 'Brief', 'Decide', 'Recommend', 'Reorient', 'Ask', 'Fail', 'Detour']);
+    assert.deepStrictEqual([...CASE_TOOL_NAMES], ['Ledger', 'Brief', 'Decide', 'Recommend', 'Reorient', 'Ask', 'Fail', 'Detour', 'Plan', 'Executor']);
     for (const name of ['Reorient', 'Ask', 'Fail']) {
       assert.ok(toolRegistry.get(name), `${name} registered`);
       assert.strictEqual(toolRegistry.get(name).requiresApproval, false);

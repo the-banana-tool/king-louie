@@ -105,7 +105,10 @@ async function markWakeupsFailed(runtime, caseId, ids, err, title) {
 
 // Runs inside systemAction('sweep'): housekeeping every case gets each tick,
 // then the ids of the due wake-ups that need a turn.
-async function sweepCase(runtime, id, now) {
+// `prefetched`: the executor registry's prefetchPolls result, fetched
+// before the lock was taken (C3 final review I3), so no poll here waits on
+// the network.
+async function sweepCase(runtime, id, now, { prefetched = null } = {}) {
   const meta = runtime.getCase(id);
   const store = runtime.wakeups(meta.id);
   store.reanchor(now);
@@ -141,7 +144,7 @@ async function sweepCase(runtime, id, now) {
       let material = false;
       if (registry && typeof registry.pollWakeup === 'function') {
         try {
-          material = Boolean((await registry.pollWakeup(meta.id, w))?.material);
+          material = Boolean((await registry.pollWakeup(meta.id, w, { prefetched }))?.material);
         } catch (err) {
           await markWakeupsFailed(runtime, meta.id, [w.id], err, meta.title);
           failed += 1;
@@ -324,9 +327,20 @@ async function runDueWakeups(runtime, now = runtime.now()) {
       counts.busy += 1;
       continue;
     }
+    // Executor polls hit the network: fetched here, outside the case lock,
+    // and applied inside it (C3 final review I3).
+    let prefetched = null;
+    const registry = typeof runtime.host?.getExecutorRegistry === 'function' ? runtime.host.getExecutorRegistry() : null;
+    if (registry && typeof registry.prefetchPolls === 'function') {
+      try {
+        prefetched = await registry.prefetchPolls(meta.id, now);
+      } catch (err) {
+        log.warn(`Prefetching executor polls failed for case ${meta.slug}: ${err.message}`);
+      }
+    }
     let sweep;
     try {
-      sweep = await runtime.systemAction(meta.id, 'sweep', () => sweepCase(runtime, meta.id, now));
+      sweep = await runtime.systemAction(meta.id, 'sweep', () => sweepCase(runtime, meta.id, now, { prefetched }));
     } catch (err) {
       if (err && err.code === 'CASE_BUSY') { counts.busy += 1; continue; }
       log.warn(`Wake-up sweep failed for case ${meta.slug}: ${err.message}`);

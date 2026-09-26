@@ -62,9 +62,10 @@ describe('Agent registry includes planner', () => {
     assert.ok(planner, 'Planner should be in the agents list');
   });
 
-  it('registry has 4 agents total', () => {
+  it('registry has 5 agents total', () => {
     const agents = listAgents();
-    assert.strictEqual(agents.length, 4);
+    assert.strictEqual(agents.length, 5);
+    assert.ok(agents.some((a) => a.id === 'case-researcher'));
     const ids = agents.map(a => a.id);
     assert.ok(ids.includes('main'));
     assert.ok(ids.includes('code-explorer'));

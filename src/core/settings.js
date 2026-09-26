@@ -128,6 +128,8 @@ const mergeSettings = (settings = {}) => {
     // Cases stage 2 keys (budgets, roles, wakeups…) merge key by key over
     // their defaults (src/cases/defaults.js).
     cases: require('../cases/defaults').mergeCaseSettings(DEFAULT_SETTINGS.cases, source.cases),
+    // Cases stage 3: settings.executors, merged key by key over its defaults.
+    executors: require('../cases/executors/defaults').mergeExecutorSettings(null, source.executors),
     templateVariables: {
       ...(DEFAULT_SETTINGS.templateVariables || {}),
       ...(source.templateVariables || {})

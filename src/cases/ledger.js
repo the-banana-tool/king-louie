@@ -26,9 +26,12 @@ function requireText(input, field) {
 }
 
 class FactLedger {
-  constructor(dir) {
+  // executorIds (cases stage 3): when given, an external-agent source must sit
+  // under one of these executors' sources/ folders.
+  constructor(dir, { executorIds = null } = {}) {
     this.dir = dir;
     this.path = path.join(dir, 'facts.jsonl');
+    this.executorIds = executorIds instanceof Set ? executorIds : null;
   }
 
   _entries() {
@@ -138,6 +141,15 @@ class FactLedger {
     }
     if (provenance === 'user' && !HOST_SOURCE_KINDS.has(input.source.kind)) {
       throw new LedgerError('provenance "user" needs a host-verified owner source (user-message, question or owner-action).');
+    }
+    // external-agent facts are written only by Executor results (R40).
+    if (provenance === 'external-agent') {
+      const ref = String(input.source.ref || '');
+      const m = /^sources\/([a-z][a-z0-9-]{1,39})\//.exec(ref);
+      if (!['call', 'api', 'document'].includes(input.source.kind) || !m || ref.includes('..')
+        || (this.executorIds && !this.executorIds.has(m[1]))) {
+        throw new LedgerError('external-agent facts are written only by Executor results, with a source under sources/<executor>/.');
+      }
     }
     return this._write({ ...input, provenance });
   }

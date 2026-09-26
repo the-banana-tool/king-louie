@@ -14,6 +14,19 @@ const NO_CASE = Object.freeze({
   error: 'This chat is not attached to a case. The owner can attach one from Chat Info → Case.'
 });
 
+// Ops memory (cases stage 3 §3.11) lives on the executor registry, when the
+// host has one. It runs after the ledger write, and its failure never undoes
+// that write: the tool still returns ok, with a warning.
+function updateOpsMemory(ctx, fn) {
+  try {
+    const registry = ctx?.runtime?.host?.getExecutorRegistry?.();
+    if (registry && registry.opsMemory) fn(registry.opsMemory);
+    return null;
+  } catch (err) {
+    return `Ops memory was not updated: ${err && err.message ? err.message : err}`;
+  }
+}
+
 const SOURCE_KINDS = ['url', 'document', 'call', 'api'];
 const VALUE_DESCRIPTION = 'numbers and lists as JSON text';
 // Brief fields whose value is text: never parse these, so "2027" stays text.
@@ -79,7 +92,7 @@ function staleDirection(ctx, messageIndex) {
 
 const LedgerTool = acceptAnyValue(new Tool({
   name: 'Ledger',
-  description: 'Read and write the case fact ledger. assert: a fact with a source (provenance "sourced" with a source object; "user" for what the owner actually said, which requires a "quote" of their own words matching this chat\'s owner messages; or "external-agent" with a source). infer: your own derivation, with basis fact ids. unknown: something not known, with what it changes, who can answer, and how. retract: withdraw a fact. query: list facts. Corrections supersede; nothing is edited in place.',
+  description: 'Read and write the case fact ledger. assert: a fact with a source (provenance "sourced" with a source object; "user" for what the owner actually said, which requires a "quote" of their own words matching this chat\'s owner messages. external-agent facts are written only by Executor results). infer: your own derivation, with basis fact ids. unknown: something not known, with what it changes, who can answer, and how. retract: withdraw a fact. query: list facts. Corrections supersede; nothing is edited in place.',
   parameters: {
     type: 'object',
     properties: {
@@ -89,7 +102,7 @@ const LedgerTool = acceptAnyValue(new Tool({
       attr: { type: 'string', description: 'Which attribute, e.g. "acreage", "payoff"' },
       value: { type: 'string', description: `The value, if any; ${VALUE_DESCRIPTION}` },
       unit: { type: 'string' },
-      provenance: { type: 'string', enum: ['sourced', 'user', 'external-agent'] },
+      provenance: { type: 'string', enum: ['sourced', 'user'] },
       source: {
         type: 'object',
         description: 'Where the fact comes from. Not used for provenance "user", which is sourced from the quote.',
@@ -144,15 +157,18 @@ const LedgerTool = acceptAnyValue(new Tool({
         } else if (input.source?.kind && !SOURCE_KINDS.includes(input.source.kind)) {
           return { ok: false, error: `Source kind "${input.source.kind}" is reserved for the host.` };
         }
+        // After the owner-quote and user-message checks, so their errors win.
+        if (input.provenance === 'external-agent') return { ok: false, error: 'external-agent facts are written only by Executor results.' };
         const fact = ledger.assert(input);
-        if (fact.provenance !== 'user') return { ok: true, fact };
-        const effect = ctx.runtime.applyOwnerFact(ctx.caseId, fact);
+        const effect = fact.provenance === 'user' ? ctx.runtime.applyOwnerFact(ctx.caseId, fact) : {};
+        const opsWarning = updateOpsMemory(ctx, (m) => m.afterAssert(fact, { caseId: ctx.caseId, caseTitle: ctx.title, facts: ledger.view().facts }));
+        const warning = [effect.error, opsWarning].filter(Boolean).join(' ');
         return {
           ok: true,
           fact,
           ...(effect.applied ? { effect: effect.applied } : {}),
           ...(effect.note ? { note: effect.note } : {}),
-          ...(effect.error ? { warning: effect.error } : {})
+          ...(warning ? { warning } : {})
         };
       }
       case 'infer':
@@ -197,7 +213,11 @@ const LedgerTool = acceptAnyValue(new Tool({
       }
       case 'retract':
         if (!params.id || !params.reason) return { ok: false, error: 'retract needs "id" and "reason".' };
-        return { ok: true, fact: ledger.retract(params.id, params.reason) };
+        {
+          const retracted = ledger.retract(params.id, params.reason);
+          const opsWarning = updateOpsMemory(ctx, (m) => m.retract(ctx.caseId, params.id));
+          return { ok: true, fact: retracted, ...(opsWarning ? { warning: opsWarning } : {}) };
+        }
       case 'query':
         return { ok: true, facts: ledger.query(params.filter || {}) };
       default:
@@ -237,6 +257,15 @@ const BriefTool = acceptAnyValue(new Tool({
       return { ok: false, error: `Field "${params.field}" is only for ${declaredBy} cases.` };
     }
     if (params.value !== undefined && !BRIEF_TEXT_FIELDS.has(params.field)) params = { ...params, value: parseValue(params.value) };
+    // brief.resources.ownerLabor is host-only (R41): only syncPlan writes it.
+    if (params.field === 'resources' && params.value && typeof params.value === 'object' && !Array.isArray(params.value)) {
+      const stored = brief.read().data?.resources?.ownerLabor ?? [];
+      if (params.value.ownerLabor === undefined) {
+        params = { ...params, value: { ...params.value, ownerLabor: stored } };
+      } else if (JSON.stringify(params.value.ownerLabor) !== JSON.stringify(stored)) {
+        return { ok: false, error: "ownerLabor is recorded only from the owner's answer to a plan or owner task." };
+      }
+    }
     const provenance = params.provenance || 'model';
     let quoteNote = '';
     if (brief.isUserOnly(params.field) && provenance === 'user') {

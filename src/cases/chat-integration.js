@@ -2,10 +2,9 @@
 // Glue between the chat send path and a case: prompt text, tool list
 // shaping, the protected-path check the tool executor uses, and the
 // owner-quote check the case tools use for provenance "user".
-const fs = require('fs');
-const path = require('path');
+const { segmentsWithin } = require('./safe-path');
 
-const CASE_TOOL_NAMES = Object.freeze(['Ledger', 'Brief', 'Decide', 'Recommend', 'Reorient', 'Ask', 'Fail', 'Detour']);
+const CASE_TOOL_NAMES = Object.freeze(['Ledger', 'Brief', 'Decide', 'Recommend', 'Reorient', 'Ask', 'Fail', 'Detour', 'Plan', 'Executor']);
 
 // Tools kept out of every case turn (stage 2 spec §3.2). SpawnAgent,
 // BackgroundTask, sessions_spawn, RemoteDispatch and Cron start a run with
@@ -19,9 +18,9 @@ const CASE_BLOCKED_TOOL_NAMES = Object.freeze([
 const CASE_BLOCKED_TOOL_ERROR = 'This tool is not available in case turns: it starts another run, reaches another session, or changes the tool list. Do the work in this turn with the case tools and the other tools.';
 
 // Everything a wake-up may use besides the case tools. WebFetch and
-// WebSearch join once the outbound gate (C3) exists: a GET URL is an
-// outbound channel.
-const WAKEUP_BASE_TOOLS = Object.freeze(['Read', 'Glob', 'Grep']);
+// WebSearch are gated in query mode by the case-turn guard (C3): a GET URL
+// is an outbound channel.
+const WAKEUP_BASE_TOOLS = Object.freeze(['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch']);
 
 const CASE_MODE_PROMPT = [
   'Case mode. This chat is attached to a case. The orientation below was read from the case repository on disk at the start of this turn. It is the authoritative state and outranks anything earlier in the conversation.',
@@ -35,6 +34,9 @@ const CASE_MODE_PROMPT = [
   '- When an approach fails, call Fail with what you tried and why, with at most one recommendation, then stop. Do not start a new plan unasked.',
   '- If the orientation says "Re-orientation required", call Reorient first; Recommend, Decide and Fail are refused until you do.',
   '- Contact the owner only through the Ask tool. The answer arrives later as an owner fact; never assume it.',
+  '- Plan with the Plan tool: every step names an executor and the capability it uses. The owner does a step only after agreeing to it.',
+  '- Anything that leaves this machine (a call, a message, a web form) goes through the Executor tool inside an owner-approved envelope. Never type into a web page with the browser tools.',
+  '- In outbound text quote facts as {{f-0042}} references; never paste a private value, and never state a date, price, deadline or promise that no user or sourced fact backs.',
   '- Never edit facts.jsonl, brief.md, case.yaml or anything under .kl/ directly. The case tools are the only write path.',
   '- Work that does not serve the objective is a detour: propose it with the Detour tool and continue; never do it inline.'
 ].join('\n');
@@ -72,66 +74,16 @@ function buildCaseSystemPrompt(orientation, base) {
   return [CASE_MODE_PROMPT, orientation, base].filter(Boolean).join('\n\n');
 }
 
-// A Windows long-path prefix (`\\?\` or `\\.\`) opts a path out of the usual
-// MAX_PATH / normalization rules. Strip it before doing anything else so the
-// rest of this function sees an ordinary path.
-const LONG_PATH_PREFIX = /^\\\\[?.]\\/;
-
-function stripLongPathPrefix(p) {
-  return p.replace(LONG_PATH_PREFIX, '');
-}
-
-// Resolve as much of `absPath` as already exists on disk to its real path
-// (following symlinks and Windows junctions), then re-append whatever
-// doesn't exist yet, unchanged. This defeats a link that points *into* the
-// case directory from outside it, without requiring the whole path to
-// already exist (the file being written usually doesn't, yet).
-function realpathNearest(absPath) {
-  let current = absPath;
-  const remainder = [];
-  for (;;) {
-    try {
-      const real = fs.realpathSync.native(current);
-      return remainder.length ? path.join(real, ...remainder) : real;
-    } catch (err) {
-      const parent = path.dirname(current);
-      if (parent === current) return absPath; // hit the root; nothing left to resolve
-      remainder.unshift(path.basename(current));
-      current = parent;
-    }
-  }
-}
-
 // Files at the case root the model changes only through the case tools
 // (Ledger for facts, Brief and gating for brief.md and case.yaml).
 // Compared after case folding, so the names are lower case.
 const PROTECTED_ROOT_FILES = new Set(['facts.jsonl', 'case.yaml', 'brief.md']);
 
 function isProtectedCasePath(caseDir, absolutePath) {
-  if (!caseDir || !absolutePath) return false;
-
-  // NTFS and APFS/HFS+ are case-insensitive by default; comparing case-
-  // sensitively there lets `FACTS.JSONL` or `.KL\x` name the same file the
-  // guard is supposed to protect while missing the match.
-  const foldCase = process.platform === 'win32' || process.platform === 'darwin';
-  const fold = (s) => (foldCase ? s.toLowerCase() : s);
-
-  const resolvedCaseDir = realpathNearest(path.resolve(stripLongPathPrefix(String(caseDir))));
-  const resolvedTarget = realpathNearest(path.resolve(stripLongPathPrefix(String(absolutePath))));
-
-  const rel = path.relative(resolvedCaseDir, resolvedTarget);
-  if (!rel || rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return false;
-
-  // Per segment: drop an NTFS alternate-data-stream suffix (`name::$DATA`,
-  // everything from the first ':') and trailing dots/spaces (both silently
-  // stripped by the Win32 file APIs, so `facts.jsonl.` and `facts.jsonl `
-  // resolve to the same file as `facts.jsonl`).
-  const segments = rel.split(/[\\/]/).map((seg) => {
-    const streamCut = seg.indexOf(':');
-    const base = streamCut === -1 ? seg : seg.slice(0, streamCut);
-    return fold(base.replace(/[. ]+$/, ''));
-  });
-
+  // Links, junctions, 8.3 names, long-path prefixes, stream suffixes,
+  // trailing dots/spaces and letter case are undone by segmentsWithin.
+  const segments = segmentsWithin(caseDir, absolutePath);
+  if (!segments || !segments.length) return false;
   return segments[0] === '.kl' || PROTECTED_ROOT_FILES.has(segments.join('/'));
 }
 

@@ -1,0 +1,24 @@
+{
+  "name": "kl-executor-phone-agent",
+  "version": "1.0.0",
+  "private": true,
+  "description": "King Louie executor for a phone agent behind a generic HTTP errands API",
+  "main": "adapter.js",
+  "license": "MIT",
+  "kingLouie": {
+    "executor": {
+      "apiVersion": 1,
+      "id": "phone-agent",
+      "kind": "external-agent",
+      "capabilities": ["call", "voicemail"],
+      "cannot": ["web-form", "email", "sms"],
+      "configSchema": {
+        "baseUrl": { "type": "string", "required": true },
+        "token": { "type": "string", "secret": true, "required": true },
+        "defaultCountryCode": { "type": "string" }
+      },
+      "payloadSchema": { "venue": { "type": "string" } },
+      "origins": ["config:baseUrl"]
+    }
+  }
+}

@@ -4,6 +4,7 @@ const { getRuntimeEnvironment } = require('./runtime-environment');
 const { evaluateRules, describeRule } = require('../tools/permission-rules');
 const path = require('path');
 const { isProtectedCasePath, CASE_BLOCKED_TOOL_NAMES, CASE_BLOCKED_TOOL_ERROR } = require('../cases/chat-integration');
+const { caseToolGuard, caseBrowserProfileGuard } = require('../cases/executors/case-guard');
 const { markLocalRequester } = require('../core/origin');
 const { createLogger } = require('../logging');
 
@@ -304,6 +305,26 @@ class ToolExecutor extends EventEmitter {
         };
         this.emit('postExecute', { toolName, parameters: effectiveParameters, result: refused });
         return refused;
+      }
+    }
+
+    // Cases stage 3: browser allow-list, web tools gated in query mode, no
+    // writes into ops memory or the executors folder, for case turns and for
+    // child runs that carry a guardContext.
+    const guardContext = this.extraToolOptions.guardContext || null;
+    if (caseContext || guardContext) {
+      const refusedByGuard = caseToolGuard(toolName, effectiveParameters, {
+        caseContext, guardContext, workingDirectory: options.workingDirectory || this.workingDirectory
+      });
+      if (refusedByGuard) {
+        this.emit('postExecute', { toolName, parameters: effectiveParameters, result: refusedByGuard });
+        return refusedByGuard;
+      }
+      // A browser the owner opened in their own profile is not used by a case run.
+      const refusedByProfile = await caseBrowserProfileGuard(toolName, effectiveParameters, { caseContext, guardContext });
+      if (refusedByProfile) {
+        this.emit('postExecute', { toolName, parameters: effectiveParameters, result: refusedByProfile });
+        return refusedByProfile;
       }
     }
 

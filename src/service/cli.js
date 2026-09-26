@@ -120,6 +120,9 @@ function runningServicePid(dataDir) {
   return pid && isRunning(pid) ? pid : null;
 }
 
+// Executors in service mode (R42): no package roots outside `run`.
+const NO_ADMIN_EXECUTORS = Object.freeze({ entries: Object.freeze({}), packageRoots: Object.freeze([]) });
+
 // Opens the service's stores and runs `fn(core, ports)` against them. The
 // ports go along because the core does not expose its cipher. Every path the ports create or write is reported as it happens, so a
 // failure partway through still hands back what it managed to write: run as
@@ -138,7 +141,7 @@ function withServiceCore(dataDir, io, fn) {
       chatDataDefaults: CHAT_DATA_DEFAULTS,
       onPathWritten: (p) => writtenPaths.push(p)
     });
-    const core = createCore(ports);
+    const core = createCore({ ...ports, adminExecutors: NO_ADMIN_EXECUTORS });
     return fn(core, ports);
   } finally {
     restoreDataDirOwnership(dataDir, writtenPaths, io.ownership);

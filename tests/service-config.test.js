@@ -33,6 +33,7 @@ describe('loadServiceConfig', () => {
       ports: { gateway: 18793, webhook: 18794, desktopBridge: 18796 },
       relay: null,
       audit: { retentionDays: 365 },
+      executors: { entries: {}, packageRoots: [] },
       contact: null
     });
   });

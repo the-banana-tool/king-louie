@@ -24,7 +24,9 @@ const TRANSITIONS = Object.freeze([
   row(['active', 'needs-direction', 'paused'], 'abandoned', ['owner'], ['owner'])
 ]);
 
-const READ_OPS = Object.freeze(['Ledger.query', 'Brief.read', 'Playbook.list', 'Playbook.read']);
+// Cases stage 3: reading a plan or an executor's jobs is allowed wherever
+// Ledger.query is.
+const READ_OPS = Object.freeze(['Ledger.query', 'Brief.read', 'Playbook.list', 'Playbook.read', 'Plan.status', 'Executor.status', 'Executor.results']);
 
 // Narrow statuses use an allowlist; the others a denylist (spec §3.1).
 const ALLOWED = Object.freeze({

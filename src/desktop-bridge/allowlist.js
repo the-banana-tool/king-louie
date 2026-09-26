@@ -16,6 +16,8 @@ const PROXIED_DOMAINS = Object.freeze([
   'usage',
   'checkpoint',
   'canvas',
+  // Cases stage 3: executors:list (the case:* executor channels ride 'case').
+  'executors',
   // Cases stage 4: the ladder state, the contact policy editor and heartbeats.
   'contact',
   'contactPolicy',
