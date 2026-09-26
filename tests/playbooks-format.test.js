@@ -106,6 +106,13 @@ describe('parsePlaybookYaml', () => {
     assert.match(yamlErrors(withYaml(/budgetDefaults: .*/, 'budgetDefaults: { usd: 0 }'))[0], /usd must be a number greater than 0/);
     assert.match(yamlErrors(withYaml(/budgetDefaults: .*/, 'budgetDefaults: { turnsPerDay: 1.5 }'))[0], /turnsPerDay must be a whole number/);
   });
+
+  it('caps budgetDefaults at a sane upper bound', () => {
+    assert.match(yamlErrors(withYaml(/budgetDefaults: .*/, 'budgetDefaults: { usd: 1000001 }'))[0], /usd must be at most 1000000/);
+    assert.match(yamlErrors(withYaml(/budgetDefaults: .*/, 'budgetDefaults: { turnsPerDay: 10001 }'))[0], /turnsPerDay must be at most 10000/);
+    // The bounds themselves are still accepted.
+    assert.deepStrictEqual(yamlErrors(withYaml(/budgetDefaults: .*/, 'budgetDefaults: { usd: 1000000, turnsPerDay: 10000 }')), []);
+  });
 });
 
 describe('parseSteps', () => {

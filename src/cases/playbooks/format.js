@@ -302,6 +302,13 @@ function checkMateriality(m, err) {
   return out;
 }
 
+// Upper bounds are a sanity check, not a real budget ceiling (R30: a
+// playbook only ever *lowers* a budget default, never raises one without
+// the owner's confirm) — they exist so a playbook can't hand the parser a
+// number so large it is awkward to store, log or compare (e.g. Infinity
+// minus one, or a value that stops being a safe integer).
+const BUDGET_MAX = Object.freeze({ usd: 1e6, turnsPerDay: 10000, contactsPerDay: 10000, questionsPerDay: 10000 });
+
 function checkBudget(b, err) {
   if (b === undefined || b === null) return {};
   if (!isMap(b)) {
@@ -314,9 +321,12 @@ function checkBudget(b, err) {
       err(`budgetDefaults: unknown key "${truncateForMessage(k)}" (allowed: ${BUDGET_KEYS.join(', ')})`);
     } else if (k === 'usd') {
       if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) err('budgetDefaults.usd must be a number greater than 0');
+      else if (v > BUDGET_MAX.usd) err(`budgetDefaults.usd must be at most ${BUDGET_MAX.usd}`);
       else out[k] = v;
     } else if (!Number.isInteger(v) || v <= 0) {
       err(`budgetDefaults.${k} must be a whole number greater than 0`);
+    } else if (v > BUDGET_MAX[k]) {
+      err(`budgetDefaults.${k} must be at most ${BUDGET_MAX[k]}`);
     } else {
       out[k] = v;
     }
