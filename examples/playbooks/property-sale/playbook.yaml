@@ -1,0 +1,36 @@
+name: property-sale
+version: "1.0.0"
+title: Sell a parcel of land
+description: Method for selling vacant land through listing agents and direct buyers, from confirming the parcel to reviewing offers.
+caseType: outreach
+executors: [web, browser, phone-agent, owner]
+gatingQuestions:
+  - id: owners-of-record
+    text: Who are the owners of record, exactly as the deed names them?
+    fact: { subject: property, attr: owners-of-record }
+    answerable: owner
+    briefField: hardConstraints
+  - id: floor-price
+    text: What is the lowest price you would accept for the parcel?
+    fact: { subject: property, attr: floor-price }
+    answerable: owner
+    briefField: hardConstraints
+    category: financial
+  - id: prior-attempts
+    text: Have you tried to sell this parcel before? If so, how, and what happened?
+    fact: { subject: property, attr: prior-attempts }
+    answerable: owner
+    briefField: alreadyTried
+  - id: financing-allowed
+    text: Will you consider seller financing?
+    fact: { subject: property, attr: financing-allowed }
+    answerable: owner
+    options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }]
+  - id: parcel-id
+    text: What is the county parcel id of the lot?
+    fact: { subject: property, attr: parcel-id }
+    answerable: web
+    changes: Every records lookup keys on the parcel id
+    how: Search the county assessor records by the property address
+materialityDefaults: { tell: [offers, deadline-risk, title-issues], ignore: [no-answer, voicemail] }
+budgetDefaults: { usd: 40, contactsPerDay: 20, questionsPerDay: 6 }

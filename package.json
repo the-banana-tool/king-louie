@@ -38,7 +38,8 @@
       "!tests/**",
       "!product-management/**",
       "!.github/**",
-      "!examples/**"
+      "!examples/**",
+      "examples/playbooks/**"
     ],
     "win": {
       "target": [
