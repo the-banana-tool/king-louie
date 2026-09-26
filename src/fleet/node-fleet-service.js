@@ -16,6 +16,7 @@ const MAX_BYTES_DEFAULT = 524288;
 const MAX_BYTES_MIN = 4096;
 const GET_JOB_LOG_TAIL_BYTES = 65536;
 const RESERVE_BYTES = 1024; // the reply's own keys and punctuation
+const LOG_FLOOR_BYTES = 1024; // get_job always has room for some log tail
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const FLEET_METHODS = Object.freeze({
   'fleet.describe': 'describe_machine',
@@ -123,6 +124,7 @@ class NodeFleetService {
     this.dedupe = new Map();
     this.extra = new Map();
     this.started = false;
+    this.stopped = false;
     this._onUpdate = (job) => {
       // Runs inside JobManager.updateJob's emit: it must never throw there.
       try {
@@ -146,7 +148,11 @@ class NodeFleetService {
     return this;
   }
 
+  // RelayClient cannot unregister a method, so a stopped service keeps
+  // answering its link methods; every answer is a refusal (ruling T12-stop).
   stop() {
+    this.stopped = true;
+    this.started = false;
     this.handler.jobManager.removeListener('update', this._onUpdate);
     if (this.relayClient && typeof this.relayClient.off === 'function') this.relayClient.off('connected', this._onConnected);
   }
@@ -225,6 +231,7 @@ class NodeFleetService {
 
   // Never throws: every failure is a coded refusal (errorReply).
   async dispatch(method, params = {}) {
+    if (this.stopped) return refusal('unavailable', 'unavailable: this node is stopping');
     const origin = params && typeof params === 'object' ? params.origin : undefined;
     if (!validOrigin(origin)) {
       return refusal('invalid_params', 'invalid_params: fleet calls carry a front-door origin with a grant and scopes');
@@ -239,7 +246,7 @@ class NodeFleetService {
       return this._bounded(method, maxBytes, () => fn(params, { origin, maxBytes }));
     }
 
-    const tool = FLEET_METHODS[method];
+    const tool = Object.hasOwn(FLEET_METHODS, method) ? FLEET_METHODS[method] : null;
     if (!tool) return refusal('unknown_method', `no fleet method ${method}`);
     let tier = null;
     if (tool === 'run_runbook') {
@@ -311,13 +318,19 @@ class NodeFleetService {
 
   // The stdio get_job shape with raw logs (the front door wraps them,
   // Deviation 6). A delegate job's result is the agent's reply and stays
-  // wrapped as untrusted, as in FleetToolHandler (ruling T9-wrap).
+  // wrapped as untrusted, as in FleetToolHandler (ruling T9-wrap). A reply
+  // too big for the page is cut like a log line, so get_job never refuses a
+  // job for good because its reply is large.
   _jobView(jobId, origin, maxBytes) {
     const job = this.handler.getJobOrThrow(jobId, origin);
     const { logs, ...rest } = job;
-    if (job.kind === 'delegate' && typeof rest.result === 'string') rest.result = untrustedOutput([rest.result]);
+    if (job.kind === 'delegate' && typeof rest.result === 'string') {
+      const others = jsonBytes({ ...rest, result: untrustedOutput(['']), evidence: job.evidence || null });
+      const room = Math.max(256, maxBytes - RESERVE_BYTES - LOG_FLOOR_BYTES - others);
+      rest.result = untrustedOutput([cutLine(rest.result, room)]);
+    }
     const budget = Math.min(GET_JOB_LOG_TAIL_BYTES, maxBytes - RESERVE_BYTES - jsonBytes({ ...rest, evidence: job.evidence || null }));
-    const tail = tailWithin(Array.isArray(logs) ? logs : [], Math.max(1024, budget));
+    const tail = tailWithin(Array.isArray(logs) ? logs : [], Math.max(LOG_FLOOR_BYTES, budget));
     return { ...rest, logs: tail.logs, logs_truncated: tail.truncated, evidence: job.evidence || null };
   }
 
