@@ -43,7 +43,12 @@ function registerCaseHandlers(ipcMain, context = {}) {
     { ok: true, cases: runtime().listCases().map(summarize) }
   )));
 
-  ipcMain.handle(IPC.CASE_CREATE, wrapHandler(IPC.CASE_CREATE, async (_event, { title, type, objective, chatId, force, playbooks, acceptBudgetRaises } = {}) => {
+  ipcMain.handle(IPC.CASE_CREATE, wrapHandler(IPC.CASE_CREATE, async (_event, payload) => {
+    // A non-object payload (null, an array) counts as {} and gets the fixed
+    // title error below, never a destructuring TypeError.
+    const form = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
+    let { type } = form;
+    const { title, objective, chatId, force, playbooks, acceptBudgetRaises } = form;
     if (typeof title !== 'string' || !title.trim()) return { ok: false, error: 'A case needs a title.' };
     if (type !== undefined && (typeof type !== 'string' || !type.trim())) return { ok: false, error: 'type must be a non-empty string.' };
     if (objective !== undefined && (typeof objective !== 'string' || !objective.trim())) return { ok: false, error: 'objective must be a non-empty string.' };

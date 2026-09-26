@@ -488,7 +488,8 @@ describe('recorded local sources', () => {
   it('the owner re-confirming reads it', async (t) => {
     if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
     const w = await imported(t);
-    const [row] = await w.mgr.checkUpdates(w.id, null, { confirmSource: true });
+    await assert.rejects(w.mgr.checkUpdates(w.id, null, { confirmSource: true }), { code: 'CONFIRM_NEEDS_NAME', message: 'confirmSource needs a playbook name.' });
+    const [row] = await w.mgr.checkUpdates(w.id, 'land-sale', { confirmSource: true });
     assert.strictEqual(row.upstream, '9.9.9');
     const r = await w.mgr.update(w.id, 'land-sale', { confirmSource: true });
     assert.deepStrictEqual(r, { ok: true, from: '1.2.0', to: '9.9.9', budgetRaises: [] });

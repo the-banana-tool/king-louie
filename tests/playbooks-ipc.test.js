@@ -12,6 +12,7 @@ const IPC = require('../src/ipc/constants');
 const { CaseRuntime } = require('../src/cases');
 const { installPlaybooks } = require('../src/cases/playbooks');
 const { readState, writeState } = require('../src/cases/playbooks/changes');
+const { MAX_PATCH_BYTES } = require('../src/cases/playbooks/proposals');
 const { registerCaseHandlers } = require('../src/ipc/case-handlers');
 const { registerPlaybookHandlers } = require('../src/ipc/playbook-handlers');
 const { createBridgeDispatcher } = require('../src/desktop-bridge/bridge-dispatcher');
@@ -129,6 +130,34 @@ describe('playbook channels', () => {
   });
 });
 
+describe('patch text', () => {
+  it('an oversize patch file is refused with a fixed error and never read', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const { runtime, call } = await world();
+    const { id, dir } = await runtime.createCase({ title: 'Lakeside lot', objective: 'Sell the lot' });
+    assert.strictEqual((await call(IPC.CASE_ADD_PLAYBOOK, { caseId: id, source: 'example:land-sale' })).ok, true);
+    runtime.brief(id).update('why', 'Need the cash', { provenance: 'user' });
+    runtime.brief(id).append('successCriteria', 'Sold', { provenance: 'model' });
+    for (const q of runtime.questions(id).open()) await runtime.answerQuestion(id, q.id, q.options?.length ? { optionId: q.options[0].id } : { text: '250000' });
+    runtime.completeGating(id);
+    runtime.setStatus(id, 'done', { kind: 'owner', by: 'owner' });
+    const proposed = await runtime.playbooks.propose(id, { playbook: 'land-sale', files: [{ path: 'steps.md', content: STEPS_MD.replace('Call the buyers on the list;', 'Call the largest buyers first;') }], rationale: 'Faster answers.', factIds: [] });
+    const patchFile = path.join(dir, ...proposed.proposal.patch.split('/'));
+    fs.writeFileSync(patchFile, 'x'.repeat(MAX_PATCH_BYTES + 1));
+    const reads = [];
+    const realRead = fs.readFileSync;
+    fs.readFileSync = function (p, ...rest) {
+      if (typeof p === 'string' && path.resolve(p) === path.resolve(patchFile)) reads.push(p);
+      return realRead.call(this, p, ...rest);
+    };
+    t.after(() => { fs.readFileSync = realRead; });
+    const r = await call(IPC.CASE_PLAYBOOK_PROPOSALS, { caseId: id, proposalId: proposed.proposal.id });
+    fs.readFileSync = realRead;
+    assert.deepStrictEqual(r, U({ ok: false, error: `The patch of proposal ${proposed.proposal.id} is too large to show here; review it in the case folder.`, code: 'PATCH_TOO_LARGE' }));
+    assert.deepStrictEqual(reads, [], 'the oversize patch was never read');
+  });
+});
+
 describe('argument validation', () => {
   it('every channel refuses a bad argument with a fixed error before using it', async (t) => {
     if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
@@ -224,10 +253,35 @@ describe('confirmSource', () => {
       }
     }
     assert.strictEqual(readState(w.dir).vendored['land-sale'].onDiskVersion, '1.2.0', 'nothing was read or written');
-    const [checked] = (await w.call(IPC.CASE_CHECK_PLAYBOOK_UPDATES, { caseId: w.id, confirmSource: true })).updates;
+    assert.deepStrictEqual(await w.call(IPC.CASE_CHECK_PLAYBOOK_UPDATES, { caseId: w.id, confirmSource: true }), U({ ok: false, error: 'confirmSource needs a playbook name.' }));
+    const [checked] = (await w.call(IPC.CASE_CHECK_PLAYBOOK_UPDATES, { caseId: w.id, name: 'land-sale', confirmSource: true })).updates;
     assert.deepStrictEqual(checked, { name: 'land-sale', pinned: '1.2.0', upstream: '1.9.9', updateAvailable: true, sameMajor: true });
     const confirmed = await w.call(IPC.CASE_UPDATE_PLAYBOOK, { caseId: w.id, name: 'land-sale', confirmSource: true });
     assert.deepStrictEqual(confirmed, U({ ok: true, from: '1.2.0', to: '1.9.9', budgetRaises: [] }));
+  });
+  it('a confirmation covers only the named playbook; another recorded folder stays unconfirmed', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const w = await world();
+    const farmYaml = (v) => PLAYBOOK_YAML.replace('name: land-sale', 'name: farm').replace('"1.2.0"', v);
+    const typedA = await makeGitPackage(path.join(tmp(), 'land-sale'));
+    const typedB = await makeGitPackage(path.join(tmp(), 'farm'), { 'playbook.yaml': farmYaml('"1.2.0"') });
+    const otherA = await makeGitPackage(path.join(tmp(), 'land-sale'), { 'playbook.yaml': PLAYBOOK_YAML.replace('"1.2.0"', '"1.9.9"') });
+    const otherB = await makeGitPackage(path.join(tmp(), 'farm'), { 'playbook.yaml': farmYaml('"1.8.8"') });
+    const { id, dir } = await w.runtime.createCase({ title: 'Lakeside lot' });
+    assert.strictEqual((await w.call(IPC.CASE_ADD_PLAYBOOK, { caseId: id, source: typedA })).ok, true);
+    assert.strictEqual((await w.call(IPC.CASE_ADD_PLAYBOOK, { caseId: id, source: typedB })).ok, true);
+    const s = readState(dir);
+    s.vendored['land-sale'].source = `path:${otherA}`;
+    s.vendored.farm.source = `path:${otherB}`;
+    writeState(dir, s);
+    w.settings.playbooks.autoUpdate = true;
+    const confirmed = await w.call(IPC.CASE_CHECK_PLAYBOOK_UPDATES, { caseId: id, name: 'land-sale', confirmSource: true });
+    assert.deepStrictEqual(confirmed.updates.map((u) => [u.name, u.upstream, u.applied]), [['land-sale', '1.9.9', '1.9.9']]);
+    const after = await w.call(IPC.CASE_CHECK_PLAYBOOK_UPDATES, { caseId: id });
+    const farm = after.updates.find((u) => u.name === 'farm');
+    assert.strictEqual(farm.code, 'SOURCE_NEEDS_CONFIRM');
+    assert.strictEqual(readState(dir).vendored.farm.onDiskVersion, '1.2.0', 'farm was never read or updated');
+    assert.strictEqual(readState(dir).vendored['land-sale'].onDiskVersion, '1.9.9');
   });
 });
 
@@ -335,6 +389,13 @@ describe('case:create with playbooks', () => {
     assert.deepStrictEqual(clash, U({ ok: false, error: 'Playbooks disagree on case type (outreach, general); pick a type.' }));
     const mismatch = await call(IPC.CASE_CREATE, { title: 'Typed', type: 'software-repo', playbooks: [{ source: 'example:land-sale' }] });
     assert.deepStrictEqual(mismatch, U({ ok: false, error: 'Playbook "land-sale" is for "outreach" cases; this case is "software-repo".' }));
+  });
+
+  it('a non-object payload gets the fixed title error, not a TypeError', async () => {
+    const { call } = await world();
+    for (const payload of [null, undefined, [], 'x']) {
+      assert.deepStrictEqual(await call(IPC.CASE_CREATE, payload), { ok: false, error: 'A case needs a title.' }, JSON.stringify(payload));
+    }
   });
 
   it('without playbooks the reply is unchanged', async () => {

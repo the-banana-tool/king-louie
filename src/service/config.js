@@ -25,7 +25,9 @@ const CONFIG_FILE = 'service.json';
 // `relay` (the relay's listeners, TLS files and push credentials) and `audit`
 // (ledger retention) joined in fleet stage 3. `contact` (cases stage 4, R55):
 // who the owner is, where to reach them and through which relays.
-const ADMIN_ONLY_KEYS = ['features', 'ports', 'profile', 'relay', 'audit', 'contact'];
+// `playbooks` (cases stage 6, ruling T14-admin): the playbook source
+// allowlist and same-major auto-update.
+const ADMIN_ONLY_KEYS = ['features', 'ports', 'profile', 'relay', 'audit', 'contact', 'playbooks'];
 const RELAY_DEFAULTS = { phoneListen: { host: '0.0.0.0', port: 8443 }, meshPort: 18795, auditRetentionDays: 365 };
 
 function isPlainObject(value) {
@@ -138,6 +140,34 @@ function validateFeatures(features, file) {
     }
   }
   return features;
+}
+
+// Cases stage 6 (ruling T14-admin): in service mode the playbook source
+// allowlist and autoUpdate are policy, so they come only from here. Each
+// source is a path:<absolute folder> or an https/ssh URL prefix, checked
+// with the same rules the allowlist matches by (src/cases/playbooks/vendor.js).
+const PLAYBOOK_SOURCE_UNSAFE_RE = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/;
+function parsePlaybooksConfig(raw, file) {
+  if (raw === undefined) return { sources: [], autoUpdate: false };
+  if (!isPlainObject(raw)) throw new Error(`Invalid ${file}: "playbooks" must be an object`);
+  rejectUnknownKeys(raw, ['sources', 'autoUpdate'], 'playbooks', file);
+  const sources = raw.sources === undefined ? [] : raw.sources;
+  if (!Array.isArray(sources) || sources.length > 100) throw new Error(`Invalid ${file}: playbooks.sources must be a list of at most 100 entries`);
+  const { normalizeUrl } = require('../cases/playbooks/vendor');
+  const out = sources.map((entry, i) => {
+    const bad = () => new Error(`Invalid ${file}: playbooks.sources[${i}] must be path:<absolute folder> or an https/ssh URL prefix`);
+    if (typeof entry !== 'string' || !entry.trim() || entry.length > 2048 || PLAYBOOK_SOURCE_UNSAFE_RE.test(entry)) throw bad();
+    const e = entry.trim();
+    if (e.startsWith('path:')) {
+      const folder = e.slice('path:'.length).trim();
+      if (/^[\\/]{2}/.test(folder) || !path.isAbsolute(folder)) throw bad();
+      return e;
+    }
+    if (!normalizeUrl(e)) throw bad();
+    return e;
+  });
+  if (raw.autoUpdate !== undefined && typeof raw.autoUpdate !== 'boolean') throw new Error(`Invalid ${file}: playbooks.autoUpdate must be true or false`);
+  return { sources: out, autoUpdate: raw.autoUpdate === true };
 }
 
 // Cases stage 4 (R55): who the owner is and where to reach them comes only
@@ -303,8 +333,9 @@ function loadServiceConfig(dataDir, overrides = {}, {
     ports,
     relay: parseRelayConfig(adminCfg.relay, adminFile),
     audit: parseAuditConfig(adminCfg.audit, adminFile),
-    contact: validateContactConfig(adminCfg.contact, adminFile, { unknownKeyError })
+    contact: validateContactConfig(adminCfg.contact, adminFile, { unknownKeyError }),
+    playbooks: parsePlaybooksConfig(adminCfg.playbooks, adminFile)
   };
 }
 
-module.exports = { loadServiceConfig, assertAdminOwned, parseRelayConfig, parseAuditConfig, PROFILES, DEFAULT_PORTS, DEFAULT_FEATURES, CONFIG_FILE, unknownKeyError };
+module.exports = { loadServiceConfig, assertAdminOwned, parseRelayConfig, parseAuditConfig, parsePlaybooksConfig, PROFILES, DEFAULT_PORTS, DEFAULT_FEATURES, CONFIG_FILE, unknownKeyError };

@@ -57,7 +57,7 @@ function adminDirApprovalOptions({ adminUid, configDir }) {
 function loadProfile(profile) {
   if (profile === 'agent') {
     return {
-      async start({ dataDir, features, ports, workspace, audit, contact = null, adminUid, configDir }) {
+      async start({ dataDir, features, ports, workspace, audit, contact = null, playbooks = null, adminUid, configDir }) {
         const { createCore } = require('../core');
         const { CHAT_DATA_DEFAULTS } = require('../core/settings');
         const { buildServicePorts } = require('./ports');
@@ -97,6 +97,9 @@ function loadProfile(profile) {
             // the admin service.json only (runService loads it once, with
             // adminUid). The key is always present: it means service mode.
             contactConfig: contact ?? null,
+            // Cases stage 6 (ruling T14-admin): the playbook source allowlist
+            // and autoUpdate, from the admin service.json only.
+            playbooksConfig: playbooks ?? { sources: [], autoUpdate: false },
             isService: true,
             remoteApprovals: 'phone',
             phoneApprover: approvals.phoneApprover,
@@ -244,7 +247,7 @@ async function runService({ dataDir: requestedDataDir, profile: profileOverride,
       const config = loadServiceConfig(dataDir, { profile: profileOverride }, adminUid === undefined ? {} : { adminUid });
       profile = config.profile;
       log.info('service starting', { profile, dataDir, workspace, pid: process.pid });
-      running = await loadProfile(profile).start({ dataDir, features: config.features, ports: config.ports, workspace, audit: config.audit, contact: config.contact, adminUid });
+      running = await loadProfile(profile).start({ dataDir, features: config.features, ports: config.ports, workspace, audit: config.audit, contact: config.contact, playbooks: config.playbooks, adminUid });
     } catch (err) {
       // On Windows nothing reads the task's stderr, so the log file is the
       // only place a startup failure is visible.

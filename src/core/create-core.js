@@ -2861,9 +2861,44 @@ function createCore(deps = {}) {
 
   // Cases stage 6: playbooks. The manager rides on the runtime; the gating
   // source, the turn-start hook and (with an executor registry) the brief
-  // rules are registered by installPlaybooks. settings.playbooks is read
-  // through this core's own getSettings in every mode (ruling M14).
-  installPlaybooks(caseRuntime, { getSettings, examplesDir: deps.examplesDir || null });
+  // rules are registered by installPlaybooks.
+  // Ruling T14-admin: in service mode the source allowlist and autoUpdate
+  // are policy and come only from the admin service.json (run.js passes
+  // deps.playbooksConfig; absent means no sources, no auto-update). The
+  // data-dir settings for them are ignored there, with one warning. The
+  // desktop reads the owner's own settings. The service signals are the
+  // ones start() uses for contact, plus playbooksConfig itself.
+  const playbooksFromAdmin = deps.isService === true
+    || Object.prototype.hasOwnProperty.call(deps, 'contactConfig')
+    || Object.prototype.hasOwnProperty.call(deps, 'playbooksConfig')
+    || deps.remoteApprovals === 'phone';
+  let getPlaybookSettings = getSettings;
+  if (playbooksFromAdmin) {
+    const admin = deps.playbooksConfig && typeof deps.playbooksConfig === 'object' ? deps.playbooksConfig : {};
+    const adminPlaybooks = Object.freeze({
+      sources: Object.freeze(Array.isArray(admin.sources) ? admin.sources.filter((x) => typeof x === 'string') : []),
+      autoUpdate: admin.autoUpdate === true
+    });
+    let warnedDataDir = false;
+    getPlaybookSettings = () => {
+      if (!warnedDataDir) {
+        let stored = null;
+        try {
+          stored = store.get('settings', null)?.playbooks;
+        } catch {
+          stored = null;
+        }
+        const set = stored && typeof stored === 'object'
+          && ((Array.isArray(stored.sources) && stored.sources.length > 0) || stored.autoUpdate === true);
+        if (set) {
+          warnedDataDir = true;
+          log.warn('Ignoring settings.playbooks (sources, autoUpdate) from the data dir in service mode; set "playbooks" in the admin service.json instead.');
+        }
+      }
+      return { playbooks: adminPlaybooks };
+    };
+  }
+  installPlaybooks(caseRuntime, { getSettings: getPlaybookSettings, examplesDir: deps.examplesDir || null });
 
   const context = {
     // Chat

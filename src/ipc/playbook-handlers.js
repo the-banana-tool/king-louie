@@ -297,6 +297,8 @@ function registerPlaybookHandlers(ipcMain, context = {}) {
     const caseId = needCase(p);
     const name = p.name === undefined || p.name === null ? null : checkPlaybookName(p.name, 'name');
     const confirmSource = checkFlag(p.confirmSource, 'confirmSource');
+    // A confirmation names the one playbook it covers.
+    if (confirmSource && name === null) bad('confirmSource needs a playbook name.');
     const updates = await getManager(context).checkUpdates(caseId, name, { apply: true, confirmSource });
     return { ok: true, updates: updates.map(shapeUpdateRow) };
   });

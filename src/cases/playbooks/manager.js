@@ -736,8 +736,13 @@ class PlaybookManager {
   // settings.playbooks.autoUpdate, same-major updates apply at once.
   // confirmSource === true is the owner re-confirming recorded local
   // folders for this call (ruling T5-recorded).
+  // A confirmation covers one named playbook only, never every recorded
+  // folder in the case.
   async checkUpdates(caseId, name = null, { apply = false, confirmSource = false } = {}) {
     if (name !== null && name !== undefined) checkName(name);
+    if (confirmSource === true && (name === null || name === undefined)) {
+      throw new PlaybookError('confirmSource needs a playbook name.', { code: 'CONFIRM_NEEDS_NAME' });
+    }
     const meta = this.runtime.getCase(caseId);
     const settings = this.settings();
     const state = changes.readState(meta.dir);
@@ -1059,6 +1064,11 @@ class PlaybookManager {
     if (!r) throw new PlaybookError(`Proposal ${showProposalId(proposalId)} was not found.`);
     const file = path.join(meta.dir, ...r.patch.split('/'));
     if (!vendor.isInside(file, meta.dir)) throw new PlaybookError(`Proposal ${r.id} points outside the case.`);
+    // Stat first: the patch file is case data, so a file that is not a plain
+    // file or is larger than any patch storeProposal writes is never read.
+    const st = lstatOrNull(file);
+    if (!st || !st.isFile()) throw new PlaybookError(`The patch of proposal ${r.id} is missing or not a regular file.`, { code: 'PATCH_UNREADABLE' });
+    if (st.size > proposals.MAX_PATCH_BYTES) throw new PlaybookError(`The patch of proposal ${r.id} is too large to show here; review it in the case folder.`, { code: 'PATCH_TOO_LARGE' });
     return fs.readFileSync(file, 'utf8');
   }
 
