@@ -32,6 +32,16 @@ const ENVELOPE_WINDOW_MS = 5 * 60 * 1000;
 const FRONT_DOOR_ENVELOPE_WINDOW_MS = 60000;
 const STALE_GRACE_MS = 5000;
 const CLOSE_CODES = Object.freeze({ tooBig: 1009, unauthenticated: 4001, keyRemoved: 4003, alreadyConnected: 4009, replayDetected: 4010, rateLimited: 4029 });
+// One connection per key (fleet stage 4 §3.6, with duplicatePingMs): what an
+// authenticated candidate sends while the old link is pinged is held, up to
+// these bounds (anything more closes it 4029), and replayed on takeover.
+const DUPLICATE_HOLD_MAX_FRAMES = 64;
+const DUPLICATE_HOLD_MAX_BYTES = 1024 * 1024;
+// A takeover never waits on this: a stale link must never keep a valid node
+// out (F7). Repeated takeovers of one key (two machines holding it, or a
+// stolen copy) are logged at error and reported as flapping instead.
+const TAKEOVER_WINDOW_MS = 10 * 60 * 1000;
+const TAKEOVER_ALERT_COUNT = 3;
 
 // An auth challenge is exactly 32 random bytes and a signature exactly one
 // Ed25519 signature. Fixing the challenge length matters beyond tidiness:
@@ -202,6 +212,13 @@ class MeshTransport extends EventEmitter {
     // one, the trusted peers' pinned tlsFingerprints decide.
     this.isPinned = typeof config.isPinned === 'function' ? config.isPinned : null;
     this.attached = [];
+    // Fleet stage 4 §3.6: with a value, a second authenticated connection
+    // for a connected peer pings the old one first (see _promoteToPeer).
+    this.duplicatePingMs = Number.isInteger(config.duplicatePingMs) ? config.duplicatePingMs : null;
+    // peerId → the one candidate waiting on that ping.
+    this.duplicates = new Map();
+    // peerId → times of recent takeovers (within TAKEOVER_WINDOW_MS).
+    this.takeovers = new Map();
     this.running = false;
     this.onPairingRequest = null; // set by MeshPairing to handle pair:request messages
   }
@@ -306,6 +323,10 @@ class MeshTransport extends EventEmitter {
       try { ws.terminate(); } catch { /* gone */ }
     }
     this.unauth.clear();
+    for (const held of this.duplicates.values()) {
+      try { held.ws.terminate(); } catch { /* gone */ }
+    }
+    this.duplicates.clear();
 
     for (const wss of this.attached) await new Promise((resolve) => wss.close(() => resolve()));
     this.attached = [];
@@ -882,6 +903,12 @@ class MeshTransport extends EventEmitter {
     this.pendingAuth.delete(authId);
     this.unauth.delete(ws);
 
+    const current = this.peers.get(remoteIdentity.peerId);
+    if (current && this.duplicatePingMs !== null && pending.direction === 'inbound' && !pending.duplicateSettled) {
+      this._holdDuplicate(authId, ws, remoteIdentity, pending, current);
+      return;
+    }
+
     const existingPeer = this.peers.get(remoteIdentity.peerId);
     if (existingPeer) {
       try { existingPeer.ws.close(); } catch { /* ignore */ }
@@ -1008,6 +1035,109 @@ class MeshTransport extends EventEmitter {
       try { peer.ws.terminate(); } catch { /* gone */ }
     }
     return true;
+  }
+
+  // A second authenticated inbound connection for a connected peer. A pong
+  // from the old link within duplicatePingMs: it is alive, and the new one is
+  // refused (4009). No pong: the old one is dead (a node that crashed inside
+  // the heartbeat window) and the new one takes over, with whatever it sent
+  // meanwhile. The 4009 is only ever sent here, after the candidate's
+  // auth:complete verified, so the dialer has already authenticated when it
+  // sees it. One candidate per key waits at a time; a newer one supersedes it.
+  _holdDuplicate(authId, ws, remoteIdentity, pending, current) {
+    const peerId = remoteIdentity.peerId;
+    const earlier = this.duplicates.get(peerId);
+    if (earlier) {
+      this.duplicates.delete(peerId);
+      closeQuietly(earlier.ws, CLOSE_CODES.alreadyConnected, 'already_connected');
+    }
+    const held = { ws, frames: [], bytes: 0 };
+    this.duplicates.set(peerId, held);
+    const drop = () => { if (this.duplicates.get(peerId) === held) this.duplicates.delete(peerId); };
+    // Authenticated: it may send full-size frames, held within bounds.
+    setFrameLimit(ws, MAX_PAYLOAD_BYTES);
+    ws.removeAllListeners('message');
+    ws.on('message', (data, isBinary) => {
+      if (this.duplicates.get(peerId) !== held) return;
+      const size = frameBytes(data).length;
+      if (held.frames.length >= DUPLICATE_HOLD_MAX_FRAMES || held.bytes + size > DUPLICATE_HOLD_MAX_BYTES) {
+        drop();
+        log.warn(`second connection for ${peerId} sent too much while the old one was checked; closing it`);
+        closeQuietly(ws, CLOSE_CODES.rateLimited, 'rate_limited');
+        return;
+      }
+      held.frames.push([data, isBinary]);
+      held.bytes += size;
+    });
+    ws.once('close', drop);
+
+    this._settleDuplicate(current).then((oldAlive) => {
+      if (this.duplicates.get(peerId) !== held) return; // superseded, closed or stopped
+      this.duplicates.delete(peerId);
+      if (!this.running || ws.readyState !== WebSocket.OPEN) {
+        closeQuietly(ws, CLOSE_CODES.unauthenticated, 'unauthenticated');
+        return;
+      }
+      if (!this.trustedPeers.has(peerId)) {
+        closeQuietly(ws, CLOSE_CODES.keyRemoved, 'key_removed');
+        return;
+      }
+      const live = this.peers.get(peerId);
+      if (live && (live !== current || oldAlive)) {
+        // The old link answered, or another link took the slot meanwhile.
+        log.info(`refusing a second connection for ${peerId}: the current one is alive`);
+        closeQuietly(ws, CLOSE_CODES.alreadyConnected, 'already_connected');
+        return;
+      }
+      if (live) {
+        live.disconnectReason = 'replaced';
+        try { live.ws.terminate(); } catch { /* gone */ }
+        this._noteTakeover(peerId);
+      }
+      this._promoteToPeer(authId, ws, remoteIdentity, { ...pending, duplicateSettled: true });
+      for (const [data, isBinary] of held.frames) ws.emit('message', data, isBinary);
+    });
+  }
+
+  // Resolves true on a pong from the existing link within duplicatePingMs,
+  // false on none, or when that link closes first.
+  _settleDuplicate(existing) {
+    return new Promise((resolve) => {
+      const ws = existing.ws;
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        resolve(false);
+        return;
+      }
+      let timer = null;
+      const done = (alive) => {
+        clearTimeout(timer);
+        ws.removeListener('pong', onPong);
+        ws.removeListener('close', onClose);
+        resolve(alive);
+      };
+      const onPong = () => done(true);
+      const onClose = () => done(false);
+      timer = setTimeout(() => done(false), this.duplicatePingMs);
+      ws.once('pong', onPong);
+      ws.once('close', onClose);
+      try {
+        ws.ping();
+      } catch {
+        done(false);
+      }
+    });
+  }
+
+  _noteTakeover(peerId) {
+    const now = Date.now();
+    const recent = (this.takeovers.get(peerId) || []).filter((t) => now - t < TAKEOVER_WINDOW_MS);
+    recent.push(now);
+    this.takeovers.set(peerId, recent);
+    const flapping = recent.length >= TAKEOVER_ALERT_COUNT;
+    const message = `a new connection for ${peerId} replaced one that did not answer a ping (${recent.length} in ${TAKEOVER_WINDOW_MS / 60000} min)`;
+    if (flapping) log.error(`${message}: two machines may hold this node's key`);
+    else log.warn(message);
+    this.emit('peerTakeover', { peerId, count: recent.length, windowMs: TAKEOVER_WINDOW_MS, flapping });
   }
 
   // A nonce is kept until its envelope is older than the envelope window:
@@ -1239,6 +1369,7 @@ module.exports = {
   MAX_PAYLOAD_BYTES,
   PRE_AUTH_MAX_BYTES,
   CLOSE_CODES,
+  TAKEOVER_ALERT_COUNT,
   EXPORTER_LABEL,
   parsePreAuthFrame,
   channelBinding,

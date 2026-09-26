@@ -191,17 +191,22 @@ class RelayClient extends EventEmitter {
   }
 
   async _onConnected() {
+    // The link this hello runs on. If it is gone by the time the hello
+    // settles (a 4009, or any close), that close was already handled with its
+    // own reason; failing "it" then would only leave a stale reason behind
+    // (and take the 5 s floor off the next 4009) or drop a newer link.
+    const link = this.transport ? this.transport.getPeer(this.relayPeerId) : null;
     let hello;
     try {
       hello = await this.rpc.call(this.relayPeerId, 'relay.hello', { node_id: this.identity.nodeId, node_name: this.nodeName, versions: [1] });
     } catch (err) {
       log.warn(`relay hello failed: ${err.message}`);
-      this._failLink('hello_failed');
+      this._failLink('hello_failed', link);
       return;
     }
     if (!hello || hello.relay_id !== this.pin.relay_id) {
       log.error(`relay answered as ${hello && hello.relay_id}, but this node paired with ${this.pin.relay_id}; not using the link`);
-      this._failLink('mismatch');
+      this._failLink('mismatch', link);
       return;
     }
     // F3's relay resets its backoff on a good hello; the front-door link
@@ -221,7 +226,8 @@ class RelayClient extends EventEmitter {
   // Drops the (transport-level connected, but not usable) peer and lets the
   // 'peerDisconnected' that produces drive the actual redial — one path, so
   // there is exactly one place that schedules it.
-  _failLink(reason) {
+  _failLink(reason, link) {
+    if (!this.transport || !link || this.transport.getPeer(this.relayPeerId) !== link) return;
     this.pendingFailureReason = reason;
     if (this.transport && typeof this.transport.disconnectPeer === 'function') {
       this.transport.disconnectPeer(this.relayPeerId);

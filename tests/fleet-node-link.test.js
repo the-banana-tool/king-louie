@@ -149,6 +149,41 @@ describe('RelayClient with a front-door pin', () => {
     assert.equal(c.lastDelayMs, 5000);
   });
 
+  it('every 4009 from a front door holding another link waits at least 5 s, even with a hello in flight', async () => {
+    // A real front-door transport with the duplicate rule, and a live link
+    // for this node's key that answers pings: each dial authenticates, sends
+    // relay.hello, and is then closed with 4009 (never before auth).
+    const hub = new MeshTransport({ identity: fd, host: '127.0.0.1', port: 0, useTls: false, duplicatePingMs: 200 });
+    await hub.start();
+    cleanups.push(() => hub.stop());
+    hub.addTrustedPeer(node.peerId, node.publicKey);
+    const incumbent = new MeshTransport({ identity: node, listen: false, useTls: false });
+    await incumbent.start();
+    cleanups.push(() => incumbent.stop());
+    incumbent.addTrustedPeer(fd.peerId, fd.publicKey);
+    await incumbent.connectToPeer('127.0.0.1', hub.port);
+    for (let i = 0; i < 300 && !hub.getPeer(node.peerId); i += 1) await new Promise((r) => setTimeout(r, 10));
+    const c = new RelayClient({ identity: node, frontDoorPin: pinFor(), useTls: false, random: () => 0,
+      transportFactory: (options) => {
+        const t = new MeshTransport(options);
+        t.connectPinned = () => t.connectToPeer('127.0.0.1', hub.port);
+        return t;
+      } });
+    cleanups.push(() => c.stop());
+    const delays = [];
+    for (let round = 0; round < 3; round += 1) {
+      c.lastDelayMs = null;
+      if (round === 0) await c.start();
+      else c._dial();
+      for (let i = 0; i < 300 && c.lastDelayMs === null; i += 1) await new Promise((r) => setTimeout(r, 10));
+      clearTimeout(c.retryTimer);
+      await new Promise((r) => setImmediate(r)); // the in-flight hello settles
+      delays.push(c.lastDelayMs);
+    }
+    assert.deepEqual(delays, [5000, 5000, 5000]);
+    assert.ok(hub.getPeer(node.peerId) && incumbent.getPeer(fd.peerId), 'the incumbent link stays');
+  });
+
   it('a relay_id mismatch on the front-door link waits at least 60 s', () => {
     const c = new RelayClient({ identity: node, frontDoorPin: pinFor(), useTls: false, random: () => 0 });
     c._handleLinkDown('mismatch');
