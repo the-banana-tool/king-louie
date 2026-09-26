@@ -1032,3 +1032,29 @@ describe('ContactRouter ack budget (final review I4)', () => {
     assert.strictEqual(mobileAcks, 30);
   });
 });
+
+describe('ContactRouter.deliver persists before sending (final review M1)', () => {
+  it('the delivery and its tokens are on disk while the send is in flight; a failed send is marked failed', async () => {
+    const w = await world();
+    const q = w.ask(w.lot.id, { text: 'Accept 41k?', options: [{ id: 'a', label: 'Yes' }, { id: 'b', label: 'No' }] });
+    const e = w.entry(w.lot, q);
+    const tg = w.adapters.get('telegram');
+    let seenDuringSend = null;
+    const original = tg.sendContact.bind(tg);
+    tg.sendContact = async (message, meta) => {
+      const onDisk = new ContactState({ dir: w.state.dir, clock: w.clock });
+      seenDuringSend = onDisk.resolve(e.token, { channel: 'telegram' });
+      return original(message, meta);
+    };
+    const out = await w.router.deliver('telegram', [e]);
+    assert.ok(seenDuringSend && seenDuringSend.item && seenDuringSend.item.questionId === q.id, 'resolvable from disk during the send');
+    assert.strictEqual(seenDuringSend.delivery.status, 'sending');
+    assert.strictEqual(w.state.deliveries()[out.deliveryId].status, 'sent');
+    assert.strictEqual(w.state.deliveries()[out.deliveryId].externalRef, out.externalRef);
+    tg.sendContact = async () => { throw new Error('telegram is down'); };
+    const e2 = w.entry(w.lot, q);
+    await assert.rejects(w.router.deliver('telegram', [e2], { deliveryId: 'd-fail' }), /telegram is down/);
+    assert.strictEqual(w.state.deliveries()['d-fail'].status, 'failed');
+    assert.match(w.state.deliveries()['d-fail'].error, /telegram is down/);
+  });
+});

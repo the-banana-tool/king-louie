@@ -209,17 +209,29 @@ class ContactRouter {
       urgency: message.items.some((i) => i.urgency === 'high') ? 'high' : (message.items.some((i) => i.urgency === 'normal') ? 'normal' : 'low')
     };
     const items = replies ? message.items : message.items.map(({ token: _token, ...rest }) => rest);
-    const sent = await adapter.sendContact({ subject: message.subject, text: message.text, items }, meta);
-    this.state.recordDelivery(id, {
+    // Final review M1 (spec §3.6, persisted before acting): the delivery and
+    // its tokens are on disk before the send, so a crash right after a
+    // non-idempotent send (Telegram, Discord, the phone) still leaves every
+    // token and button of the sent message resolvable.
+    const record = {
       channel: channelId,
       at: this.clock().toISOString(),
-      externalRef: sent?.externalRef ?? null,
-      relayId: sent?.relayId ?? null,
+      externalRef: null,
+      relayId: null,
       batchToken: token,
       idempotencyKey: id,
-      status: 'sent',
+      status: 'sending',
       items: message.items.map((i) => ({ n: i.n, caseId: i.caseId, questionId: i.questionId, token: i.token, kind: i.kind, answerable: i.answerable }))
-    });
+    };
+    this.state.recordDelivery(id, record);
+    let sent;
+    try {
+      sent = await adapter.sendContact({ subject: message.subject, text: message.text, items }, meta);
+    } catch (err) {
+      this.state.recordDelivery(id, { ...record, status: 'failed', error: cut(err?.message || err, 500) });
+      throw err;
+    }
+    this.state.recordDelivery(id, { ...record, externalRef: sent?.externalRef ?? null, relayId: sent?.relayId ?? null, status: 'sent' });
     return { deliveryId: id, externalRef: sent?.externalRef ?? null, batchToken: token };
   }
 
