@@ -67,6 +67,30 @@ describe('AlertCenter', () => {
     assert.equal(a.list().filter((x) => x.kind === 'unknown_node_key').length, 2);
   });
 
+  it('unknown_node_key: recovers count/top after a restart mid-day, with no second push', async () => {
+    const now = Date.parse('2026-09-23T01:00:00.000Z');
+    const f = file();
+    const pushed1 = [];
+    const a = new AlertCenter({ file: f, now: () => now, push: (x) => pushed1.push(x.kind) });
+    for (let i = 0; i < 6; i += 1) a.unknownNodeKey({ fingerprint: `${'a'.repeat(63)}${i % 3}`, ip: `203.0.113.${i}` });
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(pushed1, ['unknown_node_key']);
+    const before = a.list().find((x) => x.kind === 'unknown_node_key');
+    assert.equal(before.detail.count, 6);
+
+    // A fresh AlertCenter reloading the same file mid-day simulates a
+    // restart: `unknown` starts null, so without recovery the next calls
+    // would dedupe against the persisted alert and the summary would freeze.
+    const pushed2 = [];
+    const b = new AlertCenter({ file: f, now: () => now, push: (x) => pushed2.push(x.kind) });
+    for (let i = 0; i < 4; i += 1) b.unknownNodeKey({ fingerprint: `${'a'.repeat(63)}${i % 3}`, ip: `203.0.113.${100 + i}` });
+    const day = b.list().filter((x) => x.kind === 'unknown_node_key');
+    assert.equal(day.length, 1, 'still one alert for the day, not a second one');
+    assert.equal(day[0].detail.count, 10, 'counts keep going instead of restarting from zero');
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(pushed2, [], 'recovering an existing alert never pushes again');
+  });
+
   it('refuses an unknown kind', () => {
     assert.throws(() => new AlertCenter({ file: file() }).raise('made_up'), /unknown alert kind/);
     assert.ok(ALERT_KINDS.includes('node_replaced'));

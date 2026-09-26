@@ -151,6 +151,18 @@ class AlertCenter {
     if (!this.unknown || this.unknown.day !== day) {
       this.unknown = { day, alertId: null, byFingerprint: new Map() };
     }
+    // A restart mid-day loses this in-memory summary; recover the id and
+    // the counts from the already-persisted alert rather than starting a
+    // second one raise()'s own dedupe would just discard, freezing the
+    // summary for the rest of the day.
+    if (this.unknown.alertId === null) {
+      const persisted = this.alerts.find((a) => a.kind === 'unknown_node_key' && a.subject === day);
+      if (persisted) {
+        this.unknown.alertId = persisted.id;
+        const top = persisted.detail && Array.isArray(persisted.detail.top) ? persisted.detail.top : [];
+        for (const e of top) this.unknown.byFingerprint.set(e.fingerprint || '(none)', { fingerprint: e.fingerprint, count: e.count, last_ip: e.last_ip });
+      }
+    }
     const key = fingerprint || '(none)';
     const entry = this.unknown.byFingerprint.get(key) || { fingerprint, count: 0, last_ip: null };
     entry.count += 1;
