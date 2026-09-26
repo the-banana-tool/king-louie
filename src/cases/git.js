@@ -109,8 +109,10 @@ function caseHooksDir(cwd) {
 
 // No signing, no hooks, no fsmonitor, no symlinks or line-ending rewrites on
 // checkout, Git LFS neutralised, and only the https and ssh transports (file
-// only when the caller asks, for a local clone). `ext::` and friends are
-// refused by git.
+// only when the caller asks, for a local clone). These -c flags alone do not
+// stop `ext::`: a later -c or a config key can turn a transport back on, so
+// the transport list is enforced by GIT_ALLOW_PROTOCOL in gitEnv, which
+// overrides every protocol.* setting.
 function hardenedGitArgs(args, { hooksDir, allowFile = false } = {}) {
   if (!hooksDir) throw new Error('hardenedGitArgs needs a hooksDir.');
   return [
@@ -131,49 +133,185 @@ function hardenedGitArgs(args, { hooksDir, allowFile = false } = {}) {
   ];
 }
 
-// Never prompt, never smudge LFS, never ask ssh for a password, and never
-// inherit a repository location from the environment.
-function gitEnv(extra = {}) {
-  const env = { ...process.env };
-  for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE']) delete env[key];
+// No inherited GIT_* variable reaches git: GIT_DIR/GIT_WORK_TREE would move
+// the repository, GIT_CONFIG_COUNT/KEY_n/VALUE_n and GIT_CONFIG_PARAMETERS
+// inject config, GIT_ASKPASS/GIT_EDITOR/GIT_SSH run programs. The caller's
+// `extra` comes next, and the hardening keys last, so no caller can undo
+// them: never prompt, never smudge LFS, never ask ssh for a password, and
+// only the allowed transports.
+function gitEnv(extra = {}, { allowFile = false } = {}) {
+  const env = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!/^GIT_/i.test(key)) env[key] = value;
+  }
   return {
     ...env,
+    ...extra,
     GIT_TERMINAL_PROMPT: '0',
     GIT_LFS_SKIP_SMUDGE: '1',
     GIT_SSH_COMMAND: 'ssh -o BatchMode=yes',
-    ...extra
+    GIT_ALLOW_PROTOCOL: allowFile ? 'https:ssh:file' : 'https:ssh'
   };
 }
 
-function firstStderrLine(err) {
-  if (err && typeof err.firstLine === 'string') return err.firstLine;
-  const text = String((err && (err.stderr || err.message)) || '');
-  return text.split(/\r?\n/).map((l) => l.trim()).find(Boolean) || '';
+// `scheme://user:secret@host` → `scheme://host`, so a token in a URL never
+// reaches an error message.
+function stripUserinfo(text) {
+  return String(text).replace(/(\/\/)[^/\s@'"]*@/g, '$1');
 }
 
-function describeError(err, cwd, args, timeoutMs) {
-  // spawn reports a missing cwd as ENOENT too; only a present cwd means git is missing.
-  if (err && err.code === 'ENOENT' && fs.existsSync(cwd)) return new GitUnavailableError();
-  if (err && timeoutMs && (err.killed || err.code === 'ETIMEDOUT' || err.signal === 'SIGKILL')) {
-    const took = timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)} s` : `${timeoutMs} ms`;
-    const out = new Error(`git ${args[0]} timed out after ${took}`);
-    out.code = 'GIT_TIMEOUT';
-    out.firstLine = out.message;
-    return out;
+// The first non-empty line git wrote to stderr, credentials removed. Node's
+// own "Command failed: git …" message carries the whole argv, so it is never
+// used for a process that ran.
+function firstStderrLine(err) {
+  if (err && typeof err.firstLine === 'string') return err.firstLine;
+  let text = '';
+  if (err && err.stderr != null) text = String(err.stderr);
+  else if (err && !err.cmd) text = String(err.message || '');
+  return stripUserinfo(text.split(/\r?\n/).map((l) => l.trim()).find(Boolean) || '');
+}
+
+// The git subcommand in `args`, skipping global options (`-c k=v`, `-C dir`).
+function subcommandOf(args) {
+  for (let i = 0; i < args.length; i++) {
+    const a = String(args[i]);
+    if (a === '-c' || a === '-C') { i++; continue; }
+    if (!a.startsWith('-')) return a;
   }
-  if (err && typeof err === 'object') err.firstLine = firstStderrLine(err);
+  return 'git';
+}
+
+function codedError(message, code, props = {}) {
+  const err = new Error(message);
+  err.code = code;
+  Object.assign(err, props);
   return err;
 }
 
+// A new error carrying only the subcommand, exit code and the first stderr
+// line: never the argv, the full stderr or Node's `.cmd`, any of which can
+// hold a URL with credentials.
+function describeError(err, cwd, args, timeoutMs) {
+  // spawn reports a missing cwd as ENOENT too; only a present cwd means git is missing.
+  if (err && err.code === 'ENOENT' && fs.existsSync(cwd)) return new GitUnavailableError();
+  const sub = subcommandOf(args);
+  if (err && timeoutMs && (err.killed || err.code === 'ETIMEDOUT' || err.signal === 'SIGKILL')) {
+    const took = timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)} s` : `${timeoutMs} ms`;
+    const message = `git ${sub} timed out after ${took}`;
+    return codedError(message, 'GIT_TIMEOUT', { firstLine: message });
+  }
+  const firstLine = firstStderrLine(err);
+  let exitCode = null;
+  if (err && typeof err.code === 'number') exitCode = err.code;
+  else if (err && typeof err.status === 'number') exitCode = err.status;
+  return codedError(`git ${sub} failed: ${firstLine || (exitCode === null ? 'unknown error' : `exit code ${exitCode}`)}`, 'GIT_FAILED', { exitCode, firstLine });
+}
+
+// Repository config that runs a program or redirects traffic when git reads
+// it: filter/diff/merge drivers, an external diff, credential helpers, URL
+// rewrites, transport switches, and the pager/editor/askpass/proxy/ssh
+// commands. A case repo (an imported one included) or a fetched package may
+// carry any of these in .git/config, so git is not run in such a repo.
+const UNSAFE_CONFIG_RE = '^(filter|diff|merge)\\..+\\.(clean|smudge|process|command|textconv|driver)$|^diff\\.external$|^credential\\.|^url\\.|^protocol\\.|^core\\.(pager|editor|askpass|gitproxy|sshcommand)$';
+const CONFIG_QUERY = ['config', '--local', '--includes', '--name-only', '--get-regexp', UNSAFE_CONFIG_RE];
+// C locale so "not a repository" is recognisable whatever the owner's language.
+const QUERY_ENV = { LC_ALL: 'C', LANGUAGE: 'C' };
+const NOT_A_REPO_RE = /only be used inside a git repository|not a git repository/i;
+
+// .git/config path → the exact text last found clean. A repo whose config
+// has an include is checked every time (an included file can change
+// without this one changing).
+const cleanConfigs = new Map();
+
+function configCacheEntry(cwd) {
+  const file = path.join(path.resolve(cwd), '.git', 'config');
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); } catch { return null; }
+  if (/^\s*\[\s*include/im.test(text)) return null;
+  return { file, text };
+}
+
+function unsafeConfigError(cwd, stdout) {
+  const keys = String(stdout).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const list = [...new Set(keys)].join(', ');
+  const message = `Refusing to run git in ${cwd}: its repository config sets ${list}, which can run a program or redirect git. Remove ${keys.length === 1 ? 'that key' : 'those keys'} from the repository's .git/config to continue.`;
+  return codedError(message, 'GIT_UNSAFE_CONFIG', { keys, firstLine: message });
+}
+
+// Exit 0 = something matched (refuse), exit 1 = nothing matched (clean),
+// "not inside a repository" = nothing to check (git init, a bare temp dir).
+function settleConfigQuery(cwd, entry, err, stdout) {
+  if (!err) throw unsafeConfigError(cwd, stdout);
+  const exit = typeof err.code === 'number' ? err.code : err.status;
+  if (exit === 1) {
+    if (entry) cleanConfigs.set(entry.file, entry.text);
+    return;
+  }
+  if (err.code !== 'ENOENT' && NOT_A_REPO_RE.test(String(err.stderr || ''))) return;
+  throw describeError(err, cwd, CONFIG_QUERY, 0);
+}
+
+function needsConfigCheck(cwd) {
+  if (!fs.existsSync(cwd)) return { skip: true };
+  const entry = configCacheEntry(cwd);
+  if (entry && cleanConfigs.get(entry.file) === entry.text) return { skip: true };
+  return { skip: false, entry };
+}
+
+async function checkRepoConfig(cwd, hooksDir) {
+  const { skip, entry } = needsConfigCheck(cwd);
+  if (skip) return;
+  let stdout = '';
+  let failure = null;
+  try {
+    ({ stdout } = await run('git', hardenedGitArgs(CONFIG_QUERY, { hooksDir }), {
+      cwd, env: gitEnv(QUERY_ENV), windowsHide: true, maxBuffer: MAX_BUFFER
+    }));
+  } catch (err) {
+    failure = err;
+  }
+  settleConfigQuery(cwd, entry, failure, stdout);
+}
+
+function checkRepoConfigSync(cwd, hooksDir) {
+  const { skip, entry } = needsConfigCheck(cwd);
+  if (skip) return;
+  let stdout = '';
+  let failure = null;
+  try {
+    stdout = execFileSync('git', hardenedGitArgs(CONFIG_QUERY, { hooksDir }), {
+      cwd, env: gitEnv(QUERY_ENV), windowsHide: true, maxBuffer: MAX_BUFFER,
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']
+    });
+  } catch (err) {
+    failure = err;
+  }
+  settleConfigQuery(cwd, entry, failure, stdout);
+}
+
+// A hooks dir the caller passes gets the same checks as noHooksDir(): a
+// plain directory, ours and private, and empty.
+function checkedHooksDir(dir) {
+  if (!dir) return noHooksDir();
+  const problem = hooksDirProblem(dir);
+  if (problem) throw new Error(`The git hooks directory ${dir} can't be used (${problem}), so git was not run.`);
+  if (fs.readdirSync(dir).length > 0) {
+    throw new Error(`The git hooks directory ${dir} is not empty, so git was not run.`);
+  }
+  return dir;
+}
+
 // Without a hooksDir, the checked empty hooks dir outside every case is used,
-// so no call ever creates a .kl/ anywhere. The command name (args[0]) is used
-// in the timeout message.
+// so no call ever creates a .kl/ anywhere. In an existing repository the
+// repo's own config is checked first (checkRepoConfig).
 async function runGit(cwd, args, { env = {}, timeoutMs = DEFAULT_TIMEOUT_MS, hooksDir = null, allowFile = false } = {}) {
-  const argv = hardenedGitArgs(args, { hooksDir: hooksDir || noHooksDir(), allowFile });
+  const hooks = checkedHooksDir(hooksDir);
+  await checkRepoConfig(cwd, hooks);
+  const argv = hardenedGitArgs(args, { hooksDir: hooks, allowFile });
   try {
     const { stdout } = await run('git', argv, {
       cwd,
-      env: gitEnv(env),
+      env: gitEnv(env, { allowFile }),
       windowsHide: true,
       maxBuffer: MAX_BUFFER,
       timeout: timeoutMs || 0,
@@ -186,11 +324,13 @@ async function runGit(cwd, args, { env = {}, timeoutMs = DEFAULT_TIMEOUT_MS, hoo
 }
 
 function runGitSync(cwd, args, { timeoutMs = DEFAULT_TIMEOUT_MS, hooksDir = null, allowFile = false } = {}) {
-  const argv = hardenedGitArgs(args, { hooksDir: hooksDir || noHooksDir(), allowFile });
+  const hooks = checkedHooksDir(hooksDir);
+  checkRepoConfigSync(cwd, hooks);
+  const argv = hardenedGitArgs(args, { hooksDir: hooks, allowFile });
   try {
     return execFileSync('git', argv, {
       cwd,
-      env: gitEnv(),
+      env: gitEnv({}, { allowFile }),
       windowsHide: true,
       maxBuffer: MAX_BUFFER,
       timeout: timeoutMs || 0,
