@@ -229,7 +229,9 @@ describe('a running front door', () => {
     // progress_hold_s 2 and a 1 s request timeout: a hold longer than the
     // timeout (ruling T26-hold, carry 7) on the real mcp. server.
     const l = await layout({ fdRaw: { mcp: { progress_hold_s: 2 } } });
-    l.deps.mcpServerLimits = { requestTimeoutMs: 1000, headersTimeoutMs: 800, idleTimeoutMs: 1000 };
+    // idle > headers: a pipelined request's headers deadline (from the
+    // previous response) must fire before the idle limit would.
+    l.deps.mcpServerLimits = { requestTimeoutMs: 1000, headersTimeoutMs: 800, idleTimeoutMs: 2500 };
     l.deps.meshServerLimits = { requestTimeoutMs: 1000, headersTimeoutMs: 800, idleTimeoutMs: 1000 };
     l.deps.probeAllowLoopbackForTests = true;
     const fd = await start(l);
@@ -373,6 +375,31 @@ describe('a running front door', () => {
     assert.match(idle.reply, /^HTTP\/1\.1 200/);
     assert.ok(idle.closedAt !== null && idle.closedAt < 3500, `closed after ${idle.closedAt} ms`);
     assert.ok(!/408/.test(idle.reply), 'closed as idle, not cut as a slow request');
+  });
+
+  it('round 2: an Upgrade request on mcp. is closed at once, never exempt from the deadlines', async () => {
+    const r = await trickle({
+      port: t.port, servername: 'mcp.kl.example.com', ca: t.ca.cert,
+      text: 'GET /mcp HTTP/1.1\r\nHost: mcp.kl.example.com\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n'
+    });
+    assert.ok(r.closedAt !== null && r.closedAt < 500, `closed after ${r.closedAt} ms`);
+    assert.equal(r.reply, '');
+  });
+
+  it('round 2: a pipelined request\'s headers deadline starts when the previous response finishes', async () => {
+    const first = 'GET /.well-known/oauth-authorization-server HTTP/1.1\r\nHost: mcp.kl.example.com\r\n\r\n';
+    const second = 'GET /.well-known/oauth-authorization-server HTTP/1.1\r\nHost: mcp.kl.example.com\r\n'; // never finished
+    const r = await new Promise((resolve) => {
+      let answeredAt = null;
+      let reply = '';
+      const s = tls.connect({ host: '127.0.0.1', port: t.port, servername: 'mcp.kl.example.com', ca: t.ca.cert }, () => s.write(first + second));
+      s.on('data', (d) => { reply += d.toString('utf8'); if (answeredAt === null) answeredAt = Date.now(); });
+      s.on('error', () => {});
+      s.on('close', () => resolve({ reply, afterAnswer: answeredAt === null ? null : Date.now() - answeredAt }));
+      setTimeout(() => s.destroy(), 6000).unref();
+    });
+    assert.match(r.reply, /^HTTP\/1\.1 200/);
+    assert.ok(r.afterAnswer !== null && r.afterAnswer < 1800, `closed ${r.afterAnswer} ms after the first answer (headers 0.8 s, idle 2.5 s)`);
   });
 
   it('fix 2: the node\'s upgraded mesh link outlives the mesh server\'s timers', async () => {

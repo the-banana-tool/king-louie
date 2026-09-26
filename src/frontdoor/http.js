@@ -104,12 +104,18 @@ function createFrontDoorHandler({ mcpHost, oauth, mcp = null, phoneApiHandler, p
 //   timed after that, so a response held open (the MCP get_job long-poll, up
 //   to frontdoor.mcp.progress_hold_s ≤ 55 s) outlives the 30 s limit;
 // - idle: after a response, a keep-alive connection that sends nothing is
-//   closed.
+//   closed. The next request's headers deadline also counts from that
+//   response's end (a pipelined request already waiting included): at most
+//   min(idle, headers) to show a byte, and headers in all to finish them.
 // A request cut before it has an answer gets 408 and the connection closes.
-// An upgraded connection (a mesh WebSocket) leaves every timer behind.
+// Upgrades: with `upgrades: 'keep'` (the mesh server, where
+// MeshTransport#attachServer authenticates the socket in the same 'upgrade'
+// event) an upgraded connection leaves every timer behind. Otherwise (the
+// mcp. server, which serves no upgrade) an upgrade request is destroyed at
+// once, so no client can park sockets outside every deadline.
 const END_GRACE_MS = 1000;
 
-function guardConnections(server, { headersTimeoutMs, requestTimeoutMs, idleTimeoutMs }) {
+function guardConnections(server, { headersTimeoutMs, requestTimeoutMs, idleTimeoutMs, upgrades = 'refuse' }) {
   const state = new WeakMap(); // socket → { timer, phase }
   const clear = (socket) => {
     const st = state.get(socket);
@@ -170,16 +176,27 @@ function guardConnections(server, { headersTimeoutMs, requestTimeoutMs, idleTime
     res.once('finish', () => {
       if (!state.has(socket)) return;
       const readAt = socket.bytesRead;
-      arm(socket, { kind: 'idle' }, idleTimeoutMs, () => {
+      const first = Math.min(idleTimeoutMs, headersTimeoutMs);
+      arm(socket, { kind: 'idle' }, first, () => {
+        // Nothing new since the response: idle (or a pipelined request that
+        // is still incomplete). Otherwise the rest of the headers deadline.
         if (socket.bytesRead === readAt) socket.destroy();
-        else awaitHeaders(socket); // the next request has begun
+        else arm(socket, { kind: 'headers' }, Math.max(1, headersTimeoutMs - first), () => cut(socket, null));
       });
     });
   });
-  server.on('upgrade', (req, socket) => {
-    clear(socket);
-    state.delete(socket);
-  });
+  if (upgrades === 'keep') {
+    server.on('upgrade', (req, socket) => {
+      clear(socket);
+      state.delete(socket);
+    });
+  } else {
+    server.on('upgrade', (req, socket) => {
+      clear(socket);
+      state.delete(socket);
+      socket.destroy();
+    });
+  }
   return server;
 }
 
@@ -213,7 +230,7 @@ function createMeshHttpServer(limits = {}) {
   server.headersTimeout = 0;
   server.maxHeadersCount = MAX_HEADERS_COUNT;
   server.frontDoorLimits = Object.freeze(l);
-  return guardConnections(server, l);
+  return guardConnections(server, { ...l, upgrades: 'keep' });
 }
 
 module.exports = { createFrontDoorHandler, createMcpHttpServer, createMeshHttpServer, guardConnections, MCP_LIMITS, REQUEST_TIMEOUT_MS };
