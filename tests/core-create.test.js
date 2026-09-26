@@ -393,3 +393,70 @@ describe('createCore: a contact host that cannot start (ruling T13-start)', () =
     }
   });
 });
+
+describe('createCore: contact construction and a bad presence file (final review I2)', () => {
+  it('contact/presence.json as a directory: core.start() succeeds and contact runs with empty presence', async () => {
+    const { deps } = makeDeps();
+    fs.mkdirSync(path.join(deps.paths.dataDir, 'contact', 'presence.json'), { recursive: true });
+    const core = createCore(deps);
+    await core.start();
+    try {
+      const contact = core.context.getContact();
+      assert.ok(contact && contact.presence, 'contact is on');
+      assert.deepStrictEqual(contact.presence.channels, {});
+      // A later owner-proven inbound does not throw on the unwritable file.
+      contact.presence.noteInbound('telegram');
+      assert.ok(contact.presence.channels.telegram);
+    } finally {
+      await core.shutdown();
+    }
+  });
+
+  it('a contact host that throws while being built leaves contact off and starts everything else', async () => {
+    const { deps } = makeDeps();
+    const { Presence } = require('../src/cases/presence');
+    const load = Presence.prototype._load;
+    Presence.prototype._load = () => { throw new Error('construction boom'); };
+    const toasts = [];
+    const core = createCore({ ...deps, uiToastChannel: { send: async (p) => { toasts.push(p); } } });
+    try {
+      await core.start();
+    } finally {
+      Presence.prototype._load = load;
+    }
+    try {
+      assert.strictEqual(core.context.getContact(), null);
+      assert.ok(core.context.toolRegistry.getFunctionDefinitions().length > 10);
+      assert.strictEqual(toasts.length, 1);
+      assert.match(toasts[0].body, /construction boom/);
+    } finally {
+      await core.shutdown();
+    }
+  });
+});
+
+describe('createCore: service mode is explicit (final review M6)', () => {
+  const settings = {
+    contact: { sms: { owner: '+15550100', from: '+15550199', relay: 'main' }, relays: { main: { baseUrl: 'https://relay.example.com', pollSec: 30 } } },
+    channels: { sms: { enabled: true } }
+  };
+  for (const [label, extra, expectSms] of [
+    ['desktop (no service signal) reads the owner from settings', {}, true],
+    ['deps.isService: true ignores data-dir contact settings', { isService: true }, false],
+    ['remoteApprovals "phone" alone also means service mode', { remoteApprovals: 'phone', phoneApprover: { ttlMs: 300000, request: async () => false } }, false]
+  ]) {
+    it(label, async () => {
+      const { deps } = makeDeps();
+      deps.store.set('settings', settings);
+      const core = createCore({ ...deps, ...extra, features: { ...deps.features, channels: true } });
+      await core.start();
+      try {
+        const contact = core.context.getContact();
+        assert.ok(contact);
+        assert.strictEqual(Boolean(contact.router.adapter('sms')), expectSms);
+      } finally {
+        await core.shutdown();
+      }
+    });
+  }
+});

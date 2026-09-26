@@ -2724,33 +2724,38 @@ function createCore(deps = {}) {
     migrateLegacyBridgeChatOrigins();
     initializeTools();
     await initializeAgentInfrastructure();
-    // Service mode is signalled by the presence of deps.contactConfig (run.js
-    // always passes it, from the admin service.json only); the desktop reads
-    // the owner and addresses from settings. sendExternal's outbound gate is
-    // contact-host's defaultGetGate (C3's gateLeaves once it merges).
-    contactHost = createContactHost({
-      getSettings,
-      setSettings,
-      contactConfig: deps.contactConfig ?? null,
-      isService: Object.prototype.hasOwnProperty.call(deps, 'contactConfig'),
-      caseRuntime,
-      channelRegistry,
-      vault,
-      dataDir: userDataPath,
-      features,
-      getBridges: () => ({ telegram: telegramBridge, discord: discordBridge }),
-      getWebhookServer: () => webhookServer,
-      approvals: deps.approvals || null
-    });
-    // Ruling T13-start: contact that cannot start never stops the app. Log it,
-    // leave contact off (getContact() → null) and warn the owner once.
+    // Service mode (final review M6): run.js passes deps.isService === true;
+    // any other service signal (deps.contactConfig present, phone approvals)
+    // also counts, so a service entry point that forgets one still reads the
+    // owner identity from the admin config only, never data-dir settings.
+    // The desktop reads the owner and addresses from settings.
+    // sendExternal's outbound gate is contact-host's defaultGetGate (C3's
+    // gateLeaves once it merges).
+    const isService = deps.isService === true || Object.prototype.hasOwnProperty.call(deps, 'contactConfig') || deps.remoteApprovals === 'phone';
+    // Ruling T13-start (final review I2): contact that cannot be built or
+    // cannot start never stops the app. Log it, leave contact off
+    // (getContact() → null) and warn the owner once.
     try {
+      contactHost = createContactHost({
+        getSettings,
+        setSettings,
+        contactConfig: deps.contactConfig ?? null,
+        isService,
+        caseRuntime,
+        channelRegistry,
+        vault,
+        dataDir: userDataPath,
+        features,
+        getBridges: () => ({ telegram: telegramBridge, discord: discordBridge }),
+        getWebhookServer: () => webhookServer,
+        approvals: deps.approvals || null
+      });
       await contactHost.start();
     } catch (err) {
       const failed = contactHost;
       contactHost = null;
       log.error(`Contact channels could not start: ${err.message}`);
-      await withTimeout(failed.stop(), shutdownTimeoutMs, 'Contact cleanup', (label, ms) => log.warn(`${label} timed out after ${ms}ms`))
+      if (failed) await withTimeout(failed.stop(), shutdownTimeoutMs, 'Contact cleanup', (label, ms) => log.warn(`${label} timed out after ${ms}ms`))
         .catch((stopErr) => log.warn(`Contact cleanup failed: ${stopErr.message}`));
       if (deps.uiToastChannel && typeof deps.uiToastChannel.send === 'function') {
         Promise.resolve()

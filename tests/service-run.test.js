@@ -350,6 +350,7 @@ describe('loadProfile("agent") listener readiness', { timeout: 120000 }, () => {
     }
     assert.ok(seen.approvals && seen.approvals.approverStore && seen.approvals.identity);
     assert.strictEqual(seen.approvals.phoneApprover, seen.phoneApprover);
+    assert.strictEqual(seen.isService, true, 'service mode is passed explicitly (final review M6)');
     assert.strictEqual(path.resolve(seen.approvals.approverStore.dir), path.resolve(configDir, 'approvers'));
     assert.ok(!path.resolve(seen.approvals.approverStore.dir).startsWith(path.resolve(dir)), 'not a data-dir approver set');
   });

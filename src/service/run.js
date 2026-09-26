@@ -97,6 +97,7 @@ function loadProfile(profile) {
             // the admin service.json only (runService loads it once, with
             // adminUid). The key is always present: it means service mode.
             contactConfig: contact ?? null,
+            isService: true,
             remoteApprovals: 'phone',
             phoneApprover: approvals.phoneApprover,
             auditLedger: approvals.auditLedger,

@@ -52,14 +52,28 @@ class Presence {
     this._hostZoneLogged = false;
   }
 
+  // Presence is advisory: an unreadable presence.json (a directory, EACCES,
+  // bad JSON, a failing disk) costs only the last-seen times, so it is logged
+  // and presence starts empty instead of stopping contact (final review I2).
   _load() {
-    const data = readJson(this.file, null);
-    return data && typeof data.channels === 'object' && data.channels ? { ...data.channels } : {};
+    let data = null;
+    try {
+      data = readJson(this.file, null);
+    } catch (err) {
+      this.log.warn(`presence file ${this.file} is unreadable (${err.code || err.message}); starting with no last-seen times`);
+      return {};
+    }
+    return data && typeof data.channels === 'object' && data.channels && !Array.isArray(data.channels) ? { ...data.channels } : {};
   }
 
   _save() {
     if (!this.file) return;
-    writeJson(this.file, { version: 1, channels: this.channels });
+    try {
+      writeJson(this.file, { version: 1, channels: this.channels });
+    } catch (err) {
+      if (!this._saveWarned) this.log.warn(`presence file ${this.file} cannot be written (${err.code || err.message}); last-seen times stay in memory`);
+      this._saveWarned = true;
+    }
   }
 
   policy() {
