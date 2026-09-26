@@ -103,7 +103,7 @@ It uses `buildServicePorts`, `getOrGenerateNodeIdentity` (its `nodeId` is `front
 |---|---|---|
 | 1 | Admin `service.json` `profile` and `node.yaml` `profile` both `frontdoor` | refuse `profile mismatch: service.json says "<a>", node.yaml says "<b>"` |
 | 2 | `frontdoor.domain` is a lowercase DNS name with ≥2 labels, not an IP | refuse `frontdoor.domain must be a DNS name` |
-| 3 | Exactly one TLS source: `frontdoor.acme` (with `terms_agreed: true`) or `frontdoor.tls` | refuse `configure frontdoor.acme or frontdoor.tls, not both/neither` |
+| 3 | Exactly one TLS source: `frontdoor.acme` (with `terms_agreed: true`) or `frontdoor.tls` | refuse `configure frontdoor.acme or frontdoor.tls, not both/neither`; with `frontdoor.acme` but no agreement, refuse `frontdoor.acme.terms_agreed must be true to use ACME (it records that you accept the CA terms of service)` |
 | 4 | `features.*` all false; no forbidden `relay.*` key | refuse (the messages above) |
 | 5 | The listener binds `frontdoor.listen` | refuse `cannot bind <host>:<port>: <err>` |
 | 6 | Registry load (§3.6): every record verifies | a bad record is quarantined to `nodes.rejected.json`, and the alert `node_record_invalid` fires |
@@ -220,7 +220,7 @@ under these caps:
 
 Each pending authorization gets:
 - a **`user_code`**: 6 Crockford base32 characters, shown as `XXX-XXX`;
-- the cookie `kl_authz=<32 random bytes b64url>; HttpOnly; Secure; SameSite=Lax; Path=/oauth`. The wait page requires it, so only the browser that started the flow can collect the code.
+- a cookie named per grant, `kl_authz_<grant id prefix>=<32 random bytes b64url>; HttpOnly; Secure; SameSite=Lax; Path=/oauth` (ruling T22-cookiename: named per grant so two authorize flows in one browser do not overwrite each other's cookie). The wait page requires it, so only the browser that started the flow can collect the code.
 
 **No push is sent for grants.** The owner is at the browser, so push would only add an attack
 surface (push-bombing).
@@ -766,8 +766,12 @@ freshness is by echo; `created_at` is not judged.
 
 ### 4.6 Challenges
 
-`POST /v1/challenges` (device-authenticated) returns `{ challenge, expires_in_ms: 120000 }`.
-At most 20 are live per device.
+`POST /v1/challenges` (device-authenticated) takes `{ purpose }`, one of `revoke`
+(spent only by `kl.client.revoke`) or `remove` (spent only by `kl.node.remove`);
+any other purpose is refused (ruling T2-purpose). It returns
+`{ challenge, expires_in_ms: 120000 }`. At most 20 are live per device. A
+challenge is bound to the purpose it was issued for and can be spent only
+once, on a message of that purpose (`challenge_wrong_purpose` otherwise).
 
 ### 4.7 Front-door link RPCs
 
