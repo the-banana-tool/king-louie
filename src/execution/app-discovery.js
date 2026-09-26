@@ -100,17 +100,27 @@ async function isAppAvailable(app) {
   }
 }
 
+/**
+ * The command that checks whether a COM class (e.g. "Word.Application") is
+ * registered, by reading its CLSID key. It never creates the object:
+ * instantiating a COM class starts the app (a hidden WINWORD.EXE for Word)
+ * and nothing would ever close it. Returns null for anything that is not a
+ * plain dotted ProgID, since the value goes into a shell command.
+ */
+function comClassRegisteredCommand(progId) {
+  if (typeof progId !== 'string' || !/^[A-Za-z0-9]+(\.[A-Za-z0-9]+)+$/.test(progId)) return null;
+  return `reg query "HKCR\\${progId}\\CLSID" /ve`;
+}
+
 async function detectWindows(app) {
-  // Check Windows registry via COM automation class
-  if (app.winReg) {
+  // A registered COM class means the app is installed (reg exits non-zero if not)
+  const regCmd = comClassRegisteredCommand(app.winReg);
+  if (regCmd) {
     try {
-      await execAsync(
-        `powershell -NoProfile -Command "(New-Object -ComObject ${app.winReg}).Visible = $false" 2>$null`,
-        { windowsHide: true, timeout: 8000, shell: true }
-      );
+      await execAsync(regCmd, { windowsHide: true, timeout: 5000 });
       return { found: true, launchCmd: app.names[0] || app.id };
     } catch {
-      // COM object not registered
+      // COM class not registered
     }
   }
 
@@ -220,6 +230,7 @@ async function discoverApps(options = {}) {
 
   const catalog = options.catalog || APP_CATALOG;
   const concurrency = options.concurrency || 5;
+  const detect = options.detect || isAppAvailable;
 
   const results = [];
   // Process in batches to avoid spawning too many processes
@@ -229,7 +240,7 @@ async function discoverApps(options = {}) {
       batch.map(async (app) => {
         if (app.webOnly) return null; // Skip web-only apps
         try {
-          const detection = await isAppAvailable(app);
+          const detection = await detect(app);
           if (detection.found) {
             return {
               id: app.id,
@@ -401,6 +412,7 @@ async function discoverAllApps(options = {}) {
 
 module.exports = {
   APP_CATALOG,
+  comClassRegisteredCommand,
   discoverApps,
   discoverAllApps,
   findByCapability,

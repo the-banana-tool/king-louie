@@ -6,8 +6,15 @@ const {
   findByCapability,
   findById,
   buildAppContextSection,
-  resetDiscoveryCache
+  resetDiscoveryCache,
+  comClassRegisteredCommand
 } = require('../src/execution/app-discovery');
+
+// Discovery over the real catalog probes the machine; the tests stub the
+// per-app check so the suite never touches installed software.
+function stubDetect(app) {
+  return Promise.resolve(['vscode', 'node'].includes(app.id) ? { found: true, launchCmd: app.id } : { found: false });
+}
 
 // ── catalog structure ────────────────────────────────────────────────────────
 
@@ -49,14 +56,14 @@ describe('APP_CATALOG', () => {
 describe('discoverApps()', () => {
   it('returns an array of discovered apps', async () => {
     resetDiscoveryCache();
-    const apps = await discoverApps();
+    const apps = await discoverApps({ detect: stubDetect });
     assert.ok(Array.isArray(apps));
     // Should find at least something on any dev machine
     // (node, git are CLI tools not desktop apps, but we might find vscode, terminal, etc.)
   });
 
   it('discovered apps have required fields', async () => {
-    const apps = await discoverApps();
+    const apps = await discoverApps({ detect: stubDetect });
     for (const app of apps) {
       assert.ok(app.id, 'discovered app must have id');
       assert.ok(app.description, `${app.id} must have description`);
@@ -68,8 +75,8 @@ describe('discoverApps()', () => {
 
   it('uses cache on subsequent calls', async () => {
     // apps1 is already cached from the previous test
-    const apps1 = await discoverApps();
-    const apps2 = await discoverApps();
+    const apps1 = await discoverApps({ detect: stubDetect });
+    const apps2 = await discoverApps({ detect: stubDetect });
     assert.strictEqual(apps1, apps2, 'should return same cached reference');
   });
 
@@ -78,14 +85,14 @@ describe('discoverApps()', () => {
     const tinyCatalog = [
       { id: 'node', names: ['node'], capabilities: ['runtime'], category: 'dev', description: 'Node' }
     ];
-    const apps1 = await discoverApps({ catalog: tinyCatalog, force: true });
-    const apps2 = await discoverApps({ catalog: tinyCatalog, force: true });
+    const apps1 = await discoverApps({ catalog: tinyCatalog, force: true, detect: stubDetect });
+    const apps2 = await discoverApps({ catalog: tinyCatalog, force: true, detect: stubDetect });
     assert.ok(Array.isArray(apps2));
     assert.notStrictEqual(apps1, apps2, 'force should return a new array');
   });
 
   it('skips webOnly apps', async () => {
-    const apps = await discoverApps();
+    const apps = await discoverApps({ detect: stubDetect });
     const webOnly = apps.filter((a) => {
       const catalogEntry = APP_CATALOG.find((c) => c.id === a.id);
       return catalogEntry?.webOnly;
@@ -98,9 +105,25 @@ describe('discoverApps()', () => {
       { id: 'node', names: ['node'], capabilities: ['runtime'], category: 'development', description: 'Node.js' }
     ];
     resetDiscoveryCache();
-    const apps = await discoverApps({ catalog: customCatalog, force: true });
-    // node should be found on any machine running these tests
+    const apps = await discoverApps({ catalog: customCatalog, force: true, detect: stubDetect });
+    // the stub reports node as installed
     assert.ok(apps.some((a) => a.id === 'node'), 'should find node');
+  });
+});
+
+// ── Windows COM check ────────────────────────────────────────────────────────
+
+describe('comClassRegisteredCommand()', () => {
+  it('reads the registry and never instantiates the COM class', () => {
+    const cmd = comClassRegisteredCommand('Word.Application');
+    assert.strictEqual(cmd, 'reg query "HKCR\\Word.Application\\CLSID" /ve');
+    assert.doesNotMatch(cmd, /New-Object|ComObject|powershell/i);
+  });
+
+  it('refuses a ProgID that is not a plain dotted name', () => {
+    assert.strictEqual(comClassRegisteredCommand('Word.Application" & calc'), null);
+    assert.strictEqual(comClassRegisteredCommand(''), null);
+    assert.strictEqual(comClassRegisteredCommand(undefined), null);
   });
 });
 
