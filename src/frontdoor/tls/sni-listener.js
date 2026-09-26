@@ -8,12 +8,19 @@
 //
 // Every connection is tracked from accept to close, in arrival order, with
 // its stage: 'hello' (peeking), 'handshake' (TLS in progress) or 'open'
-// (handed to a consumer). At the per-IP or overall cap the OLDEST socket
-// still before its handshake is evicted instead of refusing the newcomer
-// (Ruling T6-cap, after the owner's F7 rule: a valid peer is never locked
-// out by sockets someone else holds open). Open sockets are never evicted:
-// they finished a handshake, and on mesh. they are pinned nodes. When every
-// slot is open, the newcomer is refused.
+// (handed to a consumer). The caps follow the owner's F7 rule (a valid peer
+// is never locked out by sockets someone else holds open; Rulings T6-cap
+// and T16-cap):
+// - per IP, keyed by the IPv4 address or the IPv6 /64 (a v4-mapped address
+//   counts as its IPv4 address), every tracked socket counts;
+// - overall, every socket counts against maxSockets except a pinned node
+//   handed to the mesh;
+// - established mcp. sockets may hold at most maxSockets - handshakeReserve
+//   slots, so the reserve always has room for sockets before their
+//   handshake and a node can always reach its pin check;
+// - at either cap the OLDEST socket still before its handshake is evicted
+//   instead of refusing the newcomer. Open sockets are never evicted; when
+//   an IP's every slot is open, its newcomer is refused.
 const net = require('net');
 const tls = require('tls');
 const { EventEmitter } = require('events');
@@ -23,8 +30,39 @@ const { peerCertFingerprint } = require('../../mesh/mesh-transport');
 
 const log = createLogger('frontdoor/sni');
 
-const DEFAULT_LIMITS = Object.freeze({ maxSockets: 1024, perIp: 32, helloBytes: 16384, helloTimeoutMs: 5000, handshakeMs: 10000, firstRequestMs: 60000 });
+const DEFAULT_LIMITS = Object.freeze({ maxSockets: 1024, perIp: 32, helloBytes: 16384, helloTimeoutMs: 5000, handshakeMs: 10000, firstRequestMs: 60000, handshakeReserve: 64 });
 const ACME_ALPN = 'acme-tls/1';
+// A peer that got end() (probe, ACME) but keeps its side open is dropped.
+const END_GRACE_MS = 1000;
+// Evictions and refusals are summed and logged at most once a minute.
+const CAP_LOG_INTERVAL_MS = 60000;
+
+// The per-IP counting key: an IPv4 address as is (also when v4-mapped), an
+// IPv6 address as its /64 — one host usually holds a whole /64.
+function ipKey(address) {
+  if (typeof address !== 'string' || address === '') return 'unknown';
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(address);
+  if (mapped) return mapped[1];
+  if (!address.includes(':')) return address;
+  const bare = address.split('%')[0].toLowerCase();
+  const halves = bare.split('::');
+  if (halves.length > 2) return bare;
+  const groups = (part) => {
+    if (!part) return [];
+    const out = part.split(':');
+    const last = out[out.length - 1];
+    if (last.includes('.')) {
+      const o = last.split('.').map(Number);
+      out.splice(-1, 1, ((o[0] << 8) | o[1]).toString(16), ((o[2] << 8) | o[3]).toString(16));
+    }
+    return out;
+  };
+  const head = groups(halves[0]);
+  const tail = halves.length === 2 ? groups(halves[1]) : [];
+  const all = halves.length === 2 ? [...head, ...Array(Math.max(0, 8 - head.length - tail.length)).fill('0'), ...tail] : head;
+  if (all.length !== 8 || !all.every((g) => /^[0-9a-f]{1,4}$/.test(g))) return bare;
+  return `${all.slice(0, 4).map((g) => parseInt(g, 16).toString(16)).join(':')}::/64`;
+}
 
 class SniListener extends EventEmitter {
   constructor({ host, port, domain, mcpContext, meshContext, isPinnedNodeCert, isProbeCert, acmeChallenge, onMcpSocket, onMeshSocket,
@@ -43,12 +81,27 @@ class SniListener extends EventEmitter {
     this.onMeshSocket = onMeshSocket;
     this.onUnknownNodeKey = onUnknownNodeKey;
     this.limits = { ...DEFAULT_LIMITS, ...limits };
+    this.reserve = Math.max(0, Math.min(this.limits.handshakeReserve, this.limits.maxSockets - 1));
     this.server = null;
-    this.sockets = new Map(); // raw socket → { ip, stage, tls }, in arrival order
-    this.perIp = new Map();
+    this._starting = null;
+    this.sockets = new Map(); // raw socket → { key, address, stage, tls, counted }, in arrival order
+    this.perIp = new Map(); // ipKey → tracked sockets
+    this.counted = 0; // sockets counting against maxSockets
+    this.openMcp = 0; // established mcp. sockets
+    this._capLog = { at: 0, evicted: 0, refused: 0, latest: null };
   }
 
   async start() {
+    if (this.server || this._starting) throw new Error('SniListener already started');
+    this._starting = this._listen();
+    try {
+      await this._starting;
+    } finally {
+      this._starting = null;
+    }
+  }
+
+  async _listen() {
     const server = net.createServer((socket) => this._accept(socket));
     await new Promise((resolve, reject) => {
       const onError = (err) => reject(new Error(`cannot bind ${this.host}:${this.port}: ${err.message}`));
@@ -67,20 +120,25 @@ class SniListener extends EventEmitter {
     return this.server ? this.server.address() : null;
   }
 
+  // Waits for a start() in progress, so a stop() that races it still closes
+  // what it opened.
   async stop() {
+    if (this._starting) await this._starting.catch(() => {});
     if (!this.server) return;
     const server = this.server;
     this.server = null;
     const closed = new Promise((resolve) => server.close(() => resolve()));
     for (const socket of [...this.sockets.keys()]) this._drop(socket);
+    this._flushCapLog();
     await closed;
   }
 
   // Counted from here until the raw socket closes or is dropped, whichever
   // comes first; both paths go through _untrack, which counts down once.
-  _track(socket, ip) {
-    this.sockets.set(socket, { ip, stage: 'hello', tls: null });
-    this.perIp.set(ip, (this.perIp.get(ip) || 0) + 1);
+  _track(socket, key, address) {
+    this.sockets.set(socket, { key, address, stage: 'hello', tls: null, counted: true, mcp: false });
+    this.perIp.set(key, (this.perIp.get(key) || 0) + 1);
+    this.counted += 1;
     socket.once('close', () => this._untrack(socket));
   }
 
@@ -88,9 +146,11 @@ class SniListener extends EventEmitter {
     const entry = this.sockets.get(socket);
     if (!entry) return;
     this.sockets.delete(socket);
-    const left = (this.perIp.get(entry.ip) || 1) - 1;
-    if (left > 0) this.perIp.set(entry.ip, left);
-    else this.perIp.delete(entry.ip);
+    if (entry.counted) this.counted -= 1;
+    if (entry.mcp) this.openMcp -= 1;
+    const left = (this.perIp.get(entry.key) || 1) - 1;
+    if (left > 0) this.perIp.set(entry.key, left);
+    else this.perIp.delete(entry.key);
   }
 
   _drop(socket) {
@@ -100,44 +160,59 @@ class SniListener extends EventEmitter {
     socket.destroy();
   }
 
-  // Evicts the oldest socket (from `ip`, or from anywhere when null) that
-  // has not finished its handshake. False when there is none.
-  _evictOldest(ip) {
+  _noteCap(kind, address) {
+    const c = this._capLog;
+    c[kind] += 1;
+    c.latest = address;
+    if (Date.now() - c.at >= CAP_LOG_INTERVAL_MS) this._flushCapLog();
+  }
+
+  _flushCapLog() {
+    const c = this._capLog;
+    if (c.evicted === 0 && c.refused === 0) return;
+    log.warn(`connection caps: ${c.evicted} evicted before their handshake, ${c.refused} refused (latest from ${c.latest})`);
+    this._capLog = { at: Date.now(), evicted: 0, refused: 0, latest: null };
+  }
+
+  // Evicts the oldest socket (with `key`, or any when null) that has not
+  // finished its handshake. False when there is none.
+  _evictOldest(key) {
     for (const [socket, entry] of this.sockets) {
-      if (entry.stage === 'open' || (ip !== null && entry.ip !== ip)) continue;
-      log.warn(`evicting the oldest connection still before its handshake${ip !== null ? ` from ${ip}` : ''}: too many are open`);
+      if (entry.stage === 'open' || (key !== null && entry.key !== key)) continue;
+      this._noteCap('evicted', entry.address);
       this._drop(socket);
       return true;
     }
     return false;
   }
 
-  _admit(ip) {
-    if ((this.perIp.get(ip) || 0) >= this.limits.perIp && !this._evictOldest(ip)) return false;
-    if (this.sockets.size >= this.limits.maxSockets && !this._evictOldest(null)) return false;
+  _admit(key) {
+    if ((this.perIp.get(key) || 0) >= this.limits.perIp && !this._evictOldest(key)) return false;
+    if (this.counted >= this.limits.maxSockets && !this._evictOldest(null)) return false;
     return true;
   }
 
   async _accept(socket) {
-    const ip = socket.remoteAddress || 'unknown';
+    const address = socket.remoteAddress || 'unknown';
+    const key = ipKey(address);
     // The raw socket has an 'error' listener from its first tick to its
     // last: the peek's own listener comes and goes, and after the TLS wrap
     // the raw socket still exists underneath.
     socket.on('error', (err) => {
-      log.debug(`connection from ${ip}: ${err.message}`);
+      log.debug(`connection from ${address}: ${err.message}`);
       this._drop(socket);
     });
-    if (!this._admit(ip)) {
-      log.warn(`refusing a connection from ${ip}: every slot holds an open connection`);
+    if (!this._admit(key)) {
+      this._noteCap('refused', address);
       socket.destroy();
       return;
     }
-    this._track(socket, ip);
+    this._track(socket, key, address);
     let hello;
     try {
       ({ hello } = await peekClientHello(socket, { maxBytes: this.limits.helloBytes, timeoutMs: this.limits.helloTimeoutMs }));
     } catch (err) {
-      log.debug(`dropping a connection from ${ip}: ${err.message}`);
+      log.debug(`dropping a connection from ${address}: ${err.message}`);
       this._drop(socket);
       return;
     }
@@ -148,9 +223,9 @@ class SniListener extends EventEmitter {
       return;
     }
     try {
-      this._route(socket, ip, hello);
+      this._route(socket, address, hello);
     } catch (err) {
-      log.warn(`dropping a connection from ${ip} for ${hello.serverName}: ${err.message}`);
+      log.warn(`dropping a connection from ${address} for ${hello.serverName}: ${err.message}`);
       this._drop(socket);
     }
   }
@@ -163,7 +238,7 @@ class SniListener extends EventEmitter {
       if (hello.alpn.includes(ACME_ALPN)) {
         const challenge = this.acmeChallenge(name);
         if (challenge) {
-          this._wrap(socket, { secureContext: challenge, ALPNProtocols: [ACME_ALPN] }, (s) => s.end());
+          this._wrap(socket, { secureContext: challenge, ALPNProtocols: [ACME_ALPN] }, (s) => this._endAndDrop(socket, s));
           return;
         }
       }
@@ -173,7 +248,18 @@ class SniListener extends EventEmitter {
         this._drop(socket);
         return;
       }
-      this._wrap(socket, { secureContext: context, ALPNProtocols: ['http/1.1'], requestCert: false }, (s) => this._handOver(socket, s, this.onMcpSocket));
+      this._wrap(socket, { secureContext: context, ALPNProtocols: ['http/1.1'], requestCert: false }, (s) => {
+        // Established mcp. sockets never take the handshake reserve.
+        if (this.openMcp >= this.limits.maxSockets - this.reserve) {
+          this._noteCap('refused', ip);
+          this._drop(socket);
+          return;
+        }
+        const entry = this.sockets.get(socket);
+        entry.mcp = true;
+        this.openMcp += 1;
+        this._handOver(socket, s, this.onMcpSocket);
+      });
       return;
     }
     if (name === this.meshHost && this.meshContext) {
@@ -181,7 +267,7 @@ class SniListener extends EventEmitter {
         // 'secure' fires after the handshake and before anything reads.
         const fp = peerCertFingerprint(s);
         if (fp && this._yes(this.isProbeCert, fp)) {
-          s.end();
+          this._endAndDrop(socket, s);
           return;
         }
         if (!fp || !this._yes(this.isPinnedNodeCert, fp)) {
@@ -193,6 +279,11 @@ class SniListener extends EventEmitter {
           this._drop(socket);
           return;
         }
+        // A pinned node no longer counts against maxSockets (it stays in
+        // the per-IP count and in tracking, so stop() still closes it).
+        const entry = this.sockets.get(socket);
+        entry.counted = false;
+        this.counted -= 1;
         this._handOver(socket, s, this.onMeshSocket);
       });
       return;
@@ -211,13 +302,19 @@ class SniListener extends EventEmitter {
     }
   }
 
+  _endAndDrop(socket, s) {
+    s.end();
+    setTimeout(() => this._drop(socket), END_GRACE_MS).unref();
+  }
+
   _wrap(socket, options, onSecure) {
     const entry = this.sockets.get(socket);
     const s = new tls.TLSSocket(socket, { isServer: true, ...options });
+    s.disableRenegotiation();
     entry.tls = s;
     entry.stage = 'handshake';
     s.on('error', (err) => {
-      log.debug(`TLS connection from ${entry.ip}: ${err.message}`);
+      log.debug(`TLS connection from ${entry.address}: ${err.message}`);
       this._drop(socket);
     });
     const handshake = setTimeout(() => this._drop(socket), this.limits.handshakeMs);
@@ -251,4 +348,4 @@ class SniListener extends EventEmitter {
   }
 }
 
-module.exports = { SniListener, DEFAULT_LIMITS };
+module.exports = { SniListener, DEFAULT_LIMITS, ipKey };

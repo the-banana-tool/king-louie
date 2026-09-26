@@ -5,7 +5,7 @@ const net = require('net');
 const tls = require('tls');
 const http = require('http');
 const { X509Certificate } = require('crypto');
-const { SniListener } = require('../src/frontdoor/tls/sni-listener');
+const { SniListener, ipKey } = require('../src/frontdoor/tls/sni-listener');
 const { createCa, issueCert, selfSigned, fingerprint } = require('./helpers/test-certs');
 const { setLogLevel } = require('../src/logging');
 
@@ -58,6 +58,14 @@ const waitFor = async (cond, ms = 2000) => {
     await new Promise((r) => setTimeout(r, 5));
   }
 };
+
+// Resolves when `s` closes; fails the test instead of hanging past `ms`.
+function closeWithin(s, ms = 3000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`socket still open after ${ms} ms`)), ms);
+    s.once('close', () => { clearTimeout(timer); resolve(); });
+  });
+}
 
 // A raw TCP client that stays silent (never sends a ClientHello).
 function quietClient(port) {
@@ -234,7 +242,7 @@ describe('SniListener', () => {
     const s = net.connect(port, '127.0.0.1', () => s.write('GET / HTTP/1.1\r\nHost: x\r\n\r\n'));
     s.on('error', () => {});
     const t0 = Date.now();
-    await new Promise((r) => s.once('close', r));
+    await closeWithin(s);
     assert.ok(Date.now() - t0 < 1000, 'closed well before the 5 s hello timeout');
     await waitFor(() => l.sockets.size === 0 && l.perIp.size === 0);
   });
@@ -294,7 +302,7 @@ describe('SniListener', () => {
     s.on('error', () => {});
     s.on('data', () => {});
     const t0 = Date.now();
-    await new Promise((r) => s.once('close', r));
+    await closeWithin(s);
     assert.ok(Date.now() - t0 < 2000);
     await waitFor(() => l.sockets.size === 0);
   });
@@ -350,5 +358,157 @@ describe('SniListener', () => {
     assert.equal(await q.gone, true);
     assert.equal(l.address(), null);
     assert.equal(l.sockets.size, 0);
+  });
+
+  it('with maxSockets full of held mcp. connections a pinned node still connects (T16-cap)', async () => {
+    const held = [];
+    const mesh = [];
+    const { l, port } = await start({
+      limits: { maxSockets: 6, handshakeReserve: 2 },
+      onMcpSocket: (s) => held.push(s),
+      onMeshSocket: (s) => mesh.push(s)
+    });
+    const clients = [];
+    for (let i = 0; i < 6; i++) {
+      const c = tls.connect({ host: '127.0.0.1', port, servername: `mcp.${DOMAIN}`, rejectUnauthorized: false });
+      c.on('error', () => {});
+      clients.push(c);
+      await new Promise((r) => { c.once('secureConnect', r); c.once('close', r); });
+      await waitFor(() => held.length === Math.min(i + 1, 4) && l.sockets.size === Math.min(i + 1, 4));
+    }
+    assert.equal(held.length, 4, 'established mcp. sockets stop at maxSockets - handshakeReserve');
+    const quiet = [quietClient(port), quietClient(port)];
+    await waitFor(() => l.counted === 6);
+    const node = tls.connect({ host: '127.0.0.1', port, servername: `mesh.${DOMAIN}`, cert: pinnedNode.cert, key: pinnedNode.key, rejectUnauthorized: false });
+    node.on('error', () => {});
+    await waitFor(() => mesh.length === 1);
+    assert.equal(await quiet[0].gone, true, 'the oldest socket before its handshake made room');
+    assert.ok(held.every((s) => !s.destroyed), 'no established mcp. socket was evicted');
+    assert.equal(l.counted, l.sockets.size - 1, 'the pinned node no longer counts against maxSockets');
+    for (const c of [...clients, ...quiet, node]) c.destroy();
+    await waitFor(() => l.sockets.size === 0 && l.perIp.size === 0 && l.counted === 0 && l.openMcp === 0);
+  });
+
+  it('pinned mesh. sockets do not count against maxSockets but stay tracked, and stop() closes them', async () => {
+    const mesh = [];
+    const held = [];
+    const { l, port } = await start({ limits: { maxSockets: 3, handshakeReserve: 1 }, onMeshSocket: (s) => mesh.push(s), onMcpSocket: (s) => held.push(s) });
+    const clients = [];
+    for (let i = 0; i < 4; i++) {
+      const c = tls.connect({ host: '127.0.0.1', port, servername: `mesh.${DOMAIN}`, cert: pinnedNode.cert, key: pinnedNode.key, rejectUnauthorized: false });
+      c.on('error', () => {});
+      clients.push(c);
+      await waitFor(() => mesh.length === i + 1);
+    }
+    for (let i = 0; i < 2; i++) {
+      const c = tls.connect({ host: '127.0.0.1', port, servername: `mcp.${DOMAIN}`, rejectUnauthorized: false });
+      c.on('error', () => {});
+      clients.push(c);
+      await waitFor(() => held.length === i + 1);
+    }
+    assert.equal(l.sockets.size, 6);
+    assert.equal(l.perIp.get('127.0.0.1'), 6);
+    assert.equal(l.counted, 2);
+    listeners.pop();
+    await l.stop();
+    assert.ok(mesh.every((s) => s.destroyed));
+    assert.equal(l.sockets.size, 0);
+    assert.equal(l.counted, 0);
+    for (const c of clients) c.destroy();
+  });
+
+  it('ipKey counts an IPv6 address by its /64 and a v4-mapped address as IPv4', () => {
+    assert.equal(ipKey('2001:db8:1:2:3:4:5:6'), '2001:db8:1:2::/64');
+    assert.equal(ipKey('2001:db8:1:2::9'), '2001:db8:1:2::/64');
+    assert.equal(ipKey('2001:0DB8:0001:0002:ffff::1'), '2001:db8:1:2::/64');
+    assert.equal(ipKey('2001:db8::1'), '2001:db8:0:0::/64');
+    assert.equal(ipKey('2001:db8:1:3::1'), '2001:db8:1:3::/64', 'the next /64 is another key');
+    assert.equal(ipKey('::1'), '0:0:0:0::/64');
+    assert.equal(ipKey('fe80::1%eth0'), 'fe80:0:0:0::/64');
+    assert.equal(ipKey('64:ff9b::192.0.2.7'), '64:ff9b:0:0::/64');
+    assert.equal(ipKey('::ffff:192.0.2.7'), '192.0.2.7');
+    assert.equal(ipKey('::FFFF:192.0.2.7'), '192.0.2.7');
+    assert.equal(ipKey('192.0.2.7'), '192.0.2.7');
+    assert.equal(ipKey(''), 'unknown');
+    assert.equal(ipKey(undefined), 'unknown');
+  });
+
+  it('a v4-mapped peer on a dual-stack listener is counted as its IPv4 address', async (t) => {
+    let started;
+    try {
+      started = await start({ host: '::' });
+    } catch (err) {
+      t.skip(`no dual-stack listener here: ${err.message}`);
+      return;
+    }
+    const { l, port } = started;
+    const q = quietClient(port);
+    await waitFor(() => l.sockets.size === 1);
+    const [entry] = l.sockets.values();
+    if (!/^::ffff:/i.test(entry.address)) {
+      q.destroy();
+      t.skip(`the peer address is ${entry.address}, not v4-mapped`);
+      return;
+    }
+    assert.deepEqual([...l.perIp.keys()], ['127.0.0.1']);
+    q.destroy();
+  });
+
+  it('acme-tls/1 on mesh. or any other name never asks acmeChallenge', async () => {
+    const asked = [];
+    const { port } = await start({ acmeChallenge: (name) => { asked.push(name); return null; } });
+    await connect(port, { servername: `mesh.${DOMAIN}`, ALPNProtocols: ['acme-tls/1'], cert: pinnedNode.cert, key: pinnedNode.key });
+    await connect(port, { servername: `www.${DOMAIN}`, ALPNProtocols: ['acme-tls/1'] });
+    await connect(port, { ALPNProtocols: ['acme-tls/1'] });
+    assert.deepEqual(asked, []);
+  });
+
+  it('mesh. without a mesh context is closed before any handshake', async () => {
+    const { l, seen, port } = await start({ meshContext: null });
+    const r = await connect(port, { servername: `mesh.${DOMAIN}`, cert: pinnedNode.cert, key: pinnedNode.key });
+    assert.equal(r.secure, false);
+    assert.equal(seen.mesh.length, 0);
+    assert.equal(seen.unknown.length, 0);
+    await waitFor(() => l.sockets.size === 0);
+  });
+
+  it('a probe that keeps its side open after end() is dropped within about a second', async () => {
+    const { l, port } = await start();
+    const s = tls.connect({ host: '127.0.0.1', port, servername: `mesh.${DOMAIN}`, cert: probe.cert, key: probe.key, rejectUnauthorized: false, allowHalfOpen: true });
+    s.on('error', () => {});
+    s.on('data', () => {});
+    s.on('end', () => {}); // half-open: never ends its own side
+    await new Promise((r) => s.once('secureConnect', r));
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(l.sockets.size, 1, 'still held open by the half-closed peer');
+    await waitFor(() => l.sockets.size === 0, 2500);
+    s.destroy();
+  });
+
+  it('every TLS wrap disables renegotiation', async (t) => {
+    const calls = [];
+    const original = tls.TLSSocket.prototype.disableRenegotiation;
+    t.after(() => { tls.TLSSocket.prototype.disableRenegotiation = original; });
+    tls.TLSSocket.prototype.disableRenegotiation = function () { calls.push(this); return original.call(this); };
+    const held = [];
+    const { port } = await start({ onMcpSocket: (s) => held.push(s) });
+    const r = connect(port, { servername: `mcp.${DOMAIN}` });
+    await waitFor(() => held.length === 1);
+    assert.ok(calls.includes(held[0]), 'the handed-over socket had renegotiation disabled');
+    held[0].destroy();
+    await r;
+  });
+
+  it('start() twice is refused, and stop() during start() still closes the listener', async () => {
+    const l = new SniListener({ host: '127.0.0.1', port: 0, domain: DOMAIN, mcpContext: () => null, meshContext: null, isPinnedNodeCert: () => false, isProbeCert: () => false, acmeChallenge: () => null, onMcpSocket() {}, onMeshSocket() {} });
+    const starting = l.start();
+    await assert.rejects(l.start(), /already started/);
+    const stopping = l.stop();
+    await starting;
+    await stopping;
+    assert.equal(l.address(), null);
+    await l.start();
+    await assert.rejects(l.start(), /already started/);
+    await l.stop();
   });
 });
