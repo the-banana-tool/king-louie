@@ -138,7 +138,7 @@ class DetourClassifier {
       result = { ...outcome.parsed, detour, failed: null };
       this.cache.set(key, { at: nowMs, result });
     }
-    this._record(meta, effectiveTurn, { source, result, model: outcome.model, ms });
+    await this._record(meta, effectiveTurn, { source, result, model: outcome.model, ms });
     return result;
   }
 
@@ -203,27 +203,35 @@ class DetourClassifier {
     return parsed ? { parsed, model } : { failed: 'malformed', model };
   }
 
-  _record(meta, turn, { source, result, model, ms }) {
+  // Under the case lock through systemAction: inline inside a turn this
+  // process holds; outside one (C3 calling detourGate with no turn) it takes
+  // the lock and commits. When another process holds the case, the row is
+  // skipped (logged) and the classification still fails open.
+  async _record(meta, turn, { source, result, model, ms }) {
     try {
-      new DetourLog(meta.dir).append({
-        type: 'classification',
-        at: this.now().toISOString(),
-        turnId: turn?.turnId || null,
-        source,
-        onCase: result.onCase,
-        confidence: result.confidence,
-        reason: result.reason,
-        model,
-        ms,
-        failed: result.failed
-      });
-      const turnKey = `${meta.id}:${turn?.turnId || 'no-turn'}`;
-      if (result.failed && !this.failedTurns.has(turnKey)) {
-        this.failedTurns.add(turnKey);
-        this.runtime.records(meta.id).writeJournal('detour', `Detour classifier failed (${result.failed}) on ${source}; treated as on-case.`, this.now());
-      }
+      await this.runtime.systemAction(meta.id, `classify ${source}`, () => this._write(meta, turn, { source, result, model, ms }));
     } catch (err) {
       this.log.warn(`Recording a classification on case ${meta.slug} failed: ${err.message}`);
+    }
+  }
+
+  _write(meta, turn, { source, result, model, ms }) {
+    new DetourLog(meta.dir).append({
+      type: 'classification',
+      at: this.now().toISOString(),
+      turnId: turn?.turnId || null,
+      source,
+      onCase: result.onCase,
+      confidence: result.confidence,
+      reason: result.reason,
+      model,
+      ms,
+      failed: result.failed
+    });
+    const turnKey = `${meta.id}:${turn?.turnId || 'no-turn'}`;
+    if (result.failed && !this.failedTurns.has(turnKey)) {
+      this.failedTurns.add(turnKey);
+      this.runtime.records(meta.id).writeJournal('detour', `Detour classifier failed (${result.failed}) on ${source}; treated as on-case.`, this.now());
     }
   }
 }

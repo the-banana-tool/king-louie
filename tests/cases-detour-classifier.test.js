@@ -211,4 +211,24 @@ describe('DetourClassifier', () => {
     assert.strictEqual(h.recorded.length, 1);
     assert.strictEqual(rt.budget(info.id).status().usd.spent, before + 0.25);
   });
+
+  it('outside a turn, records under the case lock and commits; with the lock held elsewhere, still fails open', async () => {
+    const git = require('../src/cases/git');
+    const h = host(() => 'not json');
+    const { rt, classifier, info, turn } = await activeCase(h);
+    await rt.endTurn(turn, {});
+    const { dir } = rt.getCase(info.id);
+    const rows = () => new DetourLog(dir).rows().filter((r) => r.type === 'classification').length;
+    const r = await classifier.classify(info.id, { source: 'executor', text: 'Call the glazier about the rear door' });
+    assert.strictEqual(r.failed, 'malformed');
+    assert.strictEqual(rows(), 1);
+    assert.strictEqual(journalLines(dir).length, 1);
+    assert.strictEqual(fs.existsSync(path.join(dir, '.kl', 'lock')), false, 'the lock is released');
+    assert.strictEqual(await git.isDirty(dir), false, 'the row and journal line are committed');
+    fs.writeFileSync(path.join(dir, '.kl', 'lock'), JSON.stringify({ turnId: 'turn-9', pid: process.ppid, at: new Date().toISOString() }));
+    const busy = await classifier.classify(info.id, { source: 'executor', text: 'Email the glazier about the rear door' });
+    assert.deepStrictEqual([busy.onCase, busy.detour, busy.failed], [true, false, 'malformed']);
+    assert.strictEqual(rows(), 1, 'nothing is written while another process holds the case');
+    fs.rmSync(path.join(dir, '.kl', 'lock'));
+  });
 });
