@@ -81,6 +81,37 @@ function extractPathsFromParameters(toolName, parameters = {}, cwd = null) {
   return paths.map((p) => (typeof p === 'string' && p && !path.isAbsolute(p) ? path.resolve(cwd, p) : p));
 }
 
+// Parameters that hold a glob pattern rather than a path: extractPaths
+// cannot resolve them, so they are checked by shape instead (ruling
+// T11-glob). `glob` is a glob in any tool.
+const GLOB_PARAMS = Object.freeze({ Glob: ['pattern'], Grep: ['glob'] });
+
+// A `..` segment, including one inside a brace or extglob alternative
+// (`{..,x}/*`, `@(..)/*`), which fast-glob expands into a real `..`.
+const GLOB_PARENT_SEGMENT = /(^|[\\/{},(|])\.\.(?=$|[\\/{},)|])/;
+// An absolute, drive-letter or UNC start, for the pattern or any of its
+// brace or extglob alternatives (`{/etc,x}/*`).
+const GLOB_ROOTED = /(^|[{,(|])\s*([\\/]|[A-Za-z]:)/;
+
+function globPatternsOf(toolName, parameters) {
+  if (!parameters || typeof parameters !== 'object') return [];
+  const names = new Set([...(GLOB_PARAMS[toolName] || []), 'glob']);
+  const out = [];
+  for (const name of names) {
+    const value = parameters[name];
+    if (typeof value === 'string') out.push(value);
+    else if (Array.isArray(value)) for (const v of value) if (typeof v === 'string') out.push(v);
+  }
+  return out;
+}
+
+// True when a glob parameter could reach outside the directory it is
+// matched against: absolute, rooted at a drive or UNC share, or climbing
+// with `..`.
+function globEscapesBase(toolName, parameters) {
+  return globPatternsOf(toolName, parameters).some((g) => GLOB_PARENT_SEGMENT.test(g) || GLOB_ROOTED.test(g));
+}
+
 /**
  * Classifies a tool call from a remote-originated session into a safety tier
  * (spec §5.3).
@@ -110,7 +141,11 @@ function classifyToolCall(toolName, parameters = {}, policy = {}, { cwd = null }
     return { tier: 'unsafe', reason: 'command_substitution' };
   }
 
-  // 2. Check path containment against allowed_roots
+  // 2. Check path containment against allowed_roots. A glob parameter is a
+  // pattern, not a path, so one that can leave its base counts as outside.
+  if (globEscapesBase(toolName, parameters)) {
+    return { tier: 'unsafe', reason: 'path_outside_allowed_roots' };
+  }
   const paths = extractPathsFromParameters(toolName, parameters, cwd);
   for (const p of paths) {
     if (!isPathUnderRoots(p, allowedRoots)) {
@@ -157,6 +192,7 @@ module.exports = {
   splitShellSegments,
   SHELL_SEPARATORS,
   extractPathsFromParameters,
+  globEscapesBase,
   matchesPatternList,
   isPathUnderRoots,
   classifyToolCall,

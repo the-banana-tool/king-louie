@@ -366,4 +366,42 @@ describe('DelegateSessions', () => {
       assert.deepEqual(t.calls, []);
     });
   }
+  it('a glob cannot reach outside the cwd: .. and absolute patterns are refused (T11-glob)', async () => {
+    const t = await setup();
+    fs.writeFileSync(path.join(t.dataDir, 'outside.txt'), 'MARKER outside');
+    const abs = `${path.join(t.dataDir).replace(/\\/g, '/')}/*.txt`;
+    script = [
+      use('Grep', { pattern: 'MARKER', glob: '../*.txt' }),
+      use('Glob', { pattern: '../*.txt' }),
+      use('Glob', { pattern: abs }),
+      use('Grep', { pattern: 'MARKER', glob: abs }),
+      { type: 'text', content: 'done' }
+    ];
+    const { job_id: jobId } = await t.sessions.start({ task: 'look around', origin: origin(['fleet:delegate']) });
+    await t.sessions.turns.get(jobId);
+    const calls = seen.filter((x) => x.tool === 'Grep' || x.tool === 'Glob');
+    assert.equal(calls.length, 4);
+    for (const c of calls) {
+      assert.equal(c.result.success, false, JSON.stringify(c.result));
+      assert.equal(c.result.error, REFUSE_UNSAFE_MESSAGE);
+    }
+    assert.ok(!JSON.stringify(t.jobs.getJob(jobId).logs).includes('MARKER outside'));
+  });
+
+  it('a junction or symlink inside the cwd does not lead Glob or Grep out of it (T11-glob)', async () => {
+    const t = await setup();
+    fs.writeFileSync(path.join(t.root, 'mine.txt'), 'MARKER inside');
+    fs.mkdirSync(path.join(t.dataDir, 'elsewhere'));
+    fs.writeFileSync(path.join(t.dataDir, 'elsewhere', 'linked.txt'), 'MARKER linked');
+    fs.symlinkSync(path.join(t.dataDir, 'elsewhere'), path.join(t.root, 'out'), 'junction');
+    script = [use('Glob', { pattern: '**/*.txt' }), use('Grep', { pattern: 'MARKER' }), { type: 'text', content: 'done' }];
+    const { job_id: jobId } = await t.sessions.start({ task: 'look around', origin: origin(['fleet:delegate']) });
+    await t.sessions.turns.get(jobId);
+    const glob = seen.find((x) => x.tool === 'Glob').result;
+    assert.equal(glob.ok, true, JSON.stringify(glob));
+    assert.deepEqual(glob.files.map((x) => x.path), ['mine.txt']);
+    const grep = seen.find((x) => x.tool === 'Grep').result;
+    assert.equal(grep.ok, true, JSON.stringify(grep));
+    assert.deepEqual(grep.matches.map((m) => m.line), ['MARKER inside']);
+  });
 });

@@ -81,13 +81,16 @@ describe('Glob and Grep are bounded on a symlink loop', { timeout: 60000 }, () =
     }
   });
 
+  // The target lives under the search base (a linked package), since a link
+  // that leads out of the base is dropped (ruling T11-glob,
+  // tests/glob-escape.test.js). node_modules is never walked directly, so the
+  // link is the only way to reach it.
   it('a symlink to a real directory outside the cycle is still followed', { skip }, async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-link-'));
     try {
-      fs.mkdirSync(path.join(root, 'ws'));
-      fs.mkdirSync(path.join(root, 'shared'));
-      fs.writeFileSync(path.join(root, 'shared', 'note.txt'), 'hello\n');
-      fs.symlinkSync(path.join(root, 'shared'), path.join(root, 'ws', 'linked'), 'dir');
+      fs.mkdirSync(path.join(root, 'ws', 'node_modules', 'shared'), { recursive: true });
+      fs.writeFileSync(path.join(root, 'ws', 'node_modules', 'shared', 'note.txt'), 'hello\n');
+      fs.symlinkSync(path.join(root, 'ws', 'node_modules', 'shared'), path.join(root, 'ws', 'linked'), 'dir');
 
       const result = await globTool.execute(
         { pattern: '**/*.txt' },

@@ -131,3 +131,29 @@ describe('Safety Policy Engine', () => {
     assert.ok(patternMatch('Bash(a*c)', 'Bash(ac)'));
   });
 });
+
+describe('glob parameters (ruling T11-glob)', () => {
+  const policy = { allowed_roots: ['/srv/site'] };
+  const opts = { cwd: '/srv/site' };
+  const outside = { tier: 'unsafe', reason: 'path_outside_allowed_roots' };
+
+  for (const pattern of ['../*.txt', 'a/../../b/*', '..', '/etc/*', '\\\\server\\share\\*', 'C:/Windows/*', 'c:\\x\\*', '{..,a}/*', '{a,/etc}/*', '@(..)/*']) {
+    it(`Glob pattern ${JSON.stringify(pattern)} is outside the allowed roots`, () => {
+      assert.deepEqual(classifyToolCall('Glob', { pattern }, policy, opts), outside);
+    });
+  }
+
+  it('a Grep glob and a glob parameter on any tool are checked too', () => {
+    assert.deepEqual(classifyToolCall('Grep', { pattern: 'x', glob: '../../*.txt' }, policy, opts), outside);
+    assert.deepEqual(classifyToolCall('SomeTool', { glob: '/etc/*' }, policy, opts), outside);
+    // Grep's `pattern` is a regex, not a glob.
+    assert.equal(classifyToolCall('Grep', { pattern: '\\.\\./x' }, policy, opts).tier, 'read');
+  });
+
+  it('relative patterns that stay under the base keep their tier', () => {
+    for (const pattern of ['**/*.js', 'src/{a,b}/*.ts', 'a..b/*', '*.min..js', './x/*']) {
+      assert.equal(classifyToolCall('Glob', { pattern }, policy, opts).tier, 'read', pattern);
+    }
+    assert.equal(classifyToolCall('Grep', { pattern: 'x', glob: '**/*.md' }, policy, opts).tier, 'read');
+  });
+});
