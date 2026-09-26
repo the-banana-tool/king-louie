@@ -6,7 +6,10 @@ const {
   formatApprovalRequest
 } = require('./telegram-adapter');
 const { ChannelPlugin, ContactDeliveryError } = require('./channel-plugin');
-const { contactOwnerProven, parseCallback, leadingToken, buttonRows, telegramError, redact } = require('./bridge-contact');
+const {
+  contactOwnerProven, contactOwnerOf, bridgeCapabilities, matchContactReply, swallowRefusedContact,
+  parseCallback, buttonRows, telegramError, redact
+} = require('./bridge-contact');
 const { shouldRespond } = require('./mention-gating');
 const { NoticeLimiter, resolveApprovalTarget, judgeApprovalPress, addressesBot, commandTargetsBot } = require('./sender-policy');
 const { skillRegistry } = require('../skills');
@@ -201,10 +204,7 @@ class TelegramBridge extends ChannelPlugin {
   }
 
   _contactOwner() {
-    if (!this.contactHost) return null;
-    const enabled = typeof this.contactHost.isEnabled === 'function' && this.contactHost.isEnabled() === true;
-    const owner = typeof this.contactHost.getOwnerUserId === 'function' ? String(this.contactHost.getOwnerUserId() || '').trim() : '';
-    return enabled && owner ? owner : null;
+    return contactOwnerOf(this.contactHost);
   }
 
   ownerTarget() {
@@ -213,10 +213,7 @@ class TelegramBridge extends ChannelPlugin {
 
   contactCapabilities() {
     if (!this.ownerTarget()) return null;
-    return {
-      buttons: true, richText: false, attachments: false, voice: false, expectsReplies: true, authenticatedReplies: true,
-      interrupts: true, maxOptions: 8, maxChars: 4000
-    };
+    return bridgeCapabilities({ maxOptions: 8, maxChars: 4000 });
   }
 
   onContactReply(handler) {
@@ -260,25 +257,20 @@ class TelegramBridge extends ChannelPlugin {
     if (!this.contactHost || !this.contactReplyHandler || !this.contactHost.router) return false;
     const isPrivate = String(message.chat?.type || '') === 'private';
     const target = this.ownerTarget();
-    const token = leadingToken(text);
     const replyTo = message.reply_to_message && isPrivate && target && chatId === target
       ? String(message.reply_to_message.message_id ?? '') || null
       : null;
-    const byToken = Boolean(token && this.contactHost.router.knows('telegram', token));
-    const byReply = Boolean(replyTo && this.contactHost.router.knows('telegram', replyTo, { ref: true }));
-    if (!byToken && !byReply) return false;
+    const match = matchContactReply(this.contactHost.router, 'telegram', text, replyTo);
+    if (!match) return false;
     const senderId = String(message.from?.id || '');
     const forwarded = message.forward_origin != null || message.forward_from != null || message.forward_date != null
       || message.forward_from_chat != null || message.forward_sender_name != null;
     const ownerProven = !forwarded && contactOwnerProven({ isPrivate, chatId, senderId, target, ownerUserId: this._contactOwner() });
-    await this._contactReply(byToken ? token : replyTo, { text }, { senderId, chatId, ownerProven, deliveryRef: byToken || !byReply ? null : replyTo });
-    if (!ownerProven) {
-      const chatType = String(message.chat?.type || '').toLowerCase();
-      const groupId = chatType === 'group' || chatType === 'supergroup' ? chatId : null;
-      const allowlistSender = String(message.from?.id || message.chat?.id || '');
-      if (!this.allowlistManager || !this.allowlistManager.isAllowed('telegram', allowlistSender, groupId)) return false;
-    }
-    return true;
+    await this._contactReply(match.correlationId, { text }, { senderId, chatId, ownerProven, deliveryRef: match.deliveryRef });
+    if (ownerProven) return true;
+    const chatType = String(message.chat?.type || '').toLowerCase();
+    const groupId = chatType === 'group' || chatType === 'supergroup' ? chatId : null;
+    return swallowRefusedContact(this.allowlistManager, 'telegram', String(message.from?.id || message.chat?.id || ''), groupId);
   }
 
   async handleContactCallback(query = {}) {

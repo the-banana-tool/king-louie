@@ -550,4 +550,251 @@ describe('bridge-contact helpers', () => {
     assert.strictEqual(telegramError(new Error('Failed to parse URL from http://x/botABC/sendMessage'), { secret: 'ABC' }).message, 'Failed to parse URL from http://x/bot<bot-token>/sendMessage');
     assert.strictEqual(discordError(Object.assign(new Error('x'), { status: 413 })).code, 'too-large');
   });
+
+  it('shared bridge pieces: owner id, reply matching, the refused-sender path', () => {
+    const { contactOwnerOf, bridgeCapabilities, matchContactReply, swallowRefusedContact } = require('../src/channels/bridge-contact');
+    assert.strictEqual(contactOwnerOf({ isEnabled: () => true, getOwnerUserId: () => ' 111 ' }), '111');
+    assert.strictEqual(contactOwnerOf({ isEnabled: () => 'yes', getOwnerUserId: () => '111' }), null, 'only === true enables');
+    assert.strictEqual(contactOwnerOf({ isEnabled: () => true, getOwnerUserId: () => '' }), null);
+    assert.strictEqual(contactOwnerOf(null), null);
+    assert.deepStrictEqual([bridgeCapabilities({ maxOptions: 5, maxChars: 1900 }).maxOptions, bridgeCapabilities({ maxOptions: 5, maxChars: 1900 }).authenticatedReplies], [5, true]);
+    const seen = [];
+    const router = { knows: (ch, ref, opts = {}) => { seen.push([ch, ref, Boolean(opts.ref)]); return opts.ref ? ref === '123456' : ref === 'K7QD4M'; } };
+    assert.deepStrictEqual(matchContactReply(router, 'discord', '#k7qd4m 2', '123456'), { correlationId: 'K7QD4M', deliveryRef: null }, 'an explicit token wins');
+    assert.deepStrictEqual(matchContactReply(router, 'discord', '2', '123456'), { correlationId: '123456', deliveryRef: '123456' });
+    assert.strictEqual(matchContactReply(router, 'discord', '#ZZZZZZ 2', null), null);
+    seen.length = 0;
+    assert.strictEqual(matchContactReply({ knows: (ch, ref, opts = {}) => { seen.push([ref, Boolean(opts.ref)]); return !opts.ref; } }, 'discord', 'b', 'K7QD4M'), null, 'a reply-to id is never asked about as a token');
+    assert.deepStrictEqual(seen, [['K7QD4M', true]]);
+    assert.strictEqual(swallowRefusedContact(null, 'discord', '1', null), false);
+    assert.strictEqual(swallowRefusedContact({ isAllowed: () => true }, 'discord', '1', null), true);
+    assert.strictEqual(swallowRefusedContact({ isAllowed: () => false }, 'discord', '1', null), false);
+    assert.strictEqual(discordError(Object.assign(new Error('x TOKEN'), { status: 401 }), { secret: 'TOKEN' }).message, 'x <bot-token>');
+  });
+});
+
+describe('contact adapter: Discord (fake client)', () => {
+  const DiscordChannel = require('../src/channels/discord-bridge');
+
+  function fakeDiscord({ enabled = true } = {}) {
+    const dms = {};
+    const makeUser = (id) => ({
+      id,
+      createDM: async () => {
+        if (!dms[id]) {
+          const sends = [];
+          dms[id] = { id: `dm-${id}`, sends, fail: null, send: async (p) => { if (dms[id].fail) { const e = dms[id].fail; dms[id].fail = null; throw e; } sends.push(p); return { id: `m-${sends.length}` }; } };
+        }
+        return dms[id];
+      }
+    });
+    const bridge = new DiscordChannel({ token: 'mock-token', allowlistManager: { isAllowed: () => true, isAllowedUser: () => true } });
+    bridge.client = { users: { fetch: async (id) => makeUser(String(id)) }, channels: { fetch: async () => null } };
+    const known = new Set(['K7QD4M', '7QD4KM']);
+    bridge.setContactHost({ router: { knows: (channel, ref) => channel === 'discord' && known.has(String(ref).toUpperCase()) }, getOwnerUserId: () => '222', isEnabled: () => enabled });
+    const calls = [];
+    bridge.onContactReply(async (correlationId, answer, meta) => {
+      calls.push({ correlationId, answer, meta });
+      return meta.ownerProven ? { ok: true, outcome: 'recorded', ackText: 'Recorded for Lakeside lot.' } : { ok: false, outcome: 'refused: not-owner', ackText: null };
+    });
+    const routed = [];
+    bridge.routeAgentMessage = async (chatId, text) => { routed.push({ chatId, text }); };
+    const msg = (fields) => ({ author: { id: '222', bot: false }, content: '', channelId: 'dm-222', guildId: null, reference: null, mentions: { has: () => false }, ...fields });
+    const press = (fields) => {
+      const replies = [];
+      return { interaction: { isButton: () => true, customId: 'kl_q_7QD4KM_1', user: { id: '222' }, guildId: null, channelId: 'dm-222', reply: async (p) => { replies.push(p); }, ...fields }, replies };
+    };
+    return { bridge, dms, calls, routed, known, msg, press };
+  }
+
+  it('meets the contract', async () => {
+    const d = fakeDiscord();
+    const sent = await d.bridge.sendContact(MESSAGE, META);
+    assert.deepStrictEqual(sent, { deliveryId: 'd-test-1', externalRef: 'm-1' });
+    const payload = d.dms['222'].sends[0];
+    assert.strictEqual(payload.content, MESSAGE.text);
+    assert.deepStrictEqual(payload.components[0].toJSON().components.map((c) => [c.custom_id, c.label]), [['kl_q_7QD4KM_0', '1. No'], ['kl_q_7QD4KM_1', '1. Yes, up to 20 %']]);
+
+    const p = d.press({});
+    await d.bridge.handleInteractionCreate(p.interaction);
+    assert.deepStrictEqual([d.calls[0].correlationId, d.calls[0].answer, d.calls[0].meta.ownerProven], ['7QD4KM', { optionIndex: 1 }, true]);
+    assert.deepStrictEqual(p.replies, [{ content: 'Received', ephemeral: true }]);
+    assert.deepStrictEqual(d.dms['222'].sends.pop(), { content: 'Recorded for Lakeside lot.' });
+
+    d.known.add('M-1');
+    await d.bridge.handleMessageCreate(d.msg({ content: 'yes', reference: { messageId: 'm-1' } }));
+    assert.deepStrictEqual([d.calls[1].correlationId, d.calls[1].answer.text, d.calls[1].meta.ownerProven], ['m-1', 'yes', true]);
+
+    await d.bridge.handleMessageCreate(d.msg({ author: { id: '999', bot: false }, channelId: 'dm-999', content: '#K7QD4M a' }));
+    assert.strictEqual(d.calls[2].meta.ownerProven, false, 'a stranger');
+
+    d.dms['222'].fail = Object.assign(new Error('You are being rate limited.'), { status: 429 });
+    await assert.rejects(d.bridge.sendContact(MESSAGE, META), (err) => err instanceof ContactDeliveryError && err.code === 'rate-limited');
+  });
+
+  it('refuses a guild member and a second allowlisted user, and never routes their #TOKEN to the agent', async () => {
+    const d = fakeDiscord();
+    await d.bridge.handleMessageCreate(d.msg({ author: { id: '333', bot: false }, channelId: 'guild-channel-1', guildId: 'guild-1', content: '#K7QD4M 1 a' }));
+    await d.bridge.handleMessageCreate(d.msg({ author: { id: '444', bot: false }, channelId: 'dm-444', content: '#K7QD4M 1 a' }));
+    const inGuild = d.press({ guildId: 'guild-1', channelId: 'guild-channel-1' });
+    await d.bridge.handleInteractionCreate(inGuild.interaction);
+    assert.deepStrictEqual(d.calls.map((c) => c.meta.ownerProven), [false, false, false]);
+    assert.deepStrictEqual(inGuild.replies, [{ content: 'Not allowed', ephemeral: true }]);
+    assert.deepStrictEqual(d.routed, []);
+    assert.deepStrictEqual(d.dms['222'] ? d.dms['222'].sends : [], [], 'no acks');
+  });
+
+  it('with contact off it is not a contact channel', async () => {
+    const d = fakeDiscord({ enabled: false });
+    assert.strictEqual(d.bridge.contactCapabilities(), null);
+    await assert.rejects(d.bridge.sendContact(MESSAGE, META), (err) => err.code === 'not-configured');
+  });
+
+  // Binding carries from Task 10 (progress.md), Discord side.
+  // A router fake like ContactRouter.knows: { ref: true } matches only message references.
+  function refAware(d, { enabled = true } = {}) {
+    const refs = new Set();
+    d.bridge.setContactHost({
+      router: { knows: (channel, ref, opts = {}) => channel === 'discord' && (opts.ref ? refs.has(String(ref)) : d.known.has(String(ref).toUpperCase())) },
+      getOwnerUserId: () => '222',
+      isEnabled: () => enabled
+    });
+    return refs;
+  }
+  // A message complete enough for the normal (non-contact) path.
+  const full = (d, fields) => d.msg({ mentions: { users: [], has: () => false }, attachments: [], ...fields, author: { username: 'someone', bot: false, ...(fields.author || { id: '222' }) } });
+
+  it('a reply-to id is looked up as a message reference only, never as a token', async () => {
+    const d = fakeDiscord();
+    refAware(d);
+    d.known.add('123456');
+    await d.bridge.handleMessageCreate(full(d, { content: 'b', reference: { messageId: '123456', channelId: 'dm-222' } }));
+    assert.deepStrictEqual(d.calls, [], 'a token equal to the reply-to id does not make it a contact reply');
+    assert.deepStrictEqual(d.routed, [{ chatId: 'dm-222', text: 'b' }]);
+  });
+
+  // Review T10 round 2: an explicit #token that resolves wins; the reply-to
+  // is then not passed as deliveryRef.
+  it('a reply to X carrying the #token of Y answers Y and carries no deliveryRef', async () => {
+    const d = fakeDiscord();
+    const refs = refAware(d);
+    refs.add('m-1');
+    await d.bridge.handleMessageCreate(d.msg({ content: '#K7QD4M 2', reference: { messageId: 'm-1', channelId: 'dm-222' } }));
+    await d.bridge.handleMessageCreate(d.msg({ content: '2', reference: { messageId: 'm-1', channelId: 'dm-222' } }));
+    assert.deepStrictEqual(d.calls.map((c) => [c.correlationId, c.meta.deliveryRef, c.meta.ownerProven]), [['K7QD4M', null, true], ['m-1', 'm-1', true]]);
+  });
+
+  // Preflight M17: a reply is a contact reply only in the owner's DM.
+  it('a reply to a contact message id outside the owner DM takes the normal path', async () => {
+    const d = fakeDiscord();
+    const refs = refAware(d);
+    refs.add('m-1');
+    const ref = { messageId: 'm-1', channelId: 'dm-222' };
+    await d.bridge.handleMessageCreate(full(d, { author: { id: '333' }, channelId: 'guild-channel-1', guildId: 'guild-1', content: 'see above', reference: ref }));
+    await d.bridge.handleMessageCreate(full(d, { author: { id: '999' }, channelId: 'dm-999', content: 'what?', reference: ref }));
+    await d.bridge.handleMessageCreate(full(d, { channelId: 'guild-channel-1', guildId: 'guild-1', content: 'owner in the guild', reference: ref }));
+    assert.deepStrictEqual(d.calls, [], 'no reply-id interception outside the owner DM');
+    assert.deepStrictEqual(d.routed.map((r) => r.text), ['see above', 'what?', 'owner in the guild']);
+  });
+
+  // Review T10 M3, Discord: forwards (reference type Forward, message
+  // snapshots, the HasSnapshot flag) and crossposts carry someone else's words.
+  it('a forwarded or crossposted message is never owner-proven, and a forward is not a reply', async () => {
+    const d = fakeDiscord();
+    const refs = refAware(d);
+    refs.add('m-1');
+    const { Collection } = require('discord.js');
+    const fwd = [
+      { reference: { type: 1, messageId: 'x-1', channelId: 'other' } },
+      { messageSnapshots: new Collection([['x-1', {}]]) },
+      { flags: { bitfield: 1 << 14 } },
+      { flags: 1 << 1 }
+    ];
+    for (const f of fwd) await d.bridge.handleMessageCreate(d.msg({ content: '#K7QD4M 1 a', ...f }));
+    assert.deepStrictEqual(d.calls.map((c) => c.meta.ownerProven), [false, false, false, false]);
+    d.bridge.sendMessage = async () => {};
+    await d.bridge.handleMessageCreate(full(d, { content: '', reference: { type: 1, messageId: 'm-1', channelId: 'dm-222' } }));
+    assert.strictEqual(d.calls.length, 4, 'forwarding the contact message itself is not a reply to it');
+    assert.deepStrictEqual(d.dms['222'] ? d.dms['222'].sends : [], [], 'no ack');
+  });
+
+  // Review T10 M4: a live token must not change what a stranger sees.
+  it('a stranger who is not allowlisted gets the same notice for a live and a made-up token', async () => {
+    const d = fakeDiscord();
+    d.bridge.allowlistManager = { isAllowed: (ch, sender) => sender === '222', isAllowedUser: () => false };
+    const notices = [];
+    d.bridge.sendMessage = async (chatId, text) => { notices.push({ chatId, text: text.replace(/50[12]/g, 'N') }); };
+    await d.bridge.handleMessageCreate(full(d, { author: { id: '501' }, channelId: 'dm-501', content: '#K7QD4M 1 a' }));
+    await d.bridge.handleMessageCreate(full(d, { author: { id: '502' }, channelId: 'dm-502', content: '#ZZZZZZ 1 a' }));
+    assert.deepStrictEqual(notices.map((n) => n.chatId), ['dm-501', 'dm-502']);
+    assert.strictEqual(notices[0].text, notices[1].text, 'identical notice either way');
+    assert.deepStrictEqual(d.calls.map((c) => c.meta.ownerProven), [false]);
+    assert.deepStrictEqual(d.routed, []);
+  });
+
+  // C2 channel tagging / M21: contact replies never enter a local chat (and so
+  // never an ownerMessages quote); everything else reaches it tagged as before.
+  it('an ordinary message reaches the local chat tagged discord; a contact reply never does', async () => {
+    const d = fakeDiscord();
+    const created = [];
+    const added = [];
+    d.bridge.createLocalChat = (title, opts) => { created.push({ title, opts }); return 'local-1'; };
+    d.bridge.addMessageToLocalChat = (localChatId, sender, text, opts) => { added.push({ localChatId, sender, text, opts }); };
+
+    await d.bridge.handleMessageCreate(full(d, { content: '#K7QD4M 1 a' }));
+    assert.strictEqual(d.calls.length, 1);
+    assert.deepStrictEqual([created, added, d.routed], [[], [], []], 'the contact reply stays out of every chat');
+
+    await d.bridge.handleMessageCreate(full(d, { content: 'how is the lot going?' }));
+    assert.strictEqual(d.calls.length, 1, 'not a contact reply');
+    assert.deepStrictEqual(created.map((c) => c.opts), [{ origin: 'discord' }]);
+    assert.deepStrictEqual(added, [{ localChatId: 'local-1', sender: 'user', text: 'how is the lot going?', opts: { channel: 'discord' } }]);
+    assert.deepStrictEqual(d.routed, [{ chatId: 'dm-222', text: 'how is the lot going?' }]);
+
+    await d.bridge.handleMessageCreate(full(d, { content: '#ZZZZZZ unrelated' }));
+    assert.deepStrictEqual(d.routed.map((r) => r.text), ['how is the lot going?', '#ZZZZZZ unrelated'], 'an unknown token is an ordinary message');
+  });
+
+  // Owner decision M22: approvals and app-only items are notices, never buttons.
+  it('renders buttons only for answerable items', async () => {
+    const d = fakeDiscord();
+    const notice = { ...ITEM, n: 2, token: 'M2P8RT', kind: 'approval', answerable: false, options: [{ id: 'approve', label: 'Approve' }, { id: 'reject', label: 'Reject' }] };
+    await d.bridge.sendContact({ ...MESSAGE, items: [notice] }, META);
+    await d.bridge.sendContact({ ...MESSAGE, items: [ITEM, notice] }, META);
+    const [a, b] = d.dms['222'].sends;
+    assert.deepStrictEqual(a.components, [], 'a notice-only batch has no buttons');
+    assert.deepStrictEqual(b.components.flatMap((r) => r.toJSON().components.map((c) => c.custom_id)), ['kl_q_7QD4KM_0', 'kl_q_7QD4KM_1']);
+  });
+
+  it('a button press needs the owner inside the owner DM', async () => {
+    const d = fakeDiscord();
+    const other = d.press({ user: { id: '444' }, channelId: 'dm-222' });
+    await d.bridge.handleInteractionCreate(other.interaction);
+    const elsewhere = d.press({ channelId: 'dm-444' });
+    await d.bridge.handleInteractionCreate(elsewhere.interaction);
+    const bad = d.press({ customId: 'kl_q_7QD4KM_10' });
+    await d.bridge.handleInteractionCreate(bad.interaction);
+    assert.deepStrictEqual(d.calls.map((c) => c.meta.ownerProven), [false, false]);
+    assert.deepStrictEqual([other.replies, elsewhere.replies, bad.replies].map((r) => r[0].content), ['Not allowed', 'Not allowed', 'Unknown action']);
+    assert.deepStrictEqual(d.dms['222'].sends, [], 'no acks');
+  });
+
+  it('never puts the bot token in an error or a contact log line', async () => {
+    const { addSink } = require('../src/logging');
+    const lines = [];
+    const remove = addSink((r) => { if (r.subsystem === 'discord-bridge') lines.push(r.message); });
+    try {
+      const d = fakeDiscord();
+      d.bridge.token = 'SECRET-BOT-TOKEN';
+      await d.bridge.sendContact(MESSAGE, META);
+      d.dms['222'].fail = new Error('bad auth SECRET-BOT-TOKEN');
+      await assert.rejects(d.bridge.sendContact(MESSAGE, META), (err) => err instanceof ContactDeliveryError && !err.message.includes('SECRET-BOT-TOKEN'));
+      d.dms['222'].fail = new Error('ack failed for SECRET-BOT-TOKEN');
+      await d.bridge.handleInteractionCreate(d.press({}).interaction);
+      const line = lines.find((l) => l.startsWith('contact ack failed'));
+      assert.ok(line && !line.includes('SECRET-BOT-TOKEN') && line.includes('<bot-token>'), JSON.stringify(lines));
+    } finally {
+      remove();
+    }
+  });
 });

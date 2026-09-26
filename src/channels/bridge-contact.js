@@ -19,6 +19,47 @@ function contactOwnerProven({ isPrivate, chatId, senderId, target, ownerUserId }
     && String(chatId) === String(target) && String(senderId) === String(ownerUserId));
 }
 
+// The contact owner's user id from a bridge's contact host
+// ({ router, getOwnerUserId(), isEnabled() }), or null when contact is off or
+// no owner id is set.
+function contactOwnerOf(host) {
+  if (!host) return null;
+  const enabled = typeof host.isEnabled === 'function' && host.isEnabled() === true;
+  const owner = typeof host.getOwnerUserId === 'function' ? String(host.getOwnerUserId() || '').trim() : '';
+  return enabled && owner ? owner : null;
+}
+
+// Telegram and Discord differ only in their limits.
+function bridgeCapabilities({ maxOptions, maxChars }) {
+  return {
+    buttons: true, richText: false, attachments: false, voice: false, expectsReplies: true, authenticatedReplies: true,
+    interrupts: true, maxOptions, maxChars
+  };
+}
+
+// Whether an inbound bridge message is a contact reply, and with what
+// correlation. A leading "#<token>" the router knows on this channel names
+// its question and wins (review T10 round 2); only without one does a reply
+// to a contact message count, and `replyTo` is looked up only as a message
+// reference, never as a token (review T10 I1). The bridge passes `replyTo`
+// only where a reply can be a contact reply (the owner's private chat / DM,
+// preflight M17). Returns null or { correlationId, deliveryRef }.
+function matchContactReply(router, channel, text, replyTo) {
+  const token = leadingToken(text);
+  if (token && router.knows(channel, token)) return { correlationId: token, deliveryRef: null };
+  const ref = replyTo == null ? '' : String(replyTo);
+  if (ref && router.knows(channel, ref, { ref: true })) return { correlationId: ref, deliveryRef: ref };
+  return null;
+}
+
+// After a contact reply the router refused (not owner-proven): true swallows
+// it (an allowlisted sender, as the plan says); false hands it to the
+// bridge's normal unauthorized path, so a live token looks the same to a
+// stranger as a made-up one (review T10 M4, no token oracle).
+function swallowRefusedContact(allowlistManager, channel, senderId, groupId) {
+  return Boolean(allowlistManager && allowlistManager.isAllowed(channel, senderId, groupId));
+}
+
 function callbackData(token, index) {
   const data = `kl_q_${token}_${index}`;
   if (!TOKEN.test(String(token)) || !Number.isInteger(index) || !CALLBACK.test(data) || Buffer.byteLength(data) > MAX_CALLBACK_BYTES) {
@@ -78,9 +119,13 @@ function telegramError(err, { secret = null } = {}) {
 }
 
 // discord.js DiscordAPIError / HTTPError carry a numeric `status`.
-function discordError(err) {
-  if (err && Number.isInteger(err.status)) return httpStatusError(err.status, err.message);
-  return new ContactDeliveryError('unreachable', err && err.message ? err.message : String(err));
+function discordError(err, { secret = null } = {}) {
+  const message = redact(err && err.message ? err.message : String(err), secret);
+  if (err && Number.isInteger(err.status)) return httpStatusError(err.status, message);
+  return new ContactDeliveryError('unreachable', message);
 }
 
-module.exports = { contactOwnerProven, callbackData, parseCallback, leadingToken, buttonRows, telegramError, discordError, redact };
+module.exports = {
+  contactOwnerProven, contactOwnerOf, bridgeCapabilities, matchContactReply, swallowRefusedContact,
+  callbackData, parseCallback, leadingToken, buttonRows, telegramError, discordError, redact
+};
