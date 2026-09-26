@@ -937,7 +937,9 @@ class MeshTransport extends EventEmitter {
       port: pending.port || null,
       // §3.10 item 4: frames carry a per-direction sequence number, and an
       // envelope signed before this connection authenticated is stale.
-      authAt: now,
+      // A candidate held through a duplicate ping authenticated when it was
+      // held, not when it was promoted: what it signed meanwhile is not stale.
+      authAt: pending.authenticatedAt || now,
       sendSeq: 0,
       recvSeq: 0,
       // §3.10 item 2: replay nonces are kept per peer, and inbound frames are
@@ -1051,7 +1053,7 @@ class MeshTransport extends EventEmitter {
       this.duplicates.delete(peerId);
       closeQuietly(earlier.ws, CLOSE_CODES.alreadyConnected, 'already_connected');
     }
-    const held = { ws, frames: [], bytes: 0 };
+    const held = { ws, frames: [], bytes: 0, at: Date.now() };
     this.duplicates.set(peerId, held);
     const drop = () => { if (this.duplicates.get(peerId) === held) this.duplicates.delete(peerId); };
     // Authenticated: it may send full-size frames, held within bounds.
@@ -1094,7 +1096,7 @@ class MeshTransport extends EventEmitter {
         try { live.ws.terminate(); } catch { /* gone */ }
         this._noteTakeover(peerId);
       }
-      this._promoteToPeer(authId, ws, remoteIdentity, { ...pending, duplicateSettled: true });
+      this._promoteToPeer(authId, ws, remoteIdentity, { ...pending, duplicateSettled: true, authenticatedAt: held.at });
       for (const [data, isBinary] of held.frames) ws.emit('message', data, isBinary);
     });
   }

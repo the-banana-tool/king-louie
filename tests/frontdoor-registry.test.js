@@ -12,6 +12,8 @@ const { derivePeerId } = require('../src/mesh/mesh-identity');
 const { rawEd25519 } = require('../src/frontdoor/protocol/messages');
 const { createFakePhone, testNodeIdentity } = require('./helpers/fake-phone');
 const { approverStoreWith } = require('./helpers/approver-set');
+const { NodeHub } = require('../src/frontdoor/node-hub');
+const { MeshPairing } = require('../src/mesh/mesh-pairing');
 const { setLogLevel } = require('../src/logging');
 
 setLogLevel('fatal');
@@ -43,15 +45,15 @@ function node(name, profile = 'agent', { key = null } = {}) {
   return { id, raw: rawEd25519(id.publicKey), tls: crypto.randomBytes(32).toString('hex'), name, profile };
 }
 
-function enrollBy(phone, n, { replaces = null, signedAt = '2026-09-19T12:00:00.000Z', decision = 'approve' } = {}) {
+function enrollBy(phone, n, { replaces = null, signedAt = '2026-09-19T12:00:00.000Z', decision = 'approve', frontdoorId = FD.nodeId } = {}) {
   return phone.enrollNode({
-    frontdoorId: FD.nodeId, signedAt, decision,
+    frontdoorId, signedAt, decision,
     pairing: { pairing_id: `pr_${crypto.randomBytes(16).toString('base64url')}`, node_id: n.id.nodeId, node_name: n.name, profile: n.profile, public_key: n.raw, tls_fingerprint: n.tls, replaces }
   });
 }
 
 const consoleRecord = (n, extra = {}) => ({ node_id: n.id.nodeId, node_name: n.name, profile: n.profile, public_key: n.raw, tls_fingerprint: n.tls, source: 'console', accepted_at: '2026-09-20T00:00:00.000Z', signed: null, confirmed_by: 'console', ...extra });
-const phoneRecord = (phone, n, acceptedAt = '2026-09-21T00:00:00.000Z', extra = {}) => ({ node_id: n.id.nodeId, node_name: n.name, profile: n.profile, public_key: n.raw, tls_fingerprint: n.tls, source: 'phone', accepted_at: acceptedAt, signed: enrollBy(phone, n), ...extra });
+const phoneRecord = (phone, n, acceptedAt = '2026-09-21T00:00:00.000Z', extra = {}, enrollOpts = {}) => ({ node_id: n.id.nodeId, node_name: n.name, profile: n.profile, public_key: n.raw, tls_fingerprint: n.tls, source: 'phone', accepted_at: acceptedAt, signed: enrollBy(phone, n, enrollOpts), ...extra });
 
 function writePhoneFile(dataDir, nodes) {
   const file = path.join(dataDir, 'frontdoor', 'nodes.json');
@@ -280,6 +282,81 @@ describe('NodeRegistry trust rules', () => {
     assert.equal(rejectedList(dataDir)[0].reason, 'unreadable');
   });
 
+  it('a planted phone-signed denial is refused on load', async () => {
+    const { registry, dataDir } = await setup();
+    const gpu = node('gpu-box');
+    writePhoneFile(dataDir, { [gpu.id.nodeId]: phoneRecord(A, gpu, '2026-09-21T00:00:00.000Z', {}, { decision: 'deny' }) });
+    registry.load();
+    assert.equal(registry.byId(gpu.id.nodeId), null);
+    assert.deepEqual(rejectedList(dataDir).map((e) => e.reason), ['not_approved']);
+  });
+
+  it('an envelope for another front door is refused (wrong_frontdoor)', async () => {
+    const { registry, dataDir } = await setup();
+    const other = testNodeIdentity({ key: 'web-01' }).nodeId;
+    registry.load();
+    assert.throws(() => registry.addSigned(enrollBy(A, node('gpu-box'), { frontdoorId: other })), (err) => err.code === 'wrong_frontdoor');
+    const gpu = node('gpu-box');
+    writePhoneFile(dataDir, { [gpu.id.nodeId]: phoneRecord(A, gpu, '2026-09-21T00:00:00.000Z', {}, { frontdoorId: other }) });
+    registry.load();
+    assert.equal(registry.byId(gpu.id.nodeId), null);
+    assert.deepEqual(rejectedList(dataDir).map((e) => e.reason), ['wrong_frontdoor']);
+  });
+
+  it('a phone enrollment of a console node\'s key under a new name is refused and leaves the console record', async () => {
+    const { registry, configDir } = await setup();
+    const web = node('web-01', 'runbook');
+    NodeRegistry.writeConsoleRecord(configDir, consoleRecord(web));
+    if (POSIX) fs.chmodSync(NodeRegistry.consoleDir(configDir), 0o755);
+    registry.load();
+    const renamed = { ...web, name: 'web-02', tls: crypto.randomBytes(32).toString('hex') };
+    assert.throws(() => registry.addSigned(enrollBy(A, renamed)), (err) => err.code === 'console_record');
+    assert.throws(() => registry.removeSigned({ node_id: web.id.nodeId }), (err) => err.code === 'console_record');
+    const kept = registry.byId(web.id.nodeId);
+    assert.equal(kept.source, 'console');
+    assert.equal(kept.node_name, 'web-01');
+    assert.equal(kept.tls_fingerprint, web.tls);
+    assert.equal(registry.byName('web-02'), null);
+    assert.equal(registry.list().length, 1);
+  });
+
+  it('load refuses a phone record that collides with a console id or name, or with another phone record\'s name', async () => {
+    const { registry, configDir, dataDir } = await setup();
+    const web = node('web-01', 'runbook');
+    NodeRegistry.writeConsoleRecord(configDir, consoleRecord(web));
+    if (POSIX) fs.chmodSync(NodeRegistry.consoleDir(configDir), 0o755);
+    const sameKey = { ...web, name: 'web-02' };
+    const sameName = node('web-01', 'runbook');
+    const gpu = node('gpu-box');
+    const gpuTwin = node('gpu-box');
+    writePhoneFile(dataDir, {
+      [sameKey.id.nodeId]: phoneRecord(A, sameKey),
+      [sameName.id.nodeId]: phoneRecord(A, sameName),
+      [gpu.id.nodeId]: phoneRecord(A, gpu),
+      [gpuTwin.id.nodeId]: phoneRecord(A, gpuTwin)
+    });
+    registry.load();
+    assert.deepEqual(registry.list().map((r) => [r.node_id, r.node_name, r.source]).sort(), [[gpu.id.nodeId, 'gpu-box', 'phone'], [web.id.nodeId, 'web-01', 'console']].sort());
+    assert.deepEqual(rejectedList(dataDir).map((e) => [e.record.node_id, e.reason]), [
+      [sameKey.id.nodeId, 'shadowed_by_console'],
+      [sameName.id.nodeId, 'shadowed_by_console'],
+      [gpuTwin.id.nodeId, 'duplicate_name']
+    ]);
+  });
+
+  it('writeConsoleRecord refuses the front door\'s own id when told it', async () => {
+    const { configDir } = await setup();
+    const fdAsNode = { id: FD, raw: rawEd25519(FD.publicKey), tls: crypto.randomBytes(32).toString('hex'), name: 'impostor', profile: 'agent' };
+    assert.throws(() => NodeRegistry.writeConsoleRecord(configDir, consoleRecord(fdAsNode), { frontdoorId: FD.nodeId }), /reserved_node_id/);
+    assert.equal(fs.existsSync(path.join(NodeRegistry.consoleDir(configDir), `${FD.nodeId}.json`)), false);
+  });
+
+  it('refuses an approver store without a dir', async () => {
+    const { store, configDir, dataDir } = await setup();
+    const noDir = { get: (id) => store.get(id), isActive: (id) => store.isActive(id) };
+    assert.throws(() => new NodeRegistry({ configDir, dataDir, approverStore: noDir, frontdoorId: FD.nodeId }), /approver store/);
+  });
+
   it('raises node_link_flapping when the transport reports repeated takeovers', async () => {
     const { registry, alerts } = await setup();
     registry.load();
@@ -295,6 +372,62 @@ describe('NodeRegistry trust rules', () => {
     unwatch();
     transport.emit('peerTakeover', { peerId, count: TAKEOVER_ALERT_COUNT + 1, windowMs: 600000, flapping: true });
     assert.equal(alerts.raised.length, 1);
+  });
+});
+
+describe('the registry as the hub\'s peer source', { timeout: 15000 }, () => {
+  const meshNode = (name) => {
+    const id = new NodeIdentity({ nodeName: name });
+    return { id, raw: rawEd25519(id.publicKey), tls: crypto.randomBytes(32).toString('hex'), name, profile: 'agent' };
+  };
+
+  async function hubOver(registry) {
+    const hubId = new NodeIdentity({ nodeName: 'frontdoor' });
+    const transport = new MeshTransport({ identity: hubId, host: '127.0.0.1', port: 0, useTls: false, duplicatePingMs: 200 });
+    const hub = new NodeHub({ identity: hubId, transport, pairing: new MeshPairing(hubId, transport), registryFile: path.join(registry.dataDir, 'hub-nodes.json'), peerSource: registry.peerSource() });
+    await hub.start({ listen: true });
+    cleanups.push(() => hub.stop());
+    const link = async (n) => {
+      const t = new MeshTransport({ identity: n.id, listen: false, useTls: false });
+      await t.start();
+      cleanups.push(() => t.stop());
+      t.addTrustedPeer(hubId.peerId, hubId.publicKey);
+      await t.connectToPeer('127.0.0.1', transport.port);
+      for (let i = 0; i < 300 && !transport.getPeer(n.id.peerId); i += 1) await sleep(10); // M11
+      assert.ok(transport.getPeer(n.id.peerId), 'linked');
+      return t;
+    };
+    return { hub, transport, link };
+  }
+
+  it('removeSigned closes the live link with 4003', async () => {
+    const { registry } = await setup();
+    registry.load();
+    const gpu = meshNode('gpu-box');
+    registry.addSigned(enrollBy(A, gpu));
+    const { transport, link } = await hubOver(registry);
+    const dialer = await link(gpu);
+    const closed = once(dialer, 'peerDisconnected');
+    registry.removeSigned({ node_id: gpu.id.nodeId });
+    const [{ code }] = await closed;
+    assert.equal(code, CLOSE_CODES.keyRemoved);
+    assert.equal(transport.trustedPeers.has(gpu.id.peerId), false);
+  });
+
+  it('a replaces re-pair closes the old key\'s live link with 4003 and trusts the new key', async () => {
+    const { registry } = await setup();
+    registry.load();
+    const oldKey = meshNode('gpu-box');
+    registry.addSigned(enrollBy(A, oldKey));
+    const { transport, link } = await hubOver(registry);
+    const dialer = await link(oldKey);
+    const closed = once(dialer, 'peerDisconnected');
+    const newKey = meshNode('gpu-box');
+    registry.addSigned(enrollBy(A, newKey, { replaces: oldKey.id.nodeId }));
+    const [{ code }] = await closed;
+    assert.equal(code, CLOSE_CODES.keyRemoved);
+    assert.equal(transport.trustedPeers.has(oldKey.id.peerId), false);
+    await link(newKey);
   });
 });
 
@@ -315,8 +448,8 @@ describe('one connection per node key', { timeout: 15000 }, () => {
     };
     // M11: connectToPeer resolves when the dialer promotes, before the
     // listener has handled auth:complete.
-    const promoted = async (notWs = null) => {
-      for (let i = 0; i < 300 && (!hub.getPeer(nodeId.peerId) || hub.getPeer(nodeId.peerId).ws === notWs); i += 1) await sleep(10);
+    const promoted = async (notWs = null, tries = 300) => {
+      for (let i = 0; i < tries && (!hub.getPeer(nodeId.peerId) || hub.getPeer(nodeId.peerId).ws === notWs); i += 1) await sleep(10);
       return hub.getPeer(nodeId.peerId);
     };
     // A dead link: it stops reading, so it never answers a ping. Ended at
@@ -363,6 +496,24 @@ describe('one connection per node key', { timeout: 15000 }, () => {
     for (let i = 0; i < 100 && received.length === 0; i += 1) await sleep(10);
     assert.deepEqual(received, [[nodeId.peerId, { hello: 1 }]]);
     assert.deepEqual(takeovers, [{ peerId: nodeId.peerId, count: 1, windowMs: 600000, flapping: false }]);
+  });
+
+  it('frames held through a ping as long as the stale-envelope grace still arrive on takeover', async () => {
+    // The front door pings for 5000 ms, as long as STALE_GRACE_MS: frames
+    // signed while the candidate waited must not look older than its auth.
+    const { hub, hubId, nodeId, dial, promoted, stall } = await hubAndNode({ duplicatePingMs: 5200 });
+    const received = [];
+    hub.on('peerMessage', ({ from, payload }) => received.push([from, payload]));
+    const first = await dial();
+    await first.connectToPeer('127.0.0.1', hub.port);
+    const oldWs = (await promoted()).ws;
+    stall(first);
+    const second = await dial();
+    await second.connectToPeer('127.0.0.1', hub.port);
+    second.send(hubId.peerId, { hello: 'early' });
+    assert.notEqual((await promoted(oldWs, 800)).ws, oldWs);
+    for (let i = 0; i < 100 && received.length === 0; i += 1) await sleep(10);
+    assert.deepEqual(received, [[nodeId.peerId, { hello: 'early' }]]);
   });
 
   it('repeated takeovers are reported as flapping', async () => {

@@ -63,10 +63,10 @@ function recordProblem(r, source, { frontdoorId = null } = {}) {
 class NodeRegistry extends EventEmitter {
   constructor({ configDir, dataDir, approverStore, frontdoorId, alerts = null, adminUid = 0, geteuid = defaultGeteuid, now = Date.now } = {}) {
     super();
-    if (!approverStore || typeof approverStore.get !== 'function') throw new TypeError('NodeRegistry needs the admin approver store');
+    if (!approverStore || typeof approverStore.get !== 'function' || typeof approverStore.dir !== 'string') throw new TypeError('NodeRegistry needs the admin approver store (with its dir)');
     // Approvals are read only from the admin-owned config dir, never from
     // the service-writable data dir.
-    if (typeof approverStore.dir === 'string' && isInside(approverStore.dir, dataDir)) {
+    if (isInside(approverStore.dir, dataDir)) {
       throw new Error(`NodeRegistry refuses approvers under the data dir (${approverStore.dir}); they must come from the admin config dir`);
     }
     if (typeof frontdoorId !== 'string' || !NODE_ID_RE.test(frontdoorId)) throw new TypeError('NodeRegistry needs the front door\'s own node id');
@@ -89,8 +89,10 @@ class NodeRegistry extends EventEmitter {
   }
 
   // Admin CLI only (`frontdoor code … --confirm`).
-  static writeConsoleRecord(configDir, record) {
-    const problem = recordProblem(record, 'console');
+  // With frontdoorId, that id (and so the front door's key) is refused here
+  // as well as on load.
+  static writeConsoleRecord(configDir, record, { frontdoorId = null } = {}) {
+    const problem = recordProblem(record, 'console', { frontdoorId });
     if (problem) throw new Error(`refusing to write a console node record: ${problem}`);
     const dir = NodeRegistry.consoleDir(configDir);
     fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
