@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const { createLogger } = require('../../logging');
 const { runningServicePid } = require('./io');
+const { isRoot, dropToDataDirOwner: dropHelper } = require('../drop-privileges');
 
 const log = createLogger('mcp');
 
@@ -40,41 +41,11 @@ function assertCourierDirsSafe(dataDir, { getuid = defaultGetuid, fsImpl = fs } 
   }
 }
 
-// Ruling T13-dropprivs: run as root against a running service, `mcp` must
-// not write into the courier directories as root at all — the service
-// account owns approvals/ and could swap outbox/ or inbox/ for a link at any
-// moment, turning each root write (or chown) into a file planted wherever
-// root can write. So before the courier writes anything, the process becomes
-// the data dir's owner, once, for the rest of its life: supplementary groups
-// cleared, gid, then uid, then verified. A root-owned data dir has no one to
-// become and is refused. `proc` is injectable for tests; on Windows there is
-// no getuid and this is a no-op.
-function isRoot(proc) {
-  return (typeof proc.getuid === 'function' && proc.getuid() === 0)
-    || (typeof proc.geteuid === 'function' && proc.geteuid() === 0);
-}
-
+// Ruling T13-dropprivs: run as root against a running service, `mcp`
+// becomes the data dir's owner, once, before the courier writes anything
+// (src/service/drop-privileges.js); a root-owned data dir is refused.
 function dropToDataDirOwner(dataDir, { proc = process, fsImpl = fs } = {}) {
-  if (!isRoot(proc)) return null;
-  const st = fsImpl.lstatSync(dataDir);
-  if (st.isSymbolicLink() || !st.isDirectory()) {
-    throw new Error(`refusing to run mcp as root: ${dataDir} is not a real directory`);
-  }
-  const { uid, gid } = st;
-  if (uid === 0) {
-    throw new Error(`refusing to run mcp as root: ${dataDir} is owned by root, so there is no service account to run as; run mcp as the service account`);
-  }
-  try {
-    if (typeof proc.setgroups === 'function') proc.setgroups([]);
-    proc.setgid(gid);
-    proc.setuid(uid);
-  } catch (err) {
-    throw new Error(`refusing to run mcp as root: could not become the data dir's owner (uid ${uid}, gid ${gid}): ${err.message}`);
-  }
-  if (proc.getuid() !== uid || proc.geteuid() !== uid) {
-    throw new Error(`refusing to run mcp as root: still running as uid ${proc.getuid()}/${proc.geteuid()} after dropping to the data dir's owner (uid ${uid})`);
-  }
-  return { uid, gid };
+  return dropHelper(dataDir, { proc, fsImpl, who: 'mcp' });
 }
 
 async function runMcp({ dataDir, io, deps = {} }) {

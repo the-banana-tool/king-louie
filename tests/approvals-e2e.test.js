@@ -217,7 +217,17 @@ describe('phone approvals end to end', { skip: !CAN_RUN && 'needs root-owned adm
       assert.equal(paired, 0, pairIo.text.err);
       assert.ok(logged.some((l) => l.includes('Generated new Node Identity') && l.includes('"web-01"')), logged.join('\n'));
 
-      let service = spawnCli(children, ['run', '--profile', 'runbook', '--data-dir', nodeData]);
+      if (POSIX_ROOT) {
+        // pair ran here, as root. From here the node runs as a service
+        // account, as an installed node does: enroll-device (run as root)
+        // talks to it through a courier helper that drops to that account
+        // (ruling T13-enroll), and mcp drops to it too (T13-dropprivs).
+        for (const dir of [base, path.join(base, 'node')]) fs.chmodSync(dir, 0o755);
+        chownTree(nodeData, SERVICE_UID, SERVICE_GID);
+        chownTree(root, SERVICE_UID, SERVICE_GID);
+      }
+      const service = spawnCli(children, ['run', '--profile', 'runbook', '--data-dir', nodeData],
+        POSIX_ROOT ? { uid: SERVICE_UID, gid: SERVICE_GID } : {});
       await until(() => service.output().includes('"event":"ready"'), () => `node ready (${service.errors()})`);
       const linkFile = path.join(nodeData, 'approvals', 'link.json');
       await until(() => fs.existsSync(linkFile) && JSON.parse(fs.readFileSync(linkFile, 'utf8')).connected, () => `the relay link (${service.errors()})`);
@@ -237,26 +247,17 @@ describe('phone approvals end to end', { skip: !CAN_RUN && 'needs root-owned adm
       enrollIo.stdin.write('y\n');
       assert.equal(await enrolling, 0, enrollIo.text.err);
       await until(async () => (await anonymous('GET', `/v1/enroll/${qr.code_id}`)).body.state === 'done', 'enrollment done');
-
       if (POSIX_ROOT) {
-        // mcp run as root drops to the data dir's owner and refuses a
-        // root-owned data dir (ruling T13-dropprivs), so from here the node
-        // runs as a service account, as an installed node does: the service
-        // is restarted as that account, owning its data dir and the folder
-        // its runbook writes to. (Pairing and enrollment above ran with the
-        // service as root: F3's root-run enroll-device writes its courier
-        // files as root and hands them over only when it finishes.)
-        const exited = new Promise((resolve) => service.child.once('exit', resolve));
-        service.child.send({ type: 'shutdown' });
-        await exited;
-        for (const dir of [base, path.join(base, 'node')]) fs.chmodSync(dir, 0o755);
-        chownTree(nodeData, SERVICE_UID, SERVICE_GID);
-        chownTree(root, SERVICE_UID, SERVICE_GID);
-        fs.writeFileSync(linkFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(linkFile, 'utf8')), connected: false }));
-        fs.lchownSync(linkFile, SERVICE_UID, SERVICE_GID);
-        service = spawnCli(children, ['run', '--profile', 'runbook', '--data-dir', nodeData], { uid: SERVICE_UID, gid: SERVICE_GID });
-        await until(() => service.output().includes('"event":"ready"'), () => `node ready as the service account (${service.errors()})`);
-        await until(() => JSON.parse(fs.readFileSync(linkFile, 'utf8')).connected, () => `the relay link as the service account (${service.errors()})`);
+        // enroll-device ran as root, yet nothing it left in approvals/ is
+        // root's: its courier ran as the service account (T13-enroll).
+        const rootOwned = [];
+        const walk = (p) => {
+          const st = fs.lstatSync(p);
+          if (st.uid === 0) rootOwned.push(p);
+          if (st.isDirectory() && !st.isSymbolicLink()) for (const n of fs.readdirSync(p)) walk(path.join(p, n));
+        };
+        walk(path.join(nodeData, 'approvals'));
+        assert.deepEqual(rootOwned, []);
       }
 
       // ── The unsafe runbook through mcp ──────────────────────────────────

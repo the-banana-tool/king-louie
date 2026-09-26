@@ -8,6 +8,7 @@ const { buildServicePorts } = require('../ports');
 const { loadNodeConfig } = require('../node-config');
 const { restoreDataDirOwnership } = require('../ownership');
 const { readLine, printable, runningServicePid, renderQr } = require('./io');
+const { isRoot, dataDirOwner } = require('../drop-privileges');
 
 const ENROLL_TTL_MS = 10 * 60 * 1000;
 const DEVICE_HELP = `Usage: king-louie-service device list [--data-dir DIR]
@@ -68,8 +69,33 @@ async function runEnrollDevice({ dataDir, configDir = adminConfigDir({ dataDir }
     io.stderr.write(`approvers.relay is not set in ${path.join(configDir, 'node.yaml')}.\n`);
     return 1;
   }
-  const link = readJson(path.join(dataDir, 'approvals', 'link.json'));
+
+  // Ruling T13-enroll: run as root against a data dir the service account
+  // owns, root never touches approvals/ — the courier (and the read of
+  // link.json) runs in a forked helper that has dropped to the data dir's
+  // owner (src/service/courier-proxy.js). Not root, or a root-owned data dir
+  // (the service itself runs as root, so there is no less-privileged owner
+  // who could swap a link), the courier runs in process as before.
+  const useChild = deps.courierProcess
+    ? deps.courierProcess === 'child'
+    : isRoot() && dataDirOwner(dataDir, { who: 'enroll-device' }).uid !== 0;
+  let courier;
+  let link;
+  if (useChild) {
+    const { CourierProxy } = require('../courier-proxy');
+    courier = new CourierProxy({ dataDir, who: 'enroll-device', ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...(deps.forkImpl ? { forkImpl: deps.forkImpl } : {}) });
+    try {
+      ({ link } = await courier.start());
+    } catch (err) {
+      courier.stop();
+      io.stderr.write(`Could not start the courier helper: ${err.message}\n`);
+      return 1;
+    }
+  } else {
+    link = readJson(path.join(dataDir, 'approvals', 'link.json'));
+  }
   if (!link || link.connected !== true) {
+    if (useChild) courier.stop();
     io.stderr.write(`The service is not linked to its relay yet (see ${path.join(dataDir, 'approvals', 'link.json')}). Check \`relay nodes\` on the relay host.\n`);
     return 1;
   }
@@ -77,7 +103,10 @@ async function runEnrollDevice({ dataDir, configDir = adminConfigDir({ dataDir }
   const written = [];
   const ports = buildServicePorts({ dataDir, onPathWritten: (p) => written.push(p) });
   const identity = getOrGenerateNodeIdentity(ports.store, ports.cipher, nodeCfg.name);
-  const courier = new FileCourier({ dataDir, identity, onPathWritten: (p) => written.push(p), ...(deps.pollMs ? { pollMs: deps.pollMs } : {}) }).start();
+  if (!useChild) courier = new FileCourier({ dataDir, identity, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}) }).start();
+  // Set when the courier helper process dies: the enrollment then fails
+  // cleanly (and an approver already written is rolled back).
+  const courierDied = useChild ? courier.died : new Promise(() => {});
   const codeId = crypto.randomBytes(16).toString('base64url');
   const code = crypto.randomBytes(32).toString('base64url');
   const codeTtlMs = deps.codeTtlMs || ENROLL_TTL_MS;
@@ -89,8 +118,10 @@ async function runEnrollDevice({ dataDir, configDir = adminConfigDir({ dataDir }
   const expired = new AbortController();
   const expiry = setTimeout(() => expired.abort(), deadlineMs);
   if (typeof expiry.unref === 'function') expiry.unref();
+  // true when the relay was told.
   const finish = (claim, refused) => courier.call('enroll.done', { envelope: buildEnrollDone({ identity, codeId, enroll: refused ? null : claim, refused }) })
-    .catch((err) => io.stderr.write(`Could not tell the relay: ${err.message}\n`));
+    .then(() => true, (err) => { io.stderr.write(`Could not tell the relay: ${err.message}\n`); return false; });
+  const helperDead = () => (useChild && courier.dead ? courier.dead : null);
   try {
     const claimed = new Promise((resolve) => {
       const timer = setTimeout(() => resolve(null), Math.min(deps.timeoutMs || deadlineMs, deadlineMs));
@@ -102,7 +133,13 @@ async function runEnrollDevice({ dataDir, configDir = adminConfigDir({ dataDir }
         }
       });
     });
-    await courier.call('enroll.open', { envelope: buildEnrollOpen({ identity, codeId, expiresAt: now() + codeTtlMs }) });
+    try {
+      await courier.call('enroll.open', { envelope: buildEnrollOpen({ identity, codeId, expiresAt: now() + codeTtlMs }) });
+    } catch (err) {
+      if (!helperDead()) throw err;
+      io.stderr.write(`The courier helper stopped (${err.message}). Nothing was enrolled.\n`);
+      return 1;
+    }
     const qr = encodeQr({
       t: 'kl.pair',
       relay: link.relay_public_url,
@@ -116,7 +153,11 @@ async function runEnrollDevice({ dataDir, configDir = adminConfigDir({ dataDir }
     io.stdout.write(`Relay fingerprint: ${fingerprintGroups(link.relay_id)}\n`);
     io.stdout.write('Scan the code with the King Louie app. Waiting up to 10 minutes...\n');
 
-    const claim = await claimed;
+    const claim = await Promise.race([claimed, courierDied.then(() => null)]);
+    if (helperDead()) {
+      io.stderr.write(`The courier helper stopped (${helperDead().message}). Nothing was enrolled.\n`);
+      return 1;
+    }
     if (!claim) {
       await finish(null, true);
       io.stderr.write('No phone answered within 10 minutes. Nothing was enrolled.\n');
@@ -141,6 +182,10 @@ async function runEnrollDevice({ dataDir, configDir = adminConfigDir({ dataDir }
     if (!/^y(es)?$/i.test(answer.trim())) {
       await finish(null, true);
       io.stdout.write('Not enrolled.\n');
+      return 1;
+    }
+    if (helperDead()) {
+      io.stderr.write(`The courier helper stopped (${helperDead().message}). Nothing was enrolled.\n`);
       return 1;
     }
     const approverFile = path.join(configDir, 'approvers', `${device.device_id}.json`);
@@ -179,7 +224,19 @@ async function runEnrollDevice({ dataDir, configDir = adminConfigDir({ dataDir }
       await finish(null, true);
       return 1;
     }
-    await finish(claim, false);
+    const told = await finish(claim, false);
+    if (!told && helperDead()) {
+      // The phone was never told; with the helper gone it cannot be, so the
+      // node must not trust it either: the approver file goes back.
+      try {
+        restorePriorFile(approverFile, prior);
+      } catch (rollbackErr) {
+        io.stderr.write(`Could not roll back ${approverFile}: ${rollbackErr.message}. ${device.device_id} IS trusted on this node; run "device revoke ${device.device_id}" now.\n`);
+        return 1;
+      }
+      io.stderr.write(`The courier helper stopped (${helperDead().message}); the approver file was rolled back and ${device.device_id} is not enrolled.\n`);
+      return 1;
+    }
     io.stdout.write(`Enrolled ${device.device_id}. It can approve unsafe actions on ${nodeCfg.name} now.\n`);
     return 0;
   } finally {
