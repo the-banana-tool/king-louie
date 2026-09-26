@@ -65,8 +65,8 @@ async function submitExternal(reg, { caseId }, { entry, job, envelope, notes }) 
   // Final review I1: only a clear refusal fails the job. A timeout, a network
   // error or a 5xx may hide an accepted job, so the job stays submitting with
   // its contacts held and is reconciled with the same idempotency key.
-  const unconfirmed = (why) => {
-    jobs.holdSubmitting(reg, caseId, job, why);
+  const unconfirmed = async (why) => {
+    await jobs.holdSubmitting(reg, caseId, job, why);
     return {
       ok: false,
       error: `${entry.id} did not confirm ${job.id} (${why}); it may already be running. ${job.id} stays submitting with its contacts held and is reconciled with the same idempotency key at the next turn start or sweep`,
@@ -82,12 +82,12 @@ async function submitExternal(reg, { caseId }, { entry, job, envelope, notes }) 
       return { ok: false, error: `${entry.id} refused ${job.id}: its idempotency key was already used with a different body (idempotency conflict)` };
     }
     const message = clip(err && err.message ? err.message : err);
-    if (!jobs.isDefinitiveRefusal(err)) return unconfirmed(message);
+    if (!jobs.isDefinitiveRefusal(err)) return await unconfirmed(message);
     await failJob(reg, caseId, job, message);
     return { ok: false, error: `${entry.id} refused ${job.id}: ${message}` };
   }
   if (submitted === jobs.SUBMIT_TIMEOUT) {
-    return unconfirmed(`it did not answer within ${Math.round(settings.submitTimeoutMs / 1000)}s`);
+    return await unconfirmed(`it did not answer within ${Math.round(settings.submitTimeoutMs / 1000)}s`);
   }
   const answer = submitted && typeof submitted === 'object' && !Array.isArray(submitted) ? submitted : {};
   const mismatch = jobs.normalizationMismatch(job, answer.contacts);

@@ -167,3 +167,99 @@ describe('the sweep and the owner', () => {
     assert.strictEqual(s.reg.jobs(s.meta.id).get('job-0001').state, 'submitted');
   });
 });
+
+// ---- Residual fixes (re-review of 1886196..819994b) ----
+
+describe('unconfirmed jobs: cancel, bound, prefetch reuse and stale costs', () => {
+  const jobsLib = require('../src/cases/executors/jobs');
+  const journalText = (s) => {
+    const dir = path.join(s.meta.dir, 'journal');
+    return fs.existsSync(dir) ? fs.readdirSync(dir).map((n) => fs.readFileSync(path.join(dir, n), 'utf8')).join('\n') : '';
+  };
+  const dueWakeup = (s) => s.rt.wakeups(s.meta.id).list().find((w) => w.payload?.jobId === 'job-0001');
+
+  it('N1: cancelling an unconfirmed job cancels what the executor took', async () => {
+    const s = await setup();
+    server.knobs.failAfterWrite = 503;
+    await s.submit();
+    assert.strictEqual(server.state.jobs.get('job_1').state, 'queued');
+    const r = await jobsLib.cancelJob(s.reg, s.meta.id, 'job-0001', 'cancelled by the owner');
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(server.state.jobs.get('job_1').state, 'cancelled', 'the executor is told');
+    assert.strictEqual(s.reg.jobs(s.meta.id).get('job-0001').state, 'cancelled');
+    assert.strictEqual(s.reg.globalRemaining('phone-agent'), 4, 'it was taken, so its contact stays counted');
+  });
+
+  it('N1: a failed lookup never blocks the local cancel, and is journaled', async () => {
+    const s = await setup();
+    server.knobs.failAfterWrite = 503;
+    await s.submit();
+    server.knobs.failNextStatus = 503;
+    const r = await jobsLib.cancelJob(s.reg, s.meta.id, 'job-0001', 'case paused');
+    assert.strictEqual(r.ok, true, r.error);
+    assert.strictEqual(s.reg.jobs(s.meta.id).get('job-0001').state, 'cancelled');
+    assert.match(journalText(s), /could not ask the executor whether it took job-0001/);
+    assert.strictEqual(s.reg.globalRemaining('phone-agent'), 4, 'unknown: the contact stays counted');
+  });
+
+  it('N1: a job cancelled between the prefetch and the apply is cancelled at the executor', async () => {
+    const s = await setup();
+    server.knobs.failNextStatus = 502;
+    await s.submit();
+    assert.strictEqual(server.state.jobs.size, 0);
+    const now = s.later();
+    const prefetched = await s.reg.prefetchPolls(s.meta.id, now);
+    assert.ok(prefetched.reconcile.get('job-0001').found, 'the resubmit created the job');
+    server.knobs.failNextStatus = 503;
+    await jobsLib.cancelJob(s.reg, s.meta.id, 'job-0001', 'cancelled by the owner');
+    assert.strictEqual(server.state.jobs.get('job_1').state, 'queued', 'the cancel could not see it');
+    await s.reg.pollWakeup(s.meta.id, dueWakeup(s), { prefetched });
+    assert.strictEqual(server.state.jobs.get('job_1').state, 'cancelled');
+    assert.strictEqual(s.reg.jobs(s.meta.id).get('job-0001').state, 'cancelled');
+  });
+
+  it('N2: an unconfirmed job is unreachable after maxPollErrors failures, its contacts kept', async () => {
+    const s = await setup({ executors: { maxPollErrors: 3 } });
+    server.knobs.status5xx = true;
+    await s.submit();
+    for (let i = 0; i < 3; i += 1) await s.rt.sweep(s.meta.id, s.later());
+    const job = s.reg.jobs(s.meta.id).get('job-0001');
+    assert.deepStrictEqual([job.state, job.submitErrors, job.wakeupId], ['unreachable', 3, null]);
+    assert.match(job.reason, /never confirmed after 3 tries/);
+    assert.strictEqual(s.reg.globalRemaining('phone-agent'), 4, 'it may have been sent');
+    assert.match(journalText(s), /job-0001 on phone-agent is unreachable/);
+    assert.deepStrictEqual(s.reg.liveState({ caseId: s.meta.id }), [], 'no longer blocks a duplicate');
+    server.knobs.status5xx = false;
+    const again = await s.submit();
+    assert.strictEqual(again.ok, true, again.error);
+  });
+
+  it('N3: one prefetched failure counts once when two due wake-ups cover the job', async () => {
+    const s = await setup();
+    assert.strictEqual((await s.submit()).ok, true);
+    s.rt.wakeups(s.meta.id).ensure('poll-executor', { every: 60000, payload: { key: 'poll:all', executor: 'phone-agent' } });
+    const now = s.later();
+    server.knobs.failNextStatus = 503;
+    const prefetched = await s.reg.prefetchPolls(s.meta.id, now);
+    for (const w of s.rt.wakeups(s.meta.id).due(now).filter((x) => x.kind === 'poll-executor')) {
+      await s.reg.pollWakeup(s.meta.id, w, { prefetched });
+    }
+    assert.strictEqual(s.reg.jobs(s.meta.id).get('job-0001').pollErrors, 1);
+  });
+
+  it('N4: a stale prefetched cost after a newer poll is not applied', async () => {
+    const s = await setup();
+    assert.strictEqual((await s.submit()).ok, true);
+    server.setJob('job_1', { state: 'running', costUsd: 0.5 });
+    await s.reg.refreshCase(s.meta.id, { force: true });
+    server.setJob('job_1', { state: 'running', costUsd: 1 });
+    const now = s.later();
+    const prefetched = await s.reg.prefetchPolls(s.meta.id, now);
+    server.setJob('job_1', { state: 'running', costUsd: 1.5 });
+    await s.reg.refreshCase(s.meta.id, { force: true });
+    assert.strictEqual(spent(s, 'usd'), 1.5);
+    await s.reg.pollWakeup(s.meta.id, dueWakeup(s), { prefetched });
+    assert.strictEqual(spent(s, 'usd'), 1.5);
+    assert.doesNotMatch(journalText(s), /below the/);
+  });
+});

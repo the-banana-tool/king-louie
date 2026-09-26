@@ -337,6 +337,8 @@ async function statusFromSource(reg, caseId, job) {
 // One job's status from its source, never throwing: → { state, externalId,
 // status, failure }, where state and externalId are the job's as fetched.
 async function fetchStatus(reg, caseId, listed) {
+  // Wall clock, not reg.now(): it orders fetches, and survives a restart.
+  const startedAt = Date.now();
   let status = null;
   let failure = null;
   try {
@@ -346,7 +348,7 @@ async function fetchStatus(reg, caseId, listed) {
   } catch (err) {
     failure = err;
   }
-  return { state: listed.state, externalId: listed.externalId ?? null, status, failure };
+  return { state: listed.state, externalId: listed.externalId ?? null, status, failure, startedAt };
 }
 
 // Returns the saved job, or null when it was settled elsewhere meanwhile.
@@ -355,11 +357,16 @@ async function fetchStatus(reg, caseId, listed) {
 async function pollJob(reg, caseId, caseDir, store, listed, settings, now, fetched = null) {
   const entry = reg.get(listed.executor, { caseId });
   const every = Math.max(MIN_POLL_MS, Number(entry?.pollEveryMs) || settings.pollEveryMs);
-  const { status, failure } = fetched || await fetchStatus(reg, caseId, listed);
+  const result = fetched || await fetchStatus(reg, caseId, listed);
+  const { status, failure } = result;
   // Re-read after the await: a cancel may have landed while the poll was out.
   const job = store.get(listed.id);
   if (!isObject(job) || !isOpen(job.state) || job.state === 'submitting') return null;
   if (fetched && (job.state !== fetched.state || (job.externalId ?? null) !== fetched.externalId)) return null;
+  // A prefetched result older than a poll already applied (an owner turn's,
+  // say) is stale: its cost would read as a drop (residual N4).
+  if (fetched && Number(job.lastFetchAt) > Number(fetched.startedAt)) return null;
+  if (Number.isFinite(result.startedAt)) job.lastFetchAt = Math.max(Number(job.lastFetchAt) || 0, result.startedAt);
   const after = newAfter();
   settlePendingCharge(caseId, caseDir, job, after);
   if (!failure) {
@@ -500,10 +507,17 @@ async function refreshCase(reg, caseId, { force = false, budgetMs = null, jobIds
 async function pollWakeup(reg, caseId, wakeup, { prefetched = null } = {}) {
   const jobId = wakeup?.payload?.jobId || null;
   const jobIds = jobId ? [jobId] : null;
+  // Each prefetched entry is taken out of the map as it is used, so two due
+  // wake-ups covering one job apply its result once (residual N3).
+  const take = (map) => {
+    const out = new Map([...map].filter(([id]) => !jobIds || jobIds.includes(id)));
+    for (const id of out.keys()) map.delete(id);
+    return out;
+  };
   await reg.caseRuntime.systemAction(caseId, 'executor reconcile', () => reconcileSubmitting(reg, caseId, {
-    jobIds, prefetched: prefetched ? prefetched.reconcile : null
+    jobIds, prefetched: prefetched ? take(prefetched.reconcile) : null
   }));
-  const statuses = prefetched ? new Map([...prefetched.statuses].filter(([id]) => !jobIds || jobIds.includes(id))) : null;
+  const statuses = prefetched ? take(prefetched.statuses) : null;
   const r = await refreshCase(reg, caseId, { jobIds, prefetched: statuses });
   return { material: Boolean(r.material) };
 }
@@ -681,6 +695,16 @@ async function cancelJob(reg, caseId, jobId, reason = 'cancelled') {
   if (!listed) return { ok: false, error: `${jobId} was not found in this case.` };
   if (!isOpen(listed.state)) return { ok: false, error: `${jobId} is already ${listed.state}.` };
   let note = null;
+  // An external job still submitting may have been taken (a 5xx after the
+  // write): ask the executor by externalRef and cancel what it has. A lookup
+  // that fails never blocks the local cancel; it is journaled, and the
+  // contacts stay counted since the job may have gone out (residual N1).
+  let keepReservation = false;
+  if (listed.kind === 'external' && listed.state === 'submitting' && !validExternalId(listed.externalId)) {
+    const looked = await lookupSubmitted(reg, caseId, listed);
+    keepReservation = looked.keepReservation;
+    if (looked.note) note = looked.note;
+  }
   try {
     if (listed.kind === 'external' && validExternalId(listed.externalId)) {
       await (await reg.adapter(listed.executor)).cancel(listed.externalId);
@@ -706,7 +730,7 @@ async function cancelJob(reg, caseId, jobId, reason = 'cancelled') {
   // Re-read after the executor call: a poll may have settled it meanwhile.
   const job = store.get(jobId);
   if (!isObject(job) || !isOpen(job.state)) return { ok: false, error: `${jobId} is already ${job?.state}.` };
-  const release = takeReservation(job);
+  const release = keepReservation ? 0 : takeReservation(job);
   const after = newAfter();
   job.state = 'cancelled';
   job.reason = reason;
@@ -718,6 +742,35 @@ async function cancelJob(reg, caseId, jobId, reason = 'cancelled') {
   flushAfter(reg, caseId, after);
   await indexQuietly(reg, caseId, job);
   return { ok: true, job, ...(note ? { note } : {}) };
+}
+
+// For cancelJob: an unconfirmed external job's executor-side job, found by
+// externalRef and cancelled. → { keepReservation, note }
+async function lookupSubmitted(reg, caseId, job) {
+  let adapter;
+  try {
+    adapter = await reg.adapter(job.executor);
+  } catch (err) {
+    return { keepReservation: Boolean(job.unconfirmed), note: clip(`could not ask the executor whether it took ${job.id}: ${err.message}`) };
+  }
+  if (typeof adapter.findByExternalRef !== 'function') {
+    return job.unconfirmed
+      ? { keepReservation: true, note: `could not ask the executor whether it took ${job.id}: it cannot look jobs up` }
+      : { keepReservation: false, note: null };
+  }
+  let found;
+  try {
+    found = await adapter.findByExternalRef(`${caseId}/${job.id}`);
+  } catch (err) {
+    return { keepReservation: true, note: clip(`could not ask the executor whether it took ${job.id}: ${err.message}`) };
+  }
+  if (!found || !validExternalId(found.jobId)) return { keepReservation: false, note: null };
+  try {
+    await adapter.cancel(found.jobId);
+    return { keepReservation: true, note: clip(`the executor had taken it as ${found.jobId}; cancelled there`) };
+  } catch (err) {
+    return { keepReservation: true, note: clip(`the executor had taken it as ${found.jobId} and did not confirm the cancel: ${err.message}`) };
+  }
 }
 
 // C2's _cancelExecutorJobs fires this without awaiting it after setStatus.
@@ -816,7 +869,7 @@ function normalizationMismatch(job, contacts) {
 
 // Keeps an unconfirmed job `submitting` (contacts held) and gives it a poll
 // wake-up, so the sweep reconciles it too, not only a turn start.
-function holdSubmitting(reg, caseId, job, reason) {
+async function holdSubmitting(reg, caseId, job, reason) {
   const store = new JobStore(reg.caseDir(caseId));
   const fresh = store.get(job.id);
   if (!isObject(fresh) || fresh.state !== 'submitting') return fresh;
@@ -828,6 +881,23 @@ function holdSubmitting(reg, caseId, job, reason) {
   fresh.submitErrors = (Number(fresh.submitErrors) || 0) + 1;
   if (!fresh.wakeupId) {
     fresh.wakeupId = reg.caseRuntime.wakeups(caseId).ensure('poll-executor', { every, payload: { key: `poll:${fresh.id}`, executor: fresh.executor, jobId: fresh.id } });
+  }
+  const max = reg.settings().maxPollErrors;
+  if (fresh.submitErrors >= max) {
+    // Bounded like a poll (residual N2): unreachable, terminal. The contacts
+    // stay counted (it may have been sent); finishJob drops its wake-up and
+    // fails its plan step, and it no longer blocks a duplicate signature.
+    const after = newAfter();
+    fresh.state = 'unreachable';
+    fresh.nextPollAt = null;
+    fresh.lastChange = now.toISOString();
+    fresh.reason = clip(`never confirmed after ${fresh.submitErrors} tries; it may have been sent: ${fresh.error}`);
+    finishJob(reg, caseId, reg.caseDir(caseId), fresh, after);
+    saveJob(store, fresh);
+    after.journal.push(`Job ${fresh.id} on ${fresh.executor} is unreachable: ${fresh.reason}. Its contacts stay counted.`);
+    flushAfter(reg, caseId, after);
+    await indexQuietly(reg, caseId, fresh);
+    return fresh;
   }
   fresh.nextPollAt = new Date(now.getTime() + every).toISOString();
   saveJob(store, fresh);
@@ -869,6 +939,18 @@ async function reconcileApply(reg, caseId, listed, outcome) {
   const caseDir = reg.caseDir(caseId);
   const store = new JobStore(caseDir);
   const job = store.get(listed.id);
+  if (isObject(job) && isTerminal(job.state) && outcome.found && validExternalId(outcome.found.jobId)
+    && job.externalId !== outcome.found.jobId) {
+    // Cancelled (or failed) while the reconcile was out, and the executor
+    // has it (a resubmit may just have created it): cancel it there (residual N1).
+    try {
+      await (await reg.adapter(job.executor)).cancel(outcome.found.jobId);
+      journal(reg, caseId, `Job ${job.id} was ${job.state} while it was reconciled; the executor had it as ${clip(outcome.found.jobId)}, cancelled there.`);
+    } catch (err) {
+      journal(reg, caseId, `Job ${job.id} was ${job.state} while it was reconciled; the executor has it as ${clip(outcome.found.jobId)} and did not confirm the cancel: ${clip(err.message)}.`);
+    }
+    return null;
+  }
   if (!isObject(job) || job.state !== 'submitting' || reg.inFlight.has(runKey(caseId, job.id))) return null;
   if (outcome.found) {
     const answer = outcome.found;
@@ -886,7 +968,7 @@ async function reconcileApply(reg, caseId, listed, outcome) {
   }
   if (outcome.ambiguous) {
     log.warn(`Reconciling ${job.id} failed; trying again later: ${outcome.ambiguous}`);
-    if (job.unconfirmed) holdSubmitting(reg, caseId, job, outcome.ambiguous);
+    if (job.unconfirmed) await holdSubmitting(reg, caseId, job, outcome.ambiguous);
     return { jobId: job.id, state: 'submitting' };
   }
   // Interrupted before the executor was ever asked, and it does not have it.
@@ -917,15 +999,18 @@ function submittingJobs(reg, caseId, jobIds = null) {
 // lock; `prefetched` (jobId → reconcileFetch outcome) skips the network.
 async function reconcileSubmitting(reg, caseId, { jobIds = null, prefetched = null } = {}) {
   const out = [];
-  for (const job of submittingJobs(reg, caseId, jobIds)) {
-    let outcome;
-    if (prefetched) {
-      outcome = prefetched.get(job.id);
-      if (!outcome) continue;
-    } else {
-      outcome = await reconcileFetch(reg, caseId, job);
+  if (prefetched) {
+    // Every prefetched outcome is applied, including one whose job settled
+    // since the prefetch: reconcileApply cancels what it found (residual N1).
+    for (const [id, outcome] of prefetched) {
+      if (jobIds && !jobIds.includes(id)) continue;
+      const r = await reconcileApply(reg, caseId, { id }, outcome);
+      if (r) out.push(r);
     }
-    const r = await reconcileApply(reg, caseId, job, outcome);
+    return out;
+  }
+  for (const job of submittingJobs(reg, caseId, jobIds)) {
+    const r = await reconcileApply(reg, caseId, job, await reconcileFetch(reg, caseId, job));
     if (r) out.push(r);
   }
   return out;

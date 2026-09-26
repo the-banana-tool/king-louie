@@ -332,8 +332,11 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage3-executors.md`.
   (`submitTimeoutMs`, or `host.fetch`'s `requestTimeoutMs`), a network error
   or a 5xx leaves the job `submitting` with its contacts held; the next turn
   start or sweep finds it by `externalRef` or resubmits it with the same
-  idempotency key. The sweep fetches executor statuses before it takes the
-  case lock and applies them inside it.
+  idempotency key; after `maxPollErrors` unconfirmed tries it is `unreachable`,
+  its contacts still counted. Cancelling it asks the executor by `externalRef`
+  and cancels what it took. The sweep fetches executor statuses before it
+  takes the case lock and applies them inside it, each result once, and never
+  over a newer poll.
 - `external-agent` facts are written only by `Executor.results`;
   `brief.resources.ownerLabor` only by `syncPlan`. Tests that need a case with
   executors use `tests/helpers/executor-fixtures.js` (a temp data dir, a fake
