@@ -41,6 +41,16 @@ describe('parsePlaybookYaml', () => {
     assert.deepStrictEqual(yamlErrors(PLAYBOOK_YAML, { dirName: null }), []);
   });
 
+  it('refuses a Windows reserved device name as the playbook name', () => {
+    for (const bad of ['con', 'prn', 'aux', 'nul', 'com1', 'com9', 'lpt1', 'lpt9']) {
+      assert.strictEqual(f.NAME_RE.test(bad), false, bad);
+      assert.match(yamlErrors(withYaml(/name: land-sale/, `name: ${bad}`), { dirName: bad })[0], /name must match/);
+    }
+    // Not a prefix ban: "console" and "computer" are ordinary names.
+    assert.strictEqual(f.NAME_RE.test('console'), true);
+    assert.strictEqual(f.NAME_RE.test('computer'), true);
+  });
+
   it('refuses unknown keys, duplicate keys and bad syntax with a position', () => {
     assert.deepStrictEqual(yamlErrors(`${PLAYBOOK_YAML}author: someone\n`), ['unknown key "author"']);
     assert.match(yamlErrors(`${PLAYBOOK_YAML}title: Again\n`)[0], /duplicated mapping key/);

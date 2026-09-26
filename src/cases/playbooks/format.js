@@ -10,7 +10,11 @@ const fs = require('fs');
 const path = require('path');
 const { parseYaml } = require('../../platform/yaml');
 
-const NAME_RE = /^[a-z0-9][a-z0-9-]{0,47}$/;
+// A playbook's `name` is also its directory name and its vendored path
+// under a case; a reserved Windows device name there is exactly as
+// dangerous as one inside the package (see WINDOWS_RESERVED_RE below), so
+// the same names are refused up front, whatever case they'd be typed in.
+const NAME_RE = /^(?!(?:con|prn|aux|nul|com\d|lpt\d)$)[a-z0-9][a-z0-9-]{0,47}$/;
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const VERSION_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
 // C2's QuestionStore option id rule; a gating option becomes a question option.
