@@ -2742,7 +2742,25 @@ function createCore(deps = {}) {
       getWebhookServer: () => webhookServer,
       approvals: deps.approvals || null
     });
-    await contactHost.start();
+    // Ruling T13-start: contact that cannot start never stops the app. Log it,
+    // leave contact off (getContact() → null) and warn the owner once.
+    try {
+      await contactHost.start();
+    } catch (err) {
+      const failed = contactHost;
+      contactHost = null;
+      log.error(`Contact channels could not start: ${err.message}`);
+      await withTimeout(failed.stop(), shutdownTimeoutMs, 'Contact cleanup', (label, ms) => log.warn(`${label} timed out after ${ms}ms`))
+        .catch((stopErr) => log.warn(`Contact cleanup failed: ${stopErr.message}`));
+      if (deps.uiToastChannel && typeof deps.uiToastChannel.send === 'function') {
+        Promise.resolve()
+          .then(() => deps.uiToastChannel.send({
+            title: 'King Louie',
+            body: `Contact channels could not start: ${err.message}. Cases will only reach you in the app.`
+          }))
+          .catch((toastErr) => log.warn(`Contact start warning toast failed: ${toastErr.message}`));
+      }
+    }
     const TASK_EVENTS = { taskCreated: 'task:created', taskUpdated: 'task:updated', taskUnblocked: 'task:unblocked' };
     for (const [evt, channel] of Object.entries(TASK_EVENTS)) {
       taskManager.on(evt, (task) => ui.send(channel, task));

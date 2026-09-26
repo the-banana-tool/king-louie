@@ -356,3 +356,23 @@ describe('createCore: contact host (cases stage 4)', () => {
     assert.ok(Date.now() - startedAt < 2000, 'a hung contact stop does not hang quit');
   });
 });
+
+describe('createCore: a contact host that cannot start (ruling T13-start)', () => {
+  it('logs it, leaves contact off, warns the owner once and starts everything else', async () => {
+    const { deps } = makeDeps();
+    // A cases root that is a file: the ladder's lease open throws ENOTDIR at start.
+    fs.writeFileSync(path.join(deps.paths.dataDir, 'cases-file'), 'not a directory');
+    deps.store.set('settings', { cases: { root: 'cases-file' } });
+    const toasts = [];
+    const core = createCore({ ...deps, uiToastChannel: { send: async (p) => { toasts.push(p); } } });
+    await core.start();
+    try {
+      assert.strictEqual(core.context.getContact(), null, 'contact is off');
+      assert.ok(core.context.toolRegistry.getFunctionDefinitions().length > 10, 'the rest of the core started');
+      assert.strictEqual(toasts.length, 1);
+      assert.match(toasts[0].body, /^Contact channels could not start: .+\. Cases will only reach you in the app\.$/);
+    } finally {
+      await core.shutdown();
+    }
+  });
+});
