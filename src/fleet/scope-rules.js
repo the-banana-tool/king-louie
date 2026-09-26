@@ -96,7 +96,7 @@ const entryFor = (list, name) => list.find((e) => e.scope === name) || null;
 // A machine is a non-empty string. An unrestricted entry covers any such name
 // (a node whose name has capitals can only be granted that way, Deviation 18);
 // a restricted one covers only the exact names it lists.
-const covers = (entry, machine) =>
+const entryCovers = (entry, machine) =>
   typeof machine === 'string' && machine.length > 0 && (entry.machines === null || entry.machines.includes(machine));
 
 // `machine`: the target node's name. Omitted or null means the call targets no
@@ -118,23 +118,30 @@ function allows(scopes, tool, opts = {}) {
   if (!need) return { ok: false, code: 'insufficient_scope', required: null };
   const entry = entryFor(list, need);
   if (!entry) return { ok: false, code: 'insufficient_scope', required: need };
-  const targeted = hasOwn(o, 'machine') && o.machine !== null;
-  if (targeted && !covers(entry, o.machine)) return { ok: false, code: 'unknown_machine', required: need };
+  const targeted = 'machine' in o && o.machine !== null;
+  if (targeted && !entryCovers(entry, o.machine)) return { ok: false, code: 'unknown_machine', required: need };
   const tier = o.tier === undefined ? null : o.tier;
   if (tool === 'run_runbook' && !TIERS_WITHOUT_UNSAFE.has(tier)) {
     const unsafe = entryFor(list, 'fleet:unsafe');
-    if (!unsafe || (targeted && !covers(unsafe, o.machine))) return { ok: false, code: 'insufficient_scope', required: 'fleet:unsafe' };
+    // Scope-only (no machine) accepts a machine-limited fleet:unsafe; the router always re-checks with the machine.
+    if (!unsafe || (targeted && !entryCovers(unsafe, o.machine))) return { ok: false, code: 'insufficient_scope', required: 'fleet:unsafe' };
   }
   return { ok: true };
 }
 
-function machineVisible(scopes, machine) {
+// True only when scope `name` is present and its machine list covers
+// `machine` (a null list covers every machine name).
+function covers(scopes, name, machine) {
   try {
-    const entry = entryFor(normalizeScopes(scopes), 'fleet:read');
-    return Boolean(entry) && covers(entry, machine);
+    const entry = entryFor(normalizeScopes(scopes), name);
+    return Boolean(entry) && entryCovers(entry, machine);
   } catch {
     return false;
   }
+}
+
+function machineVisible(scopes, machine) {
+  return covers(scopes, 'fleet:read', machine);
 }
 
 function hasScope(scopes, name) {
@@ -153,6 +160,7 @@ module.exports = {
   formatScope,
   normalizeScopes,
   allows,
+  covers,
   machineVisible,
   hasScope
 };

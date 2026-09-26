@@ -11,12 +11,17 @@ const SCOPE_RE = /^[a-z][a-z0-9-]{0,31}:[a-z][a-z0-9_-]{0,31}$/;
 const UNSAFE = 'fleet:unsafe';
 
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+
+// The fleet: namespace is fixed by createFleetScopeRegistry, which opens this
+// flag only while it registers the four fleet scopes (synchronously). Nothing
+// else can add a fleet: scope, so fleet:unsafe's `requires` rule cannot be
+// dropped or replaced.
+let registeringFleet = false;
+
 const isScopeName = (v) => typeof v === 'string' && SCOPE_RE.test(v);
 
 class ScopeRegistry {
-  constructor() {
-    this.scopes = new Map();
-  }
+  #scopes = new Map();
 
   // `requires`: the grant must also carry at least one of these scopes.
   // A fleet tool may be listed only by the scope REQUIRED_SCOPE names for it
@@ -25,7 +30,8 @@ class ScopeRegistry {
   // scope's tool.
   register(name, { tools, description = '', requires = null } = {}) {
     if (!isScopeName(name)) throw new TypeError(`bad scope name "${name}"`);
-    if (this.scopes.has(name)) throw new Error(`scope ${name} is already registered`);
+    if (name.startsWith('fleet:') && !registeringFleet) throw new Error(`scope ${name}: the fleet: namespace is registered only by createFleetScopeRegistry`);
+    if (this.#scopes.has(name)) throw new Error(`scope ${name} is already registered`);
     if (!Array.isArray(tools) || !tools.every((t) => typeof t === 'string' && t.length > 0)) {
       throw new TypeError(`scope ${name}: tools must be a list of tool names`);
     }
@@ -38,11 +44,11 @@ class ScopeRegistry {
         if (!own) throw new Error(`scope ${name}: tool ${t} belongs to ${REQUIRED_SCOPE[t]}`);
         continue;
       }
-      for (const s of this.scopes.values()) {
+      for (const s of this.#scopes.values()) {
         if (s.tools.includes(t)) throw new Error(`scope ${name}: tool ${t} already belongs to ${s.name}`);
       }
     }
-    this.scopes.set(name, Object.freeze({
+    this.#scopes.set(name, Object.freeze({
       name,
       tools: Object.freeze([...tools]),
       description: String(description),
@@ -51,15 +57,15 @@ class ScopeRegistry {
   }
 
   has(name) {
-    return this.scopes.has(name);
+    return this.#scopes.has(name);
   }
 
   get(name) {
-    return this.scopes.get(name) || null;
+    return this.#scopes.get(name) || null;
   }
 
   names() {
-    return [...this.scopes.keys()].sort();
+    return [...this.#scopes.keys()].sort();
   }
 
   supported(enabled) {
@@ -71,7 +77,7 @@ class ScopeRegistry {
     const supported = this.supported(enabled);
     const requires = {};
     for (const n of supported) {
-      const s = this.scopes.get(n);
+      const s = this.#scopes.get(n);
       if (s.requires) requires[n] = [...s.requires];
     }
     return { supported, requires };
@@ -82,14 +88,14 @@ class ScopeRegistry {
   requiredScopeFor(tool) {
     if (typeof tool !== 'string') return null;
     if (hasOwn(REQUIRED_SCOPE, tool)) return REQUIRED_SCOPE[tool];
-    for (const s of this.scopes.values()) if (s.name !== UNSAFE && s.tools.includes(tool)) return s.name;
+    for (const s of this.#scopes.values()) if (s.name !== UNSAFE && s.tools.includes(tool)) return s.name;
     return null;
   }
 
   toolsFor(scopeNames) {
     const out = new Set();
     for (const n of Array.isArray(scopeNames) ? scopeNames : []) {
-      const s = this.scopes.get(n);
+      const s = this.#scopes.get(n);
       if (s && n !== UNSAFE) for (const t of s.tools) out.add(t);
     }
     return out;
@@ -98,6 +104,16 @@ class ScopeRegistry {
 
 function createFleetScopeRegistry() {
   const r = new ScopeRegistry();
+  registeringFleet = true;
+  try {
+    registerFleetScopes(r);
+  } finally {
+    registeringFleet = false;
+  }
+  return r;
+}
+
+function registerFleetScopes(r) {
   r.register('fleet:read', { tools: ['list_machines', 'describe_machine', 'get_state', 'get_job', 'get_job_logs'], description: 'See machines, their state and their jobs' });
   r.register('fleet:run', { tools: ['run_runbook', 'cancel_job'], description: 'Start read and routine runbooks, and cancel jobs' });
   r.register('fleet:unsafe', {
@@ -106,7 +122,6 @@ function createFleetScopeRegistry() {
     requires: ['fleet:run', 'fleet:delegate']
   });
   r.register('fleet:delegate', { tools: ['delegate', 'send_to_job'], description: 'Start and continue agent sessions on agent machines' });
-  return r;
 }
 
 module.exports = { ScopeRegistry, createFleetScopeRegistry, SCOPE_RE };

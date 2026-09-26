@@ -243,6 +243,32 @@ describe('allows', () => {
     assert.equal(S.machineVisible(null, 'web-01'), false);
   });
 
+  it('an inherited machine is honoured like an own one', () => {
+    const opts = Object.create({ machine: 'gpu-box' });
+    assert.deepEqual(S.allows(['fleet:run;machines=web-01'], 'cancel_job', opts), { ok: false, code: 'unknown_machine', required: 'fleet:run' });
+    const undef = Object.create({ machine: undefined });
+    assert.deepEqual(S.allows(['fleet:run'], 'cancel_job', undef), { ok: false, code: 'unknown_machine', required: 'fleet:run' });
+    assert.deepEqual(S.allows(['fleet:run;machines=web-01'], 'cancel_job', Object.create({ machine: 'web-01' })), { ok: true });
+  });
+
+  it('covers: the named scope is present and its machine list covers the machine', () => {
+    // an unlimited scope
+    assert.equal(S.covers(['fleet:run', 'fleet:unsafe'], 'fleet:unsafe', 'gpu-box'), true);
+    assert.equal(S.covers(['fleet:unsafe'], 'fleet:unsafe', 'Build-Box'), true);
+    // a limited scope that covers the machine
+    assert.equal(S.covers(['fleet:unsafe;machines=gpu-box,web-01'], 'fleet:unsafe', 'web-01'), true);
+    // a limited scope that does not
+    assert.equal(S.covers(['fleet:unsafe;machines=web-01'], 'fleet:unsafe', 'gpu-box'), false);
+    assert.equal(S.covers(['fleet:unsafe;machines=web-01'], 'fleet:unsafe', 'Web-01'), false);
+    // a missing scope
+    assert.equal(S.covers(['fleet:run'], 'fleet:unsafe', 'web-01'), false);
+    assert.equal(S.covers([], 'fleet:unsafe', 'web-01'), false);
+    // not a machine name, or a malformed list: nothing
+    for (const machine of ['', null, undefined, ['web-01']]) assert.equal(S.covers(['fleet:unsafe'], 'fleet:unsafe', machine), false, String(machine));
+    assert.equal(S.covers(['fleet:unsafe', 'garbage;;'], 'fleet:unsafe', 'web-01'), false);
+    assert.equal(S.covers(null, 'fleet:unsafe', 'web-01'), false);
+  });
+
   it('hasScope finds a scope by exact name, limited or not', () => {
     assert.equal(S.hasScope(['fleet:run', 'fleet:unsafe;machines=web-01'], 'fleet:unsafe'), true);
     assert.equal(S.hasScope(['fleet:run'], 'fleet:unsafe'), false);
@@ -330,12 +356,30 @@ describe('ScopeRegistry', () => {
     assert.deepEqual([...r.toolsFor(['cases:read'])], ['list_cases']);
   });
 
-  it('only fleet:run and fleet:unsafe may list run_runbook', () => {
+  it('the fleet: namespace is registered only by createFleetScopeRegistry', () => {
     const r = new ScopeRegistry();
-    assert.throws(() => r.register('fleet:read', { tools: ['run_runbook'] }), /run_runbook/);
-    r.register('fleet:run', { tools: ['run_runbook'] });
-    r.register('fleet:unsafe', { tools: ['run_runbook'], requires: ['fleet:run'] });
-    assert.deepEqual([...r.toolsFor(['fleet:unsafe'])], []);
+    for (const name of ['fleet:read', 'fleet:run', 'fleet:unsafe', 'fleet:delegate', 'fleet:admin']) {
+      assert.throws(() => r.register(name, { tools: [] }), /fleet: namespace/, name);
+    }
+    assert.deepEqual(r.names(), []);
+    assert.throws(() => createFleetScopeRegistry().register('fleet:admin', { tools: [] }), /fleet: namespace/);
+    // createFleetScopeRegistry leaves the namespace closed behind it
+    createFleetScopeRegistry();
+    assert.throws(() => new ScopeRegistry().register('fleet:unsafe', { tools: [] }), /fleet: namespace/);
+  });
+
+  it('fleet:unsafe keeps its rule: it cannot be dropped or replaced', () => {
+    const r = createFleetScopeRegistry();
+    assert.throws(() => r.register('fleet:unsafe', { tools: ['run_runbook'], requires: null }));
+    assert.throws(() => r.register('fleet:unsafe', { tools: ['run_runbook'], requires: ['fleet:read'] }));
+    const entry = r.get('fleet:unsafe');
+    assert.throws(() => entry.requires.push('fleet:read'), TypeError);
+    try { entry.requires = null; } catch { /* strict mode throws; sloppy mode ignores */ }
+    assert.deepEqual(r.get('fleet:unsafe').requires, ['fleet:run', 'fleet:delegate']);
+    assert.equal(r.scopes, undefined, 'the scope map is private');
+    r.scopes = new Map();
+    assert.deepEqual(r.rules(['fleet:run', 'fleet:unsafe']).requires, { 'fleet:unsafe': ['fleet:run', 'fleet:delegate'] });
+    assert.equal(scopeProblem(['fleet:read', 'fleet:unsafe'], r.rules(['fleet:read', 'fleet:unsafe'])), 'invalid_scope');
   });
 
   it('refuses a malformed scope name', () => {
