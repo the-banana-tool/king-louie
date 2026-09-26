@@ -254,11 +254,16 @@ class AcmeManager extends EventEmitter {
       this._schedule();
       // Listeners attach before start(); phones re-pin from this event.
       if (recovered) {
+        // The next file goes only once a listener has taken the event, so a
+        // throwing listener means the next start emits it again.
+        let delivered = false;
         try {
           this.emit('rotated', recovered);
-        } finally {
-          fs.rmSync(this.files.nextKey, { force: true });
+          delivered = true;
+        } catch (err) {
+          log.error(`a 'rotated' listener failed (${safeMessage(err)}); ${this.files.nextKey} is kept so the next start emits the new pin again`);
         }
+        if (delivered) fs.rmSync(this.files.nextKey, { force: true });
       }
     } finally {
       this.starting = false;

@@ -303,6 +303,28 @@ describe('AcmeManager', () => {
       assert.ok(!fs.existsSync(s.files.next));
     });
 
+    it('a throwing rotated listener keeps the next file, start() still resolves, and the next start emits again', async () => {
+      const s = await started();
+      const next = newKeyPem();
+      writeStoredKey(s.files.next, s.key, next, { old_spki: s.oldSpki });
+      writeStoredCert(s.files.cert, issueCert(ca, { dnsNames: ['mcp.kl.example.com'], keyPem: next, notBefore: clock.now, notAfter: clock.now + 90 * DAY }).cert);
+      const first = manager({ dir: s.dir, key: s.key, acme: s.acme }).m;
+      first.on('rotated', () => { throw new Error('listener down'); });
+      const logs = captureLogs();
+      try {
+        await first.start();
+      } finally {
+        logs.restore();
+      }
+      assert.equal(first.leafSpki(), pinOfKey(next), 'running on the new key');
+      assert.ok(logs.records.some((x) => x.level === 'error' && /'rotated' listener failed/.test(x.message)));
+      first.stop();
+      assert.ok(fs.existsSync(s.files.next), 'kept so the event is not lost');
+      const r = await restart(s);
+      assert.deepEqual(r.events, [{ oldSpki: s.oldSpki, newSpki: pinOfKey(next) }]);
+      assert.ok(!fs.existsSync(s.files.next));
+    });
+
     it('a next key with neither cert-key.json nor its certificate refuses to start, naming both files', async () => {
       const s = await started();
       writeStoredKey(s.files.next, s.key, newKeyPem(), { old_spki: s.oldSpki });
@@ -557,6 +579,59 @@ describe('AcmeManager: what a CA returns, timers and races', () => {
     assert.deepEqual(order.slice(2, 4), [`start ${stable}`, `end ${stable}`]);
     assert.equal(order[4], `start ${r.newSpki}`);
     assert.equal(m.leafSpki(), r.newSpki);
+    m.stop();
+  });
+
+  it('overlapping check() calls share one issuance', async () => {
+    const releases = [];
+    let calls = 0;
+    const { m } = manager({
+      acme: issuing(async ({ keyPem }) => {
+        calls += 1;
+        if (calls > 1) await new Promise((resolve) => { releases.push(resolve); });
+        return leafFor(keyPem, { from: clock.now });
+      })
+    });
+    await m.start();
+    clock.now += 61 * DAY;
+    const a = m.check();
+    const b = m.check({ ignoreBackoff: true });
+    try {
+      assert.equal(b, a, 'the second call joins the first');
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(calls, 2, 'one adapter call for both');
+    } finally {
+      for (const r of releases) r(); // never leave a stalled issuance behind
+    }
+    await Promise.all([a, b]);
+    assert.equal(calls, 2);
+    m.stop();
+  });
+
+  it('check() during a stalled rotation returns the rotation and calls nothing', async () => {
+    const releases = [];
+    let calls = 0;
+    const { m } = manager({
+      acme: issuing(async ({ keyPem }) => {
+        calls += 1;
+        if (calls > 1) await new Promise((resolve) => { releases.push(resolve); });
+        return leafFor(keyPem, { from: clock.now });
+      })
+    });
+    await m.start();
+    const rotation = m.rotateKey();
+    await new Promise((resolve) => setImmediate(resolve));
+    clock.now += 61 * DAY; // a renewal would be due
+    try {
+      const during = m.check({ ignoreBackoff: true });
+      assert.equal(during, m.inFlight, 'the same promise as the running rotation');
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(calls, 2, 'no adapter call beyond the rotation');
+    } finally {
+      for (const r of releases) r(); // never leave a stalled issuance behind
+    }
+    await rotation;
+    assert.equal(calls, 2);
     m.stop();
   });
 
