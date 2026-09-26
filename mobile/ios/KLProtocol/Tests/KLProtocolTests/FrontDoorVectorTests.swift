@@ -414,4 +414,77 @@ final class FrontDoorVectorTests: XCTestCase {
         XCTAssertThrowsError(try AuditStatus(json: JSONParser.parse("[]")))
         XCTAssertNoThrow(try AuditStatus(json: JSONParser.parse(#"{"head_seq":0,"anchor":null,"gaps":[],"breaks":[],"later_field":1}"#)))
     }
+    /// The front door's isHttpsUrl, never looser: ports 1-65535, hosts of
+    /// ASCII labels or a bracketed IPv6 literal, no userinfo or fragment.
+    func testHttpsUrlsFollowTheFrontDoor() {
+        for ok in ["https://client.example.com/meta.json", "https://client.example.com:443/meta.json", "HTTPS://client.example.com",
+                   "https://client.example.com:1/", "https://client.example.com:65535/", "https://[2001:db8::1]:8443/m", "https://10.0.0.1/m"] {
+            XCTAssertTrue(FrontDoorRules.isHttpsUrl(ok, max: FrontDoorRules.clientIdMax), ok)
+        }
+        for bad in ["https://client.example.com:65536/", "https://client.example.com:99999/", "https://client.example.com:0443x/",
+                    "https://client.example.com:/", "https://client.example.com:123456/", "https://exa mple.com/", "https://exa_mple.com/",
+                    "https://client..example.com/", "https://.example.com/", "https://[::1/", "https://[zz::1]/", "https://user@client.example.com/m",
+                    "https://@client.example.com/m", "https://client.example.com/m#x", "https://client.example.com/m#", "http://client.example.com/m",
+                    "https:client.example.com/m", "https:///m", "https://"] {
+            XCTAssertFalse(FrontDoorRules.isHttpsUrl(bad, max: FrontDoorRules.clientIdMax), bad)
+        }
+    }
+
+    func pendingReply(_ name: String) throws -> [String: JSONValue] {
+        var reply = try vector(name)["given"]!["pending"]!.objectValue!
+        for k in ["user_code", "expires_at", "claimed_by", "used_nonces"] { reply.removeValue(forKey: k) }
+        reply["preselected"] = .array([])
+        reply["expires_in_ms"] = .number("280000")
+        return reply
+    }
+
+    /// URL-form client_id (a client ID metadata document): accepted in a
+    /// request and signed as is; the refused forms never are.
+    func testUrlClientIds() throws {
+        let v = try vector("grant-approve")
+        let fd = string(v["given"]!["frontdoor"], "id")
+        let a = try deviceA()
+        let pending = v["given"]!["pending"]!.objectValue!
+        let reply = try pendingReply("grant-approve")
+        func withId(_ base: [String: JSONValue], _ id: String) -> JSONValue {
+            var r = base
+            r["client_id"] = .string(id)
+            return .object(r)
+        }
+        for ok in ["https://client.example.com/meta.json", "https://client.example.com:443/.well-known/client"] {
+            let r = try GrantRequest(json: withId(reply, ok))
+            XCTAssertEqual(r.clientId, ok)
+            let m = try r.message(frontdoorId: fd, userCode: "Q7KM2X", scopes: [ScopeChoice(scope: "fleet:read")], decision: "approve",
+                                  nonce: Messages.randomNonce(), deviceId: a.id, signedAt: "2026-09-23T18:04:13.201Z")
+            XCTAssertEqual(m["client_id"]?.stringValue, ok)
+        }
+        for bad in ["https://user@client.example.com/meta.json", "https://client.example.com/meta.json#x", "https://client.example.com:65536/meta.json",
+                    "https://exa mple.com/meta.json", "http://client.example.com/meta.json", "https://client.example.com/" + String(repeating: "a", count: 512)] {
+            XCTAssertThrowsError(try GrantRequest(json: withId(reply, bad)), bad)
+            XCTAssertThrowsError(try FrontDoor.clientGrant(frontdoorId: fd, pending: withId(pending, bad), userCode: "Q7KM2X",
+                                                           scopes: [ScopeChoice(scope: "fleet:read")], decision: "approve", nonce: Messages.randomNonce(),
+                                                           deviceId: a.id, signedAt: "2026-09-23T18:04:13.201Z"), bad)
+        }
+    }
+
+    /// Modelled on grant-reject-scope-widened: the phone never signs a scope
+    /// the client did not request.
+    func testGrantRequestRefusesUnrequestedScopes() throws {
+        let v = try vector("grant-reject-scope-widened")
+        let fd = string(v["given"]!["frontdoor"], "id")
+        let a = try deviceA()
+        let request = try GrantRequest(json: .object(try pendingReply("grant-reject-scope-widened")))
+        func sign(_ scopes: [ScopeChoice], _ decision: String = "approve") throws -> JSONValue {
+            try request.message(frontdoorId: fd, userCode: "Q7KM2X", scopes: scopes, decision: decision, nonce: Messages.randomNonce(),
+                                deviceId: a.id, signedAt: "2026-09-23T18:04:13.201Z")
+        }
+        // The vector's widened set: fleet:delegate was never requested.
+        let widened = try Envelope(json: v["input"]!).message()["scopes"]!.arrayValue!.map { ScopeChoice(scope: $0["scope"]!.stringValue!) }
+        XCTAssertThrowsError(try sign(widened))
+        XCTAssertThrowsError(try sign([ScopeChoice(scope: "fleet:read"), ScopeChoice(scope: "fleet:unsafe")]))
+        XCTAssertNoThrow(try sign([ScopeChoice(scope: "fleet:read")]))
+        XCTAssertNoThrow(try sign([ScopeChoice(scope: "fleet:read"), ScopeChoice(scope: "fleet:run", machines: ["gpu-box"])]))
+        // A denial carries no scopes, so what was chosen does not matter.
+        XCTAssertEqual(try sign(widened, "deny")["scopes"], .array([]))
+    }
 }

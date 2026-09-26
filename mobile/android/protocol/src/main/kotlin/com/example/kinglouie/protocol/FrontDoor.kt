@@ -31,8 +31,8 @@ object FrontDoor {
 
     /** JavaScript's `\s` (what the front door strips), every one a single UTF-16 unit. */
     private fun isJsWhitespace(c: Char): Boolean = when (c) {
-        '\t', '\n', '\u000B', '\u000C', '\r', ' ', ' ', ' ', ' ', ' ', ' ', ' ', '　', '﻿' -> true
-        else -> c in ' '..' '
+        '\t', '\n', '\u000B', '\u000C', '\r', ' ', '\u00A0', '\u1680', '\u2028', '\u2029', '\u202F', '\u205F', '\u3000', '\uFEFF' -> true
+        else -> c in '\u2000'..'\u200A'
     }
 
     private fun isAsciiAlnum(c: Char): Boolean = c in 'A'..'Z' || c in 'a'..'z' || c in '0'..'9'
@@ -279,8 +279,18 @@ class GrantRequest(val json: JsonElement) {
     /** The host the browser returns to (the redirect URI's); the whole URI when it has none this parser can read. */
     val redirectHost: String get() = runCatching { URI(redirectUri).host }.getOrNull() ?: redirectUri
 
-    fun message(frontdoorId: String, userCode: String, scopes: List<ScopeChoice>, decision: String, nonce: String, deviceId: String, signedAt: String): JsonObject =
-        FrontDoor.clientGrant(frontdoorId, json, userCode, scopes, decision, nonce, deviceId, signedAt)
+    /**
+     * The grant for this request. An approval may only narrow what the client
+     * asked for: a scope outside `requestedScopes` is refused here, before it
+     * is signed (the front door would refuse it as `invalid_scope`). Which
+     * scopes need another (`fleet:unsafe`) stays the front door's rule.
+     */
+    fun message(frontdoorId: String, userCode: String, scopes: List<ScopeChoice>, decision: String, nonce: String, deviceId: String, signedAt: String): JsonObject {
+        if (decision != "deny") {
+            scopes.firstOrNull { it.scope !in requestedScopes }?.let { throw ProtocolException("\"${it.scope}\" was not requested by this client") }
+        }
+        return FrontDoor.clientGrant(frontdoorId, json, userCode, scopes, decision, nonce, deviceId, signedAt)
+    }
 
     private companion object {
         val FIELDS = listOf("grant_id", "client_id", "client_name", "client_host", "redirect_uri", "resource", "code_challenge",
@@ -458,16 +468,37 @@ internal object FrontDoorRules {
     fun isMachineName(s: String) = MACHINE_NAME.matches(s)
     fun isNodeName(s: String) = NODE_NAME.matches(s)
 
+    private val HOST_NAME = Regex("[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)*")
+    private val IPV6_LITERAL = Regex("\\[[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*]")
+    private val PORT = Regex("[0-9]{1,5}")
+
+    /**
+     * `host[:port]` with no userinfo: the host is ASCII letters, digits and
+     * `-` in non-empty dot-separated labels, or a bracketed IPv6 literal; the
+     * port is 1–5 digits and at most 65535 (WHATWG refuses more).
+     */
+    fun isAuthority(authority: String): Boolean {
+        val portAt = if (authority.startsWith("[")) authority.indexOf(']') + 1 else authority.indexOf(':').let { if (it < 0) authority.length else it }
+        if (portAt <= 0) return false
+        val host = authority.substring(0, portAt)
+        val rest = authority.substring(portAt)
+        if (!(HOST_NAME.matches(host) || IPV6_LITERAL.matches(host))) return false
+        if (rest.isEmpty()) return true
+        val port = rest.substring(1)
+        return rest[0] == ':' && PORT.matches(port) && port.toInt() <= 65535
+    }
+
     /**
      * An `https:` URL with a host, no userinfo and no fragment (the front
      * door's isHttpsUrl). Stricter where parsers differ: the text must start
-     * `https://`, and java.net.URI must read a host from it.
+     * `https://`, the authority must pass [isAuthority], and java.net.URI
+     * must read a host from it.
      */
     fun isHttpsUrl(s: String, max: Int): Boolean {
         if (s.isEmpty() || s.length > max || '#' in s) return false
         if (!s.regionMatches(0, "https://", 0, 8, ignoreCase = true)) return false
         val authority = s.substring(8).split('/', '?', '\\')[0]
-        if (authority.isEmpty() || '@' in authority) return false
+        if (!isAuthority(authority)) return false
         val uri = runCatching { URI(s) }.getOrNull() ?: return false
         return uri.scheme.equals("https", ignoreCase = true) && !uri.host.isNullOrEmpty() && uri.rawUserInfo == null && uri.rawFragment == null
     }

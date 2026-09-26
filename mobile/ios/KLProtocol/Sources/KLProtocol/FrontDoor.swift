@@ -289,9 +289,19 @@ public struct GrantRequest: Equatable {
         URLComponents(string: redirectUri)?.host ?? redirectUri
     }
 
+    /// The grant for this request. An approval may only narrow what the
+    /// client asked for: a scope outside `requestedScopes` is refused here,
+    /// before it is signed (the front door would refuse it as
+    /// `invalid_scope`). Which scopes need another (`fleet:unsafe`) stays the
+    /// front door's rule.
     public func message(frontdoorId: String, userCode: String, scopes: [ScopeChoice], decision: String, nonce: String, deviceId: String, signedAt: String) throws -> JSONValue {
-        try FrontDoor.clientGrant(frontdoorId: frontdoorId, pending: json, userCode: userCode, scopes: scopes, decision: decision,
-                                  nonce: nonce, deviceId: deviceId, signedAt: signedAt)
+        if !ExactText.same(decision, "deny") {
+            for choice in scopes where !requestedScopes.contains(where: { ExactText.same($0, choice.scope) }) {
+                throw ProtocolError.malformed("\"\(choice.scope)\" was not requested by this client")
+            }
+        }
+        return try FrontDoor.clientGrant(frontdoorId: frontdoorId, pending: json, userCode: userCode, scopes: scopes, decision: decision,
+                                         nonce: nonce, deviceId: deviceId, signedAt: signedAt)
     }
 }
 
@@ -484,16 +494,46 @@ enum FrontDoorRules {
         return b.count == 64 && b.allSatisfy { isDigit($0) || ($0 >= 0x61 && $0 <= 0x66) }
     }
 
+    static func isHexDigit(_ c: UInt8) -> Bool { isDigit(c) || (c >= 0x41 && c <= 0x46) || (c >= 0x61 && c <= 0x66) }
+
+    /// `host[:port]` with no userinfo: the host is ASCII letters, digits and
+    /// `-` in non-empty dot-separated labels, or a bracketed IPv6 literal;
+    /// the port is 1–5 digits and at most 65535 (WHATWG refuses more).
+    static func isAuthority(_ a: [UInt8]) -> Bool {
+        let host: ArraySlice<UInt8>
+        let rest: ArraySlice<UInt8>
+        if a.first == 0x5B {
+            // [ … ] then an optional :port
+            guard let close = a.firstIndex(of: 0x5D) else { return false }
+            let inner = a[1..<close]
+            guard inner.contains(0x3A), inner.allSatisfy({ isHexDigit($0) || $0 == 0x3A || $0 == 0x2E }) else { return false }
+            host = a[...close]
+            rest = a[(close + 1)...]
+        } else {
+            let colon = a.firstIndex(of: 0x3A) ?? a.count
+            host = a[..<colon]
+            rest = a[colon...]
+            guard !host.isEmpty, host.allSatisfy({ isLower($0) || isUpper($0) || isDigit($0) || $0 == 0x2D || $0 == 0x2E }),
+                  !host.split(separator: 0x2E, omittingEmptySubsequences: false).contains(where: { $0.isEmpty }) else { return false }
+        }
+        guard !host.isEmpty else { return false }
+        if rest.isEmpty { return true }
+        let port = rest.dropFirst()
+        guard rest.first == 0x3A, (1...5).contains(port.count), port.allSatisfy(isDigit) else { return false }
+        return port.reduce(0) { $0 * 10 + Int($1 - 0x30) } <= 65535
+    }
+
     /// An `https:` URL with a host, no userinfo and no fragment (the front
     /// door's isHttpsUrl). Stricter where parsers differ: the text must start
-    /// `https://`, and URLComponents must read a host from it.
+    /// `https://`, the authority must pass `isAuthority`, and URLComponents
+    /// must read a host from it.
     static func isHttpsUrl(_ s: String, max: Int) -> Bool {
         let b = Array(s.utf8)
         guard !b.isEmpty, s.utf16.count <= max, !b.contains(0x23) else { return false }
         let scheme = Array("https://".utf8)
         guard b.count > scheme.count, zip(b.prefix(scheme.count), scheme).allSatisfy({ lowerASCII($0) == $1 }) else { return false }
-        let authority = b.dropFirst(scheme.count).prefix { $0 != 0x2F && $0 != 0x3F && $0 != 0x5C }
-        guard !authority.isEmpty, !authority.contains(0x40) else { return false }
+        let authority = Array(b.dropFirst(scheme.count).prefix { $0 != 0x2F && $0 != 0x3F && $0 != 0x5C })
+        guard isAuthority(authority) else { return false }
         guard let c = URLComponents(string: s), c.scheme?.lowercased() == "https", let host = c.host, !host.isEmpty,
               c.user == nil, c.password == nil, c.fragment == nil else { return false }
         return true

@@ -188,15 +188,15 @@ class FrontDoorVectorTest {
     /** The front door's normalizeUserCode, character for character (client-grant-v1 §6). */
     @Test
     fun userCodesFollowTheFrontDoor() {
-        assertEquals("Q7KM2X", FrontDoor.normalizeUserCode("Q7K　M2X"))
-        assertEquals("Q7KM2X", FrontDoor.normalizeUserCode("﻿q7k m2x\n"))
+        assertEquals("Q7KM2X", FrontDoor.normalizeUserCode("Q7K\u3000M2X"))
+        assertEquals("Q7KM2X", FrontDoor.normalizeUserCode("\uFEFFq7k\u00A0m2x\n"))
         assertEquals("Q7KM2X", FrontDoor.normalizeUserCode("Q7K" + " ".repeat(58) + "M2X"))
         assertNull(FrontDoor.normalizeUserCode("Q7K" + " ".repeat(59) + "M2X"))
         // Checked as ASCII before upper-casing: no look-alike becomes the alphabet.
-        assertNull(FrontDoor.normalizeUserCode("Q7KMß"))
-        assertNull(FrontDoor.normalizeUserCode("Q7KM2ı"))
-        assertNull(FrontDoor.normalizeUserCode("Q7KM2ﬀ"))
-        assertNull(FrontDoor.normalizeUserCode("Q7KM2Ｘ"))
+        assertNull(FrontDoor.normalizeUserCode("Q7KM\u00DF"))
+        assertNull(FrontDoor.normalizeUserCode("Q7KM2\u0131"))
+        assertNull(FrontDoor.normalizeUserCode("Q7KM2\uFB00"))
+        assertNull(FrontDoor.normalizeUserCode("Q7KM2\uFF38"))
         assertNull(FrontDoor.normalizeUserCode("Q7K_M2X"))
         assertNull(FrontDoor.normalizeUserCode(""))
     }
@@ -380,5 +380,65 @@ class FrontDoorVectorTest {
         throwsProtocol { AuditStatus(JsonText.parse("""{"head_seq":0,"anchor":null,"gaps":[],"breaks":[7]}""")) }
         throwsProtocol { AuditStatus(JsonText.parse("[]")) }
         assertNotNull(AuditStatus(JsonText.parse("""{"head_seq":0,"anchor":null,"gaps":[],"breaks":[],"later_field":1}""")))
+    }
+    /** The front door's isHttpsUrl, never looser: ports 1-65535, hosts of ASCII labels or a bracketed IPv6 literal, no userinfo or fragment. */
+    @Test
+    fun httpsUrlsFollowTheFrontDoor() {
+        for (ok in listOf("https://client.example.com/meta.json", "https://client.example.com:443/meta.json", "HTTPS://client.example.com",
+                "https://client.example.com:1/", "https://client.example.com:65535/", "https://[2001:db8::1]:8443/m", "https://10.0.0.1/m")) {
+            assertTrue(ok, FrontDoorRules.isHttpsUrl(ok, FrontDoorRules.CLIENT_ID_MAX))
+        }
+        for (bad in listOf("https://client.example.com:65536/", "https://client.example.com:99999/", "https://client.example.com:0443x/",
+                "https://client.example.com:/", "https://client.example.com:123456/", "https://exa mple.com/", "https://exa_mple.com/",
+                "https://client..example.com/", "https://.example.com/", "https://[::1/", "https://[zz::1]/", "https://user@client.example.com/m",
+                "https://@client.example.com/m", "https://client.example.com/m#x", "https://client.example.com/m#", "http://client.example.com/m",
+                "https:client.example.com/m", "https:///m", "https://")) {
+            assertFalse(bad, FrontDoorRules.isHttpsUrl(bad, FrontDoorRules.CLIENT_ID_MAX))
+        }
+    }
+
+    /** URL-form client_id (a client ID metadata document): accepted in a request and signed as is; the refused forms never are. */
+    @Test
+    fun urlClientIds() {
+        val v = vector("grant-approve")
+        val fd = s(v["given"]["frontdoor"], "id")
+        val a = s(keys["devices"]["A"], "id")
+        val pending = v["given"]["pending"].obj()!!
+        val reply = JsonObject(pending.filterKeys { it !in setOf("user_code", "expires_at", "claimed_by", "used_nonces") } +
+            mapOf("preselected" to JsonArray(emptyList()), "expires_in_ms" to jsonNumber("280000")))
+        fun withId(id: String) = JsonObject(reply + ("client_id" to jsonString(id)))
+        for (ok in listOf("https://client.example.com/meta.json", "https://client.example.com:443/.well-known/client")) {
+            val r = GrantRequest(withId(ok))
+            assertEquals(ok, r.clientId)
+            val m = r.message(fd, "Q7KM2X", listOf(ScopeChoice("fleet:read")), "approve", Messages.randomNonce(), a, "2026-09-23T18:04:13.201Z")
+            assertEquals(ok, m["client_id"].str())
+        }
+        for (bad in listOf("https://user@client.example.com/meta.json", "https://client.example.com/meta.json#x", "https://client.example.com:65536/meta.json",
+                "https://exa mple.com/meta.json", "http://client.example.com/meta.json", "https://client.example.com/" + "a".repeat(512))) {
+            throwsProtocol { GrantRequest(withId(bad)) }
+            throwsProtocol { FrontDoor.clientGrant(fd, JsonObject(pending + ("client_id" to jsonString(bad))), "Q7KM2X", listOf(ScopeChoice("fleet:read")), "approve",
+                Messages.randomNonce(), a, "2026-09-23T18:04:13.201Z") }
+        }
+    }
+
+    /** Modelled on grant-reject-scope-widened: the phone never signs a scope the client did not request. */
+    @Test
+    fun grantRequestRefusesUnrequestedScopes() {
+        val v = vector("grant-reject-scope-widened")
+        val fd = s(v["given"]["frontdoor"], "id")
+        val a = s(keys["devices"]["A"], "id")
+        val reply = JsonObject(v["given"]["pending"].obj()!!.filterKeys { it !in setOf("user_code", "expires_at", "claimed_by", "used_nonces") } +
+            mapOf("preselected" to JsonArray(emptyList()), "expires_in_ms" to jsonNumber("280000")))
+        val request = GrantRequest(reply)
+        fun sign(scopes: List<ScopeChoice>, decision: String = "approve") =
+            request.message(fd, "Q7KM2X", scopes, decision, Messages.randomNonce(), a, "2026-09-23T18:04:13.201Z")
+        // The vector's widened set: fleet:delegate was never requested.
+        val widened = Envelope.fromJson(v["input"]!!).message()["scopes"].arr()!!.map { ScopeChoice(it["scope"].str()!!) }
+        throwsProtocol { sign(widened) }
+        throwsProtocol { sign(listOf(ScopeChoice("fleet:read"), ScopeChoice("fleet:unsafe"))) }
+        sign(listOf(ScopeChoice("fleet:read")))
+        sign(listOf(ScopeChoice("fleet:read"), ScopeChoice("fleet:run", listOf("gpu-box"))))
+        // A denial carries no scopes, so what was chosen does not matter.
+        assertEquals(JsonArray(emptyList()), sign(widened, "deny")["scopes"])
     }
 }
