@@ -43,6 +43,13 @@ async function linked() {
   return { a, b, aId: a.identity, bId };
 }
 
+// A wait that fails by name instead of hanging the file (Linux, Node 22).
+function within(promise, ms, what) {
+  let timer;
+  const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`timed out waiting for ${what}`)), ms); });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 function envelopeWith(identity, to, payload, { nonce = crypto.randomBytes(16).toString('hex'), timestamp = Date.now() } = {}) {
   const body = JSON.stringify({ nonce, timestamp, to, payload });
   return { from: identity.peerId, to, nonce, timestamp, signature: identity.sign(body).toString('hex'), payload };
@@ -91,7 +98,10 @@ describe('frame limits and auth before parse', () => {
     }
   });
 
-  it('holds at most 8 unauthenticated sockets per IP', async () => {
+  // Ruling T6-cap (fix round 1): the cap evicts the OLDEST unauthenticated
+  // socket (4029) instead of refusing the newest, so holding sockets open
+  // cannot keep a valid peer out.
+  it('holds at most 8 unauthenticated sockets per IP, evicting the oldest', async () => {
     const a = await listener();
     const open = [];
     for (let i = 0; i < 8; i += 1) {
@@ -99,10 +109,76 @@ describe('frame limits and auth before parse', () => {
       await once(ws, 'open');
       open.push(ws);
     }
+    const oldestClosed = within(once(open[0], 'close'), 5000, 'the oldest socket to be evicted');
     const ninth = new WebSocket(`ws://127.0.0.1:${a.port}`);
-    const [code] = await once(ninth, 'close');
+    await once(ninth, 'open');
+    const [code] = await oldestClosed;
     assert.equal(code, CLOSE_CODES.rateLimited);
-    for (const ws of open) ws.terminate();
+    await waitFor(() => a.unauth.size === 8, 'eight unauthenticated sockets');
+    assert.equal(ninth.readyState, WebSocket.OPEN);
+    for (const ws of [...open, ninth]) ws.terminate();
+  });
+
+  it('closes a socket that sends no first frame within about 2 s', async () => {
+    const a = await listener();
+    const ws = new WebSocket(`ws://127.0.0.1:${a.port}`);
+    await once(ws, 'open');
+    const started = Date.now();
+    const [code] = await within(once(ws, 'close'), 5000, 'the first-frame deadline');
+    assert.equal(code, CLOSE_CODES.unauthenticated);
+    assert.ok(Date.now() - started < 4000, `closed after ${Date.now() - started} ms`);
+  });
+
+  it('an attacker holding 8 sockets on the same address cannot keep a valid peer out', async () => {
+    const a = await listener();
+    const held = [];
+    for (let i = 0; i < 8; i += 1) {
+      const ws = new WebSocket(`ws://127.0.0.1:${a.port}`);
+      ws.on('error', () => {});
+      await once(ws, 'open');
+      held.push(ws);
+    }
+    const bId = new MeshIdentity({ displayName: 'dialer' });
+    a.addTrustedPeer(bId.peerId, bId.publicKey);
+    const b = new MeshTransport({ identity: bId, listen: false, useTls: false });
+    await b.start();
+    cleanups.push(() => b.stop());
+    b.addTrustedPeer(a.identity.peerId, a.identity.publicKey);
+    await within(b.connectToPeer('127.0.0.1', a.port), 5000, 'b to authenticate');
+    await waitFor(() => a.getPeer(bId.peerId), 'the listener to promote b');
+    for (const ws of held) ws.terminate();
+  });
+
+  it('churn at the global cap from other addresses cannot keep a valid peer out', async () => {
+    const a = await listener();
+    let stop = false;
+    let opened = 0;
+    const live = new Set();
+    cleanups.push(async () => { stop = true; for (const ws of live) ws.terminate(); });
+    // 8 addresses x 8 sockets fills the global cap of 64; every socket that
+    // is evicted (or times out) is reopened at once from the same address.
+    const hold = (localAddress) => {
+      if (stop) return;
+      const ws = new WebSocket(`ws://127.0.0.1:${a.port}`, { localAddress });
+      live.add(ws);
+      ws.on('error', () => {});
+      ws.on('open', () => { opened += 1; });
+      ws.on('close', () => { live.delete(ws); hold(localAddress); });
+    };
+    for (let ip = 2; ip <= 9; ip += 1) for (let i = 0; i < 8; i += 1) hold(`127.0.0.${ip}`);
+    await waitFor(() => a.unauth.size === 64, 'the global cap to fill');
+    const bId = new MeshIdentity({ displayName: 'dialer' });
+    a.addTrustedPeer(bId.peerId, bId.publicKey);
+    const b = new MeshTransport({ identity: bId, listen: false, useTls: false });
+    await b.start();
+    cleanups.push(() => b.stop());
+    b.addTrustedPeer(a.identity.peerId, a.identity.publicKey);
+    const before = opened;
+    await within(b.connectToPeer('127.0.0.1', a.port), 5000, 'b to authenticate');
+    await waitFor(() => a.getPeer(bId.peerId), 'the listener to promote b');
+    await waitFor(() => opened > before, 'the churn to continue');
+    stop = true;
+    assert.ok(a.unauth.size <= 64);
   });
 });
 
@@ -119,7 +195,7 @@ describe('authenticated links', () => {
 
   it('a replayed or unsequenced frame closes the link with 4010', async () => {
     const { b, aId } = await linked();
-    const closed = once(b, 'peerDisconnected');
+    const closed = within(once(b, 'peerDisconnected'), 10000, 'the link to close');
     b.peers.get(aId.peerId).ws.send(JSON.stringify({ type: 'mesh:heartbeat', seq: 0 }));
     const [{ code }] = await closed;
     assert.equal(code, CLOSE_CODES.replayDetected);
@@ -164,9 +240,12 @@ describe('authenticated links', () => {
 
   it('closes a peer over 200 messages a second (burst 400) with 4029', async () => {
     const { b, aId } = await linked();
-    const closed = once(b, 'peerDisconnected');
-    for (let i = 0; i < 450; i += 1) {
+    const closed = within(once(b, 'peerDisconnected'), 15000, 'the rate-limit close');
+    // Keep sending until the link closes (a slow receiver refills the bucket
+    // while a fixed 450 are in flight), capped at 5000 frames.
+    for (let i = 0; i < 5000 && b.getPeer(aId.peerId); i += 1) {
       try { b.send(aId.peerId, { i }); } catch { break; }
+      if (i % 100 === 99) await new Promise((r) => setImmediate(r));
     }
     const [{ code }] = await closed;
     assert.equal(code, CLOSE_CODES.rateLimited);
@@ -176,7 +255,7 @@ describe('authenticated links', () => {
     const { a, b, aId, bId } = await linked();
     const peer = b.peers.get(aId.peerId);
     Object.defineProperty(peer.ws, 'bufferedAmount', { get: () => 9 * 1024 * 1024 });
-    const closed = once(a, 'peerDisconnected');
+    const closed = within(once(a, 'peerDisconnected'), 10000, 'the link to close');
     assert.throws(() => b.send(aId.peerId, { x: 1 }), /send buffer full/);
     const [{ peerId, code }] = await closed;
     assert.equal(peerId, bId.peerId);
@@ -290,7 +369,7 @@ describe('frame limits at the socket', () => {
     // send() refuses an oversize frame itself and keeps the link.
     assert.throws(() => b.send(aId.peerId, { blob: 'x'.repeat(MAX_PAYLOAD_BYTES) }), /larger than/);
     assert.ok(a.getPeer(bId.peerId));
-    const closed = once(b, 'peerDisconnected');
+    const closed = within(once(b, 'peerDisconnected'), 10000, 'the link to close');
     rawSend(b, aId.peerId, { type: 'mesh:heartbeat', pad: 'x'.repeat(MAX_PAYLOAD_BYTES) });
     const [{ code }] = await closed;
     assert.equal(code, CLOSE_CODES.tooBig);
@@ -370,7 +449,7 @@ describe('the handshake refuses hostile frames', () => {
 describe('sequence numbers and nonces', () => {
   it('a reordered frame closes the link with 4010', async () => {
     const { b, aId } = await linked();
-    const closed = once(b, 'peerDisconnected');
+    const closed = within(once(b, 'peerDisconnected'), 10000, 'the link to close');
     const peer = b.peers.get(aId.peerId);
     peer.ws.send(JSON.stringify({ type: 'mesh:heartbeat', seq: peer.sendSeq + 2 }));
     peer.ws.send(JSON.stringify({ type: 'mesh:heartbeat', seq: peer.sendSeq + 1 }));
@@ -398,9 +477,31 @@ describe('sequence numbers and nonces', () => {
     assert.deepEqual(seen, [{ n: 'ok' }]);
   });
 
-  it('keeps at most 10 000 nonces per peer, oldest out first', async () => {
+  // Fix round 1, item 7: nonces leave by age (once the envelope window has
+  // passed, verifyEnvelope refuses the envelope anyway), with a hard cap as a
+  // memory backstop that a peer within the rate limit never reaches.
+  it('forgets a nonce only once its envelope is older than the envelope window', async () => {
     const { a, aId, bId } = await linked();
-    a._takeToken = () => true; // this test is about the window, not the rate
+    const peer = a.getPeer(bId.peerId);
+    peer.envelopeWindowMs = 300;
+    const first = envelopeWith(bId, aId.peerId, { n: 1 });
+    a._handlePeerMessage(bId.peerId, { type: 'mesh:message', seq: 1, envelope: first });
+    const second = envelopeWith(bId, aId.peerId, { n: 2 });
+    a._handlePeerMessage(bId.peerId, { type: 'mesh:message', seq: 2, envelope: second });
+    assert.ok(peer.seenNonces.has(first.nonce) && peer.seenNonces.has(second.nonce));
+    await new Promise((r) => setTimeout(r, 400));
+    const third = envelopeWith(bId, aId.peerId, { n: 3 });
+    a._handlePeerMessage(bId.peerId, { type: 'mesh:message', seq: 3, envelope: third });
+    assert.deepEqual([...peer.seenNonces.keys()], [third.nonce]);
+    // and the forgotten one cannot be replayed: it is outside the window
+    const seen = [];
+    a.on('peerMessage', (m) => seen.push(m.payload));
+    a._handlePeerMessage(bId.peerId, { type: 'mesh:message', seq: 4, envelope: first });
+    assert.deepEqual(seen, []);
+  });
+
+  it('keeps nonces within the window even past 10 000 messages', async () => {
+    const { a, aId, bId } = await linked();
     const peer = a.getPeer(bId.peerId);
     let first = null;
     for (let i = 1; i <= 10001; i += 1) {
@@ -408,8 +509,49 @@ describe('sequence numbers and nonces', () => {
       if (i === 1) first = envelope.nonce;
       a._handlePeerMessage(bId.peerId, { type: 'mesh:message', seq: i, envelope });
     }
-    assert.equal(peer.seenNonces.size, 10000);
+    assert.equal(peer.seenNonces.size, 10001);
+    assert.ok(peer.seenNonces.has(first), 'a nonce still inside the window is never forgotten early');
+  });
+
+  it('caps the nonce memory at rate x window + burst as a backstop', async () => {
+    const { a, aId, bId } = await linked();
+    const peer = a.getPeer(bId.peerId);
+    peer.envelopeWindowMs = 10000; // cap = 200/s x 10 s + 400 = 2400
+    let first = null;
+    for (let i = 1; i <= 2401; i += 1) {
+      const envelope = envelopeWith(bId, aId.peerId, { i });
+      if (i === 1) first = envelope.nonce;
+      a._handlePeerMessage(bId.peerId, { type: 'mesh:message', seq: i, envelope });
+    }
+    assert.equal(peer.seenNonces.size, 2400);
     assert.equal(peer.seenNonces.has(first), false);
+  });
+
+  it('takes a token before parsing, and closes 4010 on a frame that is not a JSON object', async () => {
+    for (const garbage of ['not json', '[1,2]', '42', 'null']) {
+      const { a, b, aId, bId } = await linked();
+      let taken = 0;
+      const realTake = a._takeToken.bind(a);
+      a._takeToken = (p) => { taken += 1; return realTake(p); };
+      const closed = within(once(a, 'peerDisconnected'), 5000, 'the close');
+      b.peers.get(aId.peerId).ws.send(garbage);
+      const [{ peerId, code }] = await closed;
+      assert.equal(peerId, bId.peerId);
+      assert.equal(code, CLOSE_CODES.replayDetected, garbage);
+      assert.equal(taken, 1, garbage);
+    }
+  });
+
+  it('a flood of garbage frames is rate-limited and closed', async () => {
+    const { a, b, aId, bId } = await linked();
+    const peer = a.getPeer(bId.peerId);
+    peer.tokens = 0; // an empty bucket: the next frame, garbage or not, is over the rate
+    peer.tokensAt = Date.now();
+    const closed = within(once(a, 'peerDisconnected'), 5000, 'the close');
+    const ws = b.peers.get(aId.peerId).ws;
+    for (let i = 0; i < 50; i += 1) ws.send('garbage');
+    const [{ code }] = await closed;
+    assert.equal(code, CLOSE_CODES.rateLimited);
   });
 
   it('draws envelope nonces and auth challenges from the CSPRNG', () => {
@@ -519,5 +661,57 @@ describe('LAN lockout throttles failures, never a valid signature', () => {
     await Promise.all(workers);
     assert.ok(during >= 40, `failures kept coming (${during})`);
     assert.ok(pairing.lockedUntil > Date.now(), 'pairing is still locked; authentication never was');
+  });
+});
+
+describe('dialer socket options (fix round 1)', () => {
+  it('pins the dialer receiver field: 16 KiB during the handshake, 1 MiB once linked', async () => {
+    const wss = new WebSocket.Server({ host: '127.0.0.1', port: 0 });
+    await once(wss, 'listening');
+    cleanups.push(() => new Promise((r) => { for (const c of wss.clients) c.terminate(); wss.close(() => r()); }));
+    wss.on('connection', (ws) => ws.on('error', () => {}));
+    const t = new MeshTransport({ identity: new MeshIdentity({ displayName: 'd' }), listen: false, useTls: false });
+    await t.start();
+    cleanups.push(() => t.stop());
+    const dial = t.connectToPeer('127.0.0.1', wss.address().port).catch(() => {});
+    await waitFor(() => t.pendingAuth.size === 1, 'the handshake to start');
+    const [pending] = t.pendingAuth.values();
+    assert.equal(pending.ws._receiver._maxPayload, PRE_AUTH_MAX_BYTES);
+    await t.stop();
+    await dial;
+
+    const { b, aId } = await linked();
+    assert.equal(b.peers.get(aId.peerId).ws._receiver._maxPayload, MAX_PAYLOAD_BYTES);
+  });
+
+  it('fails the dial when the frame limit cannot be set', async () => {
+    const a = await listener();
+    const t = new MeshTransport({ identity: new MeshIdentity({ displayName: 'd' }), listen: false, useTls: false });
+    await t.start();
+    cleanups.push(() => t.stop());
+    const real = t._initiateAuth.bind(t);
+    t._initiateAuth = (ws, ...rest) => { delete ws._receiver._maxPayload; return real(ws, ...rest); };
+    await assert.rejects(within(t.connectToPeer('127.0.0.1', a.port), 5000, 'the dial to fail'), /frame limit/);
+    assert.equal(t.pendingAuth.size, 0);
+  });
+
+  it('never offers permessage-deflate', async () => {
+    const wss = new WebSocket.Server({ host: '127.0.0.1', port: 0, perMessageDeflate: true });
+    await once(wss, 'listening');
+    cleanups.push(() => new Promise((r) => { for (const c of wss.clients) c.terminate(); wss.close(() => r()); }));
+    const offered = new Promise((resolve) => wss.on('connection', (ws, req) => { ws.on('error', () => {}); resolve(req.headers['sec-websocket-extensions']); }));
+    const t = new MeshTransport({ identity: new MeshIdentity({ displayName: 'd' }), listen: false, useTls: false });
+    await t.start();
+    cleanups.push(() => t.stop());
+    t.connectToPeer('127.0.0.1', wss.address().port).catch(() => {});
+    assert.equal(await within(offered, 5000, 'the upgrade'), undefined);
+  });
+
+  it('pins ws exactly, since the frame limit reaches a private receiver field', () => {
+    const pkg = require('../package.json');
+    const lock = require('../package-lock.json');
+    assert.equal(pkg.dependencies.ws, '8.20.0');
+    assert.equal(lock.packages['node_modules/ws'].version, '8.20.0');
+    assert.equal(require('ws/package.json').version, '8.20.0');
   });
 });

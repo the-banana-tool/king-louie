@@ -16,12 +16,14 @@ const AUTH_TIMEOUT_MS = 10000;
 const MAX_PAYLOAD_BYTES = 1024 * 1024;
 const PRE_AUTH_MAX_BYTES = 16 * 1024;
 const PRE_AUTH_STRING_MAX = 4096;
-const PEER_NONCE_WINDOW = 10000;
 const MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
 const INBOUND_RATE_PER_S = 200;
 const INBOUND_BURST = 400;
 const MAX_UNAUTH_SOCKETS = 64;
 const MAX_UNAUTH_PER_IP = 8;
+// Ruling T6-cap: an unauthenticated socket must send its first frame within
+// this, apart from the 10 s for the whole handshake.
+const FIRST_FRAME_MS = 2000;
 const ENVELOPE_WINDOW_MS = 5 * 60 * 1000;
 const FRONT_DOOR_ENVELOPE_WINDOW_MS = 60000;
 const STALE_GRACE_MS = 5000;
@@ -237,6 +239,9 @@ class MeshTransport extends EventEmitter {
     for (const pending of this.pendingAuth.values()) {
       try { pending.ws.close(); } catch { /* ignore */ }
       if (pending.timeout) clearTimeout(pending.timeout);
+      // A dial still in its handshake settles now; with the entry gone, its
+      // socket's close handler could no longer reject it.
+      if (typeof pending.reject === 'function') pending.reject(new Error('transport stopped'));
     }
     this.pendingAuth.clear();
     for (const ws of this.unauth.keys()) {
@@ -323,7 +328,7 @@ class MeshTransport extends EventEmitter {
     return new Promise((resolve, reject) => {
       // `ws` clients default to 100 MiB frames; a mesh frame is at most 1 MiB
       // (and 16 KiB until the link authenticates, see _initiateAuth).
-      const wsOptions = { maxPayload: MAX_PAYLOAD_BYTES };
+      const wsOptions = { maxPayload: MAX_PAYLOAD_BYTES, perMessageDeflate: false };
 
       if (this.useTls) {
         // Accept self-signed certs — we verify via fingerprint pinning, not CA
@@ -384,7 +389,14 @@ class MeshTransport extends EventEmitter {
 
     // The listener is not authenticated yet either: its frames get the same
     // pre-auth size cap (enforced by `ws` before buffering) and exact shapes.
-    setFrameLimit(ws, PRE_AUTH_MAX_BYTES);
+    if (!setFrameLimit(ws, PRE_AUTH_MAX_BYTES)) {
+      log.error('ws has no receiver frame limit to set; failing the dial');
+      this.pendingAuth.delete(authId);
+      clearTimeout(timeout);
+      closeQuietly(ws, 1011, 'internal');
+      reject(new Error('cannot set the pre-auth frame limit on this ws version; refusing to authenticate'));
+      return;
+    }
     // Closed or broken before it authenticated (a refusal, a 4029, a frame
     // over the limit, a dead socket): the dial fails now instead of waiting
     // out AUTH_TIMEOUT_MS, and nothing of it stays in pendingAuth.
@@ -430,14 +442,24 @@ class MeshTransport extends EventEmitter {
 
   _handleInboundConnection(ws, req = null) {
     const ip = (req && req.socket && req.socket.remoteAddress) || 'unknown';
-    let fromIp = 0;
-    for (const other of this.unauth.values()) if (other === ip) fromIp += 1;
-    if (this.unauth.size >= MAX_UNAUTH_SOCKETS || fromIp >= MAX_UNAUTH_PER_IP) {
-      log.warn(`refusing an unauthenticated mesh connection from ${ip}: too many are open`);
-      ws.on('error', () => { /* refused socket: nothing to report */ });
-      closeQuietly(ws, CLOSE_CODES.rateLimited, 'too_many_unauthenticated');
-      return;
-    }
+    // Ruling T6-cap (the F7 rule: failures are throttled, a valid signature
+    // is never locked out): at the per-IP or global cap the OLDEST
+    // unauthenticated socket (from that IP, or overall) is evicted with 4029,
+    // never the newcomer, so sockets held open cannot keep a peer out.
+    // `unauth` is in arrival order, so the first match is the oldest.
+    const evictOldest = (fromIp) => {
+      for (const [other, otherIp] of this.unauth) {
+        if (fromIp !== null && otherIp !== fromIp) continue;
+        this.unauth.delete(other);
+        log.warn(`evicting the oldest unauthenticated mesh connection${fromIp !== null ? ` from ${fromIp}` : ''}: too many are open`);
+        closeQuietly(other, CLOSE_CODES.rateLimited, 'too_many_unauthenticated');
+        return;
+      }
+    };
+    let fromThisIp = 0;
+    for (const other of this.unauth.values()) if (other === ip) fromThisIp += 1;
+    if (fromThisIp >= MAX_UNAUTH_PER_IP) evictOldest(ip);
+    if (this.unauth.size >= MAX_UNAUTH_SOCKETS) evictOldest(null);
     this.unauth.set(ws, ip);
     ws.once('close', () => this.unauth.delete(ws));
     // Enforced by `ws` while it reads each frame header, before it buffers
@@ -453,7 +475,10 @@ class MeshTransport extends EventEmitter {
     const authTimeout = setTimeout(() => {
       if (this.unauth.has(ws)) closeQuietly(ws, CLOSE_CODES.unauthenticated, 'auth_timeout');
     }, AUTH_TIMEOUT_MS);
-    ws.once('close', () => clearTimeout(authTimeout));
+    const firstFrameTimeout = setTimeout(() => {
+      if (this.unauth.has(ws)) closeQuietly(ws, CLOSE_CODES.unauthenticated, 'first_frame_timeout');
+    }, FIRST_FRAME_MS);
+    ws.once('close', () => { clearTimeout(authTimeout); clearTimeout(firstFrameTimeout); });
 
     // A malformed or oversized frame makes `ws` emit 'error' on this socket
     // (it has already started a close with 1009/1002). This listener is
@@ -474,6 +499,7 @@ class MeshTransport extends EventEmitter {
     // Ruling 8: the first frame is size-checked, then parsed once, then
     // accepted only as exactly auth:challenge or (LAN only) pair:request.
     const onMessage = (data) => {
+      clearTimeout(firstFrameTimeout);
       ws.removeListener('message', onMessage);
       const parsed = parsePreAuthFrame(data);
       if (parsed.close) {
@@ -719,7 +745,8 @@ class MeshTransport extends EventEmitter {
       recvSeq: 0,
       // §3.10 item 2: replay nonces are kept per peer, and inbound frames are
       // metered with a token bucket.
-      seenNonces: new Set(),
+      // nonce → the time its envelope leaves the envelope window
+      seenNonces: new Map(),
       tokens: INBOUND_BURST,
       tokensAt: now,
       envelopeWindowMs: pending.frontDoorLink || this.requireClientCert ? FRONT_DOOR_ENVELOPE_WINDOW_MS : ENVELOPE_WINDOW_MS
@@ -729,14 +756,26 @@ class MeshTransport extends EventEmitter {
 
     ws.removeAllListeners('message');
     ws.on('message', (data) => {
-      let msg;
-      try {
-        msg = JSON.parse(frameBytes(data).toString('utf8'));
-      } catch (err) {
-        log.debug(`peer message parse error: ${err.message}`);
+      const peerId = remoteIdentity.peerId;
+      if (this.peers.get(peerId) !== peerInfo || ws.readyState !== WebSocket.OPEN) return;
+      // Metered before anything else, so garbage costs a token like any frame.
+      if (!this._takeToken(peerInfo)) {
+        log.warn(`peer ${peerId} sent more than ${INBOUND_RATE_PER_S} messages a second; closing`);
+        this.closePeer(peerId, CLOSE_CODES.rateLimited, 'rate_limited');
         return;
       }
-      if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return;
+      let msg = null;
+      try {
+        msg = JSON.parse(frameBytes(data).toString('utf8'));
+      } catch {
+        msg = null;
+      }
+      if (!msg || typeof msg !== 'object' || Array.isArray(msg)) {
+        // Not a sequenced frame at all.
+        log.warn(`unparseable frame from ${peerId}; closing`);
+        this.closePeer(peerId, CLOSE_CODES.replayDetected, 'malformed_frame');
+        return;
+      }
       // A throw here (a malformed envelope, or a peerMessage listener) must
       // never escape into `ws` and take the process down.
       try {
@@ -801,6 +840,18 @@ class MeshTransport extends EventEmitter {
     return true;
   }
 
+  // A nonce is kept until its envelope is older than the envelope window:
+  // after that verifyEnvelope refuses it anyway, so forgetting it opens no
+  // replay. Entries are in arrival order, nearly sorted by expiry; the scan
+  // stops at the first live one, and the cap bounds any stragglers.
+  _pruneNonces(peer) {
+    const now = Date.now();
+    for (const [nonce, expiresAt] of peer.seenNonces) {
+      if (expiresAt >= now) break;
+      peer.seenNonces.delete(nonce);
+    }
+  }
+
   _takeToken(peer) {
     const now = Date.now();
     peer.tokens = Math.min(INBOUND_BURST, peer.tokens + ((now - peer.tokensAt) / 1000) * INBOUND_RATE_PER_S);
@@ -829,11 +880,7 @@ class MeshTransport extends EventEmitter {
     if (!peer || (expected && peer !== expected)) return;
     // Closing (rate limit, replay, removal): nothing more is processed.
     if (peer.ws.readyState !== WebSocket.OPEN) return;
-    if (!this._takeToken(peer)) {
-      log.warn(`peer ${peerId} sent more than ${INBOUND_RATE_PER_S} messages a second; closing`);
-      this.closePeer(peerId, CLOSE_CODES.rateLimited, 'rate_limited');
-      return;
-    }
+    // (The frame's rate token was taken by the socket listener, before parsing.)
     // Strictly increasing per direction and connection: a replayed,
     // reordered or unsequenced frame ends the link.
     if (!Number.isSafeInteger(msg.seq) || msg.seq <= peer.recvSeq) {
@@ -851,6 +898,7 @@ class MeshTransport extends EventEmitter {
       log.warn(`envelope from ${peerId} is addressed to someone else`);
       return;
     }
+    this._pruneNonces(peer);
     if (peer.seenNonces.has(envelope.nonce)) return; // replay
 
     const trusted = this.trustedPeers.get(peerId);
@@ -870,8 +918,11 @@ class MeshTransport extends EventEmitter {
       return;
     }
 
-    peer.seenNonces.add(envelope.nonce);
-    if (peer.seenNonces.size > PEER_NONCE_WINDOW) peer.seenNonces.delete(peer.seenNonces.values().next().value);
+    peer.seenNonces.set(envelope.nonce, Number(envelope.timestamp) + peer.envelopeWindowMs);
+    // Backstop: a peer within the rate limit never sends more than this many
+    // envelopes inside one window.
+    const cap = Math.ceil((peer.envelopeWindowMs / 1000) * INBOUND_RATE_PER_S) + INBOUND_BURST;
+    while (peer.seenNonces.size > cap) peer.seenNonces.delete(peer.seenNonces.keys().next().value);
 
     this.emit('peerMessage', {
       from: peerId,
