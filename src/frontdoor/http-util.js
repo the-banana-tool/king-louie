@@ -105,11 +105,18 @@ function requestHost(req) {
   return String(req.headers.host || '').toLowerCase().replace(/:\d*$/, '');
 }
 
+// Set by the SNI listener on each TLS socket it hands over: the peer address
+// it saw when it accepted the connection.
+const ACCEPT_ADDRESS = Symbol.for('king-louie.frontdoor.acceptAddress');
+
 // The peer address of the connection. The front door is the public listener
 // itself (no proxy in front of it), so X-Forwarded-For is never read: any
-// caller could set it.
+// caller could set it. A TLS socket the SNI listener wrapped reports its
+// peer through the raw socket underneath; once that is gone (the peer reset
+// mid-request) the address recorded at accept time stands in.
 function clientIp(req) {
-  return (req.socket && req.socket.remoteAddress) || 'unknown';
+  const socket = req.socket;
+  return (socket && (socket.remoteAddress || socket[ACCEPT_ADDRESS])) || 'unknown';
 }
 
-module.exports = { readBody, sendJson, sendHtml, parseForm, parseCookies, printable, escapeHtml, requestHost, clientIp };
+module.exports = { readBody, sendJson, sendHtml, parseForm, parseCookies, printable, escapeHtml, requestHost, clientIp, ACCEPT_ADDRESS };

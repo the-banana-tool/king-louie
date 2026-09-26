@@ -27,6 +27,7 @@ const { EventEmitter } = require('events');
 const { createLogger } = require('../../logging');
 const { peekClientHello } = require('./client-hello');
 const { peerCertFingerprint } = require('../../mesh/mesh-transport');
+const { ACCEPT_ADDRESS } = require('../http-util');
 
 const log = createLogger('frontdoor/sni');
 
@@ -338,7 +339,10 @@ class SniListener extends EventEmitter {
   // 'data' never fires there, and a listener would also switch the stream
   // to flowing before the consumer is attached.
   _handOver(socket, s, consumer) {
-    this.sockets.get(socket).stage = 'open';
+    const entry = this.sockets.get(socket);
+    entry.stage = 'open';
+    // clientIp()'s fallback when the raw socket no longer reports its peer.
+    s[ACCEPT_ADDRESS] = entry.address;
     const before = s.bytesRead;
     const idle = setTimeout(() => {
       if (s.bytesRead === before) this._drop(socket);

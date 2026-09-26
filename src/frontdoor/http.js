@@ -96,13 +96,33 @@ function createFrontDoorHandler({ mcpHost, oauth, mcp = null, phoneApiHandler, p
 
 // Never listens: the SNI listener emits 'connection' with each mcp. TLS
 // socket it hands over.
-function createMcpHttpServer(handler) {
-  const server = http.createServer({ maxHeaderSize: MAX_HEADER_SIZE }, handler);
-  server.requestTimeout = REQUEST_TIMEOUT_MS;
-  server.headersTimeout = HEADERS_TIMEOUT_MS;
+//
+// requestTimeout bounds only the time to RECEIVE a request (headers and
+// body); Node stops timing a request once its body has ended, so a response
+// held open afterwards (the MCP get_job long-poll, up to
+// frontdoor.mcp.progress_hold_s ≤ 55 s) is never cut by it (ruling T26-hold,
+// pinned end to end by tests/frontdoor-e2e.test.js with a hold longer than
+// the timeout). `limits` exists for that test, which scales the timings down.
+function createMcpHttpServer(handler, limits = {}) {
+  const l = { requestTimeoutMs: REQUEST_TIMEOUT_MS, headersTimeoutMs: HEADERS_TIMEOUT_MS, checkIntervalMs: undefined, ...limits };
+  const server = http.createServer({ maxHeaderSize: MAX_HEADER_SIZE, ...(l.checkIntervalMs ? { connectionsCheckingInterval: l.checkIntervalMs } : {}) }, handler);
+  server.requestTimeout = l.requestTimeoutMs;
+  server.headersTimeout = l.headersTimeoutMs;
   server.keepAliveTimeout = KEEP_ALIVE_TIMEOUT_MS;
   server.maxHeadersCount = MAX_HEADERS_COUNT;
+  return startConnectionTracking(server);
+}
+
+// Node enforces requestTimeout and headersTimeout only on the connections it
+// tracks, and starts tracking when the server listens (its own 'listening'
+// handler). A server that is only handed sockets never listens, so without
+// this neither limit ever fires and a client may trickle headers or a body
+// forever. Stopped by server.close().
+function startConnectionTracking(server) {
+  const internal = server.listeners('listening').filter((fn) => fn.name === 'setupConnectionsTracking');
+  if (internal.length !== 1) throw new Error('this Node version tracks HTTP connections differently; the request timeouts cannot be enforced');
+  internal[0].call(server);
   return server;
 }
 
-module.exports = { createFrontDoorHandler, createMcpHttpServer };
+module.exports = { createFrontDoorHandler, createMcpHttpServer, startConnectionTracking, REQUEST_TIMEOUT_MS };

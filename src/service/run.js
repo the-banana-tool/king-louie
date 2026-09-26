@@ -201,6 +201,20 @@ function loadProfile(profile) {
       }
     };
   }
+  if (profile === 'frontdoor') {
+    return {
+      // Fleet stage 4 §3.1: the front door requires only its own profile
+      // module (and node-config); no core, providers, tools or runbooks.
+      async start({ dataDir, adminUid, configDir, serviceConfig, deps = {} }) {
+        const { loadNodeConfig } = require('./node-config');
+        const { adminConfigDir } = require('../platform/paths');
+        const { startFrontDoor } = require('../frontdoor/profile');
+        const dir = configDir || adminConfigDir({ dataDir });
+        const nodeConfig = loadNodeConfig(adminDirOptions({ dataDir, adminUid, configDir: dir }));
+        return startFrontDoor({ dataDir, configDir: dir, ...(adminUid === undefined ? {} : { adminUid }), nodeConfig, serviceConfig, deps });
+      }
+    };
+  }
   throw new Error(`Unknown profile "${profile}"`);
 }
 
@@ -270,7 +284,7 @@ async function runService({ dataDir: requestedDataDir, profile: profileOverride,
       const config = loadServiceConfig(dataDir, { profile: profileOverride }, adminUid === undefined ? {} : { adminUid });
       profile = config.profile;
       log.info('service starting', { profile, dataDir, workspace, pid: process.pid });
-      running = await loadProfile(profile).start({ dataDir, features: config.features, ports: config.ports, workspace, audit: config.audit, adminUid });
+      running = await loadProfile(profile).start({ dataDir, features: config.features, ports: config.ports, workspace, audit: config.audit, adminUid, serviceConfig: config });
     } catch (err) {
       // On Windows nothing reads the task's stderr, so the log file is the
       // only place a startup failure is visible.
