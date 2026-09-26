@@ -85,6 +85,27 @@ async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, c
     }
   }
 
+  // Fleet stage 4 §3.14: doctor on a front door.
+  {
+    const { adminConfigDir } = require('../platform/paths');
+    const dir = configDir || adminConfigDir({ dataDir });
+    let nodeConfig = null;
+    try {
+      nodeConfig = require('./node-config').loadNodeConfig({ dataDir, adminConfigDir: dir, adminUid });
+    } catch {
+      nodeConfig = null;
+    }
+    if (nodeConfig && nodeConfig.profile === 'frontdoor') {
+      let serviceConfig = null;
+      try {
+        serviceConfig = require('./config').loadServiceConfig(dataDir, {}, { adminConfigDir: dir, adminUid });
+      } catch (err) {
+        results.push({ check: 'service.json', ok: false, detail: err.message });
+      }
+      if (serviceConfig) results.push(...(await require('../frontdoor/doctor-checks').checks({ dataDir, configDir: dir, adminUid, nodeConfig, serviceConfig, platform })));
+    }
+  }
+
   results.push(...(await approvalChecks({ dataDir, platform, adminUid })));
   return results;
 }

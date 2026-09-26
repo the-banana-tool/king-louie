@@ -1376,5 +1376,6 @@ module.exports = {
   parsePreAuthFrame,
   channelBinding,
   boundChallenge,
-  peerCertFingerprint
+  peerCertFingerprint,
+  timingSafeHexEqual
 };
