@@ -1804,6 +1804,17 @@ async function renderChatCaseSection(chat, container) {
 
   container.append(row, newRow, orientationBtn, orientation, error);
 
+  // Cases stage 6: the playbook picker in the create form, and the
+  // playbooks of the attached case.
+  const playbookPicker = buildPlaybookPicker(newRow);
+  const playbooksSection = document.createElement('div');
+  playbooksSection.id = 'case-playbooks-section';
+  playbooksSection.className = 'case-playbooks-section';
+  container.appendChild(playbooksSection);
+  if (chat.caseId && !caseMissing) {
+    renderPlaybooksSection(chat, playbooksSection).catch((err) => chatLog.warn(`Playbooks panel failed: ${err.message}`));
+  }
+
   // Cases stage 2: status, budget and questions for the attached case.
   const unattended = document.createElement('div');
   unattended.id = 'case-unattended-section';
@@ -1846,18 +1857,23 @@ async function renderChatCaseSection(chat, container) {
     showError('');
     const title = titleInput.value.trim();
     if (!title) { showError('Give the case a title.'); titleInput.focus(); return; }
-    let result = await window.electron.cases.create({ title, chatId: chat.id });
+    let result = await window.electron.cases.create({ title, chatId: chat.id, ...playbookPicker.fields() });
     // Cases stage 5: a similar open case exists; create anyway, or attach to it.
     if (!result?.ok && result?.code === 'SIMILAR_CASES' && Array.isArray(result.similar) && result.similar.length) {
       const match = result.similar[0];
       if (await showConfirmDialog(`A similar case exists: "${match.title}" (${match.status}). Create anyway?`)) {
-        result = await window.electron.cases.create({ title, chatId: chat.id, force: true });
+        result = await window.electron.cases.create({ title, chatId: chat.id, force: true, ...playbookPicker.fields() });
       } else {
         result = await window.electron.cases.attach({ chatId: chat.id, caseId: match.caseId });
       }
     }
     if (!result?.ok) { showError(result?.error || 'Could not create the case.'); return; }
     await adopt(result.chat);
+    // Cases stage 6: the case exists; a playbook that failed to attach is
+    // reported here (plain text; the owner can add it again from the panel).
+    for (const p of Array.isArray(result.playbooks) ? result.playbooks : []) {
+      if (p && p.error) showNotice(playbookClip(`Playbook ${p.name || '?'} was not attached: ${p.error}`));
+    }
   });
 
   orientationBtn.addEventListener('click', async () => {
@@ -2247,6 +2263,256 @@ async function renderCaseDetoursSection(chat, container) {
     container.appendChild(list);
   }
   container.appendChild(error);
+}
+
+/* --- Cases stage 6: playbooks (docs/superpowers/specs/2026-09-23-cases-stage6-playbooks.md §3.12) --- */
+
+// Every string from a case or a playbook (and every reply marked
+// untrustedText) can quote package text: it is set with textContent only,
+// never innerHTML or markdown, and clipped for display.
+const PLAYBOOK_TEXT_MAX = 600;
+const PLAYBOOK_PATCH_MAX = 200000;
+
+function playbookClip(value, max = PLAYBOOK_TEXT_MAX) {
+  const s = typeof value === 'string' ? value : (value === undefined || value === null ? '' : String(value));
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+}
+
+function playbookEl(tag, className, text) {
+  const el = document.createElement(tag);
+  if (className) el.className = className;
+  if (text !== undefined) el.textContent = playbookClip(text);
+  return el;
+}
+
+function playbookButton(id, text, onClick) {
+  const b = playbookEl('button', 'secondary-button playbook-button', text);
+  b.type = 'button';
+  if (id) b.id = id;
+  b.addEventListener('click', onClick);
+  return b;
+}
+
+// The create-form picker: example checkboxes, one free source with an
+// optional ref, and the owner's consent to higher budget limits.
+function buildPlaybookPicker(container) {
+  const wrap = playbookEl('div', 'playbook-picker');
+  wrap.id = 'chat-case-playbook-picker';
+  const examples = playbookEl('div', 'playbook-example-list');
+  const source = playbookEl('input', 'chat-info-input');
+  source.type = 'text';
+  source.id = 'chat-case-playbook-source';
+  source.placeholder = 'Playbook folder or https/ssh git URL (optional)';
+  const ref = playbookEl('input', 'chat-info-input');
+  ref.type = 'text';
+  ref.id = 'chat-case-playbook-ref';
+  ref.placeholder = 'Branch or tag (optional)';
+  const acceptRow = playbookEl('label', 'playbook-accept');
+  const accept = document.createElement('input');
+  accept.type = 'checkbox';
+  accept.id = 'chat-case-playbook-accept-budget';
+  acceptRow.append(accept, document.createTextNode(' Allow these playbooks to raise budget limits'));
+  wrap.append(playbookEl('div', 'playbook-label', 'Playbooks'), examples, source, ref, acceptRow);
+  container.appendChild(wrap);
+  window.electron.cases.listExamplePlaybooks()
+    .then((r) => {
+      for (const e of (r?.ok ? r.examples : [])) {
+        const row = playbookEl('label', 'playbook-example');
+        const box = document.createElement('input');
+        box.type = 'checkbox';
+        box.id = `chat-case-playbook-example-${e.name}`;
+        box.value = `example:${e.name}`;
+        row.append(box, document.createTextNode(playbookClip(` ${e.title || e.name} (${e.name}@${e.version}, ${e.caseType})`, 300)));
+        examples.appendChild(row);
+      }
+    })
+    .catch((err) => chatLog.warn(`Example playbooks failed: ${err.message}`));
+  return {
+    fields() {
+      const playbooks = [...examples.querySelectorAll('input[type="checkbox"]:checked')].map((b) => ({ source: b.value }));
+      if (source.value.trim()) playbooks.push({ source: source.value.trim(), ...(ref.value.trim() ? { ref: ref.value.trim() } : {}) });
+      return playbooks.length ? { playbooks, acceptBudgetRaises: accept.checked } : {};
+    }
+  };
+}
+
+async function renderPlaybooksSection(chat, container) {
+  container.innerHTML = '';
+  const caseId = chat.caseId;
+  const refresh = () => renderPlaybooksSection(chat, container).catch((err) => chatLog.warn(`Playbooks panel failed: ${err.message}`));
+  const status = playbookEl('div', 'playbook-status');
+  status.id = 'case-playbooks-status';
+  const say = (text) => { status.textContent = playbookClip(text || '', 2000); };
+  container.appendChild(playbookEl('div', 'playbook-heading', 'Playbooks'));
+
+  const listed = await window.electron.cases.playbooks({ caseId });
+  if (!listed?.ok) {
+    say(listed?.error || 'Could not load the playbooks.');
+    container.appendChild(status);
+    return;
+  }
+
+  // Each row has a slot for a "Confirm source" action. A recorded local
+  // folder that no allowlist entry covers (SOURCE_NEEDS_CONFIRM) is read only
+  // after the owner confirms that one playbook, and the re-sent call names
+  // it. SOURCE_IS_LINK is an error only: there is nothing to confirm.
+  const confirmSlots = new Map();
+  const offerConfirm = (name, retry) => {
+    const slot = confirmSlots.get(name);
+    if (!slot) return;
+    slot.replaceChildren(playbookButton(null, 'Confirm source', async () => {
+      if (!(await showConfirmDialog(`Read the recorded folder of playbook ${name}? No allowed-folder entry covers it. Confirm only if you trust that folder.`))) return;
+      slot.replaceChildren();
+      await retry();
+    }));
+  };
+
+  const runUpdate = async (name, { force = false, confirmSource = false } = {}) => {
+    const r = await window.electron.cases.updatePlaybook({ caseId, name, ...(force ? { force: true } : {}), ...(confirmSource ? { confirmSource: true } : {}) });
+    if (!r?.ok && !force && Array.isArray(r?.editedFiles) && r.editedFiles.length) {
+      if (!(await showConfirmDialog(`${playbookClip(r.error)} Overwrite them?`))) return;
+      await runUpdate(name, { force: true, confirmSource });
+      return;
+    }
+    if (!r?.ok) {
+      say(r?.error || 'Could not update the playbook.');
+      if (r?.code === 'SOURCE_NEEDS_CONFIRM' && !confirmSource) offerConfirm(name, () => runUpdate(name, { force, confirmSource: true }));
+      return;
+    }
+    say(r.from === r.to ? `${name} is up to date.` : `${name} updated from ${r.from} to ${r.to}. The next turn re-orients.`);
+    refresh();
+  };
+
+  const updateLine = (u) => {
+    if (u.error) return `${u.name}: ${u.error}`;
+    if (u.applyError) return `${u.name}: ${u.upstream} available; applying it failed: ${u.applyError}`;
+    if (u.applied) return `${u.name}: updated to ${u.applied}`;
+    return `${u.name}: ${u.updateAvailable ? `${u.upstream} available${u.sameMajor ? '' : ' (new major version)'}` : 'up to date'}`;
+  };
+
+  // name: a confirmed re-check of that one playbook; null checks them all.
+  const runCheck = async (name = null) => {
+    const r = await window.electron.cases.checkPlaybookUpdates({ caseId, ...(name ? { name, confirmSource: true } : {}) });
+    if (!r?.ok) { say(r?.error || 'Could not check for updates.'); return; }
+    say(r.updates.map(updateLine).join('; ') || 'No playbooks to check.');
+    if (!name) {
+      for (const u of r.updates) {
+        if (u.code === 'SOURCE_NEEDS_CONFIRM') offerConfirm(u.name, () => runCheck(u.name));
+      }
+    }
+    if (r.updates.some((u) => u.applied)) refresh();
+  };
+
+  const list = playbookEl('div', 'playbook-list');
+  list.id = 'case-playbook-list';
+  for (const p of listed.playbooks) {
+    const state = /^[a-z-]{1,32}$/.test(p.state || '') ? p.state : 'unknown';
+    const row = playbookEl('div', `playbook-row playbook-state-${state}`);
+    row.dataset.playbook = p.name;
+    row.appendChild(playbookEl('span', 'playbook-name', `${p.name}@${p.version || '?'} (${p.mode}, ${p.state})`));
+    for (const w of [...(p.reason ? [p.reason] : []), ...(p.warnings || [])]) row.appendChild(playbookEl('div', 'playbook-warning', w));
+    const actions = playbookEl('div', 'playbook-actions');
+    if (p.state === 'unregistered') {
+      actions.appendChild(playbookButton(null, 'Adopt', async () => {
+        const r = await window.electron.cases.addPlaybook({ caseId, adopt: p.name });
+        if (!r?.ok) { say(r?.error || 'Could not adopt the playbook.'); return; }
+        refresh();
+      }));
+    } else if (p.mode === 'vendored') {
+      actions.appendChild(playbookButton(null, 'Update', () => runUpdate(p.name)));
+    }
+    if (p.mode === 'vendored') {
+      actions.appendChild(playbookButton(null, 'Remove', async () => {
+        if (!(await showConfirmDialog(`Remove playbook ${p.name} from this case? Questions it asked and defaults it set stay.`))) return;
+        const r = await window.electron.cases.removePlaybook({ caseId, name: p.name });
+        if (!r?.ok) { say(r?.error || 'Could not remove the playbook.'); return; }
+        refresh();
+      }));
+    }
+    const slot = playbookEl('span', 'playbook-confirm');
+    confirmSlots.set(p.name, slot);
+    actions.appendChild(slot);
+    row.appendChild(actions);
+    list.appendChild(row);
+  }
+  if (!listed.playbooks.length) list.appendChild(playbookEl('div', 'playbook-empty', 'No playbooks attached.'));
+  container.appendChild(list);
+
+  if (listed.pendingGating.length) {
+    const pending = playbookEl('div', 'playbook-pending', `Waiting for your answers: ${listed.pendingGating.map((g) => g.recordId || g.key).join(', ')}`);
+    pending.id = 'case-playbook-pending';
+    container.appendChild(pending);
+  }
+
+  for (const raise of listed.budgetRaises || []) {
+    const row = playbookEl('div', 'playbook-raise');
+    row.appendChild(playbookEl('span', null, `${raise.playbook} suggests a higher ${raise.key} limit: ${raise.from} → ${raise.to}. `));
+    row.appendChild(playbookButton(null, 'Accept', async () => {
+      if (!(await showConfirmDialog(`Raise ${raise.key} from ${raise.from} to ${raise.to} for this case, as ${raise.playbook} suggests?`))) return;
+      const r = await window.electron.cases.acceptPlaybookBudget({ caseId, name: raise.playbook });
+      if (!r?.ok) { say(r?.error || 'Could not change the budget.'); return; }
+      refresh();
+    }));
+    container.appendChild(row);
+  }
+
+  const add = playbookEl('div', 'playbook-add');
+  const source = playbookEl('input', 'chat-info-input');
+  source.type = 'text';
+  source.id = 'case-playbook-add-source';
+  source.placeholder = 'example:<name>, a folder, or an https/ssh git URL';
+  const ref = playbookEl('input', 'chat-info-input');
+  ref.type = 'text';
+  ref.id = 'case-playbook-add-ref';
+  ref.placeholder = 'Branch or tag (optional)';
+  add.append(source, ref, playbookButton('case-playbook-add-btn', 'Add playbook', async () => {
+    if (!source.value.trim()) { say('Give a playbook source.'); return; }
+    const r = await window.electron.cases.addPlaybook({ caseId, source: source.value.trim(), ...(ref.value.trim() ? { ref: ref.value.trim() } : {}) });
+    if (!r?.ok) { say(r?.error || 'Could not add the playbook.'); return; }
+    refresh();
+  }), playbookButton('case-playbook-check-btn', 'Check for updates', () => runCheck()));
+  container.appendChild(add);
+
+  const proposals = await window.electron.cases.playbookProposals({ caseId });
+  if (proposals?.ok && proposals.proposals.length) {
+    const box = playbookEl('div', 'playbook-proposals');
+    box.id = 'case-playbook-proposals';
+    box.appendChild(playbookEl('div', 'playbook-heading', 'Proposals'));
+    for (const pr of proposals.proposals) {
+      const row = playbookEl('div', 'playbook-proposal');
+      row.dataset.proposal = pr.id;
+      row.appendChild(playbookEl('div', null, `${pr.id}: ${pr.newPlaybook ? 'new playbook' : 'change to'} ${pr.playbook} (${pr.status}${pr.stale ? ', stale' : ''}) — ${pr.rationale}`));
+      if (pr.hint) row.appendChild(playbookEl('div', 'playbook-warning', pr.hint));
+      const patch = playbookEl('pre', 'playbook-patch');
+      patch.hidden = true;
+      row.appendChild(playbookButton(null, 'View patch', async () => {
+        const r = await window.electron.cases.playbookProposals({ caseId, proposalId: pr.id });
+        if (!r?.ok) { say(r?.error || 'Could not read the patch.'); return; }
+        patch.textContent = playbookClip(r.patch, PLAYBOOK_PATCH_MAX);
+        patch.hidden = !patch.hidden;
+      }));
+      if (pr.status === 'proposed') {
+        const repo = playbookEl('input', 'chat-info-input');
+        repo.type = 'text';
+        repo.placeholder = "Path to the playbook's own repository";
+        row.append(repo, playbookButton(null, 'Apply to repo…', async () => {
+          if (!repo.value.trim()) { say('Give the path of the playbook repository.'); return; }
+          const r = await window.electron.cases.applyPlaybookProposal({ caseId, proposalId: pr.id, repoPath: repo.value.trim() });
+          if (!r?.ok) { say(r?.error || 'Could not apply the proposal.'); return; }
+          say(`Applied ${pr.id} to ${r.appliedTo}; review and commit it there.`);
+          refresh();
+        }), playbookButton(null, 'Reject', async () => {
+          const r = await window.electron.cases.rejectPlaybookProposal({ caseId, proposalId: pr.id });
+          if (!r?.ok) { say(r?.error || 'Could not reject the proposal.'); return; }
+          refresh();
+        }));
+      }
+      row.appendChild(patch);
+      box.appendChild(row);
+    }
+    container.appendChild(box);
+  }
+  container.appendChild(status);
 }
 
 function renderChatInfoPopover() {

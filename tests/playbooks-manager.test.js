@@ -23,12 +23,12 @@ const lastSubject = async (dir) => (await git.git(dir, ['log', '-1', '--format=%
 const clean = async (dir) => (await git.git(dir, ['status', '--porcelain'])).trim() === '';
 
 // A runtime, a manager, and an examples dir holding the fixture as land-sale.
-async function world({ playbooks = {}, examples = {}, registry = null, type } = {}) {
+async function world({ playbooks = {}, examples = {}, registry = null, type, adminPolicy } = {}) {
   const examplesDir = tmp();
   writePackage(path.join(examplesDir, 'land-sale'), examples);
   const settings = { playbooks: { sources: [], autoUpdate: false, ...playbooks } };
   const rt = new CaseRuntime({ root: tmp(), getSettings: () => settings });
-  const mgr = new PlaybookManager({ runtime: rt, getSettings: () => settings, examplesDir, getExecutorRegistry: () => registry, tmpRoot: tmp() });
+  const mgr = new PlaybookManager({ runtime: rt, getSettings: () => settings, examplesDir, getExecutorRegistry: () => registry, tmpRoot: tmp(), ...(adminPolicy === undefined ? {} : { adminPolicy }) });
   rt.playbooks = mgr;
   const info = await rt.createCase({ title: 'Lakeside lot', objective: 'Sell the lot', ...(type ? { type } : {}) });
   return { rt, mgr, id: info.id, dir: info.dir, examplesDir, settings };
@@ -453,6 +453,26 @@ describe('recorded local sources', () => {
     const confirmed = await w.mgr.update(w.id, 'land-sale', { confirmSource: true });
     assert.strictEqual(confirmed.ok, false);
     assert.ok(hits.length > 0, 'a confirmed path is then checked');
+  });
+
+  // The allowlist lives in a different place per mode (ruling T14-admin), so
+  // the hint names the one the owner can edit.
+  it('the confirm hint names Settings on the desktop and the admin service.json in service mode', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const typed = await allowedUpstream({ gitRepo: false });
+    for (const [adminPolicy, hint, not] of [
+      [false, /or add its folder to Settings → Playbooks → Allowed sources\.$/, /service\.json/],
+      [true, /or set playbooks\.sources in the admin service\.json\.$/, /Settings/]
+    ]) {
+      const w = await world({ adminPolicy });
+      await w.mgr.attach(w.id, { source: typed.dir });
+      const [row] = await w.mgr.checkUpdates(w.id);
+      assert.strictEqual(row.code, 'SOURCE_NEEDS_CONFIRM');
+      assert.match(row.error, hint);
+      assert.doesNotMatch(row.error, not);
+      const upd = await w.mgr.update(w.id, 'land-sale');
+      assert.match(upd.error, hint);
+    }
   });
 
   it('with entries that do not cover it on its text, the recorded path is refused before any file system call', async (t) => {

@@ -2864,7 +2864,8 @@ function createCore(deps = {}) {
   // rules are registered by installPlaybooks.
   // Ruling T14-admin: in service mode the source allowlist and autoUpdate
   // are policy and come only from the admin service.json (run.js passes
-  // deps.playbooksConfig; absent means no sources, no auto-update). The
+  // deps.playbooksConfig; absent or empty means no URL sources, local
+  // folders unrestricted (spec §12), no auto-update). The
   // data-dir settings for them are ignored there, with one warning. The
   // desktop reads the owner's own settings. The service signals are the
   // ones start() uses for contact, plus playbooksConfig itself.
@@ -2898,7 +2899,7 @@ function createCore(deps = {}) {
       return { playbooks: adminPlaybooks };
     };
   }
-  installPlaybooks(caseRuntime, { getSettings: getPlaybookSettings, examplesDir: deps.examplesDir || null });
+  installPlaybooks(caseRuntime, { getSettings: getPlaybookSettings, examplesDir: deps.examplesDir || null, adminPolicy: playbooksFromAdmin });
 
   const context = {
     // Chat

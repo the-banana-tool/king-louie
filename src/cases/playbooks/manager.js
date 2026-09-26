@@ -143,11 +143,14 @@ function assertNoLinks(abs, name) {
 class PlaybookManager {
   constructor({
     runtime, getSettings = () => ({}), examplesDir = null, getExecutorRegistry = () => null,
-    now = null, caseTypes = defaultCaseTypes(), fetchTimeoutMs = 60000, tmpRoot = null
+    now = null, caseTypes = defaultCaseTypes(), fetchTimeoutMs = 60000, tmpRoot = null, adminPolicy = false
   } = {}) {
     if (!runtime) throw new Error('PlaybookManager needs a runtime.');
     this.runtime = runtime;
     this.getSettings = typeof getSettings === 'function' ? getSettings : () => ({});
+    // true in service mode, where the allowlist comes from the admin
+    // service.json (ruling T14-admin); it only words the refusals.
+    this.adminPolicy = adminPolicy === true;
     this._examplesDir = examplesDir || null;
     this.getExecutorRegistry = typeof getExecutorRegistry === 'function' ? getExecutorRegistry : () => null;
     this._now = typeof now === 'function' ? now : null;
@@ -467,7 +470,7 @@ class PlaybookManager {
   // A source the owner typed (attach, case:create): resolved, allow-checked,
   // fetched and validated.
   async prepare(source, { ref = null } = {}) {
-    const resolved = vendor.resolveSource(source, { examplesDir: this.examplesDir, settings: this.settings() });
+    const resolved = vendor.resolveSource(source, { examplesDir: this.examplesDir, settings: this.settings(), adminPolicy: this.adminPolicy });
     return this._prepareResolved(resolved, ref);
   }
 
@@ -483,7 +486,7 @@ class PlaybookManager {
     const abs = recordedLocalPath(source);
     if (abs !== null) {
       const needsConfirm = () => new PlaybookError(
-        `The recorded source of "${name}" is a local folder no allowed-folder entry covers (${oneLine(abs, 200)}). Confirm it before King Louie reads it, or add its folder to Settings → Playbooks → Allowed sources.`,
+        `The recorded source of "${name}" is a local folder no allowed-folder entry covers (${oneLine(abs, 200)}). Confirm it before King Louie reads it, or ${this.adminPolicy ? 'set playbooks.sources in the admin service.json' : 'add its folder to Settings → Playbooks → Allowed sources'}.`,
         { code: 'SOURCE_NEEDS_CONFIRM' }
       );
       // Unless an entry covers it on its text, refuse before any file system
@@ -503,7 +506,7 @@ class PlaybookManager {
       }
       if (!covered && confirmSource !== true) throw needsConfirm();
     }
-    return vendor.resolveSource(source, { examplesDir: this.examplesDir, settings });
+    return vendor.resolveSource(source, { examplesDir: this.examplesDir, settings, adminPolicy: this.adminPolicy });
   }
 
   async attach(caseId, { source, ref = null, acceptBudgetRaises = false } = {}) {
@@ -720,7 +723,7 @@ class PlaybookManager {
 
   async _upstreamManifest(entry, state, settings, { confirmSource }) {
     if (entry.mode === 'submodule') {
-      return vendor.fetchSubmoduleManifest(entry.dir, entry.submodule?.url, { settings, timeoutMs: this.fetchTimeoutMs, tmpRoot: this.tmpRoot });
+      return vendor.fetchSubmoduleManifest(entry.dir, entry.submodule?.url, { settings, adminPolicy: this.adminPolicy, timeoutMs: this.fetchTimeoutMs, tmpRoot: this.tmpRoot });
     }
     const rec = state.vendored[entry.name];
     const resolved = this._resolveRecorded(entry.name, rec && rec.source, settings, { confirmSource });

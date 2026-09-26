@@ -138,9 +138,17 @@ function isUrlAllowed(url, settings) {
     .some(({ norm, exact }) => target === norm || (!exact && target.startsWith(`${norm}/`)));
 }
 
-function assertUrlAllowed(url, settings) {
+// Where the owner edits the allowlist: the desktop's own settings, or, in
+// service mode (ruling T14-admin), the admin service.json.
+function allowlistHint(adminPolicy) {
+  return adminPolicy === true
+    ? 'Set playbooks.sources in the admin service.json.'
+    : 'Add its host to Settings → Playbooks → Allowed sources.';
+}
+
+function assertUrlAllowed(url, settings, { adminPolicy = false } = {}) {
   if (!isUrlAllowed(url, settings)) {
-    throw new PlaybookSourceError(`Playbook source ${url} is not allowed. Add its host to Settings → Playbooks → Allowed sources.`, 'SOURCE_NOT_ALLOWED');
+    throw new PlaybookSourceError(`Playbook source ${url} is not allowed. ${allowlistHint(adminPolicy)}`, 'SOURCE_NOT_ALLOWED');
   }
 }
 
@@ -167,18 +175,20 @@ function gitUrlOf(raw) {
 
 // A URL that may be recorded and fetched: supported, no password (it would
 // be written to case.yaml), allowed.
-function checkGitUrl(raw, settings) {
+function checkGitUrl(raw, settings, { adminPolicy = false } = {}) {
   const s = gitUrlOf(raw);
   if (!s || !normalizeUrl(s)) throw unsupported(raw);
   if (HAS_SCHEME.test(s) && new URL(s).password) {
     throw new PlaybookSourceError('Playbook source URLs cannot carry a password.', 'UNSUPPORTED_SOURCE');
   }
-  assertUrlAllowed(s, settings);
+  assertUrlAllowed(s, settings, { adminPolicy });
   return s;
 }
 
 // settings: the `playbooks` settings namespace ({ sources, autoUpdate }).
-function resolveSource(input, { examplesDir = null, settings = {} } = {}) {
+// adminPolicy: true in service mode, where that allowlist comes from the
+// admin service.json; it only changes the wording of a refusal.
+function resolveSource(input, { examplesDir = null, settings = {}, adminPolicy = false } = {}) {
   if (typeof input !== 'string' || !input.trim()) throw new PlaybookSourceError('A playbook source is required.', 'UNSUPPORTED_SOURCE');
   const raw = input.trim();
   if (raw.startsWith('-')) throw unsupported(raw);
@@ -205,7 +215,7 @@ function resolveSource(input, { examplesDir = null, settings = {} } = {}) {
     if (!st || !st.isDirectory()) throw new PlaybookSourceError(`Playbook folder ${abs} does not exist.`, 'NO_FOLDER');
     return { kind: 'path', source: `path:${abs}`, fetchSpec: { path: abs } };
   }
-  const url = checkGitUrl(raw, settings);
+  const url = checkGitUrl(raw, settings, { adminPolicy });
   return { kind: 'git', source: url, fetchSpec: { url } };
 }
 
@@ -482,11 +492,11 @@ async function readRemoteManifest(url, { timeoutMs = DEFAULT_TIMEOUT_MS, tmpRoot
 // in a fresh temp repository, not in `subDir`: the submodule's own git dir
 // and config are case content, and a fetch there would also write objects
 // into the case.
-async function fetchSubmoduleManifest(subDir, url, { settings = {}, timeoutMs = DEFAULT_TIMEOUT_MS, tmpRoot = os.tmpdir() } = {}) {
+async function fetchSubmoduleManifest(subDir, url, { settings = {}, adminPolicy = false, timeoutMs = DEFAULT_TIMEOUT_MS, tmpRoot = os.tmpdir() } = {}) {
   if (!url || typeof url !== 'string') throw new PlaybookSourceError('The submodule has no url in .gitmodules.', 'SOURCE_NOT_ALLOWED');
   const raw = url.trim();
   if (raw.startsWith('-')) throw unsupported(raw);
-  const checked = checkGitUrl(raw, settings);
+  const checked = checkGitUrl(raw, settings, { adminPolicy });
   return readRemoteManifest(checked, { timeoutMs, tmpRoot });
 }
 
@@ -496,6 +506,7 @@ module.exports = {
   normalizeUrl,
   isUrlAllowed,
   assertUrlAllowed,
+  allowlistHint,
   assertPathAllowed,
   resolveSource,
   checkRef,

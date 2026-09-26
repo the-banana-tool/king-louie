@@ -9,7 +9,7 @@ const { createLogger } = require('../../logging');
 
 const log = createLogger('cases/playbooks');
 
-function installPlaybooks(runtime, { getSettings = () => ({}), examplesDir = null, caseTypes = defaultCaseTypes(), tmpRoot = null } = {}) {
+function installPlaybooks(runtime, { getSettings = () => ({}), examplesDir = null, caseTypes = defaultCaseTypes(), tmpRoot = null, adminPolicy = false } = {}) {
   // The host's getter can throw: in create-core the registry may be a const
   // declared below this call (a TDZ ReferenceError until it runs).
   const getExecutorRegistry = () => {
@@ -19,7 +19,7 @@ function installPlaybooks(runtime, { getSettings = () => ({}), examplesDir = nul
       return null;
     }
   };
-  const manager = new PlaybookManager({ runtime, getSettings, examplesDir, getExecutorRegistry, caseTypes, tmpRoot });
+  const manager = new PlaybookManager({ runtime, getSettings, examplesDir, getExecutorRegistry, caseTypes, tmpRoot, adminPolicy });
   runtime.playbooks = manager;
 
   // R18: fn(executorId, caseId); C3's briefRules(id, { caseId }) calls it.

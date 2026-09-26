@@ -85,10 +85,22 @@ describe('createCore playbooks wiring', () => {
     assert.deepStrictEqual(manager.settings(), admin);
     assert.strictEqual(warnings.length, 1, 'warned once');
 
-    // No admin block: nothing allowed, no auto-update, whatever the data dir says.
+    // No admin block: an empty list (no URL sources, local folders
+    // unrestricted, no auto-update), whatever the data dir says.
     const bare = createCore(makeDeps({ isService: true }));
     bare.context.setSettings({ ...bare.context.getSettings(), playbooks: { sources: ['path:/'], autoUpdate: true } });
     assert.deepStrictEqual(bare.context.getPlaybookManager().settings(), { sources: [], autoUpdate: false });
+  });
+
+  // The not-allowed error names where the allowlist lives in this mode.
+  it('a source outside the allowlist points the desktop at Settings and the service at the admin service.json', async () => {
+    const url = 'https://example.org/playbooks/land-sale.git';
+    const desktop = createCore(makeDeps()).context.getPlaybookManager();
+    await assert.rejects(desktop.prepare(url), (err) => err.code === 'SOURCE_NOT_ALLOWED'
+      && /Add its host to Settings → Playbooks → Allowed sources\.$/.test(err.message));
+    const service = createCore(makeDeps({ isService: true, playbooksConfig: { sources: ['https://example.com/admin/'], autoUpdate: false } })).context.getPlaybookManager();
+    await assert.rejects(service.prepare(url), (err) => err.code === 'SOURCE_NOT_ALLOWED'
+      && /Set playbooks\.sources in the admin service\.json\.$/.test(err.message) && !/Settings/.test(err.message));
   });
 
   it('run.js passes the admin block to createCore as playbooksConfig', () => {
@@ -124,7 +136,7 @@ describe('service.json playbooks block', () => {
   }
   const abs = path.resolve(os.tmpdir(), 'playbooks');
 
-  it('defaults to nothing allowed and no auto-update', () => {
+  it('defaults to an empty list: no URL sources, local folders unrestricted, no auto-update', () => {
     assert.deepStrictEqual(load(null).playbooks, { sources: [], autoUpdate: false });
   });
 
