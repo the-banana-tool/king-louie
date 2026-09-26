@@ -179,3 +179,31 @@ describe('contact adapter: email over the relay and over IMAP/SMTP', () => {
     }
   });
 });
+
+describe('contact adapter: ntfy (delivery only)', () => {
+  const { NtfyContact, NO_TEXT } = require('../src/channels/ntfy-contact');
+
+  it('meets the contract: send only, never an owner target, text only when includeText', async () => {
+    const published = [];
+    const publisher = { send: async (p) => { published.push(p); return { ok: true, channel: 'ntfy', topic: p.topic }; } };
+    let includeText = false;
+    const ntfy = new NtfyContact({ getConfig: () => ({ topic: 'kl-owner-topic', includeText }), publisher });
+    const caps = ntfy.contactCapabilities();
+    assert.strictEqual(caps.expectsReplies, false);
+    assert.strictEqual(caps.deliveryOnly, true);
+    assert.strictEqual(ntfy.ownerTarget(), null);
+    assert.strictEqual(ntfy.contactConfigured(), true);
+    assert.strictEqual((await ntfy.sendContact(MESSAGE, META)).deliveryId, 'd-test-1');
+    assert.deepStrictEqual(published[0], { topic: 'kl-owner-topic', title: MESSAGE.subject, body: NO_TEXT });
+    includeText = true;
+    await ntfy.sendContact(MESSAGE, META);
+    assert.strictEqual(published[1].body, MESSAGE.text);
+    await assert.rejects(ntfy.send('kl-owner-topic', 'hi'), /without the outbound gate/);
+
+    const failing = new NtfyContact({ getConfig: () => ({ topic: 't' }), publisher: { send: async () => { throw new Error('ntfy publish failed: 500'); } } });
+    await assert.rejects(failing.sendContact(MESSAGE, META), (err) => err instanceof ContactDeliveryError && err.code === 'unreachable');
+    const privateNet = new NtfyContact({ getConfig: () => ({ baseUrl: 'http://127.0.0.1:8080', topic: 't' }) });
+    await assert.rejects(privateNet.sendContact(MESSAGE, META), /private network/, 'the NtfyChannel SSRF guard is kept');
+    assert.strictEqual(new NtfyContact({ getConfig: () => ({}) }).contactCapabilities(), null);
+  });
+});
