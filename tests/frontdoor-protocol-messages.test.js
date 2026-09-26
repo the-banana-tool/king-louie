@@ -174,3 +174,42 @@ describe('strictness beyond the shapes', () => {
     assert.equal(P.rawEd25519(node.publicKey.toString('hex')), P.rawEd25519(node.publicKey));
   });
 });
+
+describe('fix round 1', () => {
+  it('isDnsName refuses names the URL parser reads as IPv4', () => {
+    for (const bad of ['0x7f.1', '1.2.3', '10.0.0.1', 'example.123', 'example.0x7f', 'example.0x']) assert.equal(P.isDnsName(bad), false, bad);
+    for (const good of ['kl.example.com', 'mcp.kl.example.com', 'a1.b2.example.com', 'example.123abc', 'example.0xg1', 'x.io']) assert.equal(P.isDnsName(good), true, good);
+  });
+
+  it('normalizePairingCode returns an empty string for any non-string and pins dotted capital I', () => {
+    for (const bad of [undefined, null, 42, {}, ['abandon'], Object.create(null), Symbol('x')]) assert.equal(P.normalizePairingCode(bad), '');
+    assert.equal(P.normalizePairingCode('İ'), 'i̇', 'default Unicode lower case, not locale: U+0130 becomes i + U+0307');
+    assert.notEqual(P.pairingCodeHash('İ'), P.pairingCodeHash('i'));
+  });
+
+  it('URLs with userinfo or a fragment are refused', () => {
+    for (const bad of ['https://user@client.example.com/c.json', 'https://user:pw@client.example.com/c.json', 'https://@client.example.com/c.json',
+      'https://:@client.example.com/c.json', 'https://client.example.com/c.json#frag', 'https://client.example.com/c.json#']) assert.equal(P.isClientId(bad), false, bad);
+    assert.equal(P.isClientId('https://client.example.com/c.json?x=a@b'), true, 'an @ outside the authority is not userinfo');
+    const fd = testNodeIdentity({ key: 'relay' });
+    const accept = (meshUrl) => open(P.buildNodePairAccept({ identity: fd, pairingId: `pr_${id22()}`, nodeId: 'kl-hnef32472qzibi5r', nonce: nonce(), meshUrl, meshCertFingerprint: 'b'.repeat(64) })).message;
+    for (const bad of ['wss://u@mesh.kl.example.com/mesh/v1', 'wss://u:p@mesh.kl.example.com/mesh/v1', 'wss://mesh.kl.example.com/mesh/v1#x', 'wss://mesh.kl.example.com/mesh/v1#']) {
+      assert.equal(validateMessage('kl.node.pair.accept', accept(bad)), 'malformed', bad);
+    }
+  });
+
+  it('kl.relay.repin refuses old_spki equal to new_spki', () => {
+    const fd = testNodeIdentity({ key: 'relay' });
+    const pin = `sha256/${nonce()}`;
+    const repin = P.buildRelayRepin({ identity: fd, relay: 'https://mcp.kl.example.com', oldSpki: pin, newSpki: pin, now: Date.parse(NOW) });
+    assert.equal(validateMessage('kl.relay.repin', open(repin).message), 'malformed');
+  });
+
+  it('buildNodePair refuses an empty code', () => {
+    const node = testNodeIdentity({ key: 'gpu-box', nodeName: 'gpu-box' });
+    const certPem = require('../src/mesh/mesh-identity').MeshIdentity._generateFallbackTlsCert('gpu-box', 1).cert;
+    for (const code of ['', '   \t ', undefined, null, 42]) {
+      assert.throws(() => P.buildNodePair({ identity: node, frontdoorHost: 'mcp.kl.example.com', code, profile: 'agent', tlsCertPem: certPem, now: Date.parse(NOW) }), TypeError);
+    }
+  });
+});

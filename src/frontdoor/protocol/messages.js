@@ -79,15 +79,25 @@ function isScopeList(list) {
   return true;
 }
 
+// The WHATWG URL parser reads a host whose last label is numeric (decimal or
+// 0x-hex) as IPv4 ('1.2.3', '0x7f.1'), so such a name is never a DNS name.
+const NUMERIC_LABEL_RE = /^(?:[0-9]+|0x[0-9a-f]*)$/i;
+
 function isDnsName(v) {
-  return matches(DNS_NAME_RE, v) && net.isIP(v) === 0;
+  return matches(DNS_NAME_RE, v) && net.isIP(v) === 0 && !NUMERIC_LABEL_RE.test(v.slice(v.lastIndexOf('.') + 1));
 }
 
+// No userinfo and no fragment. The parsed URL drops an empty userinfo
+// ('https://@host') and an empty fragment ('…#'), so the raw text is checked
+// too: '@' inside the authority, or any '#' (a literal '#' can only start a
+// fragment).
 function isUrlWithProtocol(v, protocol, max) {
-  if (!isString(v) || v.length === 0 || v.length > max) return false;
+  if (!isString(v) || v.length === 0 || v.length > max || v.includes('#')) return false;
   try {
     const url = new URL(v);
-    return url.protocol === protocol && url.hostname.length > 0;
+    if (url.protocol !== protocol || url.hostname.length === 0 || url.username !== '' || url.password !== '' || url.hash !== '') return false;
+    const afterScheme = v.slice(v.indexOf('//') + 2);
+    return !afterScheme.split(/[/?\\]/)[0].includes('@');
   } catch {
     return false;
   }
@@ -127,9 +137,11 @@ function randomUserCode() {
 }
 
 // A pairing code (6 words) as both ends hash it: trimmed, lower case, one
-// space between words (§4.4).
+// space between words (§4.4). toLowerCase is the default Unicode mapping, not
+// the locale's (U+0130 becomes 'i' + U+0307 everywhere). '' for a non-string.
 function normalizePairingCode(text) {
-  return String(text === undefined || text === null ? '' : text).trim().toLowerCase().split(/\s+/).filter(Boolean).join(' ');
+  if (!isString(text)) return '';
+  return text.trim().toLowerCase().split(/\s+/).filter(Boolean).join(' ');
 }
 
 function pairingCodeHash(code) {
@@ -194,7 +206,7 @@ const VALIDATORS = {
     && matches(HEX_SHA256_RE, m.mesh_cert_fingerprint) && matches(RAW_ED25519_RE, m.frontdoor_public_key),
   'kl.relay.repin': (m) => hasExactKeys(m, ['v', 'type', 'frontdoor_id', 'relay', 'old_spki', 'new_spki', 'created_at'])
     && matches(NODE_ID_RE, m.frontdoor_id) && isHttpsUrl(m.relay, URI_MAX) && matches(SPKI_PIN_RE, m.old_spki)
-    && matches(SPKI_PIN_RE, m.new_spki) && isTimestamp(m.created_at)
+    && matches(SPKI_PIN_RE, m.new_spki) && m.old_spki !== m.new_spki && isTimestamp(m.created_at)
 };
 
 for (const [type, validator] of Object.entries(VALIDATORS)) registerMessageValidator(type, validator);
@@ -202,6 +214,7 @@ for (const [type, validator] of Object.entries(VALIDATORS)) registerMessageValid
 // ── Builders (node and front door; the phone builds its own, §5) ───────────
 
 function buildNodePair({ identity, frontdoorHost, code, profile, capabilities = [], tlsCertPem, nonce = null, now = Date.now() }) {
+  if (normalizePairingCode(code) === '') throw new TypeError('buildNodePair needs a pairing code');
   return seal({
     v: 1,
     type: 'kl.node.pair',
