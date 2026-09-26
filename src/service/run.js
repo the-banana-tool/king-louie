@@ -57,7 +57,7 @@ function adminDirApprovalOptions({ adminUid, configDir }) {
 function loadProfile(profile) {
   if (profile === 'agent') {
     return {
-      async start({ dataDir, features, ports, workspace, audit, adminUid, configDir }) {
+      async start({ dataDir, features, ports, workspace, audit, contact = null, adminUid, configDir }) {
         const { createCore } = require('../core');
         const { CHAT_DATA_DEFAULTS } = require('../core/settings');
         const { buildServicePorts } = require('./ports');
@@ -93,9 +93,15 @@ function loadProfile(profile) {
             features,
             ports,
             workingDirectory: workspace,
+            // Cases stage 4: the owner identity and contact addresses, from
+            // the admin service.json only (runService loads it once, with
+            // adminUid). The key is always present: it means service mode.
+            contactConfig: contact ?? null,
+            isService: true,
             remoteApprovals: 'phone',
             phoneApprover: approvals.phoneApprover,
             auditLedger: approvals.auditLedger,
+            approvals, // Cases stage 4 (wave 3): the phone contact channel (relay link, admin approvers, node identity)
             nodePolicy: nodeConfig.policy,
             builtinSkillsDir: path.join(__dirname, '..', '..', 'skills')
           });
@@ -237,7 +243,7 @@ async function runService({ dataDir: requestedDataDir, profile: profileOverride,
       const config = loadServiceConfig(dataDir, { profile: profileOverride }, adminUid === undefined ? {} : { adminUid });
       profile = config.profile;
       log.info('service starting', { profile, dataDir, workspace, pid: process.pid });
-      running = await loadProfile(profile).start({ dataDir, features: config.features, ports: config.ports, workspace, audit: config.audit, adminUid });
+      running = await loadProfile(profile).start({ dataDir, features: config.features, ports: config.ports, workspace, audit: config.audit, contact: config.contact, adminUid });
     } catch (err) {
       // On Windows nothing reads the task's stderr, so the log file is the
       // only place a startup failure is visible.

@@ -24,11 +24,17 @@ function readJson(file, fallback) {
   }
 }
 
-function writeJson(file, value) {
+// Raw atomic write (temp file + rename) for callers that need it on text
+// that isn't a JSON.stringify of a value (e.g. JSONL files, cursor files).
+function writeAtomic(file, text) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
-  fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`);
+  fs.writeFileSync(tmp, text);
   fs.renameSync(tmp, file);
+}
+
+function writeJson(file, value) {
+  writeAtomic(file, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 function writeJsonIfChanged(file, value) {
@@ -44,4 +50,4 @@ function writeJsonIfChanged(file, value) {
   return true;
 }
 
-module.exports = { readJson, writeJson, writeJsonIfChanged };
+module.exports = { readJson, writeJson, writeJsonIfChanged, writeAtomic };

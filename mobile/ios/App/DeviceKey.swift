@@ -116,6 +116,21 @@ final class DeviceKey {
         }
     }
 
+    /// A signature with the session context the app already unlocked, or nil.
+    /// Never prompts: for background work that must not ask for Face ID
+    /// (cases stage 4 presence pings, ruling T19-presence).
+    func signIfUnlocked(_ data: Data) -> Data? {
+        guard let context = sessionContext else { return nil }
+        // If the context needs authentication again, the Secure Enclave fails
+        // instead of showing Face ID: no signature, no prompt.
+        let prior = context.interactionNotAllowed
+        context.interactionNotAllowed = true
+        defer { context.interactionNotAllowed = prior }
+        guard let signed = try? signature(data, context: context) else { return nil }
+        unusable = false
+        return signed
+    }
+
     /// Signs with a context that just passed biometrics. On failure, the key
     /// is declared invalid (ProtocolError.keyInvalidated, and the app deletes
     /// it) only when that is confirmed: the Keychain no longer has it, or the
@@ -153,6 +168,9 @@ final class DeviceKey {
         sessionContext = context
         return context
     }
+
+    /// An API session is unlocked (no prompt needed to sign a request).
+    var isSessionUnlocked: Bool { sessionContext != nil }
 
     func endSession() {
         sessionContext?.invalidate()

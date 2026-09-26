@@ -91,7 +91,7 @@ fun Welcome(model: AppModel) {
 @Composable
 fun Main(model: AppModel) {
     var tab by remember { mutableStateOf(0) }
-    val tabs = listOf("Pending", "History", "Nodes", "Devices", "Settings")
+    val tabs = listOf("Pending", "Questions", "History", "Nodes", "Devices", "Settings")
     Scaffold(bottomBar = {
         NavigationBar {
             tabs.forEachIndexed { i, label -> NavigationBarItem(selected = tab == i, onClick = { tab = i }, icon = {}, label = { Text(label) }) }
@@ -104,9 +104,10 @@ fun Main(model: AppModel) {
             model.fingerprintToCompare?.let { Text("This phone: $it — check the other screen shows the same.", Modifier.padding(6.dp), fontFamily = FontFamily.Monospace) }
             when (tab) {
                 0 -> Pending(model)
-                1 -> History(model)
-                2 -> Nodes(model)
-                3 -> Devices(model)
+                1 -> Questions(model)
+                2 -> History(model)
+                3 -> Nodes(model)
+                4 -> Devices(model)
                 else -> Settings(model)
             }
         }

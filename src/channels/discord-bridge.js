@@ -1,6 +1,12 @@
 const crypto = require('crypto');
-const { ChannelPlugin } = require('./channel-plugin');
-const { Client, GatewayIntentBits, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { ChannelPlugin, ContactDeliveryError } = require('./channel-plugin');
+const {
+  contactOwnerProven, contactOwnerOf, bridgeCapabilities, matchContactReply, swallowRefusedContact,
+  parseCallback, buttonRows, discordError, redact
+} = require('./bridge-contact');
+const {
+  Client, GatewayIntentBits, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags, MessageReferenceType, ChannelType
+} = require('discord.js');
 const {
   splitMessage,
   formatHelp,
@@ -66,6 +72,10 @@ class DiscordChannel extends ChannelPlugin {
     this.unknownSenderSeen = new NoticeLimiter();
 
     this.boundAgentResponse = this.handleAgentResponse.bind(this);
+    // Cases stage 4 contact state.
+    this.contactHost = null;
+    this.contactReplyHandler = null;
+    this.contactDm = null;
   }
 
   async initialize(gateway) {
@@ -203,6 +213,8 @@ class DiscordChannel extends ChannelPlugin {
   async handleMessageCreate(message) {
     if (message.author.bot) return;
     if (message.author.id === this.botUserId) return;
+    // Cases stage 4: contact replies go to the router before the allowlist.
+    if (await this.maybeHandleContactMessage(message)) return;
 
     const inbound = this.normalizeInboundMessage(message);
     const text = inbound.text;
@@ -711,8 +723,163 @@ class DiscordChannel extends ChannelPlugin {
     }
   }
 
+  // ---- Contact (cases stage 4 §3.1). The contact target is the DM with the
+  // contact owner, opened with users.fetch(ownerUserId).createDM(). ----
+
+  // host: { router, getOwnerUserId(), isEnabled() } from src/cases/contact-host.js
+  setContactHost(host) {
+    this.contactHost = host && typeof host === 'object' ? host : null;
+    this.contactDm = null;
+  }
+
+  _contactOwner() {
+    return contactOwnerOf(this.contactHost);
+  }
+
+  ownerTarget() {
+    return this._contactOwner();
+  }
+
+  contactCapabilities() {
+    if (!this.ownerTarget()) return null;
+    // Discord allows 5 buttons per row and 2000 characters per message.
+    return bridgeCapabilities({ maxOptions: 5, maxChars: 1900 });
+  }
+
+  onContactReply(handler) {
+    this.contactReplyHandler = typeof handler === 'function' ? handler : null;
+  }
+
+  async _contactChannel() {
+    const owner = this._contactOwner();
+    if (!owner || !this.client) return null;
+    if (this.contactDm && this.contactDm.owner === owner) return this.contactDm.channel;
+    const user = await this.client.users.fetch(owner);
+    const channel = await user.createDM();
+    this.contactDm = { owner, channel };
+    return channel;
+  }
+
+  // The contact DM channel id, or null (contact off, not connected, or the
+  // DM could not be opened: then nothing is owner-proven).
+  async _contactDmId() {
+    try {
+      const dm = await this._contactChannel();
+      return dm && dm.id ? String(dm.id) : null;
+    } catch (error) {
+      log.debug(`contact DM unavailable: ${redact(error.message, this.token)}`);
+      return null;
+    }
+  }
+
+  async sendContact(message, meta = {}) {
+    let dm;
+    try {
+      dm = await this._contactChannel();
+    } catch (error) {
+      throw discordError(error, { secret: this.token });
+    }
+    if (!dm) throw new ContactDeliveryError('not-configured', 'Discord contact is off, has no contact owner id, or the bot is not connected');
+    // Buttons only for items answerable here (owner decision M22); at most 5
+    // rows per message, later items are answered with their #token.
+    const components = buttonRows(message.items, 5).slice(0, 5).map((row) => new ActionRowBuilder().addComponents(
+      ...row.map((b) => new ButtonBuilder().setCustomId(b.data).setLabel(b.label).setStyle(ButtonStyle.Secondary))
+    ));
+    let sent;
+    try {
+      sent = await dm.send({ content: message.text, components });
+    } catch (error) {
+      throw discordError(error, { secret: this.token });
+    }
+    return { deliveryId: meta.deliveryId || null, externalRef: sent?.id ? String(sent.id) : null };
+  }
+
+  async _contactReply(correlationId, answer, meta) {
+    const result = await this.contactReplyHandler(correlationId, answer, { channel: 'discord', at: new Date().toISOString(), ...meta });
+    if (result && result.ackText && meta.ownerProven) {
+      try {
+        const dm = await this._contactChannel();
+        if (dm) await dm.send({ content: result.ackText });
+      } catch (error) {
+        log.warn(`contact ack failed: ${redact(error.message, this.token)}`);
+      }
+    }
+    return result;
+  }
+
+  // Only the contact owner, inside the contact DM, is owner-proven; a guild
+  // channel never is.
+  // The contact DM's id for a message in `channelId`. When the DM lookup
+  // fails (users.fetch / createDM, final review M4), a DM channel whose
+  // author is the contact owner is the bot's DM with the owner, so it stands
+  // in; anything else stays unmatched and the failure is logged at warn.
+  async _contactTarget({ guildId, channelId, channelType, senderId }) {
+    const target = await this._contactDmId();
+    if (target || guildId) return target;
+    const owner = this._contactOwner();
+    if (owner && channelType === ChannelType.DM && String(senderId) === owner) {
+      log.warn('contact DM lookup failed; using the owner DM this message arrived in');
+      return String(channelId);
+    }
+    if (owner) log.warn('contact DM lookup failed; a reply there cannot be matched to a contact question');
+    return null;
+  }
+
+  async _contactProven({ guildId, channelId, senderId, channelType = null }) {
+    if (guildId) return false;
+    const target = await this._contactTarget({ guildId, channelId, channelType, senderId });
+    return contactOwnerProven({ isPrivate: true, chatId: channelId, senderId, target, ownerUserId: this._contactOwner() });
+  }
+
+  // A "#<token> ..." message (any channel) or a reply to a contact message
+  // (only in the contact DM, preflight M17) goes to the router, never to
+  // routeAgentMessage or a local chat. Everyone but the owner in the contact
+  // DM is refused there (ownerProven: false), and a forward or crosspost is
+  // never the owner speaking (nor is a forward a reply). A refused sender the
+  // allowlist does not know then takes the normal unauthorized path.
+  async maybeHandleContactMessage(message) {
+    if (!this.contactHost || !this.contactReplyHandler || !this.contactHost.router) return false;
+    const text = String(message.content || '').trim();
+    const channelId = String(message.channelId);
+    const guildId = message.guildId || null;
+    const forwarded = discordForwarded(message);
+    let replyTo = null;
+    if (!guildId && !forwarded && message.reference?.messageId
+      && (message.reference.channelId == null || String(message.reference.channelId) === channelId)) {
+      replyTo = String(message.reference.messageId);
+    }
+    // Ask the router first, so an ordinary DM reply costs no DM lookup.
+    if (replyTo && !this.contactHost.router.knows('discord', replyTo, { ref: true })) replyTo = null;
+    const senderId = String(message.author?.id || '');
+    const channelType = message.channel?.type ?? null;
+    if (replyTo && (await this._contactTarget({ guildId, channelId, channelType, senderId })) !== channelId) replyTo = null;
+    const match = matchContactReply(this.contactHost.router, 'discord', text, replyTo);
+    if (!match) return false;
+    const ownerProven = !forwarded && await this._contactProven({ guildId, channelId, senderId, channelType });
+    await this._contactReply(match.correlationId, { text }, { senderId, chatId: channelId, ownerProven, deliveryRef: match.deliveryRef });
+    if (ownerProven) return true;
+    return swallowRefusedContact(this.allowlistManager, 'discord', senderId, guildId ? channelId : null);
+  }
+
+  async handleContactInteraction(interaction) {
+    const parsed = parseCallback(interaction.customId);
+    if (!parsed || !this.contactReplyHandler) {
+      await interaction.reply({ content: 'Unknown action', ephemeral: true });
+      return;
+    }
+    const senderId = String(interaction.user?.id || interaction.member?.user?.id || '');
+    const ownerProven = await this._contactProven({ guildId: interaction.guildId || null, channelId: String(interaction.channelId), senderId, channelType: interaction.channel?.type ?? null });
+    await interaction.reply({ content: ownerProven ? 'Received' : 'Not allowed', ephemeral: true });
+    await this._contactReply(parsed.token, { optionIndex: parsed.index }, { senderId, chatId: String(interaction.channelId), ownerProven });
+  }
+
   async handleInteractionCreate(interaction) {
     if (!interaction.isButton()) return;
+    // Cases stage 4: contact buttons are checked before approval buttons.
+    if (String(interaction.customId || '').startsWith('kl_q_')) {
+      await this.handleContactInteraction(interaction);
+      return;
+    }
 
     const callbackId = interaction.customId;
     const match = callbackId.match(/^kl_a_([a-z0-9]+)_(y|n)$/i);
@@ -756,6 +923,17 @@ class DiscordChannel extends ChannelPlugin {
     await interaction.reply({ content: approved ? 'Approved' : 'Denied' });
     await this.sendMessage(interaction.channelId, approved ? '✅ Tool execution approved.' : '❌ Tool execution denied.');
   }
+}
+
+// A forwarded message (a Forward reference, message snapshots, the
+// HasSnapshot flag) or a crosspost from a followed channel carries someone
+// else's words, so it never proves the owner (review T10 M3).
+function discordForwarded(message) {
+  const flags = message.flags;
+  const bits = flags == null ? 0 : Number(typeof flags === 'object' ? flags.bitfield : flags) || 0;
+  return message.reference?.type === MessageReferenceType.Forward
+    || (message.messageSnapshots?.size ?? 0) > 0
+    || (bits & (MessageFlags.HasSnapshot | MessageFlags.IsCrosspost)) !== 0;
 }
 
 // The exact prefix getOrCreateLocalChat writes into a chat's title.

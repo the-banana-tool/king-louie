@@ -313,3 +313,150 @@ describe('createCore: listener readiness', () => {
     await core.shutdown();
   });
 });
+
+describe('createCore: contact host (cases stage 4)', () => {
+  it('serves getContact() once started; desktop mode takes the owner from settings, service mode (deps.contactConfig) from the admin block', async () => {
+    const { deps } = makeDeps();
+    const core = createCore(deps);
+    assert.strictEqual(core.context.getContact(), null, 'nothing before start()');
+    await core.start();
+    try {
+      const contact = core.context.getContact();
+      assert.ok(contact && contact.ladder && contact.presence && contact.router);
+      assert.deepStrictEqual(contact.ladderState(), {});
+    } finally {
+      await core.shutdown();
+    }
+  });
+
+  it('shutdown stops the contact host before the channels and the webhook server, under the shutdown timeout', async () => {
+    const { deps } = makeDeps();
+    const core = createCore({ ...deps, contactConfig: null, shutdownTimeoutMs: 50 });
+    await core.start();
+    const order = [];
+    const { ladder } = core.context.getContact();
+    const ladderStop = ladder.stop.bind(ladder);
+    ladder.stop = async () => { order.push('contact'); await ladderStop(); return new Promise(() => {}); };
+    const registry = core.context.getChannelRegistry();
+    const shutdownAll = registry.shutdownAll.bind(registry);
+    registry.shutdownAll = async () => { order.push('channels'); return shutdownAll(); };
+    const webhook = core.getWebhookServer();
+    const webhookStop = webhook.stop.bind(webhook);
+    webhook.stop = async () => { order.push('webhook'); return webhookStop(); };
+    // withTimeout's timer is unref'd and the contact stop never settles here.
+    const release = require('./helpers/hold-event-loop').holdEventLoop();
+    const startedAt = Date.now();
+    try {
+      await core.shutdown();
+    } finally {
+      release();
+    }
+    assert.deepStrictEqual(order.slice(0, 1), ['contact']);
+    assert.ok(order.includes('channels') && order.includes('webhook'));
+    assert.ok(Date.now() - startedAt < 2000, 'a hung contact stop does not hang quit');
+  });
+});
+
+describe('createCore: a contact host that cannot start (ruling T13-start)', () => {
+  it('logs it, leaves contact off, warns the owner once and starts everything else', async () => {
+    const { deps } = makeDeps();
+    // A cases root that is a file: the ladder's lease open throws ENOTDIR at start.
+    fs.writeFileSync(path.join(deps.paths.dataDir, 'cases-file'), 'not a directory');
+    // A relay, so the failed start has a poller and the push route to undo.
+    deps.store.set('settings', {
+      cases: { root: 'cases-file' },
+      contact: { relays: { main: { baseUrl: 'https://relay.example.com', pollSec: 30 } } }
+    });
+    const { RelayPoller } = require('../src/channels/relay-client');
+    const pollers = [];
+    const pollerStart = RelayPoller.prototype.start;
+    RelayPoller.prototype.start = function trackedStart() { pollers.push(this); return pollerStart.call(this); };
+    const toasts = [];
+    const core = createCore({ ...deps, features: { ...deps.features, channels: true }, uiToastChannel: { send: async (p) => { toasts.push(p); } } });
+    try {
+      await core.start();
+    } finally {
+      RelayPoller.prototype.start = pollerStart;
+    }
+    try {
+      assert.strictEqual(core.context.getContact(), null, 'contact is off');
+      assert.ok(core.context.toolRegistry.getFunctionDefinitions().length > 10, 'the rest of the core started');
+      assert.strictEqual(toasts.length, 1);
+      assert.match(toasts[0].body, /^Contact channels could not start: .+\. Cases will only reach you in the app\.$/);
+      assert.strictEqual(core.getWebhookServer().contactRelayHandler, null, 'the relay push route is gone');
+      assert.ok(pollers.length === 1, 'the relay poller had started');
+      assert.ok(pollers.every((p) => !p.running && p.timer === null), 'and is stopped');
+      // Bridge detach after a failed start: tests/contact-host.test.js
+      // "T13-start: after a start failure…" (no bridge runs without a token here).
+    } finally {
+      await core.shutdown();
+    }
+  });
+});
+
+describe('createCore: contact construction and a bad presence file (final review I2)', () => {
+  it('contact/presence.json as a directory: core.start() succeeds and contact runs with empty presence', async () => {
+    const { deps } = makeDeps();
+    fs.mkdirSync(path.join(deps.paths.dataDir, 'contact', 'presence.json'), { recursive: true });
+    const core = createCore(deps);
+    await core.start();
+    try {
+      const contact = core.context.getContact();
+      assert.ok(contact && contact.presence, 'contact is on');
+      assert.deepStrictEqual(contact.presence.channels, {});
+      // A later owner-proven inbound does not throw on the unwritable file.
+      contact.presence.noteInbound('telegram');
+      assert.ok(contact.presence.channels.telegram);
+    } finally {
+      await core.shutdown();
+    }
+  });
+
+  it('a contact host that throws while being built leaves contact off and starts everything else', async () => {
+    const { deps } = makeDeps();
+    const { Presence } = require('../src/cases/presence');
+    const load = Presence.prototype._load;
+    Presence.prototype._load = () => { throw new Error('construction boom'); };
+    const toasts = [];
+    const core = createCore({ ...deps, uiToastChannel: { send: async (p) => { toasts.push(p); } } });
+    try {
+      await core.start();
+    } finally {
+      Presence.prototype._load = load;
+    }
+    try {
+      assert.strictEqual(core.context.getContact(), null);
+      assert.ok(core.context.toolRegistry.getFunctionDefinitions().length > 10);
+      assert.strictEqual(toasts.length, 1);
+      assert.match(toasts[0].body, /construction boom/);
+    } finally {
+      await core.shutdown();
+    }
+  });
+});
+
+describe('createCore: service mode is explicit (final review M6)', () => {
+  const settings = {
+    contact: { sms: { owner: '+15550100', from: '+15550199', relay: 'main' }, relays: { main: { baseUrl: 'https://relay.example.com', pollSec: 30 } } },
+    channels: { sms: { enabled: true } }
+  };
+  for (const [label, extra, expectSms] of [
+    ['desktop (no service signal) reads the owner from settings', {}, true],
+    ['deps.isService: true ignores data-dir contact settings', { isService: true }, false],
+    ['remoteApprovals "phone" alone also means service mode', { remoteApprovals: 'phone', phoneApprover: { ttlMs: 300000, request: async () => false } }, false]
+  ]) {
+    it(label, async () => {
+      const { deps } = makeDeps();
+      deps.store.set('settings', settings);
+      const core = createCore({ ...deps, ...extra, features: { ...deps.features, channels: true } });
+      await core.start();
+      try {
+        const contact = core.context.getContact();
+        assert.ok(contact);
+        assert.strictEqual(Boolean(contact.router.adapter('sms')), expectSms);
+      } finally {
+        await core.shutdown();
+      }
+    });
+  }
+});

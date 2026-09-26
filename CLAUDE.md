@@ -346,3 +346,95 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage5-detours.md`.
   quote — never a prefix, a substring, or text assembled across tokens.
 - `case.yaml` `related` is written only by `CaseRuntime.addRelation` and
   `removeRelation`.
+
+## Cases: contact channels (stage 4)
+
+Spec: `docs/superpowers/specs/2026-09-23-cases-stage4-channels.md`.
+
+- Every open question in every case goes up a contact ladder
+  (`src/cases/ladder.js`): `settings.contactPolicy.ladders[urgency]`, or
+  `case.yaml` `channels` (`call` = `voice`). One process per cases root runs
+  it (`<casesRoot>/.contact.lock`); its state is `<dataDir>/contact/`
+  (`ladder.json`, `deliveries.json`, `inbox.jsonl`, `presence.json`).
+- Answers from any channel go through `ContactRouter.handleReply`
+  (`src/cases/contact.js`) and then `CaseRuntime.answerQuestion`. An adapter
+  sets `ownerProven` only after its own check: Telegram and Discord accept
+  only a private chat/DM with the contact owner id, and only from that
+  sender; email must come from the owner's address, and have either an
+  authenticated pass (the topmost `Authentication-Results` header) or the
+  thread's `[KL-<token>]` token (`email-channel.js`); SMS needs the owner
+  number plus `#TOKEN`; voice and SMS both go through the relay, and voice
+  DTMF digits are owner-proven only by where the call was placed (the owner
+  number), not by anything the caller proves; the phone app needs a
+  device-signed envelope verified on the node. An explicit
+  `#token` in a reply always beats reply-to/thread correlation, so a stray
+  in-reply-to match can't steal an answer meant for a different question.
+  Tokens are never rendered on a delivery-only channel such as ntfy
+  (`caps.expectsReplies !== true` drops the reply footer), since there is
+  nowhere for a reply to land. A different second answer never overwrites
+  the first: the first answer stands, and a follow-up question asks which
+  one stands, on the channel that gave the second answer
+  (`contact.js` `_conflict`/`conflictFact`).
+- Owner decision (M22): a question C2 marks `mcpAnswerable:false` — a
+  budget-grant, a budget-daily, a direction question, or a commit-failed
+  question — is only
+  answered in the app or from the owner's paired phone. Every other channel
+  (Telegram, Discord, email, SMS, voice) gets "Answer this in the app"
+  instead of options or buttons; approvals follow the same rule and are
+  never persisted to the data-dir inbox, so a busy case refuses them outright
+  rather than queuing them.
+- Case code that sends to a channel uses `ContactRouter.sendExternal`, which
+  runs C3's outbound gate for anyone but the owner and sends `rendered`.
+  Until C3's `gateLeaves` exists (`src/cases/gates.js`), every non-owner
+  send is refused.
+- Service mode: the owner identity and channel addresses come only from the
+  admin `service.json` `contact` block (`contact` joins `ADMIN_ONLY_KEYS`);
+  a data-dir `settings.contact` or a `channels.<ch>.contactOwnerUserId` is
+  ignored with a warning. Relay tokens and mailbox passwords live in the
+  vault under `contact.`; the `Vault` tool refuses any key starting
+  `contact.` and hides them from `list`. A contact host that fails to start
+  never fails `core.start()` — it logs the failure, leaves contact off, and
+  (outside service mode) raises one owner-visible warning; the rest of the
+  app keeps running; that includes a contact host that throws while being
+  built, and an unreadable `presence.json` just starts presence empty. A
+  host that is not currently holding the cases-root lease (a passive
+  instance) refuses an inbound relay push with 503 and does not poll relay
+  events or move the relay cursor, so the events wait for the active host
+  (which dedupes by event id); the Questions section names the lease holder.
+- Replies can trigger acks, and a spoofed owner number or From address is
+  enough for SMS and email, so acks are budgeted in the router: at most one
+  refusal ack (unknown token, unparsed, refused) per channel and sender per
+  10 minutes, and 20 acks per channel per hour; the rest are dropped with a
+  debug log. Email refuses `contact.email.from` equal to the owner address
+  (it would read its own mail), marks everything it sends `Auto-Submitted:
+  auto-generated` with a `<kl-…@from-domain>` Message-ID, and drops its own
+  mail and RFC 3834 auto-replies.
+- Known gaps, carried forward as PR notes rather than fixed here: a forged
+  email DSN can trigger an early bounce escalation; the stage-1 gap that a
+  local Bash command can rewrite `facts.jsonl` directly extends to a forged
+  `inbox.jsonl` line for an ordinary (non-approval) question, which grants
+  no more than that same class of local write access already does; an
+  unauthenticated email from the owner's address (From is spoofable) whose
+  text carries any live question or batch token answers that question or
+  batch, not only its own thread's (knowing a live 30-bit token is treated
+  as equivalent to knowing the thread; tokens are only ever sent to the
+  owner); and an owner out-of-office reply that arrives through the relay is
+  not recognised as automatic, because the relay `inbound` event (spec §4.5)
+  carries no auto-submitted flag.
+- Tests use `tests/helpers/loopback-channel.js` and the fake relay/SMTP
+  helpers, never a real network; `KING_LOUIE_CONTACT_TICK_MS` shortens the
+  tick.
+- The phone app channel (`src/channels/mobile-app-channel.js`) exists only
+  in the service with F3 approvals running: questions go out as node-signed
+  `kl.question.ask` envelopes; an answer counts only as a device-signed
+  `kl.question.answer` verified on the node (nonce, `signed_at` ± 300 s, live
+  token), and it resolves only its own question. The relay routes are
+  `src/frontdoor/question-routes.js`. The apps' Questions screen shows only
+  questions signed by a pinned node and signs `signed_at` on the
+  relay-corrected clock. Foreground presence is unsigned
+  (`{ foreground, at }`), but the relay request carrying it is still
+  device-authenticated, and on these phones the key needs biometrics: iOS
+  pings every 60 s only while its API session is already unlocked (never a
+  Face ID prompt of its own); Android sends no presence and loads questions
+  only when the owner taps. Follow-up: a relay presence auth that needs no
+  biometric prompt (an F3 pairing change) would let Android report presence.

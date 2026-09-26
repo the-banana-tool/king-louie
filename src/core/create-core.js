@@ -68,6 +68,7 @@ const { TTSEngine, DEFAULT_VOICE_SETTINGS } = require('../voice/tts-engine');
 const WebhookRegistry = require('../webhooks/webhook-registry');
 const WebhookHandler = require('../webhooks/webhook-handler');
 const WebhookServer = require('../webhooks/webhook-server');
+const { createContactHost } = require('../cases/contact-host');
 const { initializeMesh } = require('../mesh');
 const LLMRouter = require('../providers/llm-router');
 const { WorkflowEngine } = require('../workflows/workflow-engine');
@@ -2715,10 +2716,56 @@ function createCore(deps = {}) {
     }
   };
 
+  // Cases stage 4: contact channels, presence and the ladder
+  // (docs/superpowers/specs/2026-09-23-cases-stage4-channels.md §7).
+  let contactHost = null;
+
   const start = async () => {
     migrateLegacyBridgeChatOrigins();
     initializeTools();
     await initializeAgentInfrastructure();
+    // Service mode (final review M6): run.js passes deps.isService === true;
+    // any other service signal (deps.contactConfig present, phone approvals)
+    // also counts, so a service entry point that forgets one still reads the
+    // owner identity from the admin config only, never data-dir settings.
+    // The desktop reads the owner and addresses from settings.
+    // sendExternal's outbound gate is contact-host's defaultGetGate (C3's
+    // gateLeaves once it merges).
+    const isService = deps.isService === true || Object.prototype.hasOwnProperty.call(deps, 'contactConfig') || deps.remoteApprovals === 'phone';
+    // Ruling T13-start (final review I2): contact that cannot be built or
+    // cannot start never stops the app. Log it, leave contact off
+    // (getContact() → null) and warn the owner once.
+    try {
+      contactHost = createContactHost({
+        getSettings,
+        setSettings,
+        contactConfig: deps.contactConfig ?? null,
+        isService,
+        caseRuntime,
+        channelRegistry,
+        vault,
+        dataDir: userDataPath,
+        features,
+        getBridges: () => ({ telegram: telegramBridge, discord: discordBridge }),
+        getWebhookServer: () => webhookServer,
+        approvals: deps.approvals || null
+      });
+      await contactHost.start();
+    } catch (err) {
+      const failed = contactHost;
+      contactHost = null;
+      log.error(`Contact channels could not start: ${err.message}`);
+      if (failed) await withTimeout(failed.stop(), shutdownTimeoutMs, 'Contact cleanup', (label, ms) => log.warn(`${label} timed out after ${ms}ms`))
+        .catch((stopErr) => log.warn(`Contact cleanup failed: ${stopErr.message}`));
+      if (deps.uiToastChannel && typeof deps.uiToastChannel.send === 'function') {
+        Promise.resolve()
+          .then(() => deps.uiToastChannel.send({
+            title: 'King Louie',
+            body: `Contact channels could not start: ${err.message}. Cases will only reach you in the app.`
+          }))
+          .catch((toastErr) => log.warn(`Contact start warning toast failed: ${toastErr.message}`));
+      }
+    }
     const TASK_EVENTS = { taskCreated: 'task:created', taskUpdated: 'task:updated', taskUnblocked: 'task:unblocked' };
     for (const [evt, channel] of Object.entries(TASK_EVENTS)) {
       taskManager.on(evt, (task) => ui.send(channel, task));
@@ -2744,6 +2791,12 @@ function createCore(deps = {}) {
     caseRuntime.beginShutdown();
     caseRuntime.abortUnattended();
     const warnTimeout = (label, ms) => log.warn(`${label} timed out after ${ms}ms; continuing shutdown`);
+    // Cases stage 4: contact stops before the channels and the webhook server
+    // below, so no in-flight ladder tick delivers through a stopped adapter.
+    if (contactHost) {
+      await withTimeout(contactHost.stop(), shutdownTimeoutMs, 'Contact shutdown', warnTimeout)
+        .catch((err) => log.warn(`Contact shutdown failed: ${err.message}`));
+    }
     // Let the in-flight cases:wakeups sweep actually finish (endTurn, lock
     // release and all) before releaseAll() below can force the lock away
     // out from under it.
@@ -2835,6 +2888,7 @@ function createCore(deps = {}) {
     createUsageRecordFromMetrics,
     getSettings,
     getCaseRuntime: () => caseRuntime,
+    getContact: () => (contactHost ? contactHost.context() : null),
     // The signed-approval requester (program §4.12), or null: always null in
     // 'allow' and 'deny' modes (the Electron host), and null while no device
     // is enrolled or no relay link can deliver.

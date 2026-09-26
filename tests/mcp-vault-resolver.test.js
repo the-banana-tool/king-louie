@@ -67,3 +67,25 @@ test('leaves non-string env values untouched', () => {
   assert.strictEqual(resolved.env.PORT, 5432);
   assert.strictEqual(resolved.env.NAME, 'plain');
 });
+
+// Cases stage 4: contact channel credentials never leave the vault through
+// an MCP env reference, however the key is spelled (electron-store's
+// dot-prop drops a backslash before an ordinary character).
+test('leaves ${vault:contact.…} references unresolved, never reads them, and logs', () => {
+  const reads = [];
+  const warnings = [];
+  const store = { get: (k) => { reads.push(k); return 'encrypted'; } };
+  const resolver = createVaultEnvResolver({
+    vaultStore: store,
+    decryptToken: () => 'secret',
+    logger: { warn: (m) => warnings.push(m) }
+  });
+  const refs = ['${vault:contact.relay.main.token}', '${vault: Contact.x}', '${vault:\\contact.relay.main.token}', '${vault:cont\\act.x}', '${vault:contact[0]}'];
+  const env = Object.fromEntries(refs.map((r, i) => [`K${i}`, r]));
+  const resolved = resolver({ env: { ...env, OK: '${vault:github_token}' } });
+  refs.forEach((r, i) => assert.strictEqual(resolved.env[`K${i}`], r));
+  assert.strictEqual(resolved.env.OK, 'secret');
+  assert.deepStrictEqual(reads, ['__vault_github_token']);
+  assert.strictEqual(warnings.length, refs.length);
+  assert.match(warnings[0], /contact/);
+});

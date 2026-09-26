@@ -23,8 +23,9 @@ const CONFIG_FILE = 'service.json';
 // which profile — and so whether the agent stack loads at all. These may only
 // come from the admin-owned config dir; see below.
 // `relay` (the relay's listeners, TLS files and push credentials) and `audit`
-// (ledger retention) joined in fleet stage 3.
-const ADMIN_ONLY_KEYS = ['features', 'ports', 'profile', 'relay', 'audit'];
+// (ledger retention) joined in fleet stage 3. `contact` (cases stage 4, R55):
+// who the owner is, where to reach them and through which relays.
+const ADMIN_ONLY_KEYS = ['features', 'ports', 'profile', 'relay', 'audit', 'contact'];
 const RELAY_DEFAULTS = { phoneListen: { host: '0.0.0.0', port: 8443 }, meshPort: 18795, auditRetentionDays: 365 };
 
 function isPlainObject(value) {
@@ -138,6 +139,10 @@ function validateFeatures(features, file) {
   }
   return features;
 }
+
+// Cases stage 4 (R55): who the owner is and where to reach them comes only
+// from the admin service.json, never from the service-writable data dir.
+const { validateContactConfig } = require('../cases/contact-settings');
 
 function validatePorts(ports, file) {
   if (ports === undefined) return {};
@@ -297,7 +302,8 @@ function loadServiceConfig(dataDir, overrides = {}, {
     features,
     ports,
     relay: parseRelayConfig(adminCfg.relay, adminFile),
-    audit: parseAuditConfig(adminCfg.audit, adminFile)
+    audit: parseAuditConfig(adminCfg.audit, adminFile),
+    contact: validateContactConfig(adminCfg.contact, adminFile, { unknownKeyError })
   };
 }
 

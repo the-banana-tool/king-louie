@@ -2973,3 +2973,26 @@ body {
   gap: 8px;
   align-items: center;
 }
+
+/* Cases stage 4: questions across cases, presence and the contact policy */
+.questions-section { display: flex; flex-direction: column; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--border-subtle); max-height: 45vh; overflow-y: auto; }
+.questions-section:empty { display: none; }
+.questions-header { display: flex; align-items: center; gap: 8px; font-weight: 600; color: var(--text-primary); }
+.questions-presence-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--text-faint); }
+.questions-presence-dot.is-here { background: var(--success); }
+.questions-presence-dot.is-elsewhere { background: var(--warning); }
+.questions-away, .questions-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.questions-away-note, .questions-ladder, .questions-empty { font-size: 0.8em; color: var(--text-muted); }
+.questions-card { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; border: 1px solid var(--border-default); border-radius: var(--radius-sm); background: var(--bg-elevated); }
+.questions-card.questions-urgency-high { border-color: var(--error); }
+.questions-case { font-size: 0.8em; color: var(--text-secondary); }
+.questions-text { color: var(--text-primary); white-space: pre-wrap; }
+.questions-input { flex: 1; min-width: 80px; }
+.questions-btn { padding: 2px 8px; font-size: 0.85em; }
+.questions-error { color: var(--error); font-size: 0.85em; }
+.questions-ladder-elsewhere { color: var(--warning); font-size: 0.85em; }
+.questions-policy summary { cursor: pointer; color: var(--text-secondary); }
+.questions-policy-row { display: flex; align-items: center; gap: 4px; margin: 4px 0; font-size: 0.85em; }
+.questions-policy-ladder { flex: 1; font-family: var(--font-mono); }
+.questions-policy-channels { margin: 4px 0; padding-left: 16px; font-size: 0.8em; color: var(--text-muted); }
+.questions-policy-channels .is-ready { color: var(--success); }

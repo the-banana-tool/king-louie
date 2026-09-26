@@ -9,10 +9,14 @@
  * missing keys surface as MCP auth errors rather than silent empty values.
  */
 
+const { createLogger } = require('../logging');
+const { isContactVaultKey } = require('../cases/contact-settings');
+
+const log = createLogger('mcp/vault-resolver');
 const VAULT_PREFIX = '__vault_';
 const VAULT_REF = /\$\{vault:([^}]+)\}/g;
 
-function createVaultEnvResolver({ vaultStore, decryptToken, onMissing } = {}) {
+function createVaultEnvResolver({ vaultStore, decryptToken, onMissing, logger = log } = {}) {
   if (!vaultStore || !decryptToken) {
     // No vault wiring — return identity resolver
     return (config) => config;
@@ -21,6 +25,12 @@ function createVaultEnvResolver({ vaultStore, decryptToken, onMissing } = {}) {
   const resolveValue = (value) => {
     if (typeof value !== 'string') return value;
     return value.replace(VAULT_REF, (match, key) => {
+      // Cases stage 4: contact channel credentials never reach an MCP server.
+      // A backslash is an escape to the desktop vault, so it is refused too.
+      if (isContactVaultKey(key) || key.includes('\\')) {
+        logger.warn(`not resolving ${match}: contact credentials and keys with a backslash are not available to MCP servers`);
+        return match;
+      }
       const encrypted = vaultStore.get(`${VAULT_PREFIX}${key.trim()}`);
       if (!encrypted) {
         if (onMissing) onMissing(key);

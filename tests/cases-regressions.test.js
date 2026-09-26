@@ -308,3 +308,99 @@ describe('F5-cross-case: one index answers every duplicate check without leaking
     await runtime.endTurn(turn, { summary: 'x' });
   });
 });
+
+describe('F2-late: a load-bearing question reaches the owner on day 1, not day 6', () => {
+  const { ContactState } = require('../src/cases/contact-state');
+  const { ContactRouter } = require('../src/cases/contact');
+  const { Presence } = require('../src/cases/presence');
+  const { LadderEngine } = require('../src/cases/ladder');
+  const { defaultPolicy } = require('../src/cases/contact-format');
+  const { TelephonyChannel } = require('../src/channels/telephony-channel');
+  const { ContactRelayClient } = require('../src/channels/relay-client');
+  const { startFakeRelay } = require('./helpers/fake-contact-relay');
+  const { LoopbackChannel } = require('./helpers/loopback-channel');
+
+  const T0 = Date.parse('2026-09-25T09:00:00Z');
+  const at = (ms) => new Date(T0 + ms);
+  const MIN = 60 * 1000;
+
+  async function contactWorld(adapterList) {
+    let now = at(0);
+    const clock = () => now;
+    const root = tmp();
+    const data = tmp();
+    const policy = defaultPolicy();
+    policy.digest = null;
+    const runtime = new CaseRuntime({ root, now: clock, getSettings: () => ({ cases: { timeZone: 'UTC' } }) });
+    const state = new ContactState({ dir: path.join(data, 'contact'), clock });
+    const adapters = new Map(adapterList);
+    const presence = new Presence({ file: path.join(data, 'contact', 'presence.json'), getPolicy: () => policy, clock, interactive: () => false, isEnabled: (c) => adapters.has(c), getTimeZone: () => 'UTC' });
+    const router = new ContactRouter({ state, runtime, adapters, presence, clock, getTimeZone: () => 'UTC' });
+    for (const [id, a] of adapters) a.onContactReply((cid, answer, meta) => router.handleReply(id, cid, answer, meta));
+    const ladder = new LadderEngine({ state, casesRoot: root, runtime, router, presence, getPolicy: () => policy, clock, dataDir: data });
+    const info = await runtime.createCase({ title: 'Lakeside lot', objective: 'Sell the lot' });
+    const q = runtime.createQuestion(info.id, {
+      kind: 'question', urgency: 'high', text: 'Has the lot been listed before, and how?', options: [{ id: 'a', label: 'Yes, on the MLS' }, { id: 'b', label: 'Never' }],
+      payload: { type: 'ask', about: { subject: 'lot', attr: 'listing-history' } }
+    }, { charge: false });
+    return {
+      runtime, state, router, ladder, info, q,
+      tick: async (ms) => { now = at(ms); return ladder.tick(now); },
+      entry: () => state.ladder().entries[`${info.id}/${q.id}`],
+      ownerFact: () => [...runtime.ledger(info.id).view().facts.values()].find((f) => f.source?.kind === 'question' && f.source.ref === q.id) || null
+    };
+  }
+
+  it('high: absent at T0+60 s, SMS at T0+15 min, a relay reply at T0+2 h becomes a user fact on day 1', async () => {
+    const relay = await startFakeRelay();
+    try {
+      const client = new ContactRelayClient({ name: 'main', baseUrl: relay.baseUrl, getToken: () => relay.token });
+      const sms = new TelephonyChannel({ kind: 'sms', relay: client, getConfig: () => ({ owner: '+15550100', from: '+15550199' }) });
+      const w = await contactWorld([['sms', sms]]);
+      await w.tick(60 * 1000);
+      assert.deepStrictEqual(w.entry().attempts.map((a) => [a.channel, a.outcome]), [['present', 'absent']]);
+      await w.tick(15 * MIN);
+      assert.strictEqual(relay.sent().length, 1);
+      const batchToken = w.entry().attempts[1].batchToken;
+      assert.match(relay.sent()[0].body.text, new RegExp(`#${batchToken}`));
+      relay.pushEvent({ id: 'ev-1', type: 'inbound', channel: 'sms', from: '+15550100', to: '+15550199', text: `#${batchToken} a`, at: at(120 * MIN).toISOString() });
+      const { events } = await client.events(null);
+      await w.tick(120 * MIN);
+      await w.router.ingestRelayEvents('main', events);
+      const fact = w.ownerFact();
+      assert.ok(fact, 'the owner answer is a fact');
+      assert.strictEqual(fact.provenance, 'user');
+      assert.strictEqual(fact.value, 'Yes, on the MLS');
+      assert.strictEqual(w.runtime.questions(w.info.id).get(w.q.id).answer.at.slice(0, 10), '2026-09-25', 'answered on day 1');
+    } finally {
+      await relay.close();
+    }
+  });
+
+  it('normal: through the loopback adapter registered as telegram at T0+30 min', async () => {
+    const telegram = new LoopbackChannel({ id: 'telegram', owner: '111' });
+    const w = await contactWorld([['telegram', telegram]]);
+    const record = w.runtime.questions(w.info.id).get(w.q.id);
+    record.urgency = 'normal';
+    fs.writeFileSync(path.join(w.runtime.getCase(w.info.id).dir, '.kl', 'questions', `${w.q.id}.json`), JSON.stringify(record));
+    await w.tick(60 * 1000);
+    await w.tick(29 * MIN);
+    assert.strictEqual(telegram.sent.length, 0);
+    await w.tick(30 * MIN);
+    assert.strictEqual(telegram.sent.length, 1);
+    await telegram.reply(w.entry().token, { optionIndex: 1 });
+    assert.strictEqual(w.ownerFact().value, 'Never');
+  });
+
+  it('control: with no reachable channel the ladder ends exhausted and journaled on day 1', async () => {
+    const w = await contactWorld([]);
+    await w.tick(60 * 1000);
+    await w.tick(15 * MIN);
+    await w.tick(30 * MIN);
+    assert.strictEqual(w.entry().exhausted, true);
+    assert.strictEqual(w.entry().exhaustJournaled, true);
+    const journal = fs.readdirSync(path.join(w.runtime.getCase(w.info.id).dir, 'journal')).filter((f) => f.endsWith('-question.md'));
+    assert.ok(journal.some((f) => f.startsWith('2026-09-25')), 'journaled on day 1');
+    assert.strictEqual(w.runtime.questions(w.info.id).get(w.q.id).answer, null, 'the question stays open; nothing is guessed');
+  });
+});

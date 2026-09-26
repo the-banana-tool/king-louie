@@ -57,6 +57,7 @@ describe('E2E: cases', { skip: gitAvailable ? false : 'git is not on PATH' }, ()
     await waitFor(ctx, `(document.getElementById('chat-case-orientation')?.textContent || '').includes('E2E lakeside lot')`);
 
     // The cross-case index lives in <casesRoot>/.index (cases stage 5).
+    // The contact host lock lives in <casesRoot>/.contact.lock (cases stage 4).
     const slugs = fs.readdirSync(casesRoot).filter((n) => !n.startsWith('.'));
     assert.deepStrictEqual(slugs, ['e2e-lakeside-lot']);
     assert.ok(fs.existsSync(path.join(casesRoot, 'e2e-lakeside-lot', 'facts.jsonl')));

@@ -173,6 +173,15 @@ class RelayApi(
 
     /** `202 { delivered, accepted, reason }`; read it with ResponseOutcome. */
     suspend fun respond(id: String, envelope: Envelope): JsonElement? = request("POST", "/v1/approvals/${segment(id)}/response", envelope.json).second
+
+    // Cases stage 4: node-signed kl.question.ask envelopes, and device-signed answers back.
+    // No presence route here: on this phone every device-signed request is a
+    // biometric prompt, so it sends no foreground pings (ruling T19-presence).
+    suspend fun questions(): List<JsonElement> = request("GET", "/v1/questions").second.arr() ?: emptyList()
+
+    /** The node's `{ ok, outcome, ack }` or `{ ok: false, error }`, passed through by the relay. */
+    suspend fun answerQuestion(token: String, envelope: Envelope): JsonElement? =
+        request("POST", "/v1/questions/${segment(token)}/answer", envelope.json).second
     suspend fun nodes(): List<JsonElement> = request("GET", "/v1/nodes").second.arr() ?: emptyList()
     suspend fun history(nodeId: String, limit: Int, beforeSeq: Int?): JsonElement? =
         request("GET", "/v1/nodes/${segment(nodeId)}/history?limit=$limit" + (beforeSeq?.let { "&before_seq=$it" } ?: "")).second

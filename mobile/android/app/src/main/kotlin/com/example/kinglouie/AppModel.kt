@@ -25,6 +25,8 @@ import com.example.kinglouie.protocol.JsonText
 import com.example.kinglouie.protocol.Messages
 import com.example.kinglouie.protocol.NodePin
 import com.example.kinglouie.protocol.ProtocolException
+import com.example.kinglouie.protocol.QuestionItem
+import com.example.kinglouie.protocol.Questions
 import com.example.kinglouie.protocol.RelayClientFactory
 import com.example.kinglouie.protocol.ResponseOutcome
 import com.example.kinglouie.protocol.Timestamps
@@ -199,6 +201,113 @@ class AppModel(context: Context) {
     private suspend fun signEnvelope(k: DeviceKey, message: JsonObject, title: String, description: String? = null): Envelope {
         val bytes = Jcs.bytes(message)
         return Envelope("ES256", k.deviceId, B64Url.encode(bytes), B64Url.encode(sign(k, bytes, title, description)))
+    }
+
+    // ---- Questions (cases stage 4) ----
+    // No presence pings from this phone (ruling T19-presence): every
+    // device-signed relay request is a biometric prompt here, so the node sees
+    // it as not in the foreground and the reach ladder moves on. Questions
+    // load only when the owner taps Refresh, like "Check for requests".
+
+    val questions = mutableStateListOf<QuestionItem>()
+
+    /** Tokens whose answer is being signed or sent. */
+    val answering = mutableStateListOf<String>()
+    var isLoadingQuestions by mutableStateOf(false)
+        private set
+    private val answeredTokens = HashSet<String>()
+
+    /**
+     * One look at the relay's questions. Only a node-signed `kl.question.ask`
+     * from a pinned node (kid, node_id and signature all that node's) is shown.
+     */
+    fun refreshQuestions() {
+        if (pairing || mode != AppMode.LIVE || isLoadingQuestions) return
+        val api = client ?: run {
+            banner = "This phone is not paired with a relay."
+            return
+        }
+        isLoadingQuestions = true
+        scope.launch {
+            try {
+                val pins = storage.nodes
+                val items = api.questions().mapNotNull { entry -> verifiedQuestion(entry, pins) }
+                    .distinctBy { it.token }
+                    .filter { it.token !in answeredTokens }
+                questions.clear()
+                questions.addAll(items)
+            } catch (e: Exception) {
+                fail(e)
+            } finally {
+                isLoadingQuestions = false
+            }
+        }
+    }
+
+    private fun verifiedQuestion(entry: JsonElement, pins: List<NodePin>): QuestionItem? {
+        val envelope = try {
+            Envelope.fromJson(entry["envelope"] ?: return null)
+        } catch (e: ProtocolException) {
+            return null
+        }
+        val pin = pins.firstOrNull { it.id == envelope.kid } ?: return null
+        if (!envelope.verifyEd25519(pin.key)) return null
+        val message = try {
+            envelope.message()
+        } catch (e: ProtocolException) {
+            return null
+        }
+        val item = QuestionItem.from(message, pin.name) ?: return null
+        // Signed by the node it names, and listed under that node.
+        if (item.nodeId != pin.id) return null
+        entry["node_id"].str()?.let { if (it != pin.id) return null }
+        return item
+    }
+
+    /**
+     * A fresh biometric signature over this one answer; the node verifies it
+     * (R44). `signed_at` comes from the relay-corrected clock (the node allows
+     * ±300 s), and the prompt shows the question escaped (node text is
+     * untrusted in a prompt).
+     */
+    fun answer(item: QuestionItem, optionId: String?, text: String?) {
+        if (mode != AppMode.LIVE || item.token in answering) return
+        if (text != null && text.length > MAX_ANSWER_CHARS) {
+            banner = "An answer can be at most $MAX_ANSWER_CHARS characters. Shorten it and send again."
+            return
+        }
+        val k = key ?: return
+        val api = client ?: return
+        answering.add(item.token)
+        scope.launch {
+            try {
+                val message = Questions.answer(item, optionId, text, k.deviceId, Messages.randomNonce(), Timestamps.string(api.now()))
+                val choice = optionId?.let { id -> item.options.firstOrNull { it.id == id }?.label } ?: text ?: ""
+                val description = "${promptText(item.caseTitle, 40)}: ${promptText(item.text, 80)} → ${promptText(choice, 40)}"
+                val envelope = signEnvelope(k, message, "Answer a question", description)
+                val result = api.answerQuestion(item.token, envelope)
+                // The node's own words (escaped) when it sent any.
+                val ack = result["ack"].str()?.let { Display.escape(it) }
+                if (result["ok"].bool() == true) {
+                    answeredTokens.add(item.token)
+                    questions.removeAll { it.token == item.token }
+                    banner = ack ?: "Answer recorded."
+                } else {
+                    banner = ack ?: "Not recorded: ${friendlyReason(result["error"].str() ?: result["outcome"].str())}"
+                }
+            } catch (e: Exception) {
+                fail(e)
+            } finally {
+                answering.remove(item.token)
+            }
+        }
+    }
+
+    /** At most `max` code points, then escaped (never cut through an escape). */
+    private fun promptText(text: String, max: Int): String {
+        val cps = text.codePoints().toArray()
+        val cut = if (cps.size <= max) text else String(cps, 0, max - 1) + "…"
+        return Display.escape(cut)
     }
 
     // Errors
@@ -972,6 +1081,8 @@ class AppModel(context: Context) {
         pending.clear()
         devices.clear()
         online.clear()
+        questions.clear()
+        answeredTokens.clear()
         history = null
         inviteQr = null
         inviteClaim = null
@@ -984,6 +1095,9 @@ class AppModel(context: Context) {
 
     companion object {
         const val MAX_EXPIRES_IN_MS = 300_000
+
+        /** The node refuses a longer free-text answer (UTF-16 units, as JS and Kotlin count). */
+        const val MAX_ANSWER_CHARS = 2000
         const val RETRY_OFFLINE = "node offline — retrying"
         const val RETRY_BUSY = "relay busy — retrying"
     }
