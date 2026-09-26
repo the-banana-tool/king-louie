@@ -1,6 +1,6 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { parseYaml } = require('../src/platform/yaml');
+const { parseYaml, findAnchorOrAlias } = require('../src/platform/yaml');
 
 describe('YAML Parser', () => {
   it('parses node.yaml structure correctly', () => {
@@ -118,5 +118,40 @@ tier: routine # trailing comment
     assert.throws(() => parseYaml('f: !!js/function "function () {}"\n'), { name: 'YAMLException' });
     // The core schema leaves timestamps as strings rather than Date objects.
     assert.equal(parseYaml('when: 2026-09-21\n').when, '2026-09-21');
+  });
+
+  it('a tagged, quoted value still parses (the tag property does not eat the real node)', () => {
+    // The old js-yaml round trip for this exact input is exercised above
+    // (it throws on the unknown tag); this checks the alias scanner alone
+    // doesn't misfire on the tag + quoted-value sequence before js-yaml
+    // ever sees it.
+    assert.equal(findAnchorOrAlias('f: !!str "hello"\n'), null);
+  });
+
+  it('refuses an anchor or an alias, but not "&"/"*" inside a plain scalar', () => {
+    assert.throws(() => parseYaml('a: &x [1, 2]\n'), { code: 'YAML_ALIAS_NOT_ALLOWED' });
+    assert.throws(() => parseYaml('a: &x [1, 2]\nb: *x\n'), { code: 'YAML_ALIAS_NOT_ALLOWED' });
+    assert.throws(() => parseYaml('<<: *base\n'), { code: 'YAML_ALIAS_NOT_ALLOWED' });
+    assert.throws(() => parseYaml('items: [*a, *a]\n'), { code: 'YAML_ALIAS_NOT_ALLOWED' });
+    // Not at a node-start position: ordinary text, left alone.
+    assert.equal(parseYaml('description: Fish & Chips\n').description, 'Fish & Chips');
+    assert.equal(parseYaml('note: 5 * 3 = 15\n').note, '5 * 3 = 15');
+    assert.equal(parseYaml("allow: ['Bash(*deploy*)']\n").allow[0], 'Bash(*deploy*)');
+  });
+
+  it('refuses a nested-alias bomb quickly instead of building it', () => {
+    // A classic "billion laughs" shape: each anchor aliases the previous
+    // one 8 times, so resolving (or later stringifying) it would build an
+    // enormous structure. This must be refused before any of that work,
+    // so the whole check has to finish well under a second.
+    const lines = ['a0: &a0 [x, x, x, x, x, x, x, x]'];
+    for (let i = 1; i < 12; i += 1) {
+      lines.push(`a${i}: &a${i} [*a${i - 1}, *a${i - 1}, *a${i - 1}, *a${i - 1}, *a${i - 1}, *a${i - 1}, *a${i - 1}, *a${i - 1}]`);
+    }
+    const bomb = lines.join('\n');
+    assert.ok(bomb.length < 2048, 'the source itself stays small');
+    const start = Date.now();
+    assert.throws(() => parseYaml(bomb), { code: 'YAML_ALIAS_NOT_ALLOWED' });
+    assert.ok(Date.now() - start < 1000, 'refusal must be fast, not proportional to the expanded size');
   });
 });
