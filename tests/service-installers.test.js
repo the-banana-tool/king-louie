@@ -1283,13 +1283,13 @@ describe('renderers validate their own inputs, not just planInstall', () => {
       /Invalid --user/
     );
     assert.throws(() => renderSystemdUnit({ ...base, user: 'root' }), /must not be "root"/);
-    assert.throws(() => renderSystemdUnit({ ...base, profile: 'frontdoor' }), /Unknown profile/);
+    assert.throws(() => renderSystemdUnit({ ...base, profile: 'relay' }), /Unknown profile/);
   });
 
   it('renderLaunchdPlist rejects the same', () => {
     const args = { ...base, dataDir: '/Library/Application Support/KingLouie/data', logsDir: '/var/log/king-louie' };
     assert.throws(() => renderLaunchdPlist({ ...args, user: 'a b' }), /Invalid --user/);
-    assert.throws(() => renderLaunchdPlist({ ...args, user: '_kinglouie', profile: 'frontdoor' }), /Unknown profile/);
+    assert.throws(() => renderLaunchdPlist({ ...args, user: '_kinglouie', profile: 'relay' }), /Unknown profile/);
   });
 
   it('renderWindowsTaskXml sanitizes entryPath and nodePath, not only dataDir', () => {
@@ -1297,7 +1297,7 @@ describe('renderers validate their own inputs, not just planInstall', () => {
     // `"C:\a\b" & --data-dir "C:\evil"` inside <Arguments> is an argv split.
     assert.throws(() => renderWindowsTaskXml({ ...win, entryPath: 'C:\\a\\b" & --data-dir "C:\\evil' }), /entryPath must not contain a double quote/);
     assert.throws(() => renderWindowsTaskXml({ ...win, nodePath: 'C:\\a" & evil "' }), /nodePath must not contain a double quote/);
-    assert.throws(() => renderWindowsTaskXml({ ...win, profile: 'frontdoor' }), /Unknown profile/);
+    assert.throws(() => renderWindowsTaskXml({ ...win, profile: 'relay' }), /Unknown profile/);
   });
 });
 

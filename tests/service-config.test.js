@@ -60,7 +60,8 @@ describe('loadServiceConfig', () => {
     );
   });
   it('rejects unknown profiles', () => {
-    assert.throws(() => loadServiceConfig(tmp(), { profile: 'frontdoor' }), /Unknown profile "frontdoor"/);
+    assert.throws(() => loadServiceConfig(tmp(), { profile: 'relay' }), /Unknown profile "relay"/);
+    assert.strictEqual(loadServiceConfig(tmp(), { profile: 'frontdoor' }).profile, 'frontdoor');
   });
   it('forces mesh off even when the admin config asks for it, and warns', () => {
     const admin = tmp();

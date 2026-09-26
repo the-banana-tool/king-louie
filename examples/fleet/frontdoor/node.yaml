@@ -1,0 +1,19 @@
+# frontdoor: a small Linux VPS, profile frontdoor, the one machine the fleet
+# is reached through from outside. Install as <configDir>/node.yaml
+# (docs/fleet/front-door.md). DNS: mcp.kl.example.com and mesh.kl.example.com
+# both point at this machine; only 443/tcp is open.
+# Only the keys below are allowed; anything else stops the front door from loading.
+name: frontdoor
+profile: frontdoor
+frontdoor:
+  domain: kl.example.com
+  listen: { host: 0.0.0.0, port: 443 }
+  # Let's Encrypt production is the default directory. Add
+  # `email: <your address>` to hear about expiring certificates.
+  acme: { terms_agreed: true }
+  oauth:
+    access_token_ttl: 1h
+    refresh_token_idle_ttl: 30d
+    scopes_enabled: [fleet:read, fleet:run, fleet:unsafe, fleet:delegate]
+  mcp: { progress_hold_s: 20 }
+  audit: { retention_days: null }
