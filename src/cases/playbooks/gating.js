@@ -93,7 +93,7 @@ function mergeGatingQuestions(questions) {
       text: oneLine(raw.text, MAX_TEXT),
       required,
       answerable: oneLine(raw.answerable, MAX_ANSWERABLE) || 'owner',
-      options: hasOptions(raw) ? raw.options.map((o) => ({ id: o?.id, label: oneLine(o?.label, MAX_LABEL) })) : null,
+      options: hasOptions(raw) ? raw.options.map((o) => ({ id: o?.id, label: oneLine(neutralize(String(o?.label ?? '')), MAX_LABEL) })) : null,
       briefField,
       category: rank(raw.category) ? raw.category : null,
       changes: raw.changes ? oneLine(raw.changes, MAX_NOTE) : null,
@@ -219,7 +219,8 @@ function applyToBrief(brief, field, record) {
   if (!record.answer || !record.answer.factId) throw new Error('the record has no owner answer');
   const answer = answerValue(record);
   if (!answer) throw new Error('the answer is empty');
-  const question = oneLine(String(record.text || '').replace(/^\[[^\]]*\]\s*/, ''), MAX_TEXT);
+  // brief.md is shown in every orientation, outside any playbook frame.
+  const question = oneLine(neutralize(String(record.text || '')).replace(/^\[[^\]]*\]\s*/, ''), MAX_TEXT);
   if (field === 'hardConstraints') {
     brief.append('hardConstraints', `${question}: ${answer}`, { provenance: 'user' });
   } else if (field === 'alreadyTried' || field === 'successCriteria') {

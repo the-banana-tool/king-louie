@@ -6,8 +6,29 @@ const { QuestionStore } = require('./questions');
 const { PER_DAY } = require('./budget');
 const { isRealCalendarDate } = require('./clock');
 const { createLogger } = require('../logging');
+const { neutralize, oneLine } = require('./playbooks/frame');
 
 const log = createLogger('cases/answer-handlers');
+
+// Playbook gating records (cases stage 6, ruling T12-answer). The record's
+// text is third-party package wording; the owner fact (append-only, shown
+// unframed) names the gating key instead. The owner's own answer text is
+// kept as it is; an option label is package text, so it is neutralised.
+QuestionStore.registerAnswerHandler('gating', {
+  toFact: (record, answer) => {
+    const about = record.payload?.about && typeof record.payload.about === 'object' ? record.payload.about : {};
+    const option = answer.optionId ? (record.options || []).find((o) => o.id === answer.optionId) : null;
+    const value = option ? oneLine(neutralize(String(option.label ?? '')), 200) : answer.text;
+    const rawKey = typeof record.payload?.gating?.key === 'string' ? record.payload.gating.key : '';
+    const key = oneLine(neutralize(rawKey), 80) || '(no key)';
+    return {
+      stmt: `Owner answered ${record.id} (gating ${key}): ${value}`,
+      subject: typeof about.subject === 'string' && about.subject.trim() ? about.subject : 'question',
+      attr: typeof about.attr === 'string' && about.attr.trim() ? about.attr : record.id,
+      value
+    };
+  }
+});
 
 // A grant reply must be essentially just the amount (controller ruling I5 on
 // Task 11 review): a money category matches "$25", "25", "25 usd" or
