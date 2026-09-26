@@ -362,15 +362,32 @@ describe('createCore: a contact host that cannot start (ruling T13-start)', () =
     const { deps } = makeDeps();
     // A cases root that is a file: the ladder's lease open throws ENOTDIR at start.
     fs.writeFileSync(path.join(deps.paths.dataDir, 'cases-file'), 'not a directory');
-    deps.store.set('settings', { cases: { root: 'cases-file' } });
+    // A relay, so the failed start has a poller and the push route to undo.
+    deps.store.set('settings', {
+      cases: { root: 'cases-file' },
+      contact: { relays: { main: { baseUrl: 'https://relay.example.com', pollSec: 30 } } }
+    });
+    const { RelayPoller } = require('../src/channels/relay-client');
+    const pollers = [];
+    const pollerStart = RelayPoller.prototype.start;
+    RelayPoller.prototype.start = function trackedStart() { pollers.push(this); return pollerStart.call(this); };
     const toasts = [];
-    const core = createCore({ ...deps, uiToastChannel: { send: async (p) => { toasts.push(p); } } });
-    await core.start();
+    const core = createCore({ ...deps, features: { ...deps.features, channels: true }, uiToastChannel: { send: async (p) => { toasts.push(p); } } });
+    try {
+      await core.start();
+    } finally {
+      RelayPoller.prototype.start = pollerStart;
+    }
     try {
       assert.strictEqual(core.context.getContact(), null, 'contact is off');
       assert.ok(core.context.toolRegistry.getFunctionDefinitions().length > 10, 'the rest of the core started');
       assert.strictEqual(toasts.length, 1);
       assert.match(toasts[0].body, /^Contact channels could not start: .+\. Cases will only reach you in the app\.$/);
+      assert.strictEqual(core.getWebhookServer().contactRelayHandler, null, 'the relay push route is gone');
+      assert.ok(pollers.length === 1, 'the relay poller had started');
+      assert.ok(pollers.every((p) => !p.running && p.timer === null), 'and is stopped');
+      // Bridge detach after a failed start: tests/contact-host.test.js
+      // "T13-start: after a start failure…" (no bridge runs without a token here).
     } finally {
       await core.shutdown();
     }

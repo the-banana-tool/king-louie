@@ -12,6 +12,7 @@ const { ChannelRegistry } = require('../src/channels/channel-plugin');
 const { mergeSettings } = require('../src/core/settings');
 const WebhookServer = require('../src/webhooks/webhook-server');
 const { LoopbackChannel } = require('./helpers/loopback-channel');
+const { RelayPoller } = require('../src/channels/relay-client');
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -40,10 +41,13 @@ class FakeBridge extends LoopbackChannel {
   }
 }
 
-function makeHost({ interactive = true, isService = false, contactConfig = null, settings = {}, features = { channels: true }, webhook = null, extraAdapters = {} } = {}) {
+function makeHost({ interactive = true, isService = false, contactConfig = null, settings = {}, features = { channels: true }, webhook = null, extraAdapters = {}, casesRootIsFile = false } = {}) {
   let stored = mergeSettings(settings);
   const events = [];
-  const runtime = new CaseRuntime({ root: path.join(tmp('kl-host-cases-'), 'cases'), host: { interactive: () => (typeof interactive === 'function' ? interactive() : interactive), notify: (e, p) => events.push([e, p]) } });
+  const casesRoot = path.join(tmp('kl-host-cases-'), 'cases');
+  // A cases root that is a file: the ladder's lease open throws at start.
+  if (casesRootIsFile) fs.writeFileSync(casesRoot, 'not a directory');
+  const runtime = new CaseRuntime({ root: casesRoot, host: { interactive: () => (typeof interactive === 'function' ? interactive() : interactive), notify: (e, p) => events.push([e, p]) } });
   const registry = new ChannelRegistry();
   const telegram = new FakeBridge({ id: 'telegram' });
   const vault = new Map([['contact.relay.main.token', 'relay-token'], ['contact.relay.main.webhookSecret', 'push-secret']]);
@@ -142,8 +146,10 @@ describe('createContactHost', () => {
     const webhook = new WebhookServer({ port: 0 }, { handle: async () => ({}) }, { port: 0 });
     await webhook.start();
     const t = makeHost({ settings: desktopSettings, webhook });
+    await t.runtime.createCase({ title: 'Lakeside lot', objective: 'Sell the lot' });
     try {
       await t.host.start();
+      assert.strictEqual(t.host.ladder.active, true, 'this host runs the ladder');
       const body = JSON.stringify({ id: 'ev-1', type: 'status', messageId: 'msg-404', status: 'delivered' });
       const ts = new Date().toISOString();
       const sig = `sha256=${crypto.createHmac('sha256', 'push-secret').update(`${ts}.${body}`).digest('hex')}`;
@@ -252,6 +258,7 @@ describe('createContactHost: preflight rulings', () => {
     let applied = 0;
     const ingest = t.host.router.ingestRelayEvents.bind(t.host.router);
     t.host.router.ingestRelayEvents = async (...args) => { applied += 1; return ingest(...args); };
+    await t.runtime.createCase({ title: 'Lakeside lot', objective: 'Sell the lot' });
     try {
       await t.host.start();
       const big = JSON.stringify({ id: 'ev-big', type: 'status', messageId: 'msg-1', status: 'delivered', pad: 'x'.repeat(1024 * 1024) });
@@ -284,5 +291,72 @@ describe('WebhookServer#readRequestBody', () => {
     req.write(bytes.subarray(0, split));
     req.end(bytes.subarray(split));
     assert.strictEqual(await read, '{"t":"é"}');
+  });
+});
+
+describe('createContactHost: fix round 1', () => {
+  function trackPollers() {
+    const started = [];
+    const { start } = RelayPoller.prototype;
+    RelayPoller.prototype.start = function trackedStart() { started.push(this); return start.call(this); };
+    return { started, restore: () => { RelayPoller.prototype.start = start; } };
+  }
+
+  it('a passive host (another process runs the ladder) answers a signed push 503 and applies nothing; once active the same push applies', async () => {
+    const webhook = new WebhookServer({ port: 0 }, { handle: async () => ({}) }, { port: 0 });
+    await webhook.start();
+    const t = makeHost({ settings: desktopSettings, webhook });
+    let applied = 0;
+    const ingest = t.host.router.ingestRelayEvents.bind(t.host.router);
+    t.host.router.ingestRelayEvents = async (...args) => { applied += 1; return ingest(...args); };
+    try {
+      await t.host.start();
+      assert.strictEqual(t.host.ladder.active, false, 'no cases root yet: passive');
+      const body = JSON.stringify({ id: 'ev-p', type: 'status', messageId: 'msg-p', status: 'delivered' });
+      const headers = sign(body);
+      const r = await signedPost(webhook.port, body, headers);
+      assert.strictEqual(r.status, 503);
+      assert.strictEqual(applied, 0, 'nothing applied on a passive host');
+      assert.strictEqual((await signedPost(webhook.port, body, {})).status, 401, 'the signature is still checked first');
+      await t.runtime.createCase({ title: 'Lakeside lot', objective: 'Sell the lot' });
+      assert.strictEqual(t.host.ladder.tryAcquire(), true);
+      const again = await signedPost(webhook.port, body, headers);
+      assert.strictEqual(again.status, 200);
+      assert.strictEqual(again.body.replay, undefined, 'a push refused while passive was not remembered as applied');
+      assert.strictEqual(applied, 1);
+    } finally {
+      await t.host.stop();
+      await webhook.stop();
+    }
+  });
+
+  it('stop() detaches the Telegram and Discord bridges, and they are not re-attached afterwards', async () => {
+    const t = makeHost({ settings: desktopSettings });
+    await t.host.start();
+    assert.ok(t.telegram.host, 'attached while running');
+    await t.host.stop();
+    assert.strictEqual(t.telegram.host, null, 'setContactHost(null) on stop');
+    assert.strictEqual(t.telegram.ownerTarget(), null, 'the bridge no longer takes contact replies');
+    assert.strictEqual(t.host.adapters.get('telegram'), null, 'no re-attach through adapters.get after stop');
+    assert.strictEqual(t.telegram.host, null);
+  });
+
+  it('T13-start: after a start failure, stop() clears the push handler, stops the pollers and detaches the bridges', async () => {
+    const webhook = new WebhookServer({ port: 0 }, { handle: async () => ({}) }, { port: 0 });
+    const tracked = trackPollers();
+    const t = makeHost({ settings: desktopSettings, webhook, casesRootIsFile: true });
+    try {
+      await assert.rejects(t.host.start());
+      assert.ok(webhook.contactRelayHandler, 'start got as far as mounting the push route');
+      assert.ok(tracked.started.length > 0 && tracked.started.every((p) => p.running));
+      assert.ok(t.telegram.host);
+      await t.host.stop();
+      assert.strictEqual(webhook.contactRelayHandler, null);
+      assert.ok(tracked.started.every((p) => !p.running && p.timer === null), 'every poller stopped');
+      assert.strictEqual(t.telegram.host, null);
+    } finally {
+      tracked.restore();
+      await t.host.stop();
+    }
   });
 });

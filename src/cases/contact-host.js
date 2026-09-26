@@ -20,6 +20,13 @@ const { createLogger } = require('../logging');
 
 const ATTACH_MS = 2000;
 
+class PassiveHostError extends Error {
+  constructor() {
+    super('this host does not run the contact ladder');
+    this.name = 'PassiveHostError';
+  }
+}
+
 // C3's gateLeaves when it has merged, else null (every non-owner send refuses).
 // Integration point for C3: once src/cases/gates.js exports gateLeaves this
 // returns the module and ContactRouter.sendExternal gates through it; no edit
@@ -62,6 +69,7 @@ function createContactHost({
 
   const built = new Map();
   const attached = {};
+  let stopping = null;
   let inApp = null;
   let presence = null;
 
@@ -111,6 +119,7 @@ function createContactHost({
   }
 
   function attachBridges() {
+    if (stopping) return;
     for (const id of ['telegram', 'discord']) {
       const bridge = getBridges()[id];
       if (!bridge || attached[id] === bridge || typeof bridge.setContactHost !== 'function') continue;
@@ -181,7 +190,6 @@ function createContactHost({
   }
 
   let attachTimer = null;
-  let stopping = null;
   const api = {
     state, router, presence, ladder, adapters, relays,
 
@@ -204,12 +212,28 @@ function createContactHost({
       }
       const webhook = getWebhookServer();
       if (webhook && typeof webhook.setContactRelayHandler === 'function') {
-        webhook.setContactRelayHandler(createRelayPushHandler({
+        // Spec §7: only the process holding the ladder lease applies relay
+        // events; a passive one answers 503 after the signature check. The
+        // refusal throws inside onEvents, so the push handler does not
+        // remember it as applied and the relay's retry (or the active
+        // host's poll) still delivers it.
+        const push = createRelayPushHandler({
           getSecret: (name) => secret(`contact.relay.${name}.webhookSecret`),
           hasRelay: (name) => relays.has(name),
-          onEvents: (name, events) => router.ingestRelayEvents(name, events),
+          onEvents: (name, events) => {
+            if (!ladder.active) throw new PassiveHostError();
+            return router.ingestRelayEvents(name, events);
+          },
           clock
-        }));
+        });
+        webhook.setContactRelayHandler(async (name, rawBody, headers) => {
+          try {
+            return await push(name, rawBody, headers);
+          } catch (err) {
+            if (err instanceof PassiveHostError) return { status: 503, body: { error: 'this host does not run the contact ladder' } };
+            throw err;
+          }
+        });
       }
       attachBridges();
       attachTimer = setInterval(attachBridges, ATTACH_MS);
@@ -270,6 +294,16 @@ function createContactHost({
     const webhook = getWebhookServer();
     if (webhook && typeof webhook.setContactRelayHandler === 'function') webhook.setContactRelayHandler(null);
     for (const p of pollers) p.stop();
+    // The bridges stop taking contact replies (and attachBridges no longer
+    // re-attaches them once stopping is set).
+    for (const id of Object.keys(attached)) {
+      try {
+        attached[id].setContactHost(null);
+      } catch (err) {
+        log.warn(`contact: detaching ${id} failed: ${err.message}`);
+      }
+      delete attached[id];
+    }
     // Out of the registry before awaiting anything: if the core's timeout
     // gives up on this stop (a hung tick), its shutdownAll() must not shut
     // these adapters while they are still ours to shut below.
