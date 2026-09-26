@@ -550,14 +550,21 @@ function reservedNameProblem(name) {
   return WINDOWS_RESERVED_RE.test(base) ? `"${name}" is a reserved Windows device name` : null;
 }
 
-// A relative path built one directory-entry at a time can never contain a
-// ".." or "." segment or be absolute (readdir never returns those, and an
-// entry name can't itself contain a path separator). This check is defence
-// in depth for any future caller that builds `rel` some other way (an
-// archive entry name, say), not for a case walkPackage can produce today.
-function unsafeRelPath(rel) {
-  if (path.isAbsolute(rel)) return 'is an absolute path';
-  if (rel.split('/').some((seg) => seg === '.' || seg === '..' || seg === '')) return 'contains a "." or ".." segment';
+// A directory-entry name is checked against a positive whitelist rather
+// than a blacklist of what to reject: `.` and `..` (impossible from a real
+// directory listing anyway, since readdir never returns them and no entry
+// name can contain a path separator), spaces, and anything outside ASCII
+// are all refused by simply not being in the allowed set, rather than by
+// enumerating every way a name could be unsafe. A trailing "." is refused
+// separately because it is allowed by the character class but Windows
+// silently strips it from the name it actually creates, which could make
+// two different-looking package entries collide on disk.
+const SEGMENT_RE = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,99}$/;
+function segmentProblem(name) {
+  if (!SEGMENT_RE.test(name)) {
+    return 'names must be 1 to 100 characters of A-Z, a-z, 0-9, "_", ".", "-", starting with a letter, digit or "_"';
+  }
+  if (name.endsWith('.')) return 'must not end with "."';
   return null;
 }
 
@@ -601,6 +608,13 @@ function walkPackage(dir) {
   let total = 0;
   let entryCount = 0;
   let stop = false;
+  // Two paths that differ only by case or Unicode normalization form can
+  // name the same file on the filesystems a case actually runs on (case
+  // insensitive on Windows and, commonly, macOS), so two package entries
+  // that look distinct here could silently collide once materialized.
+  // Keyed by the full path, not just a sibling name, so "Notes/x.md" vs.
+  // "notes/X.MD" is caught too.
+  const seenNormalized = new Map();
   const walk = (abs, rel, depth) => {
     if (stop) return;
     if (depth > MAX_WALK_DEPTH) {
@@ -637,9 +651,9 @@ function walkPackage(dir) {
       if (name.startsWith('.')) continue;
       const childAbs = path.join(abs, name);
       const childRel = rel ? `${rel}/${name}` : name;
-      const unsafe = unsafeRelPath(childRel);
-      if (unsafe) {
-        err(`${childRel}: ${unsafe}`);
+      const badSegment = segmentProblem(name);
+      if (badSegment) {
+        err(`${childRel}: ${badSegment}`);
         continue;
       }
       const reserved = reservedNameProblem(name);
@@ -647,6 +661,13 @@ function walkPackage(dir) {
         err(`${childRel}: ${reserved}`);
         continue;
       }
+      const normalized = childRel.toLowerCase().normalize('NFC');
+      const collidesWith = seenNormalized.get(normalized);
+      if (collidesWith !== undefined) {
+        err(`${childRel}: collides with "${collidesWith}" (the same name once case and accents are folded)`);
+        continue;
+      }
+      seenNormalized.set(normalized, childRel);
       let st;
       try {
         st = fs.lstatSync(childAbs);

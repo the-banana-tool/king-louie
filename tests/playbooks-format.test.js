@@ -206,14 +206,83 @@ describe('validatePackage', () => {
     assert.deepStrictEqual(messages(f.validatePackage(sources)), ['sources.md is larger than 64 KiB']);
   });
 
-  it('refuses a symlink', (t) => {
+  it('refuses a symlink, or a Windows junction where a file symlink needs privilege', (t) => {
     const dir = writePackage(path.join(tmp(), 'land-sale'));
     try {
       fs.symlinkSync(path.join(dir, 'steps.md'), path.join(dir, 'link.md'));
+      assert.deepStrictEqual(messages(f.validatePackage(dir)), ['link.md: symbolic links are not allowed']);
+      return;
     } catch {
-      return t.skip('symlinks cannot be created here');
+      // Fall through: a file symlink needs dev mode or admin on Windows,
+      // but a directory junction does not, and lstat reports a junction as
+      // a symbolic link the same way, so it exercises the same check.
     }
-    assert.deepStrictEqual(messages(f.validatePackage(dir)), ['link.md: symbolic links are not allowed']);
+    const target = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-pbfmt-junction-'));
+    dirs.push(target);
+    fs.writeFileSync(path.join(target, 'x.md'), 'x\n');
+    try {
+      fs.symlinkSync(target, path.join(dir, 'linked'), 'junction');
+    } catch {
+      return t.skip('neither a file symlink nor a junction can be created here');
+    }
+    assert.deepStrictEqual(messages(f.validatePackage(dir)), ['linked: symbolic links are not allowed']);
+  });
+
+  it('refuses each segment against a character whitelist, and a trailing "."', () => {
+    const dir = writePackage(path.join(tmp(), 'land-sale'));
+    fs.writeFileSync(path.join(dir, 'bad name.md'), 'x\n');
+    assert.match(messages(f.validatePackage(dir)).join('\n'), /names must be 1 to 100 characters of A-Z, a-z, 0-9, "_", "\.", "-"/);
+
+    const dotted = writePackage(path.join(tmp(), 'land-sale'));
+    fs.writeFileSync(path.join(dotted, 'trailing.md.'), 'x\n');
+    assert.match(messages(f.validatePackage(dotted)).join('\n'), /must not end with "\."/);
+  });
+
+  it('refuses two entries that collide once case and accents are folded', (t) => {
+    const dir = writePackage(path.join(tmp(), 'land-sale'));
+    fs.writeFileSync(path.join(dir, 'Notes.md'), 'a\n');
+    fs.writeFileSync(path.join(dir, 'notes.md'), 'b\n');
+    // On the case-insensitive filesystem this dev machine actually has, the
+    // second write above overwrote the first (there is no way to make two
+    // real directory entries collide here) — the check still matters for a
+    // package checked out on a case-sensitive filesystem (Linux git) and
+    // then validated or vendored onto a case-insensitive one (Windows,
+    // commonly macOS), so this only runs where it can actually be exercised.
+    if (fs.readdirSync(dir).filter((n) => n.toLowerCase() === 'notes.md').length < 2) {
+      return t.skip('this filesystem is case-insensitive; the two names collided before the walk ever ran');
+    }
+    assert.match(messages(f.validatePackage(dir)).join('\n'), /collides with/);
+  });
+
+  it('detects a case-fold collision deterministically (a simulated directory listing)', () => {
+    // This exercises the same check without depending on the host
+    // filesystem's own case sensitivity: the collision is caught by
+    // comparing the two spellings before either is ever lstat-ed, so it
+    // does not matter that they resolve to the same real file underneath.
+    const dir = writePackage(path.join(tmp(), 'land-sale'));
+    fs.writeFileSync(path.join(dir, 'Notes.md'), 'a\n');
+    const targetDir = path.resolve(dir);
+    const original = fs.readdirSync;
+    fs.readdirSync = function patched(p, ...rest) {
+      const result = original.call(fs, p, ...rest);
+      return path.resolve(String(p)) === targetDir ? [...result, 'notes.MD'] : result;
+    };
+    try {
+      assert.match(messages(f.validatePackage(dir)).join('\n'), /collides with/);
+    } finally {
+      fs.readdirSync = original;
+    }
+  });
+
+  it('refuses a Windows reserved device name even when it can only be created via an extended-length path', (t) => {
+    const dir = writePackage(path.join(tmp(), 'land-sale'));
+    const target = path.join(dir, 'con.md');
+    try {
+      fs.writeFileSync(`\\\\?\\${target}`, 'x\n');
+    } catch {
+      return t.skip('cannot create a reserved-name file in this environment');
+    }
+    assert.deepStrictEqual(messages(f.validatePackage(dir)), ['con.md: "con.md" is a reserved Windows device name']);
   });
 
   it('excludes .git and dot-prefixed entries from validation and hashing', () => {
