@@ -909,3 +909,189 @@ describe('service mode never loads mDNS or the remote-control mesh', () => {
     assert.equal(mesh.discovery.enabled, false);
   });
 });
+
+// ── Task 7 fix round 1 ───────────────────────────────────────────────────────
+const http = require('http');
+const { X509Certificate } = require('crypto');
+
+function nextMessage(ws, what) {
+  return within(new Promise((resolve) => ws.once('message', (d) => resolve(JSON.parse(d.toString())))), 5000, what);
+}
+
+describe('channel binding end to end', () => {
+  it('the listener signs over challenge ‖ exporter and refuses an unbound auth:complete', async () => {
+    const pinned = new Set();
+    const { fd, t: fdT, url } = await frontDoorListener({ pinned });
+    const node = new NodeIdentity({ nodeName: 'gpu-box' });
+    pinned.add(node.tlsFingerprint);
+    fdT.addTrustedPeer(node.peerId, node.publicKey, { tlsFingerprint: node.tlsFingerprint });
+    const ws = new WebSocket(url, { cert: node.tlsCert, key: node.tlsKey, rejectUnauthorized: false });
+    ws.on('error', () => {});
+    await within(once(ws, 'open'), 5000, 'the pinned socket to open');
+    const binding = channelBinding(ws);
+    assert.equal(binding.length, 32);
+    const challenge = crypto.randomBytes(32);
+    const reply = nextMessage(ws, 'auth:response');
+    ws.send(JSON.stringify({ type: 'auth:challenge', authId: 'auth-raw-1', challenge: challenge.toString('hex'), identity: node.getPublicIdentity() }));
+    const res = await reply;
+    assert.equal(res.type, 'auth:response');
+    const sig = Buffer.from(res.signature, 'hex');
+    assert.equal(MeshIdentity.verifyChallenge(challenge, sig, fd.publicKey), false, 'signed over the bare challenge');
+    assert.equal(MeshIdentity.verifyChallenge(boundChallenge(challenge, binding), sig, fd.publicKey), true);
+
+    const closed = within(once(ws, 'close'), 5000, 'the close');
+    const unbound = node.signChallenge(Buffer.from(res.challenge, 'hex'));
+    ws.send(JSON.stringify({ type: 'auth:complete', authId: 'auth-raw-1', signature: unbound.toString('hex') }));
+    const [code] = await closed;
+    assert.equal(code, CLOSE_CODES.unauthenticated);
+    assert.equal(fdT.getPeer(node.peerId), null);
+  });
+
+  it('the dialer verifies over challenge ‖ exporter and signs its auth:complete the same way', async () => {
+    const fd = new NodeIdentity({ nodeName: 'frontdoor' });
+    const server = https.createServer({ cert: fd.tlsCert, key: fd.tlsKey });
+    const wss = new WebSocket.Server({ server });
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    cleanups.push(() => new Promise((r) => { for (const c of wss.clients) c.terminate(); wss.close(() => server.close(() => r())); }));
+    const url = `wss://127.0.0.1:${server.address().port}/mesh/v1`;
+    // A scripted listener: signs its auth:response bound or bare, and reports
+    // the dialer's auth:complete.
+    let bindResponse = true;
+    const completes = [];
+    wss.on('connection', (sock) => {
+      const binding = channelBinding(sock);
+      const myChallenge = crypto.randomBytes(32);
+      sock.on('message', (d) => {
+        const msg = JSON.parse(d.toString());
+        if (msg.type === 'auth:challenge') {
+          const c = Buffer.from(msg.challenge, 'hex');
+          sock.send(JSON.stringify({
+            type: 'auth:response',
+            authId: msg.authId,
+            signature: fd.signChallenge(bindResponse ? boundChallenge(c, binding) : c).toString('hex'),
+            challenge: myChallenge.toString('hex'),
+            identity: fd.getPublicIdentity()
+          }));
+        } else if (msg.type === 'auth:complete') {
+          completes.push({ sig: Buffer.from(msg.signature, 'hex'), myChallenge, binding });
+        }
+      });
+    });
+    const { t } = await tlsNode(fd);
+
+    bindResponse = false;
+    await assert.rejects(
+      t.connectPinned({ url, pinnedFingerprint: fd.tlsFingerprint, frontdoorId: fd.nodeId }),
+      /Challenge verification failed/
+    );
+    assert.equal(completes.length, 0);
+
+    bindResponse = true;
+    const node = t.identity;
+    await t.connectPinned({ url, pinnedFingerprint: fd.tlsFingerprint, frontdoorId: fd.nodeId });
+    await waitFor(() => completes.length === 1, 'the auth:complete');
+    const [{ sig, myChallenge, binding }] = completes;
+    assert.equal(binding.length, 32);
+    assert.equal(MeshIdentity.verifyChallenge(myChallenge, sig, node.publicKey), false, 'signed over the bare challenge');
+    assert.equal(MeshIdentity.verifyChallenge(boundChallenge(myChallenge, binding), sig, node.publicKey), true);
+  });
+
+  it('a TLS link with no exporter fails the handshake instead of continuing unbound', async () => {
+    const pinned = new Set();
+    const { t: fdT, url } = await frontDoorListener({ pinned });
+    const real = tls.TLSSocket.prototype.exportKeyingMaterial;
+    tls.TLSSocket.prototype.exportKeyingMaterial = function broken() { throw new Error('no exporter'); };
+    const restore = () => { tls.TLSSocket.prototype.exportKeyingMaterial = real; };
+    const node = new NodeIdentity({ nodeName: 'gpu-box' });
+    pinned.add(node.tlsFingerprint);
+    fdT.addTrustedPeer(node.peerId, node.publicKey, { tlsFingerprint: node.tlsFingerprint });
+    try {
+      const ws = new WebSocket(url, { cert: node.tlsCert, key: node.tlsKey, rejectUnauthorized: false });
+      ws.on('error', () => {});
+      await within(once(ws, 'open'), 5000, 'the pinned socket to open');
+      const closed = within(once(ws, 'close'), 5000, 'the close');
+      const reply = nextMessage(ws, 'the refusal');
+      ws.send(JSON.stringify({ type: 'auth:challenge', authId: 'auth-raw-2', challenge: hex32(), identity: node.getPublicIdentity() }));
+      assert.deepEqual(await reply, { type: 'auth:reject', reason: 'channel_binding_unavailable' });
+      assert.equal((await closed)[0], CLOSE_CODES.unauthenticated);
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe('pins and listener checks (fix round 1)', () => {
+  it('a failed authentication leaves an unpinned peer unpinned', async () => {
+    const aId = new MeshIdentity({ displayName: 'listener' });
+    const a = new MeshTransport({ identity: aId, host: '127.0.0.1', port: 0, useTls: true });
+    await a.start();
+    cleanups.push(() => a.stop());
+    const bId = new MeshIdentity({ displayName: 'dialer' });
+    const b = new MeshTransport({ identity: bId, listen: false, useTls: true });
+    await b.start();
+    cleanups.push(() => b.stop());
+    a.addTrustedPeer(bId.peerId, bId.publicKey);
+    // b trusts a's peer id with the wrong key: a's signature cannot verify.
+    b.addTrustedPeer(aId.peerId, new MeshIdentity().publicKey);
+    await assert.rejects(b.connectToPeer('127.0.0.1', a.port), /Challenge verification failed/);
+    assert.equal(b.trustedPeers.get(aId.peerId).tlsFingerprint, null);
+  });
+
+  it('attachServer with requireClientCert destroys a plain ws:// socket', async () => {
+    const node = new NodeIdentity({ nodeName: 'gpu-box' });
+    const t = new MeshTransport({ identity: new NodeIdentity({ nodeName: 'frontdoor' }), listen: false, useTls: true, requireClientCert: true, isPinned: () => true });
+    await t.start();
+    const server = http.createServer();
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    cleanups.push(async () => { await t.stop(); await new Promise((r) => server.close(r)); });
+    const wss = t.attachServer(server);
+    let upgrades = 0;
+    const realUpgrade = wss.handleUpgrade.bind(wss);
+    wss.handleUpgrade = (...args) => { upgrades += 1; return realUpgrade(...args); };
+
+    // A real plain socket never opens.
+    const ws = new WebSocket(`ws://127.0.0.1:${server.address().port}/mesh/v1`);
+    const outcome = await within(new Promise((resolve) => {
+      ws.on('open', () => resolve('open'));
+      ws.on('error', () => resolve('error'));
+    }), 5000, 'the plain socket');
+    assert.equal(outcome, 'error');
+
+    // Nor does a plain socket that somehow carries a pinned certificate: the
+    // encrypted check itself refuses it.
+    let destroyed = 0;
+    const fake = {
+      encrypted: false,
+      getPeerX509Certificate: () => new X509Certificate(node.tlsCert),
+      destroy() { destroyed += 1; },
+      on() {}, once() {}, write() {}, end() {}, setTimeout() {}, setNoDelay() {}
+    };
+    server.emit('upgrade', { url: '/mesh/v1', headers: {}, method: 'GET' }, fake, Buffer.alloc(0));
+    assert.equal(destroyed, 1);
+    assert.equal(upgrades, 0);
+  });
+
+  it('isPinned must return exactly true: a truthy "yes" is dropped', async () => {
+    const fd = new NodeIdentity({ nodeName: 'frontdoor' });
+    const server = https.createServer({ cert: fd.tlsCert, key: fd.tlsKey, requestCert: true, rejectUnauthorized: false });
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    const t = new MeshTransport({ identity: fd, listen: false, useTls: true, requireClientCert: true, isPinned: () => 'yes' });
+    await t.start();
+    t.attachServer(server);
+    cleanups.push(async () => { await t.stop(); await new Promise((r) => server.close(r)); });
+    const node = new NodeIdentity({ nodeName: 'gpu-box' });
+    const ws = new WebSocket(`wss://127.0.0.1:${server.address().port}/mesh/v1`, { cert: node.tlsCert, key: node.tlsKey, rejectUnauthorized: false });
+    const outcome = await within(new Promise((resolve) => {
+      ws.on('open', () => { ws.terminate(); resolve('open'); });
+      ws.on('error', () => resolve('error'));
+    }), 5000, 'the dial');
+    assert.equal(outcome, 'error');
+  });
+
+  it('attachServer refuses requireClientCert on a transport built without it', async () => {
+    const t = new MeshTransport({ identity: new NodeIdentity({ nodeName: 'frontdoor' }), listen: false, useTls: true });
+    const server = https.createServer({});
+    assert.throws(() => t.attachServer(server, { requireClientCert: true }), /requireClientCert/);
+    assert.doesNotThrow(() => t.attachServer(server));
+  });
+});

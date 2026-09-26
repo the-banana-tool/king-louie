@@ -140,10 +140,18 @@ function peerCertFingerprint(socket) {
   }
 }
 
+// Both sides must be SHA-256 fingerprints (64 lowercase hex); anything else
+// is unequal, so an empty or truncated value can never match.
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 function timingSafeHexEqual(a, b) {
-  if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length || !/^[0-9a-f]*$/.test(a) || !/^[0-9a-f]*$/.test(b)) return false;
+  if (typeof a !== 'string' || typeof b !== 'string' || !SHA256_HEX_RE.test(a) || !SHA256_HEX_RE.test(b)) return false;
   return crypto.timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
 }
+
+// The binding a TLS transport must have: 32 exporter bytes. A TLS link never
+// continues unbound (an exporter that is missing or throws fails the
+// handshake); plain ws:// has none and binds to nothing.
+const CHANNEL_BINDING_BYTES = 32;
 
 // `ws` enforces maxPayload while it reads a frame header, before it buffers
 // the payload. Until a socket authenticates its limit is PRE_AUTH_MAX_BYTES,
@@ -429,6 +437,11 @@ class MeshTransport extends EventEmitter {
   // requireClientCert, an unpinned or missing client certificate never gets
   // as far as the WebSocket handshake.
   attachServer(httpServer, { requireClientCert = this.requireClientCert, isPinned = this.isPinned, path: wsPath = '/mesh/v1' } = {}) {
+    // The handshake (pair:request refusal, the two-pin tie) follows the
+    // transport's own flag, so an attached listener cannot ask for more.
+    if (requireClientCert && !this.requireClientCert) {
+      throw new Error('attachServer: requireClientCert needs a transport constructed with requireClientCert: true');
+    }
     const wss = new WebSocket.Server({ noServer: true, maxPayload: MAX_PAYLOAD_BYTES });
     httpServer.on('upgrade', (req, socket, head) => {
       let pathname = null;
@@ -688,6 +701,10 @@ class MeshTransport extends EventEmitter {
     }
 
     const binding = channelBinding(ws);
+    if (this.useTls && binding.length !== CHANNEL_BINDING_BYTES) {
+      log.error(`no TLS channel binding on the connection from ${remoteIdentity.peerId}; refusing to authenticate`);
+      return reject('channel_binding_unavailable');
+    }
     const signature = this.identity.signChallenge(boundChallenge(Buffer.from(challenge, 'hex'), binding));
     const myChallenge = this.identity.generateChallenge();
 
@@ -776,16 +793,6 @@ class MeshTransport extends EventEmitter {
       }
     }
 
-    // If we don't have a pinned fingerprint yet, pin it now (trust on first use)
-    if (this.useTls && !trusted.tlsFingerprint && pending.serverCertFingerprint) {
-      trusted.tlsFingerprint = pending.serverCertFingerprint;
-    }
-
-    // Also store the peer's declared TLS fingerprint for future inbound verification
-    if (remoteIdentity.tlsFingerprint && !trusted.tlsFingerprint) {
-      trusted.tlsFingerprint = remoteIdentity.tlsFingerprint;
-    }
-
     // connectPinned: the authenticated key must be the front door's own.
     if (pending.expectNodeId) {
       let derived = null;
@@ -800,6 +807,11 @@ class MeshTransport extends EventEmitter {
     }
 
     const binding = channelBinding(pending.ws);
+    if (this.useTls && binding.length !== CHANNEL_BINDING_BYTES) {
+      log.error(`no TLS channel binding on the link to ${remoteIdentity.peerId}; refusing to authenticate`);
+      this._failOutbound(authId, CLOSE_CODES.unauthenticated, 'channel_binding_unavailable');
+      return;
+    }
     const valid = MeshIdentity.verifyChallenge(boundChallenge(pending.challenge, binding), signature, trusted.publicKey);
 
     if (!valid) {
@@ -808,6 +820,18 @@ class MeshTransport extends EventEmitter {
       clearTimeout(pending.timeout);
       pending.reject(new Error('Challenge verification failed'));
       return;
+    }
+
+    // Pinned only once the peer has proved its key: a failed handshake never
+    // pins anything.
+    // If we don't have a pinned fingerprint yet, pin it now (trust on first use)
+    if (this.useTls && !trusted.tlsFingerprint && pending.serverCertFingerprint) {
+      trusted.tlsFingerprint = pending.serverCertFingerprint;
+    }
+
+    // Also store the peer's declared TLS fingerprint for future inbound verification
+    if (remoteIdentity.tlsFingerprint && !trusted.tlsFingerprint) {
+      trusted.tlsFingerprint = remoteIdentity.tlsFingerprint;
     }
 
     const mySignature = this.identity.signChallenge(boundChallenge(Buffer.from(theirChallenge, 'hex'), binding));
