@@ -7,7 +7,7 @@
 const crypto = require('crypto');
 const { open, verifyEs256, verifyEd25519, EnvelopeError } = require('../../approvals/envelope');
 const { validateMessage } = require('../../approvals/messages');
-const { isTestDeviceKey } = require('../../approvals/test-keys');
+const { isTestDeviceKey, isTestNodeKey } = require('../../approvals/test-keys');
 const { deriveNodeId } = require('../../mesh/node-identity');
 const { spkiHexFromRaw } = require('./messages');
 
@@ -80,20 +80,22 @@ function checkGrantDecision(envelope, { approverStore, frontdoorId, pending, sco
   return v;
 }
 
-function takeChallenge(v, challenges) {
-  const r = challenges.take(v.deviceId, v.message.challenge);
+const CHALLENGE_REASONS = { expired: 'challenge_expired', reused: 'challenge_reused', wrong_purpose: 'challenge_wrong_purpose' };
+
+function takeChallenge(v, challenges, purpose) {
+  const r = challenges.take(v.deviceId, v.message.challenge, purpose);
   if (r === 'ok') return v;
-  return fail(r === 'expired' ? 'challenge_expired' : r === 'reused' ? 'challenge_reused' : 'unknown_challenge');
+  return fail(CHALLENGE_REASONS[r] || 'unknown_challenge');
 }
 
 function checkClientRevoke(envelope, { approverStore, frontdoorId, challenges }) {
   const v = verifyPhoneEnvelope(envelope, { approverStore, type: 'kl.client.revoke', frontdoorId });
-  return v.ok ? takeChallenge(v, challenges) : v;
+  return v.ok ? takeChallenge(v, challenges, 'revoke') : v;
 }
 
 function checkNodeRemove(envelope, { approverStore, frontdoorId, challenges }) {
   const v = verifyPhoneEnvelope(envelope, { approverStore, type: 'kl.node.remove', frontdoorId });
-  return v.ok ? takeChallenge(v, challenges) : v;
+  return v.ok ? takeChallenge(v, challenges, 'remove') : v;
 }
 
 function derivedNodeId(rawKey) {
@@ -109,6 +111,8 @@ function checkNodeEnroll(envelope, { approverStore, frontdoorId, pairing, now })
   if (!v.ok) return v;
   const m = v.message;
   if (derivedNodeId(m.public_key) !== m.node_id) return fail('node_id_mismatch');
+  // Ruling T2-testkeys: the same rule as devices, from the same admin store.
+  if (approverStore.allowTestKeys !== true && isTestNodeKey(spkiHexFromRaw(m.public_key))) return fail('test_key');
   if (!pairing || m.pairing_id !== pairing.pairing_id) return fail('unknown_pairing');
   if (!(now <= pairing.expires_at_ms)) return fail('expired');
   for (const k of ['node_id', 'node_name', 'profile', 'public_key', 'tls_fingerprint', 'replaces']) {
@@ -118,7 +122,7 @@ function checkNodeEnroll(envelope, { approverStore, frontdoorId, pairing, now })
   return v;
 }
 
-function checkNodePair(envelope, { frontdoorHost }) {
+function checkNodePair(envelope, { frontdoorHost, allowTestKeys = false }) {
   const opened = openTyped(envelope, 'kl.node.pair');
   if (opened.error) return fail(opened.error);
   const m = opened.message;
@@ -130,6 +134,8 @@ function checkNodePair(envelope, { frontdoorHost }) {
     return fail('malformed');
   }
   if (deriveNodeId(spki) !== m.node_id) return fail('node_id_mismatch');
+  // Ruling T2-testkeys: a published test node key only where test keys are allowed.
+  if (allowTestKeys !== true && isTestNodeKey(spki)) return fail('test_key');
   if (!verifyEd25519(envelope, spki)) return fail('bad_signature');
   if (m.frontdoor_host !== frontdoorHost) return fail('wrong_host');
   let tlsFingerprint;

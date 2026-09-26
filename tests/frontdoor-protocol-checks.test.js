@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const { setLogLevel } = require('../src/logging');
 const P = require('../src/frontdoor/protocol/messages');
 const C = require('../src/frontdoor/protocol/checks');
-const { Challenges } = require('../src/frontdoor/protocol/challenges');
+const { Challenges, CHALLENGE_PURPOSES } = require('../src/frontdoor/protocol/challenges');
 const { seal } = require('../src/approvals/envelope');
 const { createFakePhone, testNodeIdentity } = require('./helpers/fake-phone');
 const { approverStoreWith } = require('./helpers/approver-set');
@@ -98,31 +98,31 @@ describe('Challenges and revocations', () => {
   it('a challenge works once, for its device, within 2 minutes', () => {
     let now = NOW;
     const ch = new Challenges({ now: () => now });
-    const { challenge, expires_in_ms: ttl } = ch.issue(A.deviceId);
+    const { challenge, expires_in_ms: ttl } = ch.issue(A.deviceId, 'revoke');
     assert.equal(ttl, 120000);
-    assert.equal(ch.take(B.deviceId, challenge), 'unknown');
-    assert.equal(ch.take(A.deviceId, challenge), 'ok');
-    assert.equal(ch.take(A.deviceId, challenge), 'reused');
-    const late = ch.issue(A.deviceId).challenge;
+    assert.equal(ch.take(B.deviceId, challenge, 'revoke'), 'unknown');
+    assert.equal(ch.take(A.deviceId, challenge, 'revoke'), 'ok');
+    assert.equal(ch.take(A.deviceId, challenge, 'revoke'), 'reused');
+    const late = ch.issue(A.deviceId, 'revoke').challenge;
     now += 120001;
-    assert.equal(ch.take(A.deviceId, late), 'expired');
+    assert.equal(ch.take(A.deviceId, late, 'revoke'), 'expired');
   });
 
   it('at most 20 live challenges per device', () => {
     const ch = new Challenges({ now: () => NOW });
-    for (let i = 0; i < 20; i += 1) ch.issue(A.deviceId);
-    assert.throws(() => ch.issue(A.deviceId), (err) => err.code === 'too_many_challenges');
-    ch.issue(B.deviceId);
+    for (let i = 0; i < 20; i += 1) ch.issue(A.deviceId, i % 2 ? 'revoke' : 'remove');
+    assert.throws(() => ch.issue(A.deviceId, 'revoke'), (err) => err.code === 'too_many_challenges');
+    ch.issue(B.deviceId, 'revoke');
   });
 
   it('checkClientRevoke and checkNodeRemove consume the challenge', async () => {
     const s = await store();
     const ch = new Challenges({ now: () => NOW });
-    const { challenge } = ch.issue(A.deviceId);
+    const { challenge } = ch.issue(A.deviceId, 'revoke');
     const env = A.revokeClient({ frontdoorId: FD.nodeId, grantId: `gr_${id22('g')}`, challenge });
     assert.equal(C.checkClientRevoke(env, { approverStore: s, frontdoorId: FD.nodeId, challenges: ch }).ok, true);
     assert.equal(C.checkClientRevoke(env, { approverStore: s, frontdoorId: FD.nodeId, challenges: ch }).reason, 'challenge_reused');
-    const second = ch.issue(A.deviceId).challenge;
+    const second = ch.issue(A.deviceId, 'remove').challenge;
     const rm = A.removeNode({ frontdoorId: FD.nodeId, nodeId: 'kl-hnef32472qzibi5r', challenge: second });
     assert.equal(C.checkNodeRemove(rm, { approverStore: s, frontdoorId: FD.nodeId, challenges: ch }).ok, true);
   });
@@ -151,12 +151,12 @@ describe('node enrollment and pairing', () => {
   it('checkNodePair checks the node signature, derived id and host; verifyPairAccept checks the front door', () => {
     const cert = require('../src/mesh/mesh-identity').MeshIdentity._generateFallbackTlsCert('gpu-box', 1).cert;
     const env = P.buildNodePair({ identity: gpu, frontdoorHost: 'mcp.kl.example.com', code: 'a b c d e f', profile: 'agent', tlsCertPem: cert });
-    const ok = C.checkNodePair(env, { frontdoorHost: 'mcp.kl.example.com' });
+    const ok = C.checkNodePair(env, { frontdoorHost: 'mcp.kl.example.com', allowTestKeys: true });
     assert.equal(ok.ok, true, ok.reason);
     assert.match(ok.tlsFingerprint, /^[0-9a-f]{64}$/);
-    assert.equal(C.checkNodePair(env, { frontdoorHost: 'mcp.other.example.com' }).reason, 'wrong_host');
+    assert.equal(C.checkNodePair(env, { frontdoorHost: 'mcp.other.example.com', allowTestKeys: true }).reason, 'wrong_host');
     const tampered = { ...env, sig: Buffer.from(env.sig, 'base64url').map((b, i) => (i === 0 ? b ^ 1 : b)).toString('base64url') };
-    assert.equal(C.checkNodePair(tampered, { frontdoorHost: 'mcp.kl.example.com' }).reason, 'bad_signature');
+    assert.equal(C.checkNodePair(tampered, { frontdoorHost: 'mcp.kl.example.com', allowTestKeys: true }).reason, 'bad_signature');
 
     const nonce = crypto.randomBytes(32).toString('base64url');
     const accept = P.buildNodePairAccept({ identity: FD, pairingId: `pr_${id22('p')}`, nodeId: gpu.nodeId, nonce, meshUrl: 'wss://mesh.kl.example.com/mesh/v1', meshCertFingerprint: 'd'.repeat(64) });
@@ -280,14 +280,14 @@ describe('security properties', () => {
     const ch = new Challenges({ now: () => now });
     const seen = new Set();
     for (let i = 0; i < 20; i += 1) {
-      const { challenge } = ch.issue(A.deviceId);
+      const { challenge } = ch.issue(A.deviceId, 'revoke');
       assert.equal(Buffer.from(challenge, 'base64url').length, 32);
       seen.add(challenge);
     }
     assert.equal(seen.size, 20);
     const fresh = new Challenges({ now: () => now });
     const opts = { approverStore: s, frontdoorId: FD.nodeId, challenges: fresh };
-    const { challenge } = fresh.issue(A.deviceId);
+    const { challenge } = fresh.issue(A.deviceId, 'revoke');
     const grantId = `gr_${id22('g')}`;
     // Another phone cannot use A's challenge, and trying does not burn it.
     assert.equal(C.checkClientRevoke(B.revokeClient({ frontdoorId: FD.nodeId, grantId, challenge }), opts).reason, 'unknown_challenge');
@@ -298,11 +298,64 @@ describe('security properties', () => {
     const unissued = A.revokeClient({ frontdoorId: FD.nodeId, grantId, challenge: crypto.randomBytes(32).toString('base64url') });
     assert.equal(C.checkClientRevoke(unissued, opts).reason, 'unknown_challenge');
     assert.equal(C.checkClientRevoke(good, opts).ok, true);
-    // Used once, it is used for every message type.
-    assert.equal(C.checkNodeRemove(A.removeNode({ frontdoorId: FD.nodeId, nodeId: 'kl-hnef32472qzibi5r', challenge }), opts).reason, 'challenge_reused');
-    const late = fresh.issue(A.deviceId).challenge;
+    assert.equal(C.checkClientRevoke(good, opts).reason, 'challenge_reused');
+    const late = fresh.issue(A.deviceId, 'remove').challenge;
     now += 120001;
     assert.equal(C.checkNodeRemove(A.removeNode({ frontdoorId: FD.nodeId, nodeId: 'kl-hnef32472qzibi5r', challenge: late }), opts).reason, 'challenge_expired');
+  });
+
+  it('a challenge is spent only on the purpose it was issued for (ruling T2-purpose)', async () => {
+    const s = await store();
+    const ch = new Challenges({ now: () => NOW });
+    const opts = { approverStore: s, frontdoorId: FD.nodeId, challenges: ch };
+    const forRevoke = ch.issue(A.deviceId, 'revoke').challenge;
+    const forRemove = ch.issue(A.deviceId, 'remove').challenge;
+    const rm = (challenge) => A.removeNode({ frontdoorId: FD.nodeId, nodeId: 'kl-hnef32472qzibi5r', challenge });
+    const rv = (challenge) => A.revokeClient({ frontdoorId: FD.nodeId, grantId: `gr_${id22('g')}`, challenge });
+    assert.equal(C.checkNodeRemove(rm(forRevoke), opts).reason, 'challenge_wrong_purpose');
+    assert.equal(C.checkClientRevoke(rv(forRemove), opts).reason, 'challenge_wrong_purpose');
+    // The refused attempt does not burn it for its own purpose.
+    assert.equal(C.checkClientRevoke(rv(forRevoke), opts).ok, true);
+    assert.equal(C.checkNodeRemove(rm(forRemove), opts).ok, true);
+    // A purpose is required, and must be one the checks spend.
+    assert.throws(() => ch.issue(A.deviceId), (err) => err.code === 'bad_purpose');
+    assert.throws(() => ch.issue(A.deviceId, 'grant'), (err) => err.code === 'bad_purpose');
+    assert.deepEqual([...CHALLENGE_PURPOSES].sort(), ['remove', 'revoke']);
+    // Seeded entries keep their purpose; one seeded without a known purpose is never spendable.
+    const seeded = new Challenges({ now: () => NOW, entries: [
+      { challenge: forRevoke, device_id: A.deviceId, expires_at_ms: NOW + 1000, used: false, purpose: 'revoke' },
+      { challenge: forRemove, device_id: A.deviceId, expires_at_ms: NOW + 1000, used: false }
+    ] });
+    assert.equal(seeded.take(A.deviceId, forRevoke, 'remove'), 'wrong_purpose');
+    assert.equal(seeded.take(A.deviceId, forRevoke, 'revoke'), 'ok');
+    assert.equal(seeded.take(A.deviceId, forRemove, 'remove'), 'wrong_purpose');
+  });
+
+  it('pairing and enrollment refuse published test node keys unless allowTestKeys (ruling T2-testkeys)', async () => {
+    const cert = require('../src/mesh/mesh-identity').MeshIdentity._generateFallbackTlsCert('gpu-box', 1).cert;
+    const published = testNodeIdentity({ key: 'gpu-box', nodeName: 'gpu-box' });
+    const own = testNodeIdentity({ nodeName: 'gpu-box' });
+    const pairEnv = (identity) => P.buildNodePair({ identity, frontdoorHost: 'mcp.kl.example.com', code: 'a b c d e f', profile: 'agent', tlsCertPem: cert });
+    assert.equal(C.checkNodePair(pairEnv(published), { frontdoorHost: 'mcp.kl.example.com' }).reason, 'test_key');
+    assert.equal(C.checkNodePair(pairEnv(published), { frontdoorHost: 'mcp.kl.example.com', allowTestKeys: 'true' }).reason, 'test_key');
+    assert.equal(C.checkNodePair(pairEnv(published), { frontdoorHost: 'mcp.kl.example.com', allowTestKeys: true }).ok, true);
+    assert.equal(C.checkNodePair(pairEnv(own), { frontdoorHost: 'mcp.kl.example.com' }).ok, true);
+
+    // A real (non-test) phone on a production store, enrolling a node.
+    const phone = createFakePhone();
+    const s = await approverStoreWith([phone.approverRecord()], { allowTestKeys: false, now: () => NOW });
+    stores.push(s);
+    const pr = (identity) => ({
+      pairing_id: `pr_${id22('p')}`, node_id: identity.nodeId, node_name: 'gpu-box', profile: 'agent', public_key: P.rawEd25519(identity.publicKey),
+      tls_fingerprint: 'c'.repeat(64), replaces: null, expires_at_ms: NOW + 600000, nonces: new Set()
+    });
+    const enroll = (identity, approverStore) => C.checkNodeEnroll(phone.enrollNode({ frontdoorId: FD.nodeId, pairing: pr(identity) }),
+      { approverStore, frontdoorId: FD.nodeId, pairing: pr(identity), now: NOW });
+    assert.equal(enroll(published, s).reason, 'test_key');
+    assert.equal(enroll(own, s).ok, true);
+    const lab = await approverStoreWith([phone.approverRecord()], { allowTestKeys: true, now: () => NOW });
+    stores.push(lab);
+    assert.equal(enroll(published, lab).ok, true);
   });
 
   it('every check returns a refusal, never throws, on garbage', async () => {
