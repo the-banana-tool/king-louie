@@ -141,7 +141,9 @@ function runWorker({
     thread = createThread({
       workerData: { hooks },
       ...(heapMb ? { resourceLimits: { maxOldGenerationSizeMb: heapMb } } : {}),
-      stdout: true,
+      // The thread's stdout goes to this process's fd 1, which is ignored;
+      // a piped stream nobody reads would keep pdf.js warnings in memory.
+      stdout: false,
       stderr: false
     });
     thread.on('message', ({ header, payload }) => {

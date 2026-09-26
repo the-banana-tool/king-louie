@@ -60,7 +60,9 @@ const ERROR_CODES = new Set(['ENCRYPTED', 'UNREADABLE_PDF', 'BAD_PAGE']);
 const workerFailed = (name) => new IngestError('PDF_WORKER_FAILED', `Cannot read ${name}: the PDF reader stopped unexpectedly.`);
 const timedOut = (name) => new IngestError('PDF_TIMEOUT', `Cannot read ${name}: the PDF took too long to read.`);
 const unreadable = (name) => new IngestError('UNREADABLE_PDF', `Cannot read ${name}: it is not a readable PDF.`);
-const overCap = (name) => new IngestError('UNREADABLE_PDF', `Cannot read ${name}: a page is too large to read.`);
+// A page reply over its cap. `tooLarge` lets pageAttachment (vision.js) tell
+// the owner the page is too large for vision instead of failing the read.
+const overCap = (name) => Object.assign(new IngestError('UNREADABLE_PDF', `Cannot read ${name}: a page is too large to read.`), { tooLarge: true });
 
 // ---- the pool: at most MAX_CHILDREN workers at once ----
 
@@ -287,7 +289,10 @@ class IsolatedPdf {
       const fallback = h.code === 'ENCRYPTED'
         ? `Cannot read ${this.name}: the PDF is password-protected.`
         : h.code === 'BAD_PAGE' ? `${this.name} has no page ${f.n}.` : unreadable(this.name).message;
-      return this.settle((x) => x.reject(new IngestError(h.code, safeMessage(h.message, fallback))));
+      // The worker refuses its own over-cap page with overCap's exact sentence.
+      const message = safeMessage(h.message, fallback);
+      if (h.code === 'UNREADABLE_PDF' && message === overCap(this.name).message) return this.settle((x) => x.reject(overCap(this.name)));
+      return this.settle((x) => x.reject(new IngestError(h.code, message)));
     }
     if (h.ok !== true) return this.fail(workerFailed(this.name), 'malformed reply');
     if (payload.length > PAYLOAD_CAP[f.kind]) return this.fail(overCap(this.name), 'payload over cap');

@@ -281,15 +281,19 @@ class OpenAIProvider extends BaseLLMProvider {
       body: JSON.stringify({
         model: requestedModel,
         messages: this.formatMessages(preparedMessages),
-        tools: tools.map((tool) => ({
-          type: 'function',
-          function: {
-            name: tool.name,
-            description: tool.description,
-            parameters: tool.parameters
-          }
-        })),
-        tool_choice: 'auto',
+        // Chat Completions rejects an empty tools list and tool_choice
+        // without tools; a tool-less call (document ingest) omits both.
+        ...(tools.length ? {
+          tools: tools.map((tool) => ({
+            type: 'function',
+            function: {
+              name: tool.name,
+              description: tool.description,
+              parameters: tool.parameters
+            }
+          })),
+          tool_choice: 'auto'
+        } : {}),
         ...temperatureParam(requestedModel, options),
         stream: false
       })
@@ -444,7 +448,7 @@ class OpenAIProvider extends BaseLLMProvider {
       body: JSON.stringify({
         model,
         input,
-        tools: responsesTools,
+        ...(responsesTools.length ? { tools: responsesTools } : {}),
         ...temperatureParam(model, options)
       })
     });

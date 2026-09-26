@@ -49,7 +49,9 @@ class InferenceRouter {
     if (normalizedProvider === 'openai') {
       capabilities.vision = normalizedModel.includes('gpt-4') || normalizedModel.includes('o1');
     } else if (normalizedProvider === 'anthropic') {
-      capabilities.vision = normalizedModel.includes('claude-3');
+      // Every Claude model from the 3 family on reads images; the default
+      // tiers name current models (cases stage 7 spec §11.6).
+      capabilities.vision = !normalizedModel.startsWith('claude-2') && !normalizedModel.startsWith('claude-instant');
     } else if (normalizedProvider === 'gemini') {
       capabilities.vision = true;
     } else if (normalizedProvider === 'openrouter') {
@@ -62,6 +64,10 @@ class InferenceRouter {
     if (normalizedProvider === 'ollama') {
       capabilities.toolCalling = normalizedModel.includes('llama') || normalizedModel.includes('mistral');
     }
+
+    // A one-page PDF can go to these providers as a document attachment
+    // (ImageHandler.formatDocumentForProvider); others get the page image.
+    capabilities.pdfInput = capabilities.vision && (normalizedProvider === 'anthropic' || normalizedProvider === 'gemini');
 
     return capabilities;
   }

@@ -288,7 +288,7 @@ class AnthropicProvider extends BaseLLMProvider {
       model: requestedModel,
       messages: this.formatMessages(messages),
       ...(cachedSystem ? { system: cachedSystem } : {}),
-      tools: this.buildCachedTools(tools),
+      ...(tools && tools.length ? { tools: this.buildCachedTools(tools) } : {}),
       max_tokens: options.max_tokens || 4096,
       stream: false
     };
