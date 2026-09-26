@@ -541,7 +541,9 @@ class CrossCaseIndex {
             provenance: h.doc.provenance,
             disclosable: h.doc.disclosable,
             caseStatus: h.rec.status,
-            coverage: round(h.coverage)
+            coverage: round(h.coverage),
+            // Distinct query tokens the document holds (see gates.redactedClose).
+            matched: h.tokens.size
           };
         });
     }, []);

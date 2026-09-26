@@ -63,8 +63,8 @@ const privateStmt = (title) => `(private fact in "${title}" — open that case t
 
 // Exact: an active non-inferred fact on the same (subject, attr) in this
 // case. Similar: cross-case index hits of kind `fact` with the same key or
-// close wording. A redacted hit has no text, so it matches by key or by the
-// index's `coverage` (share of the query's tokens it holds), and its row
+// close wording. A redacted hit has no text, so it matches by key or by
+// redactedClose (coverage and at least two matched tokens), and its row
 // never carries the fact's words.
 function findDuplicates({ subject, attr, text = '', facts, crossCaseHits = [] }) {
   const wanted = `${norm(subject)}|${norm(attr)}`;
@@ -80,7 +80,7 @@ function findDuplicates({ subject, attr, text = '', facts, crossCaseHits = [] })
     if (!hit || hit.kind !== 'fact') continue;
     const sameKey = key(hit) === wanted;
     const close = hit.redacted
-      ? Number(hit.coverage) >= 0.5
+      ? redactedClose(hit)
       : jaccard(words, tokens(hit.text)) >= 0.5;
     if (!sameKey && !close) continue;
     similar.push({
@@ -100,6 +100,14 @@ module.exports = { recommendationGate, findDuplicates };
 // docs/superpowers/specs/2026-09-23-cases-stage5-detours.md §3.2
 
 const { tokenSet } = require('./tokenize');
+
+// A redacted cross-case hit counts as close only when it holds at least half
+// of the query's distinct tokens AND at least two of them (the rule
+// searchCases uses). One matched token would let a one-word probe confirm
+// another case's private value (final review I2).
+function redactedClose(hit) {
+  return Number(hit.coverage) >= 0.5 && Number(hit.matched) >= 2;
+}
 
 // NFKC, drop format characters (zero-width, soft hyphen), lowercase, strip
 // trailing ? ! and dots, turn other punctuation into a space, collapse
@@ -125,7 +133,7 @@ function findDuplicateQuestion({ text, openQuestions = [], crossCaseHits = [] })
   const elsewhere = [];
   for (const hit of crossCaseHits) {
     if (!hit || hit.kind !== 'question' || hit.attr !== 'open') continue;
-    if (Number(hit.coverage) < 0.5) continue;
+    if (hit.redacted ? !redactedClose(hit) : Number(hit.coverage) < 0.5) continue;
     if (elsewhere.some((e) => e.caseId === hit.caseId && e.questionId === hit.id)) continue;
     elsewhere.push({ caseId: hit.caseId, caseTitle: hit.title, questionId: hit.id, status: hit.caseStatus });
   }

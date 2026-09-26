@@ -127,7 +127,8 @@ describe('stage 5 duplicate gates', () => {
     const hits = [
       { kind: 'fact', caseId: 'c-b', title: 'Household inventory', id: 'f-0009', subject: 'house-loan', attr: 'payoff', text: null, redacted: true, provenance: 'sourced', coverage: 0 },
       { kind: 'fact', caseId: 'c-c', title: 'Garage sale', id: 'f-0002', subject: 'garage', attr: 'date', text: 'Mortgage payoff quote for the house good through September', redacted: false, provenance: 'sourced', coverage: 0.4 },
-      { kind: 'fact', caseId: 'c-d', title: 'Taxes', id: 'f-0003', subject: 'tax', attr: 'year', text: null, redacted: true, provenance: 'user', coverage: 0.75 },
+      { kind: 'fact', caseId: 'c-d', title: 'Taxes', id: 'f-0003', subject: 'tax', attr: 'year', text: null, redacted: true, provenance: 'user', coverage: 0.75, matched: 3 },
+      { kind: 'fact', caseId: 'c-f', title: 'Probe target', id: 'f-0004', subject: 'probe', attr: 'value', text: null, redacted: true, provenance: 'user', coverage: 1, matched: 1 },
       { kind: 'question', caseId: 'c-e', title: 'Other', id: 'q-0001', text: null, redacted: true, coverage: 1 }
     ];
     const d = findDuplicates({ subject: 'House-Loan', attr: 'PAYOFF', text: 'mortgage payoff quote for the house', facts: new Map(), crossCaseHits: hits });
@@ -171,7 +172,8 @@ describe('stage 5 duplicate gates', () => {
 
   it('findDuplicateQuestion lists other cases\' open questions by title and id only', () => {
     const hits = [
-      { kind: 'question', caseId: 'c-b', title: 'Website redesign', id: 'q-0003', text: null, redacted: true, attr: 'open', caseStatus: 'active', coverage: 0.8 },
+      { kind: 'question', caseId: 'c-b', title: 'Website redesign', id: 'q-0003', text: null, redacted: true, attr: 'open', caseStatus: 'active', coverage: 0.8, matched: 4 },
+      { kind: 'question', caseId: 'c-f', title: 'Probe target', id: 'q-0009', text: null, redacted: true, attr: 'open', caseStatus: 'active', coverage: 1, matched: 1 },
       { kind: 'question', caseId: 'c-b', title: 'Website redesign', id: 'q-0001', text: null, redacted: true, attr: 'answered', caseStatus: 'active', coverage: 1 },
       { kind: 'question', caseId: 'c-c', title: 'Garage sale', id: 'q-0002', text: null, redacted: true, attr: 'open', caseStatus: 'draft', coverage: 0.2 },
       { kind: 'fact', caseId: 'c-d', title: 'Taxes', id: 'f-0001', text: null, redacted: true, coverage: 1 }

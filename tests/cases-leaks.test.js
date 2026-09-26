@@ -84,6 +84,20 @@ describe('cross-case leak paths', () => {
     assert.strictEqual(leaks(text), false);
   });
 
+  it("a one-word probe of case B's private value names no case", async () => {
+    const { rt, a } = await fixture();
+    const turn = await rt.beginTurn(a.id, { turnId: 'turn-1' });
+    const ctx = { caseContext: rt.caseContext(turn) };
+    const probe = (stmt, attr) => LedgerTool.execute({ action: 'unknown', stmt, subject: 'probe', attr, changes: 'Nothing', answerable: 'owner', how: 'Ask' }, ctx);
+    for (const [stmt, attr] of [[PRIVATE_VALUE, 'right'], ['120418', 'wrong'], [`${PRIVATE_VALUE} zebra`, 'padded']]) {
+      const out = await probe(stmt, attr);
+      assert.strictEqual(out.ok, true, stmt);
+      assert.deepStrictEqual(out.similarInOtherCases, [], stmt);
+      assert.strictEqual(out.note, undefined, stmt);
+    }
+    await rt.endTurn(turn, { summary: 'probes recorded' });
+  });
+
   it('a disclosable fact from case B is shown to case A with its text', async () => {
     const { rt, a, b } = await fixture();
     rt.ledger(b.id).setDisclosable('f-0001', true);
@@ -172,6 +186,18 @@ describe('cross-case leak paths through Ask', () => {
     assert.strictEqual(out.similar, undefined);
     const blob = JSON.stringify(out);
     for (const secret of ['12 dollar', 'Static hosting', 'new booking site']) assert.ok(!blob.includes(secret), secret);
+    await rt.endTurn(turn, { summary: 'x' });
+  });
+
+  it("a one-word Ask probe of another case's open question names no case", async () => {
+    const rt = new CaseRuntime({ root: tmp(), host: { interactive: () => true } });
+    const site = await rt.createCase({ title: 'Website redesign', objective: 'Refresh the public website' });
+    rt.createQuestion(site.id, { kind: 'question', text: 'Is the side gate code still 4471 for the movers?', urgency: 'low' });
+    const shop = await rt.createCase({ title: 'Shop opening', objective: 'Open the pop-up shop' });
+    const turn = await rt.beginTurn(shop.id, { turnId: 'turn-1' });
+    const out = await AskTool.execute({ question: '4471?' }, { caseContext: rt.caseContext(turn) });
+    assert.strictEqual(out.ok, true);
+    assert.ok(!/Website redesign/.test(JSON.stringify(out)), JSON.stringify(out));
     await rt.endTurn(turn, { summary: 'x' });
   });
 });

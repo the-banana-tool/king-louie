@@ -309,7 +309,9 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage5-detours.md`.
   another case carries text only for a `disclosable: true` fact or a brief
   `title`/`objective`; every other cross-case hit is `text: null, redacted:
   true`. Never pass `includePrivate` outside `index-store.js`; a test greps
-  `src/` for it.
+  `src/` for it. A redacted hit counts as a duplicate (Ledger `unknown`,
+  Ask) only by its key or with at least two matched query tokens, so a
+  one-word probe cannot confirm another case's private value.
 - `CaseRuntime.createCase` refuses an open case with the same or a close
   title/objective (`SimilarCaseError`, `code: 'SIMILAR_CASES'`) unless
   `force: true`. The model can never pass `force` itself — no case tool
