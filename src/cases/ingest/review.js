@@ -36,6 +36,7 @@ const RIGHT_OK = String.raw`(?![.,]?\p{Nd})`;
 const BAD_BEFORE = new RegExp(String.raw`(?:[\p{L}\p{Nd}_]|[\p{L}\p{Nd}_][.,\-])$`, 'u');
 const BAD_AFTER = new RegExp(String.raw`^[.,]?\p{Nd}`, 'u');
 const HAS_DIGIT = /\p{Nd}/u;
+const HIDDEN_ALL = new RegExp(`[${HIDDEN_CLASS}]`, 'gu');
 // A number as the Ledger reads one: an optional minus and currency sign,
 // then digits with commas only as thousands groups, or plain digits, with an
 // optional decimal part, or a leading-dot decimal. A leading zero before
@@ -61,7 +62,9 @@ function boundedIn(hay, needle) {
 // comes from a record anyone with a shell can edit.
 function valueInQuote(value, quote) {
   if (value === null || value === undefined || value === '') return true;
-  const q = Array.from(String(quote ?? '').slice(0, 2 * (QUOTE_MAX + 1))).slice(0, QUOTE_MAX + 1).join('');
+  // Hidden characters are dropped as the anchor drops them, so "1<ZWSP>200"
+  // reads as 1200 here too.
+  const q = Array.from(String(quote ?? '').slice(0, 2 * (QUOTE_MAX + 1))).slice(0, QUOTE_MAX + 1).join('').replace(HIDDEN_ALL, '');
   const v = String(value).trim();
   if (NUMERIC.test(v)) {
     const wanted = numberOf(v);
@@ -191,19 +194,41 @@ const charPattern = (c) => {
   return c.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
 };
 
+// The text without hidden characters, and for each of its code units the
+// index of the same unit in the original (one past the end at the end).
+function withoutHidden(text) {
+  const map = [];
+  let plain = '';
+  let from = 0;
+  const keep = (to) => {
+    plain += text.slice(from, to);
+    for (let i = from; i < to; i += 1) map.push(i);
+  };
+  for (const m of text.matchAll(HIDDEN_ALL)) {
+    keep(m.index);
+    from = m.index + m[0].length;
+  }
+  keep(text.length);
+  map.push(text.length);
+  return { plain, map };
+}
+
 // Where the quote starts in the raw page text: exactly (ignoring case), else
-// word by word across any run of whitespace or invisible characters, else 0.
+// word by word across any run of whitespace in the page with its hidden
+// characters removed (a soft hyphen inside a word too), mapped back to the
+// raw text, else 0. The pattern is literal words and whitespace gaps only,
+// so V8 searches it quickly even on a long, repetitive page.
 function findQuote(text, quote) {
   const exact = text.toLowerCase().indexOf(quote.toLowerCase());
   if (exact !== -1) return { at: exact, length: quote.length };
   const words = anchorText(quote).split(' ').filter(Boolean);
   if (!words.length) return { at: 0, length: 0 };
-  // Hidden characters may sit anywhere, inside a word too (a soft hyphen).
-  const gap = `[\\s${HIDDEN_CLASS}]+`;
-  const inWord = `[${HIDDEN_CLASS}]*`;
-  const loose = words.map((w) => Array.from(w).map(charPattern).join(inWord)).join(gap);
-  const m = new RegExp(loose, 'iu').exec(text);
-  return m ? { at: m.index, length: m[0].length } : { at: 0, length: 0 };
+  const { plain, map } = withoutHidden(text);
+  const loose = words.map((w) => Array.from(w).map(charPattern).join('')).join('\\s+');
+  const m = new RegExp(loose, 'iu').exec(plain);
+  if (!m) return { at: 0, length: 0 };
+  const at = map[m.index];
+  return { at, length: map[m.index + m[0].length - 1] + 1 - at };
 }
 
 // ±1,500 characters of the page around the quote, for the verify call.

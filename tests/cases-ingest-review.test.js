@@ -516,6 +516,34 @@ describe('fix round 2', () => {
   });
 });
 
+describe('fix round 3', () => {
+  it('finds a quote on a long repetitive page quickly (N1)', () => {
+    const cases = [
+      ['a'.repeat(200000), `${'a'.repeat(300)}b`],
+      [`${'a'.repeat(299)}c`.repeat(1334), `${'a'.repeat(299)} b`],
+      [`${'a'.repeat(299)}\u00adc `.repeat(1334), `${'a'.repeat(298)} b`]
+    ];
+    for (const [page, quote] of cases) {
+      const started = process.hrtime.bigint();
+      verifyContext(page, quote);
+      const ms = Number(process.hrtime.bigint() - started) / 1e6;
+      assert.ok(ms < 500, `verifyContext took ${ms.toFixed(1)} ms on a ${page.length}-character page`);
+    }
+  });
+
+  it('maps a match on the page without hidden characters back to the raw text (N1)', () => {
+    const page = `${'x'.repeat(2000)} Pay\u00ad\u200bment is\u200b\n due on 2026-10-15 ${'y'.repeat(2000)}`;
+    const ctx = verifyContext(page, 'payment is due on 2026-10-15');
+    const at = page.indexOf('Pay');
+    assert.strictEqual(ctx, page.slice(at - 1500, page.indexOf('15 y') + 2 + 1500));
+  });
+
+  it('reads numbers in the quote with hidden characters dropped, as the anchor does (N3)', () => {
+    assert.strictEqual(valueInQuote('200', 'Total 1\u200b200'), false);
+    assert.strictEqual(valueInQuote('1200', 'Total 1\u200b200'), true);
+  });
+});
+
 describe('normalizeProposal', () => {
   it('builds a fresh object with only the known fields', () => {
     const p = normalizeProposal({ ...raw(), id: 'p-009', checks: { anchor: 'ok' }, review: { action: 'accept' } });

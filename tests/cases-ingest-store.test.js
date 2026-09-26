@@ -235,6 +235,15 @@ describe('refPath (M7)', () => {
     assert.ok(refPath(dir, 'sources/a b.txt'));
   });
 
+  it('accepts a ref with a variation selector or Hangul filler, which only display drops (T5 r3)', () => {
+    const dir = caseDir();
+    for (const code of [0xfe0f, 0x3164, 0x00ad]) {
+      const ref = `sources/a${String.fromCodePoint(0x2764, code)} notes.pdf`;
+      assert.ok(refPath(dir, ref), code.toString(16));
+    }
+    assert.strictEqual(codeOf(() => refPath(dir, `sources/a${String.fromCharCode(1)}b.txt`)), 'BAD_PATH');
+  });
+
   it('refuses a ref through a symlinked sources/ directory', (t) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-ingest-store-'));
     dirs.push(dir);

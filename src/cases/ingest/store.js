@@ -145,7 +145,9 @@ function recordPath(caseDir, docId) {
 
 const SIDECAR = /\.meta\.json$/i;
 // Non-global copies: `.test` on a /g regex is stateful.
-const UNSAFE_REF = new RegExp(`${LINE_BREAKS.source}|${INVISIBLE.source}`, 'u');
+// Refs keep the narrower set (controls, bidi, zero-width): a variation
+// selector or Hangul filler is a legitimate part of a file name.
+const UNSAFE_REF = /[\t\n\v\f\r\u0085\u2028\u2029]|[\u0000-\u001f\u007f-\u009f\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/;
 const underSources = (caseDir, abs) => {
   const segs = segmentsWithin(caseDir, abs);
   return Boolean(segs) && segs.length >= 2 && segs[0] === 'sources' && !SIDECAR.test(segs[segs.length - 1]);
