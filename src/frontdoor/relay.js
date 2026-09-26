@@ -77,21 +77,28 @@ function readOnlyDevices(devices) {
   });
 }
 
-// config: { phoneListen: { host, port }, tls: { certFile, keyFile }, meshListen: { host, port }, publicUrl, push: { apns?, fcm? } }
+// config: { phoneListen, tls: { certFile, keyFile }, meshListen, publicUrl, push } for 'own';
+// for 'external' (the front door, fleet stage 4 §3.1) only { publicUrl, push },
+// plus the front door's own `transport` (pinned in TLS) and `phoneSpki`.
 async function startRelay({ dataDir, config, identity, listeners = 'own', registry = null, extensions = RELAY_EXTENSIONS,
-  useTls = true, senders = null, now = Date.now } = {}) {
+  useTls = true, senders = null, now = Date.now, transport = null, phoneSpki = null } = {}) {
   if (!['own', 'external'].includes(listeners)) throw new TypeError("listeners must be 'own' or 'external'");
-  assertPrivateMeshHost(config.meshListen && config.meshListen.host);
+  const external = listeners === 'external';
+  if (external && !transport) throw new TypeError("listeners 'external' needs the front door's transport");
+  // Only the relay's own mesh listener is limited to private addresses: the
+  // front door's mesh drops unpinned certificates in TLS (ruling 8, §3.2).
+  if (!external) assertPrivateMeshHost(config.meshListen && config.meshListen.host);
   const relayDir = path.join(dataDir, 'relay');
   fs.mkdirSync(path.join(relayDir, 'codes'), { recursive: true, mode: 0o700 });
 
   let cert = null;
   let key = null;
-  let phoneSpki = null;
-  if (useTls) {
+  // 'own' ignores both options and behaves exactly as F3 shipped it.
+  let spki = external ? phoneSpki : null;
+  if (useTls && !external) {
     cert = fs.readFileSync(config.tls.certFile, 'utf8');
     key = fs.readFileSync(config.tls.keyFile, 'utf8');
-    phoneSpki = relaySpkiPin(cert);
+    spki = relaySpkiPin(cert);
   }
 
   const devices = new DeviceRegistry({ file: path.join(relayDir, 'devices.json'), now });
@@ -102,11 +109,11 @@ async function startRelay({ dataDir, config, identity, listeners = 'own', regist
     ...(senders ? { senders } : {}),
     onDropToken: (device) => devices.setPush(device.device_id, null)
   });
-  const transport = new MeshTransport({ identity, host: config.meshListen.host, port: config.meshListen.port, useTls });
-  const pairing = new MeshPairing(identity, transport);
-  const nodeHub = new NodeHub({ identity, transport, pairing, registryFile: path.join(relayDir, 'nodes.json'), peerSource: registry, codesDir: path.join(relayDir, 'codes') });
+  const meshTransport = external ? transport : new MeshTransport({ identity, host: config.meshListen.host, port: config.meshListen.port, useTls });
+  const pairing = new MeshPairing(identity, meshTransport);
+  const nodeHub = new NodeHub({ identity, transport: meshTransport, pairing, registryFile: path.join(relayDir, 'nodes.json'), peerSource: registry, codesDir: path.join(relayDir, 'codes') });
 
-  const relay = { identity, config, publicUrl: config.publicUrl, phoneSpki, devices, approvals, invites, mailbox, pusher, nodeHub, log, now };
+  const relay = { identity, config, publicUrl: config.publicUrl, phoneSpki: spki, devices, approvals, invites, mailbox, pusher, nodeHub, log, now };
   // Route handlers see ctx.relay; they get the code/invite store the path
   // credentials are checked against, not the device registry.
   const phoneApi = createPhoneApi({ devices, relay: { invites }, now });
@@ -133,7 +140,7 @@ async function startRelay({ dataDir, config, identity, listeners = 'own', regist
   }
   const sweeper = setInterval(() => { approvals.sweep(); mailbox.sweep(); invites.sweep(); }, SWEEP_MS);
   if (typeof sweeper.unref === 'function') sweeper.unref();
-  log.info(`relay ${identity.nodeId} ready`, { phone: server ? server.address() : null, mesh: listeners === 'own' ? transport.port : null, push: pusher.senders });
+  log.info(`relay ${identity.nodeId} ready`, { phone: server ? server.address() : null, mesh: listeners === 'own' ? meshTransport.port : null, push: pusher.senders });
 
   return {
     phoneApi,
@@ -144,11 +151,17 @@ async function startRelay({ dataDir, config, identity, listeners = 'own', regist
     devices,
     approvals,
     invites,
-    phoneSpki,
+    get phoneSpki() {
+      return relay.phoneSpki;
+    },
+    // F4 (§3.3): after a certificate key change, relay.hello reports the new pin.
+    setPhoneSpki(pin) {
+      relay.phoneSpki = pin;
+    },
     address() {
       return {
         phone: server ? { host: config.phoneListen.host, port: server.address().port } : null,
-        mesh: listeners === 'own' ? { host: config.meshListen.host, port: transport.port } : null
+        mesh: listeners === 'own' ? { host: config.meshListen.host, port: meshTransport.port } : null
       };
     },
     async stop() {

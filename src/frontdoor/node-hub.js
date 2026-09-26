@@ -70,6 +70,7 @@ class NodeHub extends EventEmitter {
     this.codesDir = codesDir;
     this.codePollMs = codePollMs;
     this.registry = [];
+    this.localNode = null;
     this.handlers = new Map();
     this.rpcLink = createLinkRpc(transport);
     this.codeTimer = null;
@@ -103,12 +104,34 @@ class NodeHub extends EventEmitter {
 
   // F4's peer source: { list() → [{ peerId, publicKeyHex, name, tlsFingerprint, nodeId }], on('change') }.
   _loadPeers() {
+    const before = new Set(this.registry.map((n) => n.peer_id));
     if (this.peerSource) {
       this.registry = this.peerSource.list().map((p) => ({
         node_id: p.nodeId, node_name: p.name, public_key: p.publicKeyHex, peer_id: p.peerId, tls_fingerprint: p.tlsFingerprint || null, paired_at: null
       }));
     }
+    // The front door's own node id and key belong to the local node only: a
+    // row claiming either is never trusted, so no remote peer can act as it.
+    const claimsLocal = this.registry.filter((n) => this._claimsLocal(n));
+    if (claimsLocal.length) {
+      log.warn(`ignoring ${claimsLocal.length} peer entries that claim the front door's own node`);
+      this.registry = this.registry.filter((n) => !this._claimsLocal(n));
+    }
+    const now = new Set(this.registry.map((n) => n.peer_id));
+    for (const peerId of before) {
+      if (now.has(peerId)) continue;
+      // A removed or replaced key (fleet stage 4 §3.6): its live link closes
+      // with 4003 key_removed and it is no longer trusted.
+      if (typeof this.transport.closePeer === 'function') this.transport.closePeer(peerId, 4003, 'key_removed');
+      else this.transport.disconnectPeer(peerId);
+      this.transport.trustedPeers.delete(peerId);
+    }
     for (const n of this.registry) this._trust(n);
+  }
+
+  _claimsLocal(n) {
+    const local = this.localNode;
+    return local !== null && (n.node_id === local.node_id || (typeof n.public_key === 'string' && n.public_key === local.public_key));
   }
 
   _trust(n) {
@@ -239,11 +262,12 @@ class NodeHub extends EventEmitter {
   }
 
   nodeById(nodeId) {
+    if (this.localNode && this.localNode.node_id === nodeId) return this.localNode;
     return this.registry.find((n) => n.node_id === nodeId) || null;
   }
 
   nodeByPeer(peerId) {
-    return this.registry.find((n) => n.peer_id === peerId) || null;
+    return this.registry.find((n) => n.peer_id === peerId && !this._claimsLocal(n)) || null;
   }
 
   nodeByName(nodeName) {
@@ -267,12 +291,17 @@ class NodeHub extends EventEmitter {
   }
 
   rpc(nodeId, method, params = {}, { timeoutMs = 10000 } = {}) {
+    if (this.localNode && nodeId === this.localNode.node_id) return Promise.resolve().then(() => this.localNode.dispatch(method, params));
     const node = this.nodeById(nodeId);
     if (!node) return Promise.reject(new LinkRpcError('unknown_node', `no node ${nodeId}`));
     return this.rpcLink.call(node.peer_id, method, params, { timeoutMs });
   }
 
   notify(nodeId, method, params = {}) {
+    if (this.localNode && nodeId === this.localNode.node_id) {
+      Promise.resolve().then(() => this.localNode.dispatch(method, params)).catch((err) => log.warn(`local ${method} failed: ${err.message}`));
+      return;
+    }
     const node = this.nodeById(nodeId);
     if (node) this.rpcLink.notify(node.peer_id, method, params);
   }
@@ -283,6 +312,28 @@ class NodeHub extends EventEmitter {
 
   onConnection(fn) {
     this.on('connection', fn);
+  }
+
+  // Fleet stage 4 (§3.11, Deviation 3): the front door is a node of its own
+  // relay for console enrollment, device staging and its own history, with
+  // F3's message shapes unchanged. It is never listed as a paired node, and
+  // it is reached only in process: it has no peer id, so no mesh link maps
+  // to it, and a peer entry claiming its id or key is dropped.
+  attachLocalNode({ nodeId, nodeName, publicKeyHex, dispatch }) {
+    if (typeof dispatch !== 'function') throw new TypeError('attachLocalNode needs dispatch(method, params)');
+    if (typeof nodeId !== 'string' || !nodeId) throw new TypeError('attachLocalNode needs the front door\'s nodeId');
+    this.localNode = { node_id: nodeId, node_name: nodeName, public_key: publicKeyHex, peer_id: null, local: true, dispatch };
+    // Drop (and close with 4003) any entry already loaded under its id or key.
+    this._loadPeers();
+  }
+
+  // A node → relay call made by the front door itself (its courier, its
+  // device-state tracker).
+  callLocal(method, params = {}) {
+    if (!this.localNode) return Promise.reject(new LinkRpcError('no_local_node', 'no local node is attached'));
+    const handler = this.handlers.get(method);
+    if (!handler) return Promise.reject(new LinkRpcError('unknown_method', `the relay has no handler for ${method}`));
+    return Promise.resolve().then(() => handler(params, { nodeId: this.localNode.node_id }));
   }
 }
 
