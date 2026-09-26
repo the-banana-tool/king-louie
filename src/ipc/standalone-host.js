@@ -34,6 +34,18 @@ function startStandaloneHost(deps) {
     return win && !win.isDestroyed() ? win : null;
   };
 
+  // KL_TEST_MODE is already set on every e2e launch (tests/e2e/helpers.js),
+  // so it doubles as the switch for the installed-apps scan: without it, each
+  // launch runs discoverAllApps() (~30 `where` calls plus one PowerShell
+  // invocation per app) for a UI the e2e suite never reads. Production
+  // defaults (DEFAULT_FEATURES in src/core/create-core.js) are untouched;
+  // this only overrides the one feature, and only for this host, and only
+  // under the existing test-mode env var.
+  const hostFeatureOverrides = {
+    ...(standaloneOnce ? { channels: false, gateway: false, mesh: false, webhooks: false } : {}),
+    ...(process.env.KL_TEST_MODE ? { appDiscovery: false } : {})
+  };
+
   const core = createCoreFn({
     paths: { dataDir: app.getPath('userData') },
     store: new Store({ name: 'chat-data', defaults: CHAT_DATA_DEFAULTS }),
@@ -60,7 +72,8 @@ function startStandaloneHost(deps) {
     // One session next to a running service: nothing here may act for it.
     // Cron is built paused (never started) so no job can fire while
     // core.start() is still loading skills.
-    ...(standaloneOnce ? { features: { channels: false, gateway: false, mesh: false, webhooks: false }, cronStartPaused: true } : {})
+    ...(Object.keys(hostFeatureOverrides).length ? { features: hostFeatureOverrides } : {}),
+    ...(standaloneOnce ? { cronStartPaused: true } : {})
   });
 
   const controller = createDesktopController({
