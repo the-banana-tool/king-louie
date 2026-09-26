@@ -853,3 +853,28 @@ describe('ContactRouter.sendExternal never throws', () => {
     assert.strictEqual(r5.ok, false);
   });
 });
+
+// Ruling T9-token: a channel that expects no replies (ntfy) never carries a
+// reply footer or a token, even when it sends the question text.
+describe('ContactRouter.deliver on a delivery-only channel', () => {
+  it('sends no reply footer and no token; a reply channel still gets them', async () => {
+    const w = await world();
+    const q = w.ask(w.lot.id, { text: 'Is seller financing ever acceptable?', options: [{ id: 'a', label: 'No' }, { id: 'b', label: 'Yes, up to 20 %' }] });
+    const out = await w.router.deliver('ntfy', [w.entry(w.lot, q)]);
+    const sent = w.adapters.get('ntfy').last();
+    const tokens = [out.batchToken, ...w.state.deliveries()[out.deliveryId].items.map((i) => i.token)];
+    for (const t of tokens) assert.ok(!sent.message.text.includes(t), `ntfy text carries ${t}: ${sent.message.text}`);
+    assert.doesNotMatch(sent.message.text, /Reply|#/);
+    assert.strictEqual(sent.meta.batchToken, null);
+    assert.strictEqual(sent.meta.expectsReply, false);
+    assert.ok(sent.message.items.every((i) => i.token === undefined));
+    assert.match(sent.message.text, /Lakeside lot — Is seller financing ever acceptable\?/);
+    assert.strictEqual(w.state.deliveries()[out.deliveryId].batchToken, out.batchToken, 'the delivery is still recorded with its token');
+
+    const tg = await w.router.deliver('telegram', [w.entry(w.lot, q)]);
+    const tgSent = w.adapters.get('telegram').last();
+    assert.match(tgSent.message.text, new RegExp(`Reply "#${tg.batchToken} a"`));
+    assert.strictEqual(tgSent.meta.batchToken, tg.batchToken);
+    assert.ok(tgSent.message.items.every((i) => /^[0-9A-Z]{6}$/.test(i.token)));
+  });
+});

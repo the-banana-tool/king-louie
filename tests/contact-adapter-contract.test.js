@@ -207,3 +207,242 @@ describe('contact adapter: ntfy (delivery only)', () => {
     assert.strictEqual(new NtfyContact({ getConfig: () => ({}) }).contactCapabilities(), null);
   });
 });
+
+describe('contact adapter: Telegram (fake Bot API via apiBase)', () => {
+  const http = require('http');
+  const TelegramBridge = require('../src/channels/telegram-bridge');
+
+  async function fakeBotApi() {
+    const calls = [];
+    let failStatus = null;
+    let nextId = 4811;
+    const server = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        const method = req.url.split('/').pop();
+        calls.push({ path: req.url, method, body: body ? JSON.parse(body) : null });
+        res.setHeader('content-type', 'application/json');
+        if (failStatus) {
+          res.statusCode = failStatus;
+          failStatus = null;
+          res.end(JSON.stringify({ ok: false, description: 'forced' }));
+          return;
+        }
+        nextId += 1;
+        res.end(JSON.stringify({ ok: true, result: method === 'sendMessage' ? { message_id: nextId } : true }));
+      });
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    return { apiBase: `http://127.0.0.1:${server.address().port}`, calls, failNext: (s) => { failStatus = s; }, close: () => new Promise((r) => server.close(r)) };
+  }
+
+  async function bridgeWith(api, { enabled = true } = {}) {
+    const bridge = new TelegramBridge({
+      token: 'TEST-TOKEN',
+      apiBase: api.apiBase,
+      allowlistManager: { isAllowed: () => true, isAllowedUser: () => true },
+      sessionManager: { buildSessionKey: () => 'agent:main:telegram:x' }
+    });
+    const routed = [];
+    bridge.routeAgentMessage = async (chatId, text) => { routed.push({ chatId, text }); };
+    bridge.handleCommand = async (chatId, text) => { routed.push({ chatId, text }); };
+    bridge.getOrCreateLocalChat = () => null;
+    const known = new Set(['K7QD4M', '7QD4KM']);
+    bridge.setContactHost({ router: { knows: (channel, ref) => channel === 'telegram' && known.has(String(ref).toUpperCase()) }, getOwnerUserId: () => '111', isEnabled: () => enabled });
+    const calls = [];
+    bridge.onContactReply(async (correlationId, answer, meta) => {
+      calls.push({ correlationId, answer, meta });
+      return meta.ownerProven ? { ok: true, outcome: 'recorded', ackText: 'Recorded for Lakeside lot.' } : { ok: false, outcome: 'refused: not-owner', ackText: null };
+    });
+    return { bridge, calls, routed, known };
+  }
+
+  const privateChat = (id) => ({ id, type: 'private' });
+
+  it('meets the contract', async () => {
+    const api = await fakeBotApi();
+    try {
+      const { bridge, calls, known } = await bridgeWith(api);
+      assert.strictEqual(bridge.apiBase, `${api.apiBase}/botTEST-TOKEN`);
+      assert.strictEqual(bridge.ownerTarget(), '111');
+      const sent = await bridge.sendContact(MESSAGE, META);
+      assert.strictEqual(sent.deliveryId, 'd-test-1');
+      assert.strictEqual(sent.externalRef, '4812');
+      const req = api.calls.find((c) => c.method === 'sendMessage');
+      assert.strictEqual(req.body.chat_id, 111);
+      assert.deepStrictEqual(req.body.reply_markup.inline_keyboard, [[
+        { text: '1. No', callback_data: 'kl_q_7QD4KM_0' }, { text: '1. Yes, up to 20 %', callback_data: 'kl_q_7QD4KM_1' }
+      ]]);
+      assert.ok(Buffer.byteLength('kl_q_7QD4KM_1') <= 17);
+      for (const b of req.body.reply_markup.inline_keyboard.flat()) assert.ok(Buffer.byteLength(b.callback_data) <= 17, b.callback_data);
+
+      await bridge.handleUpdate({ callback_query: { id: 'cb1', data: 'kl_q_7QD4KM_1', from: { id: 111 }, message: { chat: privateChat(111) } } });
+      assert.deepStrictEqual([calls[0].correlationId, calls[0].answer, calls[0].meta.ownerProven], ['7QD4KM', { optionIndex: 1 }, true]);
+      assert.strictEqual(api.calls.filter((c) => c.method === 'sendMessage').pop().body.text, 'Recorded for Lakeside lot.');
+
+      known.add('4812');
+      await bridge.handleUpdate({ message: { chat: privateChat(111), from: { id: 111 }, text: 'yes', reply_to_message: { message_id: 4812 } } });
+      assert.deepStrictEqual([calls[1].correlationId, calls[1].answer, calls[1].meta.ownerProven], ['4812', { text: 'yes' }, true]);
+
+      await bridge.handleUpdate({ message: { chat: privateChat(999), from: { id: 999 }, text: '#K7QD4M a' } });
+      assert.strictEqual(calls[2].meta.ownerProven, false, 'a stranger');
+
+      api.failNext(429);
+      await assert.rejects(bridge.sendContact(MESSAGE, META), (err) => err instanceof ContactDeliveryError && err.code === 'rate-limited');
+    } finally {
+      await api.close();
+    }
+  });
+
+  it('refuses a group member and a second allowlisted user, and never routes their #TOKEN to the agent', async () => {
+    const api = await fakeBotApi();
+    try {
+      const { bridge, calls, routed } = await bridgeWith(api);
+      const before = api.calls.length;
+      await bridge.handleUpdate({ message: { chat: { id: -100222, type: 'supergroup', title: 'Family' }, from: { id: 333 }, text: '#K7QD4M 1 a' } });
+      await bridge.handleUpdate({ message: { chat: privateChat(444), from: { id: 444 }, text: '#K7QD4M 1 a' } });
+      await bridge.handleUpdate({ callback_query: { id: 'cb2', data: 'kl_q_7QD4KM_0', from: { id: 111 }, message: { chat: { id: -100222, type: 'supergroup' } } } });
+      assert.deepStrictEqual(calls.map((c) => c.meta.ownerProven), [false, false, false], 'the owner pressing in a group is not the private chat either');
+      assert.deepStrictEqual(routed, []);
+      assert.deepStrictEqual(api.calls.slice(before).filter((c) => c.method === 'sendMessage'), [], 'no acks to anyone');
+      assert.strictEqual(api.calls.slice(before).find((c) => c.method === 'answerCallbackQuery').body.text, 'Not allowed');
+
+      await bridge.handleUpdate({ message: { chat: privateChat(111), from: { id: 111 }, text: '#ZZZZZZ unrelated' } });
+      assert.deepStrictEqual(routed, [{ chatId: '111', text: '#ZZZZZZ unrelated' }], 'an unknown token is an ordinary message');
+    } finally {
+      await api.close();
+    }
+  });
+
+  it('with contact off it is not a contact channel', async () => {
+    const api = await fakeBotApi();
+    try {
+      const { bridge } = await bridgeWith(api, { enabled: false });
+      assert.strictEqual(bridge.contactCapabilities(), null);
+      assert.strictEqual(bridge.ownerTarget(), null);
+      await assert.rejects(bridge.sendContact(MESSAGE, META), (err) => err.code === 'not-configured');
+      assert.strictEqual(new TelegramBridge({ token: 'X' }).apiBase, 'https://api.telegram.org/botX');
+    } finally {
+      await api.close();
+    }
+  });
+
+  // Preflight M17: Telegram message ids are small per-chat integers, so a
+  // reply is a contact reply only in the owner's private chat.
+  it('a reply to a colliding message id outside the owner chat takes the normal path', async () => {
+    const api = await fakeBotApi();
+    try {
+      const { bridge, calls, routed, known } = await bridgeWith(api);
+      known.add('4812');
+      await bridge.handleUpdate({ message: { chat: { id: -100222, type: 'supergroup', title: 'Family' }, from: { id: 333 }, text: 'see above', reply_to_message: { message_id: 4812 } } });
+      await bridge.handleUpdate({ message: { chat: privateChat(999), from: { id: 999 }, text: 'what?', reply_to_message: { message_id: 4812 } } });
+      await bridge.handleUpdate({ message: { chat: { id: -100222, type: 'supergroup', title: 'Family' }, from: { id: 111 }, text: 'owner in the group', reply_to_message: { message_id: 4812 } } });
+      assert.deepStrictEqual(calls, [], 'no reply-id interception outside the owner private chat');
+      assert.deepStrictEqual(routed.map((r) => r.text), ['see above', 'what?', 'owner in the group']);
+    } finally {
+      await api.close();
+    }
+  });
+
+  // C2 channel tagging / M21: contact replies never enter a local chat (and so
+  // never an ownerMessages quote); everything else reaches it tagged as before.
+  it('an ordinary message reaches the local chat tagged telegram; a contact reply never does', async () => {
+    const api = await fakeBotApi();
+    try {
+      const { bridge, calls, routed } = await bridgeWith(api);
+      const created = [];
+      const added = [];
+      delete bridge.getOrCreateLocalChat;
+      bridge.createLocalChat = (title, opts) => { created.push({ title, opts }); return 'local-1'; };
+      bridge.addMessageToLocalChat = (localChatId, sender, text, opts) => { added.push({ localChatId, sender, text, opts }); };
+
+      await bridge.handleUpdate({ message: { chat: privateChat(111), from: { id: 111, username: 'owner' }, text: '#K7QD4M 1 a' } });
+      assert.strictEqual(calls.length, 1);
+      assert.deepStrictEqual([created, added, routed], [[], [], []], 'the contact reply stays out of every chat');
+
+      await bridge.handleUpdate({ message: { chat: privateChat(111), from: { id: 111, username: 'owner' }, text: 'how is the lot going?' } });
+      assert.strictEqual(calls.length, 1, 'not a contact reply');
+      assert.deepStrictEqual(created.map((c) => c.opts), [{ origin: 'telegram' }]);
+      assert.deepStrictEqual(added, [{ localChatId: 'local-1', sender: 'user', text: 'how is the lot going?', opts: { channel: 'telegram' } }]);
+      assert.deepStrictEqual(routed, [{ chatId: '111', text: 'how is the lot going?' }]);
+    } finally {
+      await api.close();
+    }
+  });
+
+  // Owner decision M22: approvals and app-only items are notices, never buttons.
+  it('renders buttons only for answerable items', async () => {
+    const api = await fakeBotApi();
+    try {
+      const { bridge } = await bridgeWith(api);
+      const notice = { ...ITEM, n: 2, token: 'M2P8RT', kind: 'approval', answerable: false, options: [{ id: 'approve', label: 'Approve' }, { id: 'reject', label: 'Reject' }] };
+      await bridge.sendContact({ ...MESSAGE, items: [notice] }, META);
+      await bridge.sendContact({ ...MESSAGE, items: [ITEM, notice] }, META);
+      const sends = api.calls.filter((c) => c.method === 'sendMessage');
+      assert.strictEqual(sends[0].body.reply_markup, undefined, 'a notice-only batch has no keyboard');
+      assert.deepStrictEqual(sends[1].body.reply_markup.inline_keyboard.flat().map((b) => b.callback_data), ['kl_q_7QD4KM_0', 'kl_q_7QD4KM_1']);
+    } finally {
+      await api.close();
+    }
+  });
+
+  it('malformed callback data is refused without reaching the router', async () => {
+    const api = await fakeBotApi();
+    try {
+      const { bridge, calls } = await bridgeWith(api);
+      const bad = ['kl_q_', 'kl_q_7QD4KM', 'kl_q_7QD4KM_', 'kl_q_7QD4KM_10', 'kl_q_7QD4K_1', 'kl_q_7QD4KMX_1', 'kl_q_7QD4KM_1 ', 'kl_q_7QD4KM_1\n', 'kl_q_7QD4KM_-1', 'kl_q_7QD4KM_١', `kl_q_7QD4KM_1${'x'.repeat(80)}`];
+      for (const [i, data] of bad.entries()) {
+        await bridge.handleUpdate({ callback_query: { id: `bad-${i}`, data, from: { id: 111 }, message: { chat: privateChat(111) } } });
+      }
+      assert.deepStrictEqual(calls, []);
+      const answers = api.calls.filter((c) => c.method === 'answerCallbackQuery').map((c) => c.body.text);
+      assert.deepStrictEqual(answers, bad.map(() => 'Unknown action'));
+    } finally {
+      await api.close();
+    }
+  });
+
+  it('never puts the bot token in an error', async () => {
+    const bridge = new TelegramBridge({ token: 'SECRET-BOT-TOKEN', apiBase: 'http://[bad' });
+    bridge.setContactHost({ router: { knows: () => false }, getOwnerUserId: () => '111', isEnabled: () => true });
+    await assert.rejects(bridge.sendContact(MESSAGE, META), (err) => err instanceof ContactDeliveryError
+      && err.code === 'unreachable' && !err.message.includes('SECRET-BOT-TOKEN') && err.message.includes('<bot-token>'));
+  });
+});
+
+describe('bridge-contact helpers', () => {
+  const { contactOwnerProven, callbackData, parseCallback, leadingToken, buttonRows, telegramError, discordError } = require('../src/channels/bridge-contact');
+
+  it('owner proof needs the private chat with the owner and the owner as sender', () => {
+    const base = { isPrivate: true, chatId: '111', senderId: '111', target: '111', ownerUserId: '111' };
+    assert.strictEqual(contactOwnerProven(base), true);
+    assert.strictEqual(contactOwnerProven({ ...base, isPrivate: false }), false, 'a group');
+    assert.strictEqual(contactOwnerProven({ ...base, senderId: '222' }), false, 'another sender');
+    assert.strictEqual(contactOwnerProven({ ...base, chatId: '222' }), false, 'another chat');
+    assert.strictEqual(contactOwnerProven({ ...base, target: null, ownerUserId: null, chatId: '', senderId: '' }), false, 'no owner configured');
+  });
+
+  it('callback data round-trips, stays within 17 bytes, and anything else parses to null', () => {
+    assert.strictEqual(callbackData('7QD4KM', 7), 'kl_q_7QD4KM_7');
+    assert.deepStrictEqual(parseCallback('kl_q_7qd4km_3'), { token: '7QD4KM', index: 3 });
+    assert.throws(() => callbackData('7QD4K', 0), /callback/);
+    assert.throws(() => callbackData('7QD4KM', 10), /callback/);
+    for (const bad of [null, undefined, 42, {}, '', 'kl_a_abc_y', 'kl_q_7QD4KM_1_', 'xkl_q_7QD4KM_1', 'kl_q_7QD4KM_1'.repeat(5)]) {
+      assert.strictEqual(parseCallback(bad), null, String(bad));
+    }
+  });
+
+  it('leading token, button rows and error mapping', () => {
+    assert.strictEqual(leadingToken('  #k7qd4m 1 a'), 'K7QD4M');
+    assert.strictEqual(leadingToken('x #K7QD4M'), null);
+    const rows = buttonRows([ITEM, { ...ITEM, token: 'bad', n: 2 }, { ...ITEM, n: 3, token: 'M2P8RT', answerable: false }], 8);
+    assert.strictEqual(rows.length, 1, 'an item with a malformed token or no answer rights gets no buttons');
+    assert.ok(rows.flat().every((b) => Buffer.byteLength(b.data) <= 17 && b.label.length <= 40));
+    assert.strictEqual(telegramError(new Error('Telegram sendMessage failed: 403 Forbidden')).code, 'not-configured');
+    assert.strictEqual(telegramError(new Error('Telegram sendMessage error: chat not found')).code, 'rejected');
+    assert.strictEqual(telegramError(new Error('fetch failed')).code, 'unreachable');
+    assert.strictEqual(telegramError(new Error('Failed to parse URL from http://x/botABC/sendMessage'), { secret: 'ABC' }).message, 'Failed to parse URL from http://x/bot<bot-token>/sendMessage');
+    assert.strictEqual(discordError(Object.assign(new Error('x'), { status: 413 })).code, 'too-large');
+  });
+});

@@ -313,7 +313,7 @@ const needsApp = (record) => record?.kind === 'approval' || appOnly(record);
 // app-only question is only announced: "Answer this in the app: …", with no
 // options and no reply hint (answerable: false).
 function renderBatch(entries, {
-  batchToken, maxChars = 4000, maxOptions = 6, authenticated = true, timeZone = '', truncate = false
+  batchToken, maxChars = 4000, maxOptions = 6, authenticated = true, timeZone = '', truncate = false, replies = true
 } = {}) {
   const sorted = [...entries].sort((a, b) => (URGENCY_RANK[a.record.urgency] ?? 1) - (URGENCY_RANK[b.record.urgency] ?? 1)
     || String(a.record.createdAt).localeCompare(String(b.record.createdAt)));
@@ -335,7 +335,8 @@ function renderBatch(entries, {
     lines.push(it.answerable ? `${it.n}. ${tag}${it.caseTitle} — ${it.text}` : `${it.n}. ${tag}${it.text}`);
     if (it.options.length) lines.push(`   ${it.options.map((o) => `${o.id}) ${o.label}`).join('   ')}`);
   }
-  const replyable = items.filter((it) => it.answerable && it.kind !== 'briefing');
+  // replies: false (a delivery-only channel) → no footer, so no token (ruling T9-token).
+  const replyable = replies ? items.filter((it) => it.answerable && it.kind !== 'briefing') : [];
   if (replyable.length) {
     const hint = (it) => {
       const answer = it.options.length ? it.options[0].id : '<answer>';
@@ -349,7 +350,7 @@ function renderBatch(entries, {
   }
   let text = lines.join('\n');
   if (text.length > maxChars && !truncate) {
-    return renderBatch(entries, { batchToken, maxChars, maxOptions, authenticated, timeZone, truncate: true });
+    return renderBatch(entries, { batchToken, maxChars, maxOptions, authenticated, timeZone, truncate: true, replies });
   }
   return { subject: subjectFor(items), text, items, tooLarge: text.length > maxChars };
 }

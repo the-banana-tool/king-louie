@@ -177,25 +177,30 @@ class ContactRouter {
     const caps = adapter.contactCapabilities();
     const id = deliveryId || this.state.newDeliveryId();
     const token = batchToken || this.state.newToken();
+    // Ruling T9-token: a channel that takes no replies (ntfy) gets no reply
+    // footer and no token, in the text or anywhere else it is handed.
+    const replies = caps.expectsReplies === true;
     const message = renderBatch(entries, {
       batchToken: token,
       maxChars: caps.maxChars || 4000,
       maxOptions: caps.maxOptions ?? 6,
       authenticated: this.answersInApp(channelId),
-      timeZone: this.getTimeZone()
+      timeZone: this.getTimeZone(),
+      replies
     });
     if (message.tooLarge) throw new ContactDeliveryError('too-large', `the batch is over ${caps.maxChars} characters even with items cut`);
     const expiries = message.items.map((i) => i.expiresAt).filter(Boolean).sort();
     const meta = {
       // A batch of app-only notices invites no reply (no gather, no buttons).
-      expectsReply: caps.expectsReplies === true && message.items.some((i) => i.answerable),
+      expectsReply: replies && message.items.some((i) => i.answerable),
       options: message.items.length === 1 ? message.items[0].options : null,
       deliveryId: id,
-      batchToken: token,
+      batchToken: replies ? token : null,
       expiresAt: expiries[0] || null,
       urgency: message.items.some((i) => i.urgency === 'high') ? 'high' : (message.items.some((i) => i.urgency === 'normal') ? 'normal' : 'low')
     };
-    const sent = await adapter.sendContact({ subject: message.subject, text: message.text, items: message.items }, meta);
+    const items = replies ? message.items : message.items.map(({ token: _token, ...rest }) => rest);
+    const sent = await adapter.sendContact({ subject: message.subject, text: message.text, items }, meta);
     this.state.recordDelivery(id, {
       channel: channelId,
       at: this.clock().toISOString(),

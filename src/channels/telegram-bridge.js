@@ -5,7 +5,8 @@ const {
   formatStatus,
   formatApprovalRequest
 } = require('./telegram-adapter');
-const { ChannelPlugin } = require('./channel-plugin');
+const { ChannelPlugin, ContactDeliveryError } = require('./channel-plugin');
+const { contactOwnerProven, parseCallback, leadingToken, buttonRows, telegramError, redact } = require('./bridge-contact');
 const { shouldRespond } = require('./mention-gating');
 const { NoticeLimiter, resolveApprovalTarget, judgeApprovalPress, addressesBot, commandTargetsBot } = require('./sender-policy');
 const { skillRegistry } = require('../skills');
@@ -54,7 +55,10 @@ class TelegramBridge extends ChannelPlugin {
     this.createLocalChat = options.createLocalChat || (() => null);
     this.addMessageToLocalChat = options.addMessageToLocalChat || (() => {});
 
-    this.apiBase = `https://api.telegram.org/bot${this.token}`;
+    // Cases stage 4: `apiBase` (default https://api.telegram.org) lets tests use a fake Bot API.
+    this.apiBase = `${String(options.apiBase || 'https://api.telegram.org').replace(/\/$/, '')}/bot${this.token}`;
+    this.contactHost = null;
+    this.contactReplyHandler = null;
     this.offset = 0;
     this.running = false;
     this.connected = false;
@@ -186,6 +190,100 @@ class TelegramBridge extends ChannelPlugin {
       return null;
     }
     return new RegExp(`@${this.botUsername}(\\b|$)`, 'i');
+  }
+
+  // ---- Contact (cases stage 4 §3.1). The contact target is the private chat
+  // with the contact owner, whose chat id is the owner's user id. ----
+
+  // host: { router, getOwnerUserId(), isEnabled() } from src/cases/contact-host.js
+  setContactHost(host) {
+    this.contactHost = host && typeof host === 'object' ? host : null;
+  }
+
+  _contactOwner() {
+    if (!this.contactHost) return null;
+    const enabled = typeof this.contactHost.isEnabled === 'function' && this.contactHost.isEnabled() === true;
+    const owner = typeof this.contactHost.getOwnerUserId === 'function' ? String(this.contactHost.getOwnerUserId() || '').trim() : '';
+    return enabled && owner ? owner : null;
+  }
+
+  ownerTarget() {
+    return this._contactOwner();
+  }
+
+  contactCapabilities() {
+    if (!this.ownerTarget()) return null;
+    return {
+      buttons: true, richText: false, attachments: false, voice: false, expectsReplies: true, authenticatedReplies: true,
+      interrupts: true, maxOptions: 8, maxChars: 4000
+    };
+  }
+
+  onContactReply(handler) {
+    this.contactReplyHandler = typeof handler === 'function' ? handler : null;
+  }
+
+  async sendContact(message, meta = {}) {
+    const target = this.ownerTarget();
+    if (!target) throw new ContactDeliveryError('not-configured', 'Telegram contact is off or has no contact owner id');
+    // Buttons only for items answerable here (owner decision M22).
+    const rows = buttonRows(message.items, 8).map((row) => row.map((b) => ({ text: b.label, callback_data: b.data })));
+    let sent;
+    try {
+      sent = await this.sendMessage(target, message.text, rows.length ? { reply_markup: { inline_keyboard: rows } } : {});
+    } catch (error) {
+      throw telegramError(error, { secret: this.token });
+    }
+    return { deliveryId: meta.deliveryId || null, externalRef: String(sent?.message_id ?? '') || null };
+  }
+
+  async _contactReply(correlationId, answer, meta) {
+    const result = await this.contactReplyHandler(correlationId, answer, { channel: 'telegram', at: new Date().toISOString(), ...meta });
+    if (result && result.ackText && meta.ownerProven) {
+      try {
+        await this.sendMessage(this.ownerTarget(), result.ackText);
+      } catch (error) {
+        log.warn(`contact ack failed: ${redact(error.message, this.token)}`);
+      }
+    }
+    return result;
+  }
+
+  // A "#<token> …" message (any chat) or a reply to a contact message (only
+  // in the owner's private chat: message ids are per chat, preflight M17)
+  // goes to the router, never to routeAgentMessage or a local chat. Everyone
+  // but the owner in the private chat is refused there (ownerProven: false).
+  async maybeHandleContactMessage(message, chatId, text) {
+    if (!this.contactHost || !this.contactReplyHandler || !this.contactHost.router) return false;
+    const isPrivate = String(message.chat?.type || '') === 'private';
+    const target = this.ownerTarget();
+    const token = leadingToken(text);
+    const replyTo = message.reply_to_message && isPrivate && target && chatId === target
+      ? String(message.reply_to_message.message_id ?? '') || null
+      : null;
+    const byToken = Boolean(token && this.contactHost.router.knows('telegram', token));
+    const byReply = Boolean(replyTo && this.contactHost.router.knows('telegram', replyTo));
+    if (!byToken && !byReply) return false;
+    const senderId = String(message.from?.id || '');
+    const ownerProven = contactOwnerProven({ isPrivate, chatId, senderId, target, ownerUserId: this._contactOwner() });
+    await this._contactReply(byToken ? token : replyTo, { text }, { senderId, chatId, ownerProven, deliveryRef: byReply ? replyTo : null });
+    return true;
+  }
+
+  async handleContactCallback(query = {}) {
+    const callbackId = String(query.id || '');
+    const parsed = parseCallback(query.data);
+    if (!parsed || !this.contactReplyHandler) {
+      await this.answerCallbackQuery(callbackId, 'Unknown action');
+      return;
+    }
+    const chatId = String(query?.message?.chat?.id || '');
+    const senderId = String(query?.from?.id || '');
+    const ownerProven = contactOwnerProven({
+      isPrivate: String(query?.message?.chat?.type || '') === 'private', chatId, senderId, target: this.ownerTarget(), ownerUserId: this._contactOwner()
+    });
+    await this.answerCallbackQuery(callbackId, ownerProven ? 'Received' : 'Not allowed');
+    await this._contactReply(parsed.token, { optionIndex: parsed.index }, { senderId, chatId, ownerProven });
   }
 
   async pollLoop() {
@@ -404,6 +502,8 @@ class TelegramBridge extends ChannelPlugin {
     const chatId = String(message?.chat?.id || '');
     const text = inbound.text;
     if (!chatId) return;
+    // Cases stage 4: contact replies go to the router before the allowlist.
+    if (await this.maybeHandleContactMessage(message, chatId, text)) return;
 
     const channelSettings = this.getChannelSettings() || {};
     const isGroup = Boolean(inbound.group);
@@ -759,6 +859,12 @@ class TelegramBridge extends ChannelPlugin {
     const data = String(query.data || '');
     const chatId = String(query?.message?.chat?.id || '');
     const callbackId = String(query.id || '');
+
+    // Cases stage 4: contact buttons are checked before approval buttons.
+    if (data.startsWith('kl_q_')) {
+      await this.handleContactCallback(query);
+      return;
+    }
 
     const match = data.match(/^kl_a_([a-z0-9]+)_(y|n)$/i);
     if (!match) {
