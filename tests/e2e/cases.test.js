@@ -56,7 +56,7 @@ describe('E2E: cases', { skip: gitAvailable ? false : 'git is not on PATH' }, ()
     await evaluate(ctx, `document.getElementById('chat-case-orientation-btn').click(); true`);
     await waitFor(ctx, `(document.getElementById('chat-case-orientation')?.textContent || '').includes('E2E lakeside lot')`);
 
-    const slugs = fs.readdirSync(casesRoot);
+    const slugs = fs.readdirSync(casesRoot).filter((n) => !n.startsWith('.'));
     assert.deepStrictEqual(slugs, ['e2e-lakeside-lot']);
     assert.ok(fs.existsSync(path.join(casesRoot, 'e2e-lakeside-lot', 'facts.jsonl')));
   });

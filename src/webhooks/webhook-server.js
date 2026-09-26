@@ -58,6 +58,13 @@ class WebhookServer {
     log.info(`HTTP server listening on http://127.0.0.1:${this.port}`);
   }
 
+  // Cases stage 4: a co-located contact relay pushes its events to
+  // POST /contact/relay/<name>. handler(name, rawBody, headers) → { status, body };
+  // it checks the HMAC (src/channels/relay-client.js createRelayPushHandler).
+  setContactRelayHandler(handler) {
+    this.contactRelayHandler = typeof handler === 'function' ? handler : null;
+  }
+
   async stop() {
     if (!this.httpServer) return;
 
@@ -108,6 +115,25 @@ class WebhookServer {
     try {
       const url = new URL(req.url, `http://${req.headers.host}`);
       
+      // Cases stage 4: signed contact relay push. The handler verifies the
+      // signature over the raw body before it parses anything.
+      const contactMatch = url.pathname.match(/^\/contact\/relay\/([a-z][a-z0-9-]{0,31})$/);
+      if (contactMatch && req.method === 'POST' && this.contactRelayHandler) {
+        let body;
+        try {
+          body = await this.readRequestBody(req);
+        } catch (err) {
+          if (!/too large/.test(err.message)) throw err;
+          res.writeHead(413, { 'Content-Type': 'application/json', Connection: 'close' });
+          res.end(JSON.stringify({ error: 'Request body too large' }));
+          return;
+        }
+        const result = await this.contactRelayHandler(contactMatch[1], body, req.headers);
+        res.writeHead(result.status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result.body));
+        return;
+      }
+
       // Route webhook requests: POST /webhooks/{webhookId}
       const webhookMatch = url.pathname.match(/^\/webhooks\/([a-f0-9]+)$/);
       if (webhookMatch && req.method === 'POST') {
@@ -178,7 +204,10 @@ class WebhookServer {
 
   async readRequestBody(req, maxSize = 1024 * 1024) {
     return new Promise((resolve, reject) => {
-      let body = '';
+      // Buffers, decoded once at the end: a multi-byte UTF-8 character split
+      // across two chunks would otherwise decode to U+FFFD twice (and a
+      // signature over the raw body would no longer verify).
+      const chunks = [];
       let size = 0;
 
       req.on('data', (chunk) => {
@@ -187,11 +216,11 @@ class WebhookServer {
           reject(new Error('Request body too large'));
           return;
         }
-        body += chunk.toString();
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
       });
 
       req.on('end', () => {
-        resolve(body);
+        resolve(Buffer.concat(chunks).toString('utf8'));
       });
 
       req.on('error', reject);

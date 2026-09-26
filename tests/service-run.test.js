@@ -279,6 +279,44 @@ describe('loadProfile("agent") listener readiness', { timeout: 120000 }, () => {
     assert.equal(shutdownCalled, true);
   });
 
+  // Cases stage 4 (preflight M2): runService loads service.json once (with
+  // adminUid) and threads its admin-only `contact` block through start(), like
+  // `audit`; createCore always gets the key, whose presence means service mode.
+  for (const [label, contact, expected] of [
+    ['the admin contact block', { telegram: { ownerUserId: '123456789' } }, { telegram: { ownerUserId: '123456789' } }],
+    ['null when service.json has none', undefined, null]
+  ]) {
+    it(`hands createCore ${label} as deps.contactConfig`, async () => {
+      const { dataDir: dir, workspace } = dataDir();
+      const coreEntry = require.resolve('../src/core');
+      const original = require.cache[coreEntry];
+      let seen = null;
+      require.cache[coreEntry] = {
+        id: coreEntry, filename: coreEntry, loaded: true,
+        exports: {
+          createCore: (deps) => {
+            seen = deps;
+            return {
+              start: async () => {},
+              whenListenersSettled: async () => {},
+              getGatewayServer: () => ({ wss: null }),
+              getWebhookServer: () => ({ httpServer: null }),
+              shutdown: async () => {}
+            };
+          }
+        }
+      };
+      try {
+        const running = await loadProfile('agent').start({ dataDir: dir, features: allOff, ports: {}, workspace, contact });
+        await running.stop();
+      } finally {
+        if (original) require.cache[coreEntry] = original; else delete require.cache[coreEntry];
+      }
+      assert.ok(Object.prototype.hasOwnProperty.call(seen, 'contactConfig'));
+      assert.deepStrictEqual(seen.contactConfig, expected);
+    });
+  }
+
   // Fix round 2 (opus re-review, minor, explicitly requested test): the
   // returned stop() already runs core.shutdown() in a try with
   // approvals.stop() in the finally (round 1); this pins that a rejecting

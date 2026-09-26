@@ -313,3 +313,46 @@ describe('createCore: listener readiness', () => {
     await core.shutdown();
   });
 });
+
+describe('createCore: contact host (cases stage 4)', () => {
+  it('serves getContact() once started; desktop mode takes the owner from settings, service mode (deps.contactConfig) from the admin block', async () => {
+    const { deps } = makeDeps();
+    const core = createCore(deps);
+    assert.strictEqual(core.context.getContact(), null, 'nothing before start()');
+    await core.start();
+    try {
+      const contact = core.context.getContact();
+      assert.ok(contact && contact.ladder && contact.presence && contact.router);
+      assert.deepStrictEqual(contact.ladderState(), {});
+    } finally {
+      await core.shutdown();
+    }
+  });
+
+  it('shutdown stops the contact host before the channels and the webhook server, under the shutdown timeout', async () => {
+    const { deps } = makeDeps();
+    const core = createCore({ ...deps, contactConfig: null, shutdownTimeoutMs: 50 });
+    await core.start();
+    const order = [];
+    const { ladder } = core.context.getContact();
+    const ladderStop = ladder.stop.bind(ladder);
+    ladder.stop = async () => { order.push('contact'); await ladderStop(); return new Promise(() => {}); };
+    const registry = core.context.getChannelRegistry();
+    const shutdownAll = registry.shutdownAll.bind(registry);
+    registry.shutdownAll = async () => { order.push('channels'); return shutdownAll(); };
+    const webhook = core.getWebhookServer();
+    const webhookStop = webhook.stop.bind(webhook);
+    webhook.stop = async () => { order.push('webhook'); return webhookStop(); };
+    // withTimeout's timer is unref'd and the contact stop never settles here.
+    const release = require('./helpers/hold-event-loop').holdEventLoop();
+    const startedAt = Date.now();
+    try {
+      await core.shutdown();
+    } finally {
+      release();
+    }
+    assert.deepStrictEqual(order.slice(0, 1), ['contact']);
+    assert.ok(order.includes('channels') && order.includes('webhook'));
+    assert.ok(Date.now() - startedAt < 2000, 'a hung contact stop does not hang quit');
+  });
+});

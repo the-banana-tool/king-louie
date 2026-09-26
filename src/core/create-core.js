@@ -68,6 +68,7 @@ const { TTSEngine, DEFAULT_VOICE_SETTINGS } = require('../voice/tts-engine');
 const WebhookRegistry = require('../webhooks/webhook-registry');
 const WebhookHandler = require('../webhooks/webhook-handler');
 const WebhookServer = require('../webhooks/webhook-server');
+const { createContactHost } = require('../cases/contact-host');
 const { initializeMesh } = require('../mesh');
 const LLMRouter = require('../providers/llm-router');
 const { WorkflowEngine } = require('../workflows/workflow-engine');
@@ -2715,10 +2716,33 @@ function createCore(deps = {}) {
     }
   };
 
+  // Cases stage 4: contact channels, presence and the ladder
+  // (docs/superpowers/specs/2026-09-23-cases-stage4-channels.md §7).
+  let contactHost = null;
+
   const start = async () => {
     migrateLegacyBridgeChatOrigins();
     initializeTools();
     await initializeAgentInfrastructure();
+    // Service mode is signalled by the presence of deps.contactConfig (run.js
+    // always passes it, from the admin service.json only); the desktop reads
+    // the owner and addresses from settings. sendExternal's outbound gate is
+    // contact-host's defaultGetGate (C3's gateLeaves once it merges).
+    contactHost = createContactHost({
+      getSettings,
+      setSettings,
+      contactConfig: deps.contactConfig ?? null,
+      isService: Object.prototype.hasOwnProperty.call(deps, 'contactConfig'),
+      caseRuntime,
+      channelRegistry,
+      vault,
+      dataDir: userDataPath,
+      features,
+      getBridges: () => ({ telegram: telegramBridge, discord: discordBridge }),
+      getWebhookServer: () => webhookServer,
+      approvals: deps.approvals || null
+    });
+    await contactHost.start();
     const TASK_EVENTS = { taskCreated: 'task:created', taskUpdated: 'task:updated', taskUnblocked: 'task:unblocked' };
     for (const [evt, channel] of Object.entries(TASK_EVENTS)) {
       taskManager.on(evt, (task) => ui.send(channel, task));
@@ -2744,6 +2768,12 @@ function createCore(deps = {}) {
     caseRuntime.beginShutdown();
     caseRuntime.abortUnattended();
     const warnTimeout = (label, ms) => log.warn(`${label} timed out after ${ms}ms; continuing shutdown`);
+    // Cases stage 4: contact stops before the channels and the webhook server
+    // below, so no in-flight ladder tick delivers through a stopped adapter.
+    if (contactHost) {
+      await withTimeout(contactHost.stop(), shutdownTimeoutMs, 'Contact shutdown', warnTimeout)
+        .catch((err) => log.warn(`Contact shutdown failed: ${err.message}`));
+    }
     // Let the in-flight cases:wakeups sweep actually finish (endTurn, lock
     // release and all) before releaseAll() below can force the lock away
     // out from under it.
@@ -2835,6 +2865,7 @@ function createCore(deps = {}) {
     createUsageRecordFromMetrics,
     getSettings,
     getCaseRuntime: () => caseRuntime,
+    getContact: () => (contactHost ? contactHost.context() : null),
     // The signed-approval requester (program §4.12), or null: always null in
     // 'allow' and 'deny' modes (the Electron host), and null while no device
     // is enrolled or no relay link can deliver.
