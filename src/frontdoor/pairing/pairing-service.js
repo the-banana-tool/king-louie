@@ -198,6 +198,17 @@ class PairingService {
     }
   }
 
+  // _commit for a decision: on a failed save the decision is undone and
+  // refused with a coded error, so the caller retries.
+  _commitDecision(p, undo) {
+    try {
+      this._commit(undo);
+    } catch (e) {
+      log.error(`saving ${this.file} failed (${e.code || e.message}); the decision on ${p.pairing_id} was not taken`);
+      throw err('save_failed', 'the decision could not be saved; try again');
+    }
+  }
+
   sweep() {
     const t = this.now();
     this.codes = this.codes.filter((c) => c.expires_at_ms + KEEP_MS > t);
@@ -248,6 +259,11 @@ class PairingService {
       log.info(`a wrong pairing code for ${m.node_name} (${code.attempts}/${this.maxAttempts})`);
       return { ok: false, status: 403, reason: 'code_rejected' };
     }
+    // Ruling T28-rename: a key already enrolled under another name would
+    // move that node to this name when approved (the registry keys records
+    // by node id), silently dropping the old name. The owner removes it first.
+    const renamed = this._renameProblem(m.node_id, m.node_name);
+    if (renamed) return { ok: false, status: 409, reason: renamed.code, message: renamed.message };
     const existing = this.registry.byName(m.node_name);
     const pairingId = `pr_${crypto.randomBytes(16).toString('base64url')}`;
     const t = this.now();
@@ -292,6 +308,13 @@ class PairingService {
     return { ok: true, status: 200, envelope: accept };
   }
 
+  // An err() when nodeId is enrolled under a name other than nodeName, else null.
+  _renameProblem(nodeId, nodeName) {
+    const enrolled = this.registry.byId(nodeId);
+    if (!enrolled || enrolled.node_name === nodeName) return null;
+    return err('key_enrolled_as_other_name', `this node key is already enrolled as "${enrolled.node_name}"; remove ${enrolled.node_name} first, then pair it as "${nodeName}"`);
+  }
+
   _notify(pairingId) {
     try {
       Promise.resolve(this.notify('pairing', pairingId)).catch((e) => log.warn(`pairing push failed: ${e && e.message}`));
@@ -323,11 +346,20 @@ class PairingService {
     if (!r.ok) throw err(r.reason, `the enrollment was refused: ${r.reason}`);
     if (typeof deviceId !== 'string' || r.deviceId !== deviceId) throw err('bad_decision', 'the decision must be signed by the calling phone');
     if (r.message.decision === 'deny') {
+      // A deny must survive a restart, or the pairing comes back pending and
+      // could be approved later: saved, or rolled back and refused so the
+      // phone retries.
       p.state = 'denied';
       p.nonces.push(r.message.nonce);
-      this._persist();
+      this._commitDecision(p, () => {
+        p.state = 'pending';
+        p.nonces.pop();
+      });
       return { state: 'denied' };
     }
+    // The registry may have changed since submit (ruling T28-rename).
+    const renamed = this._renameProblem(p.node_id, p.node_name);
+    if (renamed) throw renamed;
     // The owner signed `replaces` as it was when the node submitted its code.
     // If the name now belongs to a node the owner was not shown (another
     // pairing for the name enrolled since), approving must not remove it.
@@ -352,7 +384,10 @@ class PairingService {
   async consoleConfirmed(pairingId) {
     const p = typeof pairingId === 'string' ? this.pairings.get(pairingId) : undefined;
     if (!p || p.confirm !== 'console' || this._state(p) !== 'pending') throw err('unknown_pairing', 'no console pairing with that id is pending');
-    const before = this.registry.byName(p.node_name);
+    // Checked on the registry as it was before the reload: once the admin's
+    // console record is loaded it carries the new name.
+    const renamed = this._renameProblem(p.node_id, p.node_name);
+    if (renamed) throw renamed;
     this.registry.load();
     const record = this.registry.byId(p.node_id);
     if (!record || record.source !== 'console') throw err('no_console_record', `no console record for ${p.node_id}: run frontdoor code ${p.node_name} --confirm as an administrator`);
@@ -361,8 +396,9 @@ class PairingService {
     }
     p.state = 'enrolled';
     this._persist();
-    const replaced = before && before.node_id !== p.node_id ? before.node_id : null;
-    await this._enrolled(p, 'console', replaced);
+    // The replacement the node's submit recorded: the registry may already
+    // have been reloaded (SIGHUP) with the console record in place.
+    await this._enrolled(p, 'console', p.replaces);
     return { state: 'enrolled' };
   }
 
@@ -370,7 +406,7 @@ class PairingService {
     const p = typeof pairingId === 'string' ? this.pairings.get(pairingId) : undefined;
     if (!p || p.confirm !== 'console' || p.state !== 'pending') return false;
     p.state = 'denied';
-    this._persist();
+    this._commitDecision(p, () => { p.state = 'pending'; });
     return true;
   }
 

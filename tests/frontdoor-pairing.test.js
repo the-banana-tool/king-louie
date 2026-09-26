@@ -390,7 +390,7 @@ describe('PairingService hardening', () => {
     assert.equal(reopen(t).submit(n.pair(code)).reason, 'too_many_attempts');
   });
 
-  it('a failed issue save keeps the previous code; a deny whose save fails still holds and is saved later', async () => {
+  it('a failed issue save keeps the previous code; a deny whose save fails is refused, survives no restart, and the retry holds', async () => {
     const { broken, writeFile } = breakableWrite();
     const t = await setup({ writeFile });
     const first = await t.pairing.issue('gpu-box', { by: A.deviceId });
@@ -400,11 +400,98 @@ describe('PairingService hardening', () => {
     const id = open(t.pairing.submit(nodeKit().pair(first.code)).envelope).message.pairing_id;
     broken.on = true;
     const deny = A.enrollNode({ frontdoorId: FD.nodeId, pairing: pendingView(t, id), decision: 'deny' });
-    assert.deepEqual(await t.pairing.decide(id, deny, { deviceId: A.deviceId }), { state: 'denied' });
-    assert.deepEqual(t.pairing.status(id), { state: 'denied' });
+    await assert.rejects(t.pairing.decide(id, deny, { deviceId: A.deviceId }), (e) => e.code === 'save_failed');
+    assert.deepEqual(t.pairing.status(id), { state: 'pending' }, 'rolled back, not denied only in memory');
+    assert.deepEqual(reopen(t).status(id), { state: 'pending' });
     broken.on = false;
-    t.pairing.sweep();
+    assert.deepEqual(await t.pairing.decide(id, deny, { deviceId: A.deviceId }), { state: 'denied' }, 'the same decision, retried');
     assert.deepEqual(reopen(t).status(id), { state: 'denied' });
+  });
+
+  it('a console decline whose save fails is refused and rolled back', async () => {
+    const { broken, writeFile } = breakableWrite();
+    const t = await setup({ writeFile });
+    const { code } = await t.pairing.issue('db-01', { by: 'console' });
+    const id = open(t.pairing.submit(nodeKit('db-01', 'runbook').pair(code)).envelope).message.pairing_id;
+    broken.on = true;
+    assert.throws(() => t.pairing.consoleDeclined(id), (e) => e.code === 'save_failed');
+    assert.deepEqual(t.pairing.status(id), { state: 'pending' });
+    broken.on = false;
+    assert.equal(t.pairing.consoleDeclined(id), true);
+    assert.deepEqual(reopen(t).status(id), { state: 'denied' });
+  });
+
+  // Ruling T28-rename: one key, one name. The registry keys records by node
+  // id, so approving a known key under a new name would drop the old name.
+  const renamedKit = (kit, name) => {
+    const identity = { ...kit.identity, nodeName: name };
+    return { identity, cert: kit.cert, pair: (code) => buildNodePair({ identity, frontdoorHost: HOST, code, profile: 'agent', capabilities: ['large-disk'], tlsCertPem: kit.cert }) };
+  };
+  async function enrolByPhone(t, kit) {
+    const { code } = await t.pairing.issue(kit.identity.nodeName, { by: A.deviceId });
+    const id = open(t.pairing.submit(kit.pair(code)).envelope).message.pairing_id;
+    await t.pairing.decide(id, A.enrollNode({ frontdoorId: FD.nodeId, pairing: pendingView(t, id) }), { deviceId: A.deviceId });
+  }
+
+  it('a key enrolled under another name is refused at submit (409), over HTTP too, and the code is not spent', async () => {
+    const t = await setup();
+    const box = nodeKit('gpu-box');
+    await enrolByPhone(t, box);
+    const { code } = await t.pairing.issue('web-01', { by: A.deviceId });
+    const r = t.pairing.submit(renamedKit(box, 'web-01').pair(code));
+    assert.equal(r.ok, false);
+    assert.deepEqual([r.status, r.reason], [409, 'key_enrolled_as_other_name']);
+    assert.match(r.message, /remove gpu-box first/);
+    const base = await listen(t);
+    const posted = await request(base, { method: 'POST', path: '/pair/v1', json: renamedKit(box, 'web-01').pair(code) });
+    assert.deepEqual([posted.status, posted.json.error], [409, 'key_enrolled_as_other_name']);
+    assert.equal(t.registry.byName('gpu-box').node_id, box.identity.nodeId);
+    assert.equal(t.pairing.submit(nodeKit('web-01').pair(code)).ok, true, 'the code still works for another key');
+  });
+
+  it('a key enrolled under another name after submit is refused when the phone approves', async () => {
+    const t = await setup();
+    const box = nodeKit('gpu-box');
+    const { code } = await t.pairing.issue('web-01', { by: A.deviceId });
+    const id = open(t.pairing.submit(renamedKit(box, 'web-01').pair(code)).envelope).message.pairing_id;
+    const view = pendingView(t, id);
+    await enrolByPhone(t, box);
+    await assert.rejects(t.pairing.decide(id, A.enrollNode({ frontdoorId: FD.nodeId, pairing: view }), { deviceId: A.deviceId }), (e) => e.code === 'key_enrolled_as_other_name');
+    assert.equal(t.registry.byName('gpu-box').node_id, box.identity.nodeId);
+    assert.equal(t.registry.byName('web-01'), null);
+    assert.deepEqual(t.pairing.status(id), { state: 'pending' });
+  });
+
+  it('a key enrolled under another name after submit is refused at console confirm', async () => {
+    const t = await setup();
+    const box = nodeKit('gpu-box');
+    const { code } = await t.pairing.issue('web-01', { by: 'console' });
+    const id = open(t.pairing.submit(renamedKit(box, 'web-01').pair(code)).envelope).message.pairing_id;
+    await enrolByPhone(t, box);
+    await assert.rejects(t.pairing.consoleConfirmed(id), (e) => e.code === 'key_enrolled_as_other_name');
+    assert.equal(t.registry.byName('gpu-box').node_id, box.identity.nodeId);
+    assert.deepEqual(t.pairing.status(id), { state: 'pending' });
+  });
+
+  it('a console confirm after a registry reload still raises node_replaced for the node the submit saw', async () => {
+    const t = await setup();
+    const old = nodeKit('gpu-box');
+    await enrolByPhone(t, old);
+    const fresh = nodeKit('gpu-box');
+    const { code } = await t.pairing.issue('gpu-box', { by: 'console' });
+    const id = open(t.pairing.submit(fresh.pair(code)).envelope).message.pairing_id;
+    const p = t.pairing.consolePending('gpu-box');
+    assert.equal(p.replaces, old.identity.nodeId);
+    NodeRegistry.writeConsoleRecord(t.configDir, {
+      node_id: p.node_id, node_name: 'gpu-box', profile: 'agent', public_key: p.public_key, tls_fingerprint: p.tls_fingerprint,
+      source: 'console', accepted_at: new Date().toISOString(), signed: null, confirmed_by: 'console'
+    });
+    if (POSIX) fs.chmodSync(NodeRegistry.consoleDir(t.configDir), 0o755);
+    t.registry.load(); // SIGHUP before the admin CLI reports back
+    assert.deepEqual(await t.pairing.consoleConfirmed(id), { state: 'enrolled' });
+    // (the registry also flags the shadowed phone record: node_record_invalid)
+    assert.deepEqual(t.raised.filter(([k]) => k === 'node_replaced').map(([k, o]) => [k, o.subject]), [['node_replaced', `node:${old.identity.nodeId}`]]);
+    assert.ok(t.audit.some((e) => e.kind === 'frontdoor.node.replaced' && e.data.old_node_id === old.identity.nodeId && e.data.by === 'console'));
   });
 });
 

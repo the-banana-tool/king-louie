@@ -62,7 +62,7 @@ function createPairHandler({ pairing, perMin = 10, now = Date.now, maxIps = MAX_
         }
         const r = pairing.submit(envelope);
         if (r.ok) sendJson(res, 200, r.envelope);
-        else sendJson(res, r.status, { error: r.reason });
+        else sendJson(res, r.status, r.message ? { error: r.reason, message: r.message } : { error: r.reason });
         return;
       }
       const m = STATUS_RE.exec(url.pathname);
