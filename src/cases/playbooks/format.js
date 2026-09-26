@@ -884,6 +884,19 @@ function validatePackage(dir, { dirName = path.basename(dir), knownCaseTypes = n
     errors.push({ file: 'sources.md', message: 'sources.md is larger than 64 KiB' });
   }
 
+  // A NUL byte or invalid UTF-8 is refused in every walked file, not just
+  // the four named ones above: any .yaml/.md/.txt/LICENSE file a package
+  // carries (steps.md's own sources/ notes, say) gets the same check. The
+  // four named files were already read (and so already checked) above;
+  // this only reads the rest, and only within the per-file size limit —
+  // an oversized file is never read here either.
+  const NAMED_FILES = new Set(['playbook.yaml', 'steps.md', 'briefRules.md', 'sources.md']);
+  for (const f of files) {
+    if (NAMED_FILES.has(f.rel) || f.size > LIMITS.fileBytes) continue;
+    const { error } = readTextStrict(f.abs);
+    if (error) errors.push({ file: f.rel, message: `${f.rel} ${error}` });
+  }
+
   return {
     ok: errors.length === 0,
     playbook,

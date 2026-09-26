@@ -317,6 +317,16 @@ describe('validatePackage', () => {
     assert.deepStrictEqual(messages(f.validatePackage(badUtf8)), ['briefRules.md is not valid UTF-8']);
   });
 
+  it('refuses a NUL byte or invalid UTF-8 in any other walked file, not just the four named ones', () => {
+    const dir = writePackage(path.join(tmp(), 'land-sale'));
+    fs.mkdirSync(path.join(dir, 'notes'));
+    fs.writeFileSync(path.join(dir, 'notes', 'a.md'), Buffer.from('one\0two\n'));
+    fs.writeFileSync(path.join(dir, 'notes', 'c.md'), Buffer.from([0x2d, 0x20, 0xff, 0x0a]));
+    const msgs = messages(f.validatePackage(dir));
+    assert.match(msgs.join('\n'), /notes\/a\.md contains a NUL byte/);
+    assert.match(msgs.join('\n'), /notes\/c\.md is not valid UTF-8/);
+  });
+
   it('excludes .git and dot-prefixed entries from validation and hashing', () => {
     const dir = writePackage(path.join(tmp(), 'land-sale'));
     const before = f.hashPackage(dir);
