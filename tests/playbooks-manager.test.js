@@ -455,6 +455,36 @@ describe('recorded local sources', () => {
     assert.ok(hits.length > 0, 'a confirmed path is then checked');
   });
 
+  it('with entries that do not cover it on its text, the recorded path is refused before any file system call', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const w = await imported(t);
+    const drive = path.join(tmp(), 'mapped');
+    const s = readState(w.dir);
+    s.vendored['land-sale'].source = `path:${path.join(drive, 'land-sale')}`;
+    writeState(w.dir, s);
+    // One entry elsewhere, one sharing a name prefix but not a segment.
+    w.settings.playbooks.sources = [`path:${w.typed.root}`, `path:${drive}-other`];
+    const hits = watchFs(t, drive, { lstatSelf: true });
+    const [row] = await w.mgr.checkUpdates(w.id);
+    assert.strictEqual(row.code, 'SOURCE_NEEDS_CONFIRM');
+    assert.strictEqual((await w.mgr.update(w.id, 'land-sale')).code, 'SOURCE_NEEDS_CONFIRM');
+    assert.deepStrictEqual(hits, [], 'zero file system calls before confirming');
+    // An entry that is a text prefix of the path but not a whole segment.
+    const sibling = `${drive}-evil`;
+    const s2 = readState(w.dir);
+    s2.vendored['land-sale'].source = `path:${path.join(sibling, 'land-sale')}`;
+    writeState(w.dir, s2);
+    w.settings.playbooks.sources = [`path:${drive}`];
+    const siblingHits = watchFs(t, sibling, { lstatSelf: true });
+    assert.strictEqual((await w.mgr.update(w.id, 'land-sale')).code, 'SOURCE_NEEDS_CONFIRM');
+    assert.deepStrictEqual(siblingHits, []);
+    writeState(w.dir, s);
+    const upper = process.platform === 'win32' ? drive.toUpperCase() : drive;
+    w.settings.playbooks.sources = [`path:${upper}`];
+    await w.mgr.update(w.id, 'land-sale');
+    assert.ok(hits.length > 0, 'a covering entry (case-folded on Windows) goes on to the checks');
+  });
+
   it('the owner re-confirming reads it', async (t) => {
     if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
     const w = await imported(t);

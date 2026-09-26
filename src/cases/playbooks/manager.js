@@ -104,6 +104,22 @@ function recordedLocalPath(source) {
   return abs;
 }
 
+// Whether a path: allowlist entry covers `abs` on its text alone: both sides
+// normalised absolute paths (path.resolve, no file system call), compared by
+// whole segments, case-folded on Windows. A UNC entry covers nothing.
+function lexicallyCovered(abs, settings) {
+  const fold = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
+  const target = fold(path.resolve(abs));
+  return (settings.sources || [])
+    .filter((e) => typeof e === 'string' && e.startsWith('path:'))
+    .map((e) => expandHome(e.slice('path:'.length).trim()))
+    .filter((root) => root && !isUncLike(root) && path.isAbsolute(root))
+    .some((root) => {
+      const rel = path.relative(fold(path.resolve(root)), target);
+      return rel === '' || (!path.isAbsolute(rel) && rel.split(path.sep)[0] !== '..');
+    });
+}
+
 // Walks `abs` from its root with lstat only, so no link on the way is ever
 // followed (a link can lead to a UNC share). Stops at the first missing
 // component; resolveSource then reports the folder as missing.
@@ -460,13 +476,14 @@ class PlaybookManager {
         `The recorded source of "${name}" is a local folder no allowed-folder entry covers (${oneLine(abs, 200)}). Confirm it before King Louie reads it, or add its folder to Settings → Playbooks → Allowed sources.`,
         { code: 'SOURCE_NEEDS_CONFIRM' }
       );
-      const hasEntry = settings.sources.some((e) => e.startsWith('path:'));
-      // With no path: entry nothing can cover it: refuse on the text, before
-      // any file system call (a mapped network drive is not touched).
-      if (!hasEntry && confirmSource !== true) throw needsConfirm();
+      // Unless an entry covers it on its text, refuse before any file system
+      // call (a mapped network drive is not touched). Fail closed: a path
+      // covered only through a link waits for the owner's confirm.
+      const lexical = lexicallyCovered(abs, settings);
+      if (!lexical && confirmSource !== true) throw needsConfirm();
       assertNoLinks(abs, name);
       let covered = false;
-      if (hasEntry) {
+      if (lexical) {
         try {
           vendor.assertPathAllowed(abs, settings);
           covered = true;
