@@ -164,6 +164,35 @@ describe('cancel', () => {
     assert.strictEqual(s.reg.globalRemaining('fake-agent'), 5);
   });
 
+  // C3 merge (reviewer minor M-a): a cancel that found the job at the
+  // executor by externalRef and cancelled it there records that external id,
+  // so a reconcile outcome fetched before the cancel does not DELETE it a
+  // second time or journal that the executor "did not confirm the cancel".
+  it('a submitting job cancelled at the executor keeps its external id; a prefetched reconcile does not cancel it again', async () => {
+    const s = await setup({ findByExternalRef: true });
+    seed(s.dir);
+    const store = new JobStore(s.dir);
+    const job = store.create({ caseId: s.meta.id, executor: 'fake-agent', kind: 'external', state: 'submitting', recipients: ['+15550100'], envelopeId: 'env-01' });
+    const adapter = await s.reg.adapter('fake-agent');
+    await adapter.submit({ ...job, externalRef: `${s.meta.id}/${job.id}` }, null);
+    const prefetched = await jobs.reconcileFetch(s.reg, s.meta.id, store.get(job.id));
+    assert.deepStrictEqual(prefetched.found && prefetched.found.jobId, 'ext-1');
+
+    const r = await jobs.cancelJob(s.reg, s.meta.id, job.id, 'cancelled');
+    assert.strictEqual(r.ok, true);
+    assert.match(r.note, /had taken it as ext-1; cancelled there/);
+    const cancelled = store.get(job.id);
+    assert.deepStrictEqual([cancelled.state, cancelled.externalId], ['cancelled', 'ext-1']);
+
+    s.ctl.cancelThrows = true;
+    assert.strictEqual(await jobs.reconcileApply(s.reg, s.meta.id, { id: job.id }, prefetched), null);
+    assert.deepStrictEqual(s.ctl.calls.filter((c) => c[0] === 'cancel'), [['cancel', 'ext-1']], 'one DELETE');
+    const journalDir = path.join(s.dir, 'journal');
+    const text = fs.existsSync(journalDir) ? fs.readdirSync(journalDir).map((n) => fs.readFileSync(path.join(journalDir, n), 'utf8')).join('\n') : '';
+    assert.doesNotMatch(text, /did not confirm the cancel/);
+    assert.doesNotMatch(text, /while it was reconciled/);
+  });
+
   // Final review minor 5: the cancels run in systemAction, so they are
   // committed, not left in the working tree.
   it('cancelOpenJobs commits its cancels', async () => {

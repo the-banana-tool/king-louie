@@ -700,9 +700,11 @@ async function cancelJob(reg, caseId, jobId, reason = 'cancelled') {
   // that fails never blocks the local cancel; it is journaled, and the
   // contacts stay counted since the job may have gone out (residual N1).
   let keepReservation = false;
+  let cancelledAs = null;
   if (listed.kind === 'external' && listed.state === 'submitting' && !validExternalId(listed.externalId)) {
     const looked = await lookupSubmitted(reg, caseId, listed);
     keepReservation = looked.keepReservation;
+    cancelledAs = looked.cancelledAs || null;
     if (looked.note) note = looked.note;
   }
   try {
@@ -732,6 +734,10 @@ async function cancelJob(reg, caseId, jobId, reason = 'cancelled') {
   if (!isObject(job) || !isOpen(job.state)) return { ok: false, error: `${jobId} is already ${job?.state}.` };
   const release = keepReservation ? 0 : takeReservation(job);
   const after = newAfter();
+  // The executor-side job lookupSubmitted cancelled: recorded, so a reconcile
+  // outcome fetched before this cancel sees the job it names is already
+  // cancelled and does not send a second cancel (reviewer minor M-a).
+  if (cancelledAs) job.externalId = cancelledAs;
   job.state = 'cancelled';
   job.reason = reason;
   job.lastChange = reg.now().toISOString();
@@ -745,7 +751,8 @@ async function cancelJob(reg, caseId, jobId, reason = 'cancelled') {
 }
 
 // For cancelJob: an unconfirmed external job's executor-side job, found by
-// externalRef and cancelled. → { keepReservation, note }
+// externalRef and cancelled. → { keepReservation, note, cancelledAs? },
+// where cancelledAs is the executor's job id once its cancel succeeded.
 async function lookupSubmitted(reg, caseId, job) {
   let adapter;
   try {
@@ -767,7 +774,7 @@ async function lookupSubmitted(reg, caseId, job) {
   if (!found || !validExternalId(found.jobId)) return { keepReservation: false, note: null };
   try {
     await adapter.cancel(found.jobId);
-    return { keepReservation: true, note: clip(`the executor had taken it as ${found.jobId}; cancelled there`) };
+    return { keepReservation: true, cancelledAs: found.jobId, note: clip(`the executor had taken it as ${found.jobId}; cancelled there`) };
   } catch (err) {
     return { keepReservation: true, note: clip(`the executor had taken it as ${found.jobId} and did not confirm the cancel: ${err.message}`) };
   }
