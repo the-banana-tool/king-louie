@@ -46,7 +46,7 @@ function parseConsent(html) {
 
 function cookieOf(res) {
   const set = [].concat(res.headers['set-cookie'] || []);
-  const c = set.find((s) => s.startsWith('kl_authz='));
+  const c = set.find((s) => s.startsWith('kl_authz_'));
   return c ? c.split(';')[0] : null;
 }
 

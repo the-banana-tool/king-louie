@@ -7,12 +7,38 @@ const { createLogger } = require('../../logging');
 const { CODE_CHALLENGE_RE } = require('../protocol/messages');
 const { OAuthError } = require('./errors');
 const { clientHost } = require('./clients');
+const { SCOPE_RE } = require('./scopes');
 const { CONSENT_HEADERS, CONSENT_CSS, consentPage, messagePage } = require('./pages');
 const { readBody, sendJson, sendHtml, parseCookies, requestHost, clientIp } = require('../http-util');
 
 const log = createLogger('frontdoor/oauth');
 const BODY_LIMIT = 65536;
 const STATE_MAX = 512;
+const SHOWN_SCOPES_MAX = 64;
+const AUTHORIZE_PARAMS = new Set(['response_type', 'client_id', 'redirect_uri', 'code_challenge', 'code_challenge_method', 'resource', 'scope', 'state']);
+
+// The browser cookie is named per request, so two authorize flows in one
+// browser do not overwrite each other (ruling T22-cookiename).
+const cookieName = (grantId) => `kl_authz_${grantId.slice(0, 12)}`;
+
+// Client-metadata refusals whose text is fixed by the front door (numbers
+// aside) are shown as they are. Anything carrying text the client chose (a
+// metadata key, a host name, a network error) is shown generically, so the
+// page never repeats attacker text as if the front door said it.
+const FIXED_CLIENT_ERRORS = new RegExp('^client metadata: (?:'
+  + 'client_id (?:is not an https URL|is not a URL|must be an https URL|must use port 443|must not carry credentials|must not have a fragment'
+  + '|must name a host, not an address|must not end its host with a dot|must be a URL in canonical form)'
+  + '|the metadata (?:is not JSON|is not a JSON object|is not UTF-8|is encoded; only identity is accepted|is over \\d+ (?:KiB|bytes)|connection closed early'
+  + '|URL answered with a redirect; redirects are not followed|URL answered \\d{3})'
+  + '|fetching the metadata timed out after \\d+ ms|its client_id is not the URL it was fetched from|redirect_uris must be a list of at most \\d+ URLs)$');
+
+function shownClientError(message) {
+  const text = String(message);
+  if (FIXED_CLIENT_ERRORS.test(text)) return text;
+  if (text.startsWith('client metadata: the metadata has a forbidden key')) return 'client metadata: the metadata has a forbidden key';
+  if (/^client metadata: (?:cannot resolve |.* has no address$|.* resolves to an address that is not public$)/.test(text)) return 'client metadata: its host has no public address';
+  return 'client metadata: the metadata document could not be used';
+}
 
 class OAuthServer {
   constructor({ domain, clients, pending, scopeRegistry, scopesEnabled, clientDefaults = [], now = Date.now } = {}) {
@@ -131,7 +157,9 @@ class OAuthServer {
     // the client; RFC 6749 §3.1 forbids it.
     const keys = [...url.searchParams.keys()];
     const repeated = keys.find((k, i) => keys.indexOf(k) !== i);
-    if (repeated !== undefined) return this.refuse(res, 400, 'Invalid request', `The parameter ${repeated} was given more than once.`);
+    if (repeated !== undefined) {
+      return this.refuse(res, 400, 'Invalid request', AUTHORIZE_PARAMS.has(repeated) ? `The parameter ${repeated} was given more than once.` : 'A parameter was given more than once.');
+    }
     const q = Object.fromEntries(url.searchParams);
     const ip = clientIp(req);
     let client = null;
@@ -146,7 +174,7 @@ class OAuthServer {
       client = await this.clients.resolve(q.client_id);
     } catch (err) {
       if (err instanceof OAuthError && err.status === 429) return this.refuse(res, 429, 'Try again later', err.message);
-      if (err instanceof OAuthError) return this.refuse(res, 400, 'Unknown client', err.message);
+      if (err instanceof OAuthError) return this.refuse(res, 400, 'Unknown client', shownClientError(err.message));
       log.warn(`resolving a client failed: ${err && err.message}`);
       return this.refuse(res, 400, 'Unknown client', 'This client could not be looked up.');
     }
@@ -165,7 +193,12 @@ class OAuthServer {
     const supported = this.supportedScopes();
     const requested = q.scope === undefined || !q.scope.trim() ? supported : [...new Set(q.scope.trim().split(/\s+/))].sort();
     const unknown = requested.filter((s) => !supported.includes(s));
-    if (unknown.length) return this.refuse(res, 400, 'Invalid scope', `This front door does not grant ${unknown.join(', ')}.`);
+    if (unknown.length) {
+      // Only scope-shaped names are repeated back, and only so many of them.
+      const named = unknown.filter((u) => SCOPE_RE.test(u)).join(', ');
+      if (!named || named.length > SHOWN_SCOPES_MAX) return this.refuse(res, 400, 'Invalid scope', 'An unknown scope was requested.');
+      return this.refuse(res, 400, 'Invalid scope', `This front door does not grant ${named}.`);
+    }
     const host = clientHost(client, q.redirect_uri);
     let created;
     try {
@@ -180,7 +213,7 @@ class OAuthServer {
     const { pending, cookie } = created;
     sendHtml(res, 200, consentPage({ pending, scopeRegistry: this.scopeRegistry, waitUrl: this.waitUrl(pending) }), {
       ...CONSENT_HEADERS,
-      'set-cookie': `kl_authz=${cookie}; HttpOnly; Secure; SameSite=Lax; Path=/oauth`
+      'set-cookie': `${cookieName(pending.grant_id)}=${cookie}; HttpOnly; Secure; SameSite=Lax; Path=/oauth`
     });
     return undefined;
   }
@@ -195,7 +228,7 @@ class OAuthServer {
     if (!pending) {
       return this.refuse(res, 410, 'This request has ended', 'It expired or was already used. Start again from your client.');
     }
-    if (!this.pending.checkCookie(id, parseCookies(req.headers.cookie).kl_authz)) {
+    if (!this.pending.checkCookie(id, parseCookies(req.headers.cookie)[cookieName(pending.grant_id)])) {
       return this.refuse(res, 403, 'Not this browser', 'Only the browser that started this request can finish it. Start again from your client.');
     }
     if (pending.status === 'pending') {
@@ -219,4 +252,4 @@ class OAuthServer {
   }
 }
 
-module.exports = { OAuthServer, BODY_LIMIT, STATE_MAX };
+module.exports = { OAuthServer, BODY_LIMIT, STATE_MAX, cookieName, shownClientError };

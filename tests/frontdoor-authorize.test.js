@@ -72,7 +72,7 @@ describe('authorize and the consent page', () => {
     assert.equal(res.headers['cache-control'], 'no-store');
     assert.equal(res.headers['referrer-policy'], 'no-referrer');
     const setCookie = [].concat(res.headers['set-cookie'])[0];
-    assert.match(setCookie, /^kl_authz=[A-Za-z0-9_-]{43}; HttpOnly; Secure; SameSite=Lax; Path=\/oauth$/);
+    assert.match(setCookie, /^kl_authz_gr_[A-Za-z0-9_-]{9}=[A-Za-z0-9_-]{43}; HttpOnly; Secure; SameSite=Lax; Path=\/oauth$/);
     const { userCode, grantId } = parseConsent(res.text);
     assert.match(userCode, /^[0-9A-Z]{3}-[0-9A-Z]{3}$/);
     assert.ok(grantId);
@@ -314,7 +314,7 @@ describe('the OAuth server (hardening)', () => {
     const client = await registered(base);
     const res = await request(base, { path: approvedPath(client, pkce().challenge) });
     const { grantId } = parseConsent(res.text);
-    assert.equal((await request(base, { path: `/oauth/authorize/wait?id=${grantId}`, headers: { cookie: `kl_authz=${'A'.repeat(43)}` } })).status, 403);
+    assert.equal((await request(base, { path: `/oauth/authorize/wait?id=${grantId}`, headers: { cookie: `${cookieOf(res).split('=')[0]}=${'A'.repeat(43)}` } })).status, 403);
     pending.settle(grantId, { status: 'denied' });
     const done = await request(base, { path: `/oauth/authorize/wait?id=${grantId}`, headers: { cookie: cookieOf(res) } });
     const loc = new URL(done.headers.location);
@@ -383,5 +383,156 @@ describe('PendingAuthorizations (hardening)', () => {
     p.settle(a.grant_id, { status: 'denied' });
     assert.equal(p.byUserCode(a.user_code), null);
     assert.equal(p.claim(a.grant_id, 'd-3vmwrihhdbnit4oi'), null);
+  });
+});
+
+// ── Review fix round 1 ─────────────────────────────────────────────────────
+const { messagePage } = require('../src/frontdoor/oauth/pages');
+const { shownClientError } = require('../src/frontdoor/oauth/server');
+
+const assertConsentHeaders = (res, what) => {
+  for (const [k, v] of Object.entries(CONSENT_HEADERS)) assert.equal(res.headers[k], v, `${what}: ${k}`);
+};
+
+describe('authorize (review fix round 1)', () => {
+  it('redirect_uri is matched exactly: no prefix, path, case, port, encoding or query variant is accepted', async () => {
+    const { base } = await start();
+    const client = await registered(base, { redirect_uris: ['https://client.example.com/cb', 'https://client.example.com/q?x=1'] });
+    const { challenge } = pkce();
+    const variants = [
+      'https://client.example.com/cb?next=https://evil.example.com',
+      'https://client.example.com/cb/',
+      'https://client.example.com/cb?',
+      'https://client.example.com/%63b',
+      'https://CLIENT.example.com/cb',
+      'https://client.example.com:443/cb',
+      'https://client.example.com/q?x=1&y=2'
+    ];
+    for (const redirect of variants) {
+      const r = await request(base, { path: approvedPath(client, challenge, { redirect_uri: redirect }) });
+      assert.equal(r.status, 400, redirect);
+      assert.equal(r.headers.location, undefined, redirect);
+      assertConsentHeaders(r, redirect);
+    }
+    assert.equal((await request(base, { path: approvedPath(client, challenge, { redirect_uri: 'https://client.example.com/q?x=1' }) })).status, 200);
+  });
+
+  it('a registered redirect_uri that is not valid (a tampered clients file) is still refused', async () => {
+    const { base, clients } = await start();
+    const client = await registered(base);
+    clients.clients.get(client.client_id).redirect_uris.push('https://client.example.com/cb#frag', 'https://CLIENT.example.com/cb');
+    for (const redirect of ['https://client.example.com/cb#frag', 'https://CLIENT.example.com/cb']) {
+      const r = await request(base, { path: approvedPath(client, pkce().challenge, { redirect_uri: redirect }) });
+      assert.equal(r.status, 400, redirect);
+      assert.equal(r.headers.location, undefined, redirect);
+    }
+  });
+
+  it('code_challenge is 43-128 base64url characters and response_type must be code', async () => {
+    const { base } = await start();
+    const client = await registered(base);
+    const bad = [
+      { code_challenge: 'a'.repeat(42) },
+      { code_challenge: 'a'.repeat(129) },
+      { code_challenge: `${'a'.repeat(42)}+` },
+      { code_challenge: `${'a'.repeat(42)}=` },
+      { response_type: 'token' }
+    ];
+    for (const extra of bad) {
+      const r = await request(base, { path: approvedPath(client, 'a'.repeat(43), extra) });
+      assert.equal(r.status, 400, JSON.stringify(extra));
+      assert.equal(r.headers.location, undefined);
+    }
+    assert.equal((await request(base, { path: approvedPath(client, 'a'.repeat(128)) })).status, 200);
+  });
+
+  it('a hostile scope is never repeated on the refusal page, which carries the consent headers', async () => {
+    const { base } = await start();
+    const client = await registered(base);
+    const r = await request(base, { path: approvedPath(client, pkce().challenge, { scope: 'fleet:read <meta http-equiv=refresh content="0;url=https://evil.example.com">' }) });
+    assert.equal(r.status, 400);
+    assertConsentHeaders(r, 'scope refusal');
+    assert.ok(!r.text.includes('<meta http-equiv=refresh'));
+    assert.ok(!r.text.includes('evil.example.com'));
+    assert.match(r.text, /An unknown scope was requested/);
+    const named = await request(base, { path: approvedPath(client, pkce().challenge, { scope: 'fleet:read admin:all' }) });
+    assert.match(named.text, /does not grant admin:all/);
+    const many = Array.from({ length: 10 }, (_, i) => `admin:scope${i}`).join(' ');
+    const long = await request(base, { path: approvedPath(client, pkce().challenge, { scope: many }) });
+    assert.match(long.text, /An unknown scope was requested/, 'over 64 characters of names is not repeated');
+  });
+
+  it('a repeated parameter is named only when it is a known authorize parameter', async () => {
+    const { base } = await start();
+    const client = await registered(base);
+    const known = await request(base, { path: `${approvedPath(client, pkce().challenge)}&state=a&state=b` });
+    assert.match(known.text, /The parameter state was given more than once/);
+    const hostile = await request(base, { path: `${approvedPath(client, pkce().challenge)}&call-support-now=1&call-support-now=2` });
+    assert.equal(hostile.status, 400);
+    assert.ok(!hostile.text.includes('call-support-now'));
+    assert.match(hostile.text, /A parameter was given more than once/);
+  });
+
+  it('client metadata errors carrying client-chosen text are shown generically', () => {
+    assert.equal(shownClientError('client metadata: the metadata has a forbidden key (Call +1 555 0100 now)'), 'client metadata: the metadata has a forbidden key');
+    assert.equal(shownClientError('client metadata: cannot resolve urgent-call-support.example.com: ENOTFOUND'), 'client metadata: its host has no public address');
+    assert.equal(shownClientError('client metadata: some-host.example.com resolves to an address that is not public'), 'client metadata: its host has no public address');
+    assert.equal(shownClientError('client metadata: getaddrinfo EAI_AGAIN anything'), 'client metadata: the metadata document could not be used');
+    assert.equal(shownClientError('client metadata: the metadata URL answered 404'), 'client metadata: the metadata URL answered 404');
+    assert.equal(shownClientError('client metadata: the metadata is over 64 KiB'), 'client metadata: the metadata is over 64 KiB');
+  });
+
+  it('a CIMD refusal with a hostile metadata key shows no client text', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-authz-'));
+    temps.push(dir);
+    const { OAuthError } = require('../src/frontdoor/oauth/errors');
+    const clients = new ClientRegistry({ file: path.join(dir, 'clients.json'), fetchMetadata: async () => { throw new OAuthError('invalid_client', 'client metadata: the metadata has a forbidden key (<b>Call 555-0100</b>)'); } });
+    const oauth = new OAuthServer({ domain: 'kl.example.com', clients, pending: new PendingAuthorizations(), scopeRegistry: createFleetScopeRegistry(), scopesEnabled: ['fleet:read'] });
+    const server = http.createServer(async (req, res) => { if (!(await oauth.handle(req, res))) { res.writeHead(404); res.end(); } });
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    servers.push(server);
+    const r = await request(`http://127.0.0.1:${server.address().port}`, { path: authorizePath({ response_type: 'code', client_id: 'https://client.example.com/c.json', redirect_uri: 'https://client.example.com/cb', code_challenge: pkce().challenge, code_challenge_method: 'S256' }) });
+    assert.equal(r.status, 400);
+    assert.ok(!r.text.includes('555-0100'));
+    assert.match(r.text, /forbidden key/);
+  });
+
+  it('messagePage escapes its title and message', () => {
+    const html = messagePage({ title: '<b>t</b>', message: '<meta http-equiv=refresh content="0;url=https://evil.example.com">' });
+    assert.ok(html.includes('&lt;meta http-equiv=refresh content=&quot;0;url=https://evil.example.com&quot;&gt;'));
+    assert.ok(html.includes('&lt;b&gt;t&lt;/b&gt;'));
+    assert.ok(!html.includes('<meta http-equiv=refresh'));
+  });
+
+  it('the wait page sends the consent headers on 200 and on the 302', async () => {
+    const { base, pending } = await start();
+    const client = await registered(base);
+    const res = await request(base, { path: approvedPath(client, pkce().challenge) });
+    const { grantId } = parseConsent(res.text);
+    const waiting = await request(base, { path: `/oauth/authorize/wait?id=${grantId}`, headers: { cookie: cookieOf(res) } });
+    assert.equal(waiting.status, 200);
+    assertConsentHeaders(waiting, 'wait 200');
+    pending.settle(grantId, { status: 'approved', code: 'c' });
+    const done = await request(base, { path: `/oauth/authorize/wait?id=${grantId}`, headers: { cookie: cookieOf(res) } });
+    assert.equal(done.status, 302);
+    assertConsentHeaders(done, 'wait 302');
+  });
+
+  it('two authorize flows in one browser each keep their own cookie (ruling T22-cookiename)', async () => {
+    const { base } = await start();
+    const one = await registered(base);
+    const two = await registered(base, { redirect_uris: ['https://other.example.com/cb'] });
+    const r1 = await request(base, { path: approvedPath(one, pkce().challenge) });
+    const r2 = await request(base, { path: authorizePath({ response_type: 'code', client_id: two.client_id, redirect_uri: 'https://other.example.com/cb', code_challenge: pkce().challenge, code_challenge_method: 'S256' }) });
+    const g1 = parseConsent(r1.text).grantId;
+    const g2 = parseConsent(r2.text).grantId;
+    assert.equal(cookieOf(r1).split('=')[0], `kl_authz_${g1.slice(0, 12)}`);
+    assert.equal(cookieOf(r2).split('=')[0], `kl_authz_${g2.slice(0, 12)}`);
+    const jar = `${cookieOf(r1)}; ${cookieOf(r2)}`;
+    assert.equal((await request(base, { path: `/oauth/authorize/wait?id=${g1}`, headers: { cookie: jar } })).status, 200);
+    assert.equal((await request(base, { path: `/oauth/authorize/wait?id=${g2}`, headers: { cookie: jar } })).status, 200);
+    // One flow's cookie under the other's name does not open it.
+    const swapped = `kl_authz_${g1.slice(0, 12)}=${cookieOf(r2).split('=')[1]}`;
+    assert.equal((await request(base, { path: `/oauth/authorize/wait?id=${g1}`, headers: { cookie: swapped } })).status, 403);
   });
 });
