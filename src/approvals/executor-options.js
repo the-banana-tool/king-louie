@@ -13,6 +13,18 @@ const originHelpers = require('../core/origin');
 const log = createLogger('approvals/executor-options');
 const PHONE_GRACE_MS = 15000;
 
+// Fleet stage 4 §3.8: a delegate session whose client was not granted
+// fleet:unsafe refuses unsafe calls itself; the phone is never asked.
+const REFUSE_UNSAFE_MESSAGE = 'This client may not request unsafe actions (fleet:unsafe not granted). Nothing ran.';
+
+function refuseUnsafeClassifier(classifyCall) {
+  return (toolName, params, ctx) => {
+    const decision = classifyCall ? classifyCall(toolName, params, ctx) : null;
+    if (decision && decision.tier === 'unsafe') return { tier: 'denied', reason: 'fleet_unsafe_not_granted', message: REFUSE_UNSAFE_MESSAGE };
+    return decision;
+  };
+}
+
 function paramsSha256(params) {
   try {
     return sha256b64url(canonicalize(params === undefined || params === null ? {} : params));
@@ -87,24 +99,32 @@ function approvalSeam({ remoteApprovals, event = null, approvalRequester = null,
   const local = helpers.isLocalDesktopEvent(event) || helpers.isLocalRequester(approvalRequester);
   const origin = runOrigin({ executorOptions, event, local, helpers });
   const denyAutoApproval = (remoteApprovals !== 'allow' && !local) || executorOptions.denyAutoApproval === true;
+  // Set by a delegate turn (executorOptions) or inherited through the
+  // re-threaded requester of its sub-agents.
+  const refuseUnsafe = executorOptions.refuseUnsafe === true || Boolean(approvalRequester && approvalRequester.refuseUnsafe === true);
 
   if (remoteApprovals === 'phone') {
     // A marked (local) requester is kept; an unmarked one from a local event
     // is dropped so the on-screen dialog answers (requester null).
     const localRequester = helpers.isLocalRequester(approvalRequester) ? approvalRequester : null;
     const phone = phoneExecutorOptions({ phoneApprover, auditLedger, nodePolicy, origin, local, approvalRequester: localRequester });
-    return { toolExecutorOptions: { ...phone.options, denyAutoApproval }, attach: phone.attach, local, origin };
+    const toolExecutorOptions = { ...phone.options, denyAutoApproval };
+    if (refuseUnsafe) {
+      toolExecutorOptions.classifyCall = refuseUnsafeClassifier(phone.options.classifyCall || null);
+      toolExecutorOptions.refuseUnsafe = true;
+    }
+    return { toolExecutorOptions, attach: phone.attach, local, origin };
   }
 
   let requester;
   if (remoteApprovals === 'allow') requester = approvalRequester;
   else requester = local && helpers.isLocalRequester(approvalRequester) ? approvalRequester : null;
   return {
-    toolExecutorOptions: { approvalRequester: requester, denyAutoApproval, localOrigin: local, origin },
+    toolExecutorOptions: { approvalRequester: requester, denyAutoApproval, localOrigin: local, origin, ...(refuseUnsafe ? { refuseUnsafe: true } : {}) },
     attach: () => {},
     local,
     origin
   };
 }
 
-module.exports = { approvalSeam, phoneExecutorOptions, paramsSha256, PHONE_GRACE_MS };
+module.exports = { approvalSeam, phoneExecutorOptions, paramsSha256, refuseUnsafeClassifier, PHONE_GRACE_MS, REFUSE_UNSAFE_MESSAGE };

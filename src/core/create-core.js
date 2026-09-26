@@ -2056,6 +2056,9 @@ function createCore(deps = {}) {
       hookExecutor: getHookSettings().enabled ? hookExecutor : null,
       useSandbox: executorOptions.useSandbox !== false,
       extraToolOptions: {
+        // Fleet stage 4 §3.8: the run's origin for tools that scope work to a
+        // job (F5's job-scoped leases).
+        origin: seam.origin,
         get agentExecutorAdapter() { return agentExecutorAdapter; },
         get backgroundTaskManager() { return backgroundTaskManager; },
         // Case mode: the chat send path passes { ...caseTurn (caseId, dir,
@@ -2204,7 +2207,14 @@ function createCore(deps = {}) {
       // a child run's audit trail inherits the parent's deviceId/session
       // instead of recomputing a fresh, poorer origin from a null event and
       // an unmarked-for-origin-purposes requester.
-      { workingDirectory, allowedDirectories, origin: runtimeOptions.origin || null }
+      {
+        workingDirectory,
+        allowedDirectories,
+        origin: runtimeOptions.origin || null,
+        // Fleet stage 4 §3.8: a delegate turn's chat id and scope gate.
+        ...(runtimeOptions.chatId ? { chatId: runtimeOptions.chatId } : {}),
+        ...(runtimeOptions.refuseUnsafe === true ? { refuseUnsafe: true } : {})
+      }
     );
 
     return {
@@ -2431,13 +2441,16 @@ function createCore(deps = {}) {
           options.approvalRequester || null,
           {
             workingDirectory: options.workingDirectory,
-            // The rethreaded requester every meta-tool (SpawnAgent,
-            // BackgroundTask, workflow runners) already forwards unchanged
-            // carries the parent executor's origin as a plain property
-            // (ToolExecutor#_rethreadedRequester); read it back here so the
-            // child inherits it instead of a freshly (and more poorly)
-            // computed one.
-            origin: (options.approvalRequester && options.approvalRequester.origin) || options.origin || null
+            // The rethreaded requester every meta-tool already forwards
+            // carries the parent executor's origin (ToolExecutor
+            // #_rethreadedRequester); a delegate turn passes its own in
+            // executorOptions (fleet stage 4 §3.8).
+            origin: (options.approvalRequester && options.approvalRequester.origin)
+              || (options.executorOptions && options.executorOptions.origin)
+              || options.origin || null,
+            chatId: (options.executorOptions && options.executorOptions.chatId) || null,
+            refuseUnsafe: (options.approvalRequester && options.approvalRequester.refuseUnsafe === true)
+              || (options.executorOptions && options.executorOptions.refuseUnsafe === true)
           }
         );
         const executor = new AgentExecutor(runtime.provider, runtime.toolExecutor, {
@@ -2899,6 +2912,8 @@ function createCore(deps = {}) {
     getAgent,
     listAgents,
     createAgentRuntime,
+    // Fleet stage 4: delegate sessions run their turns through this.
+    getAgentExecutorAdapter: () => agentExecutorAdapter,
     AgentExecutor,
     AgentOrchestrator,
     buildAgentVoiceOptions,

@@ -161,6 +161,10 @@ class ToolExecutor extends EventEmitter {
     // origin instead of recomputing a fresh, poorer one that has lost the
     // parent's deviceId/session.
     this.origin = options.origin || null;
+    // Fleet stage 4 §3.8: this run (a delegate turn without fleet:unsafe)
+    // refuses unsafe calls; carried on the re-threaded requester so the
+    // run's sub-agents refuse them too.
+    this.refuseUnsafe = options.refuseUnsafe === true;
   }
 
   get permissionRules() {
@@ -370,7 +374,11 @@ class ToolExecutor extends EventEmitter {
           reason: safeDecision.reason || null
         });
         if (safeDecision.tier === 'denied') {
-          const denied = { success: false, error: 'Denied by node policy.', deniedBy: 'policy' };
+          const denied = {
+            success: false,
+            error: typeof safeDecision.message === 'string' && safeDecision.message ? safeDecision.message : 'Denied by node policy.',
+            deniedBy: 'policy'
+          };
           this.emit('postExecute', { toolName, parameters: effectiveParameters, result: denied });
           return denied;
         }
@@ -572,6 +580,7 @@ class ToolExecutor extends EventEmitter {
     // options.approvalRequester and forward it to the child's origin, the
     // same way the tool already forwards this same function unchanged.
     requester.origin = this.origin;
+    requester.refuseUnsafe = this.refuseUnsafe;
     return this.localOrigin ? markLocalRequester(requester) : requester;
   }
 
