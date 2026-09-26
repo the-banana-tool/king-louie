@@ -57,10 +57,11 @@ const PDFJS_OPTIONS = Object.freeze({
   docBaseUrl: null
 });
 
+// Always 0, 90, 180 or 270, however large the angle.
 const normalizeRotation = (angle) => {
-  const quarter = Math.round(Number(angle) / 90) * 90;
-  if (!Number.isFinite(quarter)) return 0;
-  return ((quarter % 360) + 360) % 360;
+  const quarters = Math.round(Number(angle) / 90);
+  if (!Number.isFinite(quarters)) return 0;
+  return (((quarters % 4) + 4) % 4) * 90;
 };
 
 const unreadable = (name) => new IngestError('UNREADABLE_PDF', `Cannot read ${name}: it is not a readable PDF.`);
@@ -111,9 +112,16 @@ const RUN_LENGTH = new Set(['RunLengthDecode', 'RL']);
 const IMAGE = new Set(['DCTDecode', 'DCT', 'JPXDecode', 'JPX', 'CCITTFaxDecode', 'CCF', 'JBIG2Decode']);
 const FULL_NAME = { AHx: 'ASCIIHexDecode', A85: 'ASCII85Decode', RL: 'RunLengthDecode' };
 
+// pdf.js reads a stream's filters as get('F', 'Filter') and its parameters
+// as get('DP', 'DecodeParms'): the short key wins when present. Read them the
+// same way so this scan cannot drift from what pdf.js decodes.
+function shortFirst(dict, short, long) {
+  return dict.has(PDFName.of(short)) ? dict.lookup(PDFName.of(short)) : dict.lookup(PDFName.of(long));
+}
+
 function filterChain(dict, name) {
-  const filter = dict.lookup(PDFName.of('Filter'));
-  const parms = dict.lookup(PDFName.of('DecodeParms'));
+  const filter = shortFirst(dict, 'F', 'Filter');
+  const parms = shortFirst(dict, 'DP', 'DecodeParms');
   if (filter === undefined) return [];
   if (filter instanceof PDFName) return [{ filter: filter.decodeText(), parms: parms instanceof PDFDict ? parms : null }];
   if (!(filter instanceof PDFArray) || filter.size() > MAX_FILTERS) throw unsafeFilter(name, 'an unsupported filter');
@@ -293,11 +301,16 @@ function walkPageTree(doc, name) {
 
 // Objects pdf-lib could not parse would be written back verbatim and parsed
 // by pdf.js unscanned, so they are dropped; every stream left is checked.
+// A stream dict with /F or /DP is refused outright (ruling T3-shortkeys):
+// the short filter keys belong to inline images, and /F on a stream can also
+// be a file specification, which must never be followed.
+const SHORT_KEYS = [PDFName.of('F'), PDFName.of('DP')];
 function scanObjects(context, budget) {
   for (const [ref, obj] of context.enumerateIndirectObjects()) {
     if (obj instanceof PDFInvalidObject) {
       context.delete(ref);
     } else if (obj instanceof PDFRawStream) {
+      if (SHORT_KEYS.some((key) => obj.dict.has(key))) throw unsafeFilter(budget.name, 'an unsupported filter');
       checkStream(obj.dict, obj.contents, budget, context);
     }
   }
@@ -350,8 +363,8 @@ async function openPdf(bytes, { name = 'document.pdf', maxStreamBytes, maxDocume
   } catch (err) {
     throw coded(budget.refusal || err, name, 'load');
   }
-  if (budget.refusal) throw coded(budget.refusal, name, 'load');
   if (doc.isEncrypted) throw new IngestError('ENCRYPTED', `Cannot read ${name}: the PDF is password-protected.`);
+  if (budget.refusal) throw coded(budget.refusal, name, 'load');
   let rotations;
   try {
     rotations = walkPageTree(doc, name);

@@ -10,7 +10,7 @@ const assert = require('node:assert');
 const zlib = require('node:zlib');
 const fsp = require('node:fs/promises');
 const { PDFDocument, PDFName, PDFNumber, PDFRawStream, PDFString, PDFArray } = require('pdf-lib');
-const { openPdf, PDFJS_OPTIONS, MAX_STREAM_BYTES, MAX_DOCUMENT_BYTES } = require('../src/cases/ingest/pdf');
+const { openPdf, normalizeRotation, PDFJS_OPTIONS, MAX_STREAM_BYTES, MAX_DOCUMENT_BYTES } = require('../src/cases/ingest/pdf');
 const { textQuality, extractPages, parsePages } = require('../src/cases/ingest/extract-text');
 const { makePdf, payoffLetterPdf, GARBAGE, tinyJpeg } = require('./helpers/ingest-fixtures');
 
@@ -26,6 +26,30 @@ async function pdfWithStream(filter, contents, { decodeParms } = {}) {
   const dict = doc.context.obj(decodeParms ? { Filter: filter, DecodeParms: decodeParms } : { Filter: filter });
   page.node.set(PDFName.of('Contents'), doc.context.register(PDFRawStream.of(dict, contents)));
   return Buffer.from(await doc.save({ useObjectStreams: false }));
+}
+
+// One page whose content stream carries exactly `fields` in its dict.
+async function pdfWithStreamDict(fields, contents) {
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([200, 200]);
+  page.node.set(PDFName.of('Contents'), doc.context.register(PDFRawStream.of(doc.context.obj(fields), contents)));
+  return Buffer.from(await doc.save({ useObjectStreams: false }));
+}
+
+// An incremental update appended to `bytes` that redefines object `num`
+// as a stream with dictionary text `dictText` and body `body`.
+async function appendUpdate(bytes, num, dictText, body) {
+  const doc = await PDFDocument.load(bytes);
+  const root = doc.context.trailerInfo.Root.toString();
+  const size = doc.context.largestObjectNumber + 1;
+  const prev = Number(/startxref\s+(\d+)/.exec(bytes.toString('latin1').slice(-64))[1]);
+  const offset = bytes.length + 1;
+  const head = `\n${num} 0 obj\n<< ${dictText} /Length ${body.length} >>\nstream\n`;
+  const obj = Buffer.concat([Buffer.from(head, 'latin1'), body, Buffer.from('\nendstream\nendobj\n', 'latin1')]);
+  const xrefAt = bytes.length + obj.length;
+  const entry = `${String(offset).padStart(10, '0')} 00000 n \n`;
+  const tail = `xref\n0 1\n0000000000 65535 f \n${num} 1\n${entry}trailer\n<< /Size ${size} /Root ${root} /Prev ${prev} >>\nstartxref\n${xrefAt}\n%%EOF\n`;
+  return Buffer.concat([bytes, obj, Buffer.from(tail, 'latin1')]);
 }
 
 // Reload a fixture, let `edit` rewire it, save it back.
@@ -82,6 +106,22 @@ describe('openPdf', () => {
     assert.strictEqual(img.mime, 'image/jpeg');
     assert.ok(img.bytes.equals(Buffer.from(tinyJpeg())));
     assert.strictEqual(pdf.pageImage(2), null);
+  });
+
+  it('reports ENCRYPTED even when a stream refused while loading', async () => {
+    const doc = await PDFDocument.create();
+    doc.addPage([200, 200]);
+    doc.catalog.set(PDFName.of('KlPad'), doc.context.register(PDFString.of('A'.repeat(1024 * KB))));
+    doc.context.trailerInfo.Encrypt = doc.context.obj({ Filter: 'Standard', V: 1, R: 2, O: 'o', U: 'u', P: -4 });
+    const bytes = Buffer.from(await doc.save({ useObjectStreams: true }));
+    await assert.rejects(openPdf(bytes, { name: 'locked.pdf', maxStreamBytes: 64 * KB }), (err) => err.code === 'ENCRYPTED');
+  });
+
+  it('normalizes any rotation, however large, to a quarter turn', () => {
+    for (const angle of [1e20, -1e20, 2 ** 60, -(2 ** 60), 450, -90, 89, 'x', NaN, Infinity]) {
+      assert.ok([0, 90, 180, 270].includes(normalizeRotation(angle)), String(angle));
+    }
+    assert.deepStrictEqual([450, -90, 180, 720].map(normalizeRotation), [90, 270, 180, 0]);
   });
 
   it('refuses an encrypted PDF', async () => {
@@ -229,6 +269,55 @@ describe('openPdf on hostile input (ruling M9)', () => {
       unreadable(err) && /too large when decompressed/.test(err.message)
     ));
     assert.strictEqual((await openPdf(bytes)).pageCount, 1);
+  });
+
+  it('refuses a font file whose /F short key hides a Flate bomb', async () => {
+    const bytes = await rewire(await makePdf({ pages: [{ text: 'font bearing page words' }] }), (doc, context) => {
+      const fonts = doc.getPage(0).node.Resources().lookup(PDFName.of('Font'));
+      const font = context.lookup(fonts.get(fonts.keys()[0]));
+      const file = PDFRawStream.of(context.obj({ F: 'FlateDecode', Length1: 16 * 1024 * KB }), zlib.deflateSync(Buffer.alloc(16 * 1024 * KB)));
+      font.set(PDFName.of('FontDescriptor'), context.obj({ Type: 'FontDescriptor', FontName: 'Helvetica', Flags: 32, FontFile2: context.register(file) }));
+    });
+    const started = Date.now();
+    await assert.rejects(openPdf(bytes, { name: 'font.pdf', maxStreamBytes: 64 * KB, maxDocumentBytes: 64 * KB }), unreadable);
+    assert.ok(Date.now() - started < 2000);
+  });
+
+  it('refuses a content stream whose /F short key hides a Flate bomb', async () => {
+    const bytes = await pdfWithStreamDict({ F: 'FlateDecode' }, zlib.deflateSync(Buffer.alloc(16 * 1024 * KB, 0x20)));
+    const started = Date.now();
+    await assert.rejects(openPdf(bytes, { name: 'f.pdf', maxStreamBytes: 64 * KB, maxDocumentBytes: 64 * KB }), unreadable);
+    assert.ok(Date.now() - started < 2000);
+  });
+
+  it('refuses an incremental update that replaces the content stream with an /F bomb', async () => {
+    const base = await makePdf({ pages: [{ text: 'original page words' }] });
+    const doc = await PDFDocument.load(base);
+    const contentsNum = doc.getPage(0).node.lookup(PDFName.of('Contents'), PDFArray).get(0).objectNumber;
+    const bytes = await appendUpdate(base, contentsNum, '/F /FlateDecode', zlib.deflateSync(Buffer.alloc(16 * 1024 * KB, 0x20)));
+    const started = Date.now();
+    await assert.rejects(openPdf(bytes, { name: 'upd.pdf', maxStreamBytes: 64 * KB, maxDocumentBytes: 64 * KB }), unreadable);
+    assert.ok(Date.now() - started < 2000);
+    const harmless = await appendUpdate(base, contentsNum, '', Buffer.from('BT ET'));
+    assert.strictEqual((await openPdf(harmless)).pageCount, 1);
+  });
+
+  it('refuses a predictor bomb behind the /DP short key', async () => {
+    const bytes = await pdfWithStreamDict({ Filter: 'FlateDecode', DP: { Predictor: 12, Columns: 4e8 } }, zlib.deflateSync(Buffer.from('x')));
+    const started = Date.now();
+    await assert.rejects(openPdf(bytes, { name: 'dp.pdf', maxStreamBytes: 64 * KB, maxDocumentBytes: 64 * KB }), unreadable);
+    assert.ok(Date.now() - started < 2000);
+  });
+
+  it('refuses /F or /DP on any stream, even harmless ones, and never follows /F as a file', async () => {
+    const small = zlib.deflateSync(Buffer.from('BT ET'));
+    for (const fields of [{ F: 'FlateDecode' }, { Filter: 'FlateDecode', DP: {} }, { F: PDFString.of('payload.bin') }, { F: { FS: 'URL', F: PDFString.of('https://records.example.org/x') } }]) {
+      const body = 'Filter' in fields || fields.F === 'FlateDecode' ? small : Buffer.from('BT ET');
+      await assert.rejects(openPdf(await pdfWithStreamDict(fields, body), { name: 's.pdf' }), (err) => (
+        unreadable(err) && err.message === 'Cannot read s.pdf: the PDF uses a compression (an unsupported filter) that cannot be read safely.'
+      ), JSON.stringify(Object.keys(fields)));
+    }
+    assert.strictEqual((await openPdf(await pdfWithStreamDict({ Filter: 'FlateDecode', DecodeParms: {} }, small))).pageCount, 1);
   });
 
   it('refuses LZWDecode, unknown filters and absurd predictor rows', async () => {
