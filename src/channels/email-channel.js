@@ -16,6 +16,10 @@ const DAEMON_SENDER = /^(mailer-daemon|postmaster)@/i;
 // deliveryId → batchToken of recent sends, so a token that proves the owner
 // must be the token of the thread it replies in (sendContact).
 const MAX_SENT_TOKENS = 1000;
+// A relay reports the sender as one bare address. Anything else (a display
+// name, <…>, quotes, a comment, a list) could smuggle the owner address past
+// normalizeAddress, which takes the first <…@…> it finds.
+const BARE_ADDRESS = /^[^\s<>"(),;:@\\[\]]+@[^\s<>"(),;:@\\[\]]+$/;
 
 const domainOf = (address) => {
   const at = String(address || '').lastIndexOf('@');
@@ -89,7 +93,8 @@ function authResultsPass(value, { trustedAuthServId, fromDomain } = {}) {
     if (!m || m[2].toLowerCase() !== 'pass') continue;
     const method = m[1].toLowerCase();
     const props = {};
-    for (const p of m[3].matchAll(/([a-z0-9-]+\.[a-z0-9-]+)\s*=\s*(\S+)/gi)) props[p[1].toLowerCase()] = p[2];
+    // A repeated property: the first value wins.
+    for (const p of m[3].matchAll(/([a-z0-9-]+\.[a-z0-9-]+)\s*=\s*(\S+)/gi)) props[p[1].toLowerCase()] ??= p[2];
     if (method === 'dmarc' && propDomain(props['header.from']) === from) return true;
     if (method === 'spf' && aligned(propDomain(props['smtp.mailfrom']), from)) return true;
     if (method === 'dkim' && aligned(propDomain(props['header.d'] || props['header.i']), from)) return true;
@@ -265,29 +270,42 @@ class EmailChannel extends ChannelPlugin {
 
   // A relay `inbound` event with channel email.
   async ingestRelayEvent(ev) {
+    let from = String(ev.from ?? '').trim();
+    if (!BARE_ADDRESS.test(from)) {
+      this.log.warn(`relay email event ${String(ev.id ?? '').slice(0, 64)}: the sender is not one bare address; not the owner`);
+      from = '';
+    }
     return this.handleInbound({
-      from: ev.from, subject: ev.subject, text: ev.text, inReplyTo: ev.inReplyTo, references: ev.references || [],
+      from, subject: ev.subject, text: ev.text, inReplyTo: ev.inReplyTo, references: ev.references || [],
       messageId: ev.messageId || null, auth: ev.auth || null, date: ev.at || null, autoSubmitted: ev.autoSubmitted === true
     });
   }
 
-  // IMAP/SMTP: read UNSEEN replies and DSNs. Anything else (an auto-reply, a
-  // read receipt, a delay notice) is `ignored`.
+  // One polled item. An error is logged and rethrown, so the transport leaves
+  // the message unseen for another attempt; the next item still runs.
+  async _handleItem(item) {
+    try {
+      if (item.kind === 'bounce') await this.handleBounce(item);
+      else if (item.kind === 'reply') await this.handleInbound(item);
+    } catch (err) {
+      this.log.warn(`email ${item.kind} handling failed: ${err?.message || err}`);
+      throw err;
+    }
+  }
+
+  // IMAP/SMTP: read UNSEEN replies and DSNs. The transport marks each message
+  // seen only after it was handled; automatic mail never reaches here.
   async pollOnce() {
     if (!this.transport || typeof this.transport.poll !== 'function' || this.polling) return { replies: 0, bounces: 0 };
     this.polling = true;
     try {
       let replies = 0;
       let bounces = 0;
-      for (const item of await this.transport.poll()) {
-        if (item.kind === 'bounce') {
-          bounces += 1;
-          await this.handleBounce(item);
-        } else if (item.kind === 'reply') {
-          replies += 1;
-          await this.handleInbound(item);
-        }
-      }
+      await this.transport.poll(async (item) => {
+        await this._handleItem(item);
+        if (item.kind === 'bounce') bounces += 1;
+        else if (item.kind === 'reply') replies += 1;
+      });
       return { replies, bounces };
     } finally {
       this.polling = false;

@@ -120,9 +120,12 @@ describe('Authentication-Results', () => {
   it('a forged lower header is ignored: a reply without the token and a failing top header is not owner-proven', async () => {
     const mailbox = [{ uid: 1, seen: false, source: rawReply({ auth: ['mx.example.com; dmarc=fail header.from=example.com', 'mx.example.com; dmarc=pass header.from=example.com'] }) }];
     const { email, calls } = channelWith(mailbox);
+    const seenDuring = [];
+    email.onContactReply(async (correlationId, answer, meta) => { seenDuring.push(mailbox[0].seen); calls.push({ correlationId, answer, meta }); return { ok: false, outcome: 'refused: not-owner', ackText: null }; });
     await email.pollOnce();
     assert.strictEqual(calls[0].correlationId, 'd-ABC123', 'the thread names the delivery');
     assert.strictEqual(calls[0].meta.ownerProven, false);
+    assert.deepStrictEqual(seenDuring, [false], 'still unseen while it is handled');
     assert.strictEqual(mailbox[0].seen, true, 'marked seen after handling');
   });
 
@@ -355,7 +358,7 @@ describe('credentials', () => {
       ImapFlow: FailingImap,
       log
     });
-    await assert.rejects(transport.poll(), (err) => !err.message.includes('imap-hunter2') && /^IMAP: LOGIN failed for \[redacted\]$/.test(err.message));
+    await assert.rejects(transport.poll(async () => {}), (err) => !err.message.includes('imap-hunter2') && /^IMAP: LOGIN failed for \[redacted\]$/.test(err.message));
     assert.ok(log.lines.length > 0);
     assert.ok(log.lines.every((l) => !l.includes('hunter2')), log.lines.join('\n'));
   });
@@ -383,5 +386,115 @@ describe('relay routing and notices', () => {
     } finally {
       await relay.close();
     }
+  });
+});
+
+// ---- Task 8 fix round 1 ----
+
+function channelLogged(mailbox, { simpleParser } = {}) {
+  const log = captureLog();
+  const transport = createImapSmtpTransport({
+    smtp: { host: '127.0.0.1', port: 1, secure: false, user: '' },
+    imap: { host: '127.0.0.1', port: 993, user: 'kl@example.com' },
+    getPassword: (which) => `${which}-secret`,
+    ImapFlow: imapDouble(mailbox),
+    ...(simpleParser ? { simpleParser } : {}),
+    log
+  });
+  const email = new EmailChannel({ transport, getConfig: () => CONFIG, log });
+  return { email, log };
+}
+
+describe('IMAP: seen only after handling', () => {
+  it('a failing item stays unseen and is retried; the rest are handled; after 3 failures it is marked seen and logged', async () => {
+    const mailbox = [
+      { uid: 30, seen: false, source: rawReply({ subject: 'Re: [KL-K7QD4M]', body: 'poison' }) },
+      { uid: 31, seen: false, source: rawReply({ subject: 'Re: [KL-K7QD4M]', body: 'b' }) }
+    ];
+    const { email, log } = channelLogged(mailbox);
+    const answers = [];
+    email.onContactReply(async (c, answer) => {
+      if (answer.text === 'poison') throw new Error('handler exploded');
+      answers.push(answer.text);
+      return { ok: true, outcome: 'recorded', ackText: null };
+    });
+    await email.pollOnce();
+    assert.deepStrictEqual(answers, ['b'], 'the item after the failing one is still handled');
+    assert.deepStrictEqual(mailbox.map((m) => m.seen), [false, true]);
+    await email.pollOnce();
+    assert.strictEqual(mailbox[0].seen, false, 'two failures: still unseen');
+    await email.pollOnce();
+    assert.strictEqual(mailbox[0].seen, true, 'three failures: given up');
+    assert.deepStrictEqual(answers, ['b'], 'never handled twice');
+    assert.ok(log.lines.some((l) => /^warn .*handler exploded/.test(l)), log.lines.join('\n'));
+    assert.ok(log.lines.some((l) => /^warn .*message 30 .*3 attempts/.test(l)), log.lines.join('\n'));
+  });
+
+  it('a throwing status handler does not lose the reply after the bounce', async () => {
+    const mailbox = [{ uid: 32, seen: false, source: DSN }, { uid: 33, seen: false, source: rawReply({ subject: 'Re: [KL-K7QD4M]' }) }];
+    const { email } = channelLogged(mailbox);
+    email.onContactStatus(async () => { throw new Error('status store down'); });
+    const calls = [];
+    email.onContactReply(async (...a) => { calls.push(a); return { ok: true }; });
+    await email.pollOnce();
+    assert.strictEqual(calls.length, 1);
+    assert.deepStrictEqual(mailbox.map((m) => m.seen), [false, true]);
+  });
+
+  it('oversized and unparseable messages are marked seen at once', async () => {
+    const big = rawReply({ subject: 'Re: [KL-K7QD4M]', body: 'x'.repeat(2 * 1024 * 1024 + 10) });
+    const mailbox = [{ uid: 34, seen: false, source: big }, { uid: 35, seen: false, source: 'garbage' }];
+    const { email, log } = channelLogged(mailbox, { simpleParser: async (src) => { if (String(src) === 'garbage') throw new Error('bad mime'); return require('mailparser').simpleParser(src); } });
+    const calls = [];
+    email.onContactReply(async (...a) => { calls.push(a); return { ok: true }; });
+    await email.pollOnce();
+    assert.deepStrictEqual(calls, []);
+    assert.deepStrictEqual(mailbox.map((m) => m.seen), [true, true]);
+    assert.ok(log.lines.some((l) => /message 34 is over/.test(l)));
+    assert.ok(log.lines.some((l) => /could not parse message 35/.test(l)));
+  });
+
+  it('an HTML reply with no readable text is dropped with a warning naming its Message-ID, not its content', async () => {
+    const source = rawReply({ subject: 'Re: [KL-K7QD4M]', body: '<html><head><style>.SECRET-CONTENT{color:red}</style></head><body><p> </p></body></html>' })
+      .replace('Content-Type: text/plain; charset=utf-8', 'Content-Type: text/html; charset=utf-8');
+    const mailbox = [{ uid: 36, seen: false, source }];
+    const { email, log } = channelLogged(mailbox);
+    const calls = [];
+    email.onContactReply(async (...a) => { calls.push(a); return { ok: true }; });
+    await email.pollOnce();
+    assert.deepStrictEqual(calls, []);
+    assert.strictEqual(mailbox[0].seen, true);
+    const line = log.lines.find((l) => l.includes('<reply-1@example.com>'));
+    assert.ok(line && line.startsWith('warn '), log.lines.join('\n'));
+    assert.ok(log.lines.every((l) => !l.includes('SECRET-CONTENT')));
+  });
+});
+
+describe('relay From must be one bare address', () => {
+  for (const from of ['"<owner@example.com>" <attacker@example.org>', 'Owner <owner@example.com>', 'owner@example.com, other@example.org', '<owner@example.com>', 'owner@example.com (Owner)']) {
+    it(`${from} is not the owner`, async () => {
+      const email = new EmailChannel({ transport: createRelayEmailTransport({ relay: { name: 'main', send: async () => ({ id: 'x' }) } }), getConfig: () => CONFIG });
+      const calls = [];
+      email.onContactReply(async (c, a, meta) => { calls.push(meta); return { ok: false }; });
+      await email.ingestRelayEvent({ id: 'e1', type: 'inbound', from, subject: 'Re: [KL-K7QD4M]', text: 'a', auth: { verified: true } });
+      assert.strictEqual(calls.length, 1);
+      assert.strictEqual(calls[0].ownerProven, false);
+    });
+  }
+
+  it('a bare owner address (any case) is the owner', async () => {
+    const email = new EmailChannel({ transport: createRelayEmailTransport({ relay: { name: 'main', send: async () => ({ id: 'x' }) } }), getConfig: () => CONFIG });
+    const calls = [];
+    email.onContactReply(async (c, a, meta) => { calls.push(meta); return { ok: true }; });
+    await email.ingestRelayEvent({ id: 'e1', type: 'inbound', from: ' Owner@Example.com ', subject: 'Re: [KL-K7QD4M]', text: 'a', auth: { verified: true } });
+    assert.strictEqual(calls[0].ownerProven, true);
+  });
+});
+
+describe('Authentication-Results: repeated properties', () => {
+  it('the first value of a repeated property wins', () => {
+    assert.strictEqual(authResultsPass('mx.example.com; dmarc=pass header.from=example.org header.from=example.com', PASS), false);
+    assert.strictEqual(authResultsPass('mx.example.com; spf=pass smtp.mailfrom=evil.example.org smtp.mailfrom=example.com', PASS), false);
+    assert.strictEqual(authResultsPass('mx.example.com; dmarc=pass header.from=example.com header.from=example.org', PASS), true);
   });
 });

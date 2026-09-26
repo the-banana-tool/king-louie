@@ -1,7 +1,9 @@
 // src/channels/email-transports.js
 // The two email transports (cases stage 4 spec §3.2):
 //   transport.send({ to, from, subject, text, headers, idempotencyKey }) → { messageId, relayId? }
-//   transport.poll() → [{ kind: 'reply', … } | { kind: 'bounce', originalMessageId, status, diagnostic } | { kind: 'ignored', reason }]
+//   transport.poll(onItem) → undefined; onItem({ kind: 'reply', … } | { kind: 'bounce', originalMessageId, status, diagnostic })
+//     is awaited per message, which is marked seen only after it resolves
+//     (null for the relay: its events arrive through the relay client)
 //   transport.close()
 // `relay` speaks the contact relay contract; `imap-smtp` uses nodemailer,
 // imapflow and mailparser (pure JS), with their own loggers turned off.
@@ -15,6 +17,8 @@ const { createLogger } = require('../logging');
 // each at most this big (a bigger one is marked seen and skipped).
 const MAX_MESSAGES_PER_POLL = 50;
 const MAX_MESSAGE_BYTES = 2 * 1024 * 1024;
+const MAX_ATTEMPTS = 3;
+const MAX_TRACKED_ATTEMPTS = 1000;
 
 // `relay` is a ContactRelayClient; the channel exposes it (EmailChannel.relay)
 // so the router routes that relay's events here.
@@ -87,6 +91,11 @@ function classifyParsed(parsed) {
   const from = fromList.length === 1 && fromHeaders <= 1 ? String(fromList[0].address || '') : '';
   if (DAEMON_SENDER.test(from)) return { kind: 'ignored', reason: 'mail system message' };
   if (isAutomatic(parsed)) return { kind: 'ignored', reason: 'automatic reply' };
+  // mailparser derives text from HTML; none left means nothing to read. The
+  // content is never logged, only the Message-ID.
+  if (!String(parsed.text || '').trim() && parsed.html) {
+    return { kind: 'ignored', warn: true, reason: `HTML reply ${String(parsed.messageId || '(no Message-ID)').slice(0, 200)} has no readable text; dropped` };
+  }
   const refs = parsed.references;
   return {
     kind: 'reply',
@@ -150,30 +159,54 @@ function createImapSmtpTransport({
     return transporter;
   };
 
-  async function pollMailbox(client) {
-    const items = [];
+  // uid → failed handling attempts. A message whose handling fails stays
+  // UNSEEN for the next poll; after MAX_ATTEMPTS it is marked seen, so one
+  // poison message cannot loop forever.
+  const attempts = new Map();
+  const markSeen = (client, uid) => client.messageFlagsAdd(String(uid), ['\\Seen'], { uid: true });
+
+  // Each item is handled under the mailbox lock and marked seen only after
+  // onItem resolves (spec §3.2). Oversized, unparseable and ignored messages
+  // are marked seen at once.
+  async function pollMailbox(client, onItem) {
     const lock = await client.getMailboxLock('INBOX');
     try {
       const uids = (await client.search({ seen: false }, { uid: true })) || [];
       for (const uid of uids.slice(0, MAX_MESSAGES_PER_POLL)) {
-        const msg = await client.fetchOne(String(uid), { source: { maxLength: MAX_MESSAGE_BYTES + 1 }, size: true }, { uid: true });
+        const key = String(uid);
+        const msg = await client.fetchOne(key, { source: { maxLength: MAX_MESSAGE_BYTES + 1 }, size: true }, { uid: true });
+        let item = null;
         try {
           if (!msg || !msg.source) log.warn(`message ${uid} has no source; skipped`);
           else if ((Number(msg.size) || msg.source.length) > MAX_MESSAGE_BYTES) log.warn(`message ${uid} is over ${MAX_MESSAGE_BYTES} bytes; skipped`);
-          else {
-            const item = classifyParsed(await parse(msg.source));
-            if (item.kind === 'ignored') log.info(`message ${uid} ignored: ${item.reason}`);
-            items.push(item);
-          }
+          else item = classifyParsed(await parse(msg.source));
         } catch (err) {
           log.warn(`could not parse message ${uid}: ${redact(err.message, secrets())}`);
         }
-        await client.messageFlagsAdd(String(uid), ['\\Seen'], { uid: true });
+        if (item && item.kind === 'ignored') {
+          log[item.warn ? 'warn' : 'info'](`message ${uid} ignored: ${item.reason}`);
+          item = null;
+        }
+        if (item) {
+          try {
+            await onItem(item);
+          } catch (err) {
+            const n = (attempts.get(key) || 0) + 1;
+            if (n < MAX_ATTEMPTS) {
+              attempts.set(key, n);
+              if (attempts.size > MAX_TRACKED_ATTEMPTS) attempts.delete(attempts.keys().next().value);
+              log.warn(`message ${uid} left unseen after a failed attempt (${n} of ${MAX_ATTEMPTS}): ${redact(err?.message, secrets())}`);
+              continue;
+            }
+            log.warn(`message ${uid} marked seen and dropped after ${n} attempts: ${redact(err?.message, secrets())}`);
+          }
+        }
+        attempts.delete(key);
+        await markSeen(client, uid);
       }
     } finally {
       lock.release();
     }
-    return items;
   }
 
   return {
@@ -189,7 +222,8 @@ function createImapSmtpTransport({
       }
       return { messageId: info.messageId || messageId || null, relayId: null };
     },
-    async poll() {
+    async poll(onItem) {
+      if (typeof onItem !== 'function') throw new TypeError('poll(onItem) needs a handler');
       const client = new Imap({
         host: imap.host,
         port: imap.port,
@@ -206,7 +240,7 @@ function createImapSmtpTransport({
         throw new Error(`IMAP: ${redact(err?.message, secrets())}`);
       }
       try {
-        return await pollMailbox(client);
+        await pollMailbox(client, onItem);
       } catch (err) {
         throw new Error(`IMAP: ${redact(err?.message, secrets())}`);
       } finally {

@@ -46,6 +46,15 @@ describe('contact dependencies', () => {
     for (const name of NEW_DEPS) assert.ok(pkg.dependencies[name], `${name} is a dependency`);
   });
 
+  it('the three are pinned to exact versions (no range) and the lockfile agrees', () => {
+    const PINNED = { nodemailer: '10.0.10', imapflow: '2.0.7', mailparser: '3.9.28' };
+    for (const [name, version] of Object.entries(PINNED)) {
+      assert.strictEqual(pkg.dependencies[name], version, `${name} is pinned to ${version}`);
+      assert.strictEqual(lock.packages[''].dependencies[name], version, `lockfile root pins ${name}`);
+      assert.strictEqual(lock.packages[`node_modules/${name}`].version, version, `lockfile installs ${name}@${version}`);
+    }
+  });
+
   it('lockfile: no install scripts, node-gyp or platform binaries anywhere in their closure', () => {
     const keys = closure(NEW_DEPS);
     assert.ok(keys.length >= NEW_DEPS.length);
