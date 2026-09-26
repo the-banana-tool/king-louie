@@ -10,10 +10,117 @@ const HEARTBEAT_INTERVAL_MS = 30000;
 const HEARTBEAT_TIMEOUT_MS = 90000;
 const RECONNECT_DELAYS = [5000, 10000, 20000, 60000];
 const AUTH_TIMEOUT_MS = 10000;
-const NONCE_WINDOW_SIZE = 1000;
-// Mesh envelopes are JSON control messages; `ws` would otherwise allow a single
-// frame of up to its 100 MB default.
-const MAX_PAYLOAD_BYTES = 4 * 1024 * 1024;
+// Fleet stage 4 §3.10. A frame is at most 1 MiB (list RPCs are byte-paged
+// with max_bytes); an unauthenticated one at most 16 KiB, checked before
+// anything parses it (ruling 8).
+const MAX_PAYLOAD_BYTES = 1024 * 1024;
+const PRE_AUTH_MAX_BYTES = 16 * 1024;
+const PRE_AUTH_STRING_MAX = 4096;
+const PEER_NONCE_WINDOW = 10000;
+const MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
+const INBOUND_RATE_PER_S = 200;
+const INBOUND_BURST = 400;
+const MAX_UNAUTH_SOCKETS = 64;
+const MAX_UNAUTH_PER_IP = 8;
+const ENVELOPE_WINDOW_MS = 5 * 60 * 1000;
+const FRONT_DOOR_ENVELOPE_WINDOW_MS = 60000;
+const STALE_GRACE_MS = 5000;
+const CLOSE_CODES = Object.freeze({ tooBig: 1009, unauthenticated: 4001, keyRemoved: 4003, alreadyConnected: 4009, replayDetected: 4010, rateLimited: 4029 });
+
+// An auth challenge is exactly 32 random bytes and a signature exactly one
+// Ed25519 signature. Fixing the challenge length matters beyond tidiness:
+// the listener signs whatever challenge a stranger sends, with the same key
+// that signs envelopes, and the shortest envelope body is longer than 32
+// bytes, so this handshake can never be used to get an envelope signed.
+const HEX_CHALLENGE_RE = /^[0-9a-f]{64}$/;
+const HEX_SIGNATURE_RE = /^[0-9a-f]{128}$/;
+
+// The two frames a listener accepts before it knows who is talking, with
+// exactly these keys.
+const PRE_AUTH_SHAPES = Object.freeze({
+  'auth:challenge': Object.freeze(['authId', 'challenge', 'identity', 'type']),
+  'pair:request': Object.freeze(['identity', 'nonce', 'pairingId', 'proof', 'type'])
+});
+// The rest of the handshake, exactly these keys too: what a dialer accepts
+// from the listener, and what a listener accepts after its auth:response.
+const DIALER_SHAPES = Object.freeze({
+  'auth:response': Object.freeze(['authId', 'challenge', 'identity', 'signature', 'type']),
+  'auth:reject': Object.freeze(['reason', 'type'])
+});
+const COMPLETE_SHAPES = Object.freeze({
+  'auth:complete': Object.freeze(['authId', 'signature', 'type'])
+});
+const IDENTITY_KEYS = new Set(['peerId', 'publicKey', 'displayName', 'capabilities', 'tlsFingerprint', 'nodeId', 'nodeName']);
+
+function frameBytes(data) {
+  if (Buffer.isBuffer(data)) return data;
+  if (Array.isArray(data)) return Buffer.concat(data);
+  if (data instanceof ArrayBuffer) return Buffer.from(data);
+  return Buffer.from(String(data), 'utf8');
+}
+
+const shortString = (v) => typeof v === 'string' && v.length <= PRE_AUTH_STRING_MAX;
+
+function preAuthIdentityOk(identity) {
+  if (!identity || typeof identity !== 'object' || Array.isArray(identity)) return false;
+  for (const [k, v] of Object.entries(identity)) {
+    if (!IDENTITY_KEYS.has(k)) return false;
+    if (k === 'capabilities') {
+      if (!Array.isArray(v) || v.length > 64 || !v.every(shortString)) return false;
+    } else if (!(v === null || shortString(v))) {
+      return false;
+    }
+  }
+  return typeof identity.peerId === 'string' && typeof identity.publicKey === 'string';
+}
+
+function handshakeValueOk(key, value) {
+  if (key === 'identity') return preAuthIdentityOk(value);
+  if (key === 'challenge') return typeof value === 'string' && HEX_CHALLENGE_RE.test(value);
+  if (key === 'signature') return typeof value === 'string' && HEX_SIGNATURE_RE.test(value);
+  return shortString(value);
+}
+
+// → { msg } or { close: code }. Size first, then one parse, then the exact shape.
+function parseHandshakeFrame(data, shapes) {
+  const buf = frameBytes(data);
+  if (buf.length > PRE_AUTH_MAX_BYTES) return { close: CLOSE_CODES.tooBig };
+  let msg;
+  try {
+    msg = JSON.parse(buf.toString('utf8'));
+  } catch {
+    return { close: CLOSE_CODES.unauthenticated };
+  }
+  if (!msg || typeof msg !== 'object' || Array.isArray(msg) || !Object.hasOwn(shapes, msg.type)) return { close: CLOSE_CODES.unauthenticated };
+  const keys = Object.keys(msg).sort();
+  const want = shapes[msg.type];
+  if (keys.length !== want.length || keys.some((k, i) => k !== want[i])) return { close: CLOSE_CODES.unauthenticated };
+  for (const [k, v] of Object.entries(msg)) {
+    if (!handshakeValueOk(k, v)) return { close: CLOSE_CODES.unauthenticated };
+  }
+  return { msg };
+}
+
+// The first frame on an inbound socket: exactly auth:challenge or pair:request.
+function parsePreAuthFrame(data) {
+  return parseHandshakeFrame(data, PRE_AUTH_SHAPES);
+}
+
+// `ws` enforces maxPayload while it reads a frame header, before it buffers
+// the payload. Until a socket authenticates its limit is PRE_AUTH_MAX_BYTES,
+// so an unauthenticated peer cannot make us hold even 1 MiB; promotion raises
+// it. `ws` exposes no public setter, so this reaches the receiver's field
+// (pinned by tests/mesh-hardening.test.js, which fails if it disappears).
+function setFrameLimit(ws, bytes) {
+  const receiver = ws && ws._receiver;
+  if (!receiver || typeof receiver._maxPayload !== 'number') return false;
+  receiver._maxPayload = bytes;
+  return true;
+}
+
+function closeQuietly(ws, code, reason) {
+  try { ws.close(code, reason); } catch { try { ws.terminate(); } catch { /* gone */ } }
+}
 
 class MeshTransport extends EventEmitter {
   constructor(config = {}) {
@@ -36,7 +143,11 @@ class MeshTransport extends EventEmitter {
     this.pendingAuth = new Map();
     this.reconnectTimers = new Map();
     this.heartbeatInterval = null;
-    this.seenNonces = new Set();
+    // Unauthenticated inbound sockets → remote IP (at most 64, 8 per IP).
+    this.unauth = new Map();
+    // Fleet stage 4 §3.10 item 3 (Task 7 adds the TLS side): with it on,
+    // `pair:request` is refused and only pinned client certificates connect.
+    this.requireClientCert = config.requireClientCert === true;
     this.running = false;
     this.onPairingRequest = null; // set by MeshPairing to handle pair:request messages
   }
@@ -128,6 +239,10 @@ class MeshTransport extends EventEmitter {
       if (pending.timeout) clearTimeout(pending.timeout);
     }
     this.pendingAuth.clear();
+    for (const ws of this.unauth.keys()) {
+      try { ws.terminate(); } catch { /* gone */ }
+    }
+    this.unauth.clear();
 
     if (this.server) {
       await new Promise((resolve) => this.server.close(resolve));
@@ -206,7 +321,9 @@ class MeshTransport extends EventEmitter {
     log.info(`connecting to ${url}`);
 
     return new Promise((resolve, reject) => {
-      const wsOptions = {};
+      // `ws` clients default to 100 MiB frames; a mesh frame is at most 1 MiB
+      // (and 16 KiB until the link authenticates, see _initiateAuth).
+      const wsOptions = { maxPayload: MAX_PAYLOAD_BYTES };
 
       if (this.useTls) {
         // Accept self-signed certs — we verify via fingerprint pinning, not CA
@@ -243,7 +360,8 @@ class MeshTransport extends EventEmitter {
 
   _initiateAuth(ws, address, port, timeout, resolve, reject, serverCertFingerprint) {
     const challenge = this.identity.generateChallenge();
-    const authId = `auth-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+    // Unguessable: a stranger's auth:challenge must not be able to reuse it.
+    const authId = `auth-${require('crypto').randomBytes(12).toString('hex')}`;
 
     this.pendingAuth.set(authId, {
       ws,
@@ -264,53 +382,127 @@ class MeshTransport extends EventEmitter {
       identity: this.identity.getPublicIdentity()
     }));
 
+    // The listener is not authenticated yet either: its frames get the same
+    // pre-auth size cap (enforced by `ws` before buffering) and exact shapes.
+    setFrameLimit(ws, PRE_AUTH_MAX_BYTES);
+    // Closed or broken before it authenticated (a refusal, a 4029, a frame
+    // over the limit, a dead socket): the dial fails now instead of waiting
+    // out AUTH_TIMEOUT_MS, and nothing of it stays in pendingAuth.
+    const abandon = (why) => {
+      const pending = this.pendingAuth.get(authId);
+      if (!pending || pending.ws !== ws) return;
+      this.pendingAuth.delete(authId);
+      clearTimeout(pending.timeout);
+      try { ws.terminate(); } catch { /* gone */ }
+      pending.reject(new Error(`the peer connection ended before authenticating (${why})`));
+    };
+    ws.once('close', (code) => abandon(code));
+    ws.once('error', (err) => abandon(err.message));
     ws.on('message', (data) => {
+      const parsed = parseHandshakeFrame(data, DIALER_SHAPES);
+      if (parsed.close) {
+        log.warn(`malformed handshake frame from ${address || 'the peer'}:${port || ''}; closing`);
+        this._failOutbound(authId, parsed.close, parsed.close === CLOSE_CODES.tooBig ? 'frame_too_big' : 'unauthenticated');
+        return;
+      }
+      const { msg } = parsed;
       try {
-        const msg = JSON.parse(data);
-        if (msg.type === 'auth:response') {
-          this._handleAuthResponse(authId, msg);
-        } else if (msg.type === 'auth:complete') {
-          this._handleAuthComplete(authId, msg);
-        }
+        if (msg.type === 'auth:response') this._handleAuthResponse(authId, msg);
+        else this._handleAuthReject(authId, msg);
       } catch (err) {
-        log.error(`auth message parse error: ${err.message}`);
+        log.error(`auth handshake error: ${err.message}`);
+        this._failOutbound(authId, CLOSE_CODES.unauthenticated, 'unauthenticated');
       }
     });
   }
 
+  // Ends an outbound handshake that went wrong: close, and reject the dial.
+  _failOutbound(authId, code, reason) {
+    const pending = this.pendingAuth.get(authId);
+    if (!pending || pending.direction !== 'outbound') return;
+    this.pendingAuth.delete(authId);
+    clearTimeout(pending.timeout);
+    closeQuietly(pending.ws, code, reason);
+    pending.reject(new Error(`authentication with the peer failed: ${reason}`));
+  }
+
   // --- Inbound connection handling ---
 
-  _handleInboundConnection(ws, _req) {
-    const authTimeout = setTimeout(() => {
-      ws.close();
-    }, AUTH_TIMEOUT_MS);
+  _handleInboundConnection(ws, req = null) {
+    const ip = (req && req.socket && req.socket.remoteAddress) || 'unknown';
+    let fromIp = 0;
+    for (const other of this.unauth.values()) if (other === ip) fromIp += 1;
+    if (this.unauth.size >= MAX_UNAUTH_SOCKETS || fromIp >= MAX_UNAUTH_PER_IP) {
+      log.warn(`refusing an unauthenticated mesh connection from ${ip}: too many are open`);
+      ws.on('error', () => { /* refused socket: nothing to report */ });
+      closeQuietly(ws, CLOSE_CODES.rateLimited, 'too_many_unauthenticated');
+      return;
+    }
+    this.unauth.set(ws, ip);
+    ws.once('close', () => this.unauth.delete(ws));
+    // Enforced by `ws` while it reads each frame header, before it buffers
+    // the payload; _promoteToPeer raises it to MAX_PAYLOAD_BYTES.
+    if (!setFrameLimit(ws, PRE_AUTH_MAX_BYTES)) {
+      log.error('ws has no receiver frame limit to set; refusing the connection');
+      closeQuietly(ws, 1011, 'internal');
+      return;
+    }
 
-    // A malformed frame makes `ws` emit 'error' on this socket. This listener
-    // is attached before authentication, because without one an unhandled
-    // 'error' event takes the whole process down — and this listener faces the
-    // LAN. The authenticated path adds its own listener later; both may run.
+    // One deadline for the whole unauthenticated life of the socket (either
+    // path: auth or pairing); promotion takes it out of `unauth` first.
+    const authTimeout = setTimeout(() => {
+      if (this.unauth.has(ws)) closeQuietly(ws, CLOSE_CODES.unauthenticated, 'auth_timeout');
+    }, AUTH_TIMEOUT_MS);
+    ws.once('close', () => clearTimeout(authTimeout));
+
+    // A malformed or oversized frame makes `ws` emit 'error' on this socket
+    // (it has already started a close with 1009/1002). This listener is
+    // attached before authentication, because without one an unhandled
+    // 'error' event takes the whole process down — and this listener faces
+    // the LAN. The authenticated path adds its own listener later; both may run.
     ws.on('error', (err) => {
       log.warn(`inbound mesh connection error: ${err.message}`);
-      clearTimeout(authTimeout);
+      if (!this.unauth.has(ws)) return;
+      if (ws.readyState === WebSocket.CLOSING) {
+        // Let the close frame (with its code) go out, then drop the socket.
+        setTimeout(() => { try { ws.terminate(); } catch { /* gone */ } }, 1000).unref();
+        return;
+      }
       try { ws.terminate(); } catch { /* already gone */ }
     });
 
+    // Ruling 8: the first frame is size-checked, then parsed once, then
+    // accepted only as exactly auth:challenge or (LAN only) pair:request.
     const onMessage = (data) => {
+      ws.removeListener('message', onMessage);
+      const parsed = parsePreAuthFrame(data);
+      if (parsed.close) {
+        closeQuietly(ws, parsed.close, parsed.close === CLOSE_CODES.tooBig ? 'frame_too_big' : 'unauthenticated');
+        return;
+      }
+      const { msg } = parsed;
       try {
-        const msg = JSON.parse(data);
-        if (msg.type === 'pair:request' && this.onPairingRequest) {
-          clearTimeout(authTimeout);
+        if (msg.type === 'pair:request') {
+          if (this.requireClientCert || !this.onPairingRequest) {
+            closeQuietly(ws, CLOSE_CODES.unauthenticated, 'pairing_off');
+            return;
+          }
+          // Pairing answers and closes; nothing after this frame is read.
+          ws.on('message', () => closeQuietly(ws, CLOSE_CODES.unauthenticated, 'unauthenticated'));
           this.onPairingRequest(ws, msg);
-        } else if (msg.type === 'auth:challenge') {
-          clearTimeout(authTimeout);
-          this._respondToChallenge(ws, msg);
+          return;
         }
+        if (this.pendingAuth.has(msg.authId)) {
+          // Another handshake owns this authId; never let one overwrite it.
+          closeQuietly(ws, CLOSE_CODES.unauthenticated, 'unauthenticated');
+          return;
+        }
+        this._respondToChallenge(ws, msg);
       } catch (err) {
-        log.error(`inbound auth parse error: ${err.message}`);
-        ws.close();
+        log.error(`inbound handshake error: ${err.message}`);
+        closeQuietly(ws, CLOSE_CODES.unauthenticated, 'unauthenticated');
       }
     };
-
     ws.on('message', onMessage);
   }
 
@@ -320,7 +512,7 @@ class MeshTransport extends EventEmitter {
     const trusted = this.trustedPeers.get(remoteIdentity.peerId);
     if (!trusted) {
       ws.send(JSON.stringify({ type: 'auth:reject', reason: 'not_trusted' }));
-      ws.close();
+      closeQuietly(ws, CLOSE_CODES.unauthenticated, 'not_trusted');
       return;
     }
 
@@ -329,7 +521,7 @@ class MeshTransport extends EventEmitter {
       if (trusted.tlsFingerprint !== remoteIdentity.tlsFingerprint) {
         log.warn(`TLS fingerprint mismatch for ${remoteIdentity.peerId} - possible impersonation`);
         ws.send(JSON.stringify({ type: 'auth:reject', reason: 'tls_fingerprint_mismatch' }));
-        ws.close();
+        closeQuietly(ws, CLOSE_CODES.unauthenticated, 'tls_fingerprint_mismatch');
         return;
       }
     }
@@ -359,16 +551,42 @@ class MeshTransport extends EventEmitter {
     }));
 
     ws.removeAllListeners('message');
+    // Still unauthenticated until auth:complete verifies: the same size cap
+    // and an exact shape. Exactly one auth:complete is read; anything before
+    // it closes the socket, and nothing after it is parsed here (promotion
+    // replaces this listener).
+    let completeSeen = false;
     ws.on('message', (data) => {
-      try {
-        const resp = JSON.parse(data);
-        if (resp.type === 'auth:complete') {
-          this._handleAuthComplete(authId, resp);
-        } else if (resp.type && this.peers.has(remoteIdentity.peerId)) {
-          this._handlePeerMessage(remoteIdentity.peerId, resp);
+      if (completeSeen) return;
+      const parsed = parseHandshakeFrame(data, COMPLETE_SHAPES);
+      if (parsed.close) {
+        const pending = this.pendingAuth.get(authId);
+        if (pending && pending.ws === ws) {
+          this.pendingAuth.delete(authId);
+          clearTimeout(pending.timeout);
         }
-      } catch (err) { log.debug(`inbound message parse error: ${err.message}`); }
+        closeQuietly(ws, parsed.close, parsed.close === CLOSE_CODES.tooBig ? 'frame_too_big' : 'unauthenticated');
+        return;
+      }
+      completeSeen = true;
+      try {
+        this._handleAuthComplete(authId, parsed.msg);
+      } catch (err) {
+        log.error(`auth handshake error: ${err.message}`);
+        this.pendingAuth.delete(authId);
+        closeQuietly(ws, CLOSE_CODES.unauthenticated, 'unauthenticated');
+      }
     });
+  }
+
+  _handleAuthReject(authId, msg) {
+    const pending = this.pendingAuth.get(authId);
+    if (!pending || pending.direction !== 'outbound') return;
+    this.pendingAuth.delete(authId);
+    clearTimeout(pending.timeout);
+    try { pending.ws.close(); } catch { /* gone */ }
+    const reason = typeof msg.reason === 'string' ? msg.reason.slice(0, 100).replace(/_/g, ' ') : 'no reason';
+    pending.reject(new Error(`the peer refused authentication: ${reason}`));
   }
 
   _handleAuthResponse(authId, msg) {
@@ -441,7 +659,7 @@ class MeshTransport extends EventEmitter {
     const { signature } = msg;
     const trusted = this.trustedPeers.get(pending.remoteIdentity.peerId);
     if (!trusted) {
-      pending.ws.close();
+      closeQuietly(pending.ws, CLOSE_CODES.unauthenticated, 'unauthenticated');
       this.pendingAuth.delete(authId);
       clearTimeout(pending.timeout);
       return;
@@ -454,7 +672,7 @@ class MeshTransport extends EventEmitter {
     );
 
     if (!valid) {
-      pending.ws.close();
+      closeQuietly(pending.ws, CLOSE_CODES.unauthenticated, 'unauthenticated');
       this.pendingAuth.delete(authId);
       clearTimeout(pending.timeout);
       return;
@@ -466,17 +684,22 @@ class MeshTransport extends EventEmitter {
   _promoteToPeer(authId, ws, remoteIdentity, pending) {
     clearTimeout(pending.timeout);
     this.pendingAuth.delete(authId);
+    this.unauth.delete(ws);
 
     const existingPeer = this.peers.get(remoteIdentity.peerId);
     if (existingPeer) {
       try { existingPeer.ws.close(); } catch { /* ignore */ }
     }
 
+    // Authenticated: frames may now be up to MAX_PAYLOAD_BYTES.
+    setFrameLimit(ws, MAX_PAYLOAD_BYTES);
+
     const tlsVerified = this.useTls && (
       (pending.serverCertFingerprint != null) || // outbound: we saw their cert
       (remoteIdentity.tlsFingerprint != null)     // inbound: they declared fingerprint
     );
 
+    const now = Date.now();
     const peerInfo = {
       peerId: remoteIdentity.peerId,
       displayName: remoteIdentity.displayName || '',
@@ -485,24 +708,46 @@ class MeshTransport extends EventEmitter {
       tlsFingerprint: remoteIdentity.tlsFingerprint || pending.serverCertFingerprint || null,
       tlsVerified,
       ws,
-      connectedAt: Date.now(),
-      lastSeen: Date.now(),
+      connectedAt: now,
+      lastSeen: now,
       address: pending.address || null,
-      port: pending.port || null
+      port: pending.port || null,
+      // §3.10 item 4: frames carry a per-direction sequence number, and an
+      // envelope signed before this connection authenticated is stale.
+      authAt: now,
+      sendSeq: 0,
+      recvSeq: 0,
+      // §3.10 item 2: replay nonces are kept per peer, and inbound frames are
+      // metered with a token bucket.
+      seenNonces: new Set(),
+      tokens: INBOUND_BURST,
+      tokensAt: now,
+      envelopeWindowMs: pending.frontDoorLink || this.requireClientCert ? FRONT_DOOR_ENVELOPE_WINDOW_MS : ENVELOPE_WINDOW_MS
     };
 
     this.peers.set(remoteIdentity.peerId, peerInfo);
 
     ws.removeAllListeners('message');
     ws.on('message', (data) => {
+      let msg;
       try {
-        const msg = JSON.parse(data);
-        this._handlePeerMessage(remoteIdentity.peerId, msg);
-      } catch (err) { log.debug(`peer message parse error: ${err.message}`); }
+        msg = JSON.parse(frameBytes(data).toString('utf8'));
+      } catch (err) {
+        log.debug(`peer message parse error: ${err.message}`);
+        return;
+      }
+      if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return;
+      // A throw here (a malformed envelope, or a peerMessage listener) must
+      // never escape into `ws` and take the process down.
+      try {
+        this._handlePeerMessage(remoteIdentity.peerId, msg, peerInfo);
+      } catch (err) {
+        log.warn(`peer message from ${remoteIdentity.peerId} failed: ${err.message}`);
+      }
     });
 
-    ws.on('close', () => {
-      this._handlePeerDisconnect(remoteIdentity.peerId, peerInfo);
+    ws.on('close', (code) => {
+      this._handlePeerDisconnect(remoteIdentity.peerId, peerInfo, code);
     });
 
     ws.on('error', (err) => {
@@ -525,10 +770,44 @@ class MeshTransport extends EventEmitter {
     if (!peer || peer.ws.readyState !== WebSocket.OPEN) {
       throw new Error(`Peer not connected: ${peerId}`);
     }
-
+    // A peer that stops reading must not grow our memory without bound.
+    if (peer.ws.bufferedAmount > MAX_BUFFERED_BYTES) {
+      this.closePeer(peerId, CLOSE_CODES.rateLimited, 'send_buffer_full');
+      throw new Error(`Peer ${peerId} is not reading (send buffer full); the link was closed`);
+    }
     const envelope = MeshIdentity.createEnvelope(this.identity, peerId, payload);
-    peer.ws.send(JSON.stringify({ type: 'mesh:message', envelope }));
+    const frame = JSON.stringify({ type: 'mesh:message', seq: peer.sendSeq + 1, envelope });
+    // The far side closes 1009 on anything bigger; fail here, link intact.
+    if (Buffer.byteLength(frame, 'utf8') > MAX_PAYLOAD_BYTES) {
+      throw new Error(`message to ${peerId} is larger than ${MAX_PAYLOAD_BYTES} bytes`);
+    }
+    peer.sendSeq += 1;
+    peer.ws.send(frame);
     return envelope;
+  }
+
+  // Closes a connected peer with a close code the far side can act on
+  // (4003 key removed, 4009 already connected, …); the socket's own 'close'
+  // handler does the one cleanup and emits peerDisconnected with the code.
+  closePeer(peerId, code, reason = '') {
+    const peer = this.peers.get(peerId);
+    if (!peer) return false;
+    peer.disconnectReason = reason || String(code);
+    try {
+      peer.ws.close(code, reason);
+    } catch {
+      try { peer.ws.terminate(); } catch { /* gone */ }
+    }
+    return true;
+  }
+
+  _takeToken(peer) {
+    const now = Date.now();
+    peer.tokens = Math.min(INBOUND_BURST, peer.tokens + ((now - peer.tokensAt) / 1000) * INBOUND_RATE_PER_S);
+    peer.tokensAt = now;
+    if (peer.tokens < 1) return false;
+    peer.tokens -= 1;
+    return true;
   }
 
   broadcast(payload) {
@@ -543,51 +822,62 @@ class MeshTransport extends EventEmitter {
     return results;
   }
 
-  _handlePeerMessage(peerId, msg) {
+  // `expected` is the record of the socket the frame arrived on: a late frame
+  // from a superseded socket must not touch the live peer's counters.
+  _handlePeerMessage(peerId, msg, expected = null) {
     const peer = this.peers.get(peerId);
-    if (!peer) return;
-
+    if (!peer || (expected && peer !== expected)) return;
+    // Closing (rate limit, replay, removal): nothing more is processed.
+    if (peer.ws.readyState !== WebSocket.OPEN) return;
+    if (!this._takeToken(peer)) {
+      log.warn(`peer ${peerId} sent more than ${INBOUND_RATE_PER_S} messages a second; closing`);
+      this.closePeer(peerId, CLOSE_CODES.rateLimited, 'rate_limited');
+      return;
+    }
+    // Strictly increasing per direction and connection: a replayed,
+    // reordered or unsequenced frame ends the link.
+    if (!Number.isSafeInteger(msg.seq) || msg.seq <= peer.recvSeq) {
+      log.warn(`replayed or unsequenced frame from ${peerId}; closing`);
+      this.closePeer(peerId, CLOSE_CODES.replayDetected, 'replay_detected');
+      return;
+    }
+    peer.recvSeq = msg.seq;
     peer.lastSeen = Date.now();
 
-    if (msg.type === 'mesh:heartbeat') {
+    if (msg.type !== 'mesh:message') return; // heartbeats and anything unknown end here
+    const { envelope } = msg;
+    if (!envelope || typeof envelope !== 'object' || typeof envelope.nonce !== 'string' || typeof envelope.signature !== 'string') return;
+    if (envelope.to !== this.identity.peerId) {
+      log.warn(`envelope from ${peerId} is addressed to someone else`);
+      return;
+    }
+    if (peer.seenNonces.has(envelope.nonce)) return; // replay
+
+    const trusted = this.trustedPeers.get(peerId);
+    if (!trusted) return;
+    if (!(Number(envelope.timestamp) >= peer.authAt - STALE_GRACE_MS)) {
+      log.warn(`stale envelope from ${peerId}: signed before this connection authenticated`);
+      return;
+    }
+    let verification;
+    try {
+      verification = MeshIdentity.verifyEnvelope(envelope, trusted.publicKey, peer.envelopeWindowMs);
+    } catch (err) {
+      verification = { valid: false, reason: err.message };
+    }
+    if (!verification.valid) {
+      log.warn(`invalid envelope from ${peerId}: ${verification.reason}`);
       return;
     }
 
-    if (msg.type === 'mesh:message') {
-      const { envelope } = msg;
+    peer.seenNonces.add(envelope.nonce);
+    if (peer.seenNonces.size > PEER_NONCE_WINDOW) peer.seenNonces.delete(peer.seenNonces.values().next().value);
 
-      if (this.seenNonces.has(envelope.nonce)) {
-        return; // replay
-      }
-
-      const trusted = this.trustedPeers.get(peerId);
-      if (!trusted) return;
-
-      const verification = MeshIdentity.verifyEnvelope(envelope, trusted.publicKey);
-      if (!verification.valid) {
-        log.warn(`invalid envelope from ${peerId}: ${verification.reason}`);
-        return;
-      }
-
-      this.seenNonces.add(envelope.nonce);
-      this._pruneNonces();
-
-      this.emit('peerMessage', {
-        from: peerId,
-        payload: envelope.payload,
-        envelope
-      });
-    }
-  }
-
-  _pruneNonces() {
-    if (this.seenNonces.size > NONCE_WINDOW_SIZE) {
-      const excess = this.seenNonces.size - NONCE_WINDOW_SIZE;
-      const iterator = this.seenNonces.values();
-      for (let i = 0; i < excess; i++) {
-        this.seenNonces.delete(iterator.next().value);
-      }
-    }
+    this.emit('peerMessage', {
+      from: peerId,
+      payload: envelope.payload,
+      envelope
+    });
   }
 
   // --- Heartbeat ---
@@ -618,14 +908,15 @@ class MeshTransport extends EventEmitter {
       }
 
       if (peer.ws.readyState === WebSocket.OPEN) {
-        peer.ws.send(JSON.stringify({ type: 'mesh:heartbeat' }));
+        peer.sendSeq += 1;
+        peer.ws.send(JSON.stringify({ type: 'mesh:heartbeat', seq: peer.sendSeq }));
       }
     }
   }
 
   // --- Reconnection ---
 
-  _handlePeerDisconnect(peerId, peerInfo) {
+  _handlePeerDisconnect(peerId, peerInfo, code = null) {
     // A 'close' listener is bound once per socket, in _promoteToPeer, over
     // that socket's own peerInfo closure. If a newer connection for the same
     // peerId has already replaced it in `peers` (a reconnect that beat the
@@ -635,8 +926,8 @@ class MeshTransport extends EventEmitter {
     if (this.peers.get(peerId) !== peerInfo) return;
     const reason = peerInfo.disconnectReason || 'closed';
     this.peers.delete(peerId);
-    log.info(`peer disconnected: ${peerId} (${reason})`);
-    this.emit('peerDisconnected', { peerId, reason });
+    log.info(`peer disconnected: ${peerId} (${reason}${code ? `, ${code}` : ''})`);
+    this.emit('peerDisconnected', { peerId, reason, code: Number.isInteger(code) ? code : null });
 
     // Reconnect a peer we dialed ourselves (peerInfo carries the
     // address/port connectToPeer recorded). A heartbeat timeout is the one
@@ -721,4 +1012,4 @@ class MeshTransport extends EventEmitter {
   }
 }
 
-module.exports = { MeshTransport, DEFAULT_PORT };
+module.exports = { MeshTransport, DEFAULT_PORT, MAX_PAYLOAD_BYTES, PRE_AUTH_MAX_BYTES, CLOSE_CODES, parsePreAuthFrame };
