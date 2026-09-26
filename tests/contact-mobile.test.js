@@ -427,3 +427,124 @@ describe('contact host: startMobile', () => {
     }
   });
 });
+
+describe('question routes (relay side)', () => {
+  const { registerQuestionRoutes, WEEK_MS } = require('../src/frontdoor/question-routes');
+
+  function relay({ offline = false } = {}) {
+    const routes = new Map();
+    const rpcs = [];
+    const phoneApi = { registerRoute: (method, pattern, spec) => routes.set(`${method} ${pattern}`, spec) };
+    const nodeHub = {
+      rpc: async (nodeId, method, params, opts) => {
+        rpcs.push({ nodeId, method, params, opts });
+        if (offline) throw Object.assign(new Error('timeout'), { code: 'timeout' });
+        return method === 'question.answer' ? { ok: true, outcome: 'recorded', ack: 'Recorded for Lakeside lot.' } : { ok: true };
+      }
+    };
+    const mailbox = new Mailbox({ now: () => Date.parse('2026-09-25T14:00:00Z') });
+    const devices = { nodesForDevice: (id) => [{ node_id: 'kl-aaaaaaaaaaaaaaaa', state: id === 'd-revokedrevokedre' ? 'revoked' : 'active' }] };
+    const log = { warn() {}, debug() {}, info() {} };
+    registerQuestionRoutes({ phoneApi, nodeHub, mailbox, devices, log });
+    return { routes, rpcs, mailbox };
+  }
+
+  const NODE = 'kl-aaaaaaaaaaaaaaaa';
+  const answerFor = (phone, fields = {}) => phone.sign({ v: 1, type: 'kl.question.answer', node_id: NODE, case_id: 'mfz1k2-0a1b2c3d', question_id: 'q-0012', token: '7QD4KM', answer: { option_id: 'a' }, nonce: randomNonce(), signed_at: '2026-09-25T14:00:00.000Z', device_id: phone.deviceId, ...fields });
+  function askFor(r, phone) {
+    const node = testNodeIdentity({ key: 'web-01' });
+    const question = seal({ v: 1, type: 'kl.question.ask', node_id: node.nodeId, token: '7QD4KM' }, node.signer);
+    r.mailbox.put(NODE, question, { to_device: phone.deviceId });
+    return question;
+  }
+
+  it('registers the three device-authenticated routes with their rate limits and the kl.question. mailbox prefix', () => {
+    const r = relay();
+    assert.deepStrictEqual([...r.routes.keys()], ['GET /v1/questions', 'POST /v1/questions/{token}/answer', 'POST /v1/presence']);
+    for (const spec of r.routes.values()) assert.strictEqual(spec.auth, 'device');
+    assert.deepStrictEqual(r.routes.get('POST /v1/questions/{token}/answer').rate, { perMin: 30 });
+    assert.deepStrictEqual(r.routes.get('POST /v1/presence').rate, { perMin: 6 });
+    assert.strictEqual(WEEK_MS, 7 * 24 * 3600 * 1000);
+    assert.strictEqual(r.mailbox.types.get('kl.question.').ttlMs, WEEK_MS);
+  });
+
+  it('lists the mailbox for this device and forwards an answer envelope unchanged to its node', async () => {
+    const r = relay();
+    const phone = createFakePhone();
+    const question = askFor(r, phone);
+    const listed = await r.routes.get('GET /v1/questions').handler({}, { deviceId: phone.deviceId, params: {}, query: {}, body: null });
+    assert.strictEqual(listed.body.length, 1);
+    assert.deepStrictEqual(listed.body[0].envelope, question);
+    const other = await r.routes.get('GET /v1/questions').handler({}, { deviceId: 'd-otherotherother', params: {}, query: {}, body: null });
+    assert.deepStrictEqual(other.body, []);
+
+    const envelope = answerFor(phone);
+    const sent = JSON.parse(JSON.stringify(envelope));
+    const answerRoute = r.routes.get('POST /v1/questions/{token}/answer');
+    const out = await answerRoute.handler({}, { deviceId: phone.deviceId, params: { token: '7QD4KM' }, query: {}, body: envelope });
+    assert.deepStrictEqual(out.body, { ok: true, outcome: 'recorded', ack: 'Recorded for Lakeside lot.' });
+    assert.deepStrictEqual(r.rpcs[0], { nodeId: NODE, method: 'question.answer', params: { envelope }, opts: { timeoutMs: 10000 } });
+    // The relay adds or rewrites nothing: the node gets exactly the signed body.
+    assert.deepStrictEqual(r.rpcs[0].params, { envelope: sent });
+
+    await assert.rejects(answerRoute.handler({}, { deviceId: 'd-otherotherother', params: { token: '7QD4KM' }, body: envelope }), (err) => err.status === 403);
+    await assert.rejects(answerRoute.handler({}, { deviceId: phone.deviceId, params: { token: 'K7QD4M' }, body: envelope }), (err) => err.status === 400);
+    await assert.rejects(answerRoute.handler({}, { deviceId: phone.deviceId, params: { token: '7QD4KM' }, body: { not: 'an envelope' } }), (err) => err.status === 400);
+    await assert.rejects(answerRoute.handler({}, { deviceId: phone.deviceId, params: { token: 'not-a-token' }, body: envelope }), (err) => err.status === 400);
+    assert.strictEqual(r.rpcs.length, 1);
+  });
+
+  it('refuses an answer with no matching mailbox entry, or from a device not active on the node, before any rpc', async () => {
+    const r = relay();
+    const phone = createFakePhone();
+    askFor(r, phone);
+    const answerRoute = r.routes.get('POST /v1/questions/{token}/answer');
+    // A token this device was never sent.
+    await assert.rejects(answerRoute.handler({}, { deviceId: phone.deviceId, params: { token: 'K7QD4M' }, body: answerFor(phone, { token: 'K7QD4M' }) }), (err) => err.status === 404 && err.code === 'not_found');
+    // A node the question did not come from.
+    await assert.rejects(answerRoute.handler({}, { deviceId: phone.deviceId, params: { token: '7QD4KM' }, body: answerFor(phone, { node_id: 'kl-bbbbbbbbbbbbbbbb' }) }), (err) => err.status === 404);
+    // A question sent to another device.
+    await assert.rejects(answerRoute.handler({}, { deviceId: 'd-dddddddddddddddd', params: { token: '7QD4KM' }, body: answerFor(phone, { device_id: 'd-dddddddddddddddd' }) }), (err) => err.status === 404);
+    // A device whose pairing with the node is not active.
+    await assert.rejects(answerRoute.handler({}, { deviceId: 'd-revokedrevokedre', params: { token: '7QD4KM' }, body: answerFor(phone, { device_id: 'd-revokedrevokedre' }) }), (err) => err.status === 404);
+    // Not an answer type.
+    await assert.rejects(answerRoute.handler({}, { deviceId: phone.deviceId, params: { token: '7QD4KM' }, body: answerFor(phone, { type: 'kl.question.ask' }) }), (err) => err.status === 400 && err.code === 'malformed');
+    assert.strictEqual(r.rpcs.length, 0);
+  });
+
+  it('answers 502 node_offline when the node does not answer', async () => {
+    const r = relay({ offline: true });
+    const phone = createFakePhone();
+    askFor(r, phone);
+    await assert.rejects(r.routes.get('POST /v1/questions/{token}/answer').handler({}, { deviceId: phone.deviceId, params: { token: '7QD4KM' }, body: answerFor(phone) }), (err) => err.status === 502 && err.code === 'node_offline');
+  });
+
+  it('forwards foreground pings as presence.foreground { deviceId, foreground, at } to each active node', async () => {
+    const r = relay();
+    const at = Date.parse('2026-09-25T14:00:00Z');
+    const out = await r.routes.get('POST /v1/presence').handler({}, { deviceId: 'd-bbbbbbbbbbbbbbbb', params: {}, body: { foreground: true, at } });
+    assert.deepStrictEqual(out.body, { ok: true, nodes: 1 });
+    assert.deepStrictEqual(r.rpcs[0], { nodeId: 'kl-aaaaaaaaaaaaaaaa', method: 'presence.foreground', params: { deviceId: 'd-bbbbbbbbbbbbbbbb', foreground: true, at }, opts: { timeoutMs: 5000 } });
+
+    // deviceId always comes from the device auth context, never the body.
+    await r.routes.get('POST /v1/presence').handler({}, { deviceId: 'd-bbbbbbbbbbbbbbbb', params: {}, body: { foreground: false, at, deviceId: 'd-cccccccccccccccc' } });
+    assert.deepStrictEqual(r.rpcs[1].params, { deviceId: 'd-bbbbbbbbbbbbbbbb', foreground: false, at });
+
+    // A revoked pairing is not forwarded to.
+    const none = await r.routes.get('POST /v1/presence').handler({}, { deviceId: 'd-revokedrevokedre', params: {}, body: { foreground: true, at } });
+    assert.deepStrictEqual(none.body, { ok: true, nodes: 0 });
+    assert.strictEqual(r.rpcs.length, 2);
+  });
+
+  it('refuses a presence ping whose foreground is not a boolean or whose at is not a finite number (400 malformed)', async () => {
+    const r = relay();
+    const route = r.routes.get('POST /v1/presence');
+    const at = Date.parse('2026-09-25T14:00:00Z');
+    const bad = [null, {}, [], { at }, { foreground: 'true', at }, { foreground: 1, at }, { foreground: null, at },
+      { foreground: true }, { foreground: true, at: '2026-09-25T14:00:00Z' }, { foreground: true, at: NaN }, { foreground: true, at: Infinity }, { foreground: true, at: null }];
+    for (const body of bad) {
+      await assert.rejects(route.handler({}, { deviceId: 'd-bbbbbbbbbbbbbbbb', params: {}, body }), (err) => err.status === 400 && err.code === 'malformed', JSON.stringify(body));
+    }
+    assert.strictEqual(r.rpcs.length, 0);
+  });
+});
