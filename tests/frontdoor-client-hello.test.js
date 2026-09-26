@@ -146,6 +146,33 @@ describe('parseClientHello', () => {
     assert.throws(() => parseClientHello(Buffer.concat([first, filler])), ClientHelloError);
   });
 
+  it('accepts a hello in 64 records and refuses one in more (Ruling T15-records)', () => {
+    const byRecords = (n) => {
+      const body = reframe(hello, 1).subarray(5);
+      const out = [];
+      for (let i = 0; i < n; i += 1) {
+        const frag = body.subarray(Math.floor((i * body.length) / n), Math.floor(((i + 1) * body.length) / n));
+        out.push(Buffer.from([0x16, 0x03, 0x01, frag.length >> 8, frag.length & 0xff]), frag);
+      }
+      assert.equal(out.length / 2, n, 'the hello divides into exactly n records');
+      return Buffer.concat(out);
+    };
+    assert.equal(parseClientHello(byRecords(64)).serverName, 'mcp.kl.example.com');
+    assert.throws(() => parseClientHello(byRecords(65)), /more than 64 records/);
+    const oneByte = Buffer.concat([...hello.subarray(5, 75)].map((b) => Buffer.from([0x16, 0x03, 0x01, 0x00, 0x01, b])));
+    assert.throws(() => parseClientHello(oneByte), ClientHelloError);
+  });
+
+  it('skips non-printable ALPN entries such as GREASE and keeps the rest (Ruling T15-alpn)', async () => {
+    const h = await captureHello({ alpn: ['zz', 'h2'] });
+    const m = Buffer.from(h);
+    const at = m.indexOf(Buffer.from([0x02, 0x7a, 0x7a, 0x02, 0x68, 0x32]));
+    assert.ok(at > 0);
+    m[at + 1] = 0x0a;
+    m[at + 2] = 0x0a;
+    assert.deepEqual(parseClientHello(m).alpn, ['h2']);
+  });
+
   it('survives 5 000 random buffers behind a handshake record header', () => {
     for (let i = 0; i < 5000; i += 1) {
       const m = Buffer.concat([Buffer.from([0x16, 0x03, crypto.randomInt(4)]), crypto.randomBytes(crypto.randomInt(600))]);
@@ -247,6 +274,41 @@ describe('peekClientHello', () => {
     const before = timers();
     await assert.rejects(peekClientHello(s), /closed before/);
     assertClean(s, before, 'destroyed');
+  });
+
+  it('a hello sent as 1-byte records is refused by the 65th record (Ruling T15-records)', async () => {
+    const s = new FakeSocket();
+    const p = peekClientHello(s, { timeoutMs: 60000 });
+    let sent = 0;
+    for (const b of hello.subarray(5)) {
+      s.emit('data', Buffer.from([0x16, 0x03, 0x01, 0x00, 0x01, b]));
+      sent += 1;
+      if (s.listenerCount('data') === 0) break; // the peek has finished
+    }
+    await assert.rejects(p, /more than 64 records/);
+    assert.equal(sent, 65, 'refused as soon as the 65th record header is in');
+  });
+
+  it('a large one-record hello fed one byte at a time is parsed a bounded number of times', async () => {
+    // One 16 000-byte record: a padding extension (21) carries the bulk.
+    const pad = 16000 - 4 - 2 - 32 - 1 - 4 - 2 - 2 - 4;
+    const body = Buffer.concat([
+      Buffer.from([0x03, 0x03]), Buffer.alloc(32), Buffer.from([0x00, 0x00, 0x02, 0x13, 0x01, 0x01, 0x00]),
+      Buffer.from([(pad + 4) >> 8, (pad + 4) & 0xff, 0x00, 0x15, pad >> 8, pad & 0xff]), Buffer.alloc(pad)
+    ]);
+    const hs = Buffer.concat([Buffer.from([0x01, 0x00, body.length >> 8, body.length & 0xff]), body]);
+    const rec = Buffer.concat([Buffer.from([0x16, 0x03, 0x01, hs.length >> 8, hs.length & 0xff]), hs]);
+    assert.deepEqual(parseClientHello(rec), { serverName: null, alpn: [] });
+    const s = new FakeSocket();
+    const p = peekClientHello(s, { timeoutMs: 60000 });
+    const started = process.hrtime.bigint();
+    for (let i = 0; i < rec.length; i += 1) s.emit('data', rec.subarray(i, i + 1));
+    const { buffer } = await p;
+    const ms = Number(process.hrtime.bigint() - started) / 1e6;
+    assert.deepEqual(buffer, rec);
+    // Re-parsing every chunk costs whole seconds here; parsing only when a
+    // record header or a whole record arrives costs a few milliseconds.
+    assert.ok(ms < 500, `took ${ms} ms`);
   });
 
   it('never destroys the socket itself', async () => {

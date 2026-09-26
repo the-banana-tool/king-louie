@@ -6,6 +6,9 @@
 // and anything malformed is a ClientHelloError — never another exception.
 const MAX_HELLO_BYTES = 16384;
 const HELLO_TIMEOUT_MS = 5000;
+// Real clients send the hello in one or two records; a hello cut into many
+// tiny records only costs parse work (Ruling T15-records).
+const MAX_HELLO_RECORDS = 64;
 const RECORD_HANDSHAKE = 0x16;
 const HANDSHAKE_CLIENT_HELLO = 0x01;
 const EXT_SERVER_NAME = 0x0000;
@@ -46,8 +49,11 @@ function handshakeBytes(buf) {
   let wanted = Infinity; // 4 + the handshake body length, once its header is in
   let off = 0;
   let complete = true;
+  let records = 0;
   while (off < buf.length && have < wanted) {
     if (buf.length - off < 5) { complete = false; break; }
+    records += 1;
+    if (records > MAX_HELLO_RECORDS) bad(`more than ${MAX_HELLO_RECORDS} records`);
     if (buf[off] !== RECORD_HANDSHAKE) bad(`record type ${buf[off]} is not a handshake`);
     if (buf[off + 1] !== 0x03) bad('record version is not TLS');
     const len = buf.readUInt16BE(off + 3);
@@ -103,15 +109,16 @@ function parseAlpn(data) {
     const len = r.u8();
     if (len === 0) bad('empty ALPN protocol');
     const value = r.bytes(len);
-    for (const b of value) if (b < 0x20 || b > 0x7e) bad('ALPN protocol is not printable');
-    out.push(value.toString('ascii'));
+    // Non-printable identifiers (RFC 8701 GREASE among them) are skipped:
+    // no route matches them, and refusing would break a greasing client.
+    if (value.every((b) => b >= 0x20 && b <= 0x7e)) out.push(value.toString('ascii'));
   }
   return out;
 }
 
 function parseClientHello(buf) {
   if (!Buffer.isBuffer(buf)) bad('not a buffer');
-  if (buf.length > MAX_HELLO_BYTES + 5 * 8) bad('over 16 KiB');
+  if (buf.length > MAX_HELLO_BYTES + 5 * MAX_HELLO_RECORDS) bad('over 16 KiB');
   const { bytes, complete } = handshakeBytes(buf);
   if (bytes.length < 4) return { incomplete: true };
   if (bytes[0] !== HANDSHAKE_CLIENT_HELLO) bad(`handshake type ${bytes[0]} is not a ClientHello`);
@@ -162,15 +169,19 @@ function peekError(code, message) {
 // back onto the paused socket for the TLSSocket that wraps it. Rejects past
 // `maxBytes` or `timeoutMs`, on a parse error, error or close; it never
 // destroys the socket (the caller does). Every path removes its listeners
-// and clears its timer.
+// and clears its timer. Bytes collect in one growing buffer, and the parser
+// runs only when a record header or a whole record has come in, so a hello
+// dribbled a byte at a time is parsed at most twice per record.
 function peekClientHello(socket, { maxBytes = MAX_HELLO_BYTES, timeoutMs = HELLO_TIMEOUT_MS } = {}) {
   return new Promise((resolve, reject) => {
     if (socket.destroyed) {
       reject(peekError('closed', 'closed before a ClientHello arrived'));
       return;
     }
-    const chunks = [];
+    let buf = null;
     let size = 0;
+    let scanned = 0; // offset of the first record not yet whole
+    let headerSeen = false; // the header at `scanned` has been parsed with
     let done = false;
     let timer = null;
     const finish = (err, value) => {
@@ -184,13 +195,28 @@ function peekClientHello(socket, { maxBytes = MAX_HELLO_BYTES, timeoutMs = HELLO
       else resolve(value);
     };
     const onData = (chunk) => {
-      chunks.push(chunk);
-      size += chunk.length;
-      if (size > maxBytes) {
+      if (size + chunk.length > maxBytes) {
         finish(new ClientHelloError(`over ${maxBytes} bytes`));
         return;
       }
-      const buffer = Buffer.concat(chunks, size);
+      if (!buf || size + chunk.length > buf.length) {
+        const grown = Buffer.alloc(Math.min(maxBytes, Math.max(1024, (size + chunk.length) * 2)));
+        if (buf) buf.copy(grown, 0, 0, size);
+        buf = grown;
+      }
+      chunk.copy(buf, size);
+      size += chunk.length;
+      let due = false;
+      while (size - scanned >= 5) {
+        if (!headerSeen) { headerSeen = true; due = true; }
+        const len = buf.readUInt16BE(scanned + 3);
+        if (size - scanned - 5 < len) break;
+        scanned += 5 + len;
+        headerSeen = false;
+        due = true;
+      }
+      if (!due) return;
+      const buffer = buf.subarray(0, size);
       let result;
       try {
         result = parseClientHello(buffer);
