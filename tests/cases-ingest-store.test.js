@@ -68,10 +68,48 @@ describe('storeDocument', () => {
     const dir = caseDir();
     const bytes = Buffer.from('Parcel 12-345-678 survey notes');
     const first = storeDocument(dir, { name: 'survey.txt', bytes, origin: ORIGIN, now: NOW, timeZone: 'UTC' });
-    writeRecord(dir, first.docId, { docId: first.docId, ref: first.ref });
+    writeRecord(dir, first.docId, { docId: first.docId, sha256: first.sha256, ref: first.ref });
     const again = storeDocument(dir, { name: 'survey-copy.txt', bytes, origin: ORIGIN, now: NOW, timeZone: 'UTC' });
     assert.deepStrictEqual(again, { docId: first.docId, ref: first.ref, sha256: first.sha256, duplicate: true, mime: 'text/plain' });
     assert.deepStrictEqual(fs.readdirSync(path.join(dir, 'sources', '2026-09')).sort(), ['survey.txt', 'survey.txt.meta.json']);
+  });
+
+  it('stores again when the recorded file was deleted (fix 1)', () => {
+    const dir = caseDir();
+    const bytes = Buffer.from('survey notes');
+    const first = storeDocument(dir, { name: 'survey.txt', bytes, origin: ORIGIN, now: NOW, timeZone: 'UTC' });
+    writeRecord(dir, first.docId, { docId: first.docId, sha256: first.sha256, ref: first.ref });
+    fs.rmSync(path.join(dir, first.ref));
+    fs.rmSync(path.join(dir, `${first.ref}.meta.json`));
+    const again = storeDocument(dir, { name: 'survey.txt', bytes, origin: ORIGIN, now: NOW, timeZone: 'UTC' });
+    assert.strictEqual(again.duplicate, false);
+    assert.ok(fs.readFileSync(path.join(dir, again.ref)).equals(bytes));
+  });
+
+  it('a record with another sha256 does not swallow the upload (fix 1)', () => {
+    const dir = caseDir();
+    fs.writeFileSync(path.join(dir, 'sources', 'other.txt'), 'something else');
+    const bytes = Buffer.from('the real upload');
+    const docId = docIdFor(sha256(bytes));
+    writeRecord(dir, docId, { docId, sha256: sha256(Buffer.from('something else')), ref: 'sources/other.txt' });
+    const r = storeDocument(dir, { name: 'upload.txt', bytes, origin: ORIGIN, now: NOW, timeZone: 'UTC' });
+    assert.strictEqual(r.duplicate, false);
+    assert.strictEqual(r.ref, 'sources/2026-09/upload.txt');
+    const origin = { kind: 'tool', at: NOW.toISOString() };
+    fs.writeFileSync(path.join(dir, 'sources', 'adopt.txt'), bytes);
+    assert.strictEqual(adoptDocument(dir, 'sources/adopt.txt', { origin, now: NOW }).duplicate, false);
+  });
+
+  it('a month folder that is a file is refused with a code (fix 4)', () => {
+    const dir = caseDir();
+    fs.writeFileSync(path.join(dir, 'sources', '2026-09'), 'not a folder');
+    assert.strictEqual(codeOf(() => storeDocument(dir, { name: 'a.txt', bytes: Buffer.from('x'), origin: ORIGIN, now: NOW, timeZone: 'UTC' })), 'BAD_PATH');
+  });
+
+  it('an invalid date is refused with a code (fix 4)', () => {
+    const dir = caseDir();
+    assert.strictEqual(codeOf(() => yearMonth(new Date('nonsense'), 'UTC')), 'BAD_DATE');
+    assert.strictEqual(codeOf(() => storeDocument(dir, { name: 'a.txt', bytes: Buffer.from('x'), origin: ORIGIN, now: new Date(Number.NaN) })), 'BAD_DATE');
   });
 
   it('refuses files over maxBytes before copying anything', () => {
@@ -127,11 +165,11 @@ describe('storeDocument', () => {
     fs.writeFileSync(path.join(other, 'sources', 'secret.txt'), bytes);
     const docId = docIdFor(sha256(bytes));
     const forged = path.relative(dir, path.join(other, 'sources', 'secret.txt')).split(path.sep).join('/');
-    writeRecord(dir, docId, { docId, ref: forged });
+    writeRecord(dir, docId, { docId, sha256: sha256(bytes), ref: forged });
     assert.strictEqual(codeOf(() => storeDocument(dir, { name: 'secret.txt', bytes, origin: ORIGIN, now: NOW })), 'BAD_PATH');
-    writeRecord(dir, docId, { docId, ref: `sources/../../${path.basename(other)}/sources/secret.txt` });
+    writeRecord(dir, docId, { docId, sha256: sha256(bytes), ref: `sources/../../${path.basename(other)}/sources/secret.txt` });
     assert.strictEqual(codeOf(() => storeDocument(dir, { name: 'secret.txt', bytes, origin: ORIGIN, now: NOW })), 'BAD_PATH');
-    writeRecord(dir, docId, { docId, ref: 42 });
+    writeRecord(dir, docId, { docId, sha256: sha256(bytes), ref: 42 });
     assert.strictEqual(codeOf(() => storeDocument(dir, { name: 'secret.txt', bytes, origin: ORIGIN, now: NOW })), 'BAD_PATH');
     assert.deepStrictEqual(fs.readdirSync(path.join(dir, 'sources')), []);
   });
@@ -161,6 +199,15 @@ describe('refPath (M7)', () => {
       'sources/a.txt.meta.json', 'sources/A.TXT.META.JSON', 'Sources/a.txt', `sources/${'a'.repeat(600)}`, null, 42
     ];
     for (const ref of bad) assert.strictEqual(codeOf(() => refPath(dir, ref)), 'BAD_PATH', String(ref));
+  });
+
+  it('refuses refs with line breaks, bidi or zero-width characters (fix 2)', () => {
+    const dir = caseDir();
+    for (const code of [0x85, 0x2028, 0x2029, 0x202e, 0x2066, 0x200b, 0x200f, 0xfeff, 0x061c]) {
+      const ref = `sources/a${String.fromCharCode(code)}b.txt`;
+      assert.strictEqual(codeOf(() => refPath(dir, ref)), 'BAD_PATH', code.toString(16));
+    }
+    assert.ok(refPath(dir, 'sources/a b.txt'));
   });
 
   it('refuses a ref through a symlinked sources/ directory', (t) => {
@@ -299,8 +346,20 @@ describe('adoptDocument', () => {
     fs.writeFileSync(path.join(dir, 'sources', 'a.txt'), bytes);
     fs.writeFileSync(path.join(other, 'sources', 'a.txt'), bytes);
     const docId = docIdFor(sha256(bytes));
-    writeRecord(dir, docId, { docId, ref: path.join(other, 'sources', 'a.txt') });
+    writeRecord(dir, docId, { docId, sha256: sha256(bytes), ref: path.join(other, 'sources', 'a.txt') });
     assert.strictEqual(codeOf(() => adoptDocument(dir, 'sources/a.txt', { origin, now: NOW })), 'BAD_PATH');
+  });
+
+  it('re-checks the size of the bytes read, not only the stat (fix 3)', (t) => {
+    const dir = caseDir();
+    const file = path.join(dir, 'sources', 'grows.txt');
+    fs.writeFileSync(file, 'small');
+    const real = fs.realpathSync.native(file);
+    const read = fs.readFileSync;
+    // The file grows between the stat and the read.
+    t.mock.method(fs, 'readFileSync', (p, ...rest) => (p === real ? Buffer.alloc(2048, 97) : read(p, ...rest)));
+    assert.strictEqual(codeOf(() => adoptDocument(dir, 'sources/grows.txt', { origin, now: NOW, maxBytes: 1024 })), 'TOO_LARGE');
+    assert.ok(!fs.existsSync(`${file}.meta.json`));
   });
 
   it('keeps an existing sidecar and one-lines the adopted name', () => {

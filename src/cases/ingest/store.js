@@ -112,6 +112,9 @@ function checkSize(label, size, maxBytes) {
 }
 
 function yearMonth(now, timeZone) {
+  if (!(now instanceof Date) || Number.isNaN(now.getTime())) {
+    throw new IngestError('BAD_DATE', 'The time a document is stored at must be a valid date.');
+  }
   const make = (tz) => new Intl.DateTimeFormat('en-CA', { timeZone: tz || undefined, year: 'numeric', month: '2-digit' });
   let fmt;
   try {
@@ -134,6 +137,8 @@ function recordPath(caseDir, docId) {
 }
 
 const SIDECAR = /\.meta\.json$/i;
+// Non-global copies: `.test` on a /g regex is stateful.
+const UNSAFE_REF = new RegExp(`${LINE_BREAKS.source}|${INVISIBLE.source}`);
 const underSources = (caseDir, abs) => {
   const segs = segmentsWithin(caseDir, abs);
   return Boolean(segs) && segs.length >= 2 && segs[0] === 'sources' && !SIDECAR.test(segs[segs.length - 1]);
@@ -149,6 +154,7 @@ function refPath(caseDir, ref) {
   const refuse = () => new IngestError('BAD_PATH', `${oneLine(ref, 200) || 'An empty path'} is not a document under sources/.`);
   if (typeof ref !== 'string' || !ref || ref.length > MAX_REF) throw refuse();
   if (/[\\:\u0000-\u001f\u007f]/.test(ref) || ref.startsWith('/')) throw refuse();
+  if (UNSAFE_REF.test(ref)) throw refuse();
   const segs = ref.split('/');
   if (segs[0] !== 'sources' || segs.length < 2) throw refuse();
   if (segs.some((seg) => seg === '' || /^[. ]+$/.test(seg) || /[. ]$/.test(seg))) throw refuse();
@@ -160,9 +166,11 @@ function refPath(caseDir, ref) {
 
 const toPosix = (p) => p.split(path.sep).join('/');
 
-// The ref of a document this case already holds, from its ingest record.
-// No record → null; a record whose ref is not a confined ref → BAD_PATH.
-function existingRef(caseDir, docId) {
+// The ref of a document this case already holds, from its ingest record:
+// only when the record names the same sha256 and its file is still there.
+// Otherwise null (the document is stored again); a record whose ref is not
+// a confined ref → BAD_PATH.
+function existingRef(caseDir, docId, hash) {
   let rec;
   try {
     rec = JSON.parse(fs.readFileSync(recordPath(caseDir, docId), 'utf8'));
@@ -171,8 +179,13 @@ function existingRef(caseDir, docId) {
     return null;
   }
   if (!rec || typeof rec !== 'object') return null;
-  refPath(caseDir, rec.ref);
-  return rec.ref;
+  const file = refPath(caseDir, rec.ref);
+  if (rec.sha256 !== hash) return null;
+  try {
+    return fs.statSync(file).isFile() ? rec.ref : null;
+  } catch {
+    return null;
+  }
 }
 
 // `wx`: never overwrite, never follow a link planted where the sidecar goes.
@@ -191,7 +204,7 @@ function storeDocument(caseDir, { name, mime, bytes, origin, now = new Date(), t
   const type = sniffType({ name: label, mime, bytes: buf });
   const hash = sha256(buf);
   const docId = docIdFor(hash);
-  const known = existingRef(caseDir, docId);
+  const known = existingRef(caseDir, docId, hash);
   if (known) return { docId, ref: known, sha256: hash, duplicate: true, mime: type.mime };
   const folder = `sources/${yearMonth(now, timeZone)}`;
   const stem = path.basename(label, path.extname(label));
@@ -200,7 +213,12 @@ function storeDocument(caseDir, { name, mime, bytes, origin, now = new Date(), t
   const candidate = (n) => `${folder}/${n === 1 ? base : `${base}-${n}`}.${type.ext}`;
   // Checked before mkdir: a sources/ linked out of the case gets nothing.
   refPath(caseDir, candidate(1));
-  fs.mkdirSync(path.join(caseDir, ...folder.split('/')), { recursive: true });
+  try {
+    fs.mkdirSync(path.join(caseDir, ...folder.split('/')), { recursive: true });
+  } catch (err) {
+    if (err.code === 'EEXIST' || err.code === 'ENOTDIR') throw new IngestError('BAD_PATH', `Cannot ingest ${label}: ${folder} is not a folder.`);
+    throw err;
+  }
   let ref;
   let file;
   for (let n = 1; ; n += 1) {
@@ -232,11 +250,10 @@ function storeDocument(caseDir, { name, mime, bytes, origin, now = new Date(), t
   return { docId, ref, sha256: hash, duplicate: false, mime: type.mime };
 }
 
-const fold = (s) => (process.platform === 'win32' || process.platform === 'darwin' ? s.toLowerCase() : s);
-// A file already in the case (an executor result, a download), checked with
-// the normalization isProtectedCasePath uses: a regular file under
-// <caseDir>/sources/, not a sidecar, not reached through a link that leaves
-// the case. → { real, ref, name, bytes, mime, sha256, docId }; writes nothing.
+// A file already in the case (an executor result, a download): its real
+// path relative to the real case directory must be a ref refPath accepts
+// (under sources/, not a sidecar, not reached through a link that leaves the
+// case), and a regular file. → { real, ref, name, bytes, mime, sha256, docId }; writes nothing.
 function resolveAdoptable(caseDir, relPath, { maxBytes = Infinity } = {}) {
   const raw = typeof relPath === 'string' ? stripLongPathPrefix(relPath.trim()) : '';
   const shown = oneLine(relPath, MAX_NAME) || 'that path';
@@ -251,23 +268,18 @@ function resolveAdoptable(caseDir, relPath, { maxBytes = Infinity } = {}) {
   } catch {
     throw new IngestError('NOT_FOUND', `Cannot ingest ${shown}: there is no file at that path.`);
   }
-  const rel = path.relative(realCase, real);
-  const segments = rel.split(/[\\/]/).map((seg) => fold(seg.replace(/[. ]+$/, '')));
-  if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || segments[0] !== 'sources' || segments.length < 2) {
-    throw refuse('only files under sources/ can be ingested.');
-  }
-  if (segments[segments.length - 1].endsWith('.meta.json')) throw refuse('a sidecar is not a document.');
-  const ref = toPosix(rel);
+  const ref = toPosix(path.relative(realCase, real));
   try {
     refPath(realCase, ref);
   } catch {
-    throw refuse('only files under sources/ can be ingested.');
+    throw refuse('only files under sources/ (not sidecars) can be ingested.');
   }
   const st = fs.statSync(real);
   if (!st.isFile()) throw refuse('it is not a regular file.');
   const name = cleanName(path.basename(real));
   checkSize(name, st.size, maxBytes);
   const bytes = fs.readFileSync(real);
+  checkSize(name, bytes.length, maxBytes); // the file may have grown since the stat
   const type = sniffType({ name, bytes });
   const hash = sha256(bytes);
   return { real, ref, name, bytes, mime: type.mime, sha256: hash, docId: docIdFor(hash) };
@@ -275,7 +287,7 @@ function resolveAdoptable(caseDir, relPath, { maxBytes = Infinity } = {}) {
 
 function adoptDocument(caseDir, relPath, { origin, now = new Date(), maxBytes = Infinity, pages = null } = {}) {
   const found = resolveAdoptable(caseDir, relPath, { maxBytes });
-  const known = existingRef(caseDir, found.docId);
+  const known = existingRef(caseDir, found.docId, found.sha256);
   if (known) return { docId: found.docId, ref: known, sha256: found.sha256, duplicate: true, mime: found.mime };
   try {
     writeSidecar(found.real, {
