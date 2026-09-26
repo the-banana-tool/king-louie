@@ -1,13 +1,19 @@
 // src/cases/git.js
-// Minimal git CLI wrapper for case repositories. Every call is execFile with
-// an argument array, so titles and messages are never shell-interpreted.
-const { execFile } = require('child_process');
+// Git CLI wrapper for case repositories and playbook fetches (cases stage 6
+// spec §3.4). Every call is execFile with an argument array, so titles,
+// messages and URLs are never shell-interpreted, and every call carries the
+// same hardening flags and environment.
+const { execFile, execFileSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { promisify } = require('util');
 
 const run = promisify(execFile);
+
+const DEFAULT_TIMEOUT_MS = 60 * 1000;
+const MAX_BUFFER = 16 * 1024 * 1024;
+const GITATTRIBUTES_LINE = 'playbooks/** -text';
 
 class GitUnavailableError extends Error {
   constructor() {
@@ -90,24 +96,115 @@ function noHooksDir() {
   return hooksDir;
 }
 
-function caseGitConfig(cwd) {
+// The checked empty hooks dir for a case repo; refused if it would sit
+// inside the case.
+function caseHooksDir(cwd) {
   const dir = noHooksDir();
   const rel = path.relative(path.resolve(cwd), dir);
   if (!rel || (!path.isAbsolute(rel) && rel.split(path.sep)[0] !== '..')) {
     throw new Error(`The case git hooks directory ${dir} is inside ${cwd}; git was not run.`);
   }
-  return ['-c', 'commit.gpgsign=false', '-c', `core.hooksPath=${dir}`, '-c', 'core.fsmonitor=false'];
+  return dir;
+}
+
+// No signing, no hooks, no fsmonitor, no symlinks or line-ending rewrites on
+// checkout, Git LFS neutralised, and only the https and ssh transports (file
+// only when the caller asks, for a local clone). `ext::` and friends are
+// refused by git.
+function hardenedGitArgs(args, { hooksDir, allowFile = false } = {}) {
+  if (!hooksDir) throw new Error('hardenedGitArgs needs a hooksDir.');
+  return [
+    '-c', 'commit.gpgsign=false',
+    '-c', `core.hooksPath=${hooksDir}`,
+    '-c', 'core.fsmonitor=false',
+    '-c', 'core.symlinks=false',
+    '-c', 'core.autocrlf=false',
+    '-c', 'core.eol=lf',
+    '-c', 'filter.lfs.smudge=',
+    '-c', 'filter.lfs.process=',
+    '-c', 'filter.lfs.required=false',
+    '-c', 'protocol.allow=never',
+    '-c', 'protocol.https.allow=always',
+    '-c', 'protocol.ssh.allow=always',
+    ...(allowFile ? ['-c', 'protocol.file.allow=always'] : []),
+    ...args
+  ];
+}
+
+// Never prompt, never smudge LFS, never ask ssh for a password, and never
+// inherit a repository location from the environment.
+function gitEnv(extra = {}) {
+  const env = { ...process.env };
+  for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE']) delete env[key];
+  return {
+    ...env,
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_LFS_SKIP_SMUDGE: '1',
+    GIT_SSH_COMMAND: 'ssh -o BatchMode=yes',
+    ...extra
+  };
+}
+
+function firstStderrLine(err) {
+  if (err && typeof err.firstLine === 'string') return err.firstLine;
+  const text = String((err && (err.stderr || err.message)) || '');
+  return text.split(/\r?\n/).map((l) => l.trim()).find(Boolean) || '';
+}
+
+function describeError(err, cwd, args, timeoutMs) {
+  // spawn reports a missing cwd as ENOENT too; only a present cwd means git is missing.
+  if (err && err.code === 'ENOENT' && fs.existsSync(cwd)) return new GitUnavailableError();
+  if (err && timeoutMs && (err.killed || err.code === 'ETIMEDOUT' || err.signal === 'SIGKILL')) {
+    const took = timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)} s` : `${timeoutMs} ms`;
+    const out = new Error(`git ${args[0]} timed out after ${took}`);
+    out.code = 'GIT_TIMEOUT';
+    out.firstLine = out.message;
+    return out;
+  }
+  if (err && typeof err === 'object') err.firstLine = firstStderrLine(err);
+  return err;
+}
+
+// Without a hooksDir, the checked empty hooks dir outside every case is used,
+// so no call ever creates a .kl/ anywhere. The command name (args[0]) is used
+// in the timeout message.
+async function runGit(cwd, args, { env = {}, timeoutMs = DEFAULT_TIMEOUT_MS, hooksDir = null, allowFile = false } = {}) {
+  const argv = hardenedGitArgs(args, { hooksDir: hooksDir || noHooksDir(), allowFile });
+  try {
+    const { stdout } = await run('git', argv, {
+      cwd,
+      env: gitEnv(env),
+      windowsHide: true,
+      maxBuffer: MAX_BUFFER,
+      timeout: timeoutMs || 0,
+      killSignal: 'SIGKILL'
+    });
+    return stdout;
+  } catch (err) {
+    throw describeError(err, cwd, args, timeoutMs);
+  }
+}
+
+function runGitSync(cwd, args, { timeoutMs = DEFAULT_TIMEOUT_MS, hooksDir = null, allowFile = false } = {}) {
+  const argv = hardenedGitArgs(args, { hooksDir: hooksDir || noHooksDir(), allowFile });
+  try {
+    return execFileSync('git', argv, {
+      cwd,
+      env: gitEnv(),
+      windowsHide: true,
+      maxBuffer: MAX_BUFFER,
+      timeout: timeoutMs || 0,
+      killSignal: 'SIGKILL',
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+  } catch (err) {
+    throw describeError(err, cwd, args, timeoutMs);
+  }
 }
 
 async function git(cwd, args) {
-  try {
-    const { stdout } = await run('git', [...caseGitConfig(cwd), ...args], { cwd, windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
-    return stdout;
-  } catch (err) {
-    // spawn reports a missing cwd as ENOENT too; only a present cwd means git is missing.
-    if (err.code === 'ENOENT' && fs.existsSync(cwd)) throw new GitUnavailableError();
-    throw err;
-  }
+  return runGit(cwd, args, { hooksDir: caseHooksDir(cwd), timeoutMs: 0 });
 }
 
 function samePath(a, b) {
@@ -142,6 +239,22 @@ async function isGitAvailable() {
   }
 }
 
+// Vendored playbooks are hashed byte for byte (R31): git must never rewrite
+// their line endings. Returns true when the file was written.
+function ensureGitattributes(dir) {
+  const file = path.join(dir, '.gitattributes');
+  let text = '';
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+  }
+  if (text.split(/\r?\n/).some((line) => line.trim() === GITATTRIBUTES_LINE)) return false;
+  const lead = text && !text.endsWith('\n') ? '\n' : '';
+  fs.writeFileSync(file, `${text}${lead}${GITATTRIBUTES_LINE}\n`);
+  return true;
+}
+
 async function initRepo(dir) {
   await git(dir, ['init', '-q']);
   // Local identity so commits work on machines with no global git config.
@@ -149,6 +262,7 @@ async function initRepo(dir) {
   await git(dir, ['config', 'user.email', 'king-louie@localhost']);
   // facts.jsonl must stay byte-identical across platforms.
   await git(dir, ['config', 'core.autocrlf', 'false']);
+  ensureGitattributes(dir);
 }
 
 async function isDirty(dir) {
@@ -163,4 +277,19 @@ async function commitAll(dir, message) {
   return (await git(dir, ['rev-parse', '--short', 'HEAD'])).trim();
 }
 
-module.exports = { git, isGitAvailable, initRepo, isDirty, commitAll, noHooksDir, GitUnavailableError };
+module.exports = {
+  git,
+  runGit,
+  runGitSync,
+  hardenedGitArgs,
+  firstStderrLine,
+  samePath,
+  isGitAvailable,
+  initRepo,
+  ensureGitattributes,
+  GITATTRIBUTES_LINE,
+  isDirty,
+  commitAll,
+  noHooksDir,
+  GitUnavailableError
+};
