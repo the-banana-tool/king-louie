@@ -39,69 +39,77 @@ class FrameError extends Error {
 
 // push(chunk) as bytes arrive, end() at end of stream. `limit(length)` is
 // asked about each frame's declared length before its body is kept: it
-// returns null to accept, or a value that is passed to onError. onFrame gets
-// a null-prototype header and the payload (a Buffer the reader never reuses).
-// After the first error the reader drops everything.
+// returns null to accept, or a value that is passed to onError. An accepted
+// frame gets one Buffer of exactly its declared size, and every chunk is
+// copied into it and dropped, so a frame dripped one byte per write costs its
+// own size, not a chunk object per byte. onFrame gets a null-prototype header
+// and the payload (a view of that Buffer, never reused). After the first
+// error the reader drops everything.
 class FrameReader {
   constructor({ limit, onFrame, onError, headerMax = HEADER_MAX_BYTES }) {
     this.limit = limit;
     this.onFrame = onFrame;
     this.onError = onError;
     this.headerMax = headerMax;
-    this.chunks = [];
-    this.have = 0;
-    this.need = null;
+    this.prefix = Buffer.alloc(4);
+    this.prefixFilled = 0;
+    this.body = null;
+    this.filled = 0;
     this.dead = false;
   }
 
   fail(reason) {
     if (this.dead) return;
     this.dead = true;
-    this.chunks = [];
-    this.have = 0;
+    this.body = null;
     this.onError(reason);
   }
 
-  take(n) {
-    const all = this.chunks.length === 1 ? this.chunks[0] : Buffer.concat(this.chunks, this.have);
-    const rest = all.subarray(n);
-    this.chunks = rest.length ? [rest] : [];
-    this.have = rest.length;
-    return all.subarray(0, n);
-  }
-
   push(chunk) {
-    if (this.dead) return;
-    this.chunks.push(chunk);
-    this.have += chunk.length;
-    while (!this.dead) {
-      if (this.need === null) {
-        if (this.have < 4) return;
-        const length = this.take(4).readUInt32BE(0);
+    let at = 0;
+    while (!this.dead && at < chunk.length) {
+      if (this.body === null) {
+        const n = Math.min(4 - this.prefixFilled, chunk.length - at);
+        chunk.copy(this.prefix, this.prefixFilled, at, at + n);
+        this.prefixFilled += n;
+        at += n;
+        if (this.prefixFilled < 4) return;
+        this.prefixFilled = 0;
+        const length = this.prefix.readUInt32BE(0);
         if (length < 4) return this.fail(new FrameError('frame shorter than its header length'));
         const verdict = this.limit(length);
         if (verdict != null) return this.fail(verdict);
-        this.need = length;
+        this.body = Buffer.alloc(length);
+        this.filled = 0;
       }
-      if (this.have < this.need) return;
-      const body = Buffer.from(this.take(this.need));
-      this.need = null;
-      const headerLength = body.readUInt32BE(0);
-      if (headerLength > this.headerMax || headerLength > body.length - 4) return this.fail(new FrameError('bad header length'));
-      let header;
-      try {
-        header = JSON.parse(body.subarray(4, 4 + headerLength).toString('utf8'));
-      } catch {
-        return this.fail(new FrameError('header is not JSON'));
+      const n = Math.min(this.body.length - this.filled, chunk.length - at);
+      chunk.copy(this.body, this.filled, at, at + n);
+      this.filled += n;
+      at += n;
+      if (this.filled === this.body.length) {
+        const body = this.body;
+        this.body = null;
+        this.frame(body);
       }
-      if (!header || typeof header !== 'object' || Array.isArray(header)) return this.fail(new FrameError('header is not an object'));
-      this.onFrame(Object.assign(Object.create(null), header), body.subarray(4 + headerLength));
     }
+  }
+
+  frame(body) {
+    const headerLength = body.readUInt32BE(0);
+    if (headerLength > this.headerMax || headerLength > body.length - 4) return this.fail(new FrameError('bad header length'));
+    let header;
+    try {
+      header = JSON.parse(body.subarray(4, 4 + headerLength).toString('utf8'));
+    } catch {
+      return this.fail(new FrameError('header is not JSON'));
+    }
+    if (!header || typeof header !== 'object' || Array.isArray(header)) return this.fail(new FrameError('header is not an object'));
+    return this.onFrame(Object.assign(Object.create(null), header), body.subarray(4 + headerLength));
   }
 
   end() {
     if (this.dead) return;
-    if (this.have > 0 || this.need !== null) this.fail(new FrameError('partial frame at end of stream'));
+    if (this.prefixFilled > 0 || this.body !== null) this.fail(new FrameError('partial frame at end of stream'));
   }
 }
 

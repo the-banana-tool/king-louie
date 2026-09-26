@@ -1,160 +1,183 @@
 // src/cases/ingest/pdf-worker.js
-// The PDF worker (ruling Q1, ruling T3b-frames). pdf-sandbox.js spawns it with
-// ELECTRON_RUN_AS_NODE=1, a heap ceiling and a minimal env. It opens one
-// document with openPdfInProcess (pdf-lib, pdf.js, and the pdf-lib decode
-// guard of ruling T3-patch, which is therefore installed only in this
-// process) and answers one request at a time. Requests arrive as frames on
-// stdin, replies leave as frames on fd 3; stdout is not connected. When the
-// parent goes away, stdin ends and the worker exits.
+// The PDF worker process (ruling Q1, ruling T3b-frames, ruling T3b-orphan).
+// pdf-sandbox.js spawns it with ELECTRON_RUN_AS_NODE=1, a heap ceiling and a
+// minimal env. Requests arrive as frames on stdin, replies leave as frames on
+// fd 3; stdout is not connected.
 //
-// Replies are checked against the same caps the parent enforces, so an
-// honest worker answers an over-cap page with UNREADABLE_PDF and stays up.
+// Parsing runs in a worker_threads Worker (pdf-parse-thread.js) with
+// resourceLimits, so this main thread stays responsive whatever pdf.js does.
+// It exits the whole process when:
+// - stdin ends or closes (the parent closed it or died);
+// - the parent pid changes or the parent is gone (polled; on POSIX an orphan
+//   is re-parented, on Windows the old pid stops existing);
+// - a call outlives its own deadline (the parent's timeout plus a margin,
+//   sent with each request), in case the parent could not kill it;
+// - the parsing thread dies (a heap blow-up, an uncaught error).
 //
-// Test hooks (spin, allocate, forged frames) exist only when the parent set
-// KL_PDF_WORKER_TEST_HOOKS=1, which it does only for an explicit
-// testHooks: true. They are requests from the parent, never read from a
-// document.
+// Test hooks exist only when the parent set KL_PDF_WORKER_TEST_HOOKS=1, which
+// it does only for an explicit testHooks: true. They are requests from the
+// parent, never read from a document. Hooks that forge frames run here; the
+// ones that block or exhaust the parser run on the parsing thread.
+const fs = require('node:fs');
 const net = require('node:net');
-const { openPdfInProcess } = require('./pdf');
+const path = require('node:path');
 const { encodeFrame, FrameReader, LIMITS } = require('./pdf-frames');
-const { IngestError } = require('./errors');
 
-const HOOKS = process.env.KL_PDF_WORKER_TEST_HOOKS === '1';
+const THREAD_PATH = path.join(__dirname, 'pdf-parse-thread.js');
 // The document (at most 256 MB, checked by the parent) plus its header.
 const REQUEST_MAX_BYTES = 256 * 1024 * 1024 + 4096;
+const DEFAULT_DEADLINE_MS = 60000;
+const MAX_DEADLINE_MS = 10 * 60000;
+const THREAD_HOOKS = new Set(['spin', 'alloc']);
 
-const out = new net.Socket({ fd: 3, readable: false, writable: true });
-out.on('error', () => process.exit(1));
-
-const send = (header, payload) => {
-  for (const part of encodeFrame(header, payload)) out.write(part);
-};
-
-let pdf = null;
-let name = 'document.pdf';
-const tooLarge = () => new IngestError('UNREADABLE_PDF', `Cannot read ${name}: a page is too large to read.`);
-
-function capped(bytes, max) {
-  if (bytes.length > max) throw tooLarge();
-  return bytes;
+// The heap ceiling the parent gave this process; the parsing thread gets the
+// same one through resourceLimits.
+function heapMbFromArgv(execArgv) {
+  for (const arg of execArgv) {
+    const m = /^--max-old-space-size=(\d+)$/.exec(arg);
+    if (m) return Number(m[1]);
+  }
+  return null;
 }
 
-function runHook(id, hook) {
-  const text = (s) => send({ id, ok: true }, Buffer.from(s, 'utf8'));
+function parentAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === 'EPERM';
+  }
+}
+
+function frameHook(id, hook, write) {
+  const prefixed = (length, headerLength, rest) => {
+    const prefix = Buffer.alloc(8);
+    prefix.writeUInt32BE(length, 0);
+    prefix.writeUInt32BE(headerLength, 4);
+    return Buffer.concat([prefix, rest]);
+  };
+  const send = (header, payload) => { for (const part of encodeFrame(header, payload)) write(part); };
   switch (hook) {
     case 'env':
-      return text(JSON.stringify(Object.keys(process.env)));
-    case 'spin':
-      for (;;) { /* never answers */ }
-    case 'alloc': {
-      const hog = [];
-      for (;;) hog.push(new Array(1e5).fill(hog.length));
-    }
+      return send({ id, ok: true }, Buffer.from(JSON.stringify(Object.keys(process.env)), 'utf8'));
     case 'exit':
       return process.exit(7);
-    case 'oversize': {
+    case 'oversize':
       // Declares a reply just over the cap, sends 1 KB of it, and stalls:
       // only a check of the declared length ends the call before the timeout.
-      const prefix = Buffer.alloc(8);
-      prefix.writeUInt32BE(LIMITS.pageTextBytes + 8192, 0);
-      prefix.writeUInt32BE(2, 4);
-      out.write(Buffer.concat([prefix, Buffer.from('{}'), Buffer.alloc(1024)]));
+      write(prefixed(LIMITS.pageTextBytes + 8192, 2, Buffer.concat([Buffer.from('{}'), Buffer.alloc(1024)])));
       return setInterval(() => {}, 1000);
-    }
     case 'oversize-payload':
       return send({ id, ok: true }, Buffer.alloc(LIMITS.pageTextBytes + 1, 0x61));
-    case 'bad-json': {
-      const junk = Buffer.from('{not json', 'utf8');
-      const prefix = Buffer.alloc(8);
-      prefix.writeUInt32BE(4 + junk.length, 0);
-      prefix.writeUInt32BE(junk.length, 4);
-      return out.write(Buffer.concat([prefix, junk]));
-    }
+    case 'bad-json':
+      return write(prefixed(4 + 9, 9, Buffer.from('{not json', 'utf8')));
     case 'bad-shape':
       return send({ id, ok: 'yes' });
     case 'bad-id':
       return send({ id: id + 1, ok: true });
     case 'bad-code':
       return send({ id, ok: false, code: 'EVERYTHING_FINE', message: 'x' });
-    case 'bad-header-length': {
-      const prefix = Buffer.alloc(8);
-      prefix.writeUInt32BE(4 + 10, 0);
-      prefix.writeUInt32BE(1000, 4);
-      return out.write(Buffer.concat([prefix, Buffer.alloc(10)]));
-    }
+    case 'bad-header-length':
+      return write(prefixed(4 + 10, 1000, Buffer.alloc(10)));
     case 'unasked':
       send({ id, ok: true }, Buffer.from('first', 'utf8'));
       return send({ id, ok: true }, Buffer.from('second', 'utf8'));
-    case 'partial': {
-      const prefix = Buffer.alloc(8);
-      prefix.writeUInt32BE(100, 0);
-      prefix.writeUInt32BE(2, 4);
-      out.end(Buffer.concat([prefix, Buffer.from('{}')]));
+    case 'partial':
+      write(prefixed(100, 2, Buffer.from('{}')), true);
       return setInterval(() => {}, 1000);
+    case 'drip': {
+      // A legal 1 MB reply, written one byte per write.
+      const frame = Buffer.concat(encodeFrame({ id, ok: true }, Buffer.alloc(1024 * 1024, 0x61)));
+      for (let i = 0; i < frame.length; i += 1) fs.writeSync(3, frame, i, 1);
+      return undefined;
     }
     case 'forge': {
       // Declares ~4 GB, then streams 512 MB of body.
       const prefix = Buffer.alloc(4);
       prefix.writeUInt32BE(0xfffffff0, 0);
-      out.write(prefix);
+      write(prefix);
       const chunk = Buffer.alloc(1024 * 1024, 0x61);
-      let sent = 0;
-      const pump = () => {
-        while (sent < 512) {
-          sent += 1;
-          if (!out.write(chunk)) return out.once('drain', pump);
-        }
-        return undefined;
-      };
-      return pump();
+      for (let i = 0; i < 512; i += 1) write(chunk);
+      return undefined;
     }
     default:
-      throw new IngestError('UNREADABLE_PDF', 'unknown hook');
+      return send({ id, ok: false, code: 'UNREADABLE_PDF', message: 'unknown hook' });
   }
 }
 
-async function handle(h, payload) {
-  const { id } = h;
-  try {
-    if (h.op === 'open') {
-      if (pdf) throw new IngestError('UNREADABLE_PDF', 'already open');
-      if (typeof h.name === 'string') name = h.name;
-      if (HOOKS && h.hook) runHook(id, h.hook);
-      pdf = await openPdfInProcess(payload, { name, maxStreamBytes: h.maxStreamBytes, maxDocumentBytes: h.maxDocumentBytes });
-      if (pdf.pageCount > LIMITS.pages) throw new IngestError('UNREADABLE_PDF', `Cannot read ${name}: it has too many pages.`);
-      const rotations = Buffer.alloc(pdf.pageCount);
-      for (let n = 1; n <= pdf.pageCount; n += 1) rotations[n - 1] = pdf.pageRotation(n) / 90;
-      return send({ id, ok: true, pageCount: pdf.pageCount }, rotations);
-    }
-    if (h.op === 'hook' && HOOKS) return runHook(id, h.hook);
-    if (!pdf) throw new IngestError('UNREADABLE_PDF', 'not open');
-    if (h.op === 'text') return send({ id, ok: true }, capped(Buffer.from(await pdf.pageText(h.n), 'utf8'), LIMITS.pageTextBytes));
-    if (h.op === 'page') return send({ id, ok: true }, capped(Buffer.from(await pdf.singlePagePdf(h.n)), LIMITS.pagePdfBytes));
-    if (h.op === 'image') {
-      const img = pdf.pageImage(h.n);
-      if (!img) return send({ id, ok: true, image: null });
-      return send({ id, ok: true, image: img.mime }, capped(Buffer.from(img.bytes), LIMITS.pageImageBytes));
-    }
-    throw new IngestError('UNREADABLE_PDF', 'unknown request');
-  } catch (err) {
-    const known = err instanceof IngestError;
-    return send({
-      id,
-      ok: false,
-      code: known ? err.code : 'UNREADABLE_PDF',
-      message: known ? err.message : `Cannot read ${name}: it is not a readable PDF.`
+// Everything is injectable so the exit paths can be tested in-process.
+function runWorker({
+  input,
+  write,
+  exit = (code) => process.exit(code),
+  getPpid = () => process.ppid,
+  isAlive = parentAlive,
+  pollMs = 1000,
+  hooks = false,
+  heapMb = null,
+  createThread = (opts) => new (require('node:worker_threads').Worker)(THREAD_PATH, opts)
+}) {
+  let done = false;
+  let thread = null;
+  const deadlines = new Map();
+  const stop = (code) => {
+    if (done) return;
+    done = true;
+    clearInterval(poll);
+    for (const timer of deadlines.values()) clearTimeout(timer);
+    exit(code);
+  };
+
+  const ppid = getPpid();
+  const poll = setInterval(() => {
+    if (getPpid() !== ppid || !isAlive(ppid)) stop(0);
+  }, pollMs);
+  poll.unref?.();
+  input.on('end', () => stop(0));
+  input.on('close', () => stop(0));
+  input.on('error', () => stop(1));
+
+  const startThread = () => {
+    thread = createThread({
+      workerData: { hooks },
+      ...(heapMb ? { resourceLimits: { maxOldGenerationSizeMb: heapMb } } : {}),
+      stdout: true,
+      stderr: false
     });
-  }
+    thread.on('message', ({ header, payload }) => {
+      clearTimeout(deadlines.get(header?.id));
+      deadlines.delete(header?.id);
+      for (const part of encodeFrame(header, payload)) write(part);
+    });
+    thread.on('error', () => stop(1));
+    thread.on('exit', () => stop(1));
+  };
+
+  const reader = new FrameReader({
+    limit: (length) => (length > REQUEST_MAX_BYTES ? 'request too large' : null),
+    onFrame: (h, payload) => {
+      if (hooks && h.op === 'hook' && !THREAD_HOOKS.has(h.hook)) return frameHook(h.id, h.hook, write);
+      if (!thread) startThread();
+      const ms = Number.isFinite(h.deadlineMs) && h.deadlineMs > 0 ? Math.min(h.deadlineMs, MAX_DEADLINE_MS) : DEFAULT_DEADLINE_MS;
+      deadlines.set(h.id, setTimeout(() => stop(70), ms));
+      return thread.postMessage({ header: { ...h }, payload });
+    },
+    onError: () => stop(1),
+    headerMax: 64 * 1024
+  });
+  input.on('data', (chunk) => reader.push(chunk));
+  return { stop };
 }
 
-// One request at a time, in order.
-let tail = Promise.resolve();
-const reader = new FrameReader({
-  limit: (length) => (length > REQUEST_MAX_BYTES ? 'request too large' : null),
-  onFrame: (h, payload) => { tail = tail.then(() => handle(h, payload)); },
-  onError: () => process.exit(1),
-  headerMax: 64 * 1024
-});
-process.stdin.on('data', (chunk) => reader.push(chunk));
-process.stdin.on('end', () => process.exit(0));
-process.stdin.on('error', () => process.exit(1));
+if (require.main === module) {
+  const out = new net.Socket({ fd: 3, readable: false, writable: true });
+  out.on('error', () => process.exit(1));
+  runWorker({
+    input: process.stdin,
+    write: (buf, end = false) => (end ? out.end(buf) : out.write(buf)),
+    hooks: process.env.KL_PDF_WORKER_TEST_HOOKS === '1',
+    heapMb: heapMbFromArgv(process.execArgv)
+  });
+}
+
+module.exports = { runWorker, heapMbFromArgv };

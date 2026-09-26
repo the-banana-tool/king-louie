@@ -169,7 +169,60 @@ describe('openPdf (isolated)', () => {
       .filter((f) => /openPdfInProcess/.test(fs.readFileSync(f, 'utf8')))
       .map((f) => path.relative(dir, f).split(path.sep).join('/'))
       .sort();
-    assert.deepStrictEqual(users, ['cases/ingest/pdf-worker.js', 'cases/ingest/pdf.js']);
+    assert.deepStrictEqual(users, ['cases/ingest/pdf-parse-thread.js', 'cases/ingest/pdf.js']);
+  });
+});
+
+describe('the worker process on its own (ruling T3b-orphan)', () => {
+  const { encodeFrame } = require('../src/cases/ingest/pdf-frames');
+  const { runWorker } = require('../src/cases/ingest/pdf-worker');
+  const WORKER = path.join(__dirname, '..', 'src', 'cases', 'ingest', 'pdf-worker.js');
+
+  // A worker with hooks on, the document open, and a spinning parser.
+  async function spinningWorker(t, deadlineMs) {
+    const child = childProcess.spawn(process.execPath, [WORKER], {
+      env: { ELECTRON_RUN_AS_NODE: '1', SYSTEMROOT: process.env.SYSTEMROOT || '', KL_PDF_WORKER_TEST_HOOKS: '1' },
+      stdio: ['pipe', 'ignore', 'ignore', 'pipe']
+    });
+    t.after(() => child.kill('SIGKILL'));
+    const exited = new Promise((r) => child.once('exit', () => r(Date.now())));
+    let got = 0;
+    child.stdio[3].on('data', () => { got += 1; });
+    for (const part of encodeFrame({ id: 1, op: 'open', name: 'x.pdf', deadlineMs: 30000 }, await makePdf())) child.stdin.write(part);
+    assert.ok(await waitFor(() => got > 0), 'open answered');
+    for (const part of encodeFrame({ id: 2, op: 'hook', hook: 'spin', deadlineMs })) child.stdin.write(part);
+    await new Promise((r) => setTimeout(r, 200));
+    assert.ok(alive(child.pid), 'still running while the parser spins');
+    return { child, exited };
+  }
+
+  it('exits when stdin closes, even while the parser spins', async (t) => {
+    const { child, exited } = await spinningWorker(t, 60000);
+    const t0 = Date.now();
+    child.stdin.end();
+    const at = await Promise.race([exited, new Promise((r) => setTimeout(() => r(null), 5000))]);
+    assert.ok(at && at - t0 < 5000, 'exited after stdin closed');
+  });
+
+  it('exits on its own deadline when nobody kills it', async (t) => {
+    const { exited } = await spinningWorker(t, 600);
+    const at = await Promise.race([exited, new Promise((r) => setTimeout(() => r(null), 5000))]);
+    assert.ok(at, 'exited on its deadline');
+  });
+
+  it('exits when the parent pid changes or the parent is gone', async () => {
+    const { PassThrough } = require('node:stream');
+    for (const [getPpid, isAlive] of [
+      [(() => { let n = 0; return () => (n++ === 0 ? 4242 : 1); })(), () => true],
+      [() => 4242, () => false]
+    ]) {
+      const codes = [];
+      const input = new PassThrough();
+      const w = runWorker({ input, write: () => {}, exit: (c) => codes.push(c), getPpid, isAlive, pollMs: 10, createThread: () => { throw new Error('no thread expected'); } });
+      assert.ok(await waitFor(() => codes.length === 1), 'exited');
+      w.stop(0);
+      assert.deepStrictEqual(codes, [0]);
+    }
   });
 });
 
@@ -270,6 +323,29 @@ describe('openPdf sandbox limits', () => {
     await pdf.close();
   });
 
+  it('keeps a reply dripped one byte per write to about its own size in memory', async () => {
+    const pdf = await openPdf(await makePdf(), { testHooks: true, timeouts: { call: 60000 } });
+    try {
+      global.gc?.();
+      const base = process.memoryUsage();
+      let peakRss = 0;
+      let peakAb = 0;
+      const sampler = setInterval(() => {
+        const m = process.memoryUsage();
+        peakRss = Math.max(peakRss, m.rss - base.rss);
+        peakAb = Math.max(peakAb, m.arrayBuffers - base.arrayBuffers);
+      }, 5);
+      const t0 = Date.now();
+      const text = await pdf._testHook('drip').finally(() => clearInterval(sampler));
+      assert.strictEqual(text.length, MB);
+      // The frame is 1 MB; chunk overhead used to grow this ~80x.
+      assert.ok(peakAb < 8 * MB, `arrayBuffers peaked ${(peakAb / MB).toFixed(1)} MB over ${Date.now() - t0} ms`);
+      assert.ok(peakRss < 48 * MB, `rss peaked ${(peakRss / MB).toFixed(1)} MB`);
+    } finally {
+      await pdf.close();
+    }
+  });
+
   it('refuses test hooks unless the caller asked for them', async () => {
     const pdf = await openPdf(await makePdf());
     try {
@@ -297,6 +373,60 @@ describe('openPdf sandbox limits', () => {
     assert.strictEqual(replies[0].h.ok, true);
     assert.strictEqual(replies[1].h.ok, false);
     assert.strictEqual(replies[1].h.code, 'UNREADABLE_PDF');
+  });
+
+  it('refuses starts beyond the waiting bound, and copies bytes only once a slot is free', async () => {
+    const a = await openPdf(await makePdf());
+    const b = await openPdf(await makePdf());
+    const queued = [];
+    for (let i = 0; i < sandbox.MAX_WAITING; i += 1) {
+      queued.push(openPdf(await makePdf(), {}).then((d) => d.close(), (err) => err));
+    }
+    const lateBytes = await makePdf();
+    const late = openPdf(lateBytes).then(() => null, (err) => err);
+    const refused = await Promise.race([late, new Promise((r) => setTimeout(() => r('still waiting'), 1000))]);
+    assert.ok(refused instanceof Error && failed(refused), String(refused));
+    // A queued start reads the caller's bytes when its slot comes, not before.
+    await Promise.all([a.close(), b.close()]);
+    const results = await Promise.all(queued);
+    assert.ok(results.every((r) => r === undefined), results.map(String).join());
+    const c = await openPdf(await makePdf());
+    const d = await openPdf(await makePdf());
+    const bytes = await makePdf({ pages: [{ text: 'queued document' }] });
+    const q = openPdf(bytes).then((x) => x, (err) => err);
+    await new Promise((r) => setTimeout(r, 100));
+    bytes.fill(0);
+    await c.close();
+    const qResult = await q;
+    assert.strictEqual(qResult.code, 'UNREADABLE_PDF');
+    await d.close();
+  });
+
+  it('turns a throwing spawn or a child without pipes into PDF_WORKER_FAILED and frees the slot', async () => {
+    const EventEmitter = require('node:events');
+    const throwing = () => { throw Object.assign(new Error('spawn EMFILE'), { code: 'EMFILE' }); };
+    const pipeless = () => {
+      const child = new EventEmitter();
+      Object.assign(child, { pid: undefined, stdin: null, stderr: null, stdio: [null, null, null, null], kill: () => false });
+      process.nextTick(() => child.emit('error', Object.assign(new Error('spawn ENFILE'), { code: 'ENFILE' })));
+      return child;
+    };
+    for (let i = 0; i < 3; i += 1) {
+      await assert.rejects(openPdf(await makePdf(), { spawn: throwing }), failed);
+      await assert.rejects(openPdf(await makePdf(), { spawn: pipeless }), failed);
+    }
+    const a = await openPdf(await makePdf());
+    const b = await openPdf(await makePdf());
+    await Promise.all([a.close(), b.close()]);
+  });
+
+  it('never restarts a document that was idle when the sandbox shut down', async () => {
+    const rec = recorder();
+    const pdf = await openPdf(await makePdf(), { spawn: rec.spawn, timeouts: { idle: 100 } });
+    assert.ok(await waitFor(() => !alive(rec.children[0].child.pid)));
+    await shutdownPdfSandbox();
+    await assert.rejects(pdf.pageText(1), failed);
+    assert.strictEqual(rec.children.length, 1);
   });
 
   it('runs at most two children at once; further opens queue', async () => {

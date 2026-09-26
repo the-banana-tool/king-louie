@@ -15,7 +15,12 @@
 //   which the document fails every call without respawning;
 // - killed after an idle period (a later call starts a fresh worker from the
 //   bytes kept here), at close(), and by shutdownPdfSandbox();
-// - at most MAX_CHILDREN at once; further starts queue.
+// - at most MAX_CHILDREN at once; up to MAX_WAITING further starts queue
+//   (holding the caller's bytes, copied only once a slot is free), and
+//   starts beyond that are refused;
+// - each request carries the worker's own deadline (the timeout plus a
+//   margin): the worker parses on a separate thread and ends itself on that
+//   deadline, on stdin closing, or when this process is gone (T3b-orphan).
 // stderr is captured (capped) for the log only; callers get a code and a
 // sentence, never worker output. This module never loads pdf-lib or unpdf.
 const childProcess = require('node:child_process');
@@ -29,6 +34,11 @@ const log = createLogger('cases/ingest/pdf-sandbox');
 const MB = 1024 * 1024;
 const WORKER_PATH = path.join(__dirname, 'pdf-worker.js');
 const MAX_CHILDREN = 2;
+// Starts waiting for a slot beyond this are refused, not queued.
+const MAX_WAITING = 8;
+// The worker's own per-call deadline is the parent's timeout plus this, so
+// it ends itself if the parent could not kill it (ruling T3b-orphan).
+const DEADLINE_MARGIN_MS = 2000;
 const DEFAULT_MEMORY_MB = 512;
 const DEFAULT_TIMEOUTS = Object.freeze({ open: 30000, call: 20000, idle: 60000 });
 // The largest document sent to a worker; callers may only lower it.
@@ -56,15 +66,21 @@ const overCap = (name) => new IngestError('UNREADABLE_PDF', `Cannot read ${name}
 
 let slotsUsed = 0;
 const waiting = [];
+// Bumped by shutdownPdfSandbox: a document from an earlier epoch never
+// starts a worker again.
+let epoch = 0;
 // Documents with a worker, and every worker not yet exited (a killed worker
 // stays here until its 'exit').
 const documents = new Set();
 const children = new Set();
 
-function acquireSlot() {
+function acquireSlot(name) {
   if (slotsUsed < MAX_CHILDREN) {
     slotsUsed += 1;
     return Promise.resolve();
+  }
+  if (waiting.length >= MAX_WAITING) {
+    return Promise.reject(new IngestError('PDF_WORKER_FAILED', `Cannot read ${name}: too many PDFs are waiting to be read; try again shortly.`));
   }
   return new Promise((resolve, reject) => waiting.push({ resolve, reject }));
 }
@@ -99,7 +115,10 @@ const onlyKeys = (h, keys) => Object.keys(h).every((k) => keys.includes(k));
 
 class IsolatedPdf {
   constructor(bytes, opts) {
-    this.bytes = bytes;
+    // The caller's bytes until a slot is acquired; then this document's copy.
+    this.source = bytes;
+    this.bytes = null;
+    this.epoch = epoch;
     this.name = opts.name;
     this.opts = opts;
     this.state = 'idle'; // idle (no worker) | live | failed | closed
@@ -121,6 +140,7 @@ class IsolatedPdf {
   }
 
   async call(op, fields) {
+    if (this.epoch !== epoch) this.fail(workerFailed(this.name), 'the sandbox was shut down');
     if (this.state === 'failed' || this.state === 'closed') throw workerFailed(this.name);
     this.clearIdle();
     try {
@@ -133,10 +153,14 @@ class IsolatedPdf {
   }
 
   async start() {
-    await acquireSlot();
-    if (this.state !== 'idle') {
+    await acquireSlot(this.name);
+    if (this.state !== 'idle' || this.epoch !== epoch) {
       releaseSlot();
       throw workerFailed(this.name);
+    }
+    if (!this.bytes) {
+      this.bytes = Buffer.from(this.source);
+      this.source = null;
     }
     this.spawn();
     const { opts } = this;
@@ -154,13 +178,22 @@ class IsolatedPdf {
     this.rotations = reply.rotations;
   }
 
+  // Holds a slot on entry; releases it on every failure path (a throwing
+  // spawn here, or the child's 'exit' / pid-less 'error' later).
   spawn() {
     const { opts } = this;
-    const child = opts.spawn(process.execPath, [`--max-old-space-size=${opts.memoryMb}`, WORKER_PATH], {
-      env: childEnv(opts.testHooks),
-      stdio: ['pipe', 'ignore', 'pipe', 'pipe'],
-      windowsHide: true
-    });
+    let child;
+    try {
+      child = opts.spawn(process.execPath, [`--max-old-space-size=${opts.memoryMb}`, WORKER_PATH], {
+        env: childEnv(opts.testHooks),
+        stdio: ['pipe', 'ignore', 'pipe', 'pipe'],
+        windowsHide: true
+      });
+    } catch (err) {
+      releaseSlot();
+      this.fail(workerFailed(this.name), `spawn threw: ${err.message}`);
+      throw workerFailed(this.name);
+    }
     this.child = child;
     this.state = 'live';
     documents.add(this);
@@ -192,6 +225,11 @@ class IsolatedPdf {
       });
     });
     this.exiting = child.klExited;
+    // EMFILE/ENFILE: the child object comes back without its pipes.
+    if (!child.stdin || !child.stderr || !child.stdio?.[3]) {
+      this.fail(workerFailed(this.name), 'the worker has no pipes');
+      throw workerFailed(this.name);
+    }
     child.stderr.on('data', (chunk) => {
       if (child.klStderr.length < STDERR_MAX_BYTES) child.klStderr += chunk.toString('utf8').slice(0, STDERR_MAX_BYTES - child.klStderr.length);
     });
@@ -224,7 +262,8 @@ class IsolatedPdf {
       const timer = setTimeout(() => this.fail(timedOut(this.name), `${op} timed out after ${timeoutMs} ms`), timeoutMs);
       this.inflight = { id, kind, n: fields.n, resolve, reject, timer };
       try {
-        for (const part of encodeFrame({ id, op, ...fields }, payload)) this.child.stdin.write(part);
+        const header = { id, op, ...fields, deadlineMs: timeoutMs + DEADLINE_MARGIN_MS };
+        for (const part of encodeFrame(header, payload)) this.child.stdin.write(part);
       } catch (err) {
         this.fail(workerFailed(this.name), `write failed: ${err.message}`);
       }
@@ -282,6 +321,7 @@ class IsolatedPdf {
     log.warn('PDF worker failed', { code: err.code, why: String(why).slice(0, 200), pid: this.child?.pid });
     if (this.inflight) this.settle((f) => f.reject(err));
     this.bytes = null;
+    this.source = null;
     this.clearIdle();
     this.kill(this.child);
   }
@@ -302,7 +342,7 @@ class IsolatedPdf {
       documents.delete(this);
     }
     child.klExpected = true;
-    child.stdio[3]?.destroy();
+    child.stdio?.[3]?.destroy();
     try {
       child.kill('SIGKILL');
     } catch (err) {
@@ -332,6 +372,7 @@ class IsolatedPdf {
       this.clearIdle();
       if (this.inflight) this.settle((f) => f.reject(workerFailed(this.name)));
       this.bytes = null;
+      this.source = null;
       this.kill(this.child);
     }
     await this.exiting;
@@ -370,7 +411,7 @@ async function openPdfIsolated(bytes, {
   if (!(bytes instanceof Uint8Array)) throw unreadable(name);
   const limit = Number.isSafeInteger(maxBytes) && maxBytes > 0 ? Math.min(maxBytes, MAX_INPUT_BYTES) : MAX_INPUT_BYTES;
   if (bytes.length > limit) throw new IngestError('UNREADABLE_PDF', `Cannot read ${name}: the file is too large.`);
-  const pdf = new IsolatedPdf(Buffer.from(bytes), {
+  const pdf = new IsolatedPdf(bytes, {
     name,
     maxStreamBytes,
     maxDocumentBytes,
@@ -394,8 +435,10 @@ async function openPdfIsolated(bytes, {
 }
 
 // Kills every worker and fails every queued start. Awaited by create-core's
-// shutdown (Tasks 8/11). Later opens work again.
+// shutdown (Tasks 8/11). Documents opened before it fail every later call,
+// idle ones included (they never start a worker again); later opens work.
 async function shutdownPdfSandbox() {
+  epoch += 1;
   for (const w of waiting.splice(0)) w.reject(new IngestError('PDF_WORKER_FAILED', 'The PDF reader is shutting down.'));
   await Promise.all([...documents].map((d) => d.close()));
   for (const child of children) {
@@ -412,6 +455,7 @@ module.exports = {
   shutdownPdfSandbox,
   LIMITS,
   MAX_CHILDREN,
+  MAX_WAITING,
   DEFAULT_MEMORY_MB,
   DEFAULT_TIMEOUTS,
   MAX_INPUT_BYTES

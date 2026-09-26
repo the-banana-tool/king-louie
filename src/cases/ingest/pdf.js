@@ -21,11 +21,12 @@
 //
 // Only the PDF worker parses (ruling Q1, ruling T3b-frames): `openPdf` is
 // the sandboxed version from pdf-sandbox.js, and `openPdfInProcess` is the
-// parser itself, for pdf-worker.js and for tests. pdf-lib, unpdf and the
-// process-wide pdf-lib decode guard (ruling T3-patch) are loaded on the
-// first openPdfInProcess call, never when this module is required, so a
-// process that only requires it (the desktop main process, the service)
-// never loads a parser or carries the guard.
+// parser itself, for the worker's parsing thread (pdf-parse-thread.js) and
+// for tests. pdf-lib, unpdf and the process-wide pdf-lib decode guard
+// (ruling T3-patch) are loaded on the first openPdfInProcess call, never
+// when this module is required, so a process that only requires it (the
+// desktop main process, the service) never loads a parser or carries the
+// guard.
 const zlib = require('node:zlib');
 const { AsyncLocalStorage } = require('node:async_hooks');
 const { IngestError } = require('./errors');
@@ -377,7 +378,7 @@ function singleJpeg(doc, page) {
   return { mime: 'image/jpeg', bytes: Buffer.from(images[0].contents) };
 }
 
-// In-process parsing: for pdf-worker.js and tests only. Everything else calls
+// In-process parsing: for pdf-parse-thread.js and tests only. Everything else calls
 // openPdf, which runs this in the worker.
 async function openPdfInProcess(bytes, { name = 'document.pdf', maxStreamBytes, maxDocumentBytes } = {}) {
   if (!(bytes instanceof Uint8Array)) throw unreadable(name);
