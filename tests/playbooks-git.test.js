@@ -16,7 +16,8 @@ const { CaseStore } = require('../src/cases/case-store');
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
 const tmp = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-pbgit-')); dirs.push(d); return d; };
-const ID = ['-c', 'user.name=Test', '-c', 'user.email=test@example.com'];
+// Commit identity goes through env: callers may not pass leading -c flags.
+const ID_ENV = { GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.com', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.com' };
 
 describe('hardenedGitArgs', () => {
   it('puts every hardening flag before the arguments', () => {
@@ -46,7 +47,7 @@ describe('runGit and runGitSync', () => {
     fs.writeFileSync(path.join(dir, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
     fs.writeFileSync(path.join(dir, 'a.md'), 'one\n');
     await git.runGit(dir, ['add', '-A']);
-    await git.runGit(dir, [...ID, 'commit', '-q', '-m', 'first']);
+    await git.runGit(dir, ['commit', '-q', '-m', 'first'], { env: ID_ENV });
     assert.strictEqual((await git.runGit(dir, ['rev-list', '--count', 'HEAD'])).trim(), '1');
     assert.strictEqual(fs.existsSync(path.join(dir, '.kl')), false);
   });
@@ -81,7 +82,8 @@ describe('runGit and runGitSync', () => {
     process.env.GIT_DIR = path.join(other, '.git');
     process.env.GIT_EDITOR = 'kl-planted-editor';
     try {
-      const out = await git.runGit(dir, ['-c', 'alias.e=!env', 'e'], { env: { GIT_TERMINAL_PROMPT: '1', GIT_ALLOW_PROTOCOL: 'ext' } });
+      await git.runGit(dir, ['config', 'alias.e', '!env']);
+      const out = await git.runGit(dir, ['e'], { env: { GIT_TERMINAL_PROMPT: '1', GIT_ALLOW_PROTOCOL: 'ext' } });
       assert.ok(!out.includes(path.basename(other)), 'GIT_DIR from the environment does not reach git');
       assert.ok(!out.includes('kl-planted-editor'), 'GIT_EDITOR from the environment does not reach git');
       assert.match(out, /^GIT_TERMINAL_PROMPT=0$/m);
@@ -97,8 +99,14 @@ describe('runGit and runGitSync', () => {
     await git.runGit(dir, ['init', '-q']);
     const marker = path.join(dir, 'ext-ran');
     const url = `ext::sh -c touch% ${marker.replace(/\\/g, '/')}`;
-    // A later -c flag overrides protocol.allow=never; only GIT_ALLOW_PROTOCOL stops it.
-    await assert.rejects(git.runGit(dir, ['-c', 'protocol.ext.allow=always', 'ls-remote', url]), (err) => err.code === 'GIT_FAILED');
+    // A global protocol.ext.allow=always is more specific than the
+    // -c protocol.allow=never flag; only GIT_ALLOW_PROTOCOL stops it.
+    const home = tmp();
+    fs.writeFileSync(path.join(home, '.gitconfig'), '[protocol "ext"]\n\tallow = always\n');
+    await assert.rejects(git.runGit(dir, ['ls-remote', url], { env: { HOME: home, USERPROFILE: home } }), (err) => err.code === 'GIT_FAILED');
+    // A caller's -c or GIT_CONFIG_* env: refused before git runs.
+    await assert.rejects(git.runGit(dir, ['-c', 'protocol.ext.allow=always', 'ls-remote', url]), (err) => err.code === 'GIT_BAD_ARGS');
+    await assert.rejects(git.runGit(dir, ['ls-remote', url], { env: { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'protocol.ext.allow', GIT_CONFIG_VALUE_0: 'always' } }), (err) => err.code === 'GIT_BAD_ARGS');
     // Config injected through inherited GIT_CONFIG_* variables.
     const saved = { ...process.env };
     Object.assign(process.env, { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'protocol.ext.allow', GIT_CONFIG_VALUE_0: 'always' });
@@ -154,6 +162,61 @@ describe('runGit and runGitSync', () => {
     assert.strictEqual(fs.existsSync(marker), false, 'the external diff never ran');
   });
 
+  it('refuses a leading global option and config-bearing caller env (GIT_BAD_ARGS)', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    // An unsafe repo that a leading -C/--git-dir/--work-tree would otherwise reach
+    // past the config check, run from a clean cwd.
+    const unsafe = tmp();
+    await git.runGit(unsafe, ['init', '-q']);
+    const marker = path.join(unsafe, 'bypass-ran');
+    await git.runGit(unsafe, ['config', 'filter.evil.clean', `touch "${marker.replace(/\\/g, '/')}"; cat`]);
+    fs.writeFileSync(path.join(unsafe, '.gitattributes'), '* filter=evil\n');
+    fs.writeFileSync(path.join(unsafe, 'a.txt'), 'one\n');
+    const cwd = tmp();
+    const leading = [
+      ['-C', unsafe, 'add', '-A'],
+      ['-c', 'core.hooksPath=.git/hooks', 'status'],
+      [`--git-dir=${path.join(unsafe, '.git')}`, `--work-tree=${unsafe}`, 'add', '-A'],
+      ['--git-dir', path.join(unsafe, '.git'), 'status'],
+      [`--work-tree=${unsafe}`, 'status'],
+      ['--namespace=x', 'status'],
+      ['--config-env=core.hooksPath=HOME', 'status'],
+      ['--exec-path=/tmp', 'status'],
+      ['--bare', 'status']
+    ];
+    for (const args of leading) {
+      await assert.rejects(git.runGit(cwd, args), (err) => err.code === 'GIT_BAD_ARGS', args[0]);
+      assert.throws(() => git.runGitSync(cwd, args), (err) => err.code === 'GIT_BAD_ARGS', args[0]);
+    }
+    await assert.rejects(git.runGit(cwd, []), (err) => err.code === 'GIT_BAD_ARGS');
+    for (const key of ['GIT_CONFIG_COUNT', 'GIT_CONFIG_PARAMETERS', 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_ASKPASS', 'git_dir']) {
+      await assert.rejects(git.runGit(cwd, ['status'], { env: { [key]: 'x' } }), (err) => err.code === 'GIT_BAD_ARGS', key);
+    }
+    assert.strictEqual(fs.existsSync(marker), false, 'the filter in the other repo never ran');
+    // An option after the subcommand is the caller's business.
+    await git.runGit(cwd, ['init', '-q', '--initial-branch=main']);
+  });
+
+  it('refuses unsafe config in config.worktree when extensions.worktreeConfig is on', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const dir = tmp();
+    await git.initRepo(dir);
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+    await git.commitAll(dir, 'first');
+    await git.git(dir, ['config', 'extensions.worktreeConfig', 'true']);
+    const marker = path.join(dir, 'worktree-diff-ran');
+    await git.git(dir, ['config', '--worktree', 'diff.external', `sh -c 'touch "${marker.replace(/\\/g, '/')}"' kl`]);
+    assert.ok(fs.existsSync(path.join(dir, '.git', 'config.worktree')));
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'two\n');
+    await assert.rejects(git.git(dir, ['diff']), (err) => {
+      assert.strictEqual(err.code, 'GIT_UNSAFE_CONFIG');
+      assert.match(err.message, /diff\.external/);
+      return true;
+    });
+    assert.throws(() => git.runGitSync(dir, ['diff']), (err) => err.code === 'GIT_UNSAFE_CONFIG');
+    assert.strictEqual(fs.existsSync(marker), false, 'the external diff never ran');
+  });
+
   it('names a timeout', async (t) => {
     if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
     // hash-object --stdin waits for input that never comes.
@@ -167,7 +230,10 @@ describe('runGit and runGitSync', () => {
   it('names a timeout in runGitSync', { timeout: 20000 }, async (t) => {
     if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
     // A shell alias that outlives the timeout (runGitSync gives git no stdin).
-    assert.throws(() => git.runGitSync(tmp(), ['-c', 'alias.z=!sleep 5', 'z'], { timeoutMs: 300 }), (err) => {
+    const dir = tmp();
+    await git.runGit(dir, ['init', '-q']);
+    await git.runGit(dir, ['config', 'alias.z', '!sleep 5']);
+    assert.throws(() => git.runGitSync(dir, ['z'], { timeoutMs: 300 }), (err) => {
       assert.strictEqual(err.code, 'GIT_TIMEOUT');
       assert.match(err.message, /git z timed out after 300 ms/);
       return true;

@@ -171,14 +171,10 @@ function firstStderrLine(err) {
   return stripUserinfo(text.split(/\r?\n/).map((l) => l.trim()).find(Boolean) || '');
 }
 
-// The git subcommand in `args`, skipping global options (`-c k=v`, `-C dir`).
+// The git subcommand: the first argument (checkCallerInput refuses a
+// leading option).
 function subcommandOf(args) {
-  for (let i = 0; i < args.length; i++) {
-    const a = String(args[i]);
-    if (a === '-c' || a === '-C') { i++; continue; }
-    if (!a.startsWith('-')) return a;
-  }
-  return 'git';
+  return String((args && args[0]) || 'git');
 }
 
 function codedError(message, code, props = {}) {
@@ -211,44 +207,52 @@ function describeError(err, cwd, args, timeoutMs) {
 // it: filter/diff/merge drivers, an external diff, credential helpers, URL
 // rewrites, transport switches, and the pager/editor/askpass/proxy/ssh
 // commands. A case repo (an imported one included) or a fetched package may
-// carry any of these in .git/config, so git is not run in such a repo.
+// carry any of these in .git/config, or in config.worktree when the repo sets
+// extensions.worktreeConfig, so git is not run in such a repo.
 const UNSAFE_CONFIG_RE = '^(filter|diff|merge)\\..+\\.(clean|smudge|process|command|textconv|driver)$|^diff\\.external$|^credential\\.|^url\\.|^protocol\\.|^core\\.(pager|editor|askpass|gitproxy|sshcommand)$';
-const CONFIG_QUERY = ['config', '--local', '--includes', '--name-only', '--get-regexp', UNSAFE_CONFIG_RE];
+const unsafeQuery = (scope) => ['config', scope, '--includes', '--name-only', '--get-regexp', UNSAFE_CONFIG_RE];
+const WORKTREE_FLAG_QUERY = ['config', '--local', '--type=bool', '--get', 'extensions.worktreeConfig'];
 // C locale so "not a repository" is recognisable whatever the owner's language.
 const QUERY_ENV = { LC_ALL: 'C', LANGUAGE: 'C' };
 const NOT_A_REPO_RE = /only be used inside a git repository|not a git repository/i;
 
 // .git/config path → the exact text last found clean. A repo whose config
-// has an include is checked every time (an included file can change
-// without this one changing).
+// has an include or mentions worktreeConfig is checked every time (an
+// included file or config.worktree can change without this one changing).
 const cleanConfigs = new Map();
 
 function configCacheEntry(cwd) {
   const file = path.join(path.resolve(cwd), '.git', 'config');
   let text;
   try { text = fs.readFileSync(file, 'utf8'); } catch { return null; }
-  if (/^\s*\[\s*include/im.test(text)) return null;
+  if (/^\s*\[\s*include/im.test(text) || /worktreeconfig/i.test(text)) return null;
   return { file, text };
 }
 
 function unsafeConfigError(cwd, stdout) {
-  const keys = String(stdout).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  const list = [...new Set(keys)].join(', ');
-  const message = `Refusing to run git in ${cwd}: its repository config sets ${list}, which can run a program or redirect git. Remove ${keys.length === 1 ? 'that key' : 'those keys'} from the repository's .git/config to continue.`;
+  const keys = [...new Set(String(stdout).split(/\r?\n/).map((l) => l.trim()).filter(Boolean))];
+  const message = `Refusing to run git in ${cwd}: its repository config sets ${keys.join(', ')}, which can run a program or redirect git. Remove ${keys.length === 1 ? 'that key' : 'those keys'} from the repository's .git/config (or config.worktree) to continue.`;
   return codedError(message, 'GIT_UNSAFE_CONFIG', { keys, firstLine: message });
 }
 
-// Exit 0 = something matched (refuse), exit 1 = nothing matched (clean),
-// "not inside a repository" = nothing to check (git init, a bare temp dir).
-function settleConfigQuery(cwd, entry, err, stdout) {
+function exitOf(err) {
+  return typeof err.code === 'number' ? err.code : err.status;
+}
+
+// An unsafe-key query: exit 0 = something matched (refuse), exit 1 = nothing
+// matched ('clean'), "not inside a repository" = nothing to check
+// ('no-repo': git init, a bare temp dir).
+function settleUnsafeQuery(cwd, { err, stdout }, args) {
   if (!err) throw unsafeConfigError(cwd, stdout);
-  const exit = typeof err.code === 'number' ? err.code : err.status;
-  if (exit === 1) {
-    if (entry) cleanConfigs.set(entry.file, entry.text);
-    return;
-  }
-  if (err.code !== 'ENOENT' && NOT_A_REPO_RE.test(String(err.stderr || ''))) return;
-  throw describeError(err, cwd, CONFIG_QUERY, 0);
+  if (exitOf(err) === 1) return 'clean';
+  if (err.code !== 'ENOENT' && NOT_A_REPO_RE.test(String(err.stderr || ''))) return 'no-repo';
+  throw describeError(err, cwd, args, 0);
+}
+
+function settleWorktreeFlag(cwd, { err, stdout }) {
+  if (!err) return String(stdout).trim() === 'true';
+  if (exitOf(err) === 1) return false;
+  throw describeError(err, cwd, WORKTREE_FLAG_QUERY, 0);
 }
 
 function needsConfigCheck(cwd) {
@@ -261,32 +265,58 @@ function needsConfigCheck(cwd) {
 async function checkRepoConfig(cwd, hooksDir) {
   const { skip, entry } = needsConfigCheck(cwd);
   if (skip) return;
-  let stdout = '';
-  let failure = null;
-  try {
-    ({ stdout } = await run('git', hardenedGitArgs(CONFIG_QUERY, { hooksDir }), {
-      cwd, env: gitEnv(QUERY_ENV), windowsHide: true, maxBuffer: MAX_BUFFER
-    }));
-  } catch (err) {
-    failure = err;
+  const query = (args) => run('git', hardenedGitArgs(args, { hooksDir }), {
+    cwd, env: gitEnv(QUERY_ENV), windowsHide: true, maxBuffer: MAX_BUFFER
+  }).then(({ stdout }) => ({ err: null, stdout }), (err) => ({ err, stdout: '' }));
+  if (settleUnsafeQuery(cwd, await query(unsafeQuery('--local')), unsafeQuery('--local')) === 'no-repo') return;
+  if (settleWorktreeFlag(cwd, await query(WORKTREE_FLAG_QUERY))) {
+    settleUnsafeQuery(cwd, await query(unsafeQuery('--worktree')), unsafeQuery('--worktree'));
   }
-  settleConfigQuery(cwd, entry, failure, stdout);
+  if (entry) cleanConfigs.set(entry.file, entry.text);
 }
 
 function checkRepoConfigSync(cwd, hooksDir) {
   const { skip, entry } = needsConfigCheck(cwd);
   if (skip) return;
-  let stdout = '';
-  let failure = null;
-  try {
-    stdout = execFileSync('git', hardenedGitArgs(CONFIG_QUERY, { hooksDir }), {
-      cwd, env: gitEnv(QUERY_ENV), windowsHide: true, maxBuffer: MAX_BUFFER,
-      encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']
-    });
-  } catch (err) {
-    failure = err;
+  const query = (args) => {
+    try {
+      const stdout = execFileSync('git', hardenedGitArgs(args, { hooksDir }), {
+        cwd, env: gitEnv(QUERY_ENV), windowsHide: true, maxBuffer: MAX_BUFFER,
+        encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']
+      });
+      return { err: null, stdout };
+    } catch (err) {
+      return { err, stdout: '' };
+    }
+  };
+  if (settleUnsafeQuery(cwd, query(unsafeQuery('--local')), unsafeQuery('--local')) === 'no-repo') return;
+  if (settleWorktreeFlag(cwd, query(WORKTREE_FLAG_QUERY))) {
+    settleUnsafeQuery(cwd, query(unsafeQuery('--worktree')), unsafeQuery('--worktree'));
   }
-  settleConfigQuery(cwd, entry, failure, stdout);
+  if (entry) cleanConfigs.set(entry.file, entry.text);
+}
+
+// Caller arguments start with the subcommand. A leading global option (-C,
+// -c, --git-dir, --work-tree, --namespace, --config-env, --exec-path, …)
+// could point git at another repository, past checkRepoConfig, or override
+// the hardening flags. For the same reason caller env may set only the
+// commit identity among GIT_* keys (and the hardening keys, which gitEnv
+// overwrites): GIT_CONFIG_COUNT/KEY_n/VALUE_n would do what -c does.
+const CALLER_GIT_ENV_RE = /^GIT_((AUTHOR|COMMITTER)_(NAME|EMAIL|DATE)|TERMINAL_PROMPT|LFS_SKIP_SMUDGE|SSH_COMMAND|ALLOW_PROTOCOL)$/;
+
+function checkCallerInput(args, env = {}) {
+  if (!Array.isArray(args) || args.length === 0) {
+    throw codedError('git was called without a subcommand.', 'GIT_BAD_ARGS');
+  }
+  const first = String(args[0]);
+  if (first.startsWith('-')) {
+    throw codedError(`git arguments must start with the subcommand, not the global option ${first.split('=')[0]}.`, 'GIT_BAD_ARGS');
+  }
+  for (const key of Object.keys(env || {})) {
+    if (/^GIT_/i.test(key) && !CALLER_GIT_ENV_RE.test(key)) {
+      throw codedError(`git env may not set ${key}; only the commit identity (GIT_AUTHOR_*, GIT_COMMITTER_*) is accepted.`, 'GIT_BAD_ARGS');
+    }
+  }
 }
 
 // A hooks dir the caller passes gets the same checks as noHooksDir(): a
@@ -302,9 +332,11 @@ function checkedHooksDir(dir) {
 }
 
 // Without a hooksDir, the checked empty hooks dir outside every case is used,
-// so no call ever creates a .kl/ anywhere. In an existing repository the
-// repo's own config is checked first (checkRepoConfig).
+// so no call ever creates a .kl/ anywhere. Caller input is checked first
+// (checkCallerInput), then, in an existing repository, the repo's own config
+// (checkRepoConfig).
 async function runGit(cwd, args, { env = {}, timeoutMs = DEFAULT_TIMEOUT_MS, hooksDir = null, allowFile = false } = {}) {
+  checkCallerInput(args, env);
   const hooks = checkedHooksDir(hooksDir);
   await checkRepoConfig(cwd, hooks);
   const argv = hardenedGitArgs(args, { hooksDir: hooks, allowFile });
@@ -324,6 +356,7 @@ async function runGit(cwd, args, { env = {}, timeoutMs = DEFAULT_TIMEOUT_MS, hoo
 }
 
 function runGitSync(cwd, args, { timeoutMs = DEFAULT_TIMEOUT_MS, hooksDir = null, allowFile = false } = {}) {
+  checkCallerInput(args);
   const hooks = checkedHooksDir(hooksDir);
   checkRepoConfigSync(cwd, hooks);
   const argv = hardenedGitArgs(args, { hooksDir: hooks, allowFile });
