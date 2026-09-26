@@ -10141,6 +10141,13 @@ async function renderQuestionsSection() {
     dot.title = here ? `Reaching you on ${here}` : 'Not present on any channel';
     header.append(dot, questionsEl('span', 'questions-title', 'Questions'));
     section.appendChild(header);
+    // Final review M7: when another process holds the contact ladder lease,
+    // this one sends nothing; say so where the owner looks.
+    if (presence.ok && presence.ladder && presence.ladder.runsHere === false && presence.ladder.holder) {
+      const elsewhere = questionsEl('div', 'questions-ladder-elsewhere', presence.ladder.message);
+      elsewhere.id = 'questions-ladder-elsewhere';
+      section.appendChild(elsewhere);
+    }
     if (policy.ok) section.appendChild(renderAwayControls(policy.policy, { save, showError }));
 
     const list = questionsEl('div', 'questions-list');

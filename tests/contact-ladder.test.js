@@ -591,3 +591,79 @@ describe('LadderEngine fix round 1', () => {
     assert.strictEqual(w.adapters.get('sms').sent.length, 1);
   });
 });
+
+describe('LadderEngine lease hardening (final review M3, M7)', () => {
+  const otherLadder = (w, extra = {}) => {
+    const otherData = tmp('kl-ladder-other-');
+    return new LadderEngine({
+      state: new ContactState({ dir: path.join(otherData, 'contact'), clock: w.now }), casesRoot: w.root, runtime: w.runtime,
+      router: w.router, presence: w.presence, getPolicy: () => w.policy, clock: w.now, tickMs: 30000, dataDir: otherData, hostName: 'web-01', ...extra
+    });
+  };
+
+  it('a torn or corrupt lock is held, not free, until its mtime is older than 3 × tickMs', async () => {
+    const w = await world();
+    const lock = path.join(w.root, '.contact.lock');
+    fs.writeFileSync(lock, '{"pid": 12');
+    const other = otherLadder(w);
+    assert.strictEqual(other.tryAcquire(), false);
+    assert.strictEqual(other.status().holder.unreadable, true);
+    assert.strictEqual(fs.readFileSync(lock, 'utf8'), '{"pid": 12', 'not taken over while fresh');
+    const old = (Date.now() - 91 * 1000) / 1000;
+    fs.utimesSync(lock, old, old);
+    assert.strictEqual(other.tryAcquire(), false, 'stale: the takeover is written');
+    assert.strictEqual(JSON.parse(fs.readFileSync(lock, 'utf8')).host, 'web-01');
+    assert.strictEqual(other.tryAcquire(), true);
+    await other.stop();
+  });
+
+  it('heartbeats and takeovers leave no temp files and always a whole lock', async () => {
+    const w = await world();
+    assert.strictEqual(w.ladder.tryAcquire(), true);
+    for (let i = 0; i < 20; i += 1) assert.strictEqual(w.ladder._heartbeat(), true);
+    assert.deepStrictEqual(fs.readdirSync(w.root).filter((n) => n.startsWith('.contact.lock')), ['.contact.lock']);
+    assert.strictEqual(JSON.parse(fs.readFileSync(path.join(w.root, '.contact.lock'), 'utf8')).pid, process.pid);
+    await w.ladder.stop();
+  });
+
+  it('a lease lost and regained recovers in-flight attempts again', async () => {
+    const w = await world();
+    assert.strictEqual(w.ladder.tryAcquire(), true);
+    await w.tickAt('2026-09-25T09:01:00Z');
+    assert.strictEqual(w.ladder.recovered, true);
+    // Another process takes the lease...
+    const other = otherLadder(w);
+    fs.writeFileSync(path.join(w.root, '.contact.lock'), JSON.stringify(other._lease()));
+    assert.strictEqual(w.ladder._heartbeat(), false);
+    // ...and lets it go stale; this process takes it back.
+    w.advance(91 * 1000);
+    assert.strictEqual(w.ladder.tryAcquire(), false);
+    assert.strictEqual(w.ladder.tryAcquire(), true);
+    assert.strictEqual(w.ladder.recovered, false, 'the next tick runs _recover again');
+    await w.ladder.stop();
+  });
+
+  it('a passive host reads the holder\'s ladder only from an absolute dataDir with a contact/ folder', async () => {
+    const w = await world();
+    const other = otherLadder(w);
+    const lock = path.join(w.root, '.contact.lock');
+    let reads = 0;
+    const load = ContactState.prototype.ladder;
+    ContactState.prototype.ladder = function tracked() { if (this.readOnly) reads += 1; return load.call(this); };
+    try {
+      for (const dataDir of ['relative/dir', path.join(tmp('kl-ladder-nodir-'), 'missing'), '']) {
+        fs.writeFileSync(lock, JSON.stringify({ pid: 1, host: 'gpu-box', dataDir, heartbeatAt: w.now().toISOString() }));
+        assert.strictEqual(other.tryAcquire(), false);
+        other.list();
+      }
+      assert.strictEqual(reads, 0, 'never a relative, missing or empty dataDir');
+      fs.writeFileSync(lock, JSON.stringify({ pid: 1, host: 'gpu-box', dataDir: w.data, heartbeatAt: w.now().toISOString() }));
+      fs.mkdirSync(path.join(w.data, 'contact'), { recursive: true });
+      other.tryAcquire();
+      other.list();
+      assert.strictEqual(reads, 1);
+    } finally {
+      ContactState.prototype.ladder = load;
+    }
+  });
+});

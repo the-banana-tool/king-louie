@@ -2980,6 +2980,7 @@ body {
 .questions-input { flex: 1; min-width: 80px; }
 .questions-btn { padding: 2px 8px; font-size: 0.85em; }
 .questions-error { color: var(--error); font-size: 0.85em; }
+.questions-ladder-elsewhere { color: var(--warning); font-size: 0.85em; }
 .questions-policy summary { cursor: pointer; color: var(--text-secondary); }
 .questions-policy-row { display: flex; align-items: center; gap: 4px; margin: 4px 0; font-size: 0.85em; }
 .questions-policy-ladder { flex: 1; font-family: var(--font-mono); }

@@ -427,3 +427,21 @@ describe('createContactHost: email from === owner (final review I3)', () => {
     }
   });
 });
+
+describe('createContactHost: presence status names the lease holder (final review M7)', () => {
+  it('a passive host says who runs the ladder and where the lease is', async () => {
+    const t = makeHost({ settings: desktopSettings });
+    try {
+      await t.runtime.createCase({ title: 'Lakeside lot', objective: 'Sell the lot' });
+      const lock = t.host.ladder.lockPath();
+      fs.writeFileSync(lock, JSON.stringify({ pid: 4242, host: 'gpu-box', dataDir: '/nowhere', heartbeatAt: new Date().toISOString() }));
+      await t.host.start();
+      const s = t.host.presenceStatus().ladder;
+      assert.strictEqual(s.runsHere, false);
+      assert.match(s.message, /^contact is paused here: the ladder runs in gpu-box:4242 \(lease .+\.contact\.lock, heartbeat .+\)$/);
+      assert.deepStrictEqual({ host: s.holder.host, pid: s.holder.pid, lockPath: s.holder.lockPath }, { host: 'gpu-box', pid: 4242, lockPath: lock });
+    } finally {
+      await t.host.stop();
+    }
+  });
+});

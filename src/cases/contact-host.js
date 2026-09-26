@@ -287,7 +287,17 @@ function createContactHost({
     presenceStatus() {
       const status = presence.status();
       const s = ladder.status();
-      return { ...status, ladder: s.runsHere ? { runsHere: true } : { runsHere: false, message: s.holder ? `contact ladder runs in ${s.holder.host}:${s.holder.pid}` : 'no cases yet' } };
+      // Final review M7: a passive host says plainly who holds the lease (and
+      // that this process sends nothing), so a forged or stuck lock is visible.
+      let ladderStatus = { runsHere: true };
+      if (!s.runsHere) {
+        const h = s.holder;
+        const message = !h ? 'no cases yet'
+          : h.unreadable ? `contact is paused here: the ladder lease ${ladder.lockPath()} is unreadable; it is taken over once it goes stale`
+            : `contact is paused here: the ladder runs in ${h.host}:${h.pid} (lease ${ladder.lockPath()}, heartbeat ${h.heartbeatAt || 'unknown'})`;
+        ladderStatus = { runsHere: false, message, ...(h ? { holder: { host: h.host ?? null, pid: h.pid ?? null, heartbeatAt: h.heartbeatAt ?? null, lockPath: ladder.lockPath() } } : {}) };
+      }
+      return { ...status, ladder: ladderStatus };
     },
 
     // Wave 3 (R44): the phone app, when the service runs F3 approvals. The

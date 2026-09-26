@@ -7,6 +7,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { ContactState } = require('./contact-state');
+const { writeAtomic } = require('./jsonfile');
 const { effectivePolicy, resolveSteps, formatShort } = require('./contact-format');
 const { localDay } = require('./clock');
 const { wallHhmm } = require('./presence');
@@ -20,6 +21,13 @@ const CLOSED_CASE = new Set(['done', 'abandoned']);
 const LOCK_FILE = '.contact.lock';
 
 const iso = (ms) => new Date(ms).toISOString();
+const isDir = (p) => {
+  try {
+    return fs.statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+};
 
 class LadderEngine {
   constructor({
@@ -56,12 +64,33 @@ class LadderEngine {
     return { pid: process.pid, host: this.hostName, dataDir: this.dataDir, heartbeatAt: this.clock().toISOString() };
   }
 
+  // null: no lock file. A lock file that exists but does not parse (a torn
+  // or corrupt write) is { unreadable: true, mtimeMs }: it is held until it
+  // is as old as a stale heartbeat (final review M3), never a free lease.
   _readLock() {
+    let text;
     try {
-      return JSON.parse(fs.readFileSync(this.lockPath(), 'utf8'));
+      text = fs.readFileSync(this.lockPath(), 'utf8');
     } catch {
       return null;
     }
+    try {
+      const lock = JSON.parse(text);
+      if (lock && typeof lock === 'object' && !Array.isArray(lock)) return lock;
+    } catch {
+      // fall through
+    }
+    let mtimeMs = Date.now();
+    try {
+      mtimeMs = fs.statSync(this.lockPath()).mtimeMs;
+    } catch {
+      // gone since the read: treat as just written
+    }
+    return { unreadable: true, mtimeMs };
+  }
+
+  _writeLock() {
+    writeAtomic(this.lockPath(), JSON.stringify(this._lease()));
   }
 
   _mine(lock) {
@@ -92,10 +121,21 @@ class LadderEngine {
     }
     const held = this._readLock();
     if (this._mine(held)) return this._becomeActive();
-    const beat = Date.parse(held?.heartbeatAt);
-    if (!held || !Number.isFinite(beat) || this.clock().getTime() - beat > 3 * this.tickMs) {
-      this.log.warn(`taking over a stale contact ladder lease${held ? ` from ${held.host}:${held.pid}` : ''}`);
-      fs.writeFileSync(this.lockPath(), JSON.stringify(this._lease()));
+    const stale = held?.unreadable
+      ? Date.now() - held.mtimeMs > 3 * this.tickMs
+      : (() => {
+        const beat = Date.parse(held?.heartbeatAt);
+        return !held || !Number.isFinite(beat) || this.clock().getTime() - beat > 3 * this.tickMs;
+      })();
+    if (held?.unreadable && !stale) {
+      this._warnOnce('lock-unreadable', `the contact ladder lease ${this.lockPath()} is unreadable; waiting until it is stale before taking it over`);
+      this.active = false;
+      this.holder = { host: 'unknown', pid: null, unreadable: true };
+      return false;
+    }
+    if (stale) {
+      this.log.warn(`taking over a stale contact ladder lease${held && !held.unreadable ? ` from ${held.host}:${held.pid}` : ''}`);
+      this._writeLock();
       this.active = false;
       this.holder = null;
       return false;
@@ -109,6 +149,9 @@ class LadderEngine {
   }
 
   _becomeActive() {
+    // Final review M3: a lease regained after losing it recovers in-flight
+    // attempts again on the next tick.
+    if (!this.active) this.recovered = false;
     this.active = true;
     this.holder = null;
     return true;
@@ -139,7 +182,7 @@ class LadderEngine {
       this.holder = held;
       return false;
     }
-    fs.writeFileSync(this.lockPath(), JSON.stringify(this._lease()));
+    this._writeLock();
     return true;
   }
 
@@ -625,8 +668,12 @@ class LadderEngine {
   // contact:ladderState. A passive process reads the holder's files.
   list() {
     let ladder = this.state.ladder();
-    if (!this.active && this.holder && this.holder.dataDir && this.holder.dataDir !== this.dataDir) {
-      ladder = new ContactState({ dir: path.join(this.holder.dataDir, 'contact'), readOnly: true }).ladder();
+    // The lock is in the (agent-writable) cases root, so its dataDir is read
+    // only when it is an absolute path whose contact/ folder exists (final
+    // review M7), never an arbitrary relative or made-up path.
+    const other = !this.active && this.holder && typeof this.holder.dataDir === 'string' ? this.holder.dataDir : null;
+    if (other && other !== this.dataDir && path.isAbsolute(other) && isDir(path.join(other, 'contact'))) {
+      ladder = new ContactState({ dir: path.join(other, 'contact'), readOnly: true }).ladder();
     }
     const out = {};
     for (const [key, e] of Object.entries(ladder.entries)) {
