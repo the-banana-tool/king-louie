@@ -227,6 +227,53 @@ describe('validatePackage', () => {
     fs.appendFileSync(path.join(lf, 'sources.md'), '- one more\n');
     assert.notStrictEqual(f.hashPackage(lf), f.hashPackage(crlf));
   });
+
+  it('hashes a package that no longer validates, as long as the walk was not truncated', () => {
+    // hashPackage/fileHashes detect drift from a pristine vendored copy,
+    // including a copy an owner has edited into something that no longer
+    // validates (an extra file, say). Task 11 hashes before checking
+    // force, so an ordinary validation problem here must not block it.
+    const dir = writePackage(path.join(tmp(), 'land-sale'), { 'run.js': 'module.exports = 1;\n' });
+    assert.strictEqual(f.validatePackage(dir).ok, false);
+    assert.match(f.hashPackage(dir), /^sha256:[0-9a-f]{64}$/);
+  });
+
+  it('never reads a file already flagged oversized', () => {
+    const dir = writePackage(path.join(tmp(), 'land-sale'), { 'sources.md': 'x'.repeat(2 * 1024 * 1024) });
+    const bigAbs = path.resolve(path.join(dir, 'sources.md'));
+    const original = fs.readFileSync;
+    let readBig = false;
+    fs.readFileSync = function patched(p, ...rest) {
+      if (path.resolve(String(p)) === bigAbs) readBig = true;
+      return original.call(fs, p, ...rest);
+    };
+    try {
+      const r = f.validatePackage(dir);
+      assert.match(messages(r).join('\n'), /larger than 256 KiB/);
+      assert.strictEqual(readBig, false, 'validatePackage must not read the oversized file into memory');
+      assert.throws(() => f.hashPackage(dir), { code: 'PACKAGE_TOO_LARGE' });
+      assert.strictEqual(readBig, false, 'hashPackage must not read the oversized file into memory either');
+    } finally {
+      fs.readFileSync = original;
+    }
+  });
+
+  it('stops the walk after 512 entries even when nowhere near the file-count limit', () => {
+    const dir = writePackage(path.join(tmp(), 'land-sale'));
+    for (let i = 0; i < 520; i += 1) fs.mkdirSync(path.join(dir, `empty-${i}`));
+    const start = Date.now();
+    const r = f.validatePackage(dir);
+    assert.ok(Date.now() - start < 2000, 'the walk must stop, not enumerate every empty directory');
+    assert.match(messages(r).join('\n'), /512 entries/);
+    assert.throws(() => f.hashPackage(dir), { code: 'PACKAGE_TOO_LARGE' });
+  });
+
+  it('refuses nesting deeper than 8 levels', () => {
+    const deep = Array.from({ length: 10 }, (_, i) => `d${i}`).join('/');
+    const dir = writePackage(path.join(tmp(), 'land-sale'), { [`${deep}/deep.md`]: 'x\n' });
+    assert.match(messages(f.validatePackage(dir)).join('\n'), /nested more than 8 levels deep/);
+    assert.throws(() => f.hashPackage(dir), { code: 'PACKAGE_TOO_LARGE' });
+  });
 });
 
 describe('compareVersions', () => {

@@ -42,6 +42,14 @@ const LIMITS = Object.freeze({
   note: 300
 });
 const ALLOWED_EXTENSIONS = new Set(['.yaml', '.md', '.txt']);
+// walkPackage's own cost bounds, separate from LIMITS (the package-format
+// limits a normal playbook must fit): a hostile package can be shaped to
+// cost more to WALK than its final file count/byte total would suggest —
+// many empty directories, or directories nested far deeper than any real
+// playbook needs — so these stop the walk itself, not just what it reports.
+const MAX_WALK_ENTRIES = 512;
+const MAX_WALK_DEPTH = 8;
+const MAX_WALK_ERRORS = 20;
 // Windows reserves these base names (with or without an extension) for
 // devices; opening "con.md" or "nul.txt" by path can reach the device
 // instead of a file. A package that names one is refused rather than let a
@@ -556,30 +564,47 @@ function unsafeRelPath(rel) {
 // count check runs off the cheap signal (a directory listing, an lstat)
 // available at that point, and stops the walk as soon as a count or total
 // crosses its limit rather than continuing to stat or list a package built
-// to be huge.
+// to be huge. `truncated` is true whenever the walk stopped early for any
+// of these reasons: the file list and error list are then a prefix, not the
+// whole story, which matters to a caller (readEntries) deciding whether it
+// is safe to read what's there.
 function walkPackage(dir) {
   const files = [];
   const errors = [];
-  const err = (message) => errors.push({ file: null, message });
+  let truncated = false;
+  const err = (message) => {
+    if (errors.length >= MAX_WALK_ERRORS) {
+      truncated = true;
+      return;
+    }
+    errors.push({ file: null, message });
+  };
   let root;
   try {
     root = fs.lstatSync(dir);
   } catch {
     err(`${dir} does not exist`);
-    return { files, errors };
+    return { files, errors, truncated };
   }
   if (root.isSymbolicLink()) {
     err('the package folder is a symbolic link');
-    return { files, errors };
+    return { files, errors, truncated };
   }
   if (!root.isDirectory()) {
     err(`${dir} is not a folder`);
-    return { files, errors };
+    return { files, errors, truncated };
   }
   let total = 0;
+  let entryCount = 0;
   let stop = false;
-  const walk = (abs, rel) => {
+  const walk = (abs, rel, depth) => {
     if (stop) return;
+    if (depth > MAX_WALK_DEPTH) {
+      err(`${rel || '.'}: nested more than ${MAX_WALK_DEPTH} levels deep`);
+      stop = true;
+      truncated = true;
+      return;
+    }
     let entries;
     try {
       entries = fs.readdirSync(abs).sort();
@@ -589,6 +614,22 @@ function walkPackage(dir) {
     }
     for (const name of entries) {
       if (stop) return;
+      // Every entry readdir returns counts, including the dot-prefixed and
+      // rejected ones below: a package built to hold many thousands of
+      // entries costs a stat and a name check each, whether or not it
+      // would otherwise be refused for some other reason.
+      entryCount += 1;
+      if (entryCount > MAX_WALK_ENTRIES) {
+        err(`more than ${MAX_WALK_ENTRIES} entries in the package`);
+        stop = true;
+        truncated = true;
+        return;
+      }
+      if (errors.length >= MAX_WALK_ERRORS) {
+        stop = true;
+        truncated = true;
+        return;
+      }
       if (name.startsWith('.')) continue;
       const childAbs = path.join(abs, name);
       const childRel = rel ? `${rel}/${name}` : name;
@@ -612,7 +653,7 @@ function walkPackage(dir) {
       if (st.isSymbolicLink()) {
         err(`${childRel}: symbolic links are not allowed`);
       } else if (st.isDirectory()) {
-        walk(childAbs, childRel);
+        walk(childAbs, childRel, depth + 1);
       } else if (st.isFile()) {
         const ext = path.extname(name).toLowerCase();
         if (!ALLOWED_EXTENSIONS.has(ext) && name !== 'LICENSE') {
@@ -624,11 +665,13 @@ function walkPackage(dir) {
         if (files.length > LIMITS.files) {
           err(`${files.length} files; at most ${LIMITS.files}`);
           stop = true;
+          truncated = true;
           return;
         }
         if (total > LIMITS.totalBytes) {
           err('the package is larger than 1 MiB');
           stop = true;
+          truncated = true;
           return;
         }
       } else {
@@ -636,9 +679,9 @@ function walkPackage(dir) {
       }
     }
   };
-  walk(dir, '');
+  walk(dir, '', 0);
   files.sort(byteOrder);
-  return { files, errors };
+  return { files, errors, truncated };
 }
 
 // contentHash (R31): files sorted by the UTF-8 bytes of their relative
@@ -654,12 +697,27 @@ function hashEntries(entries) {
   return `sha256:${h.digest('hex')}`;
 }
 
-// Every LIMITS check must already be clean before this reads file content:
-// hashPackage and fileHashes are for a package that has already validated,
-// never for arbitrary untrusted input.
+// hashPackage/fileHashes are used to detect whether a vendored copy still
+// matches the pristine one, including a copy that no longer *validates*
+// (an owner's edit can add a disallowed file, rename something, break a
+// slug) — the caller (Task 11) hashes first and only then decides what to
+// do about a mismatch, force included, so an ordinary validation problem
+// must not stop the hash. This only refuses to read when the walk itself
+// stopped early (truncated: there could be more package than `files`
+// shows, so hashing it would be hashing a random prefix) or a listed file
+// is over the per-file size limit — reading that much text just to throw
+// its hash away is exactly the expensive work LIMITS exists to avoid.
 function readEntries(dir) {
-  const { files, errors } = walkPackage(dir);
-  if (errors.length) throw new Error(`cannot hash an invalid package:\n${formatErrors(errors)}`);
+  const { files, errors, truncated } = walkPackage(dir);
+  const oversized = files.find((f) => f.size > LIMITS.fileBytes);
+  if (truncated || oversized) {
+    const reason = truncated
+      ? `the walk stopped early (${formatErrors(errors)})`
+      : `${oversized.rel} is larger than 256 KiB`;
+    const err = new Error(`cannot hash this package: ${reason}`);
+    err.code = 'PACKAGE_TOO_LARGE';
+    throw err;
+  }
   return files.map((f) => ({ rel: f.rel, text: fs.readFileSync(f.abs, 'utf8') }));
 }
 
