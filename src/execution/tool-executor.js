@@ -166,11 +166,15 @@ class ToolExecutor extends EventEmitter {
     // refuses unsafe calls; carried on the re-threaded requester so the
     // run's sub-agents refuse them too.
     this.refuseUnsafe = options.refuseUnsafe === true;
+    // The roots the fleet default classifier allows paths under (a delegate
+    // turn's own cwd); only read with refuseUnsafe, and carried to sub-agents
+    // with it. Unset, that classifier allows no path.
+    this.allowedRoots = Array.isArray(options.allowedRoots) ? Object.freeze([...options.allowedRoots]) : null;
     // Fail closed in every approval mode: with the gate on, every call is
     // classified (by the fleet default when the run has no node policy), an
     // unsafe one is refused in the tier branch, and nothing below ever asks
     // a person (see _refuseUnsafeResult).
-    if (this.refuseUnsafe) this.classifyCall = refuseUnsafeGate(this.classifyCall);
+    if (this.refuseUnsafe) this.classifyCall = refuseUnsafeGate(this.classifyCall, this.allowedRoots);
   }
 
   get permissionRules() {
@@ -600,6 +604,7 @@ class ToolExecutor extends EventEmitter {
     // same way the tool already forwards this same function unchanged.
     requester.origin = this.origin;
     requester.refuseUnsafe = this.refuseUnsafe;
+    if (this.refuseUnsafe && this.allowedRoots) requester.allowedRoots = this.allowedRoots;
     return this.localOrigin ? markLocalRequester(requester) : requester;
   }
 

@@ -2213,7 +2213,8 @@ function createCore(deps = {}) {
         origin: runtimeOptions.origin || null,
         // Fleet stage 4 §3.8: a delegate turn's chat id and scope gate.
         ...(runtimeOptions.chatId ? { chatId: runtimeOptions.chatId } : {}),
-        ...(runtimeOptions.refuseUnsafe === true ? { refuseUnsafe: true } : {})
+        ...(runtimeOptions.refuseUnsafe === true ? { refuseUnsafe: true } : {}),
+        ...(Array.isArray(runtimeOptions.allowedRoots) ? { allowedRoots: runtimeOptions.allowedRoots } : {})
       }
     );
 
@@ -2450,7 +2451,10 @@ function createCore(deps = {}) {
               || options.origin || null,
             chatId: (options.executorOptions && options.executorOptions.chatId) || null,
             refuseUnsafe: (options.approvalRequester && options.approvalRequester.refuseUnsafe === true)
-              || (options.executorOptions && options.executorOptions.refuseUnsafe === true)
+              || (options.executorOptions && options.executorOptions.refuseUnsafe === true),
+            // The delegate cwd the refuseUnsafe fallback classifier allows (T11-roots).
+            allowedRoots: (options.approvalRequester && options.approvalRequester.allowedRoots)
+              || (options.executorOptions && options.executorOptions.allowedRoots) || null
           }
         );
         const executor = new AgentExecutor(runtime.provider, runtime.toolExecutor, {
@@ -2914,6 +2918,9 @@ function createCore(deps = {}) {
     createAgentRuntime,
     // Fleet stage 4: delegate sessions run their turns through this.
     getAgentExecutorAdapter: () => agentExecutorAdapter,
+    // Fleet stage 4: cancel_job on a delegate stops the background tasks its
+    // turns started.
+    getBackgroundTaskManager: () => backgroundTaskManager,
     AgentExecutor,
     AgentOrchestrator,
     buildAgentVoiceOptions,

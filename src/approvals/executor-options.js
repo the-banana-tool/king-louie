@@ -25,15 +25,17 @@ function refuseUnsafeClassifier(classifyCall) {
   };
 }
 
-// The node-policy classifier with an empty policy (no allowed_roots, no
-// pattern lists), for a refuseUnsafe run that has no node policy of its own
-// ('allow'/'deny' mode, or phone mode without deps.nodePolicy). If it cannot
-// be loaded, every call is unsafe: no tool declares itself read-only, so
-// nothing can be let through.
-function defaultFleetClassifier() {
+// The node-policy classifier with no pattern lists and `allowedRoots` as its
+// allowed_roots (none when unset: every path-naming call is unsafe), for a
+// refuseUnsafe run that has no node policy of its own ('allow'/'deny' mode,
+// or phone mode without deps.nodePolicy). A delegate turn passes its own cwd
+// (T11-roots). If it cannot be loaded, every call is unsafe: no tool
+// declares itself read-only, so nothing can be let through.
+function defaultFleetClassifier(allowedRoots = null) {
+  const policy = Array.isArray(allowedRoots) && allowedRoots.length > 0 ? { allowed_roots: [...allowedRoots] } : {};
   try {
     const { classifyToolCall } = require('../execution/safety-policy');
-    return (toolName, params, { cwd } = {}) => classifyToolCall(toolName, params, {}, { cwd });
+    return (toolName, params, { cwd } = {}) => classifyToolCall(toolName, params, policy, { cwd });
   } catch (err) {
     log.error(`fleet classifier unavailable, refusing every call: ${err?.message ?? String(err)}`);
     return () => ({ tier: 'unsafe', reason: 'no_classifier' });
@@ -44,8 +46,8 @@ function defaultFleetClassifier() {
 // ToolExecutor runs. The run's own classifyCall decides when it has an
 // opinion; otherwise the fleet default does. Anything unsafe becomes the
 // refusal, so only read/routine calls run.
-function refuseUnsafeGate(classifyCall) {
-  const fallback = defaultFleetClassifier();
+function refuseUnsafeGate(classifyCall, allowedRoots = null) {
+  const fallback = defaultFleetClassifier(allowedRoots);
   return refuseUnsafeClassifier((toolName, params, ctx) => {
     const decision = classifyCall ? classifyCall(toolName, params, ctx) : null;
     return decision === null || decision === undefined ? fallback(toolName, params, ctx) : decision;
@@ -129,6 +131,11 @@ function approvalSeam({ remoteApprovals, event = null, approvalRequester = null,
   // Set by a delegate turn (executorOptions) or inherited through the
   // re-threaded requester of its sub-agents.
   const refuseUnsafe = executorOptions.refuseUnsafe === true || Boolean(approvalRequester && approvalRequester.refuseUnsafe === true);
+  // A delegate turn's cwd, for the fleet default classifier (T11-roots).
+  const rawRoots = executorOptions.allowedRoots || (approvalRequester && approvalRequester.allowedRoots);
+  const gate = refuseUnsafe
+    ? { refuseUnsafe: true, ...(Array.isArray(rawRoots) && rawRoots.length > 0 ? { allowedRoots: rawRoots } : {}) }
+    : {};
 
   if (remoteApprovals === 'phone') {
     // A marked (local) requester is kept; an unmarked one from a local event
@@ -138,7 +145,7 @@ function approvalSeam({ remoteApprovals, event = null, approvalRequester = null,
     const toolExecutorOptions = { ...phone.options, denyAutoApproval };
     if (refuseUnsafe) {
       toolExecutorOptions.classifyCall = refuseUnsafeClassifier(phone.options.classifyCall || null);
-      toolExecutorOptions.refuseUnsafe = true;
+      Object.assign(toolExecutorOptions, gate);
     }
     return { toolExecutorOptions, attach: phone.attach, local, origin };
   }
@@ -147,7 +154,7 @@ function approvalSeam({ remoteApprovals, event = null, approvalRequester = null,
   if (remoteApprovals === 'allow') requester = approvalRequester;
   else requester = local && helpers.isLocalRequester(approvalRequester) ? approvalRequester : null;
   return {
-    toolExecutorOptions: { approvalRequester: requester, denyAutoApproval, localOrigin: local, origin, ...(refuseUnsafe ? { refuseUnsafe: true } : {}) },
+    toolExecutorOptions: { approvalRequester: requester, denyAutoApproval, localOrigin: local, origin, ...gate },
     attach: () => {},
     local,
     origin
