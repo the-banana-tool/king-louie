@@ -28,15 +28,24 @@ class OperatorTls {
     const context = tls.createSecureContext({ cert: chain, key });
     const leaf = new crypto.X509Certificate(chain);
     const spki = relaySpkiPin(chain);
-    if (this.cert && this.cert.spki !== spki) {
-      log.error(`the mcp. certificate key changed (${this.cert.spki} → ${spki}): every phone must re-pin (relay qr, or rotate-tls-key under ACME)`);
-      if (this.alerts) this.alerts.raise('tls_key_changed', { subject: this.host, detail: { old_spki: this.cert.spki, new_spki: spki } });
-    }
+    const oldSpki = this.cert ? this.cert.spki : null;
+    // The operator replaced the files: serve them, then say so loudly.
     this.context = context;
     this.cert = { chain, notBefore: Date.parse(leaf.validFrom), notAfter: Date.parse(leaf.validTo), spki };
+    if (oldSpki && oldSpki !== spki) {
+      log.error(`the mcp. certificate key changed (${oldSpki} → ${spki}): every phone must re-pin (relay qr, or rotate-tls-key under ACME)`);
+      if (this.alerts) {
+        try {
+          this.alerts.raise('tls_key_changed', { subject: this.host, detail: { old_spki: oldSpki, new_spki: spki } });
+        } catch (err) {
+          log.error(`could not raise tls_key_changed: ${err.message}`);
+        }
+      }
+    }
   }
 
   start() {
+    if (this.timer) throw new Error('OperatorTls already started');
     this._load();
     this.timer = setInterval(() => this.reload(), CHECK_EVERY_MS);
     if (typeof this.timer.unref === 'function') this.timer.unref();

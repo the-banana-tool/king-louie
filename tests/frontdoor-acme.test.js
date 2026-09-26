@@ -41,10 +41,10 @@ function fakeAcme({ lifetimeDays = 90, fail = () => false } = {}) {
 const clock = { now: Date.parse('2026-09-23T00:00:00.000Z') };
 const alertsSink = () => ({ raised: [], raise(kind, opts) { this.raised.push([kind, opts]); return { id: String(this.raised.length) }; } });
 
-function manager({ dir = tmp(), acme = fakeAcme(), alerts = alertsSink(), key = crypto.randomBytes(32), cipher = createAesGcmCipher(key) } = {}) {
+function manager({ dir = tmp(), acme = fakeAcme(), alerts = alertsSink(), key = crypto.randomBytes(32), cipher = createAesGcmCipher(key), ...extra } = {}) {
   const m = new AcmeManager({
     domain: 'kl.example.com', email: null, directoryUrl: 'https://acme.example.com/directory', termsAgreed: true,
-    dir, cipher, alerts, now: () => clock.now, adapterFactory: acme.factory
+    dir, cipher, alerts, now: () => clock.now, adapterFactory: acme.factory, ...extra
   });
   return { m, dir, acme, alerts, key };
 }
@@ -52,7 +52,7 @@ function manager({ dir = tmp(), acme = fakeAcme(), alerts = alertsSink(), key = 
 const newKeyPem = () => crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' }).privateKey.export({ type: 'pkcs8', format: 'pem' });
 const pinOfKey = (pem) => `sha256/${crypto.createHash('sha256').update(crypto.createPublicKey(pem).export({ type: 'spki', format: 'der' })).digest('base64url')}`;
 const storedKeyPin = (file, key) => pinOfKey(createAesGcmCipher(key).decryptString(JSON.parse(fs.readFileSync(file, 'utf8')).key));
-const writeStoredKey = (file, key, pem) => fs.writeFileSync(file, JSON.stringify({ v: 1, key: createAesGcmCipher(key).encryptString(pem) }));
+const writeStoredKey = (file, key, pem, extra = {}) => fs.writeFileSync(file, JSON.stringify({ v: 1, key: createAesGcmCipher(key).encryptString(pem), ...extra }));
 const writeStoredCert = (file, chain) => fs.writeFileSync(file, JSON.stringify({ v: 1, chain }));
 
 // Captures every log record at trace level without printing it.
@@ -255,7 +255,14 @@ describe('AcmeManager', () => {
       s.oldSpki = s.m.leafSpki();
       return s;
     }
-    const restart = async (s) => { const r = manager({ dir: s.dir, key: s.key, acme: s.acme }).m; await r.start(); r.stop(); return r; };
+    const restart = async (s) => {
+      const r = manager({ dir: s.dir, key: s.key, acme: s.acme }).m;
+      r.events = [];
+      r.on('rotated', (e) => r.events.push(e));
+      await r.start();
+      r.stop();
+      return r;
+    };
 
     it('after the new key is written, before a certificate for it: the old key stays', async () => {
       const s = await started();
@@ -265,6 +272,7 @@ describe('AcmeManager', () => {
       assert.equal(storedKeyPin(s.files.key, s.key), s.oldSpki);
       assert.ok(!fs.existsSync(s.files.next), 'the unfinished rotation is discarded');
       assert.equal(s.acme.calls.length, 1, 'no issuance: the old certificate is still good');
+      assert.deepEqual(r.events, [], 'nothing to re-pin');
     });
 
     it('after cert.json is written for the new key: the rotation completes', async () => {
@@ -277,17 +285,44 @@ describe('AcmeManager', () => {
       assert.equal(storedKeyPin(s.files.key, s.key), pinOfKey(next));
       assert.ok(!fs.existsSync(s.files.next));
       assert.equal(s.acme.calls.length, 1);
+      assert.deepEqual(r.events, [{ oldSpki: s.oldSpki, newSpki: pinOfKey(next) }], "phones learn the new pin from 'rotated' after start");
+    });
+
+    it('a start that fails after completing a rotation still emits rotated on the next start', async () => {
+      const s = await started();
+      const next = newKeyPem();
+      writeStoredKey(s.files.next, s.key, next, { old_spki: s.oldSpki });
+      writeStoredCert(s.files.cert, issueCert(ca, { dnsNames: ['mcp.kl.example.com'], keyPem: next, notBefore: clock.now, notAfter: clock.now + 90 * DAY }).cert);
+      const accountFile = path.join(s.dir, 'account.json');
+      const account = fs.readFileSync(accountFile, 'utf8');
+      fs.writeFileSync(accountFile, '{ broken');
+      await assert.rejects(manager({ dir: s.dir, key: s.key, acme: s.acme }).m.start(), /account.json cannot be decrypted/);
+      fs.writeFileSync(accountFile, account);
+      const r = await restart(s);
+      assert.deepEqual(r.events, [{ oldSpki: s.oldSpki, newSpki: pinOfKey(next) }]);
+      assert.ok(!fs.existsSync(s.files.next));
+    });
+
+    it('a next key with neither cert-key.json nor its certificate refuses to start, naming both files', async () => {
+      const s = await started();
+      writeStoredKey(s.files.next, s.key, newKeyPem(), { old_spki: s.oldSpki });
+      fs.rmSync(s.files.key);
+      fs.rmSync(s.files.cert);
+      await assert.rejects(manager({ dir: s.dir, key: s.key }).m.start(), (err) => err.message.includes(s.files.next) && err.message.includes(s.files.key));
+      assert.ok(fs.existsSync(s.files.next));
+      assert.ok(!fs.existsSync(s.files.key), 'no key is minted');
     });
 
     it('after the new key is promoted, before the next file is removed: the new key stays', async () => {
       const s = await started();
       const next = newKeyPem();
-      writeStoredKey(s.files.next, s.key, next);
+      writeStoredKey(s.files.next, s.key, next, { old_spki: s.oldSpki });
       writeStoredKey(s.files.key, s.key, next);
       writeStoredCert(s.files.cert, issueCert(ca, { dnsNames: ['mcp.kl.example.com'], keyPem: next, notBefore: clock.now, notAfter: clock.now + 90 * DAY }).cert);
       const r = await restart(s);
       assert.equal(r.leafSpki(), pinOfKey(next));
       assert.ok(!fs.existsSync(s.files.next));
+      assert.deepEqual(r.events, [{ oldSpki: s.oldSpki, newSpki: pinOfKey(next) }]);
     });
 
     it('rotateKey writes cert.json before it replaces the key: a failure at the promotion recovers to the new key', async () => {
@@ -297,6 +332,7 @@ describe('AcmeManager', () => {
       const cipher = { ...real, encryptString(p) { if (armed && (armed -= 1) === 0) throw new Error('simulated crash'); return real.encryptString(p); } };
       const s = manager({ key, cipher });
       await s.m.start();
+      const oldSpki = s.m.leafSpki();
       armed = 2; // the first encrypt writes cert-key.next.json; the second would replace cert-key.json
       await assert.rejects(s.m.rotateKey(), /simulated crash/);
       s.m.stop();
@@ -305,8 +341,11 @@ describe('AcmeManager', () => {
       const newSpki = storedKeyPin(nextFile, key);
       assert.equal(JSON.parse(fs.readFileSync(path.join(s.dir, 'cert.json'), 'utf8')).spki, newSpki);
       const r = manager({ dir: s.dir, key, acme: s.acme }).m;
+      const events = [];
+      r.on('rotated', (e) => events.push(e));
       await r.start();
       assert.equal(r.leafSpki(), newSpki);
+      assert.deepEqual(events, [{ oldSpki, newSpki }]);
       assert.equal(storedKeyPin(path.join(s.dir, 'cert-key.json'), key), newSpki);
       r.stop();
     });
@@ -352,6 +391,222 @@ describe('AcmeManager', () => {
   });
 });
 
+describe('AcmeManager: what a CA returns, timers and races', () => {
+  const issuing = (fn) => ({ calls: [], factory: () => ({ issue: fn }) });
+  const leafFor = (keyPem, { names = ['mcp.kl.example.com'], from = clock.now, days = 90 } = {}) =>
+    issueCert(ca, { dnsNames: names, keyPem, notBefore: from, notAfter: from + days * DAY }).cert;
+  const GARBAGE = '-----BEGIN CERTIFICATE-----\nAAAAAAAA\n-----END CERTIFICATE-----\n';
+
+  it('a chain whose trailing PEM cannot be loaded is refused before anything is written', async () => {
+    const { m, dir } = manager({ acme: issuing(async ({ keyPem }) => leafFor(keyPem) + GARBAGE) });
+    await m.start();
+    assert.equal(m.currentContext(), null);
+    assert.equal(m.status().failures, 1);
+    assert.ok(!fs.existsSync(path.join(dir, 'cert.json')), 'never written, so a restart cannot brick');
+    m.stop();
+  });
+
+  it('a stored cert.json that cannot be installed is reissued with the stable key, not a start failure', async () => {
+    const { m, dir, key, acme } = manager();
+    await m.start();
+    m.stop();
+    const stable = m.leafSpki();
+    const certFile = path.join(dir, 'cert.json');
+    writeStoredCert(certFile, m.certificate().chain + GARBAGE);
+    const r = manager({ dir, key, acme }).m;
+    await r.start();
+    assert.equal(acme.calls.length, 2, 'reissued');
+    assert.equal(r.leafSpki(), stable);
+    assert.equal(JSON.parse(fs.readFileSync(certFile, 'utf8')).spki, stable);
+    r.stop();
+  });
+
+  it('a cert.json for another key is replaced by a certificate for the stable key', async () => {
+    const { m, dir, key, acme } = manager();
+    await m.start();
+    m.stop();
+    const stable = m.leafSpki();
+    writeStoredCert(path.join(dir, 'cert.json'), leafFor(newKeyPem()));
+    const r = manager({ dir, key, acme }).m;
+    const logs = captureLogs();
+    try { await r.start(); } finally { logs.restore(); }
+    assert.ok(logs.records.some((x) => /does not match the stable key/.test(x.message)), 'recognised as a key mismatch, not an unloadable file');
+    assert.equal(acme.calls.length, 2);
+    assert.equal(r.leafSpki(), stable);
+    r.stop();
+  });
+
+  it('refuses a chain that does not cover mcp.<domain>', async () => {
+    const { m } = manager({ acme: issuing(async ({ keyPem }) => leafFor(keyPem, { names: ['other.example.com'] })) });
+    await m.start();
+    assert.equal(m.currentContext(), null);
+    assert.match(m.status().last_error, /does not cover mcp\.kl\.example\.com/);
+    m.stop();
+  });
+
+  it('refuses a chain that is not yet valid or already expired', async () => {
+    for (const [from, days] of [[clock.now + DAY, 90], [clock.now - 91 * DAY, 90]]) {
+      const { m } = manager({ acme: issuing(async ({ keyPem }) => leafFor(keyPem, { from, days })) });
+      await m.start();
+      assert.equal(m.currentContext(), null);
+      assert.match(m.status().last_error, /not valid now/);
+      m.stop();
+    }
+  });
+
+  it('refuses a renewal that expires no later than the current certificate', async () => {
+    let from = clock.now;
+    const { m } = manager({ acme: issuing(async ({ keyPem }) => leafFor(keyPem, { from })) });
+    await m.start();
+    const current = m.certificate();
+    clock.now += 61 * DAY;
+    from = current.notBefore; // the same validity again
+    await m.check();
+    assert.equal(m.certificate().notAfter, current.notAfter);
+    assert.match(m.status().last_error, /no later than the current one/);
+    from = clock.now;
+    await m.reload();
+    assert.ok(m.certificate().notAfter > current.notAfter);
+    m.stop();
+  });
+
+  it('an issuance that stalls fails at the deadline, clears its challenge and ignores late callbacks', async () => {
+    let late;
+    const { m } = manager({
+      issueDeadlineMs: 30,
+      acme: issuing(({ commonName, onChallenge }) => {
+        onChallenge(commonName, selfSigned({ commonName }));
+        late = () => onChallenge(commonName, selfSigned({ commonName }));
+        return new Promise(() => {});
+      })
+    });
+    await m.start();
+    assert.match(m.status().last_error, /did not finish within/);
+    assert.equal(m.status().failures, 1);
+    assert.equal(m.challengeFor('mcp.kl.example.com'), null);
+    late();
+    assert.equal(m.challengeFor('mcp.kl.example.com'), null, 'a callback after the deadline serves nothing');
+    m.stop();
+  });
+
+  it('schedules the next check at 12 h, or when the backoff ends; stop() cancels it', async () => {
+    const DEADLINE = 777777;
+    const timers = {
+      set: [],
+      cleared: [],
+      setTimeout(fn, ms) { const h = { fn, ms }; if (ms !== DEADLINE) this.set.push(h); return h; },
+      clearTimeout(h) { this.cleared.push(h); }
+    };
+    let failing = false;
+    const acme = fakeAcme({ fail: () => failing });
+    const { m } = manager({ acme, timers, issueDeadlineMs: DEADLINE });
+    await m.start();
+    assert.equal(timers.set.at(-1).ms, CHECK_EVERY_MS);
+    failing = true;
+    clock.now += 61 * DAY;
+    timers.set.at(-1).fn(); // the timer fires a check
+    await m.inFlight;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(acme.calls.length, 2);
+    assert.equal(timers.set.at(-1).ms, 3600000, 'retried when the 1 h backoff ends');
+    const armed = timers.set.at(-1);
+    m.stop();
+    assert.ok(timers.cleared.includes(armed), 'stop() cancels the pending check');
+    const count = timers.set.length;
+    await m.reload();
+    assert.equal(timers.set.length, count, 'nothing is scheduled once stopped');
+  });
+
+  it('a second start() is refused', async () => {
+    const { m } = manager();
+    const first = m.start();
+    await assert.rejects(m.start(), /already started/);
+    await first;
+    await assert.rejects(m.start(), /already started/);
+    m.stop();
+  });
+
+  it('rotateKey waits for an in-flight renewal, then rotates', async () => {
+    const order = [];
+    let release;
+    let blockNext = false;
+    const { m } = manager({
+      acme: issuing(async ({ keyPem }) => {
+        const spki = pinOfKey(keyPem);
+        order.push(`start ${spki}`);
+        if (blockNext) { blockNext = false; await new Promise((resolve) => { release = resolve; }); }
+        order.push(`end ${spki}`);
+        return leafFor(keyPem, { from: clock.now });
+      })
+    });
+    await m.start();
+    const stable = m.leafSpki();
+    clock.now += 61 * DAY;
+    blockNext = true;
+    const renewal = m.check();
+    const rotation = m.rotateKey();
+    await new Promise((resolve) => setImmediate(resolve));
+    try {
+      assert.deepEqual(order.slice(2), [`start ${stable}`], 'the rotation has not started while the renewal runs');
+    } finally {
+      release(); // never leave a stalled issuance (and its deadline timer) behind
+    }
+    await renewal;
+    const r = await rotation;
+    assert.equal(r.oldSpki, stable);
+    assert.deepEqual(order.slice(2, 4), [`start ${stable}`, `end ${stable}`]);
+    assert.equal(order[4], `start ${r.newSpki}`);
+    assert.equal(m.leafSpki(), r.newSpki);
+    m.stop();
+  });
+
+  it('a throwing alert sink does not break the renewal path', async () => {
+    let failing = false;
+    const alerts = { raise() { throw new Error('sink down'); } };
+    const logs = captureLogs();
+    try {
+      const { m } = manager({ alerts, acme: fakeAcme({ fail: () => failing }) });
+      await m.start();
+      failing = true;
+      clock.now += 80 * DAY;
+      await m.check();
+      assert.equal(m.status().failures, 1);
+      assert.ok(m.currentContext());
+      assert.ok(logs.records.some((r) => r.level === 'error' && /could not raise acme_renewal_failing/.test(r.message)));
+      m.stop();
+    } finally {
+      logs.restore();
+    }
+  });
+
+  it('each challenge-host filter refuses evil.example.com on its own', async () => {
+    let inIssue = null;
+    const { m } = manager({
+      acme: issuing(async ({ commonName, keyPem, onChallenge, onChallengeDone }) => {
+        onChallenge('evil.example.com‮\n[frontdoor] forged', selfSigned({ commonName: 'evil.example.com' }));
+        onChallenge('evil.example.com', selfSigned({ commonName: 'evil.example.com' }));
+        inIssue = { stored: [...m.challenges.keys()] };
+        m.challenges.set('evil.example.com', {});
+        inIssue.served = m.challengeFor('evil.example.com');
+        onChallengeDone(commonName);
+        return leafFor(keyPem);
+      })
+    });
+    const logs = captureLogs();
+    try {
+      await m.start();
+    } finally {
+      logs.restore();
+    }
+    assert.deepEqual(inIssue.stored, [], 'onChallenge stores nothing for another name');
+    assert.equal(inIssue.served, null, 'challengeFor serves nothing for another name, even when stored');
+    const warned = logs.records.filter((r) => /ignoring an ACME challenge/.test(r.message));
+    assert.equal(warned.length, 2);
+    for (const r of warned) assert.doesNotMatch(r.message, /[‮\n]/, 'the CA-supplied name is redacted');
+    m.stop();
+  });
+});
+
 describe('createAcmeAdapter', () => {
   const realAcme = require('acme-client');
   const authz = (type) => ({ identifier: { value: 'mcp.kl.example.com' }, challenges: [{ type }] });
@@ -390,6 +645,11 @@ describe('createAcmeAdapter', () => {
     assert.equal(served[0][1], 'mcp.kl.example.com');
     assert.ok(new crypto.X509Certificate(served[0][2].cert));
     assert.deepEqual(served[1], ['done', 'mcp.kl.example.com']);
+  });
+
+  it('bounds every request to the CA with a 30 s timeout', () => {
+    createAcmeAdapter({ directoryUrl: 'https://acme.example.com/directory', accountKeyPem: newKeyPem() });
+    assert.equal(realAcme.axios.defaults.timeout, 30000);
   });
 
   it('refuses any other challenge type', async () => {
@@ -441,6 +701,25 @@ describe('OperatorTls', () => {
     assert.equal(alerts.raised[0][1].subject, 'mcp.kl.example.com');
     assert.equal(t.status().source, 'operator');
     await assert.rejects(t.rotateKey(), /frontdoor\.acme/);
+    t.stop();
+  });
+
+  it('installs the new certificate before alerting, survives a throwing sink, and refuses a second start()', () => {
+    const dir = tmp();
+    const write = (c) => { fs.writeFileSync(path.join(dir, 'mcp.pem'), c.cert); fs.writeFileSync(path.join(dir, 'mcp.key'), c.key); };
+    write(issueCert(ca, { dnsNames: ['mcp.kl.example.com'] }));
+    const seen = [];
+    const alerts = { raise(kind) { seen.push([kind, t.leafSpki()]); throw new Error('sink down'); } };
+    const t = new OperatorTls({ host: 'mcp.kl.example.com', certFile: path.join(dir, 'mcp.pem'), keyFile: path.join(dir, 'mcp.key'), alerts });
+    t.start();
+    assert.throws(() => t.start(), /already started/);
+    const second = issueCert(ca, { dnsNames: ['mcp.kl.example.com'] });
+    write(second);
+    const logs = captureLogs();
+    try { t.reload(); } finally { logs.restore(); }
+    assert.deepEqual(seen, [['tls_key_changed', relaySpkiPin(second.cert)]], 'the alert sees the new certificate already installed');
+    assert.equal(t.leafSpki(), relaySpkiPin(second.cert));
+    assert.ok(logs.records.some((r) => r.level === 'error' && /could not raise tls_key_changed/.test(r.message)));
     t.stop();
   });
 
