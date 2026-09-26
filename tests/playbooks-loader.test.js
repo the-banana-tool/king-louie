@@ -187,6 +187,65 @@ describe('no git process for a plain case', () => {
     assert.strictEqual(e.state, 'invalid');
     assert.deepStrictEqual(calls, [['ls-tree', '-z', 'HEAD', 'playbooks/']]);
   });
+
+  it('a folder holding a .git entry, with no .gitmodules, asks git exactly once', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const dir = await caseDir();
+    writePackage(path.join(dir, 'playbooks', 'land-sale'));
+    fs.writeFileSync(path.join(dir, 'playbooks', 'land-sale', '.git'), 'gitdir: ../../.git/modules/land-sale\n');
+    const calls = countGitSync(t);
+    assert.strictEqual(new PlaybookLoader(dir).get('land-sale').mode, 'vendored');
+    assert.deepStrictEqual(calls, [['ls-tree', '-z', 'HEAD', 'playbooks/']]);
+  });
+
+  it('list() starts over on each call: one loader sees a later gitlink', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const dir = await caseDir([{ name: 'remote-pb', version: '1.0.0', mode: 'submodule' }]);
+    fs.mkdirSync(path.join(dir, 'playbooks', 'remote-pb'));
+    const loader = new PlaybookLoader(dir);
+    const before = loader.get('remote-pb');
+    assert.strictEqual(before.mode, 'vendored');
+    assert.strictEqual(before.state, 'invalid');
+    const sha = '4b1e0c9d2f7a8b6e5d4c3b2a1f0e9d8c7b6a5f4e';
+    await git.runGit(dir, ['update-index', '--add', '--cacheinfo', `160000,${sha},playbooks/remote-pb`]);
+    await git.runGit(dir, ['commit', '-q', '-m', 'gitlink'], { env: GIT_ID });
+    const after = loader.get('remote-pb');
+    assert.strictEqual(after.mode, 'submodule');
+    assert.strictEqual(after.state, 'unavailable');
+  });
+});
+
+describe('names that differ only in case', () => {
+  const caseInsensitive = (dir) => fs.existsSync(path.join(dir, 'CASE.YAML'));
+
+  it('a pinned land-sale does not match a Land-Sale folder', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const dir = await caseDir([{ name: 'land-sale', version: '1.2.0' }]);
+    writePackage(path.join(dir, 'playbooks', 'Land-Sale'));
+    const byName = Object.fromEntries(new PlaybookLoader(dir).list().map((e) => [e.name, e]));
+    if (caseInsensitive(dir)) {
+      assert.strictEqual(byName['land-sale'].state, 'invalid');
+      assert.strictEqual(byName['land-sale'].reason, 'playbooks/land-sale differs only in case from the folder on disk');
+    } else {
+      assert.strictEqual(byName['land-sale'].state, 'missing');
+    }
+    assert.strictEqual(byName['land-sale'].package, null);
+    assert.strictEqual(byName['Land-Sale'].state, 'invalid');
+  });
+
+  it('a gitlink playbooks/Remote-PB makes a pinned remote-pb invalid, never vendored', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const dir = await caseDir([{ name: 'remote-pb', version: '1.2.0' }]);
+    const sha = '4b1e0c9d2f7a8b6e5d4c3b2a1f0e9d8c7b6a5f4e';
+    fs.writeFileSync(path.join(dir, '.gitmodules'), '[submodule "remote-pb"]\n\tpath = playbooks/Remote-PB\n\turl = https://example.com/playbooks/remote-pb.git\n');
+    await git.runGit(dir, ['update-index', '--add', '--cacheinfo', `160000,${sha},playbooks/Remote-PB`]);
+    await git.runGit(dir, ['commit', '-q', '-m', 'gitlink'], { env: GIT_ID });
+    writePackage(path.join(dir, 'playbooks', 'remote-pb'), { 'playbook.yaml': PLAYBOOK_YAML.replace('name: land-sale', 'name: remote-pb') });
+    const e = new PlaybookLoader(dir).get('remote-pb');
+    assert.strictEqual(e.state, 'invalid');
+    assert.strictEqual(e.reason, 'gitlink playbooks/Remote-PB differs only in case from playbooks/remote-pb');
+    assert.strictEqual(e.package, null);
+  });
 });
 
 describe('submodules are gitlinks only', () => {
@@ -309,6 +368,10 @@ describe('parseGitmodules', () => {
       'https://user:secret@example.com/a.git',
       'https://example.com/a b.git',
       'https://example.com/a.git\u0000x',
+      'https://example.com/‮git.a',
+      'https://exa​mple.com/a.git',
+      'https://example.com/a\u0085.git',
+      'https://exämple.com/a.git',
       'https://'
     ];
     for (const url of bad) {
@@ -320,6 +383,25 @@ describe('parseGitmodules', () => {
   it('refuses a .gitmodules over the size limit without parsing it', () => {
     const text = `[submodule "a"]\n\tpath = playbooks/a\n\turl = https://example.com/a.git\n${'#'.repeat(GITMODULES_MAX_BYTES)}`;
     assert.throws(() => parseGitmodules(text), (err) => err.code === 'GITMODULES_TOO_LARGE');
+  });
+
+  it('a .gitmodules that is a symbolic link is not read', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const dir = await caseDir([{ name: 'remote-pb', version: '1.0.0', mode: 'submodule' }]);
+    const target = path.join(tmp(), 'gitmodules');
+    fs.writeFileSync(target, '[submodule "remote-pb"]\n\tpath = playbooks/remote-pb\n\turl = https://example.com/playbooks/remote-pb.git\n');
+    try {
+      fs.symlinkSync(target, path.join(dir, '.gitmodules'), 'file');
+    } catch (err) {
+      if (err.code === 'EPERM') return t.skip('creating a file symlink needs a privilege this account lacks');
+      throw err;
+    }
+    const sha = '4b1e0c9d2f7a8b6e5d4c3b2a1f0e9d8c7b6a5f4e';
+    await git.runGit(dir, ['update-index', '--add', '--cacheinfo', `160000,${sha},playbooks/remote-pb`]);
+    await git.runGit(dir, ['commit', '-q', '-m', 'gitlink'], { env: GIT_ID });
+    const e = new PlaybookLoader(dir).get('remote-pb');
+    assert.strictEqual(e.state, 'unavailable');
+    assert.deepStrictEqual(e.submodule, { url: null, commit: sha });
   });
 
   it('an oversized .gitmodules in a case leaves the remote unknown', async (t) => {

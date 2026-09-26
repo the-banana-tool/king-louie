@@ -23,13 +23,15 @@ const URL_MAX_LENGTH = 2048;
 const LS_TREE_ARGS = Object.freeze(['ls-tree', '-z', 'HEAD', 'playbooks/']);
 
 // A submodule url is kept only when it is a plain https:// or ssh:// URL with
-// a host and no password. Everything else (ext::, fd::, file://, local
-// paths, scp-like "host:path", a leading "-" that git could read as an
-// option, http, git://, whitespace or control characters) becomes null. The
-// url is shown to the owner; the loader never passes it to git.
+// a host and no password, written in printable ASCII only. Everything else
+// (ext::, fd::, file://, local paths, scp-like "host:path", a leading "-"
+// that git could read as an option, http, git://, whitespace, control
+// characters, and any non-ASCII character such as a bidi override that
+// would make the url read differently on screen) becomes null. The url is
+// shown to the owner; the loader never passes it to git.
 function safeSubmoduleUrl(value) {
   if (typeof value !== 'string' || value.length === 0 || value.length > URL_MAX_LENGTH) return null;
-  if (/[\s\u0000-\u001f\u007f]/.test(value) || value.startsWith('-')) return null;
+  if (!/^[\x21-\x7e]+$/.test(value) || value.startsWith('-')) return null;
   if (!/^(https|ssh):\/\//i.test(value)) return null;
   let url;
   try {
@@ -110,6 +112,7 @@ class PlaybookLoader {
     this.knownCaseTypes = Array.isArray(knownCaseTypes) ? knownCaseTypes : null;
     this.meta = meta;
     this._links = null;
+    this._diskNames = undefined;
   }
 
   _readMeta() {
@@ -146,6 +149,22 @@ class PlaybookLoader {
       if (err.code !== 'ENOENT') log.warn(`Could not list ${this.playbooksDir}: ${err.message}`);
       return [];
     }
+  }
+
+  // Every name readdir returns in playbooks/ (exact spelling), or null when
+  // it can't be listed. Cached for one list() call.
+  _namesOnDisk() {
+    if (this._diskNames !== undefined) return this._diskNames;
+    let names = null;
+    if (!this._rootProblem()) {
+      try {
+        names = new Set(fs.readdirSync(this.playbooksDir));
+      } catch {
+        names = null;
+      }
+    }
+    this._diskNames = names;
+    return names;
   }
 
   _readGitmodules(file) {
@@ -212,6 +231,7 @@ class PlaybookLoader {
 
   list() {
     this._links = null;
+    this._diskNames = undefined;
     const meta = this._readMeta();
     const pinned = Array.isArray(meta.playbooks) ? meta.playbooks.filter((p) => isMap(p) && typeof p.name === 'string') : [];
     const names = [];
@@ -262,8 +282,22 @@ class PlaybookLoader {
     if (links[rel]) {
       entry.mode = 'submodule';
       entry.submodule = { url: modules[rel] || null, commit: links[rel] };
+    } else {
+      // A gitlink recorded as playbooks/Remote-PB lands in the same folder
+      // as remote-pb on a case-insensitive filesystem; it must not pass as
+      // a vendored copy.
+      const lower = rel.toLowerCase();
+      const other = Object.keys(links).find((k) => k.toLowerCase() === lower);
+      if (other) return invalid(`gitlink ${other} differs only in case from playbooks/${name}`);
     }
     const st = lstatOrNull(entry.dir);
+    // On a case-insensitive filesystem lstat("land-sale") finds "Land-Sale";
+    // only the exact spelling counts.
+    if (st) {
+      const onDisk = this._namesOnDisk();
+      if (!onDisk) return invalid('playbooks could not be listed');
+      if (!onDisk.has(name)) return invalid(`playbooks/${name} differs only in case from the folder on disk`);
+    }
     const notCheckedOut = `submodule not checked out (remote ${entry.submodule?.url || 'unknown'}); run "git submodule update --init" in the case`;
     if (!st) {
       entry.state = entry.submodule ? 'unavailable' : 'missing';
