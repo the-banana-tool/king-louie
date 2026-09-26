@@ -6,7 +6,7 @@
 // writes, chowns or unlinks inside approvals/ itself.
 //
 // Parent → child: { type: 'start', dataDir, who, pollMs }
-//                 { type: 'call', id, method, params, timeoutMs }
+//                 { type: 'call', id, method, params, timeoutMs, service? }
 //                 { type: 'stop' }
 // Child → parent: { type: 'ready', link }
 //                 { type: 'reply', id, ok: true, result } | { type: 'reply', id, ok: false, error: { code, message } }
@@ -60,7 +60,9 @@ process.on('message', (msg) => {
     return;
   }
   if (msg.type === 'call' && courier) {
-    courier.call(msg.method, msg.params || {}, { timeoutMs: msg.timeoutMs })
+    // service: the running service's own handler (no relay link needed).
+    const request = msg.service === true ? courier.callService.bind(courier) : courier.call.bind(courier);
+    request(msg.method, msg.params || {}, { timeoutMs: msg.timeoutMs })
       .then((result) => send({ type: 'reply', id: msg.id, ok: true, result: result === undefined ? null : result }))
       .catch((err) => send({ type: 'reply', id: msg.id, ok: false, error: { code: String((err && err.code) || 'error'), message: String(err && err.message) } }));
     return;

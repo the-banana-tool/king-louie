@@ -35,6 +35,10 @@ const MAX_CODES = 1000;
 // (`too_many_codes`) until one expires or is used; nothing is evicted, so a
 // flood never silently drops a code the owner is about to type.
 const MAX_LIVE_CODES = 100;
+// Codes the admin console issues have their own small pool (Task 30 carry):
+// approver phones filling every phone slot must never lock the console out,
+// and the console cannot fill the phones' slots either.
+const MAX_CONSOLE_LIVE_CODES = 10;
 const MAX_PAIRINGS = 1000;
 const MAX_NONCES = 16;
 const MAX_CAPABILITIES = 32;
@@ -95,7 +99,8 @@ function uniqueBy(list, key) {
 
 class PairingService {
   constructor({ file, registry, identity, approverStore, frontdoorHost, meshUrl, meshCertFingerprint, alerts = null, auditLedger = null,
-    notify = () => {}, now = Date.now, ttlMs = TTL_MS, maxAttempts = MAX_ATTEMPTS, maxLiveCodes = MAX_LIVE_CODES, writeFile = writeFileAtomic } = {}) {
+    notify = () => {}, now = Date.now, ttlMs = TTL_MS, maxAttempts = MAX_ATTEMPTS, maxLiveCodes = MAX_LIVE_CODES,
+    maxConsoleLiveCodes = MAX_CONSOLE_LIVE_CODES, writeFile = writeFileAtomic } = {}) {
     // Fail closed: every dependency that decides who may enrol is required.
     if (typeof file !== 'string' || file === '') throw new TypeError('PairingService needs its pairing.json path');
     if (!registry || typeof registry.byName !== 'function' || typeof registry.addSigned !== 'function') throw new TypeError('PairingService needs the node registry');
@@ -118,6 +123,7 @@ class PairingService {
     this.ttlMs = ttlMs;
     this.maxAttempts = maxAttempts;
     this.maxLiveCodes = maxLiveCodes;
+    this.maxConsoleLiveCodes = maxConsoleLiveCodes;
     this.writeFile = writeFile;
     this.codes = [];
     this.pairings = new Map();
@@ -236,10 +242,14 @@ class PairingService {
     this.sweep();
     const t = this.now();
     // A new code for a name replaces that name's code, so it never counts.
-    const live = this.codes.filter((c) => c.expires_at_ms >= t && c.node_name !== nodeName);
-    if (live.length >= this.maxLiveCodes) {
+    // Console and phone codes are counted against separate caps.
+    const fromConsole = by === 'console';
+    const cap = fromConsole ? this.maxConsoleLiveCodes : this.maxLiveCodes;
+    const live = this.codes.filter((c) => c.expires_at_ms >= t && c.node_name !== nodeName && (c.by === 'console') === fromConsole);
+    if (live.length >= cap) {
       const soonest = Math.min(...live.map((c) => c.expires_at_ms));
-      throw Object.assign(err('too_many_codes', `at most ${this.maxLiveCodes} pairing codes can be live at once; wait for one to expire`), {
+      const who = fromConsole ? 'console ' : '';
+      throw Object.assign(err('too_many_codes', `at most ${cap} ${who}pairing codes can be live at once; wait for one to expire`), {
         retryAfterS: Math.max(1, Math.ceil((soonest - t) / 1000))
       });
     }
@@ -438,4 +448,4 @@ class PairingService {
   }
 }
 
-module.exports = { PairingService, TTL_MS };
+module.exports = { PairingService, TTL_MS, MAX_LIVE_CODES, MAX_CONSOLE_LIVE_CODES };

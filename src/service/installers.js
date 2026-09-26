@@ -580,8 +580,10 @@ function renderSystemdUnit({ nodePath, entryPath, dataDir, user, profile = 'agen
     'RestartSec=5',
     `LoadCredential=kl-master-key:${linuxCredPath(dataDir)}`,
     'NoNewPrivileges=yes',
+    // The front door binds 443 as its service user (fleet stage 4 §3.14).
+    ...(profile === 'frontdoor' ? ['AmbientCapabilities=CAP_NET_BIND_SERVICE', 'CapabilityBoundingSet=CAP_NET_BIND_SERVICE'] : []),
     'ProtectSystem=strict',
-    `ProtectHome=${profile === 'runbook' ? 'yes' : 'read-only'}`,
+    `ProtectHome=${profile === 'agent' ? 'read-only' : 'yes'}`,
     'PrivateTmp=yes',
     `ReadWritePaths=${dataDir}`,
     'Environment=NODE_ENV=production',
@@ -669,6 +671,9 @@ function renderWindowsTaskXml({ nodePath, entryPath, dataDir, profile = 'agent' 
 
 function planInstall({ platform = process.platform, nodePath = process.execPath, entryPath, dataDir, user, profile = 'agent' }) {
   assertValidProfile(profile);
+  if (profile === 'frontdoor' && platform !== 'linux') {
+    throw new Error('install --profile frontdoor is Linux only: the front door binds 443 through CAP_NET_BIND_SERVICE in its systemd unit');
+  }
   dataDir = dataDir || defaultServiceDataDir({ platform });
 
   let steps;

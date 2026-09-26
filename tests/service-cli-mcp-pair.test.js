@@ -128,15 +128,14 @@ describe('service CLI: mcp', () => {
 });
 
 describe('service CLI: pair', () => {
-  it('prints usage without a front-door URL, and no longer offers --code', async () => {
+  it('prints usage without a front-door URL; the front-door flags belong to https:// only', async () => {
     const io = streamIo();
     assert.equal(await main(['pair'], io), 2);
-    assert.match(io.text.err, /Usage: king-louie-service pair <front-door-url>/);
-    assert.doesNotMatch(io.text.err, /--code/);
+    assert.match(io.text.err, /Usage: king-louie-service pair <front-door-url> \[--code CODE\] \[--ca-file PEM\] \[--yes-fingerprint "kl-…"\]/);
 
-    const withCode = streamIo();
-    assert.equal(await main(['pair', 'https://door.example', '--code', '123'], withCode), 2);
-    assert.match(withCode.text.err, /Unknown flag "--code"/);
+    const relayCode = streamIo();
+    assert.equal(await main(['pair', 'wss://10.0.0.5:18795', '--code', '123'], relayCode), 2);
+    assert.match(relayCode.text.err, /--code, --ca-file and --yes-fingerprint are for https:\/\/ front doors/);
   });
 
   it('refuses while the service is running on the data dir, and writes nothing', async () => {
@@ -149,21 +148,20 @@ describe('service CLI: pair', () => {
     assert.deepEqual(fs.readdirSync(dataDir), ['service.pid']);
   });
 
-  it('shows the node identity, says pairing is not available yet, and does not wait for input', async () => {
+  it('shows the node identity and refuses a URL that is not https://mcp.<domain>, without waiting for input', async () => {
     const { dataDir } = layout();
     // stdin is never ended: a command that waited for it would hang here.
     const io = streamIo();
-    assert.equal(await main(['pair', 'https://door.example', '--data-dir', dataDir], io), 1);
+    assert.equal(await main(['pair', 'https://door.example', '--data-dir', dataDir], io), 2);
     assert.match(io.text.out, /^Node Name: unnamed-node$/m);
     const nodeId = /^Node ID: (kl-[a-z2-7]{16})$/m.exec(io.text.out)?.[1];
     assert.ok(nodeId, io.text.out);
-    assert.match(io.text.out, /^TLS Fingerprint: \S+$/m);
-    assert.match(io.text.err, /not available yet.*stage 4/);
-    assert.doesNotMatch(io.text.out + io.text.err, /Pairing request initiated|Enter one-time pairing code/);
+    assert.match(io.text.out, /^Node fingerprint: kl-[a-z2-7]{4} [a-z2-7]{4} [a-z2-7]{4} [a-z2-7]{4}$/m);
+    assert.match(io.text.err, /A front door is reached at https:\/\/mcp\.<domain>, not https:\/\/door\.example/);
 
     // The identity was saved, so a second run reports the same node.
     const again = streamIo();
-    assert.equal(await main(['pair', 'https://door.example', '--data-dir', dataDir], again), 1);
+    assert.equal(await main(['pair', 'https://door.example', '--data-dir', dataDir], again), 2);
     assert.match(again.text.out, new RegExp(`^Node ID: ${nodeId}$`, 'm'));
   });
 });

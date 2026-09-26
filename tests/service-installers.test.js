@@ -1370,3 +1370,22 @@ describe('Windows: the config and approvers dirs are read-only to the service', 
     } finally { removeTempTree(base2); }
   });
 });
+
+describe('the frontdoor unit (fleet stage 4 §3.14)', () => {
+  const base = { nodePath: '/usr/bin/node', entryPath: '/opt/king-louie/bin/king-louie-service.js', dataDir: '/var/lib/king-louie', user: 'king-louie' };
+  it('binds 443 through CAP_NET_BIND_SERVICE and cannot read home directories', () => {
+    const unit = renderSystemdUnit({ ...base, profile: 'frontdoor' });
+    assert.match(unit, /^AmbientCapabilities=CAP_NET_BIND_SERVICE$/m);
+    assert.match(unit, /^CapabilityBoundingSet=CAP_NET_BIND_SERVICE$/m);
+    assert.match(unit, /^ProtectHome=yes$/m);
+    assert.match(unit, /--profile frontdoor$/m);
+    assert.doesNotMatch(renderSystemdUnit({ ...base, profile: 'agent' }), /CAP_NET_BIND_SERVICE/);
+  });
+
+  it('installs on Linux only', () => {
+    for (const platform of ['darwin', 'win32']) {
+      assert.throws(() => planInstall({ platform, ...base, profile: 'frontdoor' }), /install --profile frontdoor is Linux only/);
+    }
+    assert.ok(planInstall({ platform: 'linux', ...base, profile: 'frontdoor' }).length > 0);
+  });
+});

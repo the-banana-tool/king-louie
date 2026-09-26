@@ -174,7 +174,9 @@ class CourierProxy extends EventEmitter {
     }
   }
 
-  call(method, params = {}, { timeoutMs = 10000 } = {}) {
+  // service: true asks the running service's own handler (FileCourier
+  // #callService, the front door's admin commands), which needs no relay link.
+  call(method, params = {}, { timeoutMs = 10000, service = false } = {}) {
     if (this.dead) return Promise.reject(this.dead);
     const id = this.nextId;
     this.nextId += 1;
@@ -187,7 +189,7 @@ class CourierProxy extends EventEmitter {
       }, timeoutMs + 5000);
       this.pending.set(id, { resolve, reject, timer });
       try {
-        this.child.send({ type: 'call', id, method, params, timeoutMs });
+        this.child.send({ type: 'call', id, method, params, timeoutMs, ...(service === true ? { service: true } : {}) });
       } catch (err) {
         this.pending.delete(id);
         clearTimeout(timer);

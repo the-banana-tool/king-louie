@@ -2,11 +2,11 @@
 const { defaultServiceDataDir } = require('../platform/paths');
 
 const HELP = `Usage:
-  king-louie-service run [--data-dir DIR] [--profile agent|runbook]
+  king-louie-service run [--data-dir DIR] [--profile agent|runbook|frontdoor]
   king-louie-service status [--data-dir DIR]
   king-louie-service doctor [--data-dir DIR]
   king-louie-service mcp [--data-dir DIR]
-  king-louie-service pair <front-door-url> [--data-dir DIR]
+  king-louie-service pair <front-door-url> [--code CODE] [--ca-file PEM] [--yes-fingerprint "kl-…"] [--data-dir DIR]
   king-louie-service token set <provider> [--data-dir DIR]     (value read from stdin)
   king-louie-service vault set <key> [--data-dir DIR]          (value read from stdin)
   king-louie-service channel list <channel> [--data-dir DIR]
@@ -22,6 +22,7 @@ const HELP = `Usage:
   king-louie-service enroll-device [--data-dir DIR]              (admin: pair a phone approver)
   king-louie-service device list|revoke <device-id>|apply [--yes] [--data-dir DIR]
   king-louie-service relay run|code <node-name>|nodes|remove-node <node-name>|qr [--data-dir DIR]
+  king-louie-service frontdoor enroll-device|code <node-name> [--confirm]|nodes|remove-node <node-name>|rotate-tls-key [--data-dir DIR]
 
 A chat channel with an empty allowlist refuses every sender, and a channel
 approval is denied unless "channel approval" names an owner chat that is not
@@ -34,9 +35,9 @@ const CHANNEL_HELP = `Usage: king-louie-service channel list <channel> [--data-d
        king-louie-service channel approval <channel> (<chat-id> | --clear) [--data-dir DIR]
 `;
 
-const VALUE_FLAGS = new Set(['data-dir', 'profile', 'user', 'from']);
+const VALUE_FLAGS = new Set(['data-dir', 'profile', 'user', 'from', 'code', 'ca-file', 'yes-fingerprint']);
 // Flags that must never carry a value, whichever form produced it.
-const BOOLEAN_FLAGS = new Set(['dry-run', 'group', 'clear', 'yes']);
+const BOOLEAN_FLAGS = new Set(['dry-run', 'group', 'clear', 'yes', 'confirm']);
 
 function parseArgs(argv) {
   const positional = [];
@@ -251,6 +252,18 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
     io.stderr.write('Flag "--yes" is only valid for "desktop pair".\n');
     return 2;
   }
+  // The same for the front-door flags (fleet stage 4): a flag another
+  // command would silently ignore is refused.
+  for (const [flag, name] of [['code', 'code'], ['caFile', 'ca-file'], ['yesFingerprint', 'yes-fingerprint']]) {
+    if (flags[flag] !== undefined && command !== 'pair') {
+      io.stderr.write(`Flag "--${name}" is only valid for "pair".\n`);
+      return 2;
+    }
+  }
+  if (flags.confirm && !(command === 'frontdoor' && sub === 'code')) {
+    io.stderr.write('Flag "--confirm" is only valid for "frontdoor code".\n');
+    return 2;
+  }
 
   try {
     switch (command) {
@@ -300,7 +313,7 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
       case 'pair': {
         // The URL is the first word after the command, i.e. `sub` here.
         const { runPair } = require('./commands/pair');
-        return await runPair({ url: sub, dataDir, io });
+        return await runPair({ url: sub, dataDir, io, flags });
       }
 
       case 'enroll-device': {
@@ -316,6 +329,11 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
       case 'relay': {
         const { runRelayCommand } = require('./commands/relay');
         return await runRelayCommand({ sub, arg, dataDir, io });
+      }
+
+      case 'frontdoor': {
+        const { runFrontDoorCommand } = require('./commands/frontdoor');
+        return await runFrontDoorCommand({ sub, arg, flags, dataDir, io });
       }
 
       case 'channel':

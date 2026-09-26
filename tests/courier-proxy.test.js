@@ -101,6 +101,22 @@ describe('CourierProxy with the real helper process', () => {
     await waitFor(() => proxy.child.exitCode !== null || proxy.child.signalCode !== null, 'the helper to exit');
   });
 
+  it('a service call reaches the service handler with no relay link (the front door admin commands, Task 33)', { skip: ROOT_SKIP }, async () => {
+    const dir = dataDir();
+    fs.rmSync(path.join(dir, 'approvals', 'link.json'));
+    const pump = new CourierPump({ dataDir: dir, relayClient: null, identity: testNodeIdentity(), pollMs: 10,
+      rpcHandler: async (method) => ({ handled: method }) }).start();
+    cleanups.push(() => pump.stop());
+    const proxy = new CourierProxy({ dataDir: dir, pollMs: 10 });
+    try {
+      await proxy.start();
+      await assert.rejects(proxy.call('frontdoor.status', {}, { timeoutMs: 2000 }), (err) => err.code === 'unavailable');
+      assert.deepEqual(await proxy.call('frontdoor.status', {}, { timeoutMs: 5000, service: true }), { handled: 'frontdoor.status' });
+    } finally {
+      proxy.stop();
+    }
+  });
+
   it('a helper killed mid-call fails the call and resolves `died`', async () => {
     const dir = dataDir(); // no pump: the call waits
     const proxy = new CourierProxy({ dataDir: dir, pollMs: 10 });

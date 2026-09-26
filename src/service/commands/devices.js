@@ -65,7 +65,9 @@ async function runEnrollDevice({ dataDir, configDir = adminConfigDir({ dataDir }
     return 1;
   }
   const nodeCfg = loadNodeConfig({ dataDir, adminConfigDir: configDir, ...(deps.storeOptions || {}) });
-  if (!nodeCfg.approvers.relay && !fs.existsSync(path.join(configDir, 'front-door.json'))) {
+  // A front door (fleet stage 4 §3.11) is its own relay: its link.json is
+  // written by the service's self-link.
+  if (nodeCfg.profile !== 'frontdoor' && !nodeCfg.approvers.relay && !fs.existsSync(path.join(configDir, 'front-door.json'))) {
     io.stderr.write(`approvers.relay is not set in ${path.join(configDir, 'node.yaml')}.\n`);
     return 1;
   }

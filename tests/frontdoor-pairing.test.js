@@ -579,6 +579,22 @@ describe('PairingService code limits (Task 30 fix round)', () => {
     assert.ok(p.codes.some((c) => c.node_name === 'n-3'));
   });
 
+  it('console codes have their own cap: phones filling every phone slot never lock the console out (Task 30 carry)', async () => {
+    const t = await setup();
+    const p = build(t, { maxLiveCodes: 2, maxConsoleLiveCodes: 2 });
+    await p.issue('n-1', { by: A.deviceId });
+    await p.issue('n-2', { by: A.deviceId });
+    await assert.rejects(p.issue('n-3', { by: A.deviceId }), (e) => e.code === 'too_many_codes');
+    // Every phone slot is taken; the console still issues.
+    const c1 = await p.issue('c-1', { by: 'console', confirm: 'console' });
+    assert.match(c1.code, /^[a-z]+( [a-z]+){5}$/);
+    await p.issue('c-2', { by: 'console', confirm: 'phone' });
+    // The console's own pool is bounded too, and never eats phone slots.
+    await assert.rejects(p.issue('c-3', { by: 'console' }), (e) => e.code === 'too_many_codes' && /console/.test(e.message));
+    await assert.rejects(p.issue('n-3', { by: A.deviceId }), (e) => e.code === 'too_many_codes');
+    assert.deepEqual(p.codes.map((c) => c.node_name).sort(), ['c-1', 'c-2', 'n-1', 'n-2']);
+  });
+
   it('load keeps the newest codes when the file holds more than the cap', async () => {
     const t = await setup();
     const file = path.join(t.dataDir, 'frontdoor', 'pairing.json');
