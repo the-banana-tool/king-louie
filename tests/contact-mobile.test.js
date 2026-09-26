@@ -254,7 +254,7 @@ describe('mobile contact channel (node side)', () => {
 
   it('refuses a malformed ping and one that did not come over the relay link', async () => {
     const w = await world();
-    for (const bad of [undefined, null, [], {}, w.fg({ at: undefined }), w.fg({ at: 'yesterday' }), w.fg({ at: NaN }), w.fg({ at: Infinity }), w.fg({ deviceId: 'phone-1' }), w.fg({ deviceId: 7 })]) {
+    for (const bad of [undefined, null, [], {}, w.fg({ at: undefined }), w.fg({ at: 'yesterday' }), w.fg({ at: NaN }), w.fg({ at: Infinity }), w.fg({ deviceId: 'phone-1' }), w.fg({ deviceId: 7 }), w.fg({ foreground: 'yes' }), w.fg({ foreground: 1 }), w.fg({ foreground: undefined })]) {
       assert.deepStrictEqual(await w.ping(bad), { ok: false, error: 'malformed' }, JSON.stringify(bad));
     }
     assert.deepStrictEqual(await w.ping(w.fg(), null), { ok: false, error: 'not-linked' });
@@ -262,34 +262,53 @@ describe('mobile contact channel (node side)', () => {
     assert.notStrictEqual(w.presence.presentChannel(), 'mobile');
   });
 
-  it('clamps a future `at` to now and ignores a ping more than two minutes old', async () => {
+  it('ignores a ping more than two minutes old; a future `at` is accepted and never reaches Presence', async () => {
     const w = await world();
     const seen = [];
     w.mobile.presenceTracker = { mobileForeground: (p) => { seen.push(p); return { ok: true }; } };
     const old = new Date(w.now.getTime() - PRESENCE_MAX_AGE_MS - 1000).toISOString();
     assert.deepStrictEqual(await w.ping(w.fg({ at: old })), { ok: true });
     assert.deepStrictEqual(seen, [], 'a stale ping changes nothing');
-    const future = new Date(w.now.getTime() + 24 * 3600 * 1000).toISOString();
-    assert.deepStrictEqual(await w.ping(w.fg({ at: future })), { ok: true });
-    assert.deepStrictEqual(seen, [{ deviceId: w.phone.deviceId, foreground: true }], 'no phone time reaches Presence');
     const edge = new Date(w.now.getTime() - PRESENCE_MAX_AGE_MS).toISOString();
-    w.advance(PRESENCE_MIN_GAP_MS);
-    assert.deepStrictEqual(await w.ping(w.fg({ at: new Date(Date.parse(edge) + PRESENCE_MIN_GAP_MS).toISOString() })), { ok: true });
-    assert.strictEqual(seen.length, 2, 'exactly two minutes old still counts');
+    assert.deepStrictEqual(await w.ping(w.fg({ at: edge })), { ok: true });
+    assert.strictEqual(seen.length, 1, 'exactly two minutes old still counts');
+    const future = new Date(w.now.getTime() + 24 * 3600 * 1000).toISOString();
+    assert.deepStrictEqual(await w.ping(w.fg({ at: future, foreground: false })), { ok: true });
+    assert.deepStrictEqual(seen[1], { deviceId: w.phone.deviceId, foreground: false }, 'no phone time reaches Presence');
+    // A far-future `at` does not freeze the device: a later ping stamped now still applies.
+    w.advance(1000);
+    assert.deepStrictEqual(await w.ping(w.fg({ foreground: true })), { ok: true });
+    assert.strictEqual(seen.length, 3);
   });
 
-  it('rate-limits a device to one state change every 5 s and drops the rest silently', async () => {
+  it('ignores a ping older than the last applied one (out of order delivery)', async () => {
     const w = await world();
     const seen = [];
     w.mobile.presenceTracker = { mobileForeground: (p) => { seen.push(p); return { ok: true }; } };
+    const t0 = w.now.getTime();
+    assert.deepStrictEqual(await w.ping(w.fg({ at: new Date(t0).toISOString(), foreground: false })), { ok: true });
+    w.advance(10000);
+    assert.deepStrictEqual(await w.ping(w.fg({ at: new Date(t0 - 5000).toISOString(), foreground: true })), { ok: true });
+    assert.deepStrictEqual(seen, [{ deviceId: w.phone.deviceId, foreground: false }], 'the older foreground ping arrived late and is ignored');
+    assert.deepStrictEqual(await w.ping(w.fg({ at: new Date(t0 + 10000).toISOString(), foreground: true })), { ok: true });
+    assert.strictEqual(seen.length, 2);
+  });
+
+  it('rate-limits repeats of the same state to one every 5 s; a change of state always applies', async () => {
+    const w = await world();
+    const seen = [];
+    w.mobile.presenceTracker = { mobileForeground: (p) => { seen.push(p.foreground); return { ok: true }; } };
     assert.deepStrictEqual(await w.ping(w.fg()), { ok: true });
-    assert.deepStrictEqual(await w.ping(w.fg({ foreground: false })), { ok: true });
+    assert.deepStrictEqual(await w.ping(w.fg()), { ok: true });
     w.advance(PRESENCE_MIN_GAP_MS - 1);
+    assert.deepStrictEqual(await w.ping(w.fg()), { ok: true });
+    assert.deepStrictEqual(seen, [true], 'repeats inside 5 s are dropped');
     assert.deepStrictEqual(await w.ping(w.fg({ foreground: false })), { ok: true });
-    assert.strictEqual(seen.length, 1);
-    w.advance(1);
-    assert.deepStrictEqual(await w.ping(w.fg({ foreground: false })), { ok: true });
-    assert.deepStrictEqual(seen, [{ deviceId: w.phone.deviceId, foreground: true }, { deviceId: w.phone.deviceId, foreground: false }]);
+    assert.deepStrictEqual(await w.ping(w.fg({ foreground: true })), { ok: true });
+    assert.deepStrictEqual(seen, [true, false, true], 'state changes apply at once');
+    w.advance(PRESENCE_MIN_GAP_MS);
+    assert.deepStrictEqual(await w.ping(w.fg()), { ok: true });
+    assert.deepStrictEqual(seen, [true, false, true, true], 'a repeat after 5 s refreshes');
   });
 
   it('a presence ping never answers, approves, opens or closes a question', async () => {
@@ -316,6 +335,50 @@ describe('mobile contact channel (node side)', () => {
     assert.strictEqual(metas[0].at, w.now.toISOString());
     assert.strictEqual(metas[0].ownerProven, true);
     assert.strictEqual(metas[0].senderId, w.phone.deviceId);
+  });
+
+  it('a signed text answer naming another question\'s #token is refused, and neither question is touched (T17-bound)', async () => {
+    const w = await world();
+    const r = await w.call(w.answer({ answer: { text: `#${w.token2} a` } }));
+    assert.deepStrictEqual(r, { ok: false, error: 'malformed' });
+    const lower = await w.call(w.answer({ answer: { text: `yes, and #${w.token2.toLowerCase()} too` } }));
+    assert.deepStrictEqual(lower, { ok: false, error: 'malformed' });
+    assert.strictEqual(w.answerOf(w.q.id), null);
+    assert.strictEqual(w.answerOf(w.q2.id), null);
+  });
+
+  it('an approval\'s #token in a signed answer to another question never answers the approval (T17-bound)', async () => {
+    const w = await world();
+    const ap = w.runtime.questions(w.info.id).create({ kind: 'approval', urgency: 'high', text: 'Send the offer letter?', options: [{ id: 'approve', label: 'Approve' }, { id: 'reject', label: 'Reject' }] });
+    const apToken = w.router.state.newToken();
+    await w.router.deliver('mobile', [{ caseId: w.info.id, caseTitle: w.info.title, token: apToken, record: ap }]);
+    assert.deepStrictEqual(await w.call(w.answer({ answer: { text: `#${apToken} approve` } })), { ok: false, error: 'malformed' });
+    assert.strictEqual(w.answerOf(ap.id), null);
+    // Router layer alone: a bound reply's text is only the body of its own question.
+    const r = await w.router.handleReply('mobile', w.token, { text: `#${apToken} approve` }, { channel: 'mobile', senderId: w.phone.deviceId, ownerProven: true, bound: true });
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(w.answerOf(ap.id), null, 'the approval is untouched');
+    assert.strictEqual(w.answerOf(w.q.id).text, `#${apToken} approve`, 'the text answered q only, as its body');
+    assert.strictEqual(w.answerOf(w.q2.id), null);
+  });
+
+  it('single-item answers still work: option, free text, and text naming its own token', async () => {
+    const w = await world();
+    assert.strictEqual((await w.call(w.answer({ answer: { text: 'Counter at 45k' } }))).ok, true);
+    assert.strictEqual(w.answerOf(w.q.id).text, 'Counter at 45k');
+    const own = await w.call(w.answer({ question_id: w.q2.id, token: w.token2, answer: { text: `#${w.token2} after the thaw` } }));
+    assert.strictEqual(own.ok, true);
+    assert.strictEqual(w.answerOf(w.q2.id).text, `#${w.token2} after the thaw`);
+  });
+
+  it('only the mobile channel may send a bound reply', async () => {
+    const w = await world();
+    const telegram = { contactCapabilities: () => ({ authenticatedReplies: false }), contactConfigured: () => true };
+    const adapters = new Map([['telegram', telegram], ['mobile', w.mobile]]);
+    const router = new ContactRouter({ state: w.router.state, runtime: w.runtime, adapters, clock: () => w.now });
+    const r = await router.handleReply('telegram', w.token, { text: 'a' }, { channel: 'telegram', senderId: '1', ownerProven: true, bound: true });
+    assert.deepStrictEqual(r, { ok: false, outcome: 'refused: not-bound', ackText: null });
+    assert.strictEqual(w.answerOf(w.q.id), null);
   });
 
   it('the answer shape the apps build (KLProtocol / protocol Questions) passes the node validator', () => {

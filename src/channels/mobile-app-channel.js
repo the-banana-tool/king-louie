@@ -22,6 +22,7 @@ const { seal, nodeSigner } = require('../approvals/envelope');
 const { verifyDeviceEnvelope, NonceCache, bytesSha256 } = require('../approvals/verify-device');
 const messages = require('../approvals/messages');
 const { TOKEN_RE } = require('../cases/contact-format');
+const { TOKEN_IN_TEXT } = require('../cases/contact');
 const { createLogger } = require('../logging');
 
 const SIGNED_AT_SKEW_MS = 300 * 1000;
@@ -30,7 +31,8 @@ const CASE_ID = /^[A-Za-z0-9._-]{1,80}$/;
 const OPTION_ID = /^[a-z0-9-]{1,16}$/;
 const ANSWER_KEYS = ['answer', 'case_id', 'device_id', 'node_id', 'nonce', 'question_id', 'signed_at', 'token', 'type', 'v'];
 // Presence pings (ruling T17-presence): older than this are ignored; one
-// state change per device per PRESENCE_MIN_GAP_MS, extra pings dropped.
+// repeat of the same state per device per PRESENCE_MIN_GAP_MS (a change of
+// state always applies); a ping older than the last applied one is ignored.
 const PRESENCE_MAX_AGE_MS = 2 * 60 * 1000;
 const PRESENCE_MIN_GAP_MS = 5 * 1000;
 // Bounds on the node-signed question (code points).
@@ -126,7 +128,8 @@ class MobileAppChannel extends ChannelPlugin {
     this.clock = clock;
     this.log = log;
     this.replyHandler = null;
-    this.lastPresenceChange = new Map();
+    // deviceId → { foreground, at (ordering key), changedAt (node clock) }.
+    this.lastPresence = new Map();
   }
 
   async initialize() {}
@@ -218,10 +221,9 @@ class MobileAppChannel extends ChannelPlugin {
   // The link method presence.foreground: { deviceId, foreground, at },
   // unsigned (ruling T17-presence). Registered only on the approvals relay
   // link, whose RelayClient answers only its pinned relay peer; `ctx.peer`
-  // is that peer. A future `at` is clamped to now; one more than two minutes
-  // old is ignored. Presence itself is stamped with the node clock. This
-  // touches only Presence (which rung the ladder tries first), never a
-  // question.
+  // is that peer. A ping more than two minutes old, or older than the last
+  // applied one, is ignored. This touches only Presence (which rung the
+  // ladder tries first), never a question.
   async handleForeground(params, ctx) {
     const refuse = (reason) => {
       this.log.debug(`phone presence refused: ${reason}`);
@@ -229,19 +231,24 @@ class MobileAppChannel extends ChannelPlugin {
     };
     if (!ctx || !ctx.peer) return refuse('not-linked');
     const p = params && typeof params === 'object' && !Array.isArray(params) ? params : null;
-    if (!p || typeof p.deviceId !== 'string' || !messages.DEVICE_ID_RE.test(p.deviceId)) return refuse('malformed');
+    if (!p || typeof p.deviceId !== 'string' || !messages.DEVICE_ID_RE.test(p.deviceId) || typeof p.foreground !== 'boolean') return refuse('malformed');
     const atMs = typeof p.at === 'number' ? p.at : (typeof p.at === 'string' ? Date.parse(p.at) : NaN);
     if (!Number.isFinite(atMs)) return refuse('malformed');
     if (!this.approverStore.get(p.deviceId) || !this.approverStore.isActive(p.deviceId)) return refuse('unknown-device');
     if (!this.presenceTracker) return refuse('not_ready');
     const nowMs = this.clock().getTime();
-    const at = Math.min(atMs, nowMs);
-    if (nowMs - at > PRESENCE_MAX_AGE_MS) return { ok: true };
-    const last = this.lastPresenceChange.get(p.deviceId);
-    if (last !== undefined && nowMs - last < PRESENCE_MIN_GAP_MS) return { ok: true };
-    const r = this.presenceTracker.mobileForeground({ deviceId: p.deviceId, foreground: p.foreground === true });
+    // No clamp on `at`: Presence stamps the ping with the node clock, so the
+    // phone's time never reaches it.
+    if (nowMs - atMs > PRESENCE_MAX_AGE_MS) return { ok: true };
+    const last = this.lastPresence.get(p.deviceId);
+    // The ordering key is capped at now, so one far-future `at` cannot make
+    // every later ping look older and freeze this device's presence.
+    const orderAt = Math.min(atMs, nowMs);
+    if (last && orderAt < last.at) return { ok: true };
+    if (last && last.foreground === p.foreground && nowMs - last.changedAt < PRESENCE_MIN_GAP_MS) return { ok: true };
+    const r = this.presenceTracker.mobileForeground({ deviceId: p.deviceId, foreground: p.foreground });
     if (r && r.ok === false) return refuse('not_ready');
-    this.lastPresenceChange.set(p.deviceId, nowMs);
+    this.lastPresence.set(p.deviceId, { foreground: p.foreground, at: orderAt, changedAt: nowMs });
     return { ok: true };
   }
 
@@ -257,13 +264,20 @@ class MobileAppChannel extends ChannelPlugin {
       || found.item.caseId !== m.case_id || found.item.questionId !== m.question_id) {
       return this._refuse('answer', 'unknown_question');
     }
+    // Ruling T17-bound, second layer: free text may name no question but its
+    // own (the router also treats a bound reply's text as the body only).
+    if (m.answer.text !== undefined) {
+      for (const hit of m.answer.text.matchAll(new RegExp(TOKEN_IN_TEXT.source, 'g'))) {
+        if (hit[1].toUpperCase() !== m.token) return this._refuse('answer', 'malformed');
+      }
+    }
     if (!this.replyHandler) return this._refuse('answer', 'not_ready');
     this.nonces.add(m.nonce, bytesSha256(v.bytes));
     const answer = m.answer.option_id ? { optionId: m.answer.option_id } : { text: m.answer.text };
     const now = this.clock();
     const at = Math.min(Date.parse(m.signed_at), now.getTime());
     const result = await this.replyHandler(found.item.token, answer, {
-      channel: 'mobile', senderId: v.deviceId, chatId: null, at: new Date(at).toISOString(), ownerProven: true
+      channel: 'mobile', senderId: v.deviceId, chatId: null, at: new Date(at).toISOString(), ownerProven: true, bound: true
     });
     return { ok: Boolean(result && result.ok), outcome: result ? result.outcome : 'unknown', ack: result ? result.ackText : null };
   }

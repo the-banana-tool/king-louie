@@ -16,6 +16,9 @@ const { createLogger } = require('../logging');
 // allowlist, so a channel added later is refused until it is named here.
 // `mobile` is F3's device-signed phone channel.
 const APP_ANSWER_CHANNELS = Object.freeze(['in-app', 'mobile']);
+// Channels whose adapter binds a reply to one question (meta.bound): only the
+// phone app, whose answers are device-signed over token, case and question.
+const BOUND_CHANNELS = Object.freeze(['mobile']);
 // The channel named in "Answer in King Louie or <channel>" (the phone).
 const AUTHENTICATED_ORDER = ['mobile'];
 const TOKEN_IN_TEXT = /#([0-9A-Za-z]{6})\b/;
@@ -273,6 +276,13 @@ class ContactRouter {
     }
     const caps = adapter.contactCapabilities() || {};
     const text = typeof answer.text === 'string' && answer.text.trim() ? answer.text : null;
+    if (meta.bound === true) {
+      if (!BOUND_CHANNELS.includes(channelId)) {
+        this.log.warn(`contact reply refused: ${channelId} may not send a bound reply`);
+        return { ok: false, outcome: 'refused: not-bound', ackText: null };
+      }
+      return this._applyPairs(channelId, caps, meta, this._boundPairs(channelId, correlationId, answer, text));
+    }
     const textToken = text ? TOKEN_IN_TEXT.exec(text) : null;
     if (caps.requiresToken && !textToken && !(correlationId && answer.optionIndex !== undefined)) {
       return { ok: false, outcome: 'refused: no-token', ackText: this._hint(channelId) };
@@ -306,6 +316,25 @@ class ContactRouter {
       return { ok: false, outcome: 'unparsed', ackText: `Which question? Reply "#${resolved.delivery.batchToken} <n> <answer>".` };
     }
 
+    return this._applyPairs(channelId, caps, meta, pairs);
+  }
+
+  // Ruling T17-bound: a reply bound to exactly one question (the phone app's
+  // device-signed answer; the adapter already matched its signed token, case
+  // and question) answers only that question. Its text is the answer body:
+  // never searched for a #token, never parsed as a batch. { refusal } or pairs.
+  _boundPairs(channelId, correlationId, answer, text) {
+    const resolved = correlationId ? this.state.resolve(correlationId, { channel: channelId }) : null;
+    if (!resolved || !resolved.item || resolved.delivery.channel !== channelId) {
+      return { refusal: { ok: false, outcome: 'unknown', ackText: "I couldn't match that reply to a question. Answer it in King Louie." } };
+    }
+    if (answer.optionId) return [{ item: resolved.item, answer: { optionId: String(answer.optionId) } }];
+    if (text) return [{ item: resolved.item, answer: { text } }];
+    return { refusal: { ok: false, outcome: 'unparsed', ackText: null } };
+  }
+
+  async _applyPairs(channelId, caps, meta, pairs) {
+    if (!Array.isArray(pairs)) return pairs.refusal;
     if (this.presence) this.presence.noteInbound(channelId, clampedAt(meta.at, this.clock()));
     const results = [];
     for (const p of pairs) {
@@ -670,4 +699,4 @@ class ContactRouter {
   }
 }
 
-module.exports = { ContactRouter, conflictFact, conflictAnswered, sameAnswer, answerLabel, appOnly, relayOf };
+module.exports = { ContactRouter, conflictFact, conflictAnswered, sameAnswer, answerLabel, appOnly, relayOf, TOKEN_IN_TEXT };
