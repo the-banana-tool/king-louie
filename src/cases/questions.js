@@ -282,6 +282,17 @@ class QuestionStore {
     return rec;
   }
 
+  // Merges fields into a record's payload (answered or not). `type` and
+  // `key` identify the record and its dedupe, so they never change here.
+  updatePayload(id, fields) {
+    const rec = this._require(id);
+    if (!fields || typeof fields !== 'object' || Array.isArray(fields)) throw new QuestionError('INVALID', 'updatePayload needs an object.', rec);
+    if ('type' in fields || 'key' in fields) throw new QuestionError('INVALID', 'payload type and key cannot change.', rec);
+    rec.payload = { ...(rec.payload || {}), ...fields };
+    this._write(rec);
+    return rec;
+  }
+
   note(id, text) {
     const rec = this._require(id);
     rec.notes = [...(Array.isArray(rec.notes) ? rec.notes : []), { at: this.now().toISOString(), text: String(text) }];

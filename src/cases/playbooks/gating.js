@@ -6,6 +6,11 @@
 const { norm } = require('../jsonl');
 const { BriefError } = require('../brief');
 const { caseTypes } = require('./case-types-bridge');
+// The brief fields an owner's gating answer may fill (spec §3.6). A playbook
+// names the field; only the owner's answer fills it. Never resources (R41),
+// materiality, safeDefaults or a case type's own fields. why and
+// alreadyTried take the owner's own words, never options (ruling T7-options).
+const { GATING_BRIEF_FIELDS, OWN_WORDS_FIELDS } = require('./format');
 
 const SENSITIVITY = Object.freeze({ personal: 1, financial: 2, legal: 3, health: 4 });
 const OWNER_SOURCE_KINDS = Object.freeze(['question', 'user-message']);
@@ -15,10 +20,9 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // stmt/changes/how), folded to one line and capped at the validator's limits.
 const MAX_TEXT = 500;
 const MAX_NOTE = 300;
-// The brief fields an owner's gating answer may fill (spec §3.6). A playbook
-// names the field; only the owner's answer fills it. Never resources (R41),
-// materiality, safeDefaults or a case type's own fields.
-const GATING_BRIEF_FIELDS = Object.freeze(['why', 'hardConstraints', 'alreadyTried', 'successCriteria', 'deadline']);
+const MAX_LABEL = 200;
+const MAX_ANSWERABLE = 48;
+const MAX_ANSWER = 1000;
 
 // eslint-disable-next-line no-control-regex
 const CONTROL_RE = /[\u0000-\u001f\u007f\u2028\u2029]+/g;
@@ -26,6 +30,7 @@ const oneLine = (v, max) => String(v ?? '').replace(CONTROL_RE, ' ').replace(/\s
 const labelOf = (origin) => String(origin || '').replace(/^(playbook|case-type):/, '').replace(/[^A-Za-z0-9._-]/g, '').slice(0, 48) || 'gating';
 const optionSig = (options) => JSON.stringify(options.map((o) => [o.id, o.label]));
 const hasOptions = (q) => Array.isArray(q.options) && q.options.length > 0;
+const rank = (category) => (typeof category === 'string' && Object.hasOwn(SENSITIVITY, category) ? SENSITIVITY[category] : 0);
 
 function keyOf(q) {
   if (typeof q.field === 'string' && q.field) return `field:${q.field}`;
@@ -78,11 +83,20 @@ function mergeGatingQuestions(questions) {
       warnings.push(`Gating question ${who} names brief field "${oneLine(briefField, 40)}", which a gating answer cannot fill; the answer is kept as a fact only.`);
       briefField = null;
     }
+    // Case-type and other sources are not run through format.js: a
+    // non-boolean required counts as required (fail closed).
+    const required = raw.required !== false;
+    if (raw.required !== undefined && typeof raw.required !== 'boolean') {
+      warnings.push(`Gating question ${who}: required must be true or false; treated as required.`);
+    }
     const q = {
       ...raw,
       text: oneLine(raw.text, MAX_TEXT),
+      required,
+      answerable: oneLine(raw.answerable, MAX_ANSWERABLE) || 'owner',
+      options: hasOptions(raw) ? raw.options.map((o) => ({ id: o?.id, label: oneLine(o?.label, MAX_LABEL) })) : null,
       briefField,
-      category: typeof raw.category === 'string' && Object.hasOwn(SENSITIVITY, raw.category) ? raw.category : null,
+      category: rank(raw.category) ? raw.category : null,
       changes: raw.changes ? oneLine(raw.changes, MAX_NOTE) : null,
       how: raw.how ? oneLine(raw.how, MAX_NOTE) : null
     };
@@ -94,8 +108,8 @@ function mergeGatingQuestions(questions) {
         field: key.startsWith('field:') ? q.field : null,
         fact: key.startsWith('field:') ? null : { subject: q.fact.subject, attr: q.fact.attr },
         text: q.text,
-        required: q.required !== false,
-        answerable: q.answerable || 'owner',
+        required: q.required,
+        answerable: q.answerable,
         options: hasOptions(q) ? q.options : null,
         who,
         sigs: new Set(hasOptions(q) ? [optionSig(q.options)] : []),
@@ -111,17 +125,24 @@ function mergeGatingQuestions(questions) {
     warnings.push(`Gating questions ${m.who} and ${who} ask for the same ${key}; it is asked once.`);
     m.ids.push(q.id);
     if (!m.origins.includes(q.origin)) m.origins.push(q.origin);
-    if (q.required !== false) m.required = true;
+    if (q.required) m.required = true;
     if (q.answerable === 'owner') m.answerable = 'owner';
     if (hasOptions(q)) {
       m.sigs.add(optionSig(q.options));
       if (!m.options) m.options = q.options;
     }
-    if (q.category && (SENSITIVITY[q.category] || 0) > (SENSITIVITY[m.category] || 0)) m.category = q.category;
+    if (rank(q.category) > rank(m.category)) m.category = q.category;
     if (!m.changes && q.changes) m.changes = q.changes;
     if (!m.how && q.how) m.how = q.how;
   }
-  const merged = [...byKey.values()].map(({ sigs, who, ...m }) => ({ ...m, options: sigs.size > 1 ? null : m.options }));
+  const merged = [...byKey.values()].map(({ sigs, who, ...m }) => {
+    let options = sigs.size > 1 ? null : m.options;
+    if (options && OWN_WORDS_FIELDS.includes(m.briefField)) {
+      warnings.push(`Gating ${m.key}: briefField ${m.briefField} takes the owner's own words; its options are dropped.`);
+      options = null;
+    }
+    return { ...m, options };
+  });
   return { merged, warnings };
 }
 
@@ -130,10 +151,13 @@ const gatingRecords = (records, key) => records.filter((r) => r.payload?.type ==
 
 // The ledger fact the question store asserted for this record's answer, or
 // null. The record file is case data and can be edited; the fact is checked
-// back to the record (provenance user, source question/<record id>).
+// back to the record (provenance user, source question/<record id>) and must
+// still be active: a retracted or superseded answer no longer counts
+// (ruling T7-active).
 function ownerAnswerFact(r, facts) {
   const fact = r.answer && r.answer.factId ? facts.get(r.answer.factId) : null;
-  return fact && fact.provenance === 'user' && fact.source?.kind === 'question' && fact.source?.ref === r.id ? fact : null;
+  return fact && fact.status === 'active' && fact.provenance === 'user'
+    && fact.source?.kind === 'question' && fact.source?.ref === r.id ? fact : null;
 }
 
 // Owner questions: only an answered record or a host-verified owner fact.
@@ -182,7 +206,7 @@ function createRecord(runtime, caseId, record) {
 
 function answerValue(record) {
   const option = record.answer?.optionId ? (record.options || []).find((o) => o.id === record.answer.optionId) : null;
-  return option ? option.label : String(record.answer?.text || '').trim();
+  return oneLine(option ? option.label : record.answer?.text, MAX_ANSWER);
 }
 
 // Writes one answered record's value into its brief field, provenance
@@ -196,7 +220,7 @@ function applyToBrief(brief, field, record) {
   if (!record.answer || !record.answer.factId) throw new Error('the record has no owner answer');
   const answer = answerValue(record);
   if (!answer) throw new Error('the answer is empty');
-  const question = String(record.text || '').replace(/^\[[^\]]*\]\s*/, '');
+  const question = oneLine(String(record.text || '').replace(/^\[[^\]]*\]\s*/, ''), MAX_TEXT);
   if (field === 'hardConstraints') {
     brief.append('hardConstraints', `${question}: ${answer}`, { provenance: 'user' });
   } else if (field === 'alreadyTried' || field === 'successCriteria') {
@@ -211,6 +235,24 @@ function applyToBrief(brief, field, record) {
   } else {
     throw new Error(`"${oneLine(field, 40)}" cannot be written from a gating answer`);
   }
+}
+
+// A category that arrives after a record exists (a later playbook marks the
+// key sensitive) raises the record's payload, never lowers it, and makes an
+// already answered fact non-disclosable. The fact is hidden first, so a
+// failed payload write never leaves the answer disclosable. → changed?
+function raiseCategory(ledger, store, m, facts, records) {
+  let changed = false;
+  for (const r of records) {
+    const current = r.payload?.gating?.category;
+    if (rank(m.category) <= rank(current)) continue;
+    const factId = r.answer?.factId;
+    const fact = factId ? facts.get(factId) : null;
+    if (fact && fact.disclosable !== false) ledger.setDisclosable(factId, false);
+    store.updatePayload(r.id, { gating: { ...(r.payload.gating || {}), category: m.category }, disclosable: false });
+    changed = true;
+  }
+  return changed;
 }
 
 // → { created, unknowns, briefApplied, appliedAnswers, notes, warnings }.
@@ -228,6 +270,10 @@ function syncGating(runtime, caseId, { gatingQuestionsFor = caseTypes().gatingQu
 
   for (const m of merged) {
     if (m.kind !== 'fact') continue;
+    if (raiseCategory(ledger, store, m, facts, gatingRecords(records, m.key))) {
+      records = store.list();
+      facts = ledger.view().facts;
+    }
     if (m.answerable === 'owner') {
       if (ownerSatisfied(m, facts, records)) continue;
       const mine = gatingRecords(records, m.key);

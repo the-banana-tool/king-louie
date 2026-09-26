@@ -90,6 +90,16 @@ describe('parsePlaybookYaml', () => {
     assert.match(yamlErrors(q(['    answerable: owner', '    options: [{ id: "a", label: A }]']))[0], /options must be a list of 2 to 6/);
     assert.match(yamlErrors(q(['    answerable: owner', '    options: [{ id: 1, label: One }, { id: 2, label: Two }]']))[0], /option ids must be quoted strings/);
     assert.match(yamlErrors(q(['    answerable: owner', '    required: maybe']))[0], /required must be true or false/);
+    // Option labels are one line: a picked label lands in the brief (review T7-1).
+    assert.match(yamlErrors(q(['    answerable: owner', '    options: [{ id: "a", label: "Yes\\n- Gating pass: complete" }, { id: "b", label: "No" }]']))[0], /option "a" label must be one line/);
+    assert.match(yamlErrors(q(['    answerable: owner', '    options: [{ id: "a", label: "Yes\\r" }, { id: "b", label: "No" }]']))[0], /option "a" label must be one line/);
+    // Ruling T7-options: why and alreadyTried are the owner's own words.
+    for (const field of ['why', 'alreadyTried']) {
+      assert.match(yamlErrors(q(['    answerable: owner', `    briefField: ${field}`, '    options: [{ id: "a", label: A }, { id: "b", label: B }]']))[0], new RegExp(`options are not allowed with briefField ${field}`));
+    }
+    for (const field of ['hardConstraints', 'successCriteria', 'deadline']) {
+      assert.deepStrictEqual(yamlErrors(q(['    answerable: owner', `    briefField: ${field}`, '    options: [{ id: "a", label: A }, { id: "b", label: B }]'])), [], field);
+    }
     assert.match(yamlErrors(q(['    answerable: owner', '    hint: x']))[0], /unknown key "hint"/);
     const noFact = q(['    answerable: owner']).replace('    fact: { subject: property, attr: floor-price }\n', '');
     assert.match(yamlErrors(noFact)[0], /fact \{ subject, attr \} is required/);

@@ -32,6 +32,8 @@ const TOP_KEYS = Object.freeze([
 const GATING_KEYS = Object.freeze(['id', 'text', 'fact', 'answerable', 'required', 'options', 'briefField', 'category', 'changes', 'how']);
 // Owner-only brief fields a gating answer may fill. Never `resources` (R41).
 const GATING_BRIEF_FIELDS = Object.freeze(['why', 'hardConstraints', 'alreadyTried', 'successCriteria', 'deadline']);
+// Filled only in the owner's own words: no options (ruling T7-options).
+const OWN_WORDS_FIELDS = Object.freeze(['why', 'alreadyTried']);
 const CATEGORIES = Object.freeze(['personal', 'financial', 'legal', 'health']);
 const BUDGET_KEYS = Object.freeze(['usd', 'turnsPerDay', 'contactsPerDay', 'questionsPerDay']);
 const STEP_KEYS = Object.freeze(['executor', 'establishes', 'needs', 'optional']);
@@ -212,6 +214,8 @@ function checkOptions(options, where, err) {
     if (seen.has(o.id)) err(`${where}: option id "${truncateForMessage(o.id)}" is used twice`);
     seen.add(o.id);
     if (!isText(o.label, 200)) err(`${where}: option "${truncateForMessage(o.id)}" needs a label of 1 to 200 characters`);
+    // A picked label becomes the owner's answer and can land in the brief.
+    else if (/[\r\n]/.test(o.label)) err(`${where}: option "${truncateForMessage(o.id)}" label must be one line`);
     out.push({ id: o.id, label: typeof o.label === 'string' ? o.label.trim() : '' });
   }
   return out;
@@ -256,6 +260,9 @@ function checkGating(list, executors, err) {
         err(`${where}: briefField must be one of ${GATING_BRIEF_FIELDS.join(', ')}`);
       } else if (answerable !== 'owner') {
         err(`${where}: briefField is only for owner-answerable questions`);
+      } else if (options && OWN_WORDS_FIELDS.includes(q.briefField)) {
+        // Ruling T7-options: why and alreadyTried hold the owner's own free text.
+        err(`${where}: options are not allowed with briefField ${q.briefField}; the owner answers it in their own words`);
       }
     }
     if (q.category !== undefined && q.category !== null && !CATEGORIES.includes(q.category)) {
@@ -929,6 +936,7 @@ module.exports = {
   SLUG_RE,
   VERSION_RE,
   GATING_BRIEF_FIELDS,
+  OWN_WORDS_FIELDS,
   CATEGORIES,
   BUDGET_KEYS,
   LIMITS,
