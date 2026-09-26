@@ -279,7 +279,7 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
       case 'doctor': {
         const { runDoctor } = require('./doctor');
         const results = await runDoctor({ dataDir });
-        for (const r of results) io.stdout.write(`${r.ok ? 'ok  ' : 'FAIL'}  ${r.check}  (${r.detail})\n`);
+        for (const r of results) io.stdout.write(`${r.ok ? (r.warn ? 'WARN' : 'ok  ') : 'FAIL'}  ${r.check}  (${r.detail})\n`);
         return results.every((r) => r.ok) ? 0 : 1;
       }
 

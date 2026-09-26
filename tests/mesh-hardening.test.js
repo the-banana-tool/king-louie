@@ -808,6 +808,48 @@ describe('pinned front-door link', () => {
     assert.equal(appBytes, 0);
   });
 
+  // A lookup only chooses where to dial: the name resolves to 127.0.0.1, and
+  // the certificate that address serves is still held to the pin.
+  const toLoopback = (seen) => (hostname, options, callback) => {
+    seen.push(hostname);
+    if (options && options.all) callback(null, [{ address: '127.0.0.1', family: 4 }]);
+    else callback(null, '127.0.0.1', 4);
+  };
+
+  it('connectPinned dials a name through lookup and still authenticates against the pin', async () => {
+    const pinned = new Set();
+    const { fd, t: fdT, url } = await frontDoorListener({ pinned });
+    const { node, t } = await tlsNode(fd);
+    pinned.add(node.tlsFingerprint);
+    fdT.addTrustedPeer(node.peerId, node.publicKey, { tlsFingerprint: node.tlsFingerprint });
+    const seen = [];
+    const named = `wss://mesh.kl.example.com:${new URL(url).port}/mesh/v1`;
+    const peer = await t.connectPinned({ url: named, pinnedFingerprint: fd.tlsFingerprint, frontdoorId: fd.nodeId, lookup: toLoopback(seen) });
+    assert.equal(peer.peerId, fd.peerId);
+    assert.deepEqual(seen, ['mesh.kl.example.com']);
+  });
+
+  it('connectPinned through lookup: a resolved address serving another certificate is frontdoor_key_mismatch', async () => {
+    const other = new NodeIdentity({ nodeName: 'impostor' });
+    let appBytes = 0;
+    const server = tls.createServer({ cert: other.tlsCert, key: other.tlsKey }, (socket) => {
+      socket.on('data', (d) => { appBytes += d.length; });
+      socket.on('error', () => {});
+    });
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    cleanups.push(() => new Promise((r) => server.close(r)));
+    const fd = new NodeIdentity({ nodeName: 'frontdoor' });
+    const { t } = await tlsNode(fd);
+    const seen = [];
+    await assert.rejects(
+      t.connectPinned({ url: `wss://mesh.kl.example.com:${server.address().port}/mesh/v1`, pinnedFingerprint: fd.tlsFingerprint, frontdoorId: fd.nodeId, lookup: toLoopback(seen) }),
+      (err) => err.code === 'frontdoor_key_mismatch' && err.served === other.tlsFingerprint
+    );
+    assert.deepEqual(seen, ['mesh.kl.example.com']);
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(appBytes, 0);
+  });
+
   it('a signature bound to one TLS session does not verify on another', async () => {
     const pinned = new Set();
     const { fd, url } = await frontDoorListener({ pinned });

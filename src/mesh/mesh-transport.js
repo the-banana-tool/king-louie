@@ -462,7 +462,9 @@ class MeshTransport extends EventEmitter {
 
   // §3.9: dial the front door with this node's certificate; the served
   // certificate must be the pin before one application byte is written.
-  async connectPinned({ url, pinnedFingerprint, frontdoorId, servername = null, timeoutMs = AUTH_TIMEOUT_MS } = {}) {
+  // lookup (optional) only chooses the address dialled; the pin below is
+  // still checked against whatever certificate that address serves.
+  async connectPinned({ url, pinnedFingerprint, frontdoorId, servername = null, timeoutMs = AUTH_TIMEOUT_MS, lookup = null } = {}) {
     const target = new URL(url);
     if (target.protocol !== 'wss:') throw new Error('connectPinned needs a wss:// URL');
     if (!/^[0-9a-f]{64}$/.test(String(pinnedFingerprint))) throw new Error('connectPinned needs a hex SHA-256 certificate pin');
@@ -478,7 +480,8 @@ class MeshTransport extends EventEmitter {
         key: this.identity.tlsKey,
         rejectUnauthorized: false,
         checkServerIdentity: () => undefined,
-        ALPNProtocols: ['http/1.1']
+        ALPNProtocols: ['http/1.1'],
+        ...(lookup ? { lookup } : {})
       });
       const timer = setTimeout(() => { s.destroy(); reject(new Error(`connection timeout to ${url}`)); }, timeoutMs);
       s.once('secureConnect', () => {
