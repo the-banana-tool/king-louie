@@ -113,6 +113,8 @@ const PROTECTED_ROOT_FILES = new Set(['facts.jsonl', 'case.yaml', 'brief.md', '.
 // byte for byte, R31) or name a filter/diff driver from the owner's global
 // git config that git then runs on the case's add and diff.
 const PROTECTED_FILE_NAMES = new Set(['.gitattributes']);
+// Folders at the case root the model never writes directly.
+const PROTECTED_ROOT_DIRS = new Set(['.kl', 'playbooks', '.git']);
 
 function isProtectedCasePath(caseDir, absolutePath) {
   if (!caseDir || !absolutePath) return false;
@@ -141,7 +143,9 @@ function isProtectedCasePath(caseDir, absolutePath) {
 
   // playbooks/ is data the owner vendors; the model proposes changes with
   // Playbook.propose instead (cases stage 6 spec §3.10).
-  return segments[0] === '.kl' || segments[0] === 'playbooks' || PROTECTED_ROOT_FILES.has(segments.join('/'))
+  // .git/ (ruling T12-dotgit): a written .git/config or info/attributes could
+  // define filters or hooks that the runtime's own commits would run.
+  return PROTECTED_ROOT_DIRS.has(segments[0]) || PROTECTED_ROOT_FILES.has(segments.join('/'))
     || segments.some((seg) => PROTECTED_FILE_NAMES.has(seg));
 }
 

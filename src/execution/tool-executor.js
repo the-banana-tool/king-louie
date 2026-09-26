@@ -11,8 +11,8 @@ const log = createLogger('tool-executor');
 
 // Tools that write a file named by file_path (MultiEdit: per edit). In case
 // mode, the paths isProtectedCasePath names (facts.jsonl, brief.md,
-// case.yaml, .gitmodules, .gitattributes, playbooks/, .kl/) are written only
-// through the case tools.
+// case.yaml, .gitmodules, .gitattributes, playbooks/, .kl/, .git/) are
+// written only through the case tools (.git/ never). Bash is not covered.
 const FILE_WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit']);
 
 // Extract a stable, telemetry-safe error code from an Error. Raw
@@ -302,7 +302,7 @@ class ToolExecutor extends EventEmitter {
       if (targets.some((p) => isProtectedCasePath(caseContext.dir, path.resolve(base, p)))) {
         const refused = {
           success: false,
-          error: 'facts.jsonl, brief.md, case.yaml, .gitmodules, .gitattributes, playbooks/ and .kl/ are written only through the case tools. Use the Ledger tool for facts and the Brief tool for the brief (or Decide, Recommend), and Playbook propose for a playbook change, instead.'
+          error: 'facts.jsonl, brief.md, case.yaml, .gitmodules, .gitattributes, playbooks/ and .kl/ are written only through the case tools, and .git/ is never written directly. Use the Ledger tool for facts and the Brief tool for the brief (or Decide, Recommend), and Playbook propose for a playbook change, instead.'
         };
         this.emit('postExecute', { toolName, parameters: effectiveParameters, result: refused });
         return refused;

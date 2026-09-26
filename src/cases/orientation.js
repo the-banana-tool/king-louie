@@ -1,6 +1,8 @@
 // src/cases/orientation.js
 // Builds the orientation block every case turn starts from (spec §5.2).
 // Pure: callers read the case from disk and pass the pieces in.
+const { neutralize, oneLine: frameOneLine } = require('./playbooks/frame');
+
 const DEFAULT_MAX_CHARS = 28000;
 const JOURNAL_MAX = 2000;
 
@@ -77,12 +79,24 @@ function statusSection(meta, reason, failure) {
   return [...lines, ''];
 }
 
+// A playbook gating record's text is third-party wording, and this section
+// sits outside every playbook frame (ruling T12-openq, T10-quotes): it shows
+// only the neutralised, one-line, capped key. Pending required questions
+// appear with their text, framed, in the playbooks section (views.js).
+function questionText(q) {
+  if (q.payload?.type === 'gating') {
+    const key = typeof q.payload.gating?.key === 'string' ? q.payload.gating.key : '';
+    return `gating ${frameOneLine(neutralize(key), 80) || '(no key)'} (playbook question; see Brief)`;
+  }
+  return oneLine(q.text, 200);
+}
+
 function questionsSection(questions = [], now = new Date()) {
   if (!questions.length) return [];
   const t = now.getTime();
   const line = (q) => {
     const overdue = q.expiresAt && Date.parse(q.expiresAt) <= t && q.defaultOnSilence === 'hold' ? ' — OVERDUE, still holding' : '';
-    return `- ${q.id} [${q.kind}, ${q.urgency}] ${oneLine(q.text, 200)}${overdue}`;
+    return `- ${q.id} [${q.kind}, ${q.urgency}] ${questionText(q)}${overdue}`;
   };
   return ['## Open questions to the owner', ...questions.map(line), 'Do not assume answers to open questions.', ''];
 }

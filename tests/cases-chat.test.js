@@ -322,6 +322,22 @@ describe('write guard: playbooks (cases stage 6)', () => {
     assert.strictEqual(guard(dir, `${pbPath.join(dir, 'artifacts', '.gitattributes')}::$DATA`), true);
   });
 
+  it('protects the case repository .git/ (ruling T12-dotgit)', () => {
+    const dir = pbTmp();
+    const fold = process.platform === 'win32' || process.platform === 'darwin';
+    assert.strictEqual(guard(dir, pbPath.join(dir, '.git', 'config')), true);
+    assert.strictEqual(guard(dir, pbPath.join(dir, '.git', 'hooks', 'pre-commit')), true);
+    assert.strictEqual(guard(dir, pbPath.join(dir, '.git', 'info', 'attributes')), true);
+    assert.strictEqual(guard(dir, pbPath.join(dir, '.git')), true);
+    assert.strictEqual(guard(dir, pbPath.join(dir, '.git.', 'config')), true);
+    assert.strictEqual(guard(dir, pbPath.join(dir, '.git ', 'config')), true);
+    assert.strictEqual(guard(dir, `${pbPath.join(dir, '.git')}::$INDEX_ALLOCATION${pbPath.sep}config`), true);
+    assert.strictEqual(guard(dir, pbPath.join(dir, '.GIT', 'config')), fold);
+    assert.strictEqual(guard(dir, pbPath.join(dir, 'artifacts', '.git', 'config')), false, 'only the case root .git');
+    assert.strictEqual(guard(dir, pbPath.join(dir, '.github', 'x.md')), false);
+    assert.strictEqual(guard(dir, pbPath.join(dir, '.git-notes.md')), false);
+  });
+
   it('follows a link that points into playbooks/', (t) => {
     const dir = pbTmp();
     pbFs.mkdirSync(pbPath.join(dir, 'playbooks', 'land-sale'), { recursive: true });
@@ -350,12 +366,15 @@ describe('write guard: playbooks (cases stage 6)', () => {
       ['Write', { file_path: pbPath.join(dir, '.gitattributes'), content: '* text eol=crlf\n' }],
       ['Write', { file_path: pbPath.join(dir, '.gitmodules'), content: '[submodule "x"]\n' }],
       ['Edit', { file_path: pbPath.join(dir, 'playbooks', 'land-sale', 'playbook.yaml'), old_string: 'a', new_string: 'b' }],
-      ['MultiEdit', { file_path: pbPath.join(dir, 'artifacts', '.gitattributes'), edits: [{ old_string: 'a', new_string: 'b' }] }]
+      ['MultiEdit', { file_path: pbPath.join(dir, 'artifacts', '.gitattributes'), edits: [{ old_string: 'a', new_string: 'b' }] }],
+      ['Write', { file_path: pbPath.join(dir, '.git', 'config'), content: '[filter "x"]\n' }],
+      ['Edit', { file_path: pbPath.join(dir, '.git', 'info', 'attributes'), old_string: 'a', new_string: 'b' }],
+      ['MultiEdit', { file_path: pbPath.join(dir, 'artifacts', 'a.md'), edits: [{ file_path: pbPath.join(dir, '.git', 'hooks', 'pre-commit'), old_string: 'a', new_string: 'b' }] }]
     ];
     for (const [tool, params] of attempts) {
       const r = await executor.execute(tool, params);
       assert.strictEqual(r.success, false, `${tool} ${params.file_path}`);
-      for (const name of ['facts.jsonl', 'brief.md', 'case.yaml', '.gitmodules', '.gitattributes', 'playbooks/', '.kl/']) {
+      for (const name of ['facts.jsonl', 'brief.md', 'case.yaml', '.gitmodules', '.gitattributes', 'playbooks/', '.kl/', '.git/']) {
         assert.ok(r.error.includes(name), `the refusal names ${name}: ${r.error}`);
       }
       assert.match(r.error, /Playbook propose for a playbook change/);
@@ -363,5 +382,6 @@ describe('write guard: playbooks (cases stage 6)', () => {
     assert.strictEqual(pbFs.existsSync(pbPath.join(dir, '.gitattributes')), false);
     assert.strictEqual(pbFs.existsSync(pbPath.join(dir, '.gitmodules')), false);
     assert.strictEqual(pbFs.existsSync(pbPath.join(dir, 'playbooks')), false);
+    assert.strictEqual(pbFs.existsSync(pbPath.join(dir, '.git')), false);
   });
 });
