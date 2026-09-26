@@ -542,6 +542,8 @@ class CaseRuntime {
 
   completeGating(id) {
     const meta = this.getCase(id);
+    // Cases stage 6: required playbook gating questions come first.
+    if (this.playbooks) this.playbooks.assertGatingComplete(meta.id);
     this.brief(meta.id).completeGating();
     if (meta.status === 'draft') this.setStatus(meta.id, 'active', { kind: 'gating' });
     this._reindex(meta.id);
@@ -1279,6 +1281,50 @@ class CaseRuntime {
     } else {
       log.warn(`Case ${meta.slug} asks ${rec.id} (${rec.urgency}): ${rec.text}. No channel can deliver it until stage 4; it waits.`);
     }
+  }
+
+  // ---- Playbooks (cases stage 6, program §4.11). installPlaybooks sets
+  // this.playbooks; without it every accessor is empty. ----
+
+  playbookSteps(id) {
+    return this.playbooks ? this.playbooks.steps(id) : [];
+  }
+
+  playbookBriefRules(id, executorId) {
+    return this.playbooks ? this.playbooks.briefRules(id, executorId) : [];
+  }
+
+  playbookSources(id, name = null) {
+    return this.playbooks ? this.playbooks.sources(id, name) : '';
+  }
+
+  playbookChanges(id) {
+    return this.playbooks ? this.playbooks.changes(id) : [];
+  }
+
+  // Called only by recordReorientation (the Reorient tool) inside a turn:
+  // the manager's acknowledge takes no lock and does not commit; the turn
+  // holds the lock and endTurn commits. Refused anywhere else.
+  acknowledgePlaybooks(id) {
+    if (!this.playbooks) return { acknowledged: [], questionIds: [] };
+    const meta = this.getCase(id);
+    if (!this.turns.has(meta.id)) {
+      throw new Error('acknowledgePlaybooks runs only inside a case turn (the Reorient tool).');
+    }
+    return this.playbooks.acknowledge(meta.id);
+  }
+
+  // C6's package format has no safe defaults; C2's Ask reads this.
+  playbookSafeDefaults() {
+    return [];
+  }
+
+  syncGating(id) {
+    return this.playbooks ? this.playbooks.syncGating(id) : { created: [], unknowns: [], briefApplied: [] };
+  }
+
+  pendingGating(id) {
+    return this.playbooks ? this.playbooks.pendingGating(id) : [];
   }
 
   abortUnattended(reason = 'shutdown') {

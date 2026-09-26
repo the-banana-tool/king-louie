@@ -243,3 +243,72 @@ describe('.kl/playbooks.json', () => {
     });
   });
 });
+
+// ---- Cases stage 6, Task 12: acknowledgement through the runtime ----
+describe('acknowledgePlaybooks through the runtime', () => {
+  const pbGit = require('../src/cases/git');
+  const { CaseRuntime: PbRuntime } = require('../src/cases');
+  const { installPlaybooks: pbInstall } = require('../src/cases/playbooks');
+  const fixture = require('./helpers/playbook-fixture');
+
+  const SURVEY = [
+    '  - id: survey',
+    '    text: Has the lot been surveyed?',
+    '    fact: { subject: property, attr: surveyed }',
+    '    answerable: owner',
+    'materialityDefaults:'
+  ].join('\n');
+
+  it('acknowledgePlaybooks bumps case.yaml and only then creates gating records', async (t) => {
+    if (!(await pbGit.isGitAvailable())) return t.skip('git is not on PATH');
+    const upstream = await fixture.makeGitPackage(path.join(fs.realpathSync(tmp()), 'land-sale'));
+    const rt = new PbRuntime({ root: tmp(), getSettings: () => ({}) });
+    const mgr = pbInstall(rt, { getSettings: () => ({ playbooks: {} }), tmpRoot: tmp() });
+    const { id } = await rt.createCase({ title: 'Lakeside lot', objective: 'Sell the lot' });
+    await mgr.attach(id, { source: upstream });
+    await fixture.commitPackage(upstream, {
+      'playbook.yaml': fixture.PLAYBOOK_YAML.replace('"1.2.0"', '"1.3.0"').replace('materialityDefaults:', SURVEY)
+    }, '1.3.0');
+    // Ruling T5-recorded: a recorded local path is fetched on update only
+    // after the owner re-confirms it (or under a matching path: entry).
+    const refused = await mgr.update(id, 'land-sale');
+    assert.strictEqual(refused.ok, false);
+    assert.strictEqual(refused.code, 'SOURCE_NEEDS_CONFIRM');
+    assert.strictEqual((await mgr.update(id, 'land-sale', { confirmSource: true })).ok, true);
+    const surveyed = () => rt.questions(id).list().filter((q) => q.payload?.gating?.key === 'property.surveyed');
+
+    const [change] = rt.playbookChanges(id);
+    assert.deepStrictEqual([change.name, change.kind, change.from, change.to], ['land-sale', 'version-changed', '1.2.0', '1.3.0']);
+    assert.deepStrictEqual(change.gating.added, ['survey']);
+    // Ruling M2: C2's detectTriggers uses C6's own key and detail.
+    assert.match(change.key, /^playbook:land-sale:sha256:[0-9a-f]{64}$/);
+
+    const turn = await rt.beginTurn(id, { turnId: 'turn-1', source: 'owner', ownerMessage: 'Continue' });
+    try {
+      const raised = turn.triggers.filter((x) => x.kind === 'playbook-update');
+      assert.strictEqual(raised.length, 1, 'C2 raises one playbook trigger');
+      assert.strictEqual(raised[0].key, change.key);
+      assert.strictEqual(raised[0].detail, change.detail);
+      assert.strictEqual(raised[0].blocking, true);
+      assert.strictEqual(turn.reorientPending, true);
+      assert.match(turn.orientation, /Playbook land-sale moved from 1\.2\.0 to 1\.3\.0: gating \+\[survey\]/);
+      assert.deepStrictEqual(surveyed(), [], 'questions from an unacknowledged change wait');
+      rt.recordReorientation(id, turn, { changed: 'The playbook moved to 1.3.0', affects: [], action: 'continue', note: 'A survey question was added.' });
+    } finally {
+      await rt.endTurn(turn, { summary: 're-oriented' });
+    }
+    assert.strictEqual(rt.getCase(id).playbooks[0].version, '1.3.0');
+    assert.strictEqual(rt.getCase(id).playbooks[0].contentHash, ch.readState(rt.getCase(id).dir).vendored['land-sale'].contentHash);
+    assert.deepStrictEqual(rt.playbookChanges(id), []);
+    assert.strictEqual(surveyed().length, 1, 'acknowledged, then asked');
+    assert.strictEqual(ch.readState(rt.getCase(id).dir).acknowledged['land-sale'].version, '1.3.0');
+    assert.strictEqual(await pbGit.isDirty(rt.getCase(id).dir), false, 'the turn committed the acknowledgement');
+
+    const next = await rt.beginTurn(id, { turnId: 'turn-2', source: 'owner', ownerMessage: 'And now?' });
+    try {
+      assert.deepStrictEqual(next.triggers.filter((x) => x.kind === 'playbook-update'), [], 'acknowledged: no trigger again');
+    } finally {
+      await rt.endTurn(next, { summary: 'checked' });
+    }
+  });
+});

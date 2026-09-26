@@ -39,6 +39,9 @@ const MAX_CREATE_PLAYBOOKS = 5;
 const MAX_FACT_IDS = 100;
 const CLOSED = Object.freeze(['done', 'abandoned']);
 const PROPOSAL_ID_RE = /^pp-\d{3,4}$/;
+// Fixed turn-start notes (no error text: see turnStartHook).
+const GATING_SYNC_FAILED_NOTE = 'Playbook gating could not be synced this turn (details in the log); pending playbook questions may be missing.';
+const HOOK_FAILED_NOTE = 'Playbooks could not be read this turn (details in the log); playbook steps, rules and gating may be missing from this orientation.';
 
 class PlaybookError extends Error {
   constructor(message, extra = {}) {
@@ -345,7 +348,9 @@ class PlaybookManager {
   }
 
   // The turn-start hook (program §4.20): sync gating, then the orientation
-  // section as the hook's note. A sync failure is a note, never fatal.
+  // section as the hook's note. A failure is a fixed note, never fatal: an
+  // error message can quote package or case text, and these notes sit
+  // outside every frame (ruling T10-quotes), so the detail goes to the log.
   async turnStartHook({ caseId }) {
     const meta = this.runtime.getCase(caseId);
     const notes = [];
@@ -354,11 +359,16 @@ class PlaybookManager {
         this._sync(meta);
       } catch (err) {
         log.warn(`Playbook gating could not be synced on case ${meta.slug}: ${err.message}`);
-        notes.push(`Playbook gating could not be synced: ${oneLine(err.message, 300)}`);
+        notes.push(GATING_SYNC_FAILED_NOTE);
       }
     }
-    const section = this.orientationSection(meta.id);
-    if (section) notes.push(section);
+    try {
+      const section = this.orientationSection(meta.id);
+      if (section) notes.push(section);
+    } catch (err) {
+      log.warn(`Playbook orientation section failed on case ${meta.slug}: ${err.message}`);
+      notes.push(HOOK_FAILED_NOTE);
+    }
     return { notes };
   }
 
@@ -1082,4 +1092,4 @@ class PlaybookManager {
   }
 }
 
-module.exports = { PlaybookManager, PlaybookError, resolvePlaybookSettings, MAX_CREATE_PLAYBOOKS };
+module.exports = { PlaybookManager, PlaybookError, resolvePlaybookSettings, MAX_CREATE_PLAYBOOKS, GATING_SYNC_FAILED_NOTE, HOOK_FAILED_NOTE };
