@@ -18,6 +18,12 @@ const FLEET_SCOPE_RULES = Object.freeze({
 
 const fail = (reason) => ({ ok: false, reason });
 
+// A missing or broken dependency is the caller's bug; the check fails
+// closed with `internal` rather than throwing a TypeError.
+const isStore = (s) => Boolean(s) && typeof s.get === 'function' && typeof s.isActive === 'function';
+const isRules = (r) => Boolean(r) && Array.isArray(r.supported) && Boolean(r.requires) && typeof r.requires === 'object';
+const isChallenges = (c) => Boolean(c) && typeof c.take === 'function';
+
 function openTyped(envelope, type) {
   let opened;
   try {
@@ -39,7 +45,8 @@ function scopeProblem(names, { supported, requires }) {
   return null;
 }
 
-function verifyPhoneEnvelope(envelope, { approverStore, type, frontdoorId, acceptedAt = null }) {
+function verifyPhoneEnvelope(envelope, { approverStore, type, frontdoorId, acceptedAt = null } = {}) {
+  if (!isStore(approverStore)) return fail('internal');
   const opened = openTyped(envelope, type);
   if (opened.error) return fail(opened.error);
   const { message, bytes } = opened;
@@ -47,7 +54,7 @@ function verifyPhoneEnvelope(envelope, { approverStore, type, frontdoorId, accep
   const record = approverStore.get(envelope.kid);
   if (!record) return fail('unknown_device');
   if (record.platform === 'demo') return fail('demo_device');
-  if (!approverStore.allowTestKeys && isTestDeviceKey(record.public_key)) return fail('test_key');
+  if (approverStore.allowTestKeys !== true && isTestDeviceKey(record.public_key)) return fail('test_key');
   if (acceptedAt === null) {
     if (!approverStore.isActive(envelope.kid)) return fail('revoked_device');
   } else if (record.revoked_at !== null && !(Date.parse(acceptedAt) < Date.parse(record.revoked_at))) {
@@ -60,17 +67,19 @@ function verifyPhoneEnvelope(envelope, { approverStore, type, frontdoorId, accep
   return { ok: true, reason: null, message, bytes, deviceId: envelope.kid };
 }
 
-function checkGrantDecision(envelope, { approverStore, frontdoorId, pending, scopes = FLEET_SCOPE_RULES, now }) {
+function checkGrantDecision(envelope, { approverStore, frontdoorId, pending, scopes = FLEET_SCOPE_RULES, now } = {}) {
+  if (!isRules(scopes)) return fail('internal');
   const v = verifyPhoneEnvelope(envelope, { approverStore, type: 'kl.client.grant', frontdoorId });
   if (!v.ok) return v;
   const m = v.message;
   if (!pending || m.grant_id !== pending.grant_id) return fail('unknown_request');
+  if (!Array.isArray(pending.requested_scopes) || !(pending.nonces instanceof Set)) return fail('internal');
   if (pending.claimed_by && pending.claimed_by !== v.deviceId) return fail('not_claimant');
   if (!(now <= pending.expires_at_ms)) return fail('expired');
-  if (m.client_id !== pending.client_id || m.redirect_uri !== pending.redirect_uri || m.resource !== pending.resource
+  if (m.client_id !== pending.client_id || m.client_name !== pending.client_name || m.redirect_uri !== pending.redirect_uri || m.resource !== pending.resource
     || m.code_challenge !== pending.code_challenge) return fail('binding_mismatch');
   if (m.user_code !== pending.user_code) return fail('user_code_mismatch');
-  if (pending.nonces && pending.nonces.has(m.nonce)) return fail('replay');
+  if (pending.nonces.has(m.nonce)) return fail('replay');
   if (m.decision === 'approve') {
     const names = m.scopes.map((s) => s.scope);
     if (names.some((n) => !pending.requested_scopes.includes(n))) return fail('invalid_scope');
@@ -88,12 +97,14 @@ function takeChallenge(v, challenges, purpose) {
   return fail(CHALLENGE_REASONS[r] || 'unknown_challenge');
 }
 
-function checkClientRevoke(envelope, { approverStore, frontdoorId, challenges }) {
+function checkClientRevoke(envelope, { approverStore, frontdoorId, challenges } = {}) {
+  if (!isChallenges(challenges)) return fail('internal');
   const v = verifyPhoneEnvelope(envelope, { approverStore, type: 'kl.client.revoke', frontdoorId });
   return v.ok ? takeChallenge(v, challenges, 'revoke') : v;
 }
 
-function checkNodeRemove(envelope, { approverStore, frontdoorId, challenges }) {
+function checkNodeRemove(envelope, { approverStore, frontdoorId, challenges } = {}) {
+  if (!isChallenges(challenges)) return fail('internal');
   const v = verifyPhoneEnvelope(envelope, { approverStore, type: 'kl.node.remove', frontdoorId });
   return v.ok ? takeChallenge(v, challenges, 'remove') : v;
 }
@@ -106,7 +117,7 @@ function derivedNodeId(rawKey) {
   }
 }
 
-function checkNodeEnroll(envelope, { approverStore, frontdoorId, pairing, now }) {
+function checkNodeEnroll(envelope, { approverStore, frontdoorId, pairing, now } = {}) {
   const v = verifyPhoneEnvelope(envelope, { approverStore, type: 'kl.node.enroll', frontdoorId });
   if (!v.ok) return v;
   const m = v.message;
@@ -114,15 +125,16 @@ function checkNodeEnroll(envelope, { approverStore, frontdoorId, pairing, now })
   // Ruling T2-testkeys: the same rule as devices, from the same admin store.
   if (approverStore.allowTestKeys !== true && isTestNodeKey(spkiHexFromRaw(m.public_key))) return fail('test_key');
   if (!pairing || m.pairing_id !== pairing.pairing_id) return fail('unknown_pairing');
+  if (!(pairing.nonces instanceof Set)) return fail('internal');
   if (!(now <= pairing.expires_at_ms)) return fail('expired');
   for (const k of ['node_id', 'node_name', 'profile', 'public_key', 'tls_fingerprint', 'replaces']) {
     if (m[k] !== (pairing[k] === undefined ? null : pairing[k])) return fail('binding_mismatch');
   }
-  if (pairing.nonces && pairing.nonces.has(m.nonce)) return fail('replay');
+  if (pairing.nonces.has(m.nonce)) return fail('replay');
   return v;
 }
 
-function checkNodePair(envelope, { frontdoorHost, allowTestKeys = false }) {
+function checkNodePair(envelope, { frontdoorHost, allowTestKeys = false } = {}) {
   const opened = openTyped(envelope, 'kl.node.pair');
   if (opened.error) return fail(opened.error);
   const m = opened.message;
@@ -159,7 +171,7 @@ function checkFrontDoorSigned(envelope, type, frontdoorId, spkiHex) {
 
 // The node's side of §3.11 step 3: the key comes with the message, and the
 // front door id is what that key derives (the owner compares its fingerprint).
-function verifyPairAccept(envelope, { nodeId, nonce }) {
+function verifyPairAccept(envelope, { nodeId, nonce } = {}) {
   const opened = openTyped(envelope, 'kl.node.pair.accept');
   if (opened.error) return fail(opened.error);
   let spki;
@@ -177,7 +189,7 @@ function verifyPairAccept(envelope, { nodeId, nonce }) {
 }
 
 // The phone's re-pin rule (§3.3.1), ported for tests and doctor.
-function verifyRepin(envelope, { frontdoorId, frontdoorPublicKey, receivedSpki, currentPin }) {
+function verifyRepin(envelope, { frontdoorId, frontdoorPublicKey, receivedSpki, currentPin } = {}) {
   let spki;
   try {
     spki = spkiHexFromRaw(frontdoorPublicKey);

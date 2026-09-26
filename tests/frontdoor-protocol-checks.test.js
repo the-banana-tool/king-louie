@@ -358,6 +358,55 @@ describe('security properties', () => {
     assert.equal(enroll(published, lab).ok, true);
   });
 
+  it('binds the signed client_name to the pending one (review minor 1)', async () => {
+    const s = await store();
+    const p = pending();
+    const r = C.checkGrantDecision(A.grant({ frontdoorId: FD.nodeId, pending: { ...p, client_name: 'Other Client' } }),
+      { approverStore: s, frontdoorId: FD.nodeId, pending: p, now: NOW });
+    assert.equal(r.reason, 'binding_mismatch');
+  });
+
+  it('a missing dependency fails closed as internal, never a TypeError (review minor 2)', async () => {
+    const s = await store();
+    const p = pending();
+    const grant = A.grant({ frontdoorId: FD.nodeId, pending: p });
+    const rv = A.revokeClient({ frontdoorId: FD.nodeId, grantId: `gr_${id22('g')}`, challenge: crypto.randomBytes(32).toString('base64url') });
+    const rm = A.removeNode({ frontdoorId: FD.nodeId, nodeId: 'kl-hnef32472qzibi5r', challenge: crypto.randomBytes(32).toString('base64url') });
+    const base = { approverStore: s, frontdoorId: FD.nodeId, now: NOW };
+    const cases = [
+      () => C.checkGrantDecision(grant),
+      () => C.checkGrantDecision(grant, { ...base, approverStore: undefined, pending: p }),
+      () => C.checkGrantDecision(grant, { ...base, approverStore: {}, pending: p }),
+      () => C.checkGrantDecision(grant, { ...base, pending: { ...p, requested_scopes: undefined } }),
+      () => C.checkGrantDecision(grant, { ...base, pending: { ...p, nonces: undefined } }),
+      () => C.checkGrantDecision(grant, { ...base, pending: p, scopes: null }),
+      () => C.verifyPhoneEnvelope(rv),
+      () => C.checkClientRevoke(rv, { ...base }),
+      () => C.checkClientRevoke(rv, { ...base, challenges: {} }),
+      () => C.checkNodeRemove(rm, { ...base, challenges: null }),
+      () => C.checkNodeRemove(rm),
+      () => C.checkNodeEnroll(A.enrollNode({ frontdoorId: FD.nodeId, pairing: { pairing_id: `pr_${id22('p')}`, node_id: FD.nodeId, node_name: 'relay',
+        profile: 'agent', public_key: P.rawEd25519(FD.publicKey), tls_fingerprint: 'c'.repeat(64), replaces: null } }),
+      { ...base, pairing: { pairing_id: `pr_${id22('p')}`, node_id: FD.nodeId, node_name: 'relay', profile: 'agent', public_key: P.rawEd25519(FD.publicKey),
+        tls_fingerprint: 'c'.repeat(64), replaces: null, expires_at_ms: NOW + 1000 } })
+    ];
+    for (const [i, call] of cases.entries()) assert.equal(call().reason, 'internal', `case ${i}`);
+    // The front-door-signed checks take their options object optionally too.
+    assert.equal(C.checkNodePair(null).ok, false);
+    assert.equal(C.verifyPairAccept(null).ok, false);
+    assert.equal(C.verifyRepin(null).ok, false);
+  });
+
+  it('only a literal allowTestKeys === true lets a test device key through (review minor 3)', async () => {
+    const s = await store();
+    // A store whose flag is truthy but not true: its own isActive lets the key
+    // through, so only the check's own strict test can refuse it.
+    const loose = Object.create(s, { allowTestKeys: { value: 'yes' } });
+    const p = pending();
+    const r = C.checkGrantDecision(A.grant({ frontdoorId: FD.nodeId, pending: p }), { approverStore: loose, frontdoorId: FD.nodeId, pending: p, now: NOW });
+    assert.equal(r.reason, 'test_key');
+  });
+
   it('every check returns a refusal, never throws, on garbage', async () => {
     const s = await store();
     const ch = new Challenges({ now: () => NOW });
