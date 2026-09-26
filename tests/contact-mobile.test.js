@@ -494,22 +494,27 @@ describe('question routes (relay side)', () => {
     assert.strictEqual(r.rpcs.length, 1);
   });
 
-  it('refuses an answer with no matching mailbox entry, or from a device not active on the node, before any rpc', async () => {
+  it('refuses an answer from a device not active on the named node, or not an answer, before any rpc', async () => {
     const r = relay();
     const phone = createFakePhone();
-    askFor(r, phone);
     const answerRoute = r.routes.get('POST /v1/questions/{token}/answer');
-    // A token this device was never sent.
-    await assert.rejects(answerRoute.handler({}, { deviceId: phone.deviceId, params: { token: 'K7QD4M' }, body: answerFor(phone, { token: 'K7QD4M' }) }), (err) => err.status === 404 && err.code === 'not_found');
-    // A node the question did not come from.
-    await assert.rejects(answerRoute.handler({}, { deviceId: phone.deviceId, params: { token: '7QD4KM' }, body: answerFor(phone, { node_id: 'kl-bbbbbbbbbbbbbbbb' }) }), (err) => err.status === 404);
-    // A question sent to another device.
-    await assert.rejects(answerRoute.handler({}, { deviceId: 'd-dddddddddddddddd', params: { token: '7QD4KM' }, body: answerFor(phone, { device_id: 'd-dddddddddddddddd' }) }), (err) => err.status === 404);
+    // A node this device is not paired with.
+    await assert.rejects(answerRoute.handler({}, { deviceId: phone.deviceId, params: { token: '7QD4KM' }, body: answerFor(phone, { node_id: 'kl-bbbbbbbbbbbbbbbb' }) }), (err) => err.status === 404 && err.code === 'not_found');
     // A device whose pairing with the node is not active.
     await assert.rejects(answerRoute.handler({}, { deviceId: 'd-revokedrevokedre', params: { token: '7QD4KM' }, body: answerFor(phone, { device_id: 'd-revokedrevokedre' }) }), (err) => err.status === 404);
     // Not an answer type.
     await assert.rejects(answerRoute.handler({}, { deviceId: phone.deviceId, params: { token: '7QD4KM' }, body: answerFor(phone, { type: 'kl.question.ask' }) }), (err) => err.status === 400 && err.code === 'malformed');
     assert.strictEqual(r.rpcs.length, 0);
+  });
+
+  it('forwards an answer the relay mailbox holds no entry for (ruling T18-lookup: the node verifies it)', async () => {
+    const r = relay();
+    const phone = createFakePhone();
+    assert.deepStrictEqual(r.mailbox.list({ nodeIds: [NODE] }), []);
+    const envelope = answerFor(phone);
+    const out = await r.routes.get('POST /v1/questions/{token}/answer').handler({}, { deviceId: phone.deviceId, params: { token: '7QD4KM' }, body: envelope });
+    assert.deepStrictEqual(out.body, { ok: true, outcome: 'recorded', ack: 'Recorded for Lakeside lot.' });
+    assert.deepStrictEqual(r.rpcs, [{ nodeId: NODE, method: 'question.answer', params: { envelope }, opts: { timeoutMs: 10000 } }]);
   });
 
   it('answers 502 node_offline when the node does not answer', async () => {

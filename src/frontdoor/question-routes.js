@@ -18,15 +18,6 @@ function httpError(status, code, message) {
   return Object.assign(new Error(message), { status, code });
 }
 
-function tokenOf(envelope) {
-  try {
-    const { message } = open(envelope);
-    return typeof message.token === 'string' ? message.token : null;
-  } catch {
-    return null;
-  }
-}
-
 // (relay) => void, receiving { phoneApi, nodeHub, mailbox, pusher, devices, approvals, log }.
 function registerQuestionRoutes({ phoneApi, nodeHub, mailbox, devices, log }) {
   mailbox.registerType(MAILBOX_PREFIX, { ttlMs: WEEK_MS });
@@ -54,10 +45,8 @@ function registerQuestionRoutes({ phoneApi, nodeHub, mailbox, devices, log }) {
       if (message.device_id !== ctx.deviceId) throw httpError(403, 'forbidden', 'the answer is signed for another device');
       if (message.token !== ctx.params.token) throw httpError(400, 'bad_token', 'the token does not match the path');
       if (!activeNodes(ctx.deviceId).includes(message.node_id)) throw httpError(404, 'not_found', 'no such node for this device');
-      // The question must be one this node sent this device (same token).
-      const asked = mailbox.list({ nodeIds: [message.node_id], typePrefix: ASK_TYPE, toDevice: ctx.deviceId })
-        .some((item) => tokenOf(item.envelope) === message.token);
-      if (!asked) throw httpError(404, 'not_found', 'no such question for this device');
+      // No mailbox lookup (ruling T18-lookup): the mailbox is in memory, so a
+      // relay restart or the TTL would lock out a valid signed answer.
       let result;
       try {
         result = await nodeHub.rpc(message.node_id, 'question.answer', { envelope: ctx.body }, { timeoutMs: 10000 });
