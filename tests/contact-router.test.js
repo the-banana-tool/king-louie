@@ -392,6 +392,7 @@ describe('ContactRouter: app-only questions (owner decision M22)', () => {
       const r = await w.router.handleReply('email', ref, { text }, { ownerProven: true, senderId: 'owner@example.com' });
       assert.strictEqual(r.outcome, 'refused: approval');
       assert.strictEqual(r.ackText, `Answer this in the app: ${q.id} in Lakeside lot can't be answered by email.`);
+      w.advance(10 * 60 * 1000); // one refusal ack per sender per 10 min (final review I4)
     }
     unchanged(w, q);
   });
@@ -424,6 +425,7 @@ describe('ContactRouter: app-only questions (owner decision M22)', () => {
           assert.strictEqual(r.ok, false);
           assert.strictEqual(r.outcome, q.kind === 'approval' ? 'refused: approval' : 'refused: app-only');
           assert.strictEqual(r.ackText, `Answer this in the app: ${q.id} in Lakeside lot can't be answered by ${channel}.`);
+          w.advance(10 * 60 * 1000); // one refusal ack per sender per 10 min (final review I4)
         }
         unchanged(w, q);
       }
@@ -973,5 +975,60 @@ describe('ContactRouter relay events: seen only after handling (final review M2)
     const results = await Promise.all([a, b]);
     assert.strictEqual(calls, 1);
     assert.deepStrictEqual(results.map((r) => r.applied).sort(), [0, 1]);
+  });
+});
+
+describe('ContactRouter ack budget (final review I4)', () => {
+  it('a spoofed-owner SMS storm yields one refusal ack per 10 min, never more than 20 acks an hour', async () => {
+    const w = await world();
+    const sms = w.adapters.get('sms');
+    const acks = [];
+    for (let i = 0; i < 200; i += 1) {
+      const r = await w.router.handleReply('sms', null, { text: `hello ${i}` }, { channel: 'sms', senderId: '+15550100', ownerProven: true });
+      if (r.ackText) acks.push(r.ackText);
+      w.advance(1000);
+    }
+    assert.strictEqual(acks.length, 1, '200 spoofed messages in 200 s: one hint');
+    assert.ok(sms);
+    // Over the next hours, one per 10 min at most.
+    let later = 0;
+    for (let i = 0; i < 36; i += 1) {
+      w.advance(5 * 60 * 1000);
+      const r = await w.router.handleReply('sms', null, { text: 'x' }, { channel: 'sms', senderId: '+15550100', ownerProven: true });
+      if (r.ackText) later += 1;
+    }
+    assert.ok(later <= 18 && later >= 17, `one per 10 min over 3 h, got ${later}`);
+  });
+
+  it('refusal acks are per sender; all acks share a per-channel cap of 20 an hour', async () => {
+    const w = await world();
+    const results = [];
+    for (let i = 0; i < 50; i += 1) {
+      results.push(await w.router.handleReply('email', 'NOPE00', { text: 'a' }, { channel: 'email', senderId: `owner${i}@example.com`, ownerProven: true }));
+    }
+    assert.strictEqual(results.filter((r) => r.ackText).length, 20, 'capped at 20 per channel per hour');
+    assert.ok(results.every((r) => r.outcome === 'unknown'), 'the outcome is unchanged; only the ack is dropped');
+    w.advance(60 * 60 * 1000);
+    const next = await w.router.handleReply('email', 'NOPE00', { text: 'a' }, { channel: 'email', senderId: 'owner0@example.com', ownerProven: true });
+    assert.ok(next.ackText, 'the budget refills after an hour');
+  });
+
+  it('answers still apply when their ack is over budget, and the phone app is not budgeted', async () => {
+    const w = await world();
+    for (let i = 0; i < 20; i += 1) await w.router.handleReply('telegram', 'NOPE00', { text: 'a' }, { channel: 'telegram', senderId: `s${i}`, ownerProven: true });
+    const q = w.ask(w.lot.id, { text: 'Accept 41k?', options: [{ id: 'a', label: 'Yes' }, { id: 'b', label: 'No' }] });
+    const e = w.entry(w.lot, q);
+    await w.router.deliver('telegram', [e]);
+    const r = await w.router.handleReply('telegram', e.token, { optionId: 'a' }, { channel: 'telegram', senderId: '111', ownerProven: true });
+    assert.strictEqual(r.outcome, 'recorded');
+    assert.strictEqual(r.ackText, null, 'over the channel cap');
+    assert.strictEqual(w.runtime.questions(w.lot.id).get(q.id).answer.optionId, 'a');
+    w.addChannel('mobile', { owner: 'device-1' });
+    let mobileAcks = 0;
+    for (let i = 0; i < 30; i += 1) {
+      const m = await w.router.handleReply('mobile', 'NOPE00', { optionId: 'a' }, { channel: 'mobile', senderId: 'd-1', ownerProven: true });
+      if (m.ackText) mobileAcks += 1;
+    }
+    assert.strictEqual(mobileAcks, 30);
   });
 });

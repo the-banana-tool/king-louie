@@ -19,6 +19,11 @@ const APP_ANSWER_CHANNELS = Object.freeze(['in-app', 'mobile']);
 // Channels whose adapter binds a reply to one question (meta.bound): only the
 // phone app, whose answers are device-signed over token, case and question.
 const BOUND_CHANNELS = Object.freeze(['mobile']);
+// Ack budget (final review I4).
+const ACK_REFUSAL_WINDOW_MS = 10 * 60 * 1000;
+const ACK_CHANNEL_WINDOW_MS = 60 * 60 * 1000;
+const ACK_CHANNEL_MAX = 20;
+const ACK_UNBUDGETED = Object.freeze(['mobile', 'in-app']);
 // The channel named in "Answer in King Louie or <channel>" (the phone).
 const AUTHENTICATED_ORDER = ['mobile'];
 const TOKEN_IN_TEXT = /#([0-9A-Za-z]{6})\b/;
@@ -253,12 +258,42 @@ class ContactRouter {
   // channel's message reference. answer: { optionId } | { optionIndex } | { text }.
   // Never throws: bad input and unexpected errors come back as an outcome.
   async handleReply(channelId, correlationId, answer = {}, meta = {}) {
+    let result;
     try {
-      return await this._handleReply(channelId, correlationId, answer, meta);
+      result = await this._handleReply(channelId, correlationId, answer, meta);
     } catch (err) {
       this.log.error(`contact reply on ${channelId} failed: ${err?.message || err}`);
-      return { ok: false, outcome: 'error', ackText: ERROR_ACK };
+      result = { ok: false, outcome: 'error', ackText: ERROR_ACK };
     }
+    return this._budgetAck(channelId, meta, result);
+  }
+
+  // Final review I4: an ack is an outbound message the sender of a reply can
+  // trigger (a spoofed owner caller ID or From is enough for SMS and email),
+  // so acks are budgeted. At most one refusal ack (a not-ok result: unknown
+  // token, unparsed, refused, error) per channel and sender per 10 min, and
+  // at most 20 acks per channel per hour. Over budget the ack is dropped
+  // (the answer itself is unaffected), logged at debug. The phone app's ack
+  // is its RPC reply, not a message, so it is not budgeted.
+  _budgetAck(channelId, rawMeta, result) {
+    if (!result || !result.ackText || ACK_UNBUDGETED.includes(channelId)) return result;
+    const meta = rawMeta && typeof rawMeta === 'object' ? rawMeta : {};
+    const now = this.clock().getTime();
+    if (!this._acks) this._acks = { refusals: new Map(), perChannel: new Map() };
+    const { refusals, perChannel } = this._acks;
+    for (const [k, at] of refusals) if (now - at >= ACK_REFUSAL_WINDOW_MS) refusals.delete(k);
+    const sent = (perChannel.get(channelId) || []).filter((at) => now - at < ACK_CHANNEL_WINDOW_MS);
+    perChannel.set(channelId, sent);
+    const drop = (why) => {
+      this.log.debug(`contact ack on ${channelId} dropped: ${why}`);
+      return { ...result, ackText: null };
+    };
+    const refusalKey = `${channelId}|${String(meta.senderId ?? '')}`;
+    if (result.ok !== true && refusals.has(refusalKey)) return drop('one refusal ack per sender per 10 min');
+    if (sent.length >= ACK_CHANNEL_MAX) return drop(`${ACK_CHANNEL_MAX} acks per hour`);
+    if (result.ok !== true) refusals.set(refusalKey, now);
+    sent.push(now);
+    return result;
   }
 
   async _handleReply(channelId, rawCorrelationId, rawAnswer, rawMeta) {

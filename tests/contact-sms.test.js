@@ -178,3 +178,20 @@ describe('relay scoping, notices and voice relayId (carries)', () => {
     }
   });
 });
+
+describe('SMS ack budget (final review I4)', () => {
+  it('a storm of spoofed owner-number SMS makes at most one outbound hint', async () => {
+    const w = await world();
+    try {
+      await w.router.deliver('sms', [w.entry]);
+      const before = w.relay.sent().length;
+      const storm = Array.from({ length: 60 }, (_, i) => inbound('+15550100', `spam ${i}`, `ev-storm-${i}`));
+      await w.router.ingestRelayEvents('main', storm);
+      assert.strictEqual(w.relay.sent().length - before, 1, 'one hint for 60 tokenless messages');
+      await w.router.ingestRelayEvents('main', Array.from({ length: 20 }, (_, i) => inbound('+15550100', `#ZZZZZZ ${i}`, `ev-tok-${i}`)));
+      assert.strictEqual(w.relay.sent().length - before, 1, 'made-up tokens add nothing inside the window');
+    } finally {
+      await w.relay.close();
+    }
+  });
+});
