@@ -51,9 +51,14 @@ fun Questions(model: AppModel) {
                             OutlinedButton({ model.answer(item, option.id, null) }, enabled = !busy) { Text(Display.escape(option.label)) }
                         }
                         val draft = drafts[item.token] ?: ""
+                        val tooLong = draft.trim().length > AppModel.MAX_ANSWER_CHARS
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedTextField(draft, { drafts[item.token] = it }, label = { Text("Answer…") }, modifier = Modifier.weight(1f))
-                            Button({ model.answer(item, null, draft.trim()) }, enabled = !busy && draft.isNotBlank()) { Text("Send") }
+                            OutlinedTextField(
+                                draft, { drafts[item.token] = it }, label = { Text("Answer…") }, modifier = Modifier.weight(1f),
+                                isError = tooLong,
+                                supportingText = if (tooLong) ({ Text("At most ${AppModel.MAX_ANSWER_CHARS} characters.") }) else null
+                            )
+                            Button({ model.answer(item, null, draft.trim()) }, enabled = !busy && draft.isNotBlank() && !tooLong) { Text("Send") }
                         }
                     }
                 }

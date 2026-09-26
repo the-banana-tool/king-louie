@@ -272,6 +272,10 @@ class AppModel(context: Context) {
      */
     fun answer(item: QuestionItem, optionId: String?, text: String?) {
         if (mode != AppMode.LIVE || item.token in answering) return
+        if (text != null && text.length > MAX_ANSWER_CHARS) {
+            banner = "An answer can be at most $MAX_ANSWER_CHARS characters. Shorten it and send again."
+            return
+        }
         val k = key ?: return
         val api = client ?: return
         answering.add(item.token)
@@ -1091,6 +1095,9 @@ class AppModel(context: Context) {
 
     companion object {
         const val MAX_EXPIRES_IN_MS = 300_000
+
+        /** The node refuses a longer free-text answer (UTF-16 units, as JS and Kotlin count). */
+        const val MAX_ANSWER_CHARS = 2000
         const val RETRY_OFFLINE = "node offline — retrying"
         const val RETRY_BUSY = "relay busy — retrying"
     }

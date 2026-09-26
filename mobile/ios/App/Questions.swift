@@ -13,6 +13,10 @@ struct QuestionsView: View {
         (drafts[token] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private func tooLong(_ token: String) -> Bool {
+        draft(token).utf16.count > AppModel.maxAnswerChars
+    }
+
     var body: some View {
         NavigationStack {
             List {
@@ -39,7 +43,10 @@ struct QuestionsView: View {
                                     let text = draft(item.token)
                                     Task { await model.answer(item, optionId: nil, text: text) }
                                 }
-                                .disabled(busy || draft(item.token).isEmpty)
+                                .disabled(busy || draft(item.token).isEmpty || tooLong(item.token))
+                            }
+                            if tooLong(item.token) {
+                                Text("At most \(AppModel.maxAnswerChars) characters.").font(.caption).foregroundStyle(.red)
                             }
                         }
                     }

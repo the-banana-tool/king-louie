@@ -91,6 +91,9 @@ final class AppModel: ObservableObject {
 
     // MARK: Questions (cases stage 4)
 
+    /// The node refuses a longer free-text answer (UTF-16 units, as JS counts).
+    static let maxAnswerChars = 2000
+
     @Published var questions: [QuestionItem] = []
     /// Tokens whose answer is being signed or sent.
     @Published private(set) var answering: Set<String> = []
@@ -105,14 +108,28 @@ final class AppModel: ObservableObject {
         if onlyIfUnlocked, !key.isSessionUnlocked { return }
         do {
             var items: [QuestionItem] = []
-            for entry in try await client.questions() {
+            for entry in try await client.questions(signWith: onlyIfUnlocked ? Self.sessionOnlySigner(key) : nil) {
                 guard let item = verifiedQuestion(entry), !answeredTokens.contains(item.token),
                       !items.contains(where: { $0.token == item.token }) else { continue }
                 items.append(item)
             }
             questions = items
+        } catch is SessionLocked {
+            // The session lapsed: stay quiet; the owner can tap to unlock.
         } catch {
             fail(error)
+        }
+    }
+
+    /// The API session is not unlocked; nothing was signed and nothing prompted.
+    private struct SessionLocked: Error {}
+
+    /// Signs only with the already-unlocked session (DeviceKey.signIfUnlocked),
+    /// never falling back to a Face ID prompt.
+    private static func sessionOnlySigner(_ key: DeviceKey) -> RelayAPI.Signer {
+        { data in
+            guard let signed = key.signIfUnlocked(data) else { throw SessionLocked() }
+            return signed
         }
     }
 
@@ -132,6 +149,10 @@ final class AppModel: ObservableObject {
     /// is untrusted in a prompt).
     func answer(_ item: QuestionItem, optionId: String?, text: String?) async {
         guard mode == .live, let key, let client, !answering.contains(item.token) else { return }
+        if let text, text.utf16.count > Self.maxAnswerChars {
+            banner = "An answer can be at most \(Self.maxAnswerChars) characters. Shorten it and send again."
+            return
+        }
         answering.insert(item.token)
         defer { answering.remove(item.token) }
         do {
@@ -169,11 +190,7 @@ final class AppModel: ObservableObject {
     /// quiet; the node lets a ping lapse after 120 s.
     func pingPresence() async {
         guard mode == .live, !pairing, let client, let key, key.isSessionUnlocked else { return }
-        let signer: RelayAPI.Signer = { data in
-            guard let signed = key.signIfUnlocked(data) else { throw CancellationError() }
-            return signed
-        }
-        try? await client.presence(foreground: true, signer: signer)
+        try? await client.presence(foreground: true, signer: Self.sessionOnlySigner(key))
     }
 
     init() {

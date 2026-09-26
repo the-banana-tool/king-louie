@@ -120,7 +120,13 @@ final class DeviceKey {
     /// Never prompts: for background work that must not ask for Face ID
     /// (cases stage 4 presence pings, ruling T19-presence).
     func signIfUnlocked(_ data: Data) -> Data? {
-        guard let context = sessionContext, let signed = try? signature(data, context: context) else { return nil }
+        guard let context = sessionContext else { return nil }
+        // If the context needs authentication again, the Secure Enclave fails
+        // instead of showing Face ID: no signature, no prompt.
+        let prior = context.interactionNotAllowed
+        context.interactionNotAllowed = true
+        defer { context.interactionNotAllowed = prior }
+        guard let signed = try? signature(data, context: context) else { return nil }
         unusable = false
         return signed
     }
