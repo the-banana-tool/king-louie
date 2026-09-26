@@ -24,11 +24,12 @@ after(async () => {
 describe('phone-agent in an unattended case', () => {
   it('polls quietly, wakes on a material change, saves results and commits them', async () => {
     // Real service mode (M22): entries and package roots come only from the
-    // admin service.json; the root ownership check is the test's own.
+    // admin service.json, and the real root check (makeRootAssert) runs,
+    // bound to this test's uid as the admin on POSIX (a no-op on Windows).
     const admin = { entries: {}, packageRoots: [] };
     const env = fx.setupExecutors({
       registryOptions: {
-        isService: true, adminExecutors: admin, assertRoot: () => {},
+        isService: true, adminExecutors: admin,
         ...(typeof process.getuid === 'function' ? { adminUid: process.getuid() } : {})
       }
     });
@@ -51,6 +52,11 @@ describe('phone-agent in an unattended case', () => {
     const rt = env.runtime;
     const reg = env.registry;
     assert.deepStrictEqual([reg.isService, reg.get('phone-agent').available], [true, true]);
+    // A valid entry in the data-dir settings is never loaded in service mode.
+    env.settings.executors.entries = { 'data-agent': { ...admin.entries['phone-agent'] } };
+    assert.strictEqual(reg.get('data-agent'), null);
+    assert.ok(!reg.list().some((e) => e.id === 'data-agent'));
+    env.settings.executors.entries = {};
     rt.addTurnStartHook('executors', (ctx) => reg.turnStartHook(ctx));
     const meta = await fx.activeCase(rt);
     const ctx = { caseId: meta.id, turnId: 'turn-1' };

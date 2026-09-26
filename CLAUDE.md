@@ -323,7 +323,8 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage3-executors.md`.
   executors use `tests/helpers/executor-fixtures.js` (a temp data dir, a fake
   pinned package) and `tests/helpers/fake-errands-server.js`.
 - In a case turn the browser tools only look and click, `WebFetch`/`WebSearch`
-  are gated in query mode, and `Bash` is not guarded.
+  are gated in query mode, and no tool writes ops memory, the executors folder
+  or workflow files in the data dir. `Bash` is not guarded.
 - Envelopes activate when the owner approves the envelope question in the app
   or remotely (the question is `mcpAnswerable`), on the desktop and in
   service mode alike. Only an executor that declares `authority: signed`
