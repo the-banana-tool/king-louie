@@ -167,10 +167,13 @@ function refPath(caseDir, ref) {
 const toPosix = (p) => p.split(path.sep).join('/');
 
 // The ref of a document this case already holds, from its ingest record:
-// only when the record names the same sha256 and its file is still there.
-// Otherwise null (the document is stored again); a record whose ref is not
-// a confined ref → BAD_PATH.
-function existingRef(caseDir, docId, hash) {
+// only when the record names the same sha256 and the file at its ref still
+// holds exactly these bytes (same size, same hash of what is on disk: the
+// record's claim alone is not trusted). Otherwise null (the document is
+// stored again); a record whose ref is not a confined ref → BAD_PATH.
+// `size` bounds the read: the upload is already within maxBytes, and a file
+// of any other size cannot hold the same bytes.
+function existingRef(caseDir, docId, hash, size) {
   let rec;
   try {
     rec = JSON.parse(fs.readFileSync(recordPath(caseDir, docId), 'utf8'));
@@ -182,7 +185,9 @@ function existingRef(caseDir, docId, hash) {
   const file = refPath(caseDir, rec.ref);
   if (rec.sha256 !== hash) return null;
   try {
-    return fs.statSync(file).isFile() ? rec.ref : null;
+    const st = fs.statSync(file);
+    if (!st.isFile() || st.size !== size) return null;
+    return sha256(fs.readFileSync(file)) === hash ? rec.ref : null;
   } catch {
     return null;
   }
@@ -204,7 +209,7 @@ function storeDocument(caseDir, { name, mime, bytes, origin, now = new Date(), t
   const type = sniffType({ name: label, mime, bytes: buf });
   const hash = sha256(buf);
   const docId = docIdFor(hash);
-  const known = existingRef(caseDir, docId, hash);
+  const known = existingRef(caseDir, docId, hash, buf.length);
   if (known) return { docId, ref: known, sha256: hash, duplicate: true, mime: type.mime };
   const folder = `sources/${yearMonth(now, timeZone)}`;
   const stem = path.basename(label, path.extname(label));
@@ -287,7 +292,7 @@ function resolveAdoptable(caseDir, relPath, { maxBytes = Infinity } = {}) {
 
 function adoptDocument(caseDir, relPath, { origin, now = new Date(), maxBytes = Infinity, pages = null } = {}) {
   const found = resolveAdoptable(caseDir, relPath, { maxBytes });
-  const known = existingRef(caseDir, found.docId, found.sha256);
+  const known = existingRef(caseDir, found.docId, found.sha256, found.bytes.length);
   if (known) return { docId: found.docId, ref: known, sha256: found.sha256, duplicate: true, mime: found.mime };
   try {
     writeSidecar(found.real, {

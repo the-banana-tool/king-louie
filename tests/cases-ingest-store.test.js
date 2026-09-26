@@ -100,6 +100,31 @@ describe('storeDocument', () => {
     assert.strictEqual(adoptDocument(dir, 'sources/adopt.txt', { origin, now: NOW }).duplicate, false);
   });
 
+  it('stores again when the recorded file was edited on disk (fix round 2)', () => {
+    const dir = caseDir();
+    const bytes = Buffer.from('original survey');
+    const first = storeDocument(dir, { name: 'survey.txt', bytes, origin: ORIGIN, now: NOW, timeZone: 'UTC' });
+    writeRecord(dir, first.docId, { docId: first.docId, sha256: first.sha256, ref: first.ref });
+    fs.writeFileSync(path.join(dir, first.ref), 'EDITED! survey!'); // same length, other bytes
+    const again = storeDocument(dir, { name: 'survey.txt', bytes, origin: ORIGIN, now: NOW, timeZone: 'UTC' });
+    assert.strictEqual(again.duplicate, false);
+    assert.notStrictEqual(again.ref, first.ref);
+    assert.ok(fs.readFileSync(path.join(dir, again.ref)).equals(bytes));
+  });
+
+  it('a record with the right sha256 but a ref to another file does not swallow the upload (fix round 2)', () => {
+    const dir = caseDir();
+    const bytes = Buffer.from('the real upload');
+    fs.writeFileSync(path.join(dir, 'sources', 'other.txt'), 'another file!!!'); // same length
+    const docId = docIdFor(sha256(bytes));
+    writeRecord(dir, docId, { docId, sha256: sha256(bytes), ref: 'sources/other.txt' });
+    const r = storeDocument(dir, { name: 'upload.txt', bytes, origin: ORIGIN, now: NOW, timeZone: 'UTC' });
+    assert.strictEqual(r.duplicate, false);
+    assert.strictEqual(r.ref, 'sources/2026-09/upload.txt');
+    fs.writeFileSync(path.join(dir, 'sources', 'adopt.txt'), bytes);
+    assert.strictEqual(adoptDocument(dir, 'sources/adopt.txt', { origin: { kind: 'tool', at: NOW.toISOString() }, now: NOW }).duplicate, false);
+  });
+
   it('a month folder that is a file is refused with a code (fix 4)', () => {
     const dir = caseDir();
     fs.writeFileSync(path.join(dir, 'sources', '2026-09'), 'not a folder');
