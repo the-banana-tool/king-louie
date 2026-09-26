@@ -27,7 +27,7 @@ describe('hardenedGitArgs', () => {
     for (const f of [
       'commit.gpgsign=false', 'tag.gpgsign=false', 'core.hooksPath=/tmp/empty-hooks', 'core.fsmonitor=false', 'core.symlinks=false', 'core.autocrlf=false',
       'core.eol=lf', 'filter.lfs.smudge=', 'filter.lfs.process=', 'filter.lfs.required=false',
-      'protocol.allow=never', 'protocol.https.allow=always', 'protocol.ssh.allow=always'
+      'protocol.allow=never', 'protocol.https.allow=always', 'protocol.ssh.allow=always', 'transfer.fsckObjects=true'
     ]) assert.ok(flags.includes(f), `${f} present`);
     assert.ok(!flags.includes('protocol.file.allow=always'));
     assert.strictEqual(argv[argv.length - 1], 'status');
@@ -36,6 +36,33 @@ describe('hardenedGitArgs', () => {
   it('allows the file protocol only when asked, and needs a hooks dir', () => {
     assert.ok(git.hardenedGitArgs(['clone'], { hooksDir: 'h', allowFile: true }).includes('protocol.file.allow=always'));
     assert.throws(() => git.hardenedGitArgs(['status'], {}), /hooksDir/);
+  });
+});
+
+describe('clean-config cache bounds', () => {
+  it('boundedSet keeps at most `limit` entries, evicting the oldest, and a re-set counts as newest', () => {
+    const m = new Map();
+    for (let i = 0; i < 5; i += 1) git.boundedSet(m, `k${i}`, i, 3);
+    assert.deepStrictEqual([...m.keys()], ['k2', 'k3', 'k4']);
+    git.boundedSet(m, 'k2', 'again', 3);
+    git.boundedSet(m, 'k5', 5, 3);
+    assert.deepStrictEqual([...m.keys()], ['k4', 'k2', 'k5']);
+    assert.strictEqual(git.CLEAN_CONFIGS_LIMIT, 256);
+  });
+
+  it('forgetConfigs drops the cached checks under a folder and only those', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const root = tmp();
+    const other = tmp();
+    for (const d of [path.join(root, 'a'), path.join(root, 'b'), path.join(other, 'c')]) {
+      fs.mkdirSync(d);
+      await git.runGit(d, ['init', '-q']);
+      await git.runGit(d, ['status']);
+    }
+    assert.strictEqual(git.forgetConfigs(`${root}-x`), 0);
+    assert.strictEqual(git.forgetConfigs(root), 2);
+    assert.strictEqual(git.forgetConfigs(root), 0);
+    assert.strictEqual(git.forgetConfigs(other), 1);
   });
 });
 

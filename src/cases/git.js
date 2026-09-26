@@ -126,6 +126,7 @@ function hardenedGitArgs(args, { hooksDir, allowFile = false } = {}) {
     '-c', 'filter.lfs.smudge=',
     '-c', 'filter.lfs.process=',
     '-c', 'filter.lfs.required=false',
+    '-c', 'transfer.fsckObjects=true',
     '-c', 'protocol.allow=never',
     '-c', 'protocol.https.allow=always',
     '-c', 'protocol.ssh.allow=always',
@@ -255,7 +256,37 @@ const NOT_A_REPO_RE = /only be used inside a git repository|not a git repository
 // A hit is not free: it reads HEAD, config and the index (parsed for
 // gitlinks) of the case and of every checked-out submodule, but it spawns no
 // git process.
+//
+// The cache holds at most CLEAN_CONFIGS_LIMIT repositories, the least
+// recently confirmed evicted first; forgetConfigs drops the entries under a
+// folder (a fetch's temp dir, when it is removed).
 const cleanConfigs = new Map();
+const CLEAN_CONFIGS_LIMIT = 256;
+
+// map.set that keeps at most `limit` entries: a re-set moves the key to the
+// newest end, and the oldest are evicted.
+function boundedSet(map, key, value, limit) {
+  map.delete(key);
+  map.set(key, value);
+  while (map.size > limit) map.delete(map.keys().next().value);
+}
+
+// Drops every cached check for a repository under `dir` (compared as
+// resolved paths, case-folded on Windows; no file system access, so it works
+// after the folder is gone). Returns how many were dropped.
+function forgetConfigs(dir) {
+  const fold = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
+  const base = fold(path.resolve(dir));
+  let dropped = 0;
+  for (const gitDir of [...cleanConfigs.keys()]) {
+    const rel = path.relative(base, fold(gitDir));
+    if (rel && rel.split(path.sep)[0] !== '..' && !path.isAbsolute(rel)) {
+      cleanConfigs.delete(gitDir);
+      dropped += 1;
+    }
+  }
+  return dropped;
+}
 
 function isPlainDir(p) {
   try {
@@ -510,7 +541,7 @@ function* configCheckPlan(cwd, entry) {
   if (!result.repo || !entry || !result.dirs) return null;
   if (!samePath(result.dirs.gitDir, entry.gitDir) || !samePath(result.dirs.commonDir, entry.gitDir)) return null;
   if (entry.key !== null && JSON.stringify(entry.subs) === JSON.stringify(result.subs)) {
-    cleanConfigs.set(entry.gitDir, entry.key);
+    boundedSet(cleanConfigs, entry.gitDir, entry.key, CLEAN_CONFIGS_LIMIT);
   }
   return entry;
 }
@@ -610,7 +641,8 @@ function checkedHooksDir(dir) {
 // leaves those running, holding the network connection and the pipes.
 function killProcessTree(child) {
   const pid = child.pid;
-  if (!pid) return;
+  // Already exited: its pid may belong to another process by now.
+  if (!pid || child.exitCode !== null || child.signalCode !== null) return;
   const killTop = () => {
     try { child.kill('SIGKILL'); } catch { /* already gone */ }
   };
@@ -783,5 +815,8 @@ module.exports = {
   isDirty,
   commitAll,
   noHooksDir,
+  forgetConfigs,
+  boundedSet,
+  CLEAN_CONFIGS_LIMIT,
   GitUnavailableError
 };

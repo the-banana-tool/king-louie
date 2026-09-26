@@ -13,8 +13,8 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { runGit, samePath } = require('../git');
-const { NAME_RE, LIMITS, walkPackage, hashEntries, validatePackage, formatErrors } = require('./format');
+const { runGit, samePath, forgetConfigs } = require('../git');
+const { NAME_RE, LIMITS, segmentProblem, reservedNameProblem, walkPackage, hashEntries, validatePackage, formatErrors } = require('./format');
 const { createLogger } = require('../../logging');
 
 const log = createLogger('playbook-vendor');
@@ -49,6 +49,13 @@ const unsupported = (input) => new PlaybookSourceError(
 
 const expandHome = (p) => (p === '~' || /^~[\\/]/.test(p) ? path.join(os.homedir(), p.slice(1)) : p);
 
+// A UNC or device path (\\host\share, //host/share, \\?\…, \\.\…). On
+// Windows any file system call on one can open an SMB connection and send
+// the service account's NTLM credentials to that host, so such a path is
+// refused on its text alone, before anything touches it (and on every
+// platform, for one rule).
+const isUncLike = (p) => typeof p === 'string' && /^[\\/]{2}/.test(p);
+
 function lstatOrNull(p) {
   try { return fs.lstatSync(p); } catch { return null; }
 }
@@ -74,6 +81,7 @@ function realpathDeep(p) {
 // Realpath containment, case-folded where the file system usually is
 // (Windows and macOS).
 function isInside(child, parent) {
+  if (isUncLike(child) || isUncLike(parent)) return false;
   const fold = process.platform === 'win32' || process.platform === 'darwin';
   const c = fold ? realpathDeep(child).toLowerCase() : realpathDeep(child);
   const p = fold ? realpathDeep(parent).toLowerCase() : realpathDeep(parent);
@@ -118,15 +126,16 @@ function sourceEntries(settings) {
 }
 
 // A URL is allowed when its normalized form equals, or sits under, a
-// normalized URL entry. An entry is a prefix at a path boundary.
+// normalized URL entry. An entry is a prefix at a path boundary, except one
+// whose text ends in .git: that names one repository and matches only it.
 function isUrlAllowed(url, settings) {
   const target = normalizeUrl(url);
   if (!target) return false;
   return sourceEntries(settings)
     .filter((e) => !e.startsWith('path:'))
-    .map(normalizeUrl)
-    .filter(Boolean)
-    .some((entry) => target === entry || target.startsWith(`${entry}/`));
+    .map((e) => ({ norm: normalizeUrl(e), exact: /\.git\/*$/i.test(e) }))
+    .filter((e) => e.norm)
+    .some(({ norm, exact }) => target === norm || (!exact && target.startsWith(`${norm}/`)));
 }
 
 function assertUrlAllowed(url, settings) {
@@ -138,10 +147,12 @@ function assertUrlAllowed(url, settings) {
 // A local folder is allowed when there is no path: entry, or it is under one
 // (spec §6). Both sides are compared by real path, so a link inside a root
 // that leads out of it is outside.
+// A UNC entry counts as an entry but matches nothing, and is never resolved.
 function assertPathAllowed(abs, settings) {
-  const roots = sourceEntries(settings).filter((e) => e.startsWith('path:')).map((e) => path.resolve(expandHome(e.slice(5).trim())));
+  const roots = sourceEntries(settings).filter((e) => e.startsWith('path:')).map((e) => expandHome(e.slice(5).trim()));
   if (!roots.length) return;
-  if (!roots.some((root) => isInside(abs, root))) {
+  const inside = (root) => !isUncLike(root) && !isUncLike(abs) && isInside(abs, path.resolve(root));
+  if (!roots.some(inside)) {
     throw new PlaybookSourceError(`Playbook source ${abs} is outside the allowed folders.`, 'SOURCE_NOT_ALLOWED');
   }
 }
@@ -183,12 +194,15 @@ function resolveSource(input, { examplesDir = null, settings = {} } = {}) {
     return { kind: 'example', source: `example:${name}`, fetchSpec: { path: dir } };
   }
   const local = expandHome(raw.startsWith('path:') ? raw.slice('path:'.length) : raw);
+  if (isUncLike(local)) throw unsupported(raw);
   if (!HAS_SCHEME.test(local) && !SCP_RE.test(local) && path.isAbsolute(local)) {
     const abs = path.resolve(local);
+    if (isUncLike(abs)) throw unsupported(raw);
+    // The allowlist first: a path outside it is never touched.
+    assertPathAllowed(abs, settings);
     let st = null;
     try { st = fs.statSync(abs); } catch { st = null; }
     if (!st || !st.isDirectory()) throw new PlaybookSourceError(`Playbook folder ${abs} does not exist.`, 'NO_FOLDER');
-    assertPathAllowed(abs, settings);
     return { kind: 'path', source: `path:${abs}`, fetchSpec: { path: abs } };
   }
   const url = checkGitUrl(raw, settings);
@@ -288,9 +302,12 @@ async function fetchPackage(resolved, { ref = null, timeoutMs = DEFAULT_TIMEOUT_
   if (!resolved || !['example', 'path', 'git'].includes(resolved.kind) || !resolved.fetchSpec) {
     throw new PlaybookSourceError('fetchPackage needs a source from resolveSource.', 'UNSUPPORTED_SOURCE');
   }
+  if (isUncLike(resolved.fetchSpec.path)) throw unsupported(resolved.fetchSpec.path);
   let tmpDir = null;
   const cleanup = () => {
-    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+    if (!tmpDir) return;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    forgetConfigs(tmpDir);
   };
   const deadline = timeoutMs ? Date.now() + timeoutMs : 0;
   try {
@@ -342,7 +359,9 @@ function checkSnapshot(snapshot) {
   for (const f of files) {
     const rel = f && typeof f.rel === 'string' ? f.rel : '';
     const segments = rel.split('/');
-    const bad = !rel || /[\\:\0]/.test(rel) || segments.some((seg) => !seg || seg === '.' || seg === '..' || seg.startsWith('.'));
+    // format's own name rules: plain ASCII segments (no "~", spaces, dot
+    // prefixes, "." or ".."), no trailing ".", no Windows device names.
+    const bad = !rel || /[\\:\0]/.test(rel) || segments.some((seg) => !seg || segmentProblem(seg) || reservedNameProblem(seg));
     if (bad) throw new PlaybookSourceError(`"${rel}" is not a valid package path.`, 'INVALID_PACKAGE');
     if (!Buffer.isBuffer(f.data) || f.data.length > LIMITS.fileBytes) {
       throw new PlaybookSourceError(`${rel} is not a file within the 256 KiB limit.`, 'INVALID_PACKAGE');
@@ -451,7 +470,10 @@ async function readRemoteManifest(url, { timeoutMs = DEFAULT_TIMEOUT_MS, tmpRoot
     if (err instanceof PlaybookSourceError) throw err;
     throw new PlaybookSourceError(`Could not fetch ${url}: ${err.firstLine || err.message}`, 'FETCH_FAILED');
   } finally {
-    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+    if (tmpDir) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      forgetConfigs(tmpDir);
+    }
   }
 }
 

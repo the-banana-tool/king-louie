@@ -68,6 +68,30 @@ describe('resolveSource', () => {
     assert.strictEqual(v.normalizeUrl('git@Example.COM:team/x.git'), 'ssh://git@example.com/team/x');
   });
 
+  it('refuses UNC and device paths before any file system call (no SMB connection, no NTLM)', (t) => {
+    const forms = ['\\\\host\\share\\pb', '//host/share/pb', '\\\\?\\UNC\\host\\share\\pb', '\\\\?\\C:\\pb', '\\\\.\\C:\\pb', 'path:\\\\host\\share\\pb', 'path://host/share/pb'];
+    const names = ['statSync', 'lstatSync', 'existsSync', 'realpathSync', 'readdirSync', 'openSync', 'accessSync'];
+    const calls = [];
+    for (const name of names) t.mock.method(fs, name, (...args) => { calls.push([name, String(args[0])]); throw new Error(`fs.${name} called`); });
+    t.mock.method(fs.realpathSync, 'native', (p) => { calls.push(['realpathSync.native', String(p)]); throw new Error('realpath called'); });
+    for (const s of forms) {
+      assert.throws(() => v.resolveSource(s, { settings: ALLOWED }), (err) => err.code === 'UNSUPPORTED_SOURCE' && err.message === UNSUPPORTED(s), s);
+    }
+    // A UNC path: allowlist entry is never resolved either; it matches nothing.
+    assert.throws(() => v.assertPathAllowed(path.resolve('/srv/pb'), { sources: ['path:\\\\host\\share'] }), /outside the allowed folders/);
+    assert.deepStrictEqual(calls, []);
+  });
+
+  it('an allowlist entry ending in .git names one repository: exact match only', () => {
+    const settings = { sources: ['https://example.com/org/repo.git'] };
+    assert.strictEqual(v.isUrlAllowed('https://example.com/org/repo.git', settings), true);
+    assert.strictEqual(v.isUrlAllowed('https://example.com/org/repo', settings), true);
+    assert.strictEqual(v.isUrlAllowed('https://example.com/org/repo/other', settings), false);
+    assert.strictEqual(v.isUrlAllowed('https://example.com/org/repo/other.git', settings), false);
+    // Without .git the entry is still a prefix.
+    assert.strictEqual(v.isUrlAllowed('https://example.com/org/repo/other', { sources: ['https://example.com/org/repo'] }), true);
+  });
+
   it('refuses unsupported schemes, relative paths, a leading dash and passwords', () => {
     for (const s of ['http://example.com/x.git', 'git://example.com/x.git', 'file:///srv/x', 'ext::sh -c touch% /tmp/pwned', 'playbooks/land-sale', '-uhttps://example.com/x']) {
       assert.throws(() => v.resolveSource(s, { settings: ALLOWED }), { message: UNSUPPORTED(s) }, s);
@@ -277,6 +301,26 @@ describe('fetchPackage', () => {
   });
 });
 
+describe('config cache hygiene', () => {
+  it('fetchPackage and readRemoteManifest forget the temp repositories they checked', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const repo = await makeGitPackage(path.join(tmp(), 'land-sale'));
+    const root = tmp();
+    // Control: a clean check under root is cached, and forgetConfigs finds it.
+    const probe = path.join(root, 'probe');
+    fs.mkdirSync(probe);
+    await git.runGit(probe, ['init', '-q']);
+    await git.runGit(probe, ['status']);
+    assert.strictEqual(git.forgetConfigs(root), 1);
+    const f = await v.fetchPackage(v.resolveSource(repo), { tmpRoot: root });
+    f.cleanup();
+    await v.readRemoteManifest(repo, { tmpRoot: root, allowFile: true });
+    await assert.rejects(v.fetchPackage(v.resolveSource(repo), { ref: 'no-such-branch', tmpRoot: root }));
+    fs.rmSync(probe, { recursive: true, force: true });
+    assert.strictEqual(git.forgetConfigs(root), 0);
+  });
+});
+
 describe('snapshots and vendorInto', () => {
   it('copies by rename, refuses an existing directory, and cleans leftovers', async () => {
     const src = writePackage(path.join(tmp(), 'land-sale'));
@@ -310,7 +354,11 @@ describe('snapshots and vendorInto', () => {
   it('refuses snapshot paths that leave the package, and a package that fails validation, leaving no temp dir', () => {
     const good = v.readSnapshot(writePackage(path.join(tmp(), 'land-sale')));
     const caseDir = tmp();
-    for (const rel of ['../evil.md', 'a/../../evil.md', '/abs.md', 'C:/abs.md', 'a\\b.md', '.git/config', 'a//b.md', '']) {
+    for (const rel of [
+      '../evil.md', 'a/../../evil.md', '/abs.md', 'C:/abs.md', 'a\\b.md', '.git/config', 'a//b.md', '',
+      // Names Windows rewrites or maps to a device: nothing may be written for them.
+      'steps~1.md', 'notes.md ', 'notes.md.', 'sub./a.md', 'con.md', 'NUL.txt', 'lpt1/a.md', 'aux'
+    ]) {
       const snap = { files: [...good.files, { rel, data: Buffer.from('x\n') }] };
       assert.throws(() => v.vendorInto(caseDir, snap, 'land-sale'), /not a valid package path/, rel);
     }

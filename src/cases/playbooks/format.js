@@ -941,6 +941,8 @@ module.exports = {
   parsePlaybookYaml,
   parseSteps,
   parseBriefRules,
+  segmentProblem,
+  reservedNameProblem,
   walkPackage,
   hashEntries,
   hashPackage,
