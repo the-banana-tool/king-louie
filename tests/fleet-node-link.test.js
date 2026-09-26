@@ -71,6 +71,12 @@ describe('front-door.json', () => {
     fs.chmodSync(path.join(dir, 'front-door.json'), 0o666);
     assert.throws(() => readPin(dir, { geteuid: () => UID, adminUid: UID }), /group- or world-writable/);
   });
+
+  it('refuses a dangling front-door.json link instead of reading it as absent', { skip: !POSIX && 'POSIX symlinks' }, () => {
+    const { dir } = configDir();
+    fs.symlinkSync(path.join(dir, 'missing.json'), path.join(dir, 'front-door.json'));
+    assert.throws(() => readPin(dir, { geteuid: () => UID, adminUid: UID }), /symlink/);
+  });
 });
 
 describe('backoff', () => {
@@ -130,6 +136,26 @@ describe('RelayClient with a front-door pin', () => {
     }
   });
 
+  it('a 4009 close from the transport waits at least 5 s', async () => {
+    const calls = [];
+    const c = new RelayClient({ identity: node, frontDoorPin: pinFor(), useTls: false, random: () => 0,
+      transportFactory: pinnedTransportFactory(calls, { reject: () => new Error('unreachable') }) });
+    cleanups.push(() => c.stop());
+    await c.start();
+    await new Promise((r) => setImmediate(r));
+    assert.equal(c.dialing, false);
+    c.dialAttempt = 0;
+    c.transport.emit('peerDisconnected', { peerId: fd.peerId, code: 4009 });
+    assert.equal(c.lastDelayMs, 5000);
+  });
+
+  it('a relay_id mismatch on the front-door link waits at least 60 s', () => {
+    const c = new RelayClient({ identity: node, frontDoorPin: pinFor(), useTls: false, random: () => 0 });
+    c._handleLinkDown('mismatch');
+    assert.ok(c.lastDelayMs >= 60000, String(c.lastDelayMs));
+    clearTimeout(c.retryTimer);
+  });
+
   it('4009 waits at least 5 s; five minutes connected resets the backoff', () => {
     let now = 0;
     const c = new RelayClient({ identity: node, frontDoorPin: pinFor(), useTls: false, now: () => now, random: () => 1 });
@@ -170,7 +196,7 @@ describe('RelayClient with a front-door pin', () => {
     ];
     for (const pin of bad) {
       const calls = [];
-      assert.throws(() => new RelayClient({ identity: node, frontDoorPin: pin, useTls: false, transportFactory: pinnedTransportFactory(calls) }), /front-door.json/);
+      assert.throws(() => new RelayClient({ identity: node, frontDoorPin: pin, useTls: false, transportFactory: pinnedTransportFactory(calls) }), /front-door\.json/);
       assert.deepEqual(calls, []);
     }
   });
@@ -230,16 +256,34 @@ describe('startApprovals with a front door', () => {
     const l = layout();
     fs.writeFileSync(path.join(l.configDir, 'front-door.json'), '{ not json', { mode: 0o644 });
     if (POSIX) fs.chmodSync(path.join(l.configDir, 'front-door.json'), 0o644);
+    const relay = new NodeIdentity({ nodeName: 'relay' });
+    const storePin = { relay_id: relay.nodeId, peerId: relay.peerId, publicKey: relay.publicKey.toString('hex'), tlsFingerprint: relay.tlsFingerprint, address: '127.0.0.1', port: 1 };
+    l.ports.store.set('approvals.relay', storePin);
     const errors = [];
     const remove = addSink((r) => { if (r.level === 'error' && /front-door\.json/.test(r.message)) errors.push(r.message); });
+    const calls = [];
     let a;
     try {
-      a = await startApprovals({ dataDir: l.dataDir, configDir: l.configDir, nodeConfig: { name: 'web-01', approvers: { relay: null, requestTtlS: 300 }, policy: {} }, ports: l.ports, identity: node, approverStoreOptions: storeOptions });
+      a = await startApprovals({
+        dataDir: l.dataDir, configDir: l.configDir, nodeConfig: { name: 'web-01', approvers: { relay: 'wss://10.0.0.5:18795', requestTtlS: 300 }, policy: {} },
+        ports: l.ports, identity: node, approverStoreOptions: storeOptions, useTls: false, transportFactory: pinnedTransportFactory(calls)
+      });
     } finally {
       remove();
     }
     cleanups.push(() => a.stop());
     assert.equal(errors.length, 1);
+    assert.equal(a.relayClient.frontDoorPin, null);
+    assert.deepEqual(a.relayClient.pin, storePin);
+    assert.deepEqual(calls, []);
+  });
+
+  it('an invalid front-door.json and no relay: no link', async () => {
+    const l = layout();
+    fs.writeFileSync(path.join(l.configDir, 'front-door.json'), '{ not json', { mode: 0o644 });
+    if (POSIX) fs.chmodSync(path.join(l.configDir, 'front-door.json'), 0o644);
+    const a = await startApprovals({ dataDir: l.dataDir, configDir: l.configDir, nodeConfig: { name: 'web-01', approvers: { relay: null, requestTtlS: 300 }, policy: {} }, ports: l.ports, identity: node, approverStoreOptions: storeOptions });
+    cleanups.push(() => a.stop());
     assert.equal(a.relayClient, null);
   });
 });
@@ -258,6 +302,21 @@ describe('doctor on a node with front-door.json', () => {
     assert.equal(bad.at(-1).ok, false);
     assert.match(bad.at(-1).detail, new RegExp(`pinned ${fd.tlsFingerprint}, served f{64}`));
     assert.deepEqual(await nodeFrontDoorChecks({ configDir: configDir().dir, adminUid: UID, geteuid: () => UID, probe: async () => null }), []);
+  });
+});
+
+describe('doctor with a dangling front-door.json link', () => {
+  it('reports it as a FAIL row', { skip: !POSIX && 'POSIX symlinks' }, async () => {
+    const { runDoctor } = require('../src/service/doctor');
+    const { base, dir } = configDir();
+    const dataDir = path.join(base, 'data');
+    fs.mkdirSync(dataDir, { mode: 0o700 });
+    fs.symlinkSync(path.join(dir, 'missing.json'), path.join(dir, 'front-door.json'));
+    const rows = await runDoctor({ dataDir, platform: 'linux', adminUid: UID, configDir: dir });
+    const row = rows.find((r) => r.check === 'front-door.json is admin-owned and valid');
+    assert.ok(row, 'the front-door row is present');
+    assert.equal(row.ok, false);
+    assert.match(row.detail, /symlink/);
   });
 });
 

@@ -66,7 +66,15 @@ async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, c
   {
     const { adminConfigDir } = require('../platform/paths');
     const dir = configDir || adminConfigDir({ dataDir });
-    if (fs.existsSync(path.join(dir, 'front-door.json'))) {
+    // lstat, as readPin does: a dangling front-door.json link is reported.
+    let hasPin = true;
+    try {
+      fs.lstatSync(path.join(dir, 'front-door.json'));
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+      hasPin = false;
+    }
+    if (hasPin) {
       let nodeConfig = null;
       try {
         nodeConfig = require('./node-config').loadNodeConfig({ dataDir, adminConfigDir: dir, adminUid });
