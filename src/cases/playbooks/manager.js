@@ -456,8 +456,15 @@ class PlaybookManager {
     }
     const abs = recordedLocalPath(source);
     if (abs !== null) {
-      assertNoLinks(abs, name);
+      const needsConfirm = () => new PlaybookError(
+        `The recorded source of "${name}" is a local folder no allowed-folder entry covers (${oneLine(abs, 200)}). Confirm it before King Louie reads it, or add its folder to Settings → Playbooks → Allowed sources.`,
+        { code: 'SOURCE_NEEDS_CONFIRM' }
+      );
       const hasEntry = settings.sources.some((e) => e.startsWith('path:'));
+      // With no path: entry nothing can cover it: refuse on the text, before
+      // any file system call (a mapped network drive is not touched).
+      if (!hasEntry && confirmSource !== true) throw needsConfirm();
+      assertNoLinks(abs, name);
       let covered = false;
       if (hasEntry) {
         try {
@@ -467,12 +474,7 @@ class PlaybookManager {
           covered = false;
         }
       }
-      if (!covered && confirmSource !== true) {
-        throw new PlaybookError(
-          `The recorded source of "${name}" is a local folder no allowed-folder entry covers (${oneLine(abs, 200)}). Confirm it before King Louie reads it, or add its folder to Settings → Playbooks → Allowed sources.`,
-          { code: 'SOURCE_NEEDS_CONFIRM' }
-        );
-      }
+      if (!covered && confirmSource !== true) throw needsConfirm();
     }
     return vendor.resolveSource(source, { examplesDir: this.examplesDir, settings });
   }
@@ -642,6 +644,10 @@ class PlaybookManager {
   }
 
   async remove(caseId, name) {
+    if (typeof name === 'string' && !NAME_RE.test(name) && name.length <= 256) {
+      const pins = this.runtime.getCase(caseId).playbooks || [];
+      if (pins.some((p) => p && p.name === name)) return this._removeInvalidPin(caseId, name);
+    }
     checkName(name);
     return this._action(caseId, `playbook remove ${name}`, (meta) => {
       this._assertOpen(meta);
@@ -664,6 +670,21 @@ class PlaybookManager {
       delete state.acknowledged[name];
       changes.writeState(meta.dir, state);
       this._journal(meta, `Removed playbook ${name}${entry.onDisk ? `@${entry.onDisk.version}` : ''}. Question records it created and defaults it applied stay.`);
+      return { ok: true };
+    });
+  }
+
+  // A pin whose name is not a valid playbook name (an imported case.yaml can
+  // hold "../../evil"): only the exact-match entry leaves case.yaml. No path
+  // is built from the name and the file system is not touched; the name is
+  // kept out of the commit message.
+  async _removeInvalidPin(caseId, name) {
+    return this._action(caseId, 'playbook remove (invalid name)', (meta) => {
+      this._assertOpen(meta);
+      const pins = meta.playbooks || [];
+      if (!pins.some((p) => p && p.name === name)) throw new PlaybookError('That playbook is not attached to this case.', { code: 'NOT_ATTACHED' });
+      this.runtime.store.updateMeta(meta.id, { playbooks: pins.filter((p) => !(p && p.name === name)) });
+      this._journal(meta, 'Removed a playbook entry with an invalid name from case.yaml; no files were touched.');
       return { ok: true };
     });
   }
@@ -712,11 +733,14 @@ class PlaybookManager {
       }
       results.push(row);
     }
-    await this._action(meta.id, 'playbook check', (m) => {
-      const s = changes.readState(m.dir);
-      s.lastUpdateCheck = this.now().toISOString();
-      changes.writeState(m.dir, s);
-    });
+    // A closed case is read only: no lastUpdateCheck write, no commit.
+    if (!CLOSED.includes(meta.status)) {
+      await this._action(meta.id, 'playbook check', (m) => {
+        const s = changes.readState(m.dir);
+        s.lastUpdateCheck = this.now().toISOString();
+        changes.writeState(m.dir, s);
+      });
+    }
     if (apply && settings.autoUpdate) {
       for (const row of results) {
         if (!row.updateAvailable || !row.sameMajor || row.error) continue;
@@ -852,6 +876,9 @@ class PlaybookManager {
 
   // ---- Acknowledgement (C2's Reorient) ----
 
+  // Takes no lock and does not commit: call it only from C2's Reorient
+  // (runtime.acknowledgePlaybooks) inside a turn that holds the case lock
+  // and commits. Never call it from IPC or anywhere outside a turn.
   acknowledge(caseId) {
     const meta = this.runtime.getCase(caseId);
     const entries = this._loader(meta).list();

@@ -45,6 +45,38 @@ async function allowedUpstream({ gitRepo = true, name = 'land-sale', overrides =
   return { root, dir };
 }
 
+// Every fs call that reads through `target` (or anything under it) is
+// recorded and refused before it reaches the file system.
+function watchFs(t, target, { lstatSelf = false } = {}) {
+  const fold = (p) => (process.platform === 'win32' || process.platform === 'darwin' ? p.toLowerCase() : p);
+  const root = fold(path.resolve(target));
+  const hits = [];
+  const under = (p, self) => {
+    if (typeof p !== 'string' && !(p instanceof URL) && !Buffer.isBuffer(p)) return false;
+    const s = fold(path.resolve(String(p)));
+    return (self && s === root) || s.startsWith(root + path.sep);
+  };
+  const wrap = (obj, name, self) => {
+    const real = obj[name];
+    const fn = function (p, ...rest) {
+      if (under(p, self)) {
+        hits.push(`${name} ${p}`);
+        throw Object.assign(new Error(`test: ${name} on a watched path`), { code: 'EWATCHED' });
+      }
+      return real.call(this, p, ...rest);
+    };
+    Object.assign(fn, real);
+    obj[name] = fn;
+    t.after(() => { obj[name] = real; });
+  };
+  // Calls that follow a link at `target` itself, and lstat of anything under it.
+  for (const n of ['statSync', 'readdirSync', 'readFileSync', 'openSync', 'existsSync', 'accessSync', 'opendirSync']) wrap(fs, n, true);
+  wrap(fs.realpathSync, 'native', true);
+  wrap(fs, 'realpathSync', true);
+  wrap(fs, 'lstatSync', lstatSelf);
+  return hits;
+}
+
 describe('attach', () => {
   it('vendors the copy, records it, commits once, and asks the gating questions', async (t) => {
     if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
@@ -174,6 +206,22 @@ describe('remove', () => {
     assert.strictEqual(await lastSubject(dir), 'system: playbook remove land-sale');
     await assert.rejects(mgr.remove(id, '../x'), /is not a valid playbook name/);
     await assert.rejects(mgr.remove(id, { toString: () => 'x' }), { message: 'A playbook name must be a string.' });
+  });
+
+  it('a pin with an invalid name leaves case.yaml; nothing on disk is touched', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const { rt, mgr, id, dir } = await world();
+    await mgr.attach(id, { source: 'example:land-sale' });
+    // Where a path built from the name would land (the cases root).
+    const evil = path.resolve(dir, 'playbooks', '..', '..', 'evil');
+    const good = rt.getCase(id).playbooks[0];
+    rt.store.updateMeta(id, { playbooks: [good, { name: '../../evil', version: '1.0.0', source: 'adopted', mode: 'vendored', commit: null, contentHash: 'sha256:x' }] });
+    const hits = watchFs(t, evil, { lstatSelf: true });
+    assert.deepStrictEqual(await mgr.remove(id, '../../evil'), { ok: true });
+    assert.deepStrictEqual(hits, []);
+    assert.deepStrictEqual(rt.getCase(id).playbooks, [good], 'only the exact-match entry is dropped');
+    assert.strictEqual(await lastSubject(dir), 'system: playbook remove (invalid name)');
+    await assert.rejects(mgr.remove(id, '../../other'), /is not a valid playbook name/);
   });
 
   it('a linked copy is unlinked, never followed', async (t) => {
@@ -313,6 +361,28 @@ describe('updates', () => {
     assert.strictEqual(again[0].updateAvailable, false);
   });
 
+  it('checkUpdates on a closed case writes and commits nothing', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    for (const status of ['done', 'abandoned']) {
+      const { rt, mgr, id, dir } = await world();
+      await mgr.attach(id, { source: 'example:land-sale' });
+      if (status === 'done') {
+        rt.brief(id).update('why', 'Need the cash', { provenance: 'user' });
+        rt.brief(id).append('successCriteria', 'Sold', { provenance: 'model' });
+        for (const q of rt.questions(id).open()) await rt.answerQuestion(id, q.id, { text: q.options?.length ? null : '250000', optionId: q.options?.[0]?.id ?? null });
+        rt.completeGating(id);
+      }
+      rt.setStatus(id, status, { kind: 'owner', by: 'owner' });
+      await git.commitAll(dir, `closed ${status}`);
+      const head = (await git.git(dir, ['rev-parse', 'HEAD'])).trim();
+      const rows = await mgr.checkUpdates(id);
+      assert.strictEqual(rows[0].upstream, '1.2.0');
+      assert.strictEqual(readState(dir).lastUpdateCheck, null);
+      assert.strictEqual((await git.git(dir, ['rev-parse', 'HEAD'])).trim(), head, `${status}: no commit`);
+      assert.ok(await clean(dir), `${status}: nothing written`);
+    }
+  });
+
   it('a submodule update is refused', async (t) => {
     if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
     const { rt, mgr, id, dir } = await world();
@@ -334,38 +404,6 @@ describe('updates', () => {
 // data (imported, or rewritten through Bash). It is read on update only
 // under a matching path: allowlist entry, or after the owner re-confirms.
 describe('recorded local sources', () => {
-  // Every fs call that reads through `target` (or anything under it) is
-  // recorded and refused before it reaches the file system.
-  function watchFs(t, target, { lstatSelf = false } = {}) {
-    const fold = (p) => (process.platform === 'win32' || process.platform === 'darwin' ? p.toLowerCase() : p);
-    const root = fold(path.resolve(target));
-    const hits = [];
-    const under = (p, self) => {
-      if (typeof p !== 'string' && !(p instanceof URL) && !Buffer.isBuffer(p)) return false;
-      const s = fold(path.resolve(String(p)));
-      return (self && s === root) || s.startsWith(root + path.sep);
-    };
-    const wrap = (obj, name, self) => {
-      const real = obj[name];
-      const fn = function (p, ...rest) {
-        if (under(p, self)) {
-          hits.push(`${name} ${p}`);
-          throw Object.assign(new Error(`test: ${name} on a watched path`), { code: 'EWATCHED' });
-        }
-        return real.call(this, p, ...rest);
-      };
-      Object.assign(fn, real);
-      obj[name] = fn;
-      t.after(() => { obj[name] = real; });
-    };
-    // Calls that follow a link at `target` itself, and lstat of anything under it.
-    for (const n of ['statSync', 'readdirSync', 'readFileSync', 'openSync', 'existsSync', 'accessSync', 'opendirSync']) wrap(fs, n, true);
-    wrap(fs.realpathSync, 'native', true);
-    wrap(fs, 'realpathSync', true);
-    wrap(fs, 'lstatSync', lstatSelf);
-    return hits;
-  }
-
   async function imported(t, { sources = [] } = {}) {
     // The owner attached from a folder they typed; then the recorded source
     // was rewritten to point at another folder.
@@ -396,6 +434,25 @@ describe('recorded local sources', () => {
     assert.deepStrictEqual(await w.mgr.update(w.id, 'land-sale', { confirmSource: 'yes' }).then((r) => r.code), 'SOURCE_NEEDS_CONFIRM', 'confirm only on === true');
     assert.deepStrictEqual(hits, [], 'nothing under the recorded folder was touched');
     assert.strictEqual(readState(w.dir).vendored['land-sale'].onDiskVersion, '1.2.0');
+  });
+
+  it('with no path: entry the recorded path is refused before any file system call', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const w = await imported(t);
+    // Stands in for a folder on a mapped network drive: nothing on its way
+    // may be lstat-ed (or read) before the owner confirms.
+    const drive = path.join(tmp(), 'mapped');
+    const s = readState(w.dir);
+    s.vendored['land-sale'].source = `path:${path.join(drive, 'land-sale')}`;
+    writeState(w.dir, s);
+    const hits = watchFs(t, drive, { lstatSelf: true });
+    const [row] = await w.mgr.checkUpdates(w.id);
+    assert.strictEqual(row.code, 'SOURCE_NEEDS_CONFIRM');
+    assert.strictEqual((await w.mgr.update(w.id, 'land-sale')).code, 'SOURCE_NEEDS_CONFIRM');
+    assert.deepStrictEqual(hits, [], 'zero file system calls before confirming');
+    const confirmed = await w.mgr.update(w.id, 'land-sale', { confirmSource: true });
+    assert.strictEqual(confirmed.ok, false);
+    assert.ok(hits.length > 0, 'a confirmed path is then checked');
   });
 
   it('the owner re-confirming reads it', async (t) => {
