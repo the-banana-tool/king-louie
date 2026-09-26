@@ -210,6 +210,18 @@ describe('validatePackage', () => {
     assert.deepStrictEqual(messages(f.validatePackage(dir)), ['steps.md is missing']);
   });
 
+  it('suppresses "is missing" for playbook.yaml/steps.md when the walk was truncated', () => {
+    // A truncated walk stopped before listing everything, so "is missing"
+    // would be a guess — the file could be past wherever the walk gave up
+    // — and the walk already reported why it stopped (the entries cap,
+    // here).
+    const dir = writePackage(path.join(tmp(), 'land-sale'), { 'playbook.yaml': null, 'steps.md': null });
+    for (let i = 0; i < 520; i += 1) fs.mkdirSync(path.join(dir, `empty-${i}`));
+    const msgs = messages(f.validatePackage(dir));
+    assert.match(msgs.join('\n'), /512 entries/);
+    assert.ok(!msgs.some((m) => m.includes('is missing')), `expected no "is missing" message, got: ${msgs.join(' | ')}`);
+  });
+
   it('refuses other extensions, big files, too many files and big packages; allows LICENSE', () => {
     const dir = writePackage(path.join(tmp(), 'land-sale'), { 'run.js': 'module.exports = 1;\n', LICENSE: 'MIT\n' });
     assert.deepStrictEqual(messages(f.validatePackage(dir)), ['run.js: only .yaml, .md, .txt and LICENSE files are allowed']);

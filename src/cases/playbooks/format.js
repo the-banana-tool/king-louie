@@ -837,7 +837,7 @@ function readSmallFile(files, rel) {
 }
 
 function validatePackage(dir, { dirName = path.basename(dir), knownCaseTypes = null } = {}) {
-  const { files, errors } = walkPackage(dir);
+  const { files, errors, truncated } = walkPackage(dir);
   const warnings = [];
 
   const yamlFile = readSmallFile(files, 'playbook.yaml');
@@ -849,8 +849,12 @@ function validatePackage(dir, { dirName = path.basename(dir), knownCaseTypes = n
   let steps = null;
   let briefRules = { all: [], byExecutor: {}, errors: [] };
 
+  // A truncated walk stopped before listing everything: "is missing" would
+  // be a guess (the file could be past wherever the walk gave up), and the
+  // walk already reported why it stopped. Task 11 carries the "20+ errors
+  // counts as truncated too" case forward; no change needed here for it.
   if (!yamlFile.present) {
-    errors.push({ file: 'playbook.yaml', message: 'playbook.yaml is missing' });
+    if (!truncated) errors.push({ file: 'playbook.yaml', message: 'playbook.yaml is missing' });
   } else if (yamlFile.error) {
     errors.push({ file: 'playbook.yaml', message: `playbook.yaml ${yamlFile.error}` });
   } else if (yamlFile.text !== null) {
@@ -862,7 +866,7 @@ function validatePackage(dir, { dirName = path.basename(dir), knownCaseTypes = n
 
   const executors = playbook && playbook.executors.length ? playbook.executors : null;
   if (!stepsFile.present) {
-    errors.push({ file: 'steps.md', message: 'steps.md is missing' });
+    if (!truncated) errors.push({ file: 'steps.md', message: 'steps.md is missing' });
   } else if (stepsFile.error) {
     errors.push({ file: 'steps.md', message: `steps.md ${stepsFile.error}` });
   } else if (stepsFile.text !== null) {
