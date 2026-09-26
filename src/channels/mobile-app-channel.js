@@ -7,8 +7,12 @@
 // `kl.question.answer` envelope verified here, on the node, against the
 // admin-owned approver set; a relay-forwarded answer is never proof by itself.
 // This is the one remote channel that may answer approvals and app-only
-// questions (owner decision M22), so every inbound call is device-signed:
-// foreground presence too (`kl.presence.foreground`).
+// questions (owner decision M22), so every answer is device-signed. Foreground
+// presence is not (ruling T17-presence: the device key needs a biometric
+// prompt on every use, so a phone cannot sign a ping every 60 s). An unsigned
+// ping is accepted only over the approvals relay link, for a paired,
+// unrevoked device, and it only changes which ladder rung is tried first: it
+// never answers, approves, opens or closes anything.
 //
 // The relay link lives on `this.link`, never `this.relay`: the router's
 // relayOf() treats `relay.name` as "served by that contact relay", and relay
@@ -25,7 +29,10 @@ const QUESTION_ID = /^q-\d{4,}$/;
 const CASE_ID = /^[A-Za-z0-9._-]{1,80}$/;
 const OPTION_ID = /^[a-z0-9-]{1,16}$/;
 const ANSWER_KEYS = ['answer', 'case_id', 'device_id', 'node_id', 'nonce', 'question_id', 'signed_at', 'token', 'type', 'v'];
-const FOREGROUND_KEYS = ['device_id', 'foreground', 'node_id', 'nonce', 'signed_at', 'type', 'v'];
+// Presence pings (ruling T17-presence): older than this are ignored; one
+// state change per device per PRESENCE_MIN_GAP_MS, extra pings dropped.
+const PRESENCE_MAX_AGE_MS = 2 * 60 * 1000;
+const PRESENCE_MIN_GAP_MS = 5 * 1000;
 // Bounds on the node-signed question (code points).
 const MAX_TEXT = 4000;
 const MAX_TITLE = 200;
@@ -88,19 +95,10 @@ function validateAnswerMessage(m) {
     && messages.isTimestamp(m.signed_at) && messages.DEVICE_ID_RE.test(m.device_id);
 }
 
-// The kl.presence.foreground shape: a device-signed foreground ping.
-function validateForegroundMessage(m) {
-  return exactKeys(m, FOREGROUND_KEYS)
-    && messages.NODE_ID_RE.test(m.node_id) && messages.DEVICE_ID_RE.test(m.device_id) && typeof m.foreground === 'boolean'
-    && messages.NONCE_RE.test(m.nonce) && messages.isTimestamp(m.signed_at);
-}
-
-for (const [type, validator] of [['kl.question.answer', validateAnswerMessage], ['kl.presence.foreground', validateForegroundMessage]]) {
-  try {
-    messages.registerMessageValidator(type, validator);
-  } catch (err) {
-    if (!/already has a validator/.test(err.message)) throw err;
-  }
+try {
+  messages.registerMessageValidator('kl.question.answer', validateAnswerMessage);
+} catch (err) {
+  if (!/already has a validator/.test(err.message)) throw err;
 }
 
 function linkError(err) {
@@ -128,6 +126,7 @@ class MobileAppChannel extends ChannelPlugin {
     this.clock = clock;
     this.log = log;
     this.replyHandler = null;
+    this.lastPresenceChange = new Map();
   }
 
   async initialize() {}
@@ -162,7 +161,7 @@ class MobileAppChannel extends ChannelPlugin {
 
   registerMethods() {
     this.link.registerMethod('question.answer', (params) => this.handleAnswer(params));
-    this.link.registerMethod('presence.foreground', (params) => this.handleForeground(params));
+    this.link.registerMethod('presence.foreground', (params, ctx) => this.handleForeground(params, ctx));
   }
 
   // question.submit: one node-signed kl.question.ask per item and active device.
@@ -216,16 +215,34 @@ class MobileAppChannel extends ChannelPlugin {
     return { ok: false, error: reason };
   }
 
-  // The link method presence.foreground: { envelope }, a device-signed
-  // kl.presence.foreground. Presence is stamped with the node's clock, so a
-  // phone timestamp (even one ahead within the window) never enters it.
-  async handleForeground(params = {}) {
-    const v = this._verify(params, 'kl.presence.foreground');
-    if (!v.ok) return this._refuse('presence', v.reason);
-    if (!this.presenceTracker) return this._refuse('presence', 'not_ready');
-    this.nonces.add(v.message.nonce, bytesSha256(v.bytes));
-    const r = this.presenceTracker.mobileForeground({ deviceId: v.deviceId, foreground: v.message.foreground === true });
-    return r && r.ok === false ? this._refuse('presence', 'not_ready') : { ok: true };
+  // The link method presence.foreground: { deviceId, foreground, at },
+  // unsigned (ruling T17-presence). Registered only on the approvals relay
+  // link, whose RelayClient answers only its pinned relay peer; `ctx.peer`
+  // is that peer. A future `at` is clamped to now; one more than two minutes
+  // old is ignored. Presence itself is stamped with the node clock. This
+  // touches only Presence (which rung the ladder tries first), never a
+  // question.
+  async handleForeground(params, ctx) {
+    const refuse = (reason) => {
+      this.log.debug(`phone presence refused: ${reason}`);
+      return { ok: false, error: reason };
+    };
+    if (!ctx || !ctx.peer) return refuse('not-linked');
+    const p = params && typeof params === 'object' && !Array.isArray(params) ? params : null;
+    if (!p || typeof p.deviceId !== 'string' || !messages.DEVICE_ID_RE.test(p.deviceId)) return refuse('malformed');
+    const atMs = typeof p.at === 'number' ? p.at : (typeof p.at === 'string' ? Date.parse(p.at) : NaN);
+    if (!Number.isFinite(atMs)) return refuse('malformed');
+    if (!this.approverStore.get(p.deviceId) || !this.approverStore.isActive(p.deviceId)) return refuse('unknown-device');
+    if (!this.presenceTracker) return refuse('not_ready');
+    const nowMs = this.clock().getTime();
+    const at = Math.min(atMs, nowMs);
+    if (nowMs - at > PRESENCE_MAX_AGE_MS) return { ok: true };
+    const last = this.lastPresenceChange.get(p.deviceId);
+    if (last !== undefined && nowMs - last < PRESENCE_MIN_GAP_MS) return { ok: true };
+    const r = this.presenceTracker.mobileForeground({ deviceId: p.deviceId, foreground: p.foreground === true });
+    if (r && r.ok === false) return refuse('not_ready');
+    this.lastPresenceChange.set(p.deviceId, nowMs);
+    return { ok: true };
   }
 
   // The link method question.answer: { envelope } forwarded by the relay.
@@ -252,4 +269,4 @@ class MobileAppChannel extends ChannelPlugin {
   }
 }
 
-module.exports = { MobileAppChannel, validateAnswerMessage, validateForegroundMessage, SIGNED_AT_SKEW_MS };
+module.exports = { MobileAppChannel, validateAnswerMessage, SIGNED_AT_SKEW_MS, PRESENCE_MAX_AGE_MS, PRESENCE_MIN_GAP_MS };

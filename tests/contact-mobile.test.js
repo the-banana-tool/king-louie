@@ -1,6 +1,7 @@
 // tests/contact-mobile.test.js — cases stage 4 §3.9 (wave 3, R44): the phone
 // app as a contact channel. Node side: kl.question.ask out (preflight M6),
-// device-signed kl.question.answer and kl.presence.foreground in. Relay side
+// device-signed kl.question.answer and unsigned presence.foreground pings
+// (ruling T17-presence) in. Relay side
 // (appended in Task 18): the phone routes.
 const { describe, it, after } = require('node:test');
 const assert = require('node:assert');
@@ -12,7 +13,7 @@ const { ContactState } = require('../src/cases/contact-state');
 const { ContactRouter, relayOf } = require('../src/cases/contact');
 const { Presence } = require('../src/cases/presence');
 const { defaultPolicy } = require('../src/cases/contact-format');
-const { MobileAppChannel, validateAnswerMessage, validateForegroundMessage, SIGNED_AT_SKEW_MS } = require('../src/channels/mobile-app-channel');
+const { MobileAppChannel, validateAnswerMessage, SIGNED_AT_SKEW_MS, PRESENCE_MAX_AGE_MS, PRESENCE_MIN_GAP_MS } = require('../src/channels/mobile-app-channel');
 const { createContactHost } = require('../src/cases/contact-host');
 const { mergeSettings } = require('../src/core/settings');
 const { open, seal, verifyEd25519 } = require('../src/approvals/envelope');
@@ -47,7 +48,9 @@ async function world({ records = null } = {}) {
   stores.push(store);
   const node = testNodeIdentity({ key: 'web-01' });
   const now = new Date('2026-09-25T14:00:00Z');
-  const clock = () => now;
+  let current = now;
+  const clock = () => current;
+  const advance = (ms) => { current = new Date(current.getTime() + ms); };
   const runtime = new CaseRuntime({ root: tmp('kl-mobile-cases-'), now: clock });
   const data = tmp('kl-mobile-data-');
   const state = new ContactState({ dir: path.join(data, 'contact'), clock });
@@ -71,14 +74,11 @@ async function world({ records = null } = {}) {
     v: 1, type: 'kl.question.answer', node_id: node.nodeId, case_id: info.id, question_id: q.id, token,
     answer: { option_id: 'a' }, nonce: randomNonce(), signed_at: now.toISOString(), device_id: signer.deviceId, ...overrides
   });
-  const foreground = (overrides = {}, signer = phone) => signer.sign({
-    v: 1, type: 'kl.presence.foreground', node_id: node.nodeId, device_id: signer.deviceId, foreground: true,
-    nonce: randomNonce(), signed_at: now.toISOString(), ...overrides
-  });
   const call = (envelope) => link.methods['question.answer']({ envelope }, { peer: 'relay' });
-  const ping = (envelope) => link.methods['presence.foreground']({ envelope }, { peer: 'relay' });
+  const ping = (params, ctx = { peer: 'relay' }) => link.methods['presence.foreground'](params, ctx);
+  const fg = (overrides = {}) => ({ deviceId: phone.deviceId, foreground: true, at: clock().toISOString(), ...overrides });
   const answerOf = (qid = q.id) => runtime.questions(info.id).get(qid).answer;
-  return { phone, stranger, store, node, runtime, router, mobile, link, info, q, q2, token, token2, answer, foreground, call, ping, answerOf, presence, now };
+  return { phone, stranger, store, node, runtime, router, mobile, link, info, q, q2, token, token2, answer, fg, call, ping, answerOf, presence, now, advance };
 }
 
 describe('mobile contact channel (node side)', () => {
@@ -234,34 +234,77 @@ describe('mobile contact channel (node side)', () => {
     assert.strictEqual(w.answerOf(), null);
   });
 
-  it('a device-signed presence.foreground makes the phone the present channel', async () => {
+  it('an unsigned ping from a paired device over the relay link makes the phone the present channel', async () => {
     const w = await world();
-    assert.deepStrictEqual(await w.ping(w.foreground()), { ok: true });
+    assert.deepStrictEqual(await w.ping(w.fg()), { ok: true });
     assert.strictEqual(w.presence.presentChannel(), 'mobile');
   });
 
-  it('refuses an unsigned, stranger-signed, stale, replayed, relay-signed or wrong-node presence ping', async () => {
-    const w = await world();
-    assert.deepStrictEqual(await w.link.methods['presence.foreground']({ deviceId: w.phone.deviceId, foreground: true }, { peer: 'relay' }), { ok: false, error: 'malformed' }, 'the relay alone cannot claim presence');
-    assert.deepStrictEqual(await w.ping(w.foreground({}, w.stranger)), { ok: false, error: 'unknown_device' });
-    assert.deepStrictEqual(await w.ping(w.foreground({ signed_at: '2026-09-25T13:50:00.000Z' })), { ok: false, error: 'stale' });
-    assert.deepStrictEqual(await w.ping(w.foreground({ node_id: testNodeIdentity({ key: 'gpu-box' }).nodeId })), { ok: false, error: 'wrong_node' });
-    const relay = testNodeIdentity({ key: 'relay' });
-    const forged = seal({ v: 1, type: 'kl.presence.foreground', node_id: w.node.nodeId, device_id: w.phone.deviceId, foreground: true, nonce: randomNonce(), signed_at: w.now.toISOString() }, relay.signer);
-    assert.deepStrictEqual(await w.ping(forged), { ok: false, error: 'malformed' });
+  it('refuses a ping from an unknown or revoked device, with no state change', async () => {
+    const revoked = createFakePhone({ name: 'Old phone' });
+    const w = await world({
+      records: (phone) => [phone.approverRecord(), revoked.approverRecord({ revokedAt: '2026-09-24T00:00:00.000Z', revokedBy: phone.deviceId })]
+    });
+    assert.deepStrictEqual(await w.ping(w.fg({ deviceId: w.stranger.deviceId })), { ok: false, error: 'unknown-device' });
+    assert.deepStrictEqual(await w.ping(w.fg({ deviceId: revoked.deviceId })), { ok: false, error: 'unknown-device' });
+    w.store.addToOverlay(w.phone.deviceId);
+    assert.deepStrictEqual(await w.ping(w.fg()), { ok: false, error: 'unknown-device' }, 'revoked through the overlay');
     assert.notStrictEqual(w.presence.presentChannel(), 'mobile');
-    const good = w.foreground();
-    assert.deepStrictEqual(await w.ping(good), { ok: true });
-    assert.deepStrictEqual(await w.ping(good), { ok: false, error: 'replay' });
   });
 
-  it('a future-dated presence ping within the window uses the node clock, never the phone time', async () => {
+  it('refuses a malformed ping and one that did not come over the relay link', async () => {
+    const w = await world();
+    for (const bad of [undefined, null, [], {}, w.fg({ at: undefined }), w.fg({ at: 'yesterday' }), w.fg({ at: NaN }), w.fg({ at: Infinity }), w.fg({ deviceId: 'phone-1' }), w.fg({ deviceId: 7 })]) {
+      assert.deepStrictEqual(await w.ping(bad), { ok: false, error: 'malformed' }, JSON.stringify(bad));
+    }
+    assert.deepStrictEqual(await w.ping(w.fg(), null), { ok: false, error: 'not-linked' });
+    assert.deepStrictEqual(await w.ping(w.fg(), {}), { ok: false, error: 'not-linked' });
+    assert.notStrictEqual(w.presence.presentChannel(), 'mobile');
+  });
+
+  it('clamps a future `at` to now and ignores a ping more than two minutes old', async () => {
     const w = await world();
     const seen = [];
     w.mobile.presenceTracker = { mobileForeground: (p) => { seen.push(p); return { ok: true }; } };
-    const ahead = new Date(w.now.getTime() + 200000).toISOString();
-    assert.deepStrictEqual(await w.ping(w.foreground({ signed_at: ahead })), { ok: true });
-    assert.deepStrictEqual(seen, [{ deviceId: w.phone.deviceId, foreground: true }]);
+    const old = new Date(w.now.getTime() - PRESENCE_MAX_AGE_MS - 1000).toISOString();
+    assert.deepStrictEqual(await w.ping(w.fg({ at: old })), { ok: true });
+    assert.deepStrictEqual(seen, [], 'a stale ping changes nothing');
+    const future = new Date(w.now.getTime() + 24 * 3600 * 1000).toISOString();
+    assert.deepStrictEqual(await w.ping(w.fg({ at: future })), { ok: true });
+    assert.deepStrictEqual(seen, [{ deviceId: w.phone.deviceId, foreground: true }], 'no phone time reaches Presence');
+    const edge = new Date(w.now.getTime() - PRESENCE_MAX_AGE_MS).toISOString();
+    w.advance(PRESENCE_MIN_GAP_MS);
+    assert.deepStrictEqual(await w.ping(w.fg({ at: new Date(Date.parse(edge) + PRESENCE_MIN_GAP_MS).toISOString() })), { ok: true });
+    assert.strictEqual(seen.length, 2, 'exactly two minutes old still counts');
+  });
+
+  it('rate-limits a device to one state change every 5 s and drops the rest silently', async () => {
+    const w = await world();
+    const seen = [];
+    w.mobile.presenceTracker = { mobileForeground: (p) => { seen.push(p); return { ok: true }; } };
+    assert.deepStrictEqual(await w.ping(w.fg()), { ok: true });
+    assert.deepStrictEqual(await w.ping(w.fg({ foreground: false })), { ok: true });
+    w.advance(PRESENCE_MIN_GAP_MS - 1);
+    assert.deepStrictEqual(await w.ping(w.fg({ foreground: false })), { ok: true });
+    assert.strictEqual(seen.length, 1);
+    w.advance(1);
+    assert.deepStrictEqual(await w.ping(w.fg({ foreground: false })), { ok: true });
+    assert.deepStrictEqual(seen, [{ deviceId: w.phone.deviceId, foreground: true }, { deviceId: w.phone.deviceId, foreground: false }]);
+  });
+
+  it('a presence ping never answers, approves, opens or closes a question', async () => {
+    const w = await world();
+    const deliveries = JSON.stringify(w.router.state.deliveries());
+    const before = w.runtime.questions(w.info.id).open().map((r) => r.id).sort();
+    for (const extra of [{}, { token: w.token, answer: { option_id: 'a' } }, { envelope: w.answer() }, { questionId: w.q.id, optionId: 'a', close: true }]) {
+      await w.ping({ ...w.fg(), ...extra });
+      w.advance(PRESENCE_MIN_GAP_MS);
+    }
+    assert.strictEqual(w.answerOf(w.q.id), null);
+    assert.strictEqual(w.answerOf(w.q2.id), null);
+    assert.deepStrictEqual(w.runtime.questions(w.info.id).open().map((r) => r.id).sort(), before);
+    assert.strictEqual(w.runtime.questions(w.info.id).get(w.q.id).closed, null);
+    assert.strictEqual(JSON.stringify(w.router.state.deliveries()), deliveries);
   });
 
   it('an answer signed ahead of the node clock reaches the router with `at` clamped to now', async () => {
@@ -281,10 +324,6 @@ describe('mobile contact channel (node side)', () => {
     assert.strictEqual(validateAnswerMessage({ ...fromApps, answer: { option_id: 'a', text: 'both' } }), false);
     assert.strictEqual(validateAnswerMessage({ ...fromApps, extra: 1 }), false);
     assert.strictEqual(validateAnswerMessage({ ...fromApps, signed_at: '2026-02-30T14:00:00Z' }), false, 'a nonexistent date');
-    const ping = { device_id: 'd-bbbbbbbbbbbbbbbb', foreground: true, node_id: 'kl-aaaaaaaaaaaaaaaa', nonce: fromApps.nonce, signed_at: '2026-09-25T14:00:00Z', type: 'kl.presence.foreground', v: 1 };
-    assert.strictEqual(validateForegroundMessage(ping), true);
-    assert.strictEqual(validateForegroundMessage({ ...ping, foreground: 'yes' }), false);
-    assert.strictEqual(validateForegroundMessage({ ...ping, extra: 1 }), false);
   });
 });
 
