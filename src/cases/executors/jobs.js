@@ -720,12 +720,24 @@ async function cancelJob(reg, caseId, jobId, reason = 'cancelled') {
   return { ok: true, job, ...(note ? { note } : {}) };
 }
 
-// C2's _cancelExecutorJobs fires this without awaiting it, after setStatus
-// has released the case lock, so it can interleave with a refresh or another
-// cancel. What keeps that safe is the invariant in the header: each
-// re-read-to-save section (cancelJob after its executor call, pollJob after
-// its status fetch) has no await inside it.
+// C2's _cancelExecutorJobs fires this without awaiting it after setStatus.
+// Final review minor 5: it runs in systemAction, so the cancels are locked
+// and committed. When another holder has the lock (another process), it
+// runs unlocked, as before: the invariant in the header keeps that safe
+// (each re-read-to-save section has no await inside it), and the writes land
+// in the next commit.
 async function cancelOpenJobs(reg, caseId, reason) {
+  const run = () => cancelOpenJobsUnlocked(reg, caseId, reason);
+  try {
+    return await reg.caseRuntime.systemAction(caseId, 'cancel open jobs', run);
+  } catch (err) {
+    if (!err || err.name !== 'CaseBusyError') throw err;
+    log.warn(`Case ${caseId} is busy; cancelling its open jobs without the lock: ${err.message}`);
+    return run();
+  }
+}
+
+async function cancelOpenJobsUnlocked(reg, caseId, reason) {
   const cancelled = [];
   for (const job of reg.jobs(caseId).list().filter((j) => isOpen(j.state))) {
     const r = await cancelJob(reg, caseId, job.id, reason || 'cancelled');

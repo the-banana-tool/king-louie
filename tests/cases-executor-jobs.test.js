@@ -164,6 +164,19 @@ describe('cancel', () => {
     assert.strictEqual(s.reg.globalRemaining('fake-agent'), 5);
   });
 
+  // Final review minor 5: the cancels run in systemAction, so they are
+  // committed, not left in the working tree.
+  it('cancelOpenJobs commits its cancels', async () => {
+    const s = await setup();
+    await submitted(s);
+    const { execFileSync } = require('child_process');
+    execFileSync('git', ['add', '-A'], { cwd: s.dir });
+    execFileSync('git', ['commit', '-qm', 'seed', '--allow-empty'], { cwd: s.dir });
+    await s.reg.cancelOpenJobs(s.meta.id, 'case paused');
+    assert.strictEqual(execFileSync('git', ['status', '--porcelain'], { cwd: s.dir }).toString(), '');
+    assert.match(execFileSync('git', ['log', '-1', '--pretty=%s'], { cwd: s.dir }).toString(), /system: cancel open jobs/);
+  });
+
   it('cancelOpenJobs cancels every open job of the case', async () => {
     const s = await setup();
     const job = await submitted(s);
