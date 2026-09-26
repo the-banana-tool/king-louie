@@ -83,3 +83,20 @@ describe('Brief', () => {
     assert.match(b.read().body, /Notes on the Lakeside lot\./);
   });
 });
+
+describe('Brief front matter goes through parseYaml', () => {
+  it('refuses anchors and aliases as a BriefError', async () => {
+    const b = await newBrief();
+    fs.writeFileSync(b.path, '---\nobjective: &o Sell\nwhy: *o\n---\n\nBody\n');
+    assert.throws(() => b.read(), (err) => err instanceof BriefError && /not valid YAML: YAML anchors and aliases are not allowed/.test(err.message));
+  });
+
+  it('keeps an unquoted date a string (core schema) and still loads a written brief', async () => {
+    const b = await newBrief();
+    b.update('deadline', '2026-12-01', { provenance: 'user' });
+    assert.strictEqual(b.read().data.deadline, '2026-12-01');
+    const text = fs.readFileSync(b.path, 'utf8').replace(/deadline: .*/, 'deadline: 2026-12-02');
+    fs.writeFileSync(b.path, text);
+    assert.strictEqual(b.read().data.deadline, '2026-12-02');
+  });
+});

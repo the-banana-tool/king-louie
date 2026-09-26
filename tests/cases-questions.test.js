@@ -609,3 +609,13 @@ describe('answers through the runtime', () => {
     assert.strictEqual(rt.getCase(c.id).status, 'paused');
   });
 });
+
+describe('QuestionStore reads case.yaml through parseYaml', () => {
+  it('an anchored case.yaml yields no case id instead of expanding it', () => {
+    const d = caseDir();
+    fs.writeFileSync(path.join(d, 'case.yaml'), 'id: &i case-lakeside\nslug: *i\n');
+    assert.strictEqual(new QuestionStore(d, { now: () => T0 }).caseId, null);
+    fs.writeFileSync(path.join(d, 'case.yaml'), '\uFEFFid: case-lakeside\nslug: lakeside-lot\n');
+    assert.strictEqual(new QuestionStore(d, { now: () => T0 }).caseId, 'case-lakeside', 'a byte-order mark is tolerated');
+  });
+});

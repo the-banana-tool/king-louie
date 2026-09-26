@@ -4,7 +4,7 @@
 // a `<id>.claim` marker made with O_EXCL decides who answered first.
 const fs = require('fs');
 const path = require('path');
-const yaml = require('js-yaml');
+const { parseYaml } = require('../platform/yaml');
 const { readJson, writeJson } = require('./jsonfile');
 const { FactLedger } = require('./ledger');
 const { CaseRecords } = require('./records');
@@ -75,7 +75,7 @@ class QuestionStore {
   get caseId() {
     if (this._caseId) return this._caseId;
     try {
-      this._caseId = yaml.load(fs.readFileSync(path.join(this.dir, 'case.yaml'), 'utf8'))?.id || null;
+      this._caseId = parseYaml(fs.readFileSync(path.join(this.dir, 'case.yaml'), 'utf8').replace(/^\uFEFF/, ''))?.id || null;
     } catch {
       this._caseId = null;
     }
