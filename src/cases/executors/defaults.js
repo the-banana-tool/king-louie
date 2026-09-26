@@ -7,6 +7,9 @@ const EXECUTOR_SETTINGS_DEFAULTS = Object.freeze({
   // '' means a number without a country code is refused.
   defaultCountryCode: '',
   pollEveryMs: 900000,
+  // The whole adapter.submit call, and each host.fetch request inside it.
+  // Either one firing leaves the job submitting (unconfirmed) with its
+  // contacts held; it is reconciled with the same idempotency key.
   submitTimeoutMs: 30000,
   requestTimeoutMs: 20000,
   refreshBudgetMs: 5000,
