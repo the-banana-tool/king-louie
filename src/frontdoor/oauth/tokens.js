@@ -279,9 +279,15 @@ function pkceMatches(verifier, challenge) {
 function createTokenHandlers({ tokens, codes, grants, alerts = null, auditLedger = null, onGrantRevoked = () => {} } = {}) {
   tokens.attachGrants(grants);
 
+  // The tokens go whatever the grant store does: if saving the revoked grant
+  // throws, its 'revoked' event never fires, so nothing else would drop them.
   const revokeGrant = async (grantId, reason) => {
-    const changed = grants.revoke(grantId, reason);
-    tokens.revokeGrant(grantId);
+    let changed = false;
+    try {
+      changed = grants.revoke(grantId, reason);
+    } finally {
+      tokens.revokeGrant(grantId);
+    }
     try {
       onGrantRevoked(grantId);
     } catch (err) {
