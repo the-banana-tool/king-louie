@@ -139,8 +139,10 @@ function hardenedGitArgs(args, { hooksDir, allowFile = false } = {}) {
 // inject config, GIT_ASKPASS/GIT_EDITOR/GIT_SSH run programs. The caller's
 // `extra` comes next, and the hardening keys last, so no caller can undo
 // them: never prompt, never smudge LFS, never ask ssh for a password, and
-// only the allowed transports.
-function gitEnv(extra = {}, { allowFile = false } = {}) {
+// only the allowed transports. `pin` ({ gitDir, workTree }, from
+// checkRepoConfig) comes last of all: git then uses exactly the repository
+// that was checked and never walks up to an enclosing one.
+function gitEnv(extra = {}, { allowFile = false, pin = null } = {}) {
   const env = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (!/^GIT_/i.test(key)) env[key] = value;
@@ -151,7 +153,8 @@ function gitEnv(extra = {}, { allowFile = false } = {}) {
     GIT_TERMINAL_PROMPT: '0',
     GIT_LFS_SKIP_SMUDGE: '1',
     GIT_SSH_COMMAND: 'ssh -o BatchMode=yes',
-    GIT_ALLOW_PROTOCOL: allowFile ? 'https:ssh:file' : 'https:ssh'
+    GIT_ALLOW_PROTOCOL: allowFile ? 'https:ssh:file' : 'https:ssh',
+    ...(pin ? { GIT_DIR: pin.gitDir, GIT_WORK_TREE: pin.workTree } : {})
   };
 }
 
@@ -221,32 +224,44 @@ const NOT_A_REPO_RE = /only be used inside a git repository|not a git repository
 
 // <cwd>/.git → the config and HEAD text last found clean. Only a plain
 // repository whose own .git is the one git uses is cached: .git is a real
-// directory with HEAD and objects/ and no commondir (which would move the
-// config to another repository), and on the miss that fills the cache,
+// directory with HEAD, objects/ and refs/ and no commondir (which would move
+// the config to another repository), and on the miss that fills the cache,
 // rev-parse confirms git resolves both the git dir and the common dir to it
 // (a decoy .git that git does not accept sends git to an enclosing repo).
-// The structure is re-checked on every hit, and HEAD is part of the key so a
-// HEAD broken after the check (git then walks up to a parent) is a miss. A
-// config with an include or worktreeConfig is never cached: an included
-// file or config.worktree can change without this one changing.
+// The structure is re-checked on every hit, and HEAD is part of the key.
+// Whenever the cwd's own .git is the repository checked (hit or confirmed
+// miss), the command runs with GIT_DIR/GIT_WORK_TREE pinned to it, so a .git
+// broken after the check makes git fail instead of walking up to a parent.
+// A config with an include or worktreeConfig is never cached (an included
+// file or config.worktree can change without this one changing), but is
+// still pinned after its own full check.
 const cleanConfigs = new Map();
 
-function configCacheEntry(cwd) {
-  const gitDir = path.join(path.resolve(cwd), '.git');
-  let key;
+function isPlainDir(p) {
   try {
-    const st = fs.lstatSync(gitDir);
-    if (!st.isDirectory() || st.isSymbolicLink()) return null;
-    if (!fs.lstatSync(path.join(gitDir, 'objects')).isDirectory()) return null;
-    if (fs.existsSync(path.join(gitDir, 'commondir'))) return null;
-    const head = fs.readFileSync(path.join(gitDir, 'HEAD'), 'utf8');
-    const text = fs.readFileSync(path.join(gitDir, 'config'), 'utf8');
-    if (/^\s*\[\s*include/im.test(text) || /worktreeconfig/i.test(text)) return null;
-    key = `${head}\0${text}`;
+    return fs.lstatSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+// The cwd's own .git when it looks like a plain repository, or null.
+// `cacheable` is false when the config has an include or worktreeConfig.
+function configCacheEntry(cwd) {
+  const workTree = path.resolve(cwd);
+  const gitDir = path.join(workTree, '.git');
+  if (!isPlainDir(gitDir) || !isPlainDir(path.join(gitDir, 'objects')) || !isPlainDir(path.join(gitDir, 'refs'))) return null;
+  if (fs.existsSync(path.join(gitDir, 'commondir'))) return null;
+  let head;
+  let text;
+  try {
+    head = fs.readFileSync(path.join(gitDir, 'HEAD'), 'utf8');
+    text = fs.readFileSync(path.join(gitDir, 'config'), 'utf8');
   } catch {
     return null;
   }
-  return { gitDir, key };
+  const cacheable = !(/^\s*\[\s*include/im.test(text) || /worktreeconfig/i.test(text));
+  return { gitDir, workTree, key: `${head}\0${text}`, cacheable };
 }
 
 // True when git resolves both the git dir and the common dir to entry.gitDir.
@@ -284,28 +299,39 @@ function settleWorktreeFlag(cwd, { err, stdout }) {
 }
 
 function needsConfigCheck(cwd) {
-  if (!fs.existsSync(cwd)) return { skip: true };
+  if (!fs.existsSync(cwd)) return { skip: true, pin: null };
   const entry = configCacheEntry(cwd);
-  if (entry && cleanConfigs.get(entry.gitDir) === entry.key) return { skip: true };
+  if (entry && entry.cacheable && cleanConfigs.get(entry.gitDir) === entry.key) return { skip: true, pin: entry };
   return { skip: false, entry };
 }
 
+// After a clean check: the cwd's own .git to pin git to, when rev-parse
+// confirms it is the repository git used (and so the one checked).
+function settlePin(cwd, entry, dirs) {
+  if (!entry || !isOwnGitDir(cwd, entry, dirs)) return null;
+  if (entry.cacheable) cleanConfigs.set(entry.gitDir, entry.key);
+  return entry;
+}
+
+// Refuses a repository whose config runs programs. Returns { gitDir,
+// workTree } when the cwd's own .git is the repository checked (git is then
+// pinned to it), or null.
 async function checkRepoConfig(cwd, hooksDir) {
-  const { skip, entry } = needsConfigCheck(cwd);
-  if (skip) return;
+  const { skip, entry, pin } = needsConfigCheck(cwd);
+  if (skip) return pin;
   const query = (args) => run('git', hardenedGitArgs(args, { hooksDir }), {
     cwd, env: gitEnv(QUERY_ENV), windowsHide: true, maxBuffer: MAX_BUFFER
   }).then(({ stdout }) => ({ err: null, stdout }), (err) => ({ err, stdout: '' }));
-  if (settleUnsafeQuery(cwd, await query(unsafeQuery('--local')), unsafeQuery('--local')) === 'no-repo') return;
+  if (settleUnsafeQuery(cwd, await query(unsafeQuery('--local')), unsafeQuery('--local')) === 'no-repo') return null;
   if (settleWorktreeFlag(cwd, await query(WORKTREE_FLAG_QUERY))) {
     settleUnsafeQuery(cwd, await query(unsafeQuery('--worktree')), unsafeQuery('--worktree'));
   }
-  if (entry && isOwnGitDir(cwd, entry, await query(GIT_DIRS_QUERY))) cleanConfigs.set(entry.gitDir, entry.key);
+  return entry ? settlePin(cwd, entry, await query(GIT_DIRS_QUERY)) : null;
 }
 
 function checkRepoConfigSync(cwd, hooksDir) {
-  const { skip, entry } = needsConfigCheck(cwd);
-  if (skip) return;
+  const { skip, entry, pin } = needsConfigCheck(cwd);
+  if (skip) return pin;
   const query = (args) => {
     try {
       const stdout = execFileSync('git', hardenedGitArgs(args, { hooksDir }), {
@@ -317,11 +343,11 @@ function checkRepoConfigSync(cwd, hooksDir) {
       return { err, stdout: '' };
     }
   };
-  if (settleUnsafeQuery(cwd, query(unsafeQuery('--local')), unsafeQuery('--local')) === 'no-repo') return;
+  if (settleUnsafeQuery(cwd, query(unsafeQuery('--local')), unsafeQuery('--local')) === 'no-repo') return null;
   if (settleWorktreeFlag(cwd, query(WORKTREE_FLAG_QUERY))) {
     settleUnsafeQuery(cwd, query(unsafeQuery('--worktree')), unsafeQuery('--worktree'));
   }
-  if (entry && isOwnGitDir(cwd, entry, query(GIT_DIRS_QUERY))) cleanConfigs.set(entry.gitDir, entry.key);
+  return entry ? settlePin(cwd, entry, query(GIT_DIRS_QUERY)) : null;
 }
 
 // Caller arguments start with the subcommand. A leading global option (-C,
@@ -347,6 +373,11 @@ function checkCallerInput(args, env = {}) {
   }
 }
 
+// Subcommands that create a repository (possibly at a path argument) are
+// never pinned to the cwd's .git.
+const UNPINNED_SUBCOMMANDS = new Set(['init', 'clone']);
+const pinFor = (pin, args) => (pin && !UNPINNED_SUBCOMMANDS.has(subcommandOf(args)) ? pin : null);
+
 // A hooks dir the caller passes gets the same checks as noHooksDir(): a
 // plain directory, ours and private, and empty.
 function checkedHooksDir(dir) {
@@ -366,12 +397,12 @@ function checkedHooksDir(dir) {
 async function runGit(cwd, args, { env = {}, timeoutMs = DEFAULT_TIMEOUT_MS, hooksDir = null, allowFile = false } = {}) {
   checkCallerInput(args, env);
   const hooks = checkedHooksDir(hooksDir);
-  await checkRepoConfig(cwd, hooks);
+  const pin = pinFor(await checkRepoConfig(cwd, hooks), args);
   const argv = hardenedGitArgs(args, { hooksDir: hooks, allowFile });
   try {
     const { stdout } = await run('git', argv, {
       cwd,
-      env: gitEnv(env, { allowFile }),
+      env: gitEnv(env, { allowFile, pin }),
       windowsHide: true,
       maxBuffer: MAX_BUFFER,
       timeout: timeoutMs || 0,
@@ -386,12 +417,12 @@ async function runGit(cwd, args, { env = {}, timeoutMs = DEFAULT_TIMEOUT_MS, hoo
 function runGitSync(cwd, args, { timeoutMs = DEFAULT_TIMEOUT_MS, hooksDir = null, allowFile = false } = {}) {
   checkCallerInput(args);
   const hooks = checkedHooksDir(hooksDir);
-  checkRepoConfigSync(cwd, hooks);
+  const pin = pinFor(checkRepoConfigSync(cwd, hooks), args);
   const argv = hardenedGitArgs(args, { hooksDir: hooks, allowFile });
   try {
     return execFileSync('git', argv, {
       cwd,
-      env: gitEnv({}, { allowFile }),
+      env: gitEnv({}, { allowFile, pin }),
       windowsHide: true,
       maxBuffer: MAX_BUFFER,
       timeout: timeoutMs || 0,

@@ -260,6 +260,48 @@ describe('runGit and runGitSync', () => {
     assert.strictEqual(fs.existsSync(marker), false, 'the parent\'s filter never ran');
   });
 
+  it('never walks up to a parent when refs/ vanishes after a clean check', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const parent = tmp();
+    await git.runGit(parent, ['init', '-q']);
+    const sub = path.join(parent, 'sub');
+    fs.mkdirSync(sub);
+    await git.runGit(sub, ['init', '-q']);
+    await git.runGit(sub, ['status']); // a real repo: cached
+    git.runGitSync(sub, ['status']);
+    const marker = await plantFilter(parent);
+    fs.rmSync(path.join(sub, '.git', 'refs'), { recursive: true, force: true });
+    fs.writeFileSync(path.join(sub, 'a.txt'), 'one\n');
+    // Without refs/ the cache misses and the full check finds the parent's
+    // filter. (The GIT_DIR pin alone would also stop it, as GIT_FAILED.)
+    await assert.rejects(git.runGit(sub, ['add', '-A']), refusedUnsafe);
+    assert.throws(() => git.runGitSync(sub, ['add', '-A']), refusedUnsafe);
+    assert.strictEqual(fs.existsSync(marker), false, 'the parent\'s filter never ran');
+  });
+
+  it('pins git to the checked repository, except for init and clone and outside a repo', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const envVar = (out, name) => { const m = String(out).match(new RegExp(`^${name}=(.*)$`, 'm')); return m ? m[1].trim() : null; };
+    const dir = tmp();
+    await git.runGit(dir, ['init', '-q']);
+    await git.runGit(dir, ['config', 'alias.e', '!env']);
+    for (const out of [await git.runGit(dir, ['e']), await git.runGit(dir, ['e']), git.runGitSync(dir, ['e'])]) {
+      assert.ok(git.samePath(envVar(out, 'GIT_DIR'), path.join(dir, '.git')), `GIT_DIR pinned: ${envVar(out, 'GIT_DIR')}`);
+      assert.ok(git.samePath(envVar(out, 'GIT_WORK_TREE'), dir), `GIT_WORK_TREE pinned: ${envVar(out, 'GIT_WORK_TREE')}`);
+    }
+    // init and clone at a path inside a checked repo create their own repository.
+    await git.runGit(dir, ['init', '-q', 'nested']);
+    assert.ok(fs.existsSync(path.join(dir, 'nested', '.git', 'HEAD')));
+    const source = tmp();
+    await git.runGit(source, ['init', '-q']);
+    await git.runGit(source, ['commit', '-q', '--allow-empty', '-m', 'first'], { env: ID_ENV });
+    await git.runGit(dir, ['clone', '-q', source, 'copy'], { allowFile: true });
+    assert.ok(fs.existsSync(path.join(dir, 'copy', '.git', 'HEAD')));
+    assert.strictEqual((await git.runGit(path.join(dir, 'copy'), ['rev-list', '--count', 'HEAD'])).trim(), '1');
+    // Not a repository: nothing is pinned, and git reports it as before.
+    await assert.rejects(git.runGit(tmp(), ['rev-parse', '--show-toplevel']), (err) => err.code === 'GIT_FAILED' && /not a git repository/i.test(err.message));
+  });
+
   it('refuses a repo whose remote sets uploadpack', async (t) => {
     if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
     const source = tmp();
