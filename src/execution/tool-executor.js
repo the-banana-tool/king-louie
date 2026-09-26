@@ -5,6 +5,7 @@ const { evaluateRules, describeRule } = require('../tools/permission-rules');
 const path = require('path');
 const { isProtectedCasePath, CASE_BLOCKED_TOOL_NAMES, CASE_BLOCKED_TOOL_ERROR } = require('../cases/chat-integration');
 const { markLocalRequester } = require('../core/origin');
+const { refuseUnsafeGate, REFUSE_UNSAFE_MESSAGE } = require('../approvals/executor-options');
 const { createLogger } = require('../logging');
 
 const log = createLogger('tool-executor');
@@ -165,6 +166,11 @@ class ToolExecutor extends EventEmitter {
     // refuses unsafe calls; carried on the re-threaded requester so the
     // run's sub-agents refuse them too.
     this.refuseUnsafe = options.refuseUnsafe === true;
+    // Fail closed in every approval mode: with the gate on, every call is
+    // classified (by the fleet default when the run has no node policy), an
+    // unsafe one is refused in the tier branch, and nothing below ever asks
+    // a person (see _refuseUnsafeResult).
+    if (this.refuseUnsafe) this.classifyCall = refuseUnsafeGate(this.classifyCall);
   }
 
   get permissionRules() {
@@ -257,6 +263,7 @@ class ToolExecutor extends EventEmitter {
       }
 
       if (action === 'confirm') {
+        if (this.refuseUnsafe) return this._refuseUnsafeResult(toolName, effectiveParameters);
         const hookMetadata = {
           reason: preHookResult?.message || 'Hook policy requires explicit confirmation.',
           signal: options.signal || null,
@@ -413,6 +420,7 @@ class ToolExecutor extends EventEmitter {
     }
 
     if (needsApprovalGate && !ruleSaysAllow) {
+      if (this.refuseUnsafe) return this._refuseUnsafeResult(toolName, effectiveParameters);
       // An `ask` rule is the user saying "always check with me for this one",
       // so it outranks both auto-approve paths — which is what the comment
       // above evaluateRules has always claimed and the code did not do. Agent
@@ -568,6 +576,14 @@ class ToolExecutor extends EventEmitter {
       this.emit('postExecute', { toolName, parameters: effectiveParameters, result: errorResult });
       return errorResult;
     }
+  }
+
+  // A refuseUnsafe run never asks anyone: a call that would need a person's
+  // approval (a hook's confirm, an `ask` rule) is refused like an unsafe one.
+  _refuseUnsafeResult(toolName, parameters) {
+    const refused = { success: false, error: REFUSE_UNSAFE_MESSAGE, deniedBy: 'policy' };
+    this.emit('postExecute', { toolName, parameters, result: refused });
+    return refused;
   }
 
   // The approval channel handed to tools (BackgroundTask, SpawnAgent,

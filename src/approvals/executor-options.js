@@ -25,6 +25,33 @@ function refuseUnsafeClassifier(classifyCall) {
   };
 }
 
+// The node-policy classifier with an empty policy (no allowed_roots, no
+// pattern lists), for a refuseUnsafe run that has no node policy of its own
+// ('allow'/'deny' mode, or phone mode without deps.nodePolicy). If it cannot
+// be loaded, every call is unsafe: no tool declares itself read-only, so
+// nothing can be let through.
+function defaultFleetClassifier() {
+  try {
+    const { classifyToolCall } = require('../execution/safety-policy');
+    return (toolName, params, { cwd } = {}) => classifyToolCall(toolName, params, {}, { cwd });
+  } catch (err) {
+    log.error(`fleet classifier unavailable, refusing every call: ${err?.message ?? String(err)}`);
+    return () => ({ tier: 'unsafe', reason: 'no_classifier' });
+  }
+}
+
+// T10 ruling (fail closed in every mode): the classifier a refuseUnsafe
+// ToolExecutor runs. The run's own classifyCall decides when it has an
+// opinion; otherwise the fleet default does. Anything unsafe becomes the
+// refusal, so only read/routine calls run.
+function refuseUnsafeGate(classifyCall) {
+  const fallback = defaultFleetClassifier();
+  return refuseUnsafeClassifier((toolName, params, ctx) => {
+    const decision = classifyCall ? classifyCall(toolName, params, ctx) : null;
+    return decision === null || decision === undefined ? fallback(toolName, params, ctx) : decision;
+  });
+}
+
 function paramsSha256(params) {
   try {
     return sha256b64url(canonicalize(params === undefined || params === null ? {} : params));
@@ -127,4 +154,4 @@ function approvalSeam({ remoteApprovals, event = null, approvalRequester = null,
   };
 }
 
-module.exports = { approvalSeam, phoneExecutorOptions, paramsSha256, refuseUnsafeClassifier, PHONE_GRACE_MS, REFUSE_UNSAFE_MESSAGE };
+module.exports = { approvalSeam, phoneExecutorOptions, paramsSha256, refuseUnsafeClassifier, refuseUnsafeGate, PHONE_GRACE_MS, REFUSE_UNSAFE_MESSAGE };
