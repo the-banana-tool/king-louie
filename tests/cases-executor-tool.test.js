@@ -82,6 +82,24 @@ describe('Executor.submit refusals', () => {
     assert.ok(priv.blocked.some((b) => b.path === 'text' && b.reason === 'non-disclosable' && b.factId === s.floor.id));
   });
 
+  // Final review minor 3: a declared fact leaves with its statement, which
+  // is gated like any leaf.
+  it("a declared fact's statement is gated", async () => {
+    const s = await setup();
+    const leaky = s.rt.ledger(s.meta.id).assert({
+      stmt: 'Zoned R-1; the owner will not go under 98000', subject: 'lot', attr: 'zoning', value: 'R-1', provenance: 'sourced',
+      source: { kind: 'url', ref: 'https://records.example.org/zoning' }
+    });
+    const envelopeId = await approvedEnvelope(s, { facts: [s.acres.id, leaky.id] });
+    const r = await submit(s, { executor: 'fake-agent', envelopeId, payload: call(s, { facts: [leaky.id] }) });
+    assert.strictEqual(r.error, 'blocked by the outbound gate');
+    assert.ok(r.blocked.some((b) => b.path === 'factStatements[0]' && b.reason === 'non-disclosable' && b.factId === s.floor.id), JSON.stringify(r.blocked));
+    const ok = await submit(s, { executor: 'fake-agent', envelopeId, payload: call(s, { facts: [s.acres.id] }) });
+    assert.strictEqual(ok.ok, true, ok.error);
+    const [, jobView] = s.ctl.calls.find((c) => c[0] === 'submit');
+    assert.deepStrictEqual(jobView.facts, [{ id: s.acres.id, stmt: 'Lot size is 2.12 acres', value: 2.12 }]);
+  });
+
   it('payload name leaf is gated', async () => {
     const s = await setup();
     const envelopeId = await approvedEnvelope(s);

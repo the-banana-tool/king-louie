@@ -234,13 +234,19 @@ async function submitChecked(reg, ctx, params) {
   const facts = rt.ledger(caseId).view().facts;
   let rendered = payload;
   let gateBlocked = [];
+  let sentStatements = null;
   const mode = entry.outbound !== 'none' ? entry.outbound : (kind === 'external' ? 'query' : null);
   if (mode) {
-    const gl = gateLeaves(payload, {
+    const gateOptions = {
       recipients, envelope, facts, mode, caseId,
       entityIndex: typeof rt.entityIndex === 'function' ? rt.entityIndex() : null, categoryKeywords: settings.outbound.categoryKeywords
-    });
-    const hard = gl.blocked.filter((b) => b.reason !== 'not-in-envelope');
+    };
+    const gl = gateLeaves(payload, gateOptions);
+    // A declared fact leaves with its statement (the job's facts[].stmt), so
+    // that model-written text is gated like any leaf (final review minor 3).
+    const statements = (Array.isArray(payload.facts) ? payload.facts : []).map((id) => String(facts.get(id)?.stmt || ''));
+    const gs = statements.some(Boolean) ? gateLeaves({ factStatements: statements }, gateOptions) : { blocked: [] };
+    const hard = [...gl.blocked, ...gs.blocked].filter((b) => b.reason !== 'not-in-envelope');
     if (hard.length) {
       return {
         ok: false,
@@ -248,7 +254,8 @@ async function submitChecked(reg, ctx, params) {
         blocked: hard.map((b) => ({ path: b.path, text: b.span.text, reason: b.reason, ...(b.factId ? { factId: b.factId } : {}), detail: b.detail }))
       };
     }
-    gateBlocked = gl.blocked.filter((b) => b.reason === 'not-in-envelope');
+    gateBlocked = [...gl.blocked, ...gs.blocked].filter((b) => b.reason === 'not-in-envelope');
+    sentStatements = gs.rendered ? gs.rendered.factStatements : null;
     rendered = gl.rendered;
   }
 
@@ -309,9 +316,10 @@ async function submitChecked(reg, ctx, params) {
       caseId, executor: entry.id, kind, envelopeId: envelope ? envelope.id : null, planStepId: step ? step.id : null, retryOf: params.retryOf || null,
       n, signature, payloadHash: sha256hex(canonicalize(rendered)), intent, state: 'submitting', recipients,
       payload: rendered, originalPayload: payload, createdAt: now.toISOString(), estimateUsd, reservedContacts: reserved, newContacts,
-      facts: (Array.isArray(payload.facts) ? payload.facts : []).map((id) => {
+      facts: (Array.isArray(payload.facts) ? payload.facts : []).map((id, i) => {
         const f = facts.get(id);
-        return f ? { id, stmt: f.stmt, value: f.value } : { id, stmt: '', value: null };
+        const stmt = Array.isArray(sentStatements) ? sentStatements[i] : f?.stmt;
+        return f ? { id, stmt, value: f.value } : { id, stmt: '', value: null };
       }),
       window: envelope ? { ...windowInstants(envelope.window.start, envelope.window.end, envelope.window.tz), tz: envelope.window.tz } : null,
       maxCostUsd: maxCosts.length ? Math.max(0, Math.min(...maxCosts)) : null
