@@ -46,6 +46,8 @@ function mergeCaseSettings(base = {}, source = {}) {
     ...b,
     ...s,
     budgets: { ...d.budgets, ...obj(b.budgets), ...obj(s.budgets) },
+    // Cases stage 7: document ingest limits (src/cases/ingest/settings.js).
+    ingest: require('./ingest/settings').mergeIngestSettings(b.ingest, s.ingest),
     roles: { ...d.roles, ...obj(b.roles), ...obj(s.roles) },
     wakeups: { ...d.wakeups, ...obj(b.wakeups), ...obj(s.wakeups) },
     detours: { ...d.detours, ...obj(b.detours), ...obj(s.detours) },

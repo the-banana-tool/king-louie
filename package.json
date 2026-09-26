@@ -83,10 +83,12 @@
     "mailparser": "3.9.28",
     "marked": "^17.0.5",
     "nodemailer": "10.0.10",
+    "pdf-lib": "1.17.1",
+    "playwright": "^1.58.2",
     "qrcode": "^1.5.4",
     "turndown": "^7.2.2",
+    "unpdf": "1.8.1",
     "ws": "^8.20.0",
-    "xlsx": "^0.18.5",
-    "playwright": "^1.58.2"
+    "xlsx": "^0.18.5"
   }
 }
