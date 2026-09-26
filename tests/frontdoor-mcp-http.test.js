@@ -25,7 +25,9 @@ function fakeRouter() {
       if (name === 'list_machines') return [{ name: 'web-01' }];
       return { ok: false, error: { code: 'machine_offline', message: 'machine_offline: web-01 is offline' } };
     },
-    watchJob(jobId, onUpdate) {
+    watches: [],
+    watchJob(jobId, onUpdate, ctx) {
+      this.watches.push([jobId, ctx]);
       const fn = (u) => onUpdate(u);
       jobs.on(jobId, fn);
       return () => jobs.removeListener(jobId, fn);
@@ -131,6 +133,10 @@ describe('the MCP endpoint', () => {
     assert.deepEqual(events[0], { jsonrpc: '2.0', method: 'notifications/progress', params: { progressToken: 'p1', progress: 3, message: 'running' } });
     assert.equal(events.at(-1).id, 7);
     assert.equal(JSON.parse(events.at(-1).result.content[0].text).status, 'succeeded');
+    // The router gets the caller's grant and scopes, so it can refuse a job the grant may not see.
+    const [[watched, ctx]] = t.router.watches;
+    assert.deepEqual([watched, ctx.grant.grant_id, ctx.session], ['web-01:job-1', t.grantId, id]);
+    assert.ok(Array.isArray(ctx.scopes) && ctx.scopes.length > 0);
   });
 
   it('long-poll ends at the hold even without a change, and when the node goes offline', async () => {

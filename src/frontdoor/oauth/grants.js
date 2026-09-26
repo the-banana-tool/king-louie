@@ -33,6 +33,16 @@ function namedMachines(scopes) {
   return names;
 }
 
+// Whether `grant`'s entry for `scope` covers the node called `nodeName` with
+// id `nodeId` (GrantStore#machineMatches; the router calls it directly).
+// Fails closed: a malformed grant or entry matches nothing.
+function machineMatches(grant, scope, nodeName, nodeId) {
+  if (!grant || !Array.isArray(grant.scopes) || typeof nodeName !== 'string' || !nodeName || typeof nodeId !== 'string' || !nodeId) return false;
+  const ids = isPlainObject(grant.machine_ids) ? grant.machine_ids : {};
+  return grant.scopes.some((s) => isPlainObject(s) && s.scope === scope
+    && (s.machines === null || (Array.isArray(s.machines) && s.machines.includes(nodeName) && hasOwn(ids, nodeName) && ids[nodeName] === nodeId)));
+}
+
 // The client host as the consent page computed it, from the signed fields
 // rather than whatever the file says.
 const hostOf = (g) => clientHost({ client_id: g.client_id, kind: DCR_CLIENT_ID_RE.test(g.client_id) ? 'dcr' : 'cimd' }, g.redirect_uri);
@@ -192,10 +202,7 @@ class GrantStore extends EventEmitter {
   // only a listed name whose id is still the one the owner approved, so a
   // different key re-enrolled under the same name matches nothing.
   machineMatches(grant, scope, nodeName, nodeId) {
-    if (!grant || !Array.isArray(grant.scopes)) return false;
-    const ids = isPlainObject(grant.machine_ids) ? grant.machine_ids : {};
-    return grant.scopes.some((s) => s.scope === scope
-      && (s.machines === null || (s.machines.includes(nodeName) && hasOwn(ids, nodeName) && ids[nodeName] === nodeId)));
+    return machineMatches(grant, scope, nodeName, nodeId);
   }
 
   scopeStrings(grant) {
@@ -281,4 +288,4 @@ function revokeGrantEverywhere({ grants, tokens = null, onGrantRevoked = () => {
   return changed;
 }
 
-module.exports = { GrantStore, AuthCodes, revokeGrantEverywhere };
+module.exports = { GrantStore, AuthCodes, revokeGrantEverywhere, machineMatches };

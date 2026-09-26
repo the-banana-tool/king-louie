@@ -409,7 +409,7 @@ class McpHttpEndpoint {
         send({ jsonrpc: '2.0', method: 'notifications/progress', params: { progressToken, progress: lines, message: status } });
         // An update without a status (log lines only) is not a status change.
         if (update.offline === true || (typeof update.status === 'string' && update.status !== initialStatus)) finish();
-      });
+      }, ctx); // the router checks the grant's machines and the job's owner
       if (typeof unsub === 'function') unsubscribe = unsub;
     } catch (err) {
       log.warn(`watching ${args.job_id} failed: ${err && err.message}`);
