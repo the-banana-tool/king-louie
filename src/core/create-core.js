@@ -55,6 +55,7 @@ const { MemoryStore, MemoryManager } = require('../memory');
 const { CheckpointManager } = require('../checkpoints');
 const { CaseRuntime, resolveCasesRoot } = require('../cases');
 const { shapeToolDefinitions } = require('../cases/chat-integration');
+const { installPlaybooks } = require('../cases/playbooks');
 const { ensureWakeupJob } = require('../cases/wakeups');
 const ContextAssembler = require('../context/context-assembler');
 const ConversationCompactor = require('../context/conversation-compactor');
@@ -2858,6 +2859,12 @@ function createCore(deps = {}) {
     }
   });
 
+  // Cases stage 6: playbooks. The manager rides on the runtime; the gating
+  // source, the turn-start hook and (with an executor registry) the brief
+  // rules are registered by installPlaybooks. settings.playbooks is read
+  // through this core's own getSettings in every mode (ruling M14).
+  installPlaybooks(caseRuntime, { getSettings, examplesDir: deps.examplesDir || null });
+
   const context = {
     // Chat
     createId,
@@ -2888,6 +2895,7 @@ function createCore(deps = {}) {
     createUsageRecordFromMetrics,
     getSettings,
     getCaseRuntime: () => caseRuntime,
+    getPlaybookManager: () => caseRuntime.playbooks || null,
     getContact: () => (contactHost ? contactHost.context() : null),
     // The signed-approval requester (program §4.12), or null: always null in
     // 'allow' and 'deny' modes (the Electron host), and null while no device

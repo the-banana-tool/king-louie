@@ -103,7 +103,8 @@ function loadProfile(profile) {
             auditLedger: approvals.auditLedger,
             approvals, // Cases stage 4 (wave 3): the phone contact channel (relay link, admin approvers, node identity)
             nodePolicy: nodeConfig.policy,
-            builtinSkillsDir: path.join(__dirname, '..', '..', 'skills')
+            builtinSkillsDir: path.join(__dirname, '..', '..', 'skills'),
+            examplesDir: path.join(__dirname, '..', '..', 'examples', 'playbooks')
           });
           await core.start();
         } catch (err) {
