@@ -46,6 +46,17 @@ module.exports = {
   CASE_ATTACH: 'case:attach',
   CASE_ORIENTATION: 'case:orientation',
   CASE_SET_DISCLOSABLE: 'case:setDisclosable',
+  // Cases stage 6: playbooks.
+  CASE_PLAYBOOKS: 'case:playbooks',
+  CASE_ADD_PLAYBOOK: 'case:addPlaybook',
+  CASE_REMOVE_PLAYBOOK: 'case:removePlaybook',
+  CASE_CHECK_PLAYBOOK_UPDATES: 'case:checkPlaybookUpdates',
+  CASE_UPDATE_PLAYBOOK: 'case:updatePlaybook',
+  CASE_LIST_EXAMPLE_PLAYBOOKS: 'case:listExamplePlaybooks',
+  CASE_PLAYBOOK_PROPOSALS: 'case:playbookProposals',
+  CASE_APPLY_PLAYBOOK_PROPOSAL: 'case:applyPlaybookProposal',
+  CASE_REJECT_PLAYBOOK_PROPOSAL: 'case:rejectPlaybookProposal',
+  CASE_ACCEPT_PLAYBOOK_BUDGET: 'case:acceptPlaybookBudget',
   // Cases stage 4 (contact channels).
   CONTACT_LADDER_STATE: 'contact:ladderState',
   CONTACT_POLICY_GET: 'contactPolicy:get',

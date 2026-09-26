@@ -688,6 +688,64 @@ contextBridge.exposeInMainWorld(
     },
     cases: {
       list: () => ipcRenderer.invoke('case:list'),
+      // Cases stage 6: playbooks. The main process checks every argument
+      // again; replies carry untrustedText: true (render with textContent).
+      playbooks: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        return ipcRenderer.invoke('case:playbooks', payload);
+      },
+      addPlaybook: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        if (payload.acceptBudgetRaises !== undefined && typeof payload.acceptBudgetRaises !== 'boolean') throw new Error('Invalid acceptBudgetRaises: expected boolean');
+        return ipcRenderer.invoke('case:addPlaybook', payload);
+      },
+      removePlaybook: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        validateString(payload.name, 'name', { minLength: 1 });
+        return ipcRenderer.invoke('case:removePlaybook', payload);
+      },
+      checkPlaybookUpdates: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        if (payload.confirmSource !== undefined && typeof payload.confirmSource !== 'boolean') throw new Error('Invalid confirmSource: expected boolean');
+        return ipcRenderer.invoke('case:checkPlaybookUpdates', payload);
+      },
+      updatePlaybook: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        validateString(payload.name, 'name', { minLength: 1 });
+        if (payload.force !== undefined && typeof payload.force !== 'boolean') throw new Error('Invalid force: expected boolean');
+        if (payload.confirmSource !== undefined && typeof payload.confirmSource !== 'boolean') throw new Error('Invalid confirmSource: expected boolean');
+        return ipcRenderer.invoke('case:updatePlaybook', payload);
+      },
+      listExamplePlaybooks: () => ipcRenderer.invoke('case:listExamplePlaybooks', {}),
+      playbookProposals: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        return ipcRenderer.invoke('case:playbookProposals', payload);
+      },
+      applyPlaybookProposal: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        validateString(payload.proposalId, 'proposalId', { minLength: 1 });
+        validateString(payload.repoPath, 'repoPath', { minLength: 1 });
+        return ipcRenderer.invoke('case:applyPlaybookProposal', payload);
+      },
+      rejectPlaybookProposal: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        validateString(payload.proposalId, 'proposalId', { minLength: 1 });
+        return ipcRenderer.invoke('case:rejectPlaybookProposal', payload);
+      },
+      acceptPlaybookBudget: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        validateString(payload.name, 'name', { minLength: 1 });
+        return ipcRenderer.invoke('case:acceptPlaybookBudget', payload);
+      },
       create: (payload) => {
         validateObject(payload, 'payload');
         validateString(payload.title, 'title', { minLength: 1 });
