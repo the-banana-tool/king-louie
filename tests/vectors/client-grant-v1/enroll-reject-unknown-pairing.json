@@ -1,0 +1,88 @@
+{
+  "name": "enroll-reject-unknown-pairing",
+  "consumers": [
+    "node"
+  ],
+  "given": {
+    "now": "2026-09-23T18:04:11.201Z",
+    "frontdoor": {
+      "id": "kl-nt4ritcfj5kepq3y",
+      "key": "fYWiRRRJBRkudSrSwQUWQ6bpZtk03Lxrqqq__hl4pyU"
+    },
+    "approvers": [
+      {
+        "v": 1,
+        "device_id": "d-3vmwrihhdbnit4oi",
+        "name": "Test phone 3vmw",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "krcyG5D6HPx9P3Gi5oaR6OyU9D1gIrc3UD6pIRcDq74",
+          "y": "9XqgPXsMAYplX5IZVn-9FRP2sN4oHFRPjnZyfG-GpaI"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      },
+      {
+        "v": 1,
+        "device_id": "d-futyo75nn4w4reil",
+        "name": "Test phone futy",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "RscTaDzgRlaVqN4IrrtRgbBZw8hrp00xiIu7B_1AJ6w",
+          "y": "gBam0DF3krccxYdWnKr6fRP4yHKNLKfByP76l8dEw78"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      },
+      {
+        "v": 1,
+        "device_id": "d-6xdlbxglhnvfa3lw",
+        "name": "Test phone 6xdl",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "GnDHGfxMVkv5iRyStQIsJbqWKUtPy6ijuA1UiWKlYDc",
+          "y": "LLhIvQ_y0DmIXI_qxojWRICKfjPE_orjZBTwRhje91k"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": "2026-09-20T00:00:00.000Z",
+        "revoked_by": "console",
+        "enrollment": null
+      }
+    ],
+    "allow_test_keys": true,
+    "pairing": {
+      "pairing_id": "pr_FMVeo36xfVVXeqI8szLUDQ",
+      "node_id": "kl-hnef32472qzibi5r",
+      "node_name": "gpu-box",
+      "profile": "agent",
+      "public_key": "SlpSZ74Fg3DiI96Hn6qFIVCi3QxBE6pjTWJZFn7HuVA",
+      "tls_fingerprint": "f8477ebe7949f2db5e17d81362bd5aa868711d220320219ea30dc68dbad79ec8",
+      "replaces": null,
+      "expires_at": "2026-09-23T18:14:11.201Z",
+      "used_nonces": []
+    }
+  },
+  "input": {
+    "alg": "ES256",
+    "kid": "d-3vmwrihhdbnit4oi",
+    "payload": "eyJkZWNpc2lvbiI6ImFwcHJvdmUiLCJkZXZpY2VfaWQiOiJkLTN2bXdyaWhoZGJuaXQ0b2kiLCJmcm9udGRvb3JfaWQiOiJrbC1udDRyaXRjZmo1a2VwcTN5Iiwibm9kZV9pZCI6ImtsLWhuZWYzMjQ3MnF6aWJpNXIiLCJub2RlX25hbWUiOiJncHUtYm94Iiwibm9uY2UiOiJ3WkJJM0dxZDNQclVMakxyZlZRcUhuMW9ZMjNJejNnbExOWmNsNlpvSWxnIiwicGFpcmluZ19pZCI6InByX1pLczNTdk00dVEwR25LYzlTRnYxRkEiLCJwcm9maWxlIjoiYWdlbnQiLCJwdWJsaWNfa2V5IjoiU2xwU1o3NEZnM0RpSTk2SG42cUZJVkNpM1F4QkU2cGpUV0paRm43SHVWQSIsInJlcGxhY2VzIjpudWxsLCJzaWduZWRfYXQiOiIyMDI2LTA5LTIzVDE4OjA0OjE0LjIwMVoiLCJ0bHNfZmluZ2VycHJpbnQiOiJmODQ3N2ViZTc5NDlmMmRiNWUxN2Q4MTM2MmJkNWFhODY4NzExZDIyMDMyMDIxOWVhMzBkYzY4ZGJhZDc5ZWM4IiwidHlwZSI6ImtsLm5vZGUuZW5yb2xsIiwidiI6MX0",
+    "sig": "Bm6WuoO7m44yn4L_AdHOeJ9UZIpPjDYyZmqAqUC56qgXa2ezkO-w9zgZCaMEPtUDfRd9v_eDMGBcPCFgoaR7eQ"
+  },
+  "expect": {
+    "accepted": false,
+    "reason": "unknown_pairing"
+  }
+}

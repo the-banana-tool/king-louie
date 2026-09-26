@@ -1,0 +1,108 @@
+{
+  "name": "grant-reject-client-name-changed",
+  "consumers": [
+    "node"
+  ],
+  "given": {
+    "now": "2026-09-23T18:04:11.201Z",
+    "frontdoor": {
+      "id": "kl-nt4ritcfj5kepq3y",
+      "key": "fYWiRRRJBRkudSrSwQUWQ6bpZtk03Lxrqqq__hl4pyU"
+    },
+    "approvers": [
+      {
+        "v": 1,
+        "device_id": "d-3vmwrihhdbnit4oi",
+        "name": "Test phone 3vmw",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "krcyG5D6HPx9P3Gi5oaR6OyU9D1gIrc3UD6pIRcDq74",
+          "y": "9XqgPXsMAYplX5IZVn-9FRP2sN4oHFRPjnZyfG-GpaI"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      },
+      {
+        "v": 1,
+        "device_id": "d-futyo75nn4w4reil",
+        "name": "Test phone futy",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "RscTaDzgRlaVqN4IrrtRgbBZw8hrp00xiIu7B_1AJ6w",
+          "y": "gBam0DF3krccxYdWnKr6fRP4yHKNLKfByP76l8dEw78"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      },
+      {
+        "v": 1,
+        "device_id": "d-6xdlbxglhnvfa3lw",
+        "name": "Test phone 6xdl",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "GnDHGfxMVkv5iRyStQIsJbqWKUtPy6ijuA1UiWKlYDc",
+          "y": "LLhIvQ_y0DmIXI_qxojWRICKfjPE_orjZBTwRhje91k"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": "2026-09-20T00:00:00.000Z",
+        "revoked_by": "console",
+        "enrollment": null
+      }
+    ],
+    "allow_test_keys": true,
+    "pending": {
+      "grant_id": "gr_JRuDw2CtW8Q00K-2DL8XWQ",
+      "client_id": "dcr_Ik_0zmXblrINZ-eu_HTMHQ",
+      "client_name": "Example Client",
+      "client_host": "client.example.com",
+      "redirect_uri": "https://client.example.com/cb",
+      "resource": "https://mcp.kl.example.com/mcp",
+      "code_challenge": "j2MzDO4fbGpkgLthehB2XlOoIo9ZzAhCD-fGhrG89K0",
+      "user_code": "Q7KM2X",
+      "requested_scopes": [
+        "fleet:read",
+        "fleet:run"
+      ],
+      "expires_at": "2026-09-23T18:09:11.201Z",
+      "claimed_by": "d-3vmwrihhdbnit4oi",
+      "used_nonces": []
+    },
+    "scopes": {
+      "supported": [
+        "fleet:delegate",
+        "fleet:read",
+        "fleet:run",
+        "fleet:unsafe"
+      ],
+      "requires": {
+        "fleet:unsafe": [
+          "fleet:run",
+          "fleet:delegate"
+        ]
+      }
+    }
+  },
+  "input": {
+    "alg": "ES256",
+    "kid": "d-3vmwrihhdbnit4oi",
+    "payload": "eyJjbGllbnRfaWQiOiJkY3JfSWtfMHptWGJscklOWi1ldV9IVE1IUSIsImNsaWVudF9uYW1lIjoiT3RoZXIgQ2xpZW50IiwiY29kZV9jaGFsbGVuZ2UiOiJqMk16RE80ZmJHcGtnTHRoZWhCMlhsT29JbzlaekFoQ0QtZkdockc4OUswIiwiZGVjaXNpb24iOiJhcHByb3ZlIiwiZGV2aWNlX2lkIjoiZC0zdm13cmloaGRibml0NG9pIiwiZnJvbnRkb29yX2lkIjoia2wtbnQ0cml0Y2ZqNWtlcHEzeSIsImdyYW50X2lkIjoiZ3JfSlJ1RHcyQ3RXOFEwMEstMkRMOFhXUSIsIm5vbmNlIjoiNTlxYkdUTFJ4Y0dJaTlFZGdsbncxTmhlU2d4Smx1VngwVG1vczBVcFUtZyIsInJlZGlyZWN0X3VyaSI6Imh0dHBzOi8vY2xpZW50LmV4YW1wbGUuY29tL2NiIiwicmVzb3VyY2UiOiJodHRwczovL21jcC5rbC5leGFtcGxlLmNvbS9tY3AiLCJzY29wZXMiOlt7Im1hY2hpbmVzIjpudWxsLCJzY29wZSI6ImZsZWV0OnJlYWQifSx7Im1hY2hpbmVzIjpudWxsLCJzY29wZSI6ImZsZWV0OnJ1biJ9XSwic2lnbmVkX2F0IjoiMjAyNi0wOS0yM1QxODowNDoxMy4yMDFaIiwidHlwZSI6ImtsLmNsaWVudC5ncmFudCIsInVzZXJfY29kZSI6IlE3S00yWCIsInYiOjF9",
+    "sig": "Puf7SE-1-x0OIyWFnD4ACEn1QoGfKwVq0tgmrClfHNu-0Pc5B7TTTUjHSjLN2f-ZfCNT5J67f1OCkun03tsO9g"
+  },
+  "expect": {
+    "accepted": false,
+    "reason": "binding_mismatch"
+  }
+}

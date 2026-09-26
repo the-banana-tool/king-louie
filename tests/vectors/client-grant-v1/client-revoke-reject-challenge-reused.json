@@ -1,0 +1,86 @@
+{
+  "name": "client-revoke-reject-challenge-reused",
+  "consumers": [
+    "node"
+  ],
+  "given": {
+    "now": "2026-09-23T18:04:11.201Z",
+    "frontdoor": {
+      "id": "kl-nt4ritcfj5kepq3y",
+      "key": "fYWiRRRJBRkudSrSwQUWQ6bpZtk03Lxrqqq__hl4pyU"
+    },
+    "approvers": [
+      {
+        "v": 1,
+        "device_id": "d-3vmwrihhdbnit4oi",
+        "name": "Test phone 3vmw",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "krcyG5D6HPx9P3Gi5oaR6OyU9D1gIrc3UD6pIRcDq74",
+          "y": "9XqgPXsMAYplX5IZVn-9FRP2sN4oHFRPjnZyfG-GpaI"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      },
+      {
+        "v": 1,
+        "device_id": "d-futyo75nn4w4reil",
+        "name": "Test phone futy",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "RscTaDzgRlaVqN4IrrtRgbBZw8hrp00xiIu7B_1AJ6w",
+          "y": "gBam0DF3krccxYdWnKr6fRP4yHKNLKfByP76l8dEw78"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      },
+      {
+        "v": 1,
+        "device_id": "d-6xdlbxglhnvfa3lw",
+        "name": "Test phone 6xdl",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "GnDHGfxMVkv5iRyStQIsJbqWKUtPy6ijuA1UiWKlYDc",
+          "y": "LLhIvQ_y0DmIXI_qxojWRICKfjPE_orjZBTwRhje91k"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": "2026-09-20T00:00:00.000Z",
+        "revoked_by": "console",
+        "enrollment": null
+      }
+    ],
+    "allow_test_keys": true,
+    "challenges": [
+      {
+        "challenge": "w6p6wexDZuDDGCESJ5JSt2OPL-oJu00q2VFs2Kl-zsM",
+        "device_id": "d-3vmwrihhdbnit4oi",
+        "purpose": "revoke",
+        "expires_at": "2026-09-23T18:05:11.201Z",
+        "used": true
+      }
+    ]
+  },
+  "input": {
+    "alg": "ES256",
+    "kid": "d-3vmwrihhdbnit4oi",
+    "payload": "eyJjaGFsbGVuZ2UiOiJ3NnA2d2V4RFp1RERHQ0VTSjVKU3QyT1BMLW9KdTAwcTJWRnMyS2wtenNNIiwiZGV2aWNlX2lkIjoiZC0zdm13cmloaGRibml0NG9pIiwiZnJvbnRkb29yX2lkIjoia2wtbnQ0cml0Y2ZqNWtlcHEzeSIsImdyYW50X2lkIjoiZ3JfSlJ1RHcyQ3RXOFEwMEstMkRMOFhXUSIsInNpZ25lZF9hdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTIuMjAxWiIsInR5cGUiOiJrbC5jbGllbnQucmV2b2tlIiwidiI6MX0",
+    "sig": "gpFx25r8i9eQj3x9tsbddStvU8ZXuZN4ZDGqsd7xCLEKW8NAFTgQiuHijfm9FjgJZVnmX1hduwnYPtzpeax6Mg"
+  },
+  "expect": {
+    "accepted": false,
+    "reason": "challenge_reused"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "pair-reject-bad-signature",
+  "consumers": [
+    "node"
+  ],
+  "given": {
+    "frontdoor_host": "mcp.kl.example.com",
+    "allow_test_keys": true
+  },
+  "input": {
+    "alg": "Ed25519",
+    "kid": "kl-hnef32472qzibi5r",
+    "payload": "eyJjYXBhYmlsaXRpZXMiOlsiY3VkYSIsImdwdSIsImxhcmdlLWRpc2siXSwiY29kZV9oYXNoIjoiSkdtdFF4a3h3cl9JbUxmaC1raXN0Q091b0dhMjlMMG5WZkpGZ2dPeEh2QSIsImNyZWF0ZWRfYXQiOiIyMDI2LTA5LTIzVDE4OjA0OjExLjIwMVoiLCJmcm9udGRvb3JfaG9zdCI6Im1jcC5rbC5leGFtcGxlLmNvbSIsIm5vZGVfaWQiOiJrbC1obmVmMzI0NzJxemliaTVyIiwibm9kZV9uYW1lIjoiZ3B1LWJveCIsIm5vbmNlIjoiMW9WdzJJOUZvdmh0MG5mTklIZ0RyU3JWdW5PRDBfWi12QnAwQnRSZkRzVSIsInByb2ZpbGUiOiJhZ2VudCIsInB1YmxpY19rZXkiOiJTbHBTWjc0RmczRGlJOTZIbjZxRklWQ2kzUXhCRTZwalRXSlpGbjdIdVZBIiwidGxzX2NlcnQiOiItLS0tLUJFR0lOIENFUlRJRklDQVRFLS0tLS1cbk1JSFFNSUdEb0FNQ0FRSUNBUUV3QlFZREsyVndNQkl4RURBT0JnTlZCQU1NQjJkd2RTMWliM2d3SGhjTk1qWXdcbk9UQXhNREF3TURBd1doY05Nell3T1RBeE1EQXdNREF3V2pBU01SQXdEZ1lEVlFRRERBZG5jSFV0WW05NE1Db3dcbkJRWURLMlZ3QXlFQVFaNTJjWFBMYjFBTzd6MnVWODNxTmJCWVVCbk9maWJGb1cwMGMyQWtUTmd3QlFZREsyVndcbkEwRUFtYWZ3UFY5cWVDcTcySkdpNEdQN29sampIa1NGa1I1c0VPMkpHM3p2ZkJrQnp2b25vaGtyeGovRlRhbytcblJuRFExbDZtekFkK2hPR0RsbmlXNjd0OUN3PT1cbi0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS1cbiIsInR5cGUiOiJrbC5ub2RlLnBhaXIiLCJ2IjoxfQ",
+    "sig": "SzJ_nmi7uVmMvOyfaSs8CH9ZPeSixpG5SBqPGvXsWcse6R89LpVQ_aWL83TgP9bVgXmK-97UKyiJDOLpuBCtBQ"
+  },
+  "expect": {
+    "accepted": false,
+    "reason": "bad_signature"
+  }
+}

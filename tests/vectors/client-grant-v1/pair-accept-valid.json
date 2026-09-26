@@ -1,0 +1,21 @@
+{
+  "name": "pair-accept-valid",
+  "consumers": [
+    "node"
+  ],
+  "given": {
+    "node_id": "kl-hnef32472qzibi5r",
+    "nonce": "1oVw2I9Fovht0nfNIHgDrSrVunOD0_Z-vBp0BtRfDsU"
+  },
+  "input": {
+    "alg": "Ed25519",
+    "kid": "kl-nt4ritcfj5kepq3y",
+    "payload": "eyJmcm9udGRvb3JfaWQiOiJrbC1udDRyaXRjZmo1a2VwcTN5IiwiZnJvbnRkb29yX3B1YmxpY19rZXkiOiJmWVdpUlJSSkJSa3VkU3JTd1FVV1E2YnBadGswM0x4cnFxcV9faGw0cHlVIiwibWVzaF9jZXJ0X2ZpbmdlcnByaW50IjoiMmJlYjIwYTA1ZjRhOWU1YTM4Y2NlN2E0NmU0MjI5YTU2ZWI2ZjYyMjNiMzA0NjExNjM5YmUxZTY1ZGE3MzZlZSIsIm1lc2hfdXJsIjoid3NzOi8vbWVzaC5rbC5leGFtcGxlLmNvbS9tZXNoL3YxIiwibm9kZV9pZCI6ImtsLWhuZWYzMjQ3MnF6aWJpNXIiLCJub25jZSI6IjFvVncySTlGb3ZodDBuZk5JSGdEclNyVnVuT0QwX1otdkJwMEJ0UmZEc1UiLCJwYWlyaW5nX2lkIjoicHJfRk1WZW8zNnhmVlZYZXFJOHN6TFVEUSIsInR5cGUiOiJrbC5ub2RlLnBhaXIuYWNjZXB0IiwidiI6MX0",
+    "sig": "4td84obAQLlhBOG2BMUrKCKNUTQqIqoQWsxswY1TnGJ634CB4s7wHgBGTZj1-gWL2yhrToId6t49WsnWPo5LBg"
+  },
+  "expect": {
+    "accepted": true,
+    "reason": null,
+    "frontdoor_id": "kl-nt4ritcfj5kepq3y"
+  }
+}
