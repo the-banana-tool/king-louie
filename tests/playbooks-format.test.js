@@ -285,6 +285,19 @@ describe('validatePackage', () => {
     assert.deepStrictEqual(messages(f.validatePackage(dir)), ['con.md: "con.md" is a reserved Windows device name']);
   });
 
+  it('refuses a NUL byte or invalid UTF-8 in playbook.yaml/steps.md/briefRules.md/sources.md', () => {
+    const nul = writePackage(path.join(tmp(), 'land-sale'));
+    fs.writeFileSync(path.join(nul, 'sources.md'), Buffer.from('one\0two\n'));
+    assert.deepStrictEqual(messages(f.validatePackage(nul)), ['sources.md contains a NUL byte']);
+
+    const badUtf8 = writePackage(path.join(tmp(), 'land-sale'));
+    // 0xC3 alone is the first byte of a 2-byte sequence with no second byte:
+    // invalid UTF-8. Node's lenient default decoding would silently turn
+    // this into a U+FFFD replacement character instead of failing.
+    fs.writeFileSync(path.join(badUtf8, 'briefRules.md'), Buffer.from([0x2d, 0x20, 0xc3, 0x0a]));
+    assert.deepStrictEqual(messages(f.validatePackage(badUtf8)), ['briefRules.md is not valid UTF-8']);
+  });
+
   it('excludes .git and dot-prefixed entries from validation and hashing', () => {
     const dir = writePackage(path.join(tmp(), 'land-sale'));
     const before = f.hashPackage(dir);

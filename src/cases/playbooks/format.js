@@ -786,14 +786,34 @@ function fileHashes(dir) {
   return out;
 }
 
+// Node's default 'utf8' decoding is lenient: an invalid byte sequence is
+// silently replaced with U+FFFD rather than reported, so a package with
+// mojibake or a truncated multi-byte character would read as some other,
+// wrong text instead of failing. A NUL byte is separately refused: it is
+// valid UTF-8, but no legitimate playbook.yaml/steps.md/briefRules.md/
+// sources.md content needs one, and letting it through risks confusing
+// something downstream that treats the text as a C string.
+function readTextStrict(abs) {
+  const buf = fs.readFileSync(abs);
+  let text;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(buf);
+  } catch {
+    return { text: null, error: 'is not valid UTF-8' };
+  }
+  if (text.includes('\0')) return { text: null, error: 'contains a NUL byte' };
+  return { text, error: null };
+}
+
 // Reads a named package file only when walkPackage already found it within
 // the per-file size limit: a file already flagged oversized (or missing) is
 // never read into memory, however large it actually is.
 function readSmallFile(files, rel) {
   const f = files.find((x) => x.rel === rel);
-  if (!f) return { present: false, text: null };
-  if (f.size > LIMITS.fileBytes) return { present: true, text: null };
-  return { present: true, text: fs.readFileSync(f.abs, 'utf8') };
+  if (!f) return { present: false, text: null, error: null };
+  if (f.size > LIMITS.fileBytes) return { present: true, text: null, error: null };
+  const { text, error } = readTextStrict(f.abs);
+  return { present: true, text, error };
 }
 
 function validatePackage(dir, { dirName = path.basename(dir), knownCaseTypes = null } = {}) {
@@ -811,6 +831,8 @@ function validatePackage(dir, { dirName = path.basename(dir), knownCaseTypes = n
 
   if (!yamlFile.present) {
     errors.push({ file: 'playbook.yaml', message: 'playbook.yaml is missing' });
+  } else if (yamlFile.error) {
+    errors.push({ file: 'playbook.yaml', message: `playbook.yaml ${yamlFile.error}` });
   } else if (yamlFile.text !== null) {
     const parsed = parsePlaybookYaml(yamlFile.text, { dirName, knownCaseTypes });
     playbook = parsed.value;
@@ -821,17 +843,22 @@ function validatePackage(dir, { dirName = path.basename(dir), knownCaseTypes = n
   const executors = playbook && playbook.executors.length ? playbook.executors : null;
   if (!stepsFile.present) {
     errors.push({ file: 'steps.md', message: 'steps.md is missing' });
+  } else if (stepsFile.error) {
+    errors.push({ file: 'steps.md', message: `steps.md ${stepsFile.error}` });
   } else if (stepsFile.text !== null) {
     steps = parseSteps(stepsFile.text, { executors });
     errors.push(...steps.errors);
     warnings.push(...(steps.warnings || []));
   }
 
-  if (rulesFile.present && rulesFile.text !== null) {
+  if (rulesFile.error) {
+    errors.push({ file: 'briefRules.md', message: `briefRules.md ${rulesFile.error}` });
+  } else if (rulesFile.present && rulesFile.text !== null) {
     briefRules = parseBriefRules(rulesFile.text, { executors });
     errors.push(...briefRules.errors);
   }
 
+  if (sourcesFile.error) errors.push({ file: 'sources.md', message: `sources.md ${sourcesFile.error}` });
   const sources = sourcesFile.present && sourcesFile.text !== null ? normalizeText(sourcesFile.text) : '';
   if (sourcesFile.present && sourcesFile.text !== null && Buffer.byteLength(sources, 'utf8') > LIMITS.sourcesBytes) {
     errors.push({ file: 'sources.md', message: 'sources.md is larger than 64 KiB' });
