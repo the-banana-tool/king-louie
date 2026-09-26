@@ -6,6 +6,8 @@
 const { norm } = require('../jsonl');
 const { BriefError } = require('../brief');
 const { caseTypes } = require('./case-types-bridge');
+// Third-party text folded to one line and capped (shared with the frame).
+const { oneLine } = require('./frame');
 // The brief fields an owner's gating answer may fill (spec §3.6). A playbook
 // names the field; only the owner's answer fills it. Never resources (R41),
 // materiality, safeDefaults or a case type's own fields. why and
@@ -24,9 +26,6 @@ const MAX_LABEL = 200;
 const MAX_ANSWERABLE = 48;
 const MAX_ANSWER = 1000;
 
-// eslint-disable-next-line no-control-regex
-const CONTROL_RE = /[\u0000-\u001f\u007f\u2028\u2029]+/g;
-const oneLine = (v, max) => String(v ?? '').replace(CONTROL_RE, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
 const labelOf = (origin) => String(origin || '').replace(/^(playbook|case-type):/, '').replace(/[^A-Za-z0-9._-]/g, '').slice(0, 48) || 'gating';
 const optionSig = (options) => JSON.stringify(options.map((o) => [o.id, o.label]));
 const hasOptions = (q) => Array.isArray(q.options) && q.options.length > 0;
