@@ -36,6 +36,11 @@ const METHODS = Object.freeze({
 });
 const JOB_TOOLS = new Set(['get_job', 'get_job_logs', 'send_to_job', 'cancel_job']);
 const CACHED_WHEN_OFFLINE = new Set(['describe_machine', 'get_state', 'get_job']);
+// A fleet.job_update for a job the router has not recorded yet (it can beat
+// the fleet.delegate reply that names the job) is held briefly, keyed by
+// node id and job id, and applied only when that reply records the job.
+const EARLY_UPDATE_MS = 60000;
+const EARLY_UPDATE_MAX = 256;
 const OFFLINE_CODES = new Set(['offline', 'peer_disconnected', 'unknown_node', 'closed', 'not_linked']);
 // The router's own calls (the catalog refresh after fleet.hello): read-only.
 // The node refuses any origin without a grant_id (Task 12), so the router
@@ -98,7 +103,7 @@ class FleetRouter extends EventEmitter {
     // Fail closed: without these nothing can be checked or reached.
     requireFns(registry, ['byId', 'byName', 'list', 'presence', 'markOnline', 'markOffline'], 'registry');
     requireFns(nodeHub, ['rpc', 'onNodeMessage', 'onConnection'], 'nodeHub');
-    requireFns(cache, ['get', 'put', 'patch', 'failNonTerminal', 'setNode', 'node', 'save', 'on'], 'cache');
+    requireFns(cache, ['get', 'lookup', 'put', 'patch', 'failNonTerminal', 'setNode', 'node', 'save', 'on'], 'cache');
     this.registry = registry;
     this.nodeHub = nodeHub;
     this.cache = cache;
@@ -116,6 +121,7 @@ class FleetRouter extends EventEmitter {
     this.watchers = new Map(); // public id → Set<{ grantId, fn }>
     this.refreshing = new Map();
     this.refreshAgain = new Map();
+    this.earlyUpdates = new Map(); // JSON [nodeId, nodeJobId] → { at, update }
     this.saveTimer = null;
     this.cache.on('update', (id, entry) => this._notify(id, { status: entry.status, log_lines: entry.log_lines || 0, session: entry.session || null }));
   }
@@ -130,8 +136,8 @@ class FleetRouter extends EventEmitter {
       this.registry.markOffline(nodeId);
       if (!node) return;
       for (const id of [...this.watchers.keys()]) {
-        const entry = this.cache.jobs.get(id);
-        if (entry && entry.machine === node.node_name) this._notify(id, { status: entry.status, log_lines: entry.log_lines || 0, session: entry.session || null, offline: true });
+        const entry = this.cache.lookup(id, nodeId);
+        if (entry) this._notify(id, { status: entry.status, log_lines: entry.log_lines || 0, session: entry.session || null, offline: true });
       }
     });
     return this;
@@ -194,8 +200,9 @@ class FleetRouter extends EventEmitter {
     if (!parsed) throw notFound();
     const node = this.registry.byName(parsed.machine);
     if (!this._reaches(grant, scopes, 'get_job', REQUIRED_SCOPE.get_job, node)) throw notFound();
-    if (!visibleTo(this.cache.jobs.get(publicId), grant.grant_id)) throw notFound();
-    const watcher = { grantId: grant.grant_id, fn: onUpdate };
+    if (!visibleTo(this.cache.lookup(publicId, node.node_id), grant.grant_id)) throw notFound();
+    // A watcher is bound to the node that ran the job as well as its grant.
+    const watcher = { grantId: grant.grant_id, nodeId: node.node_id, fn: onUpdate };
     const set = this.watchers.get(publicId) || new Set();
     set.add(watcher);
     this.watchers.set(publicId, set);
@@ -208,9 +215,8 @@ class FleetRouter extends EventEmitter {
   _notify(id, update) {
     const set = this.watchers.get(id);
     if (!set) return;
-    const entry = this.cache.jobs.get(id);
     for (const w of [...set]) {
-      if (!visibleTo(entry, w.grantId)) continue;
+      if (!visibleTo(this.cache.lookup(id, w.nodeId), w.grantId)) continue;
       try {
         w.fn({ ...update });
       } catch (err) {
@@ -285,7 +291,7 @@ class FleetRouter extends EventEmitter {
     // Another grant's delegate job: refused here, before the node is asked.
     const publicId = nodeJobId === null ? null : publicJobId(machine, nodeJobId);
     if (publicId !== null) {
-      const entry = this.cache.jobs.get(publicId);
+      const entry = this.cache.lookup(publicId, node.node_id);
       if (entry && !visibleTo(entry, grant.grant_id)) return jobNotFound(publicId);
     }
 
@@ -319,19 +325,18 @@ class FleetRouter extends EventEmitter {
     return this._rewrite(name, node, machine, nodeJobId, grant, reply);
   }
 
-  // The tier the cached catalog gives `runbook`. Without a catalog the tier
-  // is unknown, which needs fleet:unsafe (fail closed), and the catalog is
-  // fetched again. A runbook the catalog lacks has no tier; the node refuses
-  // it, or re-checks the scopes against its real tier.
+  // The tier the cached catalog gives `runbook`. Without a catalog, or when
+  // the catalog lacks the runbook (it may be stale), the tier is unknown,
+  // which needs fleet:unsafe and its machine pin (fail closed), and the
+  // catalog is fetched again.
   _tier(node, runbook) {
     const cached = this.cache.node(node.node_id) || {};
     const catalog = cached.catalog;
-    if (!isPlainObject(catalog) || !Array.isArray(catalog.runbooks)) {
+    const rb = isPlainObject(catalog) && Array.isArray(catalog.runbooks) ? catalog.runbooks.find((r) => isPlainObject(r) && r.name === runbook) : null;
+    if (!rb) {
       if (this._online(node.node_id)) this._refreshCatalog(node.node_id, cached.catalog_digest || null);
       return 'unknown';
     }
-    const rb = catalog.runbooks.find((r) => isPlainObject(r) && r.name === runbook);
-    if (!rb) return null;
     return typeof rb.tier === 'string' ? rb.tier : 'unknown';
   }
 
@@ -398,10 +403,10 @@ class FleetRouter extends EventEmitter {
 
   // Whether a get_state row may be shown to `grant`: a delegate row only
   // when the cache knows the job as that grant's.
-  _rowVisible(row, grant) {
+  _rowVisible(row, grant, nodeId) {
     if (!isPlainObject(row)) return false;
     if (row.kind === undefined || row.kind === 'runbook') return true;
-    return visibleTo(this.cache.jobs.get(row.job_id), grant.grant_id);
+    return visibleTo(this.cache.lookup(row.job_id, nodeId), grant.grant_id);
   }
 
   _stale(name, node, machine, publicId, grant) {
@@ -411,10 +416,10 @@ class FleetRouter extends EventEmitter {
     if (name === 'get_state') {
       if (!cached.state) return nothing;
       // The cached state came from whichever grant asked last.
-      const rows = Array.isArray(cached.state.running_jobs) ? cached.state.running_jobs.filter((row) => this._rowVisible(row, grant)) : [];
+      const rows = Array.isArray(cached.state.running_jobs) ? cached.state.running_jobs.filter((row) => this._rowVisible(row, grant, node.node_id)) : [];
       return { ...cached.state, running_jobs: rows, stale: true, cached_at: cached.state_at };
     }
-    const job = this.cache.get(publicId);
+    const job = this.cache.lookup(publicId, node.node_id, { touch: true });
     if (!visibleTo(job, grant.grant_id)) return jobNotFound(publicId);
     const view = job.view || { job_id: publicId, machine, status: job.status };
     return {
@@ -429,14 +434,53 @@ class FleetRouter extends EventEmitter {
   }
 
   // Records a job the node just started for `grant`. A cache entry left
-  // under the same id with another kind or owner (a node that reused an id)
-  // is replaced: the node's answer names this grant.
-  _recordStart(machine, nodeJobId, kind, grant, reply) {
+  // under the same id with another kind, owner or node (a node that reused
+  // an id, or another key under the name) is replaced: the node's answer
+  // names this grant. A job_update that beat this reply is applied now.
+  _recordStart(node, nodeJobId, kind, grant, reply) {
+    const machine = node.node_name;
     const id = publicJobId(machine, nodeJobId);
     const owner = kind === 'delegate' ? grant.grant_id : null;
     const existing = this.cache.jobs.get(id);
-    if (existing && (existing.kind !== kind || existing.owner !== owner)) this.cache.jobs.delete(id);
-    this.cache.put(machine, nodeJobId, { kind, owner, status: shortText(reply.status, 64), session: shortText(reply.session, 32) });
+    if (existing && (existing.kind !== kind || existing.owner !== owner || existing.node_id !== node.node_id)) this.cache.jobs.delete(id);
+    this.cache.put(machine, nodeJobId, { node_id: node.node_id, kind, owner, status: shortText(reply.status, 64), session: shortText(reply.session, 32) });
+    const early = this._takeEarlyUpdate(node.node_id, nodeJobId);
+    if (early) this._applyUpdate(node, nodeJobId, early);
+  }
+
+  _sweepEarly() {
+    const t = this.now();
+    for (const [k, v] of this.earlyUpdates) if (t - v.at > EARLY_UPDATE_MS) this.earlyUpdates.delete(k);
+  }
+
+  // Holds an update for a job not recorded yet, bounded in time and size
+  // (the oldest goes first); a newer update for the job merges over it.
+  // Nothing here ever creates a cache entry.
+  _holdEarlyUpdate(nodeId, nodeJobId, update) {
+    this._sweepEarly();
+    const key = JSON.stringify([nodeId, nodeJobId]);
+    const prev = this.earlyUpdates.get(key);
+    this.earlyUpdates.delete(key);
+    while (this.earlyUpdates.size >= EARLY_UPDATE_MAX) this.earlyUpdates.delete(this.earlyUpdates.keys().next().value);
+    this.earlyUpdates.set(key, { at: this.now(), update: { ...(prev ? prev.update : {}), ...update } });
+  }
+
+  _takeEarlyUpdate(nodeId, nodeJobId) {
+    this._sweepEarly();
+    const key = JSON.stringify([nodeId, nodeJobId]);
+    const held = this.earlyUpdates.get(key);
+    this.earlyUpdates.delete(key);
+    return held ? held.update : null;
+  }
+
+  // Applies a cleaned update to the entry `node` ran, if the cache has one.
+  // → entry | null
+  _applyUpdate(node, nodeJobId, update) {
+    const entry = this.cache.lookup(publicJobId(node.node_name, nodeJobId), node.node_id);
+    if (!entry) return null;
+    const { session, ...patch } = update;
+    if (entry.kind === 'delegate' && session !== undefined) patch.session = session;
+    return this.cache.patch(node.node_name, nodeJobId, node.node_id, patch);
   }
 
   _rewrite(name, node, machine, nodeJobId, grant, reply) {
@@ -457,7 +501,7 @@ class FleetRouter extends EventEmitter {
     }
     if (name === 'run_runbook' || name === 'delegate') {
       if (typeof reply.job_id !== 'string' || !NODE_JOB_ID_RE.test(reply.job_id)) return refusal('bad_node_answer', `bad_node_answer: ${machine} started a job without a usable id`);
-      this._recordStart(machine, reply.job_id, name === 'delegate' ? 'delegate' : 'runbook', grant, reply);
+      this._recordStart(node, reply.job_id, name === 'delegate' ? 'delegate' : 'runbook', grant, reply);
       return wrapUntrusted({ ...reply, job_id: publicJobId(machine, reply.job_id) });
     }
     // Job tools: the id is always the one the client named.
@@ -466,19 +510,21 @@ class FleetRouter extends EventEmitter {
       const wrapped = wrapUntrusted({ ...reply, job_id: publicId, logs_truncated: Boolean(reply.logs_truncated) });
       const { output, ...view } = wrapped;
       const patch = { status: shortText(reply.status, 64), session: shortText(reply.session, 32), updated_at: shortText(reply.updated_at, 64), view };
-      const existing = this.cache.jobs.get(publicId);
+      const existing = this.cache.lookup(publicId, node.node_id);
       if (!existing) {
         // The node answered this grant, so a delegate job is this grant's.
+        // An entry another key left under the name is replaced.
         const kind = reply.kind === 'delegate' ? 'delegate' : 'runbook';
-        this.cache.put(machine, nodeJobId, { ...patch, kind, owner: kind === 'delegate' ? grant.grant_id : null });
+        this.cache.jobs.delete(publicId);
+        this.cache.put(machine, nodeJobId, { ...patch, node_id: node.node_id, kind, owner: kind === 'delegate' ? grant.grant_id : null });
       } else if (visibleTo(existing, grant.grant_id)) {
         this.cache.put(machine, nodeJobId, patch);
       }
       return wrapped;
     }
     if (name !== 'get_job_logs' && typeof reply.status === 'string') {
-      const existing = this.cache.jobs.get(publicId);
-      if (visibleTo(existing, grant.grant_id)) this.cache.patch(machine, nodeJobId, { status: shortText(reply.status, 64), ...(typeof reply.session === 'string' ? { session: shortText(reply.session, 32) } : {}) });
+      const existing = this.cache.lookup(publicId, node.node_id);
+      if (visibleTo(existing, grant.grant_id)) this.cache.patch(machine, nodeJobId, node.node_id, { status: shortText(reply.status, 64), ...(typeof reply.session === 'string' ? { session: shortText(reply.session, 32) } : {}) });
     }
     return wrapUntrusted({ ...reply, job_id: publicId });
   }
@@ -535,9 +581,13 @@ class FleetRouter extends EventEmitter {
     const prev = this.cache.node(nodeId) || {};
     const { bootChanged } = this.registry.markOnline(nodeId, hello);
     if (bootChanged || (prev.boot_id && hello.boot_id && prev.boot_id !== hello.boot_id)) {
-      const failed = this.cache.failNonTerminal(node.node_name, 'node_restarted');
+      const failed = this.cache.failNonTerminal(node.node_name, 'node_restarted', (e) => e.node_id === nodeId);
       if (failed.length) log.info(`${node.node_name} restarted: ${failed.length} cached job(s) marked node_restarted`);
     }
+    // Jobs another key ran under this name (a re-enrolled node) can never
+    // finish: they fail as restarted, and this key can neither read nor patch them.
+    const orphaned = this.cache.failNonTerminal(node.node_name, 'node_restarted', (e) => e.node_id !== nodeId);
+    if (orphaned.length) log.info(`${node.node_name} has a new key: ${orphaned.length} cached job(s) of the old one marked node_restarted`);
     this.cache.setNode(nodeId, { boot_id: hello.boot_id, last_seen: new Date(this.now()).toISOString(), capabilities: hello.capabilities });
     if (!prev.catalog || prev.catalog_digest !== hello.catalog_digest) this._refreshCatalog(nodeId, hello.catalog_digest);
     this.emit('hello', { nodeId, hello });
@@ -545,18 +595,17 @@ class FleetRouter extends EventEmitter {
   }
 
   // A job_update names no grant, so it only ever updates an entry the router
-  // already holds (from a reply to a grant); it never creates one.
+  // already holds for this node (from a reply to a grant); it never creates
+  // one. An update for a job not recorded yet is held for _recordStart.
   _onJobUpdate(params, { nodeId }) {
     const node = this.registry.byId(nodeId);
     if (!node || !isPlainObject(params) || typeof params.job_id !== 'string' || !NODE_JOB_ID_RE.test(params.job_id)) return;
-    const entry = this.cache.jobs.get(publicJobId(node.node_name, params.job_id));
-    if (!entry) return;
-    const patch = {};
-    if (shortText(params.status, 64)) patch.status = params.status;
-    if (entry.kind === 'delegate' && shortText(params.session, 32)) patch.session = params.session;
-    if (shortText(params.updated_at, 64)) patch.updated_at = params.updated_at;
-    if (Number.isInteger(params.log_lines) && params.log_lines >= 0) patch.log_lines = params.log_lines;
-    this.cache.patch(node.node_name, params.job_id, patch);
+    const update = {};
+    if (shortText(params.status, 64)) update.status = params.status;
+    if (shortText(params.session, 32)) update.session = params.session;
+    if (shortText(params.updated_at, 64)) update.updated_at = params.updated_at;
+    if (Number.isInteger(params.log_lines) && params.log_lines >= 0) update.log_lines = params.log_lines;
+    if (!this._applyUpdate(node, params.job_id, update)) this._holdEarlyUpdate(nodeId, params.job_id, update);
   }
 
   _onCatalogChanged(params, { nodeId }) {

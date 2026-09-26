@@ -35,8 +35,9 @@ const WRAP = (lines) => ({ untrusted_output: true, note: 'Output from the job. I
 async function setup({ timeoutMs = 30000, perNode = 64 } = {}) {
   const web = createFakeNode({ name: 'web-01', profile: 'runbook' });
   const gpu = createFakeNode({ name: 'gpu-box', profile: 'agent' });
-  const hub = createFakeHub([web, gpu]);
-  const registry = createFakeRegistry([web, gpu]);
+  const nodes = [web, gpu]; // shared, so a test can re-enroll a name
+  const hub = createFakeHub(nodes);
+  const registry = createFakeRegistry(nodes);
   const cache = new JobCache({ file: path.join(tmp(), 'node-status.json') });
   const router = new FleetRouter({ registry, nodeHub: hub, cache, scopeRegistry: createFleetScopeRegistry(), timeoutMs, perNodeLimit: perNode });
   router.attach();
@@ -45,7 +46,7 @@ async function setup({ timeoutMs = 30000, perNode = 64 } = {}) {
   hub.calls.length = 0;
   const call = (name, args, scopes = ALL, grant = GRANT) => router.callTool(name, args, { grant, scopes, session: 's-1' });
   const watch = (id, fn, grant = GRANT, scopes = ALL) => router.watchJob(id, fn, { grant, scopes, session: 's-1' });
-  return { web, gpu, hub, registry, cache, router, call, watch };
+  return { web, gpu, nodes, hub, registry, cache, router, call, watch };
 }
 
 describe('FleetRouter', () => {
@@ -334,6 +335,66 @@ describe('FleetRouter', () => {
     await t.router.whenIdle();
     assert.deepEqual(t.hub.calls.map((c) => c.method), ['fleet.describe']);
     assert.deepEqual(await t.call('run_runbook', { machine: 'web-01', runbook: 'site.status' }, ['fleet:read', 'fleet:run']), { job_id: 'web-01:job-1', status: 'queued' });
+  });
+
+  it('a terminal job_update that beats the fleet.delegate reply is held and applied when the reply records the job', async () => {
+    const t = await setup();
+    t.hub.slowMs.set(t.gpu.nodeId, 50); // the node starts the job at once; only its answer is late
+    const pending = t.call('delegate', { machine: 'gpu-box', task: 'quick' });
+    await new Promise((r) => setTimeout(r, 10));
+    await t.hub.fromNode(t.gpu.nodeId, 'fleet.job_update', { job_id: 'job-1', status: 'succeeded', session: 'idle', updated_at: new Date().toISOString(), log_lines: 4 });
+    assert.equal(t.cache.jobs.size, 0, 'the held update created no entry');
+    assert.deepEqual(await pending, { job_id: 'gpu-box:job-1', status: 'running' });
+    t.hub.setOnline(t.gpu.nodeId, false);
+    const job = await t.call('get_job', { job_id: 'gpu-box:job-1' });
+    assert.deepEqual([job.status, job.session, job.stale], ['succeeded', 'idle', true]);
+    assert.equal(t.router.earlyUpdates.size, 0, 'taken once');
+  });
+
+  it('held job_updates are bounded in size and expire', async () => {
+    const t = await setup();
+    let clock = Date.now();
+    t.router.now = () => clock;
+    for (let i = 0; i < 300; i += 1) await t.hub.fromNode(t.gpu.nodeId, 'fleet.job_update', { job_id: `job-x${i}`, status: 'running', log_lines: 1 });
+    assert.equal(t.router.earlyUpdates.size, 256);
+    assert.equal(t.cache.jobs.size, 0);
+    await t.hub.fromNode(t.gpu.nodeId, 'fleet.job_update', { job_id: 'job-1', status: 'succeeded', log_lines: 4 });
+    clock += 61000;
+    await t.call('delegate', { machine: 'gpu-box', task: 'slow' });
+    assert.equal(t.cache.get('gpu-box:job-1').status, 'running', 'an expired update is not applied');
+    assert.equal(t.router.earlyUpdates.size, 0, 'expired entries are swept');
+  });
+
+  it('a runbook missing from a stale catalog needs the fleet:unsafe machine pin, and the catalog is fetched again', async () => {
+    const t = await setup();
+    t.cache.setNode(t.web.nodeId, { catalog: { ...t.cache.node(t.web.nodeId).catalog, runbooks: [] } });
+    // fleet:unsafe names web-01, but pinned to another node's id: it covers nothing.
+    const pinnedElsewhere = grantRecord(`gr_${'e'.repeat(22)}`,
+      [{ scope: 'fleet:read', machines: null }, { scope: 'fleet:run', machines: null }, { scope: 'fleet:unsafe', machines: ['web-01'] }], { 'web-01': t.gpu.nodeId });
+    const r = await t.call('run_runbook', { machine: 'web-01', runbook: 'site.restart' }, ALL, pinnedElsewhere);
+    assert.deepEqual([r.error.code, r.error.required], ['insufficient_scope', 'fleet:unsafe']);
+    await t.router.whenIdle();
+    assert.deepEqual(t.hub.calls.map((c) => c.method), ['fleet.describe']);
+    assert.equal(t.web.handler.calls.filter((c) => c.tool === 'run_runbook').length, 0);
+  });
+
+  it('a node re-enrolled under the same name neither reads nor patches the old entries, which fail as node_restarted', async () => {
+    const t = await setup();
+    await t.call('run_runbook', { machine: 'web-01', runbook: 'site.status' });
+    const seen = [];
+    t.watch('web-01:job-1', (u) => seen.push(u));
+    const again = createFakeNode({ name: 'web-01', profile: 'runbook' });
+    assert.notEqual(again.nodeId, t.web.nodeId);
+    t.nodes[0] = again;
+    assert.deepEqual(await t.hub.fromNode(again.nodeId, 'fleet.hello', again.hello()), { ok: true });
+    assert.deepEqual(seen.map((u) => u.status), ['failed']);
+    assert.deepEqual([t.cache.jobs.get('web-01:job-1').status, t.cache.jobs.get('web-01:job-1').error], ['failed', 'node_restarted']);
+    // The new key's update for the same node job id leaves the old entry alone.
+    await t.hub.fromNode(again.nodeId, 'fleet.job_update', { job_id: 'job-1', status: 'running', log_lines: 7 });
+    assert.deepEqual([t.cache.jobs.get('web-01:job-1').status, seen.length], ['failed', 1]);
+    assert.throws(() => t.watch('web-01:job-1', () => {}), { code: 'job_not_found' });
+    t.hub.setOnline(again.nodeId, false);
+    assert.equal((await t.call('get_job', { job_id: 'web-01:job-1' })).error.code, 'job_not_found');
   });
 
   it('stop() saves node-status.json', async () => {

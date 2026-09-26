@@ -8,6 +8,11 @@
 // T11-owner): `visibleTo` is the one check every cached read and watch goes
 // through. An entry is only ever created from a reply the node gave the
 // router for a grant, never from a fleet.job_update, which names no grant.
+//
+// Entries are keyed by machine name (public ids are stateless), and each also
+// records the node_id that ran the job. Reads through `lookup` and writes
+// through `patch` require that node_id: a different key re-enrolled under the
+// same name finds nothing of the old node's and can change none of it.
 const fs = require('fs');
 const path = require('path');
 const { EventEmitter } = require('events');
@@ -108,24 +113,36 @@ class JobCache extends EventEmitter {
   put(machine, nodeJobId, patch = {}) {
     const id = publicJobId(machine, nodeJobId);
     const existing = this.jobs.get(id);
-    const prev = existing || { id, machine, node_job_id: nodeJobId, kind: null, owner: null, status: null, session: null, log_lines: 0, updated_at: null, view: null };
-    const { kind, owner, ...rest } = patch;
-    const fixed = existing ? { kind: prev.kind, owner: prev.owner } : { kind: kind === undefined ? null : kind, owner: owner === undefined ? null : owner };
+    const prev = existing || { id, machine, node_job_id: nodeJobId, node_id: null, kind: null, owner: null, status: null, session: null, log_lines: 0, updated_at: null, view: null };
+    const { kind, owner, node_id: nodeId, ...rest } = patch;
+    const fixed = existing
+      ? { kind: prev.kind, owner: prev.owner, node_id: prev.node_id }
+      : { kind: kind === undefined ? null : kind, owner: owner === undefined ? null : owner, node_id: nodeId === undefined ? null : nodeId };
     const entry = { ...prev, ...rest, ...fixed, id, machine, node_job_id: nodeJobId, cached_at: new Date(this.now()).toISOString() };
     this._touch(id, entry);
     if (prev.status !== entry.status || prev.log_lines !== entry.log_lines || prev.session !== entry.session) this.emit('update', id, entry);
     return entry;
   }
 
-  // Updates an entry that exists; never creates one. → entry | null
-  patch(machine, nodeJobId, patch = {}) {
-    return this.jobs.has(publicJobId(machine, nodeJobId)) ? this.put(machine, nodeJobId, patch) : null;
+  // The entry for `id` when node `nodeId` ran it, else null (a mismatch is
+  // not found). `touch` counts it as used for the LRU.
+  lookup(id, nodeId, { touch = false } = {}) {
+    const entry = this.jobs.get(id);
+    if (!entry || typeof nodeId !== 'string' || !nodeId || entry.node_id !== nodeId) return null;
+    if (touch) this._touch(id, entry);
+    return entry;
   }
 
-  failNonTerminal(machine, reason) {
+  // Updates an entry node `nodeId` ran; never creates one. → entry | null
+  patch(machine, nodeJobId, nodeId, patch = {}) {
+    return this.lookup(publicJobId(machine, nodeJobId), nodeId) ? this.put(machine, nodeJobId, patch) : null;
+  }
+
+  // Fails the non-terminal entries of `machine` that `match(entry)` selects.
+  failNonTerminal(machine, reason, match = () => true) {
     const failed = [];
     for (const e of [...this.jobs.values()]) {
-      if (e.machine !== machine || TERMINAL_STATUSES.includes(e.status)) continue;
+      if (e.machine !== machine || TERMINAL_STATUSES.includes(e.status) || !match(e)) continue;
       failed.push(this.put(machine, e.node_job_id, { status: 'failed', error: reason, view: e.view ? { ...e.view, status: 'failed', error: reason } : null }));
     }
     return failed;
