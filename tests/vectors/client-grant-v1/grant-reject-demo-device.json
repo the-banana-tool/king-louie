@@ -1,5 +1,5 @@
 {
-  "name": "grant-reject-scope-widened",
+  "name": "grant-reject-demo-device",
   "consumers": [
     "node"
   ],
@@ -94,7 +94,7 @@
         "fleet:run"
       ],
       "expires_at": "2026-09-23T18:09:11.201Z",
-      "claimed_by": "d-3vmwrihhdbnit4oi",
+      "claimed_by": null,
       "used_nonces": []
     },
     "scopes": {
@@ -114,12 +114,12 @@
   },
   "input": {
     "alg": "ES256",
-    "kid": "d-3vmwrihhdbnit4oi",
-    "payload": "eyJjbGllbnRfaWQiOiJkY3JfSWtfMHptWGJscklOWi1ldV9IVE1IUSIsImNsaWVudF9uYW1lIjoiRXhhbXBsZSBDbGllbnQiLCJjb2RlX2NoYWxsZW5nZSI6ImoyTXpETzRmYkdwa2dMdGhlaEIyWGxPb0lvOVp6QWhDRC1mR2hyRzg5SzAiLCJkZWNpc2lvbiI6ImFwcHJvdmUiLCJkZXZpY2VfaWQiOiJkLTN2bXdyaWhoZGJuaXQ0b2kiLCJmcm9udGRvb3JfaWQiOiJrbC1udDRyaXRjZmo1a2VwcTN5IiwiZ3JhbnRfaWQiOiJncl9KUnVEdzJDdFc4UTAwSy0yREw4WFdRIiwibm9uY2UiOiI1OXFiR1RMUnhjR0lpOUVkZ2xudzFOaGVTZ3hKbHVWeDBUbW9zMFVwVS1nIiwicmVkaXJlY3RfdXJpIjoiaHR0cHM6Ly9jbGllbnQuZXhhbXBsZS5jb20vY2IiLCJyZXNvdXJjZSI6Imh0dHBzOi8vbWNwLmtsLmV4YW1wbGUuY29tL21jcCIsInNjb3BlcyI6W3sibWFjaGluZXMiOm51bGwsInNjb3BlIjoiZmxlZXQ6ZGVsZWdhdGUifSx7Im1hY2hpbmVzIjpudWxsLCJzY29wZSI6ImZsZWV0OnJlYWQifV0sInNpZ25lZF9hdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTMuMjAxWiIsInR5cGUiOiJrbC5jbGllbnQuZ3JhbnQiLCJ1c2VyX2NvZGUiOiJRN0tNMlgiLCJ2IjoxfQ",
-    "sig": "Q-dVf275txkswX4JEcl2nMXZSb3eVPIPGOMhsiBPEeXObr9-C3XBB3mDSTrHr0z4j6J_yOedrjAX26n_g9haxw"
+    "kid": "d-vn5ed2ksh6yuxv2b",
+    "payload": "eyJjbGllbnRfaWQiOiJkY3JfSWtfMHptWGJscklOWi1ldV9IVE1IUSIsImNsaWVudF9uYW1lIjoiRXhhbXBsZSBDbGllbnQiLCJjb2RlX2NoYWxsZW5nZSI6ImoyTXpETzRmYkdwa2dMdGhlaEIyWGxPb0lvOVp6QWhDRC1mR2hyRzg5SzAiLCJkZWNpc2lvbiI6ImFwcHJvdmUiLCJkZXZpY2VfaWQiOiJkLXZuNWVkMmtzaDZ5dXh2MmIiLCJmcm9udGRvb3JfaWQiOiJrbC1udDRyaXRjZmo1a2VwcTN5IiwiZ3JhbnRfaWQiOiJncl9KUnVEdzJDdFc4UTAwSy0yREw4WFdRIiwibm9uY2UiOiI1OXFiR1RMUnhjR0lpOUVkZ2xudzFOaGVTZ3hKbHVWeDBUbW9zMFVwVS1nIiwicmVkaXJlY3RfdXJpIjoiaHR0cHM6Ly9jbGllbnQuZXhhbXBsZS5jb20vY2IiLCJyZXNvdXJjZSI6Imh0dHBzOi8vbWNwLmtsLmV4YW1wbGUuY29tL21jcCIsInNjb3BlcyI6W3sibWFjaGluZXMiOm51bGwsInNjb3BlIjoiZmxlZXQ6cmVhZCJ9LHsibWFjaGluZXMiOm51bGwsInNjb3BlIjoiZmxlZXQ6cnVuIn1dLCJzaWduZWRfYXQiOiIyMDI2LTA5LTIzVDE4OjA0OjEzLjIwMVoiLCJ0eXBlIjoia2wuY2xpZW50LmdyYW50IiwidXNlcl9jb2RlIjoiUTdLTTJYIiwidiI6MX0",
+    "sig": "sQpoL_sD_aBcq2RliPb9cfNPQpbVC4Vbqzzur2CL7vLiihNpk4C4bUnrty5DcxQe40kKssjGcdBPgs7gbWmbJw"
   },
   "expect": {
     "accepted": false,
-    "reason": "invalid_scope"
+    "reason": "demo_device"
   }
 }

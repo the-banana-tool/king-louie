@@ -21,14 +21,16 @@ const APPROVAL_DIR = path.join(__dirname, 'vectors', 'approval-v1');
 const EXPECTED = [
   'grant-approve', 'grant-deny',
   ...['user-code-mismatch', 'wrong-frontdoor', 'expired', 'code-challenge-changed', 'redirect-uri-changed', 'client-name-changed', 'scope-widened',
-    'machines-unsorted', 'unsafe-only', 'unknown-device', 'revoked-device', 'nonce-replay', 'noncanonical', 'not-claimant'].map((n) => `grant-reject-${n}`),
+    'machines-unsorted', 'unsafe-only', 'unknown-device', 'demo-device', 'unknown-request', 'revoked-device', 'nonce-replay', 'noncanonical', 'not-claimant'].map((n) => `grant-reject-${n}`),
   'grant-accept-phone-clock-ahead',
-  'client-revoke-valid', 'client-revoke-reject-challenge-reused', 'client-revoke-reject-challenge-expired', 'client-revoke-reject-challenge-wrong-purpose',
+  'client-revoke-valid', 'client-revoke-reject-challenge-reused', 'client-revoke-reject-challenge-expired', 'client-revoke-reject-challenge-unknown',
+  'client-revoke-reject-challenge-wrong-purpose',
   'enroll-valid', 'enroll-reject-node-id-mismatch', 'enroll-reject-unknown-pairing', 'remove-valid',
   'pair-valid', 'pair-reject-bad-signature', 'pair-reject-test-key', 'pair-accept-valid',
-  'repin-valid', 'repin-reject-bad-signature', 'fingerprint-grouping'
+  'repin-valid', 'repin-reject-bad-signature', 'repin-reject-spki-mismatch', 'repin-reject-old-pin-mismatch', 'fingerprint-grouping'
 ];
-const PHONE = ['grant-approve', 'grant-deny', 'client-revoke-valid', 'enroll-valid', 'remove-valid', 'repin-valid', 'repin-reject-bad-signature', 'fingerprint-grouping'];
+const PHONE = ['grant-approve', 'grant-deny', 'client-revoke-valid', 'enroll-valid', 'remove-valid', 'repin-valid', 'repin-reject-bad-signature', 'repin-reject-spki-mismatch',
+  'repin-reject-old-pin-mismatch', 'fingerprint-grouping'];
 
 const vectors = fs.readdirSync(DIR).filter((f) => f.endsWith('.json')).map((f) => JSON.parse(fs.readFileSync(path.join(DIR, f), 'utf8')));
 const byName = new Map(vectors.map((v) => [v.name, v]));
@@ -69,7 +71,7 @@ async function run(v) {
 
 describe('client-grant-v1 vectors', () => {
   it('has exactly the expected set, and phones consume exactly theirs', () => {
-    assert.equal(EXPECTED.length, 32);
+    assert.equal(EXPECTED.length, 37);
     assert.deepEqual([...byName.keys()].sort(), [...EXPECTED].sort());
     assert.deepEqual(vectors.filter((v) => v.consumers.includes('ios')).map((v) => v.name).sort(), [...PHONE].sort());
     assert.deepEqual(vectors.filter((v) => v.consumers.includes('android')).map((v) => v.name).sort(), [...PHONE].sort());

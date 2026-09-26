@@ -73,6 +73,8 @@ const DEVICE_D = {
   A: KEYS.devices.A.d,
   B: KEYS.devices.B.d,
   C: KEYS.devices.C.d,
+  // Not in keys.json: an approver whose record says platform 'demo'.
+  D: sha('client-grant-v1 demo device').toString('base64url'),
   // Not in keys.json and never an approver: the "unknown device" signer.
   U: sha('client-grant-v1 unknown device').toString('base64url')
 };
@@ -143,11 +145,12 @@ function buildVectors({ docs = committedDocs() } = {}) {
   const B = device('B', cache);
   const C = device('C', cache);
   const U = device('U', cache);
+  const D = device('D', cache);
   const fd = nodeIdentity('relay');
   const gpu = nodeIdentity('gpu-box');
   const web = nodeIdentity('web-01');
   const frontdoor = { id: fd.nodeId, key: P.rawEd25519(fd.publicKey) };
-  const approvers = [approver(A), approver(C), approver(B, { revoked_at: '2026-09-20T00:00:00.000Z', revoked_by: 'console' })];
+  const approvers = [approver(A), approver(C), approver(B, { revoked_at: '2026-09-20T00:00:00.000Z', revoked_by: 'console' }), approver(D, { platform: 'demo' })];
   const vectors = [];
   const add = (v) => vectors.push(v);
 
@@ -184,6 +187,8 @@ function buildVectors({ docs = committedDocs() } = {}) {
   grant('grant-reject-unsafe-only', seal(grantMessage(A, unsafePending), A.signer), { p: unsafePending, accepted: false, reason: 'invalid_scope' });
   const unclaimed = { ...pending, claimed_by: null };
   grant('grant-reject-unknown-device', seal(grantMessage(U, unclaimed), U.signer), { p: unclaimed, accepted: false, reason: 'unknown_device' });
+  grant('grant-reject-demo-device', seal(grantMessage(D, unclaimed), D.signer), { p: unclaimed, accepted: false, reason: 'demo_device' });
+  grant('grant-reject-unknown-request', seal(grantMessage(A, { ...pending, grant_id: idOf('gr_', 'other grant') }), A.signer), { accepted: false, reason: 'unknown_request' });
   grant('grant-reject-revoked-device', seal(grantMessage(B, unclaimed), B.signer), { p: unclaimed, accepted: false, reason: 'revoked_device' });
   grant('grant-reject-nonce-replay', seal(grantMessage(A, pending, { nonce: nonceOf('used') }), A.signer), { p: { ...pending, used_nonces: [nonceOf('used')] }, accepted: false, reason: 'replay' });
   grant('grant-reject-noncanonical', nonCanonical(grantMessage(A, pending), A.signer), { accepted: false, reason: 'malformed' });
@@ -193,14 +198,16 @@ function buildVectors({ docs = committedDocs() } = {}) {
   // ── Client revocation (approval-v1 already has a `revoke-valid`) ──────
   const challenge = nonceOf('challenge');
   const revokeMsg = { v: 1, type: 'kl.client.revoke', frontdoor_id: fd.nodeId, grant_id: pending.grant_id, challenge, device_id: A.id, signed_at: iso(NOW_MS + 1000) };
-  const revoke = (name, { purpose = 'revoke', used = false, expiresAt = iso(NOW_MS + 60000), accepted, reason = null, consumers = ['node'], message = null }) => add({
+  const revoke = (name, { issued = challenge, purpose = 'revoke', used = false, expiresAt = iso(NOW_MS + 60000), accepted, reason = null, consumers = ['node'], message = null }) => add({
     name, consumers,
-    given: { now: NOW, frontdoor, approvers, allow_test_keys: true, challenges: [{ challenge, device_id: A.id, purpose, expires_at: expiresAt, used }] },
+    given: { now: NOW, frontdoor, approvers, allow_test_keys: true, challenges: [{ challenge: issued, device_id: A.id, purpose, expires_at: expiresAt, used }] },
     input: seal(revokeMsg, A.signer), expect: message ? { accepted, reason, message } : { accepted, reason }
   });
   revoke('client-revoke-valid', { accepted: true, consumers: ['node', 'ios', 'android'], message: revokeMsg });
   revoke('client-revoke-reject-challenge-reused', { used: true, accepted: false, reason: 'challenge_reused' });
   revoke('client-revoke-reject-challenge-expired', { expiresAt: iso(NOW_MS - 1000), accepted: false, reason: 'challenge_expired' });
+  // The store holds a live challenge for A, but not the one A signed.
+  revoke('client-revoke-reject-challenge-unknown', { issued: nonceOf('other challenge'), accepted: false, reason: 'unknown_challenge' });
   revoke('client-revoke-reject-challenge-wrong-purpose', { purpose: 'remove', accepted: false, reason: 'challenge_wrong_purpose' });
 
   // ── Node enrollment and removal ───────────────────────────────────────
@@ -249,6 +256,8 @@ function buildVectors({ docs = committedDocs() } = {}) {
   const repinGiven = { frontdoor, received_spki: newSpki, current_pin: oldSpki };
   add({ name: 'repin-valid', consumers: ['node', 'ios', 'android'], given: repinGiven, input: repinEnv, expect: { accepted: true, reason: null } });
   add({ name: 'repin-reject-bad-signature', consumers: ['node', 'ios', 'android'], given: repinGiven, input: flipSig(repinEnv), expect: { accepted: false, reason: 'bad_signature' } });
+  add({ name: 'repin-reject-spki-mismatch', consumers: ['node', 'ios', 'android'], given: { ...repinGiven, received_spki: `sha256/${b64('other spki')}` }, input: repinEnv, expect: { accepted: false, reason: 'spki_mismatch' } });
+  add({ name: 'repin-reject-old-pin-mismatch', consumers: ['node', 'ios', 'android'], given: { ...repinGiven, current_pin: `sha256/${b64('other pin')}` }, input: repinEnv, expect: { accepted: false, reason: 'old_pin_mismatch' } });
 
   // ── Display ─────────────────────────────────────────────────────────────
   const typed = ['q7k-m2x', 'Q7KM2X', 'o1l abc', 'Q7KM2', 'Q7KM2U'];

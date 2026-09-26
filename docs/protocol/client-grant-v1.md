@@ -89,6 +89,7 @@ request's nonce.
 
 `{ v, type, frontdoor_id, relay, old_spki, new_spki, created_at }`, served
 unauthenticated at `GET /v1/repin` after `frontdoor rotate-tls-key`.
+`old_spki ≠ new_spki` (a message where they are equal is `malformed`).
 
 ## 4. What the front door checks
 
@@ -96,6 +97,10 @@ Steps in order; the first failure is the `reason`. A published test key (the
 keys in `tests/vectors/approval-v1/keys.json`) is refused as `test_key`
 wherever a step says so, unless the verifier was built with `allowTestKeys`,
 which only tests do.
+
+Every expiry is inclusive: a pending authorization, pending pairing or
+challenge is live while `now <= expires_at` on the verifier's clock, and
+expired from the next millisecond.
 
 ### 4.1 Every phone message
 
@@ -109,8 +114,9 @@ valid iff the front door accepted it before `revoked_at`.
 
 ### 4.2 `kl.client.grant`
 
-A pending authorization with this `grant_id` (`unknown_request`); signed by the
-device that claimed it (`not_claimant`); not expired on the front door's clock
+A pending authorization with this `grant_id` (`unknown_request`); if the request
+has been claimed, signed by the device that claimed it (`not_claimant`) — an
+unclaimed request may be decided by any active approver (§4.1); not expired on the front door's clock
 (`expired`); `client_id`, `client_name`, `redirect_uri`, `resource`,
 `code_challenge` byte-equal (`binding_mismatch`); `user_code` equal
 (`user_code_mismatch`); `nonce` unused (`replay`); on `approve`, every scope was
@@ -133,8 +139,10 @@ this front door's `mcp.` host (`wrong_host`); `tls_cert` parses (`malformed`).
 
 ### 4.5 `kl.node.pair.accept` (on the node)
 
-The front door id is derived from `frontdoor_public_key`; `kid` and
-`frontdoor_id` equal it (`wrong_frontdoor`); the signature verifies
+Opens canonically and matches its shape (`malformed`); `frontdoor_public_key`
+parses as a raw Ed25519 key (`malformed`), and the front door id is derived from
+it; `alg = Ed25519` (`malformed`); `kid` and `frontdoor_id` equal that id
+(`wrong_frontdoor`); the signature verifies
 (`bad_signature`); `node_id` is this node (`wrong_node`); `nonce` echoes the
 request (`nonce_mismatch`).
 
@@ -151,6 +159,18 @@ this message's purpose (`challenge_wrong_purpose`), is unused
 (`challenge_reused`) and unexpired (`challenge_expired`). Only an accepted
 message uses the challenge up.
 
+### 4.7 `kl.relay.repin` (on the phone; ported as `verifyRepin`)
+
+Against the front door pinned from the `kl.pair` QR:
+
+1. the pinned front-door key parses as a raw Ed25519 key (`malformed`);
+2. the envelope opens canonically and matches its shape (`malformed`);
+3. `alg = Ed25519` (`malformed`);
+4. `kid` and `frontdoor_id` equal the pinned front door's id (`wrong_frontdoor`);
+5. the signature verifies against the pinned key (`bad_signature`);
+6. `new_spki` equals the SPKI of the certificate just received (`spki_mismatch`);
+7. `old_spki` equals the current pin (`old_pin_mismatch`).
+
 ## 5. What the phone does
 
 - **Builds** `kl.client.grant`, `kl.client.revoke`, `kl.node.enroll`,
@@ -165,14 +185,17 @@ message uses the challenge up.
 - **Re-pins** (§3.3.1 of the stage 4 spec) only when all hold: the envelope
   verifies against the front-door key pinned from the `kl.pair` QR (`node.key`
   where `node.id = frontdoor_id`), `new_spki` equals the SPKI of the
-  certificate just received, `old_spki` equals the current pin. Otherwise:
+  certificate just received, `old_spki` equals the current pin (§4.7). Any
+failure — including `wrong_frontdoor`, a re-pin signed by some other front
+door — leaves the pin unchanged and shows:
   "Relay certificate changed — scan a new relay code".
 
 ## 6. User codes
 
-The browser shows `XXX-XXX`. The phone accepts what the owner types, upper
-cases it, drops `-` and spaces, maps `O→0`, `I→1`, `L→1`, and refuses anything
-that is not then six alphabet characters.
+The browser shows `XXX-XXX`. The phone accepts what the owner types, refuses
+input longer than 64 characters, drops `-` and all whitespace, upper cases it,
+maps `O→0`, `I→1`, `L→1`, and refuses anything that is not then six alphabet
+characters.
 
 ## 7. Phone API additions (under `/v1`, approval-v1 §7 auth)
 

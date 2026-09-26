@@ -1,5 +1,5 @@
 {
-  "name": "grant-reject-scope-widened",
+  "name": "grant-reject-unknown-request",
   "consumers": [
     "node"
   ],
@@ -115,11 +115,11 @@
   "input": {
     "alg": "ES256",
     "kid": "d-3vmwrihhdbnit4oi",
-    "payload": "eyJjbGllbnRfaWQiOiJkY3JfSWtfMHptWGJscklOWi1ldV9IVE1IUSIsImNsaWVudF9uYW1lIjoiRXhhbXBsZSBDbGllbnQiLCJjb2RlX2NoYWxsZW5nZSI6ImoyTXpETzRmYkdwa2dMdGhlaEIyWGxPb0lvOVp6QWhDRC1mR2hyRzg5SzAiLCJkZWNpc2lvbiI6ImFwcHJvdmUiLCJkZXZpY2VfaWQiOiJkLTN2bXdyaWhoZGJuaXQ0b2kiLCJmcm9udGRvb3JfaWQiOiJrbC1udDRyaXRjZmo1a2VwcTN5IiwiZ3JhbnRfaWQiOiJncl9KUnVEdzJDdFc4UTAwSy0yREw4WFdRIiwibm9uY2UiOiI1OXFiR1RMUnhjR0lpOUVkZ2xudzFOaGVTZ3hKbHVWeDBUbW9zMFVwVS1nIiwicmVkaXJlY3RfdXJpIjoiaHR0cHM6Ly9jbGllbnQuZXhhbXBsZS5jb20vY2IiLCJyZXNvdXJjZSI6Imh0dHBzOi8vbWNwLmtsLmV4YW1wbGUuY29tL21jcCIsInNjb3BlcyI6W3sibWFjaGluZXMiOm51bGwsInNjb3BlIjoiZmxlZXQ6ZGVsZWdhdGUifSx7Im1hY2hpbmVzIjpudWxsLCJzY29wZSI6ImZsZWV0OnJlYWQifV0sInNpZ25lZF9hdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTMuMjAxWiIsInR5cGUiOiJrbC5jbGllbnQuZ3JhbnQiLCJ1c2VyX2NvZGUiOiJRN0tNMlgiLCJ2IjoxfQ",
-    "sig": "Q-dVf275txkswX4JEcl2nMXZSb3eVPIPGOMhsiBPEeXObr9-C3XBB3mDSTrHr0z4j6J_yOedrjAX26n_g9haxw"
+    "payload": "eyJjbGllbnRfaWQiOiJkY3JfSWtfMHptWGJscklOWi1ldV9IVE1IUSIsImNsaWVudF9uYW1lIjoiRXhhbXBsZSBDbGllbnQiLCJjb2RlX2NoYWxsZW5nZSI6ImoyTXpETzRmYkdwa2dMdGhlaEIyWGxPb0lvOVp6QWhDRC1mR2hyRzg5SzAiLCJkZWNpc2lvbiI6ImFwcHJvdmUiLCJkZXZpY2VfaWQiOiJkLTN2bXdyaWhoZGJuaXQ0b2kiLCJmcm9udGRvb3JfaWQiOiJrbC1udDRyaXRjZmo1a2VwcTN5IiwiZ3JhbnRfaWQiOiJncl8tZWZuekktR1pZZFFEWVAzdnh3Nnh3Iiwibm9uY2UiOiI1OXFiR1RMUnhjR0lpOUVkZ2xudzFOaGVTZ3hKbHVWeDBUbW9zMFVwVS1nIiwicmVkaXJlY3RfdXJpIjoiaHR0cHM6Ly9jbGllbnQuZXhhbXBsZS5jb20vY2IiLCJyZXNvdXJjZSI6Imh0dHBzOi8vbWNwLmtsLmV4YW1wbGUuY29tL21jcCIsInNjb3BlcyI6W3sibWFjaGluZXMiOm51bGwsInNjb3BlIjoiZmxlZXQ6cmVhZCJ9LHsibWFjaGluZXMiOm51bGwsInNjb3BlIjoiZmxlZXQ6cnVuIn1dLCJzaWduZWRfYXQiOiIyMDI2LTA5LTIzVDE4OjA0OjEzLjIwMVoiLCJ0eXBlIjoia2wuY2xpZW50LmdyYW50IiwidXNlcl9jb2RlIjoiUTdLTTJYIiwidiI6MX0",
+    "sig": "RdsJN7N16EJNAyoBnpkm0A0s_SpFG2ElEi7mufpXj3aXXI90rphWJA08Dja-HHHVRgtCMowiPbZXsJGapxmNhA"
   },
   "expect": {
     "accepted": false,
-    "reason": "invalid_scope"
+    "reason": "unknown_request"
   }
 }

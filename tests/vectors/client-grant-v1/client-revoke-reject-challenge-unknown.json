@@ -1,5 +1,5 @@
 {
-  "name": "grant-reject-scope-widened",
+  "name": "client-revoke-reject-challenge-unknown",
   "consumers": [
     "node"
   ],
@@ -80,46 +80,24 @@
       }
     ],
     "allow_test_keys": true,
-    "pending": {
-      "grant_id": "gr_JRuDw2CtW8Q00K-2DL8XWQ",
-      "client_id": "dcr_Ik_0zmXblrINZ-eu_HTMHQ",
-      "client_name": "Example Client",
-      "client_host": "client.example.com",
-      "redirect_uri": "https://client.example.com/cb",
-      "resource": "https://mcp.kl.example.com/mcp",
-      "code_challenge": "j2MzDO4fbGpkgLthehB2XlOoIo9ZzAhCD-fGhrG89K0",
-      "user_code": "Q7KM2X",
-      "requested_scopes": [
-        "fleet:read",
-        "fleet:run"
-      ],
-      "expires_at": "2026-09-23T18:09:11.201Z",
-      "claimed_by": "d-3vmwrihhdbnit4oi",
-      "used_nonces": []
-    },
-    "scopes": {
-      "supported": [
-        "fleet:delegate",
-        "fleet:read",
-        "fleet:run",
-        "fleet:unsafe"
-      ],
-      "requires": {
-        "fleet:unsafe": [
-          "fleet:run",
-          "fleet:delegate"
-        ]
+    "challenges": [
+      {
+        "challenge": "3ejcHnf1WJoKnEyBJ4k2tPIo2EsNE-EPoGm7KUFlbsQ",
+        "device_id": "d-3vmwrihhdbnit4oi",
+        "purpose": "revoke",
+        "expires_at": "2026-09-23T18:05:11.201Z",
+        "used": false
       }
-    }
+    ]
   },
   "input": {
     "alg": "ES256",
     "kid": "d-3vmwrihhdbnit4oi",
-    "payload": "eyJjbGllbnRfaWQiOiJkY3JfSWtfMHptWGJscklOWi1ldV9IVE1IUSIsImNsaWVudF9uYW1lIjoiRXhhbXBsZSBDbGllbnQiLCJjb2RlX2NoYWxsZW5nZSI6ImoyTXpETzRmYkdwa2dMdGhlaEIyWGxPb0lvOVp6QWhDRC1mR2hyRzg5SzAiLCJkZWNpc2lvbiI6ImFwcHJvdmUiLCJkZXZpY2VfaWQiOiJkLTN2bXdyaWhoZGJuaXQ0b2kiLCJmcm9udGRvb3JfaWQiOiJrbC1udDRyaXRjZmo1a2VwcTN5IiwiZ3JhbnRfaWQiOiJncl9KUnVEdzJDdFc4UTAwSy0yREw4WFdRIiwibm9uY2UiOiI1OXFiR1RMUnhjR0lpOUVkZ2xudzFOaGVTZ3hKbHVWeDBUbW9zMFVwVS1nIiwicmVkaXJlY3RfdXJpIjoiaHR0cHM6Ly9jbGllbnQuZXhhbXBsZS5jb20vY2IiLCJyZXNvdXJjZSI6Imh0dHBzOi8vbWNwLmtsLmV4YW1wbGUuY29tL21jcCIsInNjb3BlcyI6W3sibWFjaGluZXMiOm51bGwsInNjb3BlIjoiZmxlZXQ6ZGVsZWdhdGUifSx7Im1hY2hpbmVzIjpudWxsLCJzY29wZSI6ImZsZWV0OnJlYWQifV0sInNpZ25lZF9hdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTMuMjAxWiIsInR5cGUiOiJrbC5jbGllbnQuZ3JhbnQiLCJ1c2VyX2NvZGUiOiJRN0tNMlgiLCJ2IjoxfQ",
-    "sig": "Q-dVf275txkswX4JEcl2nMXZSb3eVPIPGOMhsiBPEeXObr9-C3XBB3mDSTrHr0z4j6J_yOedrjAX26n_g9haxw"
+    "payload": "eyJjaGFsbGVuZ2UiOiJ3NnA2d2V4RFp1RERHQ0VTSjVKU3QyT1BMLW9KdTAwcTJWRnMyS2wtenNNIiwiZGV2aWNlX2lkIjoiZC0zdm13cmloaGRibml0NG9pIiwiZnJvbnRkb29yX2lkIjoia2wtbnQ0cml0Y2ZqNWtlcHEzeSIsImdyYW50X2lkIjoiZ3JfSlJ1RHcyQ3RXOFEwMEstMkRMOFhXUSIsInNpZ25lZF9hdCI6IjIwMjYtMDktMjNUMTg6MDQ6MTIuMjAxWiIsInR5cGUiOiJrbC5jbGllbnQucmV2b2tlIiwidiI6MX0",
+    "sig": "gpFx25r8i9eQj3x9tsbddStvU8ZXuZN4ZDGqsd7xCLEKW8NAFTgQiuHijfm9FjgJZVnmX1hduwnYPtzpeax6Mg"
   },
   "expect": {
     "accepted": false,
-    "reason": "invalid_scope"
+    "reason": "unknown_challenge"
   }
 }
