@@ -45,6 +45,11 @@ function diskState(allowedRoots) {
 
 const STDIO_ORIGIN = Object.freeze({ kind: 'stdio', client: 'stdio-mcp', session: null });
 const ORIGIN_STRING_MAX = 200;
+// Names the phone shows for this node's own local callers. A front-door
+// client declares its client_name itself, so one of these (in any case)
+// would pass a remote call off as a local one; it is shown by client_id
+// instead (ruling T9-origin).
+const RESERVED_CLIENT_NAMES = Object.freeze(['desktop', 'stdio-mcp', 'king-louie']);
 
 function cut(text, max) {
   const chars = Array.from(String(text));
@@ -54,11 +59,18 @@ function cut(text, max) {
 // F3's approval origin is exactly { client, session, job_id } with strings
 // of at most 200 code points (checkOrigin); a front-door call is described
 // by its client's self-declared name and its MCP session (Deviation 12).
+// An empty or reserved client_name falls back to the client_id.
+function frontDoorClient(o) {
+  const name = typeof o.client_name === 'string' ? o.client_name.trim() : '';
+  if (name && !RESERVED_CLIENT_NAMES.includes(name.toLowerCase())) return o.client_name;
+  return o.client_id || 'frontdoor-client';
+}
+
 function approvalOrigin(origin, jobId = null) {
   const o = origin || STDIO_ORIGIN;
   if (o.kind === 'frontdoor') {
     return {
-      client: cut(o.client_name || o.client_id || 'frontdoor-client', ORIGIN_STRING_MAX),
+      client: cut(frontDoorClient(o), ORIGIN_STRING_MAX),
       session: o.mcp_session ? cut(o.mcp_session, ORIGIN_STRING_MAX) : null,
       job_id: jobId
     };
@@ -228,6 +240,7 @@ class FleetToolHandler {
     }
 
     if (toolName === 'delegate') {
+      this.auditInbound('delegate', { task: args.task, cwd: args.cwd === undefined ? null : args.cwd }, origin, null);
       this.assertThisMachine(args.machine);
       if (!this.delegateSessions) throw this.delegateUnavailable();
       return this.delegateSessions.start({
@@ -239,6 +252,7 @@ class FleetToolHandler {
     }
 
     if (toolName === 'send_to_job') {
+      this.auditInbound('send_to_job', { message: args.message }, origin, typeof args.job_id === 'string' ? args.job_id : null);
       const job = this.getJobOrThrow(args.job_id);
       if (job.kind !== 'delegate') {
         throw new ToolError('not_accepted', `not_accepted: job "${job.job_id}" is a runbook job and does not accept messages`);
@@ -250,6 +264,10 @@ class FleetToolHandler {
     if (toolName === 'get_job') {
       const job = this.getJobOrThrow(args.job_id);
       const { logs, ...rest } = job;
+      // A delegate job's result is the agent's reply: model-written text
+      // that is data, not instructions, like any job output (ruling
+      // T9-wrap). A runbook job's result keeps F3's shape.
+      if (job.kind === 'delegate' && typeof rest.result === 'string') rest.result = untrustedOutput([rest.result]);
       return { ...rest, output: untrustedOutput(logs), evidence: job.evidence || null };
     }
 
@@ -301,14 +319,20 @@ class FleetToolHandler {
   // refusal leaves nothing behind (§9); then the job starts in the
   // background and its id goes back at once (§8.2). An unsafe runbook waits
   // in awaiting_approval for a signed phone approval (fleet stage 3, §3.8).
+  // The request.inbound record for a tools/call, written before anything
+  // can refuse it.
+  auditInbound(name, params, origin, jobId) {
+    const inbound = auditOrigin(origin, jobId);
+    this.auditBestEffort('request.inbound', {
+      client: inbound.client, method: 'tools/call', name: typeof name === 'string' ? name : null,
+      params_sha256: paramsSha256(params), job_id: jobId, origin: inbound
+    });
+  }
+
   runRunbook(args, origin = STDIO_ORIGIN) {
     const name = args.runbook;
     const params = args.params || {};
-    const inbound = auditOrigin(origin, null);
-    this.auditBestEffort('request.inbound', {
-      client: inbound.client, method: 'tools/call', name: typeof name === 'string' ? name : null,
-      params_sha256: paramsSha256(params), job_id: null, origin: inbound
-    });
+    this.auditInbound(name, params, origin, null);
     this.assertThisMachine(args.machine, { required: true });
     const engine = this.runbookEngine;
     if (!engine) {
