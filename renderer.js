@@ -9902,6 +9902,299 @@ function initMeshHandlers() {
 }
 
 initMeshHandlers();
+/* --- Cases stage 4: questions across cases, presence and the contact policy
+   (docs/superpowers/specs/2026-09-23-cases-stage4-channels.md §3.8) --- */
+const questionsLog = createLogger('questions');
+const QUESTION_URGENCY_RANK = { high: 0, normal: 1, low: 2 };
+const CONTACT_LADDER_URGENCIES = ['low', 'normal', 'high'];
+let questionsLastInputAt = Date.now();
+let questionsLastHeartbeatAt = 0;
+let questionsRendering = null;
+
+function questionsEl(tag, className, text) {
+  const el = document.createElement(tag);
+  if (className) el.className = className;
+  if (text !== undefined) el.textContent = text;
+  return el;
+}
+
+function questionsButton(text, className = 'btn questions-btn') {
+  const b = questionsEl('button', className, text);
+  b.type = 'button';
+  return b;
+}
+
+function formatLadderState(state) {
+  if (!state) return '';
+  if (state.exhausted) return 'exhausted';
+  if (state.expired) return 'expired';
+  if (state.nextChannel && state.nextAt) {
+    const at = new Date(state.nextAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return `next: ${state.nextChannel} at ${at}`;
+  }
+  const last = (state.attempts || [])[state.attempts.length - 1];
+  return last ? `${last.channel} ${last.outcome}` : '';
+}
+
+// "present, telegram@30, email@240, email@0+digest" ⇄ ladder steps.
+function ladderToText(steps) {
+  return (steps || []).map((s) => `${s.channel}${s.afterMin ? `@${s.afterMin}` : ''}${s.digest ? '+digest' : ''}`).join(', ');
+}
+
+function textToLadder(text) {
+  return String(text || '').split(',').map((part) => part.trim()).filter(Boolean).map((part) => {
+    const m = /^([a-z-]+)(?:@(\d+))?(\+digest)?$/.exec(part);
+    if (!m) throw new Error(`"${part}" is not a step (use channel or channel@minutes)`);
+    return { channel: m[1], ...(m[2] ? { afterMin: Number(m[2]) } : {}), ...(m[3] ? { digest: true } : {}) };
+  });
+}
+
+function renderQuestionCard(q, ladderState, { refresh, showError }) {
+  const card = questionsEl('div', `questions-card questions-urgency-${q.urgency}`);
+  card.dataset.questionId = q.id;
+  card.dataset.caseId = q.caseId;
+  card.appendChild(questionsEl('div', 'questions-case', q.caseTitle || q.caseId));
+  card.appendChild(questionsEl('div', 'questions-text', q.text));
+  const answer = async (payload) => {
+    try {
+      const r = q.kind === 'briefing'
+        ? await window.electron.cases.acknowledgeBriefing({ caseId: q.caseId, questionId: q.id })
+        : await window.electron.cases.answerQuestion({ caseId: q.caseId, questionId: q.id, ...payload });
+      if (!r || r.ok === false) throw new Error(r?.error || 'The answer was not recorded.');
+      await refresh();
+    } catch (err) {
+      showError(err.message);
+    }
+  };
+  const actions = questionsEl('div', 'questions-actions');
+  if (q.kind === 'briefing') {
+    const ack = questionsButton('Got it');
+    ack.classList.add('questions-ack');
+    ack.addEventListener('click', () => answer({}));
+    actions.appendChild(ack);
+  } else {
+    for (const option of q.options || []) {
+      const b = questionsButton(option.label);
+      b.classList.add('questions-option');
+      b.dataset.optionId = option.id;
+      b.addEventListener('click', () => answer({ optionId: option.id }));
+      actions.appendChild(b);
+    }
+    const input = questionsEl('input', 'questions-input');
+    input.type = 'text';
+    input.placeholder = 'Answer…';
+    const send = questionsButton('Answer');
+    send.classList.add('questions-answer');
+    send.addEventListener('click', () => {
+      const text = input.value.trim();
+      if (text) answer({ text });
+    });
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') send.click(); });
+    actions.append(input, send);
+  }
+  card.appendChild(actions);
+  const ladderText = formatLadderState(ladderState);
+  if (ladderText) card.appendChild(questionsEl('div', 'questions-ladder', ladderText));
+  return card;
+}
+
+function renderAwayControls(policy, { save, showError }) {
+  const row = questionsEl('div', 'questions-away');
+  const awayActive = policy.away && Date.parse(policy.away.until) > Date.now();
+  if (awayActive) {
+    row.appendChild(questionsEl('span', 'questions-away-note', `Away (${policy.away.mode}) until ${new Date(policy.away.until).toLocaleString()}`));
+    const back = questionsButton("I'm back");
+    back.id = 'questions-away-clear';
+    back.addEventListener('click', () => save({ ...policy, away: null }).catch((err) => showError(err.message)));
+    row.appendChild(back);
+    return row;
+  }
+  const mode = questionsEl('select', 'questions-away-mode');
+  for (const m of ['email-only', 'in-app-only']) {
+    const o = questionsEl('option', '', m);
+    o.value = m;
+    mode.appendChild(o);
+  }
+  const until = questionsEl('input', 'questions-away-until');
+  until.type = 'datetime-local';
+  const go = questionsButton('Away');
+  go.id = 'questions-away-set';
+  go.addEventListener('click', () => {
+    const t = Date.parse(until.value);
+    if (!Number.isFinite(t) || t <= Date.now()) {
+      showError('Pick a time in the future.');
+      return;
+    }
+    save({ ...policy, away: { mode: mode.value, until: new Date(t).toISOString() } }).catch((err) => showError(err.message));
+  });
+  row.append(mode, until, go);
+  return row;
+}
+
+function renderContactPolicyEditor(policy, channels, { save, showError }) {
+  const details = questionsEl('details', 'questions-policy');
+  details.id = 'contact-policy-editor';
+  details.appendChild(questionsEl('summary', '', 'Contact policy'));
+  const inputs = {};
+  for (const u of CONTACT_LADDER_URGENCIES) {
+    const label = questionsEl('label', 'questions-policy-row', `${u} `);
+    const input = questionsEl('input', 'questions-policy-ladder');
+    input.type = 'text';
+    input.id = `contact-ladder-${u}`;
+    input.value = ladderToText(policy.ladders[u]);
+    label.appendChild(input);
+    details.appendChild(label);
+    inputs[u] = input;
+  }
+  const quiet = questionsEl('label', 'questions-policy-row', 'Quiet hours ');
+  const qStart = questionsEl('input', 'questions-policy-time');
+  qStart.type = 'time';
+  qStart.id = 'contact-quiet-start';
+  qStart.value = policy.quietHours ? policy.quietHours.start : '';
+  const qEnd = questionsEl('input', 'questions-policy-time');
+  qEnd.type = 'time';
+  qEnd.id = 'contact-quiet-end';
+  qEnd.value = policy.quietHours ? policy.quietHours.end : '';
+  quiet.append(qStart, document.createTextNode(' – '), qEnd);
+  details.appendChild(quiet);
+  const breakthrough = questionsEl('div', 'questions-policy-row', 'Break through quiet hours: ');
+  const through = {};
+  for (const u of CONTACT_LADDER_URGENCIES) {
+    const box = questionsEl('input');
+    box.type = 'checkbox';
+    box.id = `contact-breakthrough-${u}`;
+    box.checked = (policy.quietHours?.breakthrough || ['high']).includes(u);
+    const l = questionsEl('label', 'questions-policy-check', ` ${u} `);
+    l.prepend(box);
+    breakthrough.appendChild(l);
+    through[u] = box;
+  }
+  details.appendChild(breakthrough);
+  const digest = questionsEl('label', 'questions-policy-row', 'Daily digest ');
+  const dChannel = questionsEl('input', 'questions-policy-digest');
+  dChannel.type = 'text';
+  dChannel.id = 'contact-digest-channel';
+  dChannel.placeholder = 'off';
+  dChannel.value = policy.digest ? policy.digest.channel : '';
+  const dAt = questionsEl('input', 'questions-policy-time');
+  dAt.type = 'time';
+  dAt.id = 'contact-digest-at';
+  dAt.value = policy.digest ? policy.digest.at : '08:00';
+  digest.append(dChannel, document.createTextNode(' at '), dAt);
+  details.appendChild(digest);
+  const status = questionsEl('ul', 'questions-policy-channels');
+  for (const [id, s] of Object.entries(channels || {})) {
+    const text = s.configured ? `${id}: ready` : `${id}: ${s.enabled ? 'not configured' : 'off'}${s.reason ? ` (${s.reason})` : ''}`;
+    status.appendChild(questionsEl('li', s.configured ? 'is-ready' : 'is-off', text));
+  }
+  details.appendChild(status);
+  const saveBtn = questionsButton('Save contact policy');
+  saveBtn.id = 'contact-policy-save';
+  saveBtn.addEventListener('click', async () => {
+    try {
+      const next = { ...policy, ladders: {} };
+      for (const u of CONTACT_LADDER_URGENCIES) next.ladders[u] = textToLadder(inputs[u].value);
+      next.quietHours = qStart.value && qEnd.value
+        ? { start: qStart.value, end: qEnd.value, breakthrough: CONTACT_LADDER_URGENCIES.filter((u) => through[u].checked) }
+        : null;
+      next.digest = dChannel.value.trim() ? { channel: dChannel.value.trim(), at: dAt.value || '08:00' } : null;
+      await save(next);
+    } catch (err) {
+      showError(err.message);
+    }
+  });
+  details.appendChild(saveBtn);
+  return details;
+}
+
+async function renderQuestionsSection() {
+  const section = document.getElementById('questions-section');
+  if (!section || !window.electron?.cases?.questions || !window.electron?.contact) return;
+  if (questionsRendering) return questionsRendering;
+  questionsRendering = (async () => {
+    const [q, ladder, presence, policy] = await Promise.all([
+      window.electron.cases.questions({}).catch((err) => ({ ok: false, error: err.message })),
+      window.electron.contact.ladderState().catch(() => ({ ok: false })),
+      window.electron.contact.presenceStatus().catch(() => ({ ok: false })),
+      window.electron.contact.getPolicy().catch(() => ({ ok: false }))
+    ]);
+    const openPolicy = document.getElementById('contact-policy-editor')?.open === true;
+    section.replaceChildren();
+    const error = questionsEl('div', 'questions-error');
+    error.hidden = true;
+    const showError = (message) => {
+      error.textContent = message;
+      error.hidden = false;
+    };
+    const refresh = () => renderQuestionsSection();
+    const save = async (next) => {
+      const r = await window.electron.contact.setPolicy(next);
+      if (!r || r.ok === false) throw new Error(r?.error || 'The contact policy was not saved.');
+      await refresh();
+    };
+
+    const header = questionsEl('div', 'questions-header');
+    const dot = questionsEl('span', 'questions-presence-dot');
+    dot.id = 'questions-presence-dot';
+    const here = presence.ok ? presence.presentChannel : null;
+    dot.classList.add(here === 'in-app' ? 'is-here' : (here ? 'is-elsewhere' : 'is-away'));
+    dot.title = here ? `Reaching you on ${here}` : 'Not present on any channel';
+    header.append(dot, questionsEl('span', 'questions-title', 'Questions'));
+    section.appendChild(header);
+    if (policy.ok) section.appendChild(renderAwayControls(policy.policy, { save, showError }));
+
+    const list = questionsEl('div', 'questions-list');
+    list.id = 'questions-list';
+    const states = ladder.ok ? ladder.state : {};
+    const questions = (q.ok ? q.questions : [])
+      .slice()
+      .sort((a, b) => (QUESTION_URGENCY_RANK[a.urgency] ?? 1) - (QUESTION_URGENCY_RANK[b.urgency] ?? 1)
+        || String(b.createdAt).localeCompare(String(a.createdAt)));
+    for (const question of questions) {
+      list.appendChild(renderQuestionCard(question, states[`${question.caseId}/${question.id}`], { refresh, showError }));
+    }
+    if (!questions.length) list.appendChild(questionsEl('div', 'questions-empty', 'No open questions.'));
+    section.appendChild(list);
+    if (policy.ok) {
+      const editor = renderContactPolicyEditor(policy.policy, policy.channels, { save, showError });
+      editor.open = openPolicy;
+      section.appendChild(editor);
+    }
+    section.appendChild(error);
+    if (!q.ok && q.error) showError(q.error);
+  })().catch((err) => questionsLog.warn(`Questions section failed: ${err.message}`)).finally(() => {
+    questionsRendering = null;
+  });
+  return questionsRendering;
+}
+
+function sendPresenceHeartbeat(force = false) {
+  if (!window.electron?.contact?.heartbeat) return;
+  const now = Date.now();
+  if (!force && now - questionsLastHeartbeatAt < 30000) return;
+  questionsLastHeartbeatAt = now;
+  window.electron.contact.heartbeat({ focused: document.hasFocus(), lastInputAt: new Date(questionsLastInputAt).toISOString() })
+    .catch((err) => questionsLog.debug(`heartbeat failed: ${err.message}`));
+}
+
+function initQuestionsSection() {
+  if (!document.getElementById('questions-section')) return;
+  renderQuestionsSection();
+  if (window.electron?.cases?.onChanged) window.electron.cases.onChanged(() => renderQuestionsSection());
+  setInterval(() => renderQuestionsSection(), 60000);
+  window.addEventListener('focus', () => sendPresenceHeartbeat(true));
+  window.addEventListener('blur', () => sendPresenceHeartbeat(true));
+  for (const name of ['keydown', 'pointerdown']) {
+    window.addEventListener(name, () => {
+      questionsLastInputAt = Date.now();
+      sendPresenceHeartbeat(false);
+    }, { capture: true, passive: true });
+  }
+  setInterval(() => { if (document.hasFocus()) sendPresenceHeartbeat(true); }, 60000);
+  sendPresenceHeartbeat(true);
+}
+
+initQuestionsSection();
 
 /* --- Onboarding Wizard ------------------------------------- */
 const wizardState = { currentStep: 0, steps: [], data: {} };
