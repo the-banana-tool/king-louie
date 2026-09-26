@@ -1,7 +1,11 @@
 const { EventEmitter } = require('events');
 const https = require('https');
+const crypto = require('crypto');
+const net = require('net');
+const tls = require('tls');
 const WebSocket = require('ws');
 const { MeshIdentity } = require('./mesh-identity');
+const { deriveNodeId } = require('./node-identity');
 const { createLogger } = require('../logging');
 const log = createLogger('mesh');
 
@@ -108,6 +112,39 @@ function parsePreAuthFrame(data) {
   return parseHandshakeFrame(data, PRE_AUTH_SHAPES);
 }
 
+// §3.10 item 4: auth signatures cover challenge ‖ TLS exporter, so a signed
+// auth message is worthless on any other TLS session. Plain ws:// (desktop
+// LAN tests only) has no exporter and binds to nothing.
+const EXPORTER_LABEL = 'EXPORTER-king-louie-mesh-v1';
+
+function channelBinding(ws) {
+  const socket = ws && ws._socket;
+  if (!socket || typeof socket.exportKeyingMaterial !== 'function') return Buffer.alloc(0);
+  try {
+    return socket.exportKeyingMaterial(32, EXPORTER_LABEL);
+  } catch {
+    return Buffer.alloc(0);
+  }
+}
+
+function boundChallenge(challenge, binding) {
+  return Buffer.concat([Buffer.from(challenge), Buffer.from(binding)]);
+}
+
+function peerCertFingerprint(socket) {
+  try {
+    const cert = socket && typeof socket.getPeerX509Certificate === 'function' ? socket.getPeerX509Certificate() : null;
+    return cert ? crypto.createHash('sha256').update(cert.raw).digest('hex') : null;
+  } catch {
+    return null;
+  }
+}
+
+function timingSafeHexEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length || !/^[0-9a-f]*$/.test(a) || !/^[0-9a-f]*$/.test(b)) return false;
+  return crypto.timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
+}
+
 // `ws` enforces maxPayload while it reads a frame header, before it buffers
 // the payload. Until a socket authenticates its limit is PRE_AUTH_MAX_BYTES,
 // so an unauthenticated peer cannot make us hold even 1 MiB; promotion raises
@@ -150,6 +187,13 @@ class MeshTransport extends EventEmitter {
     // Fleet stage 4 §3.10 item 3 (Task 7 adds the TLS side): with it on,
     // `pair:request` is refused and only pinned client certificates connect.
     this.requireClientCert = config.requireClientCert === true;
+    if (this.requireClientCert && !this.useTls) {
+      throw new Error('requireClientCert needs TLS: plain ws:// is only allowed with requireClientCert: false');
+    }
+    // (fingerprintHex) → boolean: is this client certificate pinned? Without
+    // one, the trusted peers' pinned tlsFingerprints decide.
+    this.isPinned = typeof config.isPinned === 'function' ? config.isPinned : null;
+    this.attached = [];
     this.running = false;
     this.onPairingRequest = null; // set by MeshPairing to handle pair:request messages
   }
@@ -168,10 +212,16 @@ class MeshTransport extends EventEmitter {
       // TLS mode: HTTPS server → WSS
       this.httpsServer = https.createServer({
         cert: this.identity.tlsCert,
-        key: this.identity.tlsKey
+        key: this.identity.tlsKey,
+        requestCert: this.requireClientCert,
+        rejectUnauthorized: false
       });
 
-      this.server = new WebSocket.Server({ server: this.httpsServer, maxPayload: MAX_PAYLOAD_BYTES });
+      this.server = new WebSocket.Server({
+        server: this.httpsServer,
+        maxPayload: MAX_PAYLOAD_BYTES,
+        ...(this.requireClientCert ? { verifyClient: ({ req }) => this._pinnedSocket(req.socket) } : {})
+      });
 
       this.server.on('connection', (ws, req) => {
         this._handleInboundConnection(ws, req);
@@ -248,6 +298,9 @@ class MeshTransport extends EventEmitter {
       try { ws.terminate(); } catch { /* gone */ }
     }
     this.unauth.clear();
+
+    for (const wss of this.attached) await new Promise((resolve) => wss.close(() => resolve()));
+    this.attached = [];
 
     if (this.server) {
       await new Promise((resolve) => this.server.close(resolve));
@@ -363,7 +416,82 @@ class MeshTransport extends EventEmitter {
     });
   }
 
-  _initiateAuth(ws, address, port, timeout, resolve, reject, serverCertFingerprint) {
+  _pinnedSocket(socket, isPinned = this.isPinned) {
+    const fp = peerCertFingerprint(socket);
+    if (!fp) return false;
+    if (isPinned) return isPinned(fp) === true;
+    for (const p of this.trustedPeers.values()) if (p.tlsFingerprint && timingSafeHexEqual(p.tlsFingerprint, fp)) return true;
+    return false;
+  }
+
+  // §3.10 item 8: serve the mesh on a listener someone else owns (the front
+  // door's SNI router hands its `mesh.` sockets to `httpServer`). With
+  // requireClientCert, an unpinned or missing client certificate never gets
+  // as far as the WebSocket handshake.
+  attachServer(httpServer, { requireClientCert = this.requireClientCert, isPinned = this.isPinned, path: wsPath = '/mesh/v1' } = {}) {
+    const wss = new WebSocket.Server({ noServer: true, maxPayload: MAX_PAYLOAD_BYTES });
+    httpServer.on('upgrade', (req, socket, head) => {
+      let pathname = null;
+      try { pathname = new URL(req.url, 'http://mesh.invalid').pathname; } catch { pathname = null; }
+      if (pathname !== wsPath) {
+        socket.destroy();
+        return;
+      }
+      if (requireClientCert && (!socket.encrypted || !this._pinnedSocket(socket, isPinned))) {
+        socket.destroy();
+        return;
+      }
+      wss.handleUpgrade(req, socket, head, (ws) => this._handleInboundConnection(ws, req));
+    });
+    this.attached.push(wss);
+    return wss;
+  }
+
+  // §3.9: dial the front door with this node's certificate; the served
+  // certificate must be the pin before one application byte is written.
+  async connectPinned({ url, pinnedFingerprint, frontdoorId, servername = null, timeoutMs = AUTH_TIMEOUT_MS } = {}) {
+    const target = new URL(url);
+    if (target.protocol !== 'wss:') throw new Error('connectPinned needs a wss:// URL');
+    if (!/^[0-9a-f]{64}$/.test(String(pinnedFingerprint))) throw new Error('connectPinned needs a hex SHA-256 certificate pin');
+    const host = target.hostname.replace(/^\[|\]$/g, '');
+    const port = Number(target.port) || 443;
+    const sni = servername || (net.isIP(host) ? undefined : host);
+    const socket = await new Promise((resolve, reject) => {
+      const s = tls.connect({
+        host,
+        port,
+        ...(sni ? { servername: sni } : {}),
+        cert: this.identity.tlsCert,
+        key: this.identity.tlsKey,
+        rejectUnauthorized: false,
+        checkServerIdentity: () => undefined,
+        ALPNProtocols: ['http/1.1']
+      });
+      const timer = setTimeout(() => { s.destroy(); reject(new Error(`connection timeout to ${url}`)); }, timeoutMs);
+      s.once('secureConnect', () => {
+        clearTimeout(timer);
+        const served = peerCertFingerprint(s);
+        if (!served || !timingSafeHexEqual(served, pinnedFingerprint)) {
+          s.destroy();
+          reject(Object.assign(new Error(`frontdoor_key_mismatch: ${url} served ${served || 'no certificate'}, pinned ${pinnedFingerprint}`), { code: 'frontdoor_key_mismatch', served }));
+          return;
+        }
+        resolve(s);
+      });
+      s.once('error', (err) => { clearTimeout(timer); reject(err); });
+    });
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(url, { createConnection: () => socket, maxPayload: MAX_PAYLOAD_BYTES, perMessageDeflate: false });
+      const timeout = setTimeout(() => {
+        try { ws.terminate(); } catch { /* gone */ }
+        reject(new Error(`authentication timeout to ${url}`));
+      }, timeoutMs);
+      ws.on('open', () => this._initiateAuth(ws, null, null, timeout, resolve, reject, pinnedFingerprint, { expectNodeId: frontdoorId, frontDoorLink: true }));
+      ws.on('error', (err) => { clearTimeout(timeout); reject(err); });
+    });
+  }
+
+  _initiateAuth(ws, address, port, timeout, resolve, reject, serverCertFingerprint, extra = {}) {
     const challenge = this.identity.generateChallenge();
     // Unguessable: a stranger's auth:challenge must not be able to reuse it.
     const authId = `auth-${require('crypto').randomBytes(12).toString('hex')}`;
@@ -377,7 +505,9 @@ class MeshTransport extends EventEmitter {
       resolve,
       reject,
       direction: 'outbound',
-      serverCertFingerprint
+      serverCertFingerprint,
+      expectNodeId: extra.expectNodeId || null,
+      frontDoorLink: extra.frontDoorLink === true
     });
 
     ws.send(JSON.stringify({
@@ -462,6 +592,9 @@ class MeshTransport extends EventEmitter {
     if (this.unauth.size >= MAX_UNAUTH_SOCKETS) evictOldest(null);
     this.unauth.set(ws, ip);
     ws.once('close', () => this.unauth.delete(ws));
+    // The client certificate this socket presented (front door: pinned in
+    // TLS already); _respondToChallenge checks it against the peer's pin.
+    ws.klClientFingerprint = req && req.socket ? peerCertFingerprint(req.socket) : null;
     // Enforced by `ws` while it reads each frame header, before it buffers
     // the payload; _promoteToPeer raises it to MAX_PAYLOAD_BYTES.
     if (!setFrameLimit(ws, PRE_AUTH_MAX_BYTES)) {
@@ -534,37 +667,39 @@ class MeshTransport extends EventEmitter {
 
   _respondToChallenge(ws, msg) {
     const { authId, challenge, identity: remoteIdentity } = msg;
+    const reject = (reason) => {
+      try { ws.send(JSON.stringify({ type: 'auth:reject', reason })); } catch { /* gone */ }
+      try { ws.close(CLOSE_CODES.unauthenticated, reason); } catch { /* gone */ }
+    };
 
     const trusted = this.trustedPeers.get(remoteIdentity.peerId);
-    if (!trusted) {
-      ws.send(JSON.stringify({ type: 'auth:reject', reason: 'not_trusted' }));
-      closeQuietly(ws, CLOSE_CODES.unauthenticated, 'not_trusted');
-      return;
-    }
+    if (!trusted) return reject('not_trusted');
 
-    // Verify TLS fingerprint if we have one pinned
-    if (this.useTls && trusted.tlsFingerprint && remoteIdentity.tlsFingerprint) {
-      if (trusted.tlsFingerprint !== remoteIdentity.tlsFingerprint) {
-        log.warn(`TLS fingerprint mismatch for ${remoteIdentity.peerId} - possible impersonation`);
-        ws.send(JSON.stringify({ type: 'auth:reject', reason: 'tls_fingerprint_mismatch' }));
-        closeQuietly(ws, CLOSE_CODES.unauthenticated, 'tls_fingerprint_mismatch');
-        return;
+    if (this.requireClientCert) {
+      // The certificate actually presented must be the one pinned for this
+      // Ed25519 key (both pins tie together here, §4.17).
+      if (!trusted.tlsFingerprint || !timingSafeHexEqual(trusted.tlsFingerprint, ws.klClientFingerprint)) {
+        log.warn(`client certificate for ${remoteIdentity.peerId} is not the pinned one`);
+        return reject('tls_fingerprint_mismatch');
       }
+    } else if (this.useTls && trusted.tlsFingerprint && remoteIdentity.tlsFingerprint && trusted.tlsFingerprint !== remoteIdentity.tlsFingerprint) {
+      log.warn(`TLS fingerprint mismatch for ${remoteIdentity.peerId} - possible impersonation`);
+      return reject('tls_fingerprint_mismatch');
     }
 
-    const challengeBuffer = Buffer.from(challenge, 'hex');
-    const signature = this.identity.signChallenge(challengeBuffer);
-
+    const binding = channelBinding(ws);
+    const signature = this.identity.signChallenge(boundChallenge(Buffer.from(challenge, 'hex'), binding));
     const myChallenge = this.identity.generateChallenge();
 
     this.pendingAuth.set(authId, {
       ws,
       challenge: myChallenge,
+      binding,
       remoteIdentity,
       direction: 'inbound',
       timeout: setTimeout(() => {
         this.pendingAuth.delete(authId);
-        ws.close();
+        try { ws.close(CLOSE_CODES.unauthenticated, 'auth_timeout'); } catch { /* gone */ }
       }, AUTH_TIMEOUT_MS)
     });
 
@@ -651,11 +786,21 @@ class MeshTransport extends EventEmitter {
       trusted.tlsFingerprint = remoteIdentity.tlsFingerprint;
     }
 
-    const valid = MeshIdentity.verifyChallenge(
-      pending.challenge,
-      signature,
-      trusted.publicKey
-    );
+    // connectPinned: the authenticated key must be the front door's own.
+    if (pending.expectNodeId) {
+      let derived = null;
+      try { derived = deriveNodeId(trusted.publicKey); } catch { derived = null; }
+      if (derived !== pending.expectNodeId) {
+        pending.ws.close();
+        this.pendingAuth.delete(authId);
+        clearTimeout(pending.timeout);
+        pending.reject(new Error(`the peer key does not derive the pinned front door id ${pending.expectNodeId}`));
+        return;
+      }
+    }
+
+    const binding = channelBinding(pending.ws);
+    const valid = MeshIdentity.verifyChallenge(boundChallenge(pending.challenge, binding), signature, trusted.publicKey);
 
     if (!valid) {
       pending.ws.close();
@@ -665,9 +810,7 @@ class MeshTransport extends EventEmitter {
       return;
     }
 
-    const mySignature = this.identity.signChallenge(
-      Buffer.from(theirChallenge, 'hex')
-    );
+    const mySignature = this.identity.signChallenge(boundChallenge(Buffer.from(theirChallenge, 'hex'), binding));
 
     pending.ws.send(JSON.stringify({
       type: 'auth:complete',
@@ -692,7 +835,7 @@ class MeshTransport extends EventEmitter {
     }
 
     const valid = MeshIdentity.verifyChallenge(
-      pending.challenge,
+      boundChallenge(pending.challenge, pending.binding || Buffer.alloc(0)),
       signature,
       trusted.publicKey
     );
@@ -1063,4 +1206,15 @@ class MeshTransport extends EventEmitter {
   }
 }
 
-module.exports = { MeshTransport, DEFAULT_PORT, MAX_PAYLOAD_BYTES, PRE_AUTH_MAX_BYTES, CLOSE_CODES, parsePreAuthFrame };
+module.exports = {
+  MeshTransport,
+  DEFAULT_PORT,
+  MAX_PAYLOAD_BYTES,
+  PRE_AUTH_MAX_BYTES,
+  CLOSE_CODES,
+  EXPORTER_LABEL,
+  parsePreAuthFrame,
+  channelBinding,
+  boundChallenge,
+  peerCertFingerprint
+};

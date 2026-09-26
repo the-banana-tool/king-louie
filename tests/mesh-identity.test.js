@@ -210,6 +210,35 @@ describe('MeshIdentity', () => {
     }
   });
 
+  // Carry from Task 6: the openssl temp files were named from Date.now()
+  // alone, so two processes in the same millisecond wrote (and deleted) each
+  // other's key. Another process's files at the old names must survive, and
+  // ours must be gone afterwards.
+  it('openssl temp files are per process and call, and are removed', () => {
+    const fs = require('fs');
+    const os = require('os');
+    const path = require('path');
+    const frozen = 1700000000000;
+    const theirs = [`kl-mesh-key-${frozen}.pem`, `kl-mesh-cert-${frozen}.pem`].map((n) => path.join(os.tmpdir(), n));
+    for (const f of theirs) fs.writeFileSync(f, 'another process');
+    const realNow = Date.now;
+    Date.now = () => frozen;
+    let result;
+    try {
+      result = MeshIdentity.generateTlsCertificate('gpu-box');
+    } finally {
+      Date.now = realNow;
+      for (const f of theirs) {
+        const kept = fs.existsSync(f) && fs.readFileSync(f, 'utf8') === 'another process';
+        try { fs.unlinkSync(f); } catch { /* gone */ }
+        assert.ok(kept, `${path.basename(f)} (another process's file) was overwritten or deleted`);
+      }
+    }
+    assert.match(result.cert, /BEGIN CERTIFICATE/);
+    const ours = fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('kl-mesh-') && n.includes(`-${process.pid}-`));
+    assert.deepStrictEqual(ours, []);
+  });
+
   it('generates unique peer IDs for different keypairs', () => {
     const id1 = new MeshIdentity();
     const id2 = new MeshIdentity();

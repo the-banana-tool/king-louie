@@ -546,7 +546,9 @@ describe('sequence numbers and nonces', () => {
     const { a, b, aId, bId } = await linked();
     const peer = a.getPeer(bId.peerId);
     peer.tokens = 0; // an empty bucket: the next frame, garbage or not, is over the rate
-    peer.tokensAt = Date.now();
+    // Refilled from a minute ahead, so the bucket stays empty however long the
+    // frames take to arrive (5 ms at 200/s would refill one token under load).
+    peer.tokensAt = Date.now() + 60000;
     const closed = within(once(a, 'peerDisconnected'), 5000, 'the close');
     const ws = b.peers.get(aId.peerId).ws;
     for (let i = 0; i < 50; i += 1) ws.send('garbage');
@@ -713,5 +715,197 @@ describe('dialer socket options (fix round 1)', () => {
     assert.equal(pkg.dependencies.ws, '8.20.0');
     assert.equal(lock.packages['node_modules/ws'].version, '8.20.0');
     assert.equal(require('ws/package.json').version, '8.20.0');
+  });
+});
+
+// ── Task 7: TLS-bound authentication and the front-door listener ─────────────
+const https = require('https');
+const tls = require('tls');
+const { execFileSync } = require('child_process');
+const path = require('path');
+const { NodeIdentity } = require('../src/mesh/node-identity');
+const { channelBinding, boundChallenge } = require('../src/mesh/mesh-transport');
+
+async function frontDoorListener({ pinned }) {
+  const fd = new NodeIdentity({ nodeName: 'frontdoor' });
+  const server = https.createServer({ cert: fd.tlsCert, key: fd.tlsKey, requestCert: true, rejectUnauthorized: false });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const t = new MeshTransport({ identity: fd, listen: false, useTls: true, requireClientCert: true, isPinned: (fp) => pinned.has(fp) });
+  await t.start();
+  t.attachServer(server);
+  cleanups.push(async () => { await t.stop(); await new Promise((r) => server.close(r)); });
+  return { fd, t, url: `wss://127.0.0.1:${server.address().port}/mesh/v1` };
+}
+
+async function tlsNode(fd) {
+  const node = new NodeIdentity({ nodeName: 'gpu-box' });
+  const t = new MeshTransport({ identity: node, listen: false, useTls: true });
+  await t.start();
+  cleanups.push(() => t.stop());
+  t.addTrustedPeer(fd.peerId, fd.publicKey, { tlsFingerprint: fd.tlsFingerprint });
+  return { node, t };
+}
+
+describe('pinned front-door link', () => {
+  it('a pinned node authenticates over TLS with channel binding, both ends on the 60 s window', async () => {
+    const pinned = new Set();
+    const { fd, t: fdT, url } = await frontDoorListener({ pinned });
+    const { node, t } = await tlsNode(fd);
+    pinned.add(node.tlsFingerprint);
+    fdT.addTrustedPeer(node.peerId, node.publicKey, { tlsFingerprint: node.tlsFingerprint });
+    const peer = await t.connectPinned({ url, pinnedFingerprint: fd.tlsFingerprint, frontdoorId: fd.nodeId });
+    assert.equal(peer.peerId, fd.peerId);
+    await waitFor(() => fdT.getPeer(node.peerId), 'the front door to promote the node');
+    assert.equal(t.getPeer(fd.peerId).envelopeWindowMs, 60000);
+    assert.equal(fdT.getPeer(node.peerId).envelopeWindowMs, 60000);
+    const got = once(fdT, 'peerMessage');
+    t.send(fd.peerId, { hello: 1 });
+    assert.deepEqual((await got)[0].payload, { hello: 1 });
+  });
+
+  it('an unpinned client certificate is dropped before any frame is parsed', async () => {
+    const { fd, url } = await frontDoorListener({ pinned: new Set() });
+    const { t } = await tlsNode(fd);
+    const realParse = JSON.parse;
+    let parses = 0;
+    JSON.parse = function parse(...args) { parses += 1; return realParse.apply(this, args); };
+    try {
+      await assert.rejects(t.connectPinned({ url, pinnedFingerprint: fd.tlsFingerprint, frontdoorId: fd.nodeId }));
+    } finally {
+      JSON.parse = realParse;
+    }
+    assert.equal(parses, 0);
+  });
+
+  it('the pinned peer key must derive the front door id', async () => {
+    const pinned = new Set();
+    const { fd, t: fdT, url } = await frontDoorListener({ pinned });
+    const { node, t } = await tlsNode(fd);
+    pinned.add(node.tlsFingerprint);
+    fdT.addTrustedPeer(node.peerId, node.publicKey, { tlsFingerprint: node.tlsFingerprint });
+    await assert.rejects(t.connectPinned({ url, pinnedFingerprint: fd.tlsFingerprint, frontdoorId: 'kl-c2ubd6jjqumalzt5' }), /front door id/);
+  });
+
+  it('a certificate that is not the pin: frontdoor_key_mismatch, and not one application byte written', async () => {
+    const other = new NodeIdentity({ nodeName: 'impostor' });
+    let appBytes = 0;
+    const server = tls.createServer({ cert: other.tlsCert, key: other.tlsKey }, (socket) => {
+      socket.on('data', (d) => { appBytes += d.length; });
+      socket.on('error', () => {});
+    });
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    cleanups.push(() => new Promise((r) => server.close(r)));
+    const node = new NodeIdentity({ nodeName: 'gpu-box' });
+    const t = new MeshTransport({ identity: node, listen: false, useTls: true });
+    await t.start();
+    cleanups.push(() => t.stop());
+    const pin = crypto.randomBytes(32).toString('hex');
+    await assert.rejects(
+      t.connectPinned({ url: `wss://127.0.0.1:${server.address().port}/mesh/v1`, pinnedFingerprint: pin, frontdoorId: 'kl-c2ubd6jjqumalzt5' }),
+      (err) => err.code === 'frontdoor_key_mismatch' && err.served === other.tlsFingerprint
+    );
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(appBytes, 0);
+  });
+
+  it('a signature bound to one TLS session does not verify on another', async () => {
+    const pinned = new Set();
+    const { fd, url } = await frontDoorListener({ pinned });
+    const node = new NodeIdentity({ nodeName: 'gpu-box' });
+    pinned.add(node.tlsFingerprint);
+    const port = Number(new URL(url).port);
+    const bindings = [];
+    for (let i = 0; i < 2; i += 1) {
+      const ws = new WebSocket(url, { cert: node.tlsCert, key: node.tlsKey, rejectUnauthorized: false });
+      await once(ws, 'open');
+      bindings.push(channelBinding(ws));
+      ws.terminate();
+    }
+    assert.equal(bindings[0].length, 32);
+    assert.notDeepEqual(bindings[0], bindings[1]);
+    const challenge = crypto.randomBytes(32);
+    const sig = fd.signChallenge(boundChallenge(challenge, bindings[0]));
+    assert.equal(MeshIdentity.verifyChallenge(boundChallenge(challenge, bindings[0]), sig, fd.publicKey), true);
+    assert.equal(MeshIdentity.verifyChallenge(boundChallenge(challenge, bindings[1]), sig, fd.publicKey), false);
+    assert.ok(port > 0);
+  });
+
+  it('requireClientCert refuses plain ws:// and pair:request', async () => {
+    const id = new MeshIdentity({ displayName: 'x' });
+    assert.throws(() => new MeshTransport({ identity: id, listen: false, useTls: false, requireClientCert: true }), /requireClientCert needs TLS/);
+  });
+
+  it('a pinned client certificate that sends pair:request is closed 4001 pairing_off (M18)', async () => {
+    const pinned = new Set();
+    const { t: fdT, url } = await frontDoorListener({ pinned });
+    let pairingCalls = 0;
+    fdT.onPairingRequest = () => { pairingCalls += 1; };
+    const node = new NodeIdentity({ nodeName: 'gpu-box' });
+    pinned.add(node.tlsFingerprint);
+    const ws = new WebSocket(url, { cert: node.tlsCert, key: node.tlsKey, rejectUnauthorized: false });
+    ws.on('error', () => {});
+    await within(once(ws, 'open'), 5000, 'the pinned socket to open');
+    const closed = once(ws, 'close');
+    ws.send(JSON.stringify({ type: 'pair:request', pairingId: 'p-1', nonce: hex32(), proof: hex32(), identity: node.getPublicIdentity() }));
+    const [code, reason] = await within(closed, 5000, 'the front door to close the socket');
+    assert.equal(code, CLOSE_CODES.unauthenticated);
+    assert.equal(String(reason), 'pairing_off');
+    assert.equal(pairingCalls, 0);
+  });
+
+  it('a pinned certificate presented with another node key is refused (the two pins must match)', async () => {
+    const pinned = new Set();
+    const { fd, t: fdT, url } = await frontDoorListener({ pinned });
+    const { node, t } = await tlsNode(fd);
+    const other = new NodeIdentity({ nodeName: 'web-01' });
+    // The certificate is allowed at the TLS layer, but the key it authenticates
+    // with is pinned to a different certificate.
+    pinned.add(node.tlsFingerprint);
+    fdT.addTrustedPeer(node.peerId, node.publicKey, { tlsFingerprint: other.tlsFingerprint });
+    await assert.rejects(
+      t.connectPinned({ url, pinnedFingerprint: fd.tlsFingerprint, frontdoorId: fd.nodeId }),
+      /tls fingerprint mismatch/
+    );
+    assert.equal(fdT.getPeer(node.peerId), null);
+  });
+
+  it('its own listener with requireClientCert refuses a certificate no trusted peer pins', async () => {
+    const fd = new NodeIdentity({ nodeName: 'frontdoor' });
+    const fdT = new MeshTransport({ identity: fd, host: '127.0.0.1', port: 0, useTls: true, requireClientCert: true });
+    await fdT.start();
+    cleanups.push(() => fdT.stop());
+    const node = new NodeIdentity({ nodeName: 'gpu-box' });
+    const stranger = new NodeIdentity({ nodeName: 'web-01' });
+    fdT.addTrustedPeer(node.peerId, node.publicKey, { tlsFingerprint: node.tlsFingerprint });
+    const dial = (id) => new Promise((resolve) => {
+      const ws = new WebSocket(`wss://127.0.0.1:${fdT.port}`, { cert: id.tlsCert, key: id.tlsKey, rejectUnauthorized: false });
+      ws.on('open', () => { ws.terminate(); resolve('open'); });
+      ws.on('unexpected-response', (_req, res) => resolve(res.statusCode));
+      ws.on('error', () => resolve('error'));
+    });
+    assert.equal(await within(dial(stranger), 5000, 'the stranger dial'), 401);
+    assert.equal(await within(dial(node), 5000, 'the pinned dial'), 'open');
+  });
+});
+
+describe('service mode never loads mDNS or the remote-control mesh', () => {
+  it('requiring src/mesh loads neither mesh-discovery nor mesh-swarm', () => {
+    const out = execFileSync(process.execPath, ['-e', `
+      require('./src/mesh');
+      process.stdout.write(JSON.stringify(Object.keys(require.cache)));
+    `], { cwd: path.join(__dirname, '..'), env: { ...process.env, KING_LOUIE_LOG_LEVEL: 'silent' } }).toString();
+    const loaded = JSON.parse(out).map((p) => p.split(path.sep).join('/'));
+    for (const m of ['mesh-discovery', 'mesh-swarm', 'mesh-remote-control', 'mesh-channel']) {
+      assert.ok(!loaded.some((p) => p.endsWith(`src/mesh/${m}.js`)), `${m} was loaded`);
+    }
+  });
+
+  it('initializeMesh with frontDoor set keeps discovery off', async () => {
+    const { initializeMesh } = require('../src/mesh');
+    const store = { data: {}, get(k) { return this.data[k]; }, set(k, v) { this.data[k] = v; } };
+    const cipher = { encryptString: (s) => `enc:${s}`, decryptString: (s) => s.slice(4) };
+    const mesh = await initializeMesh({ store, cipher, frontDoor: true, settings: { mesh: { port: 0, host: '127.0.0.1', useTls: false, discovery: true } } });
+    cleanups.push(() => mesh.shutdown());
+    assert.equal(mesh.discovery.enabled, false);
   });
 });
