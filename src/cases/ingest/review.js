@@ -25,14 +25,24 @@ function parseValue(value) {
   return value;
 }
 
-const NUMERIC = /^-?[$€£¥]?\s*\d[\d,]*(\.\d+)?$/;
-const numbersIn = (s) => (String(s).replace(/[,$€£¥\s]/g, '').match(/-?\d+(?:\.\d+)?/g) || []).map(Number);
+// A number as text: an optional minus and currency sign, digits with commas
+// only as thousands groups, an optional decimal part, or a leading-dot
+// decimal. A leading zero before more digits ("007") is text, as the Ledger
+// tool reads it.
+const NUMBER_BODY = '(?:(?!0\\d)(?:\\d{1,3}(?:,\\d{3})+(?!\\d)|\\d+)(?:\\.\\d+)?|\\.\\d+)';
+const NUMERIC = new RegExp(`^-?[$€£¥]?\\s*${NUMBER_BODY}$`);
+// In a quote, a number starts where no digit, dot or comma touches it, and
+// a minus counts only when no digit or minus comes right before it ("10-5"
+// is 10 and 5). Separate numbers are never joined.
+const NUMBER_IN_TEXT = new RegExp(`(?:(?<![\\d-])-)?[$€£¥]?(?<![\\d.,])(?:${NUMBER_BODY})(?![\\d,]*\\d)`, 'g');
+const numberOf = (s) => Number(String(s).replace(/[,$€£¥\s]/g, ''));
+const numbersIn = (s) => (String(s).match(NUMBER_IN_TEXT) || []).map(numberOf);
 
 function valueInQuote(value, quote) {
   if (value === null || value === undefined || value === '') return true;
   const v = String(value).trim();
   if (NUMERIC.test(v)) {
-    const wanted = Number(v.replace(/[,$€£¥\s]/g, ''));
+    const wanted = numberOf(v);
     return numbersIn(quote).some((n) => n === wanted);
   }
   return normalizeForQuote(quote).includes(normalizeForQuote(v));
@@ -55,7 +65,7 @@ const valueKey = (v) => {
   if (typeof parsed === 'number') return `n:${parsed}`;
   if (parsed && typeof parsed === 'object') return `j:${JSON.stringify(parsed)}`;
   const s = String(parsed ?? '').trim();
-  return NUMERIC.test(s) ? `n:${Number(s.replace(/[,$€£¥\s]/g, ''))}` : `s:${normalizeForQuote(s)}`;
+  return NUMERIC.test(s) ? `n:${numberOf(s)}` : `s:${normalizeForQuote(s)}`;
 };
 
 // Active facts on the proposal's (subject, attr): conflicts carry a
@@ -79,6 +89,16 @@ const idNumber = (id) => {
   return m ? Number(m[1]) : 0;
 };
 
+function carriedRefusal(entry) {
+  const e = entry && typeof entry === 'object' ? entry : {};
+  const a = e.anchor && typeof e.anchor === 'object' ? e.anchor : null;
+  return {
+    stmt: oneLine(typeof e.stmt === 'string' ? e.stmt : '', 500),
+    anchor: a ? { page: Number.isSafeInteger(a.page) ? a.page : null, quote: oneLine(typeof a.quote === 'string' ? a.quote : '', QUOTE_MAX + 1) } : null,
+    reason: oneLine(typeof e.reason === 'string' ? e.reason : '', 200)
+  };
+}
+
 // record.proposals are the model's raw proposals; pages are [{ n, method, text }].
 // → the record with checked proposals (ids p-001…) and the refused ones.
 // A raw proposal is normalized again here, so only its known fields, capped
@@ -87,7 +107,9 @@ const idNumber = (id) => {
 function checkProposals(record, pages, facts) {
   const byPage = new Map(pages.map((p) => [p.n, p]));
   const proposals = [];
-  const refused = Array.isArray(record.refused) ? record.refused.slice(0, MAX_REFUSED) : [];
+  // Carried entries come from the record, which may have been edited: they
+  // are capped and one-lined again like new ones.
+  const refused = Array.isArray(record.refused) ? record.refused.slice(0, MAX_REFUSED).map(carriedRefusal) : [];
   let dropped = (Number.isSafeInteger(record.refusedDropped) && record.refusedDropped > 0 ? record.refusedDropped : 0)
     + (Array.isArray(record.refused) ? Math.max(0, record.refused.length - MAX_REFUSED) : 0);
   const refuse = (entry) => {

@@ -25,16 +25,39 @@ const pageMark = (n) => `\f[page ${n}]\n`;
 // A fresh id per prompt, so a document cannot know the line that closes it;
 // anything in the text that looks like a fence line is defused as well.
 const newFenceId = () => crypto.randomBytes(12).toString('hex');
-const FENCE_LIKE = /<(\s*\/?\s*untrusted-)/gi;
-const defuse = (text) => String(text ?? '').replace(FENCE_LIKE, '\u2039$1');
+// Invisible characters (not line breaks or tabs) are dropped first, so none
+// can hide inside a fence line. Then every '<', fullwidth '<' or '<' entity
+// that starts something reading as "untrusted-" once folded (spaces, a
+// slash and fullwidth letters allowed) loses its bracket.
+const HIDDEN = /[\u0000-\u0008\u000e-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g;
+const OPENER = /<|\uff1c|&lt;?|&#0*60;?|&#x0*3c;?/gi;
+const FENCE_AFTER = /^\s*\/?\s*untrusted-/;
+function defuse(text) {
+  const plain = String(text ?? '').replace(HIDDEN, '');
+  return plain.replace(OPENER, (opener, at) => {
+    const after = plain.slice(at + opener.length, at + opener.length + 40).normalize('NFKC').toLowerCase();
+    return FENCE_AFTER.test(after) ? '\u2039' : opener;
+  });
+}
 function fence(kind, text, id) {
   return `<untrusted-${kind} id="${id}">\n${defuse(text)}\n</untrusted-${kind} id="${id}">`;
 }
 
+// A cut at i that would split a surrogate pair moves back one unit.
+const cutAt = (s, i) => (i > 0 && i < s.length && s.charCodeAt(i - 1) >= 0xd800 && s.charCodeAt(i - 1) <= 0xdbff ? i - 1 : i);
+
+// Page text as it goes into a chunk: a form feed or vertical tab becomes a
+// space and a Unicode line or paragraph separator a newline, and a line that
+// starts with "[page " loses its bracket, so a page cannot forge another
+// page's marker.
+const pageBody = (text) => String(text)
+  .replace(/[\f\v]/g, ' ')
+  .replace(/[\u0085\u2028\u2029]/g, '\n')
+  .replace(/^([^\S\n]*)\[(\s*page\s)/gim, '$1\u2045$2');
+
 // → { chunks: [{ fromPage, toPage, text }], truncated: { fromPage, reason } | null }
 // Pages are read in order until maxExtractChars; a chunk ends at a page
-// boundary unless one page alone is longer than chunkChars. A form feed in
-// the page text becomes a space, so a page cannot forge another page's marker.
+// boundary unless one page alone is longer than chunkChars.
 function buildChunks(pages, { chunkChars = 12000, maxExtractChars = 400000 } = {}) {
   const readable = pages.filter((p) => (p.method === 'text' || p.method === 'ocr') && String(p.text || '').trim());
   const chunks = [];
@@ -46,21 +69,24 @@ function buildChunks(pages, { chunkChars = 12000, maxExtractChars = 400000 } = {
     current = null;
   };
   for (const page of readable) {
-    let block = `${pageMark(page.n)}${String(page.text).replace(/\f/g, ' ')}`;
+    let block = `${pageMark(page.n)}${pageBody(page.text)}`;
     if (total + block.length > maxExtractChars) {
       if (total > 0) {
         truncated = { fromPage: page.n, reason: 'maxExtractChars' };
         break;
       }
-      block = block.slice(0, maxExtractChars);
+      block = block.slice(0, cutAt(block, maxExtractChars));
       truncated = { fromPage: page.n, reason: 'maxExtractChars' };
     }
     total += block.length;
     if (block.length > chunkChars) {
       flush();
-      for (let at = 0; at < block.length; at += chunkChars) {
-        const piece = at === 0 ? block.slice(at, at + chunkChars) : `${pageMark(page.n)}${block.slice(at, at + chunkChars)}`;
+      for (let at = 0; at < block.length;) {
+        let end = cutAt(block, at + chunkChars);
+        if (end <= at) end = Math.min(block.length, at + 2);
+        const piece = at === 0 ? block.slice(at, end) : `${pageMark(page.n)}${block.slice(at, end)}`;
         chunks.push({ fromPage: page.n, toPage: page.n, text: piece });
+        at = end;
       }
     } else if (current && current.text.length + block.length > chunkChars) {
       flush();
