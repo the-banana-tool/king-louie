@@ -366,6 +366,12 @@ describe('applyProposalTo', () => {
       assert.throws(() => p.storeProposal(caseDir, { name: 'land-sale', isNew: false, patch, changedFiles: files, rationale: '', now: NOW }), { code: 'UNSAFE_PATCH', message: /name or version line/ });
       await assert.rejects(p.applyProposalTo({ caseDir, casesRoot, record: craft(caseDir, record, patch, { files }), repoPath: upstream, tmpRoot: tmp() }), { code: 'UNSAFE_PATCH', message: /name or version line/ });
     }
+    // Ruling T9-lines: a nested line with "name:" in it stays editable.
+    const nestedYaml = PLAYBOOK_YAML.replace('    text: What is the lowest price you would accept?', '    text: "Whose name: is on the deed, and what is the lowest price?"');
+    const nested = await diffAgainst(upstream, { 'playbook.yaml': nestedYaml });
+    assert.match(nested, /^\+ {4}text: "Whose name: is/m);
+    const stored = p.storeProposal(caseDir, { name: 'land-sale', isNew: false, patch: nested, changedFiles: files, rationale: '', baseVersion: '1.2.0', now: NOW });
+    assert.deepStrictEqual(p.checkPatch(`diff --git a/playbook.yaml b/playbook.yaml\nindex ${'a'.repeat(40)}..${'b'.repeat(40)} 100644\n--- a/playbook.yaml\n+++ b/playbook.yaml\n@@ -1 +1 @@\n-  name: a\n+  name: b\n`), ['playbook.yaml']);
     // A key spelled with a YAML escape passes the line rule; the applied
     // result in the throwaway clone is what refuses it.
     const escaped = await diffAgainst(upstream, { 'playbook.yaml': `${PLAYBOOK_YAML}"vers\\x69on": "9.9.9"\n` });
@@ -375,6 +381,10 @@ describe('applyProposalTo', () => {
     assert.strictEqual(fs.readFileSync(path.join(upstream, 'playbook.yaml'), 'utf8'), PLAYBOOK_YAML);
     assert.strictEqual((await git.runGit(upstream, ['status', '--porcelain'])).trim(), '');
     assert.deepStrictEqual(fs.readdirSync(tmpRoot), []);
+    // The nested edit stored above applies: the clone check sees the
+    // top-level name and version unchanged.
+    await p.applyProposalTo({ caseDir, casesRoot, record: stored, repoPath: upstream, tmpRoot: tmp() });
+    assert.strictEqual(fs.readFileSync(path.join(upstream, 'playbook.yaml'), 'utf8'), nestedYaml);
   });
 
   it('refuses a tampered patch', async (t) => {

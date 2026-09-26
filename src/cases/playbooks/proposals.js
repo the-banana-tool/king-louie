@@ -128,14 +128,14 @@ function checkMode(mode, p) {
   throw unsafe(`${show(p)} has mode ${mode}`);
 }
 
-// A playbook.yaml line that adds or removes a `name` or `version` key, in
-// the forms YAML allows for a key (block, flow, quoted, "? " complex key).
-// Over-broad on purpose: a changed line with "name:" or "version:" anywhere
-// in its text is refused too. The authoritative check is on the applied
-// result in the throwaway clone (checkResult).
-const IDENTITY_KEY_RE = /(?:^|[^A-Za-z0-9_-])(?:name|version)["']?\s*:/i;
-// A "? name" / "? version" complex key, whose ":" comes on the next line.
-const COMPLEX_KEY_RE = /^\s*\?.*(?:^|[^A-Za-z0-9_-])(?:name|version)(?:[^A-Za-z0-9_-]|$)/i;
+// A playbook.yaml line that adds or removes the TOP-LEVEL `name` or
+// `version` key (ruling T9-lines): unindented, the key optionally quoted,
+// or as an unindented "? name" / "? version" complex key. Nested keys and
+// text in steps or questions stay editable. The authoritative check is on
+// the applied result in the throwaway clone (checkResult), which also
+// catches keys spelled with YAML escapes, flow mappings and duplicates.
+const IDENTITY_KEY_RE = /^(["']?)(?:name|version)\1\s*:/;
+const COMPLEX_KEY_RE = /^\?\s+(["']?)(?:name|version)\1\s*(?::|$)/;
 
 // Parses a git patch line by line → [{ name, isNew, content }] in order
 // (content: the whole text of a created file, else null). Every line must
