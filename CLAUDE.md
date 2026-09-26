@@ -298,3 +298,57 @@ the e2e test), the owner check cannot tell them apart.
   `swift test` in `mobile/ios/KLProtocol` (macOS) and `../gradlew test` in `mobile/android/protocol`
   (JDK 17, no Android SDK); both read `tests/vectors/approval-v1`. `mobile/PRIVACY.md` says what the
   relay operator can see.
+
+## Cases: contact channels (stage 4)
+
+Spec: `docs/superpowers/specs/2026-09-23-cases-stage4-channels.md`.
+
+- Every open question in every case goes up a contact ladder
+  (`src/cases/ladder.js`): `settings.contactPolicy.ladders[urgency]`, or
+  `case.yaml` `channels` (`call` = `voice`). One process per cases root runs
+  it (`<casesRoot>/.contact.lock`); its state is `<dataDir>/contact/`
+  (`ladder.json`, `deliveries.json`, `inbox.jsonl`, `presence.json`).
+- Answers from any channel go through `ContactRouter.handleReply`
+  (`src/cases/contact.js`) and then `CaseRuntime.answerQuestion`. An adapter
+  sets `ownerProven` only after its own check: Telegram and Discord accept
+  only a private chat/DM with the contact owner id, and only from that
+  sender; email needs either an authenticated pass (topmost
+  `Authentication-Results`) or the thread's `[KL-<token>]` token from the
+  owner's address; SMS needs the owner number plus `#TOKEN`; voice and SMS
+  both go through the relay; the phone app needs a device-signed envelope
+  verified on the node. An explicit `#token` in a reply always beats
+  reply-to/thread correlation, so a stray in-reply-to match can't steal an
+  answer meant for a different question. Tokens are never rendered on a
+  delivery-only channel such as ntfy (`caps.expectsReplies !== true` drops
+  the reply footer), since there is nowhere for a reply to land.
+- Owner decision (M22): a question C2 marks `mcpAnswerable:false` — a
+  budget-grant, a direction question, or a commit-failed question — is only
+  answered in the app or from the owner's paired phone. Every other channel
+  (Telegram, Discord, email, SMS, voice) gets "Answer this in the app"
+  instead of options or buttons; approvals follow the same rule and are
+  never persisted to the data-dir inbox, so a busy case refuses them outright
+  rather than queuing them.
+- Case code that sends to a channel uses `ContactRouter.sendExternal`, which
+  runs C3's outbound gate for anyone but the owner and sends `rendered`.
+- Service mode: the owner identity and channel addresses come only from the
+  admin `service.json` `contact` block (`contact` joins `ADMIN_ONLY_KEYS`);
+  a data-dir `settings.contact` or a `channels.<ch>.contactOwnerUserId` is
+  ignored with a warning. Relay tokens and mailbox passwords live in the
+  vault under `contact.`; the `Vault` tool refuses any key starting
+  `contact.` and hides them from `list`. A contact host that fails to start
+  never fails `core.start()` — it logs the failure, leaves contact off, and
+  (outside service mode) raises one owner-visible warning; the rest of the
+  app keeps running. A host that is not currently holding the cases-root
+  lease (a passive instance) refuses an inbound relay push with 503 rather
+  than acting on it.
+- Known gaps, carried forward as PR notes rather than fixed here: a forged
+  email DSN can trigger an early bounce escalation; the stage-1 gap that a
+  local Bash command can rewrite `facts.jsonl` directly extends to a forged
+  `inbox.jsonl` line for an ordinary (non-approval) question, which grants
+  no more than that same class of local write access already does; and a
+  non-owner reply that resolves a live batch token is allowed to answer that
+  one batch (knowing a 30-bit token is treated as equivalent to knowing the
+  thread), which is a narrow oracle scoped to a single already-live question.
+- Tests use `tests/helpers/loopback-channel.js` and the fake relay/SMTP
+  helpers, never a real network; `KING_LOUIE_CONTACT_TICK_MS` shortens the
+  tick.

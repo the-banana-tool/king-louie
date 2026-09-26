@@ -2970,7 +2970,7 @@ body {
 .questions-header { display: flex; align-items: center; gap: 8px; font-weight: 600; color: var(--text-primary); }
 .questions-presence-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--text-faint); }
 .questions-presence-dot.is-here { background: var(--success); }
-.questions-presence-dot.is-elsewhere { background: #d9a400; }
+.questions-presence-dot.is-elsewhere { background: var(--warning); }
 .questions-away, .questions-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .questions-away-note, .questions-ladder, .questions-empty { font-size: 0.8em; color: var(--text-muted); }
 .questions-card { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; border: 1px solid var(--border-default); border-radius: var(--radius-sm); background: var(--bg-elevated); }
