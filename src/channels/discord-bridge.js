@@ -5,7 +5,7 @@ const {
   parseCallback, buttonRows, discordError, redact
 } = require('./bridge-contact');
 const {
-  Client, GatewayIntentBits, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags, MessageReferenceType
+  Client, GatewayIntentBits, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags, MessageReferenceType, ChannelType
 } = require('discord.js');
 const {
   splitMessage,
@@ -809,9 +809,25 @@ class DiscordChannel extends ChannelPlugin {
 
   // Only the contact owner, inside the contact DM, is owner-proven; a guild
   // channel never is.
-  async _contactProven({ guildId, channelId, senderId }) {
-    if (guildId) return false;
+  // The contact DM's id for a message in `channelId`. When the DM lookup
+  // fails (users.fetch / createDM, final review M4), a DM channel whose
+  // author is the contact owner is the bot's DM with the owner, so it stands
+  // in; anything else stays unmatched and the failure is logged at warn.
+  async _contactTarget({ guildId, channelId, channelType, senderId }) {
     const target = await this._contactDmId();
+    if (target || guildId) return target;
+    const owner = this._contactOwner();
+    if (owner && channelType === ChannelType.DM && String(senderId) === owner) {
+      log.warn('contact DM lookup failed; using the owner DM this message arrived in');
+      return String(channelId);
+    }
+    if (owner) log.warn('contact DM lookup failed; a reply there cannot be matched to a contact question');
+    return null;
+  }
+
+  async _contactProven({ guildId, channelId, senderId, channelType = null }) {
+    if (guildId) return false;
+    const target = await this._contactTarget({ guildId, channelId, channelType, senderId });
     return contactOwnerProven({ isPrivate: true, chatId: channelId, senderId, target, ownerUserId: this._contactOwner() });
   }
 
@@ -834,11 +850,12 @@ class DiscordChannel extends ChannelPlugin {
     }
     // Ask the router first, so an ordinary DM reply costs no DM lookup.
     if (replyTo && !this.contactHost.router.knows('discord', replyTo, { ref: true })) replyTo = null;
-    if (replyTo && (await this._contactDmId()) !== channelId) replyTo = null;
+    const senderId = String(message.author?.id || '');
+    const channelType = message.channel?.type ?? null;
+    if (replyTo && (await this._contactTarget({ guildId, channelId, channelType, senderId })) !== channelId) replyTo = null;
     const match = matchContactReply(this.contactHost.router, 'discord', text, replyTo);
     if (!match) return false;
-    const senderId = String(message.author?.id || '');
-    const ownerProven = !forwarded && await this._contactProven({ guildId, channelId, senderId });
+    const ownerProven = !forwarded && await this._contactProven({ guildId, channelId, senderId, channelType });
     await this._contactReply(match.correlationId, { text }, { senderId, chatId: channelId, ownerProven, deliveryRef: match.deliveryRef });
     if (ownerProven) return true;
     return swallowRefusedContact(this.allowlistManager, 'discord', senderId, guildId ? channelId : null);
@@ -851,7 +868,7 @@ class DiscordChannel extends ChannelPlugin {
       return;
     }
     const senderId = String(interaction.user?.id || interaction.member?.user?.id || '');
-    const ownerProven = await this._contactProven({ guildId: interaction.guildId || null, channelId: String(interaction.channelId), senderId });
+    const ownerProven = await this._contactProven({ guildId: interaction.guildId || null, channelId: String(interaction.channelId), senderId, channelType: interaction.channel?.type ?? null });
     await interaction.reply({ content: ownerProven ? 'Received' : 'Not allowed', ephemeral: true });
     await this._contactReply(parsed.token, { optionIndex: parsed.index }, { senderId, chatId: String(interaction.channelId), ownerProven });
   }

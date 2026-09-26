@@ -632,6 +632,26 @@ describe('contact adapter: Discord (fake client)', () => {
     await assert.rejects(d.bridge.sendContact(MESSAGE, META), (err) => err instanceof ContactDeliveryError && err.code === 'rate-limited');
   });
 
+  it('M4: when the DM lookup fails, the owner in a DM channel is still the contact owner; nobody else is', async () => {
+    const d = fakeDiscord();
+    const { ChannelType } = require('discord.js');
+    d.bridge.contactDm = null;
+    d.bridge.client.users.fetch = async () => { throw new Error('Discord is having a moment'); };
+    await d.bridge.handleMessageCreate(d.msg({ content: '#K7QD4M a', channel: { type: ChannelType.DM } }));
+    assert.strictEqual(d.calls[0].meta.ownerProven, true, 'the owner, in a DM');
+    assert.deepStrictEqual(d.routed, [], 'never sent down the agent path');
+    d.known.add('M-7');
+    await d.bridge.handleMessageCreate(d.msg({ content: 'b', reference: { messageId: 'm-7' }, channel: { type: ChannelType.DM } }));
+    assert.deepStrictEqual([d.calls[1].correlationId, d.calls[1].meta.ownerProven], ['m-7', true], 'a threaded reply still matches');
+    await d.bridge.handleMessageCreate(d.msg({ author: { id: '999', bot: false }, channelId: 'dm-999', content: '#K7QD4M a', channel: { type: ChannelType.DM } }));
+    assert.strictEqual(d.calls[2].meta.ownerProven, false, 'another user\'s DM is never the owner');
+    await d.bridge.handleMessageCreate(d.msg({ content: '#K7QD4M a', channelId: 'group-1', channel: { type: ChannelType.GroupDM } }));
+    assert.strictEqual(d.calls[3].meta.ownerProven, false, 'a group DM is not the contact DM');
+    const p = d.press({ channel: { type: ChannelType.DM } });
+    await d.bridge.handleInteractionCreate(p.interaction);
+    assert.strictEqual(d.calls[4].meta.ownerProven, true, 'a button in the owner DM');
+  });
+
   it('refuses a guild member and a second allowlisted user, and never routes their #TOKEN to the agent', async () => {
     const d = fakeDiscord();
     await d.bridge.handleMessageCreate(d.msg({ author: { id: '333', bot: false }, channelId: 'guild-channel-1', guildId: 'guild-1', content: '#K7QD4M 1 a' }));
