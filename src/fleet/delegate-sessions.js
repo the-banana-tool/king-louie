@@ -167,6 +167,14 @@ class DelegateSessions {
     return Boolean(session) && session.owner === sessionOwner(origin);
   }
 
+  // For NodeFleetService's fleet.job_update: true only for a session a
+  // front-door grant started, so the front door never hears of this node's
+  // own stdio sessions.
+  startedByFrontDoor(jobId) {
+    const session = this.sessions.get(jobId);
+    return Boolean(session) && typeof session.owner === 'string' && session.owner.startsWith('grant:');
+  }
+
   // Async so every refusal reaches the caller as a rejection (preflight M8).
   async start({ task, cwd = null, origin, request_id: requestId = null } = {}) {
     if (typeof task !== 'string' || !task.trim()) throw new ToolError('invalid_params', 'invalid_params: "task" is required');

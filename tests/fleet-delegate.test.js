@@ -454,6 +454,12 @@ describe('DelegateSessions', () => {
     assert.equal(t.sessions.ownsJob(jobId, STDIO_ORIGIN), true);
     assert.equal(t.sessions.ownsJob(jobId, null), true, 'no origin is the stdio caller');
     assert.equal(t.sessions.ownsJob(jobId, origin(['fleet:delegate'])), false);
+    assert.equal(t.sessions.startedByFrontDoor(jobId), false, 'the front door never hears of a stdio session');
+    assert.equal(t.sessions.startedByFrontDoor('job-unknown'), false);
+    script = [{ type: 'text', content: 'hi' }];
+    const remote = await t.sessions.start({ task: 'remote', origin: origin(['fleet:delegate']) });
+    await t.sessions.turns.get(remote.job_id);
+    assert.equal(t.sessions.startedByFrontDoor(remote.job_id), true);
     await assert.rejects(t.sessions.start({ task: 'x', origin: { ...origin(['fleet:delegate']), grant_id: '' } }), (err) => err.code === 'invalid_params');
   });
 
