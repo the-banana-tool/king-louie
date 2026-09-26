@@ -128,18 +128,31 @@ function checkMode(mode, p) {
   throw unsafe(`${show(p)} has mode ${mode}`);
 }
 
-// Parses a git patch line by line and returns the file names it touches, in
-// order. Every line must belong to a `diff --git` section: extended headers
-// are whitelisted, hunks are consumed by their counts, so no text between
-// sections (which git apply would read as a traditional diff) survives.
-// `newOnly`: every section must create its file.
-function checkPatch(patch, { newOnly = false } = {}) {
+// A playbook.yaml line that adds or removes a `name` or `version` key, in
+// the forms YAML allows for a key (block, flow, quoted, "? " complex key).
+// Over-broad on purpose: a changed line with "name:" or "version:" anywhere
+// in its text is refused too. The authoritative check is on the applied
+// result in the throwaway clone (checkResult).
+const IDENTITY_KEY_RE = /(?:^|[^A-Za-z0-9_-])(?:name|version)["']?\s*:/i;
+// A "? name" / "? version" complex key, whose ":" comes on the next line.
+const COMPLEX_KEY_RE = /^\s*\?.*(?:^|[^A-Za-z0-9_-])(?:name|version)(?:[^A-Za-z0-9_-]|$)/i;
+
+// Parses a git patch line by line → [{ name, isNew, content }] in order
+// (content: the whole text of a created file, else null). Every line must
+// belong to a `diff --git` section: extended headers are whitelisted, hunks
+// are consumed by their counts, so no text between sections (which git
+// apply would read as a traditional diff) survives. `newOnly`: every
+// section must create its file (a new playbook). Otherwise (a change
+// proposal) a created file must be .md, and no playbook.yaml line adding or
+// removing a name or version key is accepted: the version is the owner's
+// to bump.
+function parsePatch(patch, { newOnly = false } = {}) {
   if (typeof patch !== 'string') throw unsafe('it is not text');
   if (Buffer.byteLength(patch, 'utf8') > MAX_PATCH_BYTES) throw unsafe('it is too large');
   if (patch === '') throw unsafe('it changes no file');
   if (!patch.endsWith('\n')) throw unsafe('it does not end with a newline');
   const lines = patch.slice(0, -1).split('\n');
-  const names = [];
+  const sections = [];
   const folded = new Set();
   let i = 0;
   const notPart = () => unsafe(`line ${i + 1} is not part of a file diff`);
@@ -152,8 +165,7 @@ function checkPatch(patch, { newOnly = false } = {}) {
     if (a !== b) throw unsafe('renames and copies are not allowed');
     if (folded.has(a.toLowerCase())) throw unsafe(`${show(a)} appears twice`);
     folded.add(a.toLowerCase());
-    names.push(a);
-    if (names.length > MAX_FILES) throw unsafe(`it changes more than ${MAX_FILES} files`);
+    if (sections.length >= MAX_FILES) throw unsafe(`it changes more than ${MAX_FILES} files`);
     i += 1;
     let isNew = false;
     let sawIndex = false;
@@ -193,6 +205,22 @@ function checkPatch(patch, { newOnly = false } = {}) {
     if (modeChange) throw unsafe(`it changes the mode of ${show(a)}`);
     if (!sawIndex) throw unsafe(`${show(a)} has no full index line`);
     if (newOnly && !isNew) throw unsafe(`it changes an existing file ${show(a)}; a new playbook only adds files`);
+    if (!newOnly && isNew && !a.endsWith('.md')) throw unsafe(`it creates ${show(a)}; a new file in a playbook must be .md`);
+    const guardKeys = !newOnly && a === 'playbook.yaml';
+    const added = [];
+    let noFinalNewline = false;
+    const noteLine = (line, at) => {
+      const c = line[0];
+      if (c === '\\') {
+        // "\ No newline at end of file" after the last added line.
+        if (isNew) noFinalNewline = true;
+        return;
+      }
+      if (guardKeys && (c === '+' || c === '-') && (IDENTITY_KEY_RE.test(line.slice(1)) || COMPLEX_KEY_RE.test(line.slice(1)))) {
+        throw unsafe(`it adds or removes a name or version line in playbook.yaml (line ${at + 1}); the version is the owner's to bump`);
+      }
+      if (isNew && c === '+') added.push(line.slice(1));
+    };
     if (i < lines.length && lines[i].startsWith('--- ')) {
       const minus = isNew ? '--- /dev/null' : `--- a/${a}`;
       if (lines[i] !== minus) throw unsafe(`line ${i + 1}: expected "${minus}"`);
@@ -205,6 +233,7 @@ function checkPatch(patch, { newOnly = false } = {}) {
         let oldN = hm[2] === undefined ? 1 : Number(hm[2]);
         let newN = hm[4] === undefined ? 1 : Number(hm[4]);
         hunks += 1;
+        if (isNew && hunks > 1) throw unsafe(`the new file ${show(a)} has more than one hunk`);
         i += 1;
         while (oldN > 0 || newN > 0) {
           if (i >= lines.length) throw unsafe(`the hunk for ${show(a)} is truncated`);
@@ -213,16 +242,43 @@ function checkPatch(patch, { newOnly = false } = {}) {
           else if (c === '+') newN -= 1;
           else if (c !== '\\') throw unsafe(`line ${i + 1} does not match its hunk's counts`);
           if (oldN < 0 || newN < 0) throw unsafe(`line ${i + 1} does not match its hunk's counts`);
+          noteLine(lines[i], i);
           i += 1;
         }
-        if (i < lines.length && lines[i].startsWith('\\ ')) i += 1;
+        if (i < lines.length && lines[i].startsWith('\\ ')) {
+          noteLine(lines[i], i);
+          i += 1;
+        }
       }
       if (!hunks) throw unsafe(`${show(a)} has no hunk`);
     } else if (!isNew) {
       throw unsafe(`${show(a)} has no content change`);
     }
+    const content = isNew ? added.join('\n') + (added.length && !noFinalNewline ? '\n' : '') : null;
+    sections.push({ name: a, isNew, content });
   }
-  return names;
+  return sections;
+}
+
+// The file names a patch touches, in order (parsePatch's rules).
+function checkPatch(patch, options = {}) {
+  return parsePatch(patch, options).map((s) => s.name);
+}
+
+// Throws `err` unless the patch touches exactly the files `files` lists.
+function requireSameFiles(names, files, err) {
+  const a = [...names].sort();
+  const b = Array.isArray(files) ? [...files].sort() : [];
+  if (a.length !== b.length || a.some((n, k) => n !== b[k])) throw err;
+}
+
+// A new playbook's manifest, from the patch's created playbook.yaml, must
+// carry the proposed name and start at NEW_VERSION.
+function checkNewManifest(sections, name, fail) {
+  const manifest = sections.find((s) => s.name === 'playbook.yaml');
+  const parsed = manifest ? parsePlaybookYaml(manifest.content).value : null;
+  if (!isObject(parsed) || parsed.name !== name) throw fail(`its playbook.yaml does not name the playbook "${name}"`);
+  if (parsed.version !== NEW_VERSION) throw fail(`its playbook.yaml does not start at version "${NEW_VERSION}"`);
 }
 
 // ---- building -------------------------------------------------------------
@@ -426,8 +482,20 @@ function createFree(dir, base, ext, create) {
 // checked by the same rules listProposals reads it with.
 function storeProposal(caseDir, { name, isNew, patch, files, baseVersion = null, baseCommit = null, baseContentHash = null, changedFiles, rationale, factIds = [], turnId = null, now = new Date() }) {
   if (typeof name !== 'string' || !NAME_RE.test(name)) throw new ProposalError(`${show(name)} is not a valid playbook name.`);
-  checkPatch(patch, { newOnly: Boolean(isNew) });
-  if (isNew) checkFiles(files);
+  const sections = parsePatch(patch, { newOnly: Boolean(isNew) });
+  requireSameFiles(sections.map((s) => s.name), changedFiles, unsafe('it touches other files than the proposal lists'));
+  if (isNew) {
+    checkNewManifest(sections, name, unsafe);
+    // The package folder is written from the patch, so the two always
+    // agree; files, when given, must say the same.
+    if (files !== undefined) {
+      checkFiles(files);
+      const byName = new Map(sections.map((s) => [s.name, s.content]));
+      if (files.length !== sections.length || files.some((f) => byName.get(f.path) !== f.content)) {
+        throw unsafe('its files differ from the files the proposal lists');
+      }
+    }
+  }
   const existing = listProposals(caseDir);
   const next = existing.reduce((max, r) => Math.max(max, Number(r.id.slice(3))), 0) + 1;
   if (next > MAX_PROPOSALS) throw new ProposalError(`A case holds at most ${MAX_PROPOSALS} proposals.`);
@@ -454,7 +522,7 @@ function storeProposal(caseDir, { name, isNew, patch, files, baseVersion = null,
   let packageDir = null;
   if (isNew) {
     const folder = createFree(dir, name, '', (d) => fs.mkdirSync(d));
-    for (const f of files) fs.writeFileSync(path.join(dir, folder, f.path), f.content, { flag: 'wx' });
+    for (const s of sections) fs.writeFileSync(path.join(dir, folder, s.name), s.content, { flag: 'wx' });
     packageDir = `${PATCH_DIR}/${folder}`;
   }
   const record = {
@@ -520,21 +588,48 @@ function gitFailure(err, fallback) {
   return fallback;
 }
 
-// Checks in the order of spec §3.10, then git apply (3-way, tried first in a
-// throwaway clone, when the repository's version differs from the
-// proposal's base). → { appliedOver, rel }. `onProbeApplied` is a test seam
+// The applied playbook.yaml in the throwaway clone must still name the
+// playbook, and keep the owner's version (a change) or start at
+// NEW_VERSION (a new playbook). This is the authoritative form of
+// parsePatch's name/version line rule: it reads what git actually wrote,
+// so a key spelled with YAML escapes or a duplicate key is caught too.
+function checkResult(file, r, appliedOver) {
+  let parsed = null;
+  try {
+    const st = fs.lstatSync(file);
+    if (st.isFile() && st.size <= LIMITS.fileBytes) parsed = parsePlaybookYaml(fs.readFileSync(file, 'utf8')).value;
+  } catch { /* missing */ }
+  const want = r.newPlaybook ? NEW_VERSION : appliedOver;
+  if (!isObject(parsed) || parsed.name !== r.playbook || parsed.version !== want) {
+    throw new ProposalError(`The patch would change the playbook's name or version (the version is the owner's to bump); review ${r.patch} by hand.`, 'UNSAFE_PATCH');
+  }
+}
+
+// Checks in the order of spec §3.10, then git apply. The patch is always
+// applied first in a throwaway clone of the owner's repository (3-way when
+// the repository's version differs from the proposal's base), the result is
+// checked there, and only then is the owner's repository touched.
+// → { appliedOver, rel }. `casesRoot` is required: without it a repository
+// inside another case could not be refused. `onProbeApplied` is a test seam
 // run after the clone applied cleanly, before the owner's repository is
 // re-checked and touched.
-async function applyProposalTo({ caseDir, casesRoot = null, record, repoPath, tmpRoot = os.tmpdir(), timeoutMs = DEFAULT_TIMEOUT_MS, onProbeApplied = null }) {
+async function applyProposalTo({ caseDir, casesRoot, record, repoPath, tmpRoot = os.tmpdir(), timeoutMs = DEFAULT_TIMEOUT_MS, onProbeApplied = null }) {
+  if (typeof casesRoot !== 'string' || !path.isAbsolute(casesRoot) || isUncLike(casesRoot)) {
+    throw new ProposalError('applyProposalTo needs the absolute cases root, so no repository inside a case is written.', 'NO_CASES_ROOT');
+  }
   const { r, bytes } = readVerifiedPatch(caseDir, record);
-  const names = checkPatch(bytes.toString('utf8'), { newOnly: r.newPlaybook });
+  const sections = parsePatch(bytes.toString('utf8'), { newOnly: r.newPlaybook });
+  const names = sections.map((s) => s.name);
+  const mismatch = (why) => new ProposalError(`The proposal patch ${why}; review it by hand.`, 'TAMPERED');
+  requireSameFiles(names, r.files, mismatch('touches other files than its record lists'));
+  if (r.newPlaybook) checkNewManifest(sections, r.playbook, (why) => mismatch(`is not a new "${r.playbook}" playbook: ${why}`));
 
   const notRepo = () => new ProposalError(`${repoPath} is not inside a git repository.`, 'NOT_A_REPO');
   // A UNC path is refused on its text: touching it can send credentials.
   if (typeof repoPath !== 'string' || isUncLike(repoPath) || !path.isAbsolute(repoPath) || !fs.existsSync(repoPath)) throw notRepo();
   const real = fs.realpathSync.native(repoPath);
   if (isUncLike(real)) throw notRepo();
-  if (isInside(real, caseDir) || (casesRoot && fs.existsSync(casesRoot) && isInside(real, casesRoot))) {
+  if (isInside(real, caseDir) || isInside(real, casesRoot)) {
     throw new ProposalError(`${repoPath} is inside a case; apply to the playbook's own repository.`, 'INSIDE_CASE');
   }
   let top;
@@ -566,9 +661,10 @@ async function applyProposalTo({ caseDir, casesRoot = null, record, repoPath, tm
 
   const dirArgs = rel ? [`--directory=${rel}`] : [];
   const threeWay = !r.newPlaybook && appliedOver !== r.baseVersion;
+  const mode = threeWay ? ['--3way'] : [];
   const moved = new ProposalError(`Proposal was written against ${r.playbook} ${r.baseVersion}; the repository is at ${appliedOver} and the patch does not apply. Open ${r.patch} and merge by hand.`, 'DOES_NOT_APPLY');
   const plainFails = (err) => new ProposalError(`The patch does not apply: ${(err && (err.firstLine || err.message)) || 'unknown error'}`, 'DOES_NOT_APPLY');
-  const opts = { killTree: true, timeoutMs };
+  const doesNotApply = threeWay ? () => moved : plainFails;
 
   // The verified bytes go to a private copy, so the case file can't change
   // between the hash check and git reading it.
@@ -576,17 +672,9 @@ async function applyProposalTo({ caseDir, casesRoot = null, record, repoPath, tm
   try {
     const patchFile = path.join(work, 'proposal.patch');
     fs.writeFileSync(patchFile, bytes, { flag: 'wx' });
-    if (!threeWay) {
-      try {
-        await runGit(top, ['apply', '--check', ...dirArgs, '--', patchFile], opts);
-      } catch (err) {
-        throw gitFailure(err, plainFails(err));
-      }
-      await applyToOwner(top, ['apply', ...dirArgs, '--', patchFile], opts, repoPath, names, rel, plainFails);
-      return { appliedOver, rel };
-    }
-    // `git apply --3way --check` is not a dry run: it leaves conflicts
-    // behind. The 3-way merge is tried first in a throwaway clone.
+    // The patch is tried in a throwaway clone first: `git apply --3way
+    // --check` is not a dry run (it leaves conflicts behind), and the
+    // applied playbook.yaml is checked there (checkResult).
     const head = await headOf(top);
     const probe = path.join(work, 'repo');
     // One deadline for the whole probe: each git call gets what is left
@@ -602,20 +690,26 @@ async function applyProposalTo({ caseDir, casesRoot = null, record, repoPath, tm
     try {
       await runGit(work, ['clone', '-q', '--no-hardlinks', '--no-recurse-submodules', '--no-checkout', '--', top, probe], { ...left(), allowFile: true });
       if (head) await runGit(probe, ['checkout', '-q', '--detach', head], left());
-      await runGit(probe, ['apply', '--3way', ...dirArgs, '--', patchFile], left());
+      await runGit(probe, ['apply', ...mode, ...dirArgs, '--', patchFile], left());
       if (await unmerged(probe, left())) throw moved;
       left();
     } catch (err) {
-      throw gitFailure(err, moved);
+      throw gitFailure(err, doesNotApply(err));
     }
+    checkResult(path.join(probe, ...(rel ? rel.split('/') : []), 'playbook.yaml'), r, appliedOver);
     if (onProbeApplied) await onProbeApplied();
     // The clone showed the patch applies to `head`; the owner's repository
-    // must still be exactly there.
+    // must still be exactly there. An owner edit that lands after this
+    // status check and before git apply below is still safe: git apply
+    // checks each file's preimage (the patch's context and removed lines,
+    // and for --3way that the file matches the index) before it writes
+    // anything, so an edited file makes it fail without writing, and a file
+    // the owner edits that the patch does not touch is left alone.
     if ((await runGit(top, ['status', '--porcelain'])).trim()) throw dirty();
     if ((await headOf(top)) !== head) {
       throw new ProposalError(`${repoPath} changed while the proposal was checked; try again.`, 'DOES_NOT_APPLY');
     }
-    await applyToOwner(top, ['apply', '--3way', ...dirArgs, '--', patchFile], opts, repoPath, names, rel, () => moved);
+    await applyToOwner(top, ['apply', ...mode, ...dirArgs, '--', patchFile], { killTree: true, timeoutMs }, repoPath, names, rel, doesNotApply);
     return { appliedOver, rel };
   } finally {
     removeDir(work);

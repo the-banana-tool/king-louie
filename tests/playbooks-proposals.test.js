@@ -33,6 +33,37 @@ async function world(files = [{ path: 'steps.md', content: BETTER_STEPS }]) {
   return { upstream, base, casesRoot, caseDir, built, record };
 }
 
+// A patch as git writes it: `overrides` (name → text) written over a copy
+// of `pkgDir` (a git package), staged and diffed. Lets tests build patches
+// buildProposal would refuse, as a crafted case would carry.
+async function diffAgainst(pkgDir, overrides) {
+  const work = path.join(tmp(), 'work');
+  fs.cpSync(pkgDir, work, { recursive: true });
+  for (const [name, text] of Object.entries(overrides)) fs.writeFileSync(path.join(work, name), text);
+  await git.runGit(work, ['add', '-A']);
+  return git.runGit(work, ['diff', '--cached', '--full-index', '--no-ext-diff', '--no-textconv', '--no-renames']);
+}
+
+// A patch creating `files` in an empty repo.
+async function newFilesPatch(files) {
+  const work = tmp();
+  await git.runGit(work, ['init', '-q']);
+  for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(work, name), text);
+  await git.runGit(work, ['add', '-A']);
+  return git.runGit(work, ['diff', '--cached', '--full-index', '--no-ext-diff', '--no-textconv', '--no-renames']);
+}
+
+// A record as an imported case could carry it: `patch` written in the
+// proposals folder with a matching hash; `extra` overrides record fields.
+let craftSeq = 0;
+function craft(caseDir, record, patch, extra = {}) {
+  craftSeq += 1;
+  const rel = `artifacts/playbook-proposals/land-sale-2026-11-30-1500-${craftSeq + 1}.patch`;
+  fs.mkdirSync(path.join(caseDir, 'artifacts', 'playbook-proposals'), { recursive: true });
+  fs.writeFileSync(path.join(caseDir, rel), patch);
+  return { ...record, patch: rel, patchSha256: require('crypto').createHash('sha256').update(patch).digest('hex'), ...extra };
+}
+
 // Upstream moved to 1.3.0 with a non-conflicting change, so an apply takes
 // the 3-way path through the throwaway clone.
 async function movedWorld() {
@@ -292,6 +323,60 @@ describe('applyProposalTo', () => {
     assert.strictEqual(fs.readFileSync(path.join(upstream, 'steps.md'), 'utf8'), STEPS_MD);
   });
 
+  it('ruling T9-casesroot: an apply without an absolute cases root is refused', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const { upstream, caseDir, record } = await world();
+    for (const casesRoot of [undefined, null, 'cases', 42]) {
+      await assert.rejects(p.applyProposalTo({ caseDir, casesRoot, record, repoPath: upstream, tmpRoot: tmp() }), { code: 'NO_CASES_ROOT' });
+    }
+    assert.strictEqual(fs.readFileSync(path.join(upstream, 'steps.md'), 'utf8'), STEPS_MD);
+  });
+
+  it('ruling T9-files: the patch must touch exactly the listed files, at store and at apply', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const { upstream, caseDir, casesRoot, record } = await world();
+    const patch = await diffAgainst(upstream, { 'steps.md': BETTER_STEPS, 'notes.md': 'Extra.\n' });
+    assert.throws(() => p.storeProposal(caseDir, { name: 'land-sale', isNew: false, patch, changedFiles: ['steps.md'], rationale: '', now: NOW }), { code: 'UNSAFE_PATCH', message: /other files than the proposal lists/ });
+    await assert.rejects(p.applyProposalTo({ caseDir, casesRoot, record: craft(caseDir, record, patch), repoPath: upstream, tmpRoot: tmp() }), { code: 'TAMPERED', message: /other files than its record lists/ });
+    assert.strictEqual((await git.runGit(upstream, ['status', '--porcelain'])).trim(), '');
+  });
+
+  it('ruling T9-files: a change proposal creates only .md files, at store and at apply', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const { upstream, caseDir, casesRoot, record } = await world();
+    const patch = await diffAgainst(upstream, { 'steps.md': BETTER_STEPS, 'CMakeLists.txt': 'add_custom_target(x ALL)\n' });
+    const files = ['CMakeLists.txt', 'steps.md'];
+    assert.throws(() => p.storeProposal(caseDir, { name: 'land-sale', isNew: false, patch, changedFiles: files, rationale: '', now: NOW }), { code: 'UNSAFE_PATCH', message: /must be \.md/ });
+    await assert.rejects(p.applyProposalTo({ caseDir, casesRoot, record: craft(caseDir, record, patch, { files }), repoPath: upstream, tmpRoot: tmp() }), { code: 'UNSAFE_PATCH', message: /must be \.md/ });
+    assert.strictEqual(fs.existsSync(path.join(upstream, 'CMakeLists.txt')), false);
+  });
+
+  it('ruling T9-version: a name or version line in playbook.yaml is refused, at store and at apply', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const { upstream, caseDir, casesRoot, record } = await world();
+    const files = ['playbook.yaml'];
+    const variants = [
+      PLAYBOOK_YAML.replace('"1.2.0"', '"9.9.9"'),
+      PLAYBOOK_YAML.replace('name: land-sale', 'name: farm'),
+      `${PLAYBOOK_YAML}"version": "9.9.9"\n`,
+      `${PLAYBOOK_YAML}? version\n: "9.9.9"\n`
+    ];
+    for (const yamlText of variants) {
+      const patch = await diffAgainst(upstream, { 'playbook.yaml': yamlText });
+      assert.throws(() => p.storeProposal(caseDir, { name: 'land-sale', isNew: false, patch, changedFiles: files, rationale: '', now: NOW }), { code: 'UNSAFE_PATCH', message: /name or version line/ });
+      await assert.rejects(p.applyProposalTo({ caseDir, casesRoot, record: craft(caseDir, record, patch, { files }), repoPath: upstream, tmpRoot: tmp() }), { code: 'UNSAFE_PATCH', message: /name or version line/ });
+    }
+    // A key spelled with a YAML escape passes the line rule; the applied
+    // result in the throwaway clone is what refuses it.
+    const escaped = await diffAgainst(upstream, { 'playbook.yaml': `${PLAYBOOK_YAML}"vers\\x69on": "9.9.9"\n` });
+    assert.deepStrictEqual(p.checkPatch(escaped), ['playbook.yaml']);
+    const tmpRoot = tmp();
+    await assert.rejects(p.applyProposalTo({ caseDir, casesRoot, record: craft(caseDir, record, escaped, { files }), repoPath: upstream, tmpRoot }), { code: 'UNSAFE_PATCH', message: /would change the playbook's name or version/ });
+    assert.strictEqual(fs.readFileSync(path.join(upstream, 'playbook.yaml'), 'utf8'), PLAYBOOK_YAML);
+    assert.strictEqual((await git.runGit(upstream, ['status', '--porcelain'])).trim(), '');
+    assert.deepStrictEqual(fs.readdirSync(tmpRoot), []);
+  });
+
   it('refuses a tampered patch', async (t) => {
     if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
     const { upstream, caseDir, casesRoot, record } = await world();
@@ -376,18 +461,51 @@ describe('new-playbook proposals (R29)', () => {
     const built = await p.buildProposal({ name: 'dock-repair', isNew: true, files, tmpRoot: tmp() });
     assert.deepStrictEqual(built.changedFiles, ['playbook.yaml', 'steps.md']);
     assert.match(built.patch, /^new file mode 100644$/m);
-    const caseDir = tmp();
+    const casesRoot = tmp();
+    const caseDir = path.join(casesRoot, 'dock-case');
+    fs.mkdirSync(caseDir);
     const record = p.storeProposal(caseDir, { name: 'dock-repair', isNew: true, patch: built.patch, files, changedFiles: built.changedFiles, rationale: 'A method that worked', now: NOW });
     assert.strictEqual(record.newPlaybook, true);
     assert.strictEqual(record.packageDir, 'artifacts/playbook-proposals/dock-repair');
     assert.strictEqual(fs.readFileSync(path.join(caseDir, record.packageDir, 'steps.md'), 'utf8'), STEPS_MD);
+    assert.strictEqual(fs.readFileSync(path.join(caseDir, record.packageDir, 'playbook.yaml'), 'utf8'), NEW_YAML);
     const empty = tmp();
     await git.runGit(empty, ['init', '-q']);
-    const r = await p.applyProposalTo({ caseDir, record, repoPath: empty, tmpRoot: tmp() });
+    const r = await p.applyProposalTo({ caseDir, casesRoot, record, repoPath: empty, tmpRoot: tmp() });
     assert.strictEqual(r.appliedOver, null);
     assert.strictEqual(fs.readFileSync(path.join(empty, 'playbook.yaml'), 'utf8'), NEW_YAML);
     const full = await makeGitPackage(path.join(tmp(), 'dock-repair'), { 'playbook.yaml': NEW_YAML });
-    await assert.rejects(p.applyProposalTo({ caseDir, record, repoPath: full }), { message: `${full} already holds a playbook.` });
+    await assert.rejects(p.applyProposalTo({ caseDir, casesRoot, record, repoPath: full }), { message: `${full} already holds a playbook.` });
+  });
+
+  it('the package folder is written from the patch; files that differ from it are refused', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const files = [{ path: 'playbook.yaml', content: NEW_YAML }, { path: 'steps.md', content: STEPS_MD }];
+    const built = await p.buildProposal({ name: 'dock-repair', isNew: true, files, tmpRoot: tmp() });
+    const caseDir = tmp();
+    const store = (f) => p.storeProposal(caseDir, { name: 'dock-repair', isNew: true, patch: built.patch, files: f, changedFiles: built.changedFiles, rationale: '', now: NOW });
+    assert.throws(() => store([files[0], { path: 'steps.md', content: 'Something else.\n' }]), { code: 'UNSAFE_PATCH', message: /files differ/ });
+    assert.throws(() => store([files[0]]), { code: 'UNSAFE_PATCH', message: /files differ/ });
+    assert.strictEqual(fs.existsSync(path.join(caseDir, 'artifacts')), false);
+    const record = store(undefined);
+    assert.strictEqual(fs.readFileSync(path.join(caseDir, record.packageDir, 'steps.md'), 'utf8'), STEPS_MD);
+  });
+
+  it('a new playbook patch must name the playbook and start at 0.1.0, at store and at apply', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const casesRoot = tmp();
+    const caseDir = path.join(casesRoot, 'dock-case');
+    fs.mkdirSync(caseDir);
+    for (const [yamlText, re] of [[NEW_YAML.replace('name: dock-repair', 'name: pier-repair'), /does not name the playbook "dock-repair"/], [NEW_YAML.replace('"0.1.0"', '"9.0.0"'), /start at version "0\.1\.0"/]]) {
+      const patch = await newFilesPatch({ 'playbook.yaml': yamlText, 'steps.md': STEPS_MD });
+      assert.throws(() => p.storeProposal(caseDir, { name: 'dock-repair', isNew: true, patch, changedFiles: ['playbook.yaml', 'steps.md'], rationale: '', now: NOW }), { code: 'UNSAFE_PATCH', message: re });
+      const good = await newFilesPatch({ 'playbook.yaml': NEW_YAML, 'steps.md': STEPS_MD });
+      const record = craft(caseDir, p.storeProposal(caseDir, { name: 'dock-repair', isNew: true, patch: good, changedFiles: ['playbook.yaml', 'steps.md'], rationale: '', now: NOW }), patch);
+      const empty = tmp();
+      await git.runGit(empty, ['init', '-q']);
+      await assert.rejects(p.applyProposalTo({ caseDir, casesRoot, record, repoPath: empty, tmpRoot: tmp() }), { code: 'TAMPERED', message: re });
+      assert.deepStrictEqual(fs.readdirSync(empty), ['.git']);
+    }
   });
 
   it('a new-playbook record whose patch changes an existing file is refused', async (t) => {
