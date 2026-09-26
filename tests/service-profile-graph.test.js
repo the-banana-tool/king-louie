@@ -6,7 +6,8 @@ const os = require('os');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
-const FORBIDDEN = ['src/providers/', 'src/execution/agent-loop', 'src/tools/', 'src/browser/', 'src/channels/', 'src/mcp/', 'src/core/create-core', 'src/execution/safety-policy'];
+const FORBIDDEN = ['src/providers/', 'src/execution/agent-loop', 'src/tools/', 'src/browser/', 'src/channels/', 'src/mcp/', 'src/core/create-core', 'src/execution/safety-policy',
+  'src/mesh/mesh-discovery', 'src/mesh/mesh-swarm', 'src/mesh/mesh-remote-control', 'src/mesh/mesh-channel'];
 
 describe('runbook profile module graph', () => {
   it('never loads the agent stack, even after actually starting and stopping', () => {
@@ -30,6 +31,9 @@ describe('runbook profile module graph', () => {
       const loaded = JSON.parse(out).map((p) => path.relative(ROOT, p).split(path.sep).join('/'));
       assert.ok(loaded.includes('src/service/ports.js'), 'start() must have run (ports.js is only required inside it)');
       assert.ok(loaded.includes('src/approvals/service-wiring.js'), 'the runbook profile starts phone approvals');
+      assert.ok(loaded.includes('src/fleet/start.js'), 'the runbook profile hosts the fleet node (§3.7)');
+      assert.ok(loaded.includes('src/fleet/fleet-tools.js'));
+      assert.ok(!loaded.includes('src/fleet/delegate-sessions.js'), 'delegate sessions are agent-only');
       assert.ok(fs.existsSync(path.join(dataDir, 'key-check')), 'start() resolved the master key');
       const bad = loaded.filter((p) => FORBIDDEN.some((f) => p.startsWith(f)));
       assert.deepStrictEqual(bad, []);
@@ -67,6 +71,33 @@ describe('relay module graph', () => {
       assert.deepStrictEqual(bad, []);
     } finally {
       fs.rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('mcp module graph', () => {
+  it('mcp (no service running) never loads the agent core, on any profile', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-mcp-graph-'));
+    const dataDir = path.join(base, 'data');
+    fs.mkdirSync(dataDir, { recursive: true });
+    try {
+      const script = `
+        const { PassThrough } = require('stream');
+        const { runMcp } = require('./src/service/commands/mcp');
+        runMcp({ dataDir: process.env.KL_GRAPH_DATA_DIR, io: { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough() } })
+          .catch((err) => { process.stderr.write(String(err && err.stack || err)); process.exit(1); });
+        setTimeout(() => { process.stdout.write(JSON.stringify(Object.keys(require.cache))); process.exit(0); }, 1500);
+      `;
+      const out = execFileSync(process.execPath, ['-e', script], {
+        cwd: ROOT,
+        env: { ...process.env, KL_GRAPH_DATA_DIR: dataDir, KING_LOUIE_LOG_LEVEL: 'silent' }
+      }).toString();
+      const loaded = JSON.parse(out).map((p) => path.relative(ROOT, p).split(path.sep).join('/'));
+      assert.ok(loaded.includes('src/mcp/stdio-server.js'));
+      const bad = loaded.filter((p) => p.startsWith('src/core/') || p.startsWith('src/providers/') || p.startsWith('src/tools/') || p.startsWith('src/mesh/mesh-discovery'));
+      assert.deepStrictEqual(bad, []);
+    } finally {
+      fs.rmSync(base, { recursive: true, force: true });
     }
   });
 });

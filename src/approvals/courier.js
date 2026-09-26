@@ -196,6 +196,18 @@ class FileCourier extends EventEmitter {
   call(method, params = {}, { timeoutMs = 10000 } = {}) {
     const delivery = this.canDeliver();
     if (!delivery.ok) return Promise.reject(new CourierError('unavailable', delivery.reason));
+    return this._request(method, params, timeoutMs);
+  }
+
+  // Fleet stage 4 (R24): a fleet RPC to the running service's own handler.
+  // It needs the service, not a paired relay, so link.json is not consulted.
+  callService(method, params = {}, { timeoutMs = 30000 } = {}) {
+    const pid = readPidfile(this.dataDir);
+    if (!pid || !this.isAlive(pid)) return Promise.reject(new CourierError('unavailable', NOT_RUNNING));
+    return this._request(method, params, timeoutMs);
+  }
+
+  _request(method, params, timeoutMs) {
     const key = crypto.randomBytes(8).toString('hex');
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -308,6 +320,12 @@ class CourierPump {
     this.timer = null;
   }
 
+  // startFleetNode (fleet stage 4) installs the fleet handler here after
+  // startApprovals built the pump.
+  setRpcHandler(fn) {
+    this.rpcHandler = typeof fn === 'function' ? fn : null;
+  }
+
   // Verifies the envelope with the real open() + verifyEd25519, signed by
   // this node's own key and naming this node — the security boundary the
   // pump enforces before anything reaches the relay.
@@ -398,6 +416,11 @@ class CourierPump {
       return;
     }
     if (Object.prototype.hasOwnProperty.call(SIGNED_METHODS, method)) {
+      // A pump started only for fleet RPCs (no relay paired) forwards nothing.
+      if (!this.relayClient) {
+        this._reply(replyTo, { error: { code: 'relay_offline', message: 'no relay is paired with this node' } });
+        return;
+      }
       const message = this._nodeSigned(params.envelope, SIGNED_METHODS[method]);
       if (!message) {
         log.warn(`dropping ${method} from the outbox: not signed by this node`);

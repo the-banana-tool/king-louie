@@ -82,6 +82,7 @@ function loadProfile(profile) {
           nodeConfig, ports: servicePorts, profile: 'agent', serviceConfig: { audit }
         });
         let core;
+        let fleet = null;
         try {
           // createCore itself can throw synchronously (bad deps, a bad
           // phoneApprover.ttlMs, …), not just its start() — both go in the
@@ -119,7 +120,12 @@ function loadProfile(profile) {
           await core.whenListenersSettled();
           assertEnabledListenersBound(core, features);
           await desktopBridge.start({ core, ports: servicePorts, approvals });
+          // Fleet stage 4 §3.7: the runbook engine, JobManager, delegate
+          // sessions and the fleet link methods, hosted by the service.
+          const { startFleetNode } = require('../fleet/start');
+          fleet = await startFleetNode({ dataDir, nodeConfig, approvals, core, adminUid });
         } catch (err) {
+          if (fleet) await fleet.stop().catch(() => {});
           // Don't leave a half-started core (and its cron timers) behind.
           await desktopBridge.stop().catch(() => {});
           await core.shutdown().catch(() => {});
@@ -127,25 +133,33 @@ function loadProfile(profile) {
           throw err;
         }
         return {
-          // The bridge says bye and closes before the core goes down, and
-          // approvals (relay link, courier, audit ledger) stop last. Each
+          // The fleet node stops first (its link methods refuse and the
+          // courier handler is removed, so nothing is dispatched into a core
+          // that is shutting down), the bridge says bye and closes before the
+          // core goes down, and approvals (relay link, courier, audit
+          // ledger) stop last. Each
           // later step runs even if an earlier stop() throws (a wedged
           // dispatcher, say) — never skip one and leave cron timers, stores
           // or a live relay link running.
           stop: async () => {
             try {
-              await desktopBridge.stop();
+              if (fleet) await fleet.stop();
             } finally {
               try {
-                await core.shutdown();
+                await desktopBridge.stop();
               } finally {
-                await approvals.stop();
+                try {
+                  await core.shutdown();
+                } finally {
+                  await approvals.stop();
+                }
               }
             }
           },
           masterKeySource: servicePorts.masterKeySource,
           desktopBridge,
-          approvals
+          approvals,
+          fleet
         };
       }
     };
@@ -164,7 +178,26 @@ function loadProfile(profile) {
           dataDir, ...adminDirApprovalOptions({ adminUid, configDir }),
           nodeConfig, ports: servicePorts, profile: 'runbook', serviceConfig: { audit }
         });
-        return { stop: () => approvals.stop(), masterKeySource: servicePorts.masterKeySource, approvals };
+        let fleet;
+        try {
+          const { startFleetNode } = require('../fleet/start');
+          fleet = await startFleetNode({ dataDir, nodeConfig, approvals, adminUid });
+        } catch (err) {
+          await approvals.stop().catch(() => {});
+          throw err;
+        }
+        return {
+          stop: async () => {
+            try {
+              await fleet.stop();
+            } finally {
+              await approvals.stop();
+            }
+          },
+          masterKeySource: servicePorts.masterKeySource,
+          approvals,
+          fleet
+        };
       }
     };
   }

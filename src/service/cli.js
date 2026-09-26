@@ -289,37 +289,8 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
         // command runs until the process exits; undone if startup fails.
         const restoreConsole = routeConsoleToStderr(io.stderr);
         try {
-          return await withServiceCore(dataDir, io, async (core, ports) => {
-            const { loadNodeConfig } = require('./node-config');
-            const { RunbookEngine } = require('../runbooks/runbook-engine');
-            const StdioMcpServer = require('../mcp/stdio-server');
-            const { startMcpApprovals } = require('../approvals/service-wiring');
-
-            const nodeCfg = loadNodeConfig({ dataDir });
-            // Unsafe runbooks ask a phone through the running service (§3.9).
-            const approvals = await startMcpApprovals({ dataDir, nodeConfig: nodeCfg, ports });
-
-            const runbookEngine = new RunbookEngine({
-              runbooksDir: nodeCfg.runbooksDir,
-              allowedRoots: nodeCfg.policy.allowed_roots
-            });
-            // Loaded once, here: a bad runbook file fails the command at
-            // startup with its error on stderr, instead of the server coming
-            // up with a catalog that is silently empty.
-            runbookEngine.loadRunbooks();
-
-            const server = new StdioMcpServer({
-              nodeConfig: nodeCfg,
-              runbookEngine,
-              approver: approvals.approver,
-              auditLedger: approvals.auditLedger,
-              stdin: io.stdin,
-              stdout: io.stdout
-            });
-
-            server.start();
-            return new Promise(() => {}); // keep listening on stdio
-          });
+          const { runMcp } = require('./commands/mcp');
+          return await runMcp({ dataDir, io });
         } catch (err) {
           restoreConsole();
           throw err;
