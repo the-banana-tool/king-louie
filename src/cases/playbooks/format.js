@@ -419,15 +419,28 @@ function parseSteps(text, { executors = null } = {}) {
     }
     if (/^## /.test(line)) {
       finish();
-      const m = /^## (\d+)\.\s+(.+?)(?:\s+\{#([^}]*)\})?\s*$/.exec(line);
+      // A simple, unambiguous match with no nested quantifiers: the old
+      // `\s+(.+?)(?:\s+\{#([^}]*)\})?\s*$` had two greedy/lazy whitespace
+      // groups competing over the same run of spaces, which is catastrophic
+      // backtracking waiting for a heading with a lot of whitespace in it
+      // (a third party writes steps.md). The rest of the line is captured
+      // in one linear-time group, then trimmed and split by hand.
+      const m = /^## (\d{1,6})\.[ \t]+(.*)$/.exec(line);
       if (!m) {
         err(no, 'a step heading is "## <n>. <title>" with an optional {#id}');
         phase = 'skip';
         return;
       }
-      const id = m[3] !== undefined ? m[3] : slugify(m[2]);
-      if (m[3] !== undefined && !SLUG_RE.test(id)) err(no, `step id "${truncateForMessage(id)}" must be a lowercase slug`);
-      current = { n: Number(m[1]), title: m[2].trim(), id, executor: null, establishes: [], needs: [], optional: false, notes: [], line: no, seen: new Set() };
+      let rest = m[2].trimEnd();
+      const idMatch = /\{#([^}]*)\}$/.exec(rest);
+      let explicitId = null;
+      if (idMatch) {
+        explicitId = idMatch[1];
+        rest = rest.slice(0, idMatch.index).trimEnd();
+      }
+      const id = explicitId !== null ? explicitId : slugify(rest);
+      if (explicitId !== null && !SLUG_RE.test(id)) err(no, `step id "${truncateForMessage(id)}" must be a lowercase slug`);
+      current = { n: Number(m[1]), title: rest, id, executor: null, establishes: [], needs: [], optional: false, notes: [], line: no, seen: new Set() };
       phase = 'await-bullets';
       return;
     }

@@ -132,6 +132,19 @@ describe('parseSteps', () => {
     assert.match(messages(f.parseSteps('## Confirm\n', { executors }))[0], /a step heading is "## <n>\. <title>"/);
     assert.match(messages(f.parseSteps('# Only a title\n', { executors }))[0], /has no steps/);
   });
+
+  it('a heading with a lot of whitespace parses in linear time (no catastrophic backtracking)', () => {
+    // The old `\s+(.+?)(?:\s+\{#([^}]*)\})?\s*$` had two whitespace-hungry
+    // groups competing over the same run of spaces; a third party writing
+    // steps.md controls this text, so this must stay fast for any amount
+    // of whitespace, not just the small cases above.
+    const heading = `## 1. a${' '.repeat(60000)}b\n`;
+    const start = Date.now();
+    const r = f.parseSteps(heading, { executors });
+    assert.ok(Date.now() - start < 1000, 'parsing must not be exponential in the whitespace run');
+    assert.strictEqual(r.steps.length, 1);
+    assert.strictEqual(r.steps[0].title, `a${' '.repeat(60000)}b`);
+  });
 });
 
 describe('parseBriefRules', () => {
