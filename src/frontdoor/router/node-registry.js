@@ -300,18 +300,22 @@ class NodeRegistry extends EventEmitter {
     return record;
   }
 
-  // A verified kl.node.remove (challenge checked by the caller). The node
-  // leaves memory, and its link is closed, even when saving fails: that
-  // throws `save_failed`. Removing a node this process already removed saves
-  // if that is still needed and succeeds, so a retry reports success.
+  // A verified kl.node.remove (challenge checked by the caller) →
+  // { record, changed }. The node leaves memory, and its link is closed, even
+  // when saving fails: that throws `save_failed`, with `removedNow: true` when
+  // this call is the one that took the node out. Removing a node this process
+  // already removed saves if that is still needed and succeeds, so a retry
+  // reports success; `changed` says whether this call removed or saved
+  // anything (false for a removal already on disk).
   removeSigned(message) {
     const id = message && message.node_id;
     const r = this.byId(id);
     if (!r) {
       const earlier = typeof id === 'string' ? this.removals.get(id) : undefined;
       if (!earlier) throw err('unknown_node', 'no such node');
-      if (!earlier.saved) this._savePhoneOrThrow(earlier.record);
-      return earlier.record;
+      if (earlier.saved) return { record: earlier.record, changed: false };
+      this._savePhoneOrThrow(earlier.record);
+      return { record: earlier.record, changed: true };
     }
     if (r.source === 'console') throw err('console_record', `"${r.node_name}" was confirmed at the console; remove it there with frontdoor remove-node ${r.node_name}`);
     this.nodes.delete(r.node_id);
@@ -323,11 +327,20 @@ class NodeRegistry extends EventEmitter {
     }
     try {
       this._savePhoneOrThrow(r);
+    } catch (e) {
+      e.removedNow = true;
+      throw e;
     } finally {
-      this.emit('removed', { nodeId: r.node_id, reason: 'phone' });
-      this.emit('change');
+      // A listener that throws must not undo a good save or skip the caller's audit.
+      for (const [event, payload] of [['removed', { nodeId: r.node_id, reason: 'phone' }], ['change', undefined]]) {
+        try {
+          this.emit(event, payload);
+        } catch (e) {
+          log.error(`a '${event}' listener failed after removing ${r.node_id}: ${e.message}`);
+        }
+      }
     }
-    return r;
+    return { record: r, changed: true };
   }
 
   // A phone record this process removed (saved or not), else null.

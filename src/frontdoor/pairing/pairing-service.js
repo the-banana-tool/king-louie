@@ -31,6 +31,10 @@ const MAX_ATTEMPTS = 5;
 // untrusted input: a size cap before parsing, and at most this many entries.
 const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_CODES = 1000;
+// Live codes at once (one per node name). Issuing past it is refused
+// (`too_many_codes`) until one expires or is used; nothing is evicted, so a
+// flood never silently drops a code the owner is about to type.
+const MAX_LIVE_CODES = 100;
 const MAX_PAIRINGS = 1000;
 const MAX_NONCES = 16;
 const MAX_CAPABILITIES = 32;
@@ -91,7 +95,7 @@ function uniqueBy(list, key) {
 
 class PairingService {
   constructor({ file, registry, identity, approverStore, frontdoorHost, meshUrl, meshCertFingerprint, alerts = null, auditLedger = null,
-    notify = () => {}, now = Date.now, ttlMs = TTL_MS, maxAttempts = MAX_ATTEMPTS, writeFile = writeFileAtomic } = {}) {
+    notify = () => {}, now = Date.now, ttlMs = TTL_MS, maxAttempts = MAX_ATTEMPTS, maxLiveCodes = MAX_LIVE_CODES, writeFile = writeFileAtomic } = {}) {
     // Fail closed: every dependency that decides who may enrol is required.
     if (typeof file !== 'string' || file === '') throw new TypeError('PairingService needs its pairing.json path');
     if (!registry || typeof registry.byName !== 'function' || typeof registry.addSigned !== 'function') throw new TypeError('PairingService needs the node registry');
@@ -113,6 +117,7 @@ class PairingService {
     this.now = now;
     this.ttlMs = ttlMs;
     this.maxAttempts = maxAttempts;
+    this.maxLiveCodes = maxLiveCodes;
     this.writeFile = writeFile;
     this.codes = [];
     this.pairings = new Map();
@@ -149,8 +154,9 @@ class PairingService {
       this._quarantine('is not a valid pairing list');
       return;
     }
-    const codes = uniqueBy(data.codes.slice(0, MAX_CODES).map(cleanCode).filter(Boolean), 'node_name');
-    const pairings = uniqueBy(data.pairings.slice(0, MAX_PAIRINGS).map(cleanPairing).filter(Boolean), 'pairing_id');
+    // The newest entries (a file is written oldest first).
+    const codes = uniqueBy(data.codes.slice(-MAX_CODES).map(cleanCode).filter(Boolean), 'node_name');
+    const pairings = uniqueBy(data.pairings.slice(-MAX_PAIRINGS).map(cleanPairing).filter(Boolean), 'pairing_id');
     const dropped = (data.codes.length - codes.length) + (data.pairings.length - pairings.length);
     if (dropped > 0) log.warn(`${this.file}: dropped ${dropped} malformed or duplicate entr${dropped === 1 ? 'y' : 'ies'}`);
     this.codes = codes;
@@ -228,6 +234,15 @@ class PairingService {
     if (!isIssuer(by)) throw err('bad_issuer', 'a pairing code is issued by an enrolled phone (its device id) or by the console');
     if (confirm !== null && !CONFIRMS.includes(confirm)) throw err('bad_confirm', 'confirm is phone or console');
     this.sweep();
+    const t = this.now();
+    // A new code for a name replaces that name's code, so it never counts.
+    const live = this.codes.filter((c) => c.expires_at_ms >= t && c.node_name !== nodeName);
+    if (live.length >= this.maxLiveCodes) {
+      const soonest = Math.min(...live.map((c) => c.expires_at_ms));
+      throw Object.assign(err('too_many_codes', `at most ${this.maxLiveCodes} pairing codes can be live at once; wait for one to expire`), {
+        retryAfterS: Math.max(1, Math.ceil((soonest - t) / 1000))
+      });
+    }
     const words = [];
     for (let i = 0; i < CODE_WORDS; i += 1) words.push(WORDLIST[crypto.randomInt(WORDLIST.length)]);
     const code = words.join(' ');

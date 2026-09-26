@@ -34,11 +34,11 @@ const R = createFakePhone({ name: 'Revoked approver' });
 const cleanups = [];
 after(async () => { for (const c of cleanups.reverse()) await c(); });
 
-async function setup({ pairingStub = null } = {}) {
+async function setup({ pairingStub = null, allowTestKeys = true } = {}) {
   const store = await approverStoreWith([
     A.approverRecord(),
     R.approverRecord({ revokedAt: '2026-09-24T00:00:00.000Z', revokedBy: A.deviceId })
-  ], { allowTestKeys: true });
+  ], { allowTestKeys });
   cleanups.push(() => store.cleanup());
   const configDir = path.join(store.baseDir, 'config');
   const dataDir = path.join(store.baseDir, 'data');
@@ -83,6 +83,23 @@ async function setup({ pairingStub = null } = {}) {
     return { status: res.status, body: res.json };
   };
   return { store, configDir, dataDir, devices, alerts, audit, registry, pairing, mirror, challenges, ownLedger, base, call, online, setRepin: (e) => { repinEnvelope = e; } };
+}
+
+// Every route that acts on the front door, for the 403 tables.
+function frontDoorRoutes(nodeId, alertId) {
+  return [
+    ['POST', '/v1/pairing-codes', { node_name: 'web-01' }],
+    ['GET', '/v1/pairings/pending', null],
+    ['POST', `/v1/pairings/pr_${'a'.repeat(22)}/decision`, {}],
+    ['POST', `/v1/nodes/${nodeId}/remove`, {}],
+    ['GET', '/v1/nodes', null],
+    ['GET', `/v1/nodes/${nodeId}/history`, null],
+    ['GET', `/v1/nodes/${nodeId}/audit-status`, null],
+    ['GET', `/v1/nodes/${FD.nodeId}/history`, null],
+    ['GET', `/v1/nodes/${FD.nodeId}/audit-status`, null],
+    ['GET', '/v1/alerts', null],
+    ['POST', `/v1/alerts/${alertId}/ack`, null]
+  ];
 }
 
 function nodeKit(name = 'gpu-box') {
@@ -233,14 +250,43 @@ describe('front-door phone routes', () => {
     assert.equal(t.registry.byId(id), null, 'dropped in memory at once');
     assert.deepEqual(removedEvents, [id], 'the live link is closed even though the save failed');
     assert.ok(t.audit.some((e) => e.kind === 'frontdoor.node.removed' && e.data.node_id === id && e.data.saved === false));
+    const again = A.removeNode({ frontdoorId: FD.nodeId, nodeId: id, challenge: t.challenges.issue(A.deviceId, 'remove').challenge });
+    assert.equal((await t.call(A, 'POST', `/v1/nodes/${id}/remove`, again)).status, 503, 'still not saved');
+    assert.equal(t.audit.filter((e) => e.kind === 'frontdoor.node.removed').length, 1, 'a retry that removed nothing is not audited');
     t.registry._savePhone = save;
     t.registry.load();
     assert.equal(t.registry.byId(id), null, 'a reload does not bring the node back');
     const retry = A.removeNode({ frontdoorId: FD.nodeId, nodeId: id, challenge: t.challenges.issue(A.deviceId, 'remove').challenge });
     assert.equal((await t.call(A, 'POST', `/v1/nodes/${id}/remove`, retry)).status, 204);
+    assert.equal(t.audit.filter((e) => e.kind === 'frontdoor.node.removed').length, 1, 'the retry found the removal already saved by the reload');
     const fresh = new NodeRegistry({ configDir: t.configDir, dataDir: t.dataDir, approverStore: t.store, frontdoorId: FD.nodeId, adminUid: UID, geteuid: () => UID });
     fresh.load();
     assert.equal(fresh.byId(id), null, 'the removal is on disk');
+  });
+
+  it('repeated removals of a removed node answer 204 and are audited once', async () => {
+    const t = await setup();
+    const n = await enrolled(t);
+    const id = n.identity.nodeId;
+    for (let i = 0; i < 4; i += 1) {
+      const removal = A.removeNode({ frontdoorId: FD.nodeId, nodeId: id, challenge: t.challenges.issue(A.deviceId, 'remove').challenge });
+      assert.equal((await t.call(A, 'POST', `/v1/nodes/${id}/remove`, removal)).status, 204, `removal ${i}`);
+    }
+    assert.equal(t.audit.filter((e) => e.kind === 'frontdoor.node.removed').length, 1);
+  });
+
+  it('a throwing registry listener neither fails a saved removal nor skips its audit', async () => {
+    const t = await setup();
+    const n = await enrolled(t);
+    const id = n.identity.nodeId;
+    t.registry.on('removed', () => { throw new Error('listener boom'); });
+    t.registry.on('change', () => { throw new Error('listener boom'); });
+    const removal = A.removeNode({ frontdoorId: FD.nodeId, nodeId: id, challenge: t.challenges.issue(A.deviceId, 'remove').challenge });
+    assert.equal((await t.call(A, 'POST', `/v1/nodes/${id}/remove`, removal)).status, 204);
+    assert.ok(t.audit.some((e) => e.kind === 'frontdoor.node.removed' && e.data.node_id === id && e.data.saved === true));
+    const fresh = new NodeRegistry({ configDir: t.configDir, dataDir: t.dataDir, approverStore: t.store, frontdoorId: FD.nodeId, adminUid: UID, geteuid: () => UID });
+    fresh.load();
+    assert.equal(fresh.byId(id), null);
   });
 
   it('history: the node while it answers, else the mirror; audit-status; the front door serves its own', async () => {
@@ -317,19 +363,7 @@ describe('front-door phone routes', () => {
     const decideCalls = [];
     const decide = t.pairing.decide.bind(t.pairing);
     t.pairing.decide = (...a) => { decideCalls.push(a); return decide(...a); };
-    const routes = [
-      ['POST', '/v1/pairing-codes', { node_name: 'web-01' }],
-      ['GET', '/v1/pairings/pending', null],
-      ['POST', `/v1/pairings/pr_${'a'.repeat(22)}/decision`, {}],
-      ['POST', `/v1/nodes/${n.identity.nodeId}/remove`, {}],
-      ['GET', '/v1/nodes', null],
-      ['GET', `/v1/nodes/${n.identity.nodeId}/history`, null],
-      ['GET', `/v1/nodes/${n.identity.nodeId}/audit-status`, null],
-      ['GET', `/v1/nodes/${FD.nodeId}/history`, null],
-      ['GET', `/v1/nodes/${FD.nodeId}/audit-status`, null],
-      ['GET', '/v1/alerts', null],
-      ['POST', `/v1/alerts/${alert.id}/ack`, null]
-    ];
+    const routes = frontDoorRoutes(n.identity.nodeId, alert.id);
     for (const [who, phone] of [['not an approver', C], ['revoked approver', R]]) {
       for (const [method, p, body] of routes) {
         const r = await t.call(phone, method, p, body);
@@ -339,6 +373,34 @@ describe('front-door phone routes', () => {
     assert.equal(decideCalls.length, 0);
     assert.equal(t.alerts.list()[0].acked, false);
     assert.ok(t.registry.byId(n.identity.nodeId));
+  });
+
+  it('refuses 403 to an approver whose key is a published test key when the store does not allow test keys', async () => {
+    const t = await setup({ allowTestKeys: false });
+    const node = testNodeIdentity({ nodeName: 'gpu-box' });
+    for (const id of [node.nodeId, FD.nodeId]) t.devices.setNodeState(A.deviceId, id, 'active');
+    const alert = t.alerts.raise('audit_gap', { subject: 'node:x' });
+    for (const [method, p, body] of frontDoorRoutes(node.nodeId, alert.id)) {
+      const r = await t.call(A, method, p, body);
+      assert.deepEqual([r.status, r.body && r.body.error], [403, 'forbidden'], `test key: ${method} ${p}`);
+    }
+    assert.equal(t.alerts.list()[0].acked, false);
+  });
+
+  it('pairing codes have their own rate, and a full set of live codes is refused with retry_after', async () => {
+    const t = await setup();
+    t.pairing.maxLiveCodes = 2;
+    assert.equal((await t.call(A, 'POST', '/v1/pairing-codes', { node_name: 'n-1' })).status, 200);
+    assert.equal((await t.call(A, 'POST', '/v1/pairing-codes', { node_name: 'n-2' })).status, 200);
+    const full = await t.call(A, 'POST', '/v1/pairing-codes', { node_name: 'n-3' });
+    assert.deepEqual([full.status, full.body.error], [429, 'too_many_codes']);
+    assert.ok(full.body.retry_after >= 1);
+    t.pairing.maxLiveCodes = 100;
+    const statuses = [];
+    for (let i = 4; i <= 11; i += 1) statuses.push((await t.call(A, 'POST', '/v1/pairing-codes', { node_name: `n-${i}` })).status);
+    // 3 calls above + 7 here fill the route's 10 a minute; the rest are refused.
+    assert.deepEqual(statuses, [200, 200, 200, 200, 200, 200, 200, 429]);
+    assert.equal((await t.call(A, 'GET', '/v1/pairings/pending')).status, 200, 'other routes keep the device budget');
   });
 
   it('validates route ids before any lookup', async () => {

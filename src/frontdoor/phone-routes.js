@@ -70,6 +70,8 @@ function registerFrontDoorRoutes(phoneApi, { approverStore, devices, nodeHub, re
 
   phoneApi.registerRoute('POST', '/v1/pairing-codes', {
     auth: 'device',
+    // Its own budget: each call writes pairing.json and an audit entry.
+    rate: { perMin: 10 },
     handler: async (req, ctx) => {
       requireApprover(ctx);
       const body = ctx.body;
@@ -78,6 +80,7 @@ function registerFrontDoorRoutes(phoneApi, { approverStore, devices, nodeHub, re
         return { body: await pairing.issue(nodeName, { by: ctx.deviceId }) };
       } catch (err) {
         if (err.code === 'bad_node_name') throw new ApiError(400, 'bad_node_name', err.message);
+        if (err.code === 'too_many_codes') throw new ApiError(429, 'too_many_codes', err.message, { retry_after: err.retryAfterS || 60 });
         throw err;
       }
     }
@@ -127,15 +130,17 @@ function registerFrontDoorRoutes(phoneApi, { approverStore, devices, nodeHub, re
       if (!r.ok) throw new ApiError(400, r.reason, `the removal was refused: ${r.reason}`);
       // A save that fails still leaves the node removed in memory (its link
       // is closed), so the audit entry is written either way; the phone sees
-      // a retryable error and its retry saves the removal.
-      let removed = null;
+      // a retryable error and its retry saves the removal. Only a call that
+      // removed or saved something is audited: a repeat of a removal already
+      // on disk answers 204 and writes nothing.
+      let result = null;
       let failure = null;
       try {
-        removed = registry.removeSigned(r.message);
+        result = registry.removeSigned(r.message);
       } catch (err) {
         failure = err;
       } finally {
-        if (removed || (failure && failure.code === 'save_failed')) {
+        if ((result && result.changed === true) || (failure && failure.code === 'save_failed' && failure.removedNow === true)) {
           await recordFrontDoorEvent(auditLedger, 'frontdoor.node.removed', {
             node_id: nodeId, node_name: target.node_name, device_id: r.deviceId, by: 'phone', saved: failure === null
           });

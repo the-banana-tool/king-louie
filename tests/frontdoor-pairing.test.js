@@ -557,3 +557,42 @@ describe('/pair/v1', () => {
     assert.throws(() => createPairHandler({}), TypeError);
   });
 });
+
+describe('PairingService code limits (Task 30 fix round)', () => {
+  const build = (t, extra = {}) => new PairingService({
+    file: path.join(t.dataDir, 'frontdoor', 'pairing.json'), registry: t.registry, identity: FD, approverStore: t.store, frontdoorHost: HOST,
+    meshUrl: 'wss://mesh.kl.example.com/mesh/v1', meshCertFingerprint: () => 'c'.repeat(64), ...extra
+  });
+
+  it('refuses a new code once the live-code cap is reached; re-issuing a name or an expiry frees room', async () => {
+    let clock = Date.parse('2026-09-26T12:00:00.000Z');
+    const t = await setup();
+    const p = build(t, { now: () => clock, maxLiveCodes: 2 });
+    await p.issue('n-1', { by: A.deviceId });
+    clock += 60000;
+    await p.issue('n-2', { by: A.deviceId });
+    await assert.rejects(p.issue('n-3', { by: A.deviceId }), (e) => e.code === 'too_many_codes' && e.retryAfterS === 540);
+    await p.issue('n-2', { by: A.deviceId }); // replaces its own code
+    assert.deepEqual(p.codes.map((c) => c.node_name), ['n-1', 'n-2']);
+    clock += 9 * 60000 + 1; // n-1 has expired
+    await p.issue('n-3', { by: A.deviceId });
+    assert.ok(p.codes.some((c) => c.node_name === 'n-3'));
+  });
+
+  it('load keeps the newest codes when the file holds more than the cap', async () => {
+    const t = await setup();
+    const file = path.join(t.dataDir, 'frontdoor', 'pairing.json');
+    const exp = Date.now() + 600000;
+    const codes = [];
+    for (let i = 0; i < 1001; i += 1) {
+      codes.push({ code_hash: pairingCodeHash(`code ${i}`), node_name: `n-${i}`, expires_at_ms: exp, attempts: 0, by: 'console', confirm: 'console' });
+    }
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ v: 1, codes, pairings: [] }));
+    const p = build(t);
+    const names = new Set(p.codes.map((c) => c.node_name));
+    assert.equal(names.size, 1000);
+    assert.ok(!names.has('n-0'), 'the oldest is dropped');
+    assert.ok(names.has('n-1000'), 'the newest is kept');
+  });
+});
