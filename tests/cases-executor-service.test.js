@@ -35,6 +35,12 @@ describe('phone-agent in an unattended case', () => {
     admin.packageRoots.push(env.packageRoot);
     const dir = path.join(env.packageRoot, 'phone-agent');
     fs.cpSync(path.join(__dirname, '..', 'examples', 'executors', 'phone-agent'), dir, { recursive: true });
+    // As an admin install would leave it: service mode refuses group- or
+    // world-writable entries (a checkout's umask may leave them 0664).
+    if (process.platform !== 'win32') {
+      for (const d of [env.packageRoot, dir]) fs.chmodSync(d, 0o755);
+      for (const f of fs.readdirSync(dir)) fs.chmodSync(path.join(dir, f), 0o644);
+    }
     admin.entries = {
       'phone-agent': {
         kind: 'external-agent', package: 'phone-agent', packageSha256: computePackageSha256(dir),
