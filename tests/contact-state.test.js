@@ -136,3 +136,24 @@ describe('ContactState.resolve across channels', () => {
     assert.strictEqual(s.resolve('7QD4KM', { channel: 'sms' }).deliveryId, 'd-telegram', 'else the newest');
   });
 });
+
+// Review T10 I1: a reply-to reference resolves only as a channel message
+// reference, never as a question token (Telegram ids are small integers and
+// an all-digit token is valid Crockford base32).
+describe('ContactState.resolve by reference only', () => {
+  it('ref: true matches externalRef/relayId on that channel and never a token', () => {
+    const s = new ContactState({ dir: tmp(), clock: () => NOW });
+    s.recordDelivery('d-token', delivery({ at: '2026-09-25T13:00:00Z', externalRef: '900', batchToken: 'B1B1B1', items: [{ n: 1, caseId: 'c-1', questionId: 'q-0001', token: '123456', kind: 'question' }] }));
+    s.recordDelivery('d-ref', delivery({ at: '2026-09-25T13:30:00Z', externalRef: '123456', relayId: 'r-77', batchToken: 'B2B2B2', items: [{ n: 1, caseId: 'c-1', questionId: 'q-0002', token: 'M2P8RT', kind: 'question' }] }));
+    assert.strictEqual(s.resolve('123456', { channel: 'telegram' }).deliveryId, 'd-token', 'without ref the token wins (the collision)');
+    const byRef = s.resolve('123456', { channel: 'telegram', ref: true });
+    assert.strictEqual(byRef.deliveryId, 'd-ref');
+    assert.strictEqual(byRef.item, null);
+    assert.strictEqual(s.resolve('r-77', { channel: 'telegram', ref: true }).deliveryId, 'd-ref');
+    assert.strictEqual(s.resolve('123456', { channel: 'discord', ref: true }), null, 'channel-scoped');
+    assert.strictEqual(s.resolve('M2P8RT', { channel: 'telegram', ref: true }), null, 'a token is not a reference');
+    assert.strictEqual(s.resolve('B2B2B2', { channel: 'telegram', ref: true }), null, 'a batch token is not a reference');
+    assert.strictEqual(s.resolve('d-ref', { channel: 'telegram', ref: true }), null, 'a delivery id is not a reference');
+    assert.strictEqual(s.resolve('123456', { ref: true }), null, 'ref: true needs a channel');
+  });
+});

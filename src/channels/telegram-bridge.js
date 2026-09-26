@@ -106,7 +106,7 @@ class TelegramBridge extends ChannelPlugin {
     this.running = true;
     this.gateway.on('agent:response', this.boundAgentResponse);
     this.pollLoop().catch((error) => {
-      log.error(`polling failed: ${error.message}`);
+      log.error(`polling failed: ${redact(error.message, this.token)}`);
     });
   }
 
@@ -252,7 +252,10 @@ class TelegramBridge extends ChannelPlugin {
   // A "#<token> …" message (any chat) or a reply to a contact message (only
   // in the owner's private chat: message ids are per chat, preflight M17)
   // goes to the router, never to routeAgentMessage or a local chat. Everyone
-  // but the owner in the private chat is refused there (ownerProven: false).
+  // but the owner in the private chat is refused there (ownerProven: false),
+  // and a forward is never the owner speaking. A refused sender the
+  // allowlist does not know then takes the normal unauthorized path, so a
+  // live token looks the same to a stranger as a made-up one.
   async maybeHandleContactMessage(message, chatId, text) {
     if (!this.contactHost || !this.contactReplyHandler || !this.contactHost.router) return false;
     const isPrivate = String(message.chat?.type || '') === 'private';
@@ -262,11 +265,19 @@ class TelegramBridge extends ChannelPlugin {
       ? String(message.reply_to_message.message_id ?? '') || null
       : null;
     const byToken = Boolean(token && this.contactHost.router.knows('telegram', token));
-    const byReply = Boolean(replyTo && this.contactHost.router.knows('telegram', replyTo));
+    const byReply = Boolean(replyTo && this.contactHost.router.knows('telegram', replyTo, { ref: true }));
     if (!byToken && !byReply) return false;
     const senderId = String(message.from?.id || '');
-    const ownerProven = contactOwnerProven({ isPrivate, chatId, senderId, target, ownerUserId: this._contactOwner() });
+    const forwarded = message.forward_origin != null || message.forward_from != null || message.forward_date != null
+      || message.forward_from_chat != null || message.forward_sender_name != null;
+    const ownerProven = !forwarded && contactOwnerProven({ isPrivate, chatId, senderId, target, ownerUserId: this._contactOwner() });
     await this._contactReply(byToken ? token : replyTo, { text }, { senderId, chatId, ownerProven, deliveryRef: byReply ? replyTo : null });
+    if (!ownerProven) {
+      const chatType = String(message.chat?.type || '').toLowerCase();
+      const groupId = chatType === 'group' || chatType === 'supergroup' ? chatId : null;
+      const allowlistSender = String(message.from?.id || message.chat?.id || '');
+      if (!this.allowlistManager || !this.allowlistManager.isAllowed('telegram', allowlistSender, groupId)) return false;
+    }
     return true;
   }
 
@@ -302,7 +313,7 @@ class TelegramBridge extends ChannelPlugin {
 
         const aborted = error?.name === 'AbortError';
         if (!aborted) {
-          log.error(`update handling error: ${error.message}`);
+          log.error(`update handling error: ${redact(error.message, this.token)}`);
           await new Promise((resolve) => setTimeout(resolve, 1200));
         }
       }
@@ -976,7 +987,7 @@ class TelegramBridge extends ChannelPlugin {
           }
         }
       } catch (error) {
-        log.warn(`Unable to send voice response: ${error.message}`);
+        log.warn(`Unable to send voice response: ${redact(error.message, this.token)}`);
       }
     }
 

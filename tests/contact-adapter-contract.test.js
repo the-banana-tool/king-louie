@@ -237,11 +237,11 @@ describe('contact adapter: Telegram (fake Bot API via apiBase)', () => {
     return { apiBase: `http://127.0.0.1:${server.address().port}`, calls, failNext: (s) => { failStatus = s; }, close: () => new Promise((r) => server.close(r)) };
   }
 
-  async function bridgeWith(api, { enabled = true } = {}) {
+  async function bridgeWith(api, { enabled = true, allowed = () => true } = {}) {
     const bridge = new TelegramBridge({
       token: 'TEST-TOKEN',
       apiBase: api.apiBase,
-      allowlistManager: { isAllowed: () => true, isAllowedUser: () => true },
+      allowlistManager: { isAllowed: (ch, sender, group) => allowed(sender, group), isAllowedUser: () => true },
       sessionManager: { buildSessionKey: () => 'agent:main:telegram:x' }
     });
     const routed = [];
@@ -249,13 +249,16 @@ describe('contact adapter: Telegram (fake Bot API via apiBase)', () => {
     bridge.handleCommand = async (chatId, text) => { routed.push({ chatId, text }); };
     bridge.getOrCreateLocalChat = () => null;
     const known = new Set(['K7QD4M', '7QD4KM']);
-    bridge.setContactHost({ router: { knows: (channel, ref) => channel === 'telegram' && known.has(String(ref).toUpperCase()) }, getOwnerUserId: () => '111', isEnabled: () => enabled });
+    const refs = new Set();
+    // Like ContactRouter.knows: { ref: true } matches only message references.
+    const knows = (channel, ref, opts = {}) => channel === 'telegram' && (opts.ref ? refs.has(String(ref)) : known.has(String(ref).toUpperCase()));
+    bridge.setContactHost({ router: { knows }, getOwnerUserId: () => '111', isEnabled: () => enabled });
     const calls = [];
     bridge.onContactReply(async (correlationId, answer, meta) => {
       calls.push({ correlationId, answer, meta });
       return meta.ownerProven ? { ok: true, outcome: 'recorded', ackText: 'Recorded for Lakeside lot.' } : { ok: false, outcome: 'refused: not-owner', ackText: null };
     });
-    return { bridge, calls, routed, known };
+    return { bridge, calls, routed, known, refs };
   }
 
   const privateChat = (id) => ({ id, type: 'private' });
@@ -263,7 +266,7 @@ describe('contact adapter: Telegram (fake Bot API via apiBase)', () => {
   it('meets the contract', async () => {
     const api = await fakeBotApi();
     try {
-      const { bridge, calls, known } = await bridgeWith(api);
+      const { bridge, calls, refs } = await bridgeWith(api);
       assert.strictEqual(bridge.apiBase, `${api.apiBase}/botTEST-TOKEN`);
       assert.strictEqual(bridge.ownerTarget(), '111');
       const sent = await bridge.sendContact(MESSAGE, META);
@@ -281,7 +284,7 @@ describe('contact adapter: Telegram (fake Bot API via apiBase)', () => {
       assert.deepStrictEqual([calls[0].correlationId, calls[0].answer, calls[0].meta.ownerProven], ['7QD4KM', { optionIndex: 1 }, true]);
       assert.strictEqual(api.calls.filter((c) => c.method === 'sendMessage').pop().body.text, 'Recorded for Lakeside lot.');
 
-      known.add('4812');
+      refs.add('4812');
       await bridge.handleUpdate({ message: { chat: privateChat(111), from: { id: 111 }, text: 'yes', reply_to_message: { message_id: 4812 } } });
       assert.deepStrictEqual([calls[1].correlationId, calls[1].answer, calls[1].meta.ownerProven], ['4812', { text: 'yes' }, true]);
 
@@ -333,8 +336,8 @@ describe('contact adapter: Telegram (fake Bot API via apiBase)', () => {
   it('a reply to a colliding message id outside the owner chat takes the normal path', async () => {
     const api = await fakeBotApi();
     try {
-      const { bridge, calls, routed, known } = await bridgeWith(api);
-      known.add('4812');
+      const { bridge, calls, routed, refs } = await bridgeWith(api);
+      refs.add('4812');
       await bridge.handleUpdate({ message: { chat: { id: -100222, type: 'supergroup', title: 'Family' }, from: { id: 333 }, text: 'see above', reply_to_message: { message_id: 4812 } } });
       await bridge.handleUpdate({ message: { chat: privateChat(999), from: { id: 999 }, text: 'what?', reply_to_message: { message_id: 4812 } } });
       await bridge.handleUpdate({ message: { chat: { id: -100222, type: 'supergroup', title: 'Family' }, from: { id: 111 }, text: 'owner in the group', reply_to_message: { message_id: 4812 } } });
@@ -400,6 +403,93 @@ describe('contact adapter: Telegram (fake Bot API via apiBase)', () => {
       assert.deepStrictEqual(answers, bad.map(() => 'Unknown action'));
     } finally {
       await api.close();
+    }
+  });
+
+  it('a reply-to id is looked up as a message reference only, never as a token', async () => {
+    const api = await fakeBotApi();
+    try {
+      const { bridge, calls, routed, known } = await bridgeWith(api);
+      known.add('123456');
+      await bridge.handleUpdate({ message: { chat: privateChat(111), from: { id: 111 }, text: 'b', reply_to_message: { message_id: 123456 } } });
+      assert.deepStrictEqual(calls, [], 'a token equal to the reply-to id does not make it a contact reply');
+      assert.deepStrictEqual(routed, [{ chatId: '111', text: 'b' }]);
+    } finally {
+      await api.close();
+    }
+  });
+
+  // Review T10 M3: a forward carries someone else's words; it never proves the owner.
+  it('a forwarded message is never owner-proven', async () => {
+    const api = await fakeBotApi();
+    try {
+      const { bridge, calls, refs } = await bridgeWith(api);
+      refs.add('4812');
+      const fwd = [{ forward_origin: { type: 'user', sender_user: { id: 999 }, date: 1 } }, { forward_from: { id: 999 } }, { forward_date: 1 }, { forward_origin: { type: 'hidden_user', sender_user_name: 'x', date: 1 } }];
+      for (const f of fwd) await bridge.handleUpdate({ message: { chat: privateChat(111), from: { id: 111 }, text: '#K7QD4M 1 a', ...f } });
+      await bridge.handleUpdate({ message: { chat: privateChat(111), from: { id: 111 }, text: 'a', reply_to_message: { message_id: 4812 }, forward_date: 1 } });
+      assert.deepStrictEqual(calls.map((c) => c.meta.ownerProven), [false, false, false, false, false]);
+      assert.deepStrictEqual(api.calls.filter((c) => c.method === 'sendMessage'), [], 'no ack');
+    } finally {
+      await api.close();
+    }
+  });
+
+  // Review T10 M4: a live token must not change what a stranger sees.
+  it('a stranger who is not allowlisted gets the same notice for a live and a made-up token', async () => {
+    const api = await fakeBotApi();
+    try {
+      const { bridge, routed } = await bridgeWith(api, { allowed: (sender) => sender === '111' });
+      await bridge.handleUpdate({ message: { chat: privateChat(501), from: { id: 501 }, text: '#K7QD4M 1 a' } });
+      await bridge.handleUpdate({ message: { chat: privateChat(502), from: { id: 502 }, text: '#ZZZZZZ 1 a' } });
+      const notices = api.calls.filter((c) => c.method === 'sendMessage').map((c) => ({ chat: c.body.chat_id, text: c.body.text.replace(/50[12]/g, 'N') }));
+      assert.strictEqual(notices.length, 2);
+      assert.deepStrictEqual(notices.map((n) => n.chat), [501, 502]);
+      assert.strictEqual(notices[0].text, notices[1].text, 'identical notice either way');
+      assert.deepStrictEqual(routed, []);
+    } finally {
+      await api.close();
+    }
+  });
+
+  // Review T10 M2: the bridge's existing error logs never carry the bot token.
+  it('the bridge error logs redact the bot token', async () => {
+    const { addSink } = require('../src/logging');
+    const lines = [];
+    const remove = addSink((r) => { if (r.subsystem === 'telegram-bridge') lines.push(r.message); });
+    try {
+      const secret = 'SECRET-BOT-TOKEN';
+      // polling failed (start's catch)
+      const a = new TelegramBridge({ token: secret, apiBase: 'http://[bad', gatewayServer: { on() {} } });
+      a.callTelegram = async () => ({ id: 1, username: 'kl_bot' });
+      a.pollLoop = () => Promise.reject(new Error(`Failed to parse URL from http://[bad/bot${secret}/getUpdates`));
+      await a.start();
+      await new Promise((r) => setImmediate(r));
+      // update handling error (the poll loop)
+      const b = new TelegramBridge({ token: secret, apiBase: 'http://[bad' });
+      b.running = true;
+      const loop = b.pollLoop();
+      while (!lines.some((l) => l.startsWith('update handling error'))) await new Promise((r) => setImmediate(r));
+      b.running = false;
+      await loop;
+      // voice response
+      const c = new TelegramBridge({
+        token: secret, apiBase: 'http://[bad',
+        getVoiceSettings: () => ({ enabled: true, telegramVoiceForLongResponses: true, telegramMinChars: 1 }),
+        getTtsEngine: () => ({ speakSummary: async () => ({ audio: { buffer: Buffer.from('x') } }) })
+      });
+      c.sendMessage = async () => ({ message_id: 1 });
+      c.pendingRuns.set('run-1', { chatId: '111', startedAt: Date.now() });
+      await c.handleAgentResponse({ runId: 'run-1', content: 'hello' });
+
+      const hits = ['polling failed', 'update handling error', 'Unable to send voice response'].map((p) => lines.find((l) => l.startsWith(p)));
+      assert.ok(hits.every(Boolean), JSON.stringify(lines));
+      for (const l of hits) {
+        assert.ok(!l.includes(secret), l);
+        assert.ok(l.includes('<bot-token>'), l);
+      }
+    } finally {
+      remove();
     }
   });
 

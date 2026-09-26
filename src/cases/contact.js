@@ -143,8 +143,9 @@ class ContactRouter {
 
   // Whether a token, delivery id or channel message reference belongs to a
   // contact delivery (the bridges use it to intercept replies).
-  knows(channelId, correlationId) {
-    return Boolean(correlationId && this.state.resolve(correlationId, { channel: channelId }));
+  // { ref: true }: correlationId is a message reference only (never a token).
+  knows(channelId, correlationId, { ref = false } = {}) {
+    return Boolean(correlationId && this.state.resolve(correlationId, { channel: channelId, ref: ref === true }));
   }
 
   channelStatus(channelId) {
@@ -276,7 +277,12 @@ class ContactRouter {
     if (caps.requiresToken && !textToken && !(correlationId && answer.optionIndex !== undefined)) {
       return { ok: false, outcome: 'refused: no-token', ackText: this._hint(channelId) };
     }
-    let resolved = correlationId ? this.state.resolve(correlationId, { channel: channelId }) : null;
+    // A reply-to reference (meta.deliveryRef) resolves first and only as a
+    // reference; when it is also the correlation it is never retried as a
+    // token (review T10 I1).
+    const deliveryRef = typeof meta.deliveryRef === 'string' || typeof meta.deliveryRef === 'number' ? String(meta.deliveryRef).trim() : '';
+    let resolved = deliveryRef ? this.state.resolve(deliveryRef, { channel: channelId, ref: true }) : null;
+    if (!resolved && correlationId && correlationId !== deliveryRef) resolved = this.state.resolve(correlationId, { channel: channelId });
     if (!resolved && textToken) resolved = this.state.resolve(textToken[1], { channel: channelId });
     if (!resolved) return { ok: false, outcome: 'unknown', ackText: "I couldn't match that reply to a question. Answer it in King Louie." };
 

@@ -285,6 +285,10 @@ describe('token binding', () => {
       await email.ingestRelayEvent({ id: 'e2', type: 'inbound', from: 'owner@example.com', subject: 'Re: [KL-ZZZZZZ]', text: 'a', inReplyTo });
       await email.ingestRelayEvent({ id: 'e3', type: 'inbound', from: 'owner@example.com', subject: 'Re: [KL-ZZZZZZ]', text: 'a', inReplyTo, auth: { verified: true, method: 'dmarc' } });
       assert.deepStrictEqual(calls.map((c) => [c.correlationId, c.meta.ownerProven]), [['d-ABC123', true], ['ZZZZZZ', true], ['d-ABC123', true]]);
+      // Review T10 I1: the router resolves deliveryRef first, so it is set only
+      // when the thread is the correlation; a token that names another batch
+      // must not be overridden by the thread it was sent in.
+      assert.deepStrictEqual(calls.map((c) => c.meta.deliveryRef), [inReplyTo, null, inReplyTo]);
     } finally {
       await relay.close();
     }

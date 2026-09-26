@@ -124,9 +124,19 @@ class ContactState {
   // `channel` is given, a channel reference (externalRef/relayId) must match
   // on that same channel — an SMS delivery's externalRef never resolves from
   // an email reply.
-  resolve(correlationId, { channel = null } = {}) {
+  // ref: true — correlationId is a channel message reference (a reply-to id,
+  // an In-Reply-To): it matches only externalRef/relayId on that channel and
+  // never a token, a batch token or a delivery id (review T10 I1: a Telegram
+  // message id can equal an all-digit token).
+  resolve(correlationId, { channel = null, ref = false } = {}) {
     const key = String(correlationId ?? '').trim();
     if (!key) return null;
+    if (ref) {
+      if (!channel) return null;
+      const hit = Object.entries(this.deliveries()).sort((a, b) => String(b[1].at).localeCompare(String(a[1].at)))
+        .find(([, d]) => d.channel === channel && (d.externalRef === key || d.relayId === key));
+      return hit ? { deliveryId: hit[0], delivery: hit[1], item: null } : null;
+    }
     const upper = key.toUpperCase();
     const all = Object.entries(this.deliveries()).sort((a, b) => String(b[1].at).localeCompare(String(a[1].at)));
     const withToken = all.filter(([, d]) => (d.items || []).some((it) => it.token === upper));

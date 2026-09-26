@@ -248,7 +248,10 @@ class EmailChannel extends ChannelPlugin {
     if (!this.replyHandler) return null;
     const answerText = body.replace(SUBJECT_TOKEN, '').trim();
     const result = await this.replyHandler(correlation, { text: answerText }, {
-      channel: 'email', senderId: from || String(reply.from || ''), chatId: null, at: reply.date || null, ownerProven, deliveryRef: reply.inReplyTo || null
+      channel: 'email', senderId: from || String(reply.from || ''), chatId: null, at: reply.date || null, ownerProven,
+      // The router resolves deliveryRef first, so it is passed only when the
+      // thread is the correlation: a token naming another batch keeps its batch.
+      deliveryRef: correlation === thread ? (reply.inReplyTo || null) : null
     });
     if (result && result.ackText && ownerProven) {
       try {

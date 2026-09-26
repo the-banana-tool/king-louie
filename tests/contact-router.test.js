@@ -878,3 +878,36 @@ describe('ContactRouter.deliver on a delivery-only channel', () => {
     assert.ok(tgSent.message.items.every((i) => /^[0-9A-Z]{6}$/.test(i.token)));
   });
 });
+
+// Review T10 I1: a reply to a message answers that message's question, even
+// when the message id equals another open question's token.
+describe('ContactRouter: a reply-to reference never resolves as a token', () => {
+  it('reply to message 123456 answers its own delivery, not the question whose token is 123456', async () => {
+    const w = await world();
+    const opts = [{ id: 'a', label: 'No' }, { id: 'b', label: 'Yes' }];
+    const qToken = w.ask(w.lot.id, { text: 'Seller financing?', options: opts });
+    const qRef = w.ask(w.kitchen.id, { text: 'Site visit on Oct 5?', options: opts });
+    await w.router.deliver('telegram', [{ caseId: w.lot.id, caseTitle: w.lot.title, token: '123456', record: qToken }]);
+    const tg = w.adapters.get('telegram');
+    const realSend = tg.sendContact.bind(tg);
+    tg.sendContact = async (m, meta) => ({ ...(await realSend(m, meta)), externalRef: '123456' });
+    w.advance(1000);
+    await w.router.deliver('telegram', [w.entry(w.kitchen, qRef)]);
+    assert.strictEqual(w.router.knows('telegram', '123456', { ref: true }), true);
+    assert.strictEqual(w.router.knows('telegram', '654321', { ref: true }), false);
+
+    const r = await w.router.handleReply('telegram', '123456', { text: 'b' }, { ownerProven: true, senderId: '111', chatId: '111', deliveryRef: '123456' });
+    assert.strictEqual(r.outcome, 'recorded');
+    assert.strictEqual(w.runtime.questions(w.kitchen.id).get(qRef.id).answer.optionId, 'b');
+    assert.strictEqual(w.runtime.questions(w.lot.id).get(qToken.id).answer, null, 'the token-colliding question is untouched');
+  });
+
+  it('an unknown reply-to reference is unknown, never retried as a token', async () => {
+    const w = await world();
+    const q = w.ask(w.lot.id, { text: 'Seller financing?', options: [{ id: 'a', label: 'No' }] });
+    await w.router.deliver('telegram', [{ caseId: w.lot.id, caseTitle: w.lot.title, token: '123456', record: q }]);
+    const r = await w.router.handleReply('telegram', '123456', { text: 'a' }, { ownerProven: true, senderId: '111', chatId: '111', deliveryRef: '123456' });
+    assert.strictEqual(r.outcome, 'unknown');
+    assert.strictEqual(w.runtime.questions(w.lot.id).get(q.id).answer, null);
+  });
+});
