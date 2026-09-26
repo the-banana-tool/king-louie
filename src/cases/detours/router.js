@@ -382,8 +382,12 @@ class DetourRouter {
     const refusal = this._answerRefusal(meta, d, optionId);
     if (refusal) return refusal;
     const p = d.proposal;
-    // An answer in words that the model mapped: both cases journal the words.
-    const words = d.status === 'awaiting-mapping' && d.last?.text ? `\nOwner's words (mapped by the model): "${oneLine(d.last.text, 500)}"` : '';
+    // An answer in words that the model mapped. The words are a non-disclosable
+    // owner fact of this case: only this case's journal quotes them; the other
+    // case's journal says only where the routing came from.
+    const mapped = d.status === 'awaiting-mapping' && Boolean(d.last?.text);
+    const words = mapped ? `\nOwner's words (mapped by the model): "${oneLine(d.last.text, 500)}"` : '';
+    const routedFrom = mapped ? `\nRouted from the owner's answer in case "${meta.title}".` : '';
     const at = () => this.now().toISOString();
     const resolution = (status, extra = {}) => log.append({
       type: 'resolution', id: detourId, at: at(), optionId, by: String(by), status, targetCaseId: null, error: null, ...extra
@@ -411,7 +415,7 @@ class DetourRouter {
     // A case created before a later step failed; recorded on the failed row.
     let createdId = null;
     try {
-      return await this._apply(meta, d, { optionId, title, objective, force, words, at, finish, retry, onCreated: (id) => { createdId = id; } });
+      return await this._apply(meta, d, { optionId, title, objective, force, routedFrom, at, finish, retry, onCreated: (id) => { createdId = id; } });
     } catch (err) {
       if (err && err.code === 'CASE_BUSY') throw err;
       const error = `Resolving ${detourId} failed: ${err && err.message ? err.message : String(err)}`;
@@ -423,7 +427,7 @@ class DetourRouter {
   }
 
   // The option's writes. Throws on failure; _resolve records the failed row.
-  async _apply(meta, d, { optionId, title, objective, force, words, at, finish, retry, onCreated }) {
+  async _apply(meta, d, { optionId, title, objective, force, routedFrom, at, finish, retry, onCreated }) {
     const rt = this.runtime;
     const detourId = d.id;
     const p = d.proposal;
@@ -442,7 +446,7 @@ class DetourRouter {
           new DetourLog(target.dir).append({
             type: 'incoming', id: detourId, at: at(), fromCaseId: meta.id, fromTitle: meta.title, summary: p.summary, reason: p.reason, blocks: p.blocks
           });
-          rt.records(target.id).writeJournal('detour', `# Incoming detour ${detourId} from "${meta.title}"\n\nSummary: ${p.summary}\nReason: ${p.reason || '—'}\nBlocks "${meta.title}": ${p.blocks ? 'yes' : 'no'}${words}`, this.now());
+          rt.records(target.id).writeJournal('detour', `# Incoming detour ${detourId} from "${meta.title}"\n\nSummary: ${p.summary}\nReason: ${p.reason || '—'}\nBlocks "${meta.title}": ${p.blocks ? 'yes' : 'no'}${routedFrom}`, this.now());
           if (target.status === 'active') {
             rt.wakeups(target.id).register({
               kind: 'detours:incoming', at: at(), payload: { key: `incoming:${detourId}`, detourId, fromCaseId: meta.id }, createdBy: 'detours'
@@ -479,7 +483,7 @@ class DetourRouter {
       await rt.systemAction(created.id, `detour ${detourId} from ${meta.slug}`, async () => {
         rt.brief(created.id).update('successCriteria', p.newCase.successCriteria, { provenance: 'model' });
         rt.brief(created.id).writeBody(p.newCase.body);
-        rt.records(created.id).writeJournal('detour', `# Spawned by detour ${detourId} from "${meta.title}"\n\nSummary: ${p.summary}\nReason: ${p.reason || '—'}${words}`, this.now());
+        rt.records(created.id).writeJournal('detour', `# Spawned by detour ${detourId} from "${meta.title}"\n\nSummary: ${p.summary}\nReason: ${p.reason || '—'}${routedFrom}`, this.now());
         rt.addRelation(created.id, { id: meta.id, relation: 'related', note: p.summary, detour: detourId });
         if (p.blocks) rt.addRelation(created.id, { id: meta.id, relation: 'blocks', note: p.summary, detour: detourId });
       }, { commitMessage: `spawned from ${meta.slug} (${detourId})` });

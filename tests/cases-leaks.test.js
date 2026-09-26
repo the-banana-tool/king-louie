@@ -137,6 +137,23 @@ describe('cross-case leak paths through detours', () => {
     for (const secret of ['landlord', 'deposit', '1834', 'savings account']) assert.ok(!targetFiles.includes(secret), secret);
   });
 
+  it("the owner's routing answer in words stays in the source case's journal", async () => {
+    const readJournal = (dir) => fs.readdirSync(path.join(dir, 'journal')).map((n) => fs.readFileSync(path.join(dir, 'journal', n), 'utf8')).join('\n');
+    const words = 'Put it with the phone agent, the landlord keeps calling about the deposit';
+    for (const optionId of ['attach-1', 'new']) {
+      const { rt, router, door, phone, p } = await routed();
+      await rt.answerQuestion(door.id, p.questionId, { channel: 'in-app', text: words });
+      await router.reconcile(door.id);
+      const r = await router.resolve(door.id, p.detour.id, { optionId, by: 'model-mapped', expectStatus: 'awaiting-mapping' });
+      assert.strictEqual(r.ok, true, `${optionId}: ${r.error}`);
+      const target = optionId === 'new' ? rt.getCase(r.linkedCaseId) : phone;
+      const theirs = readJournal(target.dir);
+      assert.ok(!theirs.includes('landlord') && !theirs.includes('deposit'), `${optionId}: ${theirs}`);
+      assert.ok(theirs.includes(`Routed from the owner's answer in case "Rear door quotes".`), `${optionId}: ${theirs}`);
+      assert.ok(readJournal(door.dir).includes(words), `${optionId}: the source journal keeps the words`);
+    }
+  });
+
   it('routing answer fact is non-disclosable', async () => {
     const { rt, door, p } = await routed();
     const out = await rt.answerQuestion(door.id, p.questionId, { channel: 'in-app', optionId: 'attach-1' });

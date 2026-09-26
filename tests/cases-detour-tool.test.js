@@ -65,7 +65,7 @@ describe('Detour tool', () => {
     await rt.endTurn(turn, { summary: 'x' });
   });
 
-  it('resolve maps an answer in words only, and journals the owner\'s words in both cases', async () => {
+  it('resolve maps an answer in words only, and journals the owner\'s words in the source case only', async () => {
     const { rt, door, phone, turn, opts } = await setup();
     const p = await DetourTool.execute({ action: 'propose', summary: 'Fix the phone agent status polling', reason: 'A different project' }, opts);
     const early = await DetourTool.execute({ action: 'resolve', questionId: p.questionId, optionId: 'attach-1' }, opts);
@@ -77,7 +77,8 @@ describe('Detour tool', () => {
     const words = 'Owner\'s words (mapped by the model): "give it to the phone agent case"';
     const journals = (dir) => fs.readdirSync(path.join(dir, 'journal')).map((n) => fs.readFileSync(path.join(dir, 'journal', n), 'utf8')).join('\n');
     assert.ok(journals(door.dir).includes(words));
-    assert.ok(journals(phone.dir).includes(words));
+    assert.ok(!journals(phone.dir).includes('give it to the phone agent case'));
+    assert.ok(journals(phone.dir).includes(`Routed from the owner's answer in case "${door.title}".`));
     assert.match((await DetourTool.execute({ action: 'resolve', questionId: 'q-0099', optionId: 'attach-1' }, opts)).error, /not a routing question/);
     await rt.endTurn(turn, { summary: 'x' });
   });
