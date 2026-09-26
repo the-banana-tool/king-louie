@@ -24,16 +24,26 @@ const FD = testNodeIdentity({ key: 'relay' });
 const A = createFakePhone({ seed: 'A' });
 const C = createFakePhone({ seed: 'C' });
 const stranger = createFakePhone();
+// An approver whose record the admin revoked.
+const R = createFakePhone({ name: 'Revoked phone' });
 
-// A stand-in for the node registry (Task 19): exact names only.
-const fakeNodes = (names) => ({ byName: (n) => (names.includes(n) ? { node_name: n } : null) });
+const GPU_ID = 'kl-aaaaaaaaaaaaaaaa';
+const WEB_ID = 'kl-bbbbbbbbbbbbbbbb';
+const OTHER_GPU_ID = 'kl-cccccccccccccccc';
 
-async function setup({ nodes = fakeNodes(['gpu-box', 'web-01']), clientName = 'Example Client' } = {}) {
-  const store = await approverStoreWith([A.approverRecord(), C.approverRecord()], { allowTestKeys: true });
+// A stand-in for the node registry (Task 19): exact names only; `ids` can be
+// changed to remove or re-enroll a node.
+function fakeNodes(ids) {
+  return { ids, byName: (n) => (Object.prototype.hasOwnProperty.call(ids, n) ? { node_name: n, node_id: ids[n] } : null) };
+}
+
+async function setup({ nodes = fakeNodes({ 'gpu-box': GPU_ID, 'web-01': WEB_ID }), clientName = 'Example Client', allowTestKeys = true, onGrantRevoked = null } = {}) {
+  const records = [A.approverRecord(), C.approverRecord(), R.approverRecord({ revokedAt: '2026-09-01T00:00:00.000Z', revokedBy: C.deviceId })];
+  const store = await approverStoreWith(records, { allowTestKeys });
   cleanups.push(() => store.cleanup());
   const dataDir = path.join(store.baseDir, 'data');
   const devices = new DeviceRegistry({ file: path.join(dataDir, 'relay', 'devices.json') });
-  for (const p of [A, C, stranger]) devices.register({ device_id: p.deviceId, jwk: p.jwk, name: p.name, platform: 'android' });
+  for (const p of [A, C, stranger, R]) devices.register({ device_id: p.deviceId, jwk: p.jwk, name: p.name, platform: 'android' });
   const phoneApi = createPhoneApi({ devices });
   const pending = new PendingAuthorizations();
   const alerts = { raised: [], raise(kind, opts) { this.raised.push([kind, opts]); } };
@@ -45,7 +55,7 @@ async function setup({ nodes = fakeNodes(['gpu-box', 'web-01']), clientName = 'E
   const audit = [];
   registerGrantRoutes(phoneApi, {
     pending, grants, codes, clients: { markGranted: (id) => granted.push(id) }, challenges, approverStore: store, frontdoorId: FD.nodeId,
-    scopeRules: () => FLEET_SCOPE_RULES, auditLedger: { append: async (e) => { audit.push(e); return e; } }, onGrantRevoked: (id) => revoked.push(id), nodes
+    scopeRules: () => FLEET_SCOPE_RULES, auditLedger: { append: async (e) => { audit.push(e); return e; } }, onGrantRevoked: onGrantRevoked || ((id) => revoked.push(id)), nodes
   });
   const server = http.createServer(phoneApi.handler);
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
@@ -69,7 +79,7 @@ async function setup({ nodes = fakeNodes(['gpu-box', 'web-01']), clientName = 'E
     return call(phone, 'POST', `/v1/grants/${p.grant_id}/decision`, phone.grant({ frontdoorId: FD.nodeId, pending: p, scopes }));
   };
   const challenge = async (phone, purpose = 'revoke') => (await call(phone, 'POST', '/v1/challenges', { purpose })).body.challenge;
-  return { store, pending, grants, codes, challenges, call, newPending, approve, challenge, granted, revoked, audit, alerts, dataDir };
+  return { store, nodes, pending, grants, codes, challenges, call, newPending, approve, challenge, granted, revoked, audit, alerts, dataDir };
 }
 
 describe('the phone claims by the typed code, then decides', () => {
@@ -125,19 +135,32 @@ describe('the phone claims by the typed code, then decides', () => {
   it('a device that is not an active approver is refused on every route (Deviation 13)', async () => {
     const t = await setup();
     const p = t.newPending();
-    const cases = [
-      ['GET', `/v1/grants/pending?user_code=${p.user_code}`, null],
-      ['POST', `/v1/grants/${p.grant_id}/decision`, stranger.grant({ frontdoorId: FD.nodeId, pending: p })],
-      ['GET', '/v1/clients', null],
-      ['POST', '/v1/challenges', { purpose: 'revoke' }],
-      ['POST', `/v1/clients/${p.grant_id}/revoke`, stranger.revokeClient({ frontdoorId: FD.nodeId, grantId: p.grant_id, challenge: 'x'.repeat(43) })]
-    ];
-    for (const [method, route, body] of cases) {
-      const r = await t.call(stranger, method, route, body);
-      assert.equal(r.status, 403, `${method} ${route}`);
-      assert.equal(r.body.error, 'forbidden');
+    // stranger: no approver record at all; R: an approver record the admin revoked.
+    for (const phone of [stranger, R]) {
+      const cases = [
+        ['GET', `/v1/grants/pending?user_code=${p.user_code}`, null],
+        ['POST', `/v1/grants/${p.grant_id}/decision`, phone.grant({ frontdoorId: FD.nodeId, pending: p })],
+        ['GET', '/v1/clients', null],
+        ['POST', '/v1/challenges', { purpose: 'revoke' }],
+        ['POST', `/v1/clients/${p.grant_id}/revoke`, phone.revokeClient({ frontdoorId: FD.nodeId, grantId: p.grant_id, challenge: 'x'.repeat(43) })]
+      ];
+      for (const [method, route, body] of cases) {
+        const r = await t.call(phone, method, route, body);
+        assert.equal(r.status, 403, `${phone.name}: ${method} ${route}`);
+        assert.equal(r.body.error, 'forbidden');
+      }
     }
     assert.equal(p.claimed_by, null);
+    assert.equal(p.status, 'pending');
+  });
+
+  it('a published test key is not an approver where the admin store refuses test keys', async () => {
+    const t = await setup({ allowTestKeys: false });
+    const p = t.newPending();
+    const r = await t.call(A, 'GET', `/v1/grants/pending?user_code=${p.user_code}`);
+    assert.equal(r.status, 403);
+    assert.equal(r.body.error, 'forbidden');
+    assert.equal(p.claimed_by, null, 'the request stays unclaimed');
   });
 
   it('client_name reaches the phone printable, and that is what it signs and what the grant keeps', async () => {
@@ -191,12 +214,36 @@ describe('the phone claims by the typed code, then decides', () => {
     const ok = await t.approve(A, known, [{ scope: 'fleet:read', machines: ['gpu-box'] }]);
     assert.deepEqual(ok.body, { state: 'approved' });
     assert.deepEqual(t.grants.scopeStrings(t.grants.live(known.grant_id)), ['fleet:read;machines=gpu-box']);
+    assert.deepEqual(t.grants.live(known.grant_id).machine_ids, { 'gpu-box': GPU_ID });
     const unknown = t.newPending();
     const refused = await t.approve(A, unknown, [{ scope: 'fleet:read', machines: ['gpu-box', 'nas-9'] }]);
     assert.equal(refused.status, 400);
     assert.equal(refused.body.error, 'unknown_machine');
     assert.equal(unknown.status, 'pending');
     assert.equal(t.grants.get(unknown.grant_id), null);
+  });
+
+  it('machines: a grant is pinned to the node id; a different key re-enrolled under the name matches nothing (ruling T23-nodeid)', async () => {
+    const t = await setup();
+    const limited = t.newPending();
+    await t.approve(A, limited, [{ scope: 'fleet:read', machines: ['gpu-box'] }, { scope: 'fleet:run', machines: null }]);
+    const g = t.grants.live(limited.grant_id);
+    assert.equal(t.grants.machineMatches(g, 'fleet:read', 'gpu-box', GPU_ID), true);
+    assert.equal(t.grants.machineMatches(g, 'fleet:read', 'web-01', WEB_ID), false, 'not a listed name');
+    assert.equal(t.grants.machineMatches(g, 'fleet:run', 'web-01', WEB_ID), true, 'an unlimited entry covers every node');
+    assert.equal(t.grants.machineMatches(g, 'fleet:delegate', 'gpu-box', GPU_ID), false, 'a scope the grant lacks');
+    // gpu-box is removed, and a different key enrolls under the same name.
+    delete t.nodes.ids['gpu-box'];
+    t.nodes.ids['gpu-box'] = OTHER_GPU_ID;
+    assert.equal(t.grants.machineMatches(g, 'fleet:read', 'gpu-box', OTHER_GPU_ID), false);
+    const fresh = new GrantStore({ file: t.grants.file, approverStore: t.store, frontdoorId: FD.nodeId, alerts: t.alerts });
+    fresh.load();
+    assert.equal(fresh.machineMatches(fresh.live(limited.grant_id), 'fleet:read', 'gpu-box', OTHER_GPU_ID), false, 'still after a restart');
+    assert.equal(fresh.machineMatches(fresh.live(limited.grant_id), 'fleet:read', 'gpu-box', GPU_ID), true);
+    // A new approval now pins the new key.
+    const again = t.newPending();
+    await t.approve(A, again, [{ scope: 'fleet:read', machines: ['gpu-box'] }]);
+    assert.equal(t.grants.machineMatches(t.grants.live(again.grant_id), 'fleet:read', 'gpu-box', OTHER_GPU_ID), true);
   });
 
   it('machines: with no node registry, any machine limit is refused', async () => {
@@ -245,6 +292,16 @@ describe('connected clients and revocation', () => {
     assert.deepEqual(t.grants.list(), []);
     assert.equal(t.grants.list({ liveOnly: false }).length, 1);
     assert.equal(t.grants.revoke(p.grant_id, 'again'), false, 'a revoked grant stays revoked');
+  });
+
+  it('an onGrantRevoked that throws still leaves the grant revoked and audited', async () => {
+    const t = await setup({ onGrantRevoked: () => { throw new Error('boom'); } });
+    const p = t.newPending();
+    await t.approve(A, p);
+    const revoke = A.revokeClient({ frontdoorId: FD.nodeId, grantId: p.grant_id, challenge: await t.challenge(A) });
+    assert.equal((await t.call(A, 'POST', `/v1/clients/${p.grant_id}/revoke`, revoke)).status, 204);
+    assert.equal(t.grants.live(p.grant_id), null);
+    assert.ok(t.audit.some((e) => e.kind === 'frontdoor.grant.revoked' && e.data.grant_id === p.grant_id));
   });
 
   it('a challenge is good only for its own purpose (ruling T2-purpose)', async () => {
@@ -376,6 +433,48 @@ describe('GrantStore on load', () => {
     const earlier = await load(new Date(acceptedAt - 60000).toISOString());
     assert.equal(earlier.g.get(p.grant_id), null);
     assert.deepEqual(earlier.alerts.raised, [['node_record_invalid', { subject: `grant:${p.grant_id}`, detail: { reason: 'revoked_device' } }]]);
+  });
+
+  it('drops a record built on a signed deny, a moved map key, a bad revoked_at, and bad machine ids', async () => {
+    const t = await setup();
+    const ps = {};
+    for (const k of ['deny', 'key', 'revokedAt', 'missingId', 'extraId', 'badId']) {
+      ps[k] = t.newPending();
+      await t.approve(A, ps[k], ['deny', 'key', 'revokedAt'].includes(k) ? undefined : [{ scope: 'fleet:read', machines: ['gpu-box'] }]);
+    }
+    const stored = JSON.parse(fs.readFileSync(t.grants.file, 'utf8'));
+    const rec = (k) => stored.grants[ps[k].grant_id];
+    rec('deny').signed_grant = A.grant({ frontdoorId: FD.nodeId, pending: ps.deny, decision: 'deny' });
+    rec('revokedAt').revoked_at = 5;
+    rec('missingId').machine_ids = {};
+    rec('extraId').machine_ids = { 'gpu-box': GPU_ID, 'web-01': WEB_ID };
+    rec('badId').machine_ids = { 'gpu-box': 'gpu-box' };
+    const moved = rec('key');
+    delete stored.grants[ps.key.grant_id];
+    stored.grants.gr_CCCCCCCCCCCCCCCCCCCCCC = moved;
+    fs.writeFileSync(t.grants.file, JSON.stringify(stored));
+    t.grants.load();
+    assert.deepEqual(t.grants.list({ liveOnly: false }), []);
+    const reasons = Object.fromEntries(t.alerts.raised.map(([, o]) => [o.subject, o.detail.reason]));
+    assert.deepEqual(reasons, {
+      [`grant:${ps.deny.grant_id}`]: 'not_approved',
+      [`grant:${ps.key.grant_id}`]: 'record_mismatch',
+      [`grant:${ps.revokedAt.grant_id}`]: 'malformed',
+      [`grant:${ps.missingId.grant_id}`]: 'record_mismatch',
+      [`grant:${ps.extraId.grant_id}`]: 'record_mismatch',
+      [`grant:${ps.badId.grant_id}`]: 'malformed'
+    });
+  });
+
+  it('client_host is recomputed from the signed client and redirect, not read from the file', async () => {
+    const t = await setup();
+    const p = t.newPending();
+    await t.approve(A, p);
+    const stored = JSON.parse(fs.readFileSync(t.grants.file, 'utf8'));
+    stored.grants[p.grant_id].client_host = 'trusted.example.com';
+    fs.writeFileSync(t.grants.file, JSON.stringify(stored));
+    t.grants.load();
+    assert.equal(t.grants.live(p.grant_id).client_host, 'client.example.com');
   });
 
   it('a missing file loads empty; a malformed entry is dropped with an alert', async () => {

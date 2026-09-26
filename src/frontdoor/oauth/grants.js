@@ -11,6 +11,9 @@ const { writeFileAtomic } = require('../../approvals/approver-store');
 const { canonicalize } = require('../../platform/jcs');
 const { verifyPhoneEnvelope } = require('../protocol/checks');
 const { formatScope } = require('../../fleet/scope-rules');
+const { NODE_ID_RE } = require('../../approvals/messages');
+const { DCR_CLIENT_ID_RE } = require('../protocol/messages');
+const { clientHost } = require('./clients');
 
 const log = createLogger('frontdoor/oauth/grants');
 const TOUCH_EVERY_MS = 60000;
@@ -18,6 +21,20 @@ const sha = (text) => crypto.createHash('sha256').update(String(text)).digest('b
 
 // The fields a grant record binds, each compared with what the phone signed.
 const BOUND_FIELDS = ['grant_id', 'client_id', 'client_name', 'redirect_uri', 'resource', 'device_id'];
+
+const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+
+// Every machine name the scopes limit to, once each.
+function namedMachines(scopes) {
+  const names = new Set();
+  for (const s of scopes) for (const n of s.machines || []) names.add(n);
+  return names;
+}
+
+// The client host as the consent page computed it, from the signed fields
+// rather than whatever the file says.
+const hostOf = (g) => clientHost({ client_id: g.client_id, kind: DCR_CLIENT_ID_RE.test(g.client_id) ? 'dcr' : 'cimd' }, g.redirect_uri);
 
 class GrantStore extends EventEmitter {
   constructor({ file, approverStore, frontdoorId, alerts = null, now = Date.now } = {}) {
@@ -41,11 +58,17 @@ class GrantStore extends EventEmitter {
   _problem(g) {
     if (!g || typeof g !== 'object' || !g.signed_grant || typeof g.accepted_at !== 'string' || !Array.isArray(g.scopes)) return 'malformed';
     if (!(g.revoked_at === null || typeof g.revoked_at === 'string')) return 'malformed';
+    if (!isPlainObject(g.machine_ids) || Object.values(g.machine_ids).some((id) => typeof id !== 'string' || !NODE_ID_RE.test(id))) return 'malformed';
     const v = verifyPhoneEnvelope(g.signed_grant, { approverStore: this.approverStore, type: 'kl.client.grant', frontdoorId: this.frontdoorId, acceptedAt: g.accepted_at });
     if (!v.ok) return v.reason;
     const m = v.message;
     if (m.decision !== 'approve') return 'not_approved';
     if (BOUND_FIELDS.some((k) => m[k] !== g[k]) || canonicalize(m.scopes) !== canonicalize(g.scopes)) return 'record_mismatch';
+    // Ruling T23-nodeid: each named machine is pinned to the node id it had
+    // when the owner approved; exactly the signed names, each with an id.
+    const names = namedMachines(m.scopes);
+    const pinned = Object.keys(g.machine_ids);
+    if (pinned.length !== names.size || pinned.some((n) => !names.has(n))) return 'record_mismatch';
     return null;
   }
 
@@ -74,6 +97,7 @@ class GrantStore extends EventEmitter {
         if (this.alerts) this.alerts.raise('node_record_invalid', { subject: `grant:${id}`, detail: { reason } });
         continue;
       }
+      g.client_host = hostOf(g);
       this.grants.set(g.grant_id, g);
     }
     if (dropped) this._save();
@@ -82,7 +106,16 @@ class GrantStore extends EventEmitter {
 
   // `message` is the verified kl.client.grant; the record keeps what the
   // phone signed, byte for byte, so load() can compare the two.
-  create({ pending, envelope, message, acceptedAt = new Date(this.now()).toISOString() }) {
+  // `machineIds` maps every machine name the scopes limit to onto the node id
+  // that name had at approval (ruling T23-nodeid); a name without one is a
+  // caller bug and refused here.
+  create({ pending, envelope, message, machineIds = {}, acceptedAt = new Date(this.now()).toISOString() }) {
+    const machine_ids = {};
+    for (const name of namedMachines(message.scopes)) {
+      const id = hasOwn(machineIds, name) ? machineIds[name] : null;
+      if (typeof id !== 'string' || !NODE_ID_RE.test(id)) throw new Error(`no node id for machine "${name}"`);
+      machine_ids[name] = id;
+    }
     const grant = {
       grant_id: message.grant_id,
       client_id: message.client_id,
@@ -92,6 +125,7 @@ class GrantStore extends EventEmitter {
       resource: message.resource,
       scopes: message.scopes.map((s) => ({ scope: s.scope, machines: s.machines === null ? null : [...s.machines] })),
       device_id: message.device_id,
+      machine_ids,
       accepted_at: acceptedAt,
       signed_grant: envelope,
       revoked_at: null,
@@ -137,6 +171,17 @@ class GrantStore extends EventEmitter {
       this.lastTouchSave.set(id, t);
       this._save();
     }
+  }
+
+  // Whether `grant`'s entry for `scope` covers the node called `nodeName`
+  // with id `nodeId`: an unlimited entry covers every node; a limited one
+  // only a listed name whose id is still the one the owner approved, so a
+  // different key re-enrolled under the same name matches nothing.
+  machineMatches(grant, scope, nodeName, nodeId) {
+    if (!grant || !Array.isArray(grant.scopes)) return false;
+    const ids = isPlainObject(grant.machine_ids) ? grant.machine_ids : {};
+    return grant.scopes.some((s) => s.scope === scope
+      && (s.machines === null || (s.machines.includes(nodeName) && hasOwn(ids, nodeName) && ids[nodeName] === nodeId)));
   }
 
   scopeStrings(grant) {

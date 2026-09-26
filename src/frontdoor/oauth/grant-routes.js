@@ -17,15 +17,19 @@ const log = createLogger('frontdoor/oauth/grant-routes');
 const phoneView = (p) => ({ ...p, client_name: printable(p.client_name) });
 
 // `nodes` is the front door's node registry (Task 19; anything with
-// byName(name)). A machine limit may name only nodes it holds; without a
-// registry no machine limit is accepted.
-function unknownMachine(scopes, nodes) {
+// byName(name) → { node_id }). A machine limit may name only nodes it holds;
+// without a registry no machine limit is accepted. Each name resolves to the
+// node id it has now, which the grant pins (ruling T23-nodeid).
+function resolveMachines(scopes, nodes) {
+  const ids = {};
   for (const s of scopes) {
     for (const name of s.machines || []) {
-      if (!nodes || typeof nodes.byName !== 'function' || !nodes.byName(name)) return name;
+      const node = nodes && typeof nodes.byName === 'function' ? nodes.byName(name) : null;
+      if (!node || typeof node.node_id !== 'string') return { unknown: name };
+      ids[name] = node.node_id;
     }
   }
-  return null;
+  return { ids };
 }
 
 function registerGrantRoutes(phoneApi, { pending, grants, codes, clients, challenges, approverStore, frontdoorId, scopeRules,
@@ -85,10 +89,10 @@ function registerGrantRoutes(phoneApi, { pending, grants, codes, clients, challe
       }
       // Only an explicit, verified approve grants anything.
       if (m.decision !== 'approve') throw new ApiError(400, 'malformed', 'the decision is neither approve nor deny');
-      const unknown = unknownMachine(m.scopes, nodes);
-      if (unknown !== null) throw new ApiError(400, 'unknown_machine', `no machine named "${unknown}" is enrolled with this front door`);
+      const machines = resolveMachines(m.scopes, nodes);
+      if (machines.unknown) throw new ApiError(400, 'unknown_machine', `no machine named "${machines.unknown}" is enrolled with this front door`);
       open.nonces.add(m.nonce);
-      const grant = grants.create({ pending: open, envelope: ctx.body, message: m, acceptedAt: new Date(now()).toISOString() });
+      const grant = grants.create({ pending: open, envelope: ctx.body, message: m, machineIds: machines.ids, acceptedAt: new Date(now()).toISOString() });
       clients.markGranted(grant.client_id);
       // The code binds exactly what the phone signed; the token endpoint
       // compares each field with the redemption.
