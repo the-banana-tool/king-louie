@@ -190,7 +190,7 @@ class MeshIdentity {
 
     // Build X.509 cert DER structure
     const serialNumber = crypto.randomBytes(16);
-    serialNumber[0] &= 0x7f;
+    serialNumber[0] = (serialNumber[0] & 0x7f) || 0x01; // positive, and no redundant leading 0x00 (minimal DER)
 
     const now = new Date();
     const notBefore = _formatAsn1Time(now);

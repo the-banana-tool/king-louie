@@ -199,6 +199,17 @@ describe('MeshIdentity', () => {
     assert.strictEqual(nonces.size, 100);
   });
 
+  // M12: the serial is a positive INTEGER with no redundant leading 0x00.
+  // Before the fix about 0.4% of fallback certificates had one and OpenSSL
+  // refused them ("illegal padding"), so 2000 in a row would fail ~8 times.
+  it('every fallback TLS certificate parses (minimal DER serial)', () => {
+    const crypto = require('crypto');
+    for (let i = 0; i < 2000; i++) {
+      const { cert } = MeshIdentity._generateFallbackTlsCert('gpu-box', 1);
+      assert.doesNotThrow(() => new crypto.X509Certificate(cert), `certificate ${i} does not parse`);
+    }
+  });
+
   it('generates unique peer IDs for different keypairs', () => {
     const id1 = new MeshIdentity();
     const id2 = new MeshIdentity();
