@@ -2,6 +2,9 @@
 const { describe, it, after } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('crypto');
+const fs = require('fs');
+const { GrantStore } = require('../src/frontdoor/oauth/grants');
+const { TokenStore } = require('../src/frontdoor/oauth/tokens');
 const { startFrontDoorHttp } = require('./helpers/frontdoor-harness');
 const { request, pkce, parseConsent, cookieOf } = require('./helpers/oauth-test-client');
 const { setLogLevel } = require('../src/logging');
@@ -109,8 +112,9 @@ describe('grant abuse: codes', () => {
 
   // Carry (Task 24): the token helper drops the tokens even if grants.revoke
   // throws; the 'revoked' event never fires then, so nothing else would.
-  it('a reused code kills the tokens even when saving the revoked grant fails', async () => {
-    const h = await start();
+  it('a reused code kills the tokens and ends the sessions even when saving the revoked grant fails', async () => {
+    const ended = [];
+    const h = await start({ mcp: { handle: async () => {}, endSessionsForGrant: (id) => ended.push(id) } });
     const c = await approvedCode(h);
     const first = await redeem(h, c);
     assert.equal(first.status, 200);
@@ -119,6 +123,38 @@ describe('grant abuse: codes', () => {
     assert.notEqual(again.status, 200);
     assert.equal(h.tokens.find(first.json.access_token), null, 'the access token is gone');
     assert.equal(h.tokens.find(first.json.refresh_token), null, 'the refresh token is gone');
+    assert.deepEqual(h.revokedGrants, [c.grantId], 'onGrantRevoked ran (ruling T25-revokefail)');
+    assert.deepEqual(ended, [c.grantId], 'the grant\'s MCP sessions were ended');
+    assert.ok(h.audit.some((e) => e.kind === 'frontdoor.grant.revoked' && e.data.grant_id === c.grantId && e.data.reason === 'code_reuse'), 'and audited');
+    // The revocation reaches the file on the next attempt.
+    delete h.grants._save;
+    assert.equal(h.grants.revoke(c.grantId, 'code_reuse'), true, 'the retry saves and reports success');
+    assert.equal(h.grants.revoke(c.grantId, 'code_reuse'), false, 'once saved, it is simply revoked');
+    const onDisk = JSON.parse(fs.readFileSync(h.grants.file, 'utf8')).grants[c.grantId];
+    assert.equal(typeof onDisk.revoked_at, 'string');
+  });
+
+  it('a reused code kills the tokens and ends the sessions even when the tokens save fails too', async () => {
+    const ended = [];
+    const h = await start({ mcp: { handle: async () => {}, endSessionsForGrant: (id) => ended.push(id) } });
+    const c = await approvedCode(h);
+    const first = await redeem(h, c);
+    assert.equal(first.status, 200);
+    h.grants._save = () => { throw new Error('disk full'); };
+    h.tokens._save = () => { throw new Error('disk full'); };
+    assert.notEqual((await redeem(h, c)).status, 200);
+    assert.deepEqual(ended, [c.grantId], 'a failing tokens save does not skip onGrantRevoked');
+    // The tokens are gone from memory but not yet from the file; the retry
+    // writes that, though it finds nothing more to remove.
+    const onDisk = () => JSON.parse(fs.readFileSync(h.tokens.file, 'utf8'));
+    assert.ok(Object.values(onDisk().access).some((r) => r.grant_id === c.grantId), 'the failed save left the file as it was');
+    delete h.grants._save;
+    delete h.tokens._save;
+    h.tokens.revokeGrant(c.grantId);
+    assert.ok(!Object.values(onDisk().access).some((r) => r.grant_id === c.grantId));
+    assert.ok(!Object.values(onDisk().refresh).some((r) => r.grant_id === c.grantId));
+    const restarted = new TokenStore({ file: h.tokens.file, grants: h.grants });
+    assert.equal(restarted.find(first.json.access_token), null, 'a restart does not bring them back');
   });
 
   it('a stolen code with the wrong verifier is neither consumed nor revoked; three failures burn it', async () => {
@@ -232,6 +268,22 @@ describe('grant abuse: refresh tokens', () => {
     assert.ok(h.grants.live(g.grantId), 'only the reused grant is revoked');
   });
 
+  it('refresh reuse is alerted and audited even when revoking the grant throws', async () => {
+    let t = Date.now();
+    const h = await start({ now: () => t });
+    const c = await approvedCode(h);
+    const pair = (await redeem(h, c)).json;
+    const next = await refresh(h, c.clientId, pair.refresh_token);
+    assert.equal(next.status, 200);
+    t += 30001;
+    h.grants._save = () => { throw new Error('disk full'); };
+    const reuse = await refresh(h, c.clientId, pair.refresh_token);
+    assert.notEqual(reuse.status, 200);
+    assert.ok(h.alerts.unacked('refresh_reuse').some((a) => a.subject === `grant:${c.grantId}`), 'the theft is alerted');
+    assert.ok(h.audit.some((e) => e.kind === 'frontdoor.refresh_reuse' && e.data.grant_id === c.grantId), 'and audited');
+    assert.equal(h.tokens.find(next.json.refresh_token), null, 'and the tokens still die');
+  });
+
   it('refresh may not narrow to a machine the grant did not pin', async () => {
     const h = await start({ pendingPerIp: 10 });
     const gpu = h.registry.byName('gpu-box');
@@ -261,5 +313,37 @@ describe('grant abuse: refresh tokens', () => {
     assert.equal(same.json.scope, 'fleet:read;machines=gpu-box');
     assert.equal((await refresh(h, u.clientId, upair.refresh_token)).status, 200);
     assert.ok(h.grants.live(c.grantId) && h.grants.live(u.grantId));
+  });
+});
+
+describe('grant abuse: revocation when saving fails', () => {
+  it('the phone revoke drops the tokens and ends the sessions; a retry saves the revocation, which survives a restart', async () => {
+    const ended = [];
+    const h = await start({ mcp: { handle: async () => {}, endSessionsForGrant: (id) => ended.push(id) } });
+    const c = await approvedCode(h);
+    const pair = (await redeem(h, c)).json;
+    const revoke = async () => {
+      const { body: { challenge } } = await h.phoneCall(h.phone, 'POST', '/v1/challenges', { purpose: 'revoke' });
+      return h.phoneCall(h.phone, 'POST', `/v1/clients/${c.grantId}/revoke`, h.phone.revokeClient({ frontdoorId: h.fd.nodeId, grantId: c.grantId, challenge }));
+    };
+    h.grants._save = () => { throw new Error('disk full'); };
+    const failed = await revoke();
+    assert.equal(failed.status, 500);
+    assert.equal(h.grants.live(c.grantId), null);
+    assert.equal(h.tokens.find(pair.access_token), null);
+    assert.equal(h.tokens.find(pair.refresh_token), null);
+    assert.deepEqual(h.revokedGrants, [c.grantId]);
+    assert.deepEqual(ended, [c.grantId]);
+    const audited = () => h.audit.filter((e) => e.kind === 'frontdoor.grant.revoked' && e.data.grant_id === c.grantId && e.data.reason === 'phone').length;
+    assert.equal(audited(), 1, 'the failed attempt is on the record');
+    delete h.grants._save;
+    const retry = await revoke();
+    assert.equal(retry.status, 204, 'the retry succeeds rather than answering 404');
+    assert.equal(typeof JSON.parse(fs.readFileSync(h.grants.file, 'utf8')).grants[c.grantId].revoked_at, 'string');
+    const restarted = new GrantStore({ file: h.grants.file, approverStore: h.store, frontdoorId: h.fd.nodeId });
+    restarted.load();
+    assert.ok(restarted.get(c.grantId));
+    assert.equal(restarted.live(c.grantId), null, 'still revoked after a restart');
+    assert.equal(audited(), 2, 'the attempt that saved it is on the record too');
   });
 });

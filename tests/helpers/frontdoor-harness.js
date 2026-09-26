@@ -70,9 +70,10 @@ async function startFrontDoorHttp({ mcp = null, fetchMetadata = null, clientDefa
   const challenges = new Challenges({ now });
   const revokedGrants = [];
   let mcpEndpoint = null;
+  // The tokens are dropped by the shared revoke helper on both paths (the
+  // token endpoint and the phone route), before this runs.
   const onGrantRevoked = (grantId) => {
     revokedGrants.push(grantId);
-    tokens.revokeGrant(grantId);
     if (mcpEndpoint && typeof mcpEndpoint.endSessionsForGrant === 'function') mcpEndpoint.endSessionsForGrant(grantId);
   };
   const oauth = new OAuthServer({
@@ -81,7 +82,7 @@ async function startFrontDoorHttp({ mcp = null, fetchMetadata = null, clientDefa
   });
   registerGrantRoutes(phoneApi, {
     pending, grants, codes, clients, challenges, approverStore: store, frontdoorId: fd.nodeId,
-    scopeRules: () => scopeRegistry.rules(scopesEnabled), auditLedger, onGrantRevoked, nodes: registry, now
+    scopeRules: () => scopeRegistry.rules(scopesEnabled), auditLedger, onGrantRevoked, tokens, nodes: registry, now
   });
   mcpEndpoint = typeof mcp === 'function' ? mcp({ tokens, grants, registry, scopeRegistry, scopesEnabled, oauth }) : mcp;
   const handler = createFrontDoorHandler({ mcpHost: 'mcp.kl.example.com', oauth, mcp: mcpEndpoint, phoneApiHandler: phoneApi.handler });

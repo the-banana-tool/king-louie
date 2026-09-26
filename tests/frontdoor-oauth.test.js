@@ -1,6 +1,7 @@
 // tests/frontdoor-oauth.test.js — fleet stage 4 §3.4, the whole flow.
 const { describe, it, after } = require('node:test');
 const assert = require('node:assert/strict');
+const net = require('net');
 const { startFrontDoorHttp } = require('./helpers/frontdoor-harness');
 const { request } = require('./helpers/oauth-test-client');
 const { createMcpHttpServer } = require('../src/frontdoor/http');
@@ -10,6 +11,24 @@ setLogLevel('fatal');
 const running = [];
 after(async () => { for (const h of running) await h.stop(); });
 const start = async (opts) => { const h = await startFrontDoorHttp(opts); running.push(h); return h; };
+
+// Bytes as written, for what http.request cannot send (two Host headers, an
+// absolute-form target) → { status, json }.
+function rawRequest(base, text) {
+  const { hostname, port } = new URL(base);
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(Number(port), hostname, () => socket.end(text));
+    let data = '';
+    socket.on('data', (chunk) => { data += chunk; });
+    socket.on('error', reject);
+    socket.on('close', () => {
+      const [head, body = ''] = data.split('\r\n\r\n');
+      let json = null;
+      try { json = JSON.parse(body); } catch { json = null; }
+      resolve({ status: Number(/^HTTP\/1\.1 (\d{3})/.exec(head)[1]), json });
+    });
+  });
+}
 
 describe('connecting a client', () => {
   it('DCR → authorize → typed code on the phone → wait page → token', async () => {
@@ -85,6 +104,44 @@ describe('the mcp. dispatcher', () => {
     }
     // Case and a port do not change the name.
     assert.equal((await request(h.base, { path: '/.well-known/oauth-authorization-server', host: 'MCP.kl.example.com:443' })).status, 200);
+  });
+
+  it('more than one Host header is 400, even when both name mcp.<domain>', async () => {
+    const h = await start();
+    for (const second of ['evil.example.com', 'mcp.kl.example.com']) {
+      const r = await rawRequest(h.base, `GET /.well-known/oauth-authorization-server HTTP/1.1\r\nHost: mcp.kl.example.com\r\nHost: ${second}\r\nConnection: close\r\n\r\n`);
+      assert.equal(r.status, 400, second);
+      assert.equal(r.json.error, 'invalid_request');
+    }
+    const one = await rawRequest(h.base, 'GET /.well-known/oauth-authorization-server HTTP/1.1\r\nHost: mcp.kl.example.com\r\nConnection: close\r\n\r\n');
+    assert.equal(one.status, 200);
+  });
+
+  it('an absolute-form target must name mcp.<domain>; anything else that is not a path is 400', async () => {
+    const seen = [];
+    const h = await start({ mcp: { handle: async (req, res) => { seen.push(req.url); res.writeHead(204); res.end(); } } });
+    const get = (target) => rawRequest(h.base, `GET ${target} HTTP/1.1\r\nHost: mcp.kl.example.com\r\nConnection: close\r\n\r\n`);
+    assert.equal((await get('https://mcp.kl.example.com/mcp?x=1')).status, 204);
+    assert.deepEqual(seen, ['/mcp?x=1'], 'the endpoint is handed origin form');
+    const ok = await get('https://MCP.kl.example.com/.well-known/oauth-authorization-server');
+    assert.equal(ok.status, 200, 'the target is routed by its path');
+    assert.equal(ok.json.issuer, 'https://mcp.kl.example.com');
+    // Handlers behind the dispatcher see origin form: the phone API routes it
+    // (and answers for its missing device headers) rather than 404.
+    const v1 = await get('https://mcp.kl.example.com/v1/grants/pending?user_code=ABC-DEF');
+    assert.equal(v1.status, 401);
+    assert.equal(v1.json.error, 'unauthorized');
+    for (const target of [
+      'https://evil.example.com/.well-known/oauth-authorization-server',
+      'http://mcp.kl.example.com.evil.example.com/.well-known/oauth-authorization-server',
+      'https://user@mcp.kl.example.com/.well-known/oauth-authorization-server',
+      'ftp://mcp.kl.example.com/.well-known/oauth-authorization-server',
+      '*'
+    ]) {
+      const r = await get(target);
+      assert.equal(r.status, 400, target);
+      assert.equal(r.json.error, 'invalid_request', target);
+    }
   });
 
   it('routes /v1 to the phone API, OAuth paths to OAuth, and everything else to 404', async () => {

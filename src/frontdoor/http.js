@@ -16,6 +16,13 @@ const KEEP_ALIVE_TIMEOUT_MS = 5000;
 const MAX_HEADERS_COUNT = 100;
 const MAX_HEADER_SIZE = 16384;
 
+function hostHeaderCount(req) {
+  let n = 0;
+  const raw = req.rawHeaders || [];
+  for (let i = 0; i < raw.length; i += 2) if (String(raw[i]).toLowerCase() === 'host') n += 1;
+  return n;
+}
+
 // `mcpHost` is the name the SNI listener routed this connection by
 // (mcp.<domain>), never the TLS socket's servername: a request whose Host
 // names anything else is misdirected (421), whatever its TLS name was.
@@ -23,9 +30,32 @@ function createFrontDoorHandler({ mcpHost, oauth, mcp = null, phoneApiHandler, p
   if (typeof mcpHost !== 'string' || !mcpHost) throw new TypeError('createFrontDoorHandler needs mcpHost');
   const host = mcpHost.toLowerCase();
   const route = async (req, res) => {
+    // Node keeps the first of several Host headers; a proxy or the client may
+    // have meant another, so more than one is refused outright.
+    if (hostHeaderCount(req) > 1) {
+      sendJson(res, 400, { error: 'invalid_request', error_description: 'more than one Host header' });
+      return;
+    }
     if (requestHost(req) !== host) {
       sendJson(res, 421, { error: 'misdirected_request', error_description: `this front door answers only as ${host}` });
       return;
+    }
+    // A request target in absolute form (RFC 9112 §3.2.2) names its own
+    // authority, which must be this host too; anything else that is not
+    // origin form ("/…") is refused. An accepted absolute form is rewritten
+    // to origin form, so every handler behind this one sees a path.
+    if (!String(req.url).startsWith('/')) {
+      let target = null;
+      try {
+        target = new URL(req.url);
+      } catch {
+        target = null;
+      }
+      if (!target || !/^https?:$/.test(target.protocol) || target.username || target.password || target.hostname.toLowerCase() !== host) {
+        sendJson(res, 400, { error: 'invalid_request', error_description: `the request target must be a path, or an absolute URL on ${host}` });
+        return;
+      }
+      req.url = `${target.pathname}${target.search}`;
     }
     let pathname;
     try {

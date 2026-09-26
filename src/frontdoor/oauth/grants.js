@@ -47,11 +47,15 @@ class GrantStore extends EventEmitter {
     this.now = now;
     this.grants = new Map();
     this.lastTouchSave = new Map();
+    // Grants revoked in memory whose revocation has not reached the file yet
+    // (the save threw). Any successful save writes them.
+    this.unsavedRevocations = new Set();
   }
 
   _save() {
     fs.mkdirSync(path.dirname(this.file), { recursive: true, mode: 0o700 });
     writeFileAtomic(this.file, `${JSON.stringify({ v: 1, grants: Object.fromEntries(this.grants) }, null, 2)}\n`);
+    this.unsavedRevocations.clear();
   }
 
   // R25: verified against the admin approvers as of the grant's own
@@ -151,11 +155,20 @@ class GrantStore extends EventEmitter {
     return [...this.grants.values()].filter((g) => !liveOnly || g.revoked_at === null);
   }
 
+  // true once the revocation is on disk. A revocation whose save threw stays
+  // in memory (live() is null from then on) and is saved by the next
+  // revoke() of the same grant, which reports success; without that retry a
+  // restart would load the grant live again.
   revoke(id, reason) {
     const g = this.grants.get(id);
-    if (!g || g.revoked_at !== null) return false;
-    g.revoked_at = new Date(this.now()).toISOString();
-    g.revoked_reason = reason;
+    if (!g) return false;
+    if (g.revoked_at === null) {
+      g.revoked_at = new Date(this.now()).toISOString();
+      g.revoked_reason = reason;
+      this.unsavedRevocations.add(id);
+    } else if (!this.unsavedRevocations.has(id)) {
+      return false;
+    }
     this._save();
     this.emit('revoked', id);
     return true;
@@ -243,4 +256,29 @@ class AuthCodes {
   }
 }
 
-module.exports = { GrantStore, AuthCodes };
+// Revokes a grant everywhere, whatever fails on the way: the grant store,
+// then the grant's tokens, then onGrantRevoked (which ends its MCP
+// sessions). Each later step runs even if an earlier one throws; an error
+// from the store or the tokens propagates once the later steps have run (a
+// throwing onGrantRevoked is only logged). → whether the store changed (as
+// GrantStore.revoke). Shared by the token endpoint and the phone's revoke
+// route.
+function revokeGrantEverywhere({ grants, tokens = null, onGrantRevoked = () => {} }, grantId, reason) {
+  let changed = false;
+  try {
+    changed = grants.revoke(grantId, reason);
+  } finally {
+    try {
+      if (tokens) tokens.revokeGrant(grantId);
+    } finally {
+      try {
+        onGrantRevoked(grantId);
+      } catch (err) {
+        log.error(`onGrantRevoked(${grantId}) failed: ${err && err.message}`);
+      }
+    }
+  }
+  return changed;
+}
+
+module.exports = { GrantStore, AuthCodes, revokeGrantEverywhere };

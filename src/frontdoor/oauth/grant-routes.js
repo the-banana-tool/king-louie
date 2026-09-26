@@ -1,14 +1,12 @@
 // The phone's side of connecting a client (fleet stage 4 §3.4, §4.9), under
 // F3's /v1 and its X-KL-* device auth. Only an active approver of this front
 // door (its admin-owned approvers/, R25) may use these routes (Deviation 13).
-const { createLogger } = require('../../logging');
 const { ApiError } = require('../phone-api');
 const { printable } = require('../http-util');
 const { normalizeUserCode } = require('../protocol/messages');
 const { checkGrantDecision, checkClientRevoke, verifyPhoneEnvelope } = require('../protocol/checks');
 const { recordFrontDoorEvent } = require('../audit/own-ledger');
-
-const log = createLogger('frontdoor/oauth/grant-routes');
+const { revokeGrantEverywhere } = require('./grants');
 
 // The request as the phone is shown it. client_name is self-declared, so it
 // goes out printable (no controls, bidi or invisible characters); that is
@@ -33,7 +31,7 @@ function resolveMachines(scopes, nodes) {
 }
 
 function registerGrantRoutes(phoneApi, { pending, grants, codes, clients, challenges, approverStore, frontdoorId, scopeRules,
-  auditLedger = null, onGrantRevoked = () => {}, nodes = null, now = Date.now } = {}) {
+  auditLedger = null, onGrantRevoked = () => {}, tokens = null, nodes = null, now = Date.now } = {}) {
   const requireApprover = (ctx) => {
     if (!approverStore.isActive(ctx.deviceId)) throw new ApiError(403, 'forbidden', 'this phone is not an approver on this front door');
   };
@@ -145,14 +143,21 @@ function registerGrantRoutes(phoneApi, { pending, grants, codes, clients, challe
       if (!grants.get(grantId)) throw new ApiError(404, 'not_found', 'no grant with that id');
       const r = checkClientRevoke(ctx.body, { approverStore, frontdoorId, challenges });
       if (!r.ok) throw new ApiError(400, r.reason, `the revocation was refused: ${r.reason}`);
-      if (!grants.revoke(grantId, 'phone')) throw new ApiError(404, 'not_found', 'no live grant with that id');
+      // The tokens and onGrantRevoked run even if saving the grant throws
+      // (ruling T25-revokefail); the phone then sees an error, and its retry
+      // saves the revocation. The audit entry is written either way, since
+      // the grant is revoked in memory from then on.
+      let changed = false;
+      let threw = false;
       try {
-        onGrantRevoked(grantId);
+        changed = revokeGrantEverywhere({ grants, tokens, onGrantRevoked }, grantId, 'phone');
       } catch (err) {
-        // The grant is revoked (never live again) whatever this hook does.
-        log.error(`onGrantRevoked(${grantId}) failed: ${err.message}`);
+        threw = true;
+        throw err;
+      } finally {
+        if (changed || threw) await recordFrontDoorEvent(auditLedger, 'frontdoor.grant.revoked', { grant_id: grantId, device_id: r.deviceId, reason: 'phone' });
       }
-      await recordFrontDoorEvent(auditLedger, 'frontdoor.grant.revoked', { grant_id: grantId, device_id: r.deviceId, reason: 'phone' });
+      if (!changed) throw new ApiError(404, 'not_found', 'no live grant with that id');
       return { status: 204 };
     }
   });

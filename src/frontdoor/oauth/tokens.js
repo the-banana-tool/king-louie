@@ -11,6 +11,7 @@ const { createLogger } = require('../../logging');
 const { writeFileAtomic } = require('../../approvals/approver-store');
 const { parseScope, formatScope } = require('../../fleet/scope-rules');
 const { OAuthError } = require('./errors');
+const { revokeGrantEverywhere } = require('./grants');
 const { readBody, parseForm, sendJson } = require('../http-util');
 const { recordFrontDoorEvent } = require('../audit/own-ledger');
 
@@ -30,6 +31,7 @@ class TokenStore {
     this.graceMs = graceMs;
     this.access = new Map();
     this.refreshTokens = new Map();
+    this.unsavedRemovals = false;
     this.grants = null;
     this._load();
     if (grants) this.attachGrants(grants);
@@ -118,6 +120,15 @@ class TokenStore {
     for (const [h, r] of this.refreshTokens) if (t - r.last_used > this.refreshIdleTtlMs) this.refreshTokens.delete(h);
     fs.mkdirSync(path.dirname(this.file), { recursive: true, mode: 0o700 });
     writeFileAtomic(this.file, `${JSON.stringify({ v: 1, access: Object.fromEntries(this.access), refresh: Object.fromEntries(this.refreshTokens) })}\n`);
+    this.unsavedRemovals = false;
+  }
+
+  // A removal whose save threw is still pending: the next removal saves it
+  // even when it finds nothing more to remove, so a retry reaches the file
+  // and a restart does not bring the tokens back.
+  _saveRemovals(changed) {
+    if (changed) this.unsavedRemovals = true;
+    if (this.unsavedRemovals) this._save();
   }
 
   _mint({ grantId, clientId, scopes, aud, generation }) {
@@ -252,7 +263,7 @@ class TokenStore {
     let changed = false;
     for (const [h, r] of this.access) if (r.grant_id === grantId) { this.access.delete(h); changed = true; }
     for (const [h, r] of this.refreshTokens) if (r.grant_id === grantId) { this.refreshTokens.delete(h); changed = true; }
-    if (changed) this._save();
+    this._saveRemovals(changed);
   }
 
   find(token) {
@@ -264,7 +275,7 @@ class TokenStore {
   }
 
   revokeAccess(token) {
-    if (typeof token === 'string' && this.access.delete(sha(token))) this._save();
+    this._saveRemovals(typeof token === 'string' && this.access.delete(sha(token)));
   }
 }
 
@@ -279,21 +290,22 @@ function pkceMatches(verifier, challenge) {
 function createTokenHandlers({ tokens, codes, grants, alerts = null, auditLedger = null, onGrantRevoked = () => {} } = {}) {
   tokens.attachGrants(grants);
 
-  // The tokens go whatever the grant store does: if saving the revoked grant
-  // throws, its 'revoked' event never fires, so nothing else would drop them.
+  // The tokens and onGrantRevoked run whatever the grant store does: if
+  // saving the revoked grant throws, its 'revoked' event never fires, so
+  // nothing else would drop them (ruling T25-revokefail).
+  // The audit entry is written even when a save threw: the grant is revoked
+  // in memory from then on, and the revocation must be on the record.
   const revokeGrant = async (grantId, reason) => {
     let changed = false;
+    let threw = false;
     try {
-      changed = grants.revoke(grantId, reason);
-    } finally {
-      tokens.revokeGrant(grantId);
-    }
-    try {
-      onGrantRevoked(grantId);
+      changed = revokeGrantEverywhere({ grants, tokens, onGrantRevoked }, grantId, reason);
     } catch (err) {
-      log.error(`onGrantRevoked(${grantId}) failed: ${err && err.message}`);
+      threw = true;
+      throw err;
+    } finally {
+      if (changed || threw) await recordFrontDoorEvent(auditLedger, 'frontdoor.grant.revoked', { grant_id: grantId, reason });
     }
-    if (changed) await recordFrontDoorEvent(auditLedger, 'frontdoor.grant.revoked', { grant_id: grantId, reason });
   };
 
   async function readForm(req) {
@@ -336,9 +348,16 @@ function createTokenHandlers({ tokens, codes, grants, alerts = null, auditLedger
       const r = tokens.refresh({ token: f.refresh_token, clientId: f.client_id, scope: f.scope });
       if (r.reuse) {
         log.warn(`refresh token reuse on ${r.reuse}; revoking the grant`);
-        await revokeGrant(r.reuse, 'refresh_reuse');
-        if (alerts) alerts.raise('refresh_reuse', { subject: `grant:${r.reuse}`, detail: { client_id: f.client_id } });
+        // A detected theft is alerted and audited before the revocation, so
+        // it is reported even if revoking throws; and a failing alert never
+        // stops the revocation.
+        try {
+          if (alerts) alerts.raise('refresh_reuse', { subject: `grant:${r.reuse}`, detail: { client_id: f.client_id } });
+        } catch (err) {
+          log.error(`raising refresh_reuse for ${r.reuse} failed: ${err && err.message}`);
+        }
         await recordFrontDoorEvent(auditLedger, 'frontdoor.refresh_reuse', { grant_id: r.reuse });
+        await revokeGrant(r.reuse, 'refresh_reuse');
         throw new OAuthError('invalid_grant', 'this refresh token was already used; the grant is revoked');
       }
       const grant = grants.live(r.grantId);
