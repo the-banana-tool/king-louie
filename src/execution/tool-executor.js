@@ -175,6 +175,9 @@ class ToolExecutor extends EventEmitter {
     // unsafe one is refused in the tier branch, and nothing below ever asks
     // a person (see _refuseUnsafeResult).
     if (this.refuseUnsafe) this.classifyCall = refuseUnsafeGate(this.classifyCall, this.allowedRoots);
+    // A delegate session's background-task view, handed on to sub-agents so
+    // their BackgroundTask/TaskStatus calls stay inside the session.
+    this.scopedBackgroundTasks = options.scopedBackgroundTasks || null;
   }
 
   get permissionRules() {
@@ -605,6 +608,7 @@ class ToolExecutor extends EventEmitter {
     requester.origin = this.origin;
     requester.refuseUnsafe = this.refuseUnsafe;
     if (this.refuseUnsafe && this.allowedRoots) requester.allowedRoots = this.allowedRoots;
+    if (this.scopedBackgroundTasks) requester.scopedBackgroundTasks = this.scopedBackgroundTasks;
     return this.localOrigin ? markLocalRequester(requester) : requester;
   }
 

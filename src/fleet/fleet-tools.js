@@ -148,10 +148,20 @@ class FleetToolHandler {
     }
   }
 
-  getJobOrThrow(jobId) {
+  // A delegate job is visible only to the caller that started it (ruling
+  // T11-owner); anyone else gets exactly the answer for a job that does not
+  // exist.
+  getJobOrThrow(jobId, origin = STDIO_ORIGIN) {
     const job = this.jobManager.getJob(jobId);
-    if (!job) throw new ToolError('job_not_found', `job_not_found: no job "${jobId}" on this node`);
+    if (!job || (job.kind === 'delegate' && !this.ownsDelegateJob(job.job_id, origin))) {
+      throw new ToolError('job_not_found', `job_not_found: no job "${jobId}" on this node`);
+    }
     return job;
+  }
+
+  ownsDelegateJob(jobId, origin) {
+    return Boolean(this.delegateSessions && typeof this.delegateSessions.ownsJob === 'function'
+      && this.delegateSessions.ownsJob(jobId, origin) === true);
   }
 
   delegateUnavailable() {
@@ -210,6 +220,7 @@ class FleetToolHandler {
       const jobs = this.jobManager;
       const running = [...jobs.jobs.values()]
         .filter((j) => j.status === 'queued' || j.status === 'running' || jobs.isExecuting(j.job_id))
+        .filter((j) => j.kind !== 'delegate' || this.ownsDelegateJob(j.job_id, origin))
         .map((j) => {
           const entry = { job_id: j.job_id, runbook: j.runbook, status: j.status, created_at: j.created_at };
           if (j.kind === 'delegate') {
@@ -253,7 +264,7 @@ class FleetToolHandler {
 
     if (toolName === 'send_to_job') {
       this.auditInbound('send_to_job', { message: args.message }, origin, typeof args.job_id === 'string' ? args.job_id : null);
-      const job = this.getJobOrThrow(args.job_id);
+      const job = this.getJobOrThrow(args.job_id, origin);
       if (job.kind !== 'delegate') {
         throw new ToolError('not_accepted', `not_accepted: job "${job.job_id}" is a runbook job and does not accept messages`);
       }
@@ -262,7 +273,7 @@ class FleetToolHandler {
     }
 
     if (toolName === 'get_job') {
-      const job = this.getJobOrThrow(args.job_id);
+      const job = this.getJobOrThrow(args.job_id, origin);
       const { logs, ...rest } = job;
       // A delegate job's result is the agent's reply: model-written text
       // that is data, not instructions, like any job output (ruling
@@ -272,7 +283,7 @@ class FleetToolHandler {
     }
 
     if (toolName === 'get_job_logs') {
-      const job = this.getJobOrThrow(args.job_id);
+      const job = this.getJobOrThrow(args.job_id, origin);
       const all = job.logs || [];
       let since = 0;
       if (args.since !== undefined && args.since !== null) {
@@ -298,8 +309,8 @@ class FleetToolHandler {
     }
 
     if (toolName === 'cancel_job') {
-      const job = this.getJobOrThrow(args.job_id);
-      if (job.kind === 'delegate' && this.delegateSessions) return this.delegateSessions.cancel(job.job_id);
+      const job = this.getJobOrThrow(args.job_id, origin);
+      if (job.kind === 'delegate' && this.delegateSessions) return this.delegateSessions.cancel(job.job_id, { origin });
       const ok = this.jobManager.cancelJob(job.job_id);
       return { success: ok, job_id: job.job_id, status: job.status };
     }

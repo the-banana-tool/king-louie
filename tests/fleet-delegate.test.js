@@ -14,7 +14,7 @@ const { Tool } = require('../src/tools/tool-schema');
 const { toolRegistry } = require('../src/tools');
 const { JobManager } = require('../src/runbooks/runbook-engine');
 const { DelegateSessions, shouldRefuseUnsafe } = require('../src/fleet/delegate-sessions');
-const { ToolError, STDIO_ORIGIN } = require('../src/fleet/fleet-tools');
+const { ToolError, STDIO_ORIGIN, FleetToolHandler } = require('../src/fleet/fleet-tools');
 const { REFUSE_UNSAFE_MESSAGE } = require('../src/approvals/executor-options');
 const { holdEventLoop } = require('./helpers/hold-event-loop');
 
@@ -134,7 +134,7 @@ async function setup({ maxSessions = 4, maxJobs = 2, idleCloseMs = 7200000, with
   return { core, sessions, jobs, calls, audit, ended, root, dataDir, advance: (ms) => { now += ms; } };
 }
 
-const origin = (scopes) => ({ kind: 'frontdoor', client_id: 'dcr_x', client_name: 'Example Client', grant_id: 'gr_y', scopes, mcp_session: 'mcp-1' });
+const origin = (scopes, grantId = 'gr_y') => ({ kind: 'frontdoor', client_id: 'dcr_x', client_name: 'Example Client', grant_id: grantId, scopes, mcp_session: 'mcp-1' });
 
 describe('DelegateSessions', () => {
   it('a routine tool call runs; the transcript, result and evidence summary are recorded', async () => {
@@ -189,7 +189,7 @@ describe('DelegateSessions', () => {
     for (let i = 0; i < 200 && !slowStarted; i += 1) await new Promise((r) => setTimeout(r, 10));
     assert.ok(slowStarted);
     await assert.rejects(t.sessions.send(jobId, 'more', { origin: origin(['fleet:delegate']) }), (err) => err.code === 'node_busy' && err.data.retry_after === 5);
-    const res = t.sessions.cancel(jobId);
+    const res = t.sessions.cancel(jobId, { origin: origin(['fleet:delegate']) });
     assert.equal(res.success, true);
     await t.sessions.turns.get(jobId);
     assert.equal(t.jobs.getJob(jobId).status, 'cancelled');
@@ -308,7 +308,7 @@ describe('DelegateSessions', () => {
     const { job_id: jobId } = await t.sessions.start({ task: 'delegate to a child', origin: origin(['fleet:delegate']) });
     await waitFor(() => slowStarted, 'the sub-agent\'s tool to start');
     assert.equal(t.jobs.activeJobCount(), 1);
-    assert.equal(t.sessions.cancel(jobId).success, true);
+    assert.equal(t.sessions.cancel(jobId, { origin: origin(['fleet:delegate']) }).success, true);
     await t.sessions.turns.get(jobId);
     assert.ok(seen.some((x) => x.tool === SLOW && x.result && x.result.cancelled === true), 'the sub-agent\'s tool saw the abort');
     assert.equal(t.jobs.getJob(jobId).status, 'cancelled');
@@ -329,7 +329,7 @@ describe('DelegateSessions', () => {
     await waitFor(() => bgRuns.length === 2, 'the second background task');
     assert.equal(t.jobs.getJob(a.job_id).session, 'idle', 'the turn ended; the background task outlives it');
 
-    t.sessions.cancel(a.job_id);
+    t.sessions.cancel(a.job_id, { origin: origin(['fleet:delegate']) });
     await waitFor(() => bgRuns[0].aborted, 'the first background task to stop');
     const bg = t.core.context.getBackgroundTaskManager();
     await waitFor(() => bg.list().some((x) => x.state === 'stopped'), 'the task to settle');
@@ -403,5 +403,95 @@ describe('DelegateSessions', () => {
     const grep = seen.find((x) => x.tool === 'Grep').result;
     assert.equal(grep.ok, true, JSON.stringify(grep));
     assert.deepEqual(grep.matches.map((m) => m.line), ['MARKER inside']);
+  });
+  it('a session belongs to the grant that started it; others see no such job (T11-owner)', async () => {
+    const t = await setup();
+    const scopes = ['fleet:read', 'fleet:run', 'fleet:delegate'];
+    const A = origin(scopes, 'gr_a');
+    const B = origin(scopes, 'gr_b');
+    const handler = new FleetToolHandler({ nodeConfig: { name: 'gpu-box', profile: 'agent', capabilities: [], policy: {} }, jobManager: t.jobs, delegateSessions: t.sessions });
+    script = [{ type: 'text', content: 'hello' }];
+    const { job_id: jobId } = await handler.call('delegate', { task: 'mine', machine: 'gpu-box' }, { origin: A });
+    await t.sessions.turns.get(jobId);
+    const notFound = (err) => err instanceof ToolError && err.code === 'job_not_found' && err.message === `job_not_found: no job "${jobId}" on this node`;
+    for (const who of [B, STDIO_ORIGIN]) {
+      await assert.rejects(handler.call('get_job', { job_id: jobId }, { origin: who }), notFound);
+      await assert.rejects(handler.call('get_job_logs', { job_id: jobId }, { origin: who }), notFound);
+      await assert.rejects(handler.call('send_to_job', { job_id: jobId, message: 'hi' }, { origin: who }), notFound);
+      await assert.rejects(handler.call('cancel_job', { job_id: jobId }, { origin: who }), notFound);
+      const state = await handler.call('get_state', {}, { origin: who });
+      assert.ok(!state.running_jobs.some((j) => j.job_id === jobId), 'get_state does not list it');
+      // Called directly, DelegateSessions answers the same way.
+      await assert.rejects(t.sessions.send(jobId, 'hi', { origin: who }), (err) => err.code === 'job_not_found');
+      assert.throws(() => t.sessions.cancel(jobId, { origin: who }), (err) => err.code === 'job_not_found');
+    }
+    assert.equal(t.jobs.getJob(jobId).status, 'running', 'nothing the other callers did touched it');
+    assert.equal((await handler.call('get_job', { job_id: jobId }, { origin: A })).job_id, jobId);
+    assert.ok((await handler.call('get_state', {}, { origin: A })).running_jobs.some((j) => j.job_id === jobId));
+    assert.equal((await handler.call('cancel_job', { job_id: jobId }, { origin: A })).success, true);
+  });
+
+  it('DelegateSessions.cancel touches only delegate jobs', async () => {
+    const t = await setup();
+    const job = t.jobs.createJob({ machine: 'gpu-box', runbook: 'x', tier: 'routine' });
+    assert.throws(() => t.sessions.cancel(job.job_id, { origin: STDIO_ORIGIN }), (err) => err.code === 'job_not_found');
+    assert.equal(t.jobs.getJob(job.job_id).status, 'queued');
+  });
+
+  it('a stdio session is owned by stdio; a front-door origin without a grant cannot start one', async () => {
+    const t = await setup();
+    script = [{ type: 'text', content: 'hi' }];
+    const { job_id: jobId } = await t.sessions.start({ task: 'local', origin: STDIO_ORIGIN });
+    await t.sessions.turns.get(jobId);
+    assert.equal(t.sessions.ownsJob(jobId, STDIO_ORIGIN), true);
+    assert.equal(t.sessions.ownsJob(jobId, null), true, 'no origin is the stdio caller');
+    assert.equal(t.sessions.ownsJob(jobId, origin(['fleet:delegate'])), false);
+    await assert.rejects(t.sessions.start({ task: 'x', origin: { ...origin(['fleet:delegate']), grant_id: '' } }), (err) => err.code === 'invalid_params');
+  });
+
+  it('TaskStatus in one session cannot list, read or stop another session\'s background task (T11-taskstatus)', async () => {
+    const t = await setup({ maxJobs: 3 });
+    const bg = t.core.context.getBackgroundTaskManager();
+    script = [use('BackgroundTask', { task: 'bg a' }), { type: 'text', content: 'started a' }];
+    byTask.set('bg a', [use(BGSLOW)]);
+    const a = await t.sessions.start({ task: 'start bg a', origin: origin(['fleet:delegate'], 'gr_a') });
+    await t.sessions.turns.get(a.job_id);
+    await waitFor(() => bgRuns.length === 1, 'task a');
+    const taskA = bg.list()[0].id;
+
+    script = [use('BackgroundTask', { task: 'bg b' }), { type: 'text', content: 'started b' }];
+    byTask.set('bg b', [use(BGSLOW)]);
+    const b = await t.sessions.start({ task: 'start bg b', origin: origin(['fleet:delegate'], 'gr_b') });
+    await t.sessions.turns.get(b.job_id);
+    await waitFor(() => bgRuns.length === 2, 'task b');
+    const taskB = bg.list().find((x) => x.id !== taskA).id;
+
+    seen = [];
+    script = [
+      use('TaskStatus', { action: 'list' }),
+      use('TaskStatus', { action: 'status', taskId: taskA }),
+      use('TaskStatus', { action: 'output', taskId: taskA }),
+      use('TaskStatus', { action: 'stop', taskId: taskA }),
+      { type: 'text', content: 'poked' }
+    ];
+    await t.sessions.send(b.job_id, 'poke a', { origin: origin(['fleet:delegate'], 'gr_b') });
+    await t.sessions.turns.get(b.job_id);
+    const [list, status, output, stop] = seen.filter((x) => x.tool === 'TaskStatus').map((x) => x.result);
+    assert.deepEqual(list.tasks.map((x) => x.id), [taskB]);
+    assert.equal(status.ok, false);
+    assert.notEqual(output.ok, true);
+    assert.ok(!JSON.stringify(output).includes('Starting'), 'no output of task a');
+    assert.equal(stop.ok, false);
+    assert.equal(bgRuns[0].aborted, false);
+    assert.equal(bg.get(taskA).state, 'running');
+
+    // A sub-agent of session a inherits a's view.
+    seen = [];
+    script = [use('SpawnAgent', { task: 'child list', agentId: 'main' }), { type: 'text', content: 'listed' }];
+    byTask.set('child list', [use('TaskStatus', { action: 'list' })]);
+    await t.sessions.send(a.job_id, 'list via a child', { origin: origin(['fleet:delegate'], 'gr_a') });
+    await t.sessions.turns.get(a.job_id);
+    const childList = seen.find((x) => x.tool === 'TaskStatus').result;
+    assert.deepEqual(childList.tasks.map((x) => x.id), [taskA]);
   });
 });

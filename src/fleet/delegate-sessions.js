@@ -6,7 +6,6 @@
 // Sessions live in memory: after a restart their job ids are unknown here and
 // the front door reports node_restarted.
 const path = require('path');
-const { AsyncLocalStorage } = require('async_hooks');
 const { createLogger } = require('../logging');
 const { isPathUnderRoots } = require('../platform/path-roots');
 const { EvidenceLedger } = require('../verification/evidence-ledger');
@@ -48,6 +47,50 @@ function capText(value, max) {
 
 const toolOk = (result) => Boolean(result) && result.success !== false && result.ok !== false;
 
+// Who a session belongs to (ruling T11-owner): the grant for a front-door
+// caller, 'stdio' for this node's own callers (STDIO_ORIGIN, or none). A
+// front-door origin without a grant id belongs to no one.
+function sessionOwner(origin) {
+  if (origin && origin.kind === 'frontdoor') {
+    return typeof origin.grant_id === 'string' && origin.grant_id ? `grant:${origin.grant_id}` : null;
+  }
+  return 'stdio';
+}
+
+// The BackgroundTaskManager as one session's turns see it (ruling
+// T11-taskstatus): BackgroundTask records what it spawns here, and TaskStatus
+// can get, list, read and stop only those. A foreign id answers exactly like
+// an unknown one.
+function scopedBackgroundTasks(manager, ids) {
+  const mine = (id) => ids.has(id);
+  const notFound = (id) => new Error(`Background task not found: ${id}`);
+  return Object.freeze({
+    async spawn(config, executor) {
+      // Recorded before the executor runs: it writes the task's output
+      // through this view straight away.
+      const task = await manager.spawn(config, (bgTask) => {
+        ids.add(bgTask.id);
+        return executor(bgTask);
+      });
+      ids.add(task.id);
+      return task;
+    },
+    get: (id) => (mine(id) ? manager.get(id) : undefined),
+    list: () => manager.list().filter((t) => mine(t.id)),
+    readOutput(id) {
+      if (!mine(id)) throw notFound(id);
+      return manager.readOutput(id);
+    },
+    stop(id) {
+      if (!mine(id)) throw notFound(id);
+      return manager.stop(id);
+    },
+    appendOutput(id, text) {
+      if (mine(id)) manager.appendOutput(id, text);
+    }
+  });
+}
+
 class DelegateSessions {
   constructor({ core, nodeConfig, jobManager, auditLedger = null, leaseManager = null, now = Date.now,
     fullTranscriptTools = FULL_TRANSCRIPT_TOOLS, providers = null, sweepMs = 60000 } = {}) {
@@ -66,15 +109,6 @@ class DelegateSessions {
     this.fullTools = new Set(fullTranscriptTools);
     this.sessions = new Map();
     this.turns = new Map();
-    // The session whose turn is running in this async context: a background
-    // task created inside a turn (by the turn itself, a sub-agent, or another
-    // background task) belongs to that session (T11-bg).
-    this.turnScope = new AsyncLocalStorage();
-    this.backgroundTasks = null;
-    this.onBackgroundTask = (task) => {
-      const session = this.turnScope.getStore();
-      if (session && task && task.id) session.backgroundTaskIds.add(task.id);
-    };
 
     this.agent = core.context.getAgent(this.config.agent);
     if (!this.agent) {
@@ -108,19 +142,34 @@ class DelegateSessions {
   }
 
   // The core builds its BackgroundTaskManager in start(), so it is looked up
-  // on the first turn rather than at construction.
-  _watchBackgroundTasks() {
-    if (this.backgroundTasks) return;
+  // when a turn needs it rather than at construction.
+  _backgroundTasks() {
     const getter = this.core.context.getBackgroundTaskManager;
-    const manager = typeof getter === 'function' ? getter() : null;
-    if (!manager || typeof manager.on !== 'function') return;
-    this.backgroundTasks = manager;
-    manager.on('taskCreated', this.onBackgroundTask);
+    return typeof getter === 'function' ? getter() || null : null;
+  }
+
+  // The session a caller may act on, or job_not_found: another caller's
+  // session answers exactly like one that does not exist (T11-owner).
+  _sessionFor(jobId, origin) {
+    const session = this.sessions.get(jobId);
+    if (!session || session.owner !== sessionOwner(origin)) {
+      throw new ToolError('job_not_found', `job_not_found: no delegate session "${jobId}" on this node`);
+    }
+    return session;
+  }
+
+  // For FleetToolHandler's job reads: true only for a delegate session this
+  // caller started.
+  ownsJob(jobId, origin) {
+    const session = this.sessions.get(jobId);
+    return Boolean(session) && session.owner === sessionOwner(origin);
   }
 
   // Async so every refusal reaches the caller as a rejection (preflight M8).
   async start({ task, cwd = null, origin, request_id: requestId = null } = {}) {
     if (typeof task !== 'string' || !task.trim()) throw new ToolError('invalid_params', 'invalid_params: "task" is required');
+    const owner = sessionOwner(origin);
+    if (!owner) throw new ToolError('invalid_params', 'invalid_params: a front-door caller needs a grant');
     const dir = this._resolveCwd(cwd);
     if (this._openCount() >= this.config.maxSessions) {
       throw new ToolError('node_busy', `node_busy: this node already has ${this.config.maxSessions} open delegate session(s)`, { retry_after: 5 });
@@ -131,7 +180,7 @@ class DelegateSessions {
     const job = this.jobs.createDelegateJob({ machine: this.nodeConfig.name, task, cwd: dir });
     const session = {
       jobId: job.job_id, cwd: dir, state: 'idle', history: [], evidence: new EvidenceLedger(),
-      lastActivity: this.now(), turnAbort: null, requestId, backgroundTaskIds: new Set()
+      lastActivity: this.now(), turnAbort: null, requestId, owner, backgroundTaskIds: new Set(), backgroundView: null
     };
     this.sessions.set(job.job_id, session);
     this.jobs.getSignal(job.job_id).addEventListener('abort', () => this._onJobAborted(session), { once: true });
@@ -140,8 +189,7 @@ class DelegateSessions {
   }
 
   async send(jobId, message, { origin } = {}) {
-    const session = this.sessions.get(jobId);
-    if (!session) throw new ToolError('job_not_found', `job_not_found: no delegate session "${jobId}" on this node`);
+    const session = this._sessionFor(jobId, origin);
     if (session.state === 'turn') {
       throw new ToolError('node_busy', 'node_busy: a turn is running in this session; send the message when it ends', { retry_after: 5 });
     }
@@ -156,7 +204,9 @@ class DelegateSessions {
     return { job_id: jobId, status: 'running', session: 'turn' };
   }
 
-  cancel(jobId) {
+  // Only this caller's own delegate sessions; a runbook job is not ours.
+  cancel(jobId, { origin } = {}) {
+    this._sessionFor(jobId, origin);
     const ok = this.jobs.cancelJob(jobId);
     const job = this.jobs.getJob(jobId);
     return { success: ok, job_id: jobId, status: job ? job.status : null };
@@ -171,12 +221,10 @@ class DelegateSessions {
 
   stop() {
     clearInterval(this.timer);
-    if (this.backgroundTasks) this.backgroundTasks.off('taskCreated', this.onBackgroundTask);
     for (const session of this.sessions.values()) if (session.turnAbort) session.turnAbort.abort();
   }
 
   _beginTurn(session, message, origin) {
-    this._watchBackgroundTasks();
     this.jobs.beginTurn(session.jobId);
     session.state = 'turn';
     const run = this._runTurn(session, message, origin)
@@ -221,7 +269,9 @@ class DelegateSessions {
       const messages = [];
       for (const h of session.history) messages.push({ role: 'user', content: h.user }, { role: 'assistant', content: h.assistant });
       messages.push({ role: 'user', content: message });
-      const result = await this.turnScope.run(session, () => this.core.context.getAgentExecutorAdapter().execute(this.agent, message, {
+      const manager = this._backgroundTasks();
+      if (manager && !session.backgroundView) session.backgroundView = scopedBackgroundTasks(manager, session.backgroundTaskIds);
+      const result = await this.core.context.getAgentExecutorAdapter().execute(this.agent, message, {
         ...(this.config.provider ? { provider: this.config.provider } : {}),
         ...(this.config.model ? { model: this.config.model } : {}),
         workingDirectory: session.cwd,
@@ -234,9 +284,11 @@ class DelegateSessions {
           refuseUnsafe: shouldRefuseUnsafe(origin, this.nodeConfig),
           // T11-roots: with no node policy, the refuseUnsafe classifier
           // allows paths under the session's cwd and nowhere else.
-          allowedRoots: [session.cwd]
+          allowedRoots: [session.cwd],
+          // T11-taskstatus: this session's background tasks only.
+          ...(session.backgroundView ? { scopedBackgroundTasks: session.backgroundView } : {})
         }
-      }));
+      });
       this._record(session, message, result);
     } catch (err) {
       failure = err;
@@ -279,12 +331,13 @@ class DelegateSessions {
   // T11-bg: cancel_job also stops the background tasks this session's turns
   // started; they otherwise outlive the turn that spawned them.
   _stopBackgroundTasks(session) {
-    if (!this.backgroundTasks) return;
+    const manager = this._backgroundTasks();
+    if (!manager) return;
     for (const id of session.backgroundTaskIds) {
-      const task = this.backgroundTasks.get(id);
+      const task = manager.get(id);
       if (!task || !LIVE_BACKGROUND_STATES.has(task.state)) continue;
       try {
-        this.backgroundTasks.stop(id);
+        manager.stop(id);
       } catch (err) {
         log.warn(`stopping background task ${id} of ${session.jobId} failed: ${err.message}`);
       }
@@ -311,4 +364,4 @@ class DelegateSessions {
   }
 }
 
-module.exports = { DelegateSessions, FULL_TRANSCRIPT_TOOLS, PARAMS_CAP, RESULT_CAP, FULL_CAP, capText, shouldRefuseUnsafe };
+module.exports = { DelegateSessions, FULL_TRANSCRIPT_TOOLS, PARAMS_CAP, RESULT_CAP, FULL_CAP, capText, shouldRefuseUnsafe, sessionOwner };

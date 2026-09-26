@@ -2033,6 +2033,7 @@ function createCore(deps = {}) {
       workingDirectory,
       allowedDirectories: executorOptions.allowedDirectories || [],
       requireApproval: true,
+      scopedBackgroundTasks: executorOptions.scopedBackgroundTasks || null,
       runtimeEnvironment: resolvedRuntimeEnvironment,
       // approvalRequester, denyAutoApproval, localOrigin and origin, plus in
       // phone mode approvalTimeoutMs and classifyCall. denyAutoApproval closes
@@ -2060,7 +2061,9 @@ function createCore(deps = {}) {
         // job (F5's job-scoped leases).
         origin: seam.origin,
         get agentExecutorAdapter() { return agentExecutorAdapter; },
-        get backgroundTaskManager() { return backgroundTaskManager; },
+        // A delegate turn (and its children) sees only its own session's
+        // background tasks (ruling T11-taskstatus).
+        get backgroundTaskManager() { return executorOptions.scopedBackgroundTasks || backgroundTaskManager; },
         // Case mode: the chat send path passes { ...caseTurn (caseId, dir,
         // turnId, title, orientation), runtime, ownerMessages }. The case
         // tools read it, and ToolExecutor's ledger write guard uses dir.
@@ -2214,7 +2217,8 @@ function createCore(deps = {}) {
         // Fleet stage 4 §3.8: a delegate turn's chat id and scope gate.
         ...(runtimeOptions.chatId ? { chatId: runtimeOptions.chatId } : {}),
         ...(runtimeOptions.refuseUnsafe === true ? { refuseUnsafe: true } : {}),
-        ...(Array.isArray(runtimeOptions.allowedRoots) ? { allowedRoots: runtimeOptions.allowedRoots } : {})
+        ...(Array.isArray(runtimeOptions.allowedRoots) ? { allowedRoots: runtimeOptions.allowedRoots } : {}),
+        ...(runtimeOptions.scopedBackgroundTasks ? { scopedBackgroundTasks: runtimeOptions.scopedBackgroundTasks } : {})
       }
     );
 
@@ -2454,7 +2458,10 @@ function createCore(deps = {}) {
               || (options.executorOptions && options.executorOptions.refuseUnsafe === true),
             // The delegate cwd the refuseUnsafe fallback classifier allows (T11-roots).
             allowedRoots: (options.approvalRequester && options.approvalRequester.allowedRoots)
-              || (options.executorOptions && options.executorOptions.allowedRoots) || null
+              || (options.executorOptions && options.executorOptions.allowedRoots) || null,
+            // A delegate session's background-task view (T11-taskstatus).
+            scopedBackgroundTasks: (options.approvalRequester && options.approvalRequester.scopedBackgroundTasks)
+              || (options.executorOptions && options.executorOptions.scopedBackgroundTasks) || null
           }
         );
         const executor = new AgentExecutor(runtime.provider, runtime.toolExecutor, {
