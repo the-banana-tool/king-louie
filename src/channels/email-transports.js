@@ -19,6 +19,18 @@ const MAX_MESSAGES_PER_POLL = 50;
 const MAX_MESSAGE_BYTES = 2 * 1024 * 1024;
 const MAX_ATTEMPTS = 3;
 const MAX_TRACKED_ATTEMPTS = 1000;
+// A handler that never settles would hold the INBOX lock and the IMAP session
+// and stall every later poll: it fails the attempt after this long instead.
+const HANDLE_TIMEOUT_MS = 60 * 1000;
+
+function withTimeout(promise, ms) {
+  let timer = null;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`handling timed out after ${ms} ms`)), ms);
+    if (typeof timer.unref === 'function') timer.unref();
+  });
+  return Promise.race([Promise.resolve(promise), timeout]).finally(() => clearTimeout(timer));
+}
 
 // `relay` is a ContactRelayClient; the channel exposes it (EmailChannel.relay)
 // so the router routes that relay's events here.
@@ -129,10 +141,13 @@ function smtpError(err, secrets = []) {
 }
 
 // smtp: { host, port, secure, user }; imap: { host, port, user, secure? };
-// passwords come from the vault through getPassword('smtp' | 'imap').
+// passwords come from the vault through getPassword('smtp' | 'imap');
+// handleTimeoutMs bounds each onItem (default 60 s; a timeout is a failed attempt).
 function createImapSmtpTransport({
-  smtp, imap, getPassword = () => null, nodemailer = null, ImapFlow = null, simpleParser = null, log = createLogger('contact/email-imap')
+  smtp, imap, getPassword = () => null, nodemailer = null, ImapFlow = null, simpleParser = null, log = createLogger('contact/email-imap'),
+  handleTimeoutMs = HANDLE_TIMEOUT_MS
 }) {
+  const timeoutMs = Number.isFinite(handleTimeoutMs) && handleTimeoutMs > 0 ? handleTimeoutMs : HANDLE_TIMEOUT_MS;
   const mailer = nodemailer || require('nodemailer');
   const Imap = ImapFlow || require('imapflow').ImapFlow;
   const parse = simpleParser || require('mailparser').simpleParser;
@@ -159,7 +174,7 @@ function createImapSmtpTransport({
     return transporter;
   };
 
-  // uid → failed handling attempts. A message whose handling fails stays
+  // `<uidValidity>:<uid>` → failed handling attempts. A message whose handling fails stays
   // UNSEEN for the next poll; after MAX_ATTEMPTS it is marked seen, so one
   // poison message cannot loop forever.
   const attempts = new Map();
@@ -173,8 +188,8 @@ function createImapSmtpTransport({
     try {
       const uids = (await client.search({ seen: false }, { uid: true })) || [];
       for (const uid of uids.slice(0, MAX_MESSAGES_PER_POLL)) {
-        const key = String(uid);
-        const msg = await client.fetchOne(key, { source: { maxLength: MAX_MESSAGE_BYTES + 1 }, size: true }, { uid: true });
+        const key = `${String(client.mailbox?.uidValidity ?? '')}:${uid}`;
+        const msg = await client.fetchOne(String(uid), { source: { maxLength: MAX_MESSAGE_BYTES + 1 }, size: true }, { uid: true });
         let item = null;
         try {
           if (!msg || !msg.source) log.warn(`message ${uid} has no source; skipped`);
@@ -189,7 +204,7 @@ function createImapSmtpTransport({
         }
         if (item) {
           try {
-            await onItem(item);
+            await withTimeout(onItem(item), timeoutMs);
           } catch (err) {
             const n = (attempts.get(key) || 0) + 1;
             if (n < MAX_ATTEMPTS) {

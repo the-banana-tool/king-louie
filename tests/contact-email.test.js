@@ -498,3 +498,68 @@ describe('Authentication-Results: repeated properties', () => {
     assert.strictEqual(authResultsPass('mx.example.com; dmarc=pass header.from=example.com header.from=example.org', PASS), true);
   });
 });
+
+// ---- Task 8 fix round 2 ----
+
+describe('IMAP: a stuck handler times out', () => {
+  const { holdEventLoop } = require('./helpers/hold-event-loop');
+
+  it('a handler that never settles fails the attempt; the poll finishes and the next one runs', async () => {
+    const release = holdEventLoop();
+    try {
+      const mailbox = [
+        { uid: 40, seen: false, source: rawReply({ subject: 'Re: [KL-K7QD4M]', body: 'stuck' }) },
+        { uid: 41, seen: false, source: rawReply({ subject: 'Re: [KL-K7QD4M]', body: 'b' }) }
+      ];
+      const log = captureLog();
+      const transport = createImapSmtpTransport({
+        smtp: { host: '127.0.0.1', port: 1, secure: false, user: '' },
+        imap: { host: '127.0.0.1', port: 993, user: 'kl@example.com' },
+        ImapFlow: imapDouble(mailbox),
+        handleTimeoutMs: 50,
+        log
+      });
+      const email = new EmailChannel({ transport, getConfig: () => CONFIG, log });
+      const seen = [];
+      email.onContactReply(async (c, answer) => {
+        seen.push(answer.text);
+        if (answer.text === 'stuck') return new Promise(() => {});
+        return { ok: true, outcome: 'recorded', ackText: null };
+      });
+      assert.deepStrictEqual(await email.pollOnce(), { replies: 1, bounces: 0 });
+      assert.deepStrictEqual(mailbox.map((m) => m.seen), [false, true], 'the stuck message stays unseen');
+      assert.ok(log.lines.some((l) => /^warn message 40 left unseen .*timed out after 50 ms/.test(l)), log.lines.join('\n'));
+      await email.pollOnce();
+      assert.deepStrictEqual(seen, ['stuck', 'b', 'stuck'], 'the next poll ran');
+    } finally {
+      release();
+    }
+  });
+});
+
+describe('IMAP: attempts are keyed by UIDVALIDITY and UID', () => {
+  it('a new UIDVALIDITY starts the count again', async () => {
+    const mailbox = [{ uid: 50, seen: false, source: rawReply({ subject: 'Re: [KL-K7QD4M]', body: 'poison' }) }];
+    const Base = imapDouble(mailbox);
+    let uidValidity = 1n;
+    class Imap extends Base {
+      get mailbox() { return { path: 'INBOX', uidValidity }; }
+    }
+    const transport = createImapSmtpTransport({
+      smtp: { host: '127.0.0.1', port: 1, secure: false, user: '' },
+      imap: { host: '127.0.0.1', port: 993, user: 'kl@example.com' },
+      ImapFlow: Imap,
+      log: captureLog()
+    });
+    const email = new EmailChannel({ transport, getConfig: () => CONFIG, log: captureLog() });
+    email.onContactReply(async () => { throw new Error('boom'); });
+    await email.pollOnce();
+    await email.pollOnce();
+    uidValidity = 2n; // the mailbox was recreated: uid 50 is another message now
+    await email.pollOnce();
+    assert.strictEqual(mailbox[0].seen, false, 'one failure under the new UIDVALIDITY, not the third');
+    await email.pollOnce();
+    await email.pollOnce();
+    assert.strictEqual(mailbox[0].seen, true);
+  });
+});
