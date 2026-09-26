@@ -59,10 +59,13 @@ function cut(text, max) {
 // F3's approval origin is exactly { client, session, job_id } with strings
 // of at most 200 code points (checkOrigin); a front-door call is described
 // by its client's self-declared name and its MCP session (Deviation 12).
-// An empty or reserved client_name falls back to the client_id.
+// An empty or reserved client_name falls back to the client_id. Controls
+// and invisible format characters (zero-width, bidi) are removed first, so
+// "desktop" plus a zero-width space neither slips past the reserved list
+// nor shows on the phone as "desktop".
 function frontDoorClient(o) {
-  const name = typeof o.client_name === 'string' ? o.client_name.trim() : '';
-  if (name && !RESERVED_CLIENT_NAMES.includes(name.toLowerCase())) return o.client_name;
+  const name = typeof o.client_name === 'string' ? o.client_name.replace(/[\p{Cc}\p{Cf}]/gu, '').trim() : '';
+  if (name && !RESERVED_CLIENT_NAMES.includes(name.toLowerCase())) return name;
   return o.client_id || 'frontdoor-client';
 }
 

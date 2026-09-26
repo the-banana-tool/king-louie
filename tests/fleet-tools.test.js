@@ -108,6 +108,14 @@ describe('front-door origins (fix round 1)', () => {
     assert.equal(approvalOrigin({ kind: 'frontdoor', client_name: 'Example Client', client_id: 'dcr_x' }).client, 'Example Client');
   });
 
+  it('strips format characters (zero-width, bidi) before comparing with the reserved names, and shows the stripped name', () => {
+    for (const name of ['desktop\u200b', '\u202edesktop', 'desk\u200dtop\ufeff', ' \u2066Stdio-MCP\u2069 ', 'king\u00ad-louie', '\u2060\u0000desktop']) {
+      assert.equal(approvalOrigin({ kind: 'frontdoor', client_name: name, client_id: 'dcr_x' }).client, 'dcr_x', JSON.stringify(name));
+    }
+    assert.equal(approvalOrigin({ kind: 'frontdoor', client_name: '\u200b\u202e', client_id: 'dcr_x' }).client, 'dcr_x');
+    assert.equal(approvalOrigin({ kind: 'frontdoor', client_name: 'Exa\u200bmple\u202e Client', client_id: 'dcr_x' }).client, 'Example Client');
+  });
+
   it('clips a 300-character mcp_session to 200 code points', () => {
     const o = approvalOrigin({ ...FD_ORIGIN, mcp_session: '\u{1F600}'.repeat(300) }, null);
     assert.equal(Array.from(o.session).length, 200);

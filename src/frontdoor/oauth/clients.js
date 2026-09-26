@@ -24,7 +24,10 @@ const LIMITS = Object.freeze({
   // front door hold: every stored client (granted ones too), and the CIMD cache.
   maxClients: 1000,
   cimdCacheMax: 500,
-  cimdInflightMax: 16
+  cimdInflightMax: 16,
+  // A failed fetch is answered from memory for a minute, so retrying one
+  // URL does not become a fetch storm against it.
+  cimdFailureMs: 60000
 });
 const REDIRECT_URI_MAX = 2048;
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '[::1]', 'localhost']);
@@ -80,6 +83,7 @@ class ClientRegistry {
     this.clients = new Map();
     this.cimd = new Map(); // client_id → { client, at }, oldest first
     this.inflight = new Map(); // client_id → Promise<client>
+    this.cimdFailed = new Map(); // client_id → { err, at }, oldest first
     this.byIp = new Map(); // rate key → [registration times]
     this._load();
   }
@@ -155,7 +159,7 @@ class ClientRegistry {
     if (name.length === 0 || name.length > CLIENT_NAME_MAX) throw invalid(`client_name must be 1–${CLIENT_NAME_MAX} characters`);
     const uris = body.redirect_uris;
     if (!Array.isArray(uris) || uris.length === 0 || uris.length > MAX_REDIRECT_URIS || !uris.every(validRedirectUri)) {
-      throw invalid(`redirect_uris must list 1–${MAX_REDIRECT_URIS} https (or loopback http) URLs without fragments`);
+      throw invalid(`redirect_uris must list 1–${MAX_REDIRECT_URIS} https (or loopback http) URLs, each in canonical URL form (percent-encoded as the URL parser prints it, with no userinfo or fragment)`);
     }
     const grantTypes = body.grant_types === undefined ? ['authorization_code'] : body.grant_types;
     if (!Array.isArray(grantTypes) || grantTypes.length === 0 || !grantTypes.every((g) => g === 'authorization_code' || g === 'refresh_token')) {
@@ -194,10 +198,35 @@ class ClientRegistry {
     if (cached && this.now() - cached.at < LIMITS.cimdCacheMs) return cached.client;
     // Concurrent resolves of one URL share a single fetch.
     if (this.inflight.has(clientId)) return this.inflight.get(clientId);
+    const failed = this._recentFailure(clientId);
+    if (failed) throw failed;
     if (this.inflight.size >= LIMITS.cimdInflightMax) throw busy('too many client metadata documents are being fetched; try again later');
-    const pending = this._fetchCimd(clientId).finally(() => this.inflight.delete(clientId));
+    const pending = this._fetchCimd(clientId).catch((err) => {
+      this.cimdFailed.delete(clientId);
+      this.cimdFailed.set(clientId, { err, at: this.now() });
+      while (this.cimdFailed.size > LIMITS.cimdCacheMax) this.cimdFailed.delete(this.cimdFailed.keys().next().value);
+      throw err;
+    }).finally(() => this.inflight.delete(clientId));
     this.inflight.set(clientId, pending);
     return pending;
+  }
+
+  _recentFailure(clientId) {
+    const f = this.cimdFailed.get(clientId);
+    if (!f) return null;
+    if (this.now() - f.at < LIMITS.cimdFailureMs) return f.err;
+    this.cimdFailed.delete(clientId);
+    return null;
+  }
+
+  // Whether resolve(clientId) would fetch a metadata document now (a CIMD
+  // URL that is neither cached, nor being fetched, nor a recent failure), so
+  // the caller can charge the fetch to the asking address first.
+  needsFetch(clientId) {
+    if (!isClientId(clientId) || DCR_CLIENT_ID_RE.test(clientId)) return false;
+    const cached = this.cimd.get(clientId);
+    if (cached && this.now() - cached.at < LIMITS.cimdCacheMs) return false;
+    return !this.inflight.has(clientId) && !this._recentFailure(clientId);
   }
 
   async _fetchCimd(clientId) {
@@ -243,4 +272,4 @@ class ClientRegistry {
   }
 }
 
-module.exports = { ClientRegistry, validRedirectUri, clientHost, LIMITS };
+module.exports = { ClientRegistry, validRedirectUri, clientHost, rateKey, LIMITS };

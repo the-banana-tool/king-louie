@@ -233,3 +233,36 @@ describe('ClientRegistry (fix round 1)', () => {
     assert.equal((await last).client_id, 'https://client.example.com/c16.json');
   });
 });
+
+describe('ClientRegistry (Task 22)', () => {
+  it('a failed CIMD fetch is answered from memory for 60 s, then fetched again; needsFetch says when a fetch would happen', async () => {
+    let now = 0;
+    let fetches = 0;
+    let fail = true;
+    const r = new ClientRegistry({ file: file(), now: () => now, fetchMetadata: async (u) => {
+      fetches += 1;
+      if (fail) throw Object.assign(new Error('client metadata: unreachable'), { error: 'invalid_client' });
+      return { client_id: u, client_name: 'Example Client', redirect_uris: ['https://client.example.com/cb'] };
+    } });
+    const url = 'https://client.example.com/client.json';
+    assert.equal(r.needsFetch(url), true);
+    assert.equal(r.needsFetch('dcr_AAAAAAAAAAAAAAAAAAAAAA'), false);
+    assert.equal(r.needsFetch('not a client id'), false);
+    await assert.rejects(r.resolve(url), /unreachable/);
+    assert.equal(r.needsFetch(url), false);
+    now += 59999;
+    await assert.rejects(r.resolve(url), /unreachable/);
+    assert.equal(fetches, 1);
+    now += 1;
+    fail = false;
+    assert.equal(r.needsFetch(url), true);
+    assert.equal((await r.resolve(url)).client_id, url);
+    assert.equal(fetches, 2);
+    assert.equal(r.needsFetch(url), false, 'cached');
+  });
+
+  it('a refused redirect URI names the canonical form', () => {
+    const r = new ClientRegistry({ file: file() });
+    assert.throws(() => r.register(good({ redirect_uris: ['https://user@client.example.com/cb'] })), /canonical URL form .*no userinfo or fragment/);
+  });
+});
