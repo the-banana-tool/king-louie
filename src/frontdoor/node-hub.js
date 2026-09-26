@@ -291,7 +291,7 @@ class NodeHub extends EventEmitter {
   }
 
   rpc(nodeId, method, params = {}, { timeoutMs = 10000 } = {}) {
-    if (this.localNode && nodeId === this.localNode.node_id) return Promise.resolve().then(() => this.localNode.dispatch(method, params));
+    if (this.localNode && nodeId === this.localNode.node_id) return this._rpcLocal(method, params, timeoutMs);
     const node = this.nodeById(nodeId);
     if (!node) return Promise.reject(new LinkRpcError('unknown_node', `no node ${nodeId}`));
     return this.rpcLink.call(node.peer_id, method, params, { timeoutMs });
@@ -325,6 +325,18 @@ class NodeHub extends EventEmitter {
     this.localNode = { node_id: nodeId, node_name: nodeName, public_key: publicKeyHex, peer_id: null, local: true, dispatch };
     // Drop (and close with 4003) any entry already loaded under its id or key.
     this._loadPeers();
+  }
+
+  // The same timeout contract as a link-rpc call to a remote node.
+  _rpcLocal(method, params, timeoutMs) {
+    const { dispatch } = this.localNode;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new LinkRpcError('timeout', `${method} to the local node timed out after ${timeoutMs} ms`)), timeoutMs);
+      Promise.resolve().then(() => dispatch(method, params)).then(
+        (result) => { clearTimeout(timer); resolve(result); },
+        (err) => { clearTimeout(timer); reject(err); }
+      );
+    });
   }
 
   // A node → relay call made by the front door itself (its courier, its

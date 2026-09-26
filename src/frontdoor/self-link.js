@@ -20,6 +20,13 @@ class FrontDoorSelfLink extends EventEmitter {
     this.publicUrl = publicUrl;
     this.spki = spki;
     this.since = new Date(now()).toISOString();
+    // The link to itself is always up. F3's trackDeviceStates re-announces
+    // the admin-applied devices on 'connected', so every new 'connected'
+    // listener gets one on the next turn (a device applied while the front
+    // door was stopped becomes active).
+    this.on('newListener', (event) => {
+      if (event === 'connected') setImmediate(() => this.emit('connected'));
+    });
   }
 
   isConnected() {

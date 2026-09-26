@@ -9,6 +9,7 @@ const path = require('path');
 const { EventEmitter, once } = require('events');
 const { startRelay } = require('../src/frontdoor/relay');
 const { NodeHub } = require('../src/frontdoor/node-hub');
+const { trackDeviceStates } = require('../src/approvals/service-wiring');
 const { FrontDoorSelfLink } = require('../src/frontdoor/self-link');
 const { MeshTransport, CLOSE_CODES } = require('../src/mesh/mesh-transport');
 const { MeshPairing } = require('../src/mesh/mesh-pairing');
@@ -23,6 +24,11 @@ const cleanups = [];
 after(async () => { for (const c of cleanups.reverse()) await c(); });
 const tmp = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-relay-ext-')); cleanups.push(() => fs.rmSync(d, { recursive: true, force: true })); return d; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Real-shaped phone pins (relaySpkiPin: sha256/ + 43 base64url characters).
+const pin = (seed) => `sha256/${crypto.createHash('sha256').update(seed).digest('base64url')}`;
+const PIN_A = pin('a');
+const PIN_B = pin('b');
+const PIN_C = pin('c');
 
 // M11: connectToPeer resolves when the dialer promotes, before the listener
 // has; wait (bounded) for the listener's side of the link, as Task 6's
@@ -36,7 +42,7 @@ async function externalRelay() {
   const fd = testNodeIdentity({ key: 'relay', nodeName: 'frontdoor' });
   const transport = new MeshTransport({ identity: fd, listen: false, useTls: false });
   const relay = await startRelay({
-    dataDir: tmp(), identity: fd, listeners: 'external', transport, phoneSpki: 'sha256/aaaa',
+    dataDir: tmp(), identity: fd, listeners: 'external', transport, phoneSpki: PIN_A, testOnlyAllowPlainTransport: true,
     config: { publicUrl: 'https://mcp.kl.example.com', push: {} }
   });
   cleanups.push(() => relay.stop());
@@ -84,18 +90,52 @@ describe('startRelay with an external listener', () => {
   it('binds nothing, needs the transport, and reports the phone pin it is given', async () => {
     const { relay } = await externalRelay();
     assert.deepEqual(relay.address(), { phone: null, mesh: null });
-    assert.equal(relay.phoneSpki, 'sha256/aaaa');
-    relay.setPhoneSpki('sha256/bbbb');
-    assert.equal(relay.phoneSpki, 'sha256/bbbb');
+    assert.equal(relay.phoneSpki, PIN_A);
+    relay.setPhoneSpki(PIN_B);
+    assert.equal(relay.phoneSpki, PIN_B);
     await assert.rejects(startRelay({ dataDir: tmp(), identity: testNodeIdentity(), listeners: 'external', config: { publicUrl: 'https://x.example.com' } }), /needs the front door's transport/);
   });
 
   it('relay.hello reports the pin set by setPhoneSpki', async () => {
     const { fd, relay } = await externalRelay();
     attachFd(relay.nodeHub, fd);
-    relay.setPhoneSpki('sha256/cccc');
+    relay.setPhoneSpki(PIN_C);
     const hello = await relay.nodeHub.callLocal('relay.hello', { node_id: fd.nodeId, node_name: 'frontdoor', versions: [1] });
-    assert.deepEqual(hello, { relay_id: fd.nodeId, public_url: 'https://mcp.kl.example.com', phone_spki: 'sha256/cccc' });
+    assert.deepEqual(hello, { relay_id: fd.nodeId, public_url: 'https://mcp.kl.example.com', phone_spki: PIN_C });
+  });
+
+  it("'external' needs the relay's own identity on a pinned TLS transport, and a well-formed pin", async () => {
+    const fd = testNodeIdentity({ key: 'relay', nodeName: 'frontdoor' });
+    const base = { dataDir: tmp(), identity: fd, listeners: 'external', config: { publicUrl: 'https://mcp.kl.example.com', push: {} } };
+    const other = new MeshTransport({ identity: testNodeIdentity(), listen: false, useTls: false });
+    await assert.rejects(startRelay({ ...base, transport: other, testOnlyAllowPlainTransport: true }), /relay's own identity/);
+    const plain = new MeshTransport({ identity: fd, listen: false, useTls: false });
+    await assert.rejects(startRelay({ ...base, transport: plain }), /TLS and pinned client certificates/);
+    const tlsNoPin = new MeshTransport({ identity: fd, listen: false, useTls: true });
+    await assert.rejects(startRelay({ ...base, transport: tlsNoPin }), /TLS and pinned client certificates/);
+    await assert.rejects(startRelay({ ...base, transport: plain, testOnlyAllowPlainTransport: true, phoneSpki: 'sha256/aaaa' }), TypeError);
+    const { relay } = await externalRelay();
+    for (const bad of ['sha256/aaaa', `sha1/${PIN_A.slice(7)}`, `${PIN_A}=`, null, 42]) assert.throws(() => relay.setPhoneSpki(bad), TypeError);
+    assert.equal(relay.phoneSpki, PIN_A, 'a refused pin leaves the old one');
+  });
+
+  it('a front door without a certificate yet starts with no pin', async () => {
+    const fd = testNodeIdentity({ key: 'relay', nodeName: 'frontdoor' });
+    const relay = await startRelay({ dataDir: tmp(), identity: fd, listeners: 'external', testOnlyAllowPlainTransport: true,
+      transport: new MeshTransport({ identity: fd, listen: false, useTls: false }), config: { publicUrl: 'https://mcp.kl.example.com', push: {} } });
+    cleanups.push(() => relay.stop());
+    assert.equal(relay.phoneSpki, null);
+  });
+
+  it("'own' ignores a passed transport and phoneSpki", async () => {
+    const own = { publicUrl: 'https://relay.example.com', push: {}, phoneListen: { host: '127.0.0.1', port: 0 }, meshListen: { host: '127.0.0.1', port: 0 } };
+    const id = testNodeIdentity();
+    const transport = new MeshTransport({ identity: id, listen: false, useTls: false });
+    const relay = await startRelay({ dataDir: tmp(), identity: id, listeners: 'own', useTls: false, config: own, transport, phoneSpki: PIN_A });
+    cleanups.push(() => relay.stop());
+    assert.equal(relay.phoneSpki, null);
+    assert.notEqual(relay.nodeHub.transport, transport);
+    assert.ok(relay.address().mesh.port > 0, "'own' binds its own mesh listener");
   });
 
   it("'own' still refuses a public mesh host, with or without a transport", async () => {
@@ -106,7 +146,7 @@ describe('startRelay with an external listener', () => {
   });
 });
 
-describe('the front door as its own node', () => {
+describe('the front door as its own node', { timeout: 15000 }, () => {
   it('runs F3 console enrollment against the front door and serves its history', async () => {
     const { fd, relay, base } = await externalRelay();
     const calls = [];
@@ -147,10 +187,41 @@ describe('the front door as its own node', () => {
     link.writeLink();
     const written = JSON.parse(fs.readFileSync(path.join(dataDir, 'approvals', 'link.json'), 'utf8'));
     assert.deepEqual({ connected: written.connected, relay_id: written.relay_id, relay_public_url: written.relay_public_url, relay_spki: written.relay_spki },
-      { connected: true, relay_id: fd.nodeId, relay_public_url: 'https://mcp.kl.example.com', relay_spki: 'sha256/aaaa' });
+      { connected: true, relay_id: fd.nodeId, relay_public_url: 'https://mcp.kl.example.com', relay_spki: PIN_A });
     assert.equal(link.isConnected(), true);
     const codeId = crypto.randomBytes(16).toString('base64url');
     assert.deepEqual(await link.call('enroll.open', { envelope: buildEnrollOpen({ identity: fd, codeId, expiresAt: Date.now() + 600000 }) }), { ok: true });
+  });
+
+  it('trackDeviceStates on the self-link makes a device applied while the front door was stopped active', async () => {
+    const { fd, relay, base } = await externalRelay();
+    attachFd(relay.nodeHub, fd, async (method) => (method === 'enroll.claim' ? { delivered: true } : null));
+    // A device enrolled on the front door earlier, whose column the relay
+    // lost (it was applied by the admin while the front door was stopped).
+    const codeId = crypto.randomBytes(16).toString('base64url');
+    await relay.nodeHub.callLocal('enroll.open', { envelope: buildEnrollOpen({ identity: fd, codeId, expiresAt: Date.now() + 600000 }) });
+    const phone = createFakePhone({ seed: 'B' });
+    const claim = phone.enroll({ codeId, code: crypto.randomBytes(32).toString('base64url') });
+    assert.equal((await request(base, 'POST', `/v1/enroll/${codeId}`, { body: claim })).status, 202);
+    await relay.nodeHub.callLocal('enroll.done', { envelope: buildEnrollDone({ identity: fd, codeId, enroll: claim }) });
+    relay.devices.setNodeState(phone.deviceId, fd.nodeId, 'revoked');
+    const states = () => relay.devices.nodesForDevice(phone.deviceId);
+    assert.deepEqual(states(), [{ node_id: fd.nodeId, state: 'revoked' }]);
+
+    const link = new FrontDoorSelfLink({ nodeHub: relay.nodeHub, dataDir: tmp(), frontdoorId: fd.nodeId, publicUrl: 'https://mcp.kl.example.com', spki: () => relay.phoneSpki });
+    const approverStore = { list: () => [{ device_id: phone.deviceId }], isAdminApplied: () => true, refresh() {} };
+    const stop = trackDeviceStates({ approverStore, relayClient: link, intervalMs: 60000 });
+    cleanups.push(async () => stop());
+    for (let i = 0; i < 200 && states()[0].state !== 'active'; i++) await sleep(10);
+    assert.deepEqual(states(), [{ node_id: fd.nodeId, state: 'active' }]);
+  });
+
+  it('a local rpc honours timeoutMs', async () => {
+    const { fd, relay } = await externalRelay();
+    attachFd(relay.nodeHub, fd, () => new Promise(() => {}));
+    await assert.rejects(relay.nodeHub.rpc(fd.nodeId, 'audit.head', {}, { timeoutMs: 50 }), (err) => err.name === 'LinkRpcError' && err.code === 'timeout');
+    attachFd(relay.nodeHub, fd, async () => ({ ok: 1 }));
+    assert.deepEqual(await relay.nodeHub.rpc(fd.nodeId, 'audit.head', {}, { timeoutMs: 50 }), { ok: 1 });
   });
 
   it('callLocal needs an attached local node and a known method', async () => {
@@ -188,6 +259,20 @@ describe('the front door as its own node', () => {
     source.emit('change');
     assert.equal(transport.trustedPeers.has(impostor.peerId), false);
     assert.equal(hub.nodeById(hubId.nodeId).local, true);
+  });
+
+  it('an impostor linked before attachLocalNode is closed with 4003', async () => {
+    const hubId = new NodeIdentity({ nodeName: 'frontdoor' });
+    const impostor = new NodeIdentity({ nodeName: 'gpu-box' });
+    const { hub, transport } = await hubWithSource(hubId, [{ ...rowFor(impostor, 'gpu-box'), nodeId: hubId.nodeId }]);
+    const dialer = await dialerFor(impostor, hubId);
+    await dialer.connectToPeer('127.0.0.1', transport.port);
+    await linked(transport, impostor.peerId);
+    const closed = once(dialer, 'peerDisconnected');
+    attachFd(hub, hubId);
+    const [{ code }] = await closed;
+    assert.equal(code, CLOSE_CODES.keyRemoved);
+    assert.equal(transport.trustedPeers.has(impostor.peerId), false);
   });
 
   it('a remote key cannot pair under the front door id', async () => {

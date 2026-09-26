@@ -23,6 +23,13 @@ const { relaySpkiPin } = require('./tls');
 const RELAY_EXTENSIONS = require('./extensions');
 
 const log = createLogger('frontdoor/relay');
+// The pin a phone checks the relay's certificate against: sha256/ + the
+// base64url SHA-256 of the leaf's SPKI (relaySpkiPin).
+const SPKI_PIN_RE = /^sha256\/[A-Za-z0-9_-]{43}$/;
+
+function assertSpkiPin(pin) {
+  if (typeof pin !== 'string' || !SPKI_PIN_RE.test(pin)) throw new TypeError('phoneSpki must be sha256/ followed by 43 base64url characters');
+}
 const SWEEP_MS = 30000;
 
 // Bounds on the phone listener. requestTimeout is the time a client gets to
@@ -79,12 +86,24 @@ function readOnlyDevices(devices) {
 
 // config: { phoneListen, tls: { certFile, keyFile }, meshListen, publicUrl, push } for 'own';
 // for 'external' (the front door, fleet stage 4 §3.1) only { publicUrl, push },
-// plus the front door's own `transport` (pinned in TLS) and `phoneSpki`.
+// plus the front door's own `transport` (pinned in TLS) and `phoneSpki`
+// (null until the front door has a certificate, then set with setPhoneSpki).
+// testOnlyAllowPlainTransport: TESTS ONLY — lets 'external' take a plain
+// ws:// transport without pinned client certificates. Never set in a service.
 async function startRelay({ dataDir, config, identity, listeners = 'own', registry = null, extensions = RELAY_EXTENSIONS,
-  useTls = true, senders = null, now = Date.now, transport = null, phoneSpki = null } = {}) {
+  useTls = true, senders = null, now = Date.now, transport = null, phoneSpki = null, testOnlyAllowPlainTransport = false } = {}) {
   if (!['own', 'external'].includes(listeners)) throw new TypeError("listeners must be 'own' or 'external'");
   const external = listeners === 'external';
-  if (external && !transport) throw new TypeError("listeners 'external' needs the front door's transport");
+  if (external) {
+    if (!transport) throw new TypeError("listeners 'external' needs the front door's transport");
+    if (!transport.identity || transport.identity.nodeId !== identity.nodeId) throw new TypeError("listeners 'external' needs a transport with the relay's own identity");
+    // The skipped private-host check is safe only because the front door's
+    // mesh drops unpinned client certificates in TLS.
+    if (!(transport.useTls && transport.requireClientCert) && testOnlyAllowPlainTransport !== true) {
+      throw new TypeError("listeners 'external' needs a transport with TLS and pinned client certificates (useTls, requireClientCert)");
+    }
+    if (phoneSpki !== null) assertSpkiPin(phoneSpki);
+  }
   // Only the relay's own mesh listener is limited to private addresses: the
   // front door's mesh drops unpinned certificates in TLS (ruling 8, §3.2).
   if (!external) assertPrivateMeshHost(config.meshListen && config.meshListen.host);
@@ -156,6 +175,7 @@ async function startRelay({ dataDir, config, identity, listeners = 'own', regist
     },
     // F4 (§3.3): after a certificate key change, relay.hello reports the new pin.
     setPhoneSpki(pin) {
+      assertSpkiPin(pin);
       relay.phoneSpki = pin;
     },
     address() {
