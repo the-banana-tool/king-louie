@@ -5,7 +5,7 @@
 // Every piece of playbook text shown to the model is framed (frame.js);
 // every single-line field is also one-lined, capped and tag-neutralised.
 const { frame, neutralize, oneLine, cut } = require('./frame');
-const { LIMITS, NAME_RE, SLUG_RE } = require('./format');
+const { LIMITS, NAME_RE, SLUG_RE, VERSION_RE } = require('./format');
 
 const SOURCES_MAX = 24000;
 const ORIENTATION_MAX = 1500;
@@ -50,7 +50,7 @@ function problemOf(e) {
 
 // Only the unknown-executor warning is shown, rebuilt from the validated
 // step id and executor of a step that exists; the rest are counted.
-function warningLines(e) {
+function warningTexts(e) {
   const lines = [];
   let other = 0;
   const steps = e.package?.steps?.steps || [];
@@ -58,14 +58,15 @@ function warningLines(e) {
     const m = typeof w === 'string' ? UNREGISTERED_RE.exec(w) : null;
     const s = m && steps.find((x) => x.id === m[1] && x.executor === m[2]);
     if (s && SLUG_RE.test(s.id) && SLUG_RE.test(s.executor)) {
-      lines.push(`  - step "${s.id}" expects executor "${s.executor}", which is not registered`);
+      lines.push(`step "${s.id}" expects executor "${s.executor}", which is not registered`);
     } else {
       other += 1;
     }
   }
-  if (other) lines.push(`  - ${plural(other, 'other warning')} (${DETAILS})`);
+  if (other) lines.push(`${plural(other, 'other warning')} (${DETAILS})`);
   return lines;
 }
+const warningLines = (e) => warningTexts(e).map((w) => `  - ${w}`);
 
 const inUse = (entries) => (entries || []).filter((e) => e && e.state === 'ok' && e.package && e.pinned && e.onDisk);
 const metaOf = (e) => ({ name: e.name, version: e.onDisk.version, source: e.pinned?.source });
@@ -127,6 +128,30 @@ function briefRulesOf(entries, executorId) {
     }
   }
   return [...seen];
+}
+
+const MODES = Object.freeze(['vendored', 'submodule']);
+const versionOf = (e) => {
+  const v = e.onDisk?.version;
+  return typeof v === 'string' && v.length <= 64 && VERSION_RE.test(v) ? v : '(invalid version)';
+};
+
+// Playbook.list: the attached (and unregistered) playbooks, built only from
+// validated fields. A playbook that is not ok shows its state and the files
+// involved, never the loader's reason or the validator's messages (ruling
+// T10-quotes); the owner's Playbooks panel has the details.
+function listItems(entries) {
+  const out = [];
+  for (const e of entries || []) {
+    if (!e || !(e.pinned || e.state === 'unregistered')) continue;
+    const mode = MODES.includes(e.mode) ? e.mode : null;
+    if (e.state === 'ok' && e.package && e.onDisk) {
+      out.push({ name: nameOf(e), version: versionOf(e), mode, state: 'ok', steps: e.package.steps.steps.length, warnings: warningTexts(e) });
+    } else {
+      out.push({ name: nameOf(e), mode, state: stateOf(e), detail: problemOf(e) });
+    }
+  }
+  return out;
 }
 
 function requireInUse(entries, name) {
@@ -243,6 +268,7 @@ module.exports = {
   STEP_TITLE_MAX,
   STEP_NOTES_MAX,
   RULE_MAX,
+  listItems,
   stepsOf,
   briefRulesOf,
   sourcesOf,

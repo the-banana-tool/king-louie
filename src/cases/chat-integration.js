@@ -5,7 +5,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const CASE_TOOL_NAMES = Object.freeze(['Ledger', 'Brief', 'Decide', 'Recommend', 'Reorient', 'Ask', 'Fail', 'Detour']);
+const CASE_TOOL_NAMES = Object.freeze(['Ledger', 'Brief', 'Decide', 'Recommend', 'Reorient', 'Ask', 'Fail', 'Detour', 'Playbook']);
 
 // Tools kept out of every case turn (stage 2 spec §3.2). SpawnAgent,
 // BackgroundTask, sessions_spawn, RemoteDispatch and Cron start a run with
