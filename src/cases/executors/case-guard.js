@@ -32,9 +32,11 @@ const BROWSER_REFUSAL = 'In a case, anything typed into a page goes through Exec
 const BROWSER_START_REFUSAL = `In a case, the browser starts only with profile "${CASES_BROWSER_PROFILE}" and never a user data path, so the owner's own cookies are never used.`;
 // Top-level names under the data dir that only King Louie writes (compared
 // case-folded where the file system is): ops memory, executor packages and
-// state, and workflow files (they carry a child's guard context).
-const DATA_DIR_GUARDED = new Set(['ops-memory.jsonl', 'executors', 'workflows']);
-const DATA_DIR_REFUSAL = 'ops-memory.jsonl, the executors folder and workflow files are written only by King Louie, not by tools in a case.';
+// state, workflow files (they carry a child's guard context), and the
+// settings and vault stores (chat-data.json holds executors.entries, the
+// pins, and the outbound category keywords; final review minor 8).
+const DATA_DIR_GUARDED = new Set(['ops-memory.jsonl', 'executors', 'workflows', 'chat-data.json', 'config.json']);
+const DATA_DIR_REFUSAL = 'ops-memory.jsonl, the executors folder, workflow files and the settings and vault stores are written only by King Louie, not by tools in a case.';
 
 // Which profile the running browser uses: the browser tool's own state,
 // read only when a case run uses a browser tool.
