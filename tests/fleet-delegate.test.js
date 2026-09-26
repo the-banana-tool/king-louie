@@ -212,6 +212,14 @@ describe('DelegateSessions', () => {
     assert.equal(t.jobs.getJob(jobId).status, 'succeeded');
     await assert.rejects(t.sessions.send(jobId, 'again', { origin: origin(['fleet:delegate']) }), /not_accepted: session is closed/);
     assert.deepEqual(t.ended, [[jobId, 'job_closed']]);
+    await new Promise((r) => setImmediate(r));
+    const closed = t.audit.filter((e) => e.kind === 'exec.result' && e.data.name === 'delegate' && e.data.job_id === jobId);
+    assert.deepEqual(closed.map((e) => e.data.ok), [true]);
+    // 9: a closed session keeps only its state.
+    const kept = t.sessions.sessions.get(jobId);
+    assert.equal(kept.state, 'closed');
+    assert.equal(kept.history, null);
+    assert.equal(kept.evidence, null);
   });
 
   it('a second turn carries the history; planner calls are kept in full', async () => {
@@ -493,5 +501,111 @@ describe('DelegateSessions', () => {
     await t.sessions.turns.get(a.job_id);
     const childList = seen.find((x) => x.tool === 'TaskStatus').result;
     assert.deepEqual(childList.tasks.map((x) => x.id), [taskA]);
+  });
+  async function withBackgroundTask(t, grant = 'gr_y') {
+    const n = bgRuns.length;
+    const task = `bg for ${grant} ${n}`;
+    script = [use('BackgroundTask', { task }), { type: 'text', content: 'started' }];
+    byTask.set(task, [use(BGSLOW)]);
+    const { job_id: jobId } = await t.sessions.start({ task: `start ${task}`, origin: origin(['fleet:delegate'], grant) });
+    await t.sessions.turns.get(jobId);
+    await waitFor(() => bgRuns.length === n + 1, 'the background task');
+    return { jobId, run: bgRuns[n] };
+  }
+
+  it('an idle close stops the session\'s background tasks (T11-bg2)', async () => {
+    const t = await setup({ idleCloseMs: 300000 });
+    const { jobId, run } = await withBackgroundTask(t);
+    t.advance(300000);
+    t.sessions.sweep();
+    assert.equal(t.jobs.getJob(jobId).status, 'succeeded');
+    await waitFor(() => run.aborted, 'the background task to stop');
+  });
+
+  it('a failed session stops its background tasks (T11-bg2)', async () => {
+    const t = await setup();
+    const { jobId, run } = await withBackgroundTask(t);
+    providerError = new Error('provider exploded');
+    await t.sessions.send(jobId, 'more', { origin: origin(['fleet:delegate']) });
+    await t.sessions.turns.get(jobId);
+    assert.equal(t.jobs.getJob(jobId).status, 'failed');
+    await waitFor(() => run.aborted, 'the background task to stop');
+  });
+
+  it('stop() stops every session\'s background tasks (T11-bg2)', async () => {
+    const t = await setup();
+    const one = await withBackgroundTask(t, 'gr_a');
+    const two = await withBackgroundTask(t, 'gr_b');
+    t.sessions.stop();
+    await waitFor(() => one.run.aborted && two.run.aborted, 'both background tasks to stop');
+  });
+
+  it('with cwd = root/sub, a Read of a sibling under the node root is refused (T11-roots)', async () => {
+    const t = await setup({ withNodePolicy: false });
+    const sub = path.join(t.root, 'sub');
+    fs.mkdirSync(sub);
+    fs.writeFileSync(path.join(sub, 'in.txt'), 'inside sub');
+    fs.writeFileSync(path.join(t.root, 'sibling.txt'), 'sibling');
+    script = [
+      use('Read', { file_path: path.join(sub, 'in.txt') }),
+      use('Read', { file_path: path.join(t.root, 'sibling.txt') }),
+      { type: 'text', content: 'done' }
+    ];
+    const { job_id: jobId } = await t.sessions.start({ task: 'read', cwd: sub, origin: origin(['fleet:delegate']) });
+    await t.sessions.turns.get(jobId);
+    const [inside, sibling] = seen.filter((x) => x.tool === 'Read').map((x) => x.result);
+    assert.ok(JSON.stringify(inside).includes('inside sub'), JSON.stringify(inside));
+    assert.equal(sibling.success, false);
+    assert.equal(sibling.error, REFUSE_UNSAFE_MESSAGE);
+  });
+
+  it('tool params over 2 KiB are cut in the transcript', async () => {
+    const t = await setup();
+    script = [use(ROUTINE, { blob: 'x'.repeat(3000) }), { type: 'text', content: 'done' }];
+    const { job_id: jobId } = await t.sessions.start({ task: 'big params', origin: origin(['fleet:delegate']) });
+    await t.sessions.turns.get(jobId);
+    const line = t.jobs.getJob(jobId).logs.find((l) => l.startsWith(`tool ${ROUTINE}`));
+    const params = line.slice(`tool ${ROUTINE} `.length, line.indexOf(' → '));
+    assert.match(params, /… \[cut at 2048 of \d+ bytes\]$/);
+    assert.ok(Buffer.byteLength(params) < 2200);
+  });
+
+  it('a throw from beginTurn\'s update frees the slot and fails the new session', async () => {
+    const t = await setup({ maxJobs: 1 });
+    let thrown = false;
+    t.jobs.on('update', (job) => {
+      if (!thrown && job.session === 'turn') { thrown = true; throw new Error('listener exploded'); }
+    });
+    await assert.rejects(t.sessions.start({ task: 'x', origin: origin(['fleet:delegate']) }), /listener exploded/);
+    assert.equal(t.jobs.activeJobCount(), 0, 'no slot leaks');
+    const [job] = [...t.jobs.jobs.values()];
+    assert.equal(job.status, 'failed');
+    script = [{ type: 'text', content: 'ok' }];
+    const next = await t.sessions.start({ task: 'y', origin: origin(['fleet:delegate']) });
+    await t.sessions.turns.get(next.job_id);
+    assert.equal(t.jobs.getJob(next.job_id).result, 'ok');
+  });
+
+  it('sweep closes the other idle sessions when closing one throws', async () => {
+    const t = await setup({ idleCloseMs: 300000 });
+    const a = await t.sessions.start({ task: 'a', origin: origin(['fleet:delegate']) });
+    await t.sessions.turns.get(a.job_id);
+    const b = await t.sessions.start({ task: 'b', origin: origin(['fleet:delegate']) });
+    await t.sessions.turns.get(b.job_id);
+    t.jobs.on('update', (job) => { if (job.job_id === a.job_id && job.status === 'succeeded') throw new Error('listener exploded'); });
+    t.advance(300000);
+    assert.doesNotThrow(() => t.sessions.sweep());
+    assert.equal(t.jobs.getJob(b.job_id).status, 'succeeded');
+    assert.deepEqual(t.ended.map((e) => e[0]).sort(), [a.job_id, b.job_id].sort(), 'both leases end');
+  });
+
+  it('the session cwd is the real path', async () => {
+    const t = await setup();
+    fs.mkdirSync(path.join(t.root, 'real'));
+    fs.symlinkSync(path.join(t.root, 'real'), path.join(t.root, 'link'), 'junction');
+    script = [{ type: 'text', content: 'ok' }];
+    const { job_id: jobId } = await t.sessions.start({ task: 'x', cwd: path.join(t.root, 'link'), origin: origin(['fleet:delegate']) });
+    await t.sessions.turns.get(jobId);
+    assert.equal(t.jobs.getJob(jobId).params.cwd, fs.realpathSync.native(path.join(t.root, 'real')));
   });
 });

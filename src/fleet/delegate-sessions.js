@@ -7,7 +7,7 @@
 // the front door reports node_restarted.
 const path = require('path');
 const { createLogger } = require('../logging');
-const { isPathUnderRoots } = require('../platform/path-roots');
+const { isPathUnderRoots, realResolve } = require('../platform/path-roots');
 const { EvidenceLedger } = require('../verification/evidence-ledger');
 const { ToolError, approvalOrigin } = require('./fleet-tools');
 const { covers } = require('./scope-rules');
@@ -138,7 +138,9 @@ class DelegateSessions {
     if (typeof cwd !== 'string' || !cwd || !path.isAbsolute(cwd) || !isPathUnderRoots(cwd, roots)) {
       throw new ToolError('invalid_params', 'invalid_params: cwd must be under policy.allowed_roots');
     }
-    return path.resolve(cwd);
+    // The real path: the roots the turn is confined to are this one, so a
+    // link swapped later cannot move them.
+    return realResolve(cwd);
   }
 
   // The core builds its BackgroundTaskManager in start(), so it is looked up
@@ -184,7 +186,13 @@ class DelegateSessions {
     };
     this.sessions.set(job.job_id, session);
     this.jobs.getSignal(job.job_id).addEventListener('abort', () => this._onJobAborted(session), { once: true });
-    this._beginTurn(session, task, origin);
+    try {
+      this._beginTurn(session, task, origin);
+    } catch (err) {
+      // The session never ran a turn; nothing may be left open behind it.
+      this._close(session, 'failed', false, err.message);
+      throw err;
+    }
     return { job_id: job.job_id, status: 'running' };
   }
 
@@ -212,20 +220,44 @@ class DelegateSessions {
     return { success: ok, job_id: jobId, status: job ? job.status : null };
   }
 
+  // Runs from setInterval: one session that fails to close must not stop the
+  // others, nor throw into the timer.
   sweep() {
     const t = this.now();
     for (const session of this.sessions.values()) {
-      if (session.state === 'idle' && t - session.lastActivity >= this.config.idleCloseMs) this._close(session, 'closed', true);
+      if (session.state !== 'idle' || t - session.lastActivity < this.config.idleCloseMs) continue;
+      try {
+        this._close(session, 'closed', true);
+      } catch (err) {
+        log.warn(`idle close of ${session.jobId} failed: ${err.message}`);
+      }
     }
   }
 
   stop() {
     clearInterval(this.timer);
-    for (const session of this.sessions.values()) if (session.turnAbort) session.turnAbort.abort();
+    for (const session of this.sessions.values()) {
+      this._stopBackgroundTasks(session);
+      if (session.turnAbort) session.turnAbort.abort();
+    }
   }
 
   _beginTurn(session, message, origin) {
-    this.jobs.beginTurn(session.jobId);
+    const wasExecuting = this.jobs.isExecuting(session.jobId);
+    try {
+      this.jobs.beginTurn(session.jobId);
+    } catch (err) {
+      // beginTurn takes the slot before it emits 'update'; if a listener
+      // throws there, give the slot back (a refusal never took one).
+      if (!wasExecuting && this.jobs.isExecuting(session.jobId)) {
+        try {
+          this.jobs.endTurn(session.jobId);
+        } catch (endErr) {
+          log.warn(`endTurn(${session.jobId}) listener failed: ${endErr.message}`);
+        }
+      }
+      throw err;
+    }
     session.state = 'turn';
     const run = this._runTurn(session, message, origin)
       .catch((err) => log.error(`delegate turn on ${session.jobId} failed past its handler: ${err.message}`))
@@ -318,17 +350,25 @@ class DelegateSessions {
     const lines = (Array.isArray(result.tools) ? result.tools : []).map((t) => this._toolLine(t));
     lines.push(`< assistant: ${content}`);
     this._append(session.jobId, lines);
+    // A session closed while this turn ran (cancel_job) has dropped its
+    // history and evidence; its transcript still gets the turn's lines.
+    if (!session.history) return;
     session.history.push({ user: message, assistant: content });
     this.jobs.updateJob(session.jobId, { result: content, evidence: { summary: this._summary(session) } });
   }
 
+  // Runs from the job signal's abort listener, which must never throw.
   _onJobAborted(session) {
-    if (session.turnAbort) session.turnAbort.abort();
-    this._stopBackgroundTasks(session);
-    this._close(session, 'cancelled', false);
+    try {
+      if (session.turnAbort) session.turnAbort.abort();
+      this._close(session, 'cancelled', false);
+    } catch (err) {
+      log.warn(`cancelling ${session.jobId} failed: ${err.message}`);
+    }
   }
 
-  // T11-bg: cancel_job also stops the background tasks this session's turns
+  // T11-bg / T11-bg2: a session that ends for any reason (closed, failed,
+  // cancelled, or the service stopping) stops the background tasks its turns
   // started; they otherwise outlive the turn that spawned them.
   _stopBackgroundTasks(session) {
     const manager = this._backgroundTasks();
@@ -344,11 +384,21 @@ class DelegateSessions {
     }
   }
 
+  // Every step runs even if an earlier one throws (a JobManager listener),
+  // so a close always stops the tasks, ends the leases and is audited.
   _close(session, state, ok, error = null) {
     if (!OPEN_STATES.has(session.state)) return;
     session.state = state;
+    this._stopBackgroundTasks(session);
+    // A closed session keeps only its state (and its task ids, for stop()).
+    session.history = null;
+    session.evidence = null;
     const status = state === 'closed' ? 'succeeded' : state;
-    this.jobs.updateJob(session.jobId, { status, session: state, ...(error ? { reason: error } : {}) });
+    try {
+      this.jobs.updateJob(session.jobId, { status, session: state, ...(error ? { reason: error } : {}) });
+    } catch (err) {
+      log.warn(`closing ${session.jobId}: an update listener failed: ${err.message}`);
+    }
     if (this.leaseManager && typeof this.leaseManager.endForJob === 'function') {
       try {
         this.leaseManager.endForJob(session.jobId, 'job_closed');
