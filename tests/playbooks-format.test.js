@@ -407,6 +407,41 @@ describe('validatePackage', () => {
     assert.match(messages(f.validatePackage(dir)).join('\n'), /nested more than 8 levels deep/);
     assert.throws(() => f.hashPackage(dir), { code: 'PACKAGE_TOO_LARGE' });
   });
+
+  it('early stop actually stops the walk: a directory after the one that crossed a cap is never visited', () => {
+    // Only asserting the cap's own error message survives a mutant that
+    // deletes `stop = true` (the `return` right after it still ends that
+    // one recursive call, so the error message alone doesn't prove the
+    // walk as a whole stopped) — this checks a sibling directory that
+    // sorts after the one that crosses the file-count cap is never even
+    // listed, which only holds if `stop` actually propagates back up
+    // through the parent directory's loop. No other entries share the
+    // parent directory (deliberately not the usual fixture package): a
+    // root-level FILE sorting between the two directories would itself
+    // re-trigger the same over-limit check and cascade a `return` even
+    // without `stop`, hiding the very bug this is meant to catch.
+    const dir = tmp();
+    fs.mkdirSync(path.join(dir, 'a-early'));
+    for (let i = 0; i < 70; i += 1) fs.writeFileSync(path.join(dir, 'a-early', `f${i}.md`), 'x\n');
+    fs.mkdirSync(path.join(dir, 'z-later'));
+    fs.writeFileSync(path.join(dir, 'z-later', 'marker.md'), 'x\n');
+    const r = f.walkPackage(dir);
+    assert.match(messages(r).join('\n'), /at most 64/);
+    assert.ok(!r.files.some((x) => x.rel.startsWith('z-later/')), 'z-later sorts after a-early and must never be visited');
+  });
+
+  it('stops collecting errors after 20, even though many more problems exist', () => {
+    // Only asserting individual error messages appear survives a mutant
+    // that deletes the MAX_WALK_ERRORS check entirely: with 25 distinct
+    // bad-extension files (each its own, different error) and nothing
+    // else close to any other cap, the total is exactly the signal that
+    // the cap (not some other limit) is what's being exercised here.
+    const extra = {};
+    for (let i = 0; i < 25; i += 1) extra[`bad${i}.js`] = 'x\n';
+    const dir = writePackage(path.join(tmp(), 'land-sale'), extra);
+    const r = f.validatePackage(dir);
+    assert.ok(r.errors.length <= 20, `expected at most 20 errors, got ${r.errors.length}`);
+  });
 });
 
 describe('compareVersions', () => {
