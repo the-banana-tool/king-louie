@@ -5,7 +5,7 @@
 // Every piece of playbook text shown to the model is framed (frame.js);
 // every single-line field is also one-lined, capped and tag-neutralised.
 const { frame, neutralize, oneLine, cut } = require('./frame');
-const { LIMITS } = require('./format');
+const { LIMITS, NAME_RE, SLUG_RE } = require('./format');
 
 const SOURCES_MAX = 24000;
 const ORIENTATION_MAX = 1500;
@@ -18,6 +18,54 @@ const LINE_MAX = 300;
 // Neutralise first, then cap: the cap is then exact, and framing the
 // result adds nothing (neutralize is idempotent).
 const safeLine = (v, max) => oneLine(neutralize(v), max);
+
+// ---- Problems, without quoting package text (ruling T10-quotes) ----
+//
+// Loader reasons, validator messages and warnings quote package and case
+// text (a version string, an unknown key, a submodule URL) outside any
+// frame. The model sees only the state, the files involved (a fixed set of
+// names; any other file is counted) and where the details are.
+const STATES = Object.freeze(['ok', 'invalid', 'unavailable', 'missing', 'unregistered']);
+const KNOWN_FILES = Object.freeze(['case.yaml', '.gitmodules', 'playbook.yaml', 'steps.md', 'briefRules.md', 'sources.md']);
+const DETAILS = 'details in the Playbooks panel';
+const UNREGISTERED_RE = /^step "([a-z0-9-]+)" expects executor "([a-z0-9-]+)", which is not registered$/;
+
+const nameOf = (e) => (typeof e.name === 'string' && NAME_RE.test(e.name) ? e.name : '(invalid name)');
+const stateOf = (e) => (STATES.includes(e.state) ? e.state : 'not usable');
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+function problemOf(e) {
+  const known = new Set();
+  const other = new Set();
+  for (const err of Array.isArray(e.errors) ? e.errors : []) {
+    const file = err && err.file;
+    if (typeof file !== 'string' || !file) continue;
+    if (KNOWN_FILES.includes(file)) known.add(file);
+    else other.add(file);
+  }
+  const parts = [...known];
+  if (other.size) parts.push(plural(other.size, 'other file'));
+  return `(${parts.length ? `${parts.join(', ')}; ` : ''}${DETAILS})`;
+}
+
+// Only the unknown-executor warning is shown, rebuilt from the validated
+// step id and executor of a step that exists; the rest are counted.
+function warningLines(e) {
+  const lines = [];
+  let other = 0;
+  const steps = e.package?.steps?.steps || [];
+  for (const w of Array.isArray(e.warnings) ? e.warnings : []) {
+    const m = typeof w === 'string' ? UNREGISTERED_RE.exec(w) : null;
+    const s = m && steps.find((x) => x.id === m[1] && x.executor === m[2]);
+    if (s && SLUG_RE.test(s.id) && SLUG_RE.test(s.executor)) {
+      lines.push(`  - step "${s.id}" expects executor "${s.executor}", which is not registered`);
+    } else {
+      other += 1;
+    }
+  }
+  if (other) lines.push(`  - ${plural(other, 'other warning')} (${DETAILS})`);
+  return lines;
+}
 
 const inUse = (entries) => (entries || []).filter((e) => e && e.state === 'ok' && e.package && e.pinned && e.onDisk);
 const metaOf = (e) => ({ name: e.name, version: e.onDisk.version, source: e.pinned?.source });
@@ -86,8 +134,7 @@ function requireInUse(entries, name) {
   const e = (entries || []).find((x) => x && x.name === name);
   if (!e || !e.pinned) throw new Error(`Playbook "${safeLine(name, 64)}" is not attached to this case.`);
   if (e.state !== 'ok' || !e.package || !e.onDisk) {
-    const reason = e.reason ? ` (${safeLine(e.reason, LINE_MAX)})` : '';
-    throw new Error(`Playbook "${e.name}" is ${safeLine(e.state, 32)}${reason} and is not used.`);
+    throw new Error(`Playbook "${safeLine(e.name, 64)}" is ${stateOf(e)} ${problemOf(e)} and is not used.`);
   }
   return e;
 }
@@ -138,10 +185,11 @@ function readSection(entries, { playbook = null, section = 'steps' } = {}) {
 }
 
 // The turn-start note (≤ max characters). Blocks are added whole, in order,
-// so a frame is never cut in half. Every line outside a frame that carries
-// case or package text (names, reasons, warnings, change details, record
-// ids) is one-lined, capped and tag-neutralised, so it cannot add a line or
-// a frame of its own.
+// so a frame is never cut in half. Problems and warnings never quote package
+// text (problemOf, warningLines). Every other line outside a frame that
+// carries case or package text (names, change details, record ids) is
+// one-lined, capped and tag-neutralised, so it cannot add a line or a frame
+// of its own.
 function orientationSection({ entries = [], changes = [], pending = [], status = 'active', max = ORIENTATION_MAX } = {}) {
   const blocks = [];
   const shown = (entries || []).filter((e) => e && (e.pinned || e.state === 'unregistered'));
@@ -150,10 +198,9 @@ function orientationSection({ entries = [], changes = [], pending = [], status =
     for (const e of shown) {
       if (e.state === 'ok' && e.package && e.onDisk) {
         lines.push(`- ${safeLine(e.name, 64)}@${safeLine(e.onDisk.version, 64)} (${safeLine(e.mode, 16)}, ${e.package.steps.steps.length} steps; Playbook.read for steps and sources)`);
-        for (const w of e.warnings || []) lines.push(`  - ${safeLine(w, LINE_MAX)}`);
+        lines.push(...warningLines(e));
       } else {
-        const reason = e.reason ? `: ${safeLine(e.reason, LINE_MAX)}` : '';
-        lines.push(`- playbook "${safeLine(e.name, 64)}" ${safeLine(e.state, 32)}${reason}`);
+        lines.push(`- playbook "${nameOf(e)}" ${stateOf(e)} ${problemOf(e)}`);
       }
     }
     blocks.push(lines.join('\n'));

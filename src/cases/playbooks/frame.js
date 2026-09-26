@@ -41,13 +41,18 @@ const LT_EXTRA = new Set([
 const SLASH_EXTRA = new Set(['\u{2215}', '\u{2044}', '\u{29F8}', '\u{2571}', '\u{FF3C}', '\u{29F5}']);
 // Skipped between "<", "/" and the tag name: whitespace, controls,
 // default-ignorable characters (zero-width, soft hyphen, bidi marks,
-// variation selectors, tag characters) and combining marks.
-const GAP_RE = /^[\s\p{Cc}\p{Default_Ignorable_Code_Point}\p{M}]$/u;
+// variation selectors, tag characters), combining marks, and characters
+// that render blank without being either: the Braille blank U+2800, and the
+// Hangul fillers (U+115F, U+1160, U+3164, U+FFA0; listed explicitly
+// although this ICU already has them as default-ignorable).
+const GAP_RE = /^[\s\p{Cc}\p{Default_Ignorable_Code_Point}\p{M}\u{2800}\u{115F}\u{1160}\u{3164}\u{FFA0}]$/u;
 const LETTER_RE = /^\p{L}/u;
 
 const nfkc = (c) => c.normalize('NFKC');
 const ascii = (c) => c.charCodeAt(0) < 0x80;
-const isLtLike = (c) => (ascii(c) ? c === '<' : LT_EXTRA.has(c) || nfkc(c).startsWith('<'));
+// NFKD, not NFKC, for "<": NFKC keeps U+226E (a "<" with a combining
+// stroke) composed, NFKD splits it into "<" and the mark.
+const isLtLike = (c) => (ascii(c) ? c === '<' : LT_EXTRA.has(c) || c.normalize('NFKD').startsWith('<'));
 const isSlashLike = (c) => (ascii(c) ? c === '/' || c === '\\' : SLASH_EXTRA.has(c) || nfkc(c) === '/');
 const isLetterLike = (c) => LETTER_RE.test(c) || (!ascii(c) && LETTER_RE.test(nfkc(c)));
 

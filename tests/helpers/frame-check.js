@@ -4,18 +4,23 @@
 //
 // Independent of src/cases/playbooks/frame.js on purpose, so a gap in the
 // frame's neutraliser cannot also blind the check. The text is read the way
-// a model might read it: NFKC-folded (full-width ＜ and small ﹤ become <),
-// zero-width and other default-ignorable characters dropped, tags matched
-// case-insensitively with whitespace and attributes allowed. Any close-like
+// a model might read it: NFKD-folded (full-width and small "<" become "<",
+// a "<" with a combining stroke becomes "<" plus a mark), combining marks,
+// zero-width and other default-ignorable characters dropped, a small set of
+// "<" look-alikes of its own, tags matched case-insensitively with
+// whitespace (and the Braille blank) and attributes allowed. Any close-like
 // tag ends a frame; only the canonical `<playbook source="` opener at the
 // top level starts one.
 const assert = require('node:assert');
 
-const IGNORABLE_RE = /\p{Default_Ignorable_Code_Point}/gu;
-const TAG_RE = /<\s*(\/?)\s*playbook\b/gi;
+const DROPPED_RE = /[\p{Default_Ignorable_Code_Point}\p{M}]/gu;
+// "<", single guillemet, CJK and mathematical angle brackets, heavy angle
+// quotation mark, modifier-letter "<". Kept apart from the neutraliser's
+// own list on purpose.
+const TAG_RE = /[<\u{2039}\u{3008}\u{2329}\u{27E8}\u{276E}\u{02C2}][\s\u{2800}]*(\/?)[\s\u{2800}]*playbook\b/giu;
 const OPENER = '<playbook source="';
 
-const fold = (text) => String(text).normalize('NFKC').replace(IGNORABLE_RE, '');
+const fold = (text) => String(text).normalize('NFKD').replace(DROPPED_RE, '');
 
 // Frames as [start, end) spans of the folded text, plus the problems a
 // forged tag leaves: an open inside a frame, a close outside one, an open
