@@ -207,7 +207,10 @@ const mergeSettings = (settings = {}) => {
         ...(DEFAULT_SETTINGS.channels?.slack || {}),
         ...(source.channels?.slack || {})
       }
-    }
+    },
+    // Cases stage 4: contactPolicy, contact, and channels.* with the contact keys
+    // (src/cases/contact-settings.js). Replaces `channels` with a superset.
+    ...require('../cases/contact-settings').mergeContactSettings(source, DEFAULT_SETTINGS.channels)
   };
 };
 
