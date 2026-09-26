@@ -334,10 +334,9 @@ async function statusFromSource(reg, caseId, job) {
   return null;
 }
 
-// Returns the saved job, or null when it was settled elsewhere meanwhile.
-async function pollJob(reg, caseId, caseDir, store, listed, settings, now) {
-  const entry = reg.get(listed.executor, { caseId });
-  const every = Math.max(MIN_POLL_MS, Number(entry?.pollEveryMs) || settings.pollEveryMs);
+// One job's status from its source, never throwing: → { state, externalId,
+// status, failure }, where state and externalId are the job's as fetched.
+async function fetchStatus(reg, caseId, listed) {
   let status = null;
   let failure = null;
   try {
@@ -347,9 +346,20 @@ async function pollJob(reg, caseId, caseDir, store, listed, settings, now) {
   } catch (err) {
     failure = err;
   }
+  return { state: listed.state, externalId: listed.externalId ?? null, status, failure };
+}
+
+// Returns the saved job, or null when it was settled elsewhere meanwhile.
+// `fetched` (from fetchStatus outside the lock) skips the network; it is
+// applied only while the job is still in the state it was fetched in.
+async function pollJob(reg, caseId, caseDir, store, listed, settings, now, fetched = null) {
+  const entry = reg.get(listed.executor, { caseId });
+  const every = Math.max(MIN_POLL_MS, Number(entry?.pollEveryMs) || settings.pollEveryMs);
+  const { status, failure } = fetched || await fetchStatus(reg, caseId, listed);
   // Re-read after the await: a cancel may have landed while the poll was out.
   const job = store.get(listed.id);
   if (!isObject(job) || !isOpen(job.state) || job.state === 'submitting') return null;
+  if (fetched && (job.state !== fetched.state || (job.externalId ?? null) !== fetched.externalId)) return null;
   const after = newAfter();
   settlePendingCharge(caseId, caseDir, job, after);
   if (!failure) {
@@ -435,7 +445,18 @@ async function indexQuietly(reg, caseId, job) {
 
 // Spec §3.12: a throw never leaves the refresh. A failed job poll, index
 // write or snapshot is logged; a failed snapshot reports no material change.
-async function refreshCase(reg, caseId, { force = false, budgetMs = null, jobIds = null } = {}) {
+// The open jobs a refresh polls, oldest poll first; unless `force`, a job
+// whose next poll is more than a minute ahead is skipped.
+function pollableJobs(store, { jobIds = null, force = false, now }) {
+  return store.list()
+    .filter((j) => isOpen(j.state) && j.state !== 'submitting' && (!jobIds || jobIds.includes(j.id)))
+    .filter((j) => force || !j.nextPollAt || Date.parse(j.nextPollAt) - now.getTime() <= GRACE_MS)
+    .sort((a, b) => String(a.lastPolledAt || '').localeCompare(String(b.lastPolledAt || '')));
+}
+
+// `prefetched` (jobId → fetchStatus result, from prefetchPolls) keeps the
+// network out of the case lock: only those jobs are applied, none fetched.
+async function refreshCase(reg, caseId, { force = false, budgetMs = null, jobIds = null, prefetched = null } = {}) {
   return reg.caseRuntime.systemAction(caseId, 'executor refresh', async (meta) => {
     const caseDir = meta.dir;
     const store = new JobStore(caseDir);
@@ -443,15 +464,14 @@ async function refreshCase(reg, caseId, { force = false, budgetMs = null, jobIds
     const now = reg.now();
     const limit = Number.isFinite(budgetMs) ? budgetMs : settings.refreshBudgetMs;
     const started = Date.now();
-    const open = store.list()
-      .filter((j) => isOpen(j.state) && j.state !== 'submitting' && (!jobIds || jobIds.includes(j.id)))
-      .sort((a, b) => String(a.lastPolledAt || '').localeCompare(String(b.lastPolledAt || '')));
+    const open = prefetched
+      ? store.list().filter((j) => prefetched.has(j.id))
+      : pollableJobs(store, { jobIds, force, now });
     for (const listed of open) {
-      if (Date.now() - started > limit) break;
-      if (!force && listed.nextPollAt && Date.parse(listed.nextPollAt) - now.getTime() > GRACE_MS) continue;
+      if (!prefetched && Date.now() - started > limit) break;
       let job;
       try {
-        job = await pollJob(reg, caseId, caseDir, store, listed, settings, now);
+        job = await pollJob(reg, caseId, caseDir, store, listed, settings, now, prefetched ? prefetched.get(listed.id) : null);
       } catch (err) {
         // Applying failed part way (a disk error): nothing past the
         // write-ahead was saved; the next poll picks it up again.
@@ -474,10 +494,45 @@ async function refreshCase(reg, caseId, { force = false, budgetMs = null, jobIds
 }
 
 // R48: C2's sweep calls this for a due poll-executor wake-up, with no model.
-async function pollWakeup(reg, caseId, wakeup) {
+// An unconfirmed submit is reconciled first (final review I1). With
+// `prefetched` (from prefetchPolls, fetched before the sweep took the case
+// lock) nothing here waits on the network (final review I3).
+async function pollWakeup(reg, caseId, wakeup, { prefetched = null } = {}) {
   const jobId = wakeup?.payload?.jobId || null;
-  const r = await refreshCase(reg, caseId, { jobIds: jobId ? [jobId] : null });
+  const jobIds = jobId ? [jobId] : null;
+  await reg.caseRuntime.systemAction(caseId, 'executor reconcile', () => reconcileSubmitting(reg, caseId, {
+    jobIds, prefetched: prefetched ? prefetched.reconcile : null
+  }));
+  const statuses = prefetched ? new Map([...prefetched.statuses].filter(([id]) => !jobIds || jobIds.includes(id))) : null;
+  const r = await refreshCase(reg, caseId, { jobIds, prefetched: statuses });
   return { material: Boolean(r.material) };
+}
+
+// Final review I3: the network half of a sweep's executor polls, run BEFORE
+// the sweep takes the case lock, so an owner message is never refused as
+// busy while an executor is slow. Only reads the case. → { reconcile,
+// statuses } (jobId → outcome), applied later under the lock, where each
+// job is re-read and a stale result is dropped.
+async function prefetchPolls(reg, caseId, wakeups, now = reg.now()) {
+  const store = new JobStore(reg.caseDir(caseId));
+  let jobIds = [];
+  for (const w of wakeups || []) {
+    const id = w?.payload?.jobId || null;
+    if (!id) { jobIds = null; break; }
+    jobIds.push(id);
+  }
+  const reconcile = new Map();
+  const statuses = new Map();
+  const limit = reg.settings().refreshBudgetMs;
+  const started = Date.now();
+  for (const job of submittingJobs(reg, caseId, jobIds)) {
+    reconcile.set(job.id, await reconcileFetch(reg, caseId, job));
+  }
+  for (const listed of pollableJobs(store, { jobIds, now })) {
+    if (Date.now() - started > limit) break;
+    statuses.set(listed.id, await fetchStatus(reg, caseId, listed));
+  }
+  return { reconcile, statuses };
 }
 
 // Releases a submitting job's reservation after the job is saved without
@@ -688,47 +743,178 @@ async function cancelJobAsOwner(reg, caseId, jobId, reason = 'cancelled by the o
   }
 }
 
-// A job still `submitting` at a turn start was interrupted: ask the executor
-// whether it has it (GET /jobs?externalRef=), else fail it. A job whose
-// externalId was already written ahead by commitSubmit is known accepted.
-async function reconcileSubmitting(reg, caseId) {
+// ---- Ambiguous submits (final review I1) ----
+// A clear refusal (a 4xx the executor's contract names) means the executor
+// did not take the job. Anything else (a network error, a timeout, a 5xx, an
+// unknown throw) is ambiguous: the executor may have taken it. An ambiguous
+// job stays `submitting` with its contacts held, and is reconciled at the
+// next turn start or sweep with the SAME idempotency key.
+const DEFINITIVE_CODES = new Set(['auth', 'invalid', 'not-found', 'rate-limited', 'conflict']);
+
+function isDefinitiveRefusal(err) {
+  if (!err || typeof err !== 'object') return false;
+  const status = Number(err.status);
+  if (Number.isInteger(status) && status >= 400 && status < 500) return true;
+  return DEFINITIVE_CODES.has(err.code);
+}
+
+// What the adapter sees of a job: a frozen copy, rebuilt the same way at
+// the first submit and at every reconcile (the idempotency key included).
+function jobViewFor(job, caseId) {
+  return Object.freeze(JSON.parse(JSON.stringify({
+    id: job.id, caseId, externalRef: `${caseId}/${job.id}`, idempotencyKey: job.idempotencyKey, intent: job.intent,
+    recipients: job.recipients, payload: job.payload, facts: job.facts, maxCostUsd: job.maxCostUsd, window: job.window
+  })));
+}
+
+function envelopeViewFor(envelope) {
+  if (!envelope) return null;
+  const { payloads, ...rest } = envelope;
+  return Object.freeze(JSON.parse(JSON.stringify(rest)));
+}
+
+const SUBMIT_TIMEOUT = Symbol('timeout');
+
+// → the adapter's answer, or SUBMIT_TIMEOUT; an adapter throw is rethrown.
+async function submitWithTimeout(adapter, jobView, envelopeView, timeoutMs) {
+  let timer = null;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(SUBMIT_TIMEOUT), timeoutMs);
+  });
+  try {
+    return await Promise.race([Promise.resolve().then(() => adapter.submit(jobView, envelopeView)), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// The first reported contact whose normalized address is not one we sent,
+// or null. Every reported contact is checked, before any is stored.
+function normalizationMismatch(job, contacts) {
+  if (!Array.isArray(contacts)) return null;
+  for (const c of contacts) {
+    const used = c && typeof c === 'object' ? c.normalizedAddress : undefined;
+    if (used === undefined || used === null || used === '') continue;
+    if (typeof used === 'string' && job.recipients.includes(used)) continue;
+    const sent = typeof c.address === 'string' && job.recipients.includes(c.address) ? c.address : job.recipients[0];
+    return { sent, used: clip(typeof used === 'string' ? used : JSON.stringify(used)) };
+  }
+  return null;
+}
+
+// Keeps an unconfirmed job `submitting` (contacts held) and gives it a poll
+// wake-up, so the sweep reconciles it too, not only a turn start.
+function holdSubmitting(reg, caseId, job, reason) {
+  const store = new JobStore(reg.caseDir(caseId));
+  const fresh = store.get(job.id);
+  if (!isObject(fresh) || fresh.state !== 'submitting') return fresh;
+  const now = reg.now();
+  const entry = reg.get(fresh.executor, { caseId });
+  const every = Math.max(MIN_POLL_MS, Number(entry?.pollEveryMs) || reg.settings().pollEveryMs);
+  fresh.unconfirmed = true;
+  fresh.error = clip(reason);
+  fresh.submitErrors = (Number(fresh.submitErrors) || 0) + 1;
+  if (!fresh.wakeupId) {
+    fresh.wakeupId = reg.caseRuntime.wakeups(caseId).ensure('poll-executor', { every, payload: { key: `poll:${fresh.id}`, executor: fresh.executor, jobId: fresh.id } });
+  }
+  fresh.nextPollAt = new Date(now.getTime() + every).toISOString();
+  saveJob(store, fresh);
+  journal(reg, caseId, `Job ${fresh.id} on ${fresh.executor} was not confirmed (${fresh.error}); it may already be running. It stays submitting with its contacts held and is reconciled with the same idempotency key.`);
+  return fresh;
+}
+
+// The network half of a reconcile, safe to run without the case lock (a
+// resubmit carries the job's own idempotency key, so the executor never
+// takes it twice). → { found } | { definitive } | { ambiguous } | { missing }
+async function reconcileFetch(reg, caseId, job) {
+  if (job.kind !== 'external') return { missing: true };
+  if (validExternalId(job.externalId)) return { found: { jobId: job.externalId } };
+  let adapter;
+  try {
+    adapter = await reg.adapter(job.executor);
+    if (typeof adapter.findByExternalRef === 'function') {
+      const found = await adapter.findByExternalRef(`${caseId}/${job.id}`);
+      if (found) return { found };
+    }
+  } catch (err) {
+    return { ambiguous: clip(err && err.message ? err.message : err) };
+  }
+  if (!job.unconfirmed) return { missing: true };
+  const envelope = job.envelopeId ? new EnvelopeStore(reg.caseDir(caseId)).get(job.envelopeId) : null;
+  try {
+    const submitted = await submitWithTimeout(adapter, jobViewFor(job, caseId), envelopeViewFor(envelope), reg.settings().submitTimeoutMs);
+    if (submitted === SUBMIT_TIMEOUT) return { ambiguous: 'the executor did not answer the resubmit in time' };
+    return { found: isObject(submitted) ? submitted : {} };
+  } catch (err) {
+    const message = clip(err && err.message ? err.message : err);
+    return isDefinitiveRefusal(err) ? { definitive: message } : { ambiguous: message };
+  }
+}
+
+// The disk half, under the case lock. The job is re-read: one that moved on
+// meanwhile (committed, cancelled) ignores the fetched outcome.
+async function reconcileApply(reg, caseId, listed, outcome) {
   const caseDir = reg.caseDir(caseId);
   const store = new JobStore(caseDir);
+  const job = store.get(listed.id);
+  if (!isObject(job) || job.state !== 'submitting' || reg.inFlight.has(runKey(caseId, job.id))) return null;
+  if (outcome.found) {
+    const answer = outcome.found;
+    const mismatch = normalizationMismatch(job, answer.contacts);
+    if (mismatch) {
+      await failSubmit(reg, caseId, job, { jobId: answer.jobId }, `recipient normalized differently: sent ${mismatch.sent}, executor used ${mismatch.used}`);
+      return { jobId: job.id, state: 'failed' };
+    }
+    const committed = await commitSubmit(reg, caseId, job, { ...answer, contacts: capContacts(answer.contacts) });
+    return { jobId: job.id, state: committed?.state === 'failed' ? 'failed' : 'submitted' };
+  }
+  if (outcome.definitive) {
+    await failSubmit(reg, caseId, job, {}, `refused on resubmit: ${outcome.definitive}`);
+    return { jobId: job.id, state: 'failed' };
+  }
+  if (outcome.ambiguous) {
+    log.warn(`Reconciling ${job.id} failed; trying again later: ${outcome.ambiguous}`);
+    if (job.unconfirmed) holdSubmitting(reg, caseId, job, outcome.ambiguous);
+    return { jobId: job.id, state: 'submitting' };
+  }
+  // Interrupted before the executor was ever asked, and it does not have it.
+  const release = takeReservation(job);
+  job.state = 'failed';
+  job.reason = 'interrupted';
+  job.lastChange = reg.now().toISOString();
+  const after = newAfter();
+  finishJob(reg, caseId, caseDir, job, after);
+  saveJob(store, job);
+  if (release) await reg.releaseContacts(job.executor, release, { caseId });
+  flushAfter(reg, caseId, after);
+  await indexQuietly(reg, caseId, job);
+  return { jobId: job.id, state: 'failed' };
+}
+
+// The submitting jobs a reconcile looks at (optionally only `jobIds`).
+function submittingJobs(reg, caseId, jobIds = null) {
+  return new JobStore(reg.caseDir(caseId)).list()
+    .filter((j) => j.state === 'submitting' && !reg.inFlight.has(runKey(caseId, j.id)) && (!jobIds || jobIds.includes(j.id)));
+}
+
+// A job still `submitting` at a turn start was interrupted or unconfirmed:
+// ask the executor whether it has it (GET /jobs?externalRef=); an
+// unconfirmed one is resubmitted with its own idempotency key; one that was
+// never confirmed sent fails as interrupted. A job whose externalId was
+// already written ahead by commitSubmit is known accepted. Runs under the
+// lock; `prefetched` (jobId → reconcileFetch outcome) skips the network.
+async function reconcileSubmitting(reg, caseId, { jobIds = null, prefetched = null } = {}) {
   const out = [];
-  for (const job of store.list().filter((j) => j.state === 'submitting')) {
-    if (reg.inFlight.has(runKey(caseId, job.id))) continue;
-    let found = null;
-    if (job.kind === 'external') {
-      if (validExternalId(job.externalId)) {
-        found = { jobId: job.externalId };
-      } else {
-        try {
-          const adapter = await reg.adapter(job.executor);
-          if (typeof adapter.findByExternalRef === 'function') found = await adapter.findByExternalRef(`${caseId}/${job.id}`);
-        } catch (err) {
-          log.warn(`Reconciling ${job.id} failed; trying again next turn: ${err.message}`);
-          continue;
-        }
-      }
+  for (const job of submittingJobs(reg, caseId, jobIds)) {
+    let outcome;
+    if (prefetched) {
+      outcome = prefetched.get(job.id);
+      if (!outcome) continue;
+    } else {
+      outcome = await reconcileFetch(reg, caseId, job);
     }
-    if (found) {
-      const committed = await commitSubmit(reg, caseId, job, found);
-      out.push({ jobId: job.id, state: committed?.state === 'failed' ? 'failed' : 'submitted' });
-      continue;
-    }
-    const fresh = store.get(job.id);
-    if (!isObject(fresh) || fresh.state !== 'submitting') continue;
-    const release = takeReservation(fresh);
-    fresh.state = 'failed';
-    fresh.reason = 'interrupted';
-    fresh.lastChange = reg.now().toISOString();
-    const after = newAfter();
-    finishJob(reg, caseId, caseDir, fresh, after);
-    saveJob(store, fresh);
-    if (release) await reg.releaseContacts(fresh.executor, release, { caseId });
-    flushAfter(reg, caseId, after);
-    await indexQuietly(reg, caseId, fresh);
-    out.push({ jobId: fresh.id, state: 'failed' });
+    const r = await reconcileApply(reg, caseId, job, outcome);
+    if (r) out.push(r);
   }
   return out;
 }
@@ -794,9 +980,20 @@ module.exports = {
   failSubmit,
   refreshCase,
   pollWakeup,
+  prefetchPolls,
   cancelJob,
   cancelOpenJobs,
   cancelJobAsOwner,
   reconcileSubmitting,
+  reconcileFetch,
+  reconcileApply,
+  submittingJobs,
+  holdSubmitting,
+  isDefinitiveRefusal,
+  jobViewFor,
+  envelopeViewFor,
+  submitWithTimeout,
+  SUBMIT_TIMEOUT,
+  normalizationMismatch,
   copyBackgroundOutput
 };

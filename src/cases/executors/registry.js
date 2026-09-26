@@ -548,8 +548,19 @@ class ExecutorRegistry {
     return jobs.refreshCase(this, caseId, opts);
   }
 
-  pollWakeup(caseId, wakeup) {
-    return jobs.pollWakeup(this, caseId, wakeup);
+  pollWakeup(caseId, wakeup, options = {}) {
+    return jobs.pollWakeup(this, caseId, wakeup, options);
+  }
+
+  // Final review I3: C2's sweep calls this before it takes the case lock;
+  // the result goes to pollWakeup as { prefetched }. null: nothing is due.
+  async prefetchPolls(caseId, now = this.now()) {
+    const rt = this.caseRuntime;
+    const status = rt.getCase(caseId).status;
+    if (!['active', 'needs-direction'].includes(status)) return null;
+    const due = rt.wakeups(caseId).due(now).filter((w) => w.kind === 'poll-executor');
+    if (!due.length) return null;
+    return jobs.prefetchPolls(this, caseId, due, now);
   }
 
   cancelOpenJobs(caseId, reason) {

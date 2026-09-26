@@ -10,7 +10,6 @@ const { normalizeRecipient } = require('./normalize');
 const { writeJsonAtomic, cut, CASES_BROWSER_PROFILE } = require('./util');
 
 const log = createLogger('executors/kinds');
-const TIMEOUT = Symbol('timeout');
 const OTHER_PROFILE = 'the browser is open with another profile; close it or retry';
 const MAY_HAVE_BEEN_SENT = 'the form may have been sent';
 // Ruling M17: a login runs in this named browser profile (CASES_BROWSER_PROFILE),
@@ -60,57 +59,38 @@ function commitProblem(committed, job) {
   return null;
 }
 
-// The first reported contact whose normalized address is not one we sent,
-// or null. Every reported contact is checked, before any is stored.
-function normalizationMismatch(job, contacts) {
-  if (!Array.isArray(contacts)) return null;
-  for (const c of contacts) {
-    const used = c && typeof c === 'object' ? c.normalizedAddress : undefined;
-    if (used === undefined || used === null || used === '') continue;
-    if (typeof used === 'string' && job.recipients.includes(used)) continue;
-    const sent = typeof c.address === 'string' && job.recipients.includes(c.address) ? c.address : job.recipients[0];
-    return { sent, used: clip(typeof used === 'string' ? used : JSON.stringify(used)) };
-  }
-  return null;
-}
-
 async function submitExternal(reg, { caseId }, { entry, job, envelope, notes }) {
   const settings = reg.settings();
   const adapter = await reg.adapter(entry.id);
-  const envelopeView = envelope
-    ? Object.freeze(JSON.parse(JSON.stringify((({ payloads, ...rest }) => rest)(envelope))))
-    : null;
-  const jobView = Object.freeze(JSON.parse(JSON.stringify({
-    id: job.id, caseId, externalRef: `${caseId}/${job.id}`, idempotencyKey: job.idempotencyKey, intent: job.intent,
-    recipients: job.recipients, payload: job.payload, facts: job.facts, maxCostUsd: job.maxCostUsd, window: job.window
-  })));
-  let timer = null;
-  const timeout = new Promise((resolve) => {
-    timer = setTimeout(() => resolve(TIMEOUT), settings.submitTimeoutMs);
-  });
+  // Final review I1: only a clear refusal fails the job. A timeout, a network
+  // error or a 5xx may hide an accepted job, so the job stays submitting with
+  // its contacts held and is reconciled with the same idempotency key.
+  const unconfirmed = (why) => {
+    jobs.holdSubmitting(reg, caseId, job, why);
+    return {
+      ok: false,
+      error: `${entry.id} did not confirm ${job.id} (${why}); it may already be running. ${job.id} stays submitting with its contacts held and is reconciled with the same idempotency key at the next turn start or sweep`,
+      jobId: job.id
+    };
+  };
   let submitted;
   try {
-    submitted = await Promise.race([Promise.resolve().then(() => adapter.submit(jobView, envelopeView)), timeout]);
+    submitted = await jobs.submitWithTimeout(adapter, jobs.jobViewFor(job, caseId), jobs.envelopeViewFor(envelope), settings.submitTimeoutMs);
   } catch (err) {
     if (err && err.code === 'conflict') {
       await failJob(reg, caseId, job, 'idempotency conflict');
       return { ok: false, error: `${entry.id} refused ${job.id}: its idempotency key was already used with a different body (idempotency conflict)` };
     }
     const message = clip(err && err.message ? err.message : err);
+    if (!jobs.isDefinitiveRefusal(err)) return unconfirmed(message);
     await failJob(reg, caseId, job, message);
     return { ok: false, error: `${entry.id} refused ${job.id}: ${message}` };
-  } finally {
-    clearTimeout(timer);
   }
-  if (submitted === TIMEOUT) {
-    return {
-      ok: false,
-      error: `${entry.id} did not answer within ${Math.round(settings.submitTimeoutMs / 1000)}s; ${job.id} stays submitting and is reconciled at the next turn start`,
-      jobId: job.id
-    };
+  if (submitted === jobs.SUBMIT_TIMEOUT) {
+    return unconfirmed(`it did not answer within ${Math.round(settings.submitTimeoutMs / 1000)}s`);
   }
   const answer = submitted && typeof submitted === 'object' && !Array.isArray(submitted) ? submitted : {};
-  const mismatch = normalizationMismatch(job, answer.contacts);
+  const mismatch = jobs.normalizationMismatch(job, answer.contacts);
   if (mismatch) {
     // failSubmit asks the executor to cancel the job it accepted.
     await jobs.failSubmit(reg, caseId, job, { jobId: answer.jobId }, `recipient normalized differently: sent ${mismatch.sent}, executor used ${mismatch.used}`);

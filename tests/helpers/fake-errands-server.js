@@ -6,7 +6,7 @@ const crypto = require('crypto');
 
 async function startFakeErrandsServer({ token = 'tok-test', pageSize = 2 } = {}) {
   const state = { jobs: new Map(), records: new Map(), idempotency: new Map(), requests: [], seq: 0 };
-  const knobs = { failNextStatus: null, normalizeAs: {}, latencyMs: 0, status429: null, status404: false, status422: false, status5xx: false };
+  const knobs = { failNextStatus: null, normalizeAs: {}, latencyMs: 0, status429: null, status404: false, status422: false, status5xx: false, failAfterWrite: null, postStatus: null };
   const send = (res, status, body, headers = {}) => {
     res.writeHead(status, { 'content-type': 'application/json', ...headers });
     res.end(body === undefined ? '' : JSON.stringify(body));
@@ -39,6 +39,8 @@ async function startFakeErrandsServer({ token = 'tok-test', pageSize = 2 } = {})
       if (knobs.status422) return fail(res, 422, 'invalid', 'bad request body');
       const parts = url.pathname.split('/').filter(Boolean);
       if (req.method === 'POST' && url.pathname === '/jobs') {
+        // A refusal of POST /jobs only (other routes answer as usual).
+        if (knobs.postStatus) return fail(res, knobs.postStatus, 'invalid', `refused with ${knobs.postStatus}`);
         const key = req.headers['idempotency-key'];
         if (!key) return fail(res, 422, 'invalid', 'Idempotency-Key is required');
         if (!body || !body.externalRef || !Array.isArray(body.recipients) || !body.recipients.length) {
@@ -62,6 +64,12 @@ async function startFakeErrandsServer({ token = 'tok-test', pageSize = 2 } = {})
         };
         state.jobs.set(id, job);
         state.idempotency.set(key, { hash, id });
+        // The job is written, but the answer is lost (a 5xx after the write).
+        if (knobs.failAfterWrite) {
+          const status = knobs.failAfterWrite;
+          knobs.failAfterWrite = null;
+          return fail(res, status, 'unavailable', 'failed after the write');
+        }
         return send(res, 201, view(job));
       }
       if (req.method === 'GET' && url.pathname === '/jobs') {

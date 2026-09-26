@@ -166,7 +166,7 @@ describe('Executor.submit to an external agent', () => {
     const envelopeId = await approvedEnvelope(s);
     s.ctl.submitDelayMs = 300;
     const slow = await submit(s, { executor: 'fake-agent', envelopeId, payload: call(s) });
-    assert.match(slow.error, /did not answer within 0s; job-0001 stays submitting/);
+    assert.match(slow.error, /did not confirm job-0001 \(it did not answer within 0s\); it may already be running\. job-0001 stays submitting/);
     assert.strictEqual(new JobStore(s.meta.dir).get('job-0001').state, 'submitting');
     s.ctl.submitDelayMs = 0;
     s.ctl.submitError = Object.assign(new Error('Idempotency-Key reused with a different body'), { code: 'conflict' });
