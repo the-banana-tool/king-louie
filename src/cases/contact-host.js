@@ -275,6 +275,28 @@ function createContactHost({
       return { ...status, ladder: s.runsHere ? { runsHere: true } : { runsHere: false, message: s.holder ? `contact ladder runs in ${s.holder.host}:${s.holder.pid}` : 'no cases yet' } };
     },
 
+    // Wave 3 (R44): the phone app, when the service runs F3 approvals. The
+    // approver store is F3's admin <configDir>/approvers/ set (never a
+    // data-dir one); the relay link goes on the adapter's `link`.
+    async startMobile(approvals) {
+      if (!approvals || !approvals.relayClient || !approvals.approverStore || !approvals.identity) return;
+      const { MobileAppChannel } = require('../channels/mobile-app-channel');
+      const { NonceCache } = require('../approvals/verify-device');
+      const mobile = new MobileAppChannel({
+        link: approvals.relayClient,
+        approverStore: approvals.approverStore,
+        identity: approvals.identity,
+        nonces: new NonceCache({}),
+        getRouter: () => router,
+        presence,
+        isEnabled: () => channelSettings('mobile').enabled === true,
+        clock
+      });
+      mobile.registerMethods();
+      wire('mobile', mobile);
+      built.set('mobile', mobile);
+    },
+
     // core.context.getContact()
     context() {
       return {

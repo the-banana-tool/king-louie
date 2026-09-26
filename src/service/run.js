@@ -100,6 +100,7 @@ function loadProfile(profile) {
             remoteApprovals: 'phone',
             phoneApprover: approvals.phoneApprover,
             auditLedger: approvals.auditLedger,
+            approvals, // Cases stage 4 (wave 3): the phone contact channel (relay link, admin approvers, node identity)
             nodePolicy: nodeConfig.policy,
             builtinSkillsDir: path.join(__dirname, '..', '..', 'skills')
           });

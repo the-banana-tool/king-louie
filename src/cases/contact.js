@@ -670,4 +670,4 @@ class ContactRouter {
   }
 }
 
-module.exports = { ContactRouter, conflictFact, conflictAnswered, sameAnswer, answerLabel, appOnly };
+module.exports = { ContactRouter, conflictFact, conflictAnswered, sameAnswer, answerLabel, appOnly, relayOf };
