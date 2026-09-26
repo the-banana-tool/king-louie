@@ -270,6 +270,23 @@ describe('Executor.submit to built-in executors', () => {
     assert.deepStrictEqual(released, [['site.status', 42]]);
   });
 
+  // Final review minor 4 (spec §3.5 step 8): runbook params are gated in
+  // query mode, so a private value never reaches a runbook.
+  it('gates runbook params in query mode', async () => {
+    const engine = {
+      getRunbook: (name) => ({ name, tier: 'read' }),
+      validateParameters: (name, params) => ({ ...params }),
+      checkRateLimit: () => ({ allowed: true }),
+      recordExecution: () => 1,
+      releaseExecution: () => {},
+      executeRunbook: async () => ({ success: true })
+    };
+    const s = await setup({ registryOptions: { getRunbookEngine: () => engine } });
+    const r = await submit(s, { executor: 'runbook', payload: JSON.stringify({ runbook: 'site.status', params: { note: 'floor 98000' } }) });
+    assert.strictEqual(r.error, 'blocked by the outbound gate');
+    assert.deepStrictEqual(r.blocked.map((b) => [b.path, b.reason]), [['params.note', 'non-disclosable']]);
+  });
+
   it('asks the owner for a consented plan step and waits', async () => {
     const s = await setup();
     new PlanStore(s.meta.dir).write({

@@ -230,12 +230,12 @@ async function submitChecked(reg, ctx, params) {
 
   // 8. The outbound gate over every leaf (R38). An external agent's payload
   // leaves the node whatever its `outbound` mode, so with 'none' it still
-  // takes the value rules ('query').
+  // takes the value rules ('query'); so do runbook params (spec §3.5 step 8).
   const facts = rt.ledger(caseId).view().facts;
   let rendered = payload;
   let gateBlocked = [];
   let sentStatements = null;
-  const mode = entry.outbound !== 'none' ? entry.outbound : (kind === 'external' ? 'query' : null);
+  const mode = entry.outbound !== 'none' ? entry.outbound : (kind === 'external' || kind === 'runbook' ? 'query' : null);
   if (mode) {
     const gateOptions = {
       recipients, envelope, facts, mode, caseId,

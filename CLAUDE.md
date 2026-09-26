@@ -307,17 +307,33 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage3-executors.md`.
   built-ins (`bash`, `files`, `web`, `browser`, `workflow`, `runbook`,
   `owner`), configured external agents, the per-case `override` in
   `.kl/executors.json` (narrowing only) and the floors (an outbound capability
-  forces `outbound: message`, `authority ≥ envelope`).
+  forces `outbound: message`, `authority ≥ envelope`). The floors come from
+  the base capabilities before the case override: an override narrows the
+  tools but never lowers the gate mode or the authority.
 - External agents are packages with a `kingLouie.executor` block, loaded only
   from `<dataDir>/executors/` (desktop) or the admin `service.json`
   `executors.packageRoots` (service), and only with a matching
   `packageSha256`; `executors:list` shows the hash to pin. Secrets are
   `${vault:<key>}` references. The reference package is
   `examples/executors/phone-agent/` (errands API: `openapi.yaml`).
-- The model plans with `Plan` and sends with `Executor`. Nothing leaves without
-  `gateLeaves` (`src/cases/gates.js`) over every string leaf and an
-  owner-approved envelope in `.kl/envelopes/`; senders send `rendered`.
-  Facts go out only as `{{f-0042}}` references.
+- The model plans with `Plan` and sends with `Executor`; senders send
+  `rendered`, the gated payload. What each kind of job gets:
+  - External agents and the browser: every string leaf through `gateLeaves`
+    (`src/cases/gates.js`), in `message` mode when the executor has an
+    outbound capability, else `query` mode. The statements of declared
+    `payload.facts` are gated too; they leave with the facts' values.
+  - An owner-approved envelope (`.kl/envelopes/`) is needed only when the
+    executor's authority is `envelope` or `signed`. An external agent whose
+    admin entry says `authority: none` and that has no outbound capability
+    sends without one, in `query` mode, with only disclosable declared facts.
+  - Workflow research tasks and runbook `params`: `query` mode, no envelope.
+  - In text, facts are quoted as `{{f-0042}}` references.
+- Only a clear 4xx refusal fails an external submit. A timeout
+  (`submitTimeoutMs`, or `host.fetch`'s `requestTimeoutMs`), a network error
+  or a 5xx leaves the job `submitting` with its contacts held; the next turn
+  start or sweep finds it by `externalRef` or resubmits it with the same
+  idempotency key. The sweep fetches executor statuses before it takes the
+  case lock and applies them inside it.
 - `external-agent` facts are written only by `Executor.results`;
   `brief.resources.ownerLabor` only by `syncPlan`. Tests that need a case with
   executors use `tests/helpers/executor-fixtures.js` (a temp data dir, a fake
@@ -330,10 +346,15 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage3-executors.md`.
   service mode alike. Only an executor that declares `authority: signed`
   needs the phone: its envelope activates only on a verified phone signature
   over the live envelope hash. This is an owner decision and a deliberate
-  exception to trust principle 3 for envelopes. The envelope hash includes
-  `authority`; an `envelope`-authority hash has no key, so a Bash edit that
-  widens an envelope and recomputes the hash is not caught (the stage-1 Bash
-  write-guard gap).
+  exception to trust principle 3 for envelopes. An in-app Reject of a signed
+  envelope rejects it and withdraws the phone request.
+- Known gap (stage-1 Bash write guard), documented, not fixed: envelope files
+  are not protected from `Bash`. The envelope hash includes `authority` but an
+  `envelope`-authority hash has no key, and `envelopeFit` reads `status`
+  from the file, so Bash can write an `active` envelope that no owner
+  approved. The approval-gated `Git` tool can restore a revoked envelope
+  (`revoked` is a file field outside the hash). Signed envelopes still need
+  the phone grant.
 - The outbound gate: `{{f-NNNN}}` renders only an active, disclosable `user`,
   `sourced` or `external-agent` fact (inside the envelope's `facts` when there
   is one). Rule 1 (both modes) blocks a pasted value of an inferred, unknown,
@@ -346,6 +367,7 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage3-executors.md`.
   letters are not folded), values split across sentences or leaves,
   spelled-out amounts, URL-encoded or joined text values, and the Bash
   write-guard gap above. The detectors are English only and fail closed.
+  `query` mode runs rule 1 only.
 - Browser jobs always run in the `kl-cases` browser profile (refused while the
   browser is open in another profile) and stay on the approved origin: a
   redirect or a field-triggered navigation off it stops the job before the
