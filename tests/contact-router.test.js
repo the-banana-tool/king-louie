@@ -911,3 +911,35 @@ describe('ContactRouter: a reply-to reference never resolves as a token', () => 
     assert.strictEqual(w.runtime.questions(w.lot.id).get(q.id).answer, null);
   });
 });
+
+// Review T10 round 2: an explicit #token in the text names its question, even
+// in a reply to (or a thread of) another delivery.
+describe('ContactRouter: an explicit text token beats the reply-to reference', () => {
+  for (const channel of ['telegram', 'email']) {
+    it(`${channel}: "#<Y> 2" sent as a reply to X answers Y with "2" and leaves X alone`, async () => {
+      const w = await world();
+      const qx = w.ask(w.lot.id, { text: 'Anything else about the lot?' });
+      const qy = w.ask(w.kitchen.id, { text: 'How many builders to ask?' });
+      const x = await w.router.deliver(channel, [w.entry(w.lot, qx)]);
+      w.advance(1000);
+      const y = await w.router.deliver(channel, [w.entry(w.kitchen, qy)]);
+      const xRef = w.state.deliveries()[x.deliveryId].externalRef;
+      // Telegram's correlation is the text token; email's is the thread (X).
+      const correlation = channel === 'telegram' ? y.batchToken : x.deliveryId;
+      const r = await w.router.handleReply(channel, correlation, { text: `#${y.batchToken} 2` }, { ownerProven: true, senderId: 'owner', deliveryRef: xRef });
+      assert.strictEqual(r.outcome, 'recorded');
+      assert.strictEqual(w.runtime.questions(w.kitchen.id).get(qy.id).answer.text, '2');
+      assert.strictEqual(w.runtime.questions(w.lot.id).get(qx.id).answer, null, 'X is untouched');
+    });
+  }
+
+  it('a text token that resolves nothing falls back to the reply-to reference', async () => {
+    const w = await world();
+    const qx = w.ask(w.lot.id, { text: 'Anything else about the lot?' });
+    const x = await w.router.deliver('telegram', [w.entry(w.lot, qx)]);
+    const xRef = w.state.deliveries()[x.deliveryId].externalRef;
+    const r = await w.router.handleReply('telegram', xRef, { text: 'call #ZZZZZZ first' }, { ownerProven: true, senderId: '111', deliveryRef: xRef });
+    assert.strictEqual(r.outcome, 'recorded');
+    assert.strictEqual(w.runtime.questions(w.lot.id).get(qx.id).answer.text, 'call #ZZZZZZ first');
+  });
+});

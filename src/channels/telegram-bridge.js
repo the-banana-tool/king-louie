@@ -271,7 +271,7 @@ class TelegramBridge extends ChannelPlugin {
     const forwarded = message.forward_origin != null || message.forward_from != null || message.forward_date != null
       || message.forward_from_chat != null || message.forward_sender_name != null;
     const ownerProven = !forwarded && contactOwnerProven({ isPrivate, chatId, senderId, target, ownerUserId: this._contactOwner() });
-    await this._contactReply(byToken ? token : replyTo, { text }, { senderId, chatId, ownerProven, deliveryRef: byReply ? replyTo : null });
+    await this._contactReply(byToken ? token : replyTo, { text }, { senderId, chatId, ownerProven, deliveryRef: byToken || !byReply ? null : replyTo });
     if (!ownerProven) {
       const chatType = String(message.chat?.type || '').toLowerCase();
       const groupId = chatType === 'group' || chatType === 'supergroup' ? chatId : null;

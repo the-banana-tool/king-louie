@@ -289,6 +289,11 @@ describe('token binding', () => {
       // when the thread is the correlation; a token that names another batch
       // must not be overridden by the thread it was sent in.
       assert.deepStrictEqual(calls.map((c) => c.meta.deliveryRef), [inReplyTo, null, inReplyTo]);
+      // Review T10 round 2: an In-Reply-To that is not the thread's own message
+      // (the thread came from References) is never passed as deliveryRef.
+      await email.ingestRelayEvent({ id: 'e4', type: 'inbound', from: 'owner@example.com', subject: 'Re: [KL-K7QD4M]', text: 'a', inReplyTo: '<kl-d-OTHER99@example.com>', references: [inReplyTo], auth: { verified: true, method: 'dmarc' } });
+      await email.ingestRelayEvent({ id: 'e5', type: 'inbound', from: 'owner@example.com', subject: 'Re: [KL-K7QD4M]', text: 'a', inReplyTo: '<unrelated@mail.example.com>', references: [inReplyTo], auth: { verified: true, method: 'dmarc' } });
+      assert.deepStrictEqual(calls.slice(3).map((c) => [c.correlationId, c.meta.deliveryRef]), [['d-OTHER99', '<kl-d-OTHER99@example.com>'], ['d-ABC123', null]]);
     } finally {
       await relay.close();
     }

@@ -277,13 +277,14 @@ class ContactRouter {
     if (caps.requiresToken && !textToken && !(correlationId && answer.optionIndex !== undefined)) {
       return { ok: false, outcome: 'refused: no-token', ackText: this._hint(channelId) };
     }
-    // A reply-to reference (meta.deliveryRef) resolves first and only as a
-    // reference; when it is also the correlation it is never retried as a
-    // token (review T10 I1).
+    // Order (review T10 I1 and round 2): an explicit #token in the text that
+    // resolves names its question and wins; then a reply-to reference
+    // (meta.deliveryRef), resolved only as a reference; then the correlation,
+    // unless it is that same reference (never retried as a token).
     const deliveryRef = typeof meta.deliveryRef === 'string' || typeof meta.deliveryRef === 'number' ? String(meta.deliveryRef).trim() : '';
-    let resolved = deliveryRef ? this.state.resolve(deliveryRef, { channel: channelId, ref: true }) : null;
+    let resolved = textToken ? this.state.resolve(textToken[1], { channel: channelId }) : null;
+    if (!resolved && deliveryRef) resolved = this.state.resolve(deliveryRef, { channel: channelId, ref: true });
     if (!resolved && correlationId && correlationId !== deliveryRef) resolved = this.state.resolve(correlationId, { channel: channelId });
-    if (!resolved && textToken) resolved = this.state.resolve(textToken[1], { channel: channelId });
     if (!resolved) return { ok: false, outcome: 'unknown', ackText: "I couldn't match that reply to a question. Answer it in King Louie." };
 
     let pairs;

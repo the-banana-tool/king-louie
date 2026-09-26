@@ -419,6 +419,21 @@ describe('contact adapter: Telegram (fake Bot API via apiBase)', () => {
     }
   });
 
+  // Review T10 round 2: a leading #token names the question; the reply-to is
+  // then not passed as deliveryRef (the router would resolve it first).
+  it('a #token message that is also a reply carries no deliveryRef', async () => {
+    const api = await fakeBotApi();
+    try {
+      const { bridge, calls, refs } = await bridgeWith(api);
+      refs.add('4812');
+      await bridge.handleUpdate({ message: { chat: privateChat(111), from: { id: 111 }, text: '#K7QD4M 2', reply_to_message: { message_id: 4812 } } });
+      await bridge.handleUpdate({ message: { chat: privateChat(111), from: { id: 111 }, text: '2', reply_to_message: { message_id: 4812 } } });
+      assert.deepStrictEqual(calls.map((c) => [c.correlationId, c.meta.deliveryRef]), [['K7QD4M', null], ['4812', '4812']]);
+    } finally {
+      await api.close();
+    }
+  });
+
   // Review T10 M3: a forward carries someone else's words; it never proves the owner.
   it('a forwarded message is never owner-proven', async () => {
     const api = await fakeBotApi();
