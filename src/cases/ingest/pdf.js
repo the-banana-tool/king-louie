@@ -18,16 +18,18 @@
 // - hands pdf.js the bytes pdf-lib re-serialised from the scanned objects
 //   (never the original file, never a URL), with scripting, font loading,
 //   fetching and file reads off.
-// Inputs and outputs are plain data so the whole module can run in a child
-// process (Task 3b).
+//
+// Only the PDF worker parses (ruling Q1, ruling T3b-frames): `openPdf` is
+// the sandboxed version from pdf-sandbox.js, and `openPdfInProcess` is the
+// parser itself, for pdf-worker.js and for tests. pdf-lib, unpdf and the
+// process-wide pdf-lib decode guard (ruling T3-patch) are loaded on the
+// first openPdfInProcess call, never when this module is required, so a
+// process that only requires it (the desktop main process, the service)
+// never loads a parser or carries the guard.
 const zlib = require('node:zlib');
 const { AsyncLocalStorage } = require('node:async_hooks');
-const {
-  PDFDocument, PDFName, PDFDict, PDFArray, PDFNumber, PDFRef, PDFRawStream,
-  PDFInvalidObject, PDFPageTree, PDFPageLeaf, decodePDFRawStream
-} = require('pdf-lib');
-const ByteStream = require('pdf-lib/cjs/core/parser/ByteStream').default;
 const { IngestError } = require('./errors');
+const { openPdfIsolated } = require('./pdf-sandbox');
 const { createLogger } = require('../../logging');
 
 const log = createLogger('cases/ingest/pdf');
@@ -234,8 +236,9 @@ function checkStream(dict, contents, budget, context) {
 // the budget and rethrown after load.
 const loadScope = new AsyncLocalStorage();
 const GUARDED = Symbol.for('king-louie.ingest.pdf-lib-decode-guard');
-if (typeof ByteStream?.fromPDFRawStream !== 'function') throw new Error('pdf-lib ByteStream.fromPDFRawStream not found: the decode guard cannot be installed');
-if (!ByteStream.fromPDFRawStream[GUARDED]) {
+function installDecodeGuard(ByteStream) {
+  if (typeof ByteStream?.fromPDFRawStream !== 'function') throw new Error('pdf-lib ByteStream.fromPDFRawStream not found: the decode guard cannot be installed');
+  if (ByteStream.fromPDFRawStream[GUARDED]) return;
   const original = ByteStream.fromPDFRawStream;
   const guarded = (rawStream) => {
     const budget = loadScope.getStore() || new DecodeBudget('document.pdf', MAX_STREAM_BYTES, MAX_DOCUMENT_BYTES);
@@ -249,6 +252,27 @@ if (!ByteStream.fromPDFRawStream[GUARDED]) {
   };
   guarded[GUARDED] = true;
   ByteStream.fromPDFRawStream = guarded;
+}
+
+// pdf-lib's names, bound on the first openPdfInProcess call. PDFDocument is
+// bound last, after the guard is in place: if installing it throws, every
+// later call tries again and throws again (fail closed). pdf-lib is loaded
+// with require(): its ESM build is a separate module graph the guard would
+// not cover.
+let PDFDocument = null;
+let PDFName; let PDFDict; let PDFArray; let PDFNumber; let PDFRef; let PDFRawStream;
+let PDFInvalidObject; let PDFPageTree; let PDFPageLeaf; let decodePDFRawStream;
+let SHORT_KEYS;
+function loadParser() {
+  if (PDFDocument) return;
+  const lib = require('pdf-lib');
+  ({
+    PDFName, PDFDict, PDFArray, PDFNumber, PDFRef, PDFRawStream,
+    PDFInvalidObject, PDFPageTree, PDFPageLeaf, decodePDFRawStream
+  } = lib);
+  SHORT_KEYS = [PDFName.of('F'), PDFName.of('DP')];
+  installDecodeGuard(require('pdf-lib/cjs/core/parser/ByteStream').default);
+  PDFDocument = lib.PDFDocument;
 }
 
 // Iterative walk of the page tree in document order. Refuses cycles, a node
@@ -304,7 +328,6 @@ function walkPageTree(doc, name) {
 // A stream dict with /F or /DP is refused outright (ruling T3-shortkeys):
 // the short filter keys belong to inline images, and /F on a stream can also
 // be a file specification, which must never be followed.
-const SHORT_KEYS = [PDFName.of('F'), PDFName.of('DP')];
 function scanObjects(context, budget) {
   for (const [ref, obj] of context.enumerateIndirectObjects()) {
     if (obj instanceof PDFInvalidObject) {
@@ -354,8 +377,11 @@ function singleJpeg(doc, page) {
   return { mime: 'image/jpeg', bytes: Buffer.from(images[0].contents) };
 }
 
-async function openPdf(bytes, { name = 'document.pdf', maxStreamBytes, maxDocumentBytes } = {}) {
+// In-process parsing: for pdf-worker.js and tests only. Everything else calls
+// openPdf, which runs this in the worker.
+async function openPdfInProcess(bytes, { name = 'document.pdf', maxStreamBytes, maxDocumentBytes } = {}) {
   if (!(bytes instanceof Uint8Array)) throw unreadable(name);
+  loadParser();
   const budget = new DecodeBudget(name, capOf(maxStreamBytes, MAX_STREAM_BYTES), capOf(maxDocumentBytes, MAX_DOCUMENT_BYTES));
   let doc;
   try {
@@ -412,4 +438,4 @@ async function openPdf(bytes, { name = 'document.pdf', maxStreamBytes, maxDocume
   };
 }
 
-module.exports = { openPdf, normalizeRotation, PDFJS_OPTIONS, MAX_STREAM_BYTES, MAX_DOCUMENT_BYTES, MAX_TREE_DEPTH };
+module.exports = { openPdf: openPdfIsolated, openPdfInProcess, normalizeRotation, PDFJS_OPTIONS, MAX_STREAM_BYTES, MAX_DOCUMENT_BYTES, MAX_TREE_DEPTH };

@@ -10,7 +10,9 @@ const assert = require('node:assert');
 const zlib = require('node:zlib');
 const fsp = require('node:fs/promises');
 const { PDFDocument, PDFName, PDFNumber, PDFRawStream, PDFString, PDFArray } = require('pdf-lib');
-const { openPdf, normalizeRotation, PDFJS_OPTIONS, MAX_STREAM_BYTES, MAX_DOCUMENT_BYTES } = require('../src/cases/ingest/pdf');
+// The parser itself, in this process; the sandboxed openPdf is covered by
+// tests/cases-ingest-sandbox.test.js.
+const { openPdfInProcess: openPdf, normalizeRotation, PDFJS_OPTIONS, MAX_STREAM_BYTES, MAX_DOCUMENT_BYTES } = require('../src/cases/ingest/pdf');
 const { textQuality, extractPages, parsePages } = require('../src/cases/ingest/extract-text');
 const { makePdf, payoffLetterPdf, GARBAGE, tinyJpeg } = require('./helpers/ingest-fixtures');
 
