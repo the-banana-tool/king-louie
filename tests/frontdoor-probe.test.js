@@ -6,7 +6,8 @@ const https = require('https');
 const os = require('os');
 const path = require('path');
 const net = require('net');
-const { SelfProbe, createProbeHandler, createProbeCertificate, MAX_PENDING_NONCES } = require('../src/frontdoor/probe');
+const { X509Certificate } = require('crypto');
+const { SelfProbe, createProbeHandler, createProbeCertificate, guardLookup, MAX_PENDING_NONCES } = require('../src/frontdoor/probe');
 const { SniListener } = require('../src/frontdoor/tls/sni-listener');
 const { createFrontDoorHandler, createMcpHttpServer } = require('../src/frontdoor/http');
 const { createCa, issueCert, selfSigned, fingerprint } = require('./helpers/test-certs');
@@ -23,9 +24,11 @@ const lookup = (host, options, cb) => {
   else done(null, '127.0.0.1', 4);
 };
 
-async function frontDoor({ ownFingerprint = null, probeLookup = lookup, wrapProbe = (h) => h, probeCa = undefined } = {}) {
+async function frontDoor({ ownFingerprint = null, probeLookup = lookup, wrapProbe = (h) => h, probeCa = undefined, impostor = false, allowLoopback = true } = {}) {
   const ca = createCa();
-  const mcpCert = issueCert(ca, { dnsNames: [`mcp.${DOMAIN}`] });
+  const ownMcp = issueCert(ca, { dnsNames: [`mcp.${DOMAIN}`] });
+  // impostor: same CA, same name, different key (a TLS-terminating forwarder).
+  const mcpCert = impostor ? issueCert(ca, { dnsNames: [`mcp.${DOMAIN}`] }) : ownMcp;
   const mesh = selfSigned({ commonName: `mesh.${DOMAIN}` });
   const probeCert = createProbeCertificate();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-probe-'));
@@ -50,7 +53,8 @@ async function frontDoor({ ownFingerprint = null, probeLookup = lookup, wrapProb
   const raised = [];
   probe = new SelfProbe({
     domain: DOMAIN, port: listener.address().port, file: path.join(dir, 'probe.json'),
-    ownMeshFingerprint: () => ownFingerprint || fingerprint(mesh.cert), probeCert,
+    ownMeshFingerprint: () => ownFingerprint || fingerprint(mesh.cert), ownMcpFingerprint: () => fingerprint(ownMcp.cert), probeCert,
+    allowLoopbackForTests: allowLoopback,
     alerts: { raise: (kind, o) => { raised.push([kind, o.subject]); return {}; } }, lookup: probeLookup, ca: probeCa === undefined ? ca.cert : probeCa, timeoutMs: 3000
   });
   return { probe, raised, listener, ca, dir };
@@ -181,7 +185,7 @@ describe('SelfProbe', () => {
     const server = net.createServer((s) => sockets.push(s));
     await new Promise((r) => server.listen(0, '127.0.0.1', r));
     cleanups.push(() => new Promise((r) => { for (const s of sockets) s.destroy(); server.close(r); }));
-    const p = new SelfProbe({ domain: DOMAIN, port: server.address().port, ownMeshFingerprint: () => 'a'.repeat(64), lookup, timeoutMs: 300 });
+    const p = new SelfProbe({ domain: DOMAIN, port: server.address().port, ownMeshFingerprint: () => 'a'.repeat(64), ownMcpFingerprint: () => 'a'.repeat(64), lookup, allowLoopbackForTests: true, timeoutMs: 300 });
     const started = Date.now();
     const r = await p.runOnce();
     assert.deepEqual([r.mcp.ok, r.mesh.ok], [false, false]);
@@ -249,7 +253,7 @@ describe('createProbeHandler', () => {
       ['GET', `/.well-known/kl-probe/${'N'.repeat(65)}`]
     ]) {
       const r = call(h, method, url);
-      assert.deepEqual([r.status, r.body], [404, ''], `${method} ${url}`);
+      assert.deepEqual([r.status, r.body], [404, '{"error":"not_found"}'], `${method} ${url}`);
     }
   });
 
@@ -257,5 +261,84 @@ describe('createProbeHandler', () => {
     for (const expects of [() => 'yes', () => 1, () => { throw new Error('x'); }]) {
       assert.equal(call(createProbeHandler({ expects }), 'GET', `/.well-known/kl-probe/${NONCE}`).status, 404);
     }
+  });
+});
+
+describe('SelfProbe fix round 1', () => {
+  it('mcp. must serve the front door\'s own certificate: a same-name, different-key certificate from the same CA fails', async () => {
+    const t = await frontDoor({ impostor: true });
+    const r = await t.probe.runOnce();
+    assert.equal(r.mcp.ok, false, JSON.stringify(r));
+    assert.match(r.mcp.detail, /not this front door's/);
+    assert.equal(r.mesh.ok, true);
+  });
+
+  it('mcp. fails closed when the front door\'s own mcp. fingerprint is missing or unreadable', async () => {
+    const t = await frontDoor();
+    for (const own of [() => null, () => '', () => { throw new Error('no certificate yet'); }]) {
+      t.probe.ownMcpFingerprint = own;
+      const r = await t.probe.runOnce();
+      assert.equal(r.mcp.ok, false);
+    }
+    t.probe.ownMcpFingerprint = undefined;
+    assert.equal((await t.probe.runOnce()).mcp.ok, false);
+  });
+
+  it('loopback answers fail the probe unless the test-only option allows them', async () => {
+    const t = await frontDoor({ allowLoopback: false });
+    const r = await t.probe.runOnce();
+    assert.deepEqual([r.ok, r.mcp.ok, r.mesh.ok], [false, false, false]);
+    assert.match(r.mcp.detail, /mcp\.kl\.example\.com resolves to a loopback address/);
+    assert.match(r.mesh.detail, /mesh\.kl\.example\.com resolves to a loopback address/);
+    assert.ok(!JSON.stringify(r).includes('127.0.0.1'));
+  });
+
+  it('guardLookup refuses loopback, unspecified and link-local addresses, v4 and v6', async () => {
+    const answer = (addresses) => (host, options, cb) => {
+      const done = typeof options === 'function' ? options : cb;
+      const all = typeof options === 'object' && options && options.all;
+      if (all) done(null, addresses.map((a) => ({ address: a, family: net.isIP(a) })));
+      else done(null, addresses[0], net.isIP(addresses[0]));
+    };
+    const run = (lk, all) => new Promise((resolve) => lk('mcp.kl.example.com', all ? { all: true } : {}, (err, a) => resolve(err ? err.message : a)));
+    const cases = [
+      ['127.0.0.1', 'loopback'], ['127.8.9.10', 'loopback'], ['::1', 'loopback'], ['::ffff:127.0.0.1', 'loopback'],
+      ['0.0.0.0', 'unspecified'], ['::', 'unspecified'], ['0.1.2.3', 'unspecified'],
+      ['169.254.169.254', 'link-local'], ['fe80::1', 'link-local'], ['febf::1', 'link-local'], ['::ffff:169.254.1.1', 'link-local']
+    ];
+    for (const [address, kind] of cases) {
+      for (const all of [false, true]) {
+        const out = await run(guardLookup(answer([address]), { allowLoopback: false }), all);
+        assert.equal(out, `mcp.kl.example.com resolves to a ${kind} address, not the front door's public one`, `${address} all=${all}`);
+      }
+    }
+    assert.match(await run(guardLookup(answer(['203.0.113.5', '127.0.0.1']), { allowLoopback: false }), true), /loopback/, 'one bad address in a list fails the answer');
+    assert.equal(await run(guardLookup(answer(['203.0.113.5']), { allowLoopback: false }), false), '203.0.113.5');
+    assert.equal(await run(guardLookup(answer(['2001:db8::1']), { allowLoopback: false }), false), '2001:db8::1');
+    assert.equal(await run(guardLookup(answer(['127.0.0.1']), { allowLoopback: true }), false), '127.0.0.1');
+    for (const address of ['0.0.0.0', '169.254.1.1', 'fe80::1']) {
+      assert.match(String(await run(guardLookup(answer([address]), { allowLoopback: true }), false)), /resolves to/, `allowLoopback does not allow ${address}`);
+    }
+    assert.match(String(await run(guardLookup(answer(['not-an-ip']), { allowLoopback: false }), false)), /did not resolve to an IP address/);
+  });
+
+  it('readLast accepts only a strict ISO-8601 `at`', (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-probe-at-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const file = path.join(dir, 'probe.json');
+    const half = { ok: true, detail: 'a' };
+    for (const at of ['2026-09-23T12:00:00.000Z\u001b[2J', '2026-09-23', 'Wed, 23 Sep 2026 12:00:00 GMT', '2026-09-23T12:00:00.000+01:00', '2026-13-40T12:00:00.000Z']) {
+      fs.writeFileSync(file, JSON.stringify({ at, ok: true, mcp: half, mesh: half }));
+      assert.equal(SelfProbe.readLast(file), null, JSON.stringify(at));
+    }
+    fs.writeFileSync(file, JSON.stringify({ at: '2026-09-23T12:00:00.000Z', ok: true, mcp: half, mesh: half }));
+    assert.equal(SelfProbe.readLast(file).at, '2026-09-23T12:00:00.000Z');
+  });
+
+  it('the probe certificate carries a random, neutral name', () => {
+    const a = new X509Certificate(createProbeCertificate().cert);
+    const b = new X509Certificate(createProbeCertificate().cert);
+    assert.doesNotMatch(a.subject, /king|louie|probe/i);
+    assert.notEqual(a.subject, b.subject);
   });
 });

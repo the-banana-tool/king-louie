@@ -185,6 +185,15 @@ describe('doctor on a front door: fail closed on what it reads', () => {
     assert.equal(row(rows, 'node and grant records verify').detail, 'grant:[31mgr_x');
   });
 
+  it('a probe.json whose `at` is not a strict ISO-8601 instant is unreadable, and nothing of it is shown', async () => {
+    const t = await setup();
+    t.write('probe.json', { at: `${new Date(NOW).toISOString()}\u001b[2J`, ok: true, mcp: { ok: true, detail: 'x' }, mesh: { ok: true, detail: 'y' } });
+    const r = row(await t.run(), 'self-probe (DNS, mcp. and mesh.)');
+    assert.equal(r.ok, false);
+    assert.match(r.detail, /^cannot read .*probe\.json/);
+    assert.doesNotMatch(r.detail, /\p{Cc}/u);
+  });
+
   it('on a non-Linux host the capability row is a warning, not a check', async () => {
     const t = await setup();
     const rows = await checks({ dataDir: t.dataDir, configDir: t.configDir, nodeConfig: t.nodeConfig, serviceConfig: t.serviceConfig, platform: 'win32', deps: { approverStore: t.store, now: () => NOW, fetchDate: async () => new Date(NOW) } });

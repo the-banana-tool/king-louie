@@ -38,7 +38,9 @@ function startupProblems({ serviceConfig, nodeConfig } = {}) {
   if (!goodDomain(fd.domain)) add(2, 'frontdoor.domain must be a DNS name');
   const acme = Boolean(fd.acme);
   const tls = Boolean(fd.tls);
-  if (acme === tls || (acme && fd.acme.termsAgreed !== true)) add(3, 'configure frontdoor.acme or frontdoor.tls, not both/neither');
+  if (acme === tls) add(3, 'configure frontdoor.acme or frontdoor.tls, not both/neither');
+  // Ruling T31-keypath: the missing agreement names its own key.
+  else if (acme && fd.acme.termsAgreed !== true) add(3, 'frontdoor.acme.terms_agreed must be true to use ACME (it records that you accept the CA terms of service)');
 
   const fourth = [];
   // Off means exactly false: the rest of the service treats any truthy

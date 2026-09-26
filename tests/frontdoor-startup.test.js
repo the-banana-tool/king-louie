@@ -4,6 +4,7 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { startupProblems, runStartupChecks, startupRows, StartupError } = require('../src/frontdoor/startup-checks');
 
+const TERMS_MSG = 'frontdoor.acme.terms_agreed must be true to use ACME (it records that you accept the CA terms of service)';
 const FD = { domain: 'kl.example.com', listen: { host: '127.0.0.1', port: 443 }, acme: { email: null, directory: 'https://acme.example.com/directory', termsAgreed: true }, tls: null };
 const OFF = { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false, desktopBridge: false };
 const opts = ({ service = {}, node = {}, fd = {} } = {}) => ({
@@ -41,7 +42,9 @@ describe('§3.1 startup checks', () => {
     const msg = 'configure frontdoor.acme or frontdoor.tls, not both/neither';
     assert.deepEqual(first(opts({ fd: { acme: null } })), [3, msg]);
     assert.deepEqual(first(opts({ fd: { tls: { certFile: '/etc/king-louie/tls/mcp.pem', keyFile: '/etc/king-louie/tls/mcp.key' } } })), [3, msg]);
-    assert.deepEqual(first(opts({ fd: { acme: { ...FD.acme, termsAgreed: false } } })), [3, msg]);
+    // T31-keypath: ACME without the agreement is its own refusal, naming the key.
+    assert.deepEqual(first(opts({ fd: { acme: { ...FD.acme, termsAgreed: false } } })), [3, TERMS_MSG]);
+    assert.deepEqual(first(opts({ fd: { acme: { ...FD.acme, termsAgreed: false }, tls: { certFile: '/etc/king-louie/tls/mcp.pem', keyFile: '/etc/king-louie/tls/mcp.key' } } })), [3, msg], 'both set is still both/neither');
     assert.equal(first(opts({ fd: { acme: null, tls: { certFile: '/etc/king-louie/tls/mcp.pem', keyFile: '/etc/king-louie/tls/mcp.key' } } })), null);
   });
 
@@ -93,6 +96,7 @@ describe('§3.1 startup checks', () => {
       [opts({ node: { profile: 'agent' } }), /profile/],
       [opts({ fd: { domain: '10.0.0.5' } }), /frontdoor\.domain/],
       [opts({ fd: { acme: null } }), /frontdoor\.acme/],
+      [opts({ fd: { acme: { ...FD.acme, termsAgreed: false } } }), /frontdoor\.acme\.terms_agreed/],
       [opts({ service: { features: { ...OFF, webhooks: true } } }), /features\.webhooks/],
       [opts({ service: { relayRaw: { public_url: 'x' } } }), /relay\.public_url/],
       [opts({ service: { relayRaw: { tls: {} } } }), /relay\.tls/],

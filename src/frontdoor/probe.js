@@ -20,6 +20,7 @@ const crypto = require('crypto');
 const dns = require('dns');
 const fs = require('fs');
 const https = require('https');
+const net = require('net');
 const path = require('path');
 const tls = require('tls');
 const { createLogger } = require('../logging');
@@ -43,7 +44,8 @@ const MAX_PROBE_FILE_BYTES = 16 * 1024;
 const OPEN_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0);
 
 function createProbeCertificate() {
-  const { cert, key } = MeshIdentity._generateFallbackTlsCert('king-louie-self-probe', 2);
+  // A random, neutral name: nothing in the certificate says what it is for.
+  const { cert, key } = MeshIdentity._generateFallbackTlsCert(crypto.randomBytes(8).toString('hex'), 2);
   return { cert, key, fingerprint: MeshIdentity.getCertFingerprint(cert) };
 }
 
@@ -69,8 +71,67 @@ function createProbeHandler({ expects }) {
       res.end(m[1]);
       return;
     }
-    res.writeHead(404, { 'cache-control': 'no-store', 'content-length': 0 });
-    res.end();
+    // The same 404 the rest of the front door answers.
+    const body = JSON.stringify({ error: 'not_found' });
+    res.writeHead(404, { 'content-type': 'application/json', 'cache-control': 'no-store', 'content-length': Buffer.byteLength(body) });
+    res.end(body);
+  };
+}
+
+// Addresses a public front-door name must never resolve to. IPv4-mapped
+// IPv6 forms (::ffff:127.0.0.1) are matched by the IPv4 rules.
+const REFUSED = (() => {
+  const list = (rules) => {
+    const b = new net.BlockList();
+    for (const [addr, prefix, type] of rules) b.addSubnet(addr, prefix, type);
+    return b;
+  };
+  return [
+    ['loopback', list([['127.0.0.0', 8, 'ipv4'], ['::1', 128, 'ipv6']])],
+    ['unspecified', list([['0.0.0.0', 8, 'ipv4'], ['::', 128, 'ipv6']])],
+    ['link-local', list([['169.254.0.0', 16, 'ipv4'], ['fe80::', 10, 'ipv6']])]
+  ];
+})();
+
+function refusedKind(address, allowLoopback) {
+  const family = net.isIP(address);
+  if (family === 0) return 'not an IP address';
+  const type = family === 6 ? 'ipv6' : 'ipv4';
+  for (const [kind, list] of REFUSED) {
+    if (kind === 'loopback' && allowLoopback) continue;
+    if (list.check(address, type)) return kind;
+  }
+  return null;
+}
+
+// Wraps a dns.lookup-shaped function: an answer holding a loopback,
+// unspecified or link-local address (any of them, for `all`) fails the
+// connection with a message naming the host and the kind, never the
+// address. The answer is otherwise passed through untouched, only to
+// connect. `allowLoopback` exists for tests, which run on 127.0.0.1.
+function guardLookup(lookup, { allowLoopback = false } = {}) {
+  return (host, options, cb) => {
+    const done = typeof options === 'function' ? options : cb;
+    const opts = typeof options === 'function' ? {} : options;
+    lookup(host, opts, (err, address, family) => {
+      if (err) {
+        done(err);
+        return;
+      }
+      const addresses = Array.isArray(address) ? address.map((a) => a && a.address) : [address];
+      for (const a of addresses) {
+        const kind = refusedKind(a, allowLoopback);
+        if (kind === 'not an IP address') {
+          done(Object.assign(new Error(`${host} did not resolve to an IP address`), { code: 'EPROBEDNS' }));
+          return;
+        }
+        if (kind) {
+          done(Object.assign(new Error(`${host} resolves to a ${kind} address, not the front door's public one`), { code: 'EPROBEDNS' }));
+          return;
+        }
+      }
+      done(null, address, family);
+    });
   };
 }
 
@@ -106,21 +167,32 @@ const cut = (text) => {
   return s.length > MAX_DETAIL_CHARS ? `${s.slice(0, MAX_DETAIL_CHARS - 1)}…` : s;
 };
 
+// Exactly what toISOString() writes, and a real instant.
+const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+function isIsoInstant(v) {
+  if (typeof v !== 'string' || !ISO_RE.test(v)) return false;
+  const t = Date.parse(v);
+  return Number.isFinite(t) && new Date(t).toISOString() === v;
+}
+
 function validHalf(h) {
   return h !== null && typeof h === 'object' && !Array.isArray(h) && typeof h.ok === 'boolean'
     && typeof h.detail === 'string' && h.detail.length <= MAX_DETAIL_CHARS;
 }
 
 class SelfProbe {
-  constructor({ domain, port = 443, file, ownMeshFingerprint, probeCert = createProbeCertificate(), alerts = null, lookup = dns.lookup, ca = null,
+  constructor({ domain, port = 443, file, ownMeshFingerprint, ownMcpFingerprint, allowLoopbackForTests = false, probeCert = createProbeCertificate(), alerts = null, lookup = dns.lookup, ca = null,
     timeoutMs = 10000, firstDelayMs = 60000, everyMs = 6 * 60 * 60 * 1000, now = Date.now } = {}) {
     this.domain = domain;
     this.port = port;
     this.file = file;
     this.ownMeshFingerprint = ownMeshFingerprint;
+    // SHA-256 of the certificate the front door itself serves for mcp.
+    // (the same form peerCertFingerprint gives), read at every run.
+    this.ownMcpFingerprint = ownMcpFingerprint;
     this.probeCert = probeCert;
     this.alerts = alerts;
-    this.lookup = lookup;
+    this.lookup = guardLookup(lookup, { allowLoopback: allowLoopbackForTests === true });
     this.ca = ca;
     this.timeoutMs = timeoutMs;
     this.firstDelayMs = firstDelayMs;
@@ -139,7 +211,7 @@ class SelfProbe {
   static readLast(file) {
     const r = readStatusJson(file, MAX_PROBE_FILE_BYTES);
     if (r === null || typeof r !== 'object' || Array.isArray(r)) return null;
-    if (typeof r.at !== 'string' || r.at.length > 40 || Number.isNaN(Date.parse(r.at)) || typeof r.ok !== 'boolean') return null;
+    if (!isIsoInstant(r.at) || typeof r.ok !== 'boolean') return null;
     if (!validHalf(r.mcp) || !validHalf(r.mesh)) return null;
     return { at: r.at, ok: r.ok, mcp: { ok: r.mcp.ok, detail: r.mcp.detail }, mesh: { ok: r.mesh.ok, detail: r.mesh.detail } };
   }
@@ -219,6 +291,23 @@ class SelfProbe {
           host, port: this.port, servername: host, path: `/.well-known/kl-probe/${nonce}`, method: 'GET', agent: false,
           lookup: this.lookup, timeout: this.timeoutMs, ...(this.ca ? { ca: this.ca } : {})
         }, (res) => {
+          // WebPKI passed; the certificate must also be the one this front
+          // door serves, so a same-name certificate from the same CA on a
+          // TLS-terminating forwarder does not pass for us.
+          const served = peerCertFingerprint(res.socket);
+          let own = null;
+          try {
+            own = typeof this.ownMcpFingerprint === 'function' ? this.ownMcpFingerprint() : null;
+          } catch (err) {
+            res.resume();
+            finish({ ok: false, detail: `${host}: this front door's own mcp. certificate is unavailable (${err.message})` });
+            return;
+          }
+          if (!timingSafeHexEqual(served, own)) {
+            res.resume();
+            finish({ ok: false, detail: `${host} served ${served}, which is not this front door's (${own})` });
+            return;
+          }
           if (res.statusCode !== 200) {
             res.resume();
             finish({ ok: false, detail: `${host} answered ${res.statusCode} without our nonce${res.statusCode >= 300 && res.statusCode < 400 ? ' (redirects are not followed)' : ''}` });
@@ -338,4 +427,4 @@ class SelfProbe {
   }
 }
 
-module.exports = { SelfProbe, createProbeHandler, createProbeCertificate, readStatusJson, MAX_PENDING_NONCES };
+module.exports = { SelfProbe, createProbeHandler, createProbeCertificate, guardLookup, readStatusJson, MAX_PENDING_NONCES };

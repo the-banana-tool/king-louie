@@ -132,8 +132,8 @@ async function checks({ dataDir, configDir, adminUid = 0, nodeConfig, serviceCon
       : 'no self-probe result yet (the service probes 60 s after it starts)');
   } else {
     push('self-probe (DNS, mcp. and mesh.)', probe.ok === true, probe.ok === true
-      ? `ok at ${probe.at}`
-      : `${probe.at}: ${[probe.mcp, probe.mesh].filter((x) => !x.ok).map((x) => shown(x.detail)).join('; ')}`);
+      ? `ok at ${shown(probe.at)}`
+      : `${shown(probe.at)}: ${[probe.mcp, probe.mesh].filter((x) => !x.ok).map((x) => shown(x.detail)).join('; ')}`);
   }
 
   let notAfter = null;
