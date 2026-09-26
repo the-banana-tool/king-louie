@@ -526,13 +526,16 @@ class CrossCaseIndex {
           // Hidden text hides its names too: a redacted fact keeps its slugs
           // unless the caller named that pair, and a live-state id carries
           // the branch name or PR number.
-          const liveState = h.doc.kind === 'brief' && /^(branch|pr):/.test(h.doc.id);
-          const slugs = visible || h.doc.kind !== 'fact' || h.key;
+          // A journal id is its file name, which can be hand-written, and its
+          // attr is the kind from that name: both are hidden with the text.
+          const journal = h.doc.kind === 'journal';
+          const hiddenId = journal || (h.doc.kind === 'brief' && /^(branch|pr):/.test(h.doc.id));
+          const slugs = visible || (h.doc.kind !== 'fact' && !journal) || h.key;
           return {
             caseId: h.rec.caseId,
             title: h.rec.title,
             kind: h.doc.kind,
-            id: visible || !liveState ? h.doc.id : null,
+            id: visible || !hiddenId ? h.doc.id : null,
             score: round(h.score),
             text: visible ? h.doc.text : null,
             redacted: !visible,

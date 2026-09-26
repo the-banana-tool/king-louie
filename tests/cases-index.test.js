@@ -142,7 +142,13 @@ describe('CrossCaseIndex relevance and keys', () => {
     const q = hits.find((h) => h.kind === 'question');
     const j = hits.find((h) => h.kind === 'journal');
     assert.deepStrictEqual([q.text, q.redacted, q.attr, q.id], [null, true, 'open', 'q-0001']);
-    assert.deepStrictEqual([j.text, j.redacted, j.attr], [null, true, 'plan']);
+    // A journal file name (and its kind) can be hand-written and carry
+    // private words, so a redacted journal hit names neither.
+    assert.deepStrictEqual([j.text, j.redacted, j.id, j.attr], [null, true, null, null]);
+    const site = c.byTitle['Website redesign'];
+    const own = idx.search({ text: 'migrate booking page static generator', forCaseId: site.id, kinds: ['journal'] })[0];
+    assert.match(own.id, /-plan\.md$/);
+    assert.strictEqual(own.attr, 'plan');
     const blob = JSON.stringify([hits, idx.searchCases({ text: 'hosting plan static booking page generator', forCaseId: lot.id })]);
     assert.ok(!blob.includes('Which hosting plan'));
     assert.ok(!blob.includes('Static hosting'));
