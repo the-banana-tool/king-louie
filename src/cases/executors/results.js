@@ -173,7 +173,9 @@ async function externalResults(reg, { caseId, turnId }, job, store) {
       // record's facts (or its conflict unknowns) twice.
       job.recordsSaved = [...(job.recordsSaved || []), recordId];
       job.resultsCursor = recordId;
-      store.write(job);
+      // Only these two fields, onto the job as it is on disk now: a cancel
+      // may have landed during the await above (final review minor 2).
+      store.update(job.id, { recordsSaved: job.recordsSaved, resultsCursor: job.resultsCursor });
       saved.push(rel);
     }
     if (!res?.next || !records.length) break;

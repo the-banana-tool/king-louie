@@ -814,6 +814,29 @@ describe('Executor results against a hostile adapter', () => {
   }
   const externalFacts = (s) => [...s.rt.ledger(s.meta.id).view().facts.values()].filter((f) => f.provenance === 'external-agent');
 
+  // Final review minor 2: a cancel landing while results are fetched never
+  // loses the saved-record list, so a retry asserts nothing twice.
+  it('a cancel during the results call keeps the saved records; a retry adds nothing', async () => {
+    const jobs = require('../src/cases/executors/jobs');
+    const s = await setup();
+    const jobId = await sentJob(s);
+    s.ctl.records.set('ext-1', [{ id: 'r1', contactId: 'c1', kind: 'call', summary: 'Spoke to the broker', outcome: 'answered' }]);
+    const adapter = await s.reg.adapter('fake-agent');
+    const original = adapter.results;
+    adapter.results = async (...args) => {
+      adapter.results = original;
+      await jobs.cancelJob(s.reg, s.meta.id, jobId, 'cancelled by the owner');
+      return original.apply(adapter, args);
+    };
+    const r = await fetchResults(s.reg, { caseId: s.meta.id }, { jobId });
+    assert.strictEqual(r.ok, true, r.error);
+    const job = s.reg.jobs(s.meta.id).get(jobId);
+    assert.deepStrictEqual([job.state, job.recordsSaved, job.resultsCursor], ['cancelled', ['r1'], 'r1']);
+    const again = await fetchResults(s.reg, { caseId: s.meta.id }, { jobId });
+    assert.deepStrictEqual(again.saved, []);
+    assert.strictEqual(externalFacts(s).length, 1);
+  });
+
   it('caps a flood of inputs, skips bad ones, and a retry adds nothing', async () => {
     const flood = [
       { stmt: 'bad subject', subject: 5, attr: 'size', value: 1 },
