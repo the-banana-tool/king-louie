@@ -103,7 +103,7 @@ class Brief {
   }
 
   _write(data, body) {
-    fs.writeFileSync(this.path, `---\n${yaml.dump(data).trimEnd()}\n---\n\n${body}`);
+    fs.writeFileSync(this.path, `---\n${yaml.dump(data, { noRefs: true }).trimEnd()}\n---\n\n${body}`);
   }
 
   update(field, value, { provenance } = {}) {

@@ -75,6 +75,27 @@ describe('CaseStore', () => {
     assert.throws(() => store.updateMeta(a.id, { status: 'finished' }), /Invalid case status/);
   });
 
+  it('round-trips a patch whose fields share the same array reference (no &ref_N)', async () => {
+    // js-yaml's dump() emits an anchor/alias pair (&ref_0 / *ref_0) for a
+    // value that appears more than once by reference in the object it's
+    // dumping, unless told not to. parseYaml now refuses every anchor and
+    // alias (the alias-bomb fix), so without { noRefs: true } on the
+    // dump() call, this exact, ordinary case — two metadata fields set to
+    // the same array — would write a case.yaml the store could no longer
+    // read back.
+    const store = new CaseStore({ root: tmp() });
+    const a = await store.create({ title: 'Shared' });
+    const shared = ['land-sale'];
+    const updated = store.updateMeta(a.id, { playbooks: shared, related: shared });
+    assert.deepStrictEqual(updated.playbooks, ['land-sale']);
+    assert.deepStrictEqual(updated.related, ['land-sale']);
+    const raw = fs.readFileSync(path.join(a.dir, 'case.yaml'), 'utf8');
+    assert.doesNotMatch(raw, /&ref_/);
+    const reread = store.get(a.id);
+    assert.deepStrictEqual(reread.playbooks, ['land-sale']);
+    assert.deepStrictEqual(reread.related, ['land-sale']);
+  });
+
   it('creates nothing on disk until the first case is created', () => {
     const root = path.join(tmp(), 'not-yet');
     const store = new CaseStore({ root });

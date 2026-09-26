@@ -28,7 +28,7 @@ const BRIEF_TEMPLATE = (objective) => [
     materiality: { tell: [], ignore: [] },
     safeDefaults: [],
     gating: { complete: false }
-  }).trimEnd(),
+  }, { noRefs: true }).trimEnd(),
   '---',
   '',
   ''
@@ -96,7 +96,7 @@ class CaseStore {
         fs.mkdirSync(path.join(dir, d));
         fs.writeFileSync(path.join(dir, d, '.gitkeep'), '');
       }
-      fs.writeFileSync(path.join(dir, 'case.yaml'), yaml.dump(meta));
+      fs.writeFileSync(path.join(dir, 'case.yaml'), yaml.dump(meta, { noRefs: true }));
       fs.writeFileSync(path.join(dir, 'brief.md'), BRIEF_TEMPLATE(objective));
       fs.writeFileSync(path.join(dir, 'facts.jsonl'), '');
       fs.writeFileSync(path.join(dir, 'decisions.md'), '# Decisions\n');
@@ -147,7 +147,7 @@ class CaseStore {
       throw new Error(`Invalid case status: ${patch.status}`);
     }
     const { dir, ...meta } = { ...current, ...patch, id: current.id, slug: current.slug };
-    fs.writeFileSync(path.join(dir, 'case.yaml'), yaml.dump(meta));
+    fs.writeFileSync(path.join(dir, 'case.yaml'), yaml.dump(meta, { noRefs: true }));
     return { ...meta, dir };
   }
 }
