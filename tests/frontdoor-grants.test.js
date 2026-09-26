@@ -517,4 +517,22 @@ describe('AuthCodes', () => {
     assert.deepEqual(codes.take(code), { ok: false, expired: true });
     assert.deepEqual(codes.take(code), { ok: false, expired: true }, 'no grant is revoked over a code nobody redeemed');
   });
+
+  it('take(code, verify): a failed check spends nothing; three failures burn the code; reuse needs a passing check', () => {
+    const codes = new AuthCodes();
+    const bound = { grantId: 'gr_x', clientId: 'dcr_y', redirectUri: 'u', codeChallenge: 'c', resource: 'r' };
+    const code = codes.issue(bound);
+    const seen = [];
+    assert.deepEqual(codes.take(code, (rec) => { seen.push(rec); return false; }), { ok: false, mismatch: true });
+    assert.deepEqual(seen, [bound], 'verify sees the bound record');
+    assert.equal(codes.take(code, () => true).ok, true, 'one failure does not spend the code');
+    for (let i = 0; i < 3; i += 1) assert.deepEqual(codes.take(code, () => false), { ok: false, mismatch: true }, 'a failing second redemption is not reuse');
+    // Failures after the redemption burn nothing: whoever redeemed first
+    // could otherwise switch off reuse detection for the real client.
+    assert.deepEqual(codes.take(code, () => true), { ok: false, reused: 'gr_x' });
+
+    const other = codes.issue(bound);
+    for (let i = 0; i < 3; i += 1) assert.deepEqual(codes.take(other, () => false), { ok: false, mismatch: true });
+    assert.deepEqual(codes.take(other, () => true), { ok: false }, 'burned: never redeemed, never reuse');
+  });
 });

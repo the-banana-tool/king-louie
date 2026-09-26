@@ -1,14 +1,15 @@
 // The OAuth 2.1 authorization server on mcp.<domain> (fleet stage 4 §3.4):
 // metadata (RFC 9728, RFC 8414), dynamic registration (RFC 7591), and the
 // authorize → consent → wait flow in which the owner types the browser's
-// code on the phone (R23). Tokens and the phone routes are added in Tasks
-// 23–24 through `this.routes` and registerPhoneRoutes.
+// code on the phone (R23). The token and revoke routes (Task 24) are served
+// when the constructor is given tokens, codes and grants.
 const { createLogger } = require('../../logging');
 const { CODE_CHALLENGE_RE } = require('../protocol/messages');
 const { OAuthError } = require('./errors');
 const { clientHost } = require('./clients');
 const { SCOPE_RE } = require('./scopes');
 const { CONSENT_HEADERS, CONSENT_CSS, consentPage, messagePage } = require('./pages');
+const { createTokenHandlers } = require('./tokens');
 const { readBody, sendJson, sendHtml, parseCookies, requestHost, clientIp } = require('../http-util');
 
 const log = createLogger('frontdoor/oauth');
@@ -41,7 +42,8 @@ function shownClientError(message) {
 }
 
 class OAuthServer {
-  constructor({ domain, clients, pending, scopeRegistry, scopesEnabled, clientDefaults = [], now = Date.now } = {}) {
+  constructor({ domain, clients, pending, scopeRegistry, scopesEnabled, clientDefaults = [], now = Date.now,
+    tokens = null, codes = null, grants = null, alerts = null, auditLedger = null, onGrantRevoked = () => {} } = {}) {
     // The name the SNI listener routes to this handler; a request whose Host
     // names anything else is misdirected (421), whatever its TLS name was.
     this.mcpHost = `mcp.${String(domain).toLowerCase()}`;
@@ -65,6 +67,11 @@ class OAuthServer {
         res.end(CONSENT_CSS);
       }]
     ]);
+    if (tokens && codes && grants) {
+      const handlers = createTokenHandlers({ tokens, codes, grants, alerts, auditLedger, onGrantRevoked });
+      this.routes.set('POST /oauth/token', (req, res) => handlers.token(req, res));
+      this.routes.set('POST /oauth/revoke', (req, res) => handlers.revoke(req, res));
+    }
   }
 
   supportedScopes() {

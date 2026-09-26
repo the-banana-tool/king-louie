@@ -17,6 +17,7 @@ const { clientHost } = require('./clients');
 
 const log = createLogger('frontdoor/oauth/grants');
 const TOUCH_EVERY_MS = 60000;
+const MAX_FAILURES = 3; // failed redemptions that burn an unredeemed code
 const sha = (text) => crypto.createHash('sha256').update(String(text)).digest('base64url');
 
 // The fields a grant record binds, each compared with what the phone signed.
@@ -194,6 +195,14 @@ class GrantStore extends EventEmitter {
 // with its grant, so the token endpoint can revoke what it issued (RFC 6749
 // §4.1.2). A code that expired unredeemed only ever reports `expired`: no
 // token came from it, so there is nothing to revoke.
+//
+// `take(code, verify)` checks the redemption (client, redirect, resource,
+// PKCE) before anything is spent: a failing check neither redeems the code
+// nor counts as reuse, so someone holding a code without its verifier can
+// neither use it nor get the grant revoked. MAX_FAILURES failed checks on an
+// unredeemed code burn it. Failures after a redemption burn nothing: whoever
+// redeemed first could otherwise switch off reuse detection for the real
+// client.
 class AuthCodes {
   constructor({ now = Date.now, ttlMs = 60000 } = {}) {
     this.now = now;
@@ -213,15 +222,23 @@ class AuthCodes {
     return code;
   }
 
-  take(code) {
+  take(code, verify = () => true) {
     if (typeof code !== 'string' || !code) return { ok: false };
     const rec = this.codes.get(sha(code));
-    if (!rec) return { ok: false };
-    if (rec.used) return { ok: false, reused: rec.grantId };
-    if (!(this.now() <= rec.expiresAt)) return { ok: false, expired: true };
-    rec.used = true;
+    if (!rec || rec.burned) return { ok: false };
+    if (!rec.used && !(this.now() <= rec.expiresAt)) return { ok: false, expired: true };
     const { grantId, clientId, redirectUri, codeChallenge, resource } = rec;
-    return { ok: true, record: { grantId, clientId, redirectUri, codeChallenge, resource } };
+    const record = { grantId, clientId, redirectUri, codeChallenge, resource };
+    if (verify(record) !== true) {
+      if (!rec.used) {
+        rec.failures = (rec.failures || 0) + 1;
+        if (rec.failures >= MAX_FAILURES) rec.burned = true;
+      }
+      return { ok: false, mismatch: true };
+    }
+    if (rec.used) return { ok: false, reused: grantId };
+    rec.used = true;
+    return { ok: true, record };
   }
 }
 

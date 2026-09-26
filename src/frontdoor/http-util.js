@@ -63,8 +63,17 @@ function sendHtml(res, status, html, headers = {}) {
   res.end(html);
 }
 
+// An application/x-www-form-urlencoded body → { name: value } with no
+// prototype. A parameter given twice could be read one way here and another
+// way by the client, so it is refused (RFC 6749 §3.2); the key is not named,
+// since it is the client's text.
 function parseForm(buf) {
-  return Object.fromEntries(new URLSearchParams(buf.toString('utf8')));
+  const out = Object.create(null);
+  for (const [k, v] of new URLSearchParams(buf.toString('utf8'))) {
+    if (k in out) throw Object.assign(new Error('a parameter was given more than once'), { status: 400, error: 'invalid_request' });
+    out[k] = v;
+  }
+  return out;
 }
 
 // Cookie header → { name: value }. The first occurrence of a name wins; a
