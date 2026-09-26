@@ -81,11 +81,13 @@ struct MainView: View {
             }
             TabView {
                 PendingListView().tabItem { Label("Pending", systemImage: "checkmark.shield") }
+                QuestionsView().tabItem { Label("Questions", systemImage: "questionmark.bubble") }
                 HistoryView().tabItem { Label("History", systemImage: "clock") }
                 NodesView().tabItem { Label("Nodes", systemImage: "server.rack") }
                 DevicesView().tabItem { Label("Devices", systemImage: "iphone") }
                 SettingsView().tabItem { Label("Settings", systemImage: "gear") }
             }
+            .modifier(PresencePinger())
         }
     }
 }

@@ -356,3 +356,17 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage4-channels.md`.
 - Tests use `tests/helpers/loopback-channel.js` and the fake relay/SMTP
   helpers, never a real network; `KING_LOUIE_CONTACT_TICK_MS` shortens the
   tick.
+- The phone app channel (`src/channels/mobile-app-channel.js`) exists only
+  in the service with F3 approvals running: questions go out as node-signed
+  `kl.question.ask` envelopes; an answer counts only as a device-signed
+  `kl.question.answer` verified on the node (nonce, `signed_at` ± 300 s, live
+  token), and it resolves only its own question. The relay routes are
+  `src/frontdoor/question-routes.js`. The apps' Questions screen shows only
+  questions signed by a pinned node and signs `signed_at` on the
+  relay-corrected clock. Foreground presence is unsigned
+  (`{ foreground, at }`), but the relay request carrying it is still
+  device-authenticated, and on these phones the key needs biometrics: iOS
+  pings every 60 s only while its API session is already unlocked (never a
+  Face ID prompt of its own); Android sends no presence and loads questions
+  only when the owner taps. Follow-up: a relay presence auth that needs no
+  biometric prompt (an F3 pairing change) would let Android report presence.

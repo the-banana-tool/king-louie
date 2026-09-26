@@ -89,6 +89,93 @@ final class AppModel: ObservableObject {
     var mode: AppMode { state.mode }
     var deviceId: String? { mode == .demo ? demo?.deviceId : key?.deviceId }
 
+    // MARK: Questions (cases stage 4)
+
+    @Published var questions: [QuestionItem] = []
+    /// Tokens whose answer is being signed or sent.
+    @Published private(set) var answering: Set<String> = []
+    private var answeredTokens = Set<String>()
+
+    /// One look at the relay's questions. Only a node-signed
+    /// `kl.question.ask` from a pinned node (kid, node_id and signature all
+    /// that node's) is shown. `onlyIfUnlocked`: skip rather than ask for
+    /// Face ID (the screen appearing is not the owner asking).
+    func refreshQuestions(onlyIfUnlocked: Bool = false) async {
+        guard mode == .live, !pairing, let client, let key else { return }
+        if onlyIfUnlocked, !key.isSessionUnlocked { return }
+        do {
+            var items: [QuestionItem] = []
+            for entry in try await client.questions() {
+                guard let item = verifiedQuestion(entry), !answeredTokens.contains(item.token),
+                      !items.contains(where: { $0.token == item.token }) else { continue }
+                items.append(item)
+            }
+            questions = items
+        } catch {
+            fail(error)
+        }
+    }
+
+    private func verifiedQuestion(_ entry: JSONValue) -> QuestionItem? {
+        guard let json = entry["envelope"], let envelope = try? Envelope(json: json),
+              let pin = state.nodes.first(where: { $0.id == envelope.kid }), envelope.verifyEd25519(spkiHex: pin.key),
+              let message = try? envelope.message(), let item = QuestionItem(message: message, nodeName: pin.name),
+              item.nodeId == pin.id else { return nil }
+        // Listed under the node that signed it.
+        if let listed = entry["node_id"]?.stringValue, listed != pin.id { return nil }
+        return item
+    }
+
+    /// A fresh biometric signature over this one answer; the node verifies
+    /// it (R44). `signed_at` comes from the relay-corrected clock (the node
+    /// allows ±300 s), and the prompt shows the question escaped (node text
+    /// is untrusted in a prompt).
+    func answer(_ item: QuestionItem, optionId: String?, text: String?) async {
+        guard mode == .live, let key, let client, !answering.contains(item.token) else { return }
+        answering.insert(item.token)
+        defer { answering.remove(item.token) }
+        do {
+            let message = Questions.answer(to: item, optionId: optionId, text: text, deviceId: key.deviceId,
+                                           nonce: Messages.randomNonce(), signedAt: Timestamps.string(client.now()))
+            let choice = optionId.flatMap { id in item.options.first(where: { $0.id == id })?.label } ?? text ?? ""
+            let reason = "Answer \(Self.promptText(item.caseTitle, 40)): \(Self.promptText(item.text, 80)) → \(Self.promptText(choice, 40))"
+            let envelope = try await key.signEnvelope(message, reason: reason)
+            let result = try await client.answerQuestion(item.token, envelope: envelope)
+            // The node's own words (escaped) when it sent any.
+            let ack = result?["ack"]?.stringValue.map { Display.escape($0) }
+            if result?["ok"]?.boolValue == true {
+                answeredTokens.insert(item.token)
+                questions.removeAll { $0.token == item.token }
+                banner = ack ?? "Answer recorded."
+            } else {
+                banner = ack ?? "Not recorded: \(friendlyReason(result?["error"]?.stringValue ?? result?["outcome"]?.stringValue))"
+            }
+        } catch {
+            fail(error)
+        }
+    }
+
+    /// At most `max` Unicode scalars, then escaped (never cut through an escape).
+    private static func promptText(_ text: String, _ max: Int) -> String {
+        let scalars = Array(text.unicodeScalars)
+        guard scalars.count > max else { return Display.escape(text) }
+        var view = String.UnicodeScalarView()
+        view.append(contentsOf: scalars.prefix(max - 1))
+        return Display.escape(String(view)) + "…"
+    }
+
+    /// A foreground ping (ruling T19-presence): only with the session the
+    /// app already unlocked, never a Face ID prompt of its own. Failures are
+    /// quiet; the node lets a ping lapse after 120 s.
+    func pingPresence() async {
+        guard mode == .live, !pairing, let client, let key, key.isSessionUnlocked else { return }
+        let signer: RelayAPI.Signer = { data in
+            guard let signed = key.signIfUnlocked(data) else { throw CancellationError() }
+            return signed
+        }
+        try? await client.presence(foreground: true, signer: signer)
+    }
+
     init() {
         key = DeviceKey.load()
         if state.mode == .demo { startDemo() }
@@ -835,6 +922,8 @@ final class AppModel: ObservableObject {
         client = nil
         demo = nil
         pending = []
+        questions = []
+        answeredTokens = []
         history = nil
         devices = []
         onlineNodes = [:]

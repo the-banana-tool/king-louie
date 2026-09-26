@@ -194,7 +194,10 @@ final class RelayAPI: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     /// Device-signed unless `auth` is false (code and invite routes). A 401
     /// clock_skew is answered once, using the relay's `server_time` as the
     /// offset for this and every later request.
-    func request(_ method: String, _ pathWithQuery: String, body: JSONValue? = nil, auth: Bool = true, retried: Bool = false) async throws -> (Int, JSONValue?) {
+    /// `signWith` replaces the client's signer for this one request (a
+    /// presence ping signs only with an already-unlocked session).
+    func request(_ method: String, _ pathWithQuery: String, body: JSONValue? = nil, auth: Bool = true, retried: Bool = false,
+                 signWith: Signer? = nil) async throws -> (Int, JSONValue?) {
         let bodyData = body.map { JCS.data($0) } ?? Data()
         guard let url = URL(string: pathWithQuery, relativeTo: base) else {
             throw RelayError(status: 0, code: "bad_request", message: "Could not build the relay address.")
@@ -207,7 +210,7 @@ final class RelayAPI: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
             request.httpBody = bodyData
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
-        if auth, let deviceId, let signer {
+        if auth, let deviceId, let signer = signWith ?? signer {
             let offset = locked { clockOffset }
             let timestamp = Timestamps.string(Date().addingTimeInterval(offset))
             let s = Messages.phoneAuthString(method: method, pathWithQuery: pathWithQuery, timestamp: timestamp, body: bodyData)
@@ -232,7 +235,7 @@ final class RelayAPI: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
            let serverTime = json?["server_time"]?.stringValue, let server = Timestamps.date(serverTime) {
             let offset = server.timeIntervalSinceNow
             locked { clockOffset = offset }
-            return try await self.request(method, pathWithQuery, body: body, auth: auth, retried: true)
+            return try await self.request(method, pathWithQuery, body: body, auth: auth, retried: true, signWith: signWith)
         }
         throw RelayError(status: status, code: code, message: json?["message"]?.stringValue ?? "",
                          retryAfter: json?["retry_after"]?.intValue)
@@ -249,6 +252,25 @@ final class RelayAPI: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     /// `202 { delivered, accepted, reason }`; read it with ResponseOutcome.
     func respond(_ requestId: String, envelope: Envelope) async throws -> JSONValue? {
         try await request("POST", "/v1/approvals/\(Self.segment(requestId))/response", body: envelope.json).1
+    }
+
+    // Cases stage 4: node-signed kl.question.ask envelopes, device-signed answers back.
+    func questions() async throws -> [JSONValue] {
+        try await request("GET", "/v1/questions").1?.arrayValue ?? []
+    }
+
+    /// The node's `{ ok, outcome, ack }` or `{ ok: false, error }`, passed through by the relay.
+    func answerQuestion(_ token: String, envelope: Envelope) async throws -> JSONValue? {
+        try await request("POST", "/v1/questions/\(Self.segment(token))/answer", body: envelope.json).1
+    }
+
+    /// Unsigned foreground ping `{ foreground, at }` (ruling T17-presence),
+    /// `at` in ms since the epoch on the relay-corrected clock. The request
+    /// itself is device-authenticated with `signer`.
+    func presence(foreground: Bool, signer: @escaping Signer) async throws {
+        let at = Int64((now().timeIntervalSince1970 * 1000).rounded())
+        _ = try await request("POST", "/v1/presence", body: .object(["foreground": .bool(foreground), "at": .number(String(at))]),
+                              signWith: signer)
     }
 
     func nodes() async throws -> [JSONValue] {
