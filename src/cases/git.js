@@ -107,7 +107,7 @@ function caseHooksDir(cwd) {
   return dir;
 }
 
-// No signing, no hooks, no fsmonitor, no symlinks or line-ending rewrites on
+// No commit or tag signing, no hooks, no fsmonitor, no symlinks or line-ending rewrites on
 // checkout, Git LFS neutralised, and only the https and ssh transports (file
 // only when the caller asks, for a local clone). These -c flags alone do not
 // stop `ext::`: a later -c or a config key can turn a transport back on, so
@@ -117,6 +117,7 @@ function hardenedGitArgs(args, { hooksDir, allowFile = false } = {}) {
   if (!hooksDir) throw new Error('hardenedGitArgs needs a hooksDir.');
   return [
     '-c', 'commit.gpgsign=false',
+    '-c', 'tag.gpgsign=false',
     '-c', `core.hooksPath=${hooksDir}`,
     '-c', 'core.fsmonitor=false',
     '-c', 'core.symlinks=false',
@@ -205,28 +206,55 @@ function describeError(err, cwd, args, timeoutMs) {
 
 // Repository config that runs a program or redirects traffic when git reads
 // it: filter/diff/merge drivers, an external diff, credential helpers, URL
-// rewrites, transport switches, and the pager/editor/askpass/proxy/ssh
-// commands. A case repo (an imported one included) or a fetched package may
+// rewrites, transport switches, remote upload/receive-pack programs, gpg
+// programs, the pager/editor/askpass/proxy/ssh/sequence-editor/alternate-refs
+// commands, and per-command pagers. A case repo (an imported one included) or a fetched package may
 // carry any of these in .git/config, or in config.worktree when the repo sets
 // extensions.worktreeConfig, so git is not run in such a repo.
-const UNSAFE_CONFIG_RE = '^(filter|diff|merge)\\..+\\.(clean|smudge|process|command|textconv|driver)$|^diff\\.external$|^credential\\.|^url\\.|^protocol\\.|^core\\.(pager|editor|askpass|gitproxy|sshcommand)$';
+const UNSAFE_CONFIG_RE = '^(filter|diff|merge)\\..+\\.(clean|smudge|process|command|textconv|driver)$|^diff\\.external$|^credential\\.|^url\\.|^protocol\\.|^core\\.(pager|editor|askpass|gitproxy|sshcommand)$|^remote\\..+\\.(uploadpack|receivepack)$|^gpg\\.|^sequence\\.editor$|^core\\.alternaterefscommand$|^pager\\.';
 const unsafeQuery = (scope) => ['config', scope, '--includes', '--name-only', '--get-regexp', UNSAFE_CONFIG_RE];
 const WORKTREE_FLAG_QUERY = ['config', '--local', '--type=bool', '--get', 'extensions.worktreeConfig'];
+const GIT_DIRS_QUERY = ['rev-parse', '--absolute-git-dir', '--git-common-dir'];
 // C locale so "not a repository" is recognisable whatever the owner's language.
 const QUERY_ENV = { LC_ALL: 'C', LANGUAGE: 'C' };
 const NOT_A_REPO_RE = /only be used inside a git repository|not a git repository/i;
 
-// .git/config path → the exact text last found clean. A repo whose config
-// has an include or mentions worktreeConfig is checked every time (an
-// included file or config.worktree can change without this one changing).
+// <cwd>/.git → the config and HEAD text last found clean. Only a plain
+// repository whose own .git is the one git uses is cached: .git is a real
+// directory with HEAD and objects/ and no commondir (which would move the
+// config to another repository), and on the miss that fills the cache,
+// rev-parse confirms git resolves both the git dir and the common dir to it
+// (a decoy .git that git does not accept sends git to an enclosing repo).
+// The structure is re-checked on every hit, and HEAD is part of the key so a
+// HEAD broken after the check (git then walks up to a parent) is a miss. A
+// config with an include or worktreeConfig is never cached: an included
+// file or config.worktree can change without this one changing.
 const cleanConfigs = new Map();
 
 function configCacheEntry(cwd) {
-  const file = path.join(path.resolve(cwd), '.git', 'config');
-  let text;
-  try { text = fs.readFileSync(file, 'utf8'); } catch { return null; }
-  if (/^\s*\[\s*include/im.test(text) || /worktreeconfig/i.test(text)) return null;
-  return { file, text };
+  const gitDir = path.join(path.resolve(cwd), '.git');
+  let key;
+  try {
+    const st = fs.lstatSync(gitDir);
+    if (!st.isDirectory() || st.isSymbolicLink()) return null;
+    if (!fs.lstatSync(path.join(gitDir, 'objects')).isDirectory()) return null;
+    if (fs.existsSync(path.join(gitDir, 'commondir'))) return null;
+    const head = fs.readFileSync(path.join(gitDir, 'HEAD'), 'utf8');
+    const text = fs.readFileSync(path.join(gitDir, 'config'), 'utf8');
+    if (/^\s*\[\s*include/im.test(text) || /worktreeconfig/i.test(text)) return null;
+    key = `${head}\0${text}`;
+  } catch {
+    return null;
+  }
+  return { gitDir, key };
+}
+
+// True when git resolves both the git dir and the common dir to entry.gitDir.
+function isOwnGitDir(cwd, entry, { err, stdout }) {
+  if (err) return false;
+  const [gitDir, common] = String(stdout).split(/\r?\n/).map((l) => l.trim());
+  if (!gitDir || !common) return false;
+  return samePath(gitDir, entry.gitDir) && samePath(path.resolve(cwd, common), entry.gitDir);
 }
 
 function unsafeConfigError(cwd, stdout) {
@@ -258,7 +286,7 @@ function settleWorktreeFlag(cwd, { err, stdout }) {
 function needsConfigCheck(cwd) {
   if (!fs.existsSync(cwd)) return { skip: true };
   const entry = configCacheEntry(cwd);
-  if (entry && cleanConfigs.get(entry.file) === entry.text) return { skip: true };
+  if (entry && cleanConfigs.get(entry.gitDir) === entry.key) return { skip: true };
   return { skip: false, entry };
 }
 
@@ -272,7 +300,7 @@ async function checkRepoConfig(cwd, hooksDir) {
   if (settleWorktreeFlag(cwd, await query(WORKTREE_FLAG_QUERY))) {
     settleUnsafeQuery(cwd, await query(unsafeQuery('--worktree')), unsafeQuery('--worktree'));
   }
-  if (entry) cleanConfigs.set(entry.file, entry.text);
+  if (entry && isOwnGitDir(cwd, entry, await query(GIT_DIRS_QUERY))) cleanConfigs.set(entry.gitDir, entry.key);
 }
 
 function checkRepoConfigSync(cwd, hooksDir) {
@@ -293,7 +321,7 @@ function checkRepoConfigSync(cwd, hooksDir) {
   if (settleWorktreeFlag(cwd, query(WORKTREE_FLAG_QUERY))) {
     settleUnsafeQuery(cwd, query(unsafeQuery('--worktree')), unsafeQuery('--worktree'));
   }
-  if (entry) cleanConfigs.set(entry.file, entry.text);
+  if (entry && isOwnGitDir(cwd, entry, query(GIT_DIRS_QUERY))) cleanConfigs.set(entry.gitDir, entry.key);
 }
 
 // Caller arguments start with the subcommand. A leading global option (-C,

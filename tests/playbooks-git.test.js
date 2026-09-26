@@ -25,7 +25,7 @@ describe('hardenedGitArgs', () => {
     const flags = [];
     for (let i = 0; i < argv.length - 1; i += 2) if (argv[i] === '-c') flags.push(argv[i + 1]);
     for (const f of [
-      'commit.gpgsign=false', 'core.hooksPath=/tmp/empty-hooks', 'core.fsmonitor=false', 'core.symlinks=false', 'core.autocrlf=false',
+      'commit.gpgsign=false', 'tag.gpgsign=false', 'core.hooksPath=/tmp/empty-hooks', 'core.fsmonitor=false', 'core.symlinks=false', 'core.autocrlf=false',
       'core.eol=lf', 'filter.lfs.smudge=', 'filter.lfs.process=', 'filter.lfs.required=false',
       'protocol.allow=never', 'protocol.https.allow=always', 'protocol.ssh.allow=always'
     ]) assert.ok(flags.includes(f), `${f} present`);
@@ -88,6 +88,10 @@ describe('runGit and runGitSync', () => {
       assert.ok(!out.includes('kl-planted-editor'), 'GIT_EDITOR from the environment does not reach git');
       assert.match(out, /^GIT_TERMINAL_PROMPT=0$/m);
       assert.match(out, /^GIT_ALLOW_PROTOCOL=https:ssh$/m);
+      const syncOut = git.runGitSync(dir, ['e']);
+      assert.ok(!syncOut.includes(path.basename(other)), 'runGitSync: GIT_DIR from the environment does not reach git');
+      assert.ok(!syncOut.includes('kl-planted-editor'), 'runGitSync: GIT_EDITOR from the environment does not reach git');
+      assert.match(syncOut, /^GIT_TERMINAL_PROMPT=0$/m);
     } finally {
       for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
     }
@@ -197,6 +201,101 @@ describe('runGit and runGitSync', () => {
     await git.runGit(cwd, ['init', '-q', '--initial-branch=main']);
   });
 
+  // A repo whose config defines a clean filter over every file; returns the
+  // marker path the filter would create.
+  async function plantFilter(repo) {
+    const marker = path.join(repo, 'filter-ran');
+    await git.runGit(repo, ['config', 'filter.evil.clean', `touch "${marker.replace(/\\/g, '/')}"; cat`]);
+    fs.writeFileSync(path.join(repo, '.gitattributes'), '* filter=evil\n');
+    return marker;
+  }
+  const refusedUnsafe = (err) => err.code === 'GIT_UNSAFE_CONFIG';
+
+  it('does not trust a cached check once .git gains a commondir', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const evil = tmp();
+    await git.runGit(evil, ['init', '-q']);
+    const marker = await plantFilter(evil);
+    const dir = tmp();
+    await git.runGit(dir, ['init', '-q']);
+    await git.runGit(dir, ['status']); // a clean check, cacheable
+    fs.writeFileSync(path.join(dir, '.git', 'commondir'), `${path.join(evil, '.git')}\n`);
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+    await assert.rejects(git.runGit(dir, ['add', '-A']), refusedUnsafe);
+    assert.throws(() => git.runGitSync(dir, ['add', '-A']), refusedUnsafe);
+    assert.strictEqual(fs.existsSync(marker), false, 'the filter from the common dir never ran');
+  });
+
+  it('does not cache a decoy .git that git passes over for the enclosing repo', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const parent = tmp();
+    await git.runGit(parent, ['init', '-q']);
+    // HEAD, objects/ and a clean config, but no refs/: git does not accept it.
+    const sub = path.join(parent, 'sub');
+    fs.mkdirSync(path.join(sub, '.git', 'objects'), { recursive: true });
+    fs.writeFileSync(path.join(sub, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+    fs.writeFileSync(path.join(sub, '.git', 'config'), '[core]\n\tbare = false\n');
+    // Clean parent config, checked through both paths; must not be cached for sub.
+    await git.runGit(sub, ['status']);
+    git.runGitSync(sub, ['status']);
+    const marker = await plantFilter(parent);
+    fs.writeFileSync(path.join(sub, 'a.txt'), 'one\n');
+    await assert.rejects(git.runGit(sub, ['add', '-A']), refusedUnsafe);
+    assert.throws(() => git.runGitSync(sub, ['add', '-A']), refusedUnsafe);
+    assert.strictEqual(fs.existsSync(marker), false, 'the enclosing repo\'s filter never ran');
+  });
+
+  it('re-checks when HEAD breaks after a clean check and git walks up to a parent', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const parent = tmp();
+    await git.runGit(parent, ['init', '-q']);
+    const sub = path.join(parent, 'sub');
+    fs.mkdirSync(sub);
+    await git.runGit(sub, ['init', '-q']);
+    await git.runGit(sub, ['status']); // a real repo: cached
+    const marker = await plantFilter(parent);
+    fs.writeFileSync(path.join(sub, '.git', 'HEAD'), 'not a ref\n');
+    fs.writeFileSync(path.join(sub, 'a.txt'), 'one\n');
+    await assert.rejects(git.runGit(sub, ['add', '-A']), refusedUnsafe);
+    assert.strictEqual(fs.existsSync(marker), false, 'the parent\'s filter never ran');
+  });
+
+  it('refuses a repo whose remote sets uploadpack', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const source = tmp();
+    await git.runGit(source, ['init', '-q']);
+    fs.writeFileSync(path.join(source, 'a.txt'), 'one\n');
+    await git.runGit(source, ['add', '-A']);
+    await git.runGit(source, ['commit', '-q', '-m', 'first'], { env: ID_ENV });
+    const dir = tmp();
+    await git.runGit(dir, ['init', '-q']);
+    const marker = path.join(dir, 'uploadpack-ran');
+    await git.runGit(dir, ['remote', 'add', 'origin', source]);
+    await git.runGit(dir, ['config', 'remote.origin.uploadpack', `sh -c 'touch "${marker.replace(/\\/g, '/')}"; exec git-upload-pack "$@"' kl`]);
+    await assert.rejects(git.runGit(dir, ['fetch', '-q', 'origin'], { allowFile: true }), (err) => {
+      assert.strictEqual(err.code, 'GIT_UNSAFE_CONFIG');
+      assert.match(err.message, /remote\.origin\.uploadpack/);
+      return true;
+    });
+    assert.strictEqual(fs.existsSync(marker), false, 'the upload-pack program never ran');
+  });
+
+  it('refuses a repo whose config sets gpg.program', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const dir = tmp();
+    await git.runGit(dir, ['init', '-q']);
+    const marker = path.join(dir, 'gpg-ran');
+    const script = path.join(dir, 'fake-gpg.sh');
+    fs.writeFileSync(script, `#!/bin/sh\ntouch "${marker.replace(/\\/g, '/')}"\nexit 1\n`, { mode: 0o755 });
+    await git.runGit(dir, ['config', 'gpg.program', script.replace(/\\/g, '/')]);
+    await assert.rejects(git.runGit(dir, ['commit', '-q', '-S', '--allow-empty', '-m', 'signed'], { env: ID_ENV }), (err) => {
+      assert.strictEqual(err.code, 'GIT_UNSAFE_CONFIG');
+      assert.match(err.message, /gpg\.program/);
+      return true;
+    });
+    assert.strictEqual(fs.existsSync(marker), false, 'the gpg program never ran');
+  });
+
   it('refuses unsafe config in config.worktree when extensions.worktreeConfig is on', async (t) => {
     if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
     const dir = tmp();
@@ -217,7 +316,7 @@ describe('runGit and runGitSync', () => {
     assert.strictEqual(fs.existsSync(marker), false, 'the external diff never ran');
   });
 
-  it('names a timeout', async (t) => {
+  it('names a timeout', { timeout: 20000 }, async (t) => {
     if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
     // hash-object --stdin waits for input that never comes.
     await assert.rejects(git.runGit(tmp(), ['hash-object', '--stdin'], { timeoutMs: 300 }), (err) => {
