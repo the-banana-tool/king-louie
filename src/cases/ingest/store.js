@@ -35,9 +35,16 @@ const docIdFor = (hash) => `doc-${String(hash).slice(0, 12)}`;
 
 // ---- names (M10) ----
 
-// C0/C1 controls, bidi overrides and isolates, zero-width characters.
 const LINE_BREAKS = /[\t\n\v\f\r\u0085\u2028\u2029]/g;
-const INVISIBLE = /[\u0000-\u001f\u007f-\u009f\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g;
+// The one set of hidden characters, shared by oneLine, the ingest anchor
+// text and the prompt fence, so what is dropped for display is dropped for
+// matching too: C0/C1 controls other than line breaks and tabs, soft hyphen,
+// combining grapheme joiner, Hangul fillers, Arabic letter mark, Mongolian
+// vowel separator, zero-width characters, bidi embeddings, overrides and
+// isolates, variation selectors, BOM and tag characters.
+// A regex class body; use it with the u flag.
+const HIDDEN_CLASS = String.raw`\u0000-\u0008\u000e-\u001f\u007f-\u009f\u00ad\u034f\u061c\u115f\u1160\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2069\u3164\ufe00-\ufe0f\ufeff\uffa0\u{e0000}-\u{e007f}`;
+const INVISIBLE = new RegExp(`[${HIDDEN_CLASS}]`, 'gu');
 function oneLine(value, max) {
   const flat = String(value ?? '').replace(LINE_BREAKS, ' ').replace(INVISIBLE, '').replace(/\s+/g, ' ').trim();
   const chars = Array.from(flat);
@@ -138,7 +145,7 @@ function recordPath(caseDir, docId) {
 
 const SIDECAR = /\.meta\.json$/i;
 // Non-global copies: `.test` on a /g regex is stateful.
-const UNSAFE_REF = new RegExp(`${LINE_BREAKS.source}|${INVISIBLE.source}`);
+const UNSAFE_REF = new RegExp(`${LINE_BREAKS.source}|${INVISIBLE.source}`, 'u');
 const underSources = (caseDir, abs) => {
   const segs = segmentsWithin(caseDir, abs);
   return Boolean(segs) && segs.length >= 2 && segs[0] === 'sources' && !SIDECAR.test(segs[segs.length - 1]);
@@ -330,6 +337,7 @@ module.exports = {
   DOC_ID,
   cleanName,
   oneLine,
+  HIDDEN_CLASS,
   sniffType,
   checkSize,
   sha256,

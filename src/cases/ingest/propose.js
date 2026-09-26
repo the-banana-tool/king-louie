@@ -9,7 +9,7 @@
 // name or an option id.
 const crypto = require('crypto');
 const { MAX_REPLY_CHARS } = require('./call-model');
-const { oneLine } = require('./store');
+const { oneLine, HIDDEN_CLASS } = require('./store');
 
 const CATEGORIES = Object.freeze(['personal', 'financial', 'legal', 'health', 'property', 'ops', 'general']);
 const ENTITY_TYPES = Object.freeze(['email', 'phone', 'id', 'address', 'person', 'org']);
@@ -25,19 +25,30 @@ const pageMark = (n) => `\f[page ${n}]\n`;
 // A fresh id per prompt, so a document cannot know the line that closes it;
 // anything in the text that looks like a fence line is defused as well.
 const newFenceId = () => crypto.randomBytes(12).toString('hex');
-// Invisible characters (not line breaks or tabs) are dropped first, so none
-// can hide inside a fence line. Then every '<', fullwidth '<' or '<' entity
-// that starts something reading as "untrusted-" once folded (spaces, a
-// slash and fullwidth letters allowed) loses its bracket.
-const HIDDEN = /[\u0000-\u0008\u000e-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g;
-const OPENER = /<|\uff1c|&lt;?|&#0*60;?|&#x0*3c;?/gi;
-const FENCE_AFTER = /^\s*\/?\s*untrusted-/;
+// Hidden characters (store.js HIDDEN_CLASS, the set anchors drop too) are
+// removed first, so none can hide inside a fence line. Then every '<'
+// (plain, fullwidth, small or as an entity) that starts something reading as
+// "untrusted-" once folded (any run of spaces, a slash, fullwidth letters)
+// loses its bracket.
+const HIDDEN = new RegExp(`[${HIDDEN_CLASS}]`, 'gu');
+const OPENER = /<|\uff1c|\ufe64|&lt;?|&#0*60;?|&#x0*3c;?/gi;
+const SPACES = /\s*/y;
+const skipSpaces = (s, i) => {
+  SPACES.lastIndex = i;
+  SPACES.exec(s);
+  return SPACES.lastIndex;
+};
+// Whether the text from i reads as "/untrusted-" or "untrusted-". Skipping
+// spaces is linear overall: every opener ends the run before it.
+function readsAsFence(s, i) {
+  let at = skipSpaces(s, i);
+  const c = String.fromCodePoint(s.codePointAt(at) ?? 32);
+  if (c.normalize('NFKC') === '/') at = skipSpaces(s, at + c.length);
+  return s.slice(at, at + 40).normalize('NFKC').toLowerCase().startsWith('untrusted-');
+}
 function defuse(text) {
   const plain = String(text ?? '').replace(HIDDEN, '');
-  return plain.replace(OPENER, (opener, at) => {
-    const after = plain.slice(at + opener.length, at + opener.length + 40).normalize('NFKC').toLowerCase();
-    return FENCE_AFTER.test(after) ? '\u2039' : opener;
-  });
+  return plain.replace(OPENER, (opener, at) => (readsAsFence(plain, at + opener.length) ? '\u2039' : opener));
 }
 function fence(kind, text, id) {
   return `<untrusted-${kind} id="${id}">\n${defuse(text)}\n</untrusted-${kind} id="${id}">`;
@@ -46,13 +57,15 @@ function fence(kind, text, id) {
 // A cut at i that would split a surrogate pair moves back one unit.
 const cutAt = (s, i) => (i > 0 && i < s.length && s.charCodeAt(i - 1) >= 0xd800 && s.charCodeAt(i - 1) <= 0xdbff ? i - 1 : i);
 
-// Page text as it goes into a chunk: a form feed or vertical tab becomes a
-// space and a Unicode line or paragraph separator a newline, and a line that
-// starts with "[page " loses its bracket, so a page cannot forge another
-// page's marker.
+// Page text as it goes into a chunk: a Unicode line or paragraph separator
+// becomes a newline, a form feed or vertical tab a space, hidden characters
+// are dropped (before the next step, so none can sit in front of a forged
+// marker and vanish later), and a line that starts with "[page " loses its
+// bracket, so a page cannot forge another page's marker.
 const pageBody = (text) => String(text)
-  .replace(/[\f\v]/g, ' ')
   .replace(/[\u0085\u2028\u2029]/g, '\n')
+  .replace(/[\f\v]/g, ' ')
+  .replace(HIDDEN, '')
   .replace(/^([^\S\n]*)\[(\s*page\s)/gim, '$1\u2045$2');
 
 // → { chunks: [{ fromPage, toPage, text }], truncated: { fromPage, reason } | null }

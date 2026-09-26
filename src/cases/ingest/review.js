@@ -5,7 +5,7 @@
 // verify reply is refused unless it is exactly the verdict object.
 const { normalizeForQuote } = require('../chat-integration');
 const { norm } = require('../jsonl');
-const { oneLine } = require('./store');
+const { oneLine, HIDDEN_CLASS } = require('./store');
 const { QUOTE_MIN, QUOTE_MAX, fence, newFenceId, normalizeProposal, parseReplyObject } = require('./propose');
 
 const VERIFY_WINDOW = 1500;
@@ -25,27 +25,52 @@ function parseValue(value) {
   return value;
 }
 
-// A number as text: an optional minus and currency sign, digits with commas
-// only as thousands groups, an optional decimal part, or a leading-dot
-// decimal. A leading zero before more digits ("007") is text, as the Ledger
-// tool reads it.
-const NUMBER_BODY = '(?:(?!0\\d)(?:\\d{1,3}(?:,\\d{3})+(?!\\d)|\\d+)(?:\\.\\d+)?|\\.\\d+)';
-const NUMERIC = new RegExp(`^-?[$€£¥]?\\s*${NUMBER_BODY}$`);
-// In a quote, a number starts where no digit, dot or comma touches it, and
-// a minus counts only when no digit or minus comes right before it ("10-5"
-// is 10 and 5). Separate numbers are never joined.
-const NUMBER_IN_TEXT = new RegExp(`(?:(?<![\\d-])-)?[$€£¥]?(?<![\\d.,])(?:${NUMBER_BODY})(?![\\d,]*\\d)`, 'g');
+// Ruling T5-numeric: a value with any digit in it matches only as a bounded
+// token, never as a plain substring. On the left, a match may not touch a
+// letter, a digit or '_', nor one of those followed by '.', ',' or '-'
+// (a currency sign may come first). On the right, it may not be followed by
+// a digit, or by '.' or ',' and a digit; units ("%", "kg", " years") may
+// follow.
+const LEFT_OK = String.raw`(?<![\p{L}\p{Nd}_])(?<![\p{L}\p{Nd}_][.,\-])`;
+const RIGHT_OK = String.raw`(?![.,]?\p{Nd})`;
+const BAD_BEFORE = new RegExp(String.raw`(?:[\p{L}\p{Nd}_]|[\p{L}\p{Nd}_][.,\-])$`, 'u');
+const BAD_AFTER = new RegExp(String.raw`^[.,]?\p{Nd}`, 'u');
+const HAS_DIGIT = /\p{Nd}/u;
+// A number as the Ledger reads one: an optional minus and currency sign,
+// then digits with commas only as thousands groups, or plain digits, with an
+// optional decimal part, or a leading-dot decimal. A leading zero before
+// more digits ("007") is not a number, as parseValue keeps it as text.
+// Accepted as they are: "(5)" reads as 5, and -0 equals 0.
+const NUMBER_BODY = String.raw`(?:(?:[1-9]\d{0,2}(?:,\d{3})+|0|[1-9]\d*)(?:\.\d+)?|\.\d+)`;
+const NUMERIC = new RegExp(String.raw`^-?[$€£¥]?\s*${NUMBER_BODY}$`, 'u');
+const NUMBER_IN_TEXT = new RegExp(String.raw`${LEFT_OK}-?[$€£¥]?${NUMBER_BODY}${RIGHT_OK}`, 'gu');
 const numberOf = (s) => Number(String(s).replace(/[,$€£¥\s]/g, ''));
 const numbersIn = (s) => (String(s).match(NUMBER_IN_TEXT) || []).map(numberOf);
 
+// Whether needle occurs in hay with nothing touching it (T5-numeric).
+function boundedIn(hay, needle) {
+  for (let at = hay.indexOf(needle); at !== -1; at = hay.indexOf(needle, at + 1)) {
+    const before = hay.slice(Math.max(0, at - 4), at);
+    const after = hay.slice(at + needle.length, at + needle.length + 4);
+    if (!BAD_BEFORE.test(before) && !BAD_AFTER.test(after)) return true;
+  }
+  return false;
+}
+
+// The quote is cut to QUOTE_MAX + 1 characters here too: at accept time it
+// comes from a record anyone with a shell can edit.
 function valueInQuote(value, quote) {
   if (value === null || value === undefined || value === '') return true;
+  const q = Array.from(String(quote ?? '').slice(0, 2 * (QUOTE_MAX + 1))).slice(0, QUOTE_MAX + 1).join('');
   const v = String(value).trim();
   if (NUMERIC.test(v)) {
     const wanted = numberOf(v);
-    return numbersIn(quote).some((n) => n === wanted);
+    return numbersIn(q).some((n) => n === wanted);
   }
-  return normalizeForQuote(quote).includes(normalizeForQuote(v));
+  const needle = anchorText(v);
+  const hay = anchorText(q);
+  if (!needle) return false;
+  return HAS_DIGIT.test(needle) ? boundedIn(hay, needle) : hay.includes(needle);
 }
 
 // The text anchors are compared in: normalizeForQuote after line breaks and
@@ -159,6 +184,13 @@ function checkProposals(record, pages, facts) {
   return { ...record, proposals, refused, refusedDropped: dropped, nextProposal: next };
 }
 
+const charPattern = (c) => {
+  if (c === "'") return "['\\u2018\\u2019\\u201A\\u201B\\u2032]";
+  if (c === '"') return '["\\u201C\\u201D\\u201E\\u201F\\u2033]';
+  if (c === '-') return '[-\\u2013\\u2014]';
+  return c.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+};
+
 // Where the quote starts in the raw page text: exactly (ignoring case), else
 // word by word across any run of whitespace or invisible characters, else 0.
 function findQuote(text, quote) {
@@ -166,11 +198,10 @@ function findQuote(text, quote) {
   if (exact !== -1) return { at: exact, length: quote.length };
   const words = anchorText(quote).split(' ').filter(Boolean);
   if (!words.length) return { at: 0, length: 0 };
-  const gap = '[\\s\\u0000-\\u001f\\u007f-\\u009f\\u061c\\u180e\\u200b-\\u200f\\u202a-\\u202e\\u2060-\\u2069\\ufeff]+';
-  const loose = words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    .replace(/'/g, "['\\u2018\\u2019\\u201A\\u201B\\u2032]")
-    .replace(/"/g, '["\\u201C\\u201D\\u201E\\u201F\\u2033]')
-    .replace(/-/g, '[-\\u2013\\u2014]')).join(gap);
+  // Hidden characters may sit anywhere, inside a word too (a soft hyphen).
+  const gap = `[\\s${HIDDEN_CLASS}]+`;
+  const inWord = `[${HIDDEN_CLASS}]*`;
+  const loose = words.map((w) => Array.from(w).map(charPattern).join(inWord)).join(gap);
   const m = new RegExp(loose, 'iu').exec(text);
   return m ? { at: m.index, length: m[0].length } : { at: 0, length: 0 };
 }
