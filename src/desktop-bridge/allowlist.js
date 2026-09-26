@@ -15,7 +15,11 @@ const PROXIED_DOMAINS = Object.freeze([
   'tool',
   'usage',
   'checkpoint',
-  'canvas'
+  'canvas',
+  // Cases stage 4: the ladder state, the contact policy editor and heartbeats.
+  'contact',
+  'contactPolicy',
+  'presence'
 ]);
 const PROXIED_CHANNELS = Object.freeze(['agent:userResponse']);
 

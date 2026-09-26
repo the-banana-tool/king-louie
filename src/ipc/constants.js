@@ -46,6 +46,12 @@ module.exports = {
   CASE_ATTACH: 'case:attach',
   CASE_ORIENTATION: 'case:orientation',
   CASE_SET_DISCLOSABLE: 'case:setDisclosable',
+  // Cases stage 4 (contact channels).
+  CONTACT_LADDER_STATE: 'contact:ladderState',
+  CONTACT_POLICY_GET: 'contactPolicy:get',
+  CONTACT_POLICY_SET: 'contactPolicy:set',
+  PRESENCE_HEARTBEAT: 'presence:heartbeat',
+  PRESENCE_STATUS: 'presence:status',
   CASE_QUESTIONS: 'case:questions',
   CASE_ANSWER_QUESTION: 'case:answerQuestion',
   CASE_ACKNOWLEDGE_BRIEFING: 'case:acknowledgeBriefing',

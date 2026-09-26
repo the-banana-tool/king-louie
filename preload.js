@@ -750,6 +750,19 @@ contextBridge.exposeInMainWorld(
       },
       onChanged: (callback) => registerAdditive('case:changed', callback)
     },
+    contact: {
+      ladderState: () => ipcRenderer.invoke('contact:ladderState'),
+      getPolicy: () => ipcRenderer.invoke('contactPolicy:get'),
+      setPolicy: (policy) => {
+        validateObject(policy, 'policy');
+        return ipcRenderer.invoke('contactPolicy:set', policy);
+      },
+      heartbeat: (payload) => {
+        validateObject(payload, 'payload');
+        return ipcRenderer.invoke('presence:heartbeat', payload);
+      },
+      presenceStatus: () => ipcRenderer.invoke('presence:status')
+    },
     usage: {
       getSession: () => ipcRenderer.invoke('usage:getSession'),
       getDaily: (payload) => ipcRenderer.invoke('usage:getDaily', payload)

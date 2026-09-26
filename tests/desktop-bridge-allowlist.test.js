@@ -56,7 +56,7 @@ describe('classifyChannel (spec §3.6, first match wins)', () => {
   });
 
   it('lists the proxied domains', () => {
-    assert.deepStrictEqual([...PROXIED_DOMAINS], ['chat', 'settings', 'case', 'cron', 'memory', 'tool', 'usage', 'checkpoint', 'canvas']);
+    assert.deepStrictEqual([...PROXIED_DOMAINS], ['chat', 'settings', 'case', 'cron', 'memory', 'tool', 'usage', 'checkpoint', 'canvas', 'contact', 'contactPolicy', 'presence']);
   });
 
   it('defaults to deny for anything that is not an allow-listed channel', () => {
