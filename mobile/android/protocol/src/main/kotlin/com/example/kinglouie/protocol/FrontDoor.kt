@@ -468,21 +468,67 @@ internal object FrontDoorRules {
     fun isMachineName(s: String) = MACHINE_NAME.matches(s)
     fun isNodeName(s: String) = NODE_NAME.matches(s)
 
+    // Ruling T35-punycode: a label that starts `xn--` but is not valid
+    // punycode passes here. The front door refuses it (WHATWG's IDNA step
+    // fails), so the phone at worst signs something the front door refuses;
+    // refusing every `xn--` label would refuse real IDN client_ids.
     private val HOST_NAME = Regex("[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)*")
     private val IPV6_LITERAL = Regex("\\[[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*]")
     private val PORT = Regex("[0-9]{1,5}")
 
+    // The front door's NUMERIC_LABEL_RE: WHATWG reads a host whose last
+    // label is this as IPv4.
+    private val NUMERIC_LABEL = Regex("[0-9]+|0[xX][0-9A-Fa-f]*")
+    private val OCTET = Regex("0|[1-9][0-9]{0,2}")
+    private val HEX_GROUP = Regex("[0-9A-Fa-f]{1,4}")
+
+    /** Exactly four decimal parts, each 0–255, without leading zeros (which WHATWG would read differently). */
+    fun isIpv4(s: String): Boolean {
+        val parts = s.split('.')
+        return parts.size == 4 && parts.all { OCTET.matches(it) && it.toInt() <= 255 }
+    }
+
+    /**
+     * An IPv6 address (the text between the brackets): groups of 1–4 hex
+     * digits, at most one `::`, eight groups (fewer only with `::`), and an
+     * optional dotted-quad tail that counts as two groups.
+     */
+    fun isIpv6(inner: String): Boolean {
+        val lastColon = inner.lastIndexOf(':')
+        if (lastColon < 0) return false
+        var body = inner
+        val tail = inner.substring(lastColon + 1)
+        if ('.' in tail) {
+            if (!isIpv4(tail)) return false
+            body = inner.substring(0, lastColon + 1) + "0:0"
+        }
+        if ('.' in body) return false
+        fun groups(s: String): Int = if (s.isEmpty()) 0 else s.split(':').let { g -> if (g.all { HEX_GROUP.matches(it) }) g.size else -1 }
+        val gap = body.indexOf("::")
+        if (gap < 0) return groups(body) == 8
+        // A second `::` leaves an empty group on one side, which groups() refuses.
+        val left = groups(body.substring(0, gap))
+        val right = groups(body.substring(gap + 2))
+        return left >= 0 && right >= 0 && left + right <= 7
+    }
+
     /**
      * `host[:port]` with no userinfo: the host is ASCII letters, digits and
-     * `-` in non-empty dot-separated labels, or a bracketed IPv6 literal; the
-     * port is 1–5 digits and at most 65535 (WHATWG refuses more).
+     * `-` in non-empty dot-separated labels (a numeric last label only as a
+     * whole dotted-quad IPv4 address), or a bracketed IPv6 literal of valid
+     * structure; the port is 1–5 digits and at most 65535 (WHATWG refuses more).
      */
     fun isAuthority(authority: String): Boolean {
         val portAt = if (authority.startsWith("[")) authority.indexOf(']') + 1 else authority.indexOf(':').let { if (it < 0) authority.length else it }
         if (portAt <= 0) return false
         val host = authority.substring(0, portAt)
         val rest = authority.substring(portAt)
-        if (!(HOST_NAME.matches(host) || IPV6_LITERAL.matches(host))) return false
+        if (IPV6_LITERAL.matches(host)) {
+            if (!isIpv6(host.substring(1, host.length - 1))) return false
+        } else {
+            if (!HOST_NAME.matches(host)) return false
+            if (NUMERIC_LABEL.matches(host.substringAfterLast('.')) && !isIpv4(host)) return false
+        }
         if (rest.isEmpty()) return true
         val port = rest.substring(1)
         return rest[0] == ':' && PORT.matches(port) && port.toInt() <= 65535

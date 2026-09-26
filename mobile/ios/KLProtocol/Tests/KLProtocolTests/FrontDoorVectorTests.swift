@@ -418,14 +418,14 @@ final class FrontDoorVectorTests: XCTestCase {
     /// ASCII labels or a bracketed IPv6 literal, no userinfo or fragment.
     func testHttpsUrlsFollowTheFrontDoor() {
         for ok in ["https://client.example.com/meta.json", "https://client.example.com:443/meta.json", "HTTPS://client.example.com",
-                   "https://client.example.com:1/", "https://client.example.com:65535/", "https://[2001:db8::1]:8443/m", "https://10.0.0.1/m"] {
+                   "https://client.example.com:1/", "https://client.example.com:65535/", "https://[2001:db8::1]:8443/m", "https://10.0.0.1/m", "https://[::1]/", "https://192.0.2.1/", "https://[::ffff:192.0.2.1]/", "https://[2001:db8:0:0:0:0:0:1]/", "https://[1::]/", "https://gpu-box.example.com/"] {
             XCTAssertTrue(FrontDoorRules.isHttpsUrl(ok, max: FrontDoorRules.clientIdMax), ok)
         }
         for bad in ["https://client.example.com:65536/", "https://client.example.com:99999/", "https://client.example.com:0443x/",
                     "https://client.example.com:/", "https://client.example.com:123456/", "https://exa mple.com/", "https://exa_mple.com/",
                     "https://client..example.com/", "https://.example.com/", "https://[::1/", "https://[zz::1]/", "https://user@client.example.com/m",
                     "https://@client.example.com/m", "https://client.example.com/m#x", "https://client.example.com/m#", "http://client.example.com/m",
-                    "https:client.example.com/m", "https:///m", "https://"] {
+                    "https:client.example.com/m", "https:///m", "https://", "https://999.1.1.1/", "https://256.0.0.1/", "https://1.2.3.4.5/", "https://a.b.c.d.1/", "https://example.123/", "https://example.09/", "https://a.08/", "https://a.0x/", "https://a.0XfF/", "https://010.0.0.1/", "https://[1:2]/", "https://[:::]/", "https://[1::2::3]/", "https://[::1.2.3.4.5]/", "https://[.:]/", "https://[1:2:3:4:5:6:7:8:9]/", "https://[12345::1]/", "https://[::256.0.0.1]/"] {
             XCTAssertFalse(FrontDoorRules.isHttpsUrl(bad, max: FrontDoorRules.clientIdMax), bad)
         }
     }
@@ -486,5 +486,11 @@ final class FrontDoorVectorTests: XCTestCase {
         XCTAssertNoThrow(try sign([ScopeChoice(scope: "fleet:read"), ScopeChoice(scope: "fleet:run", machines: ["gpu-box"])]))
         // A denial carries no scopes, so what was chosen does not matter.
         XCTAssertEqual(try sign(widened, "deny")["scopes"], .array([]))
+    }
+    /// isAuthority on its own (no URLComponents behind it): the IPv4 and
+    /// IPv6 structure the front door enforces.
+    func testAuthorityStructure() {
+        for ok in ["client.example.com", "client.example.com:443", "192.0.2.1", "[::1]", "[::ffff:192.0.2.1]", "[2001:db8:0:0:0:0:0:1]", "[1::]", "[2001:db8::1]:8443", "[1:2:3:4:5:6:1.2.3.4]", "[::]", "xn--bcher-kva.example"] { XCTAssertTrue(FrontDoorRules.isAuthority(Array(ok.utf8)), ok) }
+        for bad in ["999.1.1.1", "256.0.0.1", "1.2.3.4.5", "a.b.c.d.1", "example.123", "example.09", "a.08", "a.0x", "a.0XfF", "010.0.0.1", "[1:2]", "[:::]", "[1::2::3]", "[::1.2.3.4.5]", "[.:]", "[1:2:3:4:5:6:7:8:9]", "[12345::1]", "[::256.0.0.1]", "[1:2:3:4:5:6:7::8]", "[1:2:3:4:5:6:7:1.2.3.4]", "[1.2.3.4]", "[::1", "client.example.com:65536", "exa_mple.com", ""] { XCTAssertFalse(FrontDoorRules.isAuthority(Array(bad.utf8)), bad) }
     }
 }

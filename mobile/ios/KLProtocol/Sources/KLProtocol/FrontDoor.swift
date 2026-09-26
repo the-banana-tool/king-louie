@@ -496,9 +496,67 @@ enum FrontDoorRules {
 
     static func isHexDigit(_ c: UInt8) -> Bool { isDigit(c) || (c >= 0x41 && c <= 0x46) || (c >= 0x61 && c <= 0x66) }
 
+    /// One decimal IPv4 part: 0–255 without leading zeros (which WHATWG
+    /// would read differently).
+    static func isOctet(_ s: ArraySlice<UInt8>) -> Bool {
+        guard (1...3).contains(s.count), s.allSatisfy(isDigit), !(s.count > 1 && s.first == 0x30) else { return false }
+        return s.reduce(0) { $0 * 10 + Int($1 - 0x30) } <= 255
+    }
+
+    /// Exactly four decimal parts, each an octet.
+    static func isIPv4(_ s: ArraySlice<UInt8>) -> Bool {
+        let parts = s.split(separator: 0x2E, omittingEmptySubsequences: false)
+        return parts.count == 4 && parts.allSatisfy(isOctet)
+    }
+
+    /// The front door's NUMERIC_LABEL_RE, `^([0-9]+|0x[0-9a-f]*)$` ignoring
+    /// case: WHATWG reads a host whose last label is this as IPv4.
+    static func isNumericLabel(_ s: ArraySlice<UInt8>) -> Bool {
+        if !s.isEmpty && s.allSatisfy(isDigit) { return true }
+        let b = Array(s)
+        return b.count >= 2 && b[0] == 0x30 && (b[1] == 0x78 || b[1] == 0x58) && b.dropFirst(2).allSatisfy(isHexDigit)
+    }
+
+    /// An IPv6 address (the bytes between the brackets): groups of 1–4 hex
+    /// digits, at most one `::`, eight groups (fewer only with `::`), and an
+    /// optional dotted-quad tail that counts as two groups.
+    static func isIPv6(_ inner: [UInt8]) -> Bool {
+        guard let lastColon = inner.lastIndex(of: 0x3A) else { return false }
+        var body = inner
+        let tail = inner[(lastColon + 1)...]
+        if tail.contains(0x2E) {
+            guard isIPv4(tail) else { return false }
+            body = Array(inner[...lastColon]) + Array("0:0".utf8)
+        }
+        guard !body.contains(0x2E) else { return false }
+        /// The number of groups, or nil when one is not 1–4 hex digits.
+        func groups(_ s: ArraySlice<UInt8>) -> Int? {
+            if s.isEmpty { return 0 }
+            let g = s.split(separator: 0x3A, omittingEmptySubsequences: false)
+            return g.allSatisfy({ (1...4).contains($0.count) && $0.allSatisfy(FrontDoorRules.isHexDigit) }) ? g.count : nil
+        }
+        // The first `::`; a second one leaves an empty group on one side,
+        // which groups() refuses.
+        var gap: Int?
+        for i in 0..<max(0, body.count - 1) where body[i] == 0x3A && body[i + 1] == 0x3A {
+            gap = i
+            break
+        }
+        guard let g = gap else { return groups(body[...]) == 8 }
+        guard let left = groups(body[..<g]), let right = groups(body[(g + 2)...]) else { return false }
+        return left + right <= 7
+    }
+
     /// `host[:port]` with no userinfo: the host is ASCII letters, digits and
-    /// `-` in non-empty dot-separated labels, or a bracketed IPv6 literal;
-    /// the port is 1–5 digits and at most 65535 (WHATWG refuses more).
+    /// `-` in non-empty dot-separated labels (a numeric last label only as a
+    /// whole dotted-quad IPv4 address), or a bracketed IPv6 literal of valid
+    /// structure; the port is 1–5 digits and at most 65535 (WHATWG refuses
+    /// more).
+    ///
+    /// Ruling T35-punycode: a label that starts `xn--` but is not valid
+    /// punycode passes here. The front door refuses it (WHATWG's IDNA step
+    /// fails), so the phone at worst signs something the front door refuses;
+    /// refusing every `xn--` label would refuse real IDN client_ids.
     static func isAuthority(_ a: [UInt8]) -> Bool {
         let host: ArraySlice<UInt8>
         let rest: ArraySlice<UInt8>
@@ -506,7 +564,7 @@ enum FrontDoorRules {
             // [ … ] then an optional :port
             guard let close = a.firstIndex(of: 0x5D) else { return false }
             let inner = a[1..<close]
-            guard inner.contains(0x3A), inner.allSatisfy({ isHexDigit($0) || $0 == 0x3A || $0 == 0x2E }) else { return false }
+            guard inner.contains(0x3A), inner.allSatisfy({ isHexDigit($0) || $0 == 0x3A || $0 == 0x2E }), isIPv6(Array(inner)) else { return false }
             host = a[...close]
             rest = a[(close + 1)...]
         } else {
@@ -515,6 +573,8 @@ enum FrontDoorRules {
             rest = a[colon...]
             guard !host.isEmpty, host.allSatisfy({ isLower($0) || isUpper($0) || isDigit($0) || $0 == 0x2D || $0 == 0x2E }),
                   !host.split(separator: 0x2E, omittingEmptySubsequences: false).contains(where: { $0.isEmpty }) else { return false }
+            let lastLabel = host.split(separator: 0x2E, omittingEmptySubsequences: false).last ?? host
+            guard !isNumericLabel(lastLabel) || isIPv4(host) else { return false }
         }
         guard !host.isEmpty else { return false }
         if rest.isEmpty { return true }
