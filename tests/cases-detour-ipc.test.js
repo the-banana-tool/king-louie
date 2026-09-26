@@ -75,6 +75,26 @@ describe('detour IPC', () => {
     assert.match(r.retryQuestionId, /^q-\d{4}$/);
   });
 
+  it('case:resolveDetour: a forced retry after SIMILAR_CASES leaves one routed detour, no open routing question and no pending blocker', async () => {
+    const { runtime, call } = setup();
+    const door = await activeCase(runtime, 'Rear door quotes', 'Three written quotes for the rear door');
+    await runtime.detours.propose(door.id, { summary: 'Book a piano tuner for the living room', reason: 'Unrelated errand', blocks: true });
+    const tuner = await runtime.createCase({ title: 'Book a piano tuner' });
+    const refused = await call(IPC.CASE_RESOLVE_DETOUR, { caseId: door.id, detourId: 'd-0001', optionId: 'new' });
+    assert.deepStrictEqual([refused.ok, refused.code], [false, 'SIMILAR_CASES']);
+    assert.match(refused.error, /A similar case exists: "Book a piano tuner"/);
+    assert.match(refused.retryQuestionId, /^q-\d{4}$/);
+    const forced = await call(IPC.CASE_RESOLVE_DETOUR, { caseId: door.id, detourId: 'd-0001', optionId: 'new', force: true });
+    assert.strictEqual(forced.ok, true);
+    assert.notStrictEqual(forced.linkedCaseId, tuner.id);
+    const listed = await call(IPC.CASE_DETOURS, { caseId: door.id });
+    assert.deepStrictEqual(listed.detours.map((d) => [d.id, d.status]), [['d-0001', 'created'], ['d-0002', 'superseded']]);
+    assert.deepStrictEqual(runtime.questions(door.id).open().filter((q) => q.payload?.type === 'detour'), []);
+    const related = runtime.getCase(door.id).related;
+    assert.ok(!related.some((x) => x.id.startsWith('pending:')), JSON.stringify(related));
+    assert.deepStrictEqual(related.map((x) => [x.id, x.relation]), [[forced.linkedCaseId, 'spawned'], [forced.linkedCaseId, 'blocked-by']]);
+  });
+
   it('case:detours returns busy without reconciling while another process holds the case', async () => {
     const { runtime, call } = setup();
     const door = await activeCase(runtime, 'Rear door quotes', 'Three written quotes for the rear door');

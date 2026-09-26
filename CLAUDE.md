@@ -323,6 +323,10 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage5-detours.md`.
   (never as a detour), with at most one `detour` journal line per turn.
   Routing answers are applied at turn start, from `case:detours` and after
   `case:resolveDetour`.
+  A failed resolution re-proposes the detour with `retryOf` set to the
+  chain's first id; once any detour of that chain is attached or created,
+  the others get a `superseded` row, their open routing question is closed
+  and their `pending:` blocker is removed.
 - Today a routing question is answered in the app, either from the case panel
   (`case:resolveDetour`) or by an agent session's `Detour.resolve`. Answering
   over MCP is designed but not yet wired up: `src/mcp/stdio-server.js`'s

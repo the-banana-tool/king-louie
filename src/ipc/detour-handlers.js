@@ -61,7 +61,9 @@ function registerDetourHandlers(ipcMain, context = {}) {
     }
     const r = await rt.detours.resolve(id, detourId, { optionId, by: 'in-app', title: newTitle, objective: newObjective, force: force === true });
     await rt.detours.reconcile(id);
-    if (!r.ok) return { ok: false, error: r.error, ...(r.retry?.questionId ? { retryQuestionId: r.retry.questionId } : {}) };
+    if (!r.ok) {
+      return { ok: false, error: r.error, ...(r.code ? { code: r.code } : {}), ...(r.retry?.questionId ? { retryQuestionId: r.retry.questionId } : {}) };
+    }
     return { ok: true, detour: r.detour, linkedCaseId: r.linkedCaseId, ...(r.existing ? { existing: true } : {}) };
   });
 

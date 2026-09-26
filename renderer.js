@@ -2186,7 +2186,7 @@ function renderCaseDetourCard(chat, d, { refresh, showError }) {
       showError('');
       const payload = { caseId: chat.caseId, detourId: d.id, optionId: o.optionId };
       let result = await window.electron.cases.resolveDetour(payload);
-      if (!result?.ok && o.optionId === 'new' && /similar case exists/i.test(result?.error || '')
+      if (!result?.ok && o.optionId === 'new' && result?.code === 'SIMILAR_CASES'
         && await showConfirmDialog(`${result.error} Create the new case anyway?`)) {
         result = await window.electron.cases.resolveDetour({ ...payload, force: true });
       }

@@ -219,9 +219,35 @@ describe('DetourRouter.resolve', () => {
     assert.ok(!retryQ.options.some((o) => o.id === 'new'));
     const statuses = [...new DetourLog(door.dir).detours().values()].map((d) => [d.id, d.status]);
     assert.deepStrictEqual(statuses, [['d-0001', 'failed'], ['d-0002', 'proposed']]);
+    assert.strictEqual(new DetourLog(door.dir).detours().get('d-0002').proposal.retryOf, 'd-0001');
     const forced = await router.resolve(door.id, 'd-0001', { optionId: 'new', by: 'in-app', force: true });
     assert.strictEqual(forced.ok, true);
     assert.strictEqual(rt.getCase(forced.linkedCaseId).title, 'Book a piano tuner for the living room');
+    const after = [...new DetourLog(door.dir).detours().values()].map((d) => [d.id, d.status]);
+    assert.deepStrictEqual(after, [['d-0001', 'created'], ['d-0002', 'superseded']]);
+    const closed = rt.questions(door.id).get(r.retry.questionId);
+    assert.deepStrictEqual([closed.closed.by, closed.closed.reason], ['system', 'superseded: d-0001 was created']);
+    assert.deepStrictEqual(rt.questions(door.id).open().filter((q) => q.payload?.type === 'detour'), []);
+    const again = await router.resolve(door.id, 'd-0002', { optionId: 'attach-1', by: 'in-app' });
+    assert.deepStrictEqual([again.ok, again.existing, again.detour.status], [true, true, 'superseded']);
+    assert.deepStrictEqual(rt.getCase(tuner.id).related || [], [], 'the retry never routes the work a second time');
+  });
+
+  it('a blocking retry that is attached supersedes the failed original and drops both pending blockers', async () => {
+    const { rt, router, door } = await doorAndPhone();
+    const p = await router.propose(door.id, { summary: 'Book a piano tuner for the living room', reason: 'Unrelated errand', blocks: true });
+    const tuner = await rt.createCase({ title: 'Book a piano tuner' });
+    await rt.answerQuestion(door.id, p.questionId, { channel: 'in-app', optionId: 'new' });
+    const r = await router.resolve(door.id, p.detour.id, { optionId: 'new', by: 'in-app' });
+    assert.strictEqual(r.code, 'SIMILAR_CASES');
+    await rt.answerQuestion(door.id, r.retry.questionId, { channel: 'in-app', optionId: 'attach-1' });
+    const attached = await router.resolve(door.id, 'd-0002', { optionId: 'attach-1', by: 'in-app' });
+    assert.deepStrictEqual([attached.ok, attached.linkedCaseId], [true, tuner.id]);
+    const after = [...new DetourLog(door.dir).detours().values()].map((d) => [d.id, d.status]);
+    assert.deepStrictEqual(after, [['d-0001', 'superseded'], ['d-0002', 'attached']]);
+    assert.deepStrictEqual(rt.getCase(door.id).related.map((x) => [x.id, x.relation]), [[tuner.id, 'blocked-by']]);
+    const forced = await router.resolve(door.id, 'd-0001', { optionId: 'new', by: 'in-app', force: true });
+    assert.deepStrictEqual([forced.ok, forced.existing], [true, true], 'the superseded original cannot create a second case');
   });
 
   it('decline drops a pending blocker and blocks the same proposal for 30 days', async () => {

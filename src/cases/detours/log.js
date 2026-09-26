@@ -10,9 +10,11 @@ const { createLogger } = require('../../logging');
 const log = createLogger('cases/detours');
 
 const ROW_TYPES = Object.freeze(['classification', 'proposal', 'released', 'resolution', 'incoming']);
-const RESOLUTION_STATUSES = Object.freeze(['attached', 'created', 'declined', 'failed', 'awaiting-mapping']);
+// `superseded`: another detour of the same retry chain (proposal `retryOf`)
+// was attached or created, so this one's work is already routed.
+const RESOLUTION_STATUSES = Object.freeze(['attached', 'created', 'declined', 'superseded', 'failed', 'awaiting-mapping']);
 // A detour with one of these is settled; resolve returns it as existing.
-const FINAL_STATUSES = Object.freeze(['attached', 'created', 'declined']);
+const FINAL_STATUSES = Object.freeze(['attached', 'created', 'declined', 'superseded']);
 
 class DetourLog {
   constructor(dir) {

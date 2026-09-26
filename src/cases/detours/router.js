@@ -175,7 +175,7 @@ class DetourRouter {
     return { ranked, seeAlso };
   }
 
-  async _propose(caseId, { summary, source, serves, blocks, reason, turn, extraAttach }) {
+  async _propose(caseId, { summary, source, serves, blocks, reason, turn, extraAttach, retryOf = null }) {
     const rt = this.runtime;
     const meta = rt.getCase(caseId);
     const log = new DetourLog(meta.dir);
@@ -239,7 +239,8 @@ class DetourRouter {
       questionId,
       held,
       candidates,
-      newCase
+      newCase,
+      ...(retryOf ? { retryOf } : {})
     });
     rt.records(meta.id).writeJournal('detour', [
       `# Detour ${detourId}`,
@@ -391,16 +392,20 @@ class DetourRouter {
       rt.removeRelation(meta.id, { id: `pending:${detourId}` });
       resolution(status, { targetCaseId, ...extra });
       rt.records(meta.id).writeJournal('detour', `# Detour ${detourId} resolved\n\nOption: ${optionId} (${by})\nOutcome: ${status}${targetCaseId ? `\nCase: ${targetCaseId}` : ''}${words}`, this.now());
+      if (status === 'attached' || status === 'created') this._supersedeChain(meta, log, d, status);
       rt._reindex(meta.id);
       rt._notify('case:changed', { caseId: meta.id, what: 'detours' });
       return { ok: true, detour: this._view(meta, log.detours().get(detourId)), linkedCaseId: targetCaseId };
     };
-    const retry = async (error, extraAttach = []) => {
+    // A retry proposal names the chain's first detour in `retryOf`, so a
+    // later attach or create of any of them settles the rest.
+    const retry = async (error, extraAttach = [], code = null) => {
       resolution('failed', { error });
       const again = await this._propose(meta.id, {
-        summary: p.summary, source: p.source, serves: p.serves, blocks: p.blocks, reason: p.reason, turn: null, extraAttach
+        summary: p.summary, source: p.source, serves: p.serves, blocks: p.blocks, reason: p.reason, turn: null, extraAttach,
+        retryOf: p.retryOf || detourId
       });
-      return { ok: false, error, retry: again };
+      return { ok: false, error, ...(code ? { code } : {}), retry: again };
     };
 
     // A case created before a later step failed; recorded on the failed row.
@@ -466,7 +471,7 @@ class DetourRouter {
             force: force === true
           });
         } catch (err) {
-          if (err && err.code === 'SIMILAR_CASES') return retry(err.message, err.similar.map((s) => s.caseId));
+          if (err && err.code === 'SIMILAR_CASES') return retry(err.message, err.similar.map((s) => s.caseId), 'SIMILAR_CASES');
           throw err;
         }
       }
@@ -485,6 +490,26 @@ class DetourRouter {
     }
 
     return { ok: false, error: `Option "${optionId}" is not one of ${detourId}'s options.` };
+  }
+
+  // The work of detour `d` is routed: every other unsettled detour of its
+  // retry chain gets a `superseded` row, its open routing question is closed
+  // and its pending blocker removed, so the owner is not asked again.
+  _supersedeChain(meta, log, d, status) {
+    const rt = this.runtime;
+    const root = d.proposal.retryOf || d.id;
+    const questions = rt.questions(meta.id);
+    for (const other of log.detours().values()) {
+      if (other.id === d.id || (other.id !== root && other.proposal.retryOf !== root)) continue;
+      if (other.last && FINAL_STATUSES.includes(other.last.status)) continue;
+      const q = other.questionId ? questions.get(other.questionId) : null;
+      if (q && !q.answer && !q.closed) questions.close(q.id, { reason: `superseded: ${d.id} was ${status}`, by: 'system' });
+      log.append({
+        type: 'resolution', id: other.id, at: this.now().toISOString(), optionId: null, by: 'system',
+        status: 'superseded', targetCaseId: null, error: null, supersededBy: d.id
+      });
+      rt.removeRelation(meta.id, { id: `pending:${other.id}` });
+    }
   }
 
   // ---- Reconcile ----
