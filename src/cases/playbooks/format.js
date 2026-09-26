@@ -52,6 +52,29 @@ const normalizeText = (text) => String(text ?? '').replace(/^﻿/, '').replace(/
 const isMap = (v) => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
 const isText = (v, max) => typeof v === 'string' && v.trim().length > 0 && v.length <= max;
 
+// A string already known to be a string, safe to show in full but not
+// necessarily short (an attacker-chosen YAML key or steps.md token can be
+// almost as long as the whole file). Truncated for message hygiene, never
+// for the value actually used.
+const truncateForMessage = (s) => (s.length > 40 ? `${s.slice(0, 40)}…` : s);
+
+// A value of unknown type read from parsed YAML (or elsewhere) that is
+// about to be named in an error message. Never calls String()/toString() or
+// otherwise stringifies it: a plain object or array's default stringify
+// recurses through the whole structure, and a value that reached here
+// having failed a `typeof === 'string'` check could — before parseYaml
+// started refusing YAML aliases — be a large, deeply shared structure whose
+// naive stringification is exactly the "expand a alias bomb into memory"
+// bug this guards against. A string is shown, truncated; every other type
+// is named only, never rendered.
+function describeValue(v) {
+  if (typeof v === 'string') return truncateForMessage(v);
+  if (v === null) return 'null';
+  if (Array.isArray(v)) return '<a list>';
+  if (typeof v === 'object') return '<a mapping>';
+  return `<${typeof v}>`;
+}
+
 function sha256(text) {
   return `sha256:${crypto.createHash('sha256').update(text, 'utf8').digest('hex')}`;
 }
@@ -119,9 +142,13 @@ function checkFact(fact, where, err) {
     err(`${where}: fact { subject, attr } is required`);
     return null;
   }
-  for (const k of Object.keys(fact)) if (k !== 'subject' && k !== 'attr') err(`${where}: fact has unknown key "${k}"`);
-  const ok = SLUG_RE.test(String(fact.subject ?? '')) && SLUG_RE.test(String(fact.attr ?? ''));
-  if (!ok || typeof fact.subject !== 'string' || typeof fact.attr !== 'string') {
+  for (const k of Object.keys(fact)) if (k !== 'subject' && k !== 'attr') err(`${where}: fact has unknown key "${truncateForMessage(k)}"`);
+  // typeof is checked before SLUG_RE.test ever sees the value: a non-string
+  // subject/attr (an object or array, potentially huge) must never reach a
+  // regex test or a template literal, both of which stringify their input.
+  const subjectOk = typeof fact.subject === 'string' && SLUG_RE.test(fact.subject);
+  const attrOk = typeof fact.attr === 'string' && SLUG_RE.test(fact.attr);
+  if (!subjectOk || !attrOk) {
     err(`${where}: fact subject and attr must be lowercase slugs`);
     return null;
   }
@@ -140,10 +167,10 @@ function checkOptions(options, where, err) {
       err(`${where}: option ids must be quoted strings, like id: "yes"`);
       return null;
     }
-    if (!OPTION_ID_RE.test(o.id)) err(`${where}: option id "${o.id}" must match ^[a-z0-9-]{1,16}$`);
-    if (seen.has(o.id)) err(`${where}: option id "${o.id}" is used twice`);
+    if (!OPTION_ID_RE.test(o.id)) err(`${where}: option id "${truncateForMessage(o.id)}" must match ^[a-z0-9-]{1,16}$`);
+    if (seen.has(o.id)) err(`${where}: option id "${truncateForMessage(o.id)}" is used twice`);
     seen.add(o.id);
-    if (!isText(o.label, 200)) err(`${where}: option "${o.id}" needs a label of 1 to 200 characters`);
+    if (!isText(o.label, 200)) err(`${where}: option "${truncateForMessage(o.id)}" needs a label of 1 to 200 characters`);
     out.push({ id: o.id, label: typeof o.label === 'string' ? o.label.trim() : '' });
   }
   return out;
@@ -160,14 +187,14 @@ function checkGating(list, executors, err) {
   const keys = new Set();
   const out = [];
   list.forEach((q, i) => {
-    const where = `gatingQuestions[${i}]${isMap(q) && typeof q.id === 'string' ? ` ("${q.id}")` : ''}`;
+    const where = `gatingQuestions[${i}]${isMap(q) && typeof q.id === 'string' ? ` ("${truncateForMessage(q.id)}")` : ''}`;
     if (!isMap(q)) {
       err(`${where}: must be a mapping`);
       return;
     }
-    for (const k of Object.keys(q)) if (!GATING_KEYS.includes(k)) err(`${where}: unknown key "${k}"`);
+    for (const k of Object.keys(q)) if (!GATING_KEYS.includes(k)) err(`${where}: unknown key "${truncateForMessage(k)}"`);
     if (typeof q.id !== 'string' || !SLUG_RE.test(q.id)) err(`${where}: id must be a lowercase slug`);
-    else if (ids.has(q.id)) err(`${where}: id "${q.id}" is used twice`);
+    else if (ids.has(q.id)) err(`${where}: id "${truncateForMessage(q.id)}" is used twice`);
     ids.add(q.id);
     if (!isText(q.text, LIMITS.questionText)) err(`${where}: text must be 1 to ${LIMITS.questionText} characters`);
     const fact = checkFact(q.fact, where, err);
@@ -221,7 +248,7 @@ function checkMateriality(m, err) {
   const out = { tell: [], ignore: [] };
   for (const k of Object.keys(m)) {
     if (k !== 'tell' && k !== 'ignore') {
-      err(`materialityDefaults: unknown key "${k}"`);
+      err(`materialityDefaults: unknown key "${truncateForMessage(k)}"`);
       continue;
     }
     if (!Array.isArray(m[k]) || !m[k].every((v) => isText(v, 100))) {
@@ -243,7 +270,7 @@ function checkBudget(b, err) {
   const out = {};
   for (const [k, v] of Object.entries(b)) {
     if (!BUDGET_KEYS.includes(k)) {
-      err(`budgetDefaults: unknown key "${k}" (allowed: ${BUDGET_KEYS.join(', ')})`);
+      err(`budgetDefaults: unknown key "${truncateForMessage(k)}" (allowed: ${BUDGET_KEYS.join(', ')})`);
     } else if (k === 'usd') {
       if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) err('budgetDefaults.usd must be a number greater than 0');
       else out[k] = v;
@@ -272,7 +299,7 @@ function parsePlaybookYaml(text, { dirName = null, knownCaseTypes = null } = {})
     err('playbook.yaml must be a mapping of keys to values');
     return { value: null, errors, warnings };
   }
-  for (const k of Object.keys(doc)) if (!TOP_KEYS.includes(k)) err(`unknown key "${k}"`);
+  for (const k of Object.keys(doc)) if (!TOP_KEYS.includes(k)) err(`unknown key "${truncateForMessage(k)}"`);
 
   if (typeof doc.name !== 'string' || !NAME_RE.test(doc.name)) {
     err('name must match ^[a-z0-9][a-z0-9-]{0,47}$');
@@ -301,7 +328,7 @@ function parsePlaybookYaml(text, { dirName = null, knownCaseTypes = null } = {})
   if (!Array.isArray(doc.executors) || doc.executors.length === 0) {
     err('executors must be a non-empty list of executor ids');
   } else {
-    for (const e of doc.executors) if (typeof e !== 'string' || !SLUG_RE.test(e)) err(`executors: "${e}" is not a lowercase slug`);
+    for (const e of doc.executors) if (typeof e !== 'string' || !SLUG_RE.test(e)) err(`executors: "${describeValue(e)}" is not a lowercase slug`);
     if (new Set(doc.executors).size !== doc.executors.length) err('executors: each id may appear once');
     executors = doc.executors.filter((e) => typeof e === 'string');
   }
@@ -340,7 +367,7 @@ function parseKeyList(value, key, step, err, line) {
     const subject = dot === -1 ? '' : item.slice(0, dot);
     const attr = dot === -1 ? '' : item.slice(dot + 1);
     if (!SLUG_RE.test(subject) || !SLUG_RE.test(attr)) {
-      err(line, `steps.md step "${step.id}": ${key} item "${item}" is not subject.attr`);
+      err(line, `steps.md step "${truncateForMessage(step.id)}": ${key} item "${truncateForMessage(item)}" is not subject.attr`);
     } else {
       out.push(`${subject}.${attr}`);
     }
@@ -362,15 +389,15 @@ function parseSteps(text, { executors = null } = {}) {
   const finish = () => {
     if (!current) return;
     const s = current;
-    if (!s.executor) err(s.line, `steps.md step "${s.id}": executor is required`);
+    if (!s.executor) err(s.line, `steps.md step "${truncateForMessage(s.id)}": executor is required`);
     else if (Array.isArray(executors) && !executors.includes(s.executor)) {
-      err(s.line, `steps.md step "${s.id}": executor "${s.executor}" is not in playbook.yaml executors`);
+      err(s.line, `steps.md step "${truncateForMessage(s.id)}": executor "${truncateForMessage(s.executor)}" is not in playbook.yaml executors`);
     }
-    if (!s.establishes.length) err(s.line, `steps.md step "${s.id}": establishes is required`);
-    if (s.title.length > LIMITS.title) err(s.line, `steps.md step "${s.id}": the title is longer than ${LIMITS.title} characters`);
+    if (!s.establishes.length) err(s.line, `steps.md step "${truncateForMessage(s.id)}": establishes is required`);
+    if (s.title.length > LIMITS.title) err(s.line, `steps.md step "${truncateForMessage(s.id)}": the title is longer than ${LIMITS.title} characters`);
     const prev = steps[steps.length - 1];
-    if (prev && s.n <= prev.n) err(s.line, `steps.md step "${s.id}": step numbers must increase (${prev.n} then ${s.n})`);
-    if (steps.some((o) => o.id === s.id)) err(s.line, `steps.md step "${s.id}": the id is used twice`);
+    if (prev && s.n <= prev.n) err(s.line, `steps.md step "${truncateForMessage(s.id)}": step numbers must increase (${prev.n} then ${s.n})`);
+    if (steps.some((o) => o.id === s.id)) err(s.line, `steps.md step "${truncateForMessage(s.id)}": the id is used twice`);
     steps.push({
       n: s.n,
       id: s.id,
@@ -399,7 +426,7 @@ function parseSteps(text, { executors = null } = {}) {
         return;
       }
       const id = m[3] !== undefined ? m[3] : slugify(m[2]);
-      if (m[3] !== undefined && !SLUG_RE.test(id)) err(no, `step id "${id}" must be a lowercase slug`);
+      if (m[3] !== undefined && !SLUG_RE.test(id)) err(no, `step id "${truncateForMessage(id)}" must be a lowercase slug`);
       current = { n: Number(m[1]), title: m[2].trim(), id, executor: null, establishes: [], needs: [], optional: false, notes: [], line: no, seen: new Set() };
       phase = 'await-bullets';
       return;
@@ -416,21 +443,21 @@ function parseSteps(text, { executors = null } = {}) {
       if (/^- /.test(line)) {
         const b = /^- ([A-Za-z][A-Za-z0-9-]*):\s*(.*)$/.exec(line);
         if (!b) {
-          err(no, `steps.md step "${current.id}": a bullet is "- <key>: <value>"`);
+          err(no, `steps.md step "${truncateForMessage(current.id)}": a bullet is "- <key>: <value>"`);
           return;
         }
         const [, key, value] = b;
         if (!STEP_KEYS.includes(key)) {
-          err(no, `steps.md step "${current.id}": unknown key "${key}"`);
+          err(no, `steps.md step "${truncateForMessage(current.id)}": unknown key "${truncateForMessage(key)}"`);
           return;
         }
-        if (current.seen.has(key)) err(no, `steps.md step "${current.id}": "${key}" is given twice`);
+        if (current.seen.has(key)) err(no, `steps.md step "${truncateForMessage(current.id)}": "${key}" is given twice`);
         current.seen.add(key);
         if (key === 'executor') {
-          if (!SLUG_RE.test(value.trim())) err(no, `steps.md step "${current.id}": executor "${value.trim()}" is not an executor id`);
+          if (!SLUG_RE.test(value.trim())) err(no, `steps.md step "${truncateForMessage(current.id)}": executor "${truncateForMessage(value.trim())}" is not an executor id`);
           else current.executor = value.trim();
         } else if (key === 'optional') {
-          if (value.trim() !== 'true' && value.trim() !== 'false') err(no, `steps.md step "${current.id}": optional must be true or false`);
+          if (value.trim() !== 'true' && value.trim() !== 'false') err(no, `steps.md step "${truncateForMessage(current.id)}": optional must be true or false`);
           current.optional = value.trim() === 'true';
         } else {
           current[key] = parseKeyList(value, key, current, err, no);
@@ -462,7 +489,7 @@ function parseBriefRules(text, { executors = null } = {}) {
     if (h) {
       const id = h[1].trim();
       if (!SLUG_RE.test(id) || (Array.isArray(executors) && !executors.includes(id))) {
-        err(no, `"## ${id}" is not one of playbook.yaml executors`);
+        err(no, `"## ${truncateForMessage(id)}" is not one of playbook.yaml executors`);
         section = '__invalid__';
         return;
       }

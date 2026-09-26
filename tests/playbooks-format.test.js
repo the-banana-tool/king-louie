@@ -57,6 +57,17 @@ describe('parsePlaybookYaml', () => {
     assert.match(r.warnings[0].message, /caseType "outreach" cannot be checked/);
   });
 
+  it('never stringifies a non-string executor entry into the error message', () => {
+    // A nested object/array here must be named, not rendered: a naive
+    // `${e}` template would call the value's own toString(), which for a
+    // large or (pre alias-refusal) shared nested structure is itself the
+    // "expand a bomb into a message" bug.
+    const nested = withYaml(/executors: .*/, 'executors: [web, { a: { b: [1, 2, 3] } }]');
+    const msgs = yamlErrors(nested);
+    assert.match(msgs.join('\n'), /executors: "<a mapping>" is not a lowercase slug/);
+    assert.ok(msgs.join('\n').length < 500, 'the message must stay small regardless of the nested value');
+  });
+
   it('checks gating questions', () => {
     const q = (extra) => [
       'name: land-sale', 'version: "1.0.0"', 'caseType: general', 'executors: [web, owner]', 'gatingQuestions:',
