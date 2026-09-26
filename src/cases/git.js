@@ -211,11 +211,13 @@ function describeError(err, cwd, args, timeoutMs) {
 // it: filter/diff/merge drivers, an external diff, credential helpers, URL
 // rewrites, transport switches, remote upload/receive-pack programs, gpg
 // programs, the pager/editor/askpass/proxy/ssh/sequence-editor/alternate-refs
-// commands, and per-command pagers. A case repo (an imported one included)
+// commands, per-command pagers, and submodule update modes (a "!command"
+// value runs that command on `git submodule update`; KL never runs one, but
+// an owner might in a case repo). A case repo (an imported one included)
 // or a fetched package may carry any of these in .git/config, in
 // config.worktree when the repo sets extensions.worktreeConfig, or in a
 // checked-out submodule's config, so git is not run in such a repo.
-const UNSAFE_CONFIG_RE = '^(filter|diff|merge)\\..+\\.(clean|smudge|process|command|textconv|driver)$|^diff\\.external$|^credential\\.|^url\\.|^protocol\\.|^core\\.(pager|editor|askpass|gitproxy|sshcommand)$|^remote\\..+\\.(uploadpack|receivepack)$|^gpg\\.|^sequence\\.editor$|^core\\.alternaterefscommand$|^pager\\.';
+const UNSAFE_CONFIG_RE = '^(filter|diff|merge)\\..+\\.(clean|smudge|process|command|textconv|driver)$|^diff\\.external$|^credential\\.|^url\\.|^protocol\\.|^core\\.(pager|editor|askpass|gitproxy|sshcommand)$|^remote\\..+\\.(uploadpack|receivepack)$|^gpg\\.|^sequence\\.editor$|^core\\.alternaterefscommand$|^pager\\.|^submodule\\..+\\.update$';
 const unsafeQuery = (scope) => ['config', scope, '--includes', '--name-only', '--get-regexp', UNSAFE_CONFIG_RE];
 const WORKTREE_FLAG_QUERY = ['config', '--local', '--type=bool', '--get', 'extensions.worktreeConfig'];
 const GIT_DIRS_QUERY = ['rev-parse', '--absolute-git-dir', '--git-common-dir', '--show-toplevel'];
@@ -602,24 +604,69 @@ function checkedHooksDir(dir) {
   return dir;
 }
 
+// Kills `child` and every process it started. git runs transports and
+// helpers (git-remote-https, ssh) as children, and on Windows the git on
+// PATH is often a launcher for the real one: killing only the top process
+// leaves those running, holding the network connection and the pipes.
+function killProcessTree(child) {
+  const pid = child.pid;
+  if (!pid) return;
+  const killTop = () => {
+    try { child.kill('SIGKILL'); } catch { /* already gone */ }
+  };
+  if (process.platform === 'win32') {
+    const taskkill = process.env.SystemRoot ? path.join(process.env.SystemRoot, 'System32', 'taskkill.exe') : 'taskkill';
+    // /T walks the tree from the live parent, so the parent is killed by it too.
+    execFile(taskkill, ['/pid', String(pid), '/T', '/F'], { windowsHide: true }, killTop);
+    return;
+  }
+  try {
+    process.kill(-pid, 'SIGKILL'); // the child leads its own process group (detached)
+  } catch {
+    killTop();
+  }
+}
+
+// execFile whose timeout kills the whole process tree (killProcessTree),
+// not only git. Resolves { stdout, stderr } like the promisified execFile;
+// a timed-out run rejects with `killed: true` (describeError: GIT_TIMEOUT).
+function runKillingTree(argv, options, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let timedOut = false;
+    let timer = null;
+    const child = execFile('git', argv, { ...options, detached: process.platform !== 'win32' }, (err, stdout, stderr) => {
+      clearTimeout(timer);
+      if (!err) {
+        resolve({ stdout, stderr });
+        return;
+      }
+      err.stdout = stdout;
+      err.stderr = stderr;
+      if (timedOut) err.killed = true;
+      reject(err);
+    });
+    timer = setTimeout(() => {
+      timedOut = true;
+      killProcessTree(child);
+    }, timeoutMs);
+  });
+}
+
 // Without a hooksDir, the checked empty hooks dir outside every case is used,
 // so no call ever creates a .kl/ anywhere. Caller input is checked first
 // (checkCallerInput), then, in an existing repository, the repo's own config
-// (checkRepoConfig).
-async function runGit(cwd, args, { env = {}, timeoutMs = DEFAULT_TIMEOUT_MS, hooksDir = null, allowFile = false } = {}) {
+// (checkRepoConfig). With `killTree`, the timeout kills every process git
+// started as well (fetches from remotes; runKillingTree).
+async function runGit(cwd, args, { env = {}, timeoutMs = DEFAULT_TIMEOUT_MS, hooksDir = null, allowFile = false, killTree = false } = {}) {
   checkCallerInput(args, env);
   const hooks = checkedHooksDir(hooksDir);
   const pin = pinFor(await checkRepoConfig(cwd, hooks), args);
   const argv = hardenedGitArgs(args, { hooksDir: hooks, allowFile });
+  const options = { cwd, env: gitEnv(env, { allowFile, pin }), windowsHide: true, maxBuffer: MAX_BUFFER };
   try {
-    const { stdout } = await run('git', argv, {
-      cwd,
-      env: gitEnv(env, { allowFile, pin }),
-      windowsHide: true,
-      maxBuffer: MAX_BUFFER,
-      timeout: timeoutMs || 0,
-      killSignal: 'SIGKILL'
-    });
+    const { stdout } = killTree && timeoutMs
+      ? await runKillingTree(argv, options, timeoutMs)
+      : await run('git', argv, { ...options, timeout: timeoutMs || 0, killSignal: 'SIGKILL' });
     return stdout;
   } catch (err) {
     throw describeError(err, cwd, args, timeoutMs);

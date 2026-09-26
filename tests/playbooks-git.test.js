@@ -148,6 +148,49 @@ describe('runGit and runGitSync', () => {
     assert.strictEqual(fs.existsSync(marker), false, 'the filter never ran');
   });
 
+  it('refuses a repo whose config sets submodule.<name>.update (a "!command" update)', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const dir = tmp();
+    await git.runGit(dir, ['init', '-q']);
+    const marker = path.join(dir, 'update-ran');
+    await git.runGit(dir, ['config', 'submodule.x.update', `!touch "${marker.replace(/\\/g, '/')}"`]);
+    await assert.rejects(git.runGit(dir, ['status']), (err) => {
+      assert.strictEqual(err.code, 'GIT_UNSAFE_CONFIG');
+      assert.match(err.message, /submodule.x.update/);
+      return true;
+    });
+    assert.throws(() => git.runGitSync(dir, ['status']), (err) => err.code === 'GIT_UNSAFE_CONFIG');
+    assert.strictEqual(fs.existsSync(marker), false);
+  });
+
+  it('with killTree, a timeout kills the whole process tree, so a hung transport helper dies with git', { timeout: 30000 }, async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const net = require('net');
+    const sockets = [];
+    let closed = 0;
+    const server = net.createServer((s) => {
+      sockets.push(s);
+      s.on('error', () => {});
+      s.on('close', () => { closed += 1; });
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const url = `https://127.0.0.1:${server.address().port}/x.git`;
+    const noProxy = { NO_PROXY: '*', no_proxy: '*', HTTPS_PROXY: '', https_proxy: '', ALL_PROXY: '', all_proxy: '' };
+    try {
+      await assert.rejects(
+        git.runGit(tmp(), ['ls-remote', '--', url], { timeoutMs: 3000, killTree: true, env: noProxy }),
+        (err) => err.code === 'GIT_TIMEOUT'
+      );
+      assert.ok(sockets.length >= 1, 'git connected to the server');
+      const until = Date.now() + 10000;
+      while (closed < sockets.length && Date.now() < until) await new Promise((r) => setTimeout(r, 50));
+      assert.strictEqual(closed, sockets.length, 'the transport helper holding the connection was killed');
+    } finally {
+      for (const s of sockets) s.destroy();
+      server.close();
+    }
+  });
+
   it('refuses a case repo whose config sets diff.external, through git() too', async (t) => {
     if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
     const dir = tmp();
