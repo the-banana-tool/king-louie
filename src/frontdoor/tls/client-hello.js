@@ -73,13 +73,14 @@ function handshakeBytes(buf) {
   return { bytes: parts.length === 1 ? parts[0] : Buffer.concat(parts), complete };
 }
 
-// A DNS host name: printable ASCII without spaces, no empty label (so no
-// leading, doubled or trailing dot), returned lower-cased.
+// A DNS host name of LDH labels (Ruling T15-ldh): letters, digits and
+// hyphens, 1–63 per label, no hyphen at either end of a label, 253 in all.
+// No empty label, so no leading, doubled or trailing dot. Lower-cased.
+const LDH_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 function hostName(value) {
-  if (value.length === 0 || value.length > 255) bad('host name length');
-  for (const b of value) if (b < 0x21 || b > 0x7e) bad('host name is not printable ASCII');
-  const name = value.toString('ascii').toLowerCase();
-  if (name.split('.').some((label) => label.length === 0)) bad('host name has an empty label');
+  if (value.length === 0 || value.length > 253) bad('host name length');
+  const name = value.toString('latin1').toLowerCase();
+  if (!name.split('.').every((label) => LDH_LABEL.test(label))) bad('host name is not LDH labels');
   return name;
 }
 
@@ -118,7 +119,7 @@ function parseAlpn(data) {
 
 function parseClientHello(buf) {
   if (!Buffer.isBuffer(buf)) bad('not a buffer');
-  if (buf.length > MAX_HELLO_BYTES + 5 * MAX_HELLO_RECORDS) bad('over 16 KiB');
+  if (buf.length > MAX_HELLO_BYTES + 5 * MAX_HELLO_RECORDS) bad(`input over ${MAX_HELLO_BYTES + 5 * MAX_HELLO_RECORDS} bytes`);
   const { bytes, complete } = handshakeBytes(buf);
   if (bytes.length < 4) return { incomplete: true };
   if (bytes[0] !== HANDSHAKE_CLIENT_HELLO) bad(`handshake type ${bytes[0]} is not a ClientHello`);
@@ -171,8 +172,9 @@ function peekError(code, message) {
 // destroys the socket (the caller does). Every path removes its listeners
 // and clears its timer. Bytes collect in one growing buffer, and the parser
 // runs only when a record header or a whole record has come in, so a hello
-// dribbled a byte at a time is parsed at most twice per record.
-function peekClientHello(socket, { maxBytes = MAX_HELLO_BYTES, timeoutMs = HELLO_TIMEOUT_MS } = {}) {
+// dribbled a byte at a time is parsed at most twice per record. `parse` is a
+// test seam for counting parser calls.
+function peekClientHello(socket, { maxBytes = MAX_HELLO_BYTES, timeoutMs = HELLO_TIMEOUT_MS, parse = parseClientHello } = {}) {
   return new Promise((resolve, reject) => {
     if (socket.destroyed) {
       reject(peekError('closed', 'closed before a ClientHello arrived'));
@@ -219,7 +221,7 @@ function peekClientHello(socket, { maxBytes = MAX_HELLO_BYTES, timeoutMs = HELLO
       const buffer = buf.subarray(0, size);
       let result;
       try {
-        result = parseClientHello(buffer);
+        result = parse(buffer);
       } catch (err) {
         finish(err);
         return;

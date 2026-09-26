@@ -173,6 +173,71 @@ describe('parseClientHello', () => {
     assert.deepEqual(parseClientHello(m).alpn, ['h2']);
   });
 
+  // A crafted ClientHello in one record; each field can be bent.
+  const u8 = (n) => Buffer.from([n]);
+  const u16 = (n) => Buffer.from([(n >> 8) & 0xff, n & 0xff]);
+  const sni = (names, listDelta = 0) => {
+    const entries = Buffer.concat(names.map((n) => Buffer.concat([u8(0), u16(n.length), Buffer.from(n, 'latin1')])));
+    return Buffer.concat([u16(entries.length + listDelta), entries]);
+  };
+  const alpnExt = (protos, listDelta = 0) => {
+    const entries = Buffer.concat(protos.map((p) => Buffer.concat([u8(p.length), Buffer.from(p, 'latin1')])));
+    return Buffer.concat([u16(entries.length + listDelta), entries]);
+  };
+  const craft = ({ sessionId = Buffer.alloc(0), suites = Buffer.from([0x13, 0x01]), comp = Buffer.from([0x00]), exts = [], extLenDelta = 0, bodyLen } = {}) => {
+    const extBody = Buffer.concat(exts.map(([type, data]) => Buffer.concat([u16(type), u16(data.length), data])));
+    const body = Buffer.concat([Buffer.from([0x03, 0x03]), Buffer.alloc(32), u8(sessionId.length), sessionId, u16(suites.length), suites,
+      u8(comp.length), comp, u16(extBody.length + extLenDelta), extBody]);
+    const n = bodyLen === undefined ? body.length : bodyLen;
+    const hs = Buffer.concat([Buffer.from([0x01, n >> 16, (n >> 8) & 0xff, n & 0xff]), body]);
+    return Buffer.concat([Buffer.from([0x16, 0x03, 0x01]), u16(hs.length), hs]);
+  };
+  const label63 = 'a'.repeat(63);
+
+  it('a crafted hello parses (the builder the next tests bend)', () => {
+    assert.deepEqual(parseClientHello(craft({ exts: [[0, sni(['A-b.Example.com'])], [16, alpnExt(['h2'])]] })), { serverName: 'a-b.example.com', alpn: ['h2'] });
+    const name253 = `${label63}.${label63}.${label63}.${'a'.repeat(61)}`;
+    assert.equal(parseClientHello(craft({ exts: [[0, sni([name253])]] })).serverName, name253);
+  });
+
+  it('refuses two server_name extensions, two ALPN extensions, and two host names in one list', () => {
+    assert.throws(() => parseClientHello(craft({ exts: [[0, sni(['a.example.com'])], [0, sni(['b.example.com'])]] })), /extension 0 twice/);
+    assert.throws(() => parseClientHello(craft({ exts: [[16, alpnExt(['h2'])], [16, alpnExt(['http/1.1'])]] })), /extension 16 twice/);
+    assert.throws(() => parseClientHello(craft({ exts: [[0, sni(['a.example.com', 'b.example.com'])]] })), /two host names/);
+  });
+
+  it('each bounds check refuses its own crafted mutation', () => {
+    const cases = [
+      ['session id over 32', craft({ sessionId: Buffer.alloc(33) }), /session id length/],
+      ['SNI list length', craft({ exts: [[0, sni(['a.example.com'], 1)]] }), /server_name list length/],
+      ['handshake over 16 KiB', Buffer.concat([Buffer.from([0x16, 0x03, 0x01, 0x00, 0x04, 0x01, 0x00, 0x3f, 0xff, 0x16, 0x03, 0x01, 0x40, 0x00]), Buffer.alloc(0x4000)]), /handshake over 16 KiB/],
+      ['extensions length', craft({ exts: [[0, sni(['a.example.com'])]], extLenDelta: -1 }), /extensions length/],
+      ['raw buffer cap', Buffer.concat([hello, Buffer.alloc(MAX_HELLO_BYTES + 5 * 64)]), /input over 16704 bytes/],
+      ['ALPN list length', craft({ exts: [[16, alpnExt(['h2'], 1)]] }), /ALPN list length/],
+      ['ALPN list empty', craft({ exts: [[16, u16(0)]] }), /ALPN list length/],
+      ['empty ALPN protocol', craft({ exts: [[16, Buffer.from([0x00, 0x03, 0x00, 0x01, 0x61])]] }), /empty ALPN protocol/],
+      ['ClientHello body under 38', craft({ bodyLen: 37 }), /ClientHello length 37/],
+      ['ClientHello body over 16 KiB', Buffer.from([0x16, 0x03, 0x01, 0x00, 0x04, 0x01, 0x00, 0x40, 0x01]), /ClientHello length 16385/],
+      ['cipher suites odd', craft({ suites: Buffer.from([0x13, 0x01, 0x13]) }), /cipher suites length/],
+      ['cipher suites empty', craft({ suites: Buffer.alloc(0) }), /cipher suites length/],
+      ['no compression method', craft({ comp: Buffer.alloc(0) }), /compression methods length/],
+      ['host name over 253', craft({ exts: [[0, sni([`${label63}.${label63}.${label63}.${'a'.repeat(62)}`])]] }), /host name length/],
+      ['record length over 16 KiB', Buffer.from([0x16, 0x03, 0x01, 0x40, 0x01, 0x01]), /record length 16385/]
+    ];
+    for (const [label, buf, message] of cases) {
+      assert.throws(() => parseClientHello(buf), (err) => err instanceof ClientHelloError && message.test(err.message), label);
+    }
+  });
+
+  it('accepts only LDH host names (Ruling T15-ldh)', () => {
+    for (const name of ['host:443', '*', '*.example.com', '%00', `${'a'.repeat(64)}.example.com`, '-a.example.com', 'a-.example.com', 'a_b.example.com', 'a.example.com.']) {
+      assert.throws(() => parseClientHello(craft({ exts: [[0, sni([name])]] })), (err) => err instanceof ClientHelloError && err.code === 'malformed', name);
+    }
+    for (const name of ['a', 'x1.example.com', 'a-b-c.example.com', `${label63}.example.com`, '1.2.3.4']) {
+      assert.equal(parseClientHello(craft({ exts: [[0, sni([name])]] })).serverName, name);
+    }
+  });
+
   it('survives 5 000 random buffers behind a handshake record header', () => {
     for (let i = 0; i < 5000; i += 1) {
       const m = Buffer.concat([Buffer.from([0x16, 0x03, crypto.randomInt(4)]), crypto.randomBytes(crypto.randomInt(600))]);
@@ -309,6 +374,77 @@ describe('peekClientHello', () => {
     // Re-parsing every chunk costs whole seconds here; parsing only when a
     // record header or a whole record arrives costs a few milliseconds.
     assert.ok(ms < 500, `took ${ms} ms`);
+  });
+
+  it('a 64-record hello fed one byte at a time is parsed at most twice per record (Ruling T15-records)', async () => {
+    const body = reframe(hello, 1).subarray(5);
+    const parts = [];
+    for (let i = 0; i < 64; i += 1) {
+      const frag = body.subarray(Math.floor((i * body.length) / 64), Math.floor(((i + 1) * body.length) / 64));
+      parts.push(Buffer.from([0x16, 0x03, 0x01, frag.length >> 8, frag.length & 0xff]), frag);
+    }
+    const wire = Buffer.concat(parts);
+    let calls = 0;
+    const s = new FakeSocket();
+    const p = peekClientHello(s, { timeoutMs: 60000, parse: (b) => { calls += 1; return parseClientHello(b); } });
+    for (let i = 0; i < wire.length; i += 1) s.emit('data', wire.subarray(i, i + 1));
+    const { hello: parsed, buffer } = await p;
+    assert.equal(parsed.serverName, 'mcp.kl.example.com');
+    assert.deepEqual(buffer, wire);
+    assert.ok(calls <= 64 * 2 + 2, `${calls} parser calls for ${wire.length} one-byte chunks`);
+  });
+
+  it('a real TLSSocket behind the peek completes the handshake from a multi-record hello sent in many chunks', async () => {
+    const { NodeIdentity } = require('../src/mesh/node-identity');
+    const identity = new NodeIdentity({ nodeName: 'hello-test' });
+    const secureContext = tls.createSecureContext({ cert: identity.tlsCert, key: identity.tlsKey });
+    let seen = null;
+    const server = net.createServer(async (socket) => {
+      try {
+        const { hello: parsed } = await peekClientHello(socket, { timeoutMs: 5000 });
+        seen = parsed;
+        const t = new tls.TLSSocket(socket, { isServer: true, secureContext, ALPNProtocols: ['http/1.1'] });
+        t.on('error', () => {});
+        t.on('secure', () => t.end('hello from behind the peek'));
+      } catch {
+        socket.destroy();
+      }
+    });
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    // A proxy that re-frames the client's hello into 3 records and sends it
+    // in 37-byte TCP writes, then pipes everything else both ways.
+    const proxy = net.createServer((inbound) => {
+      const outbound = net.connect(server.address().port, '127.0.0.1');
+      outbound.on('error', () => {});
+      inbound.on('error', () => {});
+      const chunks = [];
+      const onData = async (d) => {
+        chunks.push(d);
+        const all = Buffer.concat(chunks);
+        if (parseClientHello(all).incomplete) return;
+        inbound.removeListener('data', onData);
+        inbound.pause();
+        const wire = reframe(all, 3);
+        for (let i = 0; i < wire.length; i += 37) {
+          outbound.write(wire.subarray(i, i + 37));
+          await new Promise((r) => setTimeout(r, 1));
+        }
+        inbound.pipe(outbound);
+        outbound.pipe(inbound);
+      };
+      inbound.on('data', onData);
+    });
+    await new Promise((r) => proxy.listen(0, '127.0.0.1', r));
+    const client = tls.connect({ host: '127.0.0.1', port: proxy.address().port, servername: 'mcp.kl.example.com', ALPNProtocols: ['http/1.1'], rejectUnauthorized: false });
+    const received = [];
+    client.on('data', (d) => received.push(d));
+    await new Promise((resolve, reject) => { client.once('end', resolve); client.once('error', reject); });
+    assert.equal(client.alpnProtocol, 'http/1.1');
+    assert.equal(Buffer.concat(received).toString(), 'hello from behind the peek');
+    assert.deepEqual(seen, { serverName: 'mcp.kl.example.com', alpn: ['http/1.1'] });
+    client.destroy();
+    proxy.close();
+    server.close();
   });
 
   it('never destroys the socket itself', async () => {
