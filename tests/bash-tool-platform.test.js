@@ -127,6 +127,12 @@ describe('Bash tool – platform-aware command validation', () => {
         assertNotFlaggedUnavailable(result, 'pwd should be valid in sandbox (POSIX) mode');
       } finally {
         BashTool.sandboxExecutor.isDockerAvailable = originalIsDockerAvailable;
+        // Mocking isDockerAvailable still lets the rest of execute() talk to
+        // the real Docker daemon, so this test actually starts a real
+        // `debian:bookworm-slim` container (`tail -f /dev/null`, `--rm` on
+        // stop but never stopped). Without this, every run of this file left
+        // one more container behind forever, on pass, failure, or timeout.
+        await BashTool.sandboxExecutor.cleanup();
       }
     });
 
