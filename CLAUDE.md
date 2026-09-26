@@ -315,8 +315,10 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage4-channels.md`.
   sender; email must come from the owner's address, and have either an
   authenticated pass (the topmost `Authentication-Results` header) or the
   thread's `[KL-<token>]` token (`email-channel.js`); SMS needs the owner
-  number plus `#TOKEN`; voice and SMS both go through the relay; the phone
-  app needs a device-signed envelope verified on the node. An explicit
+  number plus `#TOKEN`; voice and SMS both go through the relay, and voice
+  DTMF digits are owner-proven only by where the call was placed (the owner
+  number), not by anything the caller proves; the phone app needs a
+  device-signed envelope verified on the node. An explicit
   `#token` in a reply always beats reply-to/thread correlation, so a stray
   in-reply-to match can't steal an answer meant for a different question.
   Tokens are never rendered on a delivery-only channel such as ntfy
@@ -326,7 +328,8 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage4-channels.md`.
   one stands, on the channel that gave the second answer
   (`contact.js` `_conflict`/`conflictFact`).
 - Owner decision (M22): a question C2 marks `mcpAnswerable:false` — a
-  budget-grant, a direction question, or a commit-failed question — is only
+  budget-grant, a budget-daily, a direction question, or a commit-failed
+  question — is only
   answered in the app or from the owner's paired phone. Every other channel
   (Telegram, Discord, email, SMS, voice) gets "Answer this in the app"
   instead of options or buttons; approvals follow the same rule and are
@@ -334,6 +337,8 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage4-channels.md`.
   rather than queuing them.
 - Case code that sends to a channel uses `ContactRouter.sendExternal`, which
   runs C3's outbound gate for anyone but the owner and sends `rendered`.
+  Until C3's `gateLeaves` exists (`src/cases/gates.js`), every non-owner
+  send is refused.
 - Service mode: the owner identity and channel addresses come only from the
   admin `service.json` `contact` block (`contact` joins `ADMIN_ONLY_KEYS`);
   a data-dir `settings.contact` or a `channels.<ch>.contactOwnerUserId` is
@@ -342,17 +347,32 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage4-channels.md`.
   `contact.` and hides them from `list`. A contact host that fails to start
   never fails `core.start()` — it logs the failure, leaves contact off, and
   (outside service mode) raises one owner-visible warning; the rest of the
-  app keeps running. A host that is not currently holding the cases-root
-  lease (a passive instance) refuses an inbound relay push with 503 rather
-  than acting on it.
+  app keeps running; that includes a contact host that throws while being
+  built, and an unreadable `presence.json` just starts presence empty. A
+  host that is not currently holding the cases-root lease (a passive
+  instance) refuses an inbound relay push with 503 and does not poll relay
+  events or move the relay cursor, so the events wait for the active host
+  (which dedupes by event id); the Questions section names the lease holder.
+- Replies can trigger acks, and a spoofed owner number or From address is
+  enough for SMS and email, so acks are budgeted in the router: at most one
+  refusal ack (unknown token, unparsed, refused) per channel and sender per
+  10 minutes, and 20 acks per channel per hour; the rest are dropped with a
+  debug log. Email refuses `contact.email.from` equal to the owner address
+  (it would read its own mail), marks everything it sends `Auto-Submitted:
+  auto-generated` with a `<kl-…@from-domain>` Message-ID, and drops its own
+  mail and RFC 3834 auto-replies.
 - Known gaps, carried forward as PR notes rather than fixed here: a forged
   email DSN can trigger an early bounce escalation; the stage-1 gap that a
   local Bash command can rewrite `facts.jsonl` directly extends to a forged
   `inbox.jsonl` line for an ordinary (non-approval) question, which grants
-  no more than that same class of local write access already does; and a
-  non-owner reply that resolves a live batch token is allowed to answer that
-  one batch (knowing a 30-bit token is treated as equivalent to knowing the
-  thread), which is a narrow oracle scoped to a single already-live question.
+  no more than that same class of local write access already does; an
+  unauthenticated email from the owner's address (From is spoofable) whose
+  text carries any live question or batch token answers that question or
+  batch, not only its own thread's (knowing a live 30-bit token is treated
+  as equivalent to knowing the thread; tokens are only ever sent to the
+  owner); and an owner out-of-office reply that arrives through the relay is
+  not recognised as automatic, because the relay `inbound` event (spec §4.5)
+  carries no auto-submitted flag.
 - Tests use `tests/helpers/loopback-channel.js` and the fake relay/SMTP
   helpers, never a real network; `KING_LOUIE_CONTACT_TICK_MS` shortens the
   tick.

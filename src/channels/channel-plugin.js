@@ -22,7 +22,10 @@ class ContactUnsupportedError extends ContactDeliveryError {
 
 // Set in a plain send()'s options only by src/cases/contact.js after the
 // outbound gate passed (sendExternal). The contact adapters refuse a
-// non-owner target without it.
+// non-owner target without it. It is exported (the adapters must compare
+// against it), so any in-process module could import it; that is not a
+// bypass because the model cannot `require` code, only call tools, and no
+// tool passes send() options through (final review M10).
 const GATE_PASSED = Symbol('kl.contact.gatePassed');
 
 class ChannelPlugin {
