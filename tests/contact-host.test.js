@@ -445,3 +445,62 @@ describe('createContactHost: presence status names the lease holder (final revie
     }
   });
 });
+
+// C3 merge (C4 final review M9): every sendExternal test in
+// contact-router.test.js stubs getGate. These pin the real wiring: a host
+// built without a getGate override gates a non-owner send through C3's
+// gateLeaves (src/cases/gates.js) and sends its rendered text.
+describe('createContactHost: sendExternal uses the real outbound gate (C3 merge, M9)', () => {
+  const gates = require('../src/cases/gates');
+  const { defaultGetGate } = require('../src/cases/contact-host');
+
+  it('defaultGetGate() returns the gates module that exports gateLeaves', () => {
+    const gate = defaultGetGate();
+    assert.strictEqual(gate, gates);
+    assert.strictEqual(typeof gate.gateLeaves, 'function');
+  });
+
+  it('a non-owner send goes through gateLeaves: a reference renders, a private value is blocked', async () => {
+    const extra = new LoopbackChannel({ id: 'loop-extra', owner: 'owner-1' });
+    const t = makeHost({ settings: {}, extraAdapters: { 'loop-extra': extra } });
+    const real = gates.gateLeaves;
+    const calls = [];
+    gates.gateLeaves = (payload, opts) => {
+      calls.push({ payload, opts });
+      return real(payload, opts);
+    };
+    try {
+      await t.host.start();
+      const lot = await t.runtime.createCase({ title: 'Lakeside lot', objective: 'Sell the lot' });
+      const ledger = t.runtime.ledger(lot.id);
+      const size = ledger.assert({ stmt: 'The lot is 2.12 acres', subject: 'lot', attr: 'size', value: '2.12', unit: 'acres', provenance: 'sourced', source: { kind: 'document', ref: 'survey' } });
+      const floor = ledger.assert({ stmt: 'The lowest price the owner takes', subject: 'lot', attr: 'floor price', value: 187500, provenance: 'sourced', category: 'financial', source: { kind: 'document', ref: 'notes' } });
+      assert.strictEqual(floor.disclosable, false);
+      const { router } = t.host.context();
+
+      const ok = await router.sendExternal({ caseId: lot.id, channelId: 'loop-extra', target: 'broker-1', text: `The lot is {{${size.id}}}.` });
+      assert.strictEqual(ok.ok, true, JSON.stringify(ok));
+      assert.deepStrictEqual(extra.plain, [{ target: 'broker-1', text: 'The lot is 2.12 acres.' }], 'the adapter gets the rendered text');
+      assert.strictEqual(calls.length, 1);
+      assert.deepStrictEqual(calls[0].opts.recipients, ['broker-1']);
+      assert.strictEqual(calls[0].opts.mode, 'message');
+
+      const blocked = await router.sendExternal({ caseId: lot.id, channelId: 'loop-extra', target: 'broker-1', text: 'We would take 187500 for it.' });
+      assert.strictEqual(blocked.ok, false);
+      assert.strictEqual(blocked.error, 'outbound gate blocked the message');
+      const hit = blocked.blocked.find((b) => b.factId === floor.id);
+      assert.ok(hit, JSON.stringify(blocked.blocked));
+      assert.strictEqual(hit.reason, 'non-disclosable');
+      assert.ok(gates.GATE_REASONS.includes(hit.reason));
+      assert.strictEqual(calls.length, 2);
+      assert.strictEqual(extra.plain.length, 1, 'nothing more was sent');
+
+      const owner = await router.sendExternal({ caseId: lot.id, channelId: 'loop-extra', target: 'owner-1', text: 'Floor is 187500.' });
+      assert.strictEqual(owner.ok, true);
+      assert.strictEqual(calls.length, 2, 'the owner target is exempt and never gated');
+    } finally {
+      gates.gateLeaves = real;
+      await t.host.stop();
+    }
+  });
+});
