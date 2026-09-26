@@ -275,7 +275,8 @@ describe('openPdf sandbox limits', () => {
     for (const hook of ['oversize', 'oversize-payload']) {
       const rec = recorder();
       const pdf = await openPdf(await makePdf(), { spawn: rec.spawn, testHooks: true, timeouts: { call: 10000 } });
-      await assert.rejects(pdf._testHook(hook), (err) => err.code === 'UNREADABLE_PDF', hook);
+      // A protocol break fails the document; it is never a soft "page too large".
+      await assert.rejects(pdf._testHook(hook), (err) => err.code === 'UNREADABLE_PDF' && err.tooLarge !== true, hook);
       assert.ok(await waitFor(() => !alive(rec.children[0].child.pid)), hook);
       await assert.rejects(pdf.pageText(1), failed, hook);
       await pdf.close();

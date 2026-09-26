@@ -24,7 +24,8 @@ let name = 'document.pdf';
 const reply = (header, payload = null) => parentPort.postMessage({ header, payload });
 
 function capped(bytes, max) {
-  if (bytes.length > max) throw new IngestError('UNREADABLE_PDF', `Cannot read ${name}: a page is too large to read.`);
+  // A code of its own: the parent reports it as UNREADABLE_PDF marked tooLarge.
+  if (bytes.length > max) throw new IngestError('PAGE_TOO_LARGE', `Cannot read ${name}: a page is too large to read.`);
   return bytes;
 }
 

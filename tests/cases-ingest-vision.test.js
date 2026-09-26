@@ -165,12 +165,20 @@ describe('pageAttachment', () => {
     const doc = await PDFDocument.create();
     const jpg = await doc.embedJpg(bigJpeg());
     doc.addPage([420, 300]).drawImage(jpg, { x: 0, y: 0, width: 420, height: 300 });
-    const pdf = await openPdf(Buffer.from(await doc.save()));
-    try {
-      const r = await pageAttachment({ getCapabilities: caps, sel: { provider: 'openai', model: 'gpt-4o' }, pdf, n: 1 });
-      assert.deepStrictEqual(r, { error: 'page too large for vision' });
-    } finally {
-      await pdf.close();
+    const bytes = Buffer.from(await doc.save());
+    // The worker's refusal is a code, not a sentence: names that make the
+    // sandbox fall back to its own message (too long, a tab) still map.
+    for (const name of [undefined, `${'n'.repeat(246)}.pdf`, 'tab\there.pdf']) {
+      const pdf = await openPdf(bytes, name ? { name } : {});
+      try {
+        await assert.rejects(pdf.pageImage(1), (err) => err.code === 'UNREADABLE_PDF' && err.tooLarge === true, String(name).length);
+        const r = await pageAttachment({ getCapabilities: caps, sel: { provider: 'openai', model: 'gpt-4o' }, pdf, n: 1 });
+        assert.deepStrictEqual(r, { error: 'page too large for vision' }, String(name).length);
+        // Only that page was refused: the document is still readable.
+        assert.strictEqual(typeof (await pdf.pageText(1)), 'string');
+      } finally {
+        await pdf.close();
+      }
     }
   });
 
@@ -324,6 +332,12 @@ describe('providers accept a call with no tools', () => {
   it('OpenAI responses omits tools when there are none', async () => {
     const bodies = capture(REPLY);
     await new OpenAIProvider('test-key-minimum-length')._sendResponsesWithTools('gpt-4o', MSGS, [], {});
+    assert.ok(!('tools' in bodies[0]));
+  });
+
+  it('Anthropic omits tools when the list is null', async () => {
+    const bodies = capture(REPLY);
+    await new AnthropicProvider('test-key-minimum-length').sendMessageWithTools(MSGS, null, { model: 'claude-sonnet-4-5' });
     assert.ok(!('tools' in bodies[0]));
   });
 
