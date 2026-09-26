@@ -17,15 +17,12 @@ const tmp = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-classify
 
 const DETOUR = '{"onCase":false,"confidence":0.9,"reason":"Fixing the phone agent\'s code does not collect quotes"}';
 
-// A minimal tool registry: only the confined wake-up tools (Read, Glob,
-// Grep) resolve, matching what orient's own call gets from a real registry
-// (case tool names are looked up too but come back undefined and are
-// filtered out, same as an unattached registry would do).
-const WAKEUP_TOOL_NAMES = ['Read', 'Glob', 'Grep'];
+// A tool registry that resolves every name, like a real one holding the
+// wake-up tools (C3 widens that list with WebFetch/WebSearch) and the case
+// tools: the classify call must still offer only its fixed ['Read'].
 function fakeToolRegistry() {
   return {
     get(name) {
-      if (!WAKEUP_TOOL_NAMES.includes(name)) return undefined;
       return { toFunctionDefinition: () => ({ name, description: `${name} tool`, input_schema: { type: 'object', properties: {} } }) };
     }
   };
@@ -106,6 +103,9 @@ describe('DetourClassifier', () => {
     // orient — inference-router.js only reports llmMetrics (which is what
     // gets a call charged to the case) on that path.
     assert.ok(Array.isArray(call.opts.tools) && call.opts.tools.length > 0, 'classify call must carry a non-empty tools array');
+    // Final review M3: a fixed list, not the wake-up list or the case tools,
+    // so a wider list cannot draw more tool-call (malformed) replies.
+    assert.deepStrictEqual(call.opts.tools.map((t) => t.name), ['Read']);
     assert.deepStrictEqual(JSON.parse(call.messages[0].text), {
       case: { title: 'Rear door quotes', type: 'outreach', objective: 'Three written quotes for the rear door', successCriteria: ['Three written quotes'], hardConstraints: ['Under 2,000 dollars'] },
       work: { source: 'owner-message', serves: null, text: 'Also fix the phone agent status polling' }

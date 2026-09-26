@@ -5,7 +5,6 @@
 // would have without the classifier.
 const crypto = require('crypto');
 const { DetourLog } = require('./log');
-const { WAKEUP_BASE_TOOLS, shapeToolDefinitions } = require('../chat-integration');
 const { recordOneShotUsage, textOf } = require('../turn-runner');
 const { createLogger } = require('../../logging');
 
@@ -60,11 +59,15 @@ function parseClassification(raw) {
 // llmMetrics) when `tools.length > 0`, and falls back to plain sendMessage
 // (bare text, no metrics) otherwise. Without this, classify calls would
 // never charge the case's usd budget. Mirrors turn-runner.js's orient call.
+// The list is fixed, not the wake-up list plus the case tools: every extra
+// tool costs tokens and invites a tool-call reply, which parses as malformed
+// and is silently treated as on-case (final review M3).
+const CLASSIFY_TOOLS = Object.freeze(['Read']);
+
 function confinedToolDefinitions(host) {
   const registry = host?.toolRegistry;
   if (!registry || typeof registry.get !== 'function') return [];
-  const baseDefs = WAKEUP_BASE_TOOLS.map((n) => registry.get(n)).filter(Boolean).map((t) => t.toFunctionDefinition());
-  return shapeToolDefinitions(baseDefs, true, registry);
+  return CLASSIFY_TOOLS.map((n) => registry.get(n)).filter(Boolean).map((t) => t.toFunctionDefinition());
 }
 
 class DetourClassifier {
