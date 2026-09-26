@@ -117,6 +117,8 @@ function classifyParsed(parsed) {
     inReplyTo: parsed.inReplyTo || null,
     references: Array.isArray(refs) ? refs : (refs ? String(refs).split(/\s+/) : []),
     messageId: parsed.messageId || null,
+    // One of King Louie's own messages (a batch or an ack) come back.
+    own: Boolean(headerText(parsed, 'x-kl-delivery') || headerText(parsed, 'x-kl-ack')),
     date: parsed.date && !Number.isNaN(new Date(parsed.date).getTime()) ? new Date(parsed.date).toISOString() : null,
     authResultsTop: topAuthResults(parsed.headerLines)
   };

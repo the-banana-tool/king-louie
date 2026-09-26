@@ -26,6 +26,17 @@ const domainOf = (address) => {
   return at > 0 ? String(address).slice(at + 1).toLowerCase() : '';
 };
 
+// Every message King Louie sends (batches and acks) carries a Message-ID
+// <kl-…@<from domain>> and RFC 3834 Auto-Submitted, so neither an
+// auto-responder nor our own mail coming back (final review I3) is ever
+// taken as an answer.
+const AUTO_SUBMITTED = 'auto-generated';
+const OWN_MESSAGE_ID = /^<kl-[^@>\s]+@([^>\s]+)>$/i;
+function isOwnMessageId(messageId, fromDomain) {
+  const m = OWN_MESSAGE_ID.exec(String(messageId || '').trim());
+  return Boolean(m && fromDomain && m[1].toLowerCase() === fromDomain);
+}
+
 // Split an Authentication-Results value on `;`, ignoring semicolons inside
 // quoted strings and (nested) comments, and dropping the comments. The header
 // is written by the receiving MTA but carries sender-chosen text (an envelope
@@ -189,7 +200,7 @@ class EmailChannel extends ChannelPlugin {
       from: c.from,
       subject: `${message.subject} [KL-${meta.batchToken}]`,
       text: message.text,
-      headers: { 'Message-ID': messageId, 'X-KL-Delivery': String(meta.deliveryId) },
+      headers: { 'Message-ID': messageId, 'X-KL-Delivery': String(meta.deliveryId), 'Auto-Submitted': AUTO_SUBMITTED },
       idempotencyKey: meta.deliveryId
     });
     this.sentTokens.delete(String(meta.deliveryId));
@@ -205,7 +216,11 @@ class EmailChannel extends ChannelPlugin {
     if (!to) throw new Error(`email: "${target}" is not an address`);
     if (to !== c.owner && options[GATE_PASSED] !== true) throw new Error(`email: refusing to send to ${to}: not the owner and not through the outbound gate`);
     if (!this.transport || !c.from) throw new ContactDeliveryError('not-configured', 'email needs contact.email.from');
-    const headers = {};
+    const headers = {
+      'Message-ID': `<kl-ack-${crypto.randomBytes(8).toString('hex')}@${domainOf(c.from)}>`,
+      'Auto-Submitted': AUTO_SUBMITTED,
+      'X-KL-Ack': '1'
+    };
     if (options.inReplyTo) {
       headers['In-Reply-To'] = options.inReplyTo;
       headers.References = options.inReplyTo;
@@ -223,6 +238,10 @@ class EmailChannel extends ChannelPlugin {
     const from = normalizeAddress('email', reply.from);
     if (reply.autoSubmitted === true || DAEMON_SENDER.test(from || String(reply.from || ''))) {
       this.log.info(`email from ${from || reply.from} is automatic (a report or an auto-reply); not an answer`);
+      return null;
+    }
+    if (reply.own === true || isOwnMessageId(reply.messageId, domainOf(c.from))) {
+      this.log.info(`email ${String(reply.messageId || '').slice(0, 200)} is King Louie's own message; not an answer`);
       return null;
     }
     const subjectToken = SUBJECT_TOKEN.exec(String(reply.subject || ''));

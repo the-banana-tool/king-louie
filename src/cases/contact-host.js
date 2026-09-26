@@ -14,7 +14,7 @@ const { ContactState } = require('./contact-state');
 const { ContactRouter } = require('./contact');
 const { Presence } = require('./presence');
 const { LadderEngine } = require('./ladder');
-const { CONTACT_CHANNELS, validatePolicy, effectivePolicy } = require('./contact-format');
+const { CONTACT_CHANNELS, validatePolicy, effectivePolicy, normalizeAddress } = require('./contact-format');
 const { resolveContactConfig } = require('./contact-settings');
 const { createLogger } = require('../logging');
 
@@ -138,6 +138,15 @@ function createContactHost({
   const pollers = [];
   function buildAdapters() {
     const cfg = contact();
+    // Final review I3: mail sent from the owner's own address lands in the
+    // mailbox that is polled for replies and loops (batch → ack → ack …).
+    // Refused with a clear error; ruling T13-start then leaves contact off.
+    if (channelSettings('email').enabled && cfg.email) {
+      const owner = normalizeAddress('email', cfg.email.owner);
+      if (owner && owner === normalizeAddress('email', cfg.email.from)) {
+        throw new Error('contact.email.from must be a different address from contact.email.owner: King Louie would read its own mail as replies');
+      }
+    }
     for (const [name, r] of Object.entries(cfg.relays || {})) {
       try {
         relays.set(name, {

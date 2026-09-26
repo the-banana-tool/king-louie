@@ -572,3 +572,92 @@ describe('IMAP: attempts are keyed by UIDVALIDITY and UID', () => {
     assert.strictEqual(mailbox[0].seen, true);
   });
 });
+
+describe('mail loops and auto-replies (final review I3)', () => {
+  function loopWorld(config) {
+    const sends = [];
+    const transport = createRelayEmailTransport({ relay: { name: 'main', send: async (body) => { sends.push(body); return { id: `msg-${sends.length}` }; } } });
+    const email = new EmailChannel({ transport, getConfig: () => config });
+    // The router's answer to an unparseable reply: an ack.
+    email.onContactReply(async () => ({ ok: false, outcome: 'unparsed', ackText: 'Which question? Reply "#K7QD4M <n> <answer>".' }));
+    return { email, sends };
+  }
+
+  it('the reviewer\'s loop: every sent message (batch or ack) coming back into the polled mailbox is dropped, so nothing more is sent', async () => {
+    // A self-addressed mailbox: what King Louie sends lands where it polls.
+    const { email, sends } = loopWorld({ owner: 'owner@example.com', from: 'owner@example.com' });
+    await email.sendContact(MESSAGE, META);
+    for (let poll = 0; poll < 5 && poll < sends.length; poll += 1) {
+      const m = sends[poll];
+      await email.ingestRelayEvent({
+        id: `e${poll}`, type: 'inbound', from: 'owner@example.com', subject: m.subject, text: m.text,
+        messageId: m.headers['Message-ID'], inReplyTo: m.headers['In-Reply-To'] || null, auth: { verified: true }
+      });
+    }
+    assert.strictEqual(sends.length, 1, 'only the batch; no ack loop');
+  });
+
+  it('an ack coming back is dropped too, by its Message-ID and by its X-KL-Ack header (IMAP)', async () => {
+    const { email, sends } = loopWorld(CONFIG);
+    await email.send('owner@example.com', 'Recorded.', { subject: 'Re: King Louie', inReplyTo: '<reply-1@example.com>' });
+    const ack = sends[0];
+    assert.match(ack.headers['Message-ID'], /^<kl-ack-[0-9a-f]{16}@example\.com>$/);
+    assert.strictEqual(ack.headers['X-KL-Ack'], '1');
+    const calls = [];
+    email.onContactReply(async (...a) => { calls.push(a); return { ok: true }; });
+    await email.handleInbound({ from: 'owner@example.com', subject: 'Re: King Louie [KL-K7QD4M]', text: 'Recorded.', messageId: ack.headers['Message-ID'], auth: { verified: true } });
+    const raw = rawReply({ subject: 'Re: King Louie [KL-K7QD4M]', body: 'Recorded.' }).replace('Content-Type:', 'X-KL-Ack: 1\r\nContent-Type:');
+    const imap = channelWith([{ uid: 31, seen: false, source: raw }]);
+    await imap.email.pollOnce();
+    assert.deepStrictEqual(calls, []);
+    assert.deepStrictEqual(imap.calls, []);
+  });
+
+  it('a reply from another domain whose Message-ID merely starts with kl- is still read', async () => {
+    const { email } = loopWorld(CONFIG);
+    const calls = [];
+    email.onContactReply(async (...a) => { calls.push(a); return { ok: true }; });
+    await email.handleInbound({ from: 'owner@example.com', subject: 'Re: [KL-K7QD4M]', text: 'a', inReplyTo: '<kl-d-ABC123@example.com>', messageId: '<kl-d-XYZ@mail.example.org>' });
+    assert.strictEqual(calls.length, 1);
+  });
+
+  it('every outgoing message carries Auto-Submitted: auto-generated (batch and ack, relay and SMTP)', async () => {
+    const { email, sends } = loopWorld(CONFIG);
+    await email.sendContact(MESSAGE, META);
+    await email.send('owner@example.com', 'Noted.');
+    assert.deepStrictEqual(sends.map((m) => m.headers['Auto-Submitted']), ['auto-generated', 'auto-generated']);
+    const smtp = await startFakeSmtp();
+    try {
+      const { email: viaSmtp } = channelWith([], { smtpPort: smtp.port });
+      await viaSmtp.sendContact(MESSAGE, META);
+      await viaSmtp.send('owner@example.com', 'Noted.');
+      assert.strictEqual(smtp.messages.length, 2);
+      for (const m of smtp.messages) assert.match(m.raw, /^Auto-Submitted: auto-generated$/im);
+      assert.match(smtp.messages[1].raw, /^X-KL-Ack: 1$/im);
+      await viaSmtp.shutdown();
+    } finally {
+      await smtp.close();
+    }
+  });
+
+  for (const [name, header] of [
+    ['X-Autoreply', 'X-Autoreply: yes'], ['X-Autorespond', 'X-Autorespond: vacation'],
+    ['Precedence: bulk', 'Precedence: bulk'], ['Precedence: junk', 'Precedence: junk'], ['Precedence: list', 'Precedence: list'],
+    ['Auto-Submitted: auto-generated', 'Auto-Submitted: auto-generated']
+  ]) {
+    it(`an out-of-office reply marked ${name} is dropped`, async () => {
+      const raw = rawReply({ auth: ['mx.example.com; dmarc=pass header.from=example.com'], subject: 'Out of office: King Louie [KL-K7QD4M]', body: 'I am away until Monday.' })
+        .replace('Content-Type:', `${header}\r\nContent-Type:`);
+      const { email, calls } = channelWith([{ uid: 40, seen: false, source: raw }]);
+      assert.deepStrictEqual(await email.pollOnce(), { replies: 0, bounces: 0 });
+      assert.deepStrictEqual(calls, []);
+    });
+  }
+
+  it('Auto-Submitted: no is an ordinary reply', async () => {
+    const raw = rawReply({ auth: ['mx.example.com; dmarc=pass header.from=example.com'], body: 'a' }).replace('Content-Type:', 'Auto-Submitted: no\r\nContent-Type:');
+    const { email, calls } = channelWith([{ uid: 41, seen: false, source: raw }]);
+    await email.pollOnce();
+    assert.strictEqual(calls.length, 1);
+  });
+});

@@ -403,3 +403,27 @@ describe('createContactHost: fix round 1', () => {
     }
   });
 });
+
+describe('createContactHost: email from === owner (final review I3)', () => {
+  it('refuses to start, naming the problem, when contact.email.from is the owner address (any case)', async () => {
+    const t = makeHost({
+      settings: { ...desktopSettings, contact: { ...desktopSettings.contact, email: { owner: 'Owner@Example.com', from: 'owner@example.COM', relay: 'main' } } }
+    });
+    try {
+      await assert.rejects(t.host.start(), /contact\.email\.from must be a different address from contact\.email\.owner/);
+    } finally {
+      await t.host.stop();
+    }
+  });
+
+  it('the same addresses with email disabled do not block contact', async () => {
+    const t = makeHost({
+      settings: { ...desktopSettings, channels: { ...desktopSettings.channels, email: { enabled: false } }, contact: { ...desktopSettings.contact, email: { owner: 'owner@example.com', from: 'owner@example.com', relay: 'main' } } }
+    });
+    try {
+      await t.host.start();
+    } finally {
+      await t.host.stop();
+    }
+  });
+});
