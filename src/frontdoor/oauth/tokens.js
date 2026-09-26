@@ -89,8 +89,27 @@ class TokenStore {
     }
   }
 
-  _grantLive(grantId) {
-    return !this.grants || Boolean(this.grants.live(grantId));
+  // Fails closed: a store bound to no grant store authenticates nothing and
+  // refreshes nothing.
+  _liveGrant(grantId) {
+    return this.grants ? this.grants.live(grantId) || null : null;
+  }
+
+  // Saves, or puts the in-memory change back and rethrows, so a failed save
+  // leaves the client's token as it was and its retry is not reuse.
+  _commit(undo) {
+    try {
+      this._save();
+    } catch (err) {
+      undo();
+      throw err;
+    }
+  }
+
+  _unmint(minted) {
+    const r = this.refreshTokens.get(minted.refreshHash);
+    if (r) this.access.delete(r.access_hash);
+    this.refreshTokens.delete(minted.refreshHash);
   }
 
   _save() {
@@ -128,18 +147,19 @@ class TokenStore {
     if (typeof token !== 'string' || !token.startsWith('kla_') || typeof aud !== 'string') return null;
     const rec = this.access.get(sha(token));
     if (!rec || !(this.now() < rec.exp) || rec.aud !== aud) return null;
-    if (!this._grantLive(rec.grant_id)) {
-      this.revokeGrant(rec.grant_id);
+    if (!this._liveGrant(rec.grant_id)) {
+      if (this.grants) this.revokeGrant(rec.grant_id);
       return null;
     }
     return { ...rec, scopes: [...rec.scopes] };
   }
 
   // `scope` may only narrow what the token carries: each requested scope must
-  // be one the token has, and a machine limit must stay within the token's
-  // (an unlimited entry may be limited; a limited one only to a subset). The
-  // result keeps every limit, so machine_ids on the grant still bind it.
-  _narrow(scopes, scope) {
+  // be one the token has, and every machine a requested limit names must be
+  // one the grant pinned to a node id (grant.machine_ids, ruling T23-nodeid)
+  // and, for a limited entry, one of its machines (ruling T24-narrow). The
+  // result keeps every limit.
+  _narrow(scopes, scope, grant) {
     if (scope === undefined || scope === null || String(scope).trim() === '') return scopes;
     const held = new Map(scopes.map((s) => {
       const e = parseScope(s);
@@ -160,7 +180,9 @@ class TokenStore {
       if (!have) throw new OAuthError('invalid_scope', `the grant does not include ${want.scope}`);
       let machines = have.machines;
       if (want.machines) {
-        if (have.machines && want.machines.some((m) => !have.machines.includes(m))) {
+        const pinned = grant && grant.machine_ids !== null && typeof grant.machine_ids === 'object' ? grant.machine_ids : {};
+        const allowed = (m) => Object.prototype.hasOwnProperty.call(pinned, m) && (have.machines === null || have.machines.includes(m));
+        if (!want.machines.every(allowed)) {
           throw new OAuthError('invalid_scope', `${want.scope} names a machine the grant does not include`);
         }
         machines = want.machines;
@@ -175,8 +197,9 @@ class TokenStore {
     const rec = hash ? this.refreshTokens.get(hash) : null;
     if (!rec) throw new OAuthError('invalid_grant', 'unknown refresh token');
     if (rec.client_id !== clientId) throw new OAuthError('invalid_grant', 'this refresh token was issued to another client');
-    if (!this._grantLive(rec.grant_id)) {
-      this.revokeGrant(rec.grant_id);
+    const grant = this._liveGrant(rec.grant_id);
+    if (!grant) {
+      if (this.grants) this.revokeGrant(rec.grant_id);
       throw new OAuthError('invalid_grant', 'the grant is gone');
     }
     const t = this.now();
@@ -186,13 +209,17 @@ class TokenStore {
         this._save();
         throw new OAuthError('invalid_grant', 'the refresh token expired');
       }
-      const scopes = this._narrow(rec.scopes, scope);
+      const scopes = this._narrow(rec.scopes, scope, grant);
       const minted = this._mint({ grantId: rec.grant_id, clientId, scopes, aud: rec.aud, generation: rec.generation + 1 });
+      const before = { state: rec.state, rotated_at: rec.rotated_at, used: rec.used, successor: rec.successor };
       rec.state = 'rotated';
       rec.rotated_at = t;
       rec.used = true;
       rec.successor = minted.refreshHash;
-      this._save();
+      this._commit(() => {
+        Object.assign(rec, before);
+        this._unmint(minted);
+      });
       return { pair: minted.pair, grantId: rec.grant_id };
     }
     // The grace (§3.4): once per rotation, within graceMs of it, while the
@@ -201,13 +228,20 @@ class TokenStore {
     if (rec.state === 'rotated' && !rec.graced && t - rec.rotated_at <= this.graceMs) {
       const successor = this.refreshTokens.get(rec.successor);
       if (successor && successor.state === 'live' && !successor.used) {
-        const scopes = this._narrow(rec.scopes, scope);
+        const scopes = this._narrow(rec.scopes, scope, grant);
+        const before = { graced: rec.graced, successor: rec.successor };
+        const successorAccess = this.access.get(successor.access_hash);
         rec.graced = true;
         successor.state = 'superseded';
         this.access.delete(successor.access_hash);
         const minted = this._mint({ grantId: rec.grant_id, clientId, scopes, aud: rec.aud, generation: rec.generation + 1 });
         rec.successor = minted.refreshHash;
-        this._save();
+        this._commit(() => {
+          this._unmint(minted);
+          Object.assign(rec, before);
+          successor.state = 'live';
+          if (successorAccess) this.access.set(successor.access_hash, successorAccess);
+        });
         return { pair: minted.pair, grantId: rec.grant_id };
       }
     }
@@ -327,8 +361,13 @@ function createTokenHandlers({ tokens, codes, grants, alerts = null, auditLedger
       if (!(err instanceof OAuthError)) throw err;
     }
     const found = f ? tokens.find(f.token) : null;
-    if (found && found.kind === 'refresh') await revokeGrant(found.record.grant_id, 'client_revoked');
-    else if (found) tokens.revokeAccess(f.token);
+    try {
+      if (found && found.kind === 'refresh') await revokeGrant(found.record.grant_id, 'client_revoked');
+      else if (found) tokens.revokeAccess(f.token);
+    } catch (err) {
+      // The answer still says nothing about the token.
+      log.error(`revoking a token failed: ${err && err.message}`);
+    }
     sendJson(res, 200, {});
   }
 

@@ -99,10 +99,10 @@ describe('the phone claims by the typed code, then decides', () => {
     assert.deepEqual(t.grants.scopeStrings(grant), ['fleet:read']);
     assert.deepEqual(t.granted, ['dcr_AAAAAAAAAAAAAAAAAAAAAA']);
     assert.ok(t.audit.some((e) => e.kind === 'frontdoor.grant.approved' && e.data.grant_id === p.grant_id));
-    const taken = t.codes.take(p.code);
+    const taken = t.codes.take(p.code, () => true);
     assert.equal(taken.ok, true);
     assert.equal(taken.record.grantId, p.grant_id);
-    assert.deepEqual(t.codes.take(p.code), { ok: false, reused: p.grant_id });
+    assert.deepEqual(t.codes.take(p.code, () => true), { ok: false, reused: p.grant_id });
   });
 
   it('a second phone can neither claim nor decide a claimed request (Review Focus 4)', async () => {
@@ -494,8 +494,8 @@ describe('AuthCodes', () => {
     const codes = new AuthCodes({ now: () => now });
     const code = codes.issue({ grantId: 'gr_x', clientId: 'dcr_y', redirectUri: 'https://client.example.com/cb', codeChallenge: 'c', resource: 'r' });
     now += 60001;
-    assert.deepEqual(codes.take(code), { ok: false, expired: true });
-    assert.deepEqual(codes.take('nope'), { ok: false });
+    assert.deepEqual(codes.take(code, () => true), { ok: false, expired: true });
+    assert.deepEqual(codes.take('nope', () => true), { ok: false });
   });
 
   it('binds client, redirect, challenge and resource exactly; keeps only the hash', () => {
@@ -504,7 +504,7 @@ describe('AuthCodes', () => {
     const code = codes.issue(bound);
     assert.ok(![...codes.codes.keys()].includes(code));
     assert.ok(!JSON.stringify([...codes.codes.values()]).includes(code));
-    const taken = codes.take(code);
+    const taken = codes.take(code, () => true);
     assert.equal(taken.ok, true);
     for (const [k, v] of Object.entries(bound)) assert.equal(taken.record[k], v, k);
   });
@@ -514,8 +514,8 @@ describe('AuthCodes', () => {
     const codes = new AuthCodes({ now: () => now });
     const code = codes.issue({ grantId: 'gr_x', clientId: 'dcr_y', redirectUri: 'u', codeChallenge: 'c', resource: 'r' });
     now += 60001;
-    assert.deepEqual(codes.take(code), { ok: false, expired: true });
-    assert.deepEqual(codes.take(code), { ok: false, expired: true }, 'no grant is revoked over a code nobody redeemed');
+    assert.deepEqual(codes.take(code, () => true), { ok: false, expired: true });
+    assert.deepEqual(codes.take(code, () => true), { ok: false, expired: true }, 'no grant is revoked over a code nobody redeemed');
   });
 
   it('take(code, verify): a failed check spends nothing; three failures burn the code; reuse needs a passing check', () => {
@@ -534,5 +534,14 @@ describe('AuthCodes', () => {
     const other = codes.issue(bound);
     for (let i = 0; i < 3; i += 1) assert.deepEqual(codes.take(other, () => false), { ok: false, mismatch: true });
     assert.deepEqual(codes.take(other, () => true), { ok: false }, 'burned: never redeemed, never reuse');
+  });
+
+  it('take(code) without a verify function throws (ruling T24-verify)', () => {
+    const codes = new AuthCodes();
+    const code = codes.issue({ grantId: 'gr_x', clientId: 'dcr_y', redirectUri: 'u', codeChallenge: 'c', resource: 'r' });
+    assert.throws(() => codes.take(code), TypeError);
+    assert.throws(() => codes.take(code, true), TypeError);
+    assert.throws(() => codes.take('nope'), TypeError, 'refused before the lookup, whatever the code');
+    assert.equal(codes.take(code, () => true).ok, true, 'the refused calls spent nothing');
   });
 });

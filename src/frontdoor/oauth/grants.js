@@ -222,7 +222,8 @@ class AuthCodes {
     return code;
   }
 
-  take(code, verify = () => true) {
+  take(code, verify) {
+    if (typeof verify !== 'function') throw new TypeError('AuthCodes.take needs a verify(record) function');
     if (typeof code !== 'string' || !code) return { ok: false };
     const rec = this.codes.get(sha(code));
     if (!rec || rec.burned) return { ok: false };

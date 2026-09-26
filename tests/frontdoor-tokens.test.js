@@ -20,8 +20,12 @@ after(() => { for (const s of servers) s.close(); for (const d of temps) fs.rmSy
 const tmp = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-tokens-')); temps.push(d); return d; };
 const AUD = 'https://mcp.kl.example.com/mcp';
 
+// Grant stubs for the unit tests: the machines each grant pinned to a node
+// id (ruling T23-nodeid). An unbound store authenticates nothing.
+const PINNED = { gr_1: { 'gpu-box': 'n-gpu', 'web-01': 'n-web' }, gr_2: {}, gr_3: { 'web-01': 'n-web' } };
+const stubGrants = { live: (id) => (id in PINNED ? { grant_id: id, machine_ids: PINNED[id] } : null) };
 function store(now, file = path.join(tmp(), 'tokens.json')) {
-  return new TokenStore({ file, now: () => now.t });
+  return new TokenStore({ file, now: () => now.t, grants: stubGrants });
 }
 
 describe('TokenStore', () => {
@@ -335,8 +339,13 @@ describe('carries: code redemption, forms, revocation, the tokens file', () => {
     const { pair: again } = s.refresh({ token: pair.refresh_token, clientId: 'dcr_1' });
     assert.equal(again.scope, 'fleet:run;machines=web-01', 'a narrowed token stays narrowed');
     refused(again.refresh_token, 'fleet:run;machines=gpu-box');
-    const unlimited = s.issuePair({ grantId: 'gr_2', clientId: 'dcr_1', scopes: ['fleet:read'], aud: AUD });
-    assert.equal(s.refresh({ token: unlimited.refresh_token, clientId: 'dcr_1', scope: 'fleet:read;machines=web-01' }).pair.scope, 'fleet:read;machines=web-01');
+    // Ruling T24-narrow: an unlimited entry may be limited only to machines
+    // the grant pinned to a node id.
+    const unpinned = s.issuePair({ grantId: 'gr_2', clientId: 'dcr_1', scopes: ['fleet:read'], aud: AUD });
+    refused(unpinned.refresh_token, 'fleet:read;machines=web-01');
+    const pinned = s.issuePair({ grantId: 'gr_3', clientId: 'dcr_1', scopes: ['fleet:read', 'fleet:run;machines=web-01'], aud: AUD });
+    refused(pinned.refresh_token, 'fleet:read;machines=gpu-box');
+    assert.equal(s.refresh({ token: pinned.refresh_token, clientId: 'dcr_1', scope: 'fleet:read;machines=web-01' }).pair.scope, 'fleet:read;machines=web-01');
   });
 
   it('the grace is spent once per rotation: a third presentation inside 30 s is reuse', () => {
@@ -349,6 +358,51 @@ describe('carries: code redemption, forms, revocation, the tokens file', () => {
     now.t += 1000;
     assert.deepEqual(s.refresh({ token: first.refresh_token, clientId: 'dcr_1' }), { reuse: 'gr_1' });
     assert.equal(s.authenticate(retry.access_token, { aud: AUD }).grant_id, 'gr_1', 'the store itself revokes nothing; the handler does');
+  });
+
+  it('a store bound to no grant store never authenticates or refreshes', () => {
+    const s = new TokenStore({ file: path.join(tmp(), 'tokens.json'), now: () => 0 });
+    const pair = s.issuePair({ grantId: 'gr_1', clientId: 'dcr_1', scopes: ['fleet:read'], aud: AUD });
+    assert.equal(s.authenticate(pair.access_token, { aud: AUD }), null);
+    assert.throws(() => s.refresh({ token: pair.refresh_token, clientId: 'dcr_1' }), (err) => err.error === 'invalid_grant');
+    s.attachGrants(stubGrants);
+    assert.equal(s.authenticate(pair.access_token, { aud: AUD }).grant_id, 'gr_1', 'nothing was dropped while unbound');
+  });
+
+  it('a failed save leaves the token as it was, so the retry is not reuse', () => {
+    const now = { t: 0 };
+    const s = store(now);
+    const saveFails = () => {
+      const real = s._save;
+      s._save = () => { s._save = real; throw new Error('disk full'); };
+    };
+    const first = s.issuePair({ grantId: 'gr_1', clientId: 'dcr_1', scopes: ['fleet:read'], aud: AUD });
+    const counts = () => [s.access.size, s.refreshTokens.size];
+    const before = counts();
+    saveFails();
+    assert.throws(() => s.refresh({ token: first.refresh_token, clientId: 'dcr_1' }), /disk full/);
+    assert.deepEqual(counts(), before, 'nothing minted is left behind');
+    const { pair: successor } = s.refresh({ token: first.refresh_token, clientId: 'dcr_1' });
+    assert.ok(successor.access_token, 'the retry rotates normally');
+
+    now.t += 1000;
+    const afterRotation = counts();
+    saveFails();
+    assert.throws(() => s.refresh({ token: first.refresh_token, clientId: 'dcr_1' }), /disk full/);
+    assert.deepEqual(counts(), afterRotation);
+    assert.equal(s.authenticate(successor.access_token, { aud: AUD }).grant_id, 'gr_1', 'the successor was not superseded');
+    const { pair: graced } = s.refresh({ token: first.refresh_token, clientId: 'dcr_1' });
+    assert.ok(graced.access_token, 'the grace is still there for the retry');
+    assert.equal(s.authenticate(successor.access_token, { aud: AUD }), null);
+  });
+
+  it('revoke answers 200 {} even when revoking fails', async () => {
+    const t = await carryServer();
+    const pair = (await redeem(t)).json;
+    t.grants.revoke = () => { throw new Error('disk full'); };
+    const r = await request(t.base, { method: 'POST', path: '/oauth/revoke', form: { token: pair.refresh_token } });
+    assert.equal(r.status, 200);
+    assert.equal(r.text, '{}');
   });
 
   it('a corrupt tokens file is moved aside, never overwritten', () => {
