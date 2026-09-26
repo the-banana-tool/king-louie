@@ -957,7 +957,7 @@ class CaseRuntime {
     writeJsonIfChanged(this._baselinePath(meta.dir), b);
     if (typeof this.acknowledgePlaybooks === 'function') {
       try {
-        this.acknowledgePlaybooks(meta.id);
+        this.acknowledgePlaybooks(meta.id, turn);
       } catch (err) {
         log.warn(`acknowledgePlaybooks failed for ${meta.slug}: ${err.message}`);
       }
@@ -1302,16 +1302,21 @@ class CaseRuntime {
     return this.playbooks ? this.playbooks.changes(id) : [];
   }
 
-  // Called only by recordReorientation (the Reorient tool) inside a turn:
-  // the manager's acknowledge takes no lock and does not commit; the turn
-  // holds the lock and endTurn commits. Refused anywhere else.
-  acknowledgePlaybooks(id) {
+  // Called only by recordReorientation (the Reorient tool) with the running
+  // turn: the manager's acknowledge takes no lock and does not commit; the
+  // turn holds the lock and endTurn commits. Refused anywhere else. Only the
+  // playbook-update keys this turn showed are acknowledged (ruling T12-ack,
+  // as C2's I2): a change made mid-turn fires next turn.
+  acknowledgePlaybooks(id, turn = null) {
     if (!this.playbooks) return { acknowledged: [], questionIds: [] };
     const meta = this.getCase(id);
-    if (!this.turns.has(meta.id)) {
+    if (!turn || this.turns.get(meta.id) !== turn) {
       throw new Error('acknowledgePlaybooks runs only inside a case turn (the Reorient tool).');
     }
-    return this.playbooks.acknowledge(meta.id);
+    const shownKeys = (turn.triggers || [])
+      .filter((t) => t && t.kind === 'playbook-update' && typeof t.key === 'string')
+      .map((t) => t.key);
+    return this.playbooks.acknowledge(meta.id, { shownKeys });
   }
 
   // C6's package format has no safe defaults; C2's Ask reads this.

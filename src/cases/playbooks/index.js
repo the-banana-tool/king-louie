@@ -47,6 +47,9 @@ function installPlaybooks(runtime, { getSettings = () => ({}), examplesDir = nul
     // A failure here never blocks or fails the turn: it is logged, and the
     // model sees a fixed note instead of the error text (C2's own catch would
     // put err.message, which can quote package text, in the orientation).
+    // Keep this hook synchronous and bounded (no network, no git, no waiting
+    // on the manager's per-case chain): C2's _runHooks awaits it with no
+    // timeout while the turn holds the case lock.
     runtime.addTurnStartHook('playbooks', async (ctx) => {
       try {
         ensureBriefRules();

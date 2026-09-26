@@ -7,7 +7,7 @@ const { norm } = require('../jsonl');
 const { BriefError } = require('../brief');
 const { caseTypes } = require('./case-types-bridge');
 // Third-party text folded to one line and capped (shared with the frame).
-const { oneLine } = require('./frame');
+const { oneLine, neutralize } = require('./frame');
 // The brief fields an owner's gating answer may fill (spec §3.6). A playbook
 // names the field; only the owner's answer fills it. Never resources (R41),
 // materiality, safeDefaults or a case type's own fields. why and
@@ -285,13 +285,18 @@ function syncGating(runtime, caseId, { gatingQuestionsFor = caseTypes().gatingQu
       if (otherSatisfied(m, facts)) continue;
       if (activeOn(facts, m.key).some((f) => f.provenance === 'unknown')) continue;
       const label = labelOf(m.origins[0]);
+      // facts.jsonl is append-only and its text reaches the orientation,
+      // Ledger reads and the cross-case index outside any playbook frame
+      // (ruling T12-unknowns): package text is neutralised, one-lined and
+      // capped before it is written, never after.
+      const safe = (v, max) => oneLine(neutralize(String(v ?? '')), max);
       const u = ledger.unknown({
-        stmt: m.text,
+        stmt: safe(m.text, MAX_TEXT),
         subject: m.fact.subject,
         attr: m.fact.attr,
-        changes: m.changes || `Playbook gating: ${label}`,
+        changes: m.changes ? safe(m.changes, MAX_NOTE) : `Playbook gating: ${label}`,
         answerable: m.answerable,
-        how: m.how || `Resolve with ${m.answerable}`,
+        how: m.how ? safe(m.how, MAX_NOTE) : `Resolve with ${m.answerable}`,
         loadBearing: m.required,
         addedBy: `gating:${label}`
       });

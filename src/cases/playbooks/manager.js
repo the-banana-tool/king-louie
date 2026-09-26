@@ -906,13 +906,18 @@ class PlaybookManager {
   // Takes no lock and does not commit: call it only from C2's Reorient
   // (runtime.acknowledgePlaybooks) inside a turn that holds the case lock
   // and commits. Never call it from IPC or anywhere outside a turn.
-  acknowledge(caseId) {
+  // shownKeys: the playbook-update trigger keys the turn showed the model.
+  // Only a change whose current key is among them is acknowledged; one that
+  // moved on mid-turn (new key) stays pending. No keys, nothing acknowledged.
+  acknowledge(caseId, { shownKeys = [] } = {}) {
     const meta = this.runtime.getCase(caseId);
     const entries = this._loader(meta).list();
-    const pending = changes.computeChanges(entries, changes.readState(meta.dir).acknowledged);
     const state = changes.readState(meta.dir);
+    const shown = new Set(Array.isArray(shownKeys) ? shownKeys.filter((k) => typeof k === 'string') : []);
+    const pending = changes.computeChanges(entries, state.acknowledged).filter((c) => shown.has(c.key));
+    const names = new Set(pending.map((c) => c.name));
     const pins = (meta.playbooks || []).map((p) => {
-      const e = p && entries.find((x) => x.name === p.name);
+      const e = p && names.has(p.name) && entries.find((x) => x.name === p.name);
       if (!e || e.state !== 'ok') return p;
       return {
         ...p,
@@ -924,7 +929,7 @@ class PlaybookManager {
     });
     this.runtime.store.updateMeta(meta.id, { playbooks: pins });
     const fresh = this._loader(this.runtime.getCase(meta.id)).list();
-    for (const e of fresh) if (e.pinned) state.acknowledged[e.name] = changes.snapshotOf(e);
+    for (const e of fresh) if (e.pinned && names.has(e.name)) state.acknowledged[e.name] = changes.snapshotOf(e);
     changes.writeState(meta.dir, state);
     const synced = this._sync(this.runtime.getCase(meta.id));
     return { acknowledged: pending.map((c) => c.name), questionIds: synced.created };
