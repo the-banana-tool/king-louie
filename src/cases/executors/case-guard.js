@@ -47,7 +47,9 @@ const PROFILE_FREE = new Set(['start', 'stop', 'status', 'profile_list', 'profil
 let host = { getCaseRuntime: () => null, dataDir: null, browserProfile: readBrowserProfile };
 
 // createCore calls this once: a child's guardContext is only { caseId }.
-// browserProfile: tests only.
+// browserProfile: tests only. Module-global (final review minor 11): the
+// last createCore in a process wins. Production runs one core per process;
+// a host with several cores in one process would need this keyed by runtime.
 function configureCaseGuard({ getCaseRuntime = null, dataDir = null, browserProfile = null } = {}) {
   host = {
     getCaseRuntime: typeof getCaseRuntime === 'function' ? getCaseRuntime : () => null,

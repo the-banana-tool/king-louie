@@ -246,6 +246,8 @@ describe('jobs', () => {
 });
 
 describe('global daily cap', () => {
+  // reserveContacts' critical section has no await, so this passes without
+  // the mutex too; it pins the behaviour the mutex keeps once one is added.
   it('global cap is shared across cases under the mutex', async () => {
     const env = fx.setupExecutors();
     fx.withFakeAgent(env);

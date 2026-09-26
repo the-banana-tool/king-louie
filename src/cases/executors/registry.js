@@ -276,6 +276,10 @@ class ExecutorRegistry {
     }
   }
 
+  // Uncached on purpose (final review minor 10): every get(), list() and
+  // poll re-runs checkPackage (walk, hash, service ownership) so a package
+  // changed on disk is refused at once. The reference package is a few small
+  // files; a cache keyed on directory mtimes would miss an in-place edit.
   _resolve(id, caseId = null) {
     const base = this._base(id);
     if (!base) return null;
@@ -433,6 +437,9 @@ class ExecutorRegistry {
       return { ok: false, used: 0, limit, day: null, error: 'the number of contacts to reserve must be a finite number' };
     }
     const add = Math.max(0, Math.floor(count));
+    // The section below has no await today, so JavaScript's single thread
+    // already serializes it; the mutex is what keeps it correct once an
+    // await (an async read, a remote store) is added (final review minor 9).
     return this.mutex.run('usage', async () => {
       const data = this._readObject(this.usagePath);
       const tz = this._capTimeZone(entry);
