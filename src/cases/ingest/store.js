@@ -329,6 +329,7 @@ module.exports = {
   ACCEPTED_MIME,
   DOC_ID,
   cleanName,
+  oneLine,
   sniffType,
   checkSize,
   sha256,
