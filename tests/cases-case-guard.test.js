@@ -74,7 +74,9 @@ describe('web tools and data-dir writes', () => {
     assert.strictEqual(caseToolGuard('MultiEdit', { edits: [{ file_path: path.join(env.dataDir, 'executors', 'phone-agent', 'adapter.js') }] }, ctx).success, false);
     assert.strictEqual(caseToolGuard('Write', { file_path: path.join(env.dataDir, 'notes.md') }, ctx), null);
     // Final review minor 8: the settings store holds executors.entries and pins.
-    for (const name of ['chat-data.json', 'config.json', 'Chat-Data.json']) {
+    // Case-folded only where the file system folds case (Windows, macOS).
+    const names = ['chat-data.json', 'config.json', ...(['win32', 'darwin'].includes(process.platform) ? ['Chat-Data.json'] : [])];
+    for (const name of names) {
       assert.strictEqual(caseToolGuard('Write', { file_path: path.join(env.dataDir, name), content: '{}' }, ctx).success, false, name);
     }
   });
