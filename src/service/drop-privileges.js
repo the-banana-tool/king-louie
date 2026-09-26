@@ -8,9 +8,11 @@
 // is one-way for the calling process (`mcp` calls it on itself; enroll-device
 // calls it in its forked courier child, src/service/courier-child.js).
 //
-// A root-owned data dir has no service account to become and is refused.
-// `proc` and `fsImpl` are injectable for tests; on Windows there is no
-// getuid and this is a no-op.
+// A root-owned data dir means the service itself runs as root: there is no
+// lower account to drop to, and none that could swap a link under root
+// either, so the caller goes ahead as root (ruling T13-rootdir; `mcp` and
+// enroll-device behave the same). `proc` and `fsImpl` are injectable for
+// tests; on Windows there is no getuid and this is a no-op.
 const fs = require('fs');
 
 function isRoot(proc = process) {
@@ -27,13 +29,16 @@ function dataDirOwner(dataDir, { fsImpl = fs, who = 'this command' } = {}) {
   return { uid: st.uid, gid: st.gid };
 }
 
-// → { uid, gid } when it dropped, null when not root (nothing to do).
+// → { dropped: true, uid, gid } when it dropped;
+//   { dropped: false, reason: 'not-root' } when not root (nothing to do);
+//   { dropped: false, reason: 'root-owned', uid: 0, gid } when the data dir
+//   is root's (the service runs as root; nothing lower to drop to).
+// Throws (refuses) for a data dir that is not a real directory, or when the
+// drop fails or does not take.
 function dropToDataDirOwner(dataDir, { proc = process, fsImpl = fs, who = 'this command' } = {}) {
-  if (!isRoot(proc)) return null;
+  if (!isRoot(proc)) return { dropped: false, reason: 'not-root' };
   const { uid, gid } = dataDirOwner(dataDir, { fsImpl, who });
-  if (uid === 0) {
-    throw new Error(`refusing to run ${who} as root: ${dataDir} is owned by root, so there is no service account to run as; run ${who} as the service account`);
-  }
+  if (uid === 0) return { dropped: false, reason: 'root-owned', uid, gid };
   try {
     if (typeof proc.setgroups === 'function') proc.setgroups([]);
     proc.setgid(gid);
@@ -44,7 +49,7 @@ function dropToDataDirOwner(dataDir, { proc = process, fsImpl = fs, who = 'this 
   if (proc.getuid() !== uid || proc.geteuid() !== uid) {
     throw new Error(`refusing to run ${who} as root: still running as uid ${proc.getuid()}/${proc.geteuid()} after dropping to the data dir's owner (uid ${uid})`);
   }
-  return { uid, gid };
+  return { dropped: true, uid, gid };
 }
 
 module.exports = { isRoot, dataDirOwner, dropToDataDirOwner };

@@ -25,8 +25,8 @@ function dataDir() {
   fs.writeFileSync(path.join(d, 'service.pid'), String(process.pid));
   fs.mkdirSync(path.join(d, 'approvals'), { recursive: true });
   fs.writeFileSync(path.join(d, 'approvals', 'link.json'), JSON.stringify(LINK));
-  // As POSIX root the helper drops to the data dir's owner and refuses a
-  // root-owned one: give it a service account.
+  // As POSIX root the helper drops to the data dir's owner: give the data
+  // dir a service account so the drop is what runs.
   if (typeof process.getuid === 'function' && process.getuid() === 0) {
     for (const p of [d, path.join(d, 'approvals'), path.join(d, 'approvals', 'link.json')]) fs.chownSync(p, 1000, 1000);
   }
@@ -64,10 +64,12 @@ describe('drop-privileges', () => {
     assert.equal(isRoot({}), false);
   });
 
-  it('names the command in its refusal', () => {
+  it('names the command in its refusal; a root-owned data dir is not refused (T13-rootdir)', () => {
     const proc = { getuid: () => 0, geteuid: () => 0 };
-    const fsImpl = { lstatSync: () => ({ uid: 0, gid: 0, isDirectory: () => true, isSymbolicLink: () => false }) };
-    assert.throws(() => dropToDataDirOwner('/d', { proc, fsImpl, who: 'enroll-device' }), /refusing to run enroll-device as root: \/d is owned by root/);
+    const linked = { lstatSync: () => ({ uid: 1000, gid: 1000, isDirectory: () => false, isSymbolicLink: () => true }) };
+    assert.throws(() => dropToDataDirOwner('/d', { proc, fsImpl: linked, who: 'enroll-device' }), /refusing to run enroll-device as root: \/d is not a real directory/);
+    const rootOwned = { lstatSync: () => ({ uid: 0, gid: 0, isDirectory: () => true, isSymbolicLink: () => false }) };
+    assert.deepEqual(dropToDataDirOwner('/d', { proc, fsImpl: rootOwned, who: 'enroll-device' }), { dropped: false, reason: 'root-owned', uid: 0, gid: 0 });
   });
 });
 

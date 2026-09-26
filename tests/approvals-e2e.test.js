@@ -28,9 +28,9 @@ const { createFakePhone } = require('./helpers/fake-phone');
 const BIN = path.join(__dirname, '..', 'bin', 'king-louie-service.js');
 const CAN_RUN = process.platform === 'win32' || (typeof process.getuid === 'function' && process.getuid() === 0);
 // On POSIX this test runs as root. The node's service runs as a service
-// account, as it does when installed: `mcp`, run as root, drops to the data
-// dir's owner and refuses a root-owned data dir (fleet stage 4, ruling
-// T13-dropprivs).
+// account, as it does when installed: `mcp` and enroll-device, run as root,
+// drop to the data dir's owner before any courier write (fleet stage 4,
+// rulings T13-dropprivs and T13-enroll), which this exercises.
 const POSIX_ROOT = process.platform !== 'win32' && typeof process.getuid === 'function' && process.getuid() === 0;
 const SERVICE_UID = 1000;
 const SERVICE_GID = 1000;

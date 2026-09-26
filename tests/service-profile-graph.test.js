@@ -114,8 +114,8 @@ describe('mcp module graph, courier branch', () => {
     fs.writeFileSync(path.join(configDir, 'node.yaml'), 'name: web-01\nprofile: runbook\n', { mode: 0o644 });
     const adminUid = typeof process.geteuid === 'function' ? process.geteuid() : 0;
     if (typeof process.getuid === 'function' && process.getuid() === 0) {
-      // As root, mcp drops to the data dir's owner and refuses a root-owned
-      // one (ruling T13-dropprivs): give the data dir a service account.
+      // As root, mcp drops to the data dir's owner (ruling T13-dropprivs):
+      // give the data dir a service account so that path is the one taken.
       fs.chmodSync(base, 0o755);
       for (const d of ['', 'approvals', 'approvals/inbox', 'approvals/outbox']) fs.chownSync(path.join(dataDir, d), 1000, 1000);
     }

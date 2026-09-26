@@ -423,11 +423,16 @@ describe('mcp run as root (review item 7)', () => {
     assert.equal(r.inbox[0].uid, 1000);
   });
 
-  it('as root, a root-owned data dir is refused', { skip: !IS_ROOT && 'needs POSIX root' }, () => {
+  it('as root, a root-owned data dir (the service runs as root) works as root, without a drop', { skip: !IS_ROOT && 'needs POSIX root' }, () => {
     const l = layout();
     courierDirs(l);
     const r = runMcpChild(l);
-    assert.match(r.error || '', /refusing to run mcp as root: .* is owned by root/);
+    assert.equal(r.error, undefined, r.error);
+    assert.equal(r.uid, 0);
+    assert.equal(r.euid, 0);
+    const requests = r.outbox.filter((f) => /^\d+-[a-f0-9]{8}\.json$/.test(f.name));
+    assert.equal(requests.length, 1, JSON.stringify(r.outbox));
+    assert.equal(requests[0].uid, 0);
   });
 
   describe('dropToDataDirOwner (any platform, injected process)', () => {
@@ -448,18 +453,23 @@ describe('mcp run as root (review item 7)', () => {
 
     it('clears groups, then sets gid, then uid, and verifies', () => {
       const proc = fakeProc();
-      assert.deepEqual(dropToDataDirOwner('/d', { proc, fsImpl: fakeFs(1000, 1001) }), { uid: 1000, gid: 1001 });
+      assert.deepEqual(dropToDataDirOwner('/d', { proc, fsImpl: fakeFs(1000, 1001) }), { dropped: true, uid: 1000, gid: 1001 });
       assert.deepEqual(proc.calls, [['setgroups', []], ['setgid', 1001], ['setuid', 1000]]);
     });
 
     it('does nothing when not root', () => {
       const proc = fakeProc({ uid: 1000 });
-      assert.equal(dropToDataDirOwner('/d', { proc, fsImpl: fakeFs(1000, 1000) }), null);
+      assert.deepEqual(dropToDataDirOwner('/d', { proc, fsImpl: fakeFs(1000, 1000) }), { dropped: false, reason: 'not-root' });
       assert.deepEqual(proc.calls, []);
     });
 
-    it('refuses a root-owned or linked data dir, a failed setuid, and a drop that did not take', () => {
-      assert.throws(() => dropToDataDirOwner('/d', { proc: fakeProc(), fsImpl: fakeFs(0, 0) }), /owned by root/);
+    it('goes ahead as root for a root-owned data dir without touching ids (T13-rootdir)', () => {
+      const proc = fakeProc();
+      assert.deepEqual(dropToDataDirOwner('/d', { proc, fsImpl: fakeFs(0, 0) }), { dropped: false, reason: 'root-owned', uid: 0, gid: 0 });
+      assert.deepEqual(proc.calls, []);
+    });
+
+    it('refuses a linked data dir, a failed setuid, and a drop that did not take', () => {
       assert.throws(() => dropToDataDirOwner('/d', { proc: fakeProc(), fsImpl: fakeFs(1000, 1000, { link: true }) }), /not a real directory/);
       assert.throws(() => dropToDataDirOwner('/d', { proc: fakeProc({ failSetuid: true }), fsImpl: fakeFs(1000, 1000) }), /could not become/);
       assert.throws(() => dropToDataDirOwner('/d', { proc: fakeProc({ sticky: true }), fsImpl: fakeFs(1000, 1000) }), /still running as uid 0\/0/);

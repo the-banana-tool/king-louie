@@ -43,7 +43,9 @@ function assertCourierDirsSafe(dataDir, { getuid = defaultGetuid, fsImpl = fs } 
 
 // Ruling T13-dropprivs: run as root against a running service, `mcp`
 // becomes the data dir's owner, once, before the courier writes anything
-// (src/service/drop-privileges.js); a root-owned data dir is refused.
+// (src/service/drop-privileges.js); with a root-owned data dir (the service
+// runs as root) there is no lower account and it goes ahead as root
+// (ruling T13-rootdir).
 function dropToDataDirOwner(dataDir, { proc = process, fsImpl = fs } = {}) {
   return dropHelper(dataDir, { proc, fsImpl, who: 'mcp' });
 }
@@ -66,8 +68,9 @@ async function runMcp({ dataDir, io, deps = {} }) {
     assertCourierDirsSafe(dataDir, { getuid: () => (isRoot(proc) ? 0 : -1) });
     const { FileCourier } = require('../../approvals/courier');
     const { CourierFleetClient } = require('../../fleet/courier-client');
-    const dropped = dropToDataDirOwner(dataDir, { proc });
-    if (dropped) log.info(`running as the data dir's owner (uid ${dropped.uid}, gid ${dropped.gid})`);
+    const drop = dropToDataDirOwner(dataDir, { proc });
+    if (drop.dropped) log.info(`running as the data dir's owner (uid ${drop.uid}, gid ${drop.gid})`);
+    else if (drop.reason === 'root-owned') log.info('the data dir is root\'s (the service runs as root): running as root');
     const courier = new FileCourier({ dataDir }).start();
     const server = new StdioMcpServer({ handler: new CourierFleetClient({ courier, nodeConfig: nodeCfg }), stdin: io.stdin, stdout: io.stdout });
     server.start();

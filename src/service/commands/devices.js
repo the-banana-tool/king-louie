@@ -75,7 +75,9 @@ async function runEnrollDevice({ dataDir, configDir = adminConfigDir({ dataDir }
   // link.json) runs in a forked helper that has dropped to the data dir's
   // owner (src/service/courier-proxy.js). Not root, or a root-owned data dir
   // (the service itself runs as root, so there is no less-privileged owner
-  // who could swap a link), the courier runs in process as before.
+  // who could swap a link; ruling T13-rootdir, the same rule as
+  // dropToDataDirOwner's 'root-owned'), the courier runs in process as
+  // before.
   const useChild = deps.courierProcess
     ? deps.courierProcess === 'child'
     : isRoot() && dataDirOwner(dataDir, { who: 'enroll-device' }).uid !== 0;
