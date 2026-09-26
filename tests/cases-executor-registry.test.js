@@ -100,6 +100,21 @@ describe('resolution', () => {
     assert.deepStrictEqual([b.available, b.reason, b.constraints.callingWindow], [false, 'disabled for this case', { tz: 'UTC', start: '10:00', end: '12:00', weekdays: [1, 2] }]);
   });
 
+  // Final review I2: the floors come from the base capabilities, so an
+  // override that narrows the tools never lowers the gate mode or authority.
+  it('an override that removes the outbound capability keeps message mode and the envelope', async () => {
+    const env = fx.setupExecutors();
+    fx.withFakeAgent(env, 'fake-agent', { entry: { outbound: 'none', authority: 'none' } });
+    const c = await env.runtime.createCase({ title: 'Lakeside lot', objective: 'Convert the lot to cash' });
+    const base = env.registry.get('fake-agent');
+    assert.deepStrictEqual([base.outbound, base.authority], ['message', 'envelope'], 'the floor raises a bare entry');
+    for (const capabilities of [['voicemail'], []]) {
+      writeJsonAtomic(path.join(c.dir, '.kl', 'executors.json'), { 'fake-agent': { override: { capabilities } } });
+      const e = env.registry.get('fake-agent', { caseId: c.id });
+      assert.deepStrictEqual([e.capabilities, e.outbound, e.authority], [capabilities, 'message', 'envelope'], JSON.stringify(capabilities));
+    }
+  });
+
   it('in service mode takes entries only from the admin config and admin roots', () => {
     const env = fx.setupExecutors({ registryOptions: { isService: true, adminExecutors: { entries: {}, packageRoots: [] } } });
     fx.withFakeAgent(env);

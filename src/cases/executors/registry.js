@@ -21,6 +21,7 @@ const CaseResearcherAgent = require('../../agents/builtin/case-researcher');
 
 const log = createLogger('executors');
 const AUTHORITY_RANK = Object.freeze({ none: 0, envelope: 1, signed: 2 });
+const OUTBOUND_RANK = Object.freeze({ none: 0, query: 1, message: 2 });
 // What settings may change on a built-in (spec §3.1).
 const BUILTIN_SETTABLE = new Set(['constraints', 'cost', 'latency', 'pollEveryMs']);
 const OVERRIDE_KEYS = new Set(['disabled', 'capabilities', 'constraints', 'briefRules', 'authority']);
@@ -291,9 +292,18 @@ class ExecutorRegistry {
       entry.available = false;
       entry.reason = 'no workflow engine on this node';
     }
+    // Final review I2: the floors come from the admin/base capabilities,
+    // before any case override. An override narrows the tools only; it never
+    // lowers the gate mode or the authority those capabilities set.
+    this._floors(entry, warnings);
     if (caseId) {
       const override = this._override(id, caseId);
-      if (override) this._narrow(entry, override, warnings);
+      if (override) {
+        const floor = { outbound: entry.outbound, authority: entry.authority };
+        this._narrow(entry, override, warnings);
+        if (OUTBOUND_RANK[entry.outbound] < OUTBOUND_RANK[floor.outbound]) entry.outbound = floor.outbound;
+        if ((AUTHORITY_RANK[entry.authority] ?? 0) < (AUTHORITY_RANK[floor.authority] ?? 0)) entry.authority = floor.authority;
+      }
     }
     this._floors(entry, warnings);
     entry.warnings = warnings;
