@@ -1,6 +1,6 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { parseYaml, findAnchorOrAlias } = require('../src/platform/yaml');
+const { parseYaml } = require('../src/platform/yaml');
 
 describe('YAML Parser', () => {
   it('parses node.yaml structure correctly', () => {
@@ -120,23 +120,33 @@ tier: routine # trailing comment
     assert.equal(parseYaml('when: 2026-09-21\n').when, '2026-09-21');
   });
 
-  it('a tagged, quoted value still parses (the tag property does not eat the real node)', () => {
-    // The old js-yaml round trip for this exact input is exercised above
-    // (it throws on the unknown tag); this checks the alias scanner alone
-    // doesn't misfire on the tag + quoted-value sequence before js-yaml
-    // ever sees it.
-    assert.equal(findAnchorOrAlias('f: !!str "hello"\n'), null);
-  });
-
-  it('refuses an anchor or an alias, but not "&"/"*" inside a plain scalar', () => {
+  it('refuses a block-style anchor or alias, but not "&"/"*" inside a plain or quoted scalar', () => {
     assert.throws(() => parseYaml('a: &x [1, 2]\n'), { code: 'YAML_ALIAS_NOT_ALLOWED' });
     assert.throws(() => parseYaml('a: &x [1, 2]\nb: *x\n'), { code: 'YAML_ALIAS_NOT_ALLOWED' });
-    assert.throws(() => parseYaml('<<: *base\n'), { code: 'YAML_ALIAS_NOT_ALLOWED' });
-    assert.throws(() => parseYaml('items: [*a, *a]\n'), { code: 'YAML_ALIAS_NOT_ALLOWED' });
-    // Not at a node-start position: ordinary text, left alone.
+    // A merge key is just an alias by another name (<<: *anchor): the
+    // anchor it references is refused at its own definition, well before
+    // the merge would ever resolve it.
+    assert.throws(() => parseYaml('base: &base { x: 1 }\n<<: *base\n'), { code: 'YAML_ALIAS_NOT_ALLOWED' });
+    assert.throws(() => parseYaml('a: &x 1\nitems: [*x, *x]\n'), { code: 'YAML_ALIAS_NOT_ALLOWED' });
+    // Ordinary content, not structure: left alone.
     assert.equal(parseYaml('description: Fish & Chips\n').description, 'Fish & Chips');
     assert.equal(parseYaml('note: 5 * 3 = 15\n').note, '5 * 3 = 15');
     assert.equal(parseYaml("allow: ['Bash(*deploy*)']\n").allow[0], 'Bash(*deploy*)');
+  });
+
+  it('refuses a flow-style anchor/alias and a document-level anchor (the old text scanner missed both)', () => {
+    assert.throws(() => parseYaml('{"a": &x [1, 2], "b": *x}\n'), { code: 'YAML_ALIAS_NOT_ALLOWED' });
+    assert.throws(() => parseYaml('--- &x [1, 2]\n'), { code: 'YAML_ALIAS_NOT_ALLOWED' });
+  });
+
+  it('parses a block scalar containing lines that start with "*" or "&" (the old text scanner refused these)', () => {
+    // A runbook script line and a markdown bullet/ampersand line, inside
+    // `|`/`>` block scalars: none of this is YAML structure, so none of it
+    // should ever be checked for an anchor or alias.
+    const cron = parseYaml('run: |\n  0 * * * * root /usr/bin/foo\n  echo &background &\n');
+    assert.equal(cron.run, '0 * * * * root /usr/bin/foo\necho &background &\n');
+    const bullets = parseYaml('description: |\n  * bullet one\n  * bullet two\n  & co\n');
+    assert.equal(bullets.description, '* bullet one\n* bullet two\n& co\n');
   });
 
   it('refuses a nested-alias bomb quickly instead of building it', () => {
@@ -150,6 +160,18 @@ tier: routine # trailing comment
     }
     const bomb = lines.join('\n');
     assert.ok(bomb.length < 2048, 'the source itself stays small');
+    const start = Date.now();
+    assert.throws(() => parseYaml(bomb), { code: 'YAML_ALIAS_NOT_ALLOWED' });
+    assert.ok(Date.now() - start < 1000, 'refusal must be fast, not proportional to the expanded size');
+  });
+
+  it('refuses a flow-style (map-alias) bomb quickly, an ~850-byte source that would otherwise expand hugely', () => {
+    const lines = ['a0: &a0 {x: 1, y: 2}'];
+    for (let i = 1; i < 8; i += 1) {
+      lines.push(`a${i}: &a${i} {p: *a${i - 1}, q: *a${i - 1}}`);
+    }
+    const bomb = lines.join('\n');
+    assert.ok(bomb.length < 1024, 'the source itself stays small');
     const start = Date.now();
     assert.throws(() => parseYaml(bomb), { code: 'YAML_ALIAS_NOT_ALLOWED' });
     assert.ok(Date.now() - start < 1000, 'refusal must be fast, not proportional to the expanded size');
