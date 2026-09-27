@@ -164,6 +164,35 @@ describe('front-door phone routes', () => {
     assert.deepEqual(await t.call(A, 'POST', `/v1/pairings/${id}/decision`, deny), { status: 200, body: { state: 'denied' } });
   });
 
+  // Final review carry 2: a failed nodes.json save during addSigned left the
+  // replaced node gone from memory (its link up), the new one half-trusted,
+  // the raw fs error on the phone, and a retry that lost the replaced alert
+  // and audit entry.
+  it('a re-pair whose nodes.json save fails is rolled back: 503 save_failed, no fs text, and the retry replaces and audits once', async () => {
+    const t = await setup();
+    const first = await enrolled(t);
+    const second = nodeKit('gpu-box');
+    const { code } = await t.pairing.issue('gpu-box', { by: A.deviceId });
+    const id = open(t.pairing.submit(second.pair(code)).envelope).message.pairing_id;
+    const approve = A.enrollNode({ frontdoorId: FD.nodeId, pairing: t.pairing.pending().find((p) => p.pairing_id === id) });
+    const events = [];
+    t.registry.on('replaced', (e) => events.push(['replaced', e.oldId]));
+    t.registry.on('change', () => events.push(['change']));
+    const save = t.registry._savePhone;
+    t.registry._savePhone = () => { throw Object.assign(new Error('ENOSPC: no space left on device, open \'/srv/secret/nodes.json.tmp\''), { code: 'ENOSPC' }); };
+    const failed = await t.call(A, 'POST', `/v1/pairings/${id}/decision`, approve);
+    assert.deepEqual([failed.status, failed.body.error, failed.body.retry_after], [503, 'save_failed', 1]);
+    assert.ok(!JSON.stringify(failed.body).includes('ENOSPC') && !JSON.stringify(failed.body).includes('/srv/secret'), JSON.stringify(failed.body));
+    assert.equal(t.registry.byName('gpu-box').node_id, first.identity.nodeId, 'the old node is still enrolled');
+    assert.equal(t.registry.byId(second.identity.nodeId), null, 'the new node is not');
+    assert.deepEqual(events, []);
+    t.registry._savePhone = save;
+    assert.deepEqual(await t.call(A, 'POST', `/v1/pairings/${id}/decision`, approve), { status: 200, body: { state: 'enrolled' } });
+    assert.equal(t.registry.byName('gpu-box').node_id, second.identity.nodeId);
+    assert.deepEqual(events, [['replaced', first.identity.nodeId], ['change']]);
+    assert.equal(t.audit.filter((e) => e.kind === 'frontdoor.node.replaced').length, 1);
+  });
+
   it('maps every decision refusal to its status and keeps the reason code', async () => {
     let code = null;
     const pairingStub = { issue: async () => ({}), pending: () => [], decide: async () => { throw err(code, `refused: ${code}`); } };

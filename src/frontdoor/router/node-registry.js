@@ -309,10 +309,22 @@ class NodeRegistry extends EventEmitter {
     }
     const removed = new Set();
     for (const old of [sameName, replacing]) if (old && old.node_id !== m.node_id) removed.add(old.node_id);
+    // Nothing changes unless nodes.json is saved: on a failed save the old
+    // node stays enrolled (its link and pin with it) and the new one is not,
+    // so the phone's retry replaces, alerts and audits as if first.
+    const before = new Map(this.nodes);
+    const removal = this.removals.get(record.node_id);
     for (const id of removed) this.nodes.delete(id);
     this.nodes.set(record.node_id, record);
     this.removals.delete(record.node_id);
-    this._savePhone();
+    try {
+      this._savePhone();
+    } catch (e) {
+      this.nodes = before;
+      if (removal) this.removals.set(record.node_id, removal);
+      log.error(`saving ${this.phoneFile} failed (${e.code || e.message}); ${record.node_id} was not enrolled`);
+      throw err('save_failed', 'the enrollment could not be saved; try again');
+    }
     for (const id of removed) this.emit('replaced', { oldId: id, newId: record.node_id });
     this.emit('change');
     return record;
