@@ -615,7 +615,7 @@ describe('owner review through IngestService', { skip: require('./helpers/ingest
     const [p] = files.readRecord(h.dir, docId).proposals;
     assert.deepStrictEqual(p.checks.conflicts, [{ factId: 'f-0001', provenance: 'user', value: 180000 }]);
     const all = await h.svc.acceptVerified(h.caseId, docId, { by: 'panel' });
-    assert.deepStrictEqual(all, { accepted: [], skipped: [{ pid: 'p-001', why: 'it conflicts with f-0001' }] });
+    assert.deepStrictEqual(all, { accepted: [], skipped: [{ pid: 'p-001', code: 'CONFLICTS', why: 'it conflicts with f-0001' }] });
     await assert.rejects(h.svc.review(h.caseId, docId, 'p-001', { action: 'accept' }), (e) => e.code === 'CONFLICT' && /which the owner stated/.test(e.message));
     await assert.rejects(h.svc.review(h.caseId, docId, 'p-001', { action: 'accept', keepBoth: true }), (e) => e.code === 'CONFLICT');
     await assert.rejects(h.svc.review(h.caseId, docId, 'p-001', { action: 'accept', supersedes: 'f-0009' }), (e) => e.code === 'BAD_SUPERSEDES');
@@ -683,7 +683,7 @@ describe('owner review through IngestService', { skip: require('./helpers/ingest
     const [p] = files.readRecord(h.dir, out.docId).proposals;
     assert.deepStrictEqual(p.checks.verify, { agrees: null, note: 'not checked against the image', sawImage: false });
     const r = await h.svc.acceptVerified(h.caseId, out.docId, { by: 'panel' });
-    assert.deepStrictEqual(r, { accepted: [], skipped: [{ pid: 'p-001', why: 'not verified (not checked against the image)' }] });
+    assert.deepStrictEqual(r, { accepted: [], skipped: [{ pid: 'p-001', code: 'NOT_VERIFIED', why: 'not verified (not checked against the image)' }] });
     const { fact } = await h.svc.review(h.caseId, out.docId, 'p-001', { action: 'accept' });
     assert.deepStrictEqual([fact.source.verified, fact.source.ocr], ['anchor', true]);
   });
@@ -742,6 +742,7 @@ describe('owner review through IngestService', { skip: require('./helpers/ingest
     assert.deepStrictEqual(all.accepted, []);
     assert.strictEqual(all.skipped.length, 1);
     assert.match(all.skipped[0].why, /f-0001/);
+    assert.strictEqual(all.skipped[0].code, 'CONFLICTS');
     await assert.rejects(h.svc.review(h.caseId, docId, 'p-001', { action: 'accept' }), (e) => e.code === 'CONFLICT');
     await assert.rejects(h.svc.review(h.caseId, docId, 'p-001', { action: 'edit', edit: { stmt: 'Payoff restated' } }), (e) => e.code === 'CONFLICT');
     assert.deepStrictEqual(activeUser(h).map((f) => f.id), ['f-0001']);
@@ -754,12 +755,14 @@ describe('owner review through IngestService', { skip: require('./helpers/ingest
     const r1 = await value.h.svc.acceptVerified(value.h.caseId, value.docId, { by: 'panel' });
     assert.deepStrictEqual(r1.accepted, []);
     assert.match(r1.skipped[0].why, /value is not in the quoted text/);
+    assert.strictEqual(r1.skipped[0].code, 'VALUE_NOT_QUOTED');
     // A duplicate asserted after the check: the recorded duplicateOf is stale.
     const dup = await reviewed();
     dup.h.runtime.ledger(dup.h.caseId).assert({ stmt: 'Payoff', subject: 'loan-0042-7781', attr: 'payoff-amount', value: 182340.17, provenance: 'sourced', source: { kind: 'url', ref: 'https://records.example.org/p' } });
     const r2 = await dup.h.svc.acceptVerified(dup.h.caseId, dup.docId, { by: 'panel' });
     assert.deepStrictEqual(r2.accepted, []);
     assert.match(r2.skipped[0].why, /duplicates f-0001/);
+    assert.strictEqual(r2.skipped[0].code, 'DUPLICATE');
     assert.strictEqual(dup.h.runtime.ledger(dup.h.caseId).view().facts.size, 1);
   });
 
@@ -777,6 +780,7 @@ describe('owner review through IngestService', { skip: require('./helpers/ingest
     const r = await h.svc.acceptVerified(h.caseId, docId, { by: 'panel' });
     assert.deepStrictEqual(r.accepted, []);
     assert.match(r.skipped[0].why, /not on page 1/);
+    assert.strictEqual(r.skipped[0].code, 'ANCHOR_CHANGED');
     // The anchor flag must agree with the page it names.
     const mixed = await reviewed();
     forge(mixed.h, mixed.docId, (rec) => { rec.proposals[0].anchor.ocr = true; rec.proposals[0].checks.verify.sawImage = true; });
@@ -835,6 +839,7 @@ describe('owner review through IngestService', { skip: require('./helpers/ingest
       const r = await h.svc.acceptVerified(h.caseId, docId, { by: 'panel' });
       assert.deepStrictEqual(r.accepted, []);
       assert.match(r.skipped[0].why, /document changed/);
+      assert.strictEqual(r.skipped[0].code, 'DOC_CHANGED');
       await assert.rejects(h.svc.review(h.caseId, docId, 'p-001', { action: 'accept' }), (e) => e.code === 'DOC_CHANGED');
     }
     assert.strictEqual(h.runtime.ledger(h.caseId).view().facts.size, 0);

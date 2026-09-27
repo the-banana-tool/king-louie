@@ -425,9 +425,11 @@ and cron paused, so the service stays the only instance that acts.
 
 It reconnects with backoff 1, 2, 4, 8, 16, 30 s (capped, ±20 % jitter). The `ws` client
 gets no `agent`, so `HTTP_PROXY` is ignored, and it connects to the literal `127.0.0.1`.
-Timeouts: none for `chat:sendMessage`, `tool:execute`, `cron:run` and C7's
-`case:ingest*`, which are bounded by the connection. Everything else times out at 120 s
-with `BRIDGE_TIMEOUT`. Every error result carries `error` text as well as `code`.
+Timeouts: none for `chat:sendMessage`, `tool:execute` and `cron:run`, which are bounded
+by the connection. The slow case channels in `LONG_CHANNELS` (`src/desktop-bridge/allowlist.js`:
+C6's playbook channels and `case:create`, and C7's `case:ingestFiles`, `case:ingestExtract`,
+`case:reviewProposal` and `case:acceptVerified`) time out at 10 minutes. Everything else
+times out at 120 s with `BRIDGE_TIMEOUT`. Every error result carries `error` text as well as `code`.
 
 **Mode switches relaunch.** `desktop:attach`, `desktop:detach` and
 `desktop:standaloneOnce` persist the mode and call `app.relaunch(); app.exit(0)`. The

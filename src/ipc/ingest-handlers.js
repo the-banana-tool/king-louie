@@ -26,7 +26,7 @@ const { wrapHandler } = require('./wrap-handler');
 const IPC = require('./constants');
 const { CASE_ID_RE } = require('./playbook-handlers');
 const { createLogger } = require('../logging');
-const { DOC_ID, ACCEPTED_MIME, HIDDEN_CLASS, oneLine, cleanName } = require('../cases/ingest/store');
+const { DOC_ID, ACCEPTED_MIME, oneLine, cleanName } = require('../cases/ingest/store');
 const { PROPOSAL_ID } = require('../cases/ingest/review');
 const { PAGES_GRAMMAR } = require('../cases/ingest/extract-text');
 const { REVIEW_ACTIONS, EDITABLE, FACT_ID } = require('../cases/ingest');
@@ -59,11 +59,15 @@ const MAX_REFUSED_SHOWN = 200;
 const MAX_CASES_SHOWN = 20;
 const MAX_CONFLICTS_SHOWN = 20;
 
-// Line breaks and tabs, plus the shared hidden set (controls, bidi
-// embeddings, overrides and isolates, zero-width): none belongs in a file
-// name. Built from code points so no such character sits in this file.
-const NAME_BREAKS = [0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x85, 0x2028, 0x2029].map((c) => String.fromCodePoint(c)).join('');
-const UNSAFE_NAME = new RegExp(`[${HIDDEN_CLASS}${NAME_BREAKS}]`, 'u');
+// Refused in a file name: C0/C1 controls (tabs and line breaks among
+// them), the Unicode line and paragraph separators, and the bidi controls
+// that can reorder what the owner sees (LRM/RLM, Arabic letter mark,
+// embeddings and overrides, isolates). Other invisible characters (zero-
+// width joiners and variation selectors in emoji, for one) are allowed and
+// cleanName strips them. Built from code points so no such character sits
+// in this file.
+const UNSAFE_NAME_RANGES = [[0x0000, 0x001f], [0x007f, 0x009f], [0x2028, 0x2029], [0x200e, 0x200f], [0x061c, 0x061c], [0x202a, 0x202e], [0x2066, 0x2069]];
+const UNSAFE_NAME = new RegExp(`[${UNSAFE_NAME_RANGES.map(([a, b]) => `${String.fromCodePoint(a)}-${String.fromCodePoint(b)}`).join('')}]`, 'u');
 const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
 
 class BadArgument extends Error {}
@@ -196,6 +200,23 @@ const BY_CODE = Object.freeze({
   SHUTTING_DOWN: 'King Louie is shutting down. Try again later.',
   RUNTIME_CLOSING: 'King Louie is shutting down. Try again later.'
 });
+
+// Why Accept all verified skipped a proposal, by the code the service gives
+// (review.skipCode, the accept-time recheck, or a review error's code, which
+// falls back to BY_CODE); anything else gets SKIP_OTHER.
+const SKIP_WHY = Object.freeze({
+  BAD_PROPOSAL_ID: 'It has no valid proposal id.',
+  ALREADY_DONE: 'It was already reviewed.',
+  QUOTE_NOT_FOUND: 'Its quote was not found on the page.',
+  VALUE_NOT_QUOTED: 'Its value is not in the quoted text.',
+  CONFLICTS: 'It conflicts with an active fact.',
+  DUPLICATE: 'It duplicates an active fact.',
+  VERIFY_DISAGREES: 'The verify check disagrees with it.',
+  NOT_VERIFIED: 'It was not verified.',
+  IMAGE_NOT_CHECKED: 'It was read by OCR and not checked against the page image.',
+  CHECKS_CHANGED: 'Its recorded checks differ from a check made now.'
+});
+const SKIP_OTHER = 'It could not be accepted automatically.';
 
 const codeOf = (err) => (typeof err?.code === 'string' ? err.code : '');
 const logFailure = (channel, err) => log.warn(`${channel} failed: ${oneLine(`${codeOf(err) ? `${codeOf(err)}: ` : ''}${err?.message || err}`, 500)}`);
@@ -415,6 +436,10 @@ function registerIngestHandlers(ipcMain, context = {}) {
     }
     const results = [];
     for (const f of list) {
+      if (f.bytes === 0) {
+        results.push({ name: f.name, error: `Cannot ingest ${f.name}: it has no content.` });
+        continue;
+      }
       if (f.bytes > maxBytes) {
         results.push({ name: f.name, error: `Cannot ingest ${f.name}: it is larger than the ingest size limit.` });
         continue;
@@ -494,7 +519,13 @@ function registerIngestHandlers(ipcMain, context = {}) {
     return marked({
       ok: true,
       accepted: arr(out?.accepted).map(proposalId).filter(Boolean).slice(0, MAX_PROPOSALS_SHOWN),
-      skipped: arr(out?.skipped).filter(isObj).slice(0, MAX_PROPOSALS_SHOWN).map((s) => ({ pid: proposalId(s.pid), why: text(s.why, CAP.why) }))
+      skipped: arr(out?.skipped).filter(isObj).slice(0, MAX_PROPOSALS_SHOWN)        // A fixed sentence by code, never the service's text (which can
+        // quote the verify model's note), then "Review it in the panel."
+        .map((s) => {
+          const has = (map) => typeof s.code === 'string' && Object.prototype.hasOwnProperty.call(map, s.code);
+          const why = has(SKIP_WHY) ? SKIP_WHY[s.code] : has(BY_CODE) ? BY_CODE[s.code] : SKIP_OTHER;
+          return { pid: proposalId(s.pid), code: has(SKIP_WHY) || has(BY_CODE) ? s.code : null, why: `${why} Review it in the panel.` };
+        })
     });
   });
 }

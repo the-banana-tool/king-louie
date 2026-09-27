@@ -281,6 +281,20 @@ function parseVerify(text) {
   };
 }
 
+// Why "Accept all verified" (or answer a) skips a proposal, as a code for
+// surfaces that show fixed text (the panel), or null. Same order as skipReason.
+function skipCode(p) {
+  if (p.review) return 'ALREADY_DONE';
+  if (p.checks?.anchor !== 'ok') return 'QUOTE_NOT_FOUND';
+  if (p.checks.valueInQuote === false) return 'VALUE_NOT_QUOTED';
+  if (p.checks.conflicts?.length) return 'CONFLICTS';
+  if (p.checks.duplicateOf) return 'DUPLICATE';
+  const v = p.checks.verify;
+  if (!v || v.agrees !== true) return v?.agrees === false ? 'VERIFY_DISAGREES' : 'NOT_VERIFIED';
+  if (p.anchor?.ocr && v.sawImage !== true) return 'IMAGE_NOT_CHECKED';
+  return null;
+}
+
 // Why "Accept all verified" (or answer a) skips a proposal, or null.
 function skipReason(p) {
   if (p.review) return `already ${oneLine(p.review.action, 40)}`;
@@ -308,5 +322,6 @@ module.exports = {
   verifyContext,
   verifyUserText,
   parseVerify,
-  skipReason
+  skipReason,
+  skipCode
 };

@@ -200,6 +200,34 @@ describe('ingest IPC arguments (untrusted renderer)', () => {
     assert.deepStrictEqual([svc.calls[1][2].name, svc.calls[1][2].mime, svc.calls[1][2].origin.kind], ['document', 'text/plain', 'owner-paste']);
   });
 
+  it('refuses an empty file without calling the service', async () => {
+    const svc = spyService({ store: Promise.resolve({ docId: DOC, ref: 'sources/2026-09/b.txt', status: 'stored', duplicate: false, alsoInCases: [] }) });
+    const invoke = handlers({ getIngestService: () => svc });
+    const r = await invoke(IPC.CASE_INGEST_FILES, { caseId: CASE, files: [{ name: 'empty.txt', base64: '' }, { name: 'b.txt', base64: b64('x') }] });
+    assert.deepStrictEqual(r.results[0], { name: 'empty.txt', error: 'Cannot ingest empty.txt: it has no content.' });
+    assert.strictEqual(r.results[1].docId, DOC);
+    assert.deepStrictEqual(svc.calls.map((c) => c[2].name), ['b.txt']);
+  });
+
+  it('allows emoji in names and refuses controls, line breaks and bidi controls', async () => {
+    const svc = spyService({ store: (caseId, f) => Promise.resolve({ docId: DOC, ref: `sources/2026-09/${f.name}`, status: 'stored', duplicate: false, alsoInCases: [] }) });
+    const invoke = handlers({ getIngestService: () => svc });
+    const cp = (...codes) => String.fromCodePoint(...codes);
+    // Tax + heavy heart + VS16; a family joined by ZWJ.
+    const names = [`Tax ${cp(0x2764, 0xfe0f)}.pdf`, `Family ${cp(0x1f468, 0x200d, 0x1f469)}.pdf`];
+    for (const name of names) {
+      const r = await invoke(IPC.CASE_INGEST_FILES, { caseId: CASE, files: [{ name, base64: b64('%PDF-') }] });
+      assert.strictEqual(r.ok, true, name);
+    }
+    // cleanName strips the invisible joiner and selector.
+    assert.deepStrictEqual(svc.calls.map((c) => c[2].name), [`Tax ${cp(0x2764)}.pdf`, `Family ${cp(0x1f468, 0x1f469)}.pdf`]);
+    for (const code of [0x00, 0x1f, 0x7f, 0x85, 0x0a, 0x2028, 0x2029, 0x200e, 0x200f, 0x061c, 0x202a, 0x202e, 0x2066, 0x2069]) {
+      const r = await invoke(IPC.CASE_INGEST_FILES, { caseId: CASE, files: [{ name: `a${cp(code)}b.txt`, base64: b64('x') }] });
+      assert.strictEqual(r.error, 'files[0].name must be a file name of at most 255 characters without control or direction characters.', code.toString(16));
+    }
+    assert.strictEqual(svc.calls.length, 2);
+  });
+
   it('refuses a bad pages spec and reports an early refusal from the queue', async () => {
     const svc = spyService({ extract: () => Promise.reject(new IngestError('NOT_FOUND', `No document ${DOC} in C:\\Users\\someone\\case.`)) });
     const invoke = handlers({ getIngestService: () => svc });
@@ -301,7 +329,7 @@ describe('ingest IPC replies', () => {
       store: Promise.resolve({ docId: DOC, ref: 'sources/2026-09/a.txt', status: 'stored', duplicate: 'yes', alsoInCases: [{ caseId: 'other-case', title: `Other\n${'t'.repeat(400)}`, dir: '/secret/dir' }], extra: 1 }),
       list: Promise.resolve([{ docId: DOC, ref: 'sources/2026-09/a.txt', name: 'a.txt', status: 'reviewed', note: null, pages: 1, methods: { text: 1, ocr: 0, pendingOcr: 0, unreadable: 0 }, usd: 0.01, estimateUsd: 0, pending: 0, accepted: 1, rejected: 0, origin: 'owner-drop', dir: '/secret' }]),
       review: Promise.resolve({ proposal: { id: 'p-001', stmt: 's', review: { action: 'accepted', by: 'panel' } }, fact: { id: 'f-0001', stmt: 's', subject: 'x', attr: 'y', value: 5, unit: null, provenance: 'sourced', category: 'financial', disclosable: false, supersedes: null, status: 'active', source: { ref: '/secret', quote: 'q' }, addedBy: 'ingest:doc' } }),
-      acceptVerified: Promise.resolve({ accepted: ['p-001', '../x'], skipped: [{ pid: 'p-002', why: `verify disagrees: ${'n'.repeat(900)}` }, 'junk'] })
+      acceptVerified: Promise.resolve({ accepted: ['p-001', '../x'], skipped: [{ pid: 'p-002', code: 'VERIFY_DISAGREES', why: 'verify disagrees: the page says secret' }, { pid: 'p-003', code: 'ANCHOR_CHANGED', why: 'secret' }, { pid: 'p-004', code: 'toString', why: 'secret' }, 'junk'] })
     });
     const invoke = handlers({ getIngestService: () => svc });
     const stored = await invoke(IPC.CASE_INGEST_FILES, { caseId: CASE, files: [{ name: 'a.txt', base64: b64('x') }] });
@@ -317,8 +345,12 @@ describe('ingest IPC replies', () => {
     assert.deepStrictEqual([reviewed.fact.id, reviewed.fact.provenance, reviewed.fact.disclosable], ['f-0001', 'sourced', false]);
     const all = await invoke(IPC.CASE_ACCEPT_VERIFIED, { caseId: CASE, docId: DOC });
     assert.deepStrictEqual(all.accepted, ['p-001']);
-    assert.strictEqual(all.skipped.length, 1);
-    assert.ok(all.skipped[0].why.length <= 300);
+    // Fixed sentences by code: the service's text (a verify note) never travels.
+    assert.deepStrictEqual(all.skipped, [
+      { pid: 'p-002', code: 'VERIFY_DISAGREES', why: 'The verify check disagrees with it. Review it in the panel.' },
+      { pid: 'p-003', code: 'ANCHOR_CHANGED', why: 'The quote is no longer on its page of the stored document. Extract again. Review it in the panel.' },
+      { pid: 'p-004', code: null, why: 'It could not be accepted automatically. Review it in the panel.' }
+    ]);
   });
 });
 

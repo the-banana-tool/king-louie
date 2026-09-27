@@ -1333,11 +1333,12 @@ class IngestService {
   _recheck(p, fields, facts) {
     const recorded = isObj(p.checks) ? p.checks : {};
     const fresh = { valueInQuote: review.valueInQuote(fields.value, fields.anchor.quote), ...review.ledgerMatches(fields, facts) };
-    const why = review.skipReason({ ...p, checks: { ...recorded, ...fresh } });
-    if (why) return why;
+    const now = { ...p, checks: { ...recorded, ...fresh } };
+    const why = review.skipReason(now);
+    if (why) return { code: review.skipCode(now), why };
     const ids = (list) => arr(list).map((c) => (isObj(c) ? String(c.factId) : '')).sort().join(',');
     if (recorded.valueInQuote !== fresh.valueInQuote || (recorded.duplicateOf ?? null) !== fresh.duplicateOf || ids(recorded.conflicts) !== ids(fresh.conflicts)) {
-      return 'its recorded checks differ from a check made now; review it in the panel';
+      return { code: 'CHECKS_CHANGED', why: 'its recorded checks differ from a check made now; review it in the panel' };
     }
     return null;
   }
@@ -1373,8 +1374,8 @@ class IngestService {
       const { fields } = shaped;
       const facts = ledger.view().facts;
       if (recheck) {
-        const why = this._recheck(p, fields, facts);
-        if (why) throw new IngestError('SKIPPED', why);
+        const skip = this._recheck(p, fields, facts);
+        if (skip) throw Object.assign(new IngestError('SKIPPED', skip.why), { skipCode: skip.code });
       }
       const { conflicts } = review.ledgerMatches(fields, facts);
       if (req.supersedes && !conflicts.some((c) => c.factId === req.supersedes)) {
@@ -1531,7 +1532,7 @@ class IngestService {
           const pid = typeof p.id === 'string' && p.id.length <= ID_CAP && review.PROPOSAL_ID.test(p.id) ? p.id : null;
           const why = pid ? review.skipReason(p) : 'it has no valid proposal id';
           if (why) {
-            skipped.push({ pid: pid || oneLine(p.id, ID_CAP), why });
+            skipped.push({ pid: pid || oneLine(p.id, ID_CAP), code: pid ? review.skipCode(p) : 'BAD_PROPOSAL_ID', why });
             continue;
           }
           try {
@@ -1539,7 +1540,7 @@ class IngestService {
             accepted.push(pid);
           } catch (err) {
             if (!(err instanceof IngestError)) throw err;
-            skipped.push({ pid, why: oneLine(err.message, MESSAGE_CAP) });
+            skipped.push({ pid, code: err.skipCode || err.code, why: oneLine(err.message, MESSAGE_CAP) });
           }
         }
       } finally {
