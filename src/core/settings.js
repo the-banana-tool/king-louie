@@ -21,6 +21,9 @@ const DEFAULT_SETTINGS = {
   cases: {
     root: ''
   },
+  // Cases stage 6: allowed playbook sources (URL prefixes and path:<folder>
+  // roots; example: is always allowed) and same-major auto-update.
+  playbooks: { sources: [], autoUpdate: false },
   activeProvider: 'openai',
   templateVariables: {
     name: '',

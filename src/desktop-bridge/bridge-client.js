@@ -8,7 +8,7 @@ const { createLogger } = require('../logging');
 const { deriveNodeId } = require('../mesh/node-identity');
 const { PROTOCOL, LIMITS, newNonce, buildAuthS, buildAuthC, BridgeError, MESSAGES } = require('./protocol');
 const { fromB64url, verifyWithSpkiHex } = require('./keys');
-const { isTimeoutExempt } = require('./allowlist');
+const { channelTimeoutMs } = require('./allowlist');
 
 const log = createLogger('desktop-bridge-client');
 const DEFAULT_BACKOFF_MS = Object.freeze([1000, 2000, 4000, 8000, 16000, 30000]);
@@ -143,7 +143,10 @@ class DesktopBridgeClient extends EventEmitter {
   }
 
   invoke(channel, args = [], { timeoutMs } = {}) {
-    const limit = isTimeoutExempt(channel) ? 0 : (timeoutMs ?? this.defaultTimeoutMs);
+    // An exempt channel never times out; otherwise an explicit timeoutMs
+    // wins over the channel's own bound.
+    const byChannel = channelTimeoutMs(channel, this.defaultTimeoutMs);
+    const limit = byChannel === 0 ? 0 : (timeoutMs ?? byChannel);
     return this._request({ t: 'invoke', channel, args: Array.isArray(args) ? args : [args] }, limit);
   }
 

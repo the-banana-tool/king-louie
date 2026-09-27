@@ -34,7 +34,8 @@ describe('loadServiceConfig', () => {
       relay: null,
       audit: { retentionDays: 365 },
       executors: { entries: {}, packageRoots: [] },
-      contact: null
+      contact: null,
+      playbooks: { sources: [], autoUpdate: false }
     });
   });
   it('reads the profile from the admin config and lets CLI overrides win', () => {

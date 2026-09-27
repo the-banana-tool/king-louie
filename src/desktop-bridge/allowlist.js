@@ -42,6 +42,12 @@ const RENDERER_EVENTS = new Set([
 const ATTACHED_UNAVAILABLE_TABS = Object.freeze(['mcp', 'channels', 'hooks', 'skills', 'webhooks', 'workflows', 'mesh', 'diagnostics', 'system-apps']);
 
 const TIMEOUT_EXEMPT = new Set(['chat:sendMessage', 'tool:execute', 'cron:run']);
+// Cases stage 6 (ruling T14-bridgetimeout): channels that fetch and validate
+// playbooks can outlast the default timeout. They get a longer but still
+// bounded one: a timeout that fires while the service keeps working invites
+// a duplicate retry, and an unbounded wait could hang the desktop.
+const LONG_CHANNEL_TIMEOUT_MS = 10 * 60 * 1000;
+const LONG_CHANNELS = new Set(['case:create', 'case:addPlaybook', 'case:checkPlaybookUpdates', 'case:updatePlaybook']);
 
 function domainOf(channel) {
   const i = channel.indexOf(':');
@@ -74,6 +80,15 @@ function isTimeoutExempt(channel) {
   return TIMEOUT_EXEMPT.has(ch) || ch.startsWith('case:ingest');
 }
 
+// The bridge timeout for one invoke: 0 (none) for an exempt channel, the long
+// bound for a long channel, else the default.
+function channelTimeoutMs(channel, defaultMs) {
+  const ch = String(channel);
+  if (isTimeoutExempt(ch)) return 0;
+  if (LONG_CHANNELS.has(ch)) return LONG_CHANNEL_TIMEOUT_MS;
+  return defaultMs;
+}
+
 module.exports = {
   PROXIED_DOMAINS,
   PROXIED_CHANNELS,
@@ -84,5 +99,7 @@ module.exports = {
   classifyChannel,
   servedChannels,
   isRendererEvent,
-  isTimeoutExempt
+  isTimeoutExempt,
+  channelTimeoutMs,
+  LONG_CHANNEL_TIMEOUT_MS
 };

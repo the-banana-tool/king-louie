@@ -4,7 +4,7 @@
 // a `<id>.claim` marker made with O_EXCL decides who answered first.
 const fs = require('fs');
 const path = require('path');
-const yaml = require('js-yaml');
+const { parseYaml } = require('../platform/yaml');
 const { readJson, writeJson } = require('./jsonfile');
 const { FactLedger } = require('./ledger');
 const { CaseRecords } = require('./records');
@@ -75,7 +75,7 @@ class QuestionStore {
   get caseId() {
     if (this._caseId) return this._caseId;
     try {
-      this._caseId = yaml.load(fs.readFileSync(path.join(this.dir, 'case.yaml'), 'utf8'))?.id || null;
+      this._caseId = parseYaml(fs.readFileSync(path.join(this.dir, 'case.yaml'), 'utf8').replace(/^\uFEFF/, ''))?.id || null;
     } catch {
       this._caseId = null;
     }
@@ -279,6 +279,17 @@ class QuestionStore {
       rec.deliveries.push({ channel: String(channel), at: at || this.now().toISOString(), deliveryId: String(deliveryId) });
       this._write(rec);
     }
+    return rec;
+  }
+
+  // Merges fields into a record's payload (answered or not). `type` and
+  // `key` identify the record and its dedupe, so they never change here.
+  updatePayload(id, fields) {
+    const rec = this._require(id);
+    if (!fields || typeof fields !== 'object' || Array.isArray(fields)) throw new QuestionError('INVALID', 'updatePayload needs an object.', rec);
+    if ('type' in fields || 'key' in fields) throw new QuestionError('INVALID', 'payload type and key cannot change.', rec);
+    rec.payload = { ...(rec.payload || {}), ...fields };
+    this._write(rec);
     return rec;
   }
 

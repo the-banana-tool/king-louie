@@ -57,7 +57,7 @@ function adminDirApprovalOptions({ adminUid, configDir }) {
 function loadProfile(profile) {
   if (profile === 'agent') {
     return {
-      async start({ dataDir, features, ports, workspace, audit, contact = null, adminUid, configDir, executors }) {
+      async start({ dataDir, features, ports, workspace, audit, contact = null, playbooks = null, adminUid, configDir, executors }) {
         const { createCore } = require('../core');
         const { CHAT_DATA_DEFAULTS } = require('../core/settings');
         const { buildServicePorts } = require('./ports');
@@ -97,6 +97,9 @@ function loadProfile(profile) {
             // the admin service.json only (runService loads it once, with
             // adminUid). The key is always present: it means service mode.
             contactConfig: contact ?? null,
+            // Cases stage 6 (ruling T14-admin): the playbook source allowlist
+            // and autoUpdate, from the admin service.json only.
+            playbooksConfig: playbooks ?? { sources: [], autoUpdate: false },
             isService: true,
             remoteApprovals: 'phone',
             phoneApprover: approvals.phoneApprover,
@@ -104,6 +107,7 @@ function loadProfile(profile) {
             approvals, // Cases stage 4 (wave 3): the phone contact channel (relay link, admin approvers, node identity)
             nodePolicy: nodeConfig.policy,
             builtinSkillsDir: path.join(__dirname, '..', '..', 'skills'),
+            examplesDir: path.join(__dirname, '..', '..', 'examples', 'playbooks'),
             // Cases stage 3: executors only from the admin service.json (R42);
             // always present, so the registry is always in service mode here.
             adminExecutors: executors || { entries: {}, packageRoots: [] },
@@ -256,7 +260,7 @@ async function runService({ dataDir: requestedDataDir, profile: profileOverride,
       const config = loadServiceConfig(dataDir, { profile: profileOverride }, adminUid === undefined ? {} : { adminUid });
       profile = config.profile;
       log.info('service starting', { profile, dataDir, workspace, pid: process.pid });
-      running = await loadProfile(profile).start({ dataDir, features: config.features, ports: config.ports, workspace, audit: config.audit, contact: config.contact, adminUid, executors: config.executors });
+      running = await loadProfile(profile).start({ dataDir, features: config.features, ports: config.ports, workspace, audit: config.audit, contact: config.contact, playbooks: config.playbooks, adminUid, executors: config.executors });
     } catch (err) {
       // On Windows nothing reads the task's stderr, so the log file is the
       // only place a startup failure is visible.

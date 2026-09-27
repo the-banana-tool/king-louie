@@ -69,6 +69,8 @@ function startStandaloneHost(deps) {
     openExternal: (url) => shell.openExternal(url),
     uiToastChannel: new UiToastChannel({ Notification }),
     builtinSkillsDir: path.join(appDir, 'skills'),
+    // Cases stage 6: the reference playbooks behind example:<name> sources.
+    examplesDir: path.join(appDir, 'examples', 'playbooks'),
     // One session next to a running service: nothing here may act for it.
     // Cron is built paused (never started) so no job can fire while
     // core.start() is still loading skills.

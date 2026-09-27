@@ -545,3 +545,39 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage4-channels.md`.
   Face ID prompt of its own); Android sends no presence and loads questions
   only when the owner taps. Follow-up: a relay presence auth that needs no
   biometric prompt (an F3 pairing change) would let Android report presence.
+
+## Playbooks (cases stage 6)
+
+`src/cases/playbooks/` (spec: `docs/superpowers/specs/2026-09-23-cases-stage6-playbooks.md`). A playbook
+is a data package (`playbook.yaml`, `steps.md`, optional `briefRules.md` and `sources.md`) vendored as a
+plain copy into `<case>/playbooks/<name>/`, recorded in `case.yaml.playbooks[]` and `.kl/playbooks.json`.
+
+- Playbooks are data. Validate with `validatePackage`; never `require` a path derived from a case or a
+  package. Case types come only through `case-types-bridge.js` (C5's registry or its stand-in).
+- Git for playbooks runs through `runGit` / `runGitSync` in `src/cases/git.js` (hardened `-c` flags
+  including `core.fsmonitor=false`, the checked empty hooks dir outside every case, no prompts, 60 s
+  timeout; a repo whose own config defines drivers or commands is refused with `GIT_UNSAFE_CONFIG`).
+  Versions compare with `compareVersions`; there is no `semver`.
+- Mutations (attach, adopt, update, remove, proposals) do network and temp-dir work first, then one
+  `runtime.systemAction`. Owner gating questions become question records that never charge
+  `questionsPerDay`; a `sourced` fact never satisfies an owner question.
+- Playbook text shown to the model goes through `frame()`. The write guard covers `playbooks/`,
+  `.gitmodules`, `.gitattributes` (at any depth) and `.git/`; the model changes a playbook only with
+  `Playbook.propose` once the case is `done`. As elsewhere, Bash is not covered.
+- Playbook IPC replies carry `untrustedText: true`: the renderer sets every playbook or case string with
+  `textContent` (never `innerHTML` or markdown), and a proposal's patch shows in a `<pre>`.
+- `case.yaml` is read with the strict parser (`parseCaseYaml`). A stage that adds a `case.yaml` key adds it
+  to `CASE_YAML_KEYS` and to `tests/cases-store-yaml.test.js`.
+- `playbooks.sources` is the allowlist (`example:` is always allowed); `autoUpdate` is separate from it.
+  No `playbooks` block (the default `{ sources: [], autoUpdate: false }`) means no URL sources, local
+  folders unrestricted, no auto-update. A local folder recorded in
+  `.kl/playbooks.json` (case data) is read on update only under a matching `path:` entry, or after the
+  owner confirms that one playbook (`confirmSource: true` with its `name`; a confirm without a name is
+  refused). Tests build packages with `tests/helpers/playbook-fixture.js` in temp dirs.
+- Where the allowlist comes from depends on the mode. On the desktop it is the owner's
+  `settings.playbooks` (`sources`, `autoUpdate`). In service mode both come only from the `playbooks` block
+  of the admin `service.json`, and the data-dir settings for them are ignored (with one warning). The
+  admin block is stricter than the settings form: `~` is refused and every `path:` entry must be absolute.
+- Attached, the `case:*` playbook channels are proxied to the service: `path:` sources and a
+  proposal's `repoPath` are resolved on the service host as the service account, under the service's
+  admin policy.

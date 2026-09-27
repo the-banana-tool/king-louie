@@ -55,6 +55,7 @@ const { MemoryStore, MemoryManager } = require('../memory');
 const { CheckpointManager } = require('../checkpoints');
 const { CaseRuntime, resolveCasesRoot } = require('../cases');
 const { shapeToolDefinitions } = require('../cases/chat-integration');
+const { installPlaybooks } = require('../cases/playbooks');
 const { ensureWakeupJob } = require('../cases/wakeups');
 const { ExecutorRegistry } = require('../cases/executors');
 const { configureCaseGuard } = require('../cases/executors/case-guard');
@@ -2906,6 +2907,48 @@ function createCore(deps = {}) {
   // Until this runs the case-turn guard has no case runtime for a child's
   // { caseId } and no data dir to protect.
   configureCaseGuard({ getCaseRuntime: () => caseRuntime, dataDir: userDataPath });
+  // Cases stage 6: playbooks. The manager rides on the runtime; the gating
+  // source, the turn-start hook and (with an executor registry) the brief
+  // rules are registered by installPlaybooks.
+  // Ruling T14-admin: in service mode the source allowlist and autoUpdate
+  // are policy and come only from the admin service.json (run.js passes
+  // deps.playbooksConfig; no block is the default { sources: [], autoUpdate:
+  // false }: no URL sources, local folders unrestricted (spec §12), no
+  // auto-update). The
+  // data-dir settings for them are ignored there, with one warning. The
+  // desktop reads the owner's own settings. The service signals are the
+  // ones start() uses for contact, plus playbooksConfig itself.
+  const playbooksFromAdmin = deps.isService === true
+    || Object.prototype.hasOwnProperty.call(deps, 'contactConfig')
+    || Object.prototype.hasOwnProperty.call(deps, 'playbooksConfig')
+    || deps.remoteApprovals === 'phone';
+  let getPlaybookSettings = getSettings;
+  if (playbooksFromAdmin) {
+    const admin = deps.playbooksConfig && typeof deps.playbooksConfig === 'object' ? deps.playbooksConfig : {};
+    const adminPlaybooks = Object.freeze({
+      sources: Object.freeze(Array.isArray(admin.sources) ? admin.sources.filter((x) => typeof x === 'string') : []),
+      autoUpdate: admin.autoUpdate === true
+    });
+    let warnedDataDir = false;
+    getPlaybookSettings = () => {
+      if (!warnedDataDir) {
+        let stored = null;
+        try {
+          stored = store.get('settings', null)?.playbooks;
+        } catch {
+          stored = null;
+        }
+        const set = stored && typeof stored === 'object'
+          && ((Array.isArray(stored.sources) && stored.sources.length > 0) || stored.autoUpdate === true);
+        if (set) {
+          warnedDataDir = true;
+          log.warn('Ignoring settings.playbooks (sources, autoUpdate) from the data dir in service mode; set "playbooks" in the admin service.json instead.');
+        }
+      }
+      return { playbooks: adminPlaybooks };
+    };
+  }
+  installPlaybooks(caseRuntime, { getSettings: getPlaybookSettings, examplesDir: deps.examplesDir || null, adminPolicy: playbooksFromAdmin });
 
   const context = {
     // Chat
@@ -2938,6 +2981,7 @@ function createCore(deps = {}) {
     getSettings,
     getCaseRuntime: () => caseRuntime,
     getExecutorRegistry: () => executorRegistry,
+    getPlaybookManager: () => caseRuntime.playbooks || null,
     getContact: () => (contactHost ? contactHost.context() : null),
     // The signed-approval requester (program §4.12), or null: always null in
     // 'allow' and 'deny' modes (the Electron host), and null while no device

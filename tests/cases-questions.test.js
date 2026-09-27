@@ -609,3 +609,29 @@ describe('answers through the runtime', () => {
     assert.strictEqual(rt.getCase(c.id).status, 'paused');
   });
 });
+
+describe('QuestionStore reads case.yaml through parseYaml', () => {
+  it('an anchored case.yaml yields no case id instead of expanding it', () => {
+    const d = caseDir();
+    fs.writeFileSync(path.join(d, 'case.yaml'), 'id: &i case-lakeside\nslug: *i\n');
+    assert.strictEqual(new QuestionStore(d, { now: () => T0 }).caseId, null);
+    fs.writeFileSync(path.join(d, 'case.yaml'), '\uFEFFid: case-lakeside\nslug: lakeside-lot\n');
+    assert.strictEqual(new QuestionStore(d, { now: () => T0 }).caseId, 'case-lakeside', 'a byte-order mark is tolerated');
+  });
+});
+
+describe('QuestionStore.updatePayload', () => {
+  it('merges fields on an answered record and never changes type or key', () => {
+    const d = caseDir();
+    const s = new QuestionStore(d, { now: () => T0 });
+    const q = s.create(ask({ payload: { type: 'gating', key: 'gating:a.b', gating: { category: null } } }));
+    s.answer(q.id, { text: 'yes' });
+    const r = s.updatePayload(q.id, { gating: { category: 'legal' }, disclosable: false });
+    assert.deepStrictEqual([r.payload.type, r.payload.key, r.payload.gating.category, r.payload.disclosable], ['gating', 'gating:a.b', 'legal', false]);
+    assert.ok(s.get(q.id).answer, 'the answer is kept');
+    assert.throws(() => s.updatePayload(q.id, { type: 'ask' }), code('INVALID'));
+    assert.throws(() => s.updatePayload(q.id, { key: 'x' }), code('INVALID'));
+    assert.throws(() => s.updatePayload(q.id, null), code('INVALID'));
+    assert.strictEqual(s.get(q.id).payload.type, 'gating');
+  });
+});

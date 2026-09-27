@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const yaml = require('js-yaml');
+const { parseYaml } = require('../platform/yaml');
 
 const BRIEF_FIELDS = new Set([
   'objective', 'why', 'successCriteria', 'hardConstraints', 'alreadyTried',
@@ -95,7 +96,8 @@ class Brief {
     if (end === -1) return { data: {}, body: text };
     let data;
     try {
-      data = yaml.load(lines.slice(1, end).join('\n')) || {};
+      // Strict core schema; anchors and aliases are refused (ruling C6-alias).
+      data = parseYaml(lines.slice(1, end).join('\n')) || {};
     } catch (err) {
       throw new BriefError(`brief.md front matter is not valid YAML: ${err.message}`);
     }
@@ -103,7 +105,7 @@ class Brief {
   }
 
   _write(data, body) {
-    fs.writeFileSync(this.path, `---\n${yaml.dump(data).trimEnd()}\n---\n\n${body}`);
+    fs.writeFileSync(this.path, `---\n${yaml.dump(data, { noRefs: true }).trimEnd()}\n---\n\n${body}`);
   }
 
   update(field, value, { provenance } = {}) {

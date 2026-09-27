@@ -24,7 +24,8 @@ const STEPS = JSON.stringify([{ id: 's1', title: 'Call three brokers', executor:
 
 describe('registration', () => {
   it('adds Plan and Executor to the case tools, neither needing approval', () => {
-    assert.deepStrictEqual(CASE_TOOL_NAMES.slice(-2), ['Plan', 'Executor']);
+    const i = CASE_TOOL_NAMES.indexOf('Plan');
+    assert.deepStrictEqual(CASE_TOOL_NAMES.slice(i, i + 2), ['Plan', 'Executor']);
     initializeTools();
     for (const name of ['Plan', 'Executor']) {
       assert.ok(toolRegistry.get(name), name);
