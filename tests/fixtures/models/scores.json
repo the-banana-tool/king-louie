@@ -1,0 +1,9 @@
+{
+  "fetchedAt": "2026-09-27T00:00:00.000Z",
+  "source": "artificial-analysis",
+  "scores": {
+    "openai/gpt-5.5": { "intelligence": 60.1, "coding": 55.2, "agentic": 50.3 },
+    "anthropic/claude-sonnet-4.5": { "intelligence": 50, "coding": 48, "agentic": 52 },
+    "anthropic/claude-haiku-4.5": { "intelligence": 40, "coding": null, "agentic": null }
+  }
+}

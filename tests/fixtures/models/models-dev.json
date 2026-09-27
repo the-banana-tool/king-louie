@@ -1,0 +1,150 @@
+{
+  "fetchedAt": "2026-09-27T00:00:00.000Z",
+  "source": "models.dev",
+  "data": {
+    "openai": {
+      "id": "openai",
+      "name": "OpenAI",
+      "models": {
+        "gpt-5.5": {
+          "id": "gpt-5.5", "name": "GPT-5.5", "family": "gpt", "attachment": true, "reasoning": true,
+          "reasoning_options": [{ "type": "effort", "values": ["none", "low", "medium", "high", "xhigh"] }],
+          "tool_call": true, "structured_output": true, "knowledge": "2025-12-01", "release_date": "2026-04-23",
+          "modalities": { "input": ["text", "image", "pdf"], "output": ["text"] }, "open_weights": false,
+          "limit": { "context": 1050000, "input": 922000, "output": 128000 },
+          "cost": { "input": 5, "output": 30, "cache_read": 0.5, "tiers": [{ "input": 10, "output": 45, "cache_read": 1, "tier": { "type": "context", "size": 272000 } }] }
+        },
+        "gpt-5.4": {
+          "id": "gpt-5.4", "name": "GPT-5.4", "family": "gpt", "tool_call": true,
+          "modalities": { "input": ["text", "image"], "output": ["text"] }, "limit": { "context": 400000, "output": 128000 },
+          "cost": { "input": 2.5, "output": 15, "cache_read": 0.25 }
+        },
+        "gpt-5.4-mini": {
+          "id": "gpt-5.4-mini", "name": "GPT-5.4 mini", "family": "gpt", "tool_call": true,
+          "modalities": { "input": ["text", "image"], "output": ["text"] }, "limit": { "context": 400000, "output": 128000 },
+          "cost": { "input": 0.75, "output": 4.5, "cache_read": 0.075 }
+        },
+        "gpt-4o": {
+          "id": "gpt-4o", "name": "GPT-4o", "family": "gpt", "tool_call": true,
+          "modalities": { "input": ["text", "image"], "output": ["text"] }, "limit": { "context": 128000, "output": 16384 },
+          "cost": { "input": 2.5, "output": 10, "cache_read": 1.25 }
+        },
+        "gpt-3.5-turbo": {
+          "id": "gpt-3.5-turbo", "name": "GPT-3.5 Turbo", "family": "gpt", "tool_call": true,
+          "modalities": { "input": ["text"], "output": ["text"] }, "limit": { "context": 16385, "output": 4096 },
+          "cost": { "input": 0.5, "output": 1.5 }
+        },
+        "gpt-image-1": {
+          "id": "gpt-image-1", "name": "GPT Image 1", "family": "gpt-image", "tool_call": false,
+          "modalities": { "input": ["text", "image"], "output": ["image"] }, "limit": { "context": 0, "output": 0 }
+        },
+        "o4-mini": {
+          "id": "o4-mini", "name": "o4-mini", "family": "o", "reasoning": true, "tool_call": true,
+          "modalities": { "input": ["text", "image"], "output": ["text"] }, "limit": { "context": 200000, "output": 100000 },
+          "cost": { "input": 1.1, "output": 4.4, "reasoning": 8 }
+        }
+      }
+    },
+    "anthropic": {
+      "id": "anthropic",
+      "name": "Anthropic",
+      "models": {
+        "claude-sonnet-4-5": {
+          "id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "family": "claude-sonnet", "tool_call": true,
+          "modalities": { "input": ["text", "image", "pdf"], "output": ["text"] }, "limit": { "context": 200000, "output": 64000 },
+          "cost": { "input": 3, "output": 15, "cache_read": 0.3, "cache_write": 3.75 }
+        },
+        "claude-opus-4-1": {
+          "id": "claude-opus-4-1", "name": "Claude Opus 4.1", "family": "claude-opus", "tool_call": true,
+          "modalities": { "input": ["text", "image", "pdf"], "output": ["text"] }, "limit": { "context": 200000, "output": 32000 },
+          "cost": { "input": 15, "output": 75, "cache_read": 1.5, "cache_write": 18.75 }
+        },
+        "claude-haiku-4-5": {
+          "id": "claude-haiku-4-5", "name": "Claude Haiku 4.5", "family": "claude-haiku", "tool_call": true,
+          "modalities": { "input": ["text", "image", "pdf"], "output": ["text"] }, "limit": { "context": 200000, "output": 64000 },
+          "cost": { "input": 1, "output": 5, "cache_read": 0.1, "cache_write": 1.25 }
+        },
+        "claude-haiku-4-5-20251001": {
+          "id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5 (dated)", "family": "claude-haiku", "tool_call": true,
+          "modalities": { "input": ["text", "image", "pdf"], "output": ["text"] }, "limit": { "context": 200000, "output": 64000 },
+          "cost": { "input": 1, "output": 5, "cache_read": 0.1, "cache_write": 1.25 }
+        }
+      }
+    },
+    "google": {
+      "id": "google",
+      "name": "Google",
+      "models": {
+        "gemini-2.5-pro": {
+          "id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro", "family": "gemini-pro", "tool_call": true,
+          "modalities": { "input": ["text", "image", "pdf"], "output": ["text"] }, "limit": { "context": 1048576, "output": 65536 },
+          "cost": { "input": 1.25, "output": 10, "cache_read": 0.31, "tiers": [{ "input": 2.5, "output": 15, "cache_read": 0.625, "tier": { "type": "context", "size": 200000 } }] }
+        },
+        "gemini-2.5-flash": {
+          "id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash", "family": "gemini-flash", "tool_call": true,
+          "modalities": { "input": ["text", "image", "pdf"], "output": ["text"] }, "limit": { "context": 1048576, "output": 65536 },
+          "cost": { "input": 0.3, "output": 2.5, "cache_read": 0.075 }
+        }
+      }
+    },
+    "groq": {
+      "id": "groq",
+      "name": "Groq",
+      "models": {
+        "llama-3.3-70b": {
+          "id": "llama-3.3-70b", "name": "Llama 3.3 70B", "family": "llama", "tool_call": true,
+          "modalities": { "input": ["text"], "output": ["text"] }, "limit": { "context": 131072, "output": 32768 },
+          "cost": { "input": 0.59, "output": 0.79 }
+        },
+        "llama-vision-preview": {
+          "id": "llama-vision-preview", "name": "Llama Vision Preview", "family": "llama", "tool_call": false,
+          "modalities": { "input": ["text", "image"], "output": ["text"] }, "limit": { "context": 8192, "output": 8192 },
+          "cost": { "input": 0.2, "output": 0.2 }
+        }
+      }
+    },
+    "openrouter": {
+      "id": "openrouter",
+      "name": "OpenRouter",
+      "models": {
+        "any-model": {
+          "id": "any-model", "name": "Any Model", "tool_call": true,
+          "modalities": { "input": ["text", "image"], "output": ["text"] }, "limit": { "context": 128000, "output": 8192 },
+          "cost": { "input": 1, "output": 2 }
+        },
+        "anthropic/claude-sonnet-4.5": {
+          "id": "anthropic/claude-sonnet-4.5", "name": "Anthropic: Claude Sonnet 4.5", "tool_call": true,
+          "modalities": { "input": ["text", "image"], "output": ["text"] }, "limit": { "context": 200000, "output": 64000 },
+          "cost": { "input": 3, "output": 15 }
+        }
+      }
+    },
+    "ollama-cloud": {
+      "id": "ollama-cloud",
+      "name": "Ollama Cloud",
+      "models": {
+        "gpt-oss:120b": {
+          "id": "gpt-oss:120b", "name": "gpt-oss 120B", "tool_call": true, "open_weights": true,
+          "modalities": { "input": ["text"], "output": ["text"] }, "limit": { "context": 131072, "output": 32768 },
+          "cost": { "input": 0, "output": 0 }
+        }
+      }
+    },
+    "deepseek": {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "models": {
+        "deepseek-chat": {
+          "id": "deepseek-chat", "name": "DeepSeek Chat", "tool_call": true,
+          "modalities": { "input": ["text"], "output": ["text"] }, "limit": { "context": 128000, "output": 8192 },
+          "cost": { "input": 0.28, "output": 0.42, "cache_read": 0.028 }
+        }
+      }
+    },
+    "not-a-king-louie-provider": {
+      "id": "not-a-king-louie-provider",
+      "name": "Elsewhere",
+      "models": { "x-1": { "id": "x-1", "name": "X 1", "cost": { "input": 1, "output": 1 } } }
+    }
+  }
+}
