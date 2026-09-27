@@ -23,6 +23,9 @@ const FULL_TRANSCRIPT_TOOLS = Object.freeze(['SpawnAgent', 'BackgroundTask', 'Ta
 const EDITED_PATHS_MAX = 50;
 const OPEN_STATES = new Set(['idle', 'turn']);
 const LIVE_BACKGROUND_STATES = new Set(['pending', 'running']);
+// A closed session is forgotten this long after it closed (final review
+// M-6); its job stays in JobManager, but no caller owns it any more.
+const CLOSED_RETAIN_MS = 24 * 3600000;
 // Ruling T11-sessions: the node's gateway sessions are the owner's other
 // chats (Telegram, Slack, …). A delegate turn, and every sub-agent it
 // starts, runs without the tools that list, read or post to them.
@@ -107,7 +110,7 @@ function scopedBackgroundTasks(manager, ids) {
 
 class DelegateSessions {
   constructor({ core, nodeConfig, jobManager, auditLedger = null, leaseManager = null, now = Date.now,
-    fullTranscriptTools = FULL_TRANSCRIPT_TOOLS, providers = null, sweepMs = 60000, toolRegistry = null } = {}) {
+    fullTranscriptTools = FULL_TRANSCRIPT_TOOLS, providers = null, sweepMs = 60000, toolRegistry = null, closedRetainMs = CLOSED_RETAIN_MS } = {}) {
     if (!core || !core.context || typeof core.context.getAgentExecutorAdapter !== 'function') {
       throw new TypeError('DelegateSessions needs the agent core (profile: agent)');
     }
@@ -122,6 +125,7 @@ class DelegateSessions {
     // when the session does.
     this.leaseManager = leaseManager;
     this.now = now;
+    this.closedRetainMs = closedRetainMs;
     this.fullTools = new Set(fullTranscriptTools);
     this.sessions = new Map();
     this.turns = new Map();
@@ -248,7 +252,11 @@ class DelegateSessions {
   // others, nor throw into the timer.
   sweep() {
     const t = this.now();
-    for (const session of this.sessions.values()) {
+    for (const [jobId, session] of this.sessions) {
+      if (!OPEN_STATES.has(session.state) && typeof session.closedAt === 'number' && t - session.closedAt >= this.closedRetainMs && !this.turns.has(jobId)) {
+        this.sessions.delete(jobId);
+        continue;
+      }
       if (session.state !== 'idle' || t - session.lastActivity < this.config.idleCloseMs) continue;
       try {
         this._close(session, 'closed', true);
@@ -415,6 +423,7 @@ class DelegateSessions {
   _close(session, state, ok, error = null) {
     if (!OPEN_STATES.has(session.state)) return;
     session.state = state;
+    session.closedAt = this.now();
     this._stopBackgroundTasks(session);
     // A closed session keeps only its state (and its task ids, for stop()).
     session.history = null;

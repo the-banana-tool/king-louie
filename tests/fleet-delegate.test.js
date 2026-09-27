@@ -200,6 +200,26 @@ describe('DelegateSessions', () => {
     assert.ok(t.audit.some((e) => e.kind === 'exec.result' && e.data.name === 'delegate' && e.data.job_id === jobId && e.data.ok === false));
   });
 
+  // Final review M-6: a closed session was kept for the life of the process.
+  // It is dropped a day after it closed; the job stays in JobManager.
+  it('forgets a closed session a day after it closed', async () => {
+    const t = await setup({ idleCloseMs: 300000 });
+    const { job_id: jobId } = await t.sessions.start({ task: 'x', origin: origin(['fleet:delegate']) });
+    await t.sessions.turns.get(jobId);
+    t.advance(300001);
+    t.sessions.sweep();
+    assert.equal(t.jobs.getJob(jobId).status, 'succeeded');
+    t.advance(24 * 3600000 - 1);
+    t.sessions.sweep();
+    assert.equal(t.sessions.sessions.has(jobId), true, 'still readable by its owner during the grace');
+    assert.equal(t.sessions.ownsJob(jobId, origin(['fleet:delegate'])), true);
+    t.advance(2);
+    t.sessions.sweep();
+    assert.equal(t.sessions.sessions.has(jobId), false);
+    assert.equal(t.jobs.getJob(jobId).status, 'succeeded', 'the job itself stays');
+    await assert.rejects(t.sessions.send(jobId, 'again', { origin: origin(['fleet:delegate']) }), (err) => err.code === 'job_not_found');
+  });
+
   it('closes an idle session after idle_close; the job then succeeds', async () => {
     const t = await setup({ idleCloseMs: 300000 });
     const { job_id: jobId } = await t.sessions.start({ task: 'x', origin: origin(['fleet:delegate']) });
