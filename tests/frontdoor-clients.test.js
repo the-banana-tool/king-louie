@@ -53,6 +53,41 @@ describe('ClientRegistry', () => {
     assert.deepEqual(r.list().map((c) => c.client_id), [kept]);
   });
 
+  // Final review F-2: nothing called purge(), so 100 unapproved registrations
+  // locked POST /oauth/register at 429 for good, restarts included.
+  it('100 stale unapproved registrations expire on their own, across a restart', () => {
+    let now = 0;
+    const f = file();
+    const r = new ClientRegistry({ file: f, now: () => now });
+    for (let i = 0; i < 100; i += 1) {
+      if (i > 0 && i % 10 === 0) now += 3600001;
+      r.register(good(), { ip: `198.51.100.${i}` });
+    }
+    assert.throws(() => r.register(good(), { ip: '203.0.113.200' }), (err) => err.status === 429 && /waiting for approval/.test(err.error_description || err.message));
+    now += 24 * 3600000 + 1;
+    const restarted = new ClientRegistry({ file: f, now: () => now });
+    assert.equal(restarted.list().length, 100, 'clients.json kept them');
+    const c = restarted.register(good(), { ip: '203.0.113.201' });
+    assert.match(c.client_id, /^dcr_/);
+    assert.equal(restarted.list().filter((x) => x.created_at === new Date(0).toISOString()).length, 0, 'the oldest are gone');
+    assert.equal(new ClientRegistry({ file: f, now: () => now }).list().length, 1, 'the purge was saved');
+  });
+
+  it('a purge timer runs purge() hourly and stops', () => {
+    let now = 0;
+    const r = new ClientRegistry({ file: file(), now: () => now });
+    r.register(good(), { ip: '198.51.100.1' });
+    const ticks = [];
+    const stop = r.startPurgeTimer({ everyMs: 5, setInterval: (fn, ms) => { ticks.push(ms); return { fn, unref() { this.unrefd = true; } }; }, clearInterval: (h) => { h.cleared = true; } });
+    assert.equal(ticks[0], 5);
+    now += 24 * 3600000 + 1;
+    stop.handle.fn();
+    assert.equal(r.list().length, 0);
+    assert.equal(stop.handle.unrefd, true);
+    stop();
+    assert.equal(stop.handle.cleared, true);
+  });
+
   it('resolves a CIMD client_id by fetching, and caches it for 24 h', async () => {
     let now = 0;
     let fetches = 0;

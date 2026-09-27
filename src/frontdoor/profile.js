@@ -305,6 +305,8 @@ async function startFrontDoor({ dataDir, configDir, adminUid = 0, geteuid = defa
 
     const oauthDir = path.join(fdDir, 'oauth');
     const clients = new ClientRegistry({ file: path.join(oauthDir, 'clients.json') });
+    // Unapproved registrations expire after 24 h (register() purges too).
+    started('client purge', clients.startPurgeTimer());
     const pending = new PendingAuthorizations();
     const grants = new GrantStore({ file: path.join(oauthDir, 'grants.json'), approverStore, frontdoorId, alerts });
     grants.load();

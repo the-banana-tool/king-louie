@@ -151,6 +151,9 @@ class ClientRegistry {
     const key = rateKey(ip);
     const hits = this._recentHits(key, t);
     if (hits.length >= LIMITS.perIpPerHour) throw busy('too many registrations from this address; try again later');
+    // Unapproved clients older than 24 h go before the cap is judged, so a
+    // burst of registrations never locks registration out for good.
+    this.purge();
     if (this.list().filter((c) => !c.has_grant).length >= LIMITS.withoutGrant) throw busy('too many clients are waiting for approval; try again later');
     if (this.clients.size >= LIMITS.maxClients) throw busy('too many registered clients; try again later');
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw invalid('the registration must be a JSON object');
@@ -269,6 +272,23 @@ class ClientRegistry {
     }
     if (removed) this._save();
     return removed;
+  }
+
+  // Hourly purge (the front door's profile starts it and stops it). Returns
+  // the stop function, with the timer handle on it for tests.
+  startPurgeTimer({ everyMs = HOUR, setInterval: every = setInterval, clearInterval: clear = clearInterval } = {}) {
+    const handle = every(() => {
+      try {
+        const removed = this.purge();
+        if (removed) log.info(`purged ${removed} unapproved clients`);
+      } catch (err) {
+        log.warn(`client purge failed: ${err.message}`);
+      }
+    }, everyMs);
+    if (handle && typeof handle.unref === 'function') handle.unref();
+    const stop = () => clear(handle);
+    stop.handle = handle;
+    return stop;
   }
 }
 

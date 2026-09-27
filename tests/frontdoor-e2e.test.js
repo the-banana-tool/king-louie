@@ -75,7 +75,7 @@ const until = async (fn, what, ms = 15000) => {
   }
 };
 // The steps startFrontDoor stops, in the order it stops them.
-const ALL_STEPS = ['SIGHUP handler', 'probe', 'listener', 'http servers', 'router', 'device states', 'courier', 'registry transport watch', 'relay', 'tls', 'audit prune']
+const ALL_STEPS = ['SIGHUP handler', 'probe', 'listener', 'http servers', 'client purge', 'router', 'device states', 'courier', 'registry transport watch', 'relay', 'tls', 'audit prune']
   .filter((s) => POSIX || s !== 'SIGHUP handler');
 
 async function layout({ fdRaw = {} } = {}) {
