@@ -121,6 +121,21 @@ describe('attach', () => {
     await assert.rejects(mgr.remove(id, 'land-sale'), { message: 'Case is abandoned; its playbooks cannot change.' });
   });
 
+  it('a failure after the copy keeps a consistent attach and warns (final review M-5)', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const { rt, mgr, id, dir } = await world();
+    mgr._applyDefaults = () => { throw new Error('brief.md front matter does not parse'); };
+    const r = await mgr.attach(id, { source: 'example:land-sale' });
+    assert.strictEqual(r.ok, true);
+    assert.strictEqual(r.warnings.length, 1);
+    assert.match(r.warnings[0], /^Attached land-sale, but applying its defaults, gating questions or journal entry failed \(details in the log\)\./);
+    assert.ok(!r.warnings[0].includes('front matter'), 'the error text stays in the log');
+    assert.deepStrictEqual(rt.getCase(id).playbooks.map((p) => p.name), ['land-sale']);
+    assert.ok(fs.existsSync(path.join(dir, 'playbooks', 'land-sale', 'steps.md')));
+    assert.strictEqual(readState(dir).vendored['land-sale'].onDiskVersion, '1.2.0');
+    assert.ok(await clean(dir));
+  });
+
   it('nothing is written when the source is invalid', async (t) => {
     if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
     const { rt, mgr, id, dir } = await world();
@@ -409,6 +424,35 @@ describe('updates', () => {
     settings.playbooks.autoUpdate = false;
     const again = await mgr.checkUpdates(id, 'land-sale', { apply: true });
     assert.strictEqual(again[0].updateAvailable, false);
+  });
+
+  it('checkUpdates with autoUpdate on a closed case reports the update and applies nothing (final review M-1)', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const { rt, mgr, id, dir, examplesDir, settings } = await world();
+    await mgr.attach(id, { source: 'example:land-sale' });
+    rt.setStatus(id, 'abandoned', { kind: 'owner', by: 'owner' });
+    await git.commitAll(dir, 'closed');
+    writePackage(path.join(examplesDir, 'land-sale'), { 'playbook.yaml': PLAYBOOK_YAML.replace('"1.2.0"', '"1.2.1"') });
+    settings.playbooks.autoUpdate = true;
+    const rows = await mgr.checkUpdates(id, null, { apply: true });
+    assert.deepStrictEqual(rows, [{ name: 'land-sale', pinned: '1.2.0', upstream: '1.2.1', updateAvailable: true, sameMajor: true }]);
+    assert.strictEqual(readState(dir).vendored['land-sale'].onDiskVersion, '1.2.0');
+    assert.ok(await clean(dir));
+  });
+
+  it('update refuses an upstream that changed its caseType on a typed case (final review M-2)', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const outreachYaml = withYaml(/caseType: general/, 'caseType: outreach');
+    const { mgr, id, dir, examplesDir } = await world({ type: 'outreach', examples: { 'playbook.yaml': outreachYaml } });
+    await mgr.attach(id, { source: 'example:land-sale' });
+    writePackage(path.join(examplesDir, 'land-sale'), { 'playbook.yaml': PLAYBOOK_YAML.replace('"1.2.0"', '"1.2.1"') });
+    const r = await mgr.update(id, 'land-sale');
+    assert.deepStrictEqual(r, { ok: false, error: 'Playbook "land-sale" is for "general" cases; this case is "outreach".', code: 'CASE_TYPE' });
+    assert.strictEqual(readState(dir).vendored['land-sale'].onDiskVersion, '1.2.0');
+    assert.match(fs.readFileSync(path.join(dir, 'playbooks', 'land-sale', 'playbook.yaml'), 'utf8'), /caseType: outreach/);
+    // A same-type update still applies.
+    writePackage(path.join(examplesDir, 'land-sale'), { 'playbook.yaml': outreachYaml.replace('"1.2.0"', '"1.2.2"') });
+    assert.strictEqual((await mgr.update(id, 'land-sale')).ok, true);
   });
 
   it('checkUpdates on a closed case writes and commits nothing', async (t) => {

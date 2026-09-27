@@ -525,6 +525,29 @@ class PlaybookManager {
     }
   }
 
+  // The steps after the copy and the pin are written (acknowledged state,
+  // defaults, gating sync, journal). A failure here keeps the attach: the
+  // copy, pin and record are consistent, the next turn re-syncs gating, and
+  // the owner gets a warning instead of an error for a half-done attach
+  // (final review M-5: ok with a warning, not a rollback).
+  _afterAttachOrWarn(meta, name, playbook, opts) {
+    try {
+      return { ...this._afterAttach(meta, name, playbook, opts), warning: null };
+    } catch (err) {
+      log.warn(`Case ${meta.slug}: ${opts.what} ${name}, but its defaults, gating or journal step failed: ${err.message}`);
+      try {
+        this._journal(meta, `${opts.what} playbook ${name}@${playbook.version}; applying its defaults, gating questions or journal entry failed (details in the log).`);
+      } catch (journalErr) {
+        log.warn(`Case ${meta.slug}: journaling the partial ${name} attach failed: ${journalErr.message}`);
+      }
+      return {
+        defaults: { applied: [], skipped: [], budgetRaises: [] },
+        synced: { created: [], unknowns: [] },
+        warning: `${opts.what} ${name}, but applying its defaults, gating questions or journal entry failed (details in the log). Check the brief and budget; gating questions sync again at the next turn.`
+      };
+    }
+  }
+
   _afterAttach(meta, name, playbook, { acceptBudgetRaises, what, extra = [] }) {
     const state = changes.readState(meta.dir);
     state.acknowledged[name] = changes.snapshotOf(this._loader(this.runtime.getCase(meta.id)).get(name));
@@ -586,7 +609,7 @@ class PlaybookManager {
         }
         throw err;
       }
-      const { defaults, synced } = this._afterAttach(meta, name, prepared.playbook, {
+      const { defaults, synced, warning } = this._afterAttachOrWarn(meta, name, prepared.playbook, {
         acceptBudgetRaises,
         what: 'Attached',
         extra: [`Source: ${prepared.source}${prepared.ref ? ` (ref ${prepared.ref})` : ''}; commit: ${prepared.commit || 'none'}.`]
@@ -594,7 +617,7 @@ class PlaybookManager {
       return {
         ok: true,
         playbook: { name, version },
-        warnings: prepared.warnings,
+        warnings: warning ? [...prepared.warnings, warning] : prepared.warnings,
         budgetRaises: defaults.budgetRaises,
         questionIds: synced.created,
         unknownIds: synced.unknowns
@@ -623,11 +646,11 @@ class PlaybookManager {
         contentHash: entry.onDisk.contentHash
       };
       this.runtime.store.updateMeta(meta.id, { playbooks: [...(meta.playbooks || []), pin] });
-      const { defaults, synced } = this._afterAttach(meta, name, playbook, { acceptBudgetRaises, what: 'Adopted' });
+      const { defaults, synced, warning } = this._afterAttachOrWarn(meta, name, playbook, { acceptBudgetRaises, what: 'Adopted' });
       return {
         ok: true,
         playbook: { name, version: pin.version },
-        warnings: entry.warnings,
+        warnings: warning ? [...entry.warnings, warning] : entry.warnings,
         budgetRaises: defaults.budgetRaises,
         questionIds: synced.created,
         unknownIds: synced.unknowns
@@ -787,7 +810,8 @@ class PlaybookManager {
         changes.writeState(m.dir, s);
       });
     }
-    if (apply && settings.autoUpdate) {
+    // A closed case's playbooks cannot change: report, never apply (M-1).
+    if (apply && settings.autoUpdate && !CLOSED.includes(meta.status)) {
       for (const row of results) {
         if (!row.updateAvailable || !row.sameMajor || row.error) continue;
         const u = await this.update(meta.id, row.name, { confirmSource });
@@ -871,6 +895,14 @@ class PlaybookManager {
       if (!recNow || recNow.source !== rec.source) return { ok: false, error: `The recorded source of "${name}" changed while it was being fetched; check for updates again.` };
       const refused = this._editedRefusal(name, now, recNow, force);
       if (refused) return refused;
+      // The same case type rule as attach: an upstream that changed its
+      // caseType does not land silently on a typed case (M-2).
+      try {
+        this._checkType(m, prepared.playbook);
+      } catch (err) {
+        if (err.code !== 'CASE_TYPE') throw err;
+        return { ok: false, error: err.message, code: err.code };
+      }
       const from = now.onDisk?.version ?? now.pinned.version;
       const oldPlaybook = now.package?.playbook || null;
 
