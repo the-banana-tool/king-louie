@@ -92,6 +92,26 @@ describe('createCore playbooks wiring', () => {
     assert.deepStrictEqual(bare.context.getPlaybookManager().settings(), { sources: [], autoUpdate: false });
   });
 
+  // Final review M-9 / parked P6: one serviceMode in createCore. A host that
+  // passes only adminExecutors (C3's service signal) is a service for the
+  // playbook policy too, and any service signal puts the executor registry
+  // in service mode.
+  it('a host that passes only adminExecutors still reads playbook policy from admin', () => {
+    const core = createCore(makeDeps({ adminExecutors: { entries: {}, packageRoots: [] } }));
+    core.context.setSettings({ ...core.context.getSettings(), playbooks: { sources: ['path:/', 'https://example.com/data-dir/'], autoUpdate: true } });
+    assert.deepStrictEqual(core.context.getPlaybookManager().settings(), { sources: [], autoUpdate: false });
+    assert.strictEqual(core.context.getPlaybookManager().adminPolicy, true);
+    assert.strictEqual(core.context.getExecutorRegistry().isService, true);
+
+    const contactOnly = createCore(makeDeps({ contactConfig: null }));
+    assert.strictEqual(contactOnly.context.getExecutorRegistry().isService, true, 'a contact service signal puts executors in service mode too');
+    assert.strictEqual(contactOnly.context.getPlaybookManager().adminPolicy, true);
+
+    const desktop = createCore(makeDeps());
+    assert.strictEqual(desktop.context.getExecutorRegistry().isService, false);
+    assert.strictEqual(desktop.context.getPlaybookManager().adminPolicy, false);
+  });
+
   // The not-allowed error names where the allowlist lives in this mode.
   it('a source outside the allowlist points the desktop at Settings and the service at the admin service.json', async () => {
     const url = 'https://example.org/playbooks/land-sale.git';

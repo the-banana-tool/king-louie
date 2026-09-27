@@ -2735,6 +2735,19 @@ function createCore(deps = {}) {
     }
   };
 
+  // Service mode, decided once (final review M-9, parked P6). run.js passes
+  // deps.isService === true; any other service signal also counts, so a
+  // service entry point that forgets one still takes its policy from the
+  // admin config and never from data-dir settings: the contact owner and
+  // addresses (C4), the executor registry (C3, R42) and the playbook
+  // allowlist and autoUpdate (C6, ruling T14-admin).
+  const hasDep = (key) => Object.prototype.hasOwnProperty.call(deps, key);
+  const serviceMode = deps.isService === true
+    || hasDep('contactConfig')
+    || hasDep('adminExecutors')
+    || hasDep('playbooksConfig')
+    || deps.remoteApprovals === 'phone';
+
   // Cases stage 4: contact channels, presence and the ladder
   // (docs/superpowers/specs/2026-09-23-cases-stage4-channels.md §7).
   let contactHost = null;
@@ -2743,14 +2756,11 @@ function createCore(deps = {}) {
     migrateLegacyBridgeChatOrigins();
     initializeTools();
     await initializeAgentInfrastructure();
-    // Service mode (final review M6): run.js passes deps.isService === true;
-    // any other service signal (deps.contactConfig present, phone approvals)
-    // also counts, so a service entry point that forgets one still reads the
-    // owner identity from the admin config only, never data-dir settings.
-    // The desktop reads the owner and addresses from settings.
-    // sendExternal's outbound gate is contact-host's defaultGetGate (C3's
-    // gateLeaves once it merges).
-    const isService = deps.isService === true || Object.prototype.hasOwnProperty.call(deps, 'contactConfig') || deps.remoteApprovals === 'phone';
+    // In service mode (serviceMode above) the owner identity comes from the
+    // admin config only; the desktop reads the owner and addresses from
+    // settings. sendExternal's outbound gate is contact-host's
+    // defaultGetGate (C3's gateLeaves once it merges).
+    const isService = serviceMode;
     // Ruling T13-start (final review I2): contact that cannot be built or
     // cannot start never stops the app. Log it, leave contact off
     // (getContact() → null) and warn the owner once.
@@ -2880,12 +2890,12 @@ function createCore(deps = {}) {
   });
 
   // Cases stage 3: executors. In service mode run.js passes the admin
-  // service.json `executors` as deps.adminExecutors (R42); its presence is
-  // what puts the registry in service mode. There the package root check is
+  // service.json `executors` as deps.adminExecutors (R42); without it a
+  // service-mode registry has no entries (fail closed). There the package root check is
   // bound to the service's adminUid (M16), and the signed-grant audit path
   // gets startApprovals' admin-owned approver store and this node's identity
   // (deps.approvalTrust); without it that path fails closed.
-  const executorIsService = Object.prototype.hasOwnProperty.call(deps, 'adminExecutors');
+  const executorIsService = serviceMode;
   const executorAdminUid = deps.adminUid ?? 0;
   const executorRegistry = new ExecutorRegistry({
     dataDir: userDataPath,
@@ -2916,12 +2926,9 @@ function createCore(deps = {}) {
   // false }: no URL sources, local folders unrestricted (spec §12), no
   // auto-update). The
   // data-dir settings for them are ignored there, with one warning. The
-  // desktop reads the owner's own settings. The service signals are the
-  // ones start() uses for contact, plus playbooksConfig itself.
-  const playbooksFromAdmin = deps.isService === true
-    || Object.prototype.hasOwnProperty.call(deps, 'contactConfig')
-    || Object.prototype.hasOwnProperty.call(deps, 'playbooksConfig')
-    || deps.remoteApprovals === 'phone';
+  // desktop reads the owner's own settings. serviceMode is the one service
+  // check the contact and executor code use too.
+  const playbooksFromAdmin = serviceMode;
   let getPlaybookSettings = getSettings;
   if (playbooksFromAdmin) {
     const admin = deps.playbooksConfig && typeof deps.playbooksConfig === 'object' ? deps.playbooksConfig : {};
