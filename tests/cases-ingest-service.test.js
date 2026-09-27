@@ -157,6 +157,21 @@ describe('IngestService pipeline', { skip: NEEDS_GIT }, () => {
     assert.deepStrictEqual(rec.proposedPages, [1, 2, 3, 4, 5, 6]);
   });
 
+  it('a resume queued behind the automatic read does nothing once that read finished', async () => {
+    const pages = Array.from({ length: 6 }, (_, i) => ({ lines: [`Invented survey record page ${i + 1} for the Lakeside lot parcel.`, 'Boundary notes and easement remarks follow on this page.'] }));
+    const h = await ingestHarness({ ingest: { maxExtractChars: 300, chunkChars: 1000 } });
+    const out = await h.svc.store(h.caseId, { name: 'survey.pdf', bytes: await makePdf({ pages }), origin: { kind: 'owner-drop' } });
+    // The record is still 'stored' (resumable) when the resume is queued.
+    const resumed = h.svc.extract(h.caseId, out.docId, { by: 'resume' });
+    await h.svc.drain();
+    await resumed;
+    const extracts = h.calls.filter((c) => c.purpose === 'extract').length;
+    const rec = files.readRecord(h.dir, out.docId);
+    assert.strictEqual(extracts, 1);
+    assert.strictEqual(rec.truncated.reason, 'maxExtractChars');
+    assert.ok(rec.proposedPages.length < 6);
+  });
+
   it('resume reads a document left stored by a crash before its first read', async () => {
     const h = await ingestHarness({ status: 'paused' });
     const out = await h.svc.store(h.caseId, { name: 'payoff.txt', bytes: Buffer.from(PAYOFF_TEXT), origin: { kind: 'owner-drop' } });

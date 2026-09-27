@@ -635,6 +635,25 @@ class IngestService {
     return entry;
   }
 
+  // Cached OCR pages whose charge was not recorded (the budget write
+  // failed, or a crash came between the cache write and the charge) are
+  // charged now, in page order, before anything else: the record lists
+  // them as ocr, so they are never read again to be charged on the way.
+  // Marked charged only when recorded; a 100 % crossing stops this run.
+  _sweepUncharged(meta, rec, ctx) {
+    const last = Math.min(rec.pageCount || 1, ctx.cfg.maxPages);
+    for (let n = 1; n <= last; n += 1) {
+      const cached = validCache(files.readCachedPage(meta.dir, rec.docId, n), n);
+      if (!cached || cached.charged) continue;
+      const { stop, recorded } = this._charge(meta.id, 'ocr', { usd: cached.usd, unpriced: 0 }, { docId: rec.docId, page: n });
+      if (recorded) this._cache(meta, rec, { ...cached, charged: true });
+      if (stop) {
+        ctx.stop = true;
+        return;
+      }
+    }
+  }
+
   // The page cache is local working state (ruling M14); a failed write
   // costs at most a second read of the page, so it never fails the read.
   _cache(meta, rec, entry) {
@@ -916,6 +935,10 @@ class IngestService {
     const state = await this._state(meta, job.docId);
     if (!state) throw new IngestError('NOT_FOUND', `No document ${job.docId} in this case.`);
     let { rec, text } = state;
+    // A resume job is checked again when it runs: one queued before an
+    // automatic or owner read finished must not spend on the finished
+    // document (it would propose everything left, as proposeAll).
+    if (job.by === 'resume' && !RESUMABLE.has(rec.status)) return files.readRecord(meta.dir, job.docId) || rec;
     if (WAITING.has(meta.status)) {
       const note = `extraction waits: case is ${meta.status}`;
       if (rec.note !== note) await this._publish(meta.id, { record: { ...rec, note }, message: `waiting ${rec.name}` });
@@ -963,6 +986,7 @@ class IngestService {
       proposeAll: job.by === 'owner' || job.by === 'resume' || !(rec.proposedPages.length || rec.failedChunks.length || rec.truncated)
     };
     try {
+      this._sweepUncharged(meta, rec, ctx);
       if (mime === 'application/pdf') ctx.pdf = await this.openPdf(bytes, { name: rec.name, maxBytes: cfg.maxBytes });
       let read = new Set();
       if (job.pages || !['proposing', 'checking'].includes(rec.status) || job.by === 'owner') {
