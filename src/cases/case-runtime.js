@@ -1042,6 +1042,7 @@ class CaseRuntime {
         };
         turn.orientation = this.orientation(fresh.id, { triggers, hookNotes: hook.notes });
         this.turns.set(fresh.id, turn);
+        this._notify('case:changed', { caseId: fresh.id, what: 'turn', running: true, source });
         return turn;
       } finally {
         closeEntriesScope();
@@ -1084,6 +1085,7 @@ class CaseRuntime {
     } finally {
       if (this.turns.get(turn.caseId) === turn) this.turns.delete(turn.caseId);
       this._release(turn.dir, turn.turnId);
+      this._notify('case:changed', { caseId: turn.caseId, what: 'turn', running: false, source: turn.source || 'owner' });
     }
   }
 
@@ -1368,6 +1370,33 @@ class CaseRuntime {
     for (const turn of this.turns.values()) {
       if (turn.source === 'wakeup' && typeof turn.abort === 'function') turn.abort(reason);
     }
+  }
+
+  // The turn running on a case right now: { turnId, source }, or null.
+  runningTurn(caseId) {
+    let id;
+    try {
+      id = this.getCase(caseId).id;
+    } catch {
+      return null;
+    }
+    const turn = this.turns.get(id);
+    return turn ? { turnId: turn.turnId, source: turn.source || 'owner' } : null;
+  }
+
+  // Stop from the case's chat (spec 2026-09-27 §9): aborts the running turn,
+  // an owner turn or a wake-up. False when no turn runs.
+  abortTurn(caseId, reason = 'stopped by owner') {
+    let id;
+    try {
+      id = this.getCase(caseId).id;
+    } catch {
+      return false;
+    }
+    const turn = this.turns.get(id);
+    if (!turn || typeof turn.abort !== 'function') return false;
+    turn.abort(reason);
+    return true;
   }
 
   // ---- Owner facts, answers and failure reports (spec §3.4, §3.9) ----

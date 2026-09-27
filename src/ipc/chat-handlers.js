@@ -352,6 +352,13 @@ function registerChatHandlers(ipcMain, context = {}) {
       return stoppedChat;
     };
 
+    // In a case chat, Stop also aborts the case turn itself, so its tools and
+    // anything reading the turn's own signal stop too.
+    if (caseTurn && typeof caseTurn.abort === 'function') {
+      const turnToAbort = caseTurn;
+      abortController.signal.addEventListener('abort', () => turnToAbort.abort('stopped by owner'), { once: true });
+    }
+
     try {
       const hookResult = await runHookEvent('UserPromptSubmit', {
         source: 'ui',
@@ -820,6 +827,13 @@ function registerChatHandlers(ipcMain, context = {}) {
       controller.abort();
       activeRuns.delete(chatId);
       return { ok: true };
+    }
+    // No run of this chat: a case chat may be watching a wake-up turn on its
+    // case, which the owner can stop from here (spec 2026-09-27 §9).
+    const chat = getChats().find((item) => item.id === chatId);
+    const caseRuntime = chat?.caseId && typeof context.getCaseRuntime === 'function' ? context.getCaseRuntime() : null;
+    if (caseRuntime && typeof caseRuntime.abortTurn === 'function' && caseRuntime.abortTurn(chat.caseId, 'stopped by owner')) {
+      return { ok: true, caseTurn: true };
     }
     return { ok: false, error: 'No active response for this chat.' };
   }));

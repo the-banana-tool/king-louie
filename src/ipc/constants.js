@@ -45,6 +45,7 @@ module.exports = {
   CASE_CREATE: 'case:create',
   CASE_ATTACH: 'case:attach',
   CASE_ORIENTATION: 'case:orientation',
+  CASE_RUNNING_TURN: 'case:runningTurn',
   CASE_SET_DISCLOSABLE: 'case:setDisclosable',
   CASE_INGEST_FILES: 'case:ingestFiles',
   CASE_SOURCES: 'case:sources',

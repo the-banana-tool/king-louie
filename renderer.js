@@ -33,6 +33,8 @@ const appState = {
   pendingImages: [],
   pendingDocuments: [],
   activeResponses: new Set(),
+  // Case ids with a turn running now (case:changed, what: 'turn').
+  runningCaseTurns: new Set(),
   streamBuffers: new Map(),
   settings: {
     encryptionAvailable: true,
@@ -426,6 +428,16 @@ function setHistoryCollapsed(collapsed) {
   renderHistoryToggleButton();
 }
 
+// Stop replaces Send while the active chat streams a reply or its case runs a
+// turn (an owner turn or a wake-up; spec 2026-09-27 §9).
+function refreshStopButton() {
+  const chat = getActiveChat();
+  const busy = appState.activeResponses.has(appState.activeChatId)
+    || Boolean(chat?.caseId && appState.runningCaseTurns.has(chat.caseId));
+  if (dom.sendBtn) dom.sendBtn.hidden = busy;
+  if (dom.stopBtn) dom.stopBtn.hidden = !busy;
+}
+
 function setResponseActive(active, chatId) {
   const id = chatId || appState.activeChatId;
   if (active) {
@@ -433,9 +445,7 @@ function setResponseActive(active, chatId) {
   } else {
     appState.activeResponses.delete(id);
   }
-  const isActiveChatStreaming = appState.activeResponses.has(appState.activeChatId);
-  if (dom.sendBtn) dom.sendBtn.hidden = isActiveChatStreaming;
-  if (dom.stopBtn) dom.stopBtn.hidden = !isActiveChatStreaming;
+  refreshStopButton();
   updateChatStreamingIndicators();
 }
 
@@ -2570,6 +2580,12 @@ function refreshCaseQuestionsBar(pendingMessage) {
 
 if (window.electron?.cases?.onChanged) {
   window.electron.cases.onChanged((payload) => {
+    if (payload?.what === 'turn' && payload.caseId) {
+      if (payload.running) appState.runningCaseTurns.add(payload.caseId);
+      else appState.runningCaseTurns.delete(payload.caseId);
+      refreshStopButton();
+      return;
+    }
     const chat = getActiveChat();
     if (!chat?.caseId || (payload?.caseId && payload.caseId !== chat.caseId)) return;
     refreshCaseQuestionsBar();
@@ -7871,15 +7887,24 @@ async function handleSelectChat(chatId) {
   appState.streamBuffers.clear();
   streamTextOffsets.clear();
   appState.activeChatId = chatId;
-  const isStreaming = appState.activeResponses.has(chatId);
-  if (dom.sendBtn) dom.sendBtn.hidden = isStreaming;
-  if (dom.stopBtn) dom.stopBtn.hidden = !isStreaming;
+  refreshStopButton();
   const chat = appState.chats.find((c) => c.id === chatId);
   appState.isAgentModeEnabled = !!(chat && chat.agentMode);
   appState.isSandboxModeEnabled = chat ? chat.sandboxMode !== false : true;
   unwrapIpcResult(await window.electron.chat.setActive(chatId), 'Unable to switch active chat.');
   refreshUI();
   refreshCaseQuestionsBar();
+
+  if (chat?.caseId && window.electron?.cases?.runningTurn) {
+    window.electron.cases.runningTurn({ caseId: chat.caseId })
+      .then((r) => {
+        const state = unwrapIpcResult(r, 'Unable to read the case turn.');
+        if (state?.running) appState.runningCaseTurns.add(chat.caseId);
+        else appState.runningCaseTurns.delete(chat.caseId);
+        refreshStopButton();
+      })
+      .catch((err) => chatLog.warn(`Case turn state failed: ${err.message}`));
+  }
 
   if (chat?.canvasState?.visible && chat.canvasState.content) {
     showCanvas(chat.canvasState.title, chat.canvasState.content);

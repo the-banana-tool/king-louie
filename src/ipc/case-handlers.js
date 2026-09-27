@@ -92,6 +92,11 @@ function registerCaseHandlers(ipcMain, context = {}) {
     { ok: true, text: runtime().orientation(caseId) }
   )));
 
+  ipcMain.handle(IPC.CASE_RUNNING_TURN, wrapHandler(IPC.CASE_RUNNING_TURN, async (_event, { caseId } = {}) => {
+    const turn = runtime().runningTurn(caseId);
+    return { ok: true, running: Boolean(turn), source: turn ? turn.source : null };
+  }));
+
   ipcMain.handle(IPC.CASE_SET_DISCLOSABLE, wrapHandler(IPC.CASE_SET_DISCLOSABLE, async (_event, { caseId, factId, disclosable } = {}) => {
     if (typeof disclosable !== 'boolean') return { ok: false, error: 'disclosable must be true or false.' };
     return { ok: true, fact: runtime().ledger(caseId).setDisclosable(factId, disclosable) };

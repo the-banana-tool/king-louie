@@ -836,6 +836,11 @@ contextBridge.exposeInMainWorld(
         validateString(payload.caseId, 'caseId', { minLength: 1 });
         return ipcRenderer.invoke('case:orientation', payload);
       },
+      runningTurn: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        return ipcRenderer.invoke('case:runningTurn', payload);
+      },
       setDisclosable: (payload) => {
         validateObject(payload, 'payload');
         validateString(payload.caseId, 'caseId', { minLength: 1 });
