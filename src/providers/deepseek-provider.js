@@ -1,9 +1,9 @@
 const BaseLLMProvider = require('./base-provider');
 
 class DeepSeekProvider extends BaseLLMProvider {
-  constructor(apiKey) {
-    super(apiKey);
-    this.baseUrl = 'https://api.deepseek.com/v1';
+  constructor(apiKey, options = {}) {
+    super(apiKey, options);
+    this.baseUrl = BaseLLMProvider.baseUrlFrom(options, 'https://api.deepseek.com/v1');
   }
 
   getName() { return 'deepseek'; }

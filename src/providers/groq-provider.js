@@ -1,9 +1,9 @@
 const BaseLLMProvider = require('./base-provider');
 
 class GroqProvider extends BaseLLMProvider {
-  constructor(apiKey) {
-    super(apiKey);
-    this.baseUrl = 'https://api.groq.com/openai/v1';
+  constructor(apiKey, options = {}) {
+    super(apiKey, options);
+    this.baseUrl = BaseLLMProvider.baseUrlFrom(options, 'https://api.groq.com/openai/v1');
   }
 
   getName() { return 'groq'; }

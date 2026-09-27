@@ -10,9 +10,9 @@ describe('OllamaProvider', () => {
     ProviderFactory = require('../src/providers/provider-factory');
   });
 
-  it('instantiates with default baseUrl', () => {
+  it('instantiates with the default Ollama address', () => {
     const provider = new OllamaProvider();
-    assert.strictEqual(provider.baseUrl, 'http://localhost:11434/v1');
+    assert.strictEqual(provider.baseUrl, 'http://127.0.0.1:11434/v1');
   });
 
   it('does not require API key', () => {

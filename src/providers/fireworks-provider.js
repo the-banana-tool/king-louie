@@ -1,9 +1,9 @@
 const BaseLLMProvider = require('./base-provider');
 
 class FireworksProvider extends BaseLLMProvider {
-  constructor(apiKey) {
-    super(apiKey);
-    this.baseUrl = 'https://api.fireworks.ai/inference/v1';
+  constructor(apiKey, options = {}) {
+    super(apiKey, options);
+    this.baseUrl = BaseLLMProvider.baseUrlFrom(options, 'https://api.fireworks.ai/inference/v1');
   }
 
   getName() { return 'fireworks'; }

@@ -69,6 +69,11 @@ function messagesToPromptWithTools(messages, tools) {
 }
 
 class OpenAIProvider extends BaseLLMProvider {
+  constructor(apiKey, options = {}) {
+    super(apiKey, options);
+    this.baseUrl = BaseLLMProvider.baseUrlFrom(options, 'https://api.openai.com/v1');
+  }
+
   prependSystemPrompt(messages = [], systemPrompt = '') {
     if (!systemPrompt || typeof systemPrompt !== 'string') {
       return messages;
@@ -99,24 +104,6 @@ class OpenAIProvider extends BaseLLMProvider {
       'gpt-4-turbo',
       'gpt-4'
     ];
-  }
-
-  getModelPricingTable() {
-    return {
-      'gpt-5.4-pro': { inputPerMillion: 3, outputPerMillion: 15 },
-      'gpt-5': { inputPerMillion: 3, outputPerMillion: 15 },
-      'gpt-5.1': { inputPerMillion: 3, outputPerMillion: 15 },
-      'gpt-5-mini': { inputPerMillion: 0.5, outputPerMillion: 2 },
-      'gpt-5.2-codex': { inputPerMillion: 3, outputPerMillion: 15 },
-      'gpt-4.1': { inputPerMillion: 2, outputPerMillion: 8 },
-      'gpt-4.1-mini': { inputPerMillion: 0.4, outputPerMillion: 1.6 },
-      'gpt-4o': { inputPerMillion: 2.5, outputPerMillion: 10 },
-      'gpt-4o-mini': { inputPerMillion: 0.15, outputPerMillion: 0.6 },
-      'o4-mini': { inputPerMillion: 1.1, outputPerMillion: 4.4 },
-      'o3-mini': { inputPerMillion: 1.1, outputPerMillion: 4.4 },
-      'o1': { inputPerMillion: 15, outputPerMillion: 60 },
-      'o1-mini': { inputPerMillion: 1.1, outputPerMillion: 4.4 }
-    };
   }
 
   getDefaultModel() {
@@ -217,7 +204,7 @@ class OpenAIProvider extends BaseLLMProvider {
       return this._sendResponses(model, preparedMessages, options);
     }
 
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    const response = await fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
@@ -243,7 +230,7 @@ class OpenAIProvider extends BaseLLMProvider {
   }
 
   async _sendCompletions(model, prompt, options = {}) {
-    const response = await fetch('https://api.openai.com/v1/completions', {
+    const response = await fetch(`${this.baseUrl}/completions`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
@@ -275,7 +262,7 @@ class OpenAIProvider extends BaseLLMProvider {
       return this._sendResponsesWithTools(requestedModel, preparedMessages, tools, options);
     }
 
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    const response = await fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
@@ -320,7 +307,7 @@ class OpenAIProvider extends BaseLLMProvider {
 
   async _sendCompletionsWithTools(model, messages, tools, options = {}) {
     const prompt = messagesToPromptWithTools(this.formatMessages(messages), tools);
-    const response = await fetch('https://api.openai.com/v1/completions', {
+    const response = await fetch(`${this.baseUrl}/completions`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
@@ -408,7 +395,7 @@ class OpenAIProvider extends BaseLLMProvider {
   async _sendResponses(model, messages, options = {}) {
     const input = this._formatResponsesInput(messages);
 
-    const response = await fetch('https://api.openai.com/v1/responses', {
+    const response = await fetch(`${this.baseUrl}/responses`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
@@ -442,7 +429,7 @@ class OpenAIProvider extends BaseLLMProvider {
       parameters: tool.parameters
     }));
 
-    const response = await fetch('https://api.openai.com/v1/responses', {
+    const response = await fetch(`${this.baseUrl}/responses`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
@@ -597,8 +584,8 @@ class OpenAIProvider extends BaseLLMProvider {
 
     const isCompletions = isCompletionsModel(requestedModel);
     const url = isCompletions
-      ? 'https://api.openai.com/v1/completions'
-      : 'https://api.openai.com/v1/chat/completions';
+      ? `${this.baseUrl}/completions`
+      : `${this.baseUrl}/chat/completions`;
 
     const body = isCompletions
       ? {
@@ -683,7 +670,7 @@ class OpenAIProvider extends BaseLLMProvider {
   async _streamResponses(requestedModel, messages, options, onChunk) {
     const input = this._formatResponsesInput(messages);
 
-    const response = await fetch('https://api.openai.com/v1/responses', {
+    const response = await fetch(`${this.baseUrl}/responses`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
@@ -757,7 +744,7 @@ class OpenAIProvider extends BaseLLMProvider {
   }
 
   async listModels() {
-    const response = await fetch('https://api.openai.com/v1/models', {
+    const response = await fetch(`${this.baseUrl}/models`, {
       method: 'GET',
       headers: this.getHeaders()
     });

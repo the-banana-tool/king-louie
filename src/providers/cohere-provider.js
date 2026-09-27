@@ -1,9 +1,9 @@
 const BaseLLMProvider = require('./base-provider');
 
 class CohereProvider extends BaseLLMProvider {
-  constructor(apiKey) {
-    super(apiKey);
-    this.baseUrl = 'https://api.cohere.com/v2';
+  constructor(apiKey, options = {}) {
+    super(apiKey, options);
+    this.baseUrl = BaseLLMProvider.baseUrlFrom(options, 'https://api.cohere.com/v2');
   }
 
   getName() { return 'cohere'; }
@@ -180,7 +180,7 @@ class CohereProvider extends BaseLLMProvider {
   }
 
   async listModels() {
-    const response = await fetch('https://api.cohere.com/v1/models', { method: 'GET', headers: this.getHeaders() });
+    const response = await fetch(`${this.baseUrl.replace(/\/v2$/, '/v1')}/models`, { method: 'GET', headers: this.getHeaders() });
     if (!response.ok) throw await this.buildError(response);
     const data = await response.json();
     return (data.models || []).map((m) => m.name).sort();

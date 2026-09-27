@@ -2,7 +2,6 @@ const { describe, it, beforeEach } = require('node:test');
 const assert = require('node:assert');
 
 const UsageTracker = require('../src/tracking/usage-tracker');
-const { getCost } = require('../src/tracking/pricing-tables');
 const { registerUsageHandlers } = require('../src/ipc/usage-handlers');
 
 describe('UsageTracker', () => {
@@ -25,15 +24,16 @@ describe('UsageTracker', () => {
     tracker = new UsageTracker(mockStore);
   });
 
-  it('records usage and calculates cost', () => {
+  it('records usage with the cost the call carries', () => {
     const result = tracker.record({
       provider: 'openai',
       model: 'gpt-4o-mini',
       inputTokens: 1000,
-      outputTokens: 500
+      outputTokens: 500,
+      costUsd: 0.00045
     });
 
-    assert.ok(result.cost > 0);
+    assert.strictEqual(result.cost, 0.00045);
     assert.strictEqual(result.inputTokens, 1000);
     assert.strictEqual(result.outputTokens, 500);
   });
@@ -76,7 +76,7 @@ describe('UsageTracker', () => {
     assert.ok(daily.providers.anthropic);
   });
 
-  it('returns null cost for unknown model when no explicit cost is provided', () => {
+  it('returns null cost when the call carries none', () => {
     const result = tracker.record({
       provider: 'unknown',
       model: 'unknown-model',
@@ -87,12 +87,12 @@ describe('UsageTracker', () => {
     assert.strictEqual(result.cost, null);
   });
 
-  it('uses explicit costUsd fallback for unknown models', () => {
+  it('never recomputes a recorded cost from its own table', () => {
     const result = tracker.record({
-      provider: 'unknown',
-      model: 'unknown-model',
-      inputTokens: 1000,
-      outputTokens: 500,
+      provider: 'openai',
+      model: 'gpt-4o-mini',
+      inputTokens: 1_000_000,
+      outputTokens: 1_000_000,
       costUsd: 0.1234
     });
 
@@ -111,24 +111,6 @@ describe('UsageTracker', () => {
     assert.strictEqual(session.totalTokens, 0);
     assert.strictEqual(session.turns, 0);
     assert.deepStrictEqual(session.providers, {});
-  });
-});
-
-describe('PricingTables', () => {
-  it('calculates correct cost for gpt-4o-mini', () => {
-    const cost = getCost('openai', 'gpt-4o-mini', 1_000_000, 1_000_000);
-    assert.strictEqual(cost, 0.75);
-  });
-
-  it('includes cache read cost when applicable', () => {
-    const costWithCache = getCost('anthropic', 'claude-3-5-sonnet-latest', 1000, 500, 2000);
-    const costWithoutCache = getCost('anthropic', 'claude-3-5-sonnet-latest', 1000, 500, 0);
-    assert.ok(costWithCache > costWithoutCache);
-  });
-
-  it('returns null for unknown provider/model', () => {
-    const cost = getCost('nonexistent', 'model', 1000, 500);
-    assert.strictEqual(cost, null);
   });
 });
 

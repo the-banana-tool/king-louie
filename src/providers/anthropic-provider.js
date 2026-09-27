@@ -13,6 +13,11 @@ function modelSupportsThinking(model) {
 }
 
 class AnthropicProvider extends BaseLLMProvider {
+  constructor(apiKey, options = {}) {
+    super(apiKey, options);
+    this.baseUrl = BaseLLMProvider.baseUrlFrom(options, 'https://api.anthropic.com/v1');
+  }
+
   getProviderName() {
     return 'anthropic';
   }
@@ -24,18 +29,6 @@ class AnthropicProvider extends BaseLLMProvider {
       'claude-3-5-haiku-latest',
       'claude-3-opus-latest'
     ];
-  }
-
-  getModelPricingTable() {
-    return {
-      'claude-sonnet-4': { inputPerMillion: 3, outputPerMillion: 15, cacheWritePerMillion: 3.75, cacheReadPerMillion: 0.3 },
-      'claude-opus-4': { inputPerMillion: 15, outputPerMillion: 75, cacheWritePerMillion: 18.75, cacheReadPerMillion: 1.5 },
-      'claude-haiku-4': { inputPerMillion: 0.8, outputPerMillion: 4, cacheWritePerMillion: 1, cacheReadPerMillion: 0.08 },
-      'claude-3-7-sonnet': { inputPerMillion: 3, outputPerMillion: 15, cacheWritePerMillion: 3.75, cacheReadPerMillion: 0.3 },
-      'claude-3-5-sonnet': { inputPerMillion: 3, outputPerMillion: 15, cacheWritePerMillion: 3.75, cacheReadPerMillion: 0.3 },
-      'claude-3-5-haiku': { inputPerMillion: 0.8, outputPerMillion: 4, cacheWritePerMillion: 1, cacheReadPerMillion: 0.08 },
-      'claude-3-opus': { inputPerMillion: 15, outputPerMillion: 75, cacheWritePerMillion: 18.75, cacheReadPerMillion: 1.5 }
-    };
   }
 
   getDefaultModel() {
@@ -170,35 +163,6 @@ class AnthropicProvider extends BaseLLMProvider {
       .filter(Boolean);
   }
 
-  /**
-   * Calculate cost with Anthropic cache-aware pricing.
-   * cache_creation_input_tokens cost 1.25x normal input.
-   * cache_read_input_tokens cost 0.1x normal input.
-   */
-  calculateCostUsd(model, inputTokens, outputTokens, cacheMetrics = {}) {
-    const pricing = this.resolveModelPricing(model);
-    if (!pricing) return 0;
-
-    // Anthropic reports cache tokens as separate counts (NOT included in
-    // input_tokens). Base normalizeUsage maps cache_read_input_tokens →
-    // cachedInputTokens and cache_creation_input_tokens → cacheCreationInputTokens.
-    const cacheCreation = Number(cacheMetrics.cacheCreationInputTokens || 0);
-    const cacheRead = Number(
-      cacheMetrics.cachedInputTokens
-      ?? cacheMetrics.cacheReadInputTokens
-      ?? 0
-    );
-    // Anthropic's input_tokens does NOT include cache tokens, so no subtraction.
-    const uncachedInput = Math.max(0, inputTokens);
-
-    const uncachedCost = (uncachedInput / 1_000_000) * (pricing.inputPerMillion || 0);
-    const cacheWriteCost = (cacheCreation / 1_000_000) * (pricing.cacheWritePerMillion || (pricing.inputPerMillion || 0) * 1.25);
-    const cacheReadCost = (cacheRead / 1_000_000) * (pricing.cacheReadPerMillion || (pricing.inputPerMillion || 0) * 0.1);
-    const outputCost = (outputTokens / 1_000_000) * (pricing.outputPerMillion || 0);
-
-    return Number((uncachedCost + cacheWriteCost + cacheReadCost + outputCost).toFixed(8));
-  }
-
   normalizeUsage(usage = {}) {
     const base = super.normalizeUsage(usage);
     return {
@@ -208,23 +172,15 @@ class AnthropicProvider extends BaseLLMProvider {
     };
   }
 
-  buildLlmCallMetrics({ model, usage } = {}) {
-    const normalizedModel = model || this.getDefaultModel();
-    const normalizedUsage = this.normalizeUsage(usage || {});
-
+  // Anthropic's input_tokens excludes cache reads and writes; they are
+  // separate counts, each priced at its own catalog rate.
+  usageForPricing(normalized) {
     return {
-      provider: this.getProviderName(),
-      model: normalizedModel,
-      ...normalizedUsage,
-      costUsd: this.calculateCostUsd(
-        normalizedModel,
-        normalizedUsage.inputTokens,
-        normalizedUsage.outputTokens,
-        {
-          cacheCreationInputTokens: normalizedUsage.cacheCreationInputTokens,
-          cacheReadInputTokens: normalizedUsage.cacheReadInputTokens
-        }
-      )
+      input: normalized.inputTokens,
+      cachedInput: normalized.cacheReadInputTokens,
+      cacheWrite: normalized.cacheCreationInputTokens,
+      output: normalized.outputTokens,
+      reasoning: 0
     };
   }
 
@@ -254,7 +210,7 @@ class AnthropicProvider extends BaseLLMProvider {
   async sendMessage(messages, options = {}) {
     const systemPrompt = typeof options.systemPrompt === 'string' ? options.systemPrompt : '';
     const cachedSystem = this.buildCachedSystemPrompt(systemPrompt);
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const response = await fetch(`${this.baseUrl}/messages`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
@@ -301,7 +257,7 @@ class AnthropicProvider extends BaseLLMProvider {
       body.temperature = options.temperature ?? 0.7;
     }
 
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const response = await fetch(`${this.baseUrl}/messages`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify(body)
@@ -346,7 +302,7 @@ class AnthropicProvider extends BaseLLMProvider {
       body.temperature = options.temperature ?? 0.7;
     }
 
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const response = await fetch(`${this.baseUrl}/messages`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify(body)
@@ -562,7 +518,7 @@ class AnthropicProvider extends BaseLLMProvider {
     const requestedModel = options.model || this.getDefaultModel();
     const systemPrompt = typeof options.systemPrompt === 'string' ? options.systemPrompt : '';
     const cachedSystem = this.buildCachedSystemPrompt(systemPrompt);
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const response = await fetch(`${this.baseUrl}/messages`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
@@ -649,7 +605,7 @@ class AnthropicProvider extends BaseLLMProvider {
   }
 
   async listModels() {
-    const response = await fetch('https://api.anthropic.com/v1/models', {
+    const response = await fetch(`${this.baseUrl}/models`, {
       method: 'GET',
       headers: this.getHeaders()
     });

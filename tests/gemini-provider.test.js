@@ -210,10 +210,4 @@ describe('GeminiProvider', () => {
     assert.strictEqual(provider.getName(), 'gemini');
   });
 
-  it('returns pricing table', () => {
-    const provider = new GeminiProvider('test-key-minimum-length');
-    const pricing = provider.getModelPricingTable();
-    assert.ok(pricing['gemini-2.0-flash']);
-    assert.strictEqual(pricing['gemini-2.0-flash'].inputPerMillion, 0.10);
-  });
 });

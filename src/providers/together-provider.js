@@ -1,9 +1,9 @@
 const BaseLLMProvider = require('./base-provider');
 
 class TogetherProvider extends BaseLLMProvider {
-  constructor(apiKey) {
-    super(apiKey);
-    this.baseUrl = 'https://api.together.xyz/v1';
+  constructor(apiKey, options = {}) {
+    super(apiKey, options);
+    this.baseUrl = BaseLLMProvider.baseUrlFrom(options, 'https://api.together.xyz/v1');
   }
 
   getName() { return 'together'; }

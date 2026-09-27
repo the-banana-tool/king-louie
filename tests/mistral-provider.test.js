@@ -99,10 +99,4 @@ describe('MistralProvider', () => {
     assert.strictEqual(provider.getName(), 'mistral');
   });
 
-  it('returns pricing table', () => {
-    const provider = new MistralProvider('test-key-minimum-length');
-    const pricing = provider.getModelPricingTable();
-    assert.ok(pricing['mistral-large-latest']);
-    assert.strictEqual(pricing['mistral-large-latest'].inputPerMillion, 2.00);
-  });
 });

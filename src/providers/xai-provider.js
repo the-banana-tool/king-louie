@@ -1,9 +1,9 @@
 const BaseLLMProvider = require('./base-provider');
 
 class XAIProvider extends BaseLLMProvider {
-  constructor(apiKey) {
-    super(apiKey);
-    this.baseUrl = 'https://api.x.ai/v1';
+  constructor(apiKey, options = {}) {
+    super(apiKey, options);
+    this.baseUrl = BaseLLMProvider.baseUrlFrom(options, 'https://api.x.ai/v1');
   }
 
   getName() { return 'xai'; }

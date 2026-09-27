@@ -1,5 +1,6 @@
-const { getCost } = require('./pricing-tables');
-
+// UsageTracker totals what each call recorded. It never prices a call: the
+// cost comes from the provider's catalog-priced metrics (spec 2026-09-27
+// §4.4). A call without a known cost counts its tokens and no dollars.
 const createTotals = () => ({
   inputTokens: 0,
   outputTokens: 0,
@@ -8,6 +9,8 @@ const createTotals = () => ({
   totalCost: 0,
   turns: 0
 });
+
+const recordedCost = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : null);
 
 class UsageTracker {
   constructor(store) {
@@ -70,12 +73,7 @@ class UsageTracker {
   record(event = {}) {
     const provider = String(event.provider || '').trim().toLowerCase();
     const model = String(event.model || '').trim();
-    const inputTokens = Number(event.inputTokens) || 0;
-    const outputTokens = Number(event.outputTokens) || 0;
-    const cacheReadTokens = Number(event.cacheReadTokens) || 0;
-    const eventCost = Number.isFinite(Number(event.costUsd)) ? Number(event.costUsd) : null;
-    const pricedCost = getCost(provider, model, inputTokens, outputTokens, cacheReadTokens);
-    const resolvedCost = pricedCost === null ? eventCost : pricedCost;
+    const resolvedCost = recordedCost(event.costUsd);
 
     const applied = this.applyToTotals(this.sessionUsage, event, resolvedCost);
     const providerSession = this.ensureProviderTotals(this.sessionUsage.providers, provider || 'unknown');
@@ -105,6 +103,7 @@ class UsageTracker {
       provider,
       model,
       ...applied,
+      ...(event.usagePartial ? { usagePartial: true } : {}),
       durationMs: Number(event.durationMs) || 0
     };
   }

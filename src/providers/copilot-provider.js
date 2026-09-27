@@ -12,8 +12,8 @@ class CopilotProvider extends BaseLLMProvider {
   constructor(apiKey, options = {}) {
     super(apiKey, options);
     this.githubToken = apiKey;
-    this.baseUrl = 'https://api.githubcopilot.com';
-    this.tokenExchangeUrl = 'https://api.github.com/copilot_internal/v2/token';
+    this.baseUrl = BaseLLMProvider.baseUrlFrom(options, 'https://api.githubcopilot.com');
+    this.tokenExchangeUrl = options.tokenExchangeUrl || 'https://api.github.com/copilot_internal/v2/token';
     this._copilotToken = null;
     this._copilotTokenExpiresAt = 0;
   }

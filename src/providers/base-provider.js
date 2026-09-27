@@ -1,12 +1,28 @@
 const { buildProviderError } = require('./provider-error');
+const { getActiveCatalog } = require('../models');
+const { createLogger } = require('../logging');
+
+const log = createLogger('providers');
 
 class BaseLLMProvider {
   constructor(apiKey, options = {}) {
     this.apiKey = apiKey;
     this.authMode = options.authMode || 'api-key';
+    // Prices come from the model catalog (spec 2026-09-27 §4.4). The core
+    // injects its own; without one the bundled snapshot prices the call.
+    this.catalog = options.catalog || null;
     if (this.authMode === 'api-key') {
       this.validateApiKey();
     }
+  }
+
+  /** A provider's API base: options.baseUrl when given, without trailing slashes. */
+  static baseUrlFrom(options, fallback) {
+    return String(options?.baseUrl || fallback).replace(/\/+$/, '');
+  }
+
+  getCatalog() {
+    return this.catalog || getActiveCatalog();
   }
 
   validateApiKey() {
@@ -53,91 +69,91 @@ class BaseLLMProvider {
     return 'unknown';
   }
 
-  getModelPricingTable() {
-    return {};
-  }
-
   normalizeUsage(usage = {}) {
     const inputTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0) || 0;
     const outputTokens = Number(usage.output_tokens ?? usage.completion_tokens ?? 0) || 0;
     const totalTokens = Number(usage.total_tokens ?? inputTokens + outputTokens) || 0;
 
     // Provider-specific cache reporting:
-    //   OpenAI:    usage.prompt_tokens_details.cached_tokens (subset of prompt_tokens)
-    //   Anthropic: usage.cache_read_input_tokens / cache_creation_input_tokens
-    //              (these are NOT included in input_tokens — they're separate counts)
-    //   Gemini:    usage.cached_content_token_count (subset of prompt input)
+    //   OpenAI chat:      usage.prompt_tokens_details.cached_tokens (subset of prompt_tokens)
+    //   OpenAI responses: usage.input_tokens_details.cached_tokens (subset of input_tokens)
+    //   Anthropic:        usage.cache_read_input_tokens / cache_creation_input_tokens
+    //                     (NOT included in input_tokens — separate counts)
+    //   Gemini:           usage.cached_content_token_count (subset of prompt input)
+    //   DeepSeek:         usage.prompt_cache_hit_tokens (subset of prompt_tokens)
     const cachedInputTokens =
       Number(
         usage?.prompt_tokens_details?.cached_tokens
+        ?? usage?.input_tokens_details?.cached_tokens
         ?? usage?.cache_read_input_tokens
         ?? usage?.cached_content_token_count
+        ?? usage?.prompt_cache_hit_tokens
         ?? 0
       ) || 0;
     const cacheCreationInputTokens =
       Number(usage?.cache_creation_input_tokens ?? 0) || 0;
+    // Reasoning tokens are reported inside the output count.
+    const reasoningTokens =
+      Number(
+        usage?.completion_tokens_details?.reasoning_tokens
+        ?? usage?.output_tokens_details?.reasoning_tokens
+        ?? 0
+      ) || 0;
 
     return {
       inputTokens,
       outputTokens,
       totalTokens,
       cachedInputTokens,
-      cacheCreationInputTokens
+      cacheCreationInputTokens,
+      reasoningTokens
     };
   }
 
-  resolveModelPricing(model = '') {
-    const pricingTable = this.getModelPricingTable();
-    if (!pricingTable || typeof pricingTable !== 'object') return null;
-
-    if (pricingTable[model]) {
-      return pricingTable[model];
-    }
-
-    const normalizedModel = String(model).toLowerCase();
-    const prefixMatch = Object.entries(pricingTable).find(([key]) =>
-      normalizedModel.startsWith(String(key).toLowerCase())
-    );
-
-    return prefixMatch ? prefixMatch[1] : null;
+  /**
+   * Normalized usage → the catalog's usage shape. OpenAI-style providers
+   * report cached input inside the input count; Anthropic overrides this.
+   */
+  usageForPricing(normalized) {
+    return {
+      input: Math.max(0, normalized.inputTokens - normalized.cachedInputTokens),
+      cachedInput: normalized.cachedInputTokens,
+      cacheWrite: normalized.cacheCreationInputTokens,
+      output: normalized.outputTokens,
+      reasoning: normalized.reasoningTokens
+    };
   }
 
-  calculateCostUsd(model, inputTokens, outputTokens, cacheMetrics = {}) {
-    const pricing = this.resolveModelPricing(model);
-    if (!pricing) return 0;
-
-    // OpenAI/Gemini convention: cached tokens are a subset of inputTokens
-    // and are billed at a discount (typically 50%, configurable via pricing
-    // table as cachedInputPerMillion). Anthropic overrides this method
-    // entirely because its cached tokens are reported as a separate count.
-    const cachedInput = Number(cacheMetrics.cachedInputTokens || 0);
-    const uncachedInput = Math.max(0, inputTokens - cachedInput);
-    const cachedRate = pricing.cachedInputPerMillion
-      ?? (pricing.inputPerMillion ? pricing.inputPerMillion * 0.5 : 0);
-
-    const inputCost = (uncachedInput / 1_000_000) * (pricing.inputPerMillion || 0);
-    const cachedCost = (cachedInput / 1_000_000) * cachedRate;
-    const outputCost = (outputTokens / 1_000_000) * (pricing.outputPerMillion || 0);
-    return Number((inputCost + cachedCost + outputCost).toFixed(8));
-  }
-
-  buildLlmCallMetrics({ model, usage } = {}) {
+  /**
+   * One call's metrics, priced by the catalog. An unknown model is unpriced
+   * (costUsd null, unpriced true), never $0. A call cut off by Stop is
+   * partial (usagePartial true); with nothing reported its cost is unknown.
+   */
+  buildLlmCallMetrics({ model, usage, partial = false } = {}) {
     const normalizedModel = model || this.getDefaultModel();
     const normalizedUsage = this.normalizeUsage(usage || {});
+    const provider = this.getProviderName();
+
+    let priced = null;
+    try {
+      priced = this.getCatalog().price(provider, normalizedModel, this.usageForPricing(normalizedUsage));
+    } catch (err) {
+      log.warn(`Pricing ${provider}/${normalizedModel} failed: ${err.message}`);
+    }
+
+    const reported = normalizedUsage.inputTokens
+      + normalizedUsage.outputTokens
+      + normalizedUsage.cachedInputTokens
+      + normalizedUsage.cacheCreationInputTokens;
+    const costUsd = priced && !(partial && reported === 0) ? priced.usd : null;
 
     return {
-      provider: this.getProviderName(),
+      provider,
       model: normalizedModel,
       ...normalizedUsage,
-      costUsd: this.calculateCostUsd(
-        normalizedModel,
-        normalizedUsage.inputTokens,
-        normalizedUsage.outputTokens,
-        {
-          cachedInputTokens: normalizedUsage.cachedInputTokens,
-          cacheCreationInputTokens: normalizedUsage.cacheCreationInputTokens
-        }
-      )
+      costUsd,
+      ...(priced ? {} : { unpriced: true }),
+      ...(partial ? { usagePartial: true } : {})
     };
   }
 

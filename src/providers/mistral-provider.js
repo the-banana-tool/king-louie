@@ -1,9 +1,9 @@
 const BaseLLMProvider = require('./base-provider');
 
 class MistralProvider extends BaseLLMProvider {
-  constructor(apiKey) {
-    super(apiKey);
-    this.baseUrl = 'https://api.mistral.ai/v1';
+  constructor(apiKey, options = {}) {
+    super(apiKey, options);
+    this.baseUrl = BaseLLMProvider.baseUrlFrom(options, 'https://api.mistral.ai/v1');
   }
 
   getName() { return 'mistral'; }
@@ -24,15 +24,6 @@ class MistralProvider extends BaseLLMProvider {
 
   getDefaultModel() {
     return 'mistral-large-latest';
-  }
-
-  getModelPricingTable() {
-    return {
-      'mistral-large-latest': { inputPerMillion: 2.00, outputPerMillion: 6.00 },
-      'mistral-small-latest': { inputPerMillion: 0.20, outputPerMillion: 0.60 },
-      'codestral-latest': { inputPerMillion: 0.30, outputPerMillion: 0.90 },
-      'open-mistral-nemo': { inputPerMillion: 0.15, outputPerMillion: 0.15 }
-    };
   }
 
   prependSystemPrompt(messages = [], systemPrompt = '') {

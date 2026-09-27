@@ -1,11 +1,15 @@
 const BaseLLMProvider = require('./base-provider');
+const { DEFAULT_OLLAMA_BASE_URL } = require('../models/provider-ids');
 
 class OllamaProvider extends BaseLLMProvider {
-  constructor(apiKey) {
-    // Pass a dummy key to satisfy BaseLLMProvider constructor
-    // then override validation since Ollama needs no API key
-    super(apiKey || 'ollama-local');
-    this.baseUrl = 'http://localhost:11434/v1';
+  constructor(apiKey, options = {}) {
+    // Ollama needs no key: a placeholder satisfies the base class, and
+    // validateApiKey below is a no-op.
+    super(apiKey || 'ollama-local', options);
+    // options.serverUrl is the Ollama address (settings models.ollama.baseUrl);
+    // options.baseUrl, when given, is the OpenAI-compatible API base itself.
+    const server = String(options.serverUrl || DEFAULT_OLLAMA_BASE_URL).replace(/\/+$/, '');
+    this.baseUrl = options.baseUrl ? BaseLLMProvider.baseUrlFrom(options, '') : `${server}/v1`;
   }
 
   validateApiKey() {

@@ -1,9 +1,9 @@
 const BaseLLMProvider = require('./base-provider');
 
 class OpenRouterProvider extends BaseLLMProvider {
-  constructor(apiKey) {
-    super(apiKey);
-    this.baseUrl = 'https://openrouter.ai/api/v1';
+  constructor(apiKey, options = {}) {
+    super(apiKey, options);
+    this.baseUrl = BaseLLMProvider.baseUrlFrom(options, 'https://openrouter.ai/api/v1');
   }
 
   getName() { return 'openrouter'; }
