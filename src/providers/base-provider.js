@@ -28,11 +28,18 @@ class BaseLLMProvider {
   /**
    * An abort as an Error named AbortError. A signal aborted with a string
    * reason (the case runtime does this) rejects fetch with that bare string.
+   * A signal from AbortSignal.timeout() aborts with a DOMException named
+   * TimeoutError — that must read as a timeout, not a generic "aborted",
+   * so Stop and an unrelated hang are never confused in the message.
    */
   abortError(err, signal) {
     if (err && typeof err === 'object' && err.name === 'AbortError') return err;
     const reason = signal?.reason;
-    const e = new Error(typeof reason === 'string' && reason ? `Request aborted: ${reason}` : 'The operation was aborted.');
+    const timeout = [reason, err].find((v) => v && typeof v === 'object' && v.name === 'TimeoutError');
+    const message = timeout
+      ? (timeout.message || 'The operation timed out.')
+      : (typeof reason === 'string' && reason ? `Request aborted: ${reason}` : 'The operation was aborted.');
+    const e = new Error(message);
     e.name = 'AbortError';
     if (err !== undefined) e.cause = err;
     return e;

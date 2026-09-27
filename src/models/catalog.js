@@ -71,6 +71,7 @@ class Catalog extends EventEmitter {
     this._cache = { modelsDev: null, scores: null };
     this._liveThisSession = false;
     this._overridesSig = '';
+    this._suppressEnsure = false;
     this._deps = { snapshotDir: DEFAULT_SNAPSHOT_DIR, cacheDir: null, fetch: globalThis.fetch, getSettings: () => ({}), now: () => new Date() };
   }
 
@@ -142,7 +143,24 @@ class Catalog extends EventEmitter {
 
   // Overrides live in settings; a change applies on the next lookup.
   _ensureCurrent() {
+    if (this._suppressEnsure) return;
     if (JSON.stringify(this._overrides()) !== this._overridesSig) this._rebuild();
+  }
+
+  // Check overrides once, then run fn() with every nested get()/list()/
+  // price() call skipping that check — for a pass that looks up many
+  // entries (Availability#usable() over every candidate model), so
+  // getSettings() and JSON.stringify(overrides) run once, not once per
+  // candidate.
+  withCurrent(fn) {
+    this._ensureCurrent();
+    const was = this._suppressEnsure;
+    this._suppressEnsure = true;
+    try {
+      return fn();
+    } finally {
+      this._suppressEnsure = was;
+    }
   }
 
   _lookup(provider, modelId) {

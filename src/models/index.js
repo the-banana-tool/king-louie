@@ -4,6 +4,8 @@
 const { Catalog, CATALOG_DEFAULTS, DEFAULT_SNAPSHOT_DIR } = require('./catalog');
 const { priceWithCost } = require('./pricing');
 const providerIds = require('./provider-ids');
+const { Availability } = require('./availability');
+const { discoverOllama } = require('./ollama');
 
 let active = null;
 let bundled = null;
@@ -27,5 +29,7 @@ module.exports = {
   priceWithCost,
   getActiveCatalog,
   setActiveCatalog,
+  Availability,
+  discoverOllama,
   ...providerIds
 };

@@ -42,6 +42,19 @@ describe('BaseLLMProvider.request', () => {
     });
   });
 
+  it('surfaces an AbortSignal.timeout() as a timeout, not a bare "aborted" message', async () => {
+    const signal = AbortSignal.timeout(1);
+    await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+    globalThis.fetch = async (_url, init) => { throw init.signal.reason; };
+    const p = new GroqProvider('test-key-123456', { catalog: fixtureCatalog() });
+    await assert.rejects(p.request('http://127.0.0.1:9/x', {}, { abortSignal: signal, model: 'llama-3.3-70b' }), (err) => {
+      assert.strictEqual(err.name, 'AbortError');
+      assert.match(err.message, /timeout/i);
+      assert.notStrictEqual(err.message, 'The operation was aborted.');
+      return true;
+    });
+  });
+
   it('leaves a failure that is not an abort untouched', async () => {
     const boom = new Error('fetch failed');
     globalThis.fetch = async () => { throw boom; };
