@@ -49,6 +49,8 @@ function hasVerifiedSourceField(source) {
 // from `text` itself), never a file name or another case's text. A
 // failing index gives no hits; the unknown is still recorded.
 const HIT_KINDS = new Set(['fact', 'document']);
+const MAX_HITS_ELSEWHERE = 20;
+const MAX_ENTITY_NAMES = 10;
 function entityHitsElsewhere(ctx, text) {
   try {
     const hits = ctx.runtime.entityIndex?.()?.matchText(String(text ?? ''), { excludeCaseId: ctx.caseId });
@@ -246,17 +248,22 @@ const LedgerTool = acceptAnyValue(new Tool({
         const fact = ledger.unknown({ ...params, addedBy: ctx.turnId });
         // Cases stage 7 (spec §3.6): the entity index across cases, title
         // and ids only; a note, not a refusal.
-        const alsoKnownElsewhere = entityHitsElsewhere(ctx, params.stmt);
-        const entityNames = [...new Set(alsoKnownElsewhere.map((h) => h.entity))];
+        // Capped: at most 20 hits and 10 entity names, "more" when cut.
+        const allHits = entityHitsElsewhere(ctx, params.stmt);
+        const alsoKnownElsewhere = allHits.slice(0, MAX_HITS_ELSEWHERE);
+        const allNames = [...new Set(allHits.map((h) => h.entity))];
+        const entityNames = allNames.slice(0, MAX_ENTITY_NAMES);
+        const more = allHits.length > alsoKnownElsewhere.length || allNames.length > entityNames.length;
         const notes = [
           ...(dups.similar.length ? ['Other cases hold related facts. Check them before asking the owner.'] : []),
-          ...(entityNames.length ? [`Other cases already hold records about ${entityNames.join(', ')}; check them before asking.`] : [])
+          ...(entityNames.length ? [`Other cases already hold records about ${entityNames.join(', ')}${more ? ' and more' : ''}; check them before asking.`] : [])
         ];
         return {
           ok: true,
           fact,
           similarInOtherCases: dups.similar,
           alsoKnownElsewhere,
+          ...(more ? { alsoKnownElsewhereMore: true } : {}),
           ...(notes.length ? { note: notes.join(' ') } : {})
         };
       }
