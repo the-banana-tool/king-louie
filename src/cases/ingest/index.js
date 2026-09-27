@@ -24,12 +24,13 @@
 const fs = require('fs');
 const path = require('path');
 const { createLogger } = require('../../logging');
+const { QuestionStore } = require('../questions');
 const { IngestError } = require('./errors');
 const { resolveIngestSettings } = require('./settings');
 const store = require('./store');
 const files = require('./files');
 const { openPdf: defaultOpenPdf } = require('./pdf');
-const { extractPages, parsePages } = require('./extract-text');
+const { extractPages, parsePages, textQuality, MIN_TEXT_CHARS } = require('./extract-text');
 const vision = require('./vision');
 const propose = require('./propose');
 const review = require('./review');
@@ -58,6 +59,18 @@ const JOURNAL_CAP = 4000;
 const PAGES_SPEC_CAP = 2000;
 // A cached page price above this was not written by the host.
 const MAX_PAGE_USD = 100;
+// Owner review (spec §3.5). Only the owner reviews: from the panel, or by
+// answering a review question. The model has no path here.
+const REVIEW_ACTIONS = new Set(['accept', 'edit', 'reject']);
+const REVIEWER = /^(?:panel|question:q-\d{4,})$/;
+const QUESTION_ID = /^q-\d{4,}$/;
+const FACT_ID = /^f-\d{4,}$/;
+const ID_CAP = 24;
+const EDITABLE = Object.freeze(['stmt', 'subject', 'attr', 'unit', 'category', 'value']);
+const VALUE_NOT_IN_QUOTE = 'The new value is not in the quoted text. Reject this proposal and tell King Louie the value in chat.';
+// The review question's options are this fixed set; nothing from a document
+// or a model becomes an option id.
+const REVIEW_OPTIONS = new Set(['a', 'b', 'c']);
 
 const round = (n) => Math.round(Number(n || 0) * 1e6) / 1e6;
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
@@ -441,13 +454,47 @@ class IngestService {
   }
 
   // Inside the lock; synchronous, so an inline run inside another action of
-  // this process cannot interleave with it.
-  async _apply(m, payload) {
-    const record = { ...payload.record, updatedAt: this.now().toISOString() };
+  // this process cannot interleave with it. A publish is built from the
+  // record as the pipeline read it, which can be older than a review that
+  // ran meanwhile (an owner review between the pipeline's stages, or a kept
+  // publish replayed after one): reviews already on disk are kept, never
+  // overwritten.
+  _apply(m, payload) {
+    let record = this._keepReviews(m.dir, { ...payload.record, updatedAt: this.now().toISOString() });
     if (payload.text) files.writeTextStore(m.dir, shapeText(payload.text, record.docId, record.sha256));
+    if (payload.question) record = this._askReview(m, record);
     files.writeRecord(m.dir, record);
     if (payload.journal) this.runtime.records(m.id).writeJournal('ingest', String(payload.journal).slice(0, JOURNAL_CAP), this.now());
     return record;
+  }
+
+  // The on-disk reviews carried into a record about to be written. A review
+  // is never undone, so one on disk wins over "not reviewed" in the new
+  // record when both describe the same proposal (id, page and quote).
+  _keepReviews(dir, record) {
+    const disk = files.readRecord(dir, record.docId);
+    if (!disk || !Array.isArray(record.proposals)) return record;
+    const done = new Map(arr(disk.proposals).filter((p) => isObj(p) && isObj(p.review) && typeof p.id === 'string').map((p) => [p.id, p]));
+    const questionId = record.questionId || (typeof disk.questionId === 'string' ? disk.questionId : null);
+    if (!done.size) return { ...record, questionId };
+    const same = (a, b) => isObj(a.anchor) && isObj(b.anchor) && a.anchor.page === b.anchor.page && a.anchor.quote === b.anchor.quote;
+    const proposals = record.proposals.map((p) => {
+      const d = isObj(p) && !p.review ? done.get(p.id) : null;
+      return d && same(d, p) ? { ...p, review: d.review } : p;
+    });
+    const finished = proposals.length > 0 && proposals.every((p) => isObj(p) && p.review) && record.status === 'ready-for-review';
+    return { ...record, proposals, questionId, status: finished ? 'reviewed' : record.status };
+  }
+
+  // A kept publish of docId is applied under the lock the caller holds, so
+  // a review reads the newest state and a later replay cannot overwrite it.
+  _foldKept(m, docId) {
+    const kept = this._readKept(m.dir, docId);
+    if (!kept) return;
+    this._apply(m, kept);
+    files.clearPendingPublish(m.dir, docId);
+    this.pending.delete(`${m.id}|${docId}`);
+    if (!this.pending.size) this.stop();
   }
 
   _arm() {
@@ -1003,6 +1050,440 @@ class IngestService {
     }
   }
 
+  // ---- review ----
+  //
+  // Only the owner accepts (R45): review() and acceptVerified() are called by
+  // owner surfaces (the panel's IPC) and by the owner's answer to a review
+  // question; no model tool reaches them. Accepted facts are `sourced` and
+  // `disclosable: false` whatever their category, with the host-built
+  // document source; the host never writes a `user` fact in the owner's name
+  // (a panel outcome closes the question instead, R47).
+  //
+  // At accept time everything that needs no model call is checked again
+  // (ruling M15): the stored bytes' sha256, the quote on a text page re-read
+  // from those bytes, the proposal's fields (normalized again, capped and
+  // one-lined), conflicts and duplicates against the ledger as it is now,
+  // and, for accept-all, valueInQuote, with a skip on any difference from
+  // the recorded checks. Two things stay trusted from the record, the same
+  // Bash/import limit as facts.jsonl (program §4.24): the verify verdict
+  // (re-deriving it needs a model call) and the origin (it decides whether
+  // accept-all is offered). A forged verdict can therefore pass accept-all;
+  // the fact stays private and owner-visible. An OCR page's text is a
+  // model's reading too: it is checked only against the text store and
+  // against the page really having no usable text layer.
+
+  // A review question for a record ready for review, unless the owner added
+  // the file (the owner reviews it in the panel). Tool files, and any origin
+  // this stage does not know, never get option a (R45).
+  _askReview(m, record) {
+    const open = arr(record.proposals).filter((p) => isObj(p) && !p.review);
+    const kind = ORIGIN_KINDS.has(record.origin?.kind) ? record.origin.kind : 'tool';
+    if (!open.length || OWNER_ORIGINS.has(kind)) return record;
+    try {
+      if (record.questionId) {
+        const q = this.runtime.questions(m.id).get(record.questionId);
+        if (q && !q.answer && !q.closed) return record;
+      }
+      const passing = open.filter((p) => !review.skipReason(p)).length;
+      const tool = kind === 'tool';
+      const name = store.cleanName(typeof record.name === 'string' ? record.name : 'document');
+      const text = `${plural(open.length, 'fact')} proposed from ${name} (${record.docId})${tool ? ', a file King Louie added' : ''}; ${passing} passed every check. Accepted facts are private.`;
+      const options = [
+        ...(!tool && passing > 0 ? [{ id: 'a', label: `Accept the ${passing} that passed every check` }] : []),
+        { id: 'b', label: "I'll review them in the panel" },
+        { id: 'c', label: 'Reject all' }
+      ];
+      const q = this.runtime.createQuestion(m.id, {
+        kind: 'question',
+        text,
+        options,
+        urgency: 'low',
+        expiresAt: null,
+        defaultOnSilence: 'hold',
+        payload: { type: 'ingest:review', docId: record.docId, mcpAnswerable: false, about: { subject: 'ingest', attr: record.docId } }
+      }, { charge: true });
+      if (!q || q.held) {
+        this.runtime.records(m.id).writeJournal('ingest', `No review question for ${record.docId}: the questionsPerDay budget is used up. The proposals wait in the panel.`, this.now());
+        return record;
+      }
+      return { ...record, questionId: q.id };
+    } catch (err) {
+      // The proposals still wait in the panel; a failed question never
+      // fails the publish.
+      this.log.warn(`Asking for the review of ${record.docId} failed: ${err.message}`);
+      return record;
+    }
+  }
+
+  // The arguments of a review, checked before the case is touched.
+  _reviewRequest(opts) {
+    const o = isObj(opts) ? opts : {};
+    if (!REVIEW_ACTIONS.has(o.action)) throw new IngestError('BAD_ACTION', 'action must be accept, edit or reject.');
+    const by = o.by === undefined || o.by === null ? 'panel' : o.by;
+    if (typeof by !== 'string' || !REVIEWER.test(by)) throw new IngestError('BAD_REQUEST', 'by must be "panel" or "question:<question id>".');
+    let supersedes = null;
+    if (o.supersedes !== undefined && o.supersedes !== null && o.supersedes !== '') {
+      if (typeof o.supersedes !== 'string' || o.supersedes.length > ID_CAP || !FACT_ID.test(o.supersedes)) {
+        throw new IngestError('BAD_SUPERSEDES', 'supersedes must name a fact id like f-0001.');
+      }
+      supersedes = o.supersedes;
+    }
+    let edit = null;
+    if (o.action === 'edit') {
+      if (!isObj(o.edit)) throw new IngestError('BAD_EDIT', 'edit needs the fields to change.');
+      edit = Object.create(null);
+      for (const [k, v] of Object.entries(o.edit)) {
+        if (!EDITABLE.includes(k)) throw new IngestError('BAD_EDIT', `${oneLine(k, 40)} cannot be edited; only ${EDITABLE.join(', ')}.`);
+        const ok = v === null || typeof v === 'string' || (k === 'value' && typeof v === 'number' && Number.isFinite(v));
+        if (!ok) throw new IngestError('BAD_EDIT', `${k} must be text.`);
+        edit[k] = v === '' ? null : v;
+      }
+      if (!Object.keys(edit).length) throw new IngestError('BAD_EDIT', 'edit needs the fields to change.');
+    }
+    return {
+      action: o.action,
+      by,
+      supersedes,
+      keepBoth: o.keepBoth === true,
+      reason: o.action === 'reject' && typeof o.reason === 'string' ? oneLine(o.reason, NOTE_CAP) : '',
+      edit
+    };
+  }
+
+  // The proposal as the fact will carry it: only its known fields,
+  // normalized again (the record is case data a shell can edit), with the
+  // owner's edit applied.
+  _reviewFields(p, req) {
+    if (!isObj(p.anchor) || p.checks?.anchor !== 'ok') throw new IngestError('NOT_ANCHORED', `${p.id} has no verified quote and cannot be accepted.`);
+    const clean = propose.normalizeProposal(p);
+    const quoteLength = clean ? Array.from(clean.anchor.quote).length : 0;
+    if (!clean || quoteLength < review.QUOTE_MIN || quoteLength > review.QUOTE_MAX) {
+      throw new IngestError('NOT_ANCHORED', `${p.id} has no verified quote and cannot be accepted.`);
+    }
+    if (req.action !== 'edit') return { fields: clean, edit: null };
+    const edit = req.edit;
+    if (edit.category !== undefined && !propose.CATEGORIES.includes(edit.category)) {
+      throw new IngestError('BAD_EDIT', `category must be one of ${propose.CATEGORIES.join(', ')}.`);
+    }
+    const fields = propose.normalizeProposal({ ...clean, ...edit });
+    if (!fields) throw new IngestError('BAD_EDIT', 'stmt, subject and attr need text.');
+    if (Object.prototype.hasOwnProperty.call(edit, 'value') && !review.valueInQuote(fields.value, clean.anchor.quote)) {
+      throw new IngestError('VALUE_NOT_IN_QUOTE', VALUE_NOT_IN_QUOTE);
+    }
+    const shown = {};
+    for (const k of Object.keys(edit)) shown[k] = fields[k];
+    return { fields, edit: shown };
+  }
+
+  // Evidence that the quote is in the stored document, from its bytes
+  // (spec §3.5). → { ocr }. The bytes and an open PDF are kept on ctx for
+  // the other proposals of one accept-all; the caller closes the PDF.
+  async _anchorEvidence(m, rec, p, ctx) {
+    const n = p.anchor.page;
+    const quote = p.anchor.quote;
+    const moved = new IngestError('ANCHOR_CHANGED', `The quote is not on page ${pageNo(n) ? n : '?'} of the stored document. Extract again.`);
+    const page = rec.pages.find((x) => x.n === n);
+    if (!pageNo(n) || !page || (page.method !== 'text' && page.method !== 'ocr')) throw moved;
+    const ocr = page.method === 'ocr';
+    // The flag the verdict rests on must agree with the page it names.
+    if (Boolean(p.anchor.ocr) !== ocr) throw moved;
+    if (!ctx.bytes) {
+      let bytes;
+      try {
+        bytes = this._readSource(m.dir, rec, ctx.cfg);
+      } catch (err) {
+        if (err instanceof IngestError) throw err;
+        if (err?.code === 'ENOENT') throw new IngestError('NOT_FOUND', `${oneLine(rec.ref, 200)} is missing.`);
+        throw new IngestError('READ_FAILED', `${oneLine(rec.ref, 200)} could not be read (${oneLine(err?.code || err?.message, 40)}).`);
+      }
+      if (store.sha256(bytes) !== rec.sha256) throw new IngestError('DOC_CHANGED', DOC_CHANGED);
+      ctx.bytes = bytes;
+    }
+    // The page's text layer, re-read from the bytes (none for an image).
+    let layer = null;
+    if (rec.mime.startsWith('text/')) {
+      layer = n === 1 ? ctx.bytes.toString('utf8') : null;
+    } else if (rec.mime === 'application/pdf') {
+      if (!ctx.pdf) ctx.pdf = await this.openPdf(ctx.bytes, { name: rec.name, maxBytes: ctx.cfg.maxBytes });
+      if (n > ctx.pdf.pageCount) throw moved;
+      layer = await ctx.pdf.pageText(n);
+    }
+    if (layer !== null && review.quoteOffset(layer, quote) !== -1) return { ocr };
+    if (!ocr) throw moved;
+    // An OCR quote: the page must really be one the reader sends to vision
+    // (a page with a usable text layer is never read by OCR; a lowered
+    // textQualityThreshold since the read can refuse here, and Extract
+    // again settles it), and the quote must be in the stored OCR text.
+    if (layer !== null && layer.replace(/\s/g, '').length >= MIN_TEXT_CHARS && textQuality(layer) >= ctx.cfg.textQualityThreshold) throw moved;
+    const stored = shapeText(files.readTextStore(m.dir, rec.docId), rec.docId, rec.sha256).pages.find((x) => x.n === n && x.method === 'ocr');
+    if (!stored || review.quoteOffset(stored.text, quote) === -1) throw moved;
+    return { ocr: true };
+  }
+
+  // The record and proposal to review, with any kept publish folded in.
+  _reviewTarget(m, docId, proposalId) {
+    this._foldKept(m, docId);
+    const raw = files.readRecord(m.dir, docId);
+    if (!raw) throw new IngestError('NOT_FOUND', `No document ${docId} in this case.`);
+    const rec = shapeRecord(raw);
+    const idx = rec.proposals.findIndex((p) => p.id === proposalId);
+    if (idx === -1) throw new IngestError('NOT_FOUND', `No proposal ${proposalId} in ${docId}.`);
+    const p = rec.proposals[idx];
+    if (p.review) throw new IngestError('ALREADY_REVIEWED', `${proposalId} was already ${oneLine(isObj(p.review) ? p.review.action : 'reviewed', 40)}.`);
+    return { rec, idx, p };
+  }
+
+  // Accept-all takes a proposal only when a fresh check agrees with the
+  // recorded one (ruling M15). → why it is skipped, or null.
+  _recheck(p, fields, facts) {
+    const recorded = isObj(p.checks) ? p.checks : {};
+    const fresh = { valueInQuote: review.valueInQuote(fields.value, fields.anchor.quote), ...review.ledgerMatches(fields, facts) };
+    const why = review.skipReason({ ...p, checks: { ...recorded, ...fresh } });
+    if (why) return why;
+    const ids = (list) => arr(list).map((c) => (isObj(c) ? String(c.factId) : '')).sort().join(',');
+    if (recorded.valueInQuote !== fresh.valueInQuote || (recorded.duplicateOf ?? null) !== fresh.duplicateOf || ids(recorded.conflicts) !== ids(fresh.conflicts)) {
+      return 'its recorded checks differ from a check made now; review it in the panel';
+    }
+    return null;
+  }
+
+  // One review under the case lock the caller holds. The checks that need
+  // the file (and the PDF reader) run first; then, with no await until the
+  // end, the record is read again and the fact, the record and the journal
+  // are written in one step. systemAction runs inline while this process
+  // holds the lock, so a pipeline publish or another review can run between
+  // our awaits; reading again after them is what keeps a proposal from
+  // being accepted twice or a review from being lost.
+  async _reviewLocked(m, docId, proposalId, req, ctx, { recheck = false } = {}) {
+    const first = this._reviewTarget(m, docId, proposalId);
+    let shaped = null;
+    let evidence = null;
+    if (req.action !== 'reject') {
+      shaped = this._reviewFields(first.p, req);
+      evidence = await this._anchorEvidence(m, first.rec, first.p, ctx);
+    }
+    // ---- no await from here on ----
+    const { rec, idx, p } = this._reviewTarget(m, docId, proposalId);
+    const key = (x) => JSON.stringify([propose.normalizeProposal(x), Boolean(x.anchor?.ocr)]);
+    if (rec.sha256 !== first.rec.sha256 || rec.ref !== first.rec.ref || key(p) !== key(first.p)) {
+      throw new IngestError('CHANGED', `${proposalId} changed while it was being reviewed. Review it again.`);
+    }
+    const at = this.now().toISOString();
+    const ledger = this.runtime.ledger(m.id);
+    let fact = null;
+    let outcome;
+    if (req.action === 'reject') {
+      outcome = { action: 'rejected', by: req.by, at, ...(req.reason ? { reason: req.reason } : {}) };
+    } else {
+      const { fields } = shaped;
+      const facts = ledger.view().facts;
+      if (recheck) {
+        const why = this._recheck(p, fields, facts);
+        if (why) throw new IngestError('SKIPPED', why);
+      }
+      const { conflicts } = review.ledgerMatches(fields, facts);
+      if (req.supersedes && !conflicts.some((c) => c.factId === req.supersedes)) {
+        throw new IngestError('BAD_SUPERSEDES', `${req.supersedes} is not an active fact that conflicts with ${proposalId}.`);
+      }
+      for (const c of conflicts) {
+        if (c.factId === req.supersedes) continue;
+        // An owner fact is replaced only when the owner names it.
+        if (c.provenance === 'user') {
+          throw new IngestError('CONFLICT', `${proposalId} conflicts with ${c.factId}, which the owner stated. Accept with supersedes "${c.factId}" to replace it.`);
+        }
+        if (!req.keepBoth) throw new IngestError('CONFLICT', `${proposalId} conflicts with ${c.factId}. Choose supersedes "${c.factId}" or keepBoth.`);
+      }
+      const v = isObj(p.checks?.verify) ? p.checks.verify : null;
+      const kind = rec.origin?.kind;
+      fact = ledger.assert({
+        provenance: 'sourced',
+        source: {
+          kind: 'document',
+          ref: rec.ref,
+          at: rec.createdAt,
+          page: fields.anchor.page,
+          quote: fields.anchor.quote,
+          docId: rec.docId,
+          proposalId,
+          verified: evidence.ocr && v?.sawImage === true && v?.agrees === true ? 'anchor+image' : 'anchor',
+          ocr: evidence.ocr,
+          origin: ORIGIN_KINDS.has(kind) ? kind : 'tool'
+        },
+        stmt: fields.stmt,
+        subject: fields.subject,
+        attr: fields.attr,
+        value: review.parseValue(fields.value),
+        unit: fields.unit || null,
+        category: fields.category,
+        confidence: fields.confidence,
+        supersedes: req.supersedes || null,
+        disclosable: false,
+        addedBy: `ingest:${rec.docId}${req.by === 'panel' ? '' : `:${req.by}`}`
+      });
+      outcome = {
+        action: req.action === 'edit' ? 'edited' : 'accepted',
+        by: req.by,
+        at,
+        factId: fact.id,
+        ...(shaped.edit ? { edit: shaped.edit } : {}),
+        ...(req.supersedes ? { supersedes: req.supersedes } : {}),
+        ...(req.keepBoth ? { keepBoth: true } : {})
+      };
+    }
+    const proposals = rec.proposals.map((x, i) => (i === idx ? { ...x, review: outcome } : x));
+    const finished = proposals.every((x) => x.review) && (rec.status === 'ready-for-review' || rec.status === 'reviewed');
+    const next = { ...rec, proposals, status: finished ? 'reviewed' : rec.status, updatedAt: at };
+    try {
+      files.writeRecord(m.dir, next);
+    } catch (err) {
+      // The review was not recorded: the fact goes too, so a retry accepts
+      // the proposal once, not twice.
+      if (fact) {
+        try {
+          ledger.retract(fact.id, `the review of ${proposalId} in ${docId} could not be recorded`);
+        } catch (e) {
+          this.log.error(`Retracting ${fact.id} after a failed review write failed: ${e.message}`);
+        }
+      }
+      throw err;
+    }
+    this.runtime.records(m.id).writeJournal('ingest', `${proposalId} of ${next.name} (${docId}) ${outcome.action} by ${req.by}${fact ? ` as ${fact.id}` : ''}.`, this.now());
+    if (finished && req.by === 'panel' && next.questionId) this._closeQuestion(m, next);
+    try {
+      this._entities()?.upsertCase(m.id);
+    } catch (err) {
+      this.log.warn(`Updating the entity index failed: ${err.message}`);
+    }
+    this._notify(m.id, docId);
+    return { proposal: proposals[idx], fact };
+  }
+
+  async _closeReader(ctx) {
+    if (ctx.pdf) await ctx.pdf.close().catch((err) => this.log.warn(`Closing a document after review failed: ${err.message}`));
+    ctx.pdf = null;
+  }
+
+  // accept | edit | reject, from the panel or a question answer (never the model).
+  async review(caseId, docId, proposalId, opts = {}) {
+    store.checkDocId(docId);
+    if (typeof proposalId !== 'string' || proposalId.length > ID_CAP || !review.PROPOSAL_ID.test(proposalId)) {
+      throw new IngestError('BAD_PROPOSAL_ID', 'A proposal id looks like p-001.');
+    }
+    const req = this._reviewRequest(opts);
+    return this.runtime.systemAction(caseId, `ingest ${docId}: review ${proposalId}`, async (m) => {
+      const ctx = { cfg: this.settings(), bytes: null, pdf: null };
+      try {
+        return await this._reviewLocked(m, docId, proposalId, req, ctx);
+      } finally {
+        await this._closeReader(ctx);
+      }
+    }, { commitMessage: `ingest-${docId}: reviewed ${proposalId}` });
+  }
+
+  // A panel outcome closes an open review question; no fact is written in
+  // the owner's name (R47).
+  _closeQuestion(m, rec) {
+    try {
+      const questions = this.runtime.questions(m.id);
+      const q = questions.get(rec.questionId);
+      if (!q || q.answer || q.closed || q.payload?.type !== 'ingest:review' || q.payload?.docId !== rec.docId) return;
+      const accepted = rec.proposals.filter((p) => p.review && p.review.action !== 'rejected').length;
+      const rejected = rec.proposals.filter((p) => p.review?.action === 'rejected').length;
+      const reason = `Reviewed in the panel: ${accepted} accepted, ${rejected} rejected.`;
+      questions.close(q.id, { reason, by: 'panel' });
+      this.runtime.records(m.id).writeJournal('ingest', `${q.id} closed for ${rec.docId}: ${reason}`, this.now());
+    } catch (err) {
+      // Answered meanwhile (another surface won the claim): nothing to close.
+      this.log.warn(`Closing the review question of ${rec.docId} failed: ${err.message}`);
+    }
+  }
+
+  async acceptVerified(caseId, docId, { by = 'panel' } = {}) {
+    store.checkDocId(docId);
+    if (typeof by !== 'string' || !REVIEWER.test(by)) throw new IngestError('BAD_REQUEST', 'by must be "panel" or "question:<question id>".');
+    return this.runtime.systemAction(caseId, `ingest ${docId}: accept verified`, async (m) => {
+      this._foldKept(m, docId);
+      const raw = files.readRecord(m.dir, docId);
+      if (!raw) throw new IngestError('NOT_FOUND', `No document ${docId} in this case.`);
+      const rec = shapeRecord(raw);
+      // Only owner-added files; a tool file, or an origin this stage does
+      // not know, is reviewed proposal by proposal (R45).
+      if (!OWNER_ORIGINS.has(rec.origin?.kind)) {
+        const what = rec.origin?.kind === 'tool' ? 'a file King Louie added' : 'this file';
+        throw new IngestError('NOT_AVAILABLE', `Accept all verified is not available for ${what}. Review each proposal.`);
+      }
+      const accepted = [];
+      const skipped = [];
+      const ctx = { cfg: this.settings(), bytes: null, pdf: null };
+      try {
+        for (const p of rec.proposals) {
+          if (p.review) continue;
+          const pid = typeof p.id === 'string' && p.id.length <= ID_CAP && review.PROPOSAL_ID.test(p.id) ? p.id : null;
+          const why = pid ? review.skipReason(p) : 'it has no valid proposal id';
+          if (why) {
+            skipped.push({ pid: pid || oneLine(p.id, ID_CAP), why });
+            continue;
+          }
+          try {
+            await this._reviewLocked(m, docId, pid, { action: 'accept', by, supersedes: null, keepBoth: false, reason: '', edit: null }, ctx, { recheck: true });
+            accepted.push(pid);
+          } catch (err) {
+            if (!(err instanceof IngestError)) throw err;
+            skipped.push({ pid, why: oneLine(err.message, MESSAGE_CAP) });
+          }
+        }
+      } finally {
+        await this._closeReader(ctx);
+      }
+      return { accepted, skipped };
+    }, { commitMessage: `ingest-${docId}: reviewed accept-verified` });
+  }
+
+  // The ingest:review answer (runs inside answerQuestion's systemAction).
+  // The answer is untrusted input: the question must be a review question
+  // naming a valid docId, and the option one of the fixed a/b/c that the
+  // question offered. Anything else changes nothing.
+  async onReviewAnswered(caseId, question) {
+    const refuse = (reason) => ({ applied: false, reason });
+    if (!isObj(question) || !isObj(question.payload) || question.payload.type !== 'ingest:review') return refuse('Not a document review question.');
+    if (typeof question.id !== 'string' || question.id.length > ID_CAP || !QUESTION_ID.test(question.id)) return refuse('The question has no valid id.');
+    const docId = question.payload.docId;
+    if (typeof docId !== 'string' || !store.DOC_ID.test(docId)) return refuse('The question names no valid document.');
+    const option = question.answer?.optionId;
+    if (!REVIEW_OPTIONS.has(option) || !arr(question.options).some((o) => isObj(o) && o.id === option)) {
+      return refuse('No review option was chosen; review the proposals in the panel.');
+    }
+    const by = `question:${question.id}`;
+    try {
+      if (option === 'a') {
+        const r = await this.acceptVerified(caseId, docId, { by });
+        return { applied: 'ingest', accepted: r.accepted, skipped: r.skipped };
+      }
+      if (option === 'c') return await this._rejectAll(caseId, docId, by);
+      return { applied: false };
+    } catch (err) {
+      this.log.warn(`Applying the answer to ${question.id} failed: ${err.message}`);
+      return refuse(oneLine(err.message, MESSAGE_CAP));
+    }
+  }
+
+  async _rejectAll(caseId, docId, by) {
+    const meta = this.runtime.getCase(caseId);
+    const rec = files.readRecord(meta.dir, docId);
+    if (!rec) throw new IngestError('NOT_FOUND', `No document ${docId} in this case.`);
+    const rejected = [];
+    for (const p of arr(rec.proposals)) {
+      if (!isObj(p) || p.review || typeof p.id !== 'string' || p.id.length > ID_CAP || !review.PROPOSAL_ID.test(p.id)) continue;
+      try {
+        await this.review(caseId, docId, p.id, { action: 'reject', reason: 'Rejected all from the review question.', by });
+        rejected.push(p.id);
+      } catch (err) {
+        if (err?.code !== 'ALREADY_REVIEWED') throw err;
+      }
+    }
+    return { applied: 'ingest', rejected };
+  }
+
   // ---- reading ----
 
   _methods(rec) {
@@ -1074,5 +1555,16 @@ class IngestService {
     }
   }
 }
+
+// The owner's answer to a review question. In a process without an ingest
+// worker (the mcp server) nothing is applied and the proposals wait in the
+// panel.
+QuestionStore.registerAnswerHandler('ingest:review', {
+  onAnswered: async (question, _fact, { runtime, caseId }) => {
+    const svc = ingestServiceFor(runtime);
+    if (!svc) return { applied: false, reason: 'Document ingest does not run in this process; review the proposals in the panel.' };
+    return svc.onReviewAnswered(caseId, question);
+  }
+});
 
 module.exports = { IngestService, IngestError, ingestServiceFor, WAITING, OWNER_ORIGINS };

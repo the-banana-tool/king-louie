@@ -484,3 +484,187 @@ describe('IngestService and the PDF reader', { skip: NEEDS_GIT }, () => {
     assert.strictEqual(state.closed, state.opened);
   });
 });
+
+describe('review questions for documents King Louie added', { skip: NEEDS_GIT }, () => {
+  const { PAYOFF_LINES: LINES } = require('./helpers/ingest-fixtures');
+
+  async function toolDoc(opts = {}) {
+    const h = await ingestHarness(opts);
+    fs.mkdirSync(path.join(h.dir, 'sources', 'web'), { recursive: true });
+    fs.writeFileSync(path.join(h.dir, 'sources', 'web', 'payoff-letter.txt'), LINES.join('\n'));
+    const out = await h.svc.adopt(h.caseId, 'sources/web/payoff-letter.txt');
+    await h.svc.extract(h.caseId, out.docId, { by: 'tool' });
+    return { h, docId: out.docId };
+  }
+  const userFacts = (h) => [...h.runtime.ledger(h.caseId).view().facts.values()].filter((f) => f.provenance === 'user');
+
+  it('asks one low-urgency question naming the file, without "accept all"', async () => {
+    const { h, docId } = await toolDoc();
+    const rec = files.readRecord(h.dir, docId);
+    const q = h.runtime.questions(h.caseId).get(rec.questionId);
+    assert.strictEqual(q.text, `1 fact proposed from payoff-letter.txt (${docId}), a file King Louie added; 1 passed every check. Accepted facts are private.`);
+    assert.deepStrictEqual(q.options.map((o) => o.id), ['b', 'c']);
+    assert.deepStrictEqual([q.urgency, q.defaultOnSilence, q.payload.type, q.payload.docId, q.payload.mcpAnswerable], ['low', 'hold', 'ingest:review', docId, false]);
+  });
+
+  it('asks nothing when questionsPerDay is used up; the record waits in the panel', async () => {
+    const h = await ingestHarness({ budgets: { questionsPerDay: 1 } });
+    h.runtime.budget(h.caseId).charge('questionsPerDay', 1, {});
+    fs.mkdirSync(path.join(h.dir, 'sources', 'web'), { recursive: true });
+    fs.writeFileSync(path.join(h.dir, 'sources', 'web', 'payoff-letter.txt'), LINES.join('\n'));
+    const out = await h.svc.adopt(h.caseId, 'sources/web/payoff-letter.txt');
+    await h.svc.extract(h.caseId, out.docId, { by: 'tool' });
+    const rec = files.readRecord(h.dir, out.docId);
+    assert.deepStrictEqual([rec.status, rec.questionId], ['ready-for-review', null]);
+    assert.match(journals(h.dir).join('\n'), /No review question for doc-[0-9a-f]{12}: the questionsPerDay budget is used up/);
+  });
+
+  it('answer c rejects the remaining proposals through the registered handler', async () => {
+    const { h, docId } = await toolDoc();
+    const { questionId } = files.readRecord(h.dir, docId);
+    const res = await h.runtime.answerQuestion(h.caseId, questionId, { channel: 'in-app', optionId: 'c' });
+    assert.deepStrictEqual(res.effect, { applied: 'ingest', rejected: ['p-001'] });
+    const rec = files.readRecord(h.dir, docId);
+    assert.deepStrictEqual([rec.status, rec.proposals[0].review.by], ['reviewed', `question:${questionId}`]);
+  });
+
+  it('answer a accepts what passed every check (handler, for origins that offer it)', async () => {
+    const h = await ingestHarness();
+    const out = await h.svc.store(h.caseId, { name: 'payoff.txt', bytes: Buffer.from(LINES.join('\n')), origin: { kind: 'owner-drop' } });
+    await h.svc.drain();
+    const q = h.runtime.createQuestion(h.caseId, {
+      kind: 'question', text: `Review ${out.docId}`, urgency: 'low', defaultOnSilence: 'hold',
+      options: [{ id: 'a', label: 'Accept the 1 that passed every check' }, { id: 'b', label: "I'll review them in the panel" }, { id: 'c', label: 'Reject all' }],
+      payload: { type: 'ingest:review', docId: out.docId, mcpAnswerable: false }
+    }, { charge: false });
+    const res = await h.runtime.answerQuestion(h.caseId, q.id, { channel: 'in-app', optionId: 'a' });
+    assert.deepStrictEqual(res.effect, { applied: 'ingest', accepted: ['p-001'], skipped: [] });
+    const fact = [...h.runtime.ledger(h.caseId).view().facts.values()].find((f) => f.provenance === 'sourced');
+    assert.strictEqual(fact.addedBy, `ingest:${out.docId}:question:${q.id}`);
+  });
+
+  it('finishing review in the panel closes the open question and writes no user fact', async () => {
+    const { h, docId } = await toolDoc();
+    const { questionId } = files.readRecord(h.dir, docId);
+    await h.svc.review(h.caseId, docId, 'p-001', { action: 'accept', by: 'panel' });
+    const q = h.runtime.questions(h.caseId).get(questionId);
+    assert.strictEqual(q.answer, null);
+    assert.deepStrictEqual([q.closed.reason, q.closed.by], ['Reviewed in the panel: 1 accepted, 0 rejected.', 'panel']);
+    assert.deepStrictEqual(userFacts(h), []);
+    assert.match(journals(h.dir).join('\n'), new RegExp(`${questionId} closed for ${docId}: Reviewed in the panel`));
+  });
+
+  // ---- hardening: answers are untrusted; tool files never get option a ----
+
+  const handMade = (h, docId, options) => h.runtime.createQuestion(h.caseId, {
+    kind: 'question', text: `Review ${docId} (hand-made)`, urgency: 'low', defaultOnSilence: 'hold',
+    options, payload: { type: 'ingest:review', docId, mcpAnswerable: false }
+  }, { charge: false });
+  const sourced = (h) => [...h.runtime.ledger(h.caseId).view().facts.values()].filter((f) => f.provenance === 'sourced');
+
+  it('option a on a question about a file King Louie added accepts nothing', async () => {
+    const { h, docId } = await toolDoc();
+    const q = handMade(h, docId, [{ id: 'a', label: 'Accept all' }, { id: 'c', label: 'Reject all' }]);
+    const res = await h.runtime.answerQuestion(h.caseId, q.id, { channel: 'in-app', optionId: 'a' });
+    assert.strictEqual(res.effect.applied, false);
+    assert.match(res.effect.reason, /not available for a file King Louie added/);
+    assert.deepStrictEqual(sourced(h), []);
+    assert.strictEqual(files.readRecord(h.dir, docId).proposals[0].review, null);
+  });
+
+  it('an option outside a, b, c or a malformed docId in the question does nothing', async () => {
+    const h = await ingestHarness();
+    const out = await h.svc.store(h.caseId, { name: 'payoff.txt', bytes: Buffer.from(LINES.join('\n')), origin: { kind: 'owner-drop' } });
+    await h.svc.drain();
+    const odd = handMade(h, out.docId, [{ id: 'accept', label: 'Accept everything' }, { id: 'yes', label: 'Yes' }]);
+    const r1 = await h.runtime.answerQuestion(h.caseId, odd.id, { channel: 'in-app', optionId: 'accept' });
+    assert.strictEqual(r1.effect.applied, false);
+    const bad = handMade(h, '../../../outside', [{ id: 'a', label: 'Accept' }, { id: 'c', label: 'Reject' }]);
+    const r2 = await h.runtime.answerQuestion(h.caseId, bad.id, { channel: 'in-app', optionId: 'c' });
+    assert.strictEqual(r2.effect.applied, false);
+    // A free-text answer carries no option: nothing is accepted.
+    const text = handMade(h, out.docId, [{ id: 'a', label: 'Accept' }, { id: 'c', label: 'Reject' }]);
+    const r3 = await h.runtime.answerQuestion(h.caseId, text.id, { channel: 'in-app', text: 'a' });
+    assert.strictEqual(r3.effect.applied, false);
+    assert.deepStrictEqual(sourced(h), []);
+    assert.strictEqual(files.readRecord(h.dir, out.docId).proposals[0].review, null);
+  });
+
+  it('a review commits over a kept publish: the kept state is folded in first and never replayed over the review', async () => {
+    const h = await ingestHarness({ status: 'paused' });
+    const out = await h.svc.store(h.caseId, { name: 'payoff.txt', bytes: Buffer.from(LINES.join('\n')), origin: { kind: 'owner-drop' } });
+    h.runtime.store.updateMeta(h.caseId, { status: 'active' });
+    const lock = path.join(h.dir, '.kl', 'lock');
+    fs.writeFileSync(lock, JSON.stringify({ turnId: 'other-process', pid: process.ppid, at: new Date().toISOString() }));
+    await h.svc.extract(h.caseId, out.docId, { by: 'owner' });
+    const pending = path.join(h.dir, '.kl', 'ingest', 'cache', out.docId, 'publish.json');
+    assert.ok(fs.existsSync(pending), 'the pipeline publish is kept');
+    assert.deepStrictEqual(files.readRecord(h.dir, out.docId).proposals, []);
+    fs.rmSync(lock);
+    // The proposals exist only in the kept publish; the review folds it in.
+    const { fact } = await h.svc.review(h.caseId, out.docId, 'p-001', { action: 'accept', by: 'panel' });
+    assert.strictEqual(fs.existsSync(pending), false);
+    await h.svc.retryPending(h.caseId);
+    await h.svc.list(h.caseId);
+    const rec = files.readRecord(h.dir, out.docId);
+    assert.deepStrictEqual([rec.status, rec.proposals[0].review.factId], ['reviewed', fact.id]);
+    assert.deepStrictEqual(files.readTextStore(h.dir, out.docId).pages.map((p) => p.n), [1]);
+    assert.strictEqual(sourced(h).length, 1);
+  });
+
+  it('a kept publish written before a review never overwrites it when replayed', async () => {
+    const h = await ingestHarness();
+    const out = await h.svc.store(h.caseId, { name: 'payoff.txt', bytes: Buffer.from(LINES.join('\n')), origin: { kind: 'owner-drop' } });
+    await h.svc.drain();
+    const stale = files.readRecord(h.dir, out.docId);
+    await h.svc.review(h.caseId, out.docId, 'p-001', { action: 'reject', reason: 'old letter' });
+    // A stale publish (kept by another route) lands after the review.
+    files.writePendingPublish(h.dir, out.docId, { record: stale, text: null, message: 'stale', journal: null, question: true });
+    await h.svc.retryPending(h.caseId);
+    const rec = files.readRecord(h.dir, out.docId);
+    assert.deepStrictEqual([rec.status, rec.proposals[0].review.action], ['reviewed', 'rejected']);
+  });
+
+  it('a review during an in-flight read is kept when the read publishes', async () => {
+    let gate = null;
+    let entered = null;
+    const openPdf = async (bytes, opts) => {
+      if (gate) {
+        const wait = gate;
+        gate = null;
+        entered();
+        await wait;
+      }
+      return realOpenPdf(bytes, opts);
+    };
+    const h = await ingestHarness({ openPdf });
+    const { payoffLetterPdf } = require('./helpers/ingest-fixtures');
+    const out = await h.svc.store(h.caseId, { name: 'payoff-letter.pdf', bytes: await payoffLetterPdf(), origin: { kind: 'owner-drop' } });
+    await h.svc.drain();
+    let release;
+    gate = new Promise((r) => { release = r; });
+    const inside = new Promise((r) => { entered = r; });
+    const reading = h.svc.extract(h.caseId, out.docId, { by: 'owner' });
+    await inside;
+    const { fact } = await h.svc.review(h.caseId, out.docId, 'p-001', { action: 'accept', by: 'panel' });
+    release();
+    await reading;
+    const rec = files.readRecord(h.dir, out.docId);
+    assert.deepStrictEqual([rec.status, rec.proposals[0].review?.factId], ['reviewed', fact.id]);
+    await assert.rejects(h.svc.review(h.caseId, out.docId, 'p-001', { action: 'accept' }), (e) => e.code === 'ALREADY_REVIEWED');
+    assert.strictEqual(sourced(h).length, 1);
+  });
+
+  it('a panel review and an answer racing for the same proposal accept it once', async () => {
+    const { h, docId } = await toolDoc();
+    const { questionId } = files.readRecord(h.dir, docId);
+    const results = await Promise.allSettled([
+      h.svc.review(h.caseId, docId, 'p-001', { action: 'accept', by: 'panel' }),
+      h.runtime.answerQuestion(h.caseId, questionId, { channel: 'in-app', optionId: 'c' })
+    ]);
+    const rec = files.readRecord(h.dir, docId);
+    assert.ok(rec.proposals[0].review, 'reviewed once');
+    assert.strictEqual(sourced(h).length, rec.proposals[0].review.action === 'accepted' ? 1 : 0);
+    assert.ok(results.some((r) => r.status === 'fulfilled'));
+  });
+});

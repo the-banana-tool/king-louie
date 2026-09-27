@@ -550,3 +550,285 @@ describe('normalizeProposal', () => {
     assert.deepStrictEqual(Object.keys(p).sort(), ['anchor', 'attr', 'category', 'confidence', 'entities', 'stmt', 'subject', 'unit', 'value']);
   });
 });
+
+describe('owner review through IngestService', { skip: require('./helpers/ingest-harness').NEEDS_GIT }, () => {
+  const fs = require('fs');
+  const path = require('path');
+  const { after } = require('node:test');
+  const files = require('../src/cases/ingest/files');
+  const git = require('../src/cases/git');
+  const { ingestHarness, cleanup, defaultModel, usage } = require('./helpers/ingest-harness');
+  const { payoffLetterPdf, makePdf, PAYOFF_LINES } = require('./helpers/ingest-fixtures');
+
+  after(cleanup);
+
+  async function reviewed({ before = null, ...opts } = {}) {
+    const h = await ingestHarness(opts);
+    if (before) before(h);
+    const out = await h.svc.store(h.caseId, { name: 'payoff-letter.pdf', bytes: await payoffLetterPdf(), origin: { kind: 'owner-drop' } });
+    await h.svc.drain();
+    return { h, docId: out.docId, ref: out.ref };
+  }
+  const userFact = (h, value) => h.runtime.ledger(h.caseId).assert({
+    stmt: 'The owner says the payoff is about 180k', subject: 'loan-0042-7781', attr: 'payoff-amount', value,
+    provenance: 'user', source: { kind: 'user-message', ref: 'turn-1', quote: 'about 180k' }
+  });
+
+  it('accept asserts a private sourced fact with a host-verified document source', async () => {
+    const { h, docId, ref } = await reviewed();
+    const rec = files.readRecord(h.dir, docId);
+    const { proposal, fact } = await h.svc.review(h.caseId, docId, 'p-001', { action: 'accept', by: 'panel' });
+    assert.strictEqual(fact.provenance, 'sourced');
+    assert.strictEqual(fact.category, 'general');
+    assert.strictEqual(fact.disclosable, false);
+    assert.strictEqual(fact.value, 182340.17);
+    assert.strictEqual(fact.addedBy, `ingest:${docId}`);
+    assert.deepStrictEqual(fact.source, {
+      kind: 'document', ref, at: rec.createdAt, page: 1, quote: 'Total payoff amount: $182,340.17',
+      docId, proposalId: 'p-001', verified: 'anchor', ocr: false, origin: 'owner-drop'
+    });
+    assert.deepStrictEqual({ ...proposal.review, at: undefined }, { action: 'accepted', by: 'panel', at: undefined, factId: fact.id });
+    assert.strictEqual(files.readRecord(h.dir, docId).status, 'reviewed');
+    const log = (await git.git(h.dir, ['log', '--format=%s'])).split('\n');
+    assert.ok(log.includes(`ingest-${docId}: reviewed p-001`));
+    assert.ok(h.runtime.entityIndex().searchEntities('0042-7781').some((hit) => hit.id === fact.id));
+    await assert.rejects(h.svc.review(h.caseId, docId, 'p-001', { action: 'reject' }), (e) => e.code === 'ALREADY_REVIEWED');
+  });
+
+  it('edit may change a value only to one in the quote; reject keeps the proposal with its reason', async () => {
+    const { h, docId } = await reviewed();
+    await assert.rejects(
+      h.svc.review(h.caseId, docId, 'p-001', { action: 'edit', edit: { value: '1000' } }),
+      (e) => e.code === 'VALUE_NOT_IN_QUOTE' && e.message === 'The new value is not in the quoted text. Reject this proposal and tell King Louie the value in chat.'
+    );
+    await assert.rejects(h.svc.review(h.caseId, docId, 'p-001', { action: 'edit', edit: { provenance: 'user' } }), (e) => e.code === 'BAD_EDIT');
+    const { fact, proposal } = await h.svc.review(h.caseId, docId, 'p-001', { action: 'edit', edit: { stmt: 'Loan 0042-7781 payoff is $182,340.17', category: 'financial' } });
+    assert.deepStrictEqual([fact.stmt, fact.category, fact.disclosable, proposal.review.action], ['Loan 0042-7781 payoff is $182,340.17', 'financial', false, 'edited']);
+    const second = await reviewed();
+    const r = await second.h.svc.review(second.h.caseId, second.docId, 'p-001', { action: 'reject', reason: 'old letter' });
+    assert.deepStrictEqual([r.fact, r.proposal.review.action, r.proposal.review.reason], [null, 'rejected', 'old letter']);
+    assert.strictEqual(second.h.runtime.ledger(second.h.caseId).view().facts.size, 0);
+  });
+
+  it('conflict with a user fact: listed, skipped by accept-all, refused without supersedes, chained with it', async () => {
+    const { h, docId } = await reviewed({ before: (x) => userFact(x, 180000) });
+    const [p] = files.readRecord(h.dir, docId).proposals;
+    assert.deepStrictEqual(p.checks.conflicts, [{ factId: 'f-0001', provenance: 'user', value: 180000 }]);
+    const all = await h.svc.acceptVerified(h.caseId, docId, { by: 'panel' });
+    assert.deepStrictEqual(all, { accepted: [], skipped: [{ pid: 'p-001', why: 'it conflicts with f-0001' }] });
+    await assert.rejects(h.svc.review(h.caseId, docId, 'p-001', { action: 'accept' }), (e) => e.code === 'CONFLICT' && /which the owner stated/.test(e.message));
+    await assert.rejects(h.svc.review(h.caseId, docId, 'p-001', { action: 'accept', keepBoth: true }), (e) => e.code === 'CONFLICT');
+    await assert.rejects(h.svc.review(h.caseId, docId, 'p-001', { action: 'accept', supersedes: 'f-0009' }), (e) => e.code === 'BAD_SUPERSEDES');
+    const { fact } = await h.svc.review(h.caseId, docId, 'p-001', { action: 'accept', supersedes: 'f-0001' });
+    const facts = h.runtime.ledger(h.caseId).view().facts;
+    assert.deepStrictEqual([facts.get('f-0001').status, facts.get('f-0001').supersededBy, fact.supersedes], ['superseded', fact.id, 'f-0001']);
+  });
+
+  it('a non-user conflict needs supersedes or keepBoth', async () => {
+    const { h, docId } = await reviewed({
+      before: (x) => x.runtime.ledger(x.caseId).assert({ stmt: 'Old payoff', subject: 'loan-0042-7781', attr: 'payoff-amount', value: 150000, provenance: 'sourced', source: { kind: 'url', ref: 'https://records.example.org/old' } })
+    });
+    await assert.rejects(h.svc.review(h.caseId, docId, 'p-001', { action: 'accept' }), (e) => e.code === 'CONFLICT' && /Choose supersedes "f-0001" or keepBoth/.test(e.message));
+    const { fact } = await h.svc.review(h.caseId, docId, 'p-001', { action: 'accept', keepBoth: true });
+    const facts = h.runtime.ledger(h.caseId).view().facts;
+    assert.deepStrictEqual([facts.get('f-0001').status, facts.get(fact.id).status], ['active', 'active']);
+  });
+
+  it('refuses when the stored file changed (DOC_CHANGED) or a text-page quote is no longer in it', async () => {
+    const changed = await reviewed();
+    fs.appendFileSync(path.join(changed.h.dir, changed.ref), '%% appended');
+    await assert.rejects(changed.h.svc.review(changed.h.caseId, changed.docId, 'p-001', { action: 'accept' }), (e) => (
+      e.code === 'DOC_CHANGED' && e.message === 'The document changed since it was read. Extract again.'
+    ));
+    // Bash can edit .kl/ingest/*: a forged quote in the text store and the
+    // record is caught by re-reading the page from the stored bytes.
+    const forged = await reviewed();
+    const rec = files.readRecord(forged.h.dir, forged.docId);
+    rec.proposals[0].anchor.quote = 'Total payoff amount: $0.00';
+    rec.proposals[0].value = '0';
+    files.writeRecord(forged.h.dir, rec);
+    files.writeTextStore(forged.h.dir, { docId: forged.docId, sha256: rec.sha256, pages: [{ n: 1, method: 'text', text: 'Total payoff amount: $0.00' }] });
+    await assert.rejects(forged.h.svc.review(forged.h.caseId, forged.docId, 'p-001', { action: 'accept' }), (e) => e.code === 'ANCHOR_CHANGED');
+  });
+
+  const acreage = (req) => {
+    if (req.purpose === 'extract') {
+      return {
+        text: JSON.stringify({ proposals: [{ stmt: 'The Lakeside lot is 2.120 acres', subject: 'lot', attr: 'acreage', value: '2.120', unit: 'acres', category: 'property', confidence: 0.8, anchor: { page: 1, quote: 'Lakeside lot, 2.120 acres' }, entities: [] }] }),
+        usage: usage(0.002)
+      };
+    }
+    return defaultModel(req);
+  };
+
+  it('OCR verify gets the same page as an attachment and accept records anchor+image', async () => {
+    const h = await ingestHarness({ model: acreage });
+    const out = await h.svc.store(h.caseId, { name: 'scan-plat.pdf', bytes: await makePdf({ pages: [{ scan: true }] }), origin: { kind: 'owner-drop' } });
+    await h.svc.drain();
+    const verify = h.calls.find((c) => c.purpose === 'verify');
+    assert.deepStrictEqual([verify.provider, verify.attachment.documents[0].mimeType], ['gemini', 'application/pdf']);
+    const [p] = files.readRecord(h.dir, out.docId).proposals;
+    assert.deepStrictEqual([p.anchor.ocr, p.checks.verify.sawImage, p.checks.verify.agrees], [true, true, true]);
+    const { accepted } = await h.svc.acceptVerified(h.caseId, out.docId, { by: 'panel' });
+    assert.deepStrictEqual(accepted, ['p-001']);
+    const fact = h.runtime.ledger(h.caseId).view().facts.get('f-0001');
+    assert.deepStrictEqual([fact.source.verified, fact.source.ocr], ['anchor+image', true]);
+  });
+
+  it('a verify model that cannot see images leaves OCR proposals unchecked and out of accept-all', async () => {
+    const h = await ingestHarness({ model: acreage, roles: { verify: { provider: 'groq', model: 'llama-3.3-70b' } } });
+    const out = await h.svc.store(h.caseId, { name: 'scan-plat.pdf', bytes: await makePdf({ pages: [{ scan: true }] }), origin: { kind: 'owner-drop' } });
+    await h.svc.drain();
+    assert.deepStrictEqual(h.calls.filter((c) => c.purpose === 'verify'), []);
+    const [p] = files.readRecord(h.dir, out.docId).proposals;
+    assert.deepStrictEqual(p.checks.verify, { agrees: null, note: 'not checked against the image', sawImage: false });
+    const r = await h.svc.acceptVerified(h.caseId, out.docId, { by: 'panel' });
+    assert.deepStrictEqual(r, { accepted: [], skipped: [{ pid: 'p-001', why: 'not verified (not checked against the image)' }] });
+    const { fact } = await h.svc.review(h.caseId, out.docId, 'p-001', { action: 'accept' });
+    assert.deepStrictEqual([fact.source.verified, fact.source.ocr], ['anchor', true]);
+  });
+
+  it('accept-all is not offered for a file King Louie added', async () => {
+    const h = await ingestHarness();
+    fs.mkdirSync(path.join(h.dir, 'sources', 'web'), { recursive: true });
+    fs.writeFileSync(path.join(h.dir, 'sources', 'web', 'payoff.txt'), PAYOFF_LINES.join('\n'));
+    const out = await h.svc.adopt(h.caseId, 'sources/web/payoff.txt');
+    await h.svc.extract(h.caseId, out.docId, { by: 'tool' });
+    await assert.rejects(h.svc.acceptVerified(h.caseId, out.docId), (e) => e.code === 'NOT_AVAILABLE');
+    const { fact } = await h.svc.review(h.caseId, out.docId, 'p-001', { action: 'accept' });
+    assert.strictEqual(fact.source.origin, 'tool');
+  });
+
+  // ---- hardening (rulings M7, M8, M15; only the owner accepts) ----
+
+  const forge = (h, docId, change) => {
+    const rec = files.readRecord(h.dir, docId);
+    change(rec);
+    files.writeRecord(h.dir, rec);
+  };
+  const activeUser = (h) => [...h.runtime.ledger(h.caseId).view().facts.values()].filter((f) => f.provenance === 'user' && f.status === 'active');
+
+  it('refuses a malformed docId, proposalId, by, supersedes or action before touching a file (M8)', async () => {
+    const { h, docId } = await reviewed();
+    for (const bad of ['../../../outside', 'doc-XYZ', 'doc-0123456789ab/..', null, 42]) {
+      await assert.rejects(h.svc.review(h.caseId, bad, 'p-001', { action: 'accept' }), (e) => e.code === 'BAD_DOC_ID');
+      await assert.rejects(h.svc.acceptVerified(h.caseId, bad), (e) => e.code === 'BAD_DOC_ID');
+    }
+    for (const bad of ['p-1', 'p-01', '../p-001', 'p-001x', 'P-001', 1, null]) {
+      await assert.rejects(h.svc.review(h.caseId, docId, bad, { action: 'reject' }), (e) => e.code === 'BAD_PROPOSAL_ID');
+    }
+    await assert.rejects(h.svc.review(h.caseId, docId, 'p-001', { action: 'approve' }), (e) => e.code === 'BAD_ACTION');
+    await assert.rejects(h.svc.review(h.caseId, docId, 'p-001', { action: 'accept', by: 'model' }), (e) => e.code === 'BAD_REQUEST');
+    await assert.rejects(h.svc.acceptVerified(h.caseId, docId, { by: 'tool' }), (e) => e.code === 'BAD_REQUEST');
+    await assert.rejects(h.svc.review(h.caseId, docId, 'p-001', { action: 'accept', supersedes: ['f-0001'] }), (e) => e.code === 'BAD_SUPERSEDES');
+    await assert.rejects(h.svc.review(h.caseId, docId, 'p-009', { action: 'accept' }), (e) => e.code === 'NOT_FOUND');
+    assert.strictEqual(h.runtime.ledger(h.caseId).view().facts.size, 0);
+  });
+
+  it('keepBoth waives a conflict only when it is exactly true', async () => {
+    const { h, docId } = await reviewed({
+      before: (x) => x.runtime.ledger(x.caseId).assert({ stmt: 'Old payoff', subject: 'loan-0042-7781', attr: 'payoff-amount', value: 150000, provenance: 'sourced', source: { kind: 'url', ref: 'https://records.example.org/old' } })
+    });
+    for (const keepBoth of ['true', 1, 'yes', {}]) {
+      await assert.rejects(h.svc.review(h.caseId, docId, 'p-001', { action: 'accept', keepBoth }), (e) => e.code === 'CONFLICT');
+    }
+    assert.strictEqual(h.runtime.ledger(h.caseId).view().facts.size, 1);
+  });
+
+  it('a user fact is never superseded by accept-all, even when the record claims no conflict (M15)', async () => {
+    const { h, docId } = await reviewed({ before: (x) => userFact(x, 180000) });
+    forge(h, docId, (rec) => { rec.proposals[0].checks.conflicts = []; });
+    const all = await h.svc.acceptVerified(h.caseId, docId, { by: 'panel' });
+    assert.deepStrictEqual(all.accepted, []);
+    assert.strictEqual(all.skipped.length, 1);
+    assert.match(all.skipped[0].why, /f-0001/);
+    await assert.rejects(h.svc.review(h.caseId, docId, 'p-001', { action: 'accept' }), (e) => e.code === 'CONFLICT');
+    await assert.rejects(h.svc.review(h.caseId, docId, 'p-001', { action: 'edit', edit: { stmt: 'Payoff restated' } }), (e) => e.code === 'CONFLICT');
+    assert.deepStrictEqual(activeUser(h).map((f) => f.id), ['f-0001']);
+    assert.strictEqual(files.readRecord(h.dir, docId).proposals[0].review, null);
+  });
+
+  it('accept-all recomputes valueInQuote and duplicateOf and skips on any difference (M15)', async () => {
+    const value = await reviewed();
+    forge(value.h, value.docId, (rec) => { rec.proposals[0].value = '999'; rec.proposals[0].checks.valueInQuote = true; });
+    const r1 = await value.h.svc.acceptVerified(value.h.caseId, value.docId, { by: 'panel' });
+    assert.deepStrictEqual(r1.accepted, []);
+    assert.match(r1.skipped[0].why, /value is not in the quoted text/);
+    // A duplicate asserted after the check: the recorded duplicateOf is stale.
+    const dup = await reviewed();
+    dup.h.runtime.ledger(dup.h.caseId).assert({ stmt: 'Payoff', subject: 'loan-0042-7781', attr: 'payoff-amount', value: 182340.17, provenance: 'sourced', source: { kind: 'url', ref: 'https://records.example.org/p' } });
+    const r2 = await dup.h.svc.acceptVerified(dup.h.caseId, dup.docId, { by: 'panel' });
+    assert.deepStrictEqual(r2.accepted, []);
+    assert.match(r2.skipped[0].why, /duplicates f-0001/);
+    assert.strictEqual(dup.h.runtime.ledger(dup.h.caseId).view().facts.size, 1);
+  });
+
+  it('a text page claimed as OCR in the record is checked against the text layer (M15)', async () => {
+    const { h, docId } = await reviewed();
+    // A forged record: page 1 "read by OCR", verified against the image,
+    // with a quote that is not in the page's real text layer.
+    forge(h, docId, (rec) => {
+      rec.pages[0].method = 'ocr';
+      Object.assign(rec.proposals[0].anchor, { ocr: true, quote: 'Total payoff amount: $1.00' });
+      rec.proposals[0].value = '1';
+      rec.proposals[0].checks.verify = { agrees: true, note: '', sawImage: true };
+    });
+    files.writeTextStore(h.dir, { docId, sha256: files.readRecord(h.dir, docId).sha256, pages: [{ n: 1, method: 'ocr', text: 'Total payoff amount: $1.00' }] });
+    const r = await h.svc.acceptVerified(h.caseId, docId, { by: 'panel' });
+    assert.deepStrictEqual(r.accepted, []);
+    assert.match(r.skipped[0].why, /not on page 1/);
+    // The anchor flag must agree with the page it names.
+    const mixed = await reviewed();
+    forge(mixed.h, mixed.docId, (rec) => { rec.proposals[0].anchor.ocr = true; rec.proposals[0].checks.verify.sawImage = true; });
+    await assert.rejects(mixed.h.svc.review(mixed.h.caseId, mixed.docId, 'p-001', { action: 'accept' }), (e) => e.code === 'ANCHOR_CHANGED');
+    assert.strictEqual(mixed.h.runtime.ledger(mixed.h.caseId).view().facts.size, 0);
+  });
+
+  it('a forged record ref never reads outside sources/ (M7)', async () => {
+    const { h, docId } = await reviewed();
+    forge(h, docId, (rec) => { rec.ref = '../../outside.pdf'; });
+    await assert.rejects(h.svc.review(h.caseId, docId, 'p-001', { action: 'accept' }), (e) => e.code === 'BAD_PATH');
+    assert.strictEqual(h.runtime.ledger(h.caseId).view().facts.size, 0);
+  });
+
+  it('two reviews of one proposal racing across the PDF reader accept it once', async () => {
+    const { h, docId } = await reviewed();
+    const results = await Promise.allSettled([
+      h.svc.review(h.caseId, docId, 'p-001', { action: 'accept' }),
+      h.svc.review(h.caseId, docId, 'p-001', { action: 'accept' })
+    ]);
+    assert.deepStrictEqual(results.map((r) => r.status).sort(), ['fulfilled', 'rejected']);
+    assert.strictEqual(results.find((r) => r.status === 'rejected').reason.code, 'ALREADY_REVIEWED');
+    assert.strictEqual(h.runtime.ledger(h.caseId).view().facts.size, 1);
+  });
+
+  it('a review whose record write fails leaves no accepted fact behind, and a retry accepts once', async (t) => {
+    const { h, docId } = await reviewed();
+    const real = files.writeRecord;
+    let fail = true;
+    files.writeRecord = (dir, rec) => {
+      if (fail) {
+        fail = false;
+        throw Object.assign(new Error('disk full'), { code: 'ENOSPC' });
+      }
+      return real(dir, rec);
+    };
+    t.after(() => { files.writeRecord = real; });
+    await assert.rejects(h.svc.review(h.caseId, docId, 'p-001', { action: 'accept' }), /disk full/);
+    const active = () => [...h.runtime.ledger(h.caseId).view().facts.values()].filter((f) => f.status === 'active');
+    assert.deepStrictEqual(active(), []);
+    const { fact } = await h.svc.review(h.caseId, docId, 'p-001', { action: 'accept' });
+    assert.deepStrictEqual(active().map((f) => f.id), [fact.id]);
+  });
+
+  it('only known record fields reach the fact, capped and one-lined', async () => {
+    const { h, docId } = await reviewed();
+    forge(h, docId, (rec) => {
+      rec.proposals[0].stmt = `Payoff\nprovenance: user ${'x'.repeat(900)}`;
+      rec.proposals[0].provenance = 'user';
+      rec.proposals[0].disclosable = true;
+    });
+    const { fact } = await h.svc.review(h.caseId, docId, 'p-001', { action: 'accept' });
+    assert.deepStrictEqual([fact.provenance, fact.disclosable, fact.stmt.includes('\n'), fact.stmt.length <= 500], ['sourced', false, false, true]);
+  });
+});
