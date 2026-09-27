@@ -143,6 +143,12 @@ The phone pins the `mcp.` key, so the key survives certificate renewals.
 - With your own certificate, replace the files, restart (or `SIGHUP`) the
   service, then show phones the new pin with `king-louie-service relay qr`.
 
+The front door keeps only the newest signed re-pin. A phone that missed two
+rotations (it pins key A; A was rotated to B, then B to C) sees a re-pin from
+B, not from A, and refuses it: it tells you to scan a new relay code
+(`king-louie-service relay qr`). That is the safe failure; nothing is
+trusted on the way.
+
 `SIGHUP` also re-reads the admin approvers directory and the console node
 records before the certificate, so an approver revoked, or a node record
 removed by hand, while the service was stopped takes effect (and is audited)
@@ -162,6 +168,15 @@ mirror (a fork, a truncation, a replayed page, and so on), stays flagged until
 you acknowledge the alert on your phone; `doctor` keeps reporting it in the
 meantime and the failure text names what to check.
 
+Acknowledging a break clears `doctor`'s row, not the mirror: that node's
+mirror stays `broken` (the phone's node list shows `audit: broken`), and
+its recorded breaks are kept as evidence. If you know why the node's ledger
+changed (for example, you reinstalled it with the same key, so its ledger
+started again and the mirror saw a truncation), reset that node's mirror:
+stop the service, move `<dataDir>/frontdoor/mirror/<node_id>/` somewhere
+safe (it is the only copy of what the mirror held), and start the service.
+The next sync takes a fresh anchor from the node.
+
 On a node with a `front-door.json`, `doctor` checks that the pin file is
 admin-owned and that the certificate `mesh.kl.example.com` serves is the one
 pinned. If DNS for `mesh.` points somewhere else, the node refuses to send a
@@ -170,16 +185,16 @@ byte and says so in its log once an hour.
 ## Security notes
 
 - **Runbook jobs vs. delegate jobs.** A runbook job is visible (readable,
-  watchable, cancellable) to any grant with `fleet:read` on the machine it ran
-  on. A delegate job (an agent session's turn) is visible only to the grant
+  watchable) to any grant with `fleet:read` on the machine it ran on, and any
+  grant with `fleet:run` there can cancel it. A delegate job (an agent session's turn) is visible only to the grant
   that started it — another client's `fleet:read` on the same machine will
   not show it or let it touch it.
 - **Delegate sessions and unsafe calls.** A delegate session a node started on
   its own (not through the front door) sends its unsafe calls to the phone for
   approval, exactly like an unsafe runbook. A front-door client needs
-  `fleet:unsafe` for that node before any of its delegate turns can run an
-  unsafe call there; without it, the call is refused outright rather than
-  forwarded to the phone.
+  `fleet:unsafe` for that node before any of its delegate turns can request an
+  unsafe call there, and the phone still decides each one; without it, the
+  call is refused outright rather than forwarded to the phone.
 - **The MCP client pins nothing beyond WebPKI.** Unlike the phone and the
   nodes, an MCP client does not pin the front door's key: it trusts whatever
   certificate authority your OS or client library trusts. Controlling DNS for

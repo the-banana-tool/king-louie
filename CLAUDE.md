@@ -567,8 +567,9 @@ locally, give it `frontdoor.tls` with a self-signed certificate for
   front-door client's unsafe call is never forwarded to the phone on its
   behalf; the scope check runs first.
 - **Job visibility (ruling T11-owner).** A runbook job's cache entry has no
-  owner, so any grant with `fleet:read` on the machine can read, watch or
-  cancel it. A delegate job's entry is owned by the grant that started it
+  owner, so any grant with `fleet:read` on the machine can read or watch it,
+  and any grant with `fleet:run` there can cancel it (`cancel_job` needs
+  `fleet:run`, `src/fleet/scope-rules.js`). A delegate job's entry is owned by the grant that started it
   (`FleetRouter._recordStart`, `src/frontdoor/router/router.js`); every other
   grant is told the job does not exist, even one with full access to the same
   machine.
@@ -584,8 +585,12 @@ locally, give it `frontdoor.tls` with a self-signed certificate for
 - **Audit mirror breaks** (`src/frontdoor/doctor-checks.js`'s `BREAK_REASONS`:
   `fork`, `truncated`, `replay`, `withheld_entries`, `oversize_entry`,
   `oversize_page`, `wrong_node`, `malformed_head`, `mirror_state_corrupt`)
-  each carry the owner's remedy in `doctor`'s own text; a broken mirror stays
-  broken until the phone acknowledges the alert.
+  each carry the owner's remedy in `doctor`'s own text. Acknowledging the
+  alert on the phone clears doctor's "unacknowledged breaks" row only: the
+  node's mirror status stays `broken` for good (nothing in
+  `src/frontdoor/audit/mirror.js` sets it back). The documented reset
+  (docs/fleet/front-door.md, doctor) is to stop the service, move
+  `<dataDir>/frontdoor/mirror/<node_id>/` aside and start it: a fresh anchor.
 
 Test helpers:
 - `tests/helpers/test-certs.js`: CA, leaf and self-signed certificates in pure Node (never openssl).
