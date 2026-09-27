@@ -111,8 +111,8 @@ describe('createCore playbooks wiring', () => {
 
   // Ruling M3: the desktop's createCore call lives in src/ipc/standalone-host.js.
   it('both hosts pass examplesDir', () => {
-    assert.match(fs.readFileSync(path.join(ROOT, 'src', 'ipc', 'standalone-host.js'), 'utf8'), /examplesDir: path\.join\(appDir, 'examples', 'playbooks'\)/);
-    assert.match(fs.readFileSync(path.join(ROOT, 'src', 'service', 'run.js'), 'utf8'), /examplesDir: path\.join\(__dirname, '\.\.', '\.\.', 'examples', 'playbooks'\)/);
+    assert.match(fs.readFileSync(path.join(ROOT, 'src', 'ipc', 'standalone-host.js'), 'utf8'), /examplesDir: asarUnpackedPath\(path\.join\(appDir, 'examples', 'playbooks'\)\)/);
+    assert.match(fs.readFileSync(path.join(ROOT, 'src', 'service', 'run.js'), 'utf8'), /examplesDir: asarUnpackedPath\(path\.join\(__dirname, '\.\.', '\.\.', 'examples', 'playbooks'\)\)/);
   });
 });
 
