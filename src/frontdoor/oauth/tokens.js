@@ -375,7 +375,14 @@ function createTokenHandlers({ tokens, codes, grants, alerts = null, auditLedger
     } else {
       throw new OAuthError('unsupported_grant_type', 'grant_type must be authorization_code or refresh_token');
     }
-    grants.touch(grantId);
+    // The pair is minted and saved: last_used_at is bookkeeping, and a
+    // failed save here must not turn the answer into a 500 (the client would
+    // redeem the code again, which revokes the grant as code reuse).
+    try {
+      grants.touch(grantId);
+    } catch (err) {
+      log.warn(`recording use of grant ${grantId} failed: ${err && err.message}`);
+    }
     await recordFrontDoorEvent(auditLedger, 'frontdoor.token.issued', { grant_id: grantId, kind: f.grant_type });
     sendJson(res, 200, pair, { pragma: 'no-cache' });
   }

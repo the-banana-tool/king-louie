@@ -44,6 +44,20 @@ describe('connecting a client', () => {
     assert.ok(h.audit.some((e) => e.kind === 'frontdoor.token.issued' && e.data.kind === 'authorization_code'));
   });
 
+  // Final review M-3: last_used_at is bookkeeping. A failed grants.json save
+  // after the pair was minted must not answer 500: the client would retry
+  // the code, and that second redemption revokes the grant as code reuse.
+  it('a failed last-used save still hands out the tokens, and the grant stays live', async () => {
+    const h = await start();
+    h.grants.touch = () => { throw Object.assign(new Error('disk full'), { code: 'ENOSPC' }); };
+    const r = await h.connect({ scopes: [{ scope: 'fleet:read', machines: null }] });
+    assert.equal(r.tokenStatus, 200);
+    assert.ok(h.grants.live(r.grantId));
+    assert.ok(h.tokens.authenticate(r.tokens.access_token, { aud: 'https://mcp.kl.example.com/mcp' }));
+    const refreshed = await request(h.base, { method: 'POST', path: '/oauth/token', form: { grant_type: 'refresh_token', refresh_token: r.tokens.refresh_token, client_id: r.clientId } });
+    assert.equal(refreshed.status, 200);
+  });
+
   it('a client ID metadata document works the same way', async () => {
     const url = 'https://client.example.com/client.json';
     const h = await start({ fetchMetadata: async (u) => ({ client_id: u, client_name: 'Metadata Client', redirect_uris: ['https://client.example.com/cb'] }) });
