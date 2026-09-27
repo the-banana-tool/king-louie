@@ -222,6 +222,15 @@
 
         <!-- Tab: Providers -->
         <div class="settings-tab-content active" data-tab="providers">
+          <section class="template-variables-card" id="models-catalog-card">
+            <h3>Model catalog</h3>
+            <p>Prices and capabilities for every model come from a catalog bundled with King Louie and refreshed daily from models.dev.</p>
+            <div class="provider-message" id="models-catalog-status">Reading the catalog…</div>
+            <div class="provider-actions">
+              <button type="button" class="btn" id="models-refresh-catalog-btn"><i class="fas fa-rotate"></i> Refresh now</button>
+              <button type="button" class="btn" id="models-test-all-btn"><i class="fas fa-plug"></i> Test all</button>
+            </div>
+          </section>
           <div class="provider-list" id="provider-list"></div>
 
           <section class="template-variables-card">

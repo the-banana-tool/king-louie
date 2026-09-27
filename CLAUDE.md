@@ -94,6 +94,32 @@ const bound = log.withContext({ sessionId: 's-1' }); // metadata on every call
 Levels (low → high): `trace`, `debug`, `info`, `warn`, `error`, `fatal`, `silent`.
 Default is `info`. Override with `KING_LOUIE_LOG_LEVEL` or `LOG_LEVEL` env var.
 
+## Models
+
+`src/models/` holds the model catalog and provider availability (spec:
+`docs/superpowers/specs/2026-09-27-model-catalog-profiles-roles-design.md`,
+stage M1). It is Electron-free.
+
+- Prices come only from `Catalog.price`; providers have no price tables. An
+  unknown model is unpriced (`costUsd: null`), never $0. A call cut off by
+  Stop is recorded with `usagePartial: true`.
+- The bundled catalog is `src/models/snapshot/` (models.dev trimmed to the 14
+  providers, plus Artificial Analysis scores from OpenRouter). Regenerate it
+  before each release with `npm run models:snapshot` (needs the network).
+- Unit tests never touch the network: inject `fetch`, point providers at
+  `tests/helpers/fake-llm-server.js`, and price with the fixture catalog
+  (`tests/helpers/models-fixture.js`, data in `tests/fixtures/models/`).
+- The catalog refresh and the stale-provider retests start from the host
+  (`core.models.startBackgroundChecks()` in `main.js` and `runService`), not
+  from `createCore().start()`, and are skipped when `KL_TEST_MODE` is set.
+- Every provider request goes through `BaseProvider.request(url, init,
+  options)`, which carries `options.abortSignal`; never call `fetch` directly
+  in a provider.
+- `npm run smoke:providers` streams a reply and makes one tool call against
+  each provider whose key is in the environment (`OPENAI_API_KEY`,
+  `ANTHROPIC_API_KEY`, …; `KL_SMOKE_MODEL_<PROVIDER>` picks a model). It
+  spends a little real money and is not part of `npm test`.
+
 ## Cases
 
 `src/cases/` implements case repositories (spec:

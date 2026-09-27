@@ -229,6 +229,13 @@ class Availability extends EventEmitter {
     return { usable: reasons.length === 0, reasons, notes, entry };
   }
 
+  // An id the owner listed in models.overrides (settings key "<provider>:<id>"),
+  // regardless of whether the catalog otherwise knows it.
+  _hasOverride(p, id) {
+    const overrides = this._settings().models?.overrides;
+    return Boolean(overrides && typeof overrides === 'object' && Object.prototype.hasOwnProperty.call(overrides, `${p}:${id}`));
+  }
+
   usable({ needs = {} } = {}) {
     // One overrides check for the whole pass, not one per candidate model:
     // explain() below calls catalog.get()/list() once per candidate, and
@@ -244,6 +251,16 @@ class Availability extends EventEmitter {
         for (const id of ids) {
           const verdict = this.explain(p, id, { needs });
           if (!verdict.usable) continue;
+          // The account's own model list can include non-chat ids the
+          // catalog has never heard of (OpenAI's /v1/models mixes in
+          // embedding, TTS, whisper and image model ids). explain() lets an
+          // unknown id through, unpriced, rather than refusing it — right
+          // for a single already-chosen model, wrong for a list a caller
+          // wants to pick a chat model from. A caller that needs text
+          // output drops those here, except a local Ollama model (whose
+          // only source of truth is discovery, not the catalog) or an id
+          // the owner explicitly overrode (controller ruling, Task 6 review).
+          if (needs.textOutput && !verdict.entry && p !== 'ollama' && !this._hasOverride(p, id)) continue;
           const e = verdict.entry;
           out.push({
             provider: p,

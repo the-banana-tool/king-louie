@@ -641,6 +641,16 @@ body {
   font-size: 12px;
 }
 
+.chat-info-note {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 0 0 6px;
+}
+
+.chat-info-note:empty {
+  display: none;
+}
+
 .chat-info-divider {
   border: none;
   border-top: 1px solid var(--border-subtle);
@@ -1025,6 +1035,13 @@ body {
 .message-metrics-call,
 .message-metrics-running {
   line-height: 1.4;
+}
+
+.message-stopped-marker {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
 }
 
 /* --- Tool events – compact inline -------------------------- */

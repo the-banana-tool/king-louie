@@ -120,6 +120,9 @@ const dom = {
   floatingSettingsBtn: document.getElementById('floating-settings-btn'),
   composerSettingsBtn: document.getElementById('composer-settings-btn'),
   providerList: document.getElementById('provider-list'),
+  modelsCatalogStatus: document.getElementById('models-catalog-status'),
+  modelsRefreshCatalogBtn: document.getElementById('models-refresh-catalog-btn'),
+  modelsTestAllBtn: document.getElementById('models-test-all-btn'),
   settingsEncryptionAlert: document.getElementById('settings-encryption-alert'),
   agentModeBtn: document.getElementById('agent-mode-btn'),
   slashAutocomplete: document.getElementById('slash-autocomplete'),
@@ -3057,8 +3060,7 @@ function renderChatInfoPopover() {
       appState.settings.inference = result.inference || appState.settings.inference;
       // Update the provider/model dropdowns for the new tier
       const newInfo = (appState.settings.inference.tierMap || {})[tierSelect.value] || {};
-      if (providerSelect) providerSelect.value = newInfo.provider || 'openai';
-      if (populateModels) populateModels(newInfo.provider || 'openai', newInfo.model || '');
+      loadUsable(newInfo.provider || '', newInfo.model || '');
       if (typeof renderInferenceTierDetails === 'function') renderInferenceTierDetails();
       addStatusMessage(`Tier changed: ${prevTier} → ${tierSelect.value}`);
     } catch (err) { tierLog.warn(`failed: ${err.message}`); }
@@ -3067,7 +3069,10 @@ function renderChatInfoPopover() {
   tierRow.appendChild(tierSelect);
   dom.chatInfoPopoverBody.appendChild(tierRow);
 
-  // Provider row (dropdown)
+  /* The provider and model lists hold only usable models (spec 2026-09-27
+     §5, stage M1): a passing connection test, in this account's list, and
+     able to call tools in agent mode. The current tier target always shows,
+     marked with why it cannot be used. */
   const providerRow = document.createElement('div');
   providerRow.className = 'chat-info-row';
   const providerLabel = document.createElement('span');
@@ -3076,24 +3081,11 @@ function renderChatInfoPopover() {
   providerLabel.appendChild(document.createTextNode('Provider'));
   const providerSelect = document.createElement('select');
   providerSelect.className = 'chat-info-select';
-  const providerDisplayNames = {
-    openai: 'OpenAI', anthropic: 'Anthropic', groq: 'Groq',
-    mistral: 'Mistral', ollama: 'Ollama', gemini: 'Gemini', openrouter: 'OpenRouter',
-    xai: 'xAI', deepseek: 'DeepSeek', qwen: 'Qwen', together: 'Together',
-    fireworks: 'Fireworks', cohere: 'Cohere'
-  };
-  Object.keys(providerDisplayNames).forEach((p) => {
-    const opt = document.createElement('option');
-    opt.value = p;
-    opt.textContent = providerDisplayNames[p];
-    if (p === (tierInfo.provider || '')) opt.selected = true;
-    providerSelect.appendChild(opt);
-  });
+  providerSelect.id = 'chat-info-provider-select';
   providerRow.appendChild(providerLabel);
   providerRow.appendChild(providerSelect);
   dom.chatInfoPopoverBody.appendChild(providerRow);
 
-  // Model row (dropdown)
   const modelRow = document.createElement('div');
   modelRow.className = 'chat-info-row';
   const modelLabel = document.createElement('span');
@@ -3102,109 +3094,137 @@ function renderChatInfoPopover() {
   modelLabel.appendChild(document.createTextNode('Model'));
   const modelSelect = document.createElement('select');
   modelSelect.className = 'chat-info-select';
-  // Seed with current model so there's no flash of empty
-  if (tierInfo.model) {
-    const opt = document.createElement('option');
-    opt.value = tierInfo.model;
-    opt.textContent = tierInfo.model;
-    opt.selected = true;
-    modelSelect.appendChild(opt);
-  }
+  modelSelect.id = 'chat-info-model-select';
   modelRow.appendChild(modelLabel);
   modelRow.appendChild(modelSelect);
   dom.chatInfoPopoverBody.appendChild(modelRow);
 
-  // Helper to populate model dropdown from API (with static fallback)
-  let modelFetchId = 0;
-  const populateModels = async (provider, selectedModel) => {
-    const fetchId = ++modelFetchId;
-    modelSelect.disabled = true;
-    modelSelect.innerHTML = '';
-    const loadingOpt = document.createElement('option');
-    loadingOpt.textContent = 'Loading…';
-    loadingOpt.disabled = true;
-    loadingOpt.selected = true;
-    modelSelect.appendChild(loadingOpt);
+  const modelNote = document.createElement('div');
+  modelNote.className = 'chat-info-note';
+  modelNote.id = 'chat-info-model-note';
+  dom.chatInfoPopoverBody.appendChild(modelNote);
 
+  const providerLabelOf = (key) => appState.settings?.providers?.[key]?.label || key;
+  const popoverNeeds = () => (appState.isAgentModeEnabled ? { toolCall: true } : {});
+  let usableModels = [];
+  let usableFetchId = 0;
+
+  // Why the current target cannot be used, if it cannot.
+  const showCurrentVerdict = async (provider, model) => {
+    modelNote.textContent = '';
+    if (!provider) return;
     try {
-      const result = unwrapIpcResult(
-        await window.electron.settings.listModels({ provider }),
-        'Failed to list models.'
+      const verdict = unwrapIpcResult(
+        await window.electron.models.explain({ provider, model: model || '', needs: popoverNeeds() }),
+        'Unable to check the model.'
       );
-      if (fetchId !== modelFetchId) return; // stale response
-      modelSelect.innerHTML = '';
-      const models = result.models || [];
-      let hasSelected = false;
-      models.forEach((m) => {
-        const modelId = typeof m === 'string' ? m : m.id;
-        const modelName = typeof m === 'string' ? m : (m.name || m.id);
-        const opt = document.createElement('option');
-        opt.value = modelId;
-        opt.textContent = modelName;
-        if (modelId === selectedModel) { opt.selected = true; hasSelected = true; }
-        modelSelect.appendChild(opt);
-      });
-      // If current model not in list, keep it at the top
-      if (selectedModel && !hasSelected) {
-        const opt = document.createElement('option');
-        opt.value = selectedModel;
-        opt.textContent = selectedModel + ' (current)';
-        opt.selected = true;
-        modelSelect.insertBefore(opt, modelSelect.firstChild);
-      }
-    } catch {
-      if (fetchId !== modelFetchId) return;
-      modelSelect.innerHTML = '';
-      if (selectedModel) {
-        const opt = document.createElement('option');
-        opt.value = selectedModel;
-        opt.textContent = selectedModel;
-        modelSelect.appendChild(opt);
-      }
-    } finally {
-      if (fetchId === modelFetchId) modelSelect.disabled = false;
+      if (!verdict.usable) modelNote.textContent = verdict.reasons.join(' ');
+    } catch (err) { modelLog.debug(`explain failed: ${err.message}`); }
+  };
+
+  const fillModels = (provider, selectedModel) => {
+    modelSelect.innerHTML = '';
+    let hasSelected = false;
+    for (const m of usableModels.filter((c) => c.provider === provider)) {
+      const opt = document.createElement('option');
+      opt.value = m.model;
+      opt.textContent = m.priced || m.local ? m.name : `${m.name} (unpriced)`;
+      if (m.model === selectedModel) { opt.selected = true; hasSelected = true; }
+      modelSelect.appendChild(opt);
+    }
+    if (selectedModel && !hasSelected) {
+      const opt = document.createElement('option');
+      opt.value = selectedModel;
+      opt.textContent = `${selectedModel} (current, not usable)`;
+      opt.selected = true;
+      modelSelect.insertBefore(opt, modelSelect.firstChild);
+    }
+    modelSelect.disabled = modelSelect.options.length === 0;
+  };
+
+  const fillProviders = (currentProvider) => {
+    providerSelect.innerHTML = '';
+    const providers = [...new Set(usableModels.map((m) => m.provider))];
+    for (const key of providers) {
+      const opt = document.createElement('option');
+      opt.value = key;
+      opt.textContent = providerLabelOf(key);
+      if (key === currentProvider) opt.selected = true;
+      providerSelect.appendChild(opt);
+    }
+    if (currentProvider && !providers.includes(currentProvider)) {
+      const opt = document.createElement('option');
+      opt.value = currentProvider;
+      opt.textContent = `${providerLabelOf(currentProvider)} (not usable)`;
+      opt.selected = true;
+      providerSelect.insertBefore(opt, providerSelect.firstChild);
+    }
+    if (providerSelect.options.length === 0) {
+      const opt = document.createElement('option');
+      opt.textContent = 'No usable provider: add and test a key in Settings';
+      opt.disabled = true;
+      opt.selected = true;
+      providerSelect.appendChild(opt);
     }
   };
 
-  // Provider change → fetch models + persist
+  const loadUsable = async (currentProvider, currentModel) => {
+    const fetchId = ++usableFetchId;
+    try {
+      const result = unwrapIpcResult(
+        await window.electron.models.usable({ needs: { textOutput: true, ...popoverNeeds() } }),
+        'Failed to list usable models.'
+      );
+      if (fetchId !== usableFetchId) return;
+      usableModels = Array.isArray(result.models) ? result.models : [];
+    } catch (err) {
+      if (fetchId !== usableFetchId) return;
+      usableModels = [];
+      modelLog.warn(`usable models failed: ${err.message}`);
+    }
+    fillProviders(currentProvider);
+    fillModels(currentProvider, currentModel);
+    showCurrentVerdict(currentProvider, currentModel);
+  };
+
+  // Provider change → its first usable model, persisted to the active tier.
   providerSelect.addEventListener('change', async () => {
-    const prevProvider = tierInfo.provider || 'openai';
+    const prevProvider = tierInfo.provider || '';
     const newProvider = providerSelect.value;
-    const activeTier = tierSelect.value;
-    await populateModels(newProvider, '');
+    fillModels(newProvider, '');
     const newModel = modelSelect.value || '';
     try {
       const result = unwrapIpcResult(
         await window.electron.settings.setTierProviderModel({
-          tier: activeTier, provider: newProvider, model: newModel
+          tier: tierSelect.value, provider: newProvider, model: newModel
         }),
         'Failed to update provider.'
       );
       appState.settings.inference = result.inference || appState.settings.inference;
       if (typeof renderInferenceTierDetails === 'function') renderInferenceTierDetails();
-      addStatusMessage(`Provider changed: ${prevProvider} → ${newProvider}`);
+      showCurrentVerdict(newProvider, newModel);
+      addStatusMessage(`Provider changed: ${prevProvider || '(none)'} → ${newProvider}`);
     } catch (err) { providerLog.warn(`failed: ${err.message}`); }
   });
 
-  // Model change → persist
+  // Model change → persist.
   modelSelect.addEventListener('change', async () => {
-    const activeTier = tierSelect.value;
     const prevModel = tierInfo.model || '';
     try {
       const result = unwrapIpcResult(
         await window.electron.settings.setTierProviderModel({
-          tier: activeTier, model: modelSelect.value
+          tier: tierSelect.value, model: modelSelect.value
         }),
         'Failed to update model.'
       );
       appState.settings.inference = result.inference || appState.settings.inference;
       if (typeof renderInferenceTierDetails === 'function') renderInferenceTierDetails();
+      showCurrentVerdict(providerSelect.value, modelSelect.value);
       addStatusMessage(`Model changed (${providerSelect.value}): ${prevModel || '(default)'} → ${modelSelect.value || '(default)'}`);
     } catch (err) { modelLog.warn(`failed: ${err.message}`); }
   });
 
-  // Load models for current provider
-  populateModels(tierInfo.provider || 'openai', tierInfo.model || '');
+  loadUsable(tierInfo.provider || '', tierInfo.model || '');
 
   // Agent mode toggle row
   const agentRow = document.createElement('div');
@@ -3362,11 +3382,12 @@ function renderChatMessages() {
         addToolEventCompact(block.toolName, xmlToolBlockToParams(block.toolName, block.content), 'success', false);
       }
       displayText = cleanText;
-      if (!displayText) return; // message was entirely tool blocks
+      if (!displayText && !message.stopped) return; // message was entirely tool blocks
     }
 
     addMessage(message.sender, displayText, {
       llm: message?.llm,
+      stopped: message?.stopped,
       runningLlmTotals: callTotals ? { ...runningTotals } : null,
       format: message?.format,
       images: message?.images,
@@ -3770,15 +3791,10 @@ function renderProviderCard(providerKey, provider) {
 
   const status = document.createElement('span');
   status.className = 'provider-status';
-  if (provider.status?.ok) {
-    status.classList.add('ok');
-    status.textContent = 'Connected';
-  } else if (provider.status) {
-    status.classList.add('error');
-    status.textContent = 'Error';
-  } else {
-    status.textContent = 'Not tested';
-  }
+  const statusView = providerStatusText(provider.status);
+  if (statusView.cls) status.classList.add(statusView.cls);
+  status.textContent = statusView.text;
+  if (provider.status?.checkedAt) status.title = `Last tested ${new Date(provider.status.checkedAt).toLocaleString()}`;
 
   header.appendChild(titleWrap);
   header.appendChild(status);
@@ -3799,6 +3815,20 @@ function renderProviderCard(providerKey, provider) {
 
   controls.appendChild(label);
   controls.appendChild(input);
+
+  // The Ollama address (models.ollama.baseUrl, spec 2026-09-27 §5.4).
+  if (providerKey === 'ollama') {
+    const addressLabel = document.createElement('label');
+    addressLabel.textContent = 'Ollama address';
+    const addressInput = document.createElement('input');
+    addressInput.className = 'provider-input';
+    addressInput.type = 'text';
+    addressInput.dataset.ollamaUrl = 'true';
+    addressInput.value = appState.settings.ollamaBaseUrl || '';
+    addressInput.placeholder = 'http://127.0.0.1:11434';
+    controls.appendChild(addressLabel);
+    controls.appendChild(addressInput);
+  }
 
   const modelLabel = document.createElement('label');
   modelLabel.textContent = 'Model';
@@ -3903,6 +3933,17 @@ function renderProviderCard(providerKey, provider) {
   actions.appendChild(activeBtn);
   actions.appendChild(testBtn);
   actions.appendChild(clearBtn);
+
+  if (providerKey === 'ollama') {
+    const addressBtn = document.createElement('button');
+    addressBtn.type = 'button';
+    addressBtn.className = 'btn';
+    addressBtn.appendChild(faIcon('fas fa-location-dot'));
+    addressBtn.appendChild(document.createTextNode(' Save address'));
+    addressBtn.dataset.action = 'save-ollama-url';
+    addressBtn.dataset.provider = providerKey;
+    actions.appendChild(addressBtn);
+  }
 
   const message = document.createElement('div');
   message.className = 'provider-message';
@@ -6825,6 +6866,7 @@ async function loadSettings() {
     loadWebhookList().catch(() => {});
     loadMeshStatus().catch(() => {});
     loadChannelAccess().catch(() => {});
+    loadModelsCatalogStatus().catch(() => {});
   } catch (error) {
     setProviderListFallback(`Unable to load provider settings: ${error.message || 'Unknown error'}`);
   }
@@ -6877,6 +6919,121 @@ function updateProviderStatus(providerKey, status) {
     status
   };
   renderSettings();
+}
+
+/* --- Models M1: catalog status, Test all, the Ollama address --- */
+
+function providerStatusText(status) {
+  if (status?.ok) return { text: 'Connected', cls: 'ok' };
+  if (status?.authFailed) return { text: 'Key rejected', cls: 'error' };
+  if (status) return { text: 'Error', cls: 'error' };
+  return { text: 'Not tested', cls: '' };
+}
+
+// A background retest (key saved, 401 during use) updates the badge only, so
+// a message the owner is reading on the card stays.
+function updateProviderStatusBadge(providerKey) {
+  const card = dom.providerList?.querySelector(`.provider-card[data-provider="${providerKey}"]`);
+  const badge = card?.querySelector('.provider-status');
+  if (!badge) return;
+  const status = appState.settings?.providers?.[providerKey]?.status || null;
+  const view = providerStatusText(status);
+  badge.classList.remove('ok', 'error');
+  if (view.cls) badge.classList.add(view.cls);
+  badge.textContent = view.text;
+  badge.title = status?.checkedAt ? `Last tested ${new Date(status.checkedAt).toLocaleString()}` : '';
+}
+
+function formatCatalogStatus(status) {
+  if (!status) return 'Catalog status unavailable.';
+  const when = status.fetchedAt || status.snapshotDate;
+  const date = when ? new Date(when).toLocaleDateString() : 'unknown date';
+  const source = { live: 'models.dev, fetched now', cache: 'cached copy of models.dev', snapshot: 'bundled snapshot' }[status.source] || String(status.source);
+  const stale = status.stale ? ' This copy is old: press Refresh now, or check the network.' : '';
+  return `Source: ${source}, ${date}. ${status.models} models.${stale}`;
+}
+
+function showCatalogStatus(status) {
+  if (!dom.modelsCatalogStatus) return;
+  dom.modelsCatalogStatus.textContent = formatCatalogStatus(status);
+  dom.modelsCatalogStatus.classList.toggle('error', Boolean(status?.stale));
+}
+
+async function loadModelsCatalogStatus() {
+  if (!dom.modelsCatalogStatus || !window.electron?.models) return;
+  try {
+    const result = unwrapIpcResult(await window.electron.models.status(), 'Unable to read the catalog.');
+    showCatalogStatus(result.catalog);
+  } catch (err) {
+    dom.modelsCatalogStatus.textContent = err.message;
+    dom.modelsCatalogStatus.classList.add('error');
+  }
+}
+
+async function handleSaveOllamaUrl() {
+  const input = dom.providerList.querySelector('input[data-ollama-url]');
+  const value = (input?.value || '').trim();
+  setProviderMessage('ollama', 'Saving the address and testing Ollama…');
+  try {
+    const result = unwrapIpcResult(await window.electron.models.setOllamaBaseUrl(value), 'Unable to save the Ollama address.');
+    appState.settings.ollamaBaseUrl = result.baseUrl;
+    updateProviderStatus('ollama', result.status);
+    setProviderMessage(
+      'ollama',
+      result.status?.ok ? `Address saved. ${result.status.message}` : `Address saved, but Ollama did not answer: ${result.status?.error || 'unknown error'}`,
+      !result.status?.ok
+    );
+  } catch (err) {
+    setProviderMessage('ollama', err.message, true);
+  }
+}
+
+if (dom.modelsRefreshCatalogBtn) {
+  dom.modelsRefreshCatalogBtn.addEventListener('click', async () => {
+    dom.modelsRefreshCatalogBtn.disabled = true;
+    if (dom.modelsCatalogStatus) dom.modelsCatalogStatus.textContent = 'Refreshing the catalog…';
+    try {
+      const result = unwrapIpcResult(await window.electron.models.refreshCatalog(), 'Catalog refresh failed.');
+      showCatalogStatus(result.catalog);
+    } catch (err) {
+      if (dom.modelsCatalogStatus) {
+        dom.modelsCatalogStatus.textContent = err.message;
+        dom.modelsCatalogStatus.classList.add('error');
+      }
+    } finally {
+      dom.modelsRefreshCatalogBtn.disabled = false;
+    }
+  });
+}
+
+if (dom.modelsTestAllBtn) {
+  dom.modelsTestAllBtn.addEventListener('click', async () => {
+    dom.modelsTestAllBtn.disabled = true;
+    try {
+      const result = unwrapIpcResult(await window.electron.models.testAll(), 'Test all failed.');
+      for (const [provider, status] of Object.entries(result.providers || {})) {
+        if (appState.settings?.providers?.[provider]) appState.settings.providers[provider].status = status;
+      }
+      renderSettings();
+    } catch (err) {
+      chatLog.warn(`Test all failed: ${err.message}`);
+    } finally {
+      dom.modelsTestAllBtn.disabled = false;
+    }
+  });
+}
+
+if (window.electron?.models?.onStatusChanged) {
+  window.electron.models.onStatusChanged(({ provider, status } = {}) => {
+    const entry = appState.settings?.providers?.[provider];
+    if (!entry) return;
+    entry.status = status || null;
+    updateProviderStatusBadge(provider);
+  });
+}
+
+if (window.electron?.models?.onCatalogUpdated) {
+  window.electron.models.onCatalogUpdated((status) => showCatalogStatus(status));
 }
 
 function closeContextMenu() {
@@ -7818,6 +7975,15 @@ function addMessage(sender, text, metadata = {}) {
   renderMessageImages(messageContent, metadata?.images || []);
   renderMessageDocuments(messageContent, metadata?.documents || []);
 
+  // A reply cut off by Stop keeps its text and says so (spec 2026-09-27 §9).
+  if (sender === 'assistant' && metadata?.stopped) {
+    const marker = document.createElement('div');
+    marker.className = 'message-stopped-marker';
+    marker.appendChild(faIcon('fas fa-circle-stop'));
+    marker.appendChild(document.createTextNode(' Stopped'));
+    messageContent.appendChild(marker);
+  }
+
   if (sender === 'assistant' && metadata?.llm?.totals) {
     const callTotals = metadata.llm.totals;
     const runningTotals = metadata.runningLlmTotals;
@@ -7831,7 +7997,9 @@ function addMessage(sender, text, metadata = {}) {
     if (runningTotals) {
       callSpan.textContent += ` · session ${formatTokenCount(runningTotals.totalTokens)} tokens · ${formatCompactUsd(runningTotals.costUsd)}`;
     }
-  
+    if (callTotals.partial) callSpan.textContent += ' · partial usage';
+    if (callTotals.unpriced) callSpan.textContent += ' · includes unpriced calls';
+
     metricsDiv.appendChild(callSpan);
 
     messageContent.appendChild(metricsDiv);
@@ -9650,6 +9818,9 @@ if (dom.providerList) {
     }
     if (action === 'set-active') {
       handleSetActiveProvider(provider);
+    }
+    if (action === 'save-ollama-url') {
+      handleSaveOllamaUrl();
     }
   });
 }

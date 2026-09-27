@@ -158,13 +158,44 @@ describe('the four usability rules', () => {
   it('lists usable models meeting the needs', () => {
     const { availability } = setup({ credentials: ['openai', 'groq'], statuses: { openai: passing(['gpt-5.5', 'gpt-image-1', 'my-finetune']), groq: { ok: false, error: 'bad key', checkedAt: hoursAgo(1), models: [] } } });
     assert.deepStrictEqual(availability.usable({ needs: { toolCall: true } }).map((c) => c.model), ['gpt-5.5', 'my-finetune']);
-    assert.deepStrictEqual(availability.usable({ needs: { textOutput: true } }).map((c) => c.model), ['gpt-5.5', 'my-finetune']);
+    // needs.textOutput drops an id the catalog doesn't know (controller
+    // ruling, Task 6 review): 'my-finetune' has no catalog entry, so it is
+    // excluded here even though explain() alone would call it usable — see
+    // the three cases below for the exceptions (Ollama, an override).
+    assert.deepStrictEqual(availability.usable({ needs: { textOutput: true } }).map((c) => c.model), ['gpt-5.5']);
     const [first] = availability.usable({ needs: {} });
     assert.deepStrictEqual(first, {
       provider: 'openai', model: 'gpt-5.5', name: 'GPT-5.5', known: true, priced: true,
       cost: first.cost, context: 1050000, toolCall: true, imageInput: true, local: false
     });
     assert.strictEqual(first.cost.input, 5);
+  });
+
+  // Controller ruling (Task 6 review): the chat popover must not list
+  // non-chat models the catalog doesn't know (OpenAI's /v1/models mixes in
+  // embedding, TTS, whisper and image ids alongside chat models). When a
+  // caller asks for needs.textOutput, usable() drops an unknown id, except
+  // a local Ollama model or one the owner named in models.overrides.
+  describe('needs.textOutput drops ids the catalog does not know, with two exceptions', () => {
+    it('an id no source knows about is dropped', () => {
+      const { availability } = setup({ statuses: { openai: passing(['gpt-5.5', 'text-embedding-3-small']) } });
+      assert.deepStrictEqual(availability.usable({ needs: { textOutput: true } }).map((c) => c.model), ['gpt-5.5']);
+      // Without needs.textOutput, the same unknown id is still usable (unpriced).
+      assert.deepStrictEqual(availability.usable({ needs: {} }).map((c) => c.model).sort(), ['gpt-5.5', 'text-embedding-3-small']);
+    });
+
+    it('a local Ollama model the catalog does not otherwise know is kept', () => {
+      const { availability } = setup({ statuses: { ollama: passing(['my-local-model']) } });
+      assert.deepStrictEqual(availability.usable({ needs: { textOutput: true } }).map((c) => c.model), ['my-local-model']);
+    });
+
+    it('an id the owner named in models.overrides is kept', () => {
+      const { availability } = setup({
+        statuses: { openai: passing(['gpt-5.5', 'my-custom-deploy']) },
+        settings: { models: { overrides: { 'openai:my-custom-deploy': { name: 'My custom deploy' } } } }
+      });
+      assert.deepStrictEqual(availability.usable({ needs: { textOutput: true } }).map((c) => c.model).sort(), ['gpt-5.5', 'my-custom-deploy']);
+    });
   });
 });
 

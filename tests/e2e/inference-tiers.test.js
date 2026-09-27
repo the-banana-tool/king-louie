@@ -55,26 +55,15 @@ describe('E2E: Inference Tier UI', () => {
     assert.ok(selectCount >= 1, `should have dropdowns in popover, found ${selectCount}`);
   });
 
-  it('provider dropdown includes new providers', async () => {
+  it('the provider list offers only usable providers', async () => {
+    await waitFor(ctx, `(document.getElementById('chat-info-provider-select')?.options.length || 0) > 0`);
     const options = await evaluate(ctx, `
-      (() => {
-        const selects = document.querySelectorAll('#chat-info-popover select, #chat-info-popover-body select');
-        for (const sel of selects) {
-          const opts = Array.from(sel.options).map(o => o.textContent);
-          if (opts.some(o => o.includes('OpenAI') || o === 'OpenAI')) return JSON.parse(JSON.stringify(opts));
-        }
-        return [];
-      })()
+      Array.from(document.getElementById('chat-info-provider-select').options).map((o) => o.textContent)
     `);
-
-    if (options.length > 0) {
-      const optText = options.join(', ');
-      assert.ok(options.some(o => o.includes('xAI')), `should include xAI. Options: ${optText}`);
-      assert.ok(options.some(o => o.includes('DeepSeek')), `should include DeepSeek. Options: ${optText}`);
-      assert.ok(options.some(o => o.includes('Qwen')), `should include Qwen. Options: ${optText}`);
-      assert.ok(options.some(o => o.includes('Together')), `should include Together. Options: ${optText}`);
-      assert.ok(options.some(o => o.includes('Fireworks')), `should include Fireworks. Options: ${optText}`);
-      assert.ok(options.some(o => o.includes('Cohere')), `should include Cohere. Options: ${optText}`);
+    // A fresh profile has no tested provider: the only entries are the
+    // current tier's provider, marked, or the hint to add a key.
+    for (const text of options) {
+      assert.ok(/not usable|No usable provider/.test(text), `a fresh profile offered a usable provider: ${text}`);
     }
   });
 
