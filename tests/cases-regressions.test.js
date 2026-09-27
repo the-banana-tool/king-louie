@@ -521,7 +521,8 @@ describe('F5-doc: a document in one case informs and guards another (cases stage
       action: 'unknown', stmt: 'Payoff amount for loan 0042-7781 is unknown', subject: 'refi', attr: 'payoff',
       changes: 'the refinance amount', answerable: 'the lender', how: 'ask for a payoff letter'
     }, ctx);
-    assert.deepStrictEqual(unknown.alsoKnownElsewhere.find((h) => h.kind === 'fact'), { caseId: a.caseId, title: 'Lakeside lot', kind: 'fact', id: 'f-0001', entity: 'id:00427781' });
+    assert.strictEqual(unknown.alsoKnownElsewhere.untrusted_output, true);
+    assert.deepStrictEqual(unknown.alsoKnownElsewhere.hits.find((h) => h.kind === 'fact'), { caseId: a.caseId, title: 'Lakeside lot', kind: 'fact', id: 'f-0001', entity: 'id:00427781' });
     assert.ok(!JSON.stringify(unknown.alsoKnownElsewhere).includes('payoff-letter'));
 
     const dropped = await a.svc.store(b.id, { name: 'payoff-letter.pdf', bytes, origin: { kind: 'owner-drop' } });
