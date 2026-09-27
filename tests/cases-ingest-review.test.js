@@ -544,6 +544,80 @@ describe('fix round 3', () => {
   });
 });
 
+describe('final review I1', () => {
+  const { rawSpan, sameAnchor } = require('../src/cases/ingest/review');
+  const { normalizeForQuote } = require('../src/cases/chat-integration');
+  const { oneLine } = require('../src/cases/ingest/store');
+  const anchorOf = (s) => normalizeForQuote(oneLine(s, Infinity));
+  const cp = (...codes) => String.fromCodePoint(...codes);
+
+  it('maps anchor text back to the raw page exactly, whatever the page holds', () => {
+    // Letters that lower-case longer (dotted I), final sigma, hidden and bidi
+    // characters, every kind of line break and space, typographic quotes and
+    // dashes, astral characters and tag characters.
+    const alphabet = [
+      'a', 'B', 'z', '1', '$', '.', ' ', '  ', '\t', '\n', '\r\n', cp(0x0130), cp(0x03a3), cp(0x00e9),
+      cp(0x00ad), cp(0x200b), cp(0x202e), cp(0x2066), cp(0xfeff), cp(0x0085), cp(0x2028), cp(0x00a0),
+      cp(0x3000), cp(0x2018), cp(0x201c), cp(0x2014), cp(0x1f600), cp(0xe0041), cp(0x0007), cp(0x001c)
+    ];
+    let seed = 7;
+    const rand = (n) => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed % n;
+    };
+    let checked = 0;
+    for (let round = 0; round < 400; round += 1) {
+      const page = Array.from({ length: 60 + rand(60) }, () => alphabet[rand(alphabet.length)]).join('');
+      const anchor = anchorOf(page);
+      if (anchor.length < 4) continue;
+      const from = rand(anchor.length - 2);
+      const needle = anchor.slice(from, from + 2 + rand(anchor.length - from - 1)).trim();
+      // A quote's anchor text never starts or ends inside a surrogate pair.
+      const first = needle.charCodeAt(0);
+      const final = needle.charCodeAt(needle.length - 1);
+      if (!needle || (first >= 0xdc00 && first <= 0xdfff) || (final >= 0xd800 && final <= 0xdbff)) continue;
+      const at = anchor.indexOf(needle);
+      const span = rawSpan(page, at, needle.length);
+      assert.ok(span, `no span for ${JSON.stringify(needle)} in ${JSON.stringify(page)}`);
+      assert.ok(sameAnchor(anchorOf(page.slice(span.at, span.end)), needle), JSON.stringify(page));
+      checked += 1;
+    }
+    assert.ok(checked > 300);
+  });
+
+  it('keeps the context on the quote when a dotted capital I before it lower-cases longer', () => {
+    const page = `${cp(0x0130).repeat(3000)} Total  payoff${cp(0x200b)} amount: $182,340.17 ${'b'.repeat(3000)}`;
+    const ctx = verifyContext(page, 'Total payoff amount: $182,340.17');
+    const at = page.indexOf('Total');
+    assert.strictEqual(ctx, page.slice(at - 1500, page.indexOf('.17') + 3 + 1500));
+  });
+
+  it('checks and frames 200 proposals on a crafted 2 MB page in bounded time', () => {
+    // The review's page: "a " repeated to 2 MB, ending in the quote with
+    // double spaces, so the exact match misses and the loose path runs for
+    // every proposal. Unfixed, one verifyContext took ~1.1 s here and
+    // checkProposals re-normalised the page twice per proposal.
+    const quote = `${'a '.repeat(149)}b`;
+    const tail = `${'a  '.repeat(149)}b`;
+    const page = 'a '.repeat(Math.floor((2 * 1024 * 1024 - tail.length) / 2)) + tail;
+    const proposals = Array.from({ length: 200 }, () => raw({ value: 'b', anchor: { page: 1, quote } }));
+    const bound = 30000;
+    const started = process.hrtime.bigint();
+    const elapsed = () => Number(process.hrtime.bigint() - started) / 1e6;
+    const checked = checkProposals({ proposals }, [{ n: 1, method: 'text', text: page }], new Map());
+    assert.strictEqual(checked.proposals.length, 200, JSON.stringify(checked.refused[0]));
+    const checkedMs = elapsed();
+    for (const p of checked.proposals) {
+      const ctx = verifyContext(page, p.anchor.quote);
+      assert.ok(ctx.endsWith(tail), 'the window holds the quote');
+      assert.ok(elapsed() < bound, `stopped after ${elapsed().toFixed(0)} ms`);
+    }
+    const ms = elapsed();
+    console.log(`I1 timing: checkProposals ${checkedMs.toFixed(0)} ms, then 200 verifyContext, ${ms.toFixed(0)} ms in all on a ${page.length}-character page`);
+    assert.ok(ms < bound, `took ${ms.toFixed(0)} ms`);
+  });
+});
+
 describe('normalizeProposal', () => {
   it('builds a fresh object with only the known fields', () => {
     const p = normalizeProposal({ ...raw(), id: 'p-009', checks: { anchor: 'ok' }, review: { action: 'accept' } });

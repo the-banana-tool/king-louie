@@ -6,6 +6,7 @@
 const { normalizeForQuote } = require('../chat-integration');
 const { norm } = require('../jsonl');
 const { oneLine, HIDDEN_CLASS } = require('./store');
+const { HIDDEN_RANGES } = require('../hidden-chars');
 const { QUOTE_MIN, QUOTE_MAX, fence, newFenceId, normalizeProposal, parseReplyObject } = require('./propose');
 
 const VERIFY_WINDOW = 1500;
@@ -81,11 +82,27 @@ function valueInQuote(value, quote) {
 // one-lining the stored quote had.
 const anchorText = (s) => normalizeForQuote(oneLine(s, Infinity));
 
+// A page's anchor text, remembered for the last few pages: checkProposals,
+// verify and accept look up many quotes on the same page, and on a page of
+// up to 2 MB (LIMITS.pageTextBytes) one anchorText costs ~150 ms.
+const PAGE_ANCHORS = new Map();
+const PAGE_ANCHORS_KEPT = 4;
+function pageAnchor(pageText) {
+  const text = String(pageText ?? '');
+  let anchor = PAGE_ANCHORS.get(text);
+  if (anchor === undefined) {
+    anchor = anchorText(text);
+    if (PAGE_ANCHORS.size >= PAGE_ANCHORS_KEPT) PAGE_ANCHORS.delete(PAGE_ANCHORS.keys().next().value);
+    PAGE_ANCHORS.set(text, anchor);
+  }
+  return anchor;
+}
+
 // Offset of the quote in the page's anchor text, or -1.
 function quoteOffset(pageText, quote) {
   const needle = anchorText(quote);
   if (!needle) return -1;
-  return anchorText(pageText).indexOf(needle);
+  return pageAnchor(pageText).indexOf(needle);
 }
 
 const valueKey = (v) => {
@@ -171,8 +188,8 @@ function checkProposals(record, pages, facts) {
       refuse({ stmt: raw.stmt, anchor: raw.anchor, reason: `quote not found on page ${raw.anchor.page}` });
       continue;
     }
-    const pageAnchor = anchorText(page.text);
-    const entities = raw.entities.filter((e) => pageAnchor.includes(anchorText(e.text)));
+    const onPage = pageAnchor(page.text);
+    const entities = raw.entities.filter((e) => onPage.includes(anchorText(e.text)));
     const { conflicts, duplicateOf } = ledgerMatches(raw, facts);
     proposals.push({
       id: `p-${String(next).padStart(3, '0')}`,
@@ -187,48 +204,78 @@ function checkProposals(record, pages, facts) {
   return { ...record, proposals, refused, refusedDropped: dropped, nextProposal: next };
 }
 
-const charPattern = (c) => {
-  if (c === "'") return "['\\u2018\\u2019\\u201A\\u201B\\u2032]";
-  if (c === '"') return '["\\u201C\\u201D\\u201E\\u201F\\u2033]';
-  if (c === '-') return '[-\\u2013\\u2014]';
-  return c.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
-};
+const isHidden = (cp) => HIDDEN_RANGES.some(([a, b]) => cp >= a && cp <= b);
+const SPACE_CHAR = /\s/;
+// A capital sigma lower-cases to the final form at the end of a word, so a
+// span cut out of the page may end or start in the other form.
+const FINAL_SIGMA = new RegExp(String.fromCharCode(0x3c2), 'g');
+const SIGMA = String.fromCharCode(0x3c3);
+const sameAnchor = (a, b) => a === b || a.replace(FINAL_SIGMA, SIGMA) === b.replace(FINAL_SIGMA, SIGMA);
 
-// The text without hidden characters, and for each of its code units the
-// index of the same unit in the original (one past the end at the end).
-function withoutHidden(text) {
-  const map = [];
-  let plain = '';
-  let from = 0;
-  const keep = (to) => {
-    plain += text.slice(from, to);
-    for (let i = from; i < to; i += 1) map.push(i);
-  };
-  for (const m of text.matchAll(HIDDEN_ALL)) {
-    keep(m.index);
-    from = m.index + m[0].length;
+// The span of the raw page text that the anchor text's units
+// [from, from + length) came from, walking the text once the way anchorText
+// reads it: a line break is a space, a hidden character is dropped, a run of
+// whitespace is one space, leading whitespace is gone, and a character counts
+// as many units as its lower case has. → { at, end } or null.
+function rawSpan(text, from, length) {
+  const last = from + length - 1;
+  let k = 0;
+  let at = -1;
+  let started = false;
+  let pending = false;
+  for (let i = 0; i < text.length;) {
+    const c = text.charCodeAt(i);
+    let size = 1;
+    let units = 1;
+    let kind;
+    if (c < 0x80) {
+      if (c === 0x20 || (c >= 0x09 && c <= 0x0d)) kind = 'space';
+      else kind = c < 0x20 || c === 0x7f ? 'hidden' : 'char';
+    } else {
+      const cp = text.codePointAt(i);
+      const ch = String.fromCodePoint(cp);
+      size = ch.length;
+      if (cp === 0x85 || cp === 0x2028 || cp === 0x2029) kind = 'space';
+      else if (isHidden(cp)) kind = 'hidden';
+      else if (SPACE_CHAR.test(ch)) kind = 'space';
+      else {
+        kind = 'char';
+        units = ch.toLowerCase().length;
+      }
+    }
+    if (kind === 'space') {
+      pending = started;
+    } else if (kind === 'char') {
+      if (pending) k += 1;
+      pending = false;
+      started = true;
+      if (at === -1 && from < k + units) at = i;
+      if (last < k + units) return at === -1 ? null : { at, end: i + size };
+      k += units;
+    }
+    i += size;
   }
-  keep(text.length);
-  map.push(text.length);
-  return { plain, map };
+  return null;
 }
 
 // Where the quote starts in the raw page text: exactly (ignoring case), else
-// word by word across any run of whitespace in the page with its hidden
-// characters removed (a soft hyphen inside a word too), mapped back to the
-// raw text, else 0. The pattern is literal words and whitespace gaps only,
-// so V8 searches it quickly even on a long, repetitive page.
+// where the anchor check found it (hidden characters, a soft hyphen inside a
+// word, and any run of whitespace between words ignored), mapped back to the
+// raw text by one linear walk, else 0. Nothing here scans the page with a
+// pattern built from the quote, so a long crafted page costs one pass, not
+// page length x quote length (final review I1).
 function findQuote(text, quote) {
   const exact = text.toLowerCase().indexOf(quote.toLowerCase());
   if (exact !== -1) return { at: exact, length: quote.length };
-  const words = anchorText(quote).split(' ').filter(Boolean);
-  if (!words.length) return { at: 0, length: 0 };
-  const { plain, map } = withoutHidden(text);
-  const loose = words.map((w) => Array.from(w).map(charPattern).join('')).join('\\s+');
-  const m = new RegExp(loose, 'iu').exec(plain);
-  if (!m) return { at: 0, length: 0 };
-  const at = map[m.index];
-  return { at, length: map[m.index + m[0].length - 1] + 1 - at };
+  const needle = anchorText(quote);
+  if (!needle) return { at: 0, length: 0 };
+  const offset = pageAnchor(text).indexOf(needle);
+  if (offset === -1) return { at: 0, length: 0 };
+  const span = rawSpan(text, offset, needle.length);
+  // The walk must land on the very text the anchor matched; if it ever
+  // disagrees with anchorText, the window falls back to the page start.
+  if (!span || !sameAnchor(anchorText(text.slice(span.at, span.end)), needle)) return { at: 0, length: 0 };
+  return { at: span.at, length: span.end - span.at };
 }
 
 // ±1,500 characters of the page around the quote, for the verify call.
@@ -320,6 +367,8 @@ module.exports = {
   ledgerMatches,
   checkProposals,
   verifyContext,
+  rawSpan,
+  sameAnchor,
   verifyUserText,
   parseVerify,
   skipReason,
