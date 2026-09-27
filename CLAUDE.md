@@ -648,9 +648,14 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage7-ingest.md`.
   them: the PDF text layer through `unpdf`, one-page copies through
   `pdf-lib` (both pure JS), and vision OCR through the existing providers.
   PDF parsing itself runs out of process (`src/cases/ingest/pdf-sandbox.js`):
-  a forked, memory-capped worker with wall-clock timeouts, framed stdin/fd3
-  I/O and no Node IPC channel, so a hostile PDF cannot hang or OOM the
-  desktop main process or the service. Proposals, text and page caches live
+  a separate worker process (spawned, no Node IPC), memory-capped, with
+  wall-clock timeouts and framed stdin/fd3 I/O, so a hostile PDF cannot hang
+  or OOM the desktop main process or the service. In a packaged app the
+  worker is the app binary run with `ELECTRON_RUN_AS_NODE=1`, so PDF ingest
+  needs Electron's `RunAsNode` fuse left on (the default: `package.json`
+  `build` sets no `electronFuses`). Turning it off makes every PDF fail as
+  unreadable; the `PDF worker failed` log names the fuse when the worker
+  exits at once. Only the Windows x64 package has been checked. Proposals, text and page caches live
   in `.kl/ingest/` (the page cache, `publish.json` and C2's `budget.json` are
   written outside `systemAction`; everything else — records, sidecars,
   sources, the journal and facts — goes through it).
