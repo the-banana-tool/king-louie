@@ -387,6 +387,22 @@ function gateLeaves(payload, {
   recipients = [], envelope = null, facts = new Map(), mode = 'message', caseId = null, entityIndex = null, categoryKeywords = null
 } = {}) {
   const blocked = [];
+  const hasIndex = Boolean(entityIndex) && typeof entityIndex.nonDisclosableSpans === 'function';
+  // → spans, or null after blocking `span` (fail closed).
+  const askIndex = (text, at, span) => {
+    let problem = null;
+    try {
+      const out = entityIndex.nonDisclosableSpans(text, { caseId });
+      if (Array.isArray(out)) return out.filter((e) => e && validEntitySpan(e.span, text));
+      problem = 'the entity index did not return a list';
+    } catch (err) {
+      problem = `the entity index failed: ${err.message}`;
+    }
+    blocked.push({ path: at, span, reason: 'non-disclosable-entity', detail: problem });
+    return null;
+  };
+  const entityDetail = (e, what) => `${e.entity || 'entity'}: ${e.reason || 'not disclosable'} (${what})`;
+  const renderedLeaves = [];
   const valuesOnly = (text, at) => {
     const r = outboundGate({ payloadText: text, recipients, envelope, facts, mode: 'query' });
     for (const b of r.blocked) blocked.push({ path: at, ...b });
@@ -408,6 +424,32 @@ function gateLeaves(payload, {
       }
       const r = outboundGate({ payloadText: value, recipients, envelope, facts, mode, entitySpans, categoryKeywords });
       for (const b of r.blocked) blocked.push({ path: at, ...b });
+      // What leaves is the rendered text: a disclosable value spliced to
+      // its neighbours ("Loan {{f-0001}}-7781" → "Loan 0042-7781") can spell
+      // an entity that neither side does alone. A span that touches a
+      // rendered reference but is not wholly inside one is blocked
+      // (fix-T7-r1 I1); spans away from references were found above.
+      if (hasIndex && r.rendered !== value) {
+        const { refs } = renderFactRefs(value, facts instanceof Map ? facts : new Map(), { envelope });
+        const spliced = refs.filter((ref) => ref.ok && ref.renderedEnd > ref.renderedStart);
+        const spans = askIndex(r.rendered, at, { start: 0, end: value.length, text: value }) || [];
+        for (const e of spans) {
+          const sp = e.span;
+          const touches = spliced.some((ref) => sp.start < ref.renderedEnd && ref.renderedStart < sp.end);
+          const inside = spliced.some((ref) => ref.renderedStart <= sp.start && sp.end <= ref.renderedEnd);
+          if (!touches || inside) continue;
+          const shown = r.rendered.slice(sp.start, sp.end);
+          if (isRecipient(shown, recipients)) continue;
+          const back = renderedToInput(refs, sp.start, sp.end);
+          blocked.push({
+            path: at,
+            span: { start: back.start, end: back.end, text: value.slice(back.start, back.end) },
+            reason: 'non-disclosable-entity',
+            detail: entityDetail(e, `rendered as "${shown}"`)
+          });
+        }
+      }
+      if (typeof r.rendered === 'string') renderedLeaves.push(r.rendered);
       return r.rendered;
     }
     if (typeof value === 'number') {
@@ -437,6 +479,27 @@ function gateLeaves(payload, {
     return value;
   };
   const rendered = walk(payload, '');
+  // An entity split across leaves ({ subject: 'Loan 0042', body: '7781 due' })
+  // is read as one text: the rendered string leaves joined by line breaks.
+  // A span inside one leaf was judged with that leaf; one that crosses
+  // leaves blocks the payload (fix-T7-r1 m1).
+  if (hasIndex && renderedLeaves.length > 1) {
+    const joined = renderedLeaves.join('\n');
+    const bounds = [];
+    let off = 0;
+    for (const leaf of renderedLeaves) {
+      bounds.push([off, off + leaf.length]);
+      off += leaf.length + 1;
+    }
+    const spans = askIndex(joined, '', { start: 0, end: joined.length, text: joined }) || [];
+    for (const e of spans) {
+      const sp = e.span;
+      if (bounds.some(([a, b]) => a <= sp.start && sp.end <= b)) continue;
+      const shown = joined.slice(sp.start, sp.end);
+      if (isRecipient(shown, recipients)) continue;
+      blocked.push({ path: '', span: { start: sp.start, end: sp.end, text: shown }, reason: 'non-disclosable-entity', detail: entityDetail(e, 'across fields') });
+    }
+  }
   return { ok: blocked.length === 0, blocked, rendered };
 }
 

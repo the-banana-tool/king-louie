@@ -296,6 +296,7 @@ function skipReason(p) {
 }
 
 module.exports = {
+  PROPOSAL_ID,
   QUOTE_MIN,
   QUOTE_MAX,
   VERIFY_SYSTEM,

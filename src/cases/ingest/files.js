@@ -13,27 +13,20 @@
 const fs = require('fs');
 const path = require('path');
 const { readJson, writeJson, writeAtomic } = require('../jsonfile');
-const { DOC_ID, recordPath } = require('./store');
+const { DOC_ID, checkDocId, recordPath } = require('./store');
+const { PROPOSAL_ID } = require('./review');
 const { IngestError } = require('./errors');
 const { createLogger } = require('../../logging');
 
 const log = createLogger('cases/ingest/files');
 
 const RECORD_FILE = /^doc-[0-9a-f]{12}\.json$/;
-const PROPOSAL_ID = /^p-\d{3,}$/;
 const CACHE_IGNORE = '.kl/ingest/cache/';
 const MAX_PAGE = 100000;
 // Records and text stores are bounded by the ingest limits (maxProposalsPerDoc,
 // maxPages, the capped model replies); anything far larger was not written by
 // the host.
 const MAX_READ_BYTES = 64 * 1024 * 1024;
-
-function checkDocId(docId) {
-  if (typeof docId !== 'string' || !DOC_ID.test(docId)) {
-    throw new IngestError('BAD_DOC_ID', 'A document id looks like doc-3fa1c2d4e5f6.');
-  }
-  return docId;
-}
 
 function checkPage(n) {
   if (!Number.isSafeInteger(n) || n < 1 || n > MAX_PAGE) {

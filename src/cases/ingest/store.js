@@ -132,12 +132,17 @@ function yearMonth(now, timeZone) {
 
 // ---- paths (M7, M8) ----
 
-// The ingest record of a docId; anything but `doc-` + 12 hex is refused.
-function recordPath(caseDir, docId) {
+// Anything but `doc-` + 12 hex is refused before a path is built from it.
+function checkDocId(docId) {
   if (typeof docId !== 'string' || !DOC_ID.test(docId)) {
     throw new IngestError('BAD_DOC_ID', 'A document id looks like doc-3fa1c2d4e5f6.');
   }
-  return path.join(caseDir, '.kl', 'ingest', `${docId}.json`);
+  return docId;
+}
+
+// The ingest record of a docId.
+function recordPath(caseDir, docId) {
+  return path.join(caseDir, '.kl', 'ingest', `${checkDocId(docId)}.json`);
 }
 
 const SIDECAR = /\.meta\.json$/i;
@@ -180,14 +185,10 @@ const toPosix = (p) => p.split(path.sep).join('/');
 // `size` bounds the read: the upload is already within maxBytes, and a file
 // of any other size cannot hold the same bytes.
 function existingRef(caseDir, docId, hash, size) {
-  let rec;
-  try {
-    rec = JSON.parse(fs.readFileSync(recordPath(caseDir, docId), 'utf8'));
-  } catch (err) {
-    if (err instanceof IngestError) throw err;
-    return null;
-  }
-  if (!rec || typeof rec !== 'object') return null;
+  // Size-capped read of a record that names this docId (files.js; required
+  // here, not at the top, because files.js builds its paths from this module).
+  const rec = require('./files').readRecord(caseDir, docId);
+  if (!rec) return null;
   const file = refPath(caseDir, rec.ref);
   if (rec.sha256 !== hash) return null;
   try {
@@ -342,6 +343,7 @@ module.exports = {
   sha256,
   docIdFor,
   yearMonth,
+  checkDocId,
   recordPath,
   refPath,
   storeDocument,

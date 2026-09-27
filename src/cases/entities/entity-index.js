@@ -17,31 +17,34 @@
 // extractEntities never hides a later entity), it matches every indexed key
 // of at least SURFACE_MIN characters against two normalised views of the
 // text:
-// - ids and phone numbers against the alphanumeric stream: runs of letters
-//   and digits (fullwidth and Arabic-Indic digits folded to ASCII, letters
-//   upper-cased), chained through gaps of at most MAX_GAP separator
-//   characters (whitespace, - . / ( ) and dash look-alikes). A match starts
-//   and ends on a run boundary, so `0042 7781`, `0042.7781`, `(0042) 7781`
-//   and `00427781` all match id:00427781, and `100427781` does not;
+// - ids, phone numbers and emails against the alphanumeric stream of
+//   src/cases/entities/fold.js (compatibility forms, every decimal digit
+//   and Latin look-alike letters folded; hidden characters and combining
+//   marks skipped; any punctuation, symbol or space a separator; units split
+//   at letter/digit transitions and chained through at most MAX_GAP
+//   separators). A match starts and ends on a unit boundary, so
+//   `0042 7781`, `0042,7781`, `Loan0042-7781` and `00427781` all match
+//   id:00427781, and `100427781` does not. An email also needs its units
+//   joined only by separators an email carries, one of them an at sign;
 // - addresses (and people and organisations with
 //   cases.ingest.entities.spanNames) against the word stream: words as
 //   plainWords reads them, street suffixes expanded, chained through gaps of
-//   at most MAX_GAP characters.
-// Hidden characters (src/cases/hidden-chars.js) are removed before either
-// view is built, so a zero-width character planted in a value changes
-// nothing; offsets are mapped back to the original text. Both scans hash
-// with a per-process random base, extend at most MAX_STREAM_CHARS / MAX_WORDS
-// from each run or word, and verify a hash hit before reporting it, so the
-// cost is linear in the text whatever the index holds.
+//   at most MAX_GAP characters, hidden characters removed first.
+// A run under a bidi embedding, override or isolate is also scanned in the
+// orders it may display in (see _occurrences). Both scans hash with a
+// per-process random multiplier, extend at most MAX_STREAM_CHARS /
+// MAX_WORDS from each unit or word, and verify a hash hit before reporting
+// it, so the cost is linear in the text whatever the index holds.
 //
 // The file is untrusted on read (the cases root is writable by the model's
-// Bash): its size is capped and read through one descriptor, its shape and
-// version are checked field by field into null-prototype objects, and
-// anything off means a rebuild from the cases themselves. A case whose
-// facts or ingest files changed since the file was written is re-indexed
-// before every read. A well-formed file forged with current fingerprints
-// is still believed (the same stage-1 limit as a Bash-rewritten
-// facts.jsonl).
+// Bash): it must be a regular file under a size cap, read through one
+// descriptor; its shape, version and extractor hash (EXTRACTOR: the rules
+// it was built with) are checked field by field into null-prototype
+// objects, and anything off means a rebuild from the cases themselves. A
+// case whose facts or ingest files changed since the file was written is
+// re-indexed before a read; that check runs at most once per synchronous
+// frame. A well-formed file forged with current fingerprints is still
+// believed (the same stage-1 limit as a Bash-rewritten facts.jsonl).
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -54,17 +57,17 @@ const { DOC_ID } = require('../ingest/store');
 const { listRecords, readTextStore, ingestStat, PROPOSAL_ID } = require('../ingest/files');
 const { normalizeEntity, keyType, plainWords, STREET_SUFFIXES, ENTITY_TYPES, MAX_KEY_CHARS } = require('./normalize');
 const { extractEntities, TEXT_KINDS } = require('./extract');
+const { streamView, canonStream, MAX_GAP } = require('./fold');
 
 const INDEX_VERSION = 1;
 const SURFACE_MIN = 5;
 const NAME_MATCH = 0.8;
 const ALL_KINDS = Object.freeze(['email', 'phone', 'id', 'address', 'person', 'org']);
 const NAME_KINDS = Object.freeze(['person', 'org']);
-const STREAM_KINDS = new Set(['id', 'phone']);
+const STREAM_KINDS = new Set(['id', 'phone', 'email']);
 const WORD_KINDS = new Set(['address', 'person', 'org']);
-const MAX_STREAM_CHARS = 64;
+const MAX_STREAM_CHARS = 80;
 const MAX_WORDS = 16;
-const MAX_GAP = 3;
 const MAX_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_DISPLAY = 200;
 const MAX_CASE_ID = 256;
@@ -81,6 +84,25 @@ const SHA256 = /^[0-9a-f]{64}$/;
 // else in braces is scanned like any other text (C3 reports it anyway).
 const REF_SPAN = /\{\{\s{0,8}f-\d{4,24}\s{0,8}\}\}/g;
 const HIDDEN_RUN = new RegExp(`[${HIDDEN_CLASS}]+`, 'gu');
+// A bidi embedding, override or isolate and what it controls, up to its
+// pop, a line break or the end (fix-T7-r1 I3).
+const BIDI_RUN = new RegExp(
+  `[${[0x202a, 0x202b, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068].map((c) => String.fromCodePoint(c)).join('')}]`
+  + `[^${[0x202c, 0x2069, 0x0a, 0x0d].map((c) => String.fromCodePoint(c)).join('')}]*`,
+  'gu'
+);
+const ALNUM_GROUPS = /([\p{L}\p{N}\p{M}]+)/u;
+
+// The extraction and matching rules the stored index was built with: a
+// hash of the modules that define them. An index built by other rules is
+// rebuilt (fix-T7-r1 I4), as C5 does for its tokenizer.
+const EXTRACTOR = (() => {
+  const h = crypto.createHash('sha256');
+  for (const file of [require.resolve('./extract'), require.resolve('./normalize'), require.resolve('./fold'), require.resolve('../hidden-chars'), __filename]) {
+    h.update(fs.readFileSync(file));
+  }
+  return h.digest('hex').slice(0, 16);
+})();
 const WORD_TOKEN = /[\p{L}\p{N}\p{M}]+/gu;
 const ASCII_WORD = /^[a-z0-9]+$/;
 
@@ -106,31 +128,6 @@ function hashWords(words) {
 }
 
 // ---- text views ----
-
-// Letters and digits as the id/phone stream reads them (ASCII code, upper
-// case), or -1.
-function foldAlnum(c) {
-  if (c >= 0x30 && c <= 0x39) return c;
-  if (c >= 0x41 && c <= 0x5a) return c;
-  if (c >= 0x61 && c <= 0x7a) return c - 0x20;
-  if (c >= 0xff10 && c <= 0xff19) return c - 0xff10 + 0x30; // fullwidth digits
-  if (c >= 0xff21 && c <= 0xff3a) return c - 0xff21 + 0x41; // fullwidth capitals
-  if (c >= 0xff41 && c <= 0xff5a) return c - 0xff41 + 0x41; // fullwidth small letters
-  if (c >= 0x0660 && c <= 0x0669) return c - 0x0660 + 0x30; // Arabic-Indic digits
-  if (c >= 0x06f0 && c <= 0x06f9) return c - 0x06f0 + 0x30; // extended Arabic-Indic digits
-  return -1;
-}
-
-const SEPARATORS = new Set([
-  0x2d, 0x2e, 0x2f, 0x28, 0x29, // - . / ( )
-  0x2010, 0x2011, 0x2012, 0x2013, 0x2014, 0x2015, 0x2212, // hyphens, dashes, minus
-  0xfe58, 0xfe63, 0xff08, 0xff09, 0xff0d, 0xff0e, 0xff0f // small and fullwidth forms
-]);
-// One lookup per code unit: the separators above and every \s character.
-const SEPARATOR_TABLE = new Uint8Array(0x10000);
-for (let c = 0; c < 0x10000; c++) {
-  if (SEPARATORS.has(c) || /\s/.test(String.fromCharCode(c))) SEPARATOR_TABLE[c] = 1;
-}
 
 // The text without hidden characters, and each of its code units' offset in
 // the original.
@@ -196,7 +193,7 @@ function sameFingerprint(a, b) {
 // The parsed file as fresh null-prototype objects, or null when anything is
 // off (then the caller rebuilds).
 function validIndex(raw) {
-  if (!isObj(raw) || raw.version !== INDEX_VERSION || !isObj(raw.cases) || !isObj(raw.entities)) return null;
+  if (!isObj(raw) || raw.version !== INDEX_VERSION || raw.extractor !== EXTRACTOR || !isObj(raw.cases) || !isObj(raw.entities)) return null;
   const cases = Object.create(null);
   for (const [id, fp] of Object.entries(raw.cases)) {
     if (!validCaseId(id) || !isObj(fp) || Object.keys(fp).length !== FINGERPRINT_FIELDS.length) return null;
@@ -218,7 +215,7 @@ function validIndex(raw) {
     }
     entities[key] = { type: e.type, display: e.display, links };
   }
-  return { version: INDEX_VERSION, builtAt: typeof raw.builtAt === 'string' ? raw.builtAt.slice(0, 40) : null, cases, entities };
+  return { version: INDEX_VERSION, extractor: EXTRACTOR, builtAt: typeof raw.builtAt === 'string' ? raw.builtAt.slice(0, 40) : null, cases, entities };
 }
 
 const tokenSet = (key) => new Set(key.slice(key.indexOf(':') + 1).split(' ').filter(Boolean));
@@ -229,10 +226,12 @@ function jaccard(a, b) {
   return inter / (a.size + b.size - inter);
 }
 
-const factText = (f) => {
-  const v = f.value === null || f.value === undefined ? '' : typeof f.value === 'object' ? JSON.stringify(f.value) : String(f.value);
-  return `${typeof f.stmt === 'string' ? f.stmt : ''}\n${v}`;
-};
+// A fact's statement and value, read separately: joined, the digits at the
+// end of one and the start of the other would read as one phone number.
+const factTexts = (f) => [
+  typeof f.stmt === 'string' ? f.stmt : '',
+  f.value === null || f.value === undefined ? '' : typeof f.value === 'object' ? JSON.stringify(f.value) : String(f.value)
+];
 
 class EntityIndex {
   constructor(casesRoot, { store = null, getSettings = null, log = null, maxFileBytes = MAX_FILE_BYTES } = {}) {
@@ -251,14 +250,20 @@ class EntityIndex {
   // ---- storage ----
 
   _empty() {
-    return { version: INDEX_VERSION, builtAt: new Date().toISOString(), cases: Object.create(null), entities: Object.create(null) };
+    return { version: INDEX_VERSION, extractor: EXTRACTOR, builtAt: new Date().toISOString(), cases: Object.create(null), entities: Object.create(null) };
   }
 
   _read() {
     let text;
     let fd;
     try {
-      fd = fs.openSync(this.file, 'r');
+      // Not a FIFO, device or link: lstat first, and open without blocking
+      // on a FIFO swapped in meanwhile (fix-T7-r1 m4).
+      if (!fs.lstatSync(this.file).isFile()) {
+        this.log.warn('Entity index is not a regular file; rebuilding.');
+        return null;
+      }
+      fd = fs.openSync(this.file, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0));
       const st = fs.fstatSync(fd);
       if (!st.isFile() || st.size > this.maxFileBytes) {
         this.log.warn(`Entity index is not a file of at most ${this.maxFileBytes} bytes; rebuilding.`);
@@ -341,6 +346,7 @@ class EntityIndex {
 
   _changed() {
     this._matchers = new Map();
+    this._fresh = null;
   }
 
   // ---- building ----
@@ -384,7 +390,7 @@ class EntityIndex {
       if (!FACT_ID.test(String(f.id))) continue;
       const docId = typeof f.source?.docId === 'string' && DOC_ID.test(f.source.docId) ? f.source.docId : null;
       const l = { factId: f.id, docId, disclosable: f.disclosable === true };
-      for (const e of extractAll(factText(f))) for (const key of e.keys) link(key, e.text, l);
+      for (const t of factTexts(f)) for (const e of extractAll(t)) for (const key of e.keys) link(key, e.text, l);
     }
 
     for (const rec of listRecords(meta.dir)) {
@@ -419,9 +425,12 @@ class EntityIndex {
   }
 
   // Re-index every case whose facts or ingest files changed since the last
-  // look, and drop cases that are gone. Called before every read; returns
-  // the listed cases.
+  // look, and drop cases that are gone. Called before every read, but runs
+  // at most once per synchronous frame (C3's gateLeaves asks once per string
+  // leaf): the result is kept until the next microtask, or until this index
+  // changes. Returns the listed cases.
   _refresh() {
+    if (this._fresh) return this._fresh;
     this._load();
     const metas = this._cases();
     let changed = false;
@@ -440,6 +449,8 @@ class EntityIndex {
       }
     }
     if (changed) this._save();
+    this._fresh = metas;
+    queueMicrotask(() => { this._fresh = null; });
     return metas;
   }
 
@@ -479,11 +490,11 @@ class EntityIndex {
     const cached = this._matchers.get(sig);
     if (cached) return cached;
     const m = { stream: new Map(), streamMax: 0, streamLens: new Uint8Array(MAX_STREAM_CHARS + 1), words: new Map(), wordsMax: 0 };
-    const add = (table, h, value, key) => {
+    const add = (table, h, value, key, extra = {}) => {
       const bucket = table.get(h) || [];
-      const same = bucket.find((b) => b.value === value);
+      const same = bucket.find((b) => b.value === value && b.email === extra.email);
       if (same) same.keys.push(key);
-      else bucket.push({ value, keys: [key] });
+      else bucket.push({ value, keys: [key], ...extra });
       table.set(h, bucket);
     };
     for (const key of Object.keys(this.data.entities)) {
@@ -491,10 +502,11 @@ class EntityIndex {
       if (!types.has(type)) continue;
       const value = key.slice(key.indexOf(':') + 1);
       if (STREAM_KINDS.has(type)) {
-        if (value.length < SURFACE_MIN || value.length > MAX_STREAM_CHARS || !/^[A-Z0-9]+$/.test(value)) continue;
-        add(m.stream, hashString(value), value, key);
-        m.streamMax = Math.max(m.streamMax, value.length);
-        m.streamLens[value.length] = 1;
+        const canon = canonStream(value);
+        if (!canon || canon.length < SURFACE_MIN || canon.length > MAX_STREAM_CHARS) continue;
+        add(m.stream, hashString(canon), canon, key, { email: type === 'email' });
+        m.streamMax = Math.max(m.streamMax, canon.length);
+        m.streamLens[canon.length] = 1;
       } else if (WORD_KINDS.has(type)) {
         const words = keyWords(value);
         const joined = words.join(' ');
@@ -507,59 +519,42 @@ class EntityIndex {
     return m;
   }
 
-  // Ids and phone numbers in the alphanumeric stream of `clean`: for each
-  // run, the longest chain of runs that spells a reportable key.
-  _streamScan(clean, m, ok, emit) {
+  // Ids, phone numbers and emails in the alphanumeric stream of `s`
+  // (src/cases/entities/fold.js): for each unit, the longest chain of units
+  // that spells a reportable key. An email must also be joined only by
+  // separators an email carries, one of them an at sign. `emit` gets
+  // offsets in `s`.
+  _streamScan(s, m, ok, emit) {
     if (!m.stream.size) return;
-    const n = clean.length;
-    const folded = new Uint8Array(n);
-    const starts = [];
-    const ends = [];
-    const linked = [];
-    let inRun = false;
-    let gap = 0;
-    let broken = true;
-    for (let i = 0; i < n; i++) {
-      const c = foldAlnum(clean.charCodeAt(i));
-      if (c >= 0) {
-        folded[i] = c;
-        if (!inRun) {
-          starts.push(i);
-          linked.push(!broken && gap <= MAX_GAP);
-          inRun = true;
-        }
-      } else {
-        if (inRun) {
-          ends.push(i);
-          inRun = false;
-          gap = 0;
-          broken = false;
-        }
-        if (SEPARATOR_TABLE[clean.charCodeAt(i)]) gap += 1;
-        else broken = true;
-      }
-    }
-    if (inRun) ends.push(n);
+    const v = streamView(s);
+    const { sym, uStart, uEnd, uLinked } = v;
+    const units = uStart.length;
     const spells = (a, b, value) => {
       let k = 0;
-      for (let r = a; r <= b; r++) {
-        for (let i = starts[r]; i < ends[r]; i++) if (folded[i] !== value.charCodeAt(k++)) return false;
-      }
+      for (let i = uStart[a]; i < uEnd[b]; i++) if (sym[i] !== value.charCodeAt(k++)) return false;
       return k === value.length;
     };
-    // Hash hits of the chain from run a, as (last run, length, hash); at
-    // most one per run, and a run adds at least one character.
+    const emailJoined = (a, b) => {
+      let at = false;
+      for (let u = a + 1; u <= b; u++) {
+        if (v.uGapBad[u]) return false;
+        at = at || v.uGapAt[u];
+      }
+      return at;
+    };
+    // Hash hits of the chain from unit a, as (last unit, length, hash); at
+    // most one per unit, and a unit adds at least one symbol.
     const hitB = new Int32Array(m.streamMax + 1);
     const hitLen = new Int32Array(m.streamMax + 1);
     const hitH = new Int32Array(m.streamMax + 1);
-    for (let a = 0; a < starts.length; a++) {
+    for (let a = 0; a < units; a++) {
       let hits = 0;
       let h = 0;
       let len = 0;
-      for (let b = a; b < starts.length && len <= m.streamMax; b++) {
-        if (b > a && !linked[b]) break;
-        for (let i = starts[b]; i < ends[b] && len <= m.streamMax; i++) {
-          h = step(h, folded[i]);
+      for (let b = a; b < units && len <= m.streamMax; b++) {
+        if (b > a && !uLinked[b]) break;
+        for (let i = uStart[b]; i < uEnd[b] && len <= m.streamMax; i++) {
+          h = step(h, sym[i]);
           len += 1;
         }
         if (len > m.streamMax) break;
@@ -576,9 +571,10 @@ class EntityIndex {
         const len = hitLen[x];
         for (const entry of m.stream.get(hitH[x])) {
           if (entry.value.length !== len || !spells(a, b, entry.value)) continue;
+          if (entry.email && !emailJoined(a, b)) continue;
           const key = entry.keys.find(ok);
           if (key) {
-            emit(key, starts[a], ends[b]);
+            emit(key, v.oStart[uStart[a]], v.oEnd[uEnd[b] - 1]);
             done = true;
             break;
           }
@@ -639,30 +635,53 @@ class EntityIndex {
     }
   }
 
+  // Extraction, the alphanumeric stream and the word stream over `s`;
+  // `emit(key, start, end)` gets offsets in `s`.
+  _scan(s, { types, ok }, emit) {
+    const { clean, map } = withoutHidden(s);
+    const fromClean = (key, start, end) => {
+      if (end > start) emit(key, map[start], map[end - 1] + 1);
+    };
+    for (const e of extractAll(clean)) {
+      const key = e.keys.find((k) => types.has(keyType(k)) && ok(k));
+      if (key) fromClean(key, e.start, e.end);
+    }
+    const m = this._matcher(types);
+    this._streamScan(s, m, ok, emit);
+    this._wordScan(clean, m, ok, fromClean);
+  }
+
   // Every occurrence in `text` of an indexed key of `types` that `ok`
   // accepts: → [{ key, start, end }] in original offsets, one per span.
+  //
+  // Bidi controls are hidden characters, so the scans read text in logical
+  // order; a run under an embedding, override or isolate may display in
+  // another order (`1877-2400` under U+202E shows as `0042-7781`). Each such
+  // run is also scanned reversed code point by code point (an override) and
+  // with its letter/digit groups in reverse order (an embedding or isolate
+  // around numbers), and a hit in either reports the whole run
+  // (fix-T7-r1 I3).
   _occurrences(text, { types, ok }) {
     const s = String(text ?? '');
-    const { clean, map } = withoutHidden(s);
     const out = [];
     const spans = new Set();
     // start * 2^26 + end is exact while offsets stay below 2^26.
     const numericIds = s.length < 0x4000000;
     const emit = (key, start, end) => {
       if (end <= start) return;
-      const o = { key, start: map[start], end: map[end - 1] + 1 };
-      const id = numericIds ? o.start * 0x4000000 + o.end : `${o.start}:${o.end}`;
+      const id = numericIds ? start * 0x4000000 + end : `${start}:${end}`;
       if (spans.has(id)) return;
       spans.add(id);
-      out.push(o);
+      out.push({ key, start, end });
     };
-    for (const e of extractAll(clean)) {
-      const key = e.keys.find((k) => types.has(keyType(k)) && ok(k));
-      if (key) emit(key, e.start, e.end);
+    this._scan(s, { types, ok }, emit);
+    for (const run of s.matchAll(BIDI_RUN)) {
+      const start = run.index;
+      const end = start + run[0].length;
+      const toRun = (key) => emit(key, start, end);
+      this._scan([...run[0]].reverse().join(''), { types, ok }, toRun);
+      this._scan(run[0].split(ALNUM_GROUPS).reverse().join(''), { types, ok }, toRun);
     }
-    const m = this._matcher(types);
-    this._streamScan(clean, m, ok, emit);
-    this._wordScan(clean, m, ok, emit);
     return out.sort((a, b) => a.start - b.start || (b.end - b.start) - (a.end - a.start));
   }
 

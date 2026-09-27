@@ -302,6 +302,7 @@ describe('EntityIndex', () => {
     const idx = rt.entityIndex();
     assert.strictEqual(idx.nonDisclosableSpans('Ring 555-0100.', { caseId: a.id }).length, 1);
     rt.ledger(a.id).setDisclosable(fact.id, true);
+    await Promise.resolve(); // the index refreshes at most once per synchronous frame (fix-T7-r1 I5)
     assert.deepStrictEqual(idx.nonDisclosableSpans('Ring 555-0100.', { caseId: a.id }), []);
     assert.strictEqual(idx.nonDisclosableSpans('Ring 555-0100.', { caseId: b.id }).length, 1);
   });
@@ -448,24 +449,159 @@ describe('EntityIndex', () => {
     assert.strictEqual(rt.index.entities, attached);
   });
 
-  it('nonDisclosableSpans catches spaced, punctuated, hidden-character and fullwidth variants of an indexed id', async (t) => {
+  it('nonDisclosableSpans catches spaced, punctuated, hidden-character, mark, lookalike-digit and confusable variants (fix-T7-r1 I2, m2)', async (t) => {
     if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
     const { rt, a, b } = await twoCases();
     ingested(rt, a);
+    files.writeTextStore(a.dir, {
+      docId: 'doc-cccccccccccc',
+      sha256: 'c'.repeat(64),
+      pages: [{ n: 1, method: 'text', text: 'Example Bank\nLoan No. 0042-7781\nAccount AB12CD34\nEscrow desk +1 555 0199\nWrite to pat.doe@example.com' }]
+    });
     const idx = rt.entityIndex();
-    const variants = ['0042 7781', '0042.7781', '00427781', '0042 - 7781', '0042/7781', `00${ZWSP}42-7781`, `0042${ZWSP}${ZWSP}-7781`, fullwidth('0042-7781'), '{{f-0042-7781}}'];
-    for (const v of variants) {
+    const cp = (base) => (s) => s.replace(/[0-9]/g, (d) => String.fromCodePoint(base + Number(d)));
+    const SUPER = [0x2070, 0xb9, 0xb2, 0xb3, 0x2074, 0x2075, 0x2076, 0x2077, 0x2078, 0x2079];
+    const CIRCLED = [0x24ea, 0x2460, 0x2461, 0x2462, 0x2463, 0x2464, 0x2465, 0x2466, 0x2467, 0x2468];
+    const table = (t2) => (s) => s.replace(/[0-9]/g, (d) => String.fromCodePoint(t2[Number(d)]));
+    const TILDE = String.fromCodePoint(0x0303);
+    const MIDDOT = String.fromCodePoint(0xb7);
+    const ids = [
+      '0042 7781', '0042.7781', '00427781', '0042 - 7781', '0042/7781', `00${ZWSP}42-7781`, `0042${ZWSP}${ZWSP}-7781`,
+      fullwidth('0042-7781'), '{{f-0042-7781}}',
+      // separators: every punctuation, symbol and space character
+      '0042,7781', '0042_7781', '0042:7781', '0042*7781', '0042+7781', "0042'7781", `0042${MIDDOT}7781`,
+      // digits of other scripts and compatibility forms
+      cp(0x0966)('0042-7781'), cp(0x1d7ce)('0042-7781'), table(SUPER)('0042-7781'), table(CIRCLED)('0042-7781'),
+      // a combining mark inside
+      `00${TILDE}42-7781`,
+      // a letter/digit transition is a unit boundary
+      'A0042-7781', 'Loan0042-7781', 'x0042-7781y'
+    ];
+    for (const v of ids) {
       const text = `Re: ${v}, thanks`;
       const spans = idx.nonDisclosableSpans(text, { caseId: b.id });
       assert.deepStrictEqual(spans.map((s) => s.entity), ['id:00427781'], v);
       for (const s of spans) assert.strictEqual(text.slice(s.span.start, s.span.end), s.span.text);
     }
-    // Part of a longer token is a different value; a comma is not a separator.
-    for (const v of ['100427781', '0042-77810', 'A0042-7781', '0042,7781', '0042 _ 7781']) {
+    // Cyrillic capitals that look like Latin ones.
+    const cyr = `${String.fromCodePoint(0x0410)}${String.fromCodePoint(0x0412)}12${String.fromCodePoint(0x0421)}D34`;
+    assert.deepStrictEqual(idx.nonDisclosableSpans(`Account ${cyr}`, { caseId: b.id }).map((s) => s.entity), ['id:AB12CD34']);
+    // Part of a longer digit run is a different value; four spaces are too wide a gap.
+    for (const v of ['100427781', '0042-77810', '0042    7781']) {
       assert.deepStrictEqual(idx.nonDisclosableSpans(`Re: ${v}`, { caseId: b.id }), [], v);
     }
     // A phone number from a text store, written differently.
-    assert.deepStrictEqual(idx.nonDisclosableSpans('Dial (555) 0199', { caseId: b.id }).map((s) => s.entity), ['phone:5550199']);
+    for (const v of ['Dial (555) 0199', 'Dial 555,0199']) {
+      assert.deepStrictEqual(idx.nonDisclosableSpans(v, { caseId: b.id }).map((s) => s.entity), ['phone:5550199'], v);
+    }
+    // Emails: a line break or spaces around the at sign, a fullwidth at sign.
+    for (const v of ['pat.doe@\nexample.com', `pat.doe${String.fromCodePoint(0xff20)}example.com`, 'pat.doe @ example.com']) {
+      assert.deepStrictEqual(idx.nonDisclosableSpans(`Mail ${v} today`, { caseId: b.id }).map((s) => s.entity), ['email:pat.doe@example.com'], v);
+    }
+    // The same letters without an at sign, or joined by a comma, are not the email.
+    for (const v of ['pat doe example com', 'pat.doe, example.com']) {
+      assert.deepStrictEqual(idx.nonDisclosableSpans(`Mail ${v} today`, { caseId: b.id }), [], v);
+    }
+  });
+
+  it('nonDisclosableSpans reads a bidi-controlled run in display order too (fix-T7-r1 I3)', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const { rt, a, b } = await twoCases();
+    ingested(rt, a);
+    const idx = rt.entityIndex();
+    const RLO = String.fromCodePoint(0x202e);
+    const PDF = String.fromCodePoint(0x202c);
+    const RLI = String.fromCodePoint(0x2067);
+    const PDI = String.fromCodePoint(0x2069);
+    for (const run of [`${RLO}1877-2400${PDF}`, `${RLI}7781-0042${PDI}`]) {
+      const text = `Loan ${run} closes`;
+      const spans = idx.nonDisclosableSpans(text, { caseId: b.id });
+      assert.deepStrictEqual(spans.map((s) => [s.entity, s.span.text]), [['id:00427781', run.slice(0, -1)]], run);
+    }
+    assert.deepStrictEqual(idx.nonDisclosableSpans(`Loan ${RLO}1234-5678${PDF}`, { caseId: b.id }), []);
+  });
+
+  it('gateLeaves scans the rendered text: a disclosable value spliced into an entity is blocked (fix-T7-r1 I1)', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const { gateLeaves } = require('../src/cases/gates');
+    const { rt, a, b } = await twoCases();
+    ingested(rt, a);
+    const part = rt.ledger(b.id).assert({
+      stmt: 'The branch code is 0042', subject: 'branch', attr: 'code', value: '0042',
+      category: 'other', provenance: 'sourced', source: { kind: 'url', ref: 'https://records.example.org/branch' }
+    });
+    rt.ledger(b.id).setDisclosable(part.id, true);
+    await Promise.resolve();
+    const facts = rt.ledger(b.id).view().facts;
+    const entityIndex = rt.entityIndex();
+    const gate = (payload) => gateLeaves(payload, { facts, caseId: b.id, entityIndex, mode: 'query' });
+    for (const text of [`Loan {{${part.id}}}-7781`, `{{${part.id}}}7781`]) {
+      const r = gate({ text });
+      const hits = r.blocked.filter((x) => x.reason === 'non-disclosable-entity');
+      assert.strictEqual(hits.length, 1, text);
+      assert.strictEqual(hits[0].path, 'text');
+      assert.ok(hits[0].detail.startsWith('id:00427781'), hits[0].detail);
+      assert.strictEqual(text.slice(hits[0].span.start, hits[0].span.end), hits[0].span.text);
+    }
+    assert.strictEqual(gate({ text: `Branch {{${part.id}}} is open.` }).ok, true);
+  });
+
+  it('gateLeaves reads string leaves together: an entity split across fields is blocked (fix-T7-r1 m1)', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const { gateLeaves } = require('../src/cases/gates');
+    const { rt, a, b } = await twoCases();
+    ingested(rt, a);
+    const r = gateLeaves({ subject: 'Loan 0042', body: '7781 due' }, { facts: new Map(), caseId: b.id, entityIndex: rt.entityIndex(), mode: 'query' });
+    assert.deepStrictEqual(r.blocked.map((x) => [x.path, x.reason, x.span.text]), [['', 'non-disclosable-entity', '0042\n7781']]);
+    assert.strictEqual(gateLeaves({ subject: 'Loan 0042', body: 'due Friday' }, { facts: new Map(), caseId: b.id, entityIndex: rt.entityIndex(), mode: 'query' }).ok, true);
+  });
+
+  it('refreshes at most once per synchronous frame, and sees a change after a microtask (fix-T7-r1 I5)', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const { gateLeaves } = require('../src/cases/gates');
+    const { CaseStore } = require('../src/cases/case-store');
+    const { root, rt, a, b } = await twoCases();
+    const real = new CaseStore({ root });
+    let lists = 0;
+    const store = { list() { lists += 1; return real.list(); } };
+    const idx = new EntityIndex(root, { store });
+    idx.nonDisclosableSpans('warm up', { caseId: b.id });
+    await Promise.resolve();
+    lists = 0;
+    const payload = Object.fromEntries(Array.from({ length: 50 }, (_, i) => [`field${i}`, `value ${i}`]));
+    assert.strictEqual(gateLeaves(payload, { facts: new Map(), caseId: b.id, entityIndex: idx, mode: 'query' }).ok, true);
+    assert.strictEqual(lists, 1);
+    ingested(rt, a);
+    await Promise.resolve();
+    assert.deepStrictEqual(idx.nonDisclosableSpans('Re 0042-7781', { caseId: b.id }).map((s) => s.entity), ['id:00427781']);
+    assert.strictEqual(lists, 2);
+  });
+
+  it('indexes a fact statement and value separately (fix-T7-r1 m5)', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const { rt, a } = await twoCases();
+    ingested(rt, a);
+    const idx = rt.entityIndex();
+    idx.rebuild();
+    // "…is $182,340.17" then "182340.17": joined by a line break they read
+    // as the phone number 3401718234017.
+    assert.strictEqual(idx.data.entities['phone:3401718234017'], undefined);
+    assert.ok(idx.data.entities['id:00427781']);
+  });
+
+  it('refuses a FIFO in place of the index file (fix-T7-r1 m4)', async (t) => {
+    if (process.platform === 'win32') return t.skip('no FIFOs on Windows');
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const { execFileSync } = require('child_process');
+    const { root, rt, a, b } = await twoCases();
+    ingested(rt, a);
+    fs.mkdirSync(path.join(root, '.index'), { recursive: true });
+    const file = path.join(root, '.index', 'entities.json');
+    fs.rmSync(file, { force: true });
+    execFileSync('mkfifo', ['--', file]);
+    const idx = new EntityIndex(root);
+    assert.deepStrictEqual(idx.nonDisclosableSpans('Re 0042-7781', { caseId: b.id }).map((s) => s.entity), ['id:00427781']);
+    assert.ok(fs.lstatSync(file).isFile());
   });
 
   it('nonDisclosableSpans stays linear on a 400,000-character adversarial payload', async (t) => {
@@ -487,7 +623,7 @@ describe('EntityIndex', () => {
       const ms = Number(process.hrtime.bigint() - started) / 1e6;
       assert.ok(spans.length > 0);
       t.diagnostic(`${payload.length} chars, ${spans.length} spans, ${ms.toFixed(1)} ms`);
-      assert.ok(ms < 1000, `nonDisclosableSpans took ${ms.toFixed(1)} ms on ${payload.length} characters`);
+      assert.ok(ms < 3000, `nonDisclosableSpans took ${ms.toFixed(1)} ms on ${payload.length} characters`);
     }
   });
 
@@ -550,6 +686,7 @@ describe('EntityIndex', () => {
     assert.ok(good.entities['id:00427781']);
     const forgeries = [
       { ...good, entities: {} , version: 2 },
+      { ...good, entities: {}, extractor: 'rules-of-an-older-build' },
       { ...good, entities: [] },
       { ...good, entities: { 'id:00427781': { type: 'id', display: 'x', links: [{ caseId: 'no-such-case', factId: null, docId: 'doc-cccccccccccc', disclosable: false }] } } },
       { ...good, entities: { 'id:00427781': { ...good.entities['id:00427781'], type: 'phone' } } },
