@@ -274,6 +274,10 @@ describe('MeshPairing', () => {
         'extra field': { ...real, note: 'x' }
       };
       for (const [what, identity] of Object.entries(swaps)) {
+        // Nine refusals in a row would trip the pairing lockout (fleet stage 4
+        // §3.10 item 7, tested in mesh-hardening); this test is about which
+        // proofs match, so reset the lock before each request.
+        pairingA.lockedUntil = 0;
         const sent = [];
         const result = pairingA.handlePairingRequest({ send: (d) => sent.push(JSON.parse(d)), close: () => {} }, { nonce, proof, identity });
         assert.ok(!result, what);
@@ -282,6 +286,7 @@ describe('MeshPairing', () => {
       }
 
       // The code was not used up: B's own, unaltered request still pairs.
+      pairingA.lockedUntil = 0;
       const sent = [];
       assert.ok(pairingA.handlePairingRequest({ send: (d) => sent.push(JSON.parse(d)), close: () => {} }, { nonce, proof, identity: real }));
       assert.strictEqual(sent[0].type, 'pair:accept');
@@ -304,6 +309,7 @@ describe('MeshPairing', () => {
         { nonce, proof, identity: null },
         { nonce, proof, identity: { ...identity, publicKey: 7 } }
       ]) {
+        pairingA.lockedUntil = 0; // six refusals would trip the lockout (see above)
         const sent = [];
         assert.ok(!pairingA.handlePairingRequest({ send: (d) => sent.push(JSON.parse(d)), close: () => {} }, msg));
         assert.strictEqual(sent[0].reason, 'no_matching_code');

@@ -4,6 +4,7 @@ const path = require('path');
 const fg = require('fast-glob');
 const { describePathDenial, isProtectedSecretPath } = require('../utils');
 const { boundedGlobOptions } = require('../bounded-walk');
+const { isPathUnderRoots } = require('../../platform/path-roots');
 
 function isBinary(filePath) {
   try {
@@ -99,6 +100,10 @@ const grepTool = new Tool({
       // would otherwise grep the master key and the vault ciphertext straight
       // into the transcript.
       if (isProtectedSecretPath(file)) continue;
+
+      // Nor past the directory it was rooted at: an absolute or `..` glob,
+      // or a symlink or junction inside it that points out (ruling T11-glob).
+      if (isDir && !isPathUnderRoots(file, [baseDir])) continue;
 
       if (isBinary(file)) continue;
 

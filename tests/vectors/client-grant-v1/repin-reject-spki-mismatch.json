@@ -1,0 +1,26 @@
+{
+  "name": "repin-reject-spki-mismatch",
+  "consumers": [
+    "node",
+    "ios",
+    "android"
+  ],
+  "given": {
+    "frontdoor": {
+      "id": "kl-nt4ritcfj5kepq3y",
+      "key": "fYWiRRRJBRkudSrSwQUWQ6bpZtk03Lxrqqq__hl4pyU"
+    },
+    "received_spki": "sha256/TXOP7bZCBhQPqJ9d2GsqBGA1-qGvL4DzfconbrHpkYY",
+    "current_pin": "sha256/bZkIQ1FhNgswvNErHbu2O9CxGfF2MHOUSQ2_AeUWOgw"
+  },
+  "input": {
+    "alg": "Ed25519",
+    "kid": "kl-nt4ritcfj5kepq3y",
+    "payload": "eyJjcmVhdGVkX2F0IjoiMjAyNi0wOS0yM1QxODowNDoxMS4yMDFaIiwiZnJvbnRkb29yX2lkIjoia2wtbnQ0cml0Y2ZqNWtlcHEzeSIsIm5ld19zcGtpIjoic2hhMjU2L0RHdmttMkZnY2RCUkl6YlVGZ1NZNjVIdGw3Nm00QUdRNzR0UUQtR0dzcjgiLCJvbGRfc3BraSI6InNoYTI1Ni9iWmtJUTFGaE5nc3d2TkVySGJ1Mk85Q3hHZkYyTUhPVVNRMl9BZVVXT2d3IiwicmVsYXkiOiJodHRwczovL21jcC5rbC5leGFtcGxlLmNvbSIsInR5cGUiOiJrbC5yZWxheS5yZXBpbiIsInYiOjF9",
+    "sig": "QoeZtnKzQYHP8tqoCWCRfy6Lz85pGGccpD-CzW1Wh9Z15A1qV-GlcFZX55QEyrmLLT2DjpNb3nJdzyuzTAFZCA"
+  },
+  "expect": {
+    "accepted": false,
+    "reason": "spki_mismatch"
+  }
+}

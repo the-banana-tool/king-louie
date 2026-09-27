@@ -1,7 +1,7 @@
 // The node's one link to its relay (spec §3.11): a dial-out-only
-// MeshTransport to the relay pinned by `pair`, or to the front door named in
-// <configDir>/front-door.json when F4's transport can dial it (E7). It
-// implements the link interface the PhoneApprover, F5 and C4 use.
+// MeshTransport to the relay pinned by `pair`, or to the front door pinned in
+// <configDir>/front-door.json (E7; startApprovals reads the file and passes
+// the pin). It implements the link interface the PhoneApprover, F5 and C4 use.
 const { EventEmitter } = require('events');
 const fs = require('fs');
 const path = require('path');
@@ -10,6 +10,8 @@ const { MeshTransport } = require('../mesh/mesh-transport');
 const { derivePeerId } = require('../mesh/mesh-identity');
 const { createLinkRpc, LinkRpcError } = require('./link-rpc');
 const { writeFileAtomic } = require('./approver-store');
+const { relayPinFromFrontDoor, validatePin } = require('../fleet/front-door-pin');
+const { FRONT_DOOR_BACKOFF, frontDoorDelay } = require('../fleet/backoff');
 
 const log = createLogger('approvals/relay-client');
 
@@ -36,30 +38,24 @@ function isReservedMethod(name) {
   return F3_METHODS.has(name) || RESERVED_PREFIXES.some((p) => String(name).startsWith(p));
 }
 
-function readFrontDoor(configDir) {
-  if (!configDir) return null;
-  const file = path.join(configDir, 'front-door.json');
-  let text;
-  try {
-    text = fs.readFileSync(file, 'utf8');
-  } catch (err) {
-    if (err.code !== 'ENOENT') log.warn(`could not read ${file}: ${err.message}`);
-    return null;
-  }
-  try {
-    return JSON.parse(text);
-  } catch (err) {
-    log.warn(`${file} exists but is not valid JSON: ${err.message}`);
-    return null;
-  }
-}
-
 class RelayClient extends EventEmitter {
   constructor({ identity, nodeName = null, relayPin = null, configDir = null, dataDir = null,
     transportFactory = (options) => new MeshTransport(options), useTls = true,
     reconnectDelays = [1000, 5000, 15000, 30000], callTimeoutMs = 10000, now = Date.now,
-    writeLinkFile = writeFileAtomic, linkRetryMs = 100, linkRetryLimit = 50, platform = process.platform } = {}) {
+    writeLinkFile = writeFileAtomic, linkRetryMs = 100, linkRetryLimit = 50, platform = process.platform,
+    frontDoorPin = null, random = Math.random, dnsLookup = null } = {}) {
     super();
+    // Fleet stage 4 (E7): with front-door.json the node links to its front
+    // door; the pin comes from that file, never from the relay store key.
+    // A pin that does not validate is refused here, so there is no unpinned
+    // way to reach the front door.
+    this.frontDoorPin = frontDoorPin ? validatePin(frontDoorPin) : null;
+    if (frontDoorPin) relayPin = relayPinFromFrontDoor(frontDoorPin);
+    this.random = random;
+    this.dnsLookup = dnsLookup;
+    this.connectedAt = null;
+    this.lastDelayMs = null;
+    this.lastMismatchLogAt = -Infinity;
     this.identity = identity;
     this.nodeName = nodeName || identity.nodeName;
     this.pin = relayPin;
@@ -130,14 +126,14 @@ class RelayClient extends EventEmitter {
       if (peer.peerId !== this.relayPeerId) return;
       this._onConnected().catch((err) => log.warn(`relay hello handling failed unexpectedly: ${err.message}`));
     });
-    this.transport.on('peerDisconnected', ({ peerId }) => {
+    this.transport.on('peerDisconnected', ({ peerId, code }) => {
       if (peerId !== this.relayPeerId) return;
       // A fresh dial already in flight, or a peer the transport still shows
       // as connected (a newer connection has already replaced this one):
       // this is a stale echo of an earlier disconnect, not a new one.
       if (this.dialing) return;
       if (this.transport.getPeer(peerId)) return;
-      this._onDisconnected();
+      this._onDisconnected(code === undefined ? null : code);
     });
     // No address on the trusted peer: this client, not the transport, decides
     // when to dial again.
@@ -159,11 +155,15 @@ class RelayClient extends EventEmitter {
   _dial() {
     if (this.stopped || this.connected || this.dialing) return;
     this.dialing = true;
-    const frontDoor = readFrontDoor(this.configDir);
     let attemptConnect;
     try {
-      attemptConnect = frontDoor && typeof this.transport.connectPinned === 'function'
-        ? this.transport.connectPinned(frontDoor)
+      attemptConnect = this.frontDoorPin
+        ? this.transport.connectPinned({
+          url: this.frontDoorPin.mesh_url,
+          pinnedFingerprint: this.frontDoorPin.mesh_cert_fingerprint,
+          frontdoorId: this.frontDoorPin.frontdoor_id,
+          ...(this.dnsLookup ? { lookup: this.dnsLookup } : {})
+        })
         : this.transport.connectToPeer(this.pin.address, this.pin.port);
     } catch (err) {
       // connectPinned may throw synchronously instead of rejecting.
@@ -174,6 +174,16 @@ class RelayClient extends EventEmitter {
       (err) => {
         this.dialing = false;
         if (this.stopped) return;
+        if (err && err.code === 'frontdoor_key_mismatch') {
+          // DNS or a proxy pointing mesh. at another box: loud, but at most
+          // once an hour (§3.9, §9).
+          if (this.now() - this.lastMismatchLogAt >= FRONT_DOOR_BACKOFF.mismatchLogEveryMs) {
+            this.lastMismatchLogAt = this.now();
+            log.error(`${err.message} — the front door at ${this.frontDoorPin.mesh_url} is not the one this node paired with; run doctor`);
+          }
+          this._handleLinkDown('frontdoor_key_mismatch');
+          return;
+        }
         log.info(`relay not reachable (${err.message})`);
         this._handleLinkDown('connect_failed');
       }
@@ -181,22 +191,31 @@ class RelayClient extends EventEmitter {
   }
 
   async _onConnected() {
+    // The link this hello runs on. If it is gone by the time the hello
+    // settles (a 4009, or any close), that close was already handled with its
+    // own reason; failing "it" then would only leave a stale reason behind
+    // (and take the 5 s floor off the next 4009) or drop a newer link.
+    const link = this.transport ? this.transport.getPeer(this.relayPeerId) : null;
     let hello;
     try {
       hello = await this.rpc.call(this.relayPeerId, 'relay.hello', { node_id: this.identity.nodeId, node_name: this.nodeName, versions: [1] });
     } catch (err) {
       log.warn(`relay hello failed: ${err.message}`);
-      this._failLink('hello_failed');
+      this._failLink('hello_failed', link);
       return;
     }
     if (!hello || hello.relay_id !== this.pin.relay_id) {
       log.error(`relay answered as ${hello && hello.relay_id}, but this node paired with ${this.pin.relay_id}; not using the link`);
-      this._failLink('mismatch');
+      this._failLink('mismatch', link);
       return;
     }
-    this.dialAttempt = 0;
+    // F3's relay resets its backoff on a good hello; the front-door link
+    // resets only after five minutes connected (§3.9, _onDisconnected), so a
+    // link that flaps right after hello keeps backing off.
+    if (!this.frontDoorPin) this.dialAttempt = 0;
     this.mismatched = false;
     this.connected = true;
+    this.connectedAt = this.now();
     this.relayInfo = hello;
     this.since = new Date(this.now()).toISOString();
     this._writeLink();
@@ -207,19 +226,23 @@ class RelayClient extends EventEmitter {
   // Drops the (transport-level connected, but not usable) peer and lets the
   // 'peerDisconnected' that produces drive the actual redial — one path, so
   // there is exactly one place that schedules it.
-  _failLink(reason) {
+  _failLink(reason, link) {
+    if (!this.transport || !link || this.transport.getPeer(this.relayPeerId) !== link) return;
     this.pendingFailureReason = reason;
     if (this.transport && typeof this.transport.disconnectPeer === 'function') {
       this.transport.disconnectPeer(this.relayPeerId);
     }
   }
 
-  _onDisconnected() {
+  _onDisconnected(code = null) {
     const was = this.connected;
     this.connected = false;
     this._writeLink();
     if (was) this.emit('disconnected');
-    const reason = this.pendingFailureReason || 'link_down';
+    // Five minutes of a healthy link resets the front-door backoff.
+    if (this.frontDoorPin && this.connectedAt !== null && this.now() - this.connectedAt >= FRONT_DOOR_BACKOFF.resetAfterMs) this.dialAttempt = 0;
+    this.connectedAt = null;
+    const reason = this.pendingFailureReason || (code === 4009 ? 'already_connected' : 'link_down');
     this.pendingFailureReason = null;
     this._handleLinkDown(reason);
   }
@@ -227,10 +250,19 @@ class RelayClient extends EventEmitter {
   _handleLinkDown(reason) {
     if (this.stopped) return;
     if (reason === 'mismatch') this.mismatched = true;
-    const delay = this.mismatched
-      ? this.reconnectDelays[this.reconnectDelays.length - 1]
-      : this.reconnectDelays[Math.min(this.dialAttempt, this.reconnectDelays.length - 1)];
-    if (!this.mismatched) this.dialAttempt += 1;
+    let delay;
+    if (this.frontDoorPin) {
+      const minMs = reason === 'frontdoor_key_mismatch' || this.mismatched ? FRONT_DOOR_BACKOFF.keyMismatchMinMs
+        : reason === 'already_connected' ? FRONT_DOOR_BACKOFF.alreadyConnectedMinMs : 0;
+      delay = frontDoorDelay(this.dialAttempt, { random: this.random, minMs });
+      this.dialAttempt += 1;
+    } else {
+      delay = this.mismatched
+        ? this.reconnectDelays[this.reconnectDelays.length - 1]
+        : this.reconnectDelays[Math.min(this.dialAttempt, this.reconnectDelays.length - 1)];
+      if (!this.mismatched) this.dialAttempt += 1;
+    }
+    this.lastDelayMs = delay;
     const logAt = this.mismatched ? log.error : log.info;
     logAt(`relay link down (${reason}); retrying in ${delay} ms`);
     clearTimeout(this.retryTimer);
@@ -365,4 +397,4 @@ class RelayClient extends EventEmitter {
   }
 }
 
-module.exports = { RelayClient, isReservedMethod, F3_METHODS, NODE_INBOUND, readFrontDoor };
+module.exports = { RelayClient, isReservedMethod, F3_METHODS, NODE_INBOUND };

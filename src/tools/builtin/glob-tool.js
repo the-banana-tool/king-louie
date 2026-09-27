@@ -3,6 +3,7 @@ const fg = require('fast-glob');
 const path = require('path');
 const { describePathDenial, isProtectedSecretPath } = require('../utils');
 const { boundedGlobOptions } = require('../bounded-walk');
+const { isPathUnderRoots } = require('../../platform/path-roots');
 
 const globTool = new Tool({
   name: 'Glob',
@@ -57,9 +58,15 @@ const globTool = new Tool({
       // Even naming the secret files is a gift: it tells the model (and through
       // it a remote origin) exactly what to go after next. A glob rooted at the
       // data dir lists the workspace and the logs, never the key material.
-      const files = matched.filter(
-        (f) => !isProtectedSecretPath(path.resolve(resolvedBase, f.path || f))
-      );
+      //
+      // A match whose real path is outside the base (an absolute or `..`
+      // pattern, or a symlink or junction inside the base that points out of
+      // it) is dropped: the search never reaches past where it was rooted
+      // (ruling T11-glob).
+      const files = matched.filter((f) => {
+        const abs = path.resolve(resolvedBase, f.path || f);
+        return !isProtectedSecretPath(abs) && isPathUnderRoots(abs, [resolvedBase]);
+      });
 
       // Sort by modification time (newest first)
       files.sort((a, b) => (b.stats?.mtimeMs || 0) - (a.stats?.mtimeMs || 0));

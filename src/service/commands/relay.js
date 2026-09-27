@@ -120,7 +120,37 @@ function runCode({ dataDir, name, io, deps }) {
   return 0;
 }
 
+// On profile: frontdoor, F3's relay-registry commands have front-door
+// counterparts (fleet stage 4 §3.1); `relay qr` still prints the kl.relay
+// re-pin code, from the front door's own link.json.
+const FRONT_DOOR_COUNTERPARTS = { code: 'frontdoor code <node-name>', nodes: 'frontdoor nodes', 'remove-node': 'frontdoor remove-node <node-name>' };
+
+function onFrontDoor(dataDir, deps) {
+  try {
+    const cfg = (deps.loadConfig || ((d) => loadServiceConfig(d)))(dataDir);
+    return Boolean(cfg && cfg.profile === 'frontdoor');
+  } catch {
+    return false;
+  }
+}
+
 async function runRelayCommand({ sub, arg, dataDir, io, deps = {} }) {
+  if (Object.hasOwn(FRONT_DOOR_COUNTERPARTS, sub) && onFrontDoor(dataDir, deps)) {
+    io.stderr.write(`relay ${sub} is not used on a front door; use "king-louie-service ${FRONT_DOOR_COUNTERPARTS[sub]}".\n`);
+    return 2;
+  }
+  if (sub === 'qr' && onFrontDoor(dataDir, deps)) {
+    const { encodeQr } = require('../../approvals/messages');
+    const { readFrontDoorLink } = require('./frontdoor');
+    const link = readFrontDoorLink(dataDir);
+    if (!link) {
+      io.stderr.write('The front door has no mcp. certificate yet, or is not running. Run `king-louie-service doctor`.\n');
+      return 1;
+    }
+    const qr = encodeQr({ t: 'kl.relay', relay: link.relay, relay_spki: link.spki });
+    io.stdout.write(`${await (deps.renderQr || renderQr)(qr)}\n${qr}\n`);
+    return 0;
+  }
   if (sub === 'run') return runRelayServer({ dataDir, io, deps });
   if (sub === 'code') return runCode({ dataDir, name: arg, io, deps });
   if (sub === 'nodes') {

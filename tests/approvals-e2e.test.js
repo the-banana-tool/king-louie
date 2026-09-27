@@ -27,6 +27,19 @@ const { createFakePhone } = require('./helpers/fake-phone');
 
 const BIN = path.join(__dirname, '..', 'bin', 'king-louie-service.js');
 const CAN_RUN = process.platform === 'win32' || (typeof process.getuid === 'function' && process.getuid() === 0);
+// On POSIX this test runs as root. The node's service runs as a service
+// account, as it does when installed: `mcp` and enroll-device, run as root,
+// drop to the data dir's owner before any courier write (fleet stage 4,
+// rulings T13-dropprivs and T13-enroll), which this exercises.
+const POSIX_ROOT = process.platform !== 'win32' && typeof process.getuid === 'function' && process.getuid() === 0;
+const SERVICE_UID = 1000;
+const SERVICE_GID = 1000;
+
+function chownTree(target, uid, gid) {
+  fs.lchownSync(target, uid, gid);
+  const st = fs.lstatSync(target);
+  if (st.isDirectory() && !st.isSymbolicLink()) for (const name of fs.readdirSync(target)) chownTree(path.join(target, name), uid, gid);
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Budgets are generous: this test spawns the relay, the service and `mcp`
@@ -50,10 +63,10 @@ async function freePort() {
   return port;
 }
 
-function spawnCli(children, args) {
+function spawnCli(children, args, { uid, gid } = {}) {
   const env = { ...process.env, KING_LOUIE_LOG_LEVEL: 'info' };
   delete env.ELECTRON_RUN_AS_NODE;
-  const child = fork(BIN, args, { silent: true, env });
+  const child = fork(BIN, args, { silent: true, env, ...(uid === undefined ? {} : { uid, gid }) });
   children.push(child);
   let out = '';
   let err = '';
@@ -204,7 +217,17 @@ describe('phone approvals end to end', { skip: !CAN_RUN && 'needs root-owned adm
       assert.equal(paired, 0, pairIo.text.err);
       assert.ok(logged.some((l) => l.includes('Generated new Node Identity') && l.includes('"web-01"')), logged.join('\n'));
 
-      const service = spawnCli(children, ['run', '--profile', 'runbook', '--data-dir', nodeData]);
+      if (POSIX_ROOT) {
+        // pair ran here, as root. From here the node runs as a service
+        // account, as an installed node does: enroll-device (run as root)
+        // talks to it through a courier helper that drops to that account
+        // (ruling T13-enroll), and mcp drops to it too (T13-dropprivs).
+        for (const dir of [base, path.join(base, 'node')]) fs.chmodSync(dir, 0o755);
+        chownTree(nodeData, SERVICE_UID, SERVICE_GID);
+        chownTree(root, SERVICE_UID, SERVICE_GID);
+      }
+      const service = spawnCli(children, ['run', '--profile', 'runbook', '--data-dir', nodeData],
+        POSIX_ROOT ? { uid: SERVICE_UID, gid: SERVICE_GID } : {});
       await until(() => service.output().includes('"event":"ready"'), () => `node ready (${service.errors()})`);
       const linkFile = path.join(nodeData, 'approvals', 'link.json');
       await until(() => fs.existsSync(linkFile) && JSON.parse(fs.readFileSync(linkFile, 'utf8')).connected, () => `the relay link (${service.errors()})`);
@@ -224,8 +247,22 @@ describe('phone approvals end to end', { skip: !CAN_RUN && 'needs root-owned adm
       enrollIo.stdin.write('y\n');
       assert.equal(await enrolling, 0, enrollIo.text.err);
       await until(async () => (await anonymous('GET', `/v1/enroll/${qr.code_id}`)).body.state === 'done', 'enrollment done');
+      if (POSIX_ROOT) {
+        // enroll-device ran as root, yet nothing it left in approvals/ is
+        // root's: its courier ran as the service account (T13-enroll).
+        const rootOwned = [];
+        const walk = (p) => {
+          const st = fs.lstatSync(p);
+          if (st.uid === 0) rootOwned.push(p);
+          if (st.isDirectory() && !st.isSymbolicLink()) for (const n of fs.readdirSync(p)) walk(path.join(p, n));
+        };
+        walk(path.join(nodeData, 'approvals'));
+        assert.deepEqual(rootOwned, []);
+      }
 
       // ── The unsafe runbook through mcp ──────────────────────────────────
+      // Run as root on POSIX: it becomes the data dir's owner before it
+      // writes a request (ruling T13-dropprivs).
       mcp = spawnCli(children, ['mcp', '--data-dir', nodeData]);
       let nextId = 1;
       const rpc = (method, params) => {
@@ -276,10 +313,11 @@ describe('phone approvals end to end', { skip: !CAN_RUN && 'needs root-owned adm
       assert.equal(request.origin.job_id, job.job_id);
       const answer = await api('POST', `/v1/approvals/${request.request_id}/response`, phone.respond(pending.envelope, 'approve'));
       assert.equal(answer.status, 202);
-      // The request is mcp's, so the service drops the response in mcp's
-      // courier inbox and cannot say yet whether it was accepted: `accepted`
-      // is null, never true. The job's outcome below is the verdict.
-      assert.deepEqual(answer.body, { delivered: true, accepted: null, reason: null });
+      // With the service running, mcp sends run_runbook through the courier
+      // to the service's own FleetToolHandler (fleet stage 4 §3.7, R24: one
+      // JobManager per node), so the request is the service's and its
+      // PhoneApprover accepts the response itself: `accepted` is true.
+      assert.deepEqual(answer.body, { delivered: true, accepted: true, reason: null });
 
       let lastSeen = null;
       const finalJob = await until(async () => {

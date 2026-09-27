@@ -30,6 +30,8 @@ final class RelayAPI: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     private var clockOffset: TimeInterval = 0
     /// Tasks whose server certificate did not match the pin.
     private var pinRefusedTasks: Set<Int> = []
+    /// The SPKI pin of the last certificate the pin refused (stage 4 §3.3.1).
+    private var refusedSpki: String?
     /// Set by invalidate(); an invalidated session must never be asked for a
     /// new task (URLSession raises NSGenericException).
     private var invalidated = false
@@ -124,8 +126,15 @@ final class RelayAPI: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
         guard let trust = challenge.protectionSpace.serverTrust,
               let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
               let leaf = chain.first, let pin = Self.spkiPin(of: leaf), pin == spkiPin else {
+            // Refused, whatever else happens here. The pin of what was seen is
+            // kept only so a front door's signed re-pin can be checked against
+            // it (AppModel.tryRepin); it is never trusted on its own.
             let id = task.taskIdentifier
-            locked { _ = pinRefusedTasks.insert(id) }
+            let seen = (challenge.protectionSpace.serverTrust.flatMap { SecTrustCopyCertificateChain($0) as? [SecCertificate] })?.first.flatMap { Self.spkiPin(of: $0) }
+            locked {
+                _ = pinRefusedTasks.insert(id)
+                refusedSpki = seen
+            }
             completionHandler(.cancelAuthenticationChallenge, nil)
             return
         }
@@ -134,6 +143,15 @@ final class RelayAPI: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
 
     private func takePinRefusal(_ taskId: Int) -> Bool {
         locked { pinRefusedTasks.remove(taskId) != nil }
+    }
+
+    /// The pin of the certificate the last refusal saw, once.
+    func takeRefusedSpki() -> String? {
+        locked {
+            let seen = refusedSpki
+            refusedSpki = nil
+            return seen
+        }
     }
 
     /// Redirects are refused: the 3xx itself comes back and is an error.
@@ -193,11 +211,23 @@ final class RelayAPI: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
 
     /// Device-signed unless `auth` is false (code and invite routes). A 401
     /// clock_skew is answered once, using the relay's `server_time` as the
-    /// offset for this and every later request.
+    /// offset for this and every later request. Anything outside 2xx throws
+    /// RelayError.
     /// `signWith` replaces the client's signer for this one request (a
     /// presence ping signs only with an already-unlocked session).
-    func request(_ method: String, _ pathWithQuery: String, body: JSONValue? = nil, auth: Bool = true, retried: Bool = false,
+    func request(_ method: String, _ pathWithQuery: String, body: JSONValue? = nil, auth: Bool = true,
                  signWith: Signer? = nil, makeBody: (() -> JSONValue)? = nil) async throws -> (Int, JSONValue?) {
+        let (status, json) = try await exchange(method, pathWithQuery, body: body, auth: auth, signWith: signWith, makeBody: makeBody)
+        if (200..<300).contains(status) { return (status, json) }
+        throw RelayError(status: status, code: json?["error"]?.stringValue ?? "http_\(status)", message: json?["message"]?.stringValue ?? "",
+                         retryAfter: json?["retry_after"]?.intValue)
+    }
+
+    /// As `request`, but any HTTP status comes back with its body (nil when
+    /// it has none this app can parse), for replies read with FrontDoorReply.
+    /// Only a transport failure, a refused pin or an unreadable 2xx throws.
+    func exchange(_ method: String, _ pathWithQuery: String, body: JSONValue? = nil, auth: Bool = true, retried: Bool = false,
+                  signWith: Signer? = nil, makeBody: (() -> JSONValue)? = nil) async throws -> (Int, JSONValue?) {
         // `makeBody` builds the body on each attempt, so a clock_skew retry
         // uses the corrected clock (presence `at`).
         let sentBody = makeBody?() ?? body
@@ -233,16 +263,14 @@ final class RelayAPI: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
             }
         }
         let json = data.isEmpty ? nil : try? JSONParser.parse(data)
-        let code = json?["error"]?.stringValue ?? "http_\(status)"
-        if status == 401, code == "clock_skew", !retried,
+        if status == 401, json?["error"]?.stringValue == "clock_skew", !retried,
            let serverTime = json?["server_time"]?.stringValue, let server = Timestamps.date(serverTime) {
             let offset = server.timeIntervalSinceNow
             locked { clockOffset = offset }
-            return try await self.request(method, pathWithQuery, body: body, auth: auth, retried: true, signWith: signWith,
-                                          makeBody: makeBody)
+            return try await exchange(method, pathWithQuery, body: body, auth: auth, retried: true, signWith: signWith,
+                                      makeBody: makeBody)
         }
-        throw RelayError(status: status, code: code, message: json?["message"]?.stringValue ?? "",
-                         retryAfter: json?["retry_after"]?.intValue)
+        return (status, json)
     }
 
     func approvals(wait: Int) async throws -> [JSONValue] {
@@ -331,6 +359,74 @@ final class RelayAPI: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     /// waiting | done | refused | expired.
     func consoleEnrollState(codeId: String) async throws -> String {
         try await request("GET", "/v1/enroll/\(Self.segment(codeId))", auth: false).1?["state"]?.stringValue ?? "waiting"
+    }
+
+    // MARK: Front door (fleet stage 4, client-grant-v1 §7)
+
+    func frontDoorInfo() async throws -> JSONValue? {
+        try await request("GET", "/v1/frontdoor").1
+    }
+
+    /// Claims the request for this phone; 404 `no_such_request` when the code matches nothing.
+    func pendingGrant(userCode: String) async throws -> JSONValue? {
+        try await request("GET", "/v1/grants/pending?user_code=\(Self.segment(userCode))").1
+    }
+
+    /// Decisions, revocations and removals come back as FrontDoorReply: only
+    /// its exact-state check confirms one, and a refusal's code is data.
+    private func reply(_ path: String, _ envelope: Envelope) async throws -> FrontDoorReply {
+        let (status, body) = try await exchange("POST", path, body: envelope.json)
+        return FrontDoorReply(status: status, body: body)
+    }
+
+    func grantDecision(_ grantId: String, envelope: Envelope) async throws -> FrontDoorReply {
+        try await reply("/v1/grants/\(Self.segment(grantId))/decision", envelope)
+    }
+
+    func clients() async throws -> [JSONValue] {
+        try await request("GET", "/v1/clients").1?.arrayValue ?? []
+    }
+
+    /// A fresh challenge for one purpose (`revoke` or `remove`, ruling T2-purpose).
+    func challenge(purpose: String) async throws -> Challenge {
+        let body = try FrontDoor.challengeRequest(purpose: purpose)
+        guard let reply = try await request("POST", "/v1/challenges", body: body).1 else {
+            throw RelayError(status: 0, code: "bad_reply", message: "The front door sent a reply this app cannot read.")
+        }
+        return try Challenge(json: reply)
+    }
+
+    func revokeClient(_ grantId: String, envelope: Envelope) async throws -> FrontDoorReply {
+        try await reply("/v1/clients/\(Self.segment(grantId))/revoke", envelope)
+    }
+
+    func pendingPairings() async throws -> [JSONValue] {
+        try await request("GET", "/v1/pairings/pending").1?.arrayValue ?? []
+    }
+
+    func pairingDecision(_ pairingId: String, envelope: Envelope) async throws -> FrontDoorReply {
+        try await reply("/v1/pairings/\(Self.segment(pairingId))/decision", envelope)
+    }
+
+    func removeNode(_ nodeId: String, envelope: Envelope) async throws -> FrontDoorReply {
+        try await reply("/v1/nodes/\(Self.segment(nodeId))/remove", envelope)
+    }
+
+    func alerts(since: String) async throws -> [JSONValue] {
+        try await request("GET", "/v1/alerts?since=\(Self.segment(since))").1?.arrayValue ?? []
+    }
+
+    func ackAlert(_ id: String) async throws {
+        _ = try await request("POST", "/v1/alerts/\(Self.segment(id))/ack")
+    }
+
+    func auditStatus(nodeId: String) async throws -> AuditStatus? {
+        try await request("GET", "/v1/nodes/\(Self.segment(nodeId))/audit-status").1.map { try AuditStatus(json: $0) }
+    }
+
+    /// Unauthenticated: the one request a phone makes after its pin failed.
+    func repinEnvelope() async throws -> JSONValue? {
+        try await request("GET", "/v1/repin", auth: false).1
     }
 }
 

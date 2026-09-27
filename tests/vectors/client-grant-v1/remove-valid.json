@@ -1,0 +1,114 @@
+{
+  "name": "remove-valid",
+  "consumers": [
+    "node",
+    "ios",
+    "android"
+  ],
+  "given": {
+    "now": "2026-09-23T18:04:11.201Z",
+    "frontdoor": {
+      "id": "kl-nt4ritcfj5kepq3y",
+      "key": "fYWiRRRJBRkudSrSwQUWQ6bpZtk03Lxrqqq__hl4pyU"
+    },
+    "approvers": [
+      {
+        "v": 1,
+        "device_id": "d-3vmwrihhdbnit4oi",
+        "name": "Test phone 3vmw",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "krcyG5D6HPx9P3Gi5oaR6OyU9D1gIrc3UD6pIRcDq74",
+          "y": "9XqgPXsMAYplX5IZVn-9FRP2sN4oHFRPjnZyfG-GpaI"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      },
+      {
+        "v": 1,
+        "device_id": "d-futyo75nn4w4reil",
+        "name": "Test phone futy",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "RscTaDzgRlaVqN4IrrtRgbBZw8hrp00xiIu7B_1AJ6w",
+          "y": "gBam0DF3krccxYdWnKr6fRP4yHKNLKfByP76l8dEw78"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      },
+      {
+        "v": 1,
+        "device_id": "d-6xdlbxglhnvfa3lw",
+        "name": "Test phone 6xdl",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "GnDHGfxMVkv5iRyStQIsJbqWKUtPy6ijuA1UiWKlYDc",
+          "y": "LLhIvQ_y0DmIXI_qxojWRICKfjPE_orjZBTwRhje91k"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": "2026-09-20T00:00:00.000Z",
+        "revoked_by": "console",
+        "enrollment": null
+      },
+      {
+        "v": 1,
+        "device_id": "d-vn5ed2ksh6yuxv2b",
+        "name": "Test phone vn5e",
+        "platform": "demo",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "U6dh3GtqeuuV-7Yr4B76ISLm0JX97K9-CmZV_GRQBl8",
+          "y": "_sP3jEPEf4YszvtAEBMZpZyFLeCMhD3bRffdRpbpI5c"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      }
+    ],
+    "allow_test_keys": true,
+    "challenges": [
+      {
+        "challenge": "-2FAa2eCKtUgX-D9Zpxn150XFQk7OB0nY_0gCv8NTnk",
+        "device_id": "d-3vmwrihhdbnit4oi",
+        "purpose": "remove",
+        "expires_at": "2026-09-23T18:05:11.201Z",
+        "used": false
+      }
+    ]
+  },
+  "input": {
+    "alg": "ES256",
+    "kid": "d-3vmwrihhdbnit4oi",
+    "payload": "eyJjaGFsbGVuZ2UiOiItMkZBYTJlQ0t0VWdYLUQ5WnB4bjE1MFhGUWs3T0IwbllfMGdDdjhOVG5rIiwiZGV2aWNlX2lkIjoiZC0zdm13cmloaGRibml0NG9pIiwiZnJvbnRkb29yX2lkIjoia2wtbnQ0cml0Y2ZqNWtlcHEzeSIsIm5vZGVfaWQiOiJrbC1obmVmMzI0NzJxemliaTVyIiwic2lnbmVkX2F0IjoiMjAyNi0wOS0yM1QxODowNDoxMi4yMDFaIiwidHlwZSI6ImtsLm5vZGUucmVtb3ZlIiwidiI6MX0",
+    "sig": "Qw6GDMwBISpyVS08NchLw-1FCDr5r-2rALTTwaHMhlC_FkDGSACKIcAmBMr7CPGu_cIVHFCK6BXMgELHCQWeFA"
+  },
+  "expect": {
+    "accepted": true,
+    "reason": null,
+    "message": {
+      "v": 1,
+      "type": "kl.node.remove",
+      "frontdoor_id": "kl-nt4ritcfj5kepq3y",
+      "node_id": "kl-hnef32472qzibi5r",
+      "challenge": "-2FAa2eCKtUgX-D9Zpxn150XFQk7OB0nY_0gCv8NTnk",
+      "device_id": "d-3vmwrihhdbnit4oi",
+      "signed_at": "2026-09-23T18:04:12.201Z"
+    }
+  }
+}

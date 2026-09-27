@@ -1,14 +1,17 @@
 const { MeshIdentity, saveIdentity, loadIdentity } = require('./mesh-identity');
 const { MeshTransport, DEFAULT_PORT } = require('./mesh-transport');
 const { MeshPairing } = require('./mesh-pairing');
-const { MeshChannel } = require('./mesh-channel');
-const { MeshRemoteControl } = require('./mesh-remote-control');
-const { MeshDiscovery } = require('./mesh-discovery');
-const { MeshSwarm } = require('./mesh-swarm');
 const { createLogger } = require('../logging');
 const log = createLogger('mesh');
+// MeshChannel, MeshRemoteControl, MeshDiscovery and MeshSwarm are loaded only
+// when a desktop actually starts the mesh (fleet stage 4 §3.10 items 5–6):
+// no service profile ever requires them.
 
 async function initializeMesh(config = {}) {
+  const { MeshChannel } = require('./mesh-channel');
+  const { MeshRemoteControl } = require('./mesh-remote-control');
+  const { MeshDiscovery } = require('./mesh-discovery');
+  const { MeshSwarm } = require('./mesh-swarm');
   const {
     store,
     sessionManager,
@@ -20,7 +23,8 @@ async function initializeMesh(config = {}) {
     cipher
   } = config;
 
-  const meshSettings = settings.mesh || {};
+  // A node linked to a front door never advertises itself on mDNS.
+  const meshSettings = config.frontDoor ? { ...(settings.mesh || {}), discovery: false } : (settings.mesh || {});
   if (meshSettings.enabled === false) {
     log.info('disabled by settings');
     return null;
@@ -205,10 +209,10 @@ module.exports = {
   MeshIdentity,
   MeshTransport,
   MeshPairing,
-  MeshChannel,
-  MeshRemoteControl,
-  MeshDiscovery,
-  MeshSwarm,
+  get MeshChannel() { return require('./mesh-channel').MeshChannel; },
+  get MeshRemoteControl() { return require('./mesh-remote-control').MeshRemoteControl; },
+  get MeshDiscovery() { return require('./mesh-discovery').MeshDiscovery; },
+  get MeshSwarm() { return require('./mesh-swarm').MeshSwarm; },
   initializeMesh,
   DEFAULT_PORT
 };

@@ -226,16 +226,20 @@ describe('RelayClient', () => {
 
   it('escalates the reconnect delay across unreachable-relay attempts, and resets it after a successful hello', async () => {
     const attemptsAt = [];
+    // The delay that paced each dial (null for the first): the escalation is
+    // asserted on these, not on two wall-clock gaps that load can equalise.
+    const pacedBy = [];
+    let c = null;
     const transportFactory = (options) => {
       const t = new MeshTransport(options);
       const originalConnect = t.connectToPeer.bind(t);
-      t.connectToPeer = (...args) => { attemptsAt.push(Date.now()); return originalConnect(...args); };
+      t.connectToPeer = (...args) => { attemptsAt.push(Date.now()); pacedBy.push(c.lastDelayMs); return originalConnect(...args); };
       return t;
     };
     const dataDir = tempDir();
     // Nothing listens on this port: every connect attempt fails fast
     // (connection refused) so the escalating delays are what paces retries.
-    const c = new RelayClient({
+    c = new RelayClient({
       identity: nodeIdentity,
       relayPin: {
         relay_id: relayIdentity.nodeId, peerId: relayIdentity.peerId, publicKey: relayIdentity.publicKey.toString('hex'),
@@ -247,10 +251,15 @@ describe('RelayClient', () => {
     await c.start();
     for (let i = 0; i < 100 && attemptsAt.length < 3; i += 1) await new Promise((r) => setTimeout(r, 20));
     assert.ok(attemptsAt.length >= 3, `expected at least 3 dial attempts, got ${attemptsAt.length}`);
+    // Escalating, not fixed: the first retry waited the first configured
+    // delay and the second the next, longer one.
+    assert.deepEqual(pacedBy.slice(0, 3), [null, 40, 90]);
+    // And the dials really were that far apart (timers never fire early;
+    // 5 ms of slack for clock granularity).
     const gap1 = attemptsAt[1] - attemptsAt[0];
     const gap2 = attemptsAt[2] - attemptsAt[1];
-    assert.ok(gap1 >= 25, `first gap (${gap1}ms) should be at least the ~40ms configured delay`);
-    assert.ok(gap2 > gap1, `second gap (${gap2}ms) should be longer than the first (${gap1}ms) — escalating, not fixed`);
+    assert.ok(gap1 >= 35, `first gap (${gap1}ms) should be at least the 40ms configured delay`);
+    assert.ok(gap2 >= 85, `second gap (${gap2}ms) should be at least the 90ms configured delay`);
     assert.equal(c.dialAttempt > 0, true);
   });
 
@@ -424,27 +433,6 @@ describe('RelayClient', () => {
     assert.equal(c.isConnected(), false);
   });
 
-  it('a front-door.json that exists but is not valid JSON is warned about and ignored (falls back to the pinned address)', async () => {
-    const relay = await fakeRelay();
-    cleanups.push(relay.stop);
-    const configDir = tempDir();
-    fs.writeFileSync(path.join(configDir, 'front-door.json'), '{ not valid json');
-    const warnings = [];
-    const unsubscribe = addSink((record) => {
-      if (record.subsystem === 'approvals/relay-client' && record.level === 'warn') warnings.push(record.message);
-    });
-    try {
-      const { c } = client(relay, { configDir });
-      const connected = once(c, 'connected');
-      await c.start();
-      await connected;
-      assert.equal(c.isConnected(), true);
-      assert.ok(warnings.some((m) => /front-door\.json/.test(m) && /JSON/.test(m)), warnings.join('\n'));
-    } finally {
-      unsubscribe();
-    }
-  });
-
   it('derives the relay peerId from the pinned publicKey when the pin record has no peerId (spec §3.11)', async () => {
     const relay = await fakeRelay();
     cleanups.push(relay.stop);
@@ -514,21 +502,22 @@ describe('RelayClient', () => {
     assert.equal(c.isConnected(), true);
   });
 
-  it('dials front-door.json through connectPinned when the transport has it (E7)', async () => {
-    const relay = await fakeRelay();
-    cleanups.push(relay.stop);
-    const configDir = tempDir();
-    fs.writeFileSync(path.join(configDir, 'front-door.json'), JSON.stringify({ url: 'https://kl.example.com' }));
+  it('with a front-door pin, dials connectPinned with the pin and ignores the relay pin (E7, F4 §3.9)', async () => {
+    const { rawEd25519 } = require('../src/frontdoor/protocol/messages');
     const pinned = [];
     const transportFactory = (options) => {
       const t = new MeshTransport(options);
-      t.connectPinned = (fd) => { pinned.push(fd); return t.connectToPeer('127.0.0.1', relay.transport.port); };
+      t.connectPinned = (args) => { pinned.push(args); return new Promise(() => {}); };
       return t;
     };
-    const { c } = client(relay, { configDir, transportFactory });
-    const connected = once(c, 'connected');
+    const frontDoorPin = {
+      v: 1, frontdoor_id: relayIdentity.nodeId, frontdoor_public_key: rawEd25519(relayIdentity.publicKey), domain: 'kl.example.com',
+      mesh_url: 'wss://mesh.kl.example.com/mesh/v1', mesh_cert_fingerprint: relayIdentity.tlsFingerprint, paired_at: new Date().toISOString()
+    };
+    const c = new RelayClient({ identity: nodeIdentity, frontDoorPin, dataDir: tempDir(), useTls: false, transportFactory });
+    cleanups.push(() => c.stop());
     await c.start();
-    await connected;
-    assert.deepEqual(pinned, [{ url: 'https://kl.example.com' }]);
+    assert.deepEqual(pinned, [{ url: 'wss://mesh.kl.example.com/mesh/v1', pinnedFingerprint: relayIdentity.tlsFingerprint, frontdoorId: relayIdentity.nodeId }]);
+    assert.equal(c.pin.relay_id, relayIdentity.nodeId);
   });
 });

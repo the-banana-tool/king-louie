@@ -15,7 +15,7 @@ and `<you>` are placeholders for your own values.
 | `laptop` | agent | Windows | builds and tests your site | `laptop.build_then_deploy` |
 | `mac` | agent | macOS | an agent node with no runbooks yet | none |
 | `web-01` | runbook | Linux | serves your site at `www.example.com` | `site.status`, `site.pull_and_restart`, `server.reboot` |
-| `frontdoor` | (stage 4) | Linux | reaches the fleet from outside at `kl.example.com` | arrives with fleet stage 4 |
+| `frontdoor` | frontdoor | Linux | reaches the fleet from outside at `kl.example.com` ([front door guide](fleet/front-door.md)) | none: it runs no runbooks |
 
 Each machine runs two separate things:
 

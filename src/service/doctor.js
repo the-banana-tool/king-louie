@@ -10,7 +10,7 @@ function posixPrivate(file) {
 // (default root). The CLI never passes it; tests pass their own euid so the
 // wiring runs unprivileged too.
 // Async: the approval checks wait for the approver store to load.
-async function runDoctor({ dataDir, platform = process.platform, adminUid = 0 }) {
+async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, configDir = null }) {
   const results = [];
   const major = Number(process.versions.node.split('.')[0]);
   results.push({ check: 'node >= 22', ok: major >= 22, detail: process.versions.node });
@@ -59,6 +59,51 @@ async function runDoctor({ dataDir, platform = process.platform, adminUid = 0 })
     }
   } catch (err) {
     results.push({ check: 'node config / runbooks health', ok: false, detail: err.message });
+  }
+
+  // Fleet stage 4 §3.14: a node linked to a front door (only when it has
+  // front-door.json; a node.yaml problem is already the row above).
+  {
+    const { adminConfigDir } = require('../platform/paths');
+    const dir = configDir || adminConfigDir({ dataDir });
+    // lstat, as readPin does: a dangling front-door.json link is reported.
+    let hasPin = true;
+    try {
+      fs.lstatSync(path.join(dir, 'front-door.json'));
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err;
+      hasPin = false;
+    }
+    if (hasPin) {
+      let nodeConfig = null;
+      try {
+        nodeConfig = require('./node-config').loadNodeConfig({ dataDir, adminConfigDir: dir, adminUid });
+      } catch {
+        nodeConfig = null;
+      }
+      results.push(...(await require('../fleet/doctor-checks').nodeFrontDoorChecks({ configDir: dir, adminUid, nodeConfig })));
+    }
+  }
+
+  // Fleet stage 4 §3.14: doctor on a front door.
+  {
+    const { adminConfigDir } = require('../platform/paths');
+    const dir = configDir || adminConfigDir({ dataDir });
+    let nodeConfig = null;
+    try {
+      nodeConfig = require('./node-config').loadNodeConfig({ dataDir, adminConfigDir: dir, adminUid });
+    } catch {
+      nodeConfig = null;
+    }
+    if (nodeConfig && nodeConfig.profile === 'frontdoor') {
+      let serviceConfig = null;
+      try {
+        serviceConfig = require('./config').loadServiceConfig(dataDir, {}, { adminConfigDir: dir, adminUid });
+      } catch (err) {
+        results.push({ check: 'service.json', ok: false, detail: err.message });
+      }
+      if (serviceConfig) results.push(...(await require('../frontdoor/doctor-checks').checks({ dataDir, configDir: dir, adminUid, nodeConfig, serviceConfig, platform })));
+    }
   }
 
   results.push(...(await approvalChecks({ dataDir, platform, adminUid })));

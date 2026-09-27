@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
+const { EventEmitter } = require('events');
 const http = require('http');
 const https = require('https');
 const { parseYaml } = require('../platform/yaml');
@@ -595,7 +596,10 @@ class RunbookEngine {
 
     const { signal } = options;
     const logs = [];
-    const cancelled = () => ({ success: false, error: 'cancelled', logs });
+    // The same outcomes the EvidenceLedger records, handed back so the job
+    // can report them (get_job.evidence, fleet stage 4 §3.7).
+    const checks = [];
+    const cancelled = () => ({ success: false, error: 'cancelled', logs, checks });
     if (signal?.aborted) return cancelled();
 
     if (!admitted) this.recordExecution(runbookName);
@@ -633,7 +637,7 @@ class RunbookEngine {
         if (stepResult.cancelled) return cancelled();
         if (!stepResult.success) {
           const error = stepResult.code !== undefined ? `Step ${i + 1} ${stepResult.error}` : stepResult.error;
-          return { success: false, error, logs, stepIndex: i };
+          return { success: false, error, logs, checks, stepIndex: i };
         }
       } else if (step.check) {
         logs.push(`Running check step ${i + 1}...`);
@@ -652,8 +656,18 @@ class RunbookEngine {
           scope: 'targeted'
         });
 
+        checks.push({
+          step_index: i,
+          check: step.check,
+          ok: checkResult.success === true,
+          attempts: checkResult.attempts,
+          status_code: checkResult.statusCode === undefined ? null : checkResult.statusCode,
+          error: checkResult.success ? null : (checkResult.reason || 'check failed'),
+          at: new Date().toISOString()
+        });
+
         if (!checkResult.success) {
-          return { success: false, error: `Check step ${i + 1} failed`, logs, stepIndex: i };
+          return { success: false, error: `Check step ${i + 1} failed`, logs, checks, stepIndex: i };
         }
       } else {
         // Load-time validation rules this out; a runbook that got here some
@@ -662,46 +676,51 @@ class RunbookEngine {
       }
     }
 
-    return { success: true, logs };
+    return { success: true, logs, checks };
   }
 
+  // → { success, reason?, attempts, statusCode }: what the check actually
+  // did, so executeRunbook can report it as evidence (fleet stage 4 §3.7).
   async executeCheckStep(checkDef, { signal } = {}) {
     const kinds = isPlainObject(checkDef) ? checkKindsOf(checkDef) : [];
     if (kinds.length !== 1 || !CHECK_KINDS.includes(kinds[0])) {
       // Passing an unrecognised check would record evidence for something
       // that was never checked.
-      return { success: false, reason: `Unknown check kind: ${kinds.join(', ') || '(none)'}` };
+      return { success: false, reason: `Unknown check kind: ${kinds.join(', ') || '(none)'}`, attempts: 0, statusCode: null };
     }
 
     const url = checkDef.http_get;
     if (!isHttpUrl(url)) {
-      return { success: false, reason: `http_get URL must be http:// or https://: ${url}` };
+      return { success: false, reason: `http_get URL must be http:// or https://: ${url}`, attempts: 0, statusCode: null };
     }
     const expectStatus = checkDef.expect_status !== undefined ? checkDef.expect_status : 200;
     const retries = checkDef.retries !== undefined ? checkDef.retries : 1;
 
+    let attempts = 0;
+    let statusCode = null;
     for (let attempt = 1; attempt <= retries; attempt++) {
-      if (signal?.aborted) return { success: false, reason: 'cancelled' };
-      const ok = await new Promise((resolve) => {
+      if (signal?.aborted) return { success: false, reason: 'cancelled', attempts, statusCode };
+      attempts = attempt;
+      statusCode = await new Promise((resolve) => {
         const client = new URL(url).protocol === 'https:' ? https : http;
         const req = client.get(url, signal ? { signal } : {}, (res) => {
           // Only the status matters; drain the body so the socket is freed.
           res.resume();
-          resolve(res.statusCode === expectStatus);
+          resolve(res.statusCode);
         });
-        req.on('error', () => resolve(false));
+        req.on('error', () => resolve(null));
         req.setTimeout(5000, () => {
           req.destroy();
-          resolve(false);
+          resolve(null);
         });
       });
 
-      if (ok) return { success: true };
+      if (statusCode === expectStatus) return { success: true, attempts, statusCode };
       if (attempt < retries && !signal?.aborted) {
         await new Promise((r) => setTimeout(r, 1000));
       }
     }
-    return { success: false, reason: `HTTP GET ${url} did not return ${expectStatus}` };
+    return { success: false, reason: `HTTP GET ${url} did not return ${expectStatus}`, attempts, statusCode };
   }
 }
 
@@ -712,10 +731,11 @@ const TERMINAL_JOB_STATUSES = ['succeeded', 'failed', 'cancelled', 'denied', 'ex
 /**
  * In-memory Job Manager for runbook and delegation jobs.
  */
-class JobManager {
+class JobManager extends EventEmitter {
   // maxConcurrentJobs is node policy (node.yaml policy.max_concurrent_jobs).
   // Jobs awaiting approval run nothing, so only queued and running ones count.
   constructor({ maxConcurrentJobs = Infinity } = {}) {
+    super();
     this.jobs = new Map();
     // Kept apart from the job records, which are handed back to clients.
     this.controllers = new Map();
@@ -729,9 +749,70 @@ class JobManager {
   activeJobCount() {
     let n = 0;
     for (const job of this.jobs.values()) {
+      // A delegate session holds a slot only while one of its turns runs
+      // (fleet stage 4 §3.8); an idle open session holds none.
+      if (job.kind === 'delegate') {
+        if (this.executing.has(job.job_id)) n += 1;
+        continue;
+      }
       if (job.status === 'queued' || job.status === 'running' || this.executing.has(job.job_id)) n += 1;
     }
     return n;
+  }
+
+  hasFreeSlot() {
+    return this.activeJobCount() < this.maxConcurrentJobs;
+  }
+
+  // An open delegate session (§3.8): `running` until it closes, with no slot
+  // until a turn begins.
+  createDelegateJob({ machine, task, cwd }) {
+    const jobId = `job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const now = new Date().toISOString();
+    const job = {
+      job_id: jobId,
+      kind: 'delegate',
+      machine,
+      runbook: null,
+      params: { task, cwd },
+      tier: null,
+      status: 'running',
+      session: 'idle',
+      reason: null,
+      created_at: now,
+      updated_at: now,
+      started_at: now,
+      finished_at: null,
+      logs: [],
+      result: null,
+      evidence: null
+    };
+    this.jobs.set(jobId, job);
+    this.controllers.set(jobId, new AbortController());
+    this.emit('update', job);
+    return job;
+  }
+
+  beginTurn(jobId) {
+    const job = this.jobs.get(jobId);
+    if (!job || job.kind !== 'delegate' || TERMINAL_JOB_STATUSES.includes(job.status)) {
+      throw Object.assign(new Error(`job ${jobId} is not an open delegate session`), { code: 'bad_transition' });
+    }
+    if (this.executing.has(jobId)) {
+      throw Object.assign(new Error(`node_busy: job ${jobId} already has a turn running`), { code: 'node_busy' });
+    }
+    if (this.activeJobCount() >= this.maxConcurrentJobs) {
+      throw Object.assign(new Error(`max_concurrent_jobs: this node already has ${this.maxConcurrentJobs} job(s) running; try again when one finishes`), { code: 'max_concurrent_jobs' });
+    }
+    this.executing.add(jobId);
+    return this.updateJob(jobId, { session: 'turn' });
+  }
+
+  endTurn(jobId) {
+    this.executing.delete(jobId);
+    const job = this.jobs.get(jobId);
+    if (job && !TERMINAL_JOB_STATUSES.includes(job.status)) return this.updateJob(jobId, { session: 'idle' });
+    return job || null;
   }
 
   // Called by whatever runs the job, around the execution itself: from just
@@ -783,6 +864,7 @@ class JobManager {
     // A job waiting for a phone approval gets its controller now, so
     // cancel_job can withdraw the request.
     if (initialStatus === 'queued' || initialStatus === 'awaiting_approval') this.controllers.set(jobId, new AbortController());
+    this.emit('update', job);
     return job;
   }
 
@@ -822,6 +904,7 @@ class JobManager {
   updateJob(jobId, updates = {}) {
     const job = this.jobs.get(jobId);
     if (!job) return null;
+    const before = { status: job.status, session: job.session };
     const now = new Date().toISOString();
     const safeUpdates = { ...updates };
     if (TERMINAL_JOB_STATUSES.includes(job.status) && 'status' in safeUpdates && !TERMINAL_JOB_STATUSES.includes(safeUpdates.status)) {
@@ -833,6 +916,7 @@ class JobManager {
       if (!job.finished_at) job.finished_at = now;
       this.controllers.delete(jobId);
     }
+    if (before.status !== job.status || before.session !== job.session) this.emit('update', job);
     return job;
   }
 

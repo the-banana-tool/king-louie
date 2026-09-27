@@ -1283,13 +1283,13 @@ describe('renderers validate their own inputs, not just planInstall', () => {
       /Invalid --user/
     );
     assert.throws(() => renderSystemdUnit({ ...base, user: 'root' }), /must not be "root"/);
-    assert.throws(() => renderSystemdUnit({ ...base, profile: 'frontdoor' }), /Unknown profile/);
+    assert.throws(() => renderSystemdUnit({ ...base, profile: 'relay' }), /Unknown profile/);
   });
 
   it('renderLaunchdPlist rejects the same', () => {
     const args = { ...base, dataDir: '/Library/Application Support/KingLouie/data', logsDir: '/var/log/king-louie' };
     assert.throws(() => renderLaunchdPlist({ ...args, user: 'a b' }), /Invalid --user/);
-    assert.throws(() => renderLaunchdPlist({ ...args, user: '_kinglouie', profile: 'frontdoor' }), /Unknown profile/);
+    assert.throws(() => renderLaunchdPlist({ ...args, user: '_kinglouie', profile: 'relay' }), /Unknown profile/);
   });
 
   it('renderWindowsTaskXml sanitizes entryPath and nodePath, not only dataDir', () => {
@@ -1297,7 +1297,7 @@ describe('renderers validate their own inputs, not just planInstall', () => {
     // `"C:\a\b" & --data-dir "C:\evil"` inside <Arguments> is an argv split.
     assert.throws(() => renderWindowsTaskXml({ ...win, entryPath: 'C:\\a\\b" & --data-dir "C:\\evil' }), /entryPath must not contain a double quote/);
     assert.throws(() => renderWindowsTaskXml({ ...win, nodePath: 'C:\\a" & evil "' }), /nodePath must not contain a double quote/);
-    assert.throws(() => renderWindowsTaskXml({ ...win, profile: 'frontdoor' }), /Unknown profile/);
+    assert.throws(() => renderWindowsTaskXml({ ...win, profile: 'relay' }), /Unknown profile/);
   });
 });
 
@@ -1368,5 +1368,28 @@ describe('Windows: the config and approvers dirs are read-only to the service', 
       assert.match(result.stderr, /ancestor directory .+ is not safe: owner S-1-5-\S+ is not Administrators, SYSTEM or TrustedInstaller/);
       assert.ok(!fs.existsSync(dir));
     } finally { removeTempTree(base2); }
+  });
+});
+
+describe('the frontdoor unit (fleet stage 4 §3.14)', () => {
+  const base = { nodePath: '/usr/bin/node', entryPath: '/opt/king-louie/bin/king-louie-service.js', dataDir: '/var/lib/king-louie', user: 'king-louie' };
+  it('binds 443 through CAP_NET_BIND_SERVICE and cannot read home directories', () => {
+    const unit = renderSystemdUnit({ ...base, profile: 'frontdoor' });
+    assert.match(unit, /^AmbientCapabilities=CAP_NET_BIND_SERVICE$/m);
+    assert.match(unit, /^CapabilityBoundingSet=CAP_NET_BIND_SERVICE$/m);
+    assert.match(unit, /^ProtectHome=yes$/m);
+    assert.match(unit, /--profile frontdoor$/m);
+    for (const line of ['PrivateDevices=yes', 'RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX', 'LockPersonality=yes', 'RestrictSUIDSGID=yes']) {
+      assert.ok(unit.split('\n').includes(line), line);
+    }
+    const agent = renderSystemdUnit({ ...base, profile: 'agent' });
+    assert.doesNotMatch(agent, /CAP_NET_BIND_SERVICE|RestrictAddressFamilies/);
+  });
+
+  it('installs on Linux only', () => {
+    for (const platform of ['darwin', 'win32']) {
+      assert.throws(() => planInstall({ platform, ...base, profile: 'frontdoor' }), /install --profile frontdoor is Linux only/);
+    }
+    assert.ok(planInstall({ platform: 'linux', ...base, profile: 'frontdoor' }).length > 0);
   });
 });

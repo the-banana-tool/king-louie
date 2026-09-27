@@ -2038,6 +2038,7 @@ function createCore(deps = {}) {
       workingDirectory,
       allowedDirectories: executorOptions.allowedDirectories || [],
       requireApproval: true,
+      scopedBackgroundTasks: executorOptions.scopedBackgroundTasks || null,
       runtimeEnvironment: resolvedRuntimeEnvironment,
       // approvalRequester, denyAutoApproval, localOrigin and origin, plus in
       // phone mode approvalTimeoutMs and classifyCall. denyAutoApproval closes
@@ -2061,8 +2062,13 @@ function createCore(deps = {}) {
       hookExecutor: getHookSettings().enabled ? hookExecutor : null,
       useSandbox: executorOptions.useSandbox !== false,
       extraToolOptions: {
+        // Fleet stage 4 §3.8: the run's origin for tools that scope work to a
+        // job (F5's job-scoped leases).
+        origin: seam.origin,
         get agentExecutorAdapter() { return agentExecutorAdapter; },
-        get backgroundTaskManager() { return backgroundTaskManager; },
+        // A delegate turn (and its children) sees only its own session's
+        // background tasks (ruling T11-taskstatus).
+        get backgroundTaskManager() { return executorOptions.scopedBackgroundTasks || backgroundTaskManager; },
         // Case mode: the chat send path passes { ...caseTurn (caseId, dir,
         // turnId, title, orientation), runtime, ownerMessages }. The case
         // tools read it, and ToolExecutor's ledger write guard uses dir.
@@ -2217,7 +2223,12 @@ function createCore(deps = {}) {
         origin: runtimeOptions.origin || null,
         // Cases stage 3: isolated children run only their agent's tools, guarded.
         guardContext: runtimeOptions.guardContext || null,
-        allowedToolNames: runtimeOptions.allowedToolNames || null
+        allowedToolNames: runtimeOptions.allowedToolNames || null,
+        // Fleet stage 4 §3.8: a delegate turn's chat id and scope gate.
+        ...(runtimeOptions.chatId ? { chatId: runtimeOptions.chatId } : {}),
+        ...(runtimeOptions.refuseUnsafe === true ? { refuseUnsafe: true } : {}),
+        ...(Array.isArray(runtimeOptions.allowedRoots) ? { allowedRoots: runtimeOptions.allowedRoots } : {}),
+        ...(runtimeOptions.scopedBackgroundTasks ? { scopedBackgroundTasks: runtimeOptions.scopedBackgroundTasks } : {})
       }
     );
 
@@ -2447,13 +2458,22 @@ function createCore(deps = {}) {
             // Cases stage 3: an isolated child's guardContext and tool list.
             ...childRuntimeOptions(agent, options),
             workingDirectory: options.workingDirectory,
-            // The rethreaded requester every meta-tool (SpawnAgent,
-            // BackgroundTask, workflow runners) already forwards unchanged
-            // carries the parent executor's origin as a plain property
-            // (ToolExecutor#_rethreadedRequester); read it back here so the
-            // child inherits it instead of a freshly (and more poorly)
-            // computed one.
-            origin: (options.approvalRequester && options.approvalRequester.origin) || options.origin || null
+            // The rethreaded requester every meta-tool already forwards
+            // carries the parent executor's origin (ToolExecutor
+            // #_rethreadedRequester); a delegate turn passes its own in
+            // executorOptions (fleet stage 4 §3.8).
+            origin: (options.approvalRequester && options.approvalRequester.origin)
+              || (options.executorOptions && options.executorOptions.origin)
+              || options.origin || null,
+            chatId: (options.executorOptions && options.executorOptions.chatId) || null,
+            refuseUnsafe: (options.approvalRequester && options.approvalRequester.refuseUnsafe === true)
+              || (options.executorOptions && options.executorOptions.refuseUnsafe === true),
+            // The delegate cwd the refuseUnsafe fallback classifier allows (T11-roots).
+            allowedRoots: (options.approvalRequester && options.approvalRequester.allowedRoots)
+              || (options.executorOptions && options.executorOptions.allowedRoots) || null,
+            // A delegate session's background-task view (T11-taskstatus).
+            scopedBackgroundTasks: (options.approvalRequester && options.approvalRequester.scopedBackgroundTasks)
+              || (options.executorOptions && options.executorOptions.scopedBackgroundTasks) || null
           }
         );
         const executor = new AgentExecutor(runtime.provider, runtime.toolExecutor, {
@@ -3003,6 +3023,11 @@ function createCore(deps = {}) {
     getAgent,
     listAgents,
     createAgentRuntime,
+    // Fleet stage 4: delegate sessions run their turns through this.
+    getAgentExecutorAdapter: () => agentExecutorAdapter,
+    // Fleet stage 4: cancel_job on a delegate stops the background tasks its
+    // turns started.
+    getBackgroundTaskManager: () => backgroundTaskManager,
     AgentExecutor,
     AgentOrchestrator,
     buildAgentVoiceOptions,

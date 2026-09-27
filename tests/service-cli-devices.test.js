@@ -473,3 +473,102 @@ describe('doctor', () => {
     assert.match(results['audit ledger chain'].detail, /broken at seq 2/);
   });
 });
+// The helper is forked for real only on POSIX as root; everywhere else these
+// drive the same enroll-device code path through a stand-in helper that
+// runs the FileCourier in process (and can be made to die on cue).
+const { EventEmitter } = require('events');
+const { FileCourier } = require('../src/approvals/courier');
+function inProcessFork({ dieOn = null } = {}) {
+  return () => {
+    const child = new EventEmitter();
+    child.exitCode = null;
+    child.connected = true;
+    let courier = null;
+    const reply = (m) => setImmediate(() => child.emit('message', m));
+    const die = () => {
+      if (child.exitCode !== null) return;
+      child.exitCode = 1;
+      if (courier) courier.stop();
+      setImmediate(() => child.emit('exit', 1, null));
+    };
+    child.kill = die;
+    child.disconnect = () => { child.connected = false; if (courier) courier.stop(); child.exitCode = 0; };
+    child.send = (m) => {
+      if (m.type === 'start') {
+        courier = new FileCourier({ dataDir: m.dataDir, pollMs: m.pollMs || 10 }).start();
+        courier.onMessage(async (method, params) => reply({ type: 'message', method, params }));
+        reply({ type: 'ready', link: JSON.parse(fs.readFileSync(path.join(m.dataDir, 'approvals', 'link.json'), 'utf8')) });
+      } else if (m.type === 'call') {
+        if (dieOn === m.method) { die(); return; }
+        courier.call(m.method, m.params, { timeoutMs: m.timeoutMs })
+          .then((result) => reply({ type: 'reply', id: m.id, ok: true, result: result === undefined ? null : result }))
+          .catch((err) => reply({ type: 'reply', id: m.id, ok: false, error: { code: String(err.code || 'error'), message: String(err.message) } }));
+      }
+    };
+    child.dieNow = die;
+    inProcessFork.last = child;
+    return child;
+  };
+}
+
+// Ruling T13-enroll: run as root against a data dir the service account
+// owns, enroll-device's courier runs in a helper process dropped to that
+// account. `courierProcess: 'child'` forces that path on any platform.
+describe('enroll-device through the courier helper (T13-enroll)', () => {
+
+  async function begin(extraDeps) {
+    const n = node();
+    const { pump, calls } = servicePump(n);
+    const io = streamIo();
+    const phone = createFakePhone({ name: 'Pixel 9' });
+    const running = runEnrollDevice({ ...n, io, deps: { ...deps, courierProcess: 'child', ...extraDeps } });
+    const text = await waitFor(() => /Or paste this into the app: (kl1:\S+)/.exec(io.text.out) || (io.text.err && { err: io.text.err }), 'the pairing code', 15000);
+    assert.ok(!text.err, text.err);
+    const qr = decodeQr(text[1]);
+    const claimRight = () => pump.deliver(pump.routeFor('enroll.claim', { code_id: qr.code_id }), 'enroll.claim', { code_id: qr.code_id, envelope: phone.enroll({ codeId: qr.code_id, code: qr.code }) });
+    const prompted = () => waitFor(() => /does the phone show the same\? \[y\/N\]/.test(io.text.out), 'the prompt', 15000);
+    const approverFile = path.join(n.configDir, 'approvers', `${phone.deviceId}.json`);
+    return { n, io, phone, running, calls, claimRight, prompted, approverFile };
+  }
+
+  // As POSIX root the in-process pump would run as root and write replies
+  // the helper (uid 1000) cannot read; tests/approvals-e2e.test.js covers
+  // that path with a real service running as uid 1000.
+  it('enrolls through a real forked helper', { skip: POSIX && UID === 0 && 'root: covered by approvals-e2e with a uid-1000 service' }, async () => {
+    const t = await begin({});
+    assert.ok(t.claimRight());
+    await t.prompted();
+    t.io.stdin.write('y\n');
+    assert.equal(await t.running, 0, t.io.text.err);
+    const record = JSON.parse(fs.readFileSync(t.approverFile, 'utf8'));
+    assert.equal(record.enrolled_by, 'console');
+    await waitFor(() => t.calls.some(([m]) => m === 'enroll.done'), 'enroll.done');
+    assert.equal(open(t.calls.find(([m]) => m === 'enroll.done')[1].envelope).message.refused, false);
+  });
+
+  it('the helper dying while it waits for the phone fails the enrollment at once', async () => {
+    const t = await begin({ forkImpl: inProcessFork() });
+    const helper = inProcessFork.last;
+    const t0 = Date.now();
+    helper.dieNow();
+    assert.equal(await t.running, 1);
+    assert.ok(Date.now() - t0 < 4000, 'no waiting for the claim timeout');
+    assert.match(t.io.text.err, /The courier helper stopped \(the courier helper exited/);
+    assert.equal(fs.existsSync(t.approverFile), false);
+  });
+
+  it('the helper dying before the relay is told rolls the approver back', async () => {
+    const t = await begin({ forkImpl: inProcessFork({ dieOn: 'enroll.done' }) });
+    t.claimRight();
+    await t.prompted();
+    t.io.stdin.write('y\n');
+    assert.equal(await t.running, 1);
+    assert.match(t.io.text.err, /the approver file was rolled back and .* is not enrolled/);
+    assert.equal(fs.existsSync(t.approverFile), false);
+  });
+  // As POSIX root the helper path is covered end to end by
+  // tests/approvals-e2e.test.js (service running as uid 1000, enroll-device
+  // as root, nothing root-owned left in approvals/). An in-process pump here
+  // would run as root, which no installed service does.
+
+});

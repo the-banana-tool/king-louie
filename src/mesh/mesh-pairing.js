@@ -42,6 +42,12 @@ const PAIRING_CODE_WORDS = 6;
 const PAIRING_TIMEOUT_MS = 120000; // 2 minutes
 const NONCE_RE = /^[0-9a-f]{32}$/;
 const PROOF_RE = /^[0-9a-f]{64}$/;
+// §3.10 item 7: five failed proofs lock pairing for two minutes. A pairing
+// proof is knowledge of a short code, so failures are what get throttled;
+// the lock never touches mesh authentication (Ed25519 signatures), which a
+// paired peer keeps doing throughout.
+const PAIRING_MAX_FAILURES = 5;
+const PAIRING_LOCK_MS = 120000;
 
 // Each side proves it knows the code with
 //   HMAC-SHA256(secret, nonce || JCS(identity))
@@ -83,7 +89,7 @@ function proofMatches(secret, nonce, identity, proof) {
 class MeshPairing {
   // options.timeoutMs: how long a code stays valid and how long acceptCode
   // waits (default two minutes).
-  constructor(identity, transport, { timeoutMs = PAIRING_TIMEOUT_MS } = {}) {
+  constructor(identity, transport, { timeoutMs = PAIRING_TIMEOUT_MS, now = Date.now } = {}) {
     this.identity = identity;
     this.transport = transport;
     this.timeoutMs = timeoutMs;
@@ -92,13 +98,15 @@ class MeshPairing {
     // proof-valid pairing, asked before anything is trusted or answered, so
     // a refused peer gets pair:reject rather than a pair:accept taken back.
     this.admit = null;
+    this.now = now;
+    this.failedProofs = 0;
+    this.lockedUntil = 0;
   }
 
   generateCode(meta = {}) {
-    const bytes = crypto.randomBytes(PAIRING_CODE_WORDS);
     const words = [];
     for (let i = 0; i < PAIRING_CODE_WORDS; i++) {
-      words.push(WORDLIST[bytes[i]]);
+      words.push(WORDLIST[crypto.randomInt(WORDLIST.length)]);
     }
     const { pairingId, code } = this.addCode(words.join(' '), meta);
     return { pairingId, code };
@@ -262,6 +270,11 @@ class MeshPairing {
   }
 
   handlePairingRequest(ws, msg) {
+    if (this.now() < this.lockedUntil) {
+      ws.send(JSON.stringify({ type: 'pair:reject', reason: 'pairing_locked' }));
+      ws.close();
+      return null;
+    }
     const { nonce, proof, identity: remoteIdentity } = msg;
 
     // Find a pending pairing from this side (initiator side)
@@ -276,10 +289,16 @@ class MeshPairing {
     }
 
     if (!matchedPairing) {
+      this.failedProofs += 1;
+      if (this.failedProofs >= PAIRING_MAX_FAILURES) {
+        this.failedProofs = 0;
+        this.lockedUntil = this.now() + PAIRING_LOCK_MS;
+      }
       ws.send(JSON.stringify({ type: 'pair:reject', reason: 'no_matching_code' }));
       ws.close();
-      return;
+      return null;
     }
+    this.failedProofs = 0;
 
     const { id: pairingId, pairing } = matchedPairing;
     const meta = pairing.meta || {};

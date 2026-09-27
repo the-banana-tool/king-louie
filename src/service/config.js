@@ -6,7 +6,8 @@ const { EXECUTOR_ID_PATTERN } = require('../cases/executors/util');
 
 const log = createLogger('service/config');
 
-const PROFILES = new Set(['agent', 'runbook']);
+// frontdoor (fleet stage 4): the one public machine; it loads no agent code.
+const PROFILES = new Set(['agent', 'runbook', 'frontdoor']);
 // Chat channels are off by default: in stage 1 the service denies every
 // remote approval, and stage 3 brings the phone approver that makes channels
 // useful for unsafe work.
@@ -57,6 +58,34 @@ function requiredString(value, where, file) {
   return value.trim();
 }
 
+// relay.push, shared by the relay host and the front door (§3.1: "used as is").
+function parsePushConfig(raw, file) {
+  const push = {};
+  if (raw === undefined) return push;
+  if (!isPlainObject(raw)) throw new Error(`Invalid ${file}: relay.push must be an object`);
+  rejectUnknownKeys(raw, ['apns', 'fcm'], 'relay.push', file);
+  if (raw.apns !== undefined) {
+    const a = raw.apns;
+    if (!isPlainObject(a)) throw new Error(`Invalid ${file}: relay.push.apns must be an object`);
+    rejectUnknownKeys(a, ['team_id', 'key_id', 'key_file', 'topic', 'environment'], 'relay.push.apns', file);
+    const environment = a.environment === undefined ? 'production' : a.environment;
+    if (!['production', 'sandbox'].includes(environment)) throw new Error(`Invalid ${file}: relay.push.apns.environment must be production or sandbox`);
+    push.apns = {
+      teamId: requiredString(a.team_id, 'relay.push.apns.team_id', file),
+      keyId: requiredString(a.key_id, 'relay.push.apns.key_id', file),
+      keyFile: requiredString(a.key_file, 'relay.push.apns.key_file', file),
+      topic: requiredString(a.topic, 'relay.push.apns.topic', file),
+      environment
+    };
+  }
+  if (raw.fcm !== undefined) {
+    if (!isPlainObject(raw.fcm)) throw new Error(`Invalid ${file}: relay.push.fcm must be an object`);
+    rejectUnknownKeys(raw.fcm, ['service_account_file'], 'relay.push.fcm', file);
+    push.fcm = { serviceAccountFile: requiredString(raw.fcm.service_account_file, 'relay.push.fcm.service_account_file', file) };
+  }
+  return push;
+}
+
 // The relay host's block (spec §6). Returns the shape startRelay takes, or
 // null when there is no relay block.
 function parseRelayConfig(raw, file) {
@@ -74,30 +103,7 @@ function parseRelayConfig(raw, file) {
   }
   if (parsedPublicUrl.protocol !== 'https:') throw new Error(`Invalid ${file}: relay.public_url must be an https:// URL`);
   if (!parsedPublicUrl.hostname) throw new Error(`Invalid ${file}: relay.public_url must include a host`);
-  const push = {};
-  if (raw.push !== undefined) {
-    if (!isPlainObject(raw.push)) throw new Error(`Invalid ${file}: relay.push must be an object`);
-    rejectUnknownKeys(raw.push, ['apns', 'fcm'], 'relay.push', file);
-    if (raw.push.apns !== undefined) {
-      const a = raw.push.apns;
-      if (!isPlainObject(a)) throw new Error(`Invalid ${file}: relay.push.apns must be an object`);
-      rejectUnknownKeys(a, ['team_id', 'key_id', 'key_file', 'topic', 'environment'], 'relay.push.apns', file);
-      const environment = a.environment === undefined ? 'production' : a.environment;
-      if (!['production', 'sandbox'].includes(environment)) throw new Error(`Invalid ${file}: relay.push.apns.environment must be production or sandbox`);
-      push.apns = {
-        teamId: requiredString(a.team_id, 'relay.push.apns.team_id', file),
-        keyId: requiredString(a.key_id, 'relay.push.apns.key_id', file),
-        keyFile: requiredString(a.key_file, 'relay.push.apns.key_file', file),
-        topic: requiredString(a.topic, 'relay.push.apns.topic', file),
-        environment
-      };
-    }
-    if (raw.push.fcm !== undefined) {
-      if (!isPlainObject(raw.push.fcm)) throw new Error(`Invalid ${file}: relay.push.fcm must be an object`);
-      rejectUnknownKeys(raw.push.fcm, ['service_account_file'], 'relay.push.fcm', file);
-      push.fcm = { serviceAccountFile: requiredString(raw.push.fcm.service_account_file, 'relay.push.fcm.service_account_file', file) };
-    }
-  }
+  const push = parsePushConfig(raw.push, file);
   return {
     phoneListen: listenBlock(raw.phone_listen, 'relay.phone_listen', file, RELAY_DEFAULTS.phoneListen),
     tls: { certFile: requiredString(raw.tls.cert_file, 'relay.tls.cert_file', file), keyFile: requiredString(raw.tls.key_file, 'relay.tls.key_file', file) },
@@ -318,15 +324,21 @@ function loadServiceConfig(dataDir, overrides = {}, {
     log.warn("ports.desktopBridge 0 is for tests; the paired desktop can't reach an ephemeral port");
   }
 
+  // On the frontdoor profile the relay block follows §3.1 (public_url is
+  // derived; tls/phone_listen/mesh_listen are refused; push is used as is).
+  // Those refusals are startup check 4, run in order by startFrontDoor, so
+  // the raw block is handed over unparsed.
+  const frontdoor = profile === 'frontdoor';
   return {
     profile,
     features,
     ports,
-    relay: parseRelayConfig(adminCfg.relay, adminFile),
+    relay: frontdoor ? null : parseRelayConfig(adminCfg.relay, adminFile),
+    ...(frontdoor ? { relayRaw: adminCfg.relay === undefined ? null : adminCfg.relay } : {}),
     audit: parseAuditConfig(adminCfg.audit, adminFile),
     executors: validateExecutors(adminCfg.executors, adminFile),
     contact: validateContactConfig(adminCfg.contact, adminFile, { unknownKeyError })
   };
 }
 
-module.exports = { loadServiceConfig, assertAdminOwned, parseRelayConfig, parseAuditConfig, validateExecutors, PROFILES, DEFAULT_PORTS, DEFAULT_FEATURES, CONFIG_FILE, unknownKeyError };
+module.exports = { loadServiceConfig, assertAdminOwned, parseRelayConfig, parsePushConfig, parseAuditConfig, validateExecutors, PROFILES, DEFAULT_PORTS, DEFAULT_FEATURES, CONFIG_FILE, unknownKeyError };

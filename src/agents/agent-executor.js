@@ -97,7 +97,11 @@ class AgentExecutor {
       maxIterations: options.maxIterations || agent.maxIterations,
       usageTracker: this.usageTracker,
       onUsageRecorded: this.onUsageRecorded,
-      prompter: this.prompter || undefined
+      prompter: this.prompter || undefined,
+      // Fleet stage 4 §3.8: cancel_job aborts a delegate turn, tearing down
+      // in-flight tools; the session keeps its own evidence ledger.
+      abortSignal: options.abortSignal || null,
+      ...(options.evidenceLedger ? { evidenceLedger: options.evidenceLedger } : {})
     });
 
     const combinedSystemPrompt = [this.resolveAgentSystemPrompt(agent, options, userMessage), options.systemPrompt]

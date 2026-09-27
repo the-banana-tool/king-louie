@@ -15,6 +15,7 @@ import com.google.firebase.messaging.RemoteMessage
 object Push {
     const val ENABLED = true
     const val EXTRA_REQUEST_ID = "kl.rid"
+    const val EXTRA_KIND = "kl.k"
     const val CHANNEL = "approvals"
 
     fun register(activity: Activity, onToken: (String) -> Unit) {
@@ -37,23 +38,30 @@ class KlMessagingService : FirebaseMessagingService() {
     override fun onMessageReceived(message: RemoteMessage) {
         val rid = message.data["rid"] ?: return
         val kind = message.data["k"] ?: "approval"
-        if (kind != "approval") return
+        if (kind !in setOf("approval", "pairing", "alert", "question")) return
         // The relay sanitizes the node name; the text stays generic anyway.
         val node = message.data["n"].orEmpty().filter { it.isLetterOrDigit() || it in "._-" }.take(64)
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(NotificationChannel(Push.CHANNEL, "Approvals", NotificationManager.IMPORTANCE_HIGH))
         val open = PendingIntent.getActivity(
-            this, rid.hashCode(),
-            Intent(this, MainActivity::class.java).putExtra(Push.EXTRA_REQUEST_ID, rid).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            this, "$kind:$rid".hashCode(),
+            Intent(this, MainActivity::class.java).putExtra(Push.EXTRA_REQUEST_ID, rid).putExtra(Push.EXTRA_KIND, kind).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
         val notification = android.app.Notification.Builder(this, Push.CHANNEL)
             .setSmallIcon(android.R.drawable.ic_dialog_alert)
             .setContentTitle("King Louie")
-            .setContentText(if (node.isEmpty()) "Approval needed" else "Approval needed on $node")
+            .setContentText(
+                when (kind) {
+                    "pairing" -> "A node is waiting for you"
+                    "alert" -> "Front door alert"
+                    "question" -> "A question is waiting for you"
+                    else -> if (node.isEmpty()) "Approval needed" else "Approval needed on $node"
+                }
+            )
             .setContentIntent(open)
             .setAutoCancel(true)
             .build()
-        manager.notify(rid.hashCode(), notification)
+        manager.notify("$kind:$rid".hashCode(), notification)
     }
 }

@@ -115,6 +115,9 @@ in its own conversation context. Results are returned inline to the calling agen
       executeOptions.approvalRequester = options.approvalRequester;
     }
 
+    // Cancelling the parent call (a delegate cancel_job) stops the child too.
+    if (options.signal) executeOptions.abortSignal = options.signal;
+
     try {
       const result = await agentExecutorAdapter.execute(
         agent,

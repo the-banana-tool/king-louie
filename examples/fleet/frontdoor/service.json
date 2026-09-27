@@ -1,0 +1,5 @@
+{
+  "profile": "frontdoor",
+  "features": { "gateway": false, "webhooks": false, "mesh": false, "channels": false, "appDiscovery": false, "desktopBridge": false },
+  "ports": { "gateway": 18793, "webhook": 18794, "desktopBridge": 18796 }
+}
