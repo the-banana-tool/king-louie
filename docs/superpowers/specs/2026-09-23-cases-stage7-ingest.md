@@ -180,6 +180,11 @@ part once budget allows.
 
 ### 3.5 `IngestService` — `src/cases/ingest/index.js`
 
+> **As built (ruling M5).** F4 landed first, and its `king-louie-service mcp` builds no core at all, so no
+> host passes `ingest: 'none'` and the `cli.js mcp` sentence below does not apply. The `ingest: 'none'` dep
+> still exists in `createCore` (a core with no worker, as tested); the desktop and `king-louie-service run`
+> start the worker.
+
 ```js
 new IngestService({ runtime, callModel, getSettings, log, now })
 store(caseId, { name, mime?, bytes, origin })          → { docId, ref, status, duplicate, alsoInCases }
@@ -317,6 +322,17 @@ note, not a refusal). `store`/`adopt` return `alsoInCases: [{ caseId, title }]` 
 
 ### 3.7 MCP case tools (stdio) — `src/mcp/case-tools.js`
 
+> **As built (rulings M5, T12-Q1..Q3, T12-titles).** `StdioMcpServer` has no `caseTools` option and
+> `cli.js mcp` builds no core (F4). The definitions live in the require-free
+> `src/cases/mcp-tool-definitions.js`. The running service's `FleetToolHandler` serves the case tools on an
+> agent node (built in `src/fleet/start.js`, channel `mcp-stdio`, stdio origin only), and `mcp` reaches them
+> through the file courier: it reads the service's `mcp.tools_list` reply as names only and shows its own
+> definitions. With no service running, `mcp` serves the fleet tools only (T12-Q1). No MCP channel answers
+> an `ingest:review` question, whatever its `mcpAnswerable` says, and the review effect refuses `mcp-*`
+> channels again. `list_cases` and `open_case` return title and slug inside the untrusted wrapper
+> (T12-titles). Anything running as the service account can write the courier files and answer as
+> `mcp-stdio` (T12-Q3, accepted; see CLAUDE.md).
+
 ```js
 CASE_MCP_TOOLS   // [{ name, description, inputSchema, tier }]
 createCaseToolHandler({ getRuntime, channel: 'mcp-stdio' | 'mcp-frontdoor', audit? }) → { names: Set, call(name, args) → result }
@@ -357,6 +373,13 @@ same authority as the panel's answer button; answering records what the owner sa
 envelopes, signed authority and the refusals above.
 
 ### 3.8 Front door (wave 4) and `delegate`
+
+> **As built (ruling T16-Q2, pending an owner decision).** The front door is read-only: only `cases:read`
+> (`list_cases`, `open_case`, `get_orientation`) is registered, from `src/frontdoor/tool-extensions.js`.
+> `cases:write` and `answer_question` are not registered, so listing `cases:write` in
+> `frontdoor.oauth.scopes_enabled` stops the front door at startup. Agent nodes serve the read tools as
+> `cases.<tool>` link methods, each with its own scope, on the `mcp-frontdoor` channel. A per-grant call-rate
+> limit in F4 is a precondition for bringing `answer_question` back.
 
 Wave 4 uses F4's route contract by name (R53; F4 spec §3.4 scopes, §3.6 `registerTool`, §3.7
 `NodeFleetService`, §5.2; program §4.19), with no routing of C7's own:
