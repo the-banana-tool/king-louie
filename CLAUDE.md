@@ -439,12 +439,12 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage5-detours.md`.
   stands: a later, different answer gets no C4 conflict follow-up, only an ack
   saying the first answer stands (`contact.js` `_apply`, ruling
   INT-detour), and changes are made in the app. C5 has no re-route API, so
-  changing a routing already applied is a manual step there. Answering
-  over MCP is designed but not yet wired up: `src/mcp/stdio-server.js`'s
-  `delegate` always throws (no agent session starts there yet), so it isn't a
-  live path today. Future sources are `delegate` and C7's front-door
-  `answer_question`. Routing questions keep `mcpAnswerable` at its default of
-  `true`.
+  changing a routing already applied is a manual step there. Local MCP
+  clients can answer through C7's `answer_question` on the `mcp-stdio`
+  channel (the running service's case tools, stage 7). The front door's case
+  tools are read-only for now, so no front-door client answers. `delegate`
+  remains a future source. Routing questions keep `mcpAnswerable` at its
+  default of `true`.
 - Case types are code in `src/cases/case-types/` (`general`, `outreach`,
   `software-repo`); `case.yaml.type` is validated at creation. A
   `software-repo` case runs read-only `git` and `gh` at turn start (tests
@@ -698,5 +698,6 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage7-ingest.md`.
   `frontdoor.oauth.scopes_enabled`. Agent nodes serve them as
   `cases.<tool>` link methods, each with its own scope, on the
   `mcp-frontdoor` channel. `answer_question` and `cases:write` are withheld
-  pending an owner decision; adding them back is one `CASE_SCOPES` entry
-  plus its tests.
+  pending an owner decision, so listing `cases:write` in `scopes_enabled`
+  stops the front door at startup (nothing registers it); adding them back
+  is one `CASE_SCOPES` entry plus its tests.

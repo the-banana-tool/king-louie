@@ -1,6 +1,7 @@
 // The scopes the front door can grant (§3.4). A scope is advertised only
 // once it is registered here and listed in frontdoor.oauth.scopes_enabled;
-// C7 registers cases:read / cases:write the same way (program §4.19).
+// C7 registers cases:read the same way (program §4.19); cases:write is
+// withheld for now (front-door case tools are read-only).
 const { REQUIRED_SCOPE } = require('../../fleet/scope-rules');
 
 const SCOPE_RE = /^[a-z][a-z0-9-]{0,31}:[a-z][a-z0-9_-]{0,31}$/;

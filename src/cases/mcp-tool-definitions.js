@@ -103,7 +103,17 @@ function registerFrontDoorCaseTools({ scopeRegistry, router }) {
   }
   for (const tool of CASE_MCP_TOOLS) {
     if (!Object.hasOwn(CASE_TOOL_SCOPE, tool.name)) continue;
-    const route = tool.name === 'list_cases' ? () => ({ fanout: true }) : (args) => ({ machine: args.machine });
+    // list_cases takes no arguments: one is refused here (the router answers
+    // invalid_params) rather than fanned out to nodes that would each refuse
+    // it and be listed as unreachable. The router bounds each node's reply
+    // at max_bytes but not the combined fan-out; accepted under ruling
+    // T16-Q1 (rows are short summaries, one per case).
+    const route = tool.name === 'list_cases'
+      ? (args) => {
+        if (Object.keys(args || {}).length > 0) throw new Error('list_cases takes no arguments');
+        return { fanout: true };
+      }
+      : (args) => ({ machine: args.machine });
     router.registerTool(frontDoorDef(tool), { scope: CASE_TOOL_SCOPE[tool.name], route });
   }
 }

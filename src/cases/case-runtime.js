@@ -10,7 +10,7 @@ const path = require('path');
 const git = require('./git');
 const { CaseStore } = require('./case-store');
 const { FactLedger } = require('./ledger');
-const { Brief } = require('./brief');
+const { Brief, BriefError } = require('./brief');
 const { CaseRecords } = require('./records');
 const { buildOrientation, DEFAULT_MAX_CHARS } = require('./orientation');
 const { canTransition, check: checkStatus, StatusError, AUTONOMY_KEY, REASON_KINDS } = require('./status');
@@ -337,7 +337,15 @@ class CaseRuntime {
     try {
       brief = { data: new Brief(meta.dir).read().data };
     } catch (err) {
-      brief = { error: err.message };
+      // The orientation leaves the node (MCP, the front door): a BriefError
+      // describes the file's content; any other error (ENOENT, EACCES) names
+      // the node's absolute path, so it is logged and replaced.
+      if (err instanceof BriefError) {
+        brief = { error: err.message };
+      } else {
+        log.warn(`Orientation for ${meta.slug}: brief.md unreadable: ${err.message}`);
+        brief = { error: 'brief.md is missing or unreadable' };
+      }
     }
     const records = new CaseRecords(meta.dir);
     const safely = (label, fn, fallback) => {
