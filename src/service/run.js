@@ -2,7 +2,7 @@ const path = require('path');
 const { createLogger } = require('../logging');
 const { acquireInstanceLock } = require('./pidfile');
 const { loadServiceConfig } = require('./config');
-const { ensureServicePaths, ensurePrivateDir } = require('../platform/paths');
+const { ensureServicePaths, ensurePrivateDir, asarUnpackedPath } = require('../platform/paths');
 const { attachServiceLogFile } = require('./log-file');
 
 const log = createLogger('service');
@@ -107,7 +107,7 @@ function loadProfile(profile) {
             approvals, // Cases stage 4 (wave 3): the phone contact channel (relay link, admin approvers, node identity)
             nodePolicy: nodeConfig.policy,
             builtinSkillsDir: path.join(__dirname, '..', '..', 'skills'),
-            examplesDir: path.join(__dirname, '..', '..', 'examples', 'playbooks'),
+            examplesDir: asarUnpackedPath(path.join(__dirname, '..', '..', 'examples', 'playbooks')),
             // Cases stage 3: executors only from the admin service.json (R42);
             // always present, so the registry is always in service mode here.
             adminExecutors: executors || { entries: {}, packageRoots: [] },

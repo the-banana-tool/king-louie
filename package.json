@@ -41,6 +41,9 @@
       "!examples/**",
       "examples/playbooks/**"
     ],
+    "asarUnpack": [
+      "examples/playbooks/**"
+    ],
     "win": {
       "target": [
         "nsis"

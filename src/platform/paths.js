@@ -211,7 +211,18 @@ function ensureServicePaths(dataDir, { onPath = null } = {}) {
   return paths;
 }
 
+// A folder that ships inside a packaged app's app.asar and is listed in
+// build.asarUnpack: the same path under app.asar.unpacked, where the real
+// files are. Electron's asar layer gives lstat synthetic dev/ino values and
+// extracts opened files to a temp copy, so a reader that compares lstat with
+// fstat (the playbook vendor does) must read the unpacked copy. Outside an
+// asar the path is returned unchanged.
+function asarUnpackedPath(p) {
+  return String(p).replace(/([\\/])app\.asar(?=$|[\\/])/, '$1app.asar.unpacked');
+}
+
 module.exports = {
+  asarUnpackedPath,
   defaultServiceDataDir,
   adminConfigDir,
   adminCredentialPath,
