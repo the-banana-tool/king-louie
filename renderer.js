@@ -1993,6 +1993,14 @@ async function caseSourcesAddOne(caseId, file, name, source) {
   return `${name}: Added ${r.ref}${also}`;
 }
 
+// The owner is editing in this row: an edit form is open or one of its
+// inputs has focus.
+function caseSourcesEditing(row) {
+  if (row.querySelector('.case-proposal-edit:not([hidden])')) return true;
+  const active = document.activeElement;
+  return Boolean(active && active.tagName === 'INPUT' && row.contains(active));
+}
+
 async function renderCaseSourcesSection(chat, container) {
   container.innerHTML = '';
   const caseId = chat.caseId;
@@ -2028,15 +2036,23 @@ async function renderCaseSourcesSection(chat, container) {
   };
   const settle = () => { settleUntil = Date.now() + CASE_SOURCES_SETTLE_MS; };
 
-  async function refresh() {
+  // A row with an open edit form, or focus in one of its inputs, is kept as
+  // it is, so a poll never resets what the owner is typing; rebuild names the
+  // row an action just changed, which is always rebuilt.
+  async function refresh({ rebuild = null } = {}) {
     if (!container.isConnected && list.childElementCount) return;
     const res = await window.electron.cases.sources({ caseId });
+    const kept = new Map();
+    for (const row of Array.from(list.children)) {
+      const id = row.dataset?.docId;
+      if (id && id !== rebuild && caseSourcesEditing(row)) kept.set(id, row);
+    }
     list.innerHTML = '';
     if (!res?.ok) { say([res?.error || 'Could not load the sources.']); return; }
     const documents = Array.isArray(res.documents) ? res.documents : [];
     if (!documents.length) list.appendChild(caseSourcesEl('div', 'case-sources-empty', 'No documents yet.'));
     const ctx = { refresh, say, fail, openDocs, settle };
-    for (const doc of documents) list.appendChild(renderCaseSourceRow(caseId, doc, ctx));
+    for (const doc of documents) list.appendChild(kept.get(doc.docId) || renderCaseSourceRow(caseId, doc, ctx));
     if (documents.some((d) => CASE_SOURCES_BUSY.has(d.status)) || Date.now() < settleUntil) schedule();
   }
 
@@ -2140,9 +2156,25 @@ function caseSourcesBadges(p) {
   ].filter(Boolean);
 }
 
+// What accepting p over a conflicting fact x does, for the confirm dialog.
+// Every supersede asks; replacing the owner's own statement is worded as such.
+function caseSourcesSupersedeMessage(p, x, stmt, edited) {
+  const what = edited ? `Save your edit of ${p.id} and accept it` : `Accept ${p.id}`;
+  if (x.provenance === 'user') {
+    return `${what}, replacing ${x.factId}, which is your own statement? ${x.factId} will no longer be an active fact: it stays in the ledger only as superseded, and a statement read from a document takes its place as a private sourced fact: ${stmt}`;
+  }
+  return `${what} and supersede ${x.factId}? ${x.factId} stays in the ledger as superseded, and this becomes a private sourced fact in its place: ${stmt}`;
+}
+
+function caseSourcesKeepBothMessage(p, conflicts, stmt, edited) {
+  const what = edited ? `Save your edit of ${p.id} and accept it` : `Accept ${p.id}`;
+  return `${what} and keep ${conflicts.map((x) => x.factId).join(', ')} as well? Both stay active facts although they conflict, and this becomes a private sourced fact alongside: ${stmt}`;
+}
+
 // The proposal's edit form: only stmt and value, only when changed, and
-// only within the handler's caps.
-function caseSourcesEditForm(p, act, say) {
+// only within the handler's caps. With conflicts, an edit is saved with a
+// supersede or keep-both choice, confirmed like the plain ones.
+function caseSourcesEditForm(p, conflicts, act, say) {
   const edit = caseSourcesEl('div', 'case-proposal-edit');
   edit.hidden = true;
   const oldValue = p.value === null || p.value === undefined ? '' : String(p.value);
@@ -2154,20 +2186,43 @@ function caseSourcesEditForm(p, act, say) {
   value.className = 'chat-info-input';
   value.maxLength = CASE_SOURCES_EDIT_CAP.value;
   value.value = oldValue;
-  edit.append(stmt, value, caseSourcesButton('Save edit', async () => {
-    const changes = {};
+  // → the changed fields, or null after telling the owner why not.
+  const changes = () => {
+    const out = {};
     if (stmt.value !== (p.stmt || '')) {
-      if (!stmt.value.trim()) { say([`${p.id}: the statement needs text.`]); return; }
-      if (stmt.value.length > CASE_SOURCES_EDIT_CAP.stmt) { say([`${p.id}: the statement is longer than ${CASE_SOURCES_EDIT_CAP.stmt} characters.`]); return; }
-      changes.stmt = stmt.value;
+      if (!stmt.value.trim()) { say([`${p.id}: the statement needs text.`]); return null; }
+      if (stmt.value.length > CASE_SOURCES_EDIT_CAP.stmt) { say([`${p.id}: the statement is longer than ${CASE_SOURCES_EDIT_CAP.stmt} characters.`]); return null; }
+      out.stmt = stmt.value;
     }
     if (value.value !== oldValue) {
-      if (value.value.length > CASE_SOURCES_EDIT_CAP.value) { say([`${p.id}: the value is longer than ${CASE_SOURCES_EDIT_CAP.value} characters.`]); return; }
-      changes.value = value.value.trim() ? value.value : null;
+      if (value.value.length > CASE_SOURCES_EDIT_CAP.value) { say([`${p.id}: the value is longer than ${CASE_SOURCES_EDIT_CAP.value} characters.`]); return null; }
+      out.value = value.value.trim() ? value.value : null;
     }
-    if (!Object.keys(changes).length) { say([`${p.id}: nothing changed.`]); return; }
-    await act(p.id, { action: 'edit', edit: changes }, 'edited and accepted');
-  }, (err) => say([err.message])));
+    if (!Object.keys(out).length) { say([`${p.id}: nothing changed.`]); return null; }
+    return out;
+  };
+  const onError = (err) => say([err.message]);
+  edit.append(stmt, value);
+  if (!conflicts.length) {
+    edit.appendChild(caseSourcesButton('Save edit', async () => {
+      const c = changes();
+      if (c) await act(p.id, { action: 'edit', edit: c }, 'edited and accepted');
+    }, onError));
+  }
+  for (const x of conflicts) {
+    edit.appendChild(caseSourcesButton(`Save edit & supersede ${x.factId}`, async () => {
+      const c = changes();
+      if (!c || !(await showConfirmDialog(caseSourcesSupersedeMessage(p, x, c.stmt ?? p.stmt ?? '', true)))) return;
+      await act(p.id, { action: 'edit', edit: c, supersedes: x.factId }, `edited and accepted, superseding ${x.factId}`);
+    }, onError));
+  }
+  if (conflicts.length && conflicts.every((x) => x.provenance !== 'user')) {
+    edit.appendChild(caseSourcesButton('Save edit & keep both', async () => {
+      const c = changes();
+      if (!c || !(await showConfirmDialog(caseSourcesKeepBothMessage(p, conflicts, c.stmt ?? p.stmt ?? '', true)))) return;
+      await act(p.id, { action: 'edit', edit: c, keepBoth: true }, 'edited and accepted alongside the conflicting fact');
+    }, onError));
+  }
   return edit;
 }
 
@@ -2182,7 +2237,7 @@ async function renderCaseSourceProposals(caseId, doc, container, ctx) {
     const r = await window.electron.cases.reviewProposal({ caseId, docId: doc.docId, proposalId, ...params });
     if (!r?.ok) { ctx.say([`${proposalId}: ${r?.error || 'Review failed.'}`]); return; }
     ctx.say([`${proposalId}: ${done}${r.fact?.id ? ` as ${r.fact.id}` : ''}.`]);
-    await ctx.refresh();
+    await ctx.refresh({ rebuild: doc.docId });
   };
   // Accept all verified is for the owner's own files only (the record and
   // the list row must both say so); a file King Louie added is reviewed one
@@ -2199,7 +2254,7 @@ async function renderCaseSourceProposals(caseId, doc, container, ctx) {
       const accepted = Array.isArray(r.accepted) ? r.accepted : [];
       const skipped = Array.isArray(r.skipped) ? r.skipped : [];
       ctx.say([`Accepted ${accepted.length}${accepted.length ? `: ${accepted.join(', ')}` : ''}.`, ...skipped.map((s) => `${s.pid || 'A proposal'} skipped: ${s.why}`)]);
-      await ctx.refresh();
+      await ctx.refresh({ rebuild: doc.docId });
     }, ctx.fail));
   }
   const audit = document.createElement('details');
@@ -2223,18 +2278,21 @@ async function renderCaseSourceProposals(caseId, doc, container, ctx) {
     const actions = caseSourcesEl('div', 'case-source-actions');
     const conflicts = Array.isArray(p.checks?.conflicts) ? p.checks.conflicts : [];
     if (!conflicts.length) actions.appendChild(caseSourcesButton('Accept', () => act(p.id, { action: 'accept' }, 'accepted'), ctx.fail));
-    // A conflict is shown, never resolved for the owner: superseding their
-    // own statement asks first.
+    // A conflict is shown, never resolved for the owner: every supersede
+    // and every keep-both asks first.
     for (const x of conflicts) {
       actions.appendChild(caseSourcesButton(`Accept & supersede ${x.factId}`, async () => {
-        if (x.provenance === 'user' && !(await showConfirmDialog(`Accept ${p.id} and supersede ${x.factId}, which is your own statement? ${x.factId} stays in the ledger as superseded, and this becomes a private sourced fact in its place: ${p.stmt || ''}`))) return;
+        if (!(await showConfirmDialog(caseSourcesSupersedeMessage(p, x, p.stmt || '', false)))) return;
         await act(p.id, { action: 'accept', supersedes: x.factId }, `accepted, superseding ${x.factId}`);
       }, ctx.fail));
     }
     if (conflicts.length && conflicts.every((x) => x.provenance !== 'user')) {
-      actions.appendChild(caseSourcesButton('Keep both', () => act(p.id, { action: 'accept', keepBoth: true }, 'accepted alongside the conflicting fact'), ctx.fail));
+      actions.appendChild(caseSourcesButton('Keep both', async () => {
+        if (!(await showConfirmDialog(caseSourcesKeepBothMessage(p, conflicts, p.stmt || '', false)))) return;
+        await act(p.id, { action: 'accept', keepBoth: true }, 'accepted alongside the conflicting fact');
+      }, ctx.fail));
     }
-    const edit = caseSourcesEditForm(p, act, ctx.say);
+    const edit = caseSourcesEditForm(p, conflicts, act, ctx.say);
     actions.appendChild(caseSourcesButton('Edit', () => { edit.hidden = !edit.hidden; }));
     actions.appendChild(caseSourcesButton('Reject', () => act(p.id, { action: 'reject' }, 'rejected'), ctx.fail));
     card.append(actions, edit);

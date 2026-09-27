@@ -37,12 +37,20 @@ describe('renderer sources section text', () => {
     assert.doesNotMatch(block, /\beval\(|new Function\(|\.on\w+\s*=/);
   });
 
-  it('keeps accept-all and user-fact supersede behind a confirm, and accept-all for owner files only', () => {
+  it('keeps accept-all, every supersede and every keep-both behind an unconditional confirm', () => {
     const block = sourcesBlock();
     const acceptAll = block.indexOf('acceptVerified(');
     assert.ok(acceptAll > 0, 'accept-all is wired');
     assert.ok(block.lastIndexOf('showConfirmDialog(', acceptAll) > block.lastIndexOf('function ', acceptAll), 'accept-all asks first');
     assert.match(block, /OWNER_ORIGINS|owner-drop/);
-    assert.match(block, /provenance === 'user'[\s\S]{0,400}showConfirmDialog\(/);
+    // Each act(...) that supersedes or keeps both follows, within its own
+    // button handler, a confirm that is not skipped for some provenance.
+    const calls = [...block.matchAll(/await act\([^\n]*(supersedes: x\.factId|keepBoth: true)/g)];
+    assert.strictEqual(calls.length, 4, 'accept and edit, each with supersede and keep-both');
+    for (const m of calls) {
+      const before = block.slice(block.lastIndexOf('caseSourcesButton(', m.index), m.index);
+      assert.match(before, /if \((!c \|\| )?!\(await showConfirmDialog\(/, m[0]);
+      assert.doesNotMatch(before, /provenance/, m[0]);
+    }
   });
 });
