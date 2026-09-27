@@ -24,6 +24,30 @@ describe('case git wrapper', () => {
     assert.strictEqual(count.trim(), '0');
   });
 
+  // Linux landing: each "git config" write changed the config and forced a
+  // full config check (four git processes) before it ran.
+  it('initRepo sets the identity and autocrlf with two git processes, and commits work', async () => {
+    const { ChildProcess } = require('child_process');
+    const dir = tmp();
+    // Every child process goes through ChildProcess#spawn.
+    const realSpawn = ChildProcess.prototype.spawn;
+    let calls = 0;
+    ChildProcess.prototype.spawn = function (...a) { calls += 1; return realSpawn.apply(this, a); };
+    try {
+      await git.initRepo(dir);
+    } finally {
+      ChildProcess.prototype.spawn = realSpawn;
+    }
+    assert.strictEqual(calls, 2, 'the no-repo check and git init');
+    const get = async (k) => (await git.git(dir, ['config', '--local', '--get', k])).trim();
+    assert.strictEqual(await get('user.name'), 'King Louie');
+    assert.strictEqual(await get('user.email'), 'king-louie@localhost');
+    assert.strictEqual(await get('core.autocrlf'), 'false');
+    fs.writeFileSync(path.join(dir, 'facts.jsonl'), '');
+    assert.ok(await git.commitAll(dir, 'first'));
+    assert.strictEqual((await git.git(dir, ['log', '-1', '--format=%an <%ae>'])).trim(), 'King Louie <king-louie@localhost>');
+  });
+
   it('ignores repository hooks and commit signing', async () => {
     const dir = tmp();
     await git.initRepo(dir);

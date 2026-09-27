@@ -824,13 +824,22 @@ function ensureGitattributes(dir) {
   return true;
 }
 
+// Written into a new case repo's .git/config right after git init: a local
+// identity so commits work on machines with no global git config, and
+// core.autocrlf off so facts.jsonl stays byte-identical across platforms.
+// Constants, so no quoting is needed; git accepts a second [core] section.
+const INIT_CONFIG = '[user]\n\tname = King Louie\n\temail = king-louie@localhost\n[core]\n\tautocrlf = false\n';
+
 async function initRepo(dir) {
   await git(dir, ['init', '-q']);
-  // Local identity so commits work on machines with no global git config.
-  await git(dir, ['config', 'user.name', 'King Louie']);
-  await git(dir, ['config', 'user.email', 'king-louie@localhost']);
-  // facts.jsonl must stay byte-identical across platforms.
-  await git(dir, ['config', 'core.autocrlf', 'false']);
+  // Appended directly rather than with three "git config" calls: each of
+  // those changed the config, so each forced a full config check (four git
+  // processes) before it ran, which tripled the git cost of creating a case.
+  // The first git call after this checks the resulting config as usual.
+  const configFile = path.join(dir, '.git', 'config');
+  const st = fs.lstatSync(configFile);
+  if (!st.isFile()) throw new Error(`${configFile} is not a plain file; the case repository was not set up.`);
+  fs.appendFileSync(configFile, INIT_CONFIG);
   ensureGitattributes(dir);
 }
 
