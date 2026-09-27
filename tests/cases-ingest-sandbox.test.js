@@ -324,10 +324,11 @@ describe('openPdf sandbox limits', () => {
     await pdf.close();
   });
 
-  // About 262k one-byte writes: ~5.5 s alone, but over 60 s under a loaded
-  // full suite on Windows (final review I2). The drip stays one byte per
-  // write, since the per-chunk memory bug it catches scales with the number
-  // of writes; the test gets its own, longer budget instead.
+  // About 131k one-byte writes (a 128 KB frame): the 256 KB frame took
+  // ~5.5 s alone but 140 s under a loaded full suite on Windows (final
+  // review I2, residual round). The drip stays one byte per write, since the
+  // per-chunk memory bug it catches scales with the number of writes; the
+  // test also has its own, longer budget.
   it('keeps a reply dripped one byte per write to about its own size in memory', { timeout: 240000 }, async () => {
     const pdf = await openPdf(await makePdf(), { testHooks: true, timeouts: { call: 200000 } });
     try {
@@ -342,10 +343,10 @@ describe('openPdf sandbox limits', () => {
       }, 5);
       const t0 = Date.now();
       const text = await pdf._testHook('drip').finally(() => clearInterval(sampler));
-      assert.strictEqual(text.length, 256 * KB);
-      // The frame is 256 KB (small, so the one-byte writes take seconds, not
-      // most of the call timeout). Keeping every chunk instead of one
-      // preallocated body peaked at ~165 MB rss here; the fix stays ~18 MB.
+      assert.strictEqual(text.length, 128 * KB);
+      // Keeping every chunk instead of one preallocated body peaked at
+      // ~165 MB rss with the 256 KB frame and ~84 MB with this 128 KB one;
+      // the fix stays ~18 MB.
       assert.ok(peakAb < 2 * MB, `arrayBuffers peaked ${(peakAb / MB).toFixed(1)} MB over ${Date.now() - t0} ms`);
       assert.ok(peakRss < 48 * MB, `rss peaked ${(peakRss / MB).toFixed(1)} MB`);
     } finally {
