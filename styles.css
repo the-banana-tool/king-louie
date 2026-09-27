@@ -2996,24 +2996,47 @@ body {
 /* Cases stage 4: questions across cases, presence and the contact policy */
 .questions-section { display: flex; flex-direction: column; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--border-subtle); max-height: 45vh; overflow-y: auto; }
 .questions-section:empty { display: none; }
-.questions-header { display: flex; align-items: center; gap: 8px; font-weight: 600; color: var(--text-primary); }
+.questions-header { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); }
+.questions-section select,
+.questions-section input[type="text"],
+.questions-section input[type="time"],
+.questions-section input[type="datetime-local"] {
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-default);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  color-scheme: dark;
+  outline: none;
+  min-width: 0;
+}
+.questions-section select { cursor: pointer; }
+.questions-section input::placeholder { color: var(--text-faint); }
+.questions-section select:focus,
+.questions-section input:focus { border-color: var(--accent); }
+.questions-section input[type="checkbox"] { accent-color: var(--accent); }
+.questions-away-until { flex: 1 1 150px; }
+.questions-section input[type="time"] { box-sizing: border-box; width: 86px; flex: 0 0 auto; }
 .questions-presence-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--text-faint); }
 .questions-presence-dot.is-here { background: var(--success); }
 .questions-presence-dot.is-elsewhere { background: var(--warning); }
 .questions-away, .questions-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
-.questions-away-note, .questions-ladder, .questions-empty { font-size: 0.8em; color: var(--text-muted); }
+.questions-away-note, .questions-ladder, .questions-empty { font-size: 12px; color: var(--text-muted); }
 .questions-card { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; border: 1px solid var(--border-default); border-radius: var(--radius-sm); background: var(--bg-elevated); }
 .questions-card.questions-urgency-high { border-color: var(--error); }
 .questions-case { font-size: 0.8em; color: var(--text-secondary); }
 .questions-text { color: var(--text-primary); white-space: pre-wrap; }
 .questions-input { flex: 1; min-width: 80px; }
-.questions-btn { padding: 2px 8px; font-size: 0.85em; }
+.questions-btn { padding: 3px 8px; font-size: 12px; }
 .questions-error { color: var(--error); font-size: 0.85em; }
 .questions-ladder-elsewhere { color: var(--warning); font-size: 0.85em; }
-.questions-policy summary { cursor: pointer; color: var(--text-secondary); }
-.questions-policy-row { display: flex; align-items: center; gap: 4px; margin: 4px 0; font-size: 0.85em; }
+.questions-policy summary { cursor: pointer; color: var(--text-secondary); font-size: 12px; }
+.questions-policy-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 4px 0; font-size: 12px; color: var(--text-secondary); }
+.questions-policy-check { display: inline-flex; align-items: center; gap: 3px; }
 .questions-policy-ladder { flex: 1; font-family: var(--font-mono); }
-.questions-policy-channels { margin: 4px 0; padding-left: 16px; font-size: 0.8em; color: var(--text-muted); }
+.questions-policy-channels { margin: 4px 0; padding-left: 16px; font-size: 11px; color: var(--text-muted); }
 .questions-policy-channels .is-ready { color: var(--success); }
 
 /* Cases stage 6: playbooks */
