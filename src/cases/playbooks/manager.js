@@ -66,6 +66,14 @@ function snapshotFileHashes(snapshot) {
   return out;
 }
 
+// R30, in one place (parked P9): a playbook budget value is a raise when
+// the settings default is a positive limit and the value is above it. 0 or
+// null is unlimited in C2, so nothing can raise it. A raise is written only
+// with the owner's confirm; every other value applies.
+function isRaise(value, from) {
+  return from !== null && from !== undefined && from !== 0 && value > from;
+}
+
 function editedFiles(before, now) {
   const names = new Set([...Object.keys(before || {}), ...Object.keys(now || {})]);
   return [...names].filter((n) => (before || {})[n] !== (now || {})[n]).sort();
@@ -472,7 +480,7 @@ class PlaybookManager {
         continue;
       }
       const from = base[key] ?? null;
-      const lower = from === null || from === 0 || value <= from;
+      const lower = !isRaise(value, from);
       if (lower || acceptBudgetRaises === true) {
         budget[key] = value;
         budgetChanged = true;
@@ -711,7 +719,7 @@ class PlaybookManager {
     for (const [key, value] of Object.entries(entry.package.playbook.budgetDefaults || {})) {
       if (budget[key] !== undefined && budget[key] !== null) continue;
       const from = base[key] ?? null;
-      if (from === null || from === 0 || value <= from) continue;
+      if (!isRaise(value, from)) continue;
       out.push({ key, from, to: value });
     }
     return out;
@@ -1196,4 +1204,4 @@ class PlaybookManager {
   }
 }
 
-module.exports = { PlaybookManager, PlaybookError, resolvePlaybookSettings, MAX_CREATE_PLAYBOOKS, GATING_SYNC_FAILED_NOTE, HOOK_FAILED_NOTE };
+module.exports = { PlaybookManager, PlaybookError, resolvePlaybookSettings, isRaise, MAX_CREATE_PLAYBOOKS, GATING_SYNC_FAILED_NOTE, HOOK_FAILED_NOTE };

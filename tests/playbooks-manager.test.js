@@ -167,6 +167,17 @@ describe('attach', () => {
 });
 
 describe('defaults', () => {
+  it('isRaise is the one R30 rule both the attach and the offer list use (parked P9)', () => {
+    const { isRaise } = require('../src/cases/playbooks/manager');
+    assert.strictEqual(isRaise(40, 20), true);
+    assert.strictEqual(isRaise(20, 20), false, 'equal is not a raise');
+    assert.strictEqual(isRaise(10, 20), false, 'lower applies');
+    assert.strictEqual(isRaise(40, 0), false, '0 is unlimited: nothing raises it');
+    assert.strictEqual(isRaise(40, null), false, 'no default: nothing to raise');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'cases', 'playbooks', 'manager.js'), 'utf8');
+    assert.strictEqual((src.match(/value <= from|value > from/g) || []).length, 1, 'the comparison lives only in isRaise');
+  });
+
   it('materiality fills gaps and never moves an owner ignore to tell', async (t) => {
     if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
     const { rt, mgr, id } = await world();
