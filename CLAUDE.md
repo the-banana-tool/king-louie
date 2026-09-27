@@ -639,3 +639,42 @@ plain copy into `<case>/playbooks/<name>/`, recorded in `case.yaml.playbooks[]` 
 - Attached, the `case:*` playbook channels are proxied to the service: `path:` sources and a
   proposal's `repoPath` are resolved on the service host as the service account, under the service's
   admin policy.
+
+## Cases: document ingest (stage 7)
+
+Spec: `docs/superpowers/specs/2026-09-23-cases-stage7-ingest.md`.
+
+- `src/cases/ingest/` stores documents under a case's `sources/` and reads
+  them: the PDF text layer through `unpdf`, one-page copies through
+  `pdf-lib` (both pure JS), and vision OCR through the existing providers.
+  PDF parsing itself runs out of process (`src/cases/ingest/pdf-sandbox.js`):
+  a forked, memory-capped worker with wall-clock timeouts, framed stdin/fd3
+  I/O and no Node IPC channel, so a hostile PDF cannot hang or OOM the
+  desktop main process or the service. Proposals, text and page caches live
+  in `.kl/ingest/` (the page cache, `publish.json` and C2's `budget.json` are
+  written outside `systemAction`; everything else — records, sidecars,
+  sources, the journal and facts — goes through it).
+- Only the owner accepts a proposal (panel or a review question); accepted
+  facts are `provenance: 'sourced'` and `disclosable: false` whatever their
+  category, with a host-built, host-checked source. Accept-all re-checks
+  everything that needs no model call at accept time (the stored bytes'
+  hash, the quote re-read from those bytes, the proposal's fields, conflicts
+  and duplicates) and skips on any difference; only the verify verdict and
+  the origin stay record-trusted, the same Bash/import limit as
+  `facts.jsonl` (a forged verdict can pass accept-all, but the fact stays
+  private and owner-visible either way).
+- The model reads document text with the `Ingest` tool's `text` action, not
+  `Read`: `Read` on a file under `sources/` is an unguarded residual (no
+  untrusted-output wrap, no cap) that the tool path exists to avoid.
+- The entity index is `<casesRoot>/.index/entities.json` (derived; delete it
+  freely). `CaseRuntime.entityIndex().nonDisclosableSpans(text, { caseId })`
+  feeds C3's outbound gate (`gates.gateLeaves`); its documented residuals —
+  what a disguised or split value can still slip past — are the comments in
+  `src/cases/gates.js` and `src/cases/entities/fold.js`, not this file.
+- In attached mode, a single file over about 47 MB is refused by the
+  bridge's frame limit; add a document that large on the service host
+  instead of dropping it from the desktop client.
+- Tests generate PDFs in memory (`tests/helpers/ingest-fixtures.js`) and use
+  `tests/helpers/ingest-harness.js`: a real `CaseRuntime` on a temp root and
+  a scripted `callModel`, so no provider or token is needed. Call
+  `svc.drain()` before asserting on a record.

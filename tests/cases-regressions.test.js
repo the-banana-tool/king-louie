@@ -497,3 +497,43 @@ describe('F2-late: a load-bearing question reaches the owner on day 1, not day 6
     assert.strictEqual(w.runtime.questions(w.info.id).get(w.q.id).answer, null, 'the question stays open; nothing is guessed');
   });
 });
+
+describe('F5-doc: a document in one case informs and guards another (cases stage 7)', () => {
+  const { ingestHarness, cleanup: cleanupIngest } = require('./helpers/ingest-harness');
+  const { payoffLetterPdf } = require('./helpers/ingest-fixtures');
+  const { LedgerTool } = require('../src/tools/builtin/case-tools');
+  const { after: afterAll } = require('node:test');
+
+  afterAll(cleanupIngest);
+
+  it('payoff letter in Lakeside lot: named on unknown, alsoInCases on drop, private in outbound text', async () => {
+    const a = await ingestHarness({ title: 'Lakeside lot' });
+    const bytes = await payoffLetterPdf();
+    const stored = await a.svc.store(a.caseId, { name: 'payoff-letter.pdf', bytes, origin: { kind: 'owner-drop' } });
+    await a.svc.drain();
+    const { fact } = await a.svc.review(a.caseId, stored.docId, 'p-001', { action: 'accept' });
+    assert.strictEqual(fact.id, 'f-0001');
+
+    const b = await a.runtime.createCase({ title: 'Refinance 12 Birch' });
+    a.runtime.store.updateMeta(b.id, { status: 'active' });
+    const ctx = { caseContext: { runtime: a.runtime, caseId: b.id, turnId: 'turn-b', ownerMessages: [] } };
+    const unknown = await LedgerTool.execute({
+      action: 'unknown', stmt: 'Payoff amount for loan 0042-7781 is unknown', subject: 'refi', attr: 'payoff',
+      changes: 'the refinance amount', answerable: 'the lender', how: 'ask for a payoff letter'
+    }, ctx);
+    assert.deepStrictEqual(unknown.alsoKnownElsewhere.find((h) => h.kind === 'fact'), { caseId: a.caseId, title: 'Lakeside lot', kind: 'fact', id: 'f-0001', entity: 'id:00427781' });
+    assert.ok(!JSON.stringify(unknown.alsoKnownElsewhere).includes('payoff-letter'));
+
+    const dropped = await a.svc.store(b.id, { name: 'payoff-letter.pdf', bytes, origin: { kind: 'owner-drop' } });
+    assert.deepStrictEqual(dropped.alsoInCases, [{ caseId: a.caseId, title: 'Lakeside lot' }]);
+    await a.svc.drain();
+
+    const payload = 'Please confirm the balance on loan 0042-7781 before closing.';
+    const spans = a.runtime.entityIndex().nonDisclosableSpans(payload, { caseId: b.id });
+    assert.deepStrictEqual(spans.map((s) => [s.span.text, s.entity]), [['0042-7781', 'id:00427781']]);
+    const gates = require('../src/cases/gates');
+    const r = gates.gateLeaves({ body: payload }, { facts: new Map(), mode: 'message', caseId: b.id, entityIndex: a.runtime.entityIndex() });
+    assert.strictEqual(r.ok, false);
+    assert.ok(r.blocked.some((x) => x.reason === 'non-disclosable-entity'));
+  });
+});

@@ -48,3 +48,12 @@ describe('Electron import boundary', () => {
     assert.ok(files.some((f) => f.startsWith('migration/')), 'src/migration/ is checked');
   });
 });
+
+describe('Electron import boundary covers cases stage 7', () => {
+  it('walks src/cases/ingest/ and src/cases/entities/', () => {
+    const files = walk(SRC).map((f) => path.relative(SRC, f).split(path.sep).join('/'));
+    for (const expected of ['cases/ingest/index.js', 'cases/ingest/pdf.js', 'cases/entities/entity-index.js']) {
+      assert.ok(files.includes(expected), `${expected} is not walked`);
+    }
+  });
+});
