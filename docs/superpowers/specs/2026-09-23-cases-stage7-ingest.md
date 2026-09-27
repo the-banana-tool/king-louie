@@ -329,8 +329,12 @@ note, not a refusal). `store`/`adopt` return `alsoInCases: [{ caseId, title }]` 
 > through the file courier: it reads the service's `mcp.tools_list` reply as names only and shows its own
 > definitions. With no service running, `mcp` serves the fleet tools only (T12-Q1). No MCP channel answers
 > an `ingest:review` question, whatever its `mcpAnswerable` says, and the review effect refuses `mcp-*`
-> channels again. `list_cases` and `open_case` return title and slug inside the untrusted wrapper
-> (T12-titles). Anything running as the service account can write the courier files and answer as
+> channels again. Case titles are model-authorable, so every surface that shows another case's title to a
+> model wraps it (T12-titles): `list_cases` and `open_case` return title and slug inside the untrusted
+> wrapper, the Ledger tool's `unknown` returns `alsoKnownElsewhere: { untrusted_output, note, hits }` and
+> the `Ingest` tool's `start` returns `alsoInCases: { untrusted_output, note, cases }` (final review m2),
+> with case ids bare inside. §3.6 shows both as flat lists: `IngestService.store`/`adopt` and the IPC
+> reply to the renderer still return `alsoInCases` flat. Anything running as the service account can write the courier files and answer as
 > `mcp-stdio` (T12-Q3, accepted; see CLAUDE.md).
 
 ```js
