@@ -619,6 +619,35 @@ describe('EntityIndex', () => {
     assert.strictEqual(gate({ a: 'Loan 0042', b: 'hello', c: 'due 7782' }).ok, true);
   });
 
+  it('caps the cross-field pair text, keeps near pairs and logs the cut (final review m1)', (t) => {
+    const { gateLeaves } = require('../src/cases/gates');
+    const { addSink } = require('../src/logging');
+    const warnings = [];
+    t.after(addSink((r) => { if (r.level === 'warn' && r.subsystem === 'cases/gates') warnings.push(r); }));
+    const texts = [];
+    const entityIndex = {
+      nonDisclosableSpans(text) {
+        texts.push(text.length);
+        const out = [];
+        for (let at = text.indexOf('Loan 0042\n7781'); at !== -1; at = text.indexOf('Loan 0042\n7781', at + 1)) {
+          out.push({ span: { start: at, end: at + 14 }, entity: 'id:00427781', reason: 'private' });
+        }
+        return out;
+      }
+    };
+    // 300 fields of 100 characters: ~1.6 MB of pair text within 8 fields.
+    const payload = {};
+    for (let i = 0; i < 300; i++) payload[`f${i}`] = 'v'.repeat(100);
+    payload.f150 = `${'v'.repeat(91)}Loan 0042`;
+    payload.f152 = `7781 due${'v'.repeat(92)}`;
+    const r = gateLeaves(payload, { facts: new Map(), caseId: 'c', entityIndex, mode: 'query' });
+    assert.ok(r.blocked.some((x) => x.path === '' && x.span.text === 'Loan 0042\n7781'), 'halves two fields apart are still read together');
+    const longest = Math.max(...texts);
+    assert.ok(longest < 600 * 1024, `pair text ${longest} characters`);
+    assert.strictEqual(warnings.length, 1);
+    assert.ok(warnings[0].meta.pairChars > 256 * 1024 && warnings[0].meta.kept < warnings[0].meta.pairs);
+  });
+
   it('gateLeaves blocks on a malformed span from any of its index reads (fix-T7-r2 r2)', () => {
     const { gateLeaves } = require('../src/cases/gates');
     const entityIndex = { nonDisclosableSpans: (text) => (text.includes('\n') ? [{ span: { start: -1, end: 2 }, entity: 'x' }] : []) };

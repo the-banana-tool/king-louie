@@ -6,6 +6,9 @@ const { detect, sentenceRanges, sentenceOf } = require('./outbound');
 const { EXECUTOR_SETTINGS_DEFAULTS } = require('./executors/defaults');
 const { valueText, DAY_PATTERN } = require('./executors/util');
 const { neutralize, oneLine: frameOneLine } = require('./playbooks/frame');
+const { createLogger } = require('../logging');
+
+const log = createLogger('cases/gates');
 
 const key = (f) => `${norm(f.subject)}|${norm(f.attr)}`;
 
@@ -400,14 +403,61 @@ function outboundGate({
 //   fields apart (fix-T7-r3 m1). The pairs go to the index as one text,
 //   kept apart by CROSS_FILLER, which no scan chains across; a span that
 //   crosses the join inside a pair blocks the payload.
+// The pair text is capped at CROSS_PAIR_BUDGET characters (final review
+// m1): pairs at most CROSS_CAPPED_NEAR fields apart always go in, farther
+// ones nearest first while the budget lasts, and the cut is logged. Measured
+// before the cap, with a 6,000-key index: 35 ms at 10 fields, 165 ms at 48,
+// 255 ms at 200 and 1,172 ms at 1,000, per gate call, on the event loop of
+// every outbound gate (contact, envelope, executor submit and results).
+// With the cap (fields of ~45 characters, a smaller index): 97 → 40 ms at
+// 48 fields, 148 → 48 ms at 200 and 813 → 234 ms at 1,000. The pairs within
+// CROSS_CAPPED_NEAR fields still grow with the payload.
 // Accepted residuals: a value split in the middle of long fields (beyond
-// the CROSS_WINDOW characters at each edge), and halves more than
-// CROSS_NEAR fields apart in a payload of more than CROSS_ALL_FIELDS
-// fields. Both are a deliberate covert channel, which no scanner closes.
+// the CROSS_WINDOW characters at each edge), halves more than CROSS_NEAR
+// fields apart in a payload of more than CROSS_ALL_FIELDS fields, and halves
+// more than CROSS_CAPPED_NEAR fields apart once the budget is spent. All are
+// a deliberate covert channel, which no scanner closes.
 const CROSS_WINDOW = 64;
 const CROSS_ALL_FIELDS = 48;
 const CROSS_NEAR = 8;
+const CROSS_CAPPED_NEAR = 2;
+const CROSS_PAIR_BUDGET = 256 * 1024;
 const CROSS_FILLER = '\n;;;;;\n';
+
+// The ordered pairs (i, j) of pieces to read across, in walk order, with
+// the pair text capped as the comment above says.
+function crossPairs(pieces) {
+  const n = pieces.length;
+  const fields = n ? pieces[n - 1].field : 0;
+  const pairs = [];
+  let size = 0;
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n; j++) {
+      const apart = Math.abs(pieces[i].field - pieces[j].field);
+      if (i === j || (fields > CROSS_ALL_FIELDS && apart > CROSS_NEAR)) continue;
+      const cost = Math.min(pieces[i].text.length, CROSS_WINDOW) + 1 + Math.min(pieces[j].text.length, CROSS_WINDOW) + CROSS_FILLER.length;
+      pairs.push({ i, j, apart, cost });
+      size += cost;
+    }
+  }
+  if (size <= CROSS_PAIR_BUDGET) return pairs;
+  let left = CROSS_PAIR_BUDGET;
+  const kept = new Set();
+  for (const p of pairs) {
+    if (p.apart > CROSS_CAPPED_NEAR) continue;
+    kept.add(p);
+    left -= p.cost;
+  }
+  for (const p of pairs.filter((q) => q.apart > CROSS_CAPPED_NEAR).sort((a, b) => a.apart - b.apart)) {
+    if (p.cost > left) break;
+    kept.add(p);
+    left -= p.cost;
+  }
+  log.warn('cross-field pair text over budget: farther pairs skipped', {
+    fields, pieces: n, pairChars: size, budget: CROSS_PAIR_BUDGET, pairs: pairs.length, kept: kept.size
+  });
+  return pairs.filter((p) => kept.has(p));
+}
 
 function crossFieldSpans(pieces, askIndex, recipients, entityDetail, blocked) {
   const reported = new Set();
@@ -430,19 +480,14 @@ function crossFieldSpans(pieces, askIndex, recipients, entityDetail, blocked) {
     report(e, joined.slice(sp.start, sp.end), sp.start, sp.end);
   }
 
-  const n = pieces.length;
-  const fields = n ? pieces[n - 1].field : 0;
   const parts = [];
   const joins = [];
   let at = 0;
-  for (let i = 0; i < n; i++) {
-    for (let j = 0; j < n; j++) {
-      if (i === j || (fields > CROSS_ALL_FIELDS && Math.abs(pieces[i].field - pieces[j].field) > CROSS_NEAR)) continue;
-      const pair = `${pieces[i].text.slice(-CROSS_WINDOW)}\n${pieces[j].text.slice(0, CROSS_WINDOW)}`;
-      joins.push({ start: at, join: at + Math.min(pieces[i].text.length, CROSS_WINDOW), end: at + pair.length });
-      parts.push(pair);
-      at += pair.length + CROSS_FILLER.length;
-    }
+  for (const { i, j } of crossPairs(pieces)) {
+    const pair = `${pieces[i].text.slice(-CROSS_WINDOW)}\n${pieces[j].text.slice(0, CROSS_WINDOW)}`;
+    joins.push({ start: at, join: at + Math.min(pieces[i].text.length, CROSS_WINDOW), end: at + pair.length });
+    parts.push(pair);
+    at += pair.length + CROSS_FILLER.length;
   }
   if (!parts.length) return;
   const batch = parts.join(CROSS_FILLER);
