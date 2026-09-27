@@ -29,6 +29,23 @@ const ADDRESS_RE = new RegExp(`\\b\\d{1,6}\\s+(?:[A-Z][A-Za-z'-]{0,30}\\s+){1,4}
 const PHONE_RE = /(?<![\w+$])\+?\d[\d\s().-]{5,25}\d(?![\w])/g;
 const DATE_LIKE = /^\d{4}[-./]\d{1,2}[-./]\d{1,2}$|^\d{1,2}[-./]\d{1,2}[-./]\d{2,4}$/;
 
+// A run directly after a currency sign (fix-T6-r1 I1) is not a phone number
+// even with a few spaces in between ("$ 5551234567", not just "$5551234567",
+// which the PHONE_RE lookbehind above already excludes). A bounded backward
+// scan keeps this O(1) per match instead of a variable-length lookbehind.
+const CURRENCY_SIGNS = new Set(['$', '€', '£', '¥']); // $ € £ ¥
+const MAX_CURRENCY_GAP = 4;
+
+function precededByCurrency(s, index) {
+  let i = index - 1;
+  let spaces = 0;
+  while (i >= 0 && s[i] === ' ' && spaces < MAX_CURRENCY_GAP) {
+    i--;
+    spaces++;
+  }
+  return i >= 0 && CURRENCY_SIGNS.has(s[i]);
+}
+
 function overlaps(taken, start, end) {
   return taken.some((t) => start < t.end && end > t.start);
 }
@@ -62,6 +79,7 @@ function extractEntities(text, { kinds = TEXT_KINDS } = {}) {
     for (const m of s.matchAll(PHONE_RE)) {
       const value = m[0].trim();
       if (DATE_LIKE.test(value)) continue;
+      if (precededByCurrency(s, m.index)) continue;
       add('phone', value, m.index);
     }
   }

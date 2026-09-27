@@ -64,6 +64,17 @@ describe('extractEntities', () => {
     assert.deepStrictEqual(found.map((e) => e.keys[0]), ['id:00427781']);
   });
 
+  it('does not read a spaced currency amount as a phone number (fix-T6-r1 I1)', () => {
+    assert.deepStrictEqual(extractEntities('Total: $ 5551234567 due', { kinds: ['phone'] }), []);
+    assert.deepStrictEqual(extractEntities('€ 5551234567', { kinds: ['phone'] }), []);
+    assert.deepStrictEqual(extractEntities('£ 5551234567', { kinds: ['phone'] }), []);
+    assert.deepStrictEqual(extractEntities('¥ 5551234567', { kinds: ['phone'] }), []);
+    // a few spaces still count, but a run of ordinary text before the
+    // digits is a real phone number, not a currency amount
+    const found = extractEntities('call me at 5551234567 today', { kinds: ['phone'] });
+    assert.strictEqual(found.length, 1);
+  });
+
   it('never guesses people or organisations from text', () => {
     assert.deepStrictEqual(extractEntities('Pat Doe of Example Bank called.'), []);
   });
@@ -98,6 +109,13 @@ describe('normalizeEntity — hardening: hidden characters and lookalike digits'
     // after a real label is not recognised as an id at all.
     assert.deepStrictEqual(extractEntities('Loan No. ００４２-７７８１ today'), []);
   });
+
+  it('strips the Arabic letter mark and soft hyphen from a key instead of rejecting it (fix-T6-r1 M2)', () => {
+    const ALM = String.fromCodePoint(0x061c);
+    const SOFT_HYPHEN = String.fromCodePoint(0x00ad);
+    assert.deepStrictEqual(normalizeEntity('id', `Loan No. 0042${ALM}7781`), ['id:00427781']);
+    assert.deepStrictEqual(normalizeEntity('id', `Loan No. 0042${SOFT_HYPHEN}7781`), ['id:00427781']);
+  });
 });
 
 describe('extractEntities — hardening: bounded output', () => {
@@ -120,6 +138,18 @@ describe('extractEntities — hardening: bounded output', () => {
     const text = Array.from({ length: 600 }, (_, i) => `a${i}@example.com`).join(' ');
     const found = extractEntities(text, { kinds: ['email'] });
     assert.strictEqual(found.length, 500);
+  });
+
+  it('caps the whole key, prefix included, not just the part after the colon (fix-T6-r1 M1)', () => {
+    // "email:" is 6 characters; the entity's recorded text is already
+    // capped to 200 by extractEntities, so drive normalizeEntity directly
+    // with a 199-character local part to prove the *key* (prefix + value)
+    // is what MAX_KEY_CHARS bounds, not just the value.
+    const longRaw = `${'a'.repeat(194)}@example.com`; // > MAX_KEY_CHARS once prefixed
+    const [key] = normalizeEntity('email', longRaw);
+    assert.ok(`email:${longRaw}`.length > 200, 'fixture must exceed the cap once prefixed');
+    assert.strictEqual(key.length, 200);
+    assert.ok(key.startsWith('email:'));
   });
 });
 

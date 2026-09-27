@@ -10,6 +10,7 @@ const path = require('path');
 const { slugify } = require('../slug');
 const { realpathNearest, stripLongPathPrefix, segmentsWithin } = require('../safe-path');
 const { IngestError } = require('./errors');
+const { HIDDEN_CLASS } = require('../hidden-chars');
 
 const MIME_EXTS = Object.freeze({
   'application/pdf': ['pdf'],
@@ -38,12 +39,8 @@ const docIdFor = (hash) => `doc-${String(hash).slice(0, 12)}`;
 const LINE_BREAKS = /[\t\n\v\f\r\u0085\u2028\u2029]/g;
 // The one set of hidden characters, shared by oneLine, the ingest anchor
 // text and the prompt fence, so what is dropped for display is dropped for
-// matching too: C0/C1 controls other than line breaks and tabs, soft hyphen,
-// combining grapheme joiner, Hangul fillers, Arabic letter mark, Mongolian
-// vowel separator, zero-width characters, bidi embeddings, overrides and
-// isolates, variation selectors, BOM and tag characters.
-// A regex class body; use it with the u flag.
-const HIDDEN_CLASS = String.raw`\u0000-\u0008\u000e-\u001f\u007f-\u009f\u00ad\u034f\u061c\u115f\u1160\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2069\u3164\ufe00-\ufe0f\ufeff\uffa0\u{e0000}-\u{e007f}`;
+// matching too (moved to src/cases/hidden-chars.js in fix-T6-r1 M2 so
+// src/cases/entities/ can share it without importing this ingest module).
 const INVISIBLE = new RegExp(`[${HIDDEN_CLASS}]`, 'gu');
 function oneLine(value, max) {
   const flat = String(value ?? '').replace(LINE_BREAKS, ' ').replace(INVISIBLE, '').replace(/\s+/g, ' ').trim();

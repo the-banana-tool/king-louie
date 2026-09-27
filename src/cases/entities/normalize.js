@@ -8,18 +8,24 @@
 //   no unbounded quantifier can feed an unbounded key or a catastrophic
 //   backtrack (see extract.js for the extraction-side bounds).
 // - A key is capped to MAX_KEY_CHARS regardless of input length.
-// - Control, zero-width and bidi-format characters (C0/C1 controls minus
-//   tab/CR/LF, ZWSP/ZWNJ/ZWJ/LRM/RLM, bidi embedding/override/isolate
-//   controls, the BOM) are stripped before any key is built, so a key never
-//   carries a hidden or direction-reversing character. They are removed
-//   (not replaced with a space) so a hidden character planted inside a word
-//   reconstructs the visible word instead of splitting it.
+// - Hidden characters (the shared HIDDEN_CLASS from src/cases/hidden-chars.js:
+//   C0/C1 controls minus tab/CR/LF, soft hyphen, combining grapheme joiner,
+//   Hangul fillers, Arabic letter mark, Mongolian vowel separator,
+//   ZWSP/ZWNJ/ZWJ/LRM/RLM, bidi embedding/override/isolate controls,
+//   variation selectors, the BOM and tag characters) are stripped before
+//   any key is built, so a key never carries a hidden or
+//   direction-reversing character. They are removed (not replaced with a
+//   space) so a hidden character planted inside a word reconstructs the
+//   visible word instead of splitting it. This is the same set ingest/
+//   store.js's oneLine strips, so what is dropped there is dropped here
+//   too (fix-T6-r1 M2).
 // - Lookalike digits (Arabic-Indic U+0660-0669, fullwidth U+FF10-FF19) are
 //   not ASCII `\d`: every digit test and digit-extraction below is
 //   ASCII-only, so they are consistently ignored everywhere (never counted
 //   as digits, never folded to an ASCII digit) rather than partially
 //   normalised.
 const { norm } = require('../jsonl');
+const { HIDDEN_CLASS } = require('../hidden-chars');
 
 const ENTITY_TYPES = Object.freeze(['email', 'phone', 'id', 'address', 'person', 'org', 'document']);
 
@@ -44,26 +50,16 @@ function countryCodeLength(digits) {
   return TWO_DIGIT_CODES.has(digits.slice(0, 2)) ? 2 : 3;
 }
 
-// Bounded output (hardening): no key this module returns is longer than
-// this, whatever the input.
+// Bounded output (hardening): no key this module returns — the type
+// prefix included — is longer than this, whatever the input (fix-T6-r1
+// M1: capping only the part after "type:" left the whole key uncapped).
 const MAX_KEY_CHARS = 200;
 const cap = (s) => (s.length > MAX_KEY_CHARS ? s.slice(0, MAX_KEY_CHARS) : s);
 
-// Stripped, not spaced: a hidden character inside a word is a common
-// obfuscation, and removing it (rather than turning it into a space)
-// reconstructs the visible word. Built from code points (rather than \u
-// escapes typed inline) so the ranges are auditable and none of them is an
-// actual invisible character sitting in this source file: C0 controls
-// minus tab/LF/CR, DEL + C1 controls, ZWSP..RLM, bidi embed/override,
-// bidi isolates, the BOM.
-const HIDDEN_RANGES = [
-  [0x0000, 0x0008], [0x000b, 0x000b], [0x000c, 0x000c], [0x000e, 0x001f],
-  [0x007f, 0x009f], [0x200b, 0x200f], [0x202a, 0x202e], [0x2060, 0x2069], [0xfeff, 0xfeff]
-];
-const HIDDEN_RE = new RegExp(
-  `[${HIDDEN_RANGES.map(([a, b]) => `${String.fromCodePoint(a)}-${String.fromCodePoint(b)}`).join('')}]`,
-  'g'
-);
+// Shared with src/cases/ingest/store.js's oneLine (fix-T6-r1 M2): stripped,
+// not spaced, so a hidden character inside a word (a common obfuscation)
+// reconstructs the visible word instead of splitting it.
+const HIDDEN_RE = new RegExp(`[${HIDDEN_CLASS}]`, 'gu');
 const stripHidden = (s) => s.replace(HIDDEN_RE, '');
 
 // Unicode combining-diacritical-marks block (U+0300-U+036F), same reason.
@@ -92,7 +88,7 @@ function normalizeEntity(type, text) {
   if (!raw) return [];
   switch (type) {
     case 'email': {
-      return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw) ? [`email:${cap(raw)}`] : [];
+      return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw) ? [cap(`email:${raw}`)] : [];
     }
     case 'phone': {
       const digits = raw.replace(/\D/g, '');
@@ -103,7 +99,7 @@ function normalizeEntity(type, text) {
     }
     case 'id': {
       const key = idToken(raw);
-      return key ? [`id:${cap(key)}`] : [];
+      return key ? [cap(`id:${key}`)] : [];
     }
     case 'address': {
       const words = raw.replace(/[.,]+$/, '').replace(/\./g, '').split(/\s+/);
@@ -111,16 +107,16 @@ function normalizeEntity(type, text) {
       const last = words[words.length - 1];
       if (!STREET_SUFFIXES[last]) return [];
       words[words.length - 1] = STREET_SUFFIXES[last];
-      return [`address:${cap(words.join(' '))}`];
+      return [cap(`address:${words.join(' ')}`)];
     }
     case 'person': {
       const p = plainWords(raw);
-      return p ? [`person:${cap(p)}`] : [];
+      return p ? [cap(`person:${p}`)] : [];
     }
     case 'org': {
       const words = plainWords(raw).split(' ').filter(Boolean);
       while (words.length > 1 && ORG_SUFFIXES.has(words[words.length - 1])) words.pop();
-      return words.length ? [`org:${cap(words.join(' '))}`] : [];
+      return words.length ? [cap(`org:${words.join(' ')}`)] : [];
     }
     case 'document':
       return /^[0-9a-f]{64}$/.test(raw) ? [`document:${raw}`] : [];
