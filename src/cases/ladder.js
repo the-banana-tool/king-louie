@@ -15,6 +15,13 @@ const { ContactDeliveryError } = require('../channels/channel-plugin');
 const { createLogger } = require('../logging');
 const { questionText } = require('./orientation');
 
+// The record text a ladder journal line carries: a playbook gating record by
+// its key (questionText), anything else in full.
+const journalText = (rec) => {
+  if (!rec) return '';
+  return rec.payload?.type === 'gating' ? questionText(rec) : rec.text;
+};
+
 const MINUTE = 60 * 1000;
 const DAY = 24 * 3600 * 1000;
 const ASYNC_FAILURES = new Set(['failed', 'bounced', 'no-answer', 'busy']);
@@ -359,12 +366,13 @@ class LadderEngine {
     }
 
     // Journal lines reach the next orientation outside any frame, so a
-    // record shows as questionText does there: a playbook gating record by
-    // its key only, never its third-party text (final review I3).
+    // playbook gating record is journaled by its key only, never its
+    // third-party text (final review I3). Every other record keeps its full
+    // text, as before (journalText).
     for (const e of journals) {
       const rec = this._record(e.caseId, e.questionId);
       try {
-        await this._journal(e.caseId, `contact: ${e.questionId} waiting`, `${e.questionId} waiting: ${rec ? questionText(rec) : ''}`, now);
+        await this._journal(e.caseId, `contact: ${e.questionId} waiting`, `${e.questionId} waiting: ${journalText(rec)}`, now);
         this._attempt(e, { channel: 'journal', outcome: 'sent' });
         this._advance(e, policy);
         this._afterSent(e);
@@ -384,7 +392,7 @@ class LadderEngine {
       const rec = this._record(e.caseId, e.questionId);
       const until = formatShort(e.nextAt, this.presence.timeZone());
       try {
-        await this._journal(e.caseId, `contact: ${e.questionId} held until ${until}`, `${e.questionId} held until ${until} (quiet hours): ${rec ? questionText(rec) : ''}`, now);
+        await this._journal(e.caseId, `contact: ${e.questionId} held until ${until}`, `${e.questionId} held until ${until} (quiet hours): ${journalText(rec)}`, now);
         e.heldJournaled = true;
       } catch (err) {
         if (err.code !== 'CASE_BUSY') this._warnOnce(`held|${e.caseId}/${e.questionId}|${err.message}`, `contact ladder: journaling the quiet-hours hold of ${e.caseId}/${e.questionId} failed: ${err.message}`);
