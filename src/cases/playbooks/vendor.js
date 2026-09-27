@@ -235,15 +235,19 @@ function checkRef(ref) {
 }
 
 // The clone command for a git source; `--` always precedes the URL or path.
-// No submodules and no tags are fetched (a tag named as the ref still is).
+// No submodules are fetched. Without a ref no tags are fetched either. With
+// a ref the clone is --single-branch instead of --no-tags: older git
+// (Debian 12's 2.39) refuses "--no-tags --branch <tag>" with "Remote
+// branch <tag> not found", so a tag ref failed on those systems. Only the
+// checkout is vendored, so tags that come along never reach the case.
 function cloneArgs(resolved, { ref = null, dest }) {
   const checked = checkRef(ref);
-  const branch = checked ? ['--branch', checked] : [];
+  const narrow = checked ? ['--single-branch', '--branch', checked] : ['--no-tags'];
   if (resolved.kind === 'path') {
     // --depth is ignored for local paths; --no-hardlinks keeps the copy independent.
-    return ['clone', '--no-hardlinks', '--no-recurse-submodules', '--no-tags', ...branch, '--', resolved.fetchSpec.path, dest];
+    return ['clone', '--no-hardlinks', '--no-recurse-submodules', ...narrow, '--', resolved.fetchSpec.path, dest];
   }
-  return ['clone', '--depth', '1', '--no-recurse-submodules', '--no-tags', ...branch, '--', resolved.fetchSpec.url, dest];
+  return ['clone', '--depth', '1', '--no-recurse-submodules', ...narrow, '--', resolved.fetchSpec.url, dest];
 }
 
 // A local folder is cloned only when it has its own .git and git agrees it

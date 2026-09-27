@@ -297,7 +297,7 @@ describe('fetchPackage', () => {
 
   it('puts every hardening flag and "--" on the clone argv', () => {
     const args = v.cloneArgs({ kind: 'git', fetchSpec: { url: 'https://example.com/playbooks/x.git' } }, { ref: 'v1', dest: '/tmp/k/src' });
-    assert.deepStrictEqual(args, ['clone', '--depth', '1', '--no-recurse-submodules', '--no-tags', '--branch', 'v1', '--', 'https://example.com/playbooks/x.git', '/tmp/k/src']);
+    assert.deepStrictEqual(args, ['clone', '--depth', '1', '--no-recurse-submodules', '--single-branch', '--branch', 'v1', '--', 'https://example.com/playbooks/x.git', '/tmp/k/src']);
     const argv = git.hardenedGitArgs(args, { hooksDir: '/tmp/k/hooks' });
     for (const flag of ['protocol.allow=never', 'protocol.https.allow=always', 'protocol.ssh.allow=always', 'core.symlinks=false', 'filter.lfs.smudge=', 'core.hooksPath=/tmp/k/hooks']) {
       assert.ok(argv.includes(flag), flag);
