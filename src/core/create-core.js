@@ -1002,16 +1002,21 @@ function createCore(deps = {}) {
     labels: PROVIDER_LABELS,
     hasCredential: hasProviderCredential,
     createProvider: async (provider) => {
-      // OAuth mode is decided by whether Anthropic OAuth is connected with
-      // no stored API key — not by getDecryptedProviderToken's
-      // '__anthropic_oauth__' placeholder, which only appears before the
-      // access token is cached. Once a connected session's token was
-      // cached, that check fell through to API-key mode and sent the OAuth
-      // access token as an x-api-key header, which Anthropic rejects with a
-      // 401 — marking an OAuth-only account unusable on every send (spec
-      // §5.3, fix round 1). This does not touch createProviderInstance,
-      // which the inference router's own OAuth handling still relies on.
-      if (provider === 'anthropic' && anthropicOAuth.isConnected() && !getApiTokens().anthropic) {
+      // OAuth mode is decided by whether Anthropic OAuth is connected — not
+      // by getDecryptedProviderToken's '__anthropic_oauth__' placeholder,
+      // which only appears before the access token is cached. Once a
+      // connected session's token was cached, that check fell through to
+      // API-key mode and sent the OAuth access token as an x-api-key
+      // header, which Anthropic rejects with a 401 — marking an OAuth-only
+      // account unusable on every send (spec §5.3, fix round 1). This
+      // mirrors getDecryptedProviderToken's own preference (fix round 2):
+      // OAuth wins whenever it is connected, even if an API key is also
+      // stored — a stored key alone never overrides an active OAuth
+      // session there, so it must not here either, or the same cached-token
+      // 401 recurs for that combination. This does not touch
+      // createProviderInstance, which the inference router's own OAuth
+      // handling still relies on.
+      if (provider === 'anthropic' && anthropicOAuth.isConnected()) {
         const accessToken = await refreshAnthropicOAuthToken();
         return ProviderFactory.createProvider('anthropic', accessToken, { ...providerOptionsFor('anthropic'), authMode: 'oauth' });
       }

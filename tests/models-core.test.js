@@ -126,14 +126,15 @@ describe('models in the core', () => {
     assert.strictEqual(store.get('apiStatus').openai, undefined);
   });
 
-  // Fix round 1, finding 3: Availability's createProvider decided OAuth mode
-  // by checking token === '__anthropic_oauth__', but getDecryptedProviderToken
-  // only returns that placeholder before the access token is cached — once
-  // cached it returns the real token, so the connection test ran in
-  // API-key mode (x-api-key header) and Anthropic rejected it with a 401,
-  // permanently marking an OAuth-only account unusable. OAuth mode is now
-  // decided by anthropicOAuth.isConnected() with no stored API key.
-  it('tests an OAuth-only Anthropic account in OAuth mode, not API-key mode', async () => {
+  // Fix round 1, finding 3 (strengthened in fix round 2, finding A):
+  // Availability's createProvider decided OAuth mode by checking token ===
+  // '__anthropic_oauth__', but getDecryptedProviderToken only returns that
+  // placeholder before the access token is cached — once cached it returns
+  // the real token, so the connection test ran in API-key mode (x-api-key
+  // header) and Anthropic rejected it with a 401, permanently marking an
+  // OAuth-only account unusable. OAuth mode is now decided by
+  // anthropicOAuth.isConnected() alone.
+  it('tests an OAuth-only Anthropic account in OAuth mode, not API-key mode, even once the token is cached', async () => {
     const { core, store } = makeCore();
     // Seed a connected OAuth session directly, the way a prior sign-in
     // would have left it: encrypted with the same cipher the core uses.
@@ -143,13 +144,47 @@ describe('models in the core', () => {
       expiresAt: Date.now() + 3600_000,
       connectedAt: Date.now()
     });
-    // No apiTokens.anthropic saved: the fallthrough-to-API-key bug required
-    // exactly this combination once the access token was cached.
+    // No apiTokens.anthropic saved.
+    const seen = stubProviderFetch({ 'https://api.anthropic.com/v1/models': () => json({ data: [{ id: 'claude-sonnet-5' }] }) });
+    const r1 = await core.context.testProviderConnection('anthropic');
+    assert.strictEqual(r1.ok, true, JSON.stringify(r1));
+    // A single call does not prove the fix: on a fresh core the OAuth
+    // access-token cache is still empty, so getDecryptedProviderToken
+    // returns the '__anthropic_oauth__' placeholder regardless of which
+    // code is running, and the old placeholder-string check happened to
+    // take the OAuth branch too. The bug only showed on a SECOND call,
+    // once the token was cached — the old check's `token ===
+    // '__anthropic_oauth__'` then went false (the cache returns the real
+    // token instead) and silently fell through to API-key mode. Calling it
+    // again is what actually exercises that path.
+    const r2 = await core.context.testProviderConnection('anthropic');
+    assert.strictEqual(r2.ok, true, JSON.stringify(r2));
+    assert.strictEqual(seen.length, 2);
+    assert.strictEqual(seen[1].headers.Authorization, 'Bearer oauth-access-token');
+    assert.strictEqual('x-api-key' in seen[1].headers, false, 'must not send the cached OAuth token as an x-api-key header');
+  });
+
+  // Fix round 2, finding B: getDecryptedProviderToken prefers OAuth over a
+  // stored API key whenever OAuth is connected, but Availability's
+  // createProvider required *no* stored key to take the OAuth branch — an
+  // owner who is OAuth-connected and also has an old API key saved got
+  // API-key mode (and the same 401) despite an active OAuth session.
+  // createProvider's OAuth decision now mirrors getDecryptedProviderToken's
+  // own preference: connected wins, independent of a stored key.
+  it('prefers OAuth over a stored API key when both are present', async () => {
+    const { core, store } = makeCore();
+    store.set('anthropicOAuth', {
+      accessToken: core.context.encryptToken('oauth-access-token'),
+      refreshToken: core.context.encryptToken('refresh-xyz'),
+      expiresAt: Date.now() + 3600_000,
+      connectedAt: Date.now()
+    });
+    core.saveProviderToken('anthropic', 'sk-ant-stored-key');
     const seen = stubProviderFetch({ 'https://api.anthropic.com/v1/models': () => json({ data: [{ id: 'claude-sonnet-5' }] }) });
     const r = await core.context.testProviderConnection('anthropic');
     assert.strictEqual(r.ok, true, JSON.stringify(r));
     assert.strictEqual(seen[0].headers.Authorization, 'Bearer oauth-access-token');
-    assert.strictEqual('x-api-key' in seen[0].headers, false, 'must not send the OAuth token as an x-api-key header');
+    assert.strictEqual('x-api-key' in seen[0].headers, false, 'a stored API key must not override an active OAuth session');
   });
 
   it('starts no background checks in test mode', async () => {
