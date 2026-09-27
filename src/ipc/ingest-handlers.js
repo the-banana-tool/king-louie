@@ -519,8 +519,9 @@ function registerIngestHandlers(ipcMain, context = {}) {
     return marked({
       ok: true,
       accepted: arr(out?.accepted).map(proposalId).filter(Boolean).slice(0, MAX_PROPOSALS_SHOWN),
-      skipped: arr(out?.skipped).filter(isObj).slice(0, MAX_PROPOSALS_SHOWN)        // A fixed sentence by code, never the service's text (which can
-        // quote the verify model's note), then "Review it in the panel."
+      // A fixed sentence by code, never the service's text (which can
+      // quote the verify model's note), then "Review it in the panel."
+      skipped: arr(out?.skipped).filter(isObj).slice(0, MAX_PROPOSALS_SHOWN)
         .map((s) => {
           const has = (map) => typeof s.code === 'string' && Object.prototype.hasOwnProperty.call(map, s.code);
           const why = has(SKIP_WHY) ? SKIP_WHY[s.code] : has(BY_CODE) ? BY_CODE[s.code] : SKIP_OTHER;
