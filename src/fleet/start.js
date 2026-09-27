@@ -116,6 +116,9 @@ async function startFleetNode({ dataDir, nodeConfig, approvals, core = null, adm
 
     if (approvals.relayClient) {
       fleetService = new NodeFleetService({ handler, relayClient: approvals.relayClient, nodeConfig: { ...nodeConfig, nodeId: approvals.identity.nodeId }, bootId });
+      // Cases stage 7 (spec §3.8): cases.<tool> for front-door clients, on the mcp-frontdoor channel.
+      // eslint-disable-next-line global-require -- agent profile only (caseTools is set only there)
+      if (caseTools) require('../mcp/case-tools').registerNodeCaseMethods(fleetService, { getRuntime: () => core.context?.getCaseRuntime?.() || null, audit: approvals.auditLedger || null });
       fleetService.start();
     }
 

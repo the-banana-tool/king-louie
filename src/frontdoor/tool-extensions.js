@@ -2,5 +2,8 @@
 // Each entry is ({ scopeRegistry, router }) => void and registers scopes
 // (scopeRegistry.register) and routed tools (router.registerTool). They run
 // before frontdoor.oauth.scopes_enabled is checked against the registered
-// scopes. C7 adds registerFrontDoorCaseTools here.
+// scopes.
 module.exports = [];
+
+// Cases stage 7 (spec §3.8): cases:read and the read-only case tools.
+module.exports.push(require('../cases/mcp-tool-definitions').registerFrontDoorCaseTools);

@@ -11,7 +11,7 @@
 const { createLogger } = require('../logging');
 const { ToolError } = require('../fleet/tool-definitions');
 const { listRecords } = require('../cases/ingest/files');
-const { CASE_MCP_TOOLS, STATUS_CHANGING, NEVER_OVER_MCP, untrusted } = require('../cases/mcp-tool-definitions');
+const { CASE_MCP_TOOLS, STATUS_CHANGING, NEVER_OVER_MCP, untrusted, CASE_TOOL_SCOPE } = require('../cases/mcp-tool-definitions');
 
 const CHANNELS = new Set(['mcp-stdio', 'mcp-frontdoor']);
 const RATE_WINDOW_MS = 60 * 1000;
@@ -237,4 +237,41 @@ function createCaseToolHandler({ getRuntime, channel, audit = null, log = create
   return { names, tools, call, available };
 }
 
-module.exports = { CASE_MCP_TOOLS, STATUS_CHANGING, NEVER_OVER_MCP, CaseToolError, createCaseToolHandler, untrusted, notAnswerable };
+// What F4's router adds to a case tool's arguments (FleetRouter._callExtra):
+// its own origin and max_bytes, and, for a case-keyed tool, the client's
+// routing argument `machine` (list_cases fans out and takes no machine).
+const ROUTER_FIELDS = Object.freeze(['origin', 'max_bytes']);
+const ROUTING_FIELDS = Object.freeze([...ROUTER_FIELDS, 'machine']);
+
+// On an agent node with a front-door link: the cases.<tool> methods, each
+// behind its own scope (NodeFleetService re-checks the front door's scopes
+// and machine pins before the method runs). Only the tools in
+// CASE_TOOL_SCOPE are registered: answer_question is withheld pending an
+// owner decision (ruling T16-Q2). The handler is its own, on the
+// mcp-frontdoor channel (its own rate limit; it repeats every front-door
+// refusal). The router's fields are removed; anything else is checked
+// against the tool's schema.
+function registerNodeCaseMethods(nodeFleetService, { getRuntime, audit = null, log } = {}) {
+  const handler = createCaseToolHandler({ getRuntime, channel: 'mcp-frontdoor', audit, ...(log ? { log } : {}) });
+  for (const name of handler.names) {
+    if (!Object.hasOwn(CASE_TOOL_SCOPE, name)) continue;
+    const strip = name === 'list_cases' ? ROUTER_FIELDS : ROUTING_FIELDS;
+    nodeFleetService.registerMethod(`cases.${name}`, async (params) => {
+      const args = isObj(params) ? { ...params } : {};
+      for (const key of strip) delete args[key];
+      return handler.call(name, args);
+    }, { scope: CASE_TOOL_SCOPE[name] });
+  }
+  return handler;
+}
+
+module.exports = {
+  CASE_MCP_TOOLS,
+  STATUS_CHANGING,
+  NEVER_OVER_MCP,
+  CaseToolError,
+  createCaseToolHandler,
+  untrusted,
+  notAnswerable,
+  registerNodeCaseMethods
+};

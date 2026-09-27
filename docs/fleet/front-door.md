@@ -74,6 +74,13 @@ ACME directory's subscriber agreement; Let's Encrypt production is the default
 directory. With your own certificate instead, replace `acme` with
 `tls: { cert_file: /etc/king-louie/tls/mcp.pem, key_file: /etc/king-louie/tls/mcp.key }`.
 
+To let MCP clients read cases on agent machines, also list `cases:read` in
+`scopes_enabled`. It shows case lists, briefs, open questions and
+orientation, including private facts, through `list_cases`, `open_case` and
+`get_orientation`. The front-door case tools are read-only for now: no
+front-door client can answer a case question, and `cases:write` is not a
+scope the front door knows, so listing it stops the front door at startup.
+
 Start it and watch the first certificate arrive:
 
 ```sh

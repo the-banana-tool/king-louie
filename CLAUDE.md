@@ -690,3 +690,13 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage7-ingest.md`.
   replies to `mcp` (a forged tool list is read only as names; `mcp` shows
   its own definitions): the same class of limit as Bash writing
   `facts.jsonl`.
+- On the front door the case tools are read-only for now: `list_cases`,
+  `open_case` and `get_orientation` behind `cases:read`
+  (`src/cases/mcp-tool-definitions.js`, which has no requires because the
+  front door loads it; registered from `src/frontdoor/tool-extensions.js`).
+  An admin enables them by listing `cases:read` in
+  `frontdoor.oauth.scopes_enabled`. Agent nodes serve them as
+  `cases.<tool>` link methods, each with its own scope, on the
+  `mcp-frontdoor` channel. `answer_question` and `cases:write` are withheld
+  pending an owner decision; adding them back is one `CASE_SCOPES` entry
+  plus its tests.
