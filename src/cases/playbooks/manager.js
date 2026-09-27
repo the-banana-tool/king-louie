@@ -30,7 +30,7 @@ const gating = require('./gating');
 const changes = require('./changes');
 const proposals = require('./proposals');
 const views = require('./views');
-const { oneLine } = require('./frame');
+const { oneLine, neutralize } = require('./frame');
 const { caseTypes: defaultCaseTypes } = require('./case-types-bridge');
 
 const log = createLogger('cases/playbooks');
@@ -400,7 +400,11 @@ class PlaybookManager {
     const mat = { tell: [...(current.tell || [])], ignore: [...(current.ignore || [])] };
     let matChanged = false;
     for (const list of ['tell', 'ignore']) {
-      for (const item of playbook.materialityDefaults[list] || []) {
+      for (const raw of playbook.materialityDefaults[list] || []) {
+        // format.js only lets slugs through; this second guard keeps any
+        // other text one line and tag-free all the same (final review I1).
+        const item = oneLine(neutralize(raw), 64);
+        if (!item) continue;
         if (onlyMateriality && !onlyMateriality.includes(`${list}:${item}`)) continue;
         if (mat.tell.includes(item) || mat.ignore.includes(item)) {
           skipped.push(`materiality ${item} (already in the brief)`);

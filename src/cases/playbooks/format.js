@@ -299,8 +299,11 @@ function checkMateriality(m, err) {
       err(`materialityDefaults: unknown key "${truncateForMessage(k)}"`);
       continue;
     }
-    if (!Array.isArray(m[k]) || !m[k].every((v) => isText(v, 100))) {
-      err(`materialityDefaults.${k} must be a list of short strings`);
+    // Items are tags C2 compares with norm(), never free text: a slug keeps
+    // package text (newlines, tags) out of the owner-only brief and the
+    // orientation (final review I1).
+    if (!Array.isArray(m[k]) || !m[k].every((v) => typeof v === 'string' && SLUG_RE.test(v))) {
+      err(`materialityDefaults.${k} must be a list of lowercase slugs`);
       continue;
     }
     out[k] = m[k].map((v) => v.trim());
