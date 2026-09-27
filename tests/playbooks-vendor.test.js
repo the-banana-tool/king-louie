@@ -99,6 +99,14 @@ describe('resolveSource', () => {
     assert.throws(() => v.resolveSource('https://user:secret@example.com/playbooks/x.git', { settings: ALLOWED }), /cannot carry a password/);
   });
 
+  it('refuses a user name or token in an https URL, and keeps the ssh user (final review M-3)', () => {
+    for (const s of ['https://ghp_token123@example.com/playbooks/x.git', 'git+https://someone@example.com/playbooks/x.git']) {
+      assert.throws(() => v.resolveSource(s, { settings: ALLOWED }), { code: 'UNSUPPORTED_SOURCE', message: /cannot carry a user name or token/ }, s);
+    }
+    assert.strictEqual(v.resolveSource('https://example.com/playbooks/x.git', { settings: ALLOWED }).kind, 'git');
+    assert.strictEqual(v.resolveSource('ssh://git@example.com/team/x.git', { settings: ALLOWED }).kind, 'git');
+  });
+
   it('scp-style ssh: accepted only in its ssh:// form under an entry, never with an option-like host, user or path', () => {
     const scp = v.resolveSource('git@example.com:team/land-sale.git', { settings: ALLOWED });
     assert.deepStrictEqual(scp, { kind: 'git', source: 'git@example.com:team/land-sale.git', fetchSpec: { url: 'git@example.com:team/land-sale.git' } });

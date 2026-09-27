@@ -174,12 +174,18 @@ function gitUrlOf(raw) {
 }
 
 // A URL that may be recorded and fetched: supported, no password (it would
-// be written to case.yaml), allowed.
+// be written to case.yaml), allowed. An https URL carries no user name at
+// all: https://<token>@host/… is the usual access-token form, and it would
+// be recorded, journaled and shown in every frame header (final review
+// M-3). ssh keeps its user (git@host).
 function checkGitUrl(raw, settings, { adminPolicy = false } = {}) {
   const s = gitUrlOf(raw);
   if (!s || !normalizeUrl(s)) throw unsupported(raw);
   if (HAS_SCHEME.test(s) && new URL(s).password) {
     throw new PlaybookSourceError('Playbook source URLs cannot carry a password.', 'UNSUPPORTED_SOURCE');
+  }
+  if (/^https:\/\//i.test(s) && new URL(s).username) {
+    throw new PlaybookSourceError('Playbook https source URLs cannot carry a user name or token; use a git credential helper instead.', 'UNSUPPORTED_SOURCE');
   }
   assertUrlAllowed(s, settings, { adminPolicy });
   return s;
