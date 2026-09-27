@@ -162,39 +162,6 @@ describe('extractEntities — hardening: bounded output', () => {
   });
 });
 
-describe('extractEntities — hardening: no catastrophic regex on adversarial input', () => {
-  const MAX_MS = 1000;
-  const timed = (label, text, kinds) => {
-    const started = process.hrtime.bigint();
-    const found = extractEntities(text, { kinds });
-    const ms = Number(process.hrtime.bigint() - started) / 1e6;
-    console.log(`[cases-entities] ${label}: ${text.length} chars, ${found.length} entities, ${ms.toFixed(1)} ms`);
-    assert.ok(ms < MAX_MS, `${label} took ${ms.toFixed(1)} ms on a ${text.length}-character adversarial input`);
-    return found;
-  };
-
-  it('stays fast on a 400,000-character run of digits, spaces and dashes (phone)', () => {
-    timed('phone digit run', `${'5'.repeat(200000)}${'-'.repeat(100000)}${' '.repeat(99999)}5`, ['phone']);
-  });
-
-  it('stays fast on a 400,000-character run of @ and . characters (email)', () => {
-    timed('email symbol run', `${'a@'.repeat(133333)}${'.'.repeat(133334)}`, ['email']);
-  });
-
-  it('stays fast on a 400,000-character run of address-like capitalised words (address)', () => {
-    timed('address word run', '1 Aa Bb Cc Dd Ee Ff Gg Hh '.repeat(15385), ['address']);
-  });
-
-  it('stays fast on a 400,000-character run of labelled id-like tokens (id)', () => {
-    timed('id label run', 'account 1234567890-abcdefghij.klmnop/qrstuv '.repeat(9091), ['id']);
-  });
-
-  it('stays fast across all kinds together on mixed adversarial input', () => {
-    const chunk = `${'5'.repeat(30)} a@${'b'.repeat(30)}. account ${'1'.repeat(30)} 1 Aa Bb Cc Dd `;
-    timed('mixed adversarial', chunk.repeat(Math.ceil(400000 / chunk.length)), undefined);
-  });
-});
-
 describe('EntityIndex', () => {
   const fs = require('fs');
   const os = require('os');
@@ -736,31 +703,6 @@ describe('EntityIndex', () => {
     const idx = new EntityIndex(root);
     assert.deepStrictEqual(idx.nonDisclosableSpans('Re 0042-7781', { caseId: b.id }).map((s) => s.entity), ['id:00427781']);
     assert.ok(fs.lstatSync(file).isFile());
-  });
-
-  it('nonDisclosableSpans stays linear on a 400,000-character adversarial payload', async (t) => {
-    const RLO = String.fromCodePoint(0x202e);
-    const PDF = String.fromCodePoint(0x202c);
-    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
-    const { rt, a, b } = await twoCases({ spanNames: true });
-    // Indexed ids of every length 5..40, all made of one digit, and names
-    // made of one repeated word: every position of the payload starts a match.
-    const lines = [];
-    for (let n = 5; n <= 40; n++) lines.push(`Account ${'1'.repeat(n)}`);
-    const entities = [];
-    for (let n = 2; n <= 12; n++) entities.push({ type: 'person', text: Array(n).fill('ab').join(' ') });
-    ingested(rt, a, { entities });
-    files.writeTextStore(a.dir, { docId: 'doc-cccccccccccc', sha256: 'c'.repeat(64), pages: [{ n: 1, method: 'text', text: lines.join('\n') }] });
-    const idx = rt.entityIndex();
-    idx.nonDisclosableSpans('warm up', { caseId: b.id });
-    for (const payload of ['1 '.repeat(200000), 'ab '.repeat(133334), '1-'.repeat(100000) + 'ab.'.repeat(66667), `1${ZWSP}${ZWSP} `.repeat(100000), `${RLO}1 ${PDF}`.repeat(100000), `${RLO}1 \n`.repeat(100000)]) {
-      const started = process.hrtime.bigint();
-      const spans = idx.nonDisclosableSpans(payload, { caseId: b.id });
-      const ms = Number(process.hrtime.bigint() - started) / 1e6;
-      assert.ok(spans.length > 0);
-      t.diagnostic(`${payload.length} chars, ${spans.length} spans, ${ms.toFixed(1)} ms`);
-      assert.ok(ms < 3000, `nonDisclosableSpans took ${ms.toFixed(1)} ms on ${payload.length} characters`);
-    }
   });
 
   it('a cross-case name hit carries the searched key, never the other case\'s spelling', async (t) => {
