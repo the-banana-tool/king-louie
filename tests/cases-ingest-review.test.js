@@ -821,6 +821,84 @@ describe('owner review through IngestService', { skip: require('./helpers/ingest
     assert.deepStrictEqual(active().map((f) => f.id), [fact.id]);
   });
 
+  it('a text PDF recorded as an image or a text file never skips the text-layer re-read (fix r1 I1)', async () => {
+    const { h, docId } = await reviewed();
+    for (const mime of ['image/png', 'text/plain']) {
+      forge(h, docId, (rec) => {
+        rec.mime = mime;
+        rec.pages[0].method = 'ocr';
+        Object.assign(rec.proposals[0].anchor, { ocr: true, quote: 'Total payoff amount: $1.00' });
+        rec.proposals[0].value = '1';
+        rec.proposals[0].checks.verify = { agrees: true, note: '', sawImage: true };
+      });
+      files.writeTextStore(h.dir, { docId, sha256: files.readRecord(h.dir, docId).sha256, pages: [{ n: 1, method: 'ocr', text: 'Total payoff amount: $1.00' }] });
+      const r = await h.svc.acceptVerified(h.caseId, docId, { by: 'panel' });
+      assert.deepStrictEqual(r.accepted, []);
+      assert.match(r.skipped[0].why, /document changed/);
+      await assert.rejects(h.svc.review(h.caseId, docId, 'p-001', { action: 'accept' }), (e) => e.code === 'DOC_CHANGED');
+    }
+    assert.strictEqual(h.runtime.ledger(h.caseId).view().facts.size, 0);
+    // A real text file whose page is claimed as OCR is refused too.
+    const t = await ingestHarness();
+    const out = await t.svc.store(t.caseId, { name: 'payoff.txt', bytes: Buffer.from(PAYOFF_LINES.join('\n')), origin: { kind: 'owner-drop' } });
+    await t.svc.drain();
+    forge(t, out.docId, (rec) => {
+      rec.pages[0].method = 'ocr';
+      Object.assign(rec.proposals[0].anchor, { ocr: true, quote: 'Total payoff amount: $1.00' });
+      rec.proposals[0].value = '1';
+    });
+    files.writeTextStore(t.dir, { docId: out.docId, sha256: files.readRecord(t.dir, out.docId).sha256, pages: [{ n: 1, method: 'ocr', text: 'Total payoff amount: $1.00' }] });
+    await assert.rejects(t.svc.review(t.caseId, out.docId, 'p-001', { action: 'accept' }), (e) => e.code === 'ANCHOR_CHANGED');
+    // Even a text file with no usable text (so the layer check alone would
+    // let an OCR claim through) is never read by OCR.
+    const junk = await t.svc.store(t.caseId, { name: 'junk.txt', bytes: Buffer.from('x y'), origin: { kind: 'owner-drop' } });
+    await t.svc.drain();
+    forge(t, junk.docId, (rec) => {
+      rec.pages = [{ n: 1, method: 'ocr' }];
+      rec.status = 'ready-for-review';
+      rec.proposals = [{
+        id: 'p-001', stmt: 'Payoff is $1.00', subject: 'loan', attr: 'payoff', value: '1', unit: null, category: 'general', confidence: 0.9,
+        anchor: { page: 1, quote: 'Total payoff amount: $1.00', offset: 0, ocr: true }, entities: [],
+        checks: { anchor: 'ok', valueInQuote: true, conflicts: [], duplicateOf: null, verify: { agrees: true, note: '', sawImage: true } }, review: null
+      }];
+    });
+    files.writeTextStore(t.dir, { docId: junk.docId, sha256: files.readRecord(t.dir, junk.docId).sha256, pages: [{ n: 1, method: 'ocr', text: 'Total payoff amount: $1.00' }] });
+    const r = await t.svc.acceptVerified(t.caseId, junk.docId, { by: 'panel' });
+    assert.deepStrictEqual(r.accepted, []);
+    assert.strictEqual(t.runtime.ledger(t.caseId).view().facts.size, 0);
+  });
+
+  it('a failed write around a supersede never leaves the owner fact replaced by nothing (fix r1 I2)', async (t) => {
+    const { h, docId } = await reviewed({ before: (x) => userFact(x, 180000) });
+    const real = files.writeRecord;
+    let fail = true;
+    files.writeRecord = (dir, rec) => {
+      if (fail) {
+        fail = false;
+        throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+      }
+      return real(dir, rec);
+    };
+    t.after(() => { files.writeRecord = real; });
+    await assert.rejects(h.svc.review(h.caseId, docId, 'p-001', { action: 'accept', supersedes: 'f-0001' }), /EPERM/);
+    files.writeRecord = real;
+    assert.deepStrictEqual(activeUser(h).map((f) => f.id), ['f-0001']);
+    assert.strictEqual(h.runtime.ledger(h.caseId).view().facts.size, 1);
+    await assert.rejects(h.svc.review(h.caseId, docId, 'p-001', { action: 'accept' }), (e) => e.code === 'CONFLICT');
+    // A failed assert puts the record back: the proposal can be reviewed again.
+    const { FactLedger } = require('../src/cases/ledger');
+    const assertReal = FactLedger.prototype.assert;
+    FactLedger.prototype.assert = function () { throw new Error('ledger write failed'); };
+    t.after(() => { FactLedger.prototype.assert = assertReal; });
+    await assert.rejects(h.svc.review(h.caseId, docId, 'p-001', { action: 'accept', supersedes: 'f-0001' }), /ledger write failed/);
+    FactLedger.prototype.assert = assertReal;
+    assert.strictEqual(files.readRecord(h.dir, docId).proposals[0].review, null);
+    assert.deepStrictEqual(activeUser(h).map((f) => f.id), ['f-0001']);
+    const { fact, proposal } = await h.svc.review(h.caseId, docId, 'p-001', { action: 'accept', supersedes: 'f-0001' });
+    assert.strictEqual(proposal.review.factId, fact.id);
+    assert.deepStrictEqual(activeUser(h), []);
+  });
+
   it('only known record fields reach the fact, capped and one-lined', async () => {
     const { h, docId } = await reviewed();
     forge(h, docId, (rec) => {

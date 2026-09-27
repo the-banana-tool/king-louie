@@ -464,6 +464,8 @@ class IngestService {
     if (payload.text) files.writeTextStore(m.dir, shapeText(payload.text, record.docId, record.sha256));
     if (payload.question) record = this._askReview(m, record);
     files.writeRecord(m.dir, record);
+    const props = arr(record.proposals);
+    if (record.questionId && props.length && props.every((p) => isObj(p) && p.review)) this._closeQuestion(m, record);
     if (payload.journal) this.runtime.records(m.id).writeJournal('ingest', String(payload.journal).slice(0, JOURNAL_CAP), this.now());
     return record;
   }
@@ -1197,6 +1199,16 @@ class IngestService {
         throw new IngestError('READ_FAILED', `${oneLine(rec.ref, 200)} could not be read (${oneLine(err?.code || err?.message, 40)}).`);
       }
       if (store.sha256(bytes) !== rec.sha256) throw new IngestError('DOC_CHANGED', DOC_CHANGED);
+      // The type decides where the anchor is checked (text layer, or the OCR
+      // store for an image), so it comes from the bytes, not the record: a
+      // text PDF recorded as an image would skip the text-layer re-read.
+      let sniffed = null;
+      try {
+        sniffed = store.sniffType({ name: path.basename(String(rec.ref)), bytes }).mime;
+      } catch (err) {
+        if (!(err instanceof IngestError)) throw err;
+      }
+      if (sniffed !== rec.mime) throw new IngestError('DOC_CHANGED', DOC_CHANGED);
       ctx.bytes = bytes;
     }
     // The page's text layer, re-read from the bytes (none for an image).
@@ -1209,7 +1221,8 @@ class IngestService {
       layer = await ctx.pdf.pageText(n);
     }
     if (layer !== null && review.quoteOffset(layer, quote) !== -1) return { ocr };
-    if (!ocr) throw moved;
+    // Text files are never read by OCR.
+    if (!ocr || rec.mime.startsWith('text/')) throw moved;
     // An OCR quote: the page must really be one the reader sends to vision
     // (a page with a usable text layer is never read by OCR; a lowered
     // textQualityThreshold since the read can refuse here, and Extract
@@ -1230,7 +1243,7 @@ class IngestService {
     if (idx === -1) throw new IngestError('NOT_FOUND', `No proposal ${proposalId} in ${docId}.`);
     const p = rec.proposals[idx];
     if (p.review) throw new IngestError('ALREADY_REVIEWED', `${proposalId} was already ${oneLine(isObj(p.review) ? p.review.action : 'reviewed', 40)}.`);
-    return { rec, idx, p };
+    return { raw, rec, idx, p };
   }
 
   // Accept-all takes a proposal only when a fresh check agrees with the
@@ -1263,14 +1276,14 @@ class IngestService {
       evidence = await this._anchorEvidence(m, first.rec, first.p, ctx);
     }
     // ---- no await from here on ----
-    const { rec, idx, p } = this._reviewTarget(m, docId, proposalId);
+    const { raw, rec, idx, p } = this._reviewTarget(m, docId, proposalId);
     const key = (x) => JSON.stringify([propose.normalizeProposal(x), Boolean(x.anchor?.ocr)]);
     if (rec.sha256 !== first.rec.sha256 || rec.ref !== first.rec.ref || key(p) !== key(first.p)) {
       throw new IngestError('CHANGED', `${proposalId} changed while it was being reviewed. Review it again.`);
     }
     const at = this.now().toISOString();
     const ledger = this.runtime.ledger(m.id);
-    let fact = null;
+    let factInput = null;
     let outcome;
     if (req.action === 'reject') {
       outcome = { action: 'rejected', by: req.by, at, ...(req.reason ? { reason: req.reason } : {}) };
@@ -1295,7 +1308,7 @@ class IngestService {
       }
       const v = isObj(p.checks?.verify) ? p.checks.verify : null;
       const kind = rec.origin?.kind;
-      fact = ledger.assert({
+      factInput = {
         provenance: 'sourced',
         source: {
           kind: 'document',
@@ -1319,36 +1332,51 @@ class IngestService {
         supersedes: req.supersedes || null,
         disclosable: false,
         addedBy: `ingest:${rec.docId}${req.by === 'panel' ? '' : `:${req.by}`}`
-      });
+      };
       outcome = {
         action: req.action === 'edit' ? 'edited' : 'accepted',
         by: req.by,
         at,
-        factId: fact.id,
+        // The id the ledger gives the next fact; no await until the assert.
+        factId: ledger._nextId(facts),
         ...(shaped.edit ? { edit: shaped.edit } : {}),
         ...(req.supersedes ? { supersedes: req.supersedes } : {}),
         ...(req.keepBoth ? { keepBoth: true } : {})
       };
     }
-    const proposals = rec.proposals.map((x, i) => (i === idx ? { ...x, review: outcome } : x));
-    const finished = proposals.every((x) => x.review) && (rec.status === 'ready-for-review' || rec.status === 'reviewed');
-    const next = { ...rec, proposals, status: finished ? 'reviewed' : rec.status, updatedAt: at };
-    try {
-      files.writeRecord(m.dir, next);
-    } catch (err) {
-      // The review was not recorded: the fact goes too, so a retry accepts
-      // the proposal once, not twice.
-      if (fact) {
+    const reviewed = (list) => list.every((x) => x.review);
+    let proposals = rec.proposals.map((x, i) => (i === idx ? { ...x, review: outcome } : x));
+    const finished = reviewed(proposals);
+    const status = finished && (rec.status === 'ready-for-review' || rec.status === 'reviewed') ? 'reviewed' : rec.status;
+    let next = { ...rec, proposals, status, updatedAt: at };
+    // The record first, then the fact. A failed record write leaves the
+    // ledger untouched (an owner fact named in supersedes stays active); a
+    // failed assert puts the record back as it was. Never a fact without its
+    // review, nor a superseded owner fact without the fact that replaced it.
+    files.writeRecord(m.dir, next);
+    let fact = null;
+    if (factInput) {
+      try {
+        fact = ledger.assert(factInput);
+      } catch (err) {
         try {
-          ledger.retract(fact.id, `the review of ${proposalId} in ${docId} could not be recorded`);
+          files.writeRecord(m.dir, raw);
         } catch (e) {
-          this.log.error(`Retracting ${fact.id} after a failed review write failed: ${e.message}`);
+          this.log.error(`Restoring the record of ${docId} after a failed accept failed: ${e.message}`);
         }
+        throw err;
       }
-      throw err;
+      if (fact.id !== outcome.factId) {
+        outcome = { ...outcome, factId: fact.id };
+        proposals = proposals.map((x, i) => (i === idx ? { ...x, review: outcome } : x));
+        next = { ...next, proposals };
+        files.writeRecord(m.dir, next);
+      }
     }
     this.runtime.records(m.id).writeJournal('ingest', `${proposalId} of ${next.name} (${docId}) ${outcome.action} by ${req.by}${fact ? ` as ${fact.id}` : ''}.`, this.now());
-    if (finished && req.by === 'panel' && next.questionId) this._closeQuestion(m, next);
+    // Every proposal has a review: an open review question has nothing left
+    // to ask, whoever finished it and whatever the status.
+    if (finished && next.questionId) this._closeQuestion(m, next);
     try {
       this._entities()?.upsertCase(m.id);
     } catch (err) {
@@ -1455,12 +1483,23 @@ class IngestService {
     }
     const by = `question:${question.id}`;
     try {
+      if (option === 'b') return { applied: false };
+      // A stale answer changes nothing: a question the record no longer
+      // points at (Extract again asked a new one) or a record with nothing
+      // left to review. A record with no question yet accepts the answer.
+      const meta = this.runtime.getCase(caseId);
+      this._foldKept(meta, docId);
+      const rec = files.readRecord(meta.dir, docId);
+      if (!rec) return refuse(`No document ${docId} in this case.`);
+      if (rec.questionId !== undefined && rec.questionId !== null && rec.questionId !== question.id) {
+        return refuse(`${question.id} is no longer the review question of ${docId}; review the proposals in the panel.`);
+      }
+      if (!arr(rec.proposals).some((p) => isObj(p) && !p.review)) return refuse(`Every proposal of ${docId} was already reviewed.`);
       if (option === 'a') {
         const r = await this.acceptVerified(caseId, docId, { by });
         return { applied: 'ingest', accepted: r.accepted, skipped: r.skipped };
       }
-      if (option === 'c') return await this._rejectAll(caseId, docId, by);
-      return { applied: false };
+      return await this._rejectAll(caseId, docId, by);
     } catch (err) {
       this.log.warn(`Applying the answer to ${question.id} failed: ${err.message}`);
       return refuse(oneLine(err.message, MESSAGE_CAP));

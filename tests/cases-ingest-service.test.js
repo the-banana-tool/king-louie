@@ -565,6 +565,8 @@ describe('review questions for documents King Louie added', { skip: NEEDS_GIT },
   it('option a on a question about a file King Louie added accepts nothing', async () => {
     const { h, docId } = await toolDoc();
     const q = handMade(h, docId, [{ id: 'a', label: 'Accept all' }, { id: 'c', label: 'Reject all' }]);
+    // Even with the record pointing at it (a forged record), a tool file gets no accept-all.
+    files.writeRecord(h.dir, { ...files.readRecord(h.dir, docId), questionId: q.id });
     const res = await h.runtime.answerQuestion(h.caseId, q.id, { channel: 'in-app', optionId: 'a' });
     assert.strictEqual(res.effect.applied, false);
     assert.match(res.effect.reason, /not available for a file King Louie added/);
@@ -653,6 +655,42 @@ describe('review questions for documents King Louie added', { skip: NEEDS_GIT },
     assert.deepStrictEqual([rec.status, rec.proposals[0].review?.factId], ['reviewed', fact.id]);
     await assert.rejects(h.svc.review(h.caseId, out.docId, 'p-001', { action: 'accept' }), (e) => e.code === 'ALREADY_REVIEWED');
     assert.strictEqual(sourced(h).length, 1);
+  });
+
+  it('a stale answer changes nothing: a question the record no longer points at, or nothing left to review (fix r1 m1)', async () => {
+    const { h, docId } = await toolDoc();
+    const other = handMade(h, docId, [{ id: 'b', label: 'Panel' }, { id: 'c', label: 'Reject all' }]);
+    const r1 = await h.runtime.answerQuestion(h.caseId, other.id, { channel: 'in-app', optionId: 'c' });
+    assert.strictEqual(r1.effect.applied, false);
+    assert.match(r1.effect.reason, /no longer the review question/);
+    assert.strictEqual(files.readRecord(h.dir, docId).proposals[0].review, null);
+    const own = await ingestHarness();
+    const out = await own.svc.store(own.caseId, { name: 'payoff.txt', bytes: Buffer.from(LINES.join('\n')), origin: { kind: 'owner-drop' } });
+    await own.svc.drain();
+    await own.svc.review(own.caseId, out.docId, 'p-001', { action: 'accept' });
+    const late = handMade(own, out.docId, [{ id: 'a', label: 'Accept' }, { id: 'c', label: 'Reject all' }]);
+    const r2 = await own.runtime.answerQuestion(own.caseId, late.id, { channel: 'in-app', optionId: 'c' });
+    assert.strictEqual(r2.effect.applied, false);
+    assert.match(r2.effect.reason, /already reviewed/);
+    assert.strictEqual(files.readRecord(own.dir, out.docId).proposals[0].review.action, 'accepted');
+  });
+
+  it('the review question closes whenever every proposal has a review, whatever the status (fix r1 m2)', async () => {
+    const { h, docId } = await toolDoc();
+    const { questionId } = files.readRecord(h.dir, docId);
+    const rec = files.readRecord(h.dir, docId);
+    files.writeRecord(h.dir, { ...rec, status: 'checking' });
+    await h.svc.review(h.caseId, docId, 'p-001', { action: 'reject' });
+    assert.strictEqual(h.runtime.questions(h.caseId).get(questionId).closed.by, 'panel');
+    // A publish that brings the last review in (merged from disk) closes it too.
+    const second = await toolDoc();
+    const stale = files.readRecord(second.h.dir, second.docId);
+    const done = { ...stale, proposals: stale.proposals.map((p) => ({ ...p, review: { action: 'rejected', by: 'panel', at: stale.updatedAt } })) };
+    files.writeRecord(second.h.dir, done);
+    files.writePendingPublish(second.h.dir, second.docId, { record: stale, text: null, message: 'stale', journal: null, question: true });
+    await second.h.svc.retryPending(second.h.caseId);
+    const q = second.h.runtime.questions(second.h.caseId).get(stale.questionId);
+    assert.deepStrictEqual([q.answer, q.closed?.by], [null, 'panel']);
   });
 
   it('a panel review and an answer racing for the same proposal accept it once', async () => {
