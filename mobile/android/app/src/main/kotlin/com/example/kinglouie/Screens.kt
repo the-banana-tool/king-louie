@@ -144,7 +144,7 @@ fun Pending(model: AppModel) {
                 Column(Modifier.fillMaxWidth().clickable { open = p.id }.padding(vertical = 8.dp)) {
                     Text(p.display["node"]["name"].str() ?: "", fontWeight = FontWeight.Bold)
                     Text(p.display["summary"].str() ?: "", maxLines = 2)
-                    Row { Text(p.display["origin"]["client"].str() ?: ""); Text("   " + (p.status ?: formatLeft(p.timeLeftMs))) }
+                    Row { Text(com.example.kinglouie.protocol.FrontDoor.pendingOriginText(p.display)); Text("   " + (p.status ?: formatLeft(p.timeLeftMs))) }
                 }
                 HorizontalDivider()
             }

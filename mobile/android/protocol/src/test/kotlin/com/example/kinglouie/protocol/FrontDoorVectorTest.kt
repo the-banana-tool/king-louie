@@ -4,6 +4,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -496,5 +497,16 @@ class FrontDoorVectorTest {
         assertEquals("abc…", FrontDoor.shownText("abcdef", max = 3))
         // The cap applies before escaping, so an escaped character counts once.
         assertEquals("‹U+202E›…", FrontDoor.shownText("‮‮", max = 1))
+    }
+
+    /** Final review carry 9a: the pending list's origin.client is capped and escaped. */
+    @Test
+    fun pendingOriginTextIsShownText() {
+        val display = { client: String -> JsonObject(mapOf("origin" to JsonObject(mapOf("client" to JsonPrimitive(client))))) }
+        assertEquals("Example Client", FrontDoor.pendingOriginText(display("Example Client")))
+        assertEquals("a‹U+202E›b", FrontDoor.pendingOriginText(display("a‮b")))
+        assertEquals("x".repeat(200) + "…", FrontDoor.pendingOriginText(display("x".repeat(5000))))
+        assertEquals("", FrontDoor.pendingOriginText(null))
+        assertEquals("", FrontDoor.pendingOriginText(JsonObject(mapOf("origin" to JsonObject(emptyMap())))))
     }
 }

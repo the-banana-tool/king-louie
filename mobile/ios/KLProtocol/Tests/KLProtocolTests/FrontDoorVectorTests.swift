@@ -543,4 +543,14 @@ final class FrontDoorVectorTests: XCTestCase {
         // The cap applies before escaping, so an escaped character counts once.
         XCTAssertEqual(FrontDoor.shownText("\u{202E}\u{202E}", max: 1), "\u{2039}U+202E\u{203A}\u{2026}")
     }
+
+    /// Final review carry 9a: the pending list's origin.client is capped and escaped.
+    func testPendingOriginTextIsShownText() {
+        func display(_ client: String) -> JSONValue { .object(["origin": .object(["client": .string(client)])]) }
+        XCTAssertEqual(FrontDoor.pendingOriginText(display("Example Client")), "Example Client")
+        XCTAssertEqual(FrontDoor.pendingOriginText(display("a\u{202E}b")), "a\u{2039}U+202E\u{203A}b")
+        XCTAssertEqual(FrontDoor.pendingOriginText(display(String(repeating: "x", count: 5000))), String(repeating: "x", count: 200) + "\u{2026}")
+        XCTAssertEqual(FrontDoor.pendingOriginText(nil), "")
+        XCTAssertEqual(FrontDoor.pendingOriginText(.object(["origin": .object([:])])), "")
+    }
 }

@@ -121,7 +121,7 @@ struct PendingListView: View {
                                 Text(item.display["node"]?["name"]?.stringValue ?? "").font(.headline)
                                 Text(item.display["summary"]?.stringValue ?? "").lineLimit(2)
                                 HStack {
-                                    Text(item.display["origin"]?["client"]?.stringValue ?? "")
+                                    Text(FrontDoor.pendingOriginText(item.display))
                                     Spacer()
                                     Text(item.status ?? formatLeft(item.timeLeft)).monospacedDigit()
                                 }

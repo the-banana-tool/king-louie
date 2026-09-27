@@ -275,6 +275,13 @@ object FrontDoor {
         if (text.codePointCount(0, text.length) <= limit) return Display.escape(text)
         return Display.escape(text.substring(0, text.offsetByCodePoints(0, limit))) + "…"
     }
+
+    /**
+     * The pending list's requester line: an approval's `origin.client`,
+     * which on a front door is a client's self-declared name. Shown like any
+     * client text (capped, escaped); "" when there is none.
+     */
+    fun pendingOriginText(display: JsonElement?): String = shownText(display["origin"]["client"].str())
 }
 
 /**

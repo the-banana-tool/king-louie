@@ -284,6 +284,13 @@ public enum FrontDoor {
         cut.append(contentsOf: scalars.prefix(Swift.max(0, max)))
         return Display.escape(String(cut)) + "\u{2026}"
     }
+
+    /// The pending list's requester line: an approval's `origin.client`,
+    /// which on a front door is a client's self-declared name. Shown like any
+    /// client text (capped, escaped); "" when there is none.
+    public static func pendingOriginText(_ display: JSONValue?) -> String {
+        shownText(display?["origin"]?["client"]?.stringValue)
+    }
 }
 
 /// One `GET /v1/grants/pending` reply (client-grant-v1 §7): exactly its ten
