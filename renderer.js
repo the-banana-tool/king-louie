@@ -3108,9 +3108,14 @@ function renderChatInfoPopover() {
   const popoverNeeds = () => (appState.isAgentModeEnabled ? { toolCall: true } : {});
   let usableModels = [];
   let usableFetchId = 0;
+  let verdictFetchId = 0;
 
-  // Why the current target cannot be used, if it cannot.
+  // Why the current target cannot be used, if it cannot. Its own fetch id
+  // token (separate from usableFetchId): a fast provider/model switch can
+  // leave an older explain() call in flight, and its answer must never
+  // overwrite a newer one's note (Task 12 fix round 1).
   const showCurrentVerdict = async (provider, model) => {
+    const fetchId = ++verdictFetchId;
     modelNote.textContent = '';
     if (!provider) return;
     try {
@@ -3118,8 +3123,12 @@ function renderChatInfoPopover() {
         await window.electron.models.explain({ provider, model: model || '', needs: popoverNeeds() }),
         'Unable to check the model.'
       );
+      if (fetchId !== verdictFetchId) return;
       if (!verdict.usable) modelNote.textContent = verdict.reasons.join(' ');
-    } catch (err) { modelLog.debug(`explain failed: ${err.message}`); }
+    } catch (err) {
+      if (fetchId !== verdictFetchId) return;
+      modelLog.debug(`explain failed: ${err.message}`);
+    }
   };
 
   const fillModels = (provider, selectedModel) => {

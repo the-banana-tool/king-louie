@@ -479,11 +479,17 @@ contextBridge.exposeInMainWorld(
         validateString(chatId, 'chatId');
         return ipcRenderer.invoke('chat:truncateFrom', { chatId, fromIndex });
       },
-      onMessageStart: (callback) => registerOnce('chat:messageStart', callback),
+      // Additive (not registerOnce): renderer.js registers each of these
+      // more than once (the main send-path handlers, and initAgentProgress's
+      // own progress-bar handlers) — registerOnce silently drops all but the
+      // last registration, which replaced the real streaming handlers and
+      // left Stop, the streaming placeholder and live text all broken
+      // (stream-investigation.md, Task 12 fix round 1).
+      onMessageStart: (callback) => registerAdditive('chat:messageStart', callback),
       onMessageChunk: (callback) => registerOnce('chat:messageChunk', callback),
-      onMessageComplete: (callback) => registerOnce('chat:messageComplete', callback),
+      onMessageComplete: (callback) => registerAdditive('chat:messageComplete', callback),
       onMessageError: (callback) => registerOnce('chat:messageError', callback),
-      onToolUse: (callback) => registerOnce('chat:toolUse', callback),
+      onToolUse: (callback) => registerAdditive('chat:toolUse', callback),
       onToolResult: (callback) => registerOnce('chat:toolResult', callback),
       onToolProgress: (callback) => registerOnce('chat:toolProgress', callback),
       onChatUpdated: (callback) => registerOnce('chat:updated', callback)
