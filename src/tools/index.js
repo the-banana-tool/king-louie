@@ -66,6 +66,7 @@ function initializeTools() {
   require('./builtin/executor-tools').registerExecutorTools(toolRegistry);
   require('./builtin/detour-tool').registerDetourTools(toolRegistry);
   require('./builtin/playbook-tool').registerPlaybookTools(toolRegistry);
+  require('./builtin/ingest-tool').registerIngestTools(toolRegistry);
 
   initialized = true;
 }

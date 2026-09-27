@@ -63,11 +63,12 @@ function assertClean(result, phrase, label) {
 const mentions = (result, phrase) => leaves(result).some((s) => s.includes(phrase));
 
 describe('Playbook tool', () => {
-  it('is registered, needs no approval and is the last case tool', () => {
+  it('is registered, needs no approval and is a case tool', () => {
     initializeTools();
     assert.strictEqual(toolRegistry.get('Playbook'), PlaybookTool);
     assert.strictEqual(PlaybookTool.requiresApproval, false);
-    assert.strictEqual(CASE_TOOL_NAMES[CASE_TOOL_NAMES.length - 1], 'Playbook');
+    // Later stages append their own tools after Playbook (C7 adds Ingest).
+    assert.ok(CASE_TOOL_NAMES.includes('Playbook'));
     assert.deepStrictEqual(PlaybookTool.parameters.required, ['action']);
     assert.deepStrictEqual(PlaybookTool.parameters.properties.action.enum, ['list', 'read', 'propose']);
   });

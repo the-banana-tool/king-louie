@@ -8,6 +8,7 @@ const { requireOwnerQuote } = require('../../cases/chat-integration');
 const { caseTypeForField, resolveCaseType } = require('../../cases/case-types');
 const { validateRepo, repoInQuote } = require('../../cases/case-types/software-repo');
 const { toMs } = require('../../cases/clock');
+const { oneLine } = require('../../cases/ingest/store');
 
 const NO_CASE = Object.freeze({
   ok: false,
@@ -28,6 +29,43 @@ function updateOpsMemory(ctx, fn) {
 }
 
 const SOURCE_KINDS = ['url', 'document', 'call', 'api'];
+
+// Cases stage 7 (spec §4.4): a document source carrying these is one the
+// ingest review wrote after the owner accepted it. The model never writes
+// one, whatever the provenance. __proto__ is refused too: an own
+// "__proto__" key from JSON could become the prototype on a later copy.
+const VERIFIED_SOURCE_FIELDS = Object.freeze(['verified', 'docId', 'proposalId', 'origin', '__proto__']);
+const VERIFIED_SOURCE_REFUSAL = Object.freeze({
+  ok: false,
+  error: 'Verified document sources are written only by ingest review. Use Ingest start, then ask the owner to review.'
+});
+function hasVerifiedSourceField(source) {
+  if (!source || typeof source !== 'object') return false;
+  return VERIFIED_SOURCE_FIELDS.some((k) => Object.prototype.hasOwnProperty.call(source, k));
+}
+
+// Other cases whose records name an entity in `text` (cases stage 7 spec
+// §3.6): case id, title, record kind and id, and the entity key (derived
+// from `text` itself), never a file name or another case's text. A
+// failing index gives no hits; the unknown is still recorded.
+const HIT_KINDS = new Set(['fact', 'document']);
+function entityHitsElsewhere(ctx, text) {
+  try {
+    const hits = ctx.runtime.entityIndex?.()?.matchText(String(text ?? ''), { excludeCaseId: ctx.caseId });
+    if (!Array.isArray(hits)) return [];
+    return hits
+      .filter((h) => h && typeof h === 'object' && h.caseId !== ctx.caseId && HIT_KINDS.has(h.kind))
+      .map(({ caseId, title, kind, id, entity }) => ({
+        caseId: String(caseId),
+        title: oneLine(title, 200),
+        kind,
+        id: String(id),
+        entity: oneLine(entity, 200)
+      }));
+  } catch {
+    return [];
+  }
+}
 const VALUE_DESCRIPTION = 'numbers and lists as JSON text';
 // Brief fields whose value is text: never parse these, so "2027" stays text.
 const BRIEF_TEXT_FIELDS = new Set(['objective', 'why', 'deadline', 'repo']);
@@ -144,6 +182,8 @@ const LedgerTool = acceptAnyValue(new Tool({
     switch (params.action) {
       case 'assert': {
         const input = { ...params, addedBy: ctx.turnId };
+        // Cases stage 7 (spec §4.4): only ingest review writes these fields.
+        if (hasVerifiedSourceField(params.source)) return VERIFIED_SOURCE_REFUSAL;
         if (input.provenance === 'user') {
           const check = requireOwnerQuote({ quote: input.quote, ownerMessages: ctx.ownerMessages });
           if (!check.ok) return check;
@@ -204,11 +244,20 @@ const LedgerTool = acceptAnyValue(new Tool({
           };
         }
         const fact = ledger.unknown({ ...params, addedBy: ctx.turnId });
+        // Cases stage 7 (spec §3.6): the entity index across cases, title
+        // and ids only; a note, not a refusal.
+        const alsoKnownElsewhere = entityHitsElsewhere(ctx, params.stmt);
+        const entityNames = [...new Set(alsoKnownElsewhere.map((h) => h.entity))];
+        const notes = [
+          ...(dups.similar.length ? ['Other cases hold related facts. Check them before asking the owner.'] : []),
+          ...(entityNames.length ? [`Other cases already hold records about ${entityNames.join(', ')}; check them before asking.`] : [])
+        ];
         return {
           ok: true,
           fact,
           similarInOtherCases: dups.similar,
-          ...(dups.similar.length ? { note: 'Other cases hold related facts. Check them before asking the owner.' } : {})
+          alsoKnownElsewhere,
+          ...(notes.length ? { note: notes.join(' ') } : {})
         };
       }
       case 'retract':

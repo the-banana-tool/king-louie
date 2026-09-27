@@ -4,7 +4,7 @@
 // owner-quote check the case tools use for provenance "user".
 const { segmentsWithin } = require('./safe-path');
 
-const CASE_TOOL_NAMES = Object.freeze(['Ledger', 'Brief', 'Decide', 'Recommend', 'Reorient', 'Ask', 'Fail', 'Detour', 'Plan', 'Executor', 'Playbook']);
+const CASE_TOOL_NAMES = Object.freeze(['Ledger', 'Brief', 'Decide', 'Recommend', 'Reorient', 'Ask', 'Fail', 'Detour', 'Plan', 'Executor', 'Playbook', 'Ingest']);
 
 // Tools kept out of every case turn (stage 2 spec §3.2). SpawnAgent,
 // BackgroundTask, sessions_spawn, RemoteDispatch and Cron start a run with
