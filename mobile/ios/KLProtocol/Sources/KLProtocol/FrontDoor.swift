@@ -232,6 +232,35 @@ public enum FrontDoor {
         guard let oldSpki = message["old_spki"]?.stringValue, ExactText.same(oldSpki, currentPin) else { return fail("old_pin_mismatch") }
         return RepinCheck(ok: true, reason: nil, newSpki: newSpki)
     }
+
+    /// The front door a `GET /v1/frontdoor` reply names, only when it is a
+    /// node this phone pinned from a code (never from the relay's word) and
+    /// the reply's key is that pin's key. Nothing else in the reply is
+    /// trusted; nil for anything else.
+    public static func identify(_ info: JSONValue?, pins: [NodePin]) -> String? {
+        guard let id = info?["frontdoor_id"]?.stringValue, Rules.isNodeId(info?["frontdoor_id"]),
+              FrontDoorRules.isRawEd25519(info?["public_key"]), let text = info?["public_key"]?.stringValue,
+              let raw = try? Base64URL.decode(text), raw.count == 32,
+              let pin = pins.first(where: { ExactText.same($0.id, id) }),
+              let der = try? Hex.decode(pin.key), der.count == 44, Hex.encode(der.prefix(12)) == Identifiers.ed25519SpkiPrefix,
+              Data(der.suffix(32)) == raw else { return nil }
+        return id
+    }
+
+    /// Text from a client or the front door (names, hosts, codes, reasons,
+    /// alert details) as the app shows it: at most `max` code points, with
+    /// "…" when cut, then escaped (hidden and bidi characters as ‹U+XXXX›).
+    /// The app shows the result as plain text, never as markup or a link.
+    public static let shownTextMax = 200
+
+    public static func shownText(_ text: String?, max: Int = shownTextMax) -> String {
+        guard let text else { return "" }
+        let scalars = text.unicodeScalars
+        guard scalars.count > max else { return Display.escape(text) }
+        var cut = String.UnicodeScalarView()
+        cut.append(contentsOf: scalars.prefix(Swift.max(0, max)))
+        return Display.escape(String(cut)) + "\u{2026}"
+    }
 }
 
 /// One `GET /v1/grants/pending` reply (client-grant-v1 §7): exactly its ten

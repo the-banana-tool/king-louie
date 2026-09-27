@@ -83,6 +83,7 @@ struct MainView: View {
                 PendingListView().tabItem { Label("Pending", systemImage: "checkmark.shield") }
                 HistoryView().tabItem { Label("History", systemImage: "clock") }
                 NodesView().tabItem { Label("Nodes", systemImage: "server.rack") }
+                FrontDoorView().tabItem { Label("Front door", systemImage: "door.left.hand.open") }
                 DevicesView().tabItem { Label("Devices", systemImage: "iphone") }
                 SettingsView().tabItem { Label("Settings", systemImage: "gear") }
             }
@@ -159,7 +160,8 @@ struct ApprovalDetailView: View {
                         LabeledContent("Kind", value: item.display["kind"]?.stringValue ?? "")
                         LabeledContent("Name", value: item.display["name"]?.stringValue ?? "")
                         if let cwd = item.display["cwd"]?.stringValue { LabeledContent("Directory", value: cwd) }
-                        LabeledContent("Asked by", value: originText(item.display["origin"]))
+                        // On a front door, origin.client is the client's self-declared name as the front door reports it.
+                        LabeledContent(model.state.frontDoorId == nil ? "Asked by" : "Client (reported by front door)", value: originText(item.display["origin"]))
                         LabeledContent("Time left", value: formatLeft(item.timeLeft))
                     }
                     Section("Everything it will do") {
@@ -231,6 +233,12 @@ struct HistoryView: View {
                     ForEach(model.state.nodes, id: \.id) { Text(Display.escape($0.name)).tag($0.id) }
                 }
                 if let page = model.history, page.nodeId == nodeId {
+                    if let status = page.status {
+                        FrontDoorAuditSection(status: status)
+                    }
+                    if let note = page.statusNote {
+                        Section("Reported by front door") { Text(verbatim: note).font(.caption) }
+                    }
                     Section("As of \(Display.escape(page.asOf))") {
                         ForEach(Array(page.entries.enumerated()), id: \.offset) { _, entry in
                             VStack(alignment: .leading) {
@@ -356,6 +364,9 @@ struct SettingsView: View {
                 Section("Relay") {
                     Text(model.state.relayURL ?? "not paired")
                     Text(model.state.relaySpki ?? "").font(.caption.monospaced())
+                    if let id = model.state.frontDoorId {
+                        Text(verbatim: "Front door " + FrontDoor.nodeFingerprint(id)).font(.caption.monospaced())
+                    }
                     Button("Re-pin the relay (scan a relay code)") { scanning = true }.disabled(model.mode != .live)
                 }
                 if model.mode == .demo {

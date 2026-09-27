@@ -493,4 +493,43 @@ final class FrontDoorVectorTests: XCTestCase {
         for ok in ["client.example.com", "client.example.com:443", "192.0.2.1", "[::1]", "[::ffff:192.0.2.1]", "[2001:db8:0:0:0:0:0:1]", "[1::]", "[2001:db8::1]:8443", "[1:2:3:4:5:6:1.2.3.4]", "[::]", "xn--bcher-kva.example"] { XCTAssertTrue(FrontDoorRules.isAuthority(Array(ok.utf8)), ok) }
         for bad in ["999.1.1.1", "256.0.0.1", "1.2.3.4.5", "a.b.c.d.1", "example.123", "example.09", "a.08", "a.0x", "a.0XfF", "010.0.0.1", "[1:2]", "[:::]", "[1::2::3]", "[::1.2.3.4.5]", "[.:]", "[1:2:3:4:5:6:7:8:9]", "[12345::1]", "[::256.0.0.1]", "[1:2:3:4:5:6:7::8]", "[1:2:3:4:5:6:7:1.2.3.4]", "[1.2.3.4]", "[::1", "client.example.com:65536", "exa_mple.com", ""] { XCTAssertFalse(FrontDoorRules.isAuthority(Array(bad.utf8)), bad) }
     }
+
+    /// GET /v1/frontdoor is trusted only for a node pinned from a code, with that same key.
+    func testIdentifyNeedsThePinnedKey() throws {
+        let k = try keys()
+        func spki(_ name: String) -> String { k["nodes"]![name]!["spki"]!.stringValue! }
+        func raw(_ name: String) throws -> String { Base64URL.encode(try Hex.decode(spki(name)).suffix(32)) }
+        func pin(_ name: String) -> NodePin { NodePin(id: k["nodes"]![name]!["id"]!.stringValue!, name: name, key: spki(name)) }
+        func info(_ id: JSONValue, _ key: String) -> JSONValue {
+            .object(["frontdoor_id": id, "public_key": .string(key), "domain": .string("kl.example.com")])
+        }
+        let web = k["nodes"]!["web-01"]!["id"]!.stringValue!
+        let pins = [pin("web-01"), pin("gpu-box")]
+        XCTAssertEqual(FrontDoor.identify(info(.string(web), try raw("web-01")), pins: pins), web)
+        // Another pinned node's key under this id, an unpinned id, a short key, a DER key, a non-string id.
+        XCTAssertNil(FrontDoor.identify(info(.string(web), try raw("gpu-box")), pins: pins))
+        XCTAssertNil(FrontDoor.identify(info(.string(web), try raw("web-01")), pins: [pin("gpu-box")]))
+        XCTAssertNil(FrontDoor.identify(info(.string(web), String(try raw("web-01").dropLast(2))), pins: pins))
+        XCTAssertNil(FrontDoor.identify(info(.string(web), spki("web-01")), pins: pins))
+        XCTAssertNil(FrontDoor.identify(info(.number("1"), try raw("web-01")), pins: pins))
+        XCTAssertNil(FrontDoor.identify(nil, pins: pins))
+        XCTAssertNil(FrontDoor.identify(.null, pins: pins))
+        // A pin whose key does not parse matches nothing.
+        XCTAssertNil(FrontDoor.identify(info(.string(web), try raw("web-01")), pins: [NodePin(id: web, name: "web-01", key: "zz")]))
+    }
+
+    /// Client and front-door text is capped by code points and escaped; markup stays text.
+    func testShownTextIsCappedAndEscaped() {
+        XCTAssertEqual(FrontDoor.shownText(nil), "")
+        XCTAssertEqual(FrontDoor.shownText("<img src=x onerror=alert(1)>"), "<img src=x onerror=alert(1)>")
+        XCTAssertEqual(FrontDoor.shownText("[x](https://evil.example.com)"), "[x](https://evil.example.com)")
+        XCTAssertEqual(FrontDoor.shownText("a\u{202E}b\n"), "a\u{2039}U+202E\u{203A}b\u{2039}U+000A\u{203A}")
+        XCTAssertEqual(FrontDoor.shownText(String(repeating: "x", count: 200)), String(repeating: "x", count: 200))
+        XCTAssertEqual(FrontDoor.shownText(String(repeating: "x", count: 201)), String(repeating: "x", count: 200) + "\u{2026}")
+        // Cut by code points.
+        XCTAssertEqual(FrontDoor.shownText(String(repeating: "\u{1F600}", count: 300)), String(repeating: "\u{1F600}", count: 200) + "\u{2026}")
+        XCTAssertEqual(FrontDoor.shownText("abcdef", max: 3), "abc\u{2026}")
+        // The cap applies before escaping, so an escaped character counts once.
+        XCTAssertEqual(FrontDoor.shownText("\u{202E}\u{202E}", max: 1), "\u{2039}U+202E\u{203A}\u{2026}")
+    }
 }

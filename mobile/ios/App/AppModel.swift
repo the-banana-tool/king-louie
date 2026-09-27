@@ -13,6 +13,10 @@ struct StoredState: Codable {
     var relaySpki: String?
     var nodes: [NodePin] = []
     var pushToken: String?
+    /// The front door this phone's relay is (fleet stage 4): set only when
+    /// GET /v1/frontdoor names a node pinned from a code, with that key
+    /// (FrontDoor.identify).
+    var frontDoorId: String?
 
     static let key = "kl.state"
 
@@ -49,6 +53,11 @@ struct HistoryPage {
     let nodeId: String
     let entries: [JSONValue]
     let asOf: String
+    /// The front door's own gap and break records (GET …/audit-status),
+    /// shown as "reported by front door", never as node-signed history.
+    var status: AuditStatus? = nil
+    /// Why those records could not be shown, when they could not.
+    var statusNote: String? = nil
 }
 
 @MainActor
@@ -75,6 +84,17 @@ final class AppModel: ObservableObject {
     @Published var fingerprintToCompare: String?
     @Published var inviteQR: String?
     @Published var inviteClaimToConfirm: JSONValue?
+    @Published var grantRequest: GrantRequest?
+    @Published var clients: [JSONValue] = []
+    @Published var pairings: [PairingRequest] = []
+    @Published var frontDoorNodes: [JSONValue] = []
+    @Published var alerts: [JSONValue] = []
+    /// Why the front-door screens are not getting through (shown on them, never as an alert).
+    @Published var frontDoorProblem: String?
+    /// The code the owner typed for `grantRequest`, as the grant carries it.
+    private var grantCode: String?
+    /// When `grantRequest` arrived, on the monotonic clock (its expiry counts from here).
+    private var grantReceivedAt: ContinuousClock.Instant?
 
     private(set) var key: DeviceKey?
     private var demo: DemoFleet?
@@ -295,6 +315,8 @@ final class AppModel: ObservableObject {
         let before = state
         if mode == .demo { leaveDemo() }
         stopPolling()
+        // A different relay is learned again (refreshFrontDoor) once the pairing finishes.
+        if state.relayURL != relay.url { state.frontDoorId = nil }
         state.relayURL = relay.url
         state.relaySpki = relay.spki
         for pin in pins { pinNode(pin) }
@@ -350,6 +372,7 @@ final class AppModel: ObservableObject {
             banner = "Enrolled. This phone now approves for \(Display.escape(pin.name))."
             startPolling()
             await sendPushToken()
+            await refreshFrontDoor()
         case "refused":
             restore(before)
             banner = "The node did not enroll this phone."
@@ -448,6 +471,8 @@ final class AppModel: ObservableObject {
     /// From the scene becoming active: polls unless the owner must tap first
     /// or a pairing is under way.
     func resumePolling() {
+        // Alerts are read on every open (spec §3.13), so a chain break is seen even without push.
+        if mode == .live, state.frontDoorId != nil, !pairing { Task { await refreshAlerts() } }
         guard !needsTap, !pairing else { return }
         startPolling()
     }
@@ -510,8 +535,13 @@ final class AppModel: ObservableObject {
                     return
                 }
                 if let e = error as? RelayError, e.code == "pin_mismatch" {
+                    // Only a front door's signed re-pin, checked against the
+                    // key pinned from a code, moves the pin; anything else
+                    // stops here until the owner scans a relay code.
+                    if await tryRepin() { continue }
                     banner = e.message
                     pollProblem = e.message
+                    frontDoorProblem = e.message
                     needsTap = true
                     return
                 }
@@ -637,7 +667,15 @@ final class AppModel: ObservableObject {
                 banner = "History from \(Display.escape(pin.name)) is about a different node."
                 return
             }
-            history = HistoryPage(nodeId: nodeId, entries: Array(result.entries.reversed()), asOf: slice?["created_at"]?.stringValue ?? "")
+            var page = HistoryPage(nodeId: nodeId, entries: Array(result.entries.reversed()), asOf: slice?["created_at"]?.stringValue ?? "")
+            if state.frontDoorId != nil {
+                do {
+                    page.status = try await client.auditStatus(nodeId: nodeId)
+                } catch {
+                    page.statusNote = "The front door's gap and break records could not be read: \(describe(error))"
+                }
+            }
+            history = page
         } catch {
             fail(error)
         }
@@ -802,6 +840,305 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: Front door (fleet stage 4)
+
+    /// Sets `state.frontDoorId` only when the relay's GET /v1/frontdoor names
+    /// a node this phone pinned from a code, with that same key
+    /// (FrontDoor.identify); nothing else the reply says is trusted. An F3
+    /// relay answers 404.
+    func refreshFrontDoor() async {
+        guard mode == .live, let client else { return }
+        do {
+            let info = try await client.frontDoorInfo()
+            let matched = FrontDoor.identify(info, pins: state.nodes)
+            if state.frontDoorId != matched {
+                state.frontDoorId = matched
+                state.save()
+            }
+            frontDoorProblem = nil
+        } catch let e as RelayError where e.status == 404 {
+            if state.frontDoorId != nil {
+                state.frontDoorId = nil
+                state.save()
+            }
+        } catch {
+            if !Task.isCancelled { frontDoorProblem = describe(error) }
+        }
+    }
+
+    /// Stage 4 §3.3.1: after a pin failure on a front door, exactly one
+    /// unauthenticated GET /v1/repin, to the certificate just seen. The pin
+    /// moves only when FrontDoor.verifyRepin passes: signed by the front-door
+    /// key pinned from a code, naming the certificate just seen and the
+    /// current pin. Anything else leaves the pin as it is.
+    private func tryRepin() async -> Bool {
+        guard let client, let frontDoorId = state.frontDoorId, let pin = state.nodes.first(where: { $0.id == frontDoorId }),
+              let seen = client.takeRefusedSpki(), let base = state.relayURL.flatMap({ URL(string: $0) }),
+              let current = state.relaySpki else { return false }
+        let probe = RelayAPI(base: base, spkiPin: seen, deviceId: nil, signer: nil)
+        defer { probe.invalidate() }
+        guard let envelope = try? await probe.repinEnvelope() else { return false }
+        let check = FrontDoor.verifyRepin(envelope, frontdoorId: frontDoorId, frontdoorKeyHex: pin.key, receivedSpki: seen, currentPin: current)
+        guard check.ok == true, let newSpki = check.newSpki else { return false }
+        state.relaySpki = newSpki
+        state.save()
+        connect()
+        frontDoorProblem = nil
+        banner = "The front door changed its certificate key. Its signed re-pin checked out, so this phone now pins the new key."
+        return true
+    }
+
+    /// A front-door answer that did not confirm what was asked, in the
+    /// owner's words. Known codes are worded; any other code, and a 2xx
+    /// without the expected state, is shown as neutral data, never as success.
+    private func unconfirmed(_ reply: FrontDoorReply) -> String {
+        switch reply {
+        case .done(let state):
+            return "The front door answered but did not confirm it (state: \(state ?? "none")). Check again before relying on it."
+        case .refused(let status, let code, let retryAfter):
+            switch code {
+            case "expired"?, "unknown_request"?: return "This request expired or was already decided. Start again in the client."
+            case "not_claimant"?: return "Another phone claimed this request."
+            case "forbidden"?: return "This phone is not an approver on this front door."
+            case "revoked_device"?: return "This phone was revoked on this front door."
+            case "unknown_machine"?: return "The front door has no machine by one of the names chosen. Choose again."
+            case "already_decided"?: return "This was already decided."
+            case "unknown_pairing"?: return "This pairing expired or was withdrawn."
+            case "replaces_changed"?: return "The node this one replaces changed. Check the pairing again."
+            case "key_enrolled_as_other_name"?: return "This node's key is already enrolled under another name."
+            case "console_record"?: return "This node was confirmed at the console. Remove it there with frontdoor remove-node."
+            case "save_failed"?: return "The front door could not save this. Try again" + (retryAfter.map { " in \($0) s." } ?? ".")
+            case "not_found"?: return "The front door no longer has it."
+            case let c?: return "The front door did not confirm this (\(c), HTTP \(status))."
+            case nil: return "The front door did not confirm this (HTTP \(status))."
+            }
+        }
+    }
+
+    private func isKeyInvalidated(_ error: Error) -> Bool {
+        (error as? ProtocolError) == .keyInvalidated
+    }
+
+    /// The typed code, as the grant carries it; the request is claimed for this phone.
+    func findGrant(code: String) async {
+        cancelGrant()
+        guard let client, state.frontDoorId != nil else { return }
+        guard let normalized = FrontDoor.normalizeUserCode(code) else {
+            banner = "The code is six letters and digits, like Q7K-M2X."
+            return
+        }
+        do {
+            guard let reply = try await client.pendingGrant(userCode: normalized) else {
+                banner = "The front door sent a reply this app cannot read."
+                return
+            }
+            grantRequest = try GrantRequest(json: reply)
+            grantCode = normalized
+            grantReceivedAt = .now
+        } catch let e as RelayError where e.code == "no_such_request" {
+            banner = "No connection request with that code."
+        } catch {
+            fail(error)
+        }
+    }
+
+    func cancelGrant() {
+        grantRequest = nil
+        grantCode = nil
+        grantReceivedAt = nil
+    }
+
+    private var grantExpired: Bool {
+        guard let request = grantRequest, let at = grantReceivedAt else { return true }
+        return ContinuousClock.now - at >= .milliseconds(request.expiresInMs)
+    }
+
+    /// Approve: an explicit tap, then a fresh Face ID / Touch ID prompt over
+    /// exactly the scopes chosen from those requested. Deny: an empty scope
+    /// list, signed with the session's unlock (no fresh prompt); if even that
+    /// cannot be signed, nothing is granted and the request lapses on its own.
+    func decideGrant(_ request: GrantRequest, scopes: [ScopeChoice], approve: Bool) async {
+        guard let client, let key, let frontDoorId = state.frontDoorId, let code = grantCode, grantRequest == request else { return }
+        let name = FrontDoor.shownText(request.clientName)
+        guard !grantExpired else {
+            cancelGrant()
+            banner = "This connection request expired. Start again in the client."
+            return
+        }
+        let envelope: Envelope
+        do {
+            let message = try request.message(frontdoorId: frontDoorId, userCode: code, scopes: approve ? scopes : [], decision: approve ? "approve" : "deny",
+                                              nonce: Messages.randomNonce(), deviceId: key.deviceId, signedAt: Timestamps.string(client.now()))
+            if approve {
+                envelope = try await key.signEnvelope(message, reason: "Let \(name) use your fleet.")
+            } else {
+                envelope = try await key.signRefusalEnvelope(message)
+            }
+        } catch {
+            if !approve && !isKeyInvalidated(error) {
+                cancelGrant()
+                banner = "\(name) was not connected. The refusal could not be signed (\(describe(error))), so the request stays open until it expires; nothing was granted."
+                return
+            }
+            fail(error)
+            return
+        }
+        do {
+            let reply = try await client.grantDecision(request.grantId, envelope: envelope)
+            if reply.confirms(approve ? "approved" : "denied") {
+                cancelGrant()
+                banner = approve ? "\(name) is connected. Go back to its window." : "Refused. \(name) was not connected."
+                return
+            }
+            if case .refused(let status, _, _) = reply, status == 410 || status == 404 { cancelGrant() }
+            banner = unconfirmed(reply)
+        } catch {
+            fail(error)
+        }
+    }
+
+    func refreshClients() async {
+        guard let client, state.frontDoorId != nil else { return }
+        do {
+            clients = try await client.clients()
+            frontDoorProblem = nil
+        } catch {
+            if !Task.isCancelled { frontDoorProblem = describe(error) }
+        }
+    }
+
+    /// Revocation is challenge-bound: a fresh `revoke` challenge, then the signature.
+    func revokeClient(grantId: String, name: String) async {
+        guard let client, let key, let frontDoorId = state.frontDoorId else { return }
+        do {
+            let challenge = try await client.challenge(purpose: FrontDoor.purposeRevoke)
+            let message = try FrontDoor.clientRevoke(frontdoorId: frontDoorId, grantId: grantId, challenge: challenge.challenge,
+                                                     deviceId: key.deviceId, signedAt: Timestamps.string(client.now()))
+            let envelope = try await key.signEnvelope(message, reason: "Disconnect \(FrontDoor.shownText(name)).")
+            let reply = try await client.revokeClient(grantId, envelope: envelope)
+            if !reply.succeeded { banner = unconfirmed(reply) }
+            await refreshClients()
+        } catch {
+            fail(error)
+        }
+    }
+
+    /// Nodes waiting for this phone; an entry the core cannot verify (its id
+    /// does not derive from its key, say) is dropped.
+    func refreshPairings() async {
+        guard let client, state.frontDoorId != nil else { return }
+        do {
+            pairings = try await client.pendingPairings().compactMap { try? PairingRequest(json: $0) }
+            frontDoorProblem = nil
+        } catch {
+            if !Task.isCancelled { frontDoorProblem = describe(error) }
+        }
+    }
+
+    /// Approve: a fresh prompt naming the node and its fingerprint. Deny: the
+    /// session's unlock, like a client refusal. `save_failed` sends the same
+    /// envelope again, at most twice more.
+    func decidePairing(_ pairing: PairingRequest, approve: Bool) async {
+        guard let client, let key, let frontDoorId = state.frontDoorId else { return }
+        let name = FrontDoor.shownText(pairing.nodeName)
+        let envelope: Envelope
+        do {
+            let message = try pairing.message(frontdoorId: frontDoorId, decision: approve ? "approve" : "deny", nonce: Messages.randomNonce(),
+                                              deviceId: key.deviceId, signedAt: Timestamps.string(client.now()))
+            if approve {
+                envelope = try await key.signEnvelope(message, reason: "Add \(name) (\(pairing.fingerprint)) to your fleet.")
+            } else {
+                envelope = try await key.signRefusalEnvelope(message)
+            }
+        } catch {
+            if !approve && !isKeyInvalidated(error) {
+                banner = "\(name) was not added. The refusal could not be signed (\(describe(error))), so it stays waiting until its code expires."
+                return
+            }
+            fail(error)
+            return
+        }
+        do {
+            var reply = try await client.pairingDecision(pairing.pairingId, envelope: envelope)
+            var attempts = 1
+            while reply.isRetryable, attempts < 3 {
+                if case .refused(_, _, let after) = reply { try await Task.sleep(for: .seconds(min(max(after ?? 1, 1), 10))) }
+                reply = try await client.pairingDecision(pairing.pairingId, envelope: envelope)
+                attempts += 1
+            }
+            if reply.confirms(approve ? "enrolled" : "denied") {
+                pairings.removeAll { $0.pairingId == pairing.pairingId }
+                banner = approve ? "\(name) is enrolled. It links when its pair command finishes." : "Refused. \(name) was not added."
+                return
+            }
+            banner = unconfirmed(reply)
+            await refreshPairings()
+        } catch {
+            fail(error)
+        }
+    }
+
+    func refreshFrontDoorNodes() async {
+        guard let client, state.frontDoorId != nil else { return }
+        do {
+            frontDoorNodes = try await client.nodes()
+            frontDoorProblem = nil
+        } catch {
+            if !Task.isCancelled { frontDoorProblem = describe(error) }
+        }
+    }
+
+    /// Removal is challenge-bound: a fresh `remove` challenge, then the signature.
+    func removeNode(nodeId: String, name: String) async {
+        guard let client, let key, let frontDoorId = state.frontDoorId else { return }
+        do {
+            let challenge = try await client.challenge(purpose: FrontDoor.purposeRemove)
+            let message = try FrontDoor.nodeRemove(frontdoorId: frontDoorId, nodeId: nodeId, challenge: challenge.challenge,
+                                                   deviceId: key.deviceId, signedAt: Timestamps.string(client.now()))
+            let envelope = try await key.signEnvelope(message, reason: "Remove \(FrontDoor.shownText(name)) from your fleet.")
+            let reply = try await client.removeNode(nodeId, envelope: envelope)
+            // A save_failed removal is in effect but not saved: removing again (a new challenge) saves it.
+            if !reply.succeeded { banner = reply.isRetryable ? "The node is removed but the front door could not save that. Tap Remove again." : unconfirmed(reply) }
+            await refreshFrontDoorNodes()
+        } catch {
+            fail(error)
+        }
+    }
+
+    /// Read on every app open (spec §3.13), so a chain break is seen even without push.
+    func refreshAlerts() async {
+        guard let client, state.frontDoorId != nil else { return }
+        do {
+            alerts = try await client.alerts(since: "0")
+        } catch {
+            if !Task.isCancelled { frontDoorProblem = describe(error) }
+        }
+    }
+
+    func ackAlert(_ id: String) async {
+        guard let client, state.frontDoorId != nil else { return }
+        do {
+            try await client.ackAlert(id)
+            await refreshAlerts()
+        } catch {
+            fail(error)
+        }
+    }
+
+    /// A push carries only { kind, id }: the app fetches and verifies.
+    func openPushed(kind: String, id: String) async {
+        switch kind {
+        case "pairing": await refreshPairings()
+        case "alert": await refreshAlerts()
+        default: await openPushed(requestId: id)
+        }
+    }
+
+    /// Nodes the phone pinned, and whether a grant can limit to each (Deviation 18).
+    var machineChoices: [MachineChoice] {
+        state.nodes.filter { $0.id != state.frontDoorId }.map { MachineChoice(name: $0.name, limitable: FrontDoor.isMachineName($0.name)) }
+    }
+
     // MARK: Push
 
     func registerPushToken(_ token: String) async {
@@ -840,6 +1177,14 @@ final class AppModel: ObservableObject {
         onlineNodes = [:]
         inviteQR = nil
         inviteClaimToConfirm = nil
+        grantRequest = nil
+        grantCode = nil
+        grantReceivedAt = nil
+        clients = []
+        pairings = []
+        frontDoorNodes = []
+        alerts = []
+        frontDoorProblem = nil
         fingerprintToCompare = nil
         needsTap = false
         pollProblem = nil

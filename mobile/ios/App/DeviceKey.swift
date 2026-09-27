@@ -99,6 +99,18 @@ final class DeviceKey {
         return Envelope(alg: "ES256", kid: deviceId, payload: Base64URL.encode(bytes), sig: Base64URL.encode(signature))
     }
 
+    /// A phone-signed envelope with the session's unlock, without a fresh
+    /// prompt. Only for refusals, which grant nothing (a front-door deny
+    /// signs an empty scope list); anything that approves uses signEnvelope.
+    func signRefusalEnvelope(_ message: JSONValue) async throws -> Envelope {
+        guard message["decision"]?.stringValue == "deny", message["scopes"].map({ $0 == .array([]) }) ?? true else {
+            throw ProtocolError.malformed("Only a refusal is signed without a fresh unlock.")
+        }
+        let bytes = JCS.data(message)
+        let signature = try await signForSession(bytes)
+        return Envelope(alg: "ES256", kid: deviceId, payload: Base64URL.encode(bytes), sig: Base64URL.encode(signature))
+    }
+
     /// Signs API requests with a context unlocked once per session. If the
     /// cached context no longer works, unlock once more before judging the key.
     func signForSession(_ data: Data) async throws -> Data {
