@@ -986,34 +986,43 @@ class CaseRuntime {
         const r = budget.charge('turnsPerDay', 1, { turnId });
         if (r.crossedNow.length) this.onCrossings(meta.id, 'turnsPerDay', r.crossedNow);
       }
-      const hook = await this._runHooks('turn-start', { caseId: meta.id, dir: meta.dir, turnId, source, ownerMessage });
-      const fresh = this.getCase(meta.id);
-      const { triggers, snapshot } = this._detect(fresh, { source, hookTriggers: hook.triggers });
-      // Re-check after the awaits above: shutdown may have begun while this
-      // call was in flight. Caught below, which releases the lock this
-      // attempt just took — the turn is never registered in `this.turns`.
-      if (source === 'wakeup' && this.closing) throw new RuntimeClosingError();
-      const controller = new AbortController();
-      const turn = {
-        caseId: fresh.id,
-        dir: fresh.dir,
-        turnId,
-        title: fresh.title,
-        orientation: '',
-        source,
-        ownerMessage,
-        triggers,
-        reorientPending: triggers.some((t) => t.blocking),
-        hookTriggers: hook.triggers,
-        hookNotes: hook.notes,
-        snapshot,
-        dailyTurnsSpent,
-        signal: controller.signal,
-        abort: (reason) => controller.abort(reason)
-      };
-      turn.orientation = this.orientation(fresh.id, { triggers, hookNotes: hook.notes });
-      this.turns.set(fresh.id, turn);
-      return turn;
+      // Cases stage 6 (final review M-6): the playbook packages load once for
+      // the hooks, the triggers and the orientation below.
+      const closeEntriesScope = this.playbooks && typeof this.playbooks.beginEntriesScope === 'function'
+        ? this.playbooks.beginEntriesScope(meta.id)
+        : () => {};
+      try {
+        const hook = await this._runHooks('turn-start', { caseId: meta.id, dir: meta.dir, turnId, source, ownerMessage });
+        const fresh = this.getCase(meta.id);
+        const { triggers, snapshot } = this._detect(fresh, { source, hookTriggers: hook.triggers });
+        // Re-check after the awaits above: shutdown may have begun while this
+        // call was in flight. Caught below, which releases the lock this
+        // attempt just took — the turn is never registered in `this.turns`.
+        if (source === 'wakeup' && this.closing) throw new RuntimeClosingError();
+        const controller = new AbortController();
+        const turn = {
+          caseId: fresh.id,
+          dir: fresh.dir,
+          turnId,
+          title: fresh.title,
+          orientation: '',
+          source,
+          ownerMessage,
+          triggers,
+          reorientPending: triggers.some((t) => t.blocking),
+          hookTriggers: hook.triggers,
+          hookNotes: hook.notes,
+          snapshot,
+          dailyTurnsSpent,
+          signal: controller.signal,
+          abort: (reason) => controller.abort(reason)
+        };
+        turn.orientation = this.orientation(fresh.id, { triggers, hookNotes: hook.notes });
+        this.turns.set(fresh.id, turn);
+        return turn;
+      } finally {
+        closeEntriesScope();
+      }
     } catch (err) {
       this._release(meta.dir, turnId);
       throw err;

@@ -161,7 +161,30 @@ class PlaybookManager {
     // case lock, so it does not serialise two calls from this process. Every
     // check-then-write here runs in this per-case chain as well.
     this._chains = new Map();
+    // caseId -> { depth, entries }: see beginEntriesScope.
+    this._entriesScopes = new Map();
     gating.ensurePlaybookGatingSource(this.caseTypes);
+  }
+
+  // One package load per turn start (final review M-6). CaseRuntime.beginTurn
+  // opens a scope around its hooks, trigger detection and orientation; there
+  // the gating source, pendingGating, orientationSection, changes and every
+  // executor's briefRules share one loaded list. Nothing in that window
+  // writes playbooks/, the pins or .gitmodules: the case lock is held and no
+  // tool runs yet. Outside a scope every call loads fresh from disk. Returns
+  // the function that closes the scope.
+  beginEntriesScope(caseId) {
+    const id = this.runtime.getCase(caseId).id;
+    const scope = this._entriesScopes.get(id) || { depth: 0, entries: null };
+    scope.depth += 1;
+    this._entriesScopes.set(id, scope);
+    let closed = false;
+    return () => {
+      if (closed) return;
+      closed = true;
+      scope.depth -= 1;
+      if (scope.depth <= 0) this._entriesScopes.delete(id);
+    };
   }
 
   now() {
@@ -201,8 +224,24 @@ class PlaybookManager {
   }
 
   // One systemAction inside the per-case chain.
+  // A mutation drops any turn-start memo of the case's entries, before it
+  // runs (its own reads see disk) and after (later reads see its writes):
+  // systemAction runs inline while this process holds the case lock, so an
+  // owner action can land inside a turn start's scope.
   _action(caseId, label, fn) {
-    return this._exclusive(caseId, () => this.runtime.systemAction(caseId, label, fn));
+    return this._exclusive(caseId, () => this.runtime.systemAction(caseId, label, async (meta) => {
+      this._dropEntriesMemo(meta.id);
+      try {
+        return await fn(meta);
+      } finally {
+        this._dropEntriesMemo(meta.id);
+      }
+    }));
+  }
+
+  _dropEntriesMemo(id) {
+    const scope = this._entriesScopes.get(id);
+    if (scope) scope.entries = null;
   }
 
   _registry() {
@@ -228,7 +267,11 @@ class PlaybookManager {
   }
 
   _entries(caseId) {
-    return this._loader(this.runtime.getCase(caseId)).list();
+    const meta = this.runtime.getCase(caseId);
+    const scope = this._entriesScopes.get(meta.id);
+    if (!scope) return this._loader(meta).list();
+    if (!scope.entries) scope.entries = this._loader(meta).list();
+    return scope.entries;
   }
 
   _journal(meta, text) {
@@ -285,12 +328,12 @@ class PlaybookManager {
 
   changes(caseId) {
     const meta = this.runtime.getCase(caseId);
-    return changes.computeChanges(this._loader(meta).list(), changes.readState(meta.dir).acknowledged);
+    return changes.computeChanges(this._entries(meta.id), changes.readState(meta.dir).acknowledged);
   }
 
   orientationSection(caseId) {
     const meta = this.runtime.getCase(caseId);
-    const entries = this._loader(meta).list();
+    const entries = this._entries(meta.id);
     let pending = [];
     if (meta.status === 'draft' || meta.status === 'active') {
       try {
