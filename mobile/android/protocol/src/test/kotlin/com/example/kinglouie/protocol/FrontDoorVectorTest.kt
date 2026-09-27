@@ -447,4 +447,43 @@ class FrontDoorVectorTest {
         for (ok in listOf("client.example.com", "client.example.com:443", "192.0.2.1", "[::1]", "[::ffff:192.0.2.1]", "[2001:db8:0:0:0:0:0:1]", "[1::]", "[2001:db8::1]:8443", "[1:2:3:4:5:6:1.2.3.4]", "[::]", "xn--bcher-kva.example")) assertTrue(ok, FrontDoorRules.isAuthority(ok))
         for (bad in listOf("999.1.1.1", "256.0.0.1", "1.2.3.4.5", "a.b.c.d.1", "example.123", "example.09", "a.08", "a.0x", "a.0XfF", "010.0.0.1", "[1:2]", "[:::]", "[1::2::3]", "[::1.2.3.4.5]", "[.:]", "[1:2:3:4:5:6:7:8:9]", "[12345::1]", "[::256.0.0.1]", "[1:2:3:4:5:6:7::8]", "[1:2:3:4:5:6:7:1.2.3.4]", "[1.2.3.4]", "[::1", "client.example.com:65536", "exa_mple.com", "")) assertFalse(bad, FrontDoorRules.isAuthority(bad))
     }
+
+    /** GET /v1/frontdoor is trusted only for a node pinned from a code, with that same key. */
+    @Test
+    fun identifyNeedsThePinnedKey() {
+        fun spki(name: String) = keys["nodes"][name]["spki"].str()!!
+        fun raw(name: String) = B64Url.encode(Hex.decode(spki(name)).copyOfRange(12, 44))
+        fun pin(name: String) = NodePin(keys["nodes"][name]["id"].str()!!, name, spki(name))
+        val web = keys["nodes"]["web-01"]["id"].str()!!
+        fun info(id: JsonElement, key: String) =
+            JsonObject(mapOf("frontdoor_id" to id, "public_key" to jsonString(key), "domain" to jsonString("kl.example.com")))
+        val pins = listOf(pin("web-01"), pin("gpu-box"))
+        assertEquals(web, FrontDoor.identify(info(jsonString(web), raw("web-01")), pins))
+        // Another pinned node's key under this id, an unpinned id, a short key, a DER key, a non-string id.
+        assertNull(FrontDoor.identify(info(jsonString(web), raw("gpu-box")), pins))
+        assertNull(FrontDoor.identify(info(jsonString(web), raw("web-01")), listOf(pin("gpu-box"))))
+        assertNull(FrontDoor.identify(info(jsonString(web), raw("web-01").dropLast(2)), pins))
+        assertNull(FrontDoor.identify(info(jsonString(web), spki("web-01")), pins))
+        assertNull(FrontDoor.identify(info(jsonNumber("1"), raw("web-01")), pins))
+        assertNull(FrontDoor.identify(null, pins))
+        assertNull(FrontDoor.identify(JsonNull, pins))
+        // A pin whose key does not parse matches nothing.
+        assertNull(FrontDoor.identify(info(jsonString(web), raw("web-01")), listOf(NodePin(web, "web-01", "zz"))))
+    }
+
+    /** Client and front-door text is capped by code points and escaped; markup stays text. */
+    @Test
+    fun shownTextIsCappedAndEscaped() {
+        assertEquals("", FrontDoor.shownText(null))
+        assertEquals("<img src=x onerror=alert(1)>", FrontDoor.shownText("<img src=x onerror=alert(1)>"))
+        assertEquals("[x](https://evil.example.com)", FrontDoor.shownText("[x](https://evil.example.com)"))
+        assertEquals("a‹U+202E›b‹U+000A›", FrontDoor.shownText("a‮b\n"))
+        assertEquals("x".repeat(200), FrontDoor.shownText("x".repeat(200)))
+        assertEquals("x".repeat(200) + "…", FrontDoor.shownText("x".repeat(201)))
+        // Cut by code points, never inside a surrogate pair.
+        assertEquals("😀".repeat(200) + "…", FrontDoor.shownText("😀".repeat(300)))
+        assertEquals("abc…", FrontDoor.shownText("abcdef", max = 3))
+        // The cap applies before escaping, so an escaped character counts once.
+        assertEquals("‹U+202E›…", FrontDoor.shownText("‮‮", max = 1))
+    }
 }

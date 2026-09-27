@@ -6,6 +6,7 @@ import android.app.Activity
 object Push {
     const val ENABLED = false
     const val EXTRA_REQUEST_ID = "kl.rid"
+    const val EXTRA_KIND = "kl.k"
 
     @Suppress("UNUSED_PARAMETER")
     fun register(activity: Activity, onToken: (String) -> Unit) = Unit

@@ -230,6 +230,39 @@ object FrontDoor {
         if (message["old_spki"].str() != currentPin) return fail("old_pin_mismatch")
         return RepinCheck(true, null, newSpki)
     }
+
+    /**
+     * The front door a `GET /v1/frontdoor` reply names, only when it is a node
+     * this phone pinned from a code (never from the relay's word) and the
+     * reply's key is that pin's key. Nothing else in the reply is trusted;
+     * null for anything else.
+     */
+    fun identify(info: JsonElement?, pins: List<NodePin>): String? {
+        val id = info["frontdoor_id"].str() ?: return null
+        if (!Rules.isNodeId(info["frontdoor_id"]) || !FrontDoorRules.isRawEd25519(info["public_key"])) return null
+        val raw = runCatching { B64Url.decode(info["public_key"].str()!!) }.getOrNull() ?: return null
+        val pin = pins.firstOrNull { it.id == id } ?: return null
+        val der = runCatching { Hex.decode(pin.key) }.getOrNull() ?: return null
+        if (raw.size != 32 || der.size != 44 || Hex.encode(der.copyOfRange(0, 12)) != Identifiers.ED25519_SPKI_PREFIX) return null
+        return if (der.copyOfRange(12, 44).contentEquals(raw)) id else null
+    }
+
+    /** At most this many code points of client or front-door text are shown. */
+    const val SHOWN_TEXT_MAX = 200
+
+    /**
+     * Text from a client or the front door (names, hosts, codes, reasons,
+     * alert details) as the app shows it: at most `max` code points, with "…"
+     * when cut (never inside a surrogate pair), then escaped (hidden and bidi
+     * characters as ‹U+XXXX›). The app shows the result as plain text, never
+     * as markup or a link.
+     */
+    fun shownText(text: String?, max: Int = SHOWN_TEXT_MAX): String {
+        if (text == null) return ""
+        val limit = max.coerceAtLeast(0)
+        if (text.codePointCount(0, text.length) <= limit) return Display.escape(text)
+        return Display.escape(text.substring(0, text.offsetByCodePoints(0, limit))) + "…"
+    }
 }
 
 /**

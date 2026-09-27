@@ -32,8 +32,9 @@ class MainActivity : FragmentActivity() {
         super.onDestroy()
     }
 
-    /** A tapped notification carries only the request id; the app fetches and verifies. */
+    /** A tapped notification carries only a kind and an id; the app fetches and verifies. */
     private fun handle(intent: Intent?) {
-        intent?.getStringExtra(Push.EXTRA_REQUEST_ID)?.let { model.openPushed(it) }
+        val id = intent?.getStringExtra(Push.EXTRA_REQUEST_ID) ?: return
+        model.openPushed(intent.getStringExtra(Push.EXTRA_KIND) ?: "approval", id)
     }
 }
