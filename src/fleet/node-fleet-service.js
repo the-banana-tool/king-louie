@@ -143,6 +143,10 @@ class NodeFleetService {
       for (const method of Object.keys(FLEET_METHODS)) this.relayClient.registerMethod(method, (params) => this.dispatch(method, params));
       for (const name of this.extra.keys()) this.relayClient.registerMethod(name, (params) => this.dispatch(name, params));
       this.relayClient.on('connected', this._onConnected);
+      // run.js dials the link before the fleet node starts, so it is often up
+      // already and its 'connected' has gone by: say hello on it now, or the
+      // front door shows this node offline until the link next drops.
+      if (typeof this.relayClient.isConnected === 'function' && this.relayClient.isConnected() === true) this._onConnected();
     }
     this.handler.jobManager.on('update', this._onUpdate);
     return this;

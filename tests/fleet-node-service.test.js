@@ -142,6 +142,35 @@ describe('NodeFleetService', () => {
     svc.stop();
   });
 
+  // Final review F-1: in run.js the link is dialled before startFleetNode, so
+  // on an agent node it is usually up (its 'connected' already emitted)
+  // before start() subscribes. start() must say hello on that live link.
+  it('says hello at start when the link is already connected (production order)', async () => {
+    const handler = new FleetToolHandler({ nodeConfig: NODE, runbookEngine: engine() });
+    const link = fakeLink();
+    link.isConnected = () => true;
+    const svc = new NodeFleetService({ handler, relayClient: link, nodeConfig: NODE, bootId: 'c'.repeat(32), version: '1.0.0' });
+    svc.start();
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(link.calls.map(([m]) => m), ['fleet.hello'], 'no connected event ever fires here');
+    assert.equal(link.calls[0][1].boot_id, 'c'.repeat(32));
+    svc.stop();
+  });
+
+  it('does not say hello at start while the link is down', async () => {
+    const handler = new FleetToolHandler({ nodeConfig: NODE, runbookEngine: engine() });
+    const link = fakeLink();
+    link.isConnected = () => false;
+    const svc = new NodeFleetService({ handler, relayClient: link, nodeConfig: NODE, bootId: 'c'.repeat(32), version: '1.0.0' });
+    svc.start();
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(link.calls, []);
+    link.emit('connected');
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(link.calls.map(([m]) => m), ['fleet.hello']);
+    svc.stop();
+  });
+
   it('registerMethod adds cases.* with their own scope, and nothing else', async () => {
     const { svc, link } = service();
     svc.registerMethod('cases.list_cases', async () => [{ case: 'lot' }], { scope: 'cases:read' });

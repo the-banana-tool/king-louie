@@ -319,10 +319,16 @@ describe('a running front door', () => {
     await ledger.append({ kind: 'test.event', data: { i: 2 } });
     const relayClient = new RelayClient({ identity: node, nodeName: 'gpu-box', frontDoorPin: pin, dataDir: nodeData, dnsLookup: lookup });
     relayClient.onMessage(async (method, params) => (method === 'audit.slice' ? { envelope: ledger.slice(params) } : null));
+    // Production order (run.js; final review F-1/M-9): the link is up, its
+    // 'connected' already gone by, before the fleet node starts. The node
+    // must still say hello.
+    cleanups.push(async () => { await relayClient.stop(); });
+    await relayClient.start();
+    await until(() => relayClient.isConnected() === true, 'the link to come up');
+    assert.notEqual((fd.registry.presence(node.nodeId) || {}).online, true, 'linked but not yet said hello');
     const handler = fakeHandler({ name: 'gpu-box', profile: 'agent', runbooks: DEFAULT_RUNBOOKS });
     const service = new NodeFleetService({ handler, relayClient, nodeConfig: { name: 'gpu-box', profile: 'agent', capabilities: [], nodeId: node.nodeId }, version: '0.0.0-test' }).start();
-    cleanups.push(async () => { service.stop(); await relayClient.stop(); });
-    await relayClient.start();
+    cleanups.push(async () => { service.stop(); });
     await until(() => (fd.registry.presence(node.nodeId) || {}).online === true, 'the node to say hello');
     await until(() => (fd.mirror.cursor(node.nodeId) || {}).seq === 2, 'the audit mirror');
     await fd.router.whenIdle();
