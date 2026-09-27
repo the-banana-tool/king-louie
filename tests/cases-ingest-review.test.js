@@ -592,7 +592,7 @@ describe('final review I1', () => {
     assert.strictEqual(ctx, page.slice(at - 1500, page.indexOf('.17') + 3 + 1500));
   });
 
-  it('checks and frames 200 proposals on a crafted 2 MB page in bounded time', () => {
+  it('checks and frames 200 proposals on a crafted 2 MB page in bounded time', { timeout: 180000 }, () => {
     // The review's page: "a " repeated to 2 MB, ending in the quote with
     // double spaces, so the exact match misses and the loose path runs for
     // every proposal. Unfixed, one verifyContext took ~1.1 s here and
@@ -601,7 +601,9 @@ describe('final review I1', () => {
     const tail = `${'a  '.repeat(149)}b`;
     const page = 'a '.repeat(Math.floor((2 * 1024 * 1024 - tail.length) / 2)) + tail;
     const proposals = Array.from({ length: 200 }, () => raw({ value: 'b', anchor: { page: 1, quote } }));
-    const bound = 30000;
+    // ~4 s alone here; generous for a loaded full suite, and still far
+    // below the unfixed cost (over 250 s).
+    const bound = 90000;
     const started = process.hrtime.bigint();
     const elapsed = () => Number(process.hrtime.bigint() - started) / 1e6;
     const checked = checkProposals({ proposals }, [{ n: 1, method: 'text', text: page }], new Map());
