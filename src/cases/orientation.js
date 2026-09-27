@@ -228,4 +228,4 @@ function buildOrientation({
   return [head, kept.join('\n'), '', tail, ...(typeBlock ? [typeBlock, ''] : [])].join('\n');
 }
 
-module.exports = { buildOrientation, DEFAULT_MAX_CHARS };
+module.exports = { buildOrientation, questionText, DEFAULT_MAX_CHARS };

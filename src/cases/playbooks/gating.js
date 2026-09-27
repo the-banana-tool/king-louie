@@ -181,7 +181,9 @@ function pendingFrom(merged, facts, records) {
 function gatingRecord(m) {
   return {
     kind: 'question',
-    text: `[${labelOf(m.origins[0])}] ${m.text}`,
+    // Neutralised as well as one-lined: C4's ladder and any other reader
+    // outside a frame may show it (final review I3).
+    text: `[${labelOf(m.origins[0])}] ${oneLine(neutralize(m.text), MAX_TEXT)}`,
     options: m.options,
     urgency: 'normal',
     expiresAt: null,

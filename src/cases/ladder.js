@@ -13,6 +13,7 @@ const { localDay } = require('./clock');
 const { wallHhmm } = require('./presence');
 const { ContactDeliveryError } = require('../channels/channel-plugin');
 const { createLogger } = require('../logging');
+const { questionText } = require('./orientation');
 
 const MINUTE = 60 * 1000;
 const DAY = 24 * 3600 * 1000;
@@ -357,10 +358,13 @@ class LadderEngine {
       }
     }
 
+    // Journal lines reach the next orientation outside any frame, so a
+    // record shows as questionText does there: a playbook gating record by
+    // its key only, never its third-party text (final review I3).
     for (const e of journals) {
       const rec = this._record(e.caseId, e.questionId);
       try {
-        await this._journal(e.caseId, `contact: ${e.questionId} waiting`, `${e.questionId} waiting: ${rec ? rec.text : ''}`, now);
+        await this._journal(e.caseId, `contact: ${e.questionId} waiting`, `${e.questionId} waiting: ${rec ? questionText(rec) : ''}`, now);
         this._attempt(e, { channel: 'journal', outcome: 'sent' });
         this._advance(e, policy);
         this._afterSent(e);
@@ -380,7 +384,7 @@ class LadderEngine {
       const rec = this._record(e.caseId, e.questionId);
       const until = formatShort(e.nextAt, this.presence.timeZone());
       try {
-        await this._journal(e.caseId, `contact: ${e.questionId} held until ${until}`, `${e.questionId} held until ${until} (quiet hours): ${rec ? rec.text : ''}`, now);
+        await this._journal(e.caseId, `contact: ${e.questionId} held until ${until}`, `${e.questionId} held until ${until} (quiet hours): ${rec ? questionText(rec) : ''}`, now);
         e.heldJournaled = true;
       } catch (err) {
         if (err.code !== 'CASE_BUSY') this._warnOnce(`held|${e.caseId}/${e.questionId}|${err.message}`, `contact ladder: journaling the quiet-hours hold of ${e.caseId}/${e.questionId} failed: ${err.message}`);
