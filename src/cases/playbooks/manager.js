@@ -633,6 +633,22 @@ class PlaybookManager {
 
   // Budget defaults above the settings default that no playbook has been
   // allowed to write yet (R30); the panel offers them for the owner to accept.
+  // The raises one attached playbook still offers: budgetDefaults keys the
+  // case has not set whose value is above the settings default. The panel
+  // lists these per playbook, and applyBudgetRaises writes exactly these.
+  _raisesOf(entry, budget, base) {
+    const out = [];
+    for (const [key, value] of Object.entries(entry.package.playbook.budgetDefaults || {})) {
+      if (budget[key] !== undefined && budget[key] !== null) continue;
+      const from = base[key] ?? null;
+      if (from === null || from === 0 || value <= from) continue;
+      out.push({ key, from, to: value });
+    }
+    return out;
+  }
+
+  // Every playbook's own offers; a key two playbooks raise is listed under
+  // each, so a per-playbook Accept shows everything it will write.
   offeredBudgetRaises(caseId) {
     const meta = this.runtime.getCase(caseId);
     const base = this._budgetBase();
@@ -640,12 +656,7 @@ class PlaybookManager {
     const out = [];
     for (const e of this._loader(meta).list()) {
       if (e.state !== 'ok' || !e.pinned) continue;
-      for (const [key, value] of Object.entries(e.package.playbook.budgetDefaults)) {
-        if (budget[key] !== undefined && budget[key] !== null) continue;
-        const from = base[key] ?? null;
-        if (from === null || from === 0 || value <= from || out.some((r) => r.key === key)) continue;
-        out.push({ playbook: e.name, key, from, to: value });
-      }
+      for (const r of this._raisesOf(e, budget, base)) out.push({ playbook: e.name, ...r });
     }
     return out;
   }
@@ -657,14 +668,10 @@ class PlaybookManager {
       this._assertOpen(meta);
       const entry = this._loader(meta).get(name);
       if (!entry || !entry.pinned || entry.state !== 'ok') throw new PlaybookError(`"${name}" is not attached and in use in this case.`);
-      const base = this._budgetBase();
       const budget = meta.budget && typeof meta.budget === 'object' ? { ...meta.budget } : {};
-      const applied = [];
-      for (const [key, value] of Object.entries(entry.package.playbook.budgetDefaults)) {
-        if (budget[key] !== undefined && budget[key] !== null) continue;
-        applied.push({ key, from: base[key] ?? null, to: value });
-        budget[key] = value;
-      }
+      // Only the raises this playbook offers now, as the owner saw them.
+      const applied = this._raisesOf(entry, budget, this._budgetBase());
+      for (const r of applied) budget[r.key] = r.to;
       if (applied.length) {
         this.runtime.store.updateMeta(meta.id, { budget });
         this._journal(meta, `The owner accepted budget raises from playbook ${name}: ${applied.map((r) => `${r.key} ${r.from} -> ${r.to}`).join('; ')}.`);

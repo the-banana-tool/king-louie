@@ -85,8 +85,8 @@ describe('createCore playbooks wiring', () => {
     assert.deepStrictEqual(manager.settings(), admin);
     assert.strictEqual(warnings.length, 1, 'warned once');
 
-    // No admin block: an empty list (no URL sources, local folders
-    // unrestricted, no auto-update), whatever the data dir says.
+    // No admin block: the default { sources: [], autoUpdate: false } (no URL
+    // sources, local folders unrestricted, no auto-update), whatever the data dir says.
     const bare = createCore(makeDeps({ isService: true }));
     bare.context.setSettings({ ...bare.context.getSettings(), playbooks: { sources: ['path:/'], autoUpdate: true } });
     assert.deepStrictEqual(bare.context.getPlaybookManager().settings(), { sources: [], autoUpdate: false });
@@ -136,7 +136,7 @@ describe('service.json playbooks block', () => {
   }
   const abs = path.resolve(os.tmpdir(), 'playbooks');
 
-  it('defaults to an empty list: no URL sources, local folders unrestricted, no auto-update', () => {
+  it('defaults with no block to { sources: [], autoUpdate: false }: no URL sources, local folders unrestricted, no auto-update', () => {
     assert.deepStrictEqual(load(null).playbooks, { sources: [], autoUpdate: false });
   });
 

@@ -128,5 +128,63 @@ describe('E2E: playbooks', { skip: gitAvailable ? false : 'git is not on PATH' }
     await evaluate(ctx, `document.querySelector('.rename-chat-modal .btn-primary').click(); true`);
     await waitFor(ctx, `/^property-sale: up to date$/.test(document.getElementById('case-playbooks-status').textContent)`, 30000);
     assert.strictEqual(await evaluate(ctx, `!!(${confirmIn('property-sale')})`), false, 'the offer is used once');
+
+    // Update takes the same path: refused until the owner confirms that
+    // playbook, then re-sent with its name and confirmSource.
+    const updateIn = `[...${rowOf('property-sale')}.querySelectorAll('button')].find((b) => b.textContent === 'Update')`;
+    await evaluate(ctx, `${updateIn}.click(); true`);
+    await waitFor(ctx, `!!(${confirmIn('property-sale')})`, 30000);
+    assert.match(await evaluate(ctx, `document.getElementById('case-playbooks-status').textContent`), /^The recorded source of "property-sale" .* Confirm it before/);
+    await evaluate(ctx, `${confirmIn('property-sale')}.click(); true`);
+    await waitFor(ctx, `!!document.querySelector('.rename-chat-modal')`);
+    await evaluate(ctx, `document.querySelector('.rename-chat-modal .btn-primary').click(); true`);
+    await waitFor(ctx, `document.getElementById('case-playbooks-status')?.textContent === 'property-sale is up to date.'`, 30000);
+  });
+
+  // Fix round 1: accepting a playbook's budget offer raises every limit it
+  // offers, so the panel shows one row and one Accept per playbook and the
+  // dialog names each change.
+  it('offers the budget raises one playbook at a time, naming every limit the Accept changes', async () => {
+    await evaluate(ctx, `document.getElementById('new-chat-btn').click(); true`);
+    await evaluate(ctx, `document.getElementById('chat-info-btn').click(); true`);
+    await waitFor(ctx, `!!document.getElementById('chat-case-select') && !document.getElementById('case-playbook-list')`);
+    await evaluate(ctx, `(() => {
+      const s = document.getElementById('chat-case-select');
+      s.value = '__new__';
+      s.dispatchEvent(new Event('change'));
+      return true;
+    })()`);
+    await waitFor(ctx, `!!document.getElementById('chat-case-playbook-example-contractor-quotes')`);
+    await evaluate(ctx, `(() => {
+      document.getElementById('chat-case-new-title').value = 'E2E gutter cleaning quotes without raises';
+      document.getElementById('chat-case-playbook-example-contractor-quotes').checked = true;
+      document.getElementById('chat-case-create-btn').click();
+      return true;
+    })()`);
+    // C5 may ask about the similar case the first test made: create anyway.
+    await waitFor(ctx, `(() => {
+      const m = document.querySelector('.rename-chat-modal');
+      if (m && /similar case/.test(m.textContent)) m.querySelector('.btn-primary').click();
+      const s = document.getElementById('chat-case-select');
+      return s && s.value && s.value !== '__new__';
+    })()`, 30000);
+    const caseId = await evaluate(ctx, `document.getElementById('chat-case-select').value`);
+    const dir = fs.readdirSync(casesRoot).filter((n) => !n.startsWith('.')).map((n) => path.join(casesRoot, n))
+      .find((d) => yaml.load(fs.readFileSync(path.join(d, 'case.yaml'), 'utf8')).id === caseId);
+    const budget = () => yaml.load(fs.readFileSync(path.join(dir, 'case.yaml'), 'utf8')).budget;
+    assert.deepStrictEqual(budget(), { questionsPerDay: 6 }, 'only the value that is not a raise is applied without consent');
+
+    const raiseRow = `document.querySelector('.playbook-raise[data-playbook="contractor-quotes"]')`;
+    await waitFor(ctx, `!!${raiseRow}`, 15000);
+    assert.strictEqual(await evaluate(ctx, `document.querySelectorAll('.playbook-raise').length`), 1, 'one row per playbook');
+    assert.strictEqual(await evaluate(ctx, `${raiseRow}.querySelectorAll('button').length`), 1, 'one Accept per playbook');
+    await evaluate(ctx, `${raiseRow}.querySelector('button').click(); true`);
+    await waitFor(ctx, `!!document.querySelector('.rename-chat-modal')`);
+    const dialog = await evaluate(ctx, `document.querySelector('.rename-chat-modal').textContent`);
+    assert.match(dialog, /usd 20 → 25/);
+    assert.match(dialog, /contactsPerDay 20 → 30/);
+    await evaluate(ctx, `document.querySelector('.rename-chat-modal .btn-primary').click(); true`);
+    await waitFor(ctx, `!${raiseRow}`, 15000);
+    assert.deepStrictEqual(budget(), { questionsPerDay: 6, usd: 25, contactsPerDay: 30 }, 'every listed limit is raised');
   });
 });

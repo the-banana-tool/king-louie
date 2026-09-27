@@ -468,8 +468,9 @@ plain copy into `<case>/playbooks/<name>/`, recorded in `case.yaml.playbooks[]` 
   `textContent` (never `innerHTML` or markdown), and a proposal's patch shows in a `<pre>`.
 - `case.yaml` is read with the strict parser (`parseCaseYaml`). A stage that adds a `case.yaml` key adds it
   to `CASE_YAML_KEYS` and to `tests/cases-store-yaml.test.js`.
-- `playbooks.sources` is the allowlist (`example:` is always allowed). An empty list means no URL
-  sources, local folders unrestricted, and no auto-update. A local folder recorded in
+- `playbooks.sources` is the allowlist (`example:` is always allowed); `autoUpdate` is separate from it.
+  No `playbooks` block (the default `{ sources: [], autoUpdate: false }`) means no URL sources, local
+  folders unrestricted, no auto-update. A local folder recorded in
   `.kl/playbooks.json` (case data) is read on update only under a matching `path:` entry, or after the
   owner confirms that one playbook (`confirmSource: true` with its `name`; a confirm without a name is
   refused). Tests build packages with `tests/helpers/playbook-fixture.js` in temp dirs.

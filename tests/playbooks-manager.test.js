@@ -189,6 +189,31 @@ describe('defaults', () => {
     assert.deepStrictEqual(rd.budgetRaises, [{ key: 'usd', from: 20, to: 40 }], 'a truthy string is not an accept');
     assert.deepStrictEqual(d.rt.getCase(d.id).budget, { contactsPerDay: 5 });
   });
+
+  // The panel's per-playbook Accept lists offeredBudgetRaises for that
+  // playbook; applyBudgetRaises must write exactly those keys, no more.
+  it('each playbook offers its own raises, and accepting one writes exactly the keys it offers', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const w = await world({ examples: { 'playbook.yaml': withYaml(/budgetDefaults: .*/, 'budgetDefaults: { usd: 40, contactsPerDay: 5 }') } });
+    const lake = PLAYBOOK_YAML.replace('name: land-sale', 'name: lake-sale').replace(/budgetDefaults: .*/, 'budgetDefaults: { usd: 30, turnsPerDay: 96 }');
+    writePackage(path.join(w.examplesDir, 'lake-sale'), { 'playbook.yaml': lake });
+    await w.mgr.attach(w.id, { source: 'example:land-sale' });
+    await w.mgr.attach(w.id, { source: 'example:lake-sale' });
+    assert.deepStrictEqual(w.mgr.offeredBudgetRaises(w.id), [
+      { playbook: 'land-sale', key: 'usd', from: 20, to: 40 },
+      { playbook: 'lake-sale', key: 'usd', from: 20, to: 30 },
+      { playbook: 'lake-sale', key: 'turnsPerDay', from: 48, to: 96 }
+    ], 'a key two playbooks raise is offered under each');
+    // contactsPerDay 5 is not a raise; once unset it must not ride along.
+    w.rt.store.updateMeta(w.id, { budget: {} });
+    const accepted = await w.mgr.applyBudgetRaises(w.id, 'land-sale');
+    assert.deepStrictEqual(accepted, { ok: true, applied: [{ key: 'usd', from: 20, to: 40 }] });
+    assert.deepStrictEqual(w.rt.getCase(w.id).budget, { usd: 40 });
+    assert.deepStrictEqual(w.mgr.offeredBudgetRaises(w.id), [{ playbook: 'lake-sale', key: 'turnsPerDay', from: 48, to: 96 }]);
+    const lakeAccepted = await w.mgr.applyBudgetRaises(w.id, 'lake-sale');
+    assert.deepStrictEqual(lakeAccepted.applied, [{ key: 'turnsPerDay', from: 48, to: 96 }]);
+    assert.deepStrictEqual(w.rt.getCase(w.id).budget, { usd: 40, turnsPerDay: 96 });
+  });
 });
 
 describe('remove', () => {

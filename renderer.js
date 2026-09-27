@@ -2267,7 +2267,7 @@ async function renderCaseDetoursSection(chat, container) {
 
 /* --- Cases stage 6: playbooks (docs/superpowers/specs/2026-09-23-cases-stage6-playbooks.md §3.12) --- */
 
-// Every string from a case or a playbook (and every reply marked
+// Every string from a case or a playbook (and every reply flagged
 // untrustedText) can quote package text: it is set with textContent only,
 // never innerHTML or markdown, and clipped for display.
 const PLAYBOOK_TEXT_MAX = 600;
@@ -2336,13 +2336,15 @@ function buildPlaybookPicker(container) {
   };
 }
 
-async function renderPlaybooksSection(chat, container) {
+// message: a status line to keep across the re-render (an action's result).
+async function renderPlaybooksSection(chat, container, { message = '' } = {}) {
   container.innerHTML = '';
   const caseId = chat.caseId;
-  const refresh = () => renderPlaybooksSection(chat, container).catch((err) => chatLog.warn(`Playbooks panel failed: ${err.message}`));
+  const refresh = (next = '') => renderPlaybooksSection(chat, container, { message: next }).catch((err) => chatLog.warn(`Playbooks panel failed: ${err.message}`));
   const status = playbookEl('div', 'playbook-status');
   status.id = 'case-playbooks-status';
   const say = (text) => { status.textContent = playbookClip(text || '', 2000); };
+  say(message);
   container.appendChild(playbookEl('div', 'playbook-heading', 'Playbooks'));
 
   const listed = await window.electron.cases.playbooks({ caseId });
@@ -2379,8 +2381,7 @@ async function renderPlaybooksSection(chat, container) {
       if (r?.code === 'SOURCE_NEEDS_CONFIRM' && !confirmSource) offerConfirm(name, () => runUpdate(name, { force, confirmSource: true }));
       return;
     }
-    say(r.from === r.to ? `${name} is up to date.` : `${name} updated from ${r.from} to ${r.to}. The next turn re-orients.`);
-    refresh();
+    refresh(r.from === r.to ? `${name} is up to date.` : `${name} updated from ${r.from} to ${r.to}. The next turn re-orients.`);
   };
 
   const updateLine = (u) => {
@@ -2394,13 +2395,14 @@ async function renderPlaybooksSection(chat, container) {
   const runCheck = async (name = null) => {
     const r = await window.electron.cases.checkPlaybookUpdates({ caseId, ...(name ? { name, confirmSource: true } : {}) });
     if (!r?.ok) { say(r?.error || 'Could not check for updates.'); return; }
-    say(r.updates.map(updateLine).join('; ') || 'No playbooks to check.');
+    const summary = r.updates.map(updateLine).join('; ') || 'No playbooks to check.';
+    if (r.updates.some((u) => u.applied)) { refresh(summary); return; }
+    say(summary);
     if (!name) {
       for (const u of r.updates) {
         if (u.code === 'SOURCE_NEEDS_CONFIRM') offerConfirm(u.name, () => runCheck(u.name));
       }
     }
-    if (r.updates.some((u) => u.applied)) refresh();
   };
 
   const list = playbookEl('div', 'playbook-list');
@@ -2444,12 +2446,20 @@ async function renderPlaybooksSection(chat, container) {
     container.appendChild(pending);
   }
 
+  // One row and one Accept per playbook: accepting applies every raise that
+  // playbook offers, so the row and the dialog name each of them.
+  const raisesBy = new Map();
   for (const raise of listed.budgetRaises || []) {
+    if (!raisesBy.has(raise.playbook)) raisesBy.set(raise.playbook, []);
+    raisesBy.get(raise.playbook).push(`${raise.key} ${raise.from} → ${raise.to}`);
+  }
+  for (const [playbook, changes] of raisesBy) {
     const row = playbookEl('div', 'playbook-raise');
-    row.appendChild(playbookEl('span', null, `${raise.playbook} suggests a higher ${raise.key} limit: ${raise.from} → ${raise.to}. `));
+    row.dataset.playbook = playbook;
+    row.appendChild(playbookEl('span', null, `${playbook} suggests higher limits: ${changes.join(', ')}. `));
     row.appendChild(playbookButton(null, 'Accept', async () => {
-      if (!(await showConfirmDialog(`Raise ${raise.key} from ${raise.from} to ${raise.to} for this case, as ${raise.playbook} suggests?`))) return;
-      const r = await window.electron.cases.acceptPlaybookBudget({ caseId, name: raise.playbook });
+      if (!(await showConfirmDialog(playbookClip(`Raise these limits for this case, as ${playbook} suggests: ${changes.join(', ')}?`, 2000)))) return;
+      const r = await window.electron.cases.acceptPlaybookBudget({ caseId, name: playbook });
       if (!r?.ok) { say(r?.error || 'Could not change the budget.'); return; }
       refresh();
     }));
@@ -2499,8 +2509,7 @@ async function renderPlaybooksSection(chat, container) {
           if (!repo.value.trim()) { say('Give the path of the playbook repository.'); return; }
           const r = await window.electron.cases.applyPlaybookProposal({ caseId, proposalId: pr.id, repoPath: repo.value.trim() });
           if (!r?.ok) { say(r?.error || 'Could not apply the proposal.'); return; }
-          say(`Applied ${pr.id} to ${r.appliedTo}; review and commit it there.`);
-          refresh();
+          refresh(`Applied ${pr.id} to ${r.appliedTo}; review and commit it there.`);
         }), playbookButton(null, 'Reject', async () => {
           const r = await window.electron.cases.rejectPlaybookProposal({ caseId, proposalId: pr.id });
           if (!r?.ok) { say(r?.error || 'Could not reject the proposal.'); return; }
