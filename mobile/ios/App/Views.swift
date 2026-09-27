@@ -311,6 +311,9 @@ struct QRImage: View {
 
 struct DevicesView: View {
     @EnvironmentObject var model: AppModel
+    /// A revoke is in flight: a second tap would only send a revoke the relay
+    /// refuses as already revoked.
+    @State private var revoking = false
 
     var body: some View {
         NavigationStack {
@@ -333,8 +336,15 @@ struct DevicesView: View {
                                 // .borderless is required: in a List or Form row, SwiftUI runs the action of
                                 // every default-style Button in the row when any part of the row is tapped
                                 // (so one tap would run Approve and Deny, or act on a stray tap). Do not remove it.
-                                Button("Revoke", role: .destructive) { Task { await model.revoke(deviceId: id, name: name) } }
-                                    .buttonStyle(.borderless)
+                                Button("Revoke", role: .destructive) {
+                                    revoking = true
+                                    Task {
+                                        await model.revoke(deviceId: id, name: name)
+                                        revoking = false
+                                    }
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(revoking)
                             }
                         }
                     }
