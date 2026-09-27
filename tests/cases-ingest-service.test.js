@@ -544,6 +544,41 @@ describe('review questions for documents King Louie added', { skip: NEEDS_GIT },
     assert.strictEqual(fact.addedBy, `ingest:${out.docId}:question:${q.id}`);
   });
 
+  it('no MCP channel reaches the review effect, even when a record is re-typed between check and answer', async () => {
+    const { createCaseToolHandler } = require('../src/mcp/case-tools');
+    const h = await ingestHarness();
+    const out = await h.svc.store(h.caseId, { name: 'payoff.txt', bytes: Buffer.from(PAYOFF_TEXT), origin: { kind: 'owner-drop' } });
+    await h.svc.drain();
+    const options = [{ id: 'a', label: 'Accept all' }, { id: 'b', label: 'Panel' }, { id: 'c', label: 'Reject all' }];
+    const reviewPayload = { type: 'ingest:review', docId: out.docId, mcpAnswerable: false };
+    // A genuine review question answered with an mcp-* channel: refused at the effect.
+    for (const channel of ['mcp-stdio', 'mcp-frontdoor']) {
+      const q = h.runtime.createQuestion(h.caseId, { kind: 'question', text: `Review ${out.docId}`, urgency: 'low', options, payload: reviewPayload }, { charge: false });
+      const res = await h.runtime.answerQuestion(h.caseId, q.id, { channel, optionId: 'a' });
+      assert.strictEqual(res.effect.applied, false, channel);
+      assert.match(res.effect.reason, /not answered over MCP/);
+    }
+    // The race: a plain question passes the MCP handler's check, then its
+    // record is re-typed to a review before the locked re-read.
+    const plain = h.runtime.createQuestion(h.caseId, { kind: 'question', text: 'Use the county office?', urgency: 'low', options, payload: { type: 'plan' } }, { charge: false });
+    const real = h.runtime.answerQuestion.bind(h.runtime);
+    const effects = [];
+    h.runtime.answerQuestion = async (...args) => {
+      const file = path.join(h.dir, '.kl', 'questions', `${plain.id}.json`);
+      const rec = JSON.parse(fs.readFileSync(file, 'utf8'));
+      rec.payload = { ...reviewPayload };
+      fs.writeFileSync(file, JSON.stringify(rec));
+      const res = await real(...args);
+      effects.push(res.effect);
+      return res;
+    };
+    const mcp = createCaseToolHandler({ getRuntime: () => h.runtime, channel: 'mcp-stdio' });
+    await mcp.call('answer_question', { case: h.caseId, question_id: plain.id, option_id: 'a' });
+    assert.strictEqual(effects[0].applied, false);
+    assert.deepStrictEqual([...h.runtime.ledger(h.caseId).view().facts.values()].filter((f) => f.provenance === 'sourced'), []);
+    assert.strictEqual(files.readRecord(h.dir, out.docId).proposals[0].review, null);
+  });
+
   it('finishing review in the panel closes the open question and writes no user fact', async () => {
     const { h, docId } = await toolDoc();
     const { questionId } = files.readRecord(h.dir, docId);

@@ -102,16 +102,17 @@ function createCaseToolHandler({ getRuntime, channel, audit = null, log = create
   };
 
   function listCases(rt) {
+    // Titles and slugs can be model-authored (ruling T12-titles): they go
+    // back inside the untrusted wrapper; id and status stay bare.
     return rt.listCases().map((meta) => ({
       id: meta.id,
-      slug: meta.slug,
-      title: meta.title,
       type: meta.type,
       status: meta.status,
       created: meta.created,
       openQuestions: openQuestions(rt, meta.id).length,
       pendingProposals: pendingProposals(meta.dir),
-      budget: usdBudget(rt, meta.id)
+      budget: usdBudget(rt, meta.id),
+      data: untrusted({ title: meta.title, slug: meta.slug })
     }));
   }
 
@@ -127,8 +128,6 @@ function createCaseToolHandler({ getRuntime, channel, audit = null, log = create
     }
     return {
       id: meta.id,
-      slug: meta.slug,
-      title: meta.title,
       type: meta.type,
       status: meta.status,
       counts: {
@@ -138,6 +137,8 @@ function createCaseToolHandler({ getRuntime, channel, audit = null, log = create
         pendingProposals: pendingProposals(meta.dir)
       },
       data: untrusted({
+        title: meta.title,
+        slug: meta.slug,
         brief,
         questions: openQuestions(rt, meta.id).map((q) => ({
           id: q.id,
@@ -153,6 +154,7 @@ function createCaseToolHandler({ getRuntime, channel, audit = null, log = create
     };
   }
 
+  // Takes a slot and returns a release for it.
   function takeRateSlot() {
     const t = now();
     while (answers.length && answers[0] <= t - RATE_WINDOW_MS) answers.shift();
@@ -161,6 +163,10 @@ function createCaseToolHandler({ getRuntime, channel, audit = null, log = create
       throw fail('rate_limited', `at most ${rateLimit} answers per minute; retry after ${retryAfter}s`, { retry_after: retryAfter });
     }
     answers.push(t);
+    return () => {
+      const i = answers.indexOf(t);
+      if (i !== -1) answers.splice(i, 1);
+    };
   }
 
   async function answerQuestion(rt, args) {
@@ -177,12 +183,15 @@ function createCaseToolHandler({ getRuntime, channel, audit = null, log = create
     if (hasOption && !(Array.isArray(q.options) ? q.options : []).some((o) => isObj(o) && o.id === args.option_id)) {
       throw fail('invalid_params', 'option_id is not one of the question\'s options');
     }
-    takeRateSlot();
+    const releaseSlot = takeRateSlot();
     let res;
     try {
       res = await rt.answerQuestion(meta.id, q.id, { channel, text: hasText ? args.text : null, optionId: hasOption ? args.option_id : null });
     } catch (err) {
       const code = err && err.code;
+      // A busy case or an answer that does not fit changed nothing: the
+      // slot goes back (m4).
+      if (code === 'CASE_BUSY' || code === 'INVALID' || code === 'IS_BRIEFING') releaseSlot();
       if (code === 'CASE_BUSY') throw fail('case_busy', 'the case is busy with a turn', { retry_after: 5 });
       if (code === 'ALREADY_ANSWERED') throw fail('question_closed', 'the question was answered meanwhile');
       if (code === 'NOT_FOUND') throw fail('question_not_found', 'no such question in this case');

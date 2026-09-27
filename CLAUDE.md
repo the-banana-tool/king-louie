@@ -686,5 +686,7 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage7-ingest.md`.
   `mcp` serves the fleet tools only. No MCP channel answers a document
   review (`ingest:review`), whatever its `mcpAnswerable` says.
   Anything running as the service account can write the courier outbox
-  and so answer questions as `mcp-stdio`: the same class of limit as Bash
-  writing `facts.jsonl`.
+  and inbox, and so answer questions as `mcp-stdio` or forge the service's
+  replies to `mcp` (a forged tool list is read only as names; `mcp` shows
+  its own definitions): the same class of limit as Bash writing
+  `facts.jsonl`.

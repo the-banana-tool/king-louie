@@ -184,13 +184,16 @@ class FleetToolHandler {
       : new ToolError('capability_unavailable', 'capability_unavailable: delegate needs the King Louie service running on this node (not implemented in a standalone mcp process)');
   }
 
-  async call(toolName, args = {}, { origin = STDIO_ORIGIN } = {}) {
+  async call(toolName, args = {}, options = {}) {
+    const passedOrigin = options ? options.origin : undefined;
+    const origin = passedOrigin === undefined ? STDIO_ORIGIN : passedOrigin;
     args = args || {};
     if (this.caseTools && typeof toolName === 'string' && this.caseTools.names.has(toolName)) {
       // This handler's case tools answer on the mcp-stdio channel, so only
-      // this node's own local clients reach them. A front-door caller has its
-      // own cases.<tool> methods and channel (NodeFleetService, Task 16).
-      if (!origin || origin.kind !== 'stdio') throw new ToolError('unknown_tool', 'unknown_tool: case tools are served here to local MCP clients only');
+      // this node's own local clients reach them, and only when the caller
+      // says so: the stdio origin must be passed, not defaulted. A front-door
+      // caller has its own cases.<tool> methods and channel (NodeFleetService, Task 16).
+      if (!passedOrigin || passedOrigin.kind !== 'stdio') throw new ToolError('unknown_tool', 'unknown_tool: case tools are served here to local MCP clients only');
       return this.caseTools.call(toolName, args);
     }
     if (toolName === 'list_machines') {

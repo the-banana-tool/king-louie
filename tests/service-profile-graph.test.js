@@ -139,6 +139,7 @@ describe('mcp module graph', () => {
       }).toString();
       const loaded = JSON.parse(out).map((p) => path.relative(ROOT, p).split(path.sep).join('/'));
       assert.ok(loaded.includes('src/mcp/stdio-server.js'));
+      assert.ok(!loaded.includes('src/mcp/case-tools.js'), 'mcp builds no case tools of its own');
       const bad = loaded.filter((p) => p.startsWith('src/core/') || p.startsWith('src/providers/') || p.startsWith('src/tools/') || p.startsWith('src/mesh/mesh-discovery'));
       assert.deepStrictEqual(bad, []);
     } finally {
@@ -186,6 +187,7 @@ describe('mcp module graph, courier branch', () => {
       const loaded = JSON.parse(out).map((p) => path.relative(ROOT, p).split(path.sep).join('/'));
       assert.ok(loaded.includes('src/fleet/courier-client.js'), 'the courier branch ran');
       assert.ok(!loaded.includes('src/approvals/service-wiring.js'), 'no standalone approvals: the service owns them');
+      assert.ok(!loaded.includes('src/mcp/case-tools.js'), 'the case tools run in the service, not in mcp');
       const forbidden = FORBIDDEN.filter((f) => f !== 'src/mcp/');
       const bad = loaded.filter((p) => forbidden.some((f) => p.startsWith(f)) || p.startsWith('src/core/'));
       assert.deepStrictEqual(bad, []);

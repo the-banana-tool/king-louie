@@ -2,6 +2,8 @@
 // tool call goes to the service's FleetToolHandler through the file courier,
 // so one JobManager, one set of limits and one rate limiter serve the node.
 const { ToolError, MCP_TOOLS } = require('./fleet-tools');
+// Pure definitions (no requires): the courier branch never loads src/mcp/.
+const { CASE_MCP_TOOLS } = require('../cases/mcp-tool-definitions');
 
 // Seconds a client should wait before retrying a call the service did not
 // answer in time.
@@ -24,11 +26,21 @@ function transportError(err) {
 // tools/list should not hang a client for a call's full timeout.
 const LIST_TIMEOUT_MS = 5000;
 const MAX_TOOLS = 64;
-const isToolDef = (t) => Boolean(t) && typeof t === 'object' && !Array.isArray(t)
-  && typeof t.name === 'string' && t.name.length > 0 && t.name.length <= 64
-  && typeof t.description === 'string'
-  && Boolean(t.inputSchema) && typeof t.inputSchema === 'object' && !Array.isArray(t.inputSchema);
-const isToolList = (v) => Array.isArray(v) && v.length > 0 && v.length <= MAX_TOOLS && v.every(isToolDef);
+// The only two lists the service can serve. Its reply is read as a set of
+// names and the definitions shown are always these local ones, so a forged
+// reply (anything that can write the courier inbox) cannot put its own
+// names, descriptions or schemas in front of the client.
+const WITH_CASES = Object.freeze([...MCP_TOOLS, ...CASE_MCP_TOOLS.map(({ tier, ...def }) => def)]);
+function replyNames(v) {
+  if (!Array.isArray(v) || v.length === 0 || v.length > MAX_TOOLS) return null;
+  const names = [];
+  for (const t of v) {
+    if (!t || typeof t !== 'object' || typeof t.name !== 'string' || t.name.length > 64) return null;
+    names.push(t.name);
+  }
+  return new Set(names).size === names.length ? names.sort() : null;
+}
+const WITH_CASES_NAMES = WITH_CASES.map((t) => t.name).sort();
 
 class CourierFleetClient {
   constructor({ courier, nodeConfig = null, timeoutMs = 30000 } = {}) {
@@ -64,8 +76,9 @@ class CourierFleetClient {
     } catch {
       return MCP_TOOLS;
     }
-    const tools = reply && reply.result;
-    return isToolList(tools) ? tools : MCP_TOOLS;
+    const names = replyNames(reply && reply.result);
+    if (names && names.length === WITH_CASES_NAMES.length && names.every((n, i) => n === WITH_CASES_NAMES[i])) return WITH_CASES;
+    return MCP_TOOLS;
   }
 
   runRunbook() {
