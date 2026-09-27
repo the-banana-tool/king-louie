@@ -477,6 +477,30 @@ describe('sequence numbers and nonces', () => {
     assert.deepEqual(seen, [{ n: 'ok' }]);
   });
 
+  // Ruling T7-replay: on plain ws:// an envelope signed just before a
+  // reconnect is inside the stale grace of the new link. The nonces a peer
+  // sent are kept per peer node across reconnects, so it is still a replay.
+  it('keeps a peer\'s nonces across a reconnect: an envelope from the old link replayed on the new one is dropped', async () => {
+    const { a, b, aId, bId } = await linked();
+    const seen = [];
+    a.on('peerMessage', (m) => seen.push(m.payload.n));
+    const env = envelopeWith(bId, aId.peerId, { n: 'once' });
+    rawSend(b, aId.peerId, { type: 'mesh:message', envelope: env });
+    await waitFor(() => seen.length === 1, 'the first delivery');
+    const oldRecord = a.getPeer(bId.peerId);
+    const gone = within(once(a, 'peerDisconnected'), 10000, 'the old link to close');
+    b.disconnectPeer(aId.peerId);
+    await gone;
+    await b.connectToPeer('127.0.0.1', a.port);
+    await waitFor(() => a.getPeer(bId.peerId) && a.getPeer(bId.peerId) !== oldRecord && b.getPeer(aId.peerId), 'the new link');
+    assert.ok(Number(env.timestamp) >= a.getPeer(bId.peerId).authAt - 5000, 'inside the new link\'s stale grace');
+    rawSend(b, aId.peerId, { type: 'mesh:message', envelope: env });
+    rawSend(b, aId.peerId, { type: 'mesh:message', envelope: envelopeWith(bId, aId.peerId, { n: 'fresh' }) });
+    await waitFor(() => seen.includes('fresh'), 'the fresh message');
+    await new Promise((r) => setTimeout(r, 50));
+    assert.deepEqual(seen, ['once', 'fresh'], 'the replay was not delivered');
+  });
+
   // Fix round 1, item 7: nonces leave by age (once the envelope window has
   // passed, verifyEnvelope refuses the envelope anyway), with a hard cap as a
   // memory backstop that a peer within the rate limit never reaches.

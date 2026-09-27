@@ -197,6 +197,10 @@ class MeshTransport extends EventEmitter {
     this.httpsServer = null;
     this.server = null;
     this.peers = new Map();
+    // peerId → that peer's seen nonces (nonce → expiry), kept across its
+    // reconnects (ruling T7-replay): on plain ws:// an envelope from the old
+    // link can still be inside the new link's stale grace.
+    this.peerNonces = new Map();
     this.pendingAuth = new Map();
     this.reconnectTimers = new Map();
     this.heartbeatInterval = null;
@@ -361,6 +365,8 @@ class MeshTransport extends EventEmitter {
 
   removeTrustedPeer(peerId) {
     this.trustedPeers.delete(peerId);
+    // An untrusted peer's envelopes are refused anyway; its nonces can go.
+    this.peerNonces.delete(peerId);
     // disconnectPeer (below) closes the socket without touching `peers`
     // itself, so the one close listener (_handlePeerDisconnect) does the
     // single cleanup and emits 'peerDisconnected' — deleting it here first
@@ -942,10 +948,10 @@ class MeshTransport extends EventEmitter {
       authAt: pending.authenticatedAt || now,
       sendSeq: 0,
       recvSeq: 0,
-      // §3.10 item 2: replay nonces are kept per peer, and inbound frames are
-      // metered with a token bucket.
+      // §3.10 item 2: replay nonces are kept per peer (per peer node, across
+      // its reconnects), and inbound frames are metered with a token bucket.
       // nonce → the time its envelope leaves the envelope window
-      seenNonces: new Map(),
+      seenNonces: this._noncesFor(remoteIdentity.peerId),
       tokens: INBOUND_BURST,
       tokensAt: now,
       envelopeWindowMs: pending.frontDoorLink || this.requireClientCert ? FRONT_DOOR_ENVELOPE_WINDOW_MS : ENVELOPE_WINDOW_MS
@@ -1146,6 +1152,15 @@ class MeshTransport extends EventEmitter {
   // after that verifyEnvelope refuses it anyway, so forgetting it opens no
   // replay. Entries are in arrival order, nearly sorted by expiry; the scan
   // stops at the first live one, and the cap bounds any stragglers.
+  _noncesFor(peerId) {
+    let nonces = this.peerNonces.get(peerId);
+    if (!nonces) {
+      nonces = new Map();
+      this.peerNonces.set(peerId, nonces);
+    }
+    return nonces;
+  }
+
   _pruneNonces(peer) {
     const now = Date.now();
     for (const [nonce, expiresAt] of peer.seenNonces) {
