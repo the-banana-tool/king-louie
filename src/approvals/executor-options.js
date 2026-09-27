@@ -13,6 +13,47 @@ const originHelpers = require('../core/origin');
 const log = createLogger('approvals/executor-options');
 const PHONE_GRACE_MS = 15000;
 
+// Fleet stage 4 §3.8: a delegate session whose client was not granted
+// fleet:unsafe refuses unsafe calls itself; the phone is never asked.
+const REFUSE_UNSAFE_MESSAGE = 'This client may not request unsafe actions (fleet:unsafe not granted). Nothing ran.';
+
+function refuseUnsafeClassifier(classifyCall) {
+  return (toolName, params, ctx) => {
+    const decision = classifyCall ? classifyCall(toolName, params, ctx) : null;
+    if (decision && decision.tier === 'unsafe') return { tier: 'denied', reason: 'fleet_unsafe_not_granted', message: REFUSE_UNSAFE_MESSAGE };
+    return decision;
+  };
+}
+
+// The node-policy classifier with no pattern lists and `allowedRoots` as its
+// allowed_roots (none when unset: every path-naming call is unsafe), for a
+// refuseUnsafe run that has no node policy of its own ('allow'/'deny' mode,
+// or phone mode without deps.nodePolicy). A delegate turn passes its own cwd
+// (T11-roots). If it cannot be loaded, every call is unsafe: no tool
+// declares itself read-only, so nothing can be let through.
+function defaultFleetClassifier(allowedRoots = null) {
+  const policy = Array.isArray(allowedRoots) && allowedRoots.length > 0 ? { allowed_roots: [...allowedRoots] } : {};
+  try {
+    const { classifyToolCall } = require('../execution/safety-policy');
+    return (toolName, params, { cwd } = {}) => classifyToolCall(toolName, params, policy, { cwd });
+  } catch (err) {
+    log.error(`fleet classifier unavailable, refusing every call: ${err?.message ?? String(err)}`);
+    return () => ({ tier: 'unsafe', reason: 'no_classifier' });
+  }
+}
+
+// T10 ruling (fail closed in every mode): the classifier a refuseUnsafe
+// ToolExecutor runs. The run's own classifyCall decides when it has an
+// opinion; otherwise the fleet default does. Anything unsafe becomes the
+// refusal, so only read/routine calls run.
+function refuseUnsafeGate(classifyCall, allowedRoots = null) {
+  const fallback = defaultFleetClassifier(allowedRoots);
+  return refuseUnsafeClassifier((toolName, params, ctx) => {
+    const decision = classifyCall ? classifyCall(toolName, params, ctx) : null;
+    return decision === null || decision === undefined ? fallback(toolName, params, ctx) : decision;
+  });
+}
+
 function paramsSha256(params) {
   try {
     return sha256b64url(canonicalize(params === undefined || params === null ? {} : params));
@@ -87,24 +128,37 @@ function approvalSeam({ remoteApprovals, event = null, approvalRequester = null,
   const local = helpers.isLocalDesktopEvent(event) || helpers.isLocalRequester(approvalRequester);
   const origin = runOrigin({ executorOptions, event, local, helpers });
   const denyAutoApproval = (remoteApprovals !== 'allow' && !local) || executorOptions.denyAutoApproval === true;
+  // Set by a delegate turn (executorOptions) or inherited through the
+  // re-threaded requester of its sub-agents.
+  const refuseUnsafe = executorOptions.refuseUnsafe === true || Boolean(approvalRequester && approvalRequester.refuseUnsafe === true);
+  // A delegate turn's cwd, for the fleet default classifier (T11-roots).
+  const rawRoots = executorOptions.allowedRoots || (approvalRequester && approvalRequester.allowedRoots);
+  const gate = refuseUnsafe
+    ? { refuseUnsafe: true, ...(Array.isArray(rawRoots) && rawRoots.length > 0 ? { allowedRoots: rawRoots } : {}) }
+    : {};
 
   if (remoteApprovals === 'phone') {
     // A marked (local) requester is kept; an unmarked one from a local event
     // is dropped so the on-screen dialog answers (requester null).
     const localRequester = helpers.isLocalRequester(approvalRequester) ? approvalRequester : null;
     const phone = phoneExecutorOptions({ phoneApprover, auditLedger, nodePolicy, origin, local, approvalRequester: localRequester });
-    return { toolExecutorOptions: { ...phone.options, denyAutoApproval }, attach: phone.attach, local, origin };
+    const toolExecutorOptions = { ...phone.options, denyAutoApproval };
+    if (refuseUnsafe) {
+      toolExecutorOptions.classifyCall = refuseUnsafeClassifier(phone.options.classifyCall || null);
+      Object.assign(toolExecutorOptions, gate);
+    }
+    return { toolExecutorOptions, attach: phone.attach, local, origin };
   }
 
   let requester;
   if (remoteApprovals === 'allow') requester = approvalRequester;
   else requester = local && helpers.isLocalRequester(approvalRequester) ? approvalRequester : null;
   return {
-    toolExecutorOptions: { approvalRequester: requester, denyAutoApproval, localOrigin: local, origin },
+    toolExecutorOptions: { approvalRequester: requester, denyAutoApproval, localOrigin: local, origin, ...gate },
     attach: () => {},
     local,
     origin
   };
 }
 
-module.exports = { approvalSeam, phoneExecutorOptions, paramsSha256, PHONE_GRACE_MS };
+module.exports = { approvalSeam, phoneExecutorOptions, paramsSha256, refuseUnsafeClassifier, refuseUnsafeGate, PHONE_GRACE_MS, REFUSE_UNSAFE_MESSAGE };

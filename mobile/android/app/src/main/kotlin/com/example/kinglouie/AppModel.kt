@@ -13,22 +13,29 @@ import androidx.fragment.app.FragmentActivity
 import com.example.kinglouie.protocol.AppMode
 import com.example.kinglouie.protocol.ApprovalStatus
 import com.example.kinglouie.protocol.AuditSlice
+import com.example.kinglouie.protocol.AuditStatus
 import com.example.kinglouie.protocol.B64Url
 import com.example.kinglouie.protocol.DemoFleet
 import com.example.kinglouie.protocol.Digest
 import com.example.kinglouie.protocol.Display
 import com.example.kinglouie.protocol.Envelope
+import com.example.kinglouie.protocol.FrontDoor
+import com.example.kinglouie.protocol.FrontDoorReply
+import com.example.kinglouie.protocol.GrantRequest
 import com.example.kinglouie.protocol.Hex
 import com.example.kinglouie.protocol.Identifiers
 import com.example.kinglouie.protocol.Jcs
 import com.example.kinglouie.protocol.JsonText
 import com.example.kinglouie.protocol.Messages
 import com.example.kinglouie.protocol.NodePin
+import com.example.kinglouie.protocol.PairingRequest
 import com.example.kinglouie.protocol.ProtocolException
 import com.example.kinglouie.protocol.QuestionItem
 import com.example.kinglouie.protocol.Questions
 import com.example.kinglouie.protocol.RelayClientFactory
+import com.example.kinglouie.protocol.RepinTarget
 import com.example.kinglouie.protocol.ResponseOutcome
+import com.example.kinglouie.protocol.ScopeChoice
 import com.example.kinglouie.protocol.Timestamps
 import com.example.kinglouie.protocol.arr
 import com.example.kinglouie.protocol.bool
@@ -36,13 +43,16 @@ import com.example.kinglouie.protocol.get
 import com.example.kinglouie.protocol.int
 import com.example.kinglouie.protocol.jsonNumber
 import com.example.kinglouie.protocol.jsonString
+import com.example.kinglouie.protocol.obj
 import com.example.kinglouie.protocol.str
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -78,6 +88,15 @@ class Storage(context: Context) {
     var pushTokenSent: String?
         get() = prefs.getString("pushTokenSent", null)
         set(v) = prefs.edit().putString("pushTokenSent", v).apply()
+
+    /**
+     * The front door this phone's relay is (fleet stage 4): set only when GET
+     * /v1/frontdoor names a node pinned from a code, with that key
+     * (FrontDoor.identify).
+     */
+    var frontDoorId: String?
+        get() = prefs.getString("frontDoorId", null)
+        set(v) = prefs.edit().putString("frontDoorId", v).apply()
     var nodes: List<NodePin>
         get() = prefs.getString("nodes", null)?.let { text ->
             runCatching {
@@ -89,15 +108,16 @@ class Storage(context: Context) {
         }))).apply()
 
     /** The pairing state, to put back when a pairing does not finish. */
-    data class Snapshot(val mode: AppMode, val relayUrl: String?, val relaySpki: String?, val nodes: List<NodePin>)
+    data class Snapshot(val mode: AppMode, val relayUrl: String?, val relaySpki: String?, val nodes: List<NodePin>, val frontDoorId: String?)
 
-    fun snapshot() = Snapshot(mode, relayUrl, relaySpki, nodes)
+    fun snapshot() = Snapshot(mode, relayUrl, relaySpki, nodes, frontDoorId)
 
     fun restore(s: Snapshot) {
         mode = s.mode
         relayUrl = s.relayUrl
         relaySpki = s.relaySpki
         nodes = s.nodes
+        frontDoorId = s.frontDoorId
     }
 
     fun clear() = prefs.edit().clear().apply()
@@ -152,6 +172,28 @@ class AppModel(context: Context) {
     var inviteQr by mutableStateOf<String?>(null)
     var inviteClaim by mutableStateOf<JsonElement?>(null)
     var history by mutableStateOf<Pair<String, List<JsonElement>>?>(null)
+
+    /** The front door's own gap and break records for the page in `history` ("reported by front door"). */
+    var historyStatus by mutableStateOf<AuditStatus?>(null)
+
+    /** Why those records could not be shown, when they could not. */
+    var historyStatusNote by mutableStateOf<String?>(null)
+    var frontDoorId by mutableStateOf(storage.frontDoorId)
+        private set
+    var grantRequest by mutableStateOf<GrantRequest?>(null)
+        private set
+    private var grantCode: String? = null
+
+    /** When `grantRequest` arrived (elapsedRealtime ms); its expiry counts from here. */
+    private var grantReceivedAtMs = 0L
+
+    /** An approve or deny for `grantRequest`, or a pairing decision, is being signed or sent. */
+    var frontDoorBusy by mutableStateOf(false)
+        private set
+    val clients = mutableStateListOf<JsonElement>()
+    val pairings = mutableStateListOf<PairingRequest>()
+    val frontDoorNodes = mutableStateListOf<JsonElement>()
+    val alerts = mutableStateListOf<JsonElement>()
     val pending = mutableStateListOf<PendingItem>()
     val devices = mutableStateListOf<JsonElement>()
     val online = mutableStateMapOf<String, Boolean>()
@@ -499,6 +541,8 @@ class AppModel(context: Context) {
         val before = storage.snapshot()
         if (mode == AppMode.DEMO) leaveDemo()
         pollJob?.cancel()
+        // A different relay is learned again (refreshFrontDoorNow) once the pairing finishes.
+        if (storage.relayUrl != relay.first) setFrontDoor(null)
         storage.relayUrl = relay.first
         storage.relaySpki = relay.second
         pins.forEach { pinNode(it) }
@@ -511,6 +555,7 @@ class AppModel(context: Context) {
     private fun restore(before: Storage.Snapshot) {
         fingerprintToCompare = null
         storage.restore(before)
+        frontDoorId = before.frontDoorId
         if (before.mode == AppMode.DEMO) {
             startDemo()
             return
@@ -561,6 +606,7 @@ class AppModel(context: Context) {
                 "done" -> {
                     banner = "Enrolled. This phone now approves for ${Display.escape(pin.name)}."
                     sendPushToken()
+                    refreshFrontDoorNow()
                 }
                 "refused" -> {
                     restore(before)
@@ -718,7 +764,16 @@ class AppModel(context: Context) {
                 // A request that fails device auth counts against the relay's
                 // per-IP budget, so an unknown device backs off too.
                 if (e.code == "rate_limited" || e.status == 401) notBeforeMs = SystemClock.elapsedRealtime() + (e.retryAfter ?: 15).coerceAtLeast(1) * 1000L
-                if (e.code == "pin_mismatch") banner = describe(e)
+                if (e.code == "pin_mismatch") {
+                    // Only a front door's signed re-pin, checked against the key
+                    // pinned from a code, moves the pin; anything else stops here
+                    // until the owner scans a relay code.
+                    if (tryRepin()) {
+                        pollProblem = "Re-pinned the front door. Tap \u201cCheck for requests\u201d again."
+                        return@launch
+                    }
+                    banner = describe(e)
+                }
                 pollProblem = describe(e)
             } catch (e: Exception) {
                 pollProblem = describe(e)
@@ -844,6 +899,17 @@ class AppModel(context: Context) {
                 return@launch
             }
             history = (slice["created_at"].str() ?: "") to result.entries.reversed()
+            historyStatus = null
+            historyStatusNote = null
+            if (frontDoorId != null) {
+                try {
+                    historyStatus = client?.auditStatus(nodeId)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    historyStatusNote = "The front door's gap and break records could not be read: ${describe(e)}"
+                }
+            }
         } catch (e: Exception) {
             fail(e)
         }
@@ -1033,6 +1099,386 @@ class AppModel(context: Context) {
         }
     }
 
+    // Front door (fleet stage 4). On this phone every device-signed request is
+    // a biometric prompt (F3's key parameters), so each list is fetched when
+    // the owner taps, never on a timer (Deviation 30).
+
+    private fun setFrontDoor(id: String?) {
+        frontDoorId = id
+        storage.frontDoorId = id
+    }
+
+    /**
+     * Sets the front door only when GET /v1/frontdoor names a node this phone
+     * pinned from a code, with that same key (FrontDoor.identify); nothing
+     * else the reply says is trusted. An F3 relay answers 404.
+     */
+    private suspend fun refreshFrontDoorNow() {
+        val api = client ?: return
+        try {
+            setFrontDoor(FrontDoor.identify(api.frontDoorInfo(), storage.nodes))
+        } catch (e: RelayException) {
+            if (e.status == 404) setFrontDoor(null) else fail(e)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            fail(e)
+        }
+    }
+
+    fun refreshFrontDoor() = scope.launch { refreshFrontDoorNow() }
+
+    /**
+     * Stage 4 §3.3.1: after a pin failure on a front door, exactly one
+     * unauthenticated GET /v1/repin, to the certificate just seen. The pin
+     * moves only when FrontDoor.verifyRepin passes: signed by the front-door
+     * key pinned from a code, naming the certificate just seen and the current
+     * pin. Anything else leaves the pin as it is.
+     */
+    private suspend fun tryRepin(): Boolean {
+        val api = client ?: return false
+        val fd = frontDoorId ?: return false
+        val pin = storage.nodes.firstOrNull { it.id == fd } ?: return false
+        val seen = api.takeRefusedSpki() ?: return false
+        val url = storage.relayUrl ?: return false
+        val current = storage.relaySpki ?: return false
+        val probed = RepinTarget(url, current, fd)
+        val envelope = try {
+            RelayApi(url, seen, null, null).repinEnvelope()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            null
+        } ?: return false
+        val check = FrontDoor.verifyRepin(envelope, fd, pin.key, seen, current)
+        val newSpki = check.newSpki
+        if (!check.ok || newSpki == null) return false
+        // The probe took time: a reset, a new pairing or another re-pin since then wins.
+        if (!currentCoroutineContext().isActive || mode != AppMode.LIVE || !FrontDoor.repinStillApplies(probed, currentRepinTarget())) return false
+        storage.relaySpki = newSpki
+        connect()
+        banner = "The front door changed its certificate key. Its signed re-pin checked out, so this phone now pins the new key."
+        return true
+    }
+
+    /** The relay and front door the phone has now; null without one. */
+    private fun currentRepinTarget(): RepinTarget? {
+        val url = storage.relayUrl ?: return null
+        val spki = storage.relaySpki ?: return null
+        val fd = frontDoorId ?: return null
+        return RepinTarget(url, spki, fd)
+    }
+
+    /**
+     * A front-door answer that did not confirm what was asked, in the owner's
+     * words. Known codes are worded; any other code, and a 2xx without the
+     * expected state, is shown as neutral data, never as success.
+     */
+    private fun unconfirmed(reply: FrontDoorReply): String = when (reply) {
+        is FrontDoorReply.Done -> "The front door answered but did not confirm it (state: ${reply.state ?: "none"}). Check again before relying on it."
+        is FrontDoorReply.Refused -> when (reply.code) {
+            "expired", "unknown_request" -> "This request expired or was already decided. Start again in the client."
+            "not_claimant" -> "Another phone claimed this request."
+            "forbidden" -> "This phone is not an approver on this front door."
+            "revoked_device" -> "This phone was revoked on this front door."
+            "unknown_machine" -> "The front door has no machine by one of the names chosen. Choose again."
+            "already_decided" -> "This was already decided."
+            "unknown_pairing" -> "This pairing expired or was withdrawn."
+            "replaces_changed" -> "The node this one replaces changed. Check the pairing again."
+            "key_enrolled_as_other_name" -> "This node's key is already enrolled under another name."
+            "console_record" -> "This node was confirmed at the console. Remove it there with frontdoor remove-node."
+            "save_failed" -> "The front door could not save this. Try again" + (reply.retryAfterSeconds?.let { " in $it s." } ?: ".")
+            "not_found" -> "The front door no longer has it."
+            null -> "The front door did not confirm this (HTTP ${reply.status})."
+            else -> "The front door did not confirm this (${reply.code}, HTTP ${reply.status})."
+        }
+    }
+
+    /** The typed code, as the grant carries it; the request is claimed for this phone. */
+    fun findGrant(code: String) = scope.launch {
+        cancelGrant()
+        val api = client ?: return@launch
+        if (frontDoorId == null) return@launch
+        val normalized = FrontDoor.normalizeUserCode(code)
+        if (normalized == null) {
+            banner = "The code is six letters and digits, like Q7K-M2X."
+            return@launch
+        }
+        try {
+            val reply = api.pendingGrant(normalized) ?: throw OwnerMessage("The front door sent a reply this app cannot read.")
+            grantRequest = GrantRequest(reply)
+            grantCode = normalized
+            grantReceivedAtMs = SystemClock.elapsedRealtime()
+        } catch (e: RelayException) {
+            if (e.code == "no_such_request") banner = "No connection request with that code." else fail(e)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            fail(e)
+        }
+    }
+
+    fun cancelGrant() {
+        grantRequest = null
+        grantCode = null
+        grantReceivedAtMs = 0L
+    }
+
+    private fun grantExpired(request: GrantRequest): Boolean =
+        grantReceivedAtMs == 0L || SystemClock.elapsedRealtime() - grantReceivedAtMs >= request.expiresInMs
+
+    /**
+     * Approve: an explicit tap, then a biometric prompt over exactly the
+     * scopes chosen from those requested. Deny: an empty scope list. A denial
+     * never depends on the prompt: if it cannot be signed, nothing is granted
+     * and the request lapses on its own.
+     */
+    fun decideGrant(request: GrantRequest, scopes: List<ScopeChoice>, approve: Boolean) {
+        if (frontDoorBusy) return
+        frontDoorBusy = true
+        scope.launch {
+            try {
+                decideGrantNow(request, scopes, approve)
+            } finally {
+                frontDoorBusy = false
+            }
+        }
+    }
+
+    private suspend fun decideGrantNow(request: GrantRequest, scopes: List<ScopeChoice>, approve: Boolean) {
+        val api = client ?: return
+        val k = key ?: return
+        val fd = frontDoorId ?: return
+        val code = grantCode ?: return
+        if (grantRequest !== request) return
+        val name = FrontDoor.shownText(request.clientName)
+        if (grantExpired(request)) {
+            cancelGrant()
+            banner = "This connection request expired. Start again in the client."
+            return
+        }
+        val envelope = try {
+            val message = request.message(fd, code, if (approve) scopes else emptyList(), if (approve) "approve" else "deny",
+                Messages.randomNonce(), k.deviceId, Timestamps.string(api.now()))
+            signEnvelope(k, message, if (approve) "Connect a client" else "Refuse a client", if (approve) "Let $name use your fleet" else "Refuse $name")
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (!approve && e !is KeyInvalidatedException) {
+                cancelGrant()
+                banner = "$name was not connected. The refusal was not signed (${describe(e)}), so the request stays open until it expires; nothing was granted."
+                return
+            }
+            fail(e)
+            return
+        }
+        try {
+            val reply = api.grantDecision(request.grantId, envelope)
+            if (reply.confirms(if (approve) "approved" else "denied")) {
+                cancelGrant()
+                banner = if (approve) "$name is connected. Go back to its window." else "Refused. $name was not connected."
+                return
+            }
+            if (reply is FrontDoorReply.Refused && (reply.status == 410 || reply.status == 404)) cancelGrant()
+            banner = unconfirmed(reply)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            fail(e)
+        }
+    }
+
+    fun refreshClients() = scope.launch {
+        val api = client ?: return@launch
+        if (frontDoorId == null) return@launch
+        try {
+            val list = api.clients()
+            clients.clear()
+            clients.addAll(list)
+        } catch (e: Exception) {
+            fail(e)
+        }
+    }
+
+    /**
+     * One signed front-door action at a time (revoke, remove, acknowledge),
+     * shared with the decision flows through `frontDoorBusy`, so a second
+     * tap while one is out does nothing.
+     */
+    private fun frontDoorAction(block: suspend () -> Unit) {
+        if (frontDoorBusy) return
+        frontDoorBusy = true
+        scope.launch {
+            try {
+                block()
+            } finally {
+                frontDoorBusy = false
+            }
+        }
+    }
+
+    /** Revocation is challenge-bound: a fresh `revoke` challenge, then the signature. */
+    fun revokeClient(grantId: String, name: String) = frontDoorAction {
+        val api = client ?: return@frontDoorAction
+        val k = key ?: return@frontDoorAction
+        val fd = frontDoorId ?: return@frontDoorAction
+        try {
+            val challenge = api.challenge(FrontDoor.PURPOSE_REVOKE)
+            val message = FrontDoor.clientRevoke(fd, grantId, challenge.challenge, k.deviceId, Timestamps.string(api.now()))
+            val reply = api.revokeClient(grantId, signEnvelope(k, message, "Disconnect a client", "Disconnect ${FrontDoor.shownText(name)}"))
+            if (reply.succeeded) {
+                clients.removeAll { it["grant_id"].str() == grantId }
+            } else {
+                banner = unconfirmed(reply)
+            }
+        } catch (e: Exception) {
+            fail(e)
+        }
+    }
+
+    /** Nodes waiting for this phone; an entry the core cannot verify (its id does not derive from its key, say) is dropped. */
+    fun refreshPairings() = scope.launch {
+        val api = client ?: return@launch
+        if (frontDoorId == null) return@launch
+        try {
+            val list = api.pendingPairings().mapNotNull { runCatching { PairingRequest(it) }.getOrNull() }
+            pairings.clear()
+            pairings.addAll(list)
+        } catch (e: Exception) {
+            fail(e)
+        }
+    }
+
+    /**
+     * Approve: a biometric prompt naming the node and its fingerprint. A
+     * denial that cannot be signed adds nothing. `save_failed` sends the same
+     * envelope again, at most twice more (each a request, so a prompt).
+     */
+    fun decidePairing(pairing: PairingRequest, approve: Boolean) {
+        if (frontDoorBusy) return
+        frontDoorBusy = true
+        scope.launch {
+            try {
+                decidePairingNow(pairing, approve)
+            } finally {
+                frontDoorBusy = false
+            }
+        }
+    }
+
+    private suspend fun decidePairingNow(pairing: PairingRequest, approve: Boolean) {
+        val api = client ?: return
+        val k = key ?: return
+        val fd = frontDoorId ?: return
+        val name = FrontDoor.shownText(pairing.nodeName)
+        val envelope = try {
+            val message = pairing.message(fd, if (approve) "approve" else "deny", Messages.randomNonce(), k.deviceId, Timestamps.string(api.now()))
+            signEnvelope(k, message, if (approve) "Add a node" else "Refuse a node", if (approve) "Add $name (${pairing.fingerprint})" else "Refuse $name")
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (!approve && e !is KeyInvalidatedException) {
+                banner = "$name was not added. The refusal was not signed (${describe(e)}), so it stays waiting until its code expires."
+                return
+            }
+            fail(e)
+            return
+        }
+        try {
+            var reply = api.pairingDecision(pairing.pairingId, envelope)
+            var attempts = 1
+            while (reply.retryable && attempts < 3) {
+                delay(((reply as? FrontDoorReply.Refused)?.retryAfterSeconds ?: 1).coerceIn(1, 10) * 1000L)
+                reply = api.pairingDecision(pairing.pairingId, envelope)
+                attempts++
+            }
+            if (reply.confirms(if (approve) "enrolled" else "denied")) {
+                pairings.removeAll { it.pairingId == pairing.pairingId }
+                banner = if (approve) "$name is enrolled. It links when its pair command finishes." else "Refused. $name was not added."
+                return
+            }
+            banner = unconfirmed(reply)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            fail(e)
+        }
+    }
+
+    fun refreshFrontDoorNodes() = scope.launch {
+        val api = client ?: return@launch
+        if (frontDoorId == null) return@launch
+        try {
+            val list = api.nodes()
+            frontDoorNodes.clear()
+            frontDoorNodes.addAll(list)
+        } catch (e: Exception) {
+            fail(e)
+        }
+    }
+
+    /** Removal is challenge-bound: a fresh `remove` challenge, then the signature. */
+    fun removeNode(nodeId: String, name: String) = frontDoorAction {
+        val api = client ?: return@frontDoorAction
+        val k = key ?: return@frontDoorAction
+        val fd = frontDoorId ?: return@frontDoorAction
+        try {
+            val challenge = api.challenge(FrontDoor.PURPOSE_REMOVE)
+            val message = FrontDoor.nodeRemove(fd, nodeId, challenge.challenge, k.deviceId, Timestamps.string(api.now()))
+            val reply = api.removeNode(nodeId, signEnvelope(k, message, "Remove a node", "Remove ${FrontDoor.shownText(name)} from your fleet"))
+            if (reply.succeeded) {
+                frontDoorNodes.removeAll { it["node_id"].str() == nodeId }
+            } else if (reply.retryable) {
+                // In effect but not saved: removing again (a new challenge) saves it.
+                banner = "The node is removed but the front door could not save that. Tap Remove again."
+            } else {
+                banner = unconfirmed(reply)
+            }
+        } catch (e: Exception) {
+            fail(e)
+        }
+    }
+
+    fun refreshAlerts() = scope.launch {
+        val api = client ?: return@launch
+        if (frontDoorId == null) return@launch
+        try {
+            val list = api.alerts("0")
+            alerts.clear()
+            alerts.addAll(list)
+        } catch (e: Exception) {
+            fail(e)
+        }
+    }
+
+    fun ackAlert(id: String) = frontDoorAction {
+        val api = client ?: return@frontDoorAction
+        if (frontDoorId == null) return@frontDoorAction
+        try {
+            api.ackAlert(id)
+            val i = alerts.indexOfFirst { it["id"].str() == id }
+            // The front door answered 204: show it acknowledged without another (prompted) fetch.
+            if (i >= 0) alerts[i] = JsonObject(alerts[i].obj().orEmpty() + ("acked" to kotlinx.serialization.json.JsonPrimitive(true)))
+        } catch (e: Exception) {
+            fail(e)
+        }
+    }
+
+    /** A tapped notification carries only { kind, id }: the app fetches and verifies. */
+    fun openPushed(kind: String, id: String) {
+        when (kind) {
+            "pairing" -> refreshPairings()
+            "alert" -> refreshAlerts()
+            // Cases stage 4 sends kind "question"; the app fetches and verifies the list itself.
+            "question" -> refreshQuestions()
+            "approval" -> openPushed(id)
+        }
+    }
+
+    /** Nodes the phone pinned, and whether a grant can limit to each (Deviation 18). */
+    val machineChoices: List<Pair<String, Boolean>>
+        get() = storage.nodes.filter { it.id != frontDoorId }.map { it.name to FrontDoor.isMachineName(it.name) }
+
     // Push
 
     /**
@@ -1087,6 +1533,17 @@ class AppModel(context: Context) {
         inviteQr = null
         inviteClaim = null
         openInvite = null
+        grantRequest = null
+        grantCode = null
+        grantReceivedAtMs = 0L
+        frontDoorBusy = false
+        clients.clear()
+        pairings.clear()
+        frontDoorNodes.clear()
+        alerts.clear()
+        historyStatus = null
+        historyStatusNote = null
+        frontDoorId = null
         fingerprintToCompare = null
         pollProblem = null
         storage.clear()

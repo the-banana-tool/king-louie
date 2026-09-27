@@ -1,8 +1,12 @@
 package com.example.kinglouie
 
+import com.example.kinglouie.protocol.AuditStatus
 import com.example.kinglouie.protocol.B64Url
+import com.example.kinglouie.protocol.Challenge
 import com.example.kinglouie.protocol.Digest
 import com.example.kinglouie.protocol.Envelope
+import com.example.kinglouie.protocol.FrontDoor
+import com.example.kinglouie.protocol.FrontDoorReply
 import com.example.kinglouie.protocol.Jcs
 import com.example.kinglouie.protocol.JsonText
 import com.example.kinglouie.protocol.Messages
@@ -42,10 +46,21 @@ class PinMismatchException : CertificateException("Relay certificate changed —
 
 /** Trusts exactly the relay whose leaf certificate's SPKI hashes to the pin; CAs are ignored. */
 class PinningTrustManager(private val pin: String) : X509TrustManager {
+    /**
+     * The pin of the last certificate this refused (fleet stage 4 §3.3.1).
+     * Kept only so a front door's signed re-pin can be checked against it;
+     * never trusted on its own.
+     */
+    @Volatile
+    var refusedSpki: String? = null
+
     override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {
         val leaf = chain?.firstOrNull() ?: throw PinMismatchException()
         val actual = "sha256/" + Digest.sha256B64url(leaf.publicKey.encoded)
-        if (actual != pin) throw PinMismatchException()
+        if (actual != pin) {
+            refusedSpki = actual
+            throw PinMismatchException()
+        }
     }
 
     override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) = throw CertificateException("not a server")
@@ -64,7 +79,12 @@ class RelayApi(
     private val deviceId: String?,
     private val signer: (suspend (ByteArray) -> ByteArray)?
 ) {
-    private val ssl = SSLContext.getInstance("TLS").apply { init(null, arrayOf(PinningTrustManager(pin)), null) }
+    private val trust = PinningTrustManager(pin)
+    private val ssl = SSLContext.getInstance("TLS").apply { init(null, arrayOf(trust), null) }
+
+    /** The pin of the certificate the last refusal saw, once. */
+    @Synchronized
+    fun takeRefusedSpki(): String? = trust.refusedSpki.also { trust.refusedSpki = null }
 
     /** Relay clock minus this phone's, learned from a clock_skew answer or GET /v1/time. */
     private val clockOffsetMs = AtomicLong(0)
@@ -82,9 +102,22 @@ class RelayApi(
      * Device-signed unless `auth` is false (code and invite routes). A 401
      * clock_skew is answered exactly once: the offset from its `server_time`
      * is kept for this and every later request, and the request is signed
-     * again. A second clock_skew is an error.
+     * again. A second clock_skew is an error. Anything outside 2xx throws
+     * RelayException.
      */
-    suspend fun request(method: String, pathWithQuery: String, body: JsonElement? = null, auth: Boolean = true, retried: Boolean = false): Pair<Int, JsonElement?> {
+    suspend fun request(method: String, pathWithQuery: String, body: JsonElement? = null, auth: Boolean = true): Pair<Int, JsonElement?> {
+        val (status, json) = exchange(method, pathWithQuery, body, auth)
+        if (status in 200..299) return status to json
+        throw RelayException(status, json["error"].str() ?: "http_$status", json["message"].str() ?: "", json["retry_after"].int())
+    }
+
+    /**
+     * As `request`, but a status outside 2xx (other than a redirect) comes
+     * back with its body (null when it has none this app can parse), for
+     * replies read with FrontDoorReply. A transport failure, a refused pin, a
+     * redirect or an unreadable 2xx throws.
+     */
+    suspend fun exchange(method: String, pathWithQuery: String, body: JsonElement? = null, auth: Boolean = true, retried: Boolean = false): Pair<Int, JsonElement?> {
         val bytes = body?.let { Jcs.bytes(it) } ?: ByteArray(0)
         val headers = mutableMapOf<String, String>()
         if (auth && deviceId != null && signer != null) {
@@ -105,11 +138,10 @@ class RelayApi(
         }
         if (status in 300..399) throw RelayException(status, "redirect", "The relay tried to redirect this app; redirects are refused.")
         val json = if (text.isEmpty()) null else runCatching { JsonText.parse(text) }.getOrNull()
-        val code = json["error"].str() ?: "http_$status"
-        if (status == 401 && code == "clock_skew" && !retried && learnClock(json["server_time"].str())) {
-            return request(method, pathWithQuery, body, auth, retried = true)
+        if (status == 401 && json["error"].str() == "clock_skew" && !retried && learnClock(json["server_time"].str())) {
+            return exchange(method, pathWithQuery, body, auth, retried = true)
         }
-        throw RelayException(status, code, json["message"].str() ?: "", json["retry_after"].int())
+        return status to json
     }
 
     private fun send(method: String, pathWithQuery: String, headers: Map<String, String>, body: ByteArray?): Pair<Int, ByteArray> {
@@ -208,6 +240,41 @@ class RelayApi(
 
     /** waiting | done | refused | expired. */
     suspend fun consoleEnrollState(codeId: String): String = request("GET", "/v1/enroll/${segment(codeId)}", auth = false).second["state"].str() ?: "waiting"
+
+    // Front door (fleet stage 4, client-grant-v1 §7)
+
+    suspend fun frontDoorInfo(): JsonElement? = request("GET", "/v1/frontdoor").second
+
+    /** Claims the request for this phone; 404 `no_such_request` when the code matches nothing. */
+    suspend fun pendingGrant(userCode: String): JsonElement? = request("GET", "/v1/grants/pending?user_code=${segment(userCode)}").second
+
+    /** Decisions, revocations and removals: only FrontDoorReply's exact-state check confirms one, and a refusal's code is data. */
+    private suspend fun reply(path: String, envelope: Envelope): FrontDoorReply {
+        val (status, body) = exchange("POST", path, envelope.json)
+        return FrontDoorReply.from(status, body)
+    }
+
+    suspend fun grantDecision(grantId: String, envelope: Envelope): FrontDoorReply = reply("/v1/grants/${segment(grantId)}/decision", envelope)
+    suspend fun clients(): List<JsonElement> = request("GET", "/v1/clients").second.arr() ?: emptyList()
+
+    /** A fresh challenge for one purpose (`revoke` or `remove`, ruling T2-purpose). */
+    suspend fun challenge(purpose: String): Challenge {
+        val reply = request("POST", "/v1/challenges", FrontDoor.challengeRequest(purpose)).second
+            ?: throw RelayException(0, "malformed", "The front door sent a reply this app refuses as malformed.")
+        return Challenge(reply)
+    }
+    suspend fun revokeClient(grantId: String, envelope: Envelope): FrontDoorReply = reply("/v1/clients/${segment(grantId)}/revoke", envelope)
+    suspend fun pendingPairings(): List<JsonElement> = request("GET", "/v1/pairings/pending").second.arr() ?: emptyList()
+    suspend fun pairingDecision(pairingId: String, envelope: Envelope): FrontDoorReply = reply("/v1/pairings/${segment(pairingId)}/decision", envelope)
+    suspend fun removeNode(nodeId: String, envelope: Envelope): FrontDoorReply = reply("/v1/nodes/${segment(nodeId)}/remove", envelope)
+    suspend fun alerts(since: String): List<JsonElement> = request("GET", "/v1/alerts?since=${segment(since)}").second.arr() ?: emptyList()
+    suspend fun ackAlert(id: String) {
+        request("POST", "/v1/alerts/${segment(id)}/ack")
+    }
+    suspend fun auditStatus(nodeId: String): AuditStatus? = request("GET", "/v1/nodes/${segment(nodeId)}/audit-status").second?.let { AuditStatus(it) }
+
+    /** Unauthenticated: the one request a phone makes after its pin failed. */
+    suspend fun repinEnvelope(): JsonElement? = request("GET", "/v1/repin", auth = false).second
 
     companion object {
         private val longPolls = Semaphore(2)

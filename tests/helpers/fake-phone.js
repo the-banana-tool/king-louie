@@ -114,7 +114,59 @@ function createFakePhone({ seed = null, name = 'Test phone', platform = 'android
         'X-KL-Timestamp': timestamp,
         'X-KL-Signature': signer.sign(Buffer.from(s, 'utf8')).toString('base64url')
       };
-    }
+    },
+
+    // client-grant-v1 (fleet stage 4 §4.2–4.3). `pending` is the view the
+    // front door returns from GET /v1/grants/pending plus its binding fields.
+    grant({ frontdoorId, pending, decision = 'approve', scopes = null, nonce = null, signedAt = new Date().toISOString(), overrides = {} } = {}) {
+      const chosen = decision === 'deny' ? [] : (scopes || [...pending.requested_scopes].sort().map((scope) => ({ scope, machines: null })));
+      return seal({
+        v: 1,
+        type: 'kl.client.grant',
+        frontdoor_id: frontdoorId,
+        grant_id: pending.grant_id,
+        client_id: pending.client_id,
+        client_name: pending.client_name,
+        redirect_uri: pending.redirect_uri,
+        resource: pending.resource,
+        code_challenge: pending.code_challenge,
+        user_code: pending.user_code,
+        scopes: chosen,
+        decision,
+        nonce: nonce || randomNonce(),
+        device_id: deviceId,
+        signed_at: signedAt,
+        ...overrides
+      }, signer);
+    },
+
+    revokeClient({ frontdoorId, grantId, challenge, signedAt = new Date().toISOString() } = {}) {
+      return seal({ v: 1, type: 'kl.client.revoke', frontdoor_id: frontdoorId, grant_id: grantId, challenge, device_id: deviceId, signed_at: signedAt }, signer);
+    },
+
+    enrollNode({ frontdoorId, pairing, decision = 'approve', nonce = null, signedAt = new Date().toISOString(), overrides = {} } = {}) {
+      return seal({
+        v: 1,
+        type: 'kl.node.enroll',
+        frontdoor_id: frontdoorId,
+        pairing_id: pairing.pairing_id,
+        node_id: pairing.node_id,
+        node_name: pairing.node_name,
+        profile: pairing.profile,
+        public_key: pairing.public_key,
+        tls_fingerprint: pairing.tls_fingerprint,
+        replaces: pairing.replaces === undefined ? null : pairing.replaces,
+        decision,
+        nonce: nonce || randomNonce(),
+        device_id: deviceId,
+        signed_at: signedAt,
+        ...overrides
+      }, signer);
+    },
+
+    removeNode({ frontdoorId, nodeId, challenge, signedAt = new Date().toISOString() } = {}) {
+      return seal({ v: 1, type: 'kl.node.remove', frontdoor_id: frontdoorId, node_id: nodeId, challenge, device_id: deviceId, signed_at: signedAt }, signer);
+    },
   };
   return phone;
 }

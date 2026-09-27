@@ -2,7 +2,6 @@
 // Everything signed goes through here, so the shapes live in one place.
 const crypto = require('crypto');
 const { canonicalize, sha256b64url } = require('../platform/jcs');
-const { formatToolPattern } = require('../execution/tool-patterns');
 const { seal, open, nodeSigner, deviceIdFromJwk, isDeviceJwk, fromB64url, toB64url, EnvelopeError } = require('./envelope');
 
 class MessageError extends Error {
@@ -91,6 +90,9 @@ function cloneJson(value) {
 }
 
 function toolAction(toolName, params, cwd) {
+  // Required here, like runbook-engine in runbookAction, so a module that
+  // only verifies envelopes (the front door) never loads src/execution/.
+  const { formatToolPattern } = require('../execution/tool-patterns');
   const cloned = cloneJson(params === undefined || params === null ? {} : params);
   return {
     kind: 'tool',

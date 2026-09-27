@@ -84,6 +84,7 @@ struct MainView: View {
                 QuestionsView().tabItem { Label("Questions", systemImage: "questionmark.bubble") }
                 HistoryView().tabItem { Label("History", systemImage: "clock") }
                 NodesView().tabItem { Label("Nodes", systemImage: "server.rack") }
+                FrontDoorView().tabItem { Label("Front door", systemImage: "door.left.hand.open") }
                 DevicesView().tabItem { Label("Devices", systemImage: "iphone") }
                 SettingsView().tabItem { Label("Settings", systemImage: "gear") }
             }
@@ -120,7 +121,7 @@ struct PendingListView: View {
                                 Text(item.display["node"]?["name"]?.stringValue ?? "").font(.headline)
                                 Text(item.display["summary"]?.stringValue ?? "").lineLimit(2)
                                 HStack {
-                                    Text(item.display["origin"]?["client"]?.stringValue ?? "")
+                                    Text(FrontDoor.pendingOriginText(item.display))
                                     Spacer()
                                     Text(item.status ?? formatLeft(item.timeLeft)).monospacedDigit()
                                 }
@@ -161,7 +162,8 @@ struct ApprovalDetailView: View {
                         LabeledContent("Kind", value: item.display["kind"]?.stringValue ?? "")
                         LabeledContent("Name", value: item.display["name"]?.stringValue ?? "")
                         if let cwd = item.display["cwd"]?.stringValue { LabeledContent("Directory", value: cwd) }
-                        LabeledContent("Asked by", value: originText(item.display["origin"]))
+                        // On a front door, origin.client is the client's self-declared name as the front door reports it.
+                        LabeledContent(model.state.frontDoorId == nil ? "Asked by" : "Client (reported by front door)", value: originText(item.display["origin"]))
                         LabeledContent("Time left", value: formatLeft(item.timeLeft))
                     }
                     Section("Everything it will do") {
@@ -187,7 +189,8 @@ struct ApprovalDetailView: View {
 
     private func originText(_ origin: JSONValue?) -> String {
         guard let o = origin?.objectValue else { return "" }
-        return ["client", "session", "job_id", "deviceId"].compactMap { o[$0]?.stringValue }.joined(separator: " · ")
+        // The origin is the requester's word (on a front door, a client's self-declared name): capped and escaped.
+        return ["client", "session", "job_id", "deviceId"].compactMap { o[$0]?.stringValue }.map { FrontDoor.shownText($0) }.joined(separator: " · ")
     }
 
     private func act(_ item: PendingItem, _ approve: Bool) {
@@ -214,7 +217,10 @@ struct ItemRow: View {
             } else {
                 Text(entry["text"]?.stringValue ?? "").font(.body.monospaced()).textSelection(.enabled)
                 if hidden > 0 {
-                    Button("\(hidden) characters hidden — Show all") { expanded.insert(path) }.font(.caption)
+                    // .borderless is required: in a List or Form row, SwiftUI runs the action of
+                    // every default-style Button in the row when any part of the row is tapped
+                    // (so one tap would run Approve and Deny, or act on a stray tap). Do not remove it.
+                    Button("\(hidden) characters hidden — Show all") { expanded.insert(path) }.buttonStyle(.borderless).font(.caption)
                     Text(entry["tail"]?.stringValue ?? "").font(.body.monospaced())
                 }
             }
@@ -233,6 +239,12 @@ struct HistoryView: View {
                     ForEach(model.state.nodes, id: \.id) { Text(Display.escape($0.name)).tag($0.id) }
                 }
                 if let page = model.history, page.nodeId == nodeId {
+                    if let status = page.status {
+                        FrontDoorAuditSection(status: status)
+                    }
+                    if let note = page.statusNote {
+                        Section("Reported by front door") { Text(verbatim: note).font(.caption) }
+                    }
                     Section("As of \(Display.escape(page.asOf))") {
                         ForEach(Array(page.entries.enumerated()), id: \.offset) { _, entry in
                             VStack(alignment: .leading) {
@@ -299,6 +311,9 @@ struct QRImage: View {
 
 struct DevicesView: View {
     @EnvironmentObject var model: AppModel
+    /// A revoke is in flight: a second tap would only send a revoke the relay
+    /// refuses as already revoked.
+    @State private var revoking = false
 
     var body: some View {
         NavigationStack {
@@ -318,7 +333,18 @@ struct DevicesView: View {
                                 Text("\(nodeLabel(n["node_id"]?.stringValue ?? "")): \(Display.escape(n["state"]?.stringValue ?? ""))").font(.caption)
                             }
                             if id != model.deviceId {
-                                Button("Revoke", role: .destructive) { Task { await model.revoke(deviceId: id, name: name) } }
+                                // .borderless is required: in a List or Form row, SwiftUI runs the action of
+                                // every default-style Button in the row when any part of the row is tapped
+                                // (so one tap would run Approve and Deny, or act on a stray tap). Do not remove it.
+                                Button("Revoke", role: .destructive) {
+                                    revoking = true
+                                    Task {
+                                        await model.revoke(deviceId: id, name: name)
+                                        revoking = false
+                                    }
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(revoking)
                             }
                         }
                     }
@@ -358,6 +384,9 @@ struct SettingsView: View {
                 Section("Relay") {
                     Text(model.state.relayURL ?? "not paired")
                     Text(model.state.relaySpki ?? "").font(.caption.monospaced())
+                    if let id = model.state.frontDoorId {
+                        Text(verbatim: "Front door " + FrontDoor.nodeFingerprint(id)).font(.caption.monospaced())
+                    }
                     Button("Re-pin the relay (scan a relay code)") { scanning = true }.disabled(model.mode != .live)
                 }
                 if model.mode == .demo {

@@ -215,5 +215,24 @@ describe('SpawnAgentTool', () => {
 
       assert.deepStrictEqual(capturedOptions.toolFilter, ['Read', 'Grep']);
     });
+
+    it('passes the parent call abort signal to the child as abortSignal', async () => {
+      let capturedOptions = {};
+      const controller = new AbortController();
+      await SpawnAgentTool.execute(
+        { task: 'Test' },
+        makeOptions({
+          signal: controller.signal,
+          adapter: {
+            execute: async (agent, msg, opts) => {
+              capturedOptions = opts;
+              return { type: 'complete', content: 'done', iterations: 1, tools: [], llm: { totals: {} } };
+            }
+          }
+        })
+      );
+
+      assert.strictEqual(capturedOptions.abortSignal, controller.signal);
+    });
   });
 });

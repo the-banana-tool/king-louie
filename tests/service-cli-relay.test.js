@@ -297,3 +297,15 @@ describe('pair over TLS (the relay proves its certificate)', () => {
     assert.equal(pinOf(nodeDirs.dataDir), undefined);
   });
 });
+
+describe('relay commands on a front door (fleet stage 4 §3.1)', () => {
+  it('code, nodes and remove-node name their frontdoor counterparts', async () => {
+    const deps = { loadConfig: () => ({ profile: 'frontdoor', relay: null }) };
+    for (const [sub, arg, counterpart] of [['code', 'web-01', 'frontdoor code <node-name>'], ['nodes', undefined, 'frontdoor nodes'], ['remove-node', 'web-01', 'frontdoor remove-node <node-name>']]) {
+      let err = '';
+      const io = { stdout: { write: () => true }, stderr: { write: (s) => { err += s; return true; } } };
+      assert.equal(await runRelayCommand({ sub, arg, dataDir: os.tmpdir(), io, deps }), 2);
+      assert.ok(err.includes(`relay ${sub} is not used on a front door; use "king-louie-service ${counterpart}"`), err);
+    }
+  });
+});

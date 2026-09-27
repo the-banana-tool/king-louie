@@ -6,6 +6,7 @@ const path = require('path');
 const { isProtectedCasePath, CASE_BLOCKED_TOOL_NAMES, CASE_BLOCKED_TOOL_ERROR } = require('../cases/chat-integration');
 const { caseToolGuard, caseBrowserProfileGuard } = require('../cases/executors/case-guard');
 const { markLocalRequester } = require('../core/origin');
+const { refuseUnsafeGate, REFUSE_UNSAFE_MESSAGE } = require('../approvals/executor-options');
 const { createLogger } = require('../logging');
 
 const log = createLogger('tool-executor');
@@ -164,6 +165,22 @@ class ToolExecutor extends EventEmitter {
     // origin instead of recomputing a fresh, poorer one that has lost the
     // parent's deviceId/session.
     this.origin = options.origin || null;
+    // Fleet stage 4 §3.8: this run (a delegate turn without fleet:unsafe)
+    // refuses unsafe calls; carried on the re-threaded requester so the
+    // run's sub-agents refuse them too.
+    this.refuseUnsafe = options.refuseUnsafe === true;
+    // The roots the fleet default classifier allows paths under (a delegate
+    // turn's own cwd); only read with refuseUnsafe, and carried to sub-agents
+    // with it. Unset, that classifier allows no path.
+    this.allowedRoots = Array.isArray(options.allowedRoots) ? Object.freeze([...options.allowedRoots]) : null;
+    // Fail closed in every approval mode: with the gate on, every call is
+    // classified (by the fleet default when the run has no node policy), an
+    // unsafe one is refused in the tier branch, and nothing below ever asks
+    // a person (see _refuseUnsafeResult).
+    if (this.refuseUnsafe) this.classifyCall = refuseUnsafeGate(this.classifyCall, this.allowedRoots);
+    // A delegate session's background-task view, handed on to sub-agents so
+    // their BackgroundTask/TaskStatus calls stay inside the session.
+    this.scopedBackgroundTasks = options.scopedBackgroundTasks || null;
   }
 
   get permissionRules() {
@@ -256,6 +273,7 @@ class ToolExecutor extends EventEmitter {
       }
 
       if (action === 'confirm') {
+        if (this.refuseUnsafe) return this._refuseUnsafeResult(toolName, effectiveParameters);
         const hookMetadata = {
           reason: preHookResult?.message || 'Hook policy requires explicit confirmation.',
           signal: options.signal || null,
@@ -393,7 +411,11 @@ class ToolExecutor extends EventEmitter {
           reason: safeDecision.reason || null
         });
         if (safeDecision.tier === 'denied') {
-          const denied = { success: false, error: 'Denied by node policy.', deniedBy: 'policy' };
+          const denied = {
+            success: false,
+            error: typeof safeDecision.message === 'string' && safeDecision.message ? safeDecision.message : 'Denied by node policy.',
+            deniedBy: 'policy'
+          };
           this.emit('postExecute', { toolName, parameters: effectiveParameters, result: denied });
           return denied;
         }
@@ -428,6 +450,7 @@ class ToolExecutor extends EventEmitter {
     }
 
     if (needsApprovalGate && !ruleSaysAllow) {
+      if (this.refuseUnsafe) return this._refuseUnsafeResult(toolName, effectiveParameters);
       // An `ask` rule is the user saying "always check with me for this one",
       // so it outranks both auto-approve paths — which is what the comment
       // above evaluateRules has always claimed and the code did not do. Agent
@@ -585,16 +608,33 @@ class ToolExecutor extends EventEmitter {
     }
   }
 
+  // A refuseUnsafe run never asks anyone: a call that would need a person's
+  // approval (a hook's confirm, an `ask` rule) is refused like an unsafe one.
+  _refuseUnsafeResult(toolName, parameters) {
+    const refused = { success: false, error: REFUSE_UNSAFE_MESSAGE, deniedBy: 'policy' };
+    this.emit('postExecute', { toolName, parameters, result: refused });
+    return refused;
+  }
+
   // The approval channel handed to tools (BackgroundTask, SpawnAgent,
   // workflow runners) so their children ask the same place this executor
   // asks. For a local-desktop run it is marked local (program §4.21).
   _rethreadedRequester() {
-    const requester = (toolName, parameters, metadata) => this.requestApproval(toolName, parameters, metadata);
+    // A refuseUnsafe run never asks anyone, and neither do its children.
+    const requester = this.refuseUnsafe
+      ? async () => false
+      : (toolName, parameters, metadata) => this.requestApproval(toolName, parameters, metadata);
     // Carried as a plain property (not a WeakMap mark) so create-core's
     // agentExecutorAdapter.execute can read it straight off
     // options.approvalRequester and forward it to the child's origin, the
     // same way the tool already forwards this same function unchanged.
     requester.origin = this.origin;
+    requester.refuseUnsafe = this.refuseUnsafe;
+    if (this.refuseUnsafe && this.allowedRoots) requester.allowedRoots = this.allowedRoots;
+    if (this.scopedBackgroundTasks) requester.scopedBackgroundTasks = this.scopedBackgroundTasks;
+    // A child never gets a tool this run may not use (a case wake-up's list,
+    // a delegate turn's T11-sessions limit); childRuntimeOptions intersects.
+    if (this.allowedToolNames) requester.allowedToolNames = Object.freeze([...this.allowedToolNames]);
     return this.localOrigin ? markLocalRequester(requester) : requester;
   }
 

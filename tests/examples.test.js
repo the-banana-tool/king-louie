@@ -300,7 +300,9 @@ describe('example roles: files', () => {
     assert.deepEqual(runbookFiles().filter((f) => !claimed.has(f)), [], 'runbooks that belong to no role');
     assert.ok(fs.existsSync(path.join(EXAMPLES, 'README.md')));
     assert.ok(fs.existsSync(path.join(EXAMPLES, 'fleet', 'frontdoor', 'README.md')));
-    assert.ok(!fs.existsSync(path.join(EXAMPLES, 'fleet', 'frontdoor', 'node.yaml')), 'frontdoor/node.yaml arrives with fleet stage 4');
+    for (const f of ['node.yaml', 'service.json']) {
+      assert.ok(fs.existsSync(path.join(EXAMPLES, 'fleet', 'frontdoor', f)), `frontdoor/${f} missing`);
+    }
   });
 });
 
@@ -339,6 +341,31 @@ describe('example roles: load through the real loaders', () => {
       );
     });
   }
+
+  it('frontdoor loads its node.yaml and service.json (fleet stage 4)', () => {
+    const root = tmp();
+    const config = path.join(root, 'config');
+    const fleet = path.join(EXAMPLES, 'fleet', 'frontdoor');
+    installInto(config, [path.join(fleet, 'node.yaml'), path.join(fleet, 'service.json')]);
+    const node = loadNodeConfig({ adminConfigDir: config, ...adminOpts });
+    assert.equal(node.name, 'frontdoor');
+    assert.equal(node.profile, 'frontdoor');
+    assert.equal(node.frontdoor.domain, 'kl.example.com');
+    assert.deepEqual(node.frontdoor.listen, { host: '0.0.0.0', port: 443 });
+    assert.equal(node.frontdoor.acme.termsAgreed, true);
+    assert.equal(node.frontdoor.tls, null);
+    assert.deepEqual(node.frontdoor.oauth.scopesEnabled, ['fleet:read', 'fleet:run', 'fleet:unsafe', 'fleet:delegate']);
+    const raw = parseYaml(fs.readFileSync(path.join(config, 'node.yaml'), 'utf8'));
+    for (const key of Object.keys(raw)) assert.ok(NODE_YAML_KEYS.top.includes(key), `node.yaml key ${key}`);
+    const service = loadServiceConfig(path.join(root, 'data'), {}, { adminConfigDir: config, geteuid: () => -1, adminUid: EUID });
+    assert.equal(service.profile, 'frontdoor');
+    assert.equal(service.relayRaw, null);
+    const rawService = JSON.parse(fs.readFileSync(path.join(config, 'service.json'), 'utf8'));
+    assert.deepEqual(Object.keys(rawService), ['profile', 'features', 'ports']);
+    assert.deepEqual(Object.keys(rawService.features), Object.keys(DEFAULT_FEATURES));
+    assert.deepEqual(Object.keys(rawService.ports), Object.keys(DEFAULT_PORTS));
+    assert.ok(Object.values(rawService.features).every((v) => v === false), 'every listener feature off on the front door');
+  });
 
   it('a Windows root with a space holds a file inside it', { skip: POSIX ? 'win32 path semantics' : false }, () => {
     const spaced = path.join(tmp(), 'ML Data');

@@ -23,7 +23,7 @@ class LinkRpcError extends Error {
   }
 }
 
-function createLinkRpc(transport, { defaultTimeoutMs = 10000 } = {}) {
+function createLinkRpc(transport, { defaultTimeoutMs = 10000, maxPendingPerPeer = 256 } = {}) {
   const handlers = new Map();
   const pending = new Map();
   let fallback = null;
@@ -109,6 +109,12 @@ function createLinkRpc(transport, { defaultTimeoutMs = 10000 } = {}) {
   return {
     call(peerId, method, params = {}, { timeoutMs = defaultTimeoutMs } = {}) {
       if (closed) return Promise.reject(new LinkRpcError('closed', 'link closed'));
+      // §3.10 item 2: a peer that never answers cannot hold unbounded state.
+      let inFlight = 0;
+      for (const waiter of pending.values()) if (waiter.peerId === peerId) inFlight += 1;
+      if (inFlight >= maxPendingPerPeer) {
+        return Promise.reject(new LinkRpcError('peer_busy', `${peerId} already has ${maxPendingPerPeer} calls pending`));
+      }
       const id = crypto.randomBytes(12).toString('hex');
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => {

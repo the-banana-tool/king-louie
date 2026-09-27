@@ -2,7 +2,6 @@
 // approvals, for both the agent and the runbook profile. It requires nothing
 // from the agent stack, so the runbook profile's module graph stays small
 // (tests/service-profile-graph.test.js).
-const fs = require('fs');
 const path = require('path');
 const { createLogger } = require('../logging');
 const { adminConfigDir } = require('../platform/paths');
@@ -11,6 +10,7 @@ const { AuditLedger } = require('../audit/audit-ledger');
 const { ApproverStore } = require('./approver-store');
 const { PhoneApprover } = require('./phone-approver');
 const { RelayClient } = require('./relay-client');
+const { readPin } = require('../fleet/front-door-pin');
 const { CourierPump } = require('./courier');
 const { canonicalize, sha256b64url } = require('../platform/jcs');
 const { open } = require('./envelope');
@@ -203,13 +203,26 @@ async function startApprovals({ dataDir, configDir = adminConfigDir({ dataDir })
     await approverStore.ready();
 
     const approvers = nodeConfig.approvers || { relay: null, requestTtlS: 300 };
-    const relayPin = ports && ports.store ? ports.store.get(RELAY_PIN_KEY) || null : null;
-    const frontDoor = fs.existsSync(path.join(configDir, 'front-door.json'));
-    const wantsRelay = Boolean(approvers.relay) || frontDoor;
+    // Fleet stage 4 (E7, §3.9): <configDir>/front-door.json, read with the
+    // same ownership check as node.yaml, supersedes approvers.relay and the
+    // relay pin in the store (which stays as a way back).
+    let frontDoorPin = null;
+    try {
+      frontDoorPin = readPin(configDir, {
+        ...(approverStoreOptions.geteuid ? { geteuid: approverStoreOptions.geteuid } : {}),
+        ...(approverStoreOptions.adminUid === undefined ? {} : { adminUid: approverStoreOptions.adminUid })
+      });
+    } catch (err) {
+      log.error(`ignoring ${path.join(configDir, 'front-door.json')}: ${err.message}`);
+      frontDoorPin = null;
+    }
+    const storePin = ports && ports.store ? ports.store.get(RELAY_PIN_KEY) || null : null;
+    if (frontDoorPin && approvers.relay) log.info('approvers.relay is superseded by front-door.json; this node links to its front door');
+    const wantsRelay = Boolean(approvers.relay) || Boolean(frontDoorPin);
     let link;
-    if (wantsRelay && relayPin) {
+    if (frontDoorPin || (wantsRelay && storePin)) {
       relayClient = new RelayClient({
-        identity: nodeIdentity, nodeName: nodeConfig.name, relayPin, configDir, dataDir, useTls,
+        identity: nodeIdentity, nodeName: nodeConfig.name, relayPin: frontDoorPin ? null : storePin, frontDoorPin, configDir, dataDir, useTls,
         ...(transportFactory ? { transportFactory } : {}), ...(reconnectDelays ? { reconnectDelays } : {})
       });
       link = relayClient;
@@ -237,7 +250,7 @@ async function startApprovals({ dataDir, configDir = adminConfigDir({ dataDir })
       await relayClient.start();
       courierPump.start();
     }
-    log.info('phone approvals ready', { profile, relay: relayClient ? relayPin.relay_id : null, activeDevices: approverStore.activeCount() });
+    log.info('phone approvals ready', { profile, relay: relayClient ? relayClient.pin.relay_id : null, activeDevices: approverStore.activeCount() });
   } catch (err) {
     // A failed start must not leave a live relay link, a live prune timer or
     // a live device-state poll behind it.

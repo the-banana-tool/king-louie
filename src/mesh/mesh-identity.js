@@ -143,8 +143,11 @@ class MeshIdentity {
     try {
       // Use temp files (works on all platforms including Windows)
       const tmpDir = os.tmpdir();
-      const keyFile = path.join(tmpDir, `kl-mesh-key-${Date.now()}.pem`);
-      const certFile = path.join(tmpDir, `kl-mesh-cert-${Date.now()}.pem`);
+      // Unique per process and call: two processes starting in the same
+      // millisecond must not write, read or delete each other's key.
+      const stem = `${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
+      const keyFile = path.join(tmpDir, `kl-mesh-key-${stem}.pem`);
+      const certFile = path.join(tmpDir, `kl-mesh-cert-${stem}.pem`);
 
       try {
         execSync(
@@ -157,17 +160,14 @@ class MeshIdentity {
         const cert = fs.readFileSync(certFile, 'utf8');
         const key = fs.readFileSync(keyFile, 'utf8');
 
-        // Cleanup temp files
-        try { fs.unlinkSync(keyFile); } catch { /* ignore */ }
-        try { fs.unlinkSync(certFile); } catch { /* ignore */ }
-
         if (cert.includes('BEGIN CERTIFICATE') && key.includes('BEGIN PRIVATE KEY')) {
           return { cert, key };
         }
       } catch {
-        // Cleanup on failure
-        try { fs.unlinkSync(keyFile); } catch { /* ignore */ }
-        try { fs.unlinkSync(certFile); } catch { /* ignore */ }
+        // openssl failed; fall back below
+      } finally {
+        try { fs.unlinkSync(keyFile); } catch { /* not written */ }
+        try { fs.unlinkSync(certFile); } catch { /* not written */ }
       }
     } catch {
       // openssl not available
@@ -190,7 +190,7 @@ class MeshIdentity {
 
     // Build X.509 cert DER structure
     const serialNumber = crypto.randomBytes(16);
-    serialNumber[0] &= 0x7f;
+    serialNumber[0] = (serialNumber[0] & 0x7f) || 0x01; // positive, and no redundant leading 0x00 (minimal DER)
 
     const now = new Date();
     const notBefore = _formatAsn1Time(now);
