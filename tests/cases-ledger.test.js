@@ -134,6 +134,14 @@ describe('FactLedger', () => {
     assert.strictEqual(l.query({ text: 'b' }).length, 1);
   });
 
+  it('nextId names the id the next fact gets', () => {
+    const l = newLedger();
+    assert.strictEqual(l.nextId(), 'f-0001');
+    l.assert({ stmt: 'a', subject: 'lot', attr: 'acreage', value: 2, source: src });
+    assert.strictEqual(l.nextId(), 'f-0002');
+    assert.strictEqual(l.assert({ stmt: 'b', subject: 'lot', attr: 'zone', value: 'X', source: src }).id, 'f-0002');
+  });
+
   it('keeps both facts when the file lost its final newline', () => {
     const l = newLedger();
     l.assert({ stmt: 'Lot is 2.12 acres', subject: 'lot', attr: 'acreage', value: 2.12, source: src });

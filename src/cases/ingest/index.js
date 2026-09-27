@@ -1234,16 +1234,38 @@ class IngestService {
   }
 
   // The record and proposal to review, with any kept publish folded in.
-  _reviewTarget(m, docId, proposalId) {
+  _reviewTarget(m, docId, proposalId, { note = false } = {}) {
     this._foldKept(m, docId);
     const raw = files.readRecord(m.dir, docId);
     if (!raw) throw new IngestError('NOT_FOUND', `No document ${docId} in this case.`);
-    const rec = shapeRecord(raw);
+    const rec = this._withoutOrphans(m, shapeRecord(raw), { note });
     const idx = rec.proposals.findIndex((p) => p.id === proposalId);
     if (idx === -1) throw new IngestError('NOT_FOUND', `No proposal ${proposalId} in ${docId}.`);
     const p = rec.proposals[idx];
     if (p.review) throw new IngestError('ALREADY_REVIEWED', `${proposalId} was already ${oneLine(isObj(p.review) ? p.review.action : 'reviewed', 40)}.`);
     return { raw, rec, idx, p };
+  }
+
+  // An accept or edit is done only when the ledger holds its fact, from
+  // this document and proposal. The record is written before the fact
+  // (fix round 1), so a crash in between leaves a review naming a fact that
+  // was never written; that id could later belong to an unrelated fact.
+  // Such a review counts as not done: the proposal can be reviewed again.
+  _withoutOrphans(m, rec, { note = false } = {}) {
+    const accepts = rec.proposals.filter((p) => isObj(p.review) && p.review.action !== 'rejected');
+    if (!accepts.length) return rec;
+    const facts = this.runtime.ledger(m.id).view().facts;
+    const orphans = new Set();
+    for (const p of accepts) {
+      const f = facts.get(p.review.factId);
+      if (!f || f.source?.kind !== 'document' || f.source?.docId !== rec.docId || f.source?.proposalId !== p.id) orphans.add(p.id);
+    }
+    if (!orphans.size) return rec;
+    if (note) {
+      const list = [...orphans].map((id) => oneLine(id, ID_CAP)).join(', ');
+      this.runtime.records(m.id).writeJournal('ingest', `${list} of ${rec.name} (${rec.docId}): the recorded review names no fact from this document in the ledger (a write was cut off); the proposal can be reviewed again.`, this.now());
+    }
+    return { ...rec, proposals: rec.proposals.map((p) => (orphans.has(p.id) ? { ...p, review: null } : p)) };
   }
 
   // Accept-all takes a proposal only when a fresh check agrees with the
@@ -1268,7 +1290,7 @@ class IngestService {
   // our awaits; reading again after them is what keeps a proposal from
   // being accepted twice or a review from being lost.
   async _reviewLocked(m, docId, proposalId, req, ctx, { recheck = false } = {}) {
-    const first = this._reviewTarget(m, docId, proposalId);
+    const first = this._reviewTarget(m, docId, proposalId, { note: true });
     let shaped = null;
     let evidence = null;
     if (req.action !== 'reject') {
@@ -1338,7 +1360,7 @@ class IngestService {
         by: req.by,
         at,
         // The id the ledger gives the next fact; no await until the assert.
-        factId: ledger._nextId(facts),
+        factId: ledger.nextId(),
         ...(shaped.edit ? { edit: shaped.edit } : {}),
         ...(req.supersedes ? { supersedes: req.supersedes } : {}),
         ...(req.keepBoth ? { keepBoth: true } : {})
@@ -1433,7 +1455,7 @@ class IngestService {
       this._foldKept(m, docId);
       const raw = files.readRecord(m.dir, docId);
       if (!raw) throw new IngestError('NOT_FOUND', `No document ${docId} in this case.`);
-      const rec = shapeRecord(raw);
+      const rec = this._withoutOrphans(m, shapeRecord(raw));
       // Only owner-added files; a tool file, or an origin this stage does
       // not know, is reviewed proposal by proposal (R45).
       if (!OWNER_ORIGINS.has(rec.origin?.kind)) {
@@ -1489,8 +1511,9 @@ class IngestService {
       // left to review. A record with no question yet accepts the answer.
       const meta = this.runtime.getCase(caseId);
       this._foldKept(meta, docId);
-      const rec = files.readRecord(meta.dir, docId);
-      if (!rec) return refuse(`No document ${docId} in this case.`);
+      const found = files.readRecord(meta.dir, docId);
+      if (!found) return refuse(`No document ${docId} in this case.`);
+      const rec = this._withoutOrphans(meta, shapeRecord(found));
       if (rec.questionId !== undefined && rec.questionId !== null && rec.questionId !== question.id) {
         return refuse(`${question.id} is no longer the review question of ${docId}; review the proposals in the panel.`);
       }
@@ -1508,8 +1531,9 @@ class IngestService {
 
   async _rejectAll(caseId, docId, by) {
     const meta = this.runtime.getCase(caseId);
-    const rec = files.readRecord(meta.dir, docId);
-    if (!rec) throw new IngestError('NOT_FOUND', `No document ${docId} in this case.`);
+    const found = files.readRecord(meta.dir, docId);
+    if (!found) throw new IngestError('NOT_FOUND', `No document ${docId} in this case.`);
+    const rec = this._withoutOrphans(meta, shapeRecord(found));
     const rejected = [];
     for (const p of arr(rec.proposals)) {
       if (!isObj(p) || p.review || typeof p.id !== 'string' || p.id.length > ID_CAP || !review.PROPOSAL_ID.test(p.id)) continue;

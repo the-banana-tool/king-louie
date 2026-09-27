@@ -557,7 +557,7 @@ describe('owner review through IngestService', { skip: require('./helpers/ingest
   const { after } = require('node:test');
   const files = require('../src/cases/ingest/files');
   const git = require('../src/cases/git');
-  const { ingestHarness, cleanup, defaultModel, usage } = require('./helpers/ingest-harness');
+  const { ingestHarness, cleanup, defaultModel, usage, journals } = require('./helpers/ingest-harness');
   const { payoffLetterPdf, makePdf, PAYOFF_LINES } = require('./helpers/ingest-fixtures');
 
   after(cleanup);
@@ -897,6 +897,46 @@ describe('owner review through IngestService', { skip: require('./helpers/ingest
     const { fact, proposal } = await h.svc.review(h.caseId, docId, 'p-001', { action: 'accept', supersedes: 'f-0001' });
     assert.strictEqual(proposal.review.factId, fact.id);
     assert.deepStrictEqual(activeUser(h), []);
+  });
+
+  it('a review cut off between the record write and the fact counts as not done (fix r2)', async (t) => {
+    const { h, docId } = await reviewed();
+    // The crash: the record is written, the assert fails and so does the
+    // restore, leaving a review that names a fact the ledger never got.
+    const { FactLedger } = require('../src/cases/ledger');
+    const assertReal = FactLedger.prototype.assert;
+    const writeReal = files.writeRecord;
+    let writes = 0;
+    FactLedger.prototype.assert = function () { throw new Error('killed'); };
+    files.writeRecord = (dir, rec) => {
+      writes += 1;
+      if (writes > 1) throw new Error('killed');
+      return writeReal(dir, rec);
+    };
+    t.after(() => { FactLedger.prototype.assert = assertReal; files.writeRecord = writeReal; });
+    await assert.rejects(h.svc.review(h.caseId, docId, 'p-001', { action: 'accept' }), /killed/);
+    FactLedger.prototype.assert = assertReal;
+    files.writeRecord = writeReal;
+    const orphan = files.readRecord(h.dir, docId).proposals[0].review;
+    assert.deepStrictEqual([orphan.action, orphan.factId, h.runtime.ledger(h.caseId).view().facts.size], ['accepted', 'f-0001', 0]);
+    // An unrelated fact later takes that id: the review must not link to it.
+    h.runtime.ledger(h.caseId).assert({ stmt: 'Zoning', subject: 'lot', attr: 'zone', value: 'R-1', provenance: 'sourced', source: { kind: 'url', ref: 'https://records.example.org/z' } });
+    const { fact, proposal } = await h.svc.review(h.caseId, docId, 'p-001', { action: 'accept' });
+    assert.deepStrictEqual([fact.id, proposal.review.factId, fact.source.proposalId], ['f-0002', 'f-0002', 'p-001']);
+    assert.match(journals(h.dir).join('\n'), /p-001 of payoff-letter\.pdf \(doc-[0-9a-f]{12}\): the recorded review names no fact/);
+    await assert.rejects(h.svc.review(h.caseId, docId, 'p-001', { action: 'accept' }), (e) => e.code === 'ALREADY_REVIEWED');
+    // Accept-all sees such a proposal as open as well.
+    const again = await reviewed();
+    // f-0001 is a fact from this document, but from another proposal.
+    const rec = files.readRecord(again.h.dir, again.docId);
+    again.h.runtime.ledger(again.h.caseId).assert({
+      stmt: 'Other', subject: 'lot', attr: 'zone', value: 'R-1', provenance: 'sourced', disclosable: false,
+      source: { kind: 'document', ref: rec.ref, at: rec.createdAt, page: 1, quote: 'Loan No. 0042-7781', docId: again.docId, proposalId: 'p-002', verified: 'anchor', ocr: false, origin: 'owner-drop' }
+    });
+    rec.proposals[0].review = { action: 'accepted', by: 'panel', at: rec.updatedAt, factId: 'f-0001' };
+    files.writeRecord(again.h.dir, rec);
+    const all = await again.h.svc.acceptVerified(again.h.caseId, again.docId, { by: 'panel' });
+    assert.deepStrictEqual(all, { accepted: ['p-001'], skipped: [] });
   });
 
   it('only known record fields reach the fact, capped and one-lined', async () => {

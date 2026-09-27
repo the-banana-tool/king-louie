@@ -77,6 +77,12 @@ class FactLedger {
     return `f-${String(max + 1).padStart(4, '0')}`;
   }
 
+  // The id the next fact written to this ledger gets (callers that must
+  // record it before the write, such as an ingest review).
+  nextId() {
+    return this._nextId(this.view().facts);
+  }
+
   _requireActive(facts, id, role) {
     const f = facts.get(id);
     if (!f) throw new LedgerError(`${role} references ${id}, which does not exist.`);
