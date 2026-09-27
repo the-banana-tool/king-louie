@@ -545,7 +545,7 @@ describe('fix round 3', () => {
 });
 
 describe('final review I1', () => {
-  const { rawSpan, sameAnchor } = require('../src/cases/ingest/review');
+  const { rawSpan, sameAnchor, pageAnchors } = require('../src/cases/ingest/review');
   const { normalizeForQuote } = require('../src/cases/chat-integration');
   const { oneLine } = require('../src/cases/ingest/store');
   const anchorOf = (s) => normalizeForQuote(oneLine(s, Infinity));
@@ -609,13 +609,46 @@ describe('final review I1', () => {
     const checked = checkProposals({ proposals }, [{ n: 1, method: 'text', text: page }], new Map());
     assert.strictEqual(checked.proposals.length, 200, JSON.stringify(checked.refused[0]));
     const checkedMs = elapsed();
+    // As IngestService._check runs verify: one pageAnchors() per run.
+    const anchors = pageAnchors();
     for (const p of checked.proposals) {
-      const ctx = verifyContext(page, p.anchor.quote);
+      const ctx = verifyContext(page, p.anchor.quote, { pageAnchor: () => anchors(p.anchor.page, page) });
       assert.ok(ctx.endsWith(tail), 'the window holds the quote');
       assert.ok(elapsed() < bound, `stopped after ${elapsed().toFixed(0)} ms`);
     }
     const ms = elapsed();
     console.log(`I1 timing: checkProposals ${checkedMs.toFixed(0)} ms, then 200 verifyContext, ${ms.toFixed(0)} ms in all on a ${page.length}-character page`);
+    assert.ok(ms < bound, `took ${ms.toFixed(0)} ms`);
+  });
+
+  it('checks and frames 200 proposals round-robin over five crafted 2 MB pages in bounded time (residual I1-b)', { timeout: 180000 }, () => {
+    // Five pages, proposals taking turns: a cache of the last four pages
+    // missed on every lookup here (28.8 s in checkProposals and 31.3 s in
+    // verify at re-review). Each page is now normalised once per run.
+    const quote = (k) => `${'a '.repeat(149)}${'bcdef'[k]}`;
+    const tail = (k) => `${'a  '.repeat(149)}${'bcdef'[k]}`;
+    const pages = [0, 1, 2, 3, 4].map((k) => ({
+      n: k + 1, method: 'text', text: 'a '.repeat(Math.floor((2 * 1024 * 1024 - tail(k).length) / 2)) + tail(k)
+    }));
+    const proposals = Array.from({ length: 200 }, (_, i) => raw({ value: 'b', anchor: { page: (i % 5) + 1, quote: quote(i % 5) } }));
+    // ~8 s alone here; generous for a loaded full suite, and well below the
+    // four-page cache's ~60 s.
+    const bound = 25000;
+    const started = process.hrtime.bigint();
+    const elapsed = () => Number(process.hrtime.bigint() - started) / 1e6;
+    const checked = checkProposals({ proposals }, pages, new Map());
+    assert.strictEqual(checked.proposals.length, 200, JSON.stringify(checked.refused[0]));
+    const checkedMs = elapsed();
+    assert.ok(checkedMs < bound, `checkProposals took ${checkedMs.toFixed(0)} ms`);
+    const anchors = pageAnchors();
+    for (const p of checked.proposals) {
+      const page = pages[p.anchor.page - 1].text;
+      const ctx = verifyContext(page, p.anchor.quote, { pageAnchor: () => anchors(p.anchor.page, page) });
+      assert.ok(ctx.endsWith(tail(p.anchor.page - 1)), 'the window holds the quote');
+      assert.ok(elapsed() < bound, `stopped after ${elapsed().toFixed(0)} ms`);
+    }
+    const ms = elapsed();
+    console.log(`I1-b timing: checkProposals ${checkedMs.toFixed(0)} ms, then 200 verifyContext, ${ms.toFixed(0)} ms in all over 5 pages of ${pages[0].text.length} characters`);
     assert.ok(ms < bound, `took ${ms.toFixed(0)} ms`);
   });
 });

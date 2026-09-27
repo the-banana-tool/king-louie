@@ -966,7 +966,7 @@ class IngestService {
         provider: sel.provider,
         model: sel.model,
         system: review.VERIFY_SYSTEM,
-        text: review.verifyUserText(p, review.verifyContext(pageText, p.anchor.quote)),
+        text: review.verifyUserText(p, review.verifyContext(pageText, p.anchor.quote, { pageAnchor: () => ctx.anchors(p.anchor.page, pageText) })),
         attachment,
         maxTokens: 1024
       });
@@ -982,6 +982,8 @@ class IngestService {
 
   async _check(meta, rec, text, ctx) {
     ctx.verifyUsd = 0;
+    // Each page is normalised at most once for this verify run.
+    ctx.anchors = review.pageAnchors();
     const proposals = [];
     for (const p of rec.proposals) {
       const v = p.checks?.verify;
@@ -1252,6 +1254,9 @@ class IngestService {
     const page = rec.pages.find((x) => x.n === n);
     if (!pageNo(n) || !page || (page.method !== 'text' && page.method !== 'ocr')) throw moved;
     const ocr = page.method === 'ocr';
+    // Each page is normalised at most once for this review (ctx is one
+    // locked review; the bytes and the text store do not change inside it).
+    if (!ctx.anchors) ctx.anchors = review.pageAnchors();
     // The flag the verdict rests on must agree with the page it names.
     if (Boolean(p.anchor.ocr) !== ocr) throw moved;
     if (!ctx.bytes) {
@@ -1285,7 +1290,7 @@ class IngestService {
       if (n > ctx.pdf.pageCount) throw moved;
       layer = await ctx.pdf.pageText(n);
     }
-    if (layer !== null && review.quoteOffset(layer, quote) !== -1) return { ocr };
+    if (layer !== null && review.quoteOffset(layer, quote, ctx.anchors(`layer:${n}`, layer)) !== -1) return { ocr };
     // Text files are never read by OCR.
     if (!ocr || rec.mime.startsWith('text/')) throw moved;
     // An OCR quote: the page must really be one the reader sends to vision
@@ -1294,7 +1299,7 @@ class IngestService {
     // again settles it), and the quote must be in the stored OCR text.
     if (layer !== null && layer.replace(/\s/g, '').length >= MIN_TEXT_CHARS && textQuality(layer) >= ctx.cfg.textQualityThreshold) throw moved;
     const stored = shapeText(files.readTextStore(m.dir, rec.docId), rec.docId, rec.sha256).pages.find((x) => x.n === n && x.method === 'ocr');
-    if (!stored || review.quoteOffset(stored.text, quote) === -1) throw moved;
+    if (!stored || review.quoteOffset(stored.text, quote, ctx.anchors(`ocr:${n}`, stored.text)) === -1) throw moved;
     return { ocr: true };
   }
 

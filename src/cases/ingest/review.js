@@ -82,27 +82,31 @@ function valueInQuote(value, quote) {
 // one-lining the stored quote had.
 const anchorText = (s) => normalizeForQuote(oneLine(s, Infinity));
 
-// A page's anchor text, remembered for the last few pages: checkProposals,
-// verify and accept look up many quotes on the same page, and on a page of
-// up to 2 MB (LIMITS.pageTextBytes) one anchorText costs ~150 ms.
-const PAGE_ANCHORS = new Map();
-const PAGE_ANCHORS_KEPT = 4;
-function pageAnchor(pageText) {
-  const text = String(pageText ?? '');
-  let anchor = PAGE_ANCHORS.get(text);
-  if (anchor === undefined) {
-    anchor = anchorText(text);
-    if (PAGE_ANCHORS.size >= PAGE_ANCHORS_KEPT) PAGE_ANCHORS.delete(PAGE_ANCHORS.keys().next().value);
-    PAGE_ANCHORS.set(text, anchor);
-  }
-  return anchor;
+// Each page's anchor text, computed once per page for one run (one
+// checkProposals call, one verify run, one review): a run looks up many
+// quotes on the same pages, and on a page of up to 2 MB
+// (LIMITS.pageTextBytes) one anchorText costs ~150 ms. Scoped to the run,
+// so nothing is kept after it, and any number of pages is served
+// (final review I1, residual I1-b). → (key, pageText) → anchor text; the
+// caller keys by page, and one key must always name the same text.
+function pageAnchors() {
+  const byKey = new Map();
+  return (key, pageText) => {
+    let anchor = byKey.get(key);
+    if (anchor === undefined) {
+      anchor = anchorText(String(pageText ?? ''));
+      byKey.set(key, anchor);
+    }
+    return anchor;
+  };
 }
 
-// Offset of the quote in the page's anchor text, or -1.
-function quoteOffset(pageText, quote) {
+// Offset of the quote in the page's anchor text, or -1. pageAnchor, when
+// given, is that page's anchor text from pageAnchors().
+function quoteOffset(pageText, quote, pageAnchor) {
   const needle = anchorText(quote);
   if (!needle) return -1;
-  return pageAnchor(pageText).indexOf(needle);
+  return (typeof pageAnchor === 'string' ? pageAnchor : anchorText(pageText)).indexOf(needle);
 }
 
 const valueKey = (v) => {
@@ -151,6 +155,7 @@ function carriedRefusal(entry) {
 // entries; refusedDropped counts the rest.
 function checkProposals(record, pages, facts) {
   const byPage = new Map(pages.map((p) => [p.n, p]));
+  const anchors = pageAnchors();
   const proposals = [];
   // Carried entries come from the record, which may have been edited: they
   // are capped and one-lined again like new ones.
@@ -183,12 +188,12 @@ function checkProposals(record, pages, facts) {
       refuse({ stmt: raw.stmt, anchor: raw.anchor, reason: `quote must have ${QUOTE_MIN}-${QUOTE_MAX} characters` });
       continue;
     }
-    const offset = page ? quoteOffset(page.text, quote) : -1;
+    const onPage = page ? anchors(page.n, page.text) : '';
+    const offset = page ? quoteOffset(page.text, quote, onPage) : -1;
     if (offset === -1) {
       refuse({ stmt: raw.stmt, anchor: raw.anchor, reason: `quote not found on page ${raw.anchor.page}` });
       continue;
     }
-    const onPage = pageAnchor(page.text);
     const entities = raw.entities.filter((e) => onPage.includes(anchorText(e.text)));
     const { conflicts, duplicateOf } = ledgerMatches(raw, facts);
     proposals.push({
@@ -264,12 +269,12 @@ function rawSpan(text, from, length) {
 // raw text by one linear walk, else 0. Nothing here scans the page with a
 // pattern built from the quote, so a long crafted page costs one pass, not
 // page length x quote length (final review I1).
-function findQuote(text, quote) {
+function findQuote(text, quote, pageAnchor) {
   const exact = text.toLowerCase().indexOf(quote.toLowerCase());
   if (exact !== -1) return { at: exact, length: quote.length };
   const needle = anchorText(quote);
   if (!needle) return { at: 0, length: 0 };
-  const offset = pageAnchor(text).indexOf(needle);
+  const offset = (typeof pageAnchor === 'function' ? pageAnchor() : anchorText(text)).indexOf(needle);
   if (offset === -1) return { at: 0, length: 0 };
   const span = rawSpan(text, offset, needle.length);
   // The walk must land on the very text the anchor matched; if it ever
@@ -279,9 +284,12 @@ function findQuote(text, quote) {
 }
 
 // ±1,500 characters of the page around the quote, for the verify call.
-function verifyContext(pageText, quote) {
+// pageAnchor, when given, returns the page's anchor text (from
+// pageAnchors(), so a verify run normalises each page once); it is only
+// called when the exact match misses.
+function verifyContext(pageText, quote, { pageAnchor } = {}) {
   const text = String(pageText || '');
-  const { at, length } = findQuote(text, String(quote ?? ''));
+  const { at, length } = findQuote(text, String(quote ?? ''), pageAnchor);
   return text.slice(Math.max(0, at - VERIFY_WINDOW), at + length + VERIFY_WINDOW);
 }
 
@@ -364,6 +372,7 @@ module.exports = {
   parseValue,
   valueInQuote,
   quoteOffset,
+  pageAnchors,
   ledgerMatches,
   checkProposals,
   verifyContext,
