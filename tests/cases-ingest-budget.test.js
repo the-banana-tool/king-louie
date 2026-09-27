@@ -98,6 +98,45 @@ describe('ingest budget failures fail closed', { skip: NEEDS_GIT }, () => {
     assert.deepStrictEqual(rec.proposals.map((p) => p.checks.verify.note), ['budget']);
   });
 
+  it('an OCR charge that cannot be recorded leaves the page uncharged, and the next read charges it exactly once (I2)', async () => {
+    const h = await ingestHarness();
+    const budget = h.runtime.budget.bind(h.runtime);
+    let fail = true;
+    const ocrCharges = [];
+    h.runtime.budget = (id) => {
+      const b = budget(id);
+      const real = b.charge.bind(b);
+      b.charge = (cat, amount, meta) => {
+        if (fail && meta?.kind === 'ingest:ocr') throw new Error('EPERM: budget.json is locked');
+        if (meta?.kind === 'ingest:ocr') ocrCharges.push(amount);
+        return real(cat, amount, meta);
+      };
+      return b;
+    };
+    const out = await h.svc.store(h.caseId, { name: 'plat.pdf', bytes: await makePdf({ pages: [{ scan: true }] }), origin: { kind: 'owner-drop' } });
+    await h.svc.drain();
+    assert.strictEqual(files.readCachedPage(h.dir, out.docId, 1).charged, false);
+    assert.deepStrictEqual(ocrCharges, []);
+    // Charging the cached page fails again: it stays uncharged.
+    files.writeRecord(h.dir, { ...files.readRecord(h.dir, out.docId), status: 'extracting', pages: [] });
+    await h.svc.resume();
+    await h.svc.drain();
+    assert.strictEqual(files.readCachedPage(h.dir, out.docId, 1).charged, false);
+    fail = false;
+    files.writeRecord(h.dir, { ...files.readRecord(h.dir, out.docId), status: 'extracting', pages: [] });
+    h.calls.length = 0;
+    await h.svc.resume();
+    await h.svc.drain();
+    assert.deepStrictEqual(h.calls.filter((c) => c.purpose === 'ocr'), []);
+    assert.deepStrictEqual(ocrCharges, [0.01]);
+    assert.strictEqual(files.readCachedPage(h.dir, out.docId, 1).charged, true);
+    // A further read does not charge it again.
+    files.writeRecord(h.dir, { ...files.readRecord(h.dir, out.docId), status: 'extracting', pages: [] });
+    await h.svc.resume();
+    await h.svc.drain();
+    assert.deepStrictEqual(ocrCharges, [0.01]);
+  });
+
   it('makes no extract or verify call while the usd budget is already used up', async () => {
     const h = await ingestHarness({ budgets: { usd: 0.01 } });
     h.runtime.budget(h.caseId).charge('usd', 0.02, {});

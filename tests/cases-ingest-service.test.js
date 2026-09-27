@@ -104,6 +104,11 @@ describe('IngestService pipeline', { skip: NEEDS_GIT }, () => {
     assert.strictEqual(JSON.parse(fs.readFileSync(pending, 'utf8')).record.status, 'ready-for-review');
     assert.strictEqual(files.readRecord(h.dir, out.docId).status, 'stored');
     assert.ok(h.svc.timer, 'a retry timer runs while a publish is pending');
+    // Retries that meet the lock again keep the journal as it was (I1).
+    const keptJournal = JSON.parse(fs.readFileSync(pending, 'utf8')).journal;
+    await h.svc.retryPending(h.caseId);
+    await h.svc.retryPending();
+    assert.strictEqual(JSON.parse(fs.readFileSync(pending, 'utf8')).journal, keptJournal);
     fs.rmSync(lock);
     const [summary] = await h.svc.list(h.caseId);
     assert.strictEqual(summary.status, 'ready-for-review');
@@ -113,8 +118,53 @@ describe('IngestService pipeline', { skip: NEEDS_GIT }, () => {
     // with the last one, not only its record.
     assert.deepStrictEqual(files.readTextStore(h.dir, out.docId).pages, [{ n: 1, method: 'text', text: PAYOFF_TEXT }]);
     const notes = journals(h.dir).join('\n');
-    assert.match(notes, /Reading payoff\.txt/);
-    assert.match(notes, /1 proposal from payoff\.txt \(doc-[0-9a-f]{12}\) ready for review/);
+    const count = (re) => (notes.match(re) || []).length;
+    assert.strictEqual(count(/Reading payoff\.txt/g), 1);
+    assert.strictEqual(count(/Read payoff\.txt \(doc-/g), 1);
+    assert.strictEqual(count(/1 proposal from payoff\.txt \(doc-[0-9a-f]{12}\) ready for review/g), 1);
+  });
+
+  it('a tool or automatic read with nothing left to read makes no commit and no journal line', async () => {
+    const h = await ingestHarness();
+    const out = await h.svc.store(h.caseId, { name: 'payoff.txt', bytes: Buffer.from(PAYOFF_TEXT), origin: { kind: 'owner-drop' } });
+    await h.svc.drain();
+    const log = await commits(h.dir);
+    const notes = journals(h.dir).join('\n');
+    h.calls.length = 0;
+    await h.svc.extract(h.caseId, out.docId, { by: 'tool' });
+    await h.svc.extract(h.caseId, out.docId, { by: 'auto' });
+    assert.deepStrictEqual(await commits(h.dir), log);
+    assert.strictEqual(journals(h.dir).join('\n'), notes);
+    assert.deepStrictEqual(h.calls, []);
+    assert.strictEqual(files.readRecord(h.dir, out.docId).status, 'ready-for-review');
+    // An owner Extract with nothing new to propose adds no "checking" commit
+    // and no "Proposed 0 facts" line.
+    await h.svc.extract(h.caseId, out.docId, { by: 'owner' });
+    assert.ok(!(await commits(h.dir)).some((m) => m.includes('checking 0 proposals')));
+    assert.ok(!journals(h.dir).join('\n').includes('Proposed 0 facts'));
+  });
+
+  it('an owner Extract that proposes the pages past a truncation clears it', async () => {
+    const pages = Array.from({ length: 6 }, (_, i) => ({ lines: [`Invented survey record page ${i + 1} for the Lakeside lot parcel.`, 'Boundary notes and easement remarks follow on this page.'] }));
+    const h = await ingestHarness({ ingest: { maxExtractChars: 300, chunkChars: 1000 } });
+    const out = await h.svc.store(h.caseId, { name: 'survey.pdf', bytes: await makePdf({ pages }), origin: { kind: 'owner-drop' } });
+    await h.svc.drain();
+    assert.strictEqual(files.readRecord(h.dir, out.docId).truncated.reason, 'maxExtractChars');
+    h.settings.cases.ingest.maxExtractChars = 400000;
+    await h.svc.extract(h.caseId, out.docId, { by: 'owner' });
+    const rec = files.readRecord(h.dir, out.docId);
+    assert.strictEqual(rec.truncated, null);
+    assert.deepStrictEqual(rec.proposedPages, [1, 2, 3, 4, 5, 6]);
+  });
+
+  it('resume reads a document left stored by a crash before its first read', async () => {
+    const h = await ingestHarness({ status: 'paused' });
+    const out = await h.svc.store(h.caseId, { name: 'payoff.txt', bytes: Buffer.from(PAYOFF_TEXT), origin: { kind: 'owner-drop' } });
+    h.runtime.store.updateMeta(h.caseId, { status: 'active' });
+    files.writeRecord(h.dir, { ...files.readRecord(h.dir, out.docId), note: null });
+    await h.svc.resume();
+    await h.svc.drain();
+    assert.strictEqual(files.readRecord(h.dir, out.docId).status, 'ready-for-review');
   });
 
   it('a paused case stores the file without reading it', async () => {
@@ -375,6 +425,25 @@ describe('IngestService and the PDF reader', { skip: NEEDS_GIT }, () => {
       assert.deepStrictEqual(files.readRecord(h.dir, out.docId).pages.map((p) => p.method), ['text', 'text', 'text']);
     });
   }
+
+  it('a reader that dies during the check leaves the proposal unverified with a note, not a failed document', async () => {
+    let attachments = 0;
+    const die = () => { throw new IngestError('PDF_WORKER_FAILED', 'Cannot read plat.pdf: the PDF reader stopped unexpectedly.'); };
+    const openPdf = async (bytes, opts) => {
+      const pdf = await realOpenPdf(bytes, opts);
+      const once = (fn) => async (n) => (attachments++ === 0 ? fn(n) : die());
+      return { ...pdf, singlePagePdf: once(pdf.singlePagePdf), pageImage: once(pdf.pageImage) };
+    };
+    const model = (req) => (req.purpose === 'ocr' ? { text: PAYOFF_TEXT, usage: usage(0.01) } : defaultModel(req));
+    const h = await ingestHarness({ openPdf, model });
+    const out = await h.svc.store(h.caseId, { name: 'plat.pdf', bytes: await makePdf({ pages: [{ scan: true }] }), origin: { kind: 'owner-drop' } });
+    await h.svc.drain();
+    const rec = files.readRecord(h.dir, out.docId);
+    assert.strictEqual(rec.status, 'ready-for-review');
+    assert.strictEqual(rec.proposals[0].anchor.ocr, true);
+    assert.deepStrictEqual(rec.proposals[0].checks.verify, { agrees: null, note: 'not checked against the image: the PDF reader stopped', sawImage: false });
+    assert.deepStrictEqual(h.calls.filter((c) => c.purpose === 'verify'), []);
+  });
 
   it('a page whose text is over the reader cap is unreadable as too large; the rest is read', async () => {
     const state = { opened: 0, closed: 0 };

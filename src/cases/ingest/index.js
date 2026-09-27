@@ -41,7 +41,9 @@ const ingestServiceFor = (runtime) => (runtime && SERVICES.get(runtime)) || null
 const ORIGIN_KINDS = new Set(['owner-drop', 'owner-paste', 'tool']);
 const OWNER_ORIGINS = new Set(['owner-drop', 'owner-paste']);
 const WAITING = new Set(['paused', 'done', 'abandoned']);
-const RESUMABLE = new Set(['extracting', 'proposing', 'checking']);
+// 'stored': a crash between the stored commit and the first extracting
+// publish would otherwise leave a dropped document unread.
+const RESUMABLE = new Set(['stored', 'extracting', 'proposing', 'checking']);
 const BY = new Set(['owner', 'tool', 'auto', 'resume']);
 const RETRY_MS = 60 * 1000;
 const DOC_CHANGED = 'The document changed since it was read. Extract again.';
@@ -406,12 +408,13 @@ class IngestService {
   // systemAction. A kept earlier publish of the same document is folded in
   // first (its text store and journal lines are not lost to a later one);
   // when another process holds the lock, the merged payload is kept in
-  // publish.json and retried.
-  async _publish(caseId, payload) {
+  // publish.json and retried. Republishing the kept payload itself passes
+  // fold: false, so its journal lines are not added to themselves.
+  async _publish(caseId, payload, { fold = true } = {}) {
     const meta = this.runtime.getCase(caseId);
     const docId = store.checkDocId(payload?.record?.docId);
     const key = `${meta.id}|${docId}`;
-    const prior = this._readKept(meta.dir, docId);
+    const prior = fold ? this._readKept(meta.dir, docId) : null;
     const merged = {
       record: payload.record,
       text: payload.text || prior?.text || null,
@@ -466,7 +469,7 @@ class IngestService {
     for (const meta of cases) {
       for (const docId of files.pendingPublishes(meta.dir)) {
         const payload = this._readKept(meta.dir, docId);
-        if (payload) await this._publish(meta.id, payload);
+        if (payload) await this._publish(meta.id, payload, { fold: false });
       }
     }
     if (!this.pending.size) this.stop();
@@ -477,7 +480,7 @@ class IngestService {
   async _state(meta, docId) {
     try {
       const kept = this._readKept(meta.dir, docId);
-      if (kept) await this._publish(meta.id, kept);
+      if (kept) await this._publish(meta.id, kept, { fold: false });
     } catch (err) {
       this.log.warn(`Publishing the kept ingest state of ${docId} failed: ${err.message}`);
     }
@@ -506,22 +509,24 @@ class IngestService {
   }
 
   // Every charge is followed by onCrossings (program §4.4), nothing that can
-  // throw in between. → true when the pipeline must stop: 100 % crossed, or
-  // the charge could not be recorded (fail closed).
+  // throw in between. → { stop, recorded }: stop when 100 % is crossed or
+  // the charge could not be recorded (fail closed); recorded only when the
+  // budget took the charge, so a cached page is marked charged only then
+  // and an unrecorded page is charged on its next read.
   _charge(caseId, purpose, price, meta) {
     let crossedNow;
     try {
       ({ crossedNow } = this.runtime.budget(caseId).charge('usd', price.usd, { kind: `ingest:${purpose}`, ...meta, unpricedTokens: price.unpriced || 0 }));
     } catch (err) {
       this.log.error(`Charging ingest ${purpose} to case ${caseId} failed; stopping this read: ${err.message}`);
-      return true;
+      return { stop: true, recorded: false };
     }
     try {
       this.runtime.onCrossings(caseId, 'usd', crossedNow);
     } catch (err) {
       this.log.error(`Budget crossings for case ${caseId} failed: ${err.message}`);
     }
-    return Array.isArray(crossedNow) && crossedNow.includes(100);
+    return { stop: Array.isArray(crossedNow) && crossedNow.includes(100), recorded: true };
   }
 
   // Before an extract or verify call: a usd limit already used up stops.
@@ -563,8 +568,9 @@ class IngestService {
     const cached = validCache(files.readCachedPage(meta.dir, rec.docId, n), n);
     if (cached) {
       if (!cached.charged) {
-        if (this._charge(meta.id, 'ocr', { usd: cached.usd, unpriced: 0 }, { docId: rec.docId, page: n })) ctx.stop = true;
-        this._cache(meta, rec, { ...cached, charged: true });
+        const { stop, recorded } = this._charge(meta.id, 'ocr', { usd: cached.usd, unpriced: 0 }, { docId: rec.docId, page: n });
+        if (stop) ctx.stop = true;
+        if (recorded) this._cache(meta, rec, { ...cached, charged: true });
       }
       return cached;
     }
@@ -623,8 +629,9 @@ class IngestService {
     // Cache first, then charge, then mark charged: a crash in between
     // never charges the page twice on resume.
     this._cache(meta, rec, entry);
-    if (this._charge(meta.id, 'ocr', price, { docId: rec.docId, page: n })) ctx.stop = true;
-    this._cache(meta, rec, { ...entry, charged: true });
+    const { stop, recorded } = this._charge(meta.id, 'ocr', price, { docId: rec.docId, page: n });
+    if (stop) ctx.stop = true;
+    if (recorded) this._cache(meta, rec, { ...entry, charged: true });
     return entry;
   }
 
@@ -761,7 +768,7 @@ class IngestService {
         failed = null;
         const price = this._price('extract', res?.usage, ctx.cfg);
         usd += price.usd;
-        if (this._charge(meta.id, 'extract', price, { docId: rec.docId })) ctx.stop = true;
+        if (this._charge(meta.id, 'extract', price, { docId: rec.docId }).stop) ctx.stop = true;
         parsed = propose.parseProposals(typeof res?.text === 'string' ? res.text : '');
       }
       if (parsed === null) {
@@ -776,15 +783,22 @@ class IngestService {
     const room = Math.max(0, ctx.cfg.maxProposalsPerDoc - before);
     const kept = raw.slice(0, room);
     const checked = review.checkProposals({ ...rec, proposals: [...rec.proposals, ...kept] }, text.pages, this.runtime.ledger(meta.id).view().facts);
+    // An earlier truncation stays only while a readable page from it on is
+    // still not proposed; a pass that covered the rest clears it.
+    const leftFrom = (from) => text.pages.some((p) => p.n >= from && !proposed.has(p.n));
+    const nextTruncated = truncated || (rec.truncated && leftFrom(rec.truncated.fromPage) ? rec.truncated : null);
+    const unchanged = !chunks.length && nextTruncated === rec.truncated;
     rec = {
       ...checked,
       status: 'checking',
-      truncated: truncated || rec.truncated || null,
+      truncated: nextTruncated,
       failedChunks,
       droppedProposals: (Number.isSafeInteger(rec.droppedProposals) && rec.droppedProposals > 0 ? rec.droppedProposals : 0) + (raw.length - kept.length),
       proposedPages: [...proposed].sort((a, b) => a - b),
       usd: { ...rec.usd, extract: round(usd) }
     };
+    // Nothing was proposed and nothing changed: no commit, no journal line.
+    if (unchanged) return rec;
     const added = checked.proposals.length - before;
     const notes = [
       `Proposed ${plural(kept.length, 'fact')} from ${rec.name} (${rec.docId}); ${plural(checked.refused.length, 'refused proposal')} in total.`,
@@ -806,7 +820,11 @@ class IngestService {
     if (p.anchor.ocr) {
       if (!vision.isVisionEligible(this.getCapabilities, sel)) return { agrees: null, note: 'not checked against the image', sawImage: false };
       const att = await this._attachment(sel, rec, p.anchor.page, ctx);
-      if (att.down || att.error) return { agrees: null, note: 'not checked against the image', sawImage: false };
+      // A reader that dies here does not fail the document: its pages are
+      // already read. The proposal stays unverified (never accept-all) and
+      // the note says why; the owner's Extract checks it again.
+      if (att.down) return { agrees: null, note: 'not checked against the image: the PDF reader stopped', sawImage: false };
+      if (att.error) return { agrees: null, note: 'not checked against the image', sawImage: false };
       attachment = att;
     }
     const pageText = text.pages.find((x) => x.n === p.anchor.page)?.text || '';
@@ -827,7 +845,7 @@ class IngestService {
     }
     const price = this._price('verify', res?.usage, ctx.cfg);
     ctx.verifyUsd += price.usd;
-    if (this._charge(meta.id, 'verify', price, { docId: rec.docId })) ctx.stop = true;
+    if (this._charge(meta.id, 'verify', price, { docId: rec.docId }).stop) ctx.stop = true;
     const verdict = review.parseVerify(typeof res?.text === 'string' ? res.text : '') || { agrees: null, note: 'verify returned no verdict' };
     return { ...verdict, sawImage: Boolean(attachment), model: oneLine(`${sel.provider}:${res?.usage?.model || sel.model}`, MODEL_CAP) };
   }
@@ -902,6 +920,11 @@ class IngestService {
       const note = `extraction waits: case is ${meta.status}`;
       if (rec.note !== note) await this._publish(meta.id, { record: { ...rec, note }, message: `waiting ${rec.name}` });
       return files.readRecord(meta.dir, job.docId);
+    }
+    // A tool or automatic read with nothing left to read on a document
+    // already read returns as it is: no commit, no journal line.
+    if ((job.by === 'tool' || job.by === 'auto') && rec.pages.length && !RESUMABLE.has(rec.status) && !this._wantedPages(rec, job).length) {
+      return files.readRecord(meta.dir, job.docId) || rec;
     }
     const cfg = this.settings();
     let bytes;
