@@ -338,9 +338,11 @@ describe('openPdf sandbox limits', () => {
       }, 5);
       const t0 = Date.now();
       const text = await pdf._testHook('drip').finally(() => clearInterval(sampler));
-      assert.strictEqual(text.length, MB);
-      // The frame is 1 MB; chunk overhead used to grow this ~80x.
-      assert.ok(peakAb < 8 * MB, `arrayBuffers peaked ${(peakAb / MB).toFixed(1)} MB over ${Date.now() - t0} ms`);
+      assert.strictEqual(text.length, 256 * KB);
+      // The frame is 256 KB (small, so the one-byte writes take seconds, not
+      // most of the call timeout). Keeping every chunk instead of one
+      // preallocated body peaked at ~165 MB rss here; the fix stays ~18 MB.
+      assert.ok(peakAb < 2 * MB, `arrayBuffers peaked ${(peakAb / MB).toFixed(1)} MB over ${Date.now() - t0} ms`);
       assert.ok(peakRss < 48 * MB, `rss peaked ${(peakRss / MB).toFixed(1)} MB`);
     } finally {
       await pdf.close();

@@ -85,12 +85,12 @@ function frameHook(id, hook, write) {
       write(prefixed(100, 2, Buffer.from('{}')), true);
       return setInterval(() => {}, 1000);
     case 'drip': {
-      // A legal 1 MB reply, written one byte per write. Each byte goes out
+      // A legal 256 KB reply, written one byte per write. Each byte goes out
       // through the same stream as every other reply, once the previous one
       // has been written: fd 3 is non-blocking (on POSIX a socketpair that
       // net.Socket owns), so a synchronous write to it fails with EAGAIN as
       // soon as the parent falls behind, and waiting keeps nothing queued.
-      const frame = Buffer.concat(encodeFrame({ id, ok: true }, Buffer.alloc(1024 * 1024, 0x61)));
+      const frame = Buffer.concat(encodeFrame({ id, ok: true }, Buffer.alloc(256 * 1024, 0x61)));
       let at = 0;
       const next = () => {
         if (at >= frame.length) return;
