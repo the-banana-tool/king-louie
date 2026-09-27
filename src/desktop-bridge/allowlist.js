@@ -49,7 +49,14 @@ const TIMEOUT_EXEMPT = new Set(['chat:sendMessage', 'tool:execute', 'cron:run'])
 // case:applyPlaybookProposal clones the owner's repository and applies
 // there, each step bounded at 60 s (final review M-4).
 const LONG_CHANNEL_TIMEOUT_MS = 10 * 60 * 1000;
-const LONG_CHANNELS = new Set(['case:create', 'case:addPlaybook', 'case:checkPlaybookUpdates', 'case:updatePlaybook', 'case:applyPlaybookProposal']);
+// Cases stage 7: storing a dropped file (PDF page count in the sandboxed
+// reader, then a commit), queueing a read, and reviewing (which re-reads
+// the stored PDF page) can outlast it too. They replace F7's placeholder
+// exemption of every case:ingest* channel: a bounded wait, never none.
+const LONG_CHANNELS = new Set([
+  'case:create', 'case:addPlaybook', 'case:checkPlaybookUpdates', 'case:updatePlaybook', 'case:applyPlaybookProposal',
+  'case:ingestFiles', 'case:ingestExtract', 'case:reviewProposal', 'case:acceptVerified'
+]);
 
 function domainOf(channel) {
   const i = channel.indexOf(':');
@@ -79,7 +86,7 @@ function isRendererEvent(channel) {
 
 function isTimeoutExempt(channel) {
   const ch = String(channel);
-  return TIMEOUT_EXEMPT.has(ch) || ch.startsWith('case:ingest');
+  return TIMEOUT_EXEMPT.has(ch);
 }
 
 // The bridge timeout for one invoke: 0 (none) for an exempt channel, the long

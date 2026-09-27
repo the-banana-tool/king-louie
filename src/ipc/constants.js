@@ -46,6 +46,12 @@ module.exports = {
   CASE_ATTACH: 'case:attach',
   CASE_ORIENTATION: 'case:orientation',
   CASE_SET_DISCLOSABLE: 'case:setDisclosable',
+  CASE_INGEST_FILES: 'case:ingestFiles',
+  CASE_SOURCES: 'case:sources',
+  CASE_INGEST_RECORD: 'case:ingestRecord',
+  CASE_INGEST_EXTRACT: 'case:ingestExtract',
+  CASE_REVIEW_PROPOSAL: 'case:reviewProposal',
+  CASE_ACCEPT_VERIFIED: 'case:acceptVerified',
   // Cases stage 6: playbooks.
   CASE_PLAYBOOKS: 'case:playbooks',
   CASE_ADD_PLAYBOOK: 'case:addPlaybook',

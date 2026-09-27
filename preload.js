@@ -711,6 +711,57 @@ contextBridge.exposeInMainWorld(
     },
     cases: {
       list: () => ipcRenderer.invoke('case:list'),
+      // Cases stage 7: document ingest. Files travel as bytes, never paths.
+      // Only the named fields are sent; the main process checks each again,
+      // and replies carry untrustedText: true (render with textContent).
+      ingestFiles: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        if (!Array.isArray(payload.files)) throw new Error('Invalid files: expected array');
+        const files = payload.files.map((f, i) => {
+          validateObject(f, `files[${i}]`);
+          validateString(f.name, `files[${i}].name`, { minLength: 1 });
+          if (f.mime !== undefined) validateString(f.mime, `files[${i}].mime`);
+          validateString(f.base64, `files[${i}].base64`);
+          return { name: f.name, mime: f.mime, base64: f.base64 };
+        });
+        if (payload.source !== undefined && payload.source !== 'drop' && payload.source !== 'paste') throw new Error('Invalid source: expected "drop" or "paste"');
+        return ipcRenderer.invoke('case:ingestFiles', { caseId: payload.caseId, files, source: payload.source });
+      },
+      sources: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        return ipcRenderer.invoke('case:sources', { caseId: payload.caseId });
+      },
+      ingestRecord: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        validateString(payload.docId, 'docId', { minLength: 1 });
+        return ipcRenderer.invoke('case:ingestRecord', { caseId: payload.caseId, docId: payload.docId });
+      },
+      ingestExtract: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        validateString(payload.docId, 'docId', { minLength: 1 });
+        if (payload.pages !== undefined && payload.pages !== null) validateString(payload.pages, 'pages');
+        return ipcRenderer.invoke('case:ingestExtract', { caseId: payload.caseId, docId: payload.docId, pages: payload.pages });
+      },
+      reviewProposal: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        validateString(payload.docId, 'docId', { minLength: 1 });
+        validateString(payload.proposalId, 'proposalId', { minLength: 1 });
+        validateString(payload.action, 'action', { minLength: 1 });
+        if (payload.keepBoth !== undefined && typeof payload.keepBoth !== 'boolean') throw new Error('Invalid keepBoth: expected boolean');
+        const { caseId, docId, proposalId, action, edit, supersedes, keepBoth, reason } = payload;
+        return ipcRenderer.invoke('case:reviewProposal', { caseId, docId, proposalId, action, edit, supersedes, keepBoth, reason });
+      },
+      acceptVerified: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.caseId, 'caseId', { minLength: 1 });
+        validateString(payload.docId, 'docId', { minLength: 1 });
+        return ipcRenderer.invoke('case:acceptVerified', { caseId: payload.caseId, docId: payload.docId });
+      },
       // Cases stage 6: playbooks. The main process checks every argument
       // again; replies carry untrustedText: true (render with textContent).
       playbooks: (payload) => {

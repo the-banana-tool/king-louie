@@ -80,20 +80,21 @@ describe('renderer events', () => {
   });
 
   it('exempts only long-running calls from the 120 s timeout', () => {
-    for (const ch of ['chat:sendMessage', 'tool:execute', 'cron:run', 'case:ingestFile']) assert.strictEqual(isTimeoutExempt(ch), true, ch);
-    for (const ch of ['chat:load', 'case:list', 'settings:load']) assert.strictEqual(isTimeoutExempt(ch), false, ch);
+    for (const ch of ['chat:sendMessage', 'tool:execute', 'cron:run']) assert.strictEqual(isTimeoutExempt(ch), true, ch);
+    // Cases stage 7 replaced the case:ingest* placeholder with bounded long timeouts.
+    for (const ch of ['chat:load', 'case:list', 'settings:load', 'case:ingestFiles', 'case:ingestRecord', 'case:ingestFile']) assert.strictEqual(isTimeoutExempt(ch), false, ch);
   });
 
   // Ruling T14-bridgetimeout: the long playbook/case channels get a 10-minute,
   // still bounded, timeout; nothing new becomes unbounded.
   it('gives the long playbook channels a bounded 10-minute timeout', () => {
     assert.strictEqual(LONG_CHANNEL_TIMEOUT_MS, 10 * 60 * 1000);
-    for (const ch of ['case:create', 'case:addPlaybook', 'case:checkPlaybookUpdates', 'case:updatePlaybook', 'case:applyPlaybookProposal']) {
+    for (const ch of ['case:create', 'case:addPlaybook', 'case:checkPlaybookUpdates', 'case:updatePlaybook', 'case:applyPlaybookProposal', 'case:ingestFiles', 'case:ingestExtract', 'case:reviewProposal', 'case:acceptVerified']) {
       assert.strictEqual(channelTimeoutMs(ch, 120000), LONG_CHANNEL_TIMEOUT_MS, ch);
       assert.strictEqual(isTimeoutExempt(ch), false, ch);
     }
-    for (const ch of ['case:playbooks', 'case:removePlaybook', 'case:rejectPlaybookProposal', 'chat:load']) assert.strictEqual(channelTimeoutMs(ch, 120000), 120000, ch);
-    for (const ch of ['chat:sendMessage', 'case:ingestFile']) assert.strictEqual(channelTimeoutMs(ch, 120000), 0, ch);
+    for (const ch of ['case:playbooks', 'case:removePlaybook', 'case:rejectPlaybookProposal', 'chat:load', 'case:sources', 'case:ingestRecord']) assert.strictEqual(channelTimeoutMs(ch, 120000), 120000, ch);
+    for (const ch of ['chat:sendMessage']) assert.strictEqual(channelTimeoutMs(ch, 120000), 0, ch);
   });
 });
 

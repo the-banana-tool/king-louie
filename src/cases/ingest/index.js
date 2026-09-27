@@ -1692,4 +1692,4 @@ QuestionStore.registerAnswerHandler('ingest:review', {
   }
 });
 
-module.exports = { IngestService, IngestError, ingestServiceFor, WAITING, OWNER_ORIGINS };
+module.exports = { IngestService, IngestError, ingestServiceFor, WAITING, OWNER_ORIGINS, REVIEW_ACTIONS, EDITABLE, FACT_ID };

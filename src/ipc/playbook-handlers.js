@@ -355,4 +355,4 @@ function registerPlaybookHandlers(ipcMain, context = {}) {
   });
 }
 
-module.exports = { registerPlaybookHandlers, preparePlaybooksForCreate, attachPlaybooksAfterCreate };
+module.exports = { registerPlaybookHandlers, preparePlaybooksForCreate, attachPlaybooksAfterCreate, CASE_ID_RE };
