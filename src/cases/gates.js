@@ -383,29 +383,106 @@ function outboundGate({
 // Every string leaf of a payload through outboundGate; number leaves and
 // object keys through rule 1 only (ruling T3-keys). Senders send
 // `rendered`, never the input.
+// An entity split across fields ({ subject: 'Loan 0042', body: '7781 due' },
+// { '0042': '7781' }, a number leaf next to a string) is read as one text
+// (fix-T7-r1 m1, fix-T7-r2 r1), twice:
+// - every piece (keys, number leaves, rendered string leaves) joined by line
+//   breaks, in walk order: a span inside one string leaf was judged with
+//   that leaf and is skipped; any other span blocks the payload, including
+//   one inside a key or a number, which are not entity-scanned alone;
+// - the end of each piece next to the start of each other piece (the last
+//   and first CROSS_WINDOW characters), for fields that are not neighbours
+//   ({ a: 'Loan 0042', b: 'hello', c: '7781' }), in both orders. Every
+//   ordered pair while there are at most CROSS_ALL_PIECES pieces; beyond
+//   that, pairs at most CROSS_NEAR pieces apart. The pairs go to the index
+//   as one text, kept apart by CROSS_FILLER, which no scan chains across;
+//   a span that crosses the join inside a pair blocks the payload.
+const CROSS_WINDOW = 64;
+const CROSS_ALL_PIECES = 48;
+const CROSS_NEAR = 8;
+const CROSS_FILLER = '\n;;;;;\n';
+
+function crossFieldSpans(pieces, askIndex, recipients, entityDetail, blocked) {
+  const reported = new Set();
+  const report = (e, shown, start, end) => {
+    if (isRecipient(shown, recipients) || reported.has(`${e.entity}|${shown}`)) return;
+    reported.add(`${e.entity}|${shown}`);
+    blocked.push({ path: '', span: { start, end, text: shown }, reason: 'non-disclosable-entity', detail: entityDetail(e, 'across fields') });
+  };
+
+  const joined = pieces.map((p) => p.text).join('\n');
+  const bounds = [];
+  let off = 0;
+  for (const p of pieces) {
+    bounds.push({ start: off, end: off + p.text.length, value: p.value });
+    off += p.text.length + 1;
+  }
+  for (const e of askIndex(joined, '', { start: 0, end: joined.length, text: joined }) || []) {
+    const sp = e.span;
+    if (bounds.some((b) => b.value && b.start <= sp.start && sp.end <= b.end)) continue;
+    report(e, joined.slice(sp.start, sp.end), sp.start, sp.end);
+  }
+
+  const n = pieces.length;
+  const parts = [];
+  const joins = [];
+  let at = 0;
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n; j++) {
+      if (i === j || (n > CROSS_ALL_PIECES && Math.abs(i - j) > CROSS_NEAR)) continue;
+      const pair = `${pieces[i].text.slice(-CROSS_WINDOW)}\n${pieces[j].text.slice(0, CROSS_WINDOW)}`;
+      joins.push({ start: at, join: at + Math.min(pieces[i].text.length, CROSS_WINDOW), end: at + pair.length });
+      parts.push(pair);
+      at += pair.length + CROSS_FILLER.length;
+    }
+  }
+  if (!parts.length) return;
+  const batch = parts.join(CROSS_FILLER);
+  for (const e of askIndex(batch, '', { start: 0, end: batch.length, text: batch }) || []) {
+    const sp = e.span;
+    const inPair = joins.find((p) => p.start <= sp.start && sp.end <= p.end);
+    if (inPair && (sp.end <= inPair.join || sp.start > inPair.join)) continue;
+    report(e, batch.slice(sp.start, sp.end), sp.start, sp.end);
+  }
+}
+
 function gateLeaves(payload, {
   recipients = [], envelope = null, facts = new Map(), mode = 'message', caseId = null, entityIndex = null, categoryKeywords = null
 } = {}) {
   const blocked = [];
   const hasIndex = Boolean(entityIndex) && typeof entityIndex.nonDisclosableSpans === 'function';
-  // → spans, or null after blocking `span` (fail closed).
+  // → the well-formed spans, or null. An index failure, a non-list or a
+  // malformed span blocks `span` (fail closed, as rule 4 does).
+  let failed = false;
   const askIndex = (text, at, span) => {
     let problem = null;
+    let good = null;
     try {
       const out = entityIndex.nonDisclosableSpans(text, { caseId });
-      if (Array.isArray(out)) return out.filter((e) => e && validEntitySpan(e.span, text));
-      problem = 'the entity index did not return a list';
+      if (Array.isArray(out)) {
+        good = out.filter((e) => e && validEntitySpan(e.span, text));
+        if (good.length !== out.length) problem = 'a malformed entity span';
+      } else {
+        problem = 'the entity index did not return a list';
+      }
     } catch (err) {
       problem = `the entity index failed: ${err.message}`;
     }
-    blocked.push({ path: at, span, reason: 'non-disclosable-entity', detail: problem });
-    return null;
+    if (problem) {
+      failed = true;
+      blocked.push({ path: at, span, reason: 'non-disclosable-entity', detail: problem });
+    }
+    return good;
   };
   const entityDetail = (e, what) => `${e.entity || 'entity'}: ${e.reason || 'not disclosable'} (${what})`;
-  const renderedLeaves = [];
+  // Everything that leaves, in walk order, for the cross-field scans:
+  // rendered string leaves (value: true, entity-scanned on their own
+  // already), object keys and number leaves (value: false, not).
+  const pieces = [];
   const valuesOnly = (text, at) => {
     const r = outboundGate({ payloadText: text, recipients, envelope, facts, mode: 'query' });
     for (const b of r.blocked) blocked.push({ path: at, ...b });
+    pieces.push({ text, value: false });
   };
   const ancestors = new Set();
   const walk = (value, at) => {
@@ -420,7 +497,10 @@ function gateLeaves(payload, {
         } catch (err) {
           problem = `the entity index failed: ${err.message}`;
         }
-        if (problem) blocked.push({ path: at, span: { start: 0, end: value.length, text: value }, reason: 'non-disclosable-entity', detail: problem });
+        if (problem) {
+          failed = true;
+          blocked.push({ path: at, span: { start: 0, end: value.length, text: value }, reason: 'non-disclosable-entity', detail: problem });
+        }
       }
       const r = outboundGate({ payloadText: value, recipients, envelope, facts, mode, entitySpans, categoryKeywords });
       for (const b of r.blocked) blocked.push({ path: at, ...b });
@@ -449,7 +529,7 @@ function gateLeaves(payload, {
           });
         }
       }
-      if (typeof r.rendered === 'string') renderedLeaves.push(r.rendered);
+      if (typeof r.rendered === 'string') pieces.push({ text: r.rendered, value: true });
       return r.rendered;
     }
     if (typeof value === 'number') {
@@ -479,27 +559,8 @@ function gateLeaves(payload, {
     return value;
   };
   const rendered = walk(payload, '');
-  // An entity split across leaves ({ subject: 'Loan 0042', body: '7781 due' })
-  // is read as one text: the rendered string leaves joined by line breaks.
-  // A span inside one leaf was judged with that leaf; one that crosses
-  // leaves blocks the payload (fix-T7-r1 m1).
-  if (hasIndex && renderedLeaves.length > 1) {
-    const joined = renderedLeaves.join('\n');
-    const bounds = [];
-    let off = 0;
-    for (const leaf of renderedLeaves) {
-      bounds.push([off, off + leaf.length]);
-      off += leaf.length + 1;
-    }
-    const spans = askIndex(joined, '', { start: 0, end: joined.length, text: joined }) || [];
-    for (const e of spans) {
-      const sp = e.span;
-      if (bounds.some(([a, b]) => a <= sp.start && sp.end <= b)) continue;
-      const shown = joined.slice(sp.start, sp.end);
-      if (isRecipient(shown, recipients)) continue;
-      blocked.push({ path: '', span: { start: sp.start, end: sp.end, text: shown }, reason: 'non-disclosable-entity', detail: entityDetail(e, 'across fields') });
-    }
-  }
+  // Once the index has failed the payload is blocked already.
+  if (hasIndex && !failed && pieces.length > 1) crossFieldSpans(pieces, askIndex, recipients, entityDetail, blocked);
   return { ok: blocked.length === 0, blocked, rendered };
 }
 

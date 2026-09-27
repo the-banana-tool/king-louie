@@ -27,6 +27,7 @@ const ID_RE = new RegExp(
 const SUFFIX_ALT = Object.keys(STREET_SUFFIXES).map((s) => s[0].toUpperCase() + s.slice(1)).join('|');
 const ADDRESS_RE = new RegExp(`\\b\\d{1,6}\\s+(?:[A-Z][A-Za-z'-]{0,30}\\s+){1,4}?(?:${SUFFIX_ALT})\\b\\.?`, 'g');
 const PHONE_RE = /(?<![\w+$])\+?\d[\d\s().-]{5,25}\d(?![\w])/g;
+const DECIMAL_END = /\d\.\d{1,2}$/;
 const DATE_LIKE = /^\d{4}[-./]\d{1,2}[-./]\d{1,2}$|^\d{1,2}[-./]\d{1,2}[-./]\d{2,4}$/;
 
 // A run directly after a currency sign (fix-T6-r1 I1, fix round 2) is not a
@@ -83,6 +84,9 @@ function extractEntities(text, { kinds = TEXT_KINDS } = {}) {
     for (const m of s.matchAll(PHONE_RE)) {
       const value = m[0].trim();
       if (DATE_LIKE.test(value)) continue;
+      // A decimal amount (`182340.17`, or a run ending in one) is not a
+      // phone number (fix-T7-r2 r5).
+      if (DECIMAL_END.test(value)) continue;
       if (precededByCurrency(s, m.index)) continue;
       add('phone', value, m.index);
     }

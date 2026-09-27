@@ -504,21 +504,88 @@ describe('EntityIndex', () => {
     }
   });
 
-  it('nonDisclosableSpans reads a bidi-controlled run in display order too (fix-T7-r1 I3)', async (t) => {
+  it('nonDisclosableSpans reads bidi runs and right-to-left lines in display order too (fix-T7-r1 I3, fix-T7-r2 R1)', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const { rt, a, b } = await twoCases();
+    ingested(rt, a);
+    const idx = rt.entityIndex();
+    const c = (n) => String.fromCodePoint(n);
+    const [RLO, LRO, LRE, PDF, RLI, PDI, RLM] = [0x202e, 0x202d, 0x202a, 0x202c, 0x2067, 0x2069, 0x200f].map(c);
+    const ALEF = c(0x05d0);
+    const BEH = c(0x0628);
+    // Controlled runs reach the end of their line, whatever pops they hold.
+    for (const run of [`${RLO}1877-2400${PDF}`, `${RLI}7781-0042${PDI}`, `${RLO}${LRE}${PDF}1877-2400`, `${RLO}${LRO}x${PDF}1877-2400`]) {
+      const text = `Loan ${run} closes\nNext line`;
+      const spans = idx.nonDisclosableSpans(text, { caseId: b.id });
+      assert.deepStrictEqual(spans.map((s) => [s.entity, s.span.text]), [['id:00427781', `${run} closes`]], run);
+    }
+    // No control at all: a right-to-left letter or mark reorders the line.
+    for (const line of [`${ALEF} 7781 0042`, `${BEH} 7781 0042`, `${BEH} 7781-0042`, `7781 ${RLM} 0042`]) {
+      const spans = idx.nonDisclosableSpans(`First\n${line}\nLast`, { caseId: b.id });
+      assert.deepStrictEqual(spans.map((s) => [s.entity, s.span.text]), [['id:00427781', line]], line);
+    }
+    assert.deepStrictEqual(idx.nonDisclosableSpans(`Loan ${RLO}1234-5678${PDF}`, { caseId: b.id }), []);
+    assert.deepStrictEqual(idx.nonDisclosableSpans(`${ALEF} 1234 5678`, { caseId: b.id }), []);
+  });
+
+  it('scans all bidi runs of a text in one batched pass per order (fix-T7-r2 R2)', async (t) => {
     if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
     const { rt, a, b } = await twoCases();
     ingested(rt, a);
     const idx = rt.entityIndex();
     const RLO = String.fromCodePoint(0x202e);
-    const PDF = String.fromCodePoint(0x202c);
-    const RLI = String.fromCodePoint(0x2067);
-    const PDI = String.fromCodePoint(0x2069);
-    for (const run of [`${RLO}1877-2400${PDF}`, `${RLI}7781-0042${PDI}`]) {
-      const text = `Loan ${run} closes`;
-      const spans = idx.nonDisclosableSpans(text, { caseId: b.id });
-      assert.deepStrictEqual(spans.map((s) => [s.entity, s.span.text]), [['id:00427781', run.slice(0, -1)]], run);
+    let scans = 0;
+    const real = idx._scan.bind(idx);
+    idx._scan = (...args) => { scans += 1; return real(...args); };
+    const text = `${`${RLO}12 34\n`.repeat(1000)}${RLO}1877-2400`;
+    const spans = idx.nonDisclosableSpans(text, { caseId: b.id });
+    assert.deepStrictEqual(spans.map((s) => s.span.text), [`${RLO}1877-2400`]);
+    assert.strictEqual(scans, 3); // the text, the reversed runs, the regrouped runs
+  });
+
+  it('private-use and unassigned code points are separators (fix-T7-r2 r3)', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const { rt, a, b } = await twoCases();
+    ingested(rt, a);
+    for (const cp of [0xe000, 0xf8ff, 0x0378]) {
+      const text = `Re 0042${String.fromCodePoint(cp)}7781`;
+      assert.deepStrictEqual(rt.entityIndex().nonDisclosableSpans(text, { caseId: b.id }).map((s) => s.entity), ['id:00427781'], cp.toString(16));
     }
-    assert.deepStrictEqual(idx.nonDisclosableSpans(`Loan ${RLO}1234-5678${PDF}`, { caseId: b.id }), []);
+  });
+
+  it('the word stream folds Latin look-alikes (fix-T7-r2 r4)', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const { rt, a, b } = await twoCases();
+    ingested(rt, a);
+    files.writeTextStore(a.dir, { docId: 'doc-cccccccccccc', sha256: 'c'.repeat(64), pages: [{ n: 1, method: 'text', text: 'Office at 12 Birch Street' }] });
+    const text = `Meet at 12 B${String.fromCodePoint(0x0456)}rch Street`;
+    assert.deepStrictEqual(rt.entityIndex().nonDisclosableSpans(text, { caseId: b.id }).map((s) => s.entity), ['address:12 birch street']);
+  });
+
+  it('a decimal amount is not a phone number (fix-T7-r2 r5)', () => {
+    assert.deepStrictEqual(extractEntities('Payoff 182340.17 due').filter((e) => e.type === 'phone'), []);
+    assert.deepStrictEqual(extractEntities('is $182,340.17\n182340.17').filter((e) => e.type === 'phone'), []);
+    assert.deepStrictEqual(extractEntities('call 555.0199').map((e) => e.keys[0]), ['phone:5550199']);
+  });
+
+  it('gateLeaves reads keys, numbers and non-neighbouring fields together (fix-T7-r2 r1)', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const { gateLeaves } = require('../src/cases/gates');
+    const { rt, a, b } = await twoCases();
+    ingested(rt, a);
+    const gate = (payload) => gateLeaves(payload, { facts: new Map(), caseId: b.id, entityIndex: rt.entityIndex(), mode: 'query' });
+    for (const payload of [{ a: 'Loan 0042', b: 'hello', c: '7781' }, { '0042': '7781' }, { a: 'Loan 0042', n: 7781 }, { c: '7781 due', b: 'hello', a: 'Loan 0042' }, { 'Loan 0042-7781': 'x' }]) {
+      const r = gate(payload);
+      assert.ok(r.blocked.some((x) => x.path === '' && x.reason === 'non-disclosable-entity' && x.detail.startsWith('id:00427781')), JSON.stringify(payload));
+    }
+    assert.strictEqual(gate({ a: 'Loan 0042', b: 'hello', c: 'due 7782' }).ok, true);
+  });
+
+  it('gateLeaves blocks on a malformed span from any of its index reads (fix-T7-r2 r2)', () => {
+    const { gateLeaves } = require('../src/cases/gates');
+    const entityIndex = { nonDisclosableSpans: (text) => (text.includes('\n') ? [{ span: { start: -1, end: 2 }, entity: 'x' }] : []) };
+    const r = gateLeaves({ a: 'hello', b: 'world' }, { facts: new Map(), caseId: 'c', entityIndex, mode: 'query' });
+    assert.ok(r.blocked.some((x) => x.reason === 'non-disclosable-entity' && x.detail === 'a malformed entity span'));
   });
 
   it('gateLeaves scans the rendered text: a disclosable value spliced into an entity is blocked (fix-T7-r1 I1)', async (t) => {
@@ -605,6 +672,8 @@ describe('EntityIndex', () => {
   });
 
   it('nonDisclosableSpans stays linear on a 400,000-character adversarial payload', async (t) => {
+    const RLO = String.fromCodePoint(0x202e);
+    const PDF = String.fromCodePoint(0x202c);
     if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
     const { rt, a, b } = await twoCases({ spanNames: true });
     // Indexed ids of every length 5..40, all made of one digit, and names
@@ -617,7 +686,7 @@ describe('EntityIndex', () => {
     files.writeTextStore(a.dir, { docId: 'doc-cccccccccccc', sha256: 'c'.repeat(64), pages: [{ n: 1, method: 'text', text: lines.join('\n') }] });
     const idx = rt.entityIndex();
     idx.nonDisclosableSpans('warm up', { caseId: b.id });
-    for (const payload of ['1 '.repeat(200000), 'ab '.repeat(133334), '1-'.repeat(100000) + 'ab.'.repeat(66667), `1${ZWSP}${ZWSP} `.repeat(100000)]) {
+    for (const payload of ['1 '.repeat(200000), 'ab '.repeat(133334), '1-'.repeat(100000) + 'ab.'.repeat(66667), `1${ZWSP}${ZWSP} `.repeat(100000), `${RLO}1 ${PDF}`.repeat(100000), `${RLO}1 \n`.repeat(100000)]) {
       const started = process.hrtime.bigint();
       const spans = idx.nonDisclosableSpans(payload, { caseId: b.id });
       const ms = Number(process.hrtime.bigint() - started) / 1e6;

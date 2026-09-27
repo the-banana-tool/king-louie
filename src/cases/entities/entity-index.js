@@ -57,7 +57,7 @@ const { DOC_ID } = require('../ingest/store');
 const { listRecords, readTextStore, ingestStat, PROPOSAL_ID } = require('../ingest/files');
 const { normalizeEntity, keyType, plainWords, STREET_SUFFIXES, ENTITY_TYPES, MAX_KEY_CHARS } = require('./normalize');
 const { extractEntities, TEXT_KINDS } = require('./extract');
-const { streamView, canonStream, MAX_GAP } = require('./fold');
+const { streamView, canonStream, latinize, gapJoins } = require('./fold');
 
 const INDEX_VERSION = 1;
 const SURFACE_MIN = 5;
@@ -86,11 +86,15 @@ const REF_SPAN = /\{\{\s{0,8}f-\d{4,24}\s{0,8}\}\}/g;
 const HIDDEN_RUN = new RegExp(`[${HIDDEN_CLASS}]+`, 'gu');
 // A bidi embedding, override or isolate and what it controls, up to its
 // pop, a line break or the end (fix-T7-r1 I3).
-const BIDI_RUN = new RegExp(
-  `[${[0x202a, 0x202b, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068].map((c) => String.fromCodePoint(c)).join('')}]`
-  + `[^${[0x202c, 0x2069, 0x0a, 0x0d].map((c) => String.fromCodePoint(c)).join('')}]*`,
-  'gu'
+const cps = (list) => list.map((c) => String.fromCodePoint(c)).join('');
+const BIDI_OPEN = new RegExp(`[${cps([0x202a, 0x202b, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068])}]`, 'u');
+// A line that reorders without any control: it holds a right-to-left letter
+// or a right-to-left / Arabic letter mark (fix-T7-r2 R1).
+const RTL_LINE = new RegExp(
+  `[\\p{Script=Hebrew}\\p{Script=Arabic}\\p{Script=Syriac}\\p{Script=Thaana}\\p{Script=Nko}${cps([0x200f, 0x061c])}]`,
+  'u'
 );
+const LINES = new RegExp(`[^${cps([0x0a, 0x0d, 0x2028, 0x2029])}]+`, 'gu');
 const ALNUM_GROUPS = /([\p{L}\p{N}\p{M}]+)/u;
 
 // The extraction and matching rules the stored index was built with: a
@@ -149,7 +153,7 @@ function withoutHidden(s) {
 }
 
 const canonWord = (w) => STREET_SUFFIXES[w] || w;
-const keyWords = (value) => plainWords(value).split(' ').filter(Boolean).map(canonWord);
+const keyWords = (value) => plainWords(latinize(value)).split(' ').filter(Boolean).map(canonWord);
 
 // Every entity extractEntities finds, window by window. A window without
 // an @ cannot hold an email, so the email pattern (the costly one on long
@@ -591,13 +595,13 @@ class EntityIndex {
     for (const t of clean.matchAll(WORD_TOKEN)) {
       const raw = t[0];
       const lower = raw.toLowerCase();
-      const words = ASCII_WORD.test(lower) ? [lower] : plainWords(raw).split(' ').filter(Boolean);
+      const words = ASCII_WORD.test(lower) ? [lower] : plainWords(latinize(raw)).split(' ').filter(Boolean);
       const end = t.index + raw.length;
       if (!words.length) {
         prevEnd = -1;
         continue;
       }
-      const joins = prevEnd >= 0 && t.index - prevEnd <= MAX_GAP;
+      const joins = prevEnd >= 0 && gapJoins(clean.slice(prevEnd, t.index));
       words.forEach((w, i) => {
         const word = canonWord(w);
         units.push({ start: t.index, end, word, h: hashString(word), linked: i > 0 || joins });
@@ -651,16 +655,57 @@ class EntityIndex {
     this._wordScan(clean, m, ok, fromClean);
   }
 
+  // Scans the rearranged texts of bidi runs as one text (joined by line
+  // breaks), whatever their number, and reports a hit as the original
+  // span of the run(s) it lies in (fix-T7-r2 R2). A hit across two runs
+  // only adds a false positive.
+  _scanRuns(runs, opts, emit) {
+    if (!runs.length) return;
+    const offsets = [];
+    let off = 0;
+    for (const r of runs) {
+      offsets.push(off);
+      off += r.text.length + 1;
+    }
+    const runAt = (pos) => {
+      let lo = 0;
+      let hi = runs.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (offsets[mid] <= pos) lo = mid;
+        else hi = mid - 1;
+      }
+      return lo;
+    };
+    this._scan(runs.map((r) => r.text).join('\n'), opts, (key, start, end) => {
+      const first = runAt(start);
+      const last = runAt(end - 1);
+      let from = runs[first].start;
+      let to = runs[first].end;
+      for (let i = first + 1; i <= last; i++) {
+        from = Math.min(from, runs[i].start);
+        to = Math.max(to, runs[i].end);
+      }
+      emit(key, from, to);
+    });
+  }
+
   // Every occurrence in `text` of an indexed key of `types` that `ok`
   // accepts: → [{ key, start, end }] in original offsets, one per span.
   //
   // Bidi controls are hidden characters, so the scans read text in logical
-  // order; a run under an embedding, override or isolate may display in
-  // another order (`1877-2400` under U+202E shows as `0042-7781`). Each such
-  // run is also scanned reversed code point by code point (an override) and
-  // with its letter/digit groups in reverse order (an embedding or isolate
-  // around numbers), and a hit in either reports the whole run
-  // (fix-T7-r1 I3).
+  // order, but a line may display in another order (`1877-2400` after
+  // U+202E shows as `0042-7781`; `7781 0042` next to a Hebrew letter as
+  // `0042 7781`). So, as well:
+  // - from the first embedding, override or isolate control on a line to
+  //   the end of that line (pops ignored, so nesting cannot end it early):
+  //   the run reversed code point by code point, and with its letter/digit
+  //   groups in reverse order;
+  // - a line holding a Hebrew, Arabic, Syriac, Thaana or NKo letter, or a
+  //   right-to-left or Arabic letter mark: the line with its groups in
+  //   reverse order.
+  // A hit in either reports the whole run or line (fix-T7-r1 I3,
+  // fix-T7-r2 R1). These passes can only add spans.
   _occurrences(text, { types, ok }) {
     const s = String(text ?? '');
     const out = [];
@@ -675,13 +720,21 @@ class EntityIndex {
       out.push({ key, start, end });
     };
     this._scan(s, { types, ok }, emit);
-    for (const run of s.matchAll(BIDI_RUN)) {
-      const start = run.index;
-      const end = start + run[0].length;
-      const toRun = (key) => emit(key, start, end);
-      this._scan([...run[0]].reverse().join(''), { types, ok }, toRun);
-      this._scan(run[0].split(ALNUM_GROUPS).reverse().join(''), { types, ok }, toRun);
+    const reversed = [];
+    const grouped = [];
+    for (const m of s.matchAll(LINES)) {
+      const line = m[0];
+      const end = m.index + line.length;
+      const at = line.search(BIDI_OPEN);
+      if (at >= 0) {
+        const run = line.slice(at);
+        reversed.push({ text: [...run].reverse().join(''), start: m.index + at, end });
+        grouped.push({ text: run.split(ALNUM_GROUPS).reverse().join(''), start: m.index + at, end });
+      }
+      if (RTL_LINE.test(line)) grouped.push({ text: line.split(ALNUM_GROUPS).reverse().join(''), start: m.index, end });
     }
+    this._scanRuns(reversed, { types, ok }, emit);
+    this._scanRuns(grouped, { types, ok }, emit);
     return out.sort((a, b) => a.start - b.start || (b.end - b.start) - (a.end - a.start));
   }
 

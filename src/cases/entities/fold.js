@@ -26,9 +26,17 @@
 // against the concatenation of a chain of units, starting and ending on a
 // unit boundary.
 //
-// HTML entities (`&#48;`) and %-escapes are not decoded: no outbound channel
-// on main renders HTML, and the executor query gate decodes %-escapes itself
-// before it asks the index (fix-T7-r1 m7).
+// Private-use and unassigned code points (\p{Co}, \p{Cn}) are separators,
+// not breaks, so one cannot cut a value in two (fix-T7-r2 r3).
+//
+// Known gaps (accepted, fix-T7-r2 residuals):
+// - HTML entities (`&#48;`) and %-escapes are not decoded: no outbound
+//   channel on main renders HTML, and the executor query gate decodes
+//   %-escapes itself before it asks the index (fix-T7-r1 m7);
+// - letters written for digits (`OO42-7781`, `0042-778l`) are letters;
+// - emails written out in words (`pat.doe at example dot com`, `(at)`);
+// - look-alikes outside CONFUSABLE_LATIN (Cherokee, Armenian, small
+//   capitals, ...) are symbols that match no key.
 const { HIDDEN_CLASS } = require('../hidden-chars');
 
 const MAX_GAP = 3;
@@ -46,7 +54,7 @@ const MARK_ONE = /^[\p{Mn}\p{Me}]$/u;
 const MARKS = /[\p{Mn}\p{Me}]/gu;
 const ND_ONE = /^\p{Nd}$/u;
 const ALNUM_ONE = /^[\p{L}\p{N}]$/u;
-const SEP_ONE = /^[\p{P}\p{S}\p{Z}\s]$/u;
+const SEP_ONE = /^[\p{P}\p{S}\p{Z}\s\p{Co}\p{Cn}]$/u;
 const ASCII_ALNUM = /^[A-Za-z0-9]+$/;
 
 // Separators an email may carry between its units (whitespace too), and the
@@ -186,4 +194,30 @@ function canonStream(value) {
   return out;
 }
 
-module.exports = { streamView, canonStream, MAX_GAP, CONFUSABLE_LATIN };
+// `s` with every CONFUSABLE_LATIN letter replaced by its Latin letter (for
+// the word stream, which reads words through plainWords).
+function latinize(s) {
+  let out = '';
+  for (const ch of String(s)) {
+    const latin = CONFUSABLE_LATIN.get(ch.codePointAt(0));
+    out += latin ? latin.toLowerCase() : ch;
+  }
+  return out;
+}
+
+// Whether the text between two words chains them, by the rule units chain
+// by in the stream: at most MAX_GAP separators, skipped characters free,
+// nothing else (fix-T7-r2 r4).
+function gapJoins(gap) {
+  let count = 0;
+  for (const ch of gap) {
+    const c = classify(ch.codePointAt(0));
+    if (c.kind === SKIP) continue;
+    if (c.kind !== SEP) return false;
+    count += 1;
+    if (count > MAX_GAP) return false;
+  }
+  return true;
+}
+
+module.exports = { streamView, canonStream, latinize, gapJoins, MAX_GAP, CONFUSABLE_LATIN };

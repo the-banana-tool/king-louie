@@ -191,8 +191,10 @@ describe('gateLeaves', () => {
     };
     const r = gateLeaves({ 'Harbor Road access': 'ok', note: 'Ask for Pat Doe' }, { facts: facts(INFERRED), mode: 'query', caseId: 'case-1', entityIndex });
     assert.deepStrictEqual(r.blocked.map((b) => [b.path, b.reason]), [['Harbor Road access', 'inferred'], ['note', 'non-disclosable-entity']]);
-    // Per leaf, then the rendered leaves joined, for an entity split across fields (C7 fix-T7-r1 m1).
-    assert.deepStrictEqual(calls, [['ok', 'case-1'], ['Ask for Pat Doe', 'case-1'], ['ok\nAsk for Pat Doe', 'case-1']]);
+    // Per value leaf, then the cross-field reads (C7 fix-T7-r1 m1, fix-T7-r2 r1): every piece
+    // joined, and the pairs of pieces as one text.
+    assert.deepStrictEqual(calls.slice(0, 3), [['ok', 'case-1'], ['Ask for Pat Doe', 'case-1'], ['Harbor Road access\nok\nnote\nAsk for Pat Doe', 'case-1']]);
+    assert.strictEqual(calls.length, 4);
   });
 
   it('fails closed when the entity index throws', () => {
