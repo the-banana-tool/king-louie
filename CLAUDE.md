@@ -545,3 +545,97 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage4-channels.md`.
   Face ID prompt of its own); Android sends no presence and loads questions
   only when the owner taps. Follow-up: a relay presence auth that needs no
   biometric prompt (an F3 pairing change) would let Android report presence.
+
+## Front door
+
+`src/frontdoor/` (fleet stage 4, spec
+`docs/superpowers/specs/2026-09-23-fleet-stage4-front-door.md`) is the
+`profile: frontdoor` service: one SNI listener for `mcp.<domain>` (OAuth, MCP,
+F3's phone API, `/pair/v1`) and `mesh.<domain>` (pinned node links into F3's
+relay). `docs/fleet/front-door.md` is the deployment guide. To run one
+locally, give it `frontdoor.tls` with a self-signed certificate for
+`mcp.kl.example.com` and a high port (`listen: { host: 127.0.0.1, port: 8443
+}`), point both names at 127.0.0.1 in your hosts file, and run
+`node bin/king-louie-service.js run --data-dir <tmp> --profile frontdoor`.
+
+- **Delegate sessions and unsafe calls (owner decision M19).** A delegate
+  session a node started itself (stdio, no front-door origin) is not refused
+  here: its unsafe calls go to the phone, exactly like an unsafe runbook.
+  Every other origin — a front-door client, a malformed origin, an unknown
+  kind — fails closed (`shouldRefuseUnsafe` in `src/fleet/delegate-sessions.js`):
+  refused unless the caller's grant covers `fleet:unsafe` for that node. A
+  front-door client's unsafe call is never forwarded to the phone on its
+  behalf; the scope check runs first.
+- **Job visibility (ruling T11-owner).** A runbook job's cache entry has no
+  owner, so any grant with `fleet:read` on the machine can read or watch it,
+  and any grant with `fleet:run` there can cancel it (`cancel_job` needs
+  `fleet:run`, `src/fleet/scope-rules.js`). A delegate job's entry is owned by the grant that started it
+  (`FleetRouter._recordStart`, `src/frontdoor/router/router.js`); every other
+  grant is told the job does not exist, even one with full access to the same
+  machine.
+- **SIGHUP** re-reads the admin approvers directory and the console node
+  records (`src/frontdoor/console-removals.js`; a `frontdoor remove-node`
+  made by hand while the service was stopped, or an approver revoked at the
+  console, is audited/applied at the next start or `SIGHUP`), then the
+  certificate (ACME or operator `tls`), in that order (`src/frontdoor/profile.js`).
+- **Self-probe** (`src/frontdoor/probe.js`) refuses a DNS answer of loopback,
+  unspecified or link-local for `mcp.`/`mesh.`, and pins the mcp. certificate
+  by fingerprint; it does not refuse a private-LAN address (RFC 1918/ULA),
+  a known limit.
+- **Audit mirror breaks** (`src/frontdoor/doctor-checks.js`'s `BREAK_REASONS`:
+  `fork`, `truncated`, `replay`, `withheld_entries`, `oversize_entry`,
+  `oversize_page`, `wrong_node`, `malformed_head`, `mirror_state_corrupt`)
+  each carry the owner's remedy in `doctor`'s own text. Acknowledging the
+  alert on the phone clears doctor's "unacknowledged breaks" row only: the
+  node's mirror status stays `broken` for good (nothing in
+  `src/frontdoor/audit/mirror.js` sets it back). The documented reset
+  (docs/fleet/front-door.md, doctor) is to stop the service, move
+  `<dataDir>/frontdoor/mirror/<node_id>/` aside and start it: a fresh anchor.
+
+Test helpers:
+- `tests/helpers/test-certs.js`: CA, leaf and self-signed certificates in pure Node (never openssl).
+- `tests/helpers/frontdoor-harness.js`: OAuth and MCP over plain HTTP with fake phones; `tests/helpers/oauth-test-client.js` speaks to it (and to a real front door over HTTPS with `tls: { ca, lookup }`).
+- `tests/helpers/fake-node.js`: nodes as real `NodeFleetService`s behind a fake hub.
+- Tests that start a whole front door (`frontdoor-e2e`, `frontdoor-bootstrap`) pass `deps.listen` with port 0 and a `lookup` that resolves the front door's names to 127.0.0.1.
+
+## Playbooks (cases stage 6)
+
+`src/cases/playbooks/` (spec: `docs/superpowers/specs/2026-09-23-cases-stage6-playbooks.md`). A playbook
+is a data package (`playbook.yaml`, `steps.md`, optional `briefRules.md` and `sources.md`) vendored as a
+plain copy into `<case>/playbooks/<name>/`, recorded in `case.yaml.playbooks[]` and `.kl/playbooks.json`.
+
+- Playbooks are data. Validate with `validatePackage`; never `require` a path derived from a case or a
+  package. Case types come only through `case-types-bridge.js` (C5's registry or its stand-in).
+- Git for playbooks runs through `runGit` / `runGitSync` in `src/cases/git.js` (hardened `-c` flags
+  including `core.fsmonitor=false`, the checked empty hooks dir outside every case, no prompts, 60 s
+  timeout; a repo whose own config defines drivers or commands is refused with `GIT_UNSAFE_CONFIG`).
+  Versions compare with `compareVersions`; there is no `semver`.
+- Mutations (attach, adopt, update, remove, proposals) do network and temp-dir work first, then one
+  `runtime.systemAction` (applying a proposal runs its git work inside it, so a race applies once).
+  Owner gating questions become question records that never charge `questionsPerDay`; a `sourced` fact
+  never satisfies an owner question.
+- Playbook text shown to the model is framed with `frame()`, or reduced to validated fields and
+  neutralised single lines (brief rules, gating keys and labels, materiality slugs). C3's executor
+  section gives only a count of playbook brief rules; the draft prompt carries them to the executor.
+  Package loads within one turn start share a memo (`beginEntriesScope`); anything outside it loads from
+  disk. In a packaged build the `example:` playbooks are read from `app.asar.unpacked`
+  (`build.asarUnpack`, `asarUnpackedPath`). The write guard covers `playbooks/`,
+  `.gitmodules`, `.gitattributes` (at any depth) and `.git/`; the model changes a playbook only with
+  `Playbook.propose` once the case is `done`. As elsewhere, Bash is not covered.
+- Playbook IPC replies carry `untrustedText: true`: the renderer sets every playbook or case string with
+  `textContent` (never `innerHTML` or markdown), and a proposal's patch shows in a `<pre>`.
+- `case.yaml` is read with the strict parser (`parseCaseYaml`). A stage that adds a `case.yaml` key adds it
+  to `CASE_YAML_KEYS` and to `tests/cases-store-yaml.test.js`.
+- `playbooks.sources` is the allowlist (`example:` is always allowed); `autoUpdate` is separate from it.
+  No `playbooks` block (the default `{ sources: [], autoUpdate: false }`) means no URL sources, local
+  folders unrestricted, no auto-update. A local folder recorded in
+  `.kl/playbooks.json` (case data) is read on update only under a matching `path:` entry, or after the
+  owner confirms that one playbook (`confirmSource: true` with its `name`; a confirm without a name is
+  refused). Tests build packages with `tests/helpers/playbook-fixture.js` in temp dirs.
+- Where the allowlist comes from depends on the mode. On the desktop it is the owner's
+  `settings.playbooks` (`sources`, `autoUpdate`). In service mode both come only from the `playbooks` block
+  of the admin `service.json`, and the data-dir settings for them are ignored (with one warning). The
+  admin block is stricter than the settings form: `~` is refused and every `path:` entry must be absolute.
+- Attached, the `case:*` playbook channels are proxied to the service: `path:` sources and a
+  proposal's `repoPath` are resolved on the service host as the service account, under the service's
+  admin policy.

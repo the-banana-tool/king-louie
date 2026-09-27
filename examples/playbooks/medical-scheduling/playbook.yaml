@@ -1,0 +1,34 @@
+name: medical-scheduling
+version: "1.0.0"
+title: Book a specialist appointment
+description: Method for finding an in-network specialist, meeting referral rules and booking a visit in the patient's window.
+caseType: outreach
+executors: [web, phone-agent, owner]
+gatingQuestions:
+  - id: insurance-plan
+    text: Which insurance plan should the visit be billed to?
+    fact: { subject: patient, attr: insurance-plan }
+    answerable: owner
+    category: health
+  - id: referral-on-file
+    text: Is there a referral on file for this visit, and from whom?
+    fact: { subject: patient, attr: referral-on-file }
+    answerable: owner
+    category: health
+  - id: window
+    text: Which days and times can you attend the appointment?
+    fact: { subject: appointment, attr: window }
+    answerable: owner
+  - id: specialty
+    text: Which kind of specialist do you need to see?
+    fact: { subject: appointment, attr: specialty }
+    answerable: owner
+    category: health
+  - id: in-network
+    text: Is the chosen provider in network for the plan?
+    fact: { subject: provider, attr: in-network }
+    answerable: web
+    changes: Out-of-network visits change the cost
+    how: Check the insurer's provider directory
+materialityDefaults: { tell: [booking-confirmed, referral-missing], ignore: [hold-music] }
+budgetDefaults: { usd: 20, contactsPerDay: 10, questionsPerDay: 6 }

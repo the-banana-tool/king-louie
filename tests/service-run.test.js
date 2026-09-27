@@ -298,7 +298,10 @@ describe('loadProfile("agent") listener readiness', { timeout: 120000 }, () => {
             whenListenersSettled: async () => {},
             getGatewayServer: () => ({ wss: null }),
             getWebhookServer: () => ({ httpServer: null }),
-            shutdown: async () => {}
+            shutdown: async () => {},
+            // Fleet stage 4 (M10): the agent profile hosts DelegateSessions,
+            // which needs the core's agent context.
+            context: { getAgentExecutorAdapter: () => ({ execute: async () => ({}) }), getAgent: () => ({ id: 'main' }), listAgents: () => [{ id: 'main' }] }
           };
         }
       }
@@ -344,7 +347,10 @@ describe('loadProfile("agent") listener readiness', { timeout: 120000 }, () => {
               whenListenersSettled: async () => {},
               getGatewayServer: () => ({ wss: null }),
               getWebhookServer: () => ({ httpServer: null }),
-              shutdown: async () => {}
+              shutdown: async () => {},
+              // Fleet stage 4 (M10): the agent profile hosts DelegateSessions,
+              // which needs the core's agent context.
+              context: { getAgentExecutorAdapter: () => ({ execute: async () => ({}) }), getAgent: () => ({ id: 'main' }), listAgents: () => [{ id: 'main' }] }
             };
           }
         }
@@ -380,7 +386,10 @@ describe('loadProfile("agent") listener readiness', { timeout: 120000 }, () => {
             whenListenersSettled: async () => {},
             getGatewayServer: () => ({ wss: null }),
             getWebhookServer: () => ({ httpServer: null }),
-            shutdown: async () => {}
+            shutdown: async () => {},
+            // Fleet stage 4 (M10): the agent profile hosts DelegateSessions,
+            // which needs the core's agent context.
+            context: { getAgentExecutorAdapter: () => ({ execute: async () => ({}) }), getAgent: () => ({ id: 'main' }), listAgents: () => [{ id: 'main' }] }
           };
         }
       }
@@ -415,7 +424,10 @@ describe('loadProfile("agent") listener readiness', { timeout: 120000 }, () => {
           whenListenersSettled: async () => {},
           getGatewayServer: () => ({ wss: null }),
           getWebhookServer: () => ({ httpServer: null }),
-          shutdown: async () => { throw new Error('shutdown boom'); }
+          shutdown: async () => { throw new Error('shutdown boom'); },
+          // Fleet stage 4 (M10): the agent profile hosts DelegateSessions,
+          // which needs the core's agent context.
+          context: { getAgentExecutorAdapter: () => ({ execute: async () => ({}) }), getAgent: () => ({ id: 'main' }), listAgents: () => [{ id: 'main' }] }
         })
       }
     };

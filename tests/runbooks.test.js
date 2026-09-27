@@ -577,7 +577,7 @@ describe('stopping steps', () => {
     const engine = new RunbookEngine();
     engine.runbooks.set('long', { name: 'long', params: {}, steps: [{ run: LONG_STEP }] });
     const result = await engine.executeRunbook('long', {}, { signal: AbortSignal.abort() });
-    assert.deepEqual(result, { success: false, error: 'cancelled', logs: [] });
+    assert.deepEqual(result, { success: false, error: 'cancelled', logs: [], checks: [] });
   });
 
   it('escalates a timed-out step that ignores SIGTERM to SIGKILL and waits for it to exit', async () => {

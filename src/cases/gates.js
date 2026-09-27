@@ -5,6 +5,7 @@ const { valueMatchers, matchSpans, isRecipient, foldText, escapeRe } = require('
 const { detect, sentenceRanges, sentenceOf } = require('./outbound');
 const { EXECUTOR_SETTINGS_DEFAULTS } = require('./executors/defaults');
 const { valueText, DAY_PATTERN } = require('./executors/util');
+const { neutralize, oneLine: frameOneLine } = require('./playbooks/frame');
 
 const key = (f) => `${norm(f.subject)}|${norm(f.attr)}`;
 
@@ -612,6 +613,14 @@ function normQuestion(s) {
     .replace(/[?!.\s]+$/, '').replace(/\p{P}/gu, ' ').replace(/\s+/g, ' ').trim();
 }
 
+// A playbook gating record's text is third-party wording (ruling
+// T12-similar): Ask's result names it by its key only.
+function similarText(q) {
+  if (q.payload?.type !== 'gating') return q.text;
+  const key = typeof q.payload.gating?.key === 'string' ? q.payload.gating.key : '';
+  return `${frameOneLine(neutralize(key), 80) || '(no key)'} (playbook question)`;
+}
+
 // Exact: an open question in this case with the same normalized text.
 // Similar here: Jaccard >= 0.5, text shown. Elsewhere: open question hits
 // from other cases, by title, id and case status only.
@@ -624,7 +633,7 @@ function findDuplicateQuestion({ text, openQuestions = [], crossCaseHits = [] })
     ? []
     : open
       .filter((q) => jaccard(words, tokens(q.text)) >= 0.5)
-      .map((q) => ({ questionId: q.id, text: q.text }));
+      .map((q) => ({ questionId: q.id, text: similarText(q) }));
   const elsewhere = [];
   for (const hit of crossCaseHits) {
     if (!hit || hit.kind !== 'question' || hit.attr !== 'open') continue;

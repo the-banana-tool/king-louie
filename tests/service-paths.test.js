@@ -13,6 +13,34 @@ const tmp = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-paths-')
 
 const posixOnly = process.platform === 'win32' ? 'POSIX-only (needs symlinks and real mode bits)' : false;
 
+// Final review I4: example playbooks ship unpacked, and the hosts read the
+// unpacked copy (the vendor's lstat/fstat check fails inside an asar).
+describe('asarUnpackedPath', () => {
+  const { asarUnpackedPath } = require('../src/platform/paths');
+
+  it('maps an app.asar segment to app.asar.unpacked and leaves other paths alone', () => {
+    assert.strictEqual(asarUnpackedPath('C:\\Program Files\\King Louie\\resources\\app.asar\\examples\\playbooks'), 'C:\\Program Files\\King Louie\\resources\\app.asar.unpacked\\examples\\playbooks');
+    assert.strictEqual(asarUnpackedPath('/opt/King Louie/resources/app.asar/examples/playbooks'), '/opt/King Louie/resources/app.asar.unpacked/examples/playbooks');
+    assert.strictEqual(asarUnpackedPath('/Applications/King Louie.app/Contents/Resources/app.asar'), '/Applications/King Louie.app/Contents/Resources/app.asar.unpacked');
+    for (const p of [
+      '/home/dev/king-louie/examples/playbooks',
+      '/opt/kl/resources/app.asar.unpacked/examples/playbooks',
+      '/opt/kl/myapp.asar/examples',
+      '/opt/kl/app.asarx/examples',
+      'C:\\kl\\app.asar-old\\examples'
+    ]) assert.strictEqual(asarUnpackedPath(p), p, p);
+  });
+
+  it('the build unpacks exactly what the hosts read', () => {
+    const { build } = require('../package.json');
+    assert.ok(build.files.includes('examples/playbooks/**'));
+    assert.ok(Array.isArray(build.asarUnpack) && build.asarUnpack.includes('examples/playbooks/**'));
+    const src = (f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+    assert.match(src('src/ipc/standalone-host.js'), /examplesDir: asarUnpackedPath\(/);
+    assert.match(src('src/service/run.js'), /examplesDir: asarUnpackedPath\(/);
+  });
+});
+
 describe('service paths', () => {
   it('uses OS-appropriate system locations', () => {
     assert.strictEqual(defaultServiceDataDir({ platform: 'linux', env: {} }), '/var/lib/king-louie');

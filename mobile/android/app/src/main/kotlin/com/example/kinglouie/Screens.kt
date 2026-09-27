@@ -91,7 +91,7 @@ fun Welcome(model: AppModel) {
 @Composable
 fun Main(model: AppModel) {
     var tab by remember { mutableStateOf(0) }
-    val tabs = listOf("Pending", "Questions", "History", "Nodes", "Devices", "Settings")
+    val tabs = listOf("Pending", "Questions", "History", "Nodes", "Front door", "Devices", "Settings")
     Scaffold(bottomBar = {
         NavigationBar {
             tabs.forEachIndexed { i, label -> NavigationBarItem(selected = tab == i, onClick = { tab = i }, icon = {}, label = { Text(label) }) }
@@ -107,7 +107,8 @@ fun Main(model: AppModel) {
                 1 -> Questions(model)
                 2 -> History(model)
                 3 -> Nodes(model)
-                4 -> Devices(model)
+                4 -> FrontDoor(model)
+                5 -> Devices(model)
                 else -> Settings(model)
             }
         }
@@ -143,7 +144,7 @@ fun Pending(model: AppModel) {
                 Column(Modifier.fillMaxWidth().clickable { open = p.id }.padding(vertical = 8.dp)) {
                     Text(p.display["node"]["name"].str() ?: "", fontWeight = FontWeight.Bold)
                     Text(p.display["summary"].str() ?: "", maxLines = 2)
-                    Row { Text(p.display["origin"]["client"].str() ?: ""); Text("   " + (p.status ?: formatLeft(p.timeLeftMs))) }
+                    Row { Text(com.example.kinglouie.protocol.FrontDoor.pendingOriginText(p.display)); Text("   " + (p.status ?: formatLeft(p.timeLeftMs))) }
                 }
                 HorizontalDivider()
             }
@@ -164,7 +165,8 @@ fun Detail(model: AppModel, item: PendingItem, onBack: () -> Unit) {
             Text(item.display["summary"].str() ?: "", Modifier.padding(vertical = 8.dp))
             Text("Kind: ${item.display["kind"].str()}   Name: ${item.display["name"].str()}")
             item.display["cwd"].str()?.let { Text("Directory: $it") }
-            Text("Asked by: " + (item.display["origin"].obj()?.let { o -> listOf("client", "session", "job_id", "deviceId").mapNotNull { o[it].str() }.joinToString(" · ") } ?: ""))
+            // On a front door, origin.client is the client's self-declared name as the front door reports it.
+            Text((if (model.frontDoorId == null) "Asked by: " else "Client (reported by front door): ") + (item.display["origin"].obj()?.let { o -> listOf("client", "session", "job_id", "deviceId").mapNotNull { o[it].str() }.joinToString(" · ") { com.example.kinglouie.protocol.FrontDoor.shownText(it) } } ?: ""))
             Text("Time left: ${formatLeft(item.timeLeftMs)}")
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
         }
@@ -202,6 +204,8 @@ fun History(model: AppModel) {
     Column(Modifier.padding(12.dp)) {
         model.nodes.forEach { n -> TextButton({ model.loadHistory(n.id) }) { Text(Display.escape(n.name)) } }
         model.history?.let { (asOf, entries) ->
+            model.historyStatus?.let { FrontDoorAudit(it) }
+            model.historyStatusNote?.let { Text("Reported by front door: $it", color = Color.Gray) }
             Text("As of ${Display.escape(asOf)}", fontWeight = FontWeight.Bold)
             LazyColumn {
                 items(entries) { e ->
@@ -281,6 +285,7 @@ fun Settings(model: AppModel) {
     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Relay: ${model.relayUrl?.let { Display.escape(it) } ?: "not paired"}")
         Text(model.relaySpki ?: "", fontFamily = FontFamily.Monospace)
+        model.frontDoorId?.let { Text("Front door ${com.example.kinglouie.protocol.FrontDoor.nodeFingerprint(it)}", fontFamily = FontFamily.Monospace) }
         if (scanning) ScanOrPaste(model) { scanning = false } else OutlinedButton({ scanning = true }) { Text("Re-pin the relay (scan a relay code)") }
         if (model.mode == AppMode.DEMO) Button({ model.leaveDemo() }) { Text("Leave demo") }
         OutlinedButton({ model.reset() }) { Text("Reset this phone") }

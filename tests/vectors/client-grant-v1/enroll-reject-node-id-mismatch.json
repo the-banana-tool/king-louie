@@ -1,0 +1,105 @@
+{
+  "name": "enroll-reject-node-id-mismatch",
+  "consumers": [
+    "node"
+  ],
+  "given": {
+    "now": "2026-09-23T18:04:11.201Z",
+    "frontdoor": {
+      "id": "kl-nt4ritcfj5kepq3y",
+      "key": "fYWiRRRJBRkudSrSwQUWQ6bpZtk03Lxrqqq__hl4pyU"
+    },
+    "approvers": [
+      {
+        "v": 1,
+        "device_id": "d-3vmwrihhdbnit4oi",
+        "name": "Test phone 3vmw",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "krcyG5D6HPx9P3Gi5oaR6OyU9D1gIrc3UD6pIRcDq74",
+          "y": "9XqgPXsMAYplX5IZVn-9FRP2sN4oHFRPjnZyfG-GpaI"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      },
+      {
+        "v": 1,
+        "device_id": "d-futyo75nn4w4reil",
+        "name": "Test phone futy",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "RscTaDzgRlaVqN4IrrtRgbBZw8hrp00xiIu7B_1AJ6w",
+          "y": "gBam0DF3krccxYdWnKr6fRP4yHKNLKfByP76l8dEw78"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      },
+      {
+        "v": 1,
+        "device_id": "d-6xdlbxglhnvfa3lw",
+        "name": "Test phone 6xdl",
+        "platform": "android",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "GnDHGfxMVkv5iRyStQIsJbqWKUtPy6ijuA1UiWKlYDc",
+          "y": "LLhIvQ_y0DmIXI_qxojWRICKfjPE_orjZBTwRhje91k"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": "2026-09-20T00:00:00.000Z",
+        "revoked_by": "console",
+        "enrollment": null
+      },
+      {
+        "v": 1,
+        "device_id": "d-vn5ed2ksh6yuxv2b",
+        "name": "Test phone vn5e",
+        "platform": "demo",
+        "public_key": {
+          "kty": "EC",
+          "crv": "P-256",
+          "x": "U6dh3GtqeuuV-7Yr4B76ISLm0JX97K9-CmZV_GRQBl8",
+          "y": "_sP3jEPEf4YszvtAEBMZpZyFLeCMhD3bRffdRpbpI5c"
+        },
+        "enrolled_at": "2026-09-01T00:00:00.000Z",
+        "enrolled_by": "console",
+        "revoked_at": null,
+        "revoked_by": null,
+        "enrollment": null
+      }
+    ],
+    "allow_test_keys": true,
+    "pairing": {
+      "pairing_id": "pr_FMVeo36xfVVXeqI8szLUDQ",
+      "node_id": "kl-hnef32472qzibi5r",
+      "node_name": "gpu-box",
+      "profile": "agent",
+      "public_key": "SlpSZ74Fg3DiI96Hn6qFIVCi3QxBE6pjTWJZFn7HuVA",
+      "tls_fingerprint": "f8477ebe7949f2db5e17d81362bd5aa868711d220320219ea30dc68dbad79ec8",
+      "replaces": null,
+      "expires_at": "2026-09-23T18:14:11.201Z",
+      "used_nonces": []
+    }
+  },
+  "input": {
+    "alg": "ES256",
+    "kid": "d-3vmwrihhdbnit4oi",
+    "payload": "eyJkZWNpc2lvbiI6ImFwcHJvdmUiLCJkZXZpY2VfaWQiOiJkLTN2bXdyaWhoZGJuaXQ0b2kiLCJmcm9udGRvb3JfaWQiOiJrbC1udDRyaXRjZmo1a2VwcTN5Iiwibm9kZV9pZCI6ImtsLWMydWJkNmpqcXVtYWx6dDUiLCJub2RlX25hbWUiOiJncHUtYm94Iiwibm9uY2UiOiJ3WkJJM0dxZDNQclVMakxyZlZRcUhuMW9ZMjNJejNnbExOWmNsNlpvSWxnIiwicGFpcmluZ19pZCI6InByX0ZNVmVvMzZ4ZlZWWGVxSThzekxVRFEiLCJwcm9maWxlIjoiYWdlbnQiLCJwdWJsaWNfa2V5IjoiU2xwU1o3NEZnM0RpSTk2SG42cUZJVkNpM1F4QkU2cGpUV0paRm43SHVWQSIsInJlcGxhY2VzIjpudWxsLCJzaWduZWRfYXQiOiIyMDI2LTA5LTIzVDE4OjA0OjE0LjIwMVoiLCJ0bHNfZmluZ2VycHJpbnQiOiJmODQ3N2ViZTc5NDlmMmRiNWUxN2Q4MTM2MmJkNWFhODY4NzExZDIyMDMyMDIxOWVhMzBkYzY4ZGJhZDc5ZWM4IiwidHlwZSI6ImtsLm5vZGUuZW5yb2xsIiwidiI6MX0",
+    "sig": "3OAHqUQPSI1Ox15pBH3WF08L4Z5eZmiH7hY7kRt6kXATtHBkTV0kds6Sf8s0cYIBzObA7v2FGiy3PpSOI1U2uA"
+  },
+  "expect": {
+    "accepted": false,
+    "reason": "node_id_mismatch"
+  }
+}

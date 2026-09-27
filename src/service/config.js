@@ -6,7 +6,8 @@ const { EXECUTOR_ID_PATTERN } = require('../cases/executors/util');
 
 const log = createLogger('service/config');
 
-const PROFILES = new Set(['agent', 'runbook']);
+// frontdoor (fleet stage 4): the one public machine; it loads no agent code.
+const PROFILES = new Set(['agent', 'runbook', 'frontdoor']);
 // Chat channels are off by default: in stage 1 the service denies every
 // remote approval, and stage 3 brings the phone approver that makes channels
 // useful for unsafe work.
@@ -27,7 +28,9 @@ const CONFIG_FILE = 'service.json';
 // (ledger retention) joined in fleet stage 3. `executors` (which executor
 // packages load, from where) joined in cases stage 3 (R42). `contact` (cases
 // stage 4, R55): who the owner is, where to reach them and through which relays.
-const ADMIN_ONLY_KEYS = ['features', 'ports', 'profile', 'relay', 'audit', 'executors', 'contact'];
+// `playbooks` (cases stage 6, ruling T14-admin): the playbook source
+// allowlist and same-major auto-update.
+const ADMIN_ONLY_KEYS = ['features', 'ports', 'profile', 'relay', 'audit', 'executors', 'contact', 'playbooks'];
 const EXECUTOR_KEYS = ['entries', 'packageRoots'];
 const RELAY_DEFAULTS = { phoneListen: { host: '0.0.0.0', port: 8443 }, meshPort: 18795, auditRetentionDays: 365 };
 
@@ -57,6 +60,34 @@ function requiredString(value, where, file) {
   return value.trim();
 }
 
+// relay.push, shared by the relay host and the front door (§3.1: "used as is").
+function parsePushConfig(raw, file) {
+  const push = {};
+  if (raw === undefined) return push;
+  if (!isPlainObject(raw)) throw new Error(`Invalid ${file}: relay.push must be an object`);
+  rejectUnknownKeys(raw, ['apns', 'fcm'], 'relay.push', file);
+  if (raw.apns !== undefined) {
+    const a = raw.apns;
+    if (!isPlainObject(a)) throw new Error(`Invalid ${file}: relay.push.apns must be an object`);
+    rejectUnknownKeys(a, ['team_id', 'key_id', 'key_file', 'topic', 'environment'], 'relay.push.apns', file);
+    const environment = a.environment === undefined ? 'production' : a.environment;
+    if (!['production', 'sandbox'].includes(environment)) throw new Error(`Invalid ${file}: relay.push.apns.environment must be production or sandbox`);
+    push.apns = {
+      teamId: requiredString(a.team_id, 'relay.push.apns.team_id', file),
+      keyId: requiredString(a.key_id, 'relay.push.apns.key_id', file),
+      keyFile: requiredString(a.key_file, 'relay.push.apns.key_file', file),
+      topic: requiredString(a.topic, 'relay.push.apns.topic', file),
+      environment
+    };
+  }
+  if (raw.fcm !== undefined) {
+    if (!isPlainObject(raw.fcm)) throw new Error(`Invalid ${file}: relay.push.fcm must be an object`);
+    rejectUnknownKeys(raw.fcm, ['service_account_file'], 'relay.push.fcm', file);
+    push.fcm = { serviceAccountFile: requiredString(raw.fcm.service_account_file, 'relay.push.fcm.service_account_file', file) };
+  }
+  return push;
+}
+
 // The relay host's block (spec §6). Returns the shape startRelay takes, or
 // null when there is no relay block.
 function parseRelayConfig(raw, file) {
@@ -74,30 +105,7 @@ function parseRelayConfig(raw, file) {
   }
   if (parsedPublicUrl.protocol !== 'https:') throw new Error(`Invalid ${file}: relay.public_url must be an https:// URL`);
   if (!parsedPublicUrl.hostname) throw new Error(`Invalid ${file}: relay.public_url must include a host`);
-  const push = {};
-  if (raw.push !== undefined) {
-    if (!isPlainObject(raw.push)) throw new Error(`Invalid ${file}: relay.push must be an object`);
-    rejectUnknownKeys(raw.push, ['apns', 'fcm'], 'relay.push', file);
-    if (raw.push.apns !== undefined) {
-      const a = raw.push.apns;
-      if (!isPlainObject(a)) throw new Error(`Invalid ${file}: relay.push.apns must be an object`);
-      rejectUnknownKeys(a, ['team_id', 'key_id', 'key_file', 'topic', 'environment'], 'relay.push.apns', file);
-      const environment = a.environment === undefined ? 'production' : a.environment;
-      if (!['production', 'sandbox'].includes(environment)) throw new Error(`Invalid ${file}: relay.push.apns.environment must be production or sandbox`);
-      push.apns = {
-        teamId: requiredString(a.team_id, 'relay.push.apns.team_id', file),
-        keyId: requiredString(a.key_id, 'relay.push.apns.key_id', file),
-        keyFile: requiredString(a.key_file, 'relay.push.apns.key_file', file),
-        topic: requiredString(a.topic, 'relay.push.apns.topic', file),
-        environment
-      };
-    }
-    if (raw.push.fcm !== undefined) {
-      if (!isPlainObject(raw.push.fcm)) throw new Error(`Invalid ${file}: relay.push.fcm must be an object`);
-      rejectUnknownKeys(raw.push.fcm, ['service_account_file'], 'relay.push.fcm', file);
-      push.fcm = { serviceAccountFile: requiredString(raw.push.fcm.service_account_file, 'relay.push.fcm.service_account_file', file) };
-    }
-  }
+  const push = parsePushConfig(raw.push, file);
   return {
     phoneListen: listenBlock(raw.phone_listen, 'relay.phone_listen', file, RELAY_DEFAULTS.phoneListen),
     tls: { certFile: requiredString(raw.tls.cert_file, 'relay.tls.cert_file', file), keyFile: requiredString(raw.tls.key_file, 'relay.tls.key_file', file) },
@@ -159,6 +167,34 @@ function validateFeatures(features, file) {
     }
   }
   return features;
+}
+
+// Cases stage 6 (ruling T14-admin): in service mode the playbook source
+// allowlist and autoUpdate are policy, so they come only from here. Each
+// source is a path:<absolute folder> or an https/ssh URL prefix, checked
+// with the same rules the allowlist matches by (src/cases/playbooks/vendor.js).
+const PLAYBOOK_SOURCE_UNSAFE_RE = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/;
+function parsePlaybooksConfig(raw, file) {
+  if (raw === undefined) return { sources: [], autoUpdate: false };
+  if (!isPlainObject(raw)) throw new Error(`Invalid ${file}: "playbooks" must be an object`);
+  rejectUnknownKeys(raw, ['sources', 'autoUpdate'], 'playbooks', file);
+  const sources = raw.sources === undefined ? [] : raw.sources;
+  if (!Array.isArray(sources) || sources.length > 100) throw new Error(`Invalid ${file}: playbooks.sources must be a list of at most 100 entries`);
+  const { normalizeUrl } = require('../cases/playbooks/vendor');
+  const out = sources.map((entry, i) => {
+    const bad = () => new Error(`Invalid ${file}: playbooks.sources[${i}] must be path:<absolute folder> or an https/ssh URL prefix`);
+    if (typeof entry !== 'string' || !entry.trim() || entry.length > 2048 || PLAYBOOK_SOURCE_UNSAFE_RE.test(entry)) throw bad();
+    const e = entry.trim();
+    if (e.startsWith('path:')) {
+      const folder = e.slice('path:'.length).trim();
+      if (/^[\\/]{2}/.test(folder) || !path.isAbsolute(folder)) throw bad();
+      return e;
+    }
+    if (!normalizeUrl(e)) throw bad();
+    return e;
+  });
+  if (raw.autoUpdate !== undefined && typeof raw.autoUpdate !== 'boolean') throw new Error(`Invalid ${file}: playbooks.autoUpdate must be true or false`);
+  return { sources: out, autoUpdate: raw.autoUpdate === true };
 }
 
 // Cases stage 4 (R55): who the owner is and where to reach them comes only
@@ -318,15 +354,22 @@ function loadServiceConfig(dataDir, overrides = {}, {
     log.warn("ports.desktopBridge 0 is for tests; the paired desktop can't reach an ephemeral port");
   }
 
+  // On the frontdoor profile the relay block follows §3.1 (public_url is
+  // derived; tls/phone_listen/mesh_listen are refused; push is used as is).
+  // Those refusals are startup check 4, run in order by startFrontDoor, so
+  // the raw block is handed over unparsed.
+  const frontdoor = profile === 'frontdoor';
   return {
     profile,
     features,
     ports,
-    relay: parseRelayConfig(adminCfg.relay, adminFile),
+    relay: frontdoor ? null : parseRelayConfig(adminCfg.relay, adminFile),
+    ...(frontdoor ? { relayRaw: adminCfg.relay === undefined ? null : adminCfg.relay } : {}),
     audit: parseAuditConfig(adminCfg.audit, adminFile),
     executors: validateExecutors(adminCfg.executors, adminFile),
-    contact: validateContactConfig(adminCfg.contact, adminFile, { unknownKeyError })
+    contact: validateContactConfig(adminCfg.contact, adminFile, { unknownKeyError }),
+    playbooks: parsePlaybooksConfig(adminCfg.playbooks, adminFile)
   };
 }
 
-module.exports = { loadServiceConfig, assertAdminOwned, parseRelayConfig, parseAuditConfig, validateExecutors, PROFILES, DEFAULT_PORTS, DEFAULT_FEATURES, CONFIG_FILE, unknownKeyError };
+module.exports = { loadServiceConfig, assertAdminOwned, parseRelayConfig, parsePushConfig, parseAuditConfig, validateExecutors, parsePlaybooksConfig, PROFILES, DEFAULT_PORTS, DEFAULT_FEATURES, CONFIG_FILE, unknownKeyError };

@@ -3,6 +3,8 @@ const path = require('path');
 const { parseYaml } = require('../platform/yaml');
 const { adminConfigDir } = require('../platform/paths');
 const { assertAdminOwned: assertServiceAdminOwned, unknownKeyError } = require('./config');
+const { parseDuration } = require('../platform/duration');
+const { parseFrontDoorConfig, FRONTDOOR_KEYS } = require('../frontdoor/config');
 
 const NODE_CONFIG_FILE = 'node.yaml';
 
@@ -23,10 +25,14 @@ const DEFAULT_MAX_CONCURRENT_JOBS = 2;
 // same change (fleet stage 3 `approvers`, stage 4 `frontdoor`, stage 5 `gui`)
 // and validates that key's own subtree itself.
 const NODE_YAML_KEYS = Object.freeze({
-  top: Object.freeze(['name', 'profile', 'front_door', 'capabilities', 'policy', 'runbooks_dir', 'approvers']),
+  top: Object.freeze(['name', 'profile', 'front_door', 'capabilities', 'policy', 'runbooks_dir', 'approvers', 'frontdoor', 'delegate']),
   policy: Object.freeze(['allowed_roots', 'remote_sessions', 'max_concurrent_jobs']),
   remote_sessions: Object.freeze(['always_confirm', 'deny']),
-  approvers: Object.freeze(['relay', 'request_ttl_s'])
+  approvers: Object.freeze(['relay', 'request_ttl_s']),
+  // Fleet stage 4 (R11): the front door's own block (its deeper levels are
+  // checked by parseFrontDoorConfig) and an agent node's delegate sessions.
+  frontdoor: FRONTDOOR_KEYS.top,
+  delegate: Object.freeze(['provider', 'model', 'agent', 'idle_close', 'cwd', 'max_sessions'])
 });
 
 // node.yaml and the runbooks beside it decide what this node lets remote
@@ -73,13 +79,41 @@ function defaultNodeConfig(adminDir) {
       max_concurrent_jobs: DEFAULT_MAX_CONCURRENT_JOBS
     },
     runbooksDir: path.join(adminDir, 'runbooks'),
-    approvers: { ...DEFAULT_APPROVERS }
+    approvers: { ...DEFAULT_APPROVERS },
+    frontdoor: null,
+    delegate: { ...DEFAULT_DELEGATE }
   };
 }
 
 // Phone approvals (fleet stage 3): the relay's mesh endpoint and the request
 // lifetime. Absent → phone approvals off.
 const DEFAULT_APPROVERS = { relay: null, requestTtlS: 300 };
+
+// Delegate sessions (fleet stage 4 §3.8, §6). provider/model null = the
+// node's settings default; cwd null = the first policy.allowed_roots entry.
+const DEFAULT_DELEGATE = Object.freeze({ provider: null, model: null, agent: 'main', idleCloseMs: 2 * 3600000, cwd: null, maxSessions: 4 });
+
+function parseDelegate(raw, invalid, file) {
+  if (raw === undefined) return { ...DEFAULT_DELEGATE };
+  if (!isPlainObject(raw)) throw invalid('delegate must be a mapping');
+  assertKnownKeys(raw, NODE_YAML_KEYS.delegate, 'delegate.', file);
+  const out = { ...DEFAULT_DELEGATE };
+  for (const key of ['provider', 'model', 'agent', 'cwd']) {
+    if (raw[key] === undefined || raw[key] === null) continue;
+    if (typeof raw[key] !== 'string' || !raw[key].trim()) throw invalid(`delegate.${key} must be a non-empty string`);
+    out[key] = raw[key].trim();
+  }
+  if (raw.idle_close !== undefined) {
+    const ms = parseDuration(raw.idle_close);
+    if (ms === null || ms < 5 * 60000 || ms > 24 * 3600000) throw invalid('delegate.idle_close must be a duration from 5m to 24h');
+    out.idleCloseMs = ms;
+  }
+  if (raw.max_sessions !== undefined) {
+    if (!Number.isInteger(raw.max_sessions) || raw.max_sessions < 1 || raw.max_sessions > 16) throw invalid('delegate.max_sessions must be an integer from 1 to 16');
+    out.maxSessions = raw.max_sessions;
+  }
+  return out;
+}
 
 // wss://host:port, nothing else: no userinfo, no path/query/fragment, and an
 // explicit port in 1..65535. WHATWG drops a port that matches the scheme's
@@ -181,10 +215,13 @@ function loadNodeConfig({
     if (typeof parsed.name !== 'string' || !parsed.name.trim()) throw invalid('name must be a non-empty string');
     name = parsed.name.trim();
   }
-  if (parsed.profile !== undefined && !['agent', 'runbook'].includes(parsed.profile)) {
+  if (parsed.profile !== undefined && !['agent', 'runbook', 'frontdoor'].includes(parsed.profile)) {
     throw invalid(`unknown profile "${parsed.profile}"`);
   }
   const profile = parsed.profile || 'agent';
+  // Placement rules (§6): each block belongs to exactly one profile.
+  if (parsed.frontdoor !== undefined && profile !== 'frontdoor') throw invalid('frontdoor: is only for profile: frontdoor');
+  if (parsed.delegate !== undefined && profile !== 'agent') throw invalid('delegate needs profile: agent');
   const frontDoor = typeof parsed.front_door === 'string' ? parsed.front_door.trim() : null;
 
   let capabilities = [];
@@ -259,7 +296,9 @@ function loadNodeConfig({
       max_concurrent_jobs: maxConcurrentJobs
     },
     runbooksDir,
-    approvers: parseApprovers(parsed.approvers, invalid, configFile)
+    approvers: parseApprovers(parsed.approvers, invalid, configFile),
+    frontdoor: profile === 'frontdoor' ? parseFrontDoorConfig(parsed.frontdoor, configFile) : null,
+    delegate: parseDelegate(parsed.delegate, invalid, configFile)
   };
 }
 

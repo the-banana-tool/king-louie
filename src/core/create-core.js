@@ -55,6 +55,7 @@ const { MemoryStore, MemoryManager } = require('../memory');
 const { CheckpointManager } = require('../checkpoints');
 const { CaseRuntime, resolveCasesRoot } = require('../cases');
 const { shapeToolDefinitions } = require('../cases/chat-integration');
+const { installPlaybooks } = require('../cases/playbooks');
 const { ensureWakeupJob } = require('../cases/wakeups');
 const { ExecutorRegistry } = require('../cases/executors');
 const { configureCaseGuard } = require('../cases/executors/case-guard');
@@ -2038,6 +2039,7 @@ function createCore(deps = {}) {
       workingDirectory,
       allowedDirectories: executorOptions.allowedDirectories || [],
       requireApproval: true,
+      scopedBackgroundTasks: executorOptions.scopedBackgroundTasks || null,
       runtimeEnvironment: resolvedRuntimeEnvironment,
       // approvalRequester, denyAutoApproval, localOrigin and origin, plus in
       // phone mode approvalTimeoutMs and classifyCall. denyAutoApproval closes
@@ -2061,8 +2063,13 @@ function createCore(deps = {}) {
       hookExecutor: getHookSettings().enabled ? hookExecutor : null,
       useSandbox: executorOptions.useSandbox !== false,
       extraToolOptions: {
+        // Fleet stage 4 §3.8: the run's origin for tools that scope work to a
+        // job (F5's job-scoped leases).
+        origin: seam.origin,
         get agentExecutorAdapter() { return agentExecutorAdapter; },
-        get backgroundTaskManager() { return backgroundTaskManager; },
+        // A delegate turn (and its children) sees only its own session's
+        // background tasks (ruling T11-taskstatus).
+        get backgroundTaskManager() { return executorOptions.scopedBackgroundTasks || backgroundTaskManager; },
         // Case mode: the chat send path passes { ...caseTurn (caseId, dir,
         // turnId, title, orientation), runtime, ownerMessages }. The case
         // tools read it, and ToolExecutor's ledger write guard uses dir.
@@ -2217,7 +2224,12 @@ function createCore(deps = {}) {
         origin: runtimeOptions.origin || null,
         // Cases stage 3: isolated children run only their agent's tools, guarded.
         guardContext: runtimeOptions.guardContext || null,
-        allowedToolNames: runtimeOptions.allowedToolNames || null
+        allowedToolNames: runtimeOptions.allowedToolNames || null,
+        // Fleet stage 4 §3.8: a delegate turn's chat id and scope gate.
+        ...(runtimeOptions.chatId ? { chatId: runtimeOptions.chatId } : {}),
+        ...(runtimeOptions.refuseUnsafe === true ? { refuseUnsafe: true } : {}),
+        ...(Array.isArray(runtimeOptions.allowedRoots) ? { allowedRoots: runtimeOptions.allowedRoots } : {}),
+        ...(runtimeOptions.scopedBackgroundTasks ? { scopedBackgroundTasks: runtimeOptions.scopedBackgroundTasks } : {})
       }
     );
 
@@ -2447,13 +2459,22 @@ function createCore(deps = {}) {
             // Cases stage 3: an isolated child's guardContext and tool list.
             ...childRuntimeOptions(agent, options),
             workingDirectory: options.workingDirectory,
-            // The rethreaded requester every meta-tool (SpawnAgent,
-            // BackgroundTask, workflow runners) already forwards unchanged
-            // carries the parent executor's origin as a plain property
-            // (ToolExecutor#_rethreadedRequester); read it back here so the
-            // child inherits it instead of a freshly (and more poorly)
-            // computed one.
-            origin: (options.approvalRequester && options.approvalRequester.origin) || options.origin || null
+            // The rethreaded requester every meta-tool already forwards
+            // carries the parent executor's origin (ToolExecutor
+            // #_rethreadedRequester); a delegate turn passes its own in
+            // executorOptions (fleet stage 4 §3.8).
+            origin: (options.approvalRequester && options.approvalRequester.origin)
+              || (options.executorOptions && options.executorOptions.origin)
+              || options.origin || null,
+            chatId: (options.executorOptions && options.executorOptions.chatId) || null,
+            refuseUnsafe: (options.approvalRequester && options.approvalRequester.refuseUnsafe === true)
+              || (options.executorOptions && options.executorOptions.refuseUnsafe === true),
+            // The delegate cwd the refuseUnsafe fallback classifier allows (T11-roots).
+            allowedRoots: (options.approvalRequester && options.approvalRequester.allowedRoots)
+              || (options.executorOptions && options.executorOptions.allowedRoots) || null,
+            // A delegate session's background-task view (T11-taskstatus).
+            scopedBackgroundTasks: (options.approvalRequester && options.approvalRequester.scopedBackgroundTasks)
+              || (options.executorOptions && options.executorOptions.scopedBackgroundTasks) || null
           }
         );
         const executor = new AgentExecutor(runtime.provider, runtime.toolExecutor, {
@@ -2734,6 +2755,19 @@ function createCore(deps = {}) {
     }
   };
 
+  // Service mode, decided once (final review M-9, parked P6). run.js passes
+  // deps.isService === true; any other service signal also counts, so a
+  // service entry point that forgets one still takes its policy from the
+  // admin config and never from data-dir settings: the contact owner and
+  // addresses (C4), the executor registry (C3, R42) and the playbook
+  // allowlist and autoUpdate (C6, ruling T14-admin).
+  const hasDep = (key) => Object.prototype.hasOwnProperty.call(deps, key);
+  const serviceMode = deps.isService === true
+    || hasDep('contactConfig')
+    || hasDep('adminExecutors')
+    || hasDep('playbooksConfig')
+    || deps.remoteApprovals === 'phone';
+
   // Cases stage 4: contact channels, presence and the ladder
   // (docs/superpowers/specs/2026-09-23-cases-stage4-channels.md §7).
   let contactHost = null;
@@ -2742,14 +2776,11 @@ function createCore(deps = {}) {
     migrateLegacyBridgeChatOrigins();
     initializeTools();
     await initializeAgentInfrastructure();
-    // Service mode (final review M6): run.js passes deps.isService === true;
-    // any other service signal (deps.contactConfig present, phone approvals)
-    // also counts, so a service entry point that forgets one still reads the
-    // owner identity from the admin config only, never data-dir settings.
-    // The desktop reads the owner and addresses from settings.
-    // sendExternal's outbound gate is contact-host's defaultGetGate (C3's
-    // gateLeaves once it merges).
-    const isService = deps.isService === true || Object.prototype.hasOwnProperty.call(deps, 'contactConfig') || deps.remoteApprovals === 'phone';
+    // In service mode (serviceMode above) the owner identity comes from the
+    // admin config only; the desktop reads the owner and addresses from
+    // settings. sendExternal's outbound gate is contact-host's
+    // defaultGetGate (C3's gateLeaves once it merges).
+    const isService = serviceMode;
     // Ruling T13-start (final review I2): contact that cannot be built or
     // cannot start never stops the app. Log it, leave contact off
     // (getContact() → null) and warn the owner once.
@@ -2879,12 +2910,12 @@ function createCore(deps = {}) {
   });
 
   // Cases stage 3: executors. In service mode run.js passes the admin
-  // service.json `executors` as deps.adminExecutors (R42); its presence is
-  // what puts the registry in service mode. There the package root check is
+  // service.json `executors` as deps.adminExecutors (R42); without it a
+  // service-mode registry has no entries (fail closed). There the package root check is
   // bound to the service's adminUid (M16), and the signed-grant audit path
   // gets startApprovals' admin-owned approver store and this node's identity
   // (deps.approvalTrust); without it that path fails closed.
-  const executorIsService = Object.prototype.hasOwnProperty.call(deps, 'adminExecutors');
+  const executorIsService = serviceMode;
   const executorAdminUid = deps.adminUid ?? 0;
   const executorRegistry = new ExecutorRegistry({
     dataDir: userDataPath,
@@ -2906,6 +2937,45 @@ function createCore(deps = {}) {
   // Until this runs the case-turn guard has no case runtime for a child's
   // { caseId } and no data dir to protect.
   configureCaseGuard({ getCaseRuntime: () => caseRuntime, dataDir: userDataPath });
+  // Cases stage 6: playbooks. The manager rides on the runtime; the gating
+  // source, the turn-start hook and (with an executor registry) the brief
+  // rules are registered by installPlaybooks.
+  // Ruling T14-admin: in service mode the source allowlist and autoUpdate
+  // are policy and come only from the admin service.json (run.js passes
+  // deps.playbooksConfig; no block is the default { sources: [], autoUpdate:
+  // false }: no URL sources, local folders unrestricted (spec §12), no
+  // auto-update). The
+  // data-dir settings for them are ignored there, with one warning. The
+  // desktop reads the owner's own settings. serviceMode is the one service
+  // check the contact and executor code use too.
+  const playbooksFromAdmin = serviceMode;
+  let getPlaybookSettings = getSettings;
+  if (playbooksFromAdmin) {
+    const admin = deps.playbooksConfig && typeof deps.playbooksConfig === 'object' ? deps.playbooksConfig : {};
+    const adminPlaybooks = Object.freeze({
+      sources: Object.freeze(Array.isArray(admin.sources) ? admin.sources.filter((x) => typeof x === 'string') : []),
+      autoUpdate: admin.autoUpdate === true
+    });
+    let warnedDataDir = false;
+    getPlaybookSettings = () => {
+      if (!warnedDataDir) {
+        let stored = null;
+        try {
+          stored = store.get('settings', null)?.playbooks;
+        } catch {
+          stored = null;
+        }
+        const set = stored && typeof stored === 'object'
+          && ((Array.isArray(stored.sources) && stored.sources.length > 0) || stored.autoUpdate === true);
+        if (set) {
+          warnedDataDir = true;
+          log.warn('Ignoring settings.playbooks (sources, autoUpdate) from the data dir in service mode; set "playbooks" in the admin service.json instead.');
+        }
+      }
+      return { playbooks: adminPlaybooks };
+    };
+  }
+  installPlaybooks(caseRuntime, { getSettings: getPlaybookSettings, examplesDir: deps.examplesDir || null, adminPolicy: playbooksFromAdmin });
 
   const context = {
     // Chat
@@ -2938,6 +3008,7 @@ function createCore(deps = {}) {
     getSettings,
     getCaseRuntime: () => caseRuntime,
     getExecutorRegistry: () => executorRegistry,
+    getPlaybookManager: () => caseRuntime.playbooks || null,
     getContact: () => (contactHost ? contactHost.context() : null),
     // The signed-approval requester (program §4.12), or null: always null in
     // 'allow' and 'deny' modes (the Electron host), and null while no device
@@ -3003,6 +3074,11 @@ function createCore(deps = {}) {
     getAgent,
     listAgents,
     createAgentRuntime,
+    // Fleet stage 4: delegate sessions run their turns through this.
+    getAgentExecutorAdapter: () => agentExecutorAdapter,
+    // Fleet stage 4: cancel_job on a delegate stops the background tasks its
+    // turns started.
+    getBackgroundTaskManager: () => backgroundTaskManager,
     AgentExecutor,
     AgentOrchestrator,
     buildAgentVoiceOptions,

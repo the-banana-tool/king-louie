@@ -359,16 +359,26 @@ class ExecutorRegistry {
 
   // Adapter rules (once loaded), then the case override, then extra sources (C6, R18).
   briefRules(id, { caseId = null } = {}) {
-    const out = [];
-    const push = (r) => {
+    const { own, extra } = this.briefRulesBySource(id, { caseId });
+    return [...own, ...extra];
+  }
+
+  // The same rules split by where they come from: `own` (the adapter and the
+  // case override) and `extra` (registered sources, i.e. playbooks: third-party
+  // text). The orientation prints only a count of the extra ones (final
+  // review I2); the draft prompt gets them all through briefRules().
+  briefRulesBySource(id, { caseId = null } = {}) {
+    const own = [];
+    const extra = [];
+    const push = (list) => (r) => {
       const t = String(r ?? '').trim();
-      if (t && !out.includes(t)) out.push(t);
+      if (t && !own.includes(t) && !extra.includes(t)) list.push(t);
     };
     const adapter = this._loaded.get(id);
     if (adapter) {
       try {
         const rules = adapter.briefRules();
-        if (Array.isArray(rules)) rules.forEach(push);
+        if (Array.isArray(rules)) rules.forEach(push(own));
       } catch (err) {
         log.warn(`${id} briefRules failed: ${err.message}`);
       }
@@ -379,16 +389,16 @@ class ExecutorRegistry {
     } catch {
       entry = null;
     }
-    (entry?.overrideBriefRules || []).forEach(push);
+    (entry?.overrideBriefRules || []).forEach(push(own));
     for (const fn of this.extraBriefRules) {
       try {
         const rules = fn(id, caseId);
-        if (Array.isArray(rules)) rules.forEach(push);
+        if (Array.isArray(rules)) rules.forEach(push(extra));
       } catch (err) {
         log.warn(`Extra brief rules for ${id} failed: ${err.message}`);
       }
     }
-    return out;
+    return { own, extra };
   }
 
   registerExtraBriefRules(fn) {

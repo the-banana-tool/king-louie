@@ -746,6 +746,8 @@ describe('DesktopBridgeClient', () => {
     await client2.connect();
     await assert.rejects(client2.invoke('chat:load', []), (err) => err.code === 'BRIDGE_TIMEOUT' && err.message === 'The local service did not answer in time.');
     assert.strictEqual(await client2.invoke('chat:sendMessage', [{ chatId: 'c1' }]), 'late');
+    // Ruling T14-bridgetimeout: a long playbook channel outlasts the default (10-minute bound).
+    assert.strictEqual(await client2.invoke('case:addPlaybook', [{ caseId: 'c1' }]), 'late');
     client.close();
     client2.close();
   });

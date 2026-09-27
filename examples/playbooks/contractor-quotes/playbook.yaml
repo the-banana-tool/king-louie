@@ -1,0 +1,34 @@
+name: contractor-quotes
+version: "1.0.0"
+title: Get comparable contractor quotes
+description: Method for scoping a job, finding licensed contractors, collecting quotes and comparing them on the same terms.
+caseType: outreach
+executors: [web, phone-agent, owner]
+gatingQuestions:
+  - id: scope
+    text: What exactly should the job cover, and what is out of scope?
+    fact: { subject: job, attr: scope }
+    answerable: owner
+  - id: labor-only
+    text: Will you supply the materials, or should quotes include them?
+    fact: { subject: job, attr: labor-only }
+    answerable: owner
+    options: [{ id: "labor-only", label: "Labor only" }, { id: "with-materials", label: "Labor and materials" }]
+  - id: budget-ceiling
+    text: What is the most you are willing to spend on this job?
+    fact: { subject: job, attr: budget-ceiling }
+    answerable: owner
+    briefField: hardConstraints
+    category: financial
+  - id: access-window
+    text: When can a contractor get into the site to look and to work?
+    fact: { subject: job, attr: access-window }
+    answerable: owner
+  - id: license-required
+    text: Does this kind of job need a licensed contractor where the site is?
+    fact: { subject: job, attr: license-required }
+    answerable: web
+    changes: Decides whether unlicensed quotes can be considered
+    how: Check the licensing board's rules for the trade
+materialityDefaults: { tell: [quotes, license-problems], ignore: [no-answer] }
+budgetDefaults: { usd: 25, contactsPerDay: 30, questionsPerDay: 6 }

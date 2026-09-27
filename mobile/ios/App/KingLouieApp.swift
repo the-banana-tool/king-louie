@@ -8,7 +8,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     var onToken: ((String) -> Void)? {
         didSet { if let token, let onToken { onToken(token) } }
     }
-    var onOpen: ((String) -> Void)?
+    /// (kind, id): an approval's request id, or the id a pairing, alert or question push names.
+    var onOpen: ((String, String) -> Void)?
     /// A token that arrived before the app's scene hooked up onToken.
     private var token: String?
 
@@ -31,14 +32,15 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         onToken?(hex)
     }
 
-    /// The push is { aps, kl: { rid, k } }; a missing k means approval, and
-    /// only approvals are handled here. The app fetches and verifies the
-    /// request itself.
+    /// The push is { aps, kl: { rid, k } }; a missing k means approval.
+    /// Approval, pairing, alert and question pushes are handled; the app fetches and
+    /// verifies what they name itself.
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
         let kl = response.notification.request.content.userInfo["kl"] as? [String: Any]
-        if let rid = kl?["rid"] as? String, ((kl?["k"] as? String) ?? "approval") == "approval" {
-            await MainActor.run { onOpen?(rid) }
-        }
+        guard let id = kl?["rid"] as? String else { return }
+        let kind = (kl?["k"] as? String) ?? "approval"
+        guard ["approval", "pairing", "alert", "question"].contains(kind) else { return }
+        await MainActor.run { onOpen?(kind, id) }
     }
 }
 
@@ -54,7 +56,7 @@ struct KingLouieApp: App {
                 .environmentObject(model)
                 .onAppear {
                     delegate.onToken = { token in Task { await model.registerPushToken(token) } }
-                    delegate.onOpen = { rid in Task { await model.openPushed(requestId: rid) } }
+                    delegate.onOpen = { kind, id in Task { await model.openPushed(kind: kind, id: id) } }
                 }
         }
         // Only leaving for the background stops the poll: a Face ID prompt

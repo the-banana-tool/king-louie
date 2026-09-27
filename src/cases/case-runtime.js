@@ -557,6 +557,8 @@ class CaseRuntime {
 
   completeGating(id) {
     const meta = this.getCase(id);
+    // Cases stage 6: required playbook gating questions come first.
+    if (this.playbooks) this.playbooks.assertGatingComplete(meta.id);
     this.brief(meta.id).completeGating();
     if (meta.status === 'draft') this.setStatus(meta.id, 'active', { kind: 'gating' });
     this._reindex(meta.id);
@@ -970,7 +972,7 @@ class CaseRuntime {
     writeJsonIfChanged(this._baselinePath(meta.dir), b);
     if (typeof this.acknowledgePlaybooks === 'function') {
       try {
-        this.acknowledgePlaybooks(meta.id);
+        this.acknowledgePlaybooks(meta.id, turn);
       } catch (err) {
         log.warn(`acknowledgePlaybooks failed for ${meta.slug}: ${err.message}`);
       }
@@ -999,34 +1001,43 @@ class CaseRuntime {
         const r = budget.charge('turnsPerDay', 1, { turnId });
         if (r.crossedNow.length) this.onCrossings(meta.id, 'turnsPerDay', r.crossedNow);
       }
-      const hook = await this._runHooks('turn-start', { caseId: meta.id, dir: meta.dir, turnId, source, ownerMessage });
-      const fresh = this.getCase(meta.id);
-      const { triggers, snapshot } = this._detect(fresh, { source, hookTriggers: hook.triggers });
-      // Re-check after the awaits above: shutdown may have begun while this
-      // call was in flight. Caught below, which releases the lock this
-      // attempt just took — the turn is never registered in `this.turns`.
-      if (source === 'wakeup' && this.closing) throw new RuntimeClosingError();
-      const controller = new AbortController();
-      const turn = {
-        caseId: fresh.id,
-        dir: fresh.dir,
-        turnId,
-        title: fresh.title,
-        orientation: '',
-        source,
-        ownerMessage,
-        triggers,
-        reorientPending: triggers.some((t) => t.blocking),
-        hookTriggers: hook.triggers,
-        hookNotes: hook.notes,
-        snapshot,
-        dailyTurnsSpent,
-        signal: controller.signal,
-        abort: (reason) => controller.abort(reason)
-      };
-      turn.orientation = this.orientation(fresh.id, { triggers, hookNotes: hook.notes });
-      this.turns.set(fresh.id, turn);
-      return turn;
+      // Cases stage 6 (final review M-6): the playbook packages load once for
+      // the hooks, the triggers and the orientation below.
+      const closeEntriesScope = this.playbooks && typeof this.playbooks.beginEntriesScope === 'function'
+        ? this.playbooks.beginEntriesScope(meta.id)
+        : () => {};
+      try {
+        const hook = await this._runHooks('turn-start', { caseId: meta.id, dir: meta.dir, turnId, source, ownerMessage });
+        const fresh = this.getCase(meta.id);
+        const { triggers, snapshot } = this._detect(fresh, { source, hookTriggers: hook.triggers });
+        // Re-check after the awaits above: shutdown may have begun while this
+        // call was in flight. Caught below, which releases the lock this
+        // attempt just took — the turn is never registered in `this.turns`.
+        if (source === 'wakeup' && this.closing) throw new RuntimeClosingError();
+        const controller = new AbortController();
+        const turn = {
+          caseId: fresh.id,
+          dir: fresh.dir,
+          turnId,
+          title: fresh.title,
+          orientation: '',
+          source,
+          ownerMessage,
+          triggers,
+          reorientPending: triggers.some((t) => t.blocking),
+          hookTriggers: hook.triggers,
+          hookNotes: hook.notes,
+          snapshot,
+          dailyTurnsSpent,
+          signal: controller.signal,
+          abort: (reason) => controller.abort(reason)
+        };
+        turn.orientation = this.orientation(fresh.id, { triggers, hookNotes: hook.notes });
+        this.turns.set(fresh.id, turn);
+        return turn;
+      } finally {
+        closeEntriesScope();
+      }
     } catch (err) {
       this._release(meta.dir, turnId);
       throw err;
@@ -1294,6 +1305,55 @@ class CaseRuntime {
     } else {
       log.warn(`Case ${meta.slug} asks ${rec.id} (${rec.urgency}): ${rec.text}. No channel can deliver it until stage 4; it waits.`);
     }
+  }
+
+  // ---- Playbooks (cases stage 6, program §4.11). installPlaybooks sets
+  // this.playbooks; without it every accessor is empty. ----
+
+  playbookSteps(id) {
+    return this.playbooks ? this.playbooks.steps(id) : [];
+  }
+
+  playbookBriefRules(id, executorId) {
+    return this.playbooks ? this.playbooks.briefRules(id, executorId) : [];
+  }
+
+  playbookSources(id, name = null) {
+    return this.playbooks ? this.playbooks.sources(id, name) : '';
+  }
+
+  playbookChanges(id) {
+    return this.playbooks ? this.playbooks.changes(id) : [];
+  }
+
+  // Called only by recordReorientation (the Reorient tool) with the running
+  // turn: the manager's acknowledge takes no lock and does not commit; the
+  // turn holds the lock and endTurn commits. Refused anywhere else. Only the
+  // playbook-update keys this turn showed are acknowledged (ruling T12-ack,
+  // as C2's I2): a change made mid-turn fires next turn.
+  acknowledgePlaybooks(id, turn = null) {
+    if (!this.playbooks) return { acknowledged: [], questionIds: [] };
+    const meta = this.getCase(id);
+    if (!turn || this.turns.get(meta.id) !== turn) {
+      throw new Error('acknowledgePlaybooks runs only inside a case turn (the Reorient tool).');
+    }
+    const shownKeys = (turn.triggers || [])
+      .filter((t) => t && t.kind === 'playbook-update' && typeof t.key === 'string')
+      .map((t) => t.key);
+    return this.playbooks.acknowledge(meta.id, { shownKeys });
+  }
+
+  // C6's package format has no safe defaults; C2's Ask reads this.
+  playbookSafeDefaults() {
+    return [];
+  }
+
+  syncGating(id) {
+    return this.playbooks ? this.playbooks.syncGating(id) : { created: [], unknowns: [], briefApplied: [] };
+  }
+
+  pendingGating(id) {
+    return this.playbooks ? this.playbooks.pendingGating(id) : [];
   }
 
   abortUnattended(reason = 'shutdown') {

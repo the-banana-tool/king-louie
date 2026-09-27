@@ -2,7 +2,7 @@ const path = require('path');
 const { createLogger } = require('../logging');
 const { acquireInstanceLock } = require('./pidfile');
 const { loadServiceConfig } = require('./config');
-const { ensureServicePaths, ensurePrivateDir } = require('../platform/paths');
+const { ensureServicePaths, ensurePrivateDir, asarUnpackedPath } = require('../platform/paths');
 const { attachServiceLogFile } = require('./log-file');
 
 const log = createLogger('service');
@@ -57,7 +57,7 @@ function adminDirApprovalOptions({ adminUid, configDir }) {
 function loadProfile(profile) {
   if (profile === 'agent') {
     return {
-      async start({ dataDir, features, ports, workspace, audit, contact = null, adminUid, configDir, executors }) {
+      async start({ dataDir, features, ports, workspace, audit, contact = null, playbooks = null, adminUid, configDir, executors }) {
         const { createCore } = require('../core');
         const { CHAT_DATA_DEFAULTS } = require('../core/settings');
         const { buildServicePorts } = require('./ports');
@@ -82,6 +82,7 @@ function loadProfile(profile) {
           nodeConfig, ports: servicePorts, profile: 'agent', serviceConfig: { audit }
         });
         let core;
+        let fleet = null;
         try {
           // createCore itself can throw synchronously (bad deps, a bad
           // phoneApprover.ttlMs, …), not just its start() — both go in the
@@ -97,6 +98,9 @@ function loadProfile(profile) {
             // the admin service.json only (runService loads it once, with
             // adminUid). The key is always present: it means service mode.
             contactConfig: contact ?? null,
+            // Cases stage 6 (ruling T14-admin): the playbook source allowlist
+            // and autoUpdate, from the admin service.json only.
+            playbooksConfig: playbooks ?? { sources: [], autoUpdate: false },
             isService: true,
             remoteApprovals: 'phone',
             phoneApprover: approvals.phoneApprover,
@@ -104,9 +108,13 @@ function loadProfile(profile) {
             approvals, // Cases stage 4 (wave 3): the phone contact channel (relay link, admin approvers, node identity)
             nodePolicy: nodeConfig.policy,
             builtinSkillsDir: path.join(__dirname, '..', '..', 'skills'),
+            examplesDir: asarUnpackedPath(path.join(__dirname, '..', '..', 'examples', 'playbooks')),
             // Cases stage 3: executors only from the admin service.json (R42);
             // always present, so the registry is always in service mode here.
             adminExecutors: executors || { entries: {}, packageRoots: [] },
+            // Cases stage 3's runbook executor reads this lazily; fleet stage
+            // 4's node hosts the one engine (R24), started after createCore.
+            get runbookEngine() { return fleet ? fleet.runbookEngine : null; },
             // The executor package root check is bound to the same admin
             // owner as node.yaml and the approver store (M16).
             ...(adminUid === undefined ? {} : { adminUid }),
@@ -138,7 +146,12 @@ function loadProfile(profile) {
           await core.whenListenersSettled();
           assertEnabledListenersBound(core, features);
           await desktopBridge.start({ core, ports: servicePorts, approvals });
+          // Fleet stage 4 §3.7: the runbook engine, JobManager, delegate
+          // sessions and the fleet link methods, hosted by the service.
+          const { startFleetNode } = require('../fleet/start');
+          fleet = await startFleetNode({ dataDir, nodeConfig, approvals, core, adminUid });
         } catch (err) {
+          if (fleet) await fleet.stop().catch(() => {});
           // Don't leave a half-started core (and its cron timers) behind.
           await desktopBridge.stop().catch(() => {});
           await core.shutdown().catch(() => {});
@@ -146,25 +159,33 @@ function loadProfile(profile) {
           throw err;
         }
         return {
-          // The bridge says bye and closes before the core goes down, and
-          // approvals (relay link, courier, audit ledger) stop last. Each
+          // The fleet node stops first (its link methods refuse and the
+          // courier handler is removed, so nothing is dispatched into a core
+          // that is shutting down), the bridge says bye and closes before the
+          // core goes down, and approvals (relay link, courier, audit
+          // ledger) stop last. Each
           // later step runs even if an earlier stop() throws (a wedged
           // dispatcher, say) — never skip one and leave cron timers, stores
           // or a live relay link running.
           stop: async () => {
             try {
-              await desktopBridge.stop();
+              if (fleet) await fleet.stop();
             } finally {
               try {
-                await core.shutdown();
+                await desktopBridge.stop();
               } finally {
-                await approvals.stop();
+                try {
+                  await core.shutdown();
+                } finally {
+                  await approvals.stop();
+                }
               }
             }
           },
           masterKeySource: servicePorts.masterKeySource,
           desktopBridge,
-          approvals
+          approvals,
+          fleet
         };
       }
     };
@@ -183,7 +204,40 @@ function loadProfile(profile) {
           dataDir, ...adminDirApprovalOptions({ adminUid, configDir }),
           nodeConfig, ports: servicePorts, profile: 'runbook', serviceConfig: { audit }
         });
-        return { stop: () => approvals.stop(), masterKeySource: servicePorts.masterKeySource, approvals };
+        let fleet;
+        try {
+          const { startFleetNode } = require('../fleet/start');
+          fleet = await startFleetNode({ dataDir, nodeConfig, approvals, adminUid });
+        } catch (err) {
+          await approvals.stop().catch(() => {});
+          throw err;
+        }
+        return {
+          stop: async () => {
+            try {
+              await fleet.stop();
+            } finally {
+              await approvals.stop();
+            }
+          },
+          masterKeySource: servicePorts.masterKeySource,
+          approvals,
+          fleet
+        };
+      }
+    };
+  }
+  if (profile === 'frontdoor') {
+    return {
+      // Fleet stage 4 §3.1: the front door requires only its own profile
+      // module (and node-config); no core, providers, tools or runbooks.
+      async start({ dataDir, adminUid, configDir, serviceConfig, deps = {} }) {
+        const { loadNodeConfig } = require('./node-config');
+        const { adminConfigDir } = require('../platform/paths');
+        const { startFrontDoor } = require('../frontdoor/profile');
+        const dir = configDir || adminConfigDir({ dataDir });
+        const nodeConfig = loadNodeConfig(adminDirOptions({ dataDir, adminUid, configDir: dir }));
+        return startFrontDoor({ dataDir, configDir: dir, ...(adminUid === undefined ? {} : { adminUid }), nodeConfig, serviceConfig, deps });
       }
     };
   }
@@ -256,7 +310,7 @@ async function runService({ dataDir: requestedDataDir, profile: profileOverride,
       const config = loadServiceConfig(dataDir, { profile: profileOverride }, adminUid === undefined ? {} : { adminUid });
       profile = config.profile;
       log.info('service starting', { profile, dataDir, workspace, pid: process.pid });
-      running = await loadProfile(profile).start({ dataDir, features: config.features, ports: config.ports, workspace, audit: config.audit, contact: config.contact, adminUid, executors: config.executors });
+      running = await loadProfile(profile).start({ dataDir, features: config.features, ports: config.ports, workspace, audit: config.audit, contact: config.contact, playbooks: config.playbooks, adminUid, executors: config.executors, serviceConfig: config });
     } catch (err) {
       // On Windows nothing reads the task's stderr, so the log file is the
       // only place a startup failure is visible.

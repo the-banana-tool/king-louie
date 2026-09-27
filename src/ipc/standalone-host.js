@@ -7,6 +7,7 @@ const { registerHandlers } = require('./register');
 const { createCore } = require('../core');
 const { CHAT_DATA_DEFAULTS } = require('../core/settings');
 const { createSafeStorageCipher } = require('../platform/cipher');
+const { asarUnpackedPath } = require('../platform/paths');
 const { createElectronPrompter } = require('../platform/electron-prompter');
 const { markLocalDesktopEvent } = require('../core/origin');
 const UiToastChannel = require('../notifications/channels/ui-toast');
@@ -69,6 +70,9 @@ function startStandaloneHost(deps) {
     openExternal: (url) => shell.openExternal(url),
     uiToastChannel: new UiToastChannel({ Notification }),
     builtinSkillsDir: path.join(appDir, 'skills'),
+    // Cases stage 6: the reference playbooks behind example:<name> sources.
+    // Inside a packaged app they are unpacked (build.asarUnpack): final review I4.
+    examplesDir: asarUnpackedPath(path.join(appDir, 'examples', 'playbooks')),
     // One session next to a running service: nothing here may act for it.
     // Cron is built paused (never started) so no job can fire while
     // core.start() is still loading skills.

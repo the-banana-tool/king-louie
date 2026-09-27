@@ -2996,3 +2996,18 @@ body {
 .questions-policy-ladder { flex: 1; font-family: var(--font-mono); }
 .questions-policy-channels { margin: 4px 0; padding-left: 16px; font-size: 0.8em; color: var(--text-muted); }
 .questions-policy-channels .is-ready { color: var(--success); }
+
+/* Cases stage 6: playbooks */
+.chat-case-new { flex-wrap: wrap; }
+.playbook-picker { flex-basis: 100%; display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.playbook-example-list { display: flex; flex-direction: column; gap: 2px; }
+.playbook-example, .playbook-accept { font-size: 12px; color: var(--text-secondary); }
+.case-playbooks-section { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.playbook-heading, .playbook-label { font-weight: 600; font-size: 12px; }
+.playbook-row, .playbook-proposal, .playbook-raise { border: 1px solid var(--border-default); border-radius: 6px; padding: 6px; font-size: 12px; }
+.playbook-state-invalid, .playbook-state-missing, .playbook-state-unavailable { border-color: var(--accent); }
+.playbook-warning, .playbook-empty, .playbook-status { color: var(--text-secondary); font-size: 12px; }
+.playbook-pending { font-size: 12px; }
+.playbook-actions, .playbook-add { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.playbook-button { font-size: 12px; }
+.playbook-patch { max-height: 240px; overflow: auto; font-size: 11px; white-space: pre; }

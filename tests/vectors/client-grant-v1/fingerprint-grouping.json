@@ -1,0 +1,44 @@
+{
+  "name": "fingerprint-grouping",
+  "consumers": [
+    "node",
+    "ios",
+    "android"
+  ],
+  "given": {},
+  "input": {
+    "node_ids": [
+      "kl-hnef32472qzibi5r",
+      "kl-c2ubd6jjqumalzt5",
+      "kl-nt4ritcfj5kepq3y"
+    ],
+    "typed_codes": [
+      "q7k-m2x",
+      "Q7KM2X",
+      "o1l abc",
+      "Q7KM2",
+      "Q7KM2U"
+    ]
+  },
+  "expect": {
+    "node_fingerprints": [
+      "kl-hnef 3247 2qzi bi5r",
+      "kl-c2ub d6jj quma lzt5",
+      "kl-nt4r itcf j5ke pq3y"
+    ],
+    "user_codes": [
+      "Q7KM2X",
+      "Q7KM2X",
+      "011ABC",
+      null,
+      null
+    ],
+    "displayed": [
+      "Q7K-M2X",
+      "Q7K-M2X",
+      "011-ABC",
+      null,
+      null
+    ]
+  }
+}

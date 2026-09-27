@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const yaml = require('js-yaml');
+const { parseYaml } = require('../platform/yaml');
 const git = require('./git');
 const { uniqueSlug } = require('./slug');
 const { assertKnownType } = require('./case-types');
@@ -27,11 +28,41 @@ const BRIEF_TEMPLATE = (objective) => [
     materiality: { tell: [], ignore: [] },
     safeDefaults: [],
     gating: { complete: false }
-  }).trimEnd(),
+  }, { noRefs: true }).trimEnd(),
   '---',
   '',
   ''
 ].join('\n');
+
+// Every key a stage writes to case.yaml, with the stage that owns it
+// (cases stage 6 plan, Task 1). The strict parser accepts any key; this
+// table documents them and tests/cases-store-yaml.test.js round-trips each.
+const CASE_YAML_KEYS = Object.freeze({
+  id: 'C1',
+  slug: 'C1',
+  title: 'C1',
+  type: 'C1',
+  status: 'C1',
+  created: 'C1',
+  playbooks: 'C6',
+  related: 'C5',
+  lastTurnAt: 'C2',
+  lastOwnerTurnAt: 'C2',
+  statusReason: 'C2',
+  budget: 'C2',
+  roles: 'C2',
+  autonomy: 'C2',
+  channels: 'C4'
+});
+
+// case.yaml through the strict parser (program §4.11): core schema only, so
+// timestamps and dates stay strings, and duplicate keys or custom tags throw.
+// Returns null for a document that is not a mapping or names no id.
+function parseCaseYaml(text) {
+  const meta = parseYaml(String(text).replace(/^﻿/, ''));
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta) || !meta.id) return null;
+  return meta;
+}
 
 const newId = () => `${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`;
 
@@ -65,7 +96,7 @@ class CaseStore {
         fs.mkdirSync(path.join(dir, d));
         fs.writeFileSync(path.join(dir, d, '.gitkeep'), '');
       }
-      fs.writeFileSync(path.join(dir, 'case.yaml'), yaml.dump(meta));
+      fs.writeFileSync(path.join(dir, 'case.yaml'), yaml.dump(meta, { noRefs: true }));
       fs.writeFileSync(path.join(dir, 'brief.md'), BRIEF_TEMPLATE(objective));
       fs.writeFileSync(path.join(dir, 'facts.jsonl'), '');
       fs.writeFileSync(path.join(dir, 'decisions.md'), '# Decisions\n');
@@ -82,9 +113,14 @@ class CaseStore {
 
   _read(dir) {
     try {
-      const meta = yaml.load(fs.readFileSync(path.join(dir, 'case.yaml'), 'utf8'));
-      if (!meta || typeof meta !== 'object' || !meta.id) return null;
-      return { playbooks: [], related: [], ...meta, dir };
+      const meta = parseCaseYaml(fs.readFileSync(path.join(dir, 'case.yaml'), 'utf8'));
+      if (!meta) return null;
+      return {
+        ...meta,
+        playbooks: Array.isArray(meta.playbooks) ? meta.playbooks : [],
+        related: Array.isArray(meta.related) ? meta.related : [],
+        dir
+      };
     } catch (err) {
       if (err.code !== 'ENOENT') log.warn(`Unreadable case.yaml in ${dir}: ${err.message}`);
       return null;
@@ -111,9 +147,9 @@ class CaseStore {
       throw new Error(`Invalid case status: ${patch.status}`);
     }
     const { dir, ...meta } = { ...current, ...patch, id: current.id, slug: current.slug };
-    fs.writeFileSync(path.join(dir, 'case.yaml'), yaml.dump(meta));
+    fs.writeFileSync(path.join(dir, 'case.yaml'), yaml.dump(meta, { noRefs: true }));
     return { ...meta, dir };
   }
 }
 
-module.exports = { CaseStore, STATUSES };
+module.exports = { CaseStore, STATUSES, CASE_YAML_KEYS, parseCaseYaml };

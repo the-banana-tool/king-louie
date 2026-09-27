@@ -43,12 +43,24 @@ function registerCaseHandlers(ipcMain, context = {}) {
     { ok: true, cases: runtime().listCases().map(summarize) }
   )));
 
-  ipcMain.handle(IPC.CASE_CREATE, wrapHandler(IPC.CASE_CREATE, async (_event, { title, type, objective, chatId, force } = {}) => {
+  ipcMain.handle(IPC.CASE_CREATE, wrapHandler(IPC.CASE_CREATE, async (_event, payload) => {
+    // A non-object payload (null, an array) counts as {} and gets the fixed
+    // title error below, never a destructuring TypeError.
+    const form = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
+    let { type } = form;
+    const { title, objective, chatId, force, playbooks, acceptBudgetRaises } = form;
     if (typeof title !== 'string' || !title.trim()) return { ok: false, error: 'A case needs a title.' };
     if (type !== undefined && (typeof type !== 'string' || !type.trim())) return { ok: false, error: 'type must be a non-empty string.' };
     if (objective !== undefined && (typeof objective !== 'string' || !objective.trim())) return { ok: false, error: 'objective must be a non-empty string.' };
     if (force !== undefined && typeof force !== 'boolean') return { ok: false, error: 'force must be true or false.' };
     if (chatId && !context.getChats().some((c) => c.id === chatId)) return { ok: false, error: 'Chat not found.' };
+    // Cases stage 6: the owner's chosen playbooks are checked, fetched and
+    // validated before the case exists; any failure refuses the create. The
+    // type comes from the playbooks when the form gives none.
+    const playbookIpc = require('./playbook-handlers');
+    const withPlaybooks = await playbookIpc.preparePlaybooksForCreate(context, { playbooks, type, acceptBudgetRaises });
+    if (!withPlaybooks.ok) return withPlaybooks;
+    if (!type && withPlaybooks.type) type = withPlaybooks.type;
     let info;
     try {
       info = await runtime().createCase({ title: title.trim(), type: type || 'general', objective: objective || '', force: force === true });
@@ -58,7 +70,8 @@ function registerCaseHandlers(ipcMain, context = {}) {
       if (err && err.code === 'UNKNOWN_CASE_TYPE') return { ok: false, error: err.message, code: err.code };
       throw err;
     }
-    return { ok: true, case: summarize(info), chat: chatId ? attach(chatId, info.id) : null };
+    const attached = await playbookIpc.attachPlaybooksAfterCreate(context, info.id, withPlaybooks, { acceptBudgetRaises: acceptBudgetRaises === true });
+    return { ok: true, case: summarize(info), chat: chatId ? attach(chatId, info.id) : null, ...attached };
   }));
 
   ipcMain.handle(IPC.CASE_ATTACH, wrapHandler(IPC.CASE_ATTACH, async (_event, { chatId, caseId } = {}) => {

@@ -3,7 +3,7 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert');
 const IPC = require('../src/ipc/constants');
 const {
-  classifyChannel, servedChannels, isRendererEvent, isTimeoutExempt, PROMPT_EVENTS, RENDERER_EVENTS, PROXIED_DOMAINS
+  classifyChannel, servedChannels, isRendererEvent, isTimeoutExempt, channelTimeoutMs, LONG_CHANNEL_TIMEOUT_MS, PROMPT_EVENTS, RENDERER_EVENTS, PROXIED_DOMAINS
 } = require('../src/desktop-bridge/allowlist');
 const { listIpcChannels } = require('../src/ipc/channel-inventory');
 const { registerDesktopHandlers, DESKTOP_METHODS } = require('../src/ipc/desktop-handlers');
@@ -82,6 +82,18 @@ describe('renderer events', () => {
   it('exempts only long-running calls from the 120 s timeout', () => {
     for (const ch of ['chat:sendMessage', 'tool:execute', 'cron:run', 'case:ingestFile']) assert.strictEqual(isTimeoutExempt(ch), true, ch);
     for (const ch of ['chat:load', 'case:list', 'settings:load']) assert.strictEqual(isTimeoutExempt(ch), false, ch);
+  });
+
+  // Ruling T14-bridgetimeout: the long playbook/case channels get a 10-minute,
+  // still bounded, timeout; nothing new becomes unbounded.
+  it('gives the long playbook channels a bounded 10-minute timeout', () => {
+    assert.strictEqual(LONG_CHANNEL_TIMEOUT_MS, 10 * 60 * 1000);
+    for (const ch of ['case:create', 'case:addPlaybook', 'case:checkPlaybookUpdates', 'case:updatePlaybook', 'case:applyPlaybookProposal']) {
+      assert.strictEqual(channelTimeoutMs(ch, 120000), LONG_CHANNEL_TIMEOUT_MS, ch);
+      assert.strictEqual(isTimeoutExempt(ch), false, ch);
+    }
+    for (const ch of ['case:playbooks', 'case:removePlaybook', 'case:rejectPlaybookProposal', 'chat:load']) assert.strictEqual(channelTimeoutMs(ch, 120000), 120000, ch);
+    for (const ch of ['chat:sendMessage', 'case:ingestFile']) assert.strictEqual(channelTimeoutMs(ch, 120000), 0, ch);
   });
 });
 

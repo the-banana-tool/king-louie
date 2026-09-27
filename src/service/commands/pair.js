@@ -1,13 +1,14 @@
 // `king-louie-service pair <url>` (spec §3.11). `wss://host:port` pairs this
 // node with its relay: the one-time code from `relay code <node-name>` is read
 // from stdin, and the relay's key is pinned in the node's store. `https://` is
-// the stage 4 front door's flow (F4 extends this module, R22).
+// the stage 4 front door's flow (./pair-front-door.js).
 const { buildServicePorts } = require('../ports');
 const { loadNodeConfig } = require('../node-config');
 const { restoreDataDirOwnership } = require('../ownership');
 const { readLine, runningServicePid } = require('./io');
 
-const USAGE = 'Usage: king-louie-service pair <front-door-url> [--data-dir DIR]\n'
+const USAGE = 'Usage: king-louie-service pair <front-door-url> [--code CODE] [--ca-file PEM] [--yes-fingerprint "kl-…"] [--data-dir DIR]\n'
+  + '       pair https://mcp.<domain> pairs with a front door; the code comes from the phone app or `frontdoor code` (typed at the prompt, it stays out of shell history)\n'
   + '       pair wss://relay-host:port pairs with a phone-approval relay; the one-time code is read from stdin\n';
 
 async function readAll(stdin) {
@@ -16,7 +17,7 @@ async function readAll(stdin) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-async function runPair({ url, dataDir, io, deps = {} }) {
+async function runPair({ url, dataDir, io, flags = {}, deps = {} }) {
   if (!url) {
     io.stderr.write(USAGE);
     return 2;
@@ -32,6 +33,10 @@ async function runPair({ url, dataDir, io, deps = {} }) {
   const relayScheme = useTls ? 'wss:' : 'ws:';
   if (target.protocol !== 'https:' && target.protocol !== relayScheme) {
     io.stderr.write(`Unsupported URL scheme ${target.protocol}\n${USAGE}`);
+    return 2;
+  }
+  if (target.protocol === relayScheme && (flags.code !== undefined || flags.caFile !== undefined || flags.yesFingerprint !== undefined)) {
+    io.stderr.write(`--code, --ca-file and --yes-fingerprint are for https:// front doors; a relay code is read from stdin.\n${USAGE}`);
     return 2;
   }
   // Creating the identity writes to the service's store, which a running
@@ -51,12 +56,9 @@ async function runPair({ url, dataDir, io, deps = {} }) {
     const identity = getOrGenerateNodeIdentity(ports.store, ports.cipher, nodeCfg.name);
 
     if (target.protocol === 'https:') {
-      // What §5.1 step 1 shows the owner. The front door exchange is stage 4's.
-      io.stdout.write(`Node Name: ${nodeCfg.name}\n`);
-      io.stdout.write(`Node ID: ${identity.nodeId}\n`);
-      io.stdout.write(`TLS Fingerprint: ${identity.tlsFingerprint}\n`);
-      io.stderr.write(`Pairing with a front door is not available yet: the front door is built in stage 4. Nothing was sent to ${url}.\n`);
-      return 1;
+      const { pairWithFrontDoor } = require('./pair-front-door');
+      const { adminConfigDir } = require('../../platform/paths');
+      return await pairWithFrontDoor({ target, configDir: deps.configDir || adminConfigDir({ dataDir }), nodeCfg, identity, io, flags, deps });
     }
 
     const port = Number(target.port);
