@@ -829,10 +829,17 @@ function registerChatHandlers(ipcMain, context = {}) {
       return { ok: true };
     }
     // No run of this chat: a case chat may be watching a wake-up turn on its
-    // case, which the owner can stop from here (spec 2026-09-27 §9).
+    // case, which the owner can stop from here (spec 2026-09-27 §9). An
+    // owner turn is never stopped through this fallback: it belongs to some
+    // chat's own run, and that chat's own Stop already covers it (fix round
+    // 1) — two chats can be attached to the same case, and aborting an
+    // owner turn from a chat that isn't running it would abort the turn's
+    // signal without ever aborting the run's own abortController, so that
+    // other chat keeps streaming into a turn that no longer exists.
     const chat = getChats().find((item) => item.id === chatId);
     const caseRuntime = chat?.caseId && typeof context.getCaseRuntime === 'function' ? context.getCaseRuntime() : null;
-    if (caseRuntime && typeof caseRuntime.abortTurn === 'function' && caseRuntime.abortTurn(chat.caseId, 'stopped by owner')) {
+    const runningTurn = caseRuntime && typeof caseRuntime.runningTurn === 'function' ? caseRuntime.runningTurn(chat.caseId) : null;
+    if (caseRuntime && runningTurn?.source !== 'owner' && typeof caseRuntime.abortTurn === 'function' && caseRuntime.abortTurn(chat.caseId, 'stopped by owner')) {
       return { ok: true, caseTurn: true };
     }
     return { ok: false, error: 'No active response for this chat.' };

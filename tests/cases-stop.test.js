@@ -109,6 +109,27 @@ describe('Stop on a case chat', () => {
     const h = chatHarness({ provider: {}, chat: { id: 'chat-1', title: 'Case chat', caseId: 'case-1', messages: [] }, overrides: { getCaseRuntime: () => runtime } });
     assert.deepStrictEqual(await h.stop(), { ok: false, error: 'No active response for this chat.' });
   });
+
+  // Fix round 1: two chats can be attached to the same case. An owner turn
+  // belongs to whichever chat's own run started it — that chat's own Stop
+  // already covers it (it aborts its own abortController, which is wired to
+  // the turn). Aborting the turn from a *different* chat's Stop (this
+  // fallback, since that second chat has no run of its own) would abort the
+  // turn's signal without ever touching the first chat's abortController,
+  // leaving it half-stopped: still streaming into a turn that no longer
+  // exists. A wake-up turn belongs to no chat's run, so it is still
+  // stoppable this way.
+  it('an owner turn on a case is not aborted by Stop from a second chat attached to the same case; a wake-up turn still is', async () => {
+    const owner = fakeRuntime({ running: { turnId: 'turn-1', source: 'owner' } });
+    const hOwnerCase = chatHarness({ provider: {}, chat: { id: 'chat-b', title: 'Case chat B', caseId: 'case-1', messages: [] }, overrides: { getCaseRuntime: () => owner.runtime } });
+    assert.deepStrictEqual(await hOwnerCase.stop(), { ok: false, error: 'No active response for this chat.' });
+    assert.deepStrictEqual(owner.calls.aborted, [], 'an owner turn must never be aborted through this fallback');
+
+    const wakeup = fakeRuntime({ running: { turnId: 'wakeup-1', source: 'wakeup' } });
+    const hWakeupCase = chatHarness({ provider: {}, chat: { id: 'chat-c', title: 'Case chat C', caseId: 'case-1', messages: [] }, overrides: { getCaseRuntime: () => wakeup.runtime } });
+    assert.deepStrictEqual(await hWakeupCase.stop(), { ok: true, caseTurn: true });
+    assert.deepStrictEqual(wakeup.calls.aborted, [['case-1', 'stopped by owner']]);
+  });
 });
 
 describe('the case view shows Stop while a turn runs', () => {
