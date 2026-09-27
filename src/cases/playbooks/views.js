@@ -111,9 +111,12 @@ function stepsOf(entries, { registry = null } = {}) {
 }
 
 // Rules for every executor, then this executor's, each one-lined, capped
-// and prefixed [<playbook>], deduped. These go to executors, not the model,
-// so they are not framed: they are instructions to the executor by design,
-// and C3's outbound gate decides every payload. executorId is only a
+// and prefixed [<playbook>], deduped. These go to executors (C3's draft
+// prompt, "Executor rules:"), not to the case model, so they are not framed:
+// they are instructions to the executor by design, and C3's outbound gate
+// decides every payload. The case model sees them only framed, through
+// Playbook.read section briefRules; C3's orientation section prints just
+// their count (final review I2). executorId is only a
 // lookup key (own keys only: "__proto__" or "constructor" find nothing).
 function briefRulesOf(entries, executorId) {
   const seen = new Set();

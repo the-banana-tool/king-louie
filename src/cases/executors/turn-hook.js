@@ -51,10 +51,16 @@ function renderExecutorSection(reg, caseId, { maxChars = 3000 } = {}) {
       lines.push(`- ${e.id} ${e.executor}: ${money(e.caps.usd - (Number(e.usage?.usd) || 0))} of ${money(e.caps.usd)} left, ${e.caps.contacts - usedContacts} of ${e.caps.contacts} contacts left, window ${e.window.start} to ${e.window.end} (${e.window.tz})`);
     }
   }
-  const rules = ids.map((id) => [id, reg.briefRules(id, { caseId })]).filter(([, r]) => r.length);
+  // Playbook rules (the registry's extra sources) are third-party text: the
+  // orientation gives only their count and where to read them framed; the
+  // draft prompt still carries them for the executor (final review I2).
+  const rules = ids.map((id) => [id, reg.briefRulesBySource(id, { caseId })]).filter(([, r]) => r.own.length || r.extra.length);
   if (rules.length) {
     lines.push('', 'Brief rules for executors:');
-    for (const [id, list] of rules) for (const rule of list) lines.push(`- ${id}: ${rule}`);
+    for (const [id, { own, extra }] of rules) {
+      for (const rule of own) lines.push(`- ${id}: ${rule}`);
+      if (extra.length) lines.push(`- ${id}: ${extra.length} playbook brief rule${extra.length === 1 ? '' : 's'} (third-party; Playbook.read section briefRules)`);
+    }
   }
   const notes = typeof reg.opsNotes === 'function' ? reg.opsNotes(caseId, ids) : '';
   if (notes) lines.push('', notes);
