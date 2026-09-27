@@ -706,3 +706,123 @@ describe('review questions for documents King Louie added', { skip: NEEDS_GIT },
     assert.ok(results.some((r) => r.status === 'fulfilled'));
   });
 });
+
+// Ruling M16: create-core's shutdown awaits close() before releaseAll()
+// forces the case locks away, so nothing commits after that.
+describe('IngestService.close', { skip: NEEDS_GIT }, () => {
+  const shuttingDown = (e) => e instanceof IngestError && e.code === 'SHUTTING_DOWN';
+  const settledWithin = (p, ms) => Promise.race([p.then(() => true), new Promise((r) => setTimeout(() => r(false), ms))]);
+
+  it('during a slow model call: returns without waiting for it, drops the queue, refuses new work and never commits again', async () => {
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    let entered;
+    const inModel = new Promise((r) => { entered = r; });
+    const h = await ingestHarness({
+      model: async (req) => {
+        if (req.purpose === 'extract') {
+          entered();
+          await gate;
+        }
+        return defaultModel(req);
+      }
+    });
+    const a = await h.svc.store(h.caseId, { name: 'payoff.txt', bytes: Buffer.from(PAYOFF_TEXT), origin: { kind: 'owner-drop' } });
+    await inModel;
+    // Queued behind the read that waits on the model.
+    const b = await h.svc.store(h.caseId, { name: 'second.txt', bytes: Buffer.from(`${PAYOFF_TEXT}\nSecond copy.`), origin: { kind: 'owner-paste' } });
+    const queued = h.svc.extract(h.caseId, b.docId, { by: 'owner' });
+    const before = await commits(h.dir);
+    assert.strictEqual(await settledWithin(h.svc.close(), 2000), true, 'close does not wait for the model');
+    // Bounded: a job left in the queue would never settle.
+    await assert.rejects(Promise.race([queued, new Promise((_, rej) => setTimeout(() => rej(new Error('still queued')), 2000))]), shuttingDown);
+    assert.deepStrictEqual(h.svc.queue, []);
+    assert.strictEqual(h.svc.timer, null);
+    await assert.rejects(Promise.race([h.svc.extract(h.caseId, a.docId, { by: 'owner' }), new Promise((_, rej) => setTimeout(() => rej(new Error('queued after close')), 2000))]), shuttingDown);
+    await assert.rejects(h.svc.store(h.caseId, { name: 'third.txt', bytes: Buffer.from('Third invented page.'), origin: { kind: 'owner-drop' } }), shuttingDown);
+    await assert.rejects(h.svc.review(h.caseId, a.docId, 'p-001', { action: 'reject', by: 'panel' }), shuttingDown);
+    release();
+    await h.svc.drain();
+    assert.deepStrictEqual(await commits(h.dir), before, 'nothing commits after close');
+    assert.deepStrictEqual(h.calls.map((c) => c.purpose), ['extract'], 'no model call after close');
+    // Left as it was for resume at the next start.
+    assert.ok(['extracting', 'proposing'].includes(files.readRecord(h.dir, a.docId).status));
+    assert.strictEqual(files.pendingPublishes(h.dir).length, 0);
+  });
+
+  it('a scan read cut off by close makes no further vision call', async () => {
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    let entered;
+    const inModel = new Promise((r) => { entered = r; });
+    const h = await ingestHarness({
+      model: async (req) => {
+        if (req.purpose === 'ocr') {
+          entered();
+          await gate;
+        }
+        return defaultModel(req);
+      }
+    });
+    const scan = await makePdf({ pages: [{ scan: true }, { scan: true }, { scan: true }] });
+    await h.svc.store(h.caseId, { name: 'scan.pdf', bytes: scan, origin: { kind: 'owner-drop' } });
+    await inModel;
+    const before = await commits(h.dir);
+    await h.svc.close();
+    release();
+    await h.svc.drain();
+    assert.deepStrictEqual(h.calls.map((c) => c.purpose), ['ocr'], 'pages 2 and 3 are not sent after close');
+    assert.deepStrictEqual(await commits(h.dir), before);
+  });
+
+  it('stops the publish retry timer and never arms it again', async () => {
+    const h = await ingestHarness();
+    h.svc.pending.add(`${h.caseId}|doc-000000000000`);
+    h.svc._arm();
+    assert.ok(h.svc.timer, 'armed while a publish is pending');
+    await h.svc.close();
+    assert.strictEqual(h.svc.timer, null);
+    h.svc._arm();
+    assert.strictEqual(h.svc.timer, null);
+  });
+
+  it('store and adopt after close open no PDF reader', async () => {
+    let opened = 0;
+    const h = await ingestHarness({ openPdf: async (...args) => { opened += 1; return realOpenPdf(...args); } });
+    await h.svc.close();
+    const pdf = await makePdf({ pages: [{ text: 'An invented page of words for the reader.' }] });
+    await assert.rejects(h.svc.store(h.caseId, { name: 'late.pdf', bytes: pdf, origin: { kind: 'owner-drop' } }), shuttingDown);
+    fs.mkdirSync(path.join(h.dir, 'sources', 'inbox'), { recursive: true });
+    fs.writeFileSync(path.join(h.dir, 'sources', 'inbox', 'late.pdf'), pdf);
+    await assert.rejects(h.svc.adopt(h.caseId, 'sources/inbox/late.pdf'), shuttingDown);
+    assert.strictEqual(opened, 0);
+  });
+
+  it('awaits a publish already inside the case lock', async () => {
+    const h = await ingestHarness({ status: 'paused' });
+    const original = h.runtime.systemAction.bind(h.runtime);
+    let hold = null;
+    let entered;
+    const inside = new Promise((r) => { entered = r; });
+    h.runtime.systemAction = (id, label, fn, opts) => original(id, label, async (m) => {
+      if (hold) {
+        const g = hold;
+        hold = null;
+        entered();
+        await g;
+      }
+      return fn(m);
+    }, opts);
+    let release;
+    hold = new Promise((r) => { release = r; });
+    const storing = h.svc.store(h.caseId, { name: 'payoff.txt', bytes: Buffer.from(PAYOFF_TEXT), origin: { kind: 'owner-drop' } });
+    await inside;
+    const closing = h.svc.close();
+    assert.strictEqual(await settledWithin(closing, 100), false, 'close waits for the publish in the lock');
+    release();
+    await closing;
+    const out = await storing;
+    assert.ok((await commits(h.dir)).includes(`ingest-${out.docId}: stored payoff.txt`));
+    await h.svc.close();
+  });
+});

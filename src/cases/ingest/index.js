@@ -146,6 +146,10 @@ class IngestService {
     this.idle = Promise.resolve();
     this.timer = null;
     this.pending = new Set();
+    // Set by close() (ruling M16); every case write in flight is tracked so
+    // close() can await it.
+    this.closed = false;
+    this.inFlight = new Set();
     SERVICES.set(runtime, this);
   }
 
@@ -260,7 +264,7 @@ class IngestService {
     };
     const found = bad(meta.dir);
     if (!found) return;
-    await this.runtime.systemAction(meta.id, `ingest ${docId}: failed`, async (m) => {
+    await this._locked(meta.id, `ingest ${docId}: failed`, async (m) => {
       const now = bad(m.dir);
       if (!now) return;
       const note = noteOf(now.err);
@@ -274,6 +278,7 @@ class IngestService {
   // ---- storing ----
 
   async store(caseId, { name, mime, bytes, origin } = {}) {
+    this._assertOpen();
     const meta = this.runtime.getCase(caseId);
     const kind = origin?.kind;
     if (!ORIGIN_KINDS.has(kind)) throw new IngestError('BAD_ORIGIN', `origin.kind must be one of ${[...ORIGIN_KINDS].join(', ')}.`);
@@ -289,7 +294,7 @@ class IngestService {
     const docId = store.docIdFor(hash);
     const originRec = { kind, at: this.now().toISOString() };
     await this._refuseForgedRecord(meta, docId);
-    const result = await this.runtime.systemAction(meta.id, `ingest ${docId}: store`, async (m) => {
+    const result = await this._locked(meta.id, `ingest ${docId}: store`, async (m) => {
       const out = store.storeDocument(m.dir, {
         name: label, mime: type.mime, bytes: buf, origin: originRec, now: this.now(), timeZone: this._timeZone(), maxBytes: cfg.maxBytes, pages: pageCount
       });
@@ -303,6 +308,7 @@ class IngestService {
   }
 
   async adopt(caseId, relPath, { origin = { kind: 'tool' } } = {}) {
+    this._assertOpen();
     const meta = this.runtime.getCase(caseId);
     if (origin?.kind !== 'tool') throw new IngestError('BAD_ORIGIN', 'Adopted files have origin.kind "tool".');
     const cfg = this.settings();
@@ -310,7 +316,7 @@ class IngestService {
     const pageCount = await this._pageCount(found.mime, found.bytes, found.name, cfg);
     const originRec = { kind: 'tool', at: this.now().toISOString() };
     await this._refuseForgedRecord(meta, found.docId);
-    const result = await this.runtime.systemAction(meta.id, `ingest ${found.docId}: adopt`, async (m) => {
+    const result = await this._locked(meta.id, `ingest ${found.docId}: adopt`, async (m) => {
       // The file is read outside the lock (page count) and again inside: a
       // file that changed in between is refused before a sidecar is
       // written, not recorded with the other version's page count. The
@@ -365,6 +371,7 @@ class IngestService {
   // no page cap), 'tool' and 'auto' (capped per call), 'resume'.
   extract(caseId, docId, { pages = null, by = 'owner' } = {}) {
     try {
+      this._assertOpen();
       store.checkDocId(docId);
       if (!BY.has(by)) throw new IngestError('BAD_REQUEST', `by must be one of ${[...BY].join(', ')}.`);
       const meta = this.runtime.getCase(caseId);
@@ -395,6 +402,44 @@ class IngestService {
       }
       this.running = false;
     })();
+  }
+
+  // ---- shutdown (ruling M16) ----
+
+  _assertOpen() {
+    if (this.closed) throw new IngestError('SHUTTING_DOWN', 'King Louie is shutting down; document ingest is stopped.');
+  }
+
+  // Every case write goes through here: refused once closed, and tracked
+  // while it runs so close() can await it.
+  _locked(caseId, label, fn, opts) {
+    this._assertOpen();
+    const p = this.runtime.systemAction(caseId, label, fn, opts);
+    this.inFlight.add(p);
+    const done = () => this.inFlight.delete(p);
+    p.then(done, done);
+    return p;
+  }
+
+  // No model call starts once closed: a read cut off here is left as it is
+  // on disk and resumed at the next start.
+  _callModel(req) {
+    this._assertOpen();
+    return this.callModel(req);
+  }
+
+  // Called by create-core's shutdown before releaseAll() (ruling M16): stops
+  // the retry timer, refuses new jobs and case writes with SHUTTING_DOWN,
+  // drops the queue, and waits for the case writes already inside a lock.
+  // A model call in flight is not awaited; what it returns is never
+  // published (its publish is refused), so nothing commits after this.
+  async close() {
+    this.closed = true;
+    this.stop();
+    for (const job of this.queue.splice(0)) {
+      job.reject(new IngestError('SHUTTING_DOWN', 'King Louie is shutting down; document ingest is stopped.'));
+    }
+    await Promise.allSettled([...this.inFlight]);
   }
 
   // Resolves when the queue is empty (tests and shutdown).
@@ -436,7 +481,7 @@ class IngestService {
       ...(payload.question || prior?.question ? { question: true } : {})
     };
     try {
-      const out = await this.runtime.systemAction(meta.id, `ingest ${docId}: ${merged.message}`, async (m) => this._apply(m, merged), {
+      const out = await this._locked(meta.id, `ingest ${docId}: ${merged.message}`, async (m) => this._apply(m, merged), {
         commitMessage: `ingest-${docId}: ${merged.message}`
       });
       files.clearPendingPublish(meta.dir, docId);
@@ -500,7 +545,7 @@ class IngestService {
   }
 
   _arm() {
-    if (this.timer || !this.pending.size) return;
+    if (this.closed || this.timer || !this.pending.size) return;
     this.timer = setInterval(() => {
       this.retryPending().catch((err) => this.log.warn(`Retrying ingest publishes failed: ${err.message}`));
     }, this.retryMs);
@@ -650,7 +695,7 @@ class IngestService {
     let lastError = null;
     for (let attempt = 0; attempt < 2 && !res; attempt += 1) {
       try {
-        res = await this.callModel({
+        res = await this._callModel({
           purpose: 'ocr',
           caseId: meta.id,
           provider: sel.provider,
@@ -820,7 +865,7 @@ class IngestService {
       for (let attempt = 0; attempt < 2 && parsed === null && !ctx.stop; attempt += 1) {
         let res;
         try {
-          res = await this.callModel({
+          res = await this._callModel({
             purpose: 'extract',
             caseId: meta.id,
             provider: sel.provider,
@@ -898,7 +943,7 @@ class IngestService {
     const pageText = text.pages.find((x) => x.n === p.anchor.page)?.text || '';
     let res;
     try {
-      res = await this.callModel({
+      res = await this._callModel({
         purpose: 'verify',
         caseId: meta.id,
         provider: sel.provider,
@@ -1420,7 +1465,7 @@ class IngestService {
       throw new IngestError('BAD_PROPOSAL_ID', 'A proposal id looks like p-001.');
     }
     const req = this._reviewRequest(opts);
-    return this.runtime.systemAction(caseId, `ingest ${docId}: review ${proposalId}`, async (m) => {
+    return this._locked(caseId, `ingest ${docId}: review ${proposalId}`, async (m) => {
       const ctx = { cfg: this.settings(), bytes: null, pdf: null };
       try {
         return await this._reviewLocked(m, docId, proposalId, req, ctx);
@@ -1451,7 +1496,7 @@ class IngestService {
   async acceptVerified(caseId, docId, { by = 'panel' } = {}) {
     store.checkDocId(docId);
     if (typeof by !== 'string' || !REVIEWER.test(by)) throw new IngestError('BAD_REQUEST', 'by must be "panel" or "question:<question id>".');
-    return this.runtime.systemAction(caseId, `ingest ${docId}: accept verified`, async (m) => {
+    return this._locked(caseId, `ingest ${docId}: accept verified`, async (m) => {
       this._foldKept(m, docId);
       const raw = files.readRecord(m.dir, docId);
       if (!raw) throw new IngestError('NOT_FOUND', `No document ${docId} in this case.`);

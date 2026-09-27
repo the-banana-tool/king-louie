@@ -74,6 +74,7 @@ const WebhookRegistry = require('../webhooks/webhook-registry');
 const WebhookHandler = require('../webhooks/webhook-handler');
 const WebhookServer = require('../webhooks/webhook-server');
 const { createContactHost } = require('../cases/contact-host');
+const { shutdownPdfSandbox } = require('../cases/ingest/pdf-sandbox');
 const { initializeMesh } = require('../mesh');
 const LLMRouter = require('../providers/llm-router');
 const { WorkflowEngine } = require('../workflows/workflow-engine');
@@ -2776,6 +2777,8 @@ function createCore(deps = {}) {
     migrateLegacyBridgeChatOrigins();
     initializeTools();
     await initializeAgentInfrastructure();
+    // Cases stage 7: publishes kept from a busy lock, then reads cut off by a quit.
+    if (ingestService) ingestService.resume().catch((err) => log.warn(`Resuming document ingest failed: ${err.message}`));
     // In service mode (serviceMode above) the owner identity comes from the
     // admin config only; the desktop reads the owner and addresses from
     // settings. sendExternal's outbound gate is contact-host's
@@ -2846,6 +2849,16 @@ function createCore(deps = {}) {
       await withTimeout(contactHost.stop(), shutdownTimeoutMs, 'Contact shutdown', warnTimeout)
         .catch((err) => log.warn(`Contact shutdown failed: ${err.message}`));
     }
+    // Cases stage 7 (ruling M16): no ingest job or case write starts from
+    // here on, and the one already inside a case lock finishes before
+    // releaseAll() below can force the lock away. Then every PDF worker is
+    // killed, idle ones included.
+    if (ingestService) {
+      await withTimeout(ingestService.close(), shutdownTimeoutMs, 'Ingest shutdown', warnTimeout)
+        .catch((err) => log.warn(`Ingest shutdown failed: ${err.message}`));
+    }
+    await withTimeout(shutdownPdfSandbox(), shutdownTimeoutMs, 'PDF reader shutdown', warnTimeout)
+      .catch((err) => log.warn(`PDF reader shutdown failed: ${err.message}`));
     // Let the in-flight cases:wakeups sweep actually finish (endTurn, lock
     // release and all) before releaseAll() below can force the lock away
     // out from under it.
@@ -2977,6 +2990,21 @@ function createCore(deps = {}) {
   }
   installPlaybooks(caseRuntime, { getSettings: getPlaybookSettings, examplesDir: deps.examplesDir || null, adminPolicy: playbooksFromAdmin });
 
+  // Cases stage 7: document ingest. The desktop and the service (run.js)
+  // both start the worker, the same in either mode (spec §3.5), so
+  // serviceMode does not enter here; deps.ingest 'none' builds a core with
+  // no worker (review answers then wait in the panel).
+  const ingestService = deps.ingest === 'none' ? null : (() => {
+    const { IngestService } = require('../cases/ingest');
+    const { createCallModel } = require('../cases/ingest/call-model');
+    return new IngestService({
+      runtime: caseRuntime,
+      callModel: createCallModel({ resolveInference, getUsageTracker: () => usageTracker }),
+      getCapabilities: (provider, model) => inferenceRouter.getCapabilities(provider, model),
+      getSettings
+    });
+  })();
+
   const context = {
     // Chat
     createId,
@@ -3007,6 +3035,7 @@ function createCore(deps = {}) {
     createUsageRecordFromMetrics,
     getSettings,
     getCaseRuntime: () => caseRuntime,
+    getIngestService: () => ingestService,
     getExecutorRegistry: () => executorRegistry,
     getPlaybookManager: () => caseRuntime.playbooks || null,
     getContact: () => (contactHost ? contactHost.context() : null),
