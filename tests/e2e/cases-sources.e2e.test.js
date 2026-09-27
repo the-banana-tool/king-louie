@@ -40,8 +40,8 @@ describe('E2E: case sources', { skip: gitAvailable ? false : 'git is not on PATH
       const s = document.getElementById('chat-case-select');
       s.value = '__new__';
       s.dispatchEvent(new Event('change'));
-      document.getElementById('chat-case-new-title').value = 'E2E sources lot';
-      document.getElementById('chat-case-create-btn').click();
+      document.getElementById('chat-case-new-input').value = 'E2E sources lot';
+      document.getElementById('chat-case-new-confirm').click();
       return true;
     })()`);
     await waitFor(ctx, `!!document.getElementById('case-sources-list')`);

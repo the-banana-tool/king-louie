@@ -42,12 +42,13 @@ describe('E2E: cases', { skip: gitAvailable ? false : 'git is not on PATH' }, ()
       s.dispatchEvent(new Event('change'));
       return true;
     })()`);
-    await waitFor(ctx, `!document.getElementById('chat-case-new-title').closest('[hidden]')`);
+    await waitFor(ctx, `!!document.getElementById('chat-case-new-input')`);
     await evaluate(ctx, `(() => {
-      document.getElementById('chat-case-new-title').value = 'E2E lakeside lot';
-      document.getElementById('chat-case-create-btn').click();
+      document.getElementById('chat-case-new-input').value = 'E2E lakeside lot';
+      document.getElementById('chat-case-new-confirm').click();
       return true;
     })()`);
+    await waitFor(ctx, `!document.getElementById('chat-case-new-dialog')`);
 
     await waitFor(ctx, `(() => {
       const s = document.getElementById('chat-case-select');
@@ -105,10 +106,10 @@ describe('E2E: cases', { skip: gitAvailable ? false : 'git is not on PATH' }, ()
       s.dispatchEvent(new Event('change'));
       return true;
     })()`);
-    await waitFor(ctx, `!document.getElementById('chat-case-new-title').closest('[hidden]')`);
+    await waitFor(ctx, `!!document.getElementById('chat-case-new-input')`);
     await evaluate(ctx, `(() => {
-      document.getElementById('chat-case-new-title').value = 'E2E question case';
-      document.getElementById('chat-case-create-btn').click();
+      document.getElementById('chat-case-new-input').value = 'E2E question case';
+      document.getElementById('chat-case-new-confirm').click();
       return true;
     })()`);
     // Case creation runs git init/add/commit under the hood, which can take

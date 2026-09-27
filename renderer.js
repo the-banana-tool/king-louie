@@ -1774,27 +1774,14 @@ async function renderChatCaseSection(chat, container) {
   }
   addOption('__new__', 'New case…');
   select.value = chat.caseId && (caseMissing || cases.some((c) => c.id === chat.caseId)) ? chat.caseId : '';
+  // Restored when the New case dialog is cancelled.
+  const previousValue = select.value;
   row.append(label, select);
-
-  const newRow = document.createElement('div');
-  newRow.className = 'chat-info-row chat-case-new';
-  newRow.hidden = true;
-  const titleInput = document.createElement('input');
-  titleInput.type = 'text';
-  titleInput.id = 'chat-case-new-title';
-  titleInput.className = 'chat-info-input';
-  titleInput.placeholder = 'Case title';
-  const createBtn = document.createElement('button');
-  createBtn.type = 'button';
-  createBtn.id = 'chat-case-create-btn';
-  createBtn.className = 'secondary-button';
-  createBtn.textContent = 'Create';
-  newRow.append(titleInput, createBtn);
 
   const orientationBtn = document.createElement('button');
   orientationBtn.type = 'button';
   orientationBtn.id = 'chat-case-orientation-btn';
-  orientationBtn.className = 'secondary-button';
+  orientationBtn.className = 'btn btn-sm chat-case-orientation-btn';
   orientationBtn.textContent = 'Show orientation';
   orientationBtn.hidden = !chat.caseId || caseMissing;
   const orientation = document.createElement('pre');
@@ -1802,11 +1789,10 @@ async function renderChatCaseSection(chat, container) {
   orientation.className = 'chat-case-orientation';
   orientation.hidden = true;
 
-  container.append(row, newRow, orientationBtn, orientation, error);
+  container.append(row, orientationBtn, orientation, error);
 
-  // Cases stage 6: the playbook picker in the create form, and the
-  // playbooks of the attached case.
-  const playbookPicker = buildPlaybookPicker(newRow);
+  // Cases stage 6: the playbooks of the attached case. The create-form
+  // picker lives in the New case dialog.
   const playbooksSection = document.createElement('div');
   playbooksSection.id = 'case-playbooks-section';
   playbooksSection.className = 'case-playbooks-section';
@@ -1843,37 +1829,45 @@ async function renderChatCaseSection(chat, container) {
   select.addEventListener('change', async () => {
     showError('');
     if (select.value === '__new__') {
-      newRow.hidden = false;
-      titleInput.focus();
+      let created = null;
+      const extra = document.createElement('div');
+      const playbookPicker = buildPlaybookPicker(extra);
+      await showTextInputDialog({
+        heading: 'New case',
+        placeholder: 'Case title',
+        confirmLabel: 'Create',
+        idPrefix: 'chat-case-new',
+        extra,
+        onSubmit: async (value) => {
+          const title = value.trim();
+          if (!title) return 'Give the case a title.';
+          let result = await window.electron.cases.create({ title, chatId: chat.id, ...playbookPicker.fields() });
+          // Cases stage 5: a similar open case exists; create anyway, or attach to it.
+          if (!result?.ok && result?.code === 'SIMILAR_CASES' && Array.isArray(result.similar) && result.similar.length) {
+            const match = result.similar[0];
+            if (await showConfirmDialog(`A similar case exists: "${match.title}" (${match.status}). Create anyway?`)) {
+              result = await window.electron.cases.create({ title, chatId: chat.id, force: true, ...playbookPicker.fields() });
+            } else {
+              result = await window.electron.cases.attach({ chatId: chat.id, caseId: match.caseId });
+            }
+          }
+          if (!result?.ok) return result?.error || 'Could not create the case.';
+          created = result;
+          return null;
+        }
+      });
+      if (!created) { select.value = previousValue; return; }
+      await adopt(created.chat);
+      // Cases stage 6: the case exists; a playbook that failed to attach is
+      // reported here (plain text; the owner can add it again from the panel).
+      for (const p of Array.isArray(created.playbooks) ? created.playbooks : []) {
+        if (p && p.error) showNotice(playbookClip(`Playbook ${p.name || '?'} was not attached: ${p.error}`));
+      }
       return;
     }
-    newRow.hidden = true;
     const result = await window.electron.cases.attach({ chatId: chat.id, caseId: select.value || null });
     if (!result?.ok) { showError(result?.error || 'Could not attach the case.'); return; }
     await adopt(result.chat);
-  });
-
-  createBtn.addEventListener('click', async () => {
-    showError('');
-    const title = titleInput.value.trim();
-    if (!title) { showError('Give the case a title.'); titleInput.focus(); return; }
-    let result = await window.electron.cases.create({ title, chatId: chat.id, ...playbookPicker.fields() });
-    // Cases stage 5: a similar open case exists; create anyway, or attach to it.
-    if (!result?.ok && result?.code === 'SIMILAR_CASES' && Array.isArray(result.similar) && result.similar.length) {
-      const match = result.similar[0];
-      if (await showConfirmDialog(`A similar case exists: "${match.title}" (${match.status}). Create anyway?`)) {
-        result = await window.electron.cases.create({ title, chatId: chat.id, force: true, ...playbookPicker.fields() });
-      } else {
-        result = await window.electron.cases.attach({ chatId: chat.id, caseId: match.caseId });
-      }
-    }
-    if (!result?.ok) { showError(result?.error || 'Could not create the case.'); return; }
-    await adopt(result.chat);
-    // Cases stage 6: the case exists; a playbook that failed to attach is
-    // reported here (plain text; the owner can add it again from the panel).
-    for (const p of Array.isArray(result.playbooks) ? result.playbooks : []) {
-      if (p && p.error) showNotice(playbookClip(`Playbook ${p.name || '?'} was not attached: ${p.error}`));
-    }
   });
 
   orientationBtn.addEventListener('click', async () => {
@@ -6887,21 +6881,41 @@ function openContextMenu({ chatId, x, y }) {
 }
 
 function showRenameDialog(currentTitle) {
+  return showTextInputDialog({
+    heading: 'Rename chat',
+    value: currentTitle,
+    placeholder: 'Enter chat name',
+    confirmLabel: 'Save'
+  });
+}
+
+// Modal with one text field. Resolves with the entered text, or null on
+// cancel. `extra` is an optional element shown under the field. When
+// `onSubmit` is given it runs before closing: return an error string to
+// keep the dialog open and show it, or nothing to close.
+function showTextInputDialog({ heading: headingText, value = '', placeholder = '', confirmLabel = 'OK', idPrefix = null, extra = null, onSubmit = null }) {
   return new Promise((resolve) => {
     const modal = document.createElement('div');
     modal.className = 'rename-chat-modal';
+    if (idPrefix) modal.id = `${idPrefix}-dialog`;
 
     const card = document.createElement('div');
     card.className = 'rename-chat-card';
 
     const heading = document.createElement('h3');
-    heading.textContent = 'Rename chat';
+    heading.textContent = headingText;
 
     const input = document.createElement('input');
     input.type = 'text';
     input.className = 'rename-chat-input';
-    input.value = currentTitle || '';
-    input.placeholder = 'Enter chat name';
+    if (idPrefix) input.id = `${idPrefix}-input`;
+    input.value = value || '';
+    input.placeholder = placeholder;
+
+    const error = document.createElement('div');
+    error.className = 'rename-chat-error';
+    if (idPrefix) error.id = `${idPrefix}-error`;
+    error.hidden = true;
 
     const actions = document.createElement('div');
     actions.className = 'rename-chat-actions';
@@ -6915,19 +6929,37 @@ function showRenameDialog(currentTitle) {
     const saveBtn = document.createElement('button');
     saveBtn.type = 'button';
     saveBtn.className = 'btn btn-primary';
+    if (idPrefix) saveBtn.id = `${idPrefix}-confirm`;
     saveBtn.appendChild(faIcon('fas fa-check'));
-    saveBtn.appendChild(document.createTextNode(' Save'));
+    saveBtn.appendChild(document.createTextNode(` ${confirmLabel}`));
 
-    const close = (value = null) => {
+    let busy = false;
+    const close = (result = null) => {
       modal.remove();
-      resolve(value);
+      resolve(result);
+    };
+    const submit = async () => {
+      if (busy) return;
+      if (!onSubmit) { close(input.value); return; }
+      busy = true;
+      saveBtn.disabled = true;
+      const message = await onSubmit(input.value);
+      busy = false;
+      saveBtn.disabled = false;
+      if (message) {
+        error.textContent = message;
+        error.hidden = false;
+        input.focus();
+        return;
+      }
+      close(input.value);
     };
 
-    cancelBtn.addEventListener('click', () => close(null));
-    saveBtn.addEventListener('click', () => close(input.value));
+    cancelBtn.addEventListener('click', () => { if (!busy) close(null); });
+    saveBtn.addEventListener('click', submit);
 
     modal.addEventListener('click', (event) => {
-      if (event.target === modal) {
+      if (event.target === modal && !busy) {
         close(null);
       }
     });
@@ -6935,9 +6967,9 @@ function showRenameDialog(currentTitle) {
     input.addEventListener('keydown', (event) => {
       if (event.key === 'Enter') {
         event.preventDefault();
-        close(input.value);
+        submit();
       }
-      if (event.key === 'Escape') {
+      if (event.key === 'Escape' && !busy) {
         event.preventDefault();
         close(null);
       }
@@ -6948,6 +6980,8 @@ function showRenameDialog(currentTitle) {
 
     card.appendChild(heading);
     card.appendChild(input);
+    if (extra) card.appendChild(extra);
+    card.appendChild(error);
     card.appendChild(actions);
 
     modal.appendChild(card);
@@ -8602,7 +8636,8 @@ if (dom.chatInfoCloseBtn) {
 
 document.addEventListener('click', (e) => {
   if (dom.chatInfoPopover && !dom.chatInfoPopover.hidden &&
-      !e.target.closest('.chat-info-popover') && !e.target.closest('#chat-info-btn')) {
+      !e.target.closest('.chat-info-popover') && !e.target.closest('#chat-info-btn') &&
+      !e.target.closest('.rename-chat-modal')) {
     dom.chatInfoPopover.hidden = true;
   }
   if (dom.chatMcpPopover && !dom.chatMcpPopover.hidden &&

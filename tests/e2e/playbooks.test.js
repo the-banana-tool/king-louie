@@ -48,10 +48,10 @@ describe('E2E: playbooks', { skip: gitAvailable ? false : 'git is not on PATH' }
     })()`);
     await waitFor(ctx, `!!document.getElementById('chat-case-playbook-example-contractor-quotes')`);
     await evaluate(ctx, `(() => {
-      document.getElementById('chat-case-new-title').value = 'E2E deck repair quotes';
+      document.getElementById('chat-case-new-input').value = 'E2E deck repair quotes';
       document.getElementById('chat-case-playbook-example-contractor-quotes').checked = true;
       document.getElementById('chat-case-playbook-accept-budget').checked = true;
-      document.getElementById('chat-case-create-btn').click();
+      document.getElementById('chat-case-new-confirm').click();
       return true;
     })()`);
     await waitFor(ctx, `(() => {
@@ -156,15 +156,16 @@ describe('E2E: playbooks', { skip: gitAvailable ? false : 'git is not on PATH' }
     })()`);
     await waitFor(ctx, `!!document.getElementById('chat-case-playbook-example-contractor-quotes')`);
     await evaluate(ctx, `(() => {
-      document.getElementById('chat-case-new-title').value = 'E2E gutter cleaning quotes without raises';
+      document.getElementById('chat-case-new-input').value = 'E2E gutter cleaning quotes without raises';
       document.getElementById('chat-case-playbook-example-contractor-quotes').checked = true;
-      document.getElementById('chat-case-create-btn').click();
+      document.getElementById('chat-case-new-confirm').click();
       return true;
     })()`);
     // C5 may ask about the similar case the first test made: create anyway.
     await waitFor(ctx, `(() => {
-      const m = document.querySelector('.rename-chat-modal');
-      if (m && /similar case/.test(m.textContent)) m.querySelector('.btn-primary').click();
+      // The confirm opens on top of the New case dialog; both are modals.
+      const m = [...document.querySelectorAll('.rename-chat-modal')].find((el) => /similar case/.test(el.textContent));
+      if (m) m.querySelector('.btn-primary').click();
       const s = document.getElementById('chat-case-select');
       return s && s.value && s.value !== '__new__';
     })()`, 30000);
