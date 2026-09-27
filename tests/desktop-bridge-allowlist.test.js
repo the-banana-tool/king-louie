@@ -88,11 +88,11 @@ describe('renderer events', () => {
   // still bounded, timeout; nothing new becomes unbounded.
   it('gives the long playbook channels a bounded 10-minute timeout', () => {
     assert.strictEqual(LONG_CHANNEL_TIMEOUT_MS, 10 * 60 * 1000);
-    for (const ch of ['case:create', 'case:addPlaybook', 'case:checkPlaybookUpdates', 'case:updatePlaybook']) {
+    for (const ch of ['case:create', 'case:addPlaybook', 'case:checkPlaybookUpdates', 'case:updatePlaybook', 'case:applyPlaybookProposal']) {
       assert.strictEqual(channelTimeoutMs(ch, 120000), LONG_CHANNEL_TIMEOUT_MS, ch);
       assert.strictEqual(isTimeoutExempt(ch), false, ch);
     }
-    for (const ch of ['case:playbooks', 'case:removePlaybook', 'case:applyPlaybookProposal', 'chat:load']) assert.strictEqual(channelTimeoutMs(ch, 120000), 120000, ch);
+    for (const ch of ['case:playbooks', 'case:removePlaybook', 'case:rejectPlaybookProposal', 'chat:load']) assert.strictEqual(channelTimeoutMs(ch, 120000), 120000, ch);
     for (const ch of ['chat:sendMessage', 'case:ingestFile']) assert.strictEqual(channelTimeoutMs(ch, 120000), 0, ch);
   });
 });

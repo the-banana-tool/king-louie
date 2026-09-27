@@ -46,8 +46,10 @@ const TIMEOUT_EXEMPT = new Set(['chat:sendMessage', 'tool:execute', 'cron:run'])
 // playbooks can outlast the default timeout. They get a longer but still
 // bounded one: a timeout that fires while the service keeps working invites
 // a duplicate retry, and an unbounded wait could hang the desktop.
+// case:applyPlaybookProposal clones the owner's repository and applies
+// there, each step bounded at 60 s (final review M-4).
 const LONG_CHANNEL_TIMEOUT_MS = 10 * 60 * 1000;
-const LONG_CHANNELS = new Set(['case:create', 'case:addPlaybook', 'case:checkPlaybookUpdates', 'case:updatePlaybook']);
+const LONG_CHANNELS = new Set(['case:create', 'case:addPlaybook', 'case:checkPlaybookUpdates', 'case:updatePlaybook', 'case:applyPlaybookProposal']);
 
 function domainOf(channel) {
   const i = channel.indexOf(':');
