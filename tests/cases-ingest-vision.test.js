@@ -347,3 +347,169 @@ describe('providers accept a call with no tools', () => {
     assert.strictEqual(bodies[0], '{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hi"}],"system":[{"type":"text","text":"S","cache_control":{"type":"ephemeral"}}],"tools":[{"name":"ToolSearch","description":"Find tools","input_schema":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]},"cache_control":{"type":"ephemeral"}},{"name":"Read","description":"Read a file","input_schema":{"type":"object","properties":{"path":{"type":"string"}}},"cache_control":{"type":"ephemeral"}}],"max_tokens":4096,"stream":false,"temperature":0.7}');
   });
 });
+
+describe('vision pages in IngestService', { skip: require('./helpers/ingest-harness').NEEDS_GIT }, () => {
+  const fs = require('fs');
+  const path = require('path');
+  const { after } = require('node:test');
+  const files = require('../src/cases/ingest/files');
+  const { ingestHarness, cleanup, defaultModel, usage } = require('./helpers/ingest-harness');
+
+  after(cleanup);
+
+  const scan = (n) => makePdf({ pages: Array.from({ length: n }, () => ({ scan: true })) });
+  const budgetOf = (h) => h.runtime.budget(h.caseId).status().usd;
+
+  it('charges each vision page, then calls onCrossings, and caches before charging', async () => {
+    const h = await ingestHarness();
+    const order = [];
+    const charge = h.runtime.budget.bind(h.runtime);
+    h.runtime.budget = (id) => {
+      const b = charge(id);
+      const real = b.charge.bind(b);
+      b.charge = (cat, amount, meta) => {
+        const cached = files.readCachedPage(h.dir, meta.docId, meta.page);
+        order.push(['charge', meta.kind, meta.page, cached ? cached.charged : 'no-cache']);
+        return real(cat, amount, meta);
+      };
+      return b;
+    };
+    const onCrossings = h.runtime.onCrossings.bind(h.runtime);
+    h.runtime.onCrossings = (id, cat, crossed) => { order.push(['onCrossings', cat]); return onCrossings(id, cat, crossed); };
+    const out = await h.svc.store(h.caseId, { name: 'plat.pdf', bytes: await scan(2), origin: { kind: 'owner-drop' } });
+    await h.svc.drain();
+    const ocr = order.filter((o) => o[1] === 'ingest:ocr' || o[0] === 'onCrossings').slice(0, 4);
+    assert.deepStrictEqual(ocr, [['charge', 'ingest:ocr', 1, false], ['onCrossings', 'usd'], ['charge', 'ingest:ocr', 2, false], ['onCrossings', 'usd']]);
+    assert.strictEqual(files.readCachedPage(h.dir, out.docId, 1).charged, true);
+    const rec = files.readRecord(h.dir, out.docId);
+    assert.deepStrictEqual(rec.pages.map((p) => [p.method, p.usd, p.model]), [['ocr', 0.01, 'anthropic:test-model'], ['ocr', 0.01, 'anthropic:test-model']]);
+    assert.strictEqual(rec.usd.ocr, 0.02);
+    // The pdfInput model got the one-page PDF, not an image.
+    const first = h.calls.find((c) => c.purpose === 'ocr');
+    assert.strictEqual(first.attachment.documents[0].mimeType, 'application/pdf');
+    assert.deepStrictEqual([first.provider, first.model], ['anthropic', 'claude-sonnet-4-5']);
+  });
+
+  it('cost null: OCR charges the estimate, extract and verify record unpriced tokens', async () => {
+    const h = await ingestHarness({ model: (req) => ({ ...defaultModel(req), usage: usage(null, 500) }) });
+    const out = await h.svc.store(h.caseId, { name: 'plat.jpg', bytes: Buffer.from(tinyJpeg()), origin: { kind: 'owner-drop' } });
+    await h.svc.drain();
+    const rec = files.readRecord(h.dir, out.docId);
+    assert.deepStrictEqual([rec.pages[0].usd, rec.pages[0].usdEstimated], [0.02, true]);
+    const usd = budgetOf(h);
+    assert.strictEqual(usd.spent, 0.02);
+    assert.strictEqual(usd.unpricedTokens, 500);
+  });
+
+  it('never charges a cached page twice on resume', async () => {
+    const h = await ingestHarness();
+    const out = await h.svc.store(h.caseId, { name: 'plat.pdf', bytes: await scan(1), origin: { kind: 'owner-drop' } });
+    await h.svc.drain();
+    const spent = budgetOf(h).spent;
+    files.writeRecord(h.dir, { ...files.readRecord(h.dir, out.docId), status: 'extracting', pages: [] });
+    h.calls.length = 0;
+    await h.svc.resume();
+    await h.svc.drain();
+    assert.deepStrictEqual(h.calls, []);
+    assert.strictEqual(budgetOf(h).spent, spent);
+    // A crash after the cache write but before the charge: charged once now.
+    fs.writeFileSync(path.join(h.dir, '.kl', 'ingest', 'cache', out.docId, '1.json'), JSON.stringify({ ...files.readCachedPage(h.dir, out.docId, 1), charged: false }));
+    files.writeRecord(h.dir, { ...files.readRecord(h.dir, out.docId), status: 'extracting', pages: [] });
+    await h.svc.resume();
+    await h.svc.drain();
+    assert.strictEqual(budgetOf(h).spent, Math.round((spent + 0.01) * 1e6) / 1e6);
+    assert.strictEqual(files.readCachedPage(h.dir, out.docId, 1).charged, true);
+  });
+
+  it('300-page scan: one tool call reads exactly 20 pages and leaves 280 pending-ocr', async () => {
+    const h = await ingestHarness();
+    fs.mkdirSync(path.join(h.dir, 'sources', 'web'), { recursive: true });
+    fs.writeFileSync(path.join(h.dir, 'sources', 'web', 'county-scan.pdf'), await scan(300));
+    const out = await h.svc.adopt(h.caseId, 'sources/web/county-scan.pdf');
+    await h.svc.extract(h.caseId, out.docId, { by: 'tool' });
+    const rec = files.readRecord(h.dir, out.docId);
+    assert.strictEqual(h.calls.filter((c) => c.purpose === 'ocr').length, 20);
+    assert.strictEqual(rec.pages.filter((p) => p.method === 'ocr').length, 20);
+    assert.strictEqual(rec.pages.filter((p) => p.method === 'pending-ocr' && p.error === 'cap').length, 280);
+    assert.strictEqual(budgetOf(h).spent >= 0.2, true);
+    const [summary] = await h.svc.list(h.caseId);
+    assert.strictEqual(summary.estimateUsd, 5.6);
+    // A second tool call with pages reads only those pending pages.
+    h.calls.length = 0;
+    await h.svc.extract(h.caseId, out.docId, { by: 'tool', pages: '21-22,299' });
+    assert.deepStrictEqual(h.calls.filter((c) => c.purpose === 'ocr').map((c) => Number(/page (\d+)/.exec(c.text)[1])), [21, 22, 299]);
+  });
+
+  it('the owner button reads every remaining page', async () => {
+    const h = await ingestHarness({ ingest: { maxVisionPagesPerDoc: 2 } });
+    const out = await h.svc.store(h.caseId, { name: 'plat.pdf', bytes: await scan(5), origin: { kind: 'owner-drop' } });
+    await h.svc.drain();
+    assert.strictEqual(files.readRecord(h.dir, out.docId).pages.filter((p) => p.method === 'pending-ocr').length, 3);
+    await h.svc.extract(h.caseId, out.docId, { by: 'owner' });
+    assert.strictEqual(files.readRecord(h.dir, out.docId).pages.filter((p) => p.method === 'ocr').length, 5);
+  });
+
+  it('pre-checks the budget before a page, and skips the pre-check without a usd limit', async () => {
+    const tight = await ingestHarness({ budgets: { usd: 0.015 } });
+    const a = await tight.svc.store(tight.caseId, { name: 'plat.pdf', bytes: await scan(1), origin: { kind: 'owner-drop' } });
+    await tight.svc.drain();
+    assert.deepStrictEqual(files.readRecord(tight.dir, a.docId).pages.map((p) => [p.method, p.error]), [['pending-ocr', 'budget']]);
+    const open = await ingestHarness({ budgets: { usd: null } });
+    const b = await open.svc.store(open.caseId, { name: 'plat.pdf', bytes: await scan(1), origin: { kind: 'owner-drop' } });
+    await open.svc.drain();
+    assert.strictEqual(open.runtime.budget(open.caseId).remaining('usd'), null);
+    assert.strictEqual(files.readRecord(open.dir, b.docId).pages[0].method, 'ocr');
+  });
+
+  it('rotated scan: the inherited /Rotate 90 is recorded and in the prompt, and the one-page PDF keeps it', async () => {
+    const h = await ingestHarness();
+    const out = await h.svc.store(h.caseId, { name: 'scan-plat.pdf', bytes: await makePdf({ pages: [{ scan: true }], rotateRoot: 90 }), origin: { kind: 'owner-drop' } });
+    await h.svc.drain();
+    assert.strictEqual(files.readRecord(h.dir, out.docId).pages[0].rotation, 90);
+    const call = h.calls.find((c) => c.purpose === 'ocr');
+    assert.match(call.text, /rotated by 90°/);
+    const one = await PDFDocument.load(Buffer.from(call.attachment.documents[0].base64, 'base64'));
+    assert.strictEqual(one.getPage(0).getRotation().angle, 90);
+  });
+
+  it('without a vision-eligible model, text pages proceed and vision pages are unreadable', async () => {
+    const roles = { draft: { provider: 'groq', model: 'llama-3.3-70b' }, judge: { provider: 'openrouter', model: 'any' } };
+    const h = await ingestHarness({ roles });
+    const out = await h.svc.store(h.caseId, { name: 'mixed.pdf', bytes: await makePdf({ pages: [{ text: 'Total payoff amount: $182,340.17 on the typed page.' }, { scan: true }] }), origin: { kind: 'owner-drop' } });
+    await h.svc.drain();
+    const rec = files.readRecord(h.dir, out.docId);
+    assert.deepStrictEqual(rec.pages.map((p) => p.method), ['text', 'unreadable']);
+    assert.match(rec.pages[1].error, /No vision-capable model is configured/);
+    assert.deepStrictEqual(h.calls.filter((c) => c.purpose === 'ocr'), []);
+  });
+
+  it('a model without pdfInput gets the page image, and a failing call is retried once then unreadable', async () => {
+    let fail = 0;
+    const h = await ingestHarness({
+      ingest: { vision: { provider: 'openai', model: 'gpt-4o' } },
+      model: (req) => {
+        if (req.purpose === 'ocr' && /page 2/.test(req.text)) { fail += 1; throw new Error('provider timeout'); }
+        return defaultModel(req);
+      }
+    });
+    const out = await h.svc.store(h.caseId, { name: 'plat.pdf', bytes: await scan(2), origin: { kind: 'owner-drop' } });
+    await h.svc.drain();
+    const first = h.calls.find((c) => c.purpose === 'ocr');
+    assert.strictEqual(first.attachment.images[0].mimeType, 'image/jpeg');
+    assert.strictEqual(fail, 2);
+    const rec = files.readRecord(h.dir, out.docId);
+    assert.deepStrictEqual(rec.pages.map((p) => p.method), ['ocr', 'unreadable']);
+    assert.match(rec.pages[1].error, /vision call failed: provider timeout/);
+  });
+
+  it('an automatic or tool read without pages never re-reads pages left pending (gap 5)', async () => {
+    const h = await ingestHarness({ ingest: { maxVisionPagesPerDoc: 2 } });
+    const out = await h.svc.store(h.caseId, { name: 'plat.pdf', bytes: await scan(4), origin: { kind: 'owner-drop' } });
+    await h.svc.drain();
+    h.calls.length = 0;
+    await h.svc.extract(h.caseId, out.docId, { by: 'tool' });
+    await h.svc.extract(h.caseId, out.docId, { by: 'auto' });
+    assert.deepStrictEqual(h.calls.filter((c) => c.purpose === 'ocr'), []);
+    assert.strictEqual(files.readRecord(h.dir, out.docId).pages.filter((p) => p.method === 'pending-ocr').length, 2);
+  });
+});
