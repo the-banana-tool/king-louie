@@ -18,7 +18,6 @@
 // it does only for an explicit testHooks: true. They are requests from the
 // parent, never read from a document. Hooks that forge frames run here; the
 // ones that block or exhaust the parser run on the parsing thread.
-const fs = require('node:fs');
 const net = require('node:net');
 const path = require('node:path');
 const { encodeFrame, FrameReader, LIMITS } = require('./pdf-frames');
@@ -86,10 +85,19 @@ function frameHook(id, hook, write) {
       write(prefixed(100, 2, Buffer.from('{}')), true);
       return setInterval(() => {}, 1000);
     case 'drip': {
-      // A legal 1 MB reply, written one byte per write.
+      // A legal 1 MB reply, written one byte per write. Each byte goes out
+      // through the same stream as every other reply, once the previous one
+      // has been written: fd 3 is non-blocking (on POSIX a socketpair that
+      // net.Socket owns), so a synchronous write to it fails with EAGAIN as
+      // soon as the parent falls behind, and waiting keeps nothing queued.
       const frame = Buffer.concat(encodeFrame({ id, ok: true }, Buffer.alloc(1024 * 1024, 0x61)));
-      for (let i = 0; i < frame.length; i += 1) fs.writeSync(3, frame, i, 1);
-      return undefined;
+      let at = 0;
+      const next = () => {
+        if (at >= frame.length) return;
+        at += 1;
+        write(frame.subarray(at - 1, at), false, next);
+      };
+      return next();
     }
     case 'forge': {
       // Declares ~4 GB, then streams 512 MB of body.
@@ -176,7 +184,7 @@ if (require.main === module) {
   out.on('error', () => process.exit(1));
   runWorker({
     input: process.stdin,
-    write: (buf, end = false) => (end ? out.end(buf) : out.write(buf)),
+    write: (buf, end = false, cb) => (end ? out.end(buf, cb) : out.write(buf, cb)),
     hooks: process.env.KL_PDF_WORKER_TEST_HOOKS === '1',
     heapMb: heapMbFromArgv(process.execArgv)
   });
