@@ -199,4 +199,19 @@ describe('FleetToolHandler delegate jobs (fix round 1)', () => {
     assert.deepEqual(inbound[1].origin, { client: 'Example Client', session: 's-1', job_id: d.job_id, via: 'frontdoor', grant_id: 'gr_y', client_id: 'dcr_x' });
     for (const e of inbound) assert.equal(typeof e.params_sha256, 'string');
   });
+
+  // Final review carry T9: stdio can name any string as job_id; the audit
+  // entry keeps at most 200 code points of it, like every origin string.
+  it('send_to_job cuts a raw job_id to 200 code points in request.inbound', async () => {
+    const ledger = fakeLedger();
+    const delegateSessions = { start: async () => ({}), send: async () => ({}), cancel: () => ({}), ownsJob: () => true };
+    const h = new FleetToolHandler({ nodeConfig: { ...NODE, profile: 'agent' }, delegateSessions, auditLedger: ledger });
+    const long = `job-${'😀'.repeat(5000)}`;
+    await assert.rejects(h.call('send_to_job', { job_id: long, message: 'go on' }, { origin: FD_ORIGIN }));
+    await settle();
+    const [inbound] = ledger.entries.filter((e) => e.kind === 'request.inbound').map((e) => e.data);
+    assert.equal(Array.from(inbound.job_id).length, 200);
+    assert.ok(long.startsWith(inbound.job_id));
+    assert.equal(Array.from(inbound.origin.job_id).length, 200);
+  });
 });

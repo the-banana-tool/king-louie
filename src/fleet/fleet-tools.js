@@ -266,7 +266,8 @@ class FleetToolHandler {
     }
 
     if (toolName === 'send_to_job') {
-      this.auditInbound('send_to_job', { message: args.message }, origin, typeof args.job_id === 'string' ? args.job_id : null);
+      // A stdio caller can name any string: the audit keeps 200 code points.
+      this.auditInbound('send_to_job', { message: args.message }, origin, typeof args.job_id === 'string' ? cut(args.job_id, 200) : null);
       const job = this.getJobOrThrow(args.job_id, origin);
       if (job.kind !== 'delegate') {
         throw new ToolError('not_accepted', `not_accepted: job "${job.job_id}" is a runbook job and does not accept messages`);
