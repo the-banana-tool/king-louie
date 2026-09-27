@@ -146,10 +146,11 @@ class IngestService {
     this.idle = Promise.resolve();
     this.timer = null;
     this.pending = new Set();
-    // Set by close() (ruling M16); every case write in flight is tracked so
-    // close() can await it.
+    // Set by close() (ruling M16); every case write and model call in
+    // flight is tracked so close() can await it.
     this.closed = false;
     this.inFlight = new Set();
+    this.calls = new Set();
     SERVICES.set(runtime, this);
   }
 
@@ -422,23 +423,34 @@ class IngestService {
   }
 
   // No model call starts once closed: a read cut off here is left as it is
-  // on disk and resumed at the next start.
+  // on disk and resumed at the next start. A call already running is
+  // tracked: close() waits for it, so the charge that follows it (and any
+  // onCrossings pause or question) happens before the case locks are
+  // released. Every caller charges synchronously once the reply is back.
   _callModel(req) {
     this._assertOpen();
-    return this.callModel(req);
+    const p = Promise.resolve().then(() => this.callModel(req));
+    this.calls.add(p);
+    const done = () => this.calls.delete(p);
+    p.then(done, done);
+    return p;
   }
 
   // Called by create-core's shutdown before releaseAll() (ruling M16): stops
   // the retry timer, refuses new jobs and case writes with SHUTTING_DOWN,
-  // drops the queue, and waits for the case writes already inside a lock.
-  // A model call in flight is not awaited; what it returns is never
-  // published (its publish is refused), so nothing commits after this.
+  // drops the queue, and waits for the case writes already inside a lock
+  // and for the model calls in flight (create-core bounds the wait with
+  // withTimeout). A call's charge runs synchronously in its caller once the
+  // reply is back, so it is done by the time the macrotask below runs;
+  // what the job would publish next is refused, so nothing commits after.
   async close() {
     this.closed = true;
     this.stop();
     for (const job of this.queue.splice(0)) {
       job.reject(new IngestError('SHUTTING_DOWN', 'King Louie is shutting down; document ingest is stopped.'));
     }
+    await Promise.allSettled([...this.calls]);
+    await new Promise((resolve) => setImmediate(resolve));
     await Promise.allSettled([...this.inFlight]);
   }
 
@@ -1081,6 +1093,9 @@ class IngestService {
     };
     try {
       this._sweepUncharged(meta, rec, ctx);
+      // A job whose kept publish close() waited on must not start a PDF
+      // worker after shutdownPdfSandbox().
+      this._assertOpen();
       if (mime === 'application/pdf') ctx.pdf = await this.openPdf(bytes, { name: rec.name, maxBytes: cfg.maxBytes });
       let read = new Set();
       if (job.pages || !['proposing', 'checking'].includes(rec.status) || job.by === 'owner') {
@@ -1654,9 +1669,11 @@ class IngestService {
   // Cases that are paused, done or abandoned are left alone.
   async resume() {
     for (const meta of this.runtime.listCases()) {
+      if (this.closed) return;
       await this.retryPending(meta.id).catch((err) => this.log.warn(`Retrying ingest publishes for ${meta.slug} failed: ${err.message}`));
       if (WAITING.has(meta.status)) continue;
       for (const rec of files.listRecords(meta.dir)) {
+        if (this.closed) return;
         if (!RESUMABLE.has(rec.status)) continue;
         this.extract(meta.id, rec.docId, { by: 'resume' }).catch((err) => this.log.warn(`Resuming ${rec.docId} failed: ${err.message}`));
       }

@@ -9,13 +9,36 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { spawnSync } = require('child_process');
+
+// Shutdown-order spies, installed before create-core loads (it keeps its
+// own references to these exports).
+const shutdownOrder = { log: null };
+const contactHostModule = require('../src/cases/contact-host');
+const realCreateContactHost = contactHostModule.createContactHost;
+contactHostModule.createContactHost = (opts) => {
+  const host = realCreateContactHost(opts);
+  const stop = host.stop;
+  host.stop = (...args) => {
+    shutdownOrder.log?.push('contact:stop');
+    return stop.apply(host, args);
+  };
+  return host;
+};
+const pdfSandboxModule = require('../src/cases/ingest/pdf-sandbox');
+const realShutdownPdfSandbox = pdfSandboxModule.shutdownPdfSandbox;
+pdfSandboxModule.shutdownPdfSandbox = (...args) => {
+  shutdownOrder.log?.push('pdf:shutdown');
+  return realShutdownPdfSandbox(...args);
+};
+
 const core = require('../src/core');
 const { JsonFileStore } = require('../src/platform/json-file-store');
 const { createAesGcmCipher } = require('../src/platform/cipher');
 const { createHeadlessPrompter } = require('../src/platform/prompter');
 const { IngestService, ingestServiceFor } = require('../src/cases/ingest');
-const { openPdf } = require('../src/cases/ingest/pdf');
-const { shutdownPdfSandbox } = require('../src/cases/ingest/pdf-sandbox');
+const shutdownPdfSandbox = realShutdownPdfSandbox;
+const HAS_GIT = spawnSync('git', ['--version'], { windowsHide: true }).status === 0;
 const { makePdf } = require('./helpers/ingest-fixtures');
 
 // As src/service/cli.js passes it (ruling M4).
@@ -79,9 +102,10 @@ describe('createCore ingest wiring', () => {
     assert.ok(c.context.getCaseRuntime());
   });
 
-  it('shutdown closes the IngestService before it releases the case locks (M16)', async () => {
+  it('shutdown stops contact, then closes ingest, then the PDF readers, then releases the case locks (M16)', async () => {
     delete process.env.KL_CASES_ROOT;
     const c = core.createCore(makeDeps());
+    await c.start();
     const svc = c.context.getIngestService();
     const runtime = c.context.getCaseRuntime();
     const order = [];
@@ -98,8 +122,13 @@ describe('createCore ingest wiring', () => {
       order.push('releaseAll');
       return realRelease();
     };
-    await c.shutdown();
-    assert.deepStrictEqual(order, ['close:start', 'close:end', 'releaseAll']);
+    shutdownOrder.log = order;
+    try {
+      await c.shutdown();
+    } finally {
+      shutdownOrder.log = null;
+    }
+    assert.deepStrictEqual(order, ['contact:stop', 'close:start', 'close:end', 'pdf:shutdown', 'releaseAll']);
     await assert.rejects(svc.extract('any-case', 'doc-000000000000'), (e) => e.code === 'SHUTTING_DOWN');
   });
 
@@ -121,23 +150,46 @@ describe('createCore ingest wiring', () => {
     assert.strictEqual(released, true);
   });
 
-  it('no PDF worker child survives shutdown', async () => {
+  it('no PDF worker child survives shutdown: a scan read waiting on OCR', { skip: HAS_GIT ? false : 'git is not on PATH' }, async () => {
     delete process.env.KL_CASES_ROOT;
     const c = core.createCore(makeDeps());
-    const pids = [];
+    const runtime = c.context.getCaseRuntime();
+    const svc = c.context.getIngestService();
+    const meta = await runtime.createCase({ title: 'Lakeside lot' });
+    runtime.store.updateMeta(meta.id, { status: 'active' });
+    runtime.roleModel = () => ({ provider: 'anthropic', model: 'claude-sonnet-4-5', tier: 'standard' });
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    let entered;
+    const inOcr = new Promise((r) => { entered = r; });
+    const calls = [];
+    svc.callModel = async (req) => {
+      calls.push(req.purpose);
+      entered();
+      await gate;
+      return { text: 'Lakeside lot, invented page text', usage: { provider: 'anthropic', model: 'claude-sonnet-4-5', inputTokens: 900, outputTokens: 100, totalTokens: 1000, cost: 0.01 } };
+    };
     const childProcess = require('node:child_process');
-    const spawn = (...args) => {
-      const child = childProcess.spawn(...args);
+    const realSpawn = childProcess.spawn;
+    const pids = [];
+    childProcess.spawn = (...args) => {
+      const child = realSpawn(...args);
       pids.push(child.pid);
       return child;
     };
-    // A document left open: its worker lives until the idle timeout (60 s)
-    // unless shutdown stops it.
-    const pdf = await openPdf(await makePdf({ pages: [{ text: 'An invented page of words for the reader.' }] }), { name: 'open.pdf', spawn });
-    assert.strictEqual(pdf.pageCount, 1);
-    assert.strictEqual(pids.length, 1);
-    assert.ok(alive(pids[0]), 'the worker runs before shutdown');
+    try {
+      await svc.store(meta.id, { name: 'scan.pdf', bytes: await makePdf({ pages: [{ scan: true }, { scan: true }] }), origin: { kind: 'owner-drop' } });
+      await inOcr;
+    } finally {
+      childProcess.spawn = realSpawn;
+    }
+    const reader = pids.at(-1);
+    assert.ok(alive(reader), 'the reader of the scan runs while OCR waits');
+    // The OCR reply comes back while shutdown waits for it.
+    setTimeout(release, 100);
     await c.shutdown();
-    assert.strictEqual(alive(pids[0]), false, 'the worker is gone once shutdown resolves');
+    assert.deepStrictEqual(calls, ['ocr']);
+    assert.strictEqual(alive(reader), false, 'the worker is gone once shutdown resolves');
+    assert.ok(pids.every((pid) => !alive(pid)));
   });
 });

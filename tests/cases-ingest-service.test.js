@@ -9,6 +9,7 @@ const path = require('path');
 const files = require('../src/cases/ingest/files');
 const { openPdf: realOpenPdf } = require('../src/cases/ingest/pdf');
 const { IngestError } = require('../src/cases/ingest/errors');
+const { shutdownPdfSandbox } = require('../src/cases/ingest/pdf-sandbox');
 const { ingestHarness, cleanup, commits, journals, defaultModel, usage, NEEDS_GIT } = require('./helpers/ingest-harness');
 const { makePdf, PAYOFF_LINES } = require('./helpers/ingest-fixtures');
 
@@ -713,7 +714,7 @@ describe('IngestService.close', { skip: NEEDS_GIT }, () => {
   const shuttingDown = (e) => e instanceof IngestError && e.code === 'SHUTTING_DOWN';
   const settledWithin = (p, ms) => Promise.race([p.then(() => true), new Promise((r) => setTimeout(() => r(false), ms))]);
 
-  it('during a slow model call: returns without waiting for it, drops the queue, refuses new work and never commits again', async () => {
+  it('during a slow model call: drops the queue, refuses new work, waits for the call and never commits again', async () => {
     let release;
     const gate = new Promise((r) => { release = r; });
     let entered;
@@ -733,7 +734,7 @@ describe('IngestService.close', { skip: NEEDS_GIT }, () => {
     const b = await h.svc.store(h.caseId, { name: 'second.txt', bytes: Buffer.from(`${PAYOFF_TEXT}\nSecond copy.`), origin: { kind: 'owner-paste' } });
     const queued = h.svc.extract(h.caseId, b.docId, { by: 'owner' });
     const before = await commits(h.dir);
-    assert.strictEqual(await settledWithin(h.svc.close(), 2000), true, 'close does not wait for the model');
+    const closing = h.svc.close();
     // Bounded: a job left in the queue would never settle.
     await assert.rejects(Promise.race([queued, new Promise((_, rej) => setTimeout(() => rej(new Error('still queued')), 2000))]), shuttingDown);
     assert.deepStrictEqual(h.svc.queue, []);
@@ -741,7 +742,9 @@ describe('IngestService.close', { skip: NEEDS_GIT }, () => {
     await assert.rejects(Promise.race([h.svc.extract(h.caseId, a.docId, { by: 'owner' }), new Promise((_, rej) => setTimeout(() => rej(new Error('queued after close')), 2000))]), shuttingDown);
     await assert.rejects(h.svc.store(h.caseId, { name: 'third.txt', bytes: Buffer.from('Third invented page.'), origin: { kind: 'owner-drop' } }), shuttingDown);
     await assert.rejects(h.svc.review(h.caseId, a.docId, 'p-001', { action: 'reject', by: 'panel' }), shuttingDown);
+    assert.strictEqual(await settledWithin(closing, 100), false, 'close waits for the model call in flight');
     release();
+    await closing;
     await h.svc.drain();
     assert.deepStrictEqual(await commits(h.dir), before, 'nothing commits after close');
     assert.deepStrictEqual(h.calls.map((c) => c.purpose), ['extract'], 'no model call after close');
@@ -768,11 +771,113 @@ describe('IngestService.close', { skip: NEEDS_GIT }, () => {
     await h.svc.store(h.caseId, { name: 'scan.pdf', bytes: scan, origin: { kind: 'owner-drop' } });
     await inModel;
     const before = await commits(h.dir);
-    await h.svc.close();
+    const closing = h.svc.close();
     release();
+    await closing;
     await h.svc.drain();
     assert.deepStrictEqual(h.calls.map((c) => c.purpose), ['ocr'], 'pages 2 and 3 are not sent after close');
     assert.deepStrictEqual(await commits(h.dir), before);
+  });
+
+  it('a charge that crosses 100 % during close pauses the case and asks before close resolves, and nothing is written after', async () => {
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    let entered;
+    const inModel = new Promise((r) => { entered = r; });
+    const h = await ingestHarness({
+      budgets: { usd: 0.001 },
+      model: async (req) => {
+        if (req.purpose === 'extract') {
+          entered();
+          await gate;
+        }
+        return defaultModel(req);
+      }
+    });
+    const order = [];
+    for (const name of ['setStatus', 'createQuestion']) {
+      const real = h.runtime[name].bind(h.runtime);
+      h.runtime[name] = (...args) => {
+        order.push(name);
+        return real(...args);
+      };
+    }
+    const a = await h.svc.store(h.caseId, { name: 'payoff.txt', bytes: Buffer.from(PAYOFF_TEXT), origin: { kind: 'owner-drop' } });
+    await inModel;
+    const closing = h.svc.close().then(() => order.push('close:end'));
+    release();
+    await closing;
+    // Stands in for releaseAll(), which create-core runs once close() resolves.
+    const atRelease = { commits: await commits(h.dir), budget: fs.readFileSync(path.join(h.dir, '.kl', 'budget.json'), 'utf8'), record: files.readRecord(h.dir, a.docId) };
+    await h.svc.drain();
+    await new Promise((r) => setTimeout(r, 50));
+    assert.deepStrictEqual(order.filter((x, i) => order.indexOf(x) === i), ['setStatus', 'createQuestion', 'close:end']);
+    assert.strictEqual(order.at(-1), 'close:end', 'no crossing write after close');
+    assert.strictEqual(h.runtime.getCase(h.caseId).status, 'paused');
+    assert.ok(h.runtime.budget(h.caseId).status().usd.spent >= 0.002, 'the extract call was charged');
+    assert.deepStrictEqual(await commits(h.dir), atRelease.commits);
+    assert.strictEqual(fs.readFileSync(path.join(h.dir, '.kl', 'budget.json'), 'utf8'), atRelease.budget);
+    assert.deepStrictEqual(files.readRecord(h.dir, a.docId), atRelease.record);
+  });
+
+  it('a job whose kept publish close waited on starts no PDF worker afterwards', async () => {
+    const spawned = [];
+    const childProcess = require('node:child_process');
+    const spawn = (...args) => {
+      const child = childProcess.spawn(...args);
+      spawned.push(child.pid);
+      return child;
+    };
+    const h = await ingestHarness({ status: 'paused', openPdf: (bytes, opts) => realOpenPdf(bytes, { ...opts, spawn }) });
+    const { payoffLetterPdf } = require('./helpers/ingest-fixtures');
+    const out = await h.svc.store(h.caseId, { name: 'payoff-letter.pdf', bytes: await payoffLetterPdf(), origin: { kind: 'owner-drop' } });
+    const counted = spawned.length; // the page count at store
+    h.runtime.store.updateMeta(h.caseId, { status: 'active' });
+    files.writePendingPublish(h.dir, out.docId, { record: files.readRecord(h.dir, out.docId), text: null, message: 'kept', journal: null });
+    const original = h.runtime.systemAction.bind(h.runtime);
+    let hold = new Promise((r) => { h.release = r; });
+    let entered;
+    const inside = new Promise((r) => { entered = r; });
+    h.runtime.systemAction = (id, label, fn, opts) => original(id, label, async (m) => {
+      if (hold) {
+        const g = hold;
+        hold = null;
+        entered();
+        await g;
+      }
+      return fn(m);
+    }, opts);
+    const reading = h.svc.extract(h.caseId, out.docId, { by: 'owner' });
+    await inside;
+    const closing = h.svc.close();
+    await shutdownPdfSandbox();
+    h.release();
+    await closing;
+    await assert.rejects(reading, shuttingDown);
+    assert.strictEqual(spawned.length, counted, 'no worker spawned after shutdownPdfSandbox');
+  });
+
+  it('resume does nothing once closed', async () => {
+    const h = await ingestHarness({ status: 'paused' });
+    const out = await h.svc.store(h.caseId, { name: 'payoff.txt', bytes: Buffer.from(PAYOFF_TEXT), origin: { kind: 'owner-drop' } });
+    h.runtime.store.updateMeta(h.caseId, { status: 'active' });
+    files.writePendingPublish(h.dir, out.docId, { record: files.readRecord(h.dir, out.docId), text: null, message: 'kept', journal: null });
+    await h.svc.close();
+    const before = await commits(h.dir);
+    const touched = [];
+    for (const name of ['retryPending', 'extract']) {
+      const real = h.svc[name].bind(h.svc);
+      h.svc[name] = (...args) => {
+        touched.push(name);
+        return real(...args);
+      };
+    }
+    await h.svc.resume();
+    assert.deepStrictEqual(touched, [], 'resume starts nothing once closed');
+    await h.svc.drain();
+    assert.deepStrictEqual(await commits(h.dir), before);
+    assert.deepStrictEqual(h.calls, []);
+    assert.deepStrictEqual(files.pendingPublishes(h.dir), [out.docId]);
   });
 
   it('stops the publish retry timer and never arms it again', async () => {
