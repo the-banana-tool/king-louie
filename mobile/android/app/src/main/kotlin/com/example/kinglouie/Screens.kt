@@ -165,7 +165,7 @@ fun Detail(model: AppModel, item: PendingItem, onBack: () -> Unit) {
             Text("Kind: ${item.display["kind"].str()}   Name: ${item.display["name"].str()}")
             item.display["cwd"].str()?.let { Text("Directory: $it") }
             // On a front door, origin.client is the client's self-declared name as the front door reports it.
-            Text((if (model.frontDoorId == null) "Asked by: " else "Client (reported by front door): ") + (item.display["origin"].obj()?.let { o -> listOf("client", "session", "job_id", "deviceId").mapNotNull { o[it].str() }.joinToString(" · ") } ?: ""))
+            Text((if (model.frontDoorId == null) "Asked by: " else "Client (reported by front door): ") + (item.display["origin"].obj()?.let { o -> listOf("client", "session", "job_id", "deviceId").mapNotNull { o[it].str() }.joinToString(" · ") { com.example.kinglouie.protocol.FrontDoor.shownText(it) } } ?: ""))
             Text("Time left: ${formatLeft(item.timeLeftMs)}")
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
         }

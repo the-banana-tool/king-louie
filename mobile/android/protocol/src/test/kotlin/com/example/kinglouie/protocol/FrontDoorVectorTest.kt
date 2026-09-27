@@ -471,6 +471,17 @@ class FrontDoorVectorTest {
         assertNull(FrontDoor.identify(info(jsonString(web), raw("web-01")), listOf(NodePin(web, "web-01", "zz"))))
     }
 
+    /** A late re-pin never overwrites a relay the phone moved to (reset, new pairing, another re-pin) while the probe was out. */
+    @Test
+    fun repinAppliesOnlyToTheRelayProbed() {
+        val probed = RepinTarget("https://kl.example.com", "sha256/" + "A".repeat(43), "kl-c2ubd6jjqumalzt5")
+        assertTrue(FrontDoor.repinStillApplies(probed, probed.copy()))
+        assertFalse(FrontDoor.repinStillApplies(probed, null))
+        assertFalse(FrontDoor.repinStillApplies(probed, probed.copy(relaySpki = "sha256/" + "B".repeat(43))))
+        assertFalse(FrontDoor.repinStillApplies(probed, probed.copy(relayUrl = "https://other.example.com")))
+        assertFalse(FrontDoor.repinStillApplies(probed, probed.copy(frontdoorId = "kl-aaaaaaaaaaaaaaaa")))
+    }
+
     /** Client and front-door text is capped by code points and escaped; markup stays text. */
     @Test
     fun shownTextIsCappedAndEscaped() {

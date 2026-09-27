@@ -31,6 +31,7 @@ import com.example.kinglouie.protocol.NodePin
 import com.example.kinglouie.protocol.PairingRequest
 import com.example.kinglouie.protocol.ProtocolException
 import com.example.kinglouie.protocol.RelayClientFactory
+import com.example.kinglouie.protocol.RepinTarget
 import com.example.kinglouie.protocol.ResponseOutcome
 import com.example.kinglouie.protocol.ScopeChoice
 import com.example.kinglouie.protocol.Timestamps
@@ -47,7 +48,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -1030,6 +1033,7 @@ class AppModel(context: Context) {
         val seen = api.takeRefusedSpki() ?: return false
         val url = storage.relayUrl ?: return false
         val current = storage.relaySpki ?: return false
+        val probed = RepinTarget(url, current, fd)
         val envelope = try {
             RelayApi(url, seen, null, null).repinEnvelope()
         } catch (e: CancellationException) {
@@ -1040,10 +1044,20 @@ class AppModel(context: Context) {
         val check = FrontDoor.verifyRepin(envelope, fd, pin.key, seen, current)
         val newSpki = check.newSpki
         if (!check.ok || newSpki == null) return false
+        // The probe took time: a reset, a new pairing or another re-pin since then wins.
+        if (!currentCoroutineContext().isActive || mode != AppMode.LIVE || !FrontDoor.repinStillApplies(probed, currentRepinTarget())) return false
         storage.relaySpki = newSpki
         connect()
         banner = "The front door changed its certificate key. Its signed re-pin checked out, so this phone now pins the new key."
         return true
+    }
+
+    /** The relay and front door the phone has now; null without one. */
+    private fun currentRepinTarget(): RepinTarget? {
+        val url = storage.relayUrl ?: return null
+        val spki = storage.relaySpki ?: return null
+        val fd = frontDoorId ?: return null
+        return RepinTarget(url, spki, fd)
     }
 
     /**
@@ -1177,11 +1191,28 @@ class AppModel(context: Context) {
         }
     }
 
+    /**
+     * One signed front-door action at a time (revoke, remove, acknowledge),
+     * shared with the decision flows through `frontDoorBusy`, so a second
+     * tap while one is out does nothing.
+     */
+    private fun frontDoorAction(block: suspend () -> Unit) {
+        if (frontDoorBusy) return
+        frontDoorBusy = true
+        scope.launch {
+            try {
+                block()
+            } finally {
+                frontDoorBusy = false
+            }
+        }
+    }
+
     /** Revocation is challenge-bound: a fresh `revoke` challenge, then the signature. */
-    fun revokeClient(grantId: String, name: String) = scope.launch {
-        val api = client ?: return@launch
-        val k = key ?: return@launch
-        val fd = frontDoorId ?: return@launch
+    fun revokeClient(grantId: String, name: String) = frontDoorAction {
+        val api = client ?: return@frontDoorAction
+        val k = key ?: return@frontDoorAction
+        val fd = frontDoorId ?: return@frontDoorAction
         try {
             val challenge = api.challenge(FrontDoor.PURPOSE_REVOKE)
             val message = FrontDoor.clientRevoke(fd, grantId, challenge.challenge, k.deviceId, Timestamps.string(api.now()))
@@ -1278,10 +1309,10 @@ class AppModel(context: Context) {
     }
 
     /** Removal is challenge-bound: a fresh `remove` challenge, then the signature. */
-    fun removeNode(nodeId: String, name: String) = scope.launch {
-        val api = client ?: return@launch
-        val k = key ?: return@launch
-        val fd = frontDoorId ?: return@launch
+    fun removeNode(nodeId: String, name: String) = frontDoorAction {
+        val api = client ?: return@frontDoorAction
+        val k = key ?: return@frontDoorAction
+        val fd = frontDoorId ?: return@frontDoorAction
         try {
             val challenge = api.challenge(FrontDoor.PURPOSE_REMOVE)
             val message = FrontDoor.nodeRemove(fd, nodeId, challenge.challenge, k.deviceId, Timestamps.string(api.now()))
@@ -1311,9 +1342,9 @@ class AppModel(context: Context) {
         }
     }
 
-    fun ackAlert(id: String) = scope.launch {
-        val api = client ?: return@launch
-        if (frontDoorId == null) return@launch
+    fun ackAlert(id: String) = frontDoorAction {
+        val api = client ?: return@frontDoorAction
+        if (frontDoorId == null) return@frontDoorAction
         try {
             api.ackAlert(id)
             val i = alerts.indexOfFirst { it["id"].str() == id }
@@ -1391,6 +1422,8 @@ class AppModel(context: Context) {
         openInvite = null
         grantRequest = null
         grantCode = null
+        grantReceivedAtMs = 0L
+        frontDoorBusy = false
         clients.clear()
         pairings.clear()
         frontDoorNodes.clear()

@@ -518,6 +518,17 @@ final class FrontDoorVectorTests: XCTestCase {
         XCTAssertNil(FrontDoor.identify(info(.string(web), try raw("web-01")), pins: [NodePin(id: web, name: "web-01", key: "zz")]))
     }
 
+    /// A late re-pin never overwrites a relay the phone moved to (reset, new pairing, another re-pin) while the probe was out.
+    func testRepinAppliesOnlyToTheRelayProbed() {
+        let spki = "sha256/" + String(repeating: "A", count: 43)
+        let probed = RepinTarget(relayURL: "https://kl.example.com", relaySpki: spki, frontdoorId: "kl-c2ubd6jjqumalzt5")
+        XCTAssertTrue(FrontDoor.repinStillApplies(probed: probed, now: RepinTarget(relayURL: "https://kl.example.com", relaySpki: spki, frontdoorId: "kl-c2ubd6jjqumalzt5")))
+        XCTAssertFalse(FrontDoor.repinStillApplies(probed: probed, now: nil))
+        XCTAssertFalse(FrontDoor.repinStillApplies(probed: probed, now: RepinTarget(relayURL: "https://kl.example.com", relaySpki: "sha256/" + String(repeating: "B", count: 43), frontdoorId: "kl-c2ubd6jjqumalzt5")))
+        XCTAssertFalse(FrontDoor.repinStillApplies(probed: probed, now: RepinTarget(relayURL: "https://other.example.com", relaySpki: spki, frontdoorId: "kl-c2ubd6jjqumalzt5")))
+        XCTAssertFalse(FrontDoor.repinStillApplies(probed: probed, now: RepinTarget(relayURL: "https://kl.example.com", relaySpki: spki, frontdoorId: "kl-aaaaaaaaaaaaaaaa")))
+    }
+
     /// Client and front-door text is capped by code points and escaped; markup stays text.
     func testShownTextIsCappedAndEscaped() {
         XCTAssertEqual(FrontDoor.shownText(nil), "")

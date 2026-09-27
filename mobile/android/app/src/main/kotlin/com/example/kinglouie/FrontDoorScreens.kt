@@ -140,7 +140,7 @@ fun Clients(model: AppModel) {
                 Text(fdText(g["client_host"]))
                 Text(g["scopes"].arr().orEmpty().take(FrontDoor.SHOWN_TEXT_MAX).joinToString(", ") { fdText(it, 64) }, fontFamily = FontFamily.Monospace)
                 Text("Last used ${fdText(g["last_used_at"], 40).ifEmpty { "never" }}", color = Color.Gray)
-                if (grantId != null) TextButton({ model.revokeClient(grantId, name) }) { Text("Revoke") }
+                if (grantId != null) TextButton({ model.revokeClient(grantId, name) }, enabled = !model.frontDoorBusy) { Text("Revoke") }
             }
             HorizontalDivider()
         }
@@ -181,7 +181,7 @@ fun FrontDoorNodes(model: AppModel) {
                 Text("${FrontDoor.shownText(name, 64)}  ${if (n["online"].bool() == true) "online" else "offline"}", fontWeight = FontWeight.Bold)
                 Text(FrontDoor.shownText(FrontDoor.nodeFingerprint(id), 64), fontFamily = FontFamily.Monospace)
                 Text("${fdText(n["profile"], 32)} · confirmed at the ${fdText(n["source"], 32)} · audit ${fdText(n["audit"], 32)}")
-                if (n["source"].str() == "phone" && id.isNotEmpty()) TextButton({ model.removeNode(id, name) }) { Text("Remove") }
+                if (n["source"].str() == "phone" && id.isNotEmpty()) TextButton({ model.removeNode(id, name) }, enabled = !model.frontDoorBusy) { Text("Remove") }
             }
             HorizontalDivider()
         }
@@ -200,7 +200,7 @@ fun Alerts(model: AppModel) {
                 Text(fdText(a["subject"]), fontFamily = FontFamily.Monospace)
                 Text(FrontDoor.shownText(a["detail"]?.let { Jcs.serialize(it) }, 400), fontFamily = FontFamily.Monospace)
                 Text(fdText(a["at"], 40), color = Color.Gray)
-                if (a["acked"].bool() != true && id != null) TextButton({ model.ackAlert(id) }) { Text("Acknowledge") }
+                if (a["acked"].bool() != true && id != null) TextButton({ model.ackAlert(id) }, enabled = !model.frontDoorBusy) { Text("Acknowledge") }
             }
             HorizontalDivider()
         }

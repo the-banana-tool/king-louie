@@ -131,6 +131,7 @@ struct ConnectClientView: View {
 
 struct ClientsView: View {
     @EnvironmentObject var model: AppModel
+    @State private var busy = false
 
     var body: some View {
         List {
@@ -145,9 +146,18 @@ struct ClientsView: View {
                     Text(verbatim: "Last used " + ((grant["last_used_at"]?.stringValue).map { FrontDoor.shownText($0, max: 40) } ?? "never"))
                         .font(.caption).foregroundStyle(.secondary)
                     if let grantId = grant["grant_id"]?.stringValue {
+                        // .borderless is required: in a List or Form row, SwiftUI runs the action of
+                        // every default-style Button in the row when any part of the row is tapped
+                        // (so one tap would run Approve and Deny, or act on a stray tap). Do not remove it.
                         Button("Revoke", role: .destructive) {
-                            Task { await model.revokeClient(grantId: grantId, name: name) }
+                            busy = true
+                            Task {
+                                await model.revokeClient(grantId: grantId, name: name)
+                                busy = false
+                            }
                         }
+                        .buttonStyle(.borderless)
+                        .disabled(busy)
                     }
                 }
             }
@@ -174,9 +184,12 @@ struct PairingsView: View {
                     if let old = pairing.replaces {
                         Text(verbatim: "Replaces \(FrontDoor.nodeFingerprint(old))").font(.caption).foregroundStyle(.orange)
                     }
-                    HStack {
-                        Button("Approve") { act(pairing, true) }.disabled(busy)
-                        Button("Deny", role: .destructive) { act(pairing, false) }.disabled(busy)
+                    // .borderless is required: in a List or Form row, SwiftUI runs the action of
+                    // every default-style Button in the row when any part of the row is tapped
+                    // (so one tap would run Approve and Deny, or act on a stray tap). Do not remove it.
+                    HStack(spacing: 24) {
+                        Button("Approve") { act(pairing, true) }.buttonStyle(.borderless).disabled(busy)
+                        Button("Deny", role: .destructive) { act(pairing, false) }.buttonStyle(.borderless).disabled(busy)
                     }
                 }
             }
@@ -202,6 +215,7 @@ struct PairingsView: View {
 
 struct FrontDoorNodesView: View {
     @EnvironmentObject var model: AppModel
+    @State private var busy = false
 
     var body: some View {
         List {
@@ -219,7 +233,18 @@ struct FrontDoorNodesView: View {
                     Text(verbatim: "\(shown(node["profile"], max: 32)) · confirmed at the \(shown(node["source"], max: 32)) · audit \(shown(node["audit"], max: 32))")
                         .font(.caption)
                     if node["source"]?.stringValue == "phone", !id.isEmpty {
-                        Button("Remove", role: .destructive) { Task { await model.removeNode(nodeId: id, name: name) } }
+                        // .borderless is required: in a List or Form row, SwiftUI runs the action of
+                        // every default-style Button in the row when any part of the row is tapped
+                        // (so one tap would run Approve and Deny, or act on a stray tap). Do not remove it.
+                        Button("Remove", role: .destructive) {
+                            busy = true
+                            Task {
+                                await model.removeNode(nodeId: id, name: name)
+                                busy = false
+                            }
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(busy)
                     }
                 }
             }
@@ -232,6 +257,7 @@ struct FrontDoorNodesView: View {
 
 struct AlertsView: View {
     @EnvironmentObject var model: AppModel
+    @State private var busy = false
 
     var body: some View {
         List {
@@ -243,7 +269,18 @@ struct AlertsView: View {
                     Text(verbatim: FrontDoor.shownText(alert["detail"].map { JCS.serialize($0) }, max: 400)).font(.caption.monospaced())
                     Text(verbatim: shown(alert["at"], max: 40)).font(.caption).foregroundStyle(.secondary)
                     if alert["acked"]?.boolValue != true, let id = alert["id"]?.stringValue {
-                        Button("Acknowledge") { Task { await model.ackAlert(id) } }
+                        // .borderless is required: in a List or Form row, SwiftUI runs the action of
+                        // every default-style Button in the row when any part of the row is tapped
+                        // (so one tap would run Approve and Deny, or act on a stray tap). Do not remove it.
+                        Button("Acknowledge") {
+                            busy = true
+                            Task {
+                                await model.ackAlert(id)
+                                busy = false
+                            }
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(busy)
                     }
                 }
             }

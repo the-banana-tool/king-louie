@@ -20,6 +20,19 @@ public struct RepinCheck: Equatable {
     public let newSpki: String?
 }
 
+/// The relay a re-pin probe was made for (FrontDoor.repinStillApplies).
+public struct RepinTarget: Equatable {
+    public let relayURL: String
+    public let relaySpki: String
+    public let frontdoorId: String
+
+    public init(relayURL: String, relaySpki: String, frontdoorId: String) {
+        self.relayURL = relayURL
+        self.relaySpki = relaySpki
+        self.frontdoorId = frontdoorId
+    }
+}
+
 /// client-grant-v1 (docs/protocol/client-grant-v1.md): what a phone builds
 /// for a front door and what it checks from one. Each builder applies the
 /// front door's own rules first, so the phone never signs something the
@@ -231,6 +244,16 @@ public enum FrontDoor {
         guard let newSpki = message["new_spki"]?.stringValue, ExactText.same(newSpki, receivedSpki) else { return fail("spki_mismatch") }
         guard let oldSpki = message["old_spki"]?.stringValue, ExactText.same(oldSpki, currentPin) else { return fail("old_pin_mismatch") }
         return RepinCheck(ok: true, reason: nil, newSpki: newSpki)
+    }
+
+    /// A verified re-pin is applied only when the phone still has the relay
+    /// it probed: the same URL, the same pin, the same front door. A reset,
+    /// a new pairing or another re-pin while the probe was out wins (`now`
+    /// is nil when the phone has no relay or front door any more).
+    public static func repinStillApplies(probed: RepinTarget, now: RepinTarget?) -> Bool {
+        guard let now else { return false }
+        return ExactText.same(now.relayURL, probed.relayURL) && ExactText.same(now.relaySpki, probed.relaySpki)
+            && ExactText.same(now.frontdoorId, probed.frontdoorId)
     }
 
     /// The front door a `GET /v1/frontdoor` reply names, only when it is a

@@ -873,19 +873,28 @@ final class AppModel: ObservableObject {
     /// current pin. Anything else leaves the pin as it is.
     private func tryRepin() async -> Bool {
         guard let client, let frontDoorId = state.frontDoorId, let pin = state.nodes.first(where: { $0.id == frontDoorId }),
-              let seen = client.takeRefusedSpki(), let base = state.relayURL.flatMap({ URL(string: $0) }),
+              let seen = client.takeRefusedSpki(), let url = state.relayURL, let base = URL(string: url),
               let current = state.relaySpki else { return false }
+        let probed = RepinTarget(relayURL: url, relaySpki: current, frontdoorId: frontDoorId)
         let probe = RelayAPI(base: base, spkiPin: seen, deviceId: nil, signer: nil)
         defer { probe.invalidate() }
         guard let envelope = try? await probe.repinEnvelope() else { return false }
         let check = FrontDoor.verifyRepin(envelope, frontdoorId: frontDoorId, frontdoorKeyHex: pin.key, receivedSpki: seen, currentPin: current)
         guard check.ok == true, let newSpki = check.newSpki else { return false }
+        // The probe took time: a reset, a new pairing or another re-pin since then wins.
+        guard !Task.isCancelled, mode == .live, FrontDoor.repinStillApplies(probed: probed, now: currentRepinTarget) else { return false }
         state.relaySpki = newSpki
         state.save()
         connect()
         frontDoorProblem = nil
         banner = "The front door changed its certificate key. Its signed re-pin checked out, so this phone now pins the new key."
         return true
+    }
+
+    /// The relay and front door the phone has now; nil without one.
+    private var currentRepinTarget: RepinTarget? {
+        guard let url = state.relayURL, let spki = state.relaySpki, let fd = state.frontDoorId else { return nil }
+        return RepinTarget(relayURL: url, relaySpki: spki, frontdoorId: fd)
     }
 
     /// A front-door answer that did not confirm what was asked, in the

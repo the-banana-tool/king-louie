@@ -187,7 +187,8 @@ struct ApprovalDetailView: View {
 
     private func originText(_ origin: JSONValue?) -> String {
         guard let o = origin?.objectValue else { return "" }
-        return ["client", "session", "job_id", "deviceId"].compactMap { o[$0]?.stringValue }.joined(separator: " · ")
+        // The origin is the requester's word (on a front door, a client's self-declared name): capped and escaped.
+        return ["client", "session", "job_id", "deviceId"].compactMap { o[$0]?.stringValue }.map { FrontDoor.shownText($0) }.joined(separator: " · ")
     }
 
     private func act(_ item: PendingItem, _ approve: Bool) {
@@ -214,7 +215,10 @@ struct ItemRow: View {
             } else {
                 Text(entry["text"]?.stringValue ?? "").font(.body.monospaced()).textSelection(.enabled)
                 if hidden > 0 {
-                    Button("\(hidden) characters hidden — Show all") { expanded.insert(path) }.font(.caption)
+                    // .borderless is required: in a List or Form row, SwiftUI runs the action of
+                    // every default-style Button in the row when any part of the row is tapped
+                    // (so one tap would run Approve and Deny, or act on a stray tap). Do not remove it.
+                    Button("\(hidden) characters hidden — Show all") { expanded.insert(path) }.buttonStyle(.borderless).font(.caption)
                     Text(entry["tail"]?.stringValue ?? "").font(.body.monospaced())
                 }
             }
@@ -324,7 +328,11 @@ struct DevicesView: View {
                                 Text("\(nodeLabel(n["node_id"]?.stringValue ?? "")): \(Display.escape(n["state"]?.stringValue ?? ""))").font(.caption)
                             }
                             if id != model.deviceId {
+                                // .borderless is required: in a List or Form row, SwiftUI runs the action of
+                                // every default-style Button in the row when any part of the row is tapped
+                                // (so one tap would run Approve and Deny, or act on a stray tap). Do not remove it.
                                 Button("Revoke", role: .destructive) { Task { await model.revoke(deviceId: id, name: name) } }
+                                    .buttonStyle(.borderless)
                             }
                         }
                     }

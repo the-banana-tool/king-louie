@@ -12,6 +12,9 @@ data class ScopeChoice(val scope: String, val machines: List<String>? = null)
 /** The result of checking a `kl.relay.repin` (client-grant-v1 §4.7). Only `ok == true` moves the pin. */
 data class RepinCheck(val ok: Boolean, val reason: String?, val newSpki: String?)
 
+/** The relay a re-pin probe was made for (FrontDoor.repinStillApplies). */
+data class RepinTarget(val relayUrl: String, val relaySpki: String, val frontdoorId: String)
+
 /**
  * client-grant-v1 (docs/protocol/client-grant-v1.md): what a phone builds for
  * a front door and what it checks from one. Each builder applies the front
@@ -230,6 +233,15 @@ object FrontDoor {
         if (message["old_spki"].str() != currentPin) return fail("old_pin_mismatch")
         return RepinCheck(true, null, newSpki)
     }
+
+    /**
+     * A verified re-pin is applied only when the phone still has the relay it
+     * probed: the same URL, the same pin, the same front door. A reset, a new
+     * pairing or another re-pin while the probe was out wins (`now` is null
+     * when the phone has no relay or front door any more).
+     */
+    fun repinStillApplies(probed: RepinTarget, now: RepinTarget?): Boolean =
+        now != null && now.relayUrl == probed.relayUrl && now.relaySpki == probed.relaySpki && now.frontdoorId == probed.frontdoorId
 
     /**
      * The front door a `GET /v1/frontdoor` reply names, only when it is a node
