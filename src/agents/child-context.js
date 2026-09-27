@@ -23,6 +23,12 @@ function toolSet(value) {
   return value instanceof Set || Array.isArray(value) ? new Set(value) : new Set();
 }
 
+function intersect(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  return new Set([...a].filter((name) => b.has(name)));
+}
+
 function childRuntimeOptions(agent, options = {}) {
   // The parent's origin (program §4.21), read the same way createCore's
   // agentExecutorAdapter reads it: a child of a remote-origin run stays
@@ -31,7 +37,11 @@ function childRuntimeOptions(agent, options = {}) {
   // An isolated child gets its agent's tools (none listed: nothing runs),
   // never more than the parent run's allowedToolNames.
   let tools = options.isolatedContext === true ? new Set(Array.isArray(agent?.allowedTools) ? agent.allowedTools : []) : null;
-  const parentTools = toolSet(options.allowedToolNames);
+  // The parent's limit comes as options.allowedToolNames (a direct caller)
+  // and on the re-threaded requester (SpawnAgent, BackgroundTask): both hold.
+  const requester = options.approvalRequester;
+  const parentTools = intersect(toolSet(options.allowedToolNames),
+    toolSet(requester && Object.prototype.hasOwnProperty.call(requester, 'allowedToolNames') ? requester.allowedToolNames : null));
   if (parentTools) tools = tools ? new Set([...tools].filter((name) => parentTools.has(name))) : parentTools;
   return {
     workingDirectory: options.workingDirectory,

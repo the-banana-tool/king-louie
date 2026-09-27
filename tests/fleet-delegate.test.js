@@ -526,6 +526,34 @@ describe('DelegateSessions', () => {
     const childList = seen.find((x) => x.tool === 'TaskStatus').result;
     assert.deepEqual(childList.tasks.map((x) => x.id), [taskA]);
   });
+  // Ruling T11-sessions (final review F-4): the node's gateway sessions are
+  // the owner's other chats. A delegate turn and its sub-agents can neither
+  // list, read nor message them, whatever scopes the grant holds.
+  it('a delegate turn and its sub-agents cannot run sessions_list, sessions_history or message (T11-sessions)', async () => {
+    const t = await setup();
+    const refusedText = (name) => `Tool "${name}" is not available in this turn.`;
+    script = [
+      use('sessions_list'),
+      use('sessions_history', { sessionKey: 'telegram:1' }),
+      use('message', { to: 'telegram:1', text: 'hi' }),
+      use(ROUTINE),
+      use('SpawnAgent', { task: 'child peek', agentId: 'main' }),
+      { type: 'text', content: 'done' }
+    ];
+    byTask.set('child peek', [use('sessions_list'), use('sessions_history', { sessionKey: 'telegram:1' }), use('message', { to: 'telegram:1', text: 'hi' })]);
+    const { job_id: jobId } = await t.sessions.start({ task: 'peek', origin: origin(['fleet:delegate', 'fleet:unsafe']) });
+    await t.sessions.turns.get(jobId);
+    const results = (name) => seen.filter((x) => x.tool === name).map((x) => x.result);
+    for (const name of ['sessions_list', 'sessions_history', 'message']) {
+      const got = results(name);
+      assert.equal(got.length, 2, `${name}: once in the turn, once in the child`);
+      for (const r of got) assert.deepEqual(r, { success: false, error: refusedText(name) });
+    }
+    assert.equal(results(ROUTINE)[0].ok, true, 'other tools still run');
+    assert.equal(results('SpawnAgent')[0].success, true);
+    assert.deepEqual(t.calls, [], 'nothing went to the phone');
+  });
+
   async function withBackgroundTask(t, grant = 'gr_y') {
     const n = bgRuns.length;
     const task = `bg for ${grant} ${n}`;

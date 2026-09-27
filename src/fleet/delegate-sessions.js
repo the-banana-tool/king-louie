@@ -23,6 +23,17 @@ const FULL_TRANSCRIPT_TOOLS = Object.freeze(['SpawnAgent', 'BackgroundTask', 'Ta
 const EDITED_PATHS_MAX = 50;
 const OPEN_STATES = new Set(['idle', 'turn']);
 const LIVE_BACKGROUND_STATES = new Set(['pending', 'running']);
+// Ruling T11-sessions: the node's gateway sessions are the owner's other
+// chats (Telegram, Slack, …). A delegate turn, and every sub-agent it
+// starts, runs without the tools that list, read or post to them.
+const DELEGATE_EXCLUDED_TOOLS = Object.freeze(['sessions_list', 'sessions_history', 'message']);
+
+// Every registered tool but the excluded ones, read at each turn so a tool
+// registered after start (MCP) is included.
+function delegateToolNames(registry) {
+  const excluded = new Set(DELEGATE_EXCLUDED_TOOLS);
+  return new Set(registry.list().map((tool) => tool.name).filter((name) => !excluded.has(name)));
+}
 
 // Whether this delegate turn refuses unsafe calls itself (the phone is never
 // asked). §3.8: refused unless the caller holds fleet:unsafe for THIS node; a
@@ -96,11 +107,13 @@ function scopedBackgroundTasks(manager, ids) {
 
 class DelegateSessions {
   constructor({ core, nodeConfig, jobManager, auditLedger = null, leaseManager = null, now = Date.now,
-    fullTranscriptTools = FULL_TRANSCRIPT_TOOLS, providers = null, sweepMs = 60000 } = {}) {
+    fullTranscriptTools = FULL_TRANSCRIPT_TOOLS, providers = null, sweepMs = 60000, toolRegistry = null } = {}) {
     if (!core || !core.context || typeof core.context.getAgentExecutorAdapter !== 'function') {
       throw new TypeError('DelegateSessions needs the agent core (profile: agent)');
     }
     this.core = core;
+    // eslint-disable-next-line global-require -- the core's one registry
+    this.toolRegistry = toolRegistry || require('../tools/tool-registry').registry;
     this.nodeConfig = nodeConfig;
     this.config = nodeConfig.delegate;
     this.jobs = jobManager;
@@ -321,6 +334,8 @@ class DelegateSessions {
         messages,
         abortSignal: session.turnAbort.signal,
         evidenceLedger: session.evidence,
+        // T11-sessions; the re-threaded requester carries it to sub-agents.
+        allowedToolNames: delegateToolNames(this.toolRegistry),
         executorOptions: {
           origin: approvalOrigin(origin, jobId),
           chatId: `delegate:${jobId}`,
@@ -425,4 +440,4 @@ class DelegateSessions {
   }
 }
 
-module.exports = { DelegateSessions, FULL_TRANSCRIPT_TOOLS, PARAMS_CAP, RESULT_CAP, FULL_CAP, capText, shouldRefuseUnsafe, sessionOwner };
+module.exports = { DelegateSessions, DELEGATE_EXCLUDED_TOOLS, delegateToolNames, FULL_TRANSCRIPT_TOOLS, PARAMS_CAP, RESULT_CAP, FULL_CAP, capText, shouldRefuseUnsafe, sessionOwner };

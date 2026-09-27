@@ -630,6 +630,9 @@ class ToolExecutor extends EventEmitter {
     requester.refuseUnsafe = this.refuseUnsafe;
     if (this.refuseUnsafe && this.allowedRoots) requester.allowedRoots = this.allowedRoots;
     if (this.scopedBackgroundTasks) requester.scopedBackgroundTasks = this.scopedBackgroundTasks;
+    // A child never gets a tool this run may not use (a case wake-up's list,
+    // a delegate turn's T11-sessions limit); childRuntimeOptions intersects.
+    if (this.allowedToolNames) requester.allowedToolNames = Object.freeze([...this.allowedToolNames]);
     return this.localOrigin ? markLocalRequester(requester) : requester;
   }
 
