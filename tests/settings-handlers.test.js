@@ -136,6 +136,39 @@ run('settings:setInferenceTier wraps thrown errors', async () => {
   assert.deepStrictEqual(result, { ok: false, error: 'tier exploded' });
 });
 
+run('settings:saveProvider retests the provider in the background', async () => {
+  const changed = [];
+  const ipcMain = createIpcMainMock();
+  registerSettingsHandlers(ipcMain, createDefaultContext({
+    onProviderKeyChanged: async (provider) => { changed.push(provider); return { ok: true }; }
+  }));
+  const saved = await ipcMain.handlers.get('settings:saveProvider')({}, { provider: 'openai', token: 'sk-test-123456' });
+  assert.deepStrictEqual(saved, { ok: true, hasToken: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepStrictEqual(changed, ['openai']);
+  await ipcMain.handlers.get('settings:saveProvider')({}, { provider: 'openai', clear: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepStrictEqual(changed, ['openai', 'openai']);
+});
+
+run('settings:testProvider returns the one connection test\'s result', async () => {
+  const ipcMain = createIpcMainMock();
+  registerSettingsHandlers(ipcMain, createDefaultContext({
+    testProviderConnection: async (provider) => ({ ok: true, status: { ok: true, message: `tested ${provider}` } })
+  }));
+  const result = await ipcMain.handlers.get('settings:testProvider')({}, { provider: 'openai' });
+  assert.deepStrictEqual(result, { ok: true, status: { ok: true, message: 'tested openai' } });
+});
+
+run('settings:load includes the Ollama address', async () => {
+  const ipcMain = createIpcMainMock();
+  registerSettingsHandlers(ipcMain, createDefaultContext({
+    getSettings: () => ({ activeProvider: 'openai', inference: {}, providerModels: {}, models: { ollama: { baseUrl: 'http://127.0.0.1:11434' } } })
+  }));
+  const result = await ipcMain.handlers.get('settings:load')({});
+  assert.strictEqual(result.data.ollamaBaseUrl, 'http://127.0.0.1:11434');
+});
+
 setTimeout(() => {
   if (process.exitCode && process.exitCode !== 0) {
     process.exit(process.exitCode);

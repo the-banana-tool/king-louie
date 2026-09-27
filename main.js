@@ -86,6 +86,11 @@ app.whenReady().then(async () => {
     return;
   }
 
+  // Catalog refresh and stale provider retests (spec 2026-09-27 §4.1, §5.2),
+  // started here rather than in the core's start() — unit tests build a core
+  // without touching the network. Attached mode has no core of its own.
+  if (host.core && host.core.models) host.core.models.startBackgroundChecks();
+
   app.on('activate', function () {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

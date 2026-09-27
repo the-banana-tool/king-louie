@@ -33,6 +33,12 @@ class InferenceRouter {
     this.compressContext = typeof options.compressContext === 'function'
       ? options.compressContext
       : null;
+
+    // Told about a 401/403 so availability can mark the provider unusable at
+    // once (spec 2026-09-27 §5.3). Rate limits and timeouts are not reported.
+    this.onProviderError = typeof options.onProviderError === 'function'
+      ? options.onProviderError
+      : null;
   }
 
   getCapabilities(provider, model) {
@@ -188,6 +194,14 @@ class InferenceRouter {
         });
 
         attemptsByReason[plan.reason] = (attemptsByReason[plan.reason] || 0) + 1;
+
+        if (this.onProviderError && (plan.reason === 'auth' || plan.reason === 'auth_permanent')) {
+          try {
+            this.onProviderError(config.provider, err);
+          } catch (hookErr) {
+            log.warn(`Reporting a ${config.provider} auth failure failed: ${hookErr.message}`);
+          }
+        }
 
         let action = plan.action;
 

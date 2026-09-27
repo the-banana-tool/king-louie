@@ -179,4 +179,14 @@ describe('Catalog.refresh', () => {
     await c.refresh({ force: true });
     assert.strictEqual(fetch.calls.length, 0);
   });
+
+  it('shares one run between overlapping refresh() calls (the startup refresh and a forced "Refresh now")', async () => {
+    const cacheDir = tmp();
+    const fetch = fakeFetch(liveRoutes());
+    const c = fixtureCatalog({ cacheDir, fetch });
+    const [a, b] = await Promise.all([c.refresh(), c.refresh({ force: true })]);
+    assert.strictEqual(fetch.calls.length, 2, 'one fetch each for models.dev and scores, not one per call');
+    assert.deepStrictEqual(a, b, 'both callers see the same result');
+    assert.strictEqual(c.get('openai', 'gpt-5.5').name, 'GPT-5.5 live');
+  });
 });

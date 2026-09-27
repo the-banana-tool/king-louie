@@ -72,6 +72,7 @@ class Catalog extends EventEmitter {
     this._liveThisSession = false;
     this._overridesSig = '';
     this._suppressEnsure = false;
+    this._refreshInFlight = null;
     this._deps = { snapshotDir: DEFAULT_SNAPSHOT_DIR, cacheDir: null, fetch: globalThis.fetch, getSettings: () => ({}), now: () => new Date() };
   }
 
@@ -199,8 +200,17 @@ class Catalog extends EventEmitter {
 
   // Fetch the live catalog and scores (spec §4.1): at most once per
   // refreshHours unless forced, with the cached ETag, never throwing. A
-  // failure or a malformed document keeps the previous copy.
-  async refresh({ force = false } = {}) {
+  // failure or a malformed document keeps the previous copy. The startup
+  // refresh and a forced "Refresh now" can overlap; a call arriving while
+  // one is already in flight shares that run instead of fetching again.
+  refresh(options = {}) {
+    if (this._refreshInFlight) return this._refreshInFlight;
+    const run = this._refresh(options).finally(() => { this._refreshInFlight = null; });
+    this._refreshInFlight = run;
+    return run;
+  }
+
+  async _refresh({ force = false } = {}) {
     const cfg = this.config();
     const done = () => {
       const s = this.status();

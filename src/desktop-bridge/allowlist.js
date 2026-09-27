@@ -21,7 +21,9 @@ const PROXIED_DOMAINS = Object.freeze([
   // Cases stage 4: the ladder state, the contact policy editor and heartbeats.
   'contact',
   'contactPolicy',
-  'presence'
+  'presence',
+  // Models stage M1: catalog status, usable models, provider tests.
+  'models'
 ]);
 const PROXIED_CHANNELS = Object.freeze(['agent:userResponse']);
 
@@ -35,7 +37,8 @@ const RENDERER_EVENTS = new Set([
   'backgroundTask:completed',
   // Cases stage 2: the one event the case runtime emits (status, questions,
   // budget). A later case event is added here by name, not by prefix.
-  'case:changed'
+  'case:changed',
+  'models:statusChanged', 'models:catalogUpdated'
 ]);
 
 // Settings tabs whose domains the service does not serve while attached.

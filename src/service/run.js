@@ -182,6 +182,7 @@ function loadProfile(profile) {
               }
             }
           },
+          startBackgroundChecks: () => core.models.startBackgroundChecks(),
           masterKeySource: servicePorts.masterKeySource,
           desktopBridge,
           approvals,
@@ -319,6 +320,9 @@ async function runService({ dataDir: requestedDataDir, profile: profileOverride,
     }
     stdout.write(`${JSON.stringify({ event: 'ready', profile, dataDir, workspace, cwd: process.cwd(), pid: process.pid, masterKeySource: running.masterKeySource })}\n`);
     log.info('service ready', { profile, masterKeySource: running.masterKeySource });
+    if (typeof running.startBackgroundChecks === 'function') {
+      running.startBackgroundChecks().catch((err) => log.warn(`Model background checks failed: ${err.message}`));
+    }
 
     await new Promise((resolve) => {
       const onShutdown = () => resolve();

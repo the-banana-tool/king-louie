@@ -39,39 +39,33 @@ describe('Ollama tokenless settings behavior', () => {
   afterEach(() => { global.fetch = originalFetch; });
 
   describe('settings:testProvider', () => {
-    it('does NOT reject Ollama for a missing API token', async () => {
-      let calledUrl = null;
-      global.fetch = async (url) => {
-        calledUrl = url;
-        return { ok: true, text: async () => '' };
-      };
-
-      const handler = getHandler('settings:testProvider');
+    it('delegates to the one connection test, with no token needed for Ollama', async () => {
+      const tested = [];
+      const handler = getHandler('settings:testProvider', tokenlessContext({
+        testProviderConnection: async (p) => {
+          tested.push(p);
+          return { ok: true, status: { ok: true, message: 'Connected: 2 models.', models: ['llama3.1', 'qwen2.5'] } };
+        }
+      }));
       const result = await handler({}, { provider: 'ollama' });
-
       assert.strictEqual(result.ok, true, `expected success, got: ${JSON.stringify(result)}`);
-      assert.match(String(calledUrl), /11434\/api\/tags/, 'should probe the local Ollama daemon');
+      assert.deepStrictEqual(tested, ['ollama']);
     });
 
-    it('still rejects a token-required provider with no saved token', async () => {
-      global.fetch = async () => ({ ok: true, text: async () => '' });
-      const handler = getHandler('settings:testProvider');
+    it('reports a missing token as the test\'s error', async () => {
+      const handler = getHandler('settings:testProvider', tokenlessContext({
+        testProviderConnection: async () => ({ ok: false, error: 'No token saved for this provider.', status: { ok: false } })
+      }));
       const result = await handler({}, { provider: 'openai' });
       assert.strictEqual(result.ok, false);
       assert.match(result.error, /No token saved/i);
     });
 
-    it('reports an error (not a crash) when the Ollama daemon is down', async () => {
-      global.fetch = async () => ({
-        ok: false,
-        status: 503,
-        statusText: 'Service Unavailable',
-        text: async () => 'connection refused'
-      });
-      const handler = getHandler('settings:testProvider');
-      const result = await handler({}, { provider: 'ollama' });
-      assert.strictEqual(result.ok, false);
-      assert.match(result.error, /503/);
+    it('refuses an unknown provider without testing', async () => {
+      const handler = getHandler('settings:testProvider', tokenlessContext({
+        testProviderConnection: async () => { throw new Error('must not be called'); }
+      }));
+      assert.deepStrictEqual(await handler({}, { provider: 'nope' }), { ok: false, error: 'Unknown provider.' });
     });
   });
 

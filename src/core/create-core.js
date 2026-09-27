@@ -65,6 +65,8 @@ const ContextAssembler = require('../context/context-assembler');
 const ConversationCompactor = require('../context/conversation-compactor');
 const { buildSystemSections } = require('../context/system-sections');
 const UsageTracker = require('../tracking/usage-tracker');
+const { Catalog, Availability, setActiveCatalog } = require('../models');
+const { classifyError, FailoverReason } = require('../providers/error-classifier');
 const {
   NotificationRouter,
   normalizeNotificationSettings
@@ -291,6 +293,19 @@ function createCore(deps = {}) {
   const setApiStatus = (status) => store.set('apiStatus', status);
   const getSettings = () => mergeSettings(store.get('settings', DEFAULT_SETTINGS));
   const setSettings = (settings) => store.set('settings', mergeSettings(settings));
+
+  // Model catalog (spec 2026-09-27 §4): the bundled snapshot plus the copy
+  // cached under <dataDir>/catalog/. Loading never touches the network; the
+  // host starts the refresh through startModelsBackgroundChecks below.
+  const modelsFetch = typeof deps.fetch === 'function' ? deps.fetch : globalThis.fetch;
+  const catalog = new Catalog().load({
+    cacheDir: path.join(userDataPath, 'catalog'),
+    fetch: modelsFetch,
+    getSettings
+  });
+  setActiveCatalog(catalog);
+  catalog.on('updated', (status) => ui.send('models:catalogUpdated', status));
+
   const normalizeTemplateVariables = (templateVariables = {}) => ({
     name: String(templateVariables?.name || '').trim(),
     role: String(templateVariables?.role || '').trim(),
@@ -959,6 +974,82 @@ function createCore(deps = {}) {
     return false;
   };
 
+  // Providers for King Louie's own calls: the catalog prices them, and
+  // Ollama talks to the address in models.ollama.baseUrl (spec §5.4).
+  const providerOptionsFor = (providerType) => ({
+    catalog,
+    ...(providerType === 'ollama' ? { serverUrl: getSettings().models?.ollama?.baseUrl } : {})
+  });
+
+  const createProviderInstance = (providerType, token) => {
+    if (providerType === 'anthropic' && token === '__anthropic_oauth__') {
+      // OAuth mode — the token is refreshed async before the first API call.
+      return ProviderFactory.createProvider(providerType, 'oauth-placeholder', { ...providerOptionsFor(providerType), authMode: 'oauth' });
+    }
+    return ProviderFactory.createProvider(providerType, token, providerOptionsFor(providerType));
+  };
+
+  const hasProviderCredential = (provider) => {
+    if (provider === 'ollama') return true;
+    if (provider === 'anthropic' && anthropicOAuth.isConnected()) return true;
+    return Boolean(getApiTokens()[provider]);
+  };
+
+  // Availability (spec §5): one connection test per provider, its result
+  // stored under the existing apiStatus key with the account's models.
+  const availability = new Availability({
+    catalog,
+    labels: PROVIDER_LABELS,
+    hasCredential: hasProviderCredential,
+    createProvider: async (provider) => {
+      const token = getDecryptedProviderToken(provider);
+      if (provider === 'anthropic' && token === '__anthropic_oauth__') {
+        const accessToken = await refreshAnthropicOAuthToken();
+        return ProviderFactory.createProvider('anthropic', accessToken, { ...providerOptionsFor('anthropic'), authMode: 'oauth' });
+      }
+      return createProviderInstance(provider, token);
+    },
+    getStatuses: getApiStatus,
+    setStatuses: setApiStatus,
+    getSettings,
+    fetch: modelsFetch
+  });
+  availability.on('changed', (change) => ui.send('models:statusChanged', change));
+
+  // A 401 or 403 makes the provider unusable at once (spec §5.3). Rate
+  // limits and timeouts do not change usability.
+  const reportProviderError = (provider, error) => {
+    if (!provider || !error) return;
+    const root = error.cause && typeof error.cause === 'object' ? error.cause : error;
+    const { reason } = classifyError(root, { provider });
+    if (reason === FailoverReason.AUTH || reason === FailoverReason.AUTH_PERMANENT) {
+      availability.markAuthFailure(provider, root);
+    }
+  };
+
+  // A key saved, cleared or connected: test it, or drop the status when no
+  // credential is left (spec §5.2).
+  const onProviderKeyChanged = async (provider) => {
+    if (!hasProviderCredential(provider)) {
+      availability.forget(provider);
+      return null;
+    }
+    return availability.test(provider);
+  };
+
+  // The catalog refresh and the stale-provider retests reach the network, so
+  // the host starts them after start() — see main.js and src/service/run.js
+  // — never from inside this function; unit tests build cores all the time.
+  // KL_TEST_MODE (every e2e launch and the service smoke test) keeps them off.
+  const startModelsBackgroundChecks = async () => {
+    if (process.env.KL_TEST_MODE) return { skipped: true };
+    await Promise.all([
+      catalog.refresh().catch((err) => log.warn(`Model catalog refresh failed: ${err.message}`)),
+      availability.retestStale().catch((err) => log.warn(`Provider retests failed: ${err.message}`))
+    ]);
+    return { skipped: false };
+  };
+
   const normalizeSkillIdForCustomization = (rawSkillId = '') => {
     return String(rawSkillId || '').trim().toLowerCase();
   };
@@ -1434,58 +1525,10 @@ function createCore(deps = {}) {
     };
   };
 
+  // The one connection test (spec §5.2): the provider's listModels().
   const testProviderConnection = async (provider) => {
-    const tokens = getApiTokens();
-    if (!tokens[provider]) {
-      return { ok: false, error: 'No token saved for this provider.' };
-    }
-
-    const token = decryptToken(tokens[provider]);
-
-    let response;
-    if (provider === 'openai') {
-      response = await fetch('https://api.openai.com/v1/models', {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-    } else if (provider === 'anthropic') {
-      response = await fetch('https://api.anthropic.com/v1/models', {
-        headers: {
-          'x-api-key': token,
-          'anthropic-version': '2023-06-01'
-        }
-      });
-    } else if (provider === 'copilot') {
-      response = await fetch('https://api.github.com/user', {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'User-Agent': 'king-louie-app'
-        }
-      });
-    }
-
-    if (!response) {
-      return { ok: false, error: 'Unable to reach provider.' };
-    }
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      const status = updateStatus(provider, {
-        ok: false,
-        message: `${response.status} ${response.statusText}`
-      });
-      return {
-        ok: false,
-        error: `${response.status} ${response.statusText}`,
-        details: errorText,
-        status
-      };
-    }
-
-    const status = updateStatus(provider, {
-      ok: true,
-      message: 'Connection successful'
-    });
-    return { ok: true, status };
+    const status = await availability.test(provider);
+    return status.ok ? { ok: true, status } : { ok: false, error: status.error || status.message, status };
   };
 
   // Final review I3: with channels off, a channel sub-action other than
@@ -1925,6 +1968,7 @@ function createCore(deps = {}) {
       }
 
       saveProviderToken(provider, token);
+      availability.test(provider).catch((err) => log.warn(`Testing ${provider} after /llm add failed: ${err.message}`));
       return {
         ok: true,
         output: `${providerLabels[provider]} token saved securely.`
@@ -2151,13 +2195,8 @@ function createCore(deps = {}) {
     getSettings,
     getProviderModel,
     getProviderToken: getDecryptedProviderToken,
-    createProvider: (providerType, token) => {
-      if (providerType === 'anthropic' && token === '__anthropic_oauth__') {
-        // OAuth mode — token will be refreshed async before first API call
-        return ProviderFactory.createProvider(providerType, 'oauth-placeholder', { authMode: 'oauth' });
-      }
-      return ProviderFactory.createProvider(providerType, token);
-    }
+    createProvider: (providerType, token) => createProviderInstance(providerType, token),
+    onProviderError: reportProviderError
   });
 
   // Wrap resolveInference to handle async OAuth token refresh
@@ -2509,7 +2548,7 @@ function createCore(deps = {}) {
     llmRouter = new LLMRouter({
       getSettings,
       getProviderToken: getDecryptedProviderToken,
-      createProvider: (providerType, token) => ProviderFactory.createProvider(providerType, token)
+      createProvider: (providerType, token) => createProviderInstance(providerType, token)
     });
     inferenceRouter.setLLMRouter(llmRouter);
 
@@ -2699,7 +2738,7 @@ function createCore(deps = {}) {
               return null;
             }
             const token = getDecryptedProviderToken(providerType);
-            return ProviderFactory.createProvider(providerType, token);
+            return createProviderInstance(providerType, token);
           } catch (error) {
             skillsLog.warn(`LLM provider not available: ${error.message}`);
             return null;
@@ -3092,6 +3131,14 @@ function createCore(deps = {}) {
     setActiveInferenceTier,
     setNotificationSettings,
 
+    // Models (spec 2026-09-27 §4, §5)
+    getCatalog: () => catalog,
+    getAvailability: () => availability,
+    getProviderOptions: providerOptionsFor,
+    testProviderConnection,
+    reportProviderError,
+    onProviderKeyChanged,
+
     // MCP
     getMcpManager: () => mcpManager,
     vaultStore,
@@ -3183,6 +3230,9 @@ function createCore(deps = {}) {
     vault,
     getSettings,
     saveProviderToken,
+    // The host starts these after start() (see main.js and
+    // src/service/run.js): unit tests build cores all the time.
+    models: { catalog, availability, startBackgroundChecks: startModelsBackgroundChecks },
     getMeshContext: () => meshContext,
     // Service mode decides whether an enabled listener actually came up
     // through these (assertEnabledListenersBound in src/service/run.js). They

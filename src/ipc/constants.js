@@ -86,6 +86,14 @@ module.exports = {
   USAGE_GET_SESSION: 'usage:getSession',
   USAGE_GET_DAILY: 'usage:getDaily',
 
+  // Model catalog and availability (spec 2026-09-27, stage M1).
+  MODELS_STATUS: 'models:status',
+  MODELS_REFRESH_CATALOG: 'models:refreshCatalog',
+  MODELS_TEST_ALL: 'models:testAll',
+  MODELS_USABLE: 'models:usable',
+  MODELS_EXPLAIN: 'models:explain',
+  MODELS_SET_OLLAMA_URL: 'models:setOllamaBaseUrl',
+
   SETTINGS_LOAD: 'settings:load',
   SETTINGS_SAVE_TEMPLATE_VARIABLES: 'settings:saveTemplateVariables',
   SETTINGS_SAVE_USER_PROFILE: 'settings:saveUserProfile',

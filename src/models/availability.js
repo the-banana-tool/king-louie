@@ -132,8 +132,15 @@ class Availability extends EventEmitter {
     }
   }
 
+  // An Ollama never set up (no stored status) is left alone: not every owner
+  // runs one, and probing an address nobody configured just logs noise.
+  // Shared by testAll and retestStale.
+  _skipUnsetupOllama(p) {
+    return p === 'ollama' && !this.status(p);
+  }
+
   async testAll() {
-    const targets = KL_PROVIDERS.filter((p) => this.hasCredential(p));
+    const targets = KL_PROVIDERS.filter((p) => this.hasCredential(p) && !this._skipUnsetupOllama(p));
     const results = await Promise.all(targets.map((p) => this.test(p)));
     return Object.fromEntries(targets.map((p, i) => [p, results[i]]));
   }
@@ -156,9 +163,8 @@ class Availability extends EventEmitter {
     const maxAge = this._retestHours() * 3600000;
     const nowMs = this.now().getTime();
     const due = KL_PROVIDERS.filter((p) => {
-      if (!this.hasCredential(p)) return false;
+      if (!this.hasCredential(p) || this._skipUnsetupOllama(p)) return false;
       const s = this.status(p);
-      if (p === 'ollama' && !s) return false;
       return !s || !s.checkedAt || nowMs - Date.parse(s.checkedAt) >= maxAge;
     });
     await Promise.all(due.map((p) => this.test(p)));

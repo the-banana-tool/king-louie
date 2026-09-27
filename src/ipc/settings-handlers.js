@@ -34,7 +34,10 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     anthropicOAuth,
     setActiveInferenceTier,
     setNotificationSettings,
-    getMainWindow
+    getMainWindow,
+    testProviderConnection,
+    onProviderKeyChanged,
+    getProviderOptions
   } = context;
 
   const getTelegramBridge = () => (
@@ -50,6 +53,15 @@ function registerSettingsHandlers(ipcMain, context = {}) {
   );
 
   const applyActiveProvider = context.applyActiveProviderUpdate || applyActiveProviderUpdate;
+
+  // A saved, cleared or connected key is retested in the background (spec
+  // 2026-09-27 §5.2); the result reaches the UI as models:statusChanged.
+  const notifyKeyChanged = (provider) => {
+    if (typeof onProviderKeyChanged !== 'function') return;
+    Promise.resolve()
+      .then(() => onProviderKeyChanged(provider))
+      .catch((err) => log.warn(`Retesting ${provider} after a key change failed: ${err.message}`));
+  };
 
   ipcMain.handle('settings:load', wrapHandler('settings:load', async () => {
     const tokens = getApiTokens();
@@ -70,6 +82,7 @@ function registerSettingsHandlers(ipcMain, context = {}) {
       encryptionAvailable: safeStorage.isEncryptionAvailable(),
       providers,
       activeProvider: settings.activeProvider || 'openai',
+      ollamaBaseUrl: settings.models?.ollama?.baseUrl || '',
       inference: settings.inference,
       notifications: settings.notifications,
       hooks: {
@@ -335,12 +348,14 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     if (clear) {
       delete tokens[provider];
       setApiTokens(tokens);
+      notifyKeyChanged(provider);
       return { ok: true, hasToken: false };
     }
 
     if (typeof token === 'string' && token.trim() !== '') {
       tokens[provider] = encryptToken(token.trim());
       setApiTokens(tokens);
+      notifyKeyChanged(provider);
       return { ok: true, hasToken: true };
     }
 
@@ -351,90 +366,12 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     if (!providerLabels[provider]) {
       return { ok: false, error: 'Unknown provider.' };
     }
-
-    // For Anthropic, allow testing via OAuth even without a stored API key
-    const isAnthropicOAuth = provider === 'anthropic' && anthropicOAuth && anthropicOAuth.isConnected();
-    const isTokenless = provider === 'ollama';
-
-    const tokens = getApiTokens();
-    if (!tokens[provider] && !isAnthropicOAuth && !isTokenless) {
-      return { ok: false, error: 'No token saved for this provider.' };
+    if (typeof testProviderConnection !== 'function') {
+      return { ok: false, error: 'Connection tests are not available in this host.' };
     }
-
-    const token = (isAnthropicOAuth || isTokenless) ? null : decryptToken(tokens[provider]);
-
-    let response;
-    if (provider === 'openai') {
-      response = await fetch('https://api.openai.com/v1/models', {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-    } else if (provider === 'anthropic' && isAnthropicOAuth) {
-      const oauthToken = await anthropicOAuth.getValidAccessToken();
-      response = await fetch('https://api.anthropic.com/v1/models', {
-        headers: {
-          'Authorization': `Bearer ${oauthToken}`,
-          'anthropic-version': '2023-06-01'
-        }
-      });
-    } else if (provider === 'anthropic') {
-      response = await fetch('https://api.anthropic.com/v1/models', {
-        headers: {
-          'x-api-key': token,
-          'anthropic-version': '2023-06-01'
-        }
-      });
-    } else if (provider === 'copilot') {
-      response = await fetch('https://api.github.com/user', {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'User-Agent': 'king-louie-app'
-        }
-      });
-    } else if (provider === 'groq') {
-      response = await fetch('https://api.groq.com/openai/v1/models', {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-    } else if (provider === 'mistral') {
-      response = await fetch('https://api.mistral.ai/v1/models', {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-    } else if (provider === 'ollama') {
-      response = await fetch('http://localhost:11434/api/tags');
-    } else if (provider === 'gemini') {
-      response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${token}`);
-    } else if (provider === 'openrouter') {
-      response = await fetch('https://openrouter.ai/api/v1/models', {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'HTTP-Referer': 'king-louie',
-          'X-Title': 'King Louie'
-        }
-      });
-    }
-
-    if (!response) {
-      return { ok: false, error: 'Unable to reach provider.' };
-    }
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      const status = updateStatus(provider, {
-        ok: false,
-        message: `${response.status} ${response.statusText}`
-      });
-      return {
-        ok: false,
-        error: `${response.status} ${response.statusText}`,
-        details: errorText,
-        status
-      };
-    }
-
-    const status = updateStatus(provider, {
-      ok: true,
-      message: 'Connection successful'
-    });
-    return { ok: true, status };
+    // The one connection test (spec 2026-09-27 §5.2): the provider's
+    // listModels(), stored under apiStatus with the account's models.
+    return testProviderConnection(provider);
   }));
 
   ipcMain.handle('settings:runLlmCommand', wrapHandler('settings:runLlmCommand', async (_event, { command }) => {
@@ -473,7 +410,8 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     // Try API-based listing first (ollama needs no token)
     if (token || provider === 'ollama') {
       try {
-        const instance = ProviderFactory.create(provider, token || 'ollama-local', { authMode });
+        const providerOptions = typeof getProviderOptions === 'function' ? getProviderOptions(provider) : {};
+        const instance = ProviderFactory.create(provider, token || 'ollama-local', { ...providerOptions, authMode });
         const models = await instance.listModels();
         return { ok: true, models, source: 'api' };
       } catch (err) { log.debug(`listModels API failed, falling back to static: ${err.message}`); }
@@ -647,6 +585,7 @@ function registerSettingsHandlers(ipcMain, context = {}) {
         ok: true,
         message: 'Connected via OAuth (Max subscription)'
       });
+      notifyKeyChanged('anthropic');
       return { ok: true, status, expiresAt: result.expiresAt };
     } catch (err) {
       return { ok: false, error: err.message || 'OAuth flow failed.' };
@@ -659,6 +598,7 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     }
 
     anthropicOAuth.clearStoredTokens();
+    notifyKeyChanged('anthropic');
     return { ok: true };
   }));
 

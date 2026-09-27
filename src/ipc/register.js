@@ -50,6 +50,7 @@ function registerHandlers(ipcMain, context = {}) {
   require('./executor-handlers').registerExecutorHandlers(ipcMain, context);
   require('./detour-handlers').registerDetourHandlers(ipcMain, context);
   require('./desktop-handlers').registerDesktopHandlers(ipcMain, context);
+  require('./models-handlers').registerModelsHandlers(ipcMain, context);
 }
 
 module.exports = {

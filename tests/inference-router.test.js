@@ -170,6 +170,26 @@ describe('InferenceRouter', () => {
     assert.strictEqual(result, 'ollama says hi');
     assert.strictEqual(receivedToken, 'not-required');
   });
+
+  it('reports an auth failure to onProviderError, and a rate limit not at all', async () => {
+    const reported = [];
+    const authError = Object.assign(new Error('invalid x-api-key'), { status: 401 });
+    const router = new InferenceRouter({
+      ...mockConfig({ providers: { anthropic: { getDefaultModel: () => 'claude-3', sendMessage: async () => { throw authError; } } } }),
+      onProviderError: (provider, err) => reported.push([provider, err])
+    });
+    await assert.rejects(router.routeWithFallback('standard', [{ role: 'user', content: 'hi' }], {}));
+    assert.deepStrictEqual(reported, [['anthropic', authError]]);
+
+    const limited = [];
+    const slow = new InferenceRouter({
+      ...mockConfig({ providers: { anthropic: { getDefaultModel: () => 'claude-3', sendMessage: async () => { throw Object.assign(new Error('rate limited'), { status: 429 }); } } } }),
+      sleep: async () => {},
+      onProviderError: (provider) => limited.push(provider)
+    });
+    await assert.rejects(slow.routeWithFallback('standard', [{ role: 'user', content: 'hi' }], {}));
+    assert.deepStrictEqual(limited, []);
+  });
 });
 
 describe('InferenceRouter failover policy', () => {

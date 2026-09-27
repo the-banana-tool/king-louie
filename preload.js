@@ -916,6 +916,26 @@ contextBridge.exposeInMainWorld(
       getSession: () => ipcRenderer.invoke('usage:getSession'),
       getDaily: (payload) => ipcRenderer.invoke('usage:getDaily', payload)
     },
+    models: {
+      status: () => ipcRenderer.invoke('models:status'),
+      refreshCatalog: () => ipcRenderer.invoke('models:refreshCatalog'),
+      testAll: () => throttleInvoke('models:testAll', () => ipcRenderer.invoke('models:testAll')),
+      usable: (payload = {}) => {
+        validateObject(payload, 'payload');
+        return ipcRenderer.invoke('models:usable', payload);
+      },
+      explain: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.provider, 'provider', { minLength: 1 });
+        return ipcRenderer.invoke('models:explain', payload);
+      },
+      setOllamaBaseUrl: (baseUrl) => {
+        validateString(baseUrl, 'baseUrl', { minLength: 1 });
+        return ipcRenderer.invoke('models:setOllamaBaseUrl', { baseUrl });
+      },
+      onStatusChanged: (callback) => registerAdditive('models:statusChanged', callback),
+      onCatalogUpdated: (callback) => registerAdditive('models:catalogUpdated', callback)
+    },
     cron: {
       list: () => ipcRenderer.invoke('cron:list'),
       add: (payload) => {

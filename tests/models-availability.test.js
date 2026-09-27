@@ -83,11 +83,20 @@ describe('the one connection test', () => {
     assert.deepStrictEqual(created, ['openai']);
   });
 
-  it('tests every credentialed provider, Ollama included, on testAll', async () => {
+  it('tests every credentialed provider on testAll, but skips an Ollama never set up', async () => {
     const { availability } = setup({ credentials: ['openai', 'groq'], lists: { openai: ['gpt-5.5'], groq: ['llama-3.3-70b'] } });
     const all = await availability.testAll();
-    assert.deepStrictEqual(Object.keys(all).sort(), ['groq', 'ollama', 'openai']);
-    assert.strictEqual(all.ollama.ok, false, 'no Ollama server in this test');
+    assert.deepStrictEqual(Object.keys(all).sort(), ['groq', 'openai'], 'no Ollama server was ever configured, so testAll leaves it alone');
+  });
+
+  it('retests Ollama on testAll once it has a stored status', async () => {
+    const { availability } = setup({
+      credentials: ['openai'],
+      statuses: { ollama: { ok: true, error: null, message: 'ok', checkedAt: hoursAgo(1), models: [] } },
+      lists: { openai: ['gpt-5.5'] }
+    });
+    const all = await availability.testAll();
+    assert.deepStrictEqual(Object.keys(all).sort(), ['ollama', 'openai']);
   });
 });
 
