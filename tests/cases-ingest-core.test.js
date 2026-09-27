@@ -132,11 +132,16 @@ describe('createCore ingest wiring', () => {
     await assert.rejects(svc.extract('any-case', 'doc-000000000000'), (e) => e.code === 'SHUTTING_DOWN');
   });
 
-  it('shutdown finishes within shutdownTimeoutMs when closing ingest never settles', async () => {
+  it('shutdown finishes within shutdownTimeoutMs when closing ingest hangs', async () => {
     delete process.env.KL_CASES_ROOT;
     const c = core.createCore(makeDeps({ shutdownTimeoutMs: 50 }));
     const svc = c.context.getIngestService();
-    svc.close = () => new Promise(() => {});
+    // A close that hangs the way a real one can: on work that still holds a
+    // handle (a model call's socket, a git child), here a timer far past the
+    // bound. withTimeout's own timer is unref'd by design, so a promise that
+    // holds no handle at all lets the process end mid-shutdown (Linux).
+    let hung = null;
+    svc.close = () => new Promise((resolve) => { hung = setTimeout(resolve, 60000); });
     let released = false;
     const runtime = c.context.getCaseRuntime();
     const realRelease = runtime.releaseAll.bind(runtime);
@@ -145,7 +150,11 @@ describe('createCore ingest wiring', () => {
       return realRelease();
     };
     const started = Date.now();
-    await c.shutdown();
+    try {
+      await c.shutdown();
+    } finally {
+      clearTimeout(hung);
+    }
     assert.ok(Date.now() - started < 3000, `shutdown took ${Date.now() - started} ms`);
     assert.strictEqual(released, true);
   });
