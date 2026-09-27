@@ -75,6 +75,15 @@ describe('extractEntities', () => {
     assert.strictEqual(found.length, 1);
   });
 
+  it('treats a tab, newline or NBSP the same as a space in the currency gap (fix-T6-r1 fix round 2)', () => {
+    const TAB = String.fromCharCode(0x09);
+    const NEWLINE = String.fromCharCode(0x0a);
+    const NBSP = String.fromCodePoint(0x00a0);
+    assert.deepStrictEqual(extractEntities(`Total: $${TAB}5551234567 due`, { kinds: ['phone'] }), []);
+    assert.deepStrictEqual(extractEntities(`Total: $${NEWLINE}5551234567 due`, { kinds: ['phone'] }), []);
+    assert.deepStrictEqual(extractEntities(`Total: $${NBSP}5551234567 due`, { kinds: ['phone'] }), []);
+  });
+
   it('never guesses people or organisations from text', () => {
     assert.deepStrictEqual(extractEntities('Pat Doe of Example Bank called.'), []);
   });

@@ -29,19 +29,23 @@ const ADDRESS_RE = new RegExp(`\\b\\d{1,6}\\s+(?:[A-Z][A-Za-z'-]{0,30}\\s+){1,4}
 const PHONE_RE = /(?<![\w+$])\+?\d[\d\s().-]{5,25}\d(?![\w])/g;
 const DATE_LIKE = /^\d{4}[-./]\d{1,2}[-./]\d{1,2}$|^\d{1,2}[-./]\d{1,2}[-./]\d{2,4}$/;
 
-// A run directly after a currency sign (fix-T6-r1 I1) is not a phone number
-// even with a few spaces in between ("$ 5551234567", not just "$5551234567",
-// which the PHONE_RE lookbehind above already excludes). A bounded backward
-// scan keeps this O(1) per match instead of a variable-length lookbehind.
+// A run directly after a currency sign (fix-T6-r1 I1, fix round 2) is not a
+// phone number even with a few whitespace characters in between
+// ("$ 5551234567", "$\t5551234567", a non-breaking space, not just
+// "$5551234567", which the PHONE_RE lookbehind above already excludes). Any
+// `\s` character counts as gap (not just ASCII space), so a tab, newline or
+// U+00A0 (NBSP) doesn't defeat the check. A bounded backward scan keeps this
+// O(1) per match instead of a variable-length lookbehind.
 const CURRENCY_SIGNS = new Set(['$', '€', '£', '¥']); // $ € £ ¥
 const MAX_CURRENCY_GAP = 4;
+const WHITESPACE_RE = /\s/;
 
 function precededByCurrency(s, index) {
   let i = index - 1;
-  let spaces = 0;
-  while (i >= 0 && s[i] === ' ' && spaces < MAX_CURRENCY_GAP) {
+  let gap = 0;
+  while (i >= 0 && WHITESPACE_RE.test(s[i]) && gap < MAX_CURRENCY_GAP) {
     i--;
-    spaces++;
+    gap++;
   }
   return i >= 0 && CURRENCY_SIGNS.has(s[i]);
 }
