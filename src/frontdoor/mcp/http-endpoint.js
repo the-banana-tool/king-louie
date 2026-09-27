@@ -235,7 +235,11 @@ class McpHttpEndpoint {
       sendJson(res, 404, { jsonrpc: '2.0', id, error: { code: -32001, message: 'unknown session; initialize again' } });
       return;
     }
-    if (req.headers['mcp-protocol-version'] !== session.version) {
+    // The header arrived in 2025-06-18: a 2025-03-26 client never sends it
+    // (the transport text: no header, assume 2025-03-26). Present, it must
+    // name this session's version whatever that is.
+    const sentVersion = req.headers['mcp-protocol-version'];
+    if (sentVersion === undefined ? session.version !== '2025-03-26' : sentVersion !== session.version) {
       sendJson(res, 400, { jsonrpc: '2.0', id, error: { code: -32600, message: `MCP-Protocol-Version must be ${session.version}, the version this session negotiated` } });
       return;
     }

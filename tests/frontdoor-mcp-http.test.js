@@ -490,6 +490,25 @@ describe('the MCP endpoint: requests in flight', () => {
     assert.equal((await rpc(t, { jsonrpc: '2.0', id: 2, method: 'ping' }, { session: id, version: '2025-06-18' })).status, 200);
   });
 
+  // Final review F-3: the header arrived in 2025-06-18; a 2025-03-26 client
+  // never sends it, and the MCP transport text says a server that gets none
+  // SHOULD assume 2025-03-26. A present header must still match the session.
+  it('a 2025-03-26 session works without MCP-Protocol-Version; later versions still need it', async () => {
+    const t = await start();
+    const old = (await session(t, '2025-03-26')).id;
+    assert.equal((await rpc(t, { jsonrpc: '2.0', method: 'notifications/initialized' }, { session: old, version: null })).status, 202);
+    assert.equal((await rpc(t, { jsonrpc: '2.0', id: 1, method: 'ping' }, { session: old, version: null })).status, 200);
+    const list = await rpc(t, { jsonrpc: '2.0', id: 2, method: 'tools/list' }, { session: old, version: null });
+    assert.equal(list.status, 200);
+    assert.ok(Array.isArray(list.json.result.tools));
+    assert.equal((await rpc(t, { jsonrpc: '2.0', id: 3, method: 'ping' }, { session: old, version: '2025-06-18' })).status, 400, 'present and wrong');
+    assert.equal((await rpc(t, { jsonrpc: '2.0', id: 4, method: 'ping' }, { session: old, version: '2025-03-26' })).status, 200, 'present and right');
+    for (const v of ['2025-06-18', '2025-11-25']) {
+      const { id } = await session(t, v);
+      assert.equal((await rpc(t, { jsonrpc: '2.0', id: 5, method: 'ping' }, { session: id, version: null })).status, 400, v);
+    }
+  });
+
   it('a long-poll update without a status (log lines only) is not a status change', async () => {
     const t = await start({ holdS: 5 });
     const { id } = await session(t);
