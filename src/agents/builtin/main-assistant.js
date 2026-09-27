@@ -4,7 +4,7 @@ const MainAssistantAgent = new Agent({
   id: 'main',
   name: 'Main Assistant',
   description: 'General purpose orchestration assistant',
-  model: 'claude-sonnet-4-20250514',
+  model: 'claude-sonnet-5',
   inferenceTier: 'standard',
   voice: {
     enabled: false,

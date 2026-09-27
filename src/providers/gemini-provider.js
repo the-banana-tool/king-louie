@@ -18,7 +18,7 @@ class GeminiProvider extends BaseLLMProvider {
 
   getModels() {
     return [
-      { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', contextWindow: 1048576 },
+      { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', contextWindow: 1048576 },
       { id: 'gemini-2.0-pro', name: 'Gemini 2.0 Pro', contextWindow: 1048576 },
       { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash', contextWindow: 1048576 },
       { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro', contextWindow: 2097152 }
@@ -26,7 +26,7 @@ class GeminiProvider extends BaseLLMProvider {
   }
 
   getDefaultModel() {
-    return 'gemini-2.0-flash';
+    return 'gemini-2.5-flash';
   }
 
   getHeaders() {

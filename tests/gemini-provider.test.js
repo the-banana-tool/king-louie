@@ -19,7 +19,7 @@ describe('GeminiProvider', () => {
   it('returns model list', () => {
     const provider = new GeminiProvider('test-key-minimum-length');
     const models = provider.getModels();
-    assert.ok(models.some(m => m.id === 'gemini-2.0-flash'));
+    assert.ok(models.some(m => m.id === 'gemini-2.5-flash'));
     assert.ok(models.some(m => m.id === 'gemini-2.0-pro'));
   });
 

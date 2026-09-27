@@ -12,12 +12,12 @@ class DeepSeekProvider extends BaseLLMProvider {
 
   getModels() {
     return [
-      { id: 'deepseek-chat', name: 'DeepSeek V3', contextWindow: 65536 },
+      { id: 'deepseek-flash', name: 'DeepSeek V4.1 Flash', contextWindow: 1000000 },
       { id: 'deepseek-reasoner', name: 'DeepSeek R1', contextWindow: 65536 }
     ];
   }
 
-  getDefaultModel() { return 'deepseek-chat'; }
+  getDefaultModel() { return 'deepseek-flash'; }
 
   prependSystemPrompt(messages = [], systemPrompt = '') {
     if (!systemPrompt || typeof systemPrompt !== 'string') return messages;

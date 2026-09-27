@@ -17,7 +17,7 @@ describe('CopilotProvider', () => {
     const provider = new CopilotProvider('ghp_testtoken1234567890');
     assert.strictEqual(provider.getName(), 'copilot');
     assert.strictEqual(provider.getLabel(), 'GitHub Copilot');
-    assert.strictEqual(provider.getDefaultModel(), 'gpt-4o');
+    assert.strictEqual(provider.getDefaultModel(), 'gpt-5.4');
   });
 
   it('is registered in ProviderFactory', () => {
@@ -66,7 +66,7 @@ describe('CopilotProvider', () => {
     assert.strictEqual(chatOpts.headers['Copilot-Integration-Id'], 'vscode-chat');
     const body = JSON.parse(chatOpts.body);
     assert.strictEqual(body.tools[0].function.name, 'do_thing');
-    assert.strictEqual(body.model, 'gpt-4o');
+    assert.strictEqual(body.model, 'gpt-5.4');
   });
 
   it('surfaces a clear error when Copilot is not enabled for the account', async () => {

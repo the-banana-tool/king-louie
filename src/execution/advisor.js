@@ -11,7 +11,7 @@
  * Configuration:
  *   settings.advisor = {
  *     enabled: true,
- *     model: 'claude-sonnet-4-20250514',  // or any available model
+ *     model: 'claude-sonnet-5',  // or any available model
  *     provider: 'anthropic'               // optional provider override
  *   }
  */

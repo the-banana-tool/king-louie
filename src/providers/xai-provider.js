@@ -12,7 +12,7 @@ class XAIProvider extends BaseLLMProvider {
 
   getModels() {
     return [
-      { id: 'grok-3', name: 'Grok 3', contextWindow: 131072 },
+      { id: 'grok-4.3', name: 'Grok 4.3', contextWindow: 1000000 },
       { id: 'grok-3-mini', name: 'Grok 3 Mini', contextWindow: 131072 },
       { id: 'grok-3-fast', name: 'Grok 3 Fast', contextWindow: 131072 },
       { id: 'grok-3-mini-fast', name: 'Grok 3 Mini Fast', contextWindow: 131072 },
@@ -20,7 +20,7 @@ class XAIProvider extends BaseLLMProvider {
     ];
   }
 
-  getDefaultModel() { return 'grok-3-mini'; }
+  getDefaultModel() { return 'grok-4.3'; }
 
   prependSystemPrompt(messages = [], systemPrompt = '') {
     if (!systemPrompt || typeof systemPrompt !== 'string') return messages;

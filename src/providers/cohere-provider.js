@@ -12,13 +12,13 @@ class CohereProvider extends BaseLLMProvider {
 
   getModels() {
     return [
-      { id: 'command-r-plus', name: 'Command R+', contextWindow: 131072 },
+      { id: 'command-a-03-2025', name: 'Command A', contextWindow: 262144 },
       { id: 'command-r', name: 'Command R', contextWindow: 131072 },
-      { id: 'command-a-03-2025', name: 'Command A', contextWindow: 262144 }
+      { id: 'command-r-plus', name: 'Command R+', contextWindow: 131072 }
     ];
   }
 
-  getDefaultModel() { return 'command-r-plus'; }
+  getDefaultModel() { return 'command-a-03-2025'; }
 
   getHeaders() {
     return {

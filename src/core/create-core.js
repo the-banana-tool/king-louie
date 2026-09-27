@@ -502,19 +502,19 @@ function createCore(deps = {}) {
 
   const providerDefaults = {
     openai: 'gpt-4o-mini',
-    anthropic: 'claude-sonnet-4-20250514',
+    anthropic: 'claude-sonnet-5',
     copilot: '',
     groq: 'llama-3.3-70b-versatile',
     mistral: 'mistral-large-latest',
     ollama: '',
-    gemini: 'gemini-2.0-flash',
+    gemini: 'gemini-2.5-flash',
     openrouter: 'openai/gpt-4o-mini',
-    xai: 'grok-3-mini',
-    deepseek: 'deepseek-chat',
+    xai: 'grok-4.3',
+    deepseek: 'deepseek-flash',
     qwen: 'qwen-plus',
     together: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
-    fireworks: 'accounts/fireworks/models/llama-v3p3-70b-instruct',
-    cohere: 'command-r-plus'
+    fireworks: 'accounts/fireworks/models/gpt-oss-120b',
+    cohere: 'command-a-03-2025'
   };
 
   const providerTokenHints = {

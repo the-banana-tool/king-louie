@@ -12,7 +12,7 @@ class FireworksProvider extends BaseLLMProvider {
 
   getModels() {
     return [
-      { id: 'accounts/fireworks/models/llama-v3p3-70b-instruct', name: 'Llama 3.3 70B', contextWindow: 131072 },
+      { id: 'accounts/fireworks/models/gpt-oss-120b', name: 'GPT OSS 120B', contextWindow: 131072 },
       { id: 'accounts/fireworks/models/llama-v3p1-405b-instruct', name: 'Llama 3.1 405B', contextWindow: 131072 },
       { id: 'accounts/fireworks/models/llama-v3p1-8b-instruct', name: 'Llama 3.1 8B', contextWindow: 131072 },
       { id: 'accounts/fireworks/models/deepseek-r1', name: 'DeepSeek R1', contextWindow: 65536 },
@@ -22,7 +22,7 @@ class FireworksProvider extends BaseLLMProvider {
     ];
   }
 
-  getDefaultModel() { return 'accounts/fireworks/models/llama-v3p3-70b-instruct'; }
+  getDefaultModel() { return 'accounts/fireworks/models/gpt-oss-120b'; }
 
   prependSystemPrompt(messages = [], systemPrompt = '') {
     if (!systemPrompt || typeof systemPrompt !== 'string') return messages;

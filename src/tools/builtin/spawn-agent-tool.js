@@ -22,7 +22,7 @@ in its own conversation context. Results are returned inline to the calling agen
       },
       model: {
         type: 'string',
-        description: 'Override the model for this sub-agent (e.g., "gemini-2.0-flash", "gpt-4o", "claude-sonnet-4-20250514"). Uses the agent default if not specified.'
+        description: 'Override the model for this sub-agent (e.g., "gemini-2.5-flash", "gpt-4o", "claude-sonnet-5"). Uses the agent default if not specified.'
       },
       provider: {
         type: 'string',

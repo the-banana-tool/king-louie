@@ -24,7 +24,7 @@ class CopilotProvider extends BaseLLMProvider {
 
   getModels() {
     return [
-      { id: 'gpt-4o', name: 'GPT-4o', contextWindow: 128000 },
+      { id: 'gpt-5.4', name: 'GPT-5.4', contextWindow: 1050000 },
       { id: 'gpt-4o-mini', name: 'GPT-4o Mini', contextWindow: 128000 },
       { id: 'o1', name: 'o1', contextWindow: 200000 },
       { id: 'o3-mini', name: 'o3-mini', contextWindow: 200000 },
@@ -33,7 +33,7 @@ class CopilotProvider extends BaseLLMProvider {
   }
 
   getDefaultModel() {
-    return 'gpt-4o';
+    return 'gpt-5.4';
   }
 
   /**
