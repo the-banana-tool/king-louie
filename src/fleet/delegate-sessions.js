@@ -28,8 +28,9 @@ const LIVE_BACKGROUND_STATES = new Set(['pending', 'running']);
 const CLOSED_RETAIN_MS = 24 * 3600000;
 // Ruling T11-sessions: the node's gateway sessions are the owner's other
 // chats (Telegram, Slack, …). A delegate turn, and every sub-agent it
-// starts, runs without the tools that list, read or post to them.
-const DELEGATE_EXCLUDED_TOOLS = Object.freeze(['sessions_list', 'sessions_history', 'message']);
+// starts, runs without the tools that list, read, post to or spawn them (a
+// spawned owner session would run outside the delegate's own tool limits).
+const DELEGATE_EXCLUDED_TOOLS = Object.freeze(['sessions_list', 'sessions_history', 'message', 'sessions_spawn']);
 
 // Every registered tool but the excluded ones, read at each turn so a tool
 // registered after start (MCP) is included.

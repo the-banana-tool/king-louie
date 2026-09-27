@@ -548,23 +548,25 @@ describe('DelegateSessions', () => {
   });
   // Ruling T11-sessions (final review F-4): the node's gateway sessions are
   // the owner's other chats. A delegate turn and its sub-agents can neither
-  // list, read nor message them, whatever scopes the grant holds.
-  it('a delegate turn and its sub-agents cannot run sessions_list, sessions_history or message (T11-sessions)', async () => {
+  // list, read, message nor spawn them (a spawned owner session would escape
+  // the delegate's own tool limits), whatever scopes the grant holds.
+  it('a delegate turn and its sub-agents cannot run sessions_list, sessions_history, message or sessions_spawn (T11-sessions)', async () => {
     const t = await setup();
     const refusedText = (name) => `Tool "${name}" is not available in this turn.`;
     script = [
       use('sessions_list'),
       use('sessions_history', { sessionKey: 'telegram:1' }),
       use('message', { to: 'telegram:1', text: 'hi' }),
+      use('sessions_spawn', { agentId: 'main', message: 'hi' }),
       use(ROUTINE),
       use('SpawnAgent', { task: 'child peek', agentId: 'main' }),
       { type: 'text', content: 'done' }
     ];
-    byTask.set('child peek', [use('sessions_list'), use('sessions_history', { sessionKey: 'telegram:1' }), use('message', { to: 'telegram:1', text: 'hi' })]);
+    byTask.set('child peek', [use('sessions_list'), use('sessions_history', { sessionKey: 'telegram:1' }), use('message', { to: 'telegram:1', text: 'hi' }), use('sessions_spawn', { agentId: 'main', message: 'hi' })]);
     const { job_id: jobId } = await t.sessions.start({ task: 'peek', origin: origin(['fleet:delegate', 'fleet:unsafe']) });
     await t.sessions.turns.get(jobId);
     const results = (name) => seen.filter((x) => x.tool === name).map((x) => x.result);
-    for (const name of ['sessions_list', 'sessions_history', 'message']) {
+    for (const name of ['sessions_list', 'sessions_history', 'message', 'sessions_spawn']) {
       const got = results(name);
       assert.equal(got.length, 2, `${name}: once in the turn, once in the child`);
       for (const r of got) assert.deepEqual(r, { success: false, error: refusedText(name) });
