@@ -559,9 +559,15 @@ plain copy into `<case>/playbooks/<name>/`, recorded in `case.yaml.playbooks[]` 
   timeout; a repo whose own config defines drivers or commands is refused with `GIT_UNSAFE_CONFIG`).
   Versions compare with `compareVersions`; there is no `semver`.
 - Mutations (attach, adopt, update, remove, proposals) do network and temp-dir work first, then one
-  `runtime.systemAction`. Owner gating questions become question records that never charge
-  `questionsPerDay`; a `sourced` fact never satisfies an owner question.
-- Playbook text shown to the model goes through `frame()`. The write guard covers `playbooks/`,
+  `runtime.systemAction` (applying a proposal runs its git work inside it, so a race applies once).
+  Owner gating questions become question records that never charge `questionsPerDay`; a `sourced` fact
+  never satisfies an owner question.
+- Playbook text shown to the model is framed with `frame()`, or reduced to validated fields and
+  neutralised single lines (brief rules, gating keys and labels, materiality slugs). C3's executor
+  section gives only a count of playbook brief rules; the draft prompt carries them to the executor.
+  Package loads within one turn start share a memo (`beginEntriesScope`); anything outside it loads from
+  disk. In a packaged build the `example:` playbooks are read from `app.asar.unpacked`
+  (`build.asarUnpack`, `asarUnpackedPath`). The write guard covers `playbooks/`,
   `.gitmodules`, `.gitattributes` (at any depth) and `.git/`; the model changes a playbook only with
   `Playbook.propose` once the case is `done`. As elsewhere, Bash is not covered.
 - Playbook IPC replies carry `untrustedText: true`: the renderer sets every playbook or case string with
