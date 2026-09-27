@@ -5,6 +5,8 @@ const Advisor = require('../execution/advisor');
 const { createLogger } = require('../logging');
 const { buildCaseSystemPrompt, shapeToolDefinitions, casePrompter } = require('../cases/chat-integration');
 const { NO_RETRY } = require('../cases/roles');
+const { partialMetricsOf } = require('../providers/abort');
+const { sumLlmCalls } = require('../tracking/llm-totals');
 
 const log = createLogger('chat');
 const advisorLog = createLogger('advisor');
@@ -336,6 +338,19 @@ function registerChatHandlers(ipcMain, context = {}) {
       totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
     };
     const abortController = new AbortController();
+    let stopped = false;
+    let stopFinished = false;
+    // A stopped run ends here, once: the streamed text as an assistant
+    // message marked stopped, and nothing from the run after it (spec
+    // 2026-09-27 §9). No advisor review, voice or title call follows.
+    const finishStopped = async () => {
+      if (stopFinished) return null;
+      stopFinished = true;
+      await endCaseTurn({ summary: `turn stopped by owner: ${safeMessage}`, journal: null });
+      const stoppedChat = appendMessageToChat(chatId, 'assistant', fullResponse, { llm: llmSummary, stopped: true });
+      safeSend(event.sender, 'chat:messageComplete', { chatId, responseId, message: fullResponse, llm: llmSummary, stopped: true });
+      return stoppedChat;
+    };
 
     try {
       const hookResult = await runHookEvent('UserPromptSubmit', {
@@ -422,8 +437,11 @@ function registerChatHandlers(ipcMain, context = {}) {
       if (!chatRaw) {
         throw new Error('Chat not found');
       }
-      // Filter out persisted tool events — only user/assistant messages go to the LLM
-      const allContentMessages = chatRaw.messages.filter((m) => m.sender === 'user' || m.sender === 'assistant');
+      // Filter out persisted tool events — only user/assistant messages go to the LLM.
+      // A stopped reply with no text stays out: an empty assistant turn is
+      // rejected by some providers.
+      const allContentMessages = chatRaw.messages.filter((m) => (m.sender === 'user' || m.sender === 'assistant')
+        && !(m.stopped && !String(m.text || '').trim()));
 
       // Semantic conversation compaction: for large conversations, chunk every
       // message into paragraphs, embed them, then retrieve only the chunks
@@ -555,16 +573,19 @@ function registerChatHandlers(ipcMain, context = {}) {
       });
 
       executor.on('preExecute', ({ toolName, parameters }) => {
+        if (abortController.signal.aborted) return;
         appendMessageToChat(chatId, 'toolUse', '', { toolName, parameters, runId });
         safeSend(event.sender, 'chat:toolUse', { chatId, runId, toolName, parameters });
       });
 
       executor.on('postExecute', ({ toolName, result }) => {
+        if (abortController.signal.aborted) return;
         appendMessageToChat(chatId, 'toolResult', '', { toolName, result, runId });
         safeSend(event.sender, 'chat:toolResult', { chatId, runId, toolName, result });
       });
 
       executor.on('toolProgress', ({ toolName, progress }) => {
+        if (abortController.signal.aborted) return;
         safeSend(event.sender, 'chat:toolProgress', { chatId, runId, toolName, progress });
       });
 
@@ -621,6 +642,13 @@ function registerChatHandlers(ipcMain, context = {}) {
             contextAssembler,
             disabledMcpServers
           });
+          // Stopped: keep what streamed; the stopped message is appended once, below.
+          if (result?.type === 'stopped' || abortController.signal.aborted) {
+            stopped = true;
+            const stoppedCalls = result?.llm?.calls || [];
+            llmSummary = { calls: stoppedCalls, totals: result?.llm?.totals || sumLlmCalls(stoppedCalls) };
+            return;
+          }
           // If streaming didn't fire (non-streaming provider), send full response
           if (!fullResponse) {
             fullResponse = result.content || '(No response)';
@@ -636,7 +664,7 @@ function registerChatHandlers(ipcMain, context = {}) {
           answerText = fullResponse;
           llmSummary = {
             calls: result?.llm?.calls || [],
-            totals: result?.llm?.totals || llmSummary.totals
+            totals: result?.llm?.totals || sumLlmCalls(result?.llm?.calls || [])
           };
 
           // Run advisor review if enabled in settings
@@ -672,11 +700,19 @@ function registerChatHandlers(ipcMain, context = {}) {
             }
           }
         } else {
-          const streamResult = await provider.streamMessage(chat.messages, { ...options, abortSignal: abortController.signal }, (chunk) => {
-            if (abortController.signal.aborted) return;
-            fullResponse += chunk;
-            safeSend(event.sender, 'chat:messageChunk', { chatId, responseId, chunk });
-          });
+          let streamResult = null;
+          try {
+            streamResult = await provider.streamMessage(chat.messages, { ...options, abortSignal: abortController.signal }, (chunk) => {
+              if (abortController.signal.aborted) return;
+              fullResponse += chunk;
+              safeSend(event.sender, 'chat:messageChunk', { chatId, responseId, chunk });
+            });
+          } catch (err) {
+            if (!abortController.signal.aborted) throw err;
+            // Stopped mid-call: keep the usage the provider reported so far.
+            streamResult = { llmMetrics: partialMetricsOf(err, { provider: inference.providerType, model: inference.model }) };
+          }
+          if (abortController.signal.aborted) stopped = true;
 
           // No advisor review runs on this path, so the model's answer is
           // just the accumulated response.
@@ -684,18 +720,7 @@ function registerChatHandlers(ipcMain, context = {}) {
 
           const singleCall = streamResult?.llmMetrics || null;
           const calls = singleCall ? [singleCall] : [];
-          llmSummary = {
-            calls,
-            totals: calls.reduce(
-              (acc, call) => ({
-                inputTokens: acc.inputTokens + (Number(call?.inputTokens) || 0),
-                outputTokens: acc.outputTokens + (Number(call?.outputTokens) || 0),
-                totalTokens: acc.totalTokens + (Number(call?.totalTokens) || 0),
-                costUsd: Number((acc.costUsd + (Number(call?.costUsd) || 0)).toFixed(8))
-              }),
-              { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
-            )
-          };
+          llmSummary = { calls, totals: sumLlmCalls(calls) };
 
           const usageTracker = typeof getUsageTracker === 'function' ? getUsageTracker() : null;
           if (usageTracker && singleCall && typeof usageTracker.record === 'function') {
@@ -716,7 +741,12 @@ function registerChatHandlers(ipcMain, context = {}) {
         }
       });
 
-      activeRuns.delete(chatId);
+      // Only this run's own controller: after a Stop, a newer run of the same
+      // chat may already be registered.
+      if (activeRuns.get(chatId) === abortController) activeRuns.delete(chatId);
+      if (stopped || abortController.signal.aborted) {
+        return finishStopped();
+      }
       // Never journal the '(No response)' placeholder — it isn't an answer.
       const journal = answerText && answerText !== '(No response)' ? answerText : null;
       await endCaseTurn({ summary: safeMessage, journal });
@@ -747,19 +777,10 @@ function registerChatHandlers(ipcMain, context = {}) {
     } catch (error) {
       // An early failure never registered this run; leave another run's controller alone.
       if (activeRuns.get(chatId) === abortController) activeRuns.delete(chatId);
-      await endCaseTurn({ summary: `turn failed: ${error?.message || error}`, journal: null });
       if (abortController.signal.aborted) {
-        safeSend(event.sender, 'chat:messageComplete', {
-          chatId,
-          responseId,
-          message: fullResponse || '(Stopped by user)',
-          llm: llmSummary
-        });
-        if (fullResponse) {
-          appendMessageToChat(chatId, 'assistant', fullResponse, { llm: llmSummary });
-        }
-        return;
+        return finishStopped();
       }
+      await endCaseTurn({ summary: `turn failed: ${error?.message || error}`, journal: null });
       // A 401 or 403 from an actual model call marks the provider unusable
       // at once (spec §5.3). The gate's own refusal (MODEL_NOT_USABLE,
       // above) is never reported here: it is not a call failure, and

@@ -11,6 +11,8 @@ const {
 } = require('../verification');
 const { createLogger } = require('../logging');
 const { createHeadlessPrompter } = require('../platform/prompter');
+const { partialMetricsOf } = require('../providers/abort');
+const { sumLlmCalls } = require('../tracking/llm-totals');
 const log = createLogger('agent-loop');
 
 class AgentLoop {
@@ -194,32 +196,20 @@ class AgentLoop {
 
     while (iterations < this.maxIterations) {
       if (this.abortSignal?.aborted) {
-        return {
-          type: 'stopped',
-          content: '(Session stopped by user)',
-          iterations,
-          tools: executedTools,
-          llm: {
-            calls: llmCalls,
-            totals: llmCalls.reduce(
-              (acc, call) => ({
-                inputTokens: acc.inputTokens + (call.inputTokens || 0),
-                outputTokens: acc.outputTokens + (call.outputTokens || 0),
-                totalTokens: acc.totalTokens + (call.totalTokens || 0),
-                costUsd: Number((acc.costUsd + (call.costUsd || 0)).toFixed(8))
-              }),
-              { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
-            )
-          }
-        };
+        return this._stoppedResult(iterations, executedTools, llmCalls);
       }
 
       iterations += 1;
 
       // After the first iteration, switch to the cheaper loop model
-      const effectiveOptions = (iterations > 1 && this.loopModel)
+      const baseOptions = (iterations > 1 && this.loopModel)
         ? { ...options, model: this.loopModel }
         : options;
+      // The run's abort signal rides on every model call, so Stop cancels the
+      // request at the provider instead of after it returns (spec 2026-09-27 §9).
+      const effectiveOptions = this.abortSignal
+        ? { ...baseOptions, abortSignal: this.abortSignal }
+        : baseOptions;
 
       // Compact old tool results to prevent context bloat.
       // API compaction (Anthropic): triggered by token count threshold.
@@ -274,6 +264,14 @@ class AgentLoop {
           lastErr = null;
           break;
         } catch (err) {
+          // Stopped mid-call: record what the provider reported so far, then stop.
+          if (this.abortSignal?.aborted) {
+            this._recordCall(partialMetricsOf(err, {
+              provider: this.provider?.getProviderName?.() || null,
+              model: effectiveOptions.model || null
+            }), llmCalls);
+            return this._stoppedResult(iterations, executedTools, llmCalls);
+          }
           lastErr = err;
 
           const plan = this.failoverPolicy.plan(err, {
@@ -304,46 +302,20 @@ class AgentLoop {
           await new Promise((resolve) => setTimeout(resolve, waitMs));
         }
       }
+      if (!response && this.abortSignal?.aborted) {
+        return this._stoppedResult(iterations, executedTools, llmCalls);
+      }
       if (lastErr) throw lastErr;
 
-      if (response?.llmMetrics) {
-        llmCalls.push(response.llmMetrics);
+      if (response?.llmMetrics) this._recordCall(response.llmMetrics, llmCalls);
 
-        // Feed token count to API compaction tracker
-        if (this.useAPICompaction && this.apiCompaction) {
-          this.apiCompaction.updateTokenCount(response.llmMetrics);
-        }
-
-        if (this.usageTracker && typeof this.usageTracker.record === 'function') {
-          const usageEvent = this.usageTracker.record({
-            provider: response.llmMetrics.provider,
-            model: response.llmMetrics.model,
-            inputTokens: response.llmMetrics.inputTokens,
-            outputTokens: response.llmMetrics.outputTokens,
-            totalTokens: response.llmMetrics.totalTokens,
-            costUsd: response.llmMetrics.costUsd
-          });
-
-          if (this.onUsageRecorded) {
-            try {
-              this.onUsageRecorded(usageEvent);
-            } catch {
-              // Non-fatal callback failure should never break the agent loop.
-            }
-          }
-        }
+      // A reply that landed after Stop is recorded, but the turn still stops.
+      if (this.abortSignal?.aborted) {
+        return this._stoppedResult(iterations, executedTools, llmCalls);
       }
 
       if (response.type === 'text') {
-        const llmTotals = llmCalls.reduce(
-          (acc, call) => ({
-            inputTokens: acc.inputTokens + (call.inputTokens || 0),
-            outputTokens: acc.outputTokens + (call.outputTokens || 0),
-            totalTokens: acc.totalTokens + (call.totalTokens || 0),
-            costUsd: Number((acc.costUsd + (call.costUsd || 0)).toFixed(8))
-          }),
-          { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
-        );
+        const llmTotals = sumLlmCalls(llmCalls);
 
         // Verify-on-stop: the model is about to declare the work done. If
         // it changed code and never ran anything against it, ask once.
@@ -617,15 +589,7 @@ class AgentLoop {
             tools: executedTools,
             llm: {
               calls: llmCalls,
-              totals: llmCalls.reduce(
-                (acc, call) => ({
-                  inputTokens: acc.inputTokens + (call.inputTokens || 0),
-                  outputTokens: acc.outputTokens + (call.outputTokens || 0),
-                  totalTokens: acc.totalTokens + (call.totalTokens || 0),
-                  costUsd: Number((acc.costUsd + (call.costUsd || 0)).toFixed(8))
-                }),
-                { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
-              )
+              totals: sumLlmCalls(llmCalls)
             }
           };
         }
@@ -640,15 +604,7 @@ class AgentLoop {
         tools: executedTools,
         llm: {
           calls: llmCalls,
-          totals: llmCalls.reduce(
-            (acc, call) => ({
-              inputTokens: acc.inputTokens + (call.inputTokens || 0),
-              outputTokens: acc.outputTokens + (call.outputTokens || 0),
-              totalTokens: acc.totalTokens + (call.totalTokens || 0),
-              costUsd: Number((acc.costUsd + (call.costUsd || 0)).toFixed(8))
-            }),
-            { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
-          )
+          totals: sumLlmCalls(llmCalls)
         }
       };
     }
@@ -660,17 +616,49 @@ class AgentLoop {
       tools: executedTools,
       llm: {
         calls: llmCalls,
-        totals: llmCalls.reduce(
-          (acc, call) => ({
-            inputTokens: acc.inputTokens + (call.inputTokens || 0),
-            outputTokens: acc.outputTokens + (call.outputTokens || 0),
-            totalTokens: acc.totalTokens + (call.totalTokens || 0),
-            costUsd: Number((acc.costUsd + (call.costUsd || 0)).toFixed(8))
-          }),
-          { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
-        )
+        totals: sumLlmCalls(llmCalls)
       }
     };
+  }
+
+  _stoppedResult(iterations, executedTools, llmCalls) {
+    return {
+      type: 'stopped',
+      content: '(Session stopped by user)',
+      iterations,
+      tools: executedTools,
+      llm: { calls: llmCalls, totals: sumLlmCalls(llmCalls) }
+    };
+  }
+
+  // Every finished call, and a call cut off by Stop, is recorded (spec §9).
+  _recordCall(metrics, llmCalls) {
+    llmCalls.push(metrics);
+
+    // Feed token count to API compaction tracker (a partial count would mislead it).
+    if (this.useAPICompaction && this.apiCompaction && !metrics.usagePartial) {
+      this.apiCompaction.updateTokenCount(metrics);
+    }
+
+    if (this.usageTracker && typeof this.usageTracker.record === 'function') {
+      const usageEvent = this.usageTracker.record({
+        provider: metrics.provider,
+        model: metrics.model,
+        inputTokens: metrics.inputTokens,
+        outputTokens: metrics.outputTokens,
+        totalTokens: metrics.totalTokens,
+        costUsd: metrics.costUsd,
+        ...(metrics.usagePartial ? { usagePartial: true } : {})
+      });
+
+      if (this.onUsageRecorded) {
+        try {
+          this.onUsageRecorded(usageEvent);
+        } catch {
+          // Non-fatal callback failure should never break the agent loop.
+        }
+      }
+    }
   }
 
   /**

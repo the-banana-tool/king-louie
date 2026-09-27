@@ -233,7 +233,7 @@ describe('AgentLoop', () => {
       assert.ok(result.content.includes('stopped'));
     });
 
-    it('returns stopped between iterations when aborted mid-run', async () => {
+    it('returns stopped without running a tool the model asked for after Stop', async () => {
       const controller = new AbortController();
       let callCount = 0;
 
@@ -260,7 +260,74 @@ describe('AgentLoop', () => {
       const result = await loop.run([], []);
 
       assert.strictEqual(result.type, 'stopped');
-      assert.strictEqual(result.tools.length, 1);
+      assert.strictEqual(result.tools.length, 0, 'nothing from the run happens after Stop');
+    });
+
+    it('passes the abort signal to every model call', async () => {
+      const controller = new AbortController();
+      const seen = [];
+      const provider = {
+        sendMessageWithTools: async (_history, _tools, options) => {
+          seen.push(options.abortSignal);
+          return { type: 'text', content: 'done' };
+        }
+      };
+      await new AgentLoop(provider, okExecutor(), { abortSignal: controller.signal }).run([], [], { model: 'm' });
+      assert.deepStrictEqual(seen, [controller.signal]);
+    });
+
+    it('records a call cut off by Stop as partial and returns stopped', async () => {
+      const controller = new AbortController();
+      const recorded = [];
+      const hooked = [];
+      const provider = {
+        getProviderName: () => 'anthropic',
+        sendMessageWithTools: async () => {
+          controller.abort();
+          throw Object.assign(new DOMException('aborted', 'AbortError'), {
+            partialLlmMetrics: { provider: 'anthropic', model: 'claude-haiku-4-5', inputTokens: 1200, outputTokens: 1, totalTokens: 1201, costUsd: 0.001205, usagePartial: true }
+          });
+        }
+      };
+      const loop = new AgentLoop(provider, okExecutor(), {
+        abortSignal: controller.signal,
+        usageTracker: { record: (e) => { recorded.push(e); return { ...e, cost: e.costUsd }; } },
+        onUsageRecorded: (e) => hooked.push(e)
+      });
+      const result = await loop.run([], [], { model: 'claude-haiku-4-5' });
+      assert.strictEqual(result.type, 'stopped');
+      assert.strictEqual(result.llm.calls.length, 1);
+      assert.strictEqual(result.llm.calls[0].usagePartial, true);
+      assert.strictEqual(result.llm.totals.partial, true);
+      assert.strictEqual(result.llm.totals.costUsd, 0.001205);
+      assert.deepStrictEqual(recorded.map((e) => [e.usagePartial, e.costUsd]), [[true, 0.001205]]);
+      assert.strictEqual(hooked.length, 1);
+    });
+
+    it('records a cut-off call with nothing reported as no cost, never $0', async () => {
+      const controller = new AbortController();
+      const provider = {
+        getProviderName: () => 'openai',
+        sendMessageWithTools: async () => { controller.abort(); throw new DOMException('aborted', 'AbortError'); }
+      };
+      const result = await new AgentLoop(provider, okExecutor(), { abortSignal: controller.signal }).run([], [], { model: 'gpt-5.5' });
+      assert.strictEqual(result.type, 'stopped');
+      assert.strictEqual(result.llm.calls[0].costUsd, null);
+      assert.strictEqual(result.llm.calls[0].model, 'gpt-5.5');
+      assert.strictEqual(result.llm.totals.unpriced, true);
+    });
+
+    it('a reply that lands after Stop is recorded, and the turn still stops', async () => {
+      const controller = new AbortController();
+      const provider = {
+        sendMessageWithTools: async () => {
+          controller.abort();
+          return { type: 'text', content: 'too late', llmMetrics: { provider: 'openai', model: 'm', inputTokens: 10, outputTokens: 2, totalTokens: 12, costUsd: 0.0001 } };
+        }
+      };
+      const result = await new AgentLoop(provider, okExecutor(), { abortSignal: controller.signal }).run([], []);
+      assert.strictEqual(result.type, 'stopped');
+      assert.strictEqual(result.llm.calls.length, 1);
     });
   });
 

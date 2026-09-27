@@ -799,7 +799,8 @@ function createCore(deps = {}) {
     inputTokens: Number(metrics.inputTokens) || 0,
     outputTokens: Number(metrics.outputTokens) || 0,
     totalTokens: Number(metrics.totalTokens) || 0,
-    costUsd: Number.isFinite(Number(metrics.costUsd)) ? Number(metrics.costUsd) : null,
+    costUsd: typeof metrics.costUsd === 'number' && Number.isFinite(metrics.costUsd) ? metrics.costUsd : null,
+    ...(metrics.usagePartial ? { usagePartial: true } : {}),
     durationMs: Number(durationMs) || 0
   });
 
