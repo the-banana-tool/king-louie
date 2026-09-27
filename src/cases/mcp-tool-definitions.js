@@ -4,10 +4,22 @@
 // and the front door (Task 16, which must never load src/mcp/ or the agent
 // core) both read it, as the fleet tools share src/fleet/tool-definitions.js.
 
+// Frozen all the way down: every consumer (the node's handler, the courier
+// client's list, the front door) shares these objects (final review m7).
+function deepFreeze(value) {
+  if (value && typeof value === 'object') {
+    // Children first, and even under an object frozen already: a shallow
+    // Object.freeze leaves its nested objects open.
+    for (const v of Object.values(value)) deepFreeze(v);
+    Object.freeze(value);
+  }
+  return value;
+}
+
 const CASE_ARG = Object.freeze({ type: 'string', minLength: 1, maxLength: 128, description: 'Case id or slug.' });
 const CASE_ONLY = Object.freeze({ type: 'object', properties: { case: CASE_ARG }, required: ['case'], additionalProperties: false });
 
-const CASE_MCP_TOOLS = Object.freeze([
+const CASE_MCP_TOOLS = deepFreeze([
   {
     name: 'list_cases',
     description: 'List the cases on this node: status, open questions, proposals waiting for review and the usd budget.',

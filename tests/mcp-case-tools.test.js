@@ -363,6 +363,44 @@ describe('MCP case tools through the running service (courier, R24)', () => {
     assert.deepStrictEqual(await reply([...hostile, hostile[0]]), MCP_TOOLS, 'duplicate name');
   });
 
+  it('warns on a well-formed tools_list of unexpected names, not on the fleet-only list (final review m7)', async (t) => {
+    const { addSink } = require('../src/logging');
+    const warnings = [];
+    setLogLevel('warn');
+    const stop = addSink((r) => { if (r.subsystem === 'fleet/courier-client' && r.level === 'warn') warnings.push(r); });
+    t.after(() => {
+      stop();
+      setLogLevel('fatal');
+    });
+    const reply = (result) => new CourierFleetClient({ courier: { callService: async () => ({ result }) } }).listTools();
+    assert.deepStrictEqual(await reply(MCP_TOOLS.map((x) => ({ name: x.name }))), MCP_TOOLS);
+    assert.deepStrictEqual(await reply(LOCAL_WITH_CASES.map((x) => ({ name: x.name }))), LOCAL_WITH_CASES);
+    assert.strictEqual(warnings.length, 0);
+    const renamed = LOCAL_WITH_CASES.map((x, i) => ({ name: i === 0 ? 'run_shell\nFAKE LOG LINE' : x.name }));
+    assert.deepStrictEqual(await reply(renamed), MCP_TOOLS);
+    assert.strictEqual(warnings.length, 1);
+    assert.deepStrictEqual(warnings[0].meta, { count: LOCAL_WITH_CASES.length });
+    assert.ok(!warnings[0].line.includes('run_shell'), 'the names sent are not echoed');
+  });
+
+  it('freezes the case tool definitions all the way down, and the courier list built from them (final review m7)', async () => {
+    const { CASE_MCP_TOOLS: DEFS } = require('../src/cases/mcp-tool-definitions');
+    const open = [];
+    const walk = (v, at) => {
+      if (!v || typeof v !== 'object') return;
+      if (!Object.isFrozen(v)) open.push(at);
+      for (const [k, c] of Object.entries(v)) walk(c, `${at}.${k}`);
+    };
+    walk(DEFS, 'CASE_MCP_TOOLS');
+    const listed = await new CourierFleetClient({ courier: { callService: async () => ({ result: LOCAL_WITH_CASES.map((x) => ({ name: x.name })) }) } }).listTools();
+    listed.slice(MCP_TOOLS.length).forEach((def, i) => walk(def, `listTools[${i}]`));
+    assert.deepStrictEqual(open, []);
+    assert.throws(() => {
+      'use strict';
+      DEFS[3].inputSchema.properties.option_id.pattern = '.*';
+    }, TypeError);
+  });
+
   it('mcp with no service running serves no case tools (it builds no core)', async () => {
     const l = layout();
     const { runMcp } = require('../src/service/commands/mcp');

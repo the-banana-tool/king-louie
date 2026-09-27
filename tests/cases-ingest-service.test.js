@@ -575,6 +575,9 @@ describe('review questions for documents King Louie added', { skip: NEEDS_GIT },
     const mcp = createCaseToolHandler({ getRuntime: () => h.runtime, channel: 'mcp-stdio' });
     await mcp.call('answer_question', { case: h.caseId, question_id: plain.id, option_id: 'a' });
     assert.strictEqual(effects[0].applied, false);
+    // Refused for the channel, not only because the re-typed question is
+    // not the record's review question (final review m7).
+    assert.match(effects[0].reason, /not answered over MCP/);
     assert.deepStrictEqual([...h.runtime.ledger(h.caseId).view().facts.values()].filter((f) => f.provenance === 'sourced'), []);
     assert.strictEqual(files.readRecord(h.dir, out.docId).proposals[0].review, null);
   });

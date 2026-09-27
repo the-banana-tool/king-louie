@@ -4,6 +4,9 @@
 const { ToolError, MCP_TOOLS } = require('./fleet-tools');
 // Pure definitions (no requires): the courier branch never loads src/mcp/.
 const { CASE_MCP_TOOLS } = require('../cases/mcp-tool-definitions');
+const { createLogger } = require('../logging');
+
+const log = createLogger('fleet/courier-client');
 
 // Seconds a client should wait before retrying a call the service did not
 // answer in time.
@@ -30,7 +33,7 @@ const MAX_TOOLS = 64;
 // names and the definitions shown are always these local ones, so a forged
 // reply (anything that can write the courier inbox) cannot put its own
 // names, descriptions or schemas in front of the client.
-const WITH_CASES = Object.freeze([...MCP_TOOLS, ...CASE_MCP_TOOLS.map(({ tier, ...def }) => def)]);
+const WITH_CASES = Object.freeze([...MCP_TOOLS, ...CASE_MCP_TOOLS.map(({ tier, ...def }) => Object.freeze(def))]);
 function replyNames(v) {
   if (!Array.isArray(v) || v.length === 0 || v.length > MAX_TOOLS) return null;
   const names = [];
@@ -41,6 +44,8 @@ function replyNames(v) {
   return new Set(names).size === names.length ? names.sort() : null;
 }
 const WITH_CASES_NAMES = WITH_CASES.map((t) => t.name).sort();
+const FLEET_NAMES = MCP_TOOLS.map((t) => t.name).sort();
+const sameNames = (a, b) => a.length === b.length && a.every((n, i) => n === b[i]);
 
 class CourierFleetClient {
   constructor({ courier, nodeConfig = null, timeoutMs = 30000 } = {}) {
@@ -77,7 +82,13 @@ class CourierFleetClient {
       return MCP_TOOLS;
     }
     const names = replyNames(reply && reply.result);
-    if (names && names.length === WITH_CASES_NAMES.length && names.every((n, i) => n === WITH_CASES_NAMES[i])) return WITH_CASES;
+    if (names && sameNames(names, WITH_CASES_NAMES)) return WITH_CASES;
+    // A service without a CaseRuntime lists the fleet tools. Any other
+    // well-formed list is neither form the service serves (final review
+    // m7): say so, without echoing the names it sent.
+    if (names && !sameNames(names, FLEET_NAMES)) {
+      log.warn('mcp.tools_list named an unexpected set of tools; serving the fleet tools only', { count: names.length });
+    }
     return MCP_TOOLS;
   }
 
