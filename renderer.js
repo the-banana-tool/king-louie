@@ -1888,6 +1888,362 @@ async function renderChatCaseSection(chat, container) {
     orientation.textContent = result.text;
     orientation.hidden = false;
   });
+
+  // Cases stage 7: documents and fact proposals for the attached case.
+  const sources = document.createElement('div');
+  sources.id = 'case-sources-section';
+  sources.className = 'case-sources';
+  container.appendChild(sources);
+  if (chat.caseId && !caseMissing) {
+    renderCaseSourcesSection(chat, sources).catch((err) => chatLog.warn(`Sources section failed: ${err.message}`));
+  }
+}
+
+/* --- Cases stage 7: sources (docs/superpowers/specs/2026-09-23-cases-stage7-ingest.md §3.9) --- */
+// Files go to the main process as bytes, one ingestFiles call per file
+// (ruling M13: attached, each call is one bridge frame, and each file gets
+// its own result or error). Every string that comes from a document, a
+// record or a model (names, statements, quotes, notes, reasons) is set with
+// textContent: the replies carry untrustedText: true. Accept all verified,
+// and any accept that supersedes the owner's own statement, ask first.
+
+const CASE_SOURCES_BUSY = new Set(['extracting', 'proposing', 'checking']);
+const CASE_SOURCES_OWNER_ORIGINS = new Set(['owner-drop', 'owner-paste']);
+// The ingestFiles handler's per-call limits, checked here before any file is read.
+const CASE_SOURCES_MAX_FILES = 10;
+const CASE_SOURCES_MAX_BYTES = 100 * 1024 * 1024;
+const CASE_SOURCES_POLL_MS = 3000;
+// How long the list keeps polling after an add or a read request, while the
+// document may not have reached a busy status yet.
+const CASE_SOURCES_SETTLE_MS = 15000;
+// The handler's caps on edited fields (ruling M10).
+const CASE_SOURCES_EDIT_CAP = Object.freeze({ stmt: 500, value: 300 });
+const CASE_SOURCES_CONFIRM_LIST = 10;
+
+function caseSourcesBase64(bytes) {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(binary);
+}
+
+function caseSourcesEl(tag, className, text) {
+  const el = document.createElement(tag);
+  if (className) el.className = className;
+  if (text !== undefined && text !== null) el.textContent = String(text);
+  return el;
+}
+
+// A button that runs its action once at a time; a thrown error is shown
+// through onError (a preload argument check throws before any IPC).
+function caseSourcesButton(label, onClick, onError) {
+  const b = caseSourcesEl('button', 'secondary-button', label);
+  b.type = 'button';
+  b.addEventListener('click', async () => {
+    if (b.disabled) return;
+    b.disabled = true;
+    try {
+      await onClick();
+    } catch (err) {
+      if (onError) onError(err); else chatLog.warn(`Sources action failed: ${err.message}`);
+    } finally {
+      b.disabled = false;
+    }
+  });
+  return b;
+}
+
+// The files of a drop or paste, and the names of any folders in it (read
+// synchronously, while the event's items are still available).
+function caseSourcesPicked(dataTransfer) {
+  const files = [];
+  const folders = [];
+  const items = Array.from(dataTransfer?.items || []).filter((item) => item.kind === 'file');
+  if (!items.length) return { files: Array.from(dataTransfer?.files || []), folders };
+  for (const item of items) {
+    const entry = typeof item.webkitGetAsEntry === 'function' ? item.webkitGetAsEntry() : null;
+    const file = item.getAsFile();
+    if (entry && entry.isDirectory) { folders.push(entry.name || file?.name || 'folder'); continue; }
+    if (file) files.push(file);
+  }
+  return { files, folders };
+}
+
+// One file, one ingestFiles call → one status line.
+async function caseSourcesAddOne(caseId, file, name, source) {
+  let base64;
+  try {
+    base64 = caseSourcesBase64(new Uint8Array(await file.arrayBuffer()));
+  } catch {
+    return `${name}: could not be read. Folders cannot be added.`;
+  }
+  let res;
+  try {
+    res = await window.electron.cases.ingestFiles({ caseId, files: [{ name, mime: file.type || '', base64 }], source });
+  } catch (err) {
+    return `${name}: ${err.message}`;
+  }
+  // A call-level refusal, including the desktop bridge's "too large" for one
+  // file over its frame limit when attached.
+  if (!res?.ok) return `${name}: ${res?.error || 'Could not add the file.'}`;
+  const r = Array.isArray(res.results) ? res.results[0] : null;
+  if (!r) return `${name}: Could not add the file.`;
+  if (r.error) return `${name}: ${r.error}`;
+  if (r.duplicate) return `${name}: Already in this case as ${r.ref}`;
+  const also = Array.isArray(r.alsoInCases) && r.alsoInCases.length ? `. Also in: ${r.alsoInCases.map((c) => c.title).join(', ')}` : '';
+  return `${name}: Added ${r.ref}${also}`;
+}
+
+async function renderCaseSourcesSection(chat, container) {
+  container.innerHTML = '';
+  const caseId = chat.caseId;
+  const drop = caseSourcesEl('div', 'case-sources-drop', 'Drop or paste a PDF, image or text file here');
+  drop.id = 'case-sources-drop';
+  drop.tabIndex = 0;
+  const fileInput = document.createElement('input');
+  fileInput.type = 'file';
+  fileInput.multiple = true;
+  fileInput.hidden = true;
+  fileInput.accept = '.pdf,.png,.jpg,.jpeg,.webp,.gif,.txt,.md,.csv';
+  const addBtn = caseSourcesButton('Add…', () => fileInput.click());
+  addBtn.id = 'case-sources-add-btn';
+  const status = caseSourcesEl('div', 'case-sources-status');
+  status.id = 'case-sources-status';
+  const list = caseSourcesEl('div', 'case-sources-list');
+  list.id = 'case-sources-list';
+  container.append(caseSourcesEl('div', 'chat-info-label', 'Sources'), drop, addBtn, fileInput, status, list);
+
+  const say = (lines) => { status.textContent = lines.filter(Boolean).join('\n'); };
+  const fail = (err) => say([err?.message || String(err)]);
+  const openDocs = new Set();
+  let timer = null;
+  let settleUntil = 0;
+  let adding = false;
+
+  const schedule = () => {
+    if (timer) return;
+    timer = setTimeout(() => {
+      timer = null;
+      if (container.isConnected) refresh().catch((err) => chatLog.warn(`Sources refresh failed: ${err.message}`));
+    }, CASE_SOURCES_POLL_MS);
+  };
+  const settle = () => { settleUntil = Date.now() + CASE_SOURCES_SETTLE_MS; };
+
+  async function refresh() {
+    if (!container.isConnected && list.childElementCount) return;
+    const res = await window.electron.cases.sources({ caseId });
+    list.innerHTML = '';
+    if (!res?.ok) { say([res?.error || 'Could not load the sources.']); return; }
+    const documents = Array.isArray(res.documents) ? res.documents : [];
+    if (!documents.length) list.appendChild(caseSourcesEl('div', 'case-sources-empty', 'No documents yet.'));
+    const ctx = { refresh, say, fail, openDocs, settle };
+    for (const doc of documents) list.appendChild(renderCaseSourceRow(caseId, doc, ctx));
+    if (documents.some((d) => CASE_SOURCES_BUSY.has(d.status)) || Date.now() < settleUntil) schedule();
+  }
+
+  async function send(picked, source) {
+    if (adding) { say(['Still adding the previous files.']); return; }
+    const lines = picked.folders.map((n) => `${n}: folders cannot be added. Drop the files inside it.`);
+    const files = picked.files;
+    if (files.length > CASE_SOURCES_MAX_FILES) { say([...lines, `At most ${CASE_SOURCES_MAX_FILES} files per drop. Nothing was added.`]); return; }
+    if (files.reduce((n, f) => n + (f.size || 0), 0) > CASE_SOURCES_MAX_BYTES) { say([...lines, 'At most 100 MB per drop. Nothing was added.']); return; }
+    if (!files.length) { say(lines); return; }
+    adding = true;
+    try {
+      for (const f of files) {
+        const name = f.name || (source === 'paste' ? 'pasted' : 'document');
+        lines.push(`${name}: adding…`);
+        say(lines);
+        lines[lines.length - 1] = await caseSourcesAddOne(caseId, f, name, source);
+        say(lines);
+      }
+    } finally {
+      adding = false;
+    }
+    settle();
+    await refresh();
+  }
+
+  drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('case-sources-drop-active'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('case-sources-drop-active'));
+  drop.addEventListener('drop', (e) => {
+    e.preventDefault();
+    drop.classList.remove('case-sources-drop-active');
+    send(caseSourcesPicked(e.dataTransfer), 'drop').catch(fail);
+  });
+  drop.addEventListener('paste', (e) => {
+    if (!e.clipboardData?.files?.length) return;
+    e.preventDefault();
+    send(caseSourcesPicked(e.clipboardData), 'paste').catch(fail);
+  });
+  fileInput.addEventListener('change', () => {
+    send({ files: Array.from(fileInput.files || []), folders: [] }, 'drop').catch(fail).finally(() => { fileInput.value = ''; });
+  });
+  await refresh();
+}
+
+function renderCaseSourceRow(caseId, doc, ctx) {
+  const row = caseSourcesEl('div', 'case-source');
+  row.dataset.docId = doc.docId || '';
+  const m = doc.methods || {};
+  const mix = [`text ${m.text || 0}`, `ocr ${m.ocr || 0}`, m.pendingOcr ? `pending ${m.pendingOcr}` : '', m.unreadable ? `unreadable ${m.unreadable}` : ''].filter(Boolean).join(' · ');
+  const origin = doc.origin === 'tool' ? 'added by King Louie' : CASE_SOURCES_OWNER_ORIGINS.has(doc.origin) ? 'added by you' : 'origin unknown';
+  const name = doc.name || 'document';
+  row.appendChild(caseSourcesEl('div', 'case-source-title', `${name} — ${doc.pages ?? '?'} page(s) · ${mix} · ${doc.status || 'unknown'} · ${formatUsd(doc.usd)} · ${origin}`));
+  if (doc.note) row.appendChild(caseSourcesEl('div', 'case-source-note', doc.note));
+  if (!doc.docId) return row;
+  const actions = caseSourcesEl('div', 'case-source-actions');
+  const remaining = (m.pendingOcr || 0) + (m.unreadable || 0);
+  const extract = async () => {
+    const res = await window.electron.cases.ingestExtract({ caseId, docId: doc.docId });
+    if (!res?.ok) ctx.say([`${name}: ${res?.error || 'Could not start reading.'}`]);
+    else ctx.say([`${name}: reading started.`]);
+    ctx.settle();
+    await ctx.refresh();
+  };
+  if (!CASE_SOURCES_BUSY.has(doc.status)) {
+    if (remaining > 0) {
+      actions.appendChild(caseSourcesButton(`Read ${remaining} remaining pages (≈ ${formatUsd(doc.estimateUsd)})`, async () => {
+        if (await showConfirmDialog(`Read the ${remaining} remaining pages of ${name} with a vision model, for about ${formatUsd(doc.estimateUsd)}? This read has no page cap and is charged to the case budget.`)) await extract();
+      }, ctx.fail));
+    } else if (doc.status === 'stored' || doc.status === 'failed') {
+      actions.appendChild(caseSourcesButton('Extract', extract, ctx.fail));
+    }
+  }
+  const details = caseSourcesEl('div', 'case-source-proposals');
+  details.hidden = !ctx.openDocs.has(doc.docId);
+  if ((doc.pending || 0) + (doc.accepted || 0) + (doc.rejected || 0) > 0) {
+    actions.appendChild(caseSourcesButton(`Review (${doc.pending || 0} open)`, async () => {
+      details.hidden = !details.hidden;
+      if (details.hidden) { ctx.openDocs.delete(doc.docId); return; }
+      ctx.openDocs.add(doc.docId);
+      await renderCaseSourceProposals(caseId, doc, details, ctx);
+    }, ctx.fail));
+    if (!details.hidden) renderCaseSourceProposals(caseId, doc, details, ctx).catch(ctx.fail);
+  } else {
+    details.hidden = true;
+  }
+  row.append(actions, details);
+  return row;
+}
+
+function caseSourcesBadges(p) {
+  const c = p.checks || {};
+  const ocr = p.anchor?.ocr === true;
+  return [
+    ocr ? 'read by OCR' : '',
+    ocr ? (c.verify?.sawImage ? 'verify saw the image' : 'verify did not see the image') : '',
+    c.valueInQuote === false ? 'value not in quote' : '',
+    c.verify?.agrees === false ? `verify disagrees: ${c.verify.note || ''}` : '',
+    c.verify && c.verify.agrees === null ? `not verified${c.verify.note ? `: ${c.verify.note}` : ''}` : '',
+    ...(Array.isArray(c.conflicts) ? c.conflicts : []).map((x) => `conflicts with ${x.factId}${x.provenance === 'user' ? ' (your statement)' : ''}`),
+    c.duplicateOf ? `duplicate of ${c.duplicateOf}` : ''
+  ].filter(Boolean);
+}
+
+// The proposal's edit form: only stmt and value, only when changed, and
+// only within the handler's caps.
+function caseSourcesEditForm(p, act, say) {
+  const edit = caseSourcesEl('div', 'case-proposal-edit');
+  edit.hidden = true;
+  const oldValue = p.value === null || p.value === undefined ? '' : String(p.value);
+  const stmt = document.createElement('input');
+  stmt.className = 'chat-info-input';
+  stmt.maxLength = CASE_SOURCES_EDIT_CAP.stmt;
+  stmt.value = p.stmt || '';
+  const value = document.createElement('input');
+  value.className = 'chat-info-input';
+  value.maxLength = CASE_SOURCES_EDIT_CAP.value;
+  value.value = oldValue;
+  edit.append(stmt, value, caseSourcesButton('Save edit', async () => {
+    const changes = {};
+    if (stmt.value !== (p.stmt || '')) {
+      if (!stmt.value.trim()) { say([`${p.id}: the statement needs text.`]); return; }
+      if (stmt.value.length > CASE_SOURCES_EDIT_CAP.stmt) { say([`${p.id}: the statement is longer than ${CASE_SOURCES_EDIT_CAP.stmt} characters.`]); return; }
+      changes.stmt = stmt.value;
+    }
+    if (value.value !== oldValue) {
+      if (value.value.length > CASE_SOURCES_EDIT_CAP.value) { say([`${p.id}: the value is longer than ${CASE_SOURCES_EDIT_CAP.value} characters.`]); return; }
+      changes.value = value.value.trim() ? value.value : null;
+    }
+    if (!Object.keys(changes).length) { say([`${p.id}: nothing changed.`]); return; }
+    await act(p.id, { action: 'edit', edit: changes }, 'edited and accepted');
+  }, (err) => say([err.message])));
+  return edit;
+}
+
+async function renderCaseSourceProposals(caseId, doc, container, ctx) {
+  container.innerHTML = '';
+  const res = await window.electron.cases.ingestRecord({ caseId, docId: doc.docId });
+  if (!res?.ok) { container.textContent = res?.error || 'Could not load the proposals.'; return; }
+  const rec = res.record || {};
+  const proposals = Array.isArray(rec.proposals) ? rec.proposals : [];
+  const open = proposals.filter((p) => !p.review);
+  const act = async (proposalId, params, done) => {
+    const r = await window.electron.cases.reviewProposal({ caseId, docId: doc.docId, proposalId, ...params });
+    if (!r?.ok) { ctx.say([`${proposalId}: ${r?.error || 'Review failed.'}`]); return; }
+    ctx.say([`${proposalId}: ${done}${r.fact?.id ? ` as ${r.fact.id}` : ''}.`]);
+    await ctx.refresh();
+  };
+  // Accept all verified is for the owner's own files only (the record and
+  // the list row must both say so); a file King Louie added is reviewed one
+  // proposal at a time.
+  const ownerFile = CASE_SOURCES_OWNER_ORIGINS.has(rec.origin?.kind) && CASE_SOURCES_OWNER_ORIGINS.has(doc.origin);
+  if (ownerFile && open.length) {
+    container.appendChild(caseSourcesButton('Accept all verified', async () => {
+      const shown = open.slice(0, CASE_SOURCES_CONFIRM_LIST).map((p) => `${p.id}: ${p.stmt || ''}`);
+      const more = open.length > CASE_SOURCES_CONFIRM_LIST ? ` …and ${open.length - CASE_SOURCES_CONFIRM_LIST} more.` : '';
+      const message = `Accept all verified proposals of ${rec.name || 'this document'}? Of the ${open.length} open proposals, each one whose quote is on its page, whose value is in the quote, that the verify check agrees with, and that neither conflicts with nor duplicates an active fact becomes a private sourced fact. The others are skipped and stay open for you to review. Open: ${shown.join('; ')}${more}`;
+      if (!(await showConfirmDialog(message))) return;
+      const r = await window.electron.cases.acceptVerified({ caseId, docId: doc.docId });
+      if (!r?.ok) { ctx.say([r?.error || 'Accept all failed.']); return; }
+      const accepted = Array.isArray(r.accepted) ? r.accepted : [];
+      const skipped = Array.isArray(r.skipped) ? r.skipped : [];
+      ctx.say([`Accepted ${accepted.length}${accepted.length ? `: ${accepted.join(', ')}` : ''}.`, ...skipped.map((s) => `${s.pid || 'A proposal'} skipped: ${s.why}`)]);
+      await ctx.refresh();
+    }, ctx.fail));
+  }
+  const audit = document.createElement('details');
+  audit.appendChild(caseSourcesEl('summary', '', 'Audit'));
+  for (const p of proposals) {
+    const card = caseSourcesEl('div', 'case-proposal');
+    card.dataset.proposalId = p.id;
+    card.appendChild(caseSourcesEl('div', 'case-proposal-stmt', `${p.id}: ${p.stmt || ''}`));
+    const value = p.value === null || p.value === undefined ? '—' : String(p.value);
+    card.appendChild(caseSourcesEl('div', 'case-proposal-meta', `Value ${value}${p.unit ? ` ${p.unit}` : ''} · ${p.category || 'uncategorized'} · will be private · page ${p.anchor?.page ?? '?'}`));
+    const quote = caseSourcesEl('div', 'case-proposal-quote');
+    quote.appendChild(caseSourcesEl('mark', '', p.anchor?.quote || 'no quote'));
+    card.appendChild(quote);
+    for (const b of caseSourcesBadges(p)) card.appendChild(caseSourcesEl('span', 'case-proposal-badge', b));
+    if (p.review) {
+      const rv = p.review;
+      card.appendChild(caseSourcesEl('div', 'case-proposal-meta', `${rv.action} by ${rv.by || 'unknown'}${rv.factId ? ` as ${rv.factId}` : ''}${rv.supersedes ? `, superseding ${rv.supersedes}` : ''}${rv.keepBoth ? ', kept both' : ''}${rv.reason ? ` (${rv.reason})` : ''}`));
+      audit.appendChild(card);
+      continue;
+    }
+    const actions = caseSourcesEl('div', 'case-source-actions');
+    const conflicts = Array.isArray(p.checks?.conflicts) ? p.checks.conflicts : [];
+    if (!conflicts.length) actions.appendChild(caseSourcesButton('Accept', () => act(p.id, { action: 'accept' }, 'accepted'), ctx.fail));
+    // A conflict is shown, never resolved for the owner: superseding their
+    // own statement asks first.
+    for (const x of conflicts) {
+      actions.appendChild(caseSourcesButton(`Accept & supersede ${x.factId}`, async () => {
+        if (x.provenance === 'user' && !(await showConfirmDialog(`Accept ${p.id} and supersede ${x.factId}, which is your own statement? ${x.factId} stays in the ledger as superseded, and this becomes a private sourced fact in its place: ${p.stmt || ''}`))) return;
+        await act(p.id, { action: 'accept', supersedes: x.factId }, `accepted, superseding ${x.factId}`);
+      }, ctx.fail));
+    }
+    if (conflicts.length && conflicts.every((x) => x.provenance !== 'user')) {
+      actions.appendChild(caseSourcesButton('Keep both', () => act(p.id, { action: 'accept', keepBoth: true }, 'accepted alongside the conflicting fact'), ctx.fail));
+    }
+    const edit = caseSourcesEditForm(p, act, ctx.say);
+    actions.appendChild(caseSourcesButton('Edit', () => { edit.hidden = !edit.hidden; }));
+    actions.appendChild(caseSourcesButton('Reject', () => act(p.id, { action: 'reject' }, 'rejected'), ctx.fail));
+    card.append(actions, edit);
+    container.appendChild(card);
+  }
+  const refused = Array.isArray(rec.refused) ? rec.refused : [];
+  for (const r of refused) audit.appendChild(caseSourcesEl('div', 'case-proposal-refused', `Refused: ${r.stmt || ''} (${r.reason || 'no reason'})`));
+  if (rec.refusedDropped) audit.appendChild(caseSourcesEl('div', 'case-proposal-refused', `${rec.refusedDropped} more refused proposals not shown.`));
+  if (audit.childElementCount > 1) container.appendChild(audit);
 }
 
 /* --- Cases stage 2: status, budget and questions (docs/superpowers/specs/2026-09-23-cases-stage2-unattended.md §7) --- */

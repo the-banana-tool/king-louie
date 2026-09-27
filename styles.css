@@ -3011,3 +3011,21 @@ body {
 .playbook-actions, .playbook-add { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 .playbook-button { font-size: 12px; }
 .playbook-patch { max-height: 240px; overflow: auto; font-size: 11px; white-space: pre; }
+
+/* Cases stage 7: the Sources section of the case panel. */
+.case-sources { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.case-sources-drop { border: 1px dashed var(--border-default); border-radius: 6px; padding: 10px; font-size: 12px; color: var(--text-secondary); text-align: center; }
+.case-sources-drop-active { border-style: solid; color: var(--text-primary); }
+.case-sources-status { font-size: 12px; white-space: pre-line; color: var(--text-secondary); }
+.case-sources-list { display: flex; flex-direction: column; gap: 6px; }
+.case-source { border: 1px solid var(--border-default); border-radius: 6px; padding: 6px 8px; display: flex; flex-direction: column; gap: 4px; }
+.case-source-title { font-size: 12px; }
+.case-source-note, .case-sources-empty, .case-proposal-meta, .case-proposal-refused { font-size: 12px; color: var(--text-secondary); }
+.case-source-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.case-source-proposals { display: flex; flex-direction: column; gap: 6px; }
+.case-source-proposals[hidden] { display: none; }
+.case-proposal { border-top: 1px solid var(--border-default); padding-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+.case-proposal-quote { font-size: 12px; font-style: italic; }
+.case-proposal-badge { display: inline-block; font-size: 11px; padding: 1px 6px; margin-right: 4px; border: 1px solid var(--border-default); border-radius: 10px; }
+.case-proposal-edit { display: flex; flex-wrap: wrap; gap: 6px; }
+.case-proposal-edit[hidden] { display: none; }
