@@ -324,8 +324,12 @@ describe('openPdf sandbox limits', () => {
     await pdf.close();
   });
 
-  it('keeps a reply dripped one byte per write to about its own size in memory', async () => {
-    const pdf = await openPdf(await makePdf(), { testHooks: true, timeouts: { call: 60000 } });
+  // About 262k one-byte writes: ~5.5 s alone, but over 60 s under a loaded
+  // full suite on Windows (final review I2). The drip stays one byte per
+  // write, since the per-chunk memory bug it catches scales with the number
+  // of writes; the test gets its own, longer budget instead.
+  it('keeps a reply dripped one byte per write to about its own size in memory', { timeout: 240000 }, async () => {
+    const pdf = await openPdf(await makePdf(), { testHooks: true, timeouts: { call: 200000 } });
     try {
       global.gc?.();
       const base = process.memoryUsage();
