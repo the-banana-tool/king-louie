@@ -678,3 +678,13 @@ Spec: `docs/superpowers/specs/2026-09-23-cases-stage7-ingest.md`.
   `tests/helpers/ingest-harness.js`: a real `CaseRuntime` on a temp root and
   a scripted `callModel`, so no provider or token is needed. Call
   `svc.drain()` before asserting on a record.
+- `king-louie-service mcp` runs no core and no ingest worker. With the
+  service running on the data dir, its calls go through the courier to the
+  service's `FleetToolHandler`, which on an agent node also serves
+  `list_cases`, `open_case`, `get_orientation` and `answer_question`
+  (`src/mcp/case-tools.js`, channel `mcp-stdio`). With no service running,
+  `mcp` serves the fleet tools only. No MCP channel answers a document
+  review (`ingest:review`), whatever its `mcpAnswerable` says.
+  Anything running as the service account can write the courier outbox
+  and so answer questions as `mcp-stdio`: the same class of limit as Bash
+  writing `facts.jsonl`.

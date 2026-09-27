@@ -93,7 +93,7 @@ function auditOrigin(origin, jobId = null) {
 
 class FleetToolHandler {
   constructor({ nodeConfig = null, runbookEngine = null, jobManager = null, approver = null, auditLedger = null, delegateSessions = null,
-    gui = null, workingDirectory = null } = {}) {
+    gui = null, workingDirectory = null, caseTools = null } = {}) {
     this.nodeConfig = nodeConfig || { name: 'local-node', profile: 'agent', capabilities: [], policy: {} };
     this.runbookEngine = runbookEngine;
     this.jobManager = jobManager
@@ -111,6 +111,17 @@ class FleetToolHandler {
     // The directory a runbook's steps actually run in, re-resolved into every
     // hashed action (resolveCwd()).
     this.workingDirectory = workingDirectory || process.cwd();
+    // Cases stage 7 (spec §3.7): a createCaseToolHandler result on an agent
+    // node (src/fleet/start.js), else null. Never required from here: the
+    // runbook profile must not load src/mcp/.
+    this.caseTools = caseTools || null;
+  }
+
+  // The tools this handler serves: the fleet tools, then the case tools
+  // while a CaseRuntime is there.
+  listTools() {
+    if (!this.caseTools || !this.caseTools.available()) return MCP_TOOLS;
+    return [...MCP_TOOLS, ...this.caseTools.tools];
   }
 
   // Re-resolved every call: a symlink in this.workingDirectory that moves
@@ -175,6 +186,13 @@ class FleetToolHandler {
 
   async call(toolName, args = {}, { origin = STDIO_ORIGIN } = {}) {
     args = args || {};
+    if (this.caseTools && typeof toolName === 'string' && this.caseTools.names.has(toolName)) {
+      // This handler's case tools answer on the mcp-stdio channel, so only
+      // this node's own local clients reach them. A front-door caller has its
+      // own cases.<tool> methods and channel (NodeFleetService, Task 16).
+      if (!origin || origin.kind !== 'stdio') throw new ToolError('unknown_tool', 'unknown_tool: case tools are served here to local MCP clients only');
+      return this.caseTools.call(toolName, args);
+    }
     if (toolName === 'list_machines') {
       const gui = this.guiBlock();
       return [

@@ -7,7 +7,7 @@
 const crypto = require('crypto');
 const { createLogger } = require('../logging');
 const { RunbookEngine, JobManager } = require('../runbooks/runbook-engine');
-const { FleetToolHandler, ToolError, STDIO_ORIGIN } = require('./fleet-tools');
+const { FleetToolHandler, MCP_TOOLS, ToolError, STDIO_ORIGIN } = require('./fleet-tools');
 const { NodeFleetService } = require('./node-fleet-service');
 const { CourierPump } = require('../approvals/courier');
 
@@ -34,6 +34,9 @@ function defaultReadGuiStatus() {
 // paths and internals, so it is logged here and answered as `internal`.
 function courierRpcHandler(handler) {
   return async (method, params = {}) => {
+    // The tool list `mcp` shows its client (cases stage 7: the case tools
+    // are listed only by a handler that has a CaseRuntime).
+    if (method === 'mcp.tools_list') return { result: typeof handler.listTools === 'function' ? handler.listTools() : MCP_TOOLS };
     if (typeof method !== 'string' || !method.startsWith('fleet.')) {
       throw Object.assign(new Error(`${method} is not a courier method`), { code: 'unknown_method' });
     }
@@ -73,6 +76,7 @@ async function startFleetNode({ dataDir, nodeConfig, approvals, core = null, adm
   const jobManager = new JobManager({ maxConcurrentJobs: nodeConfig.policy.max_concurrent_jobs });
 
   let delegateSessions = null;
+  let caseTools = null;
   let fleetService = null;
   let courierPump = approvals.courierPump || null;
   let ownPump = false;
@@ -96,12 +100,18 @@ async function startFleetNode({ dataDir, nodeConfig, approvals, core = null, adm
       delegateSessions = new DelegateSessions({
         core, nodeConfig, jobManager, auditLedger: approvals.auditLedger, leaseManager: deps.leaseManager || null
       });
+      // Cases stage 7 (spec §3.7): the MCP case tools for this node's local
+      // clients (mcp reaches them through the courier, R24).
+      // eslint-disable-next-line global-require -- agent profile only (the runbook profile never loads src/mcp/)
+      caseTools = require('../mcp/case-tools').createCaseToolHandler({
+        getRuntime: () => core.context?.getCaseRuntime?.() || null, channel: 'mcp-stdio', audit: approvals.auditLedger || null
+      });
     }
 
     const readGuiStatus = deps.readGuiStatus === undefined ? defaultReadGuiStatus() : deps.readGuiStatus;
     const gui = readGuiStatus ? () => readGuiStatus({ dataDir }) : null;
     handler = new FleetToolHandler({
-      nodeConfig, runbookEngine, jobManager, approver: approvals.phoneApprover, auditLedger: approvals.auditLedger, delegateSessions, gui
+      nodeConfig, runbookEngine, jobManager, approver: approvals.phoneApprover, auditLedger: approvals.auditLedger, delegateSessions, gui, caseTools
     });
 
     if (approvals.relayClient) {

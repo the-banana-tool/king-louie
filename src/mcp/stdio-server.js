@@ -20,7 +20,8 @@ class StdioMcpServer {
       auditLedger: options.auditLedger,
       delegateSessions: options.delegateSessions,
       gui: options.gui,
-      workingDirectory: options.workingDirectory
+      workingDirectory: options.workingDirectory,
+      caseTools: options.caseTools || null
     });
     this.nodeConfig = this.handler.nodeConfig || options.nodeConfig || null;
     this.stdin = options.stdin || process.stdin;
@@ -92,7 +93,17 @@ class StdioMcpServer {
     }
 
     if (method === 'tools/list') {
-      return this.send({ jsonrpc: '2.0', id, result: { tools: MCP_TOOLS } });
+      // The handler's list (the fleet tools, then the case tools where it
+      // has them); a handler without listTools serves the fleet tools.
+      let tools = MCP_TOOLS;
+      if (typeof this.handler.listTools === 'function') {
+        try {
+          tools = await this.handler.listTools();
+        } catch (err) {
+          log.warn(`Listing tools failed: ${err.message}`);
+        }
+      }
+      return this.send({ jsonrpc: '2.0', id, result: { tools } });
     }
 
     if (method === 'tools/call') {
