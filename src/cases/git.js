@@ -3,7 +3,7 @@
 // spec §3.4). Every call is execFile with an argument array, so titles,
 // messages and URLs are never shell-interpreted, and every call carries the
 // same hardening flags and environment.
-const { execFile, execFileSync } = require('child_process');
+const { execFile, execFileSync, spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -659,25 +659,70 @@ function killProcessTree(child) {
   }
 }
 
-// execFile whose timeout kills the whole process tree (killProcessTree),
+// A git run whose timeout kills the whole process tree (killProcessTree),
 // not only git. Resolves { stdout, stderr } like the promisified execFile;
 // a timed-out run rejects with `killed: true` (describeError: GIT_TIMEOUT).
+// spawn, not execFile: execFile forwards only a fixed set of options to
+// spawn and silently drops `detached`, so on POSIX git stayed in Node's own
+// process group, kill(-pid) found no group, and only git itself died while
+// its transport helper kept the connection and the pipes open.
 function runKillingTree(argv, options, timeoutMs) {
   return new Promise((resolve, reject) => {
+    const { maxBuffer = MAX_BUFFER, ...spawnOptions } = options;
+    let child;
+    try {
+      child = spawn('git', argv, { ...spawnOptions, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+    } catch (err) {
+      reject(err);
+      return;
+    }
+    const out = [];
+    const errOut = [];
+    let size = 0;
+    let settled = false;
     let timedOut = false;
-    let timer = null;
-    const child = execFile('git', argv, { ...options, detached: process.platform !== 'win32' }, (err, stdout, stderr) => {
+    let overflow = false;
+    const finish = (err, value) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      if (!err) {
-        resolve({ stdout, stderr });
+      if (err) {
+        err.stdout = Buffer.concat(out).toString('utf8');
+        err.stderr = Buffer.concat(errOut).toString('utf8');
+        if (timedOut) err.killed = true;
+        reject(err);
+      } else {
+        resolve(value);
+      }
+    };
+    const collect = (list) => (chunk) => {
+      size += chunk.length;
+      if (size > maxBuffer) {
+        if (!overflow) {
+          overflow = true;
+          killProcessTree(child);
+          finish(Object.assign(new Error('git output exceeded maxBuffer'), { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' }));
+        }
         return;
       }
-      err.stdout = stdout;
-      err.stderr = stderr;
-      if (timedOut) err.killed = true;
-      reject(err);
+      list.push(chunk);
+    };
+    child.stdout.on('data', collect(out));
+    child.stderr.on('data', collect(errOut));
+    child.on('error', (err) => finish(err));
+    // A timed-out run settles when git itself exits: a straggler that still
+    // holds a pipe must not keep the caller waiting.
+    child.on('exit', () => {
+      if (timedOut) finish(new Error('git timed out'));
     });
-    timer = setTimeout(() => {
+    child.on('close', (code, signal) => {
+      if (code === 0) {
+        finish(null, { stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(errOut).toString('utf8') });
+      } else {
+        finish(Object.assign(new Error(`git exited with ${code === null ? signal : code}`), { code, signal }));
+      }
+    });
+    const timer = setTimeout(() => {
       timedOut = true;
       killProcessTree(child);
     }, timeoutMs);

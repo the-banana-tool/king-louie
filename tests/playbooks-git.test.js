@@ -199,6 +199,10 @@ describe('runGit and runGitSync', () => {
       sockets.push(s);
       s.on('error', () => {});
       s.on('close', () => { closed += 1; });
+      // Read (and drop) what git sends. A paused socket never reads the FIN
+      // a killed Linux client sends, so it would never close; Windows sends
+      // a reset instead, which closed it even unread.
+      s.resume();
     });
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
     const url = `https://127.0.0.1:${server.address().port}/x.git`;
