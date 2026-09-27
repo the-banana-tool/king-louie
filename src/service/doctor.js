@@ -71,8 +71,9 @@ async function runDoctor({ dataDir, platform = process.platform, adminUid = 0, c
     try {
       fs.lstatSync(path.join(dir, 'front-door.json'));
     } catch (err) {
-      if (err.code !== 'ENOENT') throw err;
       hasPin = false;
+      // Anything but "not there" is a problem to report, not a crash.
+      if (err.code !== 'ENOENT') results.push({ check: 'front-door.json is admin-owned and valid', ok: false, detail: err.message });
     }
     if (hasPin) {
       let nodeConfig = null;

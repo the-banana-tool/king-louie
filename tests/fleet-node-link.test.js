@@ -353,6 +353,30 @@ describe('doctor with a dangling front-door.json link', () => {
     assert.equal(row.ok, false);
     assert.match(row.detail, /symlink/);
   });
+
+  // Final review M-4 (T14 carry): any lstat failure but ENOENT is a FAIL
+  // row, never a stack trace that ends the doctor run.
+  it('an unreadable front-door.json path is a FAIL row, not a crash', async () => {
+    const { runDoctor } = require('../src/service/doctor');
+    const { base, dir } = configDir();
+    const dataDir = path.join(base, 'data');
+    fs.mkdirSync(dataDir, { mode: 0o700 });
+    const real = fs.lstatSync;
+    fs.lstatSync = function lstatSync(p, ...rest) {
+      if (path.basename(String(p)) === 'front-door.json') throw Object.assign(new Error(`EACCES: permission denied, lstat '${p}'`), { code: 'EACCES' });
+      return real.call(this, p, ...rest);
+    };
+    let rows;
+    try {
+      rows = await runDoctor({ dataDir, platform: 'linux', adminUid: UID, configDir: dir });
+    } finally {
+      fs.lstatSync = real;
+    }
+    const row = rows.find((r) => r.check === 'front-door.json is admin-owned and valid');
+    assert.ok(row, 'the front-door row is present');
+    assert.equal(row.ok, false);
+    assert.match(row.detail, /EACCES/);
+  });
 });
 
 describe('probeMeshCertificate', () => {
