@@ -148,4 +148,97 @@ describe('chat:sendMessage and usability', () => {
       assert.notStrictEqual(result.ok, false, JSON.stringify(result));
     });
   });
+
+  // Fix round 1, finding 1: the gate's own "Cannot use p/m: …" refusal is not
+  // a model-call failure. Reporting it to reportProviderError misclassified
+  // it as an auth failure (markAuthFailure), overwriting the very status
+  // that produced the refusal and nesting the message further on every send.
+  it('a refused send leaves the stored status unchanged (finding 1)', async () => {
+    // The gate's staleness check (chat-handlers.js) compares against the
+    // real Date.now(), not Availability's injectable now(), so checkedAt
+    // is set relative to real wall-clock time here: a few ms old, well
+    // under the 60s threshold, so the finding-2 stale-retest branch does
+    // not fire either; createProvider throws if it is ever called, so any
+    // retest attempt fails the test loudly.
+    let store = {
+      groq: { ok: false, error: 'Invalid API Key', message: 'Invalid API Key', checkedAt: new Date().toISOString(), models: [] }
+    };
+    const before = JSON.parse(JSON.stringify(store));
+    const availability = new Availability({
+      catalog,
+      hasCredential: () => true,
+      createProvider: async () => { throw new Error('must not create a provider: a fresh failed status already exists'); },
+      getStatuses: () => store,
+      setStatuses: (s) => { store = s; }
+    });
+    const provider = { streamMessage: async () => ({}) };
+    const h = chatHarness({ provider, providerType: 'groq', model: 'llama-3.3-70b', overrides: { getAvailability: () => availability } });
+    const result = await h.send({ agentMode: false });
+    assert.strictEqual(result.ok, false);
+    assert.deepStrictEqual(store, before, 'the refusal must not rewrite the stored status');
+  });
+
+  // Fix round 1, finding 2: a transient (non-auth) connection-test failure
+  // must not stick until the next scheduled 24h retest.
+  describe('a stale non-auth failure is retested once at send time', () => {
+    it('retests and lets the send through when it now passes (finding 2a)', async () => {
+      // Relative to real wall-clock time, matching the gate's own Date.now() check.
+      const staleCheckedAt = new Date(Date.now() - 2 * 60 * 1000).toISOString(); // 2 minutes old
+      let store = { groq: { ok: false, error: 'timeout', message: 'timeout', checkedAt: staleCheckedAt, models: [] } };
+      const tested = [];
+      const availability = new Availability({
+        catalog,
+        hasCredential: () => true,
+        createProvider: async (p) => {
+          tested.push(p);
+          // The fake server's account always lists "test-model" regardless
+          // of provider; requesting that same id is what lets this retest's
+          // discovered model list satisfy explain()'s rule 3 below.
+          return ProviderFactory.create('groq', 'test-key-123456', { baseUrl: `${server.url}/groq/openai/v1`, catalog });
+        },
+        getStatuses: () => store,
+        setStatuses: (s) => { store = s; }
+      });
+      const provider = ProviderFactory.create('groq', 'test-key-123456', { baseUrl: `${server.url}/groq/openai/v1`, catalog });
+      const h = chatHarness({ provider, providerType: 'groq', model: 'test-model', overrides: { getAvailability: () => availability } });
+      const result = await h.send({ agentMode: false });
+      assert.notStrictEqual(result.ok, false, JSON.stringify(result));
+      assert.deepStrictEqual(tested, ['groq'], 'the stale failure must be retested exactly once');
+      assert.strictEqual(store.groq.ok, true);
+    });
+
+    it('does not retest an authFailed status, even when stale (finding 2b)', async () => {
+      const staleCheckedAt = new Date(Date.now() - 2 * 60 * 1000).toISOString(); // 2 minutes old
+      const seeded = { ok: false, error: 'rejected', message: 'Groq rejected the key: Invalid API Key', checkedAt: staleCheckedAt, models: [], authFailed: true };
+      let store = { groq: { ...seeded } };
+      const tested = [];
+      const availability = new Availability({
+        catalog,
+        hasCredential: () => true,
+        createProvider: async (p) => { tested.push(p); return { listModels: async () => ['test-model'] }; },
+        getStatuses: () => store,
+        setStatuses: (s) => { store = s; }
+      });
+      const provider = { streamMessage: async () => ({}) };
+      const h = chatHarness({ provider, providerType: 'groq', model: 'llama-3.3-70b', overrides: { getAvailability: () => availability } });
+      const result = await h.send({ agentMode: false });
+      assert.strictEqual(result.ok, false);
+      assert.deepStrictEqual(tested, [], 'an authFailed status must never be retested here');
+      assert.deepStrictEqual(store.groq, seeded, 'the authFailed status must be untouched');
+    });
+  });
+
+  // Fix round 1, finding 4 (minor, promoted): before M1, an empty
+  // providerModels entry (Ollama's own empty default) silently fell back to
+  // the provider's own default at call time. explain() refuses an empty
+  // model, so the resolved model is filled in before the check runs.
+  it("an empty resolved model falls back to the provider's own default before the check (finding 4)", async () => {
+    const availability = fakeAvailability();
+    const provider = { streamMessage: async () => ({}), getDefaultModel: () => 'llama-3.3-70b' };
+    const h = chatHarness({ provider, providerType: 'groq', model: '', overrides: { getAvailability: () => availability } });
+    const result = await h.send({ agentMode: false });
+    assert.notStrictEqual(result.ok, false, JSON.stringify(result));
+    const explain = availability.calls.find((c) => c[0] === 'explain');
+    assert.strictEqual(explain[2], 'llama-3.3-70b', 'explain() must see the provider default, not the empty string');
+  });
 });

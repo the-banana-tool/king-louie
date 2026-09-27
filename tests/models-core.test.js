@@ -126,6 +126,32 @@ describe('models in the core', () => {
     assert.strictEqual(store.get('apiStatus').openai, undefined);
   });
 
+  // Fix round 1, finding 3: Availability's createProvider decided OAuth mode
+  // by checking token === '__anthropic_oauth__', but getDecryptedProviderToken
+  // only returns that placeholder before the access token is cached — once
+  // cached it returns the real token, so the connection test ran in
+  // API-key mode (x-api-key header) and Anthropic rejected it with a 401,
+  // permanently marking an OAuth-only account unusable. OAuth mode is now
+  // decided by anthropicOAuth.isConnected() with no stored API key.
+  it('tests an OAuth-only Anthropic account in OAuth mode, not API-key mode', async () => {
+    const { core, store } = makeCore();
+    // Seed a connected OAuth session directly, the way a prior sign-in
+    // would have left it: encrypted with the same cipher the core uses.
+    store.set('anthropicOAuth', {
+      accessToken: core.context.encryptToken('oauth-access-token'),
+      refreshToken: core.context.encryptToken('refresh-xyz'),
+      expiresAt: Date.now() + 3600_000,
+      connectedAt: Date.now()
+    });
+    // No apiTokens.anthropic saved: the fallthrough-to-API-key bug required
+    // exactly this combination once the access token was cached.
+    const seen = stubProviderFetch({ 'https://api.anthropic.com/v1/models': () => json({ data: [{ id: 'claude-sonnet-5' }] }) });
+    const r = await core.context.testProviderConnection('anthropic');
+    assert.strictEqual(r.ok, true, JSON.stringify(r));
+    assert.strictEqual(seen[0].headers.Authorization, 'Bearer oauth-access-token');
+    assert.strictEqual('x-api-key' in seen[0].headers, false, 'must not send the OAuth token as an x-api-key header');
+  });
+
   it('starts no background checks in test mode', async () => {
     process.env.KL_TEST_MODE = '1';
     const calls = [];

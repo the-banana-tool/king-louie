@@ -1002,11 +1002,20 @@ function createCore(deps = {}) {
     labels: PROVIDER_LABELS,
     hasCredential: hasProviderCredential,
     createProvider: async (provider) => {
-      const token = getDecryptedProviderToken(provider);
-      if (provider === 'anthropic' && token === '__anthropic_oauth__') {
+      // OAuth mode is decided by whether Anthropic OAuth is connected with
+      // no stored API key — not by getDecryptedProviderToken's
+      // '__anthropic_oauth__' placeholder, which only appears before the
+      // access token is cached. Once a connected session's token was
+      // cached, that check fell through to API-key mode and sent the OAuth
+      // access token as an x-api-key header, which Anthropic rejects with a
+      // 401 — marking an OAuth-only account unusable on every send (spec
+      // §5.3, fix round 1). This does not touch createProviderInstance,
+      // which the inference router's own OAuth handling still relies on.
+      if (provider === 'anthropic' && anthropicOAuth.isConnected() && !getApiTokens().anthropic) {
         const accessToken = await refreshAnthropicOAuthToken();
         return ProviderFactory.createProvider('anthropic', accessToken, { ...providerOptionsFor('anthropic'), authMode: 'oauth' });
       }
+      const token = getDecryptedProviderToken(provider);
       return createProviderInstance(provider, token);
     },
     getStatuses: getApiStatus,

@@ -10,6 +10,11 @@ const log = createLogger('chat');
 const advisorLog = createLogger('advisor');
 const voiceLog = createLogger('voice');
 
+// A failed-but-not-auth connection test older than this is retested once at
+// send time, so a transient blip doesn't stick until the next scheduled
+// retest (spec 2026-09-27 §5.2, fix round 1).
+const STALE_TEST_RETEST_MS = 60 * 1000;
+
 function registerChatHandlers(ipcMain, context = {}) {
   const {
     createId,
@@ -361,6 +366,14 @@ function registerChatHandlers(ipcMain, context = {}) {
 
       inference = await resolveInference({ message: safeMessage, agentMode });
 
+      // Before M1, an owner who never picked a model for a provider (an
+      // empty providerModels entry — Ollama ships one) got that provider's
+      // own default at call time. explain() refuses an empty model, so
+      // resolve the default now, before the check, not after (fix round 1).
+      if (!inference.model && typeof inference.provider?.getDefaultModel === 'function') {
+        inference.model = inference.provider.getDefaultModel();
+      }
+
       // Any usable provider may answer (spec 2026-09-27 §5.5): its connection
       // test passed, the model is in the account's list, and it can call tools
       // (agent mode, case turns) or read images when the owner attached some.
@@ -369,13 +382,31 @@ function registerChatHandlers(ipcMain, context = {}) {
       const availability = typeof context.getAvailability === 'function' ? context.getAvailability() : null;
       if (availability) {
         await availability.ensureTested(inference.providerType);
+
+        // A transient failure (a network blip, a timeout, a local server
+        // that started late) must not stick until the next scheduled
+        // retest: retest once, sharing any in-flight run, when the last
+        // test failed, was not an auth failure, and is over a minute old
+        // (fix round 1). An auth failure is never retested here — only a
+        // fixed credential and its own retest change that.
+        const priorStatus = typeof availability.status === 'function' ? availability.status(inference.providerType) : null;
+        if (priorStatus && priorStatus.ok === false && !priorStatus.authFailed && priorStatus.checkedAt
+          && Date.now() - Date.parse(priorStatus.checkedAt) > STALE_TEST_RETEST_MS) {
+          await availability.test(inference.providerType);
+        }
+
         const needs = {
           ...(agentMode || caseTurn ? { toolCall: true } : {}),
           ...(normalizedImages.length > 0 ? { imageInput: true } : {})
         };
         const verdict = availability.explain(inference.providerType, inference.model, { needs });
         if (!verdict.usable) {
-          throw new Error(`Cannot use ${inference.providerType}/${inference.model || '(no model)'}: ${verdict.reasons.join(' ')}`);
+          // Tagged so the catch block below never reports this refusal as a
+          // model-call failure (fix round 1): it would misclassify "Cannot
+          // use …" as an auth failure and overwrite the status that produced it.
+          const unusableError = new Error(`Cannot use ${inference.providerType}/${inference.model || '(no model)'}: ${verdict.reasons.join(' ')}`);
+          unusableError.code = 'MODEL_NOT_USABLE';
+          throw unusableError;
         }
       }
 
@@ -729,8 +760,12 @@ function registerChatHandlers(ipcMain, context = {}) {
         }
         return;
       }
-      // A 401 or 403 marks the provider unusable at once (spec §5.3).
-      if (inference && typeof context.reportProviderError === 'function') {
+      // A 401 or 403 from an actual model call marks the provider unusable
+      // at once (spec §5.3). The gate's own refusal (MODEL_NOT_USABLE,
+      // above) is never reported here: it is not a call failure, and
+      // reporting it would misclassify "Cannot use …" as an auth failure
+      // and overwrite the very status that produced it (fix round 1).
+      if (inference && error?.code !== 'MODEL_NOT_USABLE' && typeof context.reportProviderError === 'function') {
         context.reportProviderError(inference.providerType, error);
       }
       safeSend(event.sender, 'chat:messageError', {
