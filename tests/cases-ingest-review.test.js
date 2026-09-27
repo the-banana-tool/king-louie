@@ -633,7 +633,7 @@ describe('final review I1', () => {
     const proposals = Array.from({ length: 200 }, (_, i) => raw({ value: 'b', anchor: { page: (i % 5) + 1, quote: quote(i % 5) } }));
     // ~8 s alone here; generous for a loaded full suite, and well below the
     // four-page cache's ~60 s.
-    const bound = 25000;
+    const bound = 40000; // ~14-16 s in a loaded full suite; still well below the old cache's ~69 s
     const started = process.hrtime.bigint();
     const elapsed = () => Number(process.hrtime.bigint() - started) / 1e6;
     const checked = checkProposals({ proposals }, pages, new Map());
