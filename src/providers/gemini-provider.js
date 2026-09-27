@@ -174,11 +174,11 @@ class GeminiProvider extends BaseLLMProvider {
       body.systemInstruction = { parts: [{ text: systemInstruction }] };
     }
 
-    const response = await fetch(this.getApiUrl(model), {
+    const response = await this.request(this.getApiUrl(model), {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify(body)
-    });
+    }, options);
 
     if (!response.ok) {
       throw await this.buildError(response);
@@ -211,11 +211,11 @@ class GeminiProvider extends BaseLLMProvider {
       body.tools = formattedTools;
     }
 
-    const response = await fetch(this.getApiUrl(requestedModel), {
+    const response = await this.request(this.getApiUrl(requestedModel), {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify(body)
-    });
+    }, options);
 
     if (!response.ok) {
       throw await this.buildError(response);
@@ -332,68 +332,71 @@ class GeminiProvider extends BaseLLMProvider {
       body.systemInstruction = { parts: [{ text: systemInstruction }] };
     }
 
-    const response = await fetch(this.getApiUrl(requestedModel, true), {
+    const response = await this.request(this.getApiUrl(requestedModel, true), {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify(body)
-    });
+    }, options);
 
     if (!response.ok) {
       throw await this.buildError(response);
     }
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
     let usage = null;
 
     const buildResult = () => ({
       llmMetrics: this.buildLlmCallMetrics({ model: requestedModel, usage })
     });
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    return this.guardStream(options, () => ({ model: requestedModel, usage }), async () => {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith('data:')) continue;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
 
-        const data = trimmed.slice(5).trim();
-        if (data === '[DONE]') return buildResult();
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith('data:')) continue;
 
-        try {
-          const parsed = JSON.parse(data);
-          if (parsed?.usageMetadata) {
-            usage = {
-              prompt_tokens: parsed.usageMetadata.promptTokenCount || 0,
-              completion_tokens: parsed.usageMetadata.candidatesTokenCount || 0,
-              total_tokens: parsed.usageMetadata.totalTokenCount || 0
-            };
+          const data = trimmed.slice(5).trim();
+          if (data === '[DONE]') return buildResult();
+
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed?.usageMetadata) {
+              usage = {
+                prompt_tokens: parsed.usageMetadata.promptTokenCount || 0,
+                completion_tokens: parsed.usageMetadata.candidatesTokenCount || 0,
+                total_tokens: parsed.usageMetadata.totalTokenCount || 0
+              };
+            }
+
+            const parts = parsed.candidates?.[0]?.content?.parts || [];
+            for (const part of parts) {
+              if (part.text) onChunk(part.text);
+            }
+          } catch {
+            // Ignore malformed partial chunks
           }
-
-          const parts = parsed.candidates?.[0]?.content?.parts || [];
-          for (const part of parts) {
-            if (part.text) onChunk(part.text);
-          }
-        } catch {
-          // Ignore malformed partial chunks
         }
       }
-    }
 
-    return buildResult();
+      return buildResult();
+    });
   }
 
-  async listModels() {
-    const response = await fetch(`${this.baseUrl}/models?key=${this.apiKey}`, {
+  async listModels(options = {}) {
+    const response = await this.request(`${this.baseUrl}/models?key=${this.apiKey}`, {
       method: 'GET',
       headers: { 'Content-Type': 'application/json' }
-    });
+    }, options);
 
     if (!response.ok) {
       throw await this.buildError(response);

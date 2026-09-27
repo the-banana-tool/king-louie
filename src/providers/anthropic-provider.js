@@ -210,7 +210,7 @@ class AnthropicProvider extends BaseLLMProvider {
   async sendMessage(messages, options = {}) {
     const systemPrompt = typeof options.systemPrompt === 'string' ? options.systemPrompt : '';
     const cachedSystem = this.buildCachedSystemPrompt(systemPrompt);
-    const response = await fetch(`${this.baseUrl}/messages`, {
+    const response = await this.request(`${this.baseUrl}/messages`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
@@ -221,7 +221,7 @@ class AnthropicProvider extends BaseLLMProvider {
         temperature: options.temperature ?? 0.7,
         stream: false
       })
-    });
+    }, options);
 
     if (!response.ok) {
       throw await this.buildError(response);
@@ -257,11 +257,11 @@ class AnthropicProvider extends BaseLLMProvider {
       body.temperature = options.temperature ?? 0.7;
     }
 
-    const response = await fetch(`${this.baseUrl}/messages`, {
+    const response = await this.request(`${this.baseUrl}/messages`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify(body)
-    });
+    }, options);
 
     if (!response.ok) {
       throw await this.buildError(response);
@@ -302,118 +302,121 @@ class AnthropicProvider extends BaseLLMProvider {
       body.temperature = options.temperature ?? 0.7;
     }
 
-    const response = await fetch(`${this.baseUrl}/messages`, {
+    const response = await this.request(`${this.baseUrl}/messages`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify(body)
-    });
+    }, options);
 
     if (!response.ok) {
       throw await this.buildError(response);
     }
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
     let model = requestedModel;
     const usage = {
       input_tokens: 0, output_tokens: 0, total_tokens: 0,
       cache_creation_input_tokens: 0, cache_read_input_tokens: 0
     };
 
-    // Accumulate content blocks as they stream in
-    const contentBlocks = []; // { type, index, ... }
-    let currentBlockIndex = -1;
-    let currentBlockType = null;
-    let inputJsonBuffer = '';
+    return this.guardStream(options, () => ({ model, usage: { ...usage, total_tokens: usage.input_tokens + usage.output_tokens } }), async () => {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+      // Accumulate content blocks as they stream in
+      const contentBlocks = []; // { type, index, ... }
+      let currentBlockIndex = -1;
+      let currentBlockType = null;
+      let inputJsonBuffer = '';
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith('data:')) continue;
-        const data = trimmed.slice(5).trim();
-        if (!data || data === '[DONE]') continue;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
 
-        try {
-          const parsed = JSON.parse(data);
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith('data:')) continue;
+          const data = trimmed.slice(5).trim();
+          if (!data || data === '[DONE]') continue;
 
-          if (parsed?.type === 'message_start') {
-            model = parsed?.message?.model || model;
-            const msgUsage = parsed?.message?.usage;
-            if (msgUsage) {
-              usage.input_tokens = Number(msgUsage.input_tokens ?? 0) || 0;
-              usage.output_tokens = Number(msgUsage.output_tokens ?? 0) || 0;
-              usage.cache_creation_input_tokens = Number(msgUsage.cache_creation_input_tokens ?? 0) || 0;
-              usage.cache_read_input_tokens = Number(msgUsage.cache_read_input_tokens ?? 0) || 0;
-            }
-          }
+          try {
+            const parsed = JSON.parse(data);
 
-          if (parsed?.type === 'content_block_start') {
-            currentBlockIndex = parsed.index;
-            const block = parsed.content_block;
-            currentBlockType = block?.type;
-            if (block?.type === 'tool_use') {
-              contentBlocks[currentBlockIndex] = { type: 'tool_use', id: block.id, name: block.name, input: '' };
-              inputJsonBuffer = '';
-            } else if (block?.type === 'text') {
-              contentBlocks[currentBlockIndex] = { type: 'text', text: '' };
-            } else if (block?.type === 'thinking') {
-              contentBlocks[currentBlockIndex] = { type: 'thinking', thinking: '' };
-            }
-          }
-
-          if (parsed?.type === 'content_block_delta') {
-            const idx = parsed.index;
-            const delta = parsed.delta;
-            if (delta?.type === 'text_delta' && delta.text) {
-              if (contentBlocks[idx]) contentBlocks[idx].text += delta.text;
-              if (typeof onChunk === 'function') onChunk(delta.text);
-            } else if (delta?.type === 'input_json_delta' && delta.partial_json) {
-              inputJsonBuffer += delta.partial_json;
-            } else if (delta?.type === 'thinking_delta' && delta.thinking) {
-              if (contentBlocks[idx]) contentBlocks[idx].thinking += delta.thinking;
-            }
-          }
-
-          if (parsed?.type === 'content_block_stop') {
-            const idx = parsed.index;
-            if (contentBlocks[idx]?.type === 'tool_use' && inputJsonBuffer) {
-              try {
-                contentBlocks[idx].input = JSON.parse(inputJsonBuffer);
-              } catch {
-                contentBlocks[idx].input = {};
+            if (parsed?.type === 'message_start') {
+              model = parsed?.message?.model || model;
+              const msgUsage = parsed?.message?.usage;
+              if (msgUsage) {
+                usage.input_tokens = Number(msgUsage.input_tokens ?? 0) || 0;
+                usage.output_tokens = Number(msgUsage.output_tokens ?? 0) || 0;
+                usage.cache_creation_input_tokens = Number(msgUsage.cache_creation_input_tokens ?? 0) || 0;
+                usage.cache_read_input_tokens = Number(msgUsage.cache_read_input_tokens ?? 0) || 0;
               }
-              inputJsonBuffer = '';
             }
-            currentBlockType = null;
-          }
 
-          if (parsed?.type === 'message_delta') {
-            const nextOutput = Number(parsed?.usage?.output_tokens);
-            if (!Number.isNaN(nextOutput)) usage.output_tokens = nextOutput;
-          }
+            if (parsed?.type === 'content_block_start') {
+              currentBlockIndex = parsed.index;
+              const block = parsed.content_block;
+              currentBlockType = block?.type;
+              if (block?.type === 'tool_use') {
+                contentBlocks[currentBlockIndex] = { type: 'tool_use', id: block.id, name: block.name, input: '' };
+                inputJsonBuffer = '';
+              } else if (block?.type === 'text') {
+                contentBlocks[currentBlockIndex] = { type: 'text', text: '' };
+              } else if (block?.type === 'thinking') {
+                contentBlocks[currentBlockIndex] = { type: 'thinking', thinking: '' };
+              }
+            }
 
-          if (parsed?.type === 'message_stop') {
-            usage.total_tokens = usage.input_tokens + usage.output_tokens;
-            const llmMetrics = this.buildLlmCallMetrics({ model, usage });
-            return this.parseToolResponse({ content: contentBlocks }, llmMetrics);
+            if (parsed?.type === 'content_block_delta') {
+              const idx = parsed.index;
+              const delta = parsed.delta;
+              if (delta?.type === 'text_delta' && delta.text) {
+                if (contentBlocks[idx]) contentBlocks[idx].text += delta.text;
+                if (typeof onChunk === 'function') onChunk(delta.text);
+              } else if (delta?.type === 'input_json_delta' && delta.partial_json) {
+                inputJsonBuffer += delta.partial_json;
+              } else if (delta?.type === 'thinking_delta' && delta.thinking) {
+                if (contentBlocks[idx]) contentBlocks[idx].thinking += delta.thinking;
+              }
+            }
+
+            if (parsed?.type === 'content_block_stop') {
+              const idx = parsed.index;
+              if (contentBlocks[idx]?.type === 'tool_use' && inputJsonBuffer) {
+                try {
+                  contentBlocks[idx].input = JSON.parse(inputJsonBuffer);
+                } catch {
+                  contentBlocks[idx].input = {};
+                }
+                inputJsonBuffer = '';
+              }
+              currentBlockType = null;
+            }
+
+            if (parsed?.type === 'message_delta') {
+              const nextOutput = Number(parsed?.usage?.output_tokens);
+              if (!Number.isNaN(nextOutput)) usage.output_tokens = nextOutput;
+            }
+
+            if (parsed?.type === 'message_stop') {
+              usage.total_tokens = usage.input_tokens + usage.output_tokens;
+              const llmMetrics = this.buildLlmCallMetrics({ model, usage });
+              return this.parseToolResponse({ content: contentBlocks }, llmMetrics);
+            }
+          } catch {
+            // Ignore malformed chunks
           }
-        } catch {
-          // Ignore malformed chunks
         }
       }
-    }
 
-    usage.total_tokens = usage.input_tokens + usage.output_tokens;
-    const llmMetrics = this.buildLlmCallMetrics({ model, usage });
-    return this.parseToolResponse({ content: contentBlocks }, llmMetrics);
+      usage.total_tokens = usage.input_tokens + usage.output_tokens;
+      const llmMetrics = this.buildLlmCallMetrics({ model, usage });
+      return this.parseToolResponse({ content: contentBlocks }, llmMetrics);
+    });
   }
 
   parseToolResponse(response, llmMetrics) {
@@ -518,7 +521,7 @@ class AnthropicProvider extends BaseLLMProvider {
     const requestedModel = options.model || this.getDefaultModel();
     const systemPrompt = typeof options.systemPrompt === 'string' ? options.systemPrompt : '';
     const cachedSystem = this.buildCachedSystemPrompt(systemPrompt);
-    const response = await fetch(`${this.baseUrl}/messages`, {
+    const response = await this.request(`${this.baseUrl}/messages`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
@@ -529,15 +532,12 @@ class AnthropicProvider extends BaseLLMProvider {
         temperature: options.temperature ?? 0.7,
         stream: true
       })
-    });
+    }, options);
 
     if (!response.ok) {
       throw await this.buildError(response);
     }
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
     let model = requestedModel;
     const usage = {
       input_tokens: 0,
@@ -551,64 +551,70 @@ class AnthropicProvider extends BaseLLMProvider {
       llmMetrics: this.buildLlmCallMetrics({ model, usage })
     });
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    return this.guardStream(options, () => ({ model, usage: { ...usage, total_tokens: usage.input_tokens + usage.output_tokens } }), async () => {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith('data:')) continue;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
 
-        const data = trimmed.slice(5).trim();
-        if (!data || data === '[DONE]') continue;
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith('data:')) continue;
 
-        try {
-          const parsed = JSON.parse(data);
+          const data = trimmed.slice(5).trim();
+          if (!data || data === '[DONE]') continue;
 
-          if (parsed?.type === 'message_start') {
-            model = parsed?.message?.model || model;
-            const msgUsage = parsed?.message?.usage;
-            if (msgUsage) {
-              usage.input_tokens = Number(msgUsage.input_tokens ?? usage.input_tokens) || 0;
-              usage.output_tokens = Number(msgUsage.output_tokens ?? usage.output_tokens) || 0;
-              usage.cache_creation_input_tokens = Number(msgUsage.cache_creation_input_tokens ?? 0) || 0;
-              usage.cache_read_input_tokens = Number(msgUsage.cache_read_input_tokens ?? 0) || 0;
+          try {
+            const parsed = JSON.parse(data);
+
+            if (parsed?.type === 'message_start') {
+              model = parsed?.message?.model || model;
+              const msgUsage = parsed?.message?.usage;
+              if (msgUsage) {
+                usage.input_tokens = Number(msgUsage.input_tokens ?? usage.input_tokens) || 0;
+                usage.output_tokens = Number(msgUsage.output_tokens ?? usage.output_tokens) || 0;
+                usage.cache_creation_input_tokens = Number(msgUsage.cache_creation_input_tokens ?? 0) || 0;
+                usage.cache_read_input_tokens = Number(msgUsage.cache_read_input_tokens ?? 0) || 0;
+              }
             }
-          }
 
-          if (parsed?.type === 'message_delta') {
-            const nextOutput = Number(parsed?.usage?.output_tokens);
-            if (!Number.isNaN(nextOutput)) {
-              usage.output_tokens = nextOutput;
+            if (parsed?.type === 'message_delta') {
+              const nextOutput = Number(parsed?.usage?.output_tokens);
+              if (!Number.isNaN(nextOutput)) {
+                usage.output_tokens = nextOutput;
+              }
             }
-          }
 
-          if (parsed?.type === 'message_stop') {
-            usage.total_tokens = usage.input_tokens + usage.output_tokens;
-            return buildResult();
-          }
+            if (parsed?.type === 'message_stop') {
+              usage.total_tokens = usage.input_tokens + usage.output_tokens;
+              return buildResult();
+            }
 
-          const content = parsed?.delta?.text || parsed?.content_block?.text;
-          if (content) onChunk(content);
-        } catch {
-          // Ignore malformed partial chunks
+            const content = parsed?.delta?.text || parsed?.content_block?.text;
+            if (content) onChunk(content);
+          } catch {
+            // Ignore malformed partial chunks
+          }
         }
       }
-    }
 
-    usage.total_tokens = usage.input_tokens + usage.output_tokens;
-    return buildResult();
+      usage.total_tokens = usage.input_tokens + usage.output_tokens;
+      return buildResult();
+    });
   }
 
-  async listModels() {
-    const response = await fetch(`${this.baseUrl}/models`, {
+  async listModels(options = {}) {
+    const response = await this.request(`${this.baseUrl}/models`, {
       method: 'GET',
       headers: this.getHeaders()
-    });
+    }, options);
 
     if (!response.ok) {
       throw await this.buildError(response);

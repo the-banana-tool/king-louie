@@ -204,7 +204,7 @@ class OpenAIProvider extends BaseLLMProvider {
       return this._sendResponses(model, preparedMessages, options);
     }
 
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
+    const response = await this.request(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
@@ -213,7 +213,7 @@ class OpenAIProvider extends BaseLLMProvider {
         ...temperatureParam(model, options),
         stream: false
       })
-    });
+    }, options);
 
     if (!response.ok) {
       const providerError = await this.buildError(response);
@@ -230,7 +230,7 @@ class OpenAIProvider extends BaseLLMProvider {
   }
 
   async _sendCompletions(model, prompt, options = {}) {
-    const response = await fetch(`${this.baseUrl}/completions`, {
+    const response = await this.request(`${this.baseUrl}/completions`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
@@ -240,7 +240,7 @@ class OpenAIProvider extends BaseLLMProvider {
         ...temperatureParam(model, options),
         stream: false
       })
-    });
+    }, options);
 
     if (!response.ok) {
       throw await this.buildError(response);
@@ -262,7 +262,7 @@ class OpenAIProvider extends BaseLLMProvider {
       return this._sendResponsesWithTools(requestedModel, preparedMessages, tools, options);
     }
 
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
+    const response = await this.request(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
@@ -284,7 +284,7 @@ class OpenAIProvider extends BaseLLMProvider {
         ...temperatureParam(requestedModel, options),
         stream: false
       })
-    });
+    }, options);
 
     if (!response.ok) {
       const providerError = await this.buildError(response);
@@ -307,7 +307,7 @@ class OpenAIProvider extends BaseLLMProvider {
 
   async _sendCompletionsWithTools(model, messages, tools, options = {}) {
     const prompt = messagesToPromptWithTools(this.formatMessages(messages), tools);
-    const response = await fetch(`${this.baseUrl}/completions`, {
+    const response = await this.request(`${this.baseUrl}/completions`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
@@ -317,7 +317,7 @@ class OpenAIProvider extends BaseLLMProvider {
         ...temperatureParam(model, options),
         stream: false
       })
-    });
+    }, options);
 
     if (!response.ok) {
       throw await this.buildError(response);
@@ -395,7 +395,7 @@ class OpenAIProvider extends BaseLLMProvider {
   async _sendResponses(model, messages, options = {}) {
     const input = this._formatResponsesInput(messages);
 
-    const response = await fetch(`${this.baseUrl}/responses`, {
+    const response = await this.request(`${this.baseUrl}/responses`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
@@ -403,7 +403,7 @@ class OpenAIProvider extends BaseLLMProvider {
         input,
         ...temperatureParam(model, options)
       })
-    });
+    }, options);
 
     if (!response.ok) {
       throw await this.buildError(response);
@@ -429,7 +429,7 @@ class OpenAIProvider extends BaseLLMProvider {
       parameters: tool.parameters
     }));
 
-    const response = await fetch(`${this.baseUrl}/responses`, {
+    const response = await this.request(`${this.baseUrl}/responses`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
@@ -438,7 +438,7 @@ class OpenAIProvider extends BaseLLMProvider {
         ...(responsesTools.length ? { tools: responsesTools } : {}),
         ...temperatureParam(model, options)
       })
-    });
+    }, options);
 
     if (!response.ok) {
       throw await this.buildError(response);
@@ -604,11 +604,11 @@ class OpenAIProvider extends BaseLLMProvider {
           stream_options: { include_usage: true }
         };
 
-    const response = await fetch(url, {
+    const response = await this.request(url, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify(body)
-    });
+    }, options);
 
     if (!response.ok) {
       const providerError = await this.buildError(response);
@@ -620,9 +620,6 @@ class OpenAIProvider extends BaseLLMProvider {
       throw providerError;
     }
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
     let usage = null;
     let model = requestedModel;
 
@@ -630,47 +627,53 @@ class OpenAIProvider extends BaseLLMProvider {
       llmMetrics: this.buildLlmCallMetrics({ model, usage })
     });
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    return this.guardStream(options, () => ({ model, usage }), async () => {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith('data:')) continue;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
 
-        const data = trimmed.slice(5).trim();
-        if (data === '[DONE]') return buildResult();
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith('data:')) continue;
 
-        try {
-          const parsed = JSON.parse(data);
-          if (parsed?.usage) {
-            usage = parsed.usage;
+          const data = trimmed.slice(5).trim();
+          if (data === '[DONE]') return buildResult();
+
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed?.usage) {
+              usage = parsed.usage;
+            }
+
+            if (parsed?.model) {
+              model = parsed.model;
+            }
+
+            // Chat completions use delta.content; completions use text
+            const content = parsed.choices?.[0]?.delta?.content || parsed.choices?.[0]?.text;
+            if (content) onChunk(content);
+          } catch {
+            // Ignore malformed partial chunks
           }
-
-          if (parsed?.model) {
-            model = parsed.model;
-          }
-
-          // Chat completions use delta.content; completions use text
-          const content = parsed.choices?.[0]?.delta?.content || parsed.choices?.[0]?.text;
-          if (content) onChunk(content);
-        } catch {
-          // Ignore malformed partial chunks
         }
       }
-    }
 
-    return buildResult();
+      return buildResult();
+    });
   }
 
   async _streamResponses(requestedModel, messages, options, onChunk) {
     const input = this._formatResponsesInput(messages);
 
-    const response = await fetch(`${this.baseUrl}/responses`, {
+    const response = await this.request(`${this.baseUrl}/responses`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
@@ -679,15 +682,12 @@ class OpenAIProvider extends BaseLLMProvider {
         ...temperatureParam(requestedModel, options),
         stream: true
       })
-    });
+    }, options);
 
     if (!response.ok) {
       throw await this.buildError(response);
     }
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
     let usage = null;
     let model = requestedModel;
 
@@ -695,59 +695,65 @@ class OpenAIProvider extends BaseLLMProvider {
       llmMetrics: this.buildLlmCallMetrics({ model, usage })
     });
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    return this.guardStream(options, () => ({ model, usage }), async () => {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith('data:')) continue;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
 
-        const data = trimmed.slice(5).trim();
-        if (!data) continue;
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data:')) continue;
 
-        try {
-          const parsed = JSON.parse(data);
-          const eventType = parsed?.type;
+          const data = trimmed.slice(5).trim();
+          if (!data) continue;
 
-          // Text content delta
-          if (eventType === 'response.output_text.delta' && parsed.delta) {
-            onChunk(parsed.delta);
-          }
+          try {
+            const parsed = JSON.parse(data);
+            const eventType = parsed?.type;
 
-          // Usage from the completed event
-          if (eventType === 'response.completed' && parsed.response) {
-            if (parsed.response.usage) {
-              usage = parsed.response.usage;
+            // Text content delta
+            if (eventType === 'response.output_text.delta' && parsed.delta) {
+              onChunk(parsed.delta);
             }
-            if (parsed.response.model) {
+
+            // Usage from the completed event
+            if (eventType === 'response.completed' && parsed.response) {
+              if (parsed.response.usage) {
+                usage = parsed.response.usage;
+              }
+              if (parsed.response.model) {
+                model = parsed.response.model;
+              }
+              return buildResult();
+            }
+
+            // Capture model from early events
+            if (eventType === 'response.created' && parsed.response?.model) {
               model = parsed.response.model;
             }
-            return buildResult();
+          } catch {
+            // Ignore malformed partial chunks
           }
-
-          // Capture model from early events
-          if (eventType === 'response.created' && parsed.response?.model) {
-            model = parsed.response.model;
-          }
-        } catch {
-          // Ignore malformed partial chunks
         }
       }
-    }
 
-    return buildResult();
+      return buildResult();
+    });
   }
 
-  async listModels() {
-    const response = await fetch(`${this.baseUrl}/models`, {
+  async listModels(options = {}) {
+    const response = await this.request(`${this.baseUrl}/models`, {
       method: 'GET',
       headers: this.getHeaders()
-    });
+    }, options);
 
     if (!response.ok) {
       throw await this.buildError(response);

@@ -40,18 +40,18 @@ class CopilotProvider extends BaseLLMProvider {
    * Exchange the GitHub token for a short-lived Copilot session token.
    * Cached until ~1 minute before expiry.
    */
-  async getCopilotToken() {
+  async getCopilotToken(options = {}) {
     if (this._copilotToken && Date.now() < this._copilotTokenExpiresAt - 60_000) {
       return this._copilotToken;
     }
 
-    const response = await fetch(this.tokenExchangeUrl, {
+    const response = await this.request(this.tokenExchangeUrl, {
       headers: {
         Authorization: `token ${this.githubToken}`,
         Accept: 'application/json',
         'User-Agent': 'king-louie-app'
       }
-    });
+    }, options);
 
     if (!response.ok) {
       throw await this.buildError(response);
@@ -70,8 +70,8 @@ class CopilotProvider extends BaseLLMProvider {
     return this._copilotToken;
   }
 
-  async getRequestHeaders() {
-    const token = await this.getCopilotToken();
+  async getRequestHeaders(options = {}) {
+    const token = await this.getCopilotToken(options);
     return {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${token}`,
@@ -117,16 +117,16 @@ class CopilotProvider extends BaseLLMProvider {
 
   async sendMessage(messages, options = {}) {
     const preparedMessages = this.prependSystemPrompt(messages, options.systemPrompt);
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
+    const response = await this.request(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
-      headers: await this.getRequestHeaders(),
+      headers: await this.getRequestHeaders(options),
       body: JSON.stringify({
         model: options.model || this.getDefaultModel(),
         messages: this.formatMessages(preparedMessages),
         temperature: options.temperature ?? 0.7,
         stream: false
       })
-    });
+    }, options);
 
     if (!response.ok) {
       throw await this.buildError(response);
@@ -139,9 +139,9 @@ class CopilotProvider extends BaseLLMProvider {
   async sendMessageWithTools(messages, tools = [], options = {}) {
     const requestedModel = options.model || this.getDefaultModel();
     const preparedMessages = this.prependSystemPrompt(messages, options.systemPrompt);
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
+    const response = await this.request(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
-      headers: await this.getRequestHeaders(),
+      headers: await this.getRequestHeaders(options),
       body: JSON.stringify({
         model: requestedModel,
         messages: this.formatMessages(preparedMessages),
@@ -153,7 +153,7 @@ class CopilotProvider extends BaseLLMProvider {
         temperature: options.temperature ?? 0.7,
         stream: false
       })
-    });
+    }, options);
 
     if (!response.ok) {
       throw await this.buildError(response);
@@ -226,64 +226,67 @@ class CopilotProvider extends BaseLLMProvider {
   async streamMessage(messages, options = {}, onChunk) {
     const requestedModel = options.model || this.getDefaultModel();
     const preparedMessages = this.prependSystemPrompt(messages, options.systemPrompt);
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
+    const response = await this.request(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
-      headers: await this.getRequestHeaders(),
+      headers: await this.getRequestHeaders(options),
       body: JSON.stringify({
         model: requestedModel,
         messages: this.formatMessages(preparedMessages),
         temperature: options.temperature ?? 0.7,
         stream: true
       })
-    });
+    }, options);
 
     if (!response.ok) {
       throw await this.buildError(response);
     }
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
     let usage = null;
     let model = requestedModel;
 
     const buildResult = () => ({ llmMetrics: this.buildLlmCallMetrics({ model, usage }) });
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    return this.guardStream(options, () => ({ model, usage }), async () => {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith('data:')) continue;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
 
-        const data = trimmed.slice(5).trim();
-        if (data === '[DONE]') return buildResult();
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith('data:')) continue;
 
-        try {
-          const parsed = JSON.parse(data);
-          if (parsed?.usage) usage = parsed.usage;
-          if (parsed?.model) model = parsed.model;
-          const content = parsed.choices?.[0]?.delta?.content;
-          if (content) onChunk(content);
-        } catch {
-          // Ignore malformed partial chunks
+          const data = trimmed.slice(5).trim();
+          if (data === '[DONE]') return buildResult();
+
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed?.usage) usage = parsed.usage;
+            if (parsed?.model) model = parsed.model;
+            const content = parsed.choices?.[0]?.delta?.content;
+            if (content) onChunk(content);
+          } catch {
+            // Ignore malformed partial chunks
+          }
         }
       }
-    }
 
-    return buildResult();
+      return buildResult();
+    });
   }
 
-  async listModels() {
-    const response = await fetch(`${this.baseUrl}/models`, {
+  async listModels(options = {}) {
+    const response = await this.request(`${this.baseUrl}/models`, {
       method: 'GET',
-      headers: await this.getRequestHeaders()
-    });
+      headers: await this.getRequestHeaders(options)
+    }, options);
 
     if (!response.ok) {
       throw await this.buildError(response);

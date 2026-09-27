@@ -15,6 +15,7 @@
     "test:e2e": "node --test --test-concurrency=1 --test-timeout=120000 tests/e2e/*.test.js",
     "test:watch": "node --test --watch",
     "models:snapshot": "node scripts/models-snapshot.js",
+    "smoke:providers": "node scripts/smoke-providers.js",
     "build": "electron-builder",
     "build:win": "electron-builder --win",
     "build:mac": "electron-builder --mac",

@@ -84,7 +84,7 @@ class OllamaProvider extends BaseLLMProvider {
 
   async sendMessage(messages, options = {}) {
     const preparedMessages = this.prependSystemPrompt(messages, options.systemPrompt);
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
+    const response = await this.request(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
@@ -93,7 +93,7 @@ class OllamaProvider extends BaseLLMProvider {
         temperature: options.temperature ?? 0.7,
         stream: false
       })
-    });
+    }, options);
 
     if (!response.ok) {
       throw await this.buildError(response);
@@ -106,7 +106,7 @@ class OllamaProvider extends BaseLLMProvider {
   async sendMessageWithTools(messages, tools = [], options = {}) {
     const requestedModel = options.model || this.getDefaultModel();
     const preparedMessages = this.prependSystemPrompt(messages, options.systemPrompt);
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
+    const response = await this.request(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
@@ -124,7 +124,7 @@ class OllamaProvider extends BaseLLMProvider {
         temperature: options.temperature ?? 0.7,
         stream: false
       })
-    });
+    }, options);
 
     if (!response.ok) {
       throw await this.buildError(response);
@@ -223,7 +223,7 @@ class OllamaProvider extends BaseLLMProvider {
   async streamMessage(messages, options = {}, onChunk) {
     const requestedModel = options.model || this.getDefaultModel();
     const preparedMessages = this.prependSystemPrompt(messages, options.systemPrompt);
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
+    const response = await this.request(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
@@ -232,15 +232,12 @@ class OllamaProvider extends BaseLLMProvider {
         temperature: options.temperature ?? 0.7,
         stream: true
       })
-    });
+    }, options);
 
     if (!response.ok) {
       throw await this.buildError(response);
     }
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
     let usage = null;
     let model = requestedModel;
 
@@ -248,47 +245,53 @@ class OllamaProvider extends BaseLLMProvider {
       llmMetrics: this.buildLlmCallMetrics({ model, usage })
     });
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    return this.guardStream(options, () => ({ model, usage }), async () => {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith('data:')) continue;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
 
-        const data = trimmed.slice(5).trim();
-        if (data === '[DONE]') return buildResult();
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith('data:')) continue;
 
-        try {
-          const parsed = JSON.parse(data);
-          if (parsed?.usage) {
-            usage = parsed.usage;
+          const data = trimmed.slice(5).trim();
+          if (data === '[DONE]') return buildResult();
+
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed?.usage) {
+              usage = parsed.usage;
+            }
+
+            if (parsed?.model) {
+              model = parsed.model;
+            }
+
+            const content = parsed.choices?.[0]?.delta?.content;
+            if (content) onChunk(content);
+          } catch {
+            // Ignore malformed partial chunks
           }
-
-          if (parsed?.model) {
-            model = parsed.model;
-          }
-
-          const content = parsed.choices?.[0]?.delta?.content;
-          if (content) onChunk(content);
-        } catch {
-          // Ignore malformed partial chunks
         }
       }
-    }
 
-    return buildResult();
+      return buildResult();
+    });
   }
 
-  async listModels() {
-    const response = await fetch(`${this.baseUrl}/models`, {
+  async listModels(options = {}) {
+    const response = await this.request(`${this.baseUrl}/models`, {
       method: 'GET',
       headers: this.getHeaders()
-    });
+    }, options);
 
     if (!response.ok) {
       throw await this.buildError(response);
@@ -298,10 +301,10 @@ class OllamaProvider extends BaseLLMProvider {
     return (data.data || []).map((model) => model.id).sort();
   }
 
-  async discoverModels() {
+  async discoverModels(options = {}) {
     try {
       const baseUrl = this.baseUrl.replace(/\/v1$/, '');
-      const response = await fetch(`${baseUrl}/api/tags`);
+      const response = await this.request(`${baseUrl}/api/tags`, {}, options);
       if (!response.ok) throw new Error(`Ollama returned ${response.status}`);
       const data = await response.json();
       return (data.models || []).map(m => ({

@@ -25,6 +25,62 @@ class BaseLLMProvider {
     return this.catalog || getActiveCatalog();
   }
 
+  /**
+   * An abort as an Error named AbortError. A signal aborted with a string
+   * reason (the case runtime does this) rejects fetch with that bare string.
+   */
+  abortError(err, signal) {
+    if (err && typeof err === 'object' && err.name === 'AbortError') return err;
+    const reason = signal?.reason;
+    const e = new Error(typeof reason === 'string' && reason ? `Request aborted: ${reason}` : 'The operation was aborted.');
+    e.name = 'AbortError';
+    if (err !== undefined) e.cause = err;
+    return e;
+  }
+
+  /**
+   * The one way a provider calls its API (spec 2026-09-27 §9). The call's
+   * options.abortSignal goes on every fetch, streaming or not, so Stop cancels
+   * the request at the provider instead of letting it run on and bill. An
+   * abort before the response arrives carries a partial record with nothing
+   * reported. fetch is looked up per call so tests can stub it.
+   */
+  async request(url, init = {}, options = {}) {
+    const signal = options?.abortSignal || null;
+    try {
+      return await globalThis.fetch(url, signal ? { ...init, signal } : init);
+    } catch (err) {
+      if (signal?.aborted) {
+        const aborted = this.abortError(err, signal);
+        if (!aborted.partialLlmMetrics) {
+          aborted.partialLlmMetrics = this.buildLlmCallMetrics({ model: options.model, usage: {}, partial: true });
+        }
+        throw aborted;
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Run a stream's read loop. Aborted mid-stream, rethrow as an AbortError
+   * carrying the usage the provider had reported so far (snapshot() returns
+   * { model, usage }), marked usagePartial (spec §9).
+   */
+  async guardStream(options, snapshot, read) {
+    try {
+      return await read();
+    } catch (err) {
+      const signal = options?.abortSignal || null;
+      if (signal?.aborted || err?.name === 'AbortError') {
+        const aborted = this.abortError(err, signal);
+        const { model, usage } = (typeof snapshot === 'function' && snapshot()) || {};
+        aborted.partialLlmMetrics = this.buildLlmCallMetrics({ model, usage: usage || {}, partial: true });
+        throw aborted;
+      }
+      throw err;
+    }
+  }
+
   validateApiKey() {
     if (!this.apiKey || typeof this.apiKey !== 'string' || this.apiKey.trim().length < 8) {
       throw new Error('Invalid API key');
@@ -249,7 +305,7 @@ class BaseLLMProvider {
     }));
   }
 
-  async listModels() {
+  async listModels(_options = {}) {
     throw new Error('listModels must be implemented by provider');
   }
 }

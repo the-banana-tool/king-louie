@@ -53,7 +53,7 @@ class TogetherProvider extends BaseLLMProvider {
 
   async sendMessage(messages, options = {}) {
     const preparedMessages = this.prependSystemPrompt(messages, options.systemPrompt);
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
+    const response = await this.request(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
@@ -62,7 +62,7 @@ class TogetherProvider extends BaseLLMProvider {
         temperature: options.temperature ?? 0.7,
         stream: false
       })
-    });
+    }, options);
     if (!response.ok) throw await this.buildError(response);
     const data = await response.json();
     return data.choices?.[0]?.message?.content || '';
@@ -71,7 +71,7 @@ class TogetherProvider extends BaseLLMProvider {
   async sendMessageWithTools(messages, tools = [], options = {}) {
     const requestedModel = options.model || this.getDefaultModel();
     const preparedMessages = this.prependSystemPrompt(messages, options.systemPrompt);
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
+    const response = await this.request(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
@@ -85,7 +85,7 @@ class TogetherProvider extends BaseLLMProvider {
         temperature: options.temperature ?? 0.7,
         stream: false
       })
-    });
+    }, options);
     if (!response.ok) throw await this.buildError(response);
     const data = await response.json();
     const llmMetrics = this.buildLlmCallMetrics({ model: data.model || requestedModel, usage: data.usage });
@@ -123,7 +123,7 @@ class TogetherProvider extends BaseLLMProvider {
   async streamMessage(messages, options = {}, onChunk) {
     const requestedModel = options.model || this.getDefaultModel();
     const preparedMessages = this.prependSystemPrompt(messages, options.systemPrompt);
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
+    const response = await this.request(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify({
@@ -133,41 +133,44 @@ class TogetherProvider extends BaseLLMProvider {
         stream: true,
         stream_options: { include_usage: true }
       })
-    });
+    }, options);
     if (!response.ok) throw await this.buildError(response);
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
     let usage = null;
     let model = requestedModel;
     const buildResult = () => ({ llmMetrics: this.buildLlmCallMetrics({ model, usage }) });
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith('data:')) continue;
-        const data = trimmed.slice(5).trim();
-        if (data === '[DONE]') return buildResult();
-        try {
-          const parsed = JSON.parse(data);
-          if (parsed?.usage) usage = parsed.usage;
-          if (parsed?.model) model = parsed.model;
-          const content = parsed.choices?.[0]?.delta?.content;
-          if (content) onChunk(content);
-        } catch { /* ignore partial chunks */ }
+    return this.guardStream(options, () => ({ model, usage }), async () => {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith('data:')) continue;
+          const data = trimmed.slice(5).trim();
+          if (data === '[DONE]') return buildResult();
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed?.usage) usage = parsed.usage;
+            if (parsed?.model) model = parsed.model;
+            const content = parsed.choices?.[0]?.delta?.content;
+            if (content) onChunk(content);
+          } catch { /* ignore partial chunks */ }
+        }
       }
-    }
-    return buildResult();
+      return buildResult();
+    });
   }
 
-  async listModels() {
-    const response = await fetch(`${this.baseUrl}/models`, { method: 'GET', headers: this.getHeaders() });
+  async listModels(options = {}) {
+    const response = await this.request(`${this.baseUrl}/models`, { method: 'GET', headers: this.getHeaders() }, options);
     if (!response.ok) throw await this.buildError(response);
     const data = await response.json();
     return (data.data || []).map((m) => m.id).sort();
