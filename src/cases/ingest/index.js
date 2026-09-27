@@ -20,7 +20,12 @@
 // ref and the open() of the file, a directory on the way can be swapped for
 // a link (the same TOCTOU as C2's write guard; the model's Bash can already
 // read files); a forged page cache or kept publish is trusted like any other
-// case file the shell can write (ruling M14, T7-forgedindex).
+// case file the shell can write (ruling M14, T7-forgedindex). A crash
+// between a charged extract or verify call and its stage's publish re-runs
+// that stage on resume and charges its calls again (OCR pages are cached
+// with their charge, extract chunks and verify calls are not): the spend is
+// over-counted, never under-counted, so the budget still fails safe (plan
+// gap 4, final review m3).
 const fs = require('fs');
 const path = require('path');
 const { createLogger } = require('../../logging');
