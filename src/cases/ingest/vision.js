@@ -1,8 +1,8 @@
 // src/cases/ingest/vision.js
 // Which model reads a page, and what it is sent (cases stage 7 spec §3.2,
 // §3.4; R45). Vision is a capability of an already chosen model: a model is
-// vision-eligible only when the router says it sees images and its provider
-// is one ImageHandler formats image attachments for.
+// vision-eligible only when the model catalog says it takes image input and
+// its provider is one ImageHandler formats image attachments for.
 // The page is hostile data: it goes to the model only as an attachment, and
 // OCR_SYSTEM is a constant; nothing from the document enters a prompt here.
 const ImageHandler = require('../../media/image-handler');

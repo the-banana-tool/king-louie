@@ -65,7 +65,7 @@ const ContextAssembler = require('../context/context-assembler');
 const ConversationCompactor = require('../context/conversation-compactor');
 const { buildSystemSections } = require('../context/system-sections');
 const UsageTracker = require('../tracking/usage-tracker');
-const { Catalog, Availability, setActiveCatalog } = require('../models');
+const { Catalog, Availability, setActiveCatalog, capabilitiesOf } = require('../models');
 const { classifyError, FailoverReason } = require('../providers/error-classifier');
 const {
   NotificationRouter,
@@ -2235,7 +2235,7 @@ function createCore(deps = {}) {
     runtimeOptions = {}
   ) => {
     const resolution = await resolveInference(providerType);
-    const capabilities = inferenceRouter.getCapabilities(resolution.providerType, resolution.model);
+    const capabilities = capabilitiesOf(catalog, resolution.providerType, resolution.model);
     if (!capabilities.toolCalling) {
       throw new Error(`Provider ${resolution.providerType} (${resolution.model}) does not support tool calling required for agent mode.`);
     }
@@ -3039,7 +3039,7 @@ function createCore(deps = {}) {
     return new IngestService({
       runtime: caseRuntime,
       callModel: createCallModel({ resolveInference, getUsageTracker: () => usageTracker }),
-      getCapabilities: (provider, model) => inferenceRouter.getCapabilities(provider, model),
+      getCapabilities: (provider, model) => capabilitiesOf(catalog, provider, model),
       getSettings
     });
   })();

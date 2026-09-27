@@ -41,43 +41,6 @@ class InferenceRouter {
       : null;
   }
 
-  getCapabilities(provider, model) {
-    const normalizedProvider = String(provider || '').toLowerCase();
-    const normalizedModel = String(model || '').toLowerCase();
-
-    // Default base capabilities
-    const capabilities = {
-      vision: false,
-      toolCalling: true,
-      streaming: true
-    };
-
-    if (normalizedProvider === 'openai') {
-      capabilities.vision = normalizedModel.includes('gpt-4') || normalizedModel.includes('o1');
-    } else if (normalizedProvider === 'anthropic') {
-      // Every Claude model from the 3 family on reads images; the default
-      // tiers name current models (cases stage 7 spec §11.6).
-      capabilities.vision = !normalizedModel.startsWith('claude-2') && !normalizedModel.startsWith('claude-instant');
-    } else if (normalizedProvider === 'gemini') {
-      capabilities.vision = true;
-    } else if (normalizedProvider === 'openrouter') {
-      capabilities.vision = true; // OpenRouter handles capability routing
-    } else if (normalizedProvider === 'groq') {
-      capabilities.vision = normalizedModel.includes('vision');
-    }
-
-    // Some smaller models or specific ones might not support tool calling, but most modern ones do.
-    if (normalizedProvider === 'ollama') {
-      capabilities.toolCalling = normalizedModel.includes('llama') || normalizedModel.includes('mistral');
-    }
-
-    // A one-page PDF can go to these providers as a document attachment
-    // (ImageHandler.formatDocumentForProvider); others get the page image.
-    capabilities.pdfInput = capabilities.vision && (normalizedProvider === 'anthropic' || normalizedProvider === 'gemini');
-
-    return capabilities;
-  }
-
   getTierConfig(tier) {
     if (typeof this.getSettings !== 'function') {
       throw new Error('InferenceRouter requires getSettings()');

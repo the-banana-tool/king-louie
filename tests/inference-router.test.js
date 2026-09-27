@@ -1,6 +1,12 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert');
 const InferenceRouter = require('../src/providers/inference-router');
+const { setLogLevel } = require('../src/logging');
+
+// This file's failover-policy tests deliberately trigger retries and
+// failures (auth, rate limits, overloads, permanent errors); silence the
+// resulting warnings so TAP output stays clean.
+setLogLevel('fatal');
 
 describe('InferenceRouter', () => {
   const mockConfig = (overrides = {}) => {
@@ -80,13 +86,6 @@ describe('InferenceRouter', () => {
       async () => router.routeWithFallback('standard', [{ role: 'user', content: 'hi' }], {}),
       /Anthropic failed/
     );
-  });
-
-  it('returns capabilities for known models', () => {
-    const router = new InferenceRouter(mockConfig());
-    const caps = router.getCapabilities('openai', 'gpt-4o');
-    assert.strictEqual(caps.vision, true);
-    assert.strictEqual(caps.toolCalling, true);
   });
 
   it('all new providers are valid tier options', () => {

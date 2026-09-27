@@ -5,7 +5,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const InferenceRouter = require('../../src/providers/inference-router');
+const { capabilitiesOf } = require('../../src/models/capabilities');
+const { fixtureCatalog } = require('./models-fixture');
 const { CaseRuntime } = require('../../src/cases');
 const { IngestService } = require('../../src/cases/ingest');
 const { shutdownPdfSandbox } = require('../../src/cases/ingest/pdf-sandbox');
@@ -15,7 +16,7 @@ const git = require('../../src/cases/git');
 const HAS_GIT = spawnSync('git', ['--version'], { windowsHide: true }).status === 0;
 const NEEDS_GIT = HAS_GIT ? false : 'git is not on PATH';
 
-const router = new InferenceRouter({ getSettings: () => ({}) });
+const catalog = fixtureCatalog();
 const ROLES = {
   draft: { provider: 'anthropic', model: 'claude-sonnet-4-5' },
   judge: { provider: 'anthropic', model: 'claude-opus-4-1' },
@@ -74,7 +75,7 @@ async function ingestHarness({ ingest = {}, budgets = {}, roles = {}, model = de
       calls.push(req);
       return model(req, calls);
     },
-    getCapabilities: (p, m) => router.getCapabilities(p, m),
+    getCapabilities: (p, m) => capabilitiesOf(catalog, p, m),
     getSettings: () => settings,
     retryMs,
     ...(openPdf ? { openPdf } : {})

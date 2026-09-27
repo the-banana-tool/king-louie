@@ -6,6 +6,7 @@ const { priceWithCost } = require('./pricing');
 const providerIds = require('./provider-ids');
 const { Availability } = require('./availability');
 const { discoverOllama } = require('./ollama');
+const { capabilitiesOf } = require('./capabilities');
 
 let active = null;
 let bundled = null;
@@ -31,5 +32,6 @@ module.exports = {
   setActiveCatalog,
   Availability,
   discoverOllama,
+  capabilitiesOf,
   ...providerIds
 };

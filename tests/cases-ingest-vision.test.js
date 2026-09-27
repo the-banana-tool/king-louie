@@ -4,7 +4,8 @@
 const { describe, it, afterEach, after } = require('node:test');
 const assert = require('node:assert');
 const { PDFDocument } = require('pdf-lib');
-const InferenceRouter = require('../src/providers/inference-router');
+const { capabilitiesOf } = require('../src/models/capabilities');
+const { fixtureCatalog } = require('./helpers/models-fixture');
 const OpenAIProvider = require('../src/providers/openai-provider');
 const AnthropicProvider = require('../src/providers/anthropic-provider');
 const {
@@ -18,53 +19,28 @@ const { makePdf, tinyJpeg } = require('./helpers/ingest-fixtures');
 
 after(() => shutdownPdfSandbox());
 
-const router = new InferenceRouter({ getSettings: () => ({}) });
-const caps = (p, m) => router.getCapabilities(p, m);
+// Capabilities come from the model catalog (models M1); the fixture catalog
+// keeps these expectations fixed when the bundled snapshot is regenerated.
+const catalog = fixtureCatalog();
+const caps = (p, m) => capabilitiesOf(catalog, p, m);
 
-describe('InferenceRouter.getCapabilities (cases stage 7 fix)', () => {
-  it('marks current Anthropic models as vision-capable, not only claude-3 names', () => {
+describe('capabilities for ingest (from the catalog)', () => {
+  it('marks current Anthropic models as vision-capable', () => {
     assert.strictEqual(caps('anthropic', 'claude-sonnet-4-5').vision, true);
-    assert.strictEqual(caps('anthropic', 'claude-3-5-sonnet-latest').vision, true);
-    assert.strictEqual(caps('anthropic', 'claude-2.1').vision, false);
-    assert.strictEqual(caps('anthropic', 'claude-instant-1.2').vision, false);
+    assert.strictEqual(caps('anthropic', 'claude-opus-4-1').vision, true);
+    assert.strictEqual(caps('anthropic', 'claude-2.1').vision, false, 'a model the catalog does not know');
   });
 
-  it('adds pdfInput for vision models of Anthropic and Gemini only', () => {
+  it('adds pdfInput for PDF-reading models of Anthropic and Gemini only', () => {
     assert.strictEqual(caps('anthropic', 'claude-sonnet-4-5').pdfInput, true);
     assert.strictEqual(caps('gemini', 'gemini-2.5-pro').pdfInput, true);
     assert.strictEqual(caps('openai', 'gpt-4o').pdfInput, false);
-    assert.strictEqual(caps('anthropic', 'claude-2.1').pdfInput, false);
     assert.strictEqual(caps('openai', 'gpt-4o').vision, true);
   });
 
-  it('leaves every capability it had before unchanged (outputs taken from the code before this change)', () => {
-    // [provider, model, vision, toolCalling, streaming] as the router
-    // reported them before stage 7; only pdfInput is new.
-    const before = [
-      ['openai', 'gpt-4o', true, true, true],
-      ['openai', 'gpt-4.1-mini', true, true, true],
-      ['openai', 'o1', true, true, true],
-      ['openai', 'gpt-5', false, true, true],
-      ['openai', 'o3', false, true, true],
-      ['openai', 'o4-mini', false, true, true],
-      ['openai', 'gpt-3.5-turbo', false, true, true],
-      ['anthropic', 'claude-3-5-sonnet-latest', true, true, true],
-      ['anthropic', 'claude-3-haiku-20240307', true, true, true],
-      ['gemini', 'gemini-2.5-pro', true, true, true],
-      ['gemini', 'gemini-2.5-flash', true, true, true],
-      ['openrouter', 'any-model', true, true, true],
-      ['groq', 'llama-vision-preview', true, true, true],
-      ['groq', 'llama-3.3-70b', false, true, true],
-      ['ollama', 'llama3.1', false, true, true],
-      ['ollama', 'qwen2.5', false, false, true],
-      ['xai', 'grok-4', false, true, true],
-      ['', '', false, true, true]
-    ];
-    for (const [p, m, vision, toolCalling, streaming] of before) {
-      const c = caps(p, m);
-      assert.deepStrictEqual(Object.keys(c), ['vision', 'toolCalling', 'streaming', 'pdfInput'], `${p}/${m}`);
-      assert.deepStrictEqual({ vision: c.vision, toolCalling: c.toolCalling, streaming: c.streaming }, { vision, toolCalling, streaming }, `${p}/${m}`);
-      assert.strictEqual(c.pdfInput, vision && (p === 'anthropic' || p === 'gemini'), `${p}/${m}`);
+  it('returns the same four keys for every model', () => {
+    for (const [p, m] of [['openai', 'gpt-4o'], ['groq', 'llama-3.3-70b'], ['openrouter', 'any-model'], ['ollama', 'llama3.1'], ['', '']]) {
+      assert.deepStrictEqual(Object.keys(caps(p, m)), ['vision', 'toolCalling', 'streaming', 'pdfInput'], `${p}/${m}`);
     }
   });
 });
@@ -84,8 +60,8 @@ describe('vision eligibility', () => {
   });
 
   it('fails closed: no model, no capability function, a throwing or truthy-but-not-true capability', () => {
-    // The router reports vision for an empty Anthropic model name.
-    assert.strictEqual(caps('anthropic', '').vision, true);
+    // An empty model name has no catalog entry, so no vision.
+    assert.strictEqual(caps('anthropic', '').vision, false);
     assert.strictEqual(isVisionEligible(caps, { provider: 'anthropic', model: '' }), false);
     assert.strictEqual(isVisionEligible(null, { provider: 'anthropic', model: 'claude-sonnet-4-5' }), false);
     assert.strictEqual(isVisionEligible(() => { throw new Error('x'); }, { provider: 'anthropic', model: 'm' }), false);
