@@ -392,13 +392,19 @@ function outboundGate({
 //   one inside a key or a number, which are not entity-scanned alone;
 // - the end of each piece next to the start of each other piece (the last
 //   and first CROSS_WINDOW characters), for fields that are not neighbours
-//   ({ a: 'Loan 0042', b: 'hello', c: '7781' }), in both orders. Every
-//   ordered pair while there are at most CROSS_ALL_PIECES pieces; beyond
-//   that, pairs at most CROSS_NEAR pieces apart. The pairs go to the index
-//   as one text, kept apart by CROSS_FILLER, which no scan chains across;
-//   a span that crosses the join inside a pair blocks the payload.
+//   ({ a: 'Loan 0042', b: 'hello', c: '7781' }), in both orders. Distance
+//   is counted in fields (a key and its value are one field; so is each
+//   array item or other leaf): every ordered pair while the payload has at
+//   most CROSS_ALL_FIELDS fields, and beyond that pairs at most CROSS_NEAR
+//   fields apart (fix-T7-r3 m1). The pairs go to the index as one text,
+//   kept apart by CROSS_FILLER, which no scan chains across; a span that
+//   crosses the join inside a pair blocks the payload.
+// Accepted residuals: a value split in the middle of long fields (beyond
+// the CROSS_WINDOW characters at each edge), and halves more than
+// CROSS_NEAR fields apart in a payload of more than CROSS_ALL_FIELDS
+// fields. Both are a deliberate covert channel, which no scanner closes.
 const CROSS_WINDOW = 64;
-const CROSS_ALL_PIECES = 48;
+const CROSS_ALL_FIELDS = 48;
 const CROSS_NEAR = 8;
 const CROSS_FILLER = '\n;;;;;\n';
 
@@ -424,12 +430,13 @@ function crossFieldSpans(pieces, askIndex, recipients, entityDetail, blocked) {
   }
 
   const n = pieces.length;
+  const fields = n ? pieces[n - 1].field : 0;
   const parts = [];
   const joins = [];
   let at = 0;
   for (let i = 0; i < n; i++) {
     for (let j = 0; j < n; j++) {
-      if (i === j || (n > CROSS_ALL_PIECES && Math.abs(i - j) > CROSS_NEAR)) continue;
+      if (i === j || (fields > CROSS_ALL_FIELDS && Math.abs(pieces[i].field - pieces[j].field) > CROSS_NEAR)) continue;
       const pair = `${pieces[i].text.slice(-CROSS_WINDOW)}\n${pieces[j].text.slice(0, CROSS_WINDOW)}`;
       joins.push({ start: at, join: at + Math.min(pieces[i].text.length, CROSS_WINDOW), end: at + pair.length });
       parts.push(pair);
@@ -478,11 +485,29 @@ function gateLeaves(payload, {
   // Everything that leaves, in walk order, for the cross-field scans:
   // rendered string leaves (value: true, entity-scanned on their own
   // already), object keys and number leaves (value: false, not).
+  // Each piece carries its field number: a key opens a field, and the leaf
+  // that is its value joins it; any other leaf opens its own.
   const pieces = [];
-  const valuesOnly = (text, at) => {
+  let fieldCount = 0;
+  let keyOpen = false;
+  const leafField = () => {
+    if (keyOpen) {
+      keyOpen = false;
+      return fieldCount;
+    }
+    fieldCount += 1;
+    return fieldCount;
+  };
+  const valuesOnly = (text, at, { key = false } = {}) => {
     const r = outboundGate({ payloadText: text, recipients, envelope, facts, mode: 'query' });
     for (const b of r.blocked) blocked.push({ path: at, ...b });
-    pieces.push({ text, value: false });
+    if (key) {
+      fieldCount += 1;
+      keyOpen = true;
+      pieces.push({ text, value: false, field: fieldCount });
+    } else {
+      pieces.push({ text, value: false, field: leafField() });
+    }
   };
   const ancestors = new Set();
   const walk = (value, at) => {
@@ -529,7 +554,7 @@ function gateLeaves(payload, {
           });
         }
       }
-      if (typeof r.rendered === 'string') pieces.push({ text: r.rendered, value: true });
+      if (typeof r.rendered === 'string') pieces.push({ text: r.rendered, value: true, field: leafField() });
       return r.rendered;
     }
     if (typeof value === 'number') {
@@ -549,7 +574,7 @@ function gateLeaves(payload, {
         out = {};
         for (const [k, v] of Object.entries(value)) {
           const path = at ? `${at}.${k}` : k;
-          valuesOnly(k, path);
+          valuesOnly(k, path, { key: true });
           out[k] = walk(v, path);
         }
       }

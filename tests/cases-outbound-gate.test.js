@@ -195,6 +195,7 @@ describe('gateLeaves', () => {
     // joined, and the pairs of pieces as one text.
     assert.deepStrictEqual(calls.slice(0, 3), [['ok', 'case-1'], ['Ask for Pat Doe', 'case-1'], ['Harbor Road access\nok\nnote\nAsk for Pat Doe', 'case-1']]);
     assert.strictEqual(calls.length, 4);
+    assert.ok(calls[3][0].includes('\n;;;;;\n'), 'the fourth call is the batch of field pairs');
   });
 
   it('fails closed when the entity index throws', () => {

@@ -459,6 +459,9 @@ describe('EntityIndex', () => {
       pages: [{ n: 1, method: 'text', text: 'Example Bank\nLoan No. 0042-7781\nAccount AB12CD34\nEscrow desk +1 555 0199\nWrite to pat.doe@example.com' }]
     });
     const idx = rt.entityIndex();
+    // Distinct entities: the reversed-groups pass over every line may also
+    // report a whole line for the same entity (fix-T7-r3 I1).
+    const entities = (spans) => [...new Set(spans.map((s) => s.entity))];
     const cp = (base) => (s) => s.replace(/[0-9]/g, (d) => String.fromCodePoint(base + Number(d)));
     const SUPER = [0x2070, 0xb9, 0xb2, 0xb3, 0x2074, 0x2075, 0x2076, 0x2077, 0x2078, 0x2079];
     const CIRCLED = [0x24ea, 0x2460, 0x2461, 0x2462, 0x2463, 0x2464, 0x2465, 0x2466, 0x2467, 0x2468];
@@ -480,23 +483,26 @@ describe('EntityIndex', () => {
     for (const v of ids) {
       const text = `Re: ${v}, thanks`;
       const spans = idx.nonDisclosableSpans(text, { caseId: b.id });
-      assert.deepStrictEqual(spans.map((s) => s.entity), ['id:00427781'], v);
+      // The value itself; the whole line may be reported too, by the
+      // reversed-groups pass that reads every line (fix-T7-r3 I1).
+      assert.ok(spans.some((s) => s.entity === 'id:00427781' && s.span.text.length < text.length), v);
+      assert.ok(spans.every((s) => s.entity === 'id:00427781' && (s.span.text.length < text.length || s.span.text === text)), v);
       for (const s of spans) assert.strictEqual(text.slice(s.span.start, s.span.end), s.span.text);
     }
     // Cyrillic capitals that look like Latin ones.
     const cyr = `${String.fromCodePoint(0x0410)}${String.fromCodePoint(0x0412)}12${String.fromCodePoint(0x0421)}D34`;
-    assert.deepStrictEqual(idx.nonDisclosableSpans(`Account ${cyr}`, { caseId: b.id }).map((s) => s.entity), ['id:AB12CD34']);
+    assert.deepStrictEqual(entities(idx.nonDisclosableSpans(`Account ${cyr}`, { caseId: b.id })), ['id:AB12CD34']);
     // Part of a longer digit run is a different value; four spaces are too wide a gap.
     for (const v of ['100427781', '0042-77810', '0042    7781']) {
       assert.deepStrictEqual(idx.nonDisclosableSpans(`Re: ${v}`, { caseId: b.id }), [], v);
     }
     // A phone number from a text store, written differently.
     for (const v of ['Dial (555) 0199', 'Dial 555,0199']) {
-      assert.deepStrictEqual(idx.nonDisclosableSpans(v, { caseId: b.id }).map((s) => s.entity), ['phone:5550199'], v);
+      assert.deepStrictEqual(entities(idx.nonDisclosableSpans(v, { caseId: b.id })), ['phone:5550199'], v);
     }
     // Emails: a line break or spaces around the at sign, a fullwidth at sign.
     for (const v of ['pat.doe@\nexample.com', `pat.doe${String.fromCodePoint(0xff20)}example.com`, 'pat.doe @ example.com']) {
-      assert.deepStrictEqual(idx.nonDisclosableSpans(`Mail ${v} today`, { caseId: b.id }).map((s) => s.entity), ['email:pat.doe@example.com'], v);
+      assert.deepStrictEqual(entities(idx.nonDisclosableSpans(`Mail ${v} today`, { caseId: b.id })), ['email:pat.doe@example.com'], v);
     }
     // The same letters without an at sign, or joined by a comma, are not the email.
     for (const v of ['pat doe example com', 'pat.doe, example.com']) {
@@ -517,7 +523,10 @@ describe('EntityIndex', () => {
     for (const run of [`${RLO}1877-2400${PDF}`, `${RLI}7781-0042${PDI}`, `${RLO}${LRE}${PDF}1877-2400`, `${RLO}${LRO}x${PDF}1877-2400`]) {
       const text = `Loan ${run} closes\nNext line`;
       const spans = idx.nonDisclosableSpans(text, { caseId: b.id });
-      assert.deepStrictEqual(spans.map((s) => [s.entity, s.span.text]), [['id:00427781', `${run} closes`]], run);
+      // The controlled run; the reversed-groups pass over every line may
+      // report the whole line as well (fix-T7-r3 I1).
+      assert.ok(spans.some((s) => s.entity === 'id:00427781' && s.span.text === `${run} closes`), run);
+      assert.ok(spans.every((s) => s.entity === 'id:00427781' && [`${run} closes`, `Loan ${run} closes`].includes(s.span.text)), run);
     }
     // No control at all: a right-to-left letter or mark reorders the line.
     for (const line of [`${ALEF} 7781 0042`, `${BEH} 7781 0042`, `${BEH} 7781-0042`, `7781 ${RLM} 0042`]) {
@@ -526,6 +535,35 @@ describe('EntityIndex', () => {
     }
     assert.deepStrictEqual(idx.nonDisclosableSpans(`Loan ${RLO}1234-5678${PDF}`, { caseId: b.id }), []);
     assert.deepStrictEqual(idx.nonDisclosableSpans(`${ALEF} 1234 5678`, { caseId: b.id }), []);
+  });
+
+  it('reads every line with its groups reversed, right-to-left letters or not (fix-T7-r3 I1)', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const { gateLeaves } = require('../src/cases/gates');
+    const { rt, a, b } = await twoCases();
+    ingested(rt, a);
+    const idx = rt.entityIndex();
+    const HEB = [0x05d0, 0x05d1, 0x05d2].map((c) => String.fromCodePoint(c)).join('');
+    assert.deepStrictEqual(idx.nonDisclosableSpans('7781 0042', { caseId: b.id }).map((s) => s.entity), ['id:00427781']);
+    const r = gateLeaves({ t: `${HEB} hello\n7781 0042` }, { facts: new Map(), caseId: b.id, entityIndex: idx, mode: 'query' });
+    assert.ok(r.blocked.some((x) => x.path === 't' && x.reason === 'non-disclosable-entity' && x.span.text === '7781 0042'));
+  });
+
+  it('counts cross-field distance in fields, not keys and values (fix-T7-r3 m1)', async (t) => {
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const { gateLeaves } = require('../src/cases/gates');
+    const { rt, a, b } = await twoCases();
+    ingested(rt, a);
+    // 58 fields; the halves sit 8 fields apart (7 fields between them).
+    const payload = {};
+    for (let i = 0; i < 25; i++) payload[`before${i}`] = `note ${i}`;
+    payload.first = 'Loan 0042';
+    for (let i = 0; i < 7; i++) payload[`between${i}`] = `note ${i}`;
+    payload.second = '7781 due';
+    for (let i = 0; i < 24; i++) payload[`after${i}`] = `note ${i}`;
+    assert.strictEqual(Object.keys(payload).length, 58);
+    const r = gateLeaves(payload, { facts: new Map(), caseId: b.id, entityIndex: rt.entityIndex(), mode: 'query' });
+    assert.ok(r.blocked.some((x) => x.path === '' && x.reason === 'non-disclosable-entity' && x.detail.startsWith('id:00427781')));
   });
 
   it('scans all bidi runs of a text in one batched pass per order (fix-T7-r2 R2)', async (t) => {

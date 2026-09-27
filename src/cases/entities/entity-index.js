@@ -84,16 +84,10 @@ const SHA256 = /^[0-9a-f]{64}$/;
 // else in braces is scanned like any other text (C3 reports it anyway).
 const REF_SPAN = /\{\{\s{0,8}f-\d{4,24}\s{0,8}\}\}/g;
 const HIDDEN_RUN = new RegExp(`[${HIDDEN_CLASS}]+`, 'gu');
-// A bidi embedding, override or isolate and what it controls, up to its
-// pop, a line break or the end (fix-T7-r1 I3).
+// Bidi embedding, override and isolate controls (fix-T7-r1 I3); a run
+// they start reaches the end of its line (fix-T7-r2 R1).
 const cps = (list) => list.map((c) => String.fromCodePoint(c)).join('');
 const BIDI_OPEN = new RegExp(`[${cps([0x202a, 0x202b, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068])}]`, 'u');
-// A line that reorders without any control: it holds a right-to-left letter
-// or a right-to-left / Arabic letter mark (fix-T7-r2 R1).
-const RTL_LINE = new RegExp(
-  `[\\p{Script=Hebrew}\\p{Script=Arabic}\\p{Script=Syriac}\\p{Script=Thaana}\\p{Script=Nko}${cps([0x200f, 0x061c])}]`,
-  'u'
-);
 const LINES = new RegExp(`[^${cps([0x0a, 0x0d, 0x2028, 0x2029])}]+`, 'gu');
 const ALNUM_GROUPS = /([\p{L}\p{N}\p{M}]+)/u;
 
@@ -433,6 +427,11 @@ class EntityIndex {
   // at most once per synchronous frame (C3's gateLeaves asks once per string
   // leaf): the result is kept until the next microtask, or until this index
   // changes. Returns the listed cases.
+  //
+  // Accepted staleness: a write and a read in one synchronous frame see the
+  // view from before the write, unless the write went through upsertCase
+  // (C5 calls it from the runtime's write paths). No real path pairs a
+  // direct ledger write with a send in one frame: every send awaits first.
   _refresh() {
     if (this._fresh) return this._fresh;
     this._load();
@@ -701,9 +700,10 @@ class EntityIndex {
   //   the end of that line (pops ignored, so nesting cannot end it early):
   //   the run reversed code point by code point, and with its letter/digit
   //   groups in reverse order;
-  // - a line holding a Hebrew, Arabic, Syriac, Thaana or NKo letter, or a
-  //   right-to-left or Arabic letter mark: the line with its groups in
-  //   reverse order.
+  // - every line with its groups in reverse order: a line may display
+  //   right to left without any right-to-left character in it (the second
+  //   line of a first-strong right-to-left paragraph, a neutral-only line on
+  //   a right-to-left device), so no trigger is required (fix-T7-r3 I1).
   // A hit in either reports the whole run or line (fix-T7-r1 I3,
   // fix-T7-r2 R1). These passes can only add spans.
   _occurrences(text, { types, ok }) {
@@ -731,7 +731,7 @@ class EntityIndex {
         reversed.push({ text: [...run].reverse().join(''), start: m.index + at, end });
         grouped.push({ text: run.split(ALNUM_GROUPS).reverse().join(''), start: m.index + at, end });
       }
-      if (RTL_LINE.test(line)) grouped.push({ text: line.split(ALNUM_GROUPS).reverse().join(''), start: m.index, end });
+      grouped.push({ text: line.split(ALNUM_GROUPS).reverse().join(''), start: m.index, end });
     }
     this._scanRuns(reversed, { types, ok }, emit);
     this._scanRuns(grouped, { types, ok }, emit);
