@@ -72,6 +72,32 @@ describe('computeChanges', () => {
     assert.deepStrictEqual(ch.computeChanges(new PlaybookLoader(c.dir).list(), { 'land-sale': { state: 'missing' } }), []);
   });
 
+  it('unavailable: an acknowledged ok submodule that is no longer checked out (parked P2, spec §10)', async (t) => {
+    const git = require('../src/cases/git');
+    if (!(await git.isGitAvailable())) return t.skip('git is not on PATH');
+    const { makeGitPackage, GIT_ID } = require('./helpers/playbook-fixture');
+    const dir = tmp();
+    fs.mkdirSync(path.join(dir, 'playbooks'));
+    fs.writeFileSync(path.join(dir, 'case.yaml'), yaml.dump({ id: 'c-1', type: 'general', playbooks: [{ name: 'remote-pb', version: '1.2.0', mode: 'submodule' }] }));
+    await git.initRepo(dir);
+    const sub = path.join(dir, 'playbooks', 'remote-pb');
+    await makeGitPackage(sub, { 'playbook.yaml': PLAYBOOK_YAML.replace('name: land-sale', 'name: remote-pb') });
+    const sha = (await git.runGit(sub, ['rev-parse', 'HEAD'])).trim();
+    fs.writeFileSync(path.join(dir, '.gitmodules'), '[submodule "remote-pb"]\n\tpath = playbooks/remote-pb\n\turl = https://example.com/playbooks/remote-pb.git\n');
+    await git.runGit(dir, ['update-index', '--add', '--cacheinfo', `160000,${sha},playbooks/remote-pb`]);
+    await git.runGit(dir, ['add', '.gitmodules', 'case.yaml']);
+    await git.runGit(dir, ['commit', '-q', '-m', 'submodule'], { env: GIT_ID });
+    const ok = new PlaybookLoader(dir).get('remote-pb');
+    assert.strictEqual(ok.state, 'ok');
+    const acknowledged = { 'remote-pb': ch.snapshotOf(ok) };
+    // Uninitialised: the gitlink stays, the checkout is an empty folder.
+    fs.rmSync(sub, { recursive: true, force: true });
+    fs.mkdirSync(sub);
+    const [x] = ch.computeChanges(new PlaybookLoader(dir).list(), acknowledged);
+    assert.deepStrictEqual([x.name, x.kind, x.from, x.to], ['remote-pb', 'unavailable', '1.2.0', null]);
+    assert.strictEqual(x.key, 'playbook:remote-pb:unavailable');
+  });
+
   it('added: an ok playbook with no acknowledged snapshot', () => {
     const c = vendoredCase();
     const [x] = ch.computeChanges(new PlaybookLoader(c.dir).list(), {});

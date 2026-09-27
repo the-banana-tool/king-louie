@@ -181,6 +181,13 @@ describe('parseSteps', () => {
     assert.strictEqual(r.steps[0].title, `a${' '.repeat(60000)}b`);
   });
 
+  it('an explicit {#id} counts only at the very end of the heading (parked P1)', () => {
+    // Pins the ReDoS-safe rule: "{#x}" followed by more text is title, not id.
+    const one = (h) => f.parseSteps(`${h}\n- executor: web\n- establishes: a.b\n`, { executors });
+    assert.deepStrictEqual(one('## 1. A {#x}y').steps.map((s) => [s.id, s.title]), [['a-x-y', 'A {#x}y']]);
+    assert.deepStrictEqual(one('## 1. A {#x}').steps.map((s) => [s.id, s.title]), [['x', 'A']]);
+  });
+
   it('a heading ending in many repeated "{#" with no closing "}" parses in linear time', () => {
     // /\{#([^}]*)\}$/ is quadratic here: with no "}" anywhere, every
     // starting position makes [^}]* run to the end, fails, and backtracks
