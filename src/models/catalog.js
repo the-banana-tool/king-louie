@@ -38,6 +38,15 @@ function readJson(file) {
   }
 }
 
+const FETCH_TIMEOUT_MS = 30000;
+
+function writeJsonAtomic(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(value));
+  fs.renameSync(tmp, file);
+}
+
 const validModelsDevFile = (doc) => N.isPlainObject(doc) && N.validateModelsDev(doc.data);
 const validScoresFile = (doc) => N.isPlainObject(doc) && N.isPlainObject(doc.scores);
 
@@ -168,6 +177,90 @@ class Catalog extends EventEmitter {
     this._local.set(p, (Array.isArray(entries) ? entries : []).map((e) => ({ ...e, provider: p })));
     this._rebuild();
     this.emit('updated', this.status());
+  }
+
+  // Fetch the live catalog and scores (spec §4.1): at most once per
+  // refreshHours unless forced, with the cached ETag, never throwing. A
+  // failure or a malformed document keeps the previous copy.
+  async refresh({ force = false } = {}) {
+    const cfg = this.config();
+    const done = () => {
+      const s = this.status();
+      return { source: s.source, fetchedAt: s.fetchedAt };
+    };
+    if (!cfg.fetch || !this._deps.cacheDir || typeof this._deps.fetch !== 'function') return done();
+    const refreshHours = Number(cfg.refreshHours) > 0 ? Number(cfg.refreshHours) : CATALOG_DEFAULTS.refreshHours;
+    const changed = await Promise.all([
+      this._refreshOne('modelsDev', {
+        url: cfg.modelsDevUrl,
+        file: 'models-dev.json',
+        refreshHours,
+        force,
+        parse: (doc) => (N.validateModelsDev(doc) ? { data: N.trimModelsDev(doc) } : null)
+      }),
+      this._refreshOne('scores', {
+        url: cfg.scoresUrl,
+        file: 'scores.json',
+        refreshHours,
+        force,
+        parse: (doc) => (N.validateScores(doc) ? { source: 'artificial-analysis', scores: N.normalizeScores(doc) } : null)
+      })
+    ]);
+    if (changed.some(Boolean)) {
+      this._rebuild();
+      this.emit('updated', this.status());
+    }
+    return done();
+  }
+
+  async _refreshOne(kind, { url, file, refreshHours, force, parse }) {
+    const now = this._deps.now();
+    const cached = this._cache[kind];
+    if (!force && cached?.fetchedAt && now.getTime() - Date.parse(cached.fetchedAt) < refreshHours * 3600000) return false;
+    const headers = cached?.etag ? { 'If-None-Match': cached.etag } : {};
+    let res;
+    try {
+      res = await this._deps.fetch(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    } catch (err) {
+      log.warn(`Fetching ${url} failed; keeping the ${cached ? 'cached' : 'bundled'} copy: ${err.message}`);
+      return false;
+    }
+    if (res.status === 304 && cached) {
+      this._storeCache(kind, file, { ...cached, fetchedAt: now.toISOString() });
+      return true;
+    }
+    if (!res.ok) {
+      log.warn(`Fetching ${url} returned ${res.status}; keeping the previous copy.`);
+      return false;
+    }
+    let doc;
+    try {
+      doc = await res.json();
+    } catch (err) {
+      log.warn(`${url} returned malformed JSON; keeping the previous copy: ${err.message}`);
+      return false;
+    }
+    const parsed = parse(doc);
+    if (!parsed) {
+      log.warn(`${url} did not return a usable document; keeping the previous copy.`);
+      return false;
+    }
+    const etag = typeof res.headers?.get === 'function' ? res.headers.get('etag') : null;
+    this._storeCache(kind, file, { fetchedAt: now.toISOString(), etag: etag || null, ...parsed });
+    return true;
+  }
+
+  // In memory first, so a cache dir that cannot be written still serves the
+  // fetched copy for this session.
+  _storeCache(kind, file, doc) {
+    this._cache[kind] = doc;
+    if (kind === 'modelsDev') this._liveThisSession = true;
+    const target = path.join(this._deps.cacheDir, file);
+    try {
+      writeJsonAtomic(target, doc);
+    } catch (err) {
+      log.warn(`Writing ${target} failed; the fetched catalog lasts until restart: ${err.message}`);
+    }
   }
 
   status() {

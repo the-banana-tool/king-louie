@@ -3,6 +3,8 @@ const {
   normalizeNotificationSettings
 } = require('../notifications/notification-router');
 const { DEFAULT_VOICE_SETTINGS } = require('../voice/tts-engine');
+const { CATALOG_DEFAULTS } = require('../models/catalog');
+const { DEFAULT_OLLAMA_BASE_URL } = require('../models/provider-ids');
 
 const DEFAULT_SETTINGS = {
   defaults: {
@@ -78,6 +80,14 @@ const DEFAULT_SETTINGS = {
       speedPriority: 'medium',
       qualityPriority: 'high'
     }
+  },
+  // Model catalog and availability (spec 2026-09-27 §14; the stage M1 keys).
+  // Tiers above keep routing until stage M2 migrates them to profiles.
+  models: {
+    catalog: { ...CATALOG_DEFAULTS },
+    overrides: {},
+    ollama: { baseUrl: DEFAULT_OLLAMA_BASE_URL },
+    availability: { retestHours: 24 }
   },
   notifications: {
     ...DEFAULT_NOTIFICATION_SETTINGS
@@ -158,6 +168,25 @@ const mergeSettings = (settings = {}) => {
         rules: Array.isArray(source.inference?.smartRouting?.rules)
           ? source.inference.smartRouting.rules
           : (DEFAULT_SETTINGS.inference?.smartRouting?.rules || [])
+      }
+    },
+    models: {
+      ...(DEFAULT_SETTINGS.models || {}),
+      ...(source.models || {}),
+      catalog: {
+        ...DEFAULT_SETTINGS.models.catalog,
+        ...(source.models?.catalog || {})
+      },
+      overrides: source.models?.overrides && typeof source.models.overrides === 'object' && !Array.isArray(source.models.overrides)
+        ? source.models.overrides
+        : {},
+      ollama: {
+        ...DEFAULT_SETTINGS.models.ollama,
+        ...(source.models?.ollama || {})
+      },
+      availability: {
+        ...DEFAULT_SETTINGS.models.availability,
+        ...(source.models?.availability || {})
       }
     },
     notifications: normalizeNotificationSettings({
