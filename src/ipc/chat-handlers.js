@@ -325,6 +325,7 @@ function registerChatHandlers(ipcMain, context = {}) {
     // `return` or a `throw` below needs its own endCaseTurn call.
     let fullResponse = '';
     let answerText = '';
+    let inference = null;
     let llmSummary = {
       calls: [],
       totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
@@ -358,9 +359,24 @@ function registerChatHandlers(ipcMain, context = {}) {
         throw new Error('Chat not found');
       }
 
-      const inference = await resolveInference({ message: safeMessage, agentMode });
-      if (!['openai', 'anthropic', 'gemini'].includes(inference.providerType)) {
-        throw new Error('Active provider does not support chat completions yet.');
+      inference = await resolveInference({ message: safeMessage, agentMode });
+
+      // Any usable provider may answer (spec 2026-09-27 §5.5): its connection
+      // test passed, the model is in the account's list, and it can call tools
+      // (agent mode, case turns) or read images when the owner attached some.
+      // A provider never tested (a key saved elsewhere, a profile from before
+      // the catalog) is tested now rather than refused.
+      const availability = typeof context.getAvailability === 'function' ? context.getAvailability() : null;
+      if (availability) {
+        await availability.ensureTested(inference.providerType);
+        const needs = {
+          ...(agentMode || caseTurn ? { toolCall: true } : {}),
+          ...(normalizedImages.length > 0 ? { imageInput: true } : {})
+        };
+        const verdict = availability.explain(inference.providerType, inference.model, { needs });
+        if (!verdict.usable) {
+          throw new Error(`Cannot use ${inference.providerType}/${inference.model || '(no model)'}: ${verdict.reasons.join(' ')}`);
+        }
       }
 
       // If a prefix-type smart routing rule matched, strip the prefix from the message
@@ -712,6 +728,10 @@ function registerChatHandlers(ipcMain, context = {}) {
           appendMessageToChat(chatId, 'assistant', fullResponse, { llm: llmSummary });
         }
         return;
+      }
+      // A 401 or 403 marks the provider unusable at once (spec §5.3).
+      if (inference && typeof context.reportProviderError === 'function') {
+        context.reportProviderError(inference.providerType, error);
       }
       safeSend(event.sender, 'chat:messageError', {
         chatId,

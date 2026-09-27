@@ -26,6 +26,8 @@ const realOpenAI = ProviderFactory._registry.get('openai');
 
 class FakeProvider {
   constructor() { this.calls = 0; }
+  // The core's one connection test (models M1) lists this account's models.
+  async listModels() { return ['fake']; }
   async sendMessageWithTools() {
     this.calls += 1;
     if (this.calls === 1) return { type: 'tool_use', toolName: PROBE, toolUseId: 'call_1', parameters: {} };

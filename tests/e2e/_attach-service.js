@@ -24,8 +24,12 @@ const PROBE = 'KlE2eGatedProbe';
 // not become an orphan service (fix round 1, I1).
 process.on('disconnect', () => process.exit(0));
 
-// Registered as `openai`: the chat send path accepts only openai/anthropic/gemini types.
+// Registered as `openai`. The send path now checks usability instead of a
+// fixed provider list, so the stub answers its own connection test too:
+// without listModels() here, availability.ensureTested() would find the
+// account has no models and every e2e send would be refused as unusable.
 class StubProvider {
+  async listModels() { return ['stub']; }
   async sendMessage() { return 'Stub chat'; }
   async streamMessage(_messages, _options, onChunk) {
     const text = 'Hello from the stub provider.';
