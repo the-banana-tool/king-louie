@@ -287,6 +287,21 @@ class CaseRuntime {
 
   records(id) { return new CaseRecords(this.getCase(id).dir); }
 
+  // The cross-case entity index (cases stage 7 spec §3.6, R46): attached to
+  // C5's CrossCaseIndex (which then keeps it current through rebuild,
+  // upsertCase and removeCase), or a standalone instance at the same file
+  // (<root>/.index/entities.json) when no index can take it.
+  entityIndex() {
+    const { EntityIndex } = require('./entities');
+    const make = () => new EntityIndex(this.root, { store: this.store, getSettings: this.getSettings });
+    if (typeof this.index?.attachEntities === 'function') {
+      if (!this.index.entities) this.index.attachEntities(make());
+      return this.index.entities;
+    }
+    if (!this._entities) this._entities = make();
+    return this._entities;
+  }
+
   budget(id) {
     const meta = this.getCase(id);
     const cfg = this.settings();
