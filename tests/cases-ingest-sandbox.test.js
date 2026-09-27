@@ -353,6 +353,17 @@ describe('openPdf sandbox limits', () => {
     }
   });
 
+  it('names the RunAsNode fuse as the likely cause when the worker exits at once (final review m6)', async (t) => {
+    const { addSink } = require('../src/logging');
+    const failures = [];
+    t.after(addSink((r) => { if (r.subsystem === 'cases/ingest/pdf-sandbox' && r.message === 'PDF worker failed') failures.push(r.meta); }));
+    // What a packaged app with the fuse off does: the binary does not run
+    // the worker and ends without a reply.
+    const spawn = (cmd, args, opts) => childProcess.spawn(cmd, ['-e', 'process.exit(3)'], opts);
+    await assert.rejects(openPdf(await makePdf(), { spawn }), failed);
+    assert.ok(failures.some((m) => /RunAsNode fuse/.test(m.why)), JSON.stringify(failures));
+  });
+
   it('refuses test hooks unless the caller asked for them', async () => {
     const pdf = await openPdf(await makePdf());
     try {

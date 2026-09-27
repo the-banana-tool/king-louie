@@ -44,6 +44,13 @@ const DEFAULT_TIMEOUTS = Object.freeze({ open: 30000, call: 20000, idle: 60000 }
 // The largest document sent to a worker; callers may only lower it.
 const MAX_INPUT_BYTES = 256 * MB;
 const STDERR_MAX_BYTES = 8 * 1024;
+// A worker that ends this soon without a single reply most likely never ran
+// the worker script. In a packaged app the worker is the app binary run with
+// ELECTRON_RUN_AS_NODE=1, which needs Electron's RunAsNode fuse left on (the
+// default; package.json build sets no electronFuses): with it off, every PDF
+// fails here (final review m6).
+const QUICK_EXIT_MS = 5000;
+const QUICK_EXIT_HINT = ' at once, before any reply; likely cause in a packaged app: Electron\'s RunAsNode fuse is off';
 const MESSAGE_MAX_CHARS = 300;
 // Past this, a declared length is not an over-cap page but a broken or
 // forging worker.
@@ -206,6 +213,8 @@ class IsolatedPdf {
     children.add(child);
     child.klStderr = '';
     child.klExpected = false;
+    child.klStarted = Date.now();
+    child.klReplied = false;
     let released = false;
     const release = () => {
       if (released) return;
@@ -242,7 +251,10 @@ class IsolatedPdf {
     for (const s of [child.stdin, child.stderr, child.stdio[3]]) s.on('error', () => {});
     const reader = new FrameReader({
       limit: (length) => this.checkLength(child, length),
-      onFrame: (header, payload) => { if (child === this.child) this.onReply(header, payload); },
+      onFrame: (header, payload) => {
+        child.klReplied = true;
+        if (child === this.child) this.onReply(header, payload);
+      },
       onError: (reason) => {
         if (child !== this.child) return;
         if (reason instanceof IngestError) this.fail(reason, 'reply over cap');
@@ -337,7 +349,10 @@ class IsolatedPdf {
     if (child.klStderr && (!child.klExpected || this.state === 'failed')) {
       log.warn('PDF worker stderr', { pid: child.pid, code, signal, stderr: child.klStderr });
     }
-    if (child === this.child) this.fail(workerFailed(this.name), `worker exited (code ${code}, signal ${signal})`);
+    if (child === this.child) {
+      const quick = !child.klReplied && Date.now() - child.klStarted < QUICK_EXIT_MS;
+      this.fail(workerFailed(this.name), `worker exited (code ${code}, signal ${signal})${quick ? QUICK_EXIT_HINT : ''}`);
+    }
   }
 
   // Detaches the worker at once (nothing it sends afterwards is read) and
