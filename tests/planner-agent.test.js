@@ -9,8 +9,10 @@ describe('Planner Agent', () => {
     assert.strictEqual(PlannerAgent.name, 'Planner');
   });
 
-  it('uses smart inference tier', () => {
-    assert.strictEqual(PlannerAgent.inferenceTier, 'smart');
+  it('runs on the main role, with no fixed model or tier', () => {
+    assert.strictEqual(PlannerAgent.role, 'main');
+    assert.strictEqual(PlannerAgent.model, null);
+    assert.strictEqual(PlannerAgent.inferenceTier, null);
   });
 
   it('has low temperature for structured output', () => {

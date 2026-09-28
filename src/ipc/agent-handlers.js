@@ -24,13 +24,54 @@ function registerAgentHandlers(ipcMain, context = {}) {
     prompter
   } = context;
 
+  const usageTracker = () => (typeof getUsageTracker === 'function' ? getUsageTracker() : null);
+
+  const fullSystemPrompt = (runtime, memorySection) => [
+    buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
+    memorySection,
+    formatUserContextSection(),
+    formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
+  ].filter((part) => typeof part === 'string').join('\n\n');
+
+  // One runtime per agent run (models spec 2026-09-27 §8; M2 carry): each
+  // agent, and each dependency task, resolves its own role and gets its own
+  // routed provider, so concurrent agents never share a route's failover
+  // state. `first` is a runtime the handler already built to fail fast; the
+  // first run of that agent uses it.
+  const perAgentExecutor = (event, systemPromptFor, first = null) => {
+    let spare = first;
+    return {
+      execute: async (agent, message, options = {}) => {
+        let runtime;
+        if (spare && spare.agentId === agent.id) {
+          runtime = spare.runtime;
+          spare = null;
+        } else {
+          runtime = await createAgentRuntime({ role: roleForAgent(agent) }, event);
+        }
+        const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor, {
+          usageTracker: usageTracker(),
+          prompter,
+          failoverPolicy: NO_RETRY
+        });
+        return agentExecutor.execute(agent, message, {
+          ...options,
+          role: runtime.role,
+          model: runtime.model,
+          timeoutMs: runtime.timeoutMs,
+          tools: runtime.toolDefinitions,
+          systemPrompt: systemPromptFor(runtime)
+        });
+      }
+    };
+  };
+
   ipcMain.handle(IPC.AGENT_LIST, wrapHandler(IPC.AGENT_LIST, async () => {
     return listAgents().map((agent) => ({
       id: agent.id,
       name: agent.name,
       description: agent.description,
-      model: agent.model,
-      inferenceTier: agent.inferenceTier,
+      role: roleForAgent(agent),
       allowedTools: agent.allowedTools
     }));
   }));
@@ -85,32 +126,15 @@ function registerAgentHandlers(ipcMain, context = {}) {
   }));
 
   ipcMain.handle(IPC.AGENT_EXECUTE_PARALLEL, wrapHandler(IPC.AGENT_EXECUTE_PARALLEL, async (event, { agentIds = [], message }) => {
-    const runtime = await createAgentRuntime({ role: 'main' }, event);
-
     const agents = agentIds
       .map((agentId) => getAgent(agentId))
       .filter(Boolean);
-
-    const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor, {
-      usageTracker: typeof getUsageTracker === 'function' ? getUsageTracker() : null,
-      prompter,
-      failoverPolicy: NO_RETRY
-    });
-    const orchestrator = new AgentOrchestrator(agentExecutor);
+    const memorySection = await buildMemoryContextSection(message);
+    const orchestrator = new AgentOrchestrator(perAgentExecutor(event, (runtime) => fullSystemPrompt(runtime, memorySection)));
     return withNotificationTiming('Parallel agent run', async () => {
       const results = await orchestrator.executeParallel(agents, message, {
-        role: runtime.role,
-        model: runtime.model,
-        timeoutMs: runtime.timeoutMs,
-        tools: runtime.toolDefinitions,
         userProfile: getUserProfile(),
-        templateContext: buildTemplateContextFromSettings(),
-        systemPrompt: [
-          buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
-          await buildMemoryContextSection(message),
-          formatUserContextSection(),
-          formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
-        ].join('\n\n')
+        templateContext: buildTemplateContextFromSettings()
       });
 
       await Promise.all(
@@ -162,6 +186,8 @@ function registerAgentHandlers(ipcMain, context = {}) {
     const taskManager = typeof getTaskManager === 'function' ? getTaskManager() : context.taskManager;
     if (!taskManager) throw new Error('Task manager is not initialized');
 
+    // Resolved once up front, so a role with no usable model fails before
+    // any task exists; the first task reuses this runtime.
     const runtime = await createAgentRuntime({ role: roleForAgent(agent) }, event);
 
     // Create tasks in TaskManager from the provided configs
@@ -207,26 +233,16 @@ function registerAgentHandlers(ipcMain, context = {}) {
       }
     }
 
-    const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor, {
-      usageTracker: typeof getUsageTracker === 'function' ? getUsageTracker() : null,
-      prompter,
-      failoverPolicy: NO_RETRY
-    });
-    const orchestrator = new AgentOrchestrator(agentExecutor);
+    const orchestrator = new AgentOrchestrator(perAgentExecutor(
+      event,
+      (rt) => fullSystemPrompt(rt, null),
+      { agentId: agent.id, runtime }
+    ));
 
     return withNotificationTiming('Dependency-based agent run', async () => {
       const results = await orchestrator.executeWithDependencies(taskManager, [agent], {
-        role: runtime.role,
-        model: runtime.model,
-        timeoutMs: runtime.timeoutMs,
-        tools: runtime.toolDefinitions,
         userProfile: getUserProfile(),
-        templateContext: buildTemplateContextFromSettings(),
-        systemPrompt: [
-          buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
-          formatUserContextSection(),
-          formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
-        ].join('\n\n')
+        templateContext: buildTemplateContextFromSettings()
       });
 
       // Convert Map to serializable object
@@ -239,32 +255,15 @@ function registerAgentHandlers(ipcMain, context = {}) {
   }));
 
   ipcMain.handle(IPC.AGENT_EXECUTE_SERIAL, wrapHandler(IPC.AGENT_EXECUTE_SERIAL, async (event, { agentIds = [], message }) => {
-    const runtime = await createAgentRuntime({ role: 'main' }, event);
-
     const agents = agentIds
       .map((agentId) => getAgent(agentId))
       .filter(Boolean);
-
-    const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor, {
-      usageTracker: typeof getUsageTracker === 'function' ? getUsageTracker() : null,
-      prompter,
-      failoverPolicy: NO_RETRY
-    });
-    const orchestrator = new AgentOrchestrator(agentExecutor);
+    const memorySection = await buildMemoryContextSection(message);
+    const orchestrator = new AgentOrchestrator(perAgentExecutor(event, (runtime) => fullSystemPrompt(runtime, memorySection)));
     return withNotificationTiming('Serial agent run', async () => {
       const results = await orchestrator.executeSerial(agents, message, {
-        role: runtime.role,
-        model: runtime.model,
-        timeoutMs: runtime.timeoutMs,
-        tools: runtime.toolDefinitions,
         userProfile: getUserProfile(),
-        templateContext: buildTemplateContextFromSettings(),
-        systemPrompt: [
-          buildRuntimeSystemPrompt(runtime.runtimeEnvironment),
-          await buildMemoryContextSection(message),
-          formatUserContextSection(),
-          formatProjectContextSection(runtime.runtimeEnvironment?.workingDirectory || process.cwd())
-        ].join('\n\n')
+        templateContext: buildTemplateContextFromSettings()
       });
 
       for (let index = 0; index < (results || []).length; index += 1) {

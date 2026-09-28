@@ -7,8 +7,11 @@ class Agent {
     this.id = config.id;
     this.name = config.name || config.id;
     this.description = config.description || '';
-    this.model = config.model || 'sonnet';
-    this.inferenceTier = config.inferenceTier || 'standard';
+    // An agent never fixes a model: the profile's role decides (models spec
+    // 2026-09-27 §8). A pre-M2 tier on a user-defined agent is read as the
+    // mapped role when it names no role (§13 step 5).
+    this.model = typeof config.model === 'string' && config.model.trim() ? config.model.trim() : null;
+    this.inferenceTier = typeof config.inferenceTier === 'string' && config.inferenceTier.trim() ? config.inferenceTier.trim() : null;
     // The agent's model role (models spec 2026-09-27 §8). A user-defined
     // agent without one has its inferenceTier read as the mapped role (§13).
     this.role = typeof config.role === 'string' && config.role.trim() ? config.role.trim() : null;

@@ -53,7 +53,7 @@ describe('child context', () => {
 describe('case-researcher', () => {
   it('is a read-only built-in agent with its template', () => {
     const agent = getAgent('case-researcher');
-    assert.deepStrictEqual([agent.readOnly, agent.inferenceTier, agent.maxIterations], [true, 'standard', 20]);
+    assert.deepStrictEqual([agent.readOnly, agent.role, agent.maxIterations], [true, 'worker', 20]);
     const template = fs.readFileSync(path.join(__dirname, '..', agent.systemPromptTemplate), 'utf8');
     assert.match(template, /```facts/);
     assert.match(agent.systemPrompt, /facts/);

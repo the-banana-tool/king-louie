@@ -72,9 +72,11 @@ class AgentLoop {
       targetTokens: options.compactionTargetTokens || 40000,
       keepRecent: options.keepRecentResults ?? 6
     });
-    // Enable API compaction for Anthropic provider by default
-    this.useAPICompaction = options.useAPICompaction
-      ?? (provider?.getProviderName?.() === 'anthropic');
+    // API compaction is Anthropic's. An explicit option fixes it; otherwise
+    // it follows the provider actually answering, call by call, so a routed
+    // turn that failed over to another provider compacts that provider's
+    // way (models M2 carry; spec 2026-09-27 §6.7).
+    this._useAPICompaction = typeof options.useAPICompaction === 'boolean' ? options.useAPICompaction : null;
 
     // Deduplicate in-flight directory access prompts. When multiple parallel
     // tool calls hit the same denied directory in the same turn, they all
@@ -207,7 +209,7 @@ class AgentLoop {
       // Compact old tool results to prevent context bloat.
       // API compaction (Anthropic): triggered by token count threshold.
       // Semantic compaction (fallback): triggered every N iterations.
-      if (this.useAPICompaction && this.apiCompaction && this.apiCompaction.shouldCompact()) {
+      if (this._apiCompactionFor(this._currentProviderName()) && this.apiCompaction && this.apiCompaction.shouldCompact()) {
         const stats = this.apiCompaction.compact(conversationHistory);
         if (stats.cleared === 0) {
           // Try OpenAI format as fallback
@@ -634,12 +636,24 @@ class AgentLoop {
     };
   }
 
+  // The provider the next call goes to: a routed provider's current target,
+  // else the provider's own name.
+  _currentProviderName() {
+    const current = typeof this.provider?.current === 'function' ? this.provider.current() : null;
+    return current?.provider || this.provider?.getProviderName?.() || null;
+  }
+
+  _apiCompactionFor(providerName) {
+    if (this._useAPICompaction !== null) return this._useAPICompaction;
+    return providerName === 'anthropic';
+  }
+
   // Every finished call, and a call cut off by Stop, is recorded (spec §9).
   _recordCall(metrics, llmCalls) {
     llmCalls.push(metrics);
 
     // Feed token count to API compaction tracker (a partial count would mislead it).
-    if (this.useAPICompaction && this.apiCompaction && !metrics.usagePartial) {
+    if (this._apiCompactionFor(metrics.provider || this._currentProviderName()) && this.apiCompaction && !metrics.usagePartial) {
       this.apiCompaction.updateTokenCount(metrics);
     }
 

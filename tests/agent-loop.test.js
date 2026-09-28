@@ -1184,4 +1184,35 @@ describe('AgentLoop', () => {
     );
     assert.strictEqual(n, 3, 'two successes, then the failing third call');
   });
+
+  it('chooses API compaction per call from the provider that answered (models M2 carry)', async () => {
+    const updates = [];
+    let compacted = 0;
+    const apiCompaction = {
+      updateTokenCount: (m) => updates.push(m.provider),
+      shouldCompact: () => updates.length > 0,
+      compact: () => { compacted += 1; return { cleared: 1, freedEstimate: 10 }; },
+      compactOpenAIFormat: () => ({ cleared: 0, freedEstimate: 0 })
+    };
+    let current = 'openai';
+    let n = 0;
+    // A routed provider whose first call is answered by openai, after which
+    // the turn fails over to anthropic for the rest of it.
+    const provider = {
+      current: () => ({ provider: current, model: 'm' }),
+      getProviderName: () => current,
+      sendMessageWithTools: async () => {
+        n += 1;
+        const who = current;
+        if (n === 1) current = 'anthropic';
+        if (n < 3) return { type: 'tool_use', toolName: 'Read', parameters: { file_path: 'a.txt' }, llmMetrics: { provider: who, model: 'm', inputTokens: 200000 } };
+        return { type: 'text', content: 'done', llmMetrics: { provider: who, model: 'm', inputTokens: 10 } };
+      },
+      buildToolMessages: sequenceProvider([]).buildToolMessages
+    };
+    const loop = new AgentLoop(provider, okExecutor(), { apiCompaction, maxIterations: 5 });
+    await loop.run([{ role: 'user', content: 'hi' }], []);
+    assert.deepStrictEqual(updates, ['anthropic', 'anthropic']);
+    assert.ok(compacted >= 1, 'compacted once the answering provider was anthropic');
+  });
 });

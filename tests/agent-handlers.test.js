@@ -33,20 +33,24 @@ function createContext(overrides = {}) {
     }
   }
 
+  // Runs each agent (each task) through the executor it was given, as the
+  // real AgentOrchestrator does.
   class FakeAgentOrchestrator {
     constructor(agentExecutor) {
       this.agentExecutor = agentExecutor;
     }
-    async executeParallel(agents) {
-      return agents.map(() => ({ content: 'ok' }));
+    async executeParallel(agents, message, options) {
+      return Promise.all(agents.map((agent) => this.agentExecutor.execute(agent, message, options)));
     }
-    async executeSerial(agents) {
-      return agents.map(() => ({ content: 'ok' }));
+    async executeSerial(agents, message, options) {
+      const out = [];
+      for (const agent of agents) out.push(await this.agentExecutor.execute(agent, message, options));
+      return out;
     }
-    async executeWithDependencies(taskManager) {
+    async executeWithDependencies(taskManager, agents, options) {
       const results = new Map();
       for (const task of taskManager.list()) {
-        results.set(task.id, { content: 'ok' });
+        results.set(task.id, await this.agentExecutor.execute(agents[0], task.description || task.subject || '', options));
       }
       return results;
     }
@@ -185,7 +189,36 @@ describe('agent-handlers roles', () => {
     await ipcMain.handlers.get(IPC.AGENT_EXECUTE_PARALLEL)({}, { agentIds: ['writer'], message: 'hi' });
     await ipcMain.handlers.get(IPC.AGENT_EXECUTE_SERIAL)({}, { agentIds: ['writer'], message: 'hi' });
     await ipcMain.handlers.get(IPC.AGENT_EXECUTE_WITH_DEPS)({}, { agentId: 'writer', tasks: [{ id: 't1', subject: 'Do a thing' }] });
-    assert.deepStrictEqual(selections, [{ role: 'worker' }, { role: 'utility' }, { role: 'main' }, { role: 'main' }, { role: 'main' }, { role: 'worker' }]);
+    // Parallel and serial runs now use each agent's own role (a role-less
+    // agent is worker), not main; with-deps resolves once and reuses it.
+    assert.deepStrictEqual(selections, [{ role: 'worker' }, { role: 'utility' }, { role: 'main' }, { role: 'worker' }, { role: 'worker' }, { role: 'worker' }]);
     assert.ok(context.executorCalls.every((opts) => opts.failoverPolicy && opts.failoverPolicy.plan(new Error('x')).action === 'abort'));
+  });
+
+  it('gives each agent of a parallel run its own runtime on its own role (one route per run)', async () => {
+    const selections = [];
+    const writer = { id: 'writer', name: 'Writer', canUseTool: () => true, role: 'main' };
+    const explorer = { id: 'explorer', name: 'Explorer', canUseTool: () => true, role: 'worker' };
+    const ipcMain = createIpcMainMock();
+    const context = createContext({
+      getAgent: (id) => ({ writer, explorer })[id],
+      createAgentRuntime: async (selection) => {
+        selections.push(selection.role);
+        return { provider: { route: selections.length }, toolExecutor: {}, role: selection.role, model: 'm', timeoutMs: 1000, toolDefinitions: [], runtimeEnvironment: { workingDirectory: process.cwd() } };
+      }
+    });
+    registerAgentHandlers(ipcMain, context);
+    await ipcMain.handlers.get(IPC.AGENT_EXECUTE_PARALLEL)({}, { agentIds: ['writer', 'explorer'], message: 'hi' });
+    assert.deepStrictEqual([...selections].sort(), ['main', 'worker']);
+    assert.strictEqual(context.executorCalls.length, 2);
+  });
+
+  it('lists agents by role, with no model or tier', async () => {
+    const ipcMain = createIpcMainMock();
+    registerAgentHandlers(ipcMain, createContext());
+    const list = await ipcMain.handlers.get(IPC.AGENT_LIST)({});
+    const agents = list.data || list;
+    assert.deepStrictEqual(Object.keys(agents[0]).sort(), ['allowedTools', 'description', 'id', 'name', 'role']);
+    assert.strictEqual(agents[0].role, 'worker');
   });
 });

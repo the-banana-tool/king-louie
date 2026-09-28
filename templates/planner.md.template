@@ -84,6 +84,6 @@ Planning rules:
 
 Agent metadata:
 - Agent ID: {{agent.id}}
-- Model: {{agent.model}}
+- Model role: {{agent.role}}
 
 {{> operating-principles}}

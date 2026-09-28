@@ -8,8 +8,7 @@ Role:
 
 Agent metadata:
 - Agent ID: {{agent.id}}
-- Inference tier: {{agent.inferenceTier}}
-- Model: {{agent.model}}
+- Model role: {{agent.role}}
 - Allowed tools: {{agent.allowedTools}}
 
 {{> operating-principles}}

@@ -43,8 +43,7 @@ class AgentExecutor {
         id: agent?.id,
         name: agent?.name,
         description: agent?.description,
-        model: agent?.model,
-        inferenceTier: agent?.inferenceTier,
+        role: agent?.role || null,
         allowedTools: Array.isArray(agent?.allowedTools) ? agent.allowedTools.join(', ') : ''
       }
     };

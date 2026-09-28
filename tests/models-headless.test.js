@@ -76,6 +76,15 @@ describe('headless agent runs', () => {
   it('built-in agents run on their own roles', () => {
     const roles = Object.fromEntries(['main', 'planner', 'code-writer', 'code-explorer', 'case-researcher'].map((id) => [id, agent(id).role]));
     assert.deepStrictEqual(roles, { main: 'main', planner: 'main', 'code-writer': 'main', 'code-explorer': 'worker', 'case-researcher': 'worker' });
+    // No built-in agent names a model or a tier any more (spec §8).
+    for (const id of Object.keys(roles)) {
+      assert.strictEqual(agent(id).model, null, id);
+      assert.strictEqual(agent(id).inferenceTier, null, id);
+    }
+    const templates = path.join(__dirname, '..', 'templates');
+    for (const file of fs.readdirSync(templates).filter((f) => f.endsWith('.md.template'))) {
+      assert.doesNotMatch(fs.readFileSync(path.join(templates, file), 'utf8'), /agent\.inferenceTier|agent\.model\b/, file);
+    }
   });
 
   it('run on the agent\'s role; a user-defined agent\'s tier reads as the mapped role', async () => {
