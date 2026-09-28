@@ -2086,6 +2086,8 @@ function createCore(deps = {}) {
       allowedDirectories: executorOptions.allowedDirectories || [],
       requireApproval: true,
       scopedBackgroundTasks: executorOptions.scopedBackgroundTasks || null,
+      // The turn's frozen models, handed on to this run's children (§6.6).
+      turnModels: executorOptions.turnModels || null,
       runtimeEnvironment: resolvedRuntimeEnvironment,
       // approvalRequester, denyAutoApproval, localOrigin and origin, plus in
       // phone mode approvalTimeoutMs and classifyCall. denyAutoApproval closes
@@ -2293,6 +2295,9 @@ function createCore(deps = {}) {
 
   // An agent or headless run's models (spec §8, §12): the role on the
   // default profile, or on the profile the caller names, fixed for the run.
+  // A child of a chat turn (SpawnAgent, BackgroundTask) passes the parent
+  // turn's frozen TurnModels instead (§6.6): the chat's profile and main
+  // override as of turn launch, subagents included.
   const createAgentRuntime = async (
     selection = {},
     event = null,
@@ -2301,7 +2306,7 @@ function createCore(deps = {}) {
   ) => {
     const sel = selection && typeof selection === 'object' ? selection : {};
     const role = typeof sel.role === 'string' && sel.role ? sel.role : 'main';
-    const turnModels = snapshotModels({ profileId: sel.profileId || null });
+    const turnModels = (!sel.profileId && runtimeOptions.turnModels) || snapshotModels({ profileId: sel.profileId || null });
     const explicit = explicitTargetFor(sel, turnModels, role);
     const resolution = await resolveRole(role, { needs: { toolCall: true }, explicit, turnModels });
     const workingDirectory = runtimeOptions.workingDirectory || hostWorkingDirectory;
@@ -2334,7 +2339,9 @@ function createCore(deps = {}) {
         ...(runtimeOptions.chatId ? { chatId: runtimeOptions.chatId } : {}),
         ...(runtimeOptions.refuseUnsafe === true ? { refuseUnsafe: true } : {}),
         ...(Array.isArray(runtimeOptions.allowedRoots) ? { allowedRoots: runtimeOptions.allowedRoots } : {}),
-        ...(runtimeOptions.scopedBackgroundTasks ? { scopedBackgroundTasks: runtimeOptions.scopedBackgroundTasks } : {})
+        ...(runtimeOptions.scopedBackgroundTasks ? { scopedBackgroundTasks: runtimeOptions.scopedBackgroundTasks } : {}),
+        // The run's models reach its own children in turn (§6.6).
+        turnModels
       }
     );
 
@@ -2589,7 +2596,11 @@ function createCore(deps = {}) {
               || (options.executorOptions && options.executorOptions.allowedRoots) || null,
             // A delegate session's background-task view (T11-taskstatus).
             scopedBackgroundTasks: (options.approvalRequester && options.approvalRequester.scopedBackgroundTasks)
-              || (options.executorOptions && options.executorOptions.scopedBackgroundTasks) || null
+              || (options.executorOptions && options.executorOptions.scopedBackgroundTasks) || null,
+            // A child of a chat turn runs on that turn's frozen models (§6.6),
+            // carried on the rethreaded requester as chatId-like run state;
+            // with no parent turn, the default profile applies (§12).
+            turnModels: (options.approvalRequester && options.approvalRequester.turnModels) || null
           }
         );
         const executor = new AgentExecutor(runtime.provider, runtime.toolExecutor, {

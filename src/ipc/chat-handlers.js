@@ -572,6 +572,9 @@ function registerChatHandlers(ipcMain, context = {}) {
         allowedDirectories,
         useSandbox: sandboxMode,
         chatId,
+        // SpawnAgent and BackgroundTask children of this turn resolve their
+        // models from this turn's frozen TurnModels (spec §6.6).
+        turnModels,
         caseContext: caseTurn ? caseRuntime.caseContext(caseTurn, { ownerMessages, ownerMessageTimes }) : null
       });
 

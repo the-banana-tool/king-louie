@@ -165,6 +165,11 @@ class ToolExecutor extends EventEmitter {
     // origin instead of recomputing a fresh, poorer one that has lost the
     // parent's deviceId/session.
     this.origin = options.origin || null;
+    // The parent turn's frozen TurnModels (spec 2026-09-27 §6.6): carried on
+    // the rethreaded requester so a SpawnAgent or BackgroundTask child of a
+    // chat turn resolves against the chat's profile and main override as of
+    // turn launch. Null for runs with no parent turn (headless callers).
+    this.turnModels = options.turnModels || null;
     // Fleet stage 4 §3.8: this run (a delegate turn without fleet:unsafe)
     // refuses unsafe calls; carried on the re-threaded requester so the
     // run's sub-agents refuse them too.
@@ -632,6 +637,7 @@ class ToolExecutor extends EventEmitter {
     requester.refuseUnsafe = this.refuseUnsafe;
     if (this.refuseUnsafe && this.allowedRoots) requester.allowedRoots = this.allowedRoots;
     if (this.scopedBackgroundTasks) requester.scopedBackgroundTasks = this.scopedBackgroundTasks;
+    if (this.turnModels) requester.turnModels = this.turnModels;
     // A child never gets a tool this run may not use (a case wake-up's list,
     // a delegate turn's T11-sessions limit); childRuntimeOptions intersects.
     if (this.allowedToolNames) requester.allowedToolNames = Object.freeze([...this.allowedToolNames]);

@@ -267,7 +267,9 @@ async function runWakeupTurn(runtime, caseId, dueIds, now = runtime.now()) {
         allowedDirectories: [],
         caseContext: runtime.caseContext(turn, { ownerMessages: [], ownerMessageTimes: [] }),
         denyAutoApproval: true,
-        allowedToolNames: new Set([...CASE_TOOL_NAMES, ...WAKEUP_BASE_TOOLS])
+        allowedToolNames: new Set([...CASE_TOOL_NAMES, ...WAKEUP_BASE_TOOLS]),
+        // The turn's frozen models (spec 2026-09-27 §6.6).
+        turnModels: turn.models || null
       });
       const Loop = host.AgentLoop;
       const loop = new Loop(runtime.routedProvider(turn, { role: 'judge' }), executor, {

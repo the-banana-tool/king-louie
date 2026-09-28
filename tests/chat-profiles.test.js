@@ -2,9 +2,20 @@
 // The chat turn on profiles (spec 2026-09-27 §6.5–§6.7, §15): models frozen
 // at launch, the main gate and its messages, an unusable override, and
 // failover along main's list — any provider on the first call only.
-const { describe, it } = require('node:test');
+const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert');
+const crypto = require('crypto');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const { chatHarness } = require('./helpers/chat-harness');
+const { createCore } = require('../src/core');
+const { JsonFileStore } = require('../src/platform/json-file-store');
+const { createAesGcmCipher } = require('../src/platform/cipher');
+const { createHeadlessPrompter } = require('../src/platform/prompter');
+const ProviderFactory = require('../src/providers/provider-factory');
+const IPC = require('../src/ipc/constants');
+const { registerChatHandlers } = require('../src/ipc/chat-handlers');
 const { setLogLevel } = require('../src/logging');
 
 setLogLevel('fatal');
@@ -136,5 +147,130 @@ describe('chat turns on profiles', () => {
     const h = chatHarness({ provider, model: 'gpt-5.5', overrides: { getSettings: () => ({ advisor: { enabled: true } }) } });
     await h.send({ agentMode: true });
     assert.ok(models.some(([who, m]) => who === 'advisor' && m === 'gpt-5.5'), JSON.stringify(models));
+  });
+});
+
+// Sub-agents of a chat turn (spec §6.6): a SpawnAgent child resolves its
+// role from the parent turn's frozen TurnModels, the chat's profile and
+// main override as of turn launch, never the default profile at spawn time.
+describe('sub-agents of a chat turn', () => {
+  const FAKE = 'kl-test-subagents';
+  const tempDirs = [];
+  const savedCasesRoot = process.env.KL_CASES_ROOT;
+  afterEach(() => {
+    ProviderFactory._registry.delete(FAKE);
+    if (savedCasesRoot === undefined) delete process.env.KL_CASES_ROOT; else process.env.KL_CASES_ROOT = savedCasesRoot;
+    while (tempDirs.length) fs.rmSync(tempDirs.pop(), { recursive: true, force: true });
+  });
+
+  // The parent's calls spawn the given agents one after another (onSpawn
+  // runs just before each); a child's call answers with its model.
+  function fakeProvider(calls, spawns, onSpawn) {
+    return class {
+      getProviderName() { return FAKE; }
+      getDefaultModel() { return 'fake-default'; }
+      async sendMessage() { return 'unused'; }
+      async sendMessageWithTools(messages, _tools, options) {
+        const first = messages.find((m) => m.sender === 'user' || m.role === 'user');
+        const text = String(first?.text ?? first?.content ?? '');
+        const who = text.startsWith('sub:') ? text : 'parent';
+        calls.push([who, options.model]);
+        if (who !== 'parent') return { type: 'text', content: `answered by ${options.model}` };
+        const parentCalls = calls.filter(([w]) => w === 'parent').length;
+        const agentId = spawns[parentCalls - 1];
+        if (!agentId) return { type: 'text', content: 'parent done' };
+        if (onSpawn) onSpawn(agentId, parentCalls);
+        return { type: 'tool_use', toolName: 'SpawnAgent', toolUseId: `spawn-${parentCalls}`, parameters: { task: `sub:${agentId}`, agentId } };
+      }
+      buildToolMessages(response, toolResult, toolCallId) {
+        return [
+          { role: 'assistant', content: '', tool_calls: [{ id: toolCallId, type: 'function', function: { name: response.toolName, arguments: JSON.stringify(response.parameters || {}) } }] },
+          { role: 'tool', tool_call_id: toolCallId, content: JSON.stringify(toolResult) }
+        ];
+      }
+    };
+  }
+
+  async function startChatCore({ chat, spawns, onSpawn = null }) {
+    const calls = [];
+    let core = null;
+    ProviderFactory.registerProvider(FAKE, fakeProvider(calls, spawns, (id, n) => onSpawn && onSpawn(core, n)));
+    delete process.env.KL_CASES_ROOT;
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-chat-subagents-'));
+    tempDirs.push(dataDir);
+    const store = new JsonFileStore({ dir: dataDir, name: 'chat-data', defaults: { chats: [], activeChatId: null, apiTokens: {}, apiStatus: {}, toolApprovals: { alwaysApproveTools: {} } } });
+    const roles = (prefix) => ({ main: [t(FAKE, `${prefix}-main`)], worker: [t(FAKE, `${prefix}-worker`)], utility: [t(FAKE, `${prefix}-utility`)] });
+    store.set('settings', {
+      models: {
+        profiles: [
+          { id: 'p-a', name: 'A', kind: 'user', roles: roles('a') },
+          { id: 'p-b', name: 'B', kind: 'user', roles: roles('b') }
+        ],
+        defaultProfileId: 'p-a'
+      }
+    });
+    store.set('chats', [{ id: 'chat-1', title: 'Chat', messages: [], ...chat }]);
+    core = createCore({
+      paths: { dataDir },
+      store,
+      vaultStore: new JsonFileStore({ dir: dataDir, name: 'config' }),
+      cipher: createAesGcmCipher(crypto.randomBytes(32)),
+      prompter: createHeadlessPrompter(),
+      builtinSkillsDir: path.join(__dirname, '..', 'skills'),
+      features: { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false },
+      fetch: async (url) => { throw new Error(`no network in unit tests (${url})`); }
+    });
+    await core.start();
+    core.saveProviderToken(FAKE, 'fake-token-123456');
+    const handlers = new Map();
+    registerChatHandlers({ handle: (channel, fn) => handlers.set(channel, fn), on: () => {} }, core.context);
+    const event = { sender: { send: () => {}, isDestroyed: () => false } };
+    const send = () => handlers.get(IPC.CHAT_SEND_MESSAGE)(event, { chatId: 'chat-1', message: 'Hello', agentMode: true });
+    return { core, calls, send };
+  }
+
+  it('a SpawnAgent child runs on the chat\'s non-default profile and its main override', async () => {
+    const { core, calls, send } = await startChatCore({
+      chat: { profileId: 'p-b', mainOverride: t(FAKE, 'b-override') },
+      spawns: ['code-explorer', 'main']
+    });
+    try {
+      const result = await send();
+      assert.notStrictEqual(result?.ok, false, JSON.stringify(result));
+      // code-explorer runs on worker, main on the chat's override; nothing
+      // reaches the default profile A.
+      assert.deepStrictEqual(calls, [
+        ['parent', 'b-override'],
+        ['sub:code-explorer', 'b-worker'],
+        ['parent', 'b-override'],
+        ['sub:main', 'b-override'],
+        ['parent', 'b-override']
+      ]);
+    } finally {
+      await core.shutdown();
+    }
+  });
+
+  it('a profile edit made mid-turn does not reach a child spawned later in that turn', async () => {
+    const { core, calls, send } = await startChatCore({
+      chat: { profileId: 'p-b' },
+      spawns: ['code-explorer', 'code-explorer'],
+      // Before the second spawn the owner edits profile B's worker and
+      // makes A the default: neither may reach this turn's children.
+      onSpawn: (c, n) => {
+        if (n !== 2) return;
+        const profiles = c.context.getProfiles();
+        profiles.update('p-b', { roles: { ...profiles.get('p-b').roles, worker: [t(FAKE, 'b-worker-edited')] } });
+        profiles.setDefault('p-a');
+      }
+    });
+    try {
+      const result = await send();
+      assert.notStrictEqual(result?.ok, false, JSON.stringify(result));
+      assert.deepStrictEqual(calls.filter(([w]) => w !== 'parent').map(([, m]) => m), ['b-worker', 'b-worker']);
+      assert.deepStrictEqual(core.context.getProfiles().get('p-b').roles.worker.map((x) => x.model), ['b-worker-edited']);
+    } finally {
+      await core.shutdown();
+    }
   });
 });
