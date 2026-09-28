@@ -16,6 +16,8 @@ const HELP = `Usage:
   king-louie-service desktop pair <request> [--data-dir DIR] [--yes]
   king-louie-service desktop unpair <device-id> [--data-dir DIR]
   king-louie-service desktop list [--data-dir DIR]
+  king-louie-service models status|refresh [--data-dir DIR]
+  king-louie-service profiles list|show <id-or-name>|set-default <id-or-name> [--data-dir DIR]
   king-louie-service import --from <desktop user-data dir> [--data-dir DIR] [--dry-run]
   king-louie-service install [--profile P] [--user NAME] [--data-dir DIR] [--dry-run]
   king-louie-service uninstall [--dry-run]
@@ -136,6 +138,8 @@ function withServiceCore(dataDir, io, fn) {
   const { buildServicePorts } = require('./ports');
   const { restoreDataDirOwnership } = require('./ownership');
   const writtenPaths = [];
+  const restore = () => restoreDataDirOwnership(dataDir, writtenPaths, io.ownership);
+  let result;
   try {
     const ports = buildServicePorts({
       dataDir,
@@ -143,10 +147,16 @@ function withServiceCore(dataDir, io, fn) {
       onPathWritten: (p) => writtenPaths.push(p)
     });
     const core = createCore({ ...ports, adminExecutors: NO_ADMIN_EXECUTORS });
-    return fn(core, ports);
-  } finally {
-    restoreDataDirOwnership(dataDir, writtenPaths, io.ownership);
+    result = fn(core, ports);
+  } catch (err) {
+    restore();
+    throw err;
   }
+  // An async fn (models refresh) writes until it settles: ownership is
+  // restored after that, not before.
+  if (result && typeof result.then === 'function') return result.finally(restore);
+  restore();
+  return result;
 }
 
 function formatChannelAccess(channel, policy, approvalChatId) {
@@ -372,6 +382,16 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
         });
         io.stdout.write(`${command === 'token' ? 'Token' : 'Secret'} "${name}" saved (encrypted).\n`);
         return 0;
+      }
+
+      case 'models': {
+        const { runModelsCommand } = require('./commands/models');
+        return await runModelsCommand({ sub, dataDir, io, deps: { runningServicePid, withServiceCore } });
+      }
+
+      case 'profiles': {
+        const { runProfilesCommand } = require('./commands/models');
+        return await runProfilesCommand({ sub, arg, dataDir, io, deps: { runningServicePid, withServiceCore } });
       }
 
       case 'desktop': {

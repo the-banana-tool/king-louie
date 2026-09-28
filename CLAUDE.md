@@ -98,7 +98,7 @@ Default is `info`. Override with `KING_LOUIE_LOG_LEVEL` or `LOG_LEVEL` env var.
 
 `src/models/` holds the model catalog and provider availability (spec:
 `docs/superpowers/specs/2026-09-27-model-catalog-profiles-roles-design.md`,
-stages M1 and M2). It is Electron-free.
+stages M1 to M3). It is Electron-free.
 
 - Prices come only from `Catalog.price`; providers have no price tables. An
   unknown model is unpriced (`costUsd: null`), never $0. A call cut off by
@@ -130,6 +130,23 @@ stages M1 and M2). It is Electron-free.
 - Tests configure models with `tests/helpers/profile-settings.js`
   (`profileSettings`, `everyRole`, `withCaseProfile`). A provider a test
   registers outside the 14 is usable when it has a saved token.
+- Roles in use (stage M3): chat titles run on utility; SpawnAgent and
+  BackgroundTask take a `role` (a bare call runs on worker), and a `model`
+  an LLM names (SpawnAgent, a planned workflow task's `preferredModel`) must
+  already be in the turn's profile (`requireInProfile`). The explorer is the
+  read-only `code-explorer` agent on worker; main's agent-mode prompt starts
+  with `DELEGATION_GUIDANCE` (`src/context/system-sections.js`).
+- Every call's `llmMetrics` carries `role`, `profileId`, `failover` and
+  `borrowedFrom` (stamped by the router from `routedProvider({ meta })`) and
+  `pricingUsage`; a reply's `llm` has `subagents` and `byRole`
+  (`summarizeTurnLlm`); `UsageTracker` totals by role and model.
+- The King Louie profile (`src/models/suggester.js`, `src/models/king-louie.js`)
+  only proposes; the first Accept creates it, and only Accept (or
+  `models.kingLouie.autoAccept`) changes it. Custom roles are saved through
+  `Profiles#saveCustomRole` and never removed while a profile or case role
+  names them.
+- `king-louie-service models status|refresh` and `profiles list|show|set-default`
+  work on the data dir; the writing ones refuse while the service runs.
 
 ## Cases
 
