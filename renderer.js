@@ -6845,9 +6845,11 @@ if (dom.modelsKlSaveBtn) {
       const result = unwrapIpcResult(await window.electron.models.saveKingLouieSettings({
         autoAccept: Boolean(dom.modelsKlAutoAccept?.checked),
         preferLocalUtility: Boolean(dom.modelsKlPreferLocal?.checked),
-        bandPoints: Number(dom.modelsKlBand?.value),
-        workerAgenticRatio: Number(dom.modelsKlWorkerRatio?.value),
-        utilityIntelligenceRatio: Number(dom.modelsKlUtilityRatio?.value)
+        // Raw field text: the core refuses a blank or non-numeric value
+        // (BAD_SETTING) rather than saving it as 0.
+        bandPoints: dom.modelsKlBand?.value ?? '',
+        workerAgenticRatio: dom.modelsKlWorkerRatio?.value ?? '',
+        utilityIntelligenceRatio: dom.modelsKlUtilityRatio?.value ?? ''
       }), 'Unable to save the King Louie settings.');
       renderKingLouie(result.view);
       await loadModelProfiles();
