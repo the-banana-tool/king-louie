@@ -114,6 +114,20 @@ describe('service CLI — profiles', () => {
     assert.match(unknown.err.join(''), /No profile "Nope"/);
   });
 
+  it('refuses a name two stored profiles share, and still takes the id', async () => {
+    const dir = dataDir();
+    const data = JSON.parse(fs.readFileSync(path.join(dir, 'chat-data.json'), 'utf8'));
+    data.settings.models.profiles.push({ id: 'p-c', name: 'work', kind: 'user', roles: { main: [t('openai', 'gpt-5.5')], worker: [], utility: [] } });
+    fs.writeFileSync(path.join(dir, 'chat-data.json'), JSON.stringify(data));
+    const ambiguous = io();
+    assert.strictEqual(await main(['profiles', 'set-default', 'Work', '--data-dir', dir], ambiguous), 1);
+    assert.match(ambiguous.err.join(''), /More than one profile is named "Work" \(p-a, p-c\)\. Use its id\./);
+    assert.strictEqual(readSettings(dir).models.defaultProfileId, 'p-a');
+    const byId = io();
+    assert.strictEqual(await main(['profiles', 'set-default', 'p-c', '--data-dir', dir], byId), 0);
+    assert.strictEqual(readSettings(dir).models.defaultProfileId, 'p-c');
+  });
+
   it('is in the help', async () => {
     const t1 = io();
     await main(['help'], t1);

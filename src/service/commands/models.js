@@ -17,7 +17,8 @@ function refuseWhileRunning(dataDir, io, runningServicePid) {
 }
 
 function formatCatalog(status) {
-  const date = String(status.fetchedAt || status.snapshotDate || 'unknown date').slice(0, 10);
+  const stamp = status.fetchedAt || status.snapshotDate;
+  const date = stamp ? String(stamp).slice(0, 10) : 'unknown date';
   return `Catalog: ${status.source}, ${date} (${status.models} models)${status.stale ? ' — old: run "models refresh"' : ''}\n`;
 }
 
@@ -52,12 +53,16 @@ async function runModelsCommand({ sub, dataDir, io, deps }) {
   });
 }
 
-// By id, else by name, ignoring case.
+// By id, else by name, ignoring case. A name two stored profiles share (a
+// hand-edited or imported store) is ambiguous: the caller must use an id.
 function findProfile(profiles, ref) {
   const want = String(ref || '').trim();
-  if (!want) return null;
+  if (!want) return { profile: null, matches: [] };
   const list = profiles.list();
-  return list.find((p) => p.id === want) || list.find((p) => p.name.toLowerCase() === want.toLowerCase()) || null;
+  const byId = list.find((p) => p.id === want);
+  if (byId) return { profile: byId, matches: [byId] };
+  const matches = list.filter((p) => p.name.toLowerCase() === want.toLowerCase());
+  return { profile: matches.length === 1 ? matches[0] : null, matches };
 }
 
 const label = (t) => `${t.provider}/${t.model}`;
@@ -96,7 +101,11 @@ async function runProfilesCommand({ sub, arg, dataDir, io, deps }) {
       }
       return 0;
     }
-    const profile = findProfile(profiles, arg);
+    const { profile, matches } = findProfile(profiles, arg);
+    if (matches.length > 1) {
+      io.stderr.write(`More than one profile is named "${arg}" (${matches.map((p) => p.id).join(', ')}). Use its id.\n`);
+      return 1;
+    }
     if (!profile) {
       io.stderr.write(`No profile "${arg}". Run "king-louie-service profiles list".\n`);
       return 1;
