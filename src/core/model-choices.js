@@ -89,7 +89,9 @@ function createModelChoices({
     const mainKeys = new Set(profileMain.map(targetKey));
     const fromMain = profileMain
       .filter((x) => explainTarget(x.provider, x.model, { needs }).usable)
-      .map((x) => ({ provider: x.provider, model: x.model, name: nameOf(x), inMain: true }));
+      // The profile's own effort travels with its main entries, so picking
+      // one sets an override that keeps it (final review m4).
+      .map((x) => ({ provider: x.provider, model: x.model, effort: x.effort || null, name: nameOf(x), inMain: true }));
     const others = (availability && typeof availability.usable === 'function' ? availability.usable({ needs: { textOutput: true, ...needs } }) : [])
       .filter((c) => !mainKeys.has(targetKey(c)))
       .map((c) => ({ provider: c.provider, model: c.model, name: c.name || c.model, inMain: false }));

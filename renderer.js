@@ -7459,11 +7459,10 @@ async function resendUserMessage(messageEl) {
 }
 
 // Remove the user message at msgIndex and everything after it with
-// chat:truncateFrom, then send it again through the normal flow. When given,
-// beforeSend runs in between (Retry with…: the main switch, so its status
-// message lands before the re-sent message); if it returns false the user
-// message is put back and nothing is sent.
-async function resendFromIndex(chatId, msgIndex, { beforeSend = null } = {}) {
+// chat:truncateFrom, then send it again through the normal flow. `carry`
+// is messages to put back right after the truncation, before the re-sent
+// message (Retry with…: the status line its main switch wrote).
+async function resendFromIndex(chatId, msgIndex, { carry = [] } = {}) {
   const chat = appState.chats.find((c) => c.id === chatId);
   const userMsg = chat?.messages?.[msgIndex];
   if (!userMsg || userMsg.sender !== 'user') return;
@@ -7484,20 +7483,13 @@ async function resendFromIndex(chatId, msgIndex, { beforeSend = null } = {}) {
     return;
   }
 
-  if (beforeSend && !(await beforeSend())) {
+  for (const kept of carry) {
     try {
-      const restored = unwrapIpcResult(await window.electron.chat.addMessage({
-        chatId,
-        sender: 'user',
-        text: message,
-        ...(images.length > 0 ? { images } : {}),
-        ...(documents.length > 0 ? { documents } : {})
-      }), 'Unable to restore the message.');
+      const restored = unwrapIpcResult(await window.electron.chat.addMessage({ chatId, sender: kept.sender, text: kept.text || '' }), 'Unable to keep the status message.');
       applyUpdatedChat(restored);
     } catch (err) {
-      chatLog.warn(`restoring the message failed: ${err.message}`);
+      chatLog.warn(`keeping the ${kept.sender} message failed: ${err.message}`);
     }
-    return;
   }
   const latest = appState.chats.find((c) => c.id === chatId) || chat;
 
@@ -7815,7 +7807,7 @@ function renderChatModels(view) {
   for (const c of view.choices) {
     if (view.main && c.provider === view.main.provider && c.model === view.main.model) continue;
     const opt = document.createElement('option');
-    opt.value = JSON.stringify({ provider: c.provider, model: c.model });
+    opt.value = JSON.stringify(choiceTarget(c));
     opt.textContent = c.inMain ? `${c.name} (profile's main)` : `${c.name} (${c.provider})`;
     main.appendChild(opt);
   }
@@ -7839,6 +7831,12 @@ function applyChatModelsGate() {
   const busy = appState.activeResponses.has(appState.activeChatId);
   if (dom.chatProfileSelect) dom.chatProfileSelect.disabled = busy;
   if (dom.chatMainSelect) dom.chatMainSelect.disabled = busy;
+}
+
+// A header or Retry with… choice as the override it sets: a profile main
+// entry keeps its configured effort (final review m4).
+function choiceTarget(c) {
+  return { provider: c.provider, model: c.model, ...(c.effort ? { effort: c.effort } : {}) };
 }
 
 async function switchMainModel(target) {
@@ -7897,7 +7895,7 @@ function renderRetryControl() {
     }
     for (const c of view?.choices || []) {
       const opt = document.createElement('option');
-      opt.value = JSON.stringify({ provider: c.provider, model: c.model });
+      opt.value = JSON.stringify(choiceTarget(c));
       opt.textContent = c.inMain ? `${c.name} (profile's main)` : `${c.name} (${c.provider})`;
       select.appendChild(opt);
     }
@@ -7916,7 +7914,14 @@ async function retryWith(target) {
   if (!chatId || !chat) return;
   const index = chat.messages.findLastIndex((m) => m.sender === 'user');
   if (index < 0) return;
-  await resendFromIndex(chatId, index, { beforeSend: () => switchMainModel(target) });
+  // Switch first: a failed switch leaves the chat exactly as it was, the
+  // user message and its reply both still there (final review m3). Only
+  // then truncate and re-send, keeping the switch's status line.
+  const before = chat.messages.length;
+  if (!(await switchMainModel(target))) return;
+  const after = appState.chats.find((c) => c.id === chatId)?.messages || [];
+  const carry = after.slice(before).filter((m) => m.sender === 'status');
+  await resendFromIndex(chatId, index, { carry });
 }
 
 if (dom.chatProfileSelect) {

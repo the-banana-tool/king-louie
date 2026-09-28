@@ -158,6 +158,18 @@ describe('main override efforts', () => {
     assert.deepStrictEqual(chat('c1').mainOverride, t('openai', 'gpt-5.5', 'high'));
   });
 
+  it('picking a profile main entry keeps the effort the profile configured (m4)', async () => {
+    const { choices, profiles, chat } = setup({ chats: [{ id: 'c1' }] });
+    profiles.update('p-a', { roles: { ...profiles.get('p-a').roles, main: [t('openai', 'gpt-5.5', 'high'), t('anthropic', 'claude-sonnet-4-5')] } });
+    const v = choices.chatView('c1');
+    assert.deepStrictEqual(v.choices.map((c) => [`${c.provider}/${c.model}`, c.effort ?? null]), [
+      ['openai/gpt-5.5', 'high'], ['anthropic/claude-sonnet-4-5', null], ['openai/gpt-4o', null], ['groq/llama-3.3-70b', null]
+    ]);
+    const picked = v.choices[0];
+    await choices.setMainOverride('c1', { provider: picked.provider, model: picked.model, effort: picked.effort });
+    assert.deepStrictEqual(chat('c1').mainOverride, t('openai', 'gpt-5.5', 'high'));
+  });
+
   it('is fine with no effort', async () => {
     const { choices, chat } = setup({ chats: [{ id: 'c1' }] });
     await choices.setMainOverride('c1', t('openai', 'gpt-4o'));

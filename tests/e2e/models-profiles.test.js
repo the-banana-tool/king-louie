@@ -112,8 +112,34 @@ describe('E2E: profiles, the main switcher and Retry with…', () => {
     await waitFor(ctx, `!!document.getElementById('retry-with-btn')`, 30000);
     const chat = readChat(ctx);
     assert.strictEqual(chat.messages.filter((m) => m.sender === 'user' && m.text === 'Say hello').length, 1, 'the message was re-sent, not duplicated');
+    // The switch's status line is kept, just before the re-sent message.
+    const said = chat.messages.findIndex((m) => m.sender === 'user' && m.text === 'Say hello');
+    assert.deepStrictEqual([chat.messages[said - 1]?.sender, chat.messages[said - 1]?.text], ['status', 'Main model switched from vision-model to test-model']);
     const chatCalls = server.requests.slice(before).filter((r) => r.provider === 'ollama' && r.method === 'POST');
     assert.strictEqual(chatCalls[chatCalls.length - 1].body.model, 'test-model');
+  });
+
+  it('a failed switch in Retry with… leaves the chat exactly as it was (final review m3)', async () => {
+    const beforeMessages = readChat(ctx).messages.map((m) => [m.sender, m.text]);
+    assert.ok(beforeMessages.some(([s]) => s === 'assistant'), 'there is a reply to keep');
+    const before = server.requests.length;
+    await evaluate(ctx, `document.getElementById('retry-with-btn').click(); true`);
+    await waitFor(ctx, `(document.getElementById('retry-with-select')?.options.length || 0) > 1`);
+    // A model the account does not list: the switch is refused.
+    await evaluate(ctx, `(() => {
+      const s = document.getElementById('retry-with-select');
+      const opt = document.createElement('option');
+      opt.value = JSON.stringify({ provider: 'ollama', model: 'missing-model' });
+      opt.textContent = 'missing-model';
+      s.appendChild(opt);
+      s.value = opt.value;
+      s.dispatchEvent(new Event('change'));
+      return true;
+    })()`);
+    await waitFor(ctx, `[...document.querySelectorAll('.message.assistant')].some((el) => el.textContent.includes('missing-model'))`, 30000);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.deepStrictEqual(readChat(ctx).messages.map((m) => [m.sender, m.text]), beforeMessages);
+    assert.strictEqual(server.requests.slice(before).filter((r) => r.provider === 'ollama' && r.method === 'POST').length, 0, 'nothing was re-sent');
   });
 
   it('disables the header selects while a turn is running, so a mid-turn pick cannot wipe the reply (fix round 1)', async () => {
