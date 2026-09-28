@@ -18,7 +18,15 @@ const WORKER_MIN_CONTEXT = 128000;
 const MAX_LIST = 3;
 const EFFORT_ORDER = Object.freeze(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 const PICKED_ROLES = Object.freeze(['main', 'worker', 'utility', 'vision', 'imageGeneration']);
-const BORROW = Object.freeze({ utility: ['utility', 'worker', 'main'], worker: ['worker', 'main'] });
+const BORROW = Object.freeze({
+  utility: ['utility', 'worker', 'main'],
+  worker: ['worker', 'main'],
+  // The resolver borrows an empty vision role from utility, then worker,
+  // then main (src/models/resolver.js's resolve('vision')); a proposal's
+  // cost effect follows the same chain so an empty vision reprices on what
+  // it would actually run on, never "nothing to price".
+  vision: ['vision', 'utility', 'worker', 'main']
+});
 
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 const numOr = (v, d) => (isNum(v) ? v : d);
@@ -110,7 +118,9 @@ function pickRoles(candidates, rawSettings = {}) {
   const failover = (c) => `${c.name}: failover, the next cheapest that qualifies.`;
 
   // main: tool calling, ranked by agentic then intelligence; within the
-  // band of the best, the cheaper wins.
+  // band of the best, the cheaper wins. textOutput isn't in §7.1, but main
+  // drives the chat reply itself, so a model that can't produce text (an
+  // image-only or audio-only model) is never a candidate however it scores.
   const mainPool = priced.filter((c) => c.textOutput && c.toolCall && agentic(c) !== null);
   if (!mainPool.length) {
     return { unavailable: 'No usable model that calls tools has both a price and an agentic score, so King Louie cannot propose a main model. Add a key for a provider whose models are scored, or fill a profile by hand.' };
@@ -136,6 +146,7 @@ function pickRoles(candidates, rawSettings = {}) {
   });
 
   // worker: tool calling, 128K context, agentic at least the ratio of main's.
+  // textOutput for the same reason as main: worker also answers directly.
   const workerList = spread(priced
     .filter((c) => c.textOutput && c.toolCall && isNum(c.context) && c.context >= WORKER_MIN_CONTEXT
       && agentic(c) !== null && agentic(c) >= s.workerAgenticRatio * mainA)

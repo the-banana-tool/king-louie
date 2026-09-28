@@ -25,6 +25,10 @@ const CANDIDATES = [
   c('groq', 'fast', { input: 0.05, output: 0.1, intelligence: 32, toolCall: false, context: 128000 }),
   c('openai', 'nano', { input: 0.05, output: 0.4, intelligence: 25, agentic: 20 }),
   c('openai', 'image', { input: 5, output: 40, textOutput: false, imageOutput: true, toolCall: false }),
+  // Tool-calling and top-scored, but textOutput: false — never a candidate
+  // for main/worker/utility/vision (fix round 1: §7.1 doesn't say this, but
+  // a role that answers directly needs a model that can produce text).
+  c('anthropic', 'audio-only', { input: 1, output: 1, intelligence: 99, agentic: 99, textOutput: false }),
   c('xai', 'unpriced', { intelligence: 90, agentic: 90 }),
   c('mistral', 'unscored', { input: 0.01, output: 0.01 }),
   c('ollama', 'local', { input: 0, output: 0, local: true })
@@ -78,6 +82,13 @@ describe('pickRoles', () => {
     for (const never of ['unpriced', 'unscored', 'local']) assert.ok(!all.includes(never), never);
   });
 
+  // fix round 1: audio-only tops every score in CANDIDATES but can't
+  // produce text, so it must never win a role however well it scores.
+  it('never picks a tool-calling model that cannot produce text, however well it scores', () => {
+    const all = Object.values(S.pickRoles(CANDIDATES, {}).roles).flat().map((t) => t.model);
+    assert.ok(!all.includes('audio-only'));
+  });
+
   it('puts a local model with tool support first in utility when preferLocalUtility is on', () => {
     const { roles, reasons } = S.pickRoles(CANDIDATES, { preferLocalUtility: true });
     assert.deepStrictEqual(ids(roles.utility), ['ollama/local', 'groq/fast', 'openai/mini@minimal']);
@@ -105,6 +116,28 @@ describe('pickRoles', () => {
     assert.deepStrictEqual([roles.utility, roles.vision], [[], []]);
     assert.match(reasons.utility[0], /no intelligence score/);
     assert.match(reasons.vision[0], /No usable image-reading model qualifies/);
+  });
+
+  // fix round 1: a price of $0 (local, e.g. Ollama) must not be treated as
+  // unpriced — priced-at-zero, scored local models follow the same rules
+  // as any other provider's.
+  it('picks among priced-at-zero, scored local-only candidates by the same rules as any other', () => {
+    const local = [
+      c('ollama', 'big-local', { input: 0, output: 0, intelligence: 70, agentic: 60, local: true, context: 200000 }),
+      c('ollama', 'small-local', { input: 0, output: 0, intelligence: 50, agentic: 40, local: true, context: 200000 })
+    ];
+    const { roles, reasons } = S.pickRoles(local, {});
+    // main: only big-local (60) is within 3 points of the best (60); both
+    // are listed, big-local first (the band winner), small-local as failover.
+    assert.deepStrictEqual(ids(roles.main), ['ollama/big-local', 'ollama/small-local']);
+    assert.match(reasons.main[0], /best agentic score among usable tool-calling models \(60\)/);
+    // worker: only big-local clears 80% of main's agentic (48); small-local (40) does not.
+    assert.deepStrictEqual(ids(roles.worker), ['ollama/big-local']);
+    // utility: both clear 50% of main's intelligence (35); cheapest (tied at $0) first by id.
+    assert.deepStrictEqual(ids(roles.utility), ['ollama/big-local', 'ollama/small-local']);
+    // neither takes image input or produces images.
+    assert.deepStrictEqual(roles.vision, []);
+    assert.deepStrictEqual(roles.imageGeneration, []);
   });
 });
 
@@ -147,5 +180,20 @@ describe('buildProposal', () => {
     const usage = { utility: { calls: 2, unpricedCalls: 0, cost: 0.1, usage: { input: 1, cachedInput: 0, cacheWrite: 0, output: 1, reasoning: 0 } } };
     const p = S.buildProposal({ picks: lean, current: { main: [], worker: [], utility: [{ provider: 'groq', model: 'fast', effort: null }] }, usage, price });
     assert.deepStrictEqual(p.changes.find((x) => x.role === 'utility').costEffect.usd, 0.3);
+  });
+
+  // fix round 1: vision was missing from BORROW, so an empty proposed
+  // vision with recorded usage fell through to "Nothing to price" instead
+  // of pricing on the model it would actually borrow (worker, here).
+  it('prices an empty proposed vision on the model it actually borrows from, never "nothing to price"', () => {
+    const lean = S.pickRoles([c('openai', 'agent-only', { input: 1, output: 2, agentic: 50 })], {});
+    assert.deepStrictEqual(lean.roles.vision, []);
+    assert.deepStrictEqual(ids(lean.roles.worker), ['openai/agent-only']);
+    const usage = { vision: { calls: 2, unpricedCalls: 0, cost: 0.1, usage: { input: 1, cachedInput: 0, cacheWrite: 0, output: 1, reasoning: 0 } } };
+    const current = { main: [], worker: [], utility: [], vision: [{ provider: 'groq', model: 'fast', effort: null }] };
+    const p = S.buildProposal({ picks: lean, current, usage, price });
+    const effect = p.changes.find((x) => x.role === 'vision').costEffect;
+    assert.notStrictEqual(effect.note, 'Nothing to price: this role would have no model.');
+    assert.deepStrictEqual(effect, { usd: 0.3, note: '2 calls in the last 30 days, repriced.' });
   });
 });
