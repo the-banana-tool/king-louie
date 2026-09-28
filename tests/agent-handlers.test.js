@@ -213,6 +213,58 @@ describe('agent-handlers roles', () => {
     assert.strictEqual(context.executorCalls.length, 2);
   });
 
+  // Final review I2: a run's agents share the TurnModels taken when the run
+  // started; a default-profile change mid-run applies to the next run.
+  const snapshotRun = () => {
+    let defaultProfile = 'p-first';
+    const seen = [];
+    const executed = [];
+    const ipcMain = createIpcMainMock();
+    const context = createContext({
+      getAgent: (id) => ({ id, name: id, canUseTool: () => true, role: 'worker' }),
+      snapshotModels: () => ({ profileId: defaultProfile }),
+      // As the core does: runtimeOptions.turnModels, else a fresh snapshot.
+      createAgentRuntime: async (selection, _event, _requester, runtimeOptions = {}) => {
+        const turnModels = runtimeOptions.turnModels || context.snapshotModels({});
+        seen.push(turnModels.profileId);
+        return { provider: {}, toolExecutor: {}, role: selection.role, model: 'm', timeoutMs: 1000, toolDefinitions: [], runtimeEnvironment: { workingDirectory: process.cwd() } };
+      },
+      AgentExecutor: class {
+        async execute(agent) {
+          executed.push(agent.id);
+          // The owner switches the default profile while the first agent runs.
+          defaultProfile = 'p-second';
+          return { content: 'ok' };
+        }
+      }
+    });
+    registerAgentHandlers(ipcMain, context);
+    return { ipcMain, seen, executed, reset: () => { defaultProfile = 'p-first'; seen.length = 0; } };
+  };
+
+  it('keeps a serial run on the snapshot it started with when the default profile changes between agents', async () => {
+    const { ipcMain, seen, executed } = snapshotRun();
+    await ipcMain.handlers.get(IPC.AGENT_EXECUTE_SERIAL)({}, { agentIds: ['one', 'two'], message: 'hi' });
+    assert.deepStrictEqual(executed, ['one', 'two']);
+    assert.deepStrictEqual(seen, ['p-first', 'p-first']);
+    // The next run takes the new default.
+    await ipcMain.handlers.get(IPC.AGENT_EXECUTE_SERIAL)({}, { agentIds: ['one'], message: 'hi' });
+    assert.deepStrictEqual(seen, ['p-first', 'p-first', 'p-second']);
+  });
+
+  it('keeps parallel and with-deps runs on one snapshot too', async () => {
+    const { ipcMain, seen, reset } = snapshotRun();
+    await ipcMain.handlers.get(IPC.AGENT_EXECUTE_PARALLEL)({}, { agentIds: ['one', 'two'], message: 'hi' });
+    assert.deepStrictEqual(seen, ['p-first', 'p-first']);
+    reset();
+    await ipcMain.handlers.get(IPC.AGENT_EXECUTE_WITH_DEPS)({}, {
+      agentId: 'one',
+      tasks: [{ id: 't1', subject: 'First' }, { id: 't2', subject: 'Second', blockedBy: ['t1'] }, { id: 't3', subject: 'Third', blockedBy: ['t2'] }]
+    });
+    // One up front (reused by the first task), then one per later task.
+    assert.deepStrictEqual(seen, ['p-first', 'p-first', 'p-first']);
+  });
+
   it('lists agents by role, with no model or tier', async () => {
     const ipcMain = createIpcMainMock();
     registerAgentHandlers(ipcMain, createContext());

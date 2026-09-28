@@ -21,8 +21,18 @@ function registerAgentHandlers(ipcMain, context = {}) {
     formatUserContextSection,
     formatProjectContextSection,
     getUsageTracker,
+    snapshotModels,
     prompter
   } = context;
+
+  // One TurnModels for a whole agent-panel run (spec 2026-09-27 §6.6, final
+  // review I2): taken when the run starts and handed to every agent's
+  // runtime, so a profile switch or a King Louie accept mid-run changes the
+  // next run, never the agents still to come in this one.
+  const runOptions = () => {
+    const turnModels = typeof snapshotModels === 'function' ? snapshotModels({}) : null;
+    return turnModels ? { turnModels } : {};
+  };
 
   const usageTracker = () => (typeof getUsageTracker === 'function' ? getUsageTracker() : null);
 
@@ -38,7 +48,7 @@ function registerAgentHandlers(ipcMain, context = {}) {
   // routed provider, so concurrent agents never share a route's failover
   // state. `first` is a runtime the handler already built to fail fast; the
   // first run of that agent uses it.
-  const perAgentExecutor = (event, systemPromptFor, first = null) => {
+  const perAgentExecutor = (event, systemPromptFor, runtimeOptions, first = null) => {
     let spare = first;
     return {
       execute: async (agent, message, options = {}) => {
@@ -50,7 +60,7 @@ function registerAgentHandlers(ipcMain, context = {}) {
           runtime = spare.runtime;
           spare = null;
         } else {
-          runtime = await createAgentRuntime({ role: roleForAgent(agent) }, event);
+          runtime = await createAgentRuntime({ role: roleForAgent(agent) }, event, null, runtimeOptions);
         }
         const agentExecutor = new AgentExecutor(runtime.provider, runtime.toolExecutor, {
           usageTracker: usageTracker(),
@@ -132,8 +142,9 @@ function registerAgentHandlers(ipcMain, context = {}) {
     const agents = agentIds
       .map((agentId) => getAgent(agentId))
       .filter(Boolean);
+    const runtimeOptions = runOptions();
     const memorySection = await buildMemoryContextSection(message);
-    const orchestrator = new AgentOrchestrator(perAgentExecutor(event, (runtime) => fullSystemPrompt(runtime, memorySection)));
+    const orchestrator = new AgentOrchestrator(perAgentExecutor(event, (runtime) => fullSystemPrompt(runtime, memorySection), runtimeOptions));
     return withNotificationTiming('Parallel agent run', async () => {
       const results = await orchestrator.executeParallel(agents, message, {
         userProfile: getUserProfile(),
@@ -191,7 +202,8 @@ function registerAgentHandlers(ipcMain, context = {}) {
 
     // Resolved once up front, so a role with no usable model fails before
     // any task exists; the first task reuses this runtime.
-    const runtime = await createAgentRuntime({ role: roleForAgent(agent) }, event);
+    const runtimeOptions = runOptions();
+    const runtime = await createAgentRuntime({ role: roleForAgent(agent) }, event, null, runtimeOptions);
 
     // Create tasks in TaskManager from the provided configs
     const createdTasks = [];
@@ -239,6 +251,7 @@ function registerAgentHandlers(ipcMain, context = {}) {
     const orchestrator = new AgentOrchestrator(perAgentExecutor(
       event,
       (rt) => fullSystemPrompt(rt, null),
+      runtimeOptions,
       { agentId: agent.id, runtime }
     ));
 
@@ -261,8 +274,9 @@ function registerAgentHandlers(ipcMain, context = {}) {
     const agents = agentIds
       .map((agentId) => getAgent(agentId))
       .filter(Boolean);
+    const runtimeOptions = runOptions();
     const memorySection = await buildMemoryContextSection(message);
-    const orchestrator = new AgentOrchestrator(perAgentExecutor(event, (runtime) => fullSystemPrompt(runtime, memorySection)));
+    const orchestrator = new AgentOrchestrator(perAgentExecutor(event, (runtime) => fullSystemPrompt(runtime, memorySection), runtimeOptions));
     return withNotificationTiming('Serial agent run', async () => {
       const results = await orchestrator.executeSerial(agents, message, {
         userProfile: getUserProfile(),
