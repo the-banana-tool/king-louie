@@ -52,7 +52,10 @@ const CASE_YAML_KEYS = Object.freeze({
   budget: 'C2',
   roles: 'C2',
   autonomy: 'C2',
-  channels: 'C4'
+  channels: 'C4',
+  // Models M2 (spec 2026-09-27 §6.5, §14): the case's profile and main override.
+  profile: 'M2',
+  mainOverride: 'M2'
 });
 
 // case.yaml through the strict parser (program §4.11): core schema only, so

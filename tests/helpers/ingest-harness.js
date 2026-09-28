@@ -61,13 +61,15 @@ async function cleanup() {
   for (const d of roots.splice(0)) fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 });
 }
 
-async function ingestHarness({ ingest = {}, budgets = {}, roles = {}, model = defaultModel, title = 'Lakeside lot', status = 'active', retryMs = 60000, root = null, openPdf = undefined } = {}) {
+async function ingestHarness({ ingest = {}, budgets = {}, roles = {}, model = defaultModel, title = 'Lakeside lot', status = 'active', retryMs = 60000, root = null, openPdf = undefined, vision = null } = {}) {
   const dir = root || fs.mkdtempSync(path.join(os.tmpdir(), 'kl-ingest-'));
   if (!root) roots.push(dir);
   const settings = { cases: { timeZone: 'UTC', budgets: { usd: 20, questionsPerDay: 6, ...budgets }, ingest } };
   const runtime = new CaseRuntime({ root: dir, getSettings: () => settings });
   const pinned = { ...ROLES, ...roles };
   runtime.roleModel = (_id, role) => ({ ...pinned[role], tier: 'standard' });
+  // The profile's vision role (models spec 2026-09-27 §8), pinned per test.
+  runtime.visionTarget = () => (vision ? { ...vision } : null);
   const calls = [];
   const svc = new IngestService({
     runtime,

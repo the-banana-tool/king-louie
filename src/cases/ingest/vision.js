@@ -11,7 +11,7 @@ const { IngestError } = require('./errors');
 const IMAGE_FORWARDING_PROVIDERS = Object.freeze(['anthropic', 'openai', 'gemini']);
 const DOCUMENT_MAX_BYTES = ImageHandler.MAX_DOCUMENT_SIZE_BYTES;
 const IMAGE_MAX_BYTES = ImageHandler.MAX_SIZE_BYTES;
-const NO_VISION_MESSAGE = 'No vision-capable model is configured. Set cases.ingest.vision or a vision-capable model for the draft role.';
+const NO_VISION_MESSAGE = 'No vision-capable model is configured. Add a vision model to the profile in Settings → Models, or an image-capable model to its worker or main role.';
 const TOO_LARGE = 'page too large for vision';
 
 const OCR_SYSTEM = [
@@ -37,7 +37,7 @@ function isVisionEligible(getCapabilities, sel) {
   return IMAGE_FORWARDING_PROVIDERS.includes(provider) && capabilitiesOf(getCapabilities, { ...sel, provider }).vision === true;
 }
 
-// settings.cases.ingest.vision when eligible, else the first eligible of the
+// The profile's vision role when eligible, else the first eligible of the
 // draft and judge roles, else NO_VISION_MODEL.
 function pickOcrModel({ getCapabilities, configured, roleModel }) {
   if (configured?.provider && configured?.model) {

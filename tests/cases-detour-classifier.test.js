@@ -10,6 +10,7 @@ const path = require('path');
 const { CaseRuntime } = require('../src/cases');
 const { DetourClassifier, CLASSIFY_SYSTEM, parseClassification } = require('../src/cases/detours/classifier');
 const { DetourLog } = require('../src/cases/detours/log');
+const { withCaseProfile } = require('./helpers/profile-settings');
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -36,8 +37,8 @@ function host(reply, { token = true } = {}) {
     calls,
     recorded,
     inferenceRouter: {
-      async routeWithFallback(tier, messages, opts) {
-        calls.push({ tier, messages, opts });
+      async routeTargets(targets, messages, opts) {
+        calls.push({ targets, messages, opts });
         return reply(messages, opts, calls.length);
       }
     },
@@ -48,7 +49,7 @@ function host(reply, { token = true } = {}) {
 }
 
 async function activeCase(h, settings = {}) {
-  const rt = new CaseRuntime({ root: tmp(), host: h, getSettings: () => ({ cases: settings }) });
+  const rt = new CaseRuntime({ root: tmp(), host: h, getSettings: () => withCaseProfile({ cases: settings }) });
   const info = await rt.createCase({ title: 'Rear door quotes', type: 'outreach', objective: 'Three written quotes for the rear door' });
   rt.brief(info.id).update('why', 'The door lets rain in', { provenance: 'user' });
   rt.brief(info.id).append('successCriteria', 'Three written quotes', { provenance: 'model' });
@@ -94,7 +95,7 @@ describe('DetourClassifier', () => {
     const r = await classifier.classify(info.id, { source: 'owner-message', text: 'Also fix the phone agent status polling', turn });
     assert.deepStrictEqual(r, { onCase: false, confidence: 0.7, reason: 'A different project', detour: true, failed: null });
     const [call] = h.calls;
-    assert.strictEqual(call.tier, 'fast');
+    assert.deepStrictEqual(call.targets, [{ provider: 'openai', model: 'orient-model', effort: null }]);
     assert.strictEqual(call.opts.systemPrompt, CLASSIFY_SYSTEM);
     assert.deepStrictEqual([call.opts.temperature, call.opts.maxTokens], [0, 200]);
     assert.ok(call.opts.abortSignal instanceof AbortSignal);

@@ -13,4 +13,15 @@ function everyRole(target) {
   return { main: [{ ...t }], worker: [{ ...t }], utility: [{ ...t }] };
 }
 
-module.exports = { profileSettings, everyRole };
+// The three core roles with the model names case tests tell apart: the
+// judge loop runs on main, draft on worker, orient and classify on utility.
+function caseRoles(provider = 'openai') {
+  const t = (model) => ({ provider, model, effort: null });
+  return { main: [t('judge-model')], worker: [t('draft-model')], utility: [t('orient-model')] };
+}
+
+function withCaseProfile(settings = {}, provider = 'openai') {
+  return profileSettings(settings, caseRoles(provider));
+}
+
+module.exports = { profileSettings, everyRole, caseRoles, withCaseProfile };

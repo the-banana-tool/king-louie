@@ -7,12 +7,14 @@ const CASE_SETTINGS_DEFAULTS = Object.freeze({
   reorientAfterHours: 8,
   timeZone: '',
   budgets: Object.freeze({ usd: 20, turnsPerDay: 48, contactsPerDay: 20, questionsPerDay: 6, deadline: null }),
+  // Case roles on model roles (models spec 2026-09-27 §8); tier names in a
+  // stored setting still read as the mapped role (src/cases/roles.js).
   roles: Object.freeze({
-    orient: Object.freeze({ tier: 'fast' }),
-    classify: Object.freeze({ tier: 'fast' }),
-    draft: Object.freeze({ tier: 'standard' }),
-    judge: Object.freeze({ tier: 'smart' }),
-    verify: Object.freeze({ tier: 'smart' })
+    orient: Object.freeze({ role: 'utility' }),
+    classify: Object.freeze({ role: 'utility' }),
+    draft: Object.freeze({ role: 'worker' }),
+    judge: Object.freeze({ role: 'main' }),
+    verify: Object.freeze({ role: 'main' })
   }),
   wakeups: Object.freeze({
     enabled: true,

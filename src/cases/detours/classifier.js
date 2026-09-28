@@ -113,7 +113,7 @@ class DetourClassifier {
 
     // A host without an inference router (some tests, tools-only hosts)
     // cannot classify: skip without a row or a journal line.
-    if (typeof this.runtime.host?.inferenceRouter?.routeWithFallback !== 'function') return this._skip('no-router');
+    if (typeof this.runtime.host?.inferenceRouter?.routeTargets !== 'function') return this._skip('no-router');
     const effectiveTurn = turn || this.runtime.turns?.get(meta.id) || { caseId: meta.id, turnId: null, signal: null };
     const started = Date.now();
     const outcome = await this._call(meta, effectiveTurn, cfg, {
@@ -153,7 +153,7 @@ class DetourClassifier {
     if (!resolved?.provider || (typeof hasToken === 'function' && hasToken(resolved.provider) === false)) {
       return { failed: 'no-role', model: null };
     }
-    const model = `${resolved.provider}/${resolved.model || resolved.tier}`;
+    const model = `${resolved.provider}/${resolved.model}`;
     const controller = new AbortController();
     let timer = null;
     // Always cleared in `finally` below, including on an awaited timeout —

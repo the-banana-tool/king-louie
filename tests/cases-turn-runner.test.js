@@ -13,6 +13,7 @@ const { CASE_TOOL_NAMES } = require('../src/cases/chat-integration');
 const { WakeupStore } = require('../src/cases/wakeups');
 const { Budget } = require('../src/cases/budget');
 const { parseOrient } = require('../src/cases/turn-runner');
+const { withCaseProfile } = require('./helpers/profile-settings');
 
 initializeTools();
 
@@ -31,13 +32,12 @@ function harness({ settings = {}, orient = '{"changed": true, "why": "a new answ
   const script = [...judge];
   let runtime = null;
   const router = {
-    async routeWithFallback(tier, messages, opts) {
-      // Orient (role 'fast') and judge (role 'smart') both now call
-      // sendMessageWithTools with a non-empty tools array (cases stage 2
-      // I2 fix: orient must go through the metrics-returning path too), so
-      // the tier — not tools' presence — is what tells them apart here,
-      // same as it does for real through CaseRuntime.routedProvider/roleModel.
-      if (tier === 'smart') {
+    async routeTargets(targets, messages, opts) {
+      // Orient (utility) and judge (main) both call sendMessageWithTools
+      // with a non-empty tools array, so the resolved model — not tools'
+      // presence — tells them apart, as it does for real through
+      // CaseRuntime.routedProvider/roleModel.
+      if (targets[0].model === 'judge-model') {
         calls.judge += 1;
         calls.judgeTools.push((opts.tools || []).map((t) => t.name));
         calls.judgeMessages.push(messages);
@@ -53,10 +53,9 @@ function harness({ settings = {}, orient = '{"changed": true, "why": "a new answ
   runtime = new CaseRuntime({
     root: tmp(),
     now: () => clock.now,
-    getSettings: () => ({ cases: { timeZone: 'UTC', ...settings } }),
+    getSettings: () => withCaseProfile({ cases: { timeZone: 'UTC', ...settings } }),
     host: {
       inferenceRouter: router,
-      resolveInference: async () => null,
       toolRegistry,
       AgentLoop,
       getUsageTracker: () => tracker,

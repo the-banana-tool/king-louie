@@ -39,7 +39,9 @@ const SAMPLES = {
   budget: { usd: 40, deadline: '2026-11-30', turnsPerDay: 48, contactsPerDay: 20, questionsPerDay: 6 },
   roles: { judge: { provider: 'openai', model: 'gpt-4o' }, orient: { tier: 'fast' } },
   autonomy: { onExecutorNoAnswer: 'retry-within-envelope', onQuestionSilence: 'stop' },
-  channels: { high: ['present', 'sms', { channel: 'voice', afterMin: 20 }], 'urgency.normal': ['present', 'email'] }
+  channels: { high: ['present', 'sms', { channel: 'voice', afterMin: 20 }], 'urgency.normal': ['present', 'email'] },
+  profile: 'p-3f9a1c2e',
+  mainOverride: { provider: 'openai', model: 'gpt-5.5', effort: null }
 };
 
 function writeCase(root, name, text) {
@@ -54,6 +56,7 @@ describe('case.yaml keys', () => {
     assert.deepStrictEqual(Object.keys(CASE_YAML_KEYS).sort(), Object.keys(SAMPLES).sort());
     assert.strictEqual(CASE_YAML_KEYS.channels, 'C4');
     assert.strictEqual(CASE_YAML_KEYS.budget, 'C2');
+    assert.strictEqual(CASE_YAML_KEYS.mainOverride, 'M2');
   });
 
   it('loads every key as written by yaml.dump', () => {

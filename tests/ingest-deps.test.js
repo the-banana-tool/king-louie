@@ -86,7 +86,7 @@ describe('settings.cases.ingest', () => {
     const partial = mergeSettings({ cases: { ingest: { maxPages: 50, vision: { provider: 'gemini' }, entities: { spanNames: true } } } }).cases.ingest;
     assert.deepStrictEqual(
       [partial.maxPages, partial.maxBytes, partial.vision, partial.entities.spanNames],
-      [50, 52428800, { provider: 'gemini', model: '' }, true]
+      [50, 52428800, undefined, true]
     );
   });
 
@@ -95,7 +95,7 @@ describe('settings.cases.ingest', () => {
     assert.strictEqual(r.maxBytes, 52428800);
     assert.strictEqual(r.textQualityThreshold, 0.6);
     assert.strictEqual(r.chunkChars, 12000);
-    assert.deepStrictEqual(r.vision, { provider: 'openai', model: 'm' });
+    assert.strictEqual(r.vision, undefined, 'the OCR model is the profile\'s vision role now (models spec §13)');
     assert.strictEqual(r.entities.spanNames, false);
   });
 
@@ -127,8 +127,7 @@ describe('settings.cases.ingest', () => {
 
     const resolved = resolveIngestSettings({ ...evil, vision: evilVision });
     assert.strictEqual(resolved.maxPages, 9);
-    assert.strictEqual(resolved.vision.provider, 'openai');
-    assert.deepStrictEqual(Object.keys(resolved.vision).includes('__proto__'), false);
+    assert.strictEqual(resolved.vision, undefined);
     assert.strictEqual(({}).polluted, undefined);
     assert.strictEqual(Object.prototype.polluted, undefined);
   });

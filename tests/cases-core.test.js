@@ -44,7 +44,7 @@ describe('cases settings', () => {
     assert.strictEqual(merged.timeZone, '');
     assert.deepStrictEqual(merged.budgets, { usd: 20, turnsPerDay: 48, contactsPerDay: 20, questionsPerDay: 6, deadline: null });
     assert.deepStrictEqual(merged.wakeups, { enabled: true, dailyAt: '09:00', maxIterations: 20, maxCasesPerTick: 3, retryBackoffMinutes: [5, 15, 60] });
-    assert.deepStrictEqual(merged.roles.judge, { tier: 'smart' });
+    assert.deepStrictEqual(merged.roles.judge, { role: 'main' });
     const partial = mergeSettings({ cases: { budgets: { usd: 5 }, wakeups: { enabled: false } } }).cases;
     assert.deepStrictEqual([partial.budgets.usd, partial.budgets.turnsPerDay, partial.wakeups.enabled, partial.wakeups.dailyAt], [5, 48, false, '09:00']);
   });

@@ -321,7 +321,7 @@ function registerChatHandlers(ipcMain, context = {}) {
     const caseId = chatForDir?.caseId || null;
     const caseRuntime = caseId && typeof context.getCaseRuntime === 'function' ? context.getCaseRuntime() : null;
     let caseTurn = caseRuntime
-      ? await caseRuntime.beginTurn(caseId, { turnId: `turn-${runId}`, source: 'owner', ownerMessage: safeMessage })
+      ? await caseRuntime.beginTurn(caseId, { turnId: `turn-${runId}`, source: 'owner', ownerMessage: safeMessage, chatId })
       : null;
     const endCaseTurn = async (fields) => {
       if (!caseTurn) return;

@@ -3139,7 +3139,7 @@ function createCore(deps = {}) {
     getSettings,
     host: {
       inferenceRouter,
-      resolveInference,
+      snapshotModels,
       createToolExecutor: createToolExecutorWithApprovals,
       toolRegistry,
       AgentLoop,

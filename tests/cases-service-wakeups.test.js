@@ -12,6 +12,7 @@ const { JsonFileStore } = require('../src/platform/json-file-store');
 const { createAesGcmCipher } = require('../src/platform/cipher');
 const { createHeadlessPrompter } = require('../src/platform/prompter');
 const ProviderFactory = require('../src/providers/provider-factory');
+const { profileSettings } = require('./helpers/profile-settings');
 
 const tempDirs = [];
 const savedEnv = process.env.KL_CASES_ROOT;
@@ -209,14 +210,10 @@ describe('cases:wakeups in a service-style core', () => {
     };
     ProviderFactory.registerProvider('stub', stub);
     try {
-      deps.store.set('settings', {
-        inference: {
-          tierMap: {
-            fast: { provider: 'stub', model: 'stub-orient' },
-            smart: { provider: 'stub', model: 'stub-judge' }
-          }
-        }
-      });
+      deps.store.set('settings', profileSettings({}, {
+        utility: [{ provider: 'stub', model: 'stub-orient', effort: null }],
+        main: [{ provider: 'stub', model: 'stub-judge', effort: null }]
+      }));
       const core = createCore(deps);
       core.saveProviderToken('stub', 'stub-token');
       await core.start();
@@ -260,9 +257,10 @@ describe('cases:wakeups in a service-style core', () => {
     };
     ProviderFactory.registerProvider('stub', stub);
     try {
-      deps.store.set('settings', {
-        inference: { tierMap: { fast: { provider: 'stub', model: 'stub-orient' }, smart: { provider: 'stub', model: 'stub-judge' } } }
-      });
+      deps.store.set('settings', profileSettings({}, {
+        utility: [{ provider: 'stub', model: 'stub-orient', effort: null }],
+        main: [{ provider: 'stub', model: 'stub-judge', effort: null }]
+      }));
       const core = createCore(deps);
       core.saveProviderToken('stub', 'stub-token');
       await core.start();

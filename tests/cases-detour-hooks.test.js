@@ -12,6 +12,7 @@ const IPC = require('../src/ipc/constants');
 const { initializeTools, toolRegistry } = require('../src/tools');
 const { CaseRuntime } = require('../src/cases');
 const { DetourLog } = require('../src/cases/detours/log');
+const { withCaseProfile } = require('./helpers/profile-settings');
 
 initializeTools();
 
@@ -25,9 +26,9 @@ function makeRuntime({ reply = () => DETOUR, cases = {}, exec } = {}) {
   const calls = [];
   const rt = new CaseRuntime({
     root: tmp(),
-    getSettings: () => ({ cases }),
+    getSettings: () => withCaseProfile({ cases }),
     host: {
-      inferenceRouter: { async routeWithFallback(tier, messages, opts) { calls.push({ tier, messages, opts }); return reply(messages, opts); } },
+      inferenceRouter: { async routeTargets(targets, messages, opts) { calls.push({ targets, messages, opts }); return reply(messages, opts); } },
       interactive: () => true,
       ...(exec ? { exec } : {})
     }

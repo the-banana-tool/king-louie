@@ -462,7 +462,7 @@ describe('vision pages in IngestService', { skip: require('./helpers/ingest-harn
   it('a model without pdfInput gets the page image, and a failing call is retried once then unreadable', async () => {
     let fail = 0;
     const h = await ingestHarness({
-      ingest: { vision: { provider: 'openai', model: 'gpt-4o' } },
+      vision: { provider: 'openai', model: 'gpt-4o' },
       model: (req) => {
         if (req.purpose === 'ocr' && /page 2/.test(req.text)) { fail += 1; throw new Error('provider timeout'); }
         return defaultModel(req);

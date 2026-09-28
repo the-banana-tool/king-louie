@@ -15,6 +15,7 @@ const path = require('path');
 const { CaseRuntime } = require('../src/cases');
 const { LedgerTool, BriefTool, DecideTool, RecommendTool } = require('../src/tools/builtin/case-tools');
 const { AskTool, FailTool } = require('../src/tools/builtin/case-unattended-tools');
+const { withCaseProfile } = require('./helpers/profile-settings');
 
 const dirs = [];
 after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
@@ -173,7 +174,7 @@ describe('F12: spending stops at the budget and only the owner raises it', () =>
     let routed = 0;
     const runtime = new CaseRuntime({
       root: tmp(),
-      host: { inferenceRouter: { routeWithFallback: async () => { routed += 1; return '{"changed": true}'; } }, notify: () => {} }
+      host: { inferenceRouter: { routeTargets: async () => { routed += 1; return '{"changed": true}'; } }, notify: () => {} }
     });
     const { info, turn, opts } = await openCase(runtime, 'Lakeside lot', { ownerMessages: ['ok, go ahead'] });
     runtime.store.updateMeta(info.id, { budget: { usd: 1 } });
@@ -330,7 +331,8 @@ describe('F4-detour: off-objective work is routed, not done inline', () => {
 
     const runtime = new CaseRuntime({
       root: tmp(),
-      host: { inferenceRouter: { routeWithFallback: async () => MOCK }, interactive: () => true }
+      getSettings: () => withCaseProfile({}),
+      host: { inferenceRouter: { routeTargets: async () => MOCK }, interactive: () => true }
     });
     const door = await runtime.createCase({ title: 'Rear door quotes', type: 'outreach', objective: 'Three written quotes for the rear door' });
     runtime.brief(door.id).update('why', 'Rain gets in under the door', { provenance: 'user' });

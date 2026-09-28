@@ -21,7 +21,8 @@ const { detectTriggers, emptyBaseline } = require('./triggers');
 const { localDay, isRealCalendarDate } = require('./clock');
 const { readJson, writeJsonIfChanged } = require('./jsonfile');
 const { resolveCaseSettings } = require('./defaults');
-const { resolveRole } = require('./roles');
+const { resolveCaseRole } = require('./roles');
+const { snapshotFromSettings } = require('../models/profiles');
 const { CrossCaseIndex } = require('./index-store');
 const { findSimilarCases } = require('./gates');
 const { assertKnownType, resolveCaseType, briefFieldsFor, gatingQuestionsFor } = require('./case-types');
@@ -169,7 +170,7 @@ class CaseRuntime {
     this.getSettings = typeof getSettings === 'function' ? getSettings : () => ({});
     this._clock = typeof now === 'function' ? now : () => new Date();
     // Host services, all optional (spec §3.10): inferenceRouter,
-    // resolveInference, createToolExecutor, toolRegistry, AgentLoop,
+    // snapshotModels, createToolExecutor, toolRegistry, AgentLoop,
     // getUsageTracker, hasProviderToken, notify, uiToast, interactive,
     // getExecutorRegistry. Without them wake-ups and routed providers are off.
     this.host = host || null;
@@ -991,7 +992,7 @@ class CaseRuntime {
 
   // ---- Turns (spec §3.10) ----
 
-  async beginTurn(id, { turnId, source = 'owner', ownerMessage = null } = {}) {
+  async beginTurn(id, { turnId, source = 'owner', ownerMessage = null, chatId = null } = {}) {
     // Shutting down: refuse before even taking the lock.
     if (source === 'wakeup' && this.closing) throw new RuntimeClosingError();
     const meta = this.getCase(id);
@@ -1041,6 +1042,9 @@ class CaseRuntime {
           abort: (reason) => controller.abort(reason)
         };
         turn.orientation = this.orientation(fresh.id, { triggers, hookNotes: hook.notes });
+        // The models this turn uses, frozen at launch (models spec
+        // 2026-09-27 §6.6): a switch during the turn applies to the next one.
+        turn.models = this._turnModels(fresh.id, chatId);
         this.turns.set(fresh.id, turn);
         this._notify('case:changed', { caseId: fresh.id, what: 'turn', running: true, source });
         return turn;
@@ -1651,78 +1655,107 @@ class CaseRuntime {
     });
   }
 
-  // ---- Model roles (spec §3.8) ----
+  // ---- Model roles (spec §3.8; models spec 2026-09-27 §6, §8) ----
 
-  roleModel(id, role) {
-    const meta = this.getCase(id);
-    let settings = {};
+  _settingsSafe() {
     try {
-      settings = this.getSettings() || {};
+      return this.getSettings() || {};
     } catch (err) {
-      log.warn(`Reading settings for role ${role} failed: ${err.message}`);
+      log.warn(`Reading settings for the model roles failed: ${err.message}`);
+      return {};
     }
-    const hasToken = (provider) => {
-      if (typeof this.host?.hasProviderToken !== 'function') return true;
-      try {
-        return Boolean(this.host.hasProviderToken(provider));
-      } catch {
-        return false;
-      }
-    };
-    return resolveRole(role, { settings: { ...settings, cases: this.settings() }, caseMeta: meta, hasToken });
   }
 
-  // A provider-shaped object whose every call goes through
-  // routeWithFallback with an explicit target, so case calls fail over the
-  // same way any other call does (spec §3.8). Charging itself happens
-  // elsewhere: the caller's onUsageRecorded hook (usageHook(turn)), wired
-  // into the AgentLoop/orient call that uses this provider.
+  // The models for a case (models spec §6.3): the host's snapshot when it
+  // has one (the core: case.yaml's profile and main override, else the
+  // chat's, else the default), else one built from settings here, usable
+  // when the host says the provider has a token.
+  modelsFor(id, { chatId = null } = {}) {
+    if (typeof this.host?.snapshotModels === 'function') return this.host.snapshotModels({ caseId: id, chatId });
+    const meta = this.getCase(id);
+    const hasToken = this.host?.hasProviderToken;
+    const explain = (provider) => {
+      if (typeof hasToken !== 'function') return { usable: true, reasons: [], notes: [] };
+      let ok = false;
+      try {
+        ok = Boolean(hasToken(provider));
+      } catch {
+        ok = false;
+      }
+      return ok ? { usable: true, reasons: [], notes: [] } : { usable: false, reasons: [`No token saved for ${provider}.`], notes: [] };
+    };
+    return snapshotFromSettings(this._settingsSafe(), { profileId: meta.profile || null, mainOverride: meta.mainOverride || null, explain });
+  }
+
+  _turnModels(id, chatId) {
+    try {
+      return this.modelsFor(id, { chatId });
+    } catch (err) {
+      log.warn(`Building the models for a turn of case ${id} failed: ${err.message}`);
+      return null;
+    }
+  }
+
+  roleModel(id, role, { turn = null, needs = {} } = {}) {
+    const meta = this.getCase(id);
+    const turnModels = (turn && turn.models) || this.modelsFor(id);
+    return resolveCaseRole(role, { settings: { ...this._settingsSafe(), cases: this.settings() }, caseMeta: meta, turnModels, needs });
+  }
+
+  // The profile's vision role for case ingest OCR (models spec §8), or null.
+  visionTarget(id) {
+    try {
+      const [first] = this.modelsFor(id).resolve('vision').targets;
+      return first ? { provider: first.provider, model: first.model } : null;
+    } catch (err) {
+      log.warn(`Resolving the vision role for case ${id} failed: ${err.message}`);
+      return null;
+    }
+  }
+
+  // The header's profile picker and main switcher write here (models spec
+  // §6.5): only these two keys, under the case lock, committed.
+  async setModelChoice(id, patch = {}) {
+    const choice = {};
+    if (Object.prototype.hasOwnProperty.call(patch, 'profile')) choice.profile = patch.profile || null;
+    if (Object.prototype.hasOwnProperty.call(patch, 'mainOverride')) choice.mainOverride = patch.mainOverride || null;
+    if (!Object.keys(choice).length) throw new Error('setModelChoice needs profile or mainOverride.');
+    return this.systemAction(id, 'model choice', async (meta) => {
+      this.store.updateMeta(meta.id, choice);
+      return this.getCase(meta.id);
+    });
+  }
+
+  // A provider-shaped object whose every call goes through the router's
+  // routeTargets over a resolved list (a case role's, or the owner turn's
+  // main targets), so case calls fail over like any other (models spec
+  // §6.7). One route state per object. Charging happens in the caller's
+  // onUsageRecorded hook (usageHook(turn)).
   routedProvider(turn, spec = {}) {
     const router = this.host?.inferenceRouter;
-    if (!router || typeof router.routeWithFallback !== 'function') {
+    if (!router || typeof router.routeTargets !== 'function') {
       throw new Error('Routed providers need a host with an inference router.');
     }
-    const resolved = spec.role
-      ? this.roleModel(turn.caseId, spec.role)
-      : { provider: spec.target?.provider, model: spec.target?.model || '', tier: spec.tier || 'standard' };
-    if (!resolved.provider) throw new Error('A routed provider needs a role or a target provider.');
-    const tier = resolved.tier || 'standard';
-    const target = { provider: String(resolved.provider).toLowerCase(), model: resolved.model || '' };
-    let refreshed = null;
-    // Once per provider object: resolveInference refreshes an OAuth token.
-    const refresh = () => {
-      if (!refreshed) {
-        refreshed = Promise.resolve()
-          .then(() => (typeof this.host.resolveInference === 'function'
-            ? this.host.resolveInference({ provider: target.provider, model: target.model || undefined, tier })
-            : null))
-          .catch((err) => log.warn(`Refreshing ${target.provider} before a case call failed: ${err.message}`));
-      }
-      return refreshed;
-    };
-    const call = async (messages, opts = {}, tools = null, onChunk = null) => {
-      await refresh();
-      // inference-router.js's execute() builds its final model as
-      // `config.model || rest.model || ...`, where config comes from
-      // `target`: target.model always wins over a plain options.model. The
-      // AgentLoop switches to the cheaper loopModel on iterations after the
-      // first by setting exactly that plain options.model (agent-loop.js),
-      // so without folding it into target here, every case-turn iteration
-      // after the first silently kept running the turn's original model
-      // (minor fix, final review).
-      const callTarget = opts?.model ? { ...target, model: opts.model } : target;
-      return router.routeWithFallback(tier, messages, {
-        ...(opts || {}),
-        ...(Array.isArray(tools) ? { tools } : {}),
-        ...(typeof onChunk === 'function' ? { onChunk } : {}),
-        ...(!opts?.abortSignal && turn.signal ? { abortSignal: turn.signal } : {}),
-        target: callTarget
-      });
-    };
+    let targets;
+    if (Array.isArray(spec.targets) && spec.targets.length) targets = spec.targets;
+    else if (spec.target && spec.target.provider) targets = [spec.target];
+    else if (spec.role) targets = this.roleModel(turn.caseId, spec.role, { turn }).targets;
+    else throw new Error('A routed provider needs a role or targets.');
+    const list = targets.map((x) => ({ provider: String(x.provider).toLowerCase(), model: String(x.model || ''), effort: x.effort || null }));
+    const state = typeof router.newRouteState === 'function' ? router.newRouteState() : undefined;
+    const call = (messages, opts = {}, tools = null, onChunk = null) => router.routeTargets(list, messages, {
+      ...(opts || {}),
+      ...(Array.isArray(tools) ? { tools } : {}),
+      ...(typeof onChunk === 'function' ? { onChunk } : {}),
+      ...(!opts?.abortSignal && turn.signal ? { abortSignal: turn.signal } : {})
+    }, state);
+    const current = () => ({ ...list[Math.min(state?.index || 0, list.length - 1)] });
     return {
-      getProviderName: () => target.provider,
-      getDefaultModel: () => target.model,
+      getProviderName: () => current().provider,
+      getDefaultModel: () => current().model,
+      current,
       sendMessage: (messages, opts) => call(messages, opts),
+      streamMessage: (messages, opts, onChunk) => call(messages, opts, null, onChunk),
       sendMessageWithTools: (messages, tools, opts) => call(messages, opts, tools),
       streamMessageWithTools: (messages, tools, opts, onChunk) => call(messages, opts, tools, onChunk)
     };

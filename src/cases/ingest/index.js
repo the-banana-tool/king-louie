@@ -654,7 +654,7 @@ class IngestService {
   _ocrModel(caseId, cfg) {
     return vision.pickOcrModel({
       getCapabilities: this.getCapabilities,
-      configured: cfg.vision,
+      configured: this.runtime.visionTarget(caseId),
       roleModel: (role) => this.runtime.roleModel(caseId, role)
     });
   }

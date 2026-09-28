@@ -11,7 +11,6 @@ const INGEST_DEFAULTS = Object.freeze({
   chunkChars: 12000,
   maxExtractChars: 400000,
   maxProposalsPerDoc: 200,
-  vision: Object.freeze({ provider: '', model: '' }),
   entities: Object.freeze({ spanNames: false })
 });
 
@@ -36,11 +35,14 @@ function mergeIngestSettings(base = {}, source = {}) {
   const d = JSON.parse(JSON.stringify(INGEST_DEFAULTS));
   const b = obj(base);
   const s = obj(source);
+  // cases.ingest.vision moved to the profile's vision role (models spec
+  // 2026-09-27 §13 step 6): a stored copy is dropped, never read.
+  const { vision: _baseVision, ...baseRest } = b;
+  const { vision: _sourceVision, ...sourceRest } = s;
   return {
     ...d,
-    ...b,
-    ...s,
-    vision: { ...d.vision, ...obj(b.vision), ...obj(s.vision) },
+    ...baseRest,
+    ...sourceRest,
     entities: { ...d.entities, ...obj(b.entities), ...obj(s.entities) }
   };
 }
@@ -57,8 +59,6 @@ const fraction = (v, fallback) => {
   const n = Number(v);
   return Number.isFinite(n) && n >= 0 && n <= 1 ? n : fallback;
 };
-const text = (v) => (typeof v === 'string' ? v.trim() : '');
-
 function resolveIngestSettings(source = {}) {
   const m = mergeIngestSettings({}, source);
   const d = INGEST_DEFAULTS;
@@ -71,7 +71,6 @@ function resolveIngestSettings(source = {}) {
     chunkChars: positiveInt(m.chunkChars, d.chunkChars),
     maxExtractChars: positiveInt(m.maxExtractChars, d.maxExtractChars),
     maxProposalsPerDoc: positiveInt(m.maxProposalsPerDoc, d.maxProposalsPerDoc),
-    vision: { provider: text(m.vision.provider).toLowerCase(), model: text(m.vision.model) },
     entities: { spanNames: m.entities.spanNames === true }
   };
 }
