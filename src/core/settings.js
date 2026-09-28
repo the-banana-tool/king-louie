@@ -5,6 +5,7 @@ const {
 const { DEFAULT_VOICE_SETTINGS } = require('../voice/tts-engine');
 const { CATALOG_DEFAULTS } = require('../models/catalog');
 const { DEFAULT_OLLAMA_BASE_URL } = require('../models/provider-ids');
+const { DEFAULT_ROLE_TIMEOUTS_MS } = require('../models/roles');
 
 const DEFAULT_SETTINGS = {
   defaults: {
@@ -81,13 +82,17 @@ const DEFAULT_SETTINGS = {
       qualityPriority: 'high'
     }
   },
-  // Model catalog and availability (spec 2026-09-27 §14; the stage M1 keys).
-  // Tiers above keep routing until stage M2 migrates them to profiles.
+  // Model catalog, availability and profiles (spec 2026-09-27 §14). The
+  // tiers above are read once by the stage M2 migration and then removed.
   models: {
     catalog: { ...CATALOG_DEFAULTS },
     overrides: {},
     ollama: { baseUrl: DEFAULT_OLLAMA_BASE_URL },
-    availability: { retestHours: 24 }
+    availability: { retestHours: 24 },
+    profiles: [],
+    defaultProfileId: null,
+    customRoles: [],
+    roleTimeoutsMs: { ...DEFAULT_ROLE_TIMEOUTS_MS }
   },
   notifications: {
     ...DEFAULT_NOTIFICATION_SETTINGS
@@ -187,6 +192,17 @@ const mergeSettings = (settings = {}) => {
       availability: {
         ...DEFAULT_SETTINGS.models.availability,
         ...(source.models?.availability || {})
+      },
+      profiles: Array.isArray(source.models?.profiles) ? source.models.profiles : [],
+      defaultProfileId: typeof source.models?.defaultProfileId === 'string' && source.models.defaultProfileId
+        ? source.models.defaultProfileId
+        : null,
+      customRoles: Array.isArray(source.models?.customRoles) ? source.models.customRoles : [],
+      roleTimeoutsMs: {
+        ...DEFAULT_SETTINGS.models.roleTimeoutsMs,
+        ...(source.models?.roleTimeoutsMs && typeof source.models.roleTimeoutsMs === 'object' && !Array.isArray(source.models.roleTimeoutsMs)
+          ? source.models.roleTimeoutsMs
+          : {})
       }
     },
     notifications: normalizeNotificationSettings({

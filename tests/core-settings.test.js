@@ -44,4 +44,20 @@ describe('core settings', () => {
     assert.strictEqual(merged.models.availability.retestHours, 24);
     assert.deepStrictEqual(mergeSettings({ models: { overrides: ['not', 'an', 'object'] } }).models.overrides, {});
   });
+
+  it('carries the profile keys (spec §14, stage M2)', () => {
+    const merged = mergeSettings({});
+    assert.deepStrictEqual(merged.models.profiles, []);
+    assert.strictEqual(merged.models.defaultProfileId, null);
+    assert.deepStrictEqual(merged.models.customRoles, []);
+    assert.deepStrictEqual(merged.models.roleTimeoutsMs, { main: 90000, worker: 30000, utility: 15000 });
+    const kept = mergeSettings({ models: { profiles: [{ id: 'p-1' }], defaultProfileId: 'p-1', roleTimeoutsMs: { utility: 5000 } } });
+    assert.deepStrictEqual(kept.models.profiles, [{ id: 'p-1' }]);
+    assert.strictEqual(kept.models.defaultProfileId, 'p-1');
+    assert.deepStrictEqual(kept.models.roleTimeoutsMs, { main: 90000, worker: 30000, utility: 5000 });
+    const junk = mergeSettings({ models: { profiles: 'nope', customRoles: {}, defaultProfileId: 7 } });
+    assert.deepStrictEqual(junk.models.profiles, []);
+    assert.deepStrictEqual(junk.models.customRoles, []);
+    assert.strictEqual(junk.models.defaultProfileId, null);
+  });
 });

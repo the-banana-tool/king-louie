@@ -7,6 +7,8 @@ const providerIds = require('./provider-ids');
 const { Availability } = require('./availability');
 const { discoverOllama } = require('./ollama');
 const { capabilitiesOf } = require('./capabilities');
+const roles = require('./roles');
+const { Profiles, ProfileError, normalizeProfile } = require('./profiles');
 
 let active = null;
 let bundled = null;
@@ -33,5 +35,9 @@ module.exports = {
   Availability,
   discoverOllama,
   capabilitiesOf,
+  Profiles,
+  ProfileError,
+  normalizeProfile,
+  ...roles,
   ...providerIds
 };
