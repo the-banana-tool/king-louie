@@ -18,12 +18,11 @@ function block(start, end) {
 }
 
 describe('renderer: models M1', () => {
-  it('the chat info popover lists usable models, not a hardcoded provider list', () => {
-    const popover = block('function renderChatInfoPopover()', '\nfunction ');
-    assert.doesNotMatch(popover, /providerDisplayNames/);
-    assert.match(popover, /window\.electron\.models\.usable\(/);
-    assert.match(popover, /window\.electron\.models\.explain\(/);
-    assert.doesNotMatch(popover, /window\.electron\.settings\.listModels\(/);
+  it('the header\'s main switcher lists usable models from the chat\'s view, not a hardcoded provider list', () => {
+    const render = block('function renderChatModels(view)', '\nfunction ');
+    assert.doesNotMatch(render, /providerDisplayNames/);
+    assert.match(src, /window\.electron\.models\.chatView\(/);
+    assert.doesNotMatch(block('function renderChatInfoPopover()', '\nfunction '), /window\.electron\.settings\.listModels\(/);
   });
 
   it('marks a stopped reply, as text', () => {

@@ -3101,3 +3101,10 @@ body {
 button.models-picker-item:hover { background: var(--hover, rgba(127, 127, 127, 0.15)); }
 div.models-picker-item.is-unusable { cursor: default; }
 .models-migration-notes { margin: 6px 0 0 18px; font-size: 0.9em; }
+
+/* Chat header model switcher and Retry with… (spec 2026-09-27 §6.5, §9) */
+.chat-models-switcher { display: flex; align-items: center; gap: 6px; }
+.chat-models-switcher .chat-info-select { max-width: 220px; }
+.chat-main-override-marker { color: var(--accent, #d9a441); }
+.message-retry { margin-top: 6px; display: flex; gap: 6px; align-items: center; }
+.message-error-action { margin-top: 6px; }

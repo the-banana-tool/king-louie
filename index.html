@@ -62,6 +62,11 @@
           <button id="export-chat-btn" class="icon-button" type="button" title="Export chat as JSON" aria-label="Export chat as JSON"><i class="fas fa-file-export"></i></button>
           <button id="chat-mcp-btn" class="icon-button" type="button" title="MCP servers for this chat" aria-label="MCP servers"><i class="fas fa-plug"></i></button>
           <button id="checkpoints-btn" class="icon-button" type="button" title="File checkpoints" aria-label="File checkpoints"><i class="fas fa-clock-rotate-left"></i></button>
+          <div class="chat-models-switcher" id="chat-models-switcher" hidden>
+            <select id="chat-profile-select" class="chat-info-select" title="Profile for this chat" aria-label="Profile for this chat"></select>
+            <select id="chat-main-select" class="chat-info-select" title="Main model for this chat" aria-label="Main model for this chat"></select>
+            <span id="chat-main-override-marker" class="chat-main-override-marker" title="The main model is switched for this chat; the profile's other roles still apply" hidden><i class="fas fa-thumbtack"></i></span>
+          </div>
           <button id="chat-info-btn" class="icon-button" type="button" title="Chat info" aria-label="Chat info"><i class="fas fa-chart-bar"></i></button>
         </div>
         <div class="chat-info-popover checkpoints-popover" id="checkpoints-popover" hidden>

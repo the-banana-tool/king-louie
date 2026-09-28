@@ -57,3 +57,46 @@ describe('renderer: settings tabs for models M2', () => {
     assert.match(src, /window\.electron\.models\.saveCatalogSettings\(/);
   });
 });
+
+describe('renderer: the chat header and Retry with…', () => {
+  it('has the profile picker and main switcher in the header', () => {
+    for (const id of ['chat-models-switcher', 'chat-profile-select', 'chat-main-select', 'chat-main-override-marker']) {
+      assert.match(html, new RegExp(`id="${id}"`), id);
+    }
+  });
+
+  it('fills them from the chat\'s own view, as text', () => {
+    assert.match(block('async function refreshChatModels()'), /window\.electron\.models\.chatView\(/);
+    const render = block('function renderChatModels(view)');
+    assert.match(render, /view\.choices/);
+    assert.match(render, /__reset__/);
+    assert.doesNotMatch(render, /innerHTML\s*=\s*(?!'')/);
+    assert.match(block('async function switchMainModel(target)'), /window\.electron\.models\.setMainOverride\(/);
+  });
+
+  it('the popover keeps its cost information and loses its tier, provider and model controls', () => {
+    const popover = block('function renderChatInfoPopover()');
+    assert.match(popover, /Estimated cost/);
+    assert.doesNotMatch(popover, /setInferenceTier|setTierProviderModel|tierSelect|chat-info-provider-select|chat-info-model-select/);
+    assert.doesNotMatch(src, /getActiveInferenceTier|formatInferenceTierLabel/);
+    assert.doesNotMatch(block('function renderChatMessages()'), /Tier/);
+  });
+
+  it('Retry with… truncates, then switches main, then re-sends', () => {
+    const resend = block('async function resendFromIndex(chatId, msgIndex, { beforeSend = null } = {})');
+    const truncate = resend.indexOf('window.electron.chat.truncateFrom(');
+    const before = resend.indexOf('beforeSend()');
+    const send = resend.indexOf('window.electron.chat.sendMessage(');
+    assert.ok(truncate > 0 && before > truncate && send > before, 'truncate → switch → send');
+    assert.match(block('async function retryWith(target)'), /switchMainModel\(target\)/);
+    assert.match(block('function renderRetryControl()'), /retry-with-btn/);
+  });
+
+  it('an unusable override error offers the profile\'s main in one click', () => {
+    const i = src.indexOf('window.electron.chat.onMessageError(');
+    const handler = src.slice(i, src.indexOf('\n}));', i));
+    assert.match(handler, /use-profile-main/);
+    assert.match(handler, /switchMainModel\(null\)/);
+    assert.match(handler, /open-models/);
+  });
+});

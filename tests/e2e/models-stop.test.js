@@ -22,10 +22,11 @@ describe('E2E: model catalog and Stop', () => {
         'chat-data.json': {
           onboardingComplete: true,
           settings: {
-            activeProvider: 'ollama',
-            providerModels: { ollama: 'test-model' },
-            inference: { activeTier: 'standard', tierMap: { standard: { provider: 'ollama', model: 'test-model' } } },
-            models: { ollama: { baseUrl: `${server.url}/ollama` } }
+            models: {
+              ollama: { baseUrl: `${server.url}/ollama` },
+              profiles: [{ id: 'p-local', name: 'Local', kind: 'user', roles: { main: [{ provider: 'ollama', model: 'test-model', effort: null }], worker: [], utility: [] } }],
+              defaultProfileId: 'p-local'
+            }
           }
         }
       }

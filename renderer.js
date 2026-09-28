@@ -11,10 +11,7 @@ function createLogger(subsystem) {
 }
 
 const chatLog = createLogger('chat');
-const tierLog = createLogger('tier-change');
-const providerLog = createLogger('provider-change');
 const modelLog = createLogger('model-change');
-const modelPopulateLog = createLogger('model-populate');
 const skillSettingsLog = createLogger('skill-settings');
 const workflowLog = createLogger('workflow');
 const settingsLog = createLogger('settings');
@@ -39,10 +36,6 @@ const appState = {
   settings: {
     encryptionAvailable: true,
     providers: {},
-    activeProvider: 'openai',
-    inference: {
-      activeTier: 'standard'
-    },
     templateVariables: {
       name: '',
       role: '',
@@ -243,6 +236,10 @@ const dom = {
   imageFileInput: document.getElementById('image-file-input'),
   attachImageBtn: document.getElementById('attach-image-btn'),
   chatInfoBtn: document.getElementById('chat-info-btn'),
+  chatModelsSwitcher: document.getElementById('chat-models-switcher'),
+  chatProfileSelect: document.getElementById('chat-profile-select'),
+  chatMainSelect: document.getElementById('chat-main-select'),
+  chatMainOverrideMarker: document.getElementById('chat-main-override-marker'),
   chatInfoPopover: document.getElementById('chat-info-popover'),
   chatMcpBtn: document.getElementById('chat-mcp-btn'),
   chatMcpPopover: document.getElementById('chat-mcp-popover'),
@@ -380,8 +377,6 @@ function resetAppState() {
   appState.settings = {
     encryptionAvailable: true,
     providers: {},
-    activeProvider: 'openai',
-    inference: { activeTier: 'standard' },
     templateVariables: { name: '', role: '', preferences: '', projectContext: '' },
     userProfile: { name: '', role: '', goals: [], preferences: {}, projectContext: '' },
     notifications: { enabled: true, thresholdsMs: { toast: 30000, external: 120000 }, uiToast: { enabled: true }, ntfy: { enabled: false, topic: '' }, telegram: { longTaskNotice: true } },
@@ -1660,17 +1655,6 @@ function formatCompactUsd(value = 0) {
 
 function formatTokenCount(value = 0) {
   return Number(value || 0).toLocaleString();
-}
-
-function getActiveInferenceTier() {
-  return String(appState.settings?.inference?.activeTier || 'standard').toLowerCase();
-}
-
-function formatInferenceTierLabel(tier) {
-  const normalized = String(tier || 'standard').toLowerCase();
-  if (normalized === 'fast') return 'Fast';
-  if (normalized === 'smart') return 'Smart';
-  return 'Standard';
 }
 
 function renderChatList() {
@@ -2956,10 +2940,6 @@ function renderChatInfoPopover() {
   const messageCount = chat.messages?.length || 0;
   const userMessages = chat.messages?.filter((m) => m.sender === 'user').length || 0;
   const assistantMessages = chat.messages?.filter((m) => m.sender === 'assistant').length || 0;
-  const tier = formatInferenceTierLabel(getActiveInferenceTier());
-  const tierMap = appState.settings?.inference?.tierMap || {};
-  const activeTierKey = getActiveInferenceTier();
-  const tierInfo = tierMap[activeTierKey] || {};
   const memoryCount = appState.memoryEntries?.length || 0;
 
   const rows = [
@@ -3021,207 +3001,10 @@ function renderChatInfoPopover() {
   dom.chatInfoPopoverBody.appendChild(caseSlot);
   renderChatCaseSection(chat, caseSlot).catch((err) => chatLog.warn(`Case section failed: ${err.message}`));
 
-  /* --- Inference controls section --- */
+  /* --- Mode section. The model controls live in the chat header now
+     (spec 2026-09-27 §11): a profile picker and the main switcher. --- */
   appendRow({ divider: true });
-  appendRow({ section: 'Inference' });
-
-  // Tier selector row
-  const tierRow = document.createElement('div');
-  tierRow.className = 'chat-info-row';
-  const tierLabel = document.createElement('span');
-  tierLabel.className = 'chat-info-label';
-  tierLabel.appendChild(faIcon('fas fa-bolt'));
-  tierLabel.appendChild(document.createTextNode('Tier'));
-  const tierSelect = document.createElement('select');
-  tierSelect.className = 'chat-info-select';
-  ['fast', 'standard', 'smart'].forEach((t) => {
-    const opt = document.createElement('option');
-    opt.value = t;
-    opt.textContent = formatInferenceTierLabel(t);
-    if (t === activeTierKey) opt.selected = true;
-    tierSelect.appendChild(opt);
-  });
-  tierSelect.addEventListener('change', async () => {
-    const prevTier = appState.settings.inference?.activeTier || 'standard';
-    try {
-      const result = unwrapIpcResult(
-        await window.electron.settings.setInferenceTier({ tier: tierSelect.value }),
-        'Failed to set inference tier.'
-      );
-      appState.settings.inference = result.inference || appState.settings.inference;
-      // Update the provider/model dropdowns for the new tier
-      const newInfo = (appState.settings.inference.tierMap || {})[tierSelect.value] || {};
-      loadUsable(newInfo.provider || '', newInfo.model || '');
-      addStatusMessage(`Tier changed: ${prevTier} → ${tierSelect.value}`);
-    } catch (err) { tierLog.warn(`failed: ${err.message}`); }
-  });
-  tierRow.appendChild(tierLabel);
-  tierRow.appendChild(tierSelect);
-  dom.chatInfoPopoverBody.appendChild(tierRow);
-
-  /* The provider and model lists hold only usable models (spec 2026-09-27
-     §5, stage M1): a passing connection test, in this account's list, and
-     able to call tools in agent mode. The current tier target always shows,
-     marked with why it cannot be used. */
-  const providerRow = document.createElement('div');
-  providerRow.className = 'chat-info-row';
-  const providerLabel = document.createElement('span');
-  providerLabel.className = 'chat-info-label';
-  providerLabel.appendChild(faIcon('fas fa-plug'));
-  providerLabel.appendChild(document.createTextNode('Provider'));
-  const providerSelect = document.createElement('select');
-  providerSelect.className = 'chat-info-select';
-  providerSelect.id = 'chat-info-provider-select';
-  providerRow.appendChild(providerLabel);
-  providerRow.appendChild(providerSelect);
-  dom.chatInfoPopoverBody.appendChild(providerRow);
-
-  const modelRow = document.createElement('div');
-  modelRow.className = 'chat-info-row';
-  const modelLabel = document.createElement('span');
-  modelLabel.className = 'chat-info-label';
-  modelLabel.appendChild(faIcon('fas fa-microchip'));
-  modelLabel.appendChild(document.createTextNode('Model'));
-  const modelSelect = document.createElement('select');
-  modelSelect.className = 'chat-info-select';
-  modelSelect.id = 'chat-info-model-select';
-  modelRow.appendChild(modelLabel);
-  modelRow.appendChild(modelSelect);
-  dom.chatInfoPopoverBody.appendChild(modelRow);
-
-  const modelNote = document.createElement('div');
-  modelNote.className = 'chat-info-note';
-  modelNote.id = 'chat-info-model-note';
-  dom.chatInfoPopoverBody.appendChild(modelNote);
-
-  const providerLabelOf = (key) => appState.settings?.providers?.[key]?.label || key;
-  const popoverNeeds = () => (appState.isAgentModeEnabled ? { toolCall: true } : {});
-  let usableModels = [];
-  let usableFetchId = 0;
-  let verdictFetchId = 0;
-
-  // Why the current target cannot be used, if it cannot. Its own fetch id
-  // token (separate from usableFetchId): a fast provider/model switch can
-  // leave an older explain() call in flight, and its answer must never
-  // overwrite a newer one's note (Task 12 fix round 1).
-  const showCurrentVerdict = async (provider, model) => {
-    const fetchId = ++verdictFetchId;
-    modelNote.textContent = '';
-    if (!provider) return;
-    try {
-      const verdict = unwrapIpcResult(
-        await window.electron.models.explain({ provider, model: model || '', needs: popoverNeeds() }),
-        'Unable to check the model.'
-      );
-      if (fetchId !== verdictFetchId) return;
-      if (!verdict.usable) modelNote.textContent = verdict.reasons.join(' ');
-    } catch (err) {
-      if (fetchId !== verdictFetchId) return;
-      modelLog.debug(`explain failed: ${err.message}`);
-    }
-  };
-
-  const fillModels = (provider, selectedModel) => {
-    modelSelect.innerHTML = '';
-    let hasSelected = false;
-    for (const m of usableModels.filter((c) => c.provider === provider)) {
-      const opt = document.createElement('option');
-      opt.value = m.model;
-      opt.textContent = m.priced || m.local ? m.name : `${m.name} (unpriced)`;
-      if (m.model === selectedModel) { opt.selected = true; hasSelected = true; }
-      modelSelect.appendChild(opt);
-    }
-    if (selectedModel && !hasSelected) {
-      const opt = document.createElement('option');
-      opt.value = selectedModel;
-      opt.textContent = `${selectedModel} (current, not usable)`;
-      opt.selected = true;
-      modelSelect.insertBefore(opt, modelSelect.firstChild);
-    }
-    modelSelect.disabled = modelSelect.options.length === 0;
-  };
-
-  const fillProviders = (currentProvider) => {
-    providerSelect.innerHTML = '';
-    const providers = [...new Set(usableModels.map((m) => m.provider))];
-    for (const key of providers) {
-      const opt = document.createElement('option');
-      opt.value = key;
-      opt.textContent = providerLabelOf(key);
-      if (key === currentProvider) opt.selected = true;
-      providerSelect.appendChild(opt);
-    }
-    if (currentProvider && !providers.includes(currentProvider)) {
-      const opt = document.createElement('option');
-      opt.value = currentProvider;
-      opt.textContent = `${providerLabelOf(currentProvider)} (not usable)`;
-      opt.selected = true;
-      providerSelect.insertBefore(opt, providerSelect.firstChild);
-    }
-    if (providerSelect.options.length === 0) {
-      const opt = document.createElement('option');
-      opt.textContent = 'No usable provider: add and test a key in Settings';
-      opt.disabled = true;
-      opt.selected = true;
-      providerSelect.appendChild(opt);
-    }
-  };
-
-  const loadUsable = async (currentProvider, currentModel) => {
-    const fetchId = ++usableFetchId;
-    try {
-      const result = unwrapIpcResult(
-        await window.electron.models.usable({ needs: { textOutput: true, ...popoverNeeds() } }),
-        'Failed to list usable models.'
-      );
-      if (fetchId !== usableFetchId) return;
-      usableModels = Array.isArray(result.models) ? result.models : [];
-    } catch (err) {
-      if (fetchId !== usableFetchId) return;
-      usableModels = [];
-      modelLog.warn(`usable models failed: ${err.message}`);
-    }
-    fillProviders(currentProvider);
-    fillModels(currentProvider, currentModel);
-    showCurrentVerdict(currentProvider, currentModel);
-  };
-
-  // Provider change → its first usable model, persisted to the active tier.
-  providerSelect.addEventListener('change', async () => {
-    const prevProvider = tierInfo.provider || '';
-    const newProvider = providerSelect.value;
-    fillModels(newProvider, '');
-    const newModel = modelSelect.value || '';
-    try {
-      const result = unwrapIpcResult(
-        await window.electron.settings.setTierProviderModel({
-          tier: tierSelect.value, provider: newProvider, model: newModel
-        }),
-        'Failed to update provider.'
-      );
-      appState.settings.inference = result.inference || appState.settings.inference;
-      showCurrentVerdict(newProvider, newModel);
-      addStatusMessage(`Provider changed: ${prevProvider || '(none)'} → ${newProvider}`);
-    } catch (err) { providerLog.warn(`failed: ${err.message}`); }
-  });
-
-  // Model change → persist.
-  modelSelect.addEventListener('change', async () => {
-    const prevModel = tierInfo.model || '';
-    try {
-      const result = unwrapIpcResult(
-        await window.electron.settings.setTierProviderModel({
-          tier: tierSelect.value, model: modelSelect.value
-        }),
-        'Failed to update model.'
-      );
-      appState.settings.inference = result.inference || appState.settings.inference;
-      showCurrentVerdict(providerSelect.value, modelSelect.value);
-      addStatusMessage(`Model changed (${providerSelect.value}): ${prevModel || '(default)'} → ${modelSelect.value || '(default)'}`);
-    } catch (err) { modelLog.warn(`failed: ${err.message}`); }
-  });
-
-  loadUsable(tierInfo.provider || '', tierInfo.model || '');
+  appendRow({ section: 'Mode' });
 
   // Agent mode toggle row
   const agentRow = document.createElement('div');
@@ -3312,7 +3095,8 @@ function renderChatMessages() {
 
   if (!activeChat) {
     dom.chatHeaderTitle.textContent = 'King Louie Chat';
-    dom.chatHeaderMeta.textContent = `Start a new conversation • Tier: ${formatInferenceTierLabel(getActiveInferenceTier())}`;
+    dom.chatHeaderMeta.textContent = 'Start a new conversation';
+    if (dom.chatModelsSwitcher) dom.chatModelsSwitcher.hidden = true;
     if (dom.workingDirLabel) dom.workingDirLabel.textContent = 'No working directory';
     if (dom.workingDirBtn) dom.workingDirBtn.classList.remove('is-set');
     return;
@@ -3320,7 +3104,7 @@ function renderChatMessages() {
 
   dom.chatHeaderTitle.textContent = activeChat.title;
   const chatTotals = activeChat.llmTotals || sumChatLlmTotals(activeChat);
-  dom.chatHeaderMeta.textContent = `Updated ${formatTimestamp(activeChat.updatedAt)} • Total ${formatTokenCount(chatTotals.totalTokens)} tokens • ${formatUsd(chatTotals.costUsd)} • Tier: ${formatInferenceTierLabel(getActiveInferenceTier())}`;
+  dom.chatHeaderMeta.textContent = `Updated ${formatTimestamp(activeChat.updatedAt)} • Total ${formatTokenCount(chatTotals.totalTokens)} tokens • ${formatUsd(chatTotals.costUsd)}`;
   if (dom.workingDirBtn) {
     dom.workingDirBtn.title = activeChat.workingDirectory ? `Working directory: ${activeChat.workingDirectory}\nClick to change` : 'Click to set working directory';
     dom.workingDirBtn.classList.toggle('is-set', Boolean(activeChat.workingDirectory));
@@ -3394,6 +3178,9 @@ function renderChatMessages() {
 
   // Flush any remaining buffered tool group from the rendering pass
   flushToolGroup();
+
+  renderRetryControl();
+  refreshChatModels();
 }
 
 function refreshUI() {
@@ -6982,6 +6769,7 @@ if (window.electron?.models?.onStatusChanged) {
     if (!entry) return;
     entry.status = status || null;
     updateProviderStatusBadge(provider);
+    refreshChatModels();
   });
 }
 
@@ -7667,12 +7455,21 @@ async function resendUserMessage(messageEl) {
     }
   }
   if (msgIndex === -1) return;
+  await resendFromIndex(chatId, msgIndex);
+}
 
-  const userMsg = chat.messages[msgIndex];
+// Remove the user message at msgIndex and everything after it with
+// chat:truncateFrom, then send it again through the normal flow. When given,
+// beforeSend runs in between (Retry with…: the main switch, so its status
+// message lands before the re-sent message); if it returns false the user
+// message is put back and nothing is sent.
+async function resendFromIndex(chatId, msgIndex, { beforeSend = null } = {}) {
+  const chat = appState.chats.find((c) => c.id === chatId);
+  const userMsg = chat?.messages?.[msgIndex];
+  if (!userMsg || userMsg.sender !== 'user') return;
   const message = userMsg.text || '';
   const images = userMsg.images || [];
   const documents = userMsg.documents || [];
-
   if (!message && images.length === 0 && documents.length === 0) return;
 
   // Truncate from this message onward (removes the user message + its response)
@@ -7687,6 +7484,23 @@ async function resendUserMessage(messageEl) {
     return;
   }
 
+  if (beforeSend && !(await beforeSend())) {
+    try {
+      const restored = unwrapIpcResult(await window.electron.chat.addMessage({
+        chatId,
+        sender: 'user',
+        text: message,
+        ...(images.length > 0 ? { images } : {}),
+        ...(documents.length > 0 ? { documents } : {})
+      }), 'Unable to restore the message.');
+      applyUpdatedChat(restored);
+    } catch (err) {
+      chatLog.warn(`restoring the message failed: ${err.message}`);
+    }
+    return;
+  }
+  const latest = appState.chats.find((c) => c.id === chatId) || chat;
+
   // Re-send the message through the normal flow
   // Add user message to local state optimistically
   const now = new Date().toISOString();
@@ -7696,7 +7510,7 @@ async function resendUserMessage(messageEl) {
       ...c,
       updatedAt: now,
       messages: [
-        ...c.messages,
+        ...(c.id === latest.id ? latest.messages : c.messages),
         {
           id: `temp-${Date.now()}`,
           sender: 'user',
@@ -7931,9 +7745,193 @@ function addMessage(sender, text, metadata = {}) {
   messageDiv.appendChild(messageContent);
   
   dom.chatMessages.appendChild(messageDiv);
-  
+
   // Scroll to bottom
   dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
+}
+
+/* --- The chat's models: profile picker, main switcher, Retry with…
+   (spec 2026-09-27 §6.5, §9, §11). Every change is a between-turns choice:
+   a running turn keeps the models it launched with. --- */
+
+let chatModelsFetchId = 0;
+
+function applyUpdatedChat(chat) {
+  if (!chat || !chat.id) return;
+  appState.chats = appState.chats.map((c) => (c.id === chat.id ? chat : c));
+  refreshUI();
+}
+
+async function refreshChatModels() {
+  const chatId = appState.activeChatId;
+  if (!dom.chatModelsSwitcher) return;
+  if (!chatId || !window.electron?.models?.chatView) {
+    dom.chatModelsSwitcher.hidden = true;
+    return;
+  }
+  const fetchId = ++chatModelsFetchId;
+  try {
+    const result = unwrapIpcResult(await window.electron.models.chatView(chatId), 'Unable to read this chat\'s models.');
+    if (fetchId !== chatModelsFetchId || chatId !== appState.activeChatId) return;
+    appState.chatModels = result.view;
+    renderChatModels(result.view);
+  } catch (err) {
+    if (fetchId !== chatModelsFetchId) return;
+    modelLog.warn(`chat models: ${err.message}`);
+    dom.chatModelsSwitcher.hidden = true;
+  }
+}
+
+function renderChatModels(view) {
+  if (!dom.chatModelsSwitcher || !view) return;
+  dom.chatModelsSwitcher.hidden = false;
+
+  const profiles = dom.chatProfileSelect;
+  profiles.textContent = '';
+  const defaultName = (view.profiles.find((p) => p.id === view.defaultProfileId) || {}).name || 'none';
+  const standard = document.createElement('option');
+  standard.value = '';
+  standard.textContent = `Default profile (${defaultName})`;
+  profiles.appendChild(standard);
+  for (const p of view.profiles) {
+    const opt = document.createElement('option');
+    opt.value = p.id;
+    opt.textContent = p.name;
+    profiles.appendChild(opt);
+  }
+  profiles.value = view.chosenProfileId || '';
+
+  const main = dom.chatMainSelect;
+  main.textContent = '';
+  const current = document.createElement('option');
+  if (view.main) {
+    current.value = '__current__';
+    current.textContent = view.main.usable ? `Main: ${view.main.name}` : `Main: ${view.main.name} (not usable)`;
+  } else {
+    current.value = '__none__';
+    current.textContent = 'Main: none. Add one in Settings → Models';
+  }
+  main.appendChild(current);
+  for (const c of view.choices) {
+    if (view.main && c.provider === view.main.provider && c.model === view.main.model) continue;
+    const opt = document.createElement('option');
+    opt.value = JSON.stringify({ provider: c.provider, model: c.model });
+    opt.textContent = c.inMain ? `${c.name} (profile's main)` : `${c.name} (${c.provider})`;
+    main.appendChild(opt);
+  }
+  if (view.overridden) {
+    const reset = document.createElement('option');
+    reset.value = '__reset__';
+    reset.textContent = 'Use the profile\'s main';
+    main.appendChild(reset);
+  }
+  main.value = current.value;
+  main.title = view.main && !view.main.usable ? view.main.reasons.join(' ') : 'Main model for this chat';
+  dom.chatMainOverrideMarker.hidden = !view.overridden;
+}
+
+async function switchMainModel(target) {
+  const chatId = appState.activeChatId;
+  if (!chatId) return false;
+  try {
+    const result = unwrapIpcResult(await window.electron.models.setMainOverride({ chatId, target }), 'Unable to switch the main model.');
+    applyUpdatedChat(result.chat);
+    return true;
+  } catch (err) {
+    addMessage('assistant', `Error: ${err.message}`);
+    return false;
+  } finally {
+    refreshChatModels();
+  }
+}
+
+// On the last reply (stopped or not): the usable models, the profile's main
+// first. Choosing one sets the main override and re-sends (spec §9).
+function renderRetryControl() {
+  const chat = getActiveChat();
+  if (!chat || appState.activeResponses.has(chat.id) || !window.electron?.models?.chatView) return;
+  const messages = chat.messages || [];
+  const lastUser = messages.findLastIndex((m) => m.sender === 'user');
+  const lastReply = messages.findLastIndex((m) => m.sender === 'assistant');
+  if (lastUser < 0 || lastReply < lastUser) return;
+  const replies = dom.chatMessages.querySelectorAll('.message.assistant');
+  const reply = replies[replies.length - 1];
+  if (!reply) return;
+  const content = reply.querySelector('.message-content') || reply;
+  const wrap = document.createElement('div');
+  wrap.className = 'message-retry';
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'btn btn-sm';
+  button.id = 'retry-with-btn';
+  button.appendChild(faIcon('fas fa-rotate-right'));
+  button.appendChild(document.createTextNode(' Retry with…'));
+  const select = document.createElement('select');
+  select.className = 'chat-info-select';
+  select.id = 'retry-with-select';
+  select.hidden = true;
+  button.addEventListener('click', async () => {
+    button.hidden = true;
+    select.hidden = false;
+    select.textContent = '';
+    const prompt = document.createElement('option');
+    prompt.value = '';
+    prompt.textContent = 'Retry with…';
+    select.appendChild(prompt);
+    let view = appState.chatModels;
+    try {
+      view = unwrapIpcResult(await window.electron.models.chatView(chat.id), 'Unable to list models.').view;
+    } catch (err) {
+      modelLog.warn(`retry list: ${err.message}`);
+    }
+    for (const c of view?.choices || []) {
+      const opt = document.createElement('option');
+      opt.value = JSON.stringify({ provider: c.provider, model: c.model });
+      opt.textContent = c.inMain ? `${c.name} (profile's main)` : `${c.name} (${c.provider})`;
+      select.appendChild(opt);
+    }
+  });
+  select.addEventListener('change', () => {
+    if (select.value) retryWith(JSON.parse(select.value));
+  });
+  wrap.appendChild(button);
+  wrap.appendChild(select);
+  content.appendChild(wrap);
+}
+
+async function retryWith(target) {
+  const chatId = appState.activeChatId;
+  const chat = getActiveChat();
+  if (!chatId || !chat) return;
+  const index = chat.messages.findLastIndex((m) => m.sender === 'user');
+  if (index < 0) return;
+  await resendFromIndex(chatId, index, { beforeSend: () => switchMainModel(target) });
+}
+
+if (dom.chatProfileSelect) {
+  dom.chatProfileSelect.addEventListener('change', async () => {
+    const chatId = appState.activeChatId;
+    if (!chatId) return;
+    try {
+      const result = unwrapIpcResult(
+        await window.electron.models.setChatProfile({ chatId, profileId: dom.chatProfileSelect.value || null }),
+        'Unable to change the profile.'
+      );
+      applyUpdatedChat(result.chat);
+    } catch (err) {
+      addMessage('assistant', `Error: ${err.message}`);
+    } finally {
+      refreshChatModels();
+    }
+  });
+}
+
+if (dom.chatMainSelect) {
+  dom.chatMainSelect.addEventListener('change', async () => {
+    const value = dom.chatMainSelect.value;
+    if (value === '__current__' || value === '__none__') return;
+    await switchMainModel(value === '__reset__' ? null : JSON.parse(value));
+  });
 }
 
 async function loadChats() {
@@ -7953,6 +7951,7 @@ function persistAgentMode() {
   const chat = appState.chats.find((c) => c.id === chatId);
   if (chat) chat.agentMode = appState.isAgentModeEnabled;
   window.electron.chat.setAgentMode(chatId, appState.isAgentModeEnabled).catch((err) => chatLog.warn(`setAgentMode persistence failed: ${err.message}`));
+  refreshChatModels(); // agent mode changes what main needs
 }
 
 function persistSandboxMode() {
@@ -10039,7 +10038,7 @@ unsubscribeHandlers.push(window.electron.chat.onMessageComplete(({ chatId, respo
   }
 }));
 
-unsubscribeHandlers.push(window.electron.chat.onMessageError(({ chatId, responseId, error }) => {
+unsubscribeHandlers.push(window.electron.chat.onMessageError(({ chatId, responseId, error, action }) => {
   appState.streamBuffers.delete(responseId);
   streamTextOffsets.delete(responseId);
   if (appState.streamRenderedTools) appState.streamRenderedTools.clear();
@@ -10068,6 +10067,24 @@ unsubscribeHandlers.push(window.electron.chat.onMessageError(({ chatId, response
   p.textContent = `Error: ${error}`;
   messageDiv.textContent = '';
   messageDiv.appendChild(p);
+
+  // An unusable main override offers the profile's main in one click; no
+  // usable main at all offers the Models tab (spec 2026-09-27 §15).
+  if (action && (action.kind === 'use-profile-main' || action.kind === 'open-models')) {
+    const fix = document.createElement('button');
+    fix.type = 'button';
+    fix.className = 'btn btn-sm message-error-action';
+    fix.textContent = action.kind === 'use-profile-main' ? 'Use the profile\'s main' : 'Open Models';
+    fix.addEventListener('click', async () => {
+      if (action.kind === 'use-profile-main') {
+        if (await switchMainModel(null)) fix.disabled = true;
+      } else {
+        openSettingsDrawer();
+        switchSettingsTab('models');
+      }
+    });
+    messageDiv.appendChild(fix);
+  }
   dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
 
   // Persist the error so refreshUI / renderChatMessages doesn't wipe it
