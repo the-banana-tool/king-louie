@@ -6,6 +6,7 @@ const InferenceRouter = require('../providers/inference-router');
 const { initializeTools, toolRegistry } = require('../tools');
 const { registerSecretDataDir } = require('../tools/utils');
 const { tokenizeCommand } = require('./llm-command');
+const { createModelChoices } = require('./model-choices');
 const { DESKTOP_RULE_ORIGIN } = require('../tools/permission-rules');
 const { adminCredentialPath } = require('../platform/paths');
 const ToolExecutor = require('../execution/tool-executor');
@@ -3162,6 +3163,19 @@ function createCore(deps = {}) {
     }
   });
 
+  // The owner's model choices between turns (spec §6.5, §11, §15).
+  const modelChoices = createModelChoices({
+    profiles,
+    catalog,
+    availability,
+    explainTarget,
+    snapshotModels,
+    getChats,
+    setChats,
+    appendMessageToChat,
+    getCaseRuntime: () => caseRuntime
+  });
+
   // Cases stage 3: executors. In service mode run.js passes the admin
   // service.json `executors` as deps.adminExecutors (R42); without it a
   // service-mode registry has no entries (fail closed). There the package root check is
@@ -3346,6 +3360,7 @@ function createCore(deps = {}) {
     snapshotModels,
     resolveRole,
     routedProvider: ({ targets, signal = null } = {}) => inferenceRouter.routedProvider({ targets, signal }),
+    getModelChoices: () => modelChoices,
     getProviderOptions: providerOptionsFor,
     testProviderConnection,
     reportProviderError,

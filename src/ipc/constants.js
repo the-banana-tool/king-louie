@@ -95,6 +95,18 @@ module.exports = {
   MODELS_EXPLAIN: 'models:explain',
   MODELS_SET_OLLAMA_URL: 'models:setOllamaBaseUrl',
 
+  // Models stage M2: profiles and the owner's model choices.
+  MODELS_PROFILES: 'models:profiles',
+  MODELS_SAVE_PROFILE: 'models:saveProfile',
+  MODELS_DUPLICATE_PROFILE: 'models:duplicateProfile',
+  MODELS_REMOVE_PROFILE: 'models:removeProfile',
+  MODELS_SET_DEFAULT_PROFILE: 'models:setDefaultProfile',
+  MODELS_PICKER: 'models:picker',
+  MODELS_CHAT_VIEW: 'models:chatView',
+  MODELS_SET_CHAT_PROFILE: 'models:setChatProfile',
+  MODELS_SET_MAIN_OVERRIDE: 'models:setMainOverride',
+  MODELS_SAVE_CATALOG_SETTINGS: 'models:saveCatalogSettings',
+
   SETTINGS_LOAD: 'settings:load',
   SETTINGS_SAVE_TEMPLATE_VARIABLES: 'settings:saveTemplateVariables',
   SETTINGS_SAVE_USER_PROFILE: 'settings:saveUserProfile',

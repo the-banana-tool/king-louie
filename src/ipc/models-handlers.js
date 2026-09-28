@@ -81,6 +81,68 @@ function registerModelsHandlers(ipcMain, context = {}) {
     const status = await availability().test('ollama');
     return { ok: true, baseUrl: normalized, status };
   });
+
+  // ---- Profiles and the owner's model choices (stage M2) ----
+
+  const choices = () => {
+    const c = typeof context.getModelChoices === 'function' ? context.getModelChoices() : null;
+    if (!c) throw new Error('Model profiles are not available in this host.');
+    return c;
+  };
+  const targetFrom = (raw) => (raw && typeof raw === 'object'
+    ? { provider: String(raw.provider || ''), model: String(raw.model || ''), effort: typeof raw.effort === 'string' && raw.effort ? raw.effort : null }
+    : null);
+  const text = (v) => (typeof v === 'string' ? v : '');
+
+  handle(IPC.MODELS_PROFILES, async () => ({ ok: true, ...choices().profilesView() }));
+
+  handle(IPC.MODELS_SAVE_PROFILE, async ({ id, name, roles }) => ({
+    ok: true,
+    profile: choices().saveProfile({ id: text(id) || null, name, roles })
+  }));
+
+  handle(IPC.MODELS_DUPLICATE_PROFILE, async ({ id }) => ({ ok: true, profile: choices().duplicateProfile(text(id)) }));
+
+  handle(IPC.MODELS_REMOVE_PROFILE, async ({ id }) => ({ ok: true, ...(await choices().removeProfile(text(id))) }));
+
+  handle(IPC.MODELS_SET_DEFAULT_PROFILE, async ({ id }) => ({ ok: true, defaultProfileId: choices().setDefaultProfile(text(id)) }));
+
+  handle(IPC.MODELS_PICKER, async ({ needs }) => ({ ok: true, ...choices().pickerView({ needs: needsFrom(needs) }) }));
+
+  handle(IPC.MODELS_CHAT_VIEW, async ({ chatId }) => ({ ok: true, view: choices().chatView(text(chatId)) }));
+
+  handle(IPC.MODELS_SET_CHAT_PROFILE, async ({ chatId, profileId }) => ({
+    ok: true,
+    chat: await choices().setChatProfile(text(chatId), text(profileId) || null)
+  }));
+
+  handle(IPC.MODELS_SET_MAIN_OVERRIDE, async ({ chatId, target }) => ({
+    ok: true,
+    chat: await choices().setMainOverride(text(chatId), target ? targetFrom(target) : null)
+  }));
+
+  // The Models tab's catalog part (spec §11): fetch on or off, the refresh
+  // interval, and the owner's overrides ("<provider>:<model>" → partial Entry).
+  handle(IPC.MODELS_SAVE_CATALOG_SETTINGS, async ({ fetch, refreshHours, overrides }) => {
+    const settings = context.getSettings();
+    const models = settings.models || {};
+    const catalogSettings = { ...(models.catalog || {}) };
+    if (fetch !== undefined) catalogSettings.fetch = fetch === true;
+    if (refreshHours !== undefined) {
+      const hours = Number(refreshHours);
+      if (!Number.isInteger(hours) || hours < 1 || hours > 720) return { ok: false, error: 'The refresh interval is a whole number of hours from 1 to 720.' };
+      catalogSettings.refreshHours = hours;
+    }
+    let nextOverrides = models.overrides || {};
+    if (overrides !== undefined) {
+      const valid = overrides && typeof overrides === 'object' && !Array.isArray(overrides)
+        && Object.entries(overrides).every(([key, value]) => key.indexOf(':') > 0 && value && typeof value === 'object' && !Array.isArray(value));
+      if (!valid) return { ok: false, error: 'Overrides must be an object of "<provider>:<model>" keys, each with an object of catalog fields.' };
+      nextOverrides = overrides;
+    }
+    context.setSettings({ ...settings, models: { ...models, catalog: catalogSettings, overrides: nextOverrides } });
+    return { ok: true, catalog: catalog().status() };
+  });
 }
 
 module.exports = { registerModelsHandlers };

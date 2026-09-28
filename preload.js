@@ -944,6 +944,45 @@ contextBridge.exposeInMainWorld(
         validateString(baseUrl, 'baseUrl', { minLength: 1 });
         return ipcRenderer.invoke('models:setOllamaBaseUrl', { baseUrl });
       },
+      profiles: () => ipcRenderer.invoke('models:profiles'),
+      saveProfile: (payload) => {
+        validateObject(payload, 'payload');
+        return ipcRenderer.invoke('models:saveProfile', payload);
+      },
+      duplicateProfile: (id) => {
+        validateString(id, 'id', { minLength: 1 });
+        return ipcRenderer.invoke('models:duplicateProfile', { id });
+      },
+      removeProfile: (id) => {
+        validateString(id, 'id', { minLength: 1 });
+        return ipcRenderer.invoke('models:removeProfile', { id });
+      },
+      setDefaultProfile: (id) => {
+        validateString(id, 'id', { minLength: 1 });
+        return ipcRenderer.invoke('models:setDefaultProfile', { id });
+      },
+      picker: (payload = {}) => {
+        validateObject(payload, 'payload');
+        return ipcRenderer.invoke('models:picker', payload);
+      },
+      chatView: (chatId) => {
+        validateString(chatId, 'chatId', { minLength: 1 });
+        return ipcRenderer.invoke('models:chatView', { chatId });
+      },
+      setChatProfile: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.chatId, 'chatId', { minLength: 1 });
+        return ipcRenderer.invoke('models:setChatProfile', payload);
+      },
+      setMainOverride: (payload) => {
+        validateObject(payload, 'payload');
+        validateString(payload.chatId, 'chatId', { minLength: 1 });
+        return ipcRenderer.invoke('models:setMainOverride', payload);
+      },
+      saveCatalogSettings: (payload) => {
+        validateObject(payload, 'payload');
+        return ipcRenderer.invoke('models:saveCatalogSettings', payload);
+      },
       onStatusChanged: (callback) => registerAdditive('models:statusChanged', callback),
       onCatalogUpdated: (callback) => registerAdditive('models:catalogUpdated', callback)
     },
