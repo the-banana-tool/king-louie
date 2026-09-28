@@ -3345,6 +3345,7 @@ function createCore(deps = {}) {
     explainTarget,
     snapshotModels,
     resolveRole,
+    routedProvider: ({ targets, signal = null } = {}) => inferenceRouter.routedProvider({ targets, signal }),
     getProviderOptions: providerOptionsFor,
     testProviderConnection,
     reportProviderError,

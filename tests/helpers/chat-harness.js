@@ -1,20 +1,34 @@
 // tests/helpers/chat-harness.js
 // chat:sendMessage and chat:stopResponse against a minimal context, with the
-// real AgentLoop. Anything not given resolves to a function returning null,
-// which the send path treats as "feature absent".
+// real AgentLoop, the real resolver and the real router. The profile's main
+// is [{ providerType, model }] unless `roles` says otherwise; `providers`
+// maps a provider name to the instance that answers for it, else `provider`
+// answers for every one. Anything not given resolves to a function
+// returning null, which the send path treats as "feature absent".
 const EventEmitter = require('events');
 const IPC = require('../../src/ipc/constants');
 const { registerChatHandlers } = require('../../src/ipc/chat-handlers');
 const { initializeTools, toolRegistry } = require('../../src/tools');
 const AgentLoop = require('../../src/execution/agent-loop');
+const InferenceRouter = require('../../src/providers/inference-router');
+const { createTurnModels } = require('../../src/models/resolver');
 
 initializeTools();
 
-function chatHarness({ provider, providerType = 'openai', model = 'test-model', chat = null, overrides = {} } = {}) {
+function chatHarness({ provider, providerType = 'openai', model = 'test-model', providers = null, roles = null, chat = null, overrides = {} } = {}) {
   const sent = [];
   const usage = [];
   const theChat = chat || { id: 'chat-1', title: 'Chat', messages: [{ id: 'm0', sender: 'assistant', text: 'How can I help you?' }] };
+  const profile = {
+    id: 'p-test',
+    name: 'Test profile',
+    kind: 'user',
+    roles: roles
+      ? { main: [], worker: [], utility: [], ...roles }
+      : { main: [{ provider: providerType, model, effort: null }], worker: [], utility: [] }
+  };
   let nextId = 0;
+  let ctx = null;
   const context = {
     getChats: () => [theChat],
     setChats: () => {},
@@ -23,7 +37,24 @@ function chatHarness({ provider, providerType = 'openai', model = 'test-model', 
       return theChat;
     },
     runHookEvent: async () => ({}),
-    resolveInference: async () => ({ providerType, provider, model, tier: 'standard', timeoutMs: 1000 }),
+    // The turn's models: read at snapshot time, so a test can switch the
+    // main override between turns (or during one).
+    snapshotModels: () => createTurnModels({
+      profile,
+      mainOverride: theChat.mainOverride || null,
+      explain: (p, m, o) => {
+        const availability = ctx.getAvailability();
+        return availability && typeof availability.explain === 'function'
+          ? availability.explain(p, m, o)
+          : { usable: true, reasons: [], notes: [] };
+      }
+    }),
+    routedProvider: ({ targets, signal }) => new InferenceRouter({
+      getProviderToken: () => 'test-token-123456',
+      createProvider: (p) => (providers && providers[p]) || provider,
+      sleep: async () => {},
+      onProviderError: (p, err) => ctx.reportProviderError(p, err)
+    }).routedProvider({ targets, signal }),
     getUsageTracker: () => ({ record: (event) => { usage.push(event); return { ...event, cost: event.costUsd ?? null }; } }),
     createUsageRecordFromMetrics: (m) => ({
       provider: m.provider,
@@ -53,7 +84,7 @@ function chatHarness({ provider, providerType = 'openai', model = 'test-model', 
     createId: () => `id-${++nextId}`,
     ...overrides
   };
-  const ctx = new Proxy(context, { get: (target, key) => (key in target ? target[key] : () => null) });
+  ctx = new Proxy(context, { get: (target, key) => (key in target ? target[key] : () => null) });
   const handlers = new Map();
   registerChatHandlers({ handle: (channel, fn) => handlers.set(channel, fn), on: () => {} }, ctx);
   const event = {

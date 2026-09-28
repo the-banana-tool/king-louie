@@ -13,6 +13,7 @@ const { initializeTools, toolRegistry } = require('../src/tools');
 const { CaseRuntime } = require('../src/cases');
 const { DetourLog } = require('../src/cases/detours/log');
 const { withCaseProfile } = require('./helpers/profile-settings');
+const { createTurnModels } = require('../src/models/resolver');
 
 initializeTools();
 
@@ -60,7 +61,11 @@ function chatHarness(rt, caseId, { hookResult = null } = {}) {
     setChats: () => {},
     appendMessageToChat: (_id, sender, text) => { chat.messages.push({ id: `m${chat.messages.length}`, sender, text, timestamp: new Date().toISOString() }); return chat; },
     runHookEvent: async () => hookResult || {},
-    resolveInference: async () => ({ providerType: 'openai', provider: { sendMessageWithTools: async () => ({}) }, model: 'test-model', tier: 'standard', timeoutMs: 1000 }),
+    snapshotModels: () => createTurnModels({
+      profile: { id: 'p-test', name: 'Test profile', roles: { main: [{ provider: 'openai', model: 'test-model', effort: null }], worker: [], utility: [] } },
+      explain: () => ({ usable: true, reasons: [], notes: [] })
+    }),
+    routedProvider: () => ({ sendMessageWithTools: async () => ({}), streamMessage: async () => ({}) }),
     getConversationCompactor: () => null,
     getContextAssembler: () => null,
     getRuntimeEnvironment: async () => ({ platform: process.platform }),

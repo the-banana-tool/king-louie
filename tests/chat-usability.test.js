@@ -55,7 +55,7 @@ describe('chat:sendMessage and usability', () => {
     const h = chatHarness({ provider, providerType: 'groq', model: 'llama-3.3-70b', overrides: { getAvailability: () => availability } });
     const result = await h.send({ agentMode: false });
     assert.strictEqual(result.ok, false);
-    assert.strictEqual(result.error, 'Cannot use groq/llama-3.3-70b: Groq connection test failed at 2026-09-27T11:00:00.000Z: Invalid API Key');
+    assert.match(result.error, /^No usable model for main in the profile "Test profile"\. Skipped: groq\/llama-3\.3-70b \(Groq connection test failed at 2026-09-27T11:00:00\.000Z: Invalid API Key\)/);
     assert.strictEqual(called, false);
     assert.ok(h.sent.some((e) => e.channel === 'chat:messageError'));
   });
@@ -226,19 +226,5 @@ describe('chat:sendMessage and usability', () => {
       assert.deepStrictEqual(tested, [], 'an authFailed status must never be retested here');
       assert.deepStrictEqual(store.groq, seeded, 'the authFailed status must be untouched');
     });
-  });
-
-  // Fix round 1, finding 4 (minor, promoted): before M1, an empty
-  // providerModels entry (Ollama's own empty default) silently fell back to
-  // the provider's own default at call time. explain() refuses an empty
-  // model, so the resolved model is filled in before the check runs.
-  it("an empty resolved model falls back to the provider's own default before the check (finding 4)", async () => {
-    const availability = fakeAvailability();
-    const provider = { streamMessage: async () => ({}), getDefaultModel: () => 'llama-3.3-70b' };
-    const h = chatHarness({ provider, providerType: 'groq', model: '', overrides: { getAvailability: () => availability } });
-    const result = await h.send({ agentMode: false });
-    assert.notStrictEqual(result.ok, false, JSON.stringify(result));
-    const explain = availability.calls.find((c) => c[0] === 'explain');
-    assert.strictEqual(explain[2], 'llama-3.3-70b', 'explain() must see the provider default, not the empty string');
   });
 });

@@ -6,6 +6,7 @@ const IPC = require('../src/ipc/constants');
 const { initializeTools, toolRegistry } = require('../src/tools');
 const { CaseBusyError, CaseNotFoundError } = require('../src/cases');
 const { CASE_TOOL_NAMES } = require('../src/cases/chat-integration');
+const { createTurnModels } = require('../src/models/resolver');
 
 initializeTools();
 
@@ -17,7 +18,7 @@ function harness({
   loopContent = 'Answer text', contextAssembler = null, providerHasTools = true, streamMessageResult = null, usageTracker = null,
   reportProviderError = null
 } = {}) {
-  const calls = { begin: [], end: [], executorOptions: null, run: null, resolveInferenceCalls: 0, ownerHooks: [], routed: [], usage: [] };
+  const calls = { begin: [], end: [], executorOptions: null, run: null, snapshots: 0, ownerHooks: [], routed: [], usage: [] };
   const chat = { id: 'chat-1', title: 'Case chat', caseId, messages: [{ id: 'm0', sender: 'assistant', text: 'How can I help you?' }] };
   const runtime = {
     beginTurn: async (id, opts) => {
@@ -32,7 +33,12 @@ function harness({
     caseContext: (turn, { ownerMessages, ownerMessageTimes }) => ({ ...turn, runtime, ownerMessages, ownerMessageTimes }),
     routedProvider: (turn, spec) => {
       calls.routed.push(spec);
-      return { routed: true, getProviderName: () => spec.target.provider, sendMessageWithTools: async () => ({}) };
+      return {
+        routed: true,
+        getProviderName: () => spec.targets[0].provider,
+        ...(providerHasTools ? { sendMessageWithTools: async () => ({}) } : {}),
+        streamMessage: async () => streamMessageResult || {}
+      };
     },
     usageHook: (turn) => (ev) => { calls.usage.push([turn.turnId, ev]); },
     endTurn: async (turn, opts) => { calls.end.push({ turn, ...opts }); return 'abc1234'; }
@@ -55,18 +61,21 @@ function harness({
     setChats: () => {},
     appendMessageToChat: (_id, sender, text) => { chat.messages.push({ id: `m${chat.messages.length}`, sender, text }); return chat; },
     runHookEvent: async () => hookResult || {},
-    resolveInference: async () => {
-      calls.resolveInferenceCalls += 1;
-      if (calls.resolveInferenceCalls === inferenceErrorOnCall) throw new Error('no provider configured');
-      return {
-        providerType: 'openai',
-        provider: {
-          ...(providerHasTools ? { sendMessageWithTools: async () => ({}) } : {}),
-          streamMessage: async () => streamMessageResult || {}
-        },
-        model: 'test-model', tier: 'standard', timeoutMs: 1000
-      };
+    snapshotModels: () => {
+      calls.snapshots += 1;
+      if (calls.snapshots === inferenceErrorOnCall) throw new Error('no provider configured');
+      return createTurnModels({
+        profile: { id: 'p-test', name: 'Test profile', roles: { main: [{ provider: 'openai', model: 'test-model', effort: null }], worker: [], utility: [] } },
+        explain: () => ({ usable: true, reasons: [], notes: [] })
+      });
     },
+    routedProvider: ({ targets }) => ({
+      chatRouted: true,
+      current: () => ({ ...targets[0] }),
+      getProviderName: () => targets[0].provider,
+      ...(providerHasTools ? { sendMessageWithTools: async () => ({}) } : {}),
+      streamMessage: async () => streamMessageResult || {}
+    }),
     getUsageTracker: () => usageTracker,
     getConversationCompactor: () => null,
     getContextAssembler: () => contextAssembler,
@@ -132,7 +141,7 @@ describe('chat:sendMessage in case mode', () => {
     assert.strictEqual(calls.run, null);
     assert.strictEqual(calls.end.length, 0);
     assert.strictEqual(chat.messages.length, 1, 'no orphan user message');
-    assert.strictEqual(calls.resolveInferenceCalls, 0, 'no provider was ever resolved');
+    assert.strictEqual(calls.snapshots, 0, 'no model was ever resolved');
   });
 
   it('refuses the turn when the case is not found and runs nothing', async () => {
@@ -143,7 +152,7 @@ describe('chat:sendMessage in case mode', () => {
     assert.strictEqual(calls.run, null);
     assert.strictEqual(calls.end.length, 0);
     assert.strictEqual(chat.messages.length, 1, 'no orphan user message');
-    assert.strictEqual(calls.resolveInferenceCalls, 0, 'no provider was ever resolved');
+    assert.strictEqual(calls.snapshots, 0, 'no model was ever resolved');
   });
 
   it('ends the turn when a hook blocks the prompt, and runs nothing', async () => {
@@ -166,15 +175,9 @@ describe('chat:sendMessage in case mode', () => {
     assert.strictEqual(calls.end[0].journal, null);
   });
 
-  // Final review I5: a case turn's provider call goes through
-  // caseRuntime.routedProvider(), which routes every attempt through
-  // InferenceRouter#routeWithFallback — a fallback provider's own auth
-  // failure (for example groq failing over to openai, which has no key) is
-  // already reported by that loop against the provider that actually
-  // failed. Before this, chat-handlers.js's catch reported the same failure
-  // again, against inference.providerType — only the turn's *primary*
-  // target — which would have marked the owner's still-working primary
-  // provider (groq) auth-failed instead of the fallback that has none.
+  // A case turn's calls go through caseRuntime.routedProvider(), whose router
+  // reports each auth failure against the provider that actually failed; the
+  // send path never reports one itself (spec §6.7).
   it('does not report a case turn\'s failure itself — the router already reported the provider that actually failed', async () => {
     const reported = [];
     const authError = Object.assign(new Error('Incorrect API key provided'), { status: 401 });
@@ -241,7 +244,7 @@ describe('chat:sendMessage case turn, stage 2', () => {
     await send({ message: 'Where are we on the listing?' });
     assert.deepStrictEqual([calls.begin[0].source, calls.begin[0].ownerMessage], ['owner', 'Where are we on the listing?']);
     assert.deepStrictEqual(calls.ownerHooks, [calls.begin[0].turnId]);
-    assert.deepStrictEqual(calls.routed, [{ target: { provider: 'openai', model: 'test-model' }, tier: 'standard' }]);
+    assert.deepStrictEqual(calls.routed, [{ targets: [{ provider: 'openai', model: 'test-model', effort: null }] }]);
     assert.strictEqual(calls.loopProvider.routed, true);
     assert.strictEqual(calls.loopOptions.failoverPolicy.plan(new Error('x')).action, 'abort');
     calls.loopOptions.onUsageRecorded({ cost: 0.1 });
@@ -295,17 +298,17 @@ describe('chat:sendMessage case turn, stage 2', () => {
     assert.deepStrictEqual(calls.ownerHooks, []);
   });
 
-  it('leaves chats without a case on the plain provider, failover and prompter', async () => {
+  it('routes a chat without a case through the router, not the case runtime, with the plain prompter', async () => {
     const { calls, send } = harness({ caseId: null });
     await send({ agentMode: true });
     assert.deepStrictEqual(calls.routed, []);
-    assert.strictEqual(calls.loopProvider.routed, undefined);
-    assert.strictEqual(calls.loopOptions.failoverPolicy, undefined);
+    assert.strictEqual(calls.loopProvider.chatRouted, true);
+    // The routed provider fails over itself; its loop never retries (§6.7).
+    assert.strictEqual(calls.loopOptions.failoverPolicy.plan(new Error('x')).action, 'abort');
     assert.strictEqual(calls.loopOptions.onUsageRecorded, undefined);
     // Not casePrompter(prompter): that wraps into a plain { askUser, ... }
-    // object, so a case turn's prompter (checked above) is typeof 'object';
-    // the plain path's is whatever context.prompter itself is (a function
-    // here) (minor fix: this test's name promised this check).
+    // object, so a case turn's prompter is typeof 'object'; the plain
+    // path's is whatever context.prompter itself is (a function here).
     assert.strictEqual(typeof calls.loopOptions.prompter, 'function');
   });
 

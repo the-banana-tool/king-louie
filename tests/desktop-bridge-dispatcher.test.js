@@ -19,6 +19,7 @@ const { servedChannels } = require('../src/desktop-bridge/allowlist');
 const { createBridgeDispatcher, approvalsStatus } = require('../src/desktop-bridge/bridge-dispatcher');
 const { createConnection } = require('../src/desktop-bridge/connection');
 const { isLocalDesktopEvent, localDesktopDeviceId } = require('../src/core/origin');
+const { profileSettings, everyRole } = require('./helpers/profile-settings');
 
 const PROBE = 'KlTestBridgeProbe';
 let probeRuns = 0;
@@ -65,13 +66,7 @@ before(async () => {
     features: { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false },
     remoteApprovals: 'deny'
   });
-  const tiers = { provider: 'openai', model: 'fake' };
-  const settings = core.getSettings();
-  core.context.setSettings({
-    ...settings,
-    activeProvider: 'openai',
-    inference: { ...settings.inference, llmRouting: { enabled: false }, tierMap: { fast: tiers, standard: tiers, smart: tiers } }
-  });
+  core.context.setSettings(profileSettings(core.getSettings(), everyRole({ provider: 'openai', model: 'fake' })));
   core.saveProviderToken('openai', 'fake-token-123456');
   await core.start();
 });

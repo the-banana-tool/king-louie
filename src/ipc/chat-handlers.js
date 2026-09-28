@@ -5,6 +5,8 @@ const Advisor = require('../execution/advisor');
 const { createLogger } = require('../logging');
 const { buildCaseSystemPrompt, shapeToolDefinitions, casePrompter } = require('../cases/chat-integration');
 const { NO_RETRY } = require('../cases/roles');
+const { roleTimeoutMs } = require('../models/resolver');
+const { KL_PROVIDERS } = require('../models/provider-ids');
 const { partialMetricsOf } = require('../providers/abort');
 const { sumLlmCalls } = require('../tracking/llm-totals');
 
@@ -12,10 +14,14 @@ const log = createLogger('chat');
 const advisorLog = createLogger('advisor');
 const voiceLog = createLogger('voice');
 
-// A failed-but-not-auth connection test older than this is retested once at
-// send time, so a transient blip doesn't stick until the next scheduled
-// retest (spec 2026-09-27 §5.2, fix round 1).
-const STALE_TEST_RETEST_MS = 60 * 1000;
+// Before a send (spec 2026-09-27 §5.2): a never-tested provider is tested
+// now and a stale non-auth failure retested once (Availability#refreshForUse;
+// a host double with only ensureTested gets that).
+async function refreshProvider(availability, provider) {
+  if (typeof availability.refreshForUse === 'function') return availability.refreshForUse(provider);
+  if (typeof availability.ensureTested === 'function') return availability.ensureTested(provider);
+  return null;
+}
 
 function registerChatHandlers(ipcMain, context = {}) {
   const {
@@ -28,7 +34,8 @@ function registerChatHandlers(ipcMain, context = {}) {
     getLastAssistantMessage,
     getVoiceSettings,
     runHookEvent,
-    resolveInference,
+    snapshotModels,
+    routedProvider: createRoutedProvider,
     getRuntimeEnvironment,
     createToolExecutorWithApprovals,
     AgentLoop,
@@ -54,14 +61,13 @@ function registerChatHandlers(ipcMain, context = {}) {
   const activeRuns = new Map();
 
   /**
-   * Generate a contextual title for a chat using the LLM,
-   * then persist it and notify the renderer.
+   * Generate a contextual title for a chat with the turn's main models (the
+   * utility role takes this over in stage M3), then persist it and notify
+   * the renderer.
    */
-  async function autoNameChat(chatId, userMessage, assistantResponse, sender) {
+  async function autoNameChat(chatId, userMessage, assistantResponse, sender, provider) {
     try {
-      const inference = await resolveInference();
-      const provider = inference.provider;
-      if (typeof provider.sendMessage !== 'function') return;
+      if (!provider || typeof provider.sendMessage !== 'function') return;
 
       const titlePrompt = [
         {
@@ -70,13 +76,9 @@ function registerChatHandlers(ipcMain, context = {}) {
         }
       ];
 
-      const title = await provider.sendMessage(titlePrompt, {
-        model: inference.model,
-        temperature: 0.3,
-        max_tokens: 30
-      });
+      const title = await provider.sendMessage(titlePrompt, { temperature: 0.3, max_tokens: 30 });
 
-      const cleaned = title.replace(/^["']|["'.!]$/g, '').trim();
+      const cleaned = String(title || '').replace(/^["']|["'.!]$/g, '').trim();
       if (!cleaned) return;
 
       const chats = getChats();
@@ -281,18 +283,6 @@ function registerChatHandlers(ipcMain, context = {}) {
 
   const getSettings = context.getSettings;
 
-  /**
-   * Pick a cheap model for agent-loop tool iterations (after the first).
-   * Returns settings.inference.agentLoopModel if explicitly configured,
-   * otherwise null — no auto-downgrade. The previous auto-downgrade to
-   * haiku/mini/flash silently broke runs whose tool schemas (e.g. Browser,
-   * MCP servers with large param shapes) the cheap model couldn't accept.
-   */
-  function resolveAgentLoopModel() {
-    const settings = typeof getSettings === 'function' ? getSettings() : {};
-    return settings?.inference?.agentLoopModel || null;
-  }
-
   ipcMain.handle(IPC.CHAT_SEND_MESSAGE, wrapHandler(IPC.CHAT_SEND_MESSAGE, async (event, { chatId, message, images = [], documents = [], agentMode = false, sandboxMode = true }) => {
     let safeMessage = String(message || '');
     const normalizedImages = ImageHandler.normalizeMessageImages(images);
@@ -338,7 +328,8 @@ function registerChatHandlers(ipcMain, context = {}) {
     // `return` or a `throw` below needs its own endCaseTurn call.
     let fullResponse = '';
     let answerText = '';
-    let inference = null;
+    let turnModels = null;
+    let main = null;
     let llmSummary = {
       calls: [],
       totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
@@ -407,51 +398,30 @@ function registerChatHandlers(ipcMain, context = {}) {
         throw new Error('Chat not found');
       }
 
-      inference = await resolveInference({ message: safeMessage, agentMode });
+      // The turn's models, frozen now (spec 2026-09-27 §6.6): the profile
+      // and main override as they stand at launch serve every model call of
+      // this turn; a switch or a settings change applies to the next turn. A
+      // case turn froze its own at beginTurn, from case.yaml's choice.
+      turnModels = (caseTurn && caseTurn.models) || snapshotModels({ chatId, caseId });
 
-      // Before M1, an owner who never picked a model for a provider (an
-      // empty providerModels entry — Ollama ships one) got that provider's
-      // own default at call time. explain() refuses an empty model, so
-      // resolve the default now, before the check, not after (fix round 1).
-      if (!inference.model && typeof inference.provider?.getDefaultModel === 'function') {
-        inference.model = inference.provider.getDefaultModel();
-      }
-
-      // Any usable provider may answer (spec 2026-09-27 §5.5): its connection
-      // test passed, the model is in the account's list, and it can call tools
-      // (agent mode, case turns) or read images when the owner attached some.
-      // A provider never tested (a key saved elsewhere, a profile from before
-      // the catalog) is tested now rather than refused.
+      // Any usable model may answer (spec §5.5, §6.4): its provider's test
+      // passed, it is in the account's list, and it can call tools (agent
+      // mode, case turns) or read images when the owner attached some.
+      const needs = {
+        ...(agentMode || caseTurn ? { toolCall: true } : {}),
+        ...(normalizedImages.length > 0 ? { imageInput: true } : {})
+      };
       const availability = typeof context.getAvailability === 'function' ? context.getAvailability() : null;
       if (availability) {
-        await availability.ensureTested(inference.providerType);
-
-        // A transient failure (a network blip, a timeout, a local server
-        // that started late) must not stick until the next scheduled
-        // retest: retest once, sharing any in-flight run, when the last
-        // test failed, was not an auth failure, and is over a minute old
-        // (fix round 1). An auth failure is never retested here — only a
-        // fixed credential and its own retest change that.
-        const priorStatus = typeof availability.status === 'function' ? availability.status(inference.providerType) : null;
-        if (priorStatus && priorStatus.ok === false && !priorStatus.authFailed && priorStatus.checkedAt
-          && Date.now() - Date.parse(priorStatus.checkedAt) > STALE_TEST_RETEST_MS) {
-          await availability.test(inference.providerType);
-        }
-
-        const needs = {
-          ...(agentMode || caseTurn ? { toolCall: true } : {}),
-          ...(normalizedImages.length > 0 ? { imageInput: true } : {})
-        };
-        const verdict = availability.explain(inference.providerType, inference.model, { needs });
-        if (!verdict.usable) {
-          // Tagged so the catch block below never reports this refusal as a
-          // model-call failure (fix round 1): it would misclassify "Cannot
-          // use …" as an auth failure and overwrite the status that produced it.
-          const unusableError = new Error(`Cannot use ${inference.providerType}/${inference.model || '(no model)'}: ${verdict.reasons.join(' ')}`);
-          unusableError.code = 'MODEL_NOT_USABLE';
-          throw unusableError;
-        }
+        const providers = [...new Set(turnModels.candidatesFor('main').map((x) => x.provider))].filter((p) => KL_PROVIDERS.includes(p));
+        for (const p of providers) await refreshProvider(availability, p);
       }
+      // No usable main fails the turn before any call, listing every skipped
+      // target with its reason; an unusable override fails with the reason
+      // and a one-click "use the profile's main" (spec §15). Never a silent
+      // switch to another model.
+      main = turnModels.mustResolve('main', { needs });
+      const mainTarget = main.targets[0];
 
       // The gate above can run a connection test (20s or more): a Stop
       // pressed during it must end the run here, with no model call, rather
@@ -459,13 +429,12 @@ function registerChatHandlers(ipcMain, context = {}) {
       // review I2).
       if (abortController.signal.aborted) return finishStopped();
 
-      // If a prefix-type smart routing rule matched, strip the prefix from the message
-      if (inference.matchedPrefix) {
-        const { stripPrefix } = require('../providers/smart-routing');
-        safeMessage = stripPrefix(safeMessage, inference.matchedPrefix);
-      }
-
-      const provider = inference.provider;
+      // Every call of this turn walks main's resolved list (spec §6.7): any
+      // provider on the first call, the same provider after it. A case
+      // turn's calls go through the case runtime, which charges the case.
+      const provider = caseTurn
+        ? caseRuntime.routedProvider(caseTurn, { targets: main.targets })
+        : createRoutedProvider({ targets: main.targets, signal: abortController.signal });
 
       const chatRaw = getChats().find((item) => item.id === chatId);
       if (!chatRaw) {
@@ -509,8 +478,7 @@ function registerChatHandlers(ipcMain, context = {}) {
       // matches something the owner actually said in this chat (Task 8 fix
       // round). Collect every user-sender message's text from the chat,
       // plus the message being sent this turn if it isn't already there —
-      // it was persisted (above) before smart-routing prefix stripping, so
-      // the post-strip safeMessage may not textually match that entry.
+      // it was persisted above, and may not be in chatRaw's copy yet.
       // ownerMessageTimes runs in step with ownerMessages; this turn's
       // message is stamped now (stage 2: a direction quote must be newer
       // than the failure report).
@@ -536,9 +504,8 @@ function registerChatHandlers(ipcMain, context = {}) {
         : null;
 
       const options = {
-        model: inference.model,
-        timeoutMs: inference.timeoutMs,
-        tier: inference.tier,
+        model: mainTarget.model,
+        timeoutMs: roleTimeoutMs(settings, 'main'),
         runId
       };
 
@@ -640,21 +607,15 @@ function registerChatHandlers(ipcMain, context = {}) {
           log.warn(`Case tools could not be offered for case ${caseId}: ${reason}.`);
         }
         if (canUseAgentMode) {
-          const loopModel = resolveAgentLoopModel();
           const embeddingProvider = contextAssembler?.embeddingProvider || null;
           const toolResultsDir = typeof getToolResultsDir === 'function' ? getToolResultsDir() : null;
-          // A case turn routes through the runtime: the owner's selection is
-          // the first target of routeWithFallback, usage is charged to the
-          // case, and AskUser is refused in favour of the Ask tool.
-          const loopProvider = caseTurn
-            ? caseRuntime.routedProvider(caseTurn, { target: { provider: inference.providerType, model: inference.model }, tier: inference.tier })
-            : provider;
-          const loop = new AgentLoop(loopProvider, executor, {
+          const loop = new AgentLoop(provider, executor, {
             maxIterations: 40,
-            loopModel,
             embeddingProvider,
             usageTracker: typeof getUsageTracker === 'function' ? getUsageTracker() : null,
-            ...(caseTurn ? { onUsageRecorded: caseRuntime.usageHook(caseTurn), failoverPolicy: NO_RETRY } : {}),
+            // The routed provider fails over itself (spec §6.7); the loop never retries.
+            failoverPolicy: NO_RETRY,
+            ...(caseTurn ? { onUsageRecorded: caseRuntime.usageHook(caseTurn) } : {}),
             abortSignal: abortController.signal,
             toolResultsDir,
             prompter: caseTurn ? casePrompter(prompter) : prompter,
@@ -703,16 +664,16 @@ function registerChatHandlers(ipcMain, context = {}) {
             totals: result?.llm?.totals || sumLlmCalls(result?.llm?.calls || [])
           };
 
-          // Run advisor review if enabled in settings
+          // The advisor reviews on the turn's main model (spec §8; advisor.model is gone, §13).
           const advisorSettings = typeof getSettings === 'function' ? getSettings() : {};
           const advisorConfig = advisorSettings.advisor;
-          if (advisorConfig?.enabled && advisorConfig?.model && !abortController.signal.aborted) {
+          if (advisorConfig?.enabled && !abortController.signal.aborted) {
+            const advisorModel = mainTarget.model;
             try {
               safeSend(event.sender, 'chat:advisorStarted', { chatId });
-              const advisorProvider = provider; // Use same provider by default
               const advisor = new Advisor({
-                provider: advisorProvider,
-                model: advisorConfig.model,
+                provider,
+                model: advisorModel,
                 usageTracker: typeof getUsageTracker === 'function' ? getUsageTracker() : null
               });
 
@@ -722,13 +683,13 @@ function registerChatHandlers(ipcMain, context = {}) {
 
               if (reviewResult.review) {
                 // Append advisor review as a system note
-                const reviewNote = `\n\n---\n**Advisor Review** (${advisorConfig.model}):\n${reviewResult.review}`;
+                const reviewNote = `\n\n---\n**Advisor Review** (${advisorModel}):\n${reviewResult.review}`;
                 fullResponse += reviewNote;
                 safeSend(event.sender, 'chat:messageChunk', { chatId, responseId, chunk: reviewNote });
                 safeSend(event.sender, 'chat:advisorCompleted', {
                   chatId,
                   verdict: reviewResult.verdict,
-                  model: advisorConfig.model
+                  model: advisorModel
                 });
               }
             } catch (err) {
@@ -746,7 +707,8 @@ function registerChatHandlers(ipcMain, context = {}) {
           } catch (err) {
             if (!abortController.signal.aborted) throw err;
             // Stopped mid-call: keep the usage the provider reported so far.
-            streamResult = { llmMetrics: partialMetricsOf(err, { provider: inference.providerType, model: inference.model }) };
+            const at = typeof provider.current === 'function' ? provider.current() : mainTarget;
+            streamResult = { llmMetrics: partialMetricsOf(err, { provider: at.provider, model: at.model }) };
           }
           if (abortController.signal.aborted) stopped = true;
 
@@ -803,7 +765,7 @@ function registerChatHandlers(ipcMain, context = {}) {
 
       // Auto-name chats that still have the default title
       if (chat.title === 'New Chat' && fullResponse) {
-        autoNameChat(chatId, safeMessage, fullResponse, event.sender).catch(() => {});
+        autoNameChat(chatId, safeMessage, fullResponse, event.sender, createRoutedProvider({ targets: main.targets })).catch(() => {});
       }
 
       return updatedChat;
@@ -812,30 +774,14 @@ function registerChatHandlers(ipcMain, context = {}) {
         return finishStopped();
       }
       await endCaseTurn({ summary: `turn failed: ${error?.message || error}`, journal: null });
-      // A 401 or 403 from an actual model call marks the provider unusable
-      // at once (spec §5.3). The gate's own refusal (MODEL_NOT_USABLE,
-      // above) is never reported here: it is not a call failure, and
-      // reporting it would misclassify "Cannot use …" as an auth failure
-      // and overwrite the very status that produced it (fix round 1).
-      //
-      // A case turn's call goes through caseRuntime.routedProvider(), which
-      // routes every attempt through InferenceRouter#routeWithFallback —
-      // that loop already reports each attempt's own auth failure against
-      // whichever provider actually made it (including a fallback, e.g.
-      // groq to openai). Reporting again here, against
-      // inference.providerType (only the turn's *primary* target), would
-      // double-report it and, when a fallback is the one that 401s,
-      // misattribute it: the owner's still-working primary provider would
-      // be marked auth-failed instead of the fallback that has no key
-      // (final review I5). caseRuntime, not caseTurn, is the guard:
-      // endCaseTurn (just above) already nulled caseTurn.
-      if (inference && !caseRuntime && error?.code !== 'MODEL_NOT_USABLE' && typeof context.reportProviderError === 'function') {
-        context.reportProviderError(inference.providerType, error);
-      }
+      // The router already reported any auth failure against the provider
+      // that actually failed (spec §5.3, §6.7); the send path never does.
       safeSend(event.sender, 'chat:messageError', {
         chatId,
         responseId,
-        error: error.message
+        error: error.message,
+        ...(error?.code === 'MAIN_OVERRIDE_UNUSABLE' ? { action: { kind: 'use-profile-main' } } : {}),
+        ...(error?.code === 'NO_USABLE_MODEL' ? { action: { kind: 'open-models' } } : {})
       });
       throw error;
     } finally {

@@ -13,6 +13,7 @@ const { Tool } = require('../../src/tools/tool-schema');
 const { toolRegistry } = require('../../src/tools');
 const { addSink } = require('../../src/logging');
 const { bridgeFileRecord, writeFileAtomic } = require('../../src/desktop-bridge/pairing');
+const { profileSettings, everyRole } = require('../helpers/profile-settings');
 
 const dataDir = path.resolve(process.argv[process.argv.indexOf('--data-dir') + 1]);
 const configDir = path.join(path.dirname(dataDir), 'config');
@@ -51,9 +52,7 @@ ProviderFactory.registerProvider('openai', StubProvider);
 
 // Seed the provider settings through the stores, before the service opens them.
 const seed = createCore(buildServicePorts({ dataDir, chatDataDefaults: CHAT_DATA_DEFAULTS }));
-const tiers = { provider: 'openai', model: 'stub' };
-const settings = seed.getSettings();
-seed.context.setSettings({ ...settings, activeProvider: 'openai', inference: { ...settings.inference, llmRouting: { enabled: false }, tierMap: { fast: tiers, standard: tiers, smart: tiers } } });
+seed.context.setSettings(profileSettings(seed.getSettings(), everyRole({ provider: 'openai', model: 'stub' })));
 seed.saveProviderToken('openai', 'sk-e2e-stub-token');
 
 let boundPort = null;

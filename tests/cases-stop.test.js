@@ -61,7 +61,7 @@ function fakeRuntime({ running = null } = {}) {
     },
     runOwnerMessageHooks: async () => ({ notes: [], triggers: [] }),
     caseContext: (turn, extra) => ({ ...turn, ...extra }),
-    routedProvider: (_turn, spec) => ({ getProviderName: () => spec.target.provider, sendMessageWithTools: async () => ({}) }),
+    routedProvider: (_turn, spec) => ({ getProviderName: () => spec.targets[0].provider, sendMessageWithTools: async () => ({}) }),
     usageHook: () => () => {},
     endTurn: async (turn, opts) => { calls.end.push({ turn, ...opts }); },
     abortTurn: (caseId, reason) => { calls.aborted.push([caseId, reason]); return Boolean(running); },
