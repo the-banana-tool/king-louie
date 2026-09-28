@@ -49,7 +49,7 @@ Your output MUST be a valid JSON task graph wrapped in a ```json code block. The
       "dependsOn": [],
       "priority": 1,
       "estimatedComplexity": "low | medium | high",
-      "preferredModel": "optional — suggest a specific provider:model if the task benefits from a particular model's strengths",
+      "role": "optional — the model role for this task: utility for small mechanical jobs, main for hard reasoning; leave it out to use the agent's own role",
       "tools": ["optional list of tools this task will likely need"]
     }
   ],
@@ -76,7 +76,7 @@ Planning rules:
    - "main" for general tasks, coordination, communication
    - "planner" for sub-planning complex subtasks
 5. If a task is complex enough to need its own plan, set agentId to "planner" — this enables recursive decomposition.
-6. Suggest preferredModel when task characteristics strongly favor a specific model (e.g., vision tasks → gemini, fast simple tasks → groq, deep reasoning → anthropic opus).
+6. Set role only when a task clearly needs more (main) or less (utility) than its agent's usual role. Never name a model: the owner assigns models to roles.
 7. Exploration is mandatory, not optional — see the EXPLORATION IS REQUIRED section above. Every task must reference real paths/symbols verified via Read/Glob/Grep.
 8. If the goal is ambiguous AFTER exploration (not before), ask clarifying questions using AskUser before producing the plan.
 9. Always consider error cases — if a task might fail, note recovery steps in the description.

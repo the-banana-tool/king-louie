@@ -124,6 +124,8 @@ class WorkflowEngine extends EventEmitter {
         title: t.title || '',
         description: t.description || '',
         agentId: t.agentId || 'main',
+        // The model role for this task (models spec 2026-09-27 §8), else the agent's.
+        role: typeof t.role === 'string' && t.role.trim() ? t.role.trim() : null,
         dependsOn: Array.isArray(t.dependsOn) ? t.dependsOn : [],
         priority: t.priority || 999,
         status: TASK_STATUS.PENDING,
@@ -513,15 +515,15 @@ class WorkflowEngine extends EventEmitter {
         executeOptions.allowedDirectories = snapshot.allowedDirectories;
       }
     }
+    // The task's model role (models spec 2026-09-27 §8), else its agent's.
+    if (task.role) executeOptions.role = task.role;
+    // A planned preferredModel was written by the planner LLM, so it must
+    // already be in the profile (M-D2): the core matches it as
+    // "provider:model", "provider/model" or a bare id and refuses the rest.
+    // It is never split here: an Ollama id has a colon of its own.
     if (task.preferredModel) {
-      // Parse "provider:model" format
-      const parts = task.preferredModel.split(':');
-      if (parts.length === 2) {
-        executeOptions.provider = parts[0];
-        executeOptions.model = parts[1];
-      } else {
-        executeOptions.model = task.preferredModel;
-      }
+      executeOptions.model = String(task.preferredModel).trim();
+      executeOptions.requireInProfile = true;
     }
 
     // Parent-chat context: pull the chat that launched this workflow and

@@ -43,6 +43,9 @@ function registerAgentHandlers(ipcMain, context = {}) {
     return {
       execute: async (agent, message, options = {}) => {
         let runtime;
+        // Safe only because the orchestrator dispatches each task
+        // synchronously up to its first await, so this check-and-clear of
+        // `spare` never races a concurrent call for the same agent.
         if (spare && spare.agentId === agent.id) {
           runtime = spare.runtime;
           spare = null;

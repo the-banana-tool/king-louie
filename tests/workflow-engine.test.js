@@ -563,4 +563,35 @@ describe('WorkflowEngine', () => {
       assert.strictEqual(loaded.status, WORKFLOW_STATUS.PAUSED);
     });
   });
+
+  describe('model roles (models spec 2026-09-27 §8)', () => {
+    it('passes a task\'s role, and a planned model only for checking against the profile', async () => {
+      const seen = [];
+      engine.agentExecutorAdapter = {
+        execute: async (_agent, _msg, opts) => {
+          seen.push(opts);
+          return { type: 'complete', content: 'done', iterations: 1, tools: [], llm: { totals: {} } };
+        }
+      };
+      const wf = await engine.create({
+        tasks: [
+          { id: 'a', title: 'A', description: 'Do A', role: ' utility ' },
+          { id: 'b', title: 'B', description: 'Do B', preferredModel: 'ollama:gpt-oss:120b', dependsOn: ['a'] }
+        ]
+      });
+      assert.strictEqual(wf.tasks[0].role, 'utility');
+      assert.strictEqual(wf.tasks[1].role, null);
+      await engine.run(wf.id);
+      assert.strictEqual(seen[0].role, 'utility');
+      assert.strictEqual('requireInProfile' in seen[0], false);
+      assert.deepStrictEqual([seen[1].model, seen[1].requireInProfile, seen[1].provider], ['ollama:gpt-oss:120b', true, undefined]);
+    });
+
+    it('the planner suggests a role, never a model', () => {
+      const template = fs.readFileSync(path.join(__dirname, '..', 'templates', 'planner.md.template'), 'utf8');
+      assert.match(template, /"role":/);
+      assert.doesNotMatch(template, /"preferredModel"/);
+      assert.doesNotMatch(template, /vision tasks → gemini/);
+    });
+  });
 });
