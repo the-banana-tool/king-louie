@@ -10,6 +10,7 @@ const { capabilitiesOf } = require('./capabilities');
 const roles = require('./roles');
 const { Profiles, ProfileError, normalizeProfile, snapshotFromSettings } = require('./profiles');
 const { createTurnModels, UnknownRoleError, NoUsableModelError, roleTimeoutMs } = require('./resolver');
+const { runTierMigration, needsMigration } = require('./migrate-tiers');
 
 let active = null;
 let bundled = null;
@@ -44,6 +45,8 @@ module.exports = {
   UnknownRoleError,
   NoUsableModelError,
   roleTimeoutMs,
+  runTierMigration,
+  needsMigration,
   ...roles,
   ...providerIds
 };
