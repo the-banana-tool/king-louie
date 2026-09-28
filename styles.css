@@ -3065,6 +3065,17 @@ body {
 button.models-picker-item:hover { background: var(--hover, rgba(127, 127, 127, 0.15)); }
 div.models-picker-item.is-unusable { cursor: default; }
 .models-migration-notes { margin: 6px 0 0 18px; font-size: 0.9em; }
+.models-profile-broken { border-color: var(--error); }
+.models-profile-broken .provider-message.error { color: var(--error); }
+.models-broken-badge {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--error-bg);
+  color: var(--error);
+  border: 1px solid var(--error);
+  font-weight: 600;
+}
 
 /* Chat header model switcher and Retry with… (spec 2026-09-27 §6.5, §9) */
 .chat-models-switcher { display: flex; align-items: center; gap: 6px; }

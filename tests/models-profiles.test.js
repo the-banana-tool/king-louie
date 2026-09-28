@@ -197,6 +197,28 @@ describe('Profiles', () => {
     assert.ok(lines.some((l) => l.includes('p-bad')), lines.join('\n'));
   });
 
+  it('keeps a stored profile that fails to parse, verbatim and in place, through every write (m5)', () => {
+    const originalWarn = console.warn;
+    console.warn = () => {};
+    try {
+      const bad = { id: 'p-bad', name: 'Hand edited', roles: { main: [{ provider: 'openai' }] }, futureKey: { v: 2 } };
+      const { profiles, mem } = makeProfiles({ models: { profiles: [bad, { id: 'p-ok', name: 'OK', roles: {} }], defaultProfileId: 'p-ok' } });
+      assert.deepStrictEqual(profiles.broken(), [{ index: 0, id: 'p-bad', name: 'Hand edited', reason: 'Every model in role "main" needs a provider and a model.' }]);
+      const made = profiles.create({ name: 'New', roles: { main: [target('openai', 'gpt-5.5')] } });
+      profiles.update('p-ok', { name: 'OK renamed' });
+      profiles.setDefault(made.id);
+      profiles.duplicate('p-ok');
+      profiles.remove('p-ok');
+      const stored = mem.peek().models.profiles;
+      assert.deepStrictEqual(stored[0], bad, 'the broken entry survives every write, verbatim');
+      assert.deepStrictEqual(stored.slice(1).map((p) => p.name), ['New', 'OK renamed copy']);
+      assert.deepStrictEqual(profiles.list().map((p) => p.name), ['New', 'OK renamed copy']);
+      assert.strictEqual(profiles.broken().length, 1);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
   it('reads custom roles, dropping invalid ones', () => {
     const { profiles } = makeProfiles({ models: { customRoles: [{ id: 'legal-drafting', fallback: 'worker' }, { id: 'Bad', fallback: 'main' }] } });
     assert.deepStrictEqual(profiles.customRoles(), [{ id: 'legal-drafting', description: '', needs: {}, fallback: 'worker' }]);

@@ -181,6 +181,8 @@ function createModelChoices({
   function profilesView() {
     return {
       profiles: profiles.list().map((p) => profileView(p, { explain: explainTarget, catalog })),
+      // Stored profiles that fail to parse: kept as stored, shown with the reason.
+      broken: typeof profiles.broken === 'function' ? profiles.broken() : [],
       defaultProfileId: profiles.defaultId(),
       customRoles: profiles.customRoles()
     };

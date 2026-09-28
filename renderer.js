@@ -6352,7 +6352,7 @@ async function loadModelProfiles() {
   if (!dom.modelsProfileList || !window.electron?.models?.profiles) return;
   try {
     const result = unwrapIpcResult(await window.electron.models.profiles(), 'Unable to load the model profiles.');
-    appState.modelProfiles = { profiles: result.profiles || [], defaultProfileId: result.defaultProfileId || null };
+    appState.modelProfiles = { profiles: result.profiles || [], broken: result.broken || [], defaultProfileId: result.defaultProfileId || null };
     renderModelProfileList();
   } catch (err) {
     setModelsStatus(err.message, true);
@@ -6363,7 +6363,29 @@ function renderModelProfileList() {
   const list = dom.modelsProfileList;
   if (!list) return;
   list.textContent = '';
-  const { profiles = [], defaultProfileId = null } = appState.modelProfiles || {};
+  const { profiles = [], broken = [], defaultProfileId = null } = appState.modelProfiles || {};
+  // A stored profile that fails to parse is kept as stored and shown here
+  // as broken, with the reason; every string goes in through textContent.
+  for (const entry of broken) {
+    const card = document.createElement('div');
+    card.className = 'provider-card models-profile-card models-profile-broken';
+    const header = document.createElement('div');
+    header.className = 'provider-header';
+    const title = document.createElement('div');
+    title.className = 'provider-title';
+    title.textContent = entry.name || entry.id || `Stored profile ${Number(entry.index) + 1}`;
+    header.appendChild(title);
+    const badge = document.createElement('span');
+    badge.className = 'models-broken-badge';
+    badge.textContent = 'Broken';
+    header.appendChild(badge);
+    card.appendChild(header);
+    const reason = document.createElement('div');
+    reason.className = 'provider-message error';
+    reason.textContent = `This stored profile cannot be read: ${entry.reason || 'unknown reason'} It is kept as stored and not used.`;
+    card.appendChild(reason);
+    list.appendChild(card);
+  }
   if (!profiles.length) {
     const empty = document.createElement('div');
     empty.className = 'provider-message';

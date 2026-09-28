@@ -31,6 +31,10 @@ async function waitUntil(fn, timeoutMs = 10000) {
   throw new Error(`condition not met within ${timeoutMs} ms`);
 }
 
+// A stored profile that fails to parse, with markup in its name that must
+// render as text.
+const BROKEN_PROFILE = { id: 'p-broken', name: '<img src=x id=broken-img>Hand edited', kind: 'user', roles: { main: [{ provider: 'ollama' }] } };
+
 describe('E2E: profiles, the main switcher and Retry with…', () => {
   let ctx;
   let server;
@@ -48,7 +52,11 @@ describe('E2E: profiles, the main switcher and Retry with…', () => {
           settings: {
             models: {
               ollama: { baseUrl: `${server.url}/ollama` },
-              profiles: [{ id: 'p-local', name: 'Local', kind: 'user', roles: { main: [{ provider: 'ollama', model: 'test-model', effort: null }], worker: [], utility: [] } }],
+              profiles: [
+                { id: 'p-local', name: 'Local', kind: 'user', roles: { main: [{ provider: 'ollama', model: 'test-model', effort: null }], worker: [], utility: [] } },
+                // Fails to parse (final review m5): kept as stored, shown as broken.
+                BROKEN_PROFILE
+              ],
               defaultProfileId: 'p-local'
             }
           }
@@ -177,17 +185,25 @@ describe('E2E: profiles, the main switcher and Retry with…', () => {
     await evaluate(ctx, `document.getElementById('open-settings-btn').click(); true`);
     await waitFor(ctx, `!document.getElementById('settings-drawer').hidden`);
     await evaluate(ctx, `(() => { const s = document.getElementById('settings-nav-select'); s.value = 'models'; s.dispatchEvent(new Event('change')); return true; })()`);
-    await waitFor(ctx, `document.querySelectorAll('#models-profile-list .models-profile-card').length === 1`);
+    await waitFor(ctx, `document.querySelectorAll('#models-profile-list .models-profile-card:not(.models-profile-broken)').length === 1`);
+    // The broken stored profile shows as broken, with the reason, as text.
+    const broken = await evaluate(ctx, `(() => { const c = document.querySelector('#models-profile-list .models-profile-broken'); return c ? { text: c.textContent, img: !!document.getElementById('broken-img') } : null; })()`);
+    assert.ok(broken, 'a broken profile card is shown');
+    assert.strictEqual(broken.img, false, 'the stored name is set as text, never markup');
+    assert.match(broken.text, /<img src=x id=broken-img>Hand edited/);
+    assert.match(broken.text, /Broken/);
+    assert.match(broken.text, /cannot be read: Every model in role "main" needs a provider and a model./);
     await evaluate(ctx, `document.getElementById('models-new-profile-btn').click(); true`);
     await evaluate(ctx, `(() => { const i = document.getElementById('models-profile-name'); i.value = 'Second'; i.dispatchEvent(new Event('input')); return true; })()`);
     await evaluate(ctx, `document.querySelector('[data-add-role="main"]').click(); true`);
     await waitFor(ctx, `!!document.querySelector('.models-picker-item[data-model="test-model"]')`);
     await evaluate(ctx, `document.querySelector('.models-picker-item[data-model="test-model"]').click(); true`);
     await evaluate(ctx, `document.getElementById('models-profile-save-btn').click(); true`);
-    await waitFor(ctx, `document.querySelectorAll('#models-profile-list .models-profile-card').length === 2`);
+    await waitFor(ctx, `document.querySelectorAll('#models-profile-list .models-profile-card:not(.models-profile-broken)').length === 2`);
     const data = JSON.parse(fs.readFileSync(path.join(ctx.userDataDir, 'chat-data.json'), 'utf8'));
     const second = data.settings.models.profiles.find((p) => p.name === 'Second');
     assert.deepStrictEqual(second.roles.main, [{ provider: 'ollama', model: 'test-model', effort: null }]);
+    assert.deepStrictEqual(data.settings.models.profiles.find((p) => p.id === 'p-broken'), BROKEN_PROFILE, 'the save kept the broken profile verbatim');
     await evaluate(ctx, `document.getElementById('close-settings-btn').click(); true`);
   });
 });

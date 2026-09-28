@@ -117,21 +117,63 @@ class Profiles {
     return isPlainObject(models) ? models : {};
   }
 
+  _stored() {
+    const stored = this._models().profiles;
+    return Array.isArray(stored) ? stored : [];
+  }
+
+  // Writes the usable profiles, keeping every stored entry that fails to
+  // parse verbatim and in place (a hand edit, a bad effort, a later
+  // version's shape): no create, update, remove or set-default may delete
+  // one (final review m5). A stored usable profile is replaced by the one
+  // of the same id in `profiles`, or dropped when it is not there; new
+  // profiles go at the end.
   _write(profiles, defaultProfileId) {
     const settings = this.getSettings() || {};
-    this.setSettings({ ...settings, models: { ...(settings.models || {}), profiles, defaultProfileId } });
+    const next = new Map(profiles.map((p) => [p.id, p]));
+    const placed = new Set();
+    const out = [];
+    for (const raw of this._stored()) {
+      let parsed = null;
+      try {
+        parsed = normalizeProfile(raw);
+      } catch {
+        out.push(raw);
+        continue;
+      }
+      if (next.has(parsed.id)) {
+        out.push(next.get(parsed.id));
+        placed.add(parsed.id);
+      }
+    }
+    for (const p of profiles) if (!placed.has(p.id)) out.push(p);
+    this.setSettings({ ...settings, models: { ...(settings.models || {}), profiles: out, defaultProfileId } });
   }
 
   list() {
-    const stored = Array.isArray(this._models().profiles) ? this._models().profiles : [];
     const out = [];
-    for (const raw of stored) {
+    for (const raw of this._stored()) {
       try {
         out.push(normalizeProfile(raw));
       } catch (err) {
         log.warn(`Ignoring stored profile ${raw?.id || '(no id)'}: ${err.message}`);
       }
     }
+    return out;
+  }
+
+  // Stored entries that fail to parse, with the reason, for the Models tab.
+  // Their id and name are shown as stored (strings only), never trusted.
+  broken() {
+    const out = [];
+    this._stored().forEach((raw, index) => {
+      try {
+        normalizeProfile(raw);
+      } catch (err) {
+        const str = (v) => (typeof v === 'string' ? v.slice(0, MAX_NAME * 2) : null);
+        out.push({ index, id: str(raw?.id), name: str(raw?.name), reason: err.message });
+      }
+    });
     return out;
   }
 
