@@ -143,6 +143,23 @@ function registerModelsHandlers(ipcMain, context = {}) {
     context.setSettings({ ...settings, models: { ...models, catalog: catalogSettings, overrides: nextOverrides } });
     return { ok: true, catalog: catalog().status() };
   });
+
+  // ---- The King Louie profile (stage M3, spec §7, §11) ----
+
+  const KING_LOUIE_SETTING_KEYS = ['autoAccept', 'preferLocalUtility', 'bandPoints', 'workerAgenticRatio', 'utilityIntelligenceRatio'];
+
+  handle(IPC.MODELS_KING_LOUIE, async () => ({ ok: true, view: choices().kingLouieView() }));
+
+  handle(IPC.MODELS_ACCEPT_PROPOSAL, async ({ proposalId }) => ({ ok: true, profile: choices().acceptProposal(text(proposalId)) }));
+
+  handle(IPC.MODELS_DISMISS_PROPOSAL, async ({ proposalId }) => ({ ok: true, ...choices().dismissProposal(text(proposalId)) }));
+
+  handle(IPC.MODELS_SAVE_KING_LOUIE_SETTINGS, async (payload) => {
+    const patch = Object.fromEntries(KING_LOUIE_SETTING_KEYS.filter((k) => payload[k] !== undefined).map((k) => [k, payload[k]]));
+    return { ok: true, view: choices().saveKingLouieSettings(patch) };
+  });
+
+  handle(IPC.MODELS_DUPLICATE_KING_LOUIE, async ({ name }) => ({ ok: true, profile: choices().duplicateKingLouie({ name: text(name) || undefined }) }));
 }
 
 module.exports = { registerModelsHandlers };

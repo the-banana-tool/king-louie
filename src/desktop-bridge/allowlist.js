@@ -38,7 +38,9 @@ const RENDERER_EVENTS = new Set([
   // Cases stage 2: the one event the case runtime emits (status, questions,
   // budget). A later case event is added here by name, not by prefix.
   'case:changed',
-  'models:statusChanged', 'models:catalogUpdated'
+  'models:statusChanged', 'models:catalogUpdated',
+  // Models M3: the King Louie proposal, recomputed on the service.
+  'models:proposalChanged'
 ]);
 
 // Settings tabs whose domains the service does not serve while attached.

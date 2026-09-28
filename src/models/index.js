@@ -12,6 +12,7 @@ const { Profiles, ProfileError, normalizeProfile, snapshotFromSettings } = requi
 const { createTurnModels, UnknownRoleError, NoUsableModelError, roleTimeoutMs } = require('./resolver');
 const { runTierMigration, needsMigration } = require('./migrate-tiers');
 const suggester = require('./suggester');
+const { KingLouieProfile, KING_LOUIE_NAME } = require('./king-louie');
 
 let active = null;
 let bundled = null;
@@ -49,6 +50,8 @@ module.exports = {
   runTierMigration,
   needsMigration,
   suggester,
+  KingLouieProfile,
+  KING_LOUIE_NAME,
   ...roles,
   ...providerIds
 };

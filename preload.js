@@ -976,7 +976,25 @@ contextBridge.exposeInMainWorld(
         return ipcRenderer.invoke('models:saveCatalogSettings', payload);
       },
       onStatusChanged: (callback) => registerAdditive('models:statusChanged', callback),
-      onCatalogUpdated: (callback) => registerAdditive('models:catalogUpdated', callback)
+      onCatalogUpdated: (callback) => registerAdditive('models:catalogUpdated', callback),
+      kingLouie: () => ipcRenderer.invoke('models:kingLouie'),
+      acceptProposal: (proposalId) => {
+        validateString(proposalId, 'proposalId', { minLength: 1 });
+        return ipcRenderer.invoke('models:acceptProposal', { proposalId });
+      },
+      dismissProposal: (proposalId) => {
+        validateString(proposalId, 'proposalId', { minLength: 1 });
+        return ipcRenderer.invoke('models:dismissProposal', { proposalId });
+      },
+      saveKingLouieSettings: (payload) => {
+        validateObject(payload, 'payload');
+        return ipcRenderer.invoke('models:saveKingLouieSettings', payload);
+      },
+      duplicateKingLouie: (payload = {}) => {
+        validateObject(payload, 'payload');
+        return ipcRenderer.invoke('models:duplicateKingLouie', payload);
+      },
+      onProposalChanged: (callback) => registerAdditive('models:proposalChanged', callback)
     },
     cron: {
       list: () => ipcRenderer.invoke('cron:list'),

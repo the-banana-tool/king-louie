@@ -7,7 +7,7 @@
 const { createLogger } = require('../logging');
 const { normalizeTarget, targetLabel, targetKey } = require('../models/roles');
 const { profileView } = require('../models/profile-view');
-const { checkEffort } = require('../models/profiles');
+const { checkEffort, ProfileError } = require('../models/profiles');
 
 const log = createLogger('model-choices');
 const PICKER_UNUSABLE_CAP = 400;
@@ -21,7 +21,8 @@ function createModelChoices({
   getChats,
   setChats,
   appendMessageToChat,
-  getCaseRuntime = () => null
+  getCaseRuntime = () => null,
+  kingLouie = null
 } = {}) {
   for (const [name, value] of Object.entries({ profiles, explainTarget, snapshotModels, getChats, setChats, appendMessageToChat })) {
     if (!value) throw new Error(`createModelChoices needs ${name}.`);
@@ -189,6 +190,10 @@ function createModelChoices({
   }
 
   function saveProfile({ id = null, name, roles } = {}) {
+    // The King Louie profile changes only by accepting a proposal (spec §7).
+    if (id && profiles.get(id)?.kind === 'king-louie') {
+      throw new ProfileError('KING_LOUIE_READ_ONLY', 'The King Louie profile changes only when you accept a proposal. Duplicate it to make your own.');
+    }
     const saved = id ? profiles.update(id, { name, roles }) : profiles.create({ name, roles });
     return profileView(saved, { explain: explainTarget, catalog });
   }
@@ -218,7 +223,49 @@ function createModelChoices({
     return { usable, unusable };
   }
 
-  return { chatView, setChatProfile, setMainOverride, removeProfile, profilesView, saveProfile, duplicateProfile, setDefaultProfile, pickerView };
+  // The King Louie profile (spec §7, §11).
+  const kl = () => {
+    if (!kingLouie) throw new Error('The King Louie profile is not available in this host.');
+    return kingLouie;
+  };
+
+  function kingLouieView() {
+    return kl().view();
+  }
+
+  function acceptProposal(proposalId) {
+    return profileView(kl().accept(proposalId), { explain: explainTarget, catalog });
+  }
+
+  function dismissProposal(proposalId) {
+    return kl().dismiss(proposalId);
+  }
+
+  function saveKingLouieSettings(patch = {}) {
+    kl().saveSettings(patch);
+    return kl().view();
+  }
+
+  function duplicateKingLouie({ name } = {}) {
+    return profileView(kl().duplicateAsProfile({ name }), { explain: explainTarget, catalog });
+  }
+
+  return {
+    chatView,
+    setChatProfile,
+    setMainOverride,
+    removeProfile,
+    profilesView,
+    saveProfile,
+    duplicateProfile,
+    setDefaultProfile,
+    pickerView,
+    kingLouieView,
+    acceptProposal,
+    dismissProposal,
+    saveKingLouieSettings,
+    duplicateKingLouie
+  };
 }
 
 module.exports = { createModelChoices };

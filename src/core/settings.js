@@ -6,6 +6,7 @@ const { DEFAULT_VOICE_SETTINGS } = require('../voice/tts-engine');
 const { CATALOG_DEFAULTS } = require('../models/catalog');
 const { DEFAULT_OLLAMA_BASE_URL } = require('../models/provider-ids');
 const { DEFAULT_ROLE_TIMEOUTS_MS } = require('../models/roles');
+const { mergeKingLouieSettings } = require('../models/suggester');
 
 const DEFAULT_SETTINGS = {
   defaults: {
@@ -44,7 +45,9 @@ const DEFAULT_SETTINGS = {
     customRoles: [],
     roleTimeoutsMs: { ...DEFAULT_ROLE_TIMEOUTS_MS },
     // The explorer's summary cap (spec §8.1).
-    explorer: { summaryMaxTokens: 2000 }
+    explorer: { summaryMaxTokens: 2000 },
+    // The King Louie profile's picking thresholds and state (spec §7, §14).
+    kingLouie: mergeKingLouieSettings({})
   },
   notifications: {
     ...DEFAULT_NOTIFICATION_SETTINGS
@@ -138,7 +141,8 @@ const mergeSettings = (settings = {}) => {
         ...(source.models?.explorer && typeof source.models.explorer === 'object' && !Array.isArray(source.models.explorer)
           ? source.models.explorer
           : {})
-      }
+      },
+      kingLouie: mergeKingLouieSettings(source.models?.kingLouie)
     },
     notifications: normalizeNotificationSettings({
       ...(DEFAULT_SETTINGS.notifications || {}),

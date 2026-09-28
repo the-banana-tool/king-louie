@@ -24,7 +24,12 @@ function setup() {
     pickerView: ({ needs }) => { calls.push(['picker', needs]); return { usable: [], unusable: [] }; },
     chatView: (chatId) => { calls.push(['view', chatId]); return { chatId }; },
     setChatProfile: async (chatId, profileId) => { calls.push(['chatProfile', chatId, profileId]); return { id: chatId }; },
-    setMainOverride: async (chatId, target) => { calls.push(['override', chatId, target]); return { id: chatId }; }
+    setMainOverride: async (chatId, target) => { calls.push(['override', chatId, target]); return { id: chatId }; },
+    kingLouieView: () => ({ proposal: { id: 'abc' } }),
+    acceptProposal: (id) => { calls.push(['accept', id]); return { id: 'p-kl', kind: 'king-louie' }; },
+    dismissProposal: (id) => { calls.push(['dismiss', id]); return { dismissed: id }; },
+    saveKingLouieSettings: (patch) => { calls.push(['klSettings', patch]); return { settings: patch }; },
+    duplicateKingLouie: ({ name }) => { calls.push(['klDuplicate', name]); return { id: 'p-copy', kind: 'user' }; },
   };
   const context = {
     getModelChoices: () => choices,
@@ -79,8 +84,25 @@ describe('profile channels', () => {
 
   it('are exposed on window.electron.models in the preload bridge', () => {
     const preload = fs.readFileSync(path.join(__dirname, '..', 'preload.js'), 'utf8');
-    for (const ch of ['profiles', 'saveProfile', 'duplicateProfile', 'removeProfile', 'setDefaultProfile', 'picker', 'chatView', 'setChatProfile', 'setMainOverride', 'saveCatalogSettings']) {
+    for (const ch of ['profiles', 'saveProfile', 'duplicateProfile', 'removeProfile', 'setDefaultProfile', 'picker', 'chatView', 'setChatProfile', 'setMainOverride', 'saveCatalogSettings', 'kingLouie', 'acceptProposal', 'dismissProposal', 'saveKingLouieSettings', 'duplicateKingLouie']) {
       assert.ok(preload.includes(`ipcRenderer.invoke('models:${ch}'`), ch);
     }
+  });
+});
+
+describe('King Louie profile channels (spec §7, §11)', () => {
+  it('pass through to the model choices, keeping only the known settings', async () => {
+    const { call, calls } = setup();
+    assert.deepStrictEqual(await call(IPC.MODELS_KING_LOUIE), { ok: true, view: { proposal: { id: 'abc' } } });
+    assert.strictEqual((await call(IPC.MODELS_ACCEPT_PROPOSAL, { proposalId: 'abc' })).profile.kind, 'king-louie');
+    assert.strictEqual((await call(IPC.MODELS_DISMISS_PROPOSAL, { proposalId: 'abc' })).ok, true);
+    await call(IPC.MODELS_SAVE_KING_LOUIE_SETTINGS, { autoAccept: true, bandPoints: 4, junk: 1 });
+    assert.strictEqual((await call(IPC.MODELS_DUPLICATE_KING_LOUIE, {})).profile.kind, 'user');
+    assert.deepStrictEqual(calls.slice(-4), [['accept', 'abc'], ['dismiss', 'abc'], ['klSettings', { autoAccept: true, bandPoints: 4 }], ['klDuplicate', undefined]]);
+  });
+
+  it('models:proposalChanged reaches an attached desktop', () => {
+    const { isRendererEvent } = require('../src/desktop-bridge/allowlist');
+    assert.strictEqual(isRendererEvent('models:proposalChanged'), true);
   });
 });

@@ -69,6 +69,7 @@ const UsageTracker = require('../tracking/usage-tracker');
 const { Catalog, Availability, setActiveCatalog, capabilitiesOf } = require('../models');
 const { localEntry } = require('../models/normalize');
 const { Profiles } = require('../models/profiles');
+const { KingLouieProfile } = require('../models/king-louie');
 const { roleTimeoutMs } = require('../models/resolver');
 const { runTierMigration } = require('../models/migrate-tiers');
 const { KL_PROVIDERS } = require('../models/provider-ids');
@@ -1011,6 +1012,21 @@ function createCore(deps = {}) {
       .map(([provider, status]) => [provider, Array.isArray(status?.models) ? status.models : []]))
   });
   const profiles = new Profiles({ getSettings, setSettings, catalog });
+
+  // The King Louie profile (spec §7): proposals from the usable models,
+  // their prices and scores; the owner accepts. Recomputed when the catalog
+  // or a provider's status changes, and pushed to the renderer.
+  const kingLouie = new KingLouieProfile({
+    profiles,
+    availability,
+    catalog,
+    getSettings,
+    setSettings,
+    getRecentUsage: () => (usageTracker && typeof usageTracker.recentRoleUsage === 'function' ? usageTracker.recentRoleUsage({ days: 30 }) : {})
+  });
+  catalog.on('updated', () => kingLouie.inputsChanged());
+  availability.on('changed', () => kingLouie.inputsChanged());
+  kingLouie.on('proposal', (view) => ui.send('models:proposalChanged', view));
 
   // A provider registered at runtime outside King Louie's fourteen (a host
   // extension, or a test's fake) has no connection test: it is usable when
@@ -2999,6 +3015,7 @@ function createCore(deps = {}) {
   };
 
   const shutdown = async () => {
+    kingLouie.stop();
     // Stop cron first so no job fires while the slower stops below drain.
     if (cronScheduler) cronScheduler.stop();
     // Cases stage 2: no new wake-up turn may start from here on, and every
@@ -3099,7 +3116,8 @@ function createCore(deps = {}) {
     getChats,
     setChats,
     appendMessageToChat,
-    getCaseRuntime: () => caseRuntime
+    getCaseRuntime: () => caseRuntime,
+    kingLouie
   });
 
   // Cases stage 3: executors. In service mode run.js passes the admin
@@ -3278,6 +3296,7 @@ function createCore(deps = {}) {
     getCatalog: () => catalog,
     getAvailability: () => availability,
     getProfiles: () => profiles,
+    getKingLouie: () => kingLouie,
     getModelMigration: () => modelMigration,
     explainTarget,
     snapshotModels,
@@ -3381,7 +3400,7 @@ function createCore(deps = {}) {
     saveProviderToken,
     // The host starts these after start() (see main.js and
     // src/service/run.js): unit tests build cores all the time.
-    models: { catalog, availability, profiles, startBackgroundChecks: startModelsBackgroundChecks },
+    models: { catalog, availability, profiles, kingLouie, startBackgroundChecks: startModelsBackgroundChecks },
     getMeshContext: () => meshContext,
     // Service mode decides whether an enabled listener actually came up
     // through these (assertEnabledListenersBound in src/service/run.js). They

@@ -106,6 +106,12 @@ module.exports = {
   MODELS_SET_CHAT_PROFILE: 'models:setChatProfile',
   MODELS_SET_MAIN_OVERRIDE: 'models:setMainOverride',
   MODELS_SAVE_CATALOG_SETTINGS: 'models:saveCatalogSettings',
+  // Models M3: the King Louie profile (spec 2026-09-27 §7, §11).
+  MODELS_KING_LOUIE: 'models:kingLouie',
+  MODELS_ACCEPT_PROPOSAL: 'models:acceptProposal',
+  MODELS_DISMISS_PROPOSAL: 'models:dismissProposal',
+  MODELS_SAVE_KING_LOUIE_SETTINGS: 'models:saveKingLouieSettings',
+  MODELS_DUPLICATE_KING_LOUIE: 'models:duplicateKingLouie',
 
   SETTINGS_LOAD: 'settings:load',
   SETTINGS_SAVE_TEMPLATE_VARIABLES: 'settings:saveTemplateVariables',
