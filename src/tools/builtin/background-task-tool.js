@@ -43,6 +43,10 @@ const BackgroundTaskTool = new Tool({
         type: 'string',
         description: 'Which agent to use: "main", "code-explorer", "code-writer". Defaults to "main".'
       },
+      role: {
+        type: 'string',
+        description: 'Which model role runs the task: "worker" (the default for a plain task), "utility", "main", or a custom role from Settings → Models. With agentId and no role, the agent\'s own role applies.'
+      },
       description: {
         type: 'string',
         description: 'Short description of the background task (shown in task list)'
@@ -98,6 +102,11 @@ const BackgroundTaskTool = new Tool({
     const useIsolation = params.isolate === true;
     const workingDirectory = options.workingDirectory || process.cwd();
 
+    // The role (models spec 2026-09-27 §8), by SpawnAgent's rule.
+    const role = typeof params.role === 'string' && params.role.trim()
+      ? params.role.trim()
+      : (params.agentId ? null : 'worker');
+
     try {
       const task = await backgroundTaskManager.spawn(
         {
@@ -130,6 +139,7 @@ const BackgroundTaskTool = new Tool({
               params.task,
               {
                 maxIterations: 20,
+                ...(role ? { role } : {}),
                 abortSignal: bgTask.signal,
                 workingDirectory: taskWorkDir,
                 // Bridge approvals back to whoever spawned us (typically the

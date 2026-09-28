@@ -1,5 +1,11 @@
 const { Tool } = require('../tool-schema');
 
+// The model that answered the child's last call, from its cost record.
+function lastCallModel(result) {
+  const calls = Array.isArray(result?.llm?.calls) ? result.llm.calls : [];
+  return calls.length ? calls[calls.length - 1]?.model || null : null;
+}
+
 const SpawnAgentTool = new Tool({
   name: 'SpawnAgent',
   description: `Dynamically spawn a sub-agent to handle a specific subtask during execution.
@@ -20,13 +26,13 @@ in its own conversation context. Results are returned inline to the calling agen
         type: 'string',
         description: 'Which built-in agent to use: "main", "code-explorer", "code-writer", "planner". Defaults to "main".'
       },
+      role: {
+        type: 'string',
+        description: 'Which model role runs the sub-agent: "worker" (the default for a plain task: cheaper, good at tool use), "utility" for small mechanical jobs, "main" for hard reasoning, or a custom role from Settings → Models. With agentId and no role, the agent\'s own role applies.'
+      },
       model: {
         type: 'string',
-        description: 'Override the model for this sub-agent (e.g., "gemini-2.5-flash", "gpt-4o", "claude-sonnet-5"). Uses the agent default if not specified.'
-      },
-      provider: {
-        type: 'string',
-        description: 'Override the provider for this sub-agent (e.g., "openai", "anthropic", "gemini", "groq"). Uses default routing if not specified.'
+        description: 'Rarely needed: one model already in this chat\'s profile, as "provider/model" or its id. Any other model is refused. Prefer role.'
       },
       maxIterations: {
         type: 'number',
@@ -91,8 +97,18 @@ in its own conversation context. Results are returned inline to the calling agen
       executeOptions.maxIterations = params.maxIterations;
     }
 
-    if (params.model) {
-      executeOptions.model = params.model;
+    // The role (models spec 2026-09-27 §8): the parameter, else the named
+    // agent's own role, else worker.
+    const role = typeof params.role === 'string' && params.role.trim()
+      ? params.role.trim()
+      : (params.agentId ? null : 'worker');
+    if (role) executeOptions.role = role;
+
+    // A model the LLM names must already be in the turn's profile (M-D2);
+    // the core checks it and refuses anything else.
+    if (typeof params.model === 'string' && params.model.trim()) {
+      executeOptions.model = params.model.trim();
+      executeOptions.requireInProfile = true;
     }
 
     if (params.systemPromptAppend) {
@@ -102,11 +118,6 @@ in its own conversation context. Results are returned inline to the calling agen
     // If specific tools requested, pass them through
     if (Array.isArray(params.tools) && params.tools.length > 0) {
       executeOptions.toolFilter = params.tools;
-    }
-
-    // If a provider override is specified, pass it through
-    if (params.provider) {
-      executeOptions.provider = params.provider;
     }
 
     // Bridge approvals back to the parent context (the chat UI that spawned us)
@@ -128,7 +139,8 @@ in its own conversation context. Results are returned inline to the calling agen
       return {
         success: true,
         agentId,
-        model: params.model || agent.model,
+        role,
+        model: lastCallModel(result),
         iterations: result.iterations || 0,
         type: result.type,
         content: result.content || '',

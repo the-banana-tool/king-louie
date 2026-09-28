@@ -107,6 +107,34 @@ describe('headless agent runs', () => {
     }
   });
 
+  it('a model a sub-agent names must already be in the profile (M-D2)', async () => {
+    const { core, used, adapter } = await startCore({ main: [t(FAKE, 'main-model')], worker: [t(FAKE, 'worker-model')], utility: [t(FAKE, 'utility-model')] });
+    try {
+      // In the profile, by bare id or provider/model: it runs, whichever role holds it.
+      await adapter.execute(agent('code-explorer'), 'hello', { model: 'utility-model', requireInProfile: true });
+      await adapter.execute(agent('code-explorer'), 'hello', { model: `${FAKE}/main-model`, requireInProfile: true });
+      assert.deepStrictEqual(used, ['utility-model', 'main-model']);
+      await assert.rejects(
+        adapter.execute(agent('code-explorer'), 'hello', { model: 'named-model', requireInProfile: true }),
+        (err) => err.code === 'MODEL_NOT_IN_PROFILE'
+          && /named-model is not in the profile "Test profile"/.test(err.message)
+          && err.message.includes(`${FAKE}/worker-model`)
+      );
+      assert.deepStrictEqual(used, ['utility-model', 'main-model'], 'a refused model is never called');
+    } finally {
+      await core.shutdown();
+    }
+  });
+
+  it('a role the profile does not define fails naming the role', async () => {
+    const { core, adapter } = await startCore({ main: [t(FAKE, 'main-model')] });
+    try {
+      await assert.rejects(adapter.execute(agent('main'), 'hello', { role: 'legal-drafting' }), /Unknown model role "legal-drafting"/);
+    } finally {
+      await core.shutdown();
+    }
+  });
+
   it('a failing first target fails over to the next one in the role', async () => {
     const { core, used, adapter } = await startCore({ worker: [t(FAKE, 'down'), t(FAKE, 'backup')], main: [t(FAKE, 'main-model')] });
     // code-explorer runs on worker.

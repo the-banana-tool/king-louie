@@ -51,7 +51,9 @@ describe('SpawnAgentTool', () => {
       assert.ok(props.task);
       assert.ok(props.agentId);
       assert.ok(props.model);
-      assert.ok(props.provider);
+      assert.ok(props.role);
+      // A sub-agent names a role, never a provider (models spec 2026-09-27 §8).
+      assert.strictEqual(props.provider, undefined);
       assert.ok(props.maxIterations);
       assert.ok(props.systemPromptAppend);
       assert.ok(props.tools);
@@ -100,6 +102,8 @@ describe('SpawnAgentTool', () => {
 
       assert.strictEqual(result.success, true);
       assert.strictEqual(capturedOptions.model, 'gpt-4o');
+      // The core checks the model against the turn's profile (M-D2).
+      assert.strictEqual(capturedOptions.requireInProfile, true);
     });
 
     it('passes maxIterations override', async () => {
@@ -182,23 +186,6 @@ describe('SpawnAgentTool', () => {
       assert.ok(result.error.includes('Provider timeout'));
     });
 
-    it('passes provider override through options', async () => {
-      let capturedOptions = {};
-      await SpawnAgentTool.execute(
-        { task: 'Test', provider: 'gemini' },
-        makeOptions({
-          adapter: {
-            execute: async (agent, msg, opts) => {
-              capturedOptions = opts;
-              return { type: 'complete', content: 'done', iterations: 1, tools: [], llm: { totals: {} } };
-            }
-          }
-        })
-      );
-
-      assert.strictEqual(capturedOptions.provider, 'gemini');
-    });
-
     it('passes tool filter through options', async () => {
       let capturedOptions = {};
       await SpawnAgentTool.execute(
@@ -233,6 +220,53 @@ describe('SpawnAgentTool', () => {
       );
 
       assert.strictEqual(capturedOptions.abortSignal, controller.signal);
+    });
+  });
+
+  describe('roles (models spec 2026-09-27 §8)', () => {
+    const capture = () => {
+      const seen = [];
+      const options = makeOptions({
+        adapter: {
+          execute: async (agent, msg, opts) => {
+            seen.push({ agentId: agent.id, opts });
+            return { type: 'complete', content: 'done', iterations: 1, tools: [], llm: { calls: [{ model: 'worker-model' }], totals: {} } };
+          }
+        }
+      });
+      return { seen, options };
+    };
+
+    it('runs a bare SpawnAgent on worker', async () => {
+      const { seen, options } = capture();
+      const result = await SpawnAgentTool.execute({ task: 'Find the config loader' }, options);
+      assert.strictEqual(seen[0].opts.role, 'worker');
+      assert.strictEqual(result.role, 'worker');
+      assert.strictEqual(result.model, 'worker-model');
+    });
+
+    it('leaves a named agent on its own role unless a role is given', async () => {
+      const { seen, options } = capture();
+      await SpawnAgentTool.execute({ task: 'Plan it', agentId: 'planner' }, options);
+      await SpawnAgentTool.execute({ task: 'Plan it', agentId: 'planner', role: 'utility' }, options);
+      assert.strictEqual('role' in seen[0].opts, false);
+      assert.strictEqual(seen[1].opts.role, 'utility');
+    });
+
+    it('asks the core to check a named model against the profile', async () => {
+      const { seen, options } = capture();
+      await SpawnAgentTool.execute({ task: 'x', model: 'openai/gpt-5.4-mini' }, options);
+      assert.deepStrictEqual([seen[0].opts.model, seen[0].opts.requireInProfile], ['openai/gpt-5.4-mini', true]);
+    });
+
+    it('reports a refused model as a failed spawn', async () => {
+      const refused = Object.assign(new Error('gpt-9 is not in the profile "Work". A sub-agent may use only models placed in a role: openai/gpt-5.5. Name a role instead.'), { code: 'MODEL_NOT_IN_PROFILE' });
+      const result = await SpawnAgentTool.execute(
+        { task: 'x', model: 'gpt-9' },
+        makeOptions({ adapter: { execute: async () => { throw refused; } } })
+      );
+      assert.strictEqual(result.success, false);
+      assert.match(result.error, /not in the profile "Work"/);
     });
   });
 });

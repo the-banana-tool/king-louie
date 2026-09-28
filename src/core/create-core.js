@@ -72,7 +72,7 @@ const { Profiles } = require('../models/profiles');
 const { roleTimeoutMs } = require('../models/resolver');
 const { runTierMigration } = require('../models/migrate-tiers');
 const { KL_PROVIDERS } = require('../models/provider-ids');
-const { roleForAgent, CORE_ROLES } = require('../models/roles');
+const { roleForAgent, CORE_ROLES, BUILTIN_ROLES, targetKey, targetLabel } = require('../models/roles');
 const { NO_RETRY } = require('../providers/failover-policy');
 const { classifyError, FailoverReason } = require('../providers/error-classifier');
 const {
@@ -2298,6 +2298,36 @@ function createCore(deps = {}) {
     throw new Error(`No ${provider} model is in the profile "${turnModels.profileName}"; name the model to use.`);
   };
 
+  // A model an LLM names for a sub-agent (SpawnAgent, a planned workflow
+  // task) must already be in the turn's profile (M-D2): the role's own
+  // candidates, the main override, then any role's list. It may be named as
+  // "provider/model", "provider:model" or a bare id. Owner-written targets
+  // (case.yaml roles, a delegate's config) keep explicitTargetFor above.
+  const profileTargetFor = (selection, turnModels, role) => {
+    const provider = normalizeProvider(selection.provider || '');
+    const wanted = String(selection.model || '').trim();
+    if (!provider && !wanted) return null;
+    const pool = [];
+    const seen = new Set();
+    const add = (x) => {
+      const key = targetKey(x);
+      if (seen.has(key)) return;
+      seen.add(key);
+      pool.push({ ...x });
+    };
+    turnModels.candidatesFor(role).forEach(add);
+    if (turnModels.mainOverride) add(turnModels.mainOverride);
+    [...BUILTIN_ROLES, ...profiles.customRoles().map((r) => r.id)]
+      .forEach((r) => turnModels.configuredFor(r).forEach(add));
+    const named = (x) => !wanted || x.model === wanted || `${x.provider}/${x.model}` === wanted || `${x.provider}:${x.model}` === wanted;
+    const match = pool.find((x) => (!provider || x.provider === provider) && named(x));
+    if (match) return match;
+    const asked = provider ? `${provider}/${wanted || '(any model)'}` : wanted;
+    const err = new Error(`${asked} is not in the profile "${turnModels.profileName}". A sub-agent may use only models placed in a role: ${pool.map(targetLabel).join(', ') || '(none)'}. Name a role instead.`);
+    err.code = 'MODEL_NOT_IN_PROFILE';
+    throw err;
+  };
+
   // An agent or headless run's models (spec §8, §12): the role on the
   // default profile, or on the profile the caller names, fixed for the run.
   // A child of a chat turn (SpawnAgent, BackgroundTask) passes the parent
@@ -2312,7 +2342,9 @@ function createCore(deps = {}) {
     const sel = selection && typeof selection === 'object' ? selection : {};
     const role = typeof sel.role === 'string' && sel.role ? sel.role : 'main';
     const turnModels = (!sel.profileId && runtimeOptions.turnModels) || snapshotModels({ profileId: sel.profileId || null });
-    const explicit = explicitTargetFor(sel, turnModels, role);
+    const explicit = sel.requireInProfile === true
+      ? profileTargetFor(sel, turnModels, role)
+      : explicitTargetFor(sel, turnModels, role);
     const resolution = await resolveRole(role, { needs: { toolCall: true }, explicit, turnModels });
     const workingDirectory = runtimeOptions.workingDirectory || hostWorkingDirectory;
     const runtimeEnvironment = await getRuntimeEnvironment({
@@ -2578,7 +2610,8 @@ function createCore(deps = {}) {
             role,
             ...(options.profileId ? { profileId: options.profileId } : {}),
             ...(options.provider ? { provider: options.provider } : {}),
-            ...(options.model ? { model: options.model } : {})
+            ...(options.model ? { model: options.model } : {}),
+            ...(options.requireInProfile === true ? { requireInProfile: true } : {})
           },
           null,
           options.approvalRequester || null,
