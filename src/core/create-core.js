@@ -997,19 +997,24 @@ function createCore(deps = {}) {
   // stored settings are read, not the merged view: the migration must see
   // what the owner actually saved.
   // A caller that must write nothing (an import dry run) skips it.
+  // Each provider's own default model, in the order the app lists providers.
+  const providerDefaultModels = () => Object.keys(PROVIDER_LABELS).map((provider) => {
+    try {
+      return { provider, model: ProviderFactory.create(provider, 'model-probe-token').getDefaultModel() || '' };
+    } catch {
+      return { provider, model: '' };
+    }
+  }).filter((x) => x.model);
+  const probedDefaults = deps.skipModelMigration === true ? [] : providerDefaultModels();
   const modelMigration = deps.skipModelMigration === true ? { migrated: false, skipped: true } : runTierMigration({
     readRaw: () => store.get('settings', null),
     writeRaw: (raw) => store.set('settings', raw),
     catalog,
-    // A fresh install's Default main: each provider's own default model, in
-    // the order the app lists providers; an empty default (Ollama) is skipped.
-    freshMain: Object.keys(PROVIDER_LABELS).map((provider) => {
-      try {
-        return { provider, model: ProviderFactory.create(provider, 'model-probe-token').getDefaultModel() || '' };
-      } catch {
-        return { provider, model: '' };
-      }
-    }).filter((x) => x.model),
+    // A fresh install's Default main: each provider's own default model; an
+    // empty default (Ollama) is skipped.
+    freshMain: probedDefaults,
+    // A tier whose stored model was '' ran on its provider's default (m1).
+    providerDefaults: Object.fromEntries(probedDefaults.map((x) => [x.provider, x.model])),
     accountModels: Object.fromEntries(Object.entries(getApiStatus() || {})
       .map(([provider, status]) => [provider, Array.isArray(status?.models) ? status.models : []]))
   });

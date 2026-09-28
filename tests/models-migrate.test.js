@@ -112,6 +112,41 @@ describe('migrateTierSettings', () => {
     assert.ok(r.notes.includes('fast tier had no model for ollama; it was left out.'), r.notes.join('\n'));
   });
 
+  it('a tier whose stored model is empty falls back to the provider\'s default, as the old runtime did, with a note (m1)', () => {
+    const raw = { inference: { activeTier: 'standard', tierMap: { standard: { provider: 'openai', model: '' } } }, providerModels: { openai: '' } };
+    const r = migrateTierSettings(raw, opts({ catalog: null }));
+    assert.deepStrictEqual(r.profile.roles.main[0], t('openai', 'gpt-4o-mini'));
+    assert.ok(r.notes.includes('standard tier had no model for openai; using openai\'s default model, gpt-4o-mini, as before.'), r.notes.join('\n'));
+    // A provider with no shipped default takes the host's own default model.
+    const other = migrateTierSettings({ inference: { tierMap: { fast: { provider: 'kl-other', model: '' } } }, providerModels: { 'kl-other': '' } }, opts({ catalog: null, providerDefaults: { 'kl-other': 'other-default' } }));
+    assert.deepStrictEqual(other.profile.roles.utility, [t('kl-other', 'other-default')]);
+    assert.ok(other.notes.some((n) => n.startsWith('fast tier had no model for kl-other; using kl-other\'s default model, other-default')), other.notes.join('\n'));
+  });
+
+  it('notes each removed routing setting the owner had set, and none that were off (m2)', () => {
+    const r = migrateTierSettings(ownerShaped(), opts());
+    for (const note of [
+      'Smart routing was on; it was removed, so every message goes to main as written, prefixes included.',
+      'The LLM model router was on; it was removed, and main answers every message.',
+      'The agent loop model setting (gpt-4o-mini) was removed; the agent loop runs on main.',
+      'The advisor model setting (gpt-4o) was removed; the advisor reviews on the turn\'s main model.'
+    ]) assert.ok(r.notes.includes(note), `${note}\n---\n${r.notes.join('\n')}`);
+    assert.deepStrictEqual(r.profile.migration.notes, r.notes);
+    const rules = ownerShaped();
+    rules.inference.smartRouting = { enabled: false, rules: [{ prefix: '/code', tier: 'smart' }] };
+    rules.inference.llmRouting = { enabled: false };
+    delete rules.inference.agentLoopModel;
+    rules.advisor = { enabled: true, model: 'gpt-5.5' };
+    const quiet = migrateTierSettings(rules, opts());
+    assert.ok(quiet.notes.includes('Smart routing was off with 1 rule; it was removed, so every message goes to main as written, prefixes included.'), quiet.notes.join('\n'));
+    assert.ok(!quiet.notes.some((n) => /LLM model router|agent loop model|advisor model/.test(n)), quiet.notes.join('\n'));
+    // A store with no tier keys can still hold an advisor model.
+    const fresh = migrateTierSettings({ advisor: { enabled: true, model: 'gpt-4o' } }, opts({ freshMain: [t('openai', 'gpt-5.5')] }));
+    assert.strictEqual(fresh.fresh, true);
+    assert.deepStrictEqual(fresh.profile.migration.notes, ['The advisor model setting (gpt-4o) was removed; the advisor reviews on the turn\'s main model.']);
+    assert.strictEqual('migration' in migrateTierSettings({}, opts({ freshMain: [t('openai', 'gpt-5.5')] })).profile, false);
+  });
+
   it('keeps a stale id the account still lists, without a note', () => {
     const r = migrateTierSettings(ownerShaped(), opts({ accountModels: { anthropic: ['claude-sonnet-4-20250514'] } }));
     assert.deepStrictEqual(r.profile.roles.main[1], t('anthropic', 'claude-sonnet-4-20250514'));

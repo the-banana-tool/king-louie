@@ -61,18 +61,55 @@ function legacyView(raw) {
   return {
     activeProvider: String(raw.activeProvider || LEGACY_DEFAULTS.activeProvider).toLowerCase(),
     providerModels: { ...LEGACY_DEFAULTS.providerModels, ...(isPlainObject(raw.providerModels) ? raw.providerModels : {}) },
+    storedProviderModels: isPlainObject(raw.providerModels) ? raw.providerModels : {},
     activeTier: TIERS.includes(tier) ? tier : LEGACY_DEFAULTS.activeTier,
     tierMap: { ...LEGACY_DEFAULTS.tierMap, ...(isPlainObject(inference.tierMap) ? inference.tierMap : {}) },
     timeoutsMs: { ...LEGACY_DEFAULTS.timeoutsMs, ...(isPlainObject(inference.timeoutsMs) ? inference.timeoutsMs : {}) }
   };
 }
 
-// The target a tier resolved to, exactly as InferenceRouter#resolve did.
-function tierTarget(legacy, tier) {
+// The target a tier resolved to, as InferenceRouter#resolve did: the tier's
+// model, else the stored providerModels entry. A stored '' was never the
+// end of it: the old getProviderModel fell back to the shipped default for
+// the provider, and M1 then to the provider's own getDefaultModel()
+// (`providerDefaults`, from the host). Ollama has no default to fall back
+// to. `defaulted` marks a fallback the owner should hear about (m1).
+function tierTarget(legacy, tier, providerDefaults = {}) {
   const cfg = isPlainObject(legacy.tierMap[tier]) ? legacy.tierMap[tier] : {};
   const provider = String(cfg.provider || legacy.activeProvider || 'openai').trim().toLowerCase();
-  const model = String(cfg.model || legacy.providerModels[provider] || '').trim();
-  return { provider, model };
+  const own = String(cfg.model || '').trim();
+  if (own) return { provider, model: own, defaulted: false };
+  const stored = legacy.storedProviderModels[provider];
+  const storedModel = typeof stored === 'string' ? stored.trim() : '';
+  if (storedModel) return { provider, model: storedModel, defaulted: false };
+  const shipped = String(LEGACY_DEFAULTS.providerModels[provider] || '').trim();
+  // Never stored: the shipped default filled it in silently, as before M2.
+  if (stored === undefined && shipped) return { provider, model: shipped, defaulted: false };
+  if (provider === 'ollama') return { provider, model: '', defaulted: false };
+  const fallback = shipped || String(providerDefaults[provider] || '').trim();
+  return { provider, model: fallback, defaulted: Boolean(fallback) };
+}
+
+// Routing settings M2 removes with no successor setting (spec M-D5, M-D11):
+// each one the owner had set becomes a note on the profile card (m2).
+function discardedSettingNotes(source, main) {
+  const notes = [];
+  const inference = isPlainObject(source.inference) ? source.inference : {};
+  const smart = isPlainObject(inference.smartRouting) ? inference.smartRouting : null;
+  const rules = smart && Array.isArray(smart.rules) ? smart.rules.length : 0;
+  if (smart && (smart.enabled === true || rules > 0)) {
+    notes.push(`Smart routing${smart.enabled === true ? ' was on' : ' was off'}${rules ? ` with ${rules} rule${rules === 1 ? '' : 's'}` : ''}; it was removed, so every message goes to main as written, prefixes included.`);
+  }
+  if (isPlainObject(inference.llmRouting) && inference.llmRouting.enabled === true) {
+    notes.push('The LLM model router was on; it was removed, and main answers every message.');
+  }
+  const loopModel = typeof inference.agentLoopModel === 'string' ? inference.agentLoopModel.trim() : '';
+  if (loopModel) notes.push(`The agent loop model setting (${loopModel}) was removed; the agent loop runs on main.`);
+  const advisorModel = isPlainObject(source.advisor) && typeof source.advisor.model === 'string' ? source.advisor.model.trim() : '';
+  if (advisorModel && advisorModel !== (main[0]?.model || '')) {
+    notes.push(`The advisor model setting (${advisorModel}) was removed; the advisor reviews on the turn's main model.`);
+  }
+  return notes;
 }
 
 function inAccount(list, id) {
@@ -139,7 +176,7 @@ function dedupe(list) {
   });
 }
 
-function migrateTierSettings(raw, { catalog = null, accountModels = {}, freshMain = [], now = () => new Date(), createId = () => crypto.randomBytes(4).toString('hex') } = {}) {
+function migrateTierSettings(raw, { catalog = null, accountModels = {}, freshMain = [], providerDefaults = {}, now = () => new Date(), createId = () => crypto.randomBytes(4).toString('hex') } = {}) {
   const source = isPlainObject(raw) ? raw : {};
   const models = isPlainObject(source.models) ? source.models : {};
   const id = `p-${createId()}`;
@@ -149,19 +186,29 @@ function migrateTierSettings(raw, { catalog = null, accountModels = {}, freshMai
     // first provider the owner adds a key for answers at once; worker and
     // utility stay empty and borrow from main (§6.4).
     const main = dedupe((Array.isArray(freshMain) ? freshMain : []).map(R.normalizeTarget));
-    const profile = { id, name: 'Default', kind: 'user', roles: { main, worker: [], utility: [] } };
-    return { fresh: true, profile, notes: [], settings: { ...source, models: { ...models, profiles: [profile], defaultProfileId: id } } };
+    // An advisor model is the only removed setting a store without tier
+    // keys can still hold (stripLegacyKeys drops it).
+    const notes = discardedSettingNotes(source, main);
+    const profile = {
+      id,
+      name: 'Default',
+      kind: 'user',
+      roles: { main, worker: [], utility: [] },
+      ...(notes.length ? { migration: { at: now().toISOString(), notes } } : {})
+    };
+    return { fresh: true, profile, notes, settings: { ...source, models: { ...models, profiles: [profile], defaultProfileId: id } } };
   }
   const legacy = legacyView(source);
   const notes = [];
   const byTier = {};
   for (const tier of TIERS) {
-    const found = tierTarget(legacy, tier);
+    const found = tierTarget(legacy, tier, providerDefaults);
     if (!found.model) {
       notes.push(`${tier} tier had no model for ${found.provider}; it was left out.`);
       byTier[tier] = null;
       continue;
     }
+    if (found.defaulted) notes.push(`${tier} tier had no model for ${found.provider}; using ${found.provider}'s default model, ${found.model}, as before.`);
     const { target, note } = mapStaleTarget({ provider: found.provider, model: found.model, effort: null }, { catalog, accountModels });
     if (note) notes.push(`${tier} tier: ${note}`);
     byTier[tier] = target;
@@ -174,6 +221,7 @@ function migrateTierSettings(raw, { catalog = null, accountModels = {}, freshMai
   };
   const vision = R.normalizeTarget(source.cases?.ingest?.vision);
   if (vision) roles.vision = [vision];
+  notes.push(...discardedSettingNotes(source, roles.main));
   const profile = { id, name: 'Migrated settings', kind: 'migrated', roles, migration: { at: now().toISOString(), notes } };
   const roleTimeoutsMs = {
     main: positive(legacy.timeoutsMs.smart, R.DEFAULT_ROLE_TIMEOUTS_MS.main),
