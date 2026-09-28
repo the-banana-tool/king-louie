@@ -24,7 +24,10 @@ function summaryMaxTokens(options) {
 function capSummary(text, maxTokens) {
   const s = String(text || '');
   const limit = maxTokens * 4;
-  return s.length > limit ? `${s.slice(0, limit)}\n\n[Summary cut at about ${maxTokens} tokens.]` : s;
+  if (s.length <= limit) return s;
+  // Never end on half of a surrogate pair (an emoji cut in two).
+  const cut = s.slice(0, limit).replace(/[\uD800-\uDBFF]$/, '');
+  return `${cut}\n\n[Summary cut at about ${maxTokens} tokens.]`;
 }
 
 const SpawnAgentTool = new Tool({

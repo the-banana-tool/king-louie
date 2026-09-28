@@ -66,6 +66,13 @@ describe('SpawnAgent caps a summary', () => {
     assert.match(result.content, /\[Summary cut at about 100 tokens\.\]$/);
   });
 
+  it('never leaves half of an emoji at the cut', async () => {
+    const { result } = await run('xyz' + '\u{1F600}'.repeat(200), { models: { explorer: { summaryMaxTokens: 100 } } });
+    const body = result.content.slice(0, result.content.indexOf('\n\n[Summary cut'));
+    assert.strictEqual(body.length, 399);
+    assert.strictEqual(body.isWellFormed(), true);
+  });
+
   it('leaves an agent that returns no summary uncapped', async () => {
     let seen = null;
     const result = await SpawnAgentTool.execute({ task: 'Write it', agentId: 'code-writer' }, {
