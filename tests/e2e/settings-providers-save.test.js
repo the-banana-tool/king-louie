@@ -4,7 +4,7 @@ const { launchApp, closeApp, evaluate, waitFor, click, fill, getText } = require
 
 /**
  * E2E tests for provider token save/clear/test flows.
- * Verifies that Save Token, Test Connection, Clear Token, and Set Active
+ * Verifies that Save Token, Test Connection and Clear Token
  * buttons work correctly for every provider card.
  */
 
@@ -76,11 +76,6 @@ describe('E2E: Settings — Provider Save/Clear/Test', () => {
     it(`${provider}: has Clear Token button`, async () => {
       const exists = await evaluate(ctx, `!!document.querySelector('${btnSelector(provider, 'clear')}')`);
       assert.ok(exists, `${provider} should have a clear button`);
-    });
-
-    it(`${provider}: has Set Active button`, async () => {
-      const exists = await evaluate(ctx, `!!document.querySelector('${btnSelector(provider, 'set-active')}')`);
-      assert.ok(exists, `${provider} should have a set-active button`);
     });
 
     it(`${provider}: has password input for token`, async () => {
@@ -294,66 +289,6 @@ describe('E2E: Settings — Provider Save/Clear/Test', () => {
       msg.includes('No token saved'),
       `should show "No token saved" after clearing, got: "${msg}"`
     );
-  });
-
-  // --- Set Active provider ---
-
-  it('set active button changes active provider', async () => {
-    // Click Set Active on groq
-    await click(ctx, btnSelector('groq', 'set-active'));
-    await new Promise((r) => setTimeout(r, 500));
-
-    // The groq card should now show the active badge
-    const hasActiveBadge = await evaluate(ctx, `
-      (() => {
-        const card = document.querySelector('${providerSelector('groq')}');
-        if (!card) return false;
-        return !!card.querySelector('.active-provider-badge');
-      })()
-    `);
-    assert.ok(hasActiveBadge, 'groq should have active badge after set active');
-  });
-
-  it('set active button is disabled for the active provider', async () => {
-    const disabled = await evaluate(ctx, `
-      document.querySelector('${btnSelector('groq', 'set-active')}')?.disabled
-    `);
-    assert.strictEqual(disabled, true, 'set-active button should be disabled for active provider');
-  });
-
-  // --- Model select for providers that return objects ---
-
-  it('gemini: model dropdown does not show [object Object]', async () => {
-    // Save a token first so models can be listed
-    await fill(ctx, inputSelector('gemini'), 'test-fake-token-gemini-modeltest');
-    await click(ctx, btnSelector('gemini', 'save'));
-    await new Promise((r) => setTimeout(r, 500));
-
-    const hasObjectObject = await evaluate(ctx, `
-      (() => {
-        const sel = document.querySelector('[data-model-provider="gemini"]');
-        if (!sel) return false;
-        for (const opt of sel.options) {
-          if (opt.textContent.includes('[object Object]')) return true;
-        }
-        return false;
-      })()
-    `);
-    assert.strictEqual(hasObjectObject, false, 'gemini model dropdown should not contain [object Object]');
-  });
-
-  it('groq: model dropdown does not show [object Object]', async () => {
-    const hasObjectObject = await evaluate(ctx, `
-      (() => {
-        const sel = document.querySelector('[data-model-provider="groq"]');
-        if (!sel) return false;
-        for (const opt of sel.options) {
-          if (opt.textContent.includes('[object Object]')) return true;
-        }
-        return false;
-      })()
-    `);
-    assert.strictEqual(hasObjectObject, false, 'groq model dropdown should not contain [object Object]');
   });
 
   // --- Edge case: saving replaces previous token ---

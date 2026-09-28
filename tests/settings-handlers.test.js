@@ -163,10 +163,16 @@ run('settings:testProvider returns the one connection test\'s result', async () 
 run('settings:load includes the Ollama address', async () => {
   const ipcMain = createIpcMainMock();
   registerSettingsHandlers(ipcMain, createDefaultContext({
-    getSettings: () => ({ activeProvider: 'openai', inference: {}, providerModels: {}, models: { ollama: { baseUrl: 'http://127.0.0.1:11434' } } })
+    getSettings: () => ({
+      activeProvider: 'openai',
+      inference: {},
+      providerModels: {},
+      models: { ollama: { baseUrl: 'http://127.0.0.1:11434' }, catalog: { fetch: false, refreshHours: 12 }, overrides: {} }
+    })
   }));
   const result = await ipcMain.handlers.get('settings:load')({});
   assert.strictEqual(result.data.ollamaBaseUrl, 'http://127.0.0.1:11434');
+  assert.deepStrictEqual(result.data.modelsSettings, { catalog: { fetch: false, refreshHours: 12 }, overrides: {} });
 });
 
 setTimeout(() => {

@@ -83,6 +83,10 @@ function registerSettingsHandlers(ipcMain, context = {}) {
       providers,
       activeProvider: settings.activeProvider || 'openai',
       ollamaBaseUrl: settings.models?.ollama?.baseUrl || '',
+      modelsSettings: {
+        catalog: settings.models?.catalog || {},
+        overrides: settings.models?.overrides || {}
+      },
       inference: settings.inference,
       notifications: settings.notifications,
       hooks: {

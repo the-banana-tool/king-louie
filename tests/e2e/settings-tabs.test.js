@@ -27,7 +27,7 @@ describe('E2E: Settings — Tab Navigation', () => {
     `);
 
     const expectedTabs = [
-      'General', 'Provider', 'Inference', 'Profile', 'Voice',
+      'General', 'API keys', 'Models', 'Profile', 'Voice',
       'Notification', 'Hook', 'Memory', 'Skill', 'Mesh', 'Diagnostic'
     ];
 

@@ -122,6 +122,14 @@ const dom = {
   providerList: document.getElementById('provider-list'),
   modelsCatalogStatus: document.getElementById('models-catalog-status'),
   modelsRefreshCatalogBtn: document.getElementById('models-refresh-catalog-btn'),
+  modelsProfileList: document.getElementById('models-profile-list'),
+  modelsProfileEditor: document.getElementById('models-profile-editor'),
+  modelsNewProfileBtn: document.getElementById('models-new-profile-btn'),
+  modelsProfilesStatus: document.getElementById('models-profiles-status'),
+  modelsCatalogFetch: document.getElementById('models-catalog-fetch'),
+  modelsCatalogRefreshHours: document.getElementById('models-catalog-refresh-hours'),
+  modelsCatalogOverrides: document.getElementById('models-catalog-overrides'),
+  modelsSaveCatalogBtn: document.getElementById('models-save-catalog-btn'),
   modelsTestAllBtn: document.getElementById('models-test-all-btn'),
   settingsEncryptionAlert: document.getElementById('settings-encryption-alert'),
   agentModeBtn: document.getElementById('agent-mode-btn'),
@@ -221,12 +229,6 @@ const dom = {
   workflowPlanBtn: document.getElementById('workflow-plan-btn'),
   workflowRunBtn: document.getElementById('workflow-run-btn'),
   workflowAddStatus: document.getElementById('workflow-add-status'),
-  llmRoutingEnabled: document.getElementById('llm-routing-enabled'),
-  llmRoutingCost: document.getElementById('llm-routing-cost'),
-  llmRoutingSpeed: document.getElementById('llm-routing-speed'),
-  llmRoutingQuality: document.getElementById('llm-routing-quality'),
-  llmRoutingSaveBtn: document.getElementById('llm-routing-save-btn'),
-  llmRoutingStatus: document.getElementById('llm-routing-status'),
   appsRescanBtn: document.getElementById('apps-rescan-btn'),
   appsStatus: document.getElementById('apps-status'),
   appsList: document.getElementById('apps-list'),
@@ -264,14 +266,6 @@ const dom = {
   defaultAgentMode: document.getElementById('default-agent-mode'),
   defaultSandboxMode: document.getElementById('default-sandbox-mode'),
   generalDefaultsStatus: document.getElementById('general-defaults-status'),
-  inferenceTierSelect: document.getElementById('inference-tier-select'),
-  saveInferenceTierBtn: document.getElementById('save-inference-tier-btn'),
-  inferenceTierStatus: document.getElementById('inference-tier-status'),
-  inferenceTierDetails: document.getElementById('inference-tier-details'),
-  smartRoutingEnabled: document.getElementById('smart-routing-enabled'),
-  smartRoutingRulesList: document.getElementById('smart-routing-rules-list'),
-  addRoutingRuleBtn: document.getElementById('add-routing-rule-btn'),
-  smartRoutingStatus: document.getElementById('smart-routing-status'),
   channelTelegramTokenInput: document.getElementById('channel-telegram-token-input'),
   saveTelegramTokenBtn: document.getElementById('save-telegram-token-btn'),
   testTelegramBtn: document.getElementById('test-telegram-btn'),
@@ -488,9 +482,6 @@ async function getLocalHelpText() {
     '- `/speak` — read the last assistant response aloud',
     '- `/profile` — show your current profile values',
     '- `/profile set <field> <value>` — update profile field (`name`, `role`, `projectContext`, `goals`, `preferences`)',
-    '- `/fast` — switch inference tier to fast',
-    '- `/standard` — switch inference tier to standard',
-    '- `/smart` — switch inference tier to smart',
     '- `/pin <skill-id>` — pin a skill to this chat (all messages handled by the skill)',
     '- `/unpin` — unpin current skill, restore normal behavior',
     '- `/pinned` — show which skill (if any) is pinned to this chat',
@@ -3061,7 +3052,6 @@ function renderChatInfoPopover() {
       // Update the provider/model dropdowns for the new tier
       const newInfo = (appState.settings.inference.tierMap || {})[tierSelect.value] || {};
       loadUsable(newInfo.provider || '', newInfo.model || '');
-      if (typeof renderInferenceTierDetails === 'function') renderInferenceTierDetails();
       addStatusMessage(`Tier changed: ${prevTier} → ${tierSelect.value}`);
     } catch (err) { tierLog.warn(`failed: ${err.message}`); }
   });
@@ -3210,7 +3200,6 @@ function renderChatInfoPopover() {
         'Failed to update provider.'
       );
       appState.settings.inference = result.inference || appState.settings.inference;
-      if (typeof renderInferenceTierDetails === 'function') renderInferenceTierDetails();
       showCurrentVerdict(newProvider, newModel);
       addStatusMessage(`Provider changed: ${prevProvider || '(none)'} → ${newProvider}`);
     } catch (err) { providerLog.warn(`failed: ${err.message}`); }
@@ -3227,7 +3216,6 @@ function renderChatInfoPopover() {
         'Failed to update model.'
       );
       appState.settings.inference = result.inference || appState.settings.inference;
-      if (typeof renderInferenceTierDetails === 'function') renderInferenceTierDetails();
       showCurrentVerdict(providerSelect.value, modelSelect.value);
       addStatusMessage(`Model changed (${providerSelect.value}): ${prevModel || '(default)'} → ${modelSelect.value || '(default)'}`);
     } catch (err) { modelLog.warn(`failed: ${err.message}`); }
@@ -3433,6 +3421,10 @@ function switchSettingsTab(tabName) {
   if (tabName === 'service' && typeof renderServiceSection === 'function') {
     renderServiceSection().catch((err) => serviceLog.warn('rendering the local service pane failed', { error: err && err.message }));
   }
+  // Usability changes with every key test; re-read it whenever the tab opens.
+  if (tabName === 'models' && typeof loadModelProfiles === 'function') {
+    loadModelProfiles().catch((err) => settingsLog.warn(`loading model profiles failed: ${err.message}`));
+  }
 }
 
 function sortSettingsNavOptions() {
@@ -3451,322 +3443,6 @@ function sortSettingsNavOptions() {
 
   if (currentValue) {
     dom.settingsNavSelect.value = currentValue;
-  }
-}
-
-function renderInferenceTierDetails() {
-  if (!dom.inferenceTierDetails) return;
-  const inference = appState.settings.inference || {};
-  const tierMap = inference.tierMap || {};
-  const timeouts = inference.timeoutsMs || {};
-  const activeTier = String(inference.activeTier || 'standard').toLowerCase();
-
-  dom.inferenceTierDetails.innerHTML = '';
-  ['fast', 'standard', 'smart'].forEach((tier) => {
-    const info = tierMap[tier] || {};
-    const row = document.createElement('div');
-    row.className = 'inference-tier-row' + (tier === activeTier ? ' active-tier' : '');
-
-    const label = document.createElement('span');
-    label.className = 'inference-tier-label';
-    label.textContent = tier;
-
-    const meta = document.createElement('span');
-    meta.className = 'inference-tier-meta';
-    const timeoutSec = Math.round((timeouts[tier] || 30000) / 1000);
-    meta.textContent = `${info.provider || '?'} / ${info.model || '?'} • ${timeoutSec}s timeout`;
-
-    row.appendChild(label);
-    row.appendChild(meta);
-    dom.inferenceTierDetails.appendChild(row);
-  });
-
-  if (dom.inferenceTierSelect) {
-    dom.inferenceTierSelect.value = activeTier;
-  }
-}
-
-function generateRuleId() {
-  return `rule-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function getProviderKeys() {
-  const providers = appState.settings.providers || {};
-  return Object.keys(providers);
-}
-
-function renderSmartRoutingRules() {
-  const smartRouting = appState.settings.inference?.smartRouting || {};
-  if (dom.smartRoutingEnabled) {
-    dom.smartRoutingEnabled.checked = !!smartRouting.enabled;
-  }
-  if (!dom.smartRoutingRulesList) return;
-
-  dom.smartRoutingRulesList.innerHTML = '';
-  const rules = Array.isArray(smartRouting.rules) ? smartRouting.rules : [];
-  const providerKeys = getProviderKeys();
-
-  rules.forEach((rule, index) => {
-    const card = document.createElement('div');
-    card.className = 'routing-rule-card' + (rule.enabled === false ? ' disabled' : '');
-    card.dataset.ruleIndex = index;
-
-    // Header row: priority arrows, name, enabled toggle, delete
-    const header = document.createElement('div');
-    header.className = 'routing-rule-header';
-
-    const priorityControls = document.createElement('div');
-    priorityControls.className = 'routing-rule-priority';
-
-    const upBtn = document.createElement('button');
-    upBtn.className = 'btn btn-sm';
-    upBtn.innerHTML = '<i class="fas fa-arrow-up"></i>';
-    upBtn.title = 'Move up (higher priority)';
-    upBtn.disabled = index === 0;
-    upBtn.addEventListener('click', () => {
-      if (index > 0) {
-        const arr = getSmartRoutingRulesFromState();
-        [arr[index - 1], arr[index]] = [arr[index], arr[index - 1]];
-        recomputePriorities(arr);
-        appState.settings.inference.smartRouting.rules = arr;
-        renderSmartRoutingRules();
-        saveSmartRoutingRulesToBackend();
-      }
-    });
-
-    const downBtn = document.createElement('button');
-    downBtn.className = 'btn btn-sm';
-    downBtn.innerHTML = '<i class="fas fa-arrow-down"></i>';
-    downBtn.title = 'Move down (lower priority)';
-    downBtn.disabled = index === rules.length - 1;
-    downBtn.addEventListener('click', () => {
-      if (index < rules.length - 1) {
-        const arr = getSmartRoutingRulesFromState();
-        [arr[index], arr[index + 1]] = [arr[index + 1], arr[index]];
-        recomputePriorities(arr);
-        appState.settings.inference.smartRouting.rules = arr;
-        renderSmartRoutingRules();
-        saveSmartRoutingRulesToBackend();
-      }
-    });
-
-    priorityControls.appendChild(upBtn);
-    priorityControls.appendChild(downBtn);
-
-    const nameInput = document.createElement('input');
-    nameInput.type = 'text';
-    nameInput.className = 'provider-input routing-rule-name';
-    nameInput.value = rule.name || '';
-    nameInput.placeholder = 'Rule name';
-
-    const enabledToggle = document.createElement('label');
-    enabledToggle.className = 'inline-toggle routing-rule-toggle';
-    const enabledCheck = document.createElement('input');
-    enabledCheck.type = 'checkbox';
-    enabledCheck.checked = rule.enabled !== false;
-    const enabledLabel = document.createElement('span');
-    enabledLabel.textContent = 'Enabled';
-    enabledToggle.appendChild(enabledCheck);
-    enabledToggle.appendChild(enabledLabel);
-
-    const deleteBtn = document.createElement('button');
-    deleteBtn.className = 'btn btn-danger btn-sm';
-    deleteBtn.innerHTML = '<i class="fas fa-trash"></i>';
-    deleteBtn.title = 'Delete rule';
-    deleteBtn.addEventListener('click', () => {
-      const arr = getSmartRoutingRulesFromState();
-      arr.splice(index, 1);
-      recomputePriorities(arr);
-      appState.settings.inference.smartRouting.rules = arr;
-      renderSmartRoutingRules();
-      saveSmartRoutingRulesToBackend();
-    });
-
-    header.appendChild(priorityControls);
-    header.appendChild(nameInput);
-    header.appendChild(enabledToggle);
-    header.appendChild(deleteBtn);
-
-    // Body: condition + target
-    const body = document.createElement('div');
-    body.className = 'routing-rule-body';
-
-    // Condition type
-    const condTypeLabel = document.createElement('label');
-    condTypeLabel.textContent = 'Condition';
-    const condTypeSelect = document.createElement('select');
-    condTypeSelect.className = 'provider-input';
-    ['keyword', 'regex', 'prefix'].forEach((t) => {
-      const opt = document.createElement('option');
-      opt.value = t;
-      opt.textContent = t.charAt(0).toUpperCase() + t.slice(1);
-      condTypeSelect.appendChild(opt);
-    });
-    condTypeSelect.value = rule.condition?.type || 'keyword';
-
-    // Condition value
-    const condValueLabel = document.createElement('label');
-    condValueLabel.className = 'routing-cond-value-label';
-    const condValueInput = document.createElement('input');
-    condValueInput.type = 'text';
-    condValueInput.className = 'provider-input';
-
-    function updateCondValueUI() {
-      const type = condTypeSelect.value;
-      if (type === 'keyword') {
-        condValueLabel.textContent = 'Keywords (comma-separated)';
-        condValueInput.placeholder = 'design, architect, plan feature';
-        condValueInput.value = Array.isArray(rule.condition?.keywords) ? rule.condition.keywords.join(', ') : '';
-      } else if (type === 'regex') {
-        condValueLabel.textContent = 'Regex pattern';
-        condValueInput.placeholder = '\\b(refactor|redesign)\\b';
-        condValueInput.value = rule.condition?.pattern || '';
-      } else if (type === 'prefix') {
-        condValueLabel.textContent = 'Prefix command';
-        condValueInput.placeholder = '/code';
-        condValueInput.value = rule.condition?.prefix || '';
-      }
-    }
-    updateCondValueUI();
-    condTypeSelect.addEventListener('change', updateCondValueUI);
-
-    // Agent mode only
-    const agentToggle = document.createElement('label');
-    agentToggle.className = 'inline-toggle';
-    const agentCheck = document.createElement('input');
-    agentCheck.type = 'checkbox';
-    agentCheck.checked = !!rule.condition?.agentModeOnly;
-    const agentLabel = document.createElement('span');
-    agentLabel.textContent = 'Agent mode only';
-    agentToggle.appendChild(agentCheck);
-    agentToggle.appendChild(agentLabel);
-
-    // Target provider
-    const targetProviderLabel = document.createElement('label');
-    targetProviderLabel.textContent = 'Target Provider';
-    const targetProviderSelect = document.createElement('select');
-    targetProviderSelect.className = 'provider-input';
-    providerKeys.forEach((pk) => {
-      const opt = document.createElement('option');
-      opt.value = pk;
-      opt.textContent = pk;
-      targetProviderSelect.appendChild(opt);
-    });
-    targetProviderSelect.value = rule.target?.provider || providerKeys[0] || '';
-
-    // Target model
-    const targetModelLabel = document.createElement('label');
-    targetModelLabel.textContent = 'Target Model';
-    const targetModelInput = document.createElement('input');
-    targetModelInput.type = 'text';
-    targetModelInput.className = 'provider-input';
-    targetModelInput.placeholder = 'e.g. gpt-4o-mini';
-    targetModelInput.value = rule.target?.model || '';
-
-    // Build condition section
-    const condGrid = document.createElement('div');
-    condGrid.className = 'routing-rule-grid';
-    condGrid.appendChild(condTypeLabel);
-    condGrid.appendChild(condTypeSelect);
-    condGrid.appendChild(condValueLabel);
-    condGrid.appendChild(condValueInput);
-    condGrid.appendChild(agentToggle);
-
-    // Build target section
-    const targetGrid = document.createElement('div');
-    targetGrid.className = 'routing-rule-grid';
-    targetGrid.appendChild(targetProviderLabel);
-    targetGrid.appendChild(targetProviderSelect);
-    targetGrid.appendChild(targetModelLabel);
-    targetGrid.appendChild(targetModelInput);
-
-    body.appendChild(condGrid);
-    body.appendChild(targetGrid);
-
-    card.appendChild(header);
-    card.appendChild(body);
-
-    // Store references for collection
-    card._refs = {
-      nameInput, enabledCheck, condTypeSelect, condValueInput,
-      agentCheck, targetProviderSelect, targetModelInput
-    };
-
-    dom.smartRoutingRulesList.appendChild(card);
-  });
-}
-
-function getSmartRoutingRulesFromState() {
-  const smartRouting = appState.settings.inference?.smartRouting || {};
-  return Array.isArray(smartRouting.rules) ? [...smartRouting.rules] : [];
-}
-
-function recomputePriorities(rules) {
-  rules.forEach((r, i) => { r.priority = (i + 1) * 10; });
-}
-
-function collectSmartRoutingRules() {
-  if (!dom.smartRoutingRulesList) return [];
-  const cards = dom.smartRoutingRulesList.querySelectorAll('.routing-rule-card');
-  const rules = [];
-  cards.forEach((card, index) => {
-    const refs = card._refs;
-    if (!refs) return;
-
-    const condType = refs.condTypeSelect.value;
-    const condValue = refs.condValueInput.value.trim();
-    const condition = { type: condType, agentModeOnly: refs.agentCheck.checked };
-
-    if (condType === 'keyword') {
-      condition.keywords = condValue.split(',').map((s) => s.trim()).filter(Boolean);
-    } else if (condType === 'regex') {
-      condition.pattern = condValue;
-      condition.flags = 'i';
-    } else if (condType === 'prefix') {
-      condition.prefix = condValue;
-    }
-
-    rules.push({
-      id: appState.settings.inference?.smartRouting?.rules?.[index]?.id || generateRuleId(),
-      name: refs.nameInput.value.trim() || `Rule ${index + 1}`,
-      enabled: refs.enabledCheck.checked,
-      priority: (index + 1) * 10,
-      condition,
-      target: {
-        provider: refs.targetProviderSelect.value,
-        model: refs.targetModelInput.value.trim()
-      }
-    });
-  });
-  return rules;
-}
-
-async function saveSmartRoutingRulesToBackend() {
-  const rules = collectSmartRoutingRules();
-  try {
-    const result = await window.electron.settings.saveSmartRoutingRules({ rules });
-    if (result?.error) {
-      if (dom.smartRoutingStatus) {
-        dom.smartRoutingStatus.textContent = result.error;
-        dom.smartRoutingStatus.classList.add('error');
-      }
-      return;
-    }
-    if (result?.smartRouting) {
-      appState.settings.inference = {
-        ...(appState.settings.inference || {}),
-        smartRouting: result.smartRouting
-      };
-    }
-    if (dom.smartRoutingStatus) {
-      dom.smartRoutingStatus.textContent = 'Rules saved.';
-      dom.smartRoutingStatus.classList.remove('error');
-    }
-  } catch (err) {
-    if (dom.smartRoutingStatus) {
-      dom.smartRoutingStatus.textContent = err.message || 'Failed to save rules.';
-      dom.smartRoutingStatus.classList.add('error');
-    }
   }
 }
 
@@ -3790,13 +3466,6 @@ function renderProviderCard(providerKey, provider) {
   const titleWrap = document.createElement('div');
   titleWrap.className = 'provider-title-wrap';
   titleWrap.appendChild(title);
-
-  if (appState.settings.activeProvider === providerKey) {
-    const activeBadge = document.createElement('span');
-    activeBadge.className = 'active-provider-badge';
-    activeBadge.textContent = 'Active';
-    titleWrap.appendChild(activeBadge);
-  }
 
   const status = document.createElement('span');
   status.className = 'provider-status';
@@ -3839,70 +3508,6 @@ function renderProviderCard(providerKey, provider) {
     controls.appendChild(addressInput);
   }
 
-  const modelLabel = document.createElement('label');
-  modelLabel.textContent = 'Model';
-
-  const modelSelect = document.createElement('select');
-  modelSelect.className = 'provider-input';
-  modelSelect.dataset.modelProvider = providerKey;
-  // Seed with current model
-  if (provider.model) {
-    const opt = document.createElement('option');
-    opt.value = provider.model;
-    opt.textContent = provider.model;
-    opt.selected = true;
-    modelSelect.appendChild(opt);
-  }
-
-  // Fetch models from API asynchronously
-  (async () => {
-    try {
-      const result = unwrapIpcResult(
-        await window.electron.settings.listModels({ provider: providerKey }),
-        'Failed to list models.'
-      );
-      const models = result.models || [];
-      const currentModel = provider.model || '';
-      modelSelect.innerHTML = '';
-      let hasSelected = false;
-      models.forEach((m) => {
-        const modelId = typeof m === 'string' ? m : m.id;
-        const modelName = typeof m === 'string' ? m : (m.name || m.id);
-        const opt = document.createElement('option');
-        opt.value = modelId;
-        opt.textContent = modelName;
-        if (modelId === currentModel) { opt.selected = true; hasSelected = true; }
-        modelSelect.appendChild(opt);
-      });
-      if (currentModel && !hasSelected) {
-        const opt = document.createElement('option');
-        opt.value = currentModel;
-        opt.textContent = currentModel + ' (current)';
-        opt.selected = true;
-        modelSelect.insertBefore(opt, modelSelect.firstChild);
-      }
-    } catch (err) { modelPopulateLog.debug(`seed failed: ${err.message}`); }
-  })();
-
-  // Auto-save on change
-  modelSelect.addEventListener('change', async () => {
-    const prevModel = appState.settings.providers[providerKey]?.model || '';
-    const model = modelSelect.value;
-    const result = await window.electron.settings.setProviderModel({
-      provider: providerKey, model
-    });
-    if (!result.ok) {
-      setProviderMessage(providerKey, result.error || 'Unable to save model.', true);
-      return;
-    }
-    appState.settings.providers[providerKey].model = result.model;
-    setProviderMessage(providerKey, `Model saved: ${result.model || '(default)'}`);
-    addStatusMessage(`Model changed (${providerKey}): ${prevModel || '(default)'} → ${result.model || '(default)'}`);
-  });
-
-  controls.appendChild(modelLabel);
-  controls.appendChild(modelSelect);
-
   const actions = document.createElement('div');
   actions.className = 'provider-actions';
 
@@ -3930,16 +3535,7 @@ function renderProviderCard(providerKey, provider) {
   clearBtn.dataset.action = 'clear';
   clearBtn.dataset.provider = providerKey;
 
-  const activeBtn = document.createElement('button');
-  activeBtn.type = 'button';
-  activeBtn.className = 'btn';
-  activeBtn.textContent = appState.settings.activeProvider === providerKey ? 'Active Provider' : 'Set Active';
-  activeBtn.disabled = appState.settings.activeProvider === providerKey;
-  activeBtn.dataset.action = 'set-active';
-  activeBtn.dataset.provider = providerKey;
-
   actions.appendChild(saveBtn);
-  actions.appendChild(activeBtn);
   actions.appendChild(testBtn);
   actions.appendChild(clearBtn);
 
@@ -4152,8 +3748,7 @@ function renderSettings() {
     dom.providerList.appendChild(renderProviderCard(key, provider));
   });
 
-  renderInferenceTierDetails();
-  renderSmartRoutingRules();
+  renderCatalogSettings();
   loadVaultEntries();
   loadMcpServers();
 
@@ -6414,49 +6009,6 @@ async function handleChatPlanAndExecute() {
   }
 }
 
-async function loadLLMRoutingSettings() {
-  if (!dom.llmRoutingEnabled) return;
-  try {
-    // The settings:load handler returns {inference, providers, ...} at the
-    // top level, which wrapHandler wraps as {ok:true, data:{...}}. Use the
-    // existing unwrap helper — the old code read result.settings (which is
-    // always undefined) and force-unchecked the box on every load.
-    const data = unwrapIpcResult(await window.electron.settings.load(), 'Unable to load settings.');
-    const llmRouting = data?.inference?.llmRouting || {};
-    dom.llmRoutingEnabled.checked = llmRouting.enabled === true;
-    if (dom.llmRoutingCost) dom.llmRoutingCost.value = llmRouting.costSensitivity || 'medium';
-    if (dom.llmRoutingSpeed) dom.llmRoutingSpeed.value = llmRouting.speedPriority || 'medium';
-    if (dom.llmRoutingQuality) dom.llmRoutingQuality.value = llmRouting.qualityPriority || 'high';
-  } catch (err) {
-    settingsLog.warn(`loadLLMRoutingSettings failed: ${err.message}`);
-  }
-}
-
-async function handleSaveLLMRouting() {
-  if (dom.llmRoutingSaveBtn) dom.llmRoutingSaveBtn.disabled = true;
-  try {
-    const payload = {
-      enabled: Boolean(dom.llmRoutingEnabled?.checked),
-      costSensitivity: dom.llmRoutingCost?.value || 'medium',
-      speedPriority: dom.llmRoutingSpeed?.value || 'medium',
-      qualityPriority: dom.llmRoutingQuality?.value || 'high'
-    };
-    const result = await window.electron.settings.saveLlmRouting(payload);
-    if (!result?.ok) throw new Error(result?.error || 'Save failed');
-    if (dom.llmRoutingStatus) {
-      dom.llmRoutingStatus.textContent = payload.enabled ? 'Saved — LLM routing enabled.' : 'Saved — LLM routing disabled.';
-      dom.llmRoutingStatus.classList.remove('error');
-    }
-  } catch (err) {
-    if (dom.llmRoutingStatus) {
-      dom.llmRoutingStatus.textContent = `Error: ${err.message}`;
-      dom.llmRoutingStatus.classList.add('error');
-    }
-  } finally {
-    if (dom.llmRoutingSaveBtn) dom.llmRoutingSaveBtn.disabled = false;
-  }
-}
-
 // ─── System Apps Panel ───
 
 async function loadSystemApps() {
@@ -6870,7 +6422,7 @@ async function loadSettings() {
     await loadCronJobs();
     loadPermissionRules().catch(() => {});
     loadWorkflows().catch(() => {});
-    loadLLMRoutingSettings().catch(() => {});
+    loadModelProfiles().catch(() => {});
     loadSystemApps().catch(() => {});
     loadWebhookList().catch(() => {});
     loadMeshStatus().catch(() => {});
@@ -6977,6 +6529,398 @@ async function loadModelsCatalogStatus() {
     dom.modelsCatalogStatus.textContent = err.message;
     dom.modelsCatalogStatus.classList.add('error');
   }
+}
+
+/* --- Models tab: profiles and the catalog (spec 2026-09-27 §11) --- */
+
+const MODEL_ROLE_LABELS = {
+  main: 'Main: answers you in chats and cases',
+  worker: 'Worker: agents and delegated work',
+  utility: 'Utility: small jobs such as case orientation and classification',
+  vision: 'Vision (optional): reading images and scanned pages',
+  imageGeneration: 'Image generation (optional)'
+};
+const MODEL_ROLE_ORDER = ['main', 'worker', 'utility', 'vision', 'imageGeneration'];
+const MODEL_ROLE_NEEDS = { vision: { imageInput: true } };
+const modelsTabLog = createLogger('models-tab');
+let profileDraft = null;
+
+function formatModelPrice(cost) {
+  if (!cost || typeof cost.input !== 'number' || typeof cost.output !== 'number') return 'unpriced';
+  return `$${cost.input} in / $${cost.output} out per M`;
+}
+
+function formatContext(tokens) {
+  if (!Number.isFinite(tokens)) return '';
+  return tokens >= 1000000 ? `${(tokens / 1000000).toFixed(1)}M context` : `${Math.round(tokens / 1000)}K context`;
+}
+
+function setModelsStatus(text, isError = false) {
+  if (!dom.modelsProfilesStatus) return;
+  dom.modelsProfilesStatus.textContent = text;
+  dom.modelsProfilesStatus.classList.toggle('error', Boolean(isError));
+}
+
+async function loadModelProfiles() {
+  if (!dom.modelsProfileList || !window.electron?.models?.profiles) return;
+  try {
+    const result = unwrapIpcResult(await window.electron.models.profiles(), 'Unable to load the model profiles.');
+    appState.modelProfiles = { profiles: result.profiles || [], defaultProfileId: result.defaultProfileId || null };
+    renderModelProfileList();
+  } catch (err) {
+    setModelsStatus(err.message, true);
+  }
+}
+
+function renderModelProfileList() {
+  const list = dom.modelsProfileList;
+  if (!list) return;
+  list.textContent = '';
+  const { profiles = [], defaultProfileId = null } = appState.modelProfiles || {};
+  if (!profiles.length) {
+    const empty = document.createElement('div');
+    empty.className = 'provider-message';
+    empty.textContent = 'No profiles yet. Create one to choose the models King Louie uses.';
+    list.appendChild(empty);
+    return;
+  }
+  for (const profile of profiles) {
+    const card = document.createElement('div');
+    card.className = 'provider-card models-profile-card';
+    card.dataset.profileId = profile.id;
+
+    const header = document.createElement('div');
+    header.className = 'provider-header';
+    const title = document.createElement('div');
+    title.className = 'provider-title';
+    title.textContent = profile.name;
+    header.appendChild(title);
+    if (profile.id === defaultProfileId) {
+      const badge = document.createElement('span');
+      badge.className = 'active-provider-badge';
+      badge.textContent = 'Default';
+      header.appendChild(badge);
+    }
+    card.appendChild(header);
+
+    const summary = document.createElement('div');
+    summary.className = 'provider-message';
+    const mainNames = (profile.roles?.main || []).map((e) => e.name);
+    const unusable = Object.values(profile.roles || {}).flat().filter((e) => !e.usable).length;
+    summary.textContent = `Main: ${mainNames.length ? mainNames.join(', ') : '(none)'}${unusable ? ` · ${unusable} model${unusable === 1 ? '' : 's'} not usable now` : ''}`;
+    card.appendChild(summary);
+
+    // The migration's notes (spec §13): which old model ids were mapped or kept.
+    const notes = profile.migration && Array.isArray(profile.migration.notes) ? profile.migration.notes : [];
+    if (notes.length) {
+      const ul = document.createElement('ul');
+      ul.className = 'models-migration-notes';
+      for (const note of notes) {
+        const li = document.createElement('li');
+        li.textContent = note;
+        ul.appendChild(li);
+      }
+      card.appendChild(ul);
+    }
+
+    const actions = document.createElement('div');
+    actions.className = 'provider-actions';
+    const button = (label, action, cls = 'btn') => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = cls;
+      b.textContent = label;
+      b.dataset.profileAction = action;
+      b.dataset.profileId = profile.id;
+      return b;
+    };
+    actions.appendChild(button('Edit', 'edit', 'btn btn-primary'));
+    actions.appendChild(button('Duplicate', 'duplicate'));
+    if (profile.id !== defaultProfileId) actions.appendChild(button('Make default', 'default'));
+    if (profiles.length > 1) actions.appendChild(button('Delete', 'delete', 'btn btn-danger'));
+    card.appendChild(actions);
+    list.appendChild(card);
+  }
+}
+
+function openProfileEditor(profile) {
+  profileDraft = profile
+    ? { id: profile.id, name: profile.name, roles: JSON.parse(JSON.stringify(profile.roles || {})) }
+    : { id: null, name: '', roles: { main: [], worker: [], utility: [] } };
+  renderProfileEditor();
+}
+
+function closeProfileEditor() {
+  profileDraft = null;
+  if (!dom.modelsProfileEditor) return;
+  dom.modelsProfileEditor.hidden = true;
+  dom.modelsProfileEditor.textContent = '';
+}
+
+function renderProfileEditor() {
+  const editor = dom.modelsProfileEditor;
+  if (!editor || !profileDraft) return;
+  editor.hidden = false;
+  editor.textContent = '';
+
+  const heading = document.createElement('h4');
+  heading.textContent = profileDraft.id ? `Edit ${profileDraft.name}` : 'New profile';
+  editor.appendChild(heading);
+
+  const nameLabel = document.createElement('label');
+  nameLabel.htmlFor = 'models-profile-name';
+  nameLabel.textContent = 'Name';
+  const nameInput = document.createElement('input');
+  nameInput.id = 'models-profile-name';
+  nameInput.className = 'provider-input';
+  nameInput.value = profileDraft.name;
+  nameInput.addEventListener('input', () => { profileDraft.name = nameInput.value; });
+  editor.appendChild(nameLabel);
+  editor.appendChild(nameInput);
+
+  const roles = [...MODEL_ROLE_ORDER, ...Object.keys(profileDraft.roles).filter((r) => !MODEL_ROLE_ORDER.includes(r))];
+  for (const role of roles) editor.appendChild(renderRoleBlock(role));
+
+  const actions = document.createElement('div');
+  actions.className = 'provider-actions';
+  const save = document.createElement('button');
+  save.type = 'button';
+  save.className = 'btn btn-primary';
+  save.id = 'models-profile-save-btn';
+  save.textContent = 'Save profile';
+  save.addEventListener('click', () => saveProfileDraft());
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'btn';
+  cancel.textContent = 'Cancel';
+  cancel.addEventListener('click', () => closeProfileEditor());
+  actions.appendChild(save);
+  actions.appendChild(cancel);
+  editor.appendChild(actions);
+}
+
+function renderRoleBlock(role) {
+  const block = document.createElement('div');
+  block.className = 'models-role-block';
+  block.dataset.role = role;
+  const title = document.createElement('div');
+  title.className = 'chat-info-section-title';
+  title.textContent = MODEL_ROLE_LABELS[role] || `Custom role: ${role}`;
+  block.appendChild(title);
+  const entries = profileDraft.roles[role] || [];
+  if (!entries.length) {
+    const empty = document.createElement('div');
+    empty.className = 'provider-message';
+    empty.textContent = role === 'main'
+      ? 'Empty: chats cannot run until main has a model.'
+      : (role === 'worker' || role === 'utility' ? 'Empty: borrows from the next stronger role.' : 'Empty.');
+    block.appendChild(empty);
+  }
+  entries.forEach((entry, index) => block.appendChild(renderRoleEntry(role, entry, index, entries.length)));
+  const add = document.createElement('button');
+  add.type = 'button';
+  add.className = 'btn';
+  add.textContent = 'Add model';
+  add.dataset.addRole = role;
+  add.addEventListener('click', () => openModelPicker(role, block));
+  block.appendChild(add);
+  return block;
+}
+
+function renderRoleEntry(role, entry, index, count) {
+  const row = document.createElement('div');
+  row.className = `models-role-entry${entry.usable === false ? ' is-unusable' : ''}`;
+  const label = document.createElement('span');
+  label.className = 'models-role-entry-label';
+  const facts = [entry.provider, formatModelPrice(entry.cost), formatContext(entry.context)].filter(Boolean).join(' · ');
+  label.textContent = `${index + 1}. ${entry.name || entry.model} (${facts})`;
+  row.appendChild(label);
+  if (entry.usable === false && Array.isArray(entry.reasons) && entry.reasons.length) {
+    const why = document.createElement('div');
+    why.className = 'provider-message error';
+    why.textContent = entry.reasons.join(' ');
+    row.appendChild(why);
+  }
+  if (Array.isArray(entry.efforts) && entry.efforts.length) {
+    const effort = document.createElement('select');
+    effort.className = 'chat-info-select';
+    effort.title = 'Reasoning effort';
+    const standard = document.createElement('option');
+    standard.value = '';
+    standard.textContent = 'Default effort';
+    effort.appendChild(standard);
+    for (const value of entry.efforts) {
+      const opt = document.createElement('option');
+      opt.value = value;
+      opt.textContent = value;
+      if (entry.effort === value) opt.selected = true;
+      effort.appendChild(opt);
+    }
+    effort.addEventListener('change', () => { entry.effort = effort.value || null; });
+    row.appendChild(effort);
+  }
+  const move = (delta) => {
+    const list = profileDraft.roles[role];
+    const other = index + delta;
+    if (other < 0 || other >= list.length) return;
+    [list[index], list[other]] = [list[other], list[index]];
+    renderProfileEditor();
+  };
+  const small = (text, title, fn, disabled = false) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn';
+    b.textContent = text;
+    b.title = title;
+    b.disabled = disabled;
+    b.addEventListener('click', fn);
+    return b;
+  };
+  row.appendChild(small('↑', 'Move up', () => move(-1), index === 0));
+  row.appendChild(small('↓', 'Move down', () => move(1), index === count - 1));
+  row.appendChild(small('Remove', 'Remove from this role', () => { profileDraft.roles[role].splice(index, 1); renderProfileEditor(); }));
+  return row;
+}
+
+async function openModelPicker(role, block) {
+  const open = block.querySelector('.models-picker');
+  if (open) { open.remove(); return; }
+  const picker = document.createElement('div');
+  picker.className = 'models-picker';
+  picker.textContent = 'Loading models…';
+  block.appendChild(picker);
+  try {
+    const result = unwrapIpcResult(await window.electron.models.picker({ needs: MODEL_ROLE_NEEDS[role] || {} }), 'Unable to list models.');
+    picker.textContent = '';
+    const taken = new Set((profileDraft.roles[role] || []).map((e) => `${e.provider}:${e.model}`));
+    const usable = (result.usable || []).filter((c) => !taken.has(`${c.provider}:${c.model}`));
+    if (!usable.length) {
+      const none = document.createElement('div');
+      none.className = 'provider-message';
+      none.textContent = 'No usable model meets this role\'s needs. Add and test a key under API keys.';
+      picker.appendChild(none);
+    }
+    for (const c of usable) {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'models-picker-item';
+      item.dataset.provider = c.provider;
+      item.dataset.model = c.model;
+      item.textContent = `${c.name} (${[c.provider, c.local ? 'local' : formatModelPrice(c.cost), formatContext(c.context)].filter(Boolean).join(' · ')})`;
+      item.addEventListener('click', () => {
+        profileDraft.roles[role] = [...(profileDraft.roles[role] || []), { provider: c.provider, model: c.model, effort: null, name: c.name, usable: true, reasons: [], cost: c.cost, context: c.context, efforts: [] }];
+        renderProfileEditor();
+      });
+      picker.appendChild(item);
+    }
+    // Unusable models appear greyed out with their reasons (spec §11).
+    for (const c of (result.unusable || []).slice(0, 100)) {
+      const row = document.createElement('div');
+      row.className = 'models-picker-item is-unusable';
+      row.textContent = `${c.name} (${c.provider}): ${(c.reasons || []).join(' ')}`;
+      picker.appendChild(row);
+    }
+  } catch (err) {
+    picker.textContent = err.message;
+  }
+}
+
+async function saveProfileDraft() {
+  if (!profileDraft) return;
+  const roles = {};
+  for (const [role, entries] of Object.entries(profileDraft.roles)) {
+    roles[role] = (entries || []).map((e) => ({ provider: e.provider, model: e.model, effort: e.effort || null }));
+  }
+  try {
+    const result = unwrapIpcResult(
+      await window.electron.models.saveProfile({ ...(profileDraft.id ? { id: profileDraft.id } : {}), name: profileDraft.name, roles }),
+      'Unable to save the profile.'
+    );
+    setModelsStatus(`Saved ${result.profile.name}.`);
+    closeProfileEditor();
+    await loadModelProfiles();
+  } catch (err) {
+    setModelsStatus(err.message, true);
+  }
+}
+
+function renderCatalogSettings() {
+  const models = appState.settings?.modelsSettings || {};
+  if (dom.modelsCatalogFetch) dom.modelsCatalogFetch.checked = models.catalog?.fetch !== false;
+  if (dom.modelsCatalogRefreshHours) dom.modelsCatalogRefreshHours.value = String(models.catalog?.refreshHours ?? 24);
+  if (dom.modelsCatalogOverrides) dom.modelsCatalogOverrides.value = JSON.stringify(models.overrides || {}, null, 2);
+}
+
+if (dom.modelsNewProfileBtn) {
+  dom.modelsNewProfileBtn.addEventListener('click', () => openProfileEditor(null));
+}
+
+if (dom.modelsProfileList) {
+  dom.modelsProfileList.addEventListener('click', async (event) => {
+    const btn = event.target.closest('button[data-profile-action]');
+    if (!btn) return;
+    const id = btn.dataset.profileId;
+    const action = btn.dataset.profileAction;
+    const profile = (appState.modelProfiles?.profiles || []).find((p) => p.id === id);
+    try {
+      if (action === 'edit' && profile) openProfileEditor(profile);
+      if (action === 'duplicate') {
+        const r = unwrapIpcResult(await window.electron.models.duplicateProfile(id), 'Unable to duplicate the profile.');
+        setModelsStatus(`Created ${r.profile.name}.`);
+        await loadModelProfiles();
+      }
+      if (action === 'default') {
+        unwrapIpcResult(await window.electron.models.setDefaultProfile(id), 'Unable to set the default profile.');
+        setModelsStatus(`${profile?.name || 'The profile'} is now the default for new chats.`);
+        await loadModelProfiles();
+      }
+      if (action === 'delete') {
+        // No native dialogs: a second click confirms.
+        if (btn.dataset.confirming !== 'true') {
+          btn.dataset.confirming = 'true';
+          btn.textContent = 'Click again to delete';
+          return;
+        }
+        const r = unwrapIpcResult(await window.electron.models.removeProfile(id), 'Unable to delete the profile.');
+        const moved = (r.moved?.chats?.length || 0) + (r.moved?.cases?.length || 0);
+        setModelsStatus(`Deleted ${profile?.name || 'the profile'}.${moved ? ` ${moved} chat(s) or case(s) now use the default profile.` : ''}`);
+        await loadModelProfiles();
+      }
+    } catch (err) {
+      setModelsStatus(err.message, true);
+      modelsTabLog.warn(`profile ${action} failed: ${err.message}`);
+    }
+  });
+}
+
+if (dom.modelsSaveCatalogBtn) {
+  dom.modelsSaveCatalogBtn.addEventListener('click', async () => {
+    let overrides;
+    try {
+      overrides = JSON.parse(dom.modelsCatalogOverrides?.value || '{}');
+    } catch {
+      if (dom.modelsCatalogStatus) {
+        dom.modelsCatalogStatus.textContent = 'Overrides must be valid JSON.';
+        dom.modelsCatalogStatus.classList.add('error');
+      }
+      return;
+    }
+    const fetchOn = Boolean(dom.modelsCatalogFetch?.checked);
+    const refreshHours = Number(dom.modelsCatalogRefreshHours?.value);
+    try {
+      const result = unwrapIpcResult(
+        await window.electron.models.saveCatalogSettings({ fetch: fetchOn, refreshHours, overrides }),
+        'Unable to save the catalog settings.'
+      );
+      appState.settings.modelsSettings = { catalog: { ...(appState.settings.modelsSettings?.catalog || {}), fetch: fetchOn, refreshHours }, overrides };
+      showCatalogStatus(result.catalog);
+    } catch (err) {
+      if (dom.modelsCatalogStatus) {
+        dom.modelsCatalogStatus.textContent = err.message;
+        dom.modelsCatalogStatus.classList.add('error');
+      }
+    }
+  });
 }
 
 async function handleSaveOllamaUrl() {
@@ -7398,36 +7342,6 @@ async function sendMessage() {
       const errorText = `❌ ${error.message || 'Unable to update profile.'}`;
       appendLocalMessage('assistant', errorText);
       window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
-      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: errorText }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
-    }
-
-    return;
-  }
-
-  if (['/fast', '/standard', '/smart'].includes(slashCommand?.name)) {
-    dom.userInput.value = '';
-    dom.userInput.style.height = 'auto';
-
-    appendLocalMessage('user', message);
-    window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'user', text: message }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
-
-    const tier = slashCommand.name.slice(1);
-    try {
-      const result = await window.electron.settings.setInferenceTier({ tier });
-      const responseText = result?.ok
-        ? `Inference tier is now **${formatInferenceTierLabel(tier)}**.`
-        : `❌ ${result?.error || 'Unable to update inference tier.'}`;
-
-      if (result?.ok && result?.inference) {
-        appState.settings.inference = result.inference;
-        refreshUI();
-      }
-
-      appendLocalMessage('assistant', responseText);
-      window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: responseText }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
-    } catch (error) {
-      const errorText = `❌ ${error.message || 'Unable to update inference tier.'}`;
-      appendLocalMessage('assistant', errorText);
       window.electron.chat.addMessage({ chatId: appState.activeChatId, sender: 'assistant', text: errorText }).catch((err) => chatLog.warn(`addMessage persistence failed: ${err.message}`));
     }
 
@@ -8180,39 +8094,6 @@ async function handleTestProvider(providerKey) {
 
   updateProviderStatus(providerKey, result.status);
   setProviderMessage(providerKey, result.status?.message || 'Connection successful.');
-}
-
-async function handleSaveProviderModel(providerKey) {
-  const el = dom.providerList.querySelector(`[data-model-provider="${providerKey}"]`);
-  const model = (el?.value || '').trim();
-  const result = await window.electron.settings.setProviderModel({
-    provider: providerKey,
-    model
-  });
-
-  if (!result.ok) {
-    setProviderMessage(providerKey, result.error || 'Unable to save model.', true);
-    return;
-  }
-
-  const prevModel = appState.settings.providers[providerKey]?.model || '';
-  appState.settings.providers[providerKey].model = result.model;
-  setProviderMessage(providerKey, `Model saved: ${result.model || '(default)'}`);
-  renderSettings();
-  addStatusMessage(`Model changed (${providerKey}): ${prevModel || '(default)'} → ${result.model || '(default)'}`);
-}
-
-async function handleSetActiveProvider(providerKey) {
-  const result = await window.electron.settings.setActiveProvider({ provider: providerKey });
-  if (!result.ok) {
-    setProviderMessage(providerKey, result.error || 'Unable to set active provider.', true);
-    return;
-  }
-
-  const prev = appState.settings.activeProvider;
-  appState.settings.activeProvider = result.activeProvider;
-  renderSettings();
-  addStatusMessage(`Provider changed: ${prev} → ${result.activeProvider}`);
 }
 
 // Event Listeners
@@ -9222,84 +9103,6 @@ if (dom.skillSettingsContainer) {
   });
 }
 
-/* --- Inference tier ---------------------------------------- */
-if (dom.saveInferenceTierBtn) {
-  dom.saveInferenceTierBtn.addEventListener('click', async () => {
-    const tier = dom.inferenceTierSelect?.value;
-    if (!tier) return;
-    try {
-      const result = unwrapIpcResult(
-        await window.electron.settings.setInferenceTier({ tier }),
-        'Failed to set inference tier.'
-      );
-      appState.settings.inference = result.inference || appState.settings.inference;
-      renderInferenceTierDetails();
-      if (dom.inferenceTierStatus) {
-        dom.inferenceTierStatus.textContent = `Switched to "${tier}" tier.`;
-        dom.inferenceTierStatus.classList.remove('error');
-      }
-    } catch (err) {
-      if (dom.inferenceTierStatus) {
-        dom.inferenceTierStatus.textContent = err.message || 'Error setting tier.';
-        dom.inferenceTierStatus.classList.add('error');
-      }
-    }
-  });
-}
-
-/* --- Smart Routing ---------------------------------------- */
-if (dom.smartRoutingEnabled) {
-  dom.smartRoutingEnabled.addEventListener('change', async () => {
-    const enabled = dom.smartRoutingEnabled.checked;
-    try {
-      const result = await window.electron.settings.saveSmartRouting({ enabled });
-      if (result?.smartRouting) {
-        appState.settings.inference = {
-          ...(appState.settings.inference || {}),
-          smartRouting: result.smartRouting
-        };
-      }
-      if (dom.smartRoutingStatus) {
-        dom.smartRoutingStatus.textContent = enabled ? 'Smart routing enabled.' : 'Smart routing disabled.';
-        dom.smartRoutingStatus.classList.remove('error');
-      }
-    } catch (err) {
-      if (dom.smartRoutingStatus) {
-        dom.smartRoutingStatus.textContent = err.message || 'Error toggling smart routing.';
-        dom.smartRoutingStatus.classList.add('error');
-      }
-    }
-  });
-}
-
-if (dom.addRoutingRuleBtn) {
-  dom.addRoutingRuleBtn.addEventListener('click', () => {
-    const rules = getSmartRoutingRulesFromState();
-    rules.push({
-      id: generateRuleId(),
-      name: '',
-      enabled: true,
-      priority: (rules.length + 1) * 10,
-      condition: { type: 'keyword', keywords: [] },
-      target: { provider: getProviderKeys()[0] || 'openai', model: '' }
-    });
-    if (!appState.settings.inference) appState.settings.inference = {};
-    if (!appState.settings.inference.smartRouting) appState.settings.inference.smartRouting = { enabled: false, rules: [] };
-    appState.settings.inference.smartRouting.rules = rules;
-    renderSmartRoutingRules();
-  });
-}
-
-if (dom.smartRoutingRulesList) {
-  // Save on blur/change of any input within the rules list
-  dom.smartRoutingRulesList.addEventListener('change', () => saveSmartRoutingRulesToBackend());
-  dom.smartRoutingRulesList.addEventListener('focusout', (e) => {
-    if (e.target.tagName === 'INPUT' && e.target.type === 'text') {
-      saveSmartRoutingRulesToBackend();
-    }
-  });
-}
-
 /* --- Channel management: Telegram -------------------------- */
 if (dom.saveTelegramTokenBtn) {
   dom.saveTelegramTokenBtn.addEventListener('click', async () => {
@@ -9825,9 +9628,6 @@ if (dom.providerList) {
     if (action === 'test') {
       handleTestProvider(provider);
     }
-    if (action === 'set-active') {
-      handleSetActiveProvider(provider);
-    }
     if (action === 'save-ollama-url') {
       handleSaveOllamaUrl();
     }
@@ -10042,9 +9842,6 @@ if (dom.workflowPlanBtn) {
 }
 if (dom.workflowRunBtn) {
   dom.workflowRunBtn.addEventListener('click', () => handlePlanAndExecuteWorkflow());
-}
-if (dom.llmRoutingSaveBtn) {
-  dom.llmRoutingSaveBtn.addEventListener('click', () => handleSaveLLMRouting());
 }
 if (dom.workflowList) {
   dom.workflowList.addEventListener('click', async (e) => {
