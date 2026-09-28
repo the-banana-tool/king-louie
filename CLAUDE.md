@@ -134,12 +134,26 @@ stages M1 to M3). It is Electron-free.
   BackgroundTask take a `role` (a bare call runs on worker), and a `model`
   an LLM names (SpawnAgent, a planned workflow task's `preferredModel`) must
   already be in the turn's profile (`requireInProfile`). The explorer is the
-  read-only `code-explorer` agent on worker; main's agent-mode prompt starts
-  with `DELEGATION_GUIDANCE` (`src/context/system-sections.js`).
-- Every call's `llmMetrics` carries `role`, `profileId`, `failover` and
-  `borrowedFrom` (stamped by the router from `routedProvider({ meta })`) and
-  `pricingUsage`; a reply's `llm` has `subagents` and `byRole`
-  (`summarizeTurnLlm`); `UsageTracker` totals by role and model.
+  read-only `code-explorer` agent on worker. A non-case agent-mode turn's
+  prompt starts with `DELEGATION_GUIDANCE` (`src/context/system-sections.js`)
+  only when `workerIsCheaper` (`src/models/delegation.js`) holds: worker has
+  models of its own (no borrow from main) and its first model's blended
+  catalog rate (the suggester's 3:1 input:output blend) is strictly below
+  main's first. It reads only the frozen `TurnModels` and the catalog, so the
+  cached prefix is stable within a profile; an unpriced model on either side
+  leaves the guidance out. When worker borrows from main, the Models tab's
+  profile cards and the King Louie panel say so.
+- An agent-panel run (parallel, serial, with-deps) takes one `snapshotModels`
+  when it starts and passes it to every agent's `createAgentRuntime`.
+- Every routed call's `llmMetrics` carries `role`, `profileId`, `failover`
+  and `borrowedFrom` (stamped by the router from `routedProvider({ meta })`)
+  and `pricingUsage`; record usage with `UsageTracker.eventFromMetrics(m)` so
+  the role and `pricingUsage` reach the tracker (case orient, classify and
+  draft do). Ingest's model calls are not routed: `createCallModel` records
+  OCR as `vision` and extract/verify under the role its caller passes (the
+  case role's model role). A reply's `llm` has `subagents` and `byRole`
+  (`summarizeTurnLlm`; a borrowed role's entry keeps `borrowedFrom`, shown as
+  "worker (main) $0.20"); `UsageTracker` totals by role and model.
 - The King Louie profile (`src/models/suggester.js`, `src/models/king-louie.js`)
   only proposes; the first Accept creates it, and only Accept (or
   `models.kingLouie.autoAccept`) changes it. Custom roles are saved through
