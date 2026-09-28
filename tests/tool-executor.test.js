@@ -722,3 +722,12 @@ describe('ToolExecutor allowedToolNames', () => {
     assert.strictEqual(executor.allowedToolNames, null);
   });
 });
+
+describe('ToolExecutor sub-agent cost sink (models spec 2026-09-27 §10)', () => {
+  it('hands the sink on to its children through the requester', () => {
+    const sink = () => {};
+    const requester = new ToolExecutor({ requireApproval: false, onSubagentLlm: sink })._rethreadedRequester();
+    assert.strictEqual(requester.onSubagentLlm, sink);
+    assert.strictEqual(new ToolExecutor({ requireApproval: false })._rethreadedRequester().onSubagentLlm, undefined);
+  });
+});

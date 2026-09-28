@@ -210,4 +210,29 @@ describe('UsageTracker by role and model (spec 2026-09-27 §10)', () => {
     assert.deepStrictEqual(recent.utility, { calls: 2, unpricedCalls: 0, cost: 0.03, usage: { input: 3000, cachedInput: 0, cacheWrite: 0, output: 2, reasoning: 0 } });
     assert.deepStrictEqual([recent.main.calls, recent.main.unpricedCalls, recent.main.cost], [1, 1, 0]);
   });
+
+  it('backfills a daily record stored before unpricedCalls, roles and models existed (Task 3 review)', () => {
+    const store = memoryStore();
+    const today = new Date().toISOString().slice(0, 10);
+    // Pre-Task-3 shape: no unpricedCalls, no roles, no models; a provider
+    // entry that likewise predates unpricedCalls.
+    store.set(`usage.daily.${today}`, {
+      inputTokens: 10, outputTokens: 2, cacheReadTokens: 0, totalTokens: 12, totalCost: 0.01, turns: 1,
+      providers: { openai: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 0, totalTokens: 12, totalCost: 0.01, turns: 1 } }
+    });
+    const tracker = new UsageTracker(store);
+    const daily = tracker.getDailyUsage(today);
+    assert.strictEqual(daily.unpricedCalls, 0);
+    assert.deepStrictEqual(daily.roles, {});
+    assert.deepStrictEqual(daily.models, {});
+    assert.strictEqual(daily.providers.openai.unpricedCalls, 0);
+    assert.strictEqual(daily.providers.openai.turns, 1, 'the old data itself is preserved');
+
+    // A new call against that same old-shape provider entry backfills it in
+    // place rather than losing its history.
+    tracker.record({ provider: 'openai', model: 'gpt-5.5', role: 'main', inputTokens: 1, outputTokens: 1, costUsd: null });
+    const after = tracker.getDailyUsage(today);
+    assert.strictEqual(after.providers.openai.turns, 2);
+    assert.strictEqual(after.providers.openai.unpricedCalls, 1);
+  });
 });

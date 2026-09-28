@@ -140,6 +140,8 @@ const BackgroundTaskTool = new Tool({
               {
                 maxIterations: 20,
                 ...(role ? { role } : {}),
+                // Outlives the turn: its cost is recorded, never rolled into the reply.
+                detached: true,
                 abortSignal: bgTask.signal,
                 workingDirectory: taskWorkDir,
                 // Bridge approvals back to whoever spawned us (typically the

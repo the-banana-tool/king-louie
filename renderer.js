@@ -1653,6 +1653,17 @@ function formatCompactUsd(value = 0) {
   return `$${normalized.toFixed(4)}`;
 }
 
+// A reply's cost by role (models spec 2026-09-27 §10): " · main $0.09 ·
+// worker $0.02 · utility $0.01". Core roles first; an unpriced role's cost
+// is a lower bound, so it gets a "+".
+function formatRoleCosts(byRole) {
+  if (!byRole || typeof byRole !== 'object') return '';
+  const order = ['main', 'worker', 'utility', 'vision', 'imageGeneration'];
+  const roles = Object.keys(byRole);
+  const ordered = [...order.filter((r) => roles.includes(r)), ...roles.filter((r) => !order.includes(r)).sort()];
+  return ordered.map((r) => ` · ${r} ${formatCompactUsd(byRole[r]?.costUsd)}${byRole[r]?.unpriced ? '+' : ''}`).join('');
+}
+
 function formatTokenCount(value = 0) {
   return Number(value || 0).toLocaleString();
 }
@@ -7743,7 +7754,7 @@ function addMessage(sender, text, metadata = {}) {
 
     const callSpan = document.createElement('span');
     callSpan.className = 'message-metrics-call';
-    callSpan.textContent = `${formatTokenCount(callTotals.totalTokens)} tokens · ${formatCompactUsd(callTotals.costUsd)}`;
+    callSpan.textContent = `${formatTokenCount(callTotals.totalTokens)} tokens · ${formatCompactUsd(callTotals.costUsd)}${formatRoleCosts(metadata.llm.byRole)}`;
 
     if (runningTotals) {
       callSpan.textContent += ` · session ${formatTokenCount(runningTotals.totalTokens)} tokens · ${formatCompactUsd(runningTotals.costUsd)}`;

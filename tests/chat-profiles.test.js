@@ -175,7 +175,9 @@ describe('sub-agents of a chat turn', () => {
         const text = String(first?.text ?? first?.content ?? '');
         const who = text.startsWith('sub:') ? text : 'parent';
         calls.push([who, options.model]);
-        if (who !== 'parent') return { type: 'text', content: `answered by ${options.model}` };
+        if (who !== 'parent') {
+          return { type: 'text', content: `answered by ${options.model}`, llmMetrics: { provider: FAKE, model: options.model, inputTokens: 1, outputTokens: 1, totalTokens: 2, costUsd: 0.001 } };
+        }
         const parentCalls = calls.filter(([w]) => w === 'parent').length;
         const agentId = spawns[parentCalls - 1];
         if (!agentId) return { type: 'text', content: 'parent done' };
@@ -269,6 +271,22 @@ describe('sub-agents of a chat turn', () => {
       assert.notStrictEqual(result?.ok, false, JSON.stringify(result));
       assert.deepStrictEqual(calls.filter(([w]) => w !== 'parent').map(([, m]) => m), ['b-worker', 'b-worker']);
       assert.deepStrictEqual(core.context.getProfiles().get('p-b').roles.worker.map((x) => x.model), ['b-worker-edited']);
+    } finally {
+      await core.shutdown();
+    }
+  });
+
+  it('a sub-agent\'s calls roll up into the reply, by role (spec §10)', async () => {
+    const { core, send } = await startChatCore({ chat: { profileId: 'p-b' }, spawns: ['code-explorer'] });
+    try {
+      const result = await send();
+      assert.notStrictEqual(result?.ok, false, JSON.stringify(result));
+      const reply = core.context.getChats().find((c) => c.id === 'chat-1').messages.filter((m) => m.sender === 'assistant').pop();
+      assert.deepStrictEqual(
+        reply.llm.subagents.map((s) => [s.agentId, s.role, s.calls.map((c) => [c.model, c.role, c.profileId])]),
+        [['code-explorer', 'worker', [['b-worker', 'worker', 'p-b']]]]
+      );
+      assert.strictEqual(reply.llm.byRole.worker.costUsd, 0.001);
     } finally {
       await core.shutdown();
     }

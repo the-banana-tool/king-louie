@@ -22,6 +22,18 @@ const createRoleTotals = () => ({ ...createTotals(), usage: createUsage() });
 const recordedCost = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : null);
 const positive = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : 0);
 
+// A totals object as it might be read from disk, backfilled for a field
+// added after it was written (unpricedCalls landed in M3 Task 3) so a
+// reader never sees undefined where it expects a number.
+const withTotalsDefaults = (totals) => ({ ...createTotals(), ...(totals && typeof totals === 'object' ? totals : {}) });
+const withRoleDefaults = (totals) => ({
+  ...createRoleTotals(),
+  ...(totals && typeof totals === 'object' ? totals : {}),
+  usage: { ...createUsage(), ...(totals?.usage && typeof totals.usage === 'object' ? totals.usage : {}) }
+});
+// Every entry of a { key: totals } map, backfilled the same way.
+const withEachDefaults = (collection, fn) => Object.fromEntries(Object.entries(collection || {}).map(([k, v]) => [k, fn(v)]));
+
 class UsageTracker {
   constructor(store, { now = () => new Date() } = {}) {
     this.store = store;
@@ -74,6 +86,9 @@ class UsageTracker {
     const providerKey = String(provider || 'unknown').trim().toLowerCase() || 'unknown';
     if (!collection[providerKey]) {
       collection[providerKey] = createTotals();
+    } else if (typeof collection[providerKey].unpricedCalls !== 'number') {
+      // A provider entry stored before unpricedCalls existed (M3 Task 3).
+      collection[providerKey] = withTotalsDefaults(collection[providerKey]);
     }
 
     return { key: providerKey, totals: collection[providerKey] };
@@ -185,11 +200,13 @@ class UsageTracker {
     const key = `usage.daily.${UsageTracker.normalizeDate(date)}`;
     const daily = this.store.get(key, null);
     if (!daily) return null;
+    // A record stored before M3 Task 3 has no unpricedCalls, roles or
+    // models at all; backfilled here so the UI never reads undefined.
     return {
-      ...daily,
-      providers: { ...(daily.providers || {}) },
-      roles: { ...(daily.roles || {}) },
-      models: { ...(daily.models || {}) }
+      ...withTotalsDefaults(daily),
+      providers: withEachDefaults(daily.providers, withTotalsDefaults),
+      roles: withEachDefaults(daily.roles, withRoleDefaults),
+      models: withEachDefaults(daily.models, withTotalsDefaults)
     };
   }
 

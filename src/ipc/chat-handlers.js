@@ -8,7 +8,7 @@ const { NO_RETRY } = require('../cases/roles');
 const { roleTimeoutMs } = require('../models/resolver');
 const { KL_PROVIDERS } = require('../models/provider-ids');
 const { partialMetricsOf } = require('../providers/abort');
-const { sumLlmCalls } = require('../tracking/llm-totals');
+const { summarizeTurnLlm } = require('../tracking/llm-totals');
 const UsageTracker = require('../tracking/usage-tracker');
 const { DELEGATION_GUIDANCE } = require('../context/system-sections');
 
@@ -332,10 +332,12 @@ function registerChatHandlers(ipcMain, context = {}) {
     let answerText = '';
     let turnModels = null;
     let main = null;
-    let llmSummary = {
-      calls: [],
-      totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
-    };
+    // This turn's own model calls, and each sub-agent run's (spec §10): the
+    // reply's llm record is built from both, stopped or not.
+    let ownCalls = [];
+    const subagentRuns = [];
+    const summarize = () => summarizeTurnLlm({ calls: ownCalls, subagents: subagentRuns });
+    let llmSummary = summarize();
     const abortController = new AbortController();
     // Registered right after beginTurn, before the prompt hook and the
     // usability gate: Stop was invisible to activeRuns for the whole gate
@@ -588,6 +590,8 @@ function registerChatHandlers(ipcMain, context = {}) {
         // SpawnAgent and BackgroundTask children of this turn resolve their
         // models from this turn's frozen TurnModels (spec §6.6).
         turnModels,
+        // SpawnAgent children report their calls here (spec §10).
+        onSubagentLlm: (run) => { subagentRuns.push(run); },
         caseContext: caseTurn ? caseRuntime.caseContext(caseTurn, { ownerMessages, ownerMessageTimes }) : null
       });
 
@@ -658,8 +662,8 @@ function registerChatHandlers(ipcMain, context = {}) {
           // Stopped: keep what streamed; the stopped message is appended once, below.
           if (result?.type === 'stopped' || abortController.signal.aborted) {
             stopped = true;
-            const stoppedCalls = result?.llm?.calls || [];
-            llmSummary = { calls: stoppedCalls, totals: result?.llm?.totals || sumLlmCalls(stoppedCalls) };
+            ownCalls = result?.llm?.calls || [];
+            llmSummary = summarize();
             return;
           }
           // If streaming didn't fire (non-streaming provider), send full response
@@ -675,10 +679,8 @@ function registerChatHandlers(ipcMain, context = {}) {
           // advisor review text is appended below, and never the
           // '(No response)' placeholder (that isn't an answer to journal).
           answerText = fullResponse;
-          llmSummary = {
-            calls: result?.llm?.calls || [],
-            totals: result?.llm?.totals || sumLlmCalls(result?.llm?.calls || [])
-          };
+          ownCalls = result?.llm?.calls || [];
+          llmSummary = summarize();
 
           // The advisor reviews on the turn's main model (spec §8; advisor.model is gone, §13).
           const advisorSettings = typeof getSettings === 'function' ? getSettings() : {};
@@ -738,8 +740,8 @@ function registerChatHandlers(ipcMain, context = {}) {
           answerText = fullResponse;
 
           const singleCall = streamResult?.llmMetrics || null;
-          const calls = singleCall ? [singleCall] : [];
-          llmSummary = { calls, totals: sumLlmCalls(calls) };
+          ownCalls = singleCall ? [singleCall] : [];
+          llmSummary = summarize();
 
           const usageTracker = typeof getUsageTracker === 'function' ? getUsageTracker() : null;
           if (usageTracker && singleCall && typeof usageTracker.record === 'function') {

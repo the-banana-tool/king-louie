@@ -170,6 +170,10 @@ class ToolExecutor extends EventEmitter {
     // chat turn resolves against the chat's profile and main override as of
     // turn launch. Null for runs with no parent turn (headless callers).
     this.turnModels = options.turnModels || null;
+    // Where a sub-agent run's model calls go (models spec §10): the chat
+    // turn that owns this run rolls them into its reply. Carried on the
+    // rethreaded requester like turnModels, so grandchildren report too.
+    this.onSubagentLlm = typeof options.onSubagentLlm === 'function' ? options.onSubagentLlm : null;
     // Fleet stage 4 §3.8: this run (a delegate turn without fleet:unsafe)
     // refuses unsafe calls; carried on the re-threaded requester so the
     // run's sub-agents refuse them too.
@@ -638,6 +642,7 @@ class ToolExecutor extends EventEmitter {
     if (this.refuseUnsafe && this.allowedRoots) requester.allowedRoots = this.allowedRoots;
     if (this.scopedBackgroundTasks) requester.scopedBackgroundTasks = this.scopedBackgroundTasks;
     if (this.turnModels) requester.turnModels = this.turnModels;
+    if (this.onSubagentLlm) requester.onSubagentLlm = this.onSubagentLlm;
     // A child never gets a tool this run may not use (a case wake-up's list,
     // a delegate turn's T11-sessions limit); childRuntimeOptions intersects.
     if (this.allowedToolNames) requester.allowedToolNames = Object.freeze([...this.allowedToolNames]);

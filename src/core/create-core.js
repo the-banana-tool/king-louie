@@ -2085,6 +2085,8 @@ function createCore(deps = {}) {
       scopedBackgroundTasks: executorOptions.scopedBackgroundTasks || null,
       // The turn's frozen models, handed on to this run's children (§6.6).
       turnModels: executorOptions.turnModels || null,
+      // A sub-agent's calls roll up into the turn's reply (spec §10).
+      onSubagentLlm: executorOptions.onSubagentLlm || null,
       runtimeEnvironment: resolvedRuntimeEnvironment,
       // approvalRequester, denyAutoApproval, localOrigin and origin, plus in
       // phone mode approvalTimeoutMs and classifyCall. denyAutoApproval closes
@@ -2373,7 +2375,9 @@ function createCore(deps = {}) {
         ...(Array.isArray(runtimeOptions.allowedRoots) ? { allowedRoots: runtimeOptions.allowedRoots } : {}),
         ...(runtimeOptions.scopedBackgroundTasks ? { scopedBackgroundTasks: runtimeOptions.scopedBackgroundTasks } : {}),
         // The run's models reach its own children in turn (§6.6).
-        turnModels
+        turnModels,
+        // So does the top-level reply's sub-agent cost sink (§10).
+        onSubagentLlm: runtimeOptions.onSubagentLlm || null
       }
     );
 
@@ -2633,7 +2637,10 @@ function createCore(deps = {}) {
             // A child of a chat turn runs on that turn's frozen models (§6.6),
             // carried on the rethreaded requester as chatId-like run state;
             // with no parent turn, the default profile applies (§12).
-            turnModels: (options.approvalRequester && options.approvalRequester.turnModels) || null
+            turnModels: (options.approvalRequester && options.approvalRequester.turnModels) || null,
+            // A sub-agent's calls roll up into the turn's reply (spec §10);
+            // a detached run (BackgroundTask) outlives the turn, so it never does.
+            onSubagentLlm: options.detached === true ? null : ((options.approvalRequester && options.approvalRequester.onSubagentLlm) || null)
           }
         );
         const executor = new AgentExecutor(runtime.provider, runtime.toolExecutor, {

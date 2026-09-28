@@ -268,5 +268,20 @@ describe('SpawnAgentTool', () => {
       assert.strictEqual(result.success, false);
       assert.match(result.error, /not in the profile "Work"/);
     });
+
+    it('reports the child\'s calls to the parent turn, never an empty run (spec §10)', async () => {
+      const reports = [];
+      const requester = Object.assign(async () => true, { onSubagentLlm: (run) => reports.push(run) });
+      const calls = [{ model: 'worker-model', role: 'worker', costUsd: 0.002 }];
+      await SpawnAgentTool.execute({ task: 'look' }, makeOptions({
+        approvalRequester: requester,
+        adapter: { execute: async () => ({ type: 'complete', content: 'ok', iterations: 1, tools: [], llm: { calls, totals: { costUsd: 0.002 } } }) }
+      }));
+      await SpawnAgentTool.execute({ task: 'look again' }, makeOptions({
+        approvalRequester: requester,
+        adapter: { execute: async () => ({ type: 'complete', content: 'ok', iterations: 1, tools: [], llm: { calls: [], totals: {} } }) }
+      }));
+      assert.deepStrictEqual(reports, [{ agentId: 'main', role: 'worker', calls, totals: { costUsd: 0.002 } }]);
+    });
   });
 });

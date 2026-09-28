@@ -30,6 +30,20 @@ function capSummary(text, maxTokens) {
   return `${cut}\n\n[Summary cut at about ${maxTokens} tokens.]`;
 }
 
+// The child's calls roll up into the parent reply (models spec §10). A
+// grandchild reports to the same place, through the same requester; a run
+// that made no calls reports nothing. Reporting never fails the spawn.
+function reportSubagentLlm(options, { agentId, role, result }) {
+  const sink = options?.approvalRequester?.onSubagentLlm;
+  const calls = Array.isArray(result?.llm?.calls) ? result.llm.calls.filter(Boolean) : [];
+  if (typeof sink !== 'function' || !calls.length) return;
+  try {
+    sink({ agentId, role, calls, totals: result.llm.totals || null });
+  } catch {
+    // a broken sink only loses the roll-up; the usage is already recorded
+  }
+}
+
 const SpawnAgentTool = new Tool({
   name: 'SpawnAgent',
   description: `Dynamically spawn a sub-agent to handle a specific subtask during execution.
@@ -166,6 +180,7 @@ in its own conversation context. Results are returned inline to the calling agen
         params.task,
         executeOptions
       );
+      reportSubagentLlm(options, { agentId, role: role || agent.role || null, result });
 
       return {
         success: true,

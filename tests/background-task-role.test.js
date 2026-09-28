@@ -39,6 +39,8 @@ describe('BackgroundTask roles', () => {
     const { result, seen } = await run({ task: 'Summarize the changelog' });
     assert.strictEqual(result.ok, true);
     assert.strictEqual(seen[0].opts.role, 'worker');
+    // A background run outlives the turn: its cost is never rolled into the reply.
+    assert.strictEqual(seen[0].opts.detached, true);
   });
 
   it('keeps a named agent on its own role unless a role is given', async () => {
