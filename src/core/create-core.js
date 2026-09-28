@@ -3131,7 +3131,8 @@ function createCore(deps = {}) {
     setChats,
     appendMessageToChat,
     getCaseRuntime: () => caseRuntime,
-    kingLouie
+    kingLouie,
+    getSettings
   });
 
   // Cases stage 3: executors. In service mode run.js passes the admin

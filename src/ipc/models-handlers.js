@@ -163,6 +163,27 @@ function registerModelsHandlers(ipcMain, context = {}) {
     ok: true,
     profile: choices().duplicateKingLouie({ name: text(name) || undefined, proposalId: text(proposalId) || undefined })
   }));
+
+  // ---- Custom roles (stage M3, spec §6.2, §11) ----
+
+  handle(IPC.MODELS_SAVE_CUSTOM_ROLE, async ({ id, description, fallback, needs }) => {
+    const n = needs && typeof needs === 'object' ? needs : {};
+    return {
+      ok: true,
+      role: choices().saveCustomRole({
+        id: text(id),
+        description: text(description),
+        fallback: text(fallback),
+        needs: {
+          toolCall: n.toolCall === true,
+          imageInput: n.imageInput === true,
+          ...(n.minContext !== undefined && n.minContext !== null && n.minContext !== '' ? { minContext: n.minContext } : {})
+        }
+      })
+    };
+  });
+
+  handle(IPC.MODELS_REMOVE_CUSTOM_ROLE, async ({ id }) => ({ ok: true, ...choices().removeCustomRole(text(id)) }));
 }
 
 module.exports = { registerModelsHandlers };

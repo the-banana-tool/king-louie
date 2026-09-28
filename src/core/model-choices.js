@@ -22,7 +22,8 @@ function createModelChoices({
   setChats,
   appendMessageToChat,
   getCaseRuntime = () => null,
-  kingLouie = null
+  kingLouie = null,
+  getSettings = () => ({})
 } = {}) {
   for (const [name, value] of Object.entries({ profiles, explainTarget, snapshotModels, getChats, setChats, appendMessageToChat })) {
     if (!value) throw new Error(`createModelChoices needs ${name}.`);
@@ -223,6 +224,38 @@ function createModelChoices({
     return { usable, unusable };
   }
 
+  // Custom roles (spec §6.2, §11 "Advanced: custom roles"). A role still
+  // named by a case role — the case settings or any case's case.yaml — is
+  // not removed; nor is one a profile still lists models for.
+  function customRoleReferences(id) {
+    const refs = [];
+    const settings = getSettings() || {};
+    for (const [caseRole, entry] of Object.entries(settings.cases?.roles || {})) {
+      if (entry && entry.role === id) refs.push(`case role ${caseRole} in the case settings`);
+    }
+    let cases = [];
+    try {
+      const runtime = getCaseRuntime();
+      cases = runtime && typeof runtime.listCases === 'function' ? runtime.listCases() : [];
+    } catch (err) {
+      log.warn(`Listing cases to check custom role ${id} failed: ${err.message}`);
+    }
+    for (const meta of cases) {
+      for (const [caseRole, entry] of Object.entries(meta.roles || {})) {
+        if (entry && entry.role === id) refs.push(`case role ${caseRole} in case "${meta.title || meta.id}"`);
+      }
+    }
+    return refs;
+  }
+
+  function saveCustomRole(raw) {
+    return profiles.saveCustomRole(raw);
+  }
+
+  function removeCustomRole(id) {
+    return profiles.removeCustomRole(id, { references: customRoleReferences(id) });
+  }
+
   // The King Louie profile (spec §7, §11).
   const kl = () => {
     if (!kingLouie) throw new Error('The King Louie profile is not available in this host.');
@@ -264,7 +297,9 @@ function createModelChoices({
     acceptProposal,
     dismissProposal,
     saveKingLouieSettings,
-    duplicateKingLouie
+    duplicateKingLouie,
+    saveCustomRole,
+    removeCustomRole
   };
 }
 

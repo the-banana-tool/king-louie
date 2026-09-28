@@ -66,3 +66,26 @@ describe('renderer: the King Louie profile (spec §7, §11)', () => {
     assert.strictEqual(t([]), '(none)');
   });
 });
+
+describe('renderer: custom roles (spec §6.2, §11)', () => {
+  it('has the Advanced card with its warning and form', () => {
+    for (const id of ['models-custom-roles-card', 'models-custom-roles-warning', 'models-custom-role-list', 'models-custom-role-id', 'models-custom-role-description', 'models-custom-role-fallback', 'models-custom-role-tools', 'models-custom-role-images', 'models-custom-role-min-context', 'models-save-custom-role-btn', 'models-custom-roles-status']) {
+      assert.match(html, new RegExp(`id="${id}"`), id);
+    }
+    assert.match(html, /Use only if you know what you're doing/);
+  });
+
+  it('lists and edits them as text through their channels', () => {
+    const list = block('function renderCustomRoles()');
+    assert.doesNotMatch(list, /innerHTML\s*=\s*(?!'')/);
+    assert.doesNotMatch(list, /\bconfirm\(|\balert\(|\bprompt\(/);
+    assert.match(src, /window\.electron\.models\.saveCustomRole\(/);
+    assert.match(src, /window\.electron\.models\.removeCustomRole\(/);
+  });
+
+  it('shows every custom role in the profile editor and saves no empty custom list', () => {
+    assert.match(block('function renderProfileEditor()'), /customRoles/);
+    assert.match(block('async function saveProfileDraft()'), /!MODEL_ROLE_ORDER\.includes\(role\) && !\(entries \|\| \[\]\)\.length/);
+    assert.match(block('async function openModelPicker(role, block)'), /customRoleOf\(role\)/);
+  });
+});

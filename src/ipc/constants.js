@@ -112,6 +112,9 @@ module.exports = {
   MODELS_DISMISS_PROPOSAL: 'models:dismissProposal',
   MODELS_SAVE_KING_LOUIE_SETTINGS: 'models:saveKingLouieSettings',
   MODELS_DUPLICATE_KING_LOUIE: 'models:duplicateKingLouie',
+  // Models M3: custom roles (spec 2026-09-27 §6.2, §11).
+  MODELS_SAVE_CUSTOM_ROLE: 'models:saveCustomRole',
+  MODELS_REMOVE_CUSTOM_ROLE: 'models:removeCustomRole',
 
   SETTINGS_LOAD: 'settings:load',
   SETTINGS_SAVE_TEMPLATE_VARIABLES: 'settings:saveTemplateVariables',

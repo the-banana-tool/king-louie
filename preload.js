@@ -994,7 +994,15 @@ contextBridge.exposeInMainWorld(
         validateObject(payload, 'payload');
         return ipcRenderer.invoke('models:duplicateKingLouie', payload);
       },
-      onProposalChanged: (callback) => registerAdditive('models:proposalChanged', callback)
+      onProposalChanged: (callback) => registerAdditive('models:proposalChanged', callback),
+      saveCustomRole: (payload) => {
+        validateObject(payload, 'payload');
+        return ipcRenderer.invoke('models:saveCustomRole', payload);
+      },
+      removeCustomRole: (id) => {
+        validateString(id, 'id', { minLength: 1 });
+        return ipcRenderer.invoke('models:removeCustomRole', { id });
+      }
     },
     cron: {
       list: () => ipcRenderer.invoke('cron:list'),

@@ -133,6 +133,15 @@ const dom = {
   modelsKlUtilityRatio: document.getElementById('models-kl-utility-ratio'),
   modelsKlSaveBtn: document.getElementById('models-kl-save-btn'),
   modelsKlDuplicateBtn: document.getElementById('models-kl-duplicate-btn'),
+  modelsCustomRoleList: document.getElementById('models-custom-role-list'),
+  modelsCustomRoleId: document.getElementById('models-custom-role-id'),
+  modelsCustomRoleDescription: document.getElementById('models-custom-role-description'),
+  modelsCustomRoleFallback: document.getElementById('models-custom-role-fallback'),
+  modelsCustomRoleTools: document.getElementById('models-custom-role-tools'),
+  modelsCustomRoleImages: document.getElementById('models-custom-role-images'),
+  modelsCustomRoleMinContext: document.getElementById('models-custom-role-min-context'),
+  modelsSaveCustomRoleBtn: document.getElementById('models-save-custom-role-btn'),
+  modelsCustomRolesStatus: document.getElementById('models-custom-roles-status'),
   modelsTestAllBtn: document.getElementById('models-test-all-btn'),
   settingsEncryptionAlert: document.getElementById('settings-encryption-alert'),
   agentModeBtn: document.getElementById('agent-mode-btn'),
@@ -6374,8 +6383,9 @@ async function loadModelProfiles() {
   if (!dom.modelsProfileList || !window.electron?.models?.profiles) return;
   try {
     const result = unwrapIpcResult(await window.electron.models.profiles(), 'Unable to load the model profiles.');
-    appState.modelProfiles = { profiles: result.profiles || [], broken: result.broken || [], defaultProfileId: result.defaultProfileId || null };
+    appState.modelProfiles = { profiles: result.profiles || [], broken: result.broken || [], defaultProfileId: result.defaultProfileId || null, customRoles: result.customRoles || [] };
     renderModelProfileList();
+    renderCustomRoles();
   } catch (err) {
     setModelsStatus(err.message, true);
   }
@@ -6510,7 +6520,10 @@ function renderProfileEditor() {
   editor.appendChild(nameLabel);
   editor.appendChild(nameInput);
 
-  const roles = [...MODEL_ROLE_ORDER, ...Object.keys(profileDraft.roles).filter((r) => !MODEL_ROLE_ORDER.includes(r))];
+  // Every defined custom role gets a block (spec §6.2), then any other role
+  // the stored profile already lists.
+  const customIds = (appState.modelProfiles?.customRoles || []).map((r) => r.id);
+  const roles = [...new Set([...MODEL_ROLE_ORDER, ...customIds, ...Object.keys(profileDraft.roles)])];
   for (const role of roles) editor.appendChild(renderRoleBlock(role));
 
   const actions = document.createElement('div');
@@ -6537,7 +6550,7 @@ function renderRoleBlock(role) {
   block.dataset.role = role;
   const title = document.createElement('div');
   title.className = 'chat-info-section-title';
-  title.textContent = MODEL_ROLE_LABELS[role] || `Custom role: ${role}`;
+  title.textContent = MODEL_ROLE_LABELS[role] || customRoleLabel(role);
   block.appendChild(title);
   const entries = profileDraft.roles[role] || [];
   if (!entries.length) {
@@ -6545,7 +6558,9 @@ function renderRoleBlock(role) {
     empty.className = 'provider-message';
     empty.textContent = role === 'main'
       ? 'Empty: chats cannot run until main has a model.'
-      : (role === 'worker' || role === 'utility' ? 'Empty: borrows from the next stronger role.' : 'Empty.');
+      : (role === 'worker' || role === 'utility'
+        ? 'Empty: borrows from the next stronger role.'
+        : (customRoleOf(role) ? `Empty: uses its fallback role, ${customRoleOf(role).fallback}.` : 'Empty.'));
     block.appendChild(empty);
   }
   entries.forEach((entry, index) => block.appendChild(renderRoleEntry(role, entry, index, entries.length)));
@@ -6622,7 +6637,7 @@ async function openModelPicker(role, block) {
   picker.textContent = 'Loading models…';
   block.appendChild(picker);
   try {
-    const result = unwrapIpcResult(await window.electron.models.picker({ needs: MODEL_ROLE_NEEDS[role] || {} }), 'Unable to list models.');
+    const result = unwrapIpcResult(await window.electron.models.picker({ needs: MODEL_ROLE_NEEDS[role] || customRoleOf(role)?.needs || {} }), 'Unable to list models.');
     picker.textContent = '';
     const taken = new Set((profileDraft.roles[role] || []).map((e) => `${e.provider}:${e.model}`));
     const usable = (result.usable || []).filter((c) => !taken.has(`${c.provider}:${c.model}`));
@@ -6661,6 +6676,9 @@ async function saveProfileDraft() {
   if (!profileDraft) return;
   const roles = {};
   for (const [role, entries] of Object.entries(profileDraft.roles)) {
+    // An empty custom role list is the editor's leftover, not a choice: it
+    // would only block removing the role later.
+    if (!MODEL_ROLE_ORDER.includes(role) && !(entries || []).length) continue;
     roles[role] = (entries || []).map((e) => ({ provider: e.provider, model: e.model, effort: e.effort || null }));
   }
   try {
@@ -6885,6 +6903,122 @@ if (dom.modelsKlDuplicateBtn) {
 
 if (window.electron?.models?.onProposalChanged) {
   window.electron.models.onProposalChanged((view) => renderKingLouie(view));
+}
+
+/* --- Models tab: custom roles (spec 2026-09-27 §6.2, §11) --- */
+
+function customRoleOf(role) {
+  return (appState.modelProfiles?.customRoles || []).find((r) => r.id === role) || null;
+}
+
+function customRoleLabel(role) {
+  const r = customRoleOf(role);
+  return `Custom role: ${role}${r?.description ? ` (${r.description})` : ''}`;
+}
+
+function describeCustomRole(r) {
+  const needs = [
+    r.needs?.toolCall ? 'tool calling' : null,
+    r.needs?.imageInput ? 'image input' : null,
+    r.needs?.minContext ? formatContext(r.needs.minContext) : null
+  ].filter(Boolean);
+  return `${r.id}: ${r.description || 'no description'} · falls back to ${r.fallback}${needs.length ? ` · needs ${needs.join(', ')}` : ''}`;
+}
+
+function setCustomRolesStatus(text, isError = false) {
+  if (!dom.modelsCustomRolesStatus) return;
+  dom.modelsCustomRolesStatus.textContent = text;
+  dom.modelsCustomRolesStatus.classList.toggle('error', Boolean(isError));
+}
+
+function renderCustomRoles() {
+  const list = dom.modelsCustomRoleList;
+  if (!list) return;
+  list.textContent = '';
+  const roles = appState.modelProfiles?.customRoles || [];
+  if (!roles.length) {
+    const empty = document.createElement('div');
+    empty.className = 'provider-message';
+    empty.textContent = 'No custom roles.';
+    list.appendChild(empty);
+    return;
+  }
+  for (const r of roles) {
+    const row = document.createElement('div');
+    row.className = 'models-custom-role';
+    row.dataset.roleId = r.id;
+    const label = document.createElement('span');
+    label.textContent = describeCustomRole(r);
+    row.appendChild(label);
+    for (const [action, text, cls] of [['edit', 'Edit', 'btn'], ['delete', 'Delete', 'btn btn-danger']]) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = cls;
+      b.textContent = text;
+      b.dataset.customRoleAction = action;
+      b.dataset.roleId = r.id;
+      row.appendChild(b);
+    }
+    list.appendChild(row);
+  }
+}
+
+function fillCustomRoleForm(r) {
+  if (dom.modelsCustomRoleId) dom.modelsCustomRoleId.value = r?.id || '';
+  if (dom.modelsCustomRoleDescription) dom.modelsCustomRoleDescription.value = r?.description || '';
+  if (dom.modelsCustomRoleFallback) dom.modelsCustomRoleFallback.value = r?.fallback || 'worker';
+  if (dom.modelsCustomRoleTools) dom.modelsCustomRoleTools.checked = Boolean(r?.needs?.toolCall);
+  if (dom.modelsCustomRoleImages) dom.modelsCustomRoleImages.checked = Boolean(r?.needs?.imageInput);
+  if (dom.modelsCustomRoleMinContext) dom.modelsCustomRoleMinContext.value = r?.needs?.minContext ? String(r.needs.minContext) : '';
+}
+
+if (dom.modelsSaveCustomRoleBtn) {
+  dom.modelsSaveCustomRoleBtn.addEventListener('click', async () => {
+    const minContext = String(dom.modelsCustomRoleMinContext?.value || '').trim();
+    try {
+      const result = unwrapIpcResult(await window.electron.models.saveCustomRole({
+        id: String(dom.modelsCustomRoleId?.value || '').trim(),
+        description: String(dom.modelsCustomRoleDescription?.value || '').trim(),
+        fallback: dom.modelsCustomRoleFallback?.value || 'worker',
+        needs: {
+          toolCall: Boolean(dom.modelsCustomRoleTools?.checked),
+          imageInput: Boolean(dom.modelsCustomRoleImages?.checked),
+          ...(minContext ? { minContext: Number(minContext) } : {})
+        }
+      }), 'Unable to save the custom role.');
+      setCustomRolesStatus(`Saved ${result.role.id}.`);
+      fillCustomRoleForm(null);
+      await loadModelProfiles();
+    } catch (err) {
+      setCustomRolesStatus(err.message, true);
+    }
+  });
+}
+
+if (dom.modelsCustomRoleList) {
+  dom.modelsCustomRoleList.addEventListener('click', async (event) => {
+    const btn = event.target.closest('button[data-custom-role-action]');
+    if (!btn) return;
+    const id = btn.dataset.roleId;
+    if (btn.dataset.customRoleAction === 'edit') {
+      fillCustomRoleForm(customRoleOf(id));
+      return;
+    }
+    // No native dialogs: a second click confirms.
+    if (btn.dataset.confirming !== 'true') {
+      btn.dataset.confirming = 'true';
+      btn.textContent = 'Click again to delete';
+      return;
+    }
+    try {
+      unwrapIpcResult(await window.electron.models.removeCustomRole(id), 'Unable to delete the custom role.');
+      setCustomRolesStatus(`Deleted ${id}.`);
+      await loadModelProfiles();
+    } catch (err) {
+      setCustomRolesStatus(err.message, true);
+      await loadModelProfiles();
+    }
+  });
 }
 
 if (dom.modelsNewProfileBtn) {

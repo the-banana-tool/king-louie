@@ -94,4 +94,23 @@ describe('E2E: roles in use (models M3)', () => {
     await waitFor(ctx, `document.getElementById('models-kl-status').textContent.includes('up to date')`, 15000);
     await waitFor(ctx, `[...document.querySelectorAll('#models-profile-list .models-profile-card')].some((c) => c.textContent.includes('King Louie selected'))`, 15000);
   });
+
+  it('creates a custom role under Advanced and offers it in the profile editor', async () => {
+    await evaluate(ctx, `(() => {
+      const set = (id, value) => { const el = document.getElementById(id); el.value = value; el.dispatchEvent(new Event('input')); };
+      set('models-custom-role-id', 'legal-drafting');
+      set('models-custom-role-description', 'Contracts and letters');
+      document.getElementById('models-custom-role-fallback').value = 'main';
+      document.getElementById('models-custom-role-tools').checked = true;
+      document.getElementById('models-save-custom-role-btn').click();
+      return true;
+    })()`);
+    await waitUntil(() => (readData(ctx).settings.models.customRoles || []).some((r) => r.id === 'legal-drafting'));
+    const role = readData(ctx).settings.models.customRoles.find((r) => r.id === 'legal-drafting');
+    assert.deepStrictEqual(role, { id: 'legal-drafting', description: 'Contracts and letters', needs: { toolCall: true }, fallback: 'main' });
+    await waitFor(ctx, `document.getElementById('models-custom-role-list').textContent.includes('legal-drafting')`);
+    await evaluate(ctx, `document.getElementById('models-new-profile-btn').click(); true`);
+    await waitFor(ctx, `!!document.querySelector('.models-role-block[data-role="legal-drafting"]')`);
+    await evaluate(ctx, `[...document.querySelectorAll('#models-profile-editor button')].find((b) => b.textContent === 'Cancel').click(); true`);
+  });
 });

@@ -354,6 +354,38 @@
               <button type="button" class="btn btn-primary" id="models-save-catalog-btn">Save catalog settings</button>
             </div>
           </section>
+
+          <section class="template-variables-card" id="models-custom-roles-card">
+            <h3>Advanced: custom roles</h3>
+            <p class="provider-message error" id="models-custom-roles-warning">Use only if you know what you're doing. A custom role is a named job with its own list of models in each profile. A case role, a workflow task or SpawnAgent that names it runs on those models; a profile with none for it uses the fallback role. A role nothing names does nothing.</p>
+            <div class="provider-list" id="models-custom-role-list"></div>
+            <div class="template-variables-grid">
+              <label for="models-custom-role-id">Role id (lowercase letters, digits and dashes)</label>
+              <input id="models-custom-role-id" class="provider-input" maxlength="40" placeholder="legal-drafting">
+              <label for="models-custom-role-description">Description</label>
+              <input id="models-custom-role-description" class="provider-input" maxlength="200">
+              <label for="models-custom-role-fallback">Fallback role</label>
+              <select id="models-custom-role-fallback" class="provider-input">
+                <option value="worker">worker</option>
+                <option value="utility">utility</option>
+                <option value="main">main</option>
+              </select>
+              <label class="inline-toggle" for="models-custom-role-tools">
+                <input id="models-custom-role-tools" type="checkbox">
+                <span>Needs tool calling</span>
+              </label>
+              <label class="inline-toggle" for="models-custom-role-images">
+                <input id="models-custom-role-images" type="checkbox">
+                <span>Needs image input</span>
+              </label>
+              <label for="models-custom-role-min-context">Minimum context in tokens (optional)</label>
+              <input id="models-custom-role-min-context" class="provider-input" type="number" min="1" step="1">
+            </div>
+            <div class="provider-actions">
+              <button type="button" class="btn btn-primary" id="models-save-custom-role-btn">Save custom role</button>
+              <span class="provider-message" id="models-custom-roles-status"></span>
+            </div>
+          </section>
         </div>
 
         <!-- Tab: Vault -->

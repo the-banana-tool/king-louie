@@ -3100,3 +3100,11 @@ div.models-picker-item.is-unusable { cursor: default; }
 .models-kl-picks .provider-message {
   margin: 0.15em 0;
 }
+
+/* Models M3: custom roles (spec 2026-09-27 §6.2, §11). */
+.models-custom-role {
+  display: flex;
+  gap: 0.5em;
+  align-items: center;
+  margin: 0.25em 0;
+}

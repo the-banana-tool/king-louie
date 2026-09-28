@@ -13,6 +13,9 @@ const log = createLogger('models/profiles');
 const PROFILE_KINDS = Object.freeze(['user', 'king-louie', 'migrated']);
 const MAX_NAME = 80;
 const MAX_TARGETS = 20;
+const MAX_CUSTOM_ROLES = 20;
+const MAX_DESCRIPTION = 200;
+const BUILTIN_LOWER = R.BUILTIN_ROLES.map((r) => r.toLowerCase());
 
 class ProfileError extends Error {
   constructor(code, message) {
@@ -86,6 +89,31 @@ function normalizeCustomRole(raw) {
     ...(Number.isFinite(n.minContext) && n.minContext > 0 ? { minContext: n.minContext } : {})
   };
   return { id: raw.id, description: String(raw.description || '').trim(), needs, fallback: raw.fallback };
+}
+
+// A custom role as the owner saves it (spec §6.2, stage M3): refused with
+// the reason, where normalizeCustomRole (reading stored data) drops a bad
+// entry quietly.
+function validateCustomRole(raw) {
+  if (!isPlainObject(raw)) throw new ProfileError('BAD_CUSTOM_ROLE', 'A custom role must be an object.');
+  const id = String(raw.id || '').trim();
+  if (BUILTIN_LOWER.includes(id.toLowerCase())) throw new ProfileError('BAD_CUSTOM_ROLE', `"${id}" is a built-in role; pick another id.`);
+  if (!R.isCustomRoleId(id)) throw new ProfileError('BAD_CUSTOM_ROLE', 'A custom role id is 2 to 40 lowercase letters, digits and dashes, starting with a letter.');
+  if (!R.isCoreRole(raw.fallback)) throw new ProfileError('BAD_CUSTOM_ROLE', 'A custom role needs a fallback: main, worker or utility.');
+  const description = String(raw.description || '').trim();
+  if (description.length > MAX_DESCRIPTION) throw new ProfileError('BAD_CUSTOM_ROLE', `A description is at most ${MAX_DESCRIPTION} characters.`);
+  const n = isPlainObject(raw.needs) ? raw.needs : {};
+  let minContext = null;
+  if (n.minContext !== undefined && n.minContext !== null && n.minContext !== '') {
+    minContext = Number(n.minContext);
+    if (!Number.isInteger(minContext) || minContext <= 0) throw new ProfileError('BAD_CUSTOM_ROLE', 'The minimum context is a whole number of tokens.');
+  }
+  return normalizeCustomRole({
+    id,
+    description,
+    fallback: raw.fallback,
+    needs: { toolCall: n.toolCall === true, imageInput: n.imageInput === true, ...(minContext ? { minContext } : {}) }
+  });
 }
 
 // An effort must be one the catalog lists for that model (spec §6.1). A
@@ -198,6 +226,52 @@ class Profiles {
     return (Array.isArray(raw) ? raw : []).map(normalizeCustomRole).filter(Boolean);
   }
 
+  _storedCustomRoles() {
+    const raw = this._models().customRoles;
+    return Array.isArray(raw) ? raw : [];
+  }
+
+  _writeCustomRoles(list) {
+    const settings = this.getSettings() || {};
+    this.setSettings({ ...settings, models: { ...(settings.models || {}), customRoles: list } });
+  }
+
+  // Creates a custom role, or replaces the one with its id (spec §6.2). A
+  // stored entry that fails to parse is kept verbatim, as for profiles.
+  saveCustomRole(raw) {
+    const role = validateCustomRole(raw);
+    const stored = this._storedCustomRoles();
+    const index = stored.findIndex((r) => isPlainObject(r) && r.id === role.id);
+    if (index === -1 && this.customRoles().length >= MAX_CUSTOM_ROLES) {
+      throw new ProfileError('BAD_CUSTOM_ROLE', `At most ${MAX_CUSTOM_ROLES} custom roles.`);
+    }
+    this._writeCustomRoles(index === -1 ? [...stored, role] : stored.map((r, i) => (i === index ? role : r)));
+    return role;
+  }
+
+  // Profiles holding a non-empty list for the role: an empty list is only
+  // the editor's leftover, not a use.
+  customRoleReferences(id) {
+    return this.list()
+      .filter((p) => Array.isArray(p.roles[id]) && p.roles[id].length)
+      .map((p) => `profile "${p.name}"`);
+  }
+
+  // Refused while anything still names the role (spec §3.1: "remove refuses
+  // while referenced, returns references"); the caller adds uses outside
+  // the profiles (case roles).
+  removeCustomRole(id, { references = [] } = {}) {
+    if (!this.customRoles().some((r) => r.id === id)) throw new ProfileError('NOT_FOUND', `No custom role "${id}".`);
+    const refs = [...this.customRoleReferences(id), ...references];
+    if (refs.length) {
+      const err = new ProfileError('ROLE_IN_USE', `The custom role "${id}" is still used by ${refs.join('; ')}. Remove it there first.`);
+      err.references = refs;
+      throw err;
+    }
+    this._writeCustomRoles(this._storedCustomRoles().filter((r) => !(isPlainObject(r) && r.id === id)));
+    return { removed: id };
+  }
+
   _checkName(name, exceptId = null) {
     const lower = name.toLowerCase();
     if (this.list().some((p) => p.id !== exceptId && p.name.toLowerCase() === lower)) {
@@ -295,4 +369,4 @@ function snapshotFromSettings(settings, { profileId = null, mainOverride = null,
   return view.snapshot({ profileId, mainOverride, explain });
 }
 
-module.exports = { Profiles, ProfileError, PROFILE_KINDS, normalizeProfile, normalizeCustomRole, snapshotFromSettings, checkEffort };
+module.exports = { Profiles, ProfileError, PROFILE_KINDS, normalizeProfile, normalizeCustomRole, validateCustomRole, snapshotFromSettings, checkEffort };
