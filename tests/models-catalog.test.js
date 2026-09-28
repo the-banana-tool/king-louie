@@ -217,3 +217,60 @@ describe('Catalog status and resilience', () => {
     assert.strictEqual(c.get('openai', 'gpt-5.5').scores.agentic, 50.3);
   });
 });
+
+// Final review I4: a local Ollama model must never be priced at Ollama
+// Cloud rates, even when a Cloud model happens to share its exact id (the
+// review's own example, gpt-oss:20b, priced a real local model at
+// $0.37/1M-in+1M-out). Only an id that says "-cloud"/":cloud" in Ollama's
+// own naming for its Cloud models prices against the Cloud catalog entries.
+describe('Catalog.price(): local Ollama models are never priced at Cloud rates', () => {
+  const cacheDir = tmp();
+  fs.writeFileSync(path.join(cacheDir, 'models-dev.json'), JSON.stringify({
+    fetchedAt: '2026-09-28T00:00:00.000Z',
+    data: {
+      'ollama-cloud': {
+        id: 'ollama-cloud',
+        models: {
+          'gpt-oss:20b': { id: 'gpt-oss:20b', name: 'GPT-OSS 20B', cost: { input: 4, output: 20 } },
+          'gpt-oss:20b-cloud': { id: 'gpt-oss:20b-cloud', name: 'GPT-OSS 20B (Cloud)', cost: { input: 4, output: 20 } }
+        }
+      }
+    }
+  }));
+
+  it('prices a bare id at zero even when the catalog has a Cloud rate for that exact id', () => {
+    const c = fixtureCatalog({ cacheDir });
+    assert.strictEqual(c.get('ollama', 'gpt-oss:20b').cost.input, 4, 'sanity: the catalog does carry a Cloud rate for the bare id');
+    const local = c.price('ollama', 'gpt-oss:20b', { input: 1_000_000, output: 1_000_000 });
+    assert.notStrictEqual(local, null, 'a local id is priced at zero, never left unpriced');
+    assert.strictEqual(local.usd, 0);
+  });
+
+  it('prices an explicit -cloud id at the Cloud catalog rate', () => {
+    const c = fixtureCatalog({ cacheDir });
+    const cloud = c.price('ollama', 'gpt-oss:20b-cloud', { input: 1_000_000, output: 1_000_000 });
+    assert.strictEqual(cloud.usd, 24);
+  });
+
+  it('prices a :cloud id at the Cloud catalog rate the same way', () => {
+    const colonCacheDir = tmp();
+    fs.writeFileSync(path.join(colonCacheDir, 'models-dev.json'), JSON.stringify({
+      fetchedAt: '2026-09-28T00:00:00.000Z',
+      data: { 'ollama-cloud': { id: 'ollama-cloud', models: { 'gpt-oss:cloud': { id: 'gpt-oss:cloud', cost: { input: 4, output: 20 } } } } }
+    }));
+    const c = fixtureCatalog({ cacheDir: colonCacheDir });
+    assert.strictEqual(c.price('ollama', 'gpt-oss:cloud', { input: 1_000_000, output: 1_000_000 }).usd, 24);
+  });
+
+  it('prices an id the catalog has never heard of at all at zero, not unpriced', () => {
+    const c = fixtureCatalog({ cacheDir });
+    const p = c.price('ollama', 'my-local-model', { input: 1_000_000, output: 1_000_000 });
+    assert.notStrictEqual(p, null);
+    assert.strictEqual(p.usd, 0);
+  });
+
+  it('does not change pricing for a non-Ollama provider', () => {
+    const c = fixtureCatalog({ cacheDir });
+    assert.strictEqual(c.price('openai', 'no-such-model', { input: 100, output: 100 }), null);
+  });
+});

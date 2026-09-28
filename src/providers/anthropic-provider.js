@@ -610,18 +610,34 @@ class AnthropicProvider extends BaseLLMProvider {
     });
   }
 
+  // GET /v1/models pages at 20 by default; the account's full list can run
+  // well past that, and a model past page 1 was refused at send time as
+  // "not in this account's model list" before this followed has_more/
+  // after_id (spec 2026-09-27 §5.1, final review I1).
   async listModels(options = {}) {
-    const response = await this.request(`${this.baseUrl}/models`, {
-      method: 'GET',
-      headers: this.getHeaders()
-    }, options);
+    const ids = [];
+    let afterId = null;
+    for (;;) {
+      const url = new URL(`${this.baseUrl}/models`);
+      url.searchParams.set('limit', '1000');
+      if (afterId) url.searchParams.set('after_id', afterId);
+      const response = await this.request(url.toString(), {
+        method: 'GET',
+        headers: this.getHeaders()
+      }, options);
 
-    if (!response.ok) {
-      throw await this.buildError(response);
+      if (!response.ok) {
+        throw await this.buildError(response);
+      }
+
+      const data = await response.json();
+      const page = Array.isArray(data.data) ? data.data : [];
+      for (const model of page) ids.push(model.id);
+      if (!data.has_more || page.length === 0) break;
+      afterId = data.last_id || page[page.length - 1]?.id;
+      if (!afterId) break;
     }
-
-    const data = await response.json();
-    return (data.data || []).map((model) => model.id).sort();
+    return ids.sort();
   }
 
   async extractError(response) {

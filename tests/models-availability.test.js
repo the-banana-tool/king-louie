@@ -65,6 +65,19 @@ describe('the one connection test', () => {
     assert.deepStrictEqual(s.models, []);
   });
 
+  it('a 404/405/501 from the list call means "unsupported": ok with no models list, not a failed test (final review I1)', async () => {
+    for (const status of [404, 405, 501]) {
+      const err = Object.assign(new Error('Not Found'), { status });
+      const { availability } = setup({ credentials: ['anthropic'], lists: { anthropic: err } });
+      const s = await availability.test('anthropic');
+      assert.strictEqual(s.ok, true, `status ${status} must not fail the test`);
+      assert.strictEqual(s.error, null);
+      assert.deepStrictEqual(s.models, []);
+      // Rule 3's empty-list fallback makes a catalog-known model usable.
+      assert.strictEqual(availability.explain('anthropic', 'claude-sonnet-4-5').usable, true);
+    }
+  });
+
   it('fails without calling the provider when there is no credential', async () => {
     const { availability, created } = setup({ credentials: [] });
     const s = await availability.test('anthropic');
@@ -131,6 +144,21 @@ describe('the four usability rules', () => {
     assert.strictEqual(availability.explain('openai', 'gpt-5.5').usable, true, 'a status from before M1 has no model list');
     assert.deepStrictEqual(availability.explain('openai', 'my-own-model').reasons, ['my-own-model is not in this OpenAI account\'s model list.']);
     assert.strictEqual(availability.explain('ollama', 'gpt-oss:120b').usable, false, 'an empty Ollama server has no models');
+  });
+
+  // Minor (must fix), final review: Ollama tags an untagged name ":latest"
+  // implicitly, and accepts either form for the other. A saved id in one
+  // form against a listed id in the other must not be refused.
+  it('3. reachable: an untagged Ollama name and its ":latest" form match each other, both ways', () => {
+    const { availability } = setup({ statuses: { ollama: passing(['llama3.2:latest']) } });
+    assert.strictEqual(availability.explain('ollama', 'llama3.2').usable, true, 'saved bare, listed :latest');
+
+    const { availability: availability2 } = setup({ statuses: { ollama: passing(['llama3.2']) } });
+    assert.strictEqual(availability2.explain('ollama', 'llama3.2:latest').usable, true, 'saved :latest, listed bare');
+
+    // A genuinely different model is still refused, not accidentally matched.
+    const { availability: availability3 } = setup({ statuses: { ollama: passing(['llama3.2:latest']) } });
+    assert.deepStrictEqual(availability3.explain('ollama', 'llama3.1').reasons, ['llama3.1 is not in this Ollama (Local) account\'s model list.']);
   });
 
   it('4. fit: tool calling, image input, text output, context', () => {

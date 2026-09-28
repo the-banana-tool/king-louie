@@ -189,6 +189,34 @@ describe('Stop in chat', () => {
     const h = chatHarness({ provider: { streamMessage: async () => ({}) } });
     assert.deepStrictEqual(await h.stop(), { ok: false, error: 'No active response for this chat.' });
   });
+
+  // Final review I2: activeRuns used to register the run only after the
+  // usability gate's connection test — which can take 20s or more —
+  // finished. A Stop pressed during it found no entry, was silently lost,
+  // and the run continued to a full, billed reply once the test settled.
+  it('Stop pressed while the connection test is pending ends the run with no model call', async () => {
+    let releaseTest;
+    const gate = new Promise((resolve) => { releaseTest = resolve; });
+    let entered;
+    const inGate = new Promise((resolve) => { entered = resolve; });
+    let providerCalled = false;
+    const provider = { streamMessage: async () => { providerCalled = true; return {}; } };
+    const availability = {
+      ensureTested: async () => { entered(); await gate; return { ok: true }; },
+      explain: () => ({ usable: true, reasons: [], notes: [] })
+    };
+    const h = chatHarness({ provider, overrides: { getAvailability: () => availability } });
+    const sending = h.send({ agentMode: false });
+    await inGate;
+    assert.deepStrictEqual(await h.stop(), { ok: true }, 'the run is registered before the gate runs');
+    releaseTest();
+    const result = await sending;
+    assert.notStrictEqual(result.ok, false, JSON.stringify(result));
+    assert.strictEqual(providerCalled, false, 'no model call is made once Stop lands during the gate');
+    const stoppedMessages = h.chat.messages.filter((m) => m.sender === 'assistant' && m.stopped);
+    assert.strictEqual(stoppedMessages.length, 1, 'exactly one stopped message');
+    assert.strictEqual(h.chat.messages[h.chat.messages.length - 1].stopped, true);
+  });
 });
 
 describe('abort helpers and totals', () => {

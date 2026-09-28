@@ -14,7 +14,8 @@ initializeTools();
 // If the handler starts dereferencing another context function, add it here.
 function harness({
   caseId = 'case-1', beginError = null, inferenceErrorOnCall = 0, loopWait = null, loopError = null, hookResult = null,
-  loopContent = 'Answer text', contextAssembler = null, providerHasTools = true, streamMessageResult = null, usageTracker = null
+  loopContent = 'Answer text', contextAssembler = null, providerHasTools = true, streamMessageResult = null, usageTracker = null,
+  reportProviderError = null
 } = {}) {
   const calls = { begin: [], end: [], executorOptions: null, run: null, resolveInferenceCalls: 0, ownerHooks: [], routed: [], usage: [] };
   const chat = { id: 'chat-1', title: 'Case chat', caseId, messages: [{ id: 'm0', sender: 'assistant', text: 'How can I help you?' }] };
@@ -82,7 +83,8 @@ function harness({
     getSettings: () => ({}),
     getVoiceSettings: () => ({ enabled: false }),
     getCaseRuntime: () => runtime,
-    createId: () => `id-${Math.random().toString(16).slice(2)}`
+    createId: () => `id-${Math.random().toString(16).slice(2)}`,
+    ...(reportProviderError ? { reportProviderError } : {})
   };
   const context = new Proxy(overrides, { get: (target, key) => (key in target ? target[key] : () => null) });
   const handlers = new Map();
@@ -164,7 +166,48 @@ describe('chat:sendMessage in case mode', () => {
     assert.strictEqual(calls.end[0].journal, null);
   });
 
-  it('a second send that fails early leaves the running turn stoppable', async () => {
+  // Final review I5: a case turn's provider call goes through
+  // caseRuntime.routedProvider(), which routes every attempt through
+  // InferenceRouter#routeWithFallback — a fallback provider's own auth
+  // failure (for example groq failing over to openai, which has no key) is
+  // already reported by that loop against the provider that actually
+  // failed. Before this, chat-handlers.js's catch reported the same failure
+  // again, against inference.providerType — only the turn's *primary*
+  // target — which would have marked the owner's still-working primary
+  // provider (groq) auth-failed instead of the fallback that has none.
+  it('does not report a case turn\'s failure itself — the router already reported the provider that actually failed', async () => {
+    const reported = [];
+    const authError = Object.assign(new Error('Incorrect API key provided'), { status: 401 });
+    const { calls, send } = harness({
+      loopError: authError,
+      reportProviderError: (provider, err) => reported.push([provider, err])
+    });
+    const result = await send();
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(calls.end.length, 1);
+    assert.match(calls.end[0].summary, /^turn failed: Incorrect API key provided/);
+    assert.deepStrictEqual(reported, [], 'chat-handlers.js must not report a case turn\'s failure itself');
+  });
+
+  // Before final review I2, activeRuns registered a run only once it reached
+  // the actual model call — deep past beginTurn, the prompt hook and the
+  // usability gate. A second send whose own resolveInference fails (this
+  // test) never got that far, so it never touched activeRuns, and the
+  // first (still running) send's entry survived untouched, leaving it
+  // stoppable. I2 moved registration to right after beginTurn, before the
+  // gate — a run's own connection test can take 20s or more, and Stop
+  // pressed during it was silently lost otherwise (chat-stop.test.js's
+  // "Stop pressed while the connection test is pending" covers that). One
+  // consequence: activeRuns holds at most one controller per chat, so a
+  // second send to the same chat now claims that one slot immediately, even
+  // a send that goes on to fail during its own setup — and once it does,
+  // its own cleanup correctly removes its own (now the only) entry, leaving
+  // the still-genuinely-running first send unreachable by Stop. This is a
+  // narrower, pre-existing limitation of the one-slot-per-chat design
+  // (two truly concurrent sends to one chat is not a normal UI path — Send
+  // is hidden while a reply streams), not something I2 itself could avoid
+  // without leaving the gate unstoppable again.
+  it('a second send whose own setup fails claims (and then empties) the one activeRuns slot for the chat', async () => {
     let release;
     const loopWait = new Promise((r) => { release = r; });
     const { calls, send, stop } = harness({ caseId: null, inferenceErrorOnCall: 2, loopWait });
@@ -173,8 +216,7 @@ describe('chat:sendMessage in case mode', () => {
     const second = await send({ agentMode: true });
     assert.strictEqual(second.ok, false);
     const stopped = await stop();
-    assert.strictEqual(stopped.ok, true, 'the first run can still be stopped');
-    assert.strictEqual(calls.loopOptions.abortSignal.aborted, true);
+    assert.strictEqual(stopped.ok, false, 'the second send\'s early registration and its own cleanup left nothing to stop');
     release();
     await first;
   });

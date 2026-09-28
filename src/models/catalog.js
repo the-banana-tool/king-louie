@@ -7,7 +7,7 @@ const EventEmitter = require('events');
 const fs = require('fs');
 const path = require('path');
 const { createLogger } = require('../logging');
-const { normalizeProvider } = require('./provider-ids');
+const { normalizeProvider, isOllamaCloudModelId } = require('./provider-ids');
 const N = require('./normalize');
 const { priceWithCost } = require('./pricing');
 
@@ -21,6 +21,10 @@ const CATALOG_DEFAULTS = Object.freeze({
   modelsDevUrl: 'https://models.dev/api.json',
   scoresUrl: 'https://openrouter.ai/api/v1/models'
 });
+
+// A local Ollama model's cost, matching normalize.js's localEntry() (final
+// review I4).
+const LOCAL_OLLAMA_COST = Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: null, tiers: [] });
 
 function readJson(file) {
   let text;
@@ -187,6 +191,16 @@ class Catalog extends EventEmitter {
   }
 
   price(provider, modelId, usage = {}) {
+    const p = normalizeProvider(provider);
+    const id = String(modelId || '').trim();
+    // A local Ollama model is never priced at Ollama Cloud rates, even when
+    // a Cloud model happens to share the exact id (for example
+    // gpt-oss:20b) — only an explicit -cloud/:cloud id prices against the
+    // Cloud catalog entries. This holds independent of whether a local
+    // discovery has (yet) added its own entry to the index (final review I4).
+    if (p === 'ollama' && id && !isOllamaCloudModelId(id)) {
+      return priceWithCost(LOCAL_OLLAMA_COST, usage);
+    }
     const entry = this._lookup(provider, modelId);
     return entry ? priceWithCost(entry.cost, usage) : null;
   }

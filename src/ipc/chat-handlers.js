@@ -338,6 +338,13 @@ function registerChatHandlers(ipcMain, context = {}) {
       totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 }
     };
     const abortController = new AbortController();
+    // Registered right after beginTurn, before the prompt hook and the
+    // usability gate: Stop was invisible to activeRuns for the whole gate
+    // (a connection test can run 20s or more), so a Stop pressed there was
+    // silently lost — the run kept going, billed, and streamed in full
+    // (final review I2). Checked again after the gate and after conversation
+    // compaction, below.
+    activeRuns.set(chatId, abortController);
     let stopped = false;
     let stopFinished = false;
     // A stopped run ends here, once: the streamed text as an assistant
@@ -432,6 +439,12 @@ function registerChatHandlers(ipcMain, context = {}) {
         }
       }
 
+      // The gate above can run a connection test (20s or more): a Stop
+      // pressed during it must end the run here, with no model call, rather
+      // than let the send continue once the test finally settles (final
+      // review I2).
+      if (abortController.signal.aborted) return finishStopped();
+
       // If a prefix-type smart routing rule matched, strip the prefix from the message
       if (inference.matchedPrefix) {
         const { stripPrefix } = require('../providers/smart-routing');
@@ -472,6 +485,10 @@ function registerChatHandlers(ipcMain, context = {}) {
         }
       }
 
+      // Compaction can also run long enough for a Stop to land while it was
+      // in flight (final review I2).
+      if (abortController.signal.aborted) return finishStopped();
+
       const chat = { ...chatRaw, messages: chatMessages };
 
       // The case tools accept provenance "user" only when the model's quote
@@ -510,8 +527,6 @@ function registerChatHandlers(ipcMain, context = {}) {
         tier: inference.tier,
         runId
       };
-
-      activeRuns.set(chatId, abortController);
 
       safeSend(event.sender, 'chat:messageStart', { chatId, responseId });
 
@@ -793,7 +808,19 @@ function registerChatHandlers(ipcMain, context = {}) {
       // above) is never reported here: it is not a call failure, and
       // reporting it would misclassify "Cannot use …" as an auth failure
       // and overwrite the very status that produced it (fix round 1).
-      if (inference && error?.code !== 'MODEL_NOT_USABLE' && typeof context.reportProviderError === 'function') {
+      //
+      // A case turn's call goes through caseRuntime.routedProvider(), which
+      // routes every attempt through InferenceRouter#routeWithFallback —
+      // that loop already reports each attempt's own auth failure against
+      // whichever provider actually made it (including a fallback, e.g.
+      // groq to openai). Reporting again here, against
+      // inference.providerType (only the turn's *primary* target), would
+      // double-report it and, when a fallback is the one that 401s,
+      // misattribute it: the owner's still-working primary provider would
+      // be marked auth-failed instead of the fallback that has no key
+      // (final review I5). caseRuntime, not caseTurn, is the guard:
+      // endCaseTurn (just above) already nulled caseTurn.
+      if (inference && !caseRuntime && error?.code !== 'MODEL_NOT_USABLE' && typeof context.reportProviderError === 'function') {
         context.reportProviderError(inference.providerType, error);
       }
       safeSend(event.sender, 'chat:messageError', {

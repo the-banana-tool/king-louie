@@ -66,6 +66,7 @@ const ConversationCompactor = require('../context/conversation-compactor');
 const { buildSystemSections } = require('../context/system-sections');
 const UsageTracker = require('../tracking/usage-tracker');
 const { Catalog, Availability, setActiveCatalog, capabilitiesOf } = require('../models');
+const { localEntry } = require('../models/normalize');
 const { classifyError, FailoverReason } = require('../providers/error-classifier');
 const {
   NotificationRouter,
@@ -305,6 +306,19 @@ function createCore(deps = {}) {
   });
   setActiveCatalog(catalog);
   catalog.on('updated', (status) => ui.send('models:catalogUpdated', status));
+
+  // Local Ollama models are zero-cost and have nothing to do with Ollama
+  // Cloud's priced catalog entries (spec §4.1 item 4). Seed them from the
+  // last stored discovery right away, not only once a fresh
+  // Availability.test('ollama') runs in this process — otherwise, right
+  // after a restart, a local model that happens to share an id with an
+  // Ollama Cloud model (for example gpt-oss:20b) prices at Cloud rates, and
+  // any other local model stays unpriced, until the next retest or a
+  // manual Test (final review I4).
+  const storedOllamaModels = getApiStatus().ollama?.models;
+  if (Array.isArray(storedOllamaModels) && storedOllamaModels.length > 0) {
+    catalog.setLocalModels('ollama', storedOllamaModels.map((id) => localEntry('ollama', { id })));
+  }
 
   const normalizeTemplateVariables = (templateVariables = {}) => ({
     name: String(templateVariables?.name || '').trim(),
@@ -983,8 +997,15 @@ function createCore(deps = {}) {
   });
 
   const createProviderInstance = (providerType, token) => {
-    if (providerType === 'anthropic' && token === '__anthropic_oauth__') {
-      // OAuth mode — the token is refreshed async before the first API call.
+    // OAuth mode is decided by whether Anthropic OAuth is connected, not by
+    // getDecryptedProviderToken's '__anthropic_oauth__' placeholder, which
+    // only appears before the access token is cached — once cached it
+    // returns the real token, which fell through to API-key mode here and
+    // sent the OAuth access token as an x-api-key header, a sticky 401
+    // (final review I3; the same fix Task 9 already made to Availability's
+    // own createProvider). The real access token is refreshed async before
+    // the first API call (ensureOAuthToken, below), same as before.
+    if (providerType === 'anthropic' && anthropicOAuth.isConnected()) {
       return ProviderFactory.createProvider(providerType, 'oauth-placeholder', { ...providerOptionsFor(providerType), authMode: 'oauth' });
     }
     return ProviderFactory.createProvider(providerType, token, providerOptionsFor(providerType));

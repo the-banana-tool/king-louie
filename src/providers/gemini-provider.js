@@ -392,21 +392,35 @@ class GeminiProvider extends BaseLLMProvider {
     });
   }
 
+  // models.list pages at 50 by default; the account's full list can run
+  // well past that, and a model past page 1 was refused at send time as
+  // "not in this account's model list" before this followed nextPageToken
+  // (spec 2026-09-27 §5.1, final review I1).
   async listModels(options = {}) {
-    const response = await this.request(`${this.baseUrl}/models?key=${this.apiKey}`, {
-      method: 'GET',
-      headers: { 'Content-Type': 'application/json' }
-    }, options);
+    const ids = [];
+    let pageToken = null;
+    for (;;) {
+      const url = new URL(`${this.baseUrl}/models`);
+      url.searchParams.set('key', this.apiKey);
+      url.searchParams.set('pageSize', '1000');
+      if (pageToken) url.searchParams.set('pageToken', pageToken);
+      const response = await this.request(url.toString(), {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' }
+      }, options);
 
-    if (!response.ok) {
-      throw await this.buildError(response);
+      if (!response.ok) {
+        throw await this.buildError(response);
+      }
+
+      const data = await response.json();
+      for (const m of (data.models || [])) {
+        if (m.supportedGenerationMethods?.includes('generateContent')) ids.push(m.name.replace('models/', ''));
+      }
+      pageToken = data.nextPageToken || null;
+      if (!pageToken) break;
     }
-
-    const data = await response.json();
-    return (data.models || [])
-      .filter(m => m.supportedGenerationMethods?.includes('generateContent'))
-      .map(m => m.name.replace('models/', ''))
-      .sort();
+    return ids.sort();
   }
 
   async extractError(response) {

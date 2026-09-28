@@ -57,7 +57,12 @@ function stubProviderFetch(routes) {
   const seen = [];
   globalThis.fetch = async (url, init = {}) => {
     seen.push({ url: String(url), headers: init.headers || {} });
-    const route = routes[String(url)];
+    const key = String(url);
+    // Anthropic's and Gemini's listModels now carry pagination query params
+    // (limit/after_id, pageSize/pageToken — final review I1); match a route
+    // keyed by the bare path too, so existing routes don't have to spell
+    // out every query string.
+    const route = routes[key] || routes[key.split('?')[0]];
     if (!route) throw new Error(`unexpected fetch ${url}`);
     return route();
   };
@@ -185,6 +190,79 @@ describe('models in the core', () => {
     assert.strictEqual(r.ok, true, JSON.stringify(r));
     assert.strictEqual(seen[0].headers.Authorization, 'Bearer oauth-access-token');
     assert.strictEqual('x-api-key' in seen[0].headers, false, 'a stored API key must not override an active OAuth session');
+  });
+
+  // Final review I3: createProviderInstance (used by resolveInference /
+  // InferenceRouter — the real chat send path, not Availability's own
+  // createProvider, which Task 9 already fixed the same way) decided OAuth
+  // mode by the same '__anthropic_oauth__' placeholder check. Once the
+  // access token was cached, a chat send picked API-key mode, sent the
+  // token as x-api-key, and Anthropic's 401 got reported to
+  // markAuthFailure — a sticky "Key rejected" that a manual "Test all"
+  // couldn't fix (that goes through Availability's own, already-correct
+  // createProvider), so the owner loops.
+  it('a chat send to Anthropic stays in OAuth mode once the token is cached', async () => {
+    const { core, store } = makeCore();
+    core.context.setSettings({ ...core.getSettings(), activeProvider: 'anthropic' });
+    store.set('anthropicOAuth', {
+      accessToken: core.context.encryptToken('oauth-access-token'),
+      refreshToken: core.context.encryptToken('refresh-xyz'),
+      expiresAt: Date.now() + 3600_000,
+      connectedAt: Date.now()
+    });
+    // No apiTokens.anthropic saved.
+    const seen = stubProviderFetch({ 'https://api.anthropic.com/v1/models': () => json({ data: [{ id: 'claude-sonnet-5' }] }) });
+    const first = await core.context.resolveInference({});
+    assert.strictEqual(first.providerType, 'anthropic');
+    assert.strictEqual(first.provider.authMode, 'oauth');
+    // A single resolution does not prove the fix: on a fresh core the OAuth
+    // access-token cache is still empty, so getDecryptedProviderToken
+    // returns the '__anthropic_oauth__' placeholder regardless of which
+    // code is running. The bug only showed on a SECOND resolution, once the
+    // token was cached and the placeholder check went false.
+    const second = await core.context.resolveInference({});
+    assert.strictEqual(second.providerType, 'anthropic');
+    assert.strictEqual(second.provider.authMode, 'oauth', 'must stay in OAuth mode once the token is cached');
+    await second.provider.listModels();
+    assert.strictEqual(seen[seen.length - 1].headers.Authorization, 'Bearer oauth-access-token');
+    assert.strictEqual('x-api-key' in seen[seen.length - 1].headers, false, 'must not send the cached OAuth token as an x-api-key header');
+  });
+
+  // Final review I4: right after a normal restart, an Ollama status from a
+  // previous session is already on disk, but no Availability.test('ollama')
+  // has run yet in this process — Catalog.setLocalModels only ever ran in
+  // the process that did the discovery. Before this, the catalog knew
+  // nothing about that account's local models until the next retest (24h)
+  // or a manual Test, so a local id could price at Ollama Cloud rates (or
+  // stay unpriced) in the meantime.
+  it('seeds local Ollama entries from the stored status at core start, before any test runs this session', () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-models-core-'));
+    tempDirs.push(dataDir);
+    const store = new JsonFileStore({
+      dir: dataDir,
+      name: 'chat-data',
+      defaults: {
+        chats: [], activeChatId: null, apiTokens: {}, toolApprovals: { alwaysApproveTools: {} },
+        // A discovery from a previous session, already on disk before this
+        // core is even constructed.
+        apiStatus: { ollama: { ok: true, error: null, message: 'Connected: 1 model.', checkedAt: new Date().toISOString(), models: ['gpt-oss:20b'] } }
+      }
+    });
+    const core = createCore({
+      paths: { dataDir },
+      store,
+      vaultStore: new JsonFileStore({ dir: dataDir, name: 'config' }),
+      cipher: createAesGcmCipher(crypto.randomBytes(32)),
+      prompter: createHeadlessPrompter(),
+      ui: { send: () => {} },
+      builtinSkillsDir: path.join(__dirname, '..', 'skills'),
+      features: { gateway: false, webhooks: false, mesh: false, channels: false, appDiscovery: false },
+      fetch: async (url) => { throw new Error(`no network in unit tests (${url})`); }
+    });
+    const entry = core.models.catalog.get('ollama', 'gpt-oss:20b');
+    assert.ok(entry, 'the stored model is already in the catalog at start');
+    assert.strictEqual(entry.local, true);
+    assert.strictEqual(entry.cost.input, 0);
   });
 
   it('starts no background checks in test mode', async () => {

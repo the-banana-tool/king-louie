@@ -119,6 +119,17 @@ class Availability extends EventEmitter {
         models: list
       });
     } catch (err) {
+      // A 404/405/501 from the listing call itself means this provider does
+      // not support listing models at all — not that the credential is bad.
+      // Before this, that answer stored a failed test, which blocked every
+      // later send until a manual retest (spec 2026-09-27 §5.1 rule 3, final
+      // review I1). The account's list is simply unknown; explain()'s rule 3
+      // already falls back to the catalog for an empty list.
+      const status = Number.isFinite(err?.status) ? err.status : null;
+      if (p !== 'ollama' && [404, 405, 501].includes(status)) {
+        const message = `${this.label(p)} does not support listing models; using the catalog instead.`;
+        return this._store(p, { ok: true, error: null, message, checkedAt, models: [] });
+      }
       const message = err?.message || String(err);
       log.warn(`${this.label(p)} connection test failed: ${message}`);
       return this._store(p, {
@@ -127,7 +138,7 @@ class Availability extends EventEmitter {
         message,
         checkedAt,
         models: [],
-        ...(Number.isFinite(err?.status) ? { httpStatus: err.status } : {})
+        ...(status !== null ? { httpStatus: status } : {})
       });
     }
   }
@@ -197,7 +208,15 @@ class Availability extends EventEmitter {
     if (models.length === 0) return p === 'ollama' ? false : Boolean(this.catalog && this.catalog.get(p, id));
     if (models.includes(id)) return true;
     const base = stripDateSuffix(id);
-    return models.some((m) => m === base || stripDateSuffix(m) === id);
+    if (models.some((m) => m === base || stripDateSuffix(m) === id)) return true;
+    // Ollama tags an untagged name ":latest" implicitly, and accepts either
+    // form for the other — "llama3.2" and "llama3.2:latest" name the same
+    // model both ways (minor, final review).
+    if (p === 'ollama') {
+      const bare = id.endsWith(':latest') ? id.slice(0, -':latest'.length) : id;
+      if (models.some((m) => (m.endsWith(':latest') ? m.slice(0, -':latest'.length) : m) === bare)) return true;
+    }
+    return false;
   }
 
   explain(provider, modelId, { needs = {} } = {}) {

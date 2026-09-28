@@ -38,6 +38,16 @@ function normalizeProvider(provider) {
   return String(provider || '').trim().toLowerCase();
 }
 
+// An Ollama Cloud model says so in its own id (Ollama's own naming); every
+// other id is a local model, priced at zero regardless of whether an Ollama
+// Cloud model happens to share the exact id (for example gpt-oss:20b) —
+// only an explicit -cloud/:cloud id prices against the Cloud catalog
+// entries (spec §4.1 item 4, final review I4).
+function isOllamaCloudModelId(id) {
+  const s = String(id || '');
+  return s.endsWith('-cloud') || s.endsWith(':cloud');
+}
+
 function modelsDevIdFor(provider) {
   const p = normalizeProvider(provider);
   return MODELS_DEV_IDS[p] || p;
@@ -55,5 +65,6 @@ module.exports = {
   DEFAULT_OLLAMA_BASE_URL,
   normalizeProvider,
   modelsDevIdFor,
-  providerForModelsDevId
+  providerForModelsDevId,
+  isOllamaCloudModelId
 };
