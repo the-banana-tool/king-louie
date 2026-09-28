@@ -27,6 +27,9 @@ function costByRole(calls = []) {
     entry.costUsd = Number((entry.costUsd + (Number(call.costUsd) || 0)).toFixed(8));
     if (call.costUsd === null || call.unpriced === true) entry.unpriced = true;
     if (call.usagePartial) entry.partial = true;
+    // A role with no models of its own ran on the role it borrowed from
+    // (spec §6.4); the cost line says so (final review m3).
+    if (typeof call.borrowedFrom === 'string' && call.borrowedFrom && !entry.borrowedFrom) entry.borrowedFrom = call.borrowedFrom;
   }
   return out;
 }

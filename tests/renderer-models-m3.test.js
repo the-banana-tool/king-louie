@@ -26,6 +26,10 @@ describe('renderer: the per-role cost line', () => {
     assert.strictEqual(formatRoleCosts(undefined), '');
   });
 
+  it('names the role a borrowed role ran on (final review m3)', () => {
+    assert.strictEqual(formatRoleCosts({ main: { costUsd: 0.5 }, worker: { costUsd: 0.2, borrowedFrom: 'main' } }), ' · main $0.50 · worker (main) $0.20');
+  });
+
   it('the reply\'s metrics line uses it', () => {
     assert.match(block('function addMessage(sender, text, metadata = {})'), /formatRoleCosts\(metadata\.llm\.byRole\)/);
     assert.ok(html.length > 0);

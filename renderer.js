@@ -1680,7 +1680,9 @@ function formatRoleCosts(byRole) {
   const order = ['main', 'worker', 'utility', 'vision', 'imageGeneration'];
   const roles = Object.keys(byRole);
   const ordered = [...order.filter((r) => roles.includes(r)), ...roles.filter((r) => !order.includes(r)).sort()];
-  return ordered.map((r) => ` · ${r} ${formatCompactUsd(byRole[r]?.costUsd)}${byRole[r]?.unpriced ? '+' : ''}`).join('');
+  // A borrowed role names the role whose model it ran on: "worker (main) $0.20".
+  const label = (r) => (typeof byRole[r]?.borrowedFrom === 'string' && byRole[r].borrowedFrom ? `${r} (${byRole[r].borrowedFrom})` : r);
+  return ordered.map((r) => ` · ${label(r)} ${formatCompactUsd(byRole[r]?.costUsd)}${byRole[r]?.unpriced ? '+' : ''}`).join('');
 }
 
 function formatTokenCount(value = 0) {

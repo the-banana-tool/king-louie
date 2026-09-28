@@ -26,6 +26,12 @@ describe('summarizeTurnLlm', () => {
     assert.deepStrictEqual(byRole.other, { calls: 1, totalTokens: 2, costUsd: 0.5 });
   });
 
+  it('marks a role whose calls ran on a borrowed role\'s models (final review m3)', () => {
+    const byRole = costByRole([call('worker', 0.1, { borrowedFrom: 'main' }), call('worker', 0.1, { borrowedFrom: 'main' }), call('main', 0.3, { borrowedFrom: null })]);
+    assert.deepStrictEqual(byRole.worker, { calls: 2, totalTokens: 4, costUsd: 0.2, borrowedFrom: 'main' });
+    assert.strictEqual('borrowedFrom' in byRole.main, false);
+  });
+
   it('has no subagents or byRole when there is nothing to show', () => {
     assert.deepStrictEqual(summarizeTurnLlm({ calls: [] }), { calls: [], totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 } });
     assert.strictEqual('subagents' in summarizeTurnLlm({ calls: [call('main', 0.1)], subagents: [] }), false);
