@@ -45,12 +45,12 @@
 
 Choices this plan makes where the spec is silent or M1's code differs from its description; each is a line a reviewer can overturn.
 
-1. A fresh install (no `activeProvider`, `providerModels` or `inference` stored) gets one empty "Default" profile (`kind: 'user'`), not a profile built from the pre-M2 defaults; a chat then fails with "main has no models … Add one in Settings → Models" until the owner adds one (the proposing King Louie profile is M3).
+1. A fresh install (no `activeProvider`, `providerModels` or `inference` stored) gets a "Default" profile (`kind: 'user'`) whose `main` lists each provider's own default model in the app's provider order (Ollama's empty default skipped), with `worker` and `utility` empty so they borrow from main; the first provider the owner adds a key for answers.
 2. The migration report is the migrated profile's `migration: { at, notes }`, shown on its card in the Models tab and logged; no new settings key, no chat status message.
 3. A stale saved id is mapped only when it is in neither the catalog nor the account's stored model list, never for Ollama; the family is the one catalog `family` that is the longest prefix of the id, and the new id is that family's newest by `releaseDate` (the undated alias over its dated twin); a tie or missing dates keep the id, with a note.
 4. An "empty" core role means no entries configured. A role whose entries are all unusable does not borrow; it fails with each reason.
 5. A provider registered at runtime outside the 14 (a host extension, a test fake) is usable when it has a credential, since it has no connection test.
-6. Headless and agent runs use the agent's `role`, else its `inferenceTier` mapped (main-assistant → worker, planner and code-writer → main, code-explorer → utility), on the default profile. `agent:executeParallel`/`executeSerial` run on main with one shared routed provider; per-agent roles there are M3.
+6. Headless and agent runs use the agent's `role` on the default profile. Built-in agents name theirs (main-assistant, planner, code-writer → main; code-explorer, case-researcher → worker); only a user-defined agent without a `role` has its `inferenceTier` mapped (fast → utility, standard → worker, smart → main). `agent:executeParallel`/`executeSerial` run on main with one shared routed provider; per-agent roles there are M3.
 7. A caller naming a provider with no model gets that provider's model from the profile, else the run fails naming the provider; a model with no provider keeps the role's first provider.
 8. The chat title and the advisor run on the turn's main list in M2 (the advisor has to: §13 removes `advisor.model`; titles move to utility in M3).
 9. `effort` is stored, checked against the catalog's efforts and passed to providers as `options.effort`; no provider sends it to its API yet.
@@ -1196,9 +1196,9 @@ git commit -m "feat(models): the resolver and a frozen per-turn snapshot of a pr
   - `hasLegacyModelSettings(raw) → boolean` (any of `activeProvider`, `providerModels`, `inference` present).
   - `needsMigration(raw) → boolean` (true when `raw.models.profiles` is not a non-empty array).
   - `mapStaleTarget(target, { catalog, accountModels }) → { target, note: string|null }`.
-  - `migrateTierSettings(raw, { catalog = null, accountModels = {}, now, createId }) → { fresh: boolean, profile, notes: string[], settings }` — pure; `settings` is `raw` plus `models.profiles = [profile]`, `models.defaultProfileId`, `models.roleTimeoutsMs` (legacy keys still present).
+  - `migrateTierSettings(raw, { catalog = null, accountModels = {}, freshMain = [], now, createId }) → { fresh: boolean, profile, notes: string[], settings }` — pure; with no legacy keys (a fresh install) the profile is "Default" (`kind: 'user'`) whose `main` is `freshMain` (normalized, empty-model entries dropped) and whose `worker` and `utility` are empty, so they borrow from main; `settings` is `raw` plus `models.profiles = [profile]`, `models.defaultProfileId`, `models.roleTimeoutsMs` (legacy keys still present).
   - `stripLegacyKeys(raw) → raw` without the §13 step 6 keys.
-  - `runTierMigration({ readRaw, writeRaw, removeLegacy = true, catalog, accountModels, now, createId }) → { migrated: boolean, fresh?, profile?, notes?, error? }` — two writes (new keys, then removal); `removeLegacy: false` skips the removal (the core passes it while the tier code still exists, Tasks 5–11); never throws.
+  - `runTierMigration({ readRaw, writeRaw, removeLegacy = true, catalog, accountModels, freshMain, now, createId }) → { migrated: boolean, fresh?, profile?, notes?, error? }` — two writes (new keys, then removal); `removeLegacy: false` skips the removal (the core passes it while the tier code still exists, Tasks 5–11); never throws.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1325,10 +1325,16 @@ describe('migrateTierSettings', () => {
     assert.ok(!r.notes.some((n) => n.startsWith('smart tier:')));
   });
 
-  it('gives a fresh install one empty Default profile', () => {
-    const r = migrateTierSettings({ models: { catalog: { fetch: false } } }, opts());
+  it('gives a fresh install a Default profile whose main lists each provider\'s default model', () => {
+    const freshMain = [{ provider: 'openai', model: 'gpt-4o-mini' }, { provider: 'Anthropic', model: 'claude-sonnet-5' }, { provider: 'ollama', model: '' }];
+    const r = migrateTierSettings({ models: { catalog: { fetch: false } } }, opts({ freshMain }));
     assert.strictEqual(r.fresh, true);
-    assert.deepStrictEqual(r.profile, { id: 'p-abc', name: 'Default', kind: 'user', roles: { main: [], worker: [], utility: [] } });
+    assert.deepStrictEqual(r.profile, {
+      id: 'p-abc',
+      name: 'Default',
+      kind: 'user',
+      roles: { main: [t('openai', 'gpt-4o-mini'), t('anthropic', 'claude-sonnet-5')], worker: [], utility: [] }
+    });
     assert.deepStrictEqual(r.notes, []);
     assert.strictEqual(r.settings.models.catalog.fetch, false);
     assert.strictEqual(r.settings.models.defaultProfileId, 'p-abc');
@@ -1576,12 +1582,17 @@ function dedupe(list) {
   });
 }
 
-function migrateTierSettings(raw, { catalog = null, accountModels = {}, now = () => new Date(), createId = () => crypto.randomBytes(4).toString('hex') } = {}) {
+function migrateTierSettings(raw, { catalog = null, accountModels = {}, freshMain = [], now = () => new Date(), createId = () => crypto.randomBytes(4).toString('hex') } = {}) {
   const source = isPlainObject(raw) ? raw : {};
   const models = isPlainObject(source.models) ? source.models : {};
   const id = `p-${createId()}`;
   if (!hasLegacyModelSettings(source)) {
-    const profile = { id, name: 'Default', kind: 'user', roles: { main: [], worker: [], utility: [] } };
+    // A fresh install (spec §13 has nothing to migrate): main lists each
+    // provider's own default model, in the app's provider order, so the
+    // first provider the owner adds a key for answers at once; worker and
+    // utility stay empty and borrow from main (§6.4).
+    const main = dedupe((Array.isArray(freshMain) ? freshMain : []).map(R.normalizeTarget));
+    const profile = { id, name: 'Default', kind: 'user', roles: { main, worker: [], utility: [] } };
     return { fresh: true, profile, notes: [], settings: { ...source, models: { ...models, profiles: [profile], defaultProfileId: id } } };
   }
   const legacy = legacyView(source);
@@ -1662,7 +1673,7 @@ function runTierMigration({ readRaw, writeRaw, removeLegacy = true, ...options }
       log.warn(`Removing the old tier settings failed; they are ignored from now on: ${err.message}`);
     }
   }
-  if (result.fresh) log.info('No earlier model settings: created an empty Default profile.');
+  if (result.fresh) log.info('No earlier model settings: created the Default profile from each provider\'s default model.');
   else log.info(`Moved the tier settings to the profile "${result.profile.name}".`);
   for (const note of result.notes) log.info(`Migration: ${note}`);
   return { migrated: true, fresh: result.fresh, profile: result.profile, notes: result.notes };
@@ -2182,6 +2193,7 @@ git commit -m "feat(providers): fail over over a resolved target list, same prov
 - Consumes: `runTierMigration` (Task 3), `Profiles` (Tasks 1–2), `roleTimeoutMs` (Task 2), `InferenceRouter#routedProvider` and the `prepareProvider` option (Task 4), `KL_PROVIDERS` (`src/models/provider-ids.js`), `ProviderFactory.listRegistered()`.
 - Produces:
   - `Availability#refreshForUse(provider, { staleFailureMs = 60000 }) → Promise<ProviderStatus>`: `ensureTested`, then one retest of a failed, non-auth status older than `staleFailureMs`.
+  - A fresh install's "Default" profile has `main` = each provider's own `getDefaultModel()` in `PROVIDER_LABELS` order (the order the app lists providers), empty defaults (Ollama's) skipped; `worker`/`utility` empty.
   - `createCore({ …, skipModelMigration: true })` runs no migration and writes nothing (the import dry run's core); `getModelMigration()` then returns `{ migrated: false, skipped: true }`.
   - `core.context.getProfiles() → Profiles`, `core.context.getModelMigration() → runTierMigration's result`. The migration runs with `removeLegacy: false` until Task 12: the chat, case and agent paths still read the tiers until Tasks 6–8 move them, and tests seeding tier settings must keep working in between.
   - `core.context.explainTarget(provider, model, { needs }) → { usable, reasons, notes, entry }` — Availability's verdict, except a provider registered outside `KL_PROVIDERS` is usable when it has a credential.
@@ -2251,7 +2263,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { createCore } = require('../src/core');
+const { createCore, PROVIDER_LABELS } = require('../src/core/create-core');
 const { JsonFileStore } = require('../src/platform/json-file-store');
 const { createAesGcmCipher } = require('../src/platform/cipher');
 const { createHeadlessPrompter } = require('../src/platform/prompter');
@@ -2329,11 +2341,28 @@ describe('the tier migration at core construction', () => {
     assert.strictEqual(core.models.profiles, core.context.getProfiles());
   });
 
-  it('gives a fresh store one empty Default profile', () => {
+  it('gives a fresh store a Default profile whose main lists each provider\'s default model', () => {
     const { core } = makeCore();
     assert.strictEqual(core.context.getModelMigration().fresh, true);
-    assert.deepStrictEqual(core.context.getProfiles().getDefault().roles, { main: [], worker: [], utility: [] });
+    const profile = core.context.getProfiles().getDefault();
+    const expected = Object.keys(PROVIDER_LABELS)
+      .map((provider) => ({ provider, model: ProviderFactory.create(provider, 'test-key-123456').getDefaultModel() || '', effort: null }))
+      .filter((x) => x.model);
+    assert.deepStrictEqual(profile.roles, { main: expected, worker: [], utility: [] });
+    assert.ok(!profile.roles.main.some((x) => x.provider === 'ollama'), 'Ollama ships no default');
   });
+
+  for (const [provider, key] of [['openai', 'sk-test-openai-123456'], ['anthropic', 'sk-ant-test-123456']]) {
+    it(`a fresh install with only a ${provider} key resolves main to ${provider}'s default model`, async () => {
+      const { core } = makeCore();
+      core.saveProviderToken(provider, key);
+      const model = ProviderFactory.create(provider, key).getDefaultModel();
+      globalThis.fetch = async () => new Response(JSON.stringify({ data: [{ id: model }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+      const r = await core.context.resolveRole('main');
+      assert.deepStrictEqual([r.providerType, r.model], [provider, model]);
+      assert.strictEqual((await core.context.resolveRole('utility')).borrowedFrom, 'main');
+    });
+  }
 
   it('leaves the old settings untouched when the write fails, and still starts', () => {
     const before = legacySettings();
@@ -2525,6 +2554,15 @@ const { KL_PROVIDERS } = require('../models/provider-ids');
     // The old keys stay while code still reads them; they go with the tier code.
     removeLegacy: false,
     catalog,
+    // A fresh install's Default main: each provider's own default model, in
+    // the order the app lists providers; an empty default (Ollama) is skipped.
+    freshMain: Object.keys(PROVIDER_LABELS).map((provider) => {
+      try {
+        return { provider, model: ProviderFactory.create(provider, 'model-probe-token').getDefaultModel() || '' };
+      } catch {
+        return { provider, model: '' };
+      }
+    }).filter((x) => x.model),
     accountModels: Object.fromEntries(Object.entries(getApiStatus() || {})
       .map(([provider, status]) => [provider, Array.isArray(status?.models) ? status.models : []]))
   });
@@ -2689,13 +2727,15 @@ git commit -m "feat(core): migrate tiers to a profile at start; snapshotModels, 
 **Files:**
 - Modify: `src/core/create-core.js` — requires; `createAgentRuntime` (`:2267-2320`); `agentExecutorAdapter.execute` (`:2522-2580`); the skills `llmProvider` getter (`:2768-2780`); the ingest `createCallModel(…)` (`:3077`)
 - Modify: `src/ipc/agent-handlers.js` (the four `createAgentRuntime` calls, the `tier:`/`model:` run options, `AgentExecutor` options)
+- Modify: `src/agents/agent-schema.js:11` (a `role` field), `src/agents/builtin/main-assistant.js`, `planner.js`, `code-writer.js`, `code-explorer.js`, `case-researcher.js` (explicit roles)
 - Test: `tests/models-headless.test.js` (new); existing tests that configured a provider through tiers now use `tests/helpers/profile-settings.js`: `tests/executor-adapter-provider.test.js`, `tests/core-remote-approvals.test.js` (three places), `tests/fleet-core-seams.test.js`, `tests/fleet-delegate.test.js`, `tests/cases-executor-core.test.js`, `tests/agent-handlers.test.js` (one test added). (`tests/desktop-bridge-dispatcher.test.js` and `tests/e2e/_attach-service.js` drive the chat send path, which still reads the tiers until Task 8; they move to profiles there.)
 
 **Interfaces:**
 - Consumes: `snapshotModels`, `resolveRole`, `explainTarget` (Task 5); `roleForAgent`, `roleForTier`, `CORE_ROLES` (Task 1); `NO_RETRY` and `AgentExecutor`'s `failoverPolicy` option (Task 4).
 - Produces:
   - `core.context.createAgentRuntime(selection = {}, event, approvalRequester, runtimeOptions)` with `selection = { role = 'main', profileId?, provider?, model? }` → `{ role, providerType, model, timeoutMs, targets, turnModels, provider /* routed */, runtimeEnvironment, toolExecutor, toolDefinitions }`. Needs `toolCall`. No `tier` key any more.
-  - `agentExecutorAdapter.execute(agent, message, options)` runs on `options.role`, else `roleForAgent(agent)` (the agent's `inferenceTier` mapped per §13 step 5), on `options.profileId` or the default profile; `options.provider`/`options.model` are an explicit target. Its loop uses `NO_RETRY`.
+  - `Agent#role` (`config.role` or `null`). Built-in agents name their role: main-assistant, planner, code-writer → `main`; code-explorer, case-researcher → `worker`. Only a user-defined agent without a `role` has its `inferenceTier` mapped (fast → utility, standard → worker, smart → main; §13 step 5).
+  - `agentExecutorAdapter.execute(agent, message, options)` runs on `options.role`, else `roleForAgent(agent)`, on `options.profileId` or the default profile; `options.provider`/`options.model` are an explicit target. Its loop uses `NO_RETRY`.
   - A provider named with no model takes that provider's first model in the role, else anywhere in the profile's core roles, else the run fails naming the provider.
   - `agent:execute` accepts `{ agentId, message, role?, tier? }` (`tier` read through `roleForTier`); `agent:executeParallel` and `agent:executeSerial` run on `main`; `agent:executeWithDeps` on the agent's role.
 
@@ -2779,14 +2819,23 @@ async function startCore(roles) {
 const agent = (id) => listAgents().find((a) => a.id === id);
 
 describe('headless agent runs', () => {
-  it('run on the agent\'s role: standard reads as worker, fast as utility, smart as main', async () => {
+  it('built-in agents run on their own roles', () => {
+    const roles = Object.fromEntries(['main', 'planner', 'code-writer', 'code-explorer', 'case-researcher'].map((id) => [id, agent(id).role]));
+    assert.deepStrictEqual(roles, { main: 'main', planner: 'main', 'code-writer': 'main', 'code-explorer': 'worker', 'case-researcher': 'worker' });
+  });
+
+  it('run on the agent\'s role; a user-defined agent\'s tier reads as the mapped role', async () => {
     const { core, used, adapter } = await startCore({ main: [t(FAKE, 'main-model')], worker: [t(FAKE, 'worker-model')], utility: [t(FAKE, 'utility-model')] });
+    const Agent = require('../src/agents/agent-schema');
+    const custom = (inferenceTier) => new Agent({ id: `custom-${inferenceTier}`, inferenceTier, allowedTools: ['Read'] });
     try {
-      assert.strictEqual((await adapter.execute(agent('main'), 'hello')).content, 'answered by worker-model');
-      assert.strictEqual((await adapter.execute(agent('code-explorer'), 'hello')).content, 'answered by utility-model');
-      assert.strictEqual((await adapter.execute(agent('planner'), 'hello')).content, 'answered by main-model');
-      assert.strictEqual((await adapter.execute(agent('main'), 'hello', { role: 'main' })).content, 'answered by main-model');
-      assert.deepStrictEqual(used, ['worker-model', 'utility-model', 'main-model', 'main-model']);
+      assert.strictEqual((await adapter.execute(agent('main'), 'hello')).content, 'answered by main-model');
+      assert.strictEqual((await adapter.execute(agent('code-explorer'), 'hello')).content, 'answered by worker-model');
+      assert.strictEqual((await adapter.execute(custom('fast'), 'hello')).content, 'answered by utility-model');
+      assert.strictEqual((await adapter.execute(custom('standard'), 'hello')).content, 'answered by worker-model');
+      assert.strictEqual((await adapter.execute(custom('smart'), 'hello')).content, 'answered by main-model');
+      assert.strictEqual((await adapter.execute(agent('code-explorer'), 'hello', { role: 'main' })).content, 'answered by main-model');
+      assert.deepStrictEqual(used, ['main-model', 'worker-model', 'utility-model', 'worker-model', 'main-model', 'main-model']);
     } finally {
       await core.shutdown();
     }
@@ -2795,8 +2844,8 @@ describe('headless agent runs', () => {
   it('a named model is an explicit target; a provider with no model takes the profile\'s model of it', async () => {
     const { core, used, adapter } = await startCore({ main: [t(FAKE, 'main-model')], worker: [t(FAKE, 'worker-model')] });
     try {
-      await adapter.execute(agent('main'), 'hello', { model: 'named-model' });
-      await adapter.execute(agent('main'), 'hello', { provider: FAKE });
+      await adapter.execute(agent('code-explorer'), 'hello', { model: 'named-model' });
+      await adapter.execute(agent('code-explorer'), 'hello', { provider: FAKE });
       assert.deepStrictEqual(used, ['named-model', 'worker-model']);
       await assert.rejects(adapter.execute(agent('main'), 'hello', { provider: 'groq' }), /No groq model is in the profile "Test profile"/);
     } finally {
@@ -2806,8 +2855,9 @@ describe('headless agent runs', () => {
 
   it('a failing first target fails over to the next one in the role', async () => {
     const { core, used, adapter } = await startCore({ worker: [t(FAKE, 'down'), t(FAKE, 'backup')], main: [t(FAKE, 'main-model')] });
+    // code-explorer runs on worker.
     try {
-      assert.strictEqual((await adapter.execute(agent('main'), 'hello')).content, 'answered by backup');
+      assert.strictEqual((await adapter.execute(agent('code-explorer'), 'hello')).content, 'answered by backup');
       assert.deepStrictEqual(used, ['down', 'backup']);
     } finally {
       await core.shutdown();
@@ -2889,7 +2939,19 @@ In `tests/cases-executor-core.test.js` also replace the three `createAgentRuntim
 Run: `node --test tests/models-headless.test.js tests/agent-handlers.test.js`
 Expected: FAIL — the adapter still resolves through the tier (`answered by …` mismatches, a `tier` key on the runtime) and the agent handlers pass `{ tier }`.
 
-- [ ] **Step 3: Rewrite `createAgentRuntime` and the adapter**
+- [ ] **Step 3: Give agents a role; built-in agents name theirs**
+
+In `src/agents/agent-schema.js`, after `this.inferenceTier = config.inferenceTier || 'standard';` add:
+
+```js
+    // The agent's model role (models spec 2026-09-27 §8). A user-defined
+    // agent without one has its inferenceTier read as the mapped role (§13).
+    this.role = typeof config.role === 'string' && config.role.trim() ? config.role.trim() : null;
+```
+
+Add a `role` line directly above each built-in agent's `inferenceTier:` line: `role: 'main',` in `src/agents/builtin/main-assistant.js`, `planner.js` and `code-writer.js`; `role: 'worker',` in `src/agents/builtin/code-explorer.js` and `case-researcher.js`.
+
+- [ ] **Step 3b: Rewrite `createAgentRuntime` and the adapter**
 
 In `src/core/create-core.js`:
 
@@ -3001,9 +3063,9 @@ const { NO_RETRY } = require('../providers/failover-policy');
 with
 
 ```js
-        // The agent's role on the default profile (spec §12) — a pre-M2
-        // agent's inferenceTier reads as the mapped role (§13 step 5) — or
-        // the provider/model a caller names.
+        // The agent's role on the default profile (spec §12) — a
+        // user-defined agent without one has its inferenceTier read as the
+        // mapped role (§13 step 5) — or the provider/model a caller names.
         const role = typeof options.role === 'string' && options.role ? options.role : roleForAgent(agent);
         const runtime = await createAgentRuntime(
           {
@@ -3115,7 +3177,7 @@ Expected: PASS, `# fail 0`.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/core/create-core.js src/ipc/agent-handlers.js tests/models-headless.test.js tests/agent-handlers.test.js tests/executor-adapter-provider.test.js tests/core-remote-approvals.test.js tests/fleet-core-seams.test.js tests/fleet-delegate.test.js tests/cases-executor-core.test.js
+git add src/core/create-core.js src/ipc/agent-handlers.js src/agents/agent-schema.js src/agents/builtin/main-assistant.js src/agents/builtin/planner.js src/agents/builtin/code-writer.js src/agents/builtin/code-explorer.js src/agents/builtin/case-researcher.js tests/models-headless.test.js tests/agent-handlers.test.js tests/executor-adapter-provider.test.js tests/core-remote-approvals.test.js tests/fleet-core-seams.test.js tests/fleet-delegate.test.js tests/cases-executor-core.test.js
 git commit -m "feat(core): headless and agent runs resolve their role through the default profile"
 ```
 
@@ -6525,7 +6587,7 @@ Append to `tests/models-core-profiles.test.js`, inside `describe('the tier migra
 Append to `tests/models-migrate.test.js`, inside `describe('runTierMigration', …)`:
 
 ```js
-  it('a fresh install after stage M2 (defaults carry no tier keys) gets the empty Default profile', () => {
+  it('a fresh install after stage M2 (defaults carry no tier keys) gets the Default profile', () => {
     const { DEFAULT_SETTINGS } = require('../src/core/settings');
     const store = memoryStore(JSON.parse(JSON.stringify(DEFAULT_SETTINGS)));
     const r = runTierMigration({ ...store, ...opts() });
