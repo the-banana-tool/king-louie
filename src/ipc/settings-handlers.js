@@ -1,5 +1,4 @@
 const { wrapHandler } = require('./wrap-handler');
-const { applyActiveProviderUpdate } = require('./settings-provider');
 const { createLogger } = require('../logging');
 
 const log = createLogger('settings');
@@ -11,7 +10,6 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     getApiStatus,
     getSettings,
     providerLabels,
-    providerDefaults,
     hasStoredElevenLabsToken,
     hasStoredTelegramToken,
     listHookDefinitions,
@@ -32,7 +30,6 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     updateStatus,
     runLlmCommand,
     anthropicOAuth,
-    setActiveInferenceTier,
     setNotificationSettings,
     getMainWindow,
     testProviderConnection,
@@ -52,8 +49,6 @@ function registerSettingsHandlers(ipcMain, context = {}) {
       : context.ttsEngine
   );
 
-  const applyActiveProvider = context.applyActiveProviderUpdate || applyActiveProviderUpdate;
-
   // A saved, cleared or connected key is retested in the background (spec
   // 2026-09-27 §5.2); the result reaches the UI as models:statusChanged.
   const notifyKeyChanged = (provider) => {
@@ -72,8 +67,7 @@ function registerSettingsHandlers(ipcMain, context = {}) {
       acc[key] = {
         label: providerLabels[key],
         hasToken: Boolean(tokens[key]),
-        status: status[key] || null,
-        model: settings.providerModels?.[key] || providerDefaults[key] || ''
+        status: status[key] || null
       };
       return acc;
     }, {});
@@ -81,13 +75,11 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     return {
       encryptionAvailable: safeStorage.isEncryptionAvailable(),
       providers,
-      activeProvider: settings.activeProvider || 'openai',
       ollamaBaseUrl: settings.models?.ollama?.baseUrl || '',
       modelsSettings: {
         catalog: settings.models?.catalog || {},
         overrides: settings.models?.overrides || {}
       },
-      inference: settings.inference,
       notifications: settings.notifications,
       hooks: {
         enabled: settings?.hooks?.enabled !== false,
@@ -315,34 +307,6 @@ function registerSettingsHandlers(ipcMain, context = {}) {
     return { ok: true };
   }));
 
-  ipcMain.handle('settings:setActiveProvider', wrapHandler('settings:setActiveProvider', async (_event, { provider }) => {
-    return applyActiveProvider({
-      provider,
-      providerLabels,
-      getSettings,
-      setSettings,
-      resetRuntimeEnvironmentCache
-    });
-  }));
-
-  ipcMain.handle('settings:setProviderModel', wrapHandler('settings:setProviderModel', async (_event, { provider, model }) => {
-    if (!providerLabels[provider]) {
-      return { ok: false, error: 'Unknown provider.' };
-    }
-
-    const settings = getSettings();
-    const updated = {
-      ...settings,
-      providerModels: {
-        ...(settings.providerModels || {}),
-        [provider]: (model || '').trim()
-      }
-    };
-    setSettings(updated);
-
-    return { ok: true, model: updated.providerModels[provider] };
-  }));
-
   ipcMain.handle('settings:saveProvider', wrapHandler('settings:saveProvider', async (_event, { provider, token, clear }) => {
     if (!providerLabels[provider]) {
       return { ok: false, error: 'Unknown provider.' };
@@ -380,139 +344,6 @@ function registerSettingsHandlers(ipcMain, context = {}) {
 
   ipcMain.handle('settings:runLlmCommand', wrapHandler('settings:runLlmCommand', async (_event, { command }) => {
     return runLlmCommand(command);
-  }));
-
-  ipcMain.handle('settings:setInferenceTier', wrapHandler('settings:setInferenceTier', async (_event, { tier }) => {
-    const inference = setActiveInferenceTier(tier);
-    return { ok: true, inference };
-  }));
-
-  ipcMain.handle('settings:listModels', wrapHandler('settings:listModels', async (_event, { provider } = {}) => {
-    if (!provider) {
-      return { ok: false, error: 'Provider is required.' };
-    }
-
-    const ProviderFactory = require('../providers/provider-factory');
-    const registeredProviders = ProviderFactory.listRegistered();
-    if (!registeredProviders.includes(provider)) {
-      return { ok: false, error: 'Unknown provider.' };
-    }
-
-    const tokens = getApiTokens();
-    const encryptedToken = tokens[provider];
-    let token = encryptedToken ? decryptToken(encryptedToken) : null;
-    let authMode = 'api-key';
-
-    // For Anthropic, use OAuth token if connected and no API key
-    if (provider === 'anthropic' && !token && anthropicOAuth && anthropicOAuth.isConnected()) {
-      try {
-        token = await anthropicOAuth.getValidAccessToken();
-        authMode = 'oauth';
-      } catch { /* fall through to static list */ }
-    }
-
-    // Try API-based listing first (ollama needs no token)
-    if (token || provider === 'ollama') {
-      try {
-        const providerOptions = typeof getProviderOptions === 'function' ? getProviderOptions(provider) : {};
-        const instance = ProviderFactory.create(provider, token || 'ollama-local', { ...providerOptions, authMode });
-        const models = await instance.listModels();
-        return { ok: true, models, source: 'api' };
-      } catch (err) { log.debug(`listModels API failed, falling back to static: ${err.message}`); }
-    }
-
-    // Fall back to static model list
-    try {
-      const instance = ProviderFactory.create(provider, 'static-fallback');
-      const models = instance.getModels();
-      return { ok: true, models, source: 'static' };
-    } catch {
-      return { ok: false, error: 'Unable to list models for this provider.' };
-    }
-  }));
-
-  ipcMain.handle('settings:setTierProviderModel', wrapHandler('settings:setTierProviderModel', async (_event, { tier, provider, model } = {}) => {
-    const normalizedTier = String(tier || '').toLowerCase();
-    if (!['fast', 'standard', 'smart'].includes(normalizedTier)) {
-      return { ok: false, error: 'Invalid tier.' };
-    }
-
-    const settings = getSettings();
-    const tierMap = { ...(settings.inference?.tierMap || {}) };
-    const current = tierMap[normalizedTier] || {};
-
-    tierMap[normalizedTier] = {
-      ...current,
-      ...(provider !== undefined ? { provider } : {}),
-      ...(model !== undefined ? { model } : {})
-    };
-
-    const updated = {
-      ...settings,
-      inference: {
-        ...(settings.inference || {}),
-        tierMap
-      }
-    };
-
-    setSettings(updated);
-    return { ok: true, inference: updated.inference };
-  }));
-
-  ipcMain.handle('settings:saveSmartRouting', wrapHandler('settings:saveSmartRouting', async (_event, { enabled } = {}) => {
-    const settings = getSettings();
-    const smartRouting = {
-      ...(settings.inference?.smartRouting || {}),
-      enabled: !!enabled
-    };
-    const updated = {
-      ...settings,
-      inference: { ...(settings.inference || {}), smartRouting }
-    };
-    setSettings(updated);
-    return { ok: true, smartRouting };
-  }));
-
-  ipcMain.handle('settings:saveSmartRoutingRules', wrapHandler('settings:saveSmartRoutingRules', async (_event, { rules } = {}) => {
-    const { validateRule } = require('../providers/smart-routing');
-    if (!Array.isArray(rules)) {
-      return { ok: false, error: 'Rules must be an array.' };
-    }
-    for (const rule of rules) {
-      const check = validateRule(rule);
-      if (!check.valid) {
-        return { ok: false, error: `Rule "${rule.name || '?'}": ${check.errors.join(', ')}` };
-      }
-    }
-    const settings = getSettings();
-    const smartRouting = {
-      ...(settings.inference?.smartRouting || {}),
-      rules
-    };
-    const updated = {
-      ...settings,
-      inference: { ...(settings.inference || {}), smartRouting }
-    };
-    setSettings(updated);
-    return { ok: true, smartRouting };
-  }));
-
-  ipcMain.handle('settings:saveLlmRouting', wrapHandler('settings:saveLlmRouting', async (_event, payload = {}) => {
-    const allowedSensitivity = new Set(['low', 'medium', 'high']);
-    const settings = getSettings();
-    const current = settings.inference?.llmRouting || {};
-    const llmRouting = {
-      enabled: Boolean(payload.enabled),
-      costSensitivity: allowedSensitivity.has(payload.costSensitivity) ? payload.costSensitivity : (current.costSensitivity || 'medium'),
-      speedPriority: allowedSensitivity.has(payload.speedPriority) ? payload.speedPriority : (current.speedPriority || 'medium'),
-      qualityPriority: allowedSensitivity.has(payload.qualityPriority) ? payload.qualityPriority : (current.qualityPriority || 'high')
-    };
-    const updated = {
-      ...settings,
-      inference: { ...(settings.inference || {}), llmRouting }
-    };
-    setSettings(updated);
-    return { ok: true, llmRouting };
   }));
 
   ipcMain.handle('settings:saveNotifications', wrapHandler('settings:saveNotifications', async (_event, { notifications } = {}) => {

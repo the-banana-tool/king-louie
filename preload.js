@@ -558,9 +558,6 @@ contextBridge.exposeInMainWorld(
       saveElevenLabsKey: (payload) => ipcRenderer.invoke('settings:saveElevenLabsKey', payload),
       testVoice: (payload) =>
         throttleInvoke('settings:testVoice', () => ipcRenderer.invoke('settings:testVoice', payload)),
-      saveSmartRouting: (payload) => ipcRenderer.invoke('settings:saveSmartRouting', payload),
-      saveSmartRoutingRules: (payload) => ipcRenderer.invoke('settings:saveSmartRoutingRules', payload),
-      saveLlmRouting: (payload) => ipcRenderer.invoke('settings:saveLlmRouting', payload),
       saveNotifications: (payload) => ipcRenderer.invoke('settings:saveNotifications', payload),
       saveDefaults: (payload) => ipcRenderer.invoke('settings:saveDefaults', payload),
       addAllowedDirectory: () => ipcRenderer.invoke('settings:addAllowedDirectory'),
@@ -574,11 +571,6 @@ contextBridge.exposeInMainWorld(
       },
       testProvider: (payload) =>
         throttleInvoke('settings:testProvider', () => ipcRenderer.invoke('settings:testProvider', payload)),
-      setActiveProvider: (payload) => ipcRenderer.invoke('settings:setActiveProvider', payload),
-      setProviderModel: (payload) => ipcRenderer.invoke('settings:setProviderModel', payload),
-      setInferenceTier: (payload) => ipcRenderer.invoke('settings:setInferenceTier', payload),
-      listModels: (payload) => ipcRenderer.invoke('settings:listModels', payload),
-      setTierProviderModel: (payload) => ipcRenderer.invoke('settings:setTierProviderModel', payload),
       runLlmCommand: (payload) => {
         validateSettingsRunLlmPayload(payload);
         return ipcRenderer.invoke('settings:runLlmCommand', payload);

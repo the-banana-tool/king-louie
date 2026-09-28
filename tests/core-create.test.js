@@ -39,7 +39,7 @@ describe('createCore', () => {
   it('constructs synchronously and exposes settings and token helpers before start()', () => {
     const { deps } = makeDeps();
     const core = createCore(deps);
-    assert.strictEqual(typeof core.getSettings().activeProvider, 'string');
+    assert.strictEqual(core.getSettings().models.profiles.length, 1, 'a fresh core has its Default profile');
     core.saveProviderToken('openai', 'sk-test');
     assert.ok(deps.store.get('apiTokens').openai.startsWith('klc1:'));
     core.vault.set('k', 'v');

@@ -27,63 +27,13 @@ const DEFAULT_SETTINGS = {
   // Cases stage 6: allowed playbook sources (URL prefixes and path:<folder>
   // roots; example: is always allowed) and same-major auto-update.
   playbooks: { sources: [], autoUpdate: false },
-  activeProvider: 'openai',
   templateVariables: {
     name: '',
     role: '',
     preferences: '',
     projectContext: ''
   },
-  providerModels: {
-    openai: 'gpt-4o-mini',
-    anthropic: 'claude-sonnet-5',
-    copilot: 'gpt-5.4',
-    groq: 'llama-3.3-70b-versatile',
-    mistral: 'mistral-large-latest',
-    ollama: '',
-    gemini: 'gemini-2.5-flash',
-    openrouter: 'openai/gpt-4o-mini',
-    xai: 'grok-4.3',
-    deepseek: 'deepseek-flash',
-    qwen: 'qwen-plus',
-    together: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
-    fireworks: 'accounts/fireworks/models/gpt-oss-120b',
-    cohere: 'command-a-03-2025'
-  },
-  inference: {
-    activeTier: 'standard',
-    tierMap: {
-      fast: {
-        provider: 'groq',
-        model: 'llama-3.3-70b-versatile'
-      },
-      standard: {
-        provider: 'anthropic',
-        model: 'claude-sonnet-5'
-      },
-      smart: {
-        provider: 'anthropic',
-        model: 'claude-sonnet-5'
-      }
-    },
-    timeoutsMs: {
-      fast: 15000,
-      standard: 30000,
-      smart: 90000
-    },
-    smartRouting: {
-      enabled: false,
-      rules: []
-    },
-    llmRouting: {
-      enabled: false,
-      costSensitivity: 'medium',
-      speedPriority: 'medium',
-      qualityPriority: 'high'
-    }
-  },
-  // Model catalog, availability and profiles (spec 2026-09-27 §14). The
-  // tiers above are read once by the stage M2 migration and then removed.
+  // Model catalog, availability and profiles (spec 2026-09-27 §14).
   models: {
     catalog: { ...CATALOG_DEFAULTS },
     overrides: {},
@@ -151,29 +101,6 @@ const mergeSettings = (settings = {}) => {
     templateVariables: {
       ...(DEFAULT_SETTINGS.templateVariables || {}),
       ...(source.templateVariables || {})
-    },
-    providerModels: {
-      ...(DEFAULT_SETTINGS.providerModels || {}),
-      ...(source.providerModels || {})
-    },
-    inference: {
-      ...(DEFAULT_SETTINGS.inference || {}),
-      ...(source.inference || {}),
-      tierMap: {
-        ...(DEFAULT_SETTINGS.inference?.tierMap || {}),
-        ...(source.inference?.tierMap || {})
-      },
-      timeoutsMs: {
-        ...(DEFAULT_SETTINGS.inference?.timeoutsMs || {}),
-        ...(source.inference?.timeoutsMs || {})
-      },
-      smartRouting: {
-        ...(DEFAULT_SETTINGS.inference?.smartRouting || {}),
-        ...(source.inference?.smartRouting || {}),
-        rules: Array.isArray(source.inference?.smartRouting?.rules)
-          ? source.inference.smartRouting.rules
-          : (DEFAULT_SETTINGS.inference?.smartRouting?.rules || [])
-      }
     },
     models: {
       ...(DEFAULT_SETTINGS.models || {}),

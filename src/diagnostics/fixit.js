@@ -20,12 +20,16 @@ async function checkProvider(context) {
     return {
       status: 'WARN',
       message: 'No providers configured',
-      fix: 'Add at least one provider (e.g. OpenAI) in Settings → Providers',
+      fix: 'Add at least one provider (e.g. OpenAI) in Settings → API keys',
     };
   }
 
+  // The default profile's first main provider (models spec 2026-09-27 §6).
   const settings = store.get('settings', {});
-  const activeProvider = settings.activeProvider;
+  const models = settings.models || {};
+  const profiles = Array.isArray(models.profiles) ? models.profiles : [];
+  const profile = profiles.find((p) => p && p.id === models.defaultProfileId) || profiles[0] || null;
+  const activeProvider = profile?.roles?.main?.[0]?.provider || null;
   const apiTokens = store.get('apiTokens', {});
   const apiStatus = store.get('apiStatus', {});
 
@@ -41,7 +45,7 @@ async function checkProvider(context) {
       return {
         status: 'WARN',
         message: `${active} configured but last connection failed`,
-        fix: 'Check provider credentials in Settings → Providers and try Test Connection',
+        fix: 'Check provider credentials in Settings → API keys and try Test Connection',
       };
     }
     return { status: 'PASS', message: `Connected to ${active}` };
@@ -50,7 +54,7 @@ async function checkProvider(context) {
   return {
     status: 'WARN',
     message: 'No providers configured',
-    fix: 'Add at least one provider (e.g. OpenAI) in Settings → Providers',
+    fix: 'Add at least one provider (e.g. OpenAI) in Settings → API keys',
   };
 }
 

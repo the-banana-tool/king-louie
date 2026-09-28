@@ -86,7 +86,6 @@ const WebhookServer = require('../webhooks/webhook-server');
 const { createContactHost } = require('../cases/contact-host');
 const { shutdownPdfSandbox } = require('../cases/ingest/pdf-sandbox');
 const { initializeMesh } = require('../mesh');
-const LLMRouter = require('../providers/llm-router');
 const { WorkflowEngine } = require('../workflows/workflow-engine');
 const PlannerExecutor = require('../workflows/planner-executor');
 const { MCPManager, createVaultEnvResolver } = require('../mcp');
@@ -244,7 +243,6 @@ function createCore(deps = {}) {
   let webhookListenerSettled = Promise.resolve();
   let workflowEngine;
   let plannerExecutor;
-  let llmRouter;
   let agentExecutorAdapter;
   let discoveredApps = [];
   const TELEGRAM_TOKEN_STORE_KEY = '__telegram_bot_token';
@@ -521,23 +519,6 @@ function createCore(deps = {}) {
 
   const providerLabels = PROVIDER_LABELS;
 
-  const providerDefaults = {
-    openai: 'gpt-4o-mini',
-    anthropic: 'claude-sonnet-5',
-    copilot: '',
-    groq: 'llama-3.3-70b-versatile',
-    mistral: 'mistral-large-latest',
-    ollama: '',
-    gemini: 'gemini-2.5-flash',
-    openrouter: 'openai/gpt-4o-mini',
-    xai: 'grok-4.3',
-    deepseek: 'deepseek-flash',
-    qwen: 'qwen-plus',
-    together: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
-    fireworks: 'accounts/fireworks/models/gpt-oss-120b',
-    cohere: 'command-a-03-2025'
-  };
-
   const providerTokenHints = {
     openai: 'sk-',
     anthropic: 'sk-ant-',
@@ -569,54 +550,6 @@ function createCore(deps = {}) {
     }
 
     return null;
-  };
-
-  const getProviderModel = (provider) => {
-    const settings = getSettings();
-    return settings.providerModels?.[provider] || providerDefaults[provider] || '';
-  };
-
-  const setProviderModel = (provider, model) => {
-    const settings = getSettings();
-    const updated = {
-      ...settings,
-      providerModels: {
-        ...(settings.providerModels || {}),
-        [provider]: (model || '').trim()
-      }
-    };
-    setSettings(updated);
-    return updated.providerModels[provider];
-  };
-
-  const setActiveProvider = (provider) => {
-    const settings = getSettings();
-    const updated = {
-      ...settings,
-      activeProvider: provider
-    };
-    setSettings(updated);
-    resetRuntimeEnvironmentCache();
-    return updated.activeProvider;
-  };
-
-  const setActiveInferenceTier = (tier) => {
-    const normalizedTier = String(tier || '').toLowerCase();
-    if (!['fast', 'standard', 'smart'].includes(normalizedTier)) {
-      throw new Error('Inference tier must be one of: fast, standard, smart.');
-    }
-
-    const settings = getSettings();
-    const updated = {
-      ...settings,
-      inference: {
-        ...(settings.inference || {}),
-        activeTier: normalizedTier
-      }
-    };
-
-    setSettings(updated);
-    return updated.inference;
   };
 
   const setNotificationSettings = (notifications = {}) => {
@@ -1067,8 +1000,6 @@ function createCore(deps = {}) {
   const modelMigration = deps.skipModelMigration === true ? { migrated: false, skipped: true } : runTierMigration({
     readRaw: () => store.get('settings', null),
     writeRaw: (raw) => store.set('settings', raw),
-    // The old keys stay while code still reads them; they go with the tier code.
-    removeLegacy: false,
     catalog,
     // A fresh install's Default main: each provider's own default model, in
     // the order the app lists providers; an empty default (Ollama) is skipped.
@@ -1586,23 +1517,19 @@ function createCore(deps = {}) {
   const getProviderSnapshot = () => {
     const tokens = getApiTokens();
     const status = getApiStatus();
-    const settings = getSettings();
 
     const providers = Object.keys(providerLabels).reduce((acc, key) => {
       acc[key] = {
         label: providerLabels[key],
         hasToken: Boolean(tokens[key]),
-        status: status[key] || null,
-        model: settings.providerModels?.[key] || providerDefaults[key] || ''
+        status: status[key] || null
       };
       return acc;
     }, {});
 
     return {
       encryptionAvailable: cipher.isEncryptionAvailable(),
-      providers,
-      activeProvider: settings.activeProvider || 'openai',
-      inference: settings.inference
+      providers
     };
   };
 
@@ -1643,8 +1570,6 @@ function createCore(deps = {}) {
           '- `/llm add <provider> <token>` — add/update provider API token',
           '- `/llm remove <provider>` — remove saved provider token',
           '- `/llm test <provider>` — test provider connection',
-          '- `/llm use <provider>` — set active provider',
-          '- `/llm model <provider> <model>` — set model for provider',
           '- `/llm profile` — list model profiles; `/llm profile <name>` — make one the default',
           '- `/llm telegram add <token>` — save Telegram bot token and start bridge',
           '- `/llm telegram test` — test saved Telegram token',
@@ -2033,17 +1958,15 @@ function createCore(deps = {}) {
     if (action === 'list') {
       const snapshot = getProviderSnapshot();
       const rows = Object.entries(snapshot.providers).map(([key, provider]) => {
-        const active = snapshot.activeProvider === key;
         const status = provider.status?.ok
           ? 'connected'
           : provider.status
             ? 'error'
             : 'not tested';
         const parts = [
-          `**${provider.label}**` + (active ? ' (active)' : ''),
+          `**${provider.label}**`,
           `key: \`${key}\``,
           `token: ${provider.hasToken ? 'saved' : 'missing'}`,
-          `model: \`${provider.model || '(default)'}\``,
           `status: ${status}`
         ];
         return `- ${parts.join(' | ')}`;
@@ -2112,33 +2035,6 @@ function createCore(deps = {}) {
       return {
         ok: true,
         output: `${providerLabels[provider]} connection successful.`
-      };
-    }
-
-    if (['use', 'active'].includes(action)) {
-      const provider = normalizeProvider(rest[0]);
-      if (!isSupportedProvider(provider)) {
-        return { ok: false, error: 'Unknown provider. Use openai, anthropic, or copilot.' };
-      }
-
-      setActiveProvider(provider);
-      return {
-        ok: true,
-        output: `Active provider set to ${providerLabels[provider]}.`
-      };
-    }
-
-    if (action === 'model') {
-      const provider = normalizeProvider(rest[0]);
-      const model = rest.slice(1).join(' ').trim();
-      if (!isSupportedProvider(provider)) {
-        return { ok: false, error: 'Unknown provider. Use openai, anthropic, or copilot.' };
-      }
-
-      setProviderModel(provider, model);
-      return {
-        ok: true,
-        output: `${providerLabels[provider]} model set to ${model || '(default)'}.`
       };
     }
 
@@ -2297,8 +2193,6 @@ function createCore(deps = {}) {
   };
 
   const inferenceRouter = new InferenceRouter({
-    getSettings,
-    getProviderModel,
     getProviderToken: getDecryptedProviderToken,
     createProvider: (providerType, token) => createProviderInstance(providerType, token),
     onProviderError: reportProviderError,
@@ -2311,33 +2205,13 @@ function createCore(deps = {}) {
     }
   });
 
-  // Wrap resolveInference to handle async OAuth token refresh
-  const _originalResolve = inferenceRouter.resolve.bind(inferenceRouter);
-  const _originalResolveWithSmart = inferenceRouter.resolveWithSmartRouting.bind(inferenceRouter);
-
+  // An Anthropic OAuth instance needs a fresh access token before its first call.
   const ensureOAuthToken = async (result) => {
     if (result.providerType === 'anthropic' && result.provider?.authMode === 'oauth') {
       const accessToken = await refreshAnthropicOAuthToken();
       result.provider.apiKey = accessToken;
     }
     return result;
-  };
-
-  const resolveInference = async (selection = {}) => {
-    let result;
-    if (typeof selection === 'string') {
-      result = inferenceRouter.resolve({ provider: selection });
-    } else if (selection && selection.message) {
-      result = inferenceRouter.resolveWithSmartRouting(
-        selection,
-        selection.message,
-        { agentMode: !!selection.agentMode }
-      );
-    } else {
-      result = inferenceRouter.resolve(selection || {});
-    }
-
-    return ensureOAuthToken(result);
   };
 
   // ---- Profiles and roles (spec 2026-09-27 §6) ----
@@ -2746,14 +2620,6 @@ function createCore(deps = {}) {
         });
       }
     };
-
-    // Initialize LLM-powered router and attach to inference router
-    llmRouter = new LLMRouter({
-      getSettings,
-      getProviderToken: getDecryptedProviderToken,
-      createProvider: (providerType, token) => createProviderInstance(providerType, token)
-    });
-    inferenceRouter.setLLMRouter(llmRouter);
 
     // Initialize workflow engine for durable multi-session workflows
     workflowEngine = new WorkflowEngine({
@@ -3276,7 +3142,6 @@ function createCore(deps = {}) {
     getLastAssistantMessage,
     getVoiceSettings,
     runHookEvent,
-    resolveInference,
     getRuntimeEnvironment,
     createToolExecutorWithApprovals,
     AgentLoop,
@@ -3325,7 +3190,6 @@ function createCore(deps = {}) {
     getApiStatus,
     getSettings,
     providerLabels,
-    providerDefaults,
     hasStoredElevenLabsToken,
     hasStoredTelegramToken,
     hasStoredSlackAppToken,
@@ -3348,7 +3212,6 @@ function createCore(deps = {}) {
     updateStatus,
     runLlmCommand,
     anthropicOAuth,
-    setActiveInferenceTier,
     setNotificationSettings,
 
     // Models (spec 2026-09-27 §4, §5)
@@ -3410,7 +3273,6 @@ function createCore(deps = {}) {
     // Workflow / Planner
     getWorkflowEngine: () => workflowEngine,
     getPlannerExecutor: () => plannerExecutor,
-    getLLMRouter: () => llmRouter,
 
     // Webhook
     webhookRegistry,

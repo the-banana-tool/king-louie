@@ -19,7 +19,7 @@ const log = createLogger('desktop-import');
 
 const PLAN_TTL_MS = 30 * 60 * 1000;
 const MAX_BATCH_BYTES = 2 * 1024 * 1024;
-const IMPORTED_SETTINGS_KEYS = Object.freeze(['defaults', 'checkpoints', 'activeProvider', 'templateVariables', 'providerModels', 'inference', 'notifications', 'voice', 'cases']);
+const IMPORTED_SETTINGS_KEYS = Object.freeze(['defaults', 'checkpoints', 'templateVariables', 'notifications', 'voice', 'cases']);
 const SECRET_CATEGORIES = new Set(['providerToken', 'searchKey', 'imageKey', 'vault', 'anthropicOAuth']);
 const CATEGORY_ORDER = Object.freeze(['settings', 'userProfile', 'permissionRule', 'alwaysApprove', 'allowedDirectory', 'chat', 'memory', 'cron', 'case', 'providerToken', 'searchKey', 'imageKey', 'vault', 'anthropicOAuth', 'excluded']);
 const ACTIONS = Object.freeze(['new', 'update', 'copy', 'skip-present', 'skip-excluded', 'needs-attention', 'needs-desktop']);
@@ -66,7 +66,10 @@ const EXCLUDED = Object.freeze({
   'settings.hooks': 'hooks spawn processes; an administrator sets them with the service CLI',
   'settings.mcpServers': 'MCP servers spawn processes; an administrator sets them with the service CLI',
   'settings.channels': 'a chat bot must not answer from two hosts; an administrator sets channels with the service CLI',
-  channelTokens: 'bot tokens stay with the desktop'
+  channelTokens: 'bot tokens stay with the desktop',
+  'settings.activeProvider': 'model choice moved to profiles; set the models up under Settings → Models on the service',
+  'settings.providerModels': 'model choice moved to profiles; set the models up under Settings → Models on the service',
+  'settings.inference': 'tiers became profiles; set the models up under Settings → Models on the service'
 });
 
 class ImportError extends Error {

@@ -53,12 +53,9 @@ describe('IPC constants – sandbox mode entries', () => {
       'SETTINGS_SAVE_VOICE',
       'SETTINGS_SAVE_ELEVENLABS_KEY',
       'SETTINGS_TEST_VOICE',
-      'SETTINGS_SET_ACTIVE_PROVIDER',
-      'SETTINGS_SET_PROVIDER_MODEL',
       'SETTINGS_SAVE_PROVIDER',
       'SETTINGS_TEST_PROVIDER',
       'SETTINGS_RUN_LLM_COMMAND',
-      'SETTINGS_SET_INFERENCE_TIER',
       'SETTINGS_SAVE_NOTIFICATIONS',
       'SETTINGS_SAVE_DEFAULTS'
     ];
@@ -67,6 +64,13 @@ describe('IPC constants – sandbox mode entries', () => {
       assert.ok(IPC[key], `Missing IPC constant: ${key}`);
       assert.strictEqual(typeof IPC[key], 'string');
     }
+  });
+
+  it('has no tier or active-provider channels (models M2)', () => {
+    for (const key of ['SETTINGS_SET_ACTIVE_PROVIDER', 'SETTINGS_SET_PROVIDER_MODEL', 'SETTINGS_SET_INFERENCE_TIER']) {
+      assert.strictEqual(IPC[key], undefined, key);
+    }
+    assert.strictEqual(IPC.MODELS_SET_MAIN_OVERRIDE, 'models:setMainOverride');
   });
 
   it('no duplicate constant values', () => {

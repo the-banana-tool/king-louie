@@ -15,10 +15,9 @@ function tokenlessContext(overrides = {}) {
     safeStorage: { isEncryptionAvailable: () => true },
     getApiTokens: () => ({}),
     getApiStatus: () => ({}),
-    getSettings: () => ({ activeProvider: 'ollama', inference: {}, providerModels: {} }),
+    getSettings: () => ({ models: {} }),
     setSettings: () => {},
     providerLabels: { openai: 'OpenAI', ollama: 'Ollama (Local)' },
-    providerDefaults: { openai: 'gpt-4o-mini', ollama: '' },
     decryptToken: () => { throw new Error('decryptToken should not be called for tokenless provider'); },
     encryptToken: (t) => `enc:${t}`,
     updateStatus: (_p, status) => status,
@@ -66,31 +65,6 @@ describe('Ollama tokenless settings behavior', () => {
         testProviderConnection: async () => { throw new Error('must not be called'); }
       }));
       assert.deepStrictEqual(await handler({}, { provider: 'nope' }), { ok: false, error: 'Unknown provider.' });
-    });
-  });
-
-  describe('settings:listModels', () => {
-    it('lists Ollama models over the API without a saved token', async () => {
-      global.fetch = async () => ({
-        ok: true,
-        json: async () => ({ data: [{ id: 'llama3.1' }, { id: 'qwen2.5' }] })
-      });
-      const handler = getHandler('settings:listModels');
-      const result = await handler({}, { provider: 'ollama' });
-
-      assert.strictEqual(result.ok, true);
-      assert.strictEqual(result.source, 'api');
-      assert.deepStrictEqual(result.models, ['llama3.1', 'qwen2.5']);
-    });
-
-    it('falls back to the static list when the Ollama API is unreachable', async () => {
-      global.fetch = async () => { throw new Error('fetch failed'); };
-      const handler = getHandler('settings:listModels');
-      const result = await handler({}, { provider: 'ollama' });
-
-      assert.strictEqual(result.ok, true);
-      assert.strictEqual(result.source, 'static');
-      assert.ok(Array.isArray(result.models));
     });
   });
 });

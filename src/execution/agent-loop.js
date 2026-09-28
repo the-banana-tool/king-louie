@@ -50,11 +50,6 @@ class AgentLoop {
     // of waiting for the full response to complete.
     this.onChunk = typeof options.onChunk === 'function' ? options.onChunk : null;
 
-    // Model tiering: use a cheaper model for tool iterations after the first.
-    // The first iteration uses the primary model (for planning/reasoning),
-    // subsequent iterations switch to loopModel (for mechanical tool use).
-    this.loopModel = options.loopModel || null;
-
     // Context compaction: truncate old tool results every N iterations
     // to prevent linear context growth. keepRecentResults controls how
     // many recent tool result messages are kept intact.
@@ -201,10 +196,7 @@ class AgentLoop {
 
       iterations += 1;
 
-      // After the first iteration, switch to the cheaper loop model
-      const baseOptions = (iterations > 1 && this.loopModel)
-        ? { ...options, model: this.loopModel }
-        : options;
+      const baseOptions = options;
       // The run's abort signal rides on every model call, so Stop cancels the
       // request at the provider instead of after it returns (spec 2026-09-27 §9).
       const effectiveOptions = this.abortSignal

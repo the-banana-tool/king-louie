@@ -6,6 +6,9 @@ const makeStore = (data = {}) => ({
   get: (key, fallback) => data[key] !== undefined ? data[key] : fallback
 });
 
+// The default profile with one main model on `provider` (models M2).
+const mainOn = (provider) => ({ models: { profiles: [{ id: 'p-1', name: 'P', roles: { main: [{ provider, model: 'm' }] } }], defaultProfileId: 'p-1' } });
+
 describe('Fixit', () => {
   const mockContext = {
     providerFactory: {},
@@ -18,7 +21,7 @@ describe('Fixit', () => {
     store: makeStore({
       apiTokens: { openai: 'enc-token' },
       apiStatus: { openai: { ok: true, lastChecked: Date.now() } },
-      settings: { activeProvider: 'openai' }
+      settings: mainOn('openai')
     })
   };
 
@@ -76,7 +79,7 @@ describe('Fixit', () => {
       providerFactory: {},
       store: makeStore({
         apiTokens: { openai: 'enc-token' },
-        settings: { activeProvider: 'openai' }
+        settings: mainOn('openai')
       })
     });
     const results = await fixit.runAll();
@@ -90,7 +93,7 @@ describe('Fixit', () => {
       providerFactory: {},
       store: makeStore({
         apiTokens: {},
-        settings: { activeProvider: 'ollama' }
+        settings: mainOn('ollama')
       })
     });
     const results = await fixit.runAll();
@@ -104,7 +107,7 @@ describe('Fixit', () => {
       providerFactory: {},
       store: makeStore({
         apiTokens: {},
-        settings: { activeProvider: 'openai' }
+        settings: mainOn('openai')
       })
     });
     const results = await fixit.runAll();
@@ -113,13 +116,13 @@ describe('Fixit', () => {
     assert.ok(provider.fix);
   });
 
-  it('warns when active provider last connection failed', async () => {
+  it('warns when the main provider\'s last connection failed', async () => {
     const fixit = new Fixit({
       providerFactory: {},
       store: makeStore({
         apiTokens: { openai: 'enc-token' },
         apiStatus: { openai: { ok: false, message: '401 Unauthorized' } },
-        settings: { activeProvider: 'openai' }
+        settings: mainOn('openai')
       })
     });
     const results = await fixit.runAll();

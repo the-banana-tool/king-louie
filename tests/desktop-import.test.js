@@ -74,7 +74,7 @@ function desktopFixture(overrides = {}) {
   const workDir = tmp('kl-import-wd-');
   const chat = (id, updatedAt, title = `Chat ${id}`) => ({ id, title, createdAt: '2026-09-01T10:00:00Z', updatedAt, messages: [{ id: `${id}-m1`, sender: 'user', text: 'hello', timestamp: updatedAt }] });
   const values = {
-    settings: { inference: { activeTier: 'smart' }, voice: { enabled: true }, hooks: { enabled: false } },
+    settings: { inference: { activeTier: 'smart' }, templateVariables: { name: 'Example Owner' }, voice: { enabled: true }, hooks: { enabled: false } },
     userProfile: { name: 'Example Owner', goals: ['ship'] },
     chats: { c1: chat('c1', '2026-09-20T10:00:00Z'), c2: { ...chat('c2', '2026-09-20T11:00:00Z'), workingDirectory: path.join(workDir, 'gone') } },
     memory: { 'm-1': { id: 'm-1', type: 'preference', content: 'likes tea', source: 'desk', created: '2026-01-02T03:04:05.000Z', lastAccessed: '2026-01-03T03:04:05.000Z', metadata: {} } },
@@ -168,7 +168,8 @@ describe('DesktopImporter', () => {
     const { importer } = await service();
     const fx = desktopFixture();
     const plan = await importer.plan({ installId: fx.inventory.installId, inventory: fx.inventory });
-    assert.strictEqual(actionOf(plan, 'settings', 'inference'), 'new');
+    assert.strictEqual(actionOf(plan, 'settings', 'templateVariables'), 'new');
+    assert.strictEqual(actionOf(plan, 'settings', 'inference'), 'skip-excluded', 'tiers became profiles; nothing reads them');
     assert.strictEqual(actionOf(plan, 'settings', 'hooks'), 'skip-excluded');
     assert.strictEqual(actionOf(plan, 'userProfile', 'userProfile'), 'new');
     assert.strictEqual(actionOf(plan, 'permissionRule', 'Bash|git *|allow'), 'new');
@@ -210,7 +211,7 @@ describe('DesktopImporter', () => {
     const fx = desktopFixture();
     const first = await runImport(importer, fx);
     assert.deepStrictEqual(first.report.failures, []);
-    assert.strictEqual(core.context.getSettings().inference.activeTier, 'smart');
+    assert.strictEqual(core.context.getSettings().templateVariables.name, 'Example Owner');
     assert.ok(core.context.getChats().some((c) => c.id === 'c1'));
     const c2 = core.context.getChats().find((c) => c.id === 'c2');
     assert.strictEqual(c2.workingDirectory, null, 'an unreadable working directory is dropped');

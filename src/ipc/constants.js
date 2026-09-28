@@ -113,12 +113,9 @@ module.exports = {
   SETTINGS_SAVE_VOICE: 'settings:saveVoice',
   SETTINGS_SAVE_ELEVENLABS_KEY: 'settings:saveElevenLabsKey',
   SETTINGS_TEST_VOICE: 'settings:testVoice',
-  SETTINGS_SET_ACTIVE_PROVIDER: 'settings:setActiveProvider',
-  SETTINGS_SET_PROVIDER_MODEL: 'settings:setProviderModel',
   SETTINGS_SAVE_PROVIDER: 'settings:saveProvider',
   SETTINGS_TEST_PROVIDER: 'settings:testProvider',
   SETTINGS_RUN_LLM_COMMAND: 'settings:runLlmCommand',
-  SETTINGS_SET_INFERENCE_TIER: 'settings:setInferenceTier',
   SETTINGS_SAVE_NOTIFICATIONS: 'settings:saveNotifications',
   SETTINGS_SAVE_DEFAULTS: 'settings:saveDefaults',
 

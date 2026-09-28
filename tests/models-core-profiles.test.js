@@ -126,6 +126,14 @@ describe('the tier migration at core construction', () => {
     assert.deepStrictEqual(store.get('settings'), before);
     assert.deepStrictEqual(core.context.getProfiles().list(), []);
   });
+
+  it('removes the old tier keys from the stored settings once the profile is written', () => {
+    const { store } = makeCore({ settings: { ...legacySettings(), advisor: { enabled: true, model: 'gpt-4o' } } });
+    const raw = store.get('settings');
+    for (const key of ['activeProvider', 'providerModels', 'inference']) assert.strictEqual(key in raw, false, key);
+    assert.deepStrictEqual(raw.advisor, { enabled: true });
+    assert.strictEqual(raw.models.profiles.length, 1);
+  });
 });
 
 describe('snapshotModels', () => {

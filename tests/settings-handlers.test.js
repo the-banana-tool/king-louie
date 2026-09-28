@@ -26,14 +26,7 @@ function createIpcMainMock() {
 }
 
 function createDefaultContext(overrides = {}) {
-  const settings = {
-    activeProvider: 'openai',
-    inference: { activeTier: 'standard' },
-    notifications: { enabled: true },
-    hooks: { enabled: true },
-    templateVariables: { name: '' },
-    providerModels: { openai: 'gpt-4o-mini' }
-  };
+  const settings = { notifications: { enabled: true }, hooks: { enabled: true }, templateVariables: { name: '' }, models: {} };
 
   return {
     safeStorage: { isEncryptionAvailable: () => true },
@@ -41,7 +34,6 @@ function createDefaultContext(overrides = {}) {
     getApiStatus: () => ({ openai: { ok: true, message: 'ok' } }),
     getSettings: () => settings,
     providerLabels: { openai: 'OpenAI' },
-    providerDefaults: { openai: 'gpt-4o-mini' },
     hasStoredElevenLabsToken: () => false,
     hasStoredTelegramToken: () => false,
     getTelegramBridge: () => null,
@@ -63,19 +55,7 @@ function createDefaultContext(overrides = {}) {
     decryptToken: () => 'token',
     updateStatus: (_provider, status) => status,
     runLlmCommand: async (command) => ({ ok: true, output: command }),
-    setActiveInferenceTier: (tier) => {
-      if (!['fast', 'standard', 'smart'].includes(String(tier))) {
-        throw new Error('bad tier');
-      }
-      return { activeTier: tier };
-    },
     setNotificationSettings: (notifications) => notifications,
-    applyActiveProviderUpdate: ({ provider }) => {
-      if (provider !== 'openai') {
-        return { ok: false, error: 'Unknown provider.' };
-      }
-      return { ok: true, activeProvider: provider };
-    },
     ...overrides
   };
 }
@@ -91,18 +71,19 @@ run('registerSettingsHandlers wires expected channels', async () => {
     'settings:saveVoice',
     'settings:saveElevenLabsKey',
     'settings:testVoice',
-    'settings:setActiveProvider',
-    'settings:setProviderModel',
     'settings:saveProvider',
     'settings:testProvider',
     'settings:runLlmCommand',
-    'settings:setInferenceTier',
     'settings:saveNotifications'
   ];
 
   channels.forEach((channel) => {
     assert.ok(ipcMain.handlers.has(channel), `${channel} should be registered`);
   });
+
+  for (const gone of ['settings:setActiveProvider', 'settings:setProviderModel', 'settings:setInferenceTier', 'settings:setTierProviderModel', 'settings:listModels', 'settings:saveSmartRouting', 'settings:saveSmartRoutingRules', 'settings:saveLlmRouting']) {
+    assert.strictEqual(ipcMain.handlers.has(gone), false, `${gone} is gone with the tiers`);
+  }
 });
 
 run('settings:load returns wrapped payload with provider data', async () => {
@@ -112,28 +93,10 @@ run('settings:load returns wrapped payload with provider data', async () => {
   const result = await ipcMain.handlers.get('settings:load')({});
   assert.strictEqual(result.ok, true);
   assert.ok(result.data);
-  assert.strictEqual(result.data.activeProvider, 'openai');
+  assert.strictEqual('activeProvider' in result.data, false);
+  assert.strictEqual('inference' in result.data, false);
+  assert.strictEqual('model' in result.data.providers.openai, false);
   assert.ok(result.data.providers.openai);
-});
-
-run('settings:setActiveProvider forwards known provider errors', async () => {
-  const ipcMain = createIpcMainMock();
-  registerSettingsHandlers(ipcMain, createDefaultContext());
-
-  const result = await ipcMain.handlers.get('settings:setActiveProvider')({}, { provider: 'bad' });
-  assert.deepStrictEqual(result, { ok: false, error: 'Unknown provider.' });
-});
-
-run('settings:setInferenceTier wraps thrown errors', async () => {
-  const ipcMain = createIpcMainMock();
-  registerSettingsHandlers(ipcMain, createDefaultContext({
-    setActiveInferenceTier: () => {
-      throw new Error('tier exploded');
-    }
-  }));
-
-  const result = await ipcMain.handlers.get('settings:setInferenceTier')({}, { tier: 'broken' });
-  assert.deepStrictEqual(result, { ok: false, error: 'tier exploded' });
 });
 
 run('settings:saveProvider retests the provider in the background', async () => {
@@ -164,9 +127,6 @@ run('settings:load includes the Ollama address', async () => {
   const ipcMain = createIpcMainMock();
   registerSettingsHandlers(ipcMain, createDefaultContext({
     getSettings: () => ({
-      activeProvider: 'openai',
-      inference: {},
-      providerModels: {},
       models: { ollama: { baseUrl: 'http://127.0.0.1:11434' }, catalog: { fetch: false, refreshHours: 12 }, overrides: {} }
     })
   }));

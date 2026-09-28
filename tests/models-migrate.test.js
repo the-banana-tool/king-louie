@@ -271,4 +271,11 @@ describe('runTierMigration', () => {
     assert.deepStrictEqual(LEGACY_DEFAULTS.tierMap.fast, { provider: 'groq', model: 'llama-3.3-70b-versatile' });
     assert.deepStrictEqual({ ...LEGACY_DEFAULTS.timeoutsMs }, { fast: 15000, standard: 30000, smart: 90000 });
   });
+
+  it('a fresh install after stage M2 (defaults carry no tier keys) gets the Default profile', () => {
+    const { DEFAULT_SETTINGS } = require('../src/core/settings');
+    const store = memoryStore(JSON.parse(JSON.stringify(DEFAULT_SETTINGS)));
+    const r = runTierMigration({ ...store, ...opts() });
+    assert.deepStrictEqual([r.migrated, r.fresh, r.profile.name], [true, true, 'Default']);
+  });
 });

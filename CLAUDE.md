@@ -98,7 +98,7 @@ Default is `info`. Override with `KING_LOUIE_LOG_LEVEL` or `LOG_LEVEL` env var.
 
 `src/models/` holds the model catalog and provider availability (spec:
 `docs/superpowers/specs/2026-09-27-model-catalog-profiles-roles-design.md`,
-stage M1). It is Electron-free.
+stages M1 and M2). It is Electron-free.
 
 - Prices come only from `Catalog.price`; providers have no price tables. An
   unknown model is unpriced (`costUsd: null`), never $0. A call cut off by
@@ -119,6 +119,17 @@ stage M1). It is Electron-free.
   each provider whose key is in the environment (`OPENAI_API_KEY`,
   `ANTHROPIC_API_KEY`, …; `KL_SMOKE_MODEL_<PROVIDER>` picks a model). It
   spends a little real money and is not part of `npm test`.
+- Model choice is profiles (`settings.models.profiles`, stage M2): named sets
+  of models per role (main, worker, utility, vision, imageGeneration, custom).
+  Tiers, `activeProvider`, `providerModels`, smart routing and the LLM router
+  are gone; `src/models/migrate-tiers.js` reads them once at start. Every
+  model call resolves through a `TurnModels` (`core.context.snapshotModels` /
+  `resolveRole`) and fails over along the resolved list
+  (`InferenceRouter#routeTargets`); a loop on a routed provider gets
+  `failoverPolicy: NO_RETRY`.
+- Tests configure models with `tests/helpers/profile-settings.js`
+  (`profileSettings`, `everyRole`, `withCaseProfile`). A provider a test
+  registers outside the 14 is usable when it has a saved token.
 
 ## Cases
 
