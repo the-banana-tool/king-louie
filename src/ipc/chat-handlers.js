@@ -45,7 +45,13 @@ function registerChatHandlers(ipcMain, context = {}) {
     prompter
   } = context;
 
-  const activeRuns = new Map(); // chatId -> AbortController
+  // chatId -> Set<AbortController>. More than one send can be in flight for
+  // the same chat at once (a second send while the first is still running,
+  // or one whose own setup fails); each keeps its own entry in the chat's
+  // set, added right after beginTurn and removed only by its own `finally`
+  // (targeted fix, after final review I2's fix wave). Stop aborts every
+  // controller in the set and clears the whole entry.
+  const activeRuns = new Map();
 
   /**
    * Generate a contextual title for a chat using the LLM,
@@ -343,8 +349,16 @@ function registerChatHandlers(ipcMain, context = {}) {
     // (a connection test can run 20s or more), so a Stop pressed there was
     // silently lost — the run kept going, billed, and streamed in full
     // (final review I2). Checked again after the gate and after conversation
-    // compaction, below.
-    activeRuns.set(chatId, abortController);
+    // compaction, below. Added to this chat's own Set, not written over any
+    // other run's entry — the hook below can still deny the turn, and any
+    // exit here must remove only this run's own controller (the `finally`
+    // after the try/catch), never another run's (targeted fix).
+    let runSet = activeRuns.get(chatId);
+    if (!runSet) {
+      runSet = new Set();
+      activeRuns.set(chatId, runSet);
+    }
+    runSet.add(abortController);
     let stopped = false;
     let stopFinished = false;
     // A stopped run ends here, once: the streamed text as an assistant
@@ -763,9 +777,6 @@ function registerChatHandlers(ipcMain, context = {}) {
         }
       });
 
-      // Only this run's own controller: after a Stop, a newer run of the same
-      // chat may already be registered.
-      if (activeRuns.get(chatId) === abortController) activeRuns.delete(chatId);
       if (stopped || abortController.signal.aborted) {
         return finishStopped();
       }
@@ -797,8 +808,6 @@ function registerChatHandlers(ipcMain, context = {}) {
 
       return updatedChat;
     } catch (error) {
-      // An early failure never registered this run; leave another run's controller alone.
-      if (activeRuns.get(chatId) === abortController) activeRuns.delete(chatId);
       if (abortController.signal.aborted) {
         return finishStopped();
       }
@@ -829,6 +838,21 @@ function registerChatHandlers(ipcMain, context = {}) {
         error: error.message
       });
       throw error;
+    } finally {
+      // Only this run's own controller, from this chat's own Set — a Stop,
+      // a newer or older run of the same chat, or the hook-deny return
+      // above may have already added, aborted or removed others. Runs on
+      // every exit: the hook denying the turn, the gate's own refusal, any
+      // other error, a stop, or a normal completion (targeted fix, after
+      // final review I2's fix wave left the hook-deny return with no
+      // cleanup at all, and the wave's own rewrite of the "second send"
+      // regression test papered over that this run's controller must never
+      // take another run's entry down with it).
+      const set = activeRuns.get(chatId);
+      if (set) {
+        set.delete(abortController);
+        if (set.size === 0) activeRuns.delete(chatId);
+      }
     }
   }));
 
@@ -849,9 +873,12 @@ function registerChatHandlers(ipcMain, context = {}) {
   }));
 
   ipcMain.handle(IPC.CHAT_STOP_RESPONSE, wrapHandler(IPC.CHAT_STOP_RESPONSE, async (_event, { chatId }) => {
-    const controller = activeRuns.get(chatId);
-    if (controller) {
-      controller.abort();
+    const runSet = activeRuns.get(chatId);
+    if (runSet && runSet.size > 0) {
+      // Every concurrent send for this chat stops together — Stop has no
+      // way to target just one of them, and leaving the others running
+      // would silently keep billing and streaming (targeted fix).
+      for (const controller of runSet) controller.abort();
       activeRuns.delete(chatId);
       return { ok: true };
     }

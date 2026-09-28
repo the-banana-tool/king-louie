@@ -110,6 +110,78 @@ describe('Stop on a case chat', () => {
     assert.deepStrictEqual(await h.stop(), { ok: false, error: 'No active response for this chat.' });
   });
 
+  // Targeted fix: activeRuns is registered right after beginTurn, before the
+  // prompt hook runs (final review I2) — a hook that denies the turn used to
+  // return with that entry still in activeRuns, since nothing on the
+  // hook-deny exit path removed it. A following Stop found that stale entry
+  // and returned { ok: true } without aborting anything real, and never
+  // reached the case's own wake-up fallback below it. The `finally` added
+  // in the targeted fix removes this run's own controller on every exit,
+  // including a hook deny.
+  it('a hook-denied send leaves no stale activeRuns entry: a following Stop reaches the wake-up fallback', async () => {
+    const { runtime, calls } = fakeRuntime({ running: { turnId: 'wakeup-1', source: 'wakeup' } });
+    const h = chatHarness({
+      provider: { streamMessage: async () => ({}) },
+      chat: { id: 'chat-1', title: 'Case chat', caseId: 'case-1', messages: [] },
+      overrides: { getCaseRuntime: () => runtime, runHookEvent: async () => ({ action: 'deny', message: 'blocked by hook' }) }
+    });
+    const result = await h.send({ agentMode: false });
+    assert.strictEqual(result.ok, false, 'the hook denied the turn');
+    assert.deepStrictEqual(await h.stop(), { ok: true, caseTurn: true }, 'Stop reaches the wake-up fallback, not a stale entry');
+    assert.deepStrictEqual(calls.aborted, [['case-1', 'stopped by owner']]);
+  });
+
+  // Targeted fix: activeRuns is a Set per chat, so more than one concurrent
+  // send for the same chat is tracked at once, and Stop — which has no way
+  // to target just one of them — aborts every controller in the set. Each
+  // run's own AbortController must actually be aborted (not just its reply
+  // eventually landing marked stopped some other way), so this captures
+  // each run's own loop options and checks its abortSignal directly.
+  it('two concurrent sends for the same chat are both stopped by one Stop', async () => {
+    const { runtime } = fakeRuntime();
+    let releaseFirst;
+    let releaseSecond;
+    let enteredFirst;
+    let enteredSecond;
+    const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
+    const secondGate = new Promise((resolve) => { releaseSecond = resolve; });
+    const firstEntered = new Promise((resolve) => { enteredFirst = resolve; });
+    const secondEntered = new Promise((resolve) => { enteredSecond = resolve; });
+    const loopOptionsByRun = [];
+    let started = 0;
+    class WaitingLoop {
+      constructor(_provider, _executor, loopOptions = {}) {
+        loopOptionsByRun.push(loopOptions);
+      }
+
+      async run() {
+        const n = started++;
+        if (n === 0) { enteredFirst(); await firstGate; } else { enteredSecond(); await secondGate; }
+        return { type: 'stopped', content: '', llm: { calls: [], totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 } } };
+      }
+    }
+    const chat = { id: 'chat-1', title: 'Case chat', caseId: 'case-1', messages: [] };
+    const h = chatHarness({
+      provider: { sendMessageWithTools: async () => ({}) },
+      chat,
+      overrides: { getCaseRuntime: () => runtime, AgentLoop: WaitingLoop }
+    });
+    const first = h.send({ message: 'first' });
+    await firstEntered;
+    const second = h.send({ message: 'second' });
+    await secondEntered;
+    assert.strictEqual(loopOptionsByRun.length, 2, 'both runs constructed their own AgentLoop');
+    assert.notStrictEqual(loopOptionsByRun[0].abortSignal, loopOptionsByRun[1].abortSignal, 'each run has its own AbortController');
+    assert.deepStrictEqual(await h.stop(), { ok: true });
+    assert.strictEqual(loopOptionsByRun[0].abortSignal.aborted, true, 'the first run\'s own signal is aborted');
+    assert.strictEqual(loopOptionsByRun[1].abortSignal.aborted, true, 'the second run\'s own signal is aborted too');
+    releaseFirst();
+    releaseSecond();
+    await Promise.all([first, second]);
+    const stoppedMessages = chat.messages.filter((m) => m.sender === 'assistant' && m.stopped);
+    assert.strictEqual(stoppedMessages.length, 2, 'both sends end as stopped');
+  });
+
   // Fix round 1: two chats can be attached to the same case. An owner turn
   // belongs to whichever chat's own run started it — that chat's own Stop
   // already covers it (it aborts its own abortController, which is wired to

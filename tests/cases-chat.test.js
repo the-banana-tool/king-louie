@@ -189,25 +189,17 @@ describe('chat:sendMessage in case mode', () => {
     assert.deepStrictEqual(reported, [], 'chat-handlers.js must not report a case turn\'s failure itself');
   });
 
-  // Before final review I2, activeRuns registered a run only once it reached
-  // the actual model call — deep past beginTurn, the prompt hook and the
-  // usability gate. A second send whose own resolveInference fails (this
-  // test) never got that far, so it never touched activeRuns, and the
-  // first (still running) send's entry survived untouched, leaving it
-  // stoppable. I2 moved registration to right after beginTurn, before the
-  // gate — a run's own connection test can take 20s or more, and Stop
-  // pressed during it was silently lost otherwise (chat-stop.test.js's
-  // "Stop pressed while the connection test is pending" covers that). One
-  // consequence: activeRuns holds at most one controller per chat, so a
-  // second send to the same chat now claims that one slot immediately, even
-  // a send that goes on to fail during its own setup — and once it does,
-  // its own cleanup correctly removes its own (now the only) entry, leaving
-  // the still-genuinely-running first send unreachable by Stop. This is a
-  // narrower, pre-existing limitation of the one-slot-per-chat design
-  // (two truly concurrent sends to one chat is not a normal UI path — Send
-  // is hidden while a reply streams), not something I2 itself could avoid
-  // without leaving the gate unstoppable again.
-  it('a second send whose own setup fails claims (and then empties) the one activeRuns slot for the chat', async () => {
+  // Original regression test (a2a94e0): a send that fails early must not
+  // drop another run's stop control. The fix-wave's I2 change (registering
+  // right after beginTurn, so Stop works during a slow gate) briefly
+  // re-broke this by making activeRuns a single AbortController per chat —
+  // a second send's own early registration silently overwrote the first's
+  // entry, and once the second send's cleanup ran, there was nothing left
+  // to stop. The targeted fix makes activeRuns a Set per chat instead, so
+  // each send keeps its own entry regardless of how many others are in
+  // flight for the same chat, and this test is restored to its original
+  // assertions.
+  it('a second send that fails early leaves the running turn stoppable', async () => {
     let release;
     const loopWait = new Promise((r) => { release = r; });
     const { calls, send, stop } = harness({ caseId: null, inferenceErrorOnCall: 2, loopWait });
@@ -216,7 +208,8 @@ describe('chat:sendMessage in case mode', () => {
     const second = await send({ agentMode: true });
     assert.strictEqual(second.ok, false);
     const stopped = await stop();
-    assert.strictEqual(stopped.ok, false, 'the second send\'s early registration and its own cleanup left nothing to stop');
+    assert.strictEqual(stopped.ok, true, 'the first run can still be stopped');
+    assert.strictEqual(calls.loopOptions.abortSignal.aborted, true);
     release();
     await first;
   });
