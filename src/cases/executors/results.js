@@ -277,6 +277,7 @@ async function draftPayload(reg, { caseId } = {}, { executor, envelopeId = null,
     ...(allowed.length ? allowed.map((id) => `- {{${id}}}: ${facts.get(id)?.stmt || ''}`) : ['- none']),
     ...(instructions ? ['Instructions:', String(instructions)] : [])
   ].join('\n');
+  await rt.ensureRoleTested(caseId, 'draft', { turn });
   const provider = rt.routedProvider(turn, { role: 'draft' });
   const started = Date.now();
   const result = await provider.sendMessage([{ role: 'user', content: prompt }], {});

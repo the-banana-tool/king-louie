@@ -235,6 +235,7 @@ async function runWakeupTurn(runtime, caseId, dueIds, now = runtime.now()) {
     if (!turn.reorientPending && !answered) {
       let reply;
       try {
+        await runtime.ensureRoleTested(turn.caseId, 'orient', { turn });
         reply = await runtime.routedProvider(turn, { role: 'orient' }).sendMessageWithTools(
           [{ sender: 'user', text: [`Now: ${now.toISOString()}`, '', 'Due wake-ups:', ...dueLines(due), '', turn.orientation].join('\n') }],
           toolDefs,
@@ -271,6 +272,7 @@ async function runWakeupTurn(runtime, caseId, dueIds, now = runtime.now()) {
         // The turn's frozen models (spec 2026-09-27 §6.6).
         turnModels: turn.models || null
       });
+      await runtime.ensureRoleTested(turn.caseId, 'judge', { turn });
       const Loop = host.AgentLoop;
       const loop = new Loop(runtime.routedProvider(turn, { role: 'judge' }), executor, {
         maxIterations: cfg.maxIterations,

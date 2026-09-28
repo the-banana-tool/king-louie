@@ -115,6 +115,23 @@ describe('DetourClassifier', () => {
     assert.deepStrictEqual([row.type, row.turnId, row.source, row.onCase, row.confidence, row.failed], ['classification', 'turn-41', 'owner-message', false, 0.7, null]);
   });
 
+  it('pre-checks the classify role on the turn\'s frozen models, not a fresh snapshot (final review m7)', async () => {
+    const h = host(() => '{"onCase":true,"confidence":0.9,"reason":"On case"}');
+    let settings = withCaseProfile({ cases: {} });
+    const rt = new CaseRuntime({ root: tmp(), host: h, getSettings: () => settings });
+    const info = await rt.createCase({ title: 'Rear door quotes', type: 'outreach', objective: 'Three written quotes for the rear door' });
+    rt.brief(info.id).update('why', 'The door lets rain in', { provenance: 'user' });
+    rt.brief(info.id).append('successCriteria', 'Three written quotes', { provenance: 'model' });
+    rt.completeGating(info.id);
+    const turn = await rt.beginTurn(info.id, { turnId: 'turn-42', source: 'owner', ownerMessage: 'x' });
+    // A mid-turn profile edit empties every role: it applies to the next turn only.
+    settings = withCaseProfile({ cases: {} });
+    for (const p of settings.models.profiles) p.roles = { main: [], worker: [], utility: [] };
+    const r = await new DetourClassifier({ runtime: rt }).classify(info.id, { source: 'plan', text: 'Patch the phone agent status polling', turn });
+    assert.strictEqual(r.failed, null, JSON.stringify(r));
+    assert.deepStrictEqual(h.calls.map((c) => c.targets), [[{ provider: 'openai', model: 'orient-model', effort: null }]]);
+  });
+
   it('treats 0.69 as on-case', async () => {
     const h = host(() => '{"onCase":false,"confidence":0.69,"reason":"Maybe a different project"}');
     const { classifier, info, turn } = await activeCase(h);

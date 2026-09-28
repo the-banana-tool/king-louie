@@ -3018,6 +3018,9 @@ function createCore(deps = {}) {
     host: {
       inferenceRouter,
       snapshotModels,
+      // A case role's providers are tested (or a stale non-auth failure
+      // retested) before it resolves, as resolveRole does (final review I2).
+      ensureTargetsTested,
       createToolExecutor: createToolExecutorWithApprovals,
       toolRegistry,
       AgentLoop,

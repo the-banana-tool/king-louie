@@ -144,8 +144,11 @@ class DetourClassifier {
 
   async _call(meta, turn, cfg, payload) {
     let resolved;
+    // The pre-check resolves on the turn's frozen models, as the call below
+    // does (final review m7), after the same availability refresh (I2).
+    await this.runtime.ensureRoleTested(meta.id, 'classify', { turn });
     try {
-      resolved = this.runtime.roleModel(meta.id, 'classify');
+      resolved = this.runtime.roleModel(meta.id, 'classify', { turn });
     } catch {
       return { failed: 'no-role', model: null };
     }

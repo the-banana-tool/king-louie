@@ -332,3 +332,70 @@ describe('cases:wakeups in a service-style core', () => {
     }
   });
 });
+
+// Final review I2: a case role's providers get the same pre-resolve refresh
+// as the core's resolveRole (availability.refreshForUse), so one failed
+// start test does not block unattended turns until a restart.
+describe('wake-up turns retest a stale provider failure', () => {
+  const realGroq = ProviderFactory._registry.get('groq');
+  afterEach(() => { ProviderFactory.registerProvider('groq', realGroq); });
+
+  async function wakeupCore(storedStatus) {
+    delete process.env.KL_CASES_ROOT;
+    const deps = serviceDeps();
+    const seen = { listModels: 0, calls: [] };
+    ProviderFactory.registerProvider('groq', class {
+      constructor(apiKey) { this.apiKey = apiKey; }
+      getProviderName() { return 'groq'; }
+      getDefaultModel() { return 'llama-3.3-70b-versatile'; }
+      async listModels() { seen.listModels += 1; return ['llama-3.1-8b-instant', 'llama-3.3-70b-versatile']; }
+      async sendMessage() { throw new Error('unused'); }
+      async sendMessageWithTools(_messages, _tools, options) {
+        seen.calls.push(options.model);
+        if (options.model === 'llama-3.1-8b-instant') return { type: 'text', content: '{"changed": true, "why": "a due wake-up"}' };
+        return { type: 'text', content: 'Nothing more to do.' };
+      }
+    });
+    deps.store.set('settings', profileSettings({}, {
+      utility: [{ provider: 'groq', model: 'llama-3.1-8b-instant', effort: null }],
+      main: [{ provider: 'groq', model: 'llama-3.3-70b-versatile', effort: null }]
+    }));
+    // The start test failed five minutes ago and nothing has retested it.
+    const checkedAt = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    deps.store.set('apiStatus', { groq: { checkedAt, models: [], ...storedStatus } });
+    const core = createCore(deps);
+    core.saveProviderToken('groq', 'gsk-test-token-123456');
+    await core.start();
+    const runtime = core.context.getCaseRuntime();
+    const info = await runtime.createCase({ title: 'Lakeside lot' });
+    runtime.setStatus(info.id, 'active', { kind: 'gating' });
+    runtime.wakeups(info.id).register({ kind: 'test-wakeup', at: new Date(runtime.now().getTime() - 1000).toISOString() });
+    return { core, runtime, seen, deps };
+  }
+
+  it('retests a stale non-auth failure before the orient call, and the turn runs', async () => {
+    const { core, runtime, seen, deps } = await wakeupCore({ ok: false, error: 'getaddrinfo ENOTFOUND', message: 'getaddrinfo ENOTFOUND' });
+    try {
+      const counts = await runtime.runDueWakeups(runtime.now());
+      assert.strictEqual(counts.ran, 1, JSON.stringify(counts));
+      // One shared retest serves orient and judge alike.
+      assert.strictEqual(seen.listModels, 1);
+      assert.deepStrictEqual(seen.calls, ['llama-3.1-8b-instant', 'llama-3.3-70b-versatile']);
+      assert.strictEqual(deps.store.get('apiStatus').groq.ok, true);
+    } finally {
+      await core.shutdown();
+    }
+  });
+
+  it('still refuses on an auth failure, which only a fixed key and its own test clear', async () => {
+    const { core, runtime, seen } = await wakeupCore({ ok: false, authFailed: true, error: 'Groq rejected the key: 401', message: 'Groq rejected the key: 401' });
+    try {
+      const counts = await runtime.runDueWakeups(runtime.now());
+      assert.strictEqual(counts.ran, 0, JSON.stringify(counts));
+      assert.strictEqual(seen.listModels, 0);
+      assert.deepStrictEqual(seen.calls, []);
+    } finally {
+      await core.shutdown();
+    }
+  });
+});

@@ -21,7 +21,7 @@ const { detectTriggers, emptyBaseline } = require('./triggers');
 const { localDay, isRealCalendarDate } = require('./clock');
 const { readJson, writeJsonIfChanged } = require('./jsonfile');
 const { resolveCaseSettings } = require('./defaults');
-const { resolveCaseRole } = require('./roles');
+const { resolveCaseRole, caseRoleSpec } = require('./roles');
 const { snapshotFromSettings } = require('../models/profiles');
 const { CrossCaseIndex } = require('./index-store');
 const { findSimilarCases } = require('./gates');
@@ -1700,6 +1700,30 @@ class CaseRuntime {
     const meta = this.getCase(id);
     const turnModels = (turn && turn.models) || this.modelsFor(id);
     return resolveCaseRole(role, { settings: { ...this._settingsSafe(), cases: this.settings() }, caseMeta: meta, turnModels, needs });
+  }
+
+  // Before a case role's call (models spec §5.2), as the core's resolveRole
+  // does: every provider the role could use that was never tested is tested
+  // now, and a non-auth failure older than 60 s is retested once
+  // (availability.refreshForUse, which shares a test already in flight).
+  // Without it one failed start test would block unattended turns until a
+  // restart. Never throws: the resolve that follows reports what is unusable.
+  async ensureRoleTested(id, role, { turn = null } = {}) {
+    const ensure = this.host?.ensureTargetsTested;
+    if (typeof ensure !== 'function') return;
+    try {
+      const meta = this.getCase(id);
+      const turnModels = (turn && turn.models) || this.modelsFor(id);
+      const settings = { ...this._settingsSafe(), cases: this.settings() };
+      // verify also leans on judge's resolution (roles.js).
+      const targets = (role === 'verify' ? ['judge', 'verify'] : [role]).flatMap((r) => {
+        const spec = caseRoleSpec(r, { settings, caseMeta: meta });
+        return spec.explicit ? [spec.explicit] : turnModels.candidatesFor(spec.modelRole);
+      });
+      await ensure(targets);
+    } catch (err) {
+      log.warn(`Testing the providers of case role ${role} for case ${id} failed: ${err.message}`);
+    }
   }
 
   // The profile's vision role for case ingest OCR (models spec §8): every

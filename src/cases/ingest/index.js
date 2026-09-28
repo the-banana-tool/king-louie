@@ -872,6 +872,7 @@ class IngestService {
     const raw = [];
     const proposed = new Set(done);
     let usd = rec.usd.extract;
+    await this.runtime.ensureRoleTested(meta.id, 'draft');
     const sel = this.runtime.roleModel(meta.id, 'draft');
     for (const chunk of chunks) {
       if (!ctx.stop && this._budgetGone(meta.id)) ctx.stop = true;
@@ -943,6 +944,7 @@ class IngestService {
 
   async _verifyOne(meta, rec, p, text, ctx) {
     let sel;
+    await this.runtime.ensureRoleTested(meta.id, 'verify');
     try {
       sel = this.runtime.roleModel(meta.id, 'verify');
     } catch (err) {
