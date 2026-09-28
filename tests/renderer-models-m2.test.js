@@ -99,4 +99,20 @@ describe('renderer: the chat header and Retry with…', () => {
     assert.match(handler, /switchMainModel\(null\)/);
     assert.match(handler, /open-models/);
   });
+
+  it('disables the header selects while a turn is running for this chat (fix round 1)', () => {
+    assert.match(block('function setResponseActive(active, chatId)'), /applyChatModelsGate\(\)/);
+    const gate = block('function applyChatModelsGate()');
+    assert.match(gate, /activeResponses\.has\(appState\.activeChatId\)/);
+    assert.match(gate, /chatProfileSelect\.disabled = busy/);
+    assert.match(gate, /chatMainSelect\.disabled = busy/);
+    assert.match(block('function renderChatModels(view)'), /applyChatModelsGate\(\)/);
+    // A stray programmatic change event (not just user interaction with a
+    // disabled control) is guarded too, and reverts to the served state.
+    const profileHandler = block("dom.chatProfileSelect.addEventListener('change'", '\n}');
+    assert.match(profileHandler, /activeResponses\.has\(chatId\)/);
+    assert.match(profileHandler, /renderChatModels\(appState\.chatModels\)/);
+    const mainHandler = block("dom.chatMainSelect.addEventListener('change'", '\n}');
+    assert.match(mainHandler, /activeResponses\.has\(chatId\)/);
+  });
 });

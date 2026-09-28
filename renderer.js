@@ -439,6 +439,7 @@ function setResponseActive(active, chatId) {
   }
   refreshStopButton();
   updateChatStreamingIndicators();
+  applyChatModelsGate();
 }
 
 function updateChatStreamingIndicators() {
@@ -7828,6 +7829,17 @@ function renderChatModels(view) {
   main.value = current.value;
   main.title = view.main && !view.main.usable ? view.main.reasons.join(' ') : 'Main model for this chat';
   dom.chatMainOverrideMarker.hidden = !view.overridden;
+  applyChatModelsGate();
+}
+
+// Disabled while a turn is running for this chat: picking a model mid-turn
+// would call applyUpdatedChat → refreshUI → renderChatMessages, which empties
+// dom.chatMessages and wipes the live streaming node (spec 2026-09-27 §6.6:
+// a running turn keeps the models it launched with).
+function applyChatModelsGate() {
+  const busy = appState.activeResponses.has(appState.activeChatId);
+  if (dom.chatProfileSelect) dom.chatProfileSelect.disabled = busy;
+  if (dom.chatMainSelect) dom.chatMainSelect.disabled = busy;
 }
 
 async function switchMainModel(target) {
@@ -7912,6 +7924,14 @@ if (dom.chatProfileSelect) {
   dom.chatProfileSelect.addEventListener('change', async () => {
     const chatId = appState.activeChatId;
     if (!chatId) return;
+    // A running turn keeps the models it launched with; picking one now
+    // would wipe the live streaming node (see applyChatModelsGate above).
+    // The select is disabled while busy, but a programmatic change event
+    // (tests, a stray dispatch) is still guarded against here.
+    if (appState.activeResponses.has(chatId)) {
+      if (appState.chatModels) renderChatModels(appState.chatModels);
+      return;
+    }
     try {
       const result = unwrapIpcResult(
         await window.electron.models.setChatProfile({ chatId, profileId: dom.chatProfileSelect.value || null }),
@@ -7930,6 +7950,11 @@ if (dom.chatMainSelect) {
   dom.chatMainSelect.addEventListener('change', async () => {
     const value = dom.chatMainSelect.value;
     if (value === '__current__' || value === '__none__') return;
+    const chatId = appState.activeChatId;
+    if (chatId && appState.activeResponses.has(chatId)) {
+      if (appState.chatModels) renderChatModels(appState.chatModels);
+      return;
+    }
     await switchMainModel(value === '__reset__' ? null : JSON.parse(value));
   });
 }

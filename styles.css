@@ -2346,42 +2346,6 @@ body {
   display: none;
 }
 
-/* --- Inference tier details -------------------------------- */
-.inference-tier-details {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--text-secondary);
-  padding: 8px 0 0;
-}
-
-.inference-tier-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 10px;
-  background: var(--bg-base);
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border-subtle);
-}
-
-.inference-tier-row.active-tier {
-  border-color: var(--accent);
-  background: var(--accent-surface);
-}
-
-.inference-tier-label {
-  font-weight: 600;
-  min-width: 70px;
-  text-transform: capitalize;
-  color: var(--text-primary);
-}
-
-.inference-tier-meta {
-  color: var(--text-muted);
-}
-
 /* --- Smart routing rule cards ------------------------------ */
 .routing-rule-card {
   border: 1px solid var(--border-subtle);

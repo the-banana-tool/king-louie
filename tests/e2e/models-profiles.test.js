@@ -116,6 +116,37 @@ describe('E2E: profiles, the main switcher and Retry with…', () => {
     assert.strictEqual(chatCalls[chatCalls.length - 1].body.model, 'test-model');
   });
 
+  it('disables the header selects while a turn is running, so a mid-turn pick cannot wipe the reply (fix round 1)', async () => {
+    server.setHold(true);
+    await evaluate(ctx, `(() => {
+      const input = document.getElementById('user-input');
+      input.value = 'Hold this one';
+      input.dispatchEvent(new Event('input'));
+      document.getElementById('send-btn').click();
+      return true;
+    })()`);
+    await waitFor(ctx, `(document.querySelector('.message.assistant.streaming .message-content')?.textContent || '').includes('Hello')`, 30000);
+    const disabled = await evaluate(ctx, `document.getElementById('chat-profile-select').disabled === true && document.getElementById('chat-main-select').disabled === true`);
+    assert.strictEqual(disabled, true, 'the header selects are disabled while the turn is running');
+
+    // The select is disabled, but a stray programmatic change (not a real
+    // click, which a disabled control refuses) is guarded in the handler
+    // too: it must not call switchMainModel and wipe the live stream.
+    const stillStreaming = await evaluate(ctx, `(() => {
+      const s = document.getElementById('chat-main-select');
+      const opt = [...s.options].find((o) => o.value.includes('vision-model'));
+      if (opt) { s.value = opt.value; s.dispatchEvent(new Event('change')); }
+      return !!document.querySelector('.message.assistant.streaming');
+    })()`);
+    assert.strictEqual(stillStreaming, true, 'the streaming node survives a stray change event mid-turn');
+
+    const closedBefore = server.closedCount();
+    await evaluate(ctx, `document.getElementById('stop-btn').click(); true`);
+    await server.waitForClosedStream(closedBefore + 1, 10000);
+    await waitFor(ctx, `document.getElementById('chat-profile-select').disabled === false && document.getElementById('chat-main-select').disabled === false`, 15000);
+    server.setHold(false);
+  });
+
   it('creates a profile in the Models tab', async () => {
     await evaluate(ctx, `document.getElementById('open-settings-btn').click(); true`);
     await waitFor(ctx, `!document.getElementById('settings-drawer').hidden`);
