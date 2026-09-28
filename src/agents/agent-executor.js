@@ -115,7 +115,7 @@ class AgentExecutor {
       ...options,
       autoApproveTools: options.autoApproveTools || agent.autoApproveTools || [],
       temperature: options.temperature ?? agent.temperature,
-      model: options.model || agent.model,
+      model: options.model,
       systemPrompt: combinedSystemPrompt || undefined
     });
   }

@@ -2314,9 +2314,11 @@ function createCore(deps = {}) {
     };
   };
 
-  // A caller naming a provider and/or model (a workflow task's
-  // preferredModel, SpawnAgent's free-form model) gets an explicit target,
-  // still checked for usability (spec §6.3). A model with no provider keeps
+  // An owner-written provider and/or model (a delegate's node.yaml
+  // `delegate.provider`/`delegate.model`) gets an explicit target, still
+  // checked for usability (spec §6.3). A model an LLM named (SpawnAgent's
+  // `model`, a planned task's preferredModel) never comes here: it carries
+  // requireInProfile and goes through profileTargetFor. A model with no provider keeps
   // the role's first provider; a provider with no model takes that
   // provider's model from the profile, never a provider default (M-D2).
   const explicitTargetFor = (selection, turnModels, role) => {
