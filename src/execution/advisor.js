@@ -8,13 +8,12 @@
  * The advisor runs as a single LLM call (no tools) with a focused review
  * prompt. Its cost is tracked separately from the main agent.
  *
- * Configuration:
- *   settings.advisor = {
- *     enabled: true,
- *     model: 'claude-sonnet-5',  // or any available model
- *     provider: 'anthropic'               // optional provider override
- *   }
+ * Configuration: settings.advisor = { enabled: true }. It reviews on the
+ * turn's main role (models spec 2026-09-27 §8) and records its usage.
  */
+
+const { oneShot } = require('../providers/one-shot');
+const UsageTracker = require('../tracking/usage-tracker');
 
 const REVIEW_SYSTEM_PROMPT = `You are a senior code reviewer. Review the code changes described below and provide concise, actionable feedback.
 
@@ -51,7 +50,7 @@ class Advisor {
    * @returns {{ review: string, verdict: string, llmMetrics: object|null }}
    */
   async review(agentResult, context = {}) {
-    if (!this.provider || typeof this.provider.sendMessage !== 'function') {
+    if (!this.provider || typeof this.provider.streamMessage !== 'function') {
       return { review: null, verdict: null, llmMetrics: null, error: 'No provider configured' };
     }
 
@@ -68,19 +67,20 @@ class Advisor {
         max_tokens: 2048
       };
 
-      // Use sendMessage (no tools needed for review)
-      const reviewText = await this.provider.sendMessage(messages, options);
+      // One tool-less call through streamMessage, which reports its usage.
+      const { text: reviewText, llmMetrics } = await oneShot(this.provider, messages, options);
 
       // Extract verdict from first line
       const firstLine = (reviewText || '').split('\n')[0].trim().toUpperCase();
       const verdict = firstLine.includes('LGTM') ? 'LGTM' : 'ISSUES_FOUND';
 
-      // Track cost separately
-      let llmMetrics = null;
-      if (this.usageTracker && typeof this.provider.buildLlmCallMetrics === 'function') {
-        // Note: sendMessage doesn't return metrics directly in most providers
-        // This is a best-effort cost annotation
-        llmMetrics = { provider: this.provider.getProviderName?.() || 'unknown', model: this.model, advisor: true };
+      // The review is recorded like any other call (spec §10).
+      if (llmMetrics && this.usageTracker && typeof this.usageTracker.record === 'function') {
+        try {
+          this.usageTracker.record(UsageTracker.eventFromMetrics(llmMetrics));
+        } catch {
+          // recording never fails a review
+        }
       }
 
       return {

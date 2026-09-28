@@ -10,6 +10,8 @@ const { KL_PROVIDERS } = require('../models/provider-ids');
 const { partialMetricsOf } = require('../providers/abort');
 const { summarizeTurnLlm } = require('../tracking/llm-totals');
 const UsageTracker = require('../tracking/usage-tracker');
+const { oneShot } = require('../providers/one-shot');
+const { targetLabel } = require('../models/roles');
 const { DELEGATION_GUIDANCE } = require('../context/system-sections');
 
 const log = createLogger('chat');
@@ -63,13 +65,28 @@ function registerChatHandlers(ipcMain, context = {}) {
   const activeRuns = new Map();
 
   /**
-   * Generate a contextual title for a chat with the turn's main models (the
-   * utility role takes this over in stage M3), then persist it and notify
-   * the renderer.
+   * Title a new chat on the turn's utility role (spec 2026-09-27 §8): a
+   * small job on a cheap model, its usage recorded like any other call. An
+   * empty utility borrows from worker, then main; nothing usable means no
+   * title, never a call on a model outside the role.
    */
-  async function autoNameChat(chatId, userMessage, assistantResponse, sender, provider) {
+  async function autoNameChat({ chatId, userMessage, assistantResponse, sender, turnModels }) {
     try {
-      if (!provider || typeof provider.sendMessage !== 'function') return;
+      const availability = typeof context.getAvailability === 'function' ? context.getAvailability() : null;
+      if (availability) {
+        const providers = [...new Set(turnModels.candidatesFor('utility').map((x) => x.provider))].filter((p) => KL_PROVIDERS.includes(p));
+        await Promise.all(providers.map((p) => refreshProvider(availability, p)));
+      }
+      const utility = turnModels.resolve('utility');
+      if (!utility.targets.length) {
+        const why = utility.skipped.map((s) => `${targetLabel(s.target)} (${s.reasons.join(' ')})`).join('; ');
+        log.info(`No usable utility model for a chat title${why ? `: ${why}` : ''}.`);
+        return;
+      }
+      const provider = createRoutedProvider({
+        targets: utility.targets,
+        meta: { role: 'utility', profileId: turnModels.profileId || null, borrowedFrom: utility.borrowedFrom || null }
+      });
 
       const titlePrompt = [
         {
@@ -78,9 +95,13 @@ function registerChatHandlers(ipcMain, context = {}) {
         }
       ];
 
-      const title = await provider.sendMessage(titlePrompt, { temperature: 0.3, max_tokens: 30 });
+      const settings = typeof context.getSettings === 'function' ? context.getSettings() : {};
+      const { text, llmMetrics } = await oneShot(provider, titlePrompt, { temperature: 0.3, max_tokens: 30, timeoutMs: roleTimeoutMs(settings, 'utility') });
 
-      const cleaned = String(title || '').replace(/^["']|["'.!]$/g, '').trim();
+      const tracker = typeof getUsageTracker === 'function' ? getUsageTracker() : null;
+      if (tracker && llmMetrics && typeof tracker.record === 'function') tracker.record(UsageTracker.eventFromMetrics(llmMetrics));
+
+      const cleaned = String(text || '').replace(/^["']|["'.!]$/g, '').trim();
       if (!cleaned) return;
 
       const chats = getChats();
@@ -698,6 +719,11 @@ function registerChatHandlers(ipcMain, context = {}) {
               const reviewResult = await advisor.review(result, {
                 userMessage: safeMessage
               });
+              // The review is one more main-role call of this turn (spec §8, §10).
+              if (reviewResult.llmMetrics) {
+                ownCalls = [...ownCalls, reviewResult.llmMetrics];
+                llmSummary = summarize();
+              }
 
               if (reviewResult.review) {
                 // The routed provider may have failed over mid-review; label
@@ -779,9 +805,10 @@ function registerChatHandlers(ipcMain, context = {}) {
         });
       }
 
-      // Auto-name chats that still have the default title
+      // Auto-name chats that still have the default title, on the turn's
+      // utility role (spec §8).
       if (chat.title === 'New Chat' && fullResponse) {
-        autoNameChat(chatId, safeMessage, fullResponse, event.sender, createRoutedProvider({ targets: main.targets })).catch(() => {});
+        autoNameChat({ chatId, userMessage: safeMessage, assistantResponse: fullResponse, sender: event.sender, turnModels }).catch(() => {});
       }
 
       return updatedChat;

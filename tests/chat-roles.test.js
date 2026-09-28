@@ -109,3 +109,61 @@ describe('sub-agent calls roll up into the reply (spec §10)', () => {
     assert.strictEqual(reply.llm.byRole.worker.costUsd, 0.003);
   });
 });
+
+describe('chat titles on utility; the advisor on main (spec §8)', () => {
+  const newChat = () => ({ id: 'chat-1', title: 'New Chat', messages: [{ id: 'm0', sender: 'assistant', text: 'How can I help you?' }] });
+  const until = async (fn) => {
+    for (let i = 0; i < 200 && !fn(); i += 1) await new Promise((resolve) => setImmediate(resolve));
+  };
+  const t = (provider, model) => ({ provider, model, effort: null });
+
+  it('titles a new chat on utility and records the call as utility', async () => {
+    const seen = [];
+    const provider = {
+      streamMessage: async (_m, opts, onChunk) => {
+        seen.push(opts.model);
+        onChunk(opts.model === 'title-model' ? 'Greeting chat' : 'Hello');
+        return { llmMetrics: metricsFor(opts.model, 0.0001) };
+      }
+    };
+    const h = chatHarness({ provider, chat: newChat(), roles: { main: [t('openai', 'main-model')], utility: [t('openai', 'title-model')] } });
+    await h.send({ agentMode: false });
+    await until(() => h.usage.some((u) => u.model === 'title-model'));
+    assert.deepStrictEqual(seen, ['main-model', 'title-model']);
+    const title = h.usage.find((u) => u.model === 'title-model');
+    assert.deepStrictEqual([title.role, title.costUsd], ['utility', 0.0001]);
+  });
+
+  it('no usable utility model skips the title and records nothing', async () => {
+    const seen = [];
+    const provider = { streamMessage: async (_m, opts, onChunk) => { seen.push(opts.model); onChunk('Hello'); return { llmMetrics: metricsFor(opts.model) }; } };
+    const availability = {
+      ensureTested: async () => ({ ok: true }),
+      explain: (p) => (p === 'groq' ? { usable: false, reasons: ['No token saved for Groq.'], notes: [] } : { usable: true, reasons: [], notes: [] })
+    };
+    const h = chatHarness({
+      provider,
+      chat: newChat(),
+      roles: { main: [t('openai', 'main-model')], utility: [t('groq', 'title-model')] },
+      overrides: { getAvailability: () => availability }
+    });
+    const result = await h.send({ agentMode: false });
+    for (let i = 0; i < 50; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.notStrictEqual(result?.ok, false);
+    assert.deepStrictEqual(seen, ['main-model']);
+    assert.deepStrictEqual(h.usage.map((u) => u.model), ['main-model']);
+  });
+
+  it('the advisor reviews on main and its call joins the reply', async () => {
+    const provider = {
+      sendMessageWithTools: async (_m, _t, opts) => ({ type: 'text', content: 'done', llmMetrics: metricsFor(opts.model, 0.02) }),
+      streamMessage: async (_m, opts, onChunk) => { onChunk('LGTM'); return { llmMetrics: metricsFor(opts.model, 0.005) }; }
+    };
+    const h = chatHarness({ provider, overrides: { getSettings: () => ({ advisor: { enabled: true } }) } });
+    await h.send({ agentMode: true });
+    const reply = h.chat.messages[h.chat.messages.length - 1];
+    assert.deepStrictEqual(reply.llm.calls.map((c) => [c.role, c.costUsd]), [['main', 0.02], ['main', 0.005]]);
+    assert.strictEqual(reply.llm.totals.costUsd, 0.025);
+    assert.match(reply.text, /Advisor Review/);
+  });
+});
