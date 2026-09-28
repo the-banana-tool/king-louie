@@ -17,6 +17,7 @@ const { DelegateSessions, shouldRefuseUnsafe } = require('../src/fleet/delegate-
 const { ToolError, STDIO_ORIGIN, FleetToolHandler } = require('../src/fleet/fleet-tools');
 const { REFUSE_UNSAFE_MESSAGE } = require('../src/approvals/executor-options');
 const { holdEventLoop } = require('./helpers/hold-event-loop');
+const { profileSettings, everyRole } = require('./helpers/profile-settings');
 
 const release = holdEventLoop();
 after(release);
@@ -112,9 +113,7 @@ async function setup({ maxSessions = 4, maxJobs = 2, idleCloseMs = 7200000, with
     auditLedger: { append: async (e) => { audit.push(e); return e; } },
     ...(withNodePolicy ? { nodePolicy: { allowed_roots: [root], remote_sessions: { always_confirm: [GATED], deny: [] } } } : {})
   });
-  const tiers = { provider: FAKE, model: 'fake' };
-  const settings = core.getSettings();
-  core.context.setSettings({ ...settings, activeProvider: FAKE, inference: { ...settings.inference, llmRouting: { enabled: false }, tierMap: { fast: tiers, standard: tiers, smart: tiers } } });
+  core.context.setSettings(profileSettings(core.getSettings(), everyRole({ provider: FAKE, model: 'fake' })));
   core.saveProviderToken(FAKE, 'fake-token-123456');
   await core.start();
   let now = Date.parse('2026-09-23T18:00:00.000Z');

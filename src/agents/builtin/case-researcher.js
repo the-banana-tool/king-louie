@@ -7,6 +7,7 @@ const CaseResearcherAgent = new Agent({
   id: 'case-researcher',
   name: 'Case Researcher',
   description: 'Read-only web research for a case; proposes facts, never writes them',
+  role: 'worker',
   inferenceTier: 'standard',
   voice: { enabled: false, engine: 'system', mode: 'summary' },
   systemPromptTemplate: 'templates/case-researcher.md.template',

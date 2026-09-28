@@ -5,6 +5,7 @@ const CodeWriterAgent = new Agent({
   name: 'Code Writer',
   description: 'Writes and modifies code based on requirements',
   model: 'claude-sonnet-5',
+  role: 'main',
   inferenceTier: 'smart',
   voice: {
     enabled: false,

@@ -71,6 +71,8 @@ const { Profiles } = require('../models/profiles');
 const { roleTimeoutMs } = require('../models/resolver');
 const { runTierMigration } = require('../models/migrate-tiers');
 const { KL_PROVIDERS } = require('../models/provider-ids');
+const { roleForAgent, CORE_ROLES } = require('../models/roles');
+const { NO_RETRY } = require('../providers/failover-policy');
 const { classifyError, FailoverReason } = require('../providers/error-classifier');
 const {
   NotificationRouter,
@@ -2397,17 +2399,36 @@ function createCore(deps = {}) {
     };
   };
 
+  // A caller naming a provider and/or model (a workflow task's
+  // preferredModel, SpawnAgent's free-form model) gets an explicit target,
+  // still checked for usability (spec §6.3). A model with no provider keeps
+  // the role's first provider; a provider with no model takes that
+  // provider's model from the profile, never a provider default (M-D2).
+  const explicitTargetFor = (selection, turnModels, role) => {
+    const provider = normalizeProvider(selection.provider || '');
+    const model = String(selection.model || '').trim();
+    if (!provider && !model) return null;
+    if (!provider) return { provider: turnModels.candidatesFor(role)[0]?.provider || '', model, effort: null };
+    if (model) return { provider, model, effort: null };
+    const inProfile = [...turnModels.candidatesFor(role), ...CORE_ROLES.flatMap((r) => turnModels.configuredFor(r))]
+      .find((x) => x.provider === provider);
+    if (inProfile) return { ...inProfile };
+    throw new Error(`No ${provider} model is in the profile "${turnModels.profileName}"; name the model to use.`);
+  };
+
+  // An agent or headless run's models (spec §8, §12): the role on the
+  // default profile, or on the profile the caller names, fixed for the run.
   const createAgentRuntime = async (
-    providerType,
+    selection = {},
     event = null,
     approvalRequester = null,
     runtimeOptions = {}
   ) => {
-    const resolution = await resolveInference(providerType);
-    const capabilities = capabilitiesOf(catalog, resolution.providerType, resolution.model);
-    if (!capabilities.toolCalling) {
-      throw new Error(`Provider ${resolution.providerType} (${resolution.model}) does not support tool calling required for agent mode.`);
-    }
+    const sel = selection && typeof selection === 'object' ? selection : {};
+    const role = typeof sel.role === 'string' && sel.role ? sel.role : 'main';
+    const turnModels = snapshotModels({ profileId: sel.profileId || null });
+    const explicit = explicitTargetFor(sel, turnModels, role);
+    const resolution = await resolveRole(role, { needs: { toolCall: true }, explicit, turnModels });
     const workingDirectory = runtimeOptions.workingDirectory || hostWorkingDirectory;
     const runtimeEnvironment = await getRuntimeEnvironment({
       workingDirectory
@@ -2443,7 +2464,14 @@ function createCore(deps = {}) {
     );
 
     return {
-      ...resolution,
+      role,
+      providerType: resolution.providerType,
+      model: resolution.model,
+      timeoutMs: resolution.timeoutMs,
+      targets: resolution.targets,
+      turnModels,
+      // Routed: a failing target fails over along the role's list (§6.7).
+      provider: resolution.routed,
       runtimeEnvironment,
       toolExecutor,
       // Child and workflow runs never carry a caseContext, so they never see
@@ -2654,11 +2682,14 @@ function createCore(deps = {}) {
 
     agentExecutorAdapter = {
       execute: async (agent, message, options = {}) => {
-        const settings = getSettings();
-        const requestedTier = options.tier || agent?.inferenceTier || settings?.inference?.activeTier;
+        // The agent's role on the default profile (spec §12) — a
+        // user-defined agent without one has its inferenceTier read as the
+        // mapped role (§13 step 5) — or the provider/model a caller names.
+        const role = typeof options.role === 'string' && options.role ? options.role : roleForAgent(agent);
         const runtime = await createAgentRuntime(
           {
-            tier: requestedTier,
+            role,
+            ...(options.profileId ? { profileId: options.profileId } : {}),
             ...(options.provider ? { provider: options.provider } : {}),
             ...(options.model ? { model: options.model } : {})
           },
@@ -2688,13 +2719,15 @@ function createCore(deps = {}) {
         );
         const executor = new AgentExecutor(runtime.provider, runtime.toolExecutor, {
           usageTracker,
-          prompter
+          prompter,
+          // The routed provider fails over itself (spec §6.7).
+          failoverPolicy: NO_RETRY
         });
 
         return executor.execute(agent, message, {
           ...options,
-          tier: runtime.tier,
-          model: options.model || runtime.model || agent.model,
+          role: runtime.role,
+          model: runtime.model,
           timeoutMs: options.timeoutMs || runtime.timeoutMs,
           tools: runtime.toolDefinitions,
           // Cases stage 3: an isolated child gets no memory, profile or project context.
@@ -2901,13 +2934,12 @@ function createCore(deps = {}) {
         // Provide LLM provider for skills that need AI capabilities
         get llmProvider() {
           try {
-            const settings = getSettings();
-            const providerType = settings.activeProvider || 'openai';
-            if (!['openai', 'anthropic'].includes(providerType)) {
-              return null;
-            }
-            const token = getDecryptedProviderToken(providerType);
-            return createProviderInstance(providerType, token);
+            // The default profile's first usable main model, when it is one
+            // of the two providers skills know how to talk to.
+            const main = snapshotModels({}).resolve('main');
+            const target = main.targets.find((x) => ['openai', 'anthropic'].includes(x.provider));
+            if (!target) return null;
+            return createProviderInstance(target.provider, getDecryptedProviderToken(target.provider));
           } catch (error) {
             skillsLog.warn(`LLM provider not available: ${error.message}`);
             return null;
@@ -3207,7 +3239,12 @@ function createCore(deps = {}) {
     const { createCallModel } = require('../cases/ingest/call-model');
     return new IngestService({
       runtime: caseRuntime,
-      callModel: createCallModel({ resolveInference, getUsageTracker: () => usageTracker }),
+      // An ingest call names its model (the case's draft, verify or vision
+      // target): an explicit target, still checked (spec §6.3).
+      callModel: createCallModel({
+        resolveInference: ({ provider, model }) => resolveRole('main', { explicit: { provider, model } }),
+        getUsageTracker: () => usageTracker
+      }),
       getCapabilities: (provider, model) => capabilitiesOf(catalog, provider, model),
       getSettings
     });

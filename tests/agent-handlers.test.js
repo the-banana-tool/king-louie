@@ -167,3 +167,25 @@ describe('agent-handlers prompter wiring', () => {
     assert.strictEqual(context.executorCalls[0].prompter, undefined);
   });
 });
+
+describe('agent-handlers roles', () => {
+  it('asks createAgentRuntime for a role, never a tier', async () => {
+    const selections = [];
+    const ipcMain = createIpcMainMock();
+    const context = createContext({
+      createAgentRuntime: async (selection) => {
+        selections.push(selection);
+        return { provider: {}, toolExecutor: {}, role: selection.role, model: 'test-model', timeoutMs: 1000, toolDefinitions: [], runtimeEnvironment: { workingDirectory: process.cwd() } };
+      }
+    });
+    registerAgentHandlers(ipcMain, context);
+    await ipcMain.handlers.get(IPC.AGENT_EXECUTE)({}, { agentId: 'writer', message: 'hi' });
+    await ipcMain.handlers.get(IPC.AGENT_EXECUTE)({}, { agentId: 'writer', message: 'hi', tier: 'fast' });
+    await ipcMain.handlers.get(IPC.AGENT_EXECUTE)({}, { agentId: 'writer', message: 'hi', role: 'main' });
+    await ipcMain.handlers.get(IPC.AGENT_EXECUTE_PARALLEL)({}, { agentIds: ['writer'], message: 'hi' });
+    await ipcMain.handlers.get(IPC.AGENT_EXECUTE_SERIAL)({}, { agentIds: ['writer'], message: 'hi' });
+    await ipcMain.handlers.get(IPC.AGENT_EXECUTE_WITH_DEPS)({}, { agentId: 'writer', tasks: [{ id: 't1', subject: 'Do a thing' }] });
+    assert.deepStrictEqual(selections, [{ role: 'worker' }, { role: 'utility' }, { role: 'main' }, { role: 'main' }, { role: 'main' }, { role: 'worker' }]);
+    assert.ok(context.executorCalls.every((opts) => opts.failoverPolicy && opts.failoverPolicy.plan(new Error('x')).action === 'abort'));
+  });
+});

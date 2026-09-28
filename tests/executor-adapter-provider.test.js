@@ -13,17 +13,19 @@ const { createCore } = require('../src/core');
 const { JsonFileStore } = require('../src/platform/json-file-store');
 const { createAesGcmCipher } = require('../src/platform/cipher');
 const { createHeadlessPrompter } = require('../src/platform/prompter');
+const { profileSettings, everyRole } = require('./helpers/profile-settings');
 
 const tempDirs = [];
 after(() => { while (tempDirs.length) fs.rmSync(tempDirs.pop(), { recursive: true, force: true }); });
 
 describe('agent executor adapter', () => {
-  it('runs on options.provider and options.model while the active tier maps to another provider', async () => {
+  it('runs on options.provider and options.model while the default profile names another provider', async () => {
     const used = [];
     const stub = (name) => class {
       constructor(apiKey) { this.apiKey = apiKey; }
       getProviderName() { return name; }
       getDefaultModel() { return `${name}-default`; }
+      async listModels() { return ['gpt-stub', 'groq-model']; }
       async sendMessage() { used.push([name, 'sendMessage']); return `from ${name}`; }
       async sendMessageWithTools(messages, tools, options) { used.push([name, options.model]); return { type: 'text', content: `from ${name}` }; }
     };
@@ -36,7 +38,7 @@ describe('agent executor adapter', () => {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kl-adapter-'));
     tempDirs.push(dataDir);
     const store = new JsonFileStore({ dir: dataDir, name: 'chat-data', defaults: { chats: [], activeChatId: null, apiTokens: {}, apiStatus: {}, toolApprovals: { alwaysApproveTools: {} } } });
-    store.set('settings', { activeProvider: 'groq', inference: { activeTier: 'standard', tierMap: { standard: { provider: 'groq', model: 'groq-model' } } } });
+    store.set('settings', profileSettings({}, everyRole({ provider: 'groq', model: 'groq-model' })));
     const core = createCore({
       paths: { dataDir },
       store,

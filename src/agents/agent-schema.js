@@ -9,6 +9,9 @@ class Agent {
     this.description = config.description || '';
     this.model = config.model || 'sonnet';
     this.inferenceTier = config.inferenceTier || 'standard';
+    // The agent's model role (models spec 2026-09-27 §8). A user-defined
+    // agent without one has its inferenceTier read as the mapped role (§13).
+    this.role = typeof config.role === 'string' && config.role.trim() ? config.role.trim() : null;
     this.systemPromptTemplate = config.systemPromptTemplate || null;
     this.systemPrompt = config.systemPrompt || 'You are a helpful assistant.';
     this.allowedTools = Array.isArray(config.allowedTools) ? config.allowedTools : [];

@@ -12,6 +12,7 @@ const { registerExecutorHandlers } = require('../src/ipc/executor-handlers');
 const IPC = require('../src/ipc/constants');
 const { ExecutorRegistry, JobStore } = require('../src/cases/executors');
 const envelopeOps = require('../src/cases/executors/envelope-ops');
+const { profileSettings, everyRole } = require('./helpers/profile-settings');
 
 after(fx.cleanup);
 
@@ -186,13 +187,7 @@ describe('createCore wiring of the case guard and isolated children', () => {
     ProviderFactory.registerProvider(FAKE, FakeProvider);
     const { core, dataDir } = buildCore();
     await core.start();
-    const tiers = { provider: FAKE, model: 'fake' };
-    const settings = core.getSettings();
-    core.context.setSettings({
-      ...settings,
-      activeProvider: FAKE,
-      inference: { ...settings.inference, llmRouting: { enabled: false }, tierMap: { fast: tiers, standard: tiers, smart: tiers } }
-    });
+    core.context.setSettings(profileSettings(core.getSettings(), everyRole({ provider: FAKE, model: 'fake' })));
     core.saveProviderToken(FAKE, 'fake-token-123456');
     started = { core, dataDir };
     return started;
@@ -219,13 +214,13 @@ describe('createCore wiring of the case guard and isolated children', () => {
 
   it('createAgentRuntime threads guardContext and allowedToolNames and keeps origin', async () => {
     const { core } = await shared();
-    const rt = await core.context.createAgentRuntime({ tier: 'standard' }, null, null, {
+    const rt = await core.context.createAgentRuntime({ role: 'worker' }, null, null, {
       guardContext: { caseId: 'case-x' }, allowedToolNames: ['Read', 'Grep'], origin: ORIGIN
     });
     assert.deepStrictEqual(rt.toolExecutor.extraToolOptions.guardContext, { caseId: 'case-x' });
     assert.deepStrictEqual([...rt.toolExecutor.allowedToolNames].sort(), ['Grep', 'Read']);
     assert.deepStrictEqual(rt.toolExecutor.origin, ORIGIN);
-    const open = await core.context.createAgentRuntime({ tier: 'standard' }, null, null, {});
+    const open = await core.context.createAgentRuntime({ role: 'worker' }, null, null, {});
     assert.deepStrictEqual([open.toolExecutor.extraToolOptions.guardContext, open.toolExecutor.allowedToolNames], [null, null]);
   });
 
@@ -265,7 +260,7 @@ describe('createCore wiring of the case guard and isolated children', () => {
     assert.ok(![...CASE_TOOL_NAMES, ...WAKEUP_BASE_TOOLS].includes('SpawnAgent'), 'a wake-up never offers SpawnAgent');
     const researcher = owner.extraToolOptions.getAgent('case-researcher');
     assert.ok(!researcher.allowedTools.includes('SpawnAgent'));
-    const child = await core.context.createAgentRuntime({ tier: 'standard' }, null, null,
+    const child = await core.context.createAgentRuntime({ role: 'worker' }, null, null,
       require('../src/agents/child-context').childRuntimeOptions(researcher, { isolatedContext: true, guardContext: { caseId: 'case-x' } }));
     const fromChild = await child.toolExecutor.execute('SpawnAgent', { task: 'Price the Lakeside lot' });
     assert.deepStrictEqual([fromChild.success, fromChild.error], [false, 'Tool "SpawnAgent" is not available in this turn.']);

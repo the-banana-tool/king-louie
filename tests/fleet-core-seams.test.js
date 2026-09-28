@@ -14,6 +14,7 @@ const { Tool } = require('../src/tools/tool-schema');
 const { toolRegistry } = require('../src/tools');
 const AgentExecutor = require('../src/agents/agent-executor');
 const { REFUSE_UNSAFE_MESSAGE } = require('../src/approvals/executor-options');
+const { profileSettings, everyRole } = require('./helpers/profile-settings');
 
 const FAKE = 'kl-test-seams-fake';
 const GATED = 'KlSeamsGated';
@@ -64,9 +65,7 @@ async function phoneCore({ remoteApprovals = 'phone', withPolicy = true } = {}) 
     auditLedger: { append: async (e) => { audit.push(e); return e; } },
     ...(withPolicy ? { nodePolicy: { allowed_roots: [dataDir], remote_sessions: { always_confirm: [GATED], deny: [] } } } : {})
   });
-  const tiers = { provider: FAKE, model: 'fake' };
-  const settings = core.getSettings();
-  core.context.setSettings({ ...settings, activeProvider: FAKE, inference: { ...settings.inference, llmRouting: { enabled: false }, tierMap: { fast: tiers, standard: tiers, smart: tiers } } });
+  core.context.setSettings(profileSettings(core.getSettings(), everyRole({ provider: FAKE, model: 'fake' })));
   core.saveProviderToken(FAKE, 'fake-token-123456');
   await core.start();
   return { core, calls, audit, dataDir };

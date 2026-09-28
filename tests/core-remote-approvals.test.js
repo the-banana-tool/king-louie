@@ -18,6 +18,7 @@ const ProviderFactory = require('../src/providers/provider-factory');
 const { Tool } = require('../src/tools/tool-schema');
 const { toolRegistry } = require('../src/tools');
 const { addSink } = require('../src/logging');
+const { profileSettings, everyRole } = require('./helpers/profile-settings');
 
 const FAKE_PROVIDER = 'kl-test-approval-fake';
 const PROBE_TOOL = 'KlTestApprovalProbe';
@@ -77,13 +78,7 @@ function buildCore(remoteApprovals, extraDeps = {}) {
 }
 
 async function driveGatewayMessage(core, agentId = 'main') {
-  const tiers = { provider: FAKE_PROVIDER, model: 'fake' };
-  const settings = core.getSettings();
-  core.context.setSettings({
-    ...settings,
-    activeProvider: FAKE_PROVIDER,
-    inference: { ...settings.inference, llmRouting: { enabled: false }, tierMap: { fast: tiers, standard: tiers, smart: tiers } }
-  });
+  core.context.setSettings(profileSettings(core.getSettings(), everyRole({ provider: FAKE_PROVIDER, model: 'fake' })));
   core.saveProviderToken(FAKE_PROVIDER, 'fake-token-123456');
   await core.start();
   if (!toolRegistry.get(PROBE_TOOL)) {
@@ -213,13 +208,7 @@ async function answerDialog(core, sent, approved) {
 // driveGatewayMessage does, so a child run created off-gateway (via
 // agentExecutorAdapter.execute directly) can still resolve a provider.
 function configureFakeProvider(core) {
-  const tiers = { provider: FAKE_PROVIDER, model: 'fake' };
-  const settings = core.getSettings();
-  core.context.setSettings({
-    ...settings,
-    activeProvider: FAKE_PROVIDER,
-    inference: { ...settings.inference, llmRouting: { enabled: false }, tierMap: { fast: tiers, standard: tiers, smart: tiers } }
-  });
+  core.context.setSettings(profileSettings(core.getSettings(), everyRole({ provider: FAKE_PROVIDER, model: 'fake' })));
   core.saveProviderToken(FAKE_PROVIDER, 'fake-token-123456');
 }
 
@@ -328,13 +317,7 @@ describe("createCore remoteApprovals: 'phone'", () => {
           execute: async () => ({ ok: true })
         }));
       }
-      const tiers = { provider: FAKE_PROVIDER, model: 'fake' };
-      const settings = core.getSettings();
-      core.context.setSettings({
-        ...settings,
-        activeProvider: FAKE_PROVIDER,
-        inference: { ...settings.inference, llmRouting: { enabled: false }, tierMap: { fast: tiers, standard: tiers, smart: tiers } }
-      });
+      core.context.setSettings(profileSettings(core.getSettings(), everyRole({ provider: FAKE_PROVIDER, model: 'fake' })));
       core.saveProviderToken(FAKE_PROVIDER, 'fake-token-123456');
       await core.start();
       try {

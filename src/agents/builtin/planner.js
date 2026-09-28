@@ -5,6 +5,7 @@ const PlannerAgent = new Agent({
   name: 'Planner',
   description: 'Decomposes high-level goals into executable task graphs with dependency ordering',
   model: 'claude-sonnet-5',
+  role: 'main',
   inferenceTier: 'smart',
   systemPromptTemplate: 'templates/planner.md.template',
   allowedTools: ['WebSearch', 'WebFetch', 'Read', 'Glob', 'Grep', 'AskUser'],
