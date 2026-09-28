@@ -21,6 +21,10 @@ class Agent {
     // list that bypasses allowedTools — the planner is exploration-only and
     // any Write/Edit/Bash/Git slip-through is a bug.
     this.readOnly = config.readOnly === true;
+    // An agent whose answer is a summary for another agent (the explorer,
+    // models spec 2026-09-27 §8.1): SpawnAgent caps it at
+    // models.explorer.summaryMaxTokens.
+    this.returnsSummary = config.returnsSummary === true;
     this.temperature = typeof config.temperature === 'number' ? config.temperature : 0.7;
     this.maxIterations = Number.isInteger(config.maxIterations) ? config.maxIterations : 10;
     this.voice = Agent.normalizeVoiceConfig(config.voice);

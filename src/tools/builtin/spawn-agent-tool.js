@@ -6,11 +6,33 @@ function lastCallModel(result) {
   return calls.length ? calls[calls.length - 1]?.model || null : null;
 }
 
+const DEFAULT_SUMMARY_MAX_TOKENS = 2000;
+
+// models.explorer.summaryMaxTokens (spec 2026-09-27 §14), else 2000.
+function summaryMaxTokens(options) {
+  let settings = {};
+  try {
+    settings = typeof options.getSettings === 'function' ? options.getSettings() || {} : {};
+  } catch {
+    settings = {};
+  }
+  const n = Number(settings.models?.explorer?.summaryMaxTokens);
+  return Number.isInteger(n) && n > 0 ? n : DEFAULT_SUMMARY_MAX_TOKENS;
+}
+
+// About four characters to a token; a longer summary is cut and says so.
+function capSummary(text, maxTokens) {
+  const s = String(text || '');
+  const limit = maxTokens * 4;
+  return s.length > limit ? `${s.slice(0, limit)}\n\n[Summary cut at about ${maxTokens} tokens.]` : s;
+}
+
 const SpawnAgentTool = new Tool({
   name: 'SpawnAgent',
   description: `Dynamically spawn a sub-agent to handle a specific subtask during execution.
 The sub-agent runs independently with its own agent loop and returns a result.
-Use this to delegate work that requires a different specialization, model, or tool set.
+Use this to delegate work to a cheaper model: role is the lever, not model — "worker" (the
+default) for most delegated work, "utility" for cheap one-liners, "main" only for hard reasoning.
 
 The spawned agent inherits the current working directory and allowed directories but runs
 in its own conversation context. Results are returned inline to the calling agent.`,
@@ -111,9 +133,15 @@ in its own conversation context. Results are returned inline to the calling agen
       executeOptions.requireInProfile = true;
     }
 
-    if (params.systemPromptAppend) {
-      executeOptions.systemPrompt = params.systemPromptAppend;
+    // An agent that returns a summary (the explorer, spec §8.1) is told its
+    // budget; a longer answer is cut below.
+    const summaryCap = agent.returnsSummary ? summaryMaxTokens(options) : null;
+    const promptParts = [];
+    if (params.systemPromptAppend) promptParts.push(params.systemPromptAppend);
+    if (summaryCap) {
+      promptParts.push(`Answer with a summary of at most about ${summaryCap} tokens. Name the file paths or URLs you relied on (with line numbers where they help), so the caller can read the exact text itself.`);
     }
+    if (promptParts.length) executeOptions.systemPrompt = promptParts.join('\n\n');
 
     // If specific tools requested, pass them through
     if (Array.isArray(params.tools) && params.tools.length > 0) {
@@ -143,7 +171,7 @@ in its own conversation context. Results are returned inline to the calling agen
         model: lastCallModel(result),
         iterations: result.iterations || 0,
         type: result.type,
-        content: result.content || '',
+        content: summaryCap ? capSummary(result.content, summaryCap) : (result.content || ''),
         toolsUsed: (result.tools || []).map((t) => t.name),
         llm: result.llm?.totals || null
       };

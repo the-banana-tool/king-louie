@@ -30,6 +30,10 @@ const CORE_TOOLS = new Set([
   'Grep',
   'AskUser',
   'ToolSearch',
+  // Delegation (models spec 2026-09-27 §8.1): main's prompt tells it to
+  // hand reading and searching to the explorer, so SpawnAgent is always
+  // loaded rather than one ToolSearch round away.
+  'SpawnAgent',
 ]);
 
 // System prompt sections that are always included.

@@ -158,4 +158,13 @@ function buildSystemSections(runtimeEnvironment = {}, options = {}) {
   return sections;
 }
 
-module.exports = { buildSystemSections };
+// Main's delegation guidance (models spec 2026-09-27 §8.1). Stable text: the
+// chat send path puts it first in an agent-mode turn's system prompt, so it
+// stays in the cached prefix. Delegation is prompted, not forced.
+const DELEGATION_GUIDANCE = [
+  'Delegating reading and searching:',
+  '- To read or search many files, or several web pages, call SpawnAgent with agentId "code-explorer" and one precise question. The explorer runs on a cheaper model with read-only tools (Read, Glob, Grep, WebFetch, WebSearch) and returns a short summary naming the file paths or URLs it used.',
+  '- Read a file yourself only when you need its exact text, such as a passage to quote or the lines you are about to edit.'
+].join('\n');
+
+module.exports = { buildSystemSections, DELEGATION_GUIDANCE };

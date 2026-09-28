@@ -42,7 +42,9 @@ const DEFAULT_SETTINGS = {
     profiles: [],
     defaultProfileId: null,
     customRoles: [],
-    roleTimeoutsMs: { ...DEFAULT_ROLE_TIMEOUTS_MS }
+    roleTimeoutsMs: { ...DEFAULT_ROLE_TIMEOUTS_MS },
+    // The explorer's summary cap (spec §8.1).
+    explorer: { summaryMaxTokens: 2000 }
   },
   notifications: {
     ...DEFAULT_NOTIFICATION_SETTINGS
@@ -129,6 +131,12 @@ const mergeSettings = (settings = {}) => {
         ...DEFAULT_SETTINGS.models.roleTimeoutsMs,
         ...(source.models?.roleTimeoutsMs && typeof source.models.roleTimeoutsMs === 'object' && !Array.isArray(source.models.roleTimeoutsMs)
           ? source.models.roleTimeoutsMs
+          : {})
+      },
+      explorer: {
+        ...DEFAULT_SETTINGS.models.explorer,
+        ...(source.models?.explorer && typeof source.models.explorer === 'object' && !Array.isArray(source.models.explorer)
+          ? source.models.explorer
           : {})
       }
     },

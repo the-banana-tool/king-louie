@@ -9,6 +9,7 @@ const { roleTimeoutMs } = require('../models/resolver');
 const { KL_PROVIDERS } = require('../models/provider-ids');
 const { partialMetricsOf } = require('../providers/abort');
 const { sumLlmCalls } = require('../tracking/llm-totals');
+const { DELEGATION_GUIDANCE } = require('../context/system-sections');
 
 const log = createLogger('chat');
 const advisorLog = createLogger('advisor');
@@ -561,6 +562,13 @@ function registerChatHandlers(ipcMain, context = {}) {
           buildRuntimeSystemPrompt(runtimeEnvironment),
           memoryContext
         ].filter(Boolean).join('\n\n');
+      }
+
+      // Main's delegation guidance (spec §8.1), first so it sits in the
+      // stable, cached part of the prompt. Only where SpawnAgent can run:
+      // agent mode, and never a case turn (SpawnAgent is refused there).
+      if (agentMode && !caseTurn) {
+        options.systemPrompt = `${DELEGATION_GUIDANCE}\n\n${options.systemPrompt}`;
       }
 
       if (caseTurn) {
