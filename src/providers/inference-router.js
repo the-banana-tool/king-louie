@@ -177,14 +177,22 @@ class InferenceRouter {
 
     for (let guard = 0; guard <= this.policy.maxTotalAttempts; guard += 1) {
       const target = list[state.index];
+      // A stream that has already emitted a chunk can never be retried or
+      // failed over without duplicating what the user already saw, so this
+      // attempt's onChunk is wrapped to remember whether that happened.
+      let streamed = false;
+      const attemptOptions = typeof options.onChunk === 'function'
+        ? { ...options, onChunk: (chunk) => { streamed = true; return options.onChunk(chunk); } }
+        : options;
       try {
         const instance = await this._instanceFor(target.provider, state);
-        const response = await this.executeTarget(instance, target, payload, options);
+        const response = await this.executeTarget(instance, target, payload, attemptOptions);
         state.answered = true;
         state.lastInstance = instance;
         return response;
       } catch (err) {
         if (options.abortSignal?.aborted) throw err;
+        if (streamed) throw err;
         flags.totalAttempts += 1;
         const plan = this.policy.plan(err, { ...flags, attemptsByReason, provider: target.provider, model: target.model, aborted: false });
         attemptsByReason[plan.reason] = (attemptsByReason[plan.reason] || 0) + 1;
@@ -205,6 +213,7 @@ class InferenceRouter {
         if (action === RecoveryAction.RETRY) {
           log.warn(`${label(target)} ${plan.reason}; retrying in ${plan.waitMs}ms (attempt ${flags.totalAttempts}/${this.policy.maxTotalAttempts})`);
           if (plan.waitMs > 0) await this.sleep(plan.waitMs);
+          if (options.abortSignal?.aborted) throw err;
           continue;
         }
         if (action === RecoveryAction.ROTATE_CREDENTIAL) {

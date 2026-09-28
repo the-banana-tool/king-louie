@@ -116,6 +116,35 @@ describe('InferenceRouter#routeTargets', () => {
     assert.deepStrictEqual(calls.map((c) => c.model), ['a']);
   });
 
+  // Fix round 1: a stream that has already emitted a chunk must never be
+  // retried or failed over — the user would see the same text twice.
+  it('never retries or fails over a stream that has already emitted a chunk', async () => {
+    const busy = () => Object.assign(new Error('bad gateway'), { status: 502 });
+    const { router, calls } = harness({ 'openai/a': [busy()] });
+    const chunks = [];
+    await assert.rejects(
+      router.routeTargets([t('openai', 'a'), t('anthropic', 'b')], [], { onChunk: (c) => chunks.push(c) }),
+      /bad gateway/
+    );
+    assert.deepStrictEqual(calls.map((c) => c.model), ['a']);
+    assert.deepStrictEqual(chunks, ['chunk']);
+  });
+
+  // Fix round 1: an abort that lands during the RETRY backoff wait must
+  // stop the loop instead of making another call.
+  it('stops instead of retrying when the run is aborted during the backoff wait', async () => {
+    const busy = () => Object.assign(new Error('bad gateway'), { status: 502 });
+    const controller = new AbortController();
+    const { router, calls } = harness({ 'openai/a': [busy(), 'ok'] }, {
+      sleep: async () => { controller.abort(); }
+    });
+    await assert.rejects(
+      router.routeTargets([t('openai', 'a')], [], { abortSignal: controller.signal }),
+      /bad gateway/
+    );
+    assert.deepStrictEqual(calls.map((c) => c.model), ['a']);
+  });
+
   it('refuses an empty list', async () => {
     const { router } = harness();
     await assert.rejects(router.routeTargets([], []), /resolved list is empty/);
