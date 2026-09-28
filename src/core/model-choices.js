@@ -233,12 +233,14 @@ function createModelChoices({
     for (const [caseRole, entry] of Object.entries(settings.cases?.roles || {})) {
       if (entry && entry.role === id) refs.push(`case role ${caseRole} in the case settings`);
     }
-    let cases = [];
+    let cases;
     try {
       const runtime = getCaseRuntime();
       cases = runtime && typeof runtime.listCases === 'function' ? runtime.listCases() : [];
     } catch (err) {
-      log.warn(`Listing cases to check custom role ${id} failed: ${err.message}`);
+      // Fail closed (Task 12 review fix): a role that might still be used
+      // by a case is never removed just because listing cases broke.
+      throw new ProfileError('ROLE_CHECK_FAILED', `Could not check whether the custom role "${id}" is still used by any case: ${err.message}. Try again.`);
     }
     for (const meta of cases) {
       for (const [caseRole, entry] of Object.entries(meta.roles || {})) {

@@ -75,6 +75,29 @@ describe('custom roles', () => {
     assert.strictEqual(settings().models.customRoles.length, 1);
   });
 
+  it('refuses removal (fail closed) when listing cases to check for a use breaks', () => {
+    let settings = mergeSettings({
+      models: { profiles: [{ id: 'p-a', name: 'Work', kind: 'user', roles: { main: [t('openai', 'gpt-5.5')], worker: [], utility: [] } }], customRoles: [LEGAL], defaultProfileId: 'p-a' }
+    });
+    const getSettings = () => settings;
+    const setSettings = (next) => { settings = mergeSettings(next); };
+    const choices = createModelChoices({
+      profiles: new Profiles({ getSettings, setSettings, createId: () => 'id1' }),
+      getSettings,
+      explainTarget: usable,
+      snapshotModels: () => null,
+      getChats: () => [],
+      setChats: () => {},
+      appendMessageToChat: () => null,
+      getCaseRuntime: () => ({ listCases: () => { throw new Error('the case store is locked'); } })
+    });
+    assert.throws(() => choices.removeCustomRole('legal-drafting'), (err) => err.code === 'ROLE_CHECK_FAILED'
+      && /Could not check whether the custom role "legal-drafting" is still used by any case/.test(err.message)
+      && err.message.includes('the case store is locked'));
+    // Nothing was removed: the role is still there, unused or not.
+    assert.deepStrictEqual(settings.models.customRoles, [LEGAL]);
+  });
+
   it('removes an unused custom role; an empty list in a profile is not a use', () => {
     const { choices, profiles, settings } = setup({ models: { customRoles: [LEGAL] } });
     profiles.update('p-a', { roles: { ...profiles.get('p-a').roles, 'legal-drafting': [] } });
