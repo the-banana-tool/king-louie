@@ -21,8 +21,15 @@ function wrapHandler(name, fn) {
       // code travels to the renderer so it can tell one refusal from
       // another (e.g. STALE_PROPOSAL) instead of matching on message text.
       const code = typeof error?.code === 'string' && error.code ? error.code : null;
-      if (code) {
+      // A Node system error (ENOENT, ERR_…) also has a code, but is a real
+      // failure: it keeps error-level logging.
+      const systemError = Boolean(error?.syscall) || (code || '').startsWith('ERR_');
+      if (code && !systemError) {
         log.warn(`${name} refused (${code}): ${message}`);
+        return { ok: false, error: message, code };
+      }
+      if (code) {
+        log.error(`${name} failed (${code}): ${message}`);
         return { ok: false, error: message, code };
       }
       log.error(`${name} failed: ${message}`);
